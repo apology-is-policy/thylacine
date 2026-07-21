@@ -97,7 +97,8 @@ v1.x) — the display stays blank until reboot.
   dirty-rect traffic) never fired it — `tools/interactive/ls-gfx-live.exp`
   is the standing live-display coverage leg; the cocoa acceptance test
   is a human at `THYLACINE_DISPLAY=cocoa`.
-- `input.rs` — the virtio-keyboard-PCI eventq: the P4-K probe's audited
+- `input.rs` — the virtio-input-PCI eventq (`InputDev`, generalized from
+  the G-3 keyboard-only claim at G-7c): the P4-K probe's audited
   populate/drain/recycle discipline over the same PCI transport,
   POLL-MODE (`VIRTQ_AVAIL_F_NO_INTERRUPT`; no IRQ claimed — the
   single-threaded loop cannot also block in `SYS_IRQ_WAIT`). Drained
@@ -106,6 +107,32 @@ v1.x) — the display stays blank until reboot.
   the GPU: the MMIO input slot shares the one page-exclusive slot page
   whose lifetime belongs to stratumd. The MMIO keyboard stays wired for
   the one-shot P4-K kernel-test probe (the gpu0/gpu-mmio0 split).
+
+  **G-7c — the tablet + pointer routing.** The keyboard AND the tablet
+  are both virtio-input (device id 18), reached as enumeration instances
+  via `SYS_PCI_CLAIM`'s `nth` selector (the high-32 arg half; a bare id
+  is nth 0 = the pre-G-7c first match, byte-identical). `probe()` brings
+  BOTH instances up identically, then classifies by the `EV_BITS`
+  device-config query (`supports_abs()` → the tablet) — never by
+  ordering, so QEMU device order is irrelevant. The serve loop's tablet
+  drain accumulates `EV_ABS` X/Y, commits ONE coalesced `ptr_move` per
+  `EV_SYN` frame (scaled by the `ABS_INFO` axis max, fail-soft 0x7FFF),
+  and dispatches `EV_KEY BTN_*` / `EV_REL REL_WHEEL` immediately — a
+  BTN/wheel record inside a batched frame commits the pending MOVE
+  first, so a click always lands AT its position. `Comp::ptr_move/
+  ptr_btn/ptr_scroll` route to the surface UNDER the pointer
+  (`Layout::surface_at` — visible content rects tile, so the first hit
+  is the only hit), translate to surface-relative coords by the
+  content-origin subtract (the exact inverse of `blit_composed_pixels`'
+  top-left anchor; a point over a smaller-than-pane surface's black
+  fill CLAMPS to the far edge, keeping drag deltas alive), and emit
+  the §18.4 wire kinds: MOVE `value = sx<<16|sy` (coalescible — the
+  R2-F4 droppable class, pre-wired), BTN `code = evdev BTN_*` /
+  `value = press` (non-droppable), SCROLL `value = signed delta as
+  u32` (non-droppable). Keyboard focus stays CHORD-driven — no
+  click-to-focus at this stage (a Track-B policy question). The Super
+  chord plane is a KEYBOARD reservation; pointer events flow under
+  held modifiers (clients see `mods`).
 
 ## The 9P server (`server.rs`)
 

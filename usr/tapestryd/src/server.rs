@@ -222,11 +222,12 @@ pub const TPRESENT_MAX_RECTS: u32 = 64;
 pub const TEVENT_LEN: usize = 24;
 
 pub const TEV_KEY: u16 = 1;
-#[allow(dead_code)] // wire vocabulary (section 18.4); the pointer/scroll
-pub const TEV_PTR_MOVE: u16 = 2; // kinds arrive with the tablet device and
-#[allow(dead_code)] // the CONFIGURE/FOCUS kinds with the pane layer (G-6).
+// Pointer kinds (G-7c; section 18.4 wire semantics): MOVE value packs the
+// surface-RELATIVE x<<16|y (never absolute screen coords -- the D5 wall);
+// BTN code = the evdev BTN_* button, value = press(1)/release(0); SCROLL
+// value = the signed wheel delta as u32 (i32 wrap). All carry mods.
+pub const TEV_PTR_MOVE: u16 = 2;
 pub const TEV_PTR_BTN: u16 = 3;
-#[allow(dead_code)]
 pub const TEV_SCROLL: u16 = 4;
 pub const TEV_FRAME: u16 = 5;
 #[allow(dead_code)]
@@ -422,6 +423,10 @@ pub struct Comp {
     /// repeat swallow too, even if Super lifted first (no stray release
     /// reaches a client). evdev codes are < 256.
     chord_down: [u64; 4],
+    /// The pointer's last display position (G-7c; tablet-absolute, scaled
+    /// by the input drain). Buttons/scroll route by it.
+    ptr_x: u32,
+    ptr_y: u32,
     /// Section 18.6 determinism mode (dev/test builds only -- the #880
     /// strip-for-production class, enforced by the `test-mode` cargo
     /// feature at BUILD time): the FRAME clock freezes (ticks only on
@@ -451,6 +456,8 @@ impl Comp {
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             chord_down: [0; 4],
+            ptr_x: 0,
+            ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
         }
@@ -1504,6 +1511,86 @@ impl Comp {
         };
         if !self.push_event(n, ev) {
             self.retire(n);
+        }
+    }
+
+    /// The surface under display point (px, py) + the point translated to
+    /// surface-relative coords (G-7c pointer routing: under-the-pointer,
+    /// NOT the focused leaf -- clicking a pane must land in that pane;
+    /// keyboard focus stays chord-driven, no click-to-focus at this
+    /// stage). A fixed-size surface smaller than its pane anchors
+    /// TOP-LEFT (blit_composed_pixels: surface (0,0) -> content origin),
+    /// so the inverse is a plain content-origin subtract; a point over
+    /// the pane's black fill CLAMPS to the surface's far edge, keeping
+    /// drag/mouse-look deltas alive at the boundary.
+    fn ptr_hit(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        let (n, c) = self.layout.surface_at(px, py)?;
+        let s = self.surf(n)?;
+        if s.w == 0 || s.h == 0 {
+            return None;
+        }
+        let sx = (px - c.x).min(s.w - 1).min(0xFFFF) as u16;
+        let sy = (py - c.y).min(s.h - 1).min(0xFFFF) as u16;
+        Some((n, sx, sy))
+    }
+
+    /// Pointer motion at display coords (G-7c). MOVE is the coalescible
+    /// class (R2-F4): an overflowing queue evicts it, never a control
+    /// event, so a motion burst cannot WEDGE a surface.
+    pub fn ptr_move(&mut self, px: u32, py: u32, mods: u16) {
+        self.ptr_x = px;
+        self.ptr_y = py;
+        if let Some((n, sx, sy)) = self.ptr_hit(px, py) {
+            let ev = Tevent {
+                kind: TEV_PTR_MOVE,
+                code: 0,
+                value: ((sx as u32) << 16) | sy as u32,
+                rune: 0,
+                mods,
+                flags: 0,
+                tick: self.tick,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
+            }
+        }
+    }
+
+    /// Pointer button (evdev BTN_*) at the current pointer position.
+    /// Non-droppable (a lost release strands a drag).
+    pub fn ptr_btn(&mut self, code: u16, pressed: bool, mods: u16) {
+        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
+            let ev = Tevent {
+                kind: TEV_PTR_BTN,
+                code,
+                value: pressed as u32,
+                rune: 0,
+                mods,
+                flags: 0,
+                tick: self.tick,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
+            }
+        }
+    }
+
+    /// Wheel scroll (signed delta) at the current pointer position.
+    /// Non-droppable (discrete steps; losing one skips content).
+    pub fn ptr_scroll(&mut self, delta: i32, mods: u16) {
+        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
+            let ev = Tevent {
+                kind: TEV_SCROLL,
+                code: 0,
+                value: delta as u32,
+                rune: 0,
+                mods,
+                flags: 0,
+                tick: self.tick,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
+            }
         }
     }
 

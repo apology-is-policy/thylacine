@@ -27,6 +27,16 @@
 #                 Con_Printf -> stdout -> serial. This also asserts the
 #                 map SIGNED ON: pre-signon con_forcedup routes consolekeys
 #                 (arrows included) away from bindings (keys.c dispatch).
+#   mouse legs  : (G-7c) `bind mouse1 path` + `bind mwheelup version`,
+#                 then a QMP tablet abs-aim + click + one wheel notch;
+#                 each sentinel is a single-token command whose output
+#                 the typed line cannot contain. The click TRANSITIVELY
+#                 proves TEV_PTR_MOVE: the compositor routes buttons by
+#                 the LAST MOVE's hit-test, so a lost/mis-routed MOVE
+#                 strands the click. Quake-side relative MOTION
+#                 (mouse-look) is gated on `_windowed_mouse` + relative
+#                 mode and has no console-echo channel -- covered by the
+#                 user's live play, not gated here.
 #   render leg  : a zoomed mid-game screendump passes the color-richness
 #                 floor (the ls-gfx-quake calibration); a turn-tap frame
 #                 delta is LOGGED, not gated (torch animation makes any
@@ -73,6 +83,12 @@ proc qk_type {text} {
     global repo qmp
     if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp $text} err]} {
         lc_fail "qmp type '$text' failed: $err"
+    }
+}
+proc qk_ptr {op} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p $op} err]} {
+        lc_fail "qmp pointer '$op' failed: $err"
     }
 }
 
@@ -123,6 +139,43 @@ qk_chord "shift+esc"
 qk_chord "up"
 lc_expect "Version TyrQuake-" "in-game key dispatch (arrow -> binding -> version banner)"
 lc_pass "play: an injected arrow fires an in-game binding (the full compositor->SDL->Key_Event path; map signed on)"
+
+# --- G-7c mouse legs (the virtio tablet) -------------------------------
+# Bind single-token sentinels to a mouse button + the wheel; the command
+# echoes are drained so only a FIRING binding can satisfy each expect.
+qk_chord "shift+esc"
+qk_type "bind mouse1 path\n"
+expect {
+    -re {\]bind mouse1[^\r\n]*\r?\n} { lc_step "mouse1 bind echoed" }
+    timeout { lc_fail "mouse1 bind never echoed" }
+    eof     { lc_fail "unexpected EOF during mouse1 bind" }
+}
+qk_type "bind mwheelup version\n"
+expect {
+    -re {\]bind mwheelup[^\r\n]*\r?\n} { lc_step "mwheelup bind echoed" }
+    timeout { lc_fail "mwheelup bind never echoed" }
+    eof     { lc_fail "unexpected EOF during mwheelup bind" }
+}
+qk_chord "shift+esc"
+
+# Aim the tablet at the display center (inside the zoomed Quake pane) and
+# click. The click leg TRANSITIVELY proves TEV_PTR_MOVE end-to-end: the
+# compositor routes a button by the LAST MOVE's hit-test position, so a
+# lost or mis-routed MOVE strands the click and no banner prints. The
+# Quake-side chain: QMP abs -> virtio-tablet -> tapestryd EV_ABS scale +
+# hit-test -> TEV_PTR_MOVE/BTN -> SDL pump -> SDL_MOUSEBUTTONDOWN ->
+# Key_Event(K_MOUSE1) -> the binding.
+qk_ptr "abs 16000 16000"
+qk_ptr "btn left down"
+qk_ptr "btn left up"
+lc_expect "Current search path:" "mouse click fires an in-game binding (tablet -> compositor -> SDL)"
+lc_pass "play: a tablet click lands in the game (G-7c pointer path; MOVE proven transitively by the positional routing)"
+
+# One wheel notch: EV_REL REL_WHEEL -> TEV_SCROLL -> SDL_MOUSEWHEEL ->
+# K_MWHEELUP -> a fresh version banner.
+qk_ptr "wheel up"
+lc_expect "Version TyrQuake-" "wheel scroll fires an in-game binding"
+lc_pass "play: a wheel notch lands in the game (G-7c scroll path)"
 
 # Turn taps: view rotates ~4 deg per 30 ms tap. Frame delta LOGGED only.
 qk_chord "left"

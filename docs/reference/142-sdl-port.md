@@ -95,15 +95,36 @@ blocks on the fid (`thyla_tap_read_events`) and feeds a bounded mutex ring;
 PumpEvents drains it and translates on the SDL thread. Fd discipline: the
 pump thread touches ONLY `event_fd`; every other fid (ctl/present/weave,
 including the reweave's close-and-remap) stays on the SDL thread. Shutdown
-closes `event_fd` from the SDL thread — the kernel's cancel-at-close
-completes the parked read, the pump exits, join succeeds.
+RETIRES the surface (`thyla_tap_request_close` writes ctl `destroy`) — the
+retire makes the event fid read EMPTY, the parked read returns 0, the pump
+exits, join succeeds; only then does `thyla_tap_close` close `event_fd`.
+(The G-7d F1 correction: closing the fd from a sibling thread does NOT
+cancel a parked read — the #844 ref-held Spoor keeps the blocking read's
+own ref, so the Dev close hook never runs. The retire is the real, bounded,
+frame-clock-independent teardown signal.)
 
 Translation: `TEV_KEY.code` is a raw evdev keycode → `SDL_Scancode` via the
 stock `linux_scancode_table`; the compositor-resolved rune → `SDL_TEXTINPUT`
 on press; a size-changing `TEV_CONFIGURE` acks + reweaves on the SDL thread
 then reports `SDL_WINDOWEVENT_RESIZED`; `TEV_FOCUS`/`TEV_CLOSE` map to the
-SDL window events. `TEV_PTR_*`/`TEV_SCROLL` arrive with the tablet device
-(G-7c, not yet wired).
+SDL window events.
+
+**G-7c — the pointer path.** `TEV_PTR_MOVE` carries the surface-relative
+position packed `x<<16|y` (TAPESTRY §18.4). In relative mode (Quake
+mouse-look) the pump computes deltas DRIVER-side from successive positions
+and feeds `SDL_SendMouseMotion(relative=1, dx, dy)` — SDL core's warp
+emulation needs a warpable host cursor this backend lacks, so the video
+init installs a `SetRelativeMouseMode` hook that simply ACCEPTS the mode
+(keeping core off the warp path); the `relative_mode` read from the pump
+thread is benignly racy (a mode flip mid-motion skews one delta,
+self-corrects on the next). Non-relative mode forwards absolute positions
+(SDL derives `xrel/yrel` internally). `TEV_PTR_BTN` maps evdev
+`BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA` → `SDL_BUTTON_LEFT/RIGHT/MIDDLE/X1/X2`;
+`TEV_SCROLL`'s signed delta feeds `SDL_SendMouseWheel` (positive = up).
+Edge behavior inherited from the tablet: the compositor clamps
+out-of-surface positions to the far edge, so relative deltas die at the
+boundary (the classic absolute-device limit — irrelevant for QMP/VNC
+injection, which is positional).
 
 ## `0022-pouch-nanosleep`
 

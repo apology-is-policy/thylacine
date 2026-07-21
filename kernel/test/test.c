@@ -792,6 +792,7 @@ void test_pci_unref_releases_bars(void);
 void test_pci_live_count_balances(void);
 void test_pci_syscall_reject(void);
 void test_pci_syscall_claim_info(void);
+void test_pci_claim_nth(void);
 void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
 void test_userspace_ramfs_hello(void);
@@ -2126,6 +2127,7 @@ struct test_case g_tests[] = {
     { "pci.live_count_balances",       test_pci_live_count_balances,       false, NULL },
     { "pci.syscall_reject",            test_pci_syscall_reject,            false, NULL },
     { "pci.syscall_claim_info",        test_pci_syscall_claim_info,        false, NULL },
+    { "pci.claim_nth",                 test_pci_claim_nth,                 false, NULL },
     { "userspace.first_iteration",     test_userspace_first_iteration,     false, NULL },
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { "userspace.ramfs_hello",         test_userspace_ramfs_hello,         false, NULL },

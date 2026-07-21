@@ -24,6 +24,7 @@
 #include "../SDL_sysvideo.h"
 #include "../SDL_pixels_c.h"
 #include "../../events/SDL_events_c.h"
+#include "../../events/SDL_mouse_c.h"
 
 #include "SDL_thylacinevideo.h"
 #include "SDL_thylacineevents_c.h"
@@ -86,10 +87,21 @@ VideoBootStrap THYLACINE_bootstrap = {
     NULL /* no ShowMessageBox implementation */
 };
 
+static int THYLACINE_SetRelativeMouseMode(SDL_bool enabled)
+{
+    /* Accepting relative mode keeps SDL core off its warp emulation (no
+     * warpable cursor exists here); the event pump then delivers RELATIVE
+     * motions computed from successive tablet positions. */
+    (void)enabled;
+    return 0;
+}
+
 static int THYLACINE_VideoInit(_THIS)
 {
     SDL_DisplayMode mode;
     uint32_t w = 0, h = 0;
+
+    SDL_GetMouse()->SetRelativeMouseMode = THYLACINE_SetRelativeMouseMode;
 
     /* The display dims come from the compositor's global ctl; failing to
      * reach /srv/tapestry fails the whole driver (SDL falls through to

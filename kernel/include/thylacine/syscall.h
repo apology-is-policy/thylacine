@@ -1442,17 +1442,25 @@ enum {
     // function, maps its BARs, and reads its resolved topology. KObj_PCI is
     // non-transferable (I-5) -- the claimer is always the driver.
 
-    // SYS_PCI_CLAIM(virtio_device_id) -> handle / -1  (pci-1c)
-    //   Claim the first VirtIO-PCI function matching virtio_device_id (the
-    //   VIRTIO device id: 1 = net, 4 = rng, ...). The kernel assigns + enables
-    //   the function's memory BARs, walks the VIRTIO_PCI_CAP_* list into the
-    //   region map, and resolves the INTx GIC INTID. On success mints a
-    //   KOBJ_PCI handle with FIXED rights R|W|MAP (never TRANSFER -- I-5): a
-    //   device owner always needs read + write + map, and the handle cannot be
-    //   passed, so there is no partial-rights use case. Requires CAP_HW_CREATE
-    //   (like SYS_MMIO_CREATE). Returns -1 on: cap-missing / device-not-found /
-    //   already-claimed / BAR-assign failure / malformed cap list / OOM.
-    SYS_PCI_CLAIM = 76,    // arg: virtio_device_id (x0)
+    // SYS_PCI_CLAIM(virtio_device_id | nth<<32) -> handle / -1  (pci-1c; G-7c)
+    //   Claim the nth (0-based, enumeration-order) VirtIO-PCI function
+    //   matching the low-32 virtio device id (1 = net, 4 = rng, 18 = input,
+    //   ...). nth rides the HIGH 32 bits of the one arg: a bare id (every
+    //   pre-G-7c caller; typed-u64 wrappers zero the high word) selects
+    //   nth 0 = the historical first match, byte-identical. nth 1+ reaches a
+    //   second same-id function (G-7c: virtio-input keyboard + tablet). The
+    //   device table is boot-built + immutable, so (id, nth) -> (bus,dev,fn)
+    //   is stable -- the I-34 allowance gate resolves the SAME function the
+    //   claim picks. The kernel assigns + enables the function's memory BARs,
+    //   walks the VIRTIO_PCI_CAP_* list into the region map, and resolves the
+    //   INTx GIC INTID. On success mints a KOBJ_PCI handle with FIXED rights
+    //   R|W|MAP (never TRANSFER -- I-5): a device owner always needs read +
+    //   write + map, and the handle cannot be passed, so there is no
+    //   partial-rights use case. Requires CAP_HW_CREATE (like
+    //   SYS_MMIO_CREATE). Returns -1 on: cap-missing / device-not-found (an
+    //   over-large nth included) / already-claimed / BAR-assign failure /
+    //   malformed cap list / OOM.
+    SYS_PCI_CLAIM = 76,    // arg: virtio_device_id | nth<<32 (x0)
 
     // SYS_PCI_MAP_BAR(handle, vaddr, bar_index, prot) -> 0 / -1  (pci-1c)
     //   Install a user-VA mapping at `vaddr` for BAR `bar_index` of a KOBJ_PCI

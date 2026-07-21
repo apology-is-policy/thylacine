@@ -687,27 +687,35 @@ s64 sys_pci_claim_handler(u64 virtio_device_id, u64 a1) {
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
         return -1;
 
-    // A VIRTIO device id is a u16 on the wire; reject anything wider so the
-    // (u32) narrowing below cannot alias a real id.
-    if (virtio_device_id > (u64)0xFFFFFFFFu)         return -1;
+    // The arg packs two fields (G-7c): low 32 = the virtio device id (a u16
+    // on the wire; the id half must fit), high 32 = the 0-based INSTANCE
+    // ordinal selecting the nth same-id function in enumeration order.
+    // Every pre-G-7c caller passes a bare id (typed u64 wrappers zero the
+    // high word by construction) -> nth 0 -> the historical first-match
+    // behavior, byte-identical. An over-large nth resolves no device (-1).
+    u32 id  = (u32)(virtio_device_id & 0xFFFFFFFFu);
+    u32 nth = (u32)(virtio_device_id >> 32);
+    if (id > 0xFFFFu)                                return -1;
 
     // I-34 CreateBegin (specs/allowance.tla; build-arc step 6): SYS_PCI_CLAIM is
-    // the fourth hw-handle-minting path. Resolve the device id -> (bus,dev,fn)
-    // read-only (the SAME first match kobj_pci_claim will pick), then gate it
-    // against the calling Proc's per-(bus,dev,fn) PCI allowance axis. A broad
-    // Proc (the warden + the trusted servers, allowance == NULL) passes; a
-    // NARROWED driver may claim only a function the warden conferred -- closing
-    // the bypass where a driver narrowed to one device could claim another's PCI
-    // function ("a PCI device's allowance IS its claimed BARs", MENAGERIE.md §4).
-    // Gating on the resolved bdf BEFORE the claim means a not-permitted device
-    // is never enabled (MEM-decode + bus-master) only to be rolled back.
+    // the fourth hw-handle-minting path. Resolve (id, nth) -> (bus,dev,fn)
+    // read-only (the SAME nth match kobj_pci_claim will pick -- the device
+    // table is boot-built + immutable, so the pair is stable across the
+    // resolve->claim window), then gate it against the calling Proc's
+    // per-(bus,dev,fn) PCI allowance axis. A broad Proc (the warden + the
+    // trusted servers, allowance == NULL) passes; a NARROWED driver may claim
+    // only a function the warden conferred -- closing the bypass where a
+    // driver narrowed to one device could claim another's PCI function ("a
+    // PCI device's allowance IS its claimed BARs", MENAGERIE.md §4). Gating
+    // on the resolved bdf BEFORE the claim means a not-permitted device is
+    // never enabled (MEM-decode + bus-master) only to be rolled back.
     u8 bus, dev, fn;
-    if (kobj_pci_resolve_bdf((u32)virtio_device_id, &bus, &dev, &fn) != 0)
+    if (kobj_pci_resolve_bdf(id, nth, &bus, &dev, &fn) != 0)
         return -1;
     if (!allowance_permits(p, HW_RES_PCI, PCI_BDF_PACK(bus, dev, fn), 0))
         return -1;
 
-    struct KObj_PCI *k = kobj_pci_claim((u32)virtio_device_id);
+    struct KObj_PCI *k = kobj_pci_claim(id, nth);
     if (!k)                                          return -1;
 
     // I-34 CreateCommit: install through the allowance gate, re-checking the

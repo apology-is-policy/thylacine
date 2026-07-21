@@ -67,6 +67,7 @@
 #define VIRTIO_DEVICE_ID_SCSI             8
 #define VIRTIO_DEVICE_ID_GPU              16
 #define VIRTIO_DEVICE_ID_INPUT            18
+#define VIRTIO_DEVICE_ID_INPUT            18
 #define VIRTIO_DEVICE_ID_VSOCK            19
 
 // =============================================================================

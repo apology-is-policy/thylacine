@@ -70,10 +70,14 @@ The `TEV_PTR_MOVE/BTN/SCROLL` records are ALREADY reserved in the protocol
   keyboard).
 - tapestryd `gather` manifest picks up the tablet function (the I-34
   allowance already carries multiple PCI functions — G-3).
-- `usr/tapestryd/src/input.rs` consumes the tablet eventq → emits `TEV_PTR_*`
-  to the focused surface (absolute coords; the tablet is absolute).
+- `usr/tapestryd/src/input.rs` consumes the tablet eventq; the compositor
+  scales the absolute axes to display px, hit-tests the pane under the
+  pointer, and emits `TEV_PTR_*` with **surface-relative** coords (the
+  TAPESTRY.md §18.4 wire semantics — never absolute screen coords, the D5
+  wall; this doc's earlier "absolute coords" note was imprecise).
 - The SDL pump's `TEV_PTR_*` arms → `SDL_SendMouseMotion`/`SDL_SendMouseButton`
-  (map absolute → the window's relative for mouse-look; SDL relative-mode).
+  (relative mode computes deltas driver-side from successive positions —
+  SDL's warp emulation needs a warpable host cursor the backend lacks).
 
 Audit-light (pure userspace + the manifest); the tablet MMIO/DMA safety is
 inherited from the audited virtio-input path.
@@ -158,8 +162,11 @@ change. Candidate NET-arc stress fixture (#52).
    placement policy** (§4 fork 2): on `Super+F`, does a fixed-size surface
    **scale-to-fill** (a 640×480 Quake stretched to the display — best for
    games, cheap on the GPU blit), **letterbox** (preserve aspect), or stay
-   **centered** at native size? This is the doc-142
-   "fixed-size-app-in-a-tiling-compositor" seam, now decided.
+   at native size? This is the doc-142 "fixed-size-app-in-a-tiling-
+   compositor" seam, now decided. (Ground truth from the 2.1 E2E dump:
+   today's behavior is **top-left anchor** with black fill — surface (0,0)
+   maps to the pane content origin, `blit_composed_pixels` — not centered
+   as sketched earlier.)
 
 ### 3.3 Runtime chords (the one real tapestryd change)
 

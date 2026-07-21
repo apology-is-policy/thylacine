@@ -233,11 +233,17 @@ fi
 # (the exact gpu0/gpu-mmio0 split, applied to kbd). The warden's gather
 # manifest confers BOTH graphics-path functions (GPU + keyboard) into
 # tapestryd's one allowance.
+# G-7c adds virtio-tablet-pci id=tab-pci0: the compositor's POINTER device
+# (absolute coords -- right for QMP/VNC injection, which is positional).
+# Same PCI-transport rationale as the keyboard; tapestryd's gather manifest
+# (virtio-pci:18) collects BOTH input functions, and its dual-probe
+# classifies them by the EV_BITS config query (order-independent).
 input_flags=()
 if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
     input_flags=(
         -device "virtio-keyboard-device,id=kbd0"
         -device "virtio-keyboard-pci,id=kbd-pci0,disable-legacy=on"
+        -device "virtio-tablet-pci,id=tab-pci0,disable-legacy=on"
     )
 fi
 

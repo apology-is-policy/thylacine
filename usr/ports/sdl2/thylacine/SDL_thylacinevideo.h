@@ -36,6 +36,13 @@ typedef struct SDL_WindowData
     ThylaEvent q[THYLACINE_EVQ_CAP];
     int q_head;
     int q_len;
+    /* G-7c pointer state: the last surface-relative absolute position
+     * (TEV_PTR_MOVE packs x<<16|y). Relative mode derives deltas from
+     * successive positions DRIVER-side -- the tablet is absolute and SDL's
+     * warp emulation needs a warpable host cursor this backend lacks. */
+    int ptr_x;
+    int ptr_y;
+    int ptr_valid;
 } SDL_WindowData;
 
 typedef struct SDL_VideoData

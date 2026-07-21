@@ -289,10 +289,16 @@ struct virtio_pci_dev *virtio_pci_dev_get(int idx) {
     return &g_virtio_pci_devs[idx];
 }
 
-struct virtio_pci_dev *virtio_pci_find_by_device_id(u32 virtio_device_id) {
+struct virtio_pci_dev *virtio_pci_find_by_device_id(u32 virtio_device_id, u32 nth) {
+    // The nth (0-based) match in enumeration order. The table is boot-built
+    // + immutable, so (id, nth) -> device is stable for the machine's
+    // lifetime -- the property the SYS_PCI_CLAIM resolve-then-claim pair
+    // (I-34 CreateBegin/CreateCommit) relies on. Two same-id functions
+    // (G-7c: virtio-input keyboard + tablet) are reached as nth 0 and 1.
     for (u32 i = 0; i < g_virtio_pci_dev_count; i++) {
         if (g_virtio_pci_devs[i].virtio_device_id == (u16)virtio_device_id) {
-            return &g_virtio_pci_devs[i];
+            if (nth == 0) return &g_virtio_pci_devs[i];
+            nth--;
         }
     }
     return NULL;

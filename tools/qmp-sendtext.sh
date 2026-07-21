@@ -11,12 +11,19 @@
 #
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] "whoami\n"
 #   tools/qmp-sendtext.sh [-s QMP_SOCK] -k "meta_l+left"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "abs 16000 16000"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "btn left down|up"
+#   tools/qmp-sendtext.sh [-s QMP_SOCK] -p "wheel up|down"
 #
 # Lowercase letters, digits, space, '-', '.', '/' and '\n' only (the
 # scenario vocabulary); anything else is a hard error, not a silent skip.
 # -k sends ONE chord: '+'-separated qcodes pressed in order, released in
 # reverse (the G-6c Super-chord leg; qcodes pass through verbatim, e.g.
 # meta_l, shift, left/right/up/down, letters).
+# -p sends ONE pointer op to the virtio tablet (G-7c): `abs X Y` moves
+# (QEMU's absolute axis range is 0..32767, scaled by the guest to the
+# display), `btn left|right|middle down|up` clicks, `wheel up|down`
+# scrolls one notch.
 
 set -euo pipefail
 
@@ -26,15 +33,16 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 sock="$REPO_ROOT/build/qmp.sock"
 mode="text"
 
-while getopts "s:kh" opt; do
+while getopts "s:kph" opt; do
     case "$opt" in
         s) sock="$OPTARG" ;;
         k) mode="chord" ;;
-        *) echo "usage: qmp-sendtext.sh [-s SOCK] [-k] TEXT|CHORD" >&2; exit 2 ;;
+        p) mode="pointer" ;;
+        *) echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p] TEXT|CHORD|PTR" >&2; exit 2 ;;
     esac
 done
 shift $((OPTIND - 1))
-[[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] [-k] TEXT|CHORD" >&2; exit 2; }
+[[ $# -eq 1 ]] || { echo "usage: qmp-sendtext.sh [-s SOCK] [-k|-p] TEXT|CHORD|PTR" >&2; exit 2; }
 
 exec python3 - "$sock" "$mode" "$1" <<'PYEOF'
 import json, socket, sys, time
@@ -88,8 +96,34 @@ def key(qcode, down):
                           "key": {"type": "qcode", "data": qcode}}}])
 
 
+def send_events(events):
+    cmd("input-send-event", events=events)
+
+
 msg()  # greeting
 cmd("qmp_capabilities")
+if mode == "pointer":
+    parts = text.split()
+    if parts and parts[0] == "abs" and len(parts) == 3:
+        x, y = int(parts[1]), int(parts[2])
+        send_events([
+            {"type": "abs", "data": {"axis": "x", "value": x}},
+            {"type": "abs", "data": {"axis": "y", "value": y}},
+        ])
+    elif parts and parts[0] == "btn" and len(parts) == 3 and \
+            parts[1] in ("left", "right", "middle") and parts[2] in ("down", "up"):
+        send_events([{"type": "btn",
+                      "data": {"down": parts[2] == "down", "button": parts[1]}}])
+    elif parts and parts[0] == "wheel" and len(parts) == 2 and \
+            parts[1] in ("up", "down"):
+        b = "wheel-up" if parts[1] == "up" else "wheel-down"
+        send_events([{"type": "btn", "data": {"down": True, "button": b}}])
+        send_events([{"type": "btn", "data": {"down": False, "button": b}}])
+    else:
+        print(f"qmp-sendtext: bad pointer op {text!r}", file=sys.stderr)
+        sys.exit(1)
+    print(f"qmp-sendtext: pointer {text!r}")
+    sys.exit(0)
 if mode == "chord":
     codes = [c for c in text.split("+") if c]
     if not codes:

@@ -22,7 +22,8 @@
  *     window surface; a stale-serial ack (-2) is skipped — a newer
  *     CONFIGURE is already queued. A same-size CONFIGURE is the
  *     compositor's full-redraw request -> SDL_WINDOWEVENT_EXPOSED.
- *   - TEV_PTR_* / TEV_SCROLL arrive with the tablet device (G-7c).
+ *   - TEV_PTR / TEV_SCROLL (G-7c): surface-relative tablet input;
+ *     relative mode computes deltas driver-side (see PTR_MOVE).
  */
 #include "../../SDL_internal.h"
 
@@ -31,6 +32,7 @@
 #include "SDL_video.h"
 #include "../SDL_sysvideo.h"
 #include "../../events/SDL_events_c.h"
+#include "../../events/SDL_mouse_c.h"
 #include "../../events/SDL_keyboard_c.h"
 #include "../../events/scancodes_linux.h"
 
@@ -195,10 +197,52 @@ static void THYLACINE_HandleEvent(SDL_Window *window, SDL_WindowData *wd,
     case THYLA_TEV_CLOSE:
         SDL_SendWindowEvent(window, SDL_WINDOWEVENT_CLOSE, 0, 0);
         break;
-    case THYLA_TEV_FRAME:
-    case THYLA_TEV_PTR_MOVE: /* G-7c: the tablet device */
+    case THYLA_TEV_PTR_MOVE:
+    {
+        /* value packs the surface-relative x<<16|y (section 18.4). In
+         * relative mode (Quake mouse-look) deltas come from successive
+         * positions -- driver-side, since SDL's warp emulation needs a
+         * warpable cursor this backend lacks. The relative_mode read from
+         * the pump thread is benignly racy (a mode flip mid-motion skews
+         * one delta, self-corrects on the next). */
+        int x = (int)(ev->value >> 16);
+        int y = (int)(ev->value & 0xffff);
+        if (SDL_GetMouse()->relative_mode) {
+            if (wd->ptr_valid) {
+                SDL_SendMouseMotion(window, 0, 1, x - wd->ptr_x, y - wd->ptr_y);
+            }
+        } else {
+            SDL_SendMouseMotion(window, 0, 0, x, y);
+        }
+        wd->ptr_x = x;
+        wd->ptr_y = y;
+        wd->ptr_valid = 1;
+        break;
+    }
     case THYLA_TEV_PTR_BTN:
+    {
+        /* code = the evdev BTN_* button; value = press/release. */
+        Uint8 btn;
+        switch (ev->code) {
+        case 0x110: btn = SDL_BUTTON_LEFT;   break;
+        case 0x111: btn = SDL_BUTTON_RIGHT;  break;
+        case 0x112: btn = SDL_BUTTON_MIDDLE; break;
+        case 0x113: btn = SDL_BUTTON_X1;     break;
+        case 0x114: btn = SDL_BUTTON_X2;     break;
+        default:    btn = 0;                 break;
+        }
+        if (btn) {
+            SDL_SendMouseButton(window, 0,
+                                ev->value ? SDL_PRESSED : SDL_RELEASED, btn);
+        }
+        break;
+    }
     case THYLA_TEV_SCROLL:
+        /* value = the signed wheel delta (i32 wrap); positive = up. */
+        SDL_SendMouseWheel(window, 0, 0.0f, (float)(Sint32)ev->value,
+                           SDL_MOUSEWHEEL_NORMAL);
+        break;
+    case THYLA_TEV_FRAME:
     default:
         break;
     }

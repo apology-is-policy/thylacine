@@ -277,6 +277,27 @@ impl Layout {
         })
     }
 
+    /// The VISIBLE hosted surface whose pane content rect contains display
+    /// point (x, y), with that content rect (the caller translates to
+    /// surface-relative coords -- G-7c pointer routing: events go to the
+    /// surface UNDER the pointer). Visible content rects never overlap
+    /// (the geometry pass tiles them; zoom hides every other pane), so
+    /// the first hit is the only hit.
+    pub fn surface_at(&self, x: u32, y: u32) -> Option<(usize, Rect)> {
+        self.panes.iter().flatten().find_map(|p| match p.kind {
+            Kind::Leaf { surface: Some(n) }
+                if p.visible
+                    && x >= p.content.x
+                    && x < p.content.x.saturating_add(p.content.w)
+                    && y >= p.content.y
+                    && y < p.content.y.saturating_add(p.content.h) =>
+            {
+                Some((n, p.content))
+            }
+            _ => None,
+        })
+    }
+
     /// Split leaf `slot`: same-mode parents FLATTEN (sibling insert),
     /// different-mode ones NEST. Returns the NEW empty leaf's slot; focus
     /// moves to it (the auto-host target).

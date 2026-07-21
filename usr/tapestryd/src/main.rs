@@ -65,7 +65,9 @@ use libthyla_rs::{
     T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 
-use crate::input::{Keyboard, RawInputEvent, EV_KEY};
+use crate::input::{
+    InputDev, RawInputEvent, ABS_X, ABS_Y, BTN_LEFT, EV_ABS, EV_KEY, EV_REL, EV_SYN, REL_WHEEL,
+};
 use crate::keymap::Mods;
 use crate::server::{Comp, Conn, MAX_CONNS};
 
@@ -78,12 +80,19 @@ const GPU_BAR_WINDOW_VA: u64 = 0x0080_0000;
 const KBD_BAR_WINDOW_VA: u64 = 0x00E0_0000;
 const GPU_RING_VA: u64 = 0x0150_0000;
 const KBD_DMA_VA: u64 = 0x0152_0000;
+// The tablet's windows (G-7c): its eventq page above the keyboard's, its
+// 6-BAR window above the whole DMA region (the KBD-window..GPU-ring gap
+// is only 1 MiB -- too small for a 6 MiB BAR window).
+const TAB_DMA_VA: u64 = 0x0153_0000;
+const TAB_BAR_WINDOW_VA: u64 = 0x0160_0000;
 
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
     assert!(KBD_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_RING_VA);
     assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= KBD_DMA_VA);
-    assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= 0x0200_0000);
+    assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_DMA_VA);
+    assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
+    assert!(TAB_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= 0x0200_0000);
 };
 
 /// Post /srv/tapestry (9P-mode; the ptyfs/netd post idiom). Requires the
@@ -103,7 +112,14 @@ fn post_srv_tapestry() -> Result<i64, ()> {
 
 struct Tapestryd {
     comp: Comp,
-    kbd: Option<Keyboard>,
+    kbd: Option<InputDev>,
+    /// The tablet function (G-7c; best-effort like the keyboard).
+    tablet: Option<InputDev>,
+    /// The tablet's raw absolute position + per-axis inclusive max
+    /// (ABS_INFO); scaled to display px at the SYN commit.
+    tab_ax: u32,
+    tab_ay: u32,
+    tab_max: (u32, u32),
     mods: Mods,
 }
 
@@ -120,21 +136,49 @@ impl Driver for Tapestryd {
         // The GPU function is mandatory.
         let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA)?;
 
-        // The keyboard function is best-effort: an environment without the
-        // virtio-keyboard-pci device (or without its function in the
-        // gathered allowance) yields an input-less compositor -- the
-        // scanout/present half is unaffected.
-        let kbd = match Keyboard::probe(KBD_BAR_WINDOW_VA, KBD_DMA_VA) {
-            Ok(k) => Some(k),
-            Err(_) => {
-                say!("tapestryd: no keyboard function (input-less)");
-                None
+        // The input functions are best-effort: an environment without them
+        // (or without their functions in the gathered allowance) yields an
+        // input-less compositor -- the scanout/present half is unaffected.
+        // G-7c: BOTH virtio-input instances are probed identically (the
+        // keyboard and the tablet share device id 18, reached as nth 0/1),
+        // then classified by the EV_BITS config probe -- supports_abs() is
+        // the tablet -- so QEMU device ordering never matters.
+        let mut kbd: Option<InputDev> = None;
+        let mut tablet: Option<InputDev> = None;
+        let windows = [(0u32, KBD_BAR_WINDOW_VA, KBD_DMA_VA), (1u32, TAB_BAR_WINDOW_VA, TAB_DMA_VA)];
+        for (nth, bar_va, dma_va) in windows {
+            match InputDev::probe(nth, bar_va, dma_va) {
+                Ok(dev) => {
+                    if dev.supports_abs() {
+                        if tablet.is_none() {
+                            say!("tapestryd: input[{}] is the tablet", nth);
+                            tablet = Some(dev);
+                        }
+                    } else if kbd.is_none() {
+                        say!("tapestryd: input[{}] is the keyboard", nth);
+                        kbd = Some(dev);
+                    }
+                }
+                Err(_) => {
+                    if nth == 0 {
+                        say!("tapestryd: no input functions (input-less)");
+                    }
+                    break; // enumeration is dense: no nth+1 without nth
+                }
             }
-        };
+        }
+        let tab_max = tablet
+            .as_ref()
+            .map(|t| (t.abs_max(ABS_X as u8), t.abs_max(ABS_Y as u8)))
+            .unwrap_or((0x7FFF, 0x7FFF));
 
         Ok(Tapestryd {
             comp: Comp::new(g),
             kbd,
+            tablet,
+            tab_ax: 0,
+            tab_ay: 0,
+            tab_max,
             mods: Mods::default(),
         })
     }
@@ -191,6 +235,62 @@ impl Driver for Tapestryd {
                     };
                     self.comp.key_event(ev.code, ev.value, rune, mask);
                 }
+            }
+
+            // (1b) Tablet drain (G-7c) -> the under-pointer surface. ABS
+            // records update the raw position; the EV_SYN frame boundary
+            // commits ONE coalesced MOVE (scaled to display px); BTN_*
+            // and the wheel dispatch immediately (non-droppable). The
+            // Super chord plane is a KEYBOARD reservation -- pointer
+            // events flow regardless of held modifiers (clients see mods).
+            if let Some(tab) = self.tablet.as_mut() {
+                raw_events.clear();
+                tab.drain(|ev| raw_events.push(ev));
+                let mask = self.mods.mask();
+                let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
+                let mut moved = false;
+                let commit =
+                    |c: &mut Comp, ax: u32, ay: u32, moved: &mut bool| {
+                        if !*moved {
+                            return;
+                        }
+                        *moved = false;
+                        let (mx, my) = self.tab_max;
+                        let px = (ax.min(mx) as u64 * dw.saturating_sub(1) as u64
+                            / mx.max(1) as u64) as u32;
+                        let py = (ay.min(my) as u64 * dh.saturating_sub(1) as u64
+                            / my.max(1) as u64) as u32;
+                        c.ptr_move(px, py, mask);
+                    };
+                for ev in &raw_events {
+                    match ev.etype {
+                        EV_ABS if ev.code == ABS_X => {
+                            self.tab_ax = ev.value;
+                            moved = true;
+                        }
+                        EV_ABS if ev.code == ABS_Y => {
+                            self.tab_ay = ev.value;
+                            moved = true;
+                        }
+                        EV_SYN => {
+                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                        }
+                        EV_KEY if ev.code >= BTN_LEFT => {
+                            // A button click must land AT its position even
+                            // if the device batched MOVE+BTN in one frame.
+                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                            self.comp.ptr_btn(ev.code, ev.value != 0, mask);
+                        }
+                        EV_REL if ev.code == REL_WHEEL => {
+                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                            self.comp.ptr_scroll(ev.value as i32, mask);
+                        }
+                        _ => {}
+                    }
+                }
+                // A trailing ABS run without its SYN (ring-boundary split):
+                // commit anyway -- the next drain's SYN is a no-op then.
+                commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
             }
 
             // (2) The FRAME tick (catch-up bounded to one tick per pass --

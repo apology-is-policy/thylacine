@@ -74,7 +74,7 @@ void test_virtio_pci_devices_have_cfg(void) {
 // machine; this test asserts the specific RNG is among them.
 void test_virtio_pci_find_rng(void) {
     struct virtio_pci_dev *d =
-        virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG);
+        virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG, 0);
     TEST_ASSERT(d != NULL,
                 "virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG) returned NULL");
     TEST_EXPECT_EQ((u64)d->virtio_device_id, (u64)VIRTIO_DEVICE_ID_RNG,
@@ -83,7 +83,7 @@ void test_virtio_pci_find_rng(void) {
 
 void test_virtio_pci_find_unknown_returns_null(void) {
     // 0xFFFE is not a defined VIRTIO device_id at v1.0.
-    struct virtio_pci_dev *d = virtio_pci_find_by_device_id(0xFFFE);
+    struct virtio_pci_dev *d = virtio_pci_find_by_device_id(0xFFFE, 0);
     TEST_ASSERT(d == NULL,
                 "virtio_pci_find_by_device_id(0xFFFE) should be NULL");
 }

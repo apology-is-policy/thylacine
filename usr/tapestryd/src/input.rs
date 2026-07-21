@@ -61,9 +61,35 @@ const INPUT_QUEUE_EVENT: u16 = 0;
 const VIRTIO_INPUT_EVENT_LEN: u32 = 8;
 
 // Event types (linux/input-event-codes.h, mirrored by VIRTIO 5.8.6.2).
-#[allow(dead_code)] // wire vocabulary; the drain passes SYN records through
-pub const EV_SYN: u16 = 0; // and the consumer filters on EV_KEY
+pub const EV_SYN: u16 = 0;
 pub const EV_KEY: u16 = 1;
+pub const EV_REL: u16 = 2;
+pub const EV_ABS: u16 = 3;
+
+// The tablet vocabulary (G-7c): absolute axes + buttons + the wheel
+// (tablets still report the wheel as EV_REL).
+pub const ABS_X: u16 = 0;
+pub const ABS_Y: u16 = 1;
+pub const REL_WHEEL: u16 = 8;
+pub const BTN_LEFT: u16 = 0x110;
+#[allow(dead_code)] // wire vocabulary; consumers match code ranges
+pub const BTN_RIGHT: u16 = 0x111;
+#[allow(dead_code)]
+pub const BTN_MIDDLE: u16 = 0x112;
+
+// virtio-input device-config selects (VIRTIO 1.2 5.8.4; struct
+// virtio_input_config: select u8 @0, subsel u8 @1, size u8 @2, payload
+// @8). EV_BITS answers "which event types/codes does this device
+// support" -- the G-7c CLASSIFIER: a device answering a non-zero bitmap
+// for subsel EV_ABS is the tablet, else the keyboard (order-independent,
+// so QEMU device ordering never matters). ABS_INFO yields the axis range
+// (virtio_input_absinfo: min u32 @0, max u32 @4, ...).
+const INPUT_CFG_EV_BITS: u8 = 0x11;
+const INPUT_CFG_ABS_INFO: u8 = 0x12;
+const INPUT_CFG_SELECT_OFF: u64 = 0;
+const INPUT_CFG_SUBSEL_OFF: u64 = 1;
+const INPUT_CFG_SIZE_OFF: u64 = 2;
+const INPUT_CFG_PAYLOAD_OFF: u64 = 8;
 
 // Eventq DMA layout (single page; the P4-K probe layout, verbatim).
 const QUEUE_SIZE: u16 = 16;
@@ -146,37 +172,42 @@ fn populate_eventq(dma_va: u64, dma_pa: u64) {
     dsb_sy();
 }
 
-/// The claimed keyboard function: PCI transport + the poll-mode eventq.
-pub struct Keyboard {
+/// A claimed virtio-input function: PCI transport + the poll-mode eventq.
+/// G-7c generalizes the G-3 keyboard-only claim: the SAME bring-up serves
+/// the keyboard AND the tablet (both are virtio-input id 18, reached as
+/// enumeration instances nth 0/1); the ROLE is classified afterward via
+/// the EV_BITS config probe, never assumed from ordering.
+pub struct InputDev {
     dma_va: u64,
     last_used_idx: u16,
     avail_idx: u16,
-    _pci: PciDev,
+    pci: PciDev,
     _dma: Dma,
 }
 
-impl Keyboard {
-    /// Claim + bring up the virtio-input PCI function (eventq only; the
-    /// statusq -- LED writeback -- is deliberately unconfigured at stage 0).
-    pub fn probe(bar_window_va: u64, dma_va: u64) -> Result<Keyboard, Error> {
-        let pci = unsafe { PciDev::claim(VIRTIO_DEVICE_ID_INPUT, bar_window_va) }.map_err(|e| {
-            say!("tapestryd: kbd PCI claim/map failed {:?}", e);
+impl InputDev {
+    /// Claim + bring up the nth virtio-input PCI function (eventq only;
+    /// the statusq -- LED writeback -- is deliberately unconfigured at
+    /// stage 0).
+    pub fn probe(nth: u32, bar_window_va: u64, dma_va: u64) -> Result<InputDev, Error> {
+        let pci = unsafe { PciDev::claim_nth(VIRTIO_DEVICE_ID_INPUT, nth, bar_window_va) }.map_err(|e| {
+            say!("tapestryd: input[{}] PCI claim/map failed {:?}", nth, e);
             Error::Hardware
         })?;
 
         let (common, common_len) = pci.region(PciRegion::Common).ok_or_else(|| {
-            say!("tapestryd: kbd no common-cfg region");
+            say!("tapestryd: input no common-cfg region");
             Error::Hardware
         })?;
         if common_len < CCFG_MIN_LEN {
-            say!("tapestryd: kbd common-cfg region too small ({})", common_len);
+            say!("tapestryd: input common-cfg region too small ({})", common_len);
             return Err(Error::Hardware);
         }
 
         let rw_map = Rights::READ | Rights::WRITE | Rights::MAP;
         let prot = T_PROT_READ | T_PROT_WRITE;
         let dma = unsafe { Dma::new(INPUT_DMA_SIZE, rw_map, dma_va, prot) }.map_err(|_| {
-            say!("tapestryd: SYS_DMA_CREATE(kbd eventq) failed");
+            say!("tapestryd: SYS_DMA_CREATE(input eventq) failed");
             Error::Hardware
         })?;
         prewarm(dma.base_va() as u64, INPUT_DMA_SIZE);
@@ -193,7 +224,7 @@ impl Keyboard {
             w32(common + CCFG_DEVICE_FEATURE_SELECT, 1);
             let hi = r32(common + CCFG_DEVICE_FEATURE);
             if hi & VIRTIO_F_VERSION_1_BIT_HI == 0 {
-                say!("tapestryd: kbd lacks VIRTIO_F_VERSION_1");
+                say!("tapestryd: input lacks VIRTIO_F_VERSION_1");
                 w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
                 return Err(Error::Hardware);
             }
@@ -208,7 +239,7 @@ impl Keyboard {
                 STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK,
             );
             if r8(common + CCFG_DEVICE_STATUS) & STATUS_FEATURES_OK == 0 {
-                say!("tapestryd: kbd FEATURES_OK rejected");
+                say!("tapestryd: input FEATURES_OK rejected");
                 w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
                 return Err(Error::Hardware);
             }
@@ -216,7 +247,7 @@ impl Keyboard {
             // eventq (queue 0) only.
             w16(common + CCFG_QUEUE_SELECT, INPUT_QUEUE_EVENT);
             if r16(common + CCFG_QUEUE_SIZE) < QUEUE_SIZE {
-                say!("tapestryd: kbd eventq size below QUEUE_SIZE");
+                say!("tapestryd: input eventq size below QUEUE_SIZE");
                 w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
                 return Err(Error::Hardware);
             }
@@ -237,14 +268,63 @@ impl Keyboard {
             );
         }
 
-        say!("tapestryd: kbd up (poll-mode eventq)");
-        Ok(Keyboard {
+        
+        say!("tapestryd: input[{}] up (poll-mode eventq)", nth);
+        Ok(InputDev {
             dma_va,
             last_used_idx: 0,
             avail_idx: QUEUE_SIZE,
-            _pci: pci,
+            pci,
             _dma: dma,
         })
+    }
+
+    /// One EV_BITS config query: the payload byte count the device
+    /// answers for event type `ev` (0 = the type is unsupported). The
+    /// select/subsel registers are plain device-config bytes; virtio-pci
+    /// device config is safe to poke post-DRIVER_OK (5.8.5.2).
+    fn ev_bits_size(&self, ev: u8) -> u8 {
+        let (cfg, len) = match self.pci.region(PciRegion::Device) {
+            Some(r) => r,
+            None => return 0,
+        };
+        if (len as u64) < INPUT_CFG_PAYLOAD_OFF {
+            return 0;
+        }
+        unsafe {
+            w8(cfg + INPUT_CFG_SELECT_OFF, INPUT_CFG_EV_BITS);
+            w8(cfg + INPUT_CFG_SUBSEL_OFF, ev);
+            dsb_sy();
+            r8(cfg + INPUT_CFG_SIZE_OFF)
+        }
+    }
+
+    /// G-7c role classifier: a device supporting EV_ABS is the tablet.
+    pub fn supports_abs(&self) -> bool {
+        self.ev_bits_size(EV_ABS as u8) != 0
+    }
+
+    /// The inclusive max of absolute axis `axis` (ABS_INFO), or the QEMU
+    /// virtio-tablet default 0x7FFF when the device answers nothing --
+    /// fail-soft: a wrong max mis-scales the pointer, never faults.
+    pub fn abs_max(&self, axis: u8) -> u32 {
+        let (cfg, len) = match self.pci.region(PciRegion::Device) {
+            Some(r) => r,
+            None => return 0x7FFF,
+        };
+        if (len as u64) < INPUT_CFG_PAYLOAD_OFF + 8 {
+            return 0x7FFF;
+        }
+        let max = unsafe {
+            w8(cfg + INPUT_CFG_SELECT_OFF, INPUT_CFG_ABS_INFO);
+            w8(cfg + INPUT_CFG_SUBSEL_OFF, axis);
+            dsb_sy();
+            if r8(cfg + INPUT_CFG_SIZE_OFF) < 8 {
+                return 0x7FFF;
+            }
+            r32(cfg + INPUT_CFG_PAYLOAD_OFF + 4)
+        };
+        if max == 0 { 0x7FFF } else { max }
     }
 
     /// Drain every pending eventq record, invoking `f` per record; recycle
@@ -286,7 +366,7 @@ impl Keyboard {
                 unsafe { w16(avail_va + 4 + avail_slot * 2, desc_id as u16) };
                 self.avail_idx = self.avail_idx.wrapping_add(1);
             } else {
-                say!("tapestryd: kbd malformed used elem id={} len={}", desc_id, used_len);
+                say!("tapestryd: input malformed used elem id={} len={}", desc_id, used_len);
             }
             idx = idx.wrapping_add(1);
             consumed += 1;
