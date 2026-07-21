@@ -60,6 +60,9 @@ pub const TEVENT_LEN: usize = 24;
 pub const TEV_KEY: u16 = 1;
 pub const TEV_PTR_MOVE: u16 = 2;
 pub const TEV_PTR_BTN: u16 = 3;
+/// Relative pointer motion: value packs signed display-pixel deltas
+/// dx<<16|dy (i16 each); routed to the FOCUSED surface (section 18.4).
+pub const TEV_PTR_REL: u16 = 9;
 pub const TEV_SCROLL: u16 = 4;
 pub const TEV_FRAME: u16 = 5;
 pub const TEV_CONFIGURE: u16 = 6;

@@ -67,13 +67,14 @@ use libthyla_rs::{
 
 use crate::input::{
     InputDev, RawInputEvent, ABS_X, ABS_Y, BTN_LEFT, EV_ABS, EV_KEY, EV_REL, EV_SYN, REL_WHEEL,
+    REL_X, REL_Y,
 };
 use crate::keymap::Mods;
 use crate::server::{Comp, Conn, MAX_CONNS};
 
 // =============================================================================
-// User-VA layout (driver-private): two BAR windows + the device rings; the
-// weave mappings bump-allocate from 0x0200_0000 (server.rs).
+// User-VA layout (driver-private): the BAR windows + the device rings; the
+// weave mappings bump-allocate from 0x0240_0000 (server.rs).
 // =============================================================================
 
 const GPU_BAR_WINDOW_VA: u64 = 0x0080_0000;
@@ -85,14 +86,21 @@ const KBD_DMA_VA: u64 = 0x0152_0000;
 // is only 1 MiB -- too small for a 6 MiB BAR window).
 const TAB_DMA_VA: u64 = 0x0153_0000;
 const TAB_BAR_WINDOW_VA: u64 = 0x0160_0000;
+// The mouse function (relative pointer): its eventq page above the
+// tablet's, its 6-BAR window above the tablet's window -- which pushed
+// the weave bump-allocator base to 0x0240_0000 (server.rs).
+const MOUSE_DMA_VA: u64 = 0x0154_0000;
+const MOUSE_BAR_WINDOW_VA: u64 = 0x01C0_0000;
 
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
     assert!(KBD_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_RING_VA);
     assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= KBD_DMA_VA);
     assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_DMA_VA);
-    assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
-    assert!(TAB_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= 0x0200_0000);
+    assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= MOUSE_DMA_VA);
+    assert!(MOUSE_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
+    assert!(TAB_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= MOUSE_BAR_WINDOW_VA);
+    assert!(MOUSE_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= 0x0240_0000);
 };
 
 /// Post /srv/tapestry (9P-mode; the ptyfs/netd post idiom). Requires the
@@ -115,6 +123,10 @@ struct Tapestryd {
     kbd: Option<InputDev>,
     /// The tablet function (G-7c; best-effort like the keyboard).
     tablet: Option<InputDev>,
+    /// The relative-mouse function (best-effort like both): EV_REL
+    /// deltas accumulate into the pointer position AND reach the focused
+    /// surface as exact TEV_PTR_REL (mouse-look).
+    mouse: Option<InputDev>,
     /// The tablet's raw absolute position + per-axis inclusive max
     /// (ABS_INFO); scaled to display px at the SYN commit.
     tab_ax: u32,
@@ -145,19 +157,33 @@ impl Driver for Tapestryd {
         // the tablet -- so QEMU device ordering never matters.
         let mut kbd: Option<InputDev> = None;
         let mut tablet: Option<InputDev> = None;
-        let windows = [(0u32, KBD_BAR_WINDOW_VA, KBD_DMA_VA), (1u32, TAB_BAR_WINDOW_VA, TAB_DMA_VA)];
+        let mut mouse: Option<InputDev> = None;
+        let windows = [
+            (0u32, KBD_BAR_WINDOW_VA, KBD_DMA_VA),
+            (1u32, TAB_BAR_WINDOW_VA, TAB_DMA_VA),
+            (2u32, MOUSE_BAR_WINDOW_VA, MOUSE_DMA_VA),
+        ];
         for (nth, bar_va, dma_va) in windows {
-            // Probe BOTH instances unconditionally (G-7c audit F5): a
-            // bring-up fault on nth 0 (FEATURES_OK, DMA, eventq size)
-            // must not cost the other function too -- a claim on an
+            // Probe ALL instances unconditionally (G-7c audit F5): a
+            // bring-up fault on one nth (FEATURES_OK, DMA, eventq size)
+            // must not cost the other functions too -- a claim on an
             // ABSENT nth fails in microseconds, so there is nothing to
             // save by breaking early. probe() logs its own failure arm.
+            // Classification is capability-driven (device ordering never
+            // matters): EV_ABS = the tablet; EV_REL without ABS = the
+            // mouse (the tablet also reports REL -- its wheel -- so the
+            // ABS check runs first); neither = the keyboard.
             match InputDev::probe(nth, bar_va, dma_va) {
                 Ok(dev) => {
                     if dev.supports_abs() {
                         if tablet.is_none() {
                             say!("tapestryd: input[{}] is the tablet", nth);
                             tablet = Some(dev);
+                        }
+                    } else if dev.supports_rel() {
+                        if mouse.is_none() {
+                            say!("tapestryd: input[{}] is the mouse", nth);
+                            mouse = Some(dev);
                         }
                     } else if kbd.is_none() {
                         say!("tapestryd: input[{}] is the keyboard", nth);
@@ -167,7 +193,7 @@ impl Driver for Tapestryd {
                 Err(_) => {}
             }
         }
-        if kbd.is_none() && tablet.is_none() {
+        if kbd.is_none() && tablet.is_none() && mouse.is_none() {
             say!("tapestryd: no input functions (input-less)");
         }
         let tab_max = tablet
@@ -179,6 +205,7 @@ impl Driver for Tapestryd {
             comp: Comp::new(g),
             kbd,
             tablet,
+            mouse,
             tab_ax: 0,
             tab_ay: 0,
             tab_max,
@@ -294,6 +321,43 @@ impl Driver for Tapestryd {
                 // A trailing ABS run without its SYN (ring-boundary split):
                 // commit anyway -- the next drain's SYN is a no-op then.
                 commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+            }
+
+            // (1c) The mouse drain: REL_X/REL_Y deltas accumulate per SYN
+            // frame then commit as ONE ptr_move_rel (exact deltas to the
+            // focused surface + pointer accumulation); BTN_* and the
+            // wheel dispatch immediately at the accumulated position
+            // (same discipline as the tablet arm). REL values are signed
+            // on the wire (i32 as u32).
+            if let Some(m) = self.mouse.as_mut() {
+                raw_events.clear();
+                m.drain(|ev| raw_events.push(ev));
+                let mask = self.mods.mask();
+                let (mut dx, mut dy) = (0i32, 0i32);
+                let commit = |c: &mut Comp, dx: &mut i32, dy: &mut i32| {
+                    if *dx != 0 || *dy != 0 {
+                        c.ptr_move_rel(*dx, *dy, mask);
+                        *dx = 0;
+                        *dy = 0;
+                    }
+                };
+                for ev in &raw_events {
+                    match ev.etype {
+                        EV_REL if ev.code == REL_X => dx += ev.value as i32,
+                        EV_REL if ev.code == REL_Y => dy += ev.value as i32,
+                        EV_SYN => commit(&mut self.comp, &mut dx, &mut dy),
+                        EV_KEY if ev.code >= BTN_LEFT => {
+                            commit(&mut self.comp, &mut dx, &mut dy);
+                            self.comp.ptr_btn(ev.code, ev.value != 0, mask);
+                        }
+                        EV_REL if ev.code == REL_WHEEL => {
+                            commit(&mut self.comp, &mut dx, &mut dy);
+                            self.comp.ptr_scroll(ev.value as i32, mask);
+                        }
+                        _ => {}
+                    }
+                }
+                commit(&mut self.comp, &mut dx, &mut dy);
             }
 
             // (2) The FRAME tick (catch-up bounded to one tick per pass --

@@ -111,7 +111,9 @@ const PAGE: u64 = 0x1000;
 /// The weave-mapping VA window in tapestryd's own AS (bump-allocated;
 /// freed VAs are not reused at stage 0 -- bounded by the surface caps per
 /// generation and the 47-bit user VA space; a free-list is a v1.x seam).
-const WEAVE_VA_BASE: u64 = 0x0200_0000;
+// 0x0240_0000 since the mouse function (its 6-BAR window ends at
+// 0x0220_0000 -- the main.rs VA-layout asserts pin the whole chain).
+const WEAVE_VA_BASE: u64 = 0x0240_0000;
 
 // =============================================================================
 // The qid scheme (the ptyfs/netd bit-40 template).
@@ -228,6 +230,13 @@ pub const TEV_KEY: u16 = 1;
 // value = the signed wheel delta as u32 (i32 wrap). All carry mods.
 pub const TEV_PTR_MOVE: u16 = 2;
 pub const TEV_PTR_BTN: u16 = 3;
+/// Relative pointer motion (the mouse-look kind): value packs signed
+/// display-pixel deltas dx<<16|dy (i16 each), routed to the FOCUSED
+/// surface -- exact from a relative device (virtio-mouse), synthesized
+/// from consecutive absolute motion (so abs-only frontends -- QEMU cocoa
+/// with a tablet present never produces host rel events -- still drive
+/// mouse-look). Coalesces by SUMMATION, droppable under stall.
+pub const TEV_PTR_REL: u16 = 9;
 pub const TEV_SCROLL: u16 = 4;
 pub const TEV_FRAME: u16 = 5;
 #[allow(dead_code)]
@@ -262,8 +271,10 @@ impl Tevent {
         out[16..24].copy_from_slice(&self.tick.to_le_bytes());
     }
     fn coalescible(&self) -> bool {
-        // R2-F4: the droppable class is exactly {FRAME, PTR_MOVE}.
-        self.kind == TEV_FRAME || self.kind == TEV_PTR_MOVE
+        // R2-F4: the droppable class is exactly {FRAME, PTR_MOVE,
+        // PTR_REL} -- lossy-under-stall streams; a motion burst must
+        // never WEDGE (force-retire) a slow client.
+        self.kind == TEV_FRAME || self.kind == TEV_PTR_MOVE || self.kind == TEV_PTR_REL
     }
 }
 
@@ -439,6 +450,13 @@ pub struct Comp {
     /// by the input drain). Buttons/scroll route by it.
     ptr_x: u32,
     ptr_y: u32,
+    /// The last ABSOLUTE motion's display position -- the base for the
+    /// synthesized TEV_PTR_REL deltas. Separate from ptr_x/ptr_y so
+    /// relative-device motion never poisons the abs delta base (each
+    /// source's deltas are computed within its own frame); None until
+    /// the first abs motion (the seed emits no delta -- the initial
+    /// (0,0)->position jump is placement, not motion).
+    abs_last: Option<(u32, u32)>,
     /// Section 18.6 determinism mode (dev/test builds only -- the #880
     /// strip-for-production class, enforced by the `test-mode` cargo
     /// feature at BUILD time): the FRAME clock freezes (ticks only on
@@ -469,6 +487,7 @@ impl Comp {
             last_focus: None,
             chord_down: [0; 4],
             ptr_x: 0,
+            abs_last: None,
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
@@ -1489,6 +1508,25 @@ impl Comp {
             s.events.push_back(ev);
             return true;
         }
+        if ev.kind == TEV_PTR_REL {
+            // Deltas are ADDITIVE: replacing (the MOVE discipline) loses
+            // motion, so a back-of-queue REL sums instead (i16-saturating;
+            // back-of-queue only -- an interleaved event starts a fresh
+            // record, preserving order). Overflow falls through to the
+            // droppable class below.
+            if let Some(t) = s.events.back_mut().filter(|e| e.kind == TEV_PTR_REL) {
+                let sx = (t.value >> 16) as u16 as i16 as i32
+                    + (ev.value >> 16) as u16 as i16 as i32;
+                let sy = (t.value & 0xFFFF) as u16 as i16 as i32
+                    + (ev.value & 0xFFFF) as u16 as i16 as i32;
+                let sx = sx.clamp(-32768, 32767) as i16 as u16 as u32;
+                let sy = sy.clamp(-32768, 32767) as i16 as u16 as u32;
+                t.value = (sx << 16) | sy;
+                t.mods = ev.mods;
+                t.tick = ev.tick;
+                return true;
+            }
+        }
         if ev.kind == TEV_CONFIGURE {
             // Unacked CONFIGUREs coalesce -- only the latest serial matters
             // (section 18.3): replace a queued unread one WHOLESALE.
@@ -1667,10 +1705,65 @@ impl Comp {
         Some((n, sx, sy))
     }
 
-    /// Pointer motion at display coords (G-7c). MOVE is the coalescible
-    /// class (R2-F4): an overflowing queue evicts it, never a control
-    /// event, so a motion burst cannot WEDGE a surface.
+    /// ABSOLUTE pointer motion at display coords (G-7c; the tablet
+    /// drain). Also synthesizes the TEV_PTR_REL delta from the previous
+    /// abs position -- the abs-only-frontend mouse-look path (QEMU cocoa
+    /// with a tablet present never produces host rel events); the first
+    /// abs motion only seeds the base. Edge-stall is inherent to an abs
+    /// source (the host cursor stops at the window edge); the relative
+    /// device is exact.
     pub fn ptr_move(&mut self, px: u32, py: u32, mods: u16) {
+        if let Some((lx, ly)) = self.abs_last {
+            let (dx, dy) = (px as i32 - lx as i32, py as i32 - ly as i32);
+            if dx != 0 || dy != 0 {
+                self.ptr_rel_emit(dx, dy, mods);
+            }
+        }
+        self.abs_last = Some((px, py));
+        self.ptr_commit(px, py, mods);
+    }
+
+    /// RELATIVE pointer motion (the mouse drain): emit the EXACT deltas
+    /// to the focused surface (unclamped -- mouse-look must not stall at
+    /// the display edge), then accumulate into the pointer position so
+    /// button/click routing follows the relative device too. abs_last is
+    /// untouched (per-source delta frames).
+    pub fn ptr_move_rel(&mut self, dx: i32, dy: i32, mods: u16) {
+        self.ptr_rel_emit(dx, dy, mods);
+        let (dw, dh) = (self.gpu.width as i32, self.gpu.height as i32);
+        let px = (self.ptr_x as i32 + dx).clamp(0, dw.max(1) - 1) as u32;
+        let py = (self.ptr_y as i32 + dy).clamp(0, dh.max(1) - 1) as u32;
+        self.ptr_commit(px, py, mods);
+    }
+
+    /// Deliver a TEV_PTR_REL to the FOCUSED leaf's surface (mouse-look is
+    /// a focus companion like keys, decoupled from the pointer position;
+    /// PTR_MOVE keeps the under-pointer rule). Deltas clamp to i16.
+    fn ptr_rel_emit(&mut self, dx: i32, dy: i32, mods: u16) {
+        let n = match self.layout.focused_surface() {
+            Some(n) => n,
+            None => return,
+        };
+        let vx = dx.clamp(-32768, 32767) as i16 as u16 as u32;
+        let vy = dy.clamp(-32768, 32767) as i16 as u16 as u32;
+        let ev = Tevent {
+            kind: TEV_PTR_REL,
+            code: 0,
+            value: (vx << 16) | vy,
+            rune: 0,
+            mods,
+            flags: 0,
+            tick: self.tick,
+        };
+        if !self.push_event(n, ev) {
+            self.retire(n);
+        }
+    }
+
+    /// The shared position commit: MOVE is the coalescible class (R2-F4):
+    /// an overflowing queue evicts it, never a control event, so a motion
+    /// burst cannot WEDGE a surface.
+    fn ptr_commit(&mut self, px: u32, py: u32, mods: u16) {
         self.ptr_x = px;
         self.ptr_y = py;
         if let Some((n, sx, sy)) = self.ptr_hit(px, py) {

@@ -236,14 +236,33 @@ fi
 # G-7c adds virtio-tablet-pci id=tab-pci0: the compositor's POINTER device
 # (absolute coords -- right for QMP/VNC injection, which is positional).
 # Same PCI-transport rationale as the keyboard; tapestryd's gather manifest
-# (virtio-pci:18) collects BOTH input functions, and its dual-probe
-# classifies them by the EV_BITS config query (order-independent).
+# (virtio-pci:18) collects the input functions, and its probe classifies
+# them by the EV_BITS config query (order-independent).
+# The relative-mouse arc adds virtio-mouse-pci id=mouse-pci0: the RELATIVE
+# pointer (EV_REL deltas -- mouse-look). QEMU's input routing sends rel
+# events to it uniquely (the tablet's handler masks BTN|ABS only; the
+# wheel rides BTN), so an untargeted QMP `rel` injection is deterministic.
+# Host frontends feed it only in relative/grabbed modes -- cocoa with a
+# tablet present sends absolute always (isAbsoluteEnabled), which is why
+# tapestryd ALSO synthesizes rel deltas from consecutive abs motion.
+# ORDERING IS LOAD-BEARING (mouse_flags expands AFTER gpu+rng, never
+# here): qemu-virt PCI INTx has only FOUR shared lines ((slot+pin)%4)
+# and KObj_IRQ is exclusive-per-INTID, so the IRQ-CLAIMING functions
+# (the PCI NIC -> netd, the GPU -> tapestryd) must keep distinct lines.
+# Inserting the mouse before the GPU shifted the GPU one slot onto the
+# NIC's line (intid 35 -> 36) and its SYS_IRQ_CREATE failed on
+# exclusivity. The input functions are POLL-MODE (no IRQ ever claimed),
+# so the mouse can share any line -- it goes LAST.
 input_flags=()
+mouse_flags=()
 if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
     input_flags=(
         -device "virtio-keyboard-device,id=kbd0"
         -device "virtio-keyboard-pci,id=kbd-pci0,disable-legacy=on"
         -device "virtio-tablet-pci,id=tab-pci0,disable-legacy=on"
+    )
+    mouse_flags=(
+        -device "virtio-mouse-pci,id=mouse-pci0,disable-legacy=on"
     )
 fi
 
@@ -412,6 +431,7 @@ exec qemu-system-aarch64 \
     ${gpu_flags[@]+"${gpu_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
+    ${mouse_flags[@]+"${mouse_flags[@]}"} \
     ${display_flags[@]+"${display_flags[@]}"} \
     -serial "${THYLACINE_SERIAL:-mon:stdio}" \
     ${qmp_flags[@]+"${qmp_flags[@]}"} \

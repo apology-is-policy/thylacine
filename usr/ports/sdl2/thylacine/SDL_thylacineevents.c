@@ -228,27 +228,38 @@ static void THYLACINE_HandleEvent(SDL_Window *window, SDL_WindowData *wd,
         break;
     case THYLA_TEV_PTR_MOVE:
     {
-        /* value packs the surface-relative x<<16|y (section 18.4). In
-         * relative mode (Quake mouse-look) deltas come from successive
-         * positions -- driver-side, since SDL's warp emulation needs a
-         * warpable cursor this backend lacks. Translation (this read,
-         * ptr_x/ptr_y/ptr_valid, every SDL_SendMouse*) runs on the SDL
-         * MAIN thread only -- PumpEvents drains the pump thread's ring;
-         * the pump thread itself never touches SDL state (G-7c audit F2:
-         * do NOT move translation onto the pump thread -- SDL_Mouse
-         * state is unsynchronized). */
+        /* value packs the surface-relative x<<16|y (section 18.4).
+         * Translation (this read, ptr_x/ptr_y/ptr_valid, every
+         * SDL_SendMouse*) runs on the SDL MAIN thread only -- PumpEvents
+         * drains the pump thread's ring; the pump thread itself never
+         * touches SDL state (G-7c audit F2: do NOT move translation onto
+         * the pump thread -- SDL_Mouse state is unsynchronized).
+         * In relative mode MOVE only tracks position: EVERY motion
+         * (tablet abs or mouse rel) now arrives with a TEV_PTR_REL twin
+         * carrying the exact deltas, so a successive-position diff here
+         * would double-count. */
         int x = (int)(ev->value >> 16);
         int y = (int)(ev->value & 0xffff);
-        if (SDL_GetMouse()->relative_mode) {
-            if (wd->ptr_valid) {
-                SDL_SendMouseMotion(window, 0, 1, x - wd->ptr_x, y - wd->ptr_y);
-            }
-        } else {
+        if (!SDL_GetMouse()->relative_mode) {
             SDL_SendMouseMotion(window, 0, 0, x, y);
         }
         wd->ptr_x = x;
         wd->ptr_y = y;
         wd->ptr_valid = 1;
+        break;
+    }
+    case THYLA_TEV_PTR_REL:
+    {
+        /* value packs signed display-pixel deltas dx<<16|dy (i16 each);
+         * the compositor routes it to the FOCUSED surface -- exact from
+         * a relative device, synthesized from consecutive abs motion
+         * (abs-only frontends). Consumed only in relative mode (Quake
+         * mouse-look); absolute consumers use PTR_MOVE. */
+        if (SDL_GetMouse()->relative_mode) {
+            int dx = (Sint16)(ev->value >> 16);
+            int dy = (Sint16)(ev->value & 0xffff);
+            SDL_SendMouseMotion(window, 0, 1, dx, dy);
+        }
         break;
     }
     case THYLA_TEV_PTR_BTN:

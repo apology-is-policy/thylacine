@@ -70,6 +70,8 @@ pub const EV_ABS: u16 = 3;
 // (tablets still report the wheel as EV_REL).
 pub const ABS_X: u16 = 0;
 pub const ABS_Y: u16 = 1;
+pub const REL_X: u16 = 0;
+pub const REL_Y: u16 = 1;
 pub const REL_WHEEL: u16 = 8;
 pub const BTN_LEFT: u16 = 0x110;
 #[allow(dead_code)] // wire vocabulary; consumers match code ranges
@@ -302,6 +304,13 @@ impl InputDev {
     /// G-7c role classifier: a device supporting EV_ABS is the tablet.
     pub fn supports_abs(&self) -> bool {
         self.ev_bits_size(EV_ABS as u8) != 0
+    }
+
+    /// Relative-mouse classifier: EV_REL WITHOUT EV_ABS is the mouse.
+    /// The ABS check must run first -- the tablet also reports EV_REL
+    /// (its wheel), so REL alone does not discriminate.
+    pub fn supports_rel(&self) -> bool {
+        self.ev_bits_size(EV_REL as u8) != 0
     }
 
     /// The inclusive max of absolute axis `axis` (ABS_INFO), or the QEMU

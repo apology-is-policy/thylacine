@@ -713,11 +713,13 @@ payload = fixed **24-byte** records into a registered event buffer:
 ```
 struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
     u16 kind;                /* KEY, PTR_MOVE, PTR_BTN, SCROLL, FRAME,
-                                CONFIGURE, FOCUS, CLOSE */
+                                CONFIGURE, FOCUS, CLOSE, PTR_REL */
     u16 code;                /* KEY: evdev keycode (virtio-input passthrough);
                                 PTR_BTN: button; CONFIGURE: low bits of serial */
     u32 value;               /* KEY: press/release/repeat; PTR: packed x<<16|y
-                                (surface-RELATIVE); CONFIGURE: W<<16|H */
+                                (surface-RELATIVE); PTR_REL: packed SIGNED
+                                display-pixel deltas dx<<16|dy (i16 each);
+                                CONFIGURE: W<<16|H */
     u32 rune;                /* KEY: compositor-resolved UTF-32, 0 if none */
     u16 mods;                /* modifier bitmask (shift/ctrl/alt/super/...) */
     u16 flags;
@@ -731,6 +733,20 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   a tapestryd config concern.
 - **Pointer coords are surface-relative** — absolute screen coords would leak
   placement through the D5 wall.
+- **PTR_REL is the mouse-look stream** (the relative-mouse arc): every
+  pointer motion reaches the FOCUSED surface as signed display-pixel deltas
+  (a focus companion like KEY — decoupled from the pointer position;
+  PTR_MOVE keeps the under-pointer rule). Deltas are EXACT from a relative
+  device (virtio-mouse) and SYNTHESIZED from consecutive absolute motion —
+  load-bearing under abs-only frontends (QEMU cocoa with a tablet present
+  never produces host rel events; the edge-stall at the host window
+  boundary is inherent to the abs source). Deltas leak no placement (pure
+  motion — D5-consistent). Queueing: back-of-queue REL records coalesce by
+  SUMMATION (replacement would lose motion; an interleaved event starts a
+  fresh record, preserving order) and the kind is droppable under stall
+  (lossy motion stream — a burst must never WEDGE a client). A relative-mode
+  client (SDL mouse-look) consumes PTR_REL and must NOT diff successive
+  PTR_MOVE positions (every motion emits both — a diff double-counts).
 - **FRAME is the display clock** (D1's pacing signal): base virtio-gpu 2D has
   NO guest-visible vblank (`EVENT_DISPLAY` is config-change only — verified),
   so tapestryd SYNTHESIZES a fixed-rate FRAME tick (60 Hz default,

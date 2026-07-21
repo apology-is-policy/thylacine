@@ -51,7 +51,9 @@ use alloc::string::String;
 
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_close, t_open, t_read, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
-use tapestry::{Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY};
+use tapestry::{
+    Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_REL,
+};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -235,6 +237,33 @@ fn wait_key(surf: &mut Surface, tag: &str) -> bool {
             Err(e) => {
                 say!("tapestry-battery: FAIL {} event stream {:?}", tag, e);
                 return false;
+            }
+        }
+    }
+}
+
+/// Wait for a TEV_PTR_REL on `surf`; returns the decoded signed deltas.
+/// Non-REL events (FRAME ticks, MOVE noise from the motion itself) count
+/// down the budget -- the 60 Hz FRAME stream bounds the wait.
+fn wait_rel(surf: &mut Surface, tag: &str) -> Option<(i32, i32)> {
+    let mut budget = LEG_EVENT_BUDGET;
+    loop {
+        match surf.wait_event() {
+            Ok(ev) => {
+                if ev.kind == TEV_PTR_REL {
+                    let dx = (ev.value >> 16) as u16 as i16 as i32;
+                    let dy = (ev.value & 0xFFFF) as u16 as i16 as i32;
+                    return Some((dx, dy));
+                }
+                budget -= 1;
+                if budget == 0 {
+                    say!("tapestry-battery: FAIL {} rel never arrived", tag);
+                    return None;
+                }
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL {} rel stream {:?}", tag, e);
+                return None;
             }
         }
     }
@@ -688,6 +717,34 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     say!("battery: chord focus OK");
+
+    // The rel legs (the relative-mouse arc): focus sits on A after the
+    // chord. Leg 1 -- the mouse device: one injected QMP `rel` frame
+    // must arrive as ONE exact TEV_PTR_REL (proves the third-function
+    // claim + the EV_REL-without-ABS classify + the drain + the focused
+    // routing, end to end). Leg 2 -- the abs-synthesis twin (the
+    // abs-only-frontend mouse-look path, cocoa): two tablet abs
+    // injections at the same Y; the first only SEEDS the delta base (no
+    // rel), the second must arrive as the exact display-pixel delta.
+    drain_settle(&mut a);
+    say!("battery: rel ready");
+    match wait_rel(&mut a, "mouse") {
+        Some((7, 3)) => say!("battery: rel OK 7 3"),
+        Some((dx, dy)) => {
+            say!("tapestry-battery: FAIL mouse rel got ({}, {})", dx, dy);
+            return 1;
+        }
+        None => return 1,
+    }
+    say!("battery: relsynth ready");
+    match wait_rel(&mut a, "synth") {
+        Some((160, 0)) => say!("battery: relsynth OK 160"),
+        Some((dx, dy)) => {
+            say!("tapestry-battery: FAIL synth rel got ({}, {})", dx, dy);
+            return 1;
+        }
+        None => return 1,
+    }
 
     // The test-mode leg (section 18.6, G-6c): freeze the FRAME clock,
     // prove it holds still, then drive it one tick by hand.

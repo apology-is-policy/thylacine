@@ -27,6 +27,11 @@
 #   chord      : QMP Super+Left is intercepted ABOVE the event stream
 #                (18.4) -- focus moves compositor-side, the arrow never
 #                reaches a surface (G-6c);
+#   rel        : a QMP `rel` frame reaches the focused surface as ONE
+#                exact TEV_PTR_REL (virtio-mouse claim + classify +
+#                drain + focused routing), and two abs injections
+#                synthesize the exact display-delta twin (the cocoa
+#                mouse-look path);
 #   test-mode  : the 18.6 determinism mode -- frozen FRAME clock + the
 #                `tick` drive (G-6c, in-guest asserts);
 #   hold       : TPRESENT_HOLD + release (G-6c) -- B stays blue on
@@ -231,6 +236,42 @@ expect {
     timeout { lc_fail "the chord never moved focus" }
 }
 
+# The rel legs (the relative-mouse arc): leg 1 -- a QMP `rel` frame
+# routes to the virtio-mouse uniquely (the tablet's handler masks
+# BTN|ABS only) and must arrive as ONE exact TEV_PTR_REL on the focused
+# surface. Leg 2 -- the abs-synthesis twin (the cocoa mouse-look path):
+# two tablet abs at the same Y; the first seeds the delta base, the
+# second arrives as the exact display delta: px(v) = v*1279/32767, so
+# px(20480)-px(16384) = 799-639 = 160.
+expect {
+    -ex "battery: rel ready" {}
+    -ex "tapestry-battery: FAIL" { lc_fail "battery died before the rel leg" }
+    timeout { lc_fail "battery never reached the rel leg" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "rel 7 3"} err]} {
+    lc_fail "qmp-sendtext rel failed: $err"
+}
+expect {
+    -ex "battery: rel OK 7 3" { lc_pass "panes: mouse rel delivered exact (7,3) to the focused surface" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the mouse rel leg failed" }
+    timeout { lc_fail "the mouse rel never arrived" }
+}
+expect {
+    -ex "battery: relsynth ready" {}
+    timeout { lc_fail "battery never reached the rel-synthesis leg" }
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs 16384 16384"} err]} {
+    lc_fail "qmp-sendtext abs (seed) failed: $err"
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -p "abs 20480 16384"} err]} {
+    lc_fail "qmp-sendtext abs (delta) failed: $err"
+}
+expect {
+    -ex "battery: relsynth OK 160" { lc_pass "panes: abs motion synthesized the exact rel twin (dx=160)" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the rel-synthesis leg failed" }
+    timeout { lc_fail "the synthesized rel never arrived" }
+}
+
 # The test-mode leg (18.6): in-guest frozen-clock + tick asserts.
 expect {
     -ex "battery: test-mode OK" { lc_pass "panes: test-mode freezes the clock; tick drives it" }
@@ -291,5 +332,5 @@ if {!$ok} { lc_fail "post-battery console verify (-c) never passed (collapse/dir
 lc_pass "panes: console restored fullscreen after the battery"
 
 lc_quit
-lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + test-mode + hold + close + collapse)"
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + hold + close + collapse)"
 exit 0

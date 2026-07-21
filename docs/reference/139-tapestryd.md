@@ -155,6 +155,40 @@ v1.x) — the display stays blank until reboot.
   chord plane is a KEYBOARD reservation; pointer events flow under
   held modifiers (clients see `mods`).
 
+  **The relative mouse (the third id-18 function) + TEV_PTR_REL.**
+  `virtio-mouse-pci` (nth 2; `gather = all` extends the warden's
+  allowance with no manifest change) is classified by
+  `supports_rel()` — EV_REL WITHOUT EV_ABS (the ABS check runs first:
+  the tablet also reports REL, its wheel). The mouse drain accumulates
+  `REL_X`/`REL_Y` per `EV_SYN` frame and commits ONE
+  `Comp::ptr_move_rel` (buttons/wheel dispatch immediately at the
+  accumulated position, the tablet discipline). `ptr_move_rel` emits
+  the EXACT deltas to the FOCUSED surface as `TEV_PTR_REL`
+  (`value = dx<<16|dy`, signed i16 halves — a focus companion like KEY,
+  decoupled from the pointer position) then accumulates into the
+  clamped pointer position so click routing follows the relative device
+  too. `ptr_move` (the abs path) SYNTHESIZES the same event from
+  consecutive abs motion via a separate `abs_last` base (the first abs
+  motion only seeds — the (0,0)→position jump is placement, not
+  motion; per-source delta frames, so rel motion never poisons the abs
+  base) — load-bearing under abs-only frontends: QEMU cocoa with a
+  tablet present keys on `isAbsoluteEnabled` and never produces host
+  rel events (edge-stall at the host window boundary is inherent to
+  that source; grab-capable frontends feed the mouse exactly). QEMU
+  routes an untargeted QMP `rel` injection to the mouse uniquely (the
+  tablet's handler masks BTN|ABS; the wheel rides BTN). Queueing:
+  back-of-queue PTR_REL records coalesce by SUMMATION (i16-saturating;
+  replacement — the MOVE discipline — would lose motion; an
+  interleaved event starts a fresh record, preserving order), and the
+  kind joins the droppable class (a motion burst must never WEDGE).
+  The SDL backend consumes PTR_REL in relative mode only (Quake
+  mouse-look) and no longer diffs successive MOVE positions (every
+  motion emits both — a diff would double-count). Proven by the two
+  ls-gfx-panes rel legs: an injected `rel 7 3` arrives as ONE exact
+  event on the focused surface, and two abs injections at the same Y
+  arrive as the exact synthesized display delta (dx=160 =
+  px(20480)−px(16384) at 1280 wide).
+
   **Fork 2 — the letterbox placement + the #56 patchwork latch (both
   user-voted 2026-07-21).** A size-mismatched surface's placement is
   decided by PRESENT STYLE, not size: `Surface.patchwork` latches

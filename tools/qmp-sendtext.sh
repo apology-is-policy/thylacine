@@ -119,6 +119,14 @@ if mode == "pointer":
         b = "wheel-up" if parts[1] == "up" else "wheel-down"
         send_events([{"type": "btn", "data": {"down": True, "button": b}}])
         send_events([{"type": "btn", "data": {"down": False, "button": b}}])
+    elif parts and parts[0] == "rel" and len(parts) == 3:
+        # Routed to the relative device (virtio-mouse) uniquely: the
+        # tablet's handler masks BTN|ABS only, so no targeting is needed.
+        dx, dy = int(parts[1]), int(parts[2])
+        send_events([
+            {"type": "rel", "data": {"axis": "x", "value": dx}},
+            {"type": "rel", "data": {"axis": "y", "value": dy}},
+        ])
     else:
         print(f"qmp-sendtext: bad pointer op {text!r}", file=sys.stderr)
         sys.exit(1)

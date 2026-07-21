@@ -39,6 +39,7 @@
 #define THYLA_TEV_CONFIGURE 6
 #define THYLA_TEV_FOCUS     7
 #define THYLA_TEV_CLOSE     8
+#define THYLA_TEV_PTR_REL   9
 
 #define THYLA_TEVENT_LEN    24
 #define THYLA_TPRESENT_LEN  32
