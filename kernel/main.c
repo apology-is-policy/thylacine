@@ -203,6 +203,11 @@ bool boot_mark_complete(void) {
     uart_puts(" wake-oneshot=");
     uart_putdec(wc.tickless_oneshot_wakes);
     uart_puts("\n");
+    // #75-audit F3: drain any residual EL0 console output out of the TX ring to
+    // the wire BEFORE the direct-path banner, so the "Thylacine boot OK"
+    // tooling-ABI line (TOOLING.md section 10) cannot be torn by a lazy TX-IRQ
+    // ring drain landing between its uart_putc bytes.
+    cons_tx_flush();
     uart_puts("Thylacine boot OK\n");
     return true;
 }

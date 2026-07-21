@@ -289,17 +289,28 @@ static struct cons_tx g_cons_tx = {
 // Single-waiter by construction -- see the header comment.
 static struct Rendez g_cons_tx_room = RENDEZ_INIT;
 
+// #75-audit F6: count + writing are written under g_cons_tx.lock but read
+// LOCKLESSLY in the tsleep conds (cons_tx_has_room / cons_tx_role_free) and the
+// test hook -- a mixed atomic/non-atomic access to one object is a C11 data race
+// (the cons_count_store/load precedent, cons.c above). RELAXED is sufficient:
+// the no-lost-wake ordering comes from the rendez lock (a stale read only costs
+// an extra cond re-check), not from these accesses.
+static inline u32  tx_count_load(void)      { return __atomic_load_n(&g_cons_tx.count, __ATOMIC_RELAXED); }
+static inline void tx_count_store(u32 v)    { __atomic_store_n(&g_cons_tx.count, v, __ATOMIC_RELAXED); }
+static inline bool tx_writing_load(void)    { return __atomic_load_n(&g_cons_tx.writing, __ATOMIC_RELAXED); }
+static inline void tx_writing_store(bool v) { __atomic_store_n(&g_cons_tx.writing, v, __ATOMIC_RELAXED); }
+
 // Pop ring -> FIFO while the FIFO has room, then re-evaluate TXIM in the SAME
 // critical section. Deciding the ring's state and the interrupt's state together
 // is what makes "a non-empty ring left with TX interrupts off" -- the silent
 // console wedge -- unrepresentable. Caller holds g_cons_tx.lock.
 static void cons_tx_drain_locked(void) {
-    while (g_cons_tx.count != 0u) {
+    while (tx_count_load() != 0u) {
         if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;  // FIFO full
         g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
-        g_cons_tx.count--;
+        tx_count_store(tx_count_load() - 1u);
     }
-    uart_tx_irq_set_enabled(g_cons_tx.count != 0u);
+    uart_tx_irq_set_enabled(tx_count_load() != 0u);
 }
 
 // The TX IRQ arm (IRQ context, IRQs masked at PSTATE). Called from
@@ -307,14 +318,16 @@ static void cons_tx_drain_locked(void) {
 void cons_tx_drain_from_irq(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
     uart_tx_irq_clear();                 // clear-first, the #172 RX discipline
-    u32 before = g_cons_tx.count;
+    u32 before = tx_count_load();
     cons_tx_drain_locked();
-    bool freed = (g_cons_tx.count < before);
+    bool freed = (tx_count_load() < before);
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
 
     // Wake OUTSIDE the ring lock (the cons_drain_tap discipline): wakeup() takes
-    // the rendez lock, and keeping the ring lock a pure LEAF keeps the order
-    // acyclic. wakeup() is the only IRQ-safe wake primitive (LS-8a).
+    // the rendez lock. g_cons_tx.lock nests only the g_uart_imsc_lock LEAF (via
+    // uart_tx_irq_set_enabled, which takes nothing further), so it is a leaf
+    // w.r.t. every wait-lock; waking outside it keeps the order acyclic. wakeup()
+    // is the only IRQ-safe wake primitive (LS-8a).
     if (freed) wakeup(&g_cons_tx_room);
 }
 
@@ -334,13 +347,34 @@ void cons_tx_arm(void) {
 // bounded trylock, then gives up. HX-I discipline: bounded, never recursing.
 void cons_tx_flush_for_dump(void) {
     if (!spin_trylock(&g_cons_tx.lock)) return;   // a peer holds it: skip, do not wedge
-    for (u32 i = 0; i < CONS_TX_RING_SIZE && g_cons_tx.count != 0u; i++) {
+    for (u32 i = 0; i < CONS_TX_RING_SIZE && tx_count_load() != 0u; i++) {
         if (!uart_tx_try_putc((char)g_cons_tx.ring[g_cons_tx.head])) break;
         g_cons_tx.head = (g_cons_tx.head + 1u) & (CONS_TX_RING_SIZE - 1u);
-        g_cons_tx.count--;
+        tx_count_store(tx_count_load() - 1u);
     }
     spin_unlock(&g_cons_tx.lock);
     uart_tx_drain_sync();
+}
+
+// #75-audit F3: a bounded SYNCHRONOUS flush for a HEALTHY caller (unlike
+// cons_tx_flush_for_dump's trylock, which is for the dying machine). #75 buffers
+// EL0 output that drains lazily via the TX IRQ, so a residual ring can drain
+// between the byte-by-byte uart_putc calls of the direct-path "Thylacine boot OK"
+// banner and TEAR that tooling-ABI line (TOOLING.md section 10; a torn banner =
+// a false boot-failure, the #74 gate-blindness class). Draining the ring to the
+// wire before the banner closes that window. Bounded: each iteration drains >= 1
+// FIFO or the ring is empty; uart_tx_drain_sync is itself bounded. Blocking-lock
+// is safe here -- the banner runs in the quiescing boot context (cpu0), the ring
+// is uncontended.
+void cons_tx_flush(void) {
+    for (u32 i = 0; i < CONS_TX_RING_SIZE + 1u; i++) {
+        irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+        cons_tx_drain_locked();          // ring -> FIFO (as much as fits) + TXIM re-eval
+        bool empty = (tx_count_load() == 0u);
+        spin_unlock_irqrestore(&g_cons_tx.lock, s);
+        if (empty) return;
+        uart_tx_drain_sync();            // FIFO full -> wait it out, then drain more
+    }
 }
 
 // Non-blocking ring push. false == the ring is FULL (the caller drops or waits).
@@ -352,13 +386,13 @@ static bool cons_tx_push_nowait(u8 b) {
         uart_putc((char)b);            // pre-GIC boot path: direct, bounded (#67)
         return true;
     }
-    if (g_cons_tx.count == CONS_TX_RING_SIZE) {
+    if (tx_count_load() == CONS_TX_RING_SIZE) {
         spin_unlock_irqrestore(&g_cons_tx.lock, s);
         return false;
     }
     g_cons_tx.ring[g_cons_tx.tail] = b;
     g_cons_tx.tail = (g_cons_tx.tail + 1u) & (CONS_TX_RING_SIZE - 1u);
-    g_cons_tx.count++;
+    tx_count_store(tx_count_load() + 1u);
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
     return true;
 }
@@ -378,12 +412,12 @@ static void cons_tx_count_drop(void) {
 
 static int cons_tx_has_room(void *arg) {
     (void)arg;
-    return (int)(__atomic_load_n(&g_cons_tx.count, __ATOMIC_RELAXED) < CONS_TX_RING_SIZE);
+    return (int)(tx_count_load() < CONS_TX_RING_SIZE);
 }
 
 static int cons_tx_role_free(void *arg) {
     (void)arg;
-    return (int)!__atomic_load_n(&g_cons_tx.writing, __ATOMIC_RELAXED);
+    return (int)!tx_writing_load();
 }
 
 // Claim the writer role, parking until it frees. The audited chan_role_acquire
@@ -392,8 +426,8 @@ static int cons_tx_role_free(void *arg) {
 static int cons_tx_role_acquire(void) {
     for (;;) {
         irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
-        if (!g_cons_tx.writing) {
-            g_cons_tx.writing = true;
+        if (!tx_writing_load()) {
+            tx_writing_store(true);
             spin_unlock_irqrestore(&g_cons_tx.lock, s);
             return 0;
         }
@@ -424,17 +458,17 @@ static int cons_tx_role_acquire(void) {
 // the role from one thread and prove a second writer PARKS rather than emitting.
 void cons_test_tx_role_hold(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
-    g_cons_tx.writing = true;
+    tx_writing_store(true);
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
 }
 
 bool cons_test_tx_role_held(void) {
-    return __atomic_load_n(&g_cons_tx.writing, __ATOMIC_RELAXED);
+    return tx_writing_load();
 }
 
 static void cons_tx_role_release(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
-    g_cons_tx.writing = false;
+    tx_writing_store(false);
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
     // Clear-then-wake, outside the lock (the release side of register-then-observe).
     poll_waiter_list_wake(&g_cons_tx.role_waiters);

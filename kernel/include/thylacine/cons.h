@@ -98,6 +98,12 @@ void cons_tx_arm(void);
 // dying CPU may already hold it) and never waits on the IRQ -- HX-I discipline.
 void cons_tx_flush_for_dump(void);
 
+// #75-audit F3: bounded synchronous flush for a HEALTHY caller (blocking-lock,
+// waits the FIFO out). boot_mark_complete calls it before the direct-path
+// "Thylacine boot OK" banner so residual EL0 ring output cannot tear that
+// tooling-ABI line (TOOLING.md section 10).
+void cons_tx_flush(void);
+
 // #75 test hooks (test-only). The RING needs no dedicated test -- every byte of
 // console output on every boot goes through it, so a ring bug means no boot at
 // all. The ROLE does: it is what makes a write call-atomic, and its absence is

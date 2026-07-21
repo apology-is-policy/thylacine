@@ -389,14 +389,31 @@ single-waiter `Rendez` sound here where the role itself needs a waiter list.
   `Thylacine boot OK` / `EXTINCTION:` tooling ABI (TOOLING.md §10) is
   byte-unchanged on both paths.
 
-### Deliberately scoped out (decisions, not omissions)
+### What the guarantee is — and is not (the #75-audit F1 correction)
 
-- **Echo may be interposed at a byte boundary of a larger-than-ring write.** For a
-  write that fits the ring's free space the single lock hold excludes IRQ echo
-  entirely; only a write that sleeps for room can have echo land between its
-  bytes. Deferring echo behind a large write would put user-visible typing lag
-  behind a 128 KiB dump — strictly worse, and Linux interleaves at segment
-  granularity for the same reason.
+The role delivers atomicity **against other `cons_output_write` writers** — the
+observed #75 bug (`jc-probe` vs the `ut` prompt SGR, #74's trigger). It is **not**
+"no byte ever lands mid-write": the impl pushes one byte per `g_cons_tx.lock`
+acquire/release, so:
+
+- **Echo (IRQ context, `cons_emit`, one byte at a time) may interpose on a
+  program write's byte stream.** In cooked `CONS_ECHO` mode a typed-and-echoed
+  keystroke can land between two bytes of a program's glyph on the wire. This is
+  **unchanged from pre-#75** (echo and program output already interleaved byte-wise
+  through the lock-free `uart_putc`) — #75 does not regress it, it just does not
+  close it. Narrow v1.0 reachability: `ut` runs raw (echoes itself), a login
+  passphrase is echo-off. **Full echo-exclusion via a bulk-push fast path** (push
+  a ring-fitting write's whole cooked run under one lock hold) is a v1.x
+  enhancement (#79); it carries a two-ring (serial + the G-4 aurora drain)
+  lock-ordering design not worth rushing onto the trusted-path surface.
+- **`SYS_PUTS` (`t_putstr`) bypasses the ring + role** — the always-on diagnostic
+  UART channel writes `uart_putc` directly, so it can interleave with `/dev/cons`
+  writes at the FIFO. Deliberate (the diagnostic channel is independent of the Dev)
+  and pre-existing.
+- **A debug/job-control stop mid-`cons_output_write` holds the writer role** for
+  the stop's duration; other console writers park (never spin/extinct) until it
+  resumes. A new liveness seam (the console analog of the #89/8c-3 reader-role
+  freeze), bounded to one write call — v1.x release-on-stop.
 - **Kernel prints (`uart_puts`) keep the direct path**, so a kernel print can
   still interleave with an EL0 write. They must work pre-GIC, in IRQ context and
   inside extinction, where the ring is unavailable by construction. Post-boot
