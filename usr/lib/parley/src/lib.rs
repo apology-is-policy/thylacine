@@ -9,15 +9,21 @@
 //   - transport (8e-1c) -- persistent-child + PollSet driver (libthyla-rs).
 //   - lsp       (8e-2)  -- the LSP client policy: ids, pending map, dispatch,
 //                          diagnostics, position encoding.
+//   - dap       (8e-3a) -- the Debug Adapter Protocol envelope (seq/type/command);
+//                          shares frame + json, NOT jsonrpc.
+//   - dapc      (8e-3b) -- the DAP client policy: seq mint, pending-by-request_seq,
+//                          the launch handshake, events -> actions.
 //
 // `#![cfg_attr(not(test), no_std)]`: no_std for the aarch64-thylacine userspace
-// target, but std under `cargo test` so the pure layers (json, jsonrpc) run on
-// the host without libthyla-rs (the kaua pattern).
+// target, but std under `cargo test` so the pure layers (json, jsonrpc, dap) run
+// on the host without libthyla-rs (the kaua pattern).
 
 #![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
+pub mod dap;
+pub mod dapc;
 pub mod frame;
 pub mod json;
 pub mod jsonrpc;

@@ -16,15 +16,19 @@
 
 extern crate alloc;
 
+pub mod debug;
 pub mod diag;
 pub mod editor;
 pub mod syntax;
 pub mod text;
 pub mod theme;
+pub mod vartree;
 pub mod view;
 pub mod wrap;
 
+pub use debug::{DebugView, GoroutineRow, StackRow, VarRow};
+pub use vartree::VarNode;
 pub use diag::{Diagnostics, LineDiag, Severity};
-pub use editor::{Candidate, Editor, LspRequest, Mode, Request};
+pub use editor::{Candidate, DapRequest, DashPane, Editor, LspRequest, Mode, Request};
 pub use syntax::{HlClass, HlSpan, Lang};
 pub use text::TextBuffer;

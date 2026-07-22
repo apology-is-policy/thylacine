@@ -1,5 +1,13 @@
 # GO-IDE-DESIGN — Thylacine as a self-hosting Go development environment
 
+> **STATUS (2026-07-22): this arc (GO-PORT-PLAN Stage 8) is COMPLETE.** A Go program
+> is edited, type-checked, built, launched, breakpointed, stepped, and inspected
+> across the kernel boundary, entirely on-device. The Stage-8 *remainder* (the 8f-3
+> polish, the 8g superpowers, the 8h audit) plus the headline new work — kernel-up,
+> Linux-parity **software breakpoints** — continue in the successor arc
+> **`docs/ADVANCED-GO-DESIGN.md`** (signed off 2026-07-22). See §8 for the
+> landed-vs-carried breakdown.
+
 **Status: CHARTER (ratified 2026-06-23, user-directed). Scripture, no code.**
 This document is the binding design charter for extending the Go arc
 (`docs/GO-PORT-PLAN.md`) past the on-device toolchain into a complete,
@@ -192,6 +200,13 @@ privilege.
 
 ## 8. The staged plan (GO-PORT-PLAN Stage 8 — the IDE/debugger arc)
 
+> **Arc COMPLETE (2026-07-22).** 8a-8e + 8f-1/8f-2 + 8f-3a/3b LANDED. The remainder
+> below — the 8f-3 polish (inline values, LSP affordances, Bonfire), the 8g
+> superpowers, the 8h audit — rolls into `docs/ADVANCED-GO-DESIGN.md` (AG-3 / AG-4 /
+> AG-6), alongside the headline kernel-up **software-breakpoint** work (AG-2) that
+> removes the hardware-only breakpoint ceiling this arc shipped with, and the interim
+> single-step-`next` F10 fix (AG-1).
+
 Sequenced AFTER the toolchain (Stages 4-6) lands. Each kernel sub-stage opens
 with its own focused design pass + audit (it is a new privilege surface).
 
@@ -220,7 +235,8 @@ with its own focused design pass + audit (it is a new privilege surface).
   verbatim because `t_user_regs` *is* Linux `user_pt_regs`. The load-bearing
   decision: **all breakpoints route to the arm64 HW path** (I-12 W^X + I-36
   forbid a software `BRK` into shared text), giving a hard ceiling of the debug
-  registers (4 code + 4 data at the v1.0 clamp) — the defining ergonomic
+  registers (`num_brps` code = 6 on current substrates + 4 data) — the defining
+  ergonomic
   difference from `dlv` on Linux. Sub-chunks 8c-1 (attach + inspect) → 8c-2
   (HW breakpoints + step + continue) → 8c-3 (goroutines + the unified user→
   kernel stack via `kstack`) → 8c-4 (launch + the DAP server over stdio).

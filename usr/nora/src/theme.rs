@@ -43,6 +43,18 @@ pub fn current_line() -> Style {
     Style::new().fg(FG).bg(BAR)
 }
 
+/// The line the debugger is stopped at -- a warm ember-tinted row, distinct from
+/// the cursor's neutral surface, so "where execution is" reads at a glance
+/// (NORA-IDE-UX section 2.3). Dark enough that body text stays readable on it.
+pub fn debug_line() -> Style {
+    Style::new().fg(FG).bg(Color::Rgb(0x33, 0x1e, 0x12))
+}
+
+/// The `▸` execution marker + line number on the stopped line (ember, bold).
+pub fn debug_gutter() -> Style {
+    Style::new().fg(EMBER).bg(Color::Rgb(0x33, 0x1e, 0x12)).attr(Attr::BOLD)
+}
+
 /// The gutter number on the cursor's line -- brighter (ember) than the dim
 /// furniture, over the current-line background.
 pub fn current_gutter() -> Style {
@@ -176,4 +188,57 @@ pub fn palette_title() -> Style {
 /// The selected palette entry (a full-width highlight bar: dark text on ember).
 pub fn palette_selected() -> Style {
     Style::new().fg(BG).bg(EMBER).attr(Attr::BOLD)
+}
+
+/// A debugger dashboard tile border -- ember when the tile holds focus, dim
+/// otherwise (the keyboard-focus cue, NORA-IDE-UX section 2.3).
+pub fn tile_border(focused: bool) -> Style {
+    Style::new().fg(if focused { EMBER } else { BORDER }).bg(BG)
+}
+
+/// A dashboard tile title -- ember+bold when focused, dim otherwise.
+pub fn tile_title(focused: bool) -> Style {
+    let fg = if focused { EMBER } else { DIM };
+    Style::new().fg(fg).bg(BG).attr(Attr::BOLD)
+}
+
+/// A dashboard tile's body text (frame/variable/goroutine rows).
+pub fn tile_text() -> Style {
+    Style::new().fg(FG).bg(BG)
+}
+
+/// A dashboard tile's dimmed label (a `Tree` group node, an inactive tab).
+pub fn tile_dim() -> Style {
+    Style::new().fg(DIM).bg(BG)
+}
+
+/// The selected row in a FOCUSED dashboard tile (a full-width ember highlight,
+/// like the palette selection). Drawn only on the focused tile -- an unfocused
+/// tile shows no cursor.
+pub fn tile_selected() -> Style {
+    Style::new().fg(BG).bg(EMBER).attr(Attr::BOLD)
+}
+
+/// The Call Stack's `── kernel ──` divider row -- ember box-drawing marking the
+/// user->kernel boundary (NORA-IDE-UX section 5). Ember is Bonfire's divider
+/// accent, so the boundary is unmistakable without a bright line.
+pub fn stack_kernel_divider() -> Style {
+    Style::new().fg(EMBER).bg(BG)
+}
+
+/// A kernel frame in the Call Stack -- dim, so the cross-boundary rows read as
+/// furniture beneath the Go frames (NORA-IDE-UX section 5).
+pub fn stack_kernel_frame() -> Style {
+    Style::new().fg(DIM).bg(BG)
+}
+
+/// A tile scrollbar track (the dim `│` rail; shown only when the tile overflows).
+pub fn tile_scroll_track() -> Style {
+    Style::new().fg(BORDER).bg(BG)
+}
+
+/// A tile scrollbar thumb (the ember `█`, so the scroll position reads at a
+/// glance against the dim track).
+pub fn tile_scroll_thumb() -> Style {
+    Style::new().fg(EMBER).bg(BG)
 }

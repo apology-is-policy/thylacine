@@ -34,18 +34,25 @@ dialogue.
 | `json` | 8e-1a | no | The tree's first JSON codec (`serde_json` is std-only). |
 | `frame` | 8e-1b | no | The `Content-Length` streaming decoder. |
 | `jsonrpc` | 8e-1b | no | The JSON-RPC 2.0 message grammar. |
-| `lsp` | 8e-2a | no | The LSP **client policy** (this doc's focus). |
+| `lsp` | 8e-2a | no | The LSP **client policy** (an early focus of this doc). |
+| `dap` | 8e-3a | no | The DAP message **grammar** (`seq`/`type`/`command`). |
+| `dapc` | 8e-3b | no | The DAP **client policy** (the debugger dialogue). |
 | `transport` | 8e-1c | yes (`backend`) | Persistent child + `poll(2)` multiplexer. |
 
 `backend` is OFF by default, so `cargo test -p parley --target <host>` compiles
 only the pure layers and runs them on the host with no device dependency. The
-device build turns it on through the consumers (`parley-probe`, `nora`) via
-Cargo's workspace feature unification.
+device build turns it on through the consumers (`parley-probe`, `lsp-probe`,
+`dap-probe`, `nora`) via Cargo's workspace feature unification.
 
 ```
-cargo test  -p parley --target aarch64-apple-darwin   # 51 pure-layer tests
+cargo test  -p parley --target aarch64-apple-darwin   # 73 pure-layer tests
 cargo build -p parley                                 # no_std, aarch64-unknown-none
 ```
+
+LSP and DAP share the transport envelope (`frame`) and the JSON codec (`json`)
+but nothing else: LSP is JSON-RPC 2.0 (`jsonrpc` + `lsp`), DAP is its own
+envelope (`dap` + `dapc`). The two clients are otherwise structurally identical —
+a seq/id counter, a pending map, and a `handle() -> Action` dispatch.
 
 ---
 
@@ -130,6 +137,69 @@ MarkedString | MarkedString[]`; completion: `items[] | {items} | null`.
 **`path_to_uri` percent-encodes per byte** (a path is bytes, not necessarily
 UTF-8 text). `uri_to_path` accepts `file://`, bare `file:`, and the `localhost`
 authority.
+
+---
+
+## `dap` + `dapc` — the DAP client (the debugger dialogue)
+
+The debugger half of the substrate, added at 8e-3. `dap` is the envelope
+grammar; `dapc` is the client policy. Same split as `jsonrpc` + `lsp`, same
+no-I/O discipline — every traffic-producing method returns the `Value` to send,
+so the whole debug dialogue is host-testable with no process.
+
+### The envelope (`dap`)
+
+A DAP message is **not** JSON-RPC. It carries a `seq` and a `type` of
+`request` / `response` / `event`, with no `jsonrpc` / `method` / `id`.
+Correlation is by `request_seq` (a response echoes the request's `seq`), and
+dispatch is by `command` (requests + responses) or `event` (events). `classify`
+returns one of three:
+
+```rust
+match dap::classify(Value::parse(&body)?)? {
+    Incoming::Response { request_seq, command, success, message, body } => { /* our reply */ }
+    Incoming::Event    { event, body }                                   => { /* stopped/output/... */ }
+    Incoming::Request  { seq, command, arguments }                       => { /* a reverse-request */ }
+}
+```
+
+A response with **no explicit `success:true`** is read as a *failure*: a client
+must never treat an unconfirmed request as having worked (a missing/garbled
+`success` degrades to "no result", never to a false positive).
+
+### The client (`dapc`)
+
+`dapc::Client` mints `seq`, remembers each outstanding seq's command, and turns
+a classified `Incoming` into an `Action`. Unlike `lsp` there is **no latest-wins
+supersession**: every DAP request carries a unique seq, so a response matches
+exactly one pending entry and a stale reply is impossible by construction.
+
+The launch handshake is driven by the host via actions (the canonical VS Code /
+Delve order):
+
+```
+send initialize
+Action::Initialized(caps)     -> send launch (or attach)
+Action::ConfigureBreakpoints  -> send setFunctionBreakpoints/... then configurationDone
+Action::Stopped(entry)        -> inspect / continue / step
+```
+
+Response bodies parse down to what a debugger surfaces: `StackFrame`, `Scope`,
+`Variable`, `EvalResult`, `BreakpointInfo`, `ThreadInfo`. A failed request
+surfaces as `Action::Failed("<command>: <server message>")`; a reverse-request
+(`runInTerminal` / `startDebugging`, which we decline in `initialize`, so a
+conforming server never sends one) is answered with an error `Action::Send`
+rather than left unanswered — silence would hang a server that blocks on the
+reply. Everything unmatched or unconsumed is `Action::Ignored`, never an error.
+
+### The transport is stdio (`ambush dap-stdio`)
+
+Stock `ambush dap` is a headless TCP server; the debugger instead speaks DAP
+over the **same piped-stdio substrate as the LSP client** — the editor spawns
+`ambush dap-stdio` (a hidden thylacine-only ambush mode wrapping stdin/stdout as
+a `net.Conn` into `dap.Server.RunWithClient`) and frames DAP messages on its
+stdin/stdout, exactly as it spawns gopls. No `/net`, no listener-up race, and
+the DAP client reuses `transport::Server` + `Mux` verbatim.
 
 ---
 
@@ -243,16 +313,70 @@ Diagnostics clear on every buffer switch (`Editor::load_active`) — they are ke
 to the file that *was* showing, and carrying them across would paint another
 file's errors on these lines.
 
+## The debugger wiring (8e-3e, `usr/nora/src/dap_host.rs`)
+
+The DAP twin of `lsp_host`. `Dap` is a **third async source** in the same
+`poll(2)` (tags 3/4; gopls owns 1/2, fd 0 is 0), so a `stopped` event wakes the
+loop exactly like a keystroke or a diagnostic. Everything protocol-shaped lives
+in `dapc`; `dap_host` owns the Ambush process lifetime and turns DAP state into a
+status line and a `*backtrace*` scratch buffer.
+
+**Headless from `:`** (NORA-IDE-UX §9 — prove the debugger *loop* before the UI).
+A `:` debug verb sets `Editor::dap_request` (a `DapRequest`, the `LspRequest`
+sibling); the loop drains it with `take_dap_request`:
+
+- `:debug <prog>` starts a session — the binary's `drive_dap` spawns
+  `ambush dap-stdio`, replacing any prior session so a second `:debug` cannot
+  orphan the first Ambush + its debuggee;
+- `:break <func>` / `:cont`/`:c` / `:next`/`:n` / `:step`/`:s` / `:stepout`/`:so`
+  / `:bt` / `:print <expr>`/`:p` / `:kill` act on the live one (reporting "no
+  debug session" when there is none).
+
+**The launch is a handshake, not a call.** `dap_host` runs the canonical order
+across poll-wakes: `initialize` → (`Initialized`) → `launch(stopOnEntry)` → (the
+`initialized` EVENT) → queued breakpoints + `configurationDone` → the entry stop.
+A `:break` issued while the handshake is mid-flight is **queued** (Ambush cannot
+accept breakpoints before the `initialized` event) and flushed then; after it,
+`setFunctionBreakpoints` re-sends the whole accumulated set each time (DAP
+replaces the set, not appends).
+
+**On every stop the host auto-fetches the stack** — it yields the "stopped at
+`<func>` (`file:line`)" status *and* the frame id `:print` evaluates in, and
+caches the frames for `:bt`. A stale auto-stack (the user continued in the tiny
+window before it landed) is dropped so a "stopped at…" status never paints over a
+running target. No live-watch faster than a step (NORA-IDE-UX §7): the stack
+refreshes on stop, never continuously.
+
+**Lifecycle** mirrors gopls: `Dap::start` returns `Option` (debugger absent /
+spawn refused = "not installed", a reported state, not an error); a dead or
+exited session is reaped, dropped from the poll set, and the editor carries on;
+on `:kill` or nora exit the host sends the DAP `disconnect(terminate)`, closes
+stdin, then kills + waits unconditionally — an orphaned Ambush would hold its
+debuggee (and the ptrace stop) for the rest of the session. Ambush is baked at
+`/goroot/bin/ambush` (disk, on the login PATH, beside the Go toolchain), so a
+POST-pivot nora reaches it; `:debug`'s result surfaces on the status line and (for
+a multi-line call stack) the `*backtrace*` scratch. The Variables / Call-Stack /
+Console **tiles** are 8f; this is the headless loop that proves the state machine.
+
 ---
 
 ## Tests
 
 | Suite | Count | Command |
 |---|---|---|
-| parley pure layers | 51 | `cargo test -p parley --target <host>` |
-| nora lib (engine + diag + view) | 142 | `cargo test -p nora --no-default-features --lib --target <host>` |
+| parley pure layers | 73 | `cargo test -p parley --target <host>` |
+| nora lib (engine + diag + view) | 172 | `cargo test -p nora --no-default-features --lib --target <host>` |
 | in-guest transport | — | `/parley-probe` (boot-fatal) |
 | in-guest LIVE LSP round-trip | — | `/bin/lsp-probe` (boot-fatal where gopls is baked) |
+| in-guest LIVE DAP round-trip | — | `/dap-probe` (boot-fatal where ambush is baked) |
+| in-guest LIVE `:debug` in the editor | — | `dap-nora.exp` (HVF, LS-CI; `:debug` → sentinel) |
+
+`dap` + `dapc` add 22 of the 73 (10 envelope + 12 client): the envelope
+build/classify round-trips (including through `frame`), the full launch
+handshake sequenced via actions, stack/scopes/variables/evaluate parsing, a
+failed request surfacing `<command>: <message>`, events mapping to actions, a
+reverse-request declined rather than ignored, unmatched responses ignored, and
+seqs unique + monotonic.
 
 `lsp` tests cover: the handshake (and the encoding default when the server is
 silent), diagnostics store/replace/clear, severity mapping and defaults,
@@ -264,9 +388,12 @@ position conversion across all three encodings, clamping, and URI round-trips.
 `nora` adds: the `Diagnostics` model (most-severe-per-line, tie-breaking,
 counts, wrap-around navigation), the render behavior (gutter recolor confined to
 the marked line, warning vs error color, status-line message, explicit status
-outranking, no-diagnostic baseline), and `rev_bumps_on_every_content_mutation_only`
+outranking, no-diagnostic baseline), `rev_bumps_on_every_content_mutation_only`
 — which enumerates every `TextBuffer` mutator, because a mutator added later
-without a bump silently costs a document sync.
+without a bump silently costs a document sync — and the 8e-3e **debug axis** (5):
+each `:` debug verb and its aliases raise the right `DapRequest`, and the
+argument-taking verbs (`:debug`/`:break`/`:print`) report rather than raise when
+given no argument.
 
 ### The live round-trip (`/bin/lsp-probe`, 8e-2)
 
@@ -311,6 +438,65 @@ green; the revert-probe is what caught it.
 Measured cost: ~100 ms, inside the same joey block as `go8d` (which needs the
 same `PATH` + `CAP_CSPRNG_READ`/`CAP_LOCK_PAGES` env), so it adds no meaningful
 boot time.
+
+### The live round-trip (`/dap-probe`, 8e-3)
+
+The DAP twin. The 22 `dap`/`dapc` tests are synthetic, and the only prior
+end-to-end DAP proof — `ambush dap-selftest` — runs *in-process* (a `dap.Server`
+and a `daptest.Client` over a Go `net.Pipe`), never crossing a real process
+boundary, never framing a byte over a pipe, driving the session from Go rather
+than from parley. So parley's DAP client had been validated exclusively against
+its own assumptions about the server.
+
+`dap-probe` closes that: it spawns the real `/ambush dap-stdio` over piped stdio
+(the `transport::Server` the editor uses) and drives the canonical VS-Code launch
+sequence against `/ambush-child` **entirely through `parley::dapc`** —
+`initialize` → `launch(exec)` → the `initialized` event →
+`setFunctionBreakpoints[main.parkLoop]` + `configurationDone` → `stopped(entry)`
+→ `continue` → `stopped`, retrying until the stack shows `main.parkLoop` →
+`scopes` → `variables` → `evaluate(main.Sentinel)`. It asserts the exact value
+ambush reads back from the target's memory (`0x0AABB00DCAFE0001` =
+`768901734683508737`) — proving parley classifies real Ambush frames, `dapc`
+sequences the handshake against a real backend, and the stdio transport carries
+DAP as faithfully as it carries LSP. A fork-absent build SKIPs; a
+present-but-broken DAP path FAILS the boot (joey gates on exit 0). Measured: the
+whole round-trip in ~46 ms.
+
+### `:debug` in the editor (`dap-nora.exp`, 8e-3e)
+
+`dap-probe` proves parley drives Ambush; it does **not** prove the editor wiring
+(`dap_host`'s handshake sequencing, the stop → auto-stack → status, the `:` verb
+plumbing), which is I/O glue and host-untestable. `dap-nora.exp` closes that over
+a real PTY: it launches nora POST-pivot, `:debug`s the baked
+`/goroot/bin/ambush-child`, `:break main.parkLoop`, `:cont`s into it, and gates
+on nora's status reading `stopped: function breakpoint at main.parkLoop
+(child.go:23)`. That one line is the whole state machine end to end — `:debug`
+spawned Ambush and ran initialize → launch → the `initialized` event →
+configurationDone; `:break` set the function breakpoint; `:cont` continued from
+the entry stop; the `stopped` event landed; the auto-stack resolved the frame and
+its source; the status formatted it — everything except `evaluate`, which
+dap-probe already proves. The assertion rides the ls-7 principle: nora draws blind
+on the alt-screen, but kaua emits a status-line value as a contiguous same-styled
+run, so the frame line appears in the byte stream, and the `(child.go` form is
+stop-specific (a breakpoint-SET status carries no file:line, so it cannot match
+the earlier `:break` echo). A `:print main.Sentinel` best-effort leg follows for
+the transcript (the sentinel `768901734683508737` does appear there), but it is
+not the gate: `evaluate` is dap-probe-proven, and it lands in the window where the
+serial bridge is prone to dying under HVF.
+
+HVF-only (the LS-CI tcg default wedges at a kernel boot probe, task #70 — not
+nora). Two ground-truth findings the harness surfaced, neither a guest fault:
+
+- The first run **caught a real bake gap**: `THYLACINE_MKFS_PRESERVE=1` reuses the
+  prior pool verbatim, so a newly-baked `/goroot/bin/ambush` never lands until the
+  pool is regenerated (`PRESERVE=0`) — nora reported "debugger not installed"
+  precisely, the signal that closed it. This is the pool-bake sibling of the
+  ramfs-bake trap: a change to `/goroot` contents needs a pool regeneration.
+- The serial bridge (task #78) dies (`stdout-broken`, VM still `stat=R+`) under
+  the heavy HVF byte bursts — a fresh-pool first-login provision, or the `:print`
+  redraw. The gate is placed BEFORE that window, and the wrapper's 3× retry
+  catches a bridge-surviving attempt; the passing transcript carries both the
+  stop line and the sentinel, so the wiring is transcript-verified regardless.
 
 ---
 

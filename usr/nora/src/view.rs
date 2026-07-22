@@ -14,13 +14,26 @@ use kaua::buffer::{Buffer, Cell};
 use kaua::layout::{Constraint, Layout};
 use kaua::rect::Rect;
 use kaua::style::{Color, Style};
-use kaua::widget::{Block, List, Span, StatusLine, Widget};
+use kaua::widget::{
+    Block, List, Mark, Row, Scrollbar, Span, StatusLine, Table, Tabs, Tree, TreeRow,
+    Widget,
+};
 
+use crate::debug::DebugView;
 use crate::diag::Severity as DiagSeverity;
-use crate::editor::{Editor, Mode};
+use crate::editor::{DashPane, Editor, Mode};
 use crate::syntax::HlClass;
 use crate::theme;
 use crate::wrap;
+
+/// Floor sidebar width (NORA-IDE-UX section 2.3): the three debug tiles.
+const SIDEBAR_W: u16 = 28;
+/// Floor Console height (a Tabs strip + a few scrollback rows).
+const CONSOLE_H: u16 = 7;
+/// Below this the dashboard would crush the editor -- fall back to full-width
+/// (the debug data still reaches the status line + `:bt`).
+const DASH_MIN_W: u16 = 50;
+const DASH_MIN_H: u16 = 14;
 
 /// Most rows a hover popup may occupy. A gopls hover on a documented symbol
 /// can run to a screenful; the box exists to answer "what is this", not to
@@ -53,8 +66,349 @@ fn body_area(area: Rect, tabs: bool) -> Rect {
     }
 }
 
-/// Render `ed` into `buf` over `area`; returns the cursor `(x, y)`.
+/// The editor + optional debugger dashboard. When a debug session is live and
+/// the terminal is roomy enough, the screen splits into `[editor | sidebar]`
+/// over a full-width Console (NORA-IDE-UX section 2); otherwise the editor is
+/// full-width (the existing behavior, byte-for-byte). Returns the cursor, which
+/// stays in the editor at 8f-2a (per-pane cursors are 8f-2b).
 pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
+    // Zoom (`[Space]d z`): the focused pane fills the whole area, hiding the
+    // split. Only meaningful with a live session + a pushed view.
+    if ed.debugging() && ed.dash().zoom {
+        if let Some(dv) = ed.debug_view() {
+            return render_zoomed(ed, dv, area, buf);
+        }
+    }
+    match dash_split(ed, area) {
+        Some(d) => {
+            if let (Some(dv), Some(sb)) = (ed.debug_view(), d.sidebar) {
+                render_sidebar(ed, dv, sb, buf);
+            }
+            if let (Some(dv), Some(cs)) = (ed.debug_view(), d.console) {
+                render_console(ed, dv, cs, buf);
+            }
+            render_editor(ed, d.editor, buf)
+        }
+        None => render_editor(ed, area, buf),
+    }
+}
+
+/// Zoom (`[Space]d z`): draw only the focused pane, filling `area`. A non-editor
+/// pane returns a throwaway cursor -- it never painted an editor block, and the
+/// binary hides the real cursor in Normal mode (`block_cursor`), so no cursor
+/// shows over a zoomed tile. The editor pane keeps its own cursor.
+fn render_zoomed(ed: &Editor, dv: &DebugView, area: Rect, buf: &mut Buffer) -> (u16, u16) {
+    let d = ed.dash();
+    match d.focus {
+        DashPane::Editor => render_editor(ed, area, buf),
+        DashPane::Variables => {
+            render_variables(dv, area, true, d.var_sel, d.locals_expanded, buf);
+            (area.x, area.y)
+        }
+        DashPane::CallStack => {
+            render_call_stack(dv, area, true, d.stack_sel, buf);
+            (area.x, area.y)
+        }
+        DashPane::Goroutines => {
+            render_goroutines(dv, area, true, d.gor_sel, buf);
+            (area.x, area.y)
+        }
+        DashPane::Console => {
+            render_console(ed, dv, area, buf);
+            (area.x, area.y)
+        }
+    }
+}
+
+/// The non-overlapping tiles of the dashboard split.
+struct DashRects {
+    editor: Rect,
+    sidebar: Option<Rect>,
+    console: Option<Rect>,
+}
+
+/// The dashboard split for `area`, or `None` when not debugging or the terminal
+/// is too small (both mean "render the editor full-width"). The single source
+/// of the split geometry, shared by `render` and `editor_area` so they agree.
+fn dash_split(ed: &Editor, area: Rect) -> Option<DashRects> {
+    if !ed.debugging() || area.width < DASH_MIN_W || area.height < DASH_MIN_H {
+        return None;
+    }
+    let d = ed.dash();
+    // The Console spans the bottom band only when shown (`[Space]d c`); otherwise
+    // the main band reclaims its rows.
+    let (main, console) = if d.show_console {
+        let rows =
+            Layout::vertical(&[Constraint::Min(1), Constraint::Length(CONSOLE_H)]).split(area);
+        (rows[0], rows.get(1).copied())
+    } else {
+        (area, None)
+    };
+    // The sidebar takes the right column only when shown (`[Space]d v`);
+    // otherwise the editor reclaims its width.
+    let (editor, sidebar) = if d.show_sidebar {
+        let cols =
+            Layout::horizontal(&[Constraint::Min(1), Constraint::Length(SIDEBAR_W)]).split(main);
+        (cols[0], cols.get(1).copied())
+    } else {
+        (main, None)
+    };
+    Some(DashRects {
+        editor,
+        sidebar,
+        console,
+    })
+}
+
+/// The editor's sub-rect for the current layout (== `area` when full-width).
+/// The binary calls this for `text_metrics`/`scroll_to`, so the viewport width
+/// it scrolls to matches the width `render` draws into (else the wrapped cursor
+/// desyncs).
+pub fn editor_area(ed: &Editor, area: Rect) -> Rect {
+    // When zoomed, the focused pane fills `area`; if that pane is the editor its
+    // viewport is the whole area (else the editor is not drawn and this is moot,
+    // but `area` keeps `scroll_to` in bounds for the frame after un-zooming).
+    if ed.debugging() && ed.dash().zoom {
+        return area;
+    }
+    dash_split(ed, area).map(|d| d.editor).unwrap_or(area)
+}
+
+/// A dashboard tile frame: fill the background, draw the border + title (ember
+/// when focused), and return the inner content rect.
+fn tile(area: Rect, title: &str, focused: bool, buf: &mut Buffer) -> Rect {
+    fill(buf, area, theme::blank());
+    let block = Block::new()
+        .title(title)
+        .borders(true)
+        .border_style(theme::tile_border(focused))
+        .title_style(theme::tile_title(focused));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    inner
+}
+
+/// The right sidebar: Variables / Call Stack / Goroutines, stacked in equal
+/// thirds. Each tile highlights its selected row + shows a scrollbar when it
+/// overflows, but only the FOCUSED tile draws the row cursor (§2.3).
+fn render_sidebar(ed: &Editor, dv: &DebugView, area: Rect, buf: &mut Buffer) {
+    let d = ed.dash();
+    let focus = d.focus;
+    let tiles =
+        Layout::vertical(&[Constraint::Fill, Constraint::Fill, Constraint::Fill]).split(area);
+    render_variables(
+        dv,
+        tiles[0],
+        focus == DashPane::Variables,
+        d.var_sel,
+        d.locals_expanded,
+        buf,
+    );
+    if let Some(&r) = tiles.get(1) {
+        render_call_stack(dv, r, focus == DashPane::CallStack, d.stack_sel, buf);
+    }
+    if let Some(&r) = tiles.get(2) {
+        render_goroutines(dv, r, focus == DashPane::Goroutines, d.gor_sel, buf);
+    }
+}
+
+/// The selection to pass a tile widget: `Some(clamped)` on the focused tile with
+/// rows, `None` otherwise (an unfocused / empty tile shows no cursor).
+fn tile_sel(focused: bool, sel: usize, len: usize) -> Option<usize> {
+    if focused && len > 0 {
+        Some(sel.min(len - 1))
+    } else {
+        None
+    }
+}
+
+/// Compute the scroll offset that keeps `sel` visible in a `rows`-tall list
+/// within `inner`, and -- when the content overflows the tile -- draw a
+/// right-edge Scrollbar, returning the content rect one column narrower to
+/// clear the bar. When it fits (or there is no selection) the offset is 0, no
+/// bar, and the full inner rect. Stateless: a scrolled selection bottom-anchors
+/// (it sits on the window's last row), which needs no stored offset.
+fn scrollable(inner: Rect, rows: usize, sel: Option<usize>, buf: &mut Buffer) -> (Rect, usize) {
+    let h = inner.height as usize;
+    if inner.is_empty() || h == 0 || rows <= h {
+        return (inner, 0);
+    }
+    let off = match sel {
+        Some(s) => s.min(rows - 1).saturating_sub(h - 1).min(rows - h),
+        None => 0,
+    };
+    Scrollbar::new(rows, h, off)
+        .style(theme::tile_scroll_track())
+        .thumb_style(theme::tile_scroll_thumb())
+        .render(inner, buf);
+    let content = Rect::new(inner.x, inner.y, inner.width.saturating_sub(1), inner.height);
+    (content, off)
+}
+
+/// Variables: a `locals` group node (row 0) with the current frame's variable
+/// tree beneath it. The host flattens the visible tree into `dv.locals`
+/// (`name = value` + depth + expand state), so this builds the Kaua `TreeRow`s
+/// directly -- the group at depth 0, each variable one level deeper -- rather
+/// than reconstructing a `TreeItem` forest. `l`/`h` collapse the group or an
+/// expandable row; `sel` indexes the flattened rows (group, then the visible
+/// variables), highlighted only when `focused`.
+fn render_variables(
+    dv: &DebugView,
+    area: Rect,
+    focused: bool,
+    sel: usize,
+    expanded: bool,
+    buf: &mut Buffer,
+) {
+    let inner = tile(area, " Variables ", focused, buf);
+    let labels: alloc::vec::Vec<String> = dv
+        .locals
+        .iter()
+        .map(|v| format!("{} = {}", v.name, v.value))
+        .collect();
+    let mut rows: alloc::vec::Vec<TreeRow> = alloc::vec::Vec::with_capacity(1 + labels.len());
+    rows.push(TreeRow {
+        depth: 0,
+        mark: if expanded { Mark::Expanded } else { Mark::Collapsed },
+        label: "locals",
+        style: theme::tile_dim(),
+    });
+    if expanded {
+        for (v, label) in dv.locals.iter().zip(labels.iter()) {
+            rows.push(TreeRow {
+                // Nest the frame's variables one level under the group.
+                depth: v.depth + 1,
+                mark: if !v.expandable {
+                    Mark::Leaf
+                } else if v.expanded {
+                    Mark::Expanded
+                } else {
+                    Mark::Collapsed
+                },
+                label,
+                style: theme::tile_text(),
+            });
+        }
+    }
+    let sel = tile_sel(focused, sel, rows.len());
+    let (content, off) = scrollable(inner, rows.len(), sel, buf);
+    Tree::new(&rows)
+        .select(sel)
+        .selected_style(theme::tile_selected())
+        .offset(off)
+        .render(content, buf);
+}
+
+/// Call Stack: `#idx func` and its `file:line`, top frame first, with the
+/// cross-boundary `── kernel ──` divider (section 5). The DAP host lists the Go
+/// frames first, then the kernel frames, so the first kernel frame is where the
+/// ember divider goes and the rows beneath it dim. The divider is a visual-only
+/// row: the selection (`sel`) is a *frame* index (`Enter` -> `SelectFrame`), so
+/// navigation never lands on it -- the renderer maps a frame index to its
+/// visible row past the divider.
+fn render_call_stack(dv: &DebugView, area: Rect, focused: bool, sel: usize, buf: &mut Buffer) {
+    let inner = tile(area, " Call Stack ", focused, buf);
+    let fsel = tile_sel(focused, sel, dv.frames.len());
+    // The user->kernel boundary: the count of leading Go frames (== the divider
+    // row, when a kernel half follows).
+    let n_go = dv.frames.iter().take_while(|f| !f.kernel).count();
+    let has_div = n_go < dv.frames.len();
+    let total = dv.frames.len() + has_div as usize;
+    // A frame index -> its visible row (a kernel frame sits one past the divider).
+    let to_row = |i: usize| if i >= n_go { i + has_div as usize } else { i };
+    let row_sel = fsel.map(&to_row);
+    let (content, off) = scrollable(inner, total, row_sel, buf);
+    // Two columns: "#0 func" (fills the tile less the location) and the location.
+    let loc_w = 12u16.min(content.width / 2);
+    let name_w = content.width.saturating_sub(loc_w).saturating_sub(1);
+    let cols = [name_w, loc_w];
+    let cells: alloc::vec::Vec<[String; 2]> = dv
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(i, f)| [format!("#{} {}", i, f.func), f.location.clone()])
+        .collect();
+    let refs: alloc::vec::Vec<[&str; 2]> =
+        cells.iter().map(|c| [c[0].as_str(), c[1].as_str()]).collect();
+    let mut rows: alloc::vec::Vec<Row> = alloc::vec::Vec::with_capacity(total);
+    for (i, c) in refs.iter().enumerate() {
+        if has_div && i == n_go {
+            rows.push(Row::divider("kernel"));
+        }
+        let row = Row::new(&c[..]);
+        rows.push(if dv.frames[i].kernel {
+            row.style(theme::stack_kernel_frame())
+        } else {
+            row
+        });
+    }
+    Table::new(&cols, &rows)
+        .style(theme::tile_text())
+        .divider_style(theme::stack_kernel_divider())
+        .select(row_sel)
+        .selected_style(theme::tile_selected())
+        .offset(off)
+        .render(content, buf);
+}
+
+/// Goroutines: `g<id>` and the debugger's one-line state.
+fn render_goroutines(dv: &DebugView, area: Rect, focused: bool, sel: usize, buf: &mut Buffer) {
+    let inner = tile(area, " Goroutines ", focused, buf);
+    let sel = tile_sel(focused, sel, dv.goroutines.len());
+    let (content, off) = scrollable(inner, dv.goroutines.len(), sel, buf);
+    let id_w = 5u16.min(content.width);
+    let state_w = content.width.saturating_sub(id_w).saturating_sub(1);
+    let cols = [id_w, state_w];
+    let cells: alloc::vec::Vec<[String; 2]> = dv
+        .goroutines
+        .iter()
+        .map(|g| [format!("g{}", g.id), g.state.clone()])
+        .collect();
+    let refs: alloc::vec::Vec<[&str; 2]> =
+        cells.iter().map(|c| [c[0].as_str(), c[1].as_str()]).collect();
+    let rows: alloc::vec::Vec<Row> = refs.iter().map(|c| Row::new(&c[..])).collect();
+    Table::new(&cols, &rows)
+        .style(theme::tile_text())
+        .select(sel)
+        .selected_style(theme::tile_selected())
+        .offset(off)
+        .render(content, buf);
+}
+
+/// The bottom Console: a `[Program] Debug` tab strip, the current status line,
+/// then the tail of the scrollback. The Program/Debug stream split (the real
+/// pts vs the REPL) is 8f-2b/3; at 8f-2a both tabs show the unified log.
+fn render_console(ed: &Editor, dv: &DebugView, area: Rect, buf: &mut Buffer) {
+    let focused = ed.dash().focus == DashPane::Console;
+    let inner = tile(area, " Console ", focused, buf);
+    if inner.is_empty() {
+        return;
+    }
+    // Row 0: the tab strip.
+    Tabs::new(&["Program", "Debug"])
+        .active(ed.dash().console_tab)
+        .style(theme::tile_dim())
+        .active_style(theme::tile_title(true))
+        .render(inner, buf);
+    // Row 1: the persistent status line (ember).
+    if inner.height > 1 {
+        let y = inner.y + 1;
+        draw_text(buf, inner.x, y, inner.right(), &dv.status, theme::status_msg());
+    }
+    // Rows 2..: the tail of the scrollback.
+    let body_h = inner.height.saturating_sub(2) as usize;
+    if body_h > 0 && !dv.console.is_empty() {
+        let first = dv.console.len().saturating_sub(body_h);
+        let refs: alloc::vec::Vec<&str> =
+            dv.console[first..].iter().map(|s| s.as_str()).collect();
+        let body = Rect::new(inner.x, inner.y + 2, inner.width, body_h as u16);
+        List::new(&refs).style(theme::tile_text()).render(body, buf);
+    }
+}
+
+/// Render just the editor (gutter + text + overlays + status) into `area`. This
+/// is the whole pre-8f-2 `render`; the dashboard calls it for the editor tile.
+fn render_editor(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
     let tabs = ed.show_tabs();
     let body = body_area(area, tabs);
     let parts = Layout::vertical(&[Constraint::Min(1), Constraint::Length(1)]).split(body);
@@ -200,6 +554,7 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
     let tx = text_area.x + gutter_w;
     let ranges = ed.selection_ranges();
     let cur_row = ed.text.cursor().0;
+    let dbg_row = ed.debug_line_row();
     let lang = ed.lang();
     for r in 0..th {
         let y = text_area.y + r as u16;
@@ -208,20 +563,29 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
             buf.set_str(text_area.x, y, "~", theme::tilde());
             continue;
         }
+        let on_dbg = Some(row) == dbg_row;
         let on_cur = row == cur_row;
-        let (txt_style, gut_style) = if on_cur {
-            (theme::current_line(), theme::current_gutter())
+        // The debugger's stopped line wins over the cursor line (it marks where
+        // execution is, which the cursor may have moved away from).
+        let (txt_style, gut_style, lift) = if on_dbg {
+            (theme::debug_line(), theme::debug_gutter(), Some(theme::debug_line()))
+        } else if on_cur {
+            (theme::current_line(), theme::current_gutter(), Some(theme::current_line()))
         } else {
-            (theme::text(), theme::gutter())
+            (theme::text(), theme::gutter(), None)
         };
-        if on_cur {
+        if let Some(lift_style) = lift {
             // Lift the whole row so the highlight extends past the line's end.
             for x in text_area.x..text_area.right() {
-                buf.set_cell(x, y, Cell::new(' ', theme::current_line()));
+                buf.set_cell(x, y, Cell::new(' ', lift_style));
             }
         }
         let num = format!("{:>w$} ", row + 1, w = num_w as usize);
         buf.set_str(text_area.x, y, &num, gutter_style_for(ed, row, gut_style));
+        if on_dbg {
+            // The ▸ execution marker replaces the gutter's trailing space.
+            buf.set_cell(text_area.x + num_w, y, Cell::new('\u{25B8}', theme::debug_gutter()));
+        }
         // Horizontal scroll: draw the window [left, left+tw) of the line.
         let line = ed.text.line(row);
         let classes = lang.line_classes(line);
@@ -240,6 +604,7 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
     let tx = text_area.x + gutter_w;
     let ranges = ed.selection_ranges();
     let cur_row = ed.text.cursor().0;
+    let dbg_row = ed.debug_line_row();
     let lang = ed.lang();
     let mut pos = Some((ed.top, ed.top_sub));
     for r in 0..th {
@@ -252,20 +617,26 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
                 continue;
             }
         };
+        let on_dbg = Some(row) == dbg_row;
         let on_cur = row == cur_row;
-        let (txt_style, gut_style) = if on_cur {
-            (theme::current_line(), theme::current_gutter())
+        let (txt_style, gut_style, lift) = if on_dbg {
+            (theme::debug_line(), theme::debug_gutter(), Some(theme::debug_line()))
+        } else if on_cur {
+            (theme::current_line(), theme::current_gutter(), Some(theme::current_line()))
         } else {
-            (theme::text(), theme::gutter())
+            (theme::text(), theme::gutter(), None)
         };
-        if on_cur {
+        if let Some(lift_style) = lift {
             for x in text_area.x..text_area.right() {
-                buf.set_cell(x, y, Cell::new(' ', theme::current_line()));
+                buf.set_cell(x, y, Cell::new(' ', lift_style));
             }
         }
         if sub == 0 {
             let num = format!("{:>w$} ", row + 1, w = num_w as usize);
             buf.set_str(text_area.x, y, &num, gutter_style_for(ed, row, gut_style));
+            if on_dbg {
+                buf.set_cell(text_area.x + num_w, y, Cell::new('\u{25B8}', theme::debug_gutter()));
+            }
         }
         let line = ed.text.line(row);
         let classes = lang.line_classes(line);
@@ -468,7 +839,7 @@ fn render_menu(ed: &Editor, text_area: Rect, buf: &mut Buffer) -> (u16, u16) {
         .map(|(k, l)| format!("{}  {}", k, l))
         .collect();
     let refs: alloc::vec::Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
-    let title = " <space> ";
+    let title = ed.menu_title();
     let inner = popup(text_area, title, widest(&refs, title), rows.len() as u16, buf);
     List::new(&refs).style(theme::palette_surface()).render(inner, buf);
     (inner.x, inner.y)
@@ -743,9 +1114,11 @@ fn caret_screen(ed: &Editor, text_area: Rect, gutter_w: u16, p: (usize, usize)) 
 
 fn mode_color(mode: &Mode) -> Color {
     match mode {
-        Mode::Normal | Mode::Menu | Mode::BufferPicker { .. } | Mode::FilePicker { .. } => {
-            theme::EMBER
-        }
+        Mode::Normal
+        | Mode::Menu
+        | Mode::DebugMenu
+        | Mode::BufferPicker { .. }
+        | Mode::FilePicker { .. } => theme::EMBER,
         // Completion overlays Insert; keeping the accent means the cursor does
         // not change colour under the user just because a popup opened.
         Mode::Insert | Mode::Completion { .. } => theme::GREEN,
@@ -975,11 +1348,11 @@ ccc", false);
         ed.handle_key(KeyEvent::char(' ')); // open the menu
         let mut b = Buffer::empty(big);
         render(&ed, big, &mut b);
-        // 8 entries -> box height 10, bottom-aligned (by=3), inner.y=4; row 0 is
-        // "f  open file picker".
-        assert_eq!(sym(&b, 1, 4), 'f'); // the key
-        assert_eq!(sym(&b, 4, 4), 'o'); // "open file picker" after "f  "
-        assert_ne!(b.get(1, 4).unwrap().style.bg, theme::EMBER); // no selection bar
+        // 9 entries -> box height 11, bottom-aligned, inner.y=3; row 0 is
+        // "f  open file picker" (the 'd' debug-submenu entry added one row).
+        assert_eq!(sym(&b, 1, 3), 'f'); // the key
+        assert_eq!(sym(&b, 4, 3), 'o'); // "open file picker" after "f  "
+        assert_ne!(b.get(1, 3).unwrap().style.bg, theme::EMBER); // no selection bar
     }
 
     #[test]
@@ -1070,13 +1443,14 @@ ccc", false);
         let big = Rect::new(0, 0, 50, 14);
         let mut ed = Editor::new(None, "x", false);
         ed.handle_key(KeyEvent::char(':'));
-        ed.handle_key(KeyEvent::char('b')); // ":b" -> bn, bp, bd, bd!
+        ed.handle_key(KeyEvent::char('b')); // ":b" -> bn bp bd bd! break bt
         let mut b = Buffer::empty(big);
         let cur = render(&ed, big, &mut b);
-        // 4 matches -> box_h 6; by = 13-6 = 7; inner.y = 8; row 0 = ":bn  ...".
-        assert_eq!(sym(&b, 1, 8), ':');
-        assert_eq!(sym(&b, 2, 8), 'b');
-        assert_eq!(sym(&b, 3, 8), 'n');
+        // 6 matches (the debugger `break` + `bt` join the buffer verbs) ->
+        // box_h 8; by = 13-8 = 5; inner.y = 6; row 0 = ":bn  ..." (COMMANDS order).
+        assert_eq!(sym(&b, 1, 6), ':');
+        assert_eq!(sym(&b, 2, 6), 'b');
+        assert_eq!(sym(&b, 3, 6), 'n');
         // the command line still shows ":b" on the status row and owns the cursor.
         assert_eq!(sym(&b, 0, 13), ':');
         assert_eq!(sym(&b, 1, 13), 'b');
@@ -1263,5 +1637,407 @@ ccc", false);
         // A popup that cannot show the highlighted candidate is useless.
         assert!(frame_has(&b, a, &format!("cand{}", last)));
         assert!(!frame_has(&b, a, "cand0 "));
+    }
+
+    // -- the debugger dashboard (8f-2) -------------------------------------
+
+    fn dbg_ed() -> Editor {
+        let mut ed = Editor::new(Some("m.go".into()), "hello\nworld", false);
+        ed.set_debug_view(Some(crate::debug::DebugView {
+            status: "stopped: breakpoint at main.parkLoop".into(),
+            frames: alloc::vec![crate::debug::StackRow::go(
+                "main.parkLoop".into(),
+                "child.go:23".into(),
+            )],
+            locals: alloc::vec![crate::debug::VarRow {
+                name: "i".into(),
+                value: "3".into(),
+                depth: 0,
+                expandable: false,
+                expanded: false,
+            }],
+            goroutines: alloc::vec![crate::debug::GoroutineRow {
+                id: 1,
+                state: "running".into(),
+            }],
+            console: alloc::vec!["stopped".into()],
+        }));
+        ed
+    }
+
+    #[test]
+    fn the_dashboard_tiles_and_editor_coexist_when_roomy() {
+        let a = Rect::new(0, 0, 60, 20);
+        let ed = dbg_ed();
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        // The three sidebar tiles + the bottom Console are all titled.
+        assert!(frame_has(&b, a, "Variables"));
+        assert!(frame_has(&b, a, "Call Stack"));
+        assert!(frame_has(&b, a, "Goroutines"));
+        assert!(frame_has(&b, a, "Console"));
+        // The tiles carry live DAP data (the Call Stack shows the frame).
+        assert!(frame_has(&b, a, "parkLoop"));
+        // The editor still renders in its sub-rect (gutter "1" at col 2).
+        assert_eq!(sym(&b, 2, 0), '1');
+        // The scroll width is the narrowed sub-rect, not the full area, so the
+        // binary scrolls to the same width render draws into.
+        assert_eq!(editor_area(&ed, a).width, 60 - SIDEBAR_W);
+    }
+
+    #[test]
+    fn the_dashboard_collapses_on_a_small_terminal() {
+        // Below the floor the editor stays full-width -- the debug data still
+        // reaches the status line + `:bt`.
+        let a = Rect::new(0, 0, 40, 20); // width < DASH_MIN_W
+        let ed = dbg_ed();
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(!frame_has(&b, a, "Variables"));
+        assert_eq!(editor_area(&ed, a).width, 40);
+    }
+
+    #[test]
+    fn no_dashboard_without_a_session() {
+        // A normal editor (no pushed view) is full-width -- the pre-8f render,
+        // byte-for-byte (this is why the 30+ tests above never changed).
+        let a = Rect::new(0, 0, 60, 20);
+        let ed = Editor::new(Some("m.go".into()), "hello", false);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(!frame_has(&b, a, "Variables"));
+        assert_eq!(editor_area(&ed, a).width, 60);
+    }
+
+    #[test]
+    fn the_focused_tile_takes_an_ember_border() {
+        let a = Rect::new(0, 0, 60, 20);
+        let mut ed = dbg_ed();
+        // Default focus is the editor -> the Variables tile border is dim. Its
+        // top-left corner sits at the sidebar origin (60 - 28, 0).
+        let corner_x = 60 - SIDEBAR_W;
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert_eq!(b.get(corner_x, 0).unwrap().style.fg, theme::BORDER);
+        // Tab focuses Variables -> its border goes ember.
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        let mut b2 = Buffer::empty(a);
+        render(&ed, a, &mut b2);
+        assert_eq!(b2.get(corner_x, 0).unwrap().style.fg, theme::EMBER);
+    }
+
+    // -- the navigable dashboard (8f-2b-1) ---------------------------------
+
+    fn dbg_ed_n(frames: usize, locals: usize, gors: usize) -> Editor {
+        let mut ed = Editor::new(Some("m.go".into()), "hello\nworld", false);
+        ed.set_debug_view(Some(crate::debug::DebugView {
+            status: "stopped".into(),
+            frames: (0..frames)
+                .map(|i| crate::debug::StackRow::go(format!("f{}", i), format!("m.go:{}", i)))
+                .collect(),
+            locals: (0..locals)
+                .map(|i| crate::debug::VarRow {
+                    name: format!("v{}", i),
+                    value: i.to_string(),
+                    depth: 0,
+                    expandable: false,
+                    expanded: false,
+                })
+                .collect(),
+            goroutines: (0..gors)
+                .map(|i| crate::debug::GoroutineRow {
+                    id: i as i64,
+                    state: "running".into(),
+                })
+                .collect(),
+            console: alloc::vec!["boot".into()],
+        }));
+        ed
+    }
+
+    /// The first buffer row whose text contains `needle`.
+    fn find_row(b: &Buffer, a: Rect, needle: &str) -> Option<u16> {
+        (0..a.height).find(|&y| row_text(b, y, a.width).contains(needle))
+    }
+
+    /// Does any cell on row `y` carry background `bg`? (A selected tile row is a
+    /// full-width highlight; the ember tile border/title use ember *fg* over the
+    /// slate bg, so only a selection paints an ember *bg*.)
+    fn row_has_bg(b: &Buffer, a: Rect, y: u16, bg: kaua::style::Color) -> bool {
+        (0..a.width).any(|x| b.get(x, y).map(|c| c.style.bg == bg).unwrap_or(false))
+    }
+
+    #[test]
+    fn the_focused_tiles_selected_row_is_highlighted() {
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_n(3, 0, 0);
+        // Focus the Call Stack (Tab x2) and select frame #1 (j).
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::char('j'));
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y = find_row(&b, a, "f1").expect("frame #1 shown");
+        assert!(row_has_bg(&b, a, y, theme::EMBER), "selected row is ember");
+        // The other frames are not highlighted.
+        let y0 = find_row(&b, a, "f0").expect("frame #0 shown");
+        assert!(!row_has_bg(&b, a, y0, theme::EMBER));
+    }
+
+    #[test]
+    fn an_unfocused_tile_shows_no_row_cursor() {
+        // Focus stays on the editor -> the tiles render their data but no tile
+        // row carries a selection highlight (§2.3: the cursor is on the focused
+        // tile only).
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_n(3, 0, 0);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y = find_row(&b, a, "f0").expect("a frame is shown");
+        assert!(!row_has_bg(&b, a, y, theme::EMBER));
+    }
+
+    #[test]
+    fn a_long_tile_scrolls_to_the_selection_and_shows_a_scrollbar() {
+        // More frames than the Call Stack tile is tall: selecting the last one
+        // scrolls it into view and a scrollbar thumb (█) appears.
+        let a = Rect::new(0, 0, 60, 30);
+        let mut ed = dbg_ed_n(12, 0, 0);
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::new(KeyCode::Tab)); // focus Call Stack
+        ed.handle_key(KeyEvent::char('G')); // select the last frame
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(find_row(&b, a, "f11").is_some(), "the selected frame is visible");
+        assert!(find_row(&b, a, "f0").is_none(), "the top frames scrolled off");
+        // A scrollbar thumb glyph is drawn nowhere else in the frame.
+        let has_thumb = (0..a.width)
+            .any(|x| (0..a.height).any(|y| b.get(x, y).map(|c| c.symbol) == Some('\u{2588}')));
+        assert!(has_thumb, "an overflowing tile shows a scrollbar");
+    }
+
+    #[test]
+    fn collapsing_the_locals_group_hides_the_leaves() {
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_n(0, 2, 0);
+        ed.handle_key(KeyEvent::new(KeyCode::Tab)); // focus Variables
+        let mut open = Buffer::empty(a);
+        render(&ed, a, &mut open);
+        assert!(frame_has(&open, a, "v0"), "leaves show while expanded");
+        ed.handle_key(KeyEvent::char('h')); // collapse the group
+        let mut shut = Buffer::empty(a);
+        render(&ed, a, &mut shut);
+        assert!(frame_has(&shut, a, "locals"), "the group node stays");
+        assert!(!frame_has(&shut, a, "v0"), "the leaves are hidden");
+    }
+
+    #[test]
+    fn the_variables_tile_renders_an_expanded_struct_with_a_nested_child() {
+        // A local `p` that is expandable + open, with a fetched child `a` one
+        // level deeper. The tile shows the ▾ open marker and the nested child.
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_n(1, 0, 0);
+        let mut dv = ed.debug_view().cloned().expect("a live view");
+        dv.locals = alloc::vec![
+            crate::debug::VarRow {
+                name: "p".into(),
+                value: "*main.T".into(),
+                depth: 0,
+                expandable: true,
+                expanded: true,
+            },
+            crate::debug::VarRow {
+                name: "a".into(),
+                value: "1".into(),
+                depth: 1,
+                expandable: false,
+                expanded: false,
+            },
+        ];
+        ed.set_debug_view(Some(dv));
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "p = *main.T"), "the open struct row");
+        assert!(frame_has(&b, a, "a = 1"), "its nested child");
+        assert!(frame_has(&b, a, "\u{25BE}"), "a ▾ open marker"); // group + struct
+    }
+
+    // -- the [Space]d panel toggles (8f-2c-2) ------------------------------
+
+    /// Drive `[Space]d <key>` on a debugging editor.
+    fn space_d(ed: &mut Editor, key: char) {
+        ed.handle_key(KeyEvent::char(' '));
+        ed.handle_key(KeyEvent::char('d'));
+        ed.handle_key(KeyEvent::char(key));
+    }
+
+    #[test]
+    fn hiding_the_sidebar_gives_the_editor_the_full_width() {
+        let a = Rect::new(0, 0, 60, 20);
+        let mut ed = dbg_ed();
+        space_d(&mut ed, 'v'); // hide the sidebar
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(!frame_has(&b, a, "Variables")); // the sidebar is gone
+        assert!(frame_has(&b, a, "Console")); // the console remains
+        assert_eq!(editor_area(&ed, a).width, 60); // editor reclaimed the width
+    }
+
+    #[test]
+    fn hiding_the_console_removes_the_bottom_band() {
+        let a = Rect::new(0, 0, 60, 20);
+        let mut ed = dbg_ed();
+        space_d(&mut ed, 'c'); // hide the console
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(!frame_has(&b, a, "Console")); // the console band is gone
+        assert!(frame_has(&b, a, "Variables")); // the sidebar remains
+        assert_eq!(editor_area(&ed, a).height, 20); // editor took the console rows
+    }
+
+    #[test]
+    fn zoom_fills_the_focused_pane() {
+        let a = Rect::new(0, 0, 60, 20);
+        let mut ed = dbg_ed();
+        // Focus the Console, then zoom it.
+        for _ in 0..5 {
+            if ed.dash().focus == DashPane::Console {
+                break;
+            }
+            ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        }
+        space_d(&mut ed, 'z');
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        // Only the Console is drawn -- the editor + the sidebar tiles are hidden.
+        assert!(frame_has(&b, a, "Console"));
+        assert!(!frame_has(&b, a, "Variables"));
+        assert_ne!(sym(&b, 2, 0), '1'); // the editor gutter "1" is not drawn
+    }
+
+    // -- the cross-boundary stack divider (8f-3a) --------------------------
+
+    /// A view with `n_go` Go frames then `n_kernel` kernel frames -- the order
+    /// the DAP host lists them (Go, then the kernel half; section 5).
+    fn dbg_ed_mixed(n_go: usize, n_kernel: usize) -> Editor {
+        let mut frames: alloc::vec::Vec<crate::debug::StackRow> = (0..n_go)
+            .map(|i| crate::debug::StackRow::go(format!("gofn{}", i), format!("m.go:{}", i)))
+            .collect();
+        frames.extend(
+            (0..n_kernel)
+                .map(|i| crate::debug::StackRow::kernel(format!("ksym{}", i), String::new())),
+        );
+        let mut ed = Editor::new(Some("m.go".into()), "hello\nworld", false);
+        ed.set_debug_view(Some(crate::debug::DebugView {
+            status: "stopped".into(),
+            frames,
+            locals: alloc::vec::Vec::new(),
+            goroutines: alloc::vec::Vec::new(),
+            console: alloc::vec::Vec::new(),
+        }));
+        ed
+    }
+
+    /// The fg colour of the `#` frame-marker cell on row `y` (every data row
+    /// starts `#N ...`); `None` if the row has no marker.
+    fn hash_fg(b: &Buffer, a: Rect, y: u16) -> Option<kaua::style::Color> {
+        (0..a.width).find_map(|x| {
+            let c = b.get(x, y)?;
+            if c.symbol == '#' {
+                Some(c.style.fg)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Is there an ember `─` cell anywhere in the frame? (An unfocused tile's
+    /// border is dim, so the only ember box-drawing is the kernel divider.)
+    fn has_ember_divider(b: &Buffer, a: Rect) -> bool {
+        (0..a.width).any(|x| {
+            (0..a.height).any(|y| {
+                b.get(x, y)
+                    .map(|c| c.symbol == '\u{2500}' && c.style.fg == theme::EMBER)
+                    .unwrap_or(false)
+            })
+        })
+    }
+
+    #[test]
+    fn the_call_stack_draws_an_ember_kernel_divider() {
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_mixed(2, 2);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "gofn0"), "a Go frame renders");
+        assert!(frame_has(&b, a, "ksym0"), "a kernel frame renders");
+        assert!(find_row(&b, a, "kernel").is_some(), "the divider is labelled");
+        assert!(has_ember_divider(&b, a), "the divider is ember box-drawing");
+    }
+
+    #[test]
+    fn kernel_frames_dim_and_sit_below_the_divider() {
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_mixed(2, 2); // editor-focused -> no row selection
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y_go = find_row(&b, a, "gofn1").expect("last Go frame");
+        let y_div = find_row(&b, a, "kernel").expect("the divider");
+        let y_k = find_row(&b, a, "ksym0").expect("first kernel frame");
+        // Order: Go frames, then the divider, then the kernel frames.
+        assert!(y_go < y_div && y_div < y_k, "the divider sits at the boundary");
+        // The Go frame is body-text; the kernel frame is dim.
+        assert_eq!(hash_fg(&b, a, y_go), Some(theme::FG));
+        assert_eq!(hash_fg(&b, a, y_k), Some(theme::DIM));
+    }
+
+    #[test]
+    fn an_all_go_stack_has_no_divider() {
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_mixed(3, 0);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "gofn2"), "the frames render");
+        assert!(!has_ember_divider(&b, a), "no divider without a kernel half");
+    }
+
+    #[test]
+    fn selecting_a_kernel_frame_highlights_it_not_the_divider() {
+        // The selection is a frame index -- j past the Go frames lands on the
+        // kernel frame, never on the visual-only divider.
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_mixed(2, 2);
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::new(KeyCode::Tab)); // focus Call Stack
+        ed.handle_key(KeyEvent::char('j'));
+        ed.handle_key(KeyEvent::char('j')); // frame index 2 = first kernel frame
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y_k = find_row(&b, a, "ksym0").expect("first kernel frame");
+        assert!(row_has_bg(&b, a, y_k, theme::EMBER), "the kernel frame is selected");
+        let y_div = find_row(&b, a, "kernel").expect("the divider");
+        assert!(!row_has_bg(&b, a, y_div, theme::EMBER), "the divider is not selectable");
+    }
+
+    // -- the stopped-line marker (debugger follow + highlight) -------------
+
+    #[test]
+    fn the_stopped_line_shows_the_debug_marker() {
+        // follow_debug marks a line; the editor render draws a ▸ in its gutter
+        // (no dashboard needed -- the plain render honors the debug line).
+        let a = Rect::new(0, 0, 40, 10);
+        let mut ed = Editor::new(Some("m.go".into()), "one\ntwo\nthree\nfour", false);
+        ed.follow_debug("m.go", 2); // stop at line 3 ("three")
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y = find_row(&b, a, "three").expect("the stopped line renders");
+        let marked =
+            (0..a.width).any(|x| b.get(x, y).map(|c| c.symbol == '\u{25B8}').unwrap_or(false));
+        assert!(marked, "the stopped line carries a ▸ execution marker");
+        // Only the stopped line is marked.
+        let y0 = find_row(&b, a, "one").expect("line 1 renders");
+        let unmarked =
+            (0..a.width).all(|x| b.get(x, y0).map(|c| c.symbol != '\u{25B8}').unwrap_or(true));
+        assert!(unmarked, "a non-stopped line has no marker");
     }
 }

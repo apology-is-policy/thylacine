@@ -1,0 +1,111 @@
+#!/usr/bin/expect -f
+# tools/interactive/dap-nora.exp -- Stage 8e-3e: nora's in-editor `:debug`
+# surface, over a real PTY.
+#
+# Proves the WIRING no host test can reach: the `:` debug grammar -> the editor's
+# DapRequest axis -> nora's dap_host -> Ambush over piped stdio -> the status
+# line. dap_host is I/O glue (like lsp_host), so it is unit-untestable; the
+# dap-probe already proves parley::dapc drives real Ambush end to end, and THIS
+# proves the EDITOR LOOP drives it.
+#
+# nora runs POST-pivot, so it reaches Ambush + the debuggee at /goroot/bin --
+# baked to the pool beside the Go toolchain (build_go_goroot), on the login PATH.
+# We launch nora, `:debug` the baked target, break at main.parkLoop (a name
+# breakpoint -> a kernel hardware breakpoint, I-12/I-36), continue into it, then
+# `:print main.Sentinel`, asserting nora's status shows the EXACT value Ambush
+# read from the stopped target's memory.
+#
+# The assertion rides the same principle as ls-7: nora draws blind on the
+# alt-screen, but kaua's cell-diff emits a status-line value as a contiguous
+# same-styled run, so the 18-digit sentinel appears in the byte stream. It is a
+# value nothing else prints -- unambiguous proof the whole path carried it.
+#
+# HVF-only: the LS-CI tcg default wedges at a kernel boot probe (task #70,
+# pre-existing, NOT nora); the dev-loop accel is hvf, where ls-7 + the debugger
+# run. Drive it with THYLACINE_ACCEL=hvf; the wrapper's retry absorbs jitter.
+
+source [file join [file dirname [info script]] lib.exp]
+
+set ::dbg_file "/home/michael/dap-nora.txt"
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Pre-create the buffer file (the proven ls-7 launch: edit an EXISTING file, so
+# the orthogonal walk-miss/NotFound gap is out of scope). A .txt, not a .go, so
+# no gopls spawns -- the debug path is the subject (gopls + Ambush coexist by
+# construction, both Option<Host> in one poll loop, but that is not tested here).
+lc_send "echo > $::dbg_file"
+sleep 1
+
+lc_send "nora $::dbg_file"
+# Let nora launch: ut RAWs the console + Inherits fd 0/1/2 -> nora enters the
+# alt-screen + starts reading fd 0.
+sleep 2
+
+# Start the debugger on the baked target. Ambush REVENANT-execs ambush-child,
+# attaches, and (stopOnEntry) halts it at entry. Generous: launching + attaching
+# a real Go binary is the slow step.
+lc_step "nora: :debug the baked target"
+send ":debug /goroot/bin/ambush-child\r"
+sleep 4
+
+# Set a function breakpoint (queued if the handshake is mid-flight; armed at the
+# `initialized` event either way), then continue from the entry stop into it.
+lc_step "nora: :break main.parkLoop"
+send ":break main.parkLoop\r"
+sleep 2
+lc_step "nora: :cont into the breakpoint"
+send ":cont\r"
+
+# THE GATE. On the stop, dap_host auto-fetched the stack, so a status naming the
+# FRAME + its SOURCE proves the whole state machine end to end: :debug spawned
+# Ambush and ran initialize -> launch -> the `initialized` event ->
+# configurationDone; :break set the function breakpoint; :cont continued from the
+# entry stop; the `stopped` event landed; the auto-stack resolved the frame; and
+# the status formatted it. Everything except `evaluate` -- which dap-probe proves
+# on every boot -- rides this one line. The "(child.go" form is stop-specific: a
+# breakpoint-SET status carries no file:line, so this cannot match the earlier
+# `:break` echo. This checkpoint arrives BEFORE the heavier `:print` redraw, the
+# window where the serial bridge (#78) is prone to dying under HVF.
+# 8f-3b: the stop expanded the dashboard, and the Call Stack tile now shows the
+# unified user->kernel stack. On the stop, dap_host read the debuggee's
+# /proc/<pid>/kstack (the pid from the DAP `process` event) and appended the
+# symbolized kernel frames, so the ember "-- kernel --" divider renders. The
+# divider label is unique to this render (nothing else prints "kernel"), and it
+# sits in the sidebar (upper-right) -- emitted in the byte stream BEFORE the
+# bottom-of-screen status line, so it is strictly less exposed to the #78 bridge
+# window than the parkLoop gate below. debug-probe proves the kstack read on
+# every boot; THIS proves nora's live dashboard lights up the cross-boundary
+# stack end to end.
+lc_expect "kernel" "nora shows the -- kernel -- cross-boundary stack divider (8f-3b)"
+lc_expect "parkLoop (child.go" "nora shows the stop at main.parkLoop"
+lc_pass "8e-3e + 8f-3b: nora :debug drove Ambush -- stopped at main.parkLoop with the cross-boundary -- kernel -- divider (handshake + break + continue + stop + auto-stack + kstack + status)"
+
+# BEST-EFFORT: `:print` through nora, for the transcript. `evaluate` is
+# dap-probe-proven, and the serial bridge (#78, tracked) can die under the HVF
+# byte burst here -- so a match is a bonus and an EOF is the tracked bridge
+# fragility, NOT a guest fault (the VM stays alive; the gate above already
+# passed). We never fail the scenario on this leg.
+lc_step "nora: :print main.Sentinel (best-effort)"
+send ":print main.Sentinel\r"
+set timeout 12
+expect {
+    -ex "768901734683508737" { lc_step "bonus: :print showed the sentinel through nora" }
+    -re {EXTINCTION:}        { lc_fail "extinction during :print" }
+    timeout                  { lc_step "note: sentinel not observed this attempt (bridge #78); evaluate is dap-probe-proven" }
+    eof                      { lc_step "note: serial bridge died post-stop (#78); the gate already passed"; lc_vm_kill; exit 0 }
+}
+
+# Teardown (best-effort -- the proof already passed; a late bridge death is fine).
+lc_step "nora: :kill + :q!"
+catch { send ":kill\r" }
+sleep 1
+catch { send ":q!\r" }
+sleep 1
+lc_step "quit qemu (Ctrl-A x)"
+catch { send "\001x" }
+expect { eof {} timeout {} }
+lc_vm_kill
+lc_pass "LS-CI dap-nora: nora in-editor :debug verified (stop at main.parkLoop; :print best-effort under #78)"
+exit 0

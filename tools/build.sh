@@ -413,7 +413,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -700,6 +700,54 @@ build_go_goroot() {
         ledger "gopls: LSP server cross-compile (GOOS=thylacine, stripped) -> /goroot/bin (Stage 8d)"
     else
         echo "==> gopls: fork source not found at $gopls_src -- skipping (set GOPLSFORK)"
+    fi
+
+    # Go Stage 8e-3e: the Ambush debugger + a debuggable target for nora's
+    # in-editor `:debug` surface. nora runs POST-pivot, so unlike /ambush-probe
+    # (pre-pivot, ramfs) these must be disk-backed at /goroot/bin like gopls --
+    # dev tools on the login PATH, coupled to the toolchain. Built HERE (not
+    # copied from build_ambush) so the bake is self-contained + ordered before
+    # populate_stratum_pool; the ramfs copy (build_ambush) still ships for the
+    # pre-pivot /ambush-probe. ambush is STRIPPED (it reads the TARGET's debug
+    # info, not its own); ambush-child keeps its DWARF (it IS the debuggee). Each
+    # skips cleanly if its source is absent (nora's :debug reports "not
+    # installed").
+    local ambush_src="${AMBUSHFORK:-$HOME/projects/ambush}"
+    if [[ -d "$ambush_src/cmd/dlv" ]]; then
+        echo "==> Building Ambush for /goroot/bin (GOOS=thylacine, stripped, fork=$ambush_src)"
+        ( cd "$ambush_src" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+            "$go_bin" build -mod=vendor -ldflags="-s -w" -o "$stage/bin/ambush" ./cmd/dlv ) \
+            || { echo "==> Ambush /goroot bake FAILED" >&2; return 1; }
+        echo "==> Ambush (/goroot) built: $stage/bin/ambush ($(du -h "$stage/bin/ambush" | cut -f1 | tr -d ' '))"
+        ledger "ambush: Delve port -> /goroot/bin (Stage 8e-3e nora :debug)"
+        if [[ -d "$REPO_ROOT/usr/ambush-child" ]]; then
+            echo "==> Building ambush-child (debuggee, unstripped) for /goroot/bin"
+            ( cd "$REPO_ROOT/usr/ambush-child" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+                "$go_bin" build -o "$stage/bin/ambush-child" . ) \
+                || { echo "==> ambush-child /goroot bake FAILED" >&2; return 1; }
+            echo "==> ambush-child (/goroot) built: $stage/bin/ambush-child"
+        fi
+    else
+        echo "==> Ambush: fork source not found at $ambush_src -- skipping /goroot bake"
+    fi
+
+    # A friendly demo program for exploring nora's Go debugger + IDE features
+    # (the dashboard tiles + the cross-boundary "-- kernel --" stack + variable
+    # inspection). Unstripped so :debug can break by function + read locals; the
+    # SOURCE is baked beside it (/goroot/demo) so `nora /goroot/demo/nora-demo.go`
+    # opens it. Independent of the Ambush fork -- needs only the Go toolchain, so
+    # the source stays openable even where the debugger is absent.
+    if [[ -d "$REPO_ROOT/usr/nora-demo" ]]; then
+        echo "==> Building nora-demo (debug demo, unstripped) for /goroot/bin"
+        ( cd "$REPO_ROOT/usr/nora-demo" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+            "$go_bin" build -o "$stage/bin/nora-demo" . ) \
+            || { echo "==> nora-demo /goroot bake FAILED" >&2; return 1; }
+        mkdir -p "$stage/demo"
+        # Bake go.mod beside the source so /goroot/demo is a real module -> gopls
+        # gives the demo full diagnostics/hover/go-to-def when it is opened.
+        cp "$REPO_ROOT/usr/nora-demo/go.mod" "$REPO_ROOT/usr/nora-demo/nora-demo.go" "$stage/demo/"
+        echo "==> nora-demo (/goroot) built: $stage/bin/nora-demo + source /goroot/demo/nora-demo.go"
+        ledger "nora-demo: Go debug demo (unstripped) + source -> /goroot/bin + /goroot/demo (nora :debug demo)"
     fi
 
     # GOROOT metadata the toolchain reads (version string, go.env, timezone db).

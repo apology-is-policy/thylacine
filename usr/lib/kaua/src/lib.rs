@@ -42,7 +42,10 @@ pub use input::Parser;
 pub use layout::{Constraint, Direction, Layout};
 pub use rect::Rect;
 pub use style::{Attr, Color, Style};
-pub use widget::{Block, List, Paragraph, Span, StatusLine, Widget};
+pub use widget::{
+    flatten_tree, Block, Edge, List, Mark, Paragraph, Row, Scrollbar, Span, StatusLine, Table, Tabs,
+    Tree, TreeItem, TreeRow, Widget,
+};
 
 #[cfg(feature = "backend")]
 pub use query::terminal_size;

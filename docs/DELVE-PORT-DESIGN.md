@@ -203,12 +203,13 @@ to `hwwatch` on every backend.
 
 **The user-visible consequence — a hard breakpoint ceiling.** arm64 guarantees
 ≥ 6 breakpoint registers + 4 watchpoint registers (the debug-fs enumerates the
-real counts into `g_hw_features.num_brps`/`num_wrps`; clamped to
-`DEBUG_HWBP_SLOTS=4` / `DEBUG_HWWP_SLOTS=4` at v1.0). So a Delve session on
-Thylacine can hold **at most 4 code breakpoints + 4 watchpoints simultaneously**
-(the kernel's v1.0 clamp; raising the clamp toward the architectural 6/4 is a
-one-line kernel change weighed at 8c-2). Setting the 5th breakpoint returns a
-clear "out of hardware breakpoint slots" error — NOT a silent failure. This is
+real counts into `g_hw_features.num_brps`/`num_wrps`). The breakpoint table
+`DEBUG_HWBP_SLOTS` is sized to the arm64 architectural max (16), so the usable
+count is `min(num_brps, 16)` = `num_brps` — a Delve session holds as many code
+breakpoints as the CPU implements (**6** on QEMU `-cpu max` + Apple M2), plus 4
+watchpoints (`DEBUG_HWWP_SLOTS`, still the v1.0 clamp). Setting a `num_brps+1`-th
+breakpoint returns a clear "out of hardware breakpoint slots" error — NOT a silent
+failure. This is
 the DEBUG-FS-DESIGN §3.1 "a debugger session multiplexes them" note made
 concrete, and it is the defining ergonomic difference from `dlv` on Linux.
 
@@ -369,7 +370,9 @@ arc close (not per-sub-chunk kernel audits — the kernel is byte-unchanged).
   + `wait`; `StepInstruction` → `step`; `findHardwareBreakpoint` (post-stop
   PC-match). Watchpoints → `hwwatch`/`hwrmwatch`. Milestone: `break main.main;
   continue; step; print; continue` drives a Go program to a breakpoint and
-  single-steps it. Weigh the `DEBUG_HWBP_SLOTS` 4→6 kernel clamp lift here.
+  single-steps it. (`DEBUG_HWBP_SLOTS` is now the arm64 max, so the usable ceiling
+  is `num_brps` = 6 — no artificial clamp; a step-over needing more than `num_brps`
+  concurrent breakpoints is the single-step-`next` residual, still open.)
 - **8c-3 — the goroutine / scheduler model + the unified stack.** Confirm
   Delve's goroutine walk works over the debug-fs (it reads runtime structures
   from `mem` + the `g` from `tpidr_el0` — should be free once 8c-1 lands
@@ -441,9 +444,10 @@ Reported-at-implementation calls (mine to make + surface, not block on):
 
 - **Delve vendoring mechanics** — the `usr/ambush/` fork layout + the patch set
   scope (a 8c-1 mechanics call).
-- **HW breakpoint slot ceiling (§6)** — ship at the v1.0 clamp (4 code / 4
-  data) with clear "out of slots" errors; weigh the 4→6 kernel-clamp lift + a
-  slot-mux policy at 8c-2 (an ergonomics call, reported at 8c-2).
+- **HW breakpoint slot ceiling (§6)** — the table is the arm64 max, so the usable
+  ceiling is `num_brps` (6 code) + 4 data with clear "out of slots" errors; the
+  residual (a step-over needing > `num_brps` concurrent) is the Ambush
+  single-step-`next`, still open.
 
 ---
 

@@ -325,11 +325,51 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
 - **8e-3 — the DAP client (Ambush).** Session control + the DAP state machine,
   driven headless from `:` commands (proves the debugger loop before the UI).
 - **8f-1 — the Kaua widget additions** (`Tree`, `Table`, `Tabs`, `Scrollbar`),
-  pure + unit-tested (§3).
+  pure + unit-tested (§3). **Landed.**
 - **8f-2 — the dashboard.** The layout + collapse + focus + the sidebar tiles
   (Variables/Stack/Goroutines) + the Console tabs, wired to the DAP client state.
+  **8f-2a landed** (the skeleton: the split + collapse + `Tab` focus + all three
+  tiles + the Console rendering live DAP data at a basic level — a `DebugView`
+  the DAP host pushes into the `Editor`, the renderer draws; `docs/reference/
+  113-nora.md`). **8f-2b-1 landed** (the tiles are navigable — a focused tile
+  takes a row cursor [`j`/`k`/`g`/`G`], `l`/`h` opens/shuts the Variables group +
+  steps the Console tabs, `Esc` returns to the editor, and an overflowing tile
+  scrolls to the selection with a scrollbar; pure, +10 host tests). **8f-2b-2
+  landed** (the tile actions: Call Stack `Enter` raises a `SelectFrame` — the host
+  jumps the editor to the frame + re-scopes Variables to it; Goroutines `Enter`
+  raises a `SelectGoroutine` — the host switches thread + re-roots the stack; the
+  index is clamped to the live count, resolved against the host's own list, a
+  no-op when not stopped; the editor half is host-tested [+6], the host half is a
+  DAP round-trip covered by `dap-nora`). **8f-2b-3 landed** (the nested-lazy
+  Variables tree: the DAP host owns a `VarNode` forest + fetches a node's children
+  the first time it is expanded, routing each `variables` reply by its reference
+  [parley now echoes the requested `variablesReference`]; the visible tree
+  flattens into `DebugView.locals` so the row cursor stays a flat index, and
+  `l`/`h` on an expandable variable raise `ExpandVar`/`CollapseVar`; the pure tree
+  ops are the host-tested `nora::vartree` module, +8 host tests; the parley
+  reference + kaua `expandable`-marker substrate landed first as 8f-2b-3a).
+  **8f-2c-1** wired the muscle-memory hot-keys (`F5` cont / `F10` over / `F11`
+  into / `Shift-F11` out / `Shift-F5` stop → the existing `DapRequest`s, Normal
+  mode while a session is live, any pane focus, +5 host tests); **8f-2c-2** added
+  the `[Space]d` debug submenu + the `v`/`c`/`z` panel toggles (sidebar/console
+  visibility + zoom the focused pane, `dash_split`-honored so the cursor scroll
+  stays consistent; `e` → `:print `; `Tab` skip-cycles hidden panes; +11 host
+  tests). `F9` toggle-breakpoint + the submenu's `d`/`b`/`l`/`w`/`g`/`i` entries
+  wait for their mechanisms (8f-3 / 8g).
 - **8f-3 — polish.** The cross-boundary stack divider + select-a-frame, inline
   values, the LSP editor affordances, Bonfire pass. The "this is lovely" bar.
+  **8f-3a landed** the divider *presentation* (`StackRow.kernel: bool`; the DAP
+  host lists Go frames then the kernel half; `render_call_stack` draws the ember
+  `── kernel ──` divider with the kernel rows dim; the divider is visual-only —
+  the selection stays a frame index that maps past it; +4 host tests). **8f-3b
+  made it live**: parley decodes the DAP `process` event into `Action::Process
+  {pid}` (Ambush emits the debuggee's `systemProcessId`), and on each stop the
+  host reads + parses `/proc/<pid>/kstack` (the 8b settled-thread inspect;
+  host-tested `parse_kstack`; +3 debug tests + the parley decode) and appends the
+  symbolized kernel frames — best-effort, so a failed read renders the Go frames
+  alone. The `dap-nora` E2E now asserts the divider lights up at a live stop. It
+  is the head-thread stack (goroutine-accurate mapping is the deferred Ambush
+  8c-3, skipped in that arc — the v1.x refinement).
 - **8g — the superpowers** (§5): resource inspector, scheduler view,
   post-mortem, snapshot-debugging.
 - **8h — the whole-arc audit + by-default ship + docs** (the debug-authority

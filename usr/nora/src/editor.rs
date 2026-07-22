@@ -14,6 +14,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use kaua::event::{KeyCode, KeyEvent, Mods};
 
+use crate::debug::DebugView;
 use crate::syntax::Lang;
 use crate::text::{Pos, TextBuffer};
 use crate::wrap;
@@ -29,6 +30,10 @@ pub enum Mode {
     /// The `[Space]` which-key menu, open over Normal: the next key invokes the
     /// matching entry (Helix-style), not an arrow-navigated selection.
     Menu,
+    /// The `[Space]d` debug submenu, open over Normal while a session is live:
+    /// the next key toggles a dashboard panel (a nested which-key level under
+    /// `Menu`; reachable only via `[Space]` -> `d` when debugging).
+    DebugMenu,
     /// The buffer picker (Space-b): an arrow-selectable list of open buffers;
     /// Enter switches. `sel` is the highlighted buffer index.
     BufferPicker { sel: usize },
@@ -78,6 +83,114 @@ pub enum LspRequest {
     Hover,
     /// Offer completions for the cursor position (Ctrl-N in Insert).
     Completion,
+}
+
+/// A debugger command the editor wants issued, raised by a `:` debug verb for
+/// the binary's DAP host to drive against Ambush (8e-3e).
+///
+/// A third async axis alongside [`Request`] and [`LspRequest`], for the same
+/// reasons (see [`LspRequest`]): the debugger is a persistent child that may be
+/// absent, slow, or exit, and its events arrive on a later poll-wake. The editor
+/// only relays these verbs and shows a status/scratch result -- it holds no
+/// session state and speaks no protocol. Unlike an `LspRequest` (implicit at the
+/// cursor) a debug command carries its own argument, since it names a program,
+/// a breakpoint, or an expression rather than a screen position.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DapRequest {
+    /// Start debugging a program (`:debug <program>`).
+    Launch(String),
+    /// Set a breakpoint -- a function name, or `file:line` (`:break <spec>`).
+    Break(String),
+    /// Resume execution (`:cont` / `:c`).
+    Continue,
+    /// Step over one source line (`:next` / `:n`).
+    Next,
+    /// Step into a call (`:step` / `:s`).
+    Step,
+    /// Step out of the current function (`:stepout` / `:so`).
+    StepOut,
+    /// Show the call stack (`:bt`).
+    Backtrace,
+    /// Evaluate an expression in the current frame (`:print <expr>` / `:p`).
+    Print(String),
+    /// Select a call-stack frame by its dashboard row index (Call Stack `Enter`):
+    /// jump the editor to the frame's source and re-scope the Variables tile to
+    /// it. The index resolves against the host's own frame list.
+    SelectFrame(usize),
+    /// Select a goroutine by its dashboard row index (Goroutines `Enter`): switch
+    /// the inspected thread and re-root the Call Stack on it. The index resolves
+    /// against the host's own goroutine list.
+    SelectGoroutine(usize),
+    /// Expand the Variables tile's variable row at this flattened index (`l` on
+    /// an expandable row): the host opens it and lazily fetches its children.
+    ExpandVar(usize),
+    /// Collapse the Variables tile's variable row at this flattened index (`h`).
+    CollapseVar(usize),
+    /// End the debug session (`:kill`).
+    Kill,
+}
+
+/// Which dashboard pane holds keyboard focus (`Tab` cycles them; the focused
+/// tile takes an ember border, NORA-IDE-UX section 2.3). `Editor` is the source
+/// buffer; the rest are the debug tiles. Only meaningful while a debug session
+/// is live -- the dashboard is collapsed otherwise.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DashPane {
+    Editor,
+    Variables,
+    CallStack,
+    Goroutines,
+    Console,
+}
+
+/// The debugger dashboard UI state (8f-2): the display/selection state the
+/// renderer reads. The DAP data itself lives in the pushed [`DebugView`]; this
+/// is only "which pane has focus" and "which Console tab is up", so it survives
+/// a data refresh (a stop must not steal focus off the tile you were reading).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DashState {
+    /// The focused pane (`Tab` cycles it).
+    pub focus: DashPane,
+    /// The active Console tab (Program = 0, Debug = 1).
+    pub console_tab: usize,
+    /// The highlighted row in each selectable sidebar tile (`j`/`k` move it).
+    /// `var_sel` indexes the flattened Variables rows -- the `locals` group node,
+    /// then its leaves when expanded; the others index their flat lists. Clamped
+    /// to the live row count at render, since a stop can shrink the data under a
+    /// stale selection. Highlighted only on the FOCUSED tile.
+    pub var_sel: usize,
+    pub stack_sel: usize,
+    pub gor_sel: usize,
+    /// Whether the Variables `locals` group is expanded (`l`/`h` toggle it). The
+    /// per-variable nested expand (a struct's fields, a slice's elements) is a
+    /// later leg -- this is the one group node's collapse.
+    pub locals_expanded: bool,
+    /// Panel visibility + zoom (`[Space]d v`/`c`/`z`). `show_sidebar` /
+    /// `show_console` hide the right tiles / the bottom Console so the editor
+    /// reclaims the space; `zoom` fills the FOCUSED pane over everything else.
+    /// Reset on session start/end, so a fresh session shows the full dashboard.
+    pub show_sidebar: bool,
+    pub show_console: bool,
+    pub zoom: bool,
+}
+
+impl DashState {
+    /// The state a freshly-opened dashboard starts in: focus on the source
+    /// buffer, the Program console tab up, every selection at the top, the
+    /// `locals` group open.
+    fn new() -> Self {
+        DashState {
+            focus: DashPane::Editor,
+            console_tab: 0,
+            var_sel: 0,
+            stack_sel: 0,
+            gor_sel: 0,
+            locals_expanded: true,
+            show_sidebar: true,
+            show_console: true,
+            zoom: false,
+        }
+    }
 }
 
 /// One completion candidate, as the editor renders and applies it. The
@@ -278,6 +391,19 @@ pub struct Editor {
     completion_prefix: String,
     /// A language-server query awaiting the binary (see [`LspRequest`]).
     lsp_request: Option<LspRequest>,
+    /// A debugger command awaiting the binary (see [`DapRequest`]).
+    dap_request: Option<DapRequest>,
+    /// The debugger dashboard snapshot (8f-2), pushed by the binary's DAP host.
+    /// `Some` == a session is live == the dashboard is shown; `None` == the
+    /// editor is full-width (NORA-IDE-UX section 2.2, auto-collapse).
+    debug: Option<DebugView>,
+    /// The line the debugger is stopped at: `(source basename, 0-based line)`.
+    /// Highlighted with a `▸` marker while the active buffer's basename matches
+    /// (the binary's DWARF path is the host build path, so the match is by
+    /// basename, not full path). Cleared when the target resumes / exits.
+    debug_line: Option<(String, usize)>,
+    /// The dashboard focus/tab state, persisting across data refreshes.
+    dash: DashState,
     /// Where to put the cursor once a cross-file jump's buffer has loaded.
     /// Applied by `open_buffer`, which is the single point where a newly-read
     /// file becomes the active buffer.
@@ -342,6 +468,10 @@ impl Editor {
             completion: Vec::new(),
             completion_prefix: String::new(),
             lsp_request: None,
+            dap_request: None,
+            debug: None,
+            debug_line: None,
+            dash: DashState::new(),
             pending_jump: None,
             anchor: None,
             register: String::new(),
@@ -366,7 +496,11 @@ impl Editor {
     pub fn mode_str(&self) -> &'static str {
         match self.mode {
             // The menu + pickers overlay Normal -- show the underlying chip.
-            Mode::Normal | Mode::Menu | Mode::BufferPicker { .. } | Mode::FilePicker { .. } => {
+            Mode::Normal
+            | Mode::Menu
+            | Mode::DebugMenu
+            | Mode::BufferPicker { .. }
+            | Mode::FilePicker { .. } => {
                 if self.readonly {
                     "VIEW"
                 } else {
@@ -389,14 +523,33 @@ impl Editor {
         }
     }
 
-    /// The `[Space]` which-key menu entries as `(key, label)` (for the view).
+    /// The open which-key menu's entries as `(key, label)` (for the view) --
+    /// the root `[Space]` menu, or the `[Space]d` debug submenu.
     pub fn menu_entries(&self) -> Vec<(char, &'static str)> {
-        MENU.iter().map(|m| (m.key, m.label)).collect()
+        self.menu_table().iter().map(|m| (m.key, m.label)).collect()
     }
 
-    /// Whether the `[Space]` which-key menu is open.
+    /// The which-key popup title for the open menu (root vs the debug submenu).
+    pub fn menu_title(&self) -> &'static str {
+        if matches!(self.mode, Mode::DebugMenu) {
+            " <space>d "
+        } else {
+            " <space> "
+        }
+    }
+
+    /// The menu table for the current mode (the root `MENU` or `DEBUG_MENU`).
+    fn menu_table(&self) -> &'static [MenuItem] {
+        if matches!(self.mode, Mode::DebugMenu) {
+            DEBUG_MENU
+        } else {
+            MENU
+        }
+    }
+
+    /// Whether a which-key menu (root or debug submenu) is open.
     pub fn menu_open(&self) -> bool {
-        matches!(self.mode, Mode::Menu)
+        matches!(self.mode, Mode::Menu | Mode::DebugMenu)
     }
 
     /// The buffer-picker's highlighted index, if it is open.
@@ -449,6 +602,295 @@ impl Editor {
     /// polls this like `take_request`).
     pub fn take_lsp_request(&mut self) -> Option<LspRequest> {
         self.lsp_request.take()
+    }
+
+    /// Take the pending debugger command, if any (the binary's DAP host polls
+    /// this like `take_lsp_request`). `DapRequest::Launch` starts a session; the
+    /// rest act on the live one.
+    pub fn take_dap_request(&mut self) -> Option<DapRequest> {
+        self.dap_request.take()
+    }
+
+    /// The debugger dashboard snapshot, or `None` when no session is live (the
+    /// dashboard is collapsed and the editor renders full-width).
+    pub fn debug_view(&self) -> Option<&DebugView> {
+        self.debug.as_ref()
+    }
+
+    /// The dashboard focus/tab state the renderer reads.
+    pub fn dash(&self) -> &DashState {
+        &self.dash
+    }
+
+    /// Is a debug session live (the dashboard shown)?
+    pub fn debugging(&self) -> bool {
+        self.debug.is_some()
+    }
+
+    /// Push (or clear) the dashboard snapshot -- the binary's DAP host is the
+    /// only caller. Opening a session (the first `Some` after a `None`) resets
+    /// the dashboard to focus the source buffer; ending it (a `None`) collapses
+    /// back. A data refresh MID-session keeps the current focus + tab, so a stop
+    /// never yanks focus off the tile you were reading.
+    pub fn set_debug_view(&mut self, view: Option<DebugView>) {
+        let was_live = self.debug.is_some();
+        if view.is_none() || !was_live {
+            self.dash = DashState::new();
+        }
+        self.debug = view;
+    }
+
+    /// Follow the debugger to its stopped line: record it (highlighted with a
+    /// `▸` while the active buffer's basename matches) and, when this IS that
+    /// buffer, place the cursor there so `scroll_to` brings it into view. Matched
+    /// by BASENAME because a compiled binary's DWARF source path is the host
+    /// build path, not the guest path the file was opened at.
+    pub fn follow_debug(&mut self, basename: &str, line0: usize) {
+        self.debug_line = Some((String::from(basename), line0));
+        if self.filename_basename() == Some(basename) {
+            let line = line0.min(self.text.line_count().saturating_sub(1));
+            self.text.set_cursor(line, 0);
+        }
+    }
+
+    /// Drop the stopped-line highlight (the target resumed / exited).
+    pub fn clear_debug_line(&mut self) {
+        self.debug_line = None;
+    }
+
+    /// The 0-based line the debugger is stopped at IN THE ACTIVE BUFFER (basename
+    /// match) -- the renderer marks it. `None` when nothing is stopped, or the
+    /// stop is in a different file than the one on screen.
+    pub fn debug_line_row(&self) -> Option<usize> {
+        let (base, line) = self.debug_line.as_ref()?;
+        (self.filename_basename() == Some(base.as_str())).then_some(*line)
+    }
+
+    /// The basename of the active buffer's filename
+    /// (`/goroot/demo/nora-demo.go` -> `nora-demo.go`); `None` when unnamed.
+    fn filename_basename(&self) -> Option<&str> {
+        self.filename.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p))
+    }
+
+    /// Move the cursor to `(line0, col0)` in whichever OPEN buffer has basename
+    /// `basename`: the active buffer when it matches (the common single-file
+    /// case), else another open buffer (switching to it). Returns `false` when no
+    /// open buffer matches -- WITHOUT opening a new one.
+    ///
+    /// A debugger stack frame's source path is the host DWARF build path, not the
+    /// guest path the file was opened at, so a frame jump matches by BASENAME
+    /// against the buffers already on screen (like `follow_debug`). This is why it
+    /// does not route through `jump_to`/`Request::Open`: opening the host path
+    /// would fail on the guest and leave a blank buffer.
+    pub fn jump_to_open_basename(&mut self, basename: &str, line0: usize, col0: usize) -> bool {
+        if self.filename_basename() == Some(basename) {
+            let line = line0.min(self.text.line_count().saturating_sub(1));
+            self.text.set_cursor(line, col0);
+            return true;
+        }
+        let active = self.active;
+        let idx = self.bufs.iter().enumerate().find_map(|(i, d)| {
+            (i != active
+                && d.filename.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p))
+                    == Some(basename))
+            .then_some(i)
+        });
+        let Some(i) = idx else { return false };
+        self.switch_to(i);
+        let line = line0.min(self.text.line_count().saturating_sub(1));
+        self.text.set_cursor(line, col0);
+        true
+    }
+
+    /// Cycle dashboard focus (`Tab`): Editor -> Variables -> CallStack ->
+    /// Goroutines -> Console -> Editor, SKIPPING any pane a `[Space]d` toggle
+    /// has hidden (so Tab never lands on an invisible tile). A no-op when not
+    /// debugging.
+    fn cycle_focus(&mut self) {
+        if !self.debugging() {
+            return;
+        }
+        const ORDER: [DashPane; 5] = [
+            DashPane::Editor,
+            DashPane::Variables,
+            DashPane::CallStack,
+            DashPane::Goroutines,
+            DashPane::Console,
+        ];
+        let cur = ORDER.iter().position(|&p| p == self.dash.focus).unwrap_or(0);
+        for step in 1..=ORDER.len() {
+            let cand = ORDER[(cur + step) % ORDER.len()];
+            if self.pane_visible(cand) {
+                self.dash.focus = cand;
+                return;
+            }
+        }
+    }
+
+    /// Whether a dashboard pane is currently shown (the focus cycle skips a
+    /// hidden one). The Editor is always visible; the sidebar tiles and the
+    /// Console follow their `[Space]d` visibility toggles.
+    fn pane_visible(&self, p: DashPane) -> bool {
+        match p {
+            DashPane::Editor => true,
+            DashPane::Variables | DashPane::CallStack | DashPane::Goroutines => {
+                self.dash.show_sidebar
+            }
+            DashPane::Console => self.dash.show_console,
+        }
+    }
+
+    /// Handle a key while a dashboard tile (not the editor) holds focus.
+    /// Navigation only: `j`/`k` move the selection, `g`/`G` jump to the
+    /// ends, `l`/`h` open/shut the Variables group or step the Console tabs,
+    /// `Tab` cycles focus, `Esc` returns to the editor. `[Space]` opens the
+    /// which-key menu (so `[Space]d z` can zoom the tile you are reading without
+    /// first Esc-ing to the editor). Every other key is inert, so a stray
+    /// keystroke over a tile can never edit the buffer.
+    fn dash_nav(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Tab => self.cycle_focus(),
+            KeyCode::Esc => self.dash.focus = DashPane::Editor,
+            KeyCode::Char(' ') => self.mode = Mode::Menu,
+            KeyCode::Char('j') | KeyCode::Down => self.dash_move(1),
+            KeyCode::Char('k') | KeyCode::Up => self.dash_move(-1),
+            KeyCode::Char('g') => self.dash_move_top(),
+            KeyCode::Char('G') => self.dash_move_bottom(),
+            KeyCode::Char('l') | KeyCode::Right => self.dash_expand(true),
+            KeyCode::Char('h') | KeyCode::Left => self.dash_expand(false),
+            KeyCode::Enter => self.dash_activate(),
+            _ => {}
+        }
+    }
+
+    /// `Enter` on a tile: act on the selected row. Call Stack raises a
+    /// `SelectFrame` (the host jumps the editor to the frame + re-scopes the
+    /// Variables tile); Goroutines raises a `SelectGoroutine` (the host re-roots
+    /// the stack on that thread). The request carries the row index clamped to
+    /// the live count, so a stale selection after a data shrink names a live row,
+    /// and the host resolves it against its own list. The other tiles carry no
+    /// per-row action yet (the per-variable expand arrives with the lazy tree),
+    /// so `Enter` is inert there -- never an edit.
+    fn dash_activate(&mut self) {
+        let rows = self.dash_rows();
+        if rows == 0 {
+            return;
+        }
+        let idx = |sel: usize| sel.min(rows - 1);
+        match self.dash.focus {
+            DashPane::CallStack => {
+                self.dap_request = Some(DapRequest::SelectFrame(idx(self.dash.stack_sel)));
+            }
+            DashPane::Goroutines => {
+                self.dap_request = Some(DapRequest::SelectGoroutine(idx(self.dash.gor_sel)));
+            }
+            DashPane::Variables | DashPane::Console | DashPane::Editor => {}
+        }
+    }
+
+    /// The number of selectable rows in the focused tile (for clamping the
+    /// selection). Variables counts the flattened tree rows -- the `locals`
+    /// group node, plus its leaves when the group is expanded; the others are
+    /// their flat lists. The Console tail-follows, so it has no row cursor.
+    fn dash_rows(&self) -> usize {
+        let dv = match &self.debug {
+            Some(d) => d,
+            None => return 0,
+        };
+        match self.dash.focus {
+            DashPane::Variables => {
+                if self.dash.locals_expanded {
+                    1 + dv.locals.len()
+                } else {
+                    1
+                }
+            }
+            DashPane::CallStack => dv.frames.len(),
+            DashPane::Goroutines => dv.goroutines.len(),
+            DashPane::Console | DashPane::Editor => 0,
+        }
+    }
+
+    /// A mutable handle on the focused tile's selection field (`None` for the
+    /// Console + the Editor, which carry no row cursor).
+    fn dash_sel_mut(&mut self) -> Option<&mut usize> {
+        match self.dash.focus {
+            DashPane::Variables => Some(&mut self.dash.var_sel),
+            DashPane::CallStack => Some(&mut self.dash.stack_sel),
+            DashPane::Goroutines => Some(&mut self.dash.gor_sel),
+            DashPane::Console | DashPane::Editor => None,
+        }
+    }
+
+    /// Move the focused tile's selection by `delta` rows, clamping a stale
+    /// selection to the live row count first (a stop can shrink the data).
+    fn dash_move(&mut self, delta: i32) {
+        let rows = self.dash_rows();
+        if rows == 0 {
+            return;
+        }
+        let max = (rows - 1) as i64;
+        if let Some(sel) = self.dash_sel_mut() {
+            let cur = (*sel as i64).min(max);
+            *sel = (cur + delta as i64).clamp(0, max) as usize;
+        }
+    }
+
+    fn dash_move_top(&mut self) {
+        if let Some(sel) = self.dash_sel_mut() {
+            *sel = 0;
+        }
+    }
+
+    fn dash_move_bottom(&mut self) {
+        let rows = self.dash_rows();
+        if rows == 0 {
+            return;
+        }
+        let last = rows - 1;
+        if let Some(sel) = self.dash_sel_mut() {
+            *sel = last;
+        }
+    }
+
+    /// `l`/`h` (expand / collapse): open or shut the Variables `locals` group or
+    /// an expandable variable row, or step the two Console tabs. Inert on the
+    /// flat Call Stack / Goroutines tiles (their rows have no children).
+    fn dash_expand(&mut self, open: bool) {
+        match self.dash.focus {
+            DashPane::Variables => {
+                if self.dash.var_sel == 0 {
+                    // Row 0 is the "locals" group: toggle the whole group.
+                    self.dash.locals_expanded = open;
+                    if !open {
+                        // Collapsed -> the group node is the only row left.
+                        self.dash.var_sel = 0;
+                    }
+                } else {
+                    // A variable row (`dv.locals[var_sel - 1]`): only an
+                    // expandable one acts -- the host opens/shuts it, fetching
+                    // children lazily on the first expand. `expandable` is copied
+                    // out so the read of `self.debug` ends before `dap_request`.
+                    let i = self.dash.var_sel - 1;
+                    let expandable = self
+                        .debug
+                        .as_ref()
+                        .and_then(|dv| dv.locals.get(i))
+                        .map(|r| r.expandable)
+                        .unwrap_or(false);
+                    if expandable {
+                        self.dap_request = Some(if open {
+                            DapRequest::ExpandVar(i)
+                        } else {
+                            DapRequest::CollapseVar(i)
+                        });
+                    }
+                }
+            }
+            // Two tabs (Program = 0, Debug = 1): l -> Debug, h -> Program.
+            DashPane::Console => self.dash.console_tab = usize::from(open),
+            _ => {}
+        }
     }
 
     /// The hover text currently displayed, if any.
@@ -772,6 +1214,39 @@ impl Editor {
         self.status = Some("help -- press q to close".to_string());
     }
 
+    /// Show `content` in a read-only scratch buffer named `name` (e.g.
+    /// `*backtrace*`), focusing it. A DAP host uses this for multi-line output
+    /// (a call stack) the one-line status cannot hold; the dashboard (8f)
+    /// supersedes it with real tiles.
+    ///
+    /// REFRESHES an existing scratch of the same name in place, so a fresh `:bt`
+    /// replaces the stale stack rather than stacking buffers. Otherwise ADDS a
+    /// buffer (never overwrites the user's work); `q` / `:bd` returns to it.
+    pub fn open_scratch(&mut self, name: &str, content: &str) {
+        let fresh = DocState::new(Some(name.to_string()), content, true);
+        if let Some(i) = self
+            .bufs
+            .iter()
+            .position(|d| d.filename.as_deref() == Some(name))
+        {
+            // Already open: replace its content and focus it. Snapshot the
+            // current buffer first UNLESS it is the scratch itself (a `:bt`
+            // while already viewing `*backtrace*` refreshes in place).
+            if self.active != i {
+                self.bufs[self.active] = self.save_active();
+                self.active = i;
+            }
+            self.bufs[i] = fresh.clone();
+            self.load_active(fresh);
+        } else {
+            self.bufs[self.active] = self.save_active();
+            self.bufs.push(fresh.clone());
+            self.active = self.bufs.len() - 1;
+            self.load_active(fresh);
+        }
+        self.mode = Mode::Normal;
+    }
+
     /// Close the active buffer (`:bd`). Refuses to discard unsaved changes
     /// unless `force`; the last buffer cannot be closed.
     pub fn close_buffer(&mut self, force: bool) {
@@ -939,7 +1414,7 @@ impl Editor {
             Mode::Insert => self.insert(key),
             Mode::Visual => self.visual(key),
             Mode::Command(_) => self.command(key),
-            Mode::Menu => self.menu(key),
+            Mode::Menu | Mode::DebugMenu => self.menu(key),
             Mode::BufferPicker { .. } => self.buffer_picker(key),
             Mode::FilePicker { .. } => self.file_picker(key),
             Mode::Completion { .. } => self.completion_key(key),
@@ -949,6 +1424,24 @@ impl Editor {
     // -- per-mode handlers ------------------------------------------------
 
     fn normal(&mut self, key: KeyEvent) {
+        // Debug hot-keys (F5/F10/F11/Shift-F11/Shift-F5): the muscle-memory
+        // step/continue/stop keys, active in Normal mode whenever a session is
+        // live -- regardless of which pane holds focus, and checked BEFORE the
+        // tile redirect so they fire while reading a sidebar tile too. They only
+        // relay a command to the DAP host; nothing here edits the buffer.
+        if self.debugging() {
+            if let Some(req) = debug_hotkey(key) {
+                self.dap_request = Some(req);
+                return;
+            }
+        }
+        // A focused dashboard tile owns the navigation keys (nothing here edits
+        // the buffer). Only reachable while debugging -- with no session the
+        // focus is always the editor, so ordinary editing is untouched.
+        if self.debugging() && self.dash.focus != DashPane::Editor {
+            self.dash_nav(key);
+            return;
+        }
         // Multi-cursor (after Esc from a multi-insert): `,` collapses to the
         // primary; any other key collapses first (no stuck multi-state), then
         // acts as a single cursor.
@@ -1010,6 +1503,9 @@ impl Editor {
             KeyCode::Char(':') => self.mode = Mode::Command(":".to_string()),
             KeyCode::Char('/') => self.mode = Mode::Command("/".to_string()),
             KeyCode::Char(' ') => self.mode = Mode::Menu,
+            // Cycle dashboard focus while debugging; inert (falls through to the
+            // no-op) when there is no session, so normal-mode Tab is unchanged.
+            KeyCode::Tab if self.debugging() => self.cycle_focus(),
             KeyCode::Char('n') if !self.last_search.is_empty() => {
                 self.search(&self.last_search.clone());
             }
@@ -1707,7 +2203,8 @@ impl Editor {
             KeyCode::Char(c) => {
                 // Which-key: a bound key runs its action; any other key dismisses
                 // the menu (Helix-style -- no arrow navigation, no selection).
-                let action = MENU.iter().find(|m| m.key == c).map(|m| m.action);
+                // The table is the root `MENU` or the `[Space]d` submenu.
+                let action = self.menu_table().iter().find(|m| m.key == c).map(|m| m.action);
                 self.mode = Mode::Normal;
                 if let Some(a) = action {
                     self.run_menu(a);
@@ -1835,6 +2332,44 @@ impl Editor {
                     self.quit = true;
                 }
             }
+            MenuAction::DebugSubmenu => {
+                // The panel toggles only make sense with a live dashboard.
+                if self.debugging() {
+                    self.mode = Mode::DebugMenu;
+                } else {
+                    self.status = Some("no debug session".to_string());
+                }
+            }
+            MenuAction::ToggleSidebar => {
+                self.dash.show_sidebar = !self.dash.show_sidebar;
+                // Hiding the sidebar while one of its tiles is focused would
+                // strand the focus on an invisible pane -- pull it to the editor.
+                if !self.dash.show_sidebar
+                    && matches!(
+                        self.dash.focus,
+                        DashPane::Variables | DashPane::CallStack | DashPane::Goroutines
+                    )
+                {
+                    self.dash.focus = DashPane::Editor;
+                }
+                self.status = Some(on_off("sidebar", self.dash.show_sidebar));
+            }
+            MenuAction::ToggleConsole => {
+                self.dash.show_console = !self.dash.show_console;
+                if !self.dash.show_console && self.dash.focus == DashPane::Console {
+                    self.dash.focus = DashPane::Editor;
+                }
+                self.status = Some(on_off("console", self.dash.show_console));
+            }
+            MenuAction::ToggleZoom => {
+                self.dash.zoom = !self.dash.zoom;
+                self.status = Some(on_off("zoom", self.dash.zoom));
+            }
+            MenuAction::Evaluate => {
+                // The which-key shortcut to `:print <expr>`: open the command
+                // line prefilled so the user types only the expression.
+                self.mode = Mode::Command(":print ".to_string());
+            }
         }
     }
 
@@ -1955,6 +2490,25 @@ impl Editor {
             "bd" => self.close_buffer(false),
             "bd!" => self.close_buffer(true),
             "help" => self.open_help(),
+            // -- debugger (8e-3e): the verbs relay to the binary's DAP host --
+            "debug" if arg.is_empty() => {
+                self.status = Some(":debug needs a program (e.g. :debug /goroot/bin/prog)".to_string())
+            }
+            "debug" => self.dap_request = Some(DapRequest::Launch(arg.to_string())),
+            "break" | "br" if arg.is_empty() => {
+                self.status = Some(":break needs a function or file:line".to_string())
+            }
+            "break" | "br" => self.dap_request = Some(DapRequest::Break(arg.to_string())),
+            "cont" | "c" => self.dap_request = Some(DapRequest::Continue),
+            "next" | "n" => self.dap_request = Some(DapRequest::Next),
+            "step" | "s" => self.dap_request = Some(DapRequest::Step),
+            "stepout" | "so" => self.dap_request = Some(DapRequest::StepOut),
+            "bt" | "stack" => self.dap_request = Some(DapRequest::Backtrace),
+            "print" | "p" if arg.is_empty() => {
+                self.status = Some(":print needs an expression".to_string())
+            }
+            "print" | "p" => self.dap_request = Some(DapRequest::Print(arg.to_string())),
+            "kill" | "stop" => self.dap_request = Some(DapRequest::Kill),
             _ => self.status = Some(string_fmt_unknown(cmd)),
         }
     }
@@ -2022,6 +2576,13 @@ enum MenuAction {
     ToggleWrap,
     Save,
     Quit,
+    /// Open the `[Space]d` debug submenu (a no-op report without a session).
+    DebugSubmenu,
+    /// The debug submenu's panel toggles + evaluate shortcut.
+    ToggleSidebar,
+    ToggleConsole,
+    ToggleZoom,
+    Evaluate,
 }
 
 /// The fixed `[Space]` menu (Helix bindings where they map; nora-specific where
@@ -2058,6 +2619,11 @@ const MENU: &[MenuItem] = &[
         action: MenuAction::ToggleWrap,
     },
     MenuItem {
+        key: 'd',
+        label: "debug submenu",
+        action: MenuAction::DebugSubmenu,
+    },
+    MenuItem {
         key: 's',
         label: "save file",
         action: MenuAction::Save,
@@ -2068,6 +2634,56 @@ const MENU: &[MenuItem] = &[
         action: MenuAction::Quit,
     },
 ];
+
+/// The `[Space]d` debug submenu (reachable only while a session is live). The
+/// panel toggles + the evaluate shortcut; breakpoints / watches / goroutine
+/// switch / the resource inspector arrive with their mechanisms (8f-3 / 8g).
+const DEBUG_MENU: &[MenuItem] = &[
+    MenuItem {
+        key: 'v',
+        label: "toggle the sidebar",
+        action: MenuAction::ToggleSidebar,
+    },
+    MenuItem {
+        key: 'c',
+        label: "toggle the console",
+        action: MenuAction::ToggleConsole,
+    },
+    MenuItem {
+        key: 'z',
+        label: "zoom the focused pane",
+        action: MenuAction::ToggleZoom,
+    },
+    MenuItem {
+        key: 'e',
+        label: "evaluate an expression",
+        action: MenuAction::Evaluate,
+    },
+];
+
+/// A `"<name>: on"` / `"<name>: off"` status line for a toggle.
+fn on_off(name: &str, on: bool) -> String {
+    let mut s = String::from(name);
+    s.push_str(if on { ": on" } else { ": off" });
+    s
+}
+
+/// Map a function key to a debugger command -- the muscle-memory hot-keys
+/// active in Normal mode while a session is live (NORA-IDE-UX section 4).
+/// `Shift` distinguishes the paired keys (F5 continue / Shift-F5 stop; F11
+/// step-into / Shift-F11 step-out). Returns `None` for every non-hot-key, so
+/// ordinary Normal-mode keys pass straight through untouched.
+fn debug_hotkey(key: KeyEvent) -> Option<DapRequest> {
+    let shift = key.mods.contains(Mods::SHIFT);
+    match key.code {
+        KeyCode::F(5) if shift => Some(DapRequest::Kill),
+        KeyCode::F(5) => Some(DapRequest::Continue),
+        KeyCode::F(10) => Some(DapRequest::Next),
+        KeyCode::F(11) if shift => Some(DapRequest::StepOut),
+        KeyCode::F(11) => Some(DapRequest::Step),
+        _ => None,
+    }
+}
 
 /// A fuzzy subsequence match (case-insensitive): every char of `query` appears in
 /// `candidate` in order. An empty query matches everything.
@@ -2103,6 +2719,15 @@ const COMMANDS: &[(&str, &str)] = &[
     ("bd", "close the current buffer"),
     ("bd!", "close the buffer, discarding changes"),
     ("help", "open the manual in a new buffer"),
+    ("debug", "start debugging a program (:debug <prog>)"),
+    ("break", "set a breakpoint (:break <func>)"),
+    ("cont", "continue the debuggee (:c)"),
+    ("next", "step over one line (:n)"),
+    ("step", "step into a call (:s)"),
+    ("stepout", "step out of the function (:so)"),
+    ("bt", "show the call stack"),
+    ("print", "evaluate an expression (:p <expr>)"),
+    ("kill", "end the debug session"),
 ];
 
 /// The scratch-buffer name of the built-in manual (`:help`); also the sentinel
@@ -2190,7 +2815,8 @@ Space then c) to return to your work.
     f  open file picker        b  open buffer picker
     n  next buffer             p  previous buffer
     c  close buffer            w  toggle soft-wrap
-    s  save file               q  quit
+    d  debug submenu           s  save file
+    q  quit
 
   LANGUAGE SERVER  (Go buffers, when the toolchain is installed)
     Errors and warnings appear as you edit: the line number is tinted,
@@ -2204,6 +2830,38 @@ Space then c) to return to your work.
                     Enter or Tab   accept       Esc   cancel
                     keep typing    dismiss it and carry on
     Nothing here needs the server: without one, the editor is unchanged.
+
+  DEBUGGER  (Go programs, when Ambush is installed)
+    :debug <prog>   start debugging a compiled binary; it stops at entry
+    :break <func>   set a breakpoint by function name (main.total)
+    :cont   :c      continue until the next breakpoint or exit
+    :next   :n      step over one source line
+    :step   :s      step into a call     :stepout  :so   step back out
+    :bt             show the call stack (in a scratch buffer)
+    :print <expr>   evaluate an expression at the stopped frame  (:p)
+    :kill           end the session
+    Hot keys while stopped (NORMAL mode):  F5 continue   F10 step over
+      F11 step into    Shift-F11 step out    Shift-F5 stop
+
+  THE DEBUG DASHBOARD  (appears while stopped: a sidebar + a console)
+    Tab           move focus:  editor -> Variables -> Call Stack ->
+                    Goroutines -> Console -> back to the editor
+    On a focused sidebar tile:
+      j k  g G    select a row / jump to the top / bottom
+      l  h        expand / collapse -- a struct, slice or map in
+                    Variables; the Program/Debug tabs in the Console
+      Enter       act:  Call Stack jumps the editor to the frame;
+                    Goroutines switches the inspected goroutine
+      Esc         return focus to the editor
+    The Call Stack is a UNIFIED user->kernel stack: your Go frames,
+      an ember "-- kernel --" divider, then the kernel frames the
+      program is stopped in -- the cross-boundary view.
+    Space d  ->  panel toggles:  v sidebar  c console  z zoom  e eval
+    The status bar reports where it stopped and each result.
+
+  A DEMO is baked in to explore all of this:
+    nora /goroot/demo/nora-demo.go    read it (with Go diagnostics)
+    :debug /goroot/bin/nora-demo      then  :break main.total   :cont
 
 That's everything. Happy editing!
 "#;
@@ -2424,6 +3082,81 @@ mod tests {
         type_str(&mut ed, ":e other");
         ed.handle_key(code(KeyCode::Enter));
         assert_eq!(ed.take_request(), Some(Request::Open("other".to_string())));
+    }
+
+    /// Run a `:` command line and return whatever debug request it raised.
+    fn run_dap(ed: &mut Editor, line: &str) -> Option<DapRequest> {
+        type_str(ed, line);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.mode, Mode::Normal);
+        ed.take_dap_request()
+    }
+
+    #[test]
+    fn command_debug_raises_launch() {
+        let mut ed = Editor::new(None, "", false);
+        assert_eq!(
+            run_dap(&mut ed, ":debug /goroot/bin/prog"),
+            Some(DapRequest::Launch("/goroot/bin/prog".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_break_raises_break_by_alias() {
+        let mut ed = Editor::new(None, "", false);
+        assert_eq!(
+            run_dap(&mut ed, ":break main.parkLoop"),
+            Some(DapRequest::Break("main.parkLoop".to_string()))
+        );
+        assert_eq!(
+            run_dap(&mut ed, ":br main.other"),
+            Some(DapRequest::Break("main.other".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_print_raises_print() {
+        let mut ed = Editor::new(None, "", false);
+        assert_eq!(
+            run_dap(&mut ed, ":print main.Sentinel"),
+            Some(DapRequest::Print("main.Sentinel".to_string()))
+        );
+        assert_eq!(
+            run_dap(&mut ed, ":p x + 1"),
+            Some(DapRequest::Print("x + 1".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_debug_control_verbs_and_aliases() {
+        let mut ed = Editor::new(None, "", false);
+        for (line, want) in [
+            (":cont", DapRequest::Continue),
+            (":c", DapRequest::Continue),
+            (":next", DapRequest::Next),
+            (":n", DapRequest::Next),
+            (":step", DapRequest::Step),
+            (":s", DapRequest::Step),
+            (":stepout", DapRequest::StepOut),
+            (":so", DapRequest::StepOut),
+            (":bt", DapRequest::Backtrace),
+            (":stack", DapRequest::Backtrace),
+            (":kill", DapRequest::Kill),
+            (":stop", DapRequest::Kill),
+        ] {
+            assert_eq!(run_dap(&mut ed, line), Some(want), "verb {line}");
+        }
+    }
+
+    #[test]
+    fn command_debug_empty_args_are_guarded() {
+        let mut ed = Editor::new(None, "", false);
+        // Each argument-taking verb reports rather than raising a request.
+        for line in [":debug", ":break", ":print"] {
+            assert_eq!(run_dap(&mut ed, line), None, "{line} must not raise");
+            assert!(ed.status.is_some(), "{line} must report");
+            ed.status = None;
+        }
     }
 
     #[test]
@@ -3045,6 +3778,11 @@ mod tests {
         assert_eq!(ed.mode_str(), "VIEW");
         assert!(ed.text.content().contains("Quick Reference"));
         assert!(ed.text.content().contains("MULTI-CURSOR"));
+        // The manual covers the debugger dashboard + the baked demo (drift guard:
+        // a binding change must keep the help accurate).
+        assert!(ed.text.content().contains("DEBUG DASHBOARD"));
+        assert!(ed.text.content().contains("-- kernel --"));
+        assert!(ed.text.content().contains("nora-demo"));
     }
 
     #[test]
@@ -3345,6 +4083,35 @@ mod tests {
     }
 
     #[test]
+    fn jump_to_open_basename_moves_cursor_in_the_active_buffer() {
+        // A debugger frame's host DWARF path shares the basename of the open guest
+        // buffer -> move the cursor in place, no new buffer (the single-file case).
+        let mut ed = Editor::new(Some("/goroot/demo/nora-demo.go".to_string()), "0\n1\n2\n3\n", false);
+        assert!(ed.jump_to_open_basename("nora-demo.go", 2, 0));
+        assert_eq!(ed.text.cursor(), (2, 0));
+        assert_eq!(ed.buffer_count(), 1);
+        assert_eq!(ed.take_request(), None); // no Open request raised
+    }
+
+    #[test]
+    fn jump_to_open_basename_switches_to_a_matching_open_buffer() {
+        let mut ed = Editor::new(Some("/x/a.go".to_string()), "a0\na1\n", false);
+        ed.open_buffer(Some("/y/b.go".to_string()), "b0\nb1\nb2\n"); // active becomes b.go
+        assert!(ed.jump_to_open_basename("a.go", 1, 0));
+        assert_eq!(ed.filename.as_deref(), Some("/x/a.go")); // switched back to a.go
+        assert_eq!(ed.text.cursor(), (1, 0));
+        assert_eq!(ed.buffer_count(), 2); // no new buffer
+    }
+
+    #[test]
+    fn jump_to_open_basename_absent_source_is_false_and_opens_nothing() {
+        let mut ed = Editor::new(Some("/goroot/demo/nora-demo.go".to_string()), "0\n1\n", false);
+        assert!(!ed.jump_to_open_basename("proc.go", 5, 0)); // a stdlib frame, not open
+        assert_eq!(ed.buffer_count(), 1); // no blank buffer created
+        assert_eq!(ed.take_request(), None);
+    }
+
+    #[test]
     fn a_completion_mode_with_no_candidates_fails_closed_into_insert() {
         // The mode and the list must agree; if they ever drift, a keypress
         // must not divide by zero.
@@ -3365,5 +4132,504 @@ mod tests {
         // Overlays describe a position in the file we just left.
         assert!(ed.hover().is_none());
         assert!(ed.completion_state().is_none());
+    }
+
+    // -- the debugger dashboard (8f-2) --------------------------------------
+
+    fn dbg_view() -> DebugView {
+        DebugView {
+            status: "stopped: breakpoint at main.parkLoop".to_string(),
+            frames: alloc::vec![crate::debug::StackRow::go(
+                "main.parkLoop".to_string(),
+                "child.go:23".to_string(),
+            )],
+            locals: alloc::vec![crate::debug::VarRow {
+                name: "i".to_string(),
+                value: "3".to_string(),
+                depth: 0,
+                expandable: false,
+                expanded: false,
+            }],
+            goroutines: alloc::vec![crate::debug::GoroutineRow {
+                id: 1,
+                state: "running".to_string(),
+            }],
+            console: alloc::vec!["stopped".to_string()],
+        }
+    }
+
+    #[test]
+    fn the_dashboard_is_collapsed_until_a_view_is_pushed() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "package main", false);
+        assert!(!ed.debugging());
+        assert!(ed.debug_view().is_none());
+        ed.set_debug_view(Some(dbg_view()));
+        assert!(ed.debugging());
+        // Opening focuses the source buffer (NORA-IDE-UX section 2.2).
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+        ed.set_debug_view(None);
+        assert!(!ed.debugging());
+    }
+
+    #[test]
+    fn a_mid_session_refresh_keeps_the_current_focus() {
+        // A stop pushes a fresh view; it must not yank focus off the tile the
+        // user was reading.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(code(KeyCode::Tab)); // focus Variables
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+        ed.set_debug_view(Some(dbg_view())); // a later stop refreshes the data
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+    }
+
+    #[test]
+    fn follow_debug_marks_and_follows_the_stopped_line() {
+        // The DWARF source path is the host build path, so the match is by
+        // basename against the open (guest-path) buffer.
+        let mut ed = Editor::new(
+            Some("/goroot/demo/nora-demo.go".to_string()),
+            "a\nb\nc\nd\ne",
+            false,
+        );
+        ed.follow_debug("nora-demo.go", 3);
+        assert_eq!(ed.debug_line_row(), Some(3));
+        assert_eq!(ed.text.cursor().0, 3); // followed: cursor at the stopped line
+        // A stop in a DIFFERENT file does not mark this buffer (nor move here).
+        ed.follow_debug("other.go", 1);
+        assert_eq!(ed.debug_line_row(), None);
+        assert_eq!(ed.text.cursor().0, 3);
+        // Back to this file: marked + followed again; then cleared on resume.
+        ed.follow_debug("nora-demo.go", 2);
+        assert_eq!(ed.debug_line_row(), Some(2));
+        ed.clear_debug_line();
+        assert_eq!(ed.debug_line_row(), None);
+    }
+
+    #[test]
+    fn tab_cycles_dashboard_focus_only_while_debugging() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        // Not debugging: Tab is inert in Normal (no session to focus).
+        ed.handle_key(code(KeyCode::Tab));
+        assert!(!ed.debugging());
+        assert_eq!(ed.mode, Mode::Normal);
+
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::CallStack);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Goroutines);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Console);
+        ed.handle_key(code(KeyCode::Tab)); // wraps back to the editor
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    // -- the navigable dashboard (8f-2b-1) ---------------------------------
+
+    fn dbg_view_n(frames: usize, locals: usize, gors: usize) -> DebugView {
+        DebugView {
+            status: "stopped".to_string(),
+            frames: (0..frames)
+                .map(|i| crate::debug::StackRow::go(
+                    alloc::format!("f{}", i),
+                    alloc::format!("m.go:{}", i),
+                ))
+                .collect(),
+            locals: (0..locals)
+                .map(|i| crate::debug::VarRow {
+                    name: alloc::format!("v{}", i),
+                    value: i.to_string(),
+                    depth: 0,
+                    expandable: false,
+                    expanded: false,
+                })
+                .collect(),
+            goroutines: (0..gors)
+                .map(|i| crate::debug::GoroutineRow {
+                    id: i as i64,
+                    state: "running".to_string(),
+                })
+                .collect(),
+            console: alloc::vec!["x".to_string()],
+        }
+    }
+
+    /// Focus a specific tile by cycling Tab from the editor.
+    fn focus_tile(ed: &mut Editor, target: DashPane) {
+        for _ in 0..6 {
+            if ed.dash().focus == target {
+                return;
+            }
+            ed.handle_key(code(KeyCode::Tab));
+        }
+        panic!("could not reach {:?}", target);
+    }
+
+    #[test]
+    fn dashboard_j_k_move_the_focused_tiles_selection() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        assert_eq!(ed.dash().stack_sel, 0);
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().stack_sel, 1);
+        ed.handle_key(ch('j'));
+        ed.handle_key(ch('j')); // clamps at the last row (2)
+        assert_eq!(ed.dash().stack_sel, 2);
+        ed.handle_key(ch('k'));
+        assert_eq!(ed.dash().stack_sel, 1);
+        ed.handle_key(ch('g')); // top
+        assert_eq!(ed.dash().stack_sel, 0);
+        ed.handle_key(ch('G')); // bottom
+        assert_eq!(ed.dash().stack_sel, 2);
+    }
+
+    #[test]
+    fn dashboard_selection_clamps_when_the_data_shrinks() {
+        // A stop shrinks the stack under a stale selection; the next move clamps
+        // to the live row count first, so the selection can never point off the
+        // end.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(ch('G')); // stack_sel = 2
+        assert_eq!(ed.dash().stack_sel, 2);
+        ed.set_debug_view(Some(dbg_view_n(1, 0, 0))); // refresh: one frame now
+        ed.handle_key(ch('j')); // clamp 2 -> 0 (max), then +1 -> stays 0
+        assert_eq!(ed.dash().stack_sel, 0);
+    }
+
+    #[test]
+    fn dashboard_h_l_toggle_the_locals_group_from_row_0() {
+        // Per-node expand (8f-2b-3): `h`/`l` act on the row under the cursor. The
+        // group toggle lives on row 0; a plain (non-expandable) leaf is inert.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(0, 2, 0))); // two plain leaves
+        focus_tile(&mut ed, DashPane::Variables);
+        assert!(ed.dash().locals_expanded);
+        // On a plain leaf, `h`/`l` do nothing (no children, not the group).
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().var_sel, 1);
+        ed.handle_key(ch('h'));
+        assert!(ed.dash().locals_expanded); // still open
+        assert_eq!(ed.take_dap_request(), None); // a plain leaf raises no request
+        // Back on the group row, `h` collapses it.
+        ed.handle_key(ch('k'));
+        assert_eq!(ed.dash().var_sel, 0);
+        ed.handle_key(ch('h'));
+        assert!(!ed.dash().locals_expanded);
+        assert_eq!(ed.dash().var_sel, 0);
+        ed.handle_key(ch('j')); // only the group node -> no move
+        assert_eq!(ed.dash().var_sel, 0);
+        ed.handle_key(ch('l')); // expand again
+        assert!(ed.dash().locals_expanded);
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().var_sel, 1);
+    }
+
+    #[test]
+    fn dashboard_l_h_on_an_expandable_variable_raise_expand_and_collapse() {
+        // A variable row whose value is structured (expandable): `l`/`h` raise
+        // ExpandVar/CollapseVar with the flattened variable index (var_sel - 1),
+        // which the host resolves against its own tree + fetches lazily.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        let mut dv = dbg_view_n(1, 0, 0);
+        dv.locals = alloc::vec![crate::debug::VarRow {
+            name: "p".to_string(),
+            value: "*main.T".to_string(),
+            depth: 0,
+            expandable: true,
+            expanded: false,
+        }];
+        ed.set_debug_view(Some(dv));
+        focus_tile(&mut ed, DashPane::Variables);
+        // Row 0 = the "locals" group; row 1 = the expandable variable.
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().var_sel, 1);
+        ed.handle_key(ch('l'));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::ExpandVar(0)));
+        ed.handle_key(ch('h'));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::CollapseVar(0)));
+    }
+
+    #[test]
+    fn dashboard_l_h_step_the_console_tabs() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(1, 1, 1)));
+        focus_tile(&mut ed, DashPane::Console);
+        assert_eq!(ed.dash().console_tab, 0); // Program
+        ed.handle_key(ch('l'));
+        assert_eq!(ed.dash().console_tab, 1); // Debug
+        ed.handle_key(ch('h'));
+        assert_eq!(ed.dash().console_tab, 0);
+    }
+
+    #[test]
+    fn dashboard_esc_returns_focus_to_the_editor() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(2, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    #[test]
+    fn dashboard_keys_are_inert_over_a_focused_editor() {
+        // A session is live but the editor holds focus: `j` is an ordinary text
+        // motion (moves the cursor down), never a tile move. This is the whole
+        // no-regression contract -- editing is unchanged while debugging.
+        let mut ed = Editor::new(Some("m.go".to_string()), "one\ntwo", false);
+        ed.set_debug_view(Some(dbg_view_n(2, 0, 0)));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.text.cursor().0, 1); // the buffer cursor moved down
+        assert_eq!(ed.dash().stack_sel, 0); // the tile selection did not move
+    }
+
+    #[test]
+    fn dashboard_enter_on_the_call_stack_raises_select_frame() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(ch('j')); // stack_sel = 1
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::SelectFrame(1)));
+    }
+
+    #[test]
+    fn dashboard_enter_on_goroutines_raises_select_goroutine() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(1, 0, 3)));
+        focus_tile(&mut ed, DashPane::Goroutines);
+        ed.handle_key(ch('G')); // gor_sel = 2 (last)
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::SelectGoroutine(2)));
+    }
+
+    #[test]
+    fn dashboard_enter_clamps_a_stale_selection_before_selecting() {
+        // The stack shrinks under a bottom-pinned selection; Enter must name a
+        // live row (the clamp), never the stale off-the-end index.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(3, 0, 0)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(ch('G')); // stack_sel = 2
+        ed.set_debug_view(Some(dbg_view_n(1, 0, 0))); // refresh: one frame now
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::SelectFrame(0)));
+    }
+
+    #[test]
+    fn dashboard_enter_is_inert_on_the_variables_and_console_tiles() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(1, 2, 1)));
+        focus_tile(&mut ed, DashPane::Variables);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+        focus_tile(&mut ed, DashPane::Console);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+    }
+
+    #[test]
+    fn dashboard_enter_is_inert_over_an_empty_tile() {
+        // No frames to select: Enter raises nothing (never an out-of-range index).
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view_n(0, 0, 1)));
+        focus_tile(&mut ed, DashPane::CallStack);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+    }
+
+    #[test]
+    fn dashboard_enter_over_a_focused_editor_raises_no_request() {
+        // A live session but the editor holds focus: Enter is an ordinary text
+        // key, never a tile action -- the no-regression contract for editing
+        // while debugging.
+        let mut ed = Editor::new(Some("m.go".to_string()), "one\ntwo", false);
+        ed.set_debug_view(Some(dbg_view_n(2, 0, 0)));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+        ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+    }
+
+    // -- the debugger hot-keys (8f-2c-1) -----------------------------------
+
+    /// A bare function key (no modifiers).
+    fn fkey(n: u8) -> KeyEvent {
+        code(KeyCode::F(n))
+    }
+
+    #[test]
+    fn f_keys_drive_the_debug_loop_while_a_session_is_live() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(fkey(5));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Continue));
+        ed.handle_key(fkey(10));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Next));
+        ed.handle_key(fkey(11));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Step));
+    }
+
+    #[test]
+    fn shift_f_keys_step_out_and_stop() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(KeyEvent::with(KeyCode::F(11), kaua::event::Mods::SHIFT));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::StepOut));
+        ed.handle_key(KeyEvent::with(KeyCode::F(5), kaua::event::Mods::SHIFT));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Kill));
+    }
+
+    #[test]
+    fn the_hot_keys_fire_while_a_sidebar_tile_is_focused() {
+        // Muscle memory: F5 continues whether the editor or a tile has focus (the
+        // hot-key check precedes the tile-nav redirect). A hot-key is not a focus
+        // change, so the tile the user was reading stays focused.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        focus_tile(&mut ed, DashPane::Variables);
+        ed.handle_key(fkey(5));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Continue));
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+    }
+
+    #[test]
+    fn f_keys_are_inert_without_a_session() {
+        // No session -> the F-keys are ordinary unbound Normal-mode keys: no
+        // debug command, no edit, no mode change.
+        let mut ed = Editor::new(Some("m.go".to_string()), "abc", false);
+        assert!(!ed.debugging());
+        ed.handle_key(fkey(5));
+        ed.handle_key(fkey(10));
+        assert_eq!(ed.take_dap_request(), None);
+        assert_eq!(ed.text.content(), "abc"); // buffer untouched
+        assert_eq!(ed.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn hot_keys_do_not_fire_in_insert_mode() {
+        // Deliberately Normal-mode-only: while typing code, F5 must not step the
+        // debuggee. (Esc first -- the daily-driver debug view is Normal anyway.)
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(ch('i'));
+        assert_eq!(ed.mode, Mode::Insert);
+        ed.handle_key(fkey(5));
+        assert_eq!(ed.take_dap_request(), None);
+    }
+
+    // -- the [Space]d debug submenu + panel toggles (8f-2c-2) --------------
+
+    /// Open the `[Space]d` debug submenu (assumes a live session).
+    fn open_debug_menu(ed: &mut Editor) {
+        ed.handle_key(ch(' ')); // [Space] -> the root which-key menu
+        ed.handle_key(ch('d')); // d -> the debug submenu
+    }
+
+    #[test]
+    fn space_d_opens_the_debug_submenu_only_while_debugging() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        // No session: [Space]d reports rather than opening the submenu.
+        open_debug_menu(&mut ed);
+        assert_eq!(ed.mode, Mode::Normal);
+        assert!(!ed.menu_open());
+        // With a session it enters the submenu.
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        assert_eq!(ed.mode, Mode::DebugMenu);
+        assert!(ed.menu_open());
+    }
+
+    #[test]
+    fn the_debug_submenu_lists_the_panel_toggles() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        let keys: Vec<char> = ed.menu_entries().iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&'v') && keys.contains(&'c') && keys.contains(&'z'));
+        assert!(keys.contains(&'e'));
+        // The root menu's entries are NOT shown in the submenu.
+        assert!(!keys.contains(&'f')); // 'f' = the root file picker
+    }
+
+    #[test]
+    fn the_debug_submenu_toggles_the_panels() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        assert!(ed.dash().show_sidebar && ed.dash().show_console && !ed.dash().zoom);
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('v'));
+        assert!(!ed.dash().show_sidebar);
+        assert_eq!(ed.mode, Mode::Normal); // a which-key key runs + closes
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('c'));
+        assert!(!ed.dash().show_console);
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('z'));
+        assert!(ed.dash().zoom);
+    }
+
+    #[test]
+    fn hiding_a_focused_panel_returns_focus_to_the_editor() {
+        // Hiding the sidebar while one of its tiles is focused must not strand
+        // the focus on an invisible pane.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        focus_tile(&mut ed, DashPane::CallStack);
+        open_debug_menu(&mut ed); // [Space] reaches the menu from a focused tile
+        ed.handle_key(ch('v'));
+        assert!(!ed.dash().show_sidebar);
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    #[test]
+    fn tab_skips_a_hidden_panel() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('c')); // hide the console
+        assert!(!ed.dash().show_console);
+        // Tab from Goroutines wraps straight to the editor, skipping the console.
+        focus_tile(&mut ed, DashPane::Goroutines);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    #[test]
+    fn the_debug_submenu_e_opens_the_print_command_line() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('e'));
+        assert_eq!(ed.command_buf(), Some(":print "));
+    }
+
+    #[test]
+    fn the_debug_submenu_is_esc_dismissable() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        assert_eq!(ed.mode, Mode::DebugMenu);
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.mode, Mode::Normal);
+        assert!(ed.dash().show_sidebar); // no toggle happened
+    }
+
+    #[test]
+    fn a_new_session_resets_the_panel_toggles() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('v')); // hide the sidebar this session
+        assert!(!ed.dash().show_sidebar);
+        ed.set_debug_view(None); // session ends
+        ed.set_debug_view(Some(dbg_view())); // a fresh session
+        assert!(ed.dash().show_sidebar); // the full dashboard is back
+        assert!(!ed.dash().zoom);
     }
 }

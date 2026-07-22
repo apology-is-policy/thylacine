@@ -399,8 +399,10 @@ executes that VA. No software `BRK` (I-12 W^X + I-36 REVENANT Image cache) — t
 break is a debug register.
 
 **The per-Proc table** (`struct debug_hw`, `arch/arm64/hwdebug.h`): a lazily
-`kzalloc`'d array of up to `DEBUG_HWBP_SLOTS` (4, clamped to the CPU's `num_brps`)
-breakpoint VAs, hung off `Proc.debug_hw`. Allocated on the first `hwbreak`, freed
+`kzalloc`'d array of up to `DEBUG_HWBP_SLOTS` (16, the arm64 architectural max --
+`DFR0.BRPs` is a 4-bit field, so the usable count is `min(num_brps, 16)` =
+`num_brps`, i.e. every HW breakpoint the CPU implements: 6 on QEMU `-cpu max` +
+Apple M2) breakpoint VAs, hung off `Proc.debug_hw`. Allocated on the first `hwbreak`, freed
 ONLY at `proc_free` (never at detach) — so the ctx-switch reader never derefs
 freed memory (every thread is reaped + on_cpu-spun before `proc_free`, so no CPU
 is in a switch-in for the Proc). The table is mutated only when the target is
@@ -1005,13 +1007,16 @@ it.
   exclusive.** The clean fix — the `wait` file reporting the stop cause — is a
   kernel change deferred to a later stage; it does not affect the common
   breakpoint/continue flow.
-- **The HW code-breakpoint ceiling is 4 (F5).** Every breakpoint routes to the HW
-  path, sharing `DEBUG_HWBP_SLOTS`=4 code + 4 data debug registers. A 5th arm
-  fails cleanly (ctl `hwbreak` returns -1 → a "could not set breakpoint" error, no
-  corruption). This will bite line-stepping (`next`/`step`, v1.x), which sets
-  multiple temporary HW breakpoints per operation — that path should use the
-  kernel single-step verb (`MDSCR.SS`, already wired) plus range checks rather
-  than temp HW breakpoints, sidestepping the ceiling.
+- **The HW code-breakpoint ceiling is `num_brps` (F5).** Every breakpoint routes
+  to the HW path; `DEBUG_HWBP_SLOTS` is sized to the arm64 architectural max (16),
+  so the usable count is `min(num_brps, 16)` = `num_brps` (6 on QEMU `-cpu max` +
+  Apple M2) code + 4 data debug registers. A `num_brps+1`-th arm fails cleanly
+  (ctl `hwbreak` returns -1 → a "could not set breakpoint" error, no corruption).
+  Delve's `next`/`step` sets one temporary HW breakpoint per successor PC + the
+  return address, so a dense step-over can still exceed `num_brps` concurrent with
+  the user's breakpoints — the durable fix for that residual is an Ambush-side
+  single-step-based `next` (the `MDSCR.SS` step verb is already wired), which needs
+  at most one slot; that work is still open.
 - **`ambush attach <pid>` + disconnect-with-kill double-kills (F7, cosmetic).**
   For an *attached* (non-launched) target, `Detach(kill=true)` issues the I-39
   debug `kill` (which reliably kills the debuggee) and then a redundant I-26

@@ -156,7 +156,8 @@ exact residue UTOPIA-VISUAL.md §8 flags; corrected to Bonfire with T2.)*
 | Insert | printable → insert; Enter → split; Backspace/Delete; Tab → 4 spaces (soft tab); Esc → Normal |
 | Visual | `h j k l 0 $ gg ge G w b` extend the selection (the same goto prefix as Normal, so `gg`/`ge` mean one thing everywhere); `y` yank; `d`/`x` cut; Esc → cancel |
 | Command | type the line; Enter runs it; Backspace (erasing `:`/`/` exits); Esc → Normal |
-| Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, next/prev/close buffer, save, quit. |
+| Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, next/prev/close buffer, **debug submenu** (`d`, while a session is live), save, quit. |
+| Debug (session live) | **Hot keys** (Normal, any pane focus): `F5` continue, `F10` step over, `F11` step into, `Shift-F11` step out, `Shift-F5` stop. **Dashboard**: `Tab` cycles the focused pane (skipping hidden ones); on a focused sidebar tile `j`/`k` select, `g`/`G` ends, `l`/`h` expand/collapse, `Enter` acts (Call Stack → jump to the frame; Goroutines → switch); `Esc` back to the editor. **`[Space]d` submenu**: `v` sidebar, `c` console, `z` zoom the focused pane, `e` evaluate (`:print `). |
 
 Ex commands: `:w` / `:w <name>` (save / save-as), `:q` (guarded on unsaved),
 `:q!`, `:wq` / `:wq <name>`, `:e <name>` (opens a new buffer), `:e! <name>`,
@@ -293,6 +294,155 @@ an edit the user did not initiate.
 **`gr` (references) is not built.** The client has no `textDocument/references`
 request, and N locations need a picker; both are additive when wanted.
 
+## Debugger (Ambush, Stage 8e-3e)
+
+nora drives the Ambush (Delve) debugger from `:` commands — headless, before the
+8f dashboard (NORA-IDE-UX §9: prove the debugger *loop* first). The design + the
+`dap_host` state machine live in `141-parley.md`; the editor's part is small and
+deliberately protocol-blind, exactly like the LSP seam:
+
+| `:` command | Does |
+|---|---|
+| `:debug <prog>` | start debugging a compiled Go binary (stops at entry) |
+| `:break <func>` | set a breakpoint by function name (`main.parkLoop`) |
+| `:cont` / `:c` | continue until the next breakpoint or exit |
+| `:next` / `:n`, `:step` / `:s`, `:stepout` / `:so` | step over / into / out |
+| `:bt` | show the call stack in a `*backtrace*` scratch buffer |
+| `:print <expr>` / `:p` | evaluate an expression at the stopped frame |
+| `:kill` | end the session |
+
+A verb sets `Editor::dap_request` (a `DapRequest`, the `LspRequest` sibling — a
+**third async axis** alongside `Request`/`LspRequest`, for the same reason: the
+debugger is a persistent child that may be absent, slow, or exit); the binary
+drains it with `take_dap_request` and hands it to `dap_host`. The editor holds no
+session state and speaks no protocol — it relays verbs and shows a status line
+(state, stops, evaluate results) or the `*backtrace*` scratch (`open_scratch`, the
+generalized `:help` pattern — a read-only buffer refreshed in place). Where the
+Go toolchain is absent, `:debug` reports "debugger not installed" and editing is
+unaffected. Ambush is baked at `/goroot/bin/ambush` (disk, on the login PATH,
+beside the toolchain), reachable by a POST-pivot nora.
+
+## Debugger dashboard (8f-2, NORA-IDE-UX §2)
+
+While a session is live the editor splits into the ratified IDE dashboard:
+`[editor | right sidebar]` over a full-width bottom Console. The sidebar stacks
+three Kaua tiles — **Variables** (a `Tree`), **Call Stack** (a `Table`),
+**Goroutines** (a `Table`) — and the Console is a `Tabs` strip (`Program`/`Debug`)
+over the scrollback. It **auto-collapses** to a full-width editor when no session
+is live (`Editor::debug_view()` is `None`), and collapses again on a terminal
+below the floor (`< 50×14`, where the debug data still reaches the status line +
+`:bt`). `Tab` cycles keyboard focus (editor → tiles → Console → editor); the
+focused tile takes an ember border.
+
+The architecture keeps the renderer pure. `dap_host` already pushes into the
+`Editor` (`set_status`, `open_scratch`); the dashboard adds one more push — a
+protocol-free `DebugView` snapshot (`nora::debug`: `StackRow`/`VarRow`/
+`GoroutineRow` + a console log), rebuilt and set via `Editor::set_debug_view`
+once per poll-wake and after each `:` command. `view::render` reads it and, when
+present + roomy, splits the screen and draws the tiles (the pre-8f full-width
+render is the `None`/too-small path, byte-for-byte); `view::editor_area` gives
+the binary the editor sub-rect so `scroll_to` matches the width `render` draws.
+On a stop the host chains `stackTrace → scopes → variables` (the locals) and a
+`threads` fetch (the goroutines), so the tiles fill over a few wakes; a resume
+clears them. Opening a session expands the dashboard immediately (empty tiles +
+a "launching" status); ending it (`:kill`, exit, a dead stream) collapses back.
+
+**8f-2a landed the skeleton** — the split + collapse + `Tab` focus + all three
+tiles + the Console rendering live data at a basic level. **8f-2b-1 made the
+tiles navigable** — a focused sidebar tile takes a row cursor (`j`/`k` move it,
+`g`/`G` jump to the ends), the Variables `locals` group opens/shuts with `l`/`h`
+(the per-variable nested expand of a struct/slice is a later leg), `l`/`h` steps
+the Console `Program`/`Debug` tabs, and `Esc` returns focus to the editor; a tile
+whose content overflows draws an ember scrollbar and scrolls to keep the
+selection visible. The row cursor shows on the **focused tile only**; the
+selection clamps to the live row count each render, so a stop that shrinks the
+data can never leave it pointing off the end. The routing lives entirely in
+`Editor::normal` (a focused-tile branch off the top, reachable only while
+debugging — with no session the focus is always the editor, so ordinary editing
+is byte-unchanged). **8f-2b-2 wired the tile actions** — `Enter` on the **Call
+Stack** raises a `SelectFrame` (the host jumps the editor to that frame's source
+and re-scopes the Variables tile to it via `scopes → variables`), `Enter` on
+**Goroutines** raises a `SelectGoroutine` (the host switches the inspected thread
+and re-roots the stack via `stackTrace`); `Enter` carries the row index clamped to
+the live count so a stale selection names a live row, and the host resolves it
+against its own cached list (a non-stopped target or an out-of-range index is a
+reported no-op, never a wrong-frame jump). The host jumps by **basename**
+(`Editor::jump_to_open_basename`) because a compiled binary's DWARF source path is
+the host build path, not the guest path the file was opened at — so a same-file
+frame moves the cursor in place, a frame in another open buffer switches to it, and
+a frame whose source is not open is a reported no-op (never a blank buffer for a
+host path absent on the guest). The editor half — `Enter` raising the
+right request with the right index — is pure state and host-tested; the host half
+is a binary-side DAP round-trip (`dap_host::select_frame` / `select_goroutine`)
+covered by the `dap-nora` E2E. **8f-2b-3 made the Variables tile a nested-lazy
+tree** — the host owns a `VarNode` forest (the frame's locals as roots; each
+structured value, DAP `variablesReference != 0`, an expandable node) and fetches
+a node's children the first time it is expanded, routing each `variables`
+response by its reference (parley now echoes the requested `variablesReference`,
+so several fetches can be in flight — DAP permits out-of-order replies). The host
+flattens the *visible* tree into `DebugView.locals` (`name = value` + depth +
+expand state) each publish, so the editor's row cursor + the renderer stay a
+simple flat index; `l`/`h` on an expandable variable row raise
+`ExpandVar`/`CollapseVar(i)` (the flattened variable index, resolved against the
+host's own tree via the `flatten`↔`visible_path` inverse). The pure tree ops live
+in the host-tested `nora::vartree` module; kaua's `TreeItem`/`TreeRow` gained an
+`expandable` flag so a lazily-collapsed node shows `▸` before its children are
+cached. The group toggle (`l`/`h` on row 0) is unchanged; the parley reference +
+kaua `expandable` substrate landed first as 8f-2b-3a. **8f-2c-1 wired the
+muscle-memory hot-keys** — while a session is live, Normal-mode `F5` continues,
+`F10` steps over, `F11` steps into, `Shift-F11` steps out, `Shift-F5` stops; each
+maps to the same `DapRequest` the `:` verbs already raise (no new mechanism),
+fires whether the editor or a sidebar tile holds focus (the check precedes the
+tile-nav redirect), and is inert without a session and in Insert mode (Esc first —
+the daily-driver debug view is Normal anyway). **8f-2c-2 added the `[Space]d`
+debug submenu + the `v`/`c`/`z` panel toggles** — `[Space]` (from the editor OR a
+focused tile) then `d` opens a nested which-key of panel toggles: `v` hides the
+sidebar, `c` hides the Console (the editor reclaims the freed space via the
+shared `dash_split`, so the cursor scroll stays consistent), `z` zooms the
+focused pane over the whole split, and `e` opens `:print ` for a quick evaluate.
+`Tab` skip-cycles a hidden pane, hiding a focused pane pulls focus back to the
+editor, and a fresh session resets the layout. **8f-3a landed the cross-boundary
+`── kernel ──` stack divider** (§5, the flagship): `StackRow` gained a `kernel:
+bool`, the DAP host lists Go frames first then the kernel half, and
+`render_call_stack` draws an **ember `── kernel ──` divider** at the boundary
+with the kernel rows **dim**. The divider is a visual-only row — the selection is
+a *frame* index (`Enter` → `SelectFrame`), so `j`/`k` navigation never lands on
+it; the renderer maps a frame index to its visible row past the divider (and the
+scroll offset with it). **8f-3b sourced the kernel frames and made the divider
+live**: parley now decodes the DAP `process` event into `Action::Process{pid}`
+(Ambush emits the debuggee's `systemProcessId`), and on each stop the DAP host
+`refresh_kernel_frames()` reads `/proc/<pid>/kstack` (the 8b settled-thread
+inspect; nora, Ambush and the debuggee share the login principal, so the I-39
+owner axis authorizes it, and `/proc` is in nora's namespace because Ambush —
+spawned by nora — opens the same file), parses the owner-axis symbolic
+`#<i>  <name>+0x<off>` lines via the host-tested `nora::debug::parse_kstack`, and
+appends the kernel `StackRow`s after the Go frames on publish. Best-effort: no
+pid / an unreachable `/proc` / an unparseable read leaves the kernel half empty
+and the Go frames render alone — never a hang. Selecting a kernel frame (past the
+Go frames) reports `kernel frame: <name> (no source)` — the "why blocked" inspect
+(`/proc/<pid>/wait` in Variables) is a later polish. That `kstack` is the
+target's **head thread** (the M at the stop); the *goroutine-accurate* kernel
+stack is the deferred Ambush 8c-3 stitch (a v1.x refinement). `F9`
+toggle-breakpoint and the submenu's
+`d`/`b`/`l`/`w`/`g`/`i` entries wait for their mechanisms (gutter breakpoint
+state / watches / 8g). A UX seam: `h` on a plain leaf is inert (collapse the
+group from row 0) — move-to-parent is a later polish. Kernel byte-unchanged;
+consumes I-39; no new §28 invariant.
+
+**Trying it — the baked demo.** `usr/nora-demo/` is a small, readable Go program
+(`Item` struct + slice + map, three loop-bearing functions, and a
+worker-pool/channel fan-in) built by `build_go_goroot` **unstripped** (DWARF
+retained) and populated onto the pool at **`/goroot/bin/nora-demo`** with its
+source at **`/goroot/demo/nora-demo.go`** (both world-readable, on the login
+PATH). It exercises every dashboard feature: `nora /goroot/demo/nora-demo.go` to
+read/edit it with gopls, then `:debug /goroot/bin/nora-demo`, `:break main.total`,
+`:cont`, and `Tab` into the tiles — the `Item` tree in Variables, the worker
+goroutines in Goroutines, and the ember `── kernel ──` divider in the Call Stack.
+The `:help` manual documents the whole dashboard (the tiles, `Tab` focus, the
+per-tile keys, the cross-boundary stack) and points at this demo. The build is
+independent of the Ambush fork (needs only the Go toolchain), so the source stays
+openable even where the debugger is absent.
+
 ## Console discipline (I-27)
 
 `nora` acquires the **screen** on fd 1 (Kaua `Terminal`) and **reads input** on
@@ -312,11 +462,63 @@ client over them.
   never empty; `(row, col)` char-addressed. `Snapshot { lines, row, col }` is a
   full clone (bounded by `UNDO_CAP`).
 - `Editor` — the `TextBuffer` + the `Mode` + the file/scroll/status/quit state +
-  the private `anchor` (visual), `register` (yank), `last_search`, `request`.
+  the private `anchor` (visual), `register` (yank), `last_search`, `request` +
+  the debugger dashboard state: `debug: Option<DebugView>` (`Some` == a session
+  is live == the dashboard is shown) and `dash: DashState` (the `DashPane` focus,
+  the Console tab, the per-tile row selections `var_sel`/`stack_sel`/`gor_sel`,
+  and `locals_expanded` — kept across data refreshes, reset only on session
+  start/end; the selections clamp to the live row count at render).
+- `DebugView` (`nora::debug`) — the protocol-free dashboard snapshot the DAP host
+  pushes: `status`, `frames: Vec<StackRow>`, `locals: Vec<VarRow>`,
+  `goroutines: Vec<GoroutineRow>`, `console: Vec<String>`. Plain data (like
+  `LineDiag`), so a second backend or a test populates the same struct.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**41 host unit tests** over the pure engine:
+**238 host unit tests** over the pure engine (the per-module list below is a
+partial breakdown of the original core; later chunks added `diag`, completion,
+the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
+raise the right `DapRequest`, and that the argument-taking verbs report rather
+than raise when given no argument — the 8f-2a **dashboard axis** — 3 `editor`
+tests (collapse-until-pushed / a mid-session refresh keeps focus / `Tab` cycles
+focus only while debugging) + 4 `view` tests (the tiles+editor coexist when
+roomy, the collapse on a small terminal, no dashboard without a session, the
+focused tile takes an ember border) — the 8f-2b-1 **navigation axis** — 6
+`editor` tests (`j`/`k`/`g`/`G` move + clamp the selection, the shrink-clamp,
+`l`/`h` collapse+expand the locals group, `l`/`h` step the Console tabs, `Esc`
+returns focus, and the no-regression `j`-is-a-text-motion-over-a-focused-editor)
++ 4 `view` tests (the focused tile's row is highlighted, an unfocused tile shows
+no cursor, an overflowing tile scrolls to the selection + shows a scrollbar,
+collapsing the locals group hides the leaves) — and the 8f-2b-2 **actions axis** —
+6 `editor` tests (`Enter` on the Call Stack raises `SelectFrame`, on Goroutines
+raises `SelectGoroutine`, the clamp-a-stale-selection-before-selecting, inert on
+Variables + Console, inert over an empty tile, and the no-regression
+`Enter`-raises-no-request-over-a-focused-editor) — and the 8f-2b-3 **nested-lazy
+tree axis** — 6 `vartree` tests (flatten emits depth + markers, a collapsed node
+hides its children, `visible_count` == the flatten length, `visible_path` inverts
+`flatten` at every index, `find_by_ref` reaches a nested node, toggling via a path
+changes visibility) + 1 `editor` (`l`/`h` on an expandable row raise
+`ExpandVar`/`CollapseVar`) + 1 `view` (an expanded struct renders its ▾ marker +
+nested child), the group-toggle test reworked to the per-node semantics) — and
+the 8f-2c-1 **hot-keys axis** — 5 `editor` tests (F5/F10/F11 drive
+continue/next/step, Shift-F11/Shift-F5 step out/stop, the hot-keys fire while a
+sidebar tile is focused, inert without a session, inert in Insert mode) — and the
+8f-2c-2 **panel-toggles axis** — 8 `editor` tests (`[Space]d` opens the submenu
+only while debugging, the submenu lists v/c/z/e, each toggles its panel, hiding a
+focused pane returns focus to the editor, Tab skips a hidden pane, `e` opens
+`:print `, Esc dismisses, a new session resets the layout) + 3 `view` tests (a
+hidden sidebar/console reclaims the editor's width/height, zoom fills the focused
+pane) — and the 8f-3a **cross-boundary divider axis** — 4 `view` tests (the Call
+Stack draws an ember `── kernel ──` divider, kernel frames dim + sit below it,
+an all-Go stack has no divider, selecting a kernel frame highlights the frame not
+the visual-only divider) — and the 8f-3b **kstack-parse axis** — 3 `debug` tests
+(`parse_kstack` reads the symbolic `#<i>  <name>+0x<off>` frames as kernel rows,
+passes `<running>`/`<unknown>` through + tolerates blanks, and skips a malformed
+or hash-only line) — and the **frame-jump axis** — 3 `editor` tests
+(`jump_to_open_basename` moves the cursor in the active buffer on a basename match,
+switches to another open buffer that matches, and returns false without opening a
+blank buffer for an unopened source) [+ parley: the `process` event decodes to
+`Action::Process{pid}`, folded into `events_map_to_actions`]):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -364,8 +566,19 @@ open / edit / `:w` / `cat`).
 
 | Sub-chunk | State |
 |---|---|
-| T-3 engine + modal core + renderer + binary (this) | landed |
-| T-4 `ut` raw-mode dance + `ls-7` LS-CI | not started |
+| T-3 engine + modal core + renderer + binary | landed |
+| T-4 `ut` raw-mode dance + `ls-7` LS-CI | landed |
+| 8e-2 LSP client (gopls diagnostics/hover/def/completion, inline) | landed |
+| 8e-3e debugger (`:debug` → Ambush, headless) + `dap-nora` LS-CI | landed |
+| 8f-2a dashboard skeleton (split + collapse + `Tab` focus + tiles + Console) | landed |
+| 8f-2b-1 navigable tiles (`j`/`k`/`g`/`G` select, `l`/`h` expand, scrollbars) | landed |
+| 8f-2b-2 tile actions (Call Stack `Enter` → frame jump + re-scope, Goroutines `Enter` → re-root) | landed |
+| 8f-2b-3 nested-lazy Variables tree (`nora::vartree` + parley reference + kaua `expandable`; `l`/`h` expand/collapse, lazy child fetch) | landed |
+| 8f-2c-1 hot-keys (`F5` cont / `F10` over / `F11` into / `Shift-F11` out / `Shift-F5` stop → the DAP requests) | landed |
+| 8f-2c-2 `[Space]d` submenu + `v`/`c`/`z` panel toggles (visibility + zoom + `e` evaluate) | landed |
+| 8f-3a cross-boundary `── kernel ──` stack divider (`StackRow.kernel` + ember divider + dim kernel rows; presentation) | landed |
+| 8f-3b kernel-frame data source (parley decodes the DAP `process` pid; host reads/parses `/proc/<pid>/kstack` + appends; the divider is live) | landed |
+| 8f-3 remainder (inline values, LSP editor affordances, Bonfire pass) | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams
@@ -397,6 +610,29 @@ open / edit / `:w` / `cat`).
   saved-state diff is a v1.x refinement).
 - **Word motion** is WORD-granularity (whitespace-delimited); punctuation-class
   boundaries (vim `w` vs `W`) are a v1.x refinement.
-- **Syntax highlighting** — a native lexer highlighter (and the tree-sitter
-  feasibility, gated on the native-links-C toolchain, #67) is the documented
+- **Syntax highlighting** — the native lexer highlighter (`nora::syntax`) covers
+  **UT** (`*.ut`) and **Go** (`*.go`: `//`+`/* */` comments, the three string
+  forms, numbers, the 25 keywords); other languages are unhighlighted. Per-line
+  (a block comment / raw string spanning lines drops its colour at the newline).
+  The tree-sitter feasibility (gated on the native-links-C toolchain, #67) is the
   v1.x direction (`docs/KAUA.md` §12).
+- **The debugger follows + marks the stopped line** — on each stop nora resolves
+  the top frame's source by BASENAME (the compiled binary's DWARF path is the
+  host build path, so it can't full-path-match the open guest buffer), moves the
+  cursor there, and marks the line with a `▸` gutter marker + a warm ember tint.
+  A stop in a file that isn't open is not marked (the frame Call-Stack `Enter`
+  still tries to open by full path). An **exception** stop shows its detail
+  ("stopped: exception -- runtime error: …") so a failed step shows why.
+- **The kernel half of the stack is the target's head thread** — 8f-3b made the
+  `── kernel ──` divider live: on each stop the host reads `/proc/<pid>/kstack`
+  and appends the symbolized kernel frames. That file is the debuggee's **head
+  thread** (the M at the stop), so at a user breakpoint the kernel frames are the
+  debug-trap path; a goroutine genuinely blocked in a syscall shows its block
+  path. The *goroutine-accurate* kernel stack (mapping the stopped goroutine's
+  own M) is the deferred Ambush **8c-3** stitch (skipped in the Ambush arc — its
+  log jumps `8c-2 → 8c-4a` — so Ambush appends nothing to its own `stackTrace`;
+  the nora-side head-thread read is the v1.0 answer) and is the v1.x refinement.
+- **Selecting a kernel frame reports it, does not jump** — a kernel frame has no
+  Go source, so `Enter` on it sets `kernel frame: <name> (no source)`. The
+  "why blocked" inspect (read `/proc/<pid>/wait` into the Variables tile, §5) is
+  a later polish.

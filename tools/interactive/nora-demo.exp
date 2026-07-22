@@ -1,0 +1,42 @@
+#!/usr/bin/expect -f
+# tools/interactive/nora-demo.exp -- the baked Go debugger DEMO is reachable +
+# opens in nora.
+#
+# The user-facing companion to dap-nora (which drives the debugger loop via
+# ambush-child): this proves the demo the `:help` manual points at actually
+# landed on the pool and opens in the editor, so the documented workflow --
+# `nora /goroot/demo/nora-demo.go` + `:debug /goroot/bin/nora-demo` -- is real.
+#
+# build_go_goroot bakes usr/nora-demo/ UNSTRIPPED to /goroot/bin/nora-demo with
+# its source at /goroot/demo/nora-demo.go; populate_stratum_pool `stratum-fs
+# put`s the goroot tree RECURSIVELY onto the pool, world-readable on the login
+# PATH. nora runs POST-pivot, so it reaches both.
+#
+# TCG (the LS-CI default): nora's launch CPR handshake is reliable on TCG and
+# breaks under HVF (bug_nora_hvf_cpr_handshake), so this reads the rendered
+# source on TCG. No debugger here -- dap-nora proves the debug loop.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The demo source is on the pool, reachable + readable by the logged-in user.
+# `ls /goroot/demo` does not echo "nora-demo.go" in the typed line, so the match
+# is the directory LISTING (the real file), never the command echo.
+lc_run_expect "ls /goroot/demo" "nora-demo.go"
+
+# Open the source in nora -- the exact workflow the `:help` manual documents. A
+# phrase unique to the demo's header renders on the alt-screen (kaua's cell-diff
+# emits it as a contiguous run, the ls-7 assertion principle); it is in the first
+# viewport and appears in no command line, so a match is the RENDERED source.
+lc_step "nora /goroot/demo/nora-demo.go"
+send "nora /goroot/demo/nora-demo.go\r"
+sleep 3
+lc_expect "a small tour" "the demo source opens + renders in nora"
+lc_pass "nora-demo: the baked demo is reachable + opens in nora (nora /goroot/demo/nora-demo.go)"
+
+# Leave nora, then the VM.
+send ":q!\r"
+sleep 1
+lc_quit

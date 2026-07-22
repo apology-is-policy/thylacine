@@ -784,6 +784,58 @@ a LIVE corpse. Three method entries earned here:
 Full record: `memory/bug_359_9p_client_deadlock.md` + the #360 sections in
 `docs/reference/15-scheduler.md` and ARCH 8.11.
 
+## 6.17 The HVF idle-~256% storm -- a leaked busy-yielding debug fixture (2026-07-22)
+
+User-reported: "HVF sits at 300% CPU at idle; used to be ~5%." A performance
+regression is a real defect (never "host load"), and this one hunted cleanly by
+the method:
+
+1. **Ground-truth the magnitude AND the mechanism first.** measure-idle
+   (headless HVF, settle, sample qemu %cpu) reproduced ~256%. But %cpu is a
+   host-side proxy -- the *guest* signal is `/ctl/sched`'s `parks=` delta over a
+   quiet window (an interactive login that read it twice): **~17,000 parks/sec**
+   at idle, `runnable: 1`. So NOT a never-parking loop -- a ~17 kHz park/wake
+   ping-pong (the CPUs park, then are woken almost immediately). This
+   distinguished "a thread that never sleeps" from "a thread woken constantly,"
+   which pointed at a spinning *userspace* process, not a kernel idle bug. Note:
+   the `wake-ipi` counter is really "woke before the 4 ms backstop one-shot" --
+   it includes device IRQs, so its 99% dominance did NOT mean IPIs specifically
+   (an easy false lead).
+
+2. **The compositor-toggle differential exonerated the prime suspect in one
+   experiment.** The gfx/aurora arc was the obvious guess. `THYLACINE_NO_GPU=1`
+   (joey SKIPs the compositor -- `/srv/tapestry absent`) still idled at 248% ~=
+   255%. The storm was non-compositor; the differential saved a wrong deep-dive.
+
+3. **git-bisect on the %cpu, pruned by "what runs at the login prompt."** The
+   regression window was ~50 first-parent commits, but the storm was present at
+   the bare login prompt where the editor (nora/kaua/parley -- most of the
+   window) does not run, so that whole range was excludable a priori. Per-commit
+   build+measure walked 5% -> 5% (PTY exonerated) -> 27% -> 29% -> **256% at
+   c585fc7f** ("bake Ambush"). The jump was exactly where `/ambush` got baked,
+   which flipped the `ambush-probe` boot test's launch stages from SKIP to RUN.
+
+4. **The class: a leaked busy-yielding debug fixture.** `ambush-probe` stages C
+   (`ambush exec`) and D (`dap-selftest`) LAUNCH `/ambush-child`, a Go debuggee
+   whose `parkLoop` was `for { runtime.Gosched() }` (a tight yield). The debugger
+   exits on stdin EOF, and per I-39 NoStrand a debugger-*launched* target is
+   RESUMED (not killed) on debugger death -> orphaned to init, busy-yielding
+   forever. ambush-probe held no handle to those debugger-spawned children (the
+   "killgrp" its comment promised was never implemented). ~2-3 leaked yielders
+   pegged ~2.5 cores. Fix: park the fixture (`runtime.Gosched()` + a short
+   `time.Sleep`) so a leaked instance idles at ~0% -- the busy-yield was obsolete
+   once 8c-2 made a *parked* target debuggable. Lessons: (a) a debug/test fixture
+   that can outlive its harness must be INERT when leaked, never a busy-loop;
+   (b) "debugger death resumes the target" (NoStrand) is correct for an ATTACHED
+   target but leaks a LAUNCHED one -- the launched-vs-attached lifetime asymmetry
+   is a standing trap; (c) an **idle gate** now guards the class:
+   `tools/ci-idle-gate.sh` (`make idle-gate`) fails if idle qemu %cpu exceeds a
+   no-core-pegged threshold. It is host-load-robust by construction -- host
+   contention only *deflates* qemu's %cpu share, so it can never false-FAIL an
+   idle guest, while a real spin (>3x the threshold) fails decisively.
+
+Full record: `memory/bug_hvf_idle_300_regression.md`.
+
 ## 7. Appendix — reproduction recipe
 
 ```sh

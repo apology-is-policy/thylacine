@@ -501,6 +501,8 @@ tools/build.sh clean        ← remove build artifacts
 
 A top-level `Makefile` provides `make kernel`, `make all`, `make test`, `make production`, etc. as conventional aliases for the above.
 
+**Gates.** `make smp-gate` (`tools/ci-smp-gate.sh`) multi-boots the SMP soundness matrix (single boots lie). `make idle-gate` (`tools/ci-idle-gate.sh`) boots hvf-headless, settles, and FAILS if the guest spins a core at idle (mean qemu %cpu over a no-core-pegged threshold) — the standing guard against a boot leaving a busy-loop running (e.g. a leaked debug fixture); host-load-robust because host contention can only *deflate* qemu's %cpu, never inflate an idle guest's. `make test-interactive` (`tools/test-interactive.sh`) drives a real PTY console (login + rendered output).
+
 ### The production boot shape (`--production`, #61)
 
 By default every build is the **dev/CI shape**: the in-kernel test suite is
