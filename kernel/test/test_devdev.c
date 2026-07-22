@@ -15,6 +15,7 @@
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>               // #55: struct t_stat + T_S_IFCHR
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -25,6 +26,8 @@ void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
+void test_devdev_consctl_renderer_mint(void);   // #55
+void test_devdev_winsize_leaf(void);            // #55
 
 // =============================================================================
 // Helpers.
@@ -271,6 +274,107 @@ void test_devdev_cons_gate(void) {
 }
 
 // =============================================================================
+// #55: the consctl MINT-gate widening (ARCH 23.5.3) -- consctl becomes
+// mintable by attached OR renderer (the winsize writer self-serves by name);
+// cons (the DATA leaf) stays attach-only (the widening must STOP at consctl:
+// reading console INPUT is exactly what the renderer role must not confer).
+void test_devdev_consctl_renderer_mint(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    bool saved_attach = proc_is_console_attached(t->proc);
+    proc_revoke_console_attached(t->proc);
+    proc_test_clear_console_renderer();          // known state
+
+    struct Spoor *cc   = walk_to("consctl");
+    struct Spoor *cons = walk_to("cons");
+    TEST_ASSERT(cc != NULL && cons != NULL, "walk consctl + cons");
+
+    // Neither role: both DENIED (the pre-#55 posture for a plain Proc holds).
+    TEST_ASSERT(devdev.open(cc, 0) == NULL,   "plain Proc: consctl mint DENIED");
+    TEST_ASSERT(devdev.open(cons, 0) == NULL, "plain Proc: cons mint DENIED");
+
+    // Renderer role: consctl mints; cons STILL denied (the widening's bound).
+    TEST_EXPECT_EQ(proc_set_console_renderer(t->proc), 0, "renderer role claimed");
+    struct Spoor *ccopen = devdev.open(cc, 1);
+    TEST_ASSERT(ccopen != NULL, "renderer: consctl mint ALLOWED (#55)");
+    TEST_ASSERT(devdev.open(cons, 0) == NULL, "renderer: cons mint STILL DENIED");
+
+    // The minted fd drives the winsize verb end-to-end (the aurora path).
+    cons_test_reset();
+    TEST_EXPECT_EQ(devdev.write(ccopen, "winsize 128 36", 14, 0), 14L,
+                   "renderer writes winsize via the minted consctl");
+    u16 wc = 0, wr = 0;
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 128 && wr == 36, "winsize applied 128x36");
+
+    devdev.close(ccopen);
+    proc_test_clear_console_renderer();
+    if (saved_attach) proc_mark_console_attached(t->proc);
+    spoor_unref(cc);
+    spoor_unref(cons);
+    cons_test_reset();
+}
+
+// #55: the /dev/winsize leaf -- UNGATED (the trivial-leaf class: geometry is
+// not sensitive), read-only, renders the standalone `winsize <cols> <rows>\n`
+// line; stat_native stays cons-scoped (the leaf itself is statless).
+void test_devdev_winsize_leaf(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    bool saved_attach = proc_is_console_attached(t->proc);
+    proc_revoke_console_attached(t->proc);
+    proc_test_clear_console_renderer();
+    cons_test_reset();                            // winsize -> unset (0x0)
+
+    struct Spoor *ws = walk_to("winsize");
+    TEST_ASSERT(ws != NULL, "walk /dev/winsize resolves the name");
+
+    // Unattached, non-renderer: mint + read both succeed (ungated).
+    struct Spoor *wsopen = devdev.open(ws, 0);
+    TEST_ASSERT(wsopen != NULL, "unattached open of /dev/winsize ALLOWED");
+    char buf[24];
+    long n = devdev.read(wsopen, buf, (long)sizeof(buf), 0);
+    const char *unset = "winsize 0 0\n";
+    bool ok = (n == 12);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != unset[i]) ok = false;
+    TEST_ASSERT(ok, "unset serial posture reads winsize 0 0");
+
+    // Offset semantics (the consctl idiom): a mid-line read + EOF past end.
+    TEST_EXPECT_EQ(devdev.read(wsopen, buf, 4, 8), 4L, "offset read");
+    TEST_ASSERT(buf[0] == '0' && buf[1] == ' ' && buf[2] == '0' && buf[3] == '\n',
+                "offset 8 reads the tail");
+    TEST_EXPECT_EQ(devdev.read(wsopen, buf, 4, 100), 0L, "past-end read -> EOF");
+
+    // Read-only: writes fail.
+    TEST_EXPECT_EQ(devdev.write(wsopen, "winsize 1 1", 11, 0), -1L,
+                   "/dev/winsize write -> -1 (the writer is the consctl verb)");
+
+    // A live value flows through (set via the production verb).
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 132 50", 14), 14L, "set 132x50");
+    n = devdev.read(wsopen, buf, (long)sizeof(buf), 0);
+    const char *set = "winsize 132 50\n";
+    ok = (n == 15);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != set[i]) ok = false;
+    TEST_ASSERT(ok, "leaf reads winsize 132 50 after the verb");
+
+    // stat_native is cons-scoped: the cons leaf fills; winsize stays statless.
+    struct t_stat st;
+    TEST_EXPECT_EQ((long)devdev.stat_native(wsopen, &st), -1L,
+                   "winsize leaf is statless (the contract is cons-scoped)");
+    struct Spoor *cons = walk_to("cons");
+    TEST_ASSERT(cons != NULL, "walk cons");
+    TEST_EXPECT_EQ((long)devdev.stat_native(cons, &st), 0L, "cons leaf stat fills");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR &&
+                (st.qid_path & CONS_STAT_QID_FLAG) != 0u,
+                "cons leaf reports the S_IFCHR + bit-41 contract");
+
+    devdev.close(wsopen);
+    spoor_unref(ws);
+    spoor_unref(cons);
+    if (saved_attach) proc_mark_console_attached(t->proc);
+    cons_test_reset();
+}
+
 // G-4: the renderer pair /dev/consdrain + /dev/consfeed (TAPESTRY.md section
 // 18.12 R2-F6 / F8). Gated at open AND re-gated at I/O + poll on
 // proc_is_console_renderer -- the third console role. This test claims the

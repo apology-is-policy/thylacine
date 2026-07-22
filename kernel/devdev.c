@@ -54,6 +54,7 @@ enum {
     DEV_KIND_TAPESTRY = 9,  // the /dev/tapestry mount-stub DIRECTORY (G-3)
     DEV_KIND_CONSDRAIN = 10, // G-4: the renderer's console-output drain (RO)
     DEV_KIND_CONSFEED  = 11, // G-4: the renderer's input feed (WO)
+    DEV_KIND_WINSIZE   = 12, // #55: the UNGATED read-only console-geometry leaf
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -73,6 +74,7 @@ static const struct dev_leaf g_dev_leaves[] = {
     { "consctl", DEV_KIND_CONSCTL },
     { "consdrain", DEV_KIND_CONSDRAIN },
     { "consfeed",  DEV_KIND_CONSFEED  },
+    { "winsize",   DEV_KIND_WINSIZE   },   // #55: trivial-leaf class (ungated)
 };
 
 #define DEV_LEAF_COUNT  (sizeof(g_dev_leaves) / sizeof(g_dev_leaves[0]))
@@ -278,8 +280,19 @@ static int devdev_stat(struct Spoor *c, u8 *dp, int n) {
 // Proc cannot even spoof console output). The trivial leaves pass through ungated.
 static struct Spoor *devdev_open(struct Spoor *c, int omode) {
     if (!c) return NULL;
-    if (dev_kind_is_console((u32)c->qid.path) && !devdev_console_gate_ok())
-        return NULL;
+    if (dev_kind_is_console((u32)c->qid.path) && !devdev_console_gate_ok()) {
+        // #55 (ARCH 23.5.3): consctl (the CONTROL leaf) is ALSO mintable by
+        // the bound renderer -- the winsize writer self-serves by name,
+        // exactly as it opens consdrain/consfeed. Sound because the renderer
+        // already holds consfeed = arbitrary INPUT INJECTION, which strictly
+        // dominates consctl's termios+winsize control surface -- the widening
+        // confers no authority the role did not already have. cons (the DATA
+        // leaf) stays attach-only: reading console INPUT is exactly what the
+        // renderer role must NOT confer (I-27; the drain carries OUTPUT).
+        if (!((u32)c->qid.path == DEV_KIND_CONSCTL &&
+              devdev_renderer_gate_ok()))
+            return NULL;
+    }
     // G-4: the renderer pair mints only for the bound renderer. The drain
     // open additionally ARMS the tap (single-open; a second open is refused
     // by cons_drain_open) -- and unwinds the arm if the generic open then
@@ -344,9 +357,21 @@ static long devdev_read(struct Spoor *c, void *buf, long n, s64 off) {
     case DEV_KIND_CONS:                         // the shared console-input drain
         return cons_input_read(buf, n);
     case DEV_KIND_CONSCTL: {                     // LS-8b: read back the mode line
-        char tmp[40];                            // "+icanon +echo +isig +icrnl +onlcr\n" = 34
+        // #55: the render now ends "... winsize <cols> <rows>\n" (the ptyfs
+        // ctl_render shape) -- max 34 + " 65535 65535"-class tail = 54.
+        char tmp[64];
         long len = cons_render_mode(tmp, (long)sizeof(tmp));
         if (off < 0 || off >= len) return 0;     // EOF (and bad offset reads empty)
+        long avail = len - (long)off;
+        long cnt = (n < avail) ? n : avail;
+        u8 *out = (u8 *)buf;
+        for (long i = 0; i < cnt; i++) out[i] = (u8)tmp[(long)off + i];
+        return cnt;
+    }
+    case DEV_KIND_WINSIZE: {                     // #55: `winsize <cols> <rows>\n`
+        char tmp[24];                            // max 21 incl. NL
+        long len = cons_render_winsize(tmp, (long)sizeof(tmp));
+        if (off < 0 || off >= len) return 0;
         long avail = len - (long)off;
         long cnt = (n < avail) ? n : avail;
         u8 *out = (u8 *)buf;
@@ -397,7 +422,8 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
         if (!devdev_renderer_gate_ok()) return -1;
         return cons_feed_write(buf, n);
     case DEV_KIND_CONSDRAIN:                    // read-only
-        return -1;
+    case DEV_KIND_WINSIZE:                      // #55: read-only (the writer is
+        return -1;                              // the consctl verb, renderer-held)
     case DEV_KIND_ROOT:
     default:
         return -1;
@@ -411,6 +437,17 @@ static long devdev_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
 
 static void devdev_remove(struct Spoor *c) {
     (void)c;
+}
+
+// #55: SYS_FSTAT on the /dev/cons leaf -- the shared is-a-cons contract
+// (cons_stat_native_fill; the same fill devcons reports, so the std-fd
+// inheritance chain and a namespace-opened /dev/cons agree). Other leaves
+// stay statless (-1) -- the contract is cons-scoped; widening it to the
+// trivial leaves is an undesigned nicety, not a #55 dependency.
+static int devdev_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    if ((u32)c->qid.path != DEV_KIND_CONS) return -1;
+    return cons_stat_native_fill(c, out);
 }
 
 static int devdev_wstat(struct Spoor *c, u8 *dp, int n) {
@@ -469,6 +506,7 @@ struct Dev devdev = {
     .attach   = devdev_attach,
     .walk     = devdev_walk,
     .stat     = devdev_stat,
+    .stat_native = devdev_stat_native,   // #55: cons-leaf is-a-cons contract
 
     .open     = devdev_open,
     .create   = devdev_create,

@@ -17,6 +17,7 @@
 #include <thylacine/sched.h>                 // RW-11 SA-1b: sched_mark_interactive
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>               // #55: struct t_stat (cons_stat_native_fill)
 #include <thylacine/thread.h>                // RW-11 SA-1b: current_thread
 #include <thylacine/types.h>
 
@@ -73,6 +74,17 @@ struct cons_input {
     u32         termios;
     u8          line[CONS_LINE_MAX];
     u32         line_len;
+
+    // #55 (ARCH 23.5.3): the console winsize. Written by the renderer via the
+    // consctl `winsize <cols> <rows>` verb (aurora reports its cell grid --
+    // geometry is physical, not negotiated); 0x0 = never set (the serial
+    // posture: no renderer exists, readers fall back to CPR, which the HOST
+    // terminal answers). Mutated + read under g_cons.lock like the flags.
+    // winch_events counts CHANGED applies (diagnostic + the iff-changed
+    // regression's witness; each corresponds to one tty:winch post attempt).
+    u16         ws_cols;
+    u16         ws_rows;
+    u32         winch_events;
 
     // LS-8a: the poll-hook list for /dev/cons. The SYS_CONSOLE_OPEN fd (devcons)
     // AND the namespace /dev/cons leaf (devdev) share it -- #57b single-impl, so
@@ -772,6 +784,9 @@ void cons_test_reset(void) {
     cons_pollwake_store(false);
     cons_termios_store(CONS_TERMIOS_DEFAULT);   // LS-8b: back to the boot default
     g_cons.line_len = 0u;
+    g_cons.ws_cols = 0u;                        // #55: winsize back to unset
+    g_cons.ws_rows = 0u;
+    g_cons.winch_events = 0u;
     spin_unlock_irqrestore(&g_cons.lock, s);
 
     // G-4: the drain back to the boot (disarmed, empty) state.
@@ -1201,6 +1216,26 @@ static u32 cons_flag_lookup(const u8 *buf, long start, long end) {
     return 0u;
 }
 
+// #55: parse one whitespace-delimited decimal token in [0, 65535] starting at
+// *i (whitespace already skipped). Advances *i past the token. Returns the
+// value, or -1 on malformed (empty / non-digit / overflow).
+static long cons_parse_u16_token(const u8 *b, long n, long *i) {
+    long j = *i;
+    long v = 0;
+    long digits = 0;
+    while (j < n && !cons_is_space(b[j])) {
+        u8 ch = b[j];
+        if (ch < (u8)'0' || ch > (u8)'9') return -1;
+        v = v * 10 + (long)(ch - (u8)'0');
+        if (v > 65535) return -1;                            // the u16 band
+        digits++;
+        j++;
+    }
+    if (digits == 0) return -1;
+    *i = j;
+    return v;
+}
+
 long cons_set_mode_cmd(const void *buf, long n) {
     if (!buf || n < 0) return -1;
     const u8 *b = (const u8 *)buf;
@@ -1209,11 +1244,31 @@ long cons_set_mode_cmd(const void *buf, long n) {
     // the whole write with no change (the tcsetattr-is-atomic seam).
     u32 set_mask = 0u, clear_mask = 0u;
     int tokens = 0;
+    bool have_ws = false;                                     // #55 winsize staged
+    long ws_cols = 0, ws_rows = 0;
     long i = 0;
     while (i < n) {
         while (i < n && cons_is_space(b[i])) i++;            // skip whitespace
         if (i >= n) break;
         u8 sign = b[i];
+        // #55 (ARCH 23.5.3): the `winsize <cols> <rows>` verb -- the ptyfs
+        // PTY-2c grammar, byte-identical. Staged with the flag masks so the
+        // whole write stays atomic (a malformed winsize rejects everything).
+        if (sign == (u8)'w' && i + 7 <= n &&
+            b[i+1]==(u8)'i' && b[i+2]==(u8)'n' && b[i+3]==(u8)'s' &&
+            b[i+4]==(u8)'i' && b[i+5]==(u8)'z' && b[i+6]==(u8)'e' &&
+            (i + 7 == n || cons_is_space(b[i+7]))) {
+            i += 7;
+            while (i < n && cons_is_space(b[i])) i++;
+            ws_cols = cons_parse_u16_token(b, n, &i);
+            if (ws_cols < 0) return -1;
+            while (i < n && cons_is_space(b[i])) i++;
+            ws_rows = cons_parse_u16_token(b, n, &i);
+            if (ws_rows < 0) return -1;
+            have_ws = true;
+            tokens++;
+            continue;
+        }
         if (sign != (u8)'+' && sign != (u8)'-') return -1;   // malformed token
         long name_start = i + 1;
         long j = name_start;
@@ -1227,9 +1282,21 @@ long cons_set_mode_cmd(const void *buf, long n) {
     }
     if (tokens == 0) return -1;                               // empty command
 
+    bool winch = false;                                       // #55 changed?
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     u32 cur = cons_termios_load();
     cons_termios_store((cur | set_mask) & ~clear_mask);
+    if (have_ws) {
+        // #55: iff-changed (the Linux TIOCSWINSZ / ptyfs semantics). An
+        // unchanged rewrite must NOT post -- a repeat-post storm would be a
+        // notes-queue DoS on the owner's pgrp (the 25.4 row obligation).
+        if (g_cons.ws_cols != (u16)ws_cols || g_cons.ws_rows != (u16)ws_rows) {
+            g_cons.ws_cols = (u16)ws_cols;
+            g_cons.ws_rows = (u16)ws_rows;
+            g_cons.winch_events++;
+            winch = true;
+        }
+    }
     // A mode change starts a FRESH canonical line (the TCSAFLUSH discipline):
     // discard any half-assembled line[] so a canonical->raw->canonical flip can
     // never strand a fragment that then prepends the next line. This matches the
@@ -1240,11 +1307,28 @@ long cons_set_mode_cmd(const void *buf, long n) {
     // must be unambiguous against any consctl writer.
     g_cons.line_len = 0u;
     spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // #55: the tty:winch post runs AFTER g_cons.lock drops -- no g_cons.lock
+    // -> g_proc_table_lock edge (the 25.4 row's ordering obligation). This is
+    // process context (a consctl write; NEVER reachable from cons_rx_input/
+    // IRQ), so no console_mgr deferral is needed, unlike the ISIG cook.
+    if (winch) proc_console_post_winch();
     return n;
+}
+
+// #55: append the decimal rendering of v (known <= 65535) at out[*off].
+// The caller has bounds-checked (max 5 digits).
+static void cons_render_dec_u16(u8 *out, long *off, u32 v) {
+    char tmp[6];
+    int t = 0;
+    do { tmp[t++] = (char)('0' + (v % 10u)); v /= 10u; } while (v != 0u);
+    while (t > 0) out[(*off)++] = (u8)tmp[--t];
 }
 
 long cons_render_mode(void *buf, long n) {
     if (!buf || n < 0) return 0;
+    u16 wc, wr;
+    cons_winsize_get(&wc, &wr);                              // coherent pair
     u32 tio = cons_termios_load();                           // atomic snapshot
     u8 *out = (u8 *)buf;
     long off = 0;
@@ -1256,9 +1340,78 @@ long cons_render_mode(void *buf, long n) {
         if (off + need > n) return 0;                        // too small -> nothing
         out[off++] = (tio & g_cons_flag_names[f].bit) ? (u8)'+' : (u8)'-';
         for (long k = 0; k < namelen; k++) out[off++] = (u8)nm[k];
-        out[off++] = (f + 1 == CONS_FLAG_COUNT) ? (u8)'\n' : (u8)' ';
+        out[off++] = (u8)' ';                                // #55: winsize follows
     }
+    // #55: `winsize <cols> <rows>` closes the line (the ptyfs ctl_render
+    // shape: "+icanon ... +onlcr winsize 80 24\n" -- parser parity, pouch
+    // 0021's strstr(buf, "winsize ") works on either ctl).
+    if (off + 8 + 5 + 1 + 5 + 1 > n) return 0;               // "winsize " CCCCC ' ' RRRRR '\n'
+    const char ws[] = "winsize ";
+    for (long k = 0; ws[k]; k++) out[off++] = (u8)ws[k];
+    cons_render_dec_u16(out, &off, wc);
+    out[off++] = (u8)' ';
+    cons_render_dec_u16(out, &off, wr);
+    out[off++] = (u8)'\n';
     return off;
+}
+
+// #55: the coherent winsize snapshot (one g_cons.lock hold -- a reader must
+// never see a torn (cols, rows) pair across a concurrent verb apply).
+void cons_winsize_get(u16 *cols, u16 *rows) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (cols) *cols = g_cons.ws_cols;
+    if (rows) *rows = g_cons.ws_rows;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+}
+
+// #55: the standalone `winsize <cols> <rows>\n` line the UNGATED /dev/winsize
+// leaf serves (readback for apps that cannot mint consctl). Unset renders
+// `winsize 0 0` -- the serial posture: never an error; readers fall back to
+// the CPR probe (which the host terminal answers on serial).
+long cons_render_winsize(void *buf, long n) {
+    if (!buf || n < 21) return 0;                            // "winsize 65535 65535\n"
+    u16 wc, wr;
+    cons_winsize_get(&wc, &wr);
+    u8 *out = (u8 *)buf;
+    long off = 0;
+    const char ws[] = "winsize ";
+    for (long k = 0; ws[k]; k++) out[off++] = (u8)ws[k];
+    cons_render_dec_u16(out, &off, wc);
+    out[off++] = (u8)' ';
+    cons_render_dec_u16(out, &off, wr);
+    out[off++] = (u8)'\n';
+    return off;
+}
+
+u32 cons_winch_events(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    u32 v = g_cons.winch_events;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
+}
+
+// #55: the shared is-a-cons t_stat fill (ARCH 23.5.3) -- devcons (the
+// SYS_CONSOLE_OPEN fd, the std-fd inheritance chain) + devdev's /dev/cons
+// leaf report ONE contract: zero-fill (I-13 -- no stack garbage crosses),
+// T_S_IFCHR posture (the same posture ptyfs presents, so pouch 0021's
+// S_ISCHR pre-gate passes), SYSTEM-owned, and qid_path carrying
+// CONS_STAT_QID_FLAG (bit 41 -- DISJOINT from ptyfs's PTS_FLAG bit 40; the
+// ptsname documented-client-ABI precedent). This retires the statless-cons
+// latent (fstat -1 -> pouch folded to ENOTTY -> isatty()==false on the
+// console -> musl stdio ran fully-buffered).
+int cons_stat_native_fill(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    out->mode     = T_S_IFCHR | 0620u;
+    out->nlink    = 1;
+    out->qid_path = CONS_STAT_QID_FLAG | c->qid.path;
+    out->qid_type = QTFILE;
+    out->blksize  = 256;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+    // devno: stamped by spoor_stat_native (#100 -- the Spoor's identity, not
+    // the Dev's), the devramfs idiom; the zero-fill above leaves it 0 here.
+    return 0;
 }
 
 // LS-8a: the ONE console poll implementation, shared by devcons (the
@@ -1288,6 +1441,12 @@ static short devcons_poll(struct Spoor *c, short events, struct poll_waiter *pw)
     return cons_poll(events, pw);
 }
 
+// #55: SYS_FSTAT on a SYS_CONSOLE_OPEN fd (the std-fd inheritance chain) --
+// the shared is-a-cons contract (see cons_stat_native_fill).
+static int devcons_stat_native(struct Spoor *c, struct t_stat *out) {
+    return cons_stat_native_fill(c, out);
+}
+
 struct Dev devcons = {
     .dc       = 'c',
     .name     = "cons",
@@ -1299,6 +1458,7 @@ struct Dev devcons = {
     .attach   = devcons_attach,
     .walk     = devcons_walk,
     .stat     = devcons_stat,
+    .stat_native = devcons_stat_native,      // #55: the is-a-cons qid contract
 
     .open     = devcons_open,
     .create   = devcons_create,

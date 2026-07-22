@@ -257,6 +257,75 @@ that then prepends the next line, and the production path matches the test hook
 flips mid-line (login flips between completed reads; `ut` at prompt boundaries),
 but the kernel is unambiguous against any consctl writer (LS-8 audit F1).
 
+## The console winsize + `tty:winch` — #55 (as-built)
+
+Design: ARCH §23.5.3 (the scripture pass, user-voted 2026-07-22). The console
+gains the pts winsize contract — one kernel-held size, one writer, one signal,
+two read paths.
+
+**State.** `g_cons.ws_cols` / `g_cons.ws_rows` (u16 pair, the Linux
+unsigned-short band; `0×0` = never set — the serial posture) plus the
+diagnostic `winch_events` counter, all under `g_cons.lock` beside the termios
+word. `cons_winsize_get(&c, &r)` takes a coherent snapshot (one lock hold — a
+reader never sees a torn pair across a concurrent verb apply).
+`cons_test_reset` zeroes all three.
+
+**The verb.** `cons_set_mode_cmd` grammar grows `winsize <cols> <rows>` (the
+ptyfs PTY-2c verb, byte-identical): the keyword token, then two decimal tokens
+each in `[0, 65535]` (`cons_parse_u16_token`). It stages with the flag masks —
+the whole write stays atomic (a malformed winsize rejects the batch, flags
+included; `"winsizeX"` is not the verb — the keyword must end at
+whitespace/EOL). Flags and winsize can mix in one write.
+
+**The signal.** Under `g_cons.lock` the apply compares the staged pair against
+the current one; **iff changed** it stores, bumps `winch_events`, and captures
+a local flag. AFTER the lock drops, `proc_console_post_winch()` (kernel/proc.c)
+posts `tty:winch` (`NOTE_NAME_TTY_WINCH` — informational, catchable,
+kernel-only-POST) to the console OWNER's PGRP under ONE `g_proc_table_lock`
+hold (the `notes_post_pgrp` walk body; pgid 0 — the boot group — refused, so a
+bringup winch posts nothing). The pgrp, not the owner Proc: userspace cannot
+post `tty:*` (the PTY-1b F4 gate), so owner-only would strand every child; the
+console has no controlling-terminal / fg-pgrp model at v1.0 (`ct_sid` is
+pts-registry state), so the owner's pgid is the minimal correct set — the fg
+refinement is the recorded seam. Lock discipline: no `g_cons.lock` →
+`g_proc_table_lock` edge (the post runs lock-free of the cons layer); the path
+is process-context-only (a consctl write — never reachable from
+`cons_rx_input`/IRQ, unlike the ISIG cook, so no `console_mgr` deferral).
+
+**Read paths.** `cons_render_mode` now ends the mode line with
+`winsize <cols> <rows>\n` (the ptyfs `ctl_render` shape: parser parity — pouch
+0021's `strstr(buf, "winsize ")` works on either ctl; the render is 46+ bytes,
+callers grew from 40 to 64). `cons_render_winsize` renders the standalone
+`winsize <cols> <rows>\n` line (max 21 bytes) that the UNGATED `/dev/winsize`
+devdev leaf serves — the app-facing readback (apps cannot mint consctl). The
+in-band CPR probe stays the universal fallback and the only serial path (the
+host terminal answers it); the deterministic client rule is: read
+`/dev/winsize`; if `0 0`, CPR.
+
+**The writer.** The renderer (aurora) — it self-serves a consctl fd by name
+under the #55 mint-gate widening (see `109-devdev.md`) and writes the verb at
+first present + every reweave (AURORA.md §4). The verb itself is accepted from
+any consctl holder like the five flags (#94-B: the inherited fd is the
+capability); in practice only aurora writes it.
+
+**The is-a-cons stat contract.** `cons_stat_native_fill` (shared by
+`devcons.stat_native` + devdev's cons-leaf arm) fills a `t_stat`: zero-fill
+(I-13), `T_S_IFCHR | 0620`, SYSTEM-owned, `qid_path` carrying
+`CONS_STAT_QID_FLAG` (**bit 41** — disjoint from ptyfs's `PTS_FLAG` bit 40
+under the shared S_IFCHR posture; /net's bit-40 qids report S_IFREG and fail
+the S_ISCHR pre-gate). `devno` is stamped by `spoor_stat_native` (#100), not
+the fill. This retires the statless-cons latent: fstat on a cons fd returned
+−1, pouch 0021 folded that to ENOTTY, so `isatty()` was FALSE on the console
+and musl stdio ran fully-buffered — the 0021 cons arm (55c) restores isatty
+truth and serves TIOCGWINSZ from `/dev/winsize`.
+
+Tests: `cons.winsize_roundtrip` (verb + both renders + snapshot agree;
+malformed-batch atomicity), `cons.winsize_winch_iff_changed` (counter: change
+→ +1, rewrite → +0, flags-only → +0), `cons.stat_native_qid_contract`
+(S_IFCHR + bit-41 + zero-fill over poison), `devdev.consctl_renderer_mint`
+(**revert-probed**: widening the gate to `cons` fails exactly the
+"cons mint STILL DENIED" assert, 1194/1195), `devdev.winsize_leaf`.
+
 ## State machines
 
 - **The poller** (`cons_poll.tla` `Poller`): `start` → `registered` (hook

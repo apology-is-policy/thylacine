@@ -1415,6 +1415,17 @@ void proc_set_console_owner(struct Proc *p);
 // No-op when there is no live owner. Takes g_proc_table_lock.
 void proc_console_post_interrupt(void);
 
+// #55 (ARCH 23.5.3): post tty:winch to the console OWNER's process group --
+// the console winsize changed. The pgrp, not the owner Proc: userspace cannot
+// post tty:* (the PTY-1b F4 gate), so owner-only would strand every child; the
+// pgrp is the minimal correct set (children share ut's rfork-inherited pgid --
+// the console has no job control / ct model at v1.0; the fg refinement is the
+// recorded seam). ONE g_proc_table_lock hold covers the owner resolve + the
+// membership fan (the notes_post_pgrp discipline); pgid 0 (the boot group) is
+// refused, so a bringup-era winch posts nothing. Called from process context
+// (a consctl write), AFTER g_cons.lock drops.
+void proc_console_post_winch(void);
+
 // proc_console_relinquish — `p` drops its OWN console-attach bit and, if it is
 // the current g_console_owner, clears the owner pointer. A-5a / I-27: joey (the
 // boot console anchor) calls this (via SYS_CONSOLE_RELINQUISH on itself) at the

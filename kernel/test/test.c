@@ -535,6 +535,9 @@ void test_cons_cook_icrnl(void);                 // LS-8b
 void test_cons_cook_onlcr_output(void);          // LS-8b
 void test_cons_consctl_parse(void);              // LS-8b
 void test_cons_consctl_render(void);             // LS-8b
+void test_cons_winsize_roundtrip(void);          // #55
+void test_cons_winsize_winch_iff_changed(void);  // #55
+void test_cons_stat_native_qid_contract(void);   // #55
 void test_cons_cook_line_overflow(void);         // LS-8b
 void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
@@ -562,6 +565,8 @@ void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
+void test_devdev_consctl_renderer_mint(void);    // #55
+void test_devdev_winsize_leaf(void);             // #55
 void test_devdev_renderer_gate(void);            // G-4
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
@@ -1880,6 +1885,9 @@ struct test_case g_tests[] = {
     { "cons.cook_onlcr_output",        test_cons_cook_onlcr_output,        false, NULL },
     { "cons.consctl_parse",            test_cons_consctl_parse,            false, NULL },
     { "cons.consctl_render",           test_cons_consctl_render,           false, NULL },
+    { "cons.winsize_roundtrip",        test_cons_winsize_roundtrip,        false, NULL },
+    { "cons.winsize_winch_iff_changed", test_cons_winsize_winch_iff_changed, false, NULL },
+    { "cons.stat_native_qid_contract", test_cons_stat_native_qid_contract, false, NULL },
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
     { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
@@ -1909,6 +1917,8 @@ struct test_case g_tests[] = {
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
+    { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
+    { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
     { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },
     { "devhw.attach_returns_root",     test_devhw_attach_returns_root,     false, NULL },
     { "devhw.walk_node_and_prop",      test_devhw_walk_node_and_prop,      false, NULL },

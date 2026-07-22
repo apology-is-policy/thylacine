@@ -1397,6 +1397,27 @@ bool proc_pgrp_in_session(u32 pgid, u32 sid) {
     return ctx.found;
 }
 
+// #55 (ARCH 23.5.3; proc.h contract): tty:winch to the console owner's PGRP.
+// ONE g_proc_table_lock hold covers the owner resolve + the membership fan
+// (pgrp_post_cb -- the notes_post_pgrp walk body, so the post + the
+// self-gating terminate-wake ride the established g_proc_table_lock ->
+// q->lock edge; tty:winch is informational and never arms the latch, so the
+// wake is a no-op). pgid 0 refused (the boot group -- kproc/joey -- is never
+// a tty-signal target; the notes_post_pgrp precedent), so a bringup winch
+// posts nothing.
+void proc_console_post_winch(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *owner = g_console_owner;
+    if (owner && owner->magic == PROC_MAGIC &&
+        owner->state == PROC_STATE_ALIVE && owner->pgid != 0u) {
+        struct pgrp_post_ctx ctx = { .pgid = owner->pgid,
+                                     .name = NOTE_NAME_TTY_WINCH,
+                                     .arg = 0u, .posted = 0 };
+        proc_for_each_walk(kproc(), pgrp_post_cb, &ctx);
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
 void proc_console_post_interrupt(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner = g_console_owner;

@@ -91,6 +91,41 @@ and passed as stdio. So gating the namespace open does not regress the session's
 
 ---
 
+## #55: the `/dev/winsize` leaf + the consctl mint-gate widening (as-built)
+
+Design: ARCH §23.5.3. Two devdev-side changes:
+
+- **`/dev/winsize`** (`DEV_KIND_WINSIZE` = 12): an UNGATED read-only trivial
+  leaf rendering `winsize <cols> <rows>\n` (`cons_render_winsize`; the
+  consctl offset idiom — re-render per read, offset into the line, EOF past
+  the end). Geometry is not sensitive (two u16s; no I-13/I-16 content), so it
+  joins the null/zero class: any Proc reads it (the app-facing readback —
+  apps cannot mint consctl; pouch 0021's TIOCGWINSZ cons arm reads it). Unset
+  renders `winsize 0 0` (the serial posture — never an error; readers fall
+  back to CPR). Writes → −1 (the writer is the consctl verb). Poll: the
+  trivial-leaf always-ready fallthrough. `stat_native` → −1 (the is-a-cons
+  contract is cons-scoped).
+
+- **The consctl mint-gate widening**: `devdev_open`'s console arm now admits
+  `DEV_KIND_CONSCTL` for the bound RENDERER as well as a console-attached
+  caller — aurora (the winsize writer) self-serves by name exactly as it
+  opens consdrain/consfeed. Sound because the renderer already holds
+  **consfeed** = arbitrary input injection, which strictly dominates
+  consctl's termios+winsize control surface (the I-27 dominance argument,
+  ARCH §23.5.3). The widening STOPS at consctl: `cons` (the DATA leaf) stays
+  attach-only at open + per-I/O re-gated — reading console INPUT is exactly
+  what the renderer role must not confer. consctl I/O stays ungated (#94-B
+  unchanged). **Revert-probed**: widening the arm to cover `cons` fails
+  exactly `devdev.consctl_renderer_mint`'s "cons mint STILL DENIED" assert
+  (1194/1195).
+
+- **`devdev_stat_native`** (new slot): the cons leaf → `cons_stat_native_fill`
+  (the shared is-a-cons contract, `111-cons.md`); every other leaf stays
+  statless (−1) — widening stats to the trivial leaves is an undesigned
+  nicety, not a #55 dependency.
+
+---
+
 ## One console implementation, two front doors
 
 `cons.c` exposes a public API shared by both console front doors:

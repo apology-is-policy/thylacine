@@ -40,6 +40,7 @@
 #include <thylacine/rendez.h>   // LS-8a: Rendez for the poll_waiter
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>  // #55: struct t_stat + T_S_IFCHR (the qid contract)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -966,27 +967,131 @@ void test_cons_consctl_parse(void) {
 }
 
 // LS-8b: the /dev/consctl read-back render. Symmetric grammar with the write:
-// five "+name"/"-name" tokens + '\n'.
+// five "+name"/"-name" tokens, then (#55) the winsize, one line -- the ptyfs
+// ctl_render shape ("-icanon ... -onlcr winsize 0 0\n").
 void test_cons_consctl_render(void) {
-    cons_test_reset();                                 // default = ISIG only
-    char buf[40];
+    cons_test_reset();                                 // default = ISIG only, ws 0x0
+    char buf[64];
     long n = cons_render_mode(buf, (long)sizeof(buf));
-    const char *want_default = "-icanon -echo +isig -icrnl -onlcr\n";
-    TEST_EXPECT_EQ(n, 34L, "default render length");
-    bool ok = (n == 34);
+    const char *want_default = "-icanon -echo +isig -icrnl -onlcr winsize 0 0\n";
+    TEST_EXPECT_EQ(n, 46L, "default render length");
+    bool ok = (n == 46);
     for (long i = 0; ok && i < n; i++) if (buf[i] != want_default[i]) ok = false;
-    TEST_ASSERT(ok, "default renders -icanon -echo +isig -icrnl -onlcr");
+    TEST_ASSERT(ok, "default renders flags + winsize 0 0");
 
     cons_test_set_termios(CONS_TERMIOS_ALL);
     n = cons_render_mode(buf, (long)sizeof(buf));
-    const char *want_all = "+icanon +echo +isig +icrnl +onlcr\n";
-    ok = (n == 34);
+    const char *want_all = "+icanon +echo +isig +icrnl +onlcr winsize 0 0\n";
+    ok = (n == 46);
     for (long i = 0; ok && i < n; i++) if (buf[i] != want_all[i]) ok = false;
     TEST_ASSERT(ok, "all-set renders every flag with '+'");
 
     // A too-small buffer renders nothing (never a partial line).
     TEST_EXPECT_EQ(cons_render_mode(buf, 10), 0L, "too-small buffer -> 0");
+    TEST_EXPECT_EQ(cons_render_mode(buf, 40), 0L, "no room for the winsize tail -> 0");
     cons_test_reset();
+}
+
+// #55: the winsize round-trip -- the consctl verb sets it; the mode render,
+// the standalone leaf render, and the snapshot all agree; malformed winsize
+// tokens reject the WHOLE write (the tcsetattr-atomic seam extends to the
+// new verb).
+void test_cons_winsize_roundtrip(void) {
+    cons_test_reset();
+
+    u16 wc = 1, wr = 1;
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 0 && wr == 0, "reset -> winsize unset (0x0)");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 132 50", 14), 14L, "winsize verb accepted");
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 132 && wr == 50, "snapshot reads 132x50");
+
+    char buf[64];
+    long n = cons_render_mode(buf, (long)sizeof(buf));
+    const char *want = "-icanon -echo +isig -icrnl -onlcr winsize 132 50\n";
+    bool ok = (n == 49);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != want[i]) ok = false;
+    TEST_ASSERT(ok, "mode render carries winsize 132 50");
+
+    n = cons_render_winsize(buf, (long)sizeof(buf));
+    const char *leaf = "winsize 132 50\n";
+    ok = (n == 15);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != leaf[i]) ok = false;
+    TEST_ASSERT(ok, "leaf render is winsize 132 50");
+    TEST_EXPECT_EQ(cons_render_winsize(buf, 20), 0L, "leaf: too-small buffer -> 0");
+
+    // A mixed write applies flags + winsize atomically.
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo winsize 80 24", 19), 19L, "mixed write accepted");
+    TEST_ASSERT((cons_test_termios() & CONS_ECHO) != 0u, "mixed write set ECHO");
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 80 && wr == 24, "mixed write set 80x24");
+
+    // Malformed winsize rejects the WHOLE write (flags too -- atomic).
+    u32 before = cons_test_termios();
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 80", 10), -1L, "missing rows -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize a b", 11), -1L, "non-digit -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 70000 1", 15), -1L, "cols > 65535 -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-echo winsize 9", 15), -1L,
+                   "a bad winsize rejects the batch");
+    TEST_ASSERT(cons_test_termios() == before, "rejected batch left the flags alone");
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 80 && wr == 24, "rejected batch left the winsize alone");
+
+    // "winsizeX" is NOT the verb (the token must end at whitespace/EOL).
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsizeX 1 2", 12), -1L, "winsizeX -> -1");
+    cons_test_reset();
+}
+
+// #55: iff-changed -- a CHANGED apply advances winch_events (one tty:winch
+// post attempt each); an unchanged rewrite must NOT (a repeat-post storm
+// would be a notes-queue DoS on the owner's pgrp). The pgrp fan itself is
+// notes_post_pgrp (PTY-1e, separately covered); with no console owner at
+// test time the post is a structural no-op, so the counter is the witness.
+void test_cons_winsize_winch_iff_changed(void) {
+    cons_test_reset();
+    TEST_EXPECT_EQ((long)cons_winch_events(), 0L, "reset -> 0 winch events");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14), 14L, "set 100x40");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 1L, "first set -> 1 event");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14), 14L, "rewrite 100x40");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 1L, "unchanged rewrite -> NO new event");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 41", 14), 14L, "set 100x41");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 2L, "changed rows -> 2nd event");
+
+    // A flags-only write never touches the winsize (no event).
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "flags-only write");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 2L, "flags-only -> no event");
+    cons_test_reset();
+}
+
+// #55: the is-a-cons qid contract (ARCH 23.5.3) on the devcons vtable -- the
+// SYS_CONSOLE_OPEN / std-fd chain's Dev. S_IFCHR posture + the bit-41 marker
+// (disjoint from ptyfs's PTS_FLAG bit 40) + SYSTEM-owned + zero-fill (I-13:
+// the pad bytes must cross as defined zeroes).
+void test_cons_stat_native_qid_contract(void) {
+    struct Spoor *cs = devcons.attach(NULL);
+    TEST_ASSERT(cs != NULL, "devcons attach");
+
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;  // poison
+    TEST_EXPECT_EQ((long)devcons.stat_native(cs, &st), 0L, "stat_native fills");
+
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR, "mode is S_IFCHR");
+    TEST_ASSERT((st.mode & 0777u) == 0620u, "perm bits 0620");
+    TEST_ASSERT((st.qid_path & CONS_STAT_QID_FLAG) != 0u, "bit-41 CONS marker set");
+    TEST_ASSERT((st.qid_path & (1ULL << 40)) == 0u, "bit 40 (PTS_FLAG) clear");
+    TEST_ASSERT(st.uid == PRINCIPAL_SYSTEM && st.gid == GID_SYSTEM, "SYSTEM-owned");
+    TEST_ASSERT(st.qid_type == QTFILE, "qid_type QTFILE");
+    TEST_ASSERT(st.size == 0 && st.nlink == 1, "size 0, nlink 1");
+    // I-13: the poisoned pad bytes were overwritten by the zero-fill.
+    TEST_ASSERT(st._pad_qid[0] == 0 && st._pad_qid[1] == 0 && st._pad_qid[2] == 0,
+                "qid pad zero-filled");
+    TEST_ASSERT(st._pad_blksize == 0 && st._pad_dev == 0, "tail pads zero-filled");
+
+    spoor_unref(cs);
 }
 
 // LS-8b: the canonical line buffer is BOUNDED -- a pathologically long line

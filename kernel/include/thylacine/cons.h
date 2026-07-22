@@ -149,6 +149,44 @@ long cons_set_mode_cmd(const void *buf, long n);
 long cons_render_mode(void *buf, long n);
 
 // =============================================================================
+// #55: the console winsize (ARCH 23.5.3). One kernel-held size (cols, rows --
+// the Linux unsigned-short band; 0x0 = never set, the serial posture) beside
+// the five mode flags, under g_cons.lock. The WRITER is the renderer (aurora
+// reports its cell grid via the consctl `winsize <cols> <rows>` verb -- the
+// ptyfs PTY-2c grammar, byte-identical); a CHANGED size posts tty:winch to the
+// console owner's PGRP (proc_console_post_winch -- iff-changed, the Linux
+// TIOCSWINSZ / ptyfs semantics). Readback: cons_render_mode appends
+// "winsize <cols> <rows>" to the mode line (parser parity with the ptyfs ctl),
+// and cons_render_winsize renders the standalone `winsize <cols> <rows>\n`
+// line the ungated /dev/winsize leaf serves.
+// =============================================================================
+
+// Snapshot the current winsize (0,0 = never set). Lock-free-safe callers take
+// a coherent pair via one g_cons.lock hold internally.
+void cons_winsize_get(u16 *cols, u16 *rows);
+
+// Render `winsize <cols> <rows>\n` (max 21 bytes incl. the NL). Returns the
+// byte count, or 0 if buf is too small (never a partial line).
+long cons_render_winsize(void *buf, long n);
+
+// Diagnostic: count of CHANGED winsize applies (each corresponds to one
+// tty:winch post attempt). The iff-changed regression reads it -- an unchanged
+// rewrite must NOT advance it.
+u32 cons_winch_events(void);
+
+// #55: the is-a-cons qid contract (the ptsname PTS_FLAG precedent, pouch
+// 0021's client ABI). cons fds were STATLESS (fstat -1 -> pouch folded them
+// to ENOTTY -> isatty()==false on the console); cons_stat_native_fill gives
+// devcons + devdev's cons leaf one shared t_stat fill: zero-fill (I-13),
+// T_S_IFCHR posture, SYSTEM-owned, qid_path carrying CONS_STAT_QID_FLAG --
+// bit 41, DISJOINT from ptyfs's PTS_FLAG (bit 40) under the shared S_IFCHR
+// posture (/net's bit-40 qids report S_IFREG and fail the S_ISCHR pre-gate).
+#define CONS_STAT_QID_FLAG (1ULL << 41)
+struct Spoor;
+struct t_stat;
+int cons_stat_native_fill(struct Spoor *c, struct t_stat *out);
+
+// =============================================================================
 // G-4: the console-renderer drain/feed backend (TAPESTRY.md section 18.7 /
 // AURORA.md section 4). The bound renderer (Aurora, SPAWN_PERM_CONSOLE_RENDERER)
 // holds the /dev/consdrain + /dev/consfeed pair, served by devdev:
