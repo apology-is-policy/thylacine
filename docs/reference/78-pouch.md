@@ -1593,6 +1593,39 @@ honest-fail → master close → slave EOF (drain-then-EOF).
   actually stop a pouch program — see `83-pouch-signals.md`), and the
   `SYS_POSTNOTE` pgrp arm (`kill(-pgrp)`).
 
+### The console arm — `0026-pouch-cons-winsize.patch` (#55c)
+
+The tty ioctl dispatcher gains a CONSOLE arm on the pts-resolve miss
+(design: ARCH §23.5.3; the kernel half is #55a):
+
+- **`cons_resolve(fd)`**: fstat → S_ISCHR + the bit-41 CONS marker
+  (`CONS_STAT_QID_FLAG` — the kernel `cons_stat_native_fill` contract,
+  disjoint from ptyfs's `PTS_FLAG` bit 40 under the shared S_IFCHR
+  posture). Pre-#55 cons fds were STATLESS (fstat −1 → ENOTTY →
+  `isatty()` FALSE on the console → musl stdio ran fully-buffered — the
+  retired latent).
+- **TIOCGWINSZ** on a cons fd: read the UNGATED `/dev/winsize` leaf
+  (stateless per-op open, the pts-ctl idiom) → fill `ws`. SUCCESS even
+  at `0×0` (the serial posture) or with the leaf unreachable (a narrow
+  namespace) — a cons fd IS a terminal, so isatty stays true and stdio
+  goes line-buffered exactly as on a pts; callers fall back to CPR/env
+  on a 0 winsize (the standard convention).
+- **TIOCSWINSZ** on a cons fd: **EPERM** — the console geometry is
+  physical (the renderer's grid, written via the renderer-gated consctl
+  verb); Linux-VT-resize semantics are deliberately not offered.
+- **tcgetattr/tcsetattr** on a cons fd stay ENOTTY: the console termios
+  is held by the consctl delegation chain (joey → login → ut), not by
+  apps — the documented honest seam.
+
+Proven live by the ls-gfx `pouch-hello-pty cons` leg, run FROM ut so
+**fd 1** is a real inherited cons Spoor (fd 0 is a PIPE for an
+un-redirected console fg child — the PTY-4b rule gives Inherit stdin
+only under job control, which is pts-only; the boot prover pipes ALL
+its stdio, so only the interactive path can carry the leg):
+`pty-cons: 128x36 isatty=1 setws=EPERM tcgetattr=ENOTTY OK`. The joey
+boot check fstats the REAL `SYS_CONSOLE_OPEN` fd through the full
+syscall path every boot (prints only on mismatch).
+
 ## The fopen-create boundary-line — `0024-pouch-fopen-create.patch` (task #50)
 
 The create-mode arm the 0023 scope note owed: `openat()` O_CREAT wired

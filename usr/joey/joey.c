@@ -6686,6 +6686,27 @@ int main(void) {
     // holds it for the getty's lifetime and hands a ref to each login.
     long console_fd = t_console_open();
 
+    // #55c ground truth: the is-a-cons contract on the REAL session console
+    // fd through the FULL syscall path (the kernel unit test drives the Dev
+    // vtable directly; this is the fstat handler + handle + Spoor route the
+    // pouch 0026 dispatcher rides). Prints ONLY on mismatch -- quiet when
+    // sound.
+    if (console_fd >= 0) {
+        struct t_stat cst;
+        long frc = t_fstat(console_fd, &cst);
+        if (frc != 0 || (cst.mode & 0170000u) != 0020000u ||
+            (cst.qid_path & (1ULL << 41)) == 0) {
+            char db[24];
+            t_putstr("joey: #55 console fstat MISMATCH rc=");
+            t_putstr(itoa_dec(frc, db, sizeof(db)));
+            t_putstr(" mode=");
+            t_putstr(itoa_dec((long)cst.mode, db, sizeof(db)));
+            t_putstr(" qidhi=");
+            t_putstr(itoa_dec((long)(cst.qid_path >> 32), db, sizeof(db)));
+            t_putstr("\n");
+        }
+    }
+
     // (3b) Open /dev/consctl NOW too, while joey is still console-attached. The
     // devdev_open mint-gate requires console-attach (#94-B); joey is the sole
     // minter and hands the fd down to each login so a non-attached login/shell

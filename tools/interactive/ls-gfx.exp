@@ -92,6 +92,15 @@ lc_pass "fbcon: graphical keyboard -> tapestryd -> aurora -> consfeed -> ut (pwd
 lc_run_expect "cat /dev/winsize" "winsize 128 36"
 lc_pass "fbcon: /dev/winsize serves aurora's grid (the #55 winsize contract live)"
 
+# #55c: the pouch cons arm (patch 0026) -- run FROM ut so fd 0 is a real
+# inherited cons fd (the boot prover pipes the probe's stdio, so only this
+# path can prove it): the is-a-cons qid decode (bit 41) -> TIOCGWINSZ
+# served from /dev/winsize (aurora's live grid) -> isatty TRUE on the
+# console (the statless-cons latent retired) -> TIOCSWINSZ EPERM
+# (renderer-owned geometry) -> tcgetattr ENOTTY (the documented seam).
+lc_run_expect "pouch-hello-pty cons" "pty-cons: 128x36 isatty=1 setws=EPERM tcgetattr=ENOTTY OK"
+lc_pass "fbcon: pouch TIOCGWINSZ/isatty on the console (the 0026 cons arm live)"
+
 # And the injected session activity rendered too.
 after 700
 if {[gfx_dump /tmp/ls-gfx-final.png "-c"] ne ""} {
