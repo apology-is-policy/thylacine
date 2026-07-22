@@ -30,7 +30,9 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <time.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -199,9 +201,81 @@ int main(void)
 	CHECK(pr == 0, "poll(POLLIN) times out on an empty udp socket (waited)");
 	CHECK(close(pfd) == 0, "close pfd");
 
+	/* #52 (0025): the BSD nonblocking-socket surface, proven with a REAL
+	 * datagram over netd's resident 127.0.0.1 loopback (net-8a) -- fully
+	 * in-guest, host-decoupled. Nonblocking reads are TRY-AND-EAGAIN
+	 * (netd's `nonblock` ctl verb -> E_AGAIN on an empty read), so the
+	 * read path never touches the readiness bridge. A dials 127.x once
+	 * (the throwaway send binds its local port -- the 0017 lazy bind --
+	 * and migrates its socket onto the lo stack); B then lands a datagram
+	 * on A's ephemeral port. Pre-0025, the FIONBIO CHECK failed (no
+	 * surface: the exact "UDP_Init: Unable to open control socket"
+	 * blocker). */
+	int on52 = 1;
+	int a52 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	CHECK(a52 >= 0, "socket(AF_INET,DGRAM,IPPROTO_UDP) #52");
+	CHECK(ioctl(a52, FIONBIO, &on52) == 0, "ioctl(FIONBIO) sets nonblocking");
+	int avail = -1;
+	CHECK(ioctl(a52, FIONREAD, &avail) == 0 && avail == 0,
+	      "ioctl(FIONREAD) 0 on an idle socket");
+	struct sockaddr_in lo52;
+	memset(&lo52, 0, sizeof(lo52));
+	lo52.sin_family = AF_INET;
+	lo52.sin_addr.s_addr = htonl(0x7f000001u);
+	lo52.sin_port = htons(9);   /* discard: nobody listens; the send binds A */
+	CHECK(sendto(a52, "x", 1, 0, (struct sockaddr *)&lo52, sizeof(lo52)) == 1,
+	      "udp send-to-127.x binds A on the lo stack");
+	struct sockaddr_in asin;
+	socklen_t alen52 = sizeof(asin);
+	memset(&asin, 0, sizeof(asin));
+	CHECK(getsockname(a52, (struct sockaddr *)&asin, &alen52) == 0
+	      && asin.sin_port != 0, "getsockname A (lo ephemeral bound)");
+	/* Nonblocking recvfrom on the empty socket: EWOULDBLOCK, never a park
+	 * (netd answers E_AGAIN because A is nonblock). NO readiness bridge. */
+	char nb52 = 0;
+	ssize_t nr52 = recvfrom(a52, &nb52, 1, 0, 0, 0);
+	CHECK(nr52 == -1 && (errno == EWOULDBLOCK || errno == EAGAIN),
+	      "nonblocking recvfrom EWOULDBLOCK when empty");
+	int b52 = socket(AF_INET, SOCK_DGRAM, 0);
+	CHECK(b52 >= 0, "socket B #52");
+	lo52.sin_port = asin.sin_port;   /* -> A's port */
+	CHECK(sendto(b52, "Q", 1, 0, (struct sockaddr *)&lo52, sizeof(lo52)) == 1,
+	      "B lands a loopback datagram on A");
+	/* Convergent nonblocking read: delivery rides netd's serve loop, so a
+	 * few EWOULDBLOCK misses precede the datagram. Every miss MUST be
+	 * EWOULDBLOCK (never EIO -- the tag-exhaustion regression), and the
+	 * datagram MUST arrive within the bound. This loop does NOT poll (no
+	 * bridge, no tag churn) -- it retries the nonblocking read directly. */
+	struct timespec ts52 = { 0, 10 * 1000 * 1000 };   /* 10 ms */
+	int tries52;
+	for (tries52 = 0; tries52 < 300; tries52++) {
+		struct sockaddr_in src52;
+		socklen_t sl52 = sizeof(src52);
+		memset(&src52, 0, sizeof(src52));
+		nr52 = recvfrom(a52, &nb52, 1, 0, (struct sockaddr *)&src52, &sl52);
+		if (nr52 == 1) {
+			CHECK(nb52 == 'Q', "recvfrom returns the datagram payload");
+			CHECK(src52.sin_family == AF_INET
+			      && src52.sin_addr.s_addr == htonl(0x7f000001u),
+			      "recvfrom src IP 127.0.0.1 (recorded remote)");
+			break;
+		}
+		CHECK(nr52 == -1 && (errno == EWOULDBLOCK || errno == EAGAIN),
+		      "every convergent-read miss is EWOULDBLOCK (not EIO)");
+		nanosleep(&ts52, 0);
+	}
+	CHECK(tries52 < 300, "loopback datagram converges to the nonblocking reader");
+	/* Drained: EWOULDBLOCK again (the socket is empty; netd E_AGAIN). */
+	nr52 = recvfrom(a52, &nb52, 1, 0, 0, 0);
+	CHECK(nr52 == -1 && (errno == EWOULDBLOCK || errno == EAGAIN),
+	      "recvfrom EWOULDBLOCK once drained");
+	CHECK(setsockopt(a52, SOL_SOCKET, SO_BROADCAST, &on52, sizeof(on52)) == 0,
+	      "setsockopt(SO_BROADCAST) accepted");
+	CHECK(close(b52) == 0 && close(a52) == 0, "close #52 pair");
+
 	printf("pouch-hello-net: control surface OK "
 	       "(socket/reject/setsockopt/bind/listen/getsockname/"
-	       "shutdown/sendto/recvfrom/poll/close)\n");
+	       "shutdown/sendto/recvfrom/poll/nonblock/close)\n");
 
 	best_effort_live();
 

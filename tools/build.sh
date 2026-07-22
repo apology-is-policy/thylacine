@@ -2382,6 +2382,41 @@ build_all() {
     build_kernel
 }
 
+build_quake_host() {
+    # Task #52 (ls-gfx-mp): a HOST-native (macOS/arm64) tyr-quake from the
+    # same pruned-pristine vendored tree, run `-dedicated` as the multiplayer
+    # peer the guest connects to over slirp. Explicit-target ONLY (never part
+    # of `all` -- it needs brew sdl2 host-side; the mp scenario SKIPs when
+    # build/quake/host/tyr-quake is absent, so the suite stays green on hosts
+    # without it).
+    local hq_src="$BUILD_DIR/quake/host-src"
+    local hq_bin="$BUILD_DIR/quake/host"
+    local tq_vendor="$REPO_ROOT/third_party/tyrquake"
+    if ! command -v sdl2-config >/dev/null 2>&1; then
+        echo "==> quake-host: sdl2-config not found (brew install sdl2)" >&2
+        exit 1
+    fi
+    rm -rf "$hq_src"
+    mkdir -p "$hq_src" "$hq_bin"
+    cp -R "$tq_vendor/." "$hq_src/"
+    # The pruned icons/ + the upstream-GENERATED icon header: satisfy the
+    # Makefile's rule graph (a backdated png prerequisite + a fresh stub
+    # header) instead of bypassing it -- the build_tyrquake stub, host-shaped.
+    mkdir -p "$hq_src/icons" "$hq_src/build/include"
+    touch -t 200001010000 "$hq_src/icons/tyrquake-1024x1024.png"
+    printf 'static const unsigned char MagickImage[] = { 0 };\n' \
+        > "$hq_src/build/include/tyrquake_icon_128.h"
+    # The Makefile's darwin branch hardcodes /Library/Frameworks/SDL2; feed
+    # it brew's sdl2-config instead.
+    make -C "$hq_src" -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" \
+        bin/tyr-quake \
+        SDL_CFLAGS="$(sdl2-config --cflags) -DDISABLE_ICON" \
+        SDL_LFLAGS="$(sdl2-config --libs)" > "$hq_src/build-host.log" 2>&1 \
+        || { tail -20 "$hq_src/build-host.log" >&2; exit 1; }
+    cp "$hq_src/bin/tyr-quake" "$hq_bin/tyr-quake"
+    echo "==> quake-host: $hq_bin/tyr-quake ($(file -b "$hq_bin/tyr-quake" | cut -d, -f1-2))"
+}
+
 clean() {
     echo "==> Removing $BUILD_DIR"
     rm -rf "$BUILD_DIR"
@@ -2394,6 +2429,7 @@ case "$target" in
     pouch-progs) build_pouch_progs ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
+    quake-host)  build_quake_host  ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;

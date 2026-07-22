@@ -1074,6 +1074,51 @@ consumer polls a listener. Recorded as a net-6b-3 seam (NET-DESIGN §12.2; #220)
 the candidate fix is `check_ready` reporting `accept_ready` for an `ANNOUNCED`
 TCP slot, weighed at the net-6b-4 audit.
 
+### Nonblocking sockets — `FIONBIO` / `FIONREAD` / `SO_BROADCAST` (task #52, `0025`)
+
+The BSD-socket nonblocking idiom — `ioctl(fd, FIONBIO, &1)` to set nonblocking
+mode, then `recvfrom` that returns `EWOULDBLOCK` on no data — is what TyrQuake's
+`UDP_OpenSocket` uses; before `0025` `FIONBIO` had no pouch surface, so
+`UDP_Init` failed at "Unable to open control socket, UDP disabled". `0025` wires
+it, and the **design is the load-bearing part**: a nonblocking read is
+**try-and-EAGAIN**, never poll-then-read.
+
+- **`FIONBIO`** sets the slot's local `nonblock` record *and* writes the netd
+  `nonblock 1`/`nonblock 0` **ctl verb**. netd then answers an empty-but-open
+  `data` read with `E_AGAIN` (Rlerror 11 → the guest's `EWOULDBLOCK`, via
+  `syscall_cp`'s `__syscall_ret` translation) instead of parking a `PendingRead`.
+  So the tagged `read`/`recv`/`recvfrom` shims are **unchanged** (pristine): the
+  nonblocking behavior is entirely netd-driven, and the read path **never touches
+  the readiness bridge**.
+- **Why not poll-before-read.** An earlier cut gated each nonblocking read on a
+  0-timeout `poll()` of the `ready` fd. That churned the shared netd session's
+  9P tag pool: a 0-timeout poll submits a readiness probe the kernel poll kthread
+  then Tflush-abandons, and the abandoned tag sits `awaiting_flush` until netd
+  Rflushes it — a tight read loop piled them up faster than the Rflush and
+  **exhausted the 64-tag pool** (`alloc_tag<0` in `p9_session_send_read` →
+  spurious `EIO` on every subsequent data read; the readiness path kept working
+  because it *reused* an already-parked op whose tag was held). netd-`E_AGAIN`
+  removes the churn at its source.
+- **`FIONREAD`** answers the 1/0 **truthiness** contract (the `/net` readiness
+  surface reports ready/not-ready, never a byte count; TyrQuake's
+  `net_udp.c:302` tests nonzero only) via `pouch_sock_readable` — a **cold-path**
+  helper that *does* touch the readiness bridge (one abandoned tag per call,
+  fine at frame rate, out of contract in a tight loop; the read path is the hot
+  path and avoids it).
+- **`SO_BROADCAST`** joins the `FAM_INET` accept-as-noop allowlist (the BSD
+  broadcast setup must not error; an actual `255.255.255.255` send is a slirp
+  dead end, which UDP tolerates).
+
+Both ioctls are `FAM_INET`-only; any other fd → `ENOTTY` (no kernel ioctl
+surface). Nonblocking **writes** are out of scope (the `/net` send path does not
+park the caller — the UDP `send_slice` drops on a full tx ring). The
+`F_SETFL`/`O_NONBLOCK` fcntl route stays a documented seam. **Residual hazard
+(tracked):** a tight 0-timeout `poll()`/`select()` loop on a `/net` fd (not the
+nonblocking read path, which avoids the bridge) can still churn the session tag
+pool — the proper fix is kernel-side (a non-sleeping poll should not submit a
+readiness probe, since no poller will be around to wake), on the audit-bearing
+`dev9p.poll` bridge (`net_poll.tla`).
+
 ### Verifying live — `/pouch-hello-net`
 
 The proving binary (the first POSIX `socket()` program Thylacine runs) does the
@@ -1088,8 +1133,12 @@ a UDP `sendto` to the on-link gateway 10.0.2.2:9 (egresses without a peer) →
 ctl write — and (net-6b-3) a `poll()` surface: a connected UDP socket reads
 `POLLOUT`-ready (writable) but `poll(POLLIN)` **times out** (no datagram queued —
 the load-bearing assertion that `poll()` actually *waited* on the `ready` file
-rather than the always-ready data fd) — all against netd's `/net` (the joey
-`net-5/6a-2 PROBE` gate), plus a
+rather than the always-ready data fd) — and (#52) the nonblocking surface:
+`FIONBIO` sets nonblocking, `FIONREAD` reads 0 on an idle socket, a real
+datagram over netd's resident `127.0.0.1` loopback (net-8a) **converges to a
+nonblocking `recvfrom`** (every miss `EWOULDBLOCK`, never `EIO` — the
+tag-exhaustion regression), and `SO_BROADCAST` is accepted — all against netd's
+`/net` (the joey `net-5/6a-2 PROBE` gate), plus a
 best-effort logged live `connect`+round-trip to a public endpoint (host-coupled,
 never a gate). The full deterministic in-guest data round-trip + the
 ported-server/soak E2E are net-8's exit criteria (NET-DESIGN §16).

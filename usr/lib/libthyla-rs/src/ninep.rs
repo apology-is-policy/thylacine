@@ -110,6 +110,7 @@ pub const P9_NAME_MAX: usize = 255;
 pub const E_PERM: u32 = 1;
 pub const E_NOENT: u32 = 2;
 pub const E_BADF: u32 = 9;
+pub const E_AGAIN: u32 = 11; // EAGAIN/EWOULDBLOCK (a nonblocking read with no data, #52)
 pub const E_NOMEM: u32 = 12;
 pub const E_FAULT: u32 = 14;
 pub const E_EXIST: u32 = 17;
