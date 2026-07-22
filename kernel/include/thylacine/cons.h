@@ -145,7 +145,12 @@ short cons_poll(short events, struct poll_waiter *pw);
 // as five space-separated "+name"/"-name" tokens + '\n' (same grammar as the
 // write -- symmetric). Writes the WHOLE line into buf (needs >= 34 bytes);
 // returns the byte count, or 0 if buf is too small (never a partial line).
-long cons_set_mode_cmd(const void *buf, long n);
+// `allow_flags` (#55 audit F2): true for the trusted console-attach chain
+// (the SYS_CONSOLE_OPEN fd + login/ut's inherited consctl) -> the full five-flag
+// grammar; false for a RENDERER-minted consctl (CCONSWINSZONLY) -> the winsize
+// verb ONLY (a `+`/`-` flag token rejects the write). Keeps a compromised
+// renderer off the global termios (the serial-input ECHO-off mask defeat).
+long cons_set_mode_cmd(const void *buf, long n, bool allow_flags);
 long cons_render_mode(void *buf, long n);
 
 // =============================================================================

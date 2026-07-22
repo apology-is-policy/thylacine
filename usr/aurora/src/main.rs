@@ -289,10 +289,30 @@ pub extern "C" fn rs_main() -> i64 {
                                 // so the margins need the fill).
                                 w = surf.w as usize;
                                 h = surf.h as usize;
+                                // #55 audit F3: the sub-floor gate keys on the
+                                // OFFERED size, but the reweave adopts the
+                                // acked surf.w/h. tapestryd acks the size it
+                                // offered (verified: the G-6b resize protocol
+                                // fences on the offer), so the resulting grid
+                                // equals the gated one; a hypothetical
+                                // ack-smaller-than-offered would slip a tiny
+                                // grid past the guard -- memory-safe (.max(1)
+                                // + Vt::resize handle cols/rows >= 1), only a
+                                // cosmetically-small fbcon, never a panic.
                                 cols = (w / m.cell_w).max(1);
                                 rows = (h / m.cell_h).max(1);
                                 term.resize(cols, rows);
                                 full_fill = true;
+                                // #55 audit F1: the reweave can SHRINK the
+                                // grid below the old cursor row. prev_cursor
+                                // is main-loop-local -- Vt::resize clamps
+                                // term.cy but never touches it, so the step-3
+                                // damage `term.dirty[prev_cursor.row]` would
+                                // index past the shrunk dirty vec (an OOB
+                                // panic -> no_std abort -> a dark console). A
+                                // full_fill repaints every row, so the old
+                                // cursor position is meaningless: drop it.
+                                prev_cursor = None;
                                 // The kernel relays a changed size as
                                 // tty:winch to the session (iff-changed
                                 // at the verb, so this is post-exact).
@@ -374,11 +394,19 @@ pub extern "C" fn rs_main() -> i64 {
             None
         };
         if cursor != prev_cursor {
+            // #55 audit F1: bound both marks (mirrors Vt::mark's `row < rows`
+            // guard). prev_cursor is reset to None on a shrink reweave above,
+            // so this is belt-and-suspenders -- a stale row can never index
+            // past the (possibly just-shrunk) dirty vec.
             if let Some((_, r)) = prev_cursor {
-                term.dirty[r] = true;
+                if r < term.dirty.len() {
+                    term.dirty[r] = true;
+                }
             }
             if let Some((_, r)) = cursor {
-                term.dirty[r] = true;
+                if r < term.dirty.len() {
+                    term.dirty[r] = true;
+                }
             }
         }
         let mut r0 = usize::MAX;

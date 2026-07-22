@@ -307,6 +307,23 @@ void test_devdev_consctl_renderer_mint(void) {
     cons_winsize_get(&wc, &wr);
     TEST_ASSERT(wc == 128 && wr == 36, "winsize applied 128x36");
 
+    // #55 audit F2: the renderer-minted consctl is WINSIZE-ONLY -- a termios
+    // flag token rejects the whole write (no global-termios flip -> no
+    // serial-input ECHO-off mask defeat). The minted Spoor carries
+    // CCONSWINSZONLY; an attached-minted consctl (login/ut) does NOT and keeps
+    // full flags (covered by test_devdev_cons_gate's cc_write_took leg).
+    TEST_ASSERT((ccopen->flag & CCONSWINSZONLY) != 0u,
+                "renderer-minted consctl tagged CCONSWINSZONLY");
+    u32 tio_before = cons_test_termios();
+    TEST_EXPECT_EQ(devdev.write(ccopen, "+echo", 5, 0), -1L,
+                   "renderer consctl REJECTS a flag token (F2)");
+    TEST_EXPECT_EQ((long)cons_test_termios(), (long)tio_before,
+                   "the rejected flag write left the termios unchanged");
+    TEST_EXPECT_EQ(devdev.write(ccopen, "+icanon winsize 80 24", 21, 0), -1L,
+                   "a flag mixed with winsize rejects the whole write");
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 128 && wr == 36, "the rejected mixed write left winsize unchanged");
+
     devdev.close(ccopen);
     proc_test_clear_console_renderer();
     if (saved_attach) proc_mark_console_attached(t->proc);
@@ -350,7 +367,7 @@ void test_devdev_winsize_leaf(void) {
                    "/dev/winsize write -> -1 (the writer is the consctl verb)");
 
     // A live value flows through (set via the production verb).
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 132 50", 14), 14L, "set 132x50");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 132 50", 14, true), 14L, "set 132x50");
     n = devdev.read(wsopen, buf, (long)sizeof(buf), 0);
     const char *set = "winsize 132 50\n";
     ok = (n == 15);

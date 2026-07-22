@@ -140,7 +140,12 @@ pub extern "C" fn rs_main() -> i64 {
     // (Ctrl-C in the raw console arrives as the 0x03 BYTE anyway [ISIG off],
     // and dying mid-edit to a stray note is exactly what an editor must not
     // do; :q is the exit). Best-effort: a failed open just leaves resize on
-    // the launch size (the pre-#55 behavior).
+    // the launch size (the pre-#55 behavior). #55 audit F5: self-managing
+    // also queues (instead of default-terminating) tty:hup/tty:quit -- sound
+    // on the CONSOLE (no tty:hup is posted there; kill/snare are unaffected),
+    // but a future nora-under-a-pts would need to re-honor tty:hup (a hangup
+    // must still tear the editor down) -- a pts-scoped seam, not a console
+    // defect.
     let notes = libthyla_rs::notes::Notes::open_self().ok();
 
     // Bring up gopls for a Go buffer. Absent / unspawnable / non-Go all mean

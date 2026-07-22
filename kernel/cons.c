@@ -1236,7 +1236,7 @@ static long cons_parse_u16_token(const u8 *b, long n, long *i) {
     return v;
 }
 
-long cons_set_mode_cmd(const void *buf, long n) {
+long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     if (!buf || n < 0) return -1;
     const u8 *b = (const u8 *)buf;
 
@@ -1270,6 +1270,11 @@ long cons_set_mode_cmd(const void *buf, long n) {
             continue;
         }
         if (sign != (u8)'+' && sign != (u8)'-') return -1;   // malformed token
+        // #55 audit F2: a renderer-minted consctl (CCONSWINSZONLY) may write
+        // ONLY the winsize verb -- a `+`/`-` flag token rejects the whole
+        // write, so a compromised renderer cannot flip the global termios
+        // (the ECHO-off serial-input mask defeat).
+        if (!allow_flags) return -1;
         long name_start = i + 1;
         long j = name_start;
         while (j < n && !cons_is_space(b[j])) j++;            // token end
@@ -1369,7 +1374,7 @@ void cons_winsize_get(u16 *cols, u16 *rows) {
 // `winsize 0 0` -- the serial posture: never an error; readers fall back to
 // the CPR probe (which the host terminal answers on serial).
 long cons_render_winsize(void *buf, long n) {
-    if (!buf || n < 21) return 0;                            // "winsize 65535 65535\n"
+    if (!buf || n < 20) return 0;   // #55 audit F4: "winsize 65535 65535\n" = 20 bytes exactly
     u16 wc, wr;
     cons_winsize_get(&wc, &wr);
     u8 *out = (u8 *)buf;

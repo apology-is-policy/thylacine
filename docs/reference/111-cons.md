@@ -304,9 +304,22 @@ host terminal answers it); the deterministic client rule is: read
 
 **The writer.** The renderer (aurora) — it self-serves a consctl fd by name
 under the #55 mint-gate widening (see `109-devdev.md`) and writes the verb at
-first present + every reweave (AURORA.md §4). The verb itself is accepted from
-any consctl holder like the five flags (#94-B: the inherited fd is the
+first present + every reweave (AURORA.md §4). The verb is accepted from any
+consctl holder like the five flags (#94-B: the inherited fd is the
 capability); in practice only aurora writes it.
+
+**The renderer-minted consctl is WINSIZE-ONLY (#55 audit F2).**
+`cons_set_mode_cmd(buf, n, allow_flags)` — `allow_flags=false` rejects any
+`+`/`-` termios flag token, accepting only the winsize verb. A consctl Spoor
+minted by the RENDERER (the widened gate) carries `CCONSWINSZONLY` (set at
+`devdev_open`), so the write handler passes `allow_flags=false`; the trusted
+attached chain (login/ut's inherited consctl) is unmarked → full grammar. This
+closes the F2 hole: the renderer holds consfeed (input injection it feeds),
+which dominates a *geometry report* but NOT a flip of the *global* cooking word
+— that word also governs the serial RX path (`cons_rx_input`), so `+echo` from a
+compromised renderer would unmask a concurrent serial-typed password into the
+drain it reads (the ECHO-off HARD guarantee defeated). Winsize confers no
+input-domain authority, so the widening is sound once restricted to it.
 
 **The is-a-cons stat contract.** `cons_stat_native_fill` (shared by
 `devcons.stat_native` + devdev's cons-leaf arm) fills a `t_stat`: zero-fill

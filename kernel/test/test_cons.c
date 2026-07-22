@@ -944,23 +944,23 @@ void test_cons_consctl_parse(void) {
     cons_test_reset();
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_ISIG, "start at the default");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "+echo accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "+echo accepted");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)(CONS_ISIG | CONS_ECHO), "+echo set ECHO");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("-isig", 5), 5L, "-isig accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-isig", 5, true), 5L, "-isig accepted");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_ECHO, "-isig cleared ISIG");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon +echo", 13), 13L, "two tokens accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon +echo", 13, true), 13L, "two tokens accepted");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)(CONS_ICANON | CONS_ECHO),
                    "atomic multi-flag set");
 
     // Malformed commands reject (-1) and leave the mode unchanged.
     u32 before = cons_test_termios();
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+bogus", 6), -1L, "unknown name -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("echo", 4), -1L, "missing +/- sign -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+", 1), -1L, "empty name -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("", 0), -1L, "empty command -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo +bad", 10), -1L, "one bad token rejects the batch");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+bogus", 6, true), -1L, "unknown name -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("echo", 4, true), -1L, "missing +/- sign -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+", 1, true), -1L, "empty name -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("", 0, true), -1L, "empty command -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo +bad", 10, true), -1L, "one bad token rejects the batch");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)before,
                    "a rejected command leaves the mode unchanged");
     cons_test_reset();
@@ -1003,7 +1003,7 @@ void test_cons_winsize_roundtrip(void) {
     cons_winsize_get(&wc, &wr);
     TEST_ASSERT(wc == 0 && wr == 0, "reset -> winsize unset (0x0)");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 132 50", 14), 14L, "winsize verb accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 132 50", 14, true), 14L, "winsize verb accepted");
     cons_winsize_get(&wc, &wr);
     TEST_ASSERT(wc == 132 && wr == 50, "snapshot reads 132x50");
 
@@ -1019,27 +1019,30 @@ void test_cons_winsize_roundtrip(void) {
     ok = (n == 15);
     for (long i = 0; ok && i < n; i++) if (buf[i] != leaf[i]) ok = false;
     TEST_ASSERT(ok, "leaf render is winsize 132 50");
-    TEST_EXPECT_EQ(cons_render_winsize(buf, 20), 0L, "leaf: too-small buffer -> 0");
+    // #55 audit F4: the floor is the fixed 20-byte MAX ("winsize 65535 65535\n"),
+    // not content-dependent -- n=20 renders, n=19 returns 0 (conservative-safe).
+    TEST_EXPECT_EQ(cons_render_winsize(buf, 20) > 0 ? 1L : 0L, 1L, "leaf: n=20 renders");
+    TEST_EXPECT_EQ(cons_render_winsize(buf, 19), 0L, "leaf: n<20 -> 0 (max-reserve floor)");
 
     // A mixed write applies flags + winsize atomically.
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo winsize 80 24", 19), 19L, "mixed write accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo winsize 80 24", 19, true), 19L, "mixed write accepted");
     TEST_ASSERT((cons_test_termios() & CONS_ECHO) != 0u, "mixed write set ECHO");
     cons_winsize_get(&wc, &wr);
     TEST_ASSERT(wc == 80 && wr == 24, "mixed write set 80x24");
 
     // Malformed winsize rejects the WHOLE write (flags too -- atomic).
     u32 before = cons_test_termios();
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 80", 10), -1L, "missing rows -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize a b", 11), -1L, "non-digit -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 70000 1", 15), -1L, "cols > 65535 -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("-echo winsize 9", 15), -1L,
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 80", 10, true), -1L, "missing rows -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize a b", 11, true), -1L, "non-digit -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 70000 1", 15, true), -1L, "cols > 65535 -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-echo winsize 9", 15, true), -1L,
                    "a bad winsize rejects the batch");
     TEST_ASSERT(cons_test_termios() == before, "rejected batch left the flags alone");
     cons_winsize_get(&wc, &wr);
     TEST_ASSERT(wc == 80 && wr == 24, "rejected batch left the winsize alone");
 
     // "winsizeX" is NOT the verb (the token must end at whitespace/EOL).
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsizeX 1 2", 12), -1L, "winsizeX -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsizeX 1 2", 12, true), -1L, "winsizeX -> -1");
     cons_test_reset();
 }
 
@@ -1052,17 +1055,17 @@ void test_cons_winsize_winch_iff_changed(void) {
     cons_test_reset();
     TEST_EXPECT_EQ((long)cons_winch_events(), 0L, "reset -> 0 winch events");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14), 14L, "set 100x40");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14, true), 14L, "set 100x40");
     TEST_EXPECT_EQ((long)cons_winch_events(), 1L, "first set -> 1 event");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14), 14L, "rewrite 100x40");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14, true), 14L, "rewrite 100x40");
     TEST_EXPECT_EQ((long)cons_winch_events(), 1L, "unchanged rewrite -> NO new event");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 41", 14), 14L, "set 100x41");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 41", 14, true), 14L, "set 100x41");
     TEST_EXPECT_EQ((long)cons_winch_events(), 2L, "changed rows -> 2nd event");
 
     // A flags-only write never touches the winsize (no event).
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "flags-only write");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "flags-only write");
     TEST_EXPECT_EQ((long)cons_winch_events(), 2L, "flags-only -> no event");
     cons_test_reset();
 }
@@ -1136,7 +1139,7 @@ void test_cons_cook_mode_flip_fresh_line(void) {
 
     // A production consctl write (turns ECHO on + stays canonical) MUST discard
     // the fragment -- the flip itself is what resets the line, regardless of flags.
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "consctl +echo accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "consctl +echo accepted");
 
     // Deliver: only the bare NL arrives -- the "abc" fragment was discarded by
     // the mode change (pre-fix it would prepend, delivering "abc\n").

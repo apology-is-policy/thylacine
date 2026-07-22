@@ -83,6 +83,17 @@ _Static_assert(sizeof(struct Qid) == 16,
                                // docs/DEBUG-FS-DESIGN.md section 7.2). Never cleared:
                                // it only GATES the release-walk (a stale flag after
                                // detach finds debug_owner already NULL -> no-op).
+#define CCONSWINSZONLY (1u << 5) // #55 audit F2: a /dev/consctl Spoor minted by the
+                               // console RENDERER (the widened mint gate) -- NOT the
+                               // trusted attached chain. cons_set_mode_cmd rejects the
+                               // five termios flag tokens on it (winsize verb ONLY), so
+                               // a compromised renderer cannot flip the GLOBAL termios
+                               // (e.g. +echo) to unmask a concurrent SERIAL-input
+                               // password into the drain it reads -- the ECHO-off HARD
+                               // guarantee (cons.h) holds across the input domains the
+                               // renderer's consfeed authority does NOT dominate. Set at
+                               // devdev_open on the renderer branch; the attached chain's
+                               // consctl (login/ut, #94-B) is unmarked -> full grammar.
 #define CSRVCLIENT (1u << 2)   // devsrv byte-conn Spoor: CLIENT endpoint (read s2c
                                // / write c2s, the mirror of the server endpoint).
                                // Set on the Spoor devsrv_open returns for a byte-

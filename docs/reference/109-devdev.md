@@ -109,15 +109,24 @@ Design: ARCH §23.5.3. Two devdev-side changes:
 - **The consctl mint-gate widening**: `devdev_open`'s console arm now admits
   `DEV_KIND_CONSCTL` for the bound RENDERER as well as a console-attached
   caller — aurora (the winsize writer) self-serves by name exactly as it
-  opens consdrain/consfeed. Sound because the renderer already holds
-  **consfeed** = arbitrary input injection, which strictly dominates
-  consctl's termios+winsize control surface (the I-27 dominance argument,
-  ARCH §23.5.3). The widening STOPS at consctl: `cons` (the DATA leaf) stays
+  opens consdrain/consfeed. The renderer-minted consctl is **WINSIZE-VERB-
+  ONLY** (#55 audit F2): the opened Spoor carries `CCONSWINSZONLY`, and
+  `devdev_write` passes `cons_set_mode_cmd(..., allow_flags=false)` so a
+  `+`/`-` termios flag token rejects the whole write. This is what makes the
+  I-27 dominance argument sound: the renderer holds consfeed (input
+  injection it feeds), which dominates a *winsize report* (pure geometry)
+  but NOT a flip of the *global* cooking word — that word also governs the
+  serial RX path (`cons_rx_input`), so an unrestricted renderer could write
+  `+echo` to unmask a concurrent serial-typed password into the drain it
+  reads (the ECHO-off HARD guarantee defeated). The attached login/ut chain
+  (which legitimately sets `-echo` for the password mask) stays unmarked →
+  full grammar. The widening STOPS at consctl: `cons` (the DATA leaf) stays
   attach-only at open + per-I/O re-gated — reading console INPUT is exactly
   what the renderer role must not confer. consctl I/O stays ungated (#94-B
-  unchanged). **Revert-probed**: widening the arm to cover `cons` fails
-  exactly `devdev.consctl_renderer_mint`'s "cons mint STILL DENIED" assert
-  (1194/1195).
+  unchanged). **Revert-probed** (both legs): widening the arm to cover
+  `cons` fails `devdev.consctl_renderer_mint`'s "cons mint STILL DENIED";
+  dropping the `allow_flags` guard fails its "renderer consctl REJECTS a
+  flag token" assert — each 1194/1195.
 
 - **`devdev_stat_native`** (new slot): the cons leaf → `cons_stat_native_fill`
   (the shared is-a-cons contract, `111-cons.md`); every other leaf stays

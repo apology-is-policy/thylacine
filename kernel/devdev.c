@@ -283,15 +283,22 @@ static struct Spoor *devdev_open(struct Spoor *c, int omode) {
     if (dev_kind_is_console((u32)c->qid.path) && !devdev_console_gate_ok()) {
         // #55 (ARCH 23.5.3): consctl (the CONTROL leaf) is ALSO mintable by
         // the bound renderer -- the winsize writer self-serves by name,
-        // exactly as it opens consdrain/consfeed. Sound because the renderer
-        // already holds consfeed = arbitrary INPUT INJECTION, which strictly
-        // dominates consctl's termios+winsize control surface -- the widening
-        // confers no authority the role did not already have. cons (the DATA
-        // leaf) stays attach-only: reading console INPUT is exactly what the
-        // renderer role must NOT confer (I-27; the drain carries OUTPUT).
+        // exactly as it opens consdrain/consfeed. Sound ONLY because the
+        // renderer-minted consctl is restricted to the `winsize` verb (the
+        // CCONSWINSZONLY tag below): the renderer already holds consfeed =
+        // arbitrary INPUT INJECTION, which dominates a winsize report (pure
+        // geometry, no input-domain authority) -- but it does NOT dominate a
+        // termios flip on the GLOBAL cooking word, which also governs the
+        // SERIAL RX path (#55 audit F2). cons (the DATA leaf) stays
+        // attach-only: reading console INPUT is exactly what the renderer
+        // role must NOT confer (I-27; the drain carries OUTPUT).
         if (!((u32)c->qid.path == DEV_KIND_CONSCTL &&
               devdev_renderer_gate_ok()))
             return NULL;
+        // The renderer-minted (non-attached) consctl: winsize-verb-only.
+        struct Spoor *o = dev_simple_open(c, omode);
+        if (o) o->flag |= CCONSWINSZONLY;
+        return o;
     }
     // G-4: the renderer pair mints only for the bound renderer. The drain
     // open additionally ARMS the tap (single-open; a second open is refused
@@ -417,7 +424,9 @@ static long devdev_write(struct Spoor *c, const void *buf, long n, s64 off) {
     case DEV_KIND_CONS:                         // the shared console-output path
         return cons_output_write(buf, n);
     case DEV_KIND_CONSCTL:                      // LS-8b: stty-style +/-flag parse
-        return cons_set_mode_cmd(buf, n);
+        // #55 audit F2: a renderer-minted consctl (CCONSWINSZONLY) is
+        // restricted to the winsize verb; the attached chain gets full flags.
+        return cons_set_mode_cmd(buf, n, !(c->flag & CCONSWINSZONLY));
     case DEV_KIND_CONSFEED:                     // G-4: renderer input injection
         if (!devdev_renderer_gate_ok()) return -1;
         return cons_feed_write(buf, n);
