@@ -731,6 +731,25 @@ build_go_goroot() {
         echo "==> Ambush: fork source not found at $ambush_src -- skipping /goroot bake"
     fi
 
+    # A friendly demo program for exploring nora's Go debugger + IDE features
+    # (the dashboard tiles + the cross-boundary "-- kernel --" stack + variable
+    # inspection). Unstripped so :debug can break by function + read locals; the
+    # SOURCE is baked beside it (/goroot/demo) so `nora /goroot/demo/nora-demo.go`
+    # opens it. Independent of the Ambush fork -- needs only the Go toolchain, so
+    # the source stays openable even where the debugger is absent.
+    if [[ -d "$REPO_ROOT/usr/nora-demo" ]]; then
+        echo "==> Building nora-demo (debug demo, unstripped) for /goroot/bin"
+        ( cd "$REPO_ROOT/usr/nora-demo" && GOOS=thylacine GOARCH=arm64 CGO_ENABLED=0 \
+            "$go_bin" build -o "$stage/bin/nora-demo" . ) \
+            || { echo "==> nora-demo /goroot bake FAILED" >&2; return 1; }
+        mkdir -p "$stage/demo"
+        # Bake go.mod beside the source so /goroot/demo is a real module -> gopls
+        # gives the demo full diagnostics/hover/go-to-def when it is opened.
+        cp "$REPO_ROOT/usr/nora-demo/go.mod" "$REPO_ROOT/usr/nora-demo/nora-demo.go" "$stage/demo/"
+        echo "==> nora-demo (/goroot) built: $stage/bin/nora-demo + source /goroot/demo/nora-demo.go"
+        ledger "nora-demo: Go debug demo (unstripped) + source -> /goroot/bin + /goroot/demo (nora :debug demo)"
+    fi
+
     # GOROOT metadata the toolchain reads (version string, go.env, timezone db).
     cp "$GOFORK/VERSION" "$GOFORK/go.env" "$stage/" 2>/dev/null || true
     [[ -d "$GOFORK/lib" ]] && cp -RL "$GOFORK/lib" "$stage/" 2>/dev/null

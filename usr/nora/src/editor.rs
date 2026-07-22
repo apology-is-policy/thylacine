@@ -2765,7 +2765,7 @@ Space then c) to return to your work.
 
   DEBUGGER  (Go programs, when Ambush is installed)
     :debug <prog>   start debugging a compiled binary; it stops at entry
-    :break <func>   set a breakpoint by function name (main.parkLoop)
+    :break <func>   set a breakpoint by function name (main.total)
     :cont   :c      continue until the next breakpoint or exit
     :next   :n      step over one source line
     :step   :s      step into a call     :stepout  :so   step back out
@@ -2774,8 +2774,26 @@ Space then c) to return to your work.
     :kill           end the session
     Hot keys while stopped (NORMAL mode):  F5 continue   F10 step over
       F11 step into    Shift-F11 step out    Shift-F5 stop
-    Space d  ->  the debug submenu:  v sidebar  c console  z zoom  e eval
-    The status bar reports where the program stopped and each result.
+
+  THE DEBUG DASHBOARD  (appears while stopped: a sidebar + a console)
+    Tab           move focus:  editor -> Variables -> Call Stack ->
+                    Goroutines -> Console -> back to the editor
+    On a focused sidebar tile:
+      j k  g G    select a row / jump to the top / bottom
+      l  h        expand / collapse -- a struct, slice or map in
+                    Variables; the Program/Debug tabs in the Console
+      Enter       act:  Call Stack jumps the editor to the frame;
+                    Goroutines switches the inspected goroutine
+      Esc         return focus to the editor
+    The Call Stack is a UNIFIED user->kernel stack: your Go frames,
+      an ember "-- kernel --" divider, then the kernel frames the
+      program is stopped in -- the cross-boundary view.
+    Space d  ->  panel toggles:  v sidebar  c console  z zoom  e eval
+    The status bar reports where it stopped and each result.
+
+  A DEMO is baked in to explore all of this:
+    nora /goroot/demo/nora-demo.go    read it (with Go diagnostics)
+    :debug /goroot/bin/nora-demo      then  :break main.total   :cont
 
 That's everything. Happy editing!
 "#;
@@ -3692,6 +3710,11 @@ mod tests {
         assert_eq!(ed.mode_str(), "VIEW");
         assert!(ed.text.content().contains("Quick Reference"));
         assert!(ed.text.content().contains("MULTI-CURSOR"));
+        // The manual covers the debugger dashboard + the baked demo (drift guard:
+        // a binding change must keep the help accurate).
+        assert!(ed.text.content().contains("DEBUG DASHBOARD"));
+        assert!(ed.text.content().contains("-- kernel --"));
+        assert!(ed.text.content().contains("nora-demo"));
     }
 
     #[test]

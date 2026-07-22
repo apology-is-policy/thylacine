@@ -424,6 +424,20 @@ state / watches / 8g). A UX seam: `h` on a plain leaf is inert (collapse the
 group from row 0) — move-to-parent is a later polish. Kernel byte-unchanged;
 consumes I-39; no new §28 invariant.
 
+**Trying it — the baked demo.** `usr/nora-demo/` is a small, readable Go program
+(`Item` struct + slice + map, three loop-bearing functions, and a
+worker-pool/channel fan-in) built by `build_go_goroot` **unstripped** (DWARF
+retained) and populated onto the pool at **`/goroot/bin/nora-demo`** with its
+source at **`/goroot/demo/nora-demo.go`** (both world-readable, on the login
+PATH). It exercises every dashboard feature: `nora /goroot/demo/nora-demo.go` to
+read/edit it with gopls, then `:debug /goroot/bin/nora-demo`, `:break main.total`,
+`:cont`, and `Tab` into the tiles — the `Item` tree in Variables, the worker
+goroutines in Goroutines, and the ember `── kernel ──` divider in the Call Stack.
+The `:help` manual documents the whole dashboard (the tiles, `Tab` focus, the
+per-tile keys, the cross-boundary stack) and points at this demo. The build is
+independent of the Ambush fork (needs only the Go toolchain), so the source stays
+openable even where the debugger is absent.
+
 ## Console discipline (I-27)
 
 `nora` acquires the **screen** on fd 1 (Kaua `Terminal`) and **reads input** on
