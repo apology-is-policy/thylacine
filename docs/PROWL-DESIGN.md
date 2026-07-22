@@ -1,9 +1,9 @@
-# TTOP-DESIGN.md — the scheduler-aware process monitor + the kernel telemetry it reads
+# PROWL-DESIGN.md — the scheduler-aware process monitor + the kernel telemetry it reads
 
-Status: **DESIGN PASS — awaiting signoff on the open questions (§7).** No code yet.
-This is the scripture landing per the CLAUDE.md design-conversation pattern
-(research → doc → surface forks → signoff → bind ARCH → build). The tool's name
-is itself an open question (OQ-1); the working name in this document is `ttop`.
+Status: **SIGNED OFF 2026-07-22 — §7 resolved.** Building telemetry-first
+(prowl-1..5, §6). Landed per the CLAUDE.md design-conversation pattern (research →
+doc → surface forks → signoff → bind ARCH → build). The tool is `prowl`; the
+kernel telemetry it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
 
 ---
 
@@ -27,7 +27,7 @@ This is two layers, and they are separable:
 1. **The telemetry substrate (kernel):** per-process CPU accounting + names +
    a scheduler-introspection view, exposed through the existing `/proc` and
    `/ctl` synthetic filesystems. *The filesystem is the API* — no new syscall.
-2. **The tool (`ttop`):** a native `libthyla-rs` TUI on Kaua (the LS-7 console-TUI
+2. **The tool (`prowl`):** a native `libthyla-rs` TUI on Kaua (the LS-7 console-TUI
    substrate) that reads that telemetry, renders it, and — as a *manager* — acts
    on it (kill / stop / cont) through the existing `/proc/<pid>/ctl` surface.
 
@@ -168,7 +168,7 @@ a whole-system monitor needs. The **deep** per-process view (`/proc/<pid>/sched`
 per-thread internals, another proc's `cpu_ns` detail) is the question: Plan 9
 gates `/proc` detail by *ownership*; Thylacine's I-39 gates cross-proc
 *inspection*. Recommendation: **the summary (name/%CPU/state/mem) stays
-all-visible** (the `ttop` overview, exactly `/ctl/procs`'s posture); **the deep
+all-visible** (the `prowl` overview, exactly `/ctl/procs`'s posture); **the deep
 internals follow an owner-or-`CAP_HOSTOWNER` gate** (a full-system monitor is the
 operator's tool; a confined user still sees the overview + full detail on its own
 processes). This composes I-1 (isolation) + the existing `/ctl` posture; it adds
@@ -176,13 +176,13 @@ no new §28 invariant.
 
 ---
 
-## 4. The tool — `ttop`
+## 4. The tool — `prowl`
 
 ### 4.1 A Kaua TUI (native libthyla-rs)
 
 Built on Kaua (LS-7; `usr/lib/kaua`), the same substrate as `nora`. Polls `/proc`
 + `/ctl` on a cadence (default ~1–2 s, configurable), diffs `cpu_ns` for %CPU. A
-buggy `ttop` corrupts only its own screen — it reads the FS and validates
+buggy `prowl` corrupts only its own screen — it reads the FS and validates
 nothing on the kernel's behalf (the kernel gates the reads).
 
 ### 4.2 The view
@@ -199,7 +199,7 @@ nothing on the kernel's behalf (the kernel gates the reads).
 ### 4.3 The manager (control)
 
 - **kill / killgrp** via `/proc/<pid>/ctl` — already implemented, I-26 two-axis
-  gated (owner OR `CAP_HOSTOWNER`/`CAP_KILL`). ttop adds **no new authority**; a
+  gated (owner OR `CAP_HOSTOWNER`/`CAP_KILL`). prowl adds **no new authority**; a
   user kills only what it is already authorized to.
 - **stop / cont** via the PTY job-control ctl surface (the SIGTSTP/SIGCONT path).
 - **reband / priority** — a scheduler-control `/proc/<pid>/ctl` verb is a v1.x
@@ -230,39 +230,41 @@ nothing on the kernel's behalf (the kernel gates the reads).
 
 ## 6. Phasing
 
-- **ttop-1 (substrate MVP):** `run_ns` accounting + proc names + `/proc/<pid>/status`
+- **prowl-1 (substrate MVP):** `run_ns` accounting + proc names + `/proc/<pid>/status`
   Plan 9 parity + `/ctl/procs` name/%cpu columns. Kernel-only; the data a basic
   top needs. Kernel tests + the SMP gate (it touches the ctx-switch path).
-- **ttop-2 (tool MVP):** the Kaua `ttop` TUI — per-CPU meters + the process list
+- **prowl-2 (tool MVP):** the Kaua `prowl` TUI — per-CPU meters + the process list
   + %CPU + kill. An htop-equivalent, on-device.
-- **ttop-3 (the scheduler view):** `/proc/<pid>/sched` + the per-thread scheduler
+- **prowl-3 (the scheduler view):** `/proc/<pid>/sched` + the per-thread scheduler
   counters + the `/ctl/cpu` per-CPU leaf + the tool's detail pane + band/parks
   columns. The "better than htop" differentiator.
-- **ttop-4 (the manager):** stop/cont control + the tree view (+ the reband seam
+- **prowl-4 (the manager):** stop/cont control + the tree view (+ the reband seam
   if voted in).
-- **ttop-5 (audit):** the focused audit — the visibility gate + the hot-path cost
+- **prowl-5 (audit):** the focused audit — the visibility gate + the hot-path cost
   + the counter SMP-safety + the full SMP gate.
 
 ---
 
-## 7. Open questions — need your signoff before ttop-1
+## 7. Resolved decisions (signed off 2026-07-22)
 
-- **OQ-1 — the name.** `ttop` (your coinage; instantly legible) vs a thematic
-  name. My thematic recommendation: **`prowl`** — a predator surveying its
-  territory, and it reads naturally as a verb (`prowl`, `prowl -s cpu`). Per the
-  naming discipline I propose but don't force; `ttop` is a perfectly good legible
-  choice. **Your call.**
-- **OQ-2 — `run_ns` total vs user/kernel split at v1.0.** Recommend **total**
-  (the split is a v1.x field addition).
-- **OQ-3 — the per-CPU surface: a new `/ctl/cpu` leaf vs a Plan-9 `/dev/sysstat`.**
-  Recommend **`/ctl/cpu`** (keeps `/ctl` cohesive); `/dev/sysstat` is the
-  heritage-faithful alternative.
-- **OQ-4 — the deep-internals visibility gate.** Recommend **summary all-visible
-  (like `/ctl/procs`), deep-internals owner-or-`CAP_HOSTOWNER`**.
-- **OQ-5 — how much scheduler-introspection ships at v1.** Recommend the
-  *actionable* set first — **band / parks-per-s / wake-source / starved** (what
-  named this session's bug); the raw EEVDF `vd_t`/lag is expert-only and can be
-  v1.x.
+- **OQ-1 — the name → `prowl`.** A predator surveying its territory; reads as a
+  verb (`prowl`, `prowl -s cpu`). (The kernel telemetry surfaces are named for
+  what they are — `/proc/<pid>/status`, `/proc/<pid>/sched`, `/ctl/cpu`; `prowl`
+  is the tool.)
+- **OQ-2 — `run_ns` → total at v1.0.** The single %CPU number is what an operator
+  reads; the user/kernel (EL0/EL1) split is a clean v1.x field addition (no model
+  change).
+- **OQ-3 — per-CPU surface → a new `/ctl/cpu` leaf.** Keeps `/ctl/sched` as the
+  global summary and `/ctl` cohesive. (`/dev/sysstat` was the heritage-purist
+  alternative; not chosen.)
+- **OQ-4 — visibility → summary all-visible, deep internals gated.** The summary
+  (name / %cpu / state / mem) stays all-visible like `/ctl/procs` today; the deep
+  per-process view (`/proc/<pid>/sched`, per-thread internals, another proc's
+  detail) follows an **owner-or-`CAP_HOSTOWNER`** gate (composes I-1 + the `/ctl`
+  visibility-not-authority posture; no new §28 invariant).
+- **OQ-5 — v1 scheduler-view scope → the actionable set.** `band` /
+  `parks-per-s` / `wake-source` / `starved` ship at v1 (the set that named this
+  session's bug); the raw EEVDF `vd_t`/lag is expert-only → v1.x.
 
 ---
 
