@@ -92,6 +92,23 @@ const TAB_BAR_WINDOW_VA: u64 = 0x0160_0000;
 const MOUSE_DMA_VA: u64 = 0x0154_0000;
 const MOUSE_BAR_WINDOW_VA: u64 = 0x01C0_0000;
 
+// Idle throttle (residual-2: the ~16% compositor idle cost). The FRAME clock
+// is a fixed-rate tick that wakes every visible surface -- at 60 Hz a wholly
+// idle console still wakes tapestryd AND aurora 60x/sec (each wake pays an HVF
+// deep-park vCPU resume). When no INPUT has arrived for IDLE_AFTER_MS, drop the
+// effective tick to IDLE_HZ; the next keyboard/tablet/mouse event snaps it back
+// to the ctl rate. Activity is INPUT ONLY, never client presents: aurora
+// presents its cursor blink ~2x/sec, so counting presents would let the blink
+// pin the clock active forever. The floor is bounded by two poll-mode costs --
+// the keyboard is drained once per pass (so first-key-after-idle latency is one
+// idle period) and aurora polls /dev/consdrain once per FRAME (so console-output
+// latency during idle is one idle period); IDLE_HZ = 15 keeps both <= ~67 ms
+// (imperceptible-to-mild for the FIRST event after true idle, then 60 Hz) while
+// cutting the steady idle wakes 4x. Disabled under test-mode (the frozen clock
+// is ctl-driven). See docs/reference/139-tapestryd.md "Idle throttle".
+const IDLE_HZ: u32 = 15;
+const IDLE_AFTER_MS: u64 = 250;
+
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
     assert!(KBD_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_RING_VA);
@@ -238,8 +255,14 @@ impl Driver for Tapestryd {
         let mut ticks_done: u64 = 0;
         let mut cur_hz = self.comp.clock_hz;
         let mut was_frozen = false;
+        // Residual-2 idle throttle: the last time real INPUT arrived. Init to
+        // now so bring-up runs at the ctl rate until the console settles.
+        let mut last_input = Instant::now();
 
         loop {
+            // Residual-2: did any input device drain a raw event this pass?
+            // Set after each of the three drains below; bumps last_input.
+            let mut input_seen = false;
             // (1) Input drain -> keymap -> the Super chord layer (G-6c:
             // the compositor's reserved plane, intercepted ABOVE the
             // event stream -- a consumed key never reaches a surface) ->
@@ -248,6 +271,7 @@ impl Driver for Tapestryd {
             if let Some(kbd) = self.kbd.as_mut() {
                 raw_events.clear();
                 kbd.drain(|ev| raw_events.push(ev));
+                input_seen |= !raw_events.is_empty();
                 for ev in &raw_events {
                     if ev.etype != EV_KEY {
                         continue; // EV_SYN separators etc.
@@ -276,6 +300,7 @@ impl Driver for Tapestryd {
             if let Some(tab) = self.tablet.as_mut() {
                 raw_events.clear();
                 tab.drain(|ev| raw_events.push(ev));
+                input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
                 let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
                 let mut moved = false;
@@ -332,6 +357,7 @@ impl Driver for Tapestryd {
             if let Some(m) = self.mouse.as_mut() {
                 raw_events.clear();
                 m.drain(|ev| raw_events.push(ev));
+                input_seen |= !raw_events.is_empty();
                 let mask = self.mods.mask();
                 let (mut dx, mut dy) = (0i32, 0i32);
                 let commit = |c: &mut Comp, dx: &mut i32, dy: &mut i32| {
@@ -366,8 +392,22 @@ impl Driver for Tapestryd {
             // `tick` ctl writes drive time; the anchor re-seats on
             // unfreeze so no wall-clock backlog fires.
             let frozen = self.comp.test_frozen();
-            if self.comp.clock_hz != cur_hz || (was_frozen && !frozen) {
-                cur_hz = self.comp.clock_hz;
+            // Residual-2 idle throttle: fold the input activity into last_input,
+            // then pick the effective tick rate. Never throttle under test-mode
+            // (the frozen clock is ctl-driven). `base_hz` is the ctl rate (60,
+            // or whatever `tick`/clock ctl set); `eff_hz` drops to IDLE_HZ once
+            // the console has been input-quiet for IDLE_AFTER_MS.
+            if input_seen {
+                last_input = Instant::now();
+            }
+            let base_hz = self.comp.clock_hz;
+            let eff_hz = if frozen || (last_input.elapsed().as_millis() as u64) < IDLE_AFTER_MS {
+                base_hz
+            } else {
+                IDLE_HZ.min(base_hz)
+            };
+            if eff_hz != cur_hz || (was_frozen && !frozen) {
+                cur_hz = eff_hz;
                 anchor = Instant::now();
                 ticks_done = 0;
             }

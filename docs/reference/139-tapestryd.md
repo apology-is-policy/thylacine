@@ -740,3 +740,38 @@ every ci-smp-gate boot. FAIL diagnostics grep
 - **Input latency ≤ one FRAME period** (poll-mode kbd; fine for stage 0).
 - **Multishot event reads client-side** await a Loom provided-buffer
   pool (G-6); the server's deferred-read side is multishot-ready.
+
+## Idle throttle (residual-2: the ~16% compositor idle cost)
+
+The FRAME clock is a fixed-rate synthesized tick (base virtio-gpu 2D has no
+guest vblank). At 60 Hz a *wholly idle* console still wakes tapestryd AND
+aurora 60×/sec — and under HVF each wake pays a deep-park vCPU resume, so the
+resident compositor cost the guest ~27% idle %cpu vs an ~11% no-GPU floor (the
+measured `ci-idle-gate` regression class).
+
+**Throttle** (`main.rs` `IDLE_HZ` / `IDLE_AFTER_MS`): when no keyboard/tablet/
+mouse INPUT has arrived for `IDLE_AFTER_MS` (250 ms), the effective tick drops
+to `IDLE_HZ` (15); the next input event snaps it back to the ctl rate. Activity
+is **INPUT ONLY, never client presents** — aurora presents its cursor blink
+~2×/sec, so counting presents would let the blink pin the clock active forever.
+Disabled under test-mode (the frozen clock is ctl-driven). Measured: idle %cpu
+27% → **10.8%** (the full compositor cost cut; the remainder is the base + the
+residual-1 debuggee leak).
+
+**Floor rationale.** The floor is bounded by two poll-mode costs: the keyboard
+is drained once per loop pass (so first-key-after-idle latency is one idle
+period) and aurora polls `/dev/consdrain` once per FRAME (so console-output
+latency during idle is one idle period). `IDLE_HZ`=15 keeps both ≤ ~67 ms —
+mild for the *first* event after true idle, then 60 Hz — while cutting steady
+idle wakes 4×. A truly-quiescent zero-wake floor would need the drain to wake
+aurora directly (an event-driven `/dev/consdrain` read), which the poll-mode
+architecture does not offer at v1.0 (a recorded seam).
+
+**Cursor-blink interaction (accepted).** Aurora's blink is frame-counted
+(`BLINK_FRAMES`), so at the 15 Hz idle rate the blink slows to ~2 s — but it is
+crisp (0.5 s) exactly when the console is *active* (60 Hz), i.e. when you are
+using it. A wall-clock (time-based) aurora blink would keep it crisp at any
+rate, but the naive `Instant`-based version deterministically broke aurora's
+drain render (render-loop-dead; `Instant` itself works in aurora — an
+unexplained render-loop interaction, a recorded gfx-track seam, NOT shipped).
+The frames-based blink is retained.
