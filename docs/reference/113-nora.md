@@ -366,7 +366,12 @@ and re-scopes the Variables tile to it via `scopes → variables`), `Enter` on
 and re-roots the stack via `stackTrace`); `Enter` carries the row index clamped to
 the live count so a stale selection names a live row, and the host resolves it
 against its own cached list (a non-stopped target or an out-of-range index is a
-reported no-op, never a wrong-frame jump). The editor half — `Enter` raising the
+reported no-op, never a wrong-frame jump). The host jumps by **basename**
+(`Editor::jump_to_open_basename`) because a compiled binary's DWARF source path is
+the host build path, not the guest path the file was opened at — so a same-file
+frame moves the cursor in place, a frame in another open buffer switches to it, and
+a frame whose source is not open is a reported no-op (never a blank buffer for a
+host path absent on the guest). The editor half — `Enter` raising the
 right request with the right index — is pure state and host-tested; the host half
 is a binary-side DAP round-trip (`dap_host::select_frame` / `select_goroutine`)
 covered by the `dap-nora` E2E. **8f-2b-3 made the Variables tile a nested-lazy
@@ -470,7 +475,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**235 host unit tests** over the pure engine (the per-module list below is a
+**238 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -509,7 +514,10 @@ an all-Go stack has no divider, selecting a kernel frame highlights the frame no
 the visual-only divider) — and the 8f-3b **kstack-parse axis** — 3 `debug` tests
 (`parse_kstack` reads the symbolic `#<i>  <name>+0x<off>` frames as kernel rows,
 passes `<running>`/`<unknown>` through + tolerates blanks, and skips a malformed
-or hash-only line) [+ parley: the `process` event decodes to
+or hash-only line) — and the **frame-jump axis** — 3 `editor` tests
+(`jump_to_open_basename` moves the cursor in the active buffer on a basename match,
+switches to another open buffer that matches, and returns false without opening a
+blank buffer for an unopened source) [+ parley: the `process` event decodes to
 `Action::Process{pid}`, folded into `events_map_to_actions`]):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert

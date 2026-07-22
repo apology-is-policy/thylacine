@@ -672,6 +672,36 @@ impl Editor {
         self.filename.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p))
     }
 
+    /// Move the cursor to `(line0, col0)` in whichever OPEN buffer has basename
+    /// `basename`: the active buffer when it matches (the common single-file
+    /// case), else another open buffer (switching to it). Returns `false` when no
+    /// open buffer matches -- WITHOUT opening a new one.
+    ///
+    /// A debugger stack frame's source path is the host DWARF build path, not the
+    /// guest path the file was opened at, so a frame jump matches by BASENAME
+    /// against the buffers already on screen (like `follow_debug`). This is why it
+    /// does not route through `jump_to`/`Request::Open`: opening the host path
+    /// would fail on the guest and leave a blank buffer.
+    pub fn jump_to_open_basename(&mut self, basename: &str, line0: usize, col0: usize) -> bool {
+        if self.filename_basename() == Some(basename) {
+            let line = line0.min(self.text.line_count().saturating_sub(1));
+            self.text.set_cursor(line, col0);
+            return true;
+        }
+        let active = self.active;
+        let idx = self.bufs.iter().enumerate().find_map(|(i, d)| {
+            (i != active
+                && d.filename.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p))
+                    == Some(basename))
+            .then_some(i)
+        });
+        let Some(i) = idx else { return false };
+        self.switch_to(i);
+        let line = line0.min(self.text.line_count().saturating_sub(1));
+        self.text.set_cursor(line, col0);
+        true
+    }
+
     /// Cycle dashboard focus (`Tab`): Editor -> Variables -> CallStack ->
     /// Goroutines -> Console -> Editor, SKIPPING any pane a `[Space]d` toggle
     /// has hidden (so Tab never lands on an invisible tile). A no-op when not
@@ -4050,6 +4080,35 @@ mod tests {
         // The parked jump is spent -- a later unrelated open must not inherit it.
         ed.open_buffer(Some("c.go".to_string()), "zz\nyy\nxx");
         assert_eq!(ed.text.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn jump_to_open_basename_moves_cursor_in_the_active_buffer() {
+        // A debugger frame's host DWARF path shares the basename of the open guest
+        // buffer -> move the cursor in place, no new buffer (the single-file case).
+        let mut ed = Editor::new(Some("/goroot/demo/nora-demo.go".to_string()), "0\n1\n2\n3\n", false);
+        assert!(ed.jump_to_open_basename("nora-demo.go", 2, 0));
+        assert_eq!(ed.text.cursor(), (2, 0));
+        assert_eq!(ed.buffer_count(), 1);
+        assert_eq!(ed.take_request(), None); // no Open request raised
+    }
+
+    #[test]
+    fn jump_to_open_basename_switches_to_a_matching_open_buffer() {
+        let mut ed = Editor::new(Some("/x/a.go".to_string()), "a0\na1\n", false);
+        ed.open_buffer(Some("/y/b.go".to_string()), "b0\nb1\nb2\n"); // active becomes b.go
+        assert!(ed.jump_to_open_basename("a.go", 1, 0));
+        assert_eq!(ed.filename.as_deref(), Some("/x/a.go")); // switched back to a.go
+        assert_eq!(ed.text.cursor(), (1, 0));
+        assert_eq!(ed.buffer_count(), 2); // no new buffer
+    }
+
+    #[test]
+    fn jump_to_open_basename_absent_source_is_false_and_opens_nothing() {
+        let mut ed = Editor::new(Some("/goroot/demo/nora-demo.go".to_string()), "0\n1\n", false);
+        assert!(!ed.jump_to_open_basename("proc.go", 5, 0)); // a stdlib frame, not open
+        assert_eq!(ed.buffer_count(), 1); // no blank buffer created
+        assert_eq!(ed.take_request(), None);
     }
 
     #[test]

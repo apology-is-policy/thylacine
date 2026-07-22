@@ -685,12 +685,17 @@ impl Dap {
             }
         };
         self.frame_id = id;
-        // DAP line/column are 1-based; `jump_to` is 0-based. A runtime frame with
-        // no source leaves the cursor where it was.
+        // DAP line/column are 1-based; the editor is 0-based. The frame's source
+        // path is the host DWARF build path, so jump by BASENAME against the open
+        // buffers (like the stopped-line follow): a same-file frame moves the
+        // cursor in place, a matching open buffer switches to it, and an unopened
+        // source leaves the cursor where it was -- the label below still reports
+        // the location. This never opens a blank buffer for a host path absent on
+        // the guest (which `jump_to`'s Request::Open would).
         if let Some(p) = path {
             let row = (line.max(1) as usize) - 1;
             let c = (col.max(1) as usize) - 1;
-            ed.jump_to(Some(p), row, c);
+            ed.jump_to_open_basename(basename(&p), row, c);
         }
         // Clear the old variables so the tile does not show the previous frame's
         // data during the scopes->variables round-trip.
