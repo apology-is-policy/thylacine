@@ -83,6 +83,15 @@ if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "pwd\n"} err]} {
 lc_expect "/home/michael" "output-of graphically-typed pwd"
 lc_pass "fbcon: graphical keyboard -> tapestryd -> aurora -> consfeed -> ut (pwd output on the serial tee)"
 
+# #55b: the winsize contract live -- aurora (the geometry authority) wrote
+# its cell grid via the widened consctl mint at first present, so the
+# UNGATED /dev/winsize leaf serves the real 128x36 grid (1280x800 px /
+# 10x22 cells) to ANY session Proc. `winsize 0 0` here would mean the
+# initial write never landed (the serial CPR-fallback posture -- wrong
+# under a live renderer).
+lc_run_expect "cat /dev/winsize" "winsize 128 36"
+lc_pass "fbcon: /dev/winsize serves aurora's grid (the #55 winsize contract live)"
+
 # And the injected session activity rendered too.
 after 700
 if {[gfx_dump /tmp/ls-gfx-final.png "-c"] ne ""} {

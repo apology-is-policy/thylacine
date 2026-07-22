@@ -157,6 +157,54 @@ impl Vt {
         }
     }
 
+    /// #55 (AURORA.md section 4): the reweave grid resize. Content-preserving
+    /// and CURSOR-ANCHORED on the active screen: on a row shrink the visible
+    /// window slides down just enough to keep the cursor row (the prompt); on
+    /// grow, blank rows append at the bottom. Columns crop right / grow blank.
+    /// The INACTIVE (alt) buffer is top-left-cropped -- a fullscreen TUI on
+    /// the alt screen repaints itself on its own tty:winch. No history
+    /// reflow -- fbcon-grade. Every row is marked dirty.
+    pub fn resize(&mut self, ncols: usize, nrows: usize) {
+        if (ncols == self.cols && nrows == self.rows) || ncols == 0 || nrows == 0 {
+            return;
+        }
+        let shift = if self.cy >= nrows { self.cy + 1 - nrows } else { 0 };
+        let ccols = if self.cols < ncols { self.cols } else { ncols };
+        let mut cells = vec![Cell::blank(BG); ncols * nrows];
+        for r in 0..nrows {
+            let or = r + shift;
+            if or >= self.rows {
+                break;
+            }
+            for c in 0..ccols {
+                cells[r * ncols + c] = self.cells[or * self.cols + c];
+            }
+        }
+        let mut alt = vec![Cell::blank(BG); ncols * nrows];
+        let arows = if self.rows < nrows { self.rows } else { nrows };
+        for r in 0..arows {
+            for c in 0..ccols {
+                alt[r * ncols + c] = self.alt_cells[r * self.cols + c];
+            }
+        }
+        self.cells = cells;
+        self.alt_cells = alt;
+        self.cols = ncols;
+        self.rows = nrows;
+        self.cy = if self.cy >= shift { self.cy - shift } else { 0 };
+        if self.cy >= nrows {
+            self.cy = nrows - 1;
+        }
+        if self.cx >= ncols {
+            self.cx = ncols - 1;
+        }
+        self.saved = (
+            if self.saved.0 >= ncols { ncols - 1 } else { self.saved.0 },
+            if self.saved.1 >= nrows { nrows - 1 } else { self.saved.1 },
+        );
+        self.dirty = vec![true; nrows];
+    }
+
     #[inline]
     fn mark(&mut self, row: usize) {
         if row < self.rows {

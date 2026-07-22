@@ -1474,7 +1474,13 @@ impl Comp {
         if let Some((oldw, old_res)) = s.old_weave {
             self.release_gen(&oldw, old_res);
         }
-        say!("tapestryd: surface {} retired (presents={})", n, s.presents);
+        // No diagnostic (#55b): a surface retire is routine steady-state
+        // traffic (every client exit / pane close), and with a live-acking
+        // fbcon it lands concurrent with session output -- a SYS_PUTS line
+        // here interleaves at the UART FIFO (the P1-F carve-out) and tears
+        // byte patterns mid-line (it split `/home/michael` in the panes
+        // post-battery assert). The error/edge prints above stay.
+        let _ = s.presents;
     }
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).
@@ -3098,7 +3104,14 @@ impl Conn {
         // its weave-fid clunk (ClunkMap; #847 keeps the pages until then).
         if let Some((oldw, old_res)) = comp.surf_mut(n).and_then(|s| s.old_weave.take()) {
             comp.release_gen(&oldw, old_res);
-            say!("tapestryd: surface {} old generation retired (res {})", n, old_res);
+            // No diagnostic here (#55b): a generation retire is now ROUTINE
+            // steady-state traffic -- the fbcon acks every pane resize, so
+            // this fires per split/unsplit while the SESSION is printing,
+            // and a SYS_PUTS line here interleaves at the UART FIFO with
+            // concurrent /dev/cons output (the P1-F carve-out), tearing
+            // byte patterns mid-line (the ls-gfx-panes post-battery pwd
+            // assert lost `/home/michael` to exactly this print). Aurora's
+            // own single `reweave WxH` line carries the diagnostic value.
         }
         Ok(())
     }

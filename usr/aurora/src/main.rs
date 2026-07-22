@@ -53,7 +53,7 @@ use libthyla_rs::{
     T_WALK_OPEN_FROM_ROOT,
 };
 use render::{render_rows, Metrics};
-use tapestry::{Rect, Surface, TEV_CLOSE, TEV_CONFIGURE, TEV_FRAME, TEV_KEY};
+use tapestry::{Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FRAME, TEV_KEY};
 use vt::{Vt, BG};
 
 macro_rules! say {
@@ -125,6 +125,16 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
 
+    // #55: the winsize writer (ARCH 23.5.3). Aurora reports its cell grid via
+    // the consctl `winsize <cols> <rows>` verb -- the renderer-widened mint
+    // gate lets it self-serve by name like the drain/feed pair. Best-effort:
+    // a failed open leaves /dev/winsize at `winsize 0 0` and clients fall
+    // back to the CPR probe (the serial posture) -- degraded, never fatal.
+    let consctl = open_path("/dev/consctl", T_OWRITE);
+    if consctl < 0 {
+        say!("aurora: /dev/consctl open failed (winsize reporting off)");
+    }
+
     // Bounded connect retry (the demo discipline): tapestryd is
     // warden-spawned long before this, but a slow bring-up must not flake.
     let mut surf: Option<Surface> = None;
@@ -144,7 +154,7 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     let mut surf = surf.unwrap();
-    let (w, h) = (surf.w as usize, surf.h as usize);
+    let (mut w, mut h) = (surf.w as usize, surf.h as usize);
 
     let m = Metrics {
         cell_w: Atlas::cell_w(),
@@ -153,8 +163,8 @@ pub extern "C" fn rs_main() -> i64 {
         off_x: 0,
         off_y: 0,
     };
-    let cols = w / m.cell_w;
-    let rows = h / m.cell_h;
+    let mut cols = w / m.cell_w;
+    let mut rows = h / m.cell_h;
     if cols < 20 || rows < 5 {
         say!("aurora: FAIL degenerate grid {}x{} on {}x{}", cols, rows, w, h);
         return 1;
@@ -180,6 +190,13 @@ pub extern "C" fn rs_main() -> i64 {
     say!("aurora: console up {}x{} cells ({}x{} px, cell {}x{})",
          cols, rows, w, h, m.cell_w, m.cell_h);
 
+    // #55: report the boot geometry -- /dev/winsize serves real cells from
+    // the first present on. The 0x0 -> real transition IS a change, so the
+    // kernel attempts a winch, but the bringup console owner (joey) sits in
+    // the pgid-0 boot group, which notes_post_pgrp refuses -- the boot write
+    // is silent by construction.
+    write_winsize(consctl, cols, rows);
+
     let mut frames: u64 = 0;
     let mut blink_on = true;
     let mut prev_cursor: Option<(usize, usize)> = Some((0, 0));
@@ -193,6 +210,12 @@ pub extern "C" fn rs_main() -> i64 {
     // catches a live-stream-but-presents-never-succeed wedge.
     let mut present_fails: u32 = 0;
     const PRESENT_FAILS_FATAL: u32 = 240;
+    // #55: a reweave hands the damage pass one FULL frame (BG-fill the whole
+    // slot + render every row + present(None)) instead of the rect path --
+    // the new generation's slots are zeroed, so the margins need the fill.
+    // Cleared only on a successful present (slots rotate per attempt, so a
+    // retry must re-fill; the same discipline as the dirty rows).
+    let mut full_fill = false;
 
     loop {
         // (1) Block for the next event (<= one FRAME period), then drain the
@@ -227,22 +250,71 @@ pub extern "C" fn rs_main() -> i64 {
                 }
                 TEV_CONFIGURE => {
                     // The compositor's redraw/resize request (G-6,
-                    // TAPESTRY.md 18.3). EVERY CONFIGURE marks the whole
-                    // grid dirty: structural repaints blank pane content
-                    // (a split blanks aurora's pane exactly like a
-                    // fullscreen transition), and the row-damage renderer
-                    // would otherwise heal only rows that happen to
-                    // change. A size CHANGE is deliberately NOT acked:
-                    // the fbcon's cell grid is bound to the console
-                    // history at startup, so aurora keeps its grid and
-                    // the compositor crops the top-left (the ignore/crop
-                    // client posture; a reweaving fbcon is a follow-up).
-                    // No diagnostic print: aurora shares /dev/cons with
-                    // whatever it renders, so a chatty line here
-                    // interleaves byte-for-byte with a concurrent
-                    // writer's output (t_putstr is not cross-Proc atomic).
-                    for d in term.dirty.iter_mut() {
-                        *d = true;
+                    // TAPESTRY.md 18.3). A same-size CONFIGURE is the
+                    // full-REDRAW request: mark the whole grid dirty
+                    // (structural repaints blank pane content, and the
+                    // row-damage renderer would otherwise heal only rows
+                    // that happen to change). A size offer is the #55
+                    // REWEAVE (ARCH 23.5.3 / AURORA.md section 4) --
+                    // UNLESS the offered grid is sub-floor (< 20x5
+                    // cells): acking a degenerate size would strand the
+                    // fbcon, so the pre-#55 ignore/crop posture is
+                    // retired to exactly that case (keep the grid + old
+                    // generation; the compositor crops the top-left).
+                    // No diagnostic print on the hot arms: aurora shares
+                    // /dev/cons with whatever it renders.
+                    let ow = (e.value >> 16) as usize;
+                    let oh = (e.value & 0xffff) as usize;
+                    let sub_floor =
+                        ow / m.cell_w < 20 || oh / m.cell_h < 5;
+                    if sub_floor && !(ow == w && oh == h) {
+                        for d in term.dirty.iter_mut() {
+                            *d = true;
+                        }
+                    } else {
+                        match surf.handle_configure(&e) {
+                            Ok(false) => {
+                                // Same-size: the redraw request.
+                                for d in term.dirty.iter_mut() {
+                                    *d = true;
+                                }
+                            }
+                            Ok(true) => {
+                                // Reweaved onto the new generation: the
+                                // old pixel view is gone. Re-derive the
+                                // grid, resize the Vt (cursor-anchored),
+                                // and hand the damage pass a FULL frame
+                                // (BG-fill + all rows + present(None) --
+                                // the new generation's slots are zeroed,
+                                // so the margins need the fill).
+                                w = surf.w as usize;
+                                h = surf.h as usize;
+                                cols = (w / m.cell_w).max(1);
+                                rows = (h / m.cell_h).max(1);
+                                term.resize(cols, rows);
+                                full_fill = true;
+                                // The kernel relays a changed size as
+                                // tty:winch to the session (iff-changed
+                                // at the verb, so this is post-exact).
+                                write_winsize(consctl, cols, rows);
+                                // NO diagnostic print: reweaves are routine
+                                // steady-state (every pane split/unsplit)
+                                // and fire concurrent with session output,
+                                // so a SYS_PUTS line here interleaves at
+                                // the UART FIFO and tears byte patterns
+                                // mid-line (it split the panes battery's
+                                // own PASS marker). /dev/winsize + the
+                                // ls-gfx winsize leg carry the proof.
+                            }
+                            Err(TapError::Busy) => {
+                                // Stale offer -- a newer CONFIGURE is in
+                                // the queue and carries the current one.
+                            }
+                            Err(e) => {
+                                say!("aurora: reweave failed {:?}; exiting", e);
+                                return 1;
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -319,7 +391,35 @@ pub extern "C" fn rs_main() -> i64 {
                 r1 = r + 1;
             }
         }
-        if r0 < r1 {
+        if full_fill {
+            // #55: the post-reweave full frame (the frame-0 pattern applied
+            // through the single present site so the retry discipline holds).
+            {
+                let px = surf.pixels();
+                for p in px.iter_mut() {
+                    *p = BG;
+                }
+                render_rows(&term, &m, px, w, 0, rows, cursor);
+            }
+            if let Err(e) = surf.present(None) {
+                present_fails += 1;
+                if present_fails <= 3 || present_fails % 64 == 0 {
+                    say!("aurora: FAIL present {:?} ({} consecutive); frame dropped", e, present_fails);
+                }
+                if present_fails >= PRESENT_FAILS_FATAL {
+                    say!("aurora: presents failing persistently; exiting");
+                    return 1;
+                }
+                // full_fill + dirty stay set: the retry re-fills the next slot.
+            } else {
+                present_fails = 0;
+                full_fill = false;
+                for d in term.dirty.iter_mut() {
+                    *d = false;
+                }
+                prev_cursor = cursor;
+            }
+        } else if r0 < r1 {
             {
                 let px = surf.pixels();
                 render_rows(&term, &m, px, w, r0, r1, cursor);
@@ -350,4 +450,46 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
     }
+}
+
+// #55: write `winsize <cols> <rows>` to the consctl fd (the ARCH 23.5.3
+// verb). Best-effort -- a short/failed write only leaves /dev/winsize stale
+// (clients fall back to CPR); the renderer must never die over it.
+fn write_winsize(fd: i64, cols: usize, rows: usize) {
+    if fd < 0 {
+        return;
+    }
+    let mut buf = [0u8; 24];
+    let mut n = 0usize;
+    for b in b"winsize " {
+        buf[n] = *b;
+        n += 1;
+    }
+    n += fmt_dec(&mut buf[n..], cols);
+    buf[n] = b' ';
+    n += 1;
+    n += fmt_dec(&mut buf[n..], rows);
+    let wr = unsafe { t_write(fd, buf.as_ptr(), n) };
+    if wr < n as i64 {
+        say!("aurora: consctl winsize write short/failed ({} of {})", wr, n);
+    }
+}
+
+// Render `v` (clamped to the u16 band the verb accepts) in decimal.
+fn fmt_dec(out: &mut [u8], v: usize) -> usize {
+    let mut v = if v > 65535 { 65535 } else { v };
+    let mut tmp = [0u8; 5];
+    let mut t = 0usize;
+    loop {
+        tmp[t] = b'0' + (v % 10) as u8;
+        t += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    for i in 0..t {
+        out[i] = tmp[t - 1 - i];
+    }
+    t
 }
