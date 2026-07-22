@@ -68,8 +68,19 @@ send ":cont\r"
 # breakpoint-SET status carries no file:line, so this cannot match the earlier
 # `:break` echo. This checkpoint arrives BEFORE the heavier `:print` redraw, the
 # window where the serial bridge (#78) is prone to dying under HVF.
+# 8f-3b: the stop expanded the dashboard, and the Call Stack tile now shows the
+# unified user->kernel stack. On the stop, dap_host read the debuggee's
+# /proc/<pid>/kstack (the pid from the DAP `process` event) and appended the
+# symbolized kernel frames, so the ember "-- kernel --" divider renders. The
+# divider label is unique to this render (nothing else prints "kernel"), and it
+# sits in the sidebar (upper-right) -- emitted in the byte stream BEFORE the
+# bottom-of-screen status line, so it is strictly less exposed to the #78 bridge
+# window than the parkLoop gate below. debug-probe proves the kstack read on
+# every boot; THIS proves nora's live dashboard lights up the cross-boundary
+# stack end to end.
+lc_expect "kernel" "nora shows the -- kernel -- cross-boundary stack divider (8f-3b)"
 lc_expect "parkLoop (child.go" "nora shows the stop at main.parkLoop"
-lc_pass "8e-3e: nora :debug drove Ambush -- stopped at main.parkLoop (handshake + break + continue + stop + auto-stack + status)"
+lc_pass "8e-3e + 8f-3b: nora :debug drove Ambush -- stopped at main.parkLoop with the cross-boundary -- kernel -- divider (handshake + break + continue + stop + auto-stack + kstack + status)"
 
 # BEST-EFFORT: `:print` through nora, for the transcript. `evaluate` is
 # dap-probe-proven, and the serial bridge (#78, tracked) can die under the HVF

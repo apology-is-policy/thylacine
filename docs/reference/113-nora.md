@@ -403,11 +403,22 @@ bool`, the DAP host lists Go frames first then the kernel half, and
 with the kernel rows **dim**. The divider is a visual-only row — the selection is
 a *frame* index (`Enter` → `SelectFrame`), so `j`/`k` navigation never lands on
 it; the renderer maps a frame index to its visible row past the divider (and the
-scroll offset with it). The kernel-frame **data source** — the DAP host reading
-`/proc/<pid>/kstack` for the debuggee (Ambush already emits its pid in the DAP
-`process` event) — is **8f-3b**; until it lands the divider is dormant (the DAP
-half only supplies Go frames), but the presentation is complete + host-tested
-with a synthetic kernel half. `F9` toggle-breakpoint and the submenu's
+scroll offset with it). **8f-3b sourced the kernel frames and made the divider
+live**: parley now decodes the DAP `process` event into `Action::Process{pid}`
+(Ambush emits the debuggee's `systemProcessId`), and on each stop the DAP host
+`refresh_kernel_frames()` reads `/proc/<pid>/kstack` (the 8b settled-thread
+inspect; nora, Ambush and the debuggee share the login principal, so the I-39
+owner axis authorizes it, and `/proc` is in nora's namespace because Ambush —
+spawned by nora — opens the same file), parses the owner-axis symbolic
+`#<i>  <name>+0x<off>` lines via the host-tested `nora::debug::parse_kstack`, and
+appends the kernel `StackRow`s after the Go frames on publish. Best-effort: no
+pid / an unreachable `/proc` / an unparseable read leaves the kernel half empty
+and the Go frames render alone — never a hang. Selecting a kernel frame (past the
+Go frames) reports `kernel frame: <name> (no source)` — the "why blocked" inspect
+(`/proc/<pid>/wait` in Variables) is a later polish. That `kstack` is the
+target's **head thread** (the M at the stop); the *goroutine-accurate* kernel
+stack is the deferred Ambush 8c-3 stitch (a v1.x refinement). `F9`
+toggle-breakpoint and the submenu's
 `d`/`b`/`l`/`w`/`g`/`i` entries wait for their mechanisms (gutter breakpoint
 state / watches / 8g). A UX seam: `h` on a plain leaf is inert (collapse the
 group from row 0) — move-to-parent is a later polish. Kernel byte-unchanged;
@@ -445,7 +456,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**223 host unit tests** over the pure engine (the per-module list below is a
+**226 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -481,7 +492,11 @@ hidden sidebar/console reclaims the editor's width/height, zoom fills the focuse
 pane) — and the 8f-3a **cross-boundary divider axis** — 4 `view` tests (the Call
 Stack draws an ember `── kernel ──` divider, kernel frames dim + sit below it,
 an all-Go stack has no divider, selecting a kernel frame highlights the frame not
-the visual-only divider)):
+the visual-only divider) — and the 8f-3b **kstack-parse axis** — 3 `debug` tests
+(`parse_kstack` reads the symbolic `#<i>  <name>+0x<off>` frames as kernel rows,
+passes `<running>`/`<unknown>` through + tolerates blanks, and skips a malformed
+or hash-only line) [+ parley: the `process` event decodes to
+`Action::Process{pid}`, folded into `events_map_to_actions`]):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -540,7 +555,7 @@ open / edit / `:w` / `cat`).
 | 8f-2c-1 hot-keys (`F5` cont / `F10` over / `F11` into / `Shift-F11` out / `Shift-F5` stop → the DAP requests) | landed |
 | 8f-2c-2 `[Space]d` submenu + `v`/`c`/`z` panel toggles (visibility + zoom + `e` evaluate) | landed |
 | 8f-3a cross-boundary `── kernel ──` stack divider (`StackRow.kernel` + ember divider + dim kernel rows; presentation) | landed |
-| 8f-3b kernel-frame data source (parley decodes the DAP `process` pid; host reads `/proc/<pid>/kstack`) | pending |
+| 8f-3b kernel-frame data source (parley decodes the DAP `process` pid; host reads/parses `/proc/<pid>/kstack` + appends; the divider is live) | landed |
 | 8f-3 remainder (inline values, LSP editor affordances, Bonfire pass) | pending |
 | audit (Kaua backend + dance) | not started |
 
@@ -576,15 +591,16 @@ open / edit / `:w` / `cat`).
 - **Syntax highlighting** — a native lexer highlighter (and the tree-sitter
   feasibility, gated on the native-links-C toolchain, #67) is the documented
   v1.x direction (`docs/KAUA.md` §12).
-- **The kernel stack divider is dormant until 8f-3b** — 8f-3a landed the
-  presentation (`StackRow.kernel` + the ember `── kernel ──` divider + dim kernel
-  rows), but the DAP host still supplies only Go frames, so a real session shows
-  no kernel half yet. 8f-3b sources it: parley decodes the DAP `process` event's
-  `systemProcessId` (Ambush already emits it — `server.go` `ProcessEvent`), then
-  the host reads `/proc/<pid>/kstack` (the 8b settled-thread inspect;
-  I-39-authorized as the same login principal) on each stop and appends the
-  symbolized kernel frames. That `kstack` file is the target's **head thread**;
-  the *goroutine-accurate* kernel stack (mapping the stopped goroutine's M) is
-  the deferred Ambush **8c-3** stitch (skipped in the Ambush arc — the log jumps
-  `8c-2 → 8c-4a` — so it appends nothing today) and is the v1.x refinement over
-  the head-thread approximation.
+- **The kernel half of the stack is the target's head thread** — 8f-3b made the
+  `── kernel ──` divider live: on each stop the host reads `/proc/<pid>/kstack`
+  and appends the symbolized kernel frames. That file is the debuggee's **head
+  thread** (the M at the stop), so at a user breakpoint the kernel frames are the
+  debug-trap path; a goroutine genuinely blocked in a syscall shows its block
+  path. The *goroutine-accurate* kernel stack (mapping the stopped goroutine's
+  own M) is the deferred Ambush **8c-3** stitch (skipped in the Ambush arc — its
+  log jumps `8c-2 → 8c-4a` — so Ambush appends nothing to its own `stackTrace`;
+  the nora-side head-thread read is the v1.0 answer) and is the v1.x refinement.
+- **Selecting a kernel frame reports it, does not jump** — a kernel frame has no
+  Go source, so `Enter` on it sets `kernel frame: <name> (no source)`. The
+  "why blocked" inspect (read `/proc/<pid>/wait` into the Variables tile, §5) is
+  a later polish.

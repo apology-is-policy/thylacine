@@ -361,11 +361,15 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
   **8f-3a landed** the divider *presentation* (`StackRow.kernel: bool`; the DAP
   host lists Go frames then the kernel half; `render_call_stack` draws the ember
   `── kernel ──` divider with the kernel rows dim; the divider is visual-only —
-  the selection stays a frame index that maps past it; +4 host tests). **8f-3b**
-  sources the kernel frames: parley decodes the DAP `process` event's pid (Ambush
-  emits it), and the host reads `/proc/<pid>/kstack` (the 8b settled-thread
-  inspect) on each stop and appends them — the head-thread stack (goroutine-
-  accurate mapping is the deferred Ambush 8c-3, skipped in that arc).
+  the selection stays a frame index that maps past it; +4 host tests). **8f-3b
+  made it live**: parley decodes the DAP `process` event into `Action::Process
+  {pid}` (Ambush emits the debuggee's `systemProcessId`), and on each stop the
+  host reads + parses `/proc/<pid>/kstack` (the 8b settled-thread inspect;
+  host-tested `parse_kstack`; +3 debug tests + the parley decode) and appends the
+  symbolized kernel frames — best-effort, so a failed read renders the Go frames
+  alone. The `dap-nora` E2E now asserts the divider lights up at a live stop. It
+  is the head-thread stack (goroutine-accurate mapping is the deferred Ambush
+  8c-3, skipped in that arc — the v1.x refinement).
 - **8g — the superpowers** (§5): resource inspector, scheduler view,
   post-mortem, snapshot-debugging.
 - **8h — the whole-arc audit + by-default ship + docs** (the debug-authority

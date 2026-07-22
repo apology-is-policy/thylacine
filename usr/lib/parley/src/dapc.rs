@@ -201,6 +201,10 @@ pub enum Action {
     Terminated,
     /// A `thread` event (`started` / `exited`) for this thread id.
     Thread { reason: String, thread_id: i64 },
+    /// A `process` event -- the debuggee's OS pid (`systemProcessId`). The host
+    /// reads its `/proc/<pid>/kstack` to append the kernel half of the unified
+    /// cross-boundary stack.
+    Process { pid: i64 },
     /// A `setBreakpoints` / `setFunctionBreakpoints` response.
     Breakpoints(Vec<BreakpointInfo>),
     /// A `stackTrace` response.
@@ -538,8 +542,11 @@ impl Client {
                 reason: body.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string(),
                 thread_id: body.get("threadId").and_then(|t| t.as_i64()).unwrap_or(0),
             },
-            // process / module / loadedSource / breakpoint / capabilities:
-            // informational, not consumed by the headless surface.
+            "process" => Action::Process {
+                pid: body.get("systemProcessId").and_then(|p| p.as_i64()).unwrap_or(0),
+            },
+            // module / loadedSource / breakpoint / capabilities: informational,
+            // not consumed by the headless surface.
             _ => Action::Ignored,
         }
     }
@@ -860,6 +867,11 @@ mod tests {
             }
             other => panic!("wrong: {:?}", other),
         }
+        // the debuggee pid -- the handle for /proc/<pid>/kstack (the kernel half).
+        assert_eq!(
+            feed(&mut c, r#"{"type":"event","event":"process","body":{"name":"prog","systemProcessId":42,"startMethod":"launch"}}"#),
+            Action::Process { pid: 42 }
+        );
         // an event we do not consume
         assert_eq!(feed(&mut c, r#"{"type":"event","event":"module","body":{}}"#), Action::Ignored);
     }

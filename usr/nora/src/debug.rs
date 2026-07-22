@@ -113,3 +113,59 @@ impl DebugView {
         }
     }
 }
+
+/// Parse the kernel `/proc/<pid>/kstack` backtrace into kernel `StackRow`s (the
+/// kernel half of the unified stack, section 5; 8f-3b). The file's owner-axis
+/// form is one frame per line, `#<i>  <symbol>` -- `<name>+0x<off>` (the Halls
+/// HX-2 symtab), or `<running>` / `<unknown>`. The `#<i>` index is dropped (the
+/// unified stack renumbers continuously past the Go frames), and a kernel frame
+/// carries no source (kernel DWARF is deferred, so `location` stays empty). Blank
+/// lines + surrounding whitespace are tolerated; a line without the `#<i>` shape
+/// is skipped (never a wrong row).
+pub fn parse_kstack(text: &str) -> Vec<StackRow> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let rest = match line.strip_prefix('#') {
+            Some(r) => r,
+            None => continue,
+        };
+        let sym = rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start();
+        if sym.is_empty() {
+            continue;
+        }
+        out.push(StackRow::kernel(String::from(sym), String::new()));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_kstack_reads_symbolic_frames() {
+        let text = "#0  sleep+0x1c\n#1  sched.c::rendezvous+0x40\n#2  el0_return+0x8\n";
+        let rows = parse_kstack(text);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.kernel), "every parsed row is a kernel frame");
+        assert_eq!(rows[0].func, "sleep+0x1c");
+        assert_eq!(rows[1].func, "sched.c::rendezvous+0x40");
+        assert!(rows[0].location.is_empty(), "kernel frames carry no source");
+    }
+
+    #[test]
+    fn parse_kstack_handles_running_unknown_and_blanks() {
+        let rows = parse_kstack("\n#0  <running>\n\n#1  <unknown>\n");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].func, "<running>");
+        assert_eq!(rows[1].func, "<unknown>");
+    }
+
+    #[test]
+    fn parse_kstack_skips_malformed_and_empty() {
+        assert!(parse_kstack("").is_empty());
+        assert!(parse_kstack("no hash here\n").is_empty());
+        assert!(parse_kstack("#\n#3\n").is_empty(), "a hash with no symbol is skipped");
+    }
+}

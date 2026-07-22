@@ -34,7 +34,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use libthyla_rs::fs;
+use libthyla_rs::fs::{self, File};
+use libthyla_rs::io::slurp_capped;
 use libthyla_rs::process::Command;
 
 use parley::dap;
@@ -70,6 +71,10 @@ const BACKTRACE_BUF: &str = "*backtrace*";
 /// Console scrollback the dashboard retains (older lines drop past it) -- a
 /// bounded window so a chatty debuggee cannot grow the buffer without limit.
 const CONSOLE_MAX: usize = 200;
+
+/// Read cap for `/proc/<pid>/kstack` -- the kernel bounds the file to
+/// `DEBUG_KSTACK_MAX_FRAMES` symbolized lines, comfortably under this.
+const KSTACK_CAP: usize = 16 * 1024;
 
 /// Poll tags. fd 0 is TAG_STDIN (0) and gopls owns 1/2 (lsp_host); the DAP pipes
 /// take 3/4 so all four sources share one poll(2).
@@ -137,6 +142,14 @@ pub struct Dap {
     /// The session died / its stream broke: stop polling it and drop it. The
     /// editor keeps working.
     dead: bool,
+    /// The debuggee's OS pid (from the DAP `process` event), the handle for
+    /// reading its `/proc/<pid>/kstack`. `None` until the event lands.
+    debuggee_pid: Option<i64>,
+    /// The kernel half of the unified stack (section 5): the debuggee's
+    /// symbolized kernel frames, read from `/proc/<pid>/kstack` on each stop and
+    /// appended after the Go frames on publish. Empty when there is no pid /
+    /// nothing to show.
+    kernel_frames: Vec<StackRow>,
 }
 
 impl Dap {
@@ -187,6 +200,8 @@ impl Dap {
             func_bps: Vec::new(),
             line_bps: Vec::new(),
             dead: false,
+            debuggee_pid: None,
+            kernel_frames: Vec::new(),
         };
         if d.send(&init).is_err() {
             d.shutdown();
@@ -361,6 +376,7 @@ impl Dap {
                 self.var_tree.clear();
                 self.scope_ref = 0;
                 self.goroutines.clear();
+                self.kernel_frames.clear(); // refreshed when the stack lands
                 // Auto-fetch the stack (stop location + the `:print` frame id +
                 // the `:bt` cache) and the goroutines (the dashboard tile).
                 let st = self.cl.stack_trace(self.thread_id, MAX_FRAMES);
@@ -381,6 +397,10 @@ impl Dap {
                     return false;
                 }
                 self.frames = frames;
+                // The target is settled -- read its kernel stack for the unified
+                // Call Stack (section 5). Best-effort: any failure leaves the
+                // kernel half empty, the Go frames render alone.
+                self.refresh_kernel_frames();
                 if let Some(top) = self.frames.first() {
                     self.frame_id = top.id;
                     ed.set_status(format!(
@@ -482,6 +502,14 @@ impl Dap {
             Action::Failed(msg) => {
                 ed.set_status(format!("debug: {}", msg));
                 true
+            }
+
+            Action::Process { pid } => {
+                // The debuggee's pid -- the handle for /proc/<pid>/kstack. The
+                // stack itself is read on each stop (the target must be settled);
+                // nothing to repaint now.
+                self.debuggee_pid = if pid > 0 { Some(pid) } else { None };
+                false
             }
 
             // continued / thread / acks: no dashboard surface consumes them.
@@ -619,7 +647,19 @@ impl Dap {
                 f.column,
                 format!("frame #{}: {}{}", idx, f.name, location_suffix(f)),
             ),
-            None => return,
+            None => {
+                // Past the Go frames = a kernel frame (section 5). It has no Go
+                // source to jump to; report it rather than a silent no-op. The
+                // "why blocked" inspect (`/proc/<pid>/wait` in Variables) is a
+                // later polish.
+                if let Some(kf) = idx
+                    .checked_sub(self.frames.len())
+                    .and_then(|ki| self.kernel_frames.get(ki))
+                {
+                    ed.set_status(format!("kernel frame: {} (no source)", kf.func));
+                }
+                return;
+            }
         };
         self.frame_id = id;
         // DAP line/column are 1-based; `jump_to` is 0-based. A runtime frame with
@@ -731,16 +771,42 @@ impl Dap {
         }
     }
 
+    /// Read the debuggee's kernel backtrace from `/proc/<pid>/kstack` (the 8b
+    /// settled-thread inspect; I-39-authorized as the same login principal, and
+    /// reachable because Ambush -- spawned by nora -- opens the same file) and
+    /// parse it into the kernel half of the unified stack. Best-effort: no pid,
+    /// an unreachable/denied `/proc`, or an unparseable read all leave the kernel
+    /// half empty -- the Go frames render alone, never a hang or a spurious row.
+    /// Called on each stop, when the target is settled and the stack lands.
+    fn refresh_kernel_frames(&mut self) {
+        self.kernel_frames.clear();
+        let pid = match self.debuggee_pid {
+            Some(p) => p,
+            None => return,
+        };
+        let path = format!("/proc/{}/kstack", pid);
+        let mut f = match File::open(path.as_str()) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let bytes = slurp_capped(&mut f, KSTACK_CAP).unwrap_or_default();
+        if let Ok(text) = core::str::from_utf8(&bytes) {
+            self.kernel_frames = nora::debug::parse_kstack(text);
+        }
+    }
+
     /// Rebuild the dashboard snapshot from the current session state and push
     /// it to the editor (the dashboard mirrors the live session; NORA-IDE-UX
     /// section 2). Called once per poll-wake after the events are processed,
     /// and after each `:` command.
     fn publish(&self, ed: &mut Editor) {
-        let frames = self
+        // The unified stack: the Go frames, then the kernel half (section 5).
+        let mut frames: Vec<StackRow> = self
             .frames
             .iter()
             .map(|f| StackRow::go(f.name.clone(), frame_location(f)))
             .collect();
+        frames.extend(self.kernel_frames.iter().cloned());
         let mut locals = Vec::new();
         vartree::flatten(&self.var_tree, 0, &mut locals);
         let view = DebugView {
