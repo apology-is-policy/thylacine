@@ -30,6 +30,10 @@ pub enum Mode {
     /// The `[Space]` which-key menu, open over Normal: the next key invokes the
     /// matching entry (Helix-style), not an arrow-navigated selection.
     Menu,
+    /// The `[Space]d` debug submenu, open over Normal while a session is live:
+    /// the next key toggles a dashboard panel (a nested which-key level under
+    /// `Menu`; reachable only via `[Space]` -> `d` when debugging).
+    DebugMenu,
     /// The buffer picker (Space-b): an arrow-selectable list of open buffers;
     /// Enter switches. `sel` is the highlighted buffer index.
     BufferPicker { sel: usize },
@@ -161,6 +165,13 @@ pub struct DashState {
     /// per-variable nested expand (a struct's fields, a slice's elements) is a
     /// later leg -- this is the one group node's collapse.
     pub locals_expanded: bool,
+    /// Panel visibility + zoom (`[Space]d v`/`c`/`z`). `show_sidebar` /
+    /// `show_console` hide the right tiles / the bottom Console so the editor
+    /// reclaims the space; `zoom` fills the FOCUSED pane over everything else.
+    /// Reset on session start/end, so a fresh session shows the full dashboard.
+    pub show_sidebar: bool,
+    pub show_console: bool,
+    pub zoom: bool,
 }
 
 impl DashState {
@@ -175,6 +186,9 @@ impl DashState {
             stack_sel: 0,
             gor_sel: 0,
             locals_expanded: true,
+            show_sidebar: true,
+            show_console: true,
+            zoom: false,
         }
     }
 }
@@ -476,7 +490,11 @@ impl Editor {
     pub fn mode_str(&self) -> &'static str {
         match self.mode {
             // The menu + pickers overlay Normal -- show the underlying chip.
-            Mode::Normal | Mode::Menu | Mode::BufferPicker { .. } | Mode::FilePicker { .. } => {
+            Mode::Normal
+            | Mode::Menu
+            | Mode::DebugMenu
+            | Mode::BufferPicker { .. }
+            | Mode::FilePicker { .. } => {
                 if self.readonly {
                     "VIEW"
                 } else {
@@ -499,14 +517,33 @@ impl Editor {
         }
     }
 
-    /// The `[Space]` which-key menu entries as `(key, label)` (for the view).
+    /// The open which-key menu's entries as `(key, label)` (for the view) --
+    /// the root `[Space]` menu, or the `[Space]d` debug submenu.
     pub fn menu_entries(&self) -> Vec<(char, &'static str)> {
-        MENU.iter().map(|m| (m.key, m.label)).collect()
+        self.menu_table().iter().map(|m| (m.key, m.label)).collect()
     }
 
-    /// Whether the `[Space]` which-key menu is open.
+    /// The which-key popup title for the open menu (root vs the debug submenu).
+    pub fn menu_title(&self) -> &'static str {
+        if matches!(self.mode, Mode::DebugMenu) {
+            " <space>d "
+        } else {
+            " <space> "
+        }
+    }
+
+    /// The menu table for the current mode (the root `MENU` or `DEBUG_MENU`).
+    fn menu_table(&self) -> &'static [MenuItem] {
+        if matches!(self.mode, Mode::DebugMenu) {
+            DEBUG_MENU
+        } else {
+            MENU
+        }
+    }
+
+    /// Whether a which-key menu (root or debug submenu) is open.
     pub fn menu_open(&self) -> bool {
-        matches!(self.mode, Mode::Menu)
+        matches!(self.mode, Mode::Menu | Mode::DebugMenu)
     }
 
     /// The buffer-picker's highlighted index, if it is open.
@@ -598,29 +635,55 @@ impl Editor {
     }
 
     /// Cycle dashboard focus (`Tab`): Editor -> Variables -> CallStack ->
-    /// Goroutines -> Console -> Editor. A no-op when not debugging.
+    /// Goroutines -> Console -> Editor, SKIPPING any pane a `[Space]d` toggle
+    /// has hidden (so Tab never lands on an invisible tile). A no-op when not
+    /// debugging.
     fn cycle_focus(&mut self) {
         if !self.debugging() {
             return;
         }
-        self.dash.focus = match self.dash.focus {
-            DashPane::Editor => DashPane::Variables,
-            DashPane::Variables => DashPane::CallStack,
-            DashPane::CallStack => DashPane::Goroutines,
-            DashPane::Goroutines => DashPane::Console,
-            DashPane::Console => DashPane::Editor,
-        };
+        const ORDER: [DashPane; 5] = [
+            DashPane::Editor,
+            DashPane::Variables,
+            DashPane::CallStack,
+            DashPane::Goroutines,
+            DashPane::Console,
+        ];
+        let cur = ORDER.iter().position(|&p| p == self.dash.focus).unwrap_or(0);
+        for step in 1..=ORDER.len() {
+            let cand = ORDER[(cur + step) % ORDER.len()];
+            if self.pane_visible(cand) {
+                self.dash.focus = cand;
+                return;
+            }
+        }
+    }
+
+    /// Whether a dashboard pane is currently shown (the focus cycle skips a
+    /// hidden one). The Editor is always visible; the sidebar tiles and the
+    /// Console follow their `[Space]d` visibility toggles.
+    fn pane_visible(&self, p: DashPane) -> bool {
+        match p {
+            DashPane::Editor => true,
+            DashPane::Variables | DashPane::CallStack | DashPane::Goroutines => {
+                self.dash.show_sidebar
+            }
+            DashPane::Console => self.dash.show_console,
+        }
     }
 
     /// Handle a key while a dashboard tile (not the editor) holds focus.
     /// Navigation only: `j`/`k` move the selection, `g`/`G` jump to the
     /// ends, `l`/`h` open/shut the Variables group or step the Console tabs,
-    /// `Tab` cycles focus, `Esc` returns to the editor. Every other key is
-    /// inert, so a stray keystroke over a tile can never edit the buffer.
+    /// `Tab` cycles focus, `Esc` returns to the editor. `[Space]` opens the
+    /// which-key menu (so `[Space]d z` can zoom the tile you are reading without
+    /// first Esc-ing to the editor). Every other key is inert, so a stray
+    /// keystroke over a tile can never edit the buffer.
     fn dash_nav(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Tab => self.cycle_focus(),
             KeyCode::Esc => self.dash.focus = DashPane::Editor,
+            KeyCode::Char(' ') => self.mode = Mode::Menu,
             KeyCode::Char('j') | KeyCode::Down => self.dash_move(1),
             KeyCode::Char('k') | KeyCode::Up => self.dash_move(-1),
             KeyCode::Char('g') => self.dash_move_top(),
@@ -1283,7 +1346,7 @@ impl Editor {
             Mode::Insert => self.insert(key),
             Mode::Visual => self.visual(key),
             Mode::Command(_) => self.command(key),
-            Mode::Menu => self.menu(key),
+            Mode::Menu | Mode::DebugMenu => self.menu(key),
             Mode::BufferPicker { .. } => self.buffer_picker(key),
             Mode::FilePicker { .. } => self.file_picker(key),
             Mode::Completion { .. } => self.completion_key(key),
@@ -2072,7 +2135,8 @@ impl Editor {
             KeyCode::Char(c) => {
                 // Which-key: a bound key runs its action; any other key dismisses
                 // the menu (Helix-style -- no arrow navigation, no selection).
-                let action = MENU.iter().find(|m| m.key == c).map(|m| m.action);
+                // The table is the root `MENU` or the `[Space]d` submenu.
+                let action = self.menu_table().iter().find(|m| m.key == c).map(|m| m.action);
                 self.mode = Mode::Normal;
                 if let Some(a) = action {
                     self.run_menu(a);
@@ -2199,6 +2263,44 @@ impl Editor {
                 } else {
                     self.quit = true;
                 }
+            }
+            MenuAction::DebugSubmenu => {
+                // The panel toggles only make sense with a live dashboard.
+                if self.debugging() {
+                    self.mode = Mode::DebugMenu;
+                } else {
+                    self.status = Some("no debug session".to_string());
+                }
+            }
+            MenuAction::ToggleSidebar => {
+                self.dash.show_sidebar = !self.dash.show_sidebar;
+                // Hiding the sidebar while one of its tiles is focused would
+                // strand the focus on an invisible pane -- pull it to the editor.
+                if !self.dash.show_sidebar
+                    && matches!(
+                        self.dash.focus,
+                        DashPane::Variables | DashPane::CallStack | DashPane::Goroutines
+                    )
+                {
+                    self.dash.focus = DashPane::Editor;
+                }
+                self.status = Some(on_off("sidebar", self.dash.show_sidebar));
+            }
+            MenuAction::ToggleConsole => {
+                self.dash.show_console = !self.dash.show_console;
+                if !self.dash.show_console && self.dash.focus == DashPane::Console {
+                    self.dash.focus = DashPane::Editor;
+                }
+                self.status = Some(on_off("console", self.dash.show_console));
+            }
+            MenuAction::ToggleZoom => {
+                self.dash.zoom = !self.dash.zoom;
+                self.status = Some(on_off("zoom", self.dash.zoom));
+            }
+            MenuAction::Evaluate => {
+                // The which-key shortcut to `:print <expr>`: open the command
+                // line prefilled so the user types only the expression.
+                self.mode = Mode::Command(":print ".to_string());
             }
         }
     }
@@ -2406,6 +2508,13 @@ enum MenuAction {
     ToggleWrap,
     Save,
     Quit,
+    /// Open the `[Space]d` debug submenu (a no-op report without a session).
+    DebugSubmenu,
+    /// The debug submenu's panel toggles + evaluate shortcut.
+    ToggleSidebar,
+    ToggleConsole,
+    ToggleZoom,
+    Evaluate,
 }
 
 /// The fixed `[Space]` menu (Helix bindings where they map; nora-specific where
@@ -2442,6 +2551,11 @@ const MENU: &[MenuItem] = &[
         action: MenuAction::ToggleWrap,
     },
     MenuItem {
+        key: 'd',
+        label: "debug submenu",
+        action: MenuAction::DebugSubmenu,
+    },
+    MenuItem {
         key: 's',
         label: "save file",
         action: MenuAction::Save,
@@ -2452,6 +2566,39 @@ const MENU: &[MenuItem] = &[
         action: MenuAction::Quit,
     },
 ];
+
+/// The `[Space]d` debug submenu (reachable only while a session is live). The
+/// panel toggles + the evaluate shortcut; breakpoints / watches / goroutine
+/// switch / the resource inspector arrive with their mechanisms (8f-3 / 8g).
+const DEBUG_MENU: &[MenuItem] = &[
+    MenuItem {
+        key: 'v',
+        label: "toggle the sidebar",
+        action: MenuAction::ToggleSidebar,
+    },
+    MenuItem {
+        key: 'c',
+        label: "toggle the console",
+        action: MenuAction::ToggleConsole,
+    },
+    MenuItem {
+        key: 'z',
+        label: "zoom the focused pane",
+        action: MenuAction::ToggleZoom,
+    },
+    MenuItem {
+        key: 'e',
+        label: "evaluate an expression",
+        action: MenuAction::Evaluate,
+    },
+];
+
+/// A `"<name>: on"` / `"<name>: off"` status line for a toggle.
+fn on_off(name: &str, on: bool) -> String {
+    let mut s = String::from(name);
+    s.push_str(if on { ": on" } else { ": off" });
+    s
+}
 
 /// Map a function key to a debugger command -- the muscle-memory hot-keys
 /// active in Normal mode while a session is live (NORA-IDE-UX section 4).
@@ -2600,7 +2747,8 @@ Space then c) to return to your work.
     f  open file picker        b  open buffer picker
     n  next buffer             p  previous buffer
     c  close buffer            w  toggle soft-wrap
-    s  save file               q  quit
+    d  debug submenu           s  save file
+    q  quit
 
   LANGUAGE SERVER  (Go buffers, when the toolchain is installed)
     Errors and warnings appear as you edit: the line number is tinted,
@@ -2624,6 +2772,9 @@ Space then c) to return to your work.
     :bt             show the call stack (in a scratch buffer)
     :print <expr>   evaluate an expression at the stopped frame  (:p)
     :kill           end the session
+    Hot keys while stopped (NORMAL mode):  F5 continue   F10 step over
+      F11 step into    Shift-F11 step out    Shift-F5 stop
+    Space d  ->  the debug submenu:  v sidebar  c console  z zoom  e eval
     The status bar reports where the program stopped and each result.
 
 That's everything. Happy editing!
@@ -4227,5 +4378,115 @@ mod tests {
         assert_eq!(ed.mode, Mode::Insert);
         ed.handle_key(fkey(5));
         assert_eq!(ed.take_dap_request(), None);
+    }
+
+    // -- the [Space]d debug submenu + panel toggles (8f-2c-2) --------------
+
+    /// Open the `[Space]d` debug submenu (assumes a live session).
+    fn open_debug_menu(ed: &mut Editor) {
+        ed.handle_key(ch(' ')); // [Space] -> the root which-key menu
+        ed.handle_key(ch('d')); // d -> the debug submenu
+    }
+
+    #[test]
+    fn space_d_opens_the_debug_submenu_only_while_debugging() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        // No session: [Space]d reports rather than opening the submenu.
+        open_debug_menu(&mut ed);
+        assert_eq!(ed.mode, Mode::Normal);
+        assert!(!ed.menu_open());
+        // With a session it enters the submenu.
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        assert_eq!(ed.mode, Mode::DebugMenu);
+        assert!(ed.menu_open());
+    }
+
+    #[test]
+    fn the_debug_submenu_lists_the_panel_toggles() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        let keys: Vec<char> = ed.menu_entries().iter().map(|(k, _)| *k).collect();
+        assert!(keys.contains(&'v') && keys.contains(&'c') && keys.contains(&'z'));
+        assert!(keys.contains(&'e'));
+        // The root menu's entries are NOT shown in the submenu.
+        assert!(!keys.contains(&'f')); // 'f' = the root file picker
+    }
+
+    #[test]
+    fn the_debug_submenu_toggles_the_panels() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        assert!(ed.dash().show_sidebar && ed.dash().show_console && !ed.dash().zoom);
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('v'));
+        assert!(!ed.dash().show_sidebar);
+        assert_eq!(ed.mode, Mode::Normal); // a which-key key runs + closes
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('c'));
+        assert!(!ed.dash().show_console);
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('z'));
+        assert!(ed.dash().zoom);
+    }
+
+    #[test]
+    fn hiding_a_focused_panel_returns_focus_to_the_editor() {
+        // Hiding the sidebar while one of its tiles is focused must not strand
+        // the focus on an invisible pane.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        focus_tile(&mut ed, DashPane::CallStack);
+        open_debug_menu(&mut ed); // [Space] reaches the menu from a focused tile
+        ed.handle_key(ch('v'));
+        assert!(!ed.dash().show_sidebar);
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    #[test]
+    fn tab_skips_a_hidden_panel() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('c')); // hide the console
+        assert!(!ed.dash().show_console);
+        // Tab from Goroutines wraps straight to the editor, skipping the console.
+        focus_tile(&mut ed, DashPane::Goroutines);
+        ed.handle_key(code(KeyCode::Tab));
+        assert_eq!(ed.dash().focus, DashPane::Editor);
+    }
+
+    #[test]
+    fn the_debug_submenu_e_opens_the_print_command_line() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('e'));
+        assert_eq!(ed.command_buf(), Some(":print "));
+    }
+
+    #[test]
+    fn the_debug_submenu_is_esc_dismissable() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        assert_eq!(ed.mode, Mode::DebugMenu);
+        ed.handle_key(code(KeyCode::Esc));
+        assert_eq!(ed.mode, Mode::Normal);
+        assert!(ed.dash().show_sidebar); // no toggle happened
+    }
+
+    #[test]
+    fn a_new_session_resets_the_panel_toggles() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        open_debug_menu(&mut ed);
+        ed.handle_key(ch('v')); // hide the sidebar this session
+        assert!(!ed.dash().show_sidebar);
+        ed.set_debug_view(None); // session ends
+        ed.set_debug_view(Some(dbg_view())); // a fresh session
+        assert!(ed.dash().show_sidebar); // the full dashboard is back
+        assert!(!ed.dash().zoom);
     }
 }

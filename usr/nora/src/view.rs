@@ -72,6 +72,13 @@ fn body_area(area: Rect, tabs: bool) -> Rect {
 /// full-width (the existing behavior, byte-for-byte). Returns the cursor, which
 /// stays in the editor at 8f-2a (per-pane cursors are 8f-2b).
 pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
+    // Zoom (`[Space]d z`): the focused pane fills the whole area, hiding the
+    // split. Only meaningful with a live session + a pushed view.
+    if ed.debugging() && ed.dash().zoom {
+        if let Some(dv) = ed.debug_view() {
+            return render_zoomed(ed, dv, area, buf);
+        }
+    }
     match dash_split(ed, area) {
         Some(d) => {
             if let (Some(dv), Some(sb)) = (ed.debug_view(), d.sidebar) {
@@ -83,6 +90,33 @@ pub fn render(ed: &Editor, area: Rect, buf: &mut Buffer) -> (u16, u16) {
             render_editor(ed, d.editor, buf)
         }
         None => render_editor(ed, area, buf),
+    }
+}
+
+/// Zoom (`[Space]d z`): draw only the focused pane, filling `area`. A non-editor
+/// pane returns a throwaway cursor -- it never painted an editor block, and the
+/// binary hides the real cursor in Normal mode (`block_cursor`), so no cursor
+/// shows over a zoomed tile. The editor pane keeps its own cursor.
+fn render_zoomed(ed: &Editor, dv: &DebugView, area: Rect, buf: &mut Buffer) -> (u16, u16) {
+    let d = ed.dash();
+    match d.focus {
+        DashPane::Editor => render_editor(ed, area, buf),
+        DashPane::Variables => {
+            render_variables(dv, area, true, d.var_sel, d.locals_expanded, buf);
+            (area.x, area.y)
+        }
+        DashPane::CallStack => {
+            render_call_stack(dv, area, true, d.stack_sel, buf);
+            (area.x, area.y)
+        }
+        DashPane::Goroutines => {
+            render_goroutines(dv, area, true, d.gor_sel, buf);
+            (area.x, area.y)
+        }
+        DashPane::Console => {
+            render_console(ed, dv, area, buf);
+            (area.x, area.y)
+        }
     }
 }
 
@@ -100,15 +134,28 @@ fn dash_split(ed: &Editor, area: Rect) -> Option<DashRects> {
     if !ed.debugging() || area.width < DASH_MIN_W || area.height < DASH_MIN_H {
         return None;
     }
-    // Bottom Console spans the full width; the main band holds editor + sidebar.
-    let rows = Layout::vertical(&[Constraint::Min(1), Constraint::Length(CONSOLE_H)]).split(area);
-    let main = rows[0];
-    let console = rows.get(1).copied();
-    let cols =
-        Layout::horizontal(&[Constraint::Min(1), Constraint::Length(SIDEBAR_W)]).split(main);
+    let d = ed.dash();
+    // The Console spans the bottom band only when shown (`[Space]d c`); otherwise
+    // the main band reclaims its rows.
+    let (main, console) = if d.show_console {
+        let rows =
+            Layout::vertical(&[Constraint::Min(1), Constraint::Length(CONSOLE_H)]).split(area);
+        (rows[0], rows.get(1).copied())
+    } else {
+        (area, None)
+    };
+    // The sidebar takes the right column only when shown (`[Space]d v`);
+    // otherwise the editor reclaims its width.
+    let (editor, sidebar) = if d.show_sidebar {
+        let cols =
+            Layout::horizontal(&[Constraint::Min(1), Constraint::Length(SIDEBAR_W)]).split(main);
+        (cols[0], cols.get(1).copied())
+    } else {
+        (main, None)
+    };
     Some(DashRects {
-        editor: cols[0],
-        sidebar: cols.get(1).copied(),
+        editor,
+        sidebar,
         console,
     })
 }
@@ -118,6 +165,12 @@ fn dash_split(ed: &Editor, area: Rect) -> Option<DashRects> {
 /// it scrolls to matches the width `render` draws into (else the wrapped cursor
 /// desyncs).
 pub fn editor_area(ed: &Editor, area: Rect) -> Rect {
+    // When zoomed, the focused pane fills `area`; if that pane is the editor its
+    // viewport is the whole area (else the editor is not drawn and this is moot,
+    // but `area` keeps `scroll_to` in bounds for the frame after un-zooming).
+    if ed.debugging() && ed.dash().zoom {
+        return area;
+    }
     dash_split(ed, area).map(|d| d.editor).unwrap_or(area)
 }
 
@@ -744,7 +797,7 @@ fn render_menu(ed: &Editor, text_area: Rect, buf: &mut Buffer) -> (u16, u16) {
         .map(|(k, l)| format!("{}  {}", k, l))
         .collect();
     let refs: alloc::vec::Vec<&str> = rows.iter().map(|s| s.as_str()).collect();
-    let title = " <space> ";
+    let title = ed.menu_title();
     let inner = popup(text_area, title, widest(&refs, title), rows.len() as u16, buf);
     List::new(&refs).style(theme::palette_surface()).render(inner, buf);
     (inner.x, inner.y)
@@ -1019,9 +1072,11 @@ fn caret_screen(ed: &Editor, text_area: Rect, gutter_w: u16, p: (usize, usize)) 
 
 fn mode_color(mode: &Mode) -> Color {
     match mode {
-        Mode::Normal | Mode::Menu | Mode::BufferPicker { .. } | Mode::FilePicker { .. } => {
-            theme::EMBER
-        }
+        Mode::Normal
+        | Mode::Menu
+        | Mode::DebugMenu
+        | Mode::BufferPicker { .. }
+        | Mode::FilePicker { .. } => theme::EMBER,
         // Completion overlays Insert; keeping the accent means the cursor does
         // not change colour under the user just because a popup opened.
         Mode::Insert | Mode::Completion { .. } => theme::GREEN,
@@ -1251,11 +1306,11 @@ ccc", false);
         ed.handle_key(KeyEvent::char(' ')); // open the menu
         let mut b = Buffer::empty(big);
         render(&ed, big, &mut b);
-        // 8 entries -> box height 10, bottom-aligned (by=3), inner.y=4; row 0 is
-        // "f  open file picker".
-        assert_eq!(sym(&b, 1, 4), 'f'); // the key
-        assert_eq!(sym(&b, 4, 4), 'o'); // "open file picker" after "f  "
-        assert_ne!(b.get(1, 4).unwrap().style.bg, theme::EMBER); // no selection bar
+        // 9 entries -> box height 11, bottom-aligned, inner.y=3; row 0 is
+        // "f  open file picker" (the 'd' debug-submenu entry added one row).
+        assert_eq!(sym(&b, 1, 3), 'f'); // the key
+        assert_eq!(sym(&b, 4, 3), 'o'); // "open file picker" after "f  "
+        assert_ne!(b.get(1, 3).unwrap().style.bg, theme::EMBER); // no selection bar
     }
 
     #[test]
@@ -1766,5 +1821,58 @@ ccc", false);
         assert!(frame_has(&b, a, "p = *main.T"), "the open struct row");
         assert!(frame_has(&b, a, "a = 1"), "its nested child");
         assert!(frame_has(&b, a, "\u{25BE}"), "a ▾ open marker"); // group + struct
+    }
+
+    // -- the [Space]d panel toggles (8f-2c-2) ------------------------------
+
+    /// Drive `[Space]d <key>` on a debugging editor.
+    fn space_d(ed: &mut Editor, key: char) {
+        ed.handle_key(KeyEvent::char(' '));
+        ed.handle_key(KeyEvent::char('d'));
+        ed.handle_key(KeyEvent::char(key));
+    }
+
+    #[test]
+    fn hiding_the_sidebar_gives_the_editor_the_full_width() {
+        let a = Rect::new(0, 0, 60, 20);
+        let mut ed = dbg_ed();
+        space_d(&mut ed, 'v'); // hide the sidebar
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(!frame_has(&b, a, "Variables")); // the sidebar is gone
+        assert!(frame_has(&b, a, "Console")); // the console remains
+        assert_eq!(editor_area(&ed, a).width, 60); // editor reclaimed the width
+    }
+
+    #[test]
+    fn hiding_the_console_removes_the_bottom_band() {
+        let a = Rect::new(0, 0, 60, 20);
+        let mut ed = dbg_ed();
+        space_d(&mut ed, 'c'); // hide the console
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(!frame_has(&b, a, "Console")); // the console band is gone
+        assert!(frame_has(&b, a, "Variables")); // the sidebar remains
+        assert_eq!(editor_area(&ed, a).height, 20); // editor took the console rows
+    }
+
+    #[test]
+    fn zoom_fills_the_focused_pane() {
+        let a = Rect::new(0, 0, 60, 20);
+        let mut ed = dbg_ed();
+        // Focus the Console, then zoom it.
+        for _ in 0..5 {
+            if ed.dash().focus == DashPane::Console {
+                break;
+            }
+            ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        }
+        space_d(&mut ed, 'z');
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        // Only the Console is drawn -- the editor + the sidebar tiles are hidden.
+        assert!(frame_has(&b, a, "Console"));
+        assert!(!frame_has(&b, a, "Variables"));
+        assert_ne!(sym(&b, 2, 0), '1'); // the editor gutter "1" is not drawn
     }
 }

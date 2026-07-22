@@ -156,7 +156,8 @@ exact residue UTOPIA-VISUAL.md §8 flags; corrected to Bonfire with T2.)*
 | Insert | printable → insert; Enter → split; Backspace/Delete; Tab → 4 spaces (soft tab); Esc → Normal |
 | Visual | `h j k l 0 $ gg ge G w b` extend the selection (the same goto prefix as Normal, so `gg`/`ge` mean one thing everywhere); `y` yank; `d`/`x` cut; Esc → cancel |
 | Command | type the line; Enter runs it; Backspace (erasing `:`/`/` exits); Esc → Normal |
-| Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, next/prev/close buffer, save, quit. |
+| Palette (`[Space]`) | `j`/`k` + arrows / `Ctrl-n`/`Ctrl-p` move; Enter runs the entry; `Space`/Esc close. Entries: **toggle soft-wrap**, next/prev/close buffer, **debug submenu** (`d`, while a session is live), save, quit. |
+| Debug (session live) | **Hot keys** (Normal, any pane focus): `F5` continue, `F10` step over, `F11` step into, `Shift-F11` step out, `Shift-F5` stop. **Dashboard**: `Tab` cycles the focused pane (skipping hidden ones); on a focused sidebar tile `j`/`k` select, `g`/`G` ends, `l`/`h` expand/collapse, `Enter` acts (Call Stack → jump to the frame; Goroutines → switch); `Esc` back to the editor. **`[Space]d` submenu**: `v` sidebar, `c` console, `z` zoom the focused pane, `e` evaluate (`:print `). |
 
 Ex commands: `:w` / `:w <name>` (save / save-as), `:q` (guarded on unsaved),
 `:q!`, `:wq` / `:wq <name>`, `:e <name>` (opens a new buffer), `:e! <name>`,
@@ -388,12 +389,19 @@ muscle-memory hot-keys** — while a session is live, Normal-mode `F5` continues
 maps to the same `DapRequest` the `:` verbs already raise (no new mechanism),
 fires whether the editor or a sidebar tile holds focus (the check precedes the
 tile-nav redirect), and is inert without a session and in Insert mode (Esc first —
-the daily-driver debug view is Normal anyway). Still pending: **8f-2c-2** the
-`[Space]d` debug submenu + the `v`/`c`/`z` panel toggles (a renderer-touching leg
-— sidebar/console visibility + zoom); **8f-3** the cross-boundary `── kernel ──`
-divider (§5). A UX seam: `h` on a plain leaf is inert (collapse the group from
-row 0) — move-to-parent is a later polish. Kernel byte-unchanged; consumes I-39;
-no new §28 invariant.
+the daily-driver debug view is Normal anyway). **8f-2c-2 added the `[Space]d`
+debug submenu + the `v`/`c`/`z` panel toggles** — `[Space]` (from the editor OR a
+focused tile) then `d` opens a nested which-key of panel toggles: `v` hides the
+sidebar, `c` hides the Console (the editor reclaims the freed space via the
+shared `dash_split`, so the cursor scroll stays consistent), `z` zooms the
+focused pane over the whole split, and `e` opens `:print ` for a quick evaluate.
+`Tab` skip-cycles a hidden pane, hiding a focused pane pulls focus back to the
+editor, and a fresh session resets the layout. Still pending: **8f-3** the
+cross-boundary `── kernel ──` divider (§5); `F9` toggle-breakpoint and the
+submenu's `d`/`b`/`l`/`w`/`g`/`i` entries wait for their mechanisms (gutter
+breakpoint state / watches / 8g). A UX seam: `h` on a plain leaf is inert
+(collapse the group from row 0) — move-to-parent is a later polish. Kernel
+byte-unchanged; consumes I-39; no new §28 invariant.
 
 ## Console discipline (I-27)
 
@@ -427,7 +435,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**208 host unit tests** over the pure engine (the per-module list below is a
+**219 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -454,7 +462,13 @@ changes visibility) + 1 `editor` (`l`/`h` on an expandable row raise
 nested child), the group-toggle test reworked to the per-node semantics) — and
 the 8f-2c-1 **hot-keys axis** — 5 `editor` tests (F5/F10/F11 drive
 continue/next/step, Shift-F11/Shift-F5 step out/stop, the hot-keys fire while a
-sidebar tile is focused, inert without a session, inert in Insert mode)):
+sidebar tile is focused, inert without a session, inert in Insert mode) — and the
+8f-2c-2 **panel-toggles axis** — 8 `editor` tests (`[Space]d` opens the submenu
+only while debugging, the submenu lists v/c/z/e, each toggles its panel, hiding a
+focused pane returns focus to the editor, Tab skips a hidden pane, `e` opens
+`:print `, Esc dismisses, a new session resets the layout) + 3 `view` tests (a
+hidden sidebar/console reclaims the editor's width/height, zoom fills the focused
+pane)):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -511,7 +525,8 @@ open / edit / `:w` / `cat`).
 | 8f-2b-2 tile actions (Call Stack `Enter` → frame jump + re-scope, Goroutines `Enter` → re-root) | landed |
 | 8f-2b-3 nested-lazy Variables tree (`nora::vartree` + parley reference + kaua `expandable`; `l`/`h` expand/collapse, lazy child fetch) | landed |
 | 8f-2c-1 hot-keys (`F5` cont / `F10` over / `F11` into / `Shift-F11` out / `Shift-F5` stop → the DAP requests) | landed |
-| 8f-2c-2 `[Space]d` submenu + `v`/`c`/`z` panel toggles, 8f-3 cross-boundary stack | pending |
+| 8f-2c-2 `[Space]d` submenu + `v`/`c`/`z` panel toggles (visibility + zoom + `e` evaluate) | landed |
+| 8f-3 cross-boundary `── kernel ──` stack divider + inline values | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams
