@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="3.5 -1.5 47 25" width="1880" height="1000" shape-rendering="crispEdges">
+<defs><mask id="cut" maskUnits="userSpaceOnUse" x="3.5" y="-1.5" width="47" height="25">
+<rect x="3.5" y="-1.5" width="47" height="25" fill="#fff"></rect>
+<polygon points="26.15,5 27.85,5 26.613,9 24.913,9" fill="#000"></polygon><polygon points="29.15,5 30.85,5 28.994,11 27.294,11" fill="#000"></polygon><polygon points="32.15,5 33.85,5 31.375,13 29.675,13" fill="#000"></polygon><polygon points="35.15,5 36.85,5 34.066,14 32.366,14" fill="#000"></polygon><polygon points="12,7.2 14,7.2 13.319,9.4 11.319,9.4" fill="#000"></polygon>
+</mask></defs>
+<g mask="url(#cut)"><rect x="11" y="6" width="26" height="1" fill="#b85f2a"></rect><rect x="6" y="8" width="35" height="1" fill="#a898c8"></rect><rect x="5" y="10" width="44" height="1" fill="#cb773c"></rect><rect x="6" y="12" width="37" height="1" fill="#d58345"></rect><rect x="15" y="14" width="26" height="1" fill="#df8f4e"></rect><rect x="17" y="16" width="3" height="1" fill="#e89b57"></rect><rect x="22" y="16" width="3" height="1" fill="#e89b57"></rect><rect x="34" y="16" width="3" height="1" fill="#e89b57"></rect><rect x="39" y="16" width="3" height="1" fill="#e89b57"></rect><rect x="18" y="18" width="3" height="1" fill="#f2a760"></rect><rect x="35" y="18" width="3" height="1" fill="#f2a760"></rect></g>
+</svg>
