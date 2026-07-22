@@ -397,8 +397,11 @@ impl Dap {
                 false
             }
 
-            // The variables response: the current frame's locals.
-            Action::Variables(vars) => {
+            // The variables response: the current frame's locals. 8f-2b-3a
+            // threads the reference through (parley now echoes it); the flat
+            // model still routes every response to the top-level locals -- the
+            // nested-lazy tree that consumes `reference` lands in 8f-2b-3b.
+            Action::Variables { variables: vars, .. } => {
                 self.locals = vars
                     .iter()
                     .map(|v| VarRow {

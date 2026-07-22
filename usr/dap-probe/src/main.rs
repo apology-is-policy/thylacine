@@ -240,7 +240,7 @@ impl Session {
                 Progress::Wait
             }
 
-            Action::Variables(_) if self.phase == Phase::Vars => {
+            Action::Variables { .. } if self.phase == Phase::Vars => {
                 t_putstr("dap-probe: variables ok\n");
                 let ev = self.client.evaluate("main.Sentinel", self.frame_id, "repl");
                 if srv.send(&ev).is_err() {

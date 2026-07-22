@@ -143,7 +143,10 @@ enum Cmd {
     Pause,
     StackTrace,
     Scopes,
-    Variables,
+    /// The `i64` is the `variablesReference` this request asked for, so the
+    /// response routes to the right node (a lazy tree can have several
+    /// `variables` requests outstanding at once).
+    Variables(i64),
     Evaluate,
     Threads,
     Disconnect,
@@ -166,7 +169,7 @@ impl Cmd {
             Cmd::Pause => "pause",
             Cmd::StackTrace => "stackTrace",
             Cmd::Scopes => "scopes",
-            Cmd::Variables => "variables",
+            Cmd::Variables(_) => "variables",
             Cmd::Evaluate => "evaluate",
             Cmd::Threads => "threads",
             Cmd::Disconnect => "disconnect",
@@ -204,8 +207,10 @@ pub enum Action {
     StackTrace(Vec<StackFrame>),
     /// A `scopes` response.
     Scopes(Vec<Scope>),
-    /// A `variables` response.
-    Variables(Vec<Variable>),
+    /// A `variables` response. `reference` echoes the `variablesReference` this
+    /// answers (parley remembers it per outstanding seq), so a consumer routes
+    /// the result to the right tree node even with several requests in flight.
+    Variables { reference: i64, variables: Vec<Variable> },
     /// An `evaluate` response.
     Evaluate(EvalResult),
     /// A `threads` response.
@@ -410,7 +415,7 @@ impl Client {
     /// `variables` for a reference (from a [`Scope`] or an expandable
     /// [`Variable`]).
     pub fn variables(&mut self, variables_reference: i64) -> Value {
-        let seq = self.mint(Cmd::Variables);
+        let seq = self.mint(Cmd::Variables(variables_reference));
         dap::request(
             seq,
             "variables",
@@ -499,7 +504,10 @@ impl Client {
             }
             Cmd::StackTrace => Action::StackTrace(parse_stack_frames(&body)),
             Cmd::Scopes => Action::Scopes(parse_scopes(&body)),
-            Cmd::Variables => Action::Variables(parse_variables(&body)),
+            Cmd::Variables(reference) => Action::Variables {
+                reference,
+                variables: parse_variables(&body),
+            },
             Cmd::Evaluate => Action::Evaluate(parse_evaluate(&body)),
             Cmd::Threads => Action::Threads(parse_threads(&body)),
             // Requests whose success carries no structured result the UI needs.
@@ -793,7 +801,8 @@ mod tests {
         }
         let v_rs = seq_of(&c.variables(2000));
         match feed(&mut c, &alloc::format!(r#"{{"type":"response","request_seq":{},"success":true,"command":"variables","body":{{"variables":[{{"name":"i","value":"7","type":"int","variablesReference":0}},{{"name":"p","value":"*T","type":"*main.T","variablesReference":2001}}]}}}}"#, v_rs)) {
-            Action::Variables(vars) => {
+            Action::Variables { reference, variables: vars } => {
+                assert_eq!(reference, 2000); // routed to the requested reference
                 assert_eq!(vars.len(), 2);
                 assert_eq!(vars[0].name, "i");
                 assert_eq!(vars[0].value, "7");

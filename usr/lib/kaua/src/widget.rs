@@ -397,6 +397,11 @@ pub struct TreeItem<'a> {
     pub label: &'a str,
     pub style: Style,
     pub expanded: bool,
+    /// Force a branch marker (▸/▾) even with no children cached -- a lazily
+    /// loaded node that is expandable but not yet fetched. The marker keys on
+    /// `is_branch()` (real children) OR this; recursion still needs real
+    /// children, so an expanded-but-unfetched node shows ▾ with no child rows.
+    pub expandable: bool,
     pub children: Vec<TreeItem<'a>>,
 }
 
@@ -407,6 +412,7 @@ impl<'a> TreeItem<'a> {
             label,
             style: Style::new(),
             expanded: false,
+            expandable: false,
             children: Vec::new(),
         }
     }
@@ -417,6 +423,7 @@ impl<'a> TreeItem<'a> {
             label,
             style: Style::new(),
             expanded: false,
+            expandable: false,
             children,
         }
     }
@@ -428,6 +435,15 @@ impl<'a> TreeItem<'a> {
 
     pub fn expanded(mut self, on: bool) -> Self {
         self.expanded = on;
+        self
+    }
+
+    /// Mark this node expandable even with no children cached yet (a lazily
+    /// loaded branch): it shows a ▸/▾ marker. Recursion into `children` still
+    /// requires real children, so an expanded-but-unfetched node shows ▾ with no
+    /// child rows until they arrive.
+    pub fn expandable(mut self, on: bool) -> Self {
+        self.expandable = on;
         self
     }
 
@@ -472,7 +488,10 @@ pub struct TreeRow<'a> {
 
 fn flatten_into<'a>(items: &'a [TreeItem<'a>], depth: u16, out: &mut Vec<TreeRow<'a>>) {
     for it in items {
-        let mark = if !it.is_branch() {
+        // A node shows a marker if it has real children OR is a lazily-loaded
+        // expandable node; recursion below still needs real children.
+        let branch = it.is_branch() || it.expandable;
+        let mark = if !branch {
             Mark::Leaf
         } else if it.expanded {
             Mark::Expanded
@@ -1126,6 +1145,30 @@ mod tests {
                 ("child", 1, Mark::Leaf),
                 ("shut", 0, Mark::Collapsed),
                 ("leaf", 0, Mark::Leaf),
+            ]
+        );
+    }
+
+    #[test]
+    fn tree_expandable_flag_shows_a_marker_without_cached_children() {
+        // A lazily-loaded node: expandable but no children fetched yet. It must
+        // show ▸ collapsed / ▾ expanded (never a blank leaf), and an expanded
+        // one with no real children yields no child rows.
+        let roots = vec![
+            TreeItem::leaf("shut").expandable(true),
+            TreeItem::leaf("open").expandable(true).expanded(true),
+            TreeItem::leaf("plain"),
+        ];
+        let got: Vec<(&str, u16, Mark)> = flatten_tree(&roots)
+            .iter()
+            .map(|r| (r.label, r.depth, r.mark))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("shut", 0, Mark::Collapsed),
+                ("open", 0, Mark::Expanded), // ▾ but no child rows (unfetched)
+                ("plain", 0, Mark::Leaf),
             ]
         );
     }
