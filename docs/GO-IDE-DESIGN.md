@@ -220,7 +220,8 @@ with its own focused design pass + audit (it is a new privilege surface).
   verbatim because `t_user_regs` *is* Linux `user_pt_regs`. The load-bearing
   decision: **all breakpoints route to the arm64 HW path** (I-12 W^X + I-36
   forbid a software `BRK` into shared text), giving a hard ceiling of the debug
-  registers (4 code + 4 data at the v1.0 clamp) — the defining ergonomic
+  registers (`num_brps` code = 6 on current substrates + 4 data) — the defining
+  ergonomic
   difference from `dlv` on Linux. Sub-chunks 8c-1 (attach + inspect) → 8c-2
   (HW breakpoints + step + continue) → 8c-3 (goroutines + the unified user→
   kernel stack via `kstack`) → 8c-4 (launch + the DAP server over stdio).

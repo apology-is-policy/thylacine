@@ -35,7 +35,17 @@ void hwdebug_enumerate(void);
 // Proc runs -- PMC=EL0 alone does NOT isolate two Procs sharing a user VA). A bp
 // fire (EC 0x30) routes to a whole-Proc stop via the 8a-1 checkpoint machinery.
 
-#define DEBUG_HWBP_SLOTS 4u   // v1.0 breakpoint table size (clamped to num_brps)
+// DEBUG_HWBP_SLOTS sizes the per-Proc breakpoint TABLE; the usable count is
+// g_debug_max_bp = min(num_brps, DEBUG_HWBP_SLOTS). Sized to the arm64
+// architectural max (ID_AA64DFR0_EL1.BRPs is a 4-bit field, so num_brps <= 16,
+// and hwdebug_enumerate caps at 16) -> the software table never caps below the
+// hardware: a debugger gets EVERY HW breakpoint the CPU implements. The prior
+// v1.0 value of 4 starved Delve's `next`, which arms one temporary HW breakpoint
+// per successor PC + the return address, so a small step-over needs 4-5 slots
+// concurrent with the user's breakpoint -> the overflow `hwbreak` returned -1
+// (a failed ctl write, surfacing as EPERM). g_debug_max_bp <= num_brps still
+// holds, so a slot index is never written past the implemented DBGB* registers.
+#define DEBUG_HWBP_SLOTS 16u  // arm64 architectural max (DFR0.BRPs 4-bit); usable = min(num_brps, this)
 #define DEBUG_HWWP_SLOTS 4u   // v1.0 watchpoint table size (clamped to num_wrps; 8a-2b-3)
 
 // Watchpoint access flags -- the LSC (load/store control) the debugger wants to

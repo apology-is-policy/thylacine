@@ -314,6 +314,28 @@ fn debug_flow(child: &mut Child) -> Result<(), &'static str> {
     }
     t_putstr("debug-probe: hwbreak ok (cross-Proc bp fired; pc == landmark)\n");
 
+    // --- regression: >4 concurrent HW breakpoints through the ctl path ---
+    // The table holds min(num_brps, DEBUG_HWBP_SLOTS) breakpoints. The software cap
+    // was 4, which starved Delve's `next` (it arms one temp HW breakpoint per
+    // successor PC + the return address, so a small step-over needs 4-5 concurrent
+    // with the user's breakpoint -> the overflow `hwbreak` returned -1). With the
+    // table sized to the arm64 max, the usable count is num_brps (6 on QEMU -cpu
+    // max + Apple M2). bp_va is already armed (1); arm four more distinct 4-aligned
+    // VAs (5 total) -- each ctl write must succeed (on the old cap of 4 the 5th
+    // returned -1 -> Err). Remove the four extras so bp_va stays the sole armed bp
+    // for the step-over dance below. (The VAs need not be mapped code: the arm only
+    // records the table entry; nothing executes them -- they are removed before the
+    // child resumes.)
+    for i in 1..=4u64 {
+        ctl.write_all(format!("hwbreak 0x{:x}", bp_va + i * 4).as_bytes())
+            .map_err(|_| "debug-probe: FAIL -- 5-concurrent-bp arm (HW breakpoint ceiling < 5?)\n")?;
+    }
+    for i in 1..=4u64 {
+        ctl.write_all(format!("hwrmbreak 0x{:x}", bp_va + i * 4).as_bytes())
+            .map_err(|_| "debug-probe: FAIL -- 5-concurrent-bp disarm\n")?;
+    }
+    t_putstr("debug-probe: multi-bp ok (5 concurrent HW breakpoints via ctl)\n");
+
     // --- 8a-2b-2: single-step FROM the breakpointed PC (the step-over dance) ---
     // The target is stopped AT bp_landmark (pc == bp_va, the bp still armed). Each
     // `step` executes exactly one A64 instruction (4 bytes) and re-stops. The
