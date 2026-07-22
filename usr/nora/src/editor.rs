@@ -4019,10 +4019,10 @@ mod tests {
     fn dbg_view() -> DebugView {
         DebugView {
             status: "stopped: breakpoint at main.parkLoop".to_string(),
-            frames: alloc::vec![crate::debug::StackRow {
-                func: "main.parkLoop".to_string(),
-                location: "child.go:23".to_string(),
-            }],
+            frames: alloc::vec![crate::debug::StackRow::go(
+                "main.parkLoop".to_string(),
+                "child.go:23".to_string(),
+            )],
             locals: alloc::vec![crate::debug::VarRow {
                 name: "i".to_string(),
                 value: "3".to_string(),
@@ -4090,10 +4090,10 @@ mod tests {
         DebugView {
             status: "stopped".to_string(),
             frames: (0..frames)
-                .map(|i| crate::debug::StackRow {
-                    func: alloc::format!("f{}", i),
-                    location: alloc::format!("m.go:{}", i),
-                })
+                .map(|i| crate::debug::StackRow::go(
+                    alloc::format!("f{}", i),
+                    alloc::format!("m.go:{}", i),
+                ))
                 .collect(),
             locals: (0..locals)
                 .map(|i| crate::debug::VarRow {

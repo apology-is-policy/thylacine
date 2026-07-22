@@ -358,6 +358,14 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
   wait for their mechanisms (8f-3 / 8g).
 - **8f-3 — polish.** The cross-boundary stack divider + select-a-frame, inline
   values, the LSP editor affordances, Bonfire pass. The "this is lovely" bar.
+  **8f-3a landed** the divider *presentation* (`StackRow.kernel: bool`; the DAP
+  host lists Go frames then the kernel half; `render_call_stack` draws the ember
+  `── kernel ──` divider with the kernel rows dim; the divider is visual-only —
+  the selection stays a frame index that maps past it; +4 host tests). **8f-3b**
+  sources the kernel frames: parley decodes the DAP `process` event's pid (Ambush
+  emits it), and the host reads `/proc/<pid>/kstack` (the 8b settled-thread
+  inspect) on each stop and appends them — the head-thread stack (goroutine-
+  accurate mapping is the deferred Ambush 8c-3, skipped in that arc).
 - **8g — the superpowers** (§5): resource inspector, scheduler view,
   post-mortem, snapshot-debugging.
 - **8h — the whole-arc audit + by-default ship + docs** (the debug-authority

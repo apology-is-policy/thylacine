@@ -13,14 +13,42 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// One frame of the Call Stack tile (the unified user->kernel stack, section 5;
-/// the `── kernel ──` divider + `kernel` styling arrive with 8f-3).
+/// One frame of the Call Stack tile (the unified user->kernel stack, section 5).
+/// Go frames come first, then the kernel frames beneath the SVC boundary; the
+/// renderer draws the `── kernel ──` divider at the transition and dims the
+/// kernel rows (8f-3a). The DAP (Go) half is built from Ambush's `stackTrace`;
+/// the kernel half is read from `/proc/<pid>/kstack` (8f-3b).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct StackRow {
-    /// The function name (`main.parkLoop`).
+    /// The function name (`main.parkLoop`, or a kernel `sched.c::sleep`).
     pub func: String,
-    /// `"main.go:23"`, or `""` when the frame has no source.
+    /// `"main.go:23"`, or `""` when the frame has no source (kernel frames, and
+    /// Go runtime asm frames).
     pub location: String,
+    /// This frame is below the user->kernel boundary -- dim-styled, and the
+    /// first such frame carries the `── kernel ──` divider above it.
+    pub kernel: bool,
+}
+
+impl StackRow {
+    /// A user (Go) frame.
+    pub fn go(func: String, location: String) -> Self {
+        StackRow {
+            func,
+            location,
+            kernel: false,
+        }
+    }
+
+    /// A kernel frame (below the SVC boundary; the symbolized `func+offset` from
+    /// the Halls HX-2 symtab via `/proc/<pid>/kstack`, section 5).
+    pub fn kernel(func: String, location: String) -> Self {
+        StackRow {
+            func,
+            location,
+            kernel: true,
+        }
+    }
 }
 
 /// One visible row of the Variables tile: the flattened, visible-only view of

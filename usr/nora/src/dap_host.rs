@@ -739,10 +739,7 @@ impl Dap {
         let frames = self
             .frames
             .iter()
-            .map(|f| StackRow {
-                func: f.name.clone(),
-                location: frame_location(f),
-            })
+            .map(|f| StackRow::go(f.name.clone(), frame_location(f)))
             .collect();
         let mut locals = Vec::new();
         vartree::flatten(&self.var_tree, 0, &mut locals);

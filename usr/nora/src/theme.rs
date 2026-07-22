@@ -207,6 +207,19 @@ pub fn tile_selected() -> Style {
     Style::new().fg(BG).bg(EMBER).attr(Attr::BOLD)
 }
 
+/// The Call Stack's `── kernel ──` divider row -- ember box-drawing marking the
+/// user->kernel boundary (NORA-IDE-UX section 5). Ember is Bonfire's divider
+/// accent, so the boundary is unmistakable without a bright line.
+pub fn stack_kernel_divider() -> Style {
+    Style::new().fg(EMBER).bg(BG)
+}
+
+/// A kernel frame in the Call Stack -- dim, so the cross-boundary rows read as
+/// furniture beneath the Go frames (NORA-IDE-UX section 5).
+pub fn stack_kernel_frame() -> Style {
+    Style::new().fg(DIM).bg(BG)
+}
+
 /// A tile scrollbar track (the dim `│` rail; shown only when the tile overflows).
 pub fn tile_scroll_track() -> Style {
     Style::new().fg(BORDER).bg(BG)

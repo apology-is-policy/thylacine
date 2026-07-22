@@ -396,12 +396,22 @@ sidebar, `c` hides the Console (the editor reclaims the freed space via the
 shared `dash_split`, so the cursor scroll stays consistent), `z` zooms the
 focused pane over the whole split, and `e` opens `:print ` for a quick evaluate.
 `Tab` skip-cycles a hidden pane, hiding a focused pane pulls focus back to the
-editor, and a fresh session resets the layout. Still pending: **8f-3** the
-cross-boundary `── kernel ──` divider (§5); `F9` toggle-breakpoint and the
-submenu's `d`/`b`/`l`/`w`/`g`/`i` entries wait for their mechanisms (gutter
-breakpoint state / watches / 8g). A UX seam: `h` on a plain leaf is inert
-(collapse the group from row 0) — move-to-parent is a later polish. Kernel
-byte-unchanged; consumes I-39; no new §28 invariant.
+editor, and a fresh session resets the layout. **8f-3a landed the cross-boundary
+`── kernel ──` stack divider** (§5, the flagship): `StackRow` gained a `kernel:
+bool`, the DAP host lists Go frames first then the kernel half, and
+`render_call_stack` draws an **ember `── kernel ──` divider** at the boundary
+with the kernel rows **dim**. The divider is a visual-only row — the selection is
+a *frame* index (`Enter` → `SelectFrame`), so `j`/`k` navigation never lands on
+it; the renderer maps a frame index to its visible row past the divider (and the
+scroll offset with it). The kernel-frame **data source** — the DAP host reading
+`/proc/<pid>/kstack` for the debuggee (Ambush already emits its pid in the DAP
+`process` event) — is **8f-3b**; until it lands the divider is dormant (the DAP
+half only supplies Go frames), but the presentation is complete + host-tested
+with a synthetic kernel half. `F9` toggle-breakpoint and the submenu's
+`d`/`b`/`l`/`w`/`g`/`i` entries wait for their mechanisms (gutter breakpoint
+state / watches / 8g). A UX seam: `h` on a plain leaf is inert (collapse the
+group from row 0) — move-to-parent is a later polish. Kernel byte-unchanged;
+consumes I-39; no new §28 invariant.
 
 ## Console discipline (I-27)
 
@@ -435,7 +445,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**219 host unit tests** over the pure engine (the per-module list below is a
+**223 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -468,7 +478,10 @@ only while debugging, the submenu lists v/c/z/e, each toggles its panel, hiding 
 focused pane returns focus to the editor, Tab skips a hidden pane, `e` opens
 `:print `, Esc dismisses, a new session resets the layout) + 3 `view` tests (a
 hidden sidebar/console reclaims the editor's width/height, zoom fills the focused
-pane)):
+pane) — and the 8f-3a **cross-boundary divider axis** — 4 `view` tests (the Call
+Stack draws an ember `── kernel ──` divider, kernel frames dim + sit below it,
+an all-Go stack has no divider, selecting a kernel frame highlights the frame not
+the visual-only divider)):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -526,7 +539,9 @@ open / edit / `:w` / `cat`).
 | 8f-2b-3 nested-lazy Variables tree (`nora::vartree` + parley reference + kaua `expandable`; `l`/`h` expand/collapse, lazy child fetch) | landed |
 | 8f-2c-1 hot-keys (`F5` cont / `F10` over / `F11` into / `Shift-F11` out / `Shift-F5` stop → the DAP requests) | landed |
 | 8f-2c-2 `[Space]d` submenu + `v`/`c`/`z` panel toggles (visibility + zoom + `e` evaluate) | landed |
-| 8f-3 cross-boundary `── kernel ──` stack divider + inline values | pending |
+| 8f-3a cross-boundary `── kernel ──` stack divider (`StackRow.kernel` + ember divider + dim kernel rows; presentation) | landed |
+| 8f-3b kernel-frame data source (parley decodes the DAP `process` pid; host reads `/proc/<pid>/kstack`) | pending |
+| 8f-3 remainder (inline values, LSP editor affordances, Bonfire pass) | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams
@@ -561,3 +576,15 @@ open / edit / `:w` / `cat`).
 - **Syntax highlighting** — a native lexer highlighter (and the tree-sitter
   feasibility, gated on the native-links-C toolchain, #67) is the documented
   v1.x direction (`docs/KAUA.md` §12).
+- **The kernel stack divider is dormant until 8f-3b** — 8f-3a landed the
+  presentation (`StackRow.kernel` + the ember `── kernel ──` divider + dim kernel
+  rows), but the DAP host still supplies only Go frames, so a real session shows
+  no kernel half yet. 8f-3b sources it: parley decodes the DAP `process` event's
+  `systemProcessId` (Ambush already emits it — `server.go` `ProcessEvent`), then
+  the host reads `/proc/<pid>/kstack` (the 8b settled-thread inspect;
+  I-39-authorized as the same login principal) on each stop and appends the
+  symbolized kernel frames. That `kstack` file is the target's **head thread**;
+  the *goroutine-accurate* kernel stack (mapping the stopped goroutine's M) is
+  the deferred Ambush **8c-3** stitch (skipped in the Ambush arc — the log jumps
+  `8c-2 → 8c-4a` — so it appends nothing today) and is the v1.x refinement over
+  the head-thread approximation.

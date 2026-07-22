@@ -299,12 +299,25 @@ fn render_variables(
         .render(content, buf);
 }
 
-/// Call Stack: `#idx func` and its `file:line`, top frame first. The
-/// cross-boundary `── kernel ──` divider (section 5) fills in at 8f-3.
+/// Call Stack: `#idx func` and its `file:line`, top frame first, with the
+/// cross-boundary `── kernel ──` divider (section 5). The DAP host lists the Go
+/// frames first, then the kernel frames, so the first kernel frame is where the
+/// ember divider goes and the rows beneath it dim. The divider is a visual-only
+/// row: the selection (`sel`) is a *frame* index (`Enter` -> `SelectFrame`), so
+/// navigation never lands on it -- the renderer maps a frame index to its
+/// visible row past the divider.
 fn render_call_stack(dv: &DebugView, area: Rect, focused: bool, sel: usize, buf: &mut Buffer) {
     let inner = tile(area, " Call Stack ", focused, buf);
-    let sel = tile_sel(focused, sel, dv.frames.len());
-    let (content, off) = scrollable(inner, dv.frames.len(), sel, buf);
+    let fsel = tile_sel(focused, sel, dv.frames.len());
+    // The user->kernel boundary: the count of leading Go frames (== the divider
+    // row, when a kernel half follows).
+    let n_go = dv.frames.iter().take_while(|f| !f.kernel).count();
+    let has_div = n_go < dv.frames.len();
+    let total = dv.frames.len() + has_div as usize;
+    // A frame index -> its visible row (a kernel frame sits one past the divider).
+    let to_row = |i: usize| if i >= n_go { i + has_div as usize } else { i };
+    let row_sel = fsel.map(&to_row);
+    let (content, off) = scrollable(inner, total, row_sel, buf);
     // Two columns: "#0 func" (fills the tile less the location) and the location.
     let loc_w = 12u16.min(content.width / 2);
     let name_w = content.width.saturating_sub(loc_w).saturating_sub(1);
@@ -317,10 +330,22 @@ fn render_call_stack(dv: &DebugView, area: Rect, focused: bool, sel: usize, buf:
         .collect();
     let refs: alloc::vec::Vec<[&str; 2]> =
         cells.iter().map(|c| [c[0].as_str(), c[1].as_str()]).collect();
-    let rows: alloc::vec::Vec<Row> = refs.iter().map(|c| Row::new(&c[..])).collect();
+    let mut rows: alloc::vec::Vec<Row> = alloc::vec::Vec::with_capacity(total);
+    for (i, c) in refs.iter().enumerate() {
+        if has_div && i == n_go {
+            rows.push(Row::divider("kernel"));
+        }
+        let row = Row::new(&c[..]);
+        rows.push(if dv.frames[i].kernel {
+            row.style(theme::stack_kernel_frame())
+        } else {
+            row
+        });
+    }
     Table::new(&cols, &rows)
         .style(theme::tile_text())
-        .select(sel)
+        .divider_style(theme::stack_kernel_divider())
+        .select(row_sel)
         .selected_style(theme::tile_selected())
         .offset(off)
         .render(content, buf);
@@ -1603,10 +1628,10 @@ ccc", false);
         let mut ed = Editor::new(Some("m.go".into()), "hello\nworld", false);
         ed.set_debug_view(Some(crate::debug::DebugView {
             status: "stopped: breakpoint at main.parkLoop".into(),
-            frames: alloc::vec![crate::debug::StackRow {
-                func: "main.parkLoop".into(),
-                location: "child.go:23".into(),
-            }],
+            frames: alloc::vec![crate::debug::StackRow::go(
+                "main.parkLoop".into(),
+                "child.go:23".into(),
+            )],
             locals: alloc::vec![crate::debug::VarRow {
                 name: "i".into(),
                 value: "3".into(),
@@ -1691,10 +1716,7 @@ ccc", false);
         ed.set_debug_view(Some(crate::debug::DebugView {
             status: "stopped".into(),
             frames: (0..frames)
-                .map(|i| crate::debug::StackRow {
-                    func: format!("f{}", i),
-                    location: format!("m.go:{}", i),
-                })
+                .map(|i| crate::debug::StackRow::go(format!("f{}", i), format!("m.go:{}", i)))
                 .collect(),
             locals: (0..locals)
                 .map(|i| crate::debug::VarRow {
@@ -1874,5 +1896,109 @@ ccc", false);
         assert!(frame_has(&b, a, "Console"));
         assert!(!frame_has(&b, a, "Variables"));
         assert_ne!(sym(&b, 2, 0), '1'); // the editor gutter "1" is not drawn
+    }
+
+    // -- the cross-boundary stack divider (8f-3a) --------------------------
+
+    /// A view with `n_go` Go frames then `n_kernel` kernel frames -- the order
+    /// the DAP host lists them (Go, then the kernel half; section 5).
+    fn dbg_ed_mixed(n_go: usize, n_kernel: usize) -> Editor {
+        let mut frames: alloc::vec::Vec<crate::debug::StackRow> = (0..n_go)
+            .map(|i| crate::debug::StackRow::go(format!("gofn{}", i), format!("m.go:{}", i)))
+            .collect();
+        frames.extend(
+            (0..n_kernel)
+                .map(|i| crate::debug::StackRow::kernel(format!("ksym{}", i), String::new())),
+        );
+        let mut ed = Editor::new(Some("m.go".into()), "hello\nworld", false);
+        ed.set_debug_view(Some(crate::debug::DebugView {
+            status: "stopped".into(),
+            frames,
+            locals: alloc::vec::Vec::new(),
+            goroutines: alloc::vec::Vec::new(),
+            console: alloc::vec::Vec::new(),
+        }));
+        ed
+    }
+
+    /// The fg colour of the `#` frame-marker cell on row `y` (every data row
+    /// starts `#N ...`); `None` if the row has no marker.
+    fn hash_fg(b: &Buffer, a: Rect, y: u16) -> Option<kaua::style::Color> {
+        (0..a.width).find_map(|x| {
+            let c = b.get(x, y)?;
+            if c.symbol == '#' {
+                Some(c.style.fg)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Is there an ember `─` cell anywhere in the frame? (An unfocused tile's
+    /// border is dim, so the only ember box-drawing is the kernel divider.)
+    fn has_ember_divider(b: &Buffer, a: Rect) -> bool {
+        (0..a.width).any(|x| {
+            (0..a.height).any(|y| {
+                b.get(x, y)
+                    .map(|c| c.symbol == '\u{2500}' && c.style.fg == theme::EMBER)
+                    .unwrap_or(false)
+            })
+        })
+    }
+
+    #[test]
+    fn the_call_stack_draws_an_ember_kernel_divider() {
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_mixed(2, 2);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "gofn0"), "a Go frame renders");
+        assert!(frame_has(&b, a, "ksym0"), "a kernel frame renders");
+        assert!(find_row(&b, a, "kernel").is_some(), "the divider is labelled");
+        assert!(has_ember_divider(&b, a), "the divider is ember box-drawing");
+    }
+
+    #[test]
+    fn kernel_frames_dim_and_sit_below_the_divider() {
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_mixed(2, 2); // editor-focused -> no row selection
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y_go = find_row(&b, a, "gofn1").expect("last Go frame");
+        let y_div = find_row(&b, a, "kernel").expect("the divider");
+        let y_k = find_row(&b, a, "ksym0").expect("first kernel frame");
+        // Order: Go frames, then the divider, then the kernel frames.
+        assert!(y_go < y_div && y_div < y_k, "the divider sits at the boundary");
+        // The Go frame is body-text; the kernel frame is dim.
+        assert_eq!(hash_fg(&b, a, y_go), Some(theme::FG));
+        assert_eq!(hash_fg(&b, a, y_k), Some(theme::DIM));
+    }
+
+    #[test]
+    fn an_all_go_stack_has_no_divider() {
+        let a = Rect::new(0, 0, 60, 24);
+        let ed = dbg_ed_mixed(3, 0);
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "gofn2"), "the frames render");
+        assert!(!has_ember_divider(&b, a), "no divider without a kernel half");
+    }
+
+    #[test]
+    fn selecting_a_kernel_frame_highlights_it_not_the_divider() {
+        // The selection is a frame index -- j past the Go frames lands on the
+        // kernel frame, never on the visual-only divider.
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_mixed(2, 2);
+        ed.handle_key(KeyEvent::new(KeyCode::Tab));
+        ed.handle_key(KeyEvent::new(KeyCode::Tab)); // focus Call Stack
+        ed.handle_key(KeyEvent::char('j'));
+        ed.handle_key(KeyEvent::char('j')); // frame index 2 = first kernel frame
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y_k = find_row(&b, a, "ksym0").expect("first kernel frame");
+        assert!(row_has_bg(&b, a, y_k, theme::EMBER), "the kernel frame is selected");
+        let y_div = find_row(&b, a, "kernel").expect("the divider");
+        assert!(!row_has_bg(&b, a, y_div, theme::EMBER), "the divider is not selectable");
     }
 }
