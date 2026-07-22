@@ -397,6 +397,11 @@ pub struct Editor {
     /// `Some` == a session is live == the dashboard is shown; `None` == the
     /// editor is full-width (NORA-IDE-UX section 2.2, auto-collapse).
     debug: Option<DebugView>,
+    /// The line the debugger is stopped at: `(source basename, 0-based line)`.
+    /// Highlighted with a `▸` marker while the active buffer's basename matches
+    /// (the binary's DWARF path is the host build path, so the match is by
+    /// basename, not full path). Cleared when the target resumes / exits.
+    debug_line: Option<(String, usize)>,
     /// The dashboard focus/tab state, persisting across data refreshes.
     dash: DashState,
     /// Where to put the cursor once a cross-file jump's buffer has loaded.
@@ -465,6 +470,7 @@ impl Editor {
             lsp_request: None,
             dap_request: None,
             debug: None,
+            debug_line: None,
             dash: DashState::new(),
             pending_jump: None,
             anchor: None,
@@ -632,6 +638,38 @@ impl Editor {
             self.dash = DashState::new();
         }
         self.debug = view;
+    }
+
+    /// Follow the debugger to its stopped line: record it (highlighted with a
+    /// `▸` while the active buffer's basename matches) and, when this IS that
+    /// buffer, place the cursor there so `scroll_to` brings it into view. Matched
+    /// by BASENAME because a compiled binary's DWARF source path is the host
+    /// build path, not the guest path the file was opened at.
+    pub fn follow_debug(&mut self, basename: &str, line0: usize) {
+        self.debug_line = Some((String::from(basename), line0));
+        if self.filename_basename() == Some(basename) {
+            let line = line0.min(self.text.line_count().saturating_sub(1));
+            self.text.set_cursor(line, 0);
+        }
+    }
+
+    /// Drop the stopped-line highlight (the target resumed / exited).
+    pub fn clear_debug_line(&mut self) {
+        self.debug_line = None;
+    }
+
+    /// The 0-based line the debugger is stopped at IN THE ACTIVE BUFFER (basename
+    /// match) -- the renderer marks it. `None` when nothing is stopped, or the
+    /// stop is in a different file than the one on screen.
+    pub fn debug_line_row(&self) -> Option<usize> {
+        let (base, line) = self.debug_line.as_ref()?;
+        (self.filename_basename() == Some(base.as_str())).then_some(*line)
+    }
+
+    /// The basename of the active buffer's filename
+    /// (`/goroot/demo/nora-demo.go` -> `nora-demo.go`); `None` when unnamed.
+    fn filename_basename(&self) -> Option<&str> {
+        self.filename.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p))
     }
 
     /// Cycle dashboard focus (`Tab`): Editor -> Variables -> CallStack ->
@@ -4084,6 +4122,29 @@ mod tests {
         assert_eq!(ed.dash().focus, DashPane::Variables);
         ed.set_debug_view(Some(dbg_view())); // a later stop refreshes the data
         assert_eq!(ed.dash().focus, DashPane::Variables);
+    }
+
+    #[test]
+    fn follow_debug_marks_and_follows_the_stopped_line() {
+        // The DWARF source path is the host build path, so the match is by
+        // basename against the open (guest-path) buffer.
+        let mut ed = Editor::new(
+            Some("/goroot/demo/nora-demo.go".to_string()),
+            "a\nb\nc\nd\ne",
+            false,
+        );
+        ed.follow_debug("nora-demo.go", 3);
+        assert_eq!(ed.debug_line_row(), Some(3));
+        assert_eq!(ed.text.cursor().0, 3); // followed: cursor at the stopped line
+        // A stop in a DIFFERENT file does not mark this buffer (nor move here).
+        ed.follow_debug("other.go", 1);
+        assert_eq!(ed.debug_line_row(), None);
+        assert_eq!(ed.text.cursor().0, 3);
+        // Back to this file: marked + followed again; then cleared on resume.
+        ed.follow_debug("nora-demo.go", 2);
+        assert_eq!(ed.debug_line_row(), Some(2));
+        ed.clear_debug_line();
+        assert_eq!(ed.debug_line_row(), None);
     }
 
     #[test]

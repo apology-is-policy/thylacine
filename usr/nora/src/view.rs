@@ -554,6 +554,7 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
     let tx = text_area.x + gutter_w;
     let ranges = ed.selection_ranges();
     let cur_row = ed.text.cursor().0;
+    let dbg_row = ed.debug_line_row();
     let lang = ed.lang();
     for r in 0..th {
         let y = text_area.y + r as u16;
@@ -562,20 +563,29 @@ fn render_plain(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usize,
             buf.set_str(text_area.x, y, "~", theme::tilde());
             continue;
         }
+        let on_dbg = Some(row) == dbg_row;
         let on_cur = row == cur_row;
-        let (txt_style, gut_style) = if on_cur {
-            (theme::current_line(), theme::current_gutter())
+        // The debugger's stopped line wins over the cursor line (it marks where
+        // execution is, which the cursor may have moved away from).
+        let (txt_style, gut_style, lift) = if on_dbg {
+            (theme::debug_line(), theme::debug_gutter(), Some(theme::debug_line()))
+        } else if on_cur {
+            (theme::current_line(), theme::current_gutter(), Some(theme::current_line()))
         } else {
-            (theme::text(), theme::gutter())
+            (theme::text(), theme::gutter(), None)
         };
-        if on_cur {
+        if let Some(lift_style) = lift {
             // Lift the whole row so the highlight extends past the line's end.
             for x in text_area.x..text_area.right() {
-                buf.set_cell(x, y, Cell::new(' ', theme::current_line()));
+                buf.set_cell(x, y, Cell::new(' ', lift_style));
             }
         }
         let num = format!("{:>w$} ", row + 1, w = num_w as usize);
         buf.set_str(text_area.x, y, &num, gutter_style_for(ed, row, gut_style));
+        if on_dbg {
+            // The ▸ execution marker replaces the gutter's trailing space.
+            buf.set_cell(text_area.x + num_w, y, Cell::new('\u{25B8}', theme::debug_gutter()));
+        }
         // Horizontal scroll: draw the window [left, left+tw) of the line.
         let line = ed.text.line(row);
         let classes = lang.line_classes(line);
@@ -594,6 +604,7 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
     let tx = text_area.x + gutter_w;
     let ranges = ed.selection_ranges();
     let cur_row = ed.text.cursor().0;
+    let dbg_row = ed.debug_line_row();
     let lang = ed.lang();
     let mut pos = Some((ed.top, ed.top_sub));
     for r in 0..th {
@@ -606,20 +617,26 @@ fn render_wrapped(ed: &Editor, text_area: Rect, gutter_w: u16, tw: u16, th: usiz
                 continue;
             }
         };
+        let on_dbg = Some(row) == dbg_row;
         let on_cur = row == cur_row;
-        let (txt_style, gut_style) = if on_cur {
-            (theme::current_line(), theme::current_gutter())
+        let (txt_style, gut_style, lift) = if on_dbg {
+            (theme::debug_line(), theme::debug_gutter(), Some(theme::debug_line()))
+        } else if on_cur {
+            (theme::current_line(), theme::current_gutter(), Some(theme::current_line()))
         } else {
-            (theme::text(), theme::gutter())
+            (theme::text(), theme::gutter(), None)
         };
-        if on_cur {
+        if let Some(lift_style) = lift {
             for x in text_area.x..text_area.right() {
-                buf.set_cell(x, y, Cell::new(' ', theme::current_line()));
+                buf.set_cell(x, y, Cell::new(' ', lift_style));
             }
         }
         if sub == 0 {
             let num = format!("{:>w$} ", row + 1, w = num_w as usize);
             buf.set_str(text_area.x, y, &num, gutter_style_for(ed, row, gut_style));
+            if on_dbg {
+                buf.set_cell(text_area.x + num_w, y, Cell::new('\u{25B8}', theme::debug_gutter()));
+            }
         }
         let line = ed.text.line(row);
         let classes = lang.line_classes(line);
@@ -2000,5 +2017,27 @@ ccc", false);
         assert!(row_has_bg(&b, a, y_k, theme::EMBER), "the kernel frame is selected");
         let y_div = find_row(&b, a, "kernel").expect("the divider");
         assert!(!row_has_bg(&b, a, y_div, theme::EMBER), "the divider is not selectable");
+    }
+
+    // -- the stopped-line marker (debugger follow + highlight) -------------
+
+    #[test]
+    fn the_stopped_line_shows_the_debug_marker() {
+        // follow_debug marks a line; the editor render draws a ▸ in its gutter
+        // (no dashboard needed -- the plain render honors the debug line).
+        let a = Rect::new(0, 0, 40, 10);
+        let mut ed = Editor::new(Some("m.go".into()), "one\ntwo\nthree\nfour", false);
+        ed.follow_debug("m.go", 2); // stop at line 3 ("three")
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        let y = find_row(&b, a, "three").expect("the stopped line renders");
+        let marked =
+            (0..a.width).any(|x| b.get(x, y).map(|c| c.symbol == '\u{25B8}').unwrap_or(false));
+        assert!(marked, "the stopped line carries a ▸ execution marker");
+        // Only the stopped line is marked.
+        let y0 = find_row(&b, a, "one").expect("line 1 renders");
+        let unmarked =
+            (0..a.width).all(|x| b.get(x, y0).map(|c| c.symbol != '\u{25B8}').unwrap_or(true));
+        assert!(unmarked, "a non-stopped line has no marker");
     }
 }

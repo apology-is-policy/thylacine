@@ -43,6 +43,18 @@ pub fn current_line() -> Style {
     Style::new().fg(FG).bg(BAR)
 }
 
+/// The line the debugger is stopped at -- a warm ember-tinted row, distinct from
+/// the cursor's neutral surface, so "where execution is" reads at a glance
+/// (NORA-IDE-UX section 2.3). Dark enough that body text stays readable on it.
+pub fn debug_line() -> Style {
+    Style::new().fg(FG).bg(Color::Rgb(0x33, 0x1e, 0x12))
+}
+
+/// The `▸` execution marker + line number on the stopped line (ember, bold).
+pub fn debug_gutter() -> Style {
+    Style::new().fg(EMBER).bg(Color::Rgb(0x33, 0x1e, 0x12)).attr(Attr::BOLD)
+}
+
 /// The gutter number on the cursor's line -- brighter (ember) than the dim
 /// furniture, over the current-line background.
 pub fn current_gutter() -> Style {

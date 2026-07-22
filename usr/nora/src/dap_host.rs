@@ -129,6 +129,10 @@ pub struct Dap {
     /// The reason from the last `stopped` event, held until the auto-stack lands
     /// so the status can read "stopped: <reason> at <func>".
     last_reason: String,
+    /// The `description`/`text` of the last `stopped` event when it was an
+    /// exception (a failed step, a panic, a fatal error) -- surfaced in the
+    /// status so the user sees WHY, not just "exception".
+    exc_detail: Option<String>,
     /// The expression a pending `:print` asked about (evaluate carries the
     /// result, not the request), so the reply can read "<expr> = <value>".
     print_expr: Option<String>,
@@ -196,6 +200,7 @@ impl Dap {
             goroutines: Vec::new(),
             console: Vec::new(),
             last_reason: String::new(),
+            exc_detail: None,
             print_expr: None,
             func_bps: Vec::new(),
             line_bps: Vec::new(),
@@ -368,8 +373,10 @@ impl Dap {
             Action::Stopped(s) => {
                 self.thread_id = s.thread_id;
                 self.last_reason = s.reason.clone();
+                self.exc_detail = stop_detail(&s);
                 self.phase = Phase::Stopped;
-                self.console_push(format!("stopped: {}", s.reason));
+                ed.clear_debug_line(); // re-followed when the stack lands
+                self.console_push(self.stopped_head());
                 // The previous stop's variables/goroutines are stale until the
                 // refetch below lands; clear them so a tile never shows a
                 // different frame's data during the window.
@@ -384,7 +391,7 @@ impl Dap {
                 let th = self.cl.threads();
                 let _ = self.send(&th);
                 // A preliminary status in case the stack fetch turns up nothing.
-                ed.set_status(format!("stopped: {}", s.reason));
+                ed.set_status(self.stopped_head());
                 true
             }
 
@@ -404,11 +411,18 @@ impl Dap {
                 if let Some(top) = self.frames.first() {
                     self.frame_id = top.id;
                     ed.set_status(format!(
-                        "stopped: {} at {}{}",
-                        self.last_reason,
+                        "{} at {}{}",
+                        self.stopped_head(),
                         top.name,
                         location_suffix(top)
                     ));
+                    // Follow + highlight the stopped line. dlv's DWARF path is the
+                    // host build path, so match the open buffer by basename.
+                    if let Some(path) = &top.source_path {
+                        if top.line > 0 {
+                            ed.follow_debug(basename(path), (top.line - 1) as usize);
+                        }
+                    }
                 }
                 // Chain the locals fetch (scopes -> variables) for the top frame.
                 if !self.frames.is_empty() {
@@ -486,6 +500,7 @@ impl Dap {
 
             Action::Exited(code) => {
                 self.phase = Phase::Exited;
+                ed.clear_debug_line();
                 let msg = format!("debuggee exited (code {})", code);
                 self.console_push(msg.clone());
                 ed.set_status(msg);
@@ -493,6 +508,7 @@ impl Dap {
             }
 
             Action::Terminated => {
+                ed.clear_debug_line();
                 ed.set_status(String::from("debug session ended"));
                 ed.set_debug_view(None); // collapse the dashboard
                 self.reap();
@@ -512,7 +528,14 @@ impl Dap {
                 false
             }
 
-            // continued / thread / acks: no dashboard surface consumes them.
+            Action::Continued => {
+                // The target is running -- it is not stopped anywhere, so drop the
+                // stopped-line highlight (re-set at the next stop).
+                ed.clear_debug_line();
+                true
+            }
+
+            // thread / acks: no dashboard surface consumes them.
             _ => false,
         }
     }
@@ -827,15 +850,21 @@ impl Dap {
             }
             Phase::Running => String::from("running"),
             Phase::Stopped => match self.frames.first() {
-                Some(top) => format!(
-                    "stopped: {} at {}{}",
-                    self.last_reason,
-                    top.name,
-                    location_suffix(top)
-                ),
-                None => format!("stopped: {}", self.last_reason),
+                Some(top) => {
+                    format!("{} at {}{}", self.stopped_head(), top.name, location_suffix(top))
+                }
+                None => self.stopped_head(),
             },
             Phase::Exited => String::from("debuggee exited"),
+        }
+    }
+
+    /// "stopped: <reason>", plus " -- <detail>" when the stop was an exception
+    /// (a failed step, a panic, a fatal error) -- so the user sees WHY.
+    fn stopped_head(&self) -> String {
+        match &self.exc_detail {
+            Some(d) => format!("stopped: {} -- {}", self.last_reason, d),
+            None => format!("stopped: {}", self.last_reason),
         }
     }
 
@@ -881,6 +910,21 @@ impl Dap {
         self.dead = true;
         let _ = self.srv.kill();
         let _ = self.srv.wait();
+    }
+}
+
+/// The human-readable detail of an exception `stopped` event (a failed step, a
+/// panic, a fatal error): its `description` and/or `text`, joined. `None` for a
+/// non-exception stop (or one carrying no detail).
+fn stop_detail(s: &dapc::Stopped) -> Option<String> {
+    if s.reason != "exception" {
+        return None;
+    }
+    match (&s.description, &s.text) {
+        (Some(d), Some(t)) if !t.is_empty() && t != d => Some(format!("{}: {}", d, t)),
+        (Some(d), _) => Some(d.clone()),
+        (None, Some(t)) if !t.is_empty() => Some(t.clone()),
+        _ => None,
     }
 }
 

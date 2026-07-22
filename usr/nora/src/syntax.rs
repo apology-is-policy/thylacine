@@ -55,19 +55,24 @@ pub struct HlSpan {
 pub enum Lang {
     None,
     Ut,
+    Go,
 }
 
 impl Lang {
     /// Choose a language from a filename. UT for a `*.ut` basename (e.g.
-    /// `/bin/fun.ut`); nothing else is highlighted yet.
+    /// `/bin/fun.ut`), Go for a `*.go` one; nothing else is highlighted yet.
     pub fn from_filename(name: Option<&str>) -> Lang {
         let name = match name {
             Some(n) => n,
             None => return Lang::None,
         };
         let base = name.rsplit('/').next().unwrap_or(name);
+        if !base.contains('.') {
+            return Lang::None;
+        }
         match base.rsplit('.').next() {
-            Some("ut") if base.contains('.') => Lang::Ut,
+            Some("ut") => Lang::Ut,
+            Some("go") => Lang::Go,
             _ => Lang::None,
         }
     }
@@ -77,6 +82,7 @@ impl Lang {
     pub fn highlight_line(self, line: &str) -> Vec<HlSpan> {
         match self {
             Lang::Ut => ut_highlight(line),
+            Lang::Go => go_highlight(line),
             Lang::None => Vec::new(),
         }
     }
@@ -203,6 +209,102 @@ fn is_keyword(w: &[char]) -> bool {
     KEYWORDS.iter().any(|k| k.chars().eq(w.iter().copied()))
 }
 
+/// Go's 25 reserved words (the language spec). Predeclared identifiers (`int`,
+/// `true`, ...) are NOT keywords and stay `Text` -- a lexical scan cannot tell a
+/// shadowed `int` from the type, and colouring them risks false positives.
+const GO_KEYWORDS: [&str; 25] = [
+    "break", "case", "chan", "const", "continue", "default", "defer", "else",
+    "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map",
+    "package", "range", "return", "select", "struct", "switch", "type", "var",
+];
+
+/// Go per-line highlighter: `//` + `/* */` comments, `"..."` / `` `...` `` /
+/// `'...'` strings, decimal/hex/float numbers, and the 25 keywords. Per-line like
+/// the UT scanner -- a block comment or raw string spanning lines does not carry
+/// its colour across the newline (the documented v1 imprecision).
+fn go_highlight(line: &str) -> Vec<HlSpan> {
+    let chars: Vec<char> = line.chars().collect();
+    let n = chars.len();
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            spans.push(HlSpan { start: i, end: n, class: HlClass::Comment });
+            break;
+        } else if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            // Block comment: to the closing `*/` on this line, else end-of-line.
+            let start = i;
+            i += 2;
+            while i < n {
+                if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            spans.push(HlSpan { start, end: i, class: HlClass::Comment });
+        } else if c == '"' || c == '\'' {
+            // Interpreted string / rune: `\X` never closes it.
+            let quote = c;
+            let start = i;
+            i += 1;
+            while i < n {
+                if chars[i] == '\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            spans.push(HlSpan { start, end: i, class: HlClass::Str });
+        } else if c == '`' {
+            // Raw string: no escapes; to the next backtick, else end-of-line.
+            let start = i;
+            i += 1;
+            while i < n && chars[i] != '`' {
+                i += 1;
+            }
+            if i < n {
+                i += 1;
+            }
+            spans.push(HlSpan { start, end: i, class: HlClass::Str });
+        } else if is_go_word_char(c) {
+            let start = i;
+            while i < n && is_go_word_char(chars[i]) {
+                i += 1;
+            }
+            let class = classify_go_word(&chars[start..i]);
+            if class != HlClass::Text {
+                spans.push(HlSpan { start, end: i, class });
+            }
+        } else {
+            i += 1;
+        }
+    }
+    spans
+}
+
+/// Go identifier characters: letters, digits, `_` (NOT `-`/`.`/`/`, which are
+/// operators -- so `main.total` scans as `main`, `.`, `total`).
+fn is_go_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn classify_go_word(w: &[char]) -> HlClass {
+    if GO_KEYWORDS.iter().any(|k| k.chars().eq(w.iter().copied())) {
+        HlClass::Keyword
+    } else if matches!(w.first(), Some(c) if c.is_ascii_digit()) {
+        // Leading digit -> a number literal (`123`, `0x1c`, `1e10`, `0644`).
+        HlClass::Number
+    } else {
+        HlClass::Text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +404,57 @@ mod tests {
         .to_vec();
         want.sort_unstable();
         assert_eq!(got, want);
+    }
+
+    // -- Go highlighting -----------------------------------------------------
+
+    fn go(line: &str) -> Vec<HlSpan> {
+        Lang::Go.highlight_line(line)
+    }
+
+    #[test]
+    fn go_line_and_block_comments() {
+        assert!(has(&go("x // c"), 2, 6, HlClass::Comment));
+        assert!(has(&go("a /* b */ c"), 2, 9, HlClass::Comment));
+    }
+
+    #[test]
+    fn go_keywords_recognized() {
+        assert!(has(&go("func"), 0, 4, HlClass::Keyword));
+        assert!(has(&go("range"), 0, 5, HlClass::Keyword));
+        assert!(has(&go("for {"), 0, 3, HlClass::Keyword));
+    }
+
+    #[test]
+    fn go_keyword_is_not_a_substring() {
+        // `format` contains `for` but is one identifier.
+        assert!(go("format").iter().all(|s| s.class != HlClass::Keyword));
+    }
+
+    #[test]
+    fn go_strings_all_three_forms() {
+        assert!(has(&go("\"hi\""), 0, 4, HlClass::Str)); // interpreted
+        assert!(has(&go("`raw`"), 0, 5, HlClass::Str)); // raw
+        assert!(has(&go("'x'"), 0, 3, HlClass::Str)); // rune
+    }
+
+    #[test]
+    fn go_numbers() {
+        assert!(has(&go("42"), 0, 2, HlClass::Number));
+        assert!(has(&go("0x1c"), 0, 4, HlClass::Number));
+        assert!(go("x42").iter().all(|s| s.class != HlClass::Number));
+    }
+
+    #[test]
+    fn go_unterminated_string_is_resilient() {
+        assert!(has(&go("\"oops"), 0, 5, HlClass::Str));
+        assert!(has(&go("`oops"), 0, 5, HlClass::Str));
+    }
+
+    #[test]
+    fn from_filename_picks_go() {
+        assert_eq!(Lang::from_filename(Some("main.go")), Lang::Go);
+        assert_eq!(Lang::from_filename(Some("/goroot/demo/nora-demo.go")), Lang::Go);
+        assert_eq!(Lang::from_filename(Some("go")), Lang::None); // no extension
     }
 }

@@ -470,7 +470,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**226 host unit tests** over the pure engine (the per-module list below is a
+**235 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -602,9 +602,19 @@ open / edit / `:w` / `cat`).
   saved-state diff is a v1.x refinement).
 - **Word motion** is WORD-granularity (whitespace-delimited); punctuation-class
   boundaries (vim `w` vs `W`) are a v1.x refinement.
-- **Syntax highlighting** — a native lexer highlighter (and the tree-sitter
-  feasibility, gated on the native-links-C toolchain, #67) is the documented
+- **Syntax highlighting** — the native lexer highlighter (`nora::syntax`) covers
+  **UT** (`*.ut`) and **Go** (`*.go`: `//`+`/* */` comments, the three string
+  forms, numbers, the 25 keywords); other languages are unhighlighted. Per-line
+  (a block comment / raw string spanning lines drops its colour at the newline).
+  The tree-sitter feasibility (gated on the native-links-C toolchain, #67) is the
   v1.x direction (`docs/KAUA.md` §12).
+- **The debugger follows + marks the stopped line** — on each stop nora resolves
+  the top frame's source by BASENAME (the compiled binary's DWARF path is the
+  host build path, so it can't full-path-match the open guest buffer), moves the
+  cursor there, and marks the line with a `▸` gutter marker + a warm ember tint.
+  A stop in a file that isn't open is not marked (the frame Call-Stack `Enter`
+  still tries to open by full path). An **exception** stop shows its detail
+  ("stopped: exception -- runtime error: …") so a failed step shows why.
 - **The kernel half of the stack is the target's head thread** — 8f-3b made the
   `── kernel ──` divider live: on each stop the host reads `/proc/<pid>/kstack`
   and appends the symbolized kernel frames. That file is the debuggee's **head
