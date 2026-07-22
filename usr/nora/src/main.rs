@@ -49,7 +49,7 @@ use nora::editor::{Editor, Mode, Request};
 use nora::view;
 
 mod lsp_host;
-use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_OUT, TAG_STDIN};
+use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_OUT, TAG_NOTES, TAG_STDIN};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -131,6 +131,18 @@ pub extern "C" fn rs_main() -> i64 {
     // lost (kaua::query #117-audit F2).
     let mut src = PollSource::with_pending(probe.pending);
 
+    // #55c: the console-resize signal. Open the editor's note queue so a
+    // `tty:winch` (posted to the session pgrp when the renderer reweaves)
+    // wakes the loop -> re-read /dev/winsize -> Terminal::resize (the seam
+    // term.rs documented since LS-7). Opening a notes fd makes nora
+    // SELF-MANAGING (LS-5): an uncaught `interrupt` note now queues here
+    // instead of default-terminating -- deliberate for a fullscreen editor
+    // (Ctrl-C in the raw console arrives as the 0x03 BYTE anyway [ISIG off],
+    // and dying mid-edit to a stray note is exactly what an editor must not
+    // do; :q is the exit). Best-effort: a failed open just leaves resize on
+    // the launch size (the pre-#55 behavior).
+    let notes = libthyla_rs::notes::Notes::open_self().ok();
+
     // Bring up gopls for a Go buffer. Absent / unspawnable / non-Go all mean
     // "no language server" -- a fully supported state in which nora behaves
     // exactly as it did before 8e (NORA-IDE-UX section 6: never block the UI).
@@ -139,7 +151,7 @@ pub extern "C" fn rs_main() -> i64 {
         _ => None,
     };
 
-    let code = run(&mut term, &mut src, &mut ed, &mut lsp);
+    let code = run(&mut term, &mut src, &mut ed, &mut lsp, notes.as_ref());
     // The server must not outlive the editor: an orphaned gopls holds the
     // workspace (and its memory) for the rest of the session.
     if let Some(mut l) = lsp {
@@ -157,6 +169,7 @@ fn run(
     src: &mut PollSource,
     ed: &mut Editor,
     lsp: &mut Option<Lsp>,
+    notes: Option<&libthyla_rs::notes::Notes>,
 ) -> i32 {
     if redraw(term, ed).is_err() {
         return 1;
@@ -169,7 +182,10 @@ fn run(
         // ONE poll(2) over fd 0 and any live server pipes (8e-2). A keystroke
         // and an arriving diagnostic wake the loop identically -- there is no
         // tick, so a message nothing polls for never repaints.
-        let ready = match lsp_host::poll_sources(&mut mux, lsp.as_ref()) {
+        let ready = match lsp_host::poll_sources(&mut mux, lsp.as_ref(), notes.map(|n| {
+            use libthyla_rs::poll::AsFd;
+            n.as_raw_fd()
+        })) {
             Some(r) => r,
             // fd 0 gone (no console) -> exit cleanly rather than spin.
             None => return 1,
@@ -218,6 +234,37 @@ fn run(
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                }
+                TAG_NOTES => {
+                    // #55c: drain the queue; a tty:winch means the console
+                    // reweaved -- /dev/winsize is the authoritative geometry
+                    // (the renderer's grid). On the serial posture (0x0 /
+                    // unreachable) fall back to the CPR re-probe: the reply
+                    // rides fd 0 and the PollSource's unsolicited-CPR
+                    // backstop delivers it as Event::Resize (the same arm
+                    // the HVF late-reply path uses). Every other note is
+                    // drained + dropped (informational; kill never surfaces
+                    // through the fd; snare terminates before delivery).
+                    let mut winch = false;
+                    if let Some(nq) = notes {
+                        while let Ok(Some(note)) = nq.try_read() {
+                            if note.name == "tty:winch" {
+                                winch = true;
+                            }
+                        }
+                    }
+                    if winch {
+                        if let Some((c, r)) = kaua::query::read_winsize() {
+                            let c = c.clamp(MIN_DIM, MAX_DIM);
+                            let r = r.clamp(MIN_DIM, MAX_DIM);
+                            if (c, r) != (term.area().width, term.area().height) {
+                                term.resize(Rect::new(0, 0, c, r));
+                                dirty = true;
+                            }
+                        } else {
+                            kaua::query::request_resize_probe();
                         }
                     }
                 }

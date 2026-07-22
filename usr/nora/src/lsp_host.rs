@@ -50,6 +50,8 @@ const MODULE_SEARCH_DEPTH: usize = 32;
 pub const TAG_STDIN: Tag = 0;
 pub const TAG_LSP_OUT: Tag = 1;
 pub const TAG_LSP_ERR: Tag = 2;
+/// #55c: the editor's note queue (tty:winch — the console resize signal).
+pub const TAG_NOTES: Tag = 3;
 
 /// A live gopls session.
 pub struct Lsp {
@@ -510,9 +512,17 @@ impl Lsp {
     }
 }
 
-/// Register `stdin` plus any live server fds and block for one of them.
-pub fn poll_sources(mux: &mut Mux, lsp: Option<&Lsp>) -> Option<Vec<Ready>> {
+/// Register `stdin`, the note queue (#55c: tty:winch), plus any live server
+/// fds, and block for one of them.
+pub fn poll_sources(
+    mux: &mut Mux,
+    lsp: Option<&Lsp>,
+    notes_fd: Option<i32>,
+) -> Option<Vec<Ready>> {
     let mut fds: Vec<(i32, Tag)> = alloc::vec![(0, TAG_STDIN)];
+    if let Some(nfd) = notes_fd {
+        fds.push((nfd, TAG_NOTES));
+    }
     if let Some(l) = lsp {
         fds.extend(l.poll_fds());
     }

@@ -156,6 +156,73 @@ pub fn terminal_size(timeout_ms: u32) -> ProbeResult {
     result
 }
 
+/// #55: read the console winsize from the UNGATED `/dev/winsize` leaf
+/// (`winsize <cols> <rows>\n` — the kernel-authoritative geometry the
+/// renderer reports via the consctl verb; ARCH 23.5.3). The steady-state
+/// `tty:winch` consumer calls this. Returns `None` when the leaf is
+/// unreachable (a narrow namespace), malformed, or UNSET (`winsize 0 0` —
+/// the serial posture, where the host terminal owns geometry and the CPR
+/// round-trip is the honest source): on `None` fall back to
+/// `request_resize_probe()` and let the PollSource's unsolicited-CPR
+/// backstop deliver the size as `Event::Resize`.
+#[cfg(feature = "backend")]
+pub fn read_winsize() -> Option<(u16, u16)> {
+    use libthyla_rs::fs::File;
+    use libthyla_rs::io::Read;
+
+    let mut f = File::open("/dev/winsize").ok()?;
+    let mut buf = [0u8; 32];
+    let n = f.read(&mut buf).ok()?;
+    let s = &buf[..n];
+    let tag = b"winsize ";
+    if s.len() < tag.len() || &s[..tag.len()] != tag {
+        return None;
+    }
+    let mut i = tag.len();
+    let mut cols: u32 = 0;
+    let mut d = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        cols = cols * 10 + u32::from(s[i] - b'0');
+        i += 1;
+        d += 1;
+    }
+    if d == 0 || i >= s.len() || s[i] != b' ' {
+        return None;
+    }
+    i += 1;
+    let mut rows: u32 = 0;
+    d = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        rows = rows * 10 + u32::from(s[i] - b'0');
+        i += 1;
+        d += 1;
+    }
+    if d == 0 || cols == 0 || rows == 0 || cols > 0xffff || rows > 0xffff {
+        return None; // 0x0 = the serial posture -> the CPR fallback
+    }
+    Some((cols as u16, rows as u16))
+}
+
+/// #55: emit the CPR re-probe REQUEST only (save + park-far + `[6n` +
+/// restore) without reading the reply — the steady-state resize path: the
+/// reply arrives on fd 0 where the PollSource's unsolicited-CPR backstop
+/// parses it into `Event::Resize` (input.rs: a CPR never surfaces as a
+/// key). Used on `tty:winch` when `/dev/winsize` answers `None` (serial /
+/// narrow namespace). Single-threaded callers only — the park/restore
+/// pair must not interleave with a concurrent frame emit.
+#[cfg(feature = "backend")]
+pub fn request_resize_probe() {
+    use crate::encode::{PARK_CURSOR_FAR, REQUEST_CURSOR_POS, RESTORE_CURSOR, SAVE_CURSOR};
+    use libthyla_rs::io::{stdout, Write};
+
+    let mut out = stdout();
+    let _ = out.write_all(SAVE_CURSOR);
+    let _ = out.write_all(PARK_CURSOR_FAR);
+    let _ = out.write_all(REQUEST_CURSOR_POS);
+    let _ = out.write_all(RESTORE_CURSOR);
+    let _ = out.flush();
+}
+
 /// Read the CPR reply from fd 0. Polls before each byte (a read never blocks),
 /// the first poll on the full deadline and the rest non-blocking (F1: the reply
 /// is already in the ring once the first byte lands -- bounded total wait).

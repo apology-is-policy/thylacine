@@ -331,6 +331,14 @@ for {set i 0} {$i < 12} {incr i} {
 if {!$ok} { lc_fail "post-battery console verify (-c) never passed (collapse/direct-return broken)" }
 lc_pass "panes: console restored fullscreen after the battery"
 
+# #55: the battery's splits reweaved the CONSOLE pane repeatedly (each
+# CHANGED grid wrote the consctl winsize verb + posted tty:winch to the
+# session pgrp); after the collapse the leaf must read authoritative
+# fullscreen again -- the live end-to-end (reweave -> verb -> kernel ->
+# /dev/winsize) across a REAL split/unsplit cycle, not just the boot grid.
+lc_run_expect "cat /dev/winsize" "winsize 128 36"
+lc_pass "panes: winsize restored fullscreen after the battery (#55 live across reweaves)"
+
 lc_quit
 lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + hold + close + collapse)"
 exit 0
