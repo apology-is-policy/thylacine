@@ -15,7 +15,7 @@ use kaua::layout::{Constraint, Layout};
 use kaua::rect::Rect;
 use kaua::style::{Color, Style};
 use kaua::widget::{
-    flatten_tree, Block, List, Row, Scrollbar, Span, StatusLine, Table, Tabs, Tree, TreeItem,
+    Block, List, Mark, Row, Scrollbar, Span, StatusLine, Table, Tabs, Tree, TreeRow,
     Widget,
 };
 
@@ -192,10 +192,13 @@ fn scrollable(inner: Rect, rows: usize, sel: Option<usize>, buf: &mut Buffer) ->
     (content, off)
 }
 
-/// Variables: a `locals` group node with the current frame's locals as leaves
-/// (`name = value`). `l`/`h` collapse the group; the per-variable nested expand
-/// is a later leg. `sel` indexes the flattened rows (the group node, then the
-/// leaves), highlighted only when `focused`.
+/// Variables: a `locals` group node (row 0) with the current frame's variable
+/// tree beneath it. The host flattens the visible tree into `dv.locals`
+/// (`name = value` + depth + expand state), so this builds the Kaua `TreeRow`s
+/// directly -- the group at depth 0, each variable one level deeper -- rather
+/// than reconstructing a `TreeItem` forest. `l`/`h` collapse the group or an
+/// expandable row; `sel` indexes the flattened rows (group, then the visible
+/// variables), highlighted only when `focused`.
 fn render_variables(
     dv: &DebugView,
     area: Rect,
@@ -210,14 +213,30 @@ fn render_variables(
         .iter()
         .map(|v| format!("{} = {}", v.name, v.value))
         .collect();
-    let children: alloc::vec::Vec<TreeItem> = labels
-        .iter()
-        .map(|s| TreeItem::leaf(s).style(theme::tile_text()))
-        .collect();
-    let roots = [TreeItem::node("locals", children)
-        .style(theme::tile_dim())
-        .expanded(expanded)];
-    let rows = flatten_tree(&roots);
+    let mut rows: alloc::vec::Vec<TreeRow> = alloc::vec::Vec::with_capacity(1 + labels.len());
+    rows.push(TreeRow {
+        depth: 0,
+        mark: if expanded { Mark::Expanded } else { Mark::Collapsed },
+        label: "locals",
+        style: theme::tile_dim(),
+    });
+    if expanded {
+        for (v, label) in dv.locals.iter().zip(labels.iter()) {
+            rows.push(TreeRow {
+                // Nest the frame's variables one level under the group.
+                depth: v.depth + 1,
+                mark: if !v.expandable {
+                    Mark::Leaf
+                } else if v.expanded {
+                    Mark::Expanded
+                } else {
+                    Mark::Collapsed
+                },
+                label,
+                style: theme::tile_text(),
+            });
+        }
+    }
     let sel = tile_sel(focused, sel, rows.len());
     let (content, off) = scrollable(inner, rows.len(), sel, buf);
     Tree::new(&rows)
@@ -1536,6 +1555,9 @@ ccc", false);
             locals: alloc::vec![crate::debug::VarRow {
                 name: "i".into(),
                 value: "3".into(),
+                depth: 0,
+                expandable: false,
+                expanded: false,
             }],
             goroutines: alloc::vec![crate::debug::GoroutineRow {
                 id: 1,
@@ -1623,6 +1645,9 @@ ccc", false);
                 .map(|i| crate::debug::VarRow {
                     name: format!("v{}", i),
                     value: i.to_string(),
+                    depth: 0,
+                    expandable: false,
+                    expanded: false,
                 })
                 .collect(),
             goroutines: (0..gors)
@@ -1710,5 +1735,36 @@ ccc", false);
         render(&ed, a, &mut shut);
         assert!(frame_has(&shut, a, "locals"), "the group node stays");
         assert!(!frame_has(&shut, a, "v0"), "the leaves are hidden");
+    }
+
+    #[test]
+    fn the_variables_tile_renders_an_expanded_struct_with_a_nested_child() {
+        // A local `p` that is expandable + open, with a fetched child `a` one
+        // level deeper. The tile shows the ▾ open marker and the nested child.
+        let a = Rect::new(0, 0, 60, 24);
+        let mut ed = dbg_ed_n(1, 0, 0);
+        let mut dv = ed.debug_view().cloned().expect("a live view");
+        dv.locals = alloc::vec![
+            crate::debug::VarRow {
+                name: "p".into(),
+                value: "*main.T".into(),
+                depth: 0,
+                expandable: true,
+                expanded: true,
+            },
+            crate::debug::VarRow {
+                name: "a".into(),
+                value: "1".into(),
+                depth: 1,
+                expandable: false,
+                expanded: false,
+            },
+        ];
+        ed.set_debug_view(Some(dv));
+        let mut b = Buffer::empty(a);
+        render(&ed, a, &mut b);
+        assert!(frame_has(&b, a, "p = *main.T"), "the open struct row");
+        assert!(frame_has(&b, a, "a = 1"), "its nested child");
+        assert!(frame_has(&b, a, "\u{25BE}"), "a ▾ open marker"); // group + struct
     }
 }

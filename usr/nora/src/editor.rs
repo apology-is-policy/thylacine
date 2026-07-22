@@ -117,6 +117,11 @@ pub enum DapRequest {
     /// the inspected thread and re-root the Call Stack on it. The index resolves
     /// against the host's own goroutine list.
     SelectGoroutine(usize),
+    /// Expand the Variables tile's variable row at this flattened index (`l` on
+    /// an expandable row): the host opens it and lazily fetches its children.
+    ExpandVar(usize),
+    /// Collapse the Variables tile's variable row at this flattened index (`h`).
+    CollapseVar(usize),
     /// End the debug session (`:kill`).
     Kill,
 }
@@ -717,16 +722,38 @@ impl Editor {
         }
     }
 
-    /// `l`/`h` (expand / collapse): open or shut the Variables `locals` group,
-    /// or step the two Console tabs. Inert on the flat Call Stack / Goroutines
-    /// tiles (their rows have no children yet).
+    /// `l`/`h` (expand / collapse): open or shut the Variables `locals` group or
+    /// an expandable variable row, or step the two Console tabs. Inert on the
+    /// flat Call Stack / Goroutines tiles (their rows have no children).
     fn dash_expand(&mut self, open: bool) {
         match self.dash.focus {
             DashPane::Variables => {
-                self.dash.locals_expanded = open;
-                if !open {
-                    // Collapsed -> the group node is the only row left.
-                    self.dash.var_sel = 0;
+                if self.dash.var_sel == 0 {
+                    // Row 0 is the "locals" group: toggle the whole group.
+                    self.dash.locals_expanded = open;
+                    if !open {
+                        // Collapsed -> the group node is the only row left.
+                        self.dash.var_sel = 0;
+                    }
+                } else {
+                    // A variable row (`dv.locals[var_sel - 1]`): only an
+                    // expandable one acts -- the host opens/shuts it, fetching
+                    // children lazily on the first expand. `expandable` is copied
+                    // out so the read of `self.debug` ends before `dap_request`.
+                    let i = self.dash.var_sel - 1;
+                    let expandable = self
+                        .debug
+                        .as_ref()
+                        .and_then(|dv| dv.locals.get(i))
+                        .map(|r| r.expandable)
+                        .unwrap_or(false);
+                    if expandable {
+                        self.dap_request = Some(if open {
+                            DapRequest::ExpandVar(i)
+                        } else {
+                            DapRequest::CollapseVar(i)
+                        });
+                    }
                 }
             }
             // Two tabs (Program = 0, Debug = 1): l -> Debug, h -> Program.
@@ -3820,6 +3847,9 @@ mod tests {
             locals: alloc::vec![crate::debug::VarRow {
                 name: "i".to_string(),
                 value: "3".to_string(),
+                depth: 0,
+                expandable: false,
+                expanded: false,
             }],
             goroutines: alloc::vec![crate::debug::GoroutineRow {
                 id: 1,
@@ -3890,6 +3920,9 @@ mod tests {
                 .map(|i| crate::debug::VarRow {
                     name: alloc::format!("v{}", i),
                     value: i.to_string(),
+                    depth: 0,
+                    expandable: false,
+                    expanded: false,
                 })
                 .collect(),
             goroutines: (0..gors)
@@ -3948,16 +3981,23 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_h_l_collapse_and_expand_the_locals_group() {
+    fn dashboard_h_l_toggle_the_locals_group_from_row_0() {
+        // Per-node expand (8f-2b-3): `h`/`l` act on the row under the cursor. The
+        // group toggle lives on row 0; a plain (non-expandable) leaf is inert.
         let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
-        ed.set_debug_view(Some(dbg_view_n(0, 2, 0)));
+        ed.set_debug_view(Some(dbg_view_n(0, 2, 0))); // two plain leaves
         focus_tile(&mut ed, DashPane::Variables);
         assert!(ed.dash().locals_expanded);
-        // Move onto a leaf, then collapse -> the group node is the only row left,
-        // so the selection snaps back to it.
+        // On a plain leaf, `h`/`l` do nothing (no children, not the group).
         ed.handle_key(ch('j'));
         assert_eq!(ed.dash().var_sel, 1);
-        ed.handle_key(ch('h')); // collapse
+        ed.handle_key(ch('h'));
+        assert!(ed.dash().locals_expanded); // still open
+        assert_eq!(ed.take_dap_request(), None); // a plain leaf raises no request
+        // Back on the group row, `h` collapses it.
+        ed.handle_key(ch('k'));
+        assert_eq!(ed.dash().var_sel, 0);
+        ed.handle_key(ch('h'));
         assert!(!ed.dash().locals_expanded);
         assert_eq!(ed.dash().var_sel, 0);
         ed.handle_key(ch('j')); // only the group node -> no move
@@ -3966,6 +4006,31 @@ mod tests {
         assert!(ed.dash().locals_expanded);
         ed.handle_key(ch('j'));
         assert_eq!(ed.dash().var_sel, 1);
+    }
+
+    #[test]
+    fn dashboard_l_h_on_an_expandable_variable_raise_expand_and_collapse() {
+        // A variable row whose value is structured (expandable): `l`/`h` raise
+        // ExpandVar/CollapseVar with the flattened variable index (var_sel - 1),
+        // which the host resolves against its own tree + fetches lazily.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        let mut dv = dbg_view_n(1, 0, 0);
+        dv.locals = alloc::vec![crate::debug::VarRow {
+            name: "p".to_string(),
+            value: "*main.T".to_string(),
+            depth: 0,
+            expandable: true,
+            expanded: false,
+        }];
+        ed.set_debug_view(Some(dv));
+        focus_tile(&mut ed, DashPane::Variables);
+        // Row 0 = the "locals" group; row 1 = the expandable variable.
+        ed.handle_key(ch('j'));
+        assert_eq!(ed.dash().var_sel, 1);
+        ed.handle_key(ch('l'));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::ExpandVar(0)));
+        ed.handle_key(ch('h'));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::CollapseVar(0)));
     }
 
     #[test]

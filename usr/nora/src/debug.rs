@@ -23,12 +23,23 @@ pub struct StackRow {
     pub location: String,
 }
 
-/// One row of the Variables tile (flat at 8f-2a; a real expandable `Tree` at
-/// 8f-2b).
+/// One visible row of the Variables tile: the flattened, visible-only view of
+/// the variable tree (8f-2b-3). A row is a frame local or, when its parent is
+/// expanded, a nested field. The DAP host owns the tree (per-node children +
+/// expand state) and flattens the visible nodes into this list on every publish,
+/// so the renderer + the editor's row cursor stay a simple flat index.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct VarRow {
     pub name: String,
     pub value: String,
+    /// Nesting depth (0 = a frame's top-level local; 1+ = a field of an expanded
+    /// struct / slice / map).
+    pub depth: u16,
+    /// The value is structured and can be expanded (DAP `variablesReference`
+    /// != 0) -- shows a ▸/▾ marker.
+    pub expandable: bool,
+    /// This expandable node is open; the following deeper rows are its children.
+    pub expanded: bool,
 }
 
 /// One row of the Goroutines tile.

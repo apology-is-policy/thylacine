@@ -340,8 +340,15 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
   raises a `SelectGoroutine` — the host switches thread + re-roots the stack; the
   index is clamped to the live count, resolved against the host's own list, a
   no-op when not stopped; the editor half is host-tested [+6], the host half is a
-  DAP round-trip covered by `dap-nora`). **8f-2b-3** is the nested-lazy Variables
-  tree; **8f-2c** wires the `F5`/`F10`/`F11` hot-keys + the `[Space]d` toggles.
+  DAP round-trip covered by `dap-nora`). **8f-2b-3 landed** (the nested-lazy
+  Variables tree: the DAP host owns a `VarNode` forest + fetches a node's children
+  the first time it is expanded, routing each `variables` reply by its reference
+  [parley now echoes the requested `variablesReference`]; the visible tree
+  flattens into `DebugView.locals` so the row cursor stays a flat index, and
+  `l`/`h` on an expandable variable raise `ExpandVar`/`CollapseVar`; the pure tree
+  ops are the host-tested `nora::vartree` module, +8 host tests; the parley
+  reference + kaua `expandable`-marker substrate landed first as 8f-2b-3a).
+  **8f-2c** wires the `F5`/`F10`/`F11` hot-keys + the `[Space]d` toggles.
 - **8f-3 — polish.** The cross-boundary stack divider + select-a-frame, inline
   values, the LSP editor affordances, Bonfire pass. The "this is lovely" bar.
 - **8g — the superpowers** (§5): resource inspector, scheduler view,

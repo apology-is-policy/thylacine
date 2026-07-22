@@ -368,11 +368,25 @@ against its own cached list (a non-stopped target or an out-of-range index is a
 reported no-op, never a wrong-frame jump). The editor half — `Enter` raising the
 right request with the right index — is pure state and host-tested; the host half
 is a binary-side DAP round-trip (`dap_host::select_frame` / `select_goroutine`)
-covered by the `dap-nora` E2E. Still pending: **8f-2b-3** the nested-lazy
-Variables tree (a `VarNode` tree replacing the flat locals, children fetched on
-expand); **8f-2c** the `F5`/`F10`/`F11` hot-keys + `[Space]d` toggles; **8f-3**
-the cross-boundary `── kernel ──` divider (§5). Kernel byte-unchanged; consumes
-I-39; no new §28 invariant.
+covered by the `dap-nora` E2E. **8f-2b-3 made the Variables tile a nested-lazy
+tree** — the host owns a `VarNode` forest (the frame's locals as roots; each
+structured value, DAP `variablesReference != 0`, an expandable node) and fetches
+a node's children the first time it is expanded, routing each `variables`
+response by its reference (parley now echoes the requested `variablesReference`,
+so several fetches can be in flight — DAP permits out-of-order replies). The host
+flattens the *visible* tree into `DebugView.locals` (`name = value` + depth +
+expand state) each publish, so the editor's row cursor + the renderer stay a
+simple flat index; `l`/`h` on an expandable variable row raise
+`ExpandVar`/`CollapseVar(i)` (the flattened variable index, resolved against the
+host's own tree via the `flatten`↔`visible_path` inverse). The pure tree ops live
+in the host-tested `nora::vartree` module; kaua's `TreeItem`/`TreeRow` gained an
+`expandable` flag so a lazily-collapsed node shows `▸` before its children are
+cached. The group toggle (`l`/`h` on row 0) is unchanged; the parley reference +
+kaua `expandable` substrate landed first as 8f-2b-3a. Still pending: **8f-2c** the
+`F5`/`F10`/`F11` hot-keys + `[Space]d` toggles; **8f-3** the cross-boundary
+`── kernel ──` divider (§5). A UX seam: `h` on a plain leaf is inert (collapse
+the group from row 0) — move-to-parent is a later polish. Kernel byte-unchanged;
+consumes I-39; no new §28 invariant.
 
 ## Console discipline (I-27)
 
@@ -406,7 +420,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**195 host unit tests** over the pure engine (the per-module list below is a
+**203 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -424,7 +438,13 @@ collapsing the locals group hides the leaves) — and the 8f-2b-2 **actions axis
 6 `editor` tests (`Enter` on the Call Stack raises `SelectFrame`, on Goroutines
 raises `SelectGoroutine`, the clamp-a-stale-selection-before-selecting, inert on
 Variables + Console, inert over an empty tile, and the no-regression
-`Enter`-raises-no-request-over-a-focused-editor)):
+`Enter`-raises-no-request-over-a-focused-editor) — and the 8f-2b-3 **nested-lazy
+tree axis** — 6 `vartree` tests (flatten emits depth + markers, a collapsed node
+hides its children, `visible_count` == the flatten length, `visible_path` inverts
+`flatten` at every index, `find_by_ref` reaches a nested node, toggling via a path
+changes visibility) + 1 `editor` (`l`/`h` on an expandable row raise
+`ExpandVar`/`CollapseVar`) + 1 `view` (an expanded struct renders its ▾ marker +
+nested child), the group-toggle test reworked to the per-node semantics)):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -479,7 +499,8 @@ open / edit / `:w` / `cat`).
 | 8f-2a dashboard skeleton (split + collapse + `Tab` focus + tiles + Console) | landed |
 | 8f-2b-1 navigable tiles (`j`/`k`/`g`/`G` select, `l`/`h` expand, scrollbars) | landed |
 | 8f-2b-2 tile actions (Call Stack `Enter` → frame jump + re-scope, Goroutines `Enter` → re-root) | landed |
-| 8f-2b-3 nested-lazy Variables tree, 8f-2c hot-keys, 8f-3 cross-boundary stack | pending |
+| 8f-2b-3 nested-lazy Variables tree (`nora::vartree` + parley reference + kaua `expandable`; `l`/`h` expand/collapse, lazy child fetch) | landed |
+| 8f-2c hot-keys (`F5`/`F10`/`F11` + `[Space]d` toggles), 8f-3 cross-boundary stack | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams

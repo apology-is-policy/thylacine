@@ -41,8 +41,15 @@ use parley::dap;
 use parley::dapc::{self, Action, StackFrame};
 use parley::transport::{Ready, Server, Tag};
 
-use nora::debug::{DebugView, GoroutineRow, StackRow, VarRow};
+use nora::debug::{DebugView, GoroutineRow, StackRow};
 use nora::editor::{DapRequest, Editor};
+use nora::vartree::{self, VarNode};
+
+/// Build a tree node from a DAP variable (the bin-side bridge -- `vartree` is
+/// parley-free so it stays host-testable).
+fn var_node_from(v: &dapc::Variable) -> VarNode {
+    VarNode::new(v.name.clone(), v.value.clone(), v.variables_reference)
+}
 
 /// Where the Ambush debugger ships in the default image (Stage 8e-3e) -- baked
 /// to the pool beside the Go toolchain (`/goroot/bin`, on the login PATH), like
@@ -101,9 +108,14 @@ pub struct Dap {
     frame_id: i64,
     /// The frames from the last stop, for `:bt` (refreshed each stop).
     frames: Vec<StackFrame>,
-    /// The current frame's locals (dashboard Variables tile), fetched via
-    /// scopes->variables after each stop.
-    locals: Vec<VarRow>,
+    /// The current frame's variable tree (dashboard Variables tile): the frame's
+    /// top-level locals as roots, each expandable node's children fetched lazily
+    /// on expand. Flattened to `DebugView.locals` on publish.
+    var_tree: Vec<VarNode>,
+    /// The `variablesReference` of the current frame's Locals scope, so a
+    /// `variables` response routes to the top-level locals (reference == this) vs
+    /// a node's children (reference == that node's `var_ref`). 0 = none yet.
+    scope_ref: i64,
     /// The debuggee's goroutines (dashboard Goroutines tile), fetched via
     /// `threads` after each stop.
     goroutines: Vec<GoroutineRow>,
@@ -166,7 +178,8 @@ impl Dap {
             thread_id: 0,
             frame_id: 0,
             frames: Vec::new(),
-            locals: Vec::new(),
+            var_tree: Vec::new(),
+            scope_ref: 0,
             goroutines: Vec::new(),
             console: Vec::new(),
             last_reason: String::new(),
@@ -342,10 +355,11 @@ impl Dap {
                 self.last_reason = s.reason.clone();
                 self.phase = Phase::Stopped;
                 self.console_push(format!("stopped: {}", s.reason));
-                // The previous stop's locals/goroutines are stale until the
+                // The previous stop's variables/goroutines are stale until the
                 // refetch below lands; clear them so a tile never shows a
                 // different frame's data during the window.
-                self.locals.clear();
+                self.var_tree.clear();
+                self.scope_ref = 0;
                 self.goroutines.clear();
                 // Auto-fetch the stack (stop location + the `:print` frame id +
                 // the `:bt` cache) and the goroutines (the dashboard tile).
@@ -386,30 +400,39 @@ impl Dap {
 
             // The scopes response: fetch the FIRST scope's variables (Delve puts
             // "Locals" first). A stop that resumed before this landed is stale.
+            // Remember the scope's reference so its `variables` response is
+            // routed to the tree roots (not mistaken for a node's children).
             Action::Scopes(scopes) => {
                 if self.phase != Phase::Stopped {
                     return false;
                 }
                 if let Some(reference) = scopes.first().map(|s| s.variables_reference) {
+                    self.scope_ref = reference;
                     let vars = self.cl.variables(reference);
                     let _ = self.send(&vars);
                 }
                 false
             }
 
-            // The variables response: the current frame's locals. 8f-2b-3a
-            // threads the reference through (parley now echoes it); the flat
-            // model still routes every response to the top-level locals -- the
-            // nested-lazy tree that consumes `reference` lands in 8f-2b-3b.
-            Action::Variables { variables: vars, .. } => {
-                self.locals = vars
-                    .iter()
-                    .map(|v| VarRow {
-                        name: v.name.clone(),
-                        value: v.value.clone(),
-                    })
-                    .collect();
-                true
+            // A variables response routes by its reference (8f-2b-3): the Locals
+            // scope's reference rebuilds the tree roots; any other reference is a
+            // node's lazily-fetched children. A reference matching neither (a
+            // stale reply after a resume rebuilt the tree) is ignored.
+            Action::Variables { reference, variables: vars } => {
+                if reference == 0 {
+                    // We never request `variables(0)`; ignore a stray 0-reference
+                    // reply so it cannot match a leaf (var_ref 0) in find_by_ref.
+                    false
+                } else if reference == self.scope_ref {
+                    self.var_tree = vars.iter().map(var_node_from).collect();
+                    true
+                } else if let Some(node) = vartree::find_by_ref_mut(&mut self.var_tree, reference) {
+                    node.children = vars.iter().map(var_node_from).collect();
+                    node.fetched = true;
+                    true
+                } else {
+                    false
+                }
             }
 
             // The threads response: the debuggee's goroutines.
@@ -501,6 +524,8 @@ impl Dap {
 
             DapRequest::SelectFrame(idx) => self.select_frame(idx, ed),
             DapRequest::SelectGoroutine(idx) => self.select_goroutine(idx, ed),
+            DapRequest::ExpandVar(idx) => self.expand_var(idx),
+            DapRequest::CollapseVar(idx) => self.collapse_var(idx),
 
             DapRequest::Kill => {
                 self.shutdown();
@@ -563,11 +588,12 @@ impl Dap {
         let msg = build(&mut self.cl, self.thread_id);
         if self.send(&msg).is_ok() {
             self.phase = Phase::Running;
-            // The stack/locals/goroutines describe where we WERE stopped; a
+            // The stack/variables/goroutines describe where we WERE stopped; a
             // running target has none, so clear them until the next stop
             // refetches (the caller republishes -> the tiles show "running").
             self.frames.clear();
-            self.locals.clear();
+            self.var_tree.clear();
+            self.scope_ref = 0;
             self.goroutines.clear();
             ed.set_status(verb.to_string());
         }
@@ -603,9 +629,10 @@ impl Dap {
             let c = (col.max(1) as usize) - 1;
             ed.jump_to(Some(p), row, c);
         }
-        // Clear the old locals so the tile does not show the previous frame's
+        // Clear the old variables so the tile does not show the previous frame's
         // data during the scopes->variables round-trip.
-        self.locals.clear();
+        self.var_tree.clear();
+        self.scope_ref = 0;
         let sc = self.cl.scopes(self.frame_id);
         let _ = self.send(&sc);
         ed.set_status(label);
@@ -628,13 +655,59 @@ impl Dap {
             None => return,
         };
         self.thread_id = id;
-        // The cached frames/locals describe the previous goroutine; drop them so
-        // no tile shows another thread's stack until the refetch lands.
+        // The cached frames/variables describe the previous goroutine; drop them
+        // so no tile shows another thread's stack until the refetch lands.
         self.frames.clear();
-        self.locals.clear();
+        self.var_tree.clear();
+        self.scope_ref = 0;
         let st = self.cl.stack_trace(self.thread_id, MAX_FRAMES);
         let _ = self.send(&st);
         ed.set_status(format!("goroutine {}", id));
+    }
+
+    /// Expand variable row `idx` (a flattened visible index): open it, and on
+    /// the FIRST open of an expandable node fetch its children (`variables`,
+    /// routed back by reference). A leaf / stale index / non-stopped target is a
+    /// no-op. The caller republishes, so ▾ shows at once + children fill when the
+    /// async response lands.
+    fn expand_var(&mut self, idx: usize) {
+        if self.phase != Phase::Stopped {
+            return;
+        }
+        let path = match vartree::visible_path(&self.var_tree, idx) {
+            Some(p) => p,
+            None => return,
+        };
+        let to_fetch = match vartree::node_at_path_mut(&mut self.var_tree, &path) {
+            Some(node) if node.var_ref != 0 => {
+                node.expanded = true;
+                if node.fetched {
+                    None
+                } else {
+                    Some(node.var_ref)
+                }
+            }
+            // A leaf (or a vanished node): nothing to expand.
+            _ => return,
+        };
+        if let Some(reference) = to_fetch {
+            let msg = self.cl.variables(reference);
+            let _ = self.send(&msg);
+        }
+    }
+
+    /// Collapse variable row `idx`: hide its children (kept cached, so a
+    /// re-expand does not re-fetch). A leaf / stale index / non-stopped target is
+    /// a no-op.
+    fn collapse_var(&mut self, idx: usize) {
+        if self.phase != Phase::Stopped {
+            return;
+        }
+        if let Some(path) = vartree::visible_path(&self.var_tree, idx) {
+            if let Some(node) = vartree::node_at_path_mut(&mut self.var_tree, &path) {
+                node.expanded = false;
+            }
+        }
     }
 
     /// Re-send `setBreakpoints` for `file` with all its accumulated lines (DAP
@@ -671,10 +744,12 @@ impl Dap {
                 location: frame_location(f),
             })
             .collect();
+        let mut locals = Vec::new();
+        vartree::flatten(&self.var_tree, 0, &mut locals);
         let view = DebugView {
             status: self.status_line(),
             frames,
-            locals: self.locals.clone(),
+            locals,
             goroutines: self.goroutines.clone(),
             console: self.console.clone(),
         };
