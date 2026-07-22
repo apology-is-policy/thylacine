@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate run run-tcg gdb specs help
+.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate idle-gate run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -51,6 +51,9 @@ test-interactive:
 
 smp-gate:
 	@tools/ci-smp-gate.sh
+
+idle-gate:
+	@tools/ci-idle-gate.sh
 
 run:
 	@tools/run-vm.sh

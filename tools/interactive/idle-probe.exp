@@ -1,0 +1,32 @@
+#!/usr/bin/expect -f
+# idle-probe: log in, settle to idle, read /ctl/sched twice (parks/idle_ms
+# delta) + /ctl/procs (states). Classifies the HVF idle-spin mechanism:
+# park-then-woken storm (parks climbs, idle_ms climbs) vs a never-sleeping
+# runnable thread (runnable > 1, parks flat). NOT a pass/fail test -- the
+# transcript carries the numbers.
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+send_user "\n===IDLE-PROBE settle 12s===\n"
+sleep 12
+
+send_user "\n===SCHED READ 1===\n"
+lc_send "cat /ctl/sched"
+lc_expect "wc-tickless:" "sched-1"
+
+send_user "\n===IDLE 8s===\n"
+sleep 8
+
+send_user "\n===SCHED READ 2===\n"
+lc_send "cat /ctl/sched"
+lc_expect "wc-tickless:" "sched-2"
+
+send_user "\n===PROCS===\n"
+lc_send "cat /ctl/procs"
+lc_expect "ALIVE" "procs"
+sleep 1
+
+lc_quit
+send_user "\n===IDLE-PROBE done===\n"
