@@ -1293,6 +1293,17 @@ impl Editor {
     // -- per-mode handlers ------------------------------------------------
 
     fn normal(&mut self, key: KeyEvent) {
+        // Debug hot-keys (F5/F10/F11/Shift-F11/Shift-F5): the muscle-memory
+        // step/continue/stop keys, active in Normal mode whenever a session is
+        // live -- regardless of which pane holds focus, and checked BEFORE the
+        // tile redirect so they fire while reading a sidebar tile too. They only
+        // relay a command to the DAP host; nothing here edits the buffer.
+        if self.debugging() {
+            if let Some(req) = debug_hotkey(key) {
+                self.dap_request = Some(req);
+                return;
+            }
+        }
         // A focused dashboard tile owns the navigation keys (nothing here edits
         // the buffer). Only reachable while debugging -- with no session the
         // focus is always the editor, so ordinary editing is untouched.
@@ -2441,6 +2452,23 @@ const MENU: &[MenuItem] = &[
         action: MenuAction::Quit,
     },
 ];
+
+/// Map a function key to a debugger command -- the muscle-memory hot-keys
+/// active in Normal mode while a session is live (NORA-IDE-UX section 4).
+/// `Shift` distinguishes the paired keys (F5 continue / Shift-F5 stop; F11
+/// step-into / Shift-F11 step-out). Returns `None` for every non-hot-key, so
+/// ordinary Normal-mode keys pass straight through untouched.
+fn debug_hotkey(key: KeyEvent) -> Option<DapRequest> {
+    let shift = key.mods.contains(Mods::SHIFT);
+    match key.code {
+        KeyCode::F(5) if shift => Some(DapRequest::Kill),
+        KeyCode::F(5) => Some(DapRequest::Continue),
+        KeyCode::F(10) => Some(DapRequest::Next),
+        KeyCode::F(11) if shift => Some(DapRequest::StepOut),
+        KeyCode::F(11) => Some(DapRequest::Step),
+        _ => None,
+    }
+}
 
 /// A fuzzy subsequence match (case-insensitive): every char of `query` appears in
 /// `candidate` in order. An empty query matches everything.
@@ -4131,6 +4159,73 @@ mod tests {
         ed.set_debug_view(Some(dbg_view_n(2, 0, 0)));
         assert_eq!(ed.dash().focus, DashPane::Editor);
         ed.handle_key(code(KeyCode::Enter));
+        assert_eq!(ed.take_dap_request(), None);
+    }
+
+    // -- the debugger hot-keys (8f-2c-1) -----------------------------------
+
+    /// A bare function key (no modifiers).
+    fn fkey(n: u8) -> KeyEvent {
+        code(KeyCode::F(n))
+    }
+
+    #[test]
+    fn f_keys_drive_the_debug_loop_while_a_session_is_live() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(fkey(5));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Continue));
+        ed.handle_key(fkey(10));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Next));
+        ed.handle_key(fkey(11));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Step));
+    }
+
+    #[test]
+    fn shift_f_keys_step_out_and_stop() {
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(KeyEvent::with(KeyCode::F(11), kaua::event::Mods::SHIFT));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::StepOut));
+        ed.handle_key(KeyEvent::with(KeyCode::F(5), kaua::event::Mods::SHIFT));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Kill));
+    }
+
+    #[test]
+    fn the_hot_keys_fire_while_a_sidebar_tile_is_focused() {
+        // Muscle memory: F5 continues whether the editor or a tile has focus (the
+        // hot-key check precedes the tile-nav redirect). A hot-key is not a focus
+        // change, so the tile the user was reading stays focused.
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        focus_tile(&mut ed, DashPane::Variables);
+        ed.handle_key(fkey(5));
+        assert_eq!(ed.take_dap_request(), Some(DapRequest::Continue));
+        assert_eq!(ed.dash().focus, DashPane::Variables);
+    }
+
+    #[test]
+    fn f_keys_are_inert_without_a_session() {
+        // No session -> the F-keys are ordinary unbound Normal-mode keys: no
+        // debug command, no edit, no mode change.
+        let mut ed = Editor::new(Some("m.go".to_string()), "abc", false);
+        assert!(!ed.debugging());
+        ed.handle_key(fkey(5));
+        ed.handle_key(fkey(10));
+        assert_eq!(ed.take_dap_request(), None);
+        assert_eq!(ed.text.content(), "abc"); // buffer untouched
+        assert_eq!(ed.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn hot_keys_do_not_fire_in_insert_mode() {
+        // Deliberately Normal-mode-only: while typing code, F5 must not step the
+        // debuggee. (Esc first -- the daily-driver debug view is Normal anyway.)
+        let mut ed = Editor::new(Some("m.go".to_string()), "x", false);
+        ed.set_debug_view(Some(dbg_view()));
+        ed.handle_key(ch('i'));
+        assert_eq!(ed.mode, Mode::Insert);
+        ed.handle_key(fkey(5));
         assert_eq!(ed.take_dap_request(), None);
     }
 }

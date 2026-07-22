@@ -382,11 +382,18 @@ host's own tree via the `flatten`↔`visible_path` inverse). The pure tree ops l
 in the host-tested `nora::vartree` module; kaua's `TreeItem`/`TreeRow` gained an
 `expandable` flag so a lazily-collapsed node shows `▸` before its children are
 cached. The group toggle (`l`/`h` on row 0) is unchanged; the parley reference +
-kaua `expandable` substrate landed first as 8f-2b-3a. Still pending: **8f-2c** the
-`F5`/`F10`/`F11` hot-keys + `[Space]d` toggles; **8f-3** the cross-boundary
-`── kernel ──` divider (§5). A UX seam: `h` on a plain leaf is inert (collapse
-the group from row 0) — move-to-parent is a later polish. Kernel byte-unchanged;
-consumes I-39; no new §28 invariant.
+kaua `expandable` substrate landed first as 8f-2b-3a. **8f-2c-1 wired the
+muscle-memory hot-keys** — while a session is live, Normal-mode `F5` continues,
+`F10` steps over, `F11` steps into, `Shift-F11` steps out, `Shift-F5` stops; each
+maps to the same `DapRequest` the `:` verbs already raise (no new mechanism),
+fires whether the editor or a sidebar tile holds focus (the check precedes the
+tile-nav redirect), and is inert without a session and in Insert mode (Esc first —
+the daily-driver debug view is Normal anyway). Still pending: **8f-2c-2** the
+`[Space]d` debug submenu + the `v`/`c`/`z` panel toggles (a renderer-touching leg
+— sidebar/console visibility + zoom); **8f-3** the cross-boundary `── kernel ──`
+divider (§5). A UX seam: `h` on a plain leaf is inert (collapse the group from
+row 0) — move-to-parent is a later polish. Kernel byte-unchanged; consumes I-39;
+no new §28 invariant.
 
 ## Console discipline (I-27)
 
@@ -420,7 +427,7 @@ client over them.
 
 ## Tests (`cargo test -p nora --no-default-features --lib --target <host>`)
 
-**203 host unit tests** over the pure engine (the per-module list below is a
+**208 host unit tests** over the pure engine (the per-module list below is a
 partial breakdown of the original core; later chunks added `diag`, completion,
 the 8e-3e **debug axis** — 5 tests asserting each `:` debug verb + its aliases
 raise the right `DapRequest`, and that the argument-taking verbs report rather
@@ -444,7 +451,10 @@ hides its children, `visible_count` == the flatten length, `visible_path` invert
 `flatten` at every index, `find_by_ref` reaches a nested node, toggling via a path
 changes visibility) + 1 `editor` (`l`/`h` on an expandable row raise
 `ExpandVar`/`CollapseVar`) + 1 `view` (an expanded struct renders its ▾ marker +
-nested child), the group-toggle test reworked to the per-node semantics)):
+nested child), the group-toggle test reworked to the per-node semantics) — and
+the 8f-2c-1 **hot-keys axis** — 5 `editor` tests (F5/F10/F11 drive
+continue/next/step, Shift-F11/Shift-F5 step out/stop, the hot-keys fire while a
+sidebar tile is focused, inert without a session, inert in Insert mode)):
 
 - `text` (19): content round-trip (incl. trailing newline), char-indexed insert
   for UTF-8, newline split, backspace/delete across lines, `dd` keeps one line,
@@ -500,7 +510,8 @@ open / edit / `:w` / `cat`).
 | 8f-2b-1 navigable tiles (`j`/`k`/`g`/`G` select, `l`/`h` expand, scrollbars) | landed |
 | 8f-2b-2 tile actions (Call Stack `Enter` → frame jump + re-scope, Goroutines `Enter` → re-root) | landed |
 | 8f-2b-3 nested-lazy Variables tree (`nora::vartree` + parley reference + kaua `expandable`; `l`/`h` expand/collapse, lazy child fetch) | landed |
-| 8f-2c hot-keys (`F5`/`F10`/`F11` + `[Space]d` toggles), 8f-3 cross-boundary stack | pending |
+| 8f-2c-1 hot-keys (`F5` cont / `F10` over / `F11` into / `Shift-F11` out / `Shift-F5` stop → the DAP requests) | landed |
+| 8f-2c-2 `[Space]d` submenu + `v`/`c`/`z` panel toggles, 8f-3 cross-boundary stack | pending |
 | audit (Kaua backend + dance) | not started |
 
 ## Known caveats / seams

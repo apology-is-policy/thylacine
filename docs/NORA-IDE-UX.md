@@ -348,7 +348,10 @@ proven data. Each is pure-userspace, kernel byte-unchanged.
   `l`/`h` on an expandable variable raise `ExpandVar`/`CollapseVar`; the pure tree
   ops are the host-tested `nora::vartree` module, +8 host tests; the parley
   reference + kaua `expandable`-marker substrate landed first as 8f-2b-3a).
-  **8f-2c** wires the `F5`/`F10`/`F11` hot-keys + the `[Space]d` toggles.
+  **8f-2c-1** wired the muscle-memory hot-keys (`F5` cont / `F10` over / `F11`
+  into / `Shift-F11` out / `Shift-F5` stop → the existing `DapRequest`s, Normal
+  mode while a session is live, any pane focus, +5 host tests); **8f-2c-2** wires
+  the `[Space]d` submenu + the `v`/`c`/`z` panel toggles (renderer-touching).
 - **8f-3 — polish.** The cross-boundary stack divider + select-a-frame, inline
   values, the LSP editor affordances, Bonfire pass. The "this is lovely" bar.
 - **8g — the superpowers** (§5): resource inspector, scheduler view,
