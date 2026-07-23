@@ -141,6 +141,10 @@ static void joey_thunk(void *arg) {
     // counter-asserted per test).
     proc_publish_init(p);
 
+    // prowl-1: joey execs from the boot blob (exec_setup), not a namespace Spoor,
+    // so it carries no resolved path to stamp -- name the init Proc explicitly.
+    proc_set_name(p, "joey", 4);
+
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
     if (rc != 0) {

@@ -145,6 +145,15 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
+    // prowl-1: the process name ("?" if unstamped) as the second column.
+    n = fmt_str(s->buf, s->cap, s->off, p->name[0] ? p->name : "?");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
     n = fmt_str(s->buf, s->cap, s->off, state_name(p->state));
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
@@ -180,6 +189,19 @@ static int format_procs_cb(struct Proc *p, void *arg) {
         s->off += n;
     }
 
+    // prowl-1: cumulative on-CPU time (ns) as the trailing column -- the reader
+    // diffs it across polls for %CPU. proc_cpu_ns walks p->threads; safe here
+    // because format_procs runs under g_proc_table_lock (proc_for_each).
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+    {
+        u64 cpu_ns = proc_cpu_ns(p);
+        n = fmt_udec(s->buf, s->cap, s->off, (unsigned long)cpu_ns);
+        if (!n && cpu_ns != 0) { s->overflow = true; return 1; }
+        s->off += n;
+    }
+
     n = fmt_str(s->buf, s->cap, s->off, "\n");
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
@@ -190,7 +212,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
 static size_t format_procs(char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
-    n = fmt_str(buf, cap, off, "PID    STATE      THREADS    PAGES    CHILDREN\n");
+    n = fmt_str(buf, cap, off, "PID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS\n");
     if (!n) return 0;
     off += n;
 
@@ -465,7 +487,13 @@ static void devctl_close(struct Spoor *c) {
     dev_simple_close(c);
 }
 
-#define DEVCTL_READ_BUF 512
+// prowl-1 bumped 512 -> 2048: /ctl/procs formats the WHOLE listing into this
+// stack buffer (paginated by `off`), and the NAME + CPU_NS columns widen each
+// proc line ~2x, so 512 would truncate (via the format_procs_cb overflow
+// early-return) at ~9 procs -- fewer than a booted system runs. 2048 fits ~30
+// proc lines; a 2 KiB frame on the 16 KiB kstack is safe on the shallow Dev-read
+// path. Every /ctl leaf shares this cap (all fit comfortably).
+#define DEVCTL_READ_BUF 2048
 
 static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;

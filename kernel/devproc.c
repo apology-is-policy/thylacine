@@ -199,10 +199,19 @@ static const char *state_name(enum proc_state s) {
 // caller can compute the offset-aware copy).
 // =============================================================================
 
-// status: pid + state + threads + exit_status (if zombie).
+// status: name + pid + state + threads + cpu_ns + ppid + principal/gid +
+// pages/children + exit_status (if zombie). prowl-1 brought this to Plan 9
+// parity (name + CPU time + parent + owner). PRECONDITION: called under
+// g_proc_table_lock (via proc_for_each -> devproc_read_cb) -- proc_cpu_ns walks
+// p->threads, and p->parent is read here, both stable only under that lock.
 static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
+
+    // prowl-1: name first (Plan 9 puts it first). "?" for an unstamped Proc.
+    n = fmt_str(buf, cap, off, "name:    ");      if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, p->name[0] ? p->name : "?"); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     n = fmt_str(buf, cap, off, "pid:     ");      if (!n && off < cap) return 0; off += n;
     n = fmt_sdec(buf, cap, off, p->pid);          if (!n && p->pid != 0) return 0; off += n;
@@ -215,6 +224,24 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     int tc = __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE);  // #65 F6: lockless reader
     n = fmt_str(buf, cap, off, "threads: ");      if (!n) return 0; off += n;
     n = fmt_sdec(buf, cap, off, tc);              if (!n && tc != 0) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
+
+    // prowl-1: cumulative on-CPU time (ns; the reader diffs it for %CPU) + the
+    // parent pid + the owning principal/gid.
+    u64 cpu_ns = proc_cpu_ns(p);                  // caller holds g_proc_table_lock
+    n = fmt_str(buf, cap, off, "cpu_ns:  ");      if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)cpu_ns); if (!n && cpu_ns != 0) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
+
+    int ppid = p->parent ? p->parent->pid : 0;
+    n = fmt_str(buf, cap, off, "ppid:    ");      if (!n) return 0; off += n;
+    n = fmt_sdec(buf, cap, off, ppid);            if (!n && ppid != 0) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
+
+    n = fmt_str(buf, cap, off, "principal:"); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)p->principal_id); if (!n && p->principal_id != 0) return 0; off += n;
+    n = fmt_str(buf, cap, off, " gid:");          if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)p->primary_gid);  if (!n && p->primary_gid != 0) return 0; off += n;
     n = fmt_str(buf, cap, off, "\n");             if (!n) return 0; off += n;
 
     // #65 (I-32): the per-Proc resource-floor counters (the SEAM counters a

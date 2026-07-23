@@ -1364,6 +1364,26 @@ void sched(void) {
     // per-CPU MDE isolation fires a bp ONLY while next's (debugged) Proc runs.
     hwdebug_switch_in(next);
 
+    // prowl-1 (PROWL-DESIGN.md section 3.1): stamp the on-CPU time telemetry at
+    // the switch boundary -- one CNTVCT read + a couple of stores, and NO
+    // scheduling decision reads it (I-8/I-17 untouched). prev stops running now,
+    // so fold its slice into run_ns; next starts running now, so stamp its
+    // switch-in. The switched_in_at != 0 guard drops the boot/idle threads'
+    // never-stamped first switch-out (they became current without a sched()
+    // switch-in, so (now - 0) would be a bogus ~uptime delta -- see thread.h).
+    // The __atomic_store makes prev->run_ns coherent for the lockless cross-Proc
+    // /proc reader (single writer -- prev runs on this one CPU, I-21). `now` is
+    // read ONCE so the delta folded out of prev and the stamp given to next are
+    // the same instant (no gap double-counted or lost).
+    {
+        u64 sched_now = timer_now_ns();
+        if (prev->switched_in_at)
+            __atomic_store_n(&prev->run_ns,
+                             prev->run_ns + (sched_now - prev->switched_in_at),
+                             __ATOMIC_RELAXED);
+        next->switched_in_at = sched_now;
+    }
+
     cpu_switch_context(&prev->ctx, &next->ctx);
 
     // Resumption: prev was switched back to. State and current_thread

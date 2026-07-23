@@ -140,6 +140,15 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // teardown (burrow_unmap / vma_drain), all under p->vma_lock; TCB-exempt.
 #define PROC_SHARED_MAP_MAX_PAGES  32768u   // 128 MiB at 4-KiB pages
 
+// prowl-1 (docs/PROWL-DESIGN.md section 3.2): the bounded process name -- the
+// basename of the execed binary (the resolved namespace path, not caller-
+// controlled argv[0]). Fixed-size to keep the Proc cache slot bounded; 32 covers
+// the longest v1.0 binary basename ("pouch-stratumd-boot-e2e" = 23) with margin.
+// A longer name truncates (best-effort telemetry). Set once at exec via
+// proc_set_name; KP_ZERO leaves it "" (a pre-exec / boot Proc reads empty ->
+// the formatters substitute "?").
+#define PROC_NAME_MAX   32u
+
 struct Proc {
     u64               magic;            // PROC_MAGIC
     int               pid;
@@ -636,6 +645,13 @@ struct Proc {
     // address space starts empty). Occupies the former 348..352 tail pad, so
     // struct Proc stays 352 bytes.
     u32                shared_map_pages;
+
+    // prowl-1 (PROWL-DESIGN.md section 3.2): the process name -- the basename of
+    // the execed binary. Set once at exec (proc_set_name, from the resolved
+    // Spoor path / the boot-chain literal); NUL-terminated, "" until set. Read
+    // by /proc/<pid>/status + /ctl/procs. NOT rfork-inherited by the field
+    // itself, but the child re-execs and re-stamps its own name at exec_setup.
+    char               name[PROC_NAME_MAX];
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -704,13 +720,18 @@ struct Proc {
 // renderer's claim under g_proc_table_lock); cleared on the holder's death.
 #define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
-_Static_assert(sizeof(struct Proc) == 352,
-               "struct Proc size pinned at 352 bytes (the 328 baseline + the 8c-2 "
+_Static_assert(sizeof(struct Proc) == 384,
+               "prowl-1 appended name[PROC_NAME_MAX=32] (the process name) after "
+               "shared_map_pages @348..352: 352 -> 384. "
+               "The 352 baseline was the 328 baseline + the 8c-2 "
                "#95 debug_focus_thread pointer @328 + the PTY-1a sid/pgid pair "
                "@336/@340 + the PTY-1e report latches @344/@345 + the G-2 "
-               "shared_map_pages @348 in the former tail pad -- NO size growth). "
+               "shared_map_pages @348 in the former tail pad. "
                "Adding a field grows the SLUB cache; update this assert "
                "deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, name) == 352,
+               "prowl-1 name[] appends after shared_map_pages @348+4=352; "
+               "KP_ZERO leaves it \"\" until proc_set_name at exec.");
 _Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
                "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
                "pages) occupies the former 348..352 tail pad after the PTY-1e "
@@ -855,6 +876,30 @@ void proc_vma_uncharge(struct Proc *p);
 //   clamp-subtracts (never underflows past 0).
 bool proc_shared_map_charge(struct Proc *p, u32 npages);
 void proc_shared_map_uncharge(struct Proc *p, u32 npages);
+
+// prowl-1 (PROWL-DESIGN.md section 3): the process-monitor telemetry.
+//
+// proc_set_name -- stamp p->name with the BASENAME of `path` (the last
+//   '/'-delimited component), bounded to PROC_NAME_MAX-1 + NUL. Called once at
+//   exec (exec_setup_from_spoor from the resolved Spoor path; the boot chain
+//   passes its literal). A NULL / empty path leaves the name unchanged. No lock:
+//   the name is set in the Proc's OWN exec path before it runs at EL0, so no
+//   concurrent reader observes a torn write in practice; a /proc reader that
+//   races the one-time stamp sees either the old ("") or the new bytes of a
+//   fixed 32-byte field (never out of bounds).
+void proc_set_name(struct Proc *p, const char *path, size_t len);
+
+// proc_cpu_ns -- sum run_ns over p->threads (the per-Proc cumulative on-CPU
+//   time, PROWL-DESIGN section 3.1). PRECONDITION: the CALLER HOLDS
+//   g_proc_table_lock -- the threads list is mutated only under that lock
+//   (thread_link_into_proc / thread_unlink_from_proc), so the walk is coherent
+//   only while it is held; the formatters call this from inside proc_for_each
+//   (which holds it). Each run_ns is read __atomic (a single-writer coherent
+//   snapshot); the sum is a snapshot-of-snapshots, exact enough for the
+//   diff-across-polls %CPU the reader derives. Does NOT include the currently-
+//   running thread's in-flight slice since its last switch-in (< 1 slice; the
+//   design accepts the lag). Returns 0 for a NULL p.
+u64 proc_cpu_ns(const struct Proc *p);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the

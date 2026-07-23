@@ -1,9 +1,22 @@
 # PROWL-DESIGN.md — the scheduler-aware process monitor + the kernel telemetry it reads
 
-Status: **SIGNED OFF 2026-07-22 — §7 resolved.** Building telemetry-first
-(prowl-1..5, §6). Landed per the CLAUDE.md design-conversation pattern (research →
-doc → surface forks → signoff → bind ARCH → build). The tool is `prowl`; the
-kernel telemetry it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
+Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (the substrate) LANDED.**
+Building telemetry-first (prowl-1..5, §6). Landed per the CLAUDE.md design-
+conversation pattern (research → doc → surface forks → signoff → bind ARCH →
+build). The tool is `prowl`; the kernel telemetry it reads is
+`/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
+
+**As-built (prowl-1):** `Thread.run_ns`/`switched_in_at` (the ctx-switch on-CPU
+accounting), `Proc.name` (the basename of the resolved binary, stamped at
+`exec_setup_from_spoor`; kproc/joey stamp their literals), `proc_cpu_ns` (the
+per-Proc sum under `g_proc_table_lock`), `/proc/<pid>/status` at Plan 9 parity
+(name/cpu_ns/ppid/principal/gid), and `/ctl/procs` with NAME + CPU_NS columns
+(`DEVCTL_READ_BUF` 512 → 2048). READ-ONLY (no scheduling decision reads run_ns);
+no new syscall, no new §28 invariant. Validated by `proc.cpu_ns_accounting` +
+the SMP gate (default+UBSan × smp4/smp8, 0 corruption). The audit-trigger row is
+ARCH §25.4 (Scheduler, prowl-1 addendum); the focused audit is prowl-5. As-built
+detail: `docs/reference/15-scheduler.md` (§ on-CPU accounting) +
+`32-devproc.md` + `33-devctl.md`.
 
 ---
 
@@ -230,9 +243,11 @@ nothing on the kernel's behalf (the kernel gates the reads).
 
 ## 6. Phasing
 
-- **prowl-1 (substrate MVP):** `run_ns` accounting + proc names + `/proc/<pid>/status`
-  Plan 9 parity + `/ctl/procs` name/%cpu columns. Kernel-only; the data a basic
-  top needs. Kernel tests + the SMP gate (it touches the ctx-switch path).
+- **prowl-1 (substrate MVP): LANDED.** `run_ns` accounting + proc names +
+  `/proc/<pid>/status` Plan 9 parity + `/ctl/procs` name/CPU_NS columns.
+  Kernel-only; the data a basic top needs. `proc.cpu_ns_accounting` kernel test +
+  the SMP gate (ctx-switch path, 0 corruption). The kernel exposes cumulative
+  `cpu_ns`; the tool derives %CPU by diffing across polls.
 - **prowl-2 (tool MVP):** the Kaua `prowl` TUI — per-CPU meters + the process list
   + %CPU + kill. An htop-equivalent, on-device.
 - **prowl-3 (the scheduler view):** `/proc/<pid>/sched` + the per-thread scheduler

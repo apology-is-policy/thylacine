@@ -61,12 +61,14 @@ Reaching `/ctl` through `stalk` required the same **reuse-`nc` walk fix** as dev
 
 ### `/ctl/procs`
 
+The system-wide process overview. **prowl-1 (PROWL-DESIGN.md §3) added the `NAME` + `CPU_NS` columns** (the #65 `PAGES`/`CHILDREN` columns predate it):
+
 ```
-PID    STATE      THREADS
-0    ALIVE    1
+PID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS
+0    kproc    ALIVE    1    0    3    12345678
 ```
 
-Walks via `proc_for_each(callback, arg)` (added in P4-C; declared in `<thylacine/proc.h>`). The callback formats one row per Proc into the buffer. g_proc_table_lock held during iteration — `format_procs` runs the entire DFS under the lock; total cost is O(N_procs) with small per-proc text.
+Columns are whitespace-separated (a monitor splits on whitespace; process names are basenames, never contain spaces; an unstamped Proc reads `?`). `CPU_NS` is the cumulative on-CPU time in ns (`proc_cpu_ns` = Σ `run_ns` over the Proc's threads) — the reader diffs it across polls for %CPU. Walks via `proc_for_each(callback, arg)` (declared in `<thylacine/proc.h>`); the callback formats one row per Proc into the buffer, and `proc_cpu_ns` walks `p->threads` under the same `g_proc_table_lock` the DFS holds. `format_procs_cb` early-returns on buffer overflow (the #57a bound); prowl-1 bumped `DEVCTL_READ_BUF` 512 → 2048 so the wider lines do not truncate the listing before ~30 procs. Total cost is O(N_procs) with small per-proc text.
 
 ### `/ctl/memory`
 

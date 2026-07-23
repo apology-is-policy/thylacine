@@ -959,3 +959,58 @@ drop-before-recv discipline (`9p_client.c`).
 - Pre-thread boot code (TPIDR_EL1 not yet parked) skips counting entirely —
   single-CPU, IRQs masked, no gate needed. A lock held ACROSS the TPIDR
   park would underflow at its release; don't do that.
+
+## Per-thread on-CPU time accounting (prowl-1)
+
+`Thread.run_ns` + `Thread.switched_in_at` (`thread.h`) give the scheduler a
+cumulative **on-CPU time** telemetry counter per thread. They are stamped at the
+`sched()` context-switch boundary, immediately before `cpu_switch_context`:
+
+```c
+u64 sched_now = timer_now_ns();
+if (prev->switched_in_at)
+    __atomic_store_n(&prev->run_ns,
+                     prev->run_ns + (sched_now - prev->switched_in_at),
+                     __ATOMIC_RELAXED);   // fold prev's slice out
+next->switched_in_at = sched_now;          // stamp next's switch-in
+```
+
+**READ-ONLY telemetry.** No scheduling decision reads `run_ns` — EEVDF placement,
+the `vd_t` math, I-8 (liveness), I-17 (latency), the tickless machinery are all
+byte-unchanged. This is the substrate a process monitor (`prowl`, PROWL-DESIGN.md)
+reads through `/proc/<pid>/status` (`cpu_ns`) and `/ctl/procs` (`CPU_NS`); the
+reader derives **%CPU** by diffing the cumulative counter across two polls (the
+htop method), so the kernel keeps no instantaneous-rate state.
+
+**Cost.** One `timer_now_ns()` (a `CNTVCT` read the timer path already performs
+elsewhere) + a guarded `__atomic` store + a plain store, all under `cs->lock`
+with IRQs masked. Negligible, but it *is* the hot path — hence the SMP gate at
+prowl-1 and the focused audit at prowl-5.
+
+**Correctness properties:**
+
+- **Single writer.** `run_ns` is written only by that thread's own switch-out,
+  which runs on exactly one CPU at a time (a thread is on `<=1` CPU, I-21), so
+  there is no writer-writer race. The `__atomic_store_n`/`__atomic_load_n`
+  (RELAXED) pair gives a lockless cross-Proc reader a coherent snapshot — the
+  `page_count`/`thread_count` pattern. `switched_in_at` is owner-local (set at
+  switch-in, read at switch-out, both on the thread's own CPU — a thread does not
+  migrate *while running*), so it needs no atomics.
+- **The `switched_in_at != 0` guard.** The boot thread and the per-CPU idles
+  become current *without* a `sched()` switch-in stamp (they are installed as
+  current at init), so `switched_in_at` is 0 for their first run. Without the
+  guard their first switch-out would fold in `(now - 0)` — a bogus ~uptime delta.
+  The guard drops that one boot-era fragment; every subsequent slice is exact.
+- **`proc_cpu_ns` (per-Proc sum).** The per-Proc CPU time is `Σ run_ns` over
+  `p->threads`, computed at read time (`proc_cpu_ns`, `proc.c`). **Precondition:
+  the caller holds `g_proc_table_lock`** — the threads list is mutated only under
+  that lock (`thread_link_into_proc`/`thread_unlink_from_proc`), and the
+  formatters call it from inside `proc_for_each` (which holds it). Walk-safety is
+  the #95 argument: a Proc reachable via `proc_for_each` (the kproc-rooted tree)
+  has not been unlinked, so its threads are not being freed. The sum omits the
+  currently-running thread's in-flight slice since its last switch-in (< 1 slice;
+  negligible over a poll interval).
+
+Validated by `proc.cpu_ns_accounting` (`kernel/test/test_devproc.c`: the
+`proc_set_name` basename cases + forced-yield `run_ns` accrual + monotonicity)
+and the SMP gate (default+UBSan × smp4/smp8, 0 corruption).

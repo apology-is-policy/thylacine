@@ -28,6 +28,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>       // prowl-1: sched() -- force kthread switch-outs
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
@@ -84,6 +85,19 @@ static bool contains(const char *haystack, size_t hlen, const char *needle) {
         if (j == nlen) return true;
     }
     return false;
+}
+
+// prowl-1: exact NUL-terminated string equality (proc_set_name basename check).
+static bool streq(const char *a, const char *b) {
+    while (*a && *b) { if (*a != *b) return false; a++; b++; }
+    return *a == *b;
+}
+
+// prowl-1: read kproc's cumulative cpu_ns under g_proc_table_lock (proc_for_each
+// holds it -- proc_cpu_ns's precondition). Stashes it via the void* arg.
+static int cpu_ns_cb(struct Proc *p, void *arg) {
+    if (p == kproc()) *(u64 *)arg = proc_cpu_ns(p);
+    return 0;
 }
 
 // Walk one component from c using devproc->walk; return the new Spoor or
@@ -289,8 +303,8 @@ void test_devproc_read_status_format(void) {
     struct Spoor *c = open_status_for_pid(0);
     TEST_ASSERT(c != NULL, "open /proc/0/status OK");
 
-    char buf[256];
-    long got = devproc.read(c, buf, 256, 0);
+    char buf[512];
+    long got = devproc.read(c, buf, 512, 0);
     TEST_ASSERT(got > 0, "read returns positive byte count");
 
     TEST_ASSERT(contains(buf, (size_t)got, "pid:"),     "status contains 'pid:'");
@@ -298,8 +312,59 @@ void test_devproc_read_status_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "state:"),   "status contains 'state:'");
     TEST_ASSERT(contains(buf, (size_t)got, "ALIVE"),    "kproc state is ALIVE");
     TEST_ASSERT(contains(buf, (size_t)got, "threads:"), "status contains 'threads:'");
+    // prowl-1: Plan 9 parity -- name + cpu time + parent + owner.
+    TEST_ASSERT(contains(buf, (size_t)got, "name:"),    "status contains 'name:'");
+    TEST_ASSERT(contains(buf, (size_t)got, "kproc"),    "kproc status carries its name");
+    TEST_ASSERT(contains(buf, (size_t)got, "cpu_ns:"),  "status contains 'cpu_ns:'");
+    TEST_ASSERT(contains(buf, (size_t)got, "ppid:"),    "status contains 'ppid:'");
+    TEST_ASSERT(contains(buf, (size_t)got, "principal:"), "status contains 'principal:'");
 
     spoor_clunk(c);
+}
+
+// prowl-1 (PROWL-DESIGN.md section 3): the telemetry substrate --
+//   (a) proc_set_name extracts the basename correctly, and
+//   (b) the ctx-switch run_ns accounting is LIVE: kproc's cpu_ns accrues
+//       after forced yields and never decreases.
+void test_proc_cpu_ns_accounting(void);
+void test_proc_cpu_ns_accounting(void) {
+    // (a) proc_set_name basename extraction -- pure, on a stack Proc (only
+    // p->name is touched, so no other field need be valid).
+    struct Proc tp;
+    tp.name[0] = '\0';
+    proc_set_name(&tp, "/bin/corvus", 11);
+    TEST_ASSERT(streq(tp.name, "corvus"), "basename '/bin/corvus' -> 'corvus'");
+    proc_set_name(&tp, "joey", 4);
+    TEST_ASSERT(streq(tp.name, "joey"), "no-slash name kept whole");
+    proc_set_name(&tp, "/a/b/c/thing", 12);
+    TEST_ASSERT(streq(tp.name, "thing"), "deep-path basename -> 'thing'");
+    proc_set_name(&tp, "keep", 4);
+    proc_set_name(&tp, "/dir/", 5);           // trailing slash -> empty basename
+    TEST_ASSERT(streq(tp.name, "keep"), "trailing-slash keeps the prior name");
+    // Truncation: a > PROC_NAME_MAX-1 name stays NUL-terminated within bounds.
+    proc_set_name(&tp, "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 41);
+    TEST_ASSERT(tp.name[PROC_NAME_MAX - 1u] == '\0', "long name stays NUL-terminated");
+
+    // (b) run_ns accounting. sched() yields kthread to its CPU's idle and back;
+    // each yield switches kthread OUT so its run_ns accrues (proc_cpu_ns sums
+    // over kproc's threads). A measurable busy slice between yields guarantees a
+    // nonzero delta even at a coarse CNTVCT resolution.
+    for (int i = 0; i < 8; i++) {
+        for (volatile int j = 0; j < 1000000; j++) { /* burn a measurable slice */ }
+        sched();
+    }
+    u64 cpu_ns = 0;
+    proc_for_each(cpu_ns_cb, &cpu_ns);        // proc_cpu_ns(kproc) under the lock
+    TEST_ASSERT(cpu_ns > 0, "kproc cpu_ns accrued after forced yields");
+
+    // Monotonic: another round of run never decreases the cumulative counter.
+    for (int i = 0; i < 8; i++) {
+        for (volatile int j = 0; j < 1000000; j++) { }
+        sched();
+    }
+    u64 cpu_ns2 = 0;
+    proc_for_each(cpu_ns_cb, &cpu_ns2);
+    TEST_ASSERT(cpu_ns2 >= cpu_ns, "cpu_ns is monotonic across polls");
 }
 
 void test_devproc_read_cmdline_kproc(void) {

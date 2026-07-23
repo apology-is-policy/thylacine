@@ -63,18 +63,34 @@ Becoming reachable through `stalk` required fixing `devproc_walk` to honor the *
 
 ### `/proc/<pid>/status`
 
+**prowl-1 (PROWL-DESIGN.md §3) brought this to Plan 9 parity** — it now carries the process name, cumulative on-CPU time, the parent pid, and the owning principal/gid, not just pid/state/threads.
+
 ```
+name:    <basename>          ← the execed binary's basename; "?" if unstamped
 pid:     <decimal>
 state:   ALIVE|ZOMBIE|INVALID
 threads: <decimal>
+cpu_ns:  <decimal>           ← cumulative on-CPU time in ns (Σ run_ns over threads)
+ppid:    <decimal>           ← parent pid; 0 if none
+principal:<decimal> gid:<decimal>
+pages:   <decimal>           ← live SYS_BURROW_ATTACH anon pages (#65)
+children:<decimal>           ← live direct children (#65)
 exit:    <decimal>           ← only present when state == ZOMBIE
 ```
 
+`cpu_ns` is **cumulative + monotonic** — a monitor derives %CPU by diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel keeps no instantaneous-rate state. It is the sum of per-thread `run_ns` (`proc_cpu_ns`, walked under `g_proc_table_lock` via the `proc_for_each` read path — the #57a walk-safety); it does **not** include the currently-running thread's in-flight slice since its last switch-in (< 1 slice, negligible over a poll interval). `name` is the basename of the **resolved binary path** (`exec_setup_from_spoor` from the Spoor's #66 namespace name — unforgeable, not caller-controlled argv[0]); the boot chain (kproc/joey) is stamped its literal.
+
 Reading kproc's status (`/proc/0/status`) typically:
 ```
+name:    kproc
 pid:     0
 state:   ALIVE
 threads: 1
+cpu_ns:  12345678
+ppid:    0
+principal:4294967294 gid:4294967294
+pages:   0
+children:3
 ```
 
 ### `/proc/<pid>/cmdline`

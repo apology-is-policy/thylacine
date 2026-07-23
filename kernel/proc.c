@@ -238,6 +238,11 @@ void proc_init(void) {
     g_kproc->principal_id = PRINCIPAL_SYSTEM;
     g_kproc->primary_gid  = GID_SYSTEM;
 
+    // prowl-1: name the kernel proc (the boot chain never execs, so it carries
+    // no resolved Spoor path -- stamp the literal so /proc/0 + /ctl/procs read
+    // "kproc" rather than the empty-name "?").
+    proc_set_name(g_kproc, "kproc", 5);
+
     // P2-Fc: kproc gets its own handle table. handle_init must run
     // before proc_init (main.c bootstrap order). Failures here panic —
     // boot can't continue without kproc.
@@ -935,6 +940,34 @@ bool proc_child_cap_ok(struct Proc *p) {
     bool ok = p->child_count < PROC_CHILD_MAX;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return ok;
+}
+
+// prowl-1 (PROWL-DESIGN.md section 3.2): stamp p->name with the basename of
+// `path` (the last '/'-delimited component). See proc.h for the concurrency
+// note (set once in the Proc's own exec path before it runs at EL0).
+void proc_set_name(struct Proc *p, const char *path, size_t len) {
+    if (!p || !path || len == 0) return;
+    size_t start = 0;
+    for (size_t i = 0; i < len; i++)
+        if (path[i] == '/') start = i + 1u;
+    if (start >= len) return;   // trailing-slash / empty basename -- keep prior
+    size_t j = 0;
+    for (size_t i = start; i < len && path[i] != '\0' && j < PROC_NAME_MAX - 1u; i++)
+        p->name[j++] = path[i];
+    p->name[j] = '\0';
+}
+
+// prowl-1 (PROWL-DESIGN.md section 3.1): the per-Proc cumulative on-CPU time =
+// sum of run_ns over the threads. PRECONDITION: caller holds g_proc_table_lock
+// (the threads-list mutation domain -- the formatters call this from inside
+// proc_for_each). Each run_ns is a single-writer field read __atomic for a
+// coherent cross-CPU snapshot (the page_count reader pattern).
+u64 proc_cpu_ns(const struct Proc *p) {
+    if (!p) return 0;
+    u64 total = 0;
+    for (const struct Thread *t = p->threads; t; t = t->next_in_proc)
+        total += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
+    return total;
 }
 
 // Shared internal worker for rfork + rfork_with_caps. The only difference

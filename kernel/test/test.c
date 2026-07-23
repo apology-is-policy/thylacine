@@ -486,6 +486,7 @@ void test_devproc_walk_unknown_pid_misses(void);
 void test_devproc_walk_to_status_file(void);
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
+void test_proc_cpu_ns_accounting(void);     // prowl-1: name + run_ns substrate
 void test_devproc_read_cmdline_kproc(void);
 void test_devproc_read_ns_format(void);
 void test_devproc_read_ctl_returns_zero(void);
@@ -1822,6 +1823,7 @@ struct test_case g_tests[] = {
     { "devproc.walk_to_status_file",   test_devproc_walk_to_status_file,   false, NULL },
     { "devproc.walk_dotdot_to_root",   test_devproc_walk_dotdot_to_root,   false, NULL },
     { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
+    { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },

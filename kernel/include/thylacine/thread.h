@@ -393,9 +393,37 @@ struct Thread {
     bool               stop_unwound;
 
     u64                debug_stepover_va;
+
+    // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
+    // on-CPU time telemetry. run_ns accumulates (now - switched_in_at) at every
+    // switch-OUT; the per-Proc cpu_ns a /proc reader reports is the sum over
+    // p->threads (proc_cpu_ns, under g_proc_table_lock). READ-ONLY -- NO
+    // scheduling decision reads run_ns, so EEVDF placement / the vd_t math /
+    // liveness / latency are byte-unchanged; this is telemetry, not policy.
+    //
+    // Concurrency: run_ns is written ONLY by this thread's own switch-out, which
+    // runs on exactly one CPU at a time (I-21 on_cpu -- a thread is never on two
+    // CPUs), so there is a single writer. A cross-Proc reader (devproc / devctl)
+    // uses __atomic_load_n and the writer __atomic_store_n for a coherent
+    // snapshot -- the page_count/thread_count lockless-reader pattern. RELAXED
+    // is sufficient: the value is a monotonic counter the reader diffs across
+    // polls (htop's method); no other memory is ordered against it.
+    //
+    // switched_in_at is the last switch-IN timestamp (timer_now_ns). It is
+    // owner-local -- set at switch-in and read at switch-out, both on this
+    // thread's own CPU (a thread does not migrate WHILE running) -- so it needs
+    // no atomics. 0 == "never switched in": the boot thread + the per-CPU idles
+    // become current WITHOUT a sched() switch-in stamp, so their first switch-out
+    // would compute (now - 0) = a bogus ~uptime delta; the switch-out guards on
+    // switched_in_at != 0 to drop that one-time boot-era fragment. KP_ZERO inits
+    // both to 0; NOT propagated by rfork (a child accrues its own time).
+    u64                run_ns;
+    u64                switched_in_at;
 };
 
-_Static_assert(sizeof(struct Thread) == 1184,
+_Static_assert(sizeof(struct Thread) == 1200,
+               "prowl-1 appended run_ns + switched_in_at (2 x u64, the on-CPU "
+               "time telemetry) at the tail: 1184 -> 1200. "
                "8c-3 appended stop_unwinds + stop_no_park + stop_unwound (bools) in "
                "the debug_ss_armed padding -- no size change (#89 reader-role-release "
                "+ the F1 frame-atomic block-through + the F1-re-audit stop-unwound "
