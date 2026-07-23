@@ -65,7 +65,9 @@ if {$err ne ""} { lc_fail "baseline: the system default is not on screen: $err" 
 # marker command after it is what we assert.
 lc_send "mkdir lib"
 lc_send "echo theme spinifex > lib/aurora"
-lc_run_expect "cat lib/aurora" "theme spinifex"
+# No cat-back verification (#60 serial hygiene -- the leg cut 3/3 on its
+# echo burst on a loaded host): the retint assert below IS the proof the
+# file carried the theme through the push.
 lc_send "aurora-push"
 set err [osd_frac "session push applies" $SPINIFEX_BG 0.5 1]
 if {$err ne ""} { lc_fail "the manual aurora-push did not retint: $err" }
