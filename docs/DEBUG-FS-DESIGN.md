@@ -818,13 +818,26 @@ the kernel — which owns the ctl-fd-close release — can guarantee die-with-la
    `g_proc_table_lock`, so there is no set-vs-release race.
 
 **Invariants.** NO new §28 invariant — this refines I-39. `NoStrand`/`EventuallyResumed`
-is unchanged for an attached target (it still resumes). `StopImpliesOwned` is
-unaffected: the terminate clears `debug_stop_req` through the group-terminate death
-path, never leaving a stop set with no owner. `DeathWinsOverStop` is exactly the
-mechanism the terminate relies on. The new obligation is `EventuallyLaunchedDies`
-(§6): a launched (`exitkill`) target whose debugger dies without an explicit detach
-eventually dies. The buggy cfg `exitkill_ignored` (the pre-fix always-resume) is its
-executable counterexample.
+is unchanged for an attached target (it still resumes). `StopImpliesOwned` holds: the
+exitkill branch explicitly clears `debug_stop_req` + `debug_focus_thread` **after** the
+terminate (self-audit SA-1 — `proc_group_terminate` does NOT itself clear the stop
+flag; ordered after so `gflag` is the wake the parked threads act on, no resume-window;
+matches the spec's exitkill `ReleaseSlot` `sflag'=FALSE`). `DeathWinsOverStop` is
+exactly the mechanism the terminate relies on. The new obligation is
+`EventuallyLaunchedDies` (§6): a launched (`exitkill`) target whose debugger dies
+without an explicit detach eventually dies. The buggy cfg `exitkill_ignored` (the
+pre-fix always-resume) is its executable counterexample.
+
+**The precise trigger (audit F1).** The release-cb runs on the *target* and cannot
+observe the debugger's liveness, so it terminates a marked ALIVE target on **any
+ctl-fd close without a prior `detach` verb** — debugger *death* (the load-bearing #68
+close-at-exit leak scenario) OR a *live* debugger's bare `SYS_CLOSE` of the fd. Both
+have the identical outcome (terminate a marked launched child), the live-bare-close is
+unexercised (ambush always sends `kill`/`detach` first) and sound (within the
+debugger's slot authority — it can already `kill` the target), and `debug_stop.tla`
+abstracts it as the `~dbg_live` case (the same-outcome documented modeling boundary at
+`ReleaseSlot`). An explicit `detach` clears the mark, so a launched target survives a
+release **only** via an explicit detach.
 
 **Why not the ambush side.** The ambush debugger already kills on exit (both stages,
 stock Delve). Adding a second kill there is redundant, and no userspace change can

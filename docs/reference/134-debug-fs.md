@@ -1025,16 +1025,30 @@ running (it would send `kill` to terminate). `attach` also clears the mark (a fr
 slot starts unmarked). Both the set and the release run under `g_proc_table_lock`, so
 there is no set-vs-release race.
 
+**The precise trigger (audit F1).** The release-cb runs on the *target* and cannot
+observe the debugger's liveness, so it terminates a marked ALIVE target on **any
+ctl-fd close without a prior `detach` verb** — the load-bearing case is debugger
+*death* (the #68 close-at-exit — the leak scenario), but a *live* debugger's bare
+`SYS_CLOSE` of the fd on a marked ALIVE target also terminates it. That is correct
+for an ephemeral launched child and within the debugger's slot authority (it can
+already `kill` it), and ambush never hits it (every teardown sends `kill`/`detach`
+first). `debug_stop.tla` models the death case; the live-bare-close is the
+same-outcome, unexercised edge (a documented modeling boundary at `ReleaseSlot`).
+
 **Invariants.** NO new §28 invariant (refines I-39). `EventuallyResumed` (NoStrand) is
-unchanged for an attached target. `StopImpliesOwned` is unaffected (the terminate
-clears `debug_stop_req` through the group-terminate death path). The new obligation is
-`specs/debug_stop.tla::EventuallyLaunchedDies` (a launched/`exitkill` target whose
-debugger dies without an explicit detach eventually dies); the `exitkill_ignored`
-buggy cfg (the pre-fix always-resume) is its counterexample.
+unchanged for an attached target. `StopImpliesOwned` holds: the exitkill branch
+explicitly clears `debug_stop_req` + `debug_focus_thread` after the terminate
+(self-audit SA-1 — the spec's exitkill `ReleaseSlot` sets `sflag'=FALSE`; ordered
+after the terminate so `gflag` is the wake the parked threads act on, no
+resume-window). The new obligation is `specs/debug_stop.tla::EventuallyLaunchedDies`
+(a launched/`exitkill` target whose debugger dies without an explicit detach
+eventually dies); the `exitkill_ignored` buggy cfg (the pre-fix always-resume) is its
+counterexample.
 
 **Gates**: `devproc.debug_exitkill_terminates_on_close` (revert-probed: force the
 always-resume and leg (a) fails) + `debug_stop.tla` clean GREEN + the `exitkill_ignored`
-cfg violation + boot OK + 0 EXTINCTION + the focused holotype + the SMP gate.
+cfg violation + boot OK + 0 EXTINCTION + the focused Fable-5-max holotype
+(0 P0 / 0 P1 / 0 P2 / 1 P3, not dirty) + the SMP gate.
 
 ## Known caveats / footguns
 

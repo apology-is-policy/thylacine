@@ -533,16 +533,35 @@ static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     hwdebug_wp_clear_all(p->debug_hw);              // 8a-2b-3: likewise its watchpoints (else the orphaned target re-traps on the watched access forever)
     if (exitkill && p->state == PROC_STATE_ALIVE) {
         // 5d EXITKILL (I-39 die-with-launcher; DEBUG-FS §5d): a debugger-LAUNCHED
-        // target dies with its launcher on the debugger's death -- the Plan 9
-        // NoStrand-resume would orphan it to init to run forever. proc_group_terminate's
-        // #811 death cascade wakes the debug-parked threads; each hits the EL0-return
-        // die-check (death wins over the stop) + terminates; the last out ZOMBIEs and
-        // init reaps. Safe under g_proc_table_lock (the devproc_kill_walk_cb idiom:
-        // torpor / rendez / cs locks only). A dying / ZOMBIE target (not ALIVE) falls
-        // to proc_debug_resume, itself magic-guarded + dying-safe. Reached ONLY on the
-        // IMPLICIT death-release (ctl-fd close): an explicit `detach` clears the mark
-        // first (devproc_debug_walk_cb), so it always resumes.
+        // target dies with its launcher -- the Plan 9 NoStrand-resume would orphan it
+        // to init to run forever. proc_group_terminate's #811 death cascade wakes the
+        // debug-parked threads (by rendez_blocked_on, NOT debug_stop_req); each hits
+        // the EL0-return die-check (death wins over the stop) + terminates; the last
+        // out ZOMBIEs and init reaps. Safe under g_proc_table_lock (the
+        // devproc_kill_walk_cb idiom: torpor / rendez / cs locks only). A dying /
+        // ZOMBIE target (not ALIVE) falls to proc_debug_resume, itself magic-guarded +
+        // dying-safe.
+        //
+        // TRIGGER (audit F1): this fires on a ctl-fd close WITHOUT a prior explicit
+        // `detach` verb -- the release-cb runs on the TARGET and cannot observe the
+        // debugger's liveness, so the real trigger is "the debugger let go of a marked
+        // launched child without detach-and-resume", NOT strictly debugger DEATH. The
+        // load-bearing case IS death (the #68 close-at-exit -- the leak scenario); a
+        // LIVE debugger's bare SYS_CLOSE of the ctl fd on a marked ALIVE target also
+        // terminates it, which is correct for an ephemeral launched child + within the
+        // debugger's slot authority (it can already kill it). An explicit `detach`
+        // clears the mark first (devproc_debug_walk_cb), so a launched target survives
+        // ONLY via detach. debug_stop.tla models the death case (~dbg_live); the
+        // live-bare-close is the same-outcome, unexercised edge (see the spec note).
         proc_group_terminate(p, "debugger exited");
+        // StopImpliesOwned (debug_stop.tla; self-audit SA-1): clear the stop flag +
+        // focus so they do not outlive the now-NULL owner (the spec's exitkill
+        // ReleaseSlot sets sflag'=FALSE). Ordered AFTER the terminate so gflag is the
+        // wake the parked threads act on -- no resume-window; cosmetic cleanup of a
+        // dying target (matches proc_debug_resume's clears minus the wake, which the
+        // terminate's cascade already did).
+        __atomic_store_n(&p->debug_stop_req, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&p->debug_focus_thread, NULL, __ATOMIC_RELEASE);
     } else {
         proc_debug_resume(p);                       // 8a-1b-beta: a dead/detached debugger provably resumes an ATTACHED (or already-dying) quarry (ReleaseSlot -> NoStrand)
     }

@@ -397,6 +397,18 @@ DbgDie ==
 (* slot but neither clears sflag nor wakes (the stranded target). BUGGY_EXITKILL*)
 (* _IGNORED drops the launched distinction -> always resumes -> the launched    *)
 (* target is orphaned and runs forever (EventuallyLaunchedDies).                *)
+(*                                                                              *)
+(* MODELING BOUNDARY (audit F1): the IMPL's release-cb runs on the TARGET and   *)
+(* cannot observe the debugger's liveness, so it terminates a marked ALIVE      *)
+(* target on ANY ctl-fd close WITHOUT a prior detach -- i.e. debugger DEATH     *)
+(* (~dbg_live, modeled here, the load-bearing #68 leak scenario) OR a LIVE      *)
+(* debugger's bare SYS_CLOSE of the fd (dbg_live /\ ~detach_req, NOT a distinct *)
+(* action here). Both have the IDENTICAL outcome (terminate a marked launched   *)
+(* child), and the live-bare-close is unexercised (ambush always sends          *)
+(* kill/detach first) + sound (within the debugger's slot authority), so this   *)
+(* model abstracts it as the ~dbg_live case rather than adding a same-outcome   *)
+(* bare-close action. The load-bearing property (EventuallyLaunchedDies on      *)
+(* debugger death) is the one proven.                                           *)
 ReleaseSlot ==
     /\ attached
     /\ (detach_req \/ ~dbg_live)
