@@ -166,13 +166,24 @@ fn render_detail(buf: &mut Buffer, area: Rect, app: &App) {
             );
         }
         Some(d) => {
-            buf.set_str(
-                area.x,
-                y,
-                &format!("sched: {} (pid {})  tid band cpu run_ns nsched parks nmig state", d.name, d.pid),
-                head(),
-            );
-            let mut row = y + 1;
+            // Title on line 1; the column header on line 2 in the SAME fixed-width
+            // layout as the value rows below, so the columns align (prowl-4 fix:
+            // the header labels were crammed onto the title line with single
+            // spaces, misaligned with the fixed-width values). detail_height
+            // reserves 2 + threads.len() for exactly title + header + N rows.
+            buf.set_str(area.x, y, &format!("sched: {} (pid {})", d.name, d.pid), head());
+            if area.height >= 2 {
+                buf.set_str(
+                    area.x,
+                    y + 1,
+                    &format!(
+                        "  {:<4} {:<4} {:<3} {:<12} {:<8} {:<8} {:<5} {}",
+                        "tid", "band", "cpu", "run_ns", "nsched", "parks", "nmig", "state"
+                    ),
+                    head(),
+                );
+            }
+            let mut row = y + 2;
             for t in &d.threads {
                 if row >= area.bottom() {
                     break;
