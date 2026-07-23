@@ -62,6 +62,19 @@
 (*       Note this is a LIVENESS bug (a hang), not a safety one: a sleeping   *)
 (*       Thread is off-cpu (never confirmable, so NoEL0AfterStopped stays     *)
 (*       vacuously safe) -- the target simply never becomes fully-stopped.    *)
+(*   BUGGY_EXITKILL_IGNORED         -- releasing the slot on debugger DEATH    *)
+(*       always RESUMES the target, even one the debugger LAUNCHED (marked     *)
+(*       exitkill). The Plan 9 NoStrand-resume is correct for an ATTACHED      *)
+(*       target (it pre-existed the debugger; leave it running) but WRONG for  *)
+(*       a LAUNCHED one: a debugger-launched target must die WITH its launcher *)
+(*       (PTRACE_O_EXITKILL), else it is orphaned to init and runs forever     *)
+(*       (the HVF-idle debuggee leak). The correct release-cb (I-39 EXITKILL   *)
+(*       refinement) TERMINATES an exitkill-marked target on debugger death    *)
+(*       (proc_group_terminate, whose #811 cascade wakes the debug-parked      *)
+(*       threads -> they die at the die-check) instead of proc_debug_resume.   *)
+(*       An EXPLICIT detach still resumes (the debugger's deliberate choice --  *)
+(*       it would use `kill` to terminate); only the IMPLICIT death-release     *)
+(*       honors the mark. Violates EventuallyLaunchedDies.                      *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -72,7 +85,8 @@ CONSTANTS
     BUGGY_DOUBLE_WAKE,              \* TRUE = resume has no single-wake latch
     BUGGY_STRAND_ON_CLOSE,          \* TRUE = slot release does not resume the target
     BUGGY_FAULT_STOP_UNGATED,       \* TRUE = the EC-path fire sets sflag without the attached gate
-    BUGGY_STOP_SKIPS_SLEEPER        \* TRUE = the stop does not wake an interruptibly-sleeping Thread
+    BUGGY_STOP_SKIPS_SLEEPER,       \* TRUE = the stop does not wake an interruptibly-sleeping Thread
+    BUGGY_EXITKILL_IGNORED          \* TRUE = death-release always resumes, even a launched (exitkill) target
 
 ASSUME Cardinality(Threads) >= 1
 
@@ -106,12 +120,13 @@ VARIABLES
     detach_req,   \* an explicit `detach` was requested (BOOLEAN)
     resume_req,   \* a `start` was issued: wake all parked to EL0 (BOOLEAN)
     release_req,  \* a slot release was issued: wake all parked + detach (BOOLEAN)
+    exitkill,     \* the target was LAUNCHED + marked kill-on-debugger-death (BOOLEAN)
     wlock,        \* [Threads -> BOOLEAN]  this Thread's wait_lock is held
     confirmed,    \* SUBSET Threads -- the debugger has confirmed these parked
     fired         \* [Threads -> [Sources -> BOOLEAN]]  wake delivered from a source
 
 vars == <<pc, gflag, sflag, attached, dbg_live, detach_req,
-          resume_req, release_req, wlock, confirmed, fired>>
+          resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 WokenOf(t) == \E s \in Sources : fired[t][s]
 Active(s)  == \/ (s = "start"   /\ resume_req)
@@ -135,6 +150,7 @@ TypeOk ==
     /\ detach_req \in BOOLEAN
     /\ resume_req \in BOOLEAN
     /\ release_req \in BOOLEAN
+    /\ exitkill \in BOOLEAN
     /\ wlock \in [Threads -> BOOLEAN]
     /\ confirmed \subseteq Threads
     /\ fired \in [Threads -> [Sources -> BOOLEAN]]
@@ -148,6 +164,7 @@ Init ==
     /\ detach_req = FALSE
     /\ resume_req = FALSE
     /\ release_req = FALSE
+    /\ exitkill = FALSE
     /\ wlock = [t \in Threads |-> FALSE]
     /\ confirmed = {}
     /\ fired = [t \in Threads |-> [s \in Sources |-> FALSE]]
@@ -168,7 +185,7 @@ TailStep(t) ==
                 THEN pc' = [pc EXCEPT ![t] = "dead"]
                 ELSE pc' = [pc EXCEPT ![t] = HandshakeEntry(t)]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (* CORRECT: acquire the wait_lock (free -- the debugger's confirm-walk isn't  *)
 (* mid-access on t) before touching registration/observation.               *)
@@ -178,7 +195,7 @@ Acquire(t) ==
     /\ wlock' = [wlock EXCEPT ![t] = TRUE]
     /\ pc' = [pc EXCEPT ![t] = "reg"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, confirmed, fired>>
+                   resume_req, release_req, exitkill, confirmed, fired>>
 
 (* CORRECT register-then-observe, UNDER the lock: the Thread is now findable  *)
 (* (would be confirmable) and re-checks sflag atomically. Park if still set,  *)
@@ -191,7 +208,7 @@ RegisterObserve(t) ==
          THEN pc' = [pc EXCEPT ![t] = "stopped"]
          ELSE pc' = [pc EXCEPT ![t] = "el0"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, confirmed, fired>>
+                   resume_req, release_req, exitkill, confirmed, fired>>
 
 (* BUGGY: the register happens AFTER the out-of-lock observe. A Thread that   *)
 (* observed sflag=FALSE proceeds to EL0 even if the debugger has since set    *)
@@ -203,7 +220,7 @@ RegisterBuggy(t) ==
          THEN pc' = [pc EXCEPT ![t] = "stopped"]
          ELSE pc' = [pc EXCEPT ![t] = "el0"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (* A Thread running at EL0 hits its next checkpoint (syscall / IRQ / tick)    *)
 (* and re-enters the tail when a stop OR a death is pending. This is the      *)
@@ -214,7 +231,7 @@ ReEnterTail(t) ==
     /\ (sflag \/ gflag)
     /\ pc' = [pc EXCEPT ![t] = "tail"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (* A woken parked Thread leaves "stopped" back to the tail, where it re-runs  *)
 (* the die-check (death wins on resume). The wake(s) are consumed; the        *)
@@ -226,7 +243,7 @@ ResumeThread(t) ==
     /\ confirmed' = confirmed \ {t}
     /\ fired' = [fired EXCEPT ![t] = [s \in Sources |-> FALSE]]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock>>
+                   resume_req, release_req, exitkill, wlock>>
 
 (* A Thread running at EL0 makes a blocking syscall and SLEEPS (off-cpu on some *)
 (* non-debug rendez -- a futex/torpor wait, a pipe/poll/read block). Enabled    *)
@@ -242,7 +259,7 @@ EnterSleep(t) ==
     /\ ~gflag
     /\ pc' = [pc EXCEPT ![t] = "sleep"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (* The stop-of-a-sleeper (the #811-analog for debug-stop) + the existing #811   *)
 (* death-wake, modeled uniformly. A sleeping Thread is WOKEN when a              *)
@@ -264,7 +281,7 @@ StopWakesSleeper(t) ==
     /\ (gflag \/ (sflag /\ ~BUGGY_STOP_SKIPS_SLEEPER))
     /\ pc' = [pc EXCEPT ![t] = "tail"]
     /\ UNCHANGED <<gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (***************************************************************************)
 (* =========================== DEBUGGER ACTIONS ========================== *)
@@ -276,7 +293,7 @@ Attach ==
     /\ ~attached
     /\ attached' = TRUE
     /\ UNCHANGED <<pc, gflag, sflag, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (* The `stop` verb: set the per-Proc stop flag (once per episode).           *)
 RequestStop ==
@@ -287,7 +304,7 @@ RequestStop ==
     /\ ~release_req
     /\ sflag' = TRUE
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (* The EC-path hardware fire (a bp / wp hit or a single-step completion) also  *)
 (* requests the whole-Proc stop. Unlike the discretionary `stop` verb this is  *)
@@ -308,7 +325,7 @@ FaultStop ==
     /\ (BUGGY_FAULT_STOP_UNGATED \/ ~release_req)
     /\ sflag' = TRUE
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (* The delivery walk: mark t confirmed-parked, under t's wait_lock (so it     *)
 (* cannot interleave with t's register-then-observe). CORRECT confirms only a *)
@@ -325,7 +342,7 @@ Confirm(t) ==
          ELSE pc[t] = "stopped"
     /\ confirmed' = confirmed \cup {t}
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, fired>>
+                   resume_req, release_req, exitkill, wlock, fired>>
 
 (* The `start` verb: resume a completed stop -- clear sflag, arm the start    *)
 (* wake source.                                                             *)
@@ -337,7 +354,7 @@ StartResume ==
     /\ sflag' = FALSE
     /\ resume_req' = TRUE
     /\ UNCHANGED <<pc, gflag, attached, dbg_live, detach_req,
-                   release_req, wlock, confirmed, fired>>
+                   release_req, exitkill, wlock, confirmed, fired>>
 
 (* An explicit `detach` request.                                            *)
 DetachReq ==
@@ -346,6 +363,19 @@ DetachReq ==
     /\ ~detach_req
     /\ detach_req' = TRUE
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live,
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
+
+(* The `exitkill` verb: mark the target as debugger-LAUNCHED, so a slot release *)
+(* on debugger DEATH terminates it (die-with-launcher) rather than resuming it. *)
+(* The debugger sets this once, right after attaching a target it spawned; an   *)
+(* attached (pre-existing) target is never marked, so it resumes on release.     *)
+(* Owner-gated (attached) in the impl -- the ctl `exitkill` verb.               *)
+MarkExitkill ==
+    /\ dbg_live
+    /\ attached
+    /\ ~exitkill
+    /\ exitkill' = TRUE
+    /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
                    resume_req, release_req, wlock, confirmed, fired>>
 
 (* The debugger process dies (crash / kill). Its handle table closes at exit  *)
@@ -354,22 +384,34 @@ DbgDie ==
     /\ dbg_live
     /\ dbg_live' = FALSE
     /\ UNCHANGED <<pc, gflag, sflag, attached, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
-(* Release the slot on detach OR ctl-fd close (incl. debugger death). CORRECT *)
-(* clears the stop and arms the release wake source (resume the target).     *)
-(* BUGGY_STRAND_ON_CLOSE frees the slot but neither clears sflag nor wakes -- *)
-(* the target is stranded stopped.                                          *)
+(* Release the slot on detach OR ctl-fd close (incl. debugger death). CORRECT  *)
+(* clears the stop and arms the release wake source (resume the target) -- the *)
+(* NoStrand-resume -- EXCEPT for a LAUNCHED (exitkill-marked) target released   *)
+(* by debugger DEATH (not an explicit detach): that one is TERMINATED (gflag,   *)
+(* the die-with-launcher I-39 EXITKILL refinement -- proc_group_terminate,      *)
+(* whose #811 cascade wakes the debug-parked threads to die at the die-check).  *)
+(* An explicit detach (detach_req) always resumes -- the debugger's deliberate  *)
+(* choice; it would send `kill` to terminate. BUGGY_STRAND_ON_CLOSE frees the   *)
+(* slot but neither clears sflag nor wakes (the stranded target). BUGGY_EXITKILL*)
+(* _IGNORED drops the launched distinction -> always resumes -> the launched    *)
+(* target is orphaned and runs forever (EventuallyLaunchedDies).                *)
 ReleaseSlot ==
     /\ attached
     /\ (detach_req \/ ~dbg_live)
     /\ attached' = FALSE
     /\ confirmed' = {}
     /\ IF BUGGY_STRAND_ON_CLOSE
-         THEN UNCHANGED <<sflag, release_req>>
-         ELSE /\ sflag' = FALSE
-              /\ release_req' = TRUE
-    /\ UNCHANGED <<pc, gflag, dbg_live, detach_req, resume_req, wlock, fired>>
+         THEN UNCHANGED <<sflag, release_req, gflag>>
+         ELSE IF (~BUGGY_EXITKILL_IGNORED /\ exitkill /\ ~dbg_live /\ ~detach_req)
+                THEN /\ sflag' = FALSE
+                     /\ gflag' = TRUE
+                     /\ UNCHANGED release_req
+                ELSE /\ sflag' = FALSE
+                     /\ release_req' = TRUE
+                     /\ UNCHANGED gflag
+    /\ UNCHANGED <<pc, dbg_live, detach_req, resume_req, exitkill, wlock, fired>>
 
 (***************************************************************************)
 (* ============================= DEATH PATH ============================== *)
@@ -381,7 +423,7 @@ SetGflag ==
     /\ ~gflag
     /\ gflag' = TRUE
     /\ UNCHANGED <<pc, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed, fired>>
+                   resume_req, release_req, exitkill, wlock, confirmed, fired>>
 
 (***************************************************************************)
 (* ============================ WAKE DELIVERY =========================== *)
@@ -399,7 +441,7 @@ WakeFrom(t, s) ==
     /\ IF BUGGY_DOUBLE_WAKE THEN TRUE ELSE ~WokenOf(t)
     /\ fired' = [fired EXCEPT ![t][s] = TRUE]
     /\ UNCHANGED <<pc, gflag, sflag, attached, dbg_live, detach_req,
-                   resume_req, release_req, wlock, confirmed>>
+                   resume_req, release_req, exitkill, wlock, confirmed>>
 
 Next ==
     \/ \E t \in Threads : TailStep(t)
@@ -417,6 +459,7 @@ Next ==
     \/ FaultStop
     \/ StartResume
     \/ DetachReq
+    \/ MarkExitkill
     \/ DbgDie
     \/ ReleaseSlot
     \/ SetGflag
@@ -495,6 +538,18 @@ EventuallyAllDead ==
 (* breaks it (the slot frees but the stop is never cleared / woken).          *)
 EventuallyResumed ==
     (attached /\ ~dbg_live) ~> (\A t \in Threads : pc[t] # "stopped")
+
+(* EventuallyLaunchedDies (liveness -- the I-39 EXITKILL refinement): a          *)
+(* debugger-LAUNCHED target (exitkill-marked) whose debugger DIES without an     *)
+(* explicit detach eventually DIES -- it does not survive its launcher. The      *)
+(* correct death-release (ReleaseSlot's exitkill branch -> gflag ->              *)
+(* proc_group_terminate) guarantees it: the death cascade drives every Thread    *)
+(* to the die-check. BUGGY_EXITKILL_IGNORED breaks it -- the launched target is  *)
+(* resumed instead, orphaned to init, and runs forever (the leak). This REFINES  *)
+(* NoStrand: for a launched target "not stranded" means dead, not resumed (and   *)
+(* EventuallyResumed still holds -- "dead" is not "stopped").                    *)
+EventuallyLaunchedDies ==
+    (exitkill /\ ~dbg_live /\ ~detach_req) ~> (\A t \in Threads : pc[t] = "dead")
 
 (* EventuallyStopSettles (liveness -- the multi-thread-stop COMPLETES): once a   *)
 (* stop is requested and owned, the target eventually SETTLES -- either every    *)

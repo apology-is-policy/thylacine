@@ -765,6 +765,75 @@ bt/print at a HW bp on a multi-M Go target; it loops 8199× without the fix) +
 
 ---
 
+## 5d. EXITKILL — die-with-launcher (the launched-target death-release)
+
+Designed 2026-07-23 (user-voted "Kernel EXITKILL on gfx-4, full treatment"). The
+I-39 NoStrand liveness (§3, §5c) resumes a target when its debugger detaches or
+dies — *provably never strands a stopped quarry*. That is correct for an
+**attached** target: it existed before the debugger, so on the debugger's death it
+should keep running. It is **wrong for a debugger-LAUNCHED target**: a program the
+debugger `exec`'d has no independent existence — it is the debugger's child — and
+on the debugger's death the Plan 9 resume orphans it to init, where it runs
+forever. This is the `PTRACE_O_EXITKILL` distinction: a tracer-launched tracee dies
+with its tracer; a tracer-attached one is released.
+
+**The concrete leak.** `/ambush-probe` stages C (`ambush exec /ambush-child`) and D
+(`dap-selftest`) launch a Go debuggee. Both stages issue the graceful `kill` on
+exit — stage C via the terminal's `handleExit` → `Detach(true)` → `ctlWrite("kill")`,
+stage D via `DisconnectRequestWithKillOption(true)` (both **stock Delve**, traced
+end-to-end). But when the debugger dies **without** completing that graceful kill —
+a blocked `cmd.Wait()` on a slow kill, the probe's own 18s-timeout `amb.kill()`, a
+crash — the ctl fd closes with the target still parked, and
+`devproc_debug_release_cb` `proc_debug_resume`s it: the child is resumed and
+orphaned (the HVF-idle ~6.6% debuggee leak). The userspace debugger *cannot* close
+this: the resume fires on the fd-close, i.e. on **any** debugger-death mode. Only
+the kernel — which owns the ctl-fd-close release — can guarantee die-with-launcher.
+
+**The mechanism.**
+
+1. **The mark.** A per-Proc `Proc.debug_exitkill` (a bool in a pad slot near
+   `debug_stop_req`; no struct growth) records "this target was launched by its
+   debugger — kill it if the debugger dies." Set once, cleared with the slot.
+2. **Setting it.** A new ctl verb, `exitkill`, sets `debug_exitkill = true`,
+   owner-gated exactly like `stop`/`start`/`step` (`target->debug_owner == c`, under
+   `g_proc_table_lock`). The debugger sends it right after attaching a child it
+   spawned (`native.Launch`: `attach` → `stop` → `exitkill`). An attached target is
+   never marked. Best-effort on the ambush side: a failed mark loses only the
+   death-safety-net (the graceful `kill` still fires) — it never fails the launch.
+3. **Honoring it.** `devproc_debug_release_cb` (the ctl-fd-close release, reached on
+   debugger death via `devproc_close` + the #68 last-thread-out handle close)
+   branches: an `exitkill`-marked **ALIVE** target is `proc_group_terminate`d
+   ("debugger exited") instead of `proc_debug_resume`d. The `#811` death cascade
+   wakes the debug-parked threads; each hits the EL0-return die-check (death wins
+   over the stop) and terminates; the last out becomes ZOMBIE and is reaped by init.
+   `proc_group_terminate` is safe under `g_proc_table_lock` (the `devproc_kill_walk_cb`
+   precedent: it takes only torpor / rendez / cs locks, all below it), and the ALIVE
+   guard mirrors the kill verb — a dying/ZOMBIE target falls to the (magic-guarded,
+   dying-safe) `proc_debug_resume`.
+4. **The explicit-detach carve-out.** Only the *implicit* death-release honors the
+   mark. The explicit `detach` verb clears `debug_exitkill` and resumes — a debugger
+   that types `detach` is deliberately choosing to leave the target running (it
+   would send `kill` to terminate instead). `attach` also clears it (a fresh slot
+   starts unmarked). Both the `exitkill` set and the release run under
+   `g_proc_table_lock`, so there is no set-vs-release race.
+
+**Invariants.** NO new §28 invariant — this refines I-39. `NoStrand`/`EventuallyResumed`
+is unchanged for an attached target (it still resumes). `StopImpliesOwned` is
+unaffected: the terminate clears `debug_stop_req` through the group-terminate death
+path, never leaving a stop set with no owner. `DeathWinsOverStop` is exactly the
+mechanism the terminate relies on. The new obligation is `EventuallyLaunchedDies`
+(§6): a launched (`exitkill`) target whose debugger dies without an explicit detach
+eventually dies. The buggy cfg `exitkill_ignored` (the pre-fix always-resume) is its
+executable counterexample.
+
+**Why not the ambush side.** The ambush debugger already kills on exit (both stages,
+stock Delve). Adding a second kill there is redundant, and no userspace change can
+cover the abrupt-death modes (the resume is the kernel's ctl-fd-close reaction).
+The correct fix is the kernel refinement; the ambush half is only the one-line
+`exitkill` mark so the kernel knows *which* targets are launched.
+
+---
+
 ## 6. `specs/debug_stop.tla` (spec-first, model-first)
 
 Written and TLC-green BEFORE the 8a-1 impl. Models the stop/continue/step state
@@ -784,6 +853,13 @@ machine and its composition with the death path. Target invariants:
 - **NoStrand** — the stop is bounded by the ctl-fd-owned slot: releasing the slot
   (explicit `detach` OR ctl-fd close OR debugger death via #68 close-at-exit)
   provably resumes the target (a liveness witness: `EventuallyResumed`).
+- **EventuallyLaunchedDies** (5d, the EXITKILL refinement) — a debugger-LAUNCHED
+  (`exitkill`-marked) target whose debugger dies without an explicit detach
+  eventually DIES (die-with-launcher): the release-cb `proc_group_terminate`s it
+  rather than resuming-and-orphaning it. The buggy cfg `exitkill_ignored` (the
+  pre-fix always-resume) is the counterexample. Refines NoStrand — for a launched
+  target "not stranded" means dead, not resumed (and `EventuallyResumed` still holds:
+  dead is not stopped).
 - **StopImpliesOwned** (8a-2 SA-1) — the per-Proc stop flag is set only while a
   debugger owns the slot; the EC-path fire (`proc_debug_fault_stop`) delivers
   under `g_proc_table_lock` gated on `debug_owner != NULL`.

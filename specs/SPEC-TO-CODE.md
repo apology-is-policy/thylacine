@@ -1695,11 +1695,14 @@ they read a stopped frame, off the race surface).
 
 | Config | Flag | Invariant / Property | Result | Distinct |
 |---|---|---|---|---|
-| `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` | clean | 2264 |
+| `debug_stop.cfg` | all knobs FALSE (2 Threads) | `Safety` + `EventuallyAllDead` + `EventuallyResumed` + `EventuallyLaunchedDies` + `EventuallyStopSettles` | clean | 5633 |
 | `debug_stop_buggy_park_before_die.cfg` | `BUGGY_STOP_BEFORE_DIE` | `EventuallyAllDead` | violation | 296 |
 | `debug_stop_buggy_lost_stop.cfg` | `BUGGY_OBSERVE_BEFORE_REGISTER` | `NoLostStop` | violation | -- |
 | `debug_stop_buggy_double_wake.cfg` | `BUGGY_DOUBLE_WAKE` | `ExactlyOnceResume` | violation | -- |
 | `debug_stop_buggy_strand_on_debugger_death.cfg` | `BUGGY_STRAND_ON_CLOSE` | `EventuallyResumed` | violation | 276 |
+| `debug_stop_buggy_fault_stop_ungated.cfg` | `BUGGY_FAULT_STOP_UNGATED` | `StopImpliesOwned` | violation | -- |
+| `debug_stop_buggy_stop_skips_sleeper.cfg` | `BUGGY_STOP_SKIPS_SLEEPER` | `EventuallyStopSettles` | violation | -- |
+| `debug_stop_buggy_exitkill_ignored.cfg` | `BUGGY_EXITKILL_IGNORED` | `EventuallyLaunchedDies` | violation | 714 |
 
 | Spec action | Code site (as-built, 8a-1b-beta) | Invariant pinned |
 |---|---|---|
@@ -1709,7 +1712,8 @@ they read a stopped frame, off the race surface).
 | `Confirm(t)` (the delivery walk marks t confirmed-parked under `~wlock[t]`) | `kernel/devproc.c::devproc_stopscan_cb` -- walk `p->threads` under `g_proc_table_lock`, read `rendez_blocked_on == &peer->debug_rendez` under each peer `wait_lock`, confirm when `parked && on_cpu==false`. Delivery: `kernel/proc.c::proc_debug_stop_deliver` sets the flag + `smp_resched_others()` (a broadcast reschedule IPI kicks an EL0-running peer to its `0x480` tail; targeted STOP_SGI is a v1.x optimization) | the confirm sees only a genuinely-parked Thread (mutual exclusion on `wait_lock` vs `RegisterObserve`). |
 | `WakeFrom(t, s)` (single-wake latch; sources start/release/death) | `kernel/proc.c::proc_debug_resume` walk (waking only `rendez_blocked_on == &peer->debug_rendez` peers) + the `proc_group_terminate` death cascade. The per-Thread `debug_rendez` is single-waiter, and `wakeup` re-validates `r->waiter` under `r->lock`; all resume paths are serialized under `g_proc_table_lock` | `ExactlyOnceResume`: one wakeup per park. `BUGGY_DOUBLE_WAKE` = no latch (a `start` racing a `detach`/close double-wakes). |
 | `ResumeThread(t)` (woken park -> re-run the tail) | `kernel/proc.c::el0_return_stop_check` loop -- a woken parked Thread re-checks `group_exit_msg` (death wins) then the stop flag; returns to the tail (-> eret) only when cleared | a resume never resumes a dead Thread; death wins on the re-run. |
-| `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume + detach) | `kernel/devproc.c`: the `detach` verb branch (`devproc_debug_walk_cb`) + the ctl-fd close hook (`devproc_close` -> `devproc_debug_release_cb`, incl. #68/#926 close-at-exit) clear `debug_owner` THEN call `proc_debug_resume` (clear the stop + wake all parked) | `EventuallyResumed` (NoStrand): the handle-lifetime-tied slot resumes the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes. |
+| `MarkExitkill` (the `exitkill` verb -> mark a launched target die-with-launcher; 5d) | `kernel/devproc.c`: the `exitkill` ctl verb (`devproc_debug_walk_cb` / `CTL_VERB_EXITKILL`) sets `target->debug_exitkill = true`, owner-gated (`target->debug_owner == c`, under `g_proc_table_lock`). Ambush: `pkg/proc/native/proc_thylacine.go::Launch` sends it after attach+stop; `Attach` does not | (the mark; the invariant it feeds is `EventuallyLaunchedDies` on `ReleaseSlot`). |
+| `ReleaseSlot` (detach / ctl-fd close / debugger death -> resume, OR terminate a launched target) | `kernel/devproc.c`: the `detach` verb branch (`devproc_debug_walk_cb`, which CLEARS `debug_exitkill` -> resume) + the ctl-fd close hook (`devproc_close` -> `devproc_debug_release_cb`, incl. #68/#926 close-at-exit) clear `debug_owner`; the close hook branches on `debug_exitkill`: an `exitkill`-marked ALIVE target is `proc_group_terminate`d (5d, the EXITKILL refinement -- the #811 cascade wakes the debug-parked threads to die at the die-check), else `proc_debug_resume` (clear the stop + wake all parked) | `EventuallyResumed` (NoStrand) for an attached target + `EventuallyLaunchedDies` for a launched one: the handle-lifetime-tied slot resumes-OR-terminates the target on release. `BUGGY_STRAND_ON_CLOSE` = the release neither clears the stop nor wakes; `BUGGY_EXITKILL_IGNORED` = a launched target is resumed (orphaned) instead of terminated. |
 | `SetGflag` / the death legs | `kernel/proc.c::proc_group_terminate` (the set-once `group_exit_msg`) + `el0_return_die_check` | death completes even against a live debugger holding a stop (the death cascade wakes debugger-parked Threads via `rendez_blocked_on`). |
 
 Pre-commit gate: `debug_stop.cfg` clean GREEN + the 4 buggy cfgs confirmed, on
