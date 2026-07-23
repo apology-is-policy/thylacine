@@ -41,9 +41,10 @@ The Dev's vtable follows the directory-Dev pattern from devproc (`30-dev-spoor.m
 /ctl/devices                      path = CTL_KIND_DEVICES       QTFILE
 /ctl/kernel-base                  path = CTL_KIND_KERNEL_BASE   QTFILE
 /ctl/sched                        path = CTL_KIND_SCHED         QTFILE
+/ctl/cpu                          path = CTL_KIND_CPU           QTFILE
 ```
 
-Single-level layout — no per-pid axis (unlike devproc). Subkind enum values 1..5 are leaf kinds; 0 is the root sentinel. New leaves get the next sequential subkind; reserved range up to 31 (single byte) before nested directories need richer encoding.
+Single-level layout — no per-pid axis (unlike devproc). Subkind enum values 1..6 are leaf kinds; 0 is the root sentinel. New leaves get the next sequential subkind; reserved range up to 31 (single byte) before nested directories need richer encoding.
 
 ### Namespace residence (#57a)
 
@@ -111,7 +112,36 @@ KASLR diagnostics. seed_source is one of `dtb-kaslr-seed` / `dtb-rng-seed` / `cn
 runnable: 1
 ```
 
-Calls `sched_runnable_count()`. Per-band breakdown via `sched_runnable_count_band(band)` is held to a future sub-chunk that adds the band-specific output.
+Calls `sched_runnable_count()`. Per-band breakdown via `sched_runnable_count_band(band)` is held to a future sub-chunk that adds the band-specific output. (`/ctl/sched` also renders `cpus:` + the global work-conservation `wc:` / `wc-tickless:` lines — see `format_sched`.)
+
+### `/ctl/cpu` (prowl-3b)
+
+One row per online CPU — the per-core meter denominator `prowl` reads:
+
+```
+cpus: 4
+cpu idle_ns capacity
+0 42441000000 1024
+1 38102773311 1024
+2 40917552108 1024
+3 39558210447 1024
+```
+
+`idle_ns` is the cumulative ns that CPU spent parked in the idle loop
+(`sched_cpu_idle_ns(cpu)`, charged in `sched_idle_park` next to the global
+`g_wc_idle_ns` — prowl-3a); `capacity` is the normalized capacity class
+(`sched_cpu_capacity`, `SCHED_CAPACITY_SCALE`=1024 on a uniform topology). The
+reader derives **per-core utilization** the htop way: `1 - d(idle_ns)/d(wall)`
+diffed across two polls (the kernel keeps no instantaneous-rate state). Bounded
+by `smp_cpu_count()` (`<= DTB_MAX_CPUS`=8 rows); the accessors self-guard an
+out-of-range index. **All-visible** like the other coarse `/ctl` leaves
+(visibility-not-authority) — unlike `/proc/<pid>/sched`'s OQ-4-gated *per-thread*
+internals. Reads no per-CPU lock: `idle_ns` is a coherent `__atomic` snapshot of
+its sole (per-CPU idle) writer, `capacity` is boot-static.
+
+The **on-CPU thread** per core (§3.4's `/dev/sysstat` "who is on each CPU") is a
+v1.x add — it needs a per-CPU current-thread pointer + cross-CPU `Thread*`
+validation (a UAF concern the meter deliberately sidesteps).
 
 ---
 
@@ -187,7 +217,8 @@ When `specs/9p_client.tla` lands at Phase 4+, devctl's `/ctl/9p/` subdirectory w
 | `/ctl/memory` (phys allocator stats) | Landed (P4-D) |
 | `/ctl/devices` (bestiary listing) | Landed (P4-D) |
 | `/ctl/kernel-base` (KASLR diagnostics) | Landed (P4-D) |
-| `/ctl/sched` (runnable count) | Landed (P4-D) |
+| `/ctl/sched` (runnable count + wc stats) | Landed (P4-D) |
+| `/ctl/cpu` (per-CPU idle_ns + capacity; prowl-3b) | Landed (prowl-3b) |
 | Walk dispatch + offset-aware read | Landed (P4-D) |
 | In-kernel tests | 11 covering registration + per-leaf reads + walk misses + write rejection |
 | Bestiary count | 7 (devnone + cons + null + zero + random + proc + ctl) |

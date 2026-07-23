@@ -62,11 +62,15 @@ void test_devproc_debug_regs(void);
 void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
+// prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
+void test_devproc_sched_gate_predicate(void);
+void test_devproc_read_sched_format(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 
@@ -575,6 +579,74 @@ void test_devproc_kill_authorized_predicate(void) {
     target->state = PROC_STATE_ZOMBIE;
     proc_free(caller);
     proc_free(target);
+}
+
+// prowl-3b: the OQ-4 deep-internals gate for /proc/<pid>/sched -- owner OR
+// CAP_HOSTOWNER, and STRICTLY NARROWER than the kill/debug gates (CAP_KILL,
+// CAP_DEBUG, CAP_DAC_OVERRIDE are deliberately NOT axes for scheduler telemetry).
+void test_devproc_sched_gate_predicate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+
+    // 1. Different principal, no caps -> denied.
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "non-owner with no caps cannot read the sched view");
+
+    // 2. Same principal (owner) -> allowed.
+    caller->principal_id = 0xA11CEu;
+    TEST_ASSERT(devproc_sched_authorized(caller, target),
+                "the owner (same principal) can read its own sched view");
+
+    // 3. Different principal + CAP_HOSTOWNER -> allowed (the operator).
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    TEST_ASSERT(devproc_sched_authorized(caller, target),
+                "CAP_HOSTOWNER authorizes the sched view");
+
+    // 4-6. NARROWER than kill/debug: CAP_KILL / CAP_DEBUG / CAP_DAC_OVERRIDE are
+    //      NOT sched-view axes (reading telemetry is neither kill nor debug nor
+    //      fs-admin -- keep the capability split orthogonal, I-22).
+    caller->caps = CAP_KILL;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "CAP_KILL is NOT a sched-view axis");
+    caller->caps = CAP_DEBUG;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "CAP_DEBUG is NOT a sched-view axis");
+    caller->caps = CAP_DAC_OVERRIDE;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "CAP_DAC_OVERRIDE is NOT a sched-view axis");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// prowl-3b: read /proc/0/sched (kproc reads its OWN sched view -> owner-gated
+// allow) and verify the per-thread block rendered -- the column header + the
+// proc name. The deny path is the predicate test above (the test runner runs as
+// kproc, so it cannot exercise a cross-principal denial here).
+void test_devproc_read_sched_format(void) {
+    struct Spoor *root   = devproc.attach("");
+    struct Spoor *piddir = walk_one(root, "0");
+    struct Spoor *sched  = walk_one(piddir, "sched");
+    spoor_unref(piddir);
+    spoor_unref(root);
+    TEST_ASSERT(sched != NULL, "walk to /proc/0/sched OK");
+    TEST_ASSERT(devproc.open(sched, 0) != NULL, "open sched");
+
+    char buf[2048];   // == DEVPROC_READ_BUF (devproc.c-private); a full sched read fits
+    long got = devproc.read(sched, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "sched read positive (owner-gated allow for kproc-self)");
+    TEST_ASSERT(contains(buf, (size_t)got, "name:"), "sched has the proc name");
+    TEST_ASSERT(contains(buf, (size_t)got, "tid band cpu"),
+                "sched has the per-thread column header");
+
+    spoor_clunk(sched);
 }
 
 // stat_native reports the target Proc as the per-pid object's owner, with the

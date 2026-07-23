@@ -21,6 +21,7 @@ void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
+void test_devctl_read_cpu_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
 
@@ -89,7 +90,7 @@ void test_devctl_attach_returns_dir(void) {
 
 void test_devctl_walk_to_each_leaf(void) {
     static const char *leaf_names[] = {
-        "procs", "memory", "devices", "kernel-base", "sched",
+        "procs", "memory", "devices", "kernel-base", "sched", "cpu",
     };
     for (size_t i = 0; i < sizeof(leaf_names) / sizeof(leaf_names[0]); i++) {
         struct Spoor *root = devctl.attach("");
@@ -123,6 +124,22 @@ void test_devctl_read_procs_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "PID"),     "header has PID column");
     TEST_ASSERT(contains(buf, (size_t)got, "STATE"),   "header has STATE");
     TEST_ASSERT(contains(buf, (size_t)got, "ALIVE"),   "kproc shows ALIVE");
+
+    spoor_clunk(c);
+}
+
+// prowl-3b: /ctl/cpu -- the per-CPU meter denominator (cpus + per-CPU idle_ns +
+// capacity). All-visible like the other coarse /ctl leaves.
+void test_devctl_read_cpu_format(void) {
+    struct Spoor *c = open_ctl_leaf("cpu");
+    TEST_ASSERT(c != NULL, "open /ctl/cpu");
+
+    char buf[512];
+    long got = devctl.read(c, buf, 512, 0);
+    TEST_ASSERT(got > 0, "cpu read positive");
+    TEST_ASSERT(contains(buf, (size_t)got, "cpus:"),    "has the cpus: count");
+    TEST_ASSERT(contains(buf, (size_t)got, "idle_ns"),  "has the idle_ns column");
+    TEST_ASSERT(contains(buf, (size_t)got, "capacity"), "has the capacity column");
 
     spoor_clunk(c);
 }

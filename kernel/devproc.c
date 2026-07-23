@@ -40,6 +40,7 @@
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>  // prowl-3b: SCHED_BAND_* -- /proc/<pid>/sched band names
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/territory.h>
@@ -78,6 +79,7 @@ enum {
     PQS_WAIT     = 9,        // /proc/<pid>/wait             (QTFILE; 8a-1b-gamma-3, I-39; RO, blocks until stopped)
     PQS_KREGS    = 10,       // /proc/<pid>/kregs            (QTFILE; 8a-1b-gamma-3, I-39; RO, kernel-side frame)
     PQS_KSTACK   = 11,       // /proc/<pid>/kstack           (QTFILE; 8a-1b-gamma-3, I-39; RO, symbolized kernel bt)
+    PQS_SCHED    = 12,       // /proc/<pid>/sched            (QTFILE; prowl-3b; RO, OQ-4 owner-or-CAP_HOSTOWNER)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -114,6 +116,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "wait",    PQS_WAIT    },
     { "kregs",   PQS_KREGS   },
     { "kstack",  PQS_KSTACK  },
+    { "sched",   PQS_SCHED   },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -263,6 +266,81 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
         n = fmt_str(buf, cap, off, "exit:    ");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, p->exit_status); if (!n && p->exit_status != 0) return 0; off += n;
         n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+    }
+    return off;
+}
+
+// prowl-3b: /proc/<pid>/sched -- the per-thread scheduler-introspection block
+// (band / cpu / run_ns / nsched / parks / migrations / state). The OQ-4
+// deep-internals view: the summary (%cpu / state / mem) stays all-visible via
+// /ctl/procs + /proc/<pid>/status, but this per-thread internal detail is gated
+// at the READ site to owner-or-CAP_HOSTOWNER (devproc_sched_authorized).
+// PRECONDITION: called under g_proc_table_lock (via devproc_read_cb) -- the
+// p->threads walk + the per-thread reads are stable only under that lock
+// (thread_free holds it; the #95 walk-safety proc_cpu_ns relies on the same).
+static const char *sched_band_name(u32 band) {
+    switch (band) {
+    case SCHED_BAND_INTERACTIVE: return "INTR";
+    case SCHED_BAND_NORMAL:      return "NORM";
+    case SCHED_BAND_IDLE:        return "IDLE";
+    default:                     return "?";
+    }
+}
+static const char *thread_state_short(enum thread_state s) {
+    switch (s) {
+    case THREAD_RUNNING:  return "RUN";
+    case THREAD_RUNNABLE: return "RDY";
+    case THREAD_SLEEPING: return "SLP";
+    case THREAD_EXITING:  return "EXIT";
+    default:              return "?";
+    }
+}
+static size_t format_sched(struct Proc *p, char *buf, size_t cap) {
+    size_t off = 0, n;
+
+    n = fmt_str(buf, cap, off, "name:    "); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, p->name[0] ? p->name : "?"); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\npid:     "); if (!n) return 0; off += n;
+    n = fmt_sdec(buf, cap, off, p->pid); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\nthreads: "); if (!n) return 0; off += n;
+    n = fmt_sdec(buf, cap, off,
+                 __atomic_load_n(&p->thread_count, __ATOMIC_ACQUIRE)); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off,
+                "\ntid band cpu run_ns nsched parks nmig state\n"); if (!n) return 0; off += n;
+
+    // Per-thread rows, space-separated (the reader splits on whitespace). Bounded:
+    // a row is written into a scratch offset `row` and only committed (off = row)
+    // once the whole row + newline fit -- so a heavily-threaded Proc's tail is
+    // cleanly truncated (like format_procs), never a partial row and never past
+    // cap. Counters are RELAXED __atomic loads (the cross-Proc reader of the
+    // switch-chokepoint writer -- the run_ns pattern).
+    for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
+        size_t row = off;
+        u64 nsched = __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
+        n = fmt_sdec(buf, cap, row, t->tid); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, sched_band_name(t->band)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        // cpu: "-" until dispatched (last_cpu is meaningful only once nsched > 0).
+        if (nsched == 0) n = fmt_str(buf, cap, row, "-");
+        else n = fmt_udec(buf, cap, row,
+                          (unsigned long)__atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED));
+        if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_udec(buf, cap, row,
+                     (unsigned long)__atomic_load_n(&t->run_ns, __ATOMIC_RELAXED)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_udec(buf, cap, row, (unsigned long)nsched); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_udec(buf, cap, row,
+                     (unsigned long)__atomic_load_n(&t->nsleeps, __ATOMIC_RELAXED)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_udec(buf, cap, row,
+                     (unsigned long)__atomic_load_n(&t->nmigrations, __ATOMIC_RELAXED)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, thread_state_short(t->state)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, "\n"); if (!n) break; row += n;
+        off = row;   // commit the complete row
     }
     return off;
 }
@@ -474,6 +552,7 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_WAIT:    return 0400u;   // 8a-1b-gamma-3: RO notification (I-39-gated at the read site)
     case PQS_KREGS:   return 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
     case PQS_KSTACK:  return 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
+    case PQS_SCHED:   return 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:      return 0444u;
@@ -583,13 +662,16 @@ static void devproc_close(struct Spoor *c) {
 // buffer, then copies the requested [off, off+n) slice.
 //
 // Buffer cap. status fits in <128 B; cmdline is smaller. #66 made ns render the
-// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS=12). 512 B
-// holds the common short-name boot layout; a single deep mountpoint/source name
-// (each up to SYS_OPEN_PATH_MAX=1024) can exceed it, so the list truncates --
-// cleanly, at a whole-line boundary (territory_format_ns audit F2), best-effort
-// per I-33. Stack-safe. (Completeness for deep namespaces is a v1.x offset-aware
-// multi-read.)
-#define DEVPROC_READ_BUF 512
+// full mount list ("mount <pt> <src>\n" per entry, up to PGRP_MAX_MOUNTS=12).
+// prowl-3b bumped 512 -> 2048: /proc/<pid>/sched formats one row per thread of a
+// possibly heavily-threaded Proc (a Go binary / stratumd), each ~40-50 B; 512
+// truncated at ~8 threads. 2048 holds ~30 thread rows (the format bounds the
+// walk cleanly on overflow either way). A deep-namespace ns render (each name up
+// to SYS_OPEN_PATH_MAX=1024) can still exceed it, truncating at a whole-line
+// boundary (territory_format_ns audit F2), best-effort per I-33. A 2 KiB frame
+// on the 16 KiB kstack is safe on the shallow Dev-read path (the DEVCTL_READ_BUF
+// precedent). (Completeness for deep namespaces is a v1.x offset-aware multi-read.)
+#define DEVPROC_READ_BUF 2048
 
 // #57a F2: format under g_proc_table_lock (the kill-path shape) so the target
 // Proc cannot be unlinked + freed between the lookup and the field deref
@@ -606,13 +688,24 @@ static void devproc_close(struct Spoor *c) {
 // The pre-#66 lockless `binds: N` read was sound only because it was a single
 // aligned-int copy; a mount-list pointer walk a concurrent unmount could free
 // genuinely needs the lock. No sleep / no allocation runs under either lock.
+// prowl-3b: forward-declared so devproc_read_cb (below) can apply the OQ-4 gate;
+// the definition sits with the other authority predicates (after
+// devproc_kill_authorized). Non-static -- the test suite exercises it.
+bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+
 struct devproc_read_ctx {
-    int     pid;
-    u32     kind;
-    char   *buf;
-    size_t  cap;
-    size_t  total;
-    bool    found;
+    int                 pid;
+    u32                 kind;
+    char               *buf;
+    size_t              cap;
+    size_t              total;
+    bool                found;
+    // prowl-3b (OQ-4): the reading Proc (captured before proc_for_each) + the
+    // gate verdict for a gated kind. `caller` is read-only identity/caps; the
+    // target is `p` found under the lock, so the gate resolves both under the
+    // lock and sets `denied` for the read() to translate to -1.
+    const struct Proc  *caller;
+    bool                denied;
 };
 static int devproc_read_cb(struct Proc *p, void *arg) {
     struct devproc_read_ctx *r = (struct devproc_read_ctx *)arg;
@@ -623,6 +716,10 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
+    case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
+        if (!devproc_sched_authorized(r->caller, p)) { r->denied = true; break; }
+        r->total = format_sched(p, r->buf, r->cap);
+        break;
     default:          break;                  // kind pre-validated by the caller
     }
     return 1;                                 // matched -> stop
@@ -667,15 +764,21 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // formats the readable file kinds.
     if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) return -1;
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
-        kind != PQS_CTL) return -1;
+        kind != PQS_CTL && kind != PQS_SCHED) return -1;
+
+    // prowl-3b (OQ-4): capture the reading Proc BEFORE the lock so the gated
+    // PQS_SCHED kind can be authorized against the target found inside the walk.
+    struct Thread *self = current_thread();
+    struct Proc   *caller = self ? self->proc : NULL;
 
     char content[DEVPROC_READ_BUF];
     struct devproc_read_ctx r = {
         .pid = pid, .kind = kind, .buf = content, .cap = sizeof(content),
-        .total = 0, .found = false,
+        .total = 0, .found = false, .caller = caller, .denied = false,
     };
     proc_for_each(devproc_read_cb, &r);
     if (!r.found) return -1;                  // process gone since walk
+    if (r.denied) return -1;                  // OQ-4: not owner, no CAP_HOSTOWNER
 
     size_t total = r.total;
     if ((size_t)off >= total) return 0;       // EOF
@@ -715,6 +818,27 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
     // of caller->caps since A-4a; a plain load is C11-racy (CAP_KILL is clearance-grantable).
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_KILL))
         return true;   // admin OR kill-anyone
+    return false;
+}
+
+// prowl-3b (PROWL-DESIGN.md OQ-4): the deep-internals visibility gate for
+// /proc/<pid>/sched (the per-thread scheduler view). Owner-or-CAP_HOSTOWNER --
+// the operator's-or-owner's view: the SUMMARY (name / %cpu / state / mem) stays
+// all-visible via /ctl/procs + /proc/<pid>/status (the Plan 9 all-pids posture),
+// but a process's deep per-thread scheduler internals are the owner's own or the
+// host owner's. STRICTLY NARROWER than the kill / debug gates: CAP_KILL and
+// CAP_DEBUG are deliberately NOT axes (reading scheduler telemetry is neither
+// killing nor debugging -- keep the capability split orthogonal, I-22); no
+// identity bypasses. Composes I-1 (a confined user sees full detail only on its
+// own Procs) + the /ctl visibility-not-authority posture; NO new §28 invariant.
+// Non-static: the kernel test suite exercises the predicate.
+bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
+    if (!caller || !target)                            return false;
+    if (caller->principal_id == target->principal_id)  return true;   // owner
+    // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
+    // of caller->caps; CAP_HOSTOWNER is clearance-grantable, so a plain load is racy.
+    if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER)
+        return true;                                                   // host owner
     return false;
 }
 

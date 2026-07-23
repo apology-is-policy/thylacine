@@ -47,6 +47,7 @@ enum {
     CTL_KIND_DEVICES    = 3,
     CTL_KIND_KERNEL_BASE = 4,
     CTL_KIND_SCHED      = 5,
+    CTL_KIND_CPU        = 6,
 };
 
 #define CTL_QID_ROOT_PATH  0ULL
@@ -333,6 +334,36 @@ static size_t format_sched(char *buf, size_t cap) {
     return off;
 }
 
+// prowl-3b (PROWL-DESIGN.md section 3.4): per-CPU stats -- one row per online CPU
+// with cumulative idle-park ns (the meter denominator: utilization = 1 -
+// d(idle_ns)/d(wall) diffed across polls) and the normalized capacity class. All-
+// visible like /ctl/sched (coarse per-CPU utilization, visibility-not-authority --
+// unlike /proc/<pid>/sched's OQ-4-gated per-thread internals). One-shot,
+// bounded by smp_cpu_count() (<= DTB_MAX_CPUS = 8 rows); the accessors self-guard
+// an out-of-range index. Reads no per-CPU lock: sched_cpu_idle_ns is a coherent
+// __atomic snapshot of the sole (per-CPU idle) writer, capacity is boot-static.
+static size_t format_cpu(char *buf, size_t cap) {
+    size_t off = 0;
+    size_t n;
+
+    n = fmt_str(buf, cap, off, "cpus: "); if (!n) return 0; off += n;
+    unsigned ncpus = smp_cpu_count();
+    n = fmt_udec(buf, cap, off, (unsigned long)ncpus); off += n;
+    n = fmt_str(buf, cap, off, "\ncpu idle_ns capacity\n"); if (!n) return 0; off += n;
+
+    for (unsigned i = 0; i < ncpus; i++) {
+        size_t row = off;
+        n = fmt_udec(buf, cap, row, (unsigned long)i); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_idle_ns(i)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_capacity(i)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, "\n"); if (!n) break; row += n;
+        off = row;
+    }
+    return off;
+}
+
 // =============================================================================
 // Per-leaf table.
 // =============================================================================
@@ -349,6 +380,7 @@ static const struct ctl_leaf g_ctl_leaves[] = {
     { "devices",     CTL_KIND_DEVICES,     format_devices     },
     { "kernel-base", CTL_KIND_KERNEL_BASE, format_kernel_base },
     { "sched",       CTL_KIND_SCHED,       format_sched       },
+    { "cpu",         CTL_KIND_CPU,         format_cpu         },
 };
 
 #define CTL_LEAF_COUNT  (sizeof(g_ctl_leaves) / sizeof(g_ctl_leaves[0]))

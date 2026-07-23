@@ -1,8 +1,9 @@
 # PROWL-DESIGN.md — the scheduler-aware process monitor + the kernel telemetry it reads
 
 Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (the substrate) +
-prowl-2 (the tool MVP) + prowl-3a (the scheduler-counter accounting) LANDED.**
-Building telemetry-first (prowl-1..5, §6).
+prowl-2 (the tool MVP) + prowl-3a (scheduler-counter accounting) + prowl-3b (the
+`/proc/<pid>/sched` + `/ctl/cpu` FS surfaces) LANDED.** Building telemetry-first
+(prowl-1..5, §6).
 Landed per the CLAUDE.md design-conversation pattern (research → doc → surface
 forks → signoff → bind ARCH → build). The tool is `prowl`; the kernel telemetry
 it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
@@ -279,9 +280,12 @@ nothing on the kernel's behalf (the kernel gates the reads).
     (the `/ctl/cpu` meter denominator, read via `sched_cpu_idle_ns`). READ-ONLY
     telemetry (no decision reads them); `scheduler.prowl_counters` + the SMP gate.
     As-built: `docs/reference/15-scheduler.md` (§ per-thread scheduler counters).
-  - **prowl-3b (the FS surfaces):** `/proc/<pid>/sched` (the per-thread block, an
-    **owner-or-`CAP_HOSTOWNER`** deep-internals gate per OQ-4) + the `/ctl/cpu`
-    per-CPU leaf.
+  - **prowl-3b (the FS surfaces): LANDED.** `/proc/<pid>/sched` (`devproc.c`
+    `format_sched` — the per-thread block, gated **owner-or-`CAP_HOSTOWNER`** at
+    the read site per OQ-4, `devproc_sched_authorized`) + the `/ctl/cpu` per-CPU
+    leaf (`devctl.c` `format_cpu` — idle_ns + capacity, all-visible). Tests
+    `devproc.{sched_gate_predicate,read_sched_format}` + `devctl.read_cpu_format`.
+    As-built: `docs/reference/32-devproc.md` + `33-devctl.md`.
   - **prowl-3c (the tool):** the detail pane (a selected process's
     `/proc/<pid>/sched`) + per-CPU meter bars (from `/ctl/cpu`) + the band/parks
     columns in the process list.

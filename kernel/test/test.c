@@ -495,6 +495,8 @@ void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
+void test_devproc_sched_gate_predicate(void);       // prowl-3b: OQ-4 sched-view gate
+void test_devproc_read_sched_format(void);          // prowl-3b: /proc/<pid>/sched read
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_debug_authorized_predicate(void);
@@ -555,6 +557,7 @@ void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
+void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
 void test_devdev_bestiary_smoke(void);
@@ -1833,6 +1836,8 @@ struct test_case g_tests[] = {
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
     { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
     { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
+    { "devproc.sched_gate_predicate",  test_devproc_sched_gate_predicate,  false, NULL },
+    { "devproc.read_sched_format",     test_devproc_read_sched_format,     false, NULL },
     { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
@@ -1902,6 +1907,7 @@ struct test_case g_tests[] = {
                                        test_devctl_read_kernel_base_format, false, NULL },
     { "devctl.kernel_base_gated",      test_devctl_kernel_base_gated,      false, NULL },
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
+    { "devctl.read_cpu_format",        test_devctl_read_cpu_format,        false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
     { "devdev.bestiary_smoke",         test_devdev_bestiary_smoke,         false, NULL },
