@@ -398,7 +398,17 @@ touches a trust boundary is the §3.3 apply-authority gate.
      leg + `devsrv.srv_peer_renderer_flag`; focused-audit close 0 P0 /
      1 P1 / 0 P2 / 3 P3, NOT dirty — see `memory/audit_cfg3_closed_list.md`).
   4. **Runtime chords** (§3.5) + the niceties (gaps etc.) — additive, each
-     a small component read of a pushed value.
+     a small component read of a pushed value. CHUNK cfg-4 — BUILT +
+     AUDITED (the runtime chord table in `chords.rs` [defaults byte-
+     identical to the old match; the swallow-set independent of the table
+     so a live rebind never leaks a half key-pair] + the gated
+     `chord`/`chord-reset`/`gaps` verbs [default-deny by the cfg-3 gate,
+     no gate-line change] + the config parse/round-trip + aurora's
+     startup push; `ls-gfx-chords.exp` [env-gated THYLACINE_AURORA_CFG4=1,
+     6 legs: gaps + unbind + rebind + toggle] + the battery gate leg;
+     focused-audit close 0 P0 / 0 P1 / 1 P2 / 6 P3, NOT dirty — see
+     `memory/audit_cfg4_closed_list.md`). **THE AURORA-CONFIG ARC (Track
+     B) IS COMPLETE.**
 
 ## 6. Seams + coordinate-with-main
 
