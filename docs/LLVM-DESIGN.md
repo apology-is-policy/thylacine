@@ -370,7 +370,7 @@ no bolted-on chasing).
 | # | Scope | Gate / deliverable | Audit posture | Cut line |
 |---|---|---|---|---|
 | **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc — **LANDED, §16** | none (read-only) | — |
-| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024-pouch-fs-process-wires.patch` + `open(O_CREAT)`; §16.9). CL-1b = posix_spawn/wait4 (audit-bearing); CL-1c = make. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
+| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). CL-1b = posix_spawn/wait4/dup2/pipe2 (audit-bearing); CL-1c = make. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite | a C++ prover (EH + RTTI + threads + TLS-dtors + filesystem) green on-device | focused round on the runtime/boundary seams | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired | host cross-builds via the real triple, byte-compatible artifacts | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade` | **`clang++ -O2` compiles, links (lld), and runs a real C++ program on-device** | focused round (the Support patches + the bake) | — |
@@ -615,6 +615,21 @@ CL-0 predictions refined by ground truth: `dup2`/`dup3` (need dup-onto-N,
 not `SYS_DUP`) and `pipe2` (need a 2-register `svc` shim) are NOT clean 1:1
 wires -> deferred to CL-1b (their real home is the spawn fd-list).
 
+### 16.10 CL-1b-0 as-built (the environ populate)
+
+`0025-pouch-env.patch`: a crt boundary line (`src/env/_pouch_env.c` +
+`__libc_start_main` hook) that populates `__environ` from the `/env` device
+at startup, closing the 16.2 finding (envp is always empty; `/env` is the
+sole environment channel). It `readdir`s `/env`, opens+reads each value, and
+builds a malloc'd `"NAME=value"` vector so `getenv()` + `environ` iteration
+both work; fail-soft (a missing `/env` leaves the empty envp). Proven
+in-guest by `/pouch-hello-env` (joey sets two vars, the child inherits a
+copy via the rfork clone, reads both back + confirms an absent var is NULL).
+Full as-built: `docs/reference/78-pouch.md` "The environ populate". The
+`posix_spawn` `envp` argument stays inherited-via-`/env` (the
+`SYS_SPAWN_FULL_ARGV` `_pad_envp` slot reserves the kernel-side per-child
+override); `setenv` mutates only the in-process copy.
+
 ## 17. Revision history
 
 | Date | Change |
@@ -623,3 +638,4 @@ wires -> deferred to CL-1b (their real home is the spawn fd-list).
 | 2026-07-23 | SIGNED OFF — all §14 leans adopted verbatim; JIT invariant renumbered I-41 → I-42 (I-41 reserved by ADVANCED-GO AG-2 between draft and signoff); moved to the main tree for the scripture commit. |
 | 2026-07-23 | **CL-0 landed** (§16): syscall-gap census closed (zero new kernel syscalls for CL-1..CL-4; `renameat`+`getdents64` per-compile load-bearing), environ CLOSED (envp always empty), lld-in-multicall VERIFIED, Mesa OSMesa-removal correction (§16.6), F4 validated by measurement (worst TU 2.46 GiB). Instruments: disposable GCP ARM VM (torn down) + the fork clone @ 22.1.8. |
 | 2026-07-23 | **CL-1a landed** (§16.9): the pouch FS/process wires (`0024`, 20 files) -- getpid/chdir/getcwd/mkdir/open(O_CREAT)/rename/unlink/readdir/ftruncate/fchmod/access, each onto an existing kernel syscall (ZERO new kernel surface); the `__pouch_open_parent` path-split helper; openat's O_CREAT arm + relative-path lift. Proven in-guest by `/pouch-hello-fs` (ALL WIRES PASS, boot OK, 0 EXTINCTION). dup2/dup3/pipe2 deferred to CL-1b (not clean 1:1). Surfaced + enqueued an ftruncate shrink-after-sparse-extend EIO below the wire (Stratum `stm_fs_truncate`; `memory/bug_ftruncate_shrink_after_extend.md`). |
+| 2026-07-23 | **CL-1b-0 landed** (§16.10): the pouch-env crt boundary line (`0025`, `_pouch_env.c` + `__libc_start_main` hook) -- populate `__environ` from the `/env` device at startup so `getenv()`/`environ` work (kernel writes envp[0]=NULL). Fail-soft. Proven in-guest by `/pouch-hello-env` (PGENV1/PGENVNUM inherited via the rfork clone; boot OK, 0 EXTINCTION, suite 1196/1196). Pure userspace (kernel byte-unchanged). NEXT = CL-1b core (posix_spawn/wait4/dup2/pipe2). |

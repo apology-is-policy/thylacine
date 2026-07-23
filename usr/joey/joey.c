@@ -2649,6 +2649,46 @@ int main(void) {
         }
     }
 
+    // === /pouch-hello-env orchestration (Clade CL-1b-0: the pouch-env crt
+    // boundary line, patch 0025) ===
+    // Proves a POUCH process reads its environment through getenv()/environ,
+    // populated by __pouch_env_init from the /env device (envp[0] is NULL for
+    // every pouch program). joey sets PGENV1 + PGENVNUM on its OWN /env; the
+    // child inherits a COPY via env_clone_into (Plan 9 copy-on-rfork) and the
+    // crt reads them into __environ before main. joey UNSETs them after the
+    // spawn so they do not leak into the login session. Pre-pivot: /env is
+    // mounted in the boot namespace; a getenv miss surfaces as a FAIL.
+    {
+        long edir = t_open(T_WALK_OPEN_FROM_ROOT, "/env", 4, T_OPATH);
+        int env_set_ok = 0;
+        if (edir >= 0) {
+            long v1 = t_walk_create(edir, "PGENV1", 6, T_OWRITE, 0644);
+            if (v1 >= 0) {
+                if (t_write(v1, "clade-cl1b", 10) == 10) env_set_ok |= 1;
+                (void)t_close(v1);
+            }
+            long v2 = t_walk_create(edir, "PGENVNUM", 8, T_OWRITE, 0644);
+            if (v2 >= 0) {
+                if (t_write(v2, "1729", 4) == 4) env_set_ok |= 2;
+                (void)t_close(v2);
+            }
+        }
+        static const char phe_name[] = "pouch-hello-env";
+        int pe_rc = pouch_smoke_one(phe_name, sizeof(phe_name) - 1,
+                                    "ENV OK", 6);
+        // Unset AFTER the spawn -- the child's env was deep-copied at rfork.
+        if (edir >= 0) {
+            (void)t_unlink(edir, "PGENV1", 6, 0);
+            (void)t_unlink(edir, "PGENVNUM", 8, 0);
+            (void)t_close(edir);
+        }
+        if (env_set_ok != 3 || pe_rc != 0) {
+            t_putstr("joey: /pouch-hello-env FAILED (CL-1b-0 pouch-env regression)\n");
+            return 1;
+        }
+        t_putstr("joey: /pouch-hello-env PASS; CL-1b-0 pouch-env verified\n");
+    }
+
     // === /go-goroutines orchestration (GOOS=thylacine Go-port, Stage 2) ===
     // The Stage-2 proof: GOMAXPROCS(4) workers ping-pong channels, join via a
     // sync.WaitGroup, churn allocations, and a concurrent goroutine hammers

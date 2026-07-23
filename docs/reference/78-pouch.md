@@ -1633,3 +1633,44 @@ chdir-ENOSYS sentinel was repurposed (chdir is now wired) exactly as the
 - **`O_CREAT|O_TRUNC` on an existing file** (the OTRUNC-in-EEXIST-fallback)
   is not prover-exercised — low risk (a documented kernel omode; clang
   writes via mkstemp+rename, not O_TRUNC-overwrite).
+
+## The environ populate — `0025-pouch-env.patch` (Clade CL-1b-0)
+
+The kernel writes `envp[0] = NULL` for every program (`exec.h`: "no envp at
+v1.0"), so `environ` is empty in a pouch process. Thylacine's environment
+lives instead in the per-Proc `/env` device (the Plan 9 Egrp idiom — a
+variable is the file `/env/NAME`, inherited by children via the kernel clone
+`env_clone_into`). CL-0's census (LLVM-DESIGN.md §16.2) confirmed the crt
+boundary line is required: clang/lld read `PATH`/`TMPDIR`/etc. through
+`getenv`, and a spawned `cc1`/`lld` inherits its parent's `/env`.
+
+`0025` adds a crt hook — `__pouch_env_init` (`src/env/_pouch_env.c`), called
+from `__libc_start_main` immediately after `__init_libc` (malloc + TLS up)
+and before the ctors (so a constructor's `getenv` sees a populated environ).
+It `opendir("/env")`, `readdir`s the names (the CL-1a `readdir` wire →
+`SYS_READDIR`), `open`+reads each value, composes `"NAME=value"` into a
+malloc'd vector, and points `__environ` at it. Both `getenv()` and direct
+`environ` iteration then work.
+
+**Fail-soft**: a missing/empty `/env` (`opendir` fails, or no entries) leaves
+`__environ` as the kernel's empty envp — today's behaviour, never a crash. An
+OOM mid-build finalizes the vector with whatever was assembled (a partial
+environ is valid). Bounds: ≤ 512 vars, name < 256 B, value ≤ 8 KiB.
+
+Proven in-guest by `/pouch-hello-env`: joey sets `PGENV1` + `PGENVNUM` on its
+own `/env`, spawns the prover (which inherits a deep-copy via the rfork
+clone), which `getenv`s both, confirms an absent var is `NULL`, and iterates
+`environ` to find both — then joey unsets them so they do not leak into the
+login session (the go-env pattern). Boot-fatal on regression.
+
+### Known caveats (CL-1b-0)
+
+- **`setenv` writes only the in-process copy** — a change is not written back
+  to `/env`, so a child spawned after a `setenv` does not inherit it. `/env`
+  stays the source of truth; the write-back is a v1.x nicety.
+- **`posix_spawn`'s `envp` argument is not honored** — a spawned child
+  inherits the parent's `/env` (via the kernel clone), not the `envp` passed
+  to `posix_spawn`. The `SYS_SPAWN_FULL_ARGV` `_pad_envp` slot reserves the
+  kernel-side lift; until then a per-child env override is unavailable (see
+  the process wires, below). For the toolchain this is benign (the driver
+  passes `environ` unchanged to `cc1`/`lld`).
