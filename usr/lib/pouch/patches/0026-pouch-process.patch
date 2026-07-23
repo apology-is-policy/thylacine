@@ -1,0 +1,870 @@
+pouch boundary-line patch 0026 - CL-1b process lifecycle (posix_spawn/wait).
+
+The Clade arc (docs/LLVM-DESIGN.md) sub-chunk CL-1b core: the process
+substrate the toolchain drives -- the clang driver posix_spawns cc1/lld and
+wait4s them; make/ninja fork-per-job over pipes. CL-0's census (16.1) found
+the whole family (clone/execve/wait4/pipe2/dup3) is 0xFFFF ENOSYS. Each wires
+onto an EXISTING kernel syscall -- ZERO new kernel surface.
+
+Thylacine has NO fork/execve (a Proc cannot clone-and-replace its image);
+SYS_SPAWN_FULL_ARGV(49) is the atomic spawn primitive, installing an explicit
+positional fd_list (fd_list[i] -> child fd i, contiguous, lowest-free). So the
+upstream posix_spawn (clone(CLONE_VM|CLONE_VFORK) -> run file_actions ->
+execve) cannot apply: posix_spawn is rewritten to resolve its file_actions
+STATICALLY into that fd_list (the dominant open/dup2-onto-0/1/2/close pattern
+resolves to {0,1,2}), then call SYS_SPAWN_FULL_ARGV.
+
+Wired (Linux name -> Thylacine kernel primitive):
+  posix_spawn      -> SYS_SPAWN_FULL_ARGV (49)  [static file_actions resolve]
+  posix_spawnp     -> PATH search (via /env) + posix_spawn
+  waitpid / wait4  -> SYS_WAIT_PID (22)  [flag + status-word translation]
+  pipe / pipe2     -> SYS_PIPE (8)       [2-register svc shim; rd=x0 wr=x1]
+
+Two translations are load-bearing:
+  * WAIT flags: kernel WAIT_CONTINUED is 4, Linux musl WCONTINUED is 8, and
+    the kernel rejects unknown bits -- so the option word is mapped bit-by-bit.
+  * WAIT status: a plain wait returns the RAW exit_status (0/1); musl's W*
+    macros decode the Linux word, so it is repacked (raw & 0xff) << 8 ->
+    WIFEXITED true, WEXITSTATUS == raw. A job-control wait already returns the
+    Linux-packed word and is forwarded verbatim.
+
+envp is inherited via the /env clone (the passed posix_spawn envp is a v1.x
+lift the SYS_SPAWN_FULL_ARGV _pad_envp slot reserves). dup2/dup3 onto a chosen
+target fd have NO kernel primitive (handle_dup is lowest-free only) and NO
+runtime toolchain path needs one (posix_spawn resolves file_actions
+statically) -- the onto-target case is a documented ENOSYS seam; old==new is a
+validity check.
+
+Files:
+  src/internal/_pouch_process.h   NEW -- SYS_thyla_* numbers + the 96-byte
+                                  sys_spawn_args mirror + shared decls.
+  src/process/_pouch_process.c    NEW -- __pouch_pipe (2-reg svc shim) +
+                                  __pouch_wait (flag + status translation).
+  src/process/posix_spawn.c       rewrite -- static file_actions resolver.
+  src/process/posix_spawnp.c      rewrite -- PATH search + posix_spawn.
+  src/process/waitpid.c           -> __pouch_wait.
+  src/linux/wait4.c               -> __pouch_wait (rusage zero-filled).
+  src/unistd/dup2.c               old==new validate; onto-target ENOSYS.
+  src/unistd/dup3.c               old==new EINVAL; onto-target ENOSYS.
+  src/unistd/pipe.c               -> __pouch_pipe.
+  src/unistd/pipe2.c              -> __pouch_pipe; O_CLOEXEC no-op.
+
+diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
+diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
+diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
+diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
+diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
+diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
+--- a/src/internal/_pouch_process.h	1970-01-01 01:00:00
++++ b/src/internal/_pouch_process.h	2026-07-23 20:05:01
+@@ -0,0 +1,74 @@
++/* pouch boundary-line: process-lifecycle substrate (Clade CL-1b). Shared by
++ * posix_spawn / posix_spawnp / waitpid / wait4 / pipe / pipe2 / dup2 / dup3.
++ *
++ * The includer MUST pull "syscall.h" (-> features.h -> `hidden`) BEFORE this
++ * header; the SYS_thyla_* numbers below are the local-define idiom (0019/0024
++ * precedent -- aarch64 LP64 has no legacy syscall aliases to repoint, so
++ * naming them here avoids churning bits/syscall.h.in). Each is an EXISTING,
++ * already-audited Thylacine kernel syscall; CL-1b adds ZERO new kernel
++ * surface -- there is no fork/execve on Thylacine, so posix_spawn resolves
++ * its file_actions STATICALLY into the positional spawn fd_list.
++ */
++#ifndef POUCH_PROCESS_H
++#define POUCH_PROCESS_H
++
++/* Thylacine kernel syscall numbers (kernel/include/thylacine/syscall.h). */
++#define SYS_thyla_spawn_full_argv 49  /* struct sys_spawn_args* -> pid / -1   */
++#define SYS_thyla_wait_pid        22  /* (want_pid, flags, status_va) -> pid  */
++#define SYS_thyla_pipe             8  /* () -> rd in x0, wr in x1             */
++#define SYS_thyla_dup             12  /* (oldfd, new_rights) -> newfd (lowest)*/
++#define SYS_thyla_close           11  /* (fd) -> 0 / -1                       */
++
++/* Kernel spawn bounds (SYS_SPAWN_* in syscall.h). */
++#define POUCH_SPAWN_NAME_MAX      256u
++#define POUCH_SPAWN_MAX_FDS        16u
++#define POUCH_SPAWN_ARGV_MAX      512u
++#define POUCH_SPAWN_ARGV_DATA_MAX 65536u
++
++/* Kernel WAIT_* flag values (proc.h). NOTE: WAIT_CONTINUED is 4, but Linux
++ * musl's WCONTINUED is 8 -- the wait shim translates, it does not pass raw. */
++#define POUCH_WAIT_WNOHANG   1u
++#define POUCH_WAIT_UNTRACED  2u
++#define POUCH_WAIT_CONTINUED 4u
++
++/* Handle rights (handle.h) for posix_spawn's std-fd existence probe. There is
++ * no rights-independent fd-existence check (a 0-rights dup is rejected by
++ * valid_alloc_args, and the source's own rights -- needed as a subset -- are
++ * unknown), but a std fd is a byte-I/O Spoor with READ and/or WRITE, so
++ * probing with each detects existence. */
++#define POUCH_RIGHT_READ  1u
++#define POUCH_RIGHT_WRITE 2u
++
++/* struct sys_spawn_args -- the SYS_SPAWN_FULL_ARGV wire type. Mirrors the
++ * kernel layout EXACTLY (96 bytes; the _Static_assert below guards drift).
++ * posix_spawn fills name/argv/fd_list, cap_mask = ~0 (inherit all, the kernel
++ * intersects with the parent), and zero-fills the rest (identity/allowance
++ * inherit; perm_flags = 0). */
++struct pouch_spawn_args {
++	unsigned long long name_va;        /* 0  */
++	unsigned long long argv_data_va;   /* 8  */
++	unsigned long long fd_list_va;     /* 16 */
++	unsigned int name_len;             /* 24 */
++	unsigned int argv_data_len;        /* 28 */
++	unsigned int argc;                 /* 32 */
++	unsigned int fd_count;             /* 36 */
++	unsigned int perm_flags;           /* 40 */
++	unsigned int _pad_envp;            /* 44 -- must be 0 (reserved envp_len) */
++	unsigned long long cap_mask;       /* 48 */
++	unsigned int principal_id;         /* 56 */
++	unsigned int primary_gid;          /* 60 */
++	unsigned long long supp_gids_va;   /* 64 */
++	unsigned int supp_gid_count;       /* 72 */
++	unsigned int identity_flags;       /* 76 */
++	unsigned long long allowance_va;   /* 80 */
++	unsigned int allowance_flags;      /* 88 */
++	unsigned int _pad_allow;           /* 92 -- must be 0 */
++};
++_Static_assert(sizeof(struct pouch_spawn_args) == 96,
++	"struct pouch_spawn_args must match the kernel sys_spawn_args ABI");
++
++/* Shared helpers (_pouch_process.c). */
++hidden int __pouch_pipe(int fd[2]);
++hidden int __pouch_wait(int pid, int *status, int options);
++
++#endif /* POUCH_PROCESS_H */
+diff --color -ruN a/src/linux/wait4.c b/src/linux/wait4.c
+--- a/src/linux/wait4.c	2026-07-23 19:35:43
++++ b/src/linux/wait4.c	2026-07-23 19:41:29
+@@ -2,38 +2,15 @@
+ #include <sys/wait.h>
+ #include <sys/resource.h>
+ #include <string.h>
+-#include <errno.h>
+ #include "syscall.h"
++#include "_pouch_process.h"
+ 
++/* pouch: wait4 over SYS_WAIT_PID. Thylacine provides no per-child resource
++ * accounting, so rusage is zero-filled on a successful reap. wait3 (-> this)
++ * and wait/waitpid inherit the translation. */
+ pid_t wait4(pid_t pid, int *status, int options, struct rusage *ru)
+ {
+-	int r;
+-#ifdef SYS_wait4_time64
+-	if (ru) {
+-		long long kru64[18];
+-		r = __syscall(SYS_wait4_time64, pid, status, options, kru64);
+-		if (r > 0) {
+-			ru->ru_utime = (struct timeval)
+-				{ .tv_sec = kru64[0], .tv_usec = kru64[1] };
+-			ru->ru_stime = (struct timeval)
+-				{ .tv_sec = kru64[2], .tv_usec = kru64[3] };
+-			char *slots = (char *)&ru->ru_maxrss;
+-			for (int i=0; i<14; i++)
+-				*(long *)(slots + i*sizeof(long)) = kru64[4+i];
+-		}
+-		if (SYS_wait4_time64 == SYS_wait4 || r != -ENOSYS)
+-			return __syscall_ret(r);
+-	}
+-#endif
+-	char *dest = ru ? (char *)&ru->ru_maxrss - 4*sizeof(long) : 0;
+-	r = __sys_wait4(pid, status, options, dest);
+-	if (r>0 && ru && sizeof(time_t) > sizeof(long)) {
+-		long kru[4];
+-		memcpy(kru, dest, 4*sizeof(long));
+-		ru->ru_utime = (struct timeval)
+-			{ .tv_sec = kru[0], .tv_usec = kru[1] };
+-		ru->ru_stime = (struct timeval)
+-			{ .tv_sec = kru[2], .tv_usec = kru[3] };
+-	}
+-	return __syscall_ret(r);
++	pid_t r = __pouch_wait(pid, status, options);
++	if (r > 0 && ru) memset(ru, 0, sizeof *ru);
++	return r;
+ }
+diff --color -ruN a/src/process/_pouch_process.c b/src/process/_pouch_process.c
+--- a/src/process/_pouch_process.c	1970-01-01 01:00:00
++++ b/src/process/_pouch_process.c	2026-07-23 19:36:33
+@@ -0,0 +1,73 @@
++/* pouch boundary-line: shared process-lifecycle helpers (Clade CL-1b). See
++ * _pouch_process.h. */
++#include <errno.h>
++#include <sys/wait.h>
++#include "syscall.h"
++#include "_pouch_process.h"
++
++/* __pouch_pipe -- SYS_PIPE returns two fds (read in x0, write in x1), which
++ * musl's __syscall (single x0 result) cannot capture, so this is a bespoke
++ * 2-register svc shim (the native t_pipe shape). On failure the kernel puts
++ * -1 in x0 and leaves x1 unmodified. */
++hidden int __pouch_pipe(int fd[2])
++{
++	register long x8 __asm__("x8") = SYS_thyla_pipe;
++	register long x0 __asm__("x0");
++	register long x1 __asm__("x1");
++	__asm__ __volatile__ ("svc 0"
++		: "=r"(x0), "=r"(x1)
++		: "r"(x8)
++		: "memory");
++	if (x0 < 0) {
++		/* The kernel returns a flat -1 (per-Proc fd/table exhaustion or
++		 * OOM); EMFILE is the closest POSIX errno for pipe(2). */
++		errno = EMFILE;
++		return -1;
++	}
++	fd[0] = (int)x0;
++	fd[1] = (int)x1;
++	return 0;
++}
++
++/* __pouch_wait -- waitpid/wait4 over SYS_WAIT_PID. Two translations are
++ * load-bearing:
++ *
++ *  (1) FLAGS. The kernel WAIT_* values differ from Linux musl's: WCONTINUED
++ *      is 8 (musl) vs 4 (kernel), and the kernel REJECTS unknown flag bits
++ *      with -1. So the option word is mapped bit-by-bit, and any bit outside
++ *      the three POSIX options is dropped.
++ *
++ *  (2) STATUS. For a plain wait (no job-control flag) the kernel writes the
++ *      RAW exit_status (0 = ok, 1 = any error -- v1.0 collapses non-zero to
++ *      1). musl's W* macros decode the Linux status word, so this repacks it
++ *      as WAIT_STATUS_EXITED: (raw & 0xff) << 8 -> WIFEXITED is true and
++ *      WEXITSTATUS == raw. When a job-control flag was passed the kernel
++ *      already returns the Linux-layout packed word (exited/stopped/
++ *      continued), so it is forwarded verbatim.
++ *
++ * Returns the reaped pid (>0), 0 for WNOHANG-with-no-ready-child, or -1 with
++ * errno = ECHILD (the kernel returns a flat -1; ECHILD is the POSIX errno for
++ * "no matching child", the reachable case here). */
++hidden int __pouch_wait(int pid, int *status, int options)
++{
++	unsigned long tf = 0;
++	if (options & WNOHANG)    tf |= POUCH_WAIT_WNOHANG;
++	if (options & WUNTRACED)  tf |= POUCH_WAIT_UNTRACED;
++	if (options & WCONTINUED) tf |= POUCH_WAIT_CONTINUED;
++
++	int raw = 0;
++	long r = __syscall3(SYS_thyla_wait_pid, pid, (long)tf, (long)&raw);
++	if (r < 0) {
++		errno = ECHILD;
++		return -1;
++	}
++	if (r == 0) return 0;   /* WNOHANG: no reapable child; *status untouched */
++
++	if (status) {
++		if (tf & (POUCH_WAIT_UNTRACED | POUCH_WAIT_CONTINUED))
++			*status = raw;                 /* already Linux-packed */
++		else
++			*status = (raw & 0xff) << 8;   /* pack raw exit code as "exited" */
++	}
++	return (int)r;
++}
+diff --color -ruN a/src/process/posix_spawn.c b/src/process/posix_spawn.c
+--- a/src/process/posix_spawn.c	2026-07-23 19:35:43
++++ b/src/process/posix_spawn.c	2026-07-23 20:30:04
+@@ -1,219 +1,210 @@
++/* pouch boundary-line: posix_spawn over SYS_SPAWN_FULL_ARGV (Clade CL-1b).
++ *
++ * Thylacine has no fork/execve -- a Proc cannot clone-and-replace its image;
++ * SYS_SPAWN_FULL_ARGV is the atomic spawn primitive. So the upstream
++ * posix_spawn (clone(CLONE_VM|CLONE_VFORK) into a child that runs the
++ * file_actions then execve's) cannot apply here. Instead the file_actions are
++ * resolved STATICALLY -- interpreted against a model of the child's fd table
++ * -- into the positional fd_list the kernel installs (fd_list[i] -> child fd
++ * i, contiguous, lowest-free). The dominant toolchain pattern (open/dup2 a
++ * redirect onto fd 0/1/2, close a temp) resolves to {0,1,2}.
++ *
++ * envp is inherited via the kernel /env clone (env_clone_into), NOT the passed
++ * envp -- the SYS_SPAWN_FULL_ARGV _pad_envp slot reserves the per-child
++ * override. attr (SETSID/SETPGROUP/RESETIDS/SETSIG*) has no post-spawn child
++ * hook and is ignored: a fresh Thylacine child inherits the parent's
++ * session/pgroup/identity and starts with default note dispositions, so the
++ * toolchain's (unset) attr is satisfied by construction.
++ */
+ #define _GNU_SOURCE
+ #include <spawn.h>
+-#include <sched.h>
+ #include <unistd.h>
+-#include <signal.h>
+ #include <fcntl.h>
+ #include <errno.h>
+-#include <sys/wait.h>
++#include <string.h>
++#include <stdlib.h>
++#include <stdint.h>
+ #include "syscall.h"
+-#include "lock.h"
+-#include "pthread_impl.h"
+ #include "fdop.h"
++/* fdop.h remaps malloc/free/calloc/realloc to the internal allocators (for
++ * the allocating file_actions builders). This rewrite runs entirely in the
++ * parent (no vfork child), so the plain allocators are correct here. */
++#undef malloc
++#undef free
++#undef calloc
++#undef realloc
++#include "_pouch_process.h"
+ 
+-struct args {
+-	int p[2];
+-	sigset_t oldmask;
+-	const char *path;
+-	const posix_spawn_file_actions_t *fa;
+-	const posix_spawnattr_t *restrict attr;
+-	char *const *argv, *const *envp;
+-};
++/* The largest child-fd slot a file_action may target. A file_action that
++ * targets a higher slot (very unusual) fails EBADF rather than silently
++ * dropping. The dup2 SOURCE may be any parent fd; sources >= this are used
++ * as raw parent fds (never rewritten by a file_action, which target < this). */
++#define PSPAWN_MAXSLOT 64
+ 
+-static int __sys_dup2(int old, int new)
++/* Probe whether std fd `fd` currently exists in the parent. A std fd is a
++ * byte-I/O Spoor with READ and/or WRITE; there is no rights-independent
++ * existence check, so try a lowest-free dup with each right, then close the
++ * probe. Returns 1 if `fd` is a live handle, 0 otherwise. */
++static int pspawn_fd_exists(int fd)
+ {
+-#ifdef SYS_dup2
+-	return __syscall(SYS_dup2, old, new);
+-#else
+-	return __syscall(SYS_dup3, old, new, 0);
+-#endif
++	long t = __syscall2(SYS_thyla_dup, fd, POUCH_RIGHT_WRITE);
++	if (t < 0) t = __syscall2(SYS_thyla_dup, fd, POUCH_RIGHT_READ);
++	if (t < 0) return 0;
++	__syscall1(SYS_thyla_close, t);
++	return 1;
+ }
+ 
+-static int child(void *args_vp)
++int posix_spawn(pid_t *restrict res, const char *restrict path,
++	const posix_spawn_file_actions_t *fa,
++	const posix_spawnattr_t *restrict attr,
++	char *const argv[restrict], char *const envp[restrict])
+ {
+-	int i, ret;
+-	struct sigaction sa = {0};
+-	struct args *args = args_vp;
+-	int p = args->p[1];
+-	const posix_spawn_file_actions_t *fa = args->fa;
+-	const posix_spawnattr_t *restrict attr = args->attr;
+-	sigset_t hset;
++	(void)attr;    /* no post-spawn child hook; see the file header */
++	(void)envp;    /* inherited via /env; the passed envp is a v1.x lift  */
+ 
+-	close(args->p[0]);
++	if (!path || !path[0]) return EINVAL;
++	size_t name_len = strlen(path);
++	if (name_len > POUCH_SPAWN_NAME_MAX) return ENAMETOOLONG;
+ 
+-	/* All signal dispositions must be either SIG_DFL or SIG_IGN
+-	 * before signals are unblocked. Otherwise a signal handler
+-	 * from the parent might get run in the child while sharing
+-	 * memory, with unpredictable and dangerous results. To
+-	 * reduce overhead, sigaction has tracked for us which signals
+-	 * potentially have a signal handler. */
+-	__get_handler_set(&hset);
+-	for (i=1; i<_NSIG; i++) {
+-		if ((attr->__flags & POSIX_SPAWN_SETSIGDEF)
+-		     && sigismember(&attr->__def, i)) {
+-			sa.sa_handler = SIG_DFL;
+-		} else if (sigismember(&hset, i)) {
+-			if (i-32<3U) {
+-				sa.sa_handler = SIG_IGN;
+-			} else {
+-				__libc_sigaction(i, 0, &sa);
+-				if (sa.sa_handler==SIG_IGN) continue;
+-				sa.sa_handler = SIG_DFL;
+-			}
+-		} else {
+-			continue;
+-		}
+-		__libc_sigaction(i, &sa, 0);
+-	}
++	/* --- child fd model: slot i -> the parent fd that backs it, or -1.
++	 * Seed 0/1/2 = inherit the parent's standard streams THAT EXIST (POSIX: an
++	 * fd with no file_action is inherited). Thylacine does NOT auto-inherit
++	 * higher fds -- a well-behaved posix_spawn caller CLOEXECs its internal
++	 * fds and explicitly dup2's the ones the child needs -- so seeding only
++	 * {0,1,2} matches that (higher fds are never inherited, as CLOEXEC would
++	 * do on Linux). Probing existence keeps a parent that lacks a std stream
++	 * (e.g. no stderr) from listing a non-existent fd that would fail the
++	 * spawn. --- */
++	int child_fd[PSPAWN_MAXSLOT];
++	for (int i = 0; i < PSPAWN_MAXSLOT; i++) child_fd[i] = -1;
++	for (int i = 0; i < 3; i++)
++		if (pspawn_fd_exists(i)) child_fd[i] = i;
+ 
+-	if (attr->__flags & POSIX_SPAWN_SETSID)
+-		if ((ret=__syscall(SYS_setsid)) < 0)
+-			goto fail;
++	int opened[PSPAWN_MAXSLOT];   /* parent fds WE opened (close after spawn) */
++	int nopened = 0;
++	char *argv_buf = 0;
++	int ec = 0;
+ 
+-	if (attr->__flags & POSIX_SPAWN_SETPGROUP)
+-		if ((ret=__syscall(SYS_setpgid, 0, attr->__pgrp)))
+-			goto fail;
+-
+-	/* Use syscalls directly because the library functions attempt
+-	 * to do a multi-threaded synchronized id-change, which would
+-	 * trash the parent's state. */
+-	if (attr->__flags & POSIX_SPAWN_RESETIDS)
+-		if ((ret=__syscall(SYS_setgid, __syscall(SYS_getgid))) ||
+-		    (ret=__syscall(SYS_setuid, __syscall(SYS_getuid))) )
+-			goto fail;
+-
+ 	if (fa && fa->__actions) {
+ 		struct fdop *op;
+-		int fd;
+-		for (op = fa->__actions; op->next; op = op->next);
+-		for (; op; op = op->prev) {
+-			/* It's possible that a file operation would clobber
+-			 * the pipe fd used for synchronizing with the
+-			 * parent. To avoid that, we dup the pipe onto
+-			 * an unoccupied fd. */
+-			if (op->fd == p) {
+-				ret = __syscall(SYS_dup, p);
+-				if (ret < 0) goto fail;
+-				__syscall(SYS_close, p);
+-				p = ret;
+-			}
+-			switch(op->cmd) {
++		for (op = fa->__actions; op->next; op = op->next);  /* to the tail */
++		for (; op; op = op->prev) {                          /* oldest-first */
++			int dst = op->fd;
++			switch (op->cmd) {
+ 			case FDOP_CLOSE:
+-				__syscall(SYS_close, op->fd);
++				if (dst >= 0 && dst < PSPAWN_MAXSLOT) child_fd[dst] = -1;
+ 				break;
+-			case FDOP_DUP2:
+-				fd = op->srcfd;
+-				if (fd == p) {
+-					ret = -EBADF;
+-					goto fail;
+-				}
+-				if (fd != op->fd) {
+-					if ((ret=__sys_dup2(fd, op->fd))<0)
+-						goto fail;
+-				} else {
+-					ret = __syscall(SYS_fcntl, fd, F_GETFD);
+-					ret = __syscall(SYS_fcntl, fd, F_SETFD,
+-					                ret & ~FD_CLOEXEC);
+-					if (ret<0)
+-						goto fail;
+-				}
++			case FDOP_DUP2: {
++				if (dst < 0 || dst >= PSPAWN_MAXSLOT) { ec = EBADF; goto done; }
++				int src = op->srcfd;
++				/* The source is a CHILD fd; resolve it to the parent fd it
++				 * currently maps to. A source not in the model is a raw
++				 * parent fd (Linux would have inherited it). */
++				int srcpf = (src >= 0 && src < PSPAWN_MAXSLOT
++				             && child_fd[src] >= 0) ? child_fd[src] : src;
++				if (srcpf < 0) { ec = EBADF; goto done; }
++				child_fd[dst] = srcpf;
+ 				break;
+-			case FDOP_OPEN:
+-				fd = __sys_open(op->path, op->oflag, op->mode);
+-				if ((ret=fd) < 0) goto fail;
+-				if (fd != op->fd) {
+-					if ((ret=__sys_dup2(fd, op->fd))<0)
+-						goto fail;
+-					__syscall(SYS_close, fd);
+-				}
++			}
++			case FDOP_OPEN: {
++				if (dst < 0 || dst >= PSPAWN_MAXSLOT) { ec = EBADF; goto done; }
++				/* Bound opened[] against a crafted file_actions list: many
++				 * opens can target the same (bounded) slot, so nopened is
++				 * NOT bounded by the slot count -- guard the stack array. */
++				if (nopened >= PSPAWN_MAXSLOT) { ec = EMFILE; goto done; }
++				int pf = open(op->path, op->oflag, op->mode);
++				if (pf < 0) { ec = errno; goto done; }
++				opened[nopened++] = pf;
++				child_fd[dst] = pf;
+ 				break;
++			}
+ 			case FDOP_CHDIR:
+-				ret = __syscall(SYS_chdir, op->path);
+-				if (ret<0) goto fail;
+-				break;
+ 			case FDOP_FCHDIR:
+-				ret = __syscall(SYS_fchdir, op->fd);
+-				if (ret<0) goto fail;
+-				break;
++				/* No post-spawn child hook: the child inherits the parent's
++				 * cwd via the Territory clone. addchdir/addfchdir unsupported
++				 * at v1.0 (fail loud, never silently spawn in the wrong dir). */
++				ec = ENOSYS; goto done;
++			default:
++				ec = EINVAL; goto done;
+ 			}
+ 		}
+ 	}
+ 
+-	/* Close-on-exec flag may have been lost if we moved the pipe
+-	 * to a different fd. We don't use F_DUPFD_CLOEXEC above because
+-	 * it would fail on older kernels and atomicity is not needed --
+-	 * in this process there are no threads or signal handlers. */
+-	__syscall(SYS_fcntl, p, F_SETFD, FD_CLOEXEC);
++	/* --- validate contiguity + build the positional fd_list. The kernel
++	 * installs fd_list[i] at the lowest free slot = child fd i, so the child
++	 * fds must be a contiguous 0..N-1 with no hole. --- */
++	int maxslot = -1;
++	for (int i = 0; i < PSPAWN_MAXSLOT; i++) if (child_fd[i] >= 0) maxslot = i;
++	for (int i = 0; i <= maxslot; i++)
++		if (child_fd[i] < 0) { ec = EINVAL; goto done; }   /* a hole */
++	unsigned int fd_count = (unsigned int)(maxslot + 1);
++	if (fd_count > POUCH_SPAWN_MAX_FDS) { ec = EMFILE; goto done; }
++	unsigned int fd_list[POUCH_SPAWN_MAX_FDS];
++	for (unsigned int i = 0; i < fd_count; i++)
++		fd_list[i] = (unsigned int)child_fd[i];
+ 
+-	pthread_sigmask(SIG_SETMASK, (attr->__flags & POSIX_SPAWN_SETSIGMASK)
+-		? &attr->__mask : &args->oldmask, 0);
+-
+-	int (*exec)(const char *, char *const *, char *const *) =
+-		attr->__fn ? (int (*)())attr->__fn : execve;
+-
+-	exec(args->path, args->argv, args->envp);
+-	ret = -errno;
+-
+-fail:
+-	/* Since sizeof errno < PIPE_BUF, the write is atomic. */
+-	ret = -ret;
+-	if (ret) {
+-		int r;
+-		do r = __syscall(SYS_write, p, &ret, sizeof ret);
+-		while (r<0 && r!=-EPIPE);
++	/* --- NUL-packed argv buffer (argv[0..argc-1]); argc = the NUL count.
++	 * The kernel resolves `path` (name_va) via the namespace and delivers
++	 * this argv to the child. POSIX requires argv[0]; default to `path`. --- */
++	unsigned int argc = 0;
++	size_t argv_len = 0;
++	if (argv) {
++		for (; argv[argc]; argc++) {
++			if (argc + 1 > POUCH_SPAWN_ARGV_MAX) { ec = E2BIG; goto done; }
++			argv_len += strlen(argv[argc]) + 1;
++			if (argv_len > POUCH_SPAWN_ARGV_DATA_MAX) { ec = E2BIG; goto done; }
++		}
+ 	}
+-	_exit(127);
+-}
++	if (argc == 0) { argv_len = name_len + 1; argc = 1; }  /* synth argv[0] */
+ 
+-
+-int posix_spawn(pid_t *restrict res, const char *restrict path,
+-	const posix_spawn_file_actions_t *fa,
+-	const posix_spawnattr_t *restrict attr,
+-	char *const argv[restrict], char *const envp[restrict])
+-{
+-	pid_t pid;
+-	char stack[1024+PATH_MAX];
+-	int ec=0, cs;
+-	struct args args;
+-
+-	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+-
+-	args.path = path;
+-	args.fa = fa;
+-	args.attr = attr ? attr : &(const posix_spawnattr_t){0};
+-	args.argv = argv;
+-	args.envp = envp;
+-	pthread_sigmask(SIG_BLOCK, SIGALL_SET, &args.oldmask);
+-
+-	/* The lock guards both against seeing a SIGABRT disposition change
+-	 * by abort and against leaking the pipe fd to fork-without-exec. */
+-	LOCK(__abort_lock);
+-
+-	if (pipe2(args.p, O_CLOEXEC)) {
+-		UNLOCK(__abort_lock);
+-		ec = errno;
+-		goto fail;
++	argv_buf = malloc(argv_len);
++	if (!argv_buf) { ec = ENOMEM; goto done; }
++	{
++		size_t off = 0;
++		if (argv && argv[0]) {
++			for (unsigned int i = 0; i < argc; i++) {
++				size_t l = strlen(argv[i]);
++				/* Defensive bound: if argv[i] grew between the size pass and
++				 * here (a POSIX-UB concurrent mutation), fail rather than
++				 * overflow the malloc'd buffer. */
++				if (off + l + 1 > argv_len) { ec = E2BIG; goto done; }
++				memcpy(argv_buf + off, argv[i], l);
++				argv_buf[off + l] = 0;
++				off += l + 1;
++			}
++		} else {
++			memcpy(argv_buf, path, name_len);
++			argv_buf[name_len] = 0;
++		}
+ 	}
+ 
+-	pid = __clone(child, stack+sizeof stack,
+-		CLONE_VM|CLONE_VFORK|SIGCHLD, &args);
+-	close(args.p[1]);
+-	UNLOCK(__abort_lock);
++	/* --- the spawn. cap_mask = ~0 -> inherit all caps (the kernel intersects
++	 * with the parent's, stripping elevation-only per I-2). All other fields
++	 * zero: perm_flags 0, identity/allowance inherit. --- */
++	struct pouch_spawn_args sa;
++	memset(&sa, 0, sizeof sa);
++	sa.name_va       = (unsigned long long)(uintptr_t)path;
++	sa.argv_data_va  = (unsigned long long)(uintptr_t)argv_buf;
++	sa.fd_list_va    = fd_count ? (unsigned long long)(uintptr_t)fd_list : 0;
++	sa.name_len      = (unsigned int)name_len;
++	sa.argv_data_len = (unsigned int)argv_len;
++	sa.argc          = argc;
++	sa.fd_count      = fd_count;
++	sa.cap_mask      = ~0ULL;
+ 
+-	if (pid > 0) {
+-		if (read(args.p[0], &ec, sizeof ec) != sizeof ec) ec = 0;
+-		else waitpid(pid, &(int){0}, 0);
++	long r = __syscall1(SYS_thyla_spawn_full_argv, (long)(uintptr_t)&sa);
++	if (r < 0) {
++		/* Kernel flat -1: name not resolvable / bad ELF / OOM / a listed fd
++		 * not KOBJ_SPOOR. ENOENT is the dominant + clearest posix_spawn
++		 * failure (binary not found); the exact cause is collapsed at v1.0. */
++		ec = ENOENT;
+ 	} else {
+-		ec = -pid;
++		if (res) *res = (pid_t)r;
++		ec = 0;
+ 	}
+ 
+-	close(args.p[0]);
+-
+-	if (!ec && res) *res = pid;
+-
+-fail:
+-	pthread_sigmask(SIG_SETMASK, &args.oldmask, 0);
+-	pthread_setcancelstate(cs, 0);
+-
++done:
++	free(argv_buf);
++	for (int i = 0; i < nopened; i++) close(opened[i]);
+ 	return ec;
+ }
+diff --color -ruN a/src/process/posix_spawnp.c b/src/process/posix_spawnp.c
+--- a/src/process/posix_spawnp.c	2026-07-23 19:35:43
++++ b/src/process/posix_spawnp.c	2026-07-23 19:42:44
+@@ -1,13 +1,51 @@
++/* pouch boundary-line: posix_spawnp -- PATH search then posix_spawn (Clade
++ * CL-1b). Upstream sets attr.__fn to the in-child PATH-searching exec, but
++ * the CL-1b posix_spawn has no child hook (it resolves file_actions
++ * statically), so the search is done here in the parent: a name with '/' is
++ * used verbatim; a bare name is looked up in $PATH (now populated from /env
++ * by the pouch-env crt) via access(X_OK), and the first hit is spawned. */
+ #include <spawn.h>
+ #include <unistd.h>
++#include <string.h>
++#include <errno.h>
++#include <stdlib.h>
+ 
++/* Local path bound (avoids a limits.h dependency; the kernel SYS_OPEN_PATH_MAX is 1024). */
++#define PSPAWNP_PATH_MAX 4096
++
+ int posix_spawnp(pid_t *restrict res, const char *restrict file,
+ 	const posix_spawn_file_actions_t *fa,
+ 	const posix_spawnattr_t *restrict attr,
+ 	char *const argv[restrict], char *const envp[restrict])
+ {
+-	posix_spawnattr_t spawnp_attr = { 0 };
+-	if (attr) spawnp_attr = *attr;
+-	spawnp_attr.__fn = (void *)__execvpe;	
+-	return posix_spawn(res, file, fa, &spawnp_attr, argv, envp);
++	if (!file || !file[0]) return EINVAL;
++	if (strchr(file, '/'))
++		return posix_spawn(res, file, fa, attr, argv, envp);
++
++	const char *path = getenv("PATH");
++	if (!path || !*path) path = "/bin:/usr/bin";
++	size_t flen = strlen(file);
++	char buf[PSPAWNP_PATH_MAX];
++	int seen_eacces = 0;
++
++	for (const char *p = path; ; ) {
++		const char *colon = strchr(p, ':');
++		size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
++		if (dlen == 0) {                       /* empty element = cwd */
++			if (flen + 1 > sizeof buf) goto next;
++			memcpy(buf, file, flen + 1);
++		} else {
++			if (dlen + 1 + flen + 1 > sizeof buf) goto next;
++			memcpy(buf, p, dlen);
++			buf[dlen] = '/';
++			memcpy(buf + dlen + 1, file, flen + 1);
++		}
++		if (access(buf, X_OK) == 0)
++			return posix_spawn(res, buf, fa, attr, argv, envp);
++		if (errno == EACCES) seen_eacces = 1;
++	next:
++		if (!colon) break;
++		p = colon + 1;
++	}
++	return seen_eacces ? EACCES : ENOENT;
+ }
+diff --color -ruN a/src/process/waitpid.c b/src/process/waitpid.c
+--- a/src/process/waitpid.c	2026-07-23 19:35:43
++++ b/src/process/waitpid.c	2026-07-23 19:41:29
+@@ -1,7 +1,12 @@
+ #include <sys/wait.h>
+ #include "syscall.h"
++#include "_pouch_process.h"
+ 
++/* pouch: SYS_WAIT_PID with the flag + status translation (see
++ * __pouch_wait). Not a cancellation point at v1.0 (a blocked wait is
++ * #811-death-interruptible in the kernel, which covers the load-bearing
++ * case; pthread_cancel of a waitpid is a v1.x nicety). */
+ pid_t waitpid(pid_t pid, int *status, int options)
+ {
+-	return sys_wait4_cp(pid, status, options, 0);
++	return __pouch_wait(pid, status, options);
+ }
+diff --color -ruN a/src/unistd/dup2.c b/src/unistd/dup2.c
+--- a/src/unistd/dup2.c	2026-07-23 19:35:42
++++ b/src/unistd/dup2.c	2026-07-23 20:30:26
+@@ -1,20 +1,32 @@
+ #include <unistd.h>
+ #include <errno.h>
+-#include <fcntl.h>
+ #include "syscall.h"
++#include "_pouch_process.h"
+ 
++/* pouch: dup2. handle_dup is lowest-free-fd only -- there is no kernel
++ * dup-onto-a-chosen-target primitive -- so an old!=new dup2 (which is DEFINED
++ * by onto-target semantics) cannot be expressed. The toolchain's spawn path
++ * does NOT need it -- posix_spawn resolves its file_actions (open/dup2/close)
++ * STATICALLY into the positional spawn fd_list, never issuing a runtime dup2,
++ * and popen/system route through that resolver. But a few libc functions DO
++ * call dup2/dup3 onto a target at runtime and are left non-functional here:
++ * freopen(filename, ...) (reopen a stream onto a fixed fd), login_tty, daemon,
++ * and wordexp. Each fails LOUD (-1 + ENOSYS). The durable fix is a kernel
++ * dup-onto-target primitive (a new syscall = an ABI addition, escalate when a
++ * real workload needs it); until then this is a documented seam.
++ *
++ * old==new returns new best-effort: Thylacine has no rights-independent
++ * fd-existence probe (a 0-rights dup is rejected by valid_alloc_args, and the
++ * source's own rights -- required as a subset for handle_dup -- are unknown),
++ * so old is NOT validated beyond old>=0. This serves the common dup2(fd,fd)
++ * clear-CLOEXEC idiom on a valid fd; a validity-check dup2 on an INVALID fd
++ * wrongly succeeds (documented, not a toolchain path). */
+ int dup2(int old, int new)
+ {
+-	int r;
+-#ifdef SYS_dup2
+-	while ((r=__syscall(SYS_dup2, old, new))==-EBUSY);
+-#else
+-	if (old==new) {
+-		r = __syscall(SYS_fcntl, old, F_GETFD);
+-		if (r >= 0) return old;
+-	} else {
+-		while ((r=__syscall(SYS_dup3, old, new, 0))==-EBUSY);
++	if (old == new) {
++		if (old < 0) { errno = EBADF; return -1; }
++		return new;
+ 	}
+-#endif
+-	return __syscall_ret(r);
++	errno = ENOSYS;
++	return -1;
+ }
+diff --color -ruN a/src/unistd/dup3.c b/src/unistd/dup3.c
+--- a/src/unistd/dup3.c	2026-07-23 19:35:42
++++ b/src/unistd/dup3.c	2026-07-23 20:30:26
+@@ -1,26 +1,21 @@
+ #define _GNU_SOURCE
+ #include <unistd.h>
+ #include <errno.h>
+-#include <fcntl.h>
+ #include "syscall.h"
++#include "_pouch_process.h"
+ 
++/* pouch: dup3. Same onto-target ENOSYS seam as dup2 (no kernel
++ * dup-onto-target primitive; the spawn fd_list is resolved statically). The
++ * runtime onto-target callers left non-functional are the same as dup2's
++ * (freopen(filename,...)/login_tty/daemon/wordexp -- freopen reaches __dup3
++ * directly); each fails loud. O_CLOEXEC is a no-op on Thylacine (a child
++ * inherits only explicitly-listed fds). POSIX: dup3 with old==new is EINVAL. */
+ int __dup3(int old, int new, int flags)
+ {
+-	int r;
+-#ifdef SYS_dup2
+-	if (old==new) return __syscall_ret(-EINVAL);
+-	if (flags) {
+-		while ((r=__syscall(SYS_dup3, old, new, flags))==-EBUSY);
+-		if (r!=-ENOSYS) return __syscall_ret(r);
+-		if (flags & ~O_CLOEXEC) return __syscall_ret(-EINVAL);
+-	}
+-	while ((r=__syscall(SYS_dup2, old, new))==-EBUSY);
+-	if (r >= 0 && (flags & O_CLOEXEC))
+-		__syscall(SYS_fcntl, new, F_SETFD, FD_CLOEXEC);
+-#else
+-	while ((r=__syscall(SYS_dup3, old, new, flags))==-EBUSY);
+-#endif
+-	return __syscall_ret(r);
++	(void)flags;
++	if (old == new) { errno = EINVAL; return -1; }
++	errno = ENOSYS;
++	return -1;
+ }
+ 
+ weak_alias(__dup3, dup3);
+diff --color -ruN a/src/unistd/pipe.c b/src/unistd/pipe.c
+--- a/src/unistd/pipe.c	2026-07-23 19:35:42
++++ b/src/unistd/pipe.c	2026-07-23 19:41:29
+@@ -1,11 +1,9 @@
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_process.h"
+ 
++/* pouch: pipe over SYS_PIPE (the 2-register svc shim; rd=fd[0], wr=fd[1]). */
+ int pipe(int fd[2])
+ {
+-#ifdef SYS_pipe
+-	return syscall(SYS_pipe, fd);
+-#else
+-	return syscall(SYS_pipe2, fd, 0);
+-#endif
++	return __pouch_pipe(fd);
+ }
+diff --color -ruN a/src/unistd/pipe2.c b/src/unistd/pipe2.c
+--- a/src/unistd/pipe2.c	2026-07-23 19:35:42
++++ b/src/unistd/pipe2.c	2026-07-23 19:41:29
+@@ -2,22 +2,15 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include "syscall.h"
++#include "_pouch_process.h"
+ 
++/* pouch: pipe2. O_CLOEXEC is accepted as a no-op -- a pipe fd is inherited by
++ * a child ONLY if explicitly listed in the spawn fd_list, so "close on exec"
++ * holds by construction. O_NONBLOCK is not settable at v1.0 (no fcntl
++ * F_SETFL); the pipe stays blocking (a documented best-effort, rare in the
++ * compile path). Any other flag is EINVAL (musl's contract). */
+ int pipe2(int fd[2], int flag)
+ {
+-	if (!flag) return pipe(fd);
+-	int ret = __syscall(SYS_pipe2, fd, flag);
+-	if (ret != -ENOSYS) return __syscall_ret(ret);
+-	if (flag & ~(O_CLOEXEC|O_NONBLOCK)) return __syscall_ret(-EINVAL);
+-	ret = pipe(fd);
+-	if (ret) return ret;
+-	if (flag & O_CLOEXEC) {
+-		__syscall(SYS_fcntl, fd[0], F_SETFD, FD_CLOEXEC);
+-		__syscall(SYS_fcntl, fd[1], F_SETFD, FD_CLOEXEC);
+-	}
+-	if (flag & O_NONBLOCK) {
+-		__syscall(SYS_fcntl, fd[0], F_SETFL, O_NONBLOCK);
+-		__syscall(SYS_fcntl, fd[1], F_SETFL, O_NONBLOCK);
+-	}
+-	return 0;
++	if (flag & ~(O_CLOEXEC | O_NONBLOCK)) { errno = EINVAL; return -1; }
++	return __pouch_pipe(fd);
+ }

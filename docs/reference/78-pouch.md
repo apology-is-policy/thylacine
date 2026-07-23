@@ -1674,3 +1674,100 @@ login session (the go-env pattern). Boot-fatal on regression.
   kernel-side lift; until then a per-child env override is unavailable (see
   the process wires, below). For the toolchain this is benign (the driver
   passes `environ` unchanged to `cc1`/`lld`).
+
+## The process lifecycle — `0026-pouch-process.patch` (Clade CL-1b)
+
+The process substrate the toolchain drives: the clang driver `posix_spawn`s
+`cc1`/`lld` and `wait4`s them; `make`/`ninja` fork-per-job over pipes. CL-0's
+census (§16.1) found the whole family (`clone`/`execve`/`wait4`/`pipe2`/`dup3`)
+is `0xFFFF` ENOSYS. Each wires onto an **existing** kernel syscall — zero new
+kernel surface.
+
+### `posix_spawn` — static file-actions resolution
+
+**Thylacine has no `fork`/`execve`** (a Proc cannot clone-and-replace its
+image); `SYS_SPAWN_FULL_ARGV` is the atomic spawn primitive, installing an
+explicit **positional** fd_list (`fd_list[i]` → child fd `i`, contiguous,
+lowest-free — verified `sys_spawn_with_fds_thunk`). So the upstream
+`posix_spawn` (which `clone(CLONE_VM|CLONE_VFORK)`s into a child that runs the
+file_actions then `execve`s) cannot apply. It is rewritten to resolve the
+file_actions **statically** — interpreted against a model of the child's fd
+table — into that fd_list:
+
+- **Seed**: the child's inherited base is the standard streams 0/1/2 **that
+  exist** in the parent (probed via `dup(fd, WRITE)`-or-`dup(fd, READ)` —
+  there is no rights-independent existence check, and a 0-rights dup is
+  rejected, but a std fd is a byte-I/O Spoor with READ and/or WRITE). Higher
+  fds are never auto-inherited — a well-behaved caller CLOEXECs its internal
+  fds and explicitly `dup2`s the ones the child needs, so seeding only
+  `{0,1,2}` matches Linux's CLOEXEC behaviour on such a caller.
+- **Apply** each file_action in insertion order (the musl tail-then-`prev`
+  traversal): `FDOP_OPEN` opens the path in the parent (a real fd, closed
+  after the spawn) → child slot; `FDOP_DUP2` maps a child slot to the parent
+  fd its source currently maps to (a source not in the model is a raw parent
+  fd); `FDOP_CLOSE` removes a slot; `FDOP_CHDIR`/`FDOP_FCHDIR` → ENOSYS (no
+  post-spawn child hook).
+- **Build the fd_list**: the child fds must be contiguous `0..N-1` (the
+  positional install has no holes); a hole → EINVAL. The dominant
+  open/dup2-onto-0/1/2/close pattern resolves to `{0,1,2}`.
+
+`cap_mask = ~0` (inherit all caps; the kernel intersects with the parent's,
+stripping elevation-only per I-2); `perm_flags`/identity/allowance zero
+(inherit). `posix_spawnp` searches `$PATH` (now populated from `/env`) then
+calls `posix_spawn`.
+
+### `wait4`/`waitpid` — flag + status translation
+
+`SYS_WAIT_PID` with **two** load-bearing translations:
+
+- **Flags**: the kernel `WAIT_CONTINUED` is `4`, Linux musl `WCONTINUED` is
+  `8`, and the kernel **rejects unknown bits** — so the option word is mapped
+  bit-by-bit (`WNOHANG`→1, `WUNTRACED`→2, `WCONTINUED`→4).
+- **Status**: a plain wait returns the **raw** `exit_status` (0/1 — v1.0
+  collapses any non-zero exit to 1). musl's `W*` macros decode the Linux
+  word, so it is repacked `(raw & 0xff) << 8` → `WIFEXITED` true,
+  `WEXITSTATUS == raw`. A job-control wait already returns the Linux-packed
+  word (`WAIT_STATUS_STOPPED`/`CONTINUED`/`EXITED`) and is forwarded verbatim.
+
+`wait3`→`wait4(-1,…)` and `wait`→`waitpid` inherit; `rusage` is zero-filled
+(Thylacine has no per-child resource accounting).
+
+### `pipe`/`pipe2` and `dup2`/`dup3`
+
+`SYS_PIPE` returns two fds (read in x0, write in x1) — a bespoke 2-register
+`svc` shim (`__pouch_pipe`, the native `t_pipe` shape) captures both.
+`pipe2`'s `O_CLOEXEC` is a **no-op** (a pipe fd is inherited by a child only
+if explicitly listed in the spawn fd_list, so "close on exec" holds by
+construction); other flags → EINVAL.
+
+`dup2`/`dup3` onto a chosen target fd have **no kernel primitive**
+(`handle_dup` is lowest-free only) and **no runtime toolchain path needs one**
+(posix_spawn resolves file_actions statically, never issuing a runtime dup2)
+→ the onto-target case is a documented ENOSYS seam. `dup2(old==new)` is a
+best-effort return-`new` (the common clear-CLOEXEC idiom); only `old<0` is
+EBADF (no rights-independent fd-existence probe exists).
+
+Proven in-guest by `/pouch-hello-spawn`: it self-respawns (`pipe2` + a
+`posix_spawn` redirecting the child's stdout into the pipe), captures the
+child's output, and `waitpid`s decoding `WIFEXITED`/`WEXITSTATUS` — the exact
+clang-driver shape. Both `WEXITSTATUS ok=0` and `fail=1` (the status
+translation) are asserted; the child reading its `argv[1]` proves argv
+pass-through. Boot-fatal on regression.
+
+### Known caveats (CL-1b)
+
+- **envp is inherited via `/env`, not the passed `posix_spawn` envp** (see
+  the CL-1b-0 caveats above). A `make` that passes a modified envp to a child
+  won't see it until the `_pad_envp` kernel lift.
+- **The parent's standard streams 0/1/2 form the inherited base** — a parent
+  that has closed a std stream and relies on inheriting a **higher** fd
+  (uncommon; well-behaved posix_spawn callers CLOEXEC + explicitly dup2) will
+  not pass that fd to the child. The toolchain always has 0/1/2 and dup2's
+  its pipe fds explicitly.
+- **`dup2`/`dup3` onto a target fd is ENOSYS** — no kernel dup-onto-target
+  primitive; escalate one if a real runtime workload needs it.
+- **`addchdir`/`addfchdir` file_actions are ENOSYS** — no post-spawn child
+  hook; the child inherits the parent's cwd.
+- **A non-zero child exit is `WEXITSTATUS == 1`** (v1.0 collapses any non-zero
+  exit to 1; the exact code is a kernel v1.x lift). `make`/`ninja` treat any
+  non-zero as failure, so the pass/fail decision is preserved.

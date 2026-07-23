@@ -2689,6 +2689,23 @@ int main(void) {
         t_putstr("joey: /pouch-hello-env PASS; CL-1b-0 pouch-env verified\n");
     }
 
+    // === /pouch-hello-spawn orchestration (Clade CL-1b core: the process
+    // lifecycle, patch 0026 -- posix_spawn/wait4/dup2/pipe2) ===
+    // The audit-bearing gate: pouch-hello-spawn self-respawns (via argv[0])
+    // through pipe2 + posix_spawn (a stdout-redirect file_action) + waitpid,
+    // decoding WIFEXITED/WEXITSTATUS -- the exact shape the clang driver uses
+    // to run cc1/lld. It resolves its own bare name against the boot namespace
+    // (pre-pivot devramfs), so it runs here alongside the other pouch probes.
+    {
+        static const char phsp_name[] = "pouch-hello-spawn";
+        if (pouch_smoke_one(phsp_name, sizeof(phsp_name) - 1,
+                            "ALL SPAWN TESTS PASS", 20) != 0) {
+            t_putstr("joey: /pouch-hello-spawn FAILED (CL-1b posix_spawn/wait regression)\n");
+            return 1;
+        }
+        t_putstr("joey: /pouch-hello-spawn PASS; CL-1b posix_spawn/wait4/pipe2/dup2 verified\n");
+    }
+
     // === /go-goroutines orchestration (GOOS=thylacine Go-port, Stage 2) ===
     // The Stage-2 proof: GOMAXPROCS(4) workers ping-pong channels, join via a
     // sync.WaitGroup, churn allocations, and a concurrent goroutine hammers

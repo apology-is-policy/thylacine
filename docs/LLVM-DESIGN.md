@@ -370,7 +370,7 @@ no bolted-on chasing).
 | # | Scope | Gate / deliverable | Audit posture | Cut line |
 |---|---|---|---|---|
 | **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc — **LANDED, §16** | none (read-only) | — |
-| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). CL-1b = posix_spawn/wait4/dup2/pipe2 (audit-bearing); CL-1c = make. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
+| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). **CL-1b core LANDED** (posix_spawn/wait4/dup2/pipe2: `0026`; §16.11). CL-1c = make + on-device `make -j`. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite | a C++ prover (EH + RTTI + threads + TLS-dtors + filesystem) green on-device | focused round on the runtime/boundary seams | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired | host cross-builds via the real triple, byte-compatible artifacts | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade` | **`clang++ -O2` compiles, links (lld), and runs a real C++ program on-device** | focused round (the Support patches + the bake) | — |
@@ -630,6 +630,39 @@ Full as-built: `docs/reference/78-pouch.md` "The environ populate". The
 `SYS_SPAWN_FULL_ARGV` `_pad_envp` slot reserves the kernel-side per-child
 override); `setenv` mutates only the in-process copy.
 
+### 16.11 CL-1b core as-built (posix_spawn / wait4 / pipe2 / dup2)
+
+`0026-pouch-process.patch` (10 files: 2 new + 8 rewritten) wires the process
+substrate the toolchain drives -- the clang driver `posix_spawn`s `cc1`/`lld`
+and `wait4`s them -- each onto an existing kernel syscall (ZERO new kernel
+surface). Since Thylacine has no fork/execve, `posix_spawn` is rewritten to
+resolve its file_actions STATICALLY into the positional `SYS_SPAWN_FULL_ARGV`
+fd_list (the dominant open/dup2-onto-0/1/2/close pattern resolves to
+`{0,1,2}`); `wait4` translates the flag word (kernel `WAIT_CONTINUED`=4 vs
+musl `WCONTINUED`=8) and repacks the plain-wait raw status `(raw&0xff)<<8` so
+musl's `W*` macros decode it; `pipe` uses a 2-register `svc` shim. Proven
+in-guest by `/pouch-hello-spawn` (self-respawn via `pipe2`+`posix_spawn`+a
+stdout-redirect file_action + `waitpid` decode; `WEXITSTATUS ok=0 fail=1`;
+argv pass-through). dup2/dup3 onto-target = a documented ENOSYS seam (no
+kernel primitive; posix_spawn never needs a runtime dup2). Ground-truth
+bring-up fixed three issues before the audit: `handle_dup` rejects a rights
+superset (dup2 probe uses 0 rights → rejected → probe with WRITE/READ),
+`argv[0]` is NULL under `SYS_SPAWN_WITH_FDS` (hardcode the self-name), and the
+`{0,1,2}` seed over-specifies for a parent lacking a std fd (the existence
+probe). Self-audit caught + fixed a P1 (opened[] stack overflow on >64
+FDOP_OPEN). **Focused audit CLOSED CLEAN (Opus-4.8-max holotype + self-audit;
+0 P0 / 0 P1 / 0 P2 / 6 P3, NOT dirty)** -- the ABI mirror, resolver, fd
+lifecycle, and wait/pipe translations all traced sound; the 2 substantive P3s
+fixed (F4 argv defensive bound; F1 comment naming the real runtime
+onto-target callers). **CL SEAM (F1)**: dup2/dup3 onto a target fd is ENOSYS
+(no kernel primitive), which leaves `freopen(filename,…)`/`login_tty`/
+`daemon`/`wordexp` non-functional (each fails LOUD); the durable fix is a
+kernel dup-onto-target syscall (an ABI addition -> escalate when a ported
+workload needs it). Full as-built: `docs/reference/78-pouch.md` "The process
+lifecycle"; closed list `memory/audit_cl1b_closed_list.md`. Boot OK, 0
+EXTINCTION, suite 1196/1196 (kernel byte-unchanged). Next = CL-1c (GNU make +
+on-device `make -j`).
+
 ## 17. Revision history
 
 | Date | Change |
@@ -639,3 +672,4 @@ override); `setenv` mutates only the in-process copy.
 | 2026-07-23 | **CL-0 landed** (§16): syscall-gap census closed (zero new kernel syscalls for CL-1..CL-4; `renameat`+`getdents64` per-compile load-bearing), environ CLOSED (envp always empty), lld-in-multicall VERIFIED, Mesa OSMesa-removal correction (§16.6), F4 validated by measurement (worst TU 2.46 GiB). Instruments: disposable GCP ARM VM (torn down) + the fork clone @ 22.1.8. |
 | 2026-07-23 | **CL-1a landed** (§16.9): the pouch FS/process wires (`0024`, 20 files) -- getpid/chdir/getcwd/mkdir/open(O_CREAT)/rename/unlink/readdir/ftruncate/fchmod/access, each onto an existing kernel syscall (ZERO new kernel surface); the `__pouch_open_parent` path-split helper; openat's O_CREAT arm + relative-path lift. Proven in-guest by `/pouch-hello-fs` (ALL WIRES PASS, boot OK, 0 EXTINCTION). dup2/dup3/pipe2 deferred to CL-1b (not clean 1:1). Surfaced + enqueued an ftruncate shrink-after-sparse-extend EIO below the wire (Stratum `stm_fs_truncate`; `memory/bug_ftruncate_shrink_after_extend.md`). |
 | 2026-07-23 | **CL-1b-0 landed** (§16.10): the pouch-env crt boundary line (`0025`, `_pouch_env.c` + `__libc_start_main` hook) -- populate `__environ` from the `/env` device at startup so `getenv()`/`environ` work (kernel writes envp[0]=NULL). Fail-soft. Proven in-guest by `/pouch-hello-env` (PGENV1/PGENVNUM inherited via the rfork clone; boot OK, 0 EXTINCTION, suite 1196/1196). Pure userspace (kernel byte-unchanged). NEXT = CL-1b core (posix_spawn/wait4/dup2/pipe2). |
+| 2026-07-23 | **CL-1b core landed** (§16.11): the process lifecycle (`0026`, 10 files) -- posix_spawn (STATIC file_actions resolve -> positional SYS_SPAWN_FULL_ARGV fd_list), posix_spawnp (PATH search), wait4/waitpid (SYS_WAIT_PID + flag/status translation), pipe/pipe2 (2-reg svc shim), dup2/dup3 (old==new; onto-target ENOSYS). Proven in-guest by `/pouch-hello-spawn` (pipe2+posix_spawn+waitpid; WEXITSTATUS ok=0 fail=1; argv pass-through). Self-audit fixed a P1 (opened[] overflow); ground-truth bring-up fixed the dup2-rights/argv0-NULL/std-fd-seed issues. Boot OK, 0 EXTINCTION, suite 1196/1196 (kernel byte-unchanged). Focused audit CLOSED CLEAN (Opus-4.8-max + self-audit; 0 P0/0 P1/0 P2/6 P3, NOT dirty; F4 argv-bound + F1 dup-onto-target comment fixed; the freopen onto-target ENOSYS is a tracked kernel-primitive seam). `memory/audit_cl1b_closed_list.md`. NEXT = CL-1c (make). |
