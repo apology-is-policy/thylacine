@@ -180,7 +180,17 @@ the compositor is a file server), made symmetric across both environments.
     ZERO new kernel/9P surface); a tiny session tool emits it at login.
     A session push applies for the session; it does NOT rewrite the system
     file. An OSD "save to my profile" needs a session-side agent — a
-    recorded seam, not v1.0.
+    recorded seam, not v1.0. **The session-scoped lifetime is realized by
+    reset-first (cfg-2b as-built)**: aurora is a boot-long process, so
+    `aurora-push` ALWAYS emits a `reset system` verb (re-seed from the
+    system file) before the user's lines — every session start is
+    deterministically *system defaults ⊕ user overrides*, and a stale
+    prior-session push dies at the next login. The channel's trust posture
+    is the xterm dynamic-colors one (any console writer can emit it):
+    cosmetic, session-scoped, non-persisting, aurora-local ONLY — it must
+    NEVER gain a persisting or authority-bearing key (the write-through
+    stays OSD-only; the compositor tier rides the gated ctl, §3.3, never
+    OSC).
 - **Format**: plain `key value` text — greppable, hand-editable, ndb-adjacent
   (netd already parses ndb); no binary format, no ABI. Example (Aurora):
   ```

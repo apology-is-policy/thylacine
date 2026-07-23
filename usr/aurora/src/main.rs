@@ -47,6 +47,7 @@ mod osd;
 mod render;
 mod vt;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use cornucopia::Atlas;
 use libthyla_rs::time::{sleep, Duration};
@@ -407,6 +408,29 @@ pub extern "C" fn rs_main() -> i64 {
                 let n = unsafe { t_read(drain, drainbuf.as_mut_ptr(), drainbuf.len()) };
                 if n > 0 {
                     term.feed(&drainbuf[..n as usize]);
+                    // cfg-2b: the in-band settings channel (OSC 7770 -- the
+                    // session push). SESSION-SCOPED by scripture (3.2): the
+                    // applied values are deliberately NEVER config::save'd
+                    // -- only the F10 OSD persists. `reset system` re-seeds
+                    // from the system file (aurora-push emits it first, so
+                    // every session start = system defaults + user
+                    // overrides; a stale prior-session push dies there).
+                    if !term.settings_req.is_empty() {
+                        let reqs: Vec<String> = term.settings_req.drain(..).collect();
+                        for line in reqs {
+                            let old = settings.theme;
+                            if line == "reset system" {
+                                settings = osd::Settings::new();
+                                config::load(&mut settings);
+                            } else {
+                                config::parse(&line, &mut settings);
+                            }
+                            if settings.theme != old {
+                                term.set_theme(settings.theme);
+                            }
+                        }
+                        term.dirty[term.cy] = true; // reflect a blink change
+                    }
                     // Terminal ANSWERS (CPR [6n etc.): the reply is keyboard
                     // input -- write it into the consfeed, the same wire the
                     // key events ride. Kaua's size handshake reads it to

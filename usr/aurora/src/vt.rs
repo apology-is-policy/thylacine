@@ -10,6 +10,7 @@
 // bg/fg + the role-derived ANSI-16 map below. SGR 38;2 truecolor passes
 // through exactly (libutopia emits it), 38;5 maps via the xterm-256 cube.
 
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -199,6 +200,20 @@ pub struct Vt {
     // (SAVE + park-far + [6n + RESTORE) needs the reply or every Kaua app
     // falls back to 80x24 inside the real grid (#37).
     pub reply: Vec<u8>,
+    // cfg-2b: the in-band settings channel (AURORA-CONFIG.md section 3.2) --
+    // `OSC 7770;aurora;<key>;<value>` (BEL or ST terminated) lands here as a
+    // `key value` line for the main loop to apply (the same grammar as the
+    // config file, so config::parse serves both transports; a `reset` verb
+    // re-seeds from the system file). SESSION-SCOPED by scripture: the main
+    // loop never persists an OSC-applied setting. The xterm dynamic-colors
+    // threat model applies (any console writer can emit it): cosmetic-only,
+    // non-persistent, user-recoverable via F10 -- the channel must NEVER
+    // gain a persisting or authority-bearing key. Bounded: payload cap 256,
+    // queue cap 16 (drop beyond); a non-7770 OSC (titles) is swallowed as
+    // before.
+    pub settings_req: Vec<String>,
+    osc_buf: Vec<u8>,
+    osc_over: bool,
     // UTF-8 assembly (the prompt glyphs are multi-byte).
     utf_acc: u32,
     utf_rem: u8,
@@ -231,6 +246,9 @@ impl Vt {
             wrap: true,
             saved_wrap: true,
             reply: Vec::new(),
+            settings_req: Vec::new(),
+            osc_buf: Vec::new(),
+            osc_over: false,
             utf_acc: 0,
             utf_rem: 0,
             dirty: vec![true; rows],
@@ -313,14 +331,26 @@ impl Vt {
             State::Csi => self.csi(b),
             State::Osc => {
                 if b == 0x07 {
+                    self.osc_end();
                     self.state = State::Ground;
                 } else if b == 0x1B {
                     self.state = State::OscEsc;
+                } else if self.osc_buf.len() < 256 {
+                    self.osc_buf.push(b);
+                } else {
+                    self.osc_over = true; // oversize: discard at terminator
                 }
             }
             State::OscEsc => {
-                // ST is ESC \; anything else stays in the OSC swallow.
-                self.state = if b == b'\\' { State::Ground } else { State::Osc };
+                // ST is ESC \; anything else stays in the OSC swallow (the
+                // stray ESC is dropped from the payload -- a valid 7770
+                // payload never contains one).
+                if b == b'\\' {
+                    self.osc_end();
+                    self.state = State::Ground;
+                } else {
+                    self.state = State::Osc;
+                }
             }
         }
     }
@@ -384,7 +414,11 @@ impl Vt {
                 self.csi_priv = false;
                 self.state = State::Csi;
             }
-            b']' => self.state = State::Osc,
+            b']' => {
+                self.osc_buf.clear();
+                self.osc_over = false;
+                self.state = State::Osc;
+            }
             b'(' | b')' => self.state = State::EscCharset,
             b'7' => {
                 // DECSC: position + autowrap (DEC STD-070; G-5 F5).
@@ -832,6 +866,35 @@ impl Vt {
         self.mark(self.cy);
     }
 
+    /// The OSC terminator: dispatch the buffered payload. Only the cfg-2b
+    /// settings channel (`7770;aurora;<key>;<value>`) produces anything --
+    /// every other OSC (titles etc.) is swallowed exactly as before. The
+    /// key/value land as a `key value` line (the config-file grammar) so one
+    /// fail-soft parser serves both transports; a value containing `;` is
+    /// rejected (defensive -- no valid setting carries one).
+    fn osc_end(&mut self) {
+        let over = self.osc_over;
+        self.osc_over = false;
+        if over {
+            self.osc_buf.clear();
+            return;
+        }
+        if let Ok(s) = core::str::from_utf8(&self.osc_buf) {
+            if let Some(rest) = s.strip_prefix("7770;aurora;") {
+                if let Some((k, v)) = rest.split_once(';') {
+                    if !k.is_empty() && !v.contains(';') && self.settings_req.len() < 16 {
+                        let mut line = String::with_capacity(k.len() + 1 + v.len());
+                        line.push_str(k);
+                        line.push(' ');
+                        line.push_str(v);
+                        self.settings_req.push(line);
+                    }
+                }
+            }
+        }
+        self.osc_buf.clear();
+    }
+
     /// Switch the live theme (the OSD's Appearance/theme setting). Cells bake
     /// resolved colors at write time, so existing content retints by EXACT
     /// old->new color match across both screens + the current SGR state;
@@ -1016,6 +1079,32 @@ mod tests {
         feed(&mut vt, b"\x1b[4;1Habcdefgh");
         feed(&mut vt, b"Z");
         assert_ne!(vt.cells[0].ch, 't', "wrap-on at the bottom row scrolls");
+    }
+
+    // cfg-2b: the OSC settings channel -- 7770;aurora payloads land as
+    // `key value` lines (BEL and ST both terminate); titles and malformed
+    // payloads are swallowed; oversize discards.
+    #[test]
+    fn osc_settings_channel() {
+        let mut vt = Vt::new(10, 4);
+        feed(&mut vt, b"\x1b]7770;aurora;theme;parchment\x07"); // BEL
+        feed(&mut vt, b"\x1b]7770;aurora;cursor-blink;off\x1b\\"); // ST
+        assert_eq!(vt.settings_req.len(), 2);
+        assert_eq!(vt.settings_req[0], "theme parchment");
+        assert_eq!(vt.settings_req[1], "cursor-blink off");
+        vt.settings_req.clear();
+        feed(&mut vt, b"\x1b]0;a window title\x07"); // a normal OSC: swallowed
+        feed(&mut vt, b"\x1b]7770;aurora;noval\x07"); // no value: ignored
+        feed(&mut vt, b"\x1b]7770;aurora;k;v;extra\x07"); // ';' in value: ignored
+        assert!(vt.settings_req.is_empty());
+        // Oversize discards; the parser stays in sync after it.
+        let mut big = Vec::from(&b"\x1b]7770;aurora;theme;"[..]);
+        big.extend(core::iter::repeat(b'x').take(300));
+        big.push(0x07);
+        feed(&mut vt, &big);
+        assert!(vt.settings_req.is_empty());
+        feed(&mut vt, b"ok"); // ground state intact
+        assert_eq!(vt.cells[0].ch, 'o');
     }
 
     // The OSD theme switch: exact-match retint across both screens + the SGR

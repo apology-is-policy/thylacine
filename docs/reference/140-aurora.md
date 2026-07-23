@@ -266,9 +266,27 @@ invoke or spoof it.
   commit, monitor-style). Baked default:
   `usr/aurora/config.default` → the pool populate (the `/lib/ndb/local`
   pattern, readback-verified). Keys: `theme <name>`, `cursor-blink on|off`.
-  The per-user `$home/lib/aurora` is the SESSION's file, pushed in-band
-  via private OSC at login — cfg-2b; the compositor tier (`mode`, chords,
-  gaps) lands with the apply-authority gate (§3.3) — never before it.
+  The compositor tier (`mode`, chords, gaps) lands with the
+  apply-authority gate (§3.3) — never before it.
+- **The per-user push (cfg-2b)**: `$home/lib/aurora` is the SESSION's
+  file, pushed in-band over the console wire as
+  `OSC 7770;aurora;<key>;<value>` (BEL or ST) — the xterm dynamic-colors
+  shape; the drain already carries every console byte, so the channel adds
+  zero kernel surface. The VT parser buffers OSC payloads (cap 256, queue
+  cap 16, fail-soft on malformed/oversize; titles swallowed as before) and
+  lands each as a `key value` line in `Vt.settings_req`; the main loop
+  applies via the SAME `config::parse` the file uses — **deliberately
+  without `config::save`** (session-scoped by scripture). The
+  `aurora-push` coreutil reads `$HOME/lib/aurora` (from the login-seeded
+  `/env`) and ALWAYS emits `reset system` first — the reset re-seeds from
+  the system file, so every session start is *system defaults ⊕ user
+  overrides* and a stale prior-session push dies at the next login (aurora
+  is boot-long; without the reset it would linger). login runs the push at
+  session start (post `/env` seed, pre shell, AS THE USER — the 0700 home
+  denies SYSTEM per A-2d — best-effort + reaped). Trust posture = xterm
+  dynamic colors: any console writer can emit the OSC; it is cosmetic,
+  session-scoped, non-persisting, aurora-local ONLY, and must never gain a
+  persisting or authority-bearing key.
 
 ## The gates
 

@@ -1171,6 +1171,28 @@ pub extern "C" fn rs_main() -> i64 {
     // GOCACHE/GOPATH/GOENV from $HOME), never the login.
     unsafe { seed_session_env(&user) };
 
+    // cfg-2b (AURORA-CONFIG.md section 3.2): push the per-user renderer
+    // config at session start. aurora-push reads $HOME/lib/aurora (from the
+    // /env just seeded -- the child inherits a deep copy) and emits the
+    // in-band settings OSC on fd 1 (the console -> the drain -> aurora),
+    // ALWAYS reset-first, so every session starts at system defaults + the
+    // user's overrides and a stale prior-session push dies here. Runs AS THE
+    // USER (the home is user-owned 0700; login-as-SYSTEM would be perm
+    // denied -- no ambient authority, I-22). Best-effort + reaped: a missing
+    // tool/file or a failed spawn degrades to the system defaults, never the
+    // login. Session-scoped by scripture: aurora applies without persisting.
+    {
+        let mut push_cmd = Command::new("/bin/aurora-push");
+        push_cmd
+            .identity(pid, gid, &supp)
+            .stdin(Stdio::Inherit)
+            .stdout(Stdio::Inherit)
+            .stderr(Stdio::Inherit);
+        if let Ok(mut c) = push_cmd.spawn() {
+            let _ = c.wait();
+        }
+    }
+
     // Spawn the shell AS the user. fd 0/1/2 inherit login's (the tty), so the
     // shell reads + writes the same console. The shell gets the user's identity
     // (SPAWN_IDENTITY_SET) but NOT CAP_SET_IDENTITY. It inherits the /home/<user>

@@ -1,0 +1,102 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-osd-push.exp -- cfg-2b: the per-user session push
+# (AURORA-CONFIG.md section 3.2). Proves, in one boot:
+#
+#   channel leg : a $home/lib/aurora file + `aurora-push` retints the console
+#                 live (the OSC 7770 in-band channel, session-scoped).
+#   non-persist : /lib/aurora/config is UNTOUCHED by a session push (the
+#                 scripture line: only the F10 OSD writes the system tier).
+#   hook leg    : logout -> login again -> the console wears the user theme
+#                 WITH NO MANUAL PUSH (login's aurora-push hook ran).
+#   reset leg   : rm the user file -> logout -> login -> the console is BACK
+#                 to the system default -- the reset-first contract (a stale
+#                 prior-session push dies at the next session start; aurora
+#                 is a boot-long process, so WITHOUT the reset this leg
+#                 would wear the stale theme).
+#
+# The user file lives in the per-user encrypted home (regenerated per build)
+# and is rm'd by the reset leg -- self-cleaning; the system tier is never
+# written, so the -c-asserting siblings are unaffected.
+#
+# HVF like the ls-gfx family (bare TCG hangs at the 8a-2b hwwatch E2E).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+set BONFIRE_BG "0E0C0C"
+set SPINIFEX_BG "0A0F0A"
+
+proc osd_dump {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+proc osd_frac {label color lo hi} {
+    global repo
+    set out "(no successful dump)"
+    for {set i 0} {$i < 12} {incr i} {
+        if {[osd_dump /tmp/ls-gfx-osd-push.ppm] eq ""} {
+            if {![catch {exec python3 $repo/tools/ppm-colorfrac.py \
+                    /tmp/ls-gfx-osd-push.ppm $color $lo $hi} out]} {
+                return ""
+            }
+        }
+        after 700
+    }
+    return "colorfrac $color never entered \[$lo, $hi\] ($label): $out"
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Baseline: the system default (bonfire) on screen.
+set err [osd_frac "baseline bonfire" $BONFIRE_BG 0.5 1]
+if {$err ne ""} { lc_fail "baseline: the system default is not on screen: $err" }
+
+# The channel leg: write the per-user config (cwd is $home at shell start,
+# #113) and push it by hand. mkdir may EEXIST on a retry attempt -- the
+# marker command after it is what we assert.
+lc_send "mkdir lib"
+lc_send "echo theme spinifex > lib/aurora"
+lc_run_expect "cat lib/aurora" "theme spinifex"
+lc_send "aurora-push"
+set err [osd_frac "session push applies" $SPINIFEX_BG 0.5 1]
+if {$err ne ""} { lc_fail "the manual aurora-push did not retint: $err" }
+lc_pass "push: the OSC channel applies the per-user theme live"
+
+# Non-persistence: the system tier is untouched by a session push.
+lc_run_expect "cat /lib/aurora/config" "theme bonfire"
+lc_pass "push: session-scoped (the system file still bonfire)"
+
+# The hook leg: a fresh session gets the user theme with NO manual push.
+lc_send "exit"
+after 1500
+lc_login michael correct-horse-battery-staple-v1
+set err [osd_frac "login-hook push applies" $SPINIFEX_BG 0.5 1]
+if {$err ne ""} { lc_fail "the login hook did not push the user config: $err" }
+lc_pass "push: login's aurora-push hook applies at session start"
+
+# The reset leg: drop the user file; the NEXT session must return to the
+# system default purely via the reset-first contract (aurora's live state
+# still wears spinifex until then -- a boot-long process).
+lc_send "rm lib/aurora"
+lc_run_expect "echo rm-done" "rm-done"
+lc_send "exit"
+after 1500
+lc_login michael correct-horse-battery-staple-v1
+set err [osd_frac "reset restores the system default" $BONFIRE_BG 0.5 1]
+if {$err ne ""} { lc_fail "the reset-first contract failed (stale session theme): $err" }
+set err [osd_frac "spinifex gone" $SPINIFEX_BG 0 0.02]
+if {$err ne ""} { lc_fail "spinifex residue after the reset: $err" }
+lc_pass "push: reset-first at session start (stale push dies at login)"
+
+lc_quit
+lc_pass "ls-gfx-osd-push: cfg-2b verified (channel + non-persist + hook + reset)"
+exit 0
