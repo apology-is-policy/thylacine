@@ -245,8 +245,22 @@ The tree (TAPESTRY §18.5, stage 0):
 
 ```
 /dev/tapestry/
-  ctl                  # read: "display W H" + surfaces/clock-rate/tick;
-                       # write: clock-rate <hz> (1..240); test-mode -> G-6
+  ctl                  # read: "display W H" + surfaces/clock-rate/tick
+                       #   (UNGATED -- the geometry query every client
+                       #   boots on);
+                       # write, AUTHORITY (cfg-3: renderer-gated, below):
+                       #   mode W H  -- re-set the scanout (bounds
+                       #     320x200..3840x2160; a fresh per-generation
+                       #     screen resource, bind-then-flush #57, old
+                       #     freed after the rebind; holds DROPPED; the
+                       #     CONFIGURE fan + Direct->Composed fall ride
+                       #     reconcile())
+                       #   mode auto -- non-mutating GET_DISPLAY_INFO
+                       #     re-probe, adopt the reported rect (E_AGAIN
+                       #     when absent)
+                       #   clock-rate <hz> (1..240)
+                       # write, determinism (feature-stripped, UNgated;
+                       #   the battery drives them): test-mode -> G-6
   surface/
     new                # open mints a surface in THIS conn + rebinds the
                        #   fid onto its ctl (the netd clone idiom); the
@@ -614,6 +628,30 @@ left|right|up|down`, `zoom <id>`, and the id-less `focusdir <dir>` +
 `tab next|prev` (acting on the focused leaf). Pane ctl accepts the
 same per-pane verbs (`move <dir>`, `zoom`, ...).
 
+**The apply-authority gate (cfg-3; AURORA-CONFIG.md §3.3 — the ARCH
+§25.4 cfg-3 addendum is the prosecution list).** The global ctl's
+AUTHORITY-BEARING verbs — `mode` and `clock-rate` today; `chord`/`gaps`
+when they land; **a new global verb defaults to GATED** — admit only a
+conn whose LIVE peer holds the console-RENDERER role.
+`Conn::peer_is_renderer` calls `t_srv_peer` on the accepted conn handle
+per authority write: the kernel resolves the peer fresh under the
+proc-table lock and stamps `SRV_PEER_FLAG_CONSOLE_RENDERER` (flags@32
+bit 0, append-only ABI) iff the peer IS the live G-4 single-holder
+`g_console_renderer` — so a moved or died role revokes on the next
+write, and a dead peer fail-closes (`alive == 0` ⇒ flags 0). Two
+structural consequences: the shared `/dev/tapestry` mount is denied by
+construction (its conn peer is the MOUNTER, joey — never the renderer;
+the mount conveys visibility only), and an authority write must ride
+the client's OWN `/srv/tapestry` conn (which every libtapestry client
+holds; `Surface::global_ctl` / `global_ctl_once`). The determinism
+verbs (`test-mode`/`tick`/`release`) stay OUTSIDE the gate — their
+production posture is the #880 feature strip, the battery (a
+non-renderer) drives them in test builds, and `release` keeps its F2
+per-surface ownership gate. Ctl READS stay ungated. Regressions:
+`devsrv.srv_peer_renderer_flag` (kernel), the battery gate leg
+(`battery: gate OK` in ls-gfx-panes), `ls-gfx-mode.exp` (the admitted
+OSD path + the session-shell and OSC denial surfaces).
+
 **Control scoping (the G-6d weighing).** SURFACE qids (weave / present /
 event / ctl) are F2-owner-gated at every consumer — walk, open, read,
 write, readdir, Tweft — so no client reaches another's pixels or events
@@ -621,7 +659,9 @@ write, readdir, Tweft — so no client reaches another's pixels or events
 that is the WM-control model (control is 9P / layout-as-9P; a WM-control
 client like `halcyon.rc` drives layout globally — the i3-IPC / tmux
 shape), not a per-surface ACL. The `clock-rate` global ctl is the same
-same-session-trust family. **G-6d holotype F1 (P2)** weighs the sharpest
+same-session-trust family — and since cfg-3 it is additionally
+renderer-gated (the apply-authority gate above supersedes the F3
+"doc'd ungated" posture; no tree writer ever existed). **G-6d holotype F1 (P2)** weighs the sharpest
 consequence: a session peer could `close` another client's pane (for the
 console renderer, aurora, that queues `TEV_CLOSE`, which exits it and
 darkens the graphical console) or focus-steal its input. The v1.0 trust

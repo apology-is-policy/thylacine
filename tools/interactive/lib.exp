@@ -149,6 +149,14 @@ proc lc_boot {} {
         file delete -force $::lc_ncerr
         set bridge $lc_repo/tools/interactive/serial-bridge.py
         set chan [open [list | python3 $bridge $sock 2> $::lc_ncerr] r+]
+        # #60 probe 2 verdict (2026-07-23): -buffersize 262144 was trialed
+        # against ls-gfx-mode's then-deterministic 47-char-echo cut -- it
+        # MOVED the cut off that leg (buffer-pressure correlation confirmed)
+        # but scattered later cuts across shorter commands with no net
+        # attempt-rate win, and >match_max is its own hazard. Reverted to
+        # the default; the durable mitigations are scenario-side (short
+        # typed commands -- the echo burst is quadratic in line length) +
+        # the attempts retry. Full evidence: memory bug-60 file.
         fconfigure $chan -buffering none -translation binary
         spawn -open $chan
         # #72 residual: expect's default match_max is 2000 bytes, so a ~110 KB

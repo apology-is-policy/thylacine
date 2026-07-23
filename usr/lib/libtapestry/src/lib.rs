@@ -446,6 +446,24 @@ impl Surface {
         Ok(())
     }
 
+    /// cfg-3: write one global-ctl command on THIS connection. The
+    /// apply-authority gate checks the CONN's kernel-stamped peer, so an
+    /// authority verb (`mode ...`) must ride the caller's own conn --
+    /// never the shared /dev/tapestry mount, whose peer is the mounter.
+    /// Opens ctl per write (authority writes are rare).
+    pub fn global_ctl(&self, cmd: &str) -> Result<(), TapError> {
+        let ctl = unsafe { t_open(self.root, b"ctl".as_ptr(), 3, T_OWRITE) };
+        if ctl < 0 {
+            return Err(TapError::Protocol);
+        }
+        let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
+        unsafe { t_close(ctl) };
+        if rc < 0 {
+            return Err(TapError::Protocol);
+        }
+        Ok(())
+    }
+
     fn submit_present(&mut self, flags: u32, rects: &[Rect]) -> Result<(), TapError> {
         if rects.len() > MAX_RECTS {
             return Err(TapError::Present);
@@ -597,6 +615,51 @@ impl Drop for Surface {
             }
         }
     }
+}
+
+/// cfg-3: read the display geometry off a throwaway connection (the
+/// startup push's verify-readback; the same "display W H" line
+/// Surface::fullscreen parses).
+pub fn display_dims() -> Option<(u32, u32)> {
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+    if root < 0 {
+        return None;
+    }
+    let gctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OREAD) };
+    if gctl < 0 {
+        unsafe { t_close(root) };
+        return None;
+    }
+    let mut buf = [0u8; 256];
+    let n = read_all(gctl, &mut buf);
+    unsafe { t_close(gctl) };
+    unsafe { t_close(root) };
+    let text = core::str::from_utf8(&buf[..n]).ok()?;
+    parse_two(text, "display ")
+}
+
+/// cfg-3: one-shot global-ctl write on a THROWAWAY connection -- the
+/// aurora startup mode push runs BEFORE any Surface exists (so the
+/// console surface is born at the pushed geometry), and the gate's
+/// peer identity is per-conn, so the throwaway conn still carries the
+/// CALLER's identity. Connect + write + close; fail-soft to the caller.
+pub fn global_ctl_once(cmd: &str) -> Result<(), TapError> {
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/tapestry".as_ptr(), 13, T_OREAD) };
+    if root < 0 {
+        return Err(TapError::Connect);
+    }
+    let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_OWRITE) };
+    if ctl < 0 {
+        unsafe { t_close(root) };
+        return Err(TapError::Protocol);
+    }
+    let rc = unsafe { t_write(ctl, cmd.as_ptr(), cmd.len()) };
+    unsafe { t_close(ctl) };
+    unsafe { t_close(root) };
+    if rc < 0 {
+        return Err(TapError::Protocol);
+    }
+    Ok(())
 }
 
 /// A tiny front-pop helper (Vec as a FIFO; event volumes are small).

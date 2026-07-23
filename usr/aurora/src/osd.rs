@@ -23,6 +23,8 @@ use crate::render::{darken_rect, draw_run, Metrics};
 use crate::vt::THEMES;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
 
 // EGA -- the rawness is the point (classic TV: gray dialog, black text, a
 // cyan focus bar, blue values, a dark hint row).
@@ -44,44 +46,90 @@ const KEY_DOWN: u16 = 108;
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
 
-/// The aurora-local settings the OSD edits (session-lived until the
-/// config-file sub-chunk).
+/// The display-mode selection (cfg-3): the compositor tier the
+/// environment pushes via the GATED global ctl (AURORA-CONFIG.md
+/// section 3.3/3.4). Auto = adopt the GPU's preferred rect (never pushed
+/// at startup -- it IS the boot default); Fixed pushes `mode W H`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Mode {
+    Auto,
+    Fixed(u32, u32),
+}
+
+/// The OSD's mode presets. Base virtio-gpu reports one preferred rect,
+/// not a mode list -- these are common raster modes inside the server's
+/// 320x200..3840x2160 bounds. A hand-edited config mode outside this
+/// list still pushes at startup; the OSD's cycler just seeds at Auto.
+pub const MODE_PRESETS: [Mode; 7] = [
+    Mode::Auto,
+    Mode::Fixed(1024, 768),
+    Mode::Fixed(1280, 800),
+    Mode::Fixed(1280, 720),
+    Mode::Fixed(1600, 900),
+    Mode::Fixed(1920, 1080),
+    Mode::Fixed(2560, 1440),
+];
+
+/// The aurora-local settings the OSD edits, plus the pushed compositor
+/// tier (`mode`).
 pub struct Settings {
     pub theme: usize, // index into vt::THEMES
     pub cursor_blink: bool,
+    pub mode: Mode, // cfg-3: applied via the gated ctl, never via OSC
 }
 
 impl Settings {
     pub fn new() -> Settings {
-        Settings { theme: 0, cursor_blink: true }
+        Settings { theme: 0, cursor_blink: true, mode: Mode::Auto }
     }
 }
 
 /// What a handled key asks the main loop to do.
 pub enum OsdOut {
     None,
-    Close,          // repaint the terminal (full_fill)
-    ThemeChanged,   // call Vt::set_theme(settings.theme) + persist (cfg-2a)
-    SettingChanged, // a non-theme setting moved -> persist (cfg-2a)
+    Close,           // repaint the terminal (full_fill)
+    ThemeChanged,    // call Vt::set_theme(settings.theme) + persist (cfg-2a)
+    SettingChanged,  // a non-theme setting moved -> persist (cfg-2a)
+    ModeApply(Mode), // cfg-3: write the gated ctl; persist ONLY on success
 }
 
 const SEC_DISPLAY: usize = 0;
 const SEC_APPEARANCE: usize = 1;
 const SEC_NAMES: [&str; 2] = ["Display", "Appearance"];
-// Rows per section: Display { Resolution, Zoom policy } (info-only),
-// Appearance { Theme, Cursor blink } (live).
-const SEC_LEN: [usize; 2] = [2, 2];
+// Rows per section: Display { Mode (live cycler, Enter applies),
+// Resolution (info), Zoom policy (info) }, Appearance { Theme,
+// Cursor blink } (live).
+const SEC_LEN: [usize; 2] = [3, 2];
 
 pub struct Osd {
     pub open: bool,
     pub dirty: bool,
     sec: usize,
     sel: usize,
+    /// The PENDING mode choice (cfg-3): </> cycles it; only Enter applies
+    /// (the monitor-OSD semantic -- a mode change reconfigures the whole
+    /// display and must never fire on mere navigation). Seeded from the
+    /// applied settings at each open.
+    mode_sel: usize,
 }
 
 impl Osd {
     pub fn new() -> Osd {
-        Osd { open: false, dirty: false, sec: SEC_APPEARANCE, sel: 0 }
+        Osd { open: false, dirty: false, sec: SEC_APPEARANCE, sel: 0, mode_sel: 0 }
+    }
+
+    /// Open the panel DETERMINISTICALLY: always the first section, first
+    /// row (a settings dialog reopening on a stale tab with a stale
+    /// selection is surprising -- and a keystroke recipe against it,
+    /// like the E2E's, would silently act on the wrong rows), with the
+    /// pending mode choice re-seeded from the APPLIED settings (a
+    /// pending-but-unapplied cycle must not survive a close/reopen).
+    pub fn open_at(&mut self, s: &Settings) {
+        self.open = true;
+        self.dirty = true;
+        self.sec = SEC_APPEARANCE;
+        self.sel = 0;
+        self.mode_sel = MODE_PRESETS.iter().position(|m| *m == s.mode).unwrap_or(0);
     }
 
     /// Route one key event (press value==1, repeat value==2; releases are
@@ -122,8 +170,25 @@ impl Osd {
                 OsdOut::None
             }
             KEY_LEFT | KEY_RIGHT | KEY_ENTER => {
-                if self.sec != SEC_APPEARANCE {
-                    return OsdOut::None; // Display is info-only this chunk
+                if self.sec == SEC_DISPLAY {
+                    // Row 0 = Mode: </> cycles the PENDING choice; only
+                    // Enter applies (cfg-3). Rows 1..2 are info.
+                    if self.sel != 0 {
+                        return OsdOut::None;
+                    }
+                    let n = MODE_PRESETS.len();
+                    self.dirty = true;
+                    return match code {
+                        KEY_LEFT => {
+                            self.mode_sel = (self.mode_sel + n - 1) % n;
+                            OsdOut::None
+                        }
+                        KEY_RIGHT => {
+                            self.mode_sel = (self.mode_sel + 1) % n;
+                            OsdOut::None
+                        }
+                        _ => OsdOut::ModeApply(MODE_PRESETS[self.mode_sel]),
+                    };
                 }
                 self.dirty = true;
                 match self.sel {
@@ -227,36 +292,48 @@ impl Osd {
             draw_run(m, px, w, pc, pr + 2, &sep, EGA_BLACK, EGA_GRAY);
         }
 
-        // Item rows from row 4. Display is info-only (values in dark gray);
-        // Appearance carries the live < value > cyclers.
-        let info = self.sec == SEC_DISPLAY;
-        let items: [(String, String); 2] = if info {
-            [
-                (String::from("Resolution"), format!("{} x {}", disp_w, disp_h)),
-                (String::from("Zoom policy"), String::from("letterbox")),
+        // Item rows from row 4: (label, value, live). Live rows carry the
+        // < value > cyclers (white-on-bar / blue values); info rows are
+        // dark gray. Display row 0 shows the PENDING mode choice; the
+        // Resolution row is the live display truth beside it.
+        let items: Vec<(String, String, bool)> = if self.sec == SEC_DISPLAY {
+            let mode_val = match MODE_PRESETS[self.mode_sel % MODE_PRESETS.len()] {
+                Mode::Auto => String::from("< auto >"),
+                Mode::Fixed(mw, mh) => format!("< {} x {} >", mw, mh),
+            };
+            vec![
+                (String::from("Mode"), mode_val, true),
+                (
+                    String::from("Resolution"),
+                    format!("{} x {}", disp_w, disp_h),
+                    false,
+                ),
+                (String::from("Zoom policy"), String::from("letterbox"), false),
             ]
         } else {
-            [
+            vec![
                 (
                     String::from("Theme"),
                     format!("< {} >", THEMES[s.theme % THEMES.len()].0),
+                    true,
                 ),
                 (
                     String::from("Cursor blink"),
                     format!("< {} >", if s.cursor_blink { "on" } else { "off" }),
+                    true,
                 ),
             ]
         };
-        for (i, (label, value)) in items.iter().enumerate() {
+        for (i, (label, value, live)) in items.iter().enumerate() {
             let r = pr + 4 + i * 2;
             if r + 1 >= pr + ph - 1 {
                 break;
             }
             let selected = i == self.sel;
             let (lfg, vfg, bg) = if selected {
-                (EGA_BLACK, if info { EGA_DGRAY } else { EGA_WHITE }, EGA_CYAN)
+                (EGA_BLACK, if *live { EGA_WHITE } else { EGA_DGRAY }, EGA_CYAN)
             } else {
-                (EGA_BLACK, if info { EGA_DGRAY } else { EGA_BLUE }, EGA_GRAY)
+                (EGA_BLACK, if *live { EGA_BLUE } else { EGA_DGRAY }, EGA_GRAY)
             };
             if selected {
                 let bar: String = core::iter::repeat(' ').take(pw - 2).collect();
@@ -270,8 +347,8 @@ impl Osd {
         }
 
         // The hint row (inside the bottom border).
-        let hint = if info {
-            " read-only until the mode ctl lands "
+        let hint = if self.sec == SEC_DISPLAY {
+            " </> choose  Enter apply  Tab  Esc close "
         } else {
             " Up/Dn  </> change  Tab  Esc close "
         };
@@ -325,19 +402,52 @@ mod tests {
     }
 
     #[test]
-    fn display_section_is_inert_and_nav_bounds() {
+    fn display_info_rows_inert_and_nav_bounds() {
         let mut o = Osd::new();
         let mut s = Settings::new();
-        o.open = true;
-        o.handle_key(KEY_TAB, 1, &mut s); // -> Display
+        o.open_at(&s);
+        o.handle_key(KEY_TAB, 1, &mut s); // -> Display, sel 0 = Mode
+        o.handle_key(KEY_DOWN, 1, &mut s); // -> Resolution (info)
         let theme0 = s.theme;
         assert!(matches!(o.handle_key(KEY_RIGHT, 1, &mut s), OsdOut::None));
+        assert!(matches!(o.handle_key(KEY_ENTER, 1, &mut s), OsdOut::None));
         assert_eq!(s.theme, theme0, "info rows change nothing");
         // Nav clamps at the section bounds (no underflow/overflow).
+        o.handle_key(KEY_UP, 1, &mut s);
         o.handle_key(KEY_UP, 1, &mut s);
         o.handle_key(KEY_DOWN, 1, &mut s);
         o.handle_key(KEY_DOWN, 1, &mut s);
         o.handle_key(KEY_DOWN, 1, &mut s);
         assert!(o.sel < SEC_LEN[o.sec]);
+    }
+
+    #[test]
+    fn mode_row_cycles_pending_and_applies_on_enter_only() {
+        let mut o = Osd::new();
+        let mut s = Settings::new();
+        o.open_at(&s); // seeds the pending choice from Auto -> index 0
+        o.handle_key(KEY_TAB, 1, &mut s); // -> Display, sel 0 = Mode
+        // </> cycles the PENDING choice without applying anything.
+        assert!(matches!(o.handle_key(KEY_RIGHT, 1, &mut s), OsdOut::None));
+        assert!(s.mode == Mode::Auto, "cycling never applies");
+        // Enter emits the apply for the pending preset (1024x768 is
+        // MODE_PRESETS[1]); the MAIN loop writes the gated ctl and
+        // persists only on an accepted write -- not the OSD's job.
+        assert!(matches!(
+            o.handle_key(KEY_ENTER, 1, &mut s),
+            OsdOut::ModeApply(Mode::Fixed(1024, 768))
+        ));
+        assert!(s.mode == Mode::Auto, "the OSD itself never mutates mode");
+        // A close/reopen re-seeds the pending choice from the APPLIED
+        // settings (a stale pending cycle must not survive) AND resets
+        // to the first section/row -- the panel must reopen
+        // deterministically (the E2E's keystroke recipes act on absolute
+        // positions; a persisted section made Tab land on the WRONG
+        // section and cycle themes instead of modes).
+        s.mode = Mode::Fixed(1600, 900);
+        o.open_at(&s);
+        assert_eq!(o.mode_sel, 4, "re-seeded from the applied mode");
+        assert_eq!(o.sec, SEC_APPEARANCE, "reopen resets the section");
+        assert_eq!(o.sel, 0, "reopen resets the row");
     }
 }

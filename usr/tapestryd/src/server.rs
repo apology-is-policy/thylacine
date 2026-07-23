@@ -82,9 +82,9 @@ use alloc::vec::Vec;
 
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_weave, t_dma_map, t_weft_share, t_weft_unshare,
-    T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ,
-    T_RIGHT_WRITE,
+    t_burrow_detach, t_close, t_dma_create_weave, t_dma_map, t_srv_peer, t_weft_share,
+    t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
+    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
 use crate::gpu::Gpu;
@@ -382,24 +382,36 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
     Rect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
 }
 
-/// The compositor's own screen buffer (Composed mode), attached to
-/// SCREEN_RES. A WEAVE-subtype DMA chunk -- the G-2 type discipline puts
-/// every RESOURCE_ATTACH_BACKING scanout backing in that class (plain
-/// SYS_DMA_CREATE is the virtqueue/command class, capped at
-/// KOBJ_DMA_MAX_SIZE = 1 MiB -- a display buffer does not fit and does
-/// not belong). Share-admissible by TYPE but never REGISTERED
-/// (t_weft_share is never called on it), so no share_id exists for a
-/// client to claim -- unshared in practice. Held for the process
-/// lifetime (no screen teardown path; a tapestryd death reclaims it via
-/// the RW-7 crash contract).
+/// The compositor's own screen buffer (Composed mode). A WEAVE-subtype
+/// DMA chunk -- the G-2 type discipline puts every RESOURCE_ATTACH_BACKING
+/// scanout backing in that class (plain SYS_DMA_CREATE is the
+/// virtqueue/command class, capped at KOBJ_DMA_MAX_SIZE = 1 MiB -- a
+/// display buffer does not fit and does not belong). Share-admissible by
+/// TYPE but never REGISTERED (t_weft_share is never called on it), so no
+/// share_id exists for a client to claim -- unshared in practice. Since
+/// cfg-3 the resource id is PER-GENERATION (minted from Comp.res_seq like
+/// surface reweaves): a display-mode change builds a FRESH screen, binds
+/// it, then frees the old (never a scanned-out dead resource); otherwise
+/// held until process death (the RW-7 crash contract reclaims it).
 struct Screen {
-    _handle: i64,
+    handle: i64,
     va: u64,
+    size: u64,
+    res: u32,
 }
 
-/// The screen resource id. Per-generation surface resources mint from
-/// Comp.res_seq, which starts ABOVE this -- no id ever aliases it.
+/// The res_seq base: per-generation resource ids (surface weaves + the
+/// screen since cfg-3) mint strictly above this -- no id ever aliases.
 const SCREEN_RES: u32 = 0x40;
+
+/// cfg-3 display-mode bounds (AURORA-CONFIG.md section 3.4): base
+/// virtio-gpu reports one preferred rect, not a mode list, so `mode W H`
+/// validates against sane bounds; the max keeps the screen buffer
+/// (W*H*4) under the 64-MiB weave cap with room to spare.
+const MODE_MIN_W: u32 = 320;
+const MODE_MIN_H: u32 = 200;
+const MODE_MAX_W: u32 = 3840;
+const MODE_MAX_H: u32 = 2160;
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
 /// kernel test pattern stays until a first present -- the stage-0 look);
@@ -491,6 +503,16 @@ impl Comp {
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
+        }
+    }
+
+    /// Scanout-state name for the transition diagnostics (rare-path only).
+    fn scanout_name(&self) -> &'static str {
+        match self.scanout {
+            Scanout::Boot => "boot",
+            Scanout::Off => "off",
+            Scanout::Direct(_) => "direct",
+            Scanout::Composed => "composed",
         }
     }
 
@@ -760,40 +782,127 @@ impl Comp {
         Ok(())
     }
 
-    /// Allocate the compositor's screen buffer + resource (lazy; kept for
-    /// the process lifetime once made).
+    /// Allocate the compositor's screen buffer + resource (lazy; replaced
+    /// only by a display-mode change, else kept for the process lifetime).
     fn ensure_screen(&mut self) -> bool {
         if self.screen.is_some() {
             return true;
         }
         let (dw, dh) = (self.gpu.width, self.gpu.height);
+        match self.alloc_screen(dw, dh) {
+            Some(s) => {
+                self.screen = Some(s);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Build one screen GENERATION at the given geometry: DMA weave chunk
+    /// + map + zero + a fresh per-generation 2D resource with the chunk
+    /// attached as backing. Every failure path rolls back fully; the
+    /// caller's current screen is untouched.
+    fn alloc_screen(&mut self, dw: u32, dh: u32) -> Option<Screen> {
         let size = ((dw as u64) * (dh as u64) * 4 + PAGE - 1) & !(PAGE - 1);
         let handle =
             unsafe { t_dma_create_weave(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if handle < 0 {
             say!("tapestryd: screen t_dma_create_weave({}) failed {}", size, handle);
-            return false;
+            return None;
         }
         let va = self.weave_va_next;
         self.weave_va_next += size;
         let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
         if pa < 0 {
             unsafe { t_close(handle) };
-            return false;
+            return None;
         }
-        if self.gpu.resource_create_2d(SCREEN_RES, dw, dh).is_err() {
+        // Zero: the buffer scans out before the first chrome paint on a
+        // mode change -- never a prior occupant's bytes.
+        unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
+        let res = self.next_res_id();
+        if self.gpu.resource_create_2d(res, dw, dh).is_err() {
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
-            return false;
+            return None;
         }
-        if self.gpu.attach_backing(SCREEN_RES, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.resource_unref(SCREEN_RES);
+        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+            let _ = self.gpu.resource_unref(res);
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
-            return false;
+            return None;
         }
-        self.screen = Some(Screen { _handle: handle, va });
-        true
+        Some(Screen { handle, va, size, res })
+    }
+
+    /// Tear down a displaced screen generation (the release_gen order,
+    /// minus unshare -- the screen is never registered): resource dies
+    /// before its backing -> unmap + close. The caller has already
+    /// ensured no scanout references `s.res` (set_mode rebinds a live
+    /// Composed scanout to the NEW screen first; Direct/Boot/Off never
+    /// referenced it).
+    fn free_screen(&mut self, s: Screen) {
+        let _ = self.gpu.detach_backing(s.res);
+        let _ = self.gpu.resource_unref(s.res);
+        unsafe { t_burrow_detach(s.va, s.size) };
+        unsafe { t_close(s.handle) };
+    }
+
+    /// cfg-3: the display-mode change (AURORA-CONFIG.md section 3.4) --
+    /// the gated `mode W H` verb's engine. Build the NEW screen first
+    /// (fallible; the old survives any failure), drop stale holds, swap,
+    /// rebind a live Composed scanout BEFORE freeing the old resource,
+    /// then let the audited reconcile() do the rest: layout recompute at
+    /// the new geometry, structural chrome repaint + flush (the #57
+    /// post-bind flush lives there), the CONFIGURE fan to every visible
+    /// surface, and the Direct->Composed fall (a direct surface is no
+    /// longer display-sized). Boot stays Boot (pre-first-content -- the
+    /// aurora startup push lands here; the surface then creates at the
+    /// new geometry).
+    fn set_mode(&mut self, w: u32, h: u32) -> Result<(), u32> {
+        if !(MODE_MIN_W..=MODE_MAX_W).contains(&w) || !(MODE_MIN_H..=MODE_MAX_H).contains(&h) {
+            return Err(p9::E_INVAL);
+        }
+        if w == self.gpu.width && h == self.gpu.height {
+            return Ok(()); // same mode: a push of the current value no-ops
+        }
+        say!(
+            "tapestryd: mode {}x{} -> {}x{} (scanout {})",
+            self.gpu.width,
+            self.gpu.height,
+            w,
+            h,
+            self.scanout_name()
+        );
+        let new = match self.alloc_screen(w, h) {
+            Some(s) => s,
+            None => return Err(p9::E_NOMEM),
+        };
+        // Held pushes reference the OLD geometry/screen; a deferred push
+        // against the new one would land wrong bytes at wrong rects. The
+        // CONFIGURE fan below makes every client repaint.
+        for n in 0..MAX_SURFACES {
+            if let Some(s) = self.surf_mut(n) {
+                s.held = None;
+            }
+        }
+        let old = self.screen.take();
+        self.screen = Some(new);
+        self.gpu.width = w;
+        self.gpu.height = h;
+        if self.scanout == Scanout::Composed {
+            // Rebind the live scanout to the new screen before the old
+            // resource dies (never free a scanned-out resource). The
+            // buffer is zeroed; reconcile's structural repaint + flush
+            // follow within this same dispatch.
+            let res = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
+            let _ = self.gpu.set_scanout(res, w, h);
+        }
+        if let Some(o) = old {
+            self.free_screen(o);
+        }
+        self.reconcile();
+        Ok(())
     }
 
     /// Paint the full chrome into the screen buffer: background everywhere
@@ -960,8 +1069,12 @@ impl Comp {
     /// Push the whole screen buffer to the host resource + display.
     fn screen_flush_full(&mut self) {
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        let _ = self.gpu.transfer(SCREEN_RES, 0, 0, 0, dw, dh);
-        let _ = self.gpu.flush(SCREEN_RES, 0, 0, dw, dh);
+        let res = match &self.screen {
+            Some(s) => s.res,
+            None => return,
+        };
+        let _ = self.gpu.transfer(res, 0, 0, 0, dw, dh);
+        let _ = self.gpu.flush(res, 0, 0, dw, dh);
     }
 
     /// Reconcile scanout + chrome with the layout (run after every layout
@@ -1000,6 +1113,9 @@ impl Comp {
         match want {
             Scanout::Boot => {}
             Scanout::Off => {
+                if self.pending_direct.is_some() {
+                    say!("tapestryd: scanout off clears pending-direct");
+                }
                 self.pending_direct = None;
                 if self.scanout != Scanout::Off && self.scanout != Scanout::Boot {
                     let _ = self.gpu.set_scanout(0, dw, dh);
@@ -1019,6 +1135,7 @@ impl Comp {
                     // switch's full-slot transfer needs a full repaint to
                     // land next. Same-size by construction: Direct(n)
                     // requires the surface display-sized.
+                    say!("tapestryd: scanout pending-direct {} ({}x{})", n, dw, dh);
                     self.pending_direct = Some(n);
                     if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
@@ -1048,7 +1165,9 @@ impl Comp {
                     self.screen_flush_full();
                 }
                 if entering {
-                    let _ = self.gpu.set_scanout(SCREEN_RES, dw, dh);
+                    let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
+                    say!("tapestryd: scanout composed ({}x{})", dw, dh);
+                    let _ = self.gpu.set_scanout(sres, dw, dh);
                     // Flush AFTER the bind (#57): a RESOURCE_FLUSH reaches
                     // only scanouts bound to the resource, so the
                     // screen_flush_full above -- issued while the OLD
@@ -1059,7 +1178,7 @@ impl Comp {
                     // dirties on replace, which masked this headless).
                     // The post-bind flush makes the switch self-healing
                     // on every frontend.
-                    let _ = self.gpu.flush(SCREEN_RES, 0, 0, dw, dh);
+                    let _ = self.gpu.flush(sres, 0, 0, dw, dh);
                     self.scanout = Scanout::Composed;
                 }
                 if structural {
@@ -1260,10 +1379,14 @@ impl Comp {
         if r.is_empty() {
             return;
         }
+        let res = match &self.screen {
+            Some(s) => s.res,
+            None => return,
+        };
         let dw = self.gpu.width as u64;
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
-        let _ = self.gpu.transfer(SCREEN_RES, off, r.x, r.y, r.w, r.h);
-        let _ = self.gpu.flush(SCREEN_RES, r.x, r.y, r.w, r.h);
+        let _ = self.gpu.transfer(res, off, r.x, r.y, r.w, r.h);
+        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
     }
 
     /// Flush surface `n`'s held region (F13 release; also the implicit
@@ -1418,6 +1541,7 @@ impl Comp {
             Some(s) => s,
             None => return,
         };
+        say!("tapestryd: retire surface {}", n);
         // A stale last_focus naming this slot would suppress the gained
         // event for a FUTURE surface minted into it -- clear it (the
         // reconcile below re-emits for whatever takes focus).
@@ -2778,9 +2902,53 @@ impl Conn {
         }
     }
 
+    /// cfg-3 (AURORA-CONFIG.md section 3.3): does this conn's LIVE peer
+    /// hold the console-RENDERER role? t_srv_peer resolves the identity
+    /// fresh under the proc-table lock, so a moved/died role revokes on
+    /// the next authority write. Fail-closed on any error.
+    fn peer_is_renderer(&self) -> bool {
+        let mut info = TSrvPeerInfo::default();
+        if unsafe { t_srv_peer(self.handle, &mut info) } != 0 {
+            return false;
+        }
+        info.alive == 1 && (info.flags & T_SRV_PEER_FLAG_CONSOLE_RENDERER) != 0
+    }
+
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        // The apply-authority gate (cfg-3; the ARCH section 25.4 cfg-3
+        // addendum is the prosecution list): the AUTHORITY-BEARING global
+        // verbs -- mode, clock-rate, and every future global mutation (a
+        // new verb defaults to GATED; chord/gaps land here) -- admit only
+        // a conn whose LIVE peer holds the console-renderer role. Checked
+        // per write (revocation-correct). The determinism verbs below
+        // stay outside (their production posture is the #880 feature
+        // strip, and the battery -- a non-renderer -- drives them in test
+        // builds); ctl READS stay ungated (the geometry query).
+        let authority = s.starts_with("mode") || s.starts_with("clock-rate");
+        if authority && !self.peer_is_renderer() {
+            return Err(p9::E_PERM);
+        }
+        if s == "mode auto" {
+            // Re-probe the host's preferred rect and adopt it (base
+            // virtio-gpu reports one rect, not a mode list). Absent or
+            // probe-failed: fail soft, current mode stands.
+            let probed = comp.gpu.query_display_info().ok().flatten();
+            return match probed {
+                Some((w, h)) => comp.set_mode(w, h),
+                None => Err(p9::E_AGAIN),
+            };
+        }
+        if let Some(rest) = s.strip_prefix("mode ") {
+            let mut it = rest.split_ascii_whitespace();
+            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            return comp.set_mode(w, h);
+        }
         if let Some(rate) = s.strip_prefix("clock-rate ") {
             let hz: u32 = rate.trim().parse().map_err(|_| p9::E_INVAL)?;
             if !(1..=240).contains(&hz) {
@@ -2999,6 +3167,7 @@ impl Conn {
                     return Err(E_IO);
                 }
             }
+            say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
             if comp.gpu.set_scanout(res, w, h).is_ok() {
                 // Post-bind full flush (#57): the per-rect flushes above
                 // targeted a not-yet-scanned-out resource (dropped by

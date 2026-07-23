@@ -2,3 +2,4 @@
 # AURORA-CONFIG.md section 3.2). key value; unknown keys are ignored.
 theme bonfire
 cursor-blink on
+mode auto

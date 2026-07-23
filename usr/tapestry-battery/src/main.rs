@@ -778,6 +778,22 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: test-mode OK");
 
+    // cfg-3: the apply-authority gate (AURORA-CONFIG.md section 3.3). The
+    // battery is NOT the console renderer, so the AUTHORITY verbs must
+    // refuse this conn -- while its ctl READ (the geometry parse above)
+    // and the determinism verbs (the whole test-mode leg above) stay
+    // live. A `mode` acceptance here would be exactly the privilege leak
+    // the gate closes: any boot-chain client driving the shared display.
+    if write_file(root, "ctl", "mode 640 480") {
+        say!("tapestry-battery: FAIL gate: mode accepted from a non-renderer");
+        return 1;
+    }
+    if write_file(root, "ctl", "clock-rate 30") {
+        say!("tapestry-battery: FAIL gate: clock-rate accepted from a non-renderer");
+        return 1;
+    }
+    say!("battery: gate OK");
+
     // The hold leg (TPRESENT_HOLD + release, G-6c): magenta blits into
     // the screen buffer NOW but the device push defers -- on screen B
     // stays blue until release. The host samples between the two dumps;

@@ -218,10 +218,13 @@ invoke or spoof it.
   aurora-local). Known cosmetic edge: holding Esc past the close leaks
   its autorepeats to the terminal (a tap does not).
 - **Sections**: *Appearance* (live: theme cycler + cursor blink) and
-  *Display* (info-only — resolution + zoom policy render dark-gray with a
-  "read-only until the mode ctl lands" hint; the value pushes arrive with
-  the gated compositor ctl, AURORA-CONFIG §3.3). Keys: Up/Dn select,
-  Left/Right/Enter cycle, Tab section, Esc/F10 close.
+  *Display* (live since cfg-3: the MODE row — Left/Right cycles a
+  PENDING preset, **Enter applies** through the gated compositor ctl
+  (the monitor-OSD semantic: a whole-display reconfigure never fires on
+  mere navigation); Resolution + zoom policy stay info rows. The
+  pending choice re-seeds from the APPLIED settings at every open —
+  `Osd::open_at`). Keys: Up/Dn select, Left/Right/Enter cycle, Tab
+  section, Esc/F10 close.
 - **Theme = runtime palette** (`vt.rs::Palette` + `THEMES` + `Vt::set_theme`):
   cells bake resolved colors at write time, so a switch retints existing
   content by **exact old→new color match** across both screens + the live
@@ -263,11 +266,29 @@ invoke or spoof it.
   barrier fails the save LOUDLY — best-effort hid the first attempt. See
   the corvus `persist_keypair_wrap` discipline it now mirrors). The OSD
   writes through on EVERY change (per-keystroke when cycling — immediate
-  commit, monitor-style). Baked default:
+  commit, monitor-style; the MODE row is the exception: apply-on-Enter,
+  and it persists ONLY on an accepted ctl write). Baked default:
   `usr/aurora/config.default` → the pool populate (the `/lib/ndb/local`
-  pattern, readback-verified). Keys: `theme <name>`, `cursor-blink on|off`.
-  The compositor tier (`mode`, chords, gaps) lands with the
-  apply-authority gate (§3.3) — never before it.
+  pattern, readback-verified). Keys: `theme <name>`, `cursor-blink on|off`,
+  `mode auto | <W> <H>` (cfg-3).
+- **The compositor tier + push-on-start (cfg-3)**: `Settings.mode`
+  (`osd::Mode::{Auto, Fixed}`) is the one value aurora pushes to the
+  SHARED compositor — through the GATED global ctl (AURORA-CONFIG.md
+  §3.3; aurora holds the console-renderer role the gate admits). At
+  startup, `config::load` runs BEFORE the tapestry connect and a
+  `Fixed(w,h)` mode pushes on a THROWAWAY conn
+  (`tapestry::global_ctl_once`, bounded retry) ahead of
+  `Surface::fullscreen()` — so the console surface is BORN at the
+  configured geometry (the Boot-scanout `set_mode` arm; no boot-time
+  reweave). `Auto` never pushes (it IS the boot default). The OSD's
+  Display section is live: the Mode row cycles a PENDING preset
+  (`MODE_PRESETS`: auto + six common rasters), Enter applies via
+  `surf.global_ctl("mode W H")` on aurora's own conn, and settings +
+  config::save commit only when the compositor ACCEPTED the write (a
+  refused apply must not seed the startup push). The resulting
+  CONFIGURE rides the existing resize arm — grid realloc, present,
+  winsize re-report (#55) — so the whole session learns the new
+  geometry through `tty:winch`.
 - **The per-user push (cfg-2b)**: `$home/lib/aurora` is the SESSION's
   file, pushed in-band over the console wire as
   `OSC 7770;aurora;<key>;<value>` (BEL or ST) — the xterm dynamic-colors
@@ -276,7 +297,16 @@ invoke or spoof it.
   cap 16, fail-soft on malformed/oversize; titles swallowed as before) and
   lands each as a `key value` line in `Vt.settings_req`; the main loop
   applies via the SAME `config::parse` the file uses — **deliberately
-  without `config::save`** (session-scoped by scripture). The
+  without `config::save`** (session-scoped by scripture) — and, since
+  cfg-3, ONLY through the authority-key ALLOWLIST: `theme` and
+  `cursor-blink` pass, everything else (`mode` above all) is refused
+  with a logged `aurora: OSC settings key ... refused`. Without the
+  allowlist a session-injected `mode` would sit in `settings` and ride
+  the NEXT OSD `config::save` into the gated startup push — session
+  authority laundered through aurora's renderer role. The `reset
+  system` arm is exempt by construction (it re-reads aurora's OWN
+  system file — values the session cannot choose — and re-pushes
+  nothing). The
   `aurora-push` coreutil reads `$HOME/lib/aurora` (from the login-seeded
   `/env`) and ALWAYS emits `reset system` first — the reset re-seeds from
   the system file, so every session start is *system defaults ⊕ user

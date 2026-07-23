@@ -329,8 +329,10 @@ free.
   pre-login system renderer, legitimately owns (§3.2 "the writer defines the
   tier"; the per-user `$home/lib/aurora` is the session's, pushed via OSC).
   The reweave/resize fan-out rides the audited G-6b CONFIGURE protocol.
-- **Scope (v1)**: Display (mode/resolution, zoom-policy) + Appearance (palette,
-  font-scale, cursor); Chords + Session as later tabs. The system/display tier.
+- **Scope (v1)**: Display (mode/resolution — LIVE since cfg-3: the Mode row
+  cycles a pending preset, Enter applies through the gated ctl, persists on
+  acceptance; zoom-policy info) + Appearance (palette, cursor; font-scale a
+  later row); Chords + Session as later tabs. The system/display tier.
 - **Trust**: "Halcyon can never invoke it" holds by construction — it is not a
   program, it is part of the Aurora renderer; Halcyon is a different environment
   with its OWN settings UI over its OWN config file. The apply-authority gate
@@ -389,7 +391,10 @@ touches a trust boundary is the §3.3 apply-authority gate.
      `mode W H` verb + the CONFIGURE fan-out (composes G-6b's
      generation-fence reweave), landing WITH the gate + its focused audit
      pass (do not ship an ungated `mode`); the OSD's Display section goes
-     live here.
+     live here. CHUNK cfg-3 — BUILT (the kernel renderer-role stamp + the
+     gated `mode`/`clock-rate` + the OSD Display live + push-on-start +
+     the OSC allowlist; `ls-gfx-mode.exp` + the battery gate leg +
+     `devsrv.srv_peer_renderer_flag`).
   4. **Runtime chords** (§3.5) + the niceties (gaps etc.) — additive, each
      a small component read of a pushed value.
 

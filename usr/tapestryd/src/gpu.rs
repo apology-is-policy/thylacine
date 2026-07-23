@@ -535,6 +535,26 @@ impl Gpu {
     /// GET_DISPLAY_INFO: adopt scanout 0's enabled rect as the display
     /// geometry (fail-soft to the default when absent or absurd).
     fn read_display_info(&mut self) -> Result<(), Error> {
+        match self.query_display_info()? {
+            Some((w, h)) => {
+                self.width = w;
+                self.height = h;
+            }
+            None => {
+                say!(
+                    "tapestryd: scanout0 absent/absurd; default {}x{}",
+                    self.width,
+                    self.height
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// cfg-3: probe GET_DISPLAY_INFO WITHOUT adopting -- the `mode auto`
+    /// re-probe (the boot path adopts via read_display_info above).
+    /// Ok(None) = scanout 0 absent or absurd (the caller fails soft).
+    pub fn query_display_info(&mut self) -> Result<Option<(u32, u32)>, Error> {
         unsafe { write_ctrl_hdr(self.ring_va + REQ_OFF, VIRTIO_GPU_CMD_GET_DISPLAY_INFO) };
         self.ctrl.step(
             "GET_DISPLAY_INFO",
@@ -549,19 +569,10 @@ impl Gpu {
         let h = unsafe { r32(d0 + 12) };
         let enabled = unsafe { r32(d0 + 16) };
         if enabled != 0 && (1..=MAX_DISPLAY_DIM).contains(&w) && (1..=MAX_DISPLAY_DIM).contains(&h) {
-            self.width = w;
-            self.height = h;
+            Ok(Some((w, h)))
         } else {
-            say!(
-                "tapestryd: scanout0 absent/absurd (en={} {}x{}); default {}x{}",
-                enabled,
-                w,
-                h,
-                self.width,
-                self.height
-            );
+            Ok(None)
         }
-        Ok(())
     }
 
     pub fn resource_create_2d(&mut self, resource_id: u32, w: u32, h: u32) -> Result<(), Error> {

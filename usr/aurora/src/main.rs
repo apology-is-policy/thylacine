@@ -138,6 +138,54 @@ pub extern "C" fn rs_main() -> i64 {
         say!("aurora: /dev/consctl open failed (winsize reporting off)");
     }
 
+    // cfg-2a/cfg-3: the system-tier config seeds settings BEFORE the
+    // connect, so the compositor tier can push AHEAD of the surface create
+    // -- the console surface is then born at the configured mode (no
+    // boot-time reweave) and the pre-login screen wears the persisted
+    // theme (the monitor-OSD semantic).
+    let mut settings = osd::Settings::new();
+    config::load(&mut settings);
+    if let osd::Mode::Fixed(mw, mh) = settings.mode {
+        // Push-on-start (AURORA-CONFIG.md section 3.1): the gated `mode`
+        // verb on aurora's OWN throwaway conn (the gate's peer identity is
+        // per-conn; aurora holds the renderer role). Bounded retry only
+        // while tapestryd is not yet accepting; best-effort -- a refused
+        // or failed push leaves the default mode and the OSD still works.
+        let mut pushed = false;
+        for _ in 0..CONNECT_TRIES {
+            match tapestry::global_ctl_once(&alloc::format!("mode {} {}", mw, mh)) {
+                Ok(()) => {
+                    pushed = true;
+                    break;
+                }
+                Err(TapError::Connect) => {
+                    let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
+                }
+                Err(e) => {
+                    say!("aurora: startup mode push ({}x{}) write failed {:?}", mw, mh, e);
+                    pushed = true; // reported; don't double-log below
+                    break;
+                }
+            }
+        }
+        if !pushed {
+            say!("aurora: startup mode push ({}x{}) no compositor", mw, mh);
+        } else {
+            // Verify-readback: one diagnostic line per fixed-mode boot --
+            // the push is load-bearing for the whole session's geometry,
+            // so its outcome must be evidence, not silence.
+            match tapestry::display_dims() {
+                Some((dw, dh)) if dw == mw && dh == mh => {
+                    say!("aurora: mode push verified {}x{}", dw, dh);
+                }
+                Some((dw, dh)) => {
+                    say!("aurora: mode push MISMATCH want {}x{} got {}x{}", mw, mh, dw, dh);
+                }
+                None => say!("aurora: mode push verify read failed"),
+            }
+        }
+    }
+
     // Bounded connect retry (the demo discipline): tapestryd is
     // warden-spawned long before this, but a slow bring-up must not flake.
     let mut surf: Option<Surface> = None;
@@ -174,12 +222,8 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let mut term = Vt::new(cols, rows);
 
-    // The F10 settings overlay (osd.rs) + the aurora-local settings it edits.
-    // cfg-2a: the system-tier config seeds them (best-effort -- absent file =
-    // the compiled defaults) BEFORE the first present, so the pre-login
-    // screen already wears the persisted theme (the monitor-OSD semantic).
-    let mut settings = osd::Settings::new();
-    config::load(&mut settings);
+    // The F10 settings overlay (osd.rs); settings were loaded pre-connect
+    // (the theme applies here, where the Vt exists).
     if settings.theme != 0 {
         term.set_theme(settings.theme);
     }
@@ -270,12 +314,34 @@ pub extern "C" fn rs_main() -> i64 {
                                          config::CONFIG_PATH);
                                 }
                             }
+                            osd::OsdOut::ModeApply(mode) => {
+                                // cfg-3: the compositor tier rides the
+                                // GATED ctl on aurora's own conn. Persist
+                                // ONLY on an accepted apply -- a refused/
+                                // failed write must not seed the startup
+                                // push with a mode the compositor never
+                                // took.
+                                let cmd = match mode {
+                                    osd::Mode::Auto => String::from("mode auto"),
+                                    osd::Mode::Fixed(w, h) => {
+                                        alloc::format!("mode {} {}", w, h)
+                                    }
+                                };
+                                if surf.global_ctl(&cmd).is_ok() {
+                                    settings.mode = mode;
+                                    if !config::save(&settings) {
+                                        say!("aurora: config save failed ({})",
+                                             config::CONFIG_PATH);
+                                    }
+                                } else {
+                                    say!("aurora: mode apply refused ({})", cmd);
+                                }
+                            }
                             osd::OsdOut::Close => full_fill = true,
                             osd::OsdOut::None => {}
                         }
                     } else if e.value == 1 && e.code == osd::KEY_F10 {
-                        ui.open = true;
-                        ui.dirty = true;
+                        ui.open_at(&settings);
                     } else {
                         keybuf.clear();
                         key_bytes(e.code, e.value, e.rune, &mut keybuf);
@@ -420,10 +486,28 @@ pub extern "C" fn rs_main() -> i64 {
                         for line in reqs {
                             let old = settings.theme;
                             if line == "reset system" {
+                                // Re-seed from aurora's OWN file (the mode
+                                // it carries was already pushed at boot;
+                                // nothing re-pushes here).
                                 settings = osd::Settings::new();
                                 config::load(&mut settings);
                             } else {
-                                config::parse(&line, &mut settings);
+                                // cfg-3: the AUTHORITY-KEY allowlist. The
+                                // OSC channel is cosmetic/session-scoped
+                                // by scripture (3.2/3.3) and must never
+                                // carry `mode` -- a session-injected mode
+                                // reaching settings would launder session
+                                // authority into the OSD's config::save +
+                                // the gated startup push. Only the
+                                // renderer-local keys pass.
+                                let key =
+                                    line.split_whitespace().next().unwrap_or("");
+                                if key == "theme" || key == "cursor-blink" {
+                                    config::parse(&line, &mut settings);
+                                } else {
+                                    say!("aurora: OSC settings key {:?} refused",
+                                         key);
+                                }
                             }
                             if settings.theme != old {
                                 term.set_theme(settings.theme);

@@ -279,6 +279,15 @@ expect {
     timeout { lc_fail "battery never completed test-mode" }
 }
 
+# The cfg-3 apply-authority gate leg: the battery (NOT the console
+# renderer) must be REFUSED the authority verbs (mode, clock-rate) on the
+# very conn whose ctl read + determinism verbs just worked above.
+expect {
+    -ex "battery: gate OK" { lc_pass "panes: authority verbs refused for a non-renderer conn" }
+    -ex "tapestry-battery: FAIL" { lc_fail "the apply-authority gate leg failed" }
+    timeout { lc_fail "battery never completed the gate leg" }
+}
+
 # The hold leg (TPRESENT_HOLD + release): B is magenta-presented but the
 # screen must still show blue until the release.
 expect {
@@ -340,5 +349,5 @@ lc_run_expect "cat /dev/winsize" "winsize 128 36"
 lc_pass "panes: winsize restored fullscreen after the battery (#55 live across reweaves)"
 
 lc_quit
-lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + hold + close + collapse)"
+lc_pass "ls-gfx-panes: the G-6 compositor leg verified (focus-event + structure + resize + multirect + tabs + zoom + move + focus + chord + rel + test-mode + gate + hold + close + collapse)"
 exit 0

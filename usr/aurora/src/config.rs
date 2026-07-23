@@ -11,7 +11,7 @@
 // the compiled defaults; a failed save never disturbs the live settings.
 // Config can never break the fbcon.
 
-use crate::osd::Settings;
+use crate::osd::{Mode, Settings};
 use crate::vt::THEMES;
 use alloc::format;
 use alloc::string::String;
@@ -47,6 +47,26 @@ pub fn parse(text: &str, s: &mut Settings) {
                 "off" => s.cursor_blink = false,
                 _ => {}
             },
+            // cfg-3: the compositor tier. Reaches settings ONLY from the
+            // config FILE tiers -- the OSC drain arm allowlists its keys
+            // and never passes `mode` through here (a session-injected
+            // mode reaching config::save would launder session authority
+            // into the gated startup push). Structural parse only; the
+            // server's gate + bounds are the authority.
+            "mode" => {
+                if val == "auto" {
+                    s.mode = Mode::Auto;
+                } else {
+                    let mut it = val.split_ascii_whitespace();
+                    if let (Some(w), Some(h), None) = (
+                        it.next().and_then(|t| t.parse::<u32>().ok()),
+                        it.next().and_then(|t| t.parse::<u32>().ok()),
+                        it.next(),
+                    ) {
+                        s.mode = Mode::Fixed(w, h);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -54,13 +74,19 @@ pub fn parse(text: &str, s: &mut Settings) {
 
 /// The canonical file content (the inverse of parse).
 pub fn render(s: &Settings) -> String {
+    let mode = match s.mode {
+        Mode::Auto => String::from("auto"),
+        Mode::Fixed(w, h) => format!("{} {}", w, h),
+    };
     format!(
         "# aurora renderer config (the system tier -- the F10 OSD writes this;\n\
          # AURORA-CONFIG.md section 3.2). key value; unknown keys are ignored.\n\
          theme {}\n\
-         cursor-blink {}\n",
+         cursor-blink {}\n\
+         mode {}\n",
         THEMES[s.theme % THEMES.len()].0,
         if s.cursor_blink { "on" } else { "off" },
+        mode,
     )
 }
 
@@ -140,11 +166,19 @@ mod tests {
         let mut s = Settings::new();
         s.theme = 1;
         s.cursor_blink = false;
+        s.mode = Mode::Fixed(1600, 900);
         let text = render(&s);
         let mut back = Settings::new();
         parse(&text, &mut back);
         assert_eq!(back.theme, 1);
         assert!(!back.cursor_blink);
+        assert!(back.mode == Mode::Fixed(1600, 900));
+        // The auto form round-trips too (the non-pushing default).
+        s.mode = Mode::Auto;
+        let mut back2 = Settings::new();
+        back2.mode = Mode::Fixed(1, 1);
+        parse(&render(&s), &mut back2);
+        assert!(back2.mode == Mode::Auto);
     }
 
     #[test]
@@ -156,13 +190,19 @@ mod tests {
              theme spinifex\n\
              theme not-a-theme\n\
              cursor-blink sideways\n\
+             mode garbage here\n\
+             mode 12\n\
+             mode 1280 800 7\n\
              unknown-key whatever\n\
              justakeywithnovalue\n",
             &mut s,
         );
         // The valid theme line applied; the invalid one was ignored (did not
-        // reset); the bad blink value left the default; unknowns ignored.
+        // reset); the bad blink value left the default; every malformed mode
+        // form (non-numeric, one field, three fields) left Auto; unknowns
+        // ignored.
         assert_eq!(s.theme, 2, "spinifex applied, not-a-theme ignored");
         assert!(s.cursor_blink, "bad blink value leaves the default");
+        assert!(s.mode == Mode::Auto, "malformed mode lines leave the default");
     }
 }
