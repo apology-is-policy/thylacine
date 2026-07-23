@@ -225,8 +225,9 @@ pub extern "C" fn rs_main() -> i64 {
         let _ = surf.global_ctl(&alloc::format!("gaps {}", g));
     }
     if !settings.chords.is_empty() || settings.gaps.is_some() {
-        // A single startup line for the cfg-4 push (the ls-gfx-chords E2E
-        // gates on it; also the honest "what did the config change" record).
+        // A single startup record of the cfg-4 push (the honest "what did
+        // the config change" line; the ls-gfx-chords skip-probe gates on
+        // the config CONTENT in-guest, not this line).
         match settings.gaps {
             Some(g) => say!("aurora: cfg-4 pushed {} chord(s), gaps={}",
                             settings.chords.len(), g),

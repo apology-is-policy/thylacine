@@ -70,11 +70,18 @@ proc ch_bonfire {} {
     return -1
 }
 
+# Returns the "R G B" at (x,y), retrying the dump (F7: a transient dump
+# failure must not be mislabeled a color mismatch). "" only after retries.
 proc ch_pixel {x y} {
     global repo qmp
-    file delete -force /tmp/ls-gfx-chords.ppm
-    if {[ch_dump /tmp/ls-gfx-chords.ppm] ne ""} { return "" }
-    return [exec $repo/tools/ppm-sample.py /tmp/ls-gfx-chords.ppm $x $y]
+    for {set i 0} {$i < 12} {incr i} {
+        file delete -force /tmp/ls-gfx-chords.ppm
+        if {[ch_dump /tmp/ls-gfx-chords.ppm] eq "" && [file exists /tmp/ls-gfx-chords.ppm]} {
+            return [exec $repo/tools/ppm-sample.py /tmp/ls-gfx-chords.ppm $x $y]
+        }
+        after 500
+    }
+    return "DUMP-FAILED"
 }
 
 proc ch_key {chord} {
@@ -87,6 +94,25 @@ proc ch_key {chord} {
 
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
+
+# ENV-GATE probe (F1): this scenario is enrolled in the default LS-CI glob,
+# but the compositor-tier test lines are baked ONLY under
+# THYLACINE_AURORA_CFG4=1. On a default image /lib/aurora/config carries no
+# `chord ` line -- SKIP cleanly (the go5.exp idiom: lc_quit + exit 0 = the
+# runner counts it PASS), never a deterministic red that trains red-blindness.
+# The `chord ` grep is output-only (a config line, never a typed echo).
+set timeout 8
+send "cat /lib/aurora/config\r"
+expect {
+    -re {chord super\+g zoom} { lc_step "cfg-4 config present (super+g=zoom baked)" }
+    timeout {
+        send_user "\n==> SKIP ls-gfx-chords: cfg-4 config not baked (build with THYLACINE_AURORA_CFG4=1 to run)\n"
+        lc_quit
+        exit 0
+    }
+    eof { lc_fail "qemu exited during the cfg-4 config probe" }
+}
+set timeout $lc_cmd_timeout
 
 # Anchor: the fullscreen console settles (bonfire dominant).
 set bf -1
@@ -109,6 +135,7 @@ lc_pass "chords: Super+H split (default binding; bonfire=$bf)"
 # gaps: the console (left pane) is inset 8px, so its outer-left column is
 # BG. At the default gaps 1 this pixel would be the console's bonfire.
 set px [ch_pixel 4 400]
+if {$px eq "DUMP-FAILED"} { lc_fail "gaps leg: screendump never succeeded (harness, not the guest)" }
 if {$px ne $BG} {
     lc_fail "gaps not applied: pixel (4,400)='$px' want BG '$BG' (build with THYLACINE_AURORA_CFG4=1?)"
 }

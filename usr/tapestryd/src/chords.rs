@@ -138,10 +138,15 @@ impl Chords {
         }
     }
 
-    /// Restore the defaults (the environment's reset-first push: a removed
-    /// config line reverts to its default, never lingers).
+    /// Restore the default BINDINGS (the environment's reset-first push: a
+    /// removed config chord reverts to its default). cfg-4 audit F3:
+    /// DECOUPLED from `gaps` -- `chord-reset` resets bindings ONLY, never
+    /// the inset (which has its own verb + reconcile; a silent gaps reset
+    /// here left a stale visible inset with no triggering command).
     pub fn reset(&mut self) {
+        let gaps = self.gaps;
         *self = Chords::new();
+        self.gaps = gaps;
     }
 
     /// The dispatch lookup: what action does this (key, shift) bind?
@@ -188,17 +193,16 @@ fn parse_combo(combo: &str) -> Result<(u16, bool), ()> {
         if tok.is_empty() {
             return Err(());
         }
+        // The key must be the FINAL token: any token after it (a second
+        // key OR a modifier) is malformed (cfg-4 audit F4: the strict
+        // grammar the comment states -- modifiers must precede the key).
+        if key.is_some() {
+            return Err(());
+        }
         match tok {
             "super" => super_seen = true,
             "shift" => shift = true,
-            other => {
-                // The key must be the final token: a token after the key
-                // (a second key, or a modifier after the key) is malformed.
-                if key.is_some() {
-                    return Err(());
-                }
-                key = Some(key_code(other).ok_or(())?);
-            }
+            other => key = Some(key_code(other).ok_or(())?),
         }
     }
     match (super_seen, key) {
@@ -261,6 +265,7 @@ mod tests {
         assert!(c.bind("f", "zoom").is_err(), "super required");
         assert!(c.bind("super+", "zoom").is_err(), "empty key token");
         assert!(c.bind("super+f+g", "zoom").is_err(), "two keys");
+        assert!(c.bind("super+f+shift", "zoom").is_err(), "F4: modifier after key");
         assert!(c.bind("super+nope", "zoom").is_err(), "unknown key");
         assert!(c.bind("super+f", "fly").is_err(), "unknown action");
         assert!(c.bind("ctrl+f", "zoom").is_err(), "non-super modifier only, no super");
