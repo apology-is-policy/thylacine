@@ -60,8 +60,9 @@ impl Settings {
 /// What a handled key asks the main loop to do.
 pub enum OsdOut {
     None,
-    Close,        // repaint the terminal (full_fill)
-    ThemeChanged, // call Vt::set_theme(settings.theme)
+    Close,          // repaint the terminal (full_fill)
+    ThemeChanged,   // call Vt::set_theme(settings.theme) + persist (cfg-2a)
+    SettingChanged, // a non-theme setting moved -> persist (cfg-2a)
 }
 
 const SEC_DISPLAY: usize = 0;
@@ -137,7 +138,7 @@ impl Osd {
                     }
                     _ => {
                         s.cursor_blink = !s.cursor_blink;
-                        OsdOut::None
+                        OsdOut::SettingChanged
                     }
                 }
             }

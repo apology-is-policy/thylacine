@@ -42,6 +42,7 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+mod config;
 mod osd;
 mod render;
 mod vt;
@@ -172,9 +173,15 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let mut term = Vt::new(cols, rows);
 
-    // The F10 settings overlay (osd.rs) + the aurora-local settings it edits
-    // (AURORA-CONFIG.md section 3.6; session-lived until the config file).
+    // The F10 settings overlay (osd.rs) + the aurora-local settings it edits.
+    // cfg-2a: the system-tier config seeds them (best-effort -- absent file =
+    // the compiled defaults) BEFORE the first present, so the pre-login
+    // screen already wears the persisted theme (the monitor-OSD semantic).
     let mut settings = osd::Settings::new();
+    config::load(&mut settings);
+    if settings.theme != 0 {
+        term.set_theme(settings.theme);
+    }
     let mut ui = osd::Osd::new();
 
     // Frame 0: clear the whole mode to the theme bg (the margins outside
@@ -248,6 +255,19 @@ pub extern "C" fn rs_main() -> i64 {
                         match ui.handle_key(e.code, e.value, &mut settings) {
                             osd::OsdOut::ThemeChanged => {
                                 term.set_theme(settings.theme);
+                                // cfg-2a write-through (the monitor-OSD
+                                // semantic). Best-effort: a failed save
+                                // never disturbs the live settings.
+                                if !config::save(&settings) {
+                                    say!("aurora: config save failed ({})",
+                                         config::CONFIG_PATH);
+                                }
+                            }
+                            osd::OsdOut::SettingChanged => {
+                                if !config::save(&settings) {
+                                    say!("aurora: config save failed ({})",
+                                         config::CONFIG_PATH);
+                                }
                             }
                             osd::OsdOut::Close => full_fill = true,
                             osd::OsdOut::None => {}

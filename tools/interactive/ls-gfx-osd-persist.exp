@@ -1,0 +1,113 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-osd-persist.exp -- cfg-2a: the OSD write-through +
+# the cross-reboot startup apply (AURORA-CONFIG.md section 3.2 "the writer
+# defines the tier"; the monitor-OSD persistence semantic).
+#
+# TWO BOOTS in one scenario:
+#   boot 1: the baked default loads (bonfire bg dominant post-login) -> F10 ->
+#           Right (parchment; live retint) -> Esc -> `cat /lib/aurora/config`
+#           shows `theme parchment` (the write-tmp+fsync+rename landed) -> quit.
+#   boot 2: parchment bg dominant right after login WITH NO OSD TOUCH -- the
+#           cross-reboot proof that aurora read + applied the persisted config
+#           at startup (pre-first-present) -> F10 -> Left (bonfire back) ->
+#           Esc -> the file shows `theme bonfire` + the screen restored ->
+#           quit. The scenario ENDS at the baked default (hygiene: later
+#           scenarios' -c console verify asserts the Bonfire bg).
+#
+# FAILURE HYGIENE: a mid-run failure between the two theme writes leaves
+# `theme parchment` persisted in pool.img -- subsequent -c-asserting scenarios
+# then fail LOUDLY (not silently). Recovery: re-run this scenario, or
+# `tools/build.sh all` (the pool re-bake restores the default).
+#
+# HVF like the ls-gfx family (bare TCG hangs at the 8a-2b hwwatch E2E).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+set BONFIRE_BG "0E0C0C"
+set PARCH_BG "F1EAE0"
+
+proc osd_dump {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+proc osd_frac {label color lo hi} {
+    global repo
+    set out "(no successful dump)"
+    for {set i 0} {$i < 12} {incr i} {
+        if {[osd_dump /tmp/ls-gfx-osd-persist.ppm] eq ""} {
+            if {![catch {exec python3 $repo/tools/ppm-colorfrac.py \
+                    /tmp/ls-gfx-osd-persist.ppm $color $lo $hi} out]} {
+                return ""
+            }
+        }
+        after 700
+    }
+    return "colorfrac $color never entered \[$lo, $hi\] ($label): $out"
+}
+
+proc osd_key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+}
+
+# ---------- boot 1: default loads; the OSD persists parchment ----------
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+set err [osd_frac "boot-1 baked default (bonfire bg)" $BONFIRE_BG 0.5 1]
+if {$err ne ""} { lc_fail "boot 1: the baked default did not apply: $err" }
+lc_pass "persist: boot 1 wears the baked default (bonfire)"
+
+osd_key "f10"
+set err [osd_frac "boot-1 panel up" "AAAAAA" 0.05 1]
+if {$err ne ""} { lc_fail "boot 1: F10 did not raise the panel: $err" }
+osd_key "right"
+set err [osd_frac "boot-1 parchment live" $PARCH_BG 0.30 1]
+if {$err ne ""} { lc_fail "boot 1: theme cycle did not retint: $err" }
+osd_key "esc"
+lc_pass "persist: boot 1 switched to parchment via the OSD"
+
+# The write-through proof: the token `theme parchment` cannot come from the
+# typed command (output-only discipline).
+lc_run_expect "cat /lib/aurora/config" "theme parchment"
+lc_pass "persist: the OSD wrote through (/lib/aurora/config shows parchment)"
+
+lc_quit
+
+# ---------- boot 2: the cross-reboot startup apply; restore ----------
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# NO OSD interaction yet: the parchment screen can only come from aurora
+# reading + applying the persisted config at startup.
+set err [osd_frac "boot-2 cross-reboot apply (parchment bg)" $PARCH_BG 0.5 1]
+if {$err ne ""} { lc_fail "boot 2: the persisted theme did not apply at startup: $err" }
+lc_pass "persist: boot 2 wears parchment from the config (cross-reboot apply)"
+
+# Restore the baked default (hygiene for the -c-asserting siblings).
+osd_key "f10"
+set err [osd_frac "boot-2 panel up" "AAAAAA" 0.05 1]
+if {$err ne ""} { lc_fail "boot 2: F10 did not raise the panel: $err" }
+osd_key "left"
+set err [osd_frac "boot-2 bonfire restored live" $BONFIRE_BG 0.5 1]
+if {$err ne ""} { lc_fail "boot 2: theme cycle back did not restore: $err" }
+osd_key "esc"
+lc_run_expect "cat /lib/aurora/config" "theme bonfire"
+set err [osd_frac "boot-2 parchment gone" $PARCH_BG 0 0.02]
+if {$err ne ""} { lc_fail "boot 2: parchment residue on screen: $err" }
+lc_pass "persist: boot 2 restored bonfire (screen + file)"
+
+lc_quit
+lc_pass "ls-gfx-osd-persist: cfg-2a verified (write-through + cross-reboot startup apply)"
+exit 0

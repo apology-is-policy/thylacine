@@ -1974,6 +1974,22 @@ populate_stratum_pool() {
         || { echo "==> populate pool: /lib/ndb/local readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /lib/ndb/local baked + readback-verified (NET-DESIGN s5 ndb)"
 
+    # --- aurora-config cfg-2a: bake the system-tier renderer config ---
+    # /lib/aurora/config is the DEVICE's memory (AURORA-CONFIG.md section 3.2
+    # "the writer defines the tier"): aurora reads it at startup (the
+    # pre-login theme) and the F10 OSD writes through. /lib exists from the
+    # ndb bake above; mkdir is single-level (no -p).
+    local aurcfg_src="$REPO_ROOT/usr/aurora/config.default"
+    "$stratum_fs_bin" -s "$sock_path" mkdir /lib/aurora \
+        || { echo "==> populate pool: mkdir /lib/aurora FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" write /lib/aurora/config < "$aurcfg_src" \
+        || { echo "==> populate pool: write /lib/aurora/config FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (aurora config) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/config | cmp -s - "$aurcfg_src" \
+        || { echo "==> populate pool: /lib/aurora/config readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
+
     # --- net-7c-2: bake the system root-cert bundle at the canonical path ---
     # /etc/ssl/certs/ca-certificates.crt (NET-DESIGN s9; the host-bake idiom,
     # like /lib/ndb/local). The native https tool + the tls crate read it at

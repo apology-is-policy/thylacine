@@ -19,6 +19,12 @@
 #
 # HVF like its ls-gfx siblings (bare TCG hangs at the pre-existing 8a-2b
 # hwwatch E2E -- task #27); GPU-less boots keep the THYLACINE_NO_GPU escape.
+#
+# cfg-2a note: the theme leg WRITES THROUGH to /lib/aurora/config in the
+# pool (the OSD persists). The right-then-left cycle nets to the baked
+# default; a mid-run failure between them can leave `theme parchment`
+# persisted -- later -c-asserting scenarios then fail LOUDLY. Recovery:
+# ls-gfx-osd-persist (restores), or `tools/build.sh all` (pool re-bake).
 
 set ::env(THYLACINE_ACCEL) hvf
 

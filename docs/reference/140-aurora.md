@@ -242,10 +242,33 @@ invoke or spoof it.
   (margins refill — the theme may have changed `pal.bg`). Panel geometry
   derives from the current grid each draw, so a reweave needs no
   notification (sub-floor grids clamp).
-- **Settings are session-lived** in chunk 1; the `$home/lib/aurora`
-  config file + push-on-start is the next sub-chunk (AURORA-CONFIG §3.2),
-  and the compositor tier (`mode`, chords, gaps) lands with the
-  apply-authority gate (§3.3) — never before it.
+- **Persistence (cfg-2a — the system tier)**: `/lib/aurora/config` is the
+  DEVICE's memory (AURORA-CONFIG §3.2 "the writer defines the tier":
+  aurora is a pre-login SYSTEM process and can never touch a per-user
+  encrypted home, so the OSD persists to the tier it owns — the
+  monitor-OSD semantic). `usr/aurora/src/config.rs`: `parse`/`render`
+  (pure, fail-soft — unknown keys/malformed lines ignored, config can
+  never break the fbcon) + `load` (bounded 4-KiB read at startup, applied
+  BEFORE the first present → the pre-login screen wears the persisted
+  theme) + `save` (write-tmp + fsync + rename + a **STRICT post-rename
+  fsync on the SAME OWRITE fd** — the A-1.6 swap with its metadata
+  barrier. The barrier shape is load-bearing and was earned the hard way,
+  three iterations under the persist E2E's hard kill: `SYS_FSYNC` gates
+  on RIGHT_WRITE, so any OREAD-opened fd — a parent dir or a re-opened
+  file — fails with -1 before any 9P is sent; the fd you WROTE carries
+  the right rights and stays valid across the rename (9P fids follow the
+  file), and stratumd's `h_fsync` is a whole-pool `stm_fs_commit`, making
+  it a complete barrier. A crash mid-save leaves the old config, never a
+  torn one; a failed rename leaks a tmp the next save truncates; a failed
+  barrier fails the save LOUDLY — best-effort hid the first attempt. See
+  the corvus `persist_keypair_wrap` discipline it now mirrors). The OSD
+  writes through on EVERY change (per-keystroke when cycling — immediate
+  commit, monitor-style). Baked default:
+  `usr/aurora/config.default` → the pool populate (the `/lib/ndb/local`
+  pattern, readback-verified). Keys: `theme <name>`, `cursor-blink on|off`.
+  The per-user `$home/lib/aurora` is the SESSION's file, pushed in-band
+  via private OSC at login — cfg-2b; the compositor tier (`mode`, chords,
+  gaps) lands with the apply-authority gate (§3.3) — never before it.
 
 ## The gates
 
