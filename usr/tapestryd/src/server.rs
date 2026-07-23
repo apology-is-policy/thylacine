@@ -406,12 +406,20 @@ const SCREEN_RES: u32 = 0x40;
 
 /// cfg-3 display-mode bounds (AURORA-CONFIG.md section 3.4): base
 /// virtio-gpu reports one preferred rect, not a mode list, so `mode W H`
-/// validates against sane bounds; the max keeps the screen buffer
-/// (W*H*4) under the 64-MiB weave cap with room to spare.
+/// validates against sane bounds. The coarse dimension caps are a first
+/// sanity gate; the LOAD-BEARING bound is the triple-buffered-surface
+/// check in set_mode (F3): a fullscreen client surface is
+/// WEAVE_SLOTS-buffered (W*H*4*3), so a mode whose screen fits but whose
+/// fullscreen weave exceeds KOBJ_DMA_WEAVE_MAX_SIZE would let set_mode
+/// succeed yet aurora's create fail -> a blank console. Bounding by the
+/// surface the renderer will immediately create closes that band.
 const MODE_MIN_W: u32 = 320;
 const MODE_MIN_H: u32 = 200;
 const MODE_MAX_W: u32 = 3840;
 const MODE_MAX_H: u32 = 2160;
+/// The kernel's KOBJ_DMA_WEAVE_MAX_SIZE (dma_handle.h) -- the per-weave
+/// framebuffer-class cap a fullscreen surface at the new mode must fit.
+const WEAVE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
 /// kernel test pattern stays until a first present -- the stage-0 look);
@@ -863,6 +871,14 @@ impl Comp {
         if !(MODE_MIN_W..=MODE_MAX_W).contains(&w) || !(MODE_MIN_H..=MODE_MAX_H).contains(&h) {
             return Err(p9::E_INVAL);
         }
+        // F3: reject a mode whose fullscreen TRIPLE-buffered surface would
+        // exceed the per-weave cap -- else set_mode would succeed but the
+        // renderer's immediate fullscreen create fails, blanking the
+        // console. The page-rounded slot stride matches alloc_weave.
+        let slot = (((w as u64) * 4 * (h as u64)) + PAGE - 1) & !(PAGE - 1);
+        if slot * (WEAVE_SLOTS as u64) > WEAVE_MAX_SIZE {
+            return Err(p9::E_INVAL);
+        }
         if w == self.gpu.width && h == self.gpu.height {
             return Ok(()); // same mode: a push of the current value no-ops
         }
@@ -886,18 +902,28 @@ impl Comp {
                 s.held = None;
             }
         }
+        // F2: for a DISPLAYED (Composed) scanout, rebind to the new screen
+        // BEFORE committing any state -- and roll back cleanly on failure.
+        // A discarded set_scanout result could leave the device scanning
+        // the old resource while we free it (device DMA-scanning
+        // returned-to-pool pages -- a display-integrity glitch). `new` is
+        // still a local here, so a failed rebind frees it and leaves the
+        // old screen + geometry byte-for-byte intact.
+        if self.scanout == Scanout::Composed {
+            if self.gpu.set_scanout(new.res, w, h).is_err() {
+                say!("tapestryd: mode rebind failed; old geometry retained");
+                self.free_screen(new);
+                return Err(E_IO);
+            }
+            // The device now scans new.res (zeroed; reconcile's structural
+            // repaint fills it this dispatch); old.res is no longer bound.
+        }
+        // Commit: the old screen is now un-scanned (rebound above) or was
+        // never bound (Boot/Off/Direct) -- either way safe to free.
         let old = self.screen.take();
         self.screen = Some(new);
         self.gpu.width = w;
         self.gpu.height = h;
-        if self.scanout == Scanout::Composed {
-            // Rebind the live scanout to the new screen before the old
-            // resource dies (never free a scanned-out resource). The
-            // buffer is zeroed; reconcile's structural repaint + flush
-            // follow within this same dispatch.
-            let res = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
-            let _ = self.gpu.set_scanout(res, w, h);
-        }
         if let Some(o) = old {
             self.free_screen(o);
         }

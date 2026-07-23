@@ -1990,6 +1990,26 @@ populate_stratum_pool() {
         || { echo "==> populate pool: /lib/aurora/config readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
 
+    # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
+    # a crafted settings-channel OSC whose value embeds a NEWLINE
+    # (`theme;spinifex\nmode 640 480`). `cat`-ing it feeds the exact bytes to
+    # aurora's /dev/consdrain -> osc_end. Pre-fix, config::parse re-split the
+    # value on .lines() and applied BOTH `theme spinifex` (a visible retint)
+    # AND `mode 640 480` past the single-token allowlist; post-fix, the
+    # control byte in the value rejects the whole OSC (no retint, no mode).
+    # ls-gfx-mode's F1 leg cats this and asserts NO spinifex retint. printf
+    # emits the raw ESC/newline/BEL the shell's echo cannot.
+    local osc_attack=/tmp/thyla-osc-newline-attack.$$
+    printf '\033]7770;aurora;theme;spinifex\nmode 640 480\007' > "$osc_attack"
+    "$stratum_fs_bin" -s "$sock_path" write /lib/aurora/osc-newline-attack < "$osc_attack" \
+        || { echo "==> populate pool: write osc-newline-attack FAILED" >&2; rm -f "$osc_attack"; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (osc attack) FAILED" >&2; rm -f "$osc_attack"; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/osc-newline-attack | cmp -s - "$osc_attack" \
+        || { echo "==> populate pool: osc-newline-attack readback MISMATCH" >&2; rm -f "$osc_attack"; kill -TERM "$stratumd_pid"; exit 1; }
+    rm -f "$osc_attack"
+    echo "==> populate pool: /lib/aurora/osc-newline-attack baked (cfg-3 F1 regression fixture)"
+
     # --- net-7c-2: bake the system root-cert bundle at the canonical path ---
     # /etc/ssl/certs/ca-certificates.crt (NET-DESIGN s9; the host-bake idiom,
     # like /lib/ndb/local). The native https tool + the tls crate read it at

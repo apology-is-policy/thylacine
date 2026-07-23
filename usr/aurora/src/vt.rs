@@ -870,8 +870,19 @@ impl Vt {
     /// settings channel (`7770;aurora;<key>;<value>`) produces anything --
     /// every other OSC (titles etc.) is swallowed exactly as before. The
     /// key/value land as a `key value` line (the config-file grammar) so one
-    /// fail-soft parser serves both transports; a value containing `;` is
-    /// rejected (defensive -- no valid setting carries one).
+    /// fail-soft parser serves both transports.
+    ///
+    /// cfg-3 F1 (the OSC-laundering close): a CONTROL byte (< 0x20) in the
+    /// key or value is REJECTED. This is the receiving-end twin of
+    /// `aurora-push`'s own `b < 0x20` sender filter -- the raw
+    /// `/dev/consdrain` channel carries every session byte, and WITHOUT this
+    /// guard an embedded NEWLINE laundered a second statement past the
+    /// single-token allowlist: `config::parse` re-splits its value on
+    /// `.lines()`, so `theme spinifex\nmode 640 480` set the compositor
+    /// tier (`mode`) from a session, which a later OSD save would then
+    /// persist into the SYSTEM config + push through the gated startup path.
+    /// A settings value is a single printable token; the `;` reject stays
+    /// (no valid setting carries the field separator).
     fn osc_end(&mut self) {
         let over = self.osc_over;
         self.osc_over = false;
@@ -882,7 +893,10 @@ impl Vt {
         if let Ok(s) = core::str::from_utf8(&self.osc_buf) {
             if let Some(rest) = s.strip_prefix("7770;aurora;") {
                 if let Some((k, v)) = rest.split_once(';') {
-                    if !k.is_empty() && !v.contains(';') && self.settings_req.len() < 16 {
+                    let clean = |t: &str| !t.is_empty() && !t.bytes().any(|b| b < 0x20 || b == b';');
+                    if clean(k) && !v.contains(';') && !v.bytes().any(|b| b < 0x20)
+                        && self.settings_req.len() < 16
+                    {
                         let mut line = String::with_capacity(k.len() + 1 + v.len());
                         line.push_str(k);
                         line.push(' ');
@@ -1097,6 +1111,16 @@ mod tests {
         feed(&mut vt, b"\x1b]7770;aurora;noval\x07"); // no value: ignored
         feed(&mut vt, b"\x1b]7770;aurora;k;v;extra\x07"); // ';' in value: ignored
         assert!(vt.settings_req.is_empty());
+        // cfg-3 F1: a CONTROL byte in the value is REJECTED -- an embedded
+        // newline was the laundering vector (config::parse re-splits the
+        // value on .lines(), so `theme spinifex\nmode 640 480` slipped the
+        // compositor-tier `mode` past the single-token allowlist). The
+        // whole crafted OSC is dropped; nothing reaches settings_req.
+        feed(&mut vt, b"\x1b]7770;aurora;theme;spinifex\nmode 640 480\x07");
+        feed(&mut vt, b"\x1b]7770;aurora;theme\x01;evil\x07"); // control in key
+        feed(&mut vt, b"\x1b]7770;aurora;theme;a\rb\x07"); // CR in value
+        assert!(vt.settings_req.is_empty(),
+            "a control byte in an OSC settings key/value must be rejected");
         // Oversize discards; the parser stays in sync after it.
         let mut big = Vec::from(&b"\x1b]7770;aurora;theme;"[..]);
         big.extend(core::iter::repeat(b'x').take(300));

@@ -49,6 +49,7 @@ set qmp "$repo/build/qmp.sock"
 
 set GRAY "AAAAAA"
 set HOME_TOKEN "/home/michael"
+set SPINIFEX_BG "0A0F0A"
 
 proc mode_dump {out} {
     global repo qmp
@@ -190,6 +191,20 @@ set d [mode_dims]
 if {$d ne "1600 900"} { lc_fail "an OSC-injected mode changed the geometry ($d)" }
 lc_send "rm x"
 lc_pass "mode: the OSC channel cannot carry mode (refused; geometry intact)"
+
+# F1 (the embedded-newline OSC-laundering close): cat the baked raw-bytes
+# fixture whose OSC value embeds a newline (`theme;spinifex\nmode 640 480`).
+# Pre-fix, config::parse re-split the value on .lines() and applied BOTH
+# `theme spinifex` (a visible RETINT) and `mode 640 480` past the
+# single-token allowlist; post-fix osc_end rejects the control byte, so the
+# whole OSC is dropped -- NO retint. The theme here is bonfire (the baked
+# default; the mode leg never touched it), so a spinifex retint is the
+# observable laundering signature. This is the in-guest witness for the
+# dormant vt.rs osc_settings_channel F1 assertion.
+lc_send "cat /lib/aurora/osc-newline-attack"
+set err [mode_frac "F1: no spinifex retint from a crafted OSC" $SPINIFEX_BG 0 0.02]
+if {$err ne ""} { lc_fail "F1: an embedded-newline OSC laundered a setting (screen retinted): $err" }
+lc_pass "mode: the embedded-newline OSC is rejected (no laundered retint -- F1)"
 
 lc_quit
 
