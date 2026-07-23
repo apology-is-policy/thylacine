@@ -312,14 +312,21 @@ static size_t format_sched(struct Proc *p, char *buf, size_t cap) {
     // a row is written into a scratch offset `row` and only committed (off = row)
     // once the whole row + newline fit -- so a heavily-threaded Proc's tail is
     // cleanly truncated (like format_procs), never a partial row and never past
-    // cap. Counters are RELAXED __atomic loads (the cross-Proc reader of the
-    // switch-chokepoint writer -- the run_ns pattern).
+    // cap. EVERY per-thread field is read via a RELAXED __atomic load: the
+    // counters against the switch-chokepoint writer (the run_ns pattern), and
+    // state/band against the LOCK-FREE sched()-side writers (sched() /
+    // sched_mark_interactive mutate a running peer's state/band without
+    // g_proc_table_lock, so a plain read would be a C11 data race -- a benign
+    // display-column read, but the atomic load documents it + is TSan-clean; the
+    // sched_dump_runnable precedent; single-copy-atomic, never torn, a
+    // mid-transition snapshot is acceptable for telemetry).
     for (struct Thread *t = p->threads; t; t = t->next_in_proc) {
         size_t row = off;
         u64 nsched = __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
         n = fmt_sdec(buf, cap, row, t->tid); if (!n) break; row += n;
         n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, sched_band_name(t->band)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row,
+                    sched_band_name(__atomic_load_n(&t->band, __ATOMIC_RELAXED))); if (!n) break; row += n;
         n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
         // cpu: "-" until dispatched (last_cpu is meaningful only once nsched > 0).
         if (nsched == 0) n = fmt_str(buf, cap, row, "-");
@@ -338,7 +345,8 @@ static size_t format_sched(struct Proc *p, char *buf, size_t cap) {
         n = fmt_udec(buf, cap, row,
                      (unsigned long)__atomic_load_n(&t->nmigrations, __ATOMIC_RELAXED)); if (!n) break; row += n;
         n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, thread_state_short(t->state)); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row,
+                    thread_state_short(__atomic_load_n(&t->state, __ATOMIC_RELAXED))); if (!n) break; row += n;
         n = fmt_str(buf, cap, row, "\n"); if (!n) break; row += n;
         off = row;   // commit the complete row
     }
@@ -692,6 +700,24 @@ static void devproc_close(struct Spoor *c) {
 // the definition sits with the other authority predicates (after
 // devproc_kill_authorized). Non-static -- the test suite exercises it.
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
+                                char *buf, size_t cap, bool *denied);
+
+// prowl-3b (prowl-5 F4): the OQ-4-gated sched read, factored out so the unit
+// suite can exercise the DENY wiring with a synthetic (caller, target) pair --
+// the in-kernel test runner is always kproc (CAP_ALL, always CAP_HOSTOWNER), so
+// the deny leg is otherwise unreachable in-unit and a wiring regression (drop the
+// gate) would leave every test green. Sets *denied on an OQ-4 denial (caller
+// neither owner nor CAP_HOSTOWNER), returns 0, and formats NOTHING (no partial
+// leak); otherwise formats target's per-thread block. `target` is resolved +
+// pinned alive under g_proc_table_lock by the real caller (devproc_read_cb).
+// Non-static: test-driven.
+size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
+                                char *buf, size_t cap, bool *denied) {
+    if (!devproc_sched_authorized(caller, target)) { *denied = true; return 0; }
+    *denied = false;
+    return format_sched(target, buf, cap);
+}
 
 struct devproc_read_ctx {
     int                 pid;
@@ -717,8 +743,7 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
-        if (!devproc_sched_authorized(r->caller, p)) { r->denied = true; break; }
-        r->total = format_sched(p, r->buf, r->cap);
+        r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
         break;
     default:          break;                  // kind pre-validated by the caller
     }

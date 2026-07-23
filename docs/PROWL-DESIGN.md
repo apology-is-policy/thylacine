@@ -2,9 +2,9 @@
 
 Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (substrate) + prowl-2
 (tool MVP) + prowl-3 (the scheduler view: 3a counters + 3b `/proc/<pid>/sched` +
-`/ctl/cpu` + 3c per-CPU bars + detail pane) LANDED.** Remaining: prowl-4 (the
-manager: stop/cont + tree) + prowl-5 (the focused audit). Building
-telemetry-first (prowl-1..5, §6).
+`/ctl/cpu` + 3c per-CPU bars + detail pane) LANDED; prowl-5 (the focused audit)
+CLOSED CLEAN (0 P0 / 0 P1 / 0 P2 / 4 P3).** Remaining: prowl-4 (the manager:
+stop/cont + tree). Building telemetry-first (prowl-1..5, §6).
 Landed per the CLAUDE.md design-conversation pattern (research → doc → surface
 forks → signoff → bind ARCH → build). The tool is `prowl`; the kernel telemetry
 it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
@@ -117,8 +117,13 @@ work-conservation **starved-park** accounting (`sched_wc_stats`), per-CPU idle.
 Surfacing that **per-process** over the Plan 9 `/proc`+`/ctl` model, in a Kaua
 TUI, with control via `/proc/<pid>/ctl`, is a combination that does not exist in
 the wild. A monitor that reports "PID 1853 `ambush-child`: 99% CPU, band NORMAL,
-17k parks/s, 99% self-woken (busy-yield storm)" would have *named this session's
-bug on sight*. That scheduler-introspection angle is the novel contribution
+99% self-woken (busy-yield storm)" would have *named this session's
+bug on sight*. (As-built precision, prowl-5 F1: for that *solo*-yielder-on-an-idle-
+system case the lead signal is **%CPU**/`run_ns` — the #33 `sched_yield_hint`
+fast-path skips the switch, so a solo yield storm does *not* move `nsched`; the
+per-thread `nsched` [dispatch churn] + `parks` counters add the *character* of a
+*contended* or thrashing workload, not the solo-idle case. See
+`docs/reference/15-scheduler.md`.) That scheduler-introspection angle is the novel contribution
 (§8) — the rest is competent execution of a known shape.
 
 ---
@@ -299,8 +304,20 @@ nothing on the kernel's behalf (the kernel gates the reads).
     `docs/reference/144-prowl.md`.
 - **prowl-4 (the manager):** stop/cont control + the tree view (+ the reband seam
   if voted in).
-- **prowl-5 (audit):** the focused audit — the visibility gate + the hot-path cost
-  + the counter SMP-safety + the full SMP gate.
+- **prowl-5 (audit): CLOSED.** The focused adversarial audit of the prowl-3 arc
+  (the visibility gate + the hot-path cost + the counter SMP-safety) — a dedicated
+  Fable-5-max prosecutor + a concurrent self-audit, both converging on **sound**:
+  **0 P0 / 0 P1 / 0 P2 / 4 P3, NOT dirty.** The four P3s (all fixed): F1 the
+  `nsched` "names a busy-yield storm" doc claim (defeated by the #33 yield
+  fast-path — a *solo* yielder skips the switch, so `%CPU`/`run_ns` names the
+  HVF-idle case and `nsched` is the churn signal); F2 `/ctl/cpu` rendered a
+  never-online CPU as 100% busy (gate on `g_cpu_online`); F3 `format_sched`'s
+  plain `state`/`band` reads → `__atomic` (the comment's own discipline); F4 the
+  OQ-4 *deny* wiring had no failing test → factored `devproc_sched_read_gated` +
+  the `devproc.sched_read_gated` revert-probe (proven non-vacuous). The
+  READ-ONLY-telemetry claim, the stamp single-writer discipline, the OQ-4 gate,
+  walk-safety, and the buffer discipline all held. Closed list:
+  `memory/audit_prowl5_closed_list.md`.
 
 ---
 

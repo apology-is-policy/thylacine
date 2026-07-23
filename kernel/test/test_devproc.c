@@ -64,6 +64,7 @@ void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 // prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
 void test_devproc_sched_gate_predicate(void);
+void test_devproc_sched_read_gated(void);
 void test_devproc_read_sched_format(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
@@ -71,6 +72,8 @@ void test_devproc_read_sched_format(void);
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
+                                char *buf, size_t cap, bool *denied);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 
@@ -619,6 +622,47 @@ void test_devproc_sched_gate_predicate(void) {
     caller->caps = CAP_DAC_OVERRIDE;
     TEST_ASSERT(!devproc_sched_authorized(caller, target),
                 "CAP_DAC_OVERRIDE is NOT a sched-view axis");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// prowl-3b (prowl-5 F4): the OQ-4 DENY WIRING revert-probe. The predicate test
+// above covers the authority logic standalone; the format test below covers only
+// the allow leg (kproc-self). This drives the WIRED gate (devproc_sched_read_gated,
+// exactly what devproc_read_cb calls) with a synthetic caller, so dropping the
+// gate check makes the deny leg fail -- the coverage the real in-unit path
+// (kproc/CAP_ALL, always authorized) can never provide.
+void test_devproc_sched_read_gated(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+
+    char buf[2048];
+    bool denied;
+
+    // Non-owner, no caps -> DENIED, zero bytes formatted (no partial leak).
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    denied = false;
+    size_t n = devproc_sched_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(denied && n == 0, "non-owner sched read denied, no bytes formatted");
+
+    // Owner -> allowed; the block formats (at least the name/pid/threads header).
+    caller->principal_id = 0xA11CEu;
+    denied = true;
+    n = devproc_sched_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "owner sched read allowed, block formatted");
+
+    // CAP_HOSTOWNER (non-owner) -> allowed.
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    denied = true;
+    n = devproc_sched_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "CAP_HOSTOWNER sched read allowed");
 
     caller->state = PROC_STATE_ZOMBIE;
     target->state = PROC_STATE_ZOMBIE;

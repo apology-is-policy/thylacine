@@ -496,6 +496,7 @@ void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
 void test_devproc_sched_gate_predicate(void);       // prowl-3b: OQ-4 sched-view gate
+void test_devproc_sched_read_gated(void);           // prowl-5 F4: OQ-4 deny-wiring revert-probe
 void test_devproc_read_sched_format(void);          // prowl-3b: /proc/<pid>/sched read
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
@@ -1837,6 +1838,7 @@ struct test_case g_tests[] = {
     { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
     { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
     { "devproc.sched_gate_predicate",  test_devproc_sched_gate_predicate,  false, NULL },
+    { "devproc.sched_read_gated",      test_devproc_sched_read_gated,      false, NULL },
     { "devproc.read_sched_format",     test_devproc_read_sched_format,     false, NULL },
     { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },

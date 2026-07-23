@@ -436,10 +436,16 @@ struct Thread {
     // suffices -- these are monotonic counters the reader diffs across polls
     // (htop's method), with no other memory ordered against them.
     //
-    //   nsched       -- times switched IN (got the CPU). A busy-yield storm
-    //                   shows an astronomical rate here -- the signal that would
-    //                   have named the HVF-idle regression (DEBUGGING-PLAYBOOK
-    //                   6.17) on sight instead of a git-bisect.
+    //   nsched       -- times switched IN (got the CPU): the dispatch count. A
+    //                   high rate flags scheduler CHURN -- a thread re-dispatched
+    //                   thousands of times/sec (a sleep/wake thrash, or a yield
+    //                   storm UNDER CONTENTION). NOTE it does NOT move for a SOLO
+    //                   busy-yielder on an otherwise-idle system: the #33
+    //                   sched_yield_hint fast-path skips the switch when the local
+    //                   queue holds only the pinned idle, so THAT case (the
+    //                   HVF-idle regression, DEBUGGING-PLAYBOOK 6.17) is named by
+    //                   %CPU / run_ns, not nsched -- nsched is the complementary
+    //                   "is it thrashing the scheduler" signal.
     //   nsleeps      -- times switched OUT voluntarily (state == SLEEPING) --
     //                   the "parks" the process list surfaces (OQ-5).
     //   nmigrations  -- times dispatched on a DIFFERENT CPU than the previous

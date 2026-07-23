@@ -355,9 +355,21 @@ static size_t format_cpu(char *buf, size_t cap) {
         size_t row = off;
         n = fmt_udec(buf, cap, row, (unsigned long)i); if (!n) break; row += n;
         n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
-        n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_idle_ns(i)); if (!n) break; row += n;
-        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
-        n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_capacity(i)); if (!n) break; row += n;
+        // prowl-5 F2: a DTB-declared CPU that never came online (a PSCI bring-up
+        // failure -- smp_init tolerates it and keeps counting the CPU) has
+        // idle_ns == 0 forever, which is INDISTINGUISHABLE from a pegged-100%-busy
+        // CPU via idle_ns alone -- so a naive util = 1 - idle/wall would render a
+        // DEAD core as a permanent full meter. Gate on the online flag: an offline
+        // CPU renders "offline" (a 2-column line the reader's 3-column parse skips
+        // -> no bar), never a spurious 100%. Unreachable on QEMU-virt (never fails
+        // PSCI); a real heterogeneous/failable board reaches it.
+        if (!g_cpu_online[i]) {
+            n = fmt_str(buf, cap, row, "offline"); if (!n) break; row += n;
+        } else {
+            n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_idle_ns(i)); if (!n) break; row += n;
+            n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+            n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_capacity(i)); if (!n) break; row += n;
+        }
         n = fmt_str(buf, cap, row, "\n"); if (!n) break; row += n;
         off = row;
     }

@@ -134,7 +134,11 @@ cpu idle_ns capacity
 reader derives **per-core utilization** the htop way: `1 - d(idle_ns)/d(wall)`
 diffed across two polls (the kernel keeps no instantaneous-rate state). Bounded
 by `smp_cpu_count()` (`<= DTB_MAX_CPUS`=8 rows); the accessors self-guard an
-out-of-range index. **All-visible** like the other coarse `/ctl` leaves
+out-of-range index. A DTB-declared CPU that never came online (a PSCI bring-up
+failure — `idle_ns` stuck at 0, indistinguishable from a pegged-100%-busy core
+via idle_ns alone) renders as `<i> offline` (gated on `g_cpu_online[i]`; the
+reader's 3-column parse skips the 2-column line → no bar), never a spurious full
+meter (prowl-5 F2; unreachable on QEMU-virt, which never fails PSCI). **All-visible** like the other coarse `/ctl` leaves
 (visibility-not-authority) — unlike `/proc/<pid>/sched`'s OQ-4-gated *per-thread*
 internals. Reads no per-CPU lock: `idle_ns` is a coherent `__atomic` snapshot of
 its sole (per-CPU idle) writer, `capacity` is boot-static.

@@ -1024,7 +1024,7 @@ fields (`thread.h`), stamped at the **same single switch chokepoint** as
 
 | Field (`struct Thread`) | Stamped | Meaning |
 |---|---|---|
-| `nsched` | switch-**in** of `next` | times this thread got the CPU. A busy-yield storm reads an astronomical rate — the signal that would have named the HVF-idle regression (`DEBUGGING-PLAYBOOK.md §6.17`) on sight. |
+| `nsched` | switch-**in** of `next` | times this thread got the CPU (the dispatch count). A high rate flags scheduler **churn** — a thread re-dispatched thousands of times/sec (a sleep/wake thrash, or a yield storm *under contention*). It does **not** move for a *solo* busy-yielder on an idle system (the #33 `sched_yield_hint` fast-path skips the switch when the local queue holds only the pinned idle) — so the HVF-idle regression (`DEBUGGING-PLAYBOOK.md §6.17`) is named by `%CPU`/`run_ns`, and `nsched` is the complementary "thrashing the scheduler" signal. |
 | `nsleeps` | switch-**out** of `prev` when `prev->state == THREAD_SLEEPING` | voluntary sleeps (the "parks" the process list surfaces, OQ-5). A yield-requeue (`RUNNING→RUNNABLE`) and an `EXITING` switch-out are **not** counted. |
 | `nmigrations` | switch-**in** of `next` | times dispatched on a different CPU than the previous dispatch (guarded by `nsched != 0` so the first-ever dispatch is not miscounted as a move off the `KP_ZERO` `last_cpu`). |
 | `last_cpu` (u16) | switch-**in** of `next` | the CPU this thread most recently ran on (meaningful once `nsched > 0`; the Linux `/proc/<pid>/stat` "processor" field). |
@@ -1069,4 +1069,7 @@ them; EEVDF / `vd_t` / I-8 / I-17 / the tickless machinery are byte-unchanged.
 Validated by `scheduler.prowl_counters` (`kernel/test/test_devproc.c`: `nsched`
 growth across forced yields + a valid `last_cpu` + counter monotonicity + the
 `sched_cpu_idle_ns` bounds guard) and the SMP gate (default+UBSan × smp4/smp8,
-0 corruption). The focused audit is prowl-5.
+0 corruption). The focused audit **prowl-5 closed CLEAN** (0 P0 / 0 P1 / 0 P2 /
+4 P3): the READ-ONLY-telemetry claim (grep-complete — no decision reads any
+counter), the switch-stamp single-writer discipline, and the migration
+first-dispatch guard all held; see `memory/audit_prowl5_closed_list.md`.
