@@ -83,6 +83,10 @@ pub struct Settings {
     pub chords: Vec<(String, String)>,
     /// cfg-4: the inter-pane gap (px); None = the compositor default (1).
     pub gaps: Option<u32>,
+    /// cfg-5: the Cornucopia cell advance (px) -- one of cornucopia::ADVANCES.
+    /// Renderer-local (no compositor round-trip, no gate): selects which baked
+    /// atlas Aurora blits, which sets the cell dims and thus cols/rows.
+    pub font: u8,
 }
 
 impl Settings {
@@ -93,6 +97,7 @@ impl Settings {
             mode: Mode::Auto,
             chords: Vec::new(),
             gaps: None,
+            font: cornucopia::DEFAULT_ADVANCE,
         }
     }
 }
@@ -104,6 +109,7 @@ pub enum OsdOut {
     ThemeChanged,    // call Vt::set_theme(settings.theme) + persist (cfg-2a)
     SettingChanged,  // a non-theme setting moved -> persist (cfg-2a)
     ModeApply(Mode), // cfg-3: write the gated ctl; persist ONLY on success
+    FontChanged,     // cfg-5: rebuild Metrics + cols/rows + winsize; persist
 }
 
 const SEC_DISPLAY: usize = 0;
@@ -111,8 +117,8 @@ const SEC_APPEARANCE: usize = 1;
 const SEC_NAMES: [&str; 2] = ["Display", "Appearance"];
 // Rows per section: Display { Mode (live cycler, Enter applies),
 // Resolution (info), Zoom policy (info) }, Appearance { Theme,
-// Cursor blink } (live).
-const SEC_LEN: [usize; 2] = [3, 2];
+// Cursor blink, Font (cfg-5 live cycler) }.
+const SEC_LEN: [usize; 2] = [3, 3];
 
 pub struct Osd {
     pub open: bool,
@@ -214,9 +220,26 @@ impl Osd {
                         };
                         OsdOut::ThemeChanged
                     }
-                    _ => {
+                    1 => {
                         s.cursor_blink = !s.cursor_blink;
                         OsdOut::SettingChanged
+                    }
+                    _ => {
+                        // cfg-5 Font: cycle the baked cell advances (largest
+                        // first). LEFT = one step, RIGHT/Enter = the other --
+                        // the theme cycler's mechanics; the value label shows
+                        // the resulting cell dims so the direction is
+                        // unambiguous. Live-apply: the main loop rebuilds
+                        // Metrics + cols/rows + winsize (renderer-local, cheap).
+                        let adv = cornucopia::ADVANCES;
+                        let i = adv.iter().position(|&a| a == s.font).unwrap_or(0);
+                        let n = adv.len();
+                        s.font = if code == KEY_LEFT {
+                            adv[(i + n - 1) % n]
+                        } else {
+                            adv[(i + 1) % n]
+                        };
+                        OsdOut::FontChanged
                     }
                 }
             }
@@ -324,6 +347,10 @@ impl Osd {
                 (String::from("Zoom policy"), String::from("letterbox"), false),
             ]
         } else {
+            // cfg-5: the Font row shows the resulting cell dims (self-
+            // describing -- the config value is the advance, but the user
+            // reads the cell it produces).
+            let fa = cornucopia::Atlas::for_advance(s.font);
             vec![
                 (
                     String::from("Theme"),
@@ -333,6 +360,11 @@ impl Osd {
                 (
                     String::from("Cursor blink"),
                     format!("< {} >", if s.cursor_blink { "on" } else { "off" }),
+                    true,
+                ),
+                (
+                    String::from("Font"),
+                    format!("< {} x {} >", fa.cell_w(), fa.cell_h()),
                     true,
                 ),
             ]
@@ -412,6 +444,30 @@ mod tests {
         assert_eq!(s.theme, 0);
         assert!(matches!(o.handle_key(KEY_LEFT, 1, &mut s), OsdOut::ThemeChanged));
         assert_eq!(s.theme, n - 1, "wraps backward");
+    }
+
+    #[test]
+    fn font_row_cycles_baked_sizes() {
+        let mut o = Osd::new();
+        let mut s = Settings::new();
+        o.open_at(&s); // Appearance, sel 0 = Theme
+        o.handle_key(KEY_DOWN, 1, &mut s); // -> Cursor blink (sel 1)
+        o.handle_key(KEY_DOWN, 1, &mut s); // -> Font (sel 2, the cfg-5 row)
+        assert_eq!(o.sel, 2);
+        assert_eq!(s.font, cornucopia::DEFAULT_ADVANCE);
+        // RIGHT steps to the next baked advance (index+1 in the largest-first
+        // list = the next-smaller cell) and emits FontChanged (live-apply).
+        assert!(matches!(o.handle_key(KEY_RIGHT, 1, &mut s), OsdOut::FontChanged));
+        assert_eq!(s.font, cornucopia::ADVANCES[1]);
+        // LEFT returns to the default (index 0).
+        assert!(matches!(o.handle_key(KEY_LEFT, 1, &mut s), OsdOut::FontChanged));
+        assert_eq!(s.font, cornucopia::ADVANCES[0]);
+        // LEFT from index 0 wraps to the smallest baked size (the last entry).
+        assert!(matches!(o.handle_key(KEY_LEFT, 1, &mut s), OsdOut::FontChanged));
+        assert_eq!(s.font, cornucopia::ADVANCES[cornucopia::ADVANCES.len() - 1]);
+        // Nav stays in bounds for the now-3-row Appearance section.
+        o.handle_key(KEY_DOWN, 1, &mut s);
+        assert!(o.sel < SEC_LEN[o.sec]);
     }
 
     #[test]

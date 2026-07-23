@@ -195,7 +195,7 @@ the compositor is a file server), made symmetric across both environments.
   (netd already parses ndb); no binary format, no ABI. Example (Aurora):
   ```
   mode        1280 1024     # or: mode auto (largest the GPU reports)
-  font-scale  1.25          # aurora cell size multiplier
+  font-size   8             # Cornucopia cell advance: 10 (default) .. 6 (cfg-5)
   theme       bonfire       # aurora palette
   gaps        4             # inter-pane gap px
   zoom-policy  letterbox    # fixed-size-app placement (§3.5)
@@ -283,8 +283,18 @@ things):
    geometry); the layout recompute + the fan ride the audited
    `reconcile()` unchanged.
 2. **Aurora cell/font size** — the shell's *effective* text resolution.
-   `font-scale` changes the cell dims → more/fewer cells at the same display px.
-   Renderer-side (the cell metrics + Cornucopia scale), NOT a GPU mode change.
+   **AS-BUILT (cfg-5):** `font-size <advance>` picks one of SEVERAL baked
+   Cornucopia atlases (the SAME outline at progressively smaller cell advances
+   — 10 (the default face, 10×22) down to 6 (6×14); `cornucopia::ADVANCES`).
+   The reserved `font-scale <float multiplier>` was replaced by this discrete
+   enum: the runtime has no TTF rasterizer, so a continuous scale would need
+   one — the user's call (2026-07-23) was several pre-baked sizes, which fits
+   the pipeline (a re-bake at `--advance N`) and stays crisp at every step. A
+   smaller cell → more cols/rows at the same display px; the winsize cascade
+   (§3.4 / #55) reports the new grid. Renderer-side (a different atlas + the
+   Metrics rebuilt), NOT a GPU mode change and NOT gated (no compositor
+   round-trip). Continuous scaling / anti-aliased vector type is the
+   Halcyon-era runtime-rasterizer surface, not Aurora's crisp-bitmap console.
    What most users mean by "bigger text."
 3. **What a program requests** (Quake) — you cannot *force* an app's requested
    size. What the compositor controls is the **zoom / placement policy** on
@@ -331,8 +341,11 @@ free.
   The reweave/resize fan-out rides the audited G-6b CONFIGURE protocol.
 - **Scope (v1)**: Display (mode/resolution — LIVE since cfg-3: the Mode row
   cycles a pending preset, Enter applies through the gated ctl, persists on
-  acceptance; zoom-policy info) + Appearance (palette, cursor; font-scale a
-  later row); Chords + Session as later tabs. The system/display tier.
+  acceptance; zoom-policy info) + Appearance (palette, cursor; **Font — LIVE
+  since cfg-5**: the Font row cycles the baked cell sizes, applies live like
+  theme [renderer-local, no gate], the value shows the resulting cell dims,
+  persists on change); Chords + Session as later tabs. The system/display
+  tier.
 - **Trust**: "Halcyon can never invoke it" holds by construction — it is not a
   program, it is part of the Aurora renderer; Halcyon is a different environment
   with its OWN settings UI over its OWN config file. The apply-authority gate

@@ -47,6 +47,19 @@ pub fn parse(text: &str, s: &mut Settings) {
                 "off" => s.cursor_blink = false,
                 _ => {}
             },
+            // cfg-5: the renderer-local font size (a baked cell advance).
+            // Validated against the baked set -- an unknown advance (a future
+            // or dropped size) is IGNORED, leaving the default (forward-compat,
+            // like every key here). Reaches settings from the config FILE and
+            // the F10 OSD; the OSC session channel does not carry it yet (a
+            // documented seam -- font-size-per-session is a later sub-chunk).
+            "font-size" => {
+                if let Ok(n) = val.parse::<u8>() {
+                    if cornucopia::ADVANCES.contains(&n) {
+                        s.font = n;
+                    }
+                }
+            }
             // cfg-3: the compositor tier. Reaches settings ONLY from the
             // config FILE tiers -- the OSC drain arm allowlists its keys
             // and never passes `mode` through here (a session-injected
@@ -124,9 +137,11 @@ pub fn render(s: &Settings) -> String {
          # AURORA-CONFIG.md section 3.2). key value; unknown keys are ignored.\n\
          theme {}\n\
          cursor-blink {}\n\
+         font-size {}\n\
          mode {}\n",
         THEMES[s.theme % THEMES.len()].0,
         if s.cursor_blink { "on" } else { "off" },
+        s.font,
         mode,
     );
     if let Some(g) = s.gaps {
@@ -215,12 +230,14 @@ mod tests {
         s.theme = 1;
         s.cursor_blink = false;
         s.mode = Mode::Fixed(1600, 900);
+        s.font = 7; // cfg-5: a non-default baked advance
         let text = render(&s);
         let mut back = Settings::new();
         parse(&text, &mut back);
         assert_eq!(back.theme, 1);
         assert!(!back.cursor_blink);
         assert!(back.mode == Mode::Fixed(1600, 900));
+        assert_eq!(back.font, 7, "cfg-5 font-size round-trips");
         // The auto form round-trips too (the non-pushing default).
         s.mode = Mode::Auto;
         let mut back2 = Settings::new();
@@ -241,17 +258,26 @@ mod tests {
              mode garbage here\n\
              mode 12\n\
              mode 1280 800 7\n\
+             font-size 5\n\
+             font-size 99\n\
+             font-size notanum\n\
              unknown-key whatever\n\
              justakeywithnovalue\n",
             &mut s,
         );
         // The valid theme line applied; the invalid one was ignored (did not
         // reset); the bad blink value left the default; every malformed mode
-        // form (non-numeric, one field, three fields) left Auto; unknowns
-        // ignored.
+        // form (non-numeric, one field, three fields) left Auto; a font-size
+        // outside the baked set (5, 99) or non-numeric left the default;
+        // unknowns ignored.
         assert_eq!(s.theme, 2, "spinifex applied, not-a-theme ignored");
         assert!(s.cursor_blink, "bad blink value leaves the default");
         assert!(s.mode == Mode::Auto, "malformed mode lines leave the default");
+        assert_eq!(
+            s.font,
+            cornucopia::DEFAULT_ADVANCE,
+            "unbaked/non-numeric font-size leaves the default"
+        );
     }
 
     #[test]

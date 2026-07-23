@@ -109,7 +109,7 @@ fn key_bytes(code: u16, value: u32, rune: u32, out: &mut Vec<u8>) {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    if !Atlas::verify() {
+    if !cornucopia::verify_all() {
         say!("aurora: FAIL atlas magic/version (rebake tools/bake-cornucopia.py)");
         return 1;
     }
@@ -247,12 +247,47 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    let m = Metrics {
-        cell_w: Atlas::cell_w(),
-        cell_h: Atlas::cell_h(),
-        baseline: Atlas::baseline(),
+    // cfg-5: the saved font-size selects the baked atlas (push-on-start).
+    // Guard a saved size too LARGE for this surface (brick-resistance, the
+    // mode-fix discipline): step DOWN to the largest baked size that fits
+    // rather than failing the console -- a persisted font can never brick.
+    // (Realistically inert: the default advance 10 fits every sane mode, even
+    // 320x200; this is defense for the absurd, exactly like the mode heal.)
+    let mut adv = settings.font;
+    if !cornucopia::ADVANCES.contains(&adv) {
+        // Normalize a bogus saved value to BOTH the local `adv` and settings
+        // (unreachable today -- parse + the OSD only yield ADVANCES members --
+        // but a stray settings.font must never round-trip to disk via a later
+        // config::save).
+        adv = cornucopia::DEFAULT_ADVANCE;
+        settings.font = adv;
+    }
+    let mut atlas = Atlas::for_advance(adv);
+    if w / atlas.cell_w() < 20 || h / atlas.cell_h() < 5 {
+        for &a in cornucopia::ADVANCES.iter() {
+            if a >= adv {
+                continue; // only sizes strictly smaller than the failing one
+            }
+            let at = Atlas::for_advance(a);
+            if w / at.cell_w() >= 20 && h / at.cell_h() >= 5 {
+                adv = a;
+                atlas = at;
+                break;
+            }
+        }
+        if adv != settings.font {
+            say!("aurora: font-size {} too large for {}x{}; using {}",
+                 settings.font, w, h, adv);
+            settings.font = adv; // runtime fit; NOT persisted (preference survives)
+        }
+    }
+    let mut m = Metrics {
+        cell_w: atlas.cell_w(),
+        cell_h: atlas.cell_h(),
+        baseline: atlas.baseline(),
         off_x: 0,
         off_y: 0,
+        atlas,
     };
     let mut cols = w / m.cell_w;
     let mut rows = h / m.cell_h;
@@ -375,6 +410,45 @@ pub extern "C" fn rs_main() -> i64 {
                                     }
                                 } else {
                                     say!("aurora: mode apply refused ({})", cmd);
+                                }
+                            }
+                            osd::OsdOut::FontChanged => {
+                                // cfg-5: renderer-local -- no compositor
+                                // round-trip, no gate. Rebuild Metrics from the
+                                // newly-selected atlas, recompute the grid from
+                                // the UNCHANGED surface, resize the Vt, rewrite
+                                // the winsize (the proven cfg-3 reweave tail),
+                                // and persist. A size too LARGE for this display
+                                // is REFUSED (revert to the current advance ==
+                                // cell_w) so a cycle can never strand the fbcon.
+                                let na = Atlas::for_advance(settings.font);
+                                let (ncols, nrows) = (w / na.cell_w(), h / na.cell_h());
+                                if ncols < 20 || nrows < 5 {
+                                    say!("aurora: font-size {} too large for {}x{}; keeping {}",
+                                         settings.font, w, h, m.cell_w);
+                                    settings.font = m.cell_w as u8;
+                                } else {
+                                    m = Metrics {
+                                        cell_w: na.cell_w(),
+                                        cell_h: na.cell_h(),
+                                        baseline: na.baseline(),
+                                        off_x: 0,
+                                        off_y: 0,
+                                        atlas: na,
+                                    };
+                                    cols = ncols;
+                                    rows = nrows;
+                                    term.resize(cols, rows);
+                                    // A reflow can shrink below the old cursor
+                                    // row -- drop prev_cursor (the #55 F1 OOB
+                                    // class; full_fill repaints every row).
+                                    prev_cursor = None;
+                                    full_fill = true;
+                                    write_winsize(consctl, cols, rows);
+                                    if !config::save(&settings) {
+                                        say!("aurora: config save failed ({})",
+                                             config::CONFIG_PATH);
+                                    }
                                 }
                             }
                             osd::OsdOut::Close => full_fill = true,

@@ -109,6 +109,24 @@ absent — the renderer draws them procedurally for pixel-perfect cell
 joins. Re-bake only on a font/geometry change (fonttools in a disposable
 venv; see the tool header).
 
+**Several sizes (cfg-5):** the SAME outline is baked at five progressively
+smaller advances — `atlas.bin` (10 → 10×22, the default face) plus
+`atlas-{9,8,7,6}.bin` (9×20 / 8×18 / 7×16 / 6×14). `cornucopia::ADVANCES`
+enumerates them (largest-first); `Atlas` is now a `Copy` value carrying the
+chosen blob (`Atlas::for_advance(N)`), folded into `render::Metrics` so a
+font-size change swaps the dims and the glyph source atomically.
+`verify_all()` checks every baked blob at aurora startup (a truncated
+sibling surfaces loudly, per the doc contract). 6 is the floor — below it
+the procedural box glyphs (which need cell_w/cell_h ≥ 6) break. The config
+key `font-size <advance>` and the OSD Appearance → Font row select one; the
+selection is renderer-local (no compositor round-trip, no gate — the
+compositor only ever sees pixels), so a change just rebuilds Metrics,
+recomputes cols/rows from the UNCHANGED surface, resizes the Vt, and
+re-reports the winsize (the cfg-3 reweave tail). A saved size too large for
+the surface steps DOWN to the largest baked size that fits (brick-resistance
+— a persisted font can never strand the console; realistically inert since
+the default advance 10 fits every sane mode, even 320×200).
+
 ## The renderer (`usr/aurora`)
 
 An ordinary tapestryd client (libtapestry — the demo's template):

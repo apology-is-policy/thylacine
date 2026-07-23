@@ -14,6 +14,10 @@ pub struct Metrics {
     pub baseline: usize,
     pub off_x: usize, // centering margins (the grid rarely tiles the mode exactly)
     pub off_y: usize,
+    /// cfg-5: the glyph source for THIS cell size. Folded into Metrics so a
+    /// font-size change swaps the dims and the atlas atomically (a stale atlas
+    /// paired with new dims would blit the wrong-size alpha slice).
+    pub atlas: Atlas,
 }
 
 #[inline]
@@ -128,7 +132,7 @@ fn draw_cell(
         draw_boxchar(cp, m, px, w, x0, y0, fg, bg);
     } else if cell.ch == ' ' {
         fill_cell(px, w, x0, y0, m, bg);
-    } else if let Some(alpha) = Atlas::glyph(cell.ch) {
+    } else if let Some(alpha) = m.atlas.glyph(cell.ch) {
         for y in 0..m.cell_h {
             let dst = (y0 + y) * w + x0;
             let src = y * m.cell_w;
@@ -137,17 +141,25 @@ fn draw_cell(
             }
         }
     } else {
-        // Unbaked codepoint: a hollow box (the classic notdef).
+        // Unbaked codepoint: a hollow box (the classic notdef). The border
+        // indexes `bh-1`/`bw-1`, so GUARD a degenerate cell (bw/bh == 0):
+        // else a squat-but-verify()-valid FUTURE re-bake (cell_w==2 / cell_h==8)
+        // would underflow the usize index into an OOB abort on the first
+        // unbaked glyph. Every SHIPPED size (>= 6x14) has bw>=4, bh>=6, so this
+        // only hardens a future --advance choice -- a too-small cell then just
+        // shows a blank notdef, never a dark console.
         fill_cell(px, w, x0, y0, m, bg);
-        let (bx0, by0) = (x0 + 1, y0 + 3);
-        let (bw, bh) = (m.cell_w - 2, m.cell_h.saturating_sub(8));
-        for x in 0..bw {
-            px[by0 * w + bx0 + x] = fg;
-            px[(by0 + bh - 1) * w + bx0 + x] = fg;
-        }
-        for y in 0..bh {
-            px[(by0 + y) * w + bx0] = fg;
-            px[(by0 + y) * w + bx0 + bw - 1] = fg;
+        let (bw, bh) = (m.cell_w.saturating_sub(2), m.cell_h.saturating_sub(8));
+        if bw >= 1 && bh >= 1 {
+            let (bx0, by0) = (x0 + 1, y0 + 3);
+            for x in 0..bw {
+                px[by0 * w + bx0 + x] = fg;
+                px[(by0 + bh - 1) * w + bx0 + x] = fg;
+            }
+            for y in 0..bh {
+                px[(by0 + y) * w + bx0] = fg;
+                px[(by0 + y) * w + bx0 + bw - 1] = fg;
+            }
         }
     }
     if cell.attrs & ATTR_UNDERLINE != 0 {
