@@ -2914,20 +2914,31 @@ impl Conn {
         info.alive == 1 && (info.flags & T_SRV_PEER_FLAG_CONSOLE_RENDERER) != 0
     }
 
+    /// The ONLY intentionally-ungated global-ctl verbs (SA-1): the section
+    /// 18.6 determinism surface, which a NON-renderer (the in-guest
+    /// battery) must drive in test builds and which is #880-feature-
+    /// stripped to E_OPNOTSUPP in production. The gate is a DENYLIST of
+    /// exactly this set, not an allowlist of the known authority prefixes
+    /// -- so every FUTURE global verb (gaps/chord/a typo) is gated BY
+    /// CONSTRUCTION, realizing the scripture's "a new global verb defaults
+    /// to GATED" (an allowlist would silently ungate a verb added without
+    /// touching the gate line).
+    fn is_ungated_ctl(s: &str) -> bool {
+        s == "test-mode on" || s == "test-mode off" || s == "tick" || s.starts_with("release")
+    }
+
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
         // The apply-authority gate (cfg-3; the ARCH section 25.4 cfg-3
-        // addendum is the prosecution list): the AUTHORITY-BEARING global
-        // verbs -- mode, clock-rate, and every future global mutation (a
-        // new verb defaults to GATED; chord/gaps land here) -- admit only
-        // a conn whose LIVE peer holds the console-renderer role. Checked
-        // per write (revocation-correct). The determinism verbs below
-        // stay outside (their production posture is the #880 feature
-        // strip, and the battery -- a non-renderer -- drives them in test
-        // builds); ctl READS stay ungated (the geometry query).
-        let authority = s.starts_with("mode") || s.starts_with("clock-rate");
-        if authority && !self.peer_is_renderer() {
+        // addendum is the prosecution list): every AUTHORITY-BEARING
+        // global verb -- mode, clock-rate, and every future global
+        // mutation -- admits only a conn whose LIVE peer holds the
+        // console-renderer role. Checked per write (revocation-correct).
+        // Default-DENY: only the determinism verbs are exempt (see
+        // is_ungated_ctl); ctl READS stay ungated (the geometry query,
+        // a separate read path).
+        if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() {
             return Err(p9::E_PERM);
         }
         if s == "mode auto" {
