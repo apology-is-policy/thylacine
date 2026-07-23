@@ -221,18 +221,44 @@ hosted-in-Halcyon aurora terminal, or any app in a territory that includes
 OSD be renderer-owned (§3.6) without being a privilege hole** — the trust lives
 in *who may apply* config to the shared compositor, not in *who draws or owns* it.
 
-The gate mechanism (to pin at impl):
+The gate mechanism — **RESOLVED at cfg-3 (2026-07-23; ground-truth-driven)**:
 
-- **Peer-identity (recommended)**: tapestryd inspects the connecting peer's
-  principal (the SO_PEERCRED path netd/stratumd already use) and admits the
-  authority-bearing verbs only from the session leader — paralleling the kernel's
-  `PROC_FLAG_CONSOLE_RENDERER` single-holder pattern (`proc_is_console_renderer`,
-  `kernel/include/thylacine/proc.h`), which already distinguishes exactly this
-  class of trusted-role client.
-- **Namespace-only (insufficient alone)**: "who has `/dev/tapestry/ctl` writable
-  in their territory" is too coarse — the whole textual session shares that mount.
-- `clock-rate` (already live, ungated) is either grandfathered as a benign
-  pacing knob or folded under the same gate — decide at impl.
+- **Peer-identity, realized as the kernel renderer-role stamp.** Every
+  libtapestry client opens `/srv/tapestry` itself (`Surface::fullscreen`/`open`
+  → open=connect → a FRESH SrvConn per client), so tapestryd holds a
+  kernel-stamped per-conn identity (`t_srv_peer` on the accepted handle). The
+  discriminator the identity record lacked — "is this peer THE bound console
+  renderer?" — is added as **`SRV_PEER_FLAG_CONSOLE_RENDERER`**, bit 0 of
+  `srv_peer_info.flags@32` (previously reserved-0 → APPEND-ONLY ABI), stamped
+  inside the same alive-gated `g_proc_table_lock` walk as `caps` against the
+  G-4 single-holder `g_console_renderer`; a dead/reaped peer fail-closes to 0
+  exactly like caps. tapestryd checks it **per authority write** (live →
+  revocation-correct when the role moves or its holder dies). This is the
+  "kernel-side session-leader signal" §6 anticipated, landed with full kernel
+  treatment (kernel test + ARCH §25.4 addendum + the SMP gate re-run).
+- **The admitted set at v1.0 = {the bound console renderer}.** Aurora IS both
+  the renderer and the environment (AURORA.md §2), so the environment-that-
+  exists is exactly the role the kernel already tracks single-holder. The
+  *session-leader* admission (a session-side environment pushing compositor
+  config) is the Halcyon-era extension, landing with the task-#42
+  multi-untrusted-client model — the gate grows an admitted set, it does not
+  change shape.
+- **Namespace-only confirmed insufficient — and the shared mount is denied by
+  construction**: the `/dev/tapestry` mount is joey's own `/srv/tapestry` conn
+  MREPL-mounted, so any session write through it arrives with JOEY as the
+  conn peer — never the renderer → E_PERM. Authority requires your OWN conn
+  AND the live role; the mount conveys visibility only.
+- **`clock-rate`: FOLDED under the gate.** Ground truth: no writer exists
+  anywhere in the tree (only the server arm + the ctl read format + comments),
+  so gating costs nothing — and grandfathering an ungated global mutation
+  would contradict the chunk's point. Supersedes the G-6d F3
+  "same-session-trust" doc'd posture.
+- **The determinism verbs (`test-mode`/`tick`/`release`) stay OUTSIDE the
+  gate.** Their production posture is already the #880 cargo-feature strip
+  (E_OPNOTSUPP in a `--no-default-features` build); in test builds the whole
+  guest is a harness and the in-guest battery — a non-renderer client — must
+  keep driving them. `release` keeps its F2 per-surface ownership gate.
+  Global-ctl READS stay ungated (the geometry query every client boots on).
 
 Because this touches the compositor's trust boundary, the gate lands with a
 **focused audit pass** (unlike the rest of the OSD, which is pure aux).
@@ -247,7 +273,15 @@ things):
    (`gpu.rs`). New work: a gated `/dev/tapestry/ctl` verb `mode W H` (or
    `mode auto`) that re-sets the scanout AND fans a CONFIGURE out to every
    surface + aurora (the G-6b reweave protocol already drives per-surface
-   resize). Validate `W H` against the GPU's reported modes.
+   resize). Validation (refined at cfg-3): base virtio-gpu reports ONE
+   preferred rect (GET_DISPLAY_INFO), not a mode list — so `W H` validates
+   against sane bounds (320×200..3840×2160; the screen buffer stays under
+   the 64-MiB weave cap) and `mode auto` re-probes GET_DISPLAY_INFO
+   (non-mutating query) and adopts the reported rect. The scanout swap
+   mints a FRESH per-generation screen resource (bind-then-flush per #57;
+   the old screen freed only after the rebind); held presents drop (stale
+   geometry); the layout recompute + the fan ride the audited
+   `reconcile()` unchanged.
 2. **Aurora cell/font size** — the shell's *effective* text resolution.
    `font-scale` changes the cell dims → more/fewer cells at the same display px.
    Renderer-side (the cell metrics + Cornucopia scale), NOT a GPU mode change.
@@ -324,7 +358,11 @@ touches a trust boundary is the §3.3 apply-authority gate.
    F10, edits + live-pushes (§3.6). SUPERSEDES the 2026-07-21 launchable-Kaua-app
    design.
 4. **Apply-authority gate** — RESOLVED as REQUIRED (§3.3); the mechanism
-   (peer-identity vs the renderer-perm pattern) pinned at impl. The leak-closer.
+   PINNED at cfg-3 (2026-07-23): peer-identity via the kernel
+   `SRV_PEER_FLAG_CONSOLE_RENDERER` stamp (append-only `srv_peer_info.flags`
+   bit), checked live per authority write; admitted set at v1.0 = {the bound
+   console renderer}; `clock-rate` folded under the gate; the determinism
+   verbs stay feature-stripped outside it. The leak-closer.
 5. **Config scope** (both `/lib` defaults + `$home/lib` personal) and **zoom
    policy** (letterbox) — carried from the 2026-07-21 resolved forks, unchanged.
 
