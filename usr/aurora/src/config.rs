@@ -67,18 +67,59 @@ pub fn parse(text: &str, s: &mut Settings) {
                     }
                 }
             }
+            // cfg-4: the compositor tier (chords + gaps). Like `mode`, these
+            // reach settings ONLY from the config FILE (the OSC allowlist
+            // never passes them -- authority verbs ride the gated ctl, never
+            // OSC). Structurally parsed only for well-formedness (2 printable
+            // tokens for chord; a bounded int for gaps); tapestryd's gated
+            // verb is the real validator + authority.
+            "chord" => {
+                let mut it = val.split_ascii_whitespace();
+                if let (Some(combo), Some(action), None) =
+                    (it.next(), it.next(), it.next())
+                {
+                    if is_printable_token(combo) && is_printable_token(action)
+                        && s.chords.len() < CHORDS_MAX
+                    {
+                        s.chords.push((String::from(combo), String::from(action)));
+                    }
+                }
+            }
+            "gaps" => {
+                if let Ok(px) = val.parse::<u32>() {
+                    if px <= GAPS_MAX {
+                        s.gaps = Some(px);
+                    }
+                }
+            }
             _ => {}
         }
     }
 }
 
-/// The canonical file content (the inverse of parse).
+/// A config chord/action token must be a short run of printable, non-space,
+/// non-control ASCII (the F1 discipline: never push an unvalidated token
+/// into a ctl command, even from the trusted system file).
+fn is_printable_token(t: &str) -> bool {
+    !t.is_empty()
+        && t.len() <= 32
+        && t.bytes().all(|b| (0x21..0x7f).contains(&b))
+}
+
+/// The cfg-4 bounds mirror the compositor's (chords.rs GAPS_MAX; a bounded
+/// chord count keeps the startup push cheap + the config small).
+const GAPS_MAX: u32 = 32;
+const CHORDS_MAX: usize = 32;
+
+/// The canonical file content (the inverse of parse). The OSD edits only
+/// theme/cursor/mode, but the cfg-4 chord/gaps lines are ROUND-TRIPPED so
+/// an OSD save never wipes a hand-edited compositor config.
 pub fn render(s: &Settings) -> String {
     let mode = match s.mode {
         Mode::Auto => String::from("auto"),
         Mode::Fixed(w, h) => format!("{} {}", w, h),
     };
-    format!(
+    let mut out = format!(
         "# aurora renderer config (the system tier -- the F10 OSD writes this;\n\
          # AURORA-CONFIG.md section 3.2). key value; unknown keys are ignored.\n\
          theme {}\n\
@@ -87,7 +128,14 @@ pub fn render(s: &Settings) -> String {
         THEMES[s.theme % THEMES.len()].0,
         if s.cursor_blink { "on" } else { "off" },
         mode,
-    )
+    );
+    if let Some(g) = s.gaps {
+        out.push_str(&format!("gaps {}\n", g));
+    }
+    for (combo, action) in &s.chords {
+        out.push_str(&format!("chord {} {}\n", combo, action));
+    }
+    out
 }
 
 /// Best-effort startup load (bounded read; no alloc proportional to the
@@ -204,5 +252,38 @@ mod tests {
         assert_eq!(s.theme, 2, "spinifex applied, not-a-theme ignored");
         assert!(s.cursor_blink, "bad blink value leaves the default");
         assert!(s.mode == Mode::Auto, "malformed mode lines leave the default");
+    }
+
+    #[test]
+    fn chords_and_gaps_round_trip_and_fail_soft() {
+        // Round-trip: the OSD does not edit chords/gaps, so render() must
+        // preserve hand-edited lines (else an OSD theme save wipes them).
+        let mut s = Settings::new();
+        s.gaps = Some(8);
+        s.chords.push((String::from("super+g"), String::from("zoom")));
+        s.chords.push((String::from("super+f"), String::from("none")));
+        let mut back = Settings::new();
+        parse(&render(&s), &mut back);
+        assert_eq!(back.gaps, Some(8));
+        assert_eq!(back.chords.len(), 2);
+        assert_eq!(back.chords[0], (String::from("super+g"), String::from("zoom")));
+        assert_eq!(back.chords[1], (String::from("super+f"), String::from("none")));
+
+        // Fail-soft: an over-cap gap, a control-byte or over-long token, or
+        // a wrong-arity chord line are all IGNORED (tapestryd's gated verb
+        // is the real validator; the parser only rejects the unpushable).
+        let mut b = Settings::new();
+        parse(
+            "gaps 999\n\
+             gaps notanum\n\
+             chord super+g\n\
+             chord super+g zoom extra\n\
+             chord super+g zo\x01om\n\
+             chord super+g zoom\n",
+            &mut b,
+        );
+        assert_eq!(b.gaps, None, "over-cap + non-numeric gaps ignored");
+        assert_eq!(b.chords.len(), 1, "only the well-formed 2-token chord kept");
+        assert_eq!(b.chords[0].1, "zoom");
     }
 }

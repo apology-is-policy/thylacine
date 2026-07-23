@@ -1979,16 +1979,31 @@ populate_stratum_pool() {
     # "the writer defines the tier"): aurora reads it at startup (the
     # pre-login theme) and the F10 OSD writes through. /lib exists from the
     # ndb bake above; mkdir is single-level (no -p).
+    # cfg-4 (env-gated, the ls-gfx-chords E2E): APPEND the compositor-tier
+    # test lines (a remapped chord + gaps) to the baked config so aurora
+    # pushes them at startup. Deliberately OPT-IN (THYLACINE_AURORA_CFG4=1)
+    # -- the shipped default uses the compiled chord defaults + gaps 1, and
+    # baking a gaps/chord change unconditionally would shift ls-gfx-panes'
+    # exact pixel + chord asserts. The env-gated scenario is the seed-pinning
+    # pattern (a real regression, run on demand).
     local aurcfg_src="$REPO_ROOT/usr/aurora/config.default"
+    local aurcfg_baked="$aurcfg_src"
+    if [[ "${THYLACINE_AURORA_CFG4:-0}" != "0" ]]; then
+        aurcfg_baked=/tmp/thyla-aurora-cfg4.$$
+        cat "$aurcfg_src" > "$aurcfg_baked"
+        printf 'gaps 8\nchord super+g zoom\nchord super+f none\n' >> "$aurcfg_baked"
+        echo "==> populate pool: cfg-4 test config ENABLED (gaps 8 + super+g=zoom + super+f=none)"
+    fi
     "$stratum_fs_bin" -s "$sock_path" mkdir /lib/aurora \
         || { echo "==> populate pool: mkdir /lib/aurora FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    "$stratum_fs_bin" -s "$sock_path" write /lib/aurora/config < "$aurcfg_src" \
+    "$stratum_fs_bin" -s "$sock_path" write /lib/aurora/config < "$aurcfg_baked" \
         || { echo "==> populate pool: write /lib/aurora/config FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     "$stratum_fs_bin" -s "$sock_path" sync \
         || { echo "==> populate pool: sync (aurora config) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/config | cmp -s - "$aurcfg_src" \
+    "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/config | cmp -s - "$aurcfg_baked" \
         || { echo "==> populate pool: /lib/aurora/config readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
+    [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
 
     # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
     # a crafted settings-channel OSC whose value embeds a NEWLINE

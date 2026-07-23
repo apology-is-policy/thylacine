@@ -207,6 +207,34 @@ pub extern "C" fn rs_main() -> i64 {
     let mut surf = surf.unwrap();
     let (mut w, mut h) = (surf.w as usize, surf.h as usize);
 
+    // cfg-4: push the compositor tier (chords + gaps) on aurora's OWN
+    // renderer conn (surf.global_ctl -- the gated ctl; aurora holds the
+    // renderer role). These do NOT affect the surface geometry (unlike
+    // the pre-connect mode push), so they ride the live surface conn.
+    // Reset-first (the environment discipline): a config that REMOVES a
+    // chord line reverts it to the compiled default. Best-effort -- a
+    // refused/failed push leaves the defaults; a buggy config never
+    // wedges aurora.
+    if !settings.chords.is_empty() {
+        let _ = surf.global_ctl("chord-reset");
+        for (combo, action) in &settings.chords {
+            let _ = surf.global_ctl(&alloc::format!("chord {} {}", combo, action));
+        }
+    }
+    if let Some(g) = settings.gaps {
+        let _ = surf.global_ctl(&alloc::format!("gaps {}", g));
+    }
+    if !settings.chords.is_empty() || settings.gaps.is_some() {
+        // A single startup line for the cfg-4 push (the ls-gfx-chords E2E
+        // gates on it; also the honest "what did the config change" record).
+        match settings.gaps {
+            Some(g) => say!("aurora: cfg-4 pushed {} chord(s), gaps={}",
+                            settings.chords.len(), g),
+            None => say!("aurora: cfg-4 pushed {} chord(s), gaps=default",
+                         settings.chords.len()),
+        }
+    }
+
     let m = Metrics {
         cell_w: Atlas::cell_w(),
         cell_h: Atlas::cell_h(),

@@ -1,0 +1,147 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-chords.exp -- the cfg-4 runtime chords + gaps,
+# end to end (AURORA-CONFIG.md section 3.5).
+#
+# ENV-GATED: this scenario requires the image built with
+# THYLACINE_AURORA_CFG4=1, which appends the compositor-tier test lines to
+# the baked /lib/aurora/config:
+#     gaps 8
+#     chord super+g zoom
+#     chord super+f none
+# aurora reads them at startup and pushes them through the GATED ctl on its
+# own renderer conn (the cfg-3 apply-authority gate). The shipped default
+# does NOT carry these (they would shift ls-gfx-panes' exact pixel/chord
+# asserts), so the scenario is opt-in like the seed-pinning fixtures --
+# a real regression, run on demand:
+#     THYLACINE_AURORA_CFG4=1 tools/build.sh all
+#     tools/test-interactive.sh ls-gfx-chords
+#
+# Proves, over the REAL graphical input path (QMP -> PCI keyboard ->
+# tapestryd chord plane), that a config chord/gaps line reaches the live
+# compositor:
+#
+#   gaps      : after a split, the console pane's 8px outer inset is
+#               BG (a config `gaps 8`); at the default gaps 1 that pixel
+#               is the console's own bonfire.
+#   unbind    : Super+F -- the DEFAULT zoom key, `none`-unbound by the
+#               config -- does NOTHING (the split is preserved); without
+#               the config it would zoom (the default binding).
+#   rebind    : Super+G -- unbound by default, `zoom`-bound by the config
+#               -- zooms the focused pane fullscreen; the toggle back
+#               restores the split (zoom via the remapped key).
+#
+# The swallow-set (G-6c) is untouched by the runtime table, so a live
+# rebind never leaks a half key-pair (the cfg-4 obligation; here the push
+# happens at startup, but the table + swallow-set are the same objects a
+# runtime rebind would touch).
+#
+# HVF like its ls-gfx siblings (bare TCG hangs at the pre-existing 8a-2b
+# hwwatch E2E -- task #27).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+set BG "16 16 20"        ;# pane::BG_COLOR 0x101014, decimal RGB
+set BONFIRE "14 12 12"   ;# bonfire bg 0x0E0C0C
+
+proc ch_dump {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp -P $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+# Bonfire fraction (retried; aurora presents on damage within a frame or two).
+proc ch_bonfire {} {
+    global repo
+    for {set i 0} {$i < 12} {incr i} {
+        file delete -force /tmp/ls-gfx-chords.ppm
+        if {[ch_dump /tmp/ls-gfx-chords.ppm] eq "" && [file exists /tmp/ls-gfx-chords.ppm]} {
+            set out [exec python3 $repo/tools/ppm-colorfrac.py /tmp/ls-gfx-chords.ppm 0E0C0C 0 1]
+            if {[regexp {(0\.[0-9]+|1\.0+)} $out -> f]} { return $f }
+        }
+        after 500
+    }
+    return -1
+}
+
+proc ch_pixel {x y} {
+    global repo qmp
+    file delete -force /tmp/ls-gfx-chords.ppm
+    if {[ch_dump /tmp/ls-gfx-chords.ppm] ne ""} { return "" }
+    return [exec $repo/tools/ppm-sample.py /tmp/ls-gfx-chords.ppm $x $y]
+}
+
+proc ch_key {chord} {
+    global repo qmp
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k $chord} err]} {
+        lc_fail "qmp-sendtext -k $chord failed: $err"
+    }
+    after 1200 ;# let the chord dispatch + reconcile + present land
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Anchor: the fullscreen console settles (bonfire dominant).
+set bf -1
+for {set i 0} {$i < 12} {incr i} {
+    set bf [ch_bonfire]
+    if {$bf > 0.9} break
+    after 700
+}
+if {$bf <= 0.9} { lc_fail "post-login fullscreen console never settled (bonfire=$bf)" }
+lc_pass "chords: baseline fullscreen console (bonfire=$bf)"
+
+# Split (Super+H = the DEFAULT split-h binding; unchanged by the config).
+ch_key "meta_l+h"
+set bf [ch_bonfire]
+if {$bf > 0.7} {
+    lc_fail "Super+H did not split (bonfire=$bf still full) -- default chord table broken?"
+}
+lc_pass "chords: Super+H split (default binding; bonfire=$bf)"
+
+# gaps: the console (left pane) is inset 8px, so its outer-left column is
+# BG. At the default gaps 1 this pixel would be the console's bonfire.
+set px [ch_pixel 4 400]
+if {$px ne $BG} {
+    lc_fail "gaps not applied: pixel (4,400)='$px' want BG '$BG' (build with THYLACINE_AURORA_CFG4=1?)"
+}
+lc_pass "chords: gaps 8 applied (the console's 8px outer inset is BG)"
+
+# unbind: Super+F is `none` in the config, so it does NOTHING (the split
+# stands). Without the config, F is the default zoom -> the empty focused
+# pane would go fullscreen (bonfire -> ~0).
+ch_key "meta_l+f"
+set bf [ch_bonfire]
+if {$bf < 0.3} {
+    lc_fail "Super+F zoomed (bonfire=$bf) -- the `none` unbind not applied (cfg-4 config not baked?)"
+}
+lc_pass "chords: Super+F is unbound (`none`); the split is preserved (bonfire=$bf)"
+
+# rebind: Super+G is `zoom` in the config -> the focused (empty) pane
+# zooms fullscreen (bonfire -> ~0). Without the config, G is unbound -> no
+# change.
+ch_key "meta_l+g"
+set bf [ch_bonfire]
+if {$bf > 0.05} {
+    lc_fail "Super+G did not zoom (bonfire=$bf) -- the chord bind not applied (cfg-4 config not baked?)"
+}
+lc_pass "chords: Super+G is bound to zoom (the config rebind fired; bonfire=$bf)"
+
+# The toggle back (zoom via the remapped key) restores the split.
+ch_key "meta_l+g"
+set bf [ch_bonfire]
+if {$bf < 0.3 || $bf > 0.7} {
+    lc_fail "Super+G did not un-zoom back to the split (bonfire=$bf)"
+}
+lc_pass "chords: Super+G toggles the zoom (back to the split; bonfire=$bf)"
+
+lc_quit
+lc_pass "ls-gfx-chords: the cfg-4 runtime chords + gaps verified (gaps + unbind + rebind + toggle, all pushed from config through the gated ctl)"
+exit 0

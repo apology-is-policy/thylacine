@@ -71,16 +71,29 @@ pub const MODE_PRESETS: [Mode; 7] = [
 ];
 
 /// The aurora-local settings the OSD edits, plus the pushed compositor
-/// tier (`mode`).
+/// tier (`mode`, and cfg-4 `chords`/`gaps`).
 pub struct Settings {
     pub theme: usize, // index into vt::THEMES
     pub cursor_blink: bool,
     pub mode: Mode, // cfg-3: applied via the gated ctl, never via OSC
+    /// cfg-4: config `chord <combo> <action>` lines (compositor tier,
+    /// pushed via the gated ctl at startup). The OSD does not edit them
+    /// (hand-edited / halcyon.rc), but render() round-trips them so an
+    /// OSD theme/mode save never wipes them.
+    pub chords: Vec<(String, String)>,
+    /// cfg-4: the inter-pane gap (px); None = the compositor default (1).
+    pub gaps: Option<u32>,
 }
 
 impl Settings {
     pub fn new() -> Settings {
-        Settings { theme: 0, cursor_blink: true, mode: Mode::Auto }
+        Settings {
+            theme: 0,
+            cursor_blink: true,
+            mode: Mode::Auto,
+            chords: Vec::new(),
+            gaps: None,
+        }
     }
 }
 

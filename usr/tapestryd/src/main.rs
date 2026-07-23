@@ -46,6 +46,7 @@ macro_rules! say {
     }};
 }
 
+mod chords;
 mod gpu;
 mod input;
 mod keymap;

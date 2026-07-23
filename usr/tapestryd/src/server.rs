@@ -87,6 +87,7 @@ use libthyla_rs::{
     T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
+use crate::chords::{ChordAction, Chords};
 use crate::gpu::Gpu;
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
@@ -464,8 +465,14 @@ pub struct Comp {
     /// Keys whose PRESS was swallowed by the Super chord layer (section
     /// 18.4: reserved chords never reach a surface); their release /
     /// repeat swallow too, even if Super lifted first (no stray release
-    /// reaches a client). evdev codes are < 256.
+    /// reaches a client). evdev codes are < 256. INDEPENDENT of `chords`
+    /// (cfg-4): the swallow-set tracks physical key state, so a live
+    /// rebind never leaks a half key-pair.
     chord_down: [u64; 4],
+    /// The runtime chord binding table (cfg-4): (key, shift) -> action,
+    /// seeded with the stage-0 defaults, remapped by the gated `chord`
+    /// ctl verb. Also holds the inter-pane `gaps` inset.
+    chords: Chords,
     /// The pointer's last display position (G-7c; tablet-absolute, scaled
     /// by the input drain). Buttons/scroll route by it.
     ptr_x: u32,
@@ -506,6 +513,7 @@ impl Comp {
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             chord_down: [0; 4],
+            chords: Chords::new(),
             ptr_x: 0,
             abs_last: None,
             ptr_y: 0,
@@ -1113,7 +1121,7 @@ impl Comp {
     ///   - nothing at all -> Off (Boot stays untouched pre-first-content).
     fn reconcile(&mut self) {
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        self.layout.recompute(dw, dh);
+        self.layout.recompute(dw, dh, self.chords.gaps);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
@@ -2022,69 +2030,56 @@ impl Comp {
         true
     }
 
-    /// Dispatch one bound chord (US-QWERTY evdev codes; the binding table
-    /// is compositor policy -- a halcyon.rc concern eventually, baked
-    /// here like the keymap). i3-flavored: Super+arrows focus spatially,
-    /// +Shift move the pane; h/v split; f zoom; t/s tab/stack; e split
-    /// toggle; Tab cycles tabs; Shift+q closes the focused pane.
+    /// Dispatch one Super chord: look the (code, shift) up in the RUNTIME
+    /// table (cfg-4) and execute the bound action, if any. An unbound key
+    /// is plane-reserved + dropped (unchanged). The table is seeded with
+    /// the stage-0 i3-flavored defaults and remapped by the gated `chord`
+    /// ctl verb; the lookup here is the ONLY consumer, so a rebind takes
+    /// effect on the next press with no other coupling.
     fn chord_action(&mut self, code: u16, shift: bool) {
-        const KEY_TAB: u16 = 15;
-        const KEY_Q: u16 = 16;
-        const KEY_E: u16 = 18;
-        const KEY_T: u16 = 20;
-        const KEY_S: u16 = 31;
-        const KEY_F: u16 = 33;
-        const KEY_H: u16 = 35;
-        const KEY_V: u16 = 47;
-        const KEY_UP: u16 = 103;
-        const KEY_LEFT: u16 = 105;
-        const KEY_RIGHT: u16 = 106;
-        const KEY_DOWN: u16 = 108;
+        if let Some(action) = self.chords.lookup(code, shift) {
+            self.exec_chord(action);
+        }
+    }
 
-        let dir = match code {
-            KEY_LEFT => Some(Dir::Left),
-            KEY_RIGHT => Some(Dir::Right),
-            KEY_UP => Some(Dir::Up),
-            KEY_DOWN => Some(Dir::Down),
-            _ => None,
-        };
-        if let Some(d) = dir {
-            let changed = if shift {
+    /// Perform one resolved chord action against the layout (the old
+    /// hardcoded arms, now keyed by ChordAction). A structural change
+    /// reconciles; a no-op (edge/degenerate) does not.
+    fn exec_chord(&mut self, action: ChordAction) {
+        match action {
+            ChordAction::FocusDir(d) => {
+                if self.layout.focus_dir(d) {
+                    self.reconcile();
+                }
+            }
+            ChordAction::MoveDir(d) => {
                 let f = self.layout.focused;
                 self.layout.unzoom();
-                self.layout.move_dir(f, d)
-            } else {
-                self.layout.focus_dir(d)
-            };
-            if changed {
-                self.reconcile();
+                if self.layout.move_dir(f, d) {
+                    self.reconcile();
+                }
             }
-            return;
-        }
-        match (code, shift) {
-            (KEY_H, false) | (KEY_V, false) => {
-                let mode = if code == KEY_H { Mode::SplitH } else { Mode::SplitV };
+            ChordAction::Split(mode) => {
                 self.layout.unzoom();
                 let f = self.layout.focused;
                 if self.layout.split(f, mode).is_some() {
                     self.reconcile();
                 }
             }
-            (KEY_F, false) => {
+            ChordAction::Zoom => {
                 let f = self.layout.focused;
                 if self.layout.zoom_toggle(f) {
                     self.reconcile();
                 }
             }
-            (KEY_T, false) | (KEY_S, false) => {
-                let mode = if code == KEY_T { Mode::Tabbed } else { Mode::Stacked };
+            ChordAction::SetMode(mode) => {
                 self.layout.unzoom();
                 let f = self.layout.focused;
                 if self.layout.set_mode(f, mode) {
                     self.reconcile();
                 }
             }
-            (KEY_E, false) => {
+            ChordAction::SplitToggle => {
                 // Split-orientation toggle on the focused leaf's parent.
                 let f = self.layout.focused;
                 let parent_mode = self
@@ -2104,19 +2099,18 @@ impl Comp {
                     self.reconcile();
                 }
             }
-            (KEY_TAB, s) => {
+            ChordAction::TabCycle(fwd) => {
                 self.layout.unzoom();
-                if self.layout.tab_cycle(!s) {
+                if self.layout.tab_cycle(fwd) {
                     self.reconcile();
                 }
             }
-            (KEY_Q, true) => {
+            ChordAction::Close => {
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
                     let _ = self.pane_cmd(id, "close");
                 }
             }
-            _ => {} // unbound: plane-reserved, dropped
         }
     }
 
@@ -2992,6 +2986,33 @@ impl Conn {
                 return Err(p9::E_INVAL);
             }
             comp.clock_hz = hz;
+            return Ok(());
+        }
+        // cfg-4: the runtime chord table + gaps (AURORA-CONFIG.md section
+        // 3.5). Authority verbs (default-deny gated above). A rebind
+        // mutates only comp.chords -- NEVER the chord_down swallow-set --
+        // so a live remap can never leak a half key-pair (the cfg-4
+        // obligation). `chord-reset` (the environment's reset-first push)
+        // must precede the strip on "chord " so it is not mis-parsed.
+        if s == "chord-reset" {
+            comp.chords.reset();
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("chord ") {
+            let mut it = rest.split_ascii_whitespace();
+            let combo = it.next().ok_or(p9::E_INVAL)?;
+            let action = it.next().ok_or(p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            return comp.chords.bind(combo, action).map_err(|_| p9::E_INVAL);
+        }
+        if let Some(rest) = s.strip_prefix("gaps ") {
+            let px: u32 = rest.trim().parse().map_err(|_| p9::E_INVAL)?;
+            comp.chords.set_gaps(px).map_err(|_| p9::E_INVAL)?;
+            // The inset feeds recompute; re-run it so the change is visible
+            // without waiting for the next layout mutation.
+            comp.reconcile();
             return Ok(());
         }
         // Section 18.6 determinism mode (G-6c) -- compiled only into

@@ -792,6 +792,18 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL gate: clock-rate accepted from a non-renderer");
         return 1;
     }
+    // cfg-4: the runtime chord/gaps verbs are AUTHORITY too -- the
+    // default-deny gate refuses them for this non-renderer conn by
+    // construction (they are not in is_ungated_ctl). Valid commands that
+    // would SUCCEED ungated, so a refusal proves the gate covers them.
+    if write_file(root, "ctl", "chord super+g zoom") {
+        say!("tapestry-battery: FAIL gate: chord accepted from a non-renderer");
+        return 1;
+    }
+    if write_file(root, "ctl", "gaps 8") {
+        say!("tapestry-battery: FAIL gate: gaps accepted from a non-renderer");
+        return 1;
+    }
     say!("battery: gate OK");
 
     // The hold leg (TPRESENT_HOLD + release, G-6c): magenta blits into
