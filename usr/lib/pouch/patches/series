@@ -37,3 +37,4 @@
 0021-pouch-pty.patch
 0022-pouch-nanosleep.patch
 0023-pouch-fopen.patch
+0024-pouch-fs-process-wires.patch

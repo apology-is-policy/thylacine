@@ -6067,6 +6067,27 @@ int main(void) {
                 t_putstr("joey: /fs-mut-smoke reaped status=0; LS-3b fs-mutation API verified\n");
             }
 
+            // === CL-1a: pouch FS/process wire prover (/bin/pouch-hello-fs) ===
+            // The Clade arc (docs/LLVM-DESIGN.md) sub-chunk CL-1a proof: a POSIX
+            // C program driving every FS/process boundary line 0024 added --
+            // open(O_CREAT)/mkdir -> SYS_WALK_CREATE, rename -> SYS_RENAME,
+            // unlink/rmdir -> SYS_UNLINK, readdir -> SYS_READDIR (9P-stream ->
+            // struct dirent), ftruncate/fchmod -> SYS_WSTAT, access -> SYS_STAT,
+            // chdir/getcwd/getpid -- end to end through the musl API, against the
+            // writable post-pivot Stratum FS (the wires' whole value is runtime
+            // behavior, so "compiles" is not "works"). pouch_smoke_one wires fd
+            // 0/1 to a pipe, reaps-before-drain, and checks the child exited 0 +
+            // printed "ALL WIRES PASS". Post-pivot /bin bind resolves the name.
+            {
+                static const char phfs_name[] = "/bin/pouch-hello-fs";
+                if (pouch_smoke_one(phfs_name, sizeof(phfs_name) - 1,
+                                    "ALL WIRES PASS", 14) != 0) {
+                    t_putstr("joey: /pouch-hello-fs FAILED (CL-1a wire regression)\n");
+                    return 1;
+                }
+                t_putstr("joey: /pouch-hello-fs PASS; CL-1a FS/process wires verified\n");
+            }
+
             // === Go Stage 3a: fs file I/O (/go-fs) ===
             // The GOOS=thylacine Go-port Stage-3a proof: a Go binary driving the
             // new os + syscall packages end-to-end -- os.Mkdir / os.Create /

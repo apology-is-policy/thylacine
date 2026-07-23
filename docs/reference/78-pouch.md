@@ -1543,3 +1543,93 @@ honest-fail → master close → slave EOF (drain-then-EOF).
   not landed): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL `^Z`
   actually stop a pouch program — see `83-pouch-signals.md`), and the
   `SYS_POSTNOTE` pgrp arm (`kill(-pgrp)`).
+
+## The FS/process wires — `0024-pouch-fs-process-wires.patch` (Clade CL-1a)
+
+The on-device LLVM arc (`docs/LLVM-DESIGN.md`, working name **Clade**)
+sub-chunk **CL-1a**: the pouch FS/process syscalls that CL-0's census
+(`LLVM-DESIGN.md §16.1`) found clang/lld/make demand per-compile /
+per-link, each wired onto an **existing, already-audited** Thylacine
+kernel syscall (**zero new kernel surface**). Before this patch these were
+`0xFFFF` ENOSYS sentinels, so a compile failed at output-write
+(`renameat`), a header-search failed (`getdents64`), etc.
+
+### The wires
+
+| POSIX / Linux call | Thylacine kernel syscall | Note |
+|---|---|---|
+| `getpid` | `SYS_GETPID` (72) | temp-name mangling |
+| `chdir` / `getcwd` | `SYS_CHDIR` (69) / `SYS_GETCWD` (70) | per-Proc cwd (LS-4); `chdir` passes `(path,len)` |
+| `mkdir` / `mkdirat` | `SYS_WALK_CREATE` (54) DMDIR | make output dirs |
+| `open(O_CREAT)` / `openat` | `SYS_WALK_CREATE` (54) regular file | **clang mkstemp + the `.o` output** — per-compile |
+| `ftruncate` | `SYS_WSTAT` (59) SIZE | lld `FileOutputBuffer` sizing |
+| `fchmod` / `fchmodat` / `chmod` | `SYS_WSTAT` (59) MODE | identity-gated (#47), an O_PATH fd is accepted |
+| `access` / `faccessat` | `SYS_STAT` (88) | existence + owner-rwx probe |
+| `rename` / `renameat` | `SYS_RENAME` (57) | **clang temp + atomic `.o`** — per-compile |
+| `unlink` / `unlinkat` / `rmdir` | `SYS_UNLINK` (58) (+REMOVEDIR) | |
+| `readdir(DIR*)` | `SYS_READDIR` (56) | **9P stream → `struct dirent`** — per-compile (header-search dir scan) |
+
+### The shared path-split helper
+
+The FS-mutation kernel primitives (`SYS_RENAME` / `SYS_UNLINK` /
+`SYS_WALK_CREATE`) are **parent-fd + leaf-name**, not path-based. So the
+`*at` functions split their path into `(parent-dir, leaf)` via the new
+`__pouch_open_parent` (`src/fcntl/_pouch_fs.c` + `src/internal/_pouch_fs.h`):
+open the parent `O_PATH` (born R|W — the A-1.7 navigation base the
+primitives accept; `SYS_open` resolves it through `stalk`, cwd-joining a
+relative dir per LS-4) and hand `(parent_fd, leaf)` to the kernel. The
+`/srv/` short-circuits in `unlink()` / `chmod()` (0014) are preserved by
+delegating their real path to the CL-1a `*at` variant.
+
+`openat` also gains the **`O_CREAT` arm** (the gap `0023` deferred): split
+the path, `SYS_WALK_CREATE` the leaf (`perm = mode & 0777`, a regular file
+— no DMDIR); `O_EXCL` surfaces the kernel's EEXIST verbatim (mkstemp's
+contract), and without `O_EXCL` an EEXIST falls back to opening the
+existing file (`+OTRUNC` on `O_TRUNC`). The stale "absolute paths only"
+restriction is **lifted** now that chdir/getcwd + cwd-resolution exist — a
+relative path cwd-joins via `SYS_open`'s FROM_ROOT arm.
+
+The `readdir` refill reads the raw 9P2000.L Treaddir stream via
+`SYS_READDIR` into a stack scratch and translates it into the Linux
+getdents64 `struct dirent` records the rest of musl's dirent family
+understands: per 9P entry `qid[13]` (`type@0`, `vers@1`, **`path@5`** =
+`d_ino`) + `offset[8]` + `type[1]` (= `d_type`) + `namelen[2 LE]` + name.
+The request is capped at ¾ of `dir->buf` so the translated form (at most
+~1.004× its 9P source) always fits — no entry the kernel returns is ever
+dropped mid-batch.
+
+### Deferred to CL-1b (ground truth from CL-0 — not clean 1:1 wires)
+
+- **`dup2` / `dup3`**: need dup-*onto-a-chosen-fd*; `SYS_DUP` allocates a
+  kernel-chosen slot (that is `dup()`). The child's fd redirection maps
+  onto the `SYS_SPAWN_FULL_ARGV` fd-list, not in-child `dup2` — posix_spawn
+  territory.
+- **`pipe2`**: `SYS_PIPE` returns rd/wr in x0/x1 (a two-register `svc`
+  return the single-return `syscall()` macro cannot capture) — needs a
+  small asm shim, landed with the process substrate.
+- **`posix_spawn` / `wait4`**: the audit-bearing process-lifecycle rewrite.
+
+### Verifying — `/pouch-hello-fs`
+
+`usr/pouch-hello/pouch-hello-fs.c` is a POSIX C program driving every wire
+end-to-end (create → write → ftruncate → read-back → chmod → access →
+rename → readdir → unlink → rmdir, under a working dir it creates), spawned
+by joey post-pivot against the writable Stratum FS. On success it prints
+`pouch-hello-fs: ... -- ALL WIRES PASS` and exits 0; joey treats a non-zero
+exit as a CL-1a boot regression. `ftruncate` is proven both directions on
+**fresh** files (shrink 11→4 + extend 0→64). The `pouch-hello`
+chdir-ENOSYS sentinel was repurposed (chdir is now wired) exactly as the
+`open()` sentinel was at 16b-gamma.
+
+### Known caveats (CL-1a)
+
+- **`ftruncate` shrink-after-sparse-extend → EIO** — a valid POSIX op
+  (extend a fresh file to N, then shrink it) fails **below** this wire, at
+  Stratum `stm_fs_truncate`'s sparse-shrink path. Simple shrink and simple
+  extend both work; only the extend-then-shrink sequence fails. NOT a
+  build-tool pattern (lld only extends). Tracked as an open follow-up
+  (`memory/bug_ftruncate_shrink_after_extend.md`); the pouch wire is
+  correct and proven for both simple directions.
+- **`O_CREAT|O_TRUNC` on an existing file** (the OTRUNC-in-EEXIST-fallback)
+  is not prover-exercised — low risk (a documented kernel omode; clang
+  writes via mkstemp+rename, not O_TRUNC-overwrite).

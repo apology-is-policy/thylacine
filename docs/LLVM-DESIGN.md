@@ -370,7 +370,7 @@ no bolted-on chasing).
 | # | Scope | Gate / deliverable | Audit posture | Cut line |
 |---|---|---|---|---|
 | **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc — **LANDED, §16** | none (read-only) | — |
-| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
+| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024-pouch-fs-process-wires.patch` + `open(O_CREAT)`; §16.9). CL-1b = posix_spawn/wait4 (audit-bearing); CL-1c = make. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite | a C++ prover (EH + RTTI + threads + TLS-dtors + filesystem) green on-device | focused round on the runtime/boundary seams | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired | host cross-builds via the real triple, byte-compatible artifacts | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade` | **`clang++ -O2` compiles, links (lld), and runs a real C++ program on-device** | focused round (the Support patches + the bake) | — |
@@ -599,6 +599,22 @@ pairing over the whole binary — the superset of any runtime demand):
 **79 distinct NRs**, fully name-mapped (one unknown). The additions over the strace set are all cold-path musl families: AIO (`io_setup`/`io_submit`/`io_destroy`), `symlinkat`/`linkat` (honest-ENOSYS at v1.0 — no symlinks/hardlinks), `mkdirat`/`fchownat`/`fchmod[at]`/`fchown` (→ `SYS_WALK_CREATE`/`SYS_WSTAT`), `statfs`, `ppoll` (0005), `setitimer`/`sched_setscheduler`/`set_robust_list`/rlimit/`uname`/`sysinfo`/`gettimeofday` (stubs), `kill`/`tkill` (0007), `socket` (0006), `madvise` (ENOSYS-tolerated). Nothing in the superset demands new kernel surface. Cross-checks 16.1's strace set; entries outside the
 dispositions are cold-path musl.
 
+### 16.9 CL-1a as-built (the FS/process wires)
+
+The first CL-1 sub-chunk landed: `usr/lib/pouch/patches/0024-pouch-fs-
+process-wires.patch` (20 files: 2 new + 18 rewritten lower-half `.c`) wires
+the per-compile/per-link FS+process calls from 16.1 onto existing kernel
+syscalls, plus the `open(O_CREAT)` -> `SYS_WALK_CREATE` arm (16.1 missed
+that clang's output-write goes through it -- traced while writing the
+prover). Shared `__pouch_open_parent` splits a path into (parent-dir, leaf)
+for the parent-fd kernel primitives; `readdir` translates the 9P Treaddir
+stream into `struct dirent`. Proven end-to-end in-guest by
+`/pouch-hello-fs` (spawned post-pivot against the writable Stratum FS).
+Full as-built: `docs/reference/78-pouch.md` "The FS/process wires". Two
+CL-0 predictions refined by ground truth: `dup2`/`dup3` (need dup-onto-N,
+not `SYS_DUP`) and `pipe2` (need a 2-register `svc` shim) are NOT clean 1:1
+wires -> deferred to CL-1b (their real home is the spawn fd-list).
+
 ## 17. Revision history
 
 | Date | Change |
@@ -606,3 +622,4 @@ dispositions are cold-path musl.
 | 2026-07-23 | Initial draft: research pass (tree + external) + the full arc design; forks §14 open. |
 | 2026-07-23 | SIGNED OFF — all §14 leans adopted verbatim; JIT invariant renumbered I-41 → I-42 (I-41 reserved by ADVANCED-GO AG-2 between draft and signoff); moved to the main tree for the scripture commit. |
 | 2026-07-23 | **CL-0 landed** (§16): syscall-gap census closed (zero new kernel syscalls for CL-1..CL-4; `renameat`+`getdents64` per-compile load-bearing), environ CLOSED (envp always empty), lld-in-multicall VERIFIED, Mesa OSMesa-removal correction (§16.6), F4 validated by measurement (worst TU 2.46 GiB). Instruments: disposable GCP ARM VM (torn down) + the fork clone @ 22.1.8. |
+| 2026-07-23 | **CL-1a landed** (§16.9): the pouch FS/process wires (`0024`, 20 files) -- getpid/chdir/getcwd/mkdir/open(O_CREAT)/rename/unlink/readdir/ftruncate/fchmod/access, each onto an existing kernel syscall (ZERO new kernel surface); the `__pouch_open_parent` path-split helper; openat's O_CREAT arm + relative-path lift. Proven in-guest by `/pouch-hello-fs` (ALL WIRES PASS, boot OK, 0 EXTINCTION). dup2/dup3/pipe2 deferred to CL-1b (not clean 1:1). Surfaced + enqueued an ftruncate shrink-after-sparse-extend EIO below the wire (Stratum `stm_fs_truncate`; `memory/bug_ftruncate_shrink_after_extend.md`). |

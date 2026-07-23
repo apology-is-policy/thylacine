@@ -55,12 +55,25 @@ int main(void) {
     // in pouch before the trap — so it is deliberately bogus.
     static const char probe_path[] = "/pouch-seam-probe-never-resolved";
 
-    errno = 0;
-    if (chdir(probe_path) != -1 || errno != ENOSYS) {
-        (void)emit("pouch-hello: FAIL non-cancellable sentinel (chdir)\n");
+    // CL-1a (Clade arc, docs/LLVM-DESIGN.md): chdir() is now WIRED
+    // (0024-pouch-fs-process-wires -> SYS_CHDIR 69). This sentinel is
+    // repurposed exactly like the open() one below (16b-gamma): where it
+    // once proved the seam's non-cancellable guard returned ENOSYS for the
+    // 0xFFFF SYS_chdir, it now proves the wire is LIVE -- chdir to a valid
+    // directory succeeds, and a bogus path FAILS (with the seam's real
+    // decode, NOT the ENOSYS sentinel). The sys_chdir_handler returns a
+    // bare -1 on a walk miss (not -errno), so the assertion checks only
+    // "failed and not ENOSYS", never a specific errno.
+    if (chdir("/") != 0) {
+        (void)emit("pouch-hello: FAIL chdir(/) -- expected success (wired)\n");
         return 1;
     }
-    if (emit("pouch-hello: sentinel ok - chdir -> ENOSYS (non-cancellable path)\n") != 0)
+    errno = 0;
+    if (chdir(probe_path) != -1 || errno == ENOSYS) {
+        (void)emit("pouch-hello: FAIL chdir sentinel -- expected wired failure, not ENOSYS\n");
+        return 1;
+    }
+    if (emit("pouch-hello: sentinel ok - chdir wired (/ ok; bogus fails, not ENOSYS)\n") != 0)
         return 1;
 
     // P6-pouch-stratumd-boot 16b-gamma: open() now works (it forwards to
