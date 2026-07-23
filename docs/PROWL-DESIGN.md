@@ -1,10 +1,10 @@
 # PROWL-DESIGN.md — the scheduler-aware process monitor + the kernel telemetry it reads
 
-Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (the substrate) LANDED.**
-Building telemetry-first (prowl-1..5, §6). Landed per the CLAUDE.md design-
-conversation pattern (research → doc → surface forks → signoff → bind ARCH →
-build). The tool is `prowl`; the kernel telemetry it reads is
-`/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
+Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (the substrate) +
+prowl-2 (the tool MVP) LANDED.** Building telemetry-first (prowl-1..5, §6).
+Landed per the CLAUDE.md design-conversation pattern (research → doc → surface
+forks → signoff → bind ARCH → build). The tool is `prowl`; the kernel telemetry
+it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
 
 **As-built (prowl-1):** `Thread.run_ns`/`switched_in_at` (the ctx-switch on-CPU
 accounting), `Proc.name` (the basename of the resolved binary, stamped at
@@ -17,6 +17,23 @@ the SMP gate (default+UBSan × smp4/smp8, 0 corruption). The audit-trigger row i
 ARCH §25.4 (Scheduler, prowl-1 addendum); the focused audit is prowl-5. As-built
 detail: `docs/reference/15-scheduler.md` (§ on-CPU accounting) +
 `32-devproc.md` + `33-devctl.md`.
+
+**As-built (prowl-2):** the native `prowl` Kaua TUI (`usr/prowl/`, like nora) --
+polls `/ctl/procs` (the all-pids table + cumulative `cpu_ns`) + `/ctl/sched`
+(`cpus: N`), diffs `cpu_ns` across ~1.5 s ticks for %CPU (the htop method, on
+`time::Instant` -- the vDSO monotonic clock), and renders an **aggregate** CPU
+meter (per-core count-normalized) + a sortable process list (pid/name/%cpu/mem/
+threads/state) with cursor-follows-PID selection. As a manager it kills the
+selected process via `/proc/<pid>/ctl` (I-26 two-axis gate; NO new authority --
+a confined user kills only its own; confirm-gated `k`->`y`). Console discipline
+is the nora contract (I-27): owns fd 1 (Terminal) + fd 0 (PollSource), never
+touches consctl; ut's raw-mode dance + crash-restore backstop (prowl in ut's
+`is_raw_command`). **Pure userspace -- kernel byte-unchanged; no new syscall, no
+new §28 invariant.** The **per-CPU** meters + the scheduler-introspection view
+are prowl-3 (they need the `/ctl/cpu` leaf, not built yet). Validated by
+`tools/interactive/prowl.exp` (the LS-CI E2E: launch + raw-mode dance +
+telemetry render + nav/sort + quit + console restore) + boot OK + the intact
+suite. As-built detail: `docs/reference/144-prowl.md`.
 
 ---
 
@@ -248,8 +265,11 @@ nothing on the kernel's behalf (the kernel gates the reads).
   Kernel-only; the data a basic top needs. `proc.cpu_ns_accounting` kernel test +
   the SMP gate (ctx-switch path, 0 corruption). The kernel exposes cumulative
   `cpu_ns`; the tool derives %CPU by diffing across polls.
-- **prowl-2 (tool MVP):** the Kaua `prowl` TUI — per-CPU meters + the process list
-  + %CPU + kill. An htop-equivalent, on-device.
+- **prowl-2 (tool MVP): LANDED.** the Kaua `prowl` TUI — an **aggregate** CPU
+  meter (per-CPU bars land with `/ctl/cpu` in prowl-3) + the process list + %CPU
+  (diffing `cpu_ns` across ticks) + confirm-gated kill via `/proc/<pid>/ctl`. An
+  htop-equivalent, on-device; pure userspace. `usr/prowl/` +
+  `tools/interactive/prowl.exp`; as-built `docs/reference/144-prowl.md`.
 - **prowl-3 (the scheduler view):** `/proc/<pid>/sched` + the per-thread scheduler
   counters + the `/ctl/cpu` per-CPU leaf + the tool's detail pane + band/parks
   columns. The "better than htop" differentiator.

@@ -1,0 +1,17 @@
+[package]
+name = "prowl"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "prowl"
+path = "src/main.rs"
+
+# prowl is a device-only native TUI (no host-tested lib half like nora), so it
+# takes kaua (default features -> the `backend` console layer) + libthyla-rs as
+# plain deps -- no feature gymnastics.
+[dependencies]
+kaua = { path = "../lib/kaua" }
+libthyla-rs = { path = "../lib/libthyla-rs" }

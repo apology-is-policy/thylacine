@@ -1,0 +1,66 @@
+#!/usr/bin/expect -f
+# tools/interactive/prowl.exp -- prowl-2: the Kaua process monitor + the ut
+# raw-mode dance, over a real PTY.
+#
+# The runnable coverage no host test can reach (prowl's /ctl read + parse + the
+# Terminal/PollSource render + ut's raw-mode dance are all fd-bound):
+#   1. ut sees a raw command (console::is_raw_command("prowl")), flips the console
+#      to RAW, and hands prowl fd 0/1/2 (Inherit) -- so prowl launches, ACQUIRES
+#      THE SCREEN, reads /ctl/procs + /ctl/sched, and renders. A failed dance
+#      (fd 0 a dead pipe) -> prowl exits at once and the render assertions time out.
+#   2. prowl renders the banner (procs:/cpus:), the process table (the MEM(pg)
+#      header), and a REAL process (kproc, always pid 1) -- proving the kernel
+#      telemetry was read + parsed + drawn as live data, not an empty list.
+#   3. `q` quits; ut restores the prompt mode + the screen (the panic=abort
+#      backstop), so the post-quit command runs at a clean prompt.
+#
+# Assertion discipline: `lc_send "prowl"` echoes "prowl" at the cooked prompt, so
+# the assertions match tokens ONLY prowl's render produces (cpus:/MEM(pg)/kproc),
+# never "prowl" itself. TCG-default harness -> the terminal does not answer the
+# CPR size probe, so prowl falls back to 80x24 and renders regardless (ls-7's
+# pattern). The LS-CI wrapper retries the whole scenario up to 3x for host jitter.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Launch prowl (a raw command). ut RAWs the console + Inherits fd 0/1/2.
+lc_send "prowl"
+# Let it launch: spawn -> ut RAW dance -> prowl probes size (fallback 80x24) ->
+# reads /ctl -> renders the first frame.
+sleep 2
+
+# The banner "procs: N   cpus: N" (proves launch + the /ctl/sched ncpus read).
+lc_expect "cpus:" "prowl banner rendered"
+# The process-list Table header (proves the table rendered).
+lc_expect "MEM(pg)" "prowl table header rendered"
+# A real process -- kproc is always pid 1, ALIVE, and the initial frame is
+# pid-sorted (all %CPU 0 until the first delta) so kproc is at the top: proves
+# /ctl/procs was read + parsed + drawn as real data.
+lc_expect "kproc" "prowl process list populated with live telemetry"
+lc_pass "prowl-2: launch + raw-mode dance + kernel-telemetry render"
+
+# Exercise the key path (no assert -- just prove no crash before the quit): cycle
+# the sort, move the cursor. A crash here would break the quit + restore below.
+lc_step "prowl: cycle sort (s) + move cursor (Down)"
+send "s"
+sleep 1
+send "\x1b\[B"
+sleep 1
+
+# Quit prowl with `q` (a raw keystroke, no CR). prowl exits -> ut restores the
+# prompt + re-emits the screen escapes -> the session prompt returns.
+lc_step "prowl: quit (q)"
+send "q"
+sleep 2
+
+# The restore proof: a normal command runs + prints at a clean prompt. The
+# upper-cased token appears ONLY in the tr output (we typed lowercase), so the
+# match is unambiguous proof prowl exited + ut restored a usable console.
+lc_run_expect "echo prowl-restored | tr a-z A-Z" "PROWL-RESTORED"
+lc_pass "prowl-2: quit + ut console restore"
+
+lc_quit
+lc_pass "LS-CI prowl: process monitor verified end to end"
+exit 0

@@ -1139,6 +1139,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "prowl"
+version = "0.1.0"
+dependencies = [
+ "kaua",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "pty-probe"
 version = "0.1.0"
 dependencies = [
