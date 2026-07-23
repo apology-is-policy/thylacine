@@ -1,7 +1,8 @@
 # 144 -- prowl: the scheduler-aware process monitor (the tool)
 
-**Status:** prowl-2 (the tool MVP) as-built. The kernel telemetry it reads is
-prowl-1 (`docs/reference/15-scheduler.md` on-CPU accounting + `32-devproc.md` +
+**Status:** prowl-3c (the scheduler view) as-built. The kernel telemetry it reads
+is prowl-1 (`docs/reference/15-scheduler.md` on-CPU accounting) + prowl-3a/3b
+(the per-thread counters + `/proc/<pid>/sched` + `/ctl/cpu`, `32-devproc.md` +
 `33-devctl.md`); the design + phasing is `docs/PROWL-DESIGN.md`.
 
 `prowl` is a native `libthyla-rs` Kaua TUI -- an htop-equivalent that runs
@@ -42,6 +43,7 @@ raw-mode dance before spawning it (below).
 | PageUp / PageDown | Move the cursor by 10                                    |
 | Home / End     | Jump to the first / last process                            |
 | `s`            | Cycle the sort key (cpu -> pid -> mem -> name)              |
+| `d`            | Toggle the per-thread scheduler detail pane (prowl-3c)      |
 | `r` / Space    | Refresh now (re-sample immediately)                         |
 | `k`            | Kill the selected process (opens a `y`/`n` confirm)         |
 | `q` / Esc / Ctrl-C | Quit                                                    |
@@ -68,8 +70,20 @@ command) and quits like `q`.
   Plan 9 all-pids posture (#57a) -- coarse metadata for every process.
 
 - **`/ctl/sched`** (`kernel/devctl.c` `format_sched`) -- the `cpus: N` line gives
-  the online CPU count (`smp_cpu_count()`), which normalizes the aggregate meter.
-  Absent -> falls back to 1.
+  the online CPU count (`smp_cpu_count()`). Absent -> falls back to 1.
+
+- **`/ctl/cpu`** (prowl-3b; `kernel/devctl.c` `format_cpu`) -- one row per online
+  CPU with cumulative `idle_ns` + `capacity`. `prowl` diffs each core's `idle_ns`
+  across polls for **per-core utilization** (`1 - d(idle_ns)/d(wall)`) -- the
+  per-CPU meter bars. All-visible (coarse per-CPU stats).
+
+- **`/proc/<pid>/sched`** (prowl-3b; `kernel/devproc.c` `format_sched`) -- the
+  selected process's per-thread scheduler block (tid / band / cpu / run_ns /
+  nsched / parks / nmig / state), read **only while the detail pane is open**.
+  This is the **OQ-4-gated deep view**: the kernel returns `-1` unless `prowl`'s
+  user owns the target or holds `CAP_HOSTOWNER`, so `prowl` shows the per-thread
+  detail for its own processes (and, for the operator, any) and an "unavailable"
+  line otherwise. `prowl` confers no authority -- the kernel gate decides.
 
 Reads use the cpubench idiom: `File::open` + a bounded (4 KiB) read-to-EOF. The
 kernel caps `/ctl/procs` at `DEVCTL_READ_BUF` (2048 bytes, ~30 processes); a
@@ -104,16 +118,35 @@ so %CPU stays live even while navigating. The event loop is
 
 Three regions, top to bottom (`Layout::vertical`):
 
-- **Header (2 rows):** `prowl   procs: N   cpus: N`, then an aggregate CPU meter
-  `CPU [████░░░░] 47.3%  total 189.2%` -- utilization = the sum of every
-  process's %CPU divided by the core count (0..100%); total = the raw sum (can
-  exceed 100% across cores). The bar is drawn by hand (kaua has no gauge widget)
-  with `█`/`░` cells.
+- **Header (2 rows):** `prowl   procs: N   cpus: N`, then **one mini-bar per core**
+  (prowl-3c) -- `0[███░] 1[█░░░] 2[░░░░] 3[██░░]`, each fill = that core's
+  utilization from `/ctl/cpu`'s `idle_ns` diffed across polls. The segment width
+  adapts to the row; a too-narrow console degrades to as many cores as fit. When
+  `/ctl/cpu` is momentarily empty (a cold first frame) it falls back to the
+  prowl-2 aggregate meter `CPU [████░░░░] 47.3%  total 189.2%`. Bars are drawn by
+  hand (kaua has no gauge widget) with `█`/`░` cells.
 - **Body:** the process table (kaua's `Table` widget) -- columns pid / name /
   %cpu / mem(pages) / threads / state, sorted, with the selected row highlighted
   (reverse video) and scroll-to-keep-selection-visible.
+- **Detail pane (prowl-3c; toggled by `d`):** a bottom pane showing the selected
+  process's `/proc/<pid>/sched` -- one row per thread (tid / band / cpu / run_ns /
+  nsched / parks / nmig / state), the scheduler-introspection differentiator. The
+  pane follows the cursor (each selection move re-reads the newly-selected
+  process's sched). Height is capped so the process list keeps >= 3 rows. When the
+  OQ-4 gate denies the read (a non-owned process, no `CAP_HOSTOWNER`) or the
+  process exited, the pane shows a single "sched detail unavailable" line. The
+  per-process sched read happens **only while the pane is open** -- zero cost when
+  closed.
 - **Footer (1 row):** the key hints + the active sort; a pending kill replaces it
   with the confirm prompt.
+
+**Why the band/parks live in the detail pane, not as process-list columns.** The
+design sketch (§4.2) put `band`/`parks` in the process list. But those are
+**per-thread** (a process has N threads with N bands), and `/proc/<pid>/sched` is
+**OQ-4-gated** -- a normal user cannot read another user's / a system process's
+sched, so list columns would be mostly-blank for the common case. The detail pane
+is the correct home: per-thread granularity + the gate applied where it belongs.
+The process list stays the all-visible summary (`/ctl/procs`).
 
 The cursor tracks a **PID**, not a row index, so it stays on a process as %CPU
 re-sorts the list (the htop cursor-follows behaviour). A process that exits snaps
@@ -176,13 +209,13 @@ and the raw-command allow-list (`usr/utopia/libutopia/src/eval/console.rs`
 
 ## Status + known caveats
 
-- **This is prowl-2, the MVP.** The aggregate CPU meter, the process list, %CPU,
-  sort, and kill are live. Kernel byte-unchanged -- pure userspace.
-- **Per-CPU meters** (one bar per core) need the per-CPU `/ctl/cpu` leaf -> that,
-  plus the **scheduler-introspection view** (`/proc/<pid>/sched`: band /
-  parks-per-s / wake-source / starved) + a detail pane + band/parks columns, is
-  **prowl-3** (the "better than htop" differentiator).
+- **This is prowl-3c, the scheduler view.** Per-CPU meter bars (from `/ctl/cpu`),
+  the process list, %CPU, sort, kill, and the per-thread detail pane (from
+  `/proc/<pid>/sched`, `d`) are live. Kernel byte-unchanged for prowl-3c -- pure
+  userspace (the kernel telemetry landed at prowl-3a/3b).
 - **stop/cont + the tree view** are **prowl-4**.
+- **The `/dev/sysstat`-style per-CPU "who is on each core"** (§3.4) and the raw
+  EEVDF `vd_t`/`lag` (OQ-5 defers these as expert-only) are v1.x additions.
 - The `/ctl/procs` ~30-process cap (kernel `DEVCTL_READ_BUF`) truncates a busy
   system's tail; the sampler's previous-poll lookup is a linear scan (O(n^2) over
   the process count) -- both fine at the current process scale, tracked for the

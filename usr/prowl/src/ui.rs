@@ -44,25 +44,55 @@ fn meter_empty() -> Style {
 const COLUMNS: [u16; 6] = [6, 18, 8, 9, 5, 8];
 const HEADERS: [&str; 6] = ["PID", "NAME", "%CPU", "MEM(pg)", "THR", "STATE"];
 
-/// Draw one frame: header (2 rows) + process table (fills) + footer (1 row).
+/// Draw one frame: header (2 rows) + process table (fills) + [detail pane] +
+/// footer (1 row). The detail pane appears only when toggled (`d`).
 pub fn render(term: &mut Terminal, app: &App) -> Result<()> {
     let area = term.area();
     let cur = app.cur_index();
     {
         let buf = term.back_mut();
         buf.reset();
-        let chunks = Layout::vertical(&[
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
-        render_header(buf, chunks[0], app);
-        render_table(buf, chunks[1], app, cur);
-        render_footer(buf, chunks[2], app);
+        if app.show_detail {
+            // Reserve a bottom pane for the per-thread scheduler detail. Cap it so
+            // the process list always keeps at least a few rows.
+            let detail_h = detail_height(app, area.height);
+            let chunks = Layout::vertical(&[
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(detail_h),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            render_header(buf, chunks[0], app);
+            render_table(buf, chunks[1], app, cur);
+            render_detail(buf, chunks[2], app);
+            render_footer(buf, chunks[3], app);
+        } else {
+            let chunks = Layout::vertical(&[
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            render_header(buf, chunks[0], app);
+            render_table(buf, chunks[1], app, cur);
+            render_footer(buf, chunks[2], app);
+        }
     }
     term.set_cursor(None); // a monitor has no text cursor
     term.flush()
+}
+
+/// The detail pane height: 1 title + 1 column header + one row per thread, capped
+/// so the process list keeps >= 3 rows (and never negative on a tiny console).
+fn detail_height(app: &App, total_h: u16) -> u16 {
+    let want = match &app.detail {
+        Some(d) => 2 + d.threads.len() as u16,
+        None => 2, // the "unavailable" line + a title
+    };
+    // Leave header(2) + a >=3-row list + footer(1) = 6 for the rest.
+    let cap = total_h.saturating_sub(6);
+    want.min(cap.max(1))
 }
 
 fn render_header(buf: &mut Buffer, area: Rect, app: &App) {
@@ -74,7 +104,91 @@ fn render_header(buf: &mut Buffer, area: Rect, app: &App) {
     x = buf.set_str(x, y, &format!("   procs: {}", app.rows.len()), dim());
     buf.set_str(x, y, &format!("   cpus: {}", app.ncpus), dim());
     if area.height >= 2 {
-        render_meter(buf, area, y + 1, app);
+        // prowl-3c: one mini-bar per core (the differentiator). Falls back to the
+        // aggregate meter when /ctl/cpu was empty (e.g. an early first frame).
+        if app.cpus.is_empty() {
+            render_meter(buf, area, y + 1, app);
+        } else {
+            render_cpubars(buf, area, y + 1, app);
+        }
+    }
+}
+
+/// `0[███░] 1[█░░░] 2[░░░░] 3[██░░]` -- one labeled mini-bar per online CPU, its
+/// fill = that core's utilization (idle_ns diffed across polls). Segment width is
+/// computed to fit the row; a too-narrow console degrades to as many cores as fit.
+fn render_cpubars(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
+    let n = app.cpus.len().max(1) as u16;
+    let avail = area.width;
+    // Each segment: "<label>[<bar>] ". Label is 1-2 digits + "[" + "]" + " " ~= 4
+    // fixed chars; give the bar the rest, clamped to [1, 6].
+    let seg_w = (avail / n).max(1);
+    let bar_w = seg_w.saturating_sub(4).clamp(1, 6);
+    let mut x = area.x;
+    for c in &app.cpus {
+        if x >= area.right() {
+            break;
+        }
+        x = buf.set_str(x, y, &format!("{}", c.cpu), dim());
+        x = buf.set_str(x, y, "[", dim());
+        let filled = (c.util_x10 * bar_w as u64 / 1000) as u16;
+        for i in 0..bar_w {
+            if x >= area.right() {
+                break;
+            }
+            let (ch, st) = if i < filled {
+                ('\u{2588}', meter_fill()) // █
+            } else {
+                ('\u{2591}', meter_empty()) // ░
+            };
+            buf.set_cell(x, y, Cell::new(ch, st));
+            x = x.saturating_add(1);
+        }
+        x = buf.set_str(x, y, "] ", dim());
+    }
+}
+
+/// The per-thread scheduler detail for the selected process (`/proc/<pid>/sched`),
+/// or an "unavailable" line when the OQ-4 gate denied the read (not owner / no
+/// CAP_HOSTOWNER) or the process exited.
+fn render_detail(buf: &mut Buffer, area: Rect, app: &App) {
+    if area.is_empty() {
+        return;
+    }
+    let y = area.y;
+    match &app.detail {
+        None => {
+            buf.set_str(
+                area.x,
+                y,
+                "sched detail unavailable (not owner / no CAP_HOSTOWNER, or exited)",
+                dim(),
+            );
+        }
+        Some(d) => {
+            buf.set_str(
+                area.x,
+                y,
+                &format!("sched: {} (pid {})  tid band cpu run_ns nsched parks nmig state", d.name, d.pid),
+                head(),
+            );
+            let mut row = y + 1;
+            for t in &d.threads {
+                if row >= area.bottom() {
+                    break;
+                }
+                buf.set_str(
+                    area.x,
+                    row,
+                    &format!(
+                        "  {:<4} {:<4} {:<3} {:<12} {:<8} {:<8} {:<5} {}",
+                        t.tid, t.band, t.cpu, t.run_ns, t.nsched, t.parks, t.nmig, t.state
+                    ),
+                    normal(),
+                );
+                row += 1;
+            }
+        }
     }
 }
 
@@ -181,7 +295,7 @@ fn render_footer(buf: &mut Buffer, area: Rect, app: &App) {
     let x = buf.set_str(
         area.x,
         y,
-        " up/down move   k kill   s sort   r refresh   q quit ",
+        " up/down move   d detail   k kill   s sort   r refresh   q quit ",
         dim(),
     );
     let right = match &app.status {

@@ -146,6 +146,144 @@ impl Sampler {
     }
 }
 
+// ============================================================================
+// prowl-3c: per-CPU utilization (from /ctl/cpu) + the per-thread scheduler
+// detail (from /proc/<pid>/sched).
+// ============================================================================
+
+/// One parsed /ctl/cpu data row (kernel/devctl.c format_cpu):
+///   cpus: N
+///   cpu idle_ns capacity
+///   <i> <idle_ns> <capacity>
+/// util is derived per-poll from the idle_ns delta (see CpuSampler).
+pub struct CpuRow {
+    pub cpu: usize,
+    pub idle_ns: u64,
+    /// Per-poll utilization in tenths of a percent (1000 == fully busy). Filled
+    /// by CpuSampler::update; 0 until the first delta.
+    pub util_x10: u64,
+}
+
+/// Parse /ctl/cpu into per-CPU rows. The "cpus: N" line and the "cpu idle_ns
+/// capacity" header are skipped (their first token does not parse as a CPU index).
+pub fn parse_cpu(text: &str) -> Vec<CpuRow> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        let mut it = line.split_whitespace();
+        let (a, b) = match (it.next(), it.next(), it.next()) {
+            (Some(a), Some(b), Some(_cap)) => (a, b),
+            _ => continue, // "cpus: N" (2 tokens) / blank / short
+        };
+        let cpu: usize = match a.parse() {
+            Ok(v) => v,
+            Err(_) => continue, // the "cpu idle_ns capacity" header lands here
+        };
+        rows.push(CpuRow { cpu, idle_ns: b.parse().unwrap_or(0), util_x10: 0 });
+    }
+    rows
+}
+
+/// The cross-poll per-CPU utilization deriver: util = 1 - d(idle_ns)/d(wall).
+pub struct CpuSampler {
+    prev: Vec<(usize, u64)>, // (cpu, idle_ns) from the last poll
+}
+
+impl CpuSampler {
+    pub fn new() -> CpuSampler {
+        CpuSampler { prev: Vec::new() }
+    }
+    /// Fill each row's util_x10 from the idle_ns delta, then record the baseline.
+    /// A CPU that WFI'd the whole interval reads ~0% (idle delta ~= wall delta); a
+    /// fully-busy CPU reads ~100% (no idle delta). `.min(1000)` on the idle
+    /// fraction keeps util in [0, 1000] against clock-domain skew.
+    pub fn update(&mut self, rows: &mut [CpuRow], elapsed_ns: u64) {
+        if elapsed_ns > 0 {
+            for r in rows.iter_mut() {
+                if let Some(&(_, old)) = self.prev.iter().find(|&&(c, _)| c == r.cpu) {
+                    let didle = r.idle_ns.saturating_sub(old);
+                    let idle_x10 = (didle.saturating_mul(1000) / elapsed_ns).min(1000);
+                    r.util_x10 = 1000 - idle_x10;
+                }
+            }
+        }
+        self.prev.clear();
+        self.prev.extend(rows.iter().map(|r| (r.cpu, r.idle_ns)));
+    }
+}
+
+/// One per-thread row of /proc/<pid>/sched (kernel/devproc.c format_sched):
+///   tid band cpu run_ns nsched parks nmig state
+pub struct SchedThreadRow {
+    pub tid: i64,
+    pub band: String,
+    pub cpu: String, // "-" until dispatched, else the CPU index
+    pub run_ns: u64,
+    pub nsched: u64,
+    pub parks: u64,
+    pub nmig: u64,
+    pub state: String,
+}
+
+/// The parsed /proc/<pid>/sched block for the detail pane.
+pub struct SchedDetail {
+    pub name: String,
+    pub pid: i64,
+    pub threads: Vec<SchedThreadRow>,
+}
+
+/// Parse /proc/<pid>/sched. Returns None for an empty read -- which the kernel
+/// produces for a DENIED read (the OQ-4 owner-or-CAP_HOSTOWNER gate returns -1)
+/// OR a vanished process -- so the caller shows "unavailable" either way.
+pub fn parse_sched(text: &str) -> Option<SchedDetail> {
+    let mut name = String::new();
+    let mut pid: i64 = -1;
+    let mut threads = Vec::new();
+    let mut in_rows = false;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("name:") {
+            name = String::from(rest.trim());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("pid:") {
+            pid = rest.trim().parse().unwrap_or(-1);
+            continue;
+        }
+        if line.starts_with("threads:") {
+            continue;
+        }
+        if line.starts_with("tid ") {
+            in_rows = true; // the column header -- rows follow
+            continue;
+        }
+        if !in_rows {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        match (
+            it.next(), it.next(), it.next(), it.next(),
+            it.next(), it.next(), it.next(), it.next(),
+        ) {
+            (Some(tid), Some(band), Some(cpu), Some(run), Some(nsc), Some(pk), Some(mg), Some(st)) => {
+                threads.push(SchedThreadRow {
+                    tid: tid.parse().unwrap_or(-1),
+                    band: String::from(band),
+                    cpu: String::from(cpu),
+                    run_ns: run.parse().unwrap_or(0),
+                    nsched: nsc.parse().unwrap_or(0),
+                    parks: pk.parse().unwrap_or(0),
+                    nmig: mg.parse().unwrap_or(0),
+                    state: String::from(st),
+                });
+            }
+            _ => continue,
+        }
+    }
+    if pid < 0 {
+        return None; // empty (denied / gone) or malformed
+    }
+    Some(SchedDetail { name, pid, threads })
+}
+
 /// The process-list sort key (cycled by the `s` key; the initial one from `-s`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Sort {

@@ -41,7 +41,7 @@ use kaua::term::Terminal;
 mod sample;
 mod ui;
 
-use sample::{ProcRow, Sampler, Sort};
+use sample::{CpuRow, CpuSampler, ProcRow, Sampler, SchedDetail, Sort};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -75,6 +75,15 @@ pub struct App {
     pub ncpus: usize,
     pub confirm_kill: Option<(i64, String)>,
     pub status: Option<String>,
+    // prowl-3c: the per-CPU meter (from /ctl/cpu) + the toggleable per-thread
+    // scheduler detail (from /proc/<pid>/sched, the OQ-4-gated deep view).
+    cpu_sampler: CpuSampler,
+    pub cpus: Vec<CpuRow>,
+    pub show_detail: bool,
+    /// The selected process's parsed /proc/<pid>/sched, refreshed while the detail
+    /// pane is open. None == unavailable (denied by the OQ-4 gate, or the process
+    /// exited) -- the pane says so.
+    pub detail: Option<SchedDetail>,
 }
 
 impl App {
@@ -88,7 +97,25 @@ impl App {
             ncpus: 1,
             confirm_kill: None,
             status: None,
+            cpu_sampler: CpuSampler::new(),
+            cpus: Vec::new(),
+            show_detail: false,
+            detail: None,
         }
+    }
+
+    /// Re-read the selected process's /proc/<pid>/sched into `detail` (only while
+    /// the pane is open -- the gated per-process read is skipped otherwise). None
+    /// when no process is selected, denied, or the process is gone.
+    fn refresh_detail(&mut self) {
+        if !self.show_detail {
+            self.detail = None;
+            return;
+        }
+        self.detail = match self.selected_pid {
+            Some(pid) => sample::parse_sched(&read_ctl_file(&format!("/proc/{}/sched", pid))),
+            None => None,
+        };
     }
 
     /// The index of the cursor's process in the current (sorted) list, or 0 if
@@ -261,26 +288,38 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Action {
         KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
         KeyCode::Up => {
             app.move_selection(-1);
+            app.refresh_detail(); // the pane follows the cursor (no-op if closed)
             Action::Redraw
         }
         KeyCode::Down => {
             app.move_selection(1);
+            app.refresh_detail();
             Action::Redraw
         }
         KeyCode::PageUp => {
             app.move_selection(-10);
+            app.refresh_detail();
             Action::Redraw
         }
         KeyCode::PageDown => {
             app.move_selection(10);
+            app.refresh_detail();
             Action::Redraw
         }
         KeyCode::Home => {
             app.select_index(0);
+            app.refresh_detail();
             Action::Redraw
         }
         KeyCode::End => {
             app.select_index(usize::MAX);
+            app.refresh_detail();
+            Action::Redraw
+        }
+        // Toggle the per-thread scheduler detail pane (the OQ-4-gated deep view).
+        KeyCode::Char('d') => {
+            app.show_detail = !app.show_detail;
+            app.refresh_detail();
             Action::Redraw
         }
         KeyCode::Char('s') => {
@@ -305,15 +344,25 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Action {
     }
 }
 
-/// Read /ctl/procs, parse, derive %CPU against the previous poll, sort, store.
+/// Read /ctl/procs + /ctl/cpu, derive %CPU + per-CPU util against the previous
+/// poll, sort, store; refresh the detail pane if open.
 fn resample(app: &mut App) {
     let elapsed_ns = app.last_sample.elapsed().as_nanos() as u64;
     app.last_sample = Instant::now();
+
     let mut rows = sample::parse_procs(&read_ctl_file("/ctl/procs"));
     app.sampler.update(&mut rows, elapsed_ns);
     app.sort.apply(&mut rows);
     app.rows = rows;
     app.reconcile_selection();
+
+    // prowl-3c: per-CPU utilization (the meter denominator) -- one cheap /ctl/cpu
+    // read per poll, diffed for util.
+    let mut cpus = sample::parse_cpu(&read_ctl_file("/ctl/cpu"));
+    app.cpu_sampler.update(&mut cpus, elapsed_ns);
+    app.cpus = cpus;
+
+    app.refresh_detail();
 }
 
 /// Slurp a /ctl or /proc text file into a String (the cpubench idiom: one bounded

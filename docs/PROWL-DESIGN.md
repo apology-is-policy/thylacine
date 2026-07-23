@@ -1,9 +1,10 @@
 # PROWL-DESIGN.md — the scheduler-aware process monitor + the kernel telemetry it reads
 
-Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (the substrate) +
-prowl-2 (the tool MVP) + prowl-3a (scheduler-counter accounting) + prowl-3b (the
-`/proc/<pid>/sched` + `/ctl/cpu` FS surfaces) LANDED.** Building telemetry-first
-(prowl-1..5, §6).
+Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (substrate) + prowl-2
+(tool MVP) + prowl-3 (the scheduler view: 3a counters + 3b `/proc/<pid>/sched` +
+`/ctl/cpu` + 3c per-CPU bars + detail pane) LANDED.** Remaining: prowl-4 (the
+manager: stop/cont + tree) + prowl-5 (the focused audit). Building
+telemetry-first (prowl-1..5, §6).
 Landed per the CLAUDE.md design-conversation pattern (research → doc → surface
 forks → signoff → bind ARCH → build). The tool is `prowl`; the kernel telemetry
 it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
@@ -286,9 +287,16 @@ nothing on the kernel's behalf (the kernel gates the reads).
     leaf (`devctl.c` `format_cpu` — idle_ns + capacity, all-visible). Tests
     `devproc.{sched_gate_predicate,read_sched_format}` + `devctl.read_cpu_format`.
     As-built: `docs/reference/32-devproc.md` + `33-devctl.md`.
-  - **prowl-3c (the tool):** the detail pane (a selected process's
-    `/proc/<pid>/sched`) + per-CPU meter bars (from `/ctl/cpu`) + the band/parks
-    columns in the process list.
+  - **prowl-3c (the tool): LANDED.** Per-CPU meter bars (from `/ctl/cpu`, one
+    mini-bar per core, replacing the prowl-2 aggregate meter) + the `d`-toggled
+    per-thread detail pane (the selected process's `/proc/<pid>/sched`, gate-aware
+    -- shows "unavailable" when OQ-4 denies). The design's band/parks *list
+    columns* moved into the **detail pane** instead: they are per-thread (a proc
+    has N bands) and OQ-4-gated (mostly-blank as list columns for a normal user),
+    so the detail pane is their correct home; the list stays the all-visible
+    `/ctl/procs` summary. `usr/prowl/{sample,main,ui}.rs` +
+    `tools/interactive/prowl.exp` (the `d` detail leg). As-built:
+    `docs/reference/144-prowl.md`.
 - **prowl-4 (the manager):** stop/cont control + the tree view (+ the reband seam
   if voted in).
 - **prowl-5 (audit):** the focused audit — the visibility gate + the hot-path cost

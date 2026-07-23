@@ -49,6 +49,19 @@ sleep 1
 send "\x1b\[B"
 sleep 1
 
+# prowl-3c: open the per-thread scheduler detail pane (d). Whichever process is
+# selected, the pane renders a line containing "sched" -- either "sched: <name>
+# ... tid band cpu ..." (an owned process, the OQ-4 gate allows) OR "sched detail
+# unavailable ..." (a SYSTEM process, michael is denied by the gate). Both prove
+# the /proc/<pid>/sched read + parse + detail render fired. Then close it (toggle
+# d again) to prove the toggle round-trips without a crash before the quit.
+lc_step "prowl: open the scheduler detail pane (d)"
+send "d"
+sleep 1
+lc_expect "sched" "prowl detail pane rendered (per-thread view or gated-unavailable)"
+send "d"
+sleep 1
+
 # Quit prowl with `q` (a raw keystroke, no CR). prowl exits -> ut restores the
 # prompt + re-emits the screen escapes -> the session prompt returns.
 lc_step "prowl: quit (q)"
