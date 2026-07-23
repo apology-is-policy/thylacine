@@ -526,11 +526,26 @@ struct devproc_debug_release_ctx { struct Spoor *ctl; bool found; };
 static int devproc_debug_release_cb(struct Proc *p, void *arg) {
     struct devproc_debug_release_ctx *r = (struct devproc_debug_release_ctx *)arg;
     if (p->debug_owner != r->ctl) return 0;        // keep walking
+    bool exitkill = p->debug_exitkill;              // 5d: was this a debugger-LAUNCHED target?
     p->debug_owner = NULL;                          // release
+    p->debug_exitkill = false;                      // the mark dies with the slot
     hwdebug_bp_clear_all(p->debug_hw);              // 8a-2b-1: a dead debugger's breakpoints are disarmed (else the orphaned target re-traps forever)
     hwdebug_wp_clear_all(p->debug_hw);              // 8a-2b-3: likewise its watchpoints (else the orphaned target re-traps on the watched access forever)
-    proc_debug_resume(p);                           // 8a-1b-beta: a dead/detached debugger provably resumes its quarry (ReleaseSlot -> NoStrand)
-    // 8a-1b-beta: resume threads parked on p's debugger rendez here.
+    if (exitkill && p->state == PROC_STATE_ALIVE) {
+        // 5d EXITKILL (I-39 die-with-launcher; DEBUG-FS §5d): a debugger-LAUNCHED
+        // target dies with its launcher on the debugger's death -- the Plan 9
+        // NoStrand-resume would orphan it to init to run forever. proc_group_terminate's
+        // #811 death cascade wakes the debug-parked threads; each hits the EL0-return
+        // die-check (death wins over the stop) + terminates; the last out ZOMBIEs and
+        // init reaps. Safe under g_proc_table_lock (the devproc_kill_walk_cb idiom:
+        // torpor / rendez / cs locks only). A dying / ZOMBIE target (not ALIVE) falls
+        // to proc_debug_resume, itself magic-guarded + dying-safe. Reached ONLY on the
+        // IMPLICIT death-release (ctl-fd close): an explicit `detach` clears the mark
+        // first (devproc_debug_walk_cb), so it always resumes.
+        proc_group_terminate(p, "debugger exited");
+    } else {
+        proc_debug_resume(p);                       // 8a-1b-beta: a dead/detached debugger provably resumes an ATTACHED (or already-dying) quarry (ReleaseSlot -> NoStrand)
+    }
     r->found = true;
     return 1;                                        // matched -> stop
 }
@@ -1055,6 +1070,7 @@ enum ctl_verb {
     CTL_VERB_HWRMBREAK,// 8a-2b-1: disarm a per-Proc HW breakpoint ("hwrmbreak <hexva>")
     CTL_VERB_HWWATCH,  // 8a-2b-3: arm a per-Proc HW watchpoint ("hwwatch <rwx> <hexva> <declen>")
     CTL_VERB_HWRMWATCH,// 8a-2b-3: disarm a per-Proc HW watchpoint ("hwrmwatch <hexva>")
+    CTL_VERB_EXITKILL, // 5d (I-39 die-with-launcher): mark this target die-on-debugger-death (slot-owner)
     CTL_VERB_OTHER,
 };
 
@@ -1088,6 +1104,7 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (ctl_tok_eq(s + start, len, "hwrmbreak")) return CTL_VERB_HWRMBREAK;
     if (ctl_tok_eq(s + start, len, "hwwatch"))  return CTL_VERB_HWWATCH;
     if (ctl_tok_eq(s + start, len, "hwrmwatch")) return CTL_VERB_HWRMWATCH;
+    if (ctl_tok_eq(s + start, len, "exitkill")) return CTL_VERB_EXITKILL;
     return CTL_VERB_OTHER;
 }
 
@@ -1269,6 +1286,7 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
         if (!devproc_debug_authorized(d->caller, target)) { d->result = -1; return 1; }
         if (target->debug_owner != NULL)                  { d->result = -1; return 1; }  // Einuse
         target->debug_owner = d->ctl;              // claim (under g_proc_table_lock)
+        target->debug_exitkill = false;            // 5d: a fresh slot starts unmarked (the debugger sends `exitkill` iff it LAUNCHED this target)
         d->ctl->flag |= CDEBUGOWNER;               // gate the close-hook release
         d->result = 1;
         return 1;
@@ -1278,6 +1296,7 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
     // so a stranger's detach or a stale post-reap detach is a clean -1 / no-op).
     if (target->debug_owner == d->ctl) {
         target->debug_owner = NULL;                // release
+        target->debug_exitkill = false;            // 5d: an EXPLICIT detach RESUMES (the debugger's deliberate choice; it would send `kill` to terminate) -- clear the die-with-launcher mark so the release below resumes
         // 8a-2b-1: disarm every breakpoint (bp_count=0) BEFORE the resume, so the
         // resumed threads reload an EMPTY table (their next ctx-switch-IN) and do
         // not re-trap on an orphaned bp. Safe whether the target is stopped (the
@@ -1304,7 +1323,7 @@ static int devproc_debug_walk_cb(struct Proc *target, void *arg) {
 // debugger drives the run state, so a stranger who could attach (but hasn't)
 // cannot stop/start/resume a target another debugger owns.
 
-enum debug_runctl { DBG_RC_STOP, DBG_RC_START, DBG_RC_WAITSTOP };
+enum debug_runctl { DBG_RC_STOP, DBG_RC_START, DBG_RC_WAITSTOP, DBG_RC_EXITKILL };
 
 struct devproc_runctl_ctx {
     int                target_pid;
@@ -1327,6 +1346,12 @@ static int devproc_runctl_walk_cb(struct Proc *target, void *arg) {
         case DBG_RC_STOP:     proc_debug_stop_deliver(target); break;
         case DBG_RC_START:    proc_debug_resume(target);       break;
         case DBG_RC_WAITSTOP: break;   // no mutation; the block is outside the lock
+        // 5d EXITKILL (I-39 die-with-launcher): mark the target killed-on-debugger-
+        // death. Just records intent (a plain store under g_proc_table_lock,
+        // serialized with the release-cb's read); the debugger sends it right after
+        // attaching a child it LAUNCHED. Slot-owner gate only (like stop/start) -- the
+        // debugger already passed the I-39 attach gate; no stopped-only requirement.
+        case DBG_RC_EXITKILL: target->debug_exitkill = true;   break;
     }
     rc->result = 1;
     return 1;
@@ -1777,7 +1802,8 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP &&
         v != CTL_VERB_STEP && v != CTL_VERB_HWVERIFY &&
         v != CTL_VERB_HWBREAK && v != CTL_VERB_HWRMBREAK &&
-        v != CTL_VERB_HWWATCH && v != CTL_VERB_HWRMWATCH) return -1;
+        v != CTL_VERB_HWWATCH && v != CTL_VERB_HWRMWATCH &&
+        v != CTL_VERB_EXITKILL) return -1;
 
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
@@ -1827,16 +1853,18 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         return (d.result == 1) ? n : -1;
     }
 
-    if (v == CTL_VERB_STOP || v == CTL_VERB_START || v == CTL_VERB_WAITSTOP) {
+    if (v == CTL_VERB_STOP || v == CTL_VERB_START || v == CTL_VERB_WAITSTOP ||
+        v == CTL_VERB_EXITKILL) {
         int pid = proc_qid_pid(c->qid.path);
-        enum debug_runctl op = (v == CTL_VERB_STOP)  ? DBG_RC_STOP  :
-                               (v == CTL_VERB_START) ? DBG_RC_START : DBG_RC_WAITSTOP;
-        // Resolve + slot-owner-check + (STOP) deliver / (START) resume under the
-        // lock; a non-owner / not-found is -1.
+        enum debug_runctl op = (v == CTL_VERB_STOP)     ? DBG_RC_STOP     :
+                               (v == CTL_VERB_START)    ? DBG_RC_START    :
+                               (v == CTL_VERB_EXITKILL) ? DBG_RC_EXITKILL : DBG_RC_WAITSTOP;
+        // Resolve + slot-owner-check + (STOP) deliver / (START) resume / (EXITKILL)
+        // mark under the lock; a non-owner / not-found is -1.
         struct devproc_runctl_ctx rc = { .target_pid = pid, .ctl = c, .op = op, .result = 0 };
         proc_for_each(devproc_runctl_walk_cb, &rc);
         if (rc.result != 1) return -1;
-        if (op == DBG_RC_START) return n;   // resume is non-blocking
+        if (op == DBG_RC_START || op == DBG_RC_EXITKILL) return n;   // non-blocking
         // stop / waitstop: block (outside the lock) until stopped / exit / slot
         // release; -1 only if the CALLER was death-interrupted.
         return (devproc_debug_wait_stopped(pid, c) >= 0) ? n : -1;

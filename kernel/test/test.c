@@ -497,6 +497,7 @@ void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
+void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
@@ -1839,6 +1840,7 @@ struct test_case g_tests[] = {
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
+    { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },

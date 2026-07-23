@@ -628,6 +628,19 @@ struct Proc {
     bool               stop_report_pending;
     bool               cont_report_pending;
 
+    // EXITKILL (I-39 die-with-launcher; DEBUG-FS-DESIGN.md §5d; designed
+    // 2026-07-23): set when a debugger LAUNCHED this target and wants it killed on
+    // the debugger's death (the PTRACE_O_EXITKILL analog). Set by the ctl `exitkill`
+    // verb (owner-gated); read + honored by devproc_debug_release_cb, which
+    // proc_group_terminate's a marked ALIVE target on debugger death instead of
+    // proc_debug_resume (the Plan 9 resume would orphan a launched debuggee to init
+    // to run forever). Cleared on attach (fresh slot), explicit detach (which still
+    // resumes -- the debugger's deliberate choice), and release -- all under
+    // g_proc_table_lock, serialized with debug_owner, so it is a plain bool (no
+    // atomic). NOT rfork-inherited (per-slot debug state, like debug_owner /
+    // debug_stop_req). Occupies a tail pad byte @346, so struct Proc stays 352.
+    bool               debug_exitkill;
+
     // G-2 (the I-32 FIFTH axis; TAPESTRY.md §18.12 R2-F3): pages of OTHER
     // Procs' memory currently shared INTO this Proc via burrow_share_into
     // (SHARED_IN-flagged VMAs). Charged/uncharged under p->vma_lock (exact);
@@ -715,6 +728,11 @@ _Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
                "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
                "pages) occupies the former 348..352 tail pad after the PTY-1e "
                "report latches; KP_ZERO-fresh 0, never rfork-inherited.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_exitkill) == 346,
+               "EXITKILL debug_exitkill (I-39 die-with-launcher, DEBUG-FS §5d) "
+               "occupies a tail pad byte @346 between cont_report_pending @345 and "
+               "shared_map_pages @348 -- no struct growth (stays 352); KP_ZERO-fresh "
+               "false, never rfork-inherited (per-slot debug state).");
 _Static_assert(__builtin_offsetof(struct Proc, debug_focus_thread) == 328,
                "8c-2 #95 debug_focus_thread (the debug-fs focus M) appends after "
                "debug_hw (offset 328, the next 8-aligned slot past the pointer @320); "

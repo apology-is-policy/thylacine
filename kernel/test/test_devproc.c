@@ -745,6 +745,77 @@ void test_devproc_debug_attach_detach_lifecycle(void) {
     spoor_clunk(kctl);
 }
 
+// 5d EXITKILL (I-39 die-with-launcher; DEBUG-FS §5d; specs/debug_stop.tla
+// EventuallyLaunchedDies / the exitkill_ignored cfg): the ctl-fd-close release
+// TERMINATES a debugger-LAUNCHED (exitkill-marked) target instead of resuming it,
+// so a launched debuggee dies with its debugger (the Plan 9 NoStrand-resume would
+// orphan it to init to run forever -- the HVF-idle leak). Two legs on synthetic
+// (thread-less) targets: (a) a marked target is TERMINATED on close
+// (group_exit_msg set by proc_group_terminate); (b) an UNMARKED (attached, not
+// launched) target is RESUMED on close (group_exit_msg stays NULL). Revert-probe:
+// drop the release-cb exitkill branch (always proc_debug_resume) and leg (a) fails.
+void test_devproc_debug_exitkill_terminates_on_close(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "test thread has a proc (the debugger/caller)");
+    struct Proc *caller = t->proc;
+
+    const char attach_cmd[]   = "attach";
+    const char exitkill_cmd[] = "exitkill";
+    const long an = (long)sizeof(attach_cmd) - 1;    // 6
+    const long xn = (long)sizeof(exitkill_cmd) - 1;  // 8
+
+    // (a) a LAUNCHED (exitkill-marked) target is TERMINATED when the debugger's
+    //     ctl fd closes (debugger death) -- die-with-launcher.
+    struct Proc *launched = proc_alloc();
+    TEST_ASSERT(launched != NULL, "alloc launched target");
+    launched->principal_id = caller->principal_id;   // owner axis -> attach passes
+    launched->state        = PROC_STATE_ALIVE;
+    proc_test_link(launched);
+
+    struct Spoor *ctl = open_ctl_for_pid(launched->pid);
+    TEST_ASSERT(ctl != NULL, "open launched-target ctl");
+    TEST_EXPECT_EQ(devproc.write(ctl, attach_cmd, an, 0), an, "attach returns n");
+    TEST_EXPECT_EQ((void *)launched->debug_owner, (void *)ctl, "attach claims the slot");
+    TEST_ASSERT(launched->debug_exitkill == false, "a fresh attach leaves exitkill unset");
+
+    TEST_EXPECT_EQ(devproc.write(ctl, exitkill_cmd, xn, 0), xn, "exitkill verb returns n");
+    TEST_ASSERT(launched->debug_exitkill == true, "exitkill marks the target");
+    TEST_EXPECT_EQ(launched->group_exit_msg, (const char *)NULL,
+                   "the exitkill mark ALONE does not terminate (only the death-release does)");
+
+    spoor_clunk(ctl);   // close the fd -> devproc_close -> release-cb: exitkill+ALIVE -> proc_group_terminate
+    TEST_EXPECT_EQ((void *)launched->debug_owner, (void *)NULL, "close freed the slot");
+    TEST_ASSERT(launched->group_exit_msg != NULL,
+                "EXITKILL: a marked target is TERMINATED on debugger death (die-with-launcher)");
+    TEST_ASSERT(launched->debug_exitkill == false, "the mark is cleared with the slot");
+
+    proc_test_unlink(launched);
+    launched->state = PROC_STATE_ZOMBIE;
+    proc_free(launched);
+
+    // (b) CONTROL: an ATTACHED (unmarked) target is RESUMED on close, NOT
+    //     terminated -- the NoStrand-resume the EXITKILL refinement preserves.
+    struct Proc *attached = proc_alloc();
+    TEST_ASSERT(attached != NULL, "alloc attached target");
+    attached->principal_id = caller->principal_id;
+    attached->state        = PROC_STATE_ALIVE;
+    proc_test_link(attached);
+
+    struct Spoor *ctl2 = open_ctl_for_pid(attached->pid);
+    TEST_ASSERT(ctl2 != NULL, "open attached-target ctl");
+    TEST_EXPECT_EQ(devproc.write(ctl2, attach_cmd, an, 0), an, "attach returns n");
+    TEST_ASSERT(attached->debug_exitkill == false, "unmarked (no exitkill verb sent)");
+
+    spoor_clunk(ctl2);  // close -> release-cb: NOT exitkill -> proc_debug_resume (NoStrand)
+    TEST_EXPECT_EQ((void *)attached->debug_owner, (void *)NULL, "close freed the slot");
+    TEST_EXPECT_EQ(attached->group_exit_msg, (const char *)NULL,
+                   "an UNMARKED target is RESUMED on close, NOT terminated (NoStrand preserved)");
+
+    proc_test_unlink(attached);
+    attached->state = PROC_STATE_ZOMBIE;
+    proc_free(attached);
+}
+
 // 8a-1b-beta: the run-control state machine (specs/debug_stop.tla, the model's
 // RequestStop / StartResume / Confirm / ReleaseSlot). Drives it end-to-end via
 // ctl writes on a SYNTHETIC (thread-less) target: with no threads to park, the

@@ -73,7 +73,14 @@ I-26 gate — per-verb branching before dispatch):
 - `waitstop` — block the writer until the target is stopped/exits.
 - `detach` — release the slot; **resumes** the target (implicit on ctl-fd
   close, since handles close at exit per #68/#926 — a dead debugger provably
-  resumes its quarry).
+  resumes its quarry). An explicit `detach` always resumes, even a launched
+  target (it clears the `exitkill` mark first — see EXITKILL below).
+- `exitkill` — mark this target die-with-launcher (`Proc.debug_exitkill`);
+  owner-gated like `stop`/`start`. On the debugger's *death* (the implicit
+  ctl-fd-close release) a marked, ALIVE target is **terminated** instead of
+  resumed — the `PTRACE_O_EXITKILL` analog for a debugger-*launched* target.
+  The debugger sends it right after attaching a child it spawned. See the
+  EXITKILL section (§5d) for the full mechanism.
 
 ## Implementation
 
@@ -322,7 +329,9 @@ records a pointer), so the spec is unchanged and stays green. Action↔site map:
 ## Tests
 
 - Kernel (`kernel/test/test_devproc.c`): `debug_authorized_predicate`,
-  `debug_attach_detach_lifecycle`, `debug_stop_start_resume`, `debug_mem`,
+  `debug_attach_detach_lifecycle`, `debug_exitkill_terminates_on_close` (§5d — a
+  marked target is terminated on ctl-fd close, an unmarked one resumed;
+  revert-probed), `debug_stop_start_resume`, `debug_mem`,
   `debug_regs` (the SPSR guard + `debug_trapframe`), `debug_kregs_kstack_wait`.
   These exercise the read/write logic against a synthetic thread-less /
   hand-parked target — they call `devproc_read`/`build_regs` directly (so they
@@ -972,6 +981,60 @@ dap` to a real listener -- and the Nora DAP client -- is Stage 8e.
 sentinel=1 pass=1 code_ok=1`) + boot OK + 0 EXTINCTION + the SMP gate. Kernel
 byte-unchanged (no new §28 invariant; I-39 holds -- the debug-fs is driven, not
 extended).
+
+## EXITKILL — die-with-launcher (the launched-target death-release, §5d)
+
+Designed 2026-07-23 (user-voted). Refines I-39's NoStrand liveness: the ctl-fd-close
+release resumes an *attached* target but **terminates** a debugger-*launched* one.
+
+**Why.** The I-39 slot release (`devproc_debug_release_cb`, reached on debugger death
+via `devproc_close` + the #68 last-thread-out handle close) `proc_debug_resume`s the
+target so no debugger strands its quarry. That is right for an *attached* target
+(it pre-existed the debugger — leave it running) but wrong for a *launched* one: a
+program the debugger `exec`'d has no independent existence, and the Plan 9 resume
+orphans it to init to run forever. `/ambush-probe` stages C/D launch a Go debuggee
+that leaked exactly this way (the HVF-idle ~6.6% regression) — the ambush side
+already issues the graceful `kill` on exit (both stages, stock Delve), but the resume
+fires on the fd-close, i.e. on *any* debugger-death mode (a blocked reap, the probe's
+own timeout `amb.kill()`, a crash), which no userspace change can cover.
+
+**Mechanism.** A per-Proc `Proc.debug_exitkill` (a `bool` in a tail pad byte @346 —
+no struct growth) marks a launched target. The debugger sets it via the ctl `exitkill`
+verb, owner-gated identically to `stop`/`start` (routed through `devproc_runctl_walk_cb`
+as `DBG_RC_EXITKILL`; `target->debug_owner == c` under `g_proc_table_lock`), right
+after attaching a child it spawned (`native.Launch`: `attach` → `stop` → `exitkill`,
+best-effort). The release-cb then branches:
+
+```c
+if (exitkill && p->state == PROC_STATE_ALIVE)
+    proc_group_terminate(p, "debugger exited");   // die-with-launcher
+else
+    proc_debug_resume(p);                          // NoStrand (attached / already-dying)
+```
+
+`proc_group_terminate`'s #811 death cascade wakes the debug-parked threads; each hits
+the EL0-return die-check (death wins over the stop) and terminates; the last out
+ZOMBIEs and init reaps. It is safe under `g_proc_table_lock` (the `devproc_kill_walk_cb`
+idiom: it takes only torpor / rendez / cs locks). A dying/ZOMBIE target (not ALIVE)
+falls to the magic-guarded, dying-safe `proc_debug_resume`.
+
+**The explicit-detach carve-out.** Only the *implicit* death-release honors the mark.
+The explicit `detach` verb (`devproc_debug_walk_cb`) clears `debug_exitkill` and
+resumes — a debugger that types `detach` deliberately chose to leave the target
+running (it would send `kill` to terminate). `attach` also clears the mark (a fresh
+slot starts unmarked). Both the set and the release run under `g_proc_table_lock`, so
+there is no set-vs-release race.
+
+**Invariants.** NO new §28 invariant (refines I-39). `EventuallyResumed` (NoStrand) is
+unchanged for an attached target. `StopImpliesOwned` is unaffected (the terminate
+clears `debug_stop_req` through the group-terminate death path). The new obligation is
+`specs/debug_stop.tla::EventuallyLaunchedDies` (a launched/`exitkill` target whose
+debugger dies without an explicit detach eventually dies); the `exitkill_ignored`
+buggy cfg (the pre-fix always-resume) is its counterexample.
+
+**Gates**: `devproc.debug_exitkill_terminates_on_close` (revert-probed: force the
+always-resume and leg (a) fails) + `debug_stop.tla` clean GREEN + the `exitkill_ignored`
+cfg violation + boot OK + 0 EXTINCTION + the focused holotype + the SMP gate.
 
 ## Known caveats / footguns
 
