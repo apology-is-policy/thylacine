@@ -66,10 +66,22 @@ sleep 1
 # to the UPPERCASE "TREE" (distinct from the lowercase "t tree" key hint), so the
 # match is unambiguous proof the toggle fired + the tree re-rendered (child procs
 # indented under kproc via the /ctl/procs PPID column). Then toggle back to flat.
-lc_step "prowl: toggle the tree view (t)"
+lc_step "prowl: toggle the tree view (t) + navigate in tree order"
 send "t"
 sleep 1
 lc_expect "TREE" "prowl tree view toggled on (footer mode token TREE)"
+# Navigate WHILE in tree mode (no re-assert): the cell-diff renderer does NOT
+# re-emit the unchanged "TREE" footer token, and a REVERSE-attr cursor highlight
+# is not text-matchable over a PTY -- so this exercises the display_order path
+# and the quit + console restore at the end prove prowl stayed alive + rendering.
+# The prowl-4 fix: move_selection steps display_order, so Down walks the TREE
+# order (kproc -> joey -> ambush-child ...), not the flat sorted rows.
+send "\x1b\[B"
+sleep 1
+send "\x1b\[B"
+sleep 1
+send "\x1b\[A"
+sleep 1
 send "t"
 sleep 1
 

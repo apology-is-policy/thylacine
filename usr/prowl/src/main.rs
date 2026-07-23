@@ -131,15 +131,37 @@ impl App {
         }
     }
 
+    /// The row indices (into `self.rows`) in DISPLAY order: the tree order
+    /// (parent-before-child) when the tree view is on, else the flat sorted
+    /// order. Cursor moves + the Page/Home/End jumps step along THIS order, so
+    /// the cursor walks exactly what the user sees (prowl-4 fix: navigation
+    /// stepped the flat `rows` even in tree mode, where the render is a
+    /// permutation of it -> Up/Down skipped rows out of the displayed order).
+    fn display_order(&self) -> Vec<usize> {
+        if self.show_tree {
+            sample::tree_order(&self.rows)
+                .into_iter()
+                .map(|(i, _)| i)
+                .collect()
+        } else {
+            (0..self.rows.len()).collect()
+        }
+    }
+
     fn move_selection(&mut self, delta: isize) {
         if self.rows.is_empty() {
             self.selected_pid = None;
             return;
         }
-        let cur = self.cur_index() as isize;
-        let last = self.rows.len() as isize - 1;
-        let idx = (cur + delta).clamp(0, last) as usize;
-        self.selected_pid = Some(self.rows[idx].pid);
+        let order = self.display_order();
+        // The selected pid's POSITION within the display order (not its flat index).
+        let pos = self
+            .selected_pid
+            .and_then(|pid| order.iter().position(|&oi| self.rows[oi].pid == pid))
+            .unwrap_or(0) as isize;
+        let last = order.len() as isize - 1;
+        let np = (pos + delta).clamp(0, last) as usize;
+        self.selected_pid = Some(self.rows[order[np]].pid);
     }
 
     fn select_index(&mut self, i: usize) {
@@ -147,8 +169,9 @@ impl App {
             self.selected_pid = None;
             return;
         }
-        let idx = i.min(self.rows.len() - 1);
-        self.selected_pid = Some(self.rows[idx].pid);
+        let order = self.display_order();
+        let idx = i.min(order.len() - 1);
+        self.selected_pid = Some(self.rows[order[idx]].pid);
     }
 
     /// After a resample re-sorted/churned the list, keep the cursor valid: if the
@@ -162,7 +185,9 @@ impl App {
             .selected_pid
             .map_or(false, |pid| self.rows.iter().any(|r| r.pid == pid));
         if !live {
-            self.selected_pid = Some(self.rows[0].pid);
+            // Snap to the first row in DISPLAY order (the tree root, or the flat top).
+            let order = self.display_order();
+            self.selected_pid = order.first().map(|&oi| self.rows[oi].pid);
         }
     }
 }
