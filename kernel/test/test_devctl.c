@@ -122,6 +122,7 @@ void test_devctl_read_procs_format(void) {
     long got = devctl.read(c, buf, 512, 0);
     TEST_ASSERT(got > 0, "procs read positive");
     TEST_ASSERT(contains(buf, (size_t)got, "PID"),     "header has PID column");
+    TEST_ASSERT(contains(buf, (size_t)got, "PPID"),    "prowl-4: header has the PPID (tree) column");
     TEST_ASSERT(contains(buf, (size_t)got, "STATE"),   "header has STATE");
     TEST_ASSERT(contains(buf, (size_t)got, "ALIVE"),   "kproc shows ALIVE");
 

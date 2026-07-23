@@ -2,9 +2,10 @@
 
 Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (substrate) + prowl-2
 (tool MVP) + prowl-3 (the scheduler view: 3a counters + 3b `/proc/<pid>/sched` +
-`/ctl/cpu` + 3c per-CPU bars + detail pane) LANDED; prowl-5 (the focused audit)
-CLOSED CLEAN (0 P0 / 0 P1 / 0 P2 / 4 P3).** Remaining: prowl-4 (the manager:
-stop/cont + tree). Building telemetry-first (prowl-1..5, §6).
+`/ctl/cpu` + 3c per-CPU bars + detail pane) LANDED; prowl-5 (the focused audit of
+the prowl-3 arc) CLOSED CLEAN (0 P0 / 0 P1 / 0 P2 / 4 P3); prowl-4 (the manager:
+job-control suspend/resume via `/proc/<pid>/ctl` + the tree view) LANDED (§6) —
+its focused audit + SMP gate close the arc.** THE PROWL ARC IS COMPLETE.
 Landed per the CLAUDE.md design-conversation pattern (research → doc → surface
 forks → signoff → bind ARCH → build). The tool is `prowl`; the kernel telemetry
 it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
@@ -302,8 +303,27 @@ nothing on the kernel's behalf (the kernel gates the reads).
     `/ctl/procs` summary. `usr/prowl/{sample,main,ui}.rs` +
     `tools/interactive/prowl.exp` (the `d` detail leg). As-built:
     `docs/reference/144-prowl.md`.
-- **prowl-4 (the manager):** stop/cont control + the tree view (+ the reband seam
-  if voted in).
+- **prowl-4 (the manager): LANDED.** Job-control stop/cont + the tree view. The
+  kernel adds a `/proc/<pid>/ctl` `suspend`/`resume` verb pair (`devproc.c`
+  `CTL_VERB_SUSPEND`/`RESUME` + `devproc_job_walk_cb` -> `proc_job_stop_proc`/
+  `proc_job_cont_proc`) -- the UNCONDITIONAL Plan-9 /proc job stop, gated by the
+  SAME I-26 two-axis authority as `kill` (stopping is strictly weaker than
+  killing -> NO new authority, NO new invariant; composes I-26 + I-20's stop leg,
+  reusing the audited PTY-1f `job_stop_req` machinery). It is distinct from the
+  attach-gated DEBUG `stop`/`start` (8a-1b) and uncatchable like the /proc `kill`
+  (no `tty:susp` note, no catchability gate). `/ctl/procs` gains a `PPID` column
+  (the tree edge) + shows `STOPPED` for an ALIVE+job-stopped Proc (the Unix `ps`
+  T-state; the debug stop stays I-39-private). The tool (`usr/prowl/`) adds the
+  `t` tree toggle (`tree_order` DFS over the ppid edges, cycle/orphan-safe) + the
+  `z`/`c` suspend/resume actions (reversible -> not confirm-gated; status-line
+  feedback). Tests `devproc.ctl_suspend_resume_dispatch` (the verb + the I-26
+  gate + the job_stop_req flip, allow + deny + non-ALIVE) + the extended
+  `devctl.read_procs_format` (the PPID column) + the `prowl.exp` E2E (tree toggle
+  + suspend + resume). Audit-bearing (a new privilege surface on the death/stop
+  lineage) -> a focused prowl-4 round + the SMP gate. As-built:
+  `docs/reference/{32-devproc,33-devctl,144-prowl}.md` + the ARCH §25.4 A-4b row's
+  prowl-4 addendum. (The reband/priority scheduler-control verb stays a v1.x seam,
+  §4.3.)
 - **prowl-5 (audit): CLOSED.** The focused adversarial audit of the prowl-3 arc
   (the visibility gate + the hot-path cost + the counter SMP-safety) — a dedicated
   Fable-5-max prosecutor + a concurrent self-audit, both converging on **sound**:

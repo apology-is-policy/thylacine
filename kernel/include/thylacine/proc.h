@@ -563,10 +563,12 @@ struct Proc {
     // never run a debugger-stopped thread (StopCompatI39; the
     // BUGGY_DOUBLE_STOP counterexample). Death overrides both (the park
     // loop's group_exit_msg check precedes; GroupDie clears stopOwners).
-    // SET (RELEASE) by proc_job_stop_pgrp's uncaught-susp arm under
-    // g_proc_table_lock, CLEARED (RELEASE) by the job-resume paths under the
-    // same lock; READ (ACQUIRE) at the park predicate sites, exactly the
-    // debug_stop_req discipline. Occupies the pad slot after debug_stop_req
+    // SET (RELEASE) by proc_job_stop_pgrp's uncaught-susp arm (the pts SIGTSTP
+    // fan) AND proc_job_stop_proc (the prowl-4 /proc/<pid>/ctl `suspend`),
+    // both under g_proc_table_lock; CLEARED (RELEASE) by the job-resume paths
+    // (proc_job_cont_pgrp / proc_job_cont_proc) under the same lock; READ
+    // (ACQUIRE) at the park predicate sites, exactly the debug_stop_req
+    // discipline. Occupies the pad slot after debug_stop_req
     // (same cache line as the debug flag -- the tail's fast path reads both;
     // no struct growth). KP_ZERO -> 0; NOT propagated by rfork.
     u32                job_stop_req;
@@ -1216,6 +1218,19 @@ int proc_job_stop_pgrp(u32 pgid);
 // caught; a handler observes the note after resuming). pgid 0 refused.
 // Returns the count of ALIVE members visited.
 int proc_job_cont_pgrp(u32 pgid);
+
+// prowl-4: single-Proc job-control stop/cont -- the /proc/<pid>/ctl `suspend` /
+// `resume` verb path (a monitor pausing an arbitrary process by pid; I-26-gated
+// at the devproc write site, the same two-axis gate as `kill`). Caller holds
+// g_proc_table_lock. UNCONDITIONAL (no tty:susp/tty:cont note, no catchability
+// gate -- the Plan-9 `stop`, uncatchable like the /proc `kill`; stopping is
+// strictly weaker than the killing the gate already authorizes). Reuse the
+// PTY-1f per-member helpers: stop = proc_job_stop_one_locked + the one hoisted
+// smp_resched_others IPI; cont = proc_job_resume_one_locked (its own wake walk).
+// Idempotent. proc_job_stop_proc returns true iff `m` was freshly stopped.
+// See kernel/proc.c.
+bool proc_job_stop_proc(struct Proc *m);
+void proc_job_cont_proc(struct Proc *m);
 
 // 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
 // at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),

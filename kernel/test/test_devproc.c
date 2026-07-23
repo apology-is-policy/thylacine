@@ -53,6 +53,7 @@ void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
+void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 // 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
@@ -825,6 +826,89 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     spoor_clunk(dctl);
     proc_test_unlink(dead);
     proc_free(dead);
+}
+
+// prowl-4: the job-control suspend/resume verb dispatch end-to-end (parse -> the
+// I-26 gate -> the job_stop_req flip). Proves (a) the owner path flips
+// job_stop_req WITHOUT terminating (strictly weaker than kill), idempotently;
+// (b) the SAME I-26 gate as kill denies a non-owner-no-cap caller (the deny is
+// non-vacuous -- the harness caller holds neither CAP_HOSTOWNER nor CAP_KILL);
+// (c) a non-ALIVE target is refused even for the owner. The suspend is
+// NON-TERMINAL, so unlike the kill test it asserts the target survives.
+void test_devproc_ctl_suspend_resume_dispatch(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "test thread has a proc");
+    struct Proc *caller = t->proc;
+    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_KILL)),
+                "test caller lacks CAP_HOSTOWNER/CAP_KILL (denied case is meaningful)");
+
+    const char suspend_cmd[] = "suspend";
+    const char resume_cmd[]  = "resume";
+    const long sn = (long)sizeof(suspend_cmd) - 1;   // 7
+    const long rn = (long)sizeof(resume_cmd) - 1;    // 6
+
+    // (a) OWNER-authorized suspend + resume: the job_stop_req flip, non-terminal.
+    struct Proc *owned = proc_alloc();
+    TEST_ASSERT(owned != NULL, "alloc owned target");
+    owned->principal_id = caller->principal_id;
+    owned->state        = PROC_STATE_ALIVE;
+    proc_test_link(owned);
+    struct Spoor *octl = open_ctl_for_pid(owned->pid);
+    TEST_ASSERT(octl != NULL, "open owned-target ctl");
+
+    TEST_EXPECT_EQ(devproc.write(octl, suspend_cmd, sn, 0), sn, "owner suspend returns n");
+    TEST_EXPECT_EQ((int)owned->job_stop_req, 1, "suspend set job_stop_req");
+    TEST_ASSERT(owned->stop_report_pending, "suspend latched the WAIT_UNTRACED report");
+    TEST_EXPECT_EQ(owned->group_exit_msg, (const char *)NULL,
+                   "suspend does NOT terminate -- strictly weaker than kill");
+
+    // Idempotent: a second suspend does not re-latch the report (the primitive's
+    // already-stopped guard). Consume the latch first to observe the no-re-arm.
+    owned->stop_report_pending = false;
+    TEST_EXPECT_EQ(devproc.write(octl, suspend_cmd, sn, 0), sn, "second suspend returns n");
+    TEST_ASSERT(!owned->stop_report_pending, "idempotent suspend did NOT re-latch");
+
+    TEST_EXPECT_EQ(devproc.write(octl, resume_cmd, rn, 0), rn, "owner resume returns n");
+    TEST_EXPECT_EQ((int)owned->job_stop_req, 0, "resume cleared job_stop_req");
+    TEST_ASSERT(owned->cont_report_pending, "resume latched the WAIT_CONTINUED report");
+
+    spoor_clunk(octl);
+    proc_test_unlink(owned);
+    owned->state = PROC_STATE_ZOMBIE;
+    proc_free(owned);
+
+    // (b) DENIED: a non-owned target, caller holds no cap -- the SAME I-26 gate
+    // as kill. The target must NOT be stopped.
+    struct Proc *other = proc_alloc();
+    TEST_ASSERT(other != NULL, "alloc non-owned target");
+    other->principal_id = (caller->principal_id == 0x0B0B0B0Bu) ? 0x0C0C0C0Cu
+                                                                : 0x0B0B0B0Bu;
+    other->state        = PROC_STATE_ALIVE;
+    proc_test_link(other);
+    struct Spoor *nctl = open_ctl_for_pid(other->pid);
+    TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
+    TEST_EXPECT_EQ(devproc.write(nctl, suspend_cmd, sn, 0), (long)-1,
+                   "non-owner suspend denied (-1) -- the I-26 gate");
+    TEST_EXPECT_EQ((int)other->job_stop_req, 0, "denied target NOT stopped");
+    spoor_clunk(nctl);
+    proc_test_unlink(other);
+    other->state = PROC_STATE_ZOMBIE;
+    proc_free(other);
+
+    // (c) a non-ALIVE target is refused even for the owner (mirrors kill (d)).
+    struct Proc *dead2 = proc_alloc();
+    TEST_ASSERT(dead2 != NULL, "alloc zombie target");
+    dead2->principal_id = caller->principal_id;
+    dead2->state        = PROC_STATE_ZOMBIE;
+    proc_test_link(dead2);
+    struct Spoor *dctl2 = open_ctl_for_pid(dead2->pid);
+    TEST_ASSERT(dctl2 != NULL, "open zombie-target ctl");
+    TEST_EXPECT_EQ(devproc.write(dctl2, suspend_cmd, sn, 0), (long)-1,
+                   "suspend of a non-ALIVE target refused even for the owner");
+    TEST_EXPECT_EQ((int)dead2->job_stop_req, 0, "non-ALIVE target NOT stopped");
+    spoor_clunk(dctl2);
+    proc_test_unlink(dead2);
+    proc_free(dead2);
 }
 
 // 8a-1b: the I-39 debug-authority predicate (owner OR CAP_DEBUG; kproc +

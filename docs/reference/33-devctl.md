@@ -62,14 +62,14 @@ Reaching `/ctl` through `stalk` required the same **reuse-`nc` walk fix** as dev
 
 ### `/ctl/procs`
 
-The system-wide process overview. **prowl-1 (PROWL-DESIGN.md §3) added the `NAME` + `CPU_NS` columns** (the #65 `PAGES`/`CHILDREN` columns predate it):
+The system-wide process overview. **prowl-1 (PROWL-DESIGN.md §3) added the `NAME` + `CPU_NS` columns** (the #65 `PAGES`/`CHILDREN` columns predate it); **prowl-4 added the `PPID` column** (the tree view) **and the `STOPPED` run-state**:
 
 ```
-PID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS
-0    kproc    ALIVE    1    0    3    12345678
+PID    PPID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS
+0    0    kproc    ALIVE    1    0    3    12345678
 ```
 
-Columns are whitespace-separated (a monitor splits on whitespace; process names are basenames, never contain spaces; an unstamped Proc reads `?`). `CPU_NS` is the cumulative on-CPU time in ns (`proc_cpu_ns` = Σ `run_ns` over the Proc's threads) — the reader diffs it across polls for %CPU. Walks via `proc_for_each(callback, arg)` (declared in `<thylacine/proc.h>`); the callback formats one row per Proc into the buffer, and `proc_cpu_ns` walks `p->threads` under the same `g_proc_table_lock` the DFS holds. `format_procs_cb` early-returns on buffer overflow (the #57a bound); prowl-1 bumped `DEVCTL_READ_BUF` 512 → 2048 so the wider lines do not truncate the listing before ~30 procs. Total cost is O(N_procs) with small per-proc text.
+Columns are whitespace-separated (a monitor splits on whitespace; process names are basenames, never contain spaces; an unstamped Proc reads `?`). `PPID` is the parent pid (`p->parent ? p->parent->pid : 0` — read under `g_proc_table_lock`, so `p->parent` is a valid Proc or NULL; kproc + a reparented orphan-root read 0), the edge a monitor builds a parent→child tree from. `CPU_NS` is the cumulative on-CPU time in ns (`proc_cpu_ns` = Σ `run_ns` over the Proc's threads) — the reader diffs it across polls for %CPU. **`STATE` is the effective run-state (prowl-4):** an ALIVE Proc with `job_stop_req` set (a monitor `suspend` via `/proc/<pid>/ctl`, or a Ctrl-Z via the pts path) reads **`STOPPED`** (the Unix `ps` T-state, via `procs_state_name` — a plain `state_name` otherwise); the DEBUG stop (`debug_stop_req`, the attach-gated debugger stop) is deliberately **not** surfaced here — it is the debugger's private I-39 view, not a job-control state a monitor should expose. `job_stop_req` is read atomically (a cross-Proc reader holds `g_proc_table_lock` via `proc_for_each` but no per-Proc lock). Walks via `proc_for_each(callback, arg)` (declared in `<thylacine/proc.h>`); the callback formats one row per Proc into the buffer, and `proc_cpu_ns` walks `p->threads` under the same `g_proc_table_lock` the DFS holds. `format_procs_cb` early-returns on buffer overflow (the #57a bound); prowl-1 bumped `DEVCTL_READ_BUF` 512 → 2048 so the wider lines do not truncate the listing before ~30 procs. Total cost is O(N_procs) with small per-proc text.
 
 ### `/ctl/memory`
 

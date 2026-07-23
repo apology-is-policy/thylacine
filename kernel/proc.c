@@ -3207,6 +3207,36 @@ int proc_job_cont_pgrp(u32 pgid) {
     return ctx.visited;
 }
 
+// prowl-4: job-stop / job-cont a SINGLE Proc by pointer -- the /proc/<pid>/ctl
+// monitor path (a `suspend` / `resume` verb, I-26-gated in devproc exactly as the
+// `kill` verb). Reuse the PTY-1f per-member helpers: STOP sets job_stop_req +
+// wakes the target's own sleepers (proc_job_stop_one_locked) then issues the ONE
+// group-global reschedule IPI (the F2 hoist) so a peer RUNNING at EL0 traps to its
+// stop checkpoint; CONT clears job_stop_req + wakes the parked threads
+// (proc_job_resume_one_locked, which does its own wake walk). Caller holds
+// g_proc_table_lock (devproc's proc_for_each). Idempotent (a second stop / a
+// cont-of-a-running Proc is a no-op via the one_locked guards).
+//
+// UNCONDITIONAL -- unlike the pts SIGTSTP fan (proc_job_stop_pgrp) there is NO
+// tty:susp/tty:cont note and NO catchability gate (proc_tty_susp_would_stop_-
+// locked): a /proc stop is the Plan-9 `stop`, uncatchable exactly as the /proc
+// `kill` is, and stopping is strictly weaker than the killing the same I-26 gate
+// already authorizes. The stop_report/cont_report latches still fire, so the
+// target's PARENT sees the WAIT_UNTRACED / WAIT_CONTINUED edge -- correct: whoever
+// stops a process, its parent's wait reports the stop (the external-SIGTSTP shape;
+// a non-opt-in parent simply ignores the latch). A /proc-stopped process that is
+// later orphaned is cleaned by the existing POSIX orphan rule (hup+cont at the
+// parent's zombie flip) -- no new hazard. Composes I-20's stopOwners
+// (StopCompatI39): a target ALSO debugger-stopped stays parked on debug_stop_req
+// after a job resume, and vice-versa.
+bool proc_job_stop_proc(struct Proc *m) {
+    if (proc_job_stop_one_locked(m)) { smp_resched_others(); return true; }
+    return false;
+}
+void proc_job_cont_proc(struct Proc *m) {
+    proc_job_resume_one_locked(m);
+}
+
 // child_wait_ready_cond — wait_pid_for's sleep predicate (#344). Returns 1
 // iff the caller's OWN stack `poll_waiter` has its `ready` flag set, i.e. a
 // child of this Proc entered ZOMBIE (or was adopted ZOMBIE) and the wake site

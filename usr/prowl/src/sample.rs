@@ -11,13 +11,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// One parsed /ctl/procs data line. The kernel format (kernel/devctl.c
-/// format_procs) is 7 whitespace-separated columns after a header line:
-///   PID  NAME  STATE  THREADS  PAGES  CHILDREN  CPU_NS
+/// format_procs) is 8 whitespace-separated columns after a header line (PPID +
+/// STOPPED landed with prowl-4):
+///   PID  PPID  NAME  STATE  THREADS  PAGES  CHILDREN  CPU_NS
 /// NAME is a binary basename (no embedded spaces, <=31 bytes); STATE is one
-/// token (ALIVE/ZOMBIE/INVALID). So a 7-token whitespace split is exact.
-/// (CHILDREN is parsed for column alignment but not surfaced at prowl-2.)
+/// token (ALIVE/ZOMBIE/STOPPED/INVALID). So an 8-token whitespace split is exact.
+/// (CHILDREN is parsed for column alignment but not surfaced.)
 pub struct ProcRow {
     pub pid: i64,
+    /// The parent pid (prowl-4, the tree view). 0 for kproc / a reparented root.
+    pub ppid: i64,
     pub name: String,
     pub state: State,
     pub threads: u32,
@@ -32,6 +35,10 @@ pub struct ProcRow {
 pub enum State {
     Alive,
     Zombie,
+    /// prowl-4: an ALIVE Proc with job_stop_req set (a monitor `suspend` / a
+    /// Ctrl-Z) -- the Unix `ps` T state, surfaced by the kernel so a suspend is
+    /// visible in the list.
+    Stopped,
     Other,
 }
 
@@ -40,6 +47,7 @@ impl State {
         match self {
             State::Alive => "ALIVE",
             State::Zombie => "ZOMBIE",
+            State::Stopped => "STOPPED",
             State::Other => "?",
         }
     }
@@ -47,26 +55,30 @@ impl State {
         match tok {
             "ALIVE" => State::Alive,
             "ZOMBIE" => State::Zombie,
+            "STOPPED" => State::Stopped,
             _ => State::Other,
         }
     }
 }
 
 /// Parse the `/ctl/procs` text into rows. The header line and any malformed
-/// (non-7-token, unparseable-pid) line are skipped -- a truncated last line (the
+/// (non-8-token, unparseable-pid) line are skipped -- a truncated last line (the
 /// kernel's DEVCTL_READ_BUF overflow early-return) drops cleanly rather than
 /// producing a bogus row.
 pub fn parse_procs(text: &str) -> Vec<ProcRow> {
     let mut rows = Vec::new();
     for line in text.lines() {
         let mut it = line.split_whitespace();
-        let (pid, name, state, threads, pages, _children, cpu_ns) = match (
-            it.next(), it.next(), it.next(), it.next(), it.next(), it.next(), it.next(),
+        let (pid, ppid, name, state, threads, pages, _children, cpu_ns) = match (
+            it.next(), it.next(), it.next(), it.next(),
+            it.next(), it.next(), it.next(), it.next(),
         ) {
-            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) => (a, b, c, d, e, f, g),
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g), Some(h)) => {
+                (a, b, c, d, e, f, g, h)
+            }
             _ => continue, // header / blank / short line
         };
-        // A trailing 8th token means a space in a field (a name with a space)
+        // A trailing 9th token means a space in a field (a name with a space)
         // would desync the columns -- reject the whole line rather than
         // mis-attribute it.
         if it.next().is_some() {
@@ -78,6 +90,7 @@ pub fn parse_procs(text: &str) -> Vec<ProcRow> {
         };
         rows.push(ProcRow {
             pid,
+            ppid: ppid.parse().unwrap_or(0),
             name: String::from(name),
             state: State::parse(state),
             threads: threads.parse().unwrap_or(0),
@@ -87,6 +100,62 @@ pub fn parse_procs(text: &str) -> Vec<ProcRow> {
         });
     }
     rows
+}
+
+/// prowl-4 tree view: order `rows` parent-before-children and return each row's
+/// (index-into-rows, depth) in display order. A DFS from the roots (a row whose
+/// ppid names no row in the set -- kproc, or a parent truncated out of the
+/// /ctl/procs page) following the ppid edges. Cycle-safe + orphan-safe: a
+/// `visited` set bounds it to one visit per row, and any row not reached from a
+/// root (a cycle, or a stale ppid) is appended at depth 0 so nothing is dropped.
+/// Pure -- the caller renders; a bad tree mis-indents prowl's own screen only.
+pub fn tree_order(rows: &[ProcRow]) -> Vec<(usize, usize)> {
+    let n = rows.len();
+    // children[i] = the row indices whose ppid == rows[i].pid, in list order.
+    let mut children: Vec<Vec<usize>> = (0..n).map(|_| Vec::new()).collect();
+    let mut is_root = alloc::vec![true; n];
+    for (ci, r) in rows.iter().enumerate() {
+        // The FIRST row whose pid == this row's ppid is the parent (pids are
+        // unique among ALIVE procs; a stale ZOMBIE dup is vanishingly unlikely
+        // and self-corrects next poll).
+        if let Some(pi) = rows.iter().position(|p| p.pid == r.ppid) {
+            if pi != ci {
+                children[pi].push(ci);
+                is_root[ci] = false;
+            }
+        }
+    }
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(n);
+    let mut visited = alloc::vec![false; n];
+    // An explicit stack DFS (no_std, no recursion-depth worry): (row, depth).
+    // Push roots in reverse so they pop in list order.
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for i in (0..n).rev() {
+        if is_root[i] {
+            stack.push((i, 0));
+        }
+    }
+    while let Some((i, depth)) = stack.pop() {
+        if visited[i] {
+            continue;
+        }
+        visited[i] = true;
+        out.push((i, depth));
+        // Push children in reverse so they emerge in list order under the parent.
+        for &c in children[i].iter().rev() {
+            if !visited[c] {
+                stack.push((c, depth + 1));
+            }
+        }
+    }
+    // Anything unreached (a ppid cycle, or a row that pointed at a non-root it
+    // could not descend from) is appended so the view never loses a process.
+    for i in 0..n {
+        if !visited[i] {
+            out.push((i, 0));
+        }
+    }
+    out
 }
 
 /// Parse the online CPU count from `/ctl/sched`'s `cpus: N` line. Falls back to

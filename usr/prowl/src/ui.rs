@@ -233,15 +233,42 @@ fn render_table(buf: &mut Buffer, area: Rect, app: &App, cur: usize) {
     }
     let n = app.rows.len();
     let view_rows = area.height.saturating_sub(1) as usize; // minus the header row
-    let offset = compute_offset(cur, n, view_rows);
+
+    // prowl-4: the display order + per-row depth. Tree mode reorders
+    // parent-before-child (sample::tree_order over the ppid edges) and indents the
+    // NAME by depth; flat mode is the identity order at depth 0. Each entry is
+    // (index-into-app.rows, depth).
+    let order: Vec<(usize, usize)> = if app.show_tree {
+        crate::sample::tree_order(&app.rows)
+    } else {
+        (0..n).map(|i| (i, 0usize)).collect()
+    };
+    // The selected row's POSITION in the display order (the cursor tracks a pid,
+    // and tree order is a permutation of app.rows) -- for the scroll + highlight.
+    let sel_disp = order.iter().position(|&(oi, _)| oi == cur).unwrap_or(0);
+    let offset = compute_offset(sel_disp, order.len(), view_rows);
 
     // The Table borrows &[&str] cells, so the owned display strings must outlive
     // the Row borrows -- keep `cells` + `cell_refs` alive through the render call.
-    let mut cells: Vec<[String; 6]> = Vec::with_capacity(n);
-    for r in &app.rows {
+    let mut cells: Vec<[String; 6]> = Vec::with_capacity(order.len());
+    for &(oi, depth) in &order {
+        let r = &app.rows[oi];
+        let name = if app.show_tree && depth > 0 {
+            // Indent by depth + a light branch connector; the NAME column width
+            // (COLUMNS[1]) bounds a deep tree via the Table's own truncation.
+            let mut s = String::new();
+            for _ in 0..depth {
+                s.push_str("  ");
+            }
+            s.push_str("\u{2514} "); // └
+            s.push_str(&r.name);
+            s
+        } else {
+            r.name.clone()
+        };
         cells.push([
             r.pid.to_string(),
-            r.name.clone(),
+            name,
             fmt_pct1(r.cpu_pct_x10),
             r.pages.to_string(),
             r.threads.to_string(),
@@ -267,7 +294,7 @@ fn render_table(buf: &mut Buffer, area: Rect, app: &App, cur: usize) {
         .header(&HEADERS)
         .header_style(head())
         .style(normal())
-        .select(Some(cur))
+        .select(Some(sel_disp))
         .selected_style(selected())
         .offset(offset)
         .render(area, buf);
@@ -295,12 +322,16 @@ fn render_footer(buf: &mut Buffer, area: Rect, app: &App) {
     let x = buf.set_str(
         area.x,
         y,
-        " up/down move   d detail   k kill   s sort   r refresh   q quit ",
+        " up/dn move  d detail  t tree  z stop  c cont  k kill  s sort  q quit ",
         dim(),
     );
+    // prowl-4: reflect the tree toggle beside the sort/status on the right. The
+    // token is UPPERCASE (TREE/FLAT) so it is distinct from the lowercase "t tree"
+    // key hint on the left -- the E2E can assert the toggle unambiguously.
+    let mode = if app.show_tree { "TREE" } else { "FLAT" };
     let right = match &app.status {
-        Some(s) => format!("[{}]  sort:{} ", s, app.sort.label()),
-        None => format!("sort:{} ", app.sort.label()),
+        Some(s) => format!("[{}]  {} sort:{} ", s, mode, app.sort.label()),
+        None => format!("{} sort:{} ", mode, app.sort.label()),
     };
     let rx = area.right().saturating_sub(right.chars().count() as u16);
     if rx > x {

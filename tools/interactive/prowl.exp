@@ -62,6 +62,33 @@ lc_expect "sched" "prowl detail pane rendered (per-thread view or gated-unavaila
 send "d"
 sleep 1
 
+# prowl-4: toggle the parent->child tree view (t). The footer's mode token flips
+# to the UPPERCASE "TREE" (distinct from the lowercase "t tree" key hint), so the
+# match is unambiguous proof the toggle fired + the tree re-rendered (child procs
+# indented under kproc via the /ctl/procs PPID column). Then toggle back to flat.
+lc_step "prowl: toggle the tree view (t)"
+send "t"
+sleep 1
+lc_expect "TREE" "prowl tree view toggled on (footer mode token TREE)"
+send "t"
+sleep 1
+
+# prowl-4: job-control suspend (z) + resume (c) on the selected process, via
+# /proc/<pid>/ctl. The status line shows the outcome -- "suspended <pid> <name>"
+# (an owned target) OR "suspend <pid> denied" (a SYSTEM/kproc target michael's
+# I-26 authority cannot stop): EITHER proves the tool wrote the verb + the kernel
+# processed it (the deterministic allow/deny authorization is the kernel test
+# devproc.ctl_suspend_resume_dispatch). "suspend"/"resum" appear ONLY in the
+# status line (the footer hints read "z stop"/"c cont"), so the match is clean.
+lc_step "prowl: job-control suspend (z) + resume (c)"
+send "z"
+sleep 1
+lc_expect "suspend" "prowl suspend action fired (status reflects the /proc ctl write)"
+send "c"
+sleep 1
+lc_expect "resum" "prowl resume action fired (status reflects the /proc ctl write)"
+lc_pass "prowl-4: tree view + job-control suspend/resume"
+
 # Quit prowl with `q` (a raw keystroke, no CR). prowl exits -> ut restores the
 # prompt + re-emits the screen escapes -> the session prompt returns.
 lc_step "prowl: quit (q)"

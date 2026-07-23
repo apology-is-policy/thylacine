@@ -500,6 +500,7 @@ void test_devproc_sched_read_gated(void);           // prowl-5 F4: OQ-4 deny-wir
 void test_devproc_read_sched_format(void);          // prowl-3b: /proc/<pid>/sched read
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
+void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_stop_start_resume(void);
@@ -1842,6 +1843,7 @@ struct test_case g_tests[] = {
     { "devproc.read_sched_format",     test_devproc_read_sched_format,     false, NULL },
     { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
+    { "devproc.ctl_suspend_resume_dispatch", test_devproc_ctl_suspend_resume_dispatch, false, NULL },
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },

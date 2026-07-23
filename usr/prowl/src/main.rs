@@ -84,6 +84,9 @@ pub struct App {
     /// pane is open. None == unavailable (denied by the OQ-4 gate, or the process
     /// exited) -- the pane says so.
     pub detail: Option<SchedDetail>,
+    /// prowl-4: render the process list as a parent->child tree (indented by ppid
+    /// depth) instead of the flat sorted list. Toggled by `t`.
+    pub show_tree: bool,
 }
 
 impl App {
@@ -101,6 +104,7 @@ impl App {
             cpus: Vec::new(),
             show_detail: false,
             detail: None,
+            show_tree: false,
         }
     }
 
@@ -340,8 +344,41 @@ fn handle_key(app: &mut App, k: KeyEvent) -> Action {
             }
             Action::None
         }
+        // prowl-4: toggle the parent->child tree view.
+        KeyCode::Char('t') => {
+            app.show_tree = !app.show_tree;
+            Action::Redraw
+        }
+        // prowl-4: job-control suspend (z, the Ctrl-Z/SIGTSTP mnemonic) + resume
+        // (c, the SIGCONT mnemonic) via /proc/<pid>/ctl. NOT confirm-gated -- both
+        // are reversible (unlike kill); the status line reports the outcome, and
+        // the STATE column shows STOPPED on the next tick. The kernel's I-26 gate
+        // decides authority (same as kill) -- prowl confers none.
+        KeyCode::Char('z') => job_action(app, b"suspend", "suspended", "suspend"),
+        KeyCode::Char('c') => job_action(app, b"resume", "resumed", "resume"),
         _ => Action::None,
     }
+}
+
+/// prowl-4: apply a job-control verb (suspend/resume) to the selected process and
+/// set the status line. `verb` is the ctl bytes; `ok_word`/`deny_word` frame the
+/// status. Reversible, so no confirm gate (unlike kill).
+fn job_action(app: &mut App, verb: &[u8], ok_word: &str, deny_word: &str) -> Action {
+    if let Some(pid) = app.selected_pid {
+        let name = app
+            .rows
+            .iter()
+            .find(|r| r.pid == pid)
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        app.status = Some(if ctl_write(pid, verb) {
+            format!("{} {} {}", ok_word, pid, name)
+        } else {
+            format!("{} {} denied", deny_word, pid)
+        });
+        return Action::Redraw;
+    }
+    Action::None
 }
 
 /// Read /ctl/procs + /ctl/cpu, derive %CPU + per-CPU util against the previous
@@ -388,15 +425,22 @@ fn read_ctl_file(path: &str) -> String {
     String::from(core::str::from_utf8(&buf[..total]).unwrap_or(""))
 }
 
-/// Terminate `pid` by writing "kill" to /proc/<pid>/ctl. The kernel enforces the
-/// I-26 two-axis gate (owner OR CAP_HOSTOWNER/CAP_KILL); a denied write returns
-/// -1 -> Err -> false. prowl confers no authority.
-fn kill_pid(pid: i64) -> bool {
+/// Write a control verb to /proc/<pid>/ctl. The kernel enforces authority: kill /
+/// killgrp AND suspend / resume all take the SAME I-26 two-axis gate (owner OR
+/// CAP_HOSTOWNER/CAP_KILL -- stopping is strictly weaker than killing); a denied
+/// write returns -1 -> Err -> false. prowl confers no authority of its own -- a
+/// confined user acts only on processes it already may kill.
+fn ctl_write(pid: i64, cmd: &[u8]) -> bool {
     let path = format!("/proc/{}/ctl", pid);
     match OpenOptions::new().write(true).open(&path) {
-        Ok(mut f) => f.write_all(b"kill").is_ok(),
+        Ok(mut f) => f.write_all(cmd).is_ok(),
         Err(_) => false,
     }
+}
+
+/// Terminate `pid` by writing "kill" to /proc/<pid>/ctl (the confirm-gated action).
+fn kill_pid(pid: i64) -> bool {
+    ctl_write(pid, b"kill")
 }
 
 /// Parse `[-s cpu|pid|mem|name]` (the initial sort). Unknown flags are ignored.

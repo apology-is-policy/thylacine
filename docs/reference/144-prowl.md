@@ -1,16 +1,18 @@
 # 144 -- prowl: the scheduler-aware process monitor (the tool)
 
-**Status:** prowl-3c (the scheduler view) as-built. The kernel telemetry it reads
-is prowl-1 (`docs/reference/15-scheduler.md` on-CPU accounting) + prowl-3a/3b
-(the per-thread counters + `/proc/<pid>/sched` + `/ctl/cpu`, `32-devproc.md` +
-`33-devctl.md`); the design + phasing is `docs/PROWL-DESIGN.md`.
+**Status:** prowl-4 (the manager) as-built. The kernel telemetry it reads is
+prowl-1 (`docs/reference/15-scheduler.md` on-CPU accounting) + prowl-3a/3b (the
+per-thread counters + `/proc/<pid>/sched` + `/ctl/cpu`, `32-devproc.md` +
+`33-devctl.md`); the control it writes is `kill` + prowl-4's `suspend`/`resume`
+(`32-devproc.md`, the `/proc/<pid>/ctl` verbs). The design + phasing is
+`docs/PROWL-DESIGN.md`.
 
 `prowl` is a native `libthyla-rs` Kaua TUI -- an htop-equivalent that runs
 on-device. It polls the kernel's synthetic `/ctl` + `/proc` filesystems, derives
-per-process %CPU, renders a live process list under an aggregate CPU meter, and
-(as a manager) terminates the selected process. It is the tool the HVF-idle-256%
-hunt (`docs/DEBUGGING-PLAYBOOK.md 6.17`) would have used to name the culprit on
-sight instead of git-bisecting.
+per-process %CPU, renders a live process list (flat or a parent->child tree)
+under a per-CPU meter, and (as a manager) kills / suspends / resumes the selected
+process. It is the tool the HVF-idle-256% hunt (`docs/DEBUGGING-PLAYBOOK.md 6.17`)
+would have used to name the culprit on sight instead of git-bisecting.
 
 ## Purpose
 
@@ -44,13 +46,19 @@ raw-mode dance before spawning it (below).
 | Home / End     | Jump to the first / last process                            |
 | `s`            | Cycle the sort key (cpu -> pid -> mem -> name)              |
 | `d`            | Toggle the per-thread scheduler detail pane (prowl-3c)      |
+| `t`            | Toggle the parent->child tree view (prowl-4)                |
 | `r` / Space    | Refresh now (re-sample immediately)                         |
 | `k`            | Kill the selected process (opens a `y`/`n` confirm)         |
+| `z`            | Suspend (job-stop) the selected process (prowl-4)           |
+| `c`            | Resume (job-cont) the selected process (prowl-4)            |
 | `q` / Esc / Ctrl-C | Quit                                                    |
 
 The `k` kill is confirm-gated (`k` then `y`) so a stray keystroke cannot
-terminate a process. `Ctrl-C` arrives as a raw key (ut sets `-isig` for a raw
-command) and quits like `q`.
+terminate a process. `z` suspend / `c` resume are **not** confirm-gated -- they
+are reversible (a suspend parks the process; a resume un-parks it), so the status
+line reports the outcome and the STATE column shows `STOPPED` on the next tick.
+`Ctrl-C` arrives as a raw key (ut sets `-isig` for a raw command) and quits like
+`q`.
 
 ## The data it reads (prowl-1 substrate)
 
@@ -152,15 +160,38 @@ The cursor tracks a **PID**, not a row index, so it stays on a process as %CPU
 re-sorts the list (the htop cursor-follows behaviour). A process that exits snaps
 the cursor to the top.
 
-## The kill authority (I-26; no new authority)
+## The manager: kill + suspend/resume (I-26; no new authority)
 
-`k` -> `y` writes `"kill"` to `/proc/<pid>/ctl` (`kernel/devproc.c`
-`devproc_write`). The kernel enforces the I-26 two-axis gate at the write site:
-the caller must **own** the target (same `principal_id`, the `0600` ctl w-bit) OR
-hold `CAP_HOSTOWNER` / `CAP_KILL`. `prowl` confers **no authority of its own** --
-a denied kill returns `-1` (surfaced as "kill <pid> denied"), so an ordinary
-user's `prowl` terminates only its own processes. This composes I-26 + I-22
-(fs-admin `CAP_DAC_OVERRIDE` is deliberately not a kill axis).
+Every control action writes a verb to `/proc/<pid>/ctl` via one `ctl_write`
+helper; the kernel enforces the I-26 two-axis gate at the write site — the caller
+must **own** the target (same `principal_id`, the `0600` ctl w-bit) OR hold
+`CAP_HOSTOWNER` / `CAP_KILL`. `prowl` confers **no authority of its own**; a denied
+write returns `-1` (surfaced as "... denied"), so an ordinary user's `prowl` acts
+only on its own processes. This composes I-26 + I-22 (fs-admin `CAP_DAC_OVERRIDE`
+is deliberately not a kill axis).
+
+- **`k` -> `y`** writes `"kill"` — confirm-gated (irreversible), cascades the
+  target's thread-group via `proc_group_terminate`.
+- **`z`** writes `"suspend"` and **`c`** writes `"resume"` (prowl-4) — the
+  job-control stop/cont, **not** confirm-gated (reversible). The kernel gates them
+  by the SAME I-26 authority as kill (stopping is strictly weaker than killing),
+  so a user who cannot kill a process cannot suspend it either. A suspend parks
+  the target's threads (`job_stop_req`) at a safe checkpoint (holding no kernel
+  lock); the STATE column shows `STOPPED` on the next tick. These are distinct
+  from the debugger's `stop`/`start` (which need an `attach` slot); see
+  `docs/reference/32-devproc.md`. **Caveat:** suspending a process that holds a
+  userspace lock others wait on can wedge that *workload* until you `resume` it —
+  the standard job-control property, not a kernel hazard.
+
+## The tree view (prowl-4)
+
+`t` toggles a parent->child tree: the process list is re-ordered
+parent-before-child (a DFS over the `PPID` edges from `/ctl/procs`, `tree_order`
+in `sample.rs`) with each child's `NAME` indented by depth. The order is
+cycle-safe (a `visited` set) and orphan-safe (any row not reached from a root is
+appended, so no process is dropped). The footer's mode token reads `TREE` vs
+`FLAT`. Toggling back restores the sorted flat list; the cursor tracks its PID
+across the reorder.
 
 ## Console discipline (I-27; the nora contract)
 

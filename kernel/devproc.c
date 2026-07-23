@@ -6,7 +6,8 @@
 //
 //   /proc/<pid>/status   — pid, state, threads, exit_status text
 //   /proc/<pid>/cmdline  — argv[0]; placeholder at v1.0 (no argv yet)
-//   /proc/<pid>/ctl      — write commands: kill / killgrp (A-4b)
+//   /proc/<pid>/ctl      — write commands: kill / killgrp (A-4b); suspend /
+//                          resume (prowl-4: job-control stop/cont, I-26-gated)
 //   /proc/<pid>/ns       — territory bind list
 //
 // A-4b (IDENTITY-DESIGN.md §9.8, invariant I-26): a write of "kill" /
@@ -1231,6 +1232,8 @@ enum ctl_verb {
     CTL_VERB_HWRMBREAK,// 8a-2b-1: disarm a per-Proc HW breakpoint ("hwrmbreak <hexva>")
     CTL_VERB_HWWATCH,  // 8a-2b-3: arm a per-Proc HW watchpoint ("hwwatch <rwx> <hexva> <declen>")
     CTL_VERB_HWRMWATCH,// 8a-2b-3: disarm a per-Proc HW watchpoint ("hwrmwatch <hexva>")
+    CTL_VERB_SUSPEND,  // prowl-4: job-control stop (I-26-gated; the UNCONDITIONAL /proc stop, NOT the debug attach-gated `stop`)
+    CTL_VERB_RESUME,   // prowl-4: job-control cont (I-26-gated; the /proc `resume`, NOT the debug `start`)
     CTL_VERB_OTHER,
 };
 
@@ -1264,6 +1267,8 @@ static enum ctl_verb parse_ctl_verb(const char *s, long n) {
     if (ctl_tok_eq(s + start, len, "hwrmbreak")) return CTL_VERB_HWRMBREAK;
     if (ctl_tok_eq(s + start, len, "hwwatch"))  return CTL_VERB_HWWATCH;
     if (ctl_tok_eq(s + start, len, "hwrmwatch")) return CTL_VERB_HWRMWATCH;
+    if (ctl_tok_eq(s + start, len, "suspend"))  return CTL_VERB_SUSPEND;
+    if (ctl_tok_eq(s + start, len, "resume"))   return CTL_VERB_RESUME;
     return CTL_VERB_OTHER;
 }
 
@@ -1409,6 +1414,38 @@ static int devproc_kill_walk_cb(struct Proc *target, void *arg) {
     if (!devproc_kill_authorized(k->caller, target)) { k->result = -1; return 1; }
     proc_group_terminate(target, "killed");
     k->result = 1;
+    return 1;
+}
+
+// prowl-4: job-control suspend/resume via /proc/<pid>/ctl -- the monitor's pause
+// (the Plan-9 `stop`/`start` analog on Thylacine's job_stop_req machinery, the
+// SIGTSTP/SIGCONT path of PROWL-DESIGN.md 4.3). Resolve + authorize + apply, all
+// under g_proc_table_lock (proc_for_each). Authority is the SAME I-26 two-axis
+// gate as kill (devproc_kill_authorized: owner OR CAP_HOSTOWNER/CAP_KILL) --
+// stopping is strictly weaker than the killing that gate already permits, so NO
+// new authority and NO new invariant (composes I-26). Refuse kproc + non-ALIVE
+// targets BEFORE the authority check (a CAP_KILL holder cannot suspend the
+// kernel). The stop is UNCONDITIONAL (proc_job_stop_proc posts no note + runs no
+// catchability gate) -- the target cannot catch a /proc suspend, exactly as it
+// cannot catch a /proc kill. This is DISTINCT from the debug `stop`/`start` verbs
+// (8a-1b): those require a debugger attach slot + set debug_stop_req; suspend/
+// resume need no attach + set job_stop_req (I-20's second stop owner -- the two
+// compose per StopCompatI39).
+struct devproc_job_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    bool         resume;      // false = suspend (job-stop), true = resume (job-cont)
+    int          result;      // 0 = pid not found, +1 = applied, -1 = denied / not-ALIVE / kproc
+};
+static int devproc_job_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_job_ctx *j = (struct devproc_job_ctx *)arg;
+    if (target->pid != j->target_pid)                return 0;   // keep walking
+    if (target == kproc())                         { j->result = -1; return 1; }
+    if (target->state != PROC_STATE_ALIVE)         { j->result = -1; return 1; }
+    if (!devproc_kill_authorized(j->caller, target)) { j->result = -1; return 1; }
+    if (j->resume) proc_job_cont_proc(target);
+    else           proc_job_stop_proc(target);
+    j->result = 1;
     return 1;
 }
 
@@ -1930,7 +1967,9 @@ static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off) {
 }
 
 // Write: ctl parses kill / killgrp and terminates the target Proc's thread-
-// group (A-4b), and the debug verbs attach / detach / stop / start / waitstop
+// group (A-4b); suspend / resume drive the job-control stop (prowl-4: the
+// UNCONDITIONAL /proc job stop, I-26-gated, DISTINCT from the debug attach-gated
+// stop / start); and the debug verbs attach / detach / stop / start / waitstop
 // (8a-1b). Writes to status / cmdline / ns / dirs, and unrecognized verbs,
 // return -1. The verb is offset-agnostic (a control message, not a byte
 // stream), so off is ignored.
@@ -1953,7 +1992,8 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         v != CTL_VERB_STOP && v != CTL_VERB_START && v != CTL_VERB_WAITSTOP &&
         v != CTL_VERB_STEP && v != CTL_VERB_HWVERIFY &&
         v != CTL_VERB_HWBREAK && v != CTL_VERB_HWRMBREAK &&
-        v != CTL_VERB_HWWATCH && v != CTL_VERB_HWRMWATCH) return -1;
+        v != CTL_VERB_HWWATCH && v != CTL_VERB_HWRMWATCH &&
+        v != CTL_VERB_SUSPEND && v != CTL_VERB_RESUME) return -1;
 
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
@@ -2093,6 +2133,21 @@ static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
         proc_for_each(devproc_hwwatch_walk_cb, &h);
         if (h.spare) kfree(h.spare);   // not installed (target had a table / gate failed)
         return (h.result == 1) ? n : -1;
+    }
+
+    if (v == CTL_VERB_SUSPEND || v == CTL_VERB_RESUME) {
+        // prowl-4: job-control suspend/resume. Resolve + I-26 gate + apply the
+        // job_stop_req flip under g_proc_table_lock (proc_for_each). Non-blocking
+        // (unlike the debug STOP/WAITSTOP): the flag is set + the reschedule IPI
+        // issued, and the target parks at its own stop checkpoint asynchronously.
+        struct devproc_job_ctx j = {
+            .target_pid = proc_qid_pid(c->qid.path),
+            .caller     = t->proc,
+            .resume     = (v == CTL_VERB_RESUME),
+            .result     = 0,
+        };
+        proc_for_each(devproc_job_walk_cb, &j);
+        return (j.result == 1) ? n : -1;
     }
 
     struct devproc_kill_ctx k = {

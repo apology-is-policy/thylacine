@@ -122,6 +122,20 @@ static const char *state_name(enum proc_state s) {
     }
 }
 
+// prowl-4: the /ctl/procs STATE column shows the effective run-state -- an ALIVE
+// Proc with job_stop_req set (a monitor `suspend`, or a Ctrl-Z via the pts path)
+// reads STOPPED (the Unix `ps` T state), so a suspend is VISIBLE in the list.
+// The DEBUG stop (debug_stop_req, the attach-gated debugger stop) is deliberately
+// NOT surfaced here -- it is the debugger's private I-39 view, not a job-control
+// state a monitor should expose. job_stop_req is read atomically (a cross-Proc
+// reader holds g_proc_table_lock via proc_for_each but no per-Proc lock).
+static const char *procs_state_name(const struct Proc *p) {
+    if (p->state == PROC_STATE_ALIVE &&
+        __atomic_load_n(&p->job_stop_req, __ATOMIC_ACQUIRE) != 0)
+        return "STOPPED";
+    return state_name(p->state);
+}
+
 // =============================================================================
 // Per-leaf content generators.
 // =============================================================================
@@ -142,11 +156,24 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n && p->pid != 0) { s->overflow = true; return 1; }
     s->off += n;
 
+    // prowl-4 (the tree view): the parent pid as the second column. p->parent is
+    // stable under g_proc_table_lock (reparent + reap both hold it); NULL for
+    // kproc / a reparented orphan-root -> 0, exactly like /proc/<pid>/status.
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+    {
+        int ppid = p->parent ? p->parent->pid : 0;
+        n = fmt_sdec(s->buf, s->cap, s->off, ppid);
+        if (!n && ppid != 0) { s->overflow = true; return 1; }
+        s->off += n;
+    }
+
     n = fmt_str(s->buf, s->cap, s->off, "    ");
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
-    // prowl-1: the process name ("?" if unstamped) as the second column.
+    // prowl-1: the process name ("?" if unstamped) as the third column.
     n = fmt_str(s->buf, s->cap, s->off, p->name[0] ? p->name : "?");
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
@@ -155,7 +182,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
-    n = fmt_str(s->buf, s->cap, s->off, state_name(p->state));
+    n = fmt_str(s->buf, s->cap, s->off, procs_state_name(p));   // prowl-4: STOPPED if job-stopped
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
@@ -213,7 +240,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
 static size_t format_procs(char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
-    n = fmt_str(buf, cap, off, "PID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS\n");
+    n = fmt_str(buf, cap, off, "PID    PPID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS\n");
     if (!n) return 0;
     off += n;
 
