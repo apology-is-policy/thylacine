@@ -376,6 +376,44 @@ Input is two orthogonal layers:
   executable," modal. For an app client, layer 2 is raw input. Mouse is secondary
   (selection, focus, layout drag); keyboard is primary.
 
+**The tab/stack strip is an Acme tag bar (the i3-stacking steal; Halcyon-era,
+noted 2026-07-23 from the user's i3 find).** The layout tree already carries the
+four i3 modes (`usr/tapestryd/src/pane.rs::Mode` = split-h | split-v | tabbed |
+stacked) and a per-leaf `tag` string, and the Stacked mode already renders the
+Acme *shape* — a strip per child carved from the container top (tabbed = one row
+of per-child segments; stacked = one full-width row per child). But at G-6 that
+strip is **glyph-free colored segments, never titles** (the D7 rule: the
+compositor paints pixels, renderers paint text). The steal is to make the strip
+an actual **Acme tag bar** — the `tag` rendered as text — turning "a colored bar
+per pane" into "a stack of named tag lines," which is the thing that makes i3
+stacking (and Acme columns) legible rather than just structural.
+
+This forces one clean decision (who draws the title text, given D7):
+
+- **A thin renderer-drawn title surface** is the Plan-9-clean answer, and the
+  recommended one (to be ratified when Halcyon builds it): the compositor places
+  a title-bar rect — it already computes the strip geometry — and the *renderer*
+  (Aurora / Halcyon) paints the `tag` into it as just another surface. D7 stays
+  pristine; the compositor never grows a glyph path. Rejected: teaching the
+  compositor a minimal font, which would dissolve the mechanism/policy split the
+  whole design rests on.
+- This is *why* TTF is foundational (next): the tag bar is the first place a
+  renderer must draw crisp text into compositor-placed chrome. The near-term,
+  tractable version can even be a Cornucopia-bitmap tag bar (Aurora's existing
+  atlas) before the TTF path lands — the mechanism (renderer-drawn strip
+  surface) is identical.
+
+**The deeper steal — the executable tag line (the Halcyon NOVEL angle).** Acme's
+tag is not a *label*, it is **editable, executable text** (Layer 2's "acme's text
+is executable," above). A Thylacine tag bar should be the same: type a command
+into a pane's tag and run it — the title bar *is* a live command surface, not
+chrome. This is where i3 (which gives the *layout*) and Acme (which gives the
+*executable tag*) fuse into something neither has, in the one OS whose founding
+conviction is "the shell is sufficient as a UI." Recorded as the Halcyon-era
+pane-title direction: titles-in-strips is the tractable first step; the
+executable tag line is the richness it grows into. **Deferred to Halcyon (Phase
+8) — captured now to steer the pane work, not built yet.**
+
 **TTF is foundational, not a nicety** (the Phase-0 fontdue note becomes
 load-bearing). A native `no_std` TrueType rasterizer (fontdue / swash-class;
 aux-forkable like ratatui->nora) with AA + hinting; complex-script shaping (CJK /
