@@ -758,6 +758,7 @@ void test_devsrv_conn_release(void);
 void test_devsrv_poster_exit_drains_backlog(void);
 void test_devsrv_srv_peer_identity(void);
 void test_devsrv_srv_peer_dead_peer(void);
+void test_devsrv_srv_peer_renderer_flag(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
 void test_srv_client_no_per_proc_cap(void);
@@ -2082,6 +2083,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "devsrv.srv_peer_identity",      test_devsrv_srv_peer_identity,      false, NULL },
     { "devsrv.srv_peer_dead_peer",     test_devsrv_srv_peer_dead_peer,     false, NULL },
+    { "devsrv.srv_peer_renderer_flag", test_devsrv_srv_peer_renderer_flag, false, NULL },
     { "devsrv.srv_peer_gate",          test_devsrv_srv_peer_gate,          false, NULL },
     { "devsrv.srv_peer_bad_args",      test_devsrv_srv_peer_bad_args,      false, NULL },
     { "srv_client.no_per_proc_cap",

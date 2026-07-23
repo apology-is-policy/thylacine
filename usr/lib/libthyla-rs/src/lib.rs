@@ -1581,7 +1581,10 @@ pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
 // `alive`). Repr-C + the kernel's static asserts pin both sides.
 //   principal_id : peer's durable identity; PRINCIPAL_NONE when alive == 0
 //   primary_gid  : peer's primary group; GID_NONE when alive == 0
-//   flags        : reserved, 0 at v1.0
+//   flags        : cfg-3 — bit 0 (T_SRV_PEER_FLAG_CONSOLE_RENDERER) = the
+//                  peer holds the LIVE console-renderer role (the tapestryd
+//                  apply-authority gate's admitted set); 0 when alive == 0.
+//                  Append-only: scan by bit, unknown-clear = absent.
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct TSrvPeerInfo {
@@ -1595,6 +1598,10 @@ pub struct TSrvPeerInfo {
     pub _reserved: u32,
 }
 const _: () = assert!(core::mem::size_of::<TSrvPeerInfo>() == 40);
+
+// cfg-3: TSrvPeerInfo.flags bits (append-only; mirrors the kernel's
+// SRV_PEER_FLAG_CONSOLE_RENDERER in <thylacine/syscall.h>).
+pub const T_SRV_PEER_FLAG_CONSOLE_RENDERER: u32 = 1 << 0;
 
 // t_srv_accept — block until a client connects, return the server-side
 // endpoint as a KObj_Spoor handle (byte I/O — plain t_read/t_write). The

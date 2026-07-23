@@ -239,17 +239,17 @@ void test_proc_identity_peer_snapshot_by_stripes(void) {
     struct Proc *kp = kproc();
     caps_t caps = 0; u32 pid_out = 0xABCDu; u32 gid_out = 0xABCDu;
     bool found = proc_peer_snapshot_by_stripes(kp->stripes, &caps,
-                                               &pid_out, &gid_out);
+                                               &pid_out, &gid_out, NULL);
     TEST_ASSERT(found, "kproc not found by its own stripes");
     TEST_EXPECT_EQ(pid_out, (u32)PRINCIPAL_SYSTEM, "snapshot principal_id");
     TEST_EXPECT_EQ(gid_out, (u32)GID_SYSTEM, "snapshot primary_gid");
     // 0 sentinel fail-closes; out-params untouched.
     u32 pid2 = 0x1234u;
-    bool found0 = proc_peer_snapshot_by_stripes(0, NULL, &pid2, NULL);
+    bool found0 = proc_peer_snapshot_by_stripes(0, NULL, &pid2, NULL, NULL);
     TEST_ASSERT(!found0, "0-sentinel stripes matched a Proc");
     TEST_EXPECT_EQ(pid2, 0x1234u, "0-sentinel touched out-param");
     // An unassigned (far-future) tag matches nothing.
     bool foundx = proc_peer_snapshot_by_stripes(0xFFFFFFFFFFFFFFFEull,
-                                                NULL, NULL, NULL);
+                                                NULL, NULL, NULL, NULL);
     TEST_ASSERT(!foundx, "unassigned stripes matched a Proc");
 }

@@ -6690,8 +6690,10 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     caps_t peer_caps      = 0;
     u32    peer_principal = PRINCIPAL_NONE;
     u32    peer_gid       = GID_NONE;
+    bool   peer_renderer  = false;
     bool   peer_alive = proc_peer_snapshot_by_stripes(peer_stripes, &peer_caps,
-                                                      &peer_principal, &peer_gid);
+                                                      &peer_principal, &peer_gid,
+                                                      &peer_renderer);
 
     out->stripes      = peer_stripes;
     out->caps         = peer_alive ? (u64)peer_caps : 0u;
@@ -6701,7 +6703,10 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // NONE (the SrvConn captures only stripes + console immutably).
     out->principal_id = peer_alive ? peer_principal : PRINCIPAL_NONE;
     out->primary_gid  = peer_alive ? peer_gid       : GID_NONE;
-    out->flags        = 0u;
+    // cfg-3: the renderer-role stamp rides the same alive-gated walk as
+    // caps — a dead/reaped peer fail-closes to 0 (never a stale grant).
+    out->flags        = (peer_alive && peer_renderer)
+                            ? SRV_PEER_FLAG_CONSOLE_RENDERER : 0u;
     out->_reserved    = 0u;
     return 0;
 }

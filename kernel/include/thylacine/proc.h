@@ -1539,9 +1539,13 @@ bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
 // `stripes == 0` or no ALIVE match -> returns false, out-params untouched.
 // Any out-param may be NULL (the caller takes only what it needs). Only
 // VALUES escape — never the Proc pointer — so a peer reaped after the scan
-// is not a UAF.
+// is not a UAF. cfg-3: `renderer_out` reports whether the matched Proc
+// holds the LIVE console-RENDERER role (the G-4 single-holder — the same
+// lock the claim/release/compare discipline uses covers the walk), feeding
+// the SRV_PEER_FLAG_CONSOLE_RENDERER stamp; fail-closed false on no match.
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
-                                   u32 *principal_out, u32 *primary_gid_out);
+                                   u32 *principal_out, u32 *primary_gid_out,
+                                   bool *renderer_out);
 
 // =============================================================================
 // A-1a: identity mutation (the single audited write site).
