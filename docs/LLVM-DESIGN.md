@@ -316,6 +316,8 @@ The path of least invention, per the OSMesa verification:
 1. **Mesa port via Pouch** (the C/C++ mix now buildable): gallium llvmpipe
    + the **gallium OSMesa frontend** — off-screen render into client
    memory, no DRI/GBM/dmabuf/EGL, ORC-gallivm over the §8 mapper.
+   *(§16.6: upstream removed the OSMesa frontend post-design — the
+   frontend piece is a CL-7 entry decision; the delivery shape stands.)*
 2. **SDL-GL glue**: `SDL_thylacine` grows a GL context path — OSMesa
    context rendering into (or blitted into) the surface's **weave**, then
    the existing tear-free `tpresent`. Stock SDL-GL programs recompile.
@@ -367,7 +369,7 @@ no bolted-on chasing).
 
 | # | Scope | Gate / deliverable | Audit posture | Cut line |
 |---|---|---|---|---|
-| **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc | none (read-only) | — |
+| **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc — **LANDED, §16** | none (read-only) | — |
 | **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite | a C++ prover (EH + RTTI + threads + TLS-dtors + filesystem) green on-device | focused round on the runtime/boundary seams | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired | host cross-builds via the real triple, byte-compatible artifacts | none (host-side) | — |
@@ -425,9 +427,182 @@ note on #67) · ARCH §28 (mint I-42) + §25.4 (the code-Burrow row; the F4
 budget row) + §6.6 (supersede the pkey note with the dual-map design) ·
 CLAUDE.md (trigger-table mirror rows) · memory (`project_llvm_arc_design.md`).
 
-## 16. Revision history
+## 16. CL-0 findings (2026-07-23) — the spike/census addendum
+
+Instruments: (i) the tree census (greps; the §2 confirmations); (ii) a
+disposable GCP ARM VM (t2a-standard-16 spot, Alpine containers, torn down
+after; <$1 total) — the syscall census of **stock Alpine clang 22.1.3**
+(`aarch64-alpine-linux-musl` — version-exact against the 22.x pin; the
+demand side) via `strace -f -c` over four workloads (C compile,
+template-heavy C++ `-O2` compile, static `-fuse-ld=lld` link, `llvm-ar`,
+`make -j2` toy build), plus the pinned **llvmorg-22.1.8** static
+AArch64-only clang+lld multicall build (the CL-4 infra dry-run + the RSS
+instrument); (iii) source reads of the pinned LLVM tree + the Mesa GitHub
+mirror. The fork base is cloned: `~/projects/llvm-thylacine` @
+`llvmorg-22.1.8` (shallow, single-branch; host brew is 22.1.4 — same
+major, point-skew acceptable under F2).
+
+### 16.1 The syscall-gap census (Tier-2 demand vs the pouch seam)
+
+46 distinct syscalls demanded across the workloads. Disposition against
+the pouch boundary (the seam table + the source-level patches):
+
+- **Already served — table** (~10): `close fstat lseek mmap munmap
+  pread64 read write set_tid_address` + the exit family.
+- **Already served — source-rerouted** (~12): `openat` (0009
+  legacy-name), `newfstatat` (0019 → `SYS_STAT`/POUNCE), `futex` (0004 →
+  torpor), `clone`-for-threads (0004 → `SYS_THREAD_SPAWN`),
+  `writev`/`readv` (0002 stdio-no-iovec), `rt_sig*` (0007), `mmap`
+  family (0003), `ioctl`+`fcntl` (partial: 0006/0010/0021).
+- **GAP → CL-1 boundary lines, ALL onto existing kernel syscalls** (~13):
+  `getdents64→SYS_READDIR(56)` · `wait4→SYS_WAIT_PID(22)` ·
+  `renameat→SYS_RENAME(57)` · `unlinkat→SYS_UNLINK(58)` ·
+  `pipe2→SYS_PIPE(8)` · `dup3→SYS_DUP(12)` · `chdir→SYS_CHDIR(69)` ·
+  `getcwd→SYS_GETCWD(70)` · `getpid→SYS_GETPID(72)` ·
+  `faccessat[2]`→stat+perm probe · `ftruncate`/`fchmodat`→`SYS_WSTAT`
+  (size/mode) · `pselect6`→the 0005 poll shim · `execve`+`clone`-for-
+  process → the CL-1 `posix_spawn` rewrite (structural, §6.1).
+  **Headline: ZERO new kernel syscalls are needed for CL-1..CL-4** — the
+  gap census closes entirely onto surface the kernel already ships. The
+  kernel changes in the whole arc remain exactly the CL-5 F4 budget and
+  the CL-7k JIT trio, as scoped.
+- **Stub-OK / ENOSYS-tolerated** (~11): `brk` (mallocng mmap-fallback),
+  `getrusage` (zeros), `membarrier` (fallback fences), `mknodat` (make
+  output-sync degrade), `mprotect` (thread-stack guards bypassed by
+  0004; residual: verify at CL-1), `mremap` (musl realloc falls back;
+  perf note), `prlimit64` (RLIM_INFINITY), `sigaltstack` (§6.4
+  Signals.inc stub), `umask` (libc-local emulation),
+  `sched_getaffinity` (stub now; wiring a real ncpus source is a CL-1
+  nicety — it feeds lld's thread count and `make -j` defaults).
+
+New load-bearing findings the §2 owes-list did NOT have:
+
+1. **`renameat` is per-compile load-bearing** — clang writes every `.o`
+   via temp + atomic rename (1 rename/compile observed). Unmapped today;
+   wires to `SYS_RENAME`. Without it every compile fails at output-write.
+2. **`getdents64` is per-compile load-bearing** — 8 calls in an ordinary
+   `clang++ -O2 -c` (header-search dir scanning), not just
+   `std::filesystem`. Raises `pouch-dirent` from "directory tools need
+   it" to "every compile needs it."
+3. **`fsync` is genuinely unmapped in pouch** (no port has ever needed
+   it; `SYS_FSYNC` = 55 exists kernel-side). Not needed by
+   clang/lld/make — but the git port (CL-1's sibling consumer) will;
+   note for that arc.
+
+### 16.2 The environ ground truth (§2's open question — CLOSED)
+
+`kernel/include/thylacine/exec.h:158`: the exec frame always writes
+`envp[0] = NULL` (*"no envp at v1.0"*) — the kernel never populates
+envp, for any program; `environ` is empty in every pouch program today
+and `/env` (kernel-cloned per-Proc) is the sole environment channel.
+The `pouch-env` crt boundary line (populate `environ` from `/env` at
+startup; `/env` stays the source of truth) is **confirmed required** at
+CL-1, as designed (§6.2).
+
+### 16.3 The special-path census (the §13 Support-layer long tail)
+
+From the full compile trace: **`/proc/self/exe`** (LLVM
+`getMainExecutable`) and **`/proc/self/fd[/N]`** are the two `/proc`
+dependencies — Thylacine's devproc has neither (no `self`, no `fd` at
+v1.0; `/proc/fd` is the deferred #66c). Both become CL-4 Support
+patches (argv[0]-based resolution for the former; the latter's caller
+is bounded). `readlinkat` runs ~169×/compile (config + InstalledDir
+resolution) — the Support patch must resolve cheaply, not
+per-call-fail slowly. `/dev/urandom` is touched (exists on Thylacine —
+covered). `/etc/clang22/*.cfg` probes are Alpine-config artifacts, not
+intrinsic.
+
+### 16.4 The link shape (§6.1 confirmed by trace)
+
+The clang driver spawns **one** child (`ld.lld`) and `wait4`s it; lld
+itself is heavily threaded (futex-hot: ~1600 calls on a trivial link —
+torpor's audited ground). `ftruncate` appears exactly once (lld's
+`FileOutputBuffer` sizing the output) — removed by the §6.3 in-memory
+detour or wired via `SYS_WSTAT`; either suffices. `make -j2` adds
+`pipe2` (jobserver) + `wait4` + fork-per-job — all CL-1 `posix_spawn`
+territory.
+
+### 16.5 lld-in-multicall (F3 — VERIFIED, source + build)
+
+`lld/tools/lld/CMakeLists.txt:10` carries `GENERATE_DRIVER` at 22.1.8;
+members: clang, lld, clang-scan-deps, clang-installapi + the
+binutils-shaped tools. The pinned static build produced `bin/llvm` with
+the full dispatch set (`clang`, `clang++`, `clang-cl`,
+`clang-installapi`, `lld`, `ld.lld`, `ld64.lld`, `lld-link` → `llvm`);
+`clang --version` and `ld.lld --version` both answer 22.1.8 through the
+multicall. The F3 fallback (two binaries) is not needed. The first
+smoke exposed a useful preview: the fresh clang, config-less, could not
+find the census environment's GCC crt/libgcc pieces — exactly the
+driver knowledge CL-3's `Triple::Thylacine` ToolChain encodes for the
+pouch sysroot (the `--config`/`--gcc-toolchain` retries kept failing on the Alpine GCC-triple layout vs the build’s default triple — closed as a census-environment artifact: the stock same-version clang proved the musl E2E in the strace phase, and the driver-config lesson is precisely CL-3’s deliverable). `clangd` has NO `GENERATE_DRIVER` — it ships
+as its own static binary at CL-6 (resolves §5's parenthetical).
+
+### 16.6 Mesa: gallium OSMesa is GONE upstream — a CL-7 frontend fork
+
+The §3/§9 premise ("gallium OSMesa survives") is stale: upstream
+commit `027ccd96` (2025-03-02, MR 33836) **removed the OSMesa
+frontend** — *"redundant with EGL surfaceless."* Last release carrying
+it: **25.0.x**; gone from 25.1 on. gallivm-ORC is healthy: at 25.2
+`lp_bld_init_orc.cpp` is live and meson auto-selects ORC whenever the
+LLVM build lacks MCJIT (`llvm-orcjit` option; LLVM ≥ 15) — the LLVM-22
+pairing is fine on the JIT axis. The collision: a Mesa old enough to
+have OSMesa (25.0) is too old for LLVM-22 gallivm; a current Mesa has
+no OSMesa. Options for the CL-7 entry decision (the pin was always
+deferred there):
+
+- **(i) — the CL-0 lean**: pin a current LLVM-22-compatible Mesa and
+  **resurrect the OSMesa frontend in `mesa-thylacine`** — it is ONE
+  file (`osmesa.c`, ~1.1 kLOC + a 444-byte meson.build; also preserved
+  on the amber branch), squarely inside the §4 "small, enumerable
+  delta" vendoring policy.
+- (ii) EGL surfaceless — upstream's named replacement;
+  headless-capable (no DRI/GBM/display) but pulls the EGL loader
+  surface into the port.
+- (iii) a Thylacine-native thin gallium embedding rendering straight
+  into the weave (zero copy-out) — the ambitious variant of (i).
+
+In all three the §9 delivery (off-screen render → weave → `tpresent`)
+stands; only the frontend piece moves. Decide at CL-7 entry with a
+configure smoke against the candidate pin.
+
+### 16.7 The memory re-measure (§7 / F4)
+
+From the pinned 22.1.8 static build (AArch64-only, Release, `-j16`,
+`LLVM_PARALLEL_LINK_JOBS=2`, t2a-standard-16; host toolchain = the
+census environment's default GCC 15 — the TU numbers are gcc's, same
+order as clang's own):
+
+- Wall: **33m 26s** (7h 40m user, 16 vcpu).
+- Worst single compile RSS: **2.46 GiB** (`cc1plus`, an LLVM TU at
+  `-O2`) — ~10× the 256 MiB `PROC_PAGE_MAX` default and beyond §7's
+  ">1 GiB outlier" band.
+- Static link of the 158 MiB multicall: **0.84 GiB** (GNU ld,
+  isolated relink, 7 s); lld re-drive of the same link: not measured — three re-drive attempts fought the census env’s chained ninja command plumbing, each re-measuring GNU ld (~0.83–0.84 GiB); the lld-specific number defers to CL-4’s device build, where it falls out for free (same order expected).
+- Whole-storm peak at `-j16`: cgroup `memory.peak` **23.5 GiB**
+  (includes page cache; the anon component is bounded by it).
+- Artifacts: `bin/llvm` **158 MiB** unstripped / **134 MiB** stripped
+  (static, AArch64-only, clang+lld+tools); build tree 2.9 GiB +
+  source 2.6 GiB.
+
+**F4 verdict**: the data confirms option (b) as adopted — a
+per-child raisable budget is *necessary* (the worst TU alone is ~10×
+the default floor) and the 4 GiB global hard cap *suffices* (worst
+observed single process 2.46 GiB, with headroom). On-device storms
+are RAM-bounded by Σ(active TUs): the 4–16 GiB VM tiers need `-j`
+clamps exactly as §7 planned. CL-9's stage-2 self-host on the 8–16
+GiB configs is consistent with these numbers.
+
+### 16.8 The static-binary syscall superset
+
+Disassembly census of the static multicall (`mov w8/x8,#NR` + `svc`
+pairing over the whole binary — the superset of any runtime demand):
+**79 distinct NRs**, fully name-mapped (one unknown). The additions over the strace set are all cold-path musl families: AIO (`io_setup`/`io_submit`/`io_destroy`), `symlinkat`/`linkat` (honest-ENOSYS at v1.0 — no symlinks/hardlinks), `mkdirat`/`fchownat`/`fchmod[at]`/`fchown` (→ `SYS_WALK_CREATE`/`SYS_WSTAT`), `statfs`, `ppoll` (0005), `setitimer`/`sched_setscheduler`/`set_robust_list`/rlimit/`uname`/`sysinfo`/`gettimeofday` (stubs), `kill`/`tkill` (0007), `socket` (0006), `madvise` (ENOSYS-tolerated). Nothing in the superset demands new kernel surface. Cross-checks 16.1's strace set; entries outside the
+dispositions are cold-path musl.
+
+## 17. Revision history
 
 | Date | Change |
 |---|---|
 | 2026-07-23 | Initial draft: research pass (tree + external) + the full arc design; forks §14 open. |
 | 2026-07-23 | SIGNED OFF — all §14 leans adopted verbatim; JIT invariant renumbered I-41 → I-42 (I-41 reserved by ADVANCED-GO AG-2 between draft and signoff); moved to the main tree for the scripture commit. |
+| 2026-07-23 | **CL-0 landed** (§16): syscall-gap census closed (zero new kernel syscalls for CL-1..CL-4; `renameat`+`getdents64` per-compile load-bearing), environ CLOSED (envp always empty), lld-in-multicall VERIFIED, Mesa OSMesa-removal correction (§16.6), F4 validated by measurement (worst TU 2.46 GiB). Instruments: disposable GCP ARM VM (torn down) + the fork clone @ 22.1.8. |
