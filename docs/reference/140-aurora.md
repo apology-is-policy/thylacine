@@ -303,10 +303,21 @@ invoke or spoof it.
   with a logged `aurora: OSC settings key ... refused`. Without the
   allowlist a session-injected `mode` would sit in `settings` and ride
   the NEXT OSD `config::save` into the gated startup push — session
-  authority laundered through aurora's renderer role. The `reset
-  system` arm is exempt by construction (it re-reads aurora's OWN
-  system file — values the session cannot choose — and re-pushes
-  nothing). The
+  authority laundered through aurora's renderer role. **cfg-3 F1 (the
+  audit's P1): the allowlist reads only the first token, but
+  `config::parse` re-splits its VALUE on `.lines()`, so an embedded
+  NEWLINE (`theme;spinifex\nmode 640 480`) laundered a second statement
+  past the single-token check — so `vt.rs::osc_end` now REJECTS any OSC
+  whose key or value carries a control byte (`b < 0x20`), the
+  receiving-end twin of `aurora-push`'s own sender-side `b < 0x20`
+  filter (the PARSER is the trust boundary for a raw byte channel;
+  `aurora-push` itself cannot produce the attack — it splits its file on
+  newlines into clean single-line OSCs, which is exactly why a
+  documented-tool test missed it; the in-guest witness is the baked
+  `/lib/aurora/osc-newline-attack` fixture that `ls-gfx-mode` cats,
+  asserting no laundered retint).** The `reset system` arm is exempt by
+  construction (it re-reads aurora's OWN system file — values the
+  session cannot choose — and re-pushes nothing). The
   `aurora-push` coreutil reads `$HOME/lib/aurora` (from the login-seeded
   `/env`) and ALWAYS emits `reset system` first — the reset re-seeds from
   the system file, so every session start is *system defaults ⊕ user

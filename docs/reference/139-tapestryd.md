@@ -631,8 +631,12 @@ same per-pane verbs (`move <dir>`, `zoom`, ...).
 **The apply-authority gate (cfg-3; AURORA-CONFIG.md §3.3 — the ARCH
 §25.4 cfg-3 addendum is the prosecution list).** The global ctl's
 AUTHORITY-BEARING verbs — `mode` and `clock-rate` today; `chord`/`gaps`
-when they land; **a new global verb defaults to GATED** — admit only a
-conn whose LIVE peer holds the console-RENDERER role.
+when they land; **a new global verb defaults to GATED BY CONSTRUCTION**
+(the gate is DEFAULT-DENY: `global_ctl` denies every write except an
+explicit `is_ungated_ctl` set — the determinism verbs — so an ungated
+verb can only be created by deliberately exempting it, never by omission;
+SA-1/F4) — admit only a conn whose LIVE peer holds the console-RENDERER
+role.
 `Conn::peer_is_renderer` calls `t_srv_peer` on the accepted conn handle
 per authority write: the kernel resolves the peer fresh under the
 proc-table lock and stamps `SRV_PEER_FLAG_CONSOLE_RENDERER` (flags@32

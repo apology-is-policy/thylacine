@@ -391,10 +391,12 @@ touches a trust boundary is the §3.3 apply-authority gate.
      `mode W H` verb + the CONFIGURE fan-out (composes G-6b's
      generation-fence reweave), landing WITH the gate + its focused audit
      pass (do not ship an ungated `mode`); the OSD's Display section goes
-     live here. CHUNK cfg-3 — BUILT (the kernel renderer-role stamp + the
-     gated `mode`/`clock-rate` + the OSD Display live + push-on-start +
-     the OSC allowlist; `ls-gfx-mode.exp` + the battery gate leg +
-     `devsrv.srv_peer_renderer_flag`).
+     live here. CHUNK cfg-3 — BUILT + AUDITED (the kernel renderer-role
+     stamp + the DEFAULT-DENY gate on `mode`/`clock-rate` + the OSD
+     Display live + push-on-start + the OSC allowlist with the F1
+     control-byte reject; `ls-gfx-mode.exp` [9 legs] + the battery gate
+     leg + `devsrv.srv_peer_renderer_flag`; focused-audit close 0 P0 /
+     1 P1 / 0 P2 / 3 P3, NOT dirty — see `memory/audit_cfg3_closed_list.md`).
   4. **Runtime chords** (§3.5) + the niceties (gaps etc.) — additive, each
      a small component read of a pushed value.
 
