@@ -43,6 +43,46 @@ fn blend(bg: u32, fg: u32, a: u8) -> u32 {
     0xFF00_0000 | rb | g
 }
 
+/// Draw a text run at cell (col, row) with explicit colors -- the OSD path
+/// (osd.rs): panel cells compose OVER the grid after render_rows, so they are
+/// not owned by the Vt and carry their own fg/bg. Clips at the pixel-buffer
+/// edge (the panel is grid-clamped by the caller; this is the belt).
+pub fn draw_run(
+    m: &Metrics,
+    px: &mut [u32],
+    w: usize,
+    col: usize,
+    row: usize,
+    text: &str,
+    fg: u32,
+    bg: u32,
+) {
+    let mut c = col;
+    for ch in text.chars() {
+        if m.off_x + (c + 1) * m.cell_w > w
+            || (m.off_y + (row + 1) * m.cell_h) * w > px.len()
+        {
+            break;
+        }
+        let cell = Cell { ch, fg, bg, attrs: 0 };
+        draw_cell(&cell, m, px, w, c, row, false);
+        c += 1;
+    }
+}
+
+/// Halve the RGB of a pixel rect (stride = w) -- the OSD drop shadow darkens
+/// whatever the panel overhangs. Clamped to the buffer.
+pub fn darken_rect(px: &mut [u32], w: usize, x0: usize, y0: usize, rw: usize, rh: usize) {
+    let rows_total = px.len() / w;
+    let x1 = (x0 + rw).min(w);
+    let y1 = (y0 + rh).min(rows_total);
+    for y in y0..y1 {
+        for p in px[y * w + x0.min(x1)..y * w + x1].iter_mut() {
+            *p = 0xFF00_0000 | ((*p >> 1) & 0x007F_7F7F);
+        }
+    }
+}
+
 /// Render rows [r0, r1) of the grid into the pixel buffer (stride = w).
 /// `cursor` = Some((cx, cy)) draws the block cursor by inverting that cell.
 pub fn render_rows(
@@ -196,6 +236,143 @@ fn box_arms(cp: u32) -> u8 {
     }
 }
 
+#[inline]
+fn hseg(px: &mut [u32], w: usize, x0: usize, y0: usize, y: usize, xa: usize, xb: usize, fg: u32) {
+    fill_rect(px, w, x0 + xa, y0 + y, xb.saturating_sub(xa), 1, fg);
+}
+
+#[inline]
+fn vseg(px: &mut [u32], w: usize, x0: usize, y0: usize, x: usize, ya: usize, yb: usize, fg: u32) {
+    fill_rect(px, w, x0 + x, y0 + ya, 1, yb.saturating_sub(ya), fg);
+}
+
+// True double-line rendering (the OSD's Turbo-Vision frame; any TUI drawing
+// doubles): two parallel 1px rails at center±1, with the classic corner
+// construction -- the OUTER rails meet at the outer corner, the INNER at the
+// inner (e.g. ╔: top rail starts at the left rail, the lower rail at the
+// right rail). Junctions to a single line (╟╢╤╧) keep both rails full and
+// attach the light arm. Cells too narrow for distinct rails, and the
+// single-double hybrids (╒╓... -- unused by the tree's emitters), fall back
+// to the light single-arm path. Returns true when handled.
+fn draw_double(cp: u32, m: &Metrics, px: &mut [u32], w: usize, x0: usize, y0: usize, fg: u32) -> bool {
+    let (cw, ch) = (m.cell_w, m.cell_h);
+    if cw < 6 || ch < 6 {
+        return false;
+    }
+    let (mx, my) = (cw / 2, ch / 2);
+    let (xl, xr) = (mx - 1, mx + 1); // the vertical rails
+    let (yt, yb) = (my - 1, my + 1); // the horizontal rails
+    match cp {
+        0x2550 => {
+            // ═
+            hseg(px, w, x0, y0, yt, 0, cw, fg);
+            hseg(px, w, x0, y0, yb, 0, cw, fg);
+        }
+        0x2551 => {
+            // ║
+            vseg(px, w, x0, y0, xl, 0, ch, fg);
+            vseg(px, w, x0, y0, xr, 0, ch, fg);
+        }
+        0x2554 => {
+            // ╔ down+right
+            hseg(px, w, x0, y0, yt, xl, cw, fg);
+            hseg(px, w, x0, y0, yb, xr, cw, fg);
+            vseg(px, w, x0, y0, xl, yt, ch, fg);
+            vseg(px, w, x0, y0, xr, yb, ch, fg);
+        }
+        0x2557 => {
+            // ╗ down+left
+            hseg(px, w, x0, y0, yt, 0, xr + 1, fg);
+            hseg(px, w, x0, y0, yb, 0, xl + 1, fg);
+            vseg(px, w, x0, y0, xr, yt, ch, fg);
+            vseg(px, w, x0, y0, xl, yb, ch, fg);
+        }
+        0x255A => {
+            // ╚ up+right
+            hseg(px, w, x0, y0, yb, xl, cw, fg);
+            hseg(px, w, x0, y0, yt, xr, cw, fg);
+            vseg(px, w, x0, y0, xl, 0, yb + 1, fg);
+            vseg(px, w, x0, y0, xr, 0, yt + 1, fg);
+        }
+        0x255D => {
+            // ╝ up+left
+            hseg(px, w, x0, y0, yb, 0, xr + 1, fg);
+            hseg(px, w, x0, y0, yt, 0, xl + 1, fg);
+            vseg(px, w, x0, y0, xr, 0, yb + 1, fg);
+            vseg(px, w, x0, y0, xl, 0, yt + 1, fg);
+        }
+        0x2560 => {
+            // ╠ up+down+right
+            vseg(px, w, x0, y0, xl, 0, ch, fg);
+            vseg(px, w, x0, y0, xr, 0, yt + 1, fg);
+            vseg(px, w, x0, y0, xr, yb, ch, fg);
+            hseg(px, w, x0, y0, yt, xr, cw, fg);
+            hseg(px, w, x0, y0, yb, xr, cw, fg);
+        }
+        0x2563 => {
+            // ╣ up+down+left
+            vseg(px, w, x0, y0, xr, 0, ch, fg);
+            vseg(px, w, x0, y0, xl, 0, yt + 1, fg);
+            vseg(px, w, x0, y0, xl, yb, ch, fg);
+            hseg(px, w, x0, y0, yt, 0, xl + 1, fg);
+            hseg(px, w, x0, y0, yb, 0, xl + 1, fg);
+        }
+        0x2566 => {
+            // ╦ down+left+right
+            hseg(px, w, x0, y0, yt, 0, cw, fg);
+            hseg(px, w, x0, y0, yb, 0, xl + 1, fg);
+            hseg(px, w, x0, y0, yb, xr, cw, fg);
+            vseg(px, w, x0, y0, xl, yb, ch, fg);
+            vseg(px, w, x0, y0, xr, yb, ch, fg);
+        }
+        0x2569 => {
+            // ╩ up+left+right
+            hseg(px, w, x0, y0, yb, 0, cw, fg);
+            hseg(px, w, x0, y0, yt, 0, xl + 1, fg);
+            hseg(px, w, x0, y0, yt, xr, cw, fg);
+            vseg(px, w, x0, y0, xl, 0, yt + 1, fg);
+            vseg(px, w, x0, y0, xr, 0, yt + 1, fg);
+        }
+        0x256C => {
+            // ╬
+            vseg(px, w, x0, y0, xl, 0, yt + 1, fg);
+            vseg(px, w, x0, y0, xl, yb, ch, fg);
+            vseg(px, w, x0, y0, xr, 0, yt + 1, fg);
+            vseg(px, w, x0, y0, xr, yb, ch, fg);
+            hseg(px, w, x0, y0, yt, 0, xl + 1, fg);
+            hseg(px, w, x0, y0, yt, xr, cw, fg);
+            hseg(px, w, x0, y0, yb, 0, xl + 1, fg);
+            hseg(px, w, x0, y0, yb, xr, cw, fg);
+        }
+        0x255F => {
+            // ╟ double vertical, single right arm
+            vseg(px, w, x0, y0, xl, 0, ch, fg);
+            vseg(px, w, x0, y0, xr, 0, ch, fg);
+            hseg(px, w, x0, y0, my, xr, cw, fg);
+        }
+        0x2562 => {
+            // ╢ double vertical, single left arm
+            vseg(px, w, x0, y0, xl, 0, ch, fg);
+            vseg(px, w, x0, y0, xr, 0, ch, fg);
+            hseg(px, w, x0, y0, my, 0, xl + 1, fg);
+        }
+        0x2564 => {
+            // ╤ double horizontal, single down arm
+            hseg(px, w, x0, y0, yt, 0, cw, fg);
+            hseg(px, w, x0, y0, yb, 0, cw, fg);
+            vseg(px, w, x0, y0, mx, yb, ch, fg);
+        }
+        0x2567 => {
+            // ╧ double horizontal, single up arm
+            hseg(px, w, x0, y0, yt, 0, cw, fg);
+            hseg(px, w, x0, y0, yb, 0, cw, fg);
+            vseg(px, w, x0, y0, mx, 0, yt + 1, fg);
+        }
+        _ => return false,
+    }
+    true
+}
+
 fn draw_boxchar(cp: u32, m: &Metrics, px: &mut [u32], w: usize, x0: usize, y0: usize, fg: u32, bg: u32) {
     let (cw, ch) = (m.cell_w, m.cell_h);
     if (0x2580..=0x259F).contains(&cp) {
@@ -250,6 +427,9 @@ fn draw_boxchar(cp: u32, m: &Metrics, px: &mut [u32], w: usize, x0: usize, y0: u
             }
             _ => {}
         }
+        return;
+    }
+    if (0x2550..=0x256C).contains(&cp) && draw_double(cp, m, px, w, x0, y0, fg) {
         return;
     }
     let arms = box_arms(cp);

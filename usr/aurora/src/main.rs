@@ -42,6 +42,7 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+mod osd;
 mod render;
 mod vt;
 
@@ -54,7 +55,7 @@ use libthyla_rs::{
 };
 use render::{render_rows, Metrics};
 use tapestry::{Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FRAME, TEV_KEY};
-use vt::{Vt, BG};
+use vt::Vt;
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -171,12 +172,19 @@ pub extern "C" fn rs_main() -> i64 {
     }
     let mut term = Vt::new(cols, rows);
 
-    // Frame 0: clear the whole mode to the Bonfire bg (the margins outside
-    // the grid stay this fill forever) + the initial empty grid + cursor.
+    // The F10 settings overlay (osd.rs) + the aurora-local settings it edits
+    // (AURORA-CONFIG.md section 3.6; session-lived until the config file).
+    let mut settings = osd::Settings::new();
+    let mut ui = osd::Osd::new();
+
+    // Frame 0: clear the whole mode to the theme bg (the margins outside
+    // the grid stay this fill until a theme change or reweave refills) +
+    // the initial empty grid + cursor.
     {
+        let bg = term.pal.bg;
         let px = surf.pixels();
         for p in px.iter_mut() {
-            *p = BG;
+            *p = bg;
         }
         render_rows(&term, &m, px, w, 0, rows, Some((0, 0)));
     }
@@ -231,15 +239,34 @@ pub extern "C" fn rs_main() -> i64 {
         while let Some(e) = ev {
             match e.kind {
                 TEV_KEY => {
-                    keybuf.clear();
-                    key_bytes(e.code, e.value, e.rune, &mut keybuf);
-                    if !keybuf.is_empty() {
-                        let _ = unsafe { t_write(feed, keybuf.as_ptr(), keybuf.len()) };
+                    // The OSD is MODAL: while open, every key routes to it
+                    // and nothing feeds the terminal. Bare F10 (which
+                    // key_bytes always dropped -- no app ever saw it) opens
+                    // it; press-only (value 1) so the opening key's own
+                    // autorepeat cannot bounce it shut.
+                    if ui.open {
+                        match ui.handle_key(e.code, e.value, &mut settings) {
+                            osd::OsdOut::ThemeChanged => {
+                                term.set_theme(settings.theme);
+                            }
+                            osd::OsdOut::Close => full_fill = true,
+                            osd::OsdOut::None => {}
+                        }
+                    } else if e.value == 1 && e.code == osd::KEY_F10 {
+                        ui.open = true;
+                        ui.dirty = true;
+                    } else {
+                        keybuf.clear();
+                        key_bytes(e.code, e.value, e.rune, &mut keybuf);
+                        if !keybuf.is_empty() {
+                            let _ =
+                                unsafe { t_write(feed, keybuf.as_ptr(), keybuf.len()) };
+                        }
                     }
                 }
                 TEV_FRAME => {
                     frames += 1;
-                    if frames % BLINK_FRAMES == 0 {
+                    if frames % BLINK_FRAMES == 0 && settings.cursor_blink {
                         blink_on = !blink_on;
                         term.dirty[term.cy] = true; // repaint the cursor cell
                     }
@@ -388,7 +415,8 @@ pub extern "C" fn rs_main() -> i64 {
 
         // (3) Damage: cursor movement dirties its old + new rows; then the
         // contiguous dirty span renders into the CURRENT slot + presents.
-        let cursor = if term.cursor_visible && blink_on {
+        // Blink off (the OSD setting) means always-solid, not never-shown.
+        let cursor = if term.cursor_visible && (blink_on || !settings.cursor_blink) {
             Some((term.cx.min(cols - 1), term.cy))
         } else {
             None
@@ -419,15 +447,24 @@ pub extern "C" fn rs_main() -> i64 {
                 r1 = r + 1;
             }
         }
-        if full_fill {
+        // The OSD composes over a FULL frame (slot rotation: a partial rect
+        // could transfer stale panel pixels from an older slot), so an open
+        // OSD routes every damaged pass through the full-frame branch.
+        let osd_pass = ui.open && (ui.dirty || r0 < r1 || full_fill);
+        if full_fill || osd_pass {
             // #55: the post-reweave full frame (the frame-0 pattern applied
             // through the single present site so the retry discipline holds).
+            let (dw, dh) = (surf.w, surf.h);
             {
+                let bg = term.pal.bg;
                 let px = surf.pixels();
                 for p in px.iter_mut() {
-                    *p = BG;
+                    *p = bg;
                 }
                 render_rows(&term, &m, px, w, 0, rows, cursor);
+                if ui.open {
+                    ui.draw(px, w, &m, cols, rows, &settings, dw, dh);
+                }
             }
             if let Err(e) = surf.present(None) {
                 present_fails += 1;
@@ -438,10 +475,12 @@ pub extern "C" fn rs_main() -> i64 {
                     say!("aurora: presents failing persistently; exiting");
                     return 1;
                 }
-                // full_fill + dirty stay set: the retry re-fills the next slot.
+                // full_fill + dirty (rows AND ui) stay set: the retry
+                // re-fills + re-composes the next slot.
             } else {
                 present_fails = 0;
                 full_fill = false;
+                ui.dirty = false;
                 for d in term.dirty.iter_mut() {
                     *d = false;
                 }

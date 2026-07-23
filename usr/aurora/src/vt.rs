@@ -39,6 +39,83 @@ const ANSI: [u32; 16] = [
     0xFFE4_DDD8, // 15 bright white (fg)
 ];
 
+// The palette as runtime state (AURORA-CONFIG.md section 3.6: `theme` is an
+// aurora-local setting the OSD live-applies -- no gate, no compositor
+// involvement). Cells bake RESOLVED colors at write time, so a theme switch
+// remaps existing cells by exact old->new color match (set_theme); truecolor
+// SGR passes through a switch untouched, by design.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Palette {
+    pub bg: u32,
+    pub fg: u32,
+    pub ansi: [u32; 16],
+}
+
+pub const BONFIRE: Palette = Palette { bg: BG, fg: FG, ansi: ANSI };
+
+// Parchment: the light counterpart (warm paper + ink; the ANSI tier darkened
+// for contrast on a light field). Values are Aurora's derivation, like the
+// Bonfire brights above.
+// Slot-uniqueness note (the set_theme exact-match remap): within a palette,
+// no two slots may share a value EXCEPT ansi[15] == fg (deliberate + present
+// in every theme, so the alias maps consistently across any switch). A
+// one-sided alias (a slot aliasing fg in one theme but not another) would
+// mis-slot cells on the round-trip -- ansi[0] below is deliberately distinct
+// from fg for exactly that reason.
+const PARCHMENT: Palette = Palette {
+    bg: 0xFFF1_EAE0,
+    fg: 0xFF2B_2320,
+    ansi: [
+        0xFF3A_332E, // 0 black (distinct from fg -- see the slot-uniqueness note)
+        0xFF9C_3A28, // 1 red
+        0xFF3F_6B3F, // 2 green
+        0xFF8A_6520, // 3 yellow (dark gold)
+        0xFF3A_4E86, // 4 blue
+        0xFF6A_4E86, // 5 magenta
+        0xFF2F_6E62, // 6 cyan
+        0xFF6B_5F58, // 7 white (dim ink)
+        0xFF9A_8C82, // 8 bright black
+        0xFFB4_472E, // 9 bright red
+        0xFF4E_8046, // 10 bright green
+        0xFFA0_7828, // 11 bright yellow
+        0xFF4A_62A8, // 12 bright blue
+        0xFF7E_5EA0, // 13 bright magenta
+        0xFF3A_8578, // 14 bright cyan
+        0xFF2B_2320, // 15 bright white (= fg)
+    ],
+};
+
+// Spinifex: green phosphor over near-black (the Tasmanian-bushland name),
+// hues kept distinguishable (errors must still read red).
+const SPINIFEX: Palette = Palette {
+    bg: 0xFF0A_0F0A,
+    fg: 0xFF9F_D89A,
+    ansi: [
+        0xFF1E_2A1E, // 0 black
+        0xFFC8_6850, // 1 red
+        0xFF5F_A85F, // 2 green
+        0xFFB8_B070, // 3 yellow
+        0xFF7F_A0A8, // 4 blue (steel)
+        0xFF9A_98B8, // 5 magenta (lavender-sage)
+        0xFF78_B8A0, // 6 cyan
+        0xFF8F_BF8A, // 7 white (dim phosphor)
+        0xFF4A_5A48, // 8 bright black
+        0xFFE0_7850, // 9 bright red
+        0xFF88_D080, // 10 bright green
+        0xFFD0_C878, // 11 bright yellow
+        0xFF98_C0C8, // 12 bright blue
+        0xFFB8_B0D8, // 13 bright magenta
+        0xFF98_D8C0, // 14 bright cyan
+        0xFF9F_D89A, // 15 bright white (= fg)
+    ],
+};
+
+pub static THEMES: [(&str, Palette); 3] = [
+    ("bonfire", BONFIRE),
+    ("parchment", PARCHMENT),
+    ("spinifex", SPINIFEX),
+];
+
 pub const ATTR_REVERSE: u8 = 1 << 0;
 pub const ATTR_UNDERLINE: u8 = 1 << 1;
 pub const ATTR_BOLD: u8 = 1 << 2;
@@ -52,8 +129,8 @@ pub struct Cell {
 }
 
 impl Cell {
-    fn blank(bg: u32) -> Cell {
-        Cell { ch: ' ', fg: FG, bg, attrs: 0 }
+    fn blank(fg: u32, bg: u32) -> Cell {
+        Cell { ch: ' ', fg, bg, attrs: 0 }
     }
 }
 
@@ -85,6 +162,7 @@ fn push_dec(out: &mut Vec<u8>, n: usize) {
 pub struct Vt {
     pub cols: usize,
     pub rows: usize,
+    pub pal: Palette, // the live theme (set_theme remaps; main reads pal.bg for fills)
     pub cells: Vec<Cell>,
     alt_cells: Vec<Cell>, // the inactive buffer (alt-screen swap)
     pub on_alt: bool,
@@ -129,17 +207,19 @@ pub struct Vt {
 
 impl Vt {
     pub fn new(cols: usize, rows: usize) -> Vt {
+        let pal = BONFIRE;
         Vt {
             cols,
             rows,
-            cells: vec![Cell::blank(BG); cols * rows],
-            alt_cells: vec![Cell::blank(BG); cols * rows],
+            pal,
+            cells: vec![Cell::blank(pal.fg, pal.bg); cols * rows],
+            alt_cells: vec![Cell::blank(pal.fg, pal.bg); cols * rows],
             on_alt: false,
             cx: 0,
             cy: 0,
             cursor_visible: true,
-            fg: FG,
-            bg: BG,
+            fg: pal.fg,
+            bg: pal.bg,
             attrs: 0,
             state: State::Ground,
             params: [0; MAX_PARAMS],
@@ -170,7 +250,8 @@ impl Vt {
         }
         let shift = if self.cy >= nrows { self.cy + 1 - nrows } else { 0 };
         let ccols = if self.cols < ncols { self.cols } else { ncols };
-        let mut cells = vec![Cell::blank(BG); ncols * nrows];
+        let (pfg, pbg) = (self.pal.fg, self.pal.bg);
+        let mut cells = vec![Cell::blank(pfg, pbg); ncols * nrows];
         for r in 0..nrows {
             let or = r + shift;
             if or >= self.rows {
@@ -180,7 +261,7 @@ impl Vt {
                 cells[r * ncols + c] = self.cells[or * self.cols + c];
             }
         }
-        let mut alt = vec![Cell::blank(BG); ncols * nrows];
+        let mut alt = vec![Cell::blank(pfg, pbg); ncols * nrows];
         let arows = if self.rows < nrows { self.rows } else { nrows };
         for r in 0..arows {
             for c in 0..ccols {
@@ -326,15 +407,15 @@ impl Vt {
             }
             b'c' => {
                 // RIS full reset.
-                self.fg = FG;
-                self.bg = BG;
+                self.fg = self.pal.fg;
+                self.bg = self.pal.bg;
                 self.attrs = 0;
                 self.cx = 0;
                 self.cy = 0;
                 self.cursor_visible = true;
-                let bg = self.bg;
+                let (fg, bg) = (self.pal.fg, self.bg);
                 for c in self.cells.iter_mut() {
-                    *c = Cell::blank(bg);
+                    *c = Cell::blank(fg, bg);
                 }
                 self.mark_all();
             }
@@ -455,9 +536,9 @@ impl Vt {
         if enter {
             // A fresh alt screen (1049 semantics: implicit DECSC, so
             // autowrap saves with the cursor): clear + home.
-            let bg = self.bg;
+            let (fg, bg) = (self.pal.fg, self.bg);
             for c in self.cells.iter_mut() {
-                *c = Cell::blank(bg);
+                *c = Cell::blank(fg, bg);
             }
             self.saved = (self.cx, self.cy);
             self.saved_wrap = self.wrap;
@@ -475,8 +556,8 @@ impl Vt {
 
     fn sgr(&mut self) {
         if self.nparams == 0 {
-            self.fg = FG;
-            self.bg = BG;
+            self.fg = self.pal.fg;
+            self.bg = self.pal.bg;
             self.attrs = 0;
             return;
         }
@@ -485,8 +566,8 @@ impl Vt {
             let v = self.params[i];
             match v {
                 0 => {
-                    self.fg = FG;
-                    self.bg = BG;
+                    self.fg = self.pal.fg;
+                    self.bg = self.pal.bg;
                     self.attrs = 0;
                 }
                 1 => self.attrs |= ATTR_BOLD,
@@ -496,11 +577,11 @@ impl Vt {
                 24 => self.attrs &= !ATTR_UNDERLINE,
                 27 => self.attrs &= !ATTR_REVERSE,
                 30..=37 => self.fg = self.ansi_fg((v - 30) as usize),
-                39 => self.fg = FG,
-                40..=47 => self.bg = ANSI[(v - 40) as usize],
-                49 => self.bg = BG,
-                90..=97 => self.fg = ANSI[(v - 90 + 8) as usize],
-                100..=107 => self.bg = ANSI[(v - 100 + 8) as usize],
+                39 => self.fg = self.pal.fg,
+                40..=47 => self.bg = self.pal.ansi[(v - 40) as usize],
+                49 => self.bg = self.pal.bg,
+                90..=97 => self.fg = self.pal.ansi[(v - 90 + 8) as usize],
+                100..=107 => self.bg = self.pal.ansi[(v - 100 + 8) as usize],
                 38 | 48 => {
                     let (color, used) = self.extended_color(i);
                     if let Some(c) = color {
@@ -537,7 +618,7 @@ impl Vt {
             }
             5 => {
                 if i + 2 < self.nparams {
-                    (Some(xterm256(self.params[i + 2] as u8)), 2)
+                    (Some(xterm256(&self.pal, self.params[i + 2] as u8)), 2)
                 } else {
                     (None, 1)
                 }
@@ -550,9 +631,9 @@ impl Vt {
         // BOLD promotes the base tier to the bright tier (the classic
         // bold-as-bright terminal convention; we bake one weight).
         if self.attrs & ATTR_BOLD != 0 {
-            ANSI[idx + 8]
+            self.pal.ansi[idx + 8]
         } else {
-            ANSI[idx]
+            self.pal.ansi[idx]
         }
     }
 
@@ -575,9 +656,9 @@ impl Vt {
         let idx = cy * self.cols + cx;
         self.cells[idx] = Cell {
             ch,
-            fg: if self.attrs & ATTR_BOLD != 0 && self.fg == FG {
+            fg: if self.attrs & ATTR_BOLD != 0 && self.fg == self.pal.fg {
                 // Bold default-fg stays fg (no brighter tier exists).
-                FG
+                self.pal.fg
             } else {
                 self.fg
             },
@@ -599,10 +680,10 @@ impl Vt {
     fn scroll_up(&mut self) {
         let cols = self.cols;
         self.cells.copy_within(cols.., 0);
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         let last = (self.rows - 1) * cols;
         for c in self.cells[last..].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         self.mark_all();
     }
@@ -611,15 +692,15 @@ impl Vt {
         let cols = self.cols;
         let total = self.cols * self.rows;
         self.cells.copy_within(0..total - cols, cols);
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[..cols].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         self.mark_all();
     }
 
     fn erase_display(&mut self, mode: u32) {
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         // Clamp cx: put_char leaves the cursor in the deferred-wrap state
         // cx == cols (past the last column) after a line that exactly fills
         // the width. Mode 1's inclusive `..=cur` bound would then form
@@ -632,7 +713,7 @@ impl Vt {
         match mode {
             0 => {
                 for c in self.cells[cur..].iter_mut() {
-                    *c = Cell::blank(bg);
+                    *c = Cell::blank(fg, bg);
                 }
                 for r in self.cy..self.rows {
                     self.mark(r);
@@ -640,7 +721,7 @@ impl Vt {
             }
             1 => {
                 for c in self.cells[..=cur].iter_mut() {
-                    *c = Cell::blank(bg);
+                    *c = Cell::blank(fg, bg);
                 }
                 for r in 0..=self.cy {
                     self.mark(r);
@@ -648,7 +729,7 @@ impl Vt {
             }
             _ => {
                 for c in self.cells.iter_mut() {
-                    *c = Cell::blank(bg);
+                    *c = Cell::blank(fg, bg);
                 }
                 self.mark_all();
             }
@@ -656,7 +737,7 @@ impl Vt {
     }
 
     fn erase_line(&mut self, mode: u32) {
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         let row = self.cy * self.cols;
         // Clamp cx (the deferred-wrap cx == cols state): mode 1's `cx + 1`
         // would form b == cols + 1 -> `cells[row .. row + cols + 1]` overruns
@@ -670,7 +751,7 @@ impl Vt {
             _ => (0, self.cols),
         };
         for c in self.cells[row + a..row + b].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         self.mark(self.cy);
     }
@@ -684,9 +765,9 @@ impl Vt {
         let start = self.cy * cols;
         let end = self.rows * cols;
         self.cells.copy_within(start..end - n * cols, start + n * cols);
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[start..start + n * cols].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         for r in self.cy..self.rows {
             self.mark(r);
@@ -702,9 +783,9 @@ impl Vt {
         let start = self.cy * cols;
         let end = self.rows * cols;
         self.cells.copy_within(start + n * cols..end, start);
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[end - n * cols..].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         for r in self.cy..self.rows {
             self.mark(r);
@@ -719,9 +800,9 @@ impl Vt {
         let row = self.cy * self.cols;
         let (a, b) = (row + self.cx, row + self.cols);
         self.cells.copy_within(a..b - n, a + n);
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[a..a + n].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         self.mark(self.cy);
     }
@@ -734,9 +815,9 @@ impl Vt {
         let row = self.cy * self.cols;
         let (a, b) = (row + self.cx, row + self.cols);
         self.cells.copy_within(a + n..b, a);
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[b - n..b].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         self.mark(self.cy);
     }
@@ -744,19 +825,58 @@ impl Vt {
     fn erase_chars(&mut self, n: usize) {
         let n = n.min(self.cols - self.cx);
         let row = self.cy * self.cols;
-        let bg = self.bg;
+        let (fg, bg) = (self.pal.fg, self.bg);
         for c in self.cells[row + self.cx..row + self.cx + n].iter_mut() {
-            *c = Cell::blank(bg);
+            *c = Cell::blank(fg, bg);
         }
         self.mark(self.cy);
     }
+
+    /// Switch the live theme (the OSD's Appearance/theme setting). Cells bake
+    /// resolved colors at write time, so existing content retints by EXACT
+    /// old->new color match across both screens + the current SGR state;
+    /// truecolor (and any color no longer matching the old palette) passes
+    /// through untouched, by design. Slot order matters where a palette
+    /// aliases colors (Bonfire ansi[15] == fg): fg/bg win over the ansi scan,
+    /// so aliased cells follow the default-fg role -- benign either way (a
+    /// theme keeps ansi[15] ~= fg). Marks every row dirty; the caller owns
+    /// the margins refill (pal.bg changed).
+    pub fn set_theme(&mut self, idx: usize) {
+        let new = THEMES[idx % THEMES.len()].1;
+        let old = self.pal;
+        if new == old {
+            return;
+        }
+        let map = |c: u32| -> u32 {
+            if c == old.fg {
+                return new.fg;
+            }
+            if c == old.bg {
+                return new.bg;
+            }
+            for i in 0..16 {
+                if c == old.ansi[i] {
+                    return new.ansi[i];
+                }
+            }
+            c
+        };
+        for c in self.cells.iter_mut().chain(self.alt_cells.iter_mut()) {
+            c.fg = map(c.fg);
+            c.bg = map(c.bg);
+        }
+        self.fg = map(self.fg);
+        self.bg = map(self.bg);
+        self.pal = new;
+        self.mark_all();
+    }
 }
 
-/// xterm-256 palette: 0-15 the ANSI map, 16-231 the 6x6x6 cube, 232-255 the
-/// grayscale ramp.
-fn xterm256(n: u8) -> u32 {
+/// xterm-256 palette: 0-15 the live ANSI map, 16-231 the 6x6x6 cube, 232-255
+/// the grayscale ramp.
+fn xterm256(pal: &Palette, n: u8) -> u32 {
     match n {
-        0..=15 => ANSI[n as usize],
+        0..=15 => pal.ansi[n as usize],
         16..=231 => {
             let v = n - 16;
             let steps = [0u32, 95, 135, 175, 215, 255];
@@ -896,6 +1016,29 @@ mod tests {
         feed(&mut vt, b"\x1b[4;1Habcdefgh");
         feed(&mut vt, b"Z");
         assert_ne!(vt.cells[0].ch, 't', "wrap-on at the bottom row scrolls");
+    }
+
+    // The OSD theme switch: exact-match retint across both screens + the SGR
+    // state; truecolor survives untouched; a round-trip restores the original
+    // colors exactly (the remap is a bijection over the palette slots).
+    #[test]
+    fn set_theme_remaps_exact_and_spares_truecolor() {
+        let mut vt = Vt::new(8, 2);
+        feed(&mut vt, b"\x1b[31mrr"); // ansi red (slot 1)
+        feed(&mut vt, b"\x1b[38;2;1;2;3mt"); // truecolor
+        feed(&mut vt, b"\x1b[0mp"); // default fg
+        let (red0, tc, fg0) = (vt.cells[0].fg, vt.cells[2].fg, vt.cells[3].fg);
+        assert_eq!(red0, BONFIRE.ansi[1]);
+        assert_eq!(fg0, BONFIRE.fg);
+        vt.set_theme(1); // parchment
+        assert_eq!(vt.cells[0].fg, THEMES[1].1.ansi[1], "ansi slot follows");
+        assert_eq!(vt.cells[2].fg, tc, "truecolor untouched");
+        assert_eq!(vt.cells[3].fg, THEMES[1].1.fg, "default fg follows");
+        assert_eq!(vt.cells[4].bg, THEMES[1].1.bg, "blank bg follows");
+        assert!(vt.dirty.iter().all(|d| *d), "theme switch dirties all rows");
+        vt.set_theme(0); // round-trip
+        assert_eq!(vt.cells[0].fg, red0);
+        assert_eq!(vt.cells[3].fg, fg0);
     }
 
     // #37: DSR 6 (CPR) must be ANSWERED -- kaua's size handshake parks the

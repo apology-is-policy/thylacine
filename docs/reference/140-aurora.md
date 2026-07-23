@@ -200,6 +200,53 @@ measured exactly that mangling). **TEV_FOCUS (G-6c)** falls to the
 default-ignore arm: the fbcon renders no focus state (the compositor's
 focus ring/strip highlight is chrome, outside aurora's pane).
 
+## The F10 settings OSD (`usr/aurora/src/osd.rs`)
+
+The built-in system dialog (AURORA-CONFIG.md §3.6, chunk 1 as-built) —
+deliberately **Turbo-Vision raw** (EGA gray field, double-line frame, cyan
+focus bar, drop shadow) so it reads as "system dialog, not the session",
+contrasty against both Bonfire and Kaua's fine style. It is not a program:
+it lives inside the renderer, so nothing (a future Halcyon included) can
+invoke or spoof it.
+
+- **Trigger**: bare **F10** (evdev 68) from aurora's own event stream — a
+  key the tapestryd keymap resolves no rune for and `key_bytes` always
+  dropped, so no app ever saw it (interception is regression-free). Press
+  (`value == 1`) only: the opening key's autorepeat cannot bounce the
+  panel shut. **Modal**: while open, every key routes to the OSD and
+  nothing feeds `/dev/consfeed`; serial input is unaffected (the OSD is
+  aurora-local). Known cosmetic edge: holding Esc past the close leaks
+  its autorepeats to the terminal (a tap does not).
+- **Sections**: *Appearance* (live: theme cycler + cursor blink) and
+  *Display* (info-only — resolution + zoom policy render dark-gray with a
+  "read-only until the mode ctl lands" hint; the value pushes arrive with
+  the gated compositor ctl, AURORA-CONFIG §3.3). Keys: Up/Dn select,
+  Left/Right/Enter cycle, Tab section, Esc/F10 close.
+- **Theme = runtime palette** (`vt.rs::Palette` + `THEMES` + `Vt::set_theme`):
+  cells bake resolved colors at write time, so a switch retints existing
+  content by **exact old→new color match** across both screens + the live
+  SGR state; truecolor passes through untouched by design. Slot aliasing
+  (Bonfire `ansi[15] == fg`) resolves fg/bg-first — benign while a theme
+  keeps `ansi[15] ≈ fg`. Themes: `bonfire` (scripture), plus the
+  **proposed names** `parchment` (light) and `spinifex` (green phosphor —
+  the Tasmanian-bushland word; held-proposal per the thematic-naming
+  discipline, trivially renameable data).
+- **Compositing**: the panel draws OVER the grid after `render_rows`
+  (`render.rs::draw_run` — explicit-color cell runs — + `darken_rect`, the
+  shadow), through the **full-frame present branch only**: slot rotation
+  means a partial rect could transfer stale panel pixels from an older
+  slot, so an open OSD routes every damaged pass through fill + all rows +
+  panel + `present(None)`, sharing the `full_fill` retry discipline
+  (`ui.dirty` stays set on a failed present). The terminal keeps updating
+  UNDER the panel (the drain still feeds the Vt). Close sets `full_fill`
+  (margins refill — the theme may have changed `pal.bg`). Panel geometry
+  derives from the current grid each draw, so a reweave needs no
+  notification (sub-floor grids clamp).
+- **Settings are session-lived** in chunk 1; the `$home/lib/aurora`
+  config file + push-on-start is the next sub-chunk (AURORA-CONFIG §3.2),
+  and the compositor tier (`mode`, chords, gaps) lands with the
+  apply-authority gate (§3.3) — never before it.
+
 ## The gates
 
 - **The per-boot console gate** (`tools/test.sh`, every ci-smp-gate

@@ -301,18 +301,24 @@ touches a trust boundary is the §3.3 apply-authority gate.
 ## 5. Sequencing
 
 - **Track A** (largely landed across the gfx merges) — the record is §2.
-- **Track B** (this arc), depth-first, cheapest first:
-  1. **The config-file substrate + push-on-start** — the environment reads
-     `$home/lib/aurora` (+ the `/lib` default) and pushes to the components.
-     The `mode W H` global ctl verb + the CONFIGURE fan-out is the load-bearing
-     compositor piece (composes G-6b's generation-fence reweave).
-  2. **The apply-authority gate** (§3.3) — with its focused audit pass. This is
-     the one trust-bearing chunk; it should land WITH the first authority-bearing
-     verb (`mode`), not after (do not ship an ungated `mode`).
-  3. **The OSD** (§3.6) — aurora's F10 overlay: the Turbo-Vision panel, the
-     Display + Appearance sections, edit → write file → re-push.
-  4. **Runtime chords** (§3.5) + the niceties (theme/gaps/cursor) — additive,
-     each a small component read of a pushed value.
+- **Track B** (this arc). Build-order refinement (2026-07-23, at chunk 1):
+  the trust boundary touches ONLY the compositor tier (`mode`/chords/gaps →
+  the gated ctl); the **aurora-local settings (theme, cursor) apply with no
+  gate at all** — so the visible artifact front-loads and the single
+  audit-bearing chunk lands last, cleanly scoped, with a working UI to
+  drive it:
+  1. **The OSD shell + Appearance** (§3.6; pure aux, gate-free) — F10, the
+     Turbo-Vision panel, Display info-only + Appearance live-applying the
+     aurora-local settings (session-lived). CHUNK 1 — BUILT.
+  2. **Config-file persistence + push-on-start** (§3.2) — write/load
+     `$home/lib/aurora` (+ the `/lib` default) for the aurora-local keys.
+  3. **The compositor tier + the apply-authority gate** (§3.3/§3.4) — the
+     `mode W H` verb + the CONFIGURE fan-out (composes G-6b's
+     generation-fence reweave), landing WITH the gate + its focused audit
+     pass (do not ship an ungated `mode`); the OSD's Display section goes
+     live here.
+  4. **Runtime chords** (§3.5) + the niceties (gaps etc.) — additive, each
+     a small component read of a pushed value.
 
 ## 6. Seams + coordinate-with-main
 

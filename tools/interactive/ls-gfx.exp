@@ -58,16 +58,23 @@ lc_pass "fbcon: the session console rendered (screendump -c)"
 
 # The session leg: `ls /` over serial; assert real output, then assert the
 # RENDERED console changed (the session output repainted the screen).
+# The differ FOLDS INTO the retry: the drain (aurora) and the serial tee are
+# independent consumers of the session output, so the serial expect can win
+# the race by tens of ms -- a dump taken in that window still shows the pre
+# screen (and can match its blink phase), which is an early dump, not a dead
+# render loop. A dump that stays identical through the whole budget IS the
+# dead-loop signal.
 lc_run_expect "ls /" "bin"
 set ok 0
 for {set i 0} {$i < 10} {incr i} {
-    if {[gfx_dump /tmp/ls-gfx-post.png "-c"] eq ""} { set ok 1; break }
+    if {[gfx_dump /tmp/ls-gfx-post.png "-c"] eq ""
+        && [catch {exec cmp -s /tmp/ls-gfx-pre.png /tmp/ls-gfx-post.png}]} {
+        set ok 1
+        break
+    }
     after 700
 }
-if {!$ok} { lc_fail "post-ls console verify (-c) never passed" }
-if {![catch {exec cmp -s /tmp/ls-gfx-pre.png /tmp/ls-gfx-post.png}]} {
-    lc_fail "the screen did not change across login + ls (render loop dead)"
-}
+if {!$ok} { lc_fail "the console never repainted differently after ls (-c + differ)" }
 lc_pass "fbcon: login + ls rendered via screendump (dumps differ + -c)"
 
 # The graphical-input leg: type `pwd` + Enter on the PCI keyboard via QMP.
@@ -101,14 +108,18 @@ lc_pass "fbcon: /dev/winsize serves aurora's grid (the #55 winsize contract live
 lc_run_expect "pouch-hello-pty cons" "pty-cons: 128x36 isatty=1 setws=EPERM tcgetattr=ENOTTY OK"
 lc_pass "fbcon: pouch TIOCGWINSZ/isatty on the console (the 0026 cons arm live)"
 
-# And the injected session activity rendered too.
-after 700
-if {[gfx_dump /tmp/ls-gfx-final.png "-c"] ne ""} {
-    lc_fail "final console verify (-c) failed"
+# And the injected session activity rendered too (the same folded retry --
+# the injected pwd races the dump exactly like the ls leg).
+set ok 0
+for {set i 0} {$i < 10} {incr i} {
+    if {[gfx_dump /tmp/ls-gfx-final.png "-c"] eq ""
+        && [catch {exec cmp -s /tmp/ls-gfx-post.png /tmp/ls-gfx-final.png}]} {
+        set ok 1
+        break
+    }
+    after 700
 }
-if {![catch {exec cmp -s /tmp/ls-gfx-post.png /tmp/ls-gfx-final.png}]} {
-    lc_fail "the screen did not change across the injected pwd"
-}
+if {!$ok} { lc_fail "the console never repainted differently after the injected pwd" }
 lc_pass "fbcon: the injected command rendered (final dump differs + -c)"
 
 lc_quit
