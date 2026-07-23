@@ -884,12 +884,35 @@ impl Comp {
         // renderer's immediate fullscreen create fails, blanking the
         // console. The page-rounded slot stride matches alloc_weave.
         let slot = (((w as u64) * 4 * (h as u64)) + PAGE - 1) & !(PAGE - 1);
-        if slot * (WEAVE_SLOTS as u64) > WEAVE_MAX_SIZE {
+        let surf_size = slot * (WEAVE_SLOTS as u64);
+        if surf_size > WEAVE_MAX_SIZE {
             return Err(p9::E_INVAL);
         }
         if w == self.gpu.width && h == self.gpu.height {
             return Ok(()); // same mode: a push of the current value no-ops
         }
+        // F3-follow-up (the max-resolution display-brick, reported 2026-07-23):
+        // the STATIC cap is not enough -- the kernel's contiguous-DMA
+        // allocator can fail BELOW KOBJ_DMA_WEAVE_MAX_SIZE (buddy max-order /
+        // fragmentation / physical RAM). A 2560x1440 surface (44 MiB, < the
+        // 64 MiB cap) allocated its single-buffered SCREEN fine but its
+        // triple-buffered SURFACE weave then failed -1 -> set_mode had
+        // committed the geometry, so aurora's reweave died -> retire ->
+        // the display disconnected (and, persisted, bricked every boot).
+        // PRE-FLIGHT the real fullscreen surface allocation and reject the
+        // mode if it cannot back a surface -- the current working geometry
+        // stands, the OSD apply is refused (never persisted), and a
+        // startup push of a too-big persisted mode is rejected so aurora
+        // comes up at the default (the self-heal in aurora clears it).
+        let probe = unsafe {
+            t_dma_create_weave(surf_size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP)
+        };
+        if probe < 0 {
+            say!("tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
+                 w, h, surf_size, probe);
+            return Err(p9::E_NOMEM);
+        }
+        unsafe { t_close(probe) };
         say!(
             "tapestryd: mode {}x{} -> {}x{} (scanout {})",
             self.gpu.width,

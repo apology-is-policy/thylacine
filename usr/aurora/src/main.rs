@@ -162,7 +162,18 @@ pub extern "C" fn rs_main() -> i64 {
                     let _ = sleep(Duration::from_millis(CONNECT_DELAY_MS));
                 }
                 Err(e) => {
-                    say!("aurora: startup mode push ({}x{}) write failed {:?}", mw, mh, e);
+                    // A non-Connect error = the compositor REFUSED the mode
+                    // (E_NOMEM: the surface weave is unallocatable; E_INVAL:
+                    // out of bounds). A refused mode can never work, so
+                    // SELF-HEAL the persisted config back to `auto` -- else a
+                    // too-big mode the OSD wrote through would re-push + fail
+                    // every boot (the reported max-resolution brick). The
+                    // display then comes up at the default this boot.
+                    say!("aurora: startup mode push ({}x{}) refused {:?}; resetting to auto", mw, mh, e);
+                    settings.mode = osd::Mode::Auto;
+                    if !config::save(&settings) {
+                        say!("aurora: config self-heal (mode auto) save failed");
+                    }
                     pushed = true; // reported; don't double-log below
                     break;
                 }
