@@ -419,9 +419,50 @@ struct Thread {
     // both to 0; NOT propagated by rfork (a child accrues its own time).
     u64                run_ns;
     u64                switched_in_at;
+
+    // prowl-3a (docs/PROWL-DESIGN.md section 3.3; I-8/I-17 untouched): the
+    // per-thread scheduler-introspection counters -- the /proc/<pid>/sched
+    // substrate. All READ-ONLY telemetry: NO scheduling decision reads any of
+    // them, so EEVDF placement / the vd_t math / liveness / latency are
+    // byte-unchanged; this is telemetry, not policy.
+    //
+    // Same single-writer discipline as run_ns (all stamped at the ONE switch
+    // chokepoint in sched()): nsched / last_cpu / nmigrations are written when
+    // THIS thread is switched IN, by the single CPU that picked it (a thread is
+    // picked by exactly one CPU -- I-21 on_cpu -- so there is one writer);
+    // nsleeps is written when it is switched OUT while SLEEPING, on its single
+    // running CPU. A cross-Proc reader (devproc / devctl) uses __atomic_load_n
+    // against the writer's __atomic_store_n for a coherent snapshot; RELAXED
+    // suffices -- these are monotonic counters the reader diffs across polls
+    // (htop's method), with no other memory ordered against them.
+    //
+    //   nsched       -- times switched IN (got the CPU). A busy-yield storm
+    //                   shows an astronomical rate here -- the signal that would
+    //                   have named the HVF-idle regression (DEBUGGING-PLAYBOOK
+    //                   6.17) on sight instead of a git-bisect.
+    //   nsleeps      -- times switched OUT voluntarily (state == SLEEPING) --
+    //                   the "parks" the process list surfaces (OQ-5).
+    //   nmigrations  -- times dispatched on a DIFFERENT CPU than the previous
+    //                   dispatch (the first-ever dispatch is skipped via the
+    //                   nsched == 0 guard, so it is not miscounted as a move
+    //                   off the KP_ZERO last_cpu).
+    //   last_cpu     -- the CPU this thread most recently ran on (meaningful
+    //                   only once nsched > 0; the Linux /proc/<pid>/stat
+    //                   "processor" field). u16 spans DTB_MAX_CPUS with room.
+    //
+    // KP_ZERO inits all to 0; NOT propagated by rfork (a child accrues its own).
+    u64                nsched;
+    u64                nsleeps;
+    u64                nmigrations;
+    u16                last_cpu;
+    u16                _pad_prowl3[3];
 };
 
-_Static_assert(sizeof(struct Thread) == 1200,
+_Static_assert(sizeof(struct Thread) == 1232,
+               "prowl-3a appended the scheduler-introspection counters "
+               "nsched + nsleeps + nmigrations (3 x u64) + last_cpu (u16) + "
+               "pad at the tail: 1200 -> 1232 (READ-ONLY telemetry, the "
+               "/proc/<pid>/sched substrate). "
                "prowl-1 appended run_ns + switched_in_at (2 x u64, the on-CPU "
                "time telemetry) at the tail: 1184 -> 1200. "
                "8c-3 appended stop_unwinds + stop_no_park + stop_unwound (bools) in "

@@ -1014,3 +1014,59 @@ prowl-1 and the focused audit at prowl-5.
 Validated by `proc.cpu_ns_accounting` (`kernel/test/test_devproc.c`: the
 `proc_set_name` basename cases + forced-yield `run_ns` accrual + monotonicity)
 and the SMP gate (default+UBSan × smp4/smp8, 0 corruption).
+
+## Per-thread scheduler counters + per-CPU idle time (prowl-3a)
+
+prowl-3a extends the accounting substrate with the scheduler-introspection
+counters that `/proc/<pid>/sched` (prowl-3b) surfaces. Four more per-thread
+fields (`thread.h`), stamped at the **same single switch chokepoint** as
+`run_ns`, and one per-CPU field (`struct CpuSched`, `sched.c`):
+
+| Field (`struct Thread`) | Stamped | Meaning |
+|---|---|---|
+| `nsched` | switch-**in** of `next` | times this thread got the CPU. A busy-yield storm reads an astronomical rate — the signal that would have named the HVF-idle regression (`DEBUGGING-PLAYBOOK.md §6.17`) on sight. |
+| `nsleeps` | switch-**out** of `prev` when `prev->state == THREAD_SLEEPING` | voluntary sleeps (the "parks" the process list surfaces, OQ-5). A yield-requeue (`RUNNING→RUNNABLE`) and an `EXITING` switch-out are **not** counted. |
+| `nmigrations` | switch-**in** of `next` | times dispatched on a different CPU than the previous dispatch (guarded by `nsched != 0` so the first-ever dispatch is not miscounted as a move off the `KP_ZERO` `last_cpu`). |
+| `last_cpu` (u16) | switch-**in** of `next` | the CPU this thread most recently ran on (meaningful once `nsched > 0`; the Linux `/proc/<pid>/stat` "processor" field). |
+
+```c
+// at the switch chokepoint, in the same block as the run_ns fold:
+if (prev->state == THREAD_SLEEPING)
+    __atomic_store_n(&prev->nsleeps, prev->nsleeps + 1, __ATOMIC_RELAXED);
+u16 this_cpu   = (u16)(unsigned)(cs - g_cpu_sched);   // == smp_cpu_idx_self()
+u64 old_nsched = next->nsched;
+__atomic_store_n(&next->nsched, old_nsched + 1, __ATOMIC_RELAXED);
+if (old_nsched != 0 && next->last_cpu != this_cpu)
+    __atomic_store_n(&next->nmigrations, next->nmigrations + 1, __ATOMIC_RELAXED);
+__atomic_store_n(&next->last_cpu, this_cpu, __ATOMIC_RELAXED);
+```
+
+The per-CPU field `CpuSched.idle_ns` (charged in `sched_idle_park` alongside the
+global `g_wc_idle_ns`, read via `sched_cpu_idle_ns(cpu)`) is the `/ctl/cpu`
+per-core **meter denominator**: utilization = `1 - d(idle_ns)/d(wall)` diffed
+across polls. `cs` is cpu-pinned-stable across the park (the idle thread never
+migrates), so each CPU is the sole writer of its own slot.
+
+**READ-ONLY telemetry**, same as `run_ns`: no scheduling decision reads any of
+them; EEVDF / `vd_t` / I-8 / I-17 / the tickless machinery are byte-unchanged.
+
+**Correctness properties** (the run_ns argument, extended):
+
+- **Single writer.** `nsched`/`nmigrations`/`last_cpu` are written only when the
+  thread is switched **in**, by the single CPU that picked it — and `next->on_cpu`
+  is already `true` at the stamp (set earlier in the same frame), so no peer can
+  pick or touch `next`. `nsleeps` is written only at `prev`'s switch-out on its
+  one running CPU. RELAXED `__atomic` gives the lockless cross-Proc reader a
+  coherent snapshot; a stale cross-CPU read of `last_cpu` (written by the previous
+  dispatcher) is at worst a cosmetically-off migration count — the run_ns
+  plain-read-then-atomic-store pattern, since this is telemetry, never a decision.
+- **The first-dispatch guard.** `last_cpu` inits to `KP_ZERO` 0; the `nsched == 0`
+  guard prevents a spurious "migrated off CPU 0" the first time a thread lands on
+  a non-zero CPU. `last_cpu` is only read for display once `nsched > 0`.
+- **Not rfork-propagated.** A fresh thread (`KP_ZERO`) starts every counter at 0;
+  a child accrues its own — same as `run_ns`.
+
+Validated by `scheduler.prowl_counters` (`kernel/test/test_devproc.c`: `nsched`
+growth across forced yields + a valid `last_cpu` + counter monotonicity + the
+`sched_cpu_idle_ns` bounds guard) and the SMP gate (default+UBSan × smp4/smp8,
+0 corruption). The focused audit is prowl-5.

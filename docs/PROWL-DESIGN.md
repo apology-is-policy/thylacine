@@ -1,7 +1,8 @@
 # PROWL-DESIGN.md — the scheduler-aware process monitor + the kernel telemetry it reads
 
 Status: **SIGNED OFF 2026-07-22 — §7 resolved. prowl-1 (the substrate) +
-prowl-2 (the tool MVP) LANDED.** Building telemetry-first (prowl-1..5, §6).
+prowl-2 (the tool MVP) + prowl-3a (the scheduler-counter accounting) LANDED.**
+Building telemetry-first (prowl-1..5, §6).
 Landed per the CLAUDE.md design-conversation pattern (research → doc → surface
 forks → signoff → bind ARCH → build). The tool is `prowl`; the kernel telemetry
 it reads is `/proc/<pid>/{status,sched}` + `/ctl/{procs,cpu}`.
@@ -270,9 +271,20 @@ nothing on the kernel's behalf (the kernel gates the reads).
   (diffing `cpu_ns` across ticks) + confirm-gated kill via `/proc/<pid>/ctl`. An
   htop-equivalent, on-device; pure userspace. `usr/prowl/` +
   `tools/interactive/prowl.exp`; as-built `docs/reference/144-prowl.md`.
-- **prowl-3 (the scheduler view):** `/proc/<pid>/sched` + the per-thread scheduler
-  counters + the `/ctl/cpu` per-CPU leaf + the tool's detail pane + band/parks
-  columns. The "better than htop" differentiator.
+- **prowl-3 (the scheduler view)** — the "better than htop" differentiator, split
+  into three sub-chunks:
+  - **prowl-3a (the counter accounting): LANDED.** Four per-thread scheduler
+    counters (`Thread.nsched`/`nsleeps`/`nmigrations`/`last_cpu`) stamped at the
+    same single switch chokepoint as `run_ns`, plus per-CPU `CpuSched.idle_ns`
+    (the `/ctl/cpu` meter denominator, read via `sched_cpu_idle_ns`). READ-ONLY
+    telemetry (no decision reads them); `scheduler.prowl_counters` + the SMP gate.
+    As-built: `docs/reference/15-scheduler.md` (§ per-thread scheduler counters).
+  - **prowl-3b (the FS surfaces):** `/proc/<pid>/sched` (the per-thread block, an
+    **owner-or-`CAP_HOSTOWNER`** deep-internals gate per OQ-4) + the `/ctl/cpu`
+    per-CPU leaf.
+  - **prowl-3c (the tool):** the detail pane (a selected process's
+    `/proc/<pid>/sched`) + per-CPU meter bars (from `/ctl/cpu`) + the band/parks
+    columns in the process list.
 - **prowl-4 (the manager):** stop/cont control + the tree view (+ the reband seam
   if voted in).
 - **prowl-5 (audit):** the focused audit — the visibility gate + the hot-path cost

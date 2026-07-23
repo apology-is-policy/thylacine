@@ -119,6 +119,16 @@ struct CpuSched {
     // once at boot, never mutated thereafter (read-only data after init), so a
     // plain field with the boot-time publish barrier suffices.
     u32            capacity;
+
+    // prowl-3a (docs/PROWL-DESIGN.md section 3.4; I-8/I-17 untouched): cumulative
+    // ns THIS CPU spent parked in the idle loop -- the per-CPU meter denominator
+    // for /ctl/cpu (utilization = 1 - d(idle_ns)/d(wall) across polls). The
+    // GLOBAL g_wc_idle_ns already sums this; the per-CPU split is a small
+    // extension since the idle park runs per-CPU on a cpu_pinned idle thread that
+    // never migrates. Single-writer per CPU (only this CPU's idle charges its own
+    // slot, cs stable across the park); a cross-CPU reader (devctl) __atomic_loads
+    // it. RELAXED -- a monotonic counter the reader diffs across polls.
+    u64            idle_ns;
 };
 
 static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
@@ -1382,6 +1392,30 @@ void sched(void) {
                              prev->run_ns + (sched_now - prev->switched_in_at),
                              __ATOMIC_RELAXED);
         next->switched_in_at = sched_now;
+
+        // prowl-3a (PROWL-DESIGN.md section 3.3): the per-thread scheduler
+        // counters, stamped at this same single chokepoint. READ-ONLY telemetry
+        // (no decision reads them); single-writer per the run_ns discipline
+        // (prev switches OUT on this one CPU; next was picked by this one CPU).
+        // `this_cpu` is derived from cs (asserted == smp_cpu_idx_self() above)
+        // to avoid a redundant MPIDR read.
+        //
+        // A voluntary switch-OUT (prev going to SLEEPING) is a "park"; EXITING /
+        // a yield-requeue (RUNNING->RUNNABLE) is not counted here.
+        if (prev->state == THREAD_SLEEPING)
+            __atomic_store_n(&prev->nsleeps, prev->nsleeps + 1, __ATOMIC_RELAXED);
+
+        // next is switching IN on this CPU: bump its scheduling count, count a
+        // migration if it moved CPUs since its last dispatch (skipping the
+        // first-ever dispatch, where last_cpu is still the KP_ZERO 0), and
+        // record the CPU it now runs on.
+        u16 this_cpu   = (u16)(unsigned)(cs - g_cpu_sched);
+        u64 old_nsched = next->nsched;
+        __atomic_store_n(&next->nsched, old_nsched + 1, __ATOMIC_RELAXED);
+        if (old_nsched != 0 && next->last_cpu != this_cpu)
+            __atomic_store_n(&next->nmigrations,
+                             next->nmigrations + 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&next->last_cpu, this_cpu, __ATOMIC_RELAXED);
     }
 
     cpu_switch_context(&prev->ctx, &next->ctx);
@@ -1564,6 +1598,16 @@ void sched_wc_stats(struct sched_wc_stats *out) {
         __atomic_load_n(&g_wc_tickless_oneshot_wakes, __ATOMIC_RELAXED);
     out->tickless_ipi_wakes =
         __atomic_load_n(&g_wc_tickless_ipi_wakes, __ATOMIC_RELAXED);
+}
+
+// prowl-3a (PROWL-DESIGN.md section 3.4): cumulative ns `cpu` spent idle-parked
+// -- the /ctl/cpu per-CPU meter denominator. Coherent __atomic snapshot of the
+// per-CPU slot the idle park charges. 0 for an out-of-range or uninitialized
+// CPU (a never-brought-up secondary reads a clean 0, not garbage).
+u64 sched_cpu_idle_ns(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return 0;
+    if (!g_cpu_sched[cpu].initialized) return 0;
+    return __atomic_load_n(&g_cpu_sched[cpu].idle_ns, __ATOMIC_RELAXED);
 }
 
 // Best-effort snapshot of every runnable thread across ALL CPUs' run trees
@@ -2317,6 +2361,11 @@ void sched_idle_park(bool tickless) {
     u64 dt = timer_now_ns() - park_start;
     __atomic_fetch_add(&g_wc_park_events, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&g_wc_idle_ns, dt, __ATOMIC_RELAXED);
+    // prowl-3a: the per-CPU split of the same idle time (the /ctl/cpu meter
+    // denominator). cs is this CPU's slot, stable across the park (the idle
+    // thread is cpu_pinned -- it never migrates), so this is the sole writer of
+    // cs->idle_ns; a cross-CPU reader __atomic_loads it (sched_cpu_idle_ns).
+    __atomic_fetch_add(&cs->idle_ns, dt, __ATOMIC_RELAXED);
     if (go_tickless)
         __atomic_fetch_add(&g_wc_tickless_parks, 1, __ATOMIC_RELAXED);
     if (starved) {

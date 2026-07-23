@@ -28,7 +28,8 @@
 #include <thylacine/dev.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
-#include <thylacine/sched.h>       // prowl-1: sched() -- force kthread switch-outs
+#include <thylacine/sched.h>       // prowl-1/3a: sched() + sched_cpu_idle_ns
+#include <thylacine/smp.h>         // prowl-3a: smp_cpu_count() -- last_cpu bound
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
@@ -365,6 +366,51 @@ void test_proc_cpu_ns_accounting(void) {
     u64 cpu_ns2 = 0;
     proc_for_each(cpu_ns_cb, &cpu_ns2);
     TEST_ASSERT(cpu_ns2 >= cpu_ns, "cpu_ns is monotonic across polls");
+}
+
+// prowl-3a: the per-thread scheduler counters (nsched/nsleeps/nmigrations/
+// last_cpu) + the per-CPU idle_ns accessor -- the /proc/<pid>/sched + /ctl/cpu
+// substrate. Drives the SAME forced-yield vehicle as the run_ns test above: a
+// yield switches the running thread OUT then a peer/idle switches it back IN, so
+// nsched grows; the burned slice guarantees a real switch rather than a no-op.
+void test_sched_prowl_counters(void);
+void test_sched_prowl_counters(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL, "current thread present");
+
+    // nsched grows across forced yields (the switch chokepoint bumps it on
+    // switch-IN, exactly where run_ns accrues on switch-OUT above).
+    u64 n0 = __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
+    for (int i = 0; i < 8; i++) {
+        for (volatile int j = 0; j < 500000; j++) { /* burn a measurable slice */ }
+        sched();
+    }
+    u64 n1 = __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
+    TEST_ASSERT(n1 > n0, "nsched grows across forced yields");
+
+    // last_cpu is a valid online CPU index once the thread has been dispatched.
+    u16 lc = __atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED);
+    TEST_ASSERT((unsigned)lc < smp_cpu_count(), "last_cpu is a valid CPU index");
+
+    // The other counters are monotonic across polls (the diff-across-polls
+    // contract the userspace reader depends on -- no wrap, no decrease).
+    u64 s0 = __atomic_load_n(&t->nsleeps, __ATOMIC_RELAXED);
+    u64 m0 = __atomic_load_n(&t->nmigrations, __ATOMIC_RELAXED);
+    for (int i = 0; i < 4; i++) {
+        for (volatile int j = 0; j < 200000; j++) { }
+        sched();
+    }
+    TEST_ASSERT(__atomic_load_n(&t->nsleeps, __ATOMIC_RELAXED) >= s0,
+                "nsleeps is monotonic across polls");
+    TEST_ASSERT(__atomic_load_n(&t->nmigrations, __ATOMIC_RELAXED) >= m0,
+                "nmigrations is monotonic across polls");
+
+    // Per-CPU idle_ns: CPU 0 (online) reads a coherent cumulative value without
+    // faulting; an out-of-range CPU reads a clean 0 (the accessor's bounds
+    // guard), never garbage.
+    (void)sched_cpu_idle_ns(0);
+    TEST_EXPECT_EQ(sched_cpu_idle_ns(9999u), (u64)0,
+                   "out-of-range CPU idle_ns reads 0");
 }
 
 void test_devproc_read_cmdline_kproc(void) {
