@@ -161,6 +161,26 @@ the compositor is a file server), made symmetric across both environments.
   pre-login state; the per-user file pushes AFTER login. The Plan 9 `/lib`
   default + `$home/lib` personal idiom (per-user files are Stratum-home-backed
   → persistent + per-user-encrypted for free).
+- **The writer defines the tier (the cfg-2 refinement, 2026-07-23 — forced by
+  an isolation fact the original pass did not confront):** aurora is a
+  PRE-LOGIN SYSTEM process (spawned by joey post-pivot, `PRINCIPAL_SYSTEM`,
+  the full system namespace); the user's home is per-user-encrypted and
+  mounted in the SESSION's namespace — so aurora can never read or write
+  `$home/lib/aurora`, and must not. Ownership therefore splits by writer:
+  - `/lib/aurora/config` is **the device's memory** (the monitor-OSD
+    semantic — a monitor persists its own OSD settings): aurora READS it at
+    startup (the pre-login theme) and the F10 OSD WRITES THROUGH to it
+    (write-tmp + fsync + rename, the A-1.6 swap discipline). Baked with
+    defaults by the host populate (the `/lib/ndb/local` pattern).
+  - `$home/lib/aurora` is **the session's**: read AND written session-side
+    only, pushed to the components at session start. The renderer push
+    channel is **in-band private OSC over the console wire** (the
+    terminal-native mechanism — xterm's dynamic-colors OSC 10/11 shape; the
+    drain already carries every console byte to aurora, so the channel adds
+    ZERO new kernel/9P surface); a tiny session tool emits it at login.
+    A session push applies for the session; it does NOT rewrite the system
+    file. An OSD "save to my profile" needs a session-side agent — a
+    recorded seam, not v1.0.
 - **Format**: plain `key value` text — greppable, hand-editable, ndb-adjacent
   (netd already parses ndb); no binary format, no ABI. Example (Aurora):
   ```
@@ -259,10 +279,12 @@ free.
   "system dialog, not your Bonfire session," a drop shadow, a block cursor.
   Contrasty vs Kaua's fine style, by design — this is what signifies "an Aurora
   built-in," and "leave the pretty configuration to Halcyon."
-- **Behavior**: edits the environment's config file (`$home/lib/aurora`) AND
-  live-pushes via the gated ctl (§3.3) + the renderer's own state — so a change
-  applies immediately AND persists. The reweave/resize fan-out rides the audited
-  G-6b CONFIGURE protocol.
+- **Behavior**: live-applies immediately (the renderer's own state; the
+  compositor tier later via the gated ctl §3.3) AND persists by WRITING
+  THROUGH to `/lib/aurora/config` — the system tier the OSD, as part of the
+  pre-login system renderer, legitimately owns (§3.2 "the writer defines the
+  tier"; the per-user `$home/lib/aurora` is the session's, pushed via OSC).
+  The reweave/resize fan-out rides the audited G-6b CONFIGURE protocol.
 - **Scope (v1)**: Display (mode/resolution, zoom-policy) + Appearance (palette,
   font-scale, cursor); Chords + Session as later tabs. The system/display tier.
 - **Trust**: "Halcyon can never invoke it" holds by construction — it is not a
@@ -310,8 +332,11 @@ touches a trust boundary is the §3.3 apply-authority gate.
   1. **The OSD shell + Appearance** (§3.6; pure aux, gate-free) — F10, the
      Turbo-Vision panel, Display info-only + Appearance live-applying the
      aurora-local settings (session-lived). CHUNK 1 — BUILT.
-  2. **Config-file persistence + push-on-start** (§3.2) — write/load
-     `$home/lib/aurora` (+ the `/lib` default) for the aurora-local keys.
+  2. **Config-file persistence + push-on-start** (§3.2), split by tier:
+     **cfg-2a** — the SYSTEM tier: bake `/lib/aurora/config`, aurora reads it
+     at startup (pre-login apply), the OSD writes through (the persist loop
+     closes; the monitor-OSD semantic). **cfg-2b** — the PER-USER tier: the
+     private-OSC push channel + the session push tool + the login hook.
   3. **The compositor tier + the apply-authority gate** (§3.3/§3.4) — the
      `mode W H` verb + the CONFIGURE fan-out (composes G-6b's
      generation-fence reweave), landing WITH the gate + its focused audit
