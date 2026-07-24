@@ -2476,21 +2476,26 @@ build_libcxx() {
     # toolchain from it. Absent fork -> skip cleanly (a fresh checkout still builds;
     # the joey prover degrades to "not present").
     #
-    # Config decisions (each ground-truthed; see LLVM-DESIGN.md section 16.14):
-    #   - --target=aarch64-thylacine: under the unknown OS, libc++'s atomic-wait uses
-    #     the GENERIC pthread fallback (pouch routes pthread), NOT the Linux direct-
-    #     futex path (raw syscall(SYS_futex) is the 0xFFFF/ENOSYS sentinel on pouch).
+    # Config decisions (each ground-truthed; see LLVM-DESIGN.md section 16.14/16.15):
+    #   - Built with the FORK clang (CL-3): --target=aarch64-thylacine now hits the
+    #     real ThylacineTargetInfo (auto-defines __thylacine__/__unix__/_GNU_SOURCE)
+    #     + Thylacine ToolChain. Thylacine is NOT __linux__, so libc++'s atomic-wait
+    #     still takes the GENERIC pthread fallback (pouch routes pthread), NOT the
+    #     Linux direct-futex path (raw syscall(SYS_futex) is the 0xFFFF/ENOSYS
+    #     sentinel on pouch) -- the discriminator is __linux__, which stays undefined.
     #   - CMAKE_SYSTEM_NAME=Linux: a CMAKE-TOOLING knob only (uses llvm-ar, not the
     #     Apple libtool that rejects aarch64 ELF); the compiled code's OS stays
     #     thylacine (the --target), so __linux__ is undefined in the emitted code.
     #   - LIBCXX_HAS_PTHREAD_API=ON: forces libc++'s pthread thread-API selection
-    #     (the unknown OS can't auto-detect it -> "No thread API").
+    #     (the non-__linux__ OS can't auto-detect it -> "No thread API").
     #   - LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF: musl has no __cxa_thread_atexit_impl
     #     -> use libc++abi's pthread-key fallback.
-    #   - LIBCXXABI_ADDITIONAL_COMPILE_FLAGS=-D__linux__: SURGICAL, libc++abi ONLY --
-    #     unlocks __cxa_thread_atexit, whose definition is guarded `#if __linux__ ||
-    #     __Fuchsia__`. Verified the sole __linux__ user in libcxxabi/src; cxa_guard
-    #     keys on SYS_gettid (unaffected). Re-points at CL-3's __thylacine__ guard.
+    #   - __cxa_thread_atexit: guarded `#if __linux__ || __Fuchsia__ || __thylacine__`
+    #     (the fork guard patch, CL-3b). The CL-2 surgical -D__linux__ flag RETIRES:
+    #     libc++abi is now built WITHOUT __linux__, so its __cxx_contention_t is int64
+    #     (same as libc++/consumers) -- the CL-2-audit int32/int64 ODR split is not
+    #     merely inert now, it is ELIMINATED (F2b). cxa_guard keys on SYS_gettid
+    #     (unaffected; the concurrent-static-init seam is tracked separately).
     #   - LIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF: Thylacine ships no IANA tzdb.
     #   - CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY: the runtimes aren't built yet,
     #     so a C++ link probe can't work (chicken-and-egg); compile-only probes.
@@ -2498,12 +2503,23 @@ build_libcxx() {
     local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
     local bdir="$BUILD_DIR/pouch/cxx-runtimes"
     local progs_out="$BUILD_DIR/pouch/progs"
-    local clangxx="$LLVM_PREFIX/bin/clang++"
+    # CL-3: build the C++ runtime with the FORK clang (the real Thylacine
+    # driver). This is what auto-defines __thylacine__ + retires the surgical
+    # -D__linux__/-D__thylacine__=1 flags.
+    local pouch_cc="${POUCH_CC:-$fork/build/bin/clang}"
+    local pouch_cxx="${POUCH_CXX:-$fork/build/bin/clang++}"
+    local clangxx="$pouch_cxx"
     local readelf="$LLVM_PREFIX/bin/llvm-readelf"
 
     if [[ ! -f "$fork/runtimes/CMakeLists.txt" ]]; then
         echo "==> libcxx (CL-2): LLVM fork not found at $fork -- skipping (set LLVMFORK)"
         # Drop a stale prover so the ramfs bake cannot ship an outdated one.
+        rm -f "$progs_out/pouch-hello-cxx"
+        return 0
+    fi
+    if [[ ! -x "$pouch_cc" || ! -x "$pouch_cxx" ]]; then
+        echo "==> libcxx (CL-3): fork clang not built -- skipping the C++ runtime"
+        echo "    build it: ninja -C \"$fork/build\" clang clang-resource-headers"
         rm -f "$progs_out/pouch-hello-cxx"
         return 0
     fi
@@ -2529,7 +2545,10 @@ build_libcxx() {
 
     if [[ "$need_runtime" -eq 1 ]]; then
         echo "==> building the C++ runtime (libunwind+libc++abi+libc++, aarch64-thylacine)"
-        local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D__thylacine__=1 -D_GNU_SOURCE=1"
+        # __thylacine__ is auto-defined by the fork ThylacineTargetInfo (CL-3);
+        # _GNU_SOURCE stays explicit -- the target auto-defines it only for C++,
+        # and libunwind/libc++abi have C/ASM TUs that need the musl POSIX surface.
+        local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
         # (Re)configure when the CMake cache is absent OR this build.sh is newer
         # than the cache -- so a CMake-flag change in THIS recipe actually takes
         # effect (a stale cache would silently ignore it). Otherwise ninja is
@@ -2544,9 +2563,9 @@ build_libcxx() {
                 -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
                 -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx"
                 -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=OFF
-                -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang"
-                -DCMAKE_CXX_COMPILER="$clangxx"
-                -DCMAKE_ASM_COMPILER="$LLVM_PREFIX/bin/clang"
+                -DCMAKE_C_COMPILER="$pouch_cc"
+                -DCMAKE_CXX_COMPILER="$pouch_cxx"
+                -DCMAKE_ASM_COMPILER="$pouch_cc"
                 -DCMAKE_C_COMPILER_TARGET=aarch64-thylacine
                 -DCMAKE_CXX_COMPILER_TARGET=aarch64-thylacine
                 -DCMAKE_ASM_COMPILER_TARGET=aarch64-thylacine
@@ -2567,7 +2586,6 @@ build_libcxx() {
                 -DLIBCXX_ENABLE_THREADS=ON -DLIBCXXABI_ENABLE_THREADS=ON
                 -DLIBCXX_HAS_PTHREAD_API=ON
                 -DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF
-                -DLIBCXXABI_ADDITIONAL_COMPILE_FLAGS="-D__linux__"
                 -DLIBCXX_ENABLE_FILESYSTEM=ON
                 -DLIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF
                 -DLIBCXX_ENABLE_EXCEPTIONS=ON -DLIBCXXABI_ENABLE_EXCEPTIONS=ON
@@ -2609,27 +2627,19 @@ build_libcxx() {
                    exit 1 ;;
             esac
         done
-        # F2 (LLVM-DESIGN.md 16.14): libc++abi is built with -D__linux__ (int32
-        # __cxx_contention_t) while libc++/consumers are not (int64). That split
-        # is provably INERT only while libc++abi references NO atomic-wait /
-        # contention symbol -- whose mangled type would then disagree across the
-        # archive boundary. Pin it: fail LOUD if a fork bump makes libc++abi emit
-        # or reference one, rather than let it corrupt silently.
-        if "$LLVM_PREFIX/bin/llvm-nm" "$sysroot/lib/libc++abi.a" 2>/dev/null \
-             | grep -qE '__libcpp_atomic_(wait|monitor)|__cxx_atomic_notify'; then
-            echo "    libcxx: libc++abi.a references an atomic-wait/contention symbol --" >&2
-            echo "    the -D__linux__ int32/int64 __cxx_contention_t split is no longer inert" >&2
-            echo "    (LLVM-DESIGN.md 16.14 F2) -- resolve before shipping" >&2
-            exit 1
-        fi
+        # F2b (CL-3b): -D__linux__ is retired, so libc++abi's __cxx_contention_t
+        # is int64 -- identical to libc++/consumers. The CL-2 int32/int64 ODR
+        # split is ELIMINATED (not merely inert), and the old atomic-wait-symbol
+        # tripwire that pinned its inertness retires with it (LLVM-DESIGN 16.15).
         ledger "libcxx (libunwind+libc++abi+libc++): BUILT"
     fi
 
-    # The C++ prover (/pouch-hello-cxx). Compiled with clang++ (the pouch C++
-    # consumer flags: -std=c++20 -stdlib via explicit -isystem c++/v1, _GNU_SOURCE
-    # for the musl POSIX surface libc++ headers reference), linked via pouch-ld
-    # with --eh-frame-hdr (so libunwind finds .eh_frame via PT_GNU_EH_FRAME) + the
-    # three C++ archives. NOT part of build_pouch_progs (that path is C-only).
+    # The C++ prover (/pouch-hello-cxx). Compiled with the fork clang++ (the pouch
+    # C++ consumer flags: -std=c++20, explicit -isystem c++/v1, _GNU_SOURCE for the
+    # musl POSIX surface libc++ headers reference), then linked through the fork
+    # clang++ *driver* (CL-3): the Thylacine ToolChain adds --eh-frame-hdr (so
+    # libunwind finds .eh_frame via PT_GNU_EH_FRAME) + the three C++ archives + the
+    # CRT + libc + builtins. NOT part of build_pouch_progs (that path is C-only).
     local cxxsrc="$REPO_ROOT/usr/pouch-hello/pouch-hello-cxx.cpp"
     if [[ -f "$cxxsrc" ]]; then
         mkdir -p "$progs_out"
@@ -2642,15 +2652,12 @@ build_libcxx() {
             -Wno-potentially-evaluated-expression \
             -isystem "$sysroot/include/c++/v1" -isystem "$sysroot/include" \
             -c "$cxxsrc" -o "$progs_out/pouch-hello-cxx.o"
-        # --start-group around the C++ runtime archives: their cross-references
-        # (libc++ -> libc++abi -> libunwind, + libc++abi -> libc++ for the new/
-        # terminate handlers) resolve regardless of scan order. The order below is
-        # already single-pass-correct, but the group is the robust idiom.
-        POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
-            "$REPO_ROOT/tools/pouch-ld" "$progs_out/pouch-hello-cxx.o" \
-            --eh-frame-hdr -L"$sysroot/lib" \
-            --start-group -lc++ -lc++abi -lunwind --end-group \
-            -o "$progs_out/pouch-hello-cxx"
+        # The Thylacine ToolChain wraps -lc++ -lc++abi -lunwind in a --start-group
+        # itself, so their cross-references (libc++ -> libc++abi -> libunwind, +
+        # libc++abi -> libc++ for the new/terminate handlers) resolve regardless of
+        # scan order -- no hand-rolled group needed.
+        "$clangxx" --target=aarch64-thylacine --sysroot="$sysroot" \
+            "$progs_out/pouch-hello-cxx.o" -o "$progs_out/pouch-hello-cxx"
         # Verify the layout the kernel ELF loader requires (ET_EXEC, no PT_DYNAMIC).
         local elf_hdr elf_phdrs
         elf_hdr="$("$readelf" -h "$progs_out/pouch-hello-cxx")"

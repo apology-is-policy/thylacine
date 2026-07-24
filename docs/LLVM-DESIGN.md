@@ -372,7 +372,7 @@ no bolted-on chasing).
 | **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc — **LANDED, §16** | none (read-only) | — |
 | **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). **CL-1b core LANDED** (posix_spawn/wait4/dup2/pipe2: `0026`; §16.11). **CL-1c-1 LANDED** (the GNU make 4.4.1 port: `third_party/gnumake` + `usr/ports/gnumake` + `build_gnumake()`; `USE_POSIX_SPAWN` drives CL-1b, `MAKE_JOBSERVER` off; `/make --version` runs on-device; §16.12). **CL-1c-2 LANDED — THE CL-1c ARC IS COMPLETE** (the on-device `make -j3` gate: make drives CL-1b's posix_spawn/wait4 under parallelism; audit CLOSED 0/1/0/4 NOT dirty; §16.13). | **DONE:** `make -j3` runs a toy multi-TU build on-device (shell-free `/bin/cp` recipes) | **DONE:** boundary-line audit (the #68/#926 process-lifecycle lineage) — CLOSED 0 P0/1 P1/0 P2/4 P3, the P1 a surfaced pre-existing getcwd bug (tracked) | — (shared with the git port) |
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite. **LANDED** (§16.14; `build_libcxx` via `LLVM_ENABLE_RUNTIMES` against the pouch sysroot from `$LLVMFORK`; `0027-pouch-remove` fixed the surfaced `remove(3)` gap). | **DONE:** `pouch-hello-cxx: ALL C++ WIRES PASS` (EH + RTTI + threads + TLS-dtors + iostreams + std::filesystem) on-device; boot OK, 0 EXT, suite 1196/1196 | **CLOSED 0 P0 / 1 P1 / 0 P2 / 4 P3, NOT dirty** (Opus-4.8-max + self-audit; F1 dead-`remove_all` masking-diagnostic FIXED, `-D__linux__` ODR resolved SOUND against the real llvm-thylacine source; F2/F3/F4 folded, F2b/F5 tracked); `memory/audit_cl2_closed_list.md` | — |
-| **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired | host cross-builds via the real triple, byte-compatible artifacts | none (host-side) | — |
+| **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired. **CL-3a LANDED** (the driver — 8-file fork change-map + `ThylacineTargetInfo` + a Fuchsia-templated `Thylacine` ToolChain; fork commit `df919c8dd`; §16.15a). **CL-3b LANDED — THE CL-3 ARC IS COMPLETE** (the wrapper retirement: `pouch-clang`/`pouch-ld`/`build_libcxx` onto the fork driver, fork-less fallback kept; F2b closed at the root — the fork `__cxa_thread_atexit` guard gains `__thylacine__`, so `-D__linux__` retires and the int32/int64 split is ELIMINATED; §16.15b). | **DONE:** the real triple cross-builds byte-compatible artifacts; fork-driver-linked `pouch-hello-*` + a fork-clang-built, `clang++`-driver-linked `pouch-hello-cxx` boot + `ALL C++ WIRES PASS`; boot OK, 0 EXT, suite 1196/1196, SMP 40/40 (kernel byte-unchanged) | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade` | **`clang++ -O2` compiles, links (lld), and runs a real C++ program on-device** | focused round (the Support patches + the bake) | — |
 | **CL-5** | Build storms: on-device parallel builds of real projects (zlib → sqlite → an LLVM subset); the F4 budget mechanism lands; perf measured (the CHASE toolkit) | `make -jN` of a nontrivial project completes; numbers recorded, no committed target | the F4 kernel change gets its own round | ThinLTO, sanitizers-on-device: out |
 | **CL-6** | clangd + Nora C/C++ | diagnostics/hover/def in Nora on a C++ file | none (userspace client) | lldb-dap → post-arc |
@@ -922,6 +922,94 @@ the full SMP gate (default+UBSan x smp4/smp8 N=10 = 40/40) then passed 0
 corruption (`memory/bug_pw_wake_drain_poll_test_leak.md`). Closed list:
 `memory/audit_cl2_closed_list.md`.
 
+### 16.15 CL-3 as-built (the real triple + the wrapper retirement)
+
+CL-3 makes the fork clang THE pouch toolchain: `--target=aarch64-thylacine` now
+resolves a real `Triple::Thylacine` (a `ThylacineTargetInfo` + a `Thylacine`
+clang `ToolChain`) instead of an unknown OS, so the driver -- not a hand-rolled
+`ld.lld` line -- drives the link. Landed in two sub-chunks.
+
+**16.15a -- the driver (CL-3a; fork commit `df919c8dd`, branch `thylacine`, NOT
+pushed -- the fork's origin is read-only upstream `llvm/llvm-project`).** Eight
+files in `~/projects/llvm-thylacine` @ 22.1.8:
+- `llvm/.../Triple.h` + `Triple.cpp`: the `Triple::Thylacine` enum value +
+  `getOSTypeName`(`"thylacine"`) + `parseOS`(`.StartsWith("thylacine", ...)`) +
+  `isOSThylacine()`. `LastOSType` advanced.
+- `clang/.../Driver.cpp` + `CMakeLists.txt`: `#include "ToolChains/Thylacine.h"`
+  + the `getToolChain` dispatch case + the new source in the build.
+- `clang/.../ToolChains/Thylacine.{h,cpp}`: a Fuchsia-templated `ToolChain`
+  subclass -- `RLT_CompilerRT`, `CST_Libcxx`, non-PIC/non-PIE, `ld.lld` default,
+  and a `Linker::ConstructJob` that reproduces `tools/pouch-ld` verbatim (static
+  / `-z max-page-size=4096` / `-z separate-loadable-segments` / `-z noexecstack`
+  / `--build-id=none` / `--eh-frame-hdr` + crt1/crti + `-L<sysroot>/lib` +
+  `--start-group -lc libclang_rt.builtins.a --end-group` + crtn; the C++ group
+  `-lc++ -lc++abi -lunwind` added by `AddCXXStdlibLibArgs` when `CCCIsCXX`).
+- `clang/.../Basic/Targets/OSTargets.h` + `Targets.cpp`: a `ThylacineTargetInfo`
+  (`getOSDefines` -> `__thylacine__` + `__unix__` + `_GNU_SOURCE`-for-C++) +
+  the aarch64 `AllocateTarget` case.
+
+Verified host-side (a Release/AArch64 clang built in `~/projects/llvm-thylacine/build`):
+`--target=aarch64-thylacine -dumpmachine` -> `aarch64-unknown-thylacine`; the C
+`-###` link line is byte-for-byte `pouch-ld`'s (`ld.lld`, no Darwin `ld64` /
+`-arch` / `platform_version`); C++ adds the `-lc++ -lc++abi -lunwind` group; real
+C + C++ links produce a valid static `ET_EXEC` with 0 `PT_DYNAMIC` (the
+`kernel/elf.c` acceptance shape), modulo a benign `PT_GNU_EH_FRAME` the loader
+skips. **CL-3's gate (byte-compatible cross-build via the real triple) is MET.**
+Host-build gotcha (re-needed on any reconfigure): LLVM's CMake adds
+`-isystem /opt/homebrew/include`, whose Linux-style `uuid/uuid.h` shadows the
+macOS SDK's -> `LockFileManager.cpp: unknown type name 'uuid_string_t'`; fix by
+configuring `-DLLVM_ENABLE_{ZLIB,ZSTD,LIBXML2,TERMINFO,LIBEDIT,CURL,HTTPLIB}=OFF`.
+
+**16.15b -- the wrapper retirement + F2b (CL-3b).** The pouch toolchain retires
+onto the driver, and the CL-2 split-personality flags drop:
+- `tools/pouch-clang` prefers `$POUCH_CC` (the fork `build/bin/clang`); a
+  fork-less checkout falls back to homebrew clang (unknown-OS, compile-only).
+- `tools/pouch-ld` -- when the fork clang is present -- is a thin shim over the
+  driver (`clang --target=aarch64-thylacine --sysroot=$SR "$@"`), which supplies
+  the CRT + libc + builtins itself. The hand-rolled `ld.lld` block remains only
+  as the fork-less fallback, so a fresh checkout still links.
+- `build_libcxx` builds the C++ runtime with the fork clang/clang++
+  (`--target=aarch64-thylacine`), so `__thylacine__` is auto-defined and the
+  surgical `-D__thylacine__=1` drops. The C++ prover links through the fork
+  `clang++` *driver* (the ToolChain emits the `--start-group -lc++ -lc++abi
+  -lunwind --end-group` + `--eh-frame-hdr` itself -- no hand-rolled group).
+- **F2b closed at the root.** The `-D__linux__` that CL-2 used to unlock
+  libc++abi's `__cxa_thread_atexit` (guard `#if __linux__ || __Fuchsia__`) is
+  retired: the fork's `libcxxabi/src/cxa_thread_atexit.cpp` guard now reads
+  `#if defined(__linux__) || defined(__Fuchsia__) || defined(__thylacine__)`
+  (a 1-line fork patch that `build_libcxx` recompiles -- no clang rebuild). So
+  libc++abi is built WITHOUT `__linux__`: its `__cxx_contention_t` is `int64`,
+  identical to libc++/consumers -- the CL-2-audit int32/int64 ODR split is not
+  merely inert now, it is ELIMINATED. The old atomic-wait-symbol tripwire that
+  pinned the inertness retires with it.
+- **The cxa_guard/gettid seam FIXED (the SMP gate caught the pre-existing bug).**
+  The CL-3b SMP gate's first pass hit `bug_cxa_guard_gettid.md` 1/40 (ubsan-smp4):
+  libc++abi's `__cxa_guard` recursion check (`cxa_guard_impl.h` `PlatformThreadID`)
+  used `syscall(SYS_gettid)`, which on pouch is the ENOSYS sentinel, so every
+  thread read back the same bogus id and a concurrent first-init of a
+  function-local static false-aborted "recursive initialization". PRE-EXISTING
+  (cxa_guard is byte-identical CL-2<->CL-3b; the gettid path keys on
+  `defined(SYS_gettid)`, not `__linux__`; CL-2 passed 40/40 on luck). The seam was
+  flagged ESCALATE only because the anticipated fix was a kernel-ABI gettid; but
+  the `__APPLE__` branch already uses `pthread_self()`, so a matching
+  `#elif defined(__thylacine__)` branch returning `pthread_self()` (a distinct
+  per-thread value -- the id is only the recursion heuristic, the atomic init byte
+  is the real synchronization) fixes it as a 1-branch fork patch, no ABI change.
+  A deterministic regression (`pouch-hello-cxx` wire 7: NRACE threads barrier-sync
+  then race one static's first-init) reproduced the abort reliably pre-fix and
+  passes post-fix; it now runs on every boot, so the SMP gate exercises the
+  concurrent cxa_guard path every time.
+
+Proven in-guest: the fork-driver-linked `pouch-hello-*` + the fork-clang-built,
+`clang++`-driver-linked `pouch-hello-cxx` all boot and pass -- `pouch-hello-cxx:
+ALL C++ WIRES PASS` (EH/RTTI/threads/TLS-dtors/iostreams/std::filesystem + the
+wire-7 concurrent cxa_guard race, with `-D__linux__` gone), boot OK, 0 EXTINCTION,
+suite 1196/1196, SMP gate 40/40 (default+UBSan x smp4/smp8 N=10) 0 corruption.
+Kernel byte-unchanged. Seam carried forward: unlink-path errno-loss
+(`memory/bug_unlink_errno_loss.md`). CL-3b did NOT retire the wrappers for the
+`sdl2`/`gnumake`/`tyrquake` *compile* (they keep homebrew clang; only their link
+routes through the driver via `pouch-ld`).
+
 ## 17. Revision history
 
 | Date | Change |
@@ -935,3 +1023,5 @@ corruption (`memory/bug_pw_wake_drain_poll_test_leak.md`). Closed list:
 | 2026-07-24 | **CL-1c-1 landed** (§16.12): the GNU make 4.4.1 **port** (vendored, not a musl patch) -- `third_party/gnumake/` pruned-pristine (sha256 `dd16fb1d…`) + `usr/ports/gnumake/{config.h,generated/}` (the Thylacine delta; `patches/` EMPTY -- zero source edits) + `build_gnumake()`. The census (§16 Q1-10) picked the clean config: `USE_POSIX_SPAWN=1` (make natively drives CL-1b's posix_spawn/wait4) + `MAKE_JOBSERVER` UNDEFINED (top-level `make -jN` = pure job_slots counter + blocking waitpid, no pipe/fifo/pselect/SIGCHLD/fcntl-O_NONBLOCK); no fcntl boundary-line needed. 35 objects (30 src + 5 lib gnulib) compile+link clean against the pouch sysroot -> 371 KB static ET_EXEC. Proven in-guest by `/make --version` (`GNU Make 4.4.1` + `Built for aarch64-thylacine`), boot OK, 0 EXTINCTION, CL-1a/1b siblings unregressed (kernel byte-unchanged). `--version` doesn't spawn, so this is the load-and-run milestone; the parallel-spawn `make -j` gate + the boundary-line audit are CL-1c-2. Flagged seams (neither needed for the gate): execvp self-re-exec (self-remaking makefiles only; owed at CL-4/CL-5) + adddup2-onto-0/1/2 (handled by CL-1b's static fd-list resolve). |
 | 2026-07-24 | **CL-1c-2 landed + THE CL-1c ARC IS COMPLETE** (§16.13): the on-device `make -j3` gate -- a joey probe writes a toy project to `/tmp/mkt` (3 independent shell-free `/bin/cp` compiles + a dependent link, ALL absolute paths) + runs `make -f /tmp/mkt/Makefile -j3`, verifying all 4 outputs by content -- proving make DRIVES CL-1b's posix_spawn/wait4 under `-j` parallelism (the job_slots counter + reap-any `waitpid(-1)`). `/make -j3 PASS`, boot OK, 0 EXT, suite 1196/1196 (kernel byte-unchanged). Bringup: `/tmp` created before the probe + a trailing-NUL on the 4-arg argv blob (the kernel argv parser requires it). **Boundary-line audit CLOSED 0 P0 / 1 P1 / 0 P2 / 4 P3, NOT dirty** (Opus-4.8-max fallback [Fable depleted] + self-audit, CONVERGED on the P1): F1 [P1] = a PRE-EXISTING (LS-4) kernel getcwd bug the make oracle SURFACED (`sys_getcwd_handler` rejects buf > SYS_OPEN_PATH_MAX+1=1025; make passes PATH_MAX=4096 -> EIO) -- benign here (make degrades gracefully; abs-path gate unaffected), does NOT block the close, a probable CL-2 blocker, tracked `memory/bug_getcwd_oversized_buffer.md` + fixed as a separate kernel chunk; F2 [P3, FIXED] mkt_file_eq short-read -> read_exact loop; F3 [P3, FIXED] 2 inert darwin CF config macros -> undef; F4/F5 [P3, SEAMS] no-/bin/sh shell recipes + sub-second mtime -> CL-4. `memory/audit_cl1c_closed_list.md`. NEXT: the getcwd kernel fix, then CL-2 (C++ runtime) / CL-3 (Triple::Thylacine), parallelizable. |
 | 2026-07-24 | **CL-2 landed** (§16.14): the C++ runtime -- libunwind + libc++abi + libc++, static, cross-built via `LLVM_ENABLE_RUNTIMES` against the pouch musl sysroot (`build_libcxx`; sources from the `$LLVMFORK` @ 22.1.8, absent-fork-safe) -- installed into `build/sysroot` + a C++ prover `/bin/pouch-hello-cxx`. Config ground-truthed: `--target=aarch64-thylacine` (unknown OS -> the correct GENERIC atomic-wait fallback, NOT the broken raw-`syscall(SYS_futex)` Linux path) + `CMAKE_SYSTEM_NAME=Linux` (archiver-only, uses llvm-ar not Apple libtool) + `LIBCXX_HAS_PTHREAD_API=ON` + `LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF` + a SURGICAL `LIBCXXABI_ADDITIONAL_COMPILE_FLAGS=-D__linux__` (libc++abi-only, to unlock `__cxa_thread_atexit`'s `__linux__`-guarded definition) + `LIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF` + `_GNU_SOURCE`. **Proven in-guest**: `pouch-hello-cxx: ALL C++ WIRES PASS` -- exceptions/RTTI/threads/thread_local-dtors/iostreams/std::filesystem all live; boot OK, 0 EXTINCTION, suite 1196/1196 (kernel byte-unchanged). Surfaced + FIXED a latent CL-1a gap (`0027-pouch-remove.patch`: musl's `stdio/remove.c` used a raw `__syscall(SYS_unlinkat)` -> ENOSYS + relied on EISDIR; now lstat-dispatch through the pouch-wired `unlink()`/`rmdir()`). Two documented SEAMS: the `__cxa_guard`/`gettid` concurrent-static-init false-abort (`memory/bug_cxa_guard_gettid.md`, ESCALATE) + dirfd-relative `openat`/`unlinkat` for `remove_all`/`recursive_directory_iterator` (CL-4). Also tracked: a #102-class unlink-path errno-loss kernel gap (`memory/bug_unlink_errno_loss.md`). **Focused audit CLOSED 0 P0 / 1 P1 / 0 P2 / 4 P3, NOT dirty** (Opus-4.8-max [Fable depleted; MODEL start==end] + self-audit): the `-D__linux__` split-personality ODR/ABI question resolved SOUND against the real `~/projects/llvm-thylacine` @ 22.1.8 (every boundary-crossing type is `__linux__`-independent; the sole divergence `__cxx_contention_t` is never referenced by libc++abi); F1 [P1] the prover's dead `fs::remove_all` pre-clean (dirfd-relative -> the CL-4 ENOTSUP seam) -> a `create_directory` masking-diagnostic false-failure under PRESERVE=1 pool reuse -> FIXED (AT_FDCWD-safe clean); F2/F3/F4 [P3] FOLDED (contention-symbol nm-guard + 3-tree reuse freshness + header-dest `rm -rf`); F2b (CL-3 `__thylacine__` auto-define) + F5 (0027 TOCTOU -> #102 errno restoration) TRACKED. The CL-2 SMP gate surfaced a PRE-EXISTING pw_wake kernel-test race whose #58 fix (`cons_test_mgr_hold`) existed on the gfx track but never merged -- cherry-picked (`8383ccad` -> `7df809c9`); full SMP gate 40/40 (default+UBSan x smp4/smp8 N=10) 0 corruption. `memory/audit_cl2_closed_list.md`. NEXT: CL-3 (Triple::Thylacine). |
+| 2026-07-24 | **CL-3a landed** (§16.15a): the real driver in the fork (`~/projects/llvm-thylacine` @ 22.1.8, branch `thylacine`, commit `df919c8dd` — NOT pushed; the fork origin is read-only upstream). Eight files: `Triple::Thylacine` (enum/name/parse/`isOSThylacine`) + the `getToolChain` dispatch + a Fuchsia-templated `Thylacine` `ToolChain` whose `Linker::ConstructJob` reproduces `tools/pouch-ld` verbatim + a `ThylacineTargetInfo` (auto-defines `__thylacine__`/`__unix__`/`_GNU_SOURCE`-for-C++). Verified host-side: `-dumpmachine` → `aarch64-unknown-thylacine`; the C/C++ `-###` link lines == `pouch-ld`/the C++ group (`ld.lld`, no Darwin `ld64`); real C+C++ links → valid static `ET_EXEC`, 0 `PT_DYNAMIC`. **CL-3's gate MET.** Host-build gotcha fixed (Homebrew `uuid.h` shadow → `-DLLVM_ENABLE_{ZLIB,ZSTD,LIBXML2,TERMINFO,LIBEDIT,CURL,HTTPLIB}=OFF`). Thylacine tree unchanged (fork-only). |
+| 2026-07-24 | **CL-3b landed — THE CL-3 ARC IS COMPLETE** (§16.15b): the wrapper retirement + F2b closed. `tools/pouch-clang` prefers the fork clang; `tools/pouch-ld` becomes a thin shim over the fork driver (which supplies CRT+libc+builtins), the hand-rolled `ld.lld` kept only as the fork-less fallback; `build_libcxx` builds the C++ runtime with the fork clang/clang++ and links the prover through the `clang++` driver. **F2b closed at the root**: a 1-line fork guard patch (`libcxxabi/.../cxa_thread_atexit.cpp`: `#if __linux__ || __Fuchsia__ || __thylacine__`, recompiled by `build_libcxx` — no clang rebuild) retires the surgical `-D__linux__`, so libc++abi's `__cxx_contention_t` is `int64` like everyone else — the CL-2 int32/int64 ODR split is ELIMINATED, not merely inert; the old tripwire retires. Also dropped the redundant `-D__thylacine__=1` (now auto-defined). Proven in-guest: fork-driver-linked `pouch-hello-*` + fork-clang-built `pouch-hello-cxx` boot; `ALL C++ WIRES PASS` (with `-D__linux__` gone), boot OK, 0 EXTINCTION, suite 1196/1196, SMP 40/40 (default+UBSan × smp4/smp8 N=10) 0 corruption. Kernel byte-unchanged (host toolchain only). **The SMP gate caught + closed the pre-existing cxa_guard/gettid seam** (`bug_cxa_guard_gettid.md`): 1/40 (ubsan-smp4) false-aborted a concurrent static-init because libc++abi's `__cxa_guard` used `syscall(SYS_gettid)`=ENOSYS (shared bogus id). Fixed by a fork `cxa_guard_impl.h` `PlatformThreadID` `__thylacine__` branch using `pthread_self()` (a real per-thread id; no ABI change — dissolves the ESCALATE) + a deterministic `pouch-hello-cxx` wire-7 regression (reliable abort pre-fix, passes post-fix, runs every boot); re-gate 40/40 clean. A cleanup-collateral detour: the disk prune had removed `~/.rustup/toolchains/` — restored (stable 1.97.1 + `aarch64-unknown-none`). Seam carried: unlink-path errno-loss. NEXT: CL-4 (the device toolchain + Support-layer port). |

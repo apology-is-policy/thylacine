@@ -59,6 +59,27 @@ struct TlsGuard {
 };
 static thread_local TlsGuard t_guard;
 
+// --- concurrent Meyers-singleton race (drives libc++abi __cxa_guard directly) ---
+// On pouch, cxa_guard's recursion check keys on syscall(SYS_gettid), which routes
+// to the ENOSYS sentinel -> every thread gets the same bogus id -> a concurrent
+// FIRST init of a function-local static false-aborts ("recursive initialization").
+// This wire fires that deterministically: NRACE threads barrier-sync, then race
+// the SAME static's first init whose ctor spins to widen the guard's PENDING
+// window, so the waiters pile into __cxa_guard_acquire's recursion check together.
+// The fix (libcxxabi PlatformThreadID -> pthread_self, a real per-thread id) makes
+// the waiter's id != the initializer's id -> it waits correctly instead of aborting.
+static constexpr int NRACE = 8;
+static std::atomic<int> g_race_arrived{0};
+struct SlowSingleton {
+    int v;
+    SlowSingleton() {
+        volatile long x = 0;
+        for (long i = 0; i < 800000; i++) x += i;   // widen the PENDING window
+        v = 7;
+    }
+};
+static SlowSingleton &race_singleton() { static SlowSingleton s; return s; }
+
 int main() {
     // ---------------------------------------------------------------
     // 1. Exceptions: throw across a frame, catch by base, read what().
@@ -219,6 +240,32 @@ int main() {
         }
         if (!fs::remove(dir, ec) || ec) return fail("filesystem", "remove (rmdir) dir");
         if (fs::exists(dir)) return fail("filesystem", "probe dir survived remove");
+    }
+
+    // ---------------------------------------------------------------
+    // 7. Concurrent Meyers-singleton init: NRACE threads race the SAME
+    //    function-local static's FIRST init (the libc++abi __cxa_guard
+    //    path). A barrier makes them hit __cxa_guard_acquire together;
+    //    the initializer spins to keep the guard PENDING while the
+    //    waiters run their recursion check. Pre-fix (gettid==ENOSYS ->
+    //    shared bogus id) this false-aborts; post-fix (pthread_self id)
+    //    every waiter waits correctly and reads the singleton.
+    // ---------------------------------------------------------------
+    {
+        std::atomic<int> got{0};
+        std::vector<std::thread> rs;
+        for (int i = 0; i < NRACE; i++) {
+            rs.emplace_back([&got]() {
+                g_race_arrived.fetch_add(1, std::memory_order_relaxed);
+                while (g_race_arrived.load(std::memory_order_relaxed) < NRACE)
+                    std::this_thread::yield();
+                if (race_singleton().v == 7)
+                    got.fetch_add(1, std::memory_order_relaxed);
+            });
+        }
+        for (auto &t : rs) t.join();
+        if (got.load() != NRACE)
+            return fail("cxa-guard-race", "concurrent singleton init lost a racer");
     }
 
     std::printf("pouch-hello-cxx: ALL C++ WIRES PASS\n");

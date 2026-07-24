@@ -23,9 +23,19 @@
 # their link command to this wrapper; the CMake toolchain points
 # CMAKE_C_LINK_EXECUTABLE at it.
 #
+# Since Clade CL-3 this hand-rolled ld.lld link is RETIRED onto the real
+# driver: the fork clang's Thylacine ToolChain (docs/LLVM-DESIGN.md §16.15)
+# drives ld.lld with the exact pouch link line -- static, non-PIE ET_EXEC,
+# CRT + libc + libclang_rt.builtins -- verified byte-compatible with the
+# legacy block below. When the fork clang is present, pouch-ld is a thin
+# shim over it; the legacy ld.lld path remains as the fork-less fallback so a
+# fresh checkout still links (compile via homebrew clang, link via ld.lld).
+#
 # Environment overrides:
 #   POUCH_SYSROOT  — sysroot path (default: <repo>/build/sysroot)
 #   LLD_PREFIX     — lld install prefix (default: /opt/homebrew/opt/lld)
+#   LLVMFORK       — the Clade LLVM fork (default: ~/projects/llvm-thylacine)
+#   POUCH_CC       — the link driver (default: the fork clang if built)
 #
 # See docs/POUCH-DESIGN.md §9.
 set -euo pipefail
@@ -35,6 +45,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 POUCH_SYSROOT="${POUCH_SYSROOT:-$REPO_ROOT/build/sysroot}"
 LLD_PREFIX="${LLD_PREFIX:-/opt/homebrew/opt/lld}"
+LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
+LLVMFORK="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+
+# CL-3: retire the link onto the real driver when the fork clang is built.
+# The caller passes only its own objects + [-L/-l libs] + `-o <out>`; the
+# ToolChain adds crt1/crti/crtn, libc, and the compiler-rt builtins -- the
+# same set the legacy block below supplies by hand.
+POUCH_CC="${POUCH_CC:-$LLVMFORK/build/bin/clang}"
+if [[ -x "$POUCH_CC" ]]; then
+    exec "$POUCH_CC" \
+        --target=aarch64-thylacine \
+        --sysroot="$POUCH_SYSROOT" \
+        "$@"
+fi
+
+# --- legacy fallback (no fork clang): drive ld.lld directly ---
 lld="$LLD_PREFIX/bin/ld.lld"
 libdir="$POUCH_SYSROOT/lib"
 
