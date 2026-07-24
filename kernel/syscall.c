@@ -2419,13 +2419,21 @@ static s64 sys_getcwd_handler(u64 buf_va, u64 buf_len_raw, u64 a2, u64 a3) {
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p || !p->territory) return -1;
     if (buf_len_raw == 0)                            return -1;
-    if (buf_len_raw > SYS_OPEN_PATH_MAX + 1)         return -1;
-    if (!sys_validate_user_buf(buf_va, buf_len_raw)) return -1;
 
+    // POSIX getcwd(buf, size) accepts ANY buffer large enough for the cwd -- do
+    // NOT reject an oversized one. The pre-fix `buf_len_raw > SYS_OPEN_PATH_MAX+1
+    // -> -1` broke every caller passing a PATH_MAX (4096) buffer -- GNU make,
+    // clang, git, configure scripts, the near-universal `getcwd(buf, PATH_MAX)`
+    // idiom (surfaced by the CL-1c make oracle; `make: getcwd: I/O error`). The
+    // cwd is bounded by SYS_OPEN_PATH_MAX, so compute it FIRST, then validate +
+    // copy EXACTLY len+1 bytes -- never the whole caller buffer. That both keeps
+    // a huge buf_len_raw from overflowing the range check and matches POSIX
+    // ("getcwd writes at most the pathname + NUL into the buffer").
     char scratch[SYS_OPEN_PATH_MAX + 1];
     int len = territory_getdot(p->territory, scratch, sizeof(scratch));
-    if (len < 0)                                     return -1;
-    if ((u64)len + 1 > buf_len_raw)                  return -1;   // path + NUL must fit
+    if (len < 0)                                      return -1;
+    if ((u64)len + 1 > buf_len_raw)                   return -1;   // path + NUL must fit the caller's buffer
+    if (!sys_validate_user_buf(buf_va, (u64)len + 1)) return -1;
 
     for (int i = 0; i <= len; i++) {                 // include the trailing NUL
         if (uaccess_store_u8(buf_va + (u64)i, (u8)scratch[i]) != 0) return -1;

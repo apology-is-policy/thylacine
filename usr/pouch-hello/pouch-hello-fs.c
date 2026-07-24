@@ -51,6 +51,17 @@ int main(void) {
 	if (!getcwd(cwd0, sizeof cwd0)) return fail("getcwd", "returned NULL");
 	if (cwd0[0] != '/') return fail("getcwd", "not absolute");
 
+	// --- getcwd with a PATH_MAX buffer (CL-1c-2 audit F1 regression) ---
+	// GNU make / clang / git call getcwd(buf, PATH_MAX). The kernel handler used
+	// to REJECT any buffer > SYS_OPEN_PATH_MAX+1 (1025) -> EIO -> `make: getcwd:
+	// I/O error`. The 256-byte cwd0 above (<= 1025) masked it; this exercises the
+	// large-buffer path the fix repairs. It must succeed + agree with cwd0.
+	char cwdbig[4096];
+	if (!getcwd(cwdbig, sizeof cwdbig))
+		return fail("getcwd-pathmax", "PATH_MAX buffer rejected (F1 regression)");
+	if (strcmp(cwdbig, cwd0) != 0)
+		return fail("getcwd-pathmax", "PATH_MAX cwd disagrees with small-buf cwd");
+
 	// --- mkdir a working dir at root (absolute) ---
 	const char *wdir = "/pouch-fs-probe";
 	(void)rmdir(wdir);                 // clean a stale run (best-effort)
