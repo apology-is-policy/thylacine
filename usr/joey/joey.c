@@ -2206,6 +2206,114 @@ static int probe46_fstat_wronly(const char *tag, const char *dirpath,
     return 0;
 }
 
+// Clade CL-4c: the device-toolchain gate. When /clade is baked
+// (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
+// /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
+// /clade/bin/clang++ existing -> a normal (non-clade) boot skips it. joey-
+// spawned children are PRINCIPAL_SYSTEM (resource-exempt), so the compiler
+// allocates freely (the 256M PROC_PAGE_MAX cap + the F4 per-child budget are
+// the CL-5 concern -- a logged-in USER's non-exempt compile). Returns 0 PASS
+// / skip; -1 FAIL.
+static int clade_gate(void) {
+    char nb[24];
+    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang++", 18, T_OPATH);
+    if (probe < 0) {
+        t_putstr("joey: clade CL-4 /clade absent (THYLACINE_BAKE_CLADE not set) "
+                 "-- skipping\n");
+        return 0;  // not baked -> not a failure
+    }
+    (void)t_close(probe);
+
+    // Writable scratch on the pool root for the source + build outputs.
+    {
+        long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3, T_OREAD,
+                               T_WALK_CREATE_DMDIR | 0777u);
+        if (m >= 0) (void)t_close(m);
+    }
+
+    // Tier 1: does clang++ load + run at all? A trivial --version invocation
+    // surfaces getMainExecutable / Support-layer runtime faults cheaply. argv[0]
+    // ABSOLUTE so getMainExecutable's argv0 resolution (the CL-4 fork patch)
+    // finds the real file -> InstalledDir=/clade/bin.
+    static const char ver_argv[] = "/clade/bin/clang++\0--version";
+    long vst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                  ver_argv, (unsigned int)sizeof(ver_argv), 2,
+                                  120, 20, 0);
+    if (vst != 0) {
+        t_putstr("joey: clade CL-4 gate: clang++ --version FAILED rc=");
+        t_putstr(itoa_dec(vst, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: clade CL-4 clang++ --version OK\n");
+
+    // Write /tmp/hello.cpp: STL <vector> + printf; exits 0 IFF sum(i*i,0..9)==285.
+    static const char hello_cpp[] =
+        "#include <cstdio>\n"
+        "#include <vector>\n"
+        "int main(){\n"
+        "  std::vector<int> v(10);\n"
+        "  for(int i=0;i<10;i++) v[i]=i*i;\n"
+        "  long s=0; for(int x:v) s+=x;\n"
+        "  std::printf(\"CLADE-HELLO sum=%ld\\n\", s);\n"
+        "  return s==285?0:1;\n"
+        "}\n";
+    {
+        long td = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
+        if (td < 0) { t_putstr("joey: clade CL-4 open /tmp FAILED\n"); return -1; }
+        long sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
+        if (sf < 0) {  // self-heal a leftover on a preserved pool
+            (void)t_unlink(td, "hello.cpp", 9, 0);
+            sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
+        }
+        (void)t_close(td);
+        if (sf < 0) { t_putstr("joey: clade CL-4 create hello.cpp FAILED\n"); return -1; }
+        unsigned int srclen = (unsigned int)(sizeof(hello_cpp) - 1);  // drop the NUL
+        long wn = t_write(sf, hello_cpp, srclen);
+        (void)t_fsync(sf, 0);
+        (void)t_close(sf);
+        if (wn != (long)srclen) {
+            t_putstr("joey: clade CL-4 write hello.cpp SHORT\n"); return -1;
+        }
+    }
+
+    // Tier 2a: compile + link. clang++ execs /clade/bin/ld.lld by name (found via
+    // getMainExecutable -> InstalledDir). --sysroot=/clade/sysroot supplies the
+    // C++ headers + the static runtime + CRT. The default target is
+    // aarch64-unknown-thylacine (LLVM_DEFAULT_TARGET_TRIPLE), so no --target.
+    t_putstr("joey: clade CL-4 compiling /tmp/hello.cpp (clang++ -O2 -> ld.lld)\n");
+    static const char cc_argv[] =
+        "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
+    long cst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                  cc_argv, (unsigned int)sizeof(cc_argv), 6,
+                                  600, 20, 0);
+    if (cst != 0) {
+        t_putstr("joey: clade CL-4 gate: compile+link FAILED rc=");
+        t_putstr(itoa_dec(cst, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    long ho = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp/hello", 10, T_OPATH);
+    if (ho < 0) { t_putstr("joey: clade CL-4 gate: /tmp/hello not produced\n"); return -1; }
+    (void)t_close(ho);
+
+    // Tier 2b: run it. Its stdio is the console; "CLADE-HELLO sum=285" prints +
+    // exit 0 confirms the computed check (proves the fresh ELF execs + runs).
+    t_putstr("joey: clade CL-4 running /tmp/hello\n");
+    static const char run_argv[] = "/tmp/hello";
+    long rst = go4c_spawn_wait_hb("/tmp/hello", 10,
+                                  run_argv, (unsigned int)sizeof(run_argv), 1,
+                                  60, 15, 0);
+    if (rst != 0) {
+        t_putstr("joey: clade CL-4 gate: /tmp/hello exit rc=");
+        t_putstr(itoa_dec(rst, nb, sizeof(nb)));
+        t_putstr(" (want 0)\n");
+        return -1;
+    }
+    t_putstr("joey: clade CL-4 gate: PASS\n");
+    return 0;
+}
+
 // CF-3 A+B always-run regression: bulk byte-I/O through the two-tier
 // syscall bounce + uaccess_copy_in/out + the 9P client payload clamp, on
 // the BULK-negotiated FS mount (CF-3 B: stratumd posts /srv/stratum-fs
@@ -4662,6 +4770,11 @@ int main(void) {
                                  "program ON-DEVICE\n");
                     }
                 }
+
+                // Clade CL-4c: the on-device device-toolchain gate (sibling of
+                // the Go-4c block above; same post-pivot pool scope). Gated on
+                // /clade existing (THYLACINE_BAKE_CLADE); a normal boot skips it.
+                (void)clade_gate();
             }
 
             // net-2c-1: mount netd's /net on the pivoted root. netd (warden-

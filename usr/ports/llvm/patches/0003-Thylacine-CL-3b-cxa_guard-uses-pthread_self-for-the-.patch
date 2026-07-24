@@ -1,0 +1,45 @@
+From 81a4cef69fbff093f4529da5bdfd539a2bd69607 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 24 Jul 2026 15:35:11 +0200
+Subject: [PATCH 3/4] Thylacine CL-3b: cxa_guard uses pthread_self() for the
+ thread id, not gettid
+
+libc++abi's __cxa_guard recursion check (cxa_guard_impl.h PlatformThreadID)
+uses syscall(SYS_gettid) on non-Apple pthread platforms. On Thylacine's pouch
+libc, SYS_gettid is the ENOSYS sentinel, so every thread reads back the same
+bogus id (-38). A concurrent FIRST init of a function-local static then
+false-trips the recursion check -- a waiting thread reads the initializing
+thread's stored id, sees it equal to its own, and aborts "recursive
+initialization" -- so multithreaded C++ with a raced Meyers singleton dies.
+
+Add a __thylacine__ branch (before the SYS_gettid branch) that uses
+pthread_self() -- a distinct per-thread value -- exactly as the __APPLE__
+branch does. The id is only the recursion heuristic; the atomic init byte is
+the real synchronization, so a distinct-per-thread value is all that is needed.
+---
+ libcxxabi/src/cxa_guard_impl.h | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/libcxxabi/src/cxa_guard_impl.h b/libcxxabi/src/cxa_guard_impl.h
+index 191a58917..a65189350 100644
+--- a/libcxxabi/src/cxa_guard_impl.h
++++ b/libcxxabi/src/cxa_guard_impl.h
+@@ -161,6 +161,15 @@ uint32_t PlatformThreadID() {
+   static_assert(sizeof(mach_port_t) == sizeof(uint32_t), "");
+   return static_cast<uint32_t>(pthread_mach_thread_np(std::__libcpp_thread_get_current_id()));
+ }
++#elif defined(__thylacine__) && _LIBCPP_HAS_THREAD_API_PTHREAD
++uint32_t PlatformThreadID() {
++  // Thylacine (pouch/musl): syscall(SYS_gettid) is the ENOSYS sentinel, so every
++  // thread would read back the same bogus id and false-trip the recursion check
++  // on a concurrent first-init. pthread_self() is a distinct per-thread value;
++  // its low 32 bits suffice here (the atomic init byte is the real
++  // synchronization -- the id is only the recursion heuristic). Mirrors __APPLE__.
++  return static_cast<uint32_t>(reinterpret_cast<uintptr_t>(std::__libcpp_thread_get_current_id()));
++}
+ #elif defined(SYS_gettid) && _LIBCPP_HAS_THREAD_API_PTHREAD
+ uint32_t PlatformThreadID() {
+   static_assert(sizeof(pid_t) == sizeof(uint32_t), "");
+-- 
+2.43.0
+

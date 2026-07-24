@@ -1,0 +1,43 @@
+From e6ef19e09c2223e1cefb1652b055670b99cb388e Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 24 Jul 2026 14:56:21 +0200
+Subject: [PATCH 2/4] Thylacine CL-3b: libc++abi __cxa_thread_atexit recognizes
+ __thylacine__
+
+Add __thylacine__ to the guard on __cxa_thread_atexit's definition
+(#if __linux__ || __Fuchsia__ || __thylacine__). Thylacine, like Linux and
+Fuchsia, has no __cxa_thread_atexit_impl in its libc (musl) and uses the
+pthread-key fallback DtorsManager, so it wants this definition compiled in.
+
+This retires the surgical -D__linux__ the Thylacine build_libcxx passed to
+libc++abi only, to unlock this definition, at CL-2. With the flag gone,
+libc++abi's __cxx_contention_t is int64 -- identical to libc++ and every
+consumer built for aarch64-thylacine -- so the CL-2-audit int32/int64
+__cxx_contention_t ODR split is eliminated, not merely inert.
+---
+ libcxxabi/src/cxa_thread_atexit.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libcxxabi/src/cxa_thread_atexit.cpp b/libcxxabi/src/cxa_thread_atexit.cpp
+index 402a52c74..c918b12e2 100644
+--- a/libcxxabi/src/cxa_thread_atexit.cpp
++++ b/libcxxabi/src/cxa_thread_atexit.cpp
+@@ -106,7 +106,7 @@ namespace {
+ 
+ #endif // HAVE___CXA_THREAD_ATEXIT_IMPL
+ 
+-#if defined(__linux__) || defined(__Fuchsia__)
++#if defined(__linux__) || defined(__Fuchsia__) || defined(__thylacine__)
+ extern "C" {
+ 
+   _LIBCXXABI_FUNC_VIS int __cxa_thread_atexit(Dtor dtor, void* obj, void* dso_symbol) throw() {
+@@ -142,5 +142,5 @@ extern "C" {
+ #endif // HAVE___CXA_THREAD_ATEXIT_IMPL
+   }
+ } // extern "C"
+-#endif // defined(__linux__) || defined(__Fuchsia__)
++#endif // defined(__linux__) || defined(__Fuchsia__) || defined(__thylacine__)
+ } // namespace __cxxabiv1
+-- 
+2.43.0
+

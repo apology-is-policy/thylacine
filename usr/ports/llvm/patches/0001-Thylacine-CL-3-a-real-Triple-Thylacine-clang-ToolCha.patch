@@ -1,0 +1,527 @@
+From df919c8ddc2b2cbe4deeabbe7ea1934918ddc47b Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 24 Jul 2026 14:12:41 +0200
+Subject: [PATCH 1/4] Thylacine CL-3: a real Triple::Thylacine + clang
+ ToolChain + lld default
+
+Add a first-class aarch64-thylacine target to the LLVM/clang driver so that
+`clang --target=aarch64-thylacine` drives the ELF link directly, fixing the
+root cause the pouch-clang/pouch-ld wrappers work around: an unknown OS falls
+to Generic_ELF, whose buildLinker shells out to the host Darwin toolchain and
+emits Mach-O linker arguments the ELF ld.lld rejects.
+
+- llvm/TargetParser: a Triple::Thylacine OSType (+ isOSThylacine, getOSTypeName,
+  parseOS, LastOSType retargeted).
+- clang Driver: a Fuchsia-templated toolchains::Thylacine -- static, non-PIE
+  (kernel/elf.c rejects ET_DYN/PT_DYNAMIC), libc++ + compiler-rt builtins over
+  the musl (pouch) sysroot, ld.lld the ELF linker. Its Linker::ConstructJob
+  reproduces tools/pouch-ld: crt1/crti before the inputs, the C++ runtime
+  (libc++/libc++abi/libunwind) grouped, then musl + builtins grouped, crtn
+  last; the libc++ headers resolved flat at include/c++/v1.
+- clang Basic: a ThylacineTargetInfo predefining __unix__ (libc++ keys on it),
+  __thylacine__, _REENTRANT, _GNU_SOURCE -- which also closes the CL-2 audit
+  F2b split-personality seam (the OS macro is now automatic for the runtime
+  AND every consumer at once).
+
+Verified against the pouch sysroot (clang built Release/AArch64):
+- `-dumpmachine` -> aarch64-unknown-thylacine.
+- The C link line matches tools/pouch-ld (ld.lld, -static, the three -z flags,
+  --build-id=none, crt1/crti, -L, --start-group -lc <builtins> --end-group,
+  crtn), plus --eh-frame-hdr; NO Darwin ld64 / -arch / platform_version.
+- The C++ link additionally emits --start-group -lc++ -lc++abi -lunwind
+  --end-group.
+- Real C and C++ links produce valid static ET_EXEC (0 PT_DYNAMIC), the segment
+  layout identical to pouch-ld modulo a benign PT_GNU_EH_FRAME the CL-2 C++
+  binaries already carry.
+
+The build.sh/CMake switchover to retire the wrappers, the CL-2 build_libcxx
+re-point (drop the surgical -D__linux__ now that __thylacine__ is automatic),
+and the in-guest boot proof land in CL-3b.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RXubKBEPsQ7gdi7N6wG5mK
+---
+ clang/lib/Basic/Targets.cpp               |   3 +
+ clang/lib/Basic/Targets/OSTargets.h       |  19 ++
+ clang/lib/Driver/CMakeLists.txt           |   1 +
+ clang/lib/Driver/Driver.cpp               |   4 +
+ clang/lib/Driver/ToolChains/Thylacine.cpp | 225 ++++++++++++++++++++++
+ clang/lib/Driver/ToolChains/Thylacine.h   | 110 +++++++++++
+ llvm/include/llvm/TargetParser/Triple.h   |   5 +-
+ llvm/lib/TargetParser/Triple.cpp          |   3 +
+ 8 files changed, 369 insertions(+), 1 deletion(-)
+ create mode 100644 clang/lib/Driver/ToolChains/Thylacine.cpp
+ create mode 100644 clang/lib/Driver/ToolChains/Thylacine.h
+
+diff --git a/clang/lib/Basic/Targets.cpp b/clang/lib/Basic/Targets.cpp
+index 263253918..2e8826a91 100644
+--- a/clang/lib/Basic/Targets.cpp
++++ b/clang/lib/Basic/Targets.cpp
+@@ -166,6 +166,9 @@ std::unique_ptr<TargetInfo> AllocateTarget(const llvm::Triple &Triple,
+     case llvm::Triple::Managarm:
+       return std::make_unique<ManagarmTargetInfo<AArch64leTargetInfo>>(Triple,
+                                                                        Opts);
++    case llvm::Triple::Thylacine:
++      return std::make_unique<ThylacineTargetInfo<AArch64leTargetInfo>>(Triple,
++                                                                        Opts);
+     case llvm::Triple::NetBSD:
+       return std::make_unique<NetBSDTargetInfo<AArch64leTargetInfo>>(Triple,
+                                                                      Opts);
+diff --git a/clang/lib/Basic/Targets/OSTargets.h b/clang/lib/Basic/Targets/OSTargets.h
+index 04608649a..a1867e10d 100644
+--- a/clang/lib/Basic/Targets/OSTargets.h
++++ b/clang/lib/Basic/Targets/OSTargets.h
+@@ -446,6 +446,25 @@ public:
+   }
+ };
+ 
++// Thylacine Target
++template <typename Target>
++class LLVM_LIBRARY_VISIBILITY ThylacineTargetInfo : public OSTargetInfo<Target> {
++protected:
++  void getOSDefines(const LangOptions &Opts, const llvm::Triple &Triple,
++                    MacroBuilder &Builder) const override {
++    DefineStd(Builder, "unix", Opts);
++    Builder.defineMacro("__thylacine__");
++    if (Opts.POSIXThreads)
++      Builder.defineMacro("_REENTRANT");
++    if (Opts.CPlusPlus)
++      Builder.defineMacro("_GNU_SOURCE");
++  }
++
++public:
++  ThylacineTargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts)
++      : OSTargetInfo<Target>(Triple, Opts) {}
++};
++
+ // NetBSD Target
+ template <typename Target>
+ class LLVM_LIBRARY_VISIBILITY NetBSDTargetInfo : public OSTargetInfo<Target> {
+diff --git a/clang/lib/Driver/CMakeLists.txt b/clang/lib/Driver/CMakeLists.txt
+index 0026ba899..965148fbf 100644
+--- a/clang/lib/Driver/CMakeLists.txt
++++ b/clang/lib/Driver/CMakeLists.txt
+@@ -68,6 +68,7 @@ add_clang_library(clangDriver
+   ToolChains/LFILinux.cpp
+   ToolChains/Linux.cpp
+   ToolChains/Managarm.cpp
++  ToolChains/Thylacine.cpp
+   ToolChains/MipsLinux.cpp
+   ToolChains/MinGW.cpp
+   ToolChains/MSP430.cpp
+diff --git a/clang/lib/Driver/Driver.cpp b/clang/lib/Driver/Driver.cpp
+index eb3f9cbea..e4761839a 100644
+--- a/clang/lib/Driver/Driver.cpp
++++ b/clang/lib/Driver/Driver.cpp
+@@ -35,6 +35,7 @@
+ #include "ToolChains/MSP430.h"
+ #include "ToolChains/MSVC.h"
+ #include "ToolChains/Managarm.h"
++#include "ToolChains/Thylacine.h"
+ #include "ToolChains/MinGW.h"
+ #include "ToolChains/MipsLinux.h"
+ #include "ToolChains/NetBSD.h"
+@@ -6883,6 +6884,9 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
+     case llvm::Triple::Managarm:
+       TC = std::make_unique<toolchains::Managarm>(*this, Target, Args);
+       break;
++    case llvm::Triple::Thylacine:
++      TC = std::make_unique<toolchains::Thylacine>(*this, Target, Args);
++      break;
+     case llvm::Triple::Solaris:
+       TC = std::make_unique<toolchains::Solaris>(*this, Target, Args);
+       break;
+diff --git a/clang/lib/Driver/ToolChains/Thylacine.cpp b/clang/lib/Driver/ToolChains/Thylacine.cpp
+new file mode 100644
+index 000000000..8cefc4146
+--- /dev/null
++++ b/clang/lib/Driver/ToolChains/Thylacine.cpp
+@@ -0,0 +1,225 @@
++//===--- Thylacine.cpp - Thylacine ToolChain Implementations ----*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "Thylacine.h"
++#include "clang/Config/config.h"
++#include "clang/Driver/CommonArgs.h"
++#include "clang/Driver/Compilation.h"
++#include "clang/Driver/Driver.h"
++#include "clang/Options/Options.h"
++#include "llvm/Option/ArgList.h"
++#include "llvm/Support/FileSystem.h"
++#include "llvm/Support/Path.h"
++
++using namespace clang::driver;
++using namespace clang::driver::toolchains;
++using namespace clang::driver::tools;
++using namespace clang;
++using namespace llvm::opt;
++
++// The link mirrors tools/pouch-ld: a static, non-PIE ET_EXEC with page-aligned
++// PT_LOAD segments, crt1/crti before the inputs and crtn after, the C++ runtime
++// (libc++ + libc++abi + libunwind) grouped, then musl + compiler-rt builtins
++// grouped so their mutual references resolve.
++void thylacine::Linker::ConstructJob(Compilation &C, const JobAction &JA,
++                                     const InputInfo &Output,
++                                     const InputInfoList &Inputs,
++                                     const ArgList &Args,
++                                     const char *LinkingOutput) const {
++  const auto &ToolChain = static_cast<const Thylacine &>(getToolChain());
++  const Driver &D = ToolChain.getDriver();
++
++  ArgStringList CmdArgs;
++
++  // Silence warnings for e.g. "clang -g foo.o -o foo" / "-emit-llvm" / "-w".
++  Args.ClaimAllArgs(options::OPT_g_Group);
++  Args.ClaimAllArgs(options::OPT_emit_llvm);
++  Args.ClaimAllArgs(options::OPT_w);
++
++  CmdArgs.push_back("-static");
++  CmdArgs.push_back("-z");
++  CmdArgs.push_back("max-page-size=4096");
++  CmdArgs.push_back("-z");
++  CmdArgs.push_back("separate-loadable-segments");
++  CmdArgs.push_back("-z");
++  CmdArgs.push_back("noexecstack");
++  CmdArgs.push_back("--build-id=none");
++  CmdArgs.push_back("--eh-frame-hdr");
++
++  if (!D.SysRoot.empty())
++    CmdArgs.push_back(Args.MakeArgString("--sysroot=" + D.SysRoot));
++
++  if (Args.hasArg(options::OPT_s))
++    CmdArgs.push_back("-s");
++
++  CmdArgs.push_back("-o");
++  CmdArgs.push_back(Output.getFilename());
++
++  const bool NoStdlib = Args.hasArg(options::OPT_nostdlib);
++  const bool NoStartfiles = Args.hasArg(options::OPT_nostartfiles);
++  const bool NoDefaultlibs = Args.hasArg(options::OPT_nodefaultlibs);
++
++  if (!NoStdlib && !NoStartfiles) {
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crt1.o")));
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crti.o")));
++  }
++
++  Args.addAllArgs(CmdArgs, {options::OPT_L, options::OPT_u});
++  ToolChain.AddFilePathLibArgs(Args, CmdArgs);
++  AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
++
++  if (!NoStdlib && !NoDefaultlibs) {
++    if (D.CCCIsCXX() && ToolChain.ShouldLinkCXXStdlib(Args)) {
++      CmdArgs.push_back("--start-group");
++      ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
++      CmdArgs.push_back("--end-group");
++    }
++
++    // musl (-lc) + compiler-rt builtins, grouped: musl's soft primitives and
++    // the builtins reference each other regardless of archive order.
++    CmdArgs.push_back("--start-group");
++    CmdArgs.push_back("-lc");
++    std::string Builtins = ToolChain.GetFilePath("libclang_rt.builtins.a");
++    if (llvm::sys::fs::exists(Builtins))
++      CmdArgs.push_back(Args.MakeArgString(Builtins));
++    CmdArgs.push_back("--end-group");
++  }
++
++  if (!NoStdlib && !NoStartfiles)
++    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crtn.o")));
++
++  const char *Exec = Args.MakeArgString(ToolChain.GetLinkerPath());
++  C.addCommand(std::make_unique<Command>(JA, *this,
++                                         ResponseFileSupport::AtFileCurCP(),
++                                         Exec, CmdArgs, Inputs, Output));
++}
++
++void thylacine::StaticLibTool::ConstructJob(Compilation &C, const JobAction &JA,
++                                            const InputInfo &Output,
++                                            const InputInfoList &Inputs,
++                                            const ArgList &Args,
++                                            const char *LinkingOutput) const {
++  const Driver &D = getToolChain().getDriver();
++
++  Args.ClaimAllArgs(options::OPT_g_Group);
++  Args.ClaimAllArgs(options::OPT_emit_llvm);
++  Args.ClaimAllArgs(options::OPT_w);
++  Args.ClaimAllArgs(options::OPT_stdlib_EQ);
++
++  // llvm-ar <options> <output> <inputs>, deterministic index.
++  ArgStringList CmdArgs;
++  CmdArgs.push_back("rcsD");
++  CmdArgs.push_back(Output.getFilename());
++
++  for (const auto &II : Inputs)
++    if (II.isFilename())
++      CmdArgs.push_back(II.getFilename());
++
++  const char *OutputFileName = Output.getFilename();
++  if (Output.isFilename() && llvm::sys::fs::exists(OutputFileName)) {
++    if (std::error_code EC = llvm::sys::fs::remove(OutputFileName)) {
++      D.Diag(diag::err_drv_unable_to_remove_file) << EC.message();
++      return;
++    }
++  }
++
++  const char *Exec = Args.MakeArgString(getToolChain().GetStaticLibToolPath());
++  C.addCommand(std::make_unique<Command>(JA, *this,
++                                         ResponseFileSupport::AtFileCurCP(),
++                                         Exec, CmdArgs, Inputs, Output));
++}
++
++Thylacine::Thylacine(const Driver &D, const llvm::Triple &Triple,
++                     const ArgList &Args)
++    : ToolChain(D, Triple, Args) {
++  getProgramPaths().push_back(getDriver().Dir);
++
++  if (!D.SysRoot.empty()) {
++    SmallString<128> P(D.SysRoot);
++    llvm::sys::path::append(P, "lib");
++    getFilePaths().push_back(std::string(P));
++  }
++}
++
++Tool *Thylacine::buildLinker() const {
++  return new tools::thylacine::Linker(*this);
++}
++
++Tool *Thylacine::buildStaticLibTool() const {
++  return new tools::thylacine::StaticLibTool(*this);
++}
++
++ToolChain::RuntimeLibType
++Thylacine::GetRuntimeLibType(const ArgList &Args) const {
++  if (Arg *A = Args.getLastArg(options::OPT_rtlib_EQ)) {
++    StringRef Value = A->getValue();
++    if (Value != "compiler-rt")
++      getDriver().Diag(clang::diag::err_drv_invalid_rtlib_name)
++          << A->getAsString(Args);
++  }
++  return ToolChain::RLT_CompilerRT;
++}
++
++ToolChain::CXXStdlibType Thylacine::GetCXXStdlibType(const ArgList &Args) const {
++  if (Arg *A = Args.getLastArg(options::OPT_stdlib_EQ)) {
++    StringRef Value = A->getValue();
++    if (Value != "libc++")
++      getDriver().Diag(diag::err_drv_invalid_stdlib_name)
++          << A->getAsString(Args);
++  }
++  return ToolChain::CST_Libcxx;
++}
++
++void Thylacine::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
++                                          ArgStringList &CC1Args) const {
++  const Driver &D = getDriver();
++
++  if (DriverArgs.hasArg(options::OPT_nostdinc))
++    return;
++
++  if (!DriverArgs.hasArg(options::OPT_nobuiltininc)) {
++    SmallString<128> P(D.ResourceDir);
++    llvm::sys::path::append(P, "include");
++    addSystemInclude(DriverArgs, CC1Args, P);
++  }
++
++  if (DriverArgs.hasArg(options::OPT_nostdlibinc))
++    return;
++
++  if (!D.SysRoot.empty()) {
++    SmallString<128> P(D.SysRoot);
++    llvm::sys::path::append(P, "include");
++    addExternCSystemInclude(DriverArgs, CC1Args, P.str());
++  }
++}
++
++void Thylacine::AddClangCXXStdlibIncludeArgs(const ArgList &DriverArgs,
++                                             ArgStringList &CC1Args) const {
++  if (DriverArgs.hasArg(options::OPT_nostdinc, options::OPT_nostdlibinc,
++                        options::OPT_nostdincxx))
++    return;
++
++  if (GetCXXStdlibType(DriverArgs) != ToolChain::CST_Libcxx)
++    return;
++
++  // The pouch sysroot lays the libc++ headers flat at include/c++/v1 (not the
++  // Fuchsia per-target D.Dir/../include layout).
++  SmallString<128> P(getDriver().SysRoot);
++  llvm::sys::path::append(P, "include", "c++", "v1");
++  addSystemInclude(DriverArgs, CC1Args, P);
++}
++
++void Thylacine::AddCXXStdlibLibArgs(const ArgList &Args,
++                                    ArgStringList &CmdArgs) const {
++  // Three separate static archives in the pouch sysroot.
++  CmdArgs.push_back("-lc++");
++  CmdArgs.push_back("-lc++abi");
++  CmdArgs.push_back("-lunwind");
++  if (Args.hasArg(options::OPT_fexperimental_library))
++    CmdArgs.push_back("-lc++experimental");
++}
+diff --git a/clang/lib/Driver/ToolChains/Thylacine.h b/clang/lib/Driver/ToolChains/Thylacine.h
+new file mode 100644
+index 000000000..65268bc0b
+--- /dev/null
++++ b/clang/lib/Driver/ToolChains/Thylacine.h
+@@ -0,0 +1,110 @@
++//===--- Thylacine.h - Thylacine ToolChain Implementations ------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_THYLACINE_H
++#define LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_THYLACINE_H
++
++#include "clang/Basic/LangOptions.h"
++#include "clang/Driver/Tool.h"
++#include "clang/Driver/ToolChain.h"
++
++namespace clang {
++namespace driver {
++namespace tools {
++namespace thylacine {
++// Builds a static archive via llvm-ar (the clang -static-lib driver path).
++class LLVM_LIBRARY_VISIBILITY StaticLibTool : public Tool {
++public:
++  StaticLibTool(const ToolChain &TC)
++      : Tool("thylacine::StaticLibTool", "llvm-ar", TC) {}
++
++  bool hasIntegratedCPP() const override { return false; }
++  bool isLinkJob() const override { return true; }
++
++  void ConstructJob(Compilation &C, const JobAction &JA,
++                    const InputInfo &Output, const InputInfoList &Inputs,
++                    const llvm::opt::ArgList &TCArgs,
++                    const char *LinkingOutput) const override;
++};
++
++// Drives ld.lld directly to a static, non-PIE ET_EXEC the REVENANT loader
++// accepts. The link policy mirrors tools/pouch-ld.
++class LLVM_LIBRARY_VISIBILITY Linker final : public Tool {
++public:
++  Linker(const ToolChain &TC) : Tool("thylacine::Linker", "ld.lld", TC) {}
++
++  bool hasIntegratedCPP() const override { return false; }
++  bool isLinkJob() const override { return true; }
++
++  void ConstructJob(Compilation &C, const JobAction &JA,
++                    const InputInfo &Output, const InputInfoList &Inputs,
++                    const llvm::opt::ArgList &TCArgs,
++                    const char *LinkingOutput) const override;
++};
++} // end namespace thylacine
++} // end namespace tools
++
++namespace toolchains {
++
++// Thylacine: a Plan 9-heritage ARM64 capability OS. Static-only, non-PIE,
++// libc++ + compiler-rt builtins over a musl (pouch) sysroot; ld.lld the ELF
++// linker. Fixing the root cause the pouch-clang/pouch-ld wrappers worked around
++// (an unknown OS falling to Generic_ELF, whose buildLinker shells out to the
++// host Darwin toolchain and emits Mach-O linker args).
++class LLVM_LIBRARY_VISIBILITY Thylacine : public ToolChain {
++public:
++  Thylacine(const Driver &D, const llvm::Triple &Triple,
++            const llvm::opt::ArgList &Args);
++
++  bool HasNativeLLVMSupport() const override { return true; }
++  bool IsMathErrnoDefault() const override { return false; }
++
++  RuntimeLibType GetDefaultRuntimeLibType() const override {
++    return ToolChain::RLT_CompilerRT;
++  }
++  CXXStdlibType GetDefaultCXXStdlibType() const override {
++    return ToolChain::CST_Libcxx;
++  }
++  UnwindTableLevel
++  getDefaultUnwindTableLevel(const llvm::opt::ArgList &Args) const override {
++    return UnwindTableLevel::Asynchronous;
++  }
++
++  // Static, non-PIE: kernel/elf.c rejects ET_DYN / PT_DYNAMIC.
++  bool isPICDefault() const override { return false; }
++  bool isPIEDefault(const llvm::opt::ArgList &Args) const override {
++    return false;
++  }
++  bool isPICDefaultForced() const override { return false; }
++  bool IsIntegratedAssemblerDefault() const override { return true; }
++
++  RuntimeLibType
++  GetRuntimeLibType(const llvm::opt::ArgList &Args) const override;
++  CXXStdlibType GetCXXStdlibType(const llvm::opt::ArgList &Args) const override;
++
++  void
++  AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
++                            llvm::opt::ArgStringList &CC1Args) const override;
++  void AddClangCXXStdlibIncludeArgs(
++      const llvm::opt::ArgList &DriverArgs,
++      llvm::opt::ArgStringList &CC1Args) const override;
++  void AddCXXStdlibLibArgs(const llvm::opt::ArgList &Args,
++                           llvm::opt::ArgStringList &CmdArgs) const override;
++
++  const char *getDefaultLinker() const override { return "ld.lld"; }
++
++protected:
++  Tool *buildLinker() const override;
++  Tool *buildStaticLibTool() const override;
++};
++
++} // end namespace toolchains
++} // end namespace driver
++} // end namespace clang
++
++#endif // LLVM_CLANG_LIB_DRIVER_TOOLCHAINS_THYLACINE_H
+diff --git a/llvm/include/llvm/TargetParser/Triple.h b/llvm/include/llvm/TargetParser/Triple.h
+index 9c83abeeb..90d9bec2c 100644
+--- a/llvm/include/llvm/TargetParser/Triple.h
++++ b/llvm/include/llvm/TargetParser/Triple.h
+@@ -252,7 +252,8 @@ public:
+     Serenity,
+     Vulkan, // Vulkan SPIR-V
+     CheriotRTOS,
+-    LastOSType = CheriotRTOS
++    Thylacine, // Plan 9-heritage ARM64 capability OS
++    LastOSType = Thylacine
+   };
+   enum EnvironmentType {
+     UnknownEnvironment,
+@@ -892,6 +893,8 @@ public:
+ 
+   bool isOSManagarm() const { return getOS() == Triple::Managarm; }
+ 
++  bool isOSThylacine() const { return getOS() == Triple::Thylacine; }
++
+   bool isShaderStageEnvironment() const {
+     EnvironmentType Env = getEnvironment();
+     return Env == Triple::Pixel || Env == Triple::Vertex ||
+diff --git a/llvm/lib/TargetParser/Triple.cpp b/llvm/lib/TargetParser/Triple.cpp
+index a4f9dd42c..d9fd9dc42 100644
+--- a/llvm/lib/TargetParser/Triple.cpp
++++ b/llvm/lib/TargetParser/Triple.cpp
+@@ -341,6 +341,8 @@ StringRef Triple::getOSTypeName(OSType Kind) {
+   case Vulkan: return "vulkan";
+   case CheriotRTOS:
+     return "cheriotrtos";
++  case Thylacine:
++    return "thylacine";
+   }
+ 
+   llvm_unreachable("Invalid OSType");
+@@ -754,6 +756,7 @@ static Triple::OSType parseOS(StringRef OSName) {
+       .StartsWith("serenity", Triple::Serenity)
+       .StartsWith("vulkan", Triple::Vulkan)
+       .StartsWith("cheriotrtos", Triple::CheriotRTOS)
++      .StartsWith("thylacine", Triple::Thylacine)
+       .Default(Triple::UnknownOS);
+ }
+ 
+-- 
+2.43.0
+

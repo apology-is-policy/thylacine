@@ -1707,6 +1707,13 @@ build_stratum_pool_fixture() {
     # main`. Keyed on the staged GOROOT existing (build_go_goroot -- default-on
     # since Stage 6; THYLACINE_BAKE_GOROOT=0 opts out and removes the stage).
     local pool_size="64M"
+    # CL-4b: the device toolchain (/clade) is ~280M staged (2 multicall copies +
+    # resource headers + sysroot); at ~3.3x bake amplification + on-device /tmp
+    # compile churn a clade-only gate needs ~2 GiB. Stacks with GOROOT if both on.
+    local bake_clade=0
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
+        bake_clade=1
+    fi
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
         # Sized against MEASURED consumption (2026-07-03, task #39): the bake
         # itself uses ~575M for ~170M logical (~3.3x FS amplification) and the
@@ -1716,6 +1723,10 @@ build_stratum_pool_fixture() {
         # commit-on-allocation-pressure (task #39, the P1.2 write-amp lever);
         # this is capacity so the gate boot isn't hostage to it.
         pool_size="2560M"
+    fi
+    if [[ "$bake_clade" == "1" ]]; then
+        # clade-only -> 2048M; stacked with GOROOT (2560M) -> 4096M.
+        if [[ "$pool_size" == "2560M" ]]; then pool_size="4096M"; else pool_size="2048M"; fi
     fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
@@ -1898,6 +1909,20 @@ populate_stratum_pool() {
                 || { echo "==> populate pool: sync after Go cache FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
             echo "==> populate pool: Go warm cache + probe source baked"
         fi
+    fi
+
+    # --- CL-4b: bake the device toolchain at /clade (gated). The CL-4 clang++
+    # gate boot sets THYLACINE_BAKE_CLADE=1; stage_clade must have assembled the
+    # tree. /clade/bin/{clang++,ld.lld} + /clade/lib/clang/N/include + /clade/sysroot.
+    # A single recursive `put` (a per-file loop is infeasible). ---
+    local clade_stage="$BUILD_DIR/clade/stage"
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$clade_stage/bin" ]]; then
+        echo "==> populate pool: baking device toolchain ($clade_stage -> /clade, $(du -sh "$clade_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$clade_stage" /clade \
+            || { echo "==> populate pool: put /clade FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /clade FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: device toolchain baked at /clade"
     fi
 
     # --- G-7b: the Quake shareware data (-> /quake; QBASEDIR=/quake is
@@ -2673,6 +2698,196 @@ build_libcxx() {
     fi
 }
 
+build_clade() {
+    # Clade CL-4 (docs/LLVM-DESIGN.md section 16) -- the DEVICE TOOLCHAIN: a static
+    # aarch64-thylacine clang+lld multicall (bin/llvm), cross-built from the fork
+    # with the fork's own host clang, linked through the CL-3 Thylacine ToolChain
+    # against the pouch sysroot. The multicall dispatches clang/clang++/lld/ld.lld
+    # (F3 GENERATE_DRIVER; verified CL-0). Baked to /clade (CL-4b) so `clang++ -O2`
+    # compiles+links+runs on-device.
+    #
+    # Cross-build shape mirrors build_libcxx (fork clang + --target=aarch64-thylacine
+    # + the pouch sysroot), extended to the LLVM project itself: AArch64-only, static
+    # (kernel/elf.c requires ET_EXEC + 0 PT_DYNAMIC), the multicall driver. The fork's
+    # own build/bin host tblgens are reused so the cross-build needs no nested NATIVE
+    # host build.
+    local sysroot="$BUILD_DIR/sysroot"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local bdir="$BUILD_DIR/clade/llvm-build"
+    local pouch_cc="${POUCH_CC:-$fork/build/bin/clang}"
+    local pouch_cxx="${POUCH_CXX:-$fork/build/bin/clang++}"
+    local host_tblgen="$fork/build/bin/llvm-tblgen"
+    local host_clang_tblgen="$fork/build/bin/clang-tblgen"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+
+    if [[ ! -f "$fork/llvm/CMakeLists.txt" ]]; then
+        echo "==> clade (CL-4): LLVM fork not found at $fork -- skipping (set LLVMFORK)"
+        return 0
+    fi
+    if [[ ! -x "$pouch_cc" || ! -x "$pouch_cxx" ]]; then
+        echo "==> clade (CL-4): fork clang not built -- skipping the device toolchain"
+        echo "    build it: ninja -C \"$fork/build\" clang clang-resource-headers llvm-tblgen clang-tblgen"
+        return 0
+    fi
+    if [[ ! -x "$host_tblgen" || ! -x "$host_clang_tblgen" ]]; then
+        echo "==> clade (CL-4): fork host tblgens missing -- build them:"
+        echo "    ninja -C \"$fork/build\" llvm-tblgen clang-tblgen"
+        return 0
+    fi
+    if sysroot_is_stale; then
+        build_sysroot
+    fi
+    if [[ ! -f "$sysroot/lib/libc++.a" ]]; then
+        # The toolchain is C++ -- it links the pouch libc++ group. Ensure it exists.
+        build_libcxx
+    fi
+
+    # The multicall is a multi-hour build: reuse it when newer than this recipe
+    # AND the fork Support patch surface (Path.inc carries the CL-4 getMainExecutable
+    # port). A fork edit or a recipe change forces a rebuild.
+    local out="$bdir/bin/llvm"
+    if [[ -x "$out" \
+          && "$out" -nt "${BASH_SOURCE[0]}" \
+          && "$out" -nt "$fork/llvm/lib/Support/Unix/Path.inc" ]]; then
+        ledger "clade (clang+lld multicall): REUSED (cached + up-to-date)"
+        return 0
+    fi
+
+    echo "==> building the device toolchain (clang+lld multicall, aarch64-thylacine)"
+    echo "    NOTE: this is a LONG cross-build (hours; ~3 GiB build tree)."
+    # Explicit sysroot includes (like the C++ prover): -nostdlibinc + c++/v1 then
+    # the C include dir, so the sysroot owns every system header. _GNU_SOURCE for
+    # musl's GNU surface, which LLVM assumes under __unix__.
+    local cxxflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include/c++/v1 -isystem $sysroot/include -D_GNU_SOURCE=1"
+    local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
+    if [[ ! -f "$bdir/CMakeCache.txt" || "${BASH_SOURCE[0]}" -nt "$bdir/CMakeCache.txt" ]]; then
+        rm -rf "$bdir"
+        mkdir -p "$bdir"
+        local cmake_args=(
+            -G Ninja -S "$fork/llvm" -B "$bdir"
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+            -DCMAKE_C_COMPILER="$pouch_cc"
+            -DCMAKE_CXX_COMPILER="$pouch_cxx"
+            -DCMAKE_ASM_COMPILER="$pouch_cc"
+            -DCMAKE_C_COMPILER_TARGET=aarch64-thylacine
+            -DCMAKE_CXX_COMPILER_TARGET=aarch64-thylacine
+            -DCMAKE_ASM_COMPILER_TARGET=aarch64-thylacine
+            -DCMAKE_SYSROOT="$sysroot"
+            -DCMAKE_C_FLAGS="$cflags"
+            -DCMAKE_CXX_FLAGS="$cxxflags"
+            -DCMAKE_ASM_FLAGS="-march=armv8-a+lse+pauth+bti"
+            -DCMAKE_AR="$LLVM_PREFIX/bin/llvm-ar"
+            -DCMAKE_RANLIB="$LLVM_PREFIX/bin/llvm-ranlib"
+            -DCMAKE_NM="$LLVM_PREFIX/bin/llvm-nm"
+            # Cross-build: reuse the fork's host tblgens (no nested NATIVE build).
+            -DLLVM_USE_HOST_TOOLS=ON
+            -DLLVM_TABLEGEN="$host_tblgen"
+            -DCLANG_TABLEGEN="$host_clang_tblgen"
+            -DLLVM_NATIVE_TOOL_DIR="$fork/build/bin"
+            # The built binary RUNS on aarch64-thylacine + defaults codegen to it.
+            -DLLVM_TARGETS_TO_BUILD=AArch64
+            -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-thylacine
+            -DLLVM_HOST_TRIPLE=aarch64-unknown-thylacine
+            # clang;lld + the multicall driver (F3: lld is a member).
+            -DLLVM_ENABLE_PROJECTS="clang;lld"
+            -DLLVM_TOOL_LLVM_DRIVER_BUILD=ON
+            # Static, non-PIE ET_EXEC.
+            -DLLVM_BUILD_STATIC=ON
+            -DBUILD_SHARED_LIBS=OFF
+            -DLLVM_ENABLE_PIC=OFF
+            -DLLVM_LINK_LLVM_DYLIB=OFF
+            -DCLANG_LINK_CLANG_DYLIB=OFF
+            -DLLVM_ENABLE_THREADS=ON
+            # No optional deps (none in the sysroot; the host-header shadow gotcha).
+            -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF
+            -DLLVM_ENABLE_LIBXML2=OFF
+            -DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_CURL=OFF
+            -DLLVM_ENABLE_HTTPLIB=OFF -DLLVM_ENABLE_LIBPFM=OFF
+            -DLLVM_ENABLE_BINDINGS=OFF
+            # Trim: no tests/examples/docs/benchmarks/analyzer.
+            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF
+            -DLLVM_BUILD_TOOLS=ON
+            -DCLANG_INCLUDE_TESTS=OFF -DCLANG_INCLUDE_DOCS=OFF
+            -DCLANG_ENABLE_STATIC_ANALYZER=OFF
+        )
+        cmake "${cmake_args[@]}"
+    fi
+    # Memory-aware -j: the worst LLVM TU peaks ~2.46 GiB RSS (CL-0), so clamp to
+    # ~1 job per 3 GiB of host RAM to avoid OOM/thrash on a small-RAM host.
+    # Override with CLADE_JOBS=N.
+    local memgib jobs ncpu
+    memgib=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1073741824 ))
+    ncpu=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    jobs=$(( memgib / 3 )); [[ "$jobs" -lt 1 ]] && jobs=1
+    [[ "$jobs" -gt "$ncpu" ]] && jobs="$ncpu"
+    jobs="${CLADE_JOBS:-$jobs}"
+    echo "    ninja -j$jobs (host RAM ${memgib} GiB, ncpu $ncpu)"
+    ninja -C "$bdir" -j"$jobs" llvm clang-resource-headers
+
+    if [[ ! -x "$out" ]]; then
+        echo "    clade: multicall $out not produced" >&2
+        exit 1
+    fi
+    # Verify the kernel ELF loader's acceptance shape (ET_EXEC, no PT_DYNAMIC).
+    case "$("$readelf" -h "$out")" in
+        *"Type:"*EXEC*) ;;
+        *) echo "    clade: bin/llvm not ET_EXEC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+    esac
+    case "$("$readelf" -l "$out")" in
+        *DYNAMIC*) echo "    clade: bin/llvm has PT_DYNAMIC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+    esac
+    ledger "clade (clang+lld multicall): BUILT ($(wc -c < "$out" | tr -d ' ') bytes, ET_EXEC static)"
+}
+
+stage_clade() {
+    # Clade CL-4b -- assemble build/clade/stage/, the /clade tree baked into the
+    # pool (populate_stratum_pool `put`s it when THYLACINE_BAKE_CLADE=1). Inputs:
+    # the cross-built multicall build/clade/llvm-build/bin/llvm (from build_clade,
+    # or pulled from the GCP builder into that path) + its resource headers + the
+    # pouch sysroot.
+    #
+    # Thylacine has no symlinks/hardlinks at v1.0, and the CL-4 getMainExecutable
+    # port resolves argv[0] to a REAL file (getprogpath verifies existence), so the
+    # multicall is COPIED under each dispatch name. The C++ gate needs exactly two:
+    # clang++ (the entry, invoked absolute) + ld.lld (clang++ execs it by name).
+    # A C-mode `clang` copy is a CL-5 add.
+    local xbuild="$BUILD_DIR/clade/llvm-build"
+    local llvm_bin="$xbuild/bin/llvm"
+    local stage="$BUILD_DIR/clade/stage"
+    local sysroot="$BUILD_DIR/sysroot"
+    local strip="$LLVM_PREFIX/bin/llvm-strip"
+
+    if [[ ! -f "$llvm_bin" ]]; then
+        echo "==> clade stage: no multicall at $llvm_bin -- run build_clade or pull it from the builder"
+        return 0
+    fi
+    local resdir; resdir="$(cd "$xbuild" 2>/dev/null && ls -d lib/clang/*/include 2>/dev/null | head -1)"
+    if [[ -z "$resdir" || ! -d "$xbuild/$resdir" ]]; then
+        echo "==> clade stage: resource headers (lib/clang/*/include) missing under $xbuild" >&2
+        exit 1
+    fi
+
+    echo "==> clade stage: assembling $stage (clang++ + ld.lld + resource headers + sysroot)"
+    rm -rf "$stage"
+    mkdir -p "$stage/bin" "$stage/$(dirname "$resdir")"
+    # Stripped copies under the dispatch names (argv[0]-dispatched multicall).
+    local stripped="$BUILD_DIR/clade/.llvm.stripped"
+    "$strip" -o "$stripped" "$llvm_bin" 2>/dev/null || cp "$llvm_bin" "$stripped"
+    cp "$stripped" "$stage/bin/clang++"
+    cp "$stripped" "$stage/bin/ld.lld"
+    chmod +x "$stage/bin/clang++" "$stage/bin/ld.lld"
+    rm -f "$stripped"
+    # Resource headers (stddef.h/stdint.h/... at InstalledDir/../lib/clang/N/include).
+    cp -R "$xbuild/$resdir" "$stage/$(dirname "$resdir")/"
+    # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
+    mkdir -p "$stage/sysroot"
+    cp -R "$sysroot/lib" "$stage/sysroot/lib"
+    cp -R "$sysroot/include" "$stage/sysroot/include"
+    echo "    clade stage: $(du -sh "$stage" | cut -f1) -- bin: $(ls "$stage/bin" | tr '\n' ' ')"
+}
+
 build_disk() {
     # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
     # virtio-blk-device.
@@ -2745,6 +2960,8 @@ case "$target" in
     tyrquake)    build_tyrquake    ;;
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;
+    clade)       build_clade       ;;
+    stage-clade) stage_clade       ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;

@@ -1,0 +1,88 @@
+From 6b7bae2bea33109f73a2873ed10f408a88437592 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 24 Jul 2026 16:21:17 +0200
+Subject: [PATCH 4/4] Thylacine CL-4: Support-layer port
+
+Thylacine defines __thylacine__ + __unix__ (not __linux__), so it falls through
+the __linux__-family branches of LLVM's Support layer. Three portable-POSIX sites
+need a __thylacine__ arm (surfaced by cross-compiling lib/Support with the fork
+clang):
+
+- getMainExecutable (Unix/Path.inc): no /proc/self/exe and dladdr is inert in a
+  static musl binary -> resolve from argv[0] + $PATH via getprogpath (the classical
+  OpenBSD/Haiku detection); widen the getprogpath/test_dir OS guard. clang's
+  InstalledDir + resource-dir discovery depend on it.
+- bit.h (ADT/bit.h): the endian-header select listed __linux__/__NetBSD__/... but
+  not __thylacine__, so it hit the BSD '#else -> <machine/endian.h>' fallback;
+  musl provides <endian.h>. Add __thylacine__ to the <endian.h> arm.
+- is_local_impl (Unix/Path.inc): the '#else' BSD fallback uses statvfs.f_flags &
+  MNT_LOCAL, neither of which musl has. Thylacine's FS is 9P (network-transparent,
+  ARCH 6.5) -> return false ('remote', the documented conservative answer; is_local
+  is only a hint, and Thylacine has no file-backed mmap).
+
+Verified: all 165 real lib/Support TUs cross-compile clean for aarch64-thylacine
+(SipHash.cpp's miss is a bundled-header include-path probe artifact, not a port
+issue).
+---
+ llvm/include/llvm/ADT/bit.h    |  3 ++-
+ llvm/lib/Support/Unix/Path.inc | 16 +++++++++++++++-
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/llvm/include/llvm/ADT/bit.h b/llvm/include/llvm/ADT/bit.h
+index 5971b7504..fe212e70b 100644
+--- a/llvm/include/llvm/ADT/bit.h
++++ b/llvm/include/llvm/ADT/bit.h
+@@ -30,7 +30,8 @@
+ 
+ #if defined(__linux__) || defined(__GNU__) || defined(__HAIKU__) ||            \
+     defined(__Fuchsia__) || defined(__EMSCRIPTEN__) || defined(__NetBSD__) ||  \
+-    defined(__OpenBSD__) || defined(__DragonFly__) || defined(__managarm__)
++    defined(__OpenBSD__) || defined(__DragonFly__) || defined(__managarm__) ||  \
++    defined(__thylacine__)
+ #include <endian.h>
+ #elif defined(_AIX)
+ #include <sys/machine.h>
+diff --git a/llvm/lib/Support/Unix/Path.inc b/llvm/lib/Support/Unix/Path.inc
+index fc71ca46d..9a6b3849f 100644
+--- a/llvm/lib/Support/Unix/Path.inc
++++ b/llvm/lib/Support/Unix/Path.inc
+@@ -130,7 +130,7 @@ const file_t kInvalidFile = -1;
+     defined(__CYGWIN__) || defined(__DragonFly__) || defined(_AIX) ||          \
+     defined(__GNU__) ||                                                        \
+     (defined(__sun__) && defined(__svr4__) || defined(__HAIKU__)) ||           \
+-    defined(__managarm__)
++    defined(__managarm__) || defined(__thylacine__)
+ static int test_dir(char ret[PATH_MAX], const char *dir, const char *bin) {
+   struct stat sb;
+   char fullpath[PATH_MAX];
+@@ -326,6 +326,14 @@ std::string getMainExecutable(const char *argv0, void *MainAddr) {
+       return std::string(real_path);
+     break; // Found entry, but realpath failed.
+   }
++#elif defined(__thylacine__)
++  // Thylacine has no /proc/self/exe, and dladdr is inert in a static musl
++  // binary (dlopen/dladdr are ENOSYS stubs). Resolve from argv[0] + $PATH --
++  // the classical detection, like OpenBSD/Haiku. clang's InstalledDir +
++  // resource-dir discovery depend on this returning a real path.
++  char exe_path[PATH_MAX];
++  if (getprogpath(exe_path, argv0) != NULL)
++    return exe_path;
+ #elif defined(HAVE_DLOPEN)
+   // Use dladdr to get executable path if available.
+   Dl_info DLInfo;
+@@ -564,6 +572,12 @@ static bool is_local_impl(struct STATVFS &Vfs) {
+   // The file system can have an arbitrary structure on z/OS; must go with the
+   // conservative answer.
+   return false;
++#elif defined(__thylacine__)
++  // Thylacine's FS is 9P (network-transparent, ARCH 6.5), and musl's statvfs has
++  // no f_flags/MNT_LOCAL; "remote" is both accurate and the conservative answer
++  // (LLVM uses is_local only as a hint -- no file-backed mmap on Thylacine).
++  (void)Vfs;
++  return false;
+ #else
+   return !!(STATVFS_F_FLAG(Vfs) & MNT_LOCAL);
+ #endif
+-- 
+2.43.0
+
