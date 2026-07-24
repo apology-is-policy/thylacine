@@ -45,8 +45,7 @@ A Pouch port of TyrQuake: Almost effortless, just works. Mouse look, multiplayer
 
 ![](readme_assets/quake.png)
 
-Video:
-https://github.com/user-attachments/assets/6ecc696a-7140-485a-b59b-58c945c121a5
+![](readme_assets/quake-trimmed-480p.mov)
 
 ### Nora now supports Go (golang) debugging, LSP
 
