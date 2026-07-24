@@ -370,7 +370,7 @@ no bolted-on chasing).
 | # | Scope | Gate / deliverable | Audit posture | Cut line |
 |---|---|---|---|---|
 | **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc — **LANDED, §16** | none (read-only) | — |
-| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). **CL-1b core LANDED** (posix_spawn/wait4/dup2/pipe2: `0026`; §16.11). CL-1c = make + on-device `make -j`. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
+| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). **CL-1b core LANDED** (posix_spawn/wait4/dup2/pipe2: `0026`; §16.11). **CL-1c-1 LANDED** (the GNU make 4.4.1 port: `third_party/gnumake` + `usr/ports/gnumake` + `build_gnumake()`; `USE_POSIX_SPAWN` drives CL-1b, `MAKE_JOBSERVER` off; `/make --version` runs on-device; §16.12). CL-1c-2 = the toy `make -j` gate + the boundary-line audit. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite | a C++ prover (EH + RTTI + threads + TLS-dtors + filesystem) green on-device | focused round on the runtime/boundary seams | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired | host cross-builds via the real triple, byte-compatible artifacts | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade` | **`clang++ -O2` compiles, links (lld), and runs a real C++ program on-device** | focused round (the Support patches + the bake) | — |
@@ -663,6 +663,54 @@ lifecycle"; closed list `memory/audit_cl1b_closed_list.md`. Boot OK, 0
 EXTINCTION, suite 1196/1196 (kernel byte-unchanged). Next = CL-1c (GNU make +
 on-device `make -j`).
 
+### 16.12 CL-1c-1 as-built (the GNU make port — build + load-and-run)
+
+The first REAL toolchain program runs on Thylacine: **GNU make 4.4.1**,
+cross-built by `tools/build.sh::build_gnumake()` for `aarch64-thylacine` and
+baked into the ramfs as `/make`. It is a **vendored port** (the SDL2/tyrquake
+idiom), not a musl boundary-line: pristine source at `third_party/gnumake/`
+(pruned-pristine, sha256 `dd16fb1d…`; see its PRUNE-MANIFEST.md), the Thylacine
+delta at `usr/ports/gnumake/` (a hand-derived `config.h` + the two committed
+generated gnulib headers `fnmatch.h`/`glob.h`; `patches/` is EMPTY — the port
+needs zero source edits).
+
+**The census (§16 questions 1-10) picked the clean config**: `USE_POSIX_SPAWN=1`
+routes make's `child_execute_job` through `posix_spawn` (compiling out the
+vfork/execve paths) so make natively drives CL-1b; `MAKE_JOBSERVER` left
+UNDEFINED makes a top-level `make -jN` use the pure `job_slots` counter +
+blocking `waitpid` reap — **no pipe/fifo/pselect/SIGCHLD/fcntl-O_NONBLOCK at
+all**, a perfect fit for the Thylacine process substrate (pipe-blocking-only,
+`fcntl` unwired). No fcntl boundary-line was needed: with the jobserver off,
+`fcntl`→ENOSYS survives only in make's ENOSYS-tolerant startup checks +
+harmless `fd_noinherit` no-ops (posix_spawn's fd_list is explicit, so CLOEXEC
+is moot).
+
+**config.h** is derived from an autoconf reference config.h (a real `./configure`
+run — so the surface is autoconf-detected, not hand-guessed) with the census
+deltas: `MAKE_HOST="aarch64-thylacine"`, `ST_MTIM_NSEC st_mtim.tv_nsec` (musl
+POSIX, not darwin's `st_mtimespec`), and UNSET
+`HAVE_FORK/VFORK/WORKING_*`/`MKFIFO`/`PSELECT`/`WAIT3`/`MAKE_JOBSERVER`/`MAKE_LOAD`/`HAVE_DECL_SYS_SIGLIST`.
+The compile list is 30 src + 5 lib gnulib objects (concat-filename, findprog-in,
+fnmatch, glob, getloadavg — musl provides `alloca`, so `lib/alloca.c` is not
+built). All 35 compile + link cleanly against the pouch sysroot (zero undefined
+symbols — pouch musl provides posix_spawn/glob/fnmatch/getloadavg/realpath/…),
+a 371 KB static ET_EXEC.
+
+Proven in-guest by the joey probe `/make --version` (`GNU Make 4.4.1` +
+`Built for aarch64-thylacine` — the latter proves the derived config.h's
+MAKE_HOST reached the binary), boot OK, 0 EXTINCTION, the CL-1a/1b siblings
+unregressed. `--version` prints and exits before reading any Makefile or
+spawning a child, so this is the load-and-run milestone; **the parallel-spawn
+gate** (`make -j` driving CL-1b's posix_spawn over a real toy build) + the
+boundary-line audit on the #68/#926 process-lifecycle lineage are **CL-1c-2**.
+
+**Flagged seams** (from the census, neither needed for the toy gate):
+*execvp self-re-exec* (`main.c:2817`, only hit by a self-remaking makefile — a
+static toy Makefile never triggers it; a targeted `execvp→posix_spawn` patch is
+owed at CL-4/CL-5 when real autotools projects build) and *adddup2-onto-0/1/2*
+(handled — CL-1b resolves file-actions statically into the positional fd_list,
+so arbitrary child←parent fd mappings work).
+
 ## 17. Revision history
 
 | Date | Change |
@@ -673,3 +721,4 @@ on-device `make -j`).
 | 2026-07-23 | **CL-1a landed** (§16.9): the pouch FS/process wires (`0024`, 20 files) -- getpid/chdir/getcwd/mkdir/open(O_CREAT)/rename/unlink/readdir/ftruncate/fchmod/access, each onto an existing kernel syscall (ZERO new kernel surface); the `__pouch_open_parent` path-split helper; openat's O_CREAT arm + relative-path lift. Proven in-guest by `/pouch-hello-fs` (ALL WIRES PASS, boot OK, 0 EXTINCTION). dup2/dup3/pipe2 deferred to CL-1b (not clean 1:1). Surfaced + enqueued an ftruncate shrink-after-sparse-extend EIO below the wire (Stratum `stm_fs_truncate`; `memory/bug_ftruncate_shrink_after_extend.md`). |
 | 2026-07-23 | **CL-1b-0 landed** (§16.10): the pouch-env crt boundary line (`0025`, `_pouch_env.c` + `__libc_start_main` hook) -- populate `__environ` from the `/env` device at startup so `getenv()`/`environ` work (kernel writes envp[0]=NULL). Fail-soft. Proven in-guest by `/pouch-hello-env` (PGENV1/PGENVNUM inherited via the rfork clone; boot OK, 0 EXTINCTION, suite 1196/1196). Pure userspace (kernel byte-unchanged). NEXT = CL-1b core (posix_spawn/wait4/dup2/pipe2). |
 | 2026-07-23 | **CL-1b core landed** (§16.11): the process lifecycle (`0026`, 10 files) -- posix_spawn (STATIC file_actions resolve -> positional SYS_SPAWN_FULL_ARGV fd_list), posix_spawnp (PATH search), wait4/waitpid (SYS_WAIT_PID + flag/status translation), pipe/pipe2 (2-reg svc shim), dup2/dup3 (old==new; onto-target ENOSYS). Proven in-guest by `/pouch-hello-spawn` (pipe2+posix_spawn+waitpid; WEXITSTATUS ok=0 fail=1; argv pass-through). Self-audit fixed a P1 (opened[] overflow); ground-truth bring-up fixed the dup2-rights/argv0-NULL/std-fd-seed issues. Boot OK, 0 EXTINCTION, suite 1196/1196 (kernel byte-unchanged). Focused audit CLOSED CLEAN (Opus-4.8-max + self-audit; 0 P0/0 P1/0 P2/6 P3, NOT dirty; F4 argv-bound + F1 dup-onto-target comment fixed; the freopen onto-target ENOSYS is a tracked kernel-primitive seam). `memory/audit_cl1b_closed_list.md`. NEXT = CL-1c (make). |
+| 2026-07-24 | **CL-1c-1 landed** (§16.12): the GNU make 4.4.1 **port** (vendored, not a musl patch) -- `third_party/gnumake/` pruned-pristine (sha256 `dd16fb1d…`) + `usr/ports/gnumake/{config.h,generated/}` (the Thylacine delta; `patches/` EMPTY -- zero source edits) + `build_gnumake()`. The census (§16 Q1-10) picked the clean config: `USE_POSIX_SPAWN=1` (make natively drives CL-1b's posix_spawn/wait4) + `MAKE_JOBSERVER` UNDEFINED (top-level `make -jN` = pure job_slots counter + blocking waitpid, no pipe/fifo/pselect/SIGCHLD/fcntl-O_NONBLOCK); no fcntl boundary-line needed. 35 objects (30 src + 5 lib gnulib) compile+link clean against the pouch sysroot -> 371 KB static ET_EXEC. Proven in-guest by `/make --version` (`GNU Make 4.4.1` + `Built for aarch64-thylacine`), boot OK, 0 EXTINCTION, CL-1a/1b siblings unregressed (kernel byte-unchanged). `--version` doesn't spawn, so this is the load-and-run milestone; the parallel-spawn `make -j` gate + the boundary-line audit are CL-1c-2. Flagged seams (neither needed for the gate): execvp self-re-exec (self-remaking makefiles only; owed at CL-4/CL-5) + adddup2-onto-0/1/2 (handled by CL-1b's static fd-list resolve). |

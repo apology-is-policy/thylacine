@@ -2706,6 +2706,36 @@ int main(void) {
         t_putstr("joey: /pouch-hello-spawn PASS; CL-1b posix_spawn/wait4/pipe2/dup2 verified\n");
     }
 
+    // === /make --version orchestration (Clade CL-1c-1: the GNU make port) ===
+    // The first REAL toolchain program to run on Thylacine -- GNU make 4.4.1,
+    // cross-built by build_gnumake() against the pouch sysroot. `make --version`
+    // prints and exits before reading any Makefile or spawning a child, so it
+    // is the load-and-run smoke: the port's 35 objects link + start + the musl
+    // startup frame reaches main + stdio works. The `Built for aarch64-thylacine`
+    // line proves our derived config.h's MAKE_HOST reached the binary. The
+    // parallel-spawn gate (`make -j` driving CL-1b's posix_spawn over a real
+    // toy build) is CL-1c-2. argv = ["make","--version"], argc=2.
+    {
+        static const char mk_name[] = "make";
+        static const char mk_argv[] = "make\0--version";
+        static const char mk_m0[]   = "GNU Make 4.4.1";
+        static const char mk_m1[]   = "Built for aarch64-thylacine";
+        static const struct argv_marker mk_markers[] = {
+            { mk_m0, sizeof(mk_m0) - 1 },
+            { mk_m1, sizeof(mk_m1) - 1 },
+        };
+        if (pouch_smoke_one_argv(mk_name, sizeof(mk_name) - 1,
+                                 mk_argv, sizeof(mk_argv),
+                                 /*argc=*/2u,
+                                 mk_markers,
+                                 sizeof(mk_markers) / sizeof(mk_markers[0]),
+                                 /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0) {
+            t_putstr("joey: /make --version FAILED (CL-1c-1 GNU make port regression)\n");
+            return 1;
+        }
+        t_putstr("joey: /make --version PASS; CL-1c-1 GNU make 4.4.1 runs on Thylacine\n");
+    }
+
     // === /go-goroutines orchestration (GOOS=thylacine Go-port, Stage 2) ===
     // The Stage-2 proof: GOMAXPROCS(4) workers ping-pong channels, join via a
     // sync.WaitGroup, churn allocations, and a concurrent goroutine hammers

@@ -274,6 +274,9 @@ build_kernel() {
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
     # fixture (populate_stratum_pool puts the stage at /quake).
     build_tyrquake
+    # Clade CL-1c: cross-build GNU make (the first parallel-spawner port;
+    # drives CL-1b's posix_spawn/wait4). Baked into the ramfs as /make.
+    build_gnumake
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -468,7 +471,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "sdl-probe" "tyr-quake" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "sdl-probe" "tyr-quake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -2365,6 +2368,98 @@ build_tyrquake() {
     ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
 }
 
+build_gnumake() {
+    # Clade CL-1c (docs/LLVM-DESIGN.md) -- cross-build GNU make 4.4.1 for
+    # aarch64-thylacine. make is the first REAL parallel-spawner port: its
+    # posix_spawn code path (USE_POSIX_SPAWN) drives CL-1b's posix_spawn +
+    # wait4 directly, and with MAKE_JOBSERVER left UNDEFINED a top-level
+    # `make -jN` runs the pure job_slots counter + blocking waitpid reap
+    # (no pipe/fifo/pselect/SIGCHLD), a clean fit for the Thylacine process
+    # substrate. The vendored tree (third_party/gnumake, pruned-pristine)
+    # is COPIED into build/pouch/gnumake-{src,lib}, the hand-derived Thylacine
+    # config.h (usr/ports/gnumake/config.h -- an autoconf reference config.h
+    # with the census flips: no fork/vfork/mkfifo/jobserver/dload, st_mtim)
+    # + the committed generated gnulib headers overwrite the copy, and the
+    # explicit 35-object list compiles with the pouch toolchain (libsodium
+    # idiom -- no cross make). See docs/LLVM-DESIGN.md section 16.12 +
+    # third_party/gnumake/PRUNE-MANIFEST.md.
+    local sysroot="$BUILD_DIR/sysroot"
+    local mk_vendor="$REPO_ROOT/third_party/gnumake"
+    local port_dir="$REPO_ROOT/usr/ports/gnumake"
+    local mk_src="$BUILD_DIR/pouch/gnumake-src"
+    local mk_obj="$BUILD_DIR/pouch/gnumake-obj"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local clang="$LLVM_PREFIX/bin/clang"
+
+    if [[ ! -f "$mk_vendor/src/job.c" ]]; then
+        echo "==> gnumake: vendored source missing at $mk_vendor" >&2
+        exit 1
+    fi
+    if sysroot_is_stale; then
+        echo "==> gnumake: pouch sysroot missing/stale -- building it first"
+        build_sysroot
+    fi
+
+    # Staleness: reuse the binary when newer than the tree + port + libc.a.
+    if [[ -f "$progs_out/make" ]]; then
+        local stale
+        stale="$(find "$mk_vendor" "$port_dir" -type f -newer "$progs_out/make" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$progs_out/make" ]]; then
+            ledger "make (GNU make 4.4.1): REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building GNU make 4.4.1 (aarch64-thylacine)"
+    rm -rf "$mk_src" "$mk_obj"
+    mkdir -p "$mk_src/src" "$mk_src/lib" "$mk_obj" "$progs_out"
+    # Copy the pruned-pristine tree, then apply the Thylacine port config
+    # (the SDL2/musl idiom -- the vendored tree is never edited).
+    cp "$mk_vendor"/src/*.c "$mk_vendor"/src/*.h "$mk_src/src/"
+    cp "$mk_vendor"/lib/*.c "$mk_vendor"/lib/*.h "$mk_vendor"/lib/*.in.h "$mk_src/lib/"
+    cp "$port_dir/config.h" "$mk_src/src/config.h"
+    cp "$port_dir"/generated/fnmatch.h "$port_dir"/generated/glob.h "$mk_src/lib/"
+    local p
+    for p in "$port_dir"/patches/*.patch; do
+        [[ -e "$p" ]] || continue
+        patch -s -p1 -t -d "$mk_src" -i "$p"
+    done
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -D_GNU_SOURCE=1 -DHAVE_CONFIG_H
+                   -DLIBDIR='"/usr/lib"' -DINCLUDEDIR='"/usr/include"'
+                   -DLOCALEDIR='"/usr/share/locale"'
+                   -I"$mk_src/src" -I"$mk_src/lib"
+                   -std=gnu11 -O2 -fno-pic -fno-stack-protector )
+
+    # The explicit object list (CL-1c census: 30 src + 5 lib gnulib). The
+    # alt-OS files (w32/vms/amiga), remote-cstms, guile-under-HAVE_GUILE,
+    # load-under-MAKE_LOAD, and lib/alloca.c (musl has alloca) are NOT built.
+    local src_objs=( ar arscan commands default dir expand file function
+                     getopt getopt1 guile hash implicit job load loadapi
+                     main misc output posixos read remake rule shuffle
+                     signame strcache variable version vpath remote-stub )
+    local lib_objs=( concat-filename findprog-in fnmatch glob getloadavg )
+
+    local n=0 f
+    for f in "${src_objs[@]}"; do
+        "$clang" "${cflags[@]}" -c "$mk_src/src/$f.c" -o "$mk_obj/src_$f.o"
+        n=$((n + 1))
+    done
+    for f in "${lib_objs[@]}"; do
+        "$clang" "${cflags[@]}" -c "$mk_src/lib/$f.c" -o "$mk_obj/lib_$f.o"
+        n=$((n + 1))
+    done
+    echo "    compiled $n objects"
+
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$mk_obj"/*.o \
+        -o "$progs_out/make"
+    echo "    make: $(wc -c < "$progs_out/make" | tr -d ' ') bytes (ET_EXEC, static)"
+    ledger "make (GNU make 4.4.1): BUILT"
+}
+
 build_disk() {
     # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
     # virtio-blk-device.
@@ -2435,6 +2530,7 @@ case "$target" in
     pouch-progs) build_pouch_progs ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
+    gnumake)     build_gnumake     ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;
