@@ -277,6 +277,9 @@ build_kernel() {
     # Clade CL-1c: cross-build GNU make (the first parallel-spawner port;
     # drives CL-1b's posix_spawn/wait4). Baked into the ramfs as /make.
     build_gnumake
+    # Clade CL-2: cross-build the C++ runtime (libunwind+libc++abi+libc++) into
+    # the sysroot + the /pouch-hello-cxx prover. Skips if the LLVM fork is absent.
+    build_libcxx
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -471,7 +474,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "sdl-probe" "tyr-quake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -2460,6 +2463,209 @@ build_gnumake() {
     ledger "make (GNU make 4.4.1): BUILT"
 }
 
+build_libcxx() {
+    # Clade CL-2 (docs/LLVM-DESIGN.md) -- the C++ runtime: libunwind + libc++abi
+    # + libc++, static, cross-built for aarch64-thylacine against the pouch sysroot
+    # via LLVM_ENABLE_RUNTIMES (the "Alpine-proven musl pairing", section 5.6). The
+    # three archives + the c++/v1 headers install into build/sysroot; a C++ prover
+    # (/pouch-hello-cxx) exercises exceptions/RTTI/threads/TLS-dtors/iostreams/
+    # std::filesystem end to end.
+    #
+    # The runtime SOURCES live in the LLVM fork ($LLVMFORK, the durable arc artifact
+    # -- like the Go arc's $GOFORK), NOT vendored: CL-3/CL-4 build the whole
+    # toolchain from it. Absent fork -> skip cleanly (a fresh checkout still builds;
+    # the joey prover degrades to "not present").
+    #
+    # Config decisions (each ground-truthed; see LLVM-DESIGN.md section 16.14):
+    #   - --target=aarch64-thylacine: under the unknown OS, libc++'s atomic-wait uses
+    #     the GENERIC pthread fallback (pouch routes pthread), NOT the Linux direct-
+    #     futex path (raw syscall(SYS_futex) is the 0xFFFF/ENOSYS sentinel on pouch).
+    #   - CMAKE_SYSTEM_NAME=Linux: a CMAKE-TOOLING knob only (uses llvm-ar, not the
+    #     Apple libtool that rejects aarch64 ELF); the compiled code's OS stays
+    #     thylacine (the --target), so __linux__ is undefined in the emitted code.
+    #   - LIBCXX_HAS_PTHREAD_API=ON: forces libc++'s pthread thread-API selection
+    #     (the unknown OS can't auto-detect it -> "No thread API").
+    #   - LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF: musl has no __cxa_thread_atexit_impl
+    #     -> use libc++abi's pthread-key fallback.
+    #   - LIBCXXABI_ADDITIONAL_COMPILE_FLAGS=-D__linux__: SURGICAL, libc++abi ONLY --
+    #     unlocks __cxa_thread_atexit, whose definition is guarded `#if __linux__ ||
+    #     __Fuchsia__`. Verified the sole __linux__ user in libcxxabi/src; cxa_guard
+    #     keys on SYS_gettid (unaffected). Re-points at CL-3's __thylacine__ guard.
+    #   - LIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF: Thylacine ships no IANA tzdb.
+    #   - CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY: the runtimes aren't built yet,
+    #     so a C++ link probe can't work (chicken-and-egg); compile-only probes.
+    local sysroot="$BUILD_DIR/sysroot"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local bdir="$BUILD_DIR/pouch/cxx-runtimes"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local clangxx="$LLVM_PREFIX/bin/clang++"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+
+    if [[ ! -f "$fork/runtimes/CMakeLists.txt" ]]; then
+        echo "==> libcxx (CL-2): LLVM fork not found at $fork -- skipping (set LLVMFORK)"
+        # Drop a stale prover so the ramfs bake cannot ship an outdated one.
+        rm -f "$progs_out/pouch-hello-cxx"
+        return 0
+    fi
+    if sysroot_is_stale; then
+        echo "==> libcxx (CL-2): pouch sysroot missing/stale -- building it first"
+        build_sysroot
+    fi
+
+    # Reuse the installed runtime when libc++.a is newer than the fork's libc++
+    # tree marker + this build.sh (a recipe/config change forces a rebuild).
+    local need_runtime=1
+    if [[ -f "$sysroot/lib/libc++.a" && -f "$sysroot/include/c++/v1/__config_site" ]]; then
+        if [[ "$sysroot/lib/libc++.a" -nt "$fork/libcxx/CMakeLists.txt" \
+              && "$sysroot/lib/libc++.a" -nt "$fork/libcxxabi/CMakeLists.txt" \
+              && "$sysroot/lib/libc++.a" -nt "$fork/libunwind/CMakeLists.txt" \
+              && "$sysroot/lib/libc++.a" -nt "${BASH_SOURCE[0]}" ]]; then
+            # F3: key freshness on ALL three runtime trees (a fork edit touching
+            # only libcxxabi/libunwind must still force a rebuild, not ship stale).
+            need_runtime=0
+            ledger "libcxx (libunwind+libc++abi+libc++): REUSED (cached + up-to-date)"
+        fi
+    fi
+
+    if [[ "$need_runtime" -eq 1 ]]; then
+        echo "==> building the C++ runtime (libunwind+libc++abi+libc++, aarch64-thylacine)"
+        local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D__thylacine__=1 -D_GNU_SOURCE=1"
+        # (Re)configure when the CMake cache is absent OR this build.sh is newer
+        # than the cache -- so a CMake-flag change in THIS recipe actually takes
+        # effect (a stale cache would silently ignore it). Otherwise ninja is
+        # incremental over the existing cache. The reconfigure is paid once per
+        # build.sh edit, then the need_runtime reuse gate above skips it.
+        if [[ ! -f "$bdir/CMakeCache.txt" || "${BASH_SOURCE[0]}" -nt "$bdir/CMakeCache.txt" ]]; then
+            rm -rf "$bdir"
+            local cmake_args=(
+                -G Ninja -S "$fork/runtimes" -B "$bdir"
+                -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+                -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
+                -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx"
+                -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=OFF
+                -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang"
+                -DCMAKE_CXX_COMPILER="$clangxx"
+                -DCMAKE_ASM_COMPILER="$LLVM_PREFIX/bin/clang"
+                -DCMAKE_C_COMPILER_TARGET=aarch64-thylacine
+                -DCMAKE_CXX_COMPILER_TARGET=aarch64-thylacine
+                -DCMAKE_ASM_COMPILER_TARGET=aarch64-thylacine
+                -DCMAKE_SYSROOT="$sysroot"
+                -DCMAKE_C_FLAGS="$cflags" -DCMAKE_CXX_FLAGS="$cflags"
+                -DCMAKE_ASM_FLAGS="-march=armv8-a+lse+pauth+bti"
+                -DCMAKE_AR="$LLVM_PREFIX/bin/llvm-ar"
+                -DCMAKE_RANLIB="$LLVM_PREFIX/bin/llvm-ranlib"
+                -DCMAKE_NM="$LLVM_PREFIX/bin/llvm-nm"
+                -DCMAKE_INSTALL_PREFIX="$bdir/install"
+                -DLIBCXX_ENABLE_SHARED=OFF   -DLIBCXX_ENABLE_STATIC=ON
+                -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_ENABLE_STATIC=ON
+                -DLIBUNWIND_ENABLE_SHARED=OFF -DLIBUNWIND_ENABLE_STATIC=ON
+                -DLIBCXX_HAS_MUSL_LIBC=ON -DLIBCXX_CXX_ABI=libcxxabi
+                -DLIBCXXABI_USE_LLVM_UNWINDER=ON -DLIBCXXABI_ENABLE_STATIC_UNWINDER=OFF
+                -DLIBCXX_USE_COMPILER_RT=ON -DLIBCXXABI_USE_COMPILER_RT=ON
+                -DLIBUNWIND_USE_COMPILER_RT=ON
+                -DLIBCXX_ENABLE_THREADS=ON -DLIBCXXABI_ENABLE_THREADS=ON
+                -DLIBCXX_HAS_PTHREAD_API=ON
+                -DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF
+                -DLIBCXXABI_ADDITIONAL_COMPILE_FLAGS="-D__linux__"
+                -DLIBCXX_ENABLE_FILESYSTEM=ON
+                -DLIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF
+                -DLIBCXX_ENABLE_EXCEPTIONS=ON -DLIBCXXABI_ENABLE_EXCEPTIONS=ON
+                -DLIBCXX_ENABLE_RTTI=ON
+                -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXX_INCLUDE_BENCHMARKS=OFF
+                -DLIBCXX_INCLUDE_DOCS=OFF -DLIBCXXABI_INCLUDE_TESTS=OFF
+                -DLIBUNWIND_INCLUDE_TESTS=OFF
+            )
+            cmake "${cmake_args[@]}" >/dev/null
+        fi
+        ninja -C "$bdir" install-unwind install-cxxabi install-cxx >/dev/null
+
+        # Stage the three archives + the c++/v1 header tree into the sysroot.
+        # The libunwind top-level headers (unwind.h etc.) are DELIBERATELY not
+        # copied -- they would shadow clang's resource unwind.h; no C++ consumer
+        # needs libunwind's public API.
+        local a
+        for a in libc++.a libc++abi.a libunwind.a; do
+            if [[ ! -f "$bdir/install/lib/$a" ]]; then
+                echo "    libcxx: expected archive $a not produced" >&2
+                exit 1
+            fi
+            cp "$bdir/install/lib/$a" "$sysroot/lib/$a"
+        done
+        # F4: clear the destination first -- cp -R MERGES, so a header removed or
+        # renamed across a fork bump would survive as a stale ghost that could
+        # shadow/misdirect a later include.
+        rm -rf "$sysroot/include/c++/v1"
+        mkdir -p "$sysroot/include/c++/v1"
+        cp -R "$bdir/install/include/c++/v1/." "$sysroot/include/c++/v1/"
+        # Toolchain-completeness gate: the exception personality + the TLS-dtor
+        # ABI must be defined, or every C++ throw / thread_local dies at link.
+        local defined sym
+        defined="$("$LLVM_PREFIX/bin/llvm-nm" --defined-only "$sysroot/lib/libc++abi.a" 2>/dev/null)"$'\n'
+        for sym in __gxx_personality_v0 __cxa_throw __cxa_thread_atexit; do
+            case "$defined" in
+                *" T $sym"$'\n'*) ;;
+                *) echo "    libcxx: libc++abi.a missing $sym -- C++ runtime incomplete" >&2
+                   exit 1 ;;
+            esac
+        done
+        # F2 (LLVM-DESIGN.md 16.14): libc++abi is built with -D__linux__ (int32
+        # __cxx_contention_t) while libc++/consumers are not (int64). That split
+        # is provably INERT only while libc++abi references NO atomic-wait /
+        # contention symbol -- whose mangled type would then disagree across the
+        # archive boundary. Pin it: fail LOUD if a fork bump makes libc++abi emit
+        # or reference one, rather than let it corrupt silently.
+        if "$LLVM_PREFIX/bin/llvm-nm" "$sysroot/lib/libc++abi.a" 2>/dev/null \
+             | grep -qE '__libcpp_atomic_(wait|monitor)|__cxx_atomic_notify'; then
+            echo "    libcxx: libc++abi.a references an atomic-wait/contention symbol --" >&2
+            echo "    the -D__linux__ int32/int64 __cxx_contention_t split is no longer inert" >&2
+            echo "    (LLVM-DESIGN.md 16.14 F2) -- resolve before shipping" >&2
+            exit 1
+        fi
+        ledger "libcxx (libunwind+libc++abi+libc++): BUILT"
+    fi
+
+    # The C++ prover (/pouch-hello-cxx). Compiled with clang++ (the pouch C++
+    # consumer flags: -std=c++20 -stdlib via explicit -isystem c++/v1, _GNU_SOURCE
+    # for the musl POSIX surface libc++ headers reference), linked via pouch-ld
+    # with --eh-frame-hdr (so libunwind finds .eh_frame via PT_GNU_EH_FRAME) + the
+    # three C++ archives. NOT part of build_pouch_progs (that path is C-only).
+    local cxxsrc="$REPO_ROOT/usr/pouch-hello/pouch-hello-cxx.cpp"
+    if [[ -f "$cxxsrc" ]]; then
+        mkdir -p "$progs_out"
+        echo "==> pouch prog (C++): pouch-hello-cxx"
+        # -Wno-potentially-evaluated-expression: the prover's typeid(*polymorphic)
+        # RTTI check intentionally evaluates its operand (that IS the runtime-type
+        # test) -- the warning is expected, not a defect.
+        "$clangxx" --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti \
+            -std=c++20 -O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 \
+            -Wno-potentially-evaluated-expression \
+            -isystem "$sysroot/include/c++/v1" -isystem "$sysroot/include" \
+            -c "$cxxsrc" -o "$progs_out/pouch-hello-cxx.o"
+        # --start-group around the C++ runtime archives: their cross-references
+        # (libc++ -> libc++abi -> libunwind, + libc++abi -> libc++ for the new/
+        # terminate handlers) resolve regardless of scan order. The order below is
+        # already single-pass-correct, but the group is the robust idiom.
+        POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+            "$REPO_ROOT/tools/pouch-ld" "$progs_out/pouch-hello-cxx.o" \
+            --eh-frame-hdr -L"$sysroot/lib" \
+            --start-group -lc++ -lc++abi -lunwind --end-group \
+            -o "$progs_out/pouch-hello-cxx"
+        # Verify the layout the kernel ELF loader requires (ET_EXEC, no PT_DYNAMIC).
+        local elf_hdr elf_phdrs
+        elf_hdr="$("$readelf" -h "$progs_out/pouch-hello-cxx")"
+        elf_phdrs="$("$readelf" -l "$progs_out/pouch-hello-cxx")"
+        case "$elf_hdr" in
+            *"Type:"*EXEC*) ;;
+            *) echo "    pouch-hello-cxx: not ET_EXEC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+        esac
+        case "$elf_phdrs" in
+            *DYNAMIC*) echo "    pouch-hello-cxx: has PT_DYNAMIC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+        esac
+        echo "    pouch-hello-cxx: $(wc -c < "$progs_out/pouch-hello-cxx" | tr -d ' ') bytes (ET_EXEC, static)"
+    fi
+}
+
 build_disk() {
     # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
     # virtio-blk-device.
@@ -2531,6 +2737,7 @@ case "$target" in
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
     gnumake)     build_gnumake     ;;
+    libcxx)      build_libcxx      ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;
@@ -2551,7 +2758,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, sdl2, tyrquake, gnumake, libcxx, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

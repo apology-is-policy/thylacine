@@ -1567,6 +1567,7 @@ kernel syscall (**zero new kernel surface**). Before this patch these were
 | `access` / `faccessat` | `SYS_STAT` (88) | existence + owner-rwx probe |
 | `rename` / `renameat` | `SYS_RENAME` (57) | **clang temp + atomic `.o`** — per-compile |
 | `unlink` / `unlinkat` / `rmdir` | `SYS_UNLINK` (58) (+REMOVEDIR) | |
+| `remove(3)` (stdio) | `SYS_STAT` (88) + `SYS_UNLINK` (58) | **CL-2 `0027`**: lstat-dispatch (dir → `rmdir()`, else → `unlink()`); `std::filesystem::remove` uses `::remove` |
 | `readdir(DIR*)` | `SYS_READDIR` (56) | **9P stream → `struct dirent`** — per-compile (header-search dir scan) |
 
 ### The shared path-split helper
@@ -1580,6 +1581,15 @@ primitives accept; `SYS_open` resolves it through `stalk`, cwd-joining a
 relative dir per LS-4) and hand `(parent_fd, leaf)` to the kernel. The
 `/srv/` short-circuits in `unlink()` / `chmod()` (0014) are preserved by
 delegating their real path to the CL-1a `*at` variant.
+
+**`remove(3)` (`0027-pouch-remove.patch`, Clade CL-2).** 0024 wired the
+`unlink()` / `rmdir()` / `unlinkat()` *functions*, but musl's stdio `remove(3)`
+issues a RAW `__syscall(SYS_unlinkat)` — the `0xFFFF`/ENOSYS sentinel — and
+relies on the kernel returning `-EISDIR` to fall through from unlink to rmdir.
+Thylacine's `SYS_UNLINK` collapses every failure to a generic `-1` (no distinct
+`EISDIR`), so 0027 replaces `remove(3)` with an **lstat-dispatch** form (a
+directory → `rmdir()`, anything else → `unlink()`, both the pouch-wired
+functions). `std::filesystem::remove` → `::remove` rides this (CL-2 surfaced it).
 
 `openat` also gains the **`O_CREAT` arm** (the gap `0023` deferred): split
 the path, `SYS_WALK_CREATE` the leaf (`perm = mode & 0777`, a regular file

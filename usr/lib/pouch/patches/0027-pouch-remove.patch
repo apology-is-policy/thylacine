@@ -1,0 +1,38 @@
+diff --color -ruN musl-base/src/stdio/remove.c b/src/stdio/remove.c
+--- a/src/stdio/remove.c
++++ b/src/stdio/remove.c
+@@ -1,19 +1,20 @@
++/* pouch boundary-line (Clade CL-2): remove(3). musl's stdio remove() issues a
++ * RAW __syscall(SYS_unlinkat) (the 0xFFFF/ENOSYS sentinel on pouch) AND relies
++ * on the kernel returning -EISDIR to fall through to rmdir. Thylacine's
++ * SYS_UNLINK collapses every failure to a generic -1 (no distinct EISDIR -- a
++ * #102-class errno-loss gap), so neither the raw-syscall nor the classic
++ * unlink-then-rmdir-on-EISDIR form works. lstat-dispatch instead: a directory
++ * -> rmdir(), anything else -> unlink() (the pouch-wired functions / the CL-1a
++ * unlinkat wire). Thylacine has no symlinks at v1.0 so lstat == stat.
++ * std::filesystem::remove uses ::remove -- surfaced by CL-2. */
+ #include <stdio.h>
+-#include <errno.h>
+-#include <fcntl.h>
+-#include "syscall.h"
++#include <unistd.h>
++#include <sys/stat.h>
+ 
+ int remove(const char *path)
+ {
+-#ifdef SYS_unlink
+-	int r = __syscall(SYS_unlink, path);
+-#else
+-	int r = __syscall(SYS_unlinkat, AT_FDCWD, path, 0);
+-#endif
+-#ifdef SYS_rmdir
+-	if (r==-EISDIR) r = __syscall(SYS_rmdir, path);
+-#else
+-	if (r==-EISDIR) r = __syscall(SYS_unlinkat, AT_FDCWD, path, AT_REMOVEDIR);
+-#endif
+-	return __syscall_ret(r);
++	struct stat st;
++	if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode))
++		return rmdir(path);
++	return unlink(path);
+ }

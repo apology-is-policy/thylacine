@@ -6320,6 +6320,34 @@ int main(void) {
                 t_putstr("joey: /pouch-hello-fs PASS; CL-1a FS/process wires verified\n");
             }
 
+            // === CL-2: the C++ runtime prover (/bin/pouch-hello-cxx) ===
+            // The Clade arc (docs/LLVM-DESIGN.md) CL-2 proof: a C++ program driving
+            // the full libunwind+libc++abi+libc++ stack END TO END -- exceptions
+            // (the unwinder + libc++abi personality), RTTI, std::thread + TLS
+            // destructors (__cxa_thread_atexit), iostreams, and std::filesystem
+            // (the CL-1a dirent/stat wires + the getcwd fix) -- against the writable
+            // post-pivot Stratum FS. Same pouch_smoke_one pipe/reap/marker check as
+            // pouch-hello-fs. Unlike the C provers, the C++ runtime is built from the
+            // LLVM fork ($LLVMFORK); an absent fork means the binary was not baked,
+            // so probe for it first and skip cleanly (a fresh checkout still boots),
+            // hard-failing ONLY when it is present but regresses.
+            {
+                static const char phcxx_name[] = "/bin/pouch-hello-cxx";
+                long cxx_probe = t_open(T_WALK_OPEN_FROM_ROOT, phcxx_name,
+                                        sizeof(phcxx_name) - 1, T_OREAD);
+                if (cxx_probe < 0) {
+                    t_putstr("joey: /pouch-hello-cxx NOT present (LLVM fork absent at build) -- skipping\n");
+                } else {
+                    (void)t_close(cxx_probe);
+                    if (pouch_smoke_one(phcxx_name, sizeof(phcxx_name) - 1,
+                                        "ALL C++ WIRES PASS", 18) != 0) {
+                        t_putstr("joey: /pouch-hello-cxx FAILED (CL-2 C++ runtime regression)\n");
+                        return 1;
+                    }
+                    t_putstr("joey: /pouch-hello-cxx PASS; CL-2 C++ runtime (EH/RTTI/threads/TLS-dtors/filesystem) verified\n");
+                }
+            }
+
             // === Go Stage 3a: fs file I/O (/go-fs) ===
             // The GOOS=thylacine Go-port Stage-3a proof: a Go binary driving the
             // new os + syscall packages end-to-end -- os.Mkdir / os.Create /
