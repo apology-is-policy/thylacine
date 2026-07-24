@@ -41,10 +41,11 @@ The Thylacine (abstractly depicted in the logo above) is an extinct (though I be
 
 ### Running Quake!
 
-A Pouch port of TyrQuake:
-- Almost effortless
-- Just works
+A Pouch port of TyrQuake: Almost effortless, just works. Mouse look, multiplayer via UDP coming.
 
+![](readme_assets/quake.png)
+
+Video:
 https://github.com/user-attachments/assets/6ecc696a-7140-485a-b59b-58c945c121a5
 
 ### Nora now supports Go (golang) debugging, LSP
@@ -57,5 +58,8 @@ Nora is Thylacine's primary Helix-like modal editor. Now LSP syntax highlighting
 
 ![](readme_assets/prowl.png)
 
+## Up Next
 
-
+- LLVM, mesa port
+- Rust toolchain
+- OpenGL stack
