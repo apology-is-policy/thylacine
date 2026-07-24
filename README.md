@@ -2,11 +2,11 @@
 
 # Thylacine OS
 
-Thylacine is a non-POSIX operating system targeting ARM64/ARMv8 that revolves around one central thesis: __Plan 9 was right:__
+Thylacine is a non-POSIX operating system targeting ARM64/ARMv8 that revolves around one central thesis: __[Plan 9](https://en.wikipedia.org/wiki/Plan_9_from_Bell_Labs) was right:__
 
 - Everything is a file
-- 9P is the universal protocol
-  - Thylacine squeezes every last nanosecond of performance out of it, since it's really easy to completely botch it up, as Microsoft has shown us with its absurdly slow WSL2 interop FS bridge
+- [9P](https://en.wikipedia.org/wiki/9P_(protocol)) is the universal protocol
+  - Thylacine squeezes every last nanosecond of performance out of it, since it's really easy to implement 9P in a rather sub-optimal fashion (WSL2 interop FS bridge is an example)
 - Per-process namespaces are the superior isolation primitive
   - Plan 9 had it in the 80s, and decades later the immensely popular Docker reimplements the same concept. Ken Thompson et al. were four decades ahead of their time.
 - The kernel is a monolithic core with a deliberately minimal interface (one mechanism: 9P), and drivers are userspace programs
@@ -14,20 +14,22 @@ Thylacine is a non-POSIX operating system targeting ARM64/ARMv8 that revolves ar
 
 On top of that it adds its own convictions:
 
-- SOTA kernel components, formally modeled in TLA+
+- SOTA kernel components, formally modeled in [TLA+](https://lamport.azurewebsites.net/tla/tla.html)
   - Memory management, work scheduling, transport, security model, etc., all have their formal models
 - Borrow universally loved mechanisms from mainstream OSs, but stay true to our Plan 9 heritage
-  - Most notably Linux, e.g. 9P2000.L, and io_uring as an inspiration for Thylacine's _Loom_
+  - Most notably Linux, e.g. 9P2000.L, and [io_uring](https://en.wikipedia.org/wiki/Io_uring) as an inspiration for Thylacine's _Loom_
+  - [Factotum](https://en.wikipedia.org/wiki/Factotum_(software)), Plan9s key manager inspired Corvus, which is promoted to the system-wide authentication and trust source (driving SAK)
 - Expand on the "everything is a file"
   - Everything is a filesystem
     - Display, network, disk -- synthetic filesystems backed by 9P-speaking daemons (the console by an in-kernel device), all accessible via the kernel 9P device and grantable per-process
 - We want to be usable -- transparent POSIX compatibility layer
+  - Vendored and patched [musl](https://musl.libc.org) (an alternative c stdlib implementation used by, e.g., [Alpine Linux](https://www.alpinelinux.org))
   - Recompiled POSIX/Linux software just runs, its POSIX surface translated to Thylacine syscalls in userspace; static Linux binaries run best-effort
 - Native Go port with a flagship TUI programming and debugging experience
   - Natively symbolized stack traces all the way to the kernel depths
   - What kind of Plan 9-heritage OS would it be without Ken Thompson's language as its primary user-facing toolchain? (Also, porting Rust's compiler on-device is nowhere near as easy -- though our native userspace is Rust.)
 - A rich, media-capable, tabs-and-panes-based text terminal is the only UI
-  - The concept of a desktop and windows has failed -- from all of the possible windowing workflows, only one now remains, which is people having a couple of windows docked to various parts of their desktops, aligned to one another without overlap, filling their entire display -- this is a terminal, and windows function as panes. All operating systems are moving closer to fully embracing this workflow, but Thylacine does not have any desktop or windowing concept from the beginning.
+  - I don't believe in the concept of a desktop and windows in 2026. Most modern desktops now veer towards docking, which is Thylacine implements from the start in the form of a multimedia-capable graphical terminal the likes of [i3wm](https://i3wm.org) with substantial [Acme](https://en.wikipedia.org/wiki/Acme_(text_editor)) influence (Rob Pike, the author of Acme, is one of the Bell Labs' holy trinity that we revere (except for the mouse thing -- what was that?)).
 - A new made-to-measure (but portable) COW filesystem -- Stratum.
   - Compiles anywhere, 9P native
   - Runs as a userspace driver in Thylacine, executes via the POSIX compatibility layer ("Pouch"), and rides the 9P kernel device -- yet reaches performance competitive with the host (tested on a big Go build directly in Thylacine)
@@ -41,14 +43,24 @@ The Thylacine (abstractly depicted in the logo above) is an extinct (though I be
 
 ### Running Quake!
 
-A Pouch port of TyrQuake:
-- Almost effortless
-- Just works
+A Pouch port of TyrQuake: Almost effortless, just works. Mouse look, multiplayer via UDP coming.
 
-https://github.com/user-attachments/assets/6ecc696a-7140-485a-b59b-58c945c121a5
+![](readme_assets/quake.png)
 
+![](readme_assets/quake-trimmed-480p.mov)
 
+### Nora now supports Go (golang) debugging, LSP
 
+Nora is Thylacine's primary Helix-like modal editor. Now LSP syntax highlighting and diagnostics kick in when a .go document is opened. `:debug [binary]` launches a debug overlay, then `:break`, `:cont`, `:step`, etc. execute debug actions using a Delve integration. HW breakpoints for now, SW breakpoints coming soon.
 
+![](readme_assets/nora-serial.png)
 
+### Prowl -- an htop-like process manager
 
+![](readme_assets/prowl.png)
+
+## Up Next
+
+- LLVM, mesa port
+- Rust toolchain
+- OpenGL stack
