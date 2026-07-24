@@ -370,7 +370,7 @@ no bolted-on chasing).
 | # | Scope | Gate / deliverable | Audit posture | Cut line |
 |---|---|---|---|---|
 | **CL-0** | Spikes + verify: Tier-2 static-musl clang run (syscall-gap census); lld-in-multicall; gallium-OSMesa + ORC state in pinned Mesa; environ/dirent ground truth; memory re-measure | a one-page findings addendum to this doc — **LANDED, §16** | none (read-only) | — |
-| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). **CL-1b core LANDED** (posix_spawn/wait4/dup2/pipe2: `0026`; §16.11). **CL-1c-1 LANDED** (the GNU make 4.4.1 port: `third_party/gnumake` + `usr/ports/gnumake` + `build_gnumake()`; `USE_POSIX_SPAWN` drives CL-1b, `MAKE_JOBSERVER` off; `/make --version` runs on-device; §16.12). CL-1c-2 = the toy `make -j` gate + the boundary-line audit. | `make -j` runs a toy multi-TU C build on-device (with the host-cross clang first) | boundary-line audit (the #68/#926 process-lifecycle lineage — prosecute the spawn/reap paths) | — (shared with the git port) |
+| **CL-1** | The process substrate: `posix_spawn` rewrite + `wait4` + `pouch-env` + `pouch-dirent`; make + ninja ports. **CL-1a LANDED** (the FS/process wires: `0024`; §16.9). **CL-1b-0 LANDED** (pouch-env: `0025`; §16.10). **CL-1b core LANDED** (posix_spawn/wait4/dup2/pipe2: `0026`; §16.11). **CL-1c-1 LANDED** (the GNU make 4.4.1 port: `third_party/gnumake` + `usr/ports/gnumake` + `build_gnumake()`; `USE_POSIX_SPAWN` drives CL-1b, `MAKE_JOBSERVER` off; `/make --version` runs on-device; §16.12). **CL-1c-2 LANDED — THE CL-1c ARC IS COMPLETE** (the on-device `make -j3` gate: make drives CL-1b's posix_spawn/wait4 under parallelism; audit CLOSED 0/1/0/4 NOT dirty; §16.13). | **DONE:** `make -j3` runs a toy multi-TU build on-device (shell-free `/bin/cp` recipes) | **DONE:** boundary-line audit (the #68/#926 process-lifecycle lineage) — CLOSED 0 P0/1 P1/0 P2/4 P3, the P1 a surfaced pre-existing getcwd bug (tracked) | — (shared with the git port) |
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite | a C++ prover (EH + RTTI + threads + TLS-dtors + filesystem) green on-device | focused round on the runtime/boundary seams | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired | host cross-builds via the real triple, byte-compatible artifacts | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade` | **`clang++ -O2` compiles, links (lld), and runs a real C++ program on-device** | focused round (the Support patches + the bake) | — |
@@ -711,6 +711,81 @@ owed at CL-4/CL-5 when real autotools projects build) and *adddup2-onto-0/1/2*
 (handled — CL-1b resolves file-actions statically into the positional fd_list,
 so arbitrary child←parent fd mappings work).
 
+### 16.13 CL-1c-2 as-built (the on-device `make -j3` gate — the arc-2 close)
+
+The audit-bearing proof that GNU make actually **drives** CL-1b's
+posix_spawn/wait4 under `-j` parallelism. A joey post-pivot boot probe (search
+"CL-1c-2" in `usr/joey/joey.c`) writes a self-contained toy project to the
+writable `/tmp/mkt` — three INDEPENDENT "compile" recipes (each a shell-free
+`/bin/cp` of a `.c`→`.o`) + a "link" recipe that DEPENDS on all three — and runs
+`make -f /tmp/mkt/Makefile -j3`. Under `-j3` make starts the 3 compiles in
+parallel (the `job_slots` counter + blocking `waitpid` reap; `MAKE_JOBSERVER`
+off), reaps them, then runs the dependent link. **Everything is ABSOLUTE**
+(`-f`, `/bin/cp`, absolute target/prereq paths) so the gate has zero cwd / PATH /
+`-C`-chdir dependence. The gate verifies all four output files by exact content:
+`a.o`/`b.o`/`c.o` prove the 3 parallel compiles ran; `prog` (== `a.o`'s content)
+proves the link ran AFTER its prerequisites. Boot-fatal + non-vacuous (it unlinks
+stale outputs + rewrites fresh inputs each boot, so a PASS requires make to
+actually run the recipes). Verified in-guest: `/make -j3 PASS`, `status=0`, boot
+OK, 0 EXTINCTION, suite 1196/1196 (kernel byte-unchanged).
+
+**Shell-free is mandatory** (not just a gate convenience): Thylacine has no
+`/bin/sh` and `ut` has no `-c` mode, so a recipe with a shell metacharacter would
+make make spawn `/bin/sh -c '...'` → posix_spawn ENOENT → make exit 2. make's
+`construct_command_argv` fast path spawns a metacharacter-free `/bin/cp` recipe
+DIRECTLY (no shell), which is what drives CL-1b. **Two bringup fixes**
+(ground-truthed, not guessed): `/tmp` must be created before the probe (the
+Go-4c block that also creates it runs later), and the 4-arg spawn argv blob needs
+a **trailing NUL** — the kernel `SYS_SPAWN_FULL_ARGV` parser requires the last
+byte be NUL AND the NUL-count == argc (`kernel/syscall.c:6059/6064`); CL-1c-1's
+2-arg blob didn't need it because the last string ended exactly at the buffer
+bound.
+
+**The focused boundary-line audit CLOSED 0 P0 / 1 P1 / 0 P2 / 4 P3, NOT dirty**
+(Opus 4.8 max — the authorized Fable fallback, Fable being depleted; MODEL
+start==end — plus a concurrent self-audit that independently root-caused the
+P1). The audit confirmed by `#if`-guard trace that fork/vfork/execve/clone are
+genuinely compiled OUT (only the `#else /* USE_POSIX_SPAWN */` branch of the
+reachable `child_execute_job` is live), the jobserver + its SIGCHLD/pselect
+machinery are not compiled (`MAKE_JOBSERVER` off), the SIGCHLD handler block is
+skipped (`HAVE_WAIT_NOHANG` via `HAVE_WAITPID`) so make reaps purely via
+`waitpid(-1,WNOHANG)` + blocking `wait`, the reap-any path composes with the
+existing audited `SYS_WAIT_PID(-1)` (make is single-threaded; the kernel
+serializes zombie-create/reap under `g_proc_table_lock`), the bad-stdin
+adddup2-onto-0 and the wait-status translation round-trip, and the gate is
+non-vacuous + boot-fatal. Dispositions:
+
+- **F1 [P1] — the getcwd oversized-buffer bug, SURFACED not introduced.** The
+  make oracle exposed a **pre-existing kernel defect** (LS-4, not CL-1c):
+  `sys_getcwd_handler` (`kernel/syscall.c`) rejects any buffer
+  `> SYS_OPEN_PATH_MAX+1` (1025), but make (like clang/git/every POSIX program)
+  passes `getcwd(buf, PATH_MAX=4096)` → EIO → `make: getcwd: I/O error` at
+  startup. **Benign for this gate** (make degrades gracefully — it only affects
+  `$(CURDIR)`, not chdir / relative resolution — and the absolute-path gate is
+  unaffected; `status != 0` is not tripped). Does NOT block the CL-1c close, but
+  a **probable CL-2 blocker** (C++ `current_path()`) and broadly reachable. The
+  fix is a one-line drop of the oversized reject (the `sys_validate_user_buf` +
+  the `len+1 > buf_len_raw` fit-check are the correct + sufficient gates); tracked
+  in `memory/bug_getcwd_oversized_buffer.md` and fixed as a separate kernel chunk.
+- **F2 [P3] FIXED**: `mkt_file_eq` did a single `t_read` → a benign short read
+  could false-FAIL a correct build (never a false pass). Now uses `read_exact`
+  (a loop) + an EOF probe for exact length.
+- **F3 [P3] FIXED**: two darwin-only CoreFoundation config macros
+  (`HAVE_CFLOCALECOPYCURRENT`/`HAVE_CFPREFERENCESCOPYAPPVALUE`) carried from the
+  autoconf reference were set `1` — inert (their gnulib consumers aren't in the
+  compile list) but a landmine if it grows; now `#undef`.
+- **F4 [P3] SEAM (CL-4)**: no `/bin/sh` → make can only run shell-free recipes.
+  Real Makefiles (autoconf, kernel builds) lean on shell recipes (`;`/`&&`/`|`/
+  `$(...)`/globs). A Thylacine `/bin/sh` OR make's one-shell mode over `ut` is the
+  CL-4 lift.
+- **F5 [P3] SEAM (CL-4)**: the stat wire leaves `st_mtim.tv_nsec == 0` →
+  second-granularity mtime → the classic "make within one second" incremental
+  race. The gate sidesteps it (unlink-then-rebuild), so mtime is never
+  load-bearing here; a CL-4 incremental-build concern.
+
+**THE CL-1c ARC IS COMPLETE** (the GNU make port builds, runs, and drives the
+process substrate under parallelism). Closed list: `memory/audit_cl1c_closed_list.md`.
+
 ## 17. Revision history
 
 | Date | Change |
@@ -722,3 +797,4 @@ so arbitrary child←parent fd mappings work).
 | 2026-07-23 | **CL-1b-0 landed** (§16.10): the pouch-env crt boundary line (`0025`, `_pouch_env.c` + `__libc_start_main` hook) -- populate `__environ` from the `/env` device at startup so `getenv()`/`environ` work (kernel writes envp[0]=NULL). Fail-soft. Proven in-guest by `/pouch-hello-env` (PGENV1/PGENVNUM inherited via the rfork clone; boot OK, 0 EXTINCTION, suite 1196/1196). Pure userspace (kernel byte-unchanged). NEXT = CL-1b core (posix_spawn/wait4/dup2/pipe2). |
 | 2026-07-23 | **CL-1b core landed** (§16.11): the process lifecycle (`0026`, 10 files) -- posix_spawn (STATIC file_actions resolve -> positional SYS_SPAWN_FULL_ARGV fd_list), posix_spawnp (PATH search), wait4/waitpid (SYS_WAIT_PID + flag/status translation), pipe/pipe2 (2-reg svc shim), dup2/dup3 (old==new; onto-target ENOSYS). Proven in-guest by `/pouch-hello-spawn` (pipe2+posix_spawn+waitpid; WEXITSTATUS ok=0 fail=1; argv pass-through). Self-audit fixed a P1 (opened[] overflow); ground-truth bring-up fixed the dup2-rights/argv0-NULL/std-fd-seed issues. Boot OK, 0 EXTINCTION, suite 1196/1196 (kernel byte-unchanged). Focused audit CLOSED CLEAN (Opus-4.8-max + self-audit; 0 P0/0 P1/0 P2/6 P3, NOT dirty; F4 argv-bound + F1 dup-onto-target comment fixed; the freopen onto-target ENOSYS is a tracked kernel-primitive seam). `memory/audit_cl1b_closed_list.md`. NEXT = CL-1c (make). |
 | 2026-07-24 | **CL-1c-1 landed** (§16.12): the GNU make 4.4.1 **port** (vendored, not a musl patch) -- `third_party/gnumake/` pruned-pristine (sha256 `dd16fb1d…`) + `usr/ports/gnumake/{config.h,generated/}` (the Thylacine delta; `patches/` EMPTY -- zero source edits) + `build_gnumake()`. The census (§16 Q1-10) picked the clean config: `USE_POSIX_SPAWN=1` (make natively drives CL-1b's posix_spawn/wait4) + `MAKE_JOBSERVER` UNDEFINED (top-level `make -jN` = pure job_slots counter + blocking waitpid, no pipe/fifo/pselect/SIGCHLD/fcntl-O_NONBLOCK); no fcntl boundary-line needed. 35 objects (30 src + 5 lib gnulib) compile+link clean against the pouch sysroot -> 371 KB static ET_EXEC. Proven in-guest by `/make --version` (`GNU Make 4.4.1` + `Built for aarch64-thylacine`), boot OK, 0 EXTINCTION, CL-1a/1b siblings unregressed (kernel byte-unchanged). `--version` doesn't spawn, so this is the load-and-run milestone; the parallel-spawn `make -j` gate + the boundary-line audit are CL-1c-2. Flagged seams (neither needed for the gate): execvp self-re-exec (self-remaking makefiles only; owed at CL-4/CL-5) + adddup2-onto-0/1/2 (handled by CL-1b's static fd-list resolve). |
+| 2026-07-24 | **CL-1c-2 landed + THE CL-1c ARC IS COMPLETE** (§16.13): the on-device `make -j3` gate -- a joey probe writes a toy project to `/tmp/mkt` (3 independent shell-free `/bin/cp` compiles + a dependent link, ALL absolute paths) + runs `make -f /tmp/mkt/Makefile -j3`, verifying all 4 outputs by content -- proving make DRIVES CL-1b's posix_spawn/wait4 under `-j` parallelism (the job_slots counter + reap-any `waitpid(-1)`). `/make -j3 PASS`, boot OK, 0 EXT, suite 1196/1196 (kernel byte-unchanged). Bringup: `/tmp` created before the probe + a trailing-NUL on the 4-arg argv blob (the kernel argv parser requires it). **Boundary-line audit CLOSED 0 P0 / 1 P1 / 0 P2 / 4 P3, NOT dirty** (Opus-4.8-max fallback [Fable depleted] + self-audit, CONVERGED on the P1): F1 [P1] = a PRE-EXISTING (LS-4) kernel getcwd bug the make oracle SURFACED (`sys_getcwd_handler` rejects buf > SYS_OPEN_PATH_MAX+1=1025; make passes PATH_MAX=4096 -> EIO) -- benign here (make degrades gracefully; abs-path gate unaffected), does NOT block the close, a probable CL-2 blocker, tracked `memory/bug_getcwd_oversized_buffer.md` + fixed as a separate kernel chunk; F2 [P3, FIXED] mkt_file_eq short-read -> read_exact loop; F3 [P3, FIXED] 2 inert darwin CF config macros -> undef; F4/F5 [P3, SEAMS] no-/bin/sh shell recipes + sub-second mtime -> CL-4. `memory/audit_cl1c_closed_list.md`. NEXT: the getcwd kernel fix, then CL-2 (C++ runtime) / CL-3 (Triple::Thylacine), parallelizable. |

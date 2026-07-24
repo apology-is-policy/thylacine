@@ -124,6 +124,33 @@ static int read_exact(long fd, unsigned char *buf, size_t len) {
     return 0;
 }
 
+// mkt_file_eq (Clade CL-1c-2) -- open the file at absolute `path` and compare
+// its exact content to `expect`. Returns 1 iff the file is EXACTLY `expect_len`
+// bytes and byte-for-byte equal to `expect`; 0 on any open/read/length/content
+// mismatch. Used by the `make -j3` gate to verify each recipe's output file,
+// proving make ran the recipe (and, for the link, that it ran AFTER its
+// prerequisites). Uses read_exact (a loop) so a benign SHORT read of a small
+// file cannot false-FAIL a correct build (CL-1c-2 audit F2); a trailing EOF
+// probe rejects an over-long file.
+static int mkt_file_eq(const char *path, size_t path_len,
+                       const char *expect, size_t expect_len) {
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, path_len, T_OREAD);
+    if (fd < 0) return 0;
+    unsigned char buf[64];
+    int ok = 0;
+    if (expect_len <= sizeof(buf) &&
+        read_exact(fd, buf, expect_len) == 0) {
+        unsigned char extra;
+        if (t_read(fd, &extra, 1) == 0) {   // 0 == EOF: the file is exactly expect_len
+            ok = 1;
+            for (size_t i = 0; i < expect_len; i++)
+                if (buf[i] != (unsigned char)expect[i]) { ok = 0; break; }
+        }
+    }
+    (void)t_close(fd);
+    return ok;
+}
+
 // corvus_exchange — write a [verb|version|len_lo|len_hi|payload] request
 // frame, read a [status|len_lo|len_hi|payload] response frame. On
 // transport success returns 0 and fills *status + *resp_len; the
@@ -3954,6 +3981,124 @@ int main(void) {
                 }
                 (void)t_close(e);
                 t_putstr("joey: Go-4b post-pivot /env re-graft OK\n");
+            }
+
+            // === Clade CL-1c-2: the on-device `make -j3` gate ===
+            // The audit-bearing proof that GNU make (CL-1c-1) actually DRIVES
+            // CL-1b's posix_spawn/wait4 under -j parallelism -- the whole point
+            // of the make port. joey writes a self-contained toy project to the
+            // writable /tmp/mkt: 3 INDEPENDENT "compile" recipes (each a
+            // shell-free `/bin/cp` of a .c -> .o, so make's construct_command_argv
+            // fast-path spawns cp directly via CL-1b's posix_spawn -- no /bin/sh,
+            // which is correct since ut has no `-c` mode) + a "link" recipe that
+            // DEPENDS on all three. Under `make -j3` make starts the 3 compiles in
+            // parallel (the job_slots counter + blocking waitpid reap; MAKE_JOBSERVER
+            // is off), reaps them, then runs the dependent link. EVERYTHING is
+            // ABSOLUTE (`-f /tmp/mkt/Makefile`, `/bin/cp`, absolute target/prereq
+            // paths) so the gate has zero cwd / PATH / -C-chdir dependence. The
+            // gate verifies all four output files by exact content: a.o/b.o/c.o
+            // prove the 3 parallel compiles ran; prog (== a.o's content) proves
+            // the link ran AFTER its prerequisites (the DAG join). Boot-fatal:
+            // make is baked into every image, /tmp is writable post-pivot, so a
+            // failure is a real regression, never a silent skip.
+            {
+                static const char mkfile[] =
+                    "all: /tmp/mkt/prog\n"
+                    "/tmp/mkt/a.o: /tmp/mkt/a.c\n"
+                    "\t/bin/cp /tmp/mkt/a.c /tmp/mkt/a.o\n"
+                    "/tmp/mkt/b.o: /tmp/mkt/b.c\n"
+                    "\t/bin/cp /tmp/mkt/b.c /tmp/mkt/b.o\n"
+                    "/tmp/mkt/c.o: /tmp/mkt/c.c\n"
+                    "\t/bin/cp /tmp/mkt/c.c /tmp/mkt/c.o\n"
+                    "/tmp/mkt/prog: /tmp/mkt/a.o /tmp/mkt/b.o /tmp/mkt/c.o\n"
+                    "\t/bin/cp /tmp/mkt/a.o /tmp/mkt/prog\n";
+
+                // Create /tmp (the writable pool-root scratch) then /tmp/mkt.
+                // This probe runs BEFORE the Go-4c block that also mkdir's /tmp,
+                // so it must create it itself; both are idempotent (the pool
+                // persists across boots).
+                {
+                    long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3,
+                                           T_OREAD, T_WALK_CREATE_DMDIR | 0777u);
+                    if (m >= 0) (void)t_close(m);
+                }
+                long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
+                long mkt = (tmpd >= 0) ? mkdir_or_open(tmpd, "mkt", 3) : -1;
+                if (tmpd >= 0) (void)t_close(tmpd);
+                if (mkt < 0) {
+                    t_putstr("joey: CL-1c-2 mkdir /tmp/mkt FAILED\n");
+                    return 1;
+                }
+                // /tmp is disk-backed (persists across boots), so unlink any
+                // stale inputs + outputs first -> a fresh build every boot (the
+                // gopls-probe idempotency pattern). ENOENT is ignored.
+                (void)t_unlink(mkt, "Makefile", 8, 0);
+                (void)t_unlink(mkt, "a.c", 3, 0); (void)t_unlink(mkt, "b.c", 3, 0);
+                (void)t_unlink(mkt, "c.c", 3, 0);
+                (void)t_unlink(mkt, "a.o", 3, 0); (void)t_unlink(mkt, "b.o", 3, 0);
+                (void)t_unlink(mkt, "c.o", 3, 0); (void)t_unlink(mkt, "prog", 4, 0);
+
+                int wrote = 1;
+                long f = t_walk_create(mkt, "Makefile", 8, T_OWRITE, 0644);
+                if (f >= 0) {
+                    if (t_write(f, mkfile, sizeof(mkfile) - 1) !=
+                        (long)(sizeof(mkfile) - 1)) wrote = 0;
+                    (void)t_close(f);
+                } else wrote = 0;
+                struct { const char *n; unsigned long nl; const char *c; }
+                    srcs[] = { {"a.c",3,"AAAA\n"}, {"b.c",3,"BBBB\n"},
+                               {"c.c",3,"CCCC\n"} };
+                for (int i = 0; i < 3; i++) {
+                    long sf = t_walk_create(mkt, srcs[i].n, srcs[i].nl,
+                                            T_OWRITE, 0644);
+                    if (sf >= 0) {
+                        if (t_write(sf, srcs[i].c, 5) != 5) wrote = 0;
+                        (void)t_close(sf);
+                    } else wrote = 0;
+                }
+                (void)t_close(mkt);
+                if (!wrote) {
+                    t_putstr("joey: CL-1c-2 toy project write FAILED "
+                             "(/tmp/mkt must be writable)\n");
+                    return 1;
+                }
+
+                // NOTE: the argv blob MUST end with a trailing NUL after the
+                // last arg -- the kernel SYS_SPAWN_FULL_ARGV parser reads argc
+                // NUL-terminated strings, and a 4-arg blob without the final
+                // terminator is rejected (spawn returns pid<=0). (make prints a
+                // benign `make: getcwd: I/O error` at startup -- joey's post-pivot
+                // cwd is unset and the kernel getcwd returns EIO -- but make
+                // handles it gracefully, and this ABSOLUTE-path build has zero
+                // cwd dependence, so it is a documented no-op here.)
+                static const char mk_path[] = "/bin/make";
+                static const char mk_argv[] =
+                    "make\0-f\0/tmp/mkt/Makefile\0-j3\0";
+                t_putstr("joey: CL-1c-2 running `make -f /tmp/mkt/Makefile "
+                         "-j3` (3 parallel cp compiles + a dependent link)\n");
+                long st = go4c_spawn_wait_hb(mk_path, sizeof(mk_path) - 1,
+                                             mk_argv, sizeof(mk_argv) - 1,
+                                             /*argc=*/4, /*max_sec=*/60,
+                                             /*hb_sec=*/20, /*caps=*/0ul);
+                char mkn[24];
+                t_putstr("joey: CL-1c-2 make -j3 reaped status=");
+                t_putstr(itoa_dec(st, mkn, sizeof(mkn)));
+                t_putstr("\n");
+                if (st != 0) {
+                    t_putstr("joey: /make -j3 FAILED (exit != 0; CL-1c-2 "
+                             "parallel-spawn regression)\n");
+                    return 1;
+                }
+                if (!mkt_file_eq("/tmp/mkt/a.o", 12, "AAAA\n", 5) ||
+                    !mkt_file_eq("/tmp/mkt/b.o", 12, "BBBB\n", 5) ||
+                    !mkt_file_eq("/tmp/mkt/c.o", 12, "CCCC\n", 5) ||
+                    !mkt_file_eq("/tmp/mkt/prog", 13, "AAAA\n", 5)) {
+                    t_putstr("joey: /make -j3 FAILED (output mismatch; a "
+                             "recipe did not run or ran out of DAG order)\n");
+                    return 1;
+                }
+                t_putstr("joey: /make -j3 PASS; CL-1c-2 GNU make drives CL-1b "
+                         "posix_spawn/wait4 under -j parallelism\n");
             }
 
             // === Go Stage 4c: on-device `go build` (the GOOS=thylacine toolchain

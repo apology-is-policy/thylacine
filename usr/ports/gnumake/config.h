@@ -174,11 +174,11 @@
 
 /* Define to 1 if you have the Mac OS X function CFLocaleCopyCurrent in the
    CoreFoundation framework. */
-#define HAVE_CFLOCALECOPYCURRENT 1
+/* #undef HAVE_CFLOCALECOPYCURRENT */  /* Thylacine CL-1c: darwin-only, inert (F3 hygiene) */
 
 /* Define to 1 if you have the Mac OS X function CFPreferencesCopyAppValue in
    the CoreFoundation framework. */
-#define HAVE_CFPREFERENCESCOPYAPPVALUE 1
+/* #undef HAVE_CFPREFERENCESCOPYAPPVALUE */  /* Thylacine CL-1c: darwin-only, inert (F3 hygiene) */
 
 /* Define to 1 if you have the clock_gettime function. */
 #define HAVE_CLOCK_GETTIME 1
