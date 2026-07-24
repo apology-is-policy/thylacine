@@ -6,7 +6,7 @@ Thylacine is a non-POSIX operating system targeting ARM64/ARMv8 that revolves ar
 
 - Everything is a file
 - 9P is the universal protocol
-  - Thylacine squeezes every last nanosecond of performance out of it, since it's really easy to completely botch it up, as Microsoft has shown us with its absurdly slow WSL2 interop FS bridge
+  - Thylacine squeezes every last nanosecond of performance out of it, since it's really easy to implement 9P in a rather sub-optimal fashion (WSL2 interop FS bridge is an example)
 - Per-process namespaces are the superior isolation primitive
   - Plan 9 had it in the 80s, and decades later the immensely popular Docker reimplements the same concept. Ken Thompson et al. were four decades ahead of their time.
 - The kernel is a monolithic core with a deliberately minimal interface (one mechanism: 9P), and drivers are userspace programs
@@ -47,8 +47,15 @@ A Pouch port of TyrQuake:
 
 https://github.com/user-attachments/assets/6ecc696a-7140-485a-b59b-58c945c121a5
 
+### Nora now supports Go (golang) debugging, LSP
 
+Nora is Thylacine's primary Helix-like modal editor. Now LSP syntax highlighting and diagnostics kick in when a .go document is opened. `:debug [binary]` launches a debug overlay, then `:break`, `:cont`, `:step`, etc. execute debug actions using a Delve integration. HW breakpoints for now, SW breakpoints coming soon.
 
+![](readme_assets/nora-serial.png)
+
+### Prowl -- an htop-like process manager
+
+![](readme_assets/prowl.png)
 
 
 
