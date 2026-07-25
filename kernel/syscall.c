@@ -6022,6 +6022,22 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     int rc = exec_setup_from_spoor(p, exe, exe_size,
                                    argv_data, argv_data_len, argc,
                                    &entry, &sp);
+    // CL-4 DIAG (throwaway): the clade binary is unmistakable at ~95 MB; log
+    // exec_setup's result race-free from the child, and arm the syscall trace
+    // BEFORE EL0 so a reached-userspace clang++ is traced without a parent race.
+    if (exe_size > (50ull << 20)) {
+        extern volatile int g_clade_trace_pid;
+        uart_puts("CLADE-THUNK exe_size=");
+        uart_puthex64(exe_size);
+        uart_puts(" exec_setup rc=");
+        uart_puthex64((u64)(s64)rc);
+        uart_puts(" entry=");
+        uart_puthex64(entry);
+        uart_puts(" pid=");
+        uart_puthex64((u64)p->pid);
+        uart_puts("\n");
+        if (rc == 0) g_clade_trace_pid = p->pid;
+    }
     spoor_clunk(exe);
     kfree(argv_data);
     if (rc != 0) {
@@ -6133,6 +6149,31 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         spoor_clunk(exe);
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
+    }
+    // CL-4 DIAG (throwaway): trace a /clade/... child's syscall stream.
+    if (name_len >= 7 && name[0] == '/' && name[1] == 'c' && name[2] == 'l' &&
+        name[3] == 'a' && name[4] == 'd' && name[5] == 'e' && name[6] == '/') {
+        extern volatile int g_clade_trace_pid;
+        g_clade_trace_pid = pid;
+        // Build the whole line in one buffer + a SINGLE uart_puts, so the #75
+        // console tearing (concurrent per-char writes) does not garble it.
+        static char cl[900];
+        u32 o = 0;
+        const char *hdr = "CLADE-SPAWN argc=";
+        for (const char *q = hdr; *q && o < 890; q++) cl[o++] = *q;
+        cl[o++] = '0' + (char)(argc % 10);   // argc is small (single digit typical)
+        const char *nm = " name=";
+        for (const char *q = nm; *q && o < 890; q++) cl[o++] = *q;
+        for (u32 k = 0; k < name_len && o < 890; k++) cl[o++] = name[k];
+        const char *av = " argv='";
+        for (const char *q = av; *q && o < 890; q++) cl[o++] = *q;
+        if (argv_data_copy)
+            for (u32 k = 0; k < argv_data_len && o < 895; k++)
+                cl[o++] = argv_data_copy[k] == '\0' ? '|' : argv_data_copy[k];
+        cl[o++] = '\'';
+        cl[o++] = '\n';
+        cl[o] = '\0';
+        uart_puts(cl);
     }
     return pid;
 }
@@ -6930,8 +6971,52 @@ static s64 sys_console_open_handler(void) {
 // Dispatch entry.
 // =============================================================================
 
+// CL-4 DIAG (throwaway): pid of the /clade/... proc to trace, set at spawn.
+volatile int g_clade_trace_pid = -1;
+
 void syscall_dispatch(struct exception_context *ctx) {
     u64 nr = ctx->regs[8];
+
+    // CL-4 DIAG: trace the dying clang++/ld.lld startup syscall stream.
+    // Temporarily OFF to de-garble the CLADE-SPAWN argv dump (#75 tearing).
+    if (0 && g_clade_trace_pid >= 0) {
+        struct Thread *ct = current_thread();
+        if (ct && ct->proc && ct->proc->pid == g_clade_trace_pid) {
+            uart_puts("CLADE-SYS nr=");
+            uart_puthex64(nr);
+            uart_puts(" a0=");   uart_puthex64(ctx->regs[0]);
+            uart_puts(" a1=");   uart_puthex64(ctx->regs[1]);
+            uart_puts(" a2=");   uart_puthex64(ctx->regs[2]);
+            uart_puts(" a3=");   uart_puthex64(ctx->regs[3]);
+            uart_puts(" a4=");   uart_puthex64(ctx->regs[4]);
+            uart_puts(" a5=");   uart_puthex64(ctx->regs[5]);
+            if (nr == SYS_WRITE) {
+                char pk[65];
+                u64 len = ctx->regs[2];
+                if (len > 64) len = 64;
+                if (len && uaccess_copy_in(pk, ctx->regs[1], len) == 0) {
+                    for (u64 i = 0; i < len; i++)
+                        if (pk[i] < 0x20 || pk[i] > 0x7e) pk[i] = '.';
+                    pk[len] = '\0';
+                    uart_puts(" fd=");
+                    uart_puthex64(ctx->regs[0]);
+                    uart_puts(" buf='");
+                    uart_puts(pk);
+                    uart_puts("'");
+                }
+            }
+            if (nr == SYS_OPEN) {              // a1=path_va, a2=path_len
+                char pk[129];
+                u64 len = ctx->regs[2];
+                if (len > 128) len = 128;
+                if (len && uaccess_copy_in(pk, ctx->regs[1], len) == 0) {
+                    pk[len] = '\0';
+                    uart_puts(" path='"); uart_puts(pk); uart_puts("'");
+                }
+            }
+            uart_puts("\n");
+        }
+    }
 
     switch (nr) {
     case SYS_EXITS:
@@ -7394,9 +7479,17 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                       ctx->regs[1]);
         return;
 
-    case SYS_BURROW_ATTACH_LAZY:
-        ctx->regs[0] = (u64)sys_burrow_attach_lazy_handler(ctx->regs[0]);
+    case SYS_BURROW_ATTACH_LAZY: {
+        // CL-4 (confirmation): accept BOTH the native 1-arg ABI (length in x0)
+        // AND the Linux 6-arg mmap ABI (addr=0 in x0, length in x1). musl
+        // __init_tls issues the raw 6-arg mmap syscall for a large-TLS binary
+        // (clang++), bypassing the patched 1-arg __mmap wrapper. Sound: a valid
+        // 1-arg length is never 0 (the wrapper + libthyla-rs reject len==0), so
+        // x0==0 unambiguously means the 6-arg convention (length in x1).
+        u64 lazy_len = ctx->regs[0] ? ctx->regs[0] : ctx->regs[1];
+        ctx->regs[0] = (u64)sys_burrow_attach_lazy_handler(lazy_len);
         return;
+    }
 
     case SYS_BURROW_DECOMMIT:
         ctx->regs[0] = (u64)sys_burrow_decommit_handler(ctx->regs[0],

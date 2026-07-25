@@ -81,7 +81,16 @@
 #define EV_CURRENT    1
 
 // e_ident[EI_OSABI] — OS / ABI.
-#define ELFOSABI_NONE 0   // System V; what we accept
+#define ELFOSABI_NONE 0   // System V
+#define ELFOSABI_GNU  3   // GNU/Linux (== ELFOSABI_LINUX); lld stamps this on
+                          // any output carrying a GNU feature (IFUNC, GNU
+                          // properties) -- and, empirically, on plain static
+                          // AArch64 executables too. Accepted alongside NONE:
+                          // the OSABI byte does not change how a static ET_EXEC
+                          // is mapped, and Linux accepts both. A GNU binary that
+                          // actually needs IFUNC resolution has its IRELATIVE
+                          // relocs applied by its own static crt in userspace,
+                          // not the kernel.
 
 // e_type — object file type.
 #define ET_NONE       0
@@ -100,6 +109,7 @@ _Static_assert(ELFCLASS64 == 2,    "ELF ABI pin: e_ident[EI_CLASS] 64-bit");
 _Static_assert(ELFDATA2LSB == 1,   "ELF ABI pin: e_ident[EI_DATA] little-endian");
 _Static_assert(EV_CURRENT == 1,    "ELF ABI pin: version");
 _Static_assert(ELFOSABI_NONE == 0, "ELF ABI pin: System V OSABI");
+_Static_assert(ELFOSABI_GNU == 3,  "ELF ABI pin: GNU/Linux OSABI");
 _Static_assert(ET_EXEC == 2,       "ELF ABI pin: e_type executable");
 _Static_assert(EM_AARCH64 == 183,  "ELF ABI pin: e_machine ARM64");
 

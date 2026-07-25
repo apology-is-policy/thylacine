@@ -74,7 +74,8 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     if (eh->e_ident[EI_CLASS]   != ELFCLASS64)    return ELF_LOAD_BAD_CLASS;
     if (eh->e_ident[EI_DATA]    != ELFDATA2LSB)   return ELF_LOAD_BAD_DATA;
     if (eh->e_ident[EI_VERSION] != EV_CURRENT)    return ELF_LOAD_BAD_VERSION;
-    if (eh->e_ident[EI_OSABI]   != ELFOSABI_NONE) return ELF_LOAD_BAD_OSABI;
+    if (eh->e_ident[EI_OSABI] != ELFOSABI_NONE &&
+        eh->e_ident[EI_OSABI] != ELFOSABI_GNU)    return ELF_LOAD_BAD_OSABI;
 
     // -----------------------------------------------------------------
     // Stage 2: e_type / e_machine / e_version.

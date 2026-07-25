@@ -2231,6 +2231,7 @@ static int clade_gate(void) {
         if (m >= 0) (void)t_close(m);
     }
 
+
     // Tier 1: does clang++ load + run at all? A trivial --version invocation
     // surfaces getMainExecutable / Support-layer runtime faults cheaply. argv[0]
     // ABSOLUTE so getMainExecutable's argv0 resolution (the CL-4 fork patch)
@@ -2282,10 +2283,17 @@ static int clade_gate(void) {
     // C++ headers + the static runtime + CRT. The default target is
     // aarch64-unknown-thylacine (LLVM_DEFAULT_TARGET_TRIPLE), so no --target.
     t_putstr("joey: clade CL-4 compiling /tmp/hello.cpp (clang++ -O2 -> ld.lld)\n");
+    // CL-4 DIAG (compile layer): getMainExecutable returns "" on Thylacine
+    // (realpath fails: no /proc/self/fd), so InstalledDir is empty and clang
+    // can't auto-find its resource dir / ld.lld. Work around with explicit
+    // -resource-dir + -B, and -v to surface clang's exact steps + any error.
+    // -v keeps clang's steps visible while the CL-4b getMainExecutable fix is
+    // validated (InstalledDir now resolves -> clang auto-finds its resource dir,
+    // cc1 self-spawn path, and ld.lld -- NO explicit -B/-resource-dir needed).
     static const char cc_argv[] =
-        "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
+        "/clade/bin/clang++\0-v\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
     long cst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
-                                  cc_argv, (unsigned int)sizeof(cc_argv), 6,
+                                  cc_argv, (unsigned int)sizeof(cc_argv), 7,
                                   600, 20, 0);
     if (cst != 0) {
         t_putstr("joey: clade CL-4 gate: compile+link FAILED rc=");
@@ -7068,6 +7076,13 @@ int main(void) {
             t_putstr("joey: /srv/tapestry absent (no GPU environment); skipping\n");
         }
     }
+
+    // CL-4 DIAG (throwaway): run the clade gate here UNCONDITIONALLY (guarded
+    // only by clade_gate's own /clade check). The 4777 call is nested in the
+    // goroot-present region, which a BAKE_GOROOT=0 clade boot skips; this proven-
+    // every-boot spot (right before boot_complete, joey still console-attached)
+    // makes the gate run on a clade-only pool.
+    (void)clade_gate();
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
     // prints "Thylacine boot OK" here (the banner no longer rides joey's exit;

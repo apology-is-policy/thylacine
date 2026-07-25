@@ -28,6 +28,7 @@
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
 #include <thylacine/vdso.h>     // vdso_clock_burrow (map the RO clock page, #343)
+#include "../arch/arm64/uart.h" // CL-4 DIAG (throwaway): exec_setup stage log
 #include "../arch/arm64/hwfeat.h" // g_hw_features.linux_hwcap (the AT_HWCAP word)
 #include <thylacine/dev.h>      // REVENANT R-4: exe->dev->read for the file-backed path
 #include <thylacine/spoor.h>    // REVENANT R-4: spoor_ref / spoor_clunk
@@ -596,14 +597,27 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
     if (exe->path)
         proc_set_name(p, exe->path->s, (size_t)exe->path->len);
 
+    // CL-4 DIAG (throwaway): stage-log exec_setup for the ~95 MB clade binary.
+    // Temporarily OFF to de-garble the CLADE-SPAWN argv dump (#75 tearing).
+    bool clade_dbg = false && exe_size > (50ull << 20);
+
     // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
     //    binary. elf_load validates segment extents against the real file size.
     size_t hdr_got = 0;
     void *hdr = exec_read_header(exe, &hdr_got);
+    if (clade_dbg) {
+        uart_puts("CLADE-EXEC hdr="); uart_puthex64((u64)hdr);
+        uart_puts(" got="); uart_puthex64((u64)hdr_got); uart_puts("\n");
+    }
     if (!hdr)                                  return -1;
     struct elf_image img;
     int r = elf_load(hdr, exe_size, &img);
     kfree(hdr);
+    if (clade_dbg) {
+        uart_puts("CLADE-EXEC elf_load r="); uart_puthex64((u64)(s64)r);
+        uart_puts(" nseg="); uart_puthex64((u64)img.n_segments);
+        uart_puts(" entry="); uart_puthex64(img.entry); uart_puts("\n");
+    }
     if (r != ELF_LOAD_OK)                      return -1;
 
     // 2. Map each PT_LOAD. Non-writable segments (R+X text, R-only rodata --
@@ -635,16 +649,29 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
 
         int rc = file_shareable ? map_file_backed(p, exe, seg)
                                 : map_eager_from_file(p, exe, seg);
+        if (clade_dbg) {
+            uart_puts("CLADE-EXEC seg["); uart_puthex64((u64)i);
+            uart_puts("] flags="); uart_puthex64((u64)seg->flags);
+            uart_puts(" vaddr="); uart_puthex64(seg->vaddr);
+            uart_puts(" foff="); uart_puthex64(seg->file_offset);
+            uart_puts(" filesz="); uart_puthex64(seg->filesz);
+            uart_puts(" memsz="); uart_puthex64(seg->memsz);
+            uart_puts(" share="); uart_puthex64((u64)file_shareable);
+            uart_puts(" maprc="); uart_puthex64((u64)(s64)rc); uart_puts("\n");
+        }
         if (rc != 0)                            return -1;   // partial -> caller disposes Proc
     }
 
     // 3. User stack + the vDSO clock page + the System V startup frame (reads
     //    img metadata, not the file -- AT_PHDR resolves into the first mapped
     //    segment's VA; AT_VDSO_CLOCK into the RO clock page).
-    if (exec_map_user_stack(p) != 0)           return -1;
+    int stkrc = exec_map_user_stack(p);
+    if (clade_dbg) { uart_puts("CLADE-EXEC stack_rc="); uart_puthex64((u64)(s64)stkrc); uart_puts("\n"); }
+    if (stkrc != 0)                            return -1;
     u64 vdso_va = exec_map_vdso(p);            // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
     *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
                                        vdso_va);
+    if (clade_dbg) { uart_puts("CLADE-EXEC sp="); uart_puthex64(*sp_out); uart_puts(" DONE\n"); }
     return 0;
 }

@@ -17,6 +17,7 @@
 #include <thylacine/sched.h>                 // RW-11 SA-1b: sched_mark_interactive
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>               // t_stat + T_S_IFCHR (devcons_stat_native)
 #include <thylacine/thread.h>                // RW-11 SA-1b: current_thread
 #include <thylacine/types.h>
 
@@ -850,6 +851,25 @@ static int devcons_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
+// SYS_FSTAT on the console fd. A POSIX program fstats its stdin/stdout/stderr:
+// musl stdio probes the buffering mode, and clang's FixupStandardFileDescriptors
+// (Support/Unix/Process.inc) treats a fstat failure with errno != EBADF as fatal
+// -> clang_main returns 1 before emitting anything. Without a stat_native slot
+// spoor_stat_native returns -1, so the console MUST report itself. It is a
+// system-owned character device (a stream: no size, not seekable).
+static int devcons_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    *out = (struct t_stat){0};
+    out->qid_path = c->qid.path;
+    out->qid_type = QTFILE;
+    out->mode     = T_S_IFCHR | 0620u;
+    out->nlink    = 1;
+    out->blksize  = 4096;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+    return 0;
+}
+
 static struct Spoor *devcons_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
@@ -1299,6 +1319,7 @@ struct Dev devcons = {
     .attach   = devcons_attach,
     .walk     = devcons_walk,
     .stat     = devcons_stat,
+    .stat_native = devcons_stat_native,
 
     .open     = devcons_open,
     .create   = devcons_create,
