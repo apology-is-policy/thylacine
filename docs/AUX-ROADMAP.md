@@ -124,13 +124,32 @@ converges). They can proceed in either order; Vivarium is the one currently movi
 
 ## Coordination with the main track
 
-- Main is on the **Clade/LLVM** arc (CL-4 complete at `7cfcabce` on
-  `clade-cl4-wip`; next CL-5).
-- **Merge handoff: `docs/MERGE-gfx-4.md`** — measured conflicts from an aborted
-  trial merge, incl. the **pouch patch series number collision** (both tracks
-  numbered 0024/0025/0026) and the suspicion that main's
-  `0024-pouch-fs-process-wires` **subsumes** the aux `0024-pouch-fopen-create`.
-- Ordering: `clade-cl4-wip` → `main` **first**, then `gfx-4` → `main`.
+**Merge round 1 is DONE** (2026-07-27): `gfx-4` merged into local `main` at
+`15edb01e` + the `de451566` pouch O_APPEND restore. The pouch series collision the
+handoff predicted was real and was resolved there. **Not pushed** — `origin/main`
+is still `b0bf63f2`.
+
+Two things carry forward, both in `docs/MERGE-gfx-4.md` (rewritten as a round-2
+handoff):
+
+- **Five `gfx-4` commits landed after the merge point** (`b7df5b21..5af01124`),
+  including both VIVARIUM kernel prerequisites. Round 1's analysis said
+  `struct Proc` would auto-merge because V-1a's `phenotype` fit the tail pad — that
+  is no longer true: V-4a-0 grows it 352 -> 360. The size assert is the drift
+  detector, so a bad merge fails the build loudly.
+- **Clade CL-4 never landed.** The handoff advised `clade-cl4-wip` -> `main`
+  first; in the event `gfx-4` went first, so CL-4's four commits still merge on top
+  of the gfx-4 kernel changes. An inconvenience, not a defect — but it means
+  `kernel/syscall.c` now has a three-way overlap (main-via-gfx-4, CL-4, and
+  V-4a-0b's small `pid` out-param thread-through).
+
+**Consequence for V-1b**: it is *still* best sequenced after CL-4 lands, for the
+original reason — CL-4 touches `kernel/elf.c` + `kernel/syscall.c`, which is
+exactly where V-1b's syscall-entry phenotype branch goes. V-4a (the diorama crate)
+is pure userspace and has no such constraint, which is another reason to do it
+first.
+
 - The aux track has touched kernel files (cfg-3's `srv_peer` stamp, V-1a's
-  `Proc.phenotype`); it is not `usr/`-only. Check the main worktree's dirty state
-  before editing shared kernel files.
+  `Proc.phenotype`, V-4a-0's `exe_path`, V-4a-0b's `srv_peer_info.pid`); it is not
+  `usr/`-only. Check the main worktree's dirty state before editing shared kernel
+  files.
