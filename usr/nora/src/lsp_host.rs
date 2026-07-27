@@ -49,6 +49,9 @@ const MODULE_SEARCH_DEPTH: usize = 32;
 pub const TAG_STDIN: Tag = 0;
 pub const TAG_LSP_OUT: Tag = 1;
 pub const TAG_LSP_ERR: Tag = 2;
+// 3, 4 are TAG_DAP_OUT / TAG_DAP_ERR (dap_host.rs, the 8f debugger).
+/// #55c: the editor's note queue (tty:winch — the console resize signal).
+pub const TAG_NOTES: Tag = 5;
 
 /// A live gopls session.
 pub struct Lsp {

@@ -690,7 +690,15 @@ impl PciDev {
     /// `6 * PCI_BAR_VA_STRIDE` bytes; the kernel rejects overlaps, but only
     /// after trusting the caller chose an unmapped window.
     pub unsafe fn claim(virtio_device_id: u32, bar_window: u64) -> core::result::Result<Self, PciError> {
-        let rc = t_pci_claim(u64::from(virtio_device_id));
+        Self::claim_nth(virtio_device_id, 0, bar_window)
+    }
+
+    /// Claim the nth (0-based, enumeration-order) matching function -- the
+    /// G-7c selector for a SECOND same-id function (two virtio-input
+    /// functions: keyboard + tablet). nth rides the high 32 bits of the
+    /// SYS_PCI_CLAIM arg; nth 0 == [`PciDev::claim`]. Same safety contract.
+    pub unsafe fn claim_nth(virtio_device_id: u32, nth: u32, bar_window: u64) -> core::result::Result<Self, PciError> {
+        let rc = t_pci_claim(u64::from(virtio_device_id) | (u64::from(nth) << 32));
         if rc < 0 {
             return Err(PciError::Claim);
         }

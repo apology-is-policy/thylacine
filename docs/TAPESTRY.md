@@ -376,6 +376,44 @@ Input is two orthogonal layers:
   executable," modal. For an app client, layer 2 is raw input. Mouse is secondary
   (selection, focus, layout drag); keyboard is primary.
 
+**The tab/stack strip is an Acme tag bar (the i3-stacking steal; Halcyon-era,
+noted 2026-07-23 from the user's i3 find).** The layout tree already carries the
+four i3 modes (`usr/tapestryd/src/pane.rs::Mode` = split-h | split-v | tabbed |
+stacked) and a per-leaf `tag` string, and the Stacked mode already renders the
+Acme *shape* — a strip per child carved from the container top (tabbed = one row
+of per-child segments; stacked = one full-width row per child). But at G-6 that
+strip is **glyph-free colored segments, never titles** (the D7 rule: the
+compositor paints pixels, renderers paint text). The steal is to make the strip
+an actual **Acme tag bar** — the `tag` rendered as text — turning "a colored bar
+per pane" into "a stack of named tag lines," which is the thing that makes i3
+stacking (and Acme columns) legible rather than just structural.
+
+This forces one clean decision (who draws the title text, given D7):
+
+- **A thin renderer-drawn title surface** is the Plan-9-clean answer, and the
+  recommended one (to be ratified when Halcyon builds it): the compositor places
+  a title-bar rect — it already computes the strip geometry — and the *renderer*
+  (Aurora / Halcyon) paints the `tag` into it as just another surface. D7 stays
+  pristine; the compositor never grows a glyph path. Rejected: teaching the
+  compositor a minimal font, which would dissolve the mechanism/policy split the
+  whole design rests on.
+- This is *why* TTF is foundational (next): the tag bar is the first place a
+  renderer must draw crisp text into compositor-placed chrome. The near-term,
+  tractable version can even be a Cornucopia-bitmap tag bar (Aurora's existing
+  atlas) before the TTF path lands — the mechanism (renderer-drawn strip
+  surface) is identical.
+
+**The deeper steal — the executable tag line (the Halcyon NOVEL angle).** Acme's
+tag is not a *label*, it is **editable, executable text** (Layer 2's "acme's text
+is executable," above). A Thylacine tag bar should be the same: type a command
+into a pane's tag and run it — the title bar *is* a live command surface, not
+chrome. This is where i3 (which gives the *layout*) and Acme (which gives the
+*executable tag*) fuse into something neither has, in the one OS whose founding
+conviction is "the shell is sufficient as a UI." Recorded as the Halcyon-era
+pane-title direction: titles-in-strips is the tractable first step; the
+executable tag line is the richness it grows into. **Deferred to Halcyon (Phase
+8) — captured now to steer the pane work, not built yet.**
+
 **TTF is foundational, not a nicety** (the Phase-0 fontdue note becomes
 load-bearing). A native `no_std` TrueType rasterizer (fontdue / swash-class;
 aux-forkable like ratatui->nora) with AA + hinting; complex-script shaping (CJK /
@@ -713,11 +751,13 @@ payload = fixed **24-byte** records into a registered event buffer:
 ```
 struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
     u16 kind;                /* KEY, PTR_MOVE, PTR_BTN, SCROLL, FRAME,
-                                CONFIGURE, FOCUS, CLOSE */
+                                CONFIGURE, FOCUS, CLOSE, PTR_REL */
     u16 code;                /* KEY: evdev keycode (virtio-input passthrough);
                                 PTR_BTN: button; CONFIGURE: low bits of serial */
     u32 value;               /* KEY: press/release/repeat; PTR: packed x<<16|y
-                                (surface-RELATIVE); CONFIGURE: W<<16|H */
+                                (surface-RELATIVE); PTR_REL: packed SIGNED
+                                display-pixel deltas dx<<16|dy (i16 each);
+                                CONFIGURE: W<<16|H */
     u32 rune;                /* KEY: compositor-resolved UTF-32, 0 if none */
     u16 mods;                /* modifier bitmask (shift/ctrl/alt/super/...) */
     u16 flags;
@@ -731,6 +771,20 @@ struct tevent {              /* little-endian, 24 bytes, version-pinned wire */
   a tapestryd config concern.
 - **Pointer coords are surface-relative** — absolute screen coords would leak
   placement through the D5 wall.
+- **PTR_REL is the mouse-look stream** (the relative-mouse arc): every
+  pointer motion reaches the FOCUSED surface as signed display-pixel deltas
+  (a focus companion like KEY — decoupled from the pointer position;
+  PTR_MOVE keeps the under-pointer rule). Deltas are EXACT from a relative
+  device (virtio-mouse) and SYNTHESIZED from consecutive absolute motion —
+  load-bearing under abs-only frontends (QEMU cocoa with a tablet present
+  never produces host rel events; the edge-stall at the host window
+  boundary is inherent to the abs source). Deltas leak no placement (pure
+  motion — D5-consistent). Queueing: back-of-queue REL records coalesce by
+  SUMMATION (replacement would lose motion; an interleaved event starts a
+  fresh record, preserving order) and the kind is droppable under stall
+  (lossy motion stream — a burst must never WEDGE a client). A relative-mode
+  client (SDL mouse-look) consumes PTR_REL and must NOT diff successive
+  PTR_MOVE positions (every motion emits both — a diff double-counts).
 - **FRAME is the display clock** (D1's pacing signal): base virtio-gpu 2D has
   NO guest-visible vblank (`EVENT_DISPLAY` is config-change only — verified),
   so tapestryd SYNTHESIZES a fixed-rate FRAME tick (60 Hz default,

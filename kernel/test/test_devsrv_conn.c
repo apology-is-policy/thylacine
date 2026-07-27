@@ -42,6 +42,13 @@
 //     The dead-Proc guard: a zombie / reaped peer fail-closes caps and the
 //     alive bit to 0, while the immutable stripes survives.
 //
+//   devsrv.srv_peer_renderer_flag
+//     cfg-3: srv_peer_info.flags stamps SRV_PEER_FLAG_CONSOLE_RENDERER iff
+//     the peer holds the LIVE console-renderer role at query time — absent
+//     before the claim, present after, gone again after a release (the
+//     revocation-correct live re-check), and fail-closed 0 for a dead peer
+//     even while the (dangling) role pointer still names it.
+//
 //   devsrv.srv_peer_gate
 //     Only the service poster may query a connection's peer — a non-poster,
 //     even one holding the connection endpoint, is refused; the endpoint
@@ -99,6 +106,7 @@ void test_devsrv_conn_release(void);
 void test_devsrv_poster_exit_drains_backlog(void);
 void test_devsrv_srv_peer_identity(void);
 void test_devsrv_srv_peer_dead_peer(void);
+void test_devsrv_srv_peer_renderer_flag(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
 
@@ -846,6 +854,76 @@ void test_devsrv_srv_peer_dead_peer(void) {
     handle_close(corvus, (hidx_t)conn_h);
     srv_registry_reset();
     drop_linked_test_proc(client);          // proc_test_unlink is idempotent
+    drop_test_proc(corvus);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.srv_peer_renderer_flag — cfg-3: the console-renderer role stamp in
+// srv_peer_info.flags is LIVE (claim -> present, release -> absent) and
+// fail-closes with the peer's death (the tapestryd apply-authority gate's
+// revocation-correctness rests on both properties).
+// ---------------------------------------------------------------------------
+
+void test_devsrv_srv_peer_renderer_flag(void) {
+    srv_registry_reset();
+    proc_test_clear_console_renderer();   // defensive: start role-free
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_linked_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    TEST_ASSERT(client_h >= 0, "the client connects");
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    // Baseline: no renderer bound anywhere — the flag is absent.
+    struct srv_peer_info info = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &info), 0,
+        "SYS_SRV_PEER succeeds pre-claim");
+    TEST_EXPECT_EQ(info.flags, 0u, "no role bound -> flags absent");
+
+    // The peer claims the console-renderer role: the NEXT query stamps it
+    // (live resolution — nothing was captured at conn mint).
+    TEST_EXPECT_EQ(proc_set_console_renderer(client), 0, "client claims the role");
+    struct srv_peer_info rinfo = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &rinfo), 0,
+        "SYS_SRV_PEER succeeds post-claim");
+    TEST_EXPECT_EQ(rinfo.flags, (u32)SRV_PEER_FLAG_CONSOLE_RENDERER,
+        "the live role holder carries the renderer stamp");
+    TEST_EXPECT_EQ(rinfo.alive, 1u, "the role holder is alive");
+
+    // Release: the stamp vanishes on the next query — the gate's
+    // revocation-correctness (a stale conn loses authority with the role).
+    proc_test_clear_console_renderer();
+    struct srv_peer_info cinfo = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &cinfo), 0,
+        "SYS_SRV_PEER succeeds post-release");
+    TEST_EXPECT_EQ(cinfo.flags, 0u, "a released role stamps nothing");
+
+    // Dead-peer fail-close: re-claim, then kill the peer synthetically
+    // (bypassing proc_become_zombie_locked's clear, so the role pointer
+    // still names the corpse). The alive-gated walk must refuse the stamp
+    // — a dead renderer grants nothing.
+    TEST_EXPECT_EQ(proc_set_console_renderer(client), 0, "client re-claims");
+    client->state = PROC_STATE_ZOMBIE;
+    struct srv_peer_info zinfo = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &zinfo), 0,
+        "SYS_SRV_PEER still returns 0 for a dead peer");
+    TEST_EXPECT_EQ(zinfo.alive, 0u, "the dead peer reports not-alive");
+    TEST_EXPECT_EQ(zinfo.flags, 0u,
+        "a dead role holder's stamp fail-closes to 0");
+
+    proc_test_clear_console_renderer();   // release the dangling role pre-free
+    handle_close(corvus, (hidx_t)conn_h);
+    srv_registry_reset();
+    drop_linked_test_proc(client);
     drop_test_proc(corvus);
 }
 

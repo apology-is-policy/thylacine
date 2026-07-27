@@ -11,7 +11,12 @@
 #                  runs `+timedemo demo1`. "======= Quake Initialized ======="
 #                  proves the full boot; the "<N> frames <t> seconds <fps>"
 #                  line proves the entire render->present->scanout path ran
-#                  to completion (969 frames).
+#                  to completion (969 frames). Since #51 the present is
+#                  FRAME-paced by default, so the fps reads ~clock_hz
+#                  (~57-60) and is STABLE -- the pre-#51 122-600 spread was
+#                  HVF vCPU variance on an uncapped spin. 969 paced frames
+#                  ~= 17 s, inside the 120 s budget. (SDL_THYLACINE_NOPACE
+#                  opts a benchmark out.)
 #   render leg   : a screendump carries Quake's textured-world color
 #                  richness (not a flat/black surface) -- the pixels
 #                  reached the scanout. (The fps line is the DETERMINISTIC

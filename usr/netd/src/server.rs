@@ -366,6 +366,18 @@ struct Slot {
     // the M6 boot probe to 10.0.2.100 killed DNS at 60s). Independent of the
     // PendingConnect deadline, which only exists on the deferred data-open path.
     connect_deadline_ms: u64,
+    // #52: the connection is in nonblocking-read mode (set by the `nonblock 1`
+    // ctl verb; the pouch FIONBIO / a native nonblock socket). When set, an
+    // empty-but-open `data` read answers E_AGAIN (Rlerror 11 -> the guest's
+    // EWOULDBLOCK) instead of PARKING a PendingRead. This is the correct
+    // nonblocking-read primitive: a nonblocking reader tries-and-EAGAINs and
+    // never touches the readiness bridge, so it cannot churn the shared session
+    // tag pool (the poll-before-read design did: each 0-timeout poll submitted a
+    // readiness probe the kthread then Tflush-abandoned -> awaiting_flush tags
+    // piled up faster than netd Rflushed -> session tag exhaustion -> spurious
+    // EIO on every data read). poll()/select() (the readiness bridge) is
+    // independent and unaffected -- POSIX O_NONBLOCK governs read/write, not poll.
+    nonblock: bool,
 }
 
 /// The per-flow ring geometry netd allocates (Weft-6b). 256 KiB total (64 pages,
@@ -408,6 +420,7 @@ impl Slot {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            nonblock: false,
         }
     }
 }
@@ -1381,6 +1394,7 @@ impl Net {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            nonblock: false,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -1416,6 +1430,7 @@ impl Net {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            nonblock: false,
         };
         self.udp_active += 1;
         self.udp_opened += 1;
@@ -1460,6 +1475,7 @@ impl Net {
             lo: false,
             weft: None,
             connect_deadline_ms: 0,
+            nonblock: false,
         };
         self.icmp_active += 1;
         self.icmp_opened += 1;
@@ -1468,6 +1484,12 @@ impl Net {
 
     fn slot_live(&self, n: u32) -> bool {
         (n as usize) < MAX_SLOTS && self.slots[n as usize].used
+    }
+
+    /// #52: is a live slot in nonblocking-read mode? A dead slot is never
+    /// nonblock (defensive; the read path already gates on slot liveness).
+    fn slot_nonblock(&self, n: u32) -> bool {
+        self.slot_live(n) && self.slots[n as usize].nonblock
     }
 
     /// The protocol backing a live slot (the get::<T>() type discriminator).
@@ -2119,6 +2141,7 @@ impl Net {
             lo: nlo,
             weft: None,
             connect_deadline_ms: 0,
+            nonblock: false,
         };
         self.tcp_active += 1;
         self.tcp_opened += 1;
@@ -5357,10 +5380,16 @@ impl Conn {
                 }
                 // Genuine end of stream: recv() returns 0.
                 RecvOutcome::Eof => return p9::build_rread(&mut self.out_buf, tag, &[]),
-                // Open but empty: BLOCK. Park the read; poll_data delivers the
-                // held Rread when bytes arrive (or 0 on EOF). Bounded per
-                // connection so a client cannot pin unbounded reads (#65 floor).
+                // Open but empty: BLOCK (default) or E_AGAIN (nonblocking, #52).
+                // A nonblock connection answers immediately so the guest's
+                // recvfrom returns EWOULDBLOCK -- it never parks + never touches
+                // the readiness bridge (no tag churn). A blocking connection
+                // parks; poll_data delivers the held Rread when bytes arrive (or
+                // 0 on EOF). Bounded per connection (#65 floor).
                 RecvOutcome::WouldBlock => {
+                    if net.slot_nonblock(n) {
+                        return self.err(tag, p9::E_AGAIN);
+                    }
                     if self.pending_reads.len() >= MAX_FIDS {
                         return self.err(tag, p9::E_PROTO);
                     }
@@ -5812,6 +5841,21 @@ impl Conn {
             }
             b"hangup" => {
                 net.ctl_hangup(n);
+                p9::build_rwrite(&mut self.out_buf, tag, count)
+            }
+            b"nonblock" => {
+                // #52: toggle nonblocking-read mode for this connection. `nonblock 1`
+                // (or bare `nonblock`) sets it; `nonblock 0` clears. An empty-but-open
+                // `data` read then answers E_AGAIN instead of parking -- the correct
+                // nonblocking primitive (no readiness-bridge churn). Idempotent; a
+                // non-live slot is a no-op success (the ctl fd may outlive a hangup).
+                let on = match it.next() {
+                    Some(a) => a != b"0",
+                    None => true,
+                };
+                if net.slot_live(n) {
+                    net.slots[n as usize].nonblock = on;
+                }
                 p9::build_rwrite(&mut self.out_buf, tag, count)
             }
             b"announce" => {

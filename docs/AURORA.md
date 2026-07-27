@@ -112,6 +112,28 @@ output bytes ring into a drain fid the renderer reads; renderer-decoded keyboard
 input enters via a feed fid into the EXISTING LS-8 line discipline, which stays
 backend-independent.
 
+**The reweave + the winsize contract (#55, user-voted 2026-07-22; the kernel half
+is ARCH §23.5.3).** Aurora is the console's GEOMETRY AUTHORITY: the winsize IS its
+cell grid (`w/cell_w × h/cell_h`), reported not negotiated. It writes
+`winsize <cols> <rows>` to `/dev/consctl` (the ptyfs PTY-2c grammar; consctl's
+mint gate widens to attached-OR-renderer so aurora self-serves by name, exactly
+like consdrain/consfeed) at first present and on every reweave; the kernel relays
+a CHANGED size as `tty:winch` to the session and serves readback via the ungated
+`/dev/winsize` leaf. The reweave itself is the landed G-6b client resize —
+`libtapestry::handle_configure` (a same-size CONFIGURE = repaint-only, dirty-all;
+a size offer = ack `resize W H <serial>` + the weave generation swap) — then:
+recompute the grid from the new pixel size; **below the degenerate floor (20×5)
+do NOT reweave** — keep the old grid and let the compositor crop (a 1-cell pane
+must not kill the fbcon; the pre-#55 ignore/crop posture is retired to exactly
+this sub-floor case); else `Vt::resize` — content-preserving and
+**cursor-anchored** (on a row shrink the visible window slides down just enough
+to keep the cursor row; on grow, blank rows append at the bottom; no history
+reflow — fbcon-grade), full repaint on the new generation, then the winsize
+write. Consumers: native apps (ut's Repl, nora/Kaua) handle `tty:winch` on their
+notes fd → read `/dev/winsize` (CPR if `0 0` — the serial fallback, where the
+host terminal answers) → relayout; pouch apps get SIGWINCH + TIOCGWINSZ through
+the landed PTY-3 plumbing plus the 0021 cons arm.
+
 ---
 
 ## 5. The environment — the first-class layer
@@ -254,3 +276,8 @@ unchanged).
   build on Tapestry + the Menagerie scanout/USB-keyboard drivers + the trusted-path
   hook + the `/dev/cons` swappable backend; QEMU (virtio-gpu + virtio-input) is the
   zero-hardware-risk proving ground.
+- **2026-07-22**: the #55 reweave + winsize contract adopted (§4 here + ARCH
+  §23.5.3 + the §25.4 LS-8 row addendum). Scripture-first; the impl follows as
+  55a (kernel: winsize state + verb + winch + `/dev/winsize` + the is-a-cons qid
+  contract) → 55b (aurora reweave) → 55c (consumers: 0021 cons arm + Kaua/ut/nora
+  winch relayout + the interactive resize E2E) + one focused audit.

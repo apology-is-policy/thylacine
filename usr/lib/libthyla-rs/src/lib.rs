@@ -824,10 +824,13 @@ impl TPciInfo {
     }
 }
 
-// t_pci_claim — claim the first VirtIO-PCI function matching `virtio_device_id`
-// (1 = net, 4 = rng, ...). Returns a non-negative KOBJ_PCI handle (fixed rights
-// R|W|MAP, non-transferable) on success, -1 on cap-missing / not-found /
-// already-claimed / BAR-assign failure. Requires CAP_HW_CREATE.
+// t_pci_claim — the arg packs `virtio_device_id | nth<<32` (G-7c): the low 32
+// bits are the VIRTIO device id (1 = net, 4 = rng, 18 = input, ...), the high
+// 32 the 0-based enumeration-order instance selecting the nth same-id
+// function (a bare id is nth 0 = the first match; `PciDev::claim_nth` packs
+// this). Returns a non-negative KOBJ_PCI handle (fixed rights R|W|MAP,
+// non-transferable) on success, -1 on cap-missing / not-found (an over-large
+// nth included) / already-claimed / BAR-assign failure. Requires CAP_HW_CREATE.
 //
 // Safety: claiming a function gives the caller exclusive control of a real
 // device; the kernel does every check (cap, exclusivity, BAR assignment).
@@ -1578,7 +1581,10 @@ pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
 // `alive`). Repr-C + the kernel's static asserts pin both sides.
 //   principal_id : peer's durable identity; PRINCIPAL_NONE when alive == 0
 //   primary_gid  : peer's primary group; GID_NONE when alive == 0
-//   flags        : reserved, 0 at v1.0
+//   flags        : cfg-3 — bit 0 (T_SRV_PEER_FLAG_CONSOLE_RENDERER) = the
+//                  peer holds the LIVE console-renderer role (the tapestryd
+//                  apply-authority gate's admitted set); 0 when alive == 0.
+//                  Append-only: scan by bit, unknown-clear = absent.
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct TSrvPeerInfo {
@@ -1592,6 +1598,10 @@ pub struct TSrvPeerInfo {
     pub _reserved: u32,
 }
 const _: () = assert!(core::mem::size_of::<TSrvPeerInfo>() == 40);
+
+// cfg-3: TSrvPeerInfo.flags bits (append-only; mirrors the kernel's
+// SRV_PEER_FLAG_CONSOLE_RENDERER in <thylacine/syscall.h>).
+pub const T_SRV_PEER_FLAG_CONSOLE_RENDERER: u32 = 1 << 0;
 
 // t_srv_accept — block until a client connects, return the server-side
 // endpoint as a KObj_Spoor handle (byte I/O — plain t_read/t_write). The

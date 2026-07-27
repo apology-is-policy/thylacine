@@ -326,6 +326,16 @@ lifetime). The last clunk (`slot_unref` → refs 0) `SocketSet::remove`s it, the
   *address*). `connect()` sets the tuple + `SynSent` **synchronously**, so netd
   records the resolved `local`/`remote` in the slot immediately (peer-independent).
 - `hangup` — active-close (`socket.close()`).
+- `nonblock 1` / `nonblock 0` (task #52) — set/clear the connection's
+  **nonblocking-read** mode (a per-`Slot` `nonblock` flag). When set, an
+  empty-but-open `data` read answers `E_AGAIN` (Rlerror 11 → the client's
+  `EWOULDBLOCK`) instead of parking a `PendingRead`. This is the *correct*
+  nonblocking-read primitive: a nonblocking reader tries-and-EAGAINs and never
+  touches the readiness bridge, so it cannot churn the shared session's 9P tag
+  pool (the poll-before-read alternative did — see 78-pouch.md §"Nonblocking
+  sockets"). `poll()`/`select()` (the `ready` file) is independent and
+  unaffected — POSIX `O_NONBLOCK` governs read/write, not poll. Idempotent; a
+  non-live slot is a no-op success (the ctl fd may outlive a `hangup`).
 - `announce`/`bind`/`keepalive`/`ttl`/`tos` — the server side + per-connection
   options, rejected honestly (`EOPNOTSUPP`) not silently accepted; they land net-3+.
 
@@ -335,8 +345,10 @@ recorded failure reason. `data` is the byte stream: a write is `send_slice`, a
 read is `recv_slice` of available bytes. `data` I/O was **non-blocking** at
 net-2c-2 (a 0-length read was ambiguous between "no data yet" and EOF);
 **net-6a makes the read blocking** (a parked-and-completed deferred reply — see
-below). The synchronous `poll()`/`select()` *readiness* bridge — distinct from a
-blocking read — is the `dev9p.poll` leg (net-6b).
+below), **unless the connection is in `nonblock` mode** (task #52), in which case
+an empty read answers `E_AGAIN` immediately. The synchronous `poll()`/`select()`
+*readiness* bridge — distinct from a blocking read — is the `dev9p.poll` leg
+(net-6b).
 
 **Boot proof** (deterministic + peer-independent — it does not depend on slirp
 replying): the joey probe `clone`s, writes `connect 10.0.2.2!9` on the ctl fid

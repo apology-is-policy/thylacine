@@ -639,6 +639,40 @@ struct Proc {
     bool               stop_report_pending;
     bool               cont_report_pending;
 
+    // EXITKILL (I-39 die-with-launcher; DEBUG-FS-DESIGN.md §5d; designed
+    // 2026-07-23): set when a debugger LAUNCHED this target and wants it killed on
+    // the debugger's death (the PTRACE_O_EXITKILL analog). Set by the ctl `exitkill`
+    // verb (owner-gated); read + honored by devproc_debug_release_cb, which
+    // proc_group_terminate's a marked ALIVE target on debugger death instead of
+    // proc_debug_resume (the Plan 9 resume would orphan a launched debuggee to init
+    // to run forever). Cleared on attach (fresh slot), explicit detach (which still
+    // resumes -- the debugger's deliberate choice), and release -- all under
+    // g_proc_table_lock, serialized with debug_owner, so it is a plain bool (no
+    // atomic). NOT rfork-inherited (per-slot debug state, like debug_owner /
+    // debug_stop_req). Occupies a tail pad byte @346, so struct Proc stays 352.
+    bool               debug_exitkill;
+
+    // VIVARIUM (docs/VIVARIUM.md §5.1 + §12; invariant I-43): this Proc's ABI
+    // mode -- how its syscall numbers and argument structures are DECODED at
+    // the syscall entry. PHENO_NATIVE (0) is both the default and the
+    // KP_ZERO-fresh value, which is the fail-safe direction: a Proc is never
+    // INFERRED into a non-default ABI, only DECLARED into one by its vivarium
+    // (the Q3 resolution -- EI_OSABI cannot discriminate in either direction,
+    // so no ELF byte may set this). Set ONLY at exec; there is deliberately no
+    // syscall that changes a Proc's own phenotype at runtime.
+    //
+    // I-43: a phenotype confers ABI SHAPE, NEVER AUTHORITY. Every capability
+    // check, namespace resolution, handle right, permission check and resource
+    // charge remains the native one, applied identically to a phenotyped and a
+    // native Proc -- a translated call must land on the SAME sys_*_for_proc
+    // body, through the SAME gates, that a native caller reaches.
+    //
+    // rfork-INHERITED (unlike the debug_* slots): a Linux process that forks
+    // must produce a Linux child, or the child's first syscall mis-decodes.
+    // Occupies the tail pad byte @347 between debug_exitkill @346 and
+    // shared_map_pages @348, so struct Proc stays 352 bytes.
+    u8                 phenotype;
+
     // G-2 (the I-32 FIFTH axis; TAPESTRY.md §18.12 R2-F3): pages of OTHER
     // Procs' memory currently shared INTO this Proc via burrow_share_into
     // (SHARED_IN-flagged VMAs). Charged/uncharged under p->vma_lock (exact);
@@ -655,6 +689,12 @@ struct Proc {
     // itself, but the child re-execs and re-stamps its own name at exec_setup.
     char               name[PROC_NAME_MAX];
 };
+
+// VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
+// NATIVE is 0 so a KP_ZERO-fresh Proc is native by construction -- the
+// fail-safe default the Q3 resolution requires.
+#define PHENO_NATIVE  0u
+#define PHENO_LINUX   1u
 
 #define PROC_FLAG_NODUMP            (1u << 0)
 #define PROC_FLAG_NOTRACE           (1u << 1)
@@ -738,6 +778,16 @@ _Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
                "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
                "pages) occupies the former 348..352 tail pad after the PTY-1e "
                "report latches; KP_ZERO-fresh 0, never rfork-inherited.");
+_Static_assert(__builtin_offsetof(struct Proc, phenotype) == 347,
+               "VIVARIUM phenotype (the per-Proc ABI mode, I-43) occupies the "
+               "LAST tail pad byte @347, between debug_exitkill @346 and "
+               "shared_map_pages @348 -- no struct growth (stays 352). "
+               "KP_ZERO-fresh 0 == PHENO_NATIVE is the fail-safe default.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_exitkill) == 346,
+               "EXITKILL debug_exitkill (I-39 die-with-launcher, DEBUG-FS §5d) "
+               "occupies a tail pad byte @346 between cont_report_pending @345 and "
+               "shared_map_pages @348 -- no struct growth (stays 352); KP_ZERO-fresh "
+               "false, never rfork-inherited (per-slot debug state).");
 _Static_assert(__builtin_offsetof(struct Proc, debug_focus_thread) == 328,
                "8c-2 #95 debug_focus_thread (the debug-fs focus M) appends after "
                "debug_hw (offset 328, the next 8-aligned slot past the pointer @320); "
@@ -1475,6 +1525,17 @@ void proc_set_console_owner(struct Proc *p);
 // No-op when there is no live owner. Takes g_proc_table_lock.
 void proc_console_post_interrupt(void);
 
+// #55 (ARCH 23.5.3): post tty:winch to the console OWNER's process group --
+// the console winsize changed. The pgrp, not the owner Proc: userspace cannot
+// post tty:* (the PTY-1b F4 gate), so owner-only would strand every child; the
+// pgrp is the minimal correct set (children share ut's rfork-inherited pgid --
+// the console has no job control / ct model at v1.0; the fg refinement is the
+// recorded seam). ONE g_proc_table_lock hold covers the owner resolve + the
+// membership fan (the notes_post_pgrp discipline); pgid 0 (the boot group) is
+// refused, so a bringup-era winch posts nothing. Called from process context
+// (a consctl write), AFTER g_cons.lock drops.
+void proc_console_post_winch(void);
+
 // proc_console_relinquish — `p` drops its OWN console-attach bit and, if it is
 // the current g_console_owner, clears the owner pointer. A-5a / I-27: joey (the
 // boot console anchor) calls this (via SYS_CONSOLE_RELINQUISH on itself) at the
@@ -1570,9 +1631,13 @@ bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
 // `stripes == 0` or no ALIVE match -> returns false, out-params untouched.
 // Any out-param may be NULL (the caller takes only what it needs). Only
 // VALUES escape — never the Proc pointer — so a peer reaped after the scan
-// is not a UAF.
+// is not a UAF. cfg-3: `renderer_out` reports whether the matched Proc
+// holds the LIVE console-RENDERER role (the G-4 single-holder — the same
+// lock the claim/release/compare discipline uses covers the walk), feeding
+// the SRV_PEER_FLAG_CONSOLE_RENDERER stamp; fail-closed false on no match.
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
-                                   u32 *principal_out, u32 *primary_gid_out);
+                                   u32 *principal_out, u32 *primary_gid_out,
+                                   bool *renderer_out);
 
 // =============================================================================
 // A-1a: identity mutation (the single audited write site).

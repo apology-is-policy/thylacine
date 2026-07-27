@@ -260,7 +260,7 @@ void test_allowance_pci_membership(void) {
     // -> denies the rng's. The SYS_PCI_CLAIM handler resolves the same bdf
     // (kobj_pci_resolve_bdf == the first match kobj_pci_claim picks).
     u8 rb, rd, rf;
-    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, &rb, &rd, &rf) == 0) {
+    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) == 0) {
         u32 rng_bdf = PCI_BDF_PACK(rb, rd, rf);
         struct Proc *q = amk();
         TEST_ASSERT(q != NULL, "proc_alloc q");
@@ -293,7 +293,7 @@ void test_allowance_pci_claim_handler_gate(void) {
     // temporarily narrowed + restored to broad before return (the
     // narrowed_proc_cannot_spawn discipline; single-threaded test window).
     u8 rb, rd, rf;
-    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, &rb, &rd, &rf) != 0) return;  // SKIP
+    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &rb, &rd, &rf) != 0) return;  // SKIP
 
     struct Proc *me = kproc();
     TEST_ASSERT(me != NULL && me->allowance == NULL, "kproc broad");

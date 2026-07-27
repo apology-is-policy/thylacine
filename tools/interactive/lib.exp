@@ -149,6 +149,14 @@ proc lc_boot {} {
         file delete -force $::lc_ncerr
         set bridge $lc_repo/tools/interactive/serial-bridge.py
         set chan [open [list | python3 $bridge $sock 2> $::lc_ncerr] r+]
+        # #60 probe 2 verdict (2026-07-23): -buffersize 262144 was trialed
+        # against ls-gfx-mode's then-deterministic 47-char-echo cut -- it
+        # MOVED the cut off that leg (buffer-pressure correlation confirmed)
+        # but scattered later cuts across shorter commands with no net
+        # attempt-rate win, and >match_max is its own hazard. Reverted to
+        # the default; the durable mitigations are scenario-side (short
+        # typed commands -- the echo burst is quadratic in line length) +
+        # the attempts retry. Full evidence: memory bug-60 file.
         fconfigure $chan -buffering none -translation binary
         spawn -open $chan
         # #72 residual: expect's default match_max is 2000 bytes, so a ~110 KB
@@ -174,6 +182,16 @@ proc lc_vm_kill {} {
     }
 }
 
+# An EXTINCTION's Halls dump (symbolized backtrace) FOLLOWS the marker on the
+# serial; bailing at the token loses it (task #58: `EXTINCTION: pw_wake:` with
+# the message + dump truncated -- the one artifact a nondeterministic repro
+# needs). Drain a few seconds of serial first so the dump lands in the attempt
+# log, then fail.
+proc lc_extinction_fail {msg} {
+    catch { expect -timeout 5 timeout {} eof {} }
+    lc_fail $msg
+}
+
 # Wait for an EXACT string, with extinction / timeout / eof as hard failures.
 # `phase` is a label for the failure message. Uses the command timeout.
 proc lc_expect {pat phase} {
@@ -181,7 +199,7 @@ proc lc_expect {pat phase} {
     set timeout $lc_cmd_timeout
     expect {
         -ex $pat        { lc_step "saw: $phase" }
-        -re {EXTINCTION:} { lc_fail "kernel extinction during '$phase'" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during '$phase'" }
         timeout         { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$pat\] during '$phase'" }
         eof             { lc_fail "unexpected EOF during '$phase'" }
     }
@@ -218,7 +236,7 @@ proc lc_login {user pass} {
     set timeout $lc_boot_timeout
     expect {
         -ex "Thylacine login: " { lc_step "login prompt" }
-        -re {EXTINCTION:}       { lc_fail "extinction before login prompt" }
+        -re {EXTINCTION:}       { lc_extinction_fail "extinction before login prompt" }
         timeout                 { lc_fail "no login prompt within ${lc_boot_timeout}s" }
         eof                     { lc_fail "qemu exited before login prompt" }
     }
@@ -226,7 +244,7 @@ proc lc_login {user pass} {
     send "$user\r"
     expect {
         -ex "password: "  { lc_step "password prompt" }
-        -re {EXTINCTION:} { lc_fail "extinction at password prompt" }
+        -re {EXTINCTION:} { lc_extinction_fail "extinction at password prompt" }
         timeout           { lc_fail "no password prompt (username not received?)" }
         eof               { lc_fail "qemu exited at password prompt" }
     }
@@ -235,7 +253,7 @@ proc lc_login {user pass} {
     expect {
         -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
         -ex "login incorrect"         { lc_fail "auth rejected for $user" }
-        -re {EXTINCTION:}             { lc_fail "extinction during login/provision" }
+        -re {EXTINCTION:}             { lc_extinction_fail "extinction during login/provision" }
         timeout                       { lc_fail "shell never came up after auth (login/provision stall?)" }
         eof                           { lc_fail "qemu exited during login" }
     }

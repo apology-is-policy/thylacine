@@ -97,7 +97,30 @@ v1.x) — the display stays blank until reboot.
   dirty-rect traffic) never fired it — `tools/interactive/ls-gfx-live.exp`
   is the standing live-display coverage leg; the cocoa acceptance test
   is a human at `THYLACINE_DISPLAY=cocoa`.
-- `input.rs` — the virtio-keyboard-PCI eventq: the P4-K probe's audited
+
+  **Scanout-switch flush discipline (#57, the second live-display-class
+  fix)**: every `SET_SCANOUT` that binds a resource is followed by a
+  full-frame `RESOURCE_FLUSH` on the newly bound resource — at the
+  entering-Composed switch in `reconcile()` and at the pending-direct
+  flip in the present path. Two stacked facts make the post-bind flush
+  load-bearing: a `RESOURCE_FLUSH` reaches only scanouts *currently
+  bound* to the resource (virtio-gpu spec), so the frame flushed while
+  the OLD scanout was still bound is dropped; and the QEMU cocoa
+  frontend's `switchSurface` (10.0.2) swaps the pixman pointer with NO
+  redraw when the dimensions are unchanged — so a same-size scanout
+  switch rendered *nothing* under cocoa, leaving the stale frame on
+  screen until later client damage happened to cover it (the
+  lingering-dead-pane + invisible-chrome-at-split symptoms). VNC masked
+  the gap headless: `vnc_dpy_switch` full-dirties on every replace. The
+  divergence probe that proved it (an accumulating RFB client mirroring
+  the `dpy_gfx_update` stream against QMP-screendump resource truth,
+  the whole flow driven over QMP) showed every structural flush
+  delivered under VNC while the cocoa path had no repaint source.
+  Residual: the `set_scanout(0)` disable arms have no resource to
+  flush, so an Off transition keeps the stale frame under cocoa —
+  edge-path cosmetic (the boot session never goes Off).
+- `input.rs` — the virtio-input-PCI eventq (`InputDev`, generalized from
+  the G-3 keyboard-only claim at G-7c): the P4-K probe's audited
   populate/drain/recycle discipline over the same PCI transport,
   POLL-MODE (`VIRTQ_AVAIL_F_NO_INTERRUPT`; no IRQ claimed — the
   single-threaded loop cannot also block in `SYS_IRQ_WAIT`). Drained
@@ -106,6 +129,106 @@ v1.x) — the display stays blank until reboot.
   the GPU: the MMIO input slot shares the one page-exclusive slot page
   whose lifetime belongs to stratumd. The MMIO keyboard stays wired for
   the one-shot P4-K kernel-test probe (the gpu0/gpu-mmio0 split).
+
+  **G-7c — the tablet + pointer routing.** The keyboard AND the tablet
+  are both virtio-input (device id 18), reached as enumeration instances
+  via `SYS_PCI_CLAIM`'s `nth` selector (the high-32 arg half; a bare id
+  is nth 0 = the pre-G-7c first match, byte-identical). `probe()` brings
+  BOTH instances up identically, then classifies by the `EV_BITS`
+  device-config query (`supports_abs()` → the tablet) — never by
+  ordering, so QEMU device order is irrelevant. The serve loop's tablet
+  drain accumulates `EV_ABS` X/Y, commits ONE coalesced `ptr_move` per
+  `EV_SYN` frame (scaled by the `ABS_INFO` axis max, fail-soft 0x7FFF),
+  and dispatches `EV_KEY BTN_*` / `EV_REL REL_WHEEL` immediately — a
+  BTN/wheel record inside a batched frame commits the pending MOVE
+  first, so a click always lands AT its position. `Comp::ptr_move/
+  ptr_btn/ptr_scroll` route to the surface UNDER the pointer
+  (`Layout::surface_at` — visible content rects tile, so the first hit
+  is the only hit), translate to surface-relative coords via the
+  letterbox inverse (fork 2, below; a point over the bars CLAMPS into
+  the scaled rect, keeping drag deltas alive), and emit
+  the §18.4 wire kinds: MOVE `value = sx<<16|sy` (coalescible — the
+  R2-F4 droppable class, pre-wired), BTN `code = evdev BTN_*` /
+  `value = press` (non-droppable), SCROLL `value = signed delta as
+  u32` (non-droppable). Keyboard focus stays CHORD-driven — no
+  click-to-focus at this stage (a Track-B policy question). The Super
+  chord plane is a KEYBOARD reservation; pointer events flow under
+  held modifiers (clients see `mods`).
+
+  **The relative mouse (the third id-18 function) + TEV_PTR_REL.**
+  `virtio-mouse-pci` (nth 2; `gather = all` extends the warden's
+  allowance with no manifest change) is classified by
+  `supports_rel()` — EV_REL WITHOUT EV_ABS (the ABS check runs first:
+  the tablet also reports REL, its wheel). The mouse drain accumulates
+  `REL_X`/`REL_Y` per `EV_SYN` frame and commits ONE
+  `Comp::ptr_move_rel` (buttons/wheel dispatch immediately at the
+  accumulated position, the tablet discipline). `ptr_move_rel` emits
+  the EXACT deltas to the FOCUSED surface as `TEV_PTR_REL`
+  (`value = dx<<16|dy`, signed i16 halves — a focus companion like KEY,
+  decoupled from the pointer position) then accumulates into the
+  clamped pointer position so click routing follows the relative device
+  too. `ptr_move` (the abs path) SYNTHESIZES the same event from
+  consecutive abs motion via a separate `abs_last` base (the first abs
+  motion only seeds — the (0,0)→position jump is placement, not
+  motion; per-source delta frames, so rel motion never poisons the abs
+  base) — load-bearing under abs-only frontends: QEMU cocoa with a
+  tablet present keys on `isAbsoluteEnabled` and never produces host
+  rel events (edge-stall at the host window boundary is inherent to
+  that source; grab-capable frontends feed the mouse exactly). QEMU
+  routes an untargeted QMP `rel` injection to the mouse uniquely (the
+  tablet's handler masks BTN|ABS; the wheel rides BTN). Queueing:
+  back-of-queue PTR_REL records coalesce by SUMMATION (i16-saturating;
+  replacement — the MOVE discipline — would lose motion; an
+  interleaved event starts a fresh record, preserving order), and the
+  kind joins the droppable class (a motion burst must never WEDGE).
+  The SDL backend consumes PTR_REL in relative mode only (Quake
+  mouse-look) and no longer diffs successive MOVE positions (every
+  motion emits both — a diff would double-count). Proven by the two
+  ls-gfx-panes rel legs: an injected `rel 7 3` arrives as ONE exact
+  event on the focused surface, and two abs injections at the same Y
+  arrive as the exact synthesized display delta (dx=160 =
+  px(20480)−px(16384) at 1280 wide).
+
+  **Fork 2 — the letterbox placement + the #56 patchwork latch (both
+  user-voted 2026-07-21).** A size-mismatched surface's placement is
+  decided by PRESENT STYLE, not size: `Surface.patchwork` latches
+  (one-way) the first time a present's damage does not cover the full
+  surface — the EXACT rect union (`rects_cover_full`, a y-band sweep),
+  not a single-full-rect shortcut: the battery's G-6c multi-rect leg
+  tiles the full frame in two halves and must stay unlatched (the
+  shortcut cropped its later legs — the moveB regression the gate
+  caught). rect_count 0 counts as full; checked on every present,
+  direct-scanout mode included. An UNLATCHED
+  surface — a full-frame presenter: the SDL class (`SW_RenderPresent
+  → SDL_UpdateWindowSurface` = one full rect), the battery
+  (`present(None)`) — LETTERBOXES on any mismatch, scaled up OR down:
+  aspect-preserving nearest-neighbor, centered; the bars are pane
+  background (chrome-painted). A LATCHED surface is an accumulator
+  (aurora: a full-frame first present, then cell-diff rects over
+  rotating weave slots — each slot is patchwork, so scaling any one
+  slot composes alternating half-stale frames, the live-play "utopia
+  pane flipping" bug) and takes the damage-clipped CROP instead;
+  aurora's pane-tracking resize is the real close (#55). The interim
+  size discriminator (fit-inside letterboxes, overflow crops) cropped
+  a 2px-overflowing split Quake — present style is the property that
+  matters, and it is protocol-observable. `Comp::letterbox(sw, sh,
+  cw, ch)` is the ONE geometry authority — `blit_composed_pixels`'
+  forward map and `ptr_hit`'s inverse (subtract content + letterbox
+  origins, clamp into the scaled rect, unscale; the crop inverse's
+  far-edge clamp also covers a patchwork surface smaller than its
+  pane) both derive from it, so they cannot drift (the audit-F3
+  lesson made structural). The scaled path ignores damage sub-rects —
+  sound exactly because the latch is clear: every present so far
+  carried whole-frame bytes. The same-size fast path is byte-
+  identical to the pre-fork-2 blit. The SDL backend completes the
+  policy: a window WITHOUT `SDL_WINDOW_RESIZABLE` DECLINES size
+  offers (unacked CONFIGUREs are protocol-legal standing offers),
+  keeping its dims fixed so the compositor scales — acking would
+  reweave to the pane size while the app renders its fixed frame into
+  the corner of the bigger surface (the zoomed-Quake top-left
+  artifact this replaced). In-guest proofs: zoom `letterbox 640x480
+  -> 1066x800 @(107,0) in 1280x800`; split `letterbox 640x480 ->
+  638x478` centered in the right pane (the pre-#56 crop clipped it).
 
 ## The 9P server (`server.rs`)
 
@@ -122,8 +245,22 @@ The tree (TAPESTRY §18.5, stage 0):
 
 ```
 /dev/tapestry/
-  ctl                  # read: "display W H" + surfaces/clock-rate/tick;
-                       # write: clock-rate <hz> (1..240); test-mode -> G-6
+  ctl                  # read: "display W H" + surfaces/clock-rate/tick
+                       #   (UNGATED -- the geometry query every client
+                       #   boots on);
+                       # write, AUTHORITY (cfg-3: renderer-gated, below):
+                       #   mode W H  -- re-set the scanout (bounds
+                       #     320x200..3840x2160; a fresh per-generation
+                       #     screen resource, bind-then-flush #57, old
+                       #     freed after the rebind; holds DROPPED; the
+                       #     CONFIGURE fan + Direct->Composed fall ride
+                       #     reconcile())
+                       #   mode auto -- non-mutating GET_DISPLAY_INFO
+                       #     re-probe, adopt the reported rect (E_AGAIN
+                       #     when absent)
+                       #   clock-rate <hz> (1..240)
+                       # write, determinism (feature-stripped, UNgated;
+                       #   the battery drives them): test-mode -> G-6
   surface/
     new                # open mints a surface in THIS conn + rebinds the
                        #   fid onto its ctl (the netd clone idiom); the
@@ -491,6 +628,34 @@ left|right|up|down`, `zoom <id>`, and the id-less `focusdir <dir>` +
 `tab next|prev` (acting on the focused leaf). Pane ctl accepts the
 same per-pane verbs (`move <dir>`, `zoom`, ...).
 
+**The apply-authority gate (cfg-3; AURORA-CONFIG.md §3.3 — the ARCH
+§25.4 cfg-3 addendum is the prosecution list).** The global ctl's
+AUTHORITY-BEARING verbs — `mode` and `clock-rate` today; `chord`/`gaps`
+when they land; **a new global verb defaults to GATED BY CONSTRUCTION**
+(the gate is DEFAULT-DENY: `global_ctl` denies every write except an
+explicit `is_ungated_ctl` set — the determinism verbs — so an ungated
+verb can only be created by deliberately exempting it, never by omission;
+SA-1/F4) — admit only a conn whose LIVE peer holds the console-RENDERER
+role.
+`Conn::peer_is_renderer` calls `t_srv_peer` on the accepted conn handle
+per authority write: the kernel resolves the peer fresh under the
+proc-table lock and stamps `SRV_PEER_FLAG_CONSOLE_RENDERER` (flags@32
+bit 0, append-only ABI) iff the peer IS the live G-4 single-holder
+`g_console_renderer` — so a moved or died role revokes on the next
+write, and a dead peer fail-closes (`alive == 0` ⇒ flags 0). Two
+structural consequences: the shared `/dev/tapestry` mount is denied by
+construction (its conn peer is the MOUNTER, joey — never the renderer;
+the mount conveys visibility only), and an authority write must ride
+the client's OWN `/srv/tapestry` conn (which every libtapestry client
+holds; `Surface::global_ctl` / `global_ctl_once`). The determinism
+verbs (`test-mode`/`tick`/`release`) stay OUTSIDE the gate — their
+production posture is the #880 feature strip, the battery (a
+non-renderer) drives them in test builds, and `release` keeps its F2
+per-surface ownership gate. Ctl READS stay ungated. Regressions:
+`devsrv.srv_peer_renderer_flag` (kernel), the battery gate leg
+(`battery: gate OK` in ls-gfx-panes), `ls-gfx-mode.exp` (the admitted
+OSD path + the session-shell and OSC denial surfaces).
+
 **Control scoping (the G-6d weighing).** SURFACE qids (weave / present /
 event / ctl) are F2-owner-gated at every consumer — walk, open, read,
 write, readdir, Tweft — so no client reaches another's pixels or events
@@ -498,7 +663,9 @@ write, readdir, Tweft — so no client reaches another's pixels or events
 that is the WM-control model (control is 9P / layout-as-9P; a WM-control
 client like `halcyon.rc` drives layout globally — the i3-IPC / tmux
 shape), not a per-surface ACL. The `clock-rate` global ctl is the same
-same-session-trust family. **G-6d holotype F1 (P2)** weighs the sharpest
+same-session-trust family — and since cfg-3 it is additionally
+renderer-gated (the apply-authority gate above supersedes the F3
+"doc'd ungated" posture; no tree writer ever existed). **G-6d holotype F1 (P2)** weighs the sharpest
 consequence: a session peer could `close` another client's pane (for the
 console renderer, aurora, that queues `TEV_CLOSE`, which exits it and
 darkens the graphical console) or focus-steal its input. The v1.0 trust
@@ -617,3 +784,38 @@ every ci-smp-gate boot. FAIL diagnostics grep
 - **Input latency ≤ one FRAME period** (poll-mode kbd; fine for stage 0).
 - **Multishot event reads client-side** await a Loom provided-buffer
   pool (G-6); the server's deferred-read side is multishot-ready.
+
+## Idle throttle (residual-2: the ~16% compositor idle cost)
+
+The FRAME clock is a fixed-rate synthesized tick (base virtio-gpu 2D has no
+guest vblank). At 60 Hz a *wholly idle* console still wakes tapestryd AND
+aurora 60×/sec — and under HVF each wake pays a deep-park vCPU resume, so the
+resident compositor cost the guest ~27% idle %cpu vs an ~11% no-GPU floor (the
+measured `ci-idle-gate` regression class).
+
+**Throttle** (`main.rs` `IDLE_HZ` / `IDLE_AFTER_MS`): when no keyboard/tablet/
+mouse INPUT has arrived for `IDLE_AFTER_MS` (250 ms), the effective tick drops
+to `IDLE_HZ` (15); the next input event snaps it back to the ctl rate. Activity
+is **INPUT ONLY, never client presents** — aurora presents its cursor blink
+~2×/sec, so counting presents would let the blink pin the clock active forever.
+Disabled under test-mode (the frozen clock is ctl-driven). Measured: idle %cpu
+27% → **10.8%** (the full compositor cost cut; the remainder is the base + the
+residual-1 debuggee leak).
+
+**Floor rationale.** The floor is bounded by two poll-mode costs: the keyboard
+is drained once per loop pass (so first-key-after-idle latency is one idle
+period) and aurora polls `/dev/consdrain` once per FRAME (so console-output
+latency during idle is one idle period). `IDLE_HZ`=15 keeps both ≤ ~67 ms —
+mild for the *first* event after true idle, then 60 Hz — while cutting steady
+idle wakes 4×. A truly-quiescent zero-wake floor would need the drain to wake
+aurora directly (an event-driven `/dev/consdrain` read), which the poll-mode
+architecture does not offer at v1.0 (a recorded seam).
+
+**Cursor-blink interaction (accepted).** Aurora's blink is frame-counted
+(`BLINK_FRAMES`), so at the 15 Hz idle rate the blink slows to ~2 s — but it is
+crisp (0.5 s) exactly when the console is *active* (60 Hz), i.e. when you are
+using it. A wall-clock (time-based) aurora blink would keep it crisp at any
+rate, but the naive `Instant`-based version deterministically broke aurora's
+drain render (render-loop-dead; `Instant` itself works in aurora — an
+unexplained render-loop interaction, a recorded gfx-track seam, NOT shipped).
+The frames-based blink is retained.

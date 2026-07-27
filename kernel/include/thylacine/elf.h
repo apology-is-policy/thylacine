@@ -305,4 +305,31 @@ enum elf_load_result {
 // syscall + §28 I-12.
 int elf_load(const void *blob, size_t size, struct elf_image *out);
 
+// VIVARIUM V-1 (docs/VIVARIUM.md section 12.1): an ADVISORY brand hint.
+//
+// This function NEVER decides a phenotype. The Q3 resolution is binding: a Proc
+// is never INFERRED into a non-default ABI, only DECLARED into one (by its
+// vivarium). The hint exists solely so an obvious mismatch can be reported --
+// a Linux-interp binary exec'd OUTSIDE a vivarium earns a diagnostic and a
+// clean failure instead of a silent mis-decode.
+//
+// Why the byte cannot decide (the ground truth behind Q3):
+//   - ELFOSABI_NONE (0) is carried by most musl-static LINUX binaries AND by
+//     every native Thylacine binary -- it identifies nothing.
+//   - ELFOSABI_GNU (3) == ELFOSABI_LINUX (3) means "a GNU/LLVM toolchain
+//     emitted GNU extensions"; Clade's own NATIVE output carries it.
+// So there is deliberately NO `NATIVE_LIKELY` verdict from any byte we can read
+// today: absence of a Linux signal is NOT evidence of nativeness. A positive
+// native brand (a `.note.thylacine`, VIVARIUM section 12.2) is the v1.x seam
+// that would let this function speak in both directions.
+//
+// PURE: no allocation, no locks, no side effects; safe on a partial header
+// buffer (REVENANT reads a bounded prefix) -- anything unreadable is UNKNOWN.
+enum elf_brand {
+    ELF_BRAND_UNKNOWN = 0,      // no signal, or unreadable -- the common case
+    ELF_BRAND_LINUX_LIKELY = 1, // a positive Linux signal (interp / OSABI)
+};
+
+enum elf_brand elf_brand_hint(const void *blob, size_t size);
+
 #endif // THYLACINE_ELF_H

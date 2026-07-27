@@ -51,7 +51,7 @@ use nora::view;
 mod dap_host;
 mod lsp_host;
 use dap_host::{Dap, TAG_DAP_ERR, TAG_DAP_OUT};
-use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_OUT, TAG_STDIN};
+use lsp_host::{Lsp, TAG_LSP_ERR, TAG_LSP_OUT, TAG_NOTES, TAG_STDIN};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -133,6 +133,23 @@ pub extern "C" fn rs_main() -> i64 {
     // lost (kaua::query #117-audit F2).
     let mut src = PollSource::with_pending(probe.pending);
 
+    // #55c: the console-resize signal. Open the editor's note queue so a
+    // `tty:winch` (posted to the session pgrp when the renderer reweaves)
+    // wakes the loop -> re-read /dev/winsize -> Terminal::resize (the seam
+    // term.rs documented since LS-7). Opening a notes fd makes nora
+    // SELF-MANAGING (LS-5): an uncaught `interrupt` note now queues here
+    // instead of default-terminating -- deliberate for a fullscreen editor
+    // (Ctrl-C in the raw console arrives as the 0x03 BYTE anyway [ISIG off],
+    // and dying mid-edit to a stray note is exactly what an editor must not
+    // do; :q is the exit). Best-effort: a failed open just leaves resize on
+    // the launch size (the pre-#55 behavior). #55 audit F5: self-managing
+    // also queues (instead of default-terminating) tty:hup/tty:quit -- sound
+    // on the CONSOLE (no tty:hup is posted there; kill/snare are unaffected),
+    // but a future nora-under-a-pts would need to re-honor tty:hup (a hangup
+    // must still tear the editor down) -- a pts-scoped seam, not a console
+    // defect.
+    let notes = libthyla_rs::notes::Notes::open_self().ok();
+
     // Bring up gopls for a Go buffer. Absent / unspawnable / non-Go all mean
     // "no language server" -- a fully supported state in which nora behaves
     // exactly as it did before 8e (NORA-IDE-UX section 6: never block the UI).
@@ -144,7 +161,7 @@ pub extern "C" fn rs_main() -> i64 {
     // then; a buffer that never debugs pays nothing.
     let mut dap: Option<Dap> = None;
 
-    let code = run(&mut term, &mut src, &mut ed, &mut lsp, &mut dap);
+    let code = run(&mut term, &mut src, &mut ed, &mut lsp, &mut dap, notes.as_ref());
     // Neither child may outlive the editor: an orphaned gopls holds the
     // workspace, and an orphaned Ambush holds its debuggee (and the ptrace
     // stop). Compose #68 close-at-exit.
@@ -167,6 +184,7 @@ fn run(
     ed: &mut Editor,
     lsp: &mut Option<Lsp>,
     dap: &mut Option<Dap>,
+    notes: Option<&libthyla_rs::notes::Notes>,
 ) -> i32 {
     if redraw(term, ed).is_err() {
         return 1;
@@ -176,11 +194,15 @@ fn run(
         if src.is_eof() {
             return 0;
         }
-        // ONE poll(2) over fd 0 and any live server pipes -- gopls (8e-2) and
-        // Ambush (8e-3e). A keystroke, a diagnostic, and a debugger stop all
-        // wake the loop identically -- there is no tick, so a message nothing
-        // polls for never repaints.
-        let ready = match poll_all(&mut mux, lsp.as_ref(), dap.as_ref()) {
+        // ONE poll(2) over fd 0 and any live server pipes -- gopls (8e-2),
+        // Ambush (8e-3e), and the note queue (#55c: tty:winch). A keystroke, a
+        // diagnostic, a debugger stop, and a console resize all wake the loop
+        // identically -- there is no tick, so a message nothing polls for never
+        // repaints.
+        let ready = match poll_all(&mut mux, lsp.as_ref(), dap.as_ref(), notes.map(|n| {
+            use libthyla_rs::poll::AsFd;
+            n.as_raw_fd()
+        })) {
             Some(r) => r,
             // fd 0 gone (no console) -> exit cleanly rather than spin.
             None => return 1,
@@ -229,6 +251,37 @@ fn run(
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                }
+                TAG_NOTES => {
+                    // #55c: drain the queue; a tty:winch means the console
+                    // reweaved -- /dev/winsize is the authoritative geometry
+                    // (the renderer's grid). On the serial posture (0x0 /
+                    // unreachable) fall back to the CPR re-probe: the reply
+                    // rides fd 0 and the PollSource's unsolicited-CPR
+                    // backstop delivers it as Event::Resize (the same arm
+                    // the HVF late-reply path uses). Every other note is
+                    // drained + dropped (informational; kill never surfaces
+                    // through the fd; snare terminates before delivery).
+                    let mut winch = false;
+                    if let Some(nq) = notes {
+                        while let Ok(Some(note)) = nq.try_read() {
+                            if note.name == "tty:winch" {
+                                winch = true;
+                            }
+                        }
+                    }
+                    if winch {
+                        if let Some((c, r)) = kaua::query::read_winsize() {
+                            let c = c.clamp(MIN_DIM, MAX_DIM);
+                            let r = r.clamp(MIN_DIM, MAX_DIM);
+                            if (c, r) != (term.area().width, term.area().height) {
+                                term.resize(Rect::new(0, 0, c, r));
+                                dirty = true;
+                            }
+                        } else {
+                            kaua::query::request_resize_probe();
                         }
                     }
                 }
@@ -306,8 +359,16 @@ fn run(
 }
 
 /// Register fd 0 plus any live gopls and Ambush pipes and block for one of them.
-fn poll_all(mux: &mut Mux, lsp: Option<&Lsp>, dap: Option<&Dap>) -> Option<Vec<Ready>> {
+fn poll_all(
+    mux: &mut Mux,
+    lsp: Option<&Lsp>,
+    dap: Option<&Dap>,
+    notes_fd: Option<i32>,
+) -> Option<Vec<Ready>> {
     let mut fds: Vec<(i32, Tag)> = alloc::vec![(0, TAG_STDIN)];
+    if let Some(nfd) = notes_fd {
+        fds.push((nfd, TAG_NOTES)); // #55c: tty:winch
+    }
     if let Some(l) = lsp {
         fds.extend(l.poll_fds());
     }

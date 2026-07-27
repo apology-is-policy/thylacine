@@ -133,7 +133,7 @@ struct virtio_pci_dev *virtio_pci_dev_get(int idx);
 // Find the first VirtIO-PCI device matching the given virtio_device_id
 // (VIRTIO_DEVICE_ID_BLOCK / _NET / _GPU / _INPUT / etc.). Returns NULL
 // if no match.
-struct virtio_pci_dev *virtio_pci_find_by_device_id(u32 virtio_device_id);
+struct virtio_pci_dev *virtio_pci_find_by_device_id(u32 virtio_device_id, u32 nth);
 
 // PCI config-space read helpers. Take a BDF triple + offset; offset
 // MUST be within [0, 4096) and naturally aligned to the access width.

@@ -1062,6 +1062,13 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // in sys_spawn_full_argv_thunk, after this inherit and before exec.
     // Inheriting then optionally overriding keeps "set at creation" true:
     // the child never runs userspace under the wrong identity.
+    // VIVARIUM (I-43): the ABI mode is INHERITED -- a Linux process that forks
+    // must produce a Linux child, else the child mis-decodes its first syscall.
+    // Inheriting cannot widen authority (a phenotype confers ABI shape only),
+    // and it cannot widen SCOPE either: a native parent stays PHENO_NATIVE, so
+    // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
+    // vivarium sets it in the first place.
+    child->phenotype      = parent->phenotype;
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
@@ -1430,6 +1437,27 @@ bool proc_pgrp_in_session(u32 pgid, u32 sid) {
     return ctx.found;
 }
 
+// #55 (ARCH 23.5.3; proc.h contract): tty:winch to the console owner's PGRP.
+// ONE g_proc_table_lock hold covers the owner resolve + the membership fan
+// (pgrp_post_cb -- the notes_post_pgrp walk body, so the post + the
+// self-gating terminate-wake ride the established g_proc_table_lock ->
+// q->lock edge; tty:winch is informational and never arms the latch, so the
+// wake is a no-op). pgid 0 refused (the boot group -- kproc/joey -- is never
+// a tty-signal target; the notes_post_pgrp precedent), so a bringup winch
+// posts nothing.
+void proc_console_post_winch(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *owner = g_console_owner;
+    if (owner && owner->magic == PROC_MAGIC &&
+        owner->state == PROC_STATE_ALIVE && owner->pgid != 0u) {
+        struct pgrp_post_ctx ctx = { .pgid = owner->pgid,
+                                     .name = NOTE_NAME_TTY_WINCH,
+                                     .arg = 0u, .posted = 0 };
+        proc_for_each_walk(kproc(), pgrp_post_cb, &ctx);
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
 void proc_console_post_interrupt(void) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Proc *owner = g_console_owner;
@@ -1667,6 +1695,7 @@ struct peer_snapshot_ctx {
     caps_t caps;          // OUT — the matched Proc's live caps
     u32    principal_id;  // OUT — A-1a: the peer's durable identity
     u32    primary_gid;   // OUT — A-1a: the peer's primary group
+    bool   renderer;      // OUT — cfg-3: matched Proc IS g_console_renderer
     bool   found;         // OUT — set once an ALIVE Proc matched
 };
 
@@ -1679,6 +1708,11 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
         c->caps         = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
         c->principal_id = p->principal_id;
         c->primary_gid  = p->primary_gid;
+        // cfg-3: the renderer-role compare rides the SAME g_proc_table_lock
+        // the claim/release/compare discipline writes the pointer under
+        // (proc_for_each holds it across the walk) — a match implies a live
+        // holder; compare-only, never a deref.
+        c->renderer     = (g_console_renderer == p);
         c->found        = true;
         return 1;                 // first match wins — stop the walk
     }
@@ -1686,7 +1720,8 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
 }
 
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
-                                   u32 *principal_out, u32 *primary_gid_out) {
+                                   u32 *principal_out, u32 *primary_gid_out,
+                                   bool *renderer_out) {
     // 0 is the reserved fail-closed sentinel; no Proc is ever stamped 0,
     // so it can never match. Reject it before the scan. Out-params may be
     // NULL — the caller takes only what it needs.
@@ -1696,6 +1731,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                      .caps         = 0,
                                      .principal_id = PRINCIPAL_NONE,
                                      .primary_gid  = GID_NONE,
+                                     .renderer     = false,
                                      .found        = false };
     // proc_for_each holds g_proc_table_lock across the whole DFS, so the
     // callback's "is this Proc ALIVE" test and its field reads are one
@@ -1706,6 +1742,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
     if (caps_out)        *caps_out        = ctx.caps;
     if (principal_out)   *principal_out   = ctx.principal_id;
     if (primary_gid_out) *primary_gid_out = ctx.primary_gid;
+    if (renderer_out)    *renderer_out    = ctx.renderer;
     return true;
 }
 
@@ -1714,7 +1751,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
 // specs/corvus.tla ConnOpPeerWasLive) unchanged for current callers.
 bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
     if (!caps_out) return false;
-    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL);
+    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL);
 }
 
 // A-1a: proc_apply_identity — the single audited identity mutation site.

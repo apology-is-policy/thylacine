@@ -277,6 +277,27 @@ impl Layout {
         })
     }
 
+    /// The VISIBLE hosted surface whose pane content rect contains display
+    /// point (x, y), with that content rect (the caller translates to
+    /// surface-relative coords -- G-7c pointer routing: events go to the
+    /// surface UNDER the pointer). Visible content rects never overlap
+    /// (the geometry pass tiles them; zoom hides every other pane), so
+    /// the first hit is the only hit.
+    pub fn surface_at(&self, x: u32, y: u32) -> Option<(usize, Rect)> {
+        self.panes.iter().flatten().find_map(|p| match p.kind {
+            Kind::Leaf { surface: Some(n) }
+                if p.visible
+                    && x >= p.content.x
+                    && x < p.content.x.saturating_add(p.content.w)
+                    && y >= p.content.y
+                    && y < p.content.y.saturating_add(p.content.h) =>
+            {
+                Some((n, p.content))
+            }
+            _ => None,
+        })
+    }
+
     /// Split leaf `slot`: same-mode parents FLATTEN (sibling insert),
     /// different-mode ones NEST. Returns the NEW empty leaf's slot; focus
     /// moves to it (the auto-host target).
@@ -883,7 +904,7 @@ impl Layout {
     }
 
     /// Recompute geometry + visibility for the whole tree.
-    pub fn recompute(&mut self, disp_w: u32, disp_h: u32) {
+    pub fn recompute(&mut self, disp_w: u32, disp_h: u32, gaps: u32) {
         // Pass 1: mark everything hidden, then walk the visible tree.
         for p in self.panes.iter_mut().flatten() {
             p.visible = false;
@@ -908,8 +929,10 @@ impl Layout {
         }
         let root = self.root;
         self.layout_pane(root, Rect { x: 0, y: 0, w: disp_w, h: disp_h });
-        // Pass 2: the content inset -- 1px per leaf iff >1 leaf visible.
-        let inset = if self.visible_leaf_count() > 1 { 1u32 } else { 0 };
+        // Pass 2: the content inset -- `gaps` px per leaf iff >1 leaf
+        // visible (cfg-4; the stage-0 default is 1). A single fullscreen
+        // leaf stays borderless regardless.
+        let inset = if self.visible_leaf_count() > 1 { gaps } else { 0 };
         for p in self.panes.iter_mut().flatten() {
             if !p.visible {
                 continue;

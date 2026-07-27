@@ -109,6 +109,24 @@ absent — the renderer draws them procedurally for pixel-perfect cell
 joins. Re-bake only on a font/geometry change (fonttools in a disposable
 venv; see the tool header).
 
+**Several sizes (cfg-5):** the SAME outline is baked at five progressively
+smaller advances — `atlas.bin` (10 → 10×22, the default face) plus
+`atlas-{9,8,7,6}.bin` (9×20 / 8×18 / 7×16 / 6×14). `cornucopia::ADVANCES`
+enumerates them (largest-first); `Atlas` is now a `Copy` value carrying the
+chosen blob (`Atlas::for_advance(N)`), folded into `render::Metrics` so a
+font-size change swaps the dims and the glyph source atomically.
+`verify_all()` checks every baked blob at aurora startup (a truncated
+sibling surfaces loudly, per the doc contract). 6 is the floor — below it
+the procedural box glyphs (which need cell_w/cell_h ≥ 6) break. The config
+key `font-size <advance>` and the OSD Appearance → Font row select one; the
+selection is renderer-local (no compositor round-trip, no gate — the
+compositor only ever sees pixels), so a change just rebuilds Metrics,
+recomputes cols/rows from the UNCHANGED surface, resizes the Vt, and
+re-reports the winsize (the cfg-3 reweave tail). A saved size too large for
+the surface steps DOWN to the largest baked size that fits (brick-resistance
+— a persisted font can never strand the console; realistically inert since
+the default advance 10 fits every sane mode, even 320×200).
+
 ## The renderer (`usr/aurora`)
 
 An ordinary tapestryd client (libtapestry — the demo's template):
@@ -199,6 +217,135 @@ output (`t_putstr` is not cross-Proc atomic; the G-6b battery run
 measured exactly that mangling). **TEV_FOCUS (G-6c)** falls to the
 default-ignore arm: the fbcon renders no focus state (the compositor's
 focus ring/strip highlight is chrome, outside aurora's pane).
+
+## The F10 settings OSD (`usr/aurora/src/osd.rs`)
+
+The built-in system dialog (AURORA-CONFIG.md §3.6, chunk 1 as-built) —
+deliberately **Turbo-Vision raw** (EGA gray field, double-line frame, cyan
+focus bar, drop shadow) so it reads as "system dialog, not the session",
+contrasty against both Bonfire and Kaua's fine style. It is not a program:
+it lives inside the renderer, so nothing (a future Halcyon included) can
+invoke or spoof it.
+
+- **Trigger**: bare **F10** (evdev 68) from aurora's own event stream — a
+  key the tapestryd keymap resolves no rune for and `key_bytes` always
+  dropped, so no app ever saw it (interception is regression-free). Press
+  (`value == 1`) only: the opening key's autorepeat cannot bounce the
+  panel shut. **Modal**: while open, every key routes to the OSD and
+  nothing feeds `/dev/consfeed`; serial input is unaffected (the OSD is
+  aurora-local). Known cosmetic edge: holding Esc past the close leaks
+  its autorepeats to the terminal (a tap does not).
+- **Sections**: *Appearance* (live: theme cycler + cursor blink) and
+  *Display* (live since cfg-3: the MODE row — Left/Right cycles a
+  PENDING preset, **Enter applies** through the gated compositor ctl
+  (the monitor-OSD semantic: a whole-display reconfigure never fires on
+  mere navigation); Resolution + zoom policy stay info rows. The
+  pending choice re-seeds from the APPLIED settings at every open —
+  `Osd::open_at`). Keys: Up/Dn select, Left/Right/Enter cycle, Tab
+  section, Esc/F10 close.
+- **Theme = runtime palette** (`vt.rs::Palette` + `THEMES` + `Vt::set_theme`):
+  cells bake resolved colors at write time, so a switch retints existing
+  content by **exact old→new color match** across both screens + the live
+  SGR state; truecolor passes through untouched by design. Slot aliasing
+  (Bonfire `ansi[15] == fg`) resolves fg/bg-first — benign while a theme
+  keeps `ansi[15] ≈ fg`. Themes: `bonfire` (scripture), plus the
+  **proposed names** `parchment` (light) and `spinifex` (green phosphor —
+  the Tasmanian-bushland word; held-proposal per the thematic-naming
+  discipline, trivially renameable data).
+- **Compositing**: the panel draws OVER the grid after `render_rows`
+  (`render.rs::draw_run` — explicit-color cell runs — + `darken_rect`, the
+  shadow), through the **full-frame present branch only**: slot rotation
+  means a partial rect could transfer stale panel pixels from an older
+  slot, so an open OSD routes every damaged pass through fill + all rows +
+  panel + `present(None)`, sharing the `full_fill` retry discipline
+  (`ui.dirty` stays set on a failed present). The terminal keeps updating
+  UNDER the panel (the drain still feeds the Vt). Close sets `full_fill`
+  (margins refill — the theme may have changed `pal.bg`). Panel geometry
+  derives from the current grid each draw, so a reweave needs no
+  notification (sub-floor grids clamp).
+- **Persistence (cfg-2a — the system tier)**: `/lib/aurora/config` is the
+  DEVICE's memory (AURORA-CONFIG §3.2 "the writer defines the tier":
+  aurora is a pre-login SYSTEM process and can never touch a per-user
+  encrypted home, so the OSD persists to the tier it owns — the
+  monitor-OSD semantic). `usr/aurora/src/config.rs`: `parse`/`render`
+  (pure, fail-soft — unknown keys/malformed lines ignored, config can
+  never break the fbcon) + `load` (bounded 4-KiB read at startup, applied
+  BEFORE the first present → the pre-login screen wears the persisted
+  theme) + `save` (write-tmp + fsync + rename + a **STRICT post-rename
+  fsync on the SAME OWRITE fd** — the A-1.6 swap with its metadata
+  barrier. The barrier shape is load-bearing and was earned the hard way,
+  three iterations under the persist E2E's hard kill: `SYS_FSYNC` gates
+  on RIGHT_WRITE, so any OREAD-opened fd — a parent dir or a re-opened
+  file — fails with -1 before any 9P is sent; the fd you WROTE carries
+  the right rights and stays valid across the rename (9P fids follow the
+  file), and stratumd's `h_fsync` is a whole-pool `stm_fs_commit`, making
+  it a complete barrier. A crash mid-save leaves the old config, never a
+  torn one; a failed rename leaks a tmp the next save truncates; a failed
+  barrier fails the save LOUDLY — best-effort hid the first attempt. See
+  the corvus `persist_keypair_wrap` discipline it now mirrors). The OSD
+  writes through on EVERY change (per-keystroke when cycling — immediate
+  commit, monitor-style; the MODE row is the exception: apply-on-Enter,
+  and it persists ONLY on an accepted ctl write). Baked default:
+  `usr/aurora/config.default` → the pool populate (the `/lib/ndb/local`
+  pattern, readback-verified). Keys: `theme <name>`, `cursor-blink on|off`,
+  `mode auto | <W> <H>` (cfg-3).
+- **The compositor tier + push-on-start (cfg-3)**: `Settings.mode`
+  (`osd::Mode::{Auto, Fixed}`) is the one value aurora pushes to the
+  SHARED compositor — through the GATED global ctl (AURORA-CONFIG.md
+  §3.3; aurora holds the console-renderer role the gate admits). At
+  startup, `config::load` runs BEFORE the tapestry connect and a
+  `Fixed(w,h)` mode pushes on a THROWAWAY conn
+  (`tapestry::global_ctl_once`, bounded retry) ahead of
+  `Surface::fullscreen()` — so the console surface is BORN at the
+  configured geometry (the Boot-scanout `set_mode` arm; no boot-time
+  reweave). `Auto` never pushes (it IS the boot default). The OSD's
+  Display section is live: the Mode row cycles a PENDING preset
+  (`MODE_PRESETS`: auto + six common rasters), Enter applies via
+  `surf.global_ctl("mode W H")` on aurora's own conn, and settings +
+  config::save commit only when the compositor ACCEPTED the write (a
+  refused apply must not seed the startup push). The resulting
+  CONFIGURE rides the existing resize arm — grid realloc, present,
+  winsize re-report (#55) — so the whole session learns the new
+  geometry through `tty:winch`.
+- **The per-user push (cfg-2b)**: `$home/lib/aurora` is the SESSION's
+  file, pushed in-band over the console wire as
+  `OSC 7770;aurora;<key>;<value>` (BEL or ST) — the xterm dynamic-colors
+  shape; the drain already carries every console byte, so the channel adds
+  zero kernel surface. The VT parser buffers OSC payloads (cap 256, queue
+  cap 16, fail-soft on malformed/oversize; titles swallowed as before) and
+  lands each as a `key value` line in `Vt.settings_req`; the main loop
+  applies via the SAME `config::parse` the file uses — **deliberately
+  without `config::save`** (session-scoped by scripture) — and, since
+  cfg-3, ONLY through the authority-key ALLOWLIST: `theme` and
+  `cursor-blink` pass, everything else (`mode` above all) is refused
+  with a logged `aurora: OSC settings key ... refused`. Without the
+  allowlist a session-injected `mode` would sit in `settings` and ride
+  the NEXT OSD `config::save` into the gated startup push — session
+  authority laundered through aurora's renderer role. **cfg-3 F1 (the
+  audit's P1): the allowlist reads only the first token, but
+  `config::parse` re-splits its VALUE on `.lines()`, so an embedded
+  NEWLINE (`theme;spinifex\nmode 640 480`) laundered a second statement
+  past the single-token check — so `vt.rs::osc_end` now REJECTS any OSC
+  whose key or value carries a control byte (`b < 0x20`), the
+  receiving-end twin of `aurora-push`'s own sender-side `b < 0x20`
+  filter (the PARSER is the trust boundary for a raw byte channel;
+  `aurora-push` itself cannot produce the attack — it splits its file on
+  newlines into clean single-line OSCs, which is exactly why a
+  documented-tool test missed it; the in-guest witness is the baked
+  `/lib/aurora/osc-newline-attack` fixture that `ls-gfx-mode` cats,
+  asserting no laundered retint).** The `reset system` arm is exempt by
+  construction (it re-reads aurora's OWN system file — values the
+  session cannot choose — and re-pushes nothing). The
+  `aurora-push` coreutil reads `$HOME/lib/aurora` (from the login-seeded
+  `/env`) and ALWAYS emits `reset system` first — the reset re-seeds from
+  the system file, so every session start is *system defaults ⊕ user
+  overrides* and a stale prior-session push dies at the next login (aurora
+  is boot-long; without the reset it would linger). login runs the push at
+  session start (post `/env` seed, pre shell, AS THE USER — the 0700 home
+  denies SYSTEM per A-2d — best-effort + reaped). Trust posture = xterm
+  dynamic colors: any console writer can emit the OSC; it is cosmetic,
+  session-scoped, non-persisting, aurora-local ONLY, and must never gain a
+  persisting or authority-bearing key.
 
 ## The gates
 

@@ -30,6 +30,7 @@ void test_pci_walk_caps_hostile(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
+void test_pci_claim_nth(void);
 void test_pci_unref_releases_bars(void);
 void test_pci_live_count_balances(void);
 void test_pci_syscall_reject(void);
@@ -219,7 +220,7 @@ void test_pci_walk_caps_hostile(void) {
 // precedent); tools/run-vm.sh always attaches it, so the claim path runs in the
 // integration boot.
 static bool rng_pci_present(void) {
-    return virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG) != NULL;
+    return virtio_pci_find_by_device_id(VIRTIO_DEVICE_ID_RNG, 0) != NULL;
 }
 
 // Claim the idle rng-pci, validate the assigned BARs + the resolved COMMON_CFG
@@ -227,7 +228,7 @@ static bool rng_pci_present(void) {
 void test_pci_claim_rng(void) {
     if (!rng_pci_present()) return;
 
-    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG);
+    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
 
     // Capture everything we assert on, then unref, so the device is released
     // regardless of any assertion outcome.
@@ -259,7 +260,7 @@ void test_pci_claim_rng(void) {
         kobj_pci_unref(k);
     }
 
-    TEST_ASSERT(got, "kobj_pci_claim(RNG) returned NULL for a present device");
+    TEST_ASSERT(got, "kobj_pci_claim(RNG, 0) returned NULL for a present device");
     TEST_ASSERT(magic_ok, "claimed KObj_PCI has a bad magic");
     TEST_ASSERT(present_bars >= 1, "rng-pci claim assigned no memory BAR");
     TEST_ASSERT(bars_ok, "an assigned BAR is malformed (pa/size/align/mmio)");
@@ -274,7 +275,7 @@ void test_pci_claim_rng(void) {
 
 // Claiming a device-id with no matching VirtIO-PCI function returns NULL.
 void test_pci_claim_unknown(void) {
-    struct KObj_PCI *k = kobj_pci_claim(PCI_TEST_ABSENT_DEVICE_ID);
+    struct KObj_PCI *k = kobj_pci_claim(PCI_TEST_ABSENT_DEVICE_ID, 0);
     if (k) kobj_pci_unref(k);            // defensive — should never happen
     TEST_ASSERT(k == NULL, "claim of an absent device-id should return NULL");
 }
@@ -284,8 +285,8 @@ void test_pci_claim_unknown(void) {
 void test_pci_claim_exclusive(void) {
     if (!rng_pci_present()) return;
 
-    struct KObj_PCI *k1 = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG);
-    struct KObj_PCI *k2 = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG);   // must fail while k1 alive
+    struct KObj_PCI *k1 = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
+    struct KObj_PCI *k2 = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);   // must fail while k1 alive
 
     bool k1_ok      = (k1 != NULL);
     bool k2_blocked = (k2 == NULL);
@@ -294,7 +295,7 @@ void test_pci_claim_exclusive(void) {
     if (k1) kobj_pci_unref(k1);
 
     // After releasing k1, the function is re-claimable.
-    struct KObj_PCI *k3 = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG);
+    struct KObj_PCI *k3 = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
     bool k3_ok = (k3 != NULL);
     if (k3) kobj_pci_unref(k3);
 
@@ -307,7 +308,7 @@ void test_pci_claim_exclusive(void) {
 void test_pci_unref_releases_bars(void) {
     if (!rng_pci_present()) return;
 
-    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG);
+    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
     if (!k) { TEST_ASSERT(false, "rng-pci claim failed"); return; }
 
     u64  pa[PCI_BAR_COUNT];
@@ -339,7 +340,7 @@ void test_pci_live_count_balances(void) {
     if (!rng_pci_present()) return;
 
     u64 base = kobj_pci_live_count();
-    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG);
+    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
     u64 during = kobj_pci_live_count();
     if (k) kobj_pci_unref(k);
     u64 after = kobj_pci_live_count();
@@ -412,4 +413,48 @@ void test_pci_syscall_claim_info(void) {
     TEST_ASSERT(map_oob   < 0, "SYS_PCI_MAP_BAR with an out-of-range bar index must fail");
     TEST_ASSERT(map_prot0 < 0, "SYS_PCI_MAP_BAR with prot==0 must fail");
     TEST_ASSERT(map_wonly < 0, "SYS_PCI_MAP_BAR with W-without-R must fail");
+}
+
+// G-7c: the (id, nth) instance selector. nth 0 must agree with the historical
+// first match; an over-large nth resolves nothing; and when a SECOND same-id
+// function exists (two virtio-input functions: keyboard + tablet), nth 1
+// resolves a DIFFERENT (bus,dev,fn) than nth 0 -- the property the tapestryd
+// dual-input claim relies on. The two-instance leg self-skips when the config
+// carries fewer than two input functions (THYLACINE_NO_INPUT boots).
+void test_pci_claim_nth(void) {
+    // The over-large-nth reject needs no device at all.
+    u8 b, d, f;
+    TEST_ASSERT(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0xFFFFu, &b, &d, &f) != 0,
+        "an over-large nth must resolve no device");
+
+    if (!rng_pci_present()) return;
+
+    // nth 0 == the historical first match: resolve agrees with the claim.
+    TEST_ASSERT(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_RNG, 0, &b, &d, &f) == 0,
+        "nth 0 resolve of a present device failed");
+    struct KObj_PCI *k = kobj_pci_claim(VIRTIO_DEVICE_ID_RNG, 0);
+    bool got    = (k != NULL);
+    bool agrees = k && (k->bus == b && k->dev == d && k->fn == f);
+    if (k) kobj_pci_unref(k);
+    TEST_ASSERT(got, "nth 0 claim of a present device failed");
+    TEST_ASSERT(agrees, "nth 0 resolve and claim must pick the SAME function (the I-34 gate coupling)");
+
+    // The two-instance leg: distinct functions for nth 0 vs nth 1.
+    u8 b0, d0, f0, b1, d1, f1;
+    if (kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 1, &b1, &d1, &f1) != 0)
+        return;  // SKIP: fewer than two input functions in this config
+    TEST_ASSERT(kobj_pci_resolve_bdf(VIRTIO_DEVICE_ID_INPUT, 0, &b0, &d0, &f0) == 0,
+        "nth 1 resolved but nth 0 did not (enumeration walk broken)");
+    TEST_ASSERT(b0 != b1 || d0 != d1 || f0 != f1,
+        "nth 0 and nth 1 must name DISTINCT functions");
+
+    // Both are independently claimable at once (the dual-input shape).
+    struct KObj_PCI *k0 = kobj_pci_claim(VIRTIO_DEVICE_ID_INPUT, 0);
+    struct KObj_PCI *k1 = kobj_pci_claim(VIRTIO_DEVICE_ID_INPUT, 1);
+    bool both     = (k0 != NULL) && (k1 != NULL);
+    bool distinct = both && (k0->bus != k1->bus || k0->dev != k1->dev || k0->fn != k1->fn);
+    if (k1) kobj_pci_unref(k1);
+    if (k0) kobj_pci_unref(k0);
+    TEST_ASSERT(both, "two same-id functions must be independently claimable");
+    TEST_ASSERT(distinct, "the two claims must own DISTINCT functions");
 }

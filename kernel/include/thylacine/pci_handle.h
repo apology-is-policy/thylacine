@@ -134,14 +134,17 @@ void kobj_pci_init(void);
 // On success the caller owns the refcount=1 reference; balance with
 // kobj_pci_unref. The (bus,dev,fn) exclusivity + the per-BAR PA claims persist
 // until the last unref.
-struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id);
+struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id, u32 nth);
 
-// Read-only (bus,dev,fn) resolution for a virtio_device_id -- the same first
-// match kobj_pci_claim picks (the device table is boot-built + immutable, so
-// it is deterministic). Returns 0 + fills bus/dev/fn on a match; -1 otherwise.
-// The SYS_PCI_CLAIM allowance gate (I-34 / HW_RES_PCI) resolves the function
-// here, before claiming, so it checks the exact (bus,dev,fn) the claim resolves.
-int kobj_pci_resolve_bdf(u32 virtio_device_id, u8 *bus, u8 *dev, u8 *fn);
+// Read-only (bus,dev,fn) resolution for a (virtio_device_id, nth) pair -- the
+// same nth (0-based, enumeration-order) match kobj_pci_claim picks (the
+// device table is boot-built + immutable, so it is deterministic). nth 0 is
+// the historical first-match; nth 1+ reaches a second same-id function
+// (G-7c: keyboard + tablet are both virtio-input id 18). Returns 0 + fills
+// bus/dev/fn on a match; -1 otherwise. The SYS_PCI_CLAIM allowance gate
+// (I-34 / HW_RES_PCI) resolves the function here, before claiming, so it
+// checks the exact (bus,dev,fn) the claim resolves.
+int kobj_pci_resolve_bdf(u32 virtio_device_id, u32 nth, u8 *bus, u8 *dev, u8 *fn);
 
 // Refcount ops. Mirror kobj_mmio_ref / kobj_mmio_unref.
 void kobj_pci_ref(struct KObj_PCI *k);

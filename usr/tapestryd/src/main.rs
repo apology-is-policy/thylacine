@@ -46,6 +46,7 @@ macro_rules! say {
     }};
 }
 
+mod chords;
 mod gpu;
 mod input;
 mod keymap;
@@ -65,25 +66,59 @@ use libthyla_rs::{
     T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 
-use crate::input::{Keyboard, RawInputEvent, EV_KEY};
+use crate::input::{
+    InputDev, RawInputEvent, ABS_X, ABS_Y, BTN_LEFT, EV_ABS, EV_KEY, EV_REL, EV_SYN, REL_WHEEL,
+    REL_X, REL_Y,
+};
 use crate::keymap::Mods;
 use crate::server::{Comp, Conn, MAX_CONNS};
 
 // =============================================================================
-// User-VA layout (driver-private): two BAR windows + the device rings; the
-// weave mappings bump-allocate from 0x0200_0000 (server.rs).
+// User-VA layout (driver-private): the BAR windows + the device rings; the
+// weave mappings bump-allocate from 0x0240_0000 (server.rs).
 // =============================================================================
 
 const GPU_BAR_WINDOW_VA: u64 = 0x0080_0000;
 const KBD_BAR_WINDOW_VA: u64 = 0x00E0_0000;
 const GPU_RING_VA: u64 = 0x0150_0000;
 const KBD_DMA_VA: u64 = 0x0152_0000;
+// The tablet's windows (G-7c): its eventq page above the keyboard's, its
+// 6-BAR window above the whole DMA region (the KBD-window..GPU-ring gap
+// is only 1 MiB -- too small for a 6 MiB BAR window).
+const TAB_DMA_VA: u64 = 0x0153_0000;
+const TAB_BAR_WINDOW_VA: u64 = 0x0160_0000;
+// The mouse function (relative pointer): its eventq page above the
+// tablet's, its 6-BAR window above the tablet's window -- which pushed
+// the weave bump-allocator base to 0x0240_0000 (server.rs).
+const MOUSE_DMA_VA: u64 = 0x0154_0000;
+const MOUSE_BAR_WINDOW_VA: u64 = 0x01C0_0000;
+
+// Idle throttle (residual-2: the ~16% compositor idle cost). The FRAME clock
+// is a fixed-rate tick that wakes every visible surface -- at 60 Hz a wholly
+// idle console still wakes tapestryd AND aurora 60x/sec (each wake pays an HVF
+// deep-park vCPU resume). When no INPUT has arrived for IDLE_AFTER_MS, drop the
+// effective tick to IDLE_HZ; the next keyboard/tablet/mouse event snaps it back
+// to the ctl rate. Activity is INPUT ONLY, never client presents: aurora
+// presents its cursor blink ~2x/sec, so counting presents would let the blink
+// pin the clock active forever. The floor is bounded by two poll-mode costs --
+// the keyboard is drained once per pass (so first-key-after-idle latency is one
+// idle period) and aurora polls /dev/consdrain once per FRAME (so console-output
+// latency during idle is one idle period); IDLE_HZ = 15 keeps both <= ~67 ms
+// (imperceptible-to-mild for the FIRST event after true idle, then 60 Hz) while
+// cutting the steady idle wakes 4x. Disabled under test-mode (the frozen clock
+// is ctl-driven). See docs/reference/139-tapestryd.md "Idle throttle".
+const IDLE_HZ: u32 = 15;
+const IDLE_AFTER_MS: u64 = 250;
 
 const _: () = {
     assert!(GPU_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= KBD_BAR_WINDOW_VA);
     assert!(KBD_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_RING_VA);
     assert!(GPU_RING_VA + (gpu::RING_DMA_SIZE as u64) <= KBD_DMA_VA);
-    assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= 0x0200_0000);
+    assert!(KBD_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_DMA_VA);
+    assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= MOUSE_DMA_VA);
+    assert!(MOUSE_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
+    assert!(TAB_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= MOUSE_BAR_WINDOW_VA);
+    assert!(MOUSE_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= 0x0240_0000);
 };
 
 /// Post /srv/tapestry (9P-mode; the ptyfs/netd post idiom). Requires the
@@ -103,7 +138,18 @@ fn post_srv_tapestry() -> Result<i64, ()> {
 
 struct Tapestryd {
     comp: Comp,
-    kbd: Option<Keyboard>,
+    kbd: Option<InputDev>,
+    /// The tablet function (G-7c; best-effort like the keyboard).
+    tablet: Option<InputDev>,
+    /// The relative-mouse function (best-effort like both): EV_REL
+    /// deltas accumulate into the pointer position AND reach the focused
+    /// surface as exact TEV_PTR_REL (mouse-look).
+    mouse: Option<InputDev>,
+    /// The tablet's raw absolute position + per-axis inclusive max
+    /// (ABS_INFO); scaled to display px at the SYN commit.
+    tab_ax: u32,
+    tab_ay: u32,
+    tab_max: (u32, u32),
     mods: Mods,
 }
 
@@ -120,21 +166,67 @@ impl Driver for Tapestryd {
         // The GPU function is mandatory.
         let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA)?;
 
-        // The keyboard function is best-effort: an environment without the
-        // virtio-keyboard-pci device (or without its function in the
-        // gathered allowance) yields an input-less compositor -- the
-        // scanout/present half is unaffected.
-        let kbd = match Keyboard::probe(KBD_BAR_WINDOW_VA, KBD_DMA_VA) {
-            Ok(k) => Some(k),
-            Err(_) => {
-                say!("tapestryd: no keyboard function (input-less)");
-                None
+        // The input functions are best-effort: an environment without them
+        // (or without their functions in the gathered allowance) yields an
+        // input-less compositor -- the scanout/present half is unaffected.
+        // G-7c: BOTH virtio-input instances are probed identically (the
+        // keyboard and the tablet share device id 18, reached as nth 0/1),
+        // then classified by the EV_BITS config probe -- supports_abs() is
+        // the tablet -- so QEMU device ordering never matters.
+        let mut kbd: Option<InputDev> = None;
+        let mut tablet: Option<InputDev> = None;
+        let mut mouse: Option<InputDev> = None;
+        let windows = [
+            (0u32, KBD_BAR_WINDOW_VA, KBD_DMA_VA),
+            (1u32, TAB_BAR_WINDOW_VA, TAB_DMA_VA),
+            (2u32, MOUSE_BAR_WINDOW_VA, MOUSE_DMA_VA),
+        ];
+        for (nth, bar_va, dma_va) in windows {
+            // Probe ALL instances unconditionally (G-7c audit F5): a
+            // bring-up fault on one nth (FEATURES_OK, DMA, eventq size)
+            // must not cost the other functions too -- a claim on an
+            // ABSENT nth fails in microseconds, so there is nothing to
+            // save by breaking early. probe() logs its own failure arm.
+            // Classification is capability-driven (device ordering never
+            // matters): EV_ABS = the tablet; EV_REL without ABS = the
+            // mouse (the tablet also reports REL -- its wheel -- so the
+            // ABS check runs first); neither = the keyboard.
+            match InputDev::probe(nth, bar_va, dma_va) {
+                Ok(dev) => {
+                    if dev.supports_abs() {
+                        if tablet.is_none() {
+                            say!("tapestryd: input[{}] is the tablet", nth);
+                            tablet = Some(dev);
+                        }
+                    } else if dev.supports_rel() {
+                        if mouse.is_none() {
+                            say!("tapestryd: input[{}] is the mouse", nth);
+                            mouse = Some(dev);
+                        }
+                    } else if kbd.is_none() {
+                        say!("tapestryd: input[{}] is the keyboard", nth);
+                        kbd = Some(dev);
+                    }
+                }
+                Err(_) => {}
             }
-        };
+        }
+        if kbd.is_none() && tablet.is_none() && mouse.is_none() {
+            say!("tapestryd: no input functions (input-less)");
+        }
+        let tab_max = tablet
+            .as_ref()
+            .map(|t| (t.abs_max(ABS_X as u8), t.abs_max(ABS_Y as u8)))
+            .unwrap_or((0x7FFF, 0x7FFF));
 
         Ok(Tapestryd {
             comp: Comp::new(g),
             kbd,
+            tablet,
+            mouse,
+            tab_ax: 0,
+            tab_ay: 0,
+            tab_max,
             mods: Mods::default(),
         })
     }
@@ -164,8 +256,14 @@ impl Driver for Tapestryd {
         let mut ticks_done: u64 = 0;
         let mut cur_hz = self.comp.clock_hz;
         let mut was_frozen = false;
+        // Residual-2 idle throttle: the last time real INPUT arrived. Init to
+        // now so bring-up runs at the ctl rate until the console settles.
+        let mut last_input = Instant::now();
 
         loop {
+            // Residual-2: did any input device drain a raw event this pass?
+            // Set after each of the three drains below; bumps last_input.
+            let mut input_seen = false;
             // (1) Input drain -> keymap -> the Super chord layer (G-6c:
             // the compositor's reserved plane, intercepted ABOVE the
             // event stream -- a consumed key never reaches a surface) ->
@@ -174,6 +272,7 @@ impl Driver for Tapestryd {
             if let Some(kbd) = self.kbd.as_mut() {
                 raw_events.clear();
                 kbd.drain(|ev| raw_events.push(ev));
+                input_seen |= !raw_events.is_empty();
                 for ev in &raw_events {
                     if ev.etype != EV_KEY {
                         continue; // EV_SYN separators etc.
@@ -193,14 +292,123 @@ impl Driver for Tapestryd {
                 }
             }
 
+            // (1b) Tablet drain (G-7c) -> the under-pointer surface. ABS
+            // records update the raw position; the EV_SYN frame boundary
+            // commits ONE coalesced MOVE (scaled to display px); BTN_*
+            // and the wheel dispatch immediately (non-droppable). The
+            // Super chord plane is a KEYBOARD reservation -- pointer
+            // events flow regardless of held modifiers (clients see mods).
+            if let Some(tab) = self.tablet.as_mut() {
+                raw_events.clear();
+                tab.drain(|ev| raw_events.push(ev));
+                input_seen |= !raw_events.is_empty();
+                let mask = self.mods.mask();
+                let (dw, dh) = (self.comp.gpu.width, self.comp.gpu.height);
+                let mut moved = false;
+                let commit =
+                    |c: &mut Comp, ax: u32, ay: u32, moved: &mut bool| {
+                        if !*moved {
+                            return;
+                        }
+                        *moved = false;
+                        let (mx, my) = self.tab_max;
+                        let px = (ax.min(mx) as u64 * dw.saturating_sub(1) as u64
+                            / mx.max(1) as u64) as u32;
+                        let py = (ay.min(my) as u64 * dh.saturating_sub(1) as u64
+                            / my.max(1) as u64) as u32;
+                        c.ptr_move(px, py, mask);
+                    };
+                for ev in &raw_events {
+                    match ev.etype {
+                        EV_ABS if ev.code == ABS_X => {
+                            self.tab_ax = ev.value;
+                            moved = true;
+                        }
+                        EV_ABS if ev.code == ABS_Y => {
+                            self.tab_ay = ev.value;
+                            moved = true;
+                        }
+                        EV_SYN => {
+                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                        }
+                        EV_KEY if ev.code >= BTN_LEFT => {
+                            // A button click must land AT its position even
+                            // if the device batched MOVE+BTN in one frame.
+                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                            self.comp.ptr_btn(ev.code, ev.value != 0, mask);
+                        }
+                        EV_REL if ev.code == REL_WHEEL => {
+                            commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+                            self.comp.ptr_scroll(ev.value as i32, mask);
+                        }
+                        _ => {}
+                    }
+                }
+                // A trailing ABS run without its SYN (ring-boundary split):
+                // commit anyway -- the next drain's SYN is a no-op then.
+                commit(&mut self.comp, self.tab_ax, self.tab_ay, &mut moved);
+            }
+
+            // (1c) The mouse drain: REL_X/REL_Y deltas accumulate per SYN
+            // frame then commit as ONE ptr_move_rel (exact deltas to the
+            // focused surface + pointer accumulation); BTN_* and the
+            // wheel dispatch immediately at the accumulated position
+            // (same discipline as the tablet arm). REL values are signed
+            // on the wire (i32 as u32).
+            if let Some(m) = self.mouse.as_mut() {
+                raw_events.clear();
+                m.drain(|ev| raw_events.push(ev));
+                input_seen |= !raw_events.is_empty();
+                let mask = self.mods.mask();
+                let (mut dx, mut dy) = (0i32, 0i32);
+                let commit = |c: &mut Comp, dx: &mut i32, dy: &mut i32| {
+                    if *dx != 0 || *dy != 0 {
+                        c.ptr_move_rel(*dx, *dy, mask);
+                        *dx = 0;
+                        *dy = 0;
+                    }
+                };
+                for ev in &raw_events {
+                    match ev.etype {
+                        EV_REL if ev.code == REL_X => dx += ev.value as i32,
+                        EV_REL if ev.code == REL_Y => dy += ev.value as i32,
+                        EV_SYN => commit(&mut self.comp, &mut dx, &mut dy),
+                        EV_KEY if ev.code >= BTN_LEFT => {
+                            commit(&mut self.comp, &mut dx, &mut dy);
+                            self.comp.ptr_btn(ev.code, ev.value != 0, mask);
+                        }
+                        EV_REL if ev.code == REL_WHEEL => {
+                            commit(&mut self.comp, &mut dx, &mut dy);
+                            self.comp.ptr_scroll(ev.value as i32, mask);
+                        }
+                        _ => {}
+                    }
+                }
+                commit(&mut self.comp, &mut dx, &mut dy);
+            }
+
             // (2) The FRAME tick (catch-up bounded to one tick per pass --
             // a stalled loop coalesces missed frames, honest for a
             // synthesized clock). Frozen under test-mode (section 18.6):
             // `tick` ctl writes drive time; the anchor re-seats on
             // unfreeze so no wall-clock backlog fires.
             let frozen = self.comp.test_frozen();
-            if self.comp.clock_hz != cur_hz || (was_frozen && !frozen) {
-                cur_hz = self.comp.clock_hz;
+            // Residual-2 idle throttle: fold the input activity into last_input,
+            // then pick the effective tick rate. Never throttle under test-mode
+            // (the frozen clock is ctl-driven). `base_hz` is the ctl rate (60,
+            // or whatever `tick`/clock ctl set); `eff_hz` drops to IDLE_HZ once
+            // the console has been input-quiet for IDLE_AFTER_MS.
+            if input_seen {
+                last_input = Instant::now();
+            }
+            let base_hz = self.comp.clock_hz;
+            let eff_hz = if frozen || (last_input.elapsed().as_millis() as u64) < IDLE_AFTER_MS {
+                base_hz
+            } else {
+                IDLE_HZ.min(base_hz)
+            };
+            if eff_hz != cur_hz || (was_frozen && !frozen) {
+                cur_hz = eff_hz;
                 anchor = Instant::now();
                 ticks_done = 0;
             }

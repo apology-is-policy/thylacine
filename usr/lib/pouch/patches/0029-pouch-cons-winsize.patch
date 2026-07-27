@@ -1,0 +1,147 @@
+Task #55c: the console arm of the tty ioctl dispatcher -- TIOCGWINSZ /
+isatty on /dev/cons via the is-a-cons qid contract + /dev/winsize.
+
+Pre-#55 a cons fd was STATLESS: SYS_fstat answered -1, the 0021
+dispatcher folded that to ENOTTY, so musl's isatty() (a TIOCGWINSZ
+probe) was FALSE on the console and stdio ran FULLY-buffered -- a
+latent POSIX-compat defect with no interactive victim until now. The
+kernel side (#55a) gave devcons + devdev's cons leaf a shared
+stat_native reporting S_IFCHR + the bit-41 CONS marker
+(CONS_STAT_QID_FLAG -- disjoint from ptyfs's PTS_FLAG bit 40 under the
+shared S_IFCHR posture; /net's bit-40 qids report S_IFREG and fail the
+S_ISCHR pre-gate) and the UNGATED read-only /dev/winsize leaf
+(`winsize <cols> <rows>\n`; `winsize 0 0` = the serial posture).
+
+This patch adds the dispatcher's cons arms on the pts-resolve miss:
+
+  - cons_resolve(fd): fstat -> S_ISCHR + bit 41 (the sock-tag reject
+    first, like pts_resolve).
+  - TIOCGWINSZ: cons -> read /dev/winsize (stateless per-op open, the
+    pts-ctl idiom) -> fill ws. SUCCESS even at 0x0 or with the leaf
+    unreachable (a narrow namespace): a cons fd IS a terminal, so
+    isatty stays true and callers fall back to CPR/env -- the standard
+    0-winsize convention. stdio on the console goes line-buffered
+    exactly as on a pts.
+  - TIOCSWINSZ: cons -> EPERM. The console geometry is PHYSICAL (the
+    renderer's cell grid, written via the renderer-gated consctl verb);
+    Linux-VT-resize semantics are deliberately NOT offered.
+  - tcgetattr/tcsetattr on a cons fd stay ENOTTY: the console termios
+    is held by the consctl delegation chain (joey -> login -> ut), not
+    by apps -- the documented honest seam (ARCH 23.5.3).
+
+Proven in-guest by the ls-gfx `pouch-hello-pty cons` leg (run FROM ut,
+so fd 0 is a real inherited cons fd: TIOCGWINSZ == 128x36 + isatty(0)
+== 1 + TIOCSWINSZ == EPERM + tcgetattr == ENOTTY) -- the boot prover
+cannot carry it (pouch_smoke_one pipes the probe's stdio).
+
+--- a/src/misc/ioctl.c	2026-07-22 09:56:36
++++ b/src/misc/ioctl.c	2026-07-22 09:57:19
+@@ -108,6 +108,11 @@
+ #define POUCH_PTS_FK_MASTER 1
+ #define POUCH_PTS_FK_SLAVE  2
+ 
++/* #55: the console qid marker (kernel cons_stat_native_fill,
++ * CONS_STAT_QID_FLAG -- a documented client ABI like the pts contract;
++ * bit 41, DISJOINT from PTS_FLAG under the shared S_IFCHR posture). */
++#define POUCH_CONS_FLAG     (1ULL << 41)
++
+ /* Resolve fd -> pts (n, filekind), or -1 if the fd is not a pts
+  * master/slave endpoint. */
+ static int pts_resolve(int fd, unsigned *n_out, int *fk_out)
+@@ -125,6 +130,54 @@
+ 	return 0;
+ }
+ 
++/* #55: resolve fd -> the console (S_ISCHR + the bit-41 marker). Both
++ * console front doors (a SYS_CONSOLE_OPEN std fd inherited down the
++ * session chain and a namespace-opened /dev/cons) report the contract.
++ * Pre-#55 cons fds were STATLESS (fstat -1 -> ENOTTY here -> isatty()
++ * FALSE on the console -> stdio ran fully-buffered); the kernel
++ * cons stat retires that latent through this arm. */
++static int cons_resolve(int fd)
++{
++	struct pouch_tstat ts;
++	if ((fd & POUCH_SOCK_TAG) != 0) return -1;  /* pouch socket: never a tty */
++	if (__syscall(SYS_fstat, fd, &ts) != 0) return -1;
++	if ((ts.mode & 0170000u) != 0020000u) return -1;  /* !S_ISCHR */
++	if ((ts.qid_path & POUCH_CONS_FLAG) == 0) return -1;
++	return 0;
++}
++
++/* #55: the console winsize readback -- the UNGATED /dev/winsize leaf
++ * (apps cannot mint consctl; the leaf is the app-facing surface).
++ * Renders `winsize <cols> <rows>
++`; `winsize 0 0` is the serial
++ * posture (no renderer wrote a grid) and is reported AS-IS -- callers
++ * fall back to CPR/env, the standard 0-winsize convention. Stateless
++ * per-op open (the pts-ctl idiom). Returns -1 only when the leaf is
++ * unreachable (a narrow namespace without /dev) or malformed. */
++static int cons_winsize_read(unsigned *cols_out, unsigned *rows_out)
++{
++	int cfd = open("/dev/winsize", O_RDONLY);
++	if (cfd < 0) return -1;
++	char buf[32];
++	long r = read(cfd, buf, sizeof(buf) - 1);
++	close(cfd);
++	if (r <= 0) return -1;
++	buf[r] = 0;
++	char *w = strstr(buf, "winsize ");
++	if (!w) return -1;
++	w += 8;
++	unsigned cols = 0, rows = 0;
++	if (*w < '0' || *w > '9') return -1;
++	while (*w >= '0' && *w <= '9') cols = cols * 10 + (unsigned)(*w++ - '0');
++	if (*w != ' ') return -1;
++	w++;
++	if (*w < '0' || *w > '9') return -1;
++	while (*w >= '0' && *w <= '9') rows = rows * 10 + (unsigned)(*w++ - '0');
++	if (cols_out) *cols_out = cols;
++	if (rows_out) *rows_out = rows;
++	return 0;
++}
++
+ /* Per-op open of the pts ctl sibling /dev/pts/<n>ctl (the Plan 9
+  * suffix-ctl idiom). Stateless: opened fresh per termios/winsize op,
+  * closed before return — no cached fd to invalidate across a pts free. */
+@@ -334,7 +387,24 @@
+ 		struct winsize *ws = arg;
+ 		unsigned flags, cols, rows;
+ 		if (!ws) { errno = EINVAL; return -1; }
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) {
++			/* #55: the console arm. TIOCGWINSZ is also musl's
++			 * isatty(), so SUCCESS here restores isatty truth on
++			 * the console (stdio goes line-buffered exactly as on
++			 * a pts). A cons fd whose namespace lacks the leaf
++			 * still IS a terminal: report 0x0 (the CPR-fallback
++			 * convention), never ENOTTY. */
++			if (cons_resolve(fd) == 0) {
++				unsigned cc = 0, cr = 0;
++				(void)cons_winsize_read(&cc, &cr);
++				ws->ws_col = (unsigned short)cc;
++				ws->ws_row = (unsigned short)cr;
++				ws->ws_xpixel = 0;
++				ws->ws_ypixel = 0;
++				return 0;
++			}
++			errno = ENOTTY; return -1;
++		}
+ 		if (pts_ctl_read(n, &flags, &cols, &rows) != 0) {
+ 			errno = ENOTTY;
+ 			return -1;
+@@ -348,7 +418,14 @@
+ 	case TIOCSWINSZ: {
+ 		const struct winsize *ws = arg;
+ 		if (!ws) { errno = EINVAL; return -1; }
+-		if (pts_resolve(fd, &n, &fk) != 0) { errno = ENOTTY; return -1; }
++		if (pts_resolve(fd, &n, &fk) != 0) {
++			/* #55: the console geometry is PHYSICAL (the
++			 * renderer's cell grid, reported not negotiated) --
++			 * an app cannot set it. Linux-VT-resize semantics
++			 * are deliberately NOT offered. */
++			if (cons_resolve(fd) == 0) { errno = EPERM; return -1; }
++			errno = ENOTTY; return -1;
++		}
+ 		char cmd[40];
+ 		int len = 0;
+ 		memcpy(cmd, "winsize ", 8); len = 8;

@@ -419,7 +419,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -474,7 +474,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -1905,6 +1905,13 @@ populate_stratum_pool() {
     # gracefully when the stage is absent (a THYLACINE-minimal build). ---
     local quake_stage="$BUILD_DIR/quake/stage"
     if [[ -f "$quake_stage/id1/pak0.pak" ]]; then
+        # Task #50: config.cfg persistence. Quake writes into its
+        # com_gamedir (/quake/id1) as the SESSION user, but the bake
+        # stamps SYSTEM ownership -- the game dirs must be world-writable
+        # for the created config.cfg / demo files (the put carries host
+        # modes; single-user policy, the per-user game-dir copy is the
+        # v1.x shape). The pak files stay 0644 read-only.
+        chmod 0777 "$quake_stage" "$quake_stage/id1"
         echo "==> populate pool: baking Quake shareware data ($quake_stage -> /quake, $(du -sh "$quake_stage" | cut -f1))"
         "$stratum_fs_bin" -s "$sock_path" put "$quake_stage" /quake \
             || { echo "==> populate pool: put /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
@@ -1972,6 +1979,57 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" read /lib/ndb/local | cmp -s - "$ndb_src" \
         || { echo "==> populate pool: /lib/ndb/local readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /lib/ndb/local baked + readback-verified (NET-DESIGN s5 ndb)"
+
+    # --- aurora-config cfg-2a: bake the system-tier renderer config ---
+    # /lib/aurora/config is the DEVICE's memory (AURORA-CONFIG.md section 3.2
+    # "the writer defines the tier"): aurora reads it at startup (the
+    # pre-login theme) and the F10 OSD writes through. /lib exists from the
+    # ndb bake above; mkdir is single-level (no -p).
+    # cfg-4 (env-gated, the ls-gfx-chords E2E): APPEND the compositor-tier
+    # test lines (a remapped chord + gaps) to the baked config so aurora
+    # pushes them at startup. Deliberately OPT-IN (THYLACINE_AURORA_CFG4=1)
+    # -- the shipped default uses the compiled chord defaults + gaps 1, and
+    # baking a gaps/chord change unconditionally would shift ls-gfx-panes'
+    # exact pixel + chord asserts. The env-gated scenario is the seed-pinning
+    # pattern (a real regression, run on demand).
+    local aurcfg_src="$REPO_ROOT/usr/aurora/config.default"
+    local aurcfg_baked="$aurcfg_src"
+    if [[ "${THYLACINE_AURORA_CFG4:-0}" != "0" ]]; then
+        aurcfg_baked=/tmp/thyla-aurora-cfg4.$$
+        cat "$aurcfg_src" > "$aurcfg_baked"
+        printf 'gaps 8\nchord super+g zoom\nchord super+f none\n' >> "$aurcfg_baked"
+        echo "==> populate pool: cfg-4 test config ENABLED (gaps 8 + super+g=zoom + super+f=none)"
+    fi
+    "$stratum_fs_bin" -s "$sock_path" mkdir /lib/aurora \
+        || { echo "==> populate pool: mkdir /lib/aurora FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" write /lib/aurora/config < "$aurcfg_baked" \
+        || { echo "==> populate pool: write /lib/aurora/config FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (aurora config) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/config | cmp -s - "$aurcfg_baked" \
+        || { echo "==> populate pool: /lib/aurora/config readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "==> populate pool: /lib/aurora/config baked + readback-verified (aurora-config cfg-2a)"
+    [[ "$aurcfg_baked" != "$aurcfg_src" ]] && rm -f "$aurcfg_baked"
+
+    # cfg-3 F1 (the OSC-laundering regression): a file of RAW bytes carrying
+    # a crafted settings-channel OSC whose value embeds a NEWLINE
+    # (`theme;spinifex\nmode 640 480`). `cat`-ing it feeds the exact bytes to
+    # aurora's /dev/consdrain -> osc_end. Pre-fix, config::parse re-split the
+    # value on .lines() and applied BOTH `theme spinifex` (a visible retint)
+    # AND `mode 640 480` past the single-token allowlist; post-fix, the
+    # control byte in the value rejects the whole OSC (no retint, no mode).
+    # ls-gfx-mode's F1 leg cats this and asserts NO spinifex retint. printf
+    # emits the raw ESC/newline/BEL the shell's echo cannot.
+    local osc_attack=/tmp/thyla-osc-newline-attack.$$
+    printf '\033]7770;aurora;theme;spinifex\nmode 640 480\007' > "$osc_attack"
+    "$stratum_fs_bin" -s "$sock_path" write /lib/aurora/osc-newline-attack < "$osc_attack" \
+        || { echo "==> populate pool: write osc-newline-attack FAILED" >&2; rm -f "$osc_attack"; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (osc attack) FAILED" >&2; rm -f "$osc_attack"; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /lib/aurora/osc-newline-attack | cmp -s - "$osc_attack" \
+        || { echo "==> populate pool: osc-newline-attack readback MISMATCH" >&2; rm -f "$osc_attack"; kill -TERM "$stratumd_pid"; exit 1; }
+    rm -f "$osc_attack"
+    echo "==> populate pool: /lib/aurora/osc-newline-attack baked (cfg-3 F1 regression fixture)"
 
     # --- net-7c-2: bake the system root-cert bundle at the canonical path ---
     # /etc/ssl/certs/ca-certificates.crt (NET-DESIGN s9; the host-bake idiom,
@@ -2062,7 +2120,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fs pouch-hello-env pouch-hello-spawn; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
@@ -2731,6 +2789,41 @@ build_all() {
     build_kernel
 }
 
+build_quake_host() {
+    # Task #52 (ls-gfx-mp): a HOST-native (macOS/arm64) tyr-quake from the
+    # same pruned-pristine vendored tree, run `-dedicated` as the multiplayer
+    # peer the guest connects to over slirp. Explicit-target ONLY (never part
+    # of `all` -- it needs brew sdl2 host-side; the mp scenario SKIPs when
+    # build/quake/host/tyr-quake is absent, so the suite stays green on hosts
+    # without it).
+    local hq_src="$BUILD_DIR/quake/host-src"
+    local hq_bin="$BUILD_DIR/quake/host"
+    local tq_vendor="$REPO_ROOT/third_party/tyrquake"
+    if ! command -v sdl2-config >/dev/null 2>&1; then
+        echo "==> quake-host: sdl2-config not found (brew install sdl2)" >&2
+        exit 1
+    fi
+    rm -rf "$hq_src"
+    mkdir -p "$hq_src" "$hq_bin"
+    cp -R "$tq_vendor/." "$hq_src/"
+    # The pruned icons/ + the upstream-GENERATED icon header: satisfy the
+    # Makefile's rule graph (a backdated png prerequisite + a fresh stub
+    # header) instead of bypassing it -- the build_tyrquake stub, host-shaped.
+    mkdir -p "$hq_src/icons" "$hq_src/build/include"
+    touch -t 200001010000 "$hq_src/icons/tyrquake-1024x1024.png"
+    printf 'static const unsigned char MagickImage[] = { 0 };\n' \
+        > "$hq_src/build/include/tyrquake_icon_128.h"
+    # The Makefile's darwin branch hardcodes /Library/Frameworks/SDL2; feed
+    # it brew's sdl2-config instead.
+    make -C "$hq_src" -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" \
+        bin/tyr-quake \
+        SDL_CFLAGS="$(sdl2-config --cflags) -DDISABLE_ICON" \
+        SDL_LFLAGS="$(sdl2-config --libs)" > "$hq_src/build-host.log" 2>&1 \
+        || { tail -20 "$hq_src/build-host.log" >&2; exit 1; }
+    cp "$hq_src/bin/tyr-quake" "$hq_bin/tyr-quake"
+    echo "==> quake-host: $hq_bin/tyr-quake ($(file -b "$hq_bin/tyr-quake" | cut -d, -f1-2))"
+}
+
 clean() {
     echo "==> Removing $BUILD_DIR"
     rm -rf "$BUILD_DIR"
@@ -2745,6 +2838,7 @@ case "$target" in
     tyrquake)    build_tyrquake    ;;
     gnumake)     build_gnumake     ;;
     libcxx)      build_libcxx      ;;
+    quake-host)  build_quake_host  ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;

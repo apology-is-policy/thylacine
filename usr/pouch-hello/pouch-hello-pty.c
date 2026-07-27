@@ -71,8 +71,39 @@ static int wait_flag(volatile sig_atomic_t *flag, int fd)
 	return *flag != 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+	/* --- #55c: the CONSOLE mode (`pouch-hello-pty cons`) ----------
+	 * Run FROM ut in a live session so fd 1 is a real inherited cons
+	 * fd (the boot prover pipes the probe's stdio, so it cannot carry
+	 * this leg). Proves the 0026 cons arm end-to-end: the is-a-cons
+	 * qid decode (bit 41) -> TIOCGWINSZ served from /dev/winsize
+	 * (aurora's live grid) -> isatty truth on the console ->
+	 * TIOCSWINSZ EPERM (renderer-owned geometry) -> tcgetattr ENOTTY
+	 * (the console termios stays with the consctl delegation chain --
+	 * the documented ARCH 23.5.3 seam). */
+	if (argc > 1 && strcmp(argv[1], "cons") == 0) {
+		/* fd 1, not fd 0: ut gives an un-redirected fg child a PIPE
+		 * stdin on the console (the PTY-4b rule -- Inherit only under
+		 * job control, which is pts-only), but stdout rides
+		 * stdio_inherit = the cons Spoor. fd 1 is also the fd musl's
+		 * stdio line-buffering probe targets -- the load-bearing one. */
+		struct winsize ws;
+		CHECK(ioctl(1, TIOCGWINSZ, &ws) == 0,
+		      "TIOCGWINSZ(cons stdout)");
+		CHECK(isatty(1) == 1, "isatty(cons stdout)");
+		errno = 0;
+		CHECK(ioctl(1, TIOCSWINSZ, &ws) == -1 && errno == EPERM,
+		      "TIOCSWINSZ(cons) is EPERM");
+		struct termios tio;
+		errno = 0;
+		CHECK(tcgetattr(1, &tio) == -1 && errno == ENOTTY,
+		      "tcgetattr(cons) is ENOTTY (the documented seam)");
+		printf("pty-cons: %ux%u isatty=1 setws=EPERM tcgetattr=ENOTTY OK\n",
+		       (unsigned)ws.ws_col, (unsigned)ws.ws_row);
+		return 0;
+	}
+
 	/* --- A. mint + name ------------------------------------------- */
 	int mfd = posix_openpt(O_RDWR | O_NOCTTY);
 	CHECK(mfd >= 0, "posix_openpt(/dev/pts/ptmx)");

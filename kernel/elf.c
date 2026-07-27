@@ -247,3 +247,88 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
 
     return ELF_LOAD_OK;
 }
+
+// ---------------------------------------------------------------------
+// VIVARIUM V-1: the ADVISORY brand hint (docs/VIVARIUM.md section 12.1).
+// ---------------------------------------------------------------------
+//
+// PURE + read-only + bounds-safe. It NEVER decides a phenotype -- the Q3
+// resolution is binding: a Proc is never INFERRED into a non-default ABI,
+// only DECLARED into one by its vivarium. This exists so an obvious
+// mismatch (a Linux-interp binary exec'd OUTSIDE a vivarium) earns a
+// diagnostic + a clean failure instead of a silent mis-decode.
+//
+// PT_INTERP naming a Linux loader is the ONLY signal trusted here.
+// EI_OSABI is DELIBERATELY NOT CONSULTED, and that omission is the whole
+// point of Q3: ELFOSABI_GNU(3) == ELFOSABI_LINUX(3) is emitted by Clade
+// for NATIVE Thylacine output, so keying on it would mis-brand our own
+// toolchain's binaries; and ELFOSABI_NONE(0) is carried by native AND by
+// musl-static Linux binaries alike. The byte identifies nothing in either
+// direction -- do NOT "improve" this function by consulting it.
+//
+// Consequence, and it is correct: the v1.0 target (a musl-STATIC Linux
+// binary, which has no PT_INTERP at all) hints UNKNOWN. That is the
+// designed answer -- its vivarium declares it.
+
+// A tiny bounded substring test (no libc in the kernel; `hay` is already
+// proven NUL-terminated within its own extent by the caller).
+static bool brand_contains(const char *hay, size_t hay_len, const char *needle) {
+    size_t n = 0;
+    while (needle[n] != '\0') n++;
+    if (n == 0 || n > hay_len) return false;
+    for (size_t i = 0; i + n <= hay_len; i++) {
+        size_t j = 0;
+        while (j < n && hay[i + j] == needle[j]) j++;
+        if (j == n) return true;
+    }
+    return false;
+}
+
+enum elf_brand elf_brand_hint(const void *blob, size_t size) {
+    if (!blob || size < sizeof(struct Elf64_Ehdr)) return ELF_BRAND_UNKNOWN;
+
+    const u8 *bytes = (const u8 *)blob;
+    const struct Elf64_Ehdr *eh = (const struct Elf64_Ehdr *)blob;
+
+    // Only inspect something that is plausibly an aarch64 ELF64 at all; a
+    // non-ELF blob has no brand to report (never a verdict from garbage).
+    if (eh->e_ident[EI_MAG0] != ELFMAG0 || eh->e_ident[EI_MAG1] != ELFMAG1 ||
+        eh->e_ident[EI_MAG2] != ELFMAG2 || eh->e_ident[EI_MAG3] != ELFMAG3)
+        return ELF_BRAND_UNKNOWN;
+    if (eh->e_ident[EI_CLASS] != ELFCLASS64) return ELF_BRAND_UNKNOWN;
+    if (eh->e_ident[EI_DATA]  != ELFDATA2LSB) return ELF_BRAND_UNKNOWN;
+
+    if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) return ELF_BRAND_UNKNOWN;
+    if (eh->e_phnum == 0 || eh->e_phnum > ELF_MAX_PHNUM) return ELF_BRAND_UNKNOWN;
+
+    // The phdr table must lie wholly inside the buffer we were handed. The
+    // buffer may be a bounded PREFIX of the file (REVENANT's header read), so
+    // "not present" is a legitimate, common answer -- never an error.
+    u64 ph_off   = eh->e_phoff;
+    u64 ph_bytes = (u64)eh->e_phnum * (u64)sizeof(struct Elf64_Phdr);
+    if (ph_off > size || ph_bytes > (u64)size - ph_off) return ELF_BRAND_UNKNOWN;
+
+    const struct Elf64_Phdr *ph = (const struct Elf64_Phdr *)(bytes + ph_off);
+    for (u16 i = 0; i < eh->e_phnum; i++) {
+        if (ph[i].p_type != PT_INTERP) continue;
+
+        u64 off = ph[i].p_offset;
+        u64 fsz = ph[i].p_filesz;
+        if (fsz == 0 || off > size || fsz > (u64)size - off)
+            return ELF_BRAND_UNKNOWN;   // interp not in our prefix
+
+        const char *interp = (const char *)(bytes + off);
+        size_t n = 0;
+        while (n < (size_t)fsz && interp[n] != '\0') n++;
+        if (n == (size_t)fsz) return ELF_BRAND_UNKNOWN; // unterminated: untrusted
+
+        // Both the glibc and musl aarch64 loaders, by substring so a distro's
+        // /lib64 or multiarch path still matches.
+        if (brand_contains(interp, n, "ld-linux") ||
+            brand_contains(interp, n, "ld-musl"))
+            return ELF_BRAND_LINUX_LIKELY;
+        return ELF_BRAND_UNKNOWN;       // some other interpreter: no verdict
+    }
+
+    return ELF_BRAND_UNKNOWN;           // static: the v1.0 target, by design
+}

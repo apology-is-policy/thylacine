@@ -1442,17 +1442,25 @@ enum {
     // function, maps its BARs, and reads its resolved topology. KObj_PCI is
     // non-transferable (I-5) -- the claimer is always the driver.
 
-    // SYS_PCI_CLAIM(virtio_device_id) -> handle / -1  (pci-1c)
-    //   Claim the first VirtIO-PCI function matching virtio_device_id (the
-    //   VIRTIO device id: 1 = net, 4 = rng, ...). The kernel assigns + enables
-    //   the function's memory BARs, walks the VIRTIO_PCI_CAP_* list into the
-    //   region map, and resolves the INTx GIC INTID. On success mints a
-    //   KOBJ_PCI handle with FIXED rights R|W|MAP (never TRANSFER -- I-5): a
-    //   device owner always needs read + write + map, and the handle cannot be
-    //   passed, so there is no partial-rights use case. Requires CAP_HW_CREATE
-    //   (like SYS_MMIO_CREATE). Returns -1 on: cap-missing / device-not-found /
-    //   already-claimed / BAR-assign failure / malformed cap list / OOM.
-    SYS_PCI_CLAIM = 76,    // arg: virtio_device_id (x0)
+    // SYS_PCI_CLAIM(virtio_device_id | nth<<32) -> handle / -1  (pci-1c; G-7c)
+    //   Claim the nth (0-based, enumeration-order) VirtIO-PCI function
+    //   matching the low-32 virtio device id (1 = net, 4 = rng, 18 = input,
+    //   ...). nth rides the HIGH 32 bits of the one arg: a bare id (every
+    //   pre-G-7c caller; typed-u64 wrappers zero the high word) selects
+    //   nth 0 = the historical first match, byte-identical. nth 1+ reaches a
+    //   second same-id function (G-7c: virtio-input keyboard + tablet). The
+    //   device table is boot-built + immutable, so (id, nth) -> (bus,dev,fn)
+    //   is stable -- the I-34 allowance gate resolves the SAME function the
+    //   claim picks. The kernel assigns + enables the function's memory BARs,
+    //   walks the VIRTIO_PCI_CAP_* list into the region map, and resolves the
+    //   INTx GIC INTID. On success mints a KOBJ_PCI handle with FIXED rights
+    //   R|W|MAP (never TRANSFER -- I-5): a device owner always needs read +
+    //   write + map, and the handle cannot be passed, so there is no
+    //   partial-rights use case. Requires CAP_HW_CREATE (like
+    //   SYS_MMIO_CREATE). Returns -1 on: cap-missing / device-not-found (an
+    //   over-large nth included) / already-claimed / BAR-assign failure /
+    //   malformed cap list / OOM.
+    SYS_PCI_CLAIM = 76,    // arg: virtio_device_id | nth<<32 (x0)
 
     // SYS_PCI_MAP_BAR(handle, vaddr, bar_index, prot) -> 0 / -1  (pci-1c)
     //   Install a user-VA mapping at `vaddr` for BAR `bar_index` of a KOBJ_PCI
@@ -2022,9 +2030,21 @@ struct srv_peer_info {
     u32 alive;         // @20 1 iff an ALIVE Proc still carries `stripes`, else 0
     u32 principal_id;  // @24 A-1a: peer's durable identity; NONE when alive == 0
     u32 primary_gid;   // @28 A-1a: peer's primary group; NONE when alive == 0
-    u32 flags;         // @32 A-1a: reserved, 0 at v1.0
+    u32 flags;         // @32 cfg-3: bit 0 = SRV_PEER_FLAG_CONSOLE_RENDERER
+                       //     (the peer holds the LIVE G-4 console-renderer
+                       //     role; 0 when alive == 0). Other bits reserved 0;
+                       //     APPEND-ONLY — consumers scan by bit, unknown-clear
+                       //     means absent (the AT_HWCAP discipline).
     u32 _reserved;     // @36 A-1a: explicit pad to 40; reserved, 0
 };
+
+// cfg-3 (AURORA-CONFIG.md section 3.3): srv_peer_info.flags bits. The
+// tapestryd apply-authority gate admits the authority-bearing global ctl
+// verbs (`mode`, `clock-rate`, later `chord`/`gaps`) only from a conn
+// whose peer carries this LIVE role stamp — resolved in the same
+// alive-gated g_proc_table_lock walk as `caps`, against the single-holder
+// g_console_renderer; a dead peer fail-closes the whole flags word to 0.
+#define SRV_PEER_FLAG_CONSOLE_RENDERER (1u << 0)
 
 _Static_assert(sizeof(struct srv_peer_info) == 40,
                "struct srv_peer_info is a SYS_SRV_PEER ABI type — pinned "

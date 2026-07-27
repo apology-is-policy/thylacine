@@ -1,0 +1,142 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-mp.exp -- task #52: NETWORK MULTIPLAYER E2E.
+# Proves the 0025 nonblocking-socket surface (FIONBIO / nonblocking
+# recvfrom / EWOULDBLOCK, the surface that unblocked "UDP_Init: Unable to
+# open control socket") live in the REAL TyrQuake, and attempts a live
+# connect to a HOST-native NQ dedicated server (tyr-quake -dedicated,
+# built by `tools/build.sh quake-host`) over slirp UDP.
+#
+# The proof chain on the guest serial tee:
+#
+#   udp leg (HARD gate) : "UDP_Init: Success" -- the exact pre-0025
+#       blocker line (net_udp.c:222; pre-0025 it printed "Unable to open
+#       control socket, UDP disabled"). Deterministic: UDP_Init runs at
+#       engine startup and opens the control socket via socket()+FIONBIO,
+#       so a Success proves the 0025 FIONBIO surface live in real
+#       TyrQuake -- NO server required.
+#   connect leg (BEST-EFFORT, logged) : `+connect 10.0.2.2` drives the
+#       NQ nonblocking datagram handshake; "Connection accepted"
+#       (net_dgrm.c:1238) proves the live server round-trip. This is
+#       HOST-COUPLED (slirp must route guest->10.0.2.2:26000 to the host
+#       server) -- LOGGED, never gated, per the net-3c/net-4b best-effort
+#       discipline. The server-side log is grepped as a second witness.
+#   exit leg (HARD gate) : console `quit`; ut answers `whoami` -- the
+#       shell survived the whole dance.
+#
+# The DETERMINISTIC end-to-end proof of the nonblocking DATA path (a
+# loopback datagram round-trip through nonblocking recvfrom) is the
+# boot-fatal pouch-hello-net #52 leg; this scenario is the live-TyrQuake
+# witness on top.
+#
+# SKIPs (exit 77) when build/quake/host/tyr-quake is absent -- the host
+# server needs brew sdl2; `tools/build.sh quake-host` builds it.
+#
+# Runs under HVF (the ls-gfx-play sibling posture).
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+set hostq "$repo/build/quake/host/tyr-quake"
+set basedir "$repo/build/quake/stage"
+set dedlog "$repo/build/ls-gfx-mp-server.log"
+
+if {![file executable $hostq]} {
+    puts "LS-CI SKIP: host server absent ($hostq) -- run tools/build.sh quake-host"
+    exit 77
+}
+
+# --- host server lifecycle -------------------------------------------------
+# Started AFTER boot+login so its busy-loop never competes with the HVF
+# boot (which aggravates the expect-side channel-close flake, #60). A pty
+# via script(1) line-buffers the server output; held-open stdin keeps the
+# dedicated console alive. Torn down on EVERY exit path by the hook below.
+proc mp_server_start {} {
+    global hostq basedir dedlog
+    file delete -force $dedlog
+    exec sh -c "tail -f /dev/null | script -q $dedlog $hostq -dedicated 2 -basedir $basedir +sys_ticrate 10 +map e1m1 >/dev/null 2>&1 &"
+    for {set i 0} {$i < 50} {incr i} {
+        if {[file exists $dedlog] && ![catch {exec grep -a -q "Quake Initialized" $dedlog}]} {
+            return 1
+        }
+        after 200
+    }
+    return 0
+}
+proc mp_server_stop {} {
+    catch {exec pkill -f "tyr-quake -dedicated"}
+    catch {exec pkill -f "tail -f /dev/null"}
+}
+rename exit __mp_real_exit
+proc exit {{code 0}} {
+    mp_server_stop
+    __mp_real_exit $code
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+if {![mp_server_start]} {
+    lc_fail "host dedicated server never initialized (see $dedlog)"
+}
+lc_step "host dedicated server up (e1m1, port 26000)"
+
+# Launch the client CONNECTING. +connect drives the whole 0025 surface at
+# startup: UDP_Init (socket + FIONBIO), then the nonblocking recvfrom
+# handshake retries.
+lc_send "tyr-quake -window -nosound +connect 10.0.2.2"
+
+# HARD gate: the pre-0025 blocker line is now a Success in real TyrQuake.
+lc_expect "UDP_Init: Success" "the pre-0025 blocker line (FIONBIO surface live in real TyrQuake)"
+lc_pass "mp: UDP_Init succeeds in-guest (ioctl FIONBIO wired; #52 surface live)"
+
+# BEST-EFFORT connect (slirp must route guest->10.0.2.2:26000 to the host
+# server; environment-dependent, the net-3c gateway-ping discipline). Wait
+# a bounded window for the signon, then LOG the outcome either way.
+set timeout 12
+set connected 0
+expect {
+    "Connection accepted" { set connected 1 }
+    timeout               { }
+    eof                   { lc_fail "unexpected EOF waiting on the connect (guest died)" }
+}
+if {$connected} {
+    lc_step "mp: LIVE connect -- guest client handshaked with the host server (slirp routed 10.0.2.2:26000)"
+    # Best-effort signon witnesses (do not gate; the connect already proved the round-trip).
+    set timeout 6
+    expect {
+        "Using protocol" { lc_step "mp: signon parsing reached the protocol banner" }
+        timeout          { lc_step "mp: note: connected but signon banner not observed in-window" }
+        eof              { lc_fail "unexpected EOF during signon" }
+    }
+} else {
+    lc_step "mp: best-effort connect not observed -- slirp did not route guest->10.0.2.2:26000 to the host server (environment-dependent; the #52 surface is proven by UDP_Init + the boot prover)"
+}
+set timeout $lc_cmd_timeout
+
+# Server-side witness (logged): did any client packet reach the host server?
+if {![catch {exec grep -a -q "connected" $dedlog}]} {
+    lc_step "mp: server log confirms an inbound client connect (developer/dedicated)"
+} else {
+    lc_step "mp: note: no inbound connect in the server log ($dedlog)"
+}
+
+# Quit from the console (Shift+ESC is hardcoded-unbindable; quit at
+# key_console skips the confirm menu). This also proves the client stayed
+# alive + responsive through the whole nonblocking-socket dance.
+sleep 2
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k shift+esc} err]} {
+    lc_fail "qmp chord shift+esc failed: $err"
+}
+if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp "quit\n"} err]} {
+    lc_fail "qmp type quit failed: $err"
+}
+sleep 2
+lc_run_expect "whoami" "1000"
+lc_pass "mp: clean quit -- ut back in the foreground (client survived the nonblocking-socket dance)"
+
+lc_quit
+lc_pass "ls-gfx-mp: the #52 nonblocking-socket surface is live in real TyrQuake (UDP_Init + connect drive)"
+exit 0

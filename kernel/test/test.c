@@ -455,6 +455,7 @@ void test_elf_header_rejection(void);
 void test_elf_rwx_rejected(void);
 void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
+void test_elf_brand_hint(void);
 void test_dev_boot_registration_smoke(void);
 void test_dev_lookup_unknown(void);
 void test_dev_devnone_ops_smoke(void);
@@ -503,6 +504,7 @@ void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
+void test_devproc_debug_exitkill_terminates_on_close(void);
 void test_devproc_debug_stop_start_resume(void);
 void test_devproc_debug_mem(void);
 void test_devproc_debug_regs(void);
@@ -541,6 +543,9 @@ void test_cons_cook_icrnl(void);                 // LS-8b
 void test_cons_cook_onlcr_output(void);          // LS-8b
 void test_cons_consctl_parse(void);              // LS-8b
 void test_cons_consctl_render(void);             // LS-8b
+void test_cons_winsize_roundtrip(void);          // #55
+void test_cons_winsize_winch_iff_changed(void);  // #55
+void test_cons_stat_native_qid_contract(void);   // #55
 void test_cons_cook_line_overflow(void);         // LS-8b
 void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
@@ -569,6 +574,8 @@ void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
 void test_devdev_cons_gate(void);
+void test_devdev_consctl_renderer_mint(void);    // #55
+void test_devdev_winsize_leaf(void);             // #55
 void test_devdev_renderer_gate(void);            // G-4
 void test_devhw_bestiary_smoke(void);
 void test_devhw_attach_returns_root(void);
@@ -759,6 +766,7 @@ void test_devsrv_conn_release(void);
 void test_devsrv_poster_exit_drains_backlog(void);
 void test_devsrv_srv_peer_identity(void);
 void test_devsrv_srv_peer_dead_peer(void);
+void test_devsrv_srv_peer_renderer_flag(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
 void test_srv_client_no_per_proc_cap(void);
@@ -799,6 +807,7 @@ void test_pci_unref_releases_bars(void);
 void test_pci_live_count_balances(void);
 void test_pci_syscall_reject(void);
 void test_pci_syscall_claim_info(void);
+void test_pci_claim_nth(void);
 void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
 void test_userspace_ramfs_hello(void);
@@ -1794,6 +1803,7 @@ struct test_case g_tests[] = {
     { "elf.rwx_rejected",              test_elf_rwx_rejected,              false, NULL },
     { "elf.bounds_rejection",          test_elf_bounds_rejection,          false, NULL },
     { "elf.policy_rejection",          test_elf_policy_rejection,          false, NULL },
+    { "elf.brand_hint",                test_elf_brand_hint,                false, NULL },
     { "dev.boot_registration_smoke",   test_dev_boot_registration_smoke,   false, NULL },
     { "dev.lookup_unknown",            test_dev_lookup_unknown,            false, NULL },
     { "dev.devnone_ops_smoke",         test_dev_devnone_ops_smoke,         false, NULL },
@@ -1846,6 +1856,7 @@ struct test_case g_tests[] = {
     { "devproc.ctl_suspend_resume_dispatch", test_devproc_ctl_suspend_resume_dispatch, false, NULL },
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
+    { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
     { "devproc.debug_stop_start_resume",       test_devproc_debug_stop_start_resume,       false, NULL },
     { "devproc.debug_mem",                     test_devproc_debug_mem,                     false, NULL },
     { "devproc.debug_regs",                    test_devproc_debug_regs,                    false, NULL },
@@ -1892,6 +1903,9 @@ struct test_case g_tests[] = {
     { "cons.cook_onlcr_output",        test_cons_cook_onlcr_output,        false, NULL },
     { "cons.consctl_parse",            test_cons_consctl_parse,            false, NULL },
     { "cons.consctl_render",           test_cons_consctl_render,           false, NULL },
+    { "cons.winsize_roundtrip",        test_cons_winsize_roundtrip,        false, NULL },
+    { "cons.winsize_winch_iff_changed", test_cons_winsize_winch_iff_changed, false, NULL },
+    { "cons.stat_native_qid_contract", test_cons_stat_native_qid_contract, false, NULL },
     { "cons.cook_line_overflow",       test_cons_cook_line_overflow,       false, NULL },
     { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
@@ -1922,6 +1936,8 @@ struct test_case g_tests[] = {
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
+    { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },
+    { "devdev.winsize_leaf",           test_devdev_winsize_leaf,           false, NULL },
     { "devhw.bestiary_smoke",          test_devhw_bestiary_smoke,          false, NULL },
     { "devhw.attach_returns_root",     test_devhw_attach_returns_root,     false, NULL },
     { "devhw.walk_node_and_prop",      test_devhw_walk_node_and_prop,      false, NULL },
@@ -2083,6 +2099,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "devsrv.srv_peer_identity",      test_devsrv_srv_peer_identity,      false, NULL },
     { "devsrv.srv_peer_dead_peer",     test_devsrv_srv_peer_dead_peer,     false, NULL },
+    { "devsrv.srv_peer_renderer_flag", test_devsrv_srv_peer_renderer_flag, false, NULL },
     { "devsrv.srv_peer_gate",          test_devsrv_srv_peer_gate,          false, NULL },
     { "devsrv.srv_peer_bad_args",      test_devsrv_srv_peer_bad_args,      false, NULL },
     { "srv_client.no_per_proc_cap",
@@ -2140,6 +2157,7 @@ struct test_case g_tests[] = {
     { "pci.live_count_balances",       test_pci_live_count_balances,       false, NULL },
     { "pci.syscall_reject",            test_pci_syscall_reject,            false, NULL },
     { "pci.syscall_claim_info",        test_pci_syscall_claim_info,        false, NULL },
+    { "pci.claim_nth",                 test_pci_claim_nth,                 false, NULL },
     { "userspace.first_iteration",     test_userspace_first_iteration,     false, NULL },
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { "userspace.ramfs_hello",         test_userspace_ramfs_hello,         false, NULL },

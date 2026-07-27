@@ -95,15 +95,60 @@ blocks on the fid (`thyla_tap_read_events`) and feeds a bounded mutex ring;
 PumpEvents drains it and translates on the SDL thread. Fd discipline: the
 pump thread touches ONLY `event_fd`; every other fid (ctl/present/weave,
 including the reweave's close-and-remap) stays on the SDL thread. Shutdown
-closes `event_fd` from the SDL thread — the kernel's cancel-at-close
-completes the parked read, the pump exits, join succeeds.
+RETIRES the surface (`thyla_tap_request_close` writes ctl `destroy`) — the
+retire makes the event fid read EMPTY, the parked read returns 0, the pump
+exits, join succeeds; only then does `thyla_tap_close` close `event_fd`.
+(The G-7d F1 correction: closing the fd from a sibling thread does NOT
+cancel a parked read — the #844 ref-held Spoor keeps the blocking read's
+own ref, so the Dev close hook never runs. The retire is the real, bounded,
+frame-clock-independent teardown signal.)
 
 Translation: `TEV_KEY.code` is a raw evdev keycode → `SDL_Scancode` via the
 stock `linux_scancode_table`; the compositor-resolved rune → `SDL_TEXTINPUT`
 on press; a size-changing `TEV_CONFIGURE` acks + reweaves on the SDL thread
 then reports `SDL_WINDOWEVENT_RESIZED`; `TEV_FOCUS`/`TEV_CLOSE` map to the
-SDL window events. `TEV_PTR_*`/`TEV_SCROLL` arrive with the tablet device
-(G-7c, not yet wired).
+SDL window events.
+
+**G-7c — the pointer path.** `TEV_PTR_MOVE` carries the surface-relative
+position packed `x<<16|y` (TAPESTRY §18.4). In relative mode (Quake
+mouse-look) translation computes deltas DRIVER-side from successive
+positions and feeds `SDL_SendMouseMotion(relative=1, dx, dy)` — SDL
+core's warp emulation needs a warpable host cursor this backend lacks,
+so the video init installs a `SetRelativeMouseMode` hook that simply
+ACCEPTS the mode (keeping core off the warp path). **Threading (the G-7c
+audit F2 correction)**: ALL translation — the `relative_mode` read,
+`ptr_x/ptr_y/ptr_valid`, every `SDL_SendMouse*` — runs on the SDL MAIN
+thread inside `PumpEvents` (which drains the pump thread's ring); the
+pump thread itself never touches SDL state. There is no cross-thread
+race here, and translation must NOT be moved onto the pump thread —
+`SDL_Mouse` state is unsynchronized. Non-relative mode forwards absolute
+positions (SDL derives `xrel/yrel` internally). `TEV_PTR_BTN` maps evdev
+`BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA` → `SDL_BUTTON_LEFT/RIGHT/MIDDLE/X1/X2`;
+`TEV_SCROLL`'s signed delta feeds `SDL_SendMouseWheel` (positive = up).
+Edge behavior inherited from the tablet: the compositor clamps
+out-of-surface positions to the far edge, so relative deltas die at the
+boundary (the classic absolute-device limit — irrelevant for QMP/VNC
+injection, which is positional).
+
+**#51 — the FRAME-paced present (default ON).** A 60 Hz compositor can
+only show 60 fps; presents beyond that overwrite un-composed pixels and
+spin a vCPU (the uncapped timedemo ran ~600 fps with a 122–600 HVF
+variance). `UpdateWindowFramebuffer` now waits for the compositor's next
+FRAME tick before presenting: the PUMP thread bumps `frame_seq` +
+signals `frame_cv` per `TEV_FRAME` it reads off the fid (driver-private
+fields — the F2 rule keeps the pump off SDL state; FRAME no longer rides
+the ring), and the present path does ONE `pthread_cond_timedwait`
+bounded at 50 ms wall-clock (the G-5 F1 lesson: never a wake-count
+bound). The bump cannot live at translation — the present's wait runs on
+the main thread and would starve `PumpEvents` into timeout-only pacing.
+Degradations are all bounded: a frozen/degraded frame clock (clock-rate
+ctl, test-mode) or a HIDDEN pane (visible-only FRAME emission) paces at
+~20 fps off the timeout — background throttling for free; teardown (the
+pump exits after the retire, no further signals) is bounded by the same
+50 ms; a spurious wake presents one tick early (pacing slack, never
+correctness). `SDL_THYLACINE_NOPACE=1` opts out (benchmarks). The
+ls-gfx-quake fps line becomes STABLE ≈ clock_hz — still the
+deterministic 969-presents proof, minus the variance.
 
 ## `0022-pouch-nanosleep`
 

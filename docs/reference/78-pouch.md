@@ -1074,6 +1074,51 @@ consumer polls a listener. Recorded as a net-6b-3 seam (NET-DESIGN §12.2; #220)
 the candidate fix is `check_ready` reporting `accept_ready` for an `ANNOUNCED`
 TCP slot, weighed at the net-6b-4 audit.
 
+### Nonblocking sockets — `FIONBIO` / `FIONREAD` / `SO_BROADCAST` (task #52, `0025`)
+
+The BSD-socket nonblocking idiom — `ioctl(fd, FIONBIO, &1)` to set nonblocking
+mode, then `recvfrom` that returns `EWOULDBLOCK` on no data — is what TyrQuake's
+`UDP_OpenSocket` uses; before `0025` `FIONBIO` had no pouch surface, so
+`UDP_Init` failed at "Unable to open control socket, UDP disabled". `0025` wires
+it, and the **design is the load-bearing part**: a nonblocking read is
+**try-and-EAGAIN**, never poll-then-read.
+
+- **`FIONBIO`** sets the slot's local `nonblock` record *and* writes the netd
+  `nonblock 1`/`nonblock 0` **ctl verb**. netd then answers an empty-but-open
+  `data` read with `E_AGAIN` (Rlerror 11 → the guest's `EWOULDBLOCK`, via
+  `syscall_cp`'s `__syscall_ret` translation) instead of parking a `PendingRead`.
+  So the tagged `read`/`recv`/`recvfrom` shims are **unchanged** (pristine): the
+  nonblocking behavior is entirely netd-driven, and the read path **never touches
+  the readiness bridge**.
+- **Why not poll-before-read.** An earlier cut gated each nonblocking read on a
+  0-timeout `poll()` of the `ready` fd. That churned the shared netd session's
+  9P tag pool: a 0-timeout poll submits a readiness probe the kernel poll kthread
+  then Tflush-abandons, and the abandoned tag sits `awaiting_flush` until netd
+  Rflushes it — a tight read loop piled them up faster than the Rflush and
+  **exhausted the 64-tag pool** (`alloc_tag<0` in `p9_session_send_read` →
+  spurious `EIO` on every subsequent data read; the readiness path kept working
+  because it *reused* an already-parked op whose tag was held). netd-`E_AGAIN`
+  removes the churn at its source.
+- **`FIONREAD`** answers the 1/0 **truthiness** contract (the `/net` readiness
+  surface reports ready/not-ready, never a byte count; TyrQuake's
+  `net_udp.c:302` tests nonzero only) via `pouch_sock_readable` — a **cold-path**
+  helper that *does* touch the readiness bridge (one abandoned tag per call,
+  fine at frame rate, out of contract in a tight loop; the read path is the hot
+  path and avoids it).
+- **`SO_BROADCAST`** joins the `FAM_INET` accept-as-noop allowlist (the BSD
+  broadcast setup must not error; an actual `255.255.255.255` send is a slirp
+  dead end, which UDP tolerates).
+
+Both ioctls are `FAM_INET`-only; any other fd → `ENOTTY` (no kernel ioctl
+surface). Nonblocking **writes** are out of scope (the `/net` send path does not
+park the caller — the UDP `send_slice` drops on a full tx ring). The
+`F_SETFL`/`O_NONBLOCK` fcntl route stays a documented seam. **Residual hazard
+(tracked):** a tight 0-timeout `poll()`/`select()` loop on a `/net` fd (not the
+nonblocking read path, which avoids the bridge) can still churn the session tag
+pool — the proper fix is kernel-side (a non-sleeping poll should not submit a
+readiness probe, since no poller will be around to wake), on the audit-bearing
+`dev9p.poll` bridge (`net_poll.tla`).
+
 ### Verifying live — `/pouch-hello-net`
 
 The proving binary (the first POSIX `socket()` program Thylacine runs) does the
@@ -1088,8 +1133,12 @@ a UDP `sendto` to the on-link gateway 10.0.2.2:9 (egresses without a peer) →
 ctl write — and (net-6b-3) a `poll()` surface: a connected UDP socket reads
 `POLLOUT`-ready (writable) but `poll(POLLIN)` **times out** (no datagram queued —
 the load-bearing assertion that `poll()` actually *waited* on the `ready` file
-rather than the always-ready data fd) — all against netd's `/net` (the joey
-`net-5/6a-2 PROBE` gate), plus a
+rather than the always-ready data fd) — and (#52) the nonblocking surface:
+`FIONBIO` sets nonblocking, `FIONREAD` reads 0 on an idle socket, a real
+datagram over netd's resident `127.0.0.1` loopback (net-8a) **converges to a
+nonblocking `recvfrom`** (every miss `EWOULDBLOCK`, never `EIO` — the
+tag-exhaustion regression), and `SO_BROADCAST` is accepted — all against netd's
+`/net` (the joey `net-5/6a-2 PROBE` gate), plus a
 best-effort logged live `connect`+round-trip to a public endpoint (host-coupled,
 never a gate). The full deterministic in-guest data round-trip + the
 ported-server/soak E2E are net-8's exit criteria (NET-DESIGN §16).
@@ -1781,3 +1830,85 @@ pass-through. Boot-fatal on regression.
 - **A non-zero child exit is `WEXITSTATUS == 1`** (v1.0 collapses any non-zero
   exit to 1; the exact code is a kernel v1.x lift). `make`/`ninja` treat any
   non-zero as failure, so the pass/fail decision is preserved.
+### The console arm — `0026-pouch-cons-winsize.patch` (#55c)
+
+The tty ioctl dispatcher gains a CONSOLE arm on the pts-resolve miss
+(design: ARCH §23.5.3; the kernel half is #55a):
+
+- **`cons_resolve(fd)`**: fstat → S_ISCHR + the bit-41 CONS marker
+  (`CONS_STAT_QID_FLAG` — the kernel `cons_stat_native_fill` contract,
+  disjoint from ptyfs's `PTS_FLAG` bit 40 under the shared S_IFCHR
+  posture). Pre-#55 cons fds were STATLESS (fstat −1 → ENOTTY →
+  `isatty()` FALSE on the console → musl stdio ran fully-buffered — the
+  retired latent).
+- **TIOCGWINSZ** on a cons fd: read the UNGATED `/dev/winsize` leaf
+  (stateless per-op open, the pts-ctl idiom) → fill `ws`. SUCCESS even
+  at `0×0` (the serial posture) or with the leaf unreachable (a narrow
+  namespace) — a cons fd IS a terminal, so isatty stays true and stdio
+  goes line-buffered exactly as on a pts; callers fall back to CPR/env
+  on a 0 winsize (the standard convention).
+- **TIOCSWINSZ** on a cons fd: **EPERM** — the console geometry is
+  physical (the renderer's grid, written via the renderer-gated consctl
+  verb); Linux-VT-resize semantics are deliberately not offered.
+- **tcgetattr/tcsetattr** on a cons fd stay ENOTTY: the console termios
+  is held by the consctl delegation chain (joey → login → ut), not by
+  apps — the documented honest seam.
+
+Proven live by the ls-gfx `pouch-hello-pty cons` leg, run FROM ut so
+**fd 1** is a real inherited cons Spoor (fd 0 is a PIPE for an
+un-redirected console fg child — the PTY-4b rule gives Inherit stdin
+only under job control, which is pts-only; the boot prover pipes ALL
+its stdio, so only the interactive path can carry the leg):
+`pty-cons: 128x36 isatty=1 setws=EPERM tcgetattr=ENOTTY OK`. The joey
+boot check fstats the REAL `SYS_CONSOLE_OPEN` fd through the full
+syscall path every boot (prints only on mismatch).
+
+## The fopen-create boundary-line — `0024-pouch-fopen-create.patch` (task #50)
+
+The create-mode arm the 0023 scope note owed: `openat()` O_CREAT wired
+through `SYS_WALK_CREATE` (= 54) + the unlink family over `SYS_UNLINK`
+(= 58), so `fopen(path, "w"/"a")`, `tmpfile()`, `unlink`/`rmdir`/
+`remove` work in pouch — interactive TyrQuake's `config.cfg` persists
+(the live consequence the ls-gfx-play leg asserts after the quit).
+
+**openat O_CREAT**: open-existing first (unless O_EXCL); on ENOENT
+split the path, `T_OPATH`-open the parent (born-R|W — the A-1.7
+navigation base; #81 blocks only its byte I/O, never create/unlink),
+`SYS_WALK_CREATE` the single base component (`perm = mode & 0777`; no
+pouch umask surface), and resolve an EEXIST race by retrying the plain
+open once (the #99 honest-errno pattern). Two semantic FIXES ride
+along: `O_TRUNC` now maps to `T_OTRUNC` (the prior silent no-op made
+`fopen("w")` overwrite-in-place on an existing file), and `O_APPEND`
+seeks to END after any successful open (single-writer append; no
+kernel append mode — concurrent-append atomicity documented-absent).
+`O_TMPFILE` proper stays ENOTSUP (musl's `tmpfile()` uses
+O_CREAT|O_EXCL, never it).
+
+**The unlink family**: `unlinkat()` carries the real body (split +
+`T_OPATH` parent + `SYS_UNLINK`; AT_REMOVEDIR →
+`SYS_UNLINK_REMOVEDIR`); musl's `unlink`/`rmdir`/`remove`/`tmpfile`
+bodies are raw `__syscall(SYS_unlinkat, …)` — the unwired 0xFFFF
+sentinel — so each reroutes through the public function (the 0023
+sys_open-reroute precedent). **The 0014 `/srv/` short-circuit is
+PRESERVED inside the `unlinkat` chokepoint** (this patch replaces the
+0014 `unlink.c` body): a plain unlink of `/srv/<name>` answers 0 — the
+per-boot kernel registry has no file artifact, and stratumd's
+`stm_stratumd_listen_unix` prologue treats any non-ENOENT unlink
+failure as fatal. Dropping the carve kills the stratumd boot at 16c —
+the first gate run proved it (the staged-from-the-build-tree diff
+silently deleted 0014's lines; the M-PIN unverified-assumption class).
+
+`tmpfile()`'s immediate unlink now works: the open fd keeps the file
+alive after the unlink — the Plan 9-lineage fid-survives-unlink
+property, proven live by `/pouch-hello-fopen`'s tmpfile leg
+(write/rewind/read AFTER the unlink).
+
+**Proof**: `/bin/pouch-hello-fopen` (post-pivot on the Stratum FS —
+the surface config.cfg rides): create / append / truncate / excl /
+unlink / remove / tmpfile, boot-fatal via the joey `#50 PROBE OK`
+line; plus the ls-gfx-play `config.cfg persisted` leg (Host_Shutdown's
+`fopen("w")` into the world-writable baked `/quake`+`/quake/id1` —
+the build stage chmods both, single-user policy; the per-user game-dir
+copy is the v1.x shape). Untested-in-guest: the rmdir/AT_REMOVEDIR arm
+(no pouch mkdir surface to create a removable directory; the kernel
+SYS_UNLINK REMOVEDIR path carries its own kernel tests).

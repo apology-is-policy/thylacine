@@ -952,6 +952,8 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 
 ### 9.1 Deliverables
 
+**Binding design: `docs/VIVARIUM.md`** (the 2026-07-23 design pass — the Linux binary shim + the synthetic Linux filesystems + the container runner are ONE design: *a Linux container is a territory plus a phenotype*). It carries the SOTA survey (FreeBSD Linuxulator / illumos LX zones / WSL1 / gVisor / **Fuchsia Starnix**, the closest peer), two corrections to this section (the socket gap R-2; §11.6's syscall-number-collision R-1), the fidelity ladder, invariant I-43, and the V-0..V-8 build arc. The bullets below are the index; VIVARIUM.md refines them. **Two forks are OPEN pending signoff** (where the ABI lives; v1.0-vs-v1.1 scope).
+
 **Linux syscall shim (extend Phase 5 shim)**:
 - Cover the top 50 Linux ARM64 syscalls by frequency (per `ARCHITECTURE.md §11.5`).
 - Add: `epoll_*` (post-v1.0; v1.1 candidate but if low-effort lands here), `inotify_*` (degrade gracefully), `bpf` (return ENOSYS), `perf_event_open` (return ENOSYS).

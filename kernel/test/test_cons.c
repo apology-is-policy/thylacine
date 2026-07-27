@@ -40,6 +40,7 @@
 #include <thylacine/rendez.h>   // LS-8a: Rendez for the poll_waiter
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>  // #55: struct t_stat + T_S_IFCHR (the qid contract)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -943,50 +944,157 @@ void test_cons_consctl_parse(void) {
     cons_test_reset();
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_ISIG, "start at the default");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "+echo accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "+echo accepted");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)(CONS_ISIG | CONS_ECHO), "+echo set ECHO");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("-isig", 5), 5L, "-isig accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-isig", 5, true), 5L, "-isig accepted");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)CONS_ECHO, "-isig cleared ISIG");
 
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon +echo", 13), 13L, "two tokens accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon +echo", 13, true), 13L, "two tokens accepted");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)(CONS_ICANON | CONS_ECHO),
                    "atomic multi-flag set");
 
     // Malformed commands reject (-1) and leave the mode unchanged.
     u32 before = cons_test_termios();
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+bogus", 6), -1L, "unknown name -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("echo", 4), -1L, "missing +/- sign -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+", 1), -1L, "empty name -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("", 0), -1L, "empty command -> -1");
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo +bad", 10), -1L, "one bad token rejects the batch");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+bogus", 6, true), -1L, "unknown name -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("echo", 4, true), -1L, "missing +/- sign -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+", 1, true), -1L, "empty name -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("", 0, true), -1L, "empty command -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo +bad", 10, true), -1L, "one bad token rejects the batch");
     TEST_EXPECT_EQ((long)cons_test_termios(), (long)before,
                    "a rejected command leaves the mode unchanged");
     cons_test_reset();
 }
 
 // LS-8b: the /dev/consctl read-back render. Symmetric grammar with the write:
-// five "+name"/"-name" tokens + '\n'.
+// five "+name"/"-name" tokens, then (#55) the winsize, one line -- the ptyfs
+// ctl_render shape ("-icanon ... -onlcr winsize 0 0\n").
 void test_cons_consctl_render(void) {
-    cons_test_reset();                                 // default = ISIG only
-    char buf[40];
+    cons_test_reset();                                 // default = ISIG only, ws 0x0
+    char buf[64];
     long n = cons_render_mode(buf, (long)sizeof(buf));
-    const char *want_default = "-icanon -echo +isig -icrnl -onlcr\n";
-    TEST_EXPECT_EQ(n, 34L, "default render length");
-    bool ok = (n == 34);
+    const char *want_default = "-icanon -echo +isig -icrnl -onlcr winsize 0 0\n";
+    TEST_EXPECT_EQ(n, 46L, "default render length");
+    bool ok = (n == 46);
     for (long i = 0; ok && i < n; i++) if (buf[i] != want_default[i]) ok = false;
-    TEST_ASSERT(ok, "default renders -icanon -echo +isig -icrnl -onlcr");
+    TEST_ASSERT(ok, "default renders flags + winsize 0 0");
 
     cons_test_set_termios(CONS_TERMIOS_ALL);
     n = cons_render_mode(buf, (long)sizeof(buf));
-    const char *want_all = "+icanon +echo +isig +icrnl +onlcr\n";
-    ok = (n == 34);
+    const char *want_all = "+icanon +echo +isig +icrnl +onlcr winsize 0 0\n";
+    ok = (n == 46);
     for (long i = 0; ok && i < n; i++) if (buf[i] != want_all[i]) ok = false;
     TEST_ASSERT(ok, "all-set renders every flag with '+'");
 
     // A too-small buffer renders nothing (never a partial line).
     TEST_EXPECT_EQ(cons_render_mode(buf, 10), 0L, "too-small buffer -> 0");
+    TEST_EXPECT_EQ(cons_render_mode(buf, 40), 0L, "no room for the winsize tail -> 0");
     cons_test_reset();
+}
+
+// #55: the winsize round-trip -- the consctl verb sets it; the mode render,
+// the standalone leaf render, and the snapshot all agree; malformed winsize
+// tokens reject the WHOLE write (the tcsetattr-atomic seam extends to the
+// new verb).
+void test_cons_winsize_roundtrip(void) {
+    cons_test_reset();
+
+    u16 wc = 1, wr = 1;
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 0 && wr == 0, "reset -> winsize unset (0x0)");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 132 50", 14, true), 14L, "winsize verb accepted");
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 132 && wr == 50, "snapshot reads 132x50");
+
+    char buf[64];
+    long n = cons_render_mode(buf, (long)sizeof(buf));
+    const char *want = "-icanon -echo +isig -icrnl -onlcr winsize 132 50\n";
+    bool ok = (n == 49);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != want[i]) ok = false;
+    TEST_ASSERT(ok, "mode render carries winsize 132 50");
+
+    n = cons_render_winsize(buf, (long)sizeof(buf));
+    const char *leaf = "winsize 132 50\n";
+    ok = (n == 15);
+    for (long i = 0; ok && i < n; i++) if (buf[i] != leaf[i]) ok = false;
+    TEST_ASSERT(ok, "leaf render is winsize 132 50");
+    // #55 audit F4: the floor is the fixed 20-byte MAX ("winsize 65535 65535\n"),
+    // not content-dependent -- n=20 renders, n=19 returns 0 (conservative-safe).
+    TEST_EXPECT_EQ(cons_render_winsize(buf, 20) > 0 ? 1L : 0L, 1L, "leaf: n=20 renders");
+    TEST_EXPECT_EQ(cons_render_winsize(buf, 19), 0L, "leaf: n<20 -> 0 (max-reserve floor)");
+
+    // A mixed write applies flags + winsize atomically.
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo winsize 80 24", 19, true), 19L, "mixed write accepted");
+    TEST_ASSERT((cons_test_termios() & CONS_ECHO) != 0u, "mixed write set ECHO");
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 80 && wr == 24, "mixed write set 80x24");
+
+    // Malformed winsize rejects the WHOLE write (flags too -- atomic).
+    u32 before = cons_test_termios();
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 80", 10, true), -1L, "missing rows -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize a b", 11, true), -1L, "non-digit -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 70000 1", 15, true), -1L, "cols > 65535 -> -1");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("-echo winsize 9", 15, true), -1L,
+                   "a bad winsize rejects the batch");
+    TEST_ASSERT(cons_test_termios() == before, "rejected batch left the flags alone");
+    cons_winsize_get(&wc, &wr);
+    TEST_ASSERT(wc == 80 && wr == 24, "rejected batch left the winsize alone");
+
+    // "winsizeX" is NOT the verb (the token must end at whitespace/EOL).
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsizeX 1 2", 12, true), -1L, "winsizeX -> -1");
+    cons_test_reset();
+}
+
+// #55: iff-changed -- a CHANGED apply advances winch_events (one tty:winch
+// post attempt each); an unchanged rewrite must NOT (a repeat-post storm
+// would be a notes-queue DoS on the owner's pgrp). The pgrp fan itself is
+// notes_post_pgrp (PTY-1e, separately covered); with no console owner at
+// test time the post is a structural no-op, so the counter is the witness.
+void test_cons_winsize_winch_iff_changed(void) {
+    cons_test_reset();
+    TEST_EXPECT_EQ((long)cons_winch_events(), 0L, "reset -> 0 winch events");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14, true), 14L, "set 100x40");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 1L, "first set -> 1 event");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 40", 14, true), 14L, "rewrite 100x40");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 1L, "unchanged rewrite -> NO new event");
+
+    TEST_EXPECT_EQ(cons_set_mode_cmd("winsize 100 41", 14, true), 14L, "set 100x41");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 2L, "changed rows -> 2nd event");
+
+    // A flags-only write never touches the winsize (no event).
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "flags-only write");
+    TEST_EXPECT_EQ((long)cons_winch_events(), 2L, "flags-only -> no event");
+    cons_test_reset();
+}
+
+// #55: the is-a-cons qid contract (ARCH 23.5.3) on the devcons vtable -- the
+// SYS_CONSOLE_OPEN / std-fd chain's Dev. S_IFCHR posture + the bit-41 marker
+// (disjoint from ptyfs's PTS_FLAG bit 40) + SYSTEM-owned + zero-fill (I-13:
+// the pad bytes must cross as defined zeroes).
+void test_cons_stat_native_qid_contract(void) {
+    struct Spoor *cs = devcons.attach(NULL);
+    TEST_ASSERT(cs != NULL, "devcons attach");
+
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;  // poison
+    TEST_EXPECT_EQ((long)devcons.stat_native(cs, &st), 0L, "stat_native fills");
+
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR, "mode is S_IFCHR");
+    TEST_ASSERT((st.mode & 0777u) == 0620u, "perm bits 0620");
+    TEST_ASSERT((st.qid_path & CONS_STAT_QID_FLAG) != 0u, "bit-41 CONS marker set");
+    TEST_ASSERT((st.qid_path & (1ULL << 40)) == 0u, "bit 40 (PTS_FLAG) clear");
+    TEST_ASSERT(st.uid == PRINCIPAL_SYSTEM && st.gid == GID_SYSTEM, "SYSTEM-owned");
+    TEST_ASSERT(st.qid_type == QTFILE, "qid_type QTFILE");
+    TEST_ASSERT(st.size == 0 && st.nlink == 1, "size 0, nlink 1");
+    // I-13: the poisoned pad bytes were overwritten by the zero-fill.
+    TEST_ASSERT(st._pad_qid[0] == 0 && st._pad_qid[1] == 0 && st._pad_qid[2] == 0,
+                "qid pad zero-filled");
+    TEST_ASSERT(st._pad_blksize == 0 && st._pad_dev == 0, "tail pads zero-filled");
+
+    spoor_unref(cs);
 }
 
 // LS-8b: the canonical line buffer is BOUNDED -- a pathologically long line
@@ -1031,7 +1139,7 @@ void test_cons_cook_mode_flip_fresh_line(void) {
 
     // A production consctl write (turns ECHO on + stays canonical) MUST discard
     // the fragment -- the flip itself is what resets the line, regardless of flags.
-    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5), 5L, "consctl +echo accepted");
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+echo", 5, true), 5L, "consctl +echo accepted");
 
     // Deliver: only the bare NL arrives -- the "abc" fragment was discarded by
     // the mode change (pre-fix it would prepend, delivering "abc\n").
@@ -1049,47 +1157,54 @@ void test_cons_cook_mode_flip_fresh_line(void) {
 // empty->non-empty edge exactly once + waking console_mgr, whose deferred walk
 // makes the hook ready (the cons_poll.tla I-9 relay, driven by a multi-byte
 // flush rather than the single-byte 8a path).
-void test_cons_cook_canonical_poll_edge(void) {
-    cons_test_reset();
-    sched();                                            // console_mgr to SLEEPING
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
-    cons_test_set_termios(CONS_ICANON | CONS_ISIG);     // cooked, no echo
-
-    struct Rendez r; rendez_init(&r);
-    struct poll_waiter pw; poll_waiter_init(&pw, &r);
-    short rev = cons_poll(POLLIN, &pw);
-    TEST_EXPECT_EQ((int)(rev & POLLIN), 0, "empty cons: no POLLIN at register");
-    TEST_ASSERT(!pw.ready, "poll_waiter not ready before any line");
+// The canonical-mode twin of cons_poll_dance -- the same #58 shape (held mgr +
+// error-string returns + unregister-on-every-exit in the caller): its
+// post-Enter pending/!ready asserts carried the identical peer-CPU-dispatch
+// race, and any mid-dance failure leaked the hook.
+static const char *cons_cook_edge_dance(struct poll_waiter *pw) {
+    short rev = cons_poll(POLLIN, pw);
+    if ((rev & POLLIN) != 0) return "empty cons: POLLIN at register";
+    if (pw->ready) return "poll_waiter ready before any line";
 
     // Buffer "hi": canonical mode holds it in line[]; the ring stays EMPTY, so
     // there is NO poll edge and console_mgr is NOT woken (the bytes have not
     // entered the ring -- POSIX canonical: a poller waits for a full line).
     cons_rx_input((u8)'h', false);
     cons_rx_input((u8)'i', false);
-    TEST_ASSERT(!cons_test_pollwake_pending(), "buffered chars: no ring edge yet");
-    TEST_ASSERT(!pw.ready, "no poll wake while the line is still assembling");
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr still SLEEPING (no edge)");
+    if (cons_test_pollwake_pending()) return "buffered chars armed a ring edge";
+    if (pw->ready) return "poll wake fired while the line was still assembling";
 
     // Enter: the whole line ("hi" + NL) flushes to the ring in ONE call, arming
     // the empty->non-empty edge once + waking console_mgr (deferred -- the IRQ
-    // producer does NOT walk the hook).
+    // producer does NOT walk the hook). Deterministic under the hold.
     cons_rx_input((u8)'\n', false);
-    TEST_ASSERT(cons_test_pollwake_pending(), "Enter flushed the line -> poll edge armed");
-    TEST_ASSERT(!pw.ready, "the IRQ producer did NOT walk the hook (deferred)");
-    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr RUNNABLE post-line");
+    if (!cons_test_pollwake_pending()) return "Enter did not arm the poll edge";
+    if (pw->ready) return "the IRQ producer walked the hook (must defer)";
 
-    sched();                                            // mgr walks the hook list
-    TEST_ASSERT(pw.ready, "console_mgr's deferred walk set the hook ready");
-    TEST_ASSERT(!cons_test_pollwake_pending(), "console_mgr consumed poll_wake_pending");
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the walk");
+    cons_test_mgr_hold(false);
+    for (int i = 0; i < 100000 && !pw->ready; i++) sched();
+    if (!pw->ready) return "console_mgr's deferred walk never set the hook ready";
+    if (cons_test_pollwake_pending()) return "poll_wake_pending not consumed";
 
     // The ring holds the whole delivered line.
     u8 buf[8];
     long n = cons_drain(buf, sizeof(buf));
-    TEST_EXPECT_EQ(n, 3L, "the ring holds the delivered line hi+NL");
-    TEST_ASSERT(buf[0]=='h' && buf[1]=='i' && buf[2]=='\n', "line is hi\\n");
+    if (n != 3L) return "the ring does not hold the delivered line hi+NL";
+    if (!(buf[0]=='h' && buf[1]=='i' && buf[2]=='\n')) return "line is not hi\\n";
+    return NULL;
+}
 
-    poll_waiter_list_unregister(&pw);                   // NoStaleHook (stack waiter)
+void test_cons_cook_canonical_poll_edge(void) {
+    cons_test_mgr_hold(true);           // deterministic dance (#58)
+    cons_test_reset();
+    cons_test_set_termios(CONS_ICANON | CONS_ISIG);     // cooked, no echo
+
+    struct Rendez r; rendez_init(&r);
+    struct poll_waiter pw; poll_waiter_init(&pw, &r);
+    const char *err = cons_cook_edge_dance(&pw);
+    poll_waiter_list_unregister(&pw);   // NoStaleHook on EVERY path (#58)
+    cons_test_mgr_hold(false);          // idempotent (the err path may still hold)
+    TEST_ASSERT(err == NULL, err ? err : "unreachable");
     cons_settle_mgr();
 }
 

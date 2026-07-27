@@ -422,3 +422,92 @@ void test_elf_policy_rejection(void) {
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_OK, "valid blob still parses after the rejection matrix");
 }
+
+// VIVARIUM V-1: the ADVISORY brand hint (docs/VIVARIUM.md §12.1).
+//
+// The load-bearing property under test is a NEGATIVE one: the hint must
+// never brand a binary Linux on evidence that cannot bear it. Case (2) is
+// the Q3 regression proper -- it fails if anyone "improves" elf_brand_hint
+// by consulting EI_OSABI, which would mis-brand Clade's own native output.
+void test_elf_brand_hint(void) {
+    const u32 flags[1] = { PF_R | PF_X };
+    size_t size;
+
+    // (1) A static ELF hints UNKNOWN -- and this is ALSO the shape of the
+    // v1.0 Linux target (musl-static has no PT_INTERP). The hint deliberately
+    // cannot tell native from static-Linux; the vivarium declares instead.
+    size = build_elf(flags, 1);
+    TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, size), ELF_BRAND_UNKNOWN,
+        "a static ELF hints UNKNOWN (native and musl-static Linux alike)");
+
+    // (2) THE Q3 REGRESSION: EI_OSABI == 3 (ELFOSABI_GNU == ELFOSABI_LINUX)
+    // must NOT brand. Clade's native output carries it.
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_ident[EI_OSABI] = 3;
+    TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, size), ELF_BRAND_UNKNOWN,
+        "EI_OSABI == 3 does NOT brand Linux (Clade native output carries it)");
+
+    // (3) PT_INTERP naming a Linux loader -- the ONE trusted positive signal.
+    const char *loaders[2] = { "/lib/ld-musl-aarch64.so.1",
+                               "/lib64/ld-linux-aarch64.so.1" };
+    for (int k = 0; k < 2; k++) {
+        size = build_elf(flags, 1);
+        size_t n = 0;
+        while (loaders[k][n] != '\0') n++;
+        size_t at = size;                       // just past the headers
+        for (size_t i = 0; i <= n; i++)
+            g_test_elf_blob[at + i] = (u8)loaders[k][i];
+        struct Elf64_Phdr *ph = blob_phdrs();
+        ph[0].p_type   = PT_INTERP;
+        ph[0].p_offset = at;
+        ph[0].p_filesz = n + 1;
+        TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, at + n + 1),
+            ELF_BRAND_LINUX_LIKELY, "PT_INTERP naming a Linux loader hints LINUX");
+
+        // (4) The SAME blob, but the interp string is not inside the buffer we
+        // were handed (REVENANT hands a bounded prefix): UNKNOWN, never a
+        // read past the end.
+        TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, at),
+            ELF_BRAND_UNKNOWN, "interp outside the handed prefix hints UNKNOWN");
+    }
+
+    // (5) An UNTERMINATED interp extent is untrusted (never scanned past).
+    size = build_elf(flags, 1);
+    {
+        size_t at = size;
+        for (size_t i = 0; i < 8; i++) g_test_elf_blob[at + i] = (u8)'A';
+        struct Elf64_Phdr *ph = blob_phdrs();
+        ph[0].p_type   = PT_INTERP;
+        ph[0].p_offset = at;
+        ph[0].p_filesz = 8;                      // no NUL within the extent
+        TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, at + 8),
+            ELF_BRAND_UNKNOWN, "an unterminated interp extent hints UNKNOWN");
+    }
+
+    // (6) A non-Linux interpreter earns no verdict.
+    size = build_elf(flags, 1);
+    {
+        const char *other = "/bin/some-other-loader";
+        size_t n = 0;
+        while (other[n] != '\0') n++;
+        size_t at = size;
+        for (size_t i = 0; i <= n; i++) g_test_elf_blob[at + i] = (u8)other[i];
+        struct Elf64_Phdr *ph = blob_phdrs();
+        ph[0].p_type   = PT_INTERP;
+        ph[0].p_offset = at;
+        ph[0].p_filesz = n + 1;
+        TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, at + n + 1),
+            ELF_BRAND_UNKNOWN, "a non-Linux interpreter hints UNKNOWN");
+    }
+
+    // (7) Garbage / NULL / truncated inputs never produce a verdict.
+    TEST_EXPECT_EQ(elf_brand_hint(NULL, 4096), ELF_BRAND_UNKNOWN,
+        "NULL blob hints UNKNOWN");
+    size = build_elf(flags, 1);
+    TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, 4), ELF_BRAND_UNKNOWN,
+        "a sub-header size hints UNKNOWN");
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_ident[EI_MAG0] = 0x00;        // not an ELF at all
+    TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, size), ELF_BRAND_UNKNOWN,
+        "a non-ELF blob hints UNKNOWN");
+}

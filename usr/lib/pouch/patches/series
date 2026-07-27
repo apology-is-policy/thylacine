@@ -41,3 +41,13 @@
 0025-pouch-env.patch
 0026-pouch-process.patch
 0027-pouch-remove.patch
+# gfx-4 merge: the aux track independently numbered 0024-0026. Renumbered to
+# stack AFTER main's Clade series (the larger, active stack -- main's are NOT
+# moved). The aux 0024-pouch-fopen-create is DROPPED, not renumbered: main's
+# 0023-pouch-fopen already routes tmpfile/fopen through the public open(), and
+# main's 0024-pouch-fs-process-wires carries the same open(O_CREAT) ->
+# SYS_WALK_CREATE arm plus O_TRUNC -> OTRUNC, so it is subsumed. task #50 is
+# thereby closed by main's work; pouch-hello-fopen is retained as the
+# regression that holds that claim honest.
+0028-pouch-net-nonblock.patch
+0029-pouch-cons-winsize.patch

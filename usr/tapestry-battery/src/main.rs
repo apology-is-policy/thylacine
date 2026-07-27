@@ -51,7 +51,9 @@ use alloc::string::String;
 
 use libthyla_rs::time::{sleep, Duration};
 use libthyla_rs::{t_close, t_open, t_read, t_write, T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT};
-use tapestry::{Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY};
+use tapestry::{
+    Event, Rect, Surface, TapError, TEV_CLOSE, TEV_CONFIGURE, TEV_FOCUS, TEV_KEY, TEV_PTR_REL,
+};
 
 macro_rules! say {
     ($($a:tt)*) => {{
@@ -152,6 +154,17 @@ fn fill(surf: &mut Surface, color: u32) {
     }
 }
 
+
+/// The compositor's placement, mirrored for sample points. The battery
+/// presents FULL-FRAME only (present(None) everywhere), so it never
+/// trips the #56 patchwork latch and always LETTERBOXES -- centered,
+/// scaled up or down -- meaning the pane center always samples the
+/// fill. (The pre-#56 size discriminator needed a covered-region-center
+/// arm for the overflow crop; a latched accumulator would need it back.)
+fn sample_point(px: u32, py: u32, pw: u32, ph: u32, _sw: u32, _sh: u32) -> (u32, u32) {
+    (px + pw / 2, py + ph / 2)
+}
+
 fn overlap(a: PaneInfo, b: PaneInfo) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
@@ -224,6 +237,33 @@ fn wait_key(surf: &mut Surface, tag: &str) -> bool {
             Err(e) => {
                 say!("tapestry-battery: FAIL {} event stream {:?}", tag, e);
                 return false;
+            }
+        }
+    }
+}
+
+/// Wait for a TEV_PTR_REL on `surf`; returns the decoded signed deltas.
+/// Non-REL events (FRAME ticks, MOVE noise from the motion itself) count
+/// down the budget -- the 60 Hz FRAME stream bounds the wait.
+fn wait_rel(surf: &mut Surface, tag: &str) -> Option<(i32, i32)> {
+    let mut budget = LEG_EVENT_BUDGET;
+    loop {
+        match surf.wait_event() {
+            Ok(ev) => {
+                if ev.kind == TEV_PTR_REL {
+                    let dx = (ev.value >> 16) as u16 as i16 as i32;
+                    let dy = (ev.value & 0xFFFF) as u16 as i16 as i32;
+                    return Some((dx, dy));
+                }
+                budget -= 1;
+                if budget == 0 {
+                    say!("tapestry-battery: FAIL {} rel never arrived", tag);
+                    return None;
+                }
+            }
+            Err(e) => {
+                say!("tapestry-battery: FAIL {} rel stream {:?}", tag, e);
+                return None;
             }
         }
     }
@@ -608,13 +648,11 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL move heal presents");
         return 1;
     }
-    // Sample within the region each surface actually covers: the moved
-    // panes are taller than the surfaces (B especially -- exact-fit to
-    // its OLD pane), so a pane-center sample below the blit would hit
-    // chrome background.
-    say!("battery: move OK {} {} {} {}",
-        ma.x + ma.w.min(a.w) / 2, ma.y + ma.h.min(a.h) / 2,
-        mb.x + mb.w.min(b.w) / 2, mb.y + mb.h.min(b.h) / 2);
+    // Fork-2 placement-aware samples (see sample_point): fit-inside
+    // letterboxes (pane center), overflow crops (covered-region center).
+    let (sax, say_) = sample_point(ma.x, ma.y, ma.w, ma.h, a.w, a.h);
+    let (sbx, sby) = sample_point(mb.x, mb.y, mb.w, mb.h, b.w, b.h);
+    say!("battery: move OK {} {} {} {}", sax, say_, sbx, sby);
     nap(DUMP_MS);
 
     // Focus leg 1: A takes focus; a QMP-typed key must arrive on A's
@@ -680,6 +718,34 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: chord focus OK");
 
+    // The rel legs (the relative-mouse arc): focus sits on A after the
+    // chord. Leg 1 -- the mouse device: one injected QMP `rel` frame
+    // must arrive as ONE exact TEV_PTR_REL (proves the third-function
+    // claim + the EV_REL-without-ABS classify + the drain + the focused
+    // routing, end to end). Leg 2 -- the abs-synthesis twin (the
+    // abs-only-frontend mouse-look path, cocoa): two tablet abs
+    // injections at the same Y; the first only SEEDS the delta base (no
+    // rel), the second must arrive as the exact display-pixel delta.
+    drain_settle(&mut a);
+    say!("battery: rel ready");
+    match wait_rel(&mut a, "mouse") {
+        Some((7, 3)) => say!("battery: rel OK 7 3"),
+        Some((dx, dy)) => {
+            say!("tapestry-battery: FAIL mouse rel got ({}, {})", dx, dy);
+            return 1;
+        }
+        None => return 1,
+    }
+    say!("battery: relsynth ready");
+    match wait_rel(&mut a, "synth") {
+        Some((160, 0)) => say!("battery: relsynth OK 160"),
+        Some((dx, dy)) => {
+            say!("tapestry-battery: FAIL synth rel got ({}, {})", dx, dy);
+            return 1;
+        }
+        None => return 1,
+    }
+
     // The test-mode leg (section 18.6, G-6c): freeze the FRAME clock,
     // prove it holds still, then drive it one tick by hand.
     if !write_file(root, "ctl", "test-mode on") {
@@ -712,6 +778,34 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: test-mode OK");
 
+    // cfg-3: the apply-authority gate (AURORA-CONFIG.md section 3.3). The
+    // battery is NOT the console renderer, so the AUTHORITY verbs must
+    // refuse this conn -- while its ctl READ (the geometry parse above)
+    // and the determinism verbs (the whole test-mode leg above) stay
+    // live. A `mode` acceptance here would be exactly the privilege leak
+    // the gate closes: any boot-chain client driving the shared display.
+    if write_file(root, "ctl", "mode 640 480") {
+        say!("tapestry-battery: FAIL gate: mode accepted from a non-renderer");
+        return 1;
+    }
+    if write_file(root, "ctl", "clock-rate 30") {
+        say!("tapestry-battery: FAIL gate: clock-rate accepted from a non-renderer");
+        return 1;
+    }
+    // cfg-4: the runtime chord/gaps verbs are AUTHORITY too -- the
+    // default-deny gate refuses them for this non-renderer conn by
+    // construction (they are not in is_ungated_ctl). Valid commands that
+    // would SUCCEED ungated, so a refusal proves the gate covers them.
+    if write_file(root, "ctl", "chord super+g zoom") {
+        say!("tapestry-battery: FAIL gate: chord accepted from a non-renderer");
+        return 1;
+    }
+    if write_file(root, "ctl", "gaps 8") {
+        say!("tapestry-battery: FAIL gate: gaps accepted from a non-renderer");
+        return 1;
+    }
+    say!("battery: gate OK");
+
     // The hold leg (TPRESENT_HOLD + release, G-6c): magenta blits into
     // the screen buffer NOW but the device push defers -- on screen B
     // stays blue until release. The host samples between the two dumps;
@@ -722,8 +816,8 @@ pub extern "C" fn rs_main() -> i64 {
         say!("tapestry-battery: FAIL hold present");
         return 1;
     }
-    say!("battery: hold ready {} {}",
-        mb.x + mb.w.min(b.w) / 2, mb.y + mb.h.min(b.h) / 2);
+    let (hbx, hby) = sample_point(mb.x, mb.y, mb.w, mb.h, b.w, b.h);
+    say!("battery: hold ready {} {}", hbx, hby);
     if !wait_key(&mut a, "hold-sync") {
         return 1;
     }

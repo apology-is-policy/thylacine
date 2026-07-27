@@ -82,11 +82,12 @@ use alloc::vec::Vec;
 
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_weave, t_dma_map, t_weft_share, t_weft_unshare,
-    T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ,
-    T_RIGHT_WRITE,
+    t_burrow_detach, t_close, t_dma_create_weave, t_dma_map, t_srv_peer, t_weft_share,
+    t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
+    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
+use crate::chords::{ChordAction, Chords};
 use crate::gpu::Gpu;
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
@@ -111,7 +112,9 @@ const PAGE: u64 = 0x1000;
 /// The weave-mapping VA window in tapestryd's own AS (bump-allocated;
 /// freed VAs are not reused at stage 0 -- bounded by the surface caps per
 /// generation and the 47-bit user VA space; a free-list is a v1.x seam).
-const WEAVE_VA_BASE: u64 = 0x0200_0000;
+// 0x0240_0000 since the mouse function (its 6-BAR window ends at
+// 0x0220_0000 -- the main.rs VA-layout asserts pin the whole chain).
+const WEAVE_VA_BASE: u64 = 0x0240_0000;
 
 // =============================================================================
 // The qid scheme (the ptyfs/netd bit-40 template).
@@ -222,11 +225,19 @@ pub const TPRESENT_MAX_RECTS: u32 = 64;
 pub const TEVENT_LEN: usize = 24;
 
 pub const TEV_KEY: u16 = 1;
-#[allow(dead_code)] // wire vocabulary (section 18.4); the pointer/scroll
-pub const TEV_PTR_MOVE: u16 = 2; // kinds arrive with the tablet device and
-#[allow(dead_code)] // the CONFIGURE/FOCUS kinds with the pane layer (G-6).
+// Pointer kinds (G-7c; section 18.4 wire semantics): MOVE value packs the
+// surface-RELATIVE x<<16|y (never absolute screen coords -- the D5 wall);
+// BTN code = the evdev BTN_* button, value = press(1)/release(0); SCROLL
+// value = the signed wheel delta as u32 (i32 wrap). All carry mods.
+pub const TEV_PTR_MOVE: u16 = 2;
 pub const TEV_PTR_BTN: u16 = 3;
-#[allow(dead_code)]
+/// Relative pointer motion (the mouse-look kind): value packs signed
+/// display-pixel deltas dx<<16|dy (i16 each), routed to the FOCUSED
+/// surface -- exact from a relative device (virtio-mouse), synthesized
+/// from consecutive absolute motion (so abs-only frontends -- QEMU cocoa
+/// with a tablet present never produces host rel events -- still drive
+/// mouse-look). Coalesces by SUMMATION, droppable under stall.
+pub const TEV_PTR_REL: u16 = 9;
 pub const TEV_SCROLL: u16 = 4;
 pub const TEV_FRAME: u16 = 5;
 #[allow(dead_code)]
@@ -261,8 +272,10 @@ impl Tevent {
         out[16..24].copy_from_slice(&self.tick.to_le_bytes());
     }
     fn coalescible(&self) -> bool {
-        // R2-F4: the droppable class is exactly {FRAME, PTR_MOVE}.
-        self.kind == TEV_FRAME || self.kind == TEV_PTR_MOVE
+        // R2-F4: the droppable class is exactly {FRAME, PTR_MOVE,
+        // PTR_REL} -- lossy-under-stall streams; a motion burst must
+        // never WEDGE (force-retire) a slow client.
+        self.kind == TEV_FRAME || self.kind == TEV_PTR_MOVE || self.kind == TEV_PTR_REL
     }
 }
 
@@ -292,6 +305,18 @@ struct Surface {
     state: SurfState,
     w: u32,
     h: u32,
+    /// The last letterbox placement logged (one-shot diagnostic).
+    lb_logged: Option<(u32, u32, u32, u32)>,
+    /// The present-style latch (#56): set the first time a present's
+    /// damage does not cover the full surface; never cleared. A latched
+    /// surface is an ACCUMULATOR (aurora's cell-diff over rotating weave
+    /// slots): each slot is patchwork, so scaling any one slot composes
+    /// alternating half-stale frames -- a size mismatch therefore CROPS
+    /// (damage-clipped) instead of letterboxing. Full-frame presenters
+    /// (the SDL class, the battery) never latch and letterbox both
+    /// directions. One-way by design: a later full redraw must not flap
+    /// the placement back.
+    patchwork: bool,
     slot_stride: u64,
     /// The CURRENT weave generation (the spec's g-highest). weft_ensure,
     /// the geometry reads, and every post-fence present serve/validate
@@ -358,24 +383,44 @@ fn rect_union(a: Rect, b: Rect) -> Rect {
     Rect { x: x1, y: y1, w: x2 - x1, h: y2 - y1 }
 }
 
-/// The compositor's own screen buffer (Composed mode), attached to
-/// SCREEN_RES. A WEAVE-subtype DMA chunk -- the G-2 type discipline puts
-/// every RESOURCE_ATTACH_BACKING scanout backing in that class (plain
-/// SYS_DMA_CREATE is the virtqueue/command class, capped at
-/// KOBJ_DMA_MAX_SIZE = 1 MiB -- a display buffer does not fit and does
-/// not belong). Share-admissible by TYPE but never REGISTERED
-/// (t_weft_share is never called on it), so no share_id exists for a
-/// client to claim -- unshared in practice. Held for the process
-/// lifetime (no screen teardown path; a tapestryd death reclaims it via
-/// the RW-7 crash contract).
+/// The compositor's own screen buffer (Composed mode). A WEAVE-subtype
+/// DMA chunk -- the G-2 type discipline puts every RESOURCE_ATTACH_BACKING
+/// scanout backing in that class (plain SYS_DMA_CREATE is the
+/// virtqueue/command class, capped at KOBJ_DMA_MAX_SIZE = 1 MiB -- a
+/// display buffer does not fit and does not belong). Share-admissible by
+/// TYPE but never REGISTERED (t_weft_share is never called on it), so no
+/// share_id exists for a client to claim -- unshared in practice. Since
+/// cfg-3 the resource id is PER-GENERATION (minted from Comp.res_seq like
+/// surface reweaves): a display-mode change builds a FRESH screen, binds
+/// it, then frees the old (never a scanned-out dead resource); otherwise
+/// held until process death (the RW-7 crash contract reclaims it).
 struct Screen {
-    _handle: i64,
+    handle: i64,
     va: u64,
+    size: u64,
+    res: u32,
 }
 
-/// The screen resource id. Per-generation surface resources mint from
-/// Comp.res_seq, which starts ABOVE this -- no id ever aliases it.
+/// The res_seq base: per-generation resource ids (surface weaves + the
+/// screen since cfg-3) mint strictly above this -- no id ever aliases.
 const SCREEN_RES: u32 = 0x40;
+
+/// cfg-3 display-mode bounds (AURORA-CONFIG.md section 3.4): base
+/// virtio-gpu reports one preferred rect, not a mode list, so `mode W H`
+/// validates against sane bounds. The coarse dimension caps are a first
+/// sanity gate; the LOAD-BEARING bound is the triple-buffered-surface
+/// check in set_mode (F3): a fullscreen client surface is
+/// WEAVE_SLOTS-buffered (W*H*4*3), so a mode whose screen fits but whose
+/// fullscreen weave exceeds KOBJ_DMA_WEAVE_MAX_SIZE would let set_mode
+/// succeed yet aurora's create fail -> a blank console. Bounding by the
+/// surface the renderer will immediately create closes that band.
+const MODE_MIN_W: u32 = 320;
+const MODE_MIN_H: u32 = 200;
+const MODE_MAX_W: u32 = 3840;
+const MODE_MAX_H: u32 = 2160;
+/// The kernel's KOBJ_DMA_WEAVE_MAX_SIZE (dma_handle.h) -- the per-weave
+/// framebuffer-class cap a fullscreen surface at the new mode must fit.
+const WEAVE_MAX_SIZE: u64 = 64 * 1024 * 1024;
 
 /// What scanout 0 references (G-6). `Boot` = untouched since startup (the
 /// kernel test pattern stays until a first present -- the stage-0 look);
@@ -420,8 +465,25 @@ pub struct Comp {
     /// Keys whose PRESS was swallowed by the Super chord layer (section
     /// 18.4: reserved chords never reach a surface); their release /
     /// repeat swallow too, even if Super lifted first (no stray release
-    /// reaches a client). evdev codes are < 256.
+    /// reaches a client). evdev codes are < 256. INDEPENDENT of `chords`
+    /// (cfg-4): the swallow-set tracks physical key state, so a live
+    /// rebind never leaks a half key-pair.
     chord_down: [u64; 4],
+    /// The runtime chord binding table (cfg-4): (key, shift) -> action,
+    /// seeded with the stage-0 defaults, remapped by the gated `chord`
+    /// ctl verb. Also holds the inter-pane `gaps` inset.
+    chords: Chords,
+    /// The pointer's last display position (G-7c; tablet-absolute, scaled
+    /// by the input drain). Buttons/scroll route by it.
+    ptr_x: u32,
+    ptr_y: u32,
+    /// The last ABSOLUTE motion's display position -- the base for the
+    /// synthesized TEV_PTR_REL deltas. Separate from ptr_x/ptr_y so
+    /// relative-device motion never poisons the abs delta base (each
+    /// source's deltas are computed within its own frame); None until
+    /// the first abs motion (the seed emits no delta -- the initial
+    /// (0,0)->position jump is placement, not motion).
+    abs_last: Option<(u32, u32)>,
     /// Section 18.6 determinism mode (dev/test builds only -- the #880
     /// strip-for-production class, enforced by the `test-mode` cargo
     /// feature at BUILD time): the FRAME clock freezes (ticks only on
@@ -451,8 +513,22 @@ impl Comp {
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             chord_down: [0; 4],
+            chords: Chords::new(),
+            ptr_x: 0,
+            abs_last: None,
+            ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
+        }
+    }
+
+    /// Scanout-state name for the transition diagnostics (rare-path only).
+    fn scanout_name(&self) -> &'static str {
+        match self.scanout {
+            Scanout::Boot => "boot",
+            Scanout::Off => "off",
+            Scanout::Direct(_) => "direct",
+            Scanout::Composed => "composed",
         }
     }
 
@@ -506,6 +582,8 @@ impl Comp {
             state: SurfState::Minted,
             w: 0,
             h: 0,
+            lb_logged: None,
+            patchwork: false,
             slot_stride: 0,
             weave: None,
             resource_id: 0, // minted with the first generation (create)
@@ -720,40 +798,168 @@ impl Comp {
         Ok(())
     }
 
-    /// Allocate the compositor's screen buffer + resource (lazy; kept for
-    /// the process lifetime once made).
+    /// Allocate the compositor's screen buffer + resource (lazy; replaced
+    /// only by a display-mode change, else kept for the process lifetime).
     fn ensure_screen(&mut self) -> bool {
         if self.screen.is_some() {
             return true;
         }
         let (dw, dh) = (self.gpu.width, self.gpu.height);
+        match self.alloc_screen(dw, dh) {
+            Some(s) => {
+                self.screen = Some(s);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Build one screen GENERATION at the given geometry: DMA weave chunk
+    /// + map + zero + a fresh per-generation 2D resource with the chunk
+    /// attached as backing. Every failure path rolls back fully; the
+    /// caller's current screen is untouched.
+    fn alloc_screen(&mut self, dw: u32, dh: u32) -> Option<Screen> {
         let size = ((dw as u64) * (dh as u64) * 4 + PAGE - 1) & !(PAGE - 1);
         let handle =
             unsafe { t_dma_create_weave(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if handle < 0 {
             say!("tapestryd: screen t_dma_create_weave({}) failed {}", size, handle);
-            return false;
+            return None;
         }
         let va = self.weave_va_next;
         self.weave_va_next += size;
         let pa = unsafe { t_dma_map(handle, va, T_PROT_READ | T_PROT_WRITE) };
         if pa < 0 {
             unsafe { t_close(handle) };
-            return false;
+            return None;
         }
-        if self.gpu.resource_create_2d(SCREEN_RES, dw, dh).is_err() {
+        // Zero: the buffer scans out before the first chrome paint on a
+        // mode change -- never a prior occupant's bytes.
+        unsafe { core::ptr::write_bytes(va as *mut u8, 0, size as usize) };
+        let res = self.next_res_id();
+        if self.gpu.resource_create_2d(res, dw, dh).is_err() {
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
-            return false;
+            return None;
         }
-        if self.gpu.attach_backing(SCREEN_RES, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.resource_unref(SCREEN_RES);
+        if self.gpu.attach_backing(res, pa as u64, size as u32).is_err() {
+            let _ = self.gpu.resource_unref(res);
             unsafe { t_burrow_detach(va, size) };
             unsafe { t_close(handle) };
-            return false;
+            return None;
         }
-        self.screen = Some(Screen { _handle: handle, va });
-        true
+        Some(Screen { handle, va, size, res })
+    }
+
+    /// Tear down a displaced screen generation (the release_gen order,
+    /// minus unshare -- the screen is never registered): resource dies
+    /// before its backing -> unmap + close. The caller has already
+    /// ensured no scanout references `s.res` (set_mode rebinds a live
+    /// Composed scanout to the NEW screen first; Direct/Boot/Off never
+    /// referenced it).
+    fn free_screen(&mut self, s: Screen) {
+        let _ = self.gpu.detach_backing(s.res);
+        let _ = self.gpu.resource_unref(s.res);
+        unsafe { t_burrow_detach(s.va, s.size) };
+        unsafe { t_close(s.handle) };
+    }
+
+    /// cfg-3: the display-mode change (AURORA-CONFIG.md section 3.4) --
+    /// the gated `mode W H` verb's engine. Build the NEW screen first
+    /// (fallible; the old survives any failure), drop stale holds, swap,
+    /// rebind a live Composed scanout BEFORE freeing the old resource,
+    /// then let the audited reconcile() do the rest: layout recompute at
+    /// the new geometry, structural chrome repaint + flush (the #57
+    /// post-bind flush lives there), the CONFIGURE fan to every visible
+    /// surface, and the Direct->Composed fall (a direct surface is no
+    /// longer display-sized). Boot stays Boot (pre-first-content -- the
+    /// aurora startup push lands here; the surface then creates at the
+    /// new geometry).
+    fn set_mode(&mut self, w: u32, h: u32) -> Result<(), u32> {
+        if !(MODE_MIN_W..=MODE_MAX_W).contains(&w) || !(MODE_MIN_H..=MODE_MAX_H).contains(&h) {
+            return Err(p9::E_INVAL);
+        }
+        // F3: reject a mode whose fullscreen TRIPLE-buffered surface would
+        // exceed the per-weave cap -- else set_mode would succeed but the
+        // renderer's immediate fullscreen create fails, blanking the
+        // console. The page-rounded slot stride matches alloc_weave.
+        let slot = (((w as u64) * 4 * (h as u64)) + PAGE - 1) & !(PAGE - 1);
+        let surf_size = slot * (WEAVE_SLOTS as u64);
+        if surf_size > WEAVE_MAX_SIZE {
+            return Err(p9::E_INVAL);
+        }
+        if w == self.gpu.width && h == self.gpu.height {
+            return Ok(()); // same mode: a push of the current value no-ops
+        }
+        // F3-follow-up (the max-resolution display-brick, reported 2026-07-23):
+        // the STATIC cap is not enough -- the kernel's contiguous-DMA
+        // allocator can fail BELOW KOBJ_DMA_WEAVE_MAX_SIZE (buddy max-order /
+        // fragmentation / physical RAM). A 2560x1440 surface (44 MiB, < the
+        // 64 MiB cap) allocated its single-buffered SCREEN fine but its
+        // triple-buffered SURFACE weave then failed -1 -> set_mode had
+        // committed the geometry, so aurora's reweave died -> retire ->
+        // the display disconnected (and, persisted, bricked every boot).
+        // PRE-FLIGHT the real fullscreen surface allocation and reject the
+        // mode if it cannot back a surface -- the current working geometry
+        // stands, the OSD apply is refused (never persisted), and a
+        // startup push of a too-big persisted mode is rejected so aurora
+        // comes up at the default (the self-heal in aurora clears it).
+        let probe = unsafe {
+            t_dma_create_weave(surf_size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP)
+        };
+        if probe < 0 {
+            say!("tapestryd: mode {}x{} refused -- surface weave {} unallocatable ({})",
+                 w, h, surf_size, probe);
+            return Err(p9::E_NOMEM);
+        }
+        unsafe { t_close(probe) };
+        say!(
+            "tapestryd: mode {}x{} -> {}x{} (scanout {})",
+            self.gpu.width,
+            self.gpu.height,
+            w,
+            h,
+            self.scanout_name()
+        );
+        let new = match self.alloc_screen(w, h) {
+            Some(s) => s,
+            None => return Err(p9::E_NOMEM),
+        };
+        // Held pushes reference the OLD geometry/screen; a deferred push
+        // against the new one would land wrong bytes at wrong rects. The
+        // CONFIGURE fan below makes every client repaint.
+        for n in 0..MAX_SURFACES {
+            if let Some(s) = self.surf_mut(n) {
+                s.held = None;
+            }
+        }
+        // F2: for a DISPLAYED (Composed) scanout, rebind to the new screen
+        // BEFORE committing any state -- and roll back cleanly on failure.
+        // A discarded set_scanout result could leave the device scanning
+        // the old resource while we free it (device DMA-scanning
+        // returned-to-pool pages -- a display-integrity glitch). `new` is
+        // still a local here, so a failed rebind frees it and leaves the
+        // old screen + geometry byte-for-byte intact.
+        if self.scanout == Scanout::Composed {
+            if self.gpu.set_scanout(new.res, w, h).is_err() {
+                say!("tapestryd: mode rebind failed; old geometry retained");
+                self.free_screen(new);
+                return Err(E_IO);
+            }
+            // The device now scans new.res (zeroed; reconcile's structural
+            // repaint fills it this dispatch); old.res is no longer bound.
+        }
+        // Commit: the old screen is now un-scanned (rebound above) or was
+        // never bound (Boot/Off/Direct) -- either way safe to free.
+        let old = self.screen.take();
+        self.screen = Some(new);
+        self.gpu.width = w;
+        self.gpu.height = h;
+        if let Some(o) = old {
+            self.free_screen(o);
+        }
+        self.reconcile();
+        Ok(())
     }
 
     /// Paint the full chrome into the screen buffer: background everywhere
@@ -920,8 +1126,12 @@ impl Comp {
     /// Push the whole screen buffer to the host resource + display.
     fn screen_flush_full(&mut self) {
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        let _ = self.gpu.transfer(SCREEN_RES, 0, 0, 0, dw, dh);
-        let _ = self.gpu.flush(SCREEN_RES, 0, 0, dw, dh);
+        let res = match &self.screen {
+            Some(s) => s.res,
+            None => return,
+        };
+        let _ = self.gpu.transfer(res, 0, 0, 0, dw, dh);
+        let _ = self.gpu.flush(res, 0, 0, dw, dh);
     }
 
     /// Reconcile scanout + chrome with the layout (run after every layout
@@ -934,7 +1144,7 @@ impl Comp {
     ///   - nothing at all -> Off (Boot stays untouched pre-first-content).
     fn reconcile(&mut self) {
         let (dw, dh) = (self.gpu.width, self.gpu.height);
-        self.layout.recompute(dw, dh);
+        self.layout.recompute(dw, dh, self.chords.gaps);
         let vis = self.layout.visible_hosted();
         let nleaves = self.layout.visible_leaf_count();
 
@@ -960,6 +1170,9 @@ impl Comp {
         match want {
             Scanout::Boot => {}
             Scanout::Off => {
+                if self.pending_direct.is_some() {
+                    say!("tapestryd: scanout off clears pending-direct");
+                }
                 self.pending_direct = None;
                 if self.scanout != Scanout::Off && self.scanout != Scanout::Boot {
                     let _ = self.gpu.set_scanout(0, dw, dh);
@@ -979,6 +1192,7 @@ impl Comp {
                     // switch's full-slot transfer needs a full repaint to
                     // land next. Same-size by construction: Direct(n)
                     // requires the surface display-sized.
+                    say!("tapestryd: scanout pending-direct {} ({}x{})", n, dw, dh);
                     self.pending_direct = Some(n);
                     if !self.emit_configure_to(n, dw, dh) {
                         self.retire(n); // wedged; retire clears pending
@@ -1008,7 +1222,20 @@ impl Comp {
                     self.screen_flush_full();
                 }
                 if entering {
-                    let _ = self.gpu.set_scanout(SCREEN_RES, dw, dh);
+                    let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
+                    say!("tapestryd: scanout composed ({}x{})", dw, dh);
+                    let _ = self.gpu.set_scanout(sres, dw, dh);
+                    // Flush AFTER the bind (#57): a RESOURCE_FLUSH reaches
+                    // only scanouts bound to the resource, so the
+                    // screen_flush_full above -- issued while the OLD
+                    // scanout was still bound -- was dropped by spec, and
+                    // a same-size surface replace renders NOTHING under
+                    // the QEMU cocoa frontend (10.0.2 switchSurface swaps
+                    // the pixman pointer without a redraw; VNC full-
+                    // dirties on replace, which masked this headless).
+                    // The post-bind flush makes the switch self-healing
+                    // on every frontend.
+                    let _ = self.gpu.flush(sres, 0, 0, dw, dh);
                     self.scanout = Scanout::Composed;
                 }
                 if structural {
@@ -1102,19 +1329,87 @@ impl Comp {
             },
             None => return None, // unhosted
         };
-        // Clip the damage to the pane's content size (an oversized or
-        // CONFIGURE-deaf client shows its top-left crop).
-        let inter = Rect { x, y, w: pw, h: ph }
-            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
-        if inter.is_empty() {
-            return None;
-        }
         let screen_va = match &self.screen {
             Some(s) => s.va,
             None => return None,
         };
         let dw = self.gpu.width as u64;
         let src_base = weave_va + (slot as u64) * slot_stride;
+        let (sh_full, patchwork) = match self.surf(n) {
+            Some(s) => (s.h, s.patchwork),
+            None => return None,
+        };
+        if (sw != content.w || sh_full != content.h) && !patchwork {
+            // Fork 2 + the #56 patchwork latch (both user-voted
+            // 2026-07-21): a FULL-FRAME presenter (patchwork never
+            // latched) LETTERBOXES into its pane -- aspect-preserving
+            // scale, up OR down, centered, nearest-neighbor (crisp for
+            // the retro-game case; cheap integer math). Damage
+            // sub-rects are ignored: any present redraws the FULL
+            // scaled rect -- sound exactly BECAUSE the latch is clear:
+            // every present so far carried whole-frame bytes. A LATCHED
+            // surface is an accumulator (aurora's cell-diff over
+            // rotating weave slots): its slots are PATCHWORK, and
+            // scaling a full slot composes alternating half-stale
+            // frames -- the live-play "utopia pane flipping" bug -- so
+            // any size mismatch takes the damage-clipped CROP path
+            // below instead. (The pre-#56 discriminator was fit-inside
+            // BY SIZE, which cropped a 2px-overflowing split Quake; the
+            // present style is the property that actually matters, and
+            // it is protocol-observable.) Aurora's pane-tracking resize
+            // is the real close (#55). The bars around a letterboxed
+            // rect are the pane background, painted by the chrome pass.
+            // The geometry comes from the SAME letterbox() ptr_hit
+            // inverts -- one authority, no drift.
+            if content.w == 0 || content.h == 0 || sh_full == 0 || sw == 0 {
+                return None;
+            }
+            let (ox, oy, dw2, dh2) = Self::letterbox(sw, sh_full, content.w, content.h);
+            // One-shot geometry diagnostic (per distinct placement).
+            if let Some(su) = self.surf_mut(n) {
+                let sig = (ox, oy, dw2, dh2);
+                if su.lb_logged != Some(sig) {
+                    su.lb_logged = Some(sig);
+                    say!(
+                        "tapestryd: surface {} letterbox {}x{} -> {}x{} @({},{}) in {}x{}",
+                        n, sw, sh_full, dw2, dh2, ox, oy, content.w, content.h
+                    );
+                }
+            }
+            // SAFETY: src reads stay inside the weave slot (sx < sw,
+            // sy < sh by the division bound: lx < dw2 => lx*sw/dw2 <
+            // sw -- ratio math, valid for scale-down as well as up);
+            // dst rows stay inside the screen buffer (letterbox()
+            // bounds dw2 <= cw and dh2 <= ch by construction in BOTH
+            // directions, so the scaled rect is inside content, and
+            // content inside the display by the geometry pass).
+            unsafe {
+                for row in 0..dh2 as u64 {
+                    let sy = (row * sh_full as u64) / dh2 as u64;
+                    let dy = content.y as u64 + oy as u64 + row;
+                    let srow = (src_base + sy * sw as u64 * 4) as *const u32;
+                    let drow = (screen_va
+                        + (dy * dw + (content.x + ox) as u64) * 4)
+                        as *mut u32;
+                    for col in 0..dw2 as u64 {
+                        let sx = (col * sw as u64) / dw2 as u64;
+                        *drow.add(col as usize) = *srow.add(sx as usize);
+                    }
+                }
+            }
+            return Some(Rect {
+                x: content.x + ox,
+                y: content.y + oy,
+                w: dw2,
+                h: dh2,
+            });
+        }
+        // Same-size fast path: the byte-copy blit, damage-clipped.
+        let inter = Rect { x, y, w: pw, h: ph }
+            .intersect(Rect { x: 0, y: 0, w: content.w, h: content.h });
+        if inter.is_empty() {
+            return None;
+        }
         // SAFETY: src rows lie within the weave slot (damage was validated
         // against the surface geometry; inter only shrinks it); dst rows
         // lie within the screen buffer (content is inside the display by
@@ -1141,10 +1436,14 @@ impl Comp {
         if r.is_empty() {
             return;
         }
+        let res = match &self.screen {
+            Some(s) => s.res,
+            None => return,
+        };
         let dw = self.gpu.width as u64;
         let off = ((r.y as u64) * dw + r.x as u64) * 4;
-        let _ = self.gpu.transfer(SCREEN_RES, off, r.x, r.y, r.w, r.h);
-        let _ = self.gpu.flush(SCREEN_RES, r.x, r.y, r.w, r.h);
+        let _ = self.gpu.transfer(res, off, r.x, r.y, r.w, r.h);
+        let _ = self.gpu.flush(res, r.x, r.y, r.w, r.h);
     }
 
     /// Flush surface `n`'s held region (F13 release; also the implicit
@@ -1299,6 +1598,7 @@ impl Comp {
             Some(s) => s,
             None => return,
         };
+        say!("tapestryd: retire surface {}", n);
         // A stale last_focus naming this slot would suppress the gained
         // event for a FUTURE surface minted into it -- clear it (the
         // reconcile below re-emits for whatever takes focus).
@@ -1355,7 +1655,13 @@ impl Comp {
         if let Some((oldw, old_res)) = s.old_weave {
             self.release_gen(&oldw, old_res);
         }
-        say!("tapestryd: surface {} retired (presents={})", n, s.presents);
+        // No diagnostic (#55b): a surface retire is routine steady-state
+        // traffic (every client exit / pane close), and with a live-acking
+        // fbcon it lands concurrent with session output -- a SYS_PUTS line
+        // here interleaves at the UART FIFO (the P1-F carve-out) and tears
+        // byte patterns mid-line (it split `/home/michael` in the panes
+        // post-battery assert). The error/edge prints above stay.
+        let _ = s.presents;
     }
 
     /// Retire every surface owned by a dying conn (teardown / Tversion).
@@ -1388,6 +1694,25 @@ impl Comp {
             }
             s.events.push_back(ev);
             return true;
+        }
+        if ev.kind == TEV_PTR_REL {
+            // Deltas are ADDITIVE: replacing (the MOVE discipline) loses
+            // motion, so a back-of-queue REL sums instead (i16-saturating;
+            // back-of-queue only -- an interleaved event starts a fresh
+            // record, preserving order). Overflow falls through to the
+            // droppable class below.
+            if let Some(t) = s.events.back_mut().filter(|e| e.kind == TEV_PTR_REL) {
+                let sx = (t.value >> 16) as u16 as i16 as i32
+                    + (ev.value >> 16) as u16 as i16 as i32;
+                let sy = (t.value & 0xFFFF) as u16 as i16 as i32
+                    + (ev.value & 0xFFFF) as u16 as i16 as i32;
+                let sx = sx.clamp(-32768, 32767) as i16 as u16 as u32;
+                let sy = sy.clamp(-32768, 32767) as i16 as u16 as u32;
+                t.value = (sx << 16) | sy;
+                t.mods = ev.mods;
+                t.tick = ev.tick;
+                return true;
+            }
         }
         if ev.kind == TEV_CONFIGURE {
             // Unacked CONFIGUREs coalesce -- only the latest serial matters
@@ -1507,6 +1832,181 @@ impl Comp {
         }
     }
 
+    /// The letterbox placement of a (sw, sh) surface inside a (cw, ch)
+    /// pane content rect: aspect-preserving scale + center (the fork-2
+    /// decision, user-voted 2026-07-21). Returns (ox, oy, dw2, dh2) --
+    /// the scaled rect's content-relative origin + dims. Equal dims
+    /// return the identity (0, 0, cw, ch). THE ONE GEOMETRY AUTHORITY:
+    /// blit_composed_pixels' forward map and ptr_hit's inverse both
+    /// derive from this, so they cannot drift apart (the G-7c audit-F3
+    /// lesson made structural).
+    fn letterbox(sw: u32, sh: u32, cw: u32, ch: u32) -> (u32, u32, u32, u32) {
+        if sw == cw && sh == ch {
+            return (0, 0, cw, ch);
+        }
+        // Width-bound iff cw/sw <= ch/sh  <=>  cw*sh <= ch*sw (u64: no
+        // overflow for display-scale dims).
+        let (dw2, dh2) = if (cw as u64) * (sh as u64) <= (ch as u64) * (sw as u64) {
+            (cw, (((sh as u64) * (cw as u64)) / (sw as u64).max(1)) as u32)
+        } else {
+            ((((sw as u64) * (ch as u64)) / (sh as u64).max(1)) as u32, ch)
+        };
+        let (dw2, dh2) = (dw2.max(1), dh2.max(1));
+        ((cw - dw2) / 2, (ch - dh2) / 2, dw2, dh2)
+    }
+
+    /// The surface under display point (px, py) + the point translated to
+    /// surface-relative coords (G-7c pointer routing: under-the-pointer,
+    /// NOT the focused leaf -- clicking a pane must land in that pane;
+    /// keyboard focus stays chord-driven, no click-to-focus at this
+    /// stage). A full-frame presenter letterboxes into its pane (fork 2
+    /// + the #56 patchwork latch), so the inverse subtracts the content
+    /// + letterbox origins and UNSCALES -- via the same letterbox() the
+    /// blit uses. A point over the bars CLAMPS into the scaled rect,
+    /// keeping drag/mouse-look deltas alive at the boundary.
+    fn ptr_hit(&self, px: u32, py: u32) -> Option<(usize, u16, u16)> {
+        let (n, c) = self.layout.surface_at(px, py)?;
+        let s = self.surf(n)?;
+        if s.w == 0 || s.h == 0 || c.w == 0 || c.h == 0 {
+            return None;
+        }
+        if s.patchwork {
+            // Latched accumulator = the CROP placement (see
+            // blit_composed_pixels): surface (0,0) at the content
+            // origin, damage-clipped. The inverse is the plain subtract
+            // + far-edge clamp (which also covers a patchwork surface
+            // SMALLER than its pane: a point past the surface extent
+            // clamps to the far edge, keeping deltas alive).
+            let sx = (px - c.x).min(s.w - 1).min(0xFFFF) as u16;
+            let sy = (py - c.y).min(s.h - 1).min(0xFFFF) as u16;
+            return Some((n, sx, sy));
+        }
+        let (ox, oy, dw2, dh2) = Self::letterbox(s.w, s.h, c.w, c.h);
+        // Content-relative, clamped into the letterbox rect, unscaled.
+        let lx = (px - c.x).saturating_sub(ox).min(dw2 - 1);
+        let ly = (py - c.y).saturating_sub(oy).min(dh2 - 1);
+        let sx = (((lx as u64) * (s.w as u64)) / (dw2 as u64)) as u32;
+        let sy = (((ly as u64) * (s.h as u64)) / (dh2 as u64)) as u32;
+        let sx = sx.min(s.w - 1).min(0xFFFF) as u16;
+        let sy = sy.min(s.h - 1).min(0xFFFF) as u16;
+        Some((n, sx, sy))
+    }
+
+    /// ABSOLUTE pointer motion at display coords (G-7c; the tablet
+    /// drain). Also synthesizes the TEV_PTR_REL delta from the previous
+    /// abs position -- the abs-only-frontend mouse-look path (QEMU cocoa
+    /// with a tablet present never produces host rel events); the first
+    /// abs motion only seeds the base. Edge-stall is inherent to an abs
+    /// source (the host cursor stops at the window edge); the relative
+    /// device is exact.
+    pub fn ptr_move(&mut self, px: u32, py: u32, mods: u16) {
+        if let Some((lx, ly)) = self.abs_last {
+            let (dx, dy) = (px as i32 - lx as i32, py as i32 - ly as i32);
+            if dx != 0 || dy != 0 {
+                self.ptr_rel_emit(dx, dy, mods);
+            }
+        }
+        self.abs_last = Some((px, py));
+        self.ptr_commit(px, py, mods);
+    }
+
+    /// RELATIVE pointer motion (the mouse drain): emit the EXACT deltas
+    /// to the focused surface (unclamped -- mouse-look must not stall at
+    /// the display edge), then accumulate into the pointer position so
+    /// button/click routing follows the relative device too. abs_last is
+    /// untouched (per-source delta frames).
+    pub fn ptr_move_rel(&mut self, dx: i32, dy: i32, mods: u16) {
+        self.ptr_rel_emit(dx, dy, mods);
+        let (dw, dh) = (self.gpu.width as i32, self.gpu.height as i32);
+        let px = (self.ptr_x as i32 + dx).clamp(0, dw.max(1) - 1) as u32;
+        let py = (self.ptr_y as i32 + dy).clamp(0, dh.max(1) - 1) as u32;
+        self.ptr_commit(px, py, mods);
+    }
+
+    /// Deliver a TEV_PTR_REL to the FOCUSED leaf's surface (mouse-look is
+    /// a focus companion like keys, decoupled from the pointer position;
+    /// PTR_MOVE keeps the under-pointer rule). Deltas clamp to i16.
+    fn ptr_rel_emit(&mut self, dx: i32, dy: i32, mods: u16) {
+        let n = match self.layout.focused_surface() {
+            Some(n) => n,
+            None => return,
+        };
+        let vx = dx.clamp(-32768, 32767) as i16 as u16 as u32;
+        let vy = dy.clamp(-32768, 32767) as i16 as u16 as u32;
+        let ev = Tevent {
+            kind: TEV_PTR_REL,
+            code: 0,
+            value: (vx << 16) | vy,
+            rune: 0,
+            mods,
+            flags: 0,
+            tick: self.tick,
+        };
+        if !self.push_event(n, ev) {
+            self.retire(n);
+        }
+    }
+
+    /// The shared position commit: MOVE is the coalescible class (R2-F4):
+    /// an overflowing queue evicts it, never a control event, so a motion
+    /// burst cannot WEDGE a surface.
+    fn ptr_commit(&mut self, px: u32, py: u32, mods: u16) {
+        self.ptr_x = px;
+        self.ptr_y = py;
+        if let Some((n, sx, sy)) = self.ptr_hit(px, py) {
+            let ev = Tevent {
+                kind: TEV_PTR_MOVE,
+                code: 0,
+                value: ((sx as u32) << 16) | sy as u32,
+                rune: 0,
+                mods,
+                flags: 0,
+                tick: self.tick,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
+            }
+        }
+    }
+
+    /// Pointer button (evdev BTN_*) at the current pointer position.
+    /// Non-droppable (a lost release strands a drag).
+    pub fn ptr_btn(&mut self, code: u16, pressed: bool, mods: u16) {
+        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
+            let ev = Tevent {
+                kind: TEV_PTR_BTN,
+                code,
+                value: pressed as u32,
+                rune: 0,
+                mods,
+                flags: 0,
+                tick: self.tick,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
+            }
+        }
+    }
+
+    /// Wheel scroll (signed delta) at the current pointer position.
+    /// Non-droppable (discrete steps; losing one skips content).
+    pub fn ptr_scroll(&mut self, delta: i32, mods: u16) {
+        if let Some((n, _, _)) = self.ptr_hit(self.ptr_x, self.ptr_y) {
+            let ev = Tevent {
+                kind: TEV_SCROLL,
+                code: 0,
+                value: delta as u32,
+                rune: 0,
+                mods,
+                flags: 0,
+                tick: self.tick,
+            };
+            if !self.push_event(n, ev) {
+                self.retire(n);
+            }
+        }
+    }
+
     fn chord_bit(&self, code: u16) -> bool {
         let i = (code as usize) & 0xff;
         self.chord_down[i / 64] & (1 << (i % 64)) != 0
@@ -1553,69 +2053,56 @@ impl Comp {
         true
     }
 
-    /// Dispatch one bound chord (US-QWERTY evdev codes; the binding table
-    /// is compositor policy -- a halcyon.rc concern eventually, baked
-    /// here like the keymap). i3-flavored: Super+arrows focus spatially,
-    /// +Shift move the pane; h/v split; f zoom; t/s tab/stack; e split
-    /// toggle; Tab cycles tabs; Shift+q closes the focused pane.
+    /// Dispatch one Super chord: look the (code, shift) up in the RUNTIME
+    /// table (cfg-4) and execute the bound action, if any. An unbound key
+    /// is plane-reserved + dropped (unchanged). The table is seeded with
+    /// the stage-0 i3-flavored defaults and remapped by the gated `chord`
+    /// ctl verb; the lookup here is the ONLY consumer, so a rebind takes
+    /// effect on the next press with no other coupling.
     fn chord_action(&mut self, code: u16, shift: bool) {
-        const KEY_TAB: u16 = 15;
-        const KEY_Q: u16 = 16;
-        const KEY_E: u16 = 18;
-        const KEY_T: u16 = 20;
-        const KEY_S: u16 = 31;
-        const KEY_F: u16 = 33;
-        const KEY_H: u16 = 35;
-        const KEY_V: u16 = 47;
-        const KEY_UP: u16 = 103;
-        const KEY_LEFT: u16 = 105;
-        const KEY_RIGHT: u16 = 106;
-        const KEY_DOWN: u16 = 108;
+        if let Some(action) = self.chords.lookup(code, shift) {
+            self.exec_chord(action);
+        }
+    }
 
-        let dir = match code {
-            KEY_LEFT => Some(Dir::Left),
-            KEY_RIGHT => Some(Dir::Right),
-            KEY_UP => Some(Dir::Up),
-            KEY_DOWN => Some(Dir::Down),
-            _ => None,
-        };
-        if let Some(d) = dir {
-            let changed = if shift {
+    /// Perform one resolved chord action against the layout (the old
+    /// hardcoded arms, now keyed by ChordAction). A structural change
+    /// reconciles; a no-op (edge/degenerate) does not.
+    fn exec_chord(&mut self, action: ChordAction) {
+        match action {
+            ChordAction::FocusDir(d) => {
+                if self.layout.focus_dir(d) {
+                    self.reconcile();
+                }
+            }
+            ChordAction::MoveDir(d) => {
                 let f = self.layout.focused;
                 self.layout.unzoom();
-                self.layout.move_dir(f, d)
-            } else {
-                self.layout.focus_dir(d)
-            };
-            if changed {
-                self.reconcile();
+                if self.layout.move_dir(f, d) {
+                    self.reconcile();
+                }
             }
-            return;
-        }
-        match (code, shift) {
-            (KEY_H, false) | (KEY_V, false) => {
-                let mode = if code == KEY_H { Mode::SplitH } else { Mode::SplitV };
+            ChordAction::Split(mode) => {
                 self.layout.unzoom();
                 let f = self.layout.focused;
                 if self.layout.split(f, mode).is_some() {
                     self.reconcile();
                 }
             }
-            (KEY_F, false) => {
+            ChordAction::Zoom => {
                 let f = self.layout.focused;
                 if self.layout.zoom_toggle(f) {
                     self.reconcile();
                 }
             }
-            (KEY_T, false) | (KEY_S, false) => {
-                let mode = if code == KEY_T { Mode::Tabbed } else { Mode::Stacked };
+            ChordAction::SetMode(mode) => {
                 self.layout.unzoom();
                 let f = self.layout.focused;
                 if self.layout.set_mode(f, mode) {
                     self.reconcile();
                 }
             }
-            (KEY_E, false) => {
+            ChordAction::SplitToggle => {
                 // Split-orientation toggle on the focused leaf's parent.
                 let f = self.layout.focused;
                 let parent_mode = self
@@ -1635,19 +2122,18 @@ impl Comp {
                     self.reconcile();
                 }
             }
-            (KEY_TAB, s) => {
+            ChordAction::TabCycle(fwd) => {
                 self.layout.unzoom();
-                if self.layout.tab_cycle(!s) {
+                if self.layout.tab_cycle(fwd) {
                     self.reconcile();
                 }
             }
-            (KEY_Q, true) => {
+            ChordAction::Close => {
                 let f = self.layout.focused;
                 if let Some(id) = self.layout.id_of(f) {
                     let _ = self.pane_cmd(id, "close");
                 }
             }
-            _ => {} // unbound: plane-reserved, dropped
         }
     }
 
@@ -1696,6 +2182,54 @@ pub struct Conn {
 }
 
 const NO_FID: Option<Fid> = None;
+
+/// Exact union-cover test (#56): do `rects` (validated in-bounds,
+/// nonempty) jointly cover the full (w, h) surface? The patchwork latch
+/// must NOT trip on a full frame presented as TILES -- the battery's
+/// G-6c multi-rect leg tiles the full surface in two halves by design
+/// (the first-cut single-full-rect shortcut latched it -> the moveB
+/// pane-center regression). Y-band sweep: for each horizontal band
+/// between adjacent y-edges, the x-intervals of the rects spanning the
+/// band must union to [0, w) gap-free. Exact for arbitrary overlap;
+/// bounded by TPRESENT_MAX_RECTS=64 -> at most ~130 bands x 64
+/// intervals per present -- negligible.
+fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
+    // Fast path: a single full-surface rect (the dominant shape --
+    // rect_count 0, SDL_UpdateWindowSurface, present(None)).
+    if rects.iter().any(|&(x, y, pw, ph)| x == 0 && y == 0 && pw == w && ph == h) {
+        return true;
+    }
+    let mut ys: Vec<u32> = Vec::with_capacity(rects.len() * 2 + 2);
+    ys.push(0);
+    ys.push(h);
+    for &(_, y, _, ph) in rects {
+        ys.push(y);
+        ys.push(y + ph);
+    }
+    ys.sort_unstable();
+    ys.dedup();
+    for win in ys.windows(2) {
+        let (band_lo, band_hi) = (win[0], win[1]);
+        // x-intervals of the rects fully spanning this band, sorted.
+        let mut xs: Vec<(u32, u32)> = rects
+            .iter()
+            .filter(|&&(_, y, _, ph)| y <= band_lo && y + ph >= band_hi)
+            .map(|&(x, _, pw, _)| (x, x + pw))
+            .collect();
+        xs.sort_unstable();
+        let mut reach: u32 = 0;
+        for (x0, x1) in xs {
+            if x0 > reach {
+                return false; // horizontal gap in this band
+            }
+            reach = reach.max(x1);
+        }
+        if reach < w {
+            return false; // band not covered to the right edge
+        }
+    }
+    true
+}
 
 impl Conn {
     pub fn new(handle: i64, conn_id: u64) -> Conn {
@@ -2411,15 +2945,97 @@ impl Conn {
         }
     }
 
+    /// cfg-3 (AURORA-CONFIG.md section 3.3): does this conn's LIVE peer
+    /// hold the console-RENDERER role? t_srv_peer resolves the identity
+    /// fresh under the proc-table lock, so a moved/died role revokes on
+    /// the next authority write. Fail-closed on any error.
+    fn peer_is_renderer(&self) -> bool {
+        let mut info = TSrvPeerInfo::default();
+        if unsafe { t_srv_peer(self.handle, &mut info) } != 0 {
+            return false;
+        }
+        info.alive == 1 && (info.flags & T_SRV_PEER_FLAG_CONSOLE_RENDERER) != 0
+    }
+
+    /// The ONLY intentionally-ungated global-ctl verbs (SA-1): the section
+    /// 18.6 determinism surface, which a NON-renderer (the in-guest
+    /// battery) must drive in test builds and which is #880-feature-
+    /// stripped to E_OPNOTSUPP in production. The gate is a DENYLIST of
+    /// exactly this set, not an allowlist of the known authority prefixes
+    /// -- so every FUTURE global verb (gaps/chord/a typo) is gated BY
+    /// CONSTRUCTION, realizing the scripture's "a new global verb defaults
+    /// to GATED" (an allowlist would silently ungate a verb added without
+    /// touching the gate line).
+    fn is_ungated_ctl(s: &str) -> bool {
+        s == "test-mode on" || s == "test-mode off" || s == "tick" || s.starts_with("release")
+    }
+
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let s = s.trim();
+        // The apply-authority gate (cfg-3; the ARCH section 25.4 cfg-3
+        // addendum is the prosecution list): every AUTHORITY-BEARING
+        // global verb -- mode, clock-rate, and every future global
+        // mutation -- admits only a conn whose LIVE peer holds the
+        // console-renderer role. Checked per write (revocation-correct).
+        // Default-DENY: only the determinism verbs are exempt (see
+        // is_ungated_ctl); ctl READS stay ungated (the geometry query,
+        // a separate read path).
+        if !Self::is_ungated_ctl(s) && !self.peer_is_renderer() {
+            return Err(p9::E_PERM);
+        }
+        if s == "mode auto" {
+            // Re-probe the host's preferred rect and adopt it (base
+            // virtio-gpu reports one rect, not a mode list). Absent or
+            // probe-failed: fail soft, current mode stands.
+            let probed = comp.gpu.query_display_info().ok().flatten();
+            return match probed {
+                Some((w, h)) => comp.set_mode(w, h),
+                None => Err(p9::E_AGAIN),
+            };
+        }
+        if let Some(rest) = s.strip_prefix("mode ") {
+            let mut it = rest.split_ascii_whitespace();
+            let w: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            let h: u32 = it.next().ok_or(p9::E_INVAL)?.parse().map_err(|_| p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            return comp.set_mode(w, h);
+        }
         if let Some(rate) = s.strip_prefix("clock-rate ") {
             let hz: u32 = rate.trim().parse().map_err(|_| p9::E_INVAL)?;
             if !(1..=240).contains(&hz) {
                 return Err(p9::E_INVAL);
             }
             comp.clock_hz = hz;
+            return Ok(());
+        }
+        // cfg-4: the runtime chord table + gaps (AURORA-CONFIG.md section
+        // 3.5). Authority verbs (default-deny gated above). A rebind
+        // mutates only comp.chords -- NEVER the chord_down swallow-set --
+        // so a live remap can never leak a half key-pair (the cfg-4
+        // obligation). `chord-reset` (the environment's reset-first push)
+        // must precede the strip on "chord " so it is not mis-parsed.
+        if s == "chord-reset" {
+            comp.chords.reset();
+            return Ok(());
+        }
+        if let Some(rest) = s.strip_prefix("chord ") {
+            let mut it = rest.split_ascii_whitespace();
+            let combo = it.next().ok_or(p9::E_INVAL)?;
+            let action = it.next().ok_or(p9::E_INVAL)?;
+            if it.next().is_some() {
+                return Err(p9::E_INVAL);
+            }
+            return comp.chords.bind(combo, action).map_err(|_| p9::E_INVAL);
+        }
+        if let Some(rest) = s.strip_prefix("gaps ") {
+            let px: u32 = rest.trim().parse().map_err(|_| p9::E_INVAL)?;
+            comp.chords.set_gaps(px).map_err(|_| p9::E_INVAL)?;
+            // The inset feeds recompute; re-run it so the change is visible
+            // without waiting for the next layout mutation.
+            comp.reconcile();
             return Ok(());
         }
         // Section 18.6 determinism mode (G-6c) -- compiled only into
@@ -2592,6 +3208,21 @@ impl Conn {
             }
         }
 
+        // The #56 present-style latch: a present whose damage does not
+        // cover the full surface marks the client an ACCUMULATOR --
+        // placement (blit + ptr_hit) then crops instead of letterboxing.
+        // Checked on EVERY present (incl. direct-scanout mode, where
+        // placement is moot but the latch must stay accurate for a later
+        // return to composed mode). The cover test is the EXACT union
+        // (rects_cover_full): the battery's multi-rect leg presents the
+        // full frame as two tiles, which a single-full-rect shortcut
+        // falsely latched (the moveB pane-center regression).
+        if !rects_cover_full(&rects, w, h) {
+            if let Some(s) = comp.surf_mut(n) {
+                s.patchwork = true;
+            }
+        }
+
         // Route by scanout mode (G-6). The slot base + rect origin ride
         // the TRANSFER offset; rows advance by the resource stride (w*4).
         if comp.pending_direct == Some(n) {
@@ -2617,7 +3248,15 @@ impl Conn {
                     return Err(E_IO);
                 }
             }
+            say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
             if comp.gpu.set_scanout(res, w, h).is_ok() {
+                // Post-bind full flush (#57): the per-rect flushes above
+                // targeted a not-yet-scanned-out resource (dropped by
+                // spec), and cocoa's same-size surface replace renders
+                // nothing -- without this the display keeps the stale
+                // composed frame until later client damage covers it
+                // (the lingering-dead-pane symptom).
+                let _ = comp.gpu.flush(res, 0, 0, w, h);
                 comp.scanout = Scanout::Direct(n);
                 comp.pending_direct = None;
                 if let Some(s) = comp.surf_mut(n) {
@@ -2715,7 +3354,14 @@ impl Conn {
         // its weave-fid clunk (ClunkMap; #847 keeps the pages until then).
         if let Some((oldw, old_res)) = comp.surf_mut(n).and_then(|s| s.old_weave.take()) {
             comp.release_gen(&oldw, old_res);
-            say!("tapestryd: surface {} old generation retired (res {})", n, old_res);
+            // No diagnostic here (#55b): a generation retire is now ROUTINE
+            // steady-state traffic -- the fbcon acks every pane resize, so
+            // this fires per split/unsplit while the SESSION is printing,
+            // and a SYS_PUTS line here interleaves at the UART FIFO with
+            // concurrent /dev/cons output (the P1-F carve-out), tearing
+            // byte patterns mid-line (the ls-gfx-panes post-battery pwd
+            // assert lost `/home/michael` to exactly this print). Aurora's
+            // own single `reweave WxH` line carries the diagnostic value.
         }
         Ok(())
     }
