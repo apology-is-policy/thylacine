@@ -48,6 +48,112 @@ proc lc_step {msg} {
     }
 }
 
+# --- #78 expect-side instrumentation -------------------------------------
+#
+# The bridge instrument (b0ffd862) exonerated the relay: at every cut it was
+# perfectly current (~124 KB delivered, 1-5 bytes outstanding, ZERO idle in
+# BOTH directions) and reported `stdin_eof=1` -- the BENIGN teardown shape.
+# So expect closes its own spawn channel, mid-scenario, while the guest is
+# alive (stat R+) and the relay is healthy. All observed cuts land at or just
+# after a `send`, i.e. when expect WRITES.
+#
+# expect cannot report that to us by default: a failed `send` is a Tcl error
+# that unwinds past the scenario, and the resulting symptom downstream is a
+# bare EOF or timeout with the cause discarded. These two hooks keep it.
+
+# `exp_internal -f FILE 0` writes expect's OWN diagnostics (every byte sent,
+# every byte read, every match attempt, and the channel/EOF events) to FILE
+# and NOT to stderr -- so the transcript stays readable.
+#
+# OPT-IN, AND DELIBERATELY SO -- the trace is O(reads x buffer), NOT O(bytes):
+# expect re-prints the ENTIRE accumulated match buffer on EVERY match attempt,
+# and this harness runs `match_max 200000`. A full boot is hundreds of reads
+# against a buffer that can reach 200 KB, so an unbounded trace is a
+# multi-GB-per-attempt hazard, not a "~1 MB" one. A runaway log has already
+# ENOSPC-bricked this host once. Enable it for a single targeted repro, watch
+# the file, and never leave it on for a full-set or gate run.
+proc lc_trace_init {} {
+    if {![info exists ::env(LS_CI_EXPECT_TRACE)]} return
+    if {$::env(LS_CI_EXPECT_TRACE) eq "0"} return
+    set ::lc_trace /tmp/thyla-exptrace-[pid].log
+    file delete -force $::lc_trace
+    if {[catch {exp_internal -f $::lc_trace 0} err]} {
+        lc_step "TRACE: could not enable exp_internal ($err)"
+        unset ::lc_trace
+        return
+    }
+    lc_step "TRACE: exp_internal -> $::lc_trace"
+}
+
+# Move the trace next to the attempt evidence so a retry cannot destroy it
+# (the #72 lesson: the no-host-load discipline needs the artifact to LOOK at).
+proc lc_trace_preserve {} {
+    if {![info exists ::lc_trace] || ![file exists $::lc_trace]} return
+    # The pid keeps each ATTEMPT's trace distinct -- a fixed name would let a
+    # retry destroy the first failing attempt's evidence, which is the exact
+    # #72 mistake (a retry is a tolerance, never a diagnosis, and the evidence
+    # has to survive to be read).
+    set dst $::lc_repo/build/ls-ci-[file rootname [file tail $::argv0]].exptrace.[pid].log
+    if {[catch {file copy -force $::lc_trace $dst} err]} {
+        lc_step "TRACE: preserve failed ($err); live at $::lc_trace"
+        return
+    }
+    lc_step "TRACE: preserved -> $dst ([file size $dst] bytes)"
+}
+
+# Every write to the guest goes through here. A `send` that fails is the
+# single most informative event in the #78 hunt, and it is exactly the one
+# expect throws away by default.
+# --- infrastructure-vs-guest classification (the #74 fail-open lesson) ------
+#
+# MEASURED 2026-07-27: a full-set run reported 30/32 scenarios as "deterministic
+# = a real regression, not a flake". Ground truth from the vm logs was that 84
+# of 177 boots never started at all -- QEMU refused with
+#   -device virtio-blk-device,drive=pool0: Failed to get "write" lock
+# because another QEMU still held build/fixtures/pool.img. EVERY scenario shares
+# that one fixture, and 12 gfx scenarios legitimately switch to accel=hvf, so a
+# single lingering VM cascades into a whole run of bogus failures that look
+# exactly like a guest regression.
+#
+# The harness must never present "I could not run" as "the guest is broken".
+# This records the VM's OWN words in the steps under an INFRA: marker; the
+# wrapper keys on it to classify the attempt.
+proc lc_vm_infra_check {} {
+    if {![info exists ::lc_vmlog] || ![file exists $::lc_vmlog]} return
+    if {[catch {
+        set f [open $::lc_vmlog r]
+        set d [read $f]
+        close $f
+    }]} return
+    foreach {pat what} {
+        {Failed to get "write" lock}  "another QEMU holds a drive image (stale VM? concurrent run?)"
+        {Failed to bind socket}       "a stale socket file blocks the QMP/serial bind"
+        {Address already in use}      "a port/socket is already taken by another VM"
+        {could not open disk image}   "a drive image is missing or unreadable"
+    } {
+        if {[string first $pat $d] >= 0} {
+            lc_step "INFRA: $what -- the VM never started, so this attempt says NOTHING about the guest"
+            foreach line [split $d "\n"] {
+                if {[string first "qemu-system" $line] >= 0 &&
+                    ([string first "Failed" $line] >= 0 ||
+                     [string first "could not" $line] >= 0)} {
+                    lc_step "INFRA: qemu: [string trim $line]"
+                }
+            }
+            return
+        }
+    }
+}
+
+proc lc_raw_send {bytes what} {
+    if {[catch {send -- $bytes} err]} {
+        lc_step "SEND-ERROR during \[$what\]: $err"
+        lc_step "SEND-ERROR errorCode: $::errorCode"
+        lc_step "SEND-ERROR errorInfo: [string map {\n { | }} $::errorInfo]"
+        lc_fail "send failed during '$what': $err"
+    }
+}
+
 proc lc_fail {msg} {
     lc_step "FAIL: $msg"
     # Evidence BEFORE the kill: the VM's process state at failure time splits
@@ -70,6 +176,11 @@ proc lc_fail {msg} {
             if {$d ne ""} { lc_step "bridge-at-fail: $d" }
         }
     }
+    # A VM that never started is NOT a scenario failure. Say so, loudly, in the
+    # steps -- the wrapper keys on the INFRA: marker to stop calling it "a real
+    # regression". See lc_vm_infra_check.
+    lc_vm_infra_check
+    lc_trace_preserve
     send_user "\nLS-CI FAIL: $msg\n"
     lc_vm_kill
     exit 1
@@ -106,7 +217,10 @@ proc lc_boot {} {
         : ([string equal $::tcl_platform(os) "Darwin"] ? "sock" : "pty")}]
     if {$transport eq "sock"} {
         set sock /tmp/thyla-serial-[pid].sock
-        set vmlog /tmp/thyla-vm-[pid].log
+        # Global: lc_vm_infra_check reads it on failure to tell a VM that never
+        # started from a guest that misbehaved.
+        set ::lc_vmlog /tmp/thyla-vm-[pid].log
+        set vmlog $::lc_vmlog
         file delete -force $sock
         lc_step "BOOT vm accel=$accel transport=sock timeout=${lc_boot_timeout}s"
         # server (wait) mode: qemu blocks until the bridge connects, so no
@@ -186,6 +300,7 @@ proc lc_boot {} {
         lc_step "BOOT spawn accel=$accel timeout=${lc_boot_timeout}s"
         spawn env THYLACINE_ACCEL=$accel $lc_repo/tools/run-vm.sh
     }
+    lc_trace_init
 }
 
 # Kill the socket-transport VM if one was started (no-op otherwise). The pty
@@ -225,7 +340,7 @@ proc lc_expect {pat phase} {
 # the editor accept it).
 proc lc_send {line} {
     lc_step "send: $line"
-    send "$line\r"
+    lc_raw_send "$line\r" "send: $line"
 }
 
 # Send a raw Ctrl-C (byte 0x03). The kernel console RX cooks it to the
@@ -233,7 +348,7 @@ proc lc_send {line} {
 # so 0x03 passes through to the guest. Used by the LS-5 scenarios.
 proc lc_ctrlc {} {
     lc_step "send Ctrl-C (0x03)"
-    send "\x03"
+    lc_raw_send "\x03" "Ctrl-C"
 }
 
 # Run `cmd` and assert its OUTPUT contains `expected` (exact). The editor does
@@ -257,7 +372,7 @@ proc lc_login {user pass} {
         eof                     { lc_fail "qemu exited before login prompt" }
     }
     lc_step "send user: $user"
-    send "$user\r"
+    lc_raw_send "$user\r" "login user"
     expect {
         -ex "password: "  { lc_step "password prompt" }
         -re {EXTINCTION:} { lc_extinction_fail "extinction at password prompt" }
@@ -265,7 +380,7 @@ proc lc_login {user pass} {
         eof               { lc_fail "qemu exited at password prompt" }
     }
     lc_step "send password (masked)"
-    send "$pass\r"
+    lc_raw_send "$pass\r" "login password"
     expect {
         -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
         -ex "login incorrect"         { lc_fail "auth rejected for $user" }
@@ -285,7 +400,9 @@ proc lc_quit {} {
     lc_send "exit"
     sleep 1
     lc_step "quit qemu (Ctrl-A x)"
-    send "\001x"
+    # NOT lc_raw_send: at teardown the channel is expected to be going away,
+    # so a write error here is benign and must not turn a PASS into a FAIL.
+    catch {send -- "\001x"}
     expect {
         eof     { lc_step "EOF clean" }
         timeout { lc_step "EOF timeout (wrapper will reap qemu)" }

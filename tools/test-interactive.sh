@@ -126,6 +126,7 @@ echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS
 # retry is a TOLERANCE, never a diagnosis. If attempts start failing again,
 # read the preserved evidence -- do not reach for "host timing".
 fails=0
+infra_fails=0
 attempts="${LS_CI_ATTEMPTS:-3}"
 for scen in "${scenarios[@]}"; do
     name="$(basename "$scen" .exp)"
@@ -174,6 +175,17 @@ for scen in "${scenarios[@]}"; do
         [[ $attempt -lt $attempts ]] && echo "    retrying (an unexplained early exit -- see the preserved evidence; a retry is NOT a diagnosis)..." >&2
     done
     if [[ $passed -ne 1 ]]; then
+        # An attempt whose VM never STARTED says nothing about the guest, and
+        # calling it "a real regression" is failing open (#74). lib.exp records
+        # QEMU's own refusal under an INFRA: marker; surface that verdict
+        # instead, and count it separately.
+        if grep -qa "^INFRA:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps "$steps" 2>/dev/null; then
+            echo "    INFRA-FAIL: $name -- the VM never started; this is a HARNESS/environment fault, NOT a guest regression:" >&2
+            grep -ha "^INFRA:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps "$steps" 2>/dev/null | sort -u | sed 's/^/        /' >&2
+            infra_fails=$((infra_fails + 1))
+            fails=$((fails + 1))
+            continue
+        fi
         echo "    FAIL: $name -- all $attempts attempts failed (deterministic = a real regression, not a flake)" >&2
         echo "    --- steps ($steps; last attempt) ---" >&2
         cat "$steps" >&2 2>/dev/null || true
@@ -186,7 +198,13 @@ for scen in "${scenarios[@]}"; do
 done
 
 if [[ $fails -gt 0 ]]; then
-    echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed." >&2
+    if [[ $infra_fails -gt 0 ]]; then
+        echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed" \
+             "($infra_fails of them INFRA: the VM never started -- fix the environment," \
+             "then re-run; those results say NOTHING about the guest)." >&2
+    else
+        echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed." >&2
+    fi
     exit 1
 fi
 echo "==> LS-CI: PASS -- all ${#scenarios[@]} scenario(s)."
