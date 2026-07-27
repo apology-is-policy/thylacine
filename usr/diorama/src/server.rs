@@ -50,12 +50,12 @@
 //   /self/exe        file     its executable's path   <- the V-4a gate
 //   /self/cmdline    file     argv[0], NUL-terminated (Linux shape)
 //   /self/status     file     Linux-shaped Name/Pid/Uid/Gid/Threads/VmRSS
+//   /self/cwd        file     the working directory (V-4b-1)
 //   /meminfo         file     MemTotal/MemFree in kB
 //   /uptime          file     "<up> <idle>" seconds
 //
 // Deferred to V-4b with their kernel prerequisites (VIVARIUM section 6.7):
-// /self/maps (the VMA list is unexposed), /self/cwd (Territory has dot_path but
-// devproc does not surface it), /proc/<pid>/... , /cpuinfo, /stat.
+// /self/maps (the VMA list is unexposed), /proc/<pid>/... , /cpuinfo, /stat.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
@@ -93,9 +93,10 @@ const N_SELF: u64 = 1;
 const N_SELF_EXE: u64 = 2;
 const N_SELF_CMDLINE: u64 = 3;
 const N_SELF_STATUS: u64 = 4;
-const N_MEMINFO: u64 = 5;
-const N_UPTIME: u64 = 6;
-const N_COUNT: u64 = 7;
+const N_SELF_CWD: u64 = 5;
+const N_MEMINFO: u64 = 6;
+const N_UPTIME: u64 = 7;
+const N_COUNT: u64 = 8;
 
 struct Node {
     name: &'static [u8],
@@ -109,6 +110,7 @@ static NODES: [Node; N_COUNT as usize] = [
     Node { name: b"exe",     parent: N_SELF, is_dir: false },
     Node { name: b"cmdline", parent: N_SELF, is_dir: false },
     Node { name: b"status",  parent: N_SELF, is_dir: false },
+    Node { name: b"cwd",     parent: N_SELF, is_dir: false },
     Node { name: b"meminfo", parent: N_ROOT, is_dir: false },
     Node { name: b"uptime",  parent: N_ROOT, is_dir: false },
 ];
@@ -357,6 +359,21 @@ fn render_self_status(peer: &TSrvPeerInfo, r: &mut Render) {
     }
 }
 
+/// /self/cwd -- the caller's current working directory, bare (no NUL, no
+/// newline), from the kernel's /proc/<pid>/cwd (V-4b-1). Never empty for a live
+/// peer: an un-chdir'd Proc reads "/".
+fn render_self_cwd(peer: &TSrvPeerInfo, r: &mut Render) {
+    if peer.alive == 0 {
+        return; // dead peer -> empty, never a stale answer
+    }
+    let mut pbuf = [0u8; 64];
+    let n = native_proc_path(peer.pid, b"cwd", &mut pbuf);
+    let mut cbuf = [0u8; RENDER_MAX];
+    if let Some(got) = read_native(&pbuf[..n], &mut cbuf) {
+        r.push(&cbuf[..got]);
+    }
+}
+
 /// /meminfo -- MemTotal/MemFree in kB, from /ctl/memory's page counts.
 fn render_meminfo(r: &mut Render) {
     let mut buf = [0u8; RENDER_MAX];
@@ -424,6 +441,7 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         N_SELF_EXE => render_self_exe(peer, &mut r),
         N_SELF_CMDLINE => render_self_cmdline(peer, &mut r),
         N_SELF_STATUS => render_self_status(peer, &mut r),
+        N_SELF_CWD => render_self_cwd(peer, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
         _ => {}
@@ -861,6 +879,9 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(N_SELF, b"exe") != Some(N_SELF_EXE) {
         return Err("walk /self/exe");
     }
+    if walk_child(N_SELF, b"cwd") != Some(N_SELF_CWD) {
+        return Err("walk /self/cwd");
+    }
     if walk_child(N_ROOT, b"meminfo") != Some(N_MEMINFO) {
         return Err("walk /meminfo");
     }
@@ -931,6 +952,9 @@ pub fn selftest() -> Result<(), &'static str> {
     }
     if !render(N_SELF_CMDLINE, &dead).bytes().is_empty() {
         return Err("dead peer served a cmdline");
+    }
+    if !render(N_SELF_CWD, &dead).bytes().is_empty() {
+        return Err("dead peer served a cwd");
     }
 
     // --- uptime is always renderable and monotonic-shaped

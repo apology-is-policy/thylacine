@@ -65,6 +65,7 @@ void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
+void test_devproc_read_cwd(void);            // VIVARIUM V-4b-1
 // prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
 void test_devproc_sched_gate_predicate(void);
 void test_devproc_sched_read_gated(void);
@@ -1930,4 +1931,26 @@ void test_devproc_read_exe(void) {
     TEST_EXPECT_EQ(path_total_allocated() - alloc0,
                    path_total_freed() - freed0,
                    "V-4a-0: exe Path refs balance (no leak, no double-free)");
+}
+
+// VIVARIUM V-4b-1: /proc/<pid>/cwd -- the Territory's cwd, the source the diorama
+// re-presents as Linux's /proc/self/cwd. Unlike exe this is never empty for a
+// live Proc: a NULL dot_path means "/" (territory_getdot's contract), so the
+// Linux consumer always gets a usable path. Bare bytes, like exe.
+void test_devproc_read_cwd(void) {
+    // kproc always exists and has a territory, so its cwd is renderable and --
+    // never having chdir'd -- is the "/" default. That pins BOTH the wiring and
+    // the never-empty property in one read.
+    struct Spoor *c = open_pidfile_for(0, "cwd", 0);
+    TEST_ASSERT(c != NULL, "open /proc/0/cwd");
+    char buf[64];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
+    long n = devproc.read(c, buf, (long)sizeof(buf), 0);
+    spoor_clunk(c);
+
+    TEST_EXPECT_EQ(n, 1L, "V-4b-1: an un-chdir'd Proc's cwd is \"/\" (1 byte)");
+    TEST_ASSERT(n == 1 && buf[0] == '/',
+                "V-4b-1: cwd renders \"/\" -- bare, no NUL, no newline");
+    // Revert-probe anchor: appending a terminator makes n == 2 and fails above.
+    TEST_ASSERT(buf[1] == (char)0xAA, "V-4b-1: nothing written past the path");
 }

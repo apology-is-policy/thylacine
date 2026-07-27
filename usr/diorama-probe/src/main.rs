@@ -115,7 +115,17 @@ pub extern "C" fn rs_main() -> i64 {
         fail("status Name");
     }
 
-    // 6. meminfo + uptime render from the system-wide native sources.
+    // 6. cwd (V-4b-1): never empty for a live peer -- an un-chdir'd Proc is "/".
+    let mut wbuf = [0u8; 128];
+    let wn = match read_all(b"/dio/self/cwd", &mut wbuf) {
+        Some(n) => n,
+        None => fail("open /dio/self/cwd"),
+    };
+    if wn == 0 || wbuf[0] != b'/' {
+        fail("cwd shape");
+    }
+
+    // 7. meminfo + uptime render from the system-wide native sources.
     let mut mbuf = [0u8; 256];
     let mn = match read_all(b"/dio/meminfo", &mut mbuf) {
         Some(n) => n,
@@ -133,7 +143,7 @@ pub extern "C" fn rs_main() -> i64 {
         fail("uptime shape");
     }
 
-    // 7. READ-ONLY: opening any diorama file for write must be refused. This is
+    // 8. READ-ONLY: opening any diorama file for write must be refused. This is
     //    the property that keeps the whole surface small, so it is worth a gate.
     const T_OWRITE: u32 = 1;
     let w = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio/self/exe".as_ptr(), 13, T_OWRITE) };
@@ -142,6 +152,6 @@ pub extern "C" fn rs_main() -> i64 {
         fail("write-open was ALLOWED (read-only violated)");
     }
 
-    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+meminfo+uptime OK; write refused)\n");
+    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+meminfo+uptime OK; write refused)\n");
     unsafe { t_exits(0) }
 }

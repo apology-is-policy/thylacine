@@ -86,6 +86,7 @@ enum {
     // took subkind 12; the merge kept SCHED at 12 (already landed in main) and
     // moved EXE to 13. Subkinds are kernel-internal qid encoding, not ABI.
     PQS_EXE      = 13,       // /proc/<pid>/exe              (QTFILE; VIVARIUM V-4a-0; RO, the executable's namespace name)
+    PQS_CWD      = 14,       // /proc/<pid>/cwd              (QTFILE; VIVARIUM V-4b-1; RO, the Territory's cwd)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -123,6 +124,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "kregs",   PQS_KREGS   },
     { "kstack",  PQS_KSTACK  },
     { "exe",     PQS_EXE     },
+    { "cwd",     PQS_CWD     },
     { "sched",   PQS_SCHED   },
 };
 
@@ -387,6 +389,29 @@ static size_t format_ns(struct Proc *p, char *buf, size_t cap) {
     return (size_t)territory_format_ns(p->territory, buf, (u64)cap);
 }
 
+// cwd: the Territory's current working directory (VIVARIUM V-4b-1) -- the source
+// the diorama re-presents as Linux's /proc/self/cwd. Like exe, BARE bytes: no NUL
+// and no newline, because readlink("/proc/self/cwd") yields a bare path.
+//
+// A thin call into territory_getdot, which owns the dot_lock discipline (the
+// format_ns / territory_format_ns shape -- the lock stays in territory.c). The
+// nested g_proc_table_lock -> dot_lock acquire is acyclic for the same reason
+// ns_lock is: dot_lock is a documented LEAF guarding only dot_path, and nothing
+// held under it takes g_proc_table_lock. The resolve is bounded CPU under the
+// leaf -- no alloc, no block.
+//
+// NULL dot_path renders "/" (territory_getdot's own contract), so unlike exe this
+// file is never empty for a live Proc. A NULL territory (a Proc torn down past
+// its territory_unref) renders empty rather than faulting.
+static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
+    if (!p->territory) return 0;
+    int n = territory_getdot(p->territory, buf, (u64)cap);
+    if (n < 0) return 0;                 // buffer too small -> empty, never partial
+    // territory_getdot NUL-terminates; the file is the bare path, so the total
+    // EXCLUDES that terminator (it is already not counted in n).
+    return (size_t)n;
+}
+
 // exe: the namespace name of the running executable (VIVARIUM V-4a-0) -- the
 // source the diorama re-presents as Linux's /proc/self/exe. NOT NUL- or
 // newline-terminated: a path is a byte string and Linux's readlink("/proc/self/
@@ -604,7 +629,8 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:
-    case PQS_EXE:     return 0444u;   // V-4a-0: an info file, same posture as ns
+    case PQS_EXE:
+    case PQS_CWD:     return 0444u;   // V-4a-0 / V-4b-1: info files, ns's posture
     case PQS_PID_DIR: return 0555u;
     default:          return 0u;
     }
@@ -817,6 +843,7 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
+    case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
         r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
@@ -865,7 +892,8 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // formats the readable file kinds.
     if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) return -1;
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
-        kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED) return -1;
+        kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED &&
+        kind != PQS_CWD) return -1;
 
     // prowl-3b (OQ-4): capture the reading Proc BEFORE the lock so the gated
     // PQS_SCHED kind can be authorized against the target found inside the walk.

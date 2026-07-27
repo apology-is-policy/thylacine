@@ -458,7 +458,8 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4a-0** | **LANDED.** The kernel prerequisite §6.5 found: `Proc.exe_path` + `/proc/<pid>/exe` | `/proc/<ptyfs-pid>/exe` reads `/bin/ptyfs` in-guest (joey, boot-fatal) |
 | **V-4a-0b** | **LANDED.** The second prerequisite §6.6 found: `srv_peer_info.pid` (how the server resolves `self`) | a live peer snapshot reports its pid; a dead one fail-closes to 0 |
 | **V-4a** | **LANDED.** `usr/diorama` + Tier 1 + the selftest + `/bin/diorama-probe` (as-built: `docs/reference/141-diorama.md`) | **MET** -- the probe mounts the diorama itself and reads `/self/exe` back as `/bin/diorama-probe` |
-| **V-4b** | Tier 2 (per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
+| **V-4b-1** | **LANDED.** `/self/cwd` + its kernel source `/proc/<pid>/cwd` | the probe reads a non-empty absolute cwd in-guest |
+| **V-4b** | the rest of Tier 2 (`/self/maps` + per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
 | **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
@@ -548,13 +549,18 @@ structural.
 
 Expect the question again, at least at:
 
-- `/proc/self/cwd` — the Territory *has* `dot_path` (LS-4), but devproc does not
-  expose it. Same shape as `exe`: a renderer, not a new mechanism.
+- `/proc/self/cwd` — **DONE at V-4b-1**, and it played out exactly as predicted: a
+  renderer, not a new mechanism. The Territory already had `dot_path` and
+  `territory_getdot` already owned the `dot_lock` discipline, so `/proc/<pid>/cwd`
+  is a thin call into it (the `format_ns` → `territory_format_ns` shape), and the
+  diorama re-presents it unchanged. No new kernel state at all — cheaper even than
+  `exe`, which had to *grow* a field.
 - `/proc/self/maps` — the VMA list is likewise unexposed. Bigger, because the
-  format carries permissions and backing-file names.
+  format carries permissions and backing-file names, and because a VMA walk needs
+  its own lock discipline (`vma_lock`) rather than an existing accessor.
 
-Both are Tier 2 / **V-4b**, and both should be budgeted as *kernel + userspace*,
-not userspace alone.
+Both were Tier 2 / **V-4b**, and the prediction to budget them as *kernel +
+userspace* held for both — `cwd` just turned out to be the cheap end of that.
 
 ---
 
