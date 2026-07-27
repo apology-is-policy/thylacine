@@ -69,6 +69,23 @@ if [[ ! -f "$POOL" ]]; then
     "$REPO_ROOT/tools/build.sh" pool
 fi
 
+# --- relay preflight (host-only, ~4s, no QEMU) ---
+# serial-bridge.py is the carrier EVERY scenario below depends on, and its two
+# load-bearing properties (never back-pressure the guest; emit a DISCRIMINATING
+# exit record) are provable without booting anything. Left unrun they rot: the
+# exit-record check exists precisely because `stdout-broken` was read as a
+# diagnosis for three sessions of #78. A harness that fails OPEN is the #74
+# lesson, so this runs first and hard-fails -- a broken relay would otherwise
+# surface as a mysterious guest failure in every scenario.
+BRIDGE_TEST="$SCEN_DIR/test-serial-bridge.py"
+if [[ -f "$BRIDGE_TEST" ]] && command -v python3 >/dev/null 2>&1; then
+    echo "==> preflight: serial-bridge relay properties"
+    if ! python3 "$BRIDGE_TEST"; then
+        echo "==> FAIL: serial-bridge relay preflight -- not booting anything." >&2
+        exit 1
+    fi
+fi
+
 # --- scenario selection ---
 scenarios=()
 if [[ $# -gt 0 ]]; then

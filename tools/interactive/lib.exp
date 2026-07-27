@@ -145,6 +145,22 @@ proc lc_boot {} {
         # Together they split "the bridge died" from "the guest died" -- expect
         # sees the same bare EOF either way, so without these two the cause is
         # unknowable and the temptation is to guess.
+        #
+        # HOW TO READ `reason=` (#78 -- the record is now discriminating; the
+        # relay header has the full rationale):
+        #   stdout-broken       expect had ALREADY closed stdin -> it was tearing
+        #                       down. This is the NORMAL end-of-session reason
+        #                       (a passing scenario ends exactly this way), so on
+        #                       a failure it is nearly contentless -- do NOT read
+        #                       it as a cause. It was read as one for three
+        #                       sessions of #78.
+        #   stdout-broken-live  expect was ALIVE (stdin still open) yet its read
+        #                       end was gone. THIS is the anomaly worth chasing.
+        #   socket-eof          QEMU closed the serial -- the guest really ended.
+        #   spool-overflow      a genuinely wedged reader (64 MiB undelivered).
+        # The counters (in/out/spool/idle_in/idle_out/up) size the burst the cut
+        # landed in, so the buffer-pressure correlation is checkable from the
+        # record rather than re-derived by hand each time.
         set ::lc_ncerr /tmp/thyla-ncerr-[pid].log
         file delete -force $::lc_ncerr
         set bridge $lc_repo/tools/interactive/serial-bridge.py

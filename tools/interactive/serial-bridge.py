@@ -46,12 +46,27 @@
 # Exit 0 on either endpoint closing normally (socket EOF = guest serial gone;
 # stdout closed = expect done). Diagnostics + the exit code go to stderr (the
 # lib.exp #41 instrument reads it as `bridge exit=<rc> reason=<why>`).
+#
+# WHY the exit record carries counters and splits `stdout-broken` two ways:
+#   `stdout-broken` is ALSO the normal end-of-session reason -- when a scenario
+#   passes, expect exits, its read end closes, and the relay's next write EPIPEs.
+#   So the bare string is ambiguous by construction and says almost nothing about
+#   a FAILING attempt; it was nonetheless read as a diagnosis across three
+#   sessions of #78. The discriminator the relay already knows but used to throw
+#   away is whether expect had closed STDIN first:
+#     - stdin EOF seen  -> expect is tearing down    -> `stdout-broken` (benign)
+#     - stdin still open -> expect is ALIVE and reading, yet its read end is gone
+#                           -> `stdout-broken-live` (the #78 anomaly)
+#   The counters (bytes moved, spool depth, idle gaps) size the burst the cut
+#   landed in, so the buffer-pressure correlation can be checked from the record
+#   instead of re-derived by hand.
 
 import errno
 import os
 import select
 import socket
 import sys
+import time
 
 PARK_S = 0.2      # bounded park: re-check levels ~5x/s (the #66 lost-wakeup floor)
 CHUNK = 65536
@@ -63,11 +78,35 @@ FLUSH_TRIES = 50  # bounded tail-flush on socket EOF (never hangs on a gone read
 
 REASON = "unset"  # the exit-path witness (logged to stderr for the #41 instrument)
 
+# Exit-record counters (stderr, alongside REASON). Module-level so every exit
+# path reports them without threading state through each return.
+STATS = {
+    "stdin_eof": 0,   # 1 once expect closed stdin (its teardown signal)
+    "in": 0,          # bytes drained from the guest serial socket
+    "out": 0,         # bytes delivered to expect
+    "spool": 0,       # bytes still undelivered at exit
+    "t0": 0.0,        # start (monotonic)
+    "t_in": 0.0,      # last socket data
+    "t_out": 0.0,     # last successful stdout write
+}
+
 
 def _done(reason: str) -> int:
     global REASON
     REASON = reason
     return 0
+
+
+def _stats_line() -> str:
+    now = time.monotonic()
+    up = now - STATS["t0"] if STATS["t0"] else 0.0
+    # "never" distinguishes "no data ever" from "data, then a gap" -- a cut with
+    # idle_in=never means the relay was starved, not that the reader vanished.
+    idle_in = f"{now - STATS['t_in']:.2f}" if STATS["t_in"] else "never"
+    idle_out = f"{now - STATS['t_out']:.2f}" if STATS["t_out"] else "never"
+    return (f"stdin_eof={STATS['stdin_eof']} in={STATS['in']} out={STATS['out']} "
+            f"spool={STATS['spool']} idle_in={idle_in} idle_out={idle_out} "
+            f"up={up:.2f}")
 
 
 def main() -> int:
@@ -89,8 +128,10 @@ def main() -> int:
     spool = bytearray()  # serial->stdout bytes awaiting a slow expect reader
     watch_in = [sock.fileno(), stdin_fd]
     sock_open = True
+    STATS["t0"] = time.monotonic()
 
     while True:
+        STATS["spool"] = len(spool)
         watch_out = [stdout_fd] if spool else []
         try:
             readable, _, _ = select.select(
@@ -118,6 +159,8 @@ def main() -> int:
                     sock_open = False  # QEMU closed the serial (guest gone)
                     break
                 spool += data
+                STATS["in"] += len(data)
+                STATS["t_in"] = time.monotonic()
                 if len(spool) > SPOOL_CAP:
                     return _done("spool-overflow")  # a genuinely-wedged reader
                 if len(data) < CHUNK:
@@ -131,10 +174,19 @@ def main() -> int:
                 n = os.write(stdout_fd, spool)
                 if n:
                     del spool[:n]
+                    STATS["out"] += n
+                    STATS["t_out"] = time.monotonic()
             except BlockingIOError:
                 pass  # pipe full: keep the spool; wait for writable
             except BrokenPipeError:
-                return _done("stdout-broken")  # expect closed its read end
+                # expect closed its read end. Split the benign teardown from the
+                # #78 anomaly: a teardown closes stdin too, but this loop may not
+                # have polled it yet, so re-check once before judging.
+                STATS["spool"] = len(spool)
+                if not STATS["stdin_eof"] and _stdin_at_eof(stdin_fd):
+                    STATS["stdin_eof"] = 1
+                return _done("stdout-broken" if STATS["stdin_eof"]
+                             else "stdout-broken-live")
 
         # 3. Socket EOF: flush the tail so the session's last bytes are not lost.
         if not sock_open:
@@ -149,6 +201,7 @@ def main() -> int:
             if keys == b"":
                 # expect closed stdin (spawn teardown): stop watching it, keep
                 # relaying serial->stdout until the socket ends. NOT an exit.
+                STATS["stdin_eof"] = 1
                 if stdin_fd in watch_in:
                     watch_in.remove(stdin_fd)
             elif keys:
@@ -171,13 +224,29 @@ def _flush_tail(spool: bytearray, stdout_fd: int, reason: str) -> int:
             n = os.write(stdout_fd, spool)
             if n:
                 del spool[:n]
+                STATS["out"] += n
+                STATS["t_out"] = time.monotonic()
                 continue
         except BlockingIOError:
             pass
         except BrokenPipeError:
             break  # reader gone -- nothing more we can deliver
         select.select([], [stdout_fd], [], PARK_S)  # wait for the pipe to drain
+    STATS["spool"] = len(spool)  # >0 here means the tail was NOT delivered
     return _done(reason)
+
+
+def _stdin_at_eof(stdin_fd: int) -> bool:
+    # One-shot non-blocking probe: readable AND read()==b"" means expect closed
+    # stdin. Only ever called on the exit path, so consuming a byte here cannot
+    # affect the session. An unusable stdin counts as gone.
+    try:
+        r, _, _ = select.select([stdin_fd], [], [], 0)
+        if not r:
+            return False
+        return os.read(stdin_fd, 1) == b""
+    except OSError:
+        return True
 
 
 def _send_all(sock: socket.socket, data: bytes) -> None:
@@ -199,5 +268,5 @@ if __name__ == "__main__":
     except BaseException as e:  # noqa: BLE001 -- the instrument must see everything
         rc = 1
         REASON = f"exception:{type(e).__name__}:{e}"
-    sys.stderr.write(f"bridge exit={rc} reason={REASON}\n")
+    sys.stderr.write(f"bridge exit={rc} reason={REASON} {_stats_line()}\n")
     sys.exit(rc)
