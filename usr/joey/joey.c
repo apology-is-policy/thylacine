@@ -4843,10 +4843,10 @@ int main(void) {
                     }
                 }
 
-                // Clade CL-4c: the on-device device-toolchain gate (sibling of
-                // the Go-4c block above; same post-pivot pool scope). Gated on
-                // /clade existing (THYLACINE_BAKE_CLADE); a normal boot skips it.
-                (void)clade_gate();
+                // (The clade CL-4 toolchain gate runs unconditionally further
+                // down, right before boot-complete -- see there. It must NOT be
+                // nested here: this region is skipped on a BAKE_GOROOT=0 boot,
+                // which is exactly the clade-only configuration.)
             }
 
             // net-2c-1: mount netd's /net on the pivoted root. netd (warden-
@@ -7141,12 +7141,39 @@ int main(void) {
         }
     }
 
-    // CL-4 DIAG (throwaway): run the clade gate here UNCONDITIONALLY (guarded
-    // only by clade_gate's own /clade check). The 4777 call is nested in the
-    // goroot-present region, which a BAKE_GOROOT=0 clade boot skips; this proven-
-    // every-boot spot (right before boot_complete, joey still console-attached)
-    // makes the gate run on a clade-only pool.
-    (void)clade_gate();
+    // CL-4: F2's in-guest proof. fstat on a /dev fd must SUCCEED and report a
+    // character device. The #57b namespace door mints devdev Spoors (not
+    // devcons), so before devdev_stat_native every /dev/* fd failed fstat --
+    // and clang's FixupStandardFileDescriptors treats a non-EBADF fstat failure
+    // as fatal, so `clang++ < /dev/null` died before emitting anything. Runs on
+    // every boot, clade or not, since /dev is always mounted.
+    {
+        long dn = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/null", 9, T_OREAD);
+        if (dn < 0) {
+            t_putstr("joey: CL-4 PROBE open(/dev/null) FAILED\n");
+            return 1;
+        }
+        struct t_stat dst = {0};
+        long dr = t_fstat(dn, &dst);
+        (void)t_close(dn);
+        // 0170000 = S_IFMT, 0020000 = S_IFCHR (libt does not export these).
+        if (dr != 0 || (dst.mode & 0170000u) != 0020000u) {
+            t_putstr("joey: CL-4 PROBE fstat(/dev/null) FAILED (rc/mode)\n");
+            return 1;
+        }
+        t_putstr("joey: CL-4 /dev fstat PROBE OK\n");
+    }
+
+    // CL-4: the on-device device-toolchain gate. BOOT-FATAL -- a toolchain
+    // regression must fail the boot, not merely print. clade_gate() returns 0
+    // when /clade is absent, so a normal (non-BAKE_CLADE) boot is unaffected.
+    // Placed here, before boot-complete, because it is the one spot every
+    // configuration reaches (the goroot region above is skipped on a
+    // clade-only pool) and joey is still console-attached.
+    if (clade_gate() != 0) {
+        t_putstr("joey: clade CL-4 gate FAILED\n");
+        return 1;
+    }
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
     // prints "Thylacine boot OK" here (the banner no longer rides joey's exit;
