@@ -452,6 +452,7 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | # | Contents | Gate |
 |---|---|---|
 | **V-4a-0** | **LANDED.** The kernel prerequisite §6.5 found: `Proc.exe_path` + `/proc/<pid>/exe` | `/proc/<ptyfs-pid>/exe` reads `/bin/ptyfs` in-guest (joey, boot-fatal) |
+| **V-4a-0b** | **LANDED.** The second prerequisite §6.6 found: `srv_peer_info.pid` (how the server resolves `self`) | a live peer snapshot reports its pid; a dead one fail-closes to 0 |
 | **V-4a** | the `usr/diorama` crate (ptyfs skeleton) + Tier 1 + the selftest + joey mount + a boot probe | `/proc/self/exe` reads the running binary's path in-guest |
 | **V-4b** | Tier 2 (per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
 | **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
@@ -497,11 +498,59 @@ reading the just-spawned ptyfs's `exe` back as `/bin/ptyfs` — the E2E leg the 
 test structurally cannot cover, since it drives `format_exe` with a synthetic Path
 and so cannot prove a *real* spawn records what `stalk` resolved.
 
-**The lesson for the rest of the arc**: when a diorama file has no native source,
-the answer is to give the kernel one, never to let the diorama invent it. Expect
-the same question at `/proc/self/cwd` (the Territory has `dot_path`, but devproc
-does not expose it) and `/proc/self/maps` (the VMA list is likewise unexposed) —
-both Tier 2, both V-4b.
+### 6.6 The second prerequisite — how the diorama knows who `self` is (V-4a-0b, LANDED)
+
+`/proc/self/…` is not a file, it is a *question about the caller*. A 9P server
+answers it by identifying its peer, and Thylacine's channel for that is
+`SYS_SRV_PEER` (`struct srv_peer_info`, CORVUS-DESIGN §6.3 / C-22) — kernel-stamped,
+never client-supplied, and gated to the service's own poster.
+
+But the struct reported `stripes` (an opaque per-Proc identity tag), `caps`,
+`principal_id`, `primary_gid`, `console`, `flags` — **and no pid**. `stripes` has
+no userspace pid mapping (nothing renders it in `/proc` or `/ctl`), so the diorama
+could learn *which principal* was talking to it but never *which process* — and
+therefore could not resolve `self` to a `/proc/<pid>` at all.
+
+Taking the pid from the client instead is precisely the §6.2 failure mode, so the
+fix is again kernel-side, and again nearly free: the struct's `_reserved` u32 at
+offset 36 is exactly the right size. `srv_peer_info.pid` fills it **in place** —
+same size, same offsets, so it is an append rather than an ABI break (0 was what a
+pre-V-4a consumer read there, and 0 remains the "unknown" value). It rides the same
+alive-gated `g_proc_table_lock` walk as `caps`/`principal_id`, so a dead or reaped
+peer fail-closes to 0 rather than reporting a pid that a *reused* table entry now
+owns.
+
+Disclosure-neutral: `/ctl/procs` already lists every pid to everyone, ungated, and
+the poster gate means the pid reaches only the server the peer chose to connect to.
+
+Proven by `proc.identity_peer_snapshot_by_stripes` (the pid on a live match; the
+out-param untouched on both no-match paths, so a caller cannot mistake "no match"
+for "the peer is pid 0" — which is kproc).
+
+*(The pouch `struct pouch_srv_peer_info` mirror keeps calling the slot `_reserved`
+and ignores it. That is correct, not stale: the size is unchanged at 40, so nothing
+overflows — cf. the #100 `t_stat` lesson, where the size DID change and the stale
+mirrors overflowed at runtime.)*
+
+### 6.7 The lesson for the rest of the arc
+
+Two of Tier 1's requirements turned out to need kernel fields, in a sub-chunk
+specced as pure userspace. That is not an accident, it is §6.2 working as intended:
+**when a diorama file has no native source, the answer is to give the kernel one —
+never to let the diorama invent it, and never to let its client supply it.** A
+compatibility shim that starts sourcing answers outside the native surface has
+stopped being a reformatter and become an authority, and I-43 stops being
+structural.
+
+Expect the question again, at least at:
+
+- `/proc/self/cwd` — the Territory *has* `dot_path` (LS-4), but devproc does not
+  expose it. Same shape as `exe`: a renderer, not a new mechanism.
+- `/proc/self/maps` — the VMA list is likewise unexposed. Bigger, because the
+  format carries permissions and backing-file names.
+
+Both are Tier 2 / **V-4b**, and both should be budgeted as *kernel + userspace*,
+not userspace alone.
 
 ---
 

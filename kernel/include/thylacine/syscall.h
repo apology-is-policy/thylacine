@@ -2035,7 +2035,23 @@ struct srv_peer_info {
                        //     role; 0 when alive == 0). Other bits reserved 0;
                        //     APPEND-ONLY — consumers scan by bit, unknown-clear
                        //     means absent (the AT_HWCAP discipline).
-    u32 _reserved;     // @36 A-1a: explicit pad to 40; reserved, 0
+    u32 pid;           // @36 VIVARIUM V-4a-0b: peer's pid; 0 when alive == 0.
+                       //     Fills the former A-1a reserved pad -- same size,
+                       //     same offsets, so this is an APPEND-in-place, not
+                       //     an ABI break (a pre-V-4a consumer read 0 here and
+                       //     0 remains the "unknown" value). Rides the same
+                       //     alive-gated walk as caps/principal_id, so a dead
+                       //     peer fail-closes to 0 rather than reporting a pid
+                       //     that a REUSED table entry now owns. The diorama
+                       //     needs it to answer /proc/self/* for its caller
+                       //     (docs/VIVARIUM.md section 6.6): `stripes` is an
+                       //     opaque tag with no userspace pid mapping, so
+                       //     without this a 9P server cannot tell WHICH Proc
+                       //     is talking to it -- only which principal.
+                       //     Disclosure-neutral: /ctl/procs already lists every
+                       //     pid to everyone, and the poster gate means the pid
+                       //     reaches only the server the peer chose to connect
+                       //     to.
 };
 
 // cfg-3 (AURORA-CONFIG.md section 3.3): srv_peer_info.flags bits. The
@@ -2065,8 +2081,16 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, primary_gid) == 28,
                "srv_peer_info.primary_gid at ABI offset 28");
 _Static_assert(__builtin_offsetof(struct srv_peer_info, flags) == 32,
                "srv_peer_info.flags at ABI offset 32");
-_Static_assert(__builtin_offsetof(struct srv_peer_info, _reserved) == 36,
-               "srv_peer_info._reserved at ABI offset 36");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, pid) == 36,
+               "srv_peer_info.pid at ABI offset 36 (VIVARIUM V-4a-0b: fills the "
+               "former A-1a _reserved pad in place -- same size, same offsets, "
+               "so 0 stays the 'unknown' value a pre-V-4a consumer read there)");
+_Static_assert(sizeof(struct srv_peer_info) == 40,
+               "srv_peer_info stays 40 bytes across the V-4a-0b pid append -- "
+               "the libt / libthyla-rs mirrors are pinned to the same size, and "
+               "a growth here silently overflows every caller's stack buffer "
+               "(the #100 t_stat lesson: a per-mirror size assert proves only "
+               "THAT mirror's size, never that it matches the kernel's).");
 
 // SYS_FSTAT result — the Thylacine-native file metadata record (P6-pouch-
 // stratumd-boot sub-chunk 16b-gamma). Plan-9-shaped at the core (qid carries

@@ -1692,6 +1692,7 @@ struct peer_snapshot_ctx {
     u32    principal_id;  // OUT — A-1a: the peer's durable identity
     u32    primary_gid;   // OUT — A-1a: the peer's primary group
     bool   renderer;      // OUT — cfg-3: matched Proc IS g_console_renderer
+    int    pid;           // OUT — V-4a-0b: the peer's pid (the diorama's `self`)
     bool   found;         // OUT — set once an ALIVE Proc matched
 };
 
@@ -1709,6 +1710,10 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
         // (proc_for_each holds it across the walk) — a match implies a live
         // holder; compare-only, never a deref.
         c->renderer     = (g_console_renderer == p);
+        // V-4a-0b: the pid rides the SAME alive-gated snapshot as caps +
+        // identity, so a dead/reaped peer fail-closes to 0 -- never a stale
+        // pid a server could resolve against a REUSED table entry.
+        c->pid          = p->pid;
         c->found        = true;
         return 1;                 // first match wins — stop the walk
     }
@@ -1717,7 +1722,7 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
 
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                    u32 *principal_out, u32 *primary_gid_out,
-                                   bool *renderer_out) {
+                                   bool *renderer_out, int *pid_out) {
     // 0 is the reserved fail-closed sentinel; no Proc is ever stamped 0,
     // so it can never match. Reject it before the scan. Out-params may be
     // NULL — the caller takes only what it needs.
@@ -1728,6 +1733,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                      .principal_id = PRINCIPAL_NONE,
                                      .primary_gid  = GID_NONE,
                                      .renderer     = false,
+                                     .pid          = 0,
                                      .found        = false };
     // proc_for_each holds g_proc_table_lock across the whole DFS, so the
     // callback's "is this Proc ALIVE" test and its field reads are one
@@ -1739,6 +1745,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
     if (principal_out)   *principal_out   = ctx.principal_id;
     if (primary_gid_out) *primary_gid_out = ctx.primary_gid;
     if (renderer_out)    *renderer_out    = ctx.renderer;
+    if (pid_out)         *pid_out         = ctx.pid;
     return true;
 }
 
@@ -1747,7 +1754,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
 // specs/corvus.tla ConnOpPeerWasLive) unchanged for current callers.
 bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
     if (!caps_out) return false;
-    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL);
+    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL, NULL);
 }
 
 // A-1a: proc_apply_identity — the single audited identity mutation site.

@@ -238,18 +238,26 @@ void test_proc_identity_set_rejects_system_supp_gid(void) {
 void test_proc_identity_peer_snapshot_by_stripes(void) {
     struct Proc *kp = kproc();
     caps_t caps = 0; u32 pid_out = 0xABCDu; u32 gid_out = 0xABCDu;
+    int    procpid = -7;
     bool found = proc_peer_snapshot_by_stripes(kp->stripes, &caps,
-                                               &pid_out, &gid_out, NULL);
+                                               &pid_out, &gid_out, NULL, &procpid);
     TEST_ASSERT(found, "kproc not found by its own stripes");
     TEST_EXPECT_EQ(pid_out, (u32)PRINCIPAL_SYSTEM, "snapshot principal_id");
     TEST_EXPECT_EQ(gid_out, (u32)GID_SYSTEM, "snapshot primary_gid");
+    // V-4a-0b: the pid rides the same alive-gated snapshot (kproc is pid 0).
+    TEST_EXPECT_EQ(procpid, kp->pid, "V-4a-0b: snapshot reports the peer pid");
     // 0 sentinel fail-closes; out-params untouched.
     u32 pid2 = 0x1234u;
-    bool found0 = proc_peer_snapshot_by_stripes(0, NULL, &pid2, NULL, NULL);
+    int procpid2 = -7;
+    bool found0 = proc_peer_snapshot_by_stripes(0, NULL, &pid2, NULL, NULL, &procpid2);
     TEST_ASSERT(!found0, "0-sentinel stripes matched a Proc");
     TEST_EXPECT_EQ(pid2, 0x1234u, "0-sentinel touched out-param");
-    // An unassigned (far-future) tag matches nothing.
+    TEST_EXPECT_EQ(procpid2, -7, "V-4a-0b: 0-sentinel touched the pid out-param");
+    // An unassigned (far-future) tag matches nothing -- and leaves pid alone, so
+    // a caller cannot mistake a no-match for "the peer is pid 0" (kproc).
+    int procpid3 = -7;
     bool foundx = proc_peer_snapshot_by_stripes(0xFFFFFFFFFFFFFFFEull,
-                                                NULL, NULL, NULL, NULL);
+                                                NULL, NULL, NULL, NULL, &procpid3);
     TEST_ASSERT(!foundx, "unassigned stripes matched a Proc");
+    TEST_EXPECT_EQ(procpid3, -7, "V-4a-0b: no-match left the pid out-param alone");
 }

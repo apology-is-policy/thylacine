@@ -6691,9 +6691,10 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     u32    peer_principal = PRINCIPAL_NONE;
     u32    peer_gid       = GID_NONE;
     bool   peer_renderer  = false;
+    int    peer_pid       = 0;
     bool   peer_alive = proc_peer_snapshot_by_stripes(peer_stripes, &peer_caps,
                                                       &peer_principal, &peer_gid,
-                                                      &peer_renderer);
+                                                      &peer_renderer, &peer_pid);
 
     out->stripes      = peer_stripes;
     out->caps         = peer_alive ? (u64)peer_caps : 0u;
@@ -6707,7 +6708,9 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // caps — a dead/reaped peer fail-closes to 0 (never a stale grant).
     out->flags        = (peer_alive && peer_renderer)
                             ? SRV_PEER_FLAG_CONSOLE_RENDERER : 0u;
-    out->_reserved    = 0u;
+    // V-4a-0b: the peer's pid, same alive gate as caps/identity -- a dead peer
+    // reports 0, never a pid a REUSED table entry now owns.
+    out->pid          = peer_alive ? (u32)peer_pid : 0u;
     return 0;
 }
 
