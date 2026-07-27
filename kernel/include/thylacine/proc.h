@@ -641,6 +641,27 @@ struct Proc {
     // debug_stop_req). Occupies a tail pad byte @346, so struct Proc stays 352.
     bool               debug_exitkill;
 
+    // VIVARIUM (docs/VIVARIUM.md §5.1 + §12; invariant I-43): this Proc's ABI
+    // mode -- how its syscall numbers and argument structures are DECODED at
+    // the syscall entry. PHENO_NATIVE (0) is both the default and the
+    // KP_ZERO-fresh value, which is the fail-safe direction: a Proc is never
+    // INFERRED into a non-default ABI, only DECLARED into one by its vivarium
+    // (the Q3 resolution -- EI_OSABI cannot discriminate in either direction,
+    // so no ELF byte may set this). Set ONLY at exec; there is deliberately no
+    // syscall that changes a Proc's own phenotype at runtime.
+    //
+    // I-43: a phenotype confers ABI SHAPE, NEVER AUTHORITY. Every capability
+    // check, namespace resolution, handle right, permission check and resource
+    // charge remains the native one, applied identically to a phenotyped and a
+    // native Proc -- a translated call must land on the SAME sys_*_for_proc
+    // body, through the SAME gates, that a native caller reaches.
+    //
+    // rfork-INHERITED (unlike the debug_* slots): a Linux process that forks
+    // must produce a Linux child, or the child's first syscall mis-decodes.
+    // Occupies the tail pad byte @347 between debug_exitkill @346 and
+    // shared_map_pages @348, so struct Proc stays 352 bytes.
+    u8                 phenotype;
+
     // G-2 (the I-32 FIFTH axis; TAPESTRY.md §18.12 R2-F3): pages of OTHER
     // Procs' memory currently shared INTO this Proc via burrow_share_into
     // (SHARED_IN-flagged VMAs). Charged/uncharged under p->vma_lock (exact);
@@ -650,6 +671,12 @@ struct Proc {
     // struct Proc stays 352 bytes.
     u32                shared_map_pages;
 };
+
+// VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
+// NATIVE is 0 so a KP_ZERO-fresh Proc is native by construction -- the
+// fail-safe default the Q3 resolution requires.
+#define PHENO_NATIVE  0u
+#define PHENO_LINUX   1u
 
 #define PROC_FLAG_NODUMP            (1u << 0)
 #define PROC_FLAG_NOTRACE           (1u << 1)
@@ -728,6 +755,11 @@ _Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
                "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
                "pages) occupies the former 348..352 tail pad after the PTY-1e "
                "report latches; KP_ZERO-fresh 0, never rfork-inherited.");
+_Static_assert(__builtin_offsetof(struct Proc, phenotype) == 347,
+               "VIVARIUM phenotype (the per-Proc ABI mode, I-43) occupies the "
+               "LAST tail pad byte @347, between debug_exitkill @346 and "
+               "shared_map_pages @348 -- no struct growth (stays 352). "
+               "KP_ZERO-fresh 0 == PHENO_NATIVE is the fail-safe default.");
 _Static_assert(__builtin_offsetof(struct Proc, debug_exitkill) == 346,
                "EXITKILL debug_exitkill (I-39 die-with-launcher, DEBUG-FS §5d) "
                "occupies a tail pad byte @346 between cont_report_pending @345 and "

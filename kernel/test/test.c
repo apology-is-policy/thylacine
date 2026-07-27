@@ -455,6 +455,7 @@ void test_elf_header_rejection(void);
 void test_elf_rwx_rejected(void);
 void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
+void test_elf_brand_hint(void);
 void test_dev_boot_registration_smoke(void);
 void test_dev_lookup_unknown(void);
 void test_dev_devnone_ops_smoke(void);
@@ -1795,6 +1796,7 @@ struct test_case g_tests[] = {
     { "elf.rwx_rejected",              test_elf_rwx_rejected,              false, NULL },
     { "elf.bounds_rejection",          test_elf_bounds_rejection,          false, NULL },
     { "elf.policy_rejection",          test_elf_policy_rejection,          false, NULL },
+    { "elf.brand_hint",                test_elf_brand_hint,                false, NULL },
     { "dev.boot_registration_smoke",   test_dev_boot_registration_smoke,   false, NULL },
     { "dev.lookup_unknown",            test_dev_lookup_unknown,            false, NULL },
     { "dev.devnone_ops_smoke",         test_dev_devnone_ops_smoke,         false, NULL },

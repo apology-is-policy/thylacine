@@ -1029,6 +1029,13 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // in sys_spawn_full_argv_thunk, after this inherit and before exec.
     // Inheriting then optionally overriding keeps "set at creation" true:
     // the child never runs userspace under the wrong identity.
+    // VIVARIUM (I-43): the ABI mode is INHERITED -- a Linux process that forks
+    // must produce a Linux child, else the child mis-decodes its first syscall.
+    // Inheriting cannot widen authority (a phenotype confers ABI shape only),
+    // and it cannot widen SCOPE either: a native parent stays PHENO_NATIVE, so
+    // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
+    // vivarium sets it in the first place.
+    child->phenotype      = parent->phenotype;
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
