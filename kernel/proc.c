@@ -28,6 +28,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
+#include <thylacine/path.h>        // VIVARIUM V-4a-0: Proc.exe_path (#66 Path)
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
@@ -261,6 +262,19 @@ void proc_init(void) {
 
 struct Proc *kproc(void) {
     return g_kproc;
+}
+
+// VIVARIUM V-4a-0: record `path` as `p`'s executable name (the /proc/<pid>/exe
+// source). See the proc.h contract. Ref-new-BEFORE-unref-old is load-bearing
+// for the self-assignment case (proc_set_exe_path(p, p->exe_path), which the
+// rfork inherit reaches whenever a child re-execs the parent's own binary):
+// unref-first would drop the last ref and then ref freed storage.
+void proc_set_exe_path(struct Proc *p, struct Path *path) {
+    if (!p) return;
+    struct Path *old = p->exe_path;
+    path_ref(path);        // NULL-safe
+    p->exe_path = path;
+    path_unref(old);       // NULL-safe
 }
 
 // 2B-F3: publish `p` as init (the orphan-adopter). Called once per boot
@@ -532,6 +546,14 @@ void proc_free(struct Proc *p) {
     // independent of the frees above; owned 1:1 by this Proc (RFENVG sharing
     // deferred), so this is the sole release.
     env_free(p);
+
+    // VIVARIUM V-4a-0: drop this Proc's ref on its executable's #66 Path.
+    // NULL-tolerant (path_unref ignores NULL), and shared with any Spoor /
+    // forked child still naming the same binary -- the Path frees only with
+    // its last holder. Safe here because /proc readers hold g_proc_table_lock
+    // and a Proc reaches proc_free only after leaving the table.
+    path_unref(p->exe_path);
+    p->exe_path = NULL;
 
     // 8a-2b (I-39): release the per-Proc HW-breakpoint table (NULL-tolerant). A
     // plain heap struct freed ONLY here at reap -- never at detach -- so the
@@ -1036,6 +1058,13 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
     // vivarium sets it in the first place.
     child->phenotype      = parent->phenotype;
+    // VIVARIUM V-4a-0: the executable name is INHERITED (a fork-without-exec
+    // keeps running the parent's binary -- POSIX, and the honest answer for
+    // /proc/<pid>/exe). Every v1.0 spawn execs immediately afterwards and
+    // replaces it via proc_set_exe_path. Purely cosmetic (I-33): the Path is
+    // an immutable string nothing resolves through, and sharing the parent's
+    // is exactly right -- both Procs really are running that binary.
+    proc_set_exe_path(child, parent->exe_path);
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop

@@ -451,12 +451,57 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 
 | # | Contents | Gate |
 |---|---|---|
+| **V-4a-0** | **LANDED.** The kernel prerequisite §6.5 found: `Proc.exe_path` + `/proc/<pid>/exe` | `/proc/<ptyfs-pid>/exe` reads `/bin/ptyfs` in-guest (joey, boot-fatal) |
 | **V-4a** | the `usr/diorama` crate (ptyfs skeleton) + Tier 1 + the selftest + joey mount + a boot probe | `/proc/self/exe` reads the running binary's path in-guest |
 | **V-4b** | Tier 2 (per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
 | **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
 
-**V-4 is UNBLOCKED** — pure userspace, no kernel file touched, so it neither waits
-on nor collides with the main track's Clade work.
+**V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
+work. It is *almost* pure userspace: see §6.5 for the one kernel prerequisite the
+build surfaced.
+
+### 6.5 The one kernel prerequisite (V-4a-0, LANDED)
+
+**This section corrects §6.4's original "no kernel file touched" claim**, which was
+written before the file set was ground-truthed against the tree.
+
+`/proc/self/exe` — Tier 1's load-bearing entry — turned out to be unrenderable from
+any existing surface. The system retained **no executable identity for a running
+Proc at all**: `struct Proc` had no name and no path field, the REVENANT Image
+cache is keyed by qid (not by name), the text Burrow is anonymous, native
+`/proc/<pid>/status` reports only pid/state/threads/pages/children, `/ctl/procs`
+only pid/state/threads, and `format_cmdline` is a literal stub. So the diorama had
+nothing to reformat.
+
+The §6.2 rule made the resolution obvious rather than optional. A diorama that
+*derived* an exe path some other way — or accepted one asserted by its client —
+would stop being a reformatter and start being an authority, which is exactly the
+failure mode §6.2 exists to prevent. **The fix therefore belongs in the kernel**,
+and it was nearly free: `exec_resolve_from_namespace` already holds a Spoor whose
+#66 `Path` *is* the resolved absolute path of the binary. Pin a ref to it.
+
+As-built (`docs/reference/32-devproc.md` → `/proc/<pid>/exe`):
+
+- `Proc.exe_path` — a ref-held `struct Path`, set at the tail of a **successful**
+  `exec_setup_from_spoor` (the single chokepoint every production exec funnels
+  through), `rfork`-inherited, released at `proc_free`. Strictly non-load-bearing
+  (I-33): NULL is valid and renders empty, and a Path-alloc failure never fails an
+  exec. `struct Proc` grew 352 → 360 (the first genuine growth since the 328
+  baseline — no tail pad remained).
+- `/proc/<pid>/exe`, mode `0444`, ungated like its `ns`/`status` siblings. It adds
+  nothing to the disclosure envelope: `/proc/<pid>/ns` already renders the target's
+  whole mount list, which strictly dominates one path.
+
+Proven by `devproc.read_exe` (both legs revert-probed) plus a boot-fatal joey probe
+reading the just-spawned ptyfs's `exe` back as `/bin/ptyfs` — the E2E leg the unit
+test structurally cannot cover, since it drives `format_exe` with a synthetic Path
+and so cannot prove a *real* spawn records what `stalk` resolved.
+
+**The lesson for the rest of the arc**: when a diorama file has no native source,
+the answer is to give the kernel one, never to let the diorama invent it. Expect
+the same question at `/proc/self/cwd` (the Territory has `dot_path`, but devproc
+does not expose it) and `/proc/self/maps` (the VMA list is likewise unexposed) —
+both Tier 2, both V-4b.
 
 ---
 

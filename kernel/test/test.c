@@ -489,6 +489,7 @@ void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
 void test_devproc_read_cmdline_kproc(void);
 void test_devproc_read_ns_format(void);
+void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_ctl_returns_zero(void);
 void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
@@ -1834,6 +1835,7 @@ struct test_case g_tests[] = {
     { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
+    { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
     { "devproc.write_ctl_rejects",     test_devproc_write_ctl_rejects,     false, NULL },
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },

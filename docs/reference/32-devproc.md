@@ -123,6 +123,26 @@ The Plan 9 `ns` substrate (#66b). One `mount` line per entry in the Proc's terri
 
 The bind column stays a count: `binds[]` are abstract `path_id_t` pairs (no string names) at v1.0.
 
+### `/proc/<pid>/exe`
+
+```
+/bin/ptyfs
+```
+
+The namespace name of the executable the Proc is running (VIVARIUM **V-4a-0**) — the source the diorama re-presents as Linux's `/proc/self/exe` (`docs/VIVARIUM.md` §6.3 Tier 1). Mode `0444`, same posture as `status`/`cmdline`/`ns`.
+
+**Bare bytes: no trailing NUL, no trailing newline.** `readlink("/proc/self/exe")` yields a bare path, so a terminator here would land inside every consumer's buffer.
+
+Content is `Proc.exe_path`, a ref-held `struct Path` (#66) — the very Path `stalk` built while `exec_resolve_from_namespace` resolved the binary, recorded at the tail of a **successful** `exec_setup_from_spoor` so a Proc never advertises a binary it failed to load. It is `rfork`-inherited (a fork-without-exec really is still running the parent's binary) and released at `proc_free`.
+
+**Empty is a valid answer, not an error.** `kproc` and the blob-loaded init `/joey` (which predates any namespace, so it takes the non-resolver exec path) genuinely have no recorded name, as does any Proc whose Path allocation failed — per **I-33** that costs only this file's content, never an exec. A read of a nameless Proc's `exe` returns 0 bytes, not `-1`.
+
+**Why the kernel had to grow a field for this.** Nothing else knew: `struct Proc` carried no executable identity at all, the REVENANT Image cache is qid-keyed, the text Burrow is anonymous, and `format_cmdline` is a stub. So `/proc/<pid>/exe` could not be rendered from any existing surface — and a userspace server that *invented* the answer would be asserting authority rather than reformatting it (`VIVARIUM.md` §6.2).
+
+`format_exe` returns the **clamped** length like every sibling generator. That is load-bearing, not stylistic: `devproc_read` treats the return as the file total and copies out of a `DEVPROC_READ_BUF` (512) stack buffer, while a Path may reach `SYS_OPEN_PATH_MAX` (1024) — returning the true length would let a read at offset ≥ 512 copy adjacent kernel stack to EL0 (an OOB read and an I-13 leak). A pathological path reads as truncated instead.
+
+**Posture.** Ungated, like its `0444` siblings (`devproc.perm_enforced == false` — Plan 9 all-pids-visible). This adds nothing to the disclosure envelope: `/proc/<pid>/ns` already renders the target's entire mount list with source names, which strictly dominates one executable path. Visibility, not authority (the #57a line); the I-26 two-axis gate on `ctl` writes is untouched.
+
 ---
 
 ## Walk semantics

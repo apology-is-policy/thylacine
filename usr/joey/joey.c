@@ -6338,6 +6338,48 @@ int main(void) {
         t_putstr(itoa_dec(ptyfs_pid, pbuf, sizeof(pbuf)));
         t_putstr(" (selftest passed; serving /srv/ptyfs)\n");
 
+        // VIVARIUM V-4a-0: /proc/<pid>/exe -- the executable's namespace name,
+        // the source the diorama re-presents as Linux's /proc/self/exe.
+        //
+        // The kernel unit test drives format_exe with a SYNTHETIC Path, so it
+        // cannot prove the load-bearing half: that a real spawn actually records
+        // what stalk resolved. This does -- ptyfs was just spawned by name from
+        // "/bin/ptyfs" and proven live, so its exe must read back EXACTLY that.
+        // A regression anywhere in the chain (exec_resolve_from_namespace losing
+        // the #66 Path, exec_setup_from_spoor not recording it, proc_free
+        // releasing it early, format_exe truncating) surfaces here as a boot
+        // failure rather than as a mystery inside the diorama later.
+        {
+            char epath[32];
+            int ep = 0;
+            const char *pfx = "/proc/";
+            for (const char *z = pfx; *z; z++) epath[ep++] = *z;
+            const char *pd = itoa_dec(ptyfs_pid, pbuf, sizeof(pbuf));
+            for (const char *z = pd; *z; z++) epath[ep++] = *z;
+            const char *sfx = "/exe";
+            for (const char *z = sfx; *z; z++) epath[ep++] = *z;
+            epath[ep] = '\0';
+
+            long ef = t_open(T_WALK_OPEN_FROM_ROOT, epath, (unsigned long)ep, T_OREAD);
+            if (ef < 0) { t_putstr("joey: V-4a-0 open /proc/<ptyfs>/exe FAILED\n"); return 1; }
+            char ebuf[64];
+            long en = t_read(ef, ebuf, sizeof(ebuf) - 1);
+            (void)t_close(ef);
+            if (en <= 0) { t_putstr("joey: V-4a-0 /proc/<ptyfs>/exe EMPTY\n"); return 1; }
+            ebuf[en] = '\0';
+            const char *want = "/bin/ptyfs";
+            int wl = 0; while (want[wl]) wl++;
+            int same = (en == (long)wl);
+            for (int i = 0; same && i < wl; i++) same = (ebuf[i] == want[i]);
+            if (!same) {
+                t_putstr("joey: V-4a-0 exe mismatch: got '");
+                t_putstr(ebuf);
+                t_putstr("' want '/bin/ptyfs'\n");
+                return 1;
+            }
+            t_putstr("joey: V-4a-0 /proc/<pid>/exe OK (/bin/ptyfs)\n");
+        }
+
         // PTY-2a-2: mount ptyfs's devpts tree at /dev/pts. Fresh open=connect (a
         // 9P-mode service open yields a mountable dev9p root; the liveness fd was
         // already closed); t_mount holds its own ref (ARCH 9.6.6), so the connect
