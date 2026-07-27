@@ -233,9 +233,12 @@ recording in `NOVEL.md`.
 
 ---
 
-## 4. THE ARCHITECTURAL FORK (open — needs the user's vote)
+## 4. THE ARCHITECTURAL FORK — **RESOLVED: Option C** (user vote, 2026-07-23)
 
-Where does the Linux ABI live?
+Where does the Linux ABI live? **Decided: the hybrid (C).** The split rule below is
+binding: a syscall may live in the kernel table **iff** its translation is *total and
+stateless*; the moment it needs state the kernel does not already own, it forwards.
+Options A and B are recorded for the reasoning, not as live choices.
 
 ### Option A — in-kernel phenotype (the Linuxulator/LX model)
 
@@ -475,7 +478,7 @@ both tracks after V-3.
 
 ---
 
-## 11. Naming
+## 11. Naming — **ADOPTED** (user, 2026-07-23)
 
 Per CLAUDE.md's thematic-naming discipline. The thylacine's defining biological fact
 is **convergent evolution** — a marsupial that arrived at the canid form from a
@@ -501,20 +504,54 @@ a pouch is part of the animal, a vivarium is built around it.
 
 ---
 
-## 12. Open questions (user signoff)
+## 12. Decisions (all four RESOLVED 2026-07-23)
 
-- **Q1 — the §4 fork.** In-kernel (A), userspace supervisor (B), or hybrid (C)?
-  *Recommendation: C*, on the split rule in §4.
-- **Q2 — v1.0 or v1.1?** Vivarium is a large arc (V-0..V-8) sitting beside Halcyon
-  (G-8/G-9) in the endgame, and `ROADMAP §11.5` already makes v1.0-rc.1 the shippable
-  fallback with Halcyon as the v1.1 candidate. Both cannot obviously fit. *This is
-  the real strategic question this document exists to make answerable.*
-- **Q3 — the `ELFOSABI_GNU` collision.** `ELFOSABI_LINUX == ELFOSABI_GNU == 3`, and
-  the Clade arc widened the loader's accept-list to 3 for a *native* toolchain
-  binary. Brand inference must not mis-brand Clade's output. Options: prefer
-  `PT_INTERP` + the manifest and treat OSABI as a weak hint (recommended); or brand
-  Thylacine-native output distinctly.
-- **Q4 — naming** (§11): confirm Vivarium / phenotype / diorama.
+- **Q1 — the §4 fork: C (hybrid).** In-kernel for total-and-stateless translations,
+  userspace supervisor for everything with state. The split rule in §4 is binding.
+- **Q2 — scope: BUILD NOW, on the aux track.** Vivarium is adopted as the aux
+  track's arc, running beside the main track's Clade work. This makes it a v1.0
+  candidate rather than a v1.1 deferral; the `ROADMAP §11.5` fallback discipline is
+  unchanged (v1.0-rc.1 ships without it if the arc does not converge).
+- **Q3 — the `ELFOSABI_GNU` collision: RESOLVED, and it was never a fork.** It was
+  posed as a vote in error; the facts decide it:
+  - `ELFOSABI_NONE (0)` is what most `musl`-static Linux binaries carry — **and** what
+    native Thylacine binaries carry. The byte cannot positively identify the v1.0
+    target.
+  - `ELFOSABI_GNU (3)` means "a GNU/LLVM toolchain emitted GNU extensions," not
+    "this is Linux" — Clade's own native output carries it (which is why `elf.c:77`
+    was widened to accept 3).
+  - So `EI_OSABI` is **non-discriminating in both directions**; there is nothing to
+    trade off. `PT_INTERP` is a strong positive signal but exists only on *dynamic*
+    binaries — absent precisely on the static v1.0 target.
+  - **Therefore**: the **vivarium declares the phenotype** (the LX-zone lesson,
+    §5.2), the default is `PHENO_NATIVE`, and ELF bytes are corroborating hints that
+    may raise suspicion but may never *decide*. The fail-safe direction is forced —
+    a Proc is never *inferred* into a non-default ABI, it is only ever *declared*
+    into one. §5.2's priority list is amended accordingly below.
+- **Q4 — naming: ADOPTED.** Vivarium / phenotype / diorama are the names.
+
+### 12.1 §5.2 amended by the Q3 resolution
+
+Brand detection is **advisory input to a declaration**, never an inference:
+
+1. The **vivarium manifest** declares the container's phenotype. This is the only
+   thing that can *set* `PHENO_LINUX`.
+2. Within a declared-Linux vivarium, every exec is `PHENO_LINUX` unless the binary is
+   positively identified as native (a Thylacine-native brand, §12.2).
+3. Outside a vivarium, the phenotype is always `PHENO_NATIVE`. No ELF byte, note, or
+   interpreter path changes that.
+4. `PT_INTERP` / `EI_OSABI` / `NT_GNU_ABI_TAG` are used only to *warn* on an obvious
+   mismatch (a Linux-interp binary exec'd outside a vivarium gets a diagnostic and a
+   clean failure, not a silent mis-decode).
+
+### 12.2 Owed: a native brand (v1.x seam)
+
+Because `EI_OSABI` cannot distinguish native from Linux, Thylacine-native binaries
+should eventually carry a positive brand of their own (an `NT_GNU_ABI_TAG`-shaped
+`.note.thylacine`, emitted by the Clade toolchain and by `pouch-ld`). Not needed for
+v1.0 — rule 3 above makes the default safe without it — but it is what would let
+rule 2 be exact instead of heuristic, and it is cheap to add while Clade is being
+built. Recorded for the main track.
 
 ---
 
