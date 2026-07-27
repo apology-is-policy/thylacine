@@ -14,69 +14,43 @@ The merge took `gfx-4` at **`11ebf755`**.
 
 ---
 
-## Round 2: what is STILL outstanding
+## Round 2: DONE (2026-07-27, by the main agent)
 
-**The base is now current.** `gfx-4` merged `origin/main` (CL-4, `da049000`) at
-`1273286d` — zero behind main — so round 2 is a small, one-directional merge of
-this branch's own work rather than a two-way reconciliation.
+`gfx-4` @ **`7b917e55`** merged into local `main` at **`db566f28`** ("Merge gfx-4
+into main: VIVARIUM V-4a + the aux-resolved collisions"). The whole VIVARIUM V-4a
+arc (V-4a-0 `Proc.exe_path`, V-4a-0b `srv_peer_info.pid`, V-4a the diorama) is in.
 
-### The commits
+**Not yet pushed**: `origin/main` is still `da049000`. Local `main` is clean.
 
-```
-1273286d  Merge main (CL-4) into gfx-4     <- the base update; already contains main
-7506fc23  VIVARIUM V-4a: the diorama       <- usr/diorama + usr/diorama-probe
-f1e3dbef / 0c6ac776  docs (roadmap + this handoff)
-5af01124  sched test: spin-until in notify_idle_peer_smoke
-406d75a9  VIVARIUM V-4a-0b: srv_peer_info.pid
-2e70f5ba  VIVARIUM V-4a-0: Proc.exe_path + /proc/<pid>/exe
-b7df5b21  docs: the aux-track roadmap
-```
+**Verified in main's tree** (checked, not assumed) — all four aux-side resolutions
+carried through:
 
-### The two collisions are ALREADY RESOLVED here
+| Resolution | State in main |
+|---|---|
+| `sizeof(struct Proc) == 392` | ✅ |
+| prowl-1 `name[]` @352 | ✅ |
+| V-4a-0 `exe_path` @384 | ✅ |
+| `PQS_SCHED=12` / `PQS_EXE=13` | ✅ |
+| `usr/diorama` + `usr/diorama-probe` | ✅ present |
 
-Both surfaced while merging main *into* gfx-4, so main's side is preserved and
-round 2 should carry these resolutions rather than re-litigate them:
+The two collisions and why they resolved the way they did are recorded in the
+`struct Proc` field comments and at the `PQS_*` enum, so the reasoning travels
+with the code rather than only with this file.
 
-- **`struct Proc` — prowl-1 and V-4a-0 both appended at offset 352.** Stacked
-  rather than chosen between: prowl-1's `name[PROC_NAME_MAX=32]` keeps @352,
-  V-4a-0's `exe_path` moves to @384. Size **384 → 392**. They are complementary
-  — `name[]` is a bounded copy of the *basename* (what a listing wants, and it
-  survives a Path-alloc failure); `exe_path` is the *full* path (what
-  `readlink("/proc/self/exe")` means, and a basename cannot reconstruct it).
-  Deriving one from the other is a recorded follow-up, deliberately not done
-  inside a merge — collapsing them changes both prowl's and the diorama's
-  contracts. **The size assert is what caught the collision**, which is the good
-  failure mode.
-- **qid subkind 12 — `PQS_EXE` vs `PQS_SCHED`.** `SCHED` keeps 12 (already
-  landed); `EXE` moved to 13. Kernel-internal encoding, not ABI.
+---
 
-The feared three-way `kernel/syscall.c` overlap **did not happen** — it
-auto-merged, as main predicted.
+## The working pattern (both rounds)
 
-### Everything else was a union
+1. Aux works on `gfx-4`, pushing to both mirrors.
+2. Aux periodically merges `origin/main` **into** `gfx-4` to keep its base current
+   — a merge, never a rebase: `gfx-4` is pushed, so a rebase would need a
+   force-push, and its earlier history is already in `main` via prior merge
+   commits.
+3. Main periodically merges `gfx-4` **into** `main`.
 
-`devproc.c` (includes / file table / the read whitelist, now admitting both EXE
-and SCHED), `test_devproc.c`, `tools/build.sh` + `usr/Cargo.toml` (list
-**contents** unioned, never the lines — the recorded trap), `32-devproc.md`.
-
-## Gates for round 2
-
-```
-tools/build.sh all           # kernel + userspace both changed
-tools/test.sh                # expect 1208 PASS, 0 FAIL, boot OK, 0 EXTINCTION
-tools/ci-smp-gate.sh         # struct Proc grew again (384 -> 392)
-tools/test-interactive.sh ls-ci
-```
-
-Measured on the merged base at `1273286d`: build 0 · **1208/1208** (main's 1207 +
-`devproc.read_exe`) · boot OK · 0 EXTINCTION · SMP **40/40, 0 corruption / 0
-timing / 0 other** · `ls-ci` PASS first attempt.
-
-Round 2 adds three in-guest probes that are boot-fatal on regression — all three
-already pass alongside main's own:
-`joey: V-4a-0 /proc/<pid>/exe OK (/bin/ptyfs)`, `diorama: selftest PASS`, and
-`diorama-probe: PASS`. Kernel tests `devproc.read_exe` +
-`proc.identity_peer_snapshot_by_stripes` must pass.
+Collisions caught by a `_Static_assert` (the `struct Proc` offset clash both
+rounds) are the good failure mode — loud at build time rather than silent. Do not
+loosen one to make a merge pass.
 
 ## What NOT to do
 
