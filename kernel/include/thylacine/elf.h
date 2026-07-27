@@ -82,15 +82,25 @@
 
 // e_ident[EI_OSABI] — OS / ABI.
 #define ELFOSABI_NONE 0   // System V
-#define ELFOSABI_GNU  3   // GNU/Linux (== ELFOSABI_LINUX); lld stamps this on
-                          // any output carrying a GNU feature (IFUNC, GNU
-                          // properties) -- and, empirically, on plain static
-                          // AArch64 executables too. Accepted alongside NONE:
-                          // the OSABI byte does not change how a static ET_EXEC
-                          // is mapped, and Linux accepts both. A GNU binary that
-                          // actually needs IFUNC resolution has its IRELATIVE
-                          // relocs applied by its own static crt in userspace,
-                          // not the kernel.
+#define ELFOSABI_GNU  3   // GNU/Linux (== ELFOSABI_LINUX). lld stamps this on
+                          // any output carrying a GNU feature -- for the CL-4
+                          // clang++ it is SHF_GNU_RETAIN (0x200000) on .bss,
+                          // a purely LINK-time "do not GC this section" flag
+                          // with no runtime meaning at all (that binary was
+                          // checked: ET_EXEC, no PT_DYNAMIC, zero RELA
+                          // sections, zero R_AARCH64_IRELATIVE, zero
+                          // STT_GNU_IFUNC).
+                          //
+                          // Accepted alongside NONE because EI_OSABI is
+                          // advisory: it does not change how a static ET_EXEC
+                          // is mapped, none of this loader's real gates
+                          // (class/data/version/type/machine, segment bounds,
+                          // W^X) read it, and Linux accepts both. A GNU binary
+                          // that genuinely needs IFUNC has its IRELATIVE relocs
+                          // applied by its own static crt in userspace; if that
+                          // never happens the call faults in EL0 and the Proc
+                          // takes a snare:segv -- self-inflicted, never a
+                          // kernel concern.
 
 // e_type — object file type.
 #define ET_NONE       0

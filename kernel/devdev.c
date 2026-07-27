@@ -31,6 +31,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>              // t_stat + T_S_IF* (devdev_stat_native)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -266,6 +267,68 @@ static int devdev_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
+// SYS_FSTAT on a /dev/* fd. devdev_walk reuses the caller's `nc`, so an fd from
+// open("/dev/cons") carries THIS Dev -- not devcons -- and without a slot here
+// spoor_stat_native returns -1 and EVERY /dev fd fails fstat. That is the same
+// failure the devcons slot exists to fix on the SYS_CONSOLE_OPEN door: clang's
+// FixupStandardFileDescriptors treats an fstat failure with errno != EBADF as
+// fatal, so `clang++ < /dev/null` would die before emitting anything. The #57b
+// design has two front doors onto one console (cons.c: "the ONE console-input
+// implementation, shared by both front doors"); both must answer.
+//
+// Reachable only with an already-minted Spoor, so this bypasses no gate: the
+// I-27 console-attach check lives in devdev_open, and every field below is a
+// compile-time constant -- no pointer, no KASLR slide, no counter (I-13).
+static int devdev_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    // Byte-zero first, the tree-wide idiom: every field this switch does not
+    // set reaches EL0 as a defined zero, with no stack-garbage leakage.
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+
+    out->qid_path = c->qid.path;
+    out->nlink    = 1;
+    out->blksize  = 4096;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+
+    switch ((u32)c->qid.path) {
+    case DEV_KIND_ROOT:
+    case DEV_KIND_PTS:
+    case DEV_KIND_TAPESTRY:
+        // /dev itself + the mount-point stub dirs. World-searchable, matching
+        // the devramfs synth dirs -- the X bit is what lets the resolver
+        // traverse onto the mount point and cross.
+        out->qid_type = QTDIR;
+        out->mode     = T_S_IFDIR | 0555u;
+        return 0;
+    case DEV_KIND_CONS:
+    case DEV_KIND_CONSCTL:
+        // The console pair: the same shape devcons reports through the other
+        // door, so a program cannot tell the two apart by fstat.
+        out->qid_type = QTFILE;
+        out->mode     = T_S_IFCHR | 0620u;
+        return 0;
+    case DEV_KIND_CONSDRAIN:
+    case DEV_KIND_CONSFEED:
+        // The G-4 renderer pair: single-holder, never world-usable.
+        out->qid_type = QTFILE;
+        out->mode     = T_S_IFCHR | 0600u;
+        return 0;
+    case DEV_KIND_NULL:
+    case DEV_KIND_ZERO:
+    case DEV_KIND_FULL:
+    case DEV_KIND_RANDOM:
+    case DEV_KIND_URANDOM:
+        out->qid_type = QTFILE;
+        out->mode     = T_S_IFCHR | 0666u;
+        return 0;
+    default:
+        // An unknown kind means the qid decode and this switch disagree; fail
+        // rather than invent a shape.
+        return -1;
+    }
+}
+
 // The I-27 gate-at-namespace-open. The cons/consctl leaves are the console --
 // a single-reader resource. An ungated open("/dev/cons") would let any EL0 Proc
 // become that reader and steal the getty's console input (the A-5a-F2 break the
@@ -469,6 +532,7 @@ struct Dev devdev = {
     .attach   = devdev_attach,
     .walk     = devdev_walk,
     .stat     = devdev_stat,
+    .stat_native = devdev_stat_native,
 
     .open     = devdev_open,
     .create   = devdev_create,

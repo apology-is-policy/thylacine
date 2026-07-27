@@ -37,6 +37,7 @@ void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
 void test_sys_burrow_attach_lazy_window_va(void);
+void test_sys_burrow_lazy_len_from_args(void);
 
 // The non-static inners of the SVC handlers (defined in kernel/syscall.c).
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
@@ -44,6 +45,8 @@ extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw,
                                       u64 length_raw);
 // Overcommit / I-32 (ARCH section 6.5): the demand-zero lazy attach.
 extern s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw);
+// CL-4: the pure dual-ABI length selector behind the dispatch case.
+extern u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw);
 
 static void drop_proc(struct Proc *p) {
     if (!p) return;
@@ -293,4 +296,42 @@ void test_sys_burrow_attach_lazy_large(void) {
                    -1L, "lazy attach above BURROW_RESERVE_MAX rejected");
 
     drop_proc(p);
+}
+
+// CL-4: the dual-ABI length selection. SYS_BURROW_ATTACH_LAZY accepts the
+// native 1-arg form AND the Linux 6-arg anon-mmap form (musl's __init_tls
+// issues the latter raw). The gate must honour the 6-arg reading ONLY for an
+// anonymous-private request: the pouch wrapper's file-backed / MAP_FIXED
+// refusals are libc-side, so a direct syscall(SYS_mmap, ...) would otherwise
+// get anonymous zero pages where it asked for a FILE -- silently wrong data
+// where pre-CL-4 it was a loud MAP_FAILED (ARCH 6.5).
+void test_sys_burrow_lazy_len_from_args(void) {
+    enum { MAP_PRIVATE = 0x02, MAP_FIXED = 0x10, MAP_ANON = 0x20 };
+    const u64 LEN = 64ull * 1024;
+    const u64 NOFD = (u64)(s64)-1;
+
+    // Native 1-arg: length in x0, x1..x5 undefined -- must ignore them entirely.
+    TEST_EXPECT_EQ(burrow_lazy_len_from_args(LEN, 0xdeadbeef, 0xdeadbeef, 7),
+                   LEN, "native 1-arg takes x0 regardless of the other regs");
+
+    // Linux 6-arg anonymous-private (what __init_tls issues): length from x1.
+    TEST_EXPECT_EQ(burrow_lazy_len_from_args(0, LEN, MAP_ANON | MAP_PRIVATE, NOFD),
+                   LEN, "6-arg anonymous-private takes the length from x1");
+
+    // FILE-BACKED must fail closed -- this is the F1 regression.
+    TEST_EXPECT_EQ(burrow_lazy_len_from_args(0, LEN, MAP_PRIVATE, 7),
+                   0ull, "6-arg file-backed mmap refused (no anonymous fallback)");
+
+    // MAP_FIXED picks the VA; the kernel chooses, so refuse.
+    TEST_EXPECT_EQ(burrow_lazy_len_from_args(0, LEN, MAP_ANON | MAP_FIXED, NOFD),
+                   0ull, "6-arg MAP_FIXED refused");
+
+    // Anonymous but carrying a real fd is malformed -- refuse rather than guess.
+    TEST_EXPECT_EQ(burrow_lazy_len_from_args(0, LEN, MAP_ANON | MAP_PRIVATE, 3),
+                   0ull, "6-arg anonymous with a real fd refused");
+
+    // The native wrappers pin x1 = 0, so a native length of 0 stays a clean
+    // reject instead of depending on whatever the compiler left in x1.
+    TEST_EXPECT_EQ(burrow_lazy_len_from_args(0, 0, 0, NOFD),
+                   0ull, "length 0 with x1 pinned 0 stays a reject");
 }

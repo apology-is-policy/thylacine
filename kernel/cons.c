@@ -859,7 +859,11 @@ static int devcons_stat(struct Spoor *c, u8 *dp, int n) {
 // system-owned character device (a stream: no size, not seekable).
 static int devcons_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
-    *out = (struct t_stat){0};
+    // Byte-zero, matching every other stat_native: correctness must not rest on
+    // t_stat happening to have no implicit padding (it has none today -- the
+    // pads are named members -- but a future field insert could change that,
+    // and this is a struct copied out to EL0; I-13).
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
     out->qid_path = c->qid.path;
     out->qid_type = QTFILE;
     out->mode     = T_S_IFCHR | 0620u;

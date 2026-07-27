@@ -2248,16 +2248,33 @@ static int clade_gate(void) {
     }
     t_putstr("joey: clade CL-4 clang++ --version OK\n");
 
-    // Write /tmp/hello.cpp: STL <vector> + printf; exits 0 IFF sum(i*i,0..9)==285.
+    // Write /tmp/hello.cpp. Deliberately a REAL C++ program, not a bare hello:
+    // <vector>/<string> exercise the libc++ headers + template instantiation,
+    // and the throw/catch round trip exercises the CL-2 C++ runtime end to end
+    // in a FRESHLY on-device-compiled binary -- libc++abi's personality routine
+    // + libunwind walking .eh_frame emitted by this very clang (-funwind-tables=2
+    // + ld.lld --eh-frame-hdr). A compile that links but cannot unwind would
+    // otherwise pass a printf-only gate. Exits 0 IFF sum(i*i,0..9)==285 AND the
+    // exception was caught with its payload intact.
     static const char hello_cpp[] =
         "#include <cstdio>\n"
         "#include <vector>\n"
+        "#include <string>\n"
+        "#include <stdexcept>\n"
+        "static long sq(int x){\n"
+        "  if(x<0) throw std::runtime_error(\"neg\");\n"
+        "  return (long)x*x;\n"
+        "}\n"
         "int main(){\n"
         "  std::vector<int> v(10);\n"
-        "  for(int i=0;i<10;i++) v[i]=i*i;\n"
-        "  long s=0; for(int x:v) s+=x;\n"
-        "  std::printf(\"CLADE-HELLO sum=%ld\\n\", s);\n"
-        "  return s==285?0:1;\n"
+        "  for(int i=0;i<10;i++) v[i]=i;\n"
+        "  long s=0; for(int x:v) s+=sq(x);\n"
+        "  int eh=0;\n"
+        "  try { (void)sq(-1); }\n"
+        "  catch(const std::runtime_error &e){ eh = (std::string(e.what())==\"neg\"); }\n"
+        "  std::string tag(\"CLADE-HELLO\");\n"
+        "  std::printf(\"%s sum=%ld eh=%d\\n\", tag.c_str(), s, eh);\n"
+        "  return (s==285 && eh==1)?0:1;\n"
         "}\n";
     {
         long td = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
@@ -2290,6 +2307,11 @@ static int clade_gate(void) {
     // -v keeps clang's steps visible while the CL-4b getMainExecutable fix is
     // validated (InstalledDir now resolves -> clang auto-finds its resource dir,
     // cc1 self-spawn path, and ld.lld -- NO explicit -B/-resource-dir needed).
+    // No -no-canonical-prefixes here: the multicall must self-dispatch its own
+    // cc1 with the DEFAULT driver flags, which is exactly what fork commit
+    // CL-4c fixes (prepend the tool name only when the exec path does not
+    // already name it). A gate that needed the flag would prove nothing --
+    // no real build system passes it.
     static const char cc_argv[] =
         "/clade/bin/clang++\0-v\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
     long cst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
@@ -2305,13 +2327,55 @@ static int clade_gate(void) {
     if (ho < 0) { t_putstr("joey: clade CL-4 gate: /tmp/hello not produced\n"); return -1; }
     (void)t_close(ho);
 
-    // Tier 2b: run it. Its stdio is the console; "CLADE-HELLO sum=285" prints +
+    // Tier 2b: run it. Its stdio is the console; "CLADE-HELLO sum=285 eh=1" prints +
     // exit 0 confirms the computed check (proves the fresh ELF execs + runs).
     t_putstr("joey: clade CL-4 running /tmp/hello\n");
     static const char run_argv[] = "/tmp/hello";
     long rst = go4c_spawn_wait_hb("/tmp/hello", 10,
                                   run_argv, (unsigned int)sizeof(run_argv), 1,
                                   60, 15, 0);
+    if (rst == 0) {
+        // Tier 2c: the separate compile + link shape every build system drives
+        // (make/cmake/cargo/go). Worth its own leg because `-c` is a SINGLE job,
+        // and Driver.cpp disables integrated-cc1 only when there is more than
+        // one -- so this path runs cc1 IN-PROCESS, exercising ExecuteCC1Tool's
+        // own `ArgV[1] == "-cc1"` dispatch rather than the spawn. Both are
+        // broken by a stale PrependArg, so covering only the spawn would leave
+        // half the surface unproven.
+        t_putstr("joey: clade CL-4 -c compile then link-only\n");
+        static const char co_argv[] =
+            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/hello.cpp\0-o\0/tmp/hello.o";
+        long ost = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                      co_argv, (unsigned int)sizeof(co_argv), 7,
+                                      600, 20, 0);
+        if (ost != 0) {
+            t_putstr("joey: clade CL-4 gate: -c compile FAILED rc=");
+            t_putstr(itoa_dec(ost, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        static const char lo_argv[] =
+            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0/tmp/hello.o\0-o\0/tmp/hello2";
+        long lst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                      lo_argv, (unsigned int)sizeof(lo_argv), 5,
+                                      600, 20, 0);
+        if (lst != 0) {
+            t_putstr("joey: clade CL-4 gate: link-only FAILED rc=");
+            t_putstr(itoa_dec(lst, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        static const char run2_argv[] = "/tmp/hello2";
+        long r2 = go4c_spawn_wait_hb("/tmp/hello2", 11,
+                                     run2_argv, (unsigned int)sizeof(run2_argv), 1,
+                                     60, 15, 0);
+        if (r2 != 0) {
+            t_putstr("joey: clade CL-4 gate: /tmp/hello2 exit rc=");
+            t_putstr(itoa_dec(r2, nb, sizeof(nb)));
+            t_putstr(" (want 0)\n");
+            return -1;
+        }
+    }
     if (rst != 0) {
         t_putstr("joey: clade CL-4 gate: /tmp/hello exit rc=");
         t_putstr(itoa_dec(rst, nb, sizeof(nb)));

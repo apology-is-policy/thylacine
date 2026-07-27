@@ -63,6 +63,24 @@ With the fork clang built, `tools/build.sh`:
 - `0004` — CL-4: the Support-layer port — `getMainExecutable` via argv[0],
   `bit.h`'s `<endian.h>` arm, and `is_local`'s non-BSD-fallback, all for
   `__thylacine__` (the `__linux__`-family branches Thylacine falls through).
+- `0005` — CL-4b: `getMainExecutable` returns an absolute argv0 directly.
+  Thylacine has no `/proc/self/exe` and `realpath` fails, so the generic path
+  returned `""` and clang's `InstalledDir` was empty — it could then find
+  neither its resource dir nor `ld.lld`.
+- `0006` — CL-4c: prepend the multicall tool name only when the exec path needs
+  it. `PrependArg` tells a sub-invocation which tool of the `bin/llvm` multicall
+  to become; clang set it whenever `NeedsPrependArg || CanonicalPrefixes`, and
+  CanonicalPrefixes defaults on. That is harmless when the install uses
+  *symlinks* (canonicalisation resolves `bin/clang++` back to `bin/llvm`, so the
+  child genuinely needs the name), but wrong for a plain **copy** — or on a
+  target where `getMainExecutable` cannot canonicalise at all and returns argv0.
+  There the exec path already names the tool, and prepending shifts `-cc1` to
+  argv[2]: the cc1 child fails `clang_main`'s `Args[1] == "-cc1"` test, re-enters
+  as a *driver*, and rejects `-cc1` as an unknown argument (the integrated path
+  breaks identically — `ExecuteCC1Tool` reads `ArgV[1]` too). Thylacine is both
+  cases at once: no symlinks, so `/clade/bin/clang++` is a copy, and no
+  `/proc/self/exe`. Upstream-shaped — it fixes copy-based multicall installs on
+  Linux too.
 
 ## Refresh (when the fork changes)
 

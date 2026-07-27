@@ -175,11 +175,21 @@ void test_elf_header_rejection(void) {
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_BAD_VERSION, "ident EV_NONE rejected");
 
-    // Bad OSABI.
+    // Bad OSABI -- an unrecognized value is still rejected.
     size = build_elf(flags, 1);
     blob_ehdr()->e_ident[EI_OSABI] = 99;
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
-        ELF_LOAD_BAD_OSABI, "non-zero OSABI rejected");
+        ELF_LOAD_BAD_OSABI, "unrecognized OSABI rejected");
+
+    // CL-4: ELFOSABI_GNU (3) IS accepted, alongside NONE. lld stamps it on any
+    // output carrying a GNU feature -- for the CL-4 clang++ merely
+    // SHF_GNU_RETAIN on .bss, which has no runtime meaning. Without this the
+    // whole device toolchain fails to exec, so pin acceptance: a future
+    // re-tightening must fail HERE rather than silently in a boot.
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_ident[EI_OSABI] = ELFOSABI_GNU;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "ELFOSABI_GNU accepted");
 
     // Bad e_type (REL not EXEC).
     size = build_elf(flags, 1);

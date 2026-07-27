@@ -1,7 +1,7 @@
 From 81a4cef69fbff093f4529da5bdfd539a2bd69607 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Fri, 24 Jul 2026 15:35:11 +0200
-Subject: [PATCH 3/4] Thylacine CL-3b: cxa_guard uses pthread_self() for the
+Subject: [PATCH 3/6] Thylacine CL-3b: cxa_guard uses pthread_self() for the
  thread id, not gettid
 
 libc++abi's __cxa_guard recursion check (cxa_guard_impl.h PlatformThreadID)

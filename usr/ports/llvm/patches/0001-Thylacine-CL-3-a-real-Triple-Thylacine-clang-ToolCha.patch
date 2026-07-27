@@ -1,7 +1,7 @@
 From df919c8ddc2b2cbe4deeabbe7ea1934918ddc47b Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Fri, 24 Jul 2026 14:12:41 +0200
-Subject: [PATCH 1/4] Thylacine CL-3: a real Triple::Thylacine + clang
+Subject: [PATCH 1/6] Thylacine CL-3: a real Triple::Thylacine + clang
  ToolChain + lld default
 
 Add a first-class aarch64-thylacine target to the LLVM/clang driver so that

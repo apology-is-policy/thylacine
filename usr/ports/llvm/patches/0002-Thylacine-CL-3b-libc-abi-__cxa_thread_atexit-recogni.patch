@@ -1,7 +1,7 @@
 From e6ef19e09c2223e1cefb1652b055670b99cb388e Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Fri, 24 Jul 2026 14:56:21 +0200
-Subject: [PATCH 2/4] Thylacine CL-3b: libc++abi __cxa_thread_atexit recognizes
+Subject: [PATCH 2/6] Thylacine CL-3b: libc++abi __cxa_thread_atexit recognizes
  __thylacine__
 
 Add __thylacine__ to the guard on __cxa_thread_atexit's definition

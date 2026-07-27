@@ -1,0 +1,42 @@
+From ce5a1c519b93f50d7ba4cad1323fb9a25a8a4549 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Sat, 25 Jul 2026 06:50:49 +0200
+Subject: [PATCH 5/6] Thylacine CL-4b: getMainExecutable returns an absolute
+ argv0 directly
+
+getprogpath routes through test_dir -> realpath(), which fails on Thylacine
+(musl realpath needs /proc/self/fd, absent here). That dropped clang's
+InstalledDir to empty, so the driver built an empty-path -cc1 command and
+posix_spawn failed EINVAL -- clang could print --version but never compile.
+An absolute argv0 IS the executable path; return it directly (like the
+executable is actually named), realpath-free.
+---
+ llvm/lib/Support/Unix/Path.inc | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/llvm/lib/Support/Unix/Path.inc b/llvm/lib/Support/Unix/Path.inc
+index 9a6b3849f..89cc308fa 100644
+--- a/llvm/lib/Support/Unix/Path.inc
++++ b/llvm/lib/Support/Unix/Path.inc
+@@ -330,7 +330,17 @@ std::string getMainExecutable(const char *argv0, void *MainAddr) {
+   // Thylacine has no /proc/self/exe, and dladdr is inert in a static musl
+   // binary (dlopen/dladdr are ENOSYS stubs). Resolve from argv[0] + $PATH --
+   // the classical detection, like OpenBSD/Haiku. clang's InstalledDir +
+-  // resource-dir discovery depend on this returning a real path.
++  // resource-dir discovery + cc1/ld.lld sub-spawn all depend on this returning
++  // a real path.
++  //
++  // An ABSOLUTE argv0 IS the executable path -- return it directly. getprogpath
++  // routes through test_dir -> realpath(), which fails on Thylacine (musl
++  // realpath needs /proc/self/fd, absent here), so the general path drops
++  // InstalledDir to "" -> clang builds an empty-path -cc1 command -> posix_spawn
++  // fails EINVAL. The direct return is also how the executable is actually named
++  // (joey spawns absolute paths); a $PATH search would only re-derive it.
++  if (argv0 && argv0[0] == '/')
++    return argv0;
+   char exe_path[PATH_MAX];
+   if (getprogpath(exe_path, argv0) != NULL)
+     return exe_path;
+-- 
+2.43.0
+
