@@ -6399,6 +6399,81 @@ int main(void) {
         (void)t_close(pts_root);
         t_putstr("joey: /dev/pts mounted (ptyfs devpts tree)\n");
 
+        // === VIVARIUM V-4a: spawn /sbin/diorama + run the in-guest gate ===
+        //
+        // The diorama is the synthetic Linux world (docs/VIVARIUM.md section 6):
+        // a read-only 9P server that re-presents Thylacine's native /proc + /ctl
+        // in the shapes an unmodified Linux binary expects. Device-less, so it
+        // spawns like ptyfs/corvus -- MAY_POST_SERVICE, no caps, no hardware.
+        //
+        // joey does NOT mount it. `self` resolves from the 9P connection's peer,
+        // so a shared joey-owned mount would report JOEY's identity to every
+        // reader (and joey, blob-loaded, has no recorded exe at all). The
+        // diorama belongs in a per-container territory -- which is what a
+        // vivarium sets up at V-7 -- so joey only creates the mount POINT and
+        // lets each client mount it privately. /bin/diorama-probe does exactly
+        // that, and is therefore the meaningful gate.
+        {
+            const char dio_name[] = "/bin/diorama";
+            long dio_pid = t_spawn_with_perms(dio_name, sizeof(dio_name) - 1,
+                                              NULL, 0, 0,
+                                              T_SPAWN_PERM_MAY_POST_SERVICE);
+            if (dio_pid <= 0) {
+                t_putstr("joey: t_spawn_with_perms(\"diorama\") FAILED\n");
+                return 1;
+            }
+            // Bounded liveness connect (the ptyfs/corvus idiom): its selftest
+            // runs BEFORE the post, so a successful connect also gates a silent
+            // selftest failure.
+            long dr = -1, dw = -1;
+            int dio_up = 0;
+            if (t_pipe(&dr, &dw) == 0) {
+                for (int i = 0; i < 30; i++) {
+                    long r = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/diorama", 12, T_OREAD);
+                    if (r >= 0) { (void)t_close(r); dio_up = 1; break; }
+                    struct pollfd dpf = { .fd = (int)dr, .events = POLLIN, .revents = 0 };
+                    (void)t_poll(&dpf, 1, 500);
+                }
+                t_close(dr);
+                t_close(dw);
+            }
+            if (!dio_up) {
+                t_putstr("joey: /sbin/diorama DOWN (failed to post /srv/diorama -- selftest?)\n");
+                return 1;
+            }
+            t_putstr("joey: /sbin/diorama up pid=");
+            t_putstr(itoa_dec(dio_pid, pbuf, sizeof(pbuf)));
+            t_putstr(" (selftest passed; serving /srv/diorama)\n");
+
+            // The per-client mount point. Created once on the pivoted root so it
+            // is visible in every inherited territory; each client MREPLs its own
+            // connection over it privately.
+            long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "dio", 3, T_OREAD,
+                                    T_WALK_CREATE_DMDIR | 0755u);
+            if (mk >= 0) (void)t_close(mk);
+
+#if THYLA_BOOT_PROBES
+            // The V-4a gate. Boot-fatal: it proves the kernel's V-4a-0
+            // Proc.exe_path record, the V-4a-0b srv_peer_info.pid channel, the
+            // diorama's peer resolution and its 9P path -- in one read that no
+            // unit test can reach.
+            {
+                const char dp[] = "/bin/diorama-probe";
+                long ppid = t_spawn(dp, sizeof(dp) - 1);
+                if (ppid <= 0) {
+                    t_putstr("joey: spawn /bin/diorama-probe FAILED\n");
+                    return 1;
+                }
+                int  st  = 0;
+                long got = t_wait_pid_for((int)ppid, 0, &st);
+                if (got != ppid || st != 0) {
+                    t_putstr("joey: V-4a diorama-probe FAILED\n");
+                    return 1;
+                }
+            }
+#endif
+        }
+
 #if THYLA_BOOT_PROBES
         // PTY-2a-2 PROBE: the master/slave round-trip over the mounted /dev/pts
         // -- the FIRST real client of the clone-mint + SYS_PTY_REGISTER + the

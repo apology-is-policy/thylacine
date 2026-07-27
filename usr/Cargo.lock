@@ -419,6 +419,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "diorama"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "diorama-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
