@@ -35,8 +35,10 @@
 // proc.c for this chunk). Lookup is O(N) DFS through the kproc tree;
 // acceptable while the live-Proc count is bounded.
 
+#include <thylacine/burrow.h>   // V-4b-2: struct Burrow -- /proc/<pid>/maps backing type + file identity
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/exec.h>     // V-4b-2: EXEC_USER_STACK_BASE / EXEC_USER_VDSO_BASE -- maps role tags
 #include <thylacine/extinction.h>
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
 #include <thylacine/proc.h>
@@ -48,6 +50,7 @@
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>      // V-4b-2: struct Vma -- the /proc/<pid>/maps walk
 
 #include "../arch/arm64/timer.h"        // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
 #include "../arch/arm64/hwdebug.h"      // 8a-2a: the self-scoped EL0 hardware-breakpoint verify
@@ -87,6 +90,7 @@ enum {
     // moved EXE to 13. Subkinds are kernel-internal qid encoding, not ABI.
     PQS_EXE      = 13,       // /proc/<pid>/exe              (QTFILE; VIVARIUM V-4a-0; RO, the executable's namespace name)
     PQS_CWD      = 14,       // /proc/<pid>/cwd              (QTFILE; VIVARIUM V-4b-1; RO, the Territory's cwd)
+    PQS_MAPS     = 15,       // /proc/<pid>/maps             (QTFILE; VIVARIUM V-4b-2; RO, the VMA table)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -125,6 +129,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "kstack",  PQS_KSTACK  },
     { "exe",     PQS_EXE     },
     { "cwd",     PQS_CWD     },
+    { "maps",    PQS_MAPS    },
     { "sched",   PQS_SCHED   },
 };
 
@@ -412,6 +417,138 @@ static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
     return (size_t)n;
 }
 
+// maps: the Proc's address-space table (VIVARIUM V-4b-2) -- the source the
+// diorama re-presents as Linux's /proc/self/maps. Six fixed whitespace-separated
+// columns, one line per VMA, after a header line:
+//
+//   start-end            perms off        type file      role
+//   0x400000-0x452000    r-xp 0x0         file 0x3:0x412 -
+//   0x7ff00000-0x80000000 rw-p 0x0        anon -         stack
+//
+// Columns are FIXED (never omitted) -- an optional trailing column would make
+// the line ambiguous to split. Absent values render "-".
+//
+//   perms  4 chars: r/w/x from vma->prot, then p|s. `s` iff VMA_FLAG_SHARED_IN
+//          -- the backing Burrow is ANOTHER Proc's memory mapped cross-Proc
+//          (a netd flow ring / a tapestryd weave), which is exactly Linux's
+//          MAP_SHARED sense (writes propagate). A FILE Burrow is read-only and
+//          shared by the Image cache, but writes cannot propagate through it,
+//          so it is `p` -- matching Linux's MAP_PRIVATE file mapping.
+//   type   the backing: anon | lazy | file | mmio | dma | none. `none` is a
+//          guard VMA (vma_alloc_guard is the only producer of a NULL burrow).
+//   file   `<devno>:<qid.path>` for a FILE Burrow, else "-". These are the
+//          cache-key SCALARS the Burrow sampled at create -- deliberately NOT
+//          a chase through burrow->spoor->path: Spoor.path is mutable (a walk
+//          calls spoor_path_extend / _transplant), and "nothing walks a pinned
+//          exec Spoor today" is the latent-P1 trap, not a lifetime argument.
+//          The scalars are immutable for the Burrow's whole life. This pair is
+//          also Thylacine's own file identity -- the (dev, qid.path) that
+//          t_stat exposes and sameFile compares (#100).
+//   role   stack | vdso | guard | "-", derived from the exec.h layout
+//          constants. Native-useful (a maps viewer wants it) and what the
+//          diorama translates into Linux's [stack] / [vdso] tags -- so no
+//          consumer has to hardcode the layout.
+//
+// Lock: p->vma_lock, nested under the g_proc_table_lock proc_for_each already
+// holds. That order is ESTABLISHED and audited in this file -- devproc_mem_walk_-
+// cb (8a-1b-gamma-1) takes exactly this pair for the cross-Proc /proc/<pid>/mem
+// copy, on the recorded ground that vma_lock is a leaf below g_proc_table_lock
+// (nothing under vma_lock takes g_proc_table_lock). The walk is bounded CPU
+// under the leaf: no alloc, no block, no nested Burrow lock (every field read
+// is a plain scalar on the Burrow, and the VMA's mapping ref keeps that Burrow
+// alive for the whole walk).
+//
+// Truncation: the format_sched row-commit idiom -- a row is built at a scratch
+// offset and committed only once it wholly fits, so an address space with more
+// VMAs than the buffer holds truncates at a whole-line boundary rather than
+// emitting a partial row. (Completeness for a very large address space is the
+// same v1.x offset-aware multi-read that ns wants.)
+//
+// That truncation is ALSO what bounds the lock hold: the first field that does
+// not fit breaks the loop, so the walk is bounded by the OUTPUT BUFFER (~30
+// rows), not by the VMA count. A Proc sitting at PROC_VMA_MAX (65536 VMAs)
+// therefore holds vma_lock -- and IRQs -- for tens of rows, not 65536. Do not
+// "fix" the truncation by continuing the walk past a full buffer without
+// re-deriving that bound.
+//
+// Posture: 0444, ungated -- the exe / cwd / ns posture (devproc.perm_enforced
+// == false, Plan 9 all-pids-visible). Sound TODAY because Thylacine has no
+// USER-space ASLR: every VA here is either an exec.h constant or an ELF link
+// address, so the layout is not a secret, and /proc/<pid>/ns already discloses
+// strictly more. None of these are kernel VAs, so I-16 (the KASLR slide) is not
+// engaged -- unlike /proc/<pid>/kstack, which had to gate its raw addresses for
+// exactly that reason (8b-1d F1). FORWARD OBLIGATION: if user ASLR ever lands,
+// this posture must be revisited in the same chunk -- maps would then leak the
+// randomized layout, which is the whole point of the mitigation.
+static const char *maps_type_name(const struct Vma *v) {
+    if (!v->burrow) return "none";           // guard VMA -- no backing object
+    switch (v->burrow->type) {
+    case BURROW_TYPE_ANON:      return "anon";
+    case BURROW_TYPE_ANON_LAZY: return "lazy";
+    case BURROW_TYPE_FILE:      return "file";
+    case BURROW_TYPE_MMIO:      return "mmio";
+    case BURROW_TYPE_DMA:       return "dma";
+    default:                    return "?";
+    }
+}
+
+static const char *maps_role_name(const struct Vma *v) {
+    if (!v->burrow)                                    return "guard";
+    if (v->vaddr_start == EXEC_USER_STACK_BASE)        return "stack";
+    if (v->vaddr_start == EXEC_USER_VDSO_BASE)         return "vdso";
+    return "-";
+}
+
+static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
+    size_t off = 0, n;
+    n = fmt_str(buf, cap, off, "start-end perms off type file role\n");
+    if (!n) return 0;
+    off += n;
+
+    irq_state_t vs = spin_lock_irqsave(&p->vma_lock);
+    for (struct Vma *v = p->vmas; v; v = v->next) {
+        // The house SLUB-clobber defense every vma.c list walker runs
+        // (vma_lookup / vma_insert / vma_remove / vma_find_gap). Not optional
+        // here just because this is a diagnostic read: a freed entry's
+        // `burrow` is a dangling pointer, and dereferencing it below would
+        // copy freed slab bytes into a file EL0 reads -- an I-13 leak. Loud is
+        // the correct failure for a corrupted list.
+        if (v->magic != VMA_MAGIC) extinction("format_maps: corrupted VMA list entry");
+        size_t row = off;                    // scratch: commit only a whole row
+        n = fmt_hex(buf, cap, row, v->vaddr_start);      if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, "-");                 if (!n) break; row += n;
+        n = fmt_hex(buf, cap, row, v->vaddr_end);        if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+
+        char perms[5];
+        perms[0] = (v->prot & VMA_PROT_READ)  ? 'r' : '-';
+        perms[1] = (v->prot & VMA_PROT_WRITE) ? 'w' : '-';
+        perms[2] = (v->prot & VMA_PROT_EXEC)  ? 'x' : '-';
+        perms[3] = (v->flags & VMA_FLAG_SHARED_IN) ? 's' : 'p';
+        perms[4] = '\0';
+        n = fmt_str(buf, cap, row, perms);               if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+        n = fmt_hex(buf, cap, row, v->burrow_offset);    if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, maps_type_name(v));   if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+
+        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE) {
+            n = fmt_hex(buf, cap, row, (u64)v->burrow->file_devno);   if (!n) break; row += n;
+            n = fmt_str(buf, cap, row, ":");                          if (!n) break; row += n;
+            n = fmt_hex(buf, cap, row, v->burrow->file_qid_path);     if (!n) break; row += n;
+        } else {
+            n = fmt_str(buf, cap, row, "-");                          if (!n) break; row += n;
+        }
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, maps_role_name(v));   if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, "\n");                if (!n) break; row += n;
+        off = row;                           // commit the complete row
+    }
+    spin_unlock_irqrestore(&p->vma_lock, vs);
+    return off;
+}
+
 // exe: the namespace name of the running executable (VIVARIUM V-4a-0) -- the
 // source the diorama re-presents as Linux's /proc/self/exe. NOT NUL- or
 // newline-terminated: a path is a byte string and Linux's readlink("/proc/self/
@@ -630,7 +767,8 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_CMDLINE:
     case PQS_NS:
     case PQS_EXE:
-    case PQS_CWD:     return 0444u;   // V-4a-0 / V-4b-1: info files, ns's posture
+    case PQS_CWD:
+    case PQS_MAPS:    return 0444u;   // V-4a-0 / V-4b-1 / V-4b-2: info files, ns's posture
     case PQS_PID_DIR: return 0555u;
     default:          return 0u;
     }
@@ -844,6 +982,7 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
+    case PQS_MAPS:    r->total = format_maps(p, r->buf, r->cap);    break;  // V-4b-2
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
         r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
@@ -891,9 +1030,14 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // for commands). Validate the kind BEFORE the lookup so the callback only
     // formats the readable file kinds.
     if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) return -1;
+    // NOTE: this whitelist is the FOURTH place a new readable file must be
+    // registered (after g_proc_pid_files, devproc_read_cb, and proc_qid_mode),
+    // and the only one whose omission fails SILENTLY as a plain -1 rather than
+    // an ENOENT at walk. V-4b-2 was written missing exactly this and the read
+    // returned -1 with the file resolving fine -- add new kinds here too.
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
         kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED &&
-        kind != PQS_CWD) return -1;
+        kind != PQS_CWD && kind != PQS_MAPS) return -1;
 
     // prowl-3b (OQ-4): capture the reading Proc BEFORE the lock so the gated
     // PQS_SCHED kind can be authorized against the target found inside the walk.

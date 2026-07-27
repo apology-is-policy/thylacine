@@ -45,21 +45,28 @@ structural — so a missing source is a *kernel* gap by construction, never a li
 for the diorama to invent or accept an answer. §6.7 records the lesson and flags
 `/proc/self/cwd` + `/proc/self/maps` (both V-4b) as the same shape.
 
-**NEXT: V-4a** — now genuinely unblocked and pure userspace. Build `usr/diorama` on
-the ptyfs skeleton (native device-less `/srv` server, joey-spawned with
-`MAY_POST_SERVICE`, selftest-before-serve, read-only) serving Tier-1 `/proc`.
-**Gate: `/proc/self/exe` reads the running binary's path in-guest.** It has a
-consumer today — which is why Clade's fork patches LLVM's `getMainExecutable` onto
-`argv[0]`; pouch programs benefit with no phenotype at all.
+**V-4a is DONE** — `usr/diorama` on the ptyfs skeleton, joey-spawned with
+`MAY_POST_SERVICE`, selftest-before-serve, read-only, serving Tier-1 `/proc`. It
+mounts at `/dio`; joey creates the mount point but deliberately does **not** mount
+it, because `self` resolves to the connection's peer — i.e. the *mounter* — so a
+shared mount would report joey to every reader. Each client mounts privately,
+which is also how V-7 will set up a container.
 
-One open detail: **the mount point**. The diorama *reads* native `/proc`, so it
-must keep it reachable in its own namespace — the per-container `/proc` mount is
-therefore V-7, not now. For V-4a mount somewhere distinct (suggest `/diorama` on
-the pivoted root: one `t_walk_create` + `t_mount`, the `/net` pattern at
-`joey.c:4445`).
+**V-4b-1 and V-4b-2 are DONE**: `/self/cwd` and `/self/maps`, each with its kernel
+source. Both confirmed §6.7's "budget these as kernel + userspace", but neither for
+the predicted reason — `cwd` needed no new kernel *state* (the Territory has
+carried `dot_path` since LS-4), and `maps` inherited its lock-order argument from
+`devproc_mem_walk_cb`, which had already established and audited
+`g_proc_table_lock → vma_lock`. The refined lesson (§6.7): **grep for an existing
+accessor and an existing lock-order precedent before budgeting either.**
 
-Then: V-4b (per-pid + `sys/kernel`) → V-4c (`/sys` + Linux `/dev` + per-container
-mounts + focused audit).
+`maps` also forced the first real "which layer speaks Linux" decision, settled in
+§6.8: the kernel emits a Thylacine-native table, the diorama translates. Anything
+else is phenotype leaking into the kernel.
+
+**NEXT: the rest of V-4b** — `/proc/<pid>/…` per-pid, `sys/kernel`, and
+`/self/{fd,environ,auxv}`. Then V-4c (`/sys` + Linux `/dev` + per-container mounts
++ focused audit).
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

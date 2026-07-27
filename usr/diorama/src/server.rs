@@ -42,7 +42,7 @@
 // mode and is deliberately not offered.
 //
 // ---------------------------------------------------------------------------
-// The tree (V-4a, Tier 1)
+// The tree (V-4a Tier 1 + V-4b)
 // ---------------------------------------------------------------------------
 //
 //   /                dir
@@ -51,11 +51,12 @@
 //   /self/cmdline    file     argv[0], NUL-terminated (Linux shape)
 //   /self/status     file     Linux-shaped Name/Pid/Uid/Gid/Threads/VmRSS
 //   /self/cwd        file     the working directory (V-4b-1)
+//   /self/maps       file     the address space, Linux column layout (V-4b-2)
 //   /meminfo         file     MemTotal/MemFree in kB
 //   /uptime          file     "<up> <idle>" seconds
 //
-// Deferred to V-4b with their kernel prerequisites (VIVARIUM section 6.7):
-// /self/maps (the VMA list is unexposed), /proc/<pid>/... , /cpuinfo, /stat.
+// Deferred with their kernel prerequisites (VIVARIUM section 6.7):
+// /proc/<pid>/... , /cpuinfo, /stat, /self/{fd,environ,auxv}.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
@@ -72,7 +73,13 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 /// Largest rendered file. Every renderer is bounded by this; a renderer that
 /// would exceed it truncates rather than overflowing (best-effort introspection,
 /// the devproc DEVPROC_READ_BUF discipline).
-const RENDER_MAX: usize = 1024;
+// V-4b-2 raised this from 1024: /self/maps is the first render whose size scales
+// with the Proc rather than being a handful of fixed lines, and the Linux row is
+// LONGER than the native row it comes from (a pathname column the native table
+// encodes as a devno:qid pair). The kernel's own side caps at DEVPROC_READ_BUF
+// (2048) of native text, so 4096 leaves headroom for the expansion. Both layers
+// truncate at a whole row, never mid-row.
+const RENDER_MAX: usize = 4096;
 
 const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
@@ -94,9 +101,10 @@ const N_SELF_EXE: u64 = 2;
 const N_SELF_CMDLINE: u64 = 3;
 const N_SELF_STATUS: u64 = 4;
 const N_SELF_CWD: u64 = 5;
-const N_MEMINFO: u64 = 6;
-const N_UPTIME: u64 = 7;
-const N_COUNT: u64 = 8;
+const N_SELF_MAPS: u64 = 6;
+const N_MEMINFO: u64 = 7;
+const N_UPTIME: u64 = 8;
+const N_COUNT: u64 = 9;
 
 struct Node {
     name: &'static [u8],
@@ -111,6 +119,7 @@ static NODES: [Node; N_COUNT as usize] = [
     Node { name: b"cmdline", parent: N_SELF, is_dir: false },
     Node { name: b"status",  parent: N_SELF, is_dir: false },
     Node { name: b"cwd",     parent: N_SELF, is_dir: false },
+    Node { name: b"maps",    parent: N_SELF, is_dir: false },
     Node { name: b"meminfo", parent: N_ROOT, is_dir: false },
     Node { name: b"uptime",  parent: N_ROOT, is_dir: false },
 ];
@@ -178,8 +187,45 @@ impl Render {
             self.push(&[tmp[i]]);
         }
     }
+    /// Lowercase hex, zero-padded to at least `min` digits and with no `0x`
+    /// prefix -- Linux's /proc/*/maps column format (the kernel's own
+    /// seq_put_hex_ll pads addresses to 8).
+    fn push_hex(&mut self, v: u64, min: usize) {
+        let mut tmp = [0u8; 16];
+        let mut i = 0;
+        let mut x = v;
+        if x == 0 {
+            tmp[i] = b'0';
+            i += 1;
+        }
+        while x > 0 {
+            let d = (x & 0xf) as u8;
+            tmp[i] = if d < 10 { b'0' + d } else { b'a' + (d - 10) };
+            x >>= 4;
+            i += 1;
+        }
+        while i < min {
+            tmp[i] = b'0';
+            i += 1;
+        }
+        while i > 0 {
+            i -= 1;
+            self.push(&[tmp[i]]);
+        }
+    }
     fn bytes(&self) -> &[u8] {
         &self.buf[..self.len]
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+    /// Discard everything after `mark`. Used to abandon a partially-built row
+    /// once it turns out not to fit, so the render always ends at a row
+    /// boundary (the kernel-side format_maps row-commit idiom, mirrored).
+    fn truncate_to(&mut self, mark: usize) {
+        if mark <= self.len {
+            self.len = mark;
+        }
     }
 }
 
@@ -374,6 +420,196 @@ fn render_self_cwd(peer: &TSrvPeerInfo, r: &mut Render) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// /self/maps (V-4b-2). The kernel's /proc/<pid>/maps is a Thylacine-native
+// table; Linux's shape is this server's job, which is the whole VIVARIUM split
+// -- the kernel stays Thylacine, the phenotype lives out here.
+//
+// native:  0x10000000-0x10001000 rw-p 0x0 anon - -
+// Linux:   10000000-10001000 rw-p 00000000 00:00 0
+//
+// Six fixed columns in, six out. The interesting translations:
+//
+//   dev    Thylacine's devno is a FLAT namespace with no major/minor split, so
+//          it renders as minor under major 00. That is not a fabrication: Linux
+//          itself uses 00:xx for every filesystem with no backing block device
+//          (tmpfs, and 9P mounts specifically), which is exactly what a Stratum
+//          mount is. An anonymous mapping is 00:00 with inode 0, as on Linux.
+//   path   a FILE-backed mapping renders the executable's path. PREMISE: at
+//          v1.0 the only FILE Burrows in an address space are the exec'd
+//          binary's segments -- burrow_create_file has exactly one caller
+//          (image_lookup_or_create, from exec), and there is no file-mmap
+//          syscall. The premise is stated rather than assumed away: when a
+//          file-mmap surface lands, the KERNEL line must start carrying a path
+//          and this branch must read it instead of substituting exe.
+//   [stack]/[vdso]  from the native role column, so the layout constants stay
+//          in the kernel and no consumer hardcodes them.
+//   guard  a prot-0 VMA renders ---p with no pathname -- byte-for-byte how
+//          Linux shows a PROT_NONE guard page. Emitted, never hidden: it is
+//          real reserved address space, and dropping it would make the map
+//          claim the range is free.
+// ---------------------------------------------------------------------------
+
+/// Substring search over bytes -- selftest-only, so a render can be checked for
+/// a fragment without pinning the whole (padded) row.
+fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return needle.is_empty();
+    }
+    (0..=hay.len() - needle.len()).any(|i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Parse a `0x`-prefixed (or bare) lowercase hex integer. None on any stray
+/// byte -- a malformed native line is skipped, never half-rendered.
+fn parse_hex(s: &[u8]) -> Option<u64> {
+    let body = if s.len() > 2 && s[0] == b'0' && s[1] == b'x' { &s[2..] } else { s };
+    if body.is_empty() || body.len() > 16 {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for &c in body {
+        let d = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => return None,
+        };
+        v = (v << 4) | d as u64;
+    }
+    Some(v)
+}
+
+/// Split `line` on single spaces into at most `out.len()` fields. Returns the
+/// field count. Empty fields are kept, so a shape mismatch shows up as a count
+/// mismatch rather than a silent shift.
+fn split_fields<'a>(line: &'a [u8], out: &mut [&'a [u8]]) -> usize {
+    let mut n = 0;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i <= line.len() && n < out.len() {
+        if i == line.len() || line[i] == b' ' {
+            out[n] = &line[start..i];
+            n += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Render one native maps row into Linux's shape. Returns false if the line is
+/// malformed (wrong field count, unparsable number) -- the caller skips it.
+fn maps_row(fields: &[&[u8]], exe: &[u8], r: &mut Render) -> bool {
+    // fields: start-end perms off type file role
+    let range = fields[0];
+    let dash = match range.iter().position(|&c| c == b'-') {
+        Some(i) => i,
+        None => return false,
+    };
+    let start = match parse_hex(&range[..dash]) { Some(v) => v, None => return false };
+    let end = match parse_hex(&range[dash + 1..]) { Some(v) => v, None => return false };
+    let perms = fields[1];
+    if perms.len() != 4 {
+        return false;
+    }
+    let off = match parse_hex(fields[2]) { Some(v) => v, None => return false };
+    let typ = fields[3];
+    let file = fields[4];
+    let role = fields[5];
+
+    // The file column is "-" or "<devno>:<qid>", both 0x-prefixed hex.
+    let (devno, inode) = if file == b"-" {
+        (0u64, 0u64)
+    } else {
+        match file.iter().position(|&c| c == b':') {
+            Some(i) => match (parse_hex(&file[..i]), parse_hex(&file[i + 1..])) {
+                (Some(d), Some(q)) => (d, q),
+                _ => return false,
+            },
+            None => return false,
+        }
+    };
+
+    r.push_hex(start, 8);
+    r.push(b"-");
+    r.push_hex(end, 8);
+    r.push(b" ");
+    r.push(perms);
+    r.push(b" ");
+    r.push_hex(off, 8);
+    r.push(b" ");
+    // <major>:<minor> identifies the DEVICE and is independent of the inode.
+    // Thylacine's devno is flat, so it is the minor under a 00 major -- the way
+    // Linux renders every filesystem with no backing block device. Folding any
+    // part of the inode in here would make two files on the SAME filesystem
+    // report different devices, breaking the st_dev comparison this column
+    // exists for.
+    r.push(b"00:");
+    r.push_hex(devno, 2);
+    r.push(b" ");
+    r.push_dec(inode);
+
+    // The pathname column is optional on Linux and gets padded when present.
+    if role == b"stack" {
+        r.push(b"                    [stack]");
+    } else if role == b"vdso" {
+        r.push(b"                    [vdso]");
+    } else if typ == b"file" && !exe.is_empty() {
+        r.push(b"                    ");
+        r.push(exe);
+    }
+    r.push(b"\n");
+    true
+}
+
+/// /self/maps -- the caller's address space in Linux's /proc/*/maps shape.
+fn render_self_maps(peer: &TSrvPeerInfo, r: &mut Render) {
+    if peer.alive == 0 {
+        return; // dead peer -> empty, never a stale address space
+    }
+    let mut pbuf = [0u8; 64];
+
+    // The executable path, for FILE-backed rows. Absent is fine (a blob-loaded
+    // Proc has no recorded exe) -- those rows then carry no pathname, which is
+    // exactly how Linux shows a mapping it cannot name.
+    let mut ebuf = [0u8; 256];
+    let n = native_proc_path(peer.pid, b"exe", &mut pbuf);
+    let elen = read_native(&pbuf[..n], &mut ebuf).unwrap_or(0);
+    let exe = &ebuf[..elen];
+
+    let mut mbuf = [0u8; 2048]; // matches the kernel's DEVPROC_READ_BUF
+    let n = native_proc_path(peer.pid, b"maps", &mut pbuf);
+    let mlen = match read_native(&pbuf[..n], &mut mbuf) {
+        Some(v) => v,
+        None => return,
+    };
+
+    let mut first = true;
+    for line in mbuf[..mlen].split(|&c| c == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        if first {
+            first = false; // the native header names the columns; Linux has none
+            continue;
+        }
+        let mut fields: [&[u8]; 6] = [b""; 6];
+        if split_fields(line, &mut fields) != 6 {
+            continue;
+        }
+        // Commit whole rows only: if this one does not fit, drop it and stop,
+        // so the render always ends at a row boundary.
+        let mark = r.len();
+        if !maps_row(&fields, exe, r) {
+            r.truncate_to(mark);
+            continue;
+        }
+        if r.len() == RENDER_MAX {
+            r.truncate_to(mark);
+            break;
+        }
+    }
+}
+
 /// /meminfo -- MemTotal/MemFree in kB, from /ctl/memory's page counts.
 fn render_meminfo(r: &mut Render) {
     let mut buf = [0u8; RENDER_MAX];
@@ -442,6 +678,7 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         N_SELF_CMDLINE => render_self_cmdline(peer, &mut r),
         N_SELF_STATUS => render_self_status(peer, &mut r),
         N_SELF_CWD => render_self_cwd(peer, &mut r),
+        N_SELF_MAPS => render_self_maps(peer, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
         _ => {}
@@ -882,6 +1119,9 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(N_SELF, b"cwd") != Some(N_SELF_CWD) {
         return Err("walk /self/cwd");
     }
+    if walk_child(N_SELF, b"maps") != Some(N_SELF_MAPS) {
+        return Err("walk /self/maps");
+    }
     if walk_child(N_ROOT, b"meminfo") != Some(N_MEMINFO) {
         return Err("walk /meminfo");
     }
@@ -955,6 +1195,72 @@ pub fn selftest() -> Result<(), &'static str> {
     }
     if !render(N_SELF_CWD, &dead).bytes().is_empty() {
         return Err("dead peer served a cwd");
+    }
+    if !render(N_SELF_MAPS, &dead).bytes().is_empty() {
+        return Err("dead peer served a maps");
+    }
+
+    // --- V-4b-2: the native-maps -> Linux-maps translation, driven directly so
+    //     the column math is pinned without needing a live address space.
+    if parse_hex(b"0x10000000") != Some(0x10000000) {
+        return Err("parse_hex 0x form");
+    }
+    if parse_hex(b"7ff00000") != Some(0x7ff00000) {
+        return Err("parse_hex bare form");
+    }
+    // A malformed number must be REJECTED, not silently coerced -- a coerced 0
+    // would render a plausible-looking row for a line we did not understand.
+    if parse_hex(b"0xzz").is_some() || parse_hex(b"").is_some() {
+        return Err("parse_hex accepted garbage");
+    }
+    let mut f: [&[u8]; 6] = [b""; 6];
+    if split_fields(b"a b c d e f", &mut f) != 6 || f[0] != b"a" || f[5] != b"f" {
+        return Err("split_fields");
+    }
+    if split_fields(b"a b c", &mut f) != 3 {
+        return Err("split_fields short line");
+    }
+
+    // An anon mapping: no file identity, no pathname (Linux's 00:00 0).
+    let mut m = Render::new();
+    let mut anon: [&[u8]; 6] = [b""; 6];
+    split_fields(b"0x10000000-0x10001000 rw-p 0x0 anon - -", &mut anon);
+    if !maps_row(&anon, b"/bin/x", &mut m) {
+        return Err("maps_row rejected an anon row");
+    }
+    if m.bytes() != b"10000000-10001000 rw-p 00000000 00:00 0\n" {
+        return Err("maps_row anon shape");
+    }
+
+    // A file-backed mapping takes the exe path, and the devno lands in the
+    // major-0 column the way Linux renders a device-less filesystem.
+    let mut mf = Render::new();
+    let mut fr: [&[u8]; 6] = [b""; 6];
+    split_fields(b"0x400000-0x452000 r-xp 0x0 file 0x3:0x12 -", &mut fr);
+    if !maps_row(&fr, b"/bin/diorama", &mut mf) {
+        return Err("maps_row rejected a file row");
+    }
+    if !contains_bytes(mf.bytes(), b"00400000-00452000 r-xp 00000000 00:03 18")
+        || !contains_bytes(mf.bytes(), b"/bin/diorama")
+    {
+        return Err("maps_row file shape");
+    }
+
+    // The role column becomes Linux's bracket tag.
+    let mut ms = Render::new();
+    let mut sr: [&[u8]; 6] = [b""; 6];
+    split_fields(b"0x7ff00000-0x80000000 rw-p 0x0 anon - stack", &mut sr);
+    maps_row(&sr, b"", &mut ms);
+    if !contains_bytes(ms.bytes(), b"[stack]") {
+        return Err("maps_row stack tag");
+    }
+
+    // A malformed row is skipped, never half-rendered.
+    let mut mb = Render::new();
+    let mut br: [&[u8]; 6] = [b""; 6];
+    split_fields(b"notarange rw-p 0x0 anon - -", &mut br);
+    if maps_row(&br, b"", &mut mb) {
+        return Err("maps_row accepted a malformed range");
     }
 
     // --- uptime is always renderable and monotonic-shaped

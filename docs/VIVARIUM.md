@@ -459,6 +459,7 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4a-0b** | **LANDED.** The second prerequisite §6.6 found: `srv_peer_info.pid` (how the server resolves `self`) | a live peer snapshot reports its pid; a dead one fail-closes to 0 |
 | **V-4a** | **LANDED.** `usr/diorama` + Tier 1 + the selftest + `/bin/diorama-probe` (as-built: `docs/reference/141-diorama.md`) | **MET** -- the probe mounts the diorama itself and reads `/self/exe` back as `/bin/diorama-probe` |
 | **V-4b-1** | **LANDED.** `/self/cwd` + its kernel source `/proc/<pid>/cwd` | the probe reads a non-empty absolute cwd in-guest |
+| **V-4b-2** | **LANDED.** `/self/maps` + its kernel source `/proc/<pid>/maps` | the probe reads a Linux-shaped map with `[stack]` + a file-backed row naming the binary |
 | **V-4b** | the rest of Tier 2 (`/self/maps` + per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
 | **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
 
@@ -555,12 +556,57 @@ Expect the question again, at least at:
   is a thin call into it (the `format_ns` → `territory_format_ns` shape), and the
   diorama re-presents it unchanged. No new kernel state at all — cheaper even than
   `exe`, which had to *grow* a field.
-- `/proc/self/maps` — the VMA list is likewise unexposed. Bigger, because the
-  format carries permissions and backing-file names, and because a VMA walk needs
-  its own lock discipline (`vma_lock`) rather than an existing accessor.
+- `/proc/self/maps` — **DONE at V-4b-2.** The prediction was right that the VMA
+  list was unexposed and that a walk needs `vma_lock` rather than an existing
+  accessor, but wrong about the lock being the hard part: `devproc_mem_walk_cb`
+  (8a-1b-gamma-1) had *already* established and audited the
+  `g_proc_table_lock → vma_lock` nest for cross-Proc `/proc/<pid>/mem`, so the
+  ordering argument was inherited rather than made. The real work was the
+  translation split — see §6.8.
 
 Both were Tier 2 / **V-4b**, and the prediction to budget them as *kernel +
-userspace* held for both — `cwd` just turned out to be the cheap end of that.
+userspace* held for both, though for `cwd` the kernel half was a pure renderer
+and for `maps` the lock discipline was already paid for. The pattern that keeps
+holding is narrower than "these need kernel work": **it is worth grepping for an
+existing accessor and an existing lock-order precedent before budgeting either.**
+
+### 6.8 Where the Linux shape lives — the `maps` split
+
+`/proc/<pid>/maps` is the first file where the native and Linux renderings differ
+enough to force the question: which layer speaks Linux?
+
+The answer is the one the whole design implies — **the kernel stays Thylacine and
+the diorama does the phenotype.** The kernel emits a native six-column table
+(`0x`-prefixed ranges, a backing-`type` column, a `devno:qid` file identity, a
+`role` column) that a Thylacine tool would want; the diorama translates it into
+Linux's column layout. Letting the kernel emit Linux's shape directly would be
+phenotype leaking into the kernel, which is exactly the inversion VIVARIUM
+exists to avoid. The `status` file set the precedent: native `key: value`, Linux
+`Name:`/`Pid:`/`Uid:` out here.
+
+Three translations are worth recording because each was a judgement call:
+
+- **`dev`.** Thylacine's `devno` is flat — no major/minor split. It renders as
+  `00:<devno>`, and that is *not* a fabricated major: Linux uses `00:xx` for
+  every filesystem with no backing block device (tmpfs, and 9P mounts
+  specifically), which is precisely what a Stratum mount is.
+- **The pathname column** comes from `/proc/<pid>/exe`, under a stated premise:
+  at v1.0 the only FILE Burrows in an address space are the exec'd binary's
+  segments (`burrow_create_file` has exactly one caller, `image_lookup_or_create`,
+  from exec, and there is no file-mmap syscall). The premise is written down at
+  the call site rather than assumed away — **when a file-mmap surface lands, the
+  kernel line must start carrying a path and the diorama must read it instead of
+  substituting `exe`.**
+- **`[vdso]`.** Thylacine's vdso is a read-only *data* page (the clock struct),
+  so it renders `r--p`, not Linux's `r-xp` code vDSO. The tag is still worth
+  emitting — the consumers that look for `[vdso]` in maps (sanitizers) do so to
+  *exclude* the region, which is correct here too — but nothing should read the
+  tag as promising an ELF object. Thylacine publishes no `AT_SYSINFO_EHDR`
+  (it uses the private `AT_VDSO_CLOCK`), so no correct Linux program goes looking.
+
+A guard VMA is emitted, never hidden: `---p` with no pathname is byte-for-byte
+how Linux shows a `PROT_NONE` guard page, and dropping the row would make the map
+claim the range is free.
 
 ---
 

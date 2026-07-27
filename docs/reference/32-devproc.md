@@ -43,6 +43,8 @@ int          proc_for_each(int (*cb)(struct Proc *, void *), void *arg);
 /proc/<pid>/ns                path = (pid << 32) | PQS_NS         QTFILE
 /proc/<pid>/sched             path = (pid << 32) | PQS_SCHED      QTFILE  (prowl-3b; OQ-4 owner-or-CAP_HOSTOWNER)
 /proc/<pid>/exe               path = (pid << 32) | PQS_EXE        QTFILE  (VIVARIUM V-4a-0; RO)
+/proc/<pid>/cwd               path = (pid << 32) | PQS_CWD        QTFILE  (VIVARIUM V-4b-1; RO)
+/proc/<pid>/maps              path = (pid << 32) | PQS_MAPS       QTFILE  (VIVARIUM V-4b-2; RO)
 ```
 
 Subkinds 5..15 reserved for `mem`, `fd/`, `wait`, `note`, `args`, etc. — added as the syscall surface needs them.
@@ -206,6 +208,81 @@ Content is `Proc.exe_path`, a ref-held `struct Path` (#66) — the very Path `st
 `format_exe` returns the **clamped** length like every sibling generator. That is load-bearing, not stylistic: `devproc_read` treats the return as the file total and copies out of a `DEVPROC_READ_BUF` (512) stack buffer, while a Path may reach `SYS_OPEN_PATH_MAX` (1024) — returning the true length would let a read at offset ≥ 512 copy adjacent kernel stack to EL0 (an OOB read and an I-13 leak). A pathological path reads as truncated instead.
 
 **Posture.** Ungated, like its `0444` siblings (`devproc.perm_enforced == false` — Plan 9 all-pids-visible). This adds nothing to the disclosure envelope: `/proc/<pid>/ns` already renders the target's entire mount list with source names, which strictly dominates one executable path. Visibility, not authority (the #57a line); the I-26 two-axis gate on `ctl` writes is untouched.
+
+---
+
+### `/proc/<pid>/cwd`
+
+```
+/home/michael
+```
+
+The Territory's current working directory (VIVARIUM **V-4b-1**) — the source the diorama re-presents as Linux's `/proc/self/cwd`. Mode `0444`; bare bytes, no NUL and no newline, for the same reason as `exe` (`readlink("/proc/self/cwd")` yields a bare path).
+
+`format_cwd` is a thin call into `territory_getdot`, which already owned the `dot_lock` discipline — the `format_ns` → `territory_format_ns` shape, with the lock staying in `territory.c`. **No new kernel state was needed**: the Territory has carried `dot_path` since LS-4 and devproc simply never surfaced it.
+
+The nested `g_proc_table_lock → dot_lock` acquire is acyclic for the same reason `ns_lock` is: `dot_lock` is a documented leaf guarding only `dot_path`, nothing held under it takes `g_proc_table_lock`, and the resolve is bounded CPU with no allocation and no blocking.
+
+**Unlike `exe`, this file is never empty for a live Proc.** A NULL `dot_path` renders `"/"` (`territory_getdot`'s own contract), so a Linux consumer always gets a usable path. A Proc torn down past its `territory_unref` renders empty rather than faulting.
+
+---
+
+### `/proc/<pid>/maps`
+
+```
+start-end perms off type file role
+0x400000-0x402000 r-xp 0x0 file 0x0:0x20 -
+0x402000-0x403000 rw-p 0x0 anon - -
+0x7feff000-0x7ff00000 ---p 0x0 none - guard
+0x7ff00000-0x80000000 rw-p 0x0 anon - stack
+0xc0000000-0xc0001000 r--p 0x0 anon - vdso
+```
+
+The Proc's address-space table (VIVARIUM **V-4b-2**) — the source the diorama re-presents as Linux's `/proc/self/maps`. Mode `0444`. One line per VMA in ascending-VA order (`vma_insert`'s contract), after a header line naming the columns.
+
+**Six FIXED columns.** An optional trailing column would make the line ambiguous to split, so absent values render `-`:
+
+| Column | Meaning |
+|---|---|
+| `start-end` | the VA range, `0x`-prefixed (house style; the diorama strips the prefix for Linux) |
+| `perms` | `r`/`w`/`x` from `vma->prot`, then `p` or `s` |
+| `off` | `vma->burrow_offset` |
+| `type` | the backing: `anon` · `lazy` · `file` · `mmio` · `dma` · `none` |
+| `file` | `<devno>:<qid.path>` for a FILE Burrow, else `-` |
+| `role` | `stack` · `vdso` · `guard` · `-` |
+
+`s` means `VMA_FLAG_SHARED_IN` — the backing Burrow is *another* Proc's memory mapped cross-Proc (a netd flow ring, a tapestryd weave), which is exactly Linux's `MAP_SHARED` sense of writes propagating. A FILE Burrow is read-only and shared via the Image cache, but writes cannot propagate through it, so it renders `p`, matching Linux's `MAP_PRIVATE` file mapping.
+
+`none` is a guard VMA — `vma_alloc_guard` is the only producer of a NULL-Burrow VMA.
+
+**The `file` column is scalars, deliberately not a pointer chase.** `file_devno` / `file_qid_path` are the cache-key values the Burrow sampled at create and are immutable for its whole life. Chasing `burrow->spoor->path` for a name instead would be unsound: `Spoor.path` is *mutable* (a walk calls `spoor_path_extend` / `spoor_path_transplant`), and "nothing walks a pinned exec Spoor today" is a latent-P1 trap, not a lifetime argument. The pair is also Thylacine's own file identity — the `(dev, qid.path)` that `t_stat` exposes and `sameFile` compares (#100).
+
+**The `role` column keeps the layout constants in the kernel.** They are derived from `exec.h` (`EXEC_USER_STACK_BASE`, `EXEC_USER_VDSO_BASE`), so no consumer — including the diorama, which turns them into Linux's `[stack]` / `[vdso]` tags — has to hardcode them.
+
+The walk runs the same `VMA_MAGIC` check every `vma.c` list walker does. That is not optional for a diagnostic read: a freed entry's `burrow` is a dangling pointer, and dereferencing it for the `file` column would copy freed slab bytes into a file EL0 reads — an I-13 leak. Loud extinction is the correct failure for a corrupted list.
+
+**Lock.** `p->vma_lock`, nested under the `g_proc_table_lock` that `proc_for_each` already holds. That order is **established and audited in this same file**: `devproc_mem_walk_cb` (8a-1b-gamma-1) takes exactly this pair for the cross-Proc `/proc/<pid>/mem` copy, on the recorded ground that `vma_lock` is a leaf below `g_proc_table_lock` (nothing under `vma_lock` takes `g_proc_table_lock`). The walk is bounded CPU under the leaf: no allocation, no blocking, and no nested Burrow lock — every field read is a plain scalar on the Burrow, whose liveness the VMA's own mapping ref guarantees for the whole walk.
+
+**Truncation** uses the `format_sched` row-commit idiom: a row is built at a scratch offset and committed only once it wholly fits, so an address space with more VMAs than the buffer holds truncates at a whole-line boundary rather than emitting a partial row. That truncation is *also* what bounds the lock hold — the first field that does not fit breaks the loop, so the walk is bounded by the **output buffer** (~30 rows), not by the VMA count. A Proc at `PROC_VMA_MAX` (65536 VMAs) holds `vma_lock`, and IRQs, for tens of rows rather than 65536. Do not "fix" the truncation by continuing past a full buffer without re-deriving that bound. Measured: a small native binary renders 5 rows / ~200 B native (292 B in the wider Linux shape), against a `DEVPROC_READ_BUF` of 2048 — roughly 14× headroom. Completeness for a very large address space is the same v1.x offset-aware multi-read `ns` wants.
+
+**Posture.** `0444`, ungated — the `exe` / `cwd` / `ns` posture. Sound **today** because Thylacine has no *user-space* ASLR: every VA here is either an `exec.h` constant or an ELF link address, so the layout is not a secret, and `/proc/<pid>/ns` already discloses strictly more. None of these are kernel VAs, so **I-16** (the KASLR slide) is not engaged — unlike `/proc/<pid>/kstack`, which had to gate its raw addresses for exactly that reason (8b-1d F1).
+
+> **Forward obligation.** If user ASLR ever lands, this posture must be revisited in the same chunk. `maps` would then leak the randomized layout, which is the whole point of the mitigation.
+
+---
+
+## Adding a readable per-pid file
+
+Four places, and the fourth fails **silently**:
+
+1. `enum` — a new `PQS_*` subkind.
+2. `g_proc_pid_files[]` — the name, so `walk` resolves it.
+3. `devproc_read_cb` — the `format_*` dispatch.
+4. `proc_qid_mode` — the mode.
+5. **The kind whitelist in `devproc_read`.** Omit this and the file resolves
+   fine at walk, then every read returns a bare `-1` with nothing pointing at
+   the cause. V-4b-2 was written missing exactly this; its unit test caught it
+   on the first run, which is the argument for writing the test first.
 
 ---
 

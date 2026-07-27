@@ -24,8 +24,10 @@
 #include "../../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context (the regs test's synthetic trapframe)
 #include "../../mm/phys.h"               // alloc_pages / free_pages
 
+#include <thylacine/burrow.h>          // V-4b-2: burrow_create_anon/map -- /proc/<pid>/maps
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/exec.h>            // V-4b-2: EXEC_USER_STACK_BASE -- the maps role tag
 #include <thylacine/page.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
 #include <thylacine/proc.h>
@@ -66,6 +68,7 @@ void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);            // VIVARIUM V-4b-1
+void test_devproc_maps(void);                // VIVARIUM V-4b-2
 // prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
 void test_devproc_sched_gate_predicate(void);
 void test_devproc_sched_read_gated(void);
@@ -97,6 +100,21 @@ static bool contains(const char *haystack, size_t hlen, const char *needle) {
         if (j == nlen) return true;
     }
     return false;
+}
+
+// V-4b-2: byte offset of the first occurrence of `needle`, or -1. Distinct from
+// contains() because an ordering check needs the POSITION, not the presence --
+// scanning with contains() matches at every index and yields 0 for everything.
+static long index_of(const char *haystack, size_t hlen, const char *needle) {
+    size_t nlen = 0;
+    while (needle[nlen]) nlen++;
+    if (nlen == 0 || nlen > hlen) return -1;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        size_t j = 0;
+        while (j < nlen && haystack[i + j] == needle[j]) j++;
+        if (j == nlen) return (long)i;
+    }
+    return -1;
 }
 
 // prowl-1: exact NUL-terminated string equality (proc_set_name basename check).
@@ -1937,6 +1955,85 @@ void test_devproc_read_exe(void) {
 // re-presents as Linux's /proc/self/cwd. Unlike exe this is never empty for a
 // live Proc: a NULL dot_path means "/" (territory_getdot's contract), so the
 // Linux consumer always gets a usable path. Bare bytes, like exe.
+// VIVARIUM V-4b-2: /proc/<pid>/maps -- the VMA table the diorama re-presents as
+// Linux's /proc/self/maps. Builds a synthetic address space with one VMA of each
+// shape the renderer discriminates (a plain anon mapping, an anon mapping AT the
+// exec stack base, and a guard VMA with no backing Burrow), then reads the file
+// and checks each row. Revert-probe anchors are noted per assert.
+void test_devproc_maps(void) {
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+
+    // (1) a plain RW anon mapping, well clear of the exec layout constants.
+    const u64 plain_va = 0x0000000010000000ull;
+    struct Burrow *b1 = burrow_create_anon(PAGE_SIZE);
+    int rc1 = b1 ? burrow_map(tgt, b1, plain_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (b1) burrow_unref(b1);            // the mapping ref keeps it alive
+
+    // (2) an anon mapping exactly at the stack base -> role "stack".
+    struct Burrow *b2 = burrow_create_anon(PAGE_SIZE);
+    int rc2 = b2 ? burrow_map(tgt, b2, EXEC_USER_STACK_BASE, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (b2) burrow_unref(b2);
+
+    // (3) a guard VMA: no Burrow, prot == 0 -> type "none", role "guard".
+    struct Vma *g = vma_alloc_guard(EXEC_USER_STACK_GUARD_BASE, EXEC_USER_STACK_BASE);
+    int rc3 = -1;
+    if (g) {
+        rc3 = vma_insert(tgt, g);
+        if (rc3 != 0) vma_free(g);
+    }
+
+    char buf[1024];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
+    long n = -999;
+    struct Spoor *c = open_pidfile_for(tgt->pid, "maps", 0);
+    if (c) { n = devproc.read(c, buf, (long)sizeof(buf) - 1, 0); spoor_clunk(c); }
+    if (n > 0) buf[n] = '\0'; else buf[0] = '\0';
+
+    // Cleanup BEFORE any assert can return and strand the table link. proc_free
+    // runs vma_drain, which releases every mapping ref -- and since we already
+    // dropped our handle refs, that frees both Burrows (the I-7 dual count).
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    // --- Assert (safe: nothing linked) ---
+    TEST_EXPECT_EQ((long)rc1, 0L, "V-4b-2: mapped the plain anon VMA");
+    TEST_EXPECT_EQ((long)rc2, 0L, "V-4b-2: mapped the stack-base anon VMA");
+    TEST_EXPECT_EQ((long)rc3, 0L, "V-4b-2: inserted the guard VMA");
+    TEST_ASSERT(n > 0, "V-4b-2: /proc/<pid>/maps reads non-empty");
+
+    // The header names the columns, so a consumer can split without a schema.
+    TEST_ASSERT(contains(buf, (size_t)n, "start-end perms off type file role\n"),
+                "V-4b-2: maps leads with the column header");
+
+    // The plain mapping: RW, private, anon-backed, no file identity, no role.
+    // Revert-probe: flip the perms order, or emit `s` unconditionally, and the
+    // "rw-p" here fails.
+    TEST_ASSERT(contains(buf, (size_t)n, "0x10000000-0x10001000 rw-p 0x0 anon - -\n"),
+                "V-4b-2: the plain anon row is exactly rw-p/anon/-/-");
+
+    // The stack mapping: same shape, but the role column names it. Revert-probe:
+    // drop the EXEC_USER_STACK_BASE arm from maps_role_name and this fails while
+    // the row above still passes -- so the two are independently pinned.
+    TEST_ASSERT(contains(buf, (size_t)n, " rw-p 0x0 anon - stack\n"),
+                "V-4b-2: the VMA at the exec stack base carries role \"stack\"");
+
+    // The guard VMA: prot == 0 renders "---p", a NULL Burrow renders type "none"
+    // AND role "guard" -- the two are separate arms, so this pins both.
+    TEST_ASSERT(contains(buf, (size_t)n, " ---p 0x0 none - guard\n"),
+                "V-4b-2: a guard VMA is ---p / none / guard");
+
+    // Ascending order is vma_insert's contract; the renderer must not reorder.
+    // The guard sits one page below the stack, so its row must precede it.
+    long guard_at = index_of(buf, (size_t)n, " guard\n");
+    long stack_at = index_of(buf, (size_t)n, " stack\n");
+    TEST_ASSERT(guard_at >= 0 && stack_at >= 0 && guard_at < stack_at,
+                "V-4b-2: rows are emitted in ascending-VA order");
+}
+
 void test_devproc_read_cwd(void) {
     // kproc always exists and has a territory, so its cwd is renderable and --
     // never having chdir'd -- is the "/" default. That pins BOTH the wiring and

@@ -36,6 +36,38 @@ fn fail(msg: &str) -> ! {
     unsafe { t_exits(1) }
 }
 
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return needle.is_empty();
+    }
+    (0..=hay.len() - needle.len()).any(|i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Print a decimal, so the probe can REPORT measured sizes rather than only
+/// asserting on them -- the maps buffer bounds are sized from this number.
+fn put_dec(mut v: u64) {
+    let mut tmp = [0u8; 20];
+    let mut i = 0;
+    if v == 0 {
+        tmp[i] = b'0';
+        i += 1;
+    }
+    while v > 0 {
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        i += 1;
+    }
+    let mut out = [0u8; 20];
+    let n = i;
+    while i > 0 {
+        i -= 1;
+        out[n - 1 - i] = tmp[i];
+    }
+    if let Ok(s) = core::str::from_utf8(&out[..n]) {
+        t_putstr(s);
+    }
+}
+
 /// Read a whole file into `out`; returns the byte count or None.
 fn read_all(path: &[u8], out: &mut [u8]) -> Option<usize> {
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
@@ -125,6 +157,45 @@ pub extern "C" fn rs_main() -> i64 {
         fail("cwd shape");
     }
 
+    // 6b. maps (V-4b-2): the address space in Linux's shape. Every exec'd Proc
+    //     has a stack VMA and file-backed text (REVENANT demand-pages it), so
+    //     both the role tag and the pathname column are exercised for real --
+    //     neither is reachable from the diorama's own selftest, which has no
+    //     live address space to render.
+    let mut pbuf = [0u8; 4096];
+    let pn = match read_all(b"/dio/self/maps", &mut pbuf) {
+        Some(n) => n,
+        None => fail("open /dio/self/maps"),
+    };
+    if pn == 0 {
+        fail("maps empty");
+    }
+    // Linux's first column is a bare lowercase-hex range: no 0x, no header.
+    if !pbuf[0].is_ascii_hexdigit() {
+        fail("maps does not start with a hex address");
+    }
+    let maps = &pbuf[..pn];
+    if !contains(maps, b"[stack]") {
+        fail("maps has no [stack] mapping");
+    }
+    // The text segment is file-backed, so its row carries this binary's path.
+    if !contains(maps, b"/bin/diorama-probe") {
+        fail("maps has no file-backed row naming the executable");
+    }
+    // Every row must have Linux's column shape; check the first one fully.
+    // "<hex>-<hex> rwxp <hex8> <maj>:<min> <inode>"
+    let first_len = maps.iter().position(|&c| c == b'\n').unwrap_or(0);
+    if first_len < 30 {
+        fail("maps first row is too short to be well-formed");
+    }
+    // Report the size so the buffer bounds stay measured, not guessed.
+    let rows = maps.iter().filter(|&&c| c == b'\n').count();
+    t_putstr("diorama-probe: maps rows=");
+    put_dec(rows as u64);
+    t_putstr(" bytes=");
+    put_dec(pn as u64);
+    t_putstr("\n");
+
     // 7. meminfo + uptime render from the system-wide native sources.
     let mut mbuf = [0u8; 256];
     let mn = match read_all(b"/dio/meminfo", &mut mbuf) {
@@ -152,6 +223,6 @@ pub extern "C" fn rs_main() -> i64 {
         fail("write-open was ALLOWED (read-only violated)");
     }
 
-    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+meminfo+uptime OK; write refused)\n");
+    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+maps+meminfo+uptime OK; write refused)\n");
     unsafe { t_exits(0) }
 }

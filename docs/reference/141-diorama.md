@@ -59,6 +59,8 @@ all, so a joey-mounted `/self/exe` would read empty.
 | Path | Content | Native source |
 |---|---|---|
 | `/self/exe` | the executable's path, **bare** (no NUL, no newline) | `/proc/<pid>/exe` (V-4a-0) |
+| `/self/cwd` | the working directory, **bare** | `/proc/<pid>/cwd` (V-4b-1) |
+| `/self/maps` | the address space, Linux column layout | `/proc/<pid>/maps` (V-4b-2) |
 | `/self/cmdline` | `argv[0]`, NUL-terminated | derived from `exe` |
 | `/self/status` | `Name`/`Pid`/`Uid`/`Gid`/`Threads`/`VmRSS` | peer + `/proc/<pid>/status` |
 | `/meminfo` | `MemTotal`/`MemFree`/`MemAvailable` in kB | `/ctl/memory` page counts |
@@ -76,8 +78,53 @@ Honest gaps, deliberately not faked:
 - `MemAvailable` equals `MemFree`: without a reclaim model, any other number would
   be a fabrication.
 
-Deferred to **V-4b** with their kernel prerequisites: `/self/maps`, `/self/cwd`,
-`/proc/<pid>/…`, `/cpuinfo`, `/stat`.
+Deferred with their kernel prerequisites: `/proc/<pid>/…`, `/cpuinfo`, `/stat`,
+`/self/{fd,environ,auxv}`.
+
+### `/self/maps` — where the Linux shape lives (V-4b-2)
+
+This is the first file whose native and Linux renderings differ enough to force
+the question of which layer speaks Linux. The answer is the one the design
+implies: **the kernel stays Thylacine, the diorama does the phenotype.** The
+kernel emits a native six-column table; `render_self_maps` translates it. Letting
+the kernel emit Linux's shape would be phenotype leaking into the kernel — the
+inversion VIVARIUM exists to prevent. (`status` set the precedent: native
+`key: value` in, `Name:`/`Pid:`/`Uid:` out.)
+
+```
+00400000-00402000 r-xp 00000000 00:20 32                    /bin/diorama-probe
+00402000-00403000 rw-p 00000000 00:00 0
+7feff000-7ff00000 ---p 00000000 00:00 0
+7ff00000-80000000 rw-p 00000000 00:00 0                    [stack]
+c0000000-c0001000 r--p 00000000 00:00 0                    [vdso]
+```
+
+Three translations were judgement calls, recorded in `VIVARIUM.md` §6.8 and at
+the call sites:
+
+- **`dev` renders `00:<devno>`.** Thylacine's `devno` is flat — no major/minor.
+  The `00` major is not fabricated: Linux uses `00:xx` for every filesystem with
+  no backing block device (tmpfs, and 9P mounts specifically), which is exactly
+  what a Stratum mount is.
+- **The pathname comes from `/self/exe`, under a stated premise** — at v1.0 the
+  only FILE Burrows in an address space are the exec'd binary's segments
+  (`burrow_create_file` has one caller, from exec; there is no file-mmap
+  syscall). **When a file-mmap surface lands, the kernel line must carry a path
+  and this branch must read it instead of substituting `exe`.**
+- **`[vdso]` is emitted, but Thylacine's vdso is a read-only *data* page** (the
+  clock struct), so it renders `r--p`, not Linux's `r-xp` code vDSO. The tag
+  still helps the consumers that look for it (sanitizers, which use it to
+  *exclude* the region), and nothing goes looking for an ELF object there:
+  Thylacine publishes no `AT_SYSINFO_EHDR`, only the private `AT_VDSO_CLOCK`.
+
+A guard VMA is emitted, never hidden — `---p` with no pathname is byte-for-byte
+how Linux shows a `PROT_NONE` guard page, and dropping the row would make the map
+claim the range is free.
+
+A malformed native row is **skipped**, never half-rendered: `maps_row` returns
+false and the caller rewinds to the row boundary. `parse_hex` rejects rather than
+coercing, because a coerced `0` would render a plausible-looking row for a line
+the translator did not understand.
 
 ## Read-only
 
