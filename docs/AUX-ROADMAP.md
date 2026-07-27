@@ -25,13 +25,38 @@ Phase 8's fourth pole: run unmodified Linux binaries. Design + build arc:
 `docs/VIVARIUM.md` (all four decisions resolved — fork = **C** hybrid, build-now,
 declare-not-infer branding, names adopted). Task **#62**.
 
-**NEXT: V-4a** — unblocked, pure userspace, fully specified in `VIVARIUM.md §6`.
-Build `usr/diorama` on the ptyfs skeleton (native device-less `/srv` server,
-joey-spawned with `MAY_POST_SERVICE`, selftest-before-serve, read-only) serving
-Tier-1 `/proc`. **Gate: `/proc/self/exe` reads the running binary's path in-guest.**
-It has a consumer today — nothing provides `/proc/self/exe`, which is why Clade's
-fork patches LLVM's `getMainExecutable` onto `argv[0]`; pouch programs benefit with
-no phenotype at all.
+**V-4a-0 + V-4a-0b LANDED** — the two kernel prerequisites the build surfaced.
+V-4a was specced as pure userspace; ground-truthing the Tier-1 file set against the
+tree before writing the crate found that **two of its entries had no native source
+at all**:
+
+- **`/proc/self/exe`** — `struct Proc` carried no executable identity whatsoever
+  (the Image cache is qid-keyed, the text Burrow anonymous, `format_cmdline` a
+  stub). Fixed by `Proc.exe_path` + `/proc/<pid>/exe` (§6.5), pinning the #66 `Path`
+  the exec resolver already held.
+- **`self` itself** — `srv_peer_info` reported `stripes` (an opaque tag with no
+  userspace pid mapping) and **no pid**, so a 9P server could learn which
+  *principal* was talking to it but never which *process*. Fixed by
+  `srv_peer_info.pid` filling the reserved slot in place (§6.6).
+
+Both were the pull-forward default, not scope creep: §6.2's rule is that the
+diorama renders **only** from natively-reachable sources — that is what makes I-43
+structural — so a missing source is a *kernel* gap by construction, never a licence
+for the diorama to invent or accept an answer. §6.7 records the lesson and flags
+`/proc/self/cwd` + `/proc/self/maps` (both V-4b) as the same shape.
+
+**NEXT: V-4a** — now genuinely unblocked and pure userspace. Build `usr/diorama` on
+the ptyfs skeleton (native device-less `/srv` server, joey-spawned with
+`MAY_POST_SERVICE`, selftest-before-serve, read-only) serving Tier-1 `/proc`.
+**Gate: `/proc/self/exe` reads the running binary's path in-guest.** It has a
+consumer today — which is why Clade's fork patches LLVM's `getMainExecutable` onto
+`argv[0]`; pouch programs benefit with no phenotype at all.
+
+One open detail: **the mount point**. The diorama *reads* native `/proc`, so it
+must keep it reachable in its own namespace — the per-container `/proc` mount is
+therefore V-7, not now. For V-4a mount somewhere distinct (suggest `/diorama` on
+the pivoted root: one `t_walk_create` + `t_mount`, the `/net` pattern at
+`joey.c:4445`).
 
 Then: V-4b (per-pid + `sys/kernel`) → V-4c (`/sys` + Linux `/dev` + per-container
 mounts + focused audit).
