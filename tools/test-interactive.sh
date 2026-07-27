@@ -127,6 +127,7 @@ echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS
 # read the preserved evidence -- do not reach for "host timing".
 fails=0
 infra_fails=0
+skips=0
 attempts="${LS_CI_ATTEMPTS:-3}"
 for scen in "${scenarios[@]}"; do
     name="$(basename "$scen" .exp)"
@@ -143,6 +144,7 @@ for scen in "${scenarios[@]}"; do
           "$BUILD_DIR/ls-ci-$name.attempt"*.steps 2>/dev/null || true
     echo "==> scenario: $name (up to $attempts attempt(s))"
     passed=0
+    skipped=0
     for attempt in $(seq 1 "$attempts"); do
         : > "$transcript"
         : > "$steps"
@@ -159,6 +161,19 @@ for scen in "${scenarios[@]}"; do
         LS_CI_STEPS="$steps" script -q "$transcript" expect -f "$scen" < /dev/null >/dev/null 2>&1
         rc=$?
         reap_qemu
+        # 77 is the conventional SKIP code: the SCENARIO decided it cannot run
+        # (a missing optional host artifact, e.g. ls-gfx-mp without
+        # build/quake/host/tyr-quake). That is not a guest result. Retrying
+        # cannot change it, and counting it as a failure reports a regression
+        # that does not exist -- the #74 fail-open lesson pointed the other way.
+        # ls-gfx-mp was reported as one of #82's six "gfx regressions" purely
+        # because of this.
+        if [[ $rc -eq 77 ]]; then
+            reason="$(grep -ha 'LS-CI SKIP:' "$transcript" 2>/dev/null | head -1 | sed 's/.*LS-CI SKIP: //' | tr -d '\r')"
+            echo "    SKIP: $name${reason:+ -- $reason}"
+            skipped=1
+            break
+        fi
         if [[ $rc -eq 0 ]]; then
             if [[ $attempt -gt 1 ]]; then
                 echo "    PASS: $name (attempt $attempt/$attempts; earlier failed attempt(s) preserved: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps})"
@@ -174,6 +189,10 @@ for scen in "${scenarios[@]}"; do
         echo "    attempt $attempt/$attempts FAILED (rc=$rc; evidence: ls-ci-$name.attempt$attempt.{log,steps})" >&2
         [[ $attempt -lt $attempts ]] && echo "    retrying (an unexplained early exit -- see the preserved evidence; a retry is NOT a diagnosis)..." >&2
     done
+    if [[ $skipped -eq 1 ]]; then
+        skips=$((skips + 1))
+        continue
+    fi
     if [[ $passed -ne 1 ]]; then
         # An attempt whose VM never STARTED says nothing about the guest, and
         # calling it "a real regression" is failing open (#74). lib.exp records
@@ -205,7 +224,12 @@ if [[ $fails -gt 0 ]]; then
     else
         echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed." >&2
     fi
+    [[ $skips -gt 0 ]] && echo "    ($skips scenario(s) SKIPPED -- a missing optional host artifact, not a guest result)" >&2
     exit 1
 fi
-echo "==> LS-CI: PASS -- all ${#scenarios[@]} scenario(s)."
+if [[ $skips -gt 0 ]]; then
+    echo "==> LS-CI: PASS -- $(( ${#scenarios[@]} - skips ))/${#scenarios[@]} scenario(s); $skips SKIPPED (missing optional host artifact -- NOT a guest result, and NOT coverage)."
+else
+    echo "==> LS-CI: PASS -- all ${#scenarios[@]} scenario(s)."
+fi
 exit 0

@@ -154,6 +154,42 @@ proc lc_raw_send {bytes what} {
     }
 }
 
+# Fail with the guest's OWN reason attached.
+#
+# An arm that matches a bare failure PREFIX (the battery's "tapestry-battery:
+# FAIL") consumes only the prefix; the reason is still unread in the buffer
+# when lc_fail exits, so it is lost. Ground truth (#82, ls-gfx-panes): three
+# preserved attempts ended at exactly "FAIL " / "FAIL s" -- the reason
+# ("synth rel never arrived" vs "synth rel got (dx,dy)", two very different
+# bugs) was raced away by our own teardown, leaving every gfx failure
+# reasonless. A check that cannot say WHY is barely a check (#74).
+#
+# The pattern REQUIRES the line terminator: matching any run of bytes would
+# return whatever happened to have arrived (" s") and reproduce the truncation
+# it exists to fix.
+# NOTE the timeout is set via the GLOBAL, not `expect -timeout 5 {...}`: expect
+# 5.45 (macOS) does not accept -timeout as an option here and silently matches
+# NOTHING, so the capture always fell through to "no reason" -- the exact
+# fail-open this proc exists to close. Caught by exercising the failure path
+# directly before committing; the passing path never runs it.
+proc lc_fail_detail {msg} {
+    global timeout
+    set lc_saved_timeout $timeout
+    set timeout 5
+    set detail ""
+    expect {
+        -re {^([^\r\n]*)[\r\n]} { set detail [string trim $expect_out(1,string)] }
+        timeout {}
+        eof {}
+    }
+    set timeout $lc_saved_timeout
+    if {$detail ne ""} {
+        lc_fail "$msg -- guest reason: $detail"
+    } else {
+        lc_fail "$msg (guest gave no reason within 5s)"
+    }
+}
+
 proc lc_fail {msg} {
     lc_step "FAIL: $msg"
     # Evidence BEFORE the kill: the VM's process state at failure time splits
