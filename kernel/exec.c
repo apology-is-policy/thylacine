@@ -646,5 +646,20 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
     *entry_out = img.entry;
     *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
                                        vdso_va);
+
+    // 4. VIVARIUM V-4a-0: record the executable's namespace name for
+    //    /proc/<pid>/exe. `exe->path` is the #66 Path stalk built while
+    //    exec_resolve_from_namespace resolved this binary -- the only place in
+    //    the system that still knows what the running program is CALLED (the
+    //    Image cache is qid-keyed, the text Burrow anonymous). Set LAST, only
+    //    on the success path, so a Proc never advertises a binary it failed to
+    //    load. NULL-tolerant both ways: the blob init-load path (`/joey`,
+    //    which predates any namespace) and a #66 alloc failure both leave it
+    //    NULL, which renders as an empty file and fails no exec (I-33).
+    //
+    //    Unlocked by construction: this runs in the exec'ing Proc's own
+    //    context, before it has a second thread, and the field's only other
+    //    writers are its own rfork (which precedes this) and its proc_free.
+    proc_set_exe_path(p, exe->path);
     return 0;
 }

@@ -27,6 +27,7 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/page.h>
+#include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>       // prowl-1/3a: sched() + sched_cpu_idle_ns
 #include <thylacine/smp.h>         // prowl-3a: smp_cpu_count() -- last_cpu bound
@@ -63,6 +64,7 @@ void test_devproc_debug_regs(void);
 void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
+void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
 // prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
 void test_devproc_sched_gate_predicate(void);
 void test_devproc_sched_read_gated(void);
@@ -1830,4 +1832,102 @@ void test_devproc_debug_kstack_settled(void) {
     // F3: an EXITING head -> empty (the death-adjacent guard; the relaxed gate no
     // longer rejects a dying target, so the format-time EXITING guard is load-bearing).
     TEST_EXPECT_EQ(slen_exiting, 0L, "8b F3: EXITING head -> empty read (never walk a dying head)");
+}
+
+// =============================================================================
+// VIVARIUM V-4a-0: /proc/<pid>/exe -- the executable's namespace name.
+// =============================================================================
+//
+// The source the diorama re-presents as Linux's /proc/self/exe (VIVARIUM.md
+// section 6.3 Tier 1). Before this, NOTHING in the system knew what a running
+// program was CALLED: struct Proc carried no name, the Image cache is qid-keyed
+// and the text Burrow anonymous, and format_cmdline is a stub -- so the file
+// could not be rendered from any existing surface at all.
+//
+// Drives the real devproc read path on a Proc with a real #66 Path, and pins
+// the four properties a consumer depends on:
+//   (a) the bytes are the path EXACTLY -- no NUL, no newline (readlink("/proc/
+//       self/exe") yields a bare path; a terminator lands inside every caller's
+//       buffer);
+//   (b) no recorded name -> an EMPTY read, never -1 (kproc + the blob-loaded
+//       init /joey legitimately have none -- I-33 fail-soft);
+//   (c) the offset window matches a full read (the 9P/pread path);
+//   (d) proc_set_exe_path is ref-new-BEFORE-unref-old, so the self-assignment
+//       the rfork inherit reaches (a child re-execing the parent's own binary)
+//       cannot free the Path it is about to store.
+void test_devproc_read_exe(void) {
+    u64 alloc0 = path_total_allocated();
+    u64 freed0 = path_total_freed();
+
+    // (b) FIRST, on kproc (pid 0): blob-loaded, so exe_path is NULL. An empty
+    //     read, NOT an error -- the file exists and is honest about not knowing.
+    struct Spoor *ke = open_pidfile_for(0, "exe", 0);
+    TEST_ASSERT(ke != NULL, "open /proc/0/exe (the file exists for a nameless Proc)");
+    char kbuf[64];
+    long kn = devproc.read(ke, kbuf, (long)sizeof(kbuf), 0);
+    spoor_clunk(ke);
+    TEST_EXPECT_EQ(kn, 0L, "V-4a-0: no recorded exe -> empty read (not -1)");
+
+    // A target with a real resolved name, built exactly as stalk builds one.
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc exe target");
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);           // so the /proc/<pid> walk resolves it
+
+    struct Path *root = path_make_root();
+    TEST_ASSERT(root != NULL, "path_make_root");
+    struct Path *bin = path_addelem(root, "bin", 3);
+    TEST_ASSERT(bin != NULL, "path_addelem /bin");
+    struct Path *prog = path_addelem(bin, "diorama", 7);
+    TEST_ASSERT(prog != NULL, "path_addelem /bin/diorama");
+    path_unref(root);
+    path_unref(bin);
+    // prog now holds the sole ref; proc_set_exe_path takes its own.
+    proc_set_exe_path(tgt, prog);
+    path_unref(prog);              // the Proc is the only holder now
+
+    // (d) Self-assignment must NOT free the Path (ref-new-before-unref-old).
+    //     A unref-first implementation drops the last ref here and then refs
+    //     freed storage -- the read below would return garbage or extinct.
+    proc_set_exe_path(tgt, tgt->exe_path);
+
+    char buf[64];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
+    struct Spoor *e = open_pidfile_for(tgt->pid, "exe", 0);
+    long n = -999;
+    if (e) { n = devproc.read(e, buf, (long)sizeof(buf), 0); spoor_clunk(e); }
+
+    // (c) the offset window: bytes [3, 3+len) of a fresh read must match.
+    char wbuf[64];
+    for (size_t i = 0; i < sizeof(wbuf); i++) wbuf[i] = (char)0x55;
+    long wn = -999;
+    struct Spoor *e2 = open_pidfile_for(tgt->pid, "exe", 0);
+    if (e2) { wn = devproc.read(e2, wbuf, 4, 3); spoor_clunk(e2); }
+
+    // Cleanup BEFORE any assert can return and strand the table link.
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    // --- Assert (safe: nothing linked) ---
+    TEST_EXPECT_EQ(n, 12L, "V-4a-0: /proc/<pid>/exe reads the whole path");
+    // (a) the exact bytes, no terminator. Revert-probe: appending a '\n' or a
+    //     NUL in format_exe makes n == 13 and this comparison fail.
+    TEST_ASSERT(n == 12 && buf[0] == '/' && buf[1] == 'b' && buf[2] == 'i' &&
+                buf[3] == 'n' && buf[4] == '/' && buf[5] == 'd' && buf[6] == 'i' &&
+                buf[7] == 'o' && buf[8] == 'r' && buf[9] == 'a' && buf[10] == 'm' &&
+                buf[11] == 'a',
+                "V-4a-0: exe is exactly \"/bin/diorama\" -- no NUL, no newline");
+    TEST_ASSERT(buf[12] == (char)0xAA, "V-4a-0: nothing written past the path");
+    TEST_EXPECT_EQ(wn, 4L, "V-4a-0: offset read returns the window");
+    TEST_ASSERT(wn == 4 && wbuf[0] == 'n' && wbuf[1] == '/' && wbuf[2] == 'd' &&
+                wbuf[3] == 'i',
+                "V-4a-0: exe[3..7) == \"n/di\" (offset window matches)");
+
+    // (d) again, from the other side: every Path this test allocated is freed.
+    //     A leaked ref (proc_free forgetting path_unref) or a double-free (the
+    //     self-assign order bug) both break this equality.
+    TEST_EXPECT_EQ(path_total_allocated() - alloc0,
+                   path_total_freed() - freed0,
+                   "V-4a-0: exe Path refs balance (no leak, no double-free)");
 }

@@ -1595,7 +1595,11 @@ pub struct TSrvPeerInfo {
     pub principal_id: u32,
     pub primary_gid: u32,
     pub flags: u32,
-    pub _reserved: u32,
+    /// V-4a-0b: the peer's pid; 0 when `alive == 0` (fills the former reserved
+    /// pad -- same size + offsets, so this is an append-in-place). The diorama
+    /// resolves `/proc/self/*` through it: `stripes` is an opaque tag with no
+    /// userspace pid mapping.
+    pub pid: u32,
 }
 const _: () = assert!(core::mem::size_of::<TSrvPeerInfo>() == 40);
 

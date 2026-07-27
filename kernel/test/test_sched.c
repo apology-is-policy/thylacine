@@ -349,8 +349,33 @@ void test_sched_notify_idle_peer_smoke(void) {
         return;     // UP — no peer to notify.
     }
 
-    // Settle window: ensure secondaries are in WFI before we start.
-    timer_busy_wait_ticks(2);
+    // Settle: WAIT UNTIL a secondary is observably parked, don't just hope.
+    //
+    // notify_idle_peer IPIs a peer only if it observes that peer ALREADY idle
+    // (sched_idle_in_wfi). So if no secondary has reached WFI by the time
+    // ready() runs, NO IPI is sent -- correctly -- and the old fixed
+    // timer_busy_wait_ticks(2) settle turned that lost race into a test
+    // failure that looks like a broken mechanism. Observed 1-in-10 on the
+    // smp4 gate under host contention.
+    //
+    // Spin on the real precondition instead (the task-#20 / #28 spin-until
+    // idiom), so a subsequent miss is a GENUINE defect rather than a lost
+    // race. The budget is ~200 ms against a ~5 ms expectation: the test phase
+    // is quiescent, so a secondary parks almost immediately, and expiry means
+    // something is actually wrong -- reported with its OWN message so a
+    // precondition failure is never mistaken for an IPI failure, and never
+    // silently skipped.
+    const int SETTLE_BUDGET_TICKS = 200;
+    bool any_secondary_parked = false;
+    for (int i = 0; i < SETTLE_BUDGET_TICKS && !any_secondary_parked; i++) {
+        for (unsigned c = 1; c < DTB_MAX_CPUS; c++) {
+            if (sched_idle_in_wfi(c)) { any_secondary_parked = true; break; }
+        }
+        if (!any_secondary_parked) timer_busy_wait_ticks(1);
+    }
+    TEST_ASSERT(any_secondary_parked,
+        "no secondary reached idle WFI within the settle budget "
+        "(the notify precondition, not the IPI itself)");
 
     // Snapshot per-secondary IPI counts before.
     u64 ipi_before[DTB_MAX_CPUS];
@@ -369,20 +394,25 @@ void test_sched_notify_idle_peer_smoke(void) {
     TEST_ASSERT(t != NULL, "thread_create failed");
     ready(t);
 
-    // Allow the IPI to deliver + secondary to process. 5 ticks ~5 ms.
-    timer_busy_wait_ticks(5);
+    // Wait for delivery the same way: spin until a secondary's IPI count
+    // moves, rather than sampling once after a fixed 5 ticks. Same budget,
+    // same reasoning -- an IPI that needs > 200 ms to land is a real defect,
+    // whereas one that needs > 5 ms is just a loaded host.
+    const int DELIVER_BUDGET_TICKS = 200;
+    bool any_secondary_received = false;
+    for (int i = 0; i < DELIVER_BUDGET_TICKS && !any_secondary_received; i++) {
+        for (unsigned c = 1; c < DTB_MAX_CPUS; c++) {
+            if (g_ipi_resched_count[c] > ipi_before[c]) {
+                any_secondary_received = true;
+                break;
+            }
+        }
+        if (!any_secondary_received) timer_busy_wait_ticks(1);
+    }
 
     // Restore notify state for subsequent tests (UP-like assumption).
     sched_set_notify_enabled(false);
 
-    // At least one secondary's IPI count should have increased.
-    bool any_secondary_received = false;
-    for (unsigned i = 1; i < DTB_MAX_CPUS; i++) {
-        if (g_ipi_resched_count[i] > ipi_before[i]) {
-            any_secondary_received = true;
-            break;
-        }
-    }
     TEST_ASSERT(any_secondary_received,
         "at least one secondary received IPI_RESCHED via notify_idle_peer");
 

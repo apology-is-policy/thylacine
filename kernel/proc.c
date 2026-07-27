@@ -28,6 +28,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
+#include <thylacine/path.h>        // VIVARIUM V-4a-0: Proc.exe_path (#66 Path)
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
@@ -266,6 +267,19 @@ void proc_init(void) {
 
 struct Proc *kproc(void) {
     return g_kproc;
+}
+
+// VIVARIUM V-4a-0: record `path` as `p`'s executable name (the /proc/<pid>/exe
+// source). See the proc.h contract. Ref-new-BEFORE-unref-old is load-bearing
+// for the self-assignment case (proc_set_exe_path(p, p->exe_path), which the
+// rfork inherit reaches whenever a child re-execs the parent's own binary):
+// unref-first would drop the last ref and then ref freed storage.
+void proc_set_exe_path(struct Proc *p, struct Path *path) {
+    if (!p) return;
+    struct Path *old = p->exe_path;
+    path_ref(path);        // NULL-safe
+    p->exe_path = path;
+    path_unref(old);       // NULL-safe
 }
 
 // 2B-F3: publish `p` as init (the orphan-adopter). Called once per boot
@@ -537,6 +551,14 @@ void proc_free(struct Proc *p) {
     // independent of the frees above; owned 1:1 by this Proc (RFENVG sharing
     // deferred), so this is the sole release.
     env_free(p);
+
+    // VIVARIUM V-4a-0: drop this Proc's ref on its executable's #66 Path.
+    // NULL-tolerant (path_unref ignores NULL), and shared with any Spoor /
+    // forked child still naming the same binary -- the Path frees only with
+    // its last holder. Safe here because /proc readers hold g_proc_table_lock
+    // and a Proc reaches proc_free only after leaving the table.
+    path_unref(p->exe_path);
+    p->exe_path = NULL;
 
     // 8a-2b (I-39): release the per-Proc HW-breakpoint table (NULL-tolerant). A
     // plain heap struct freed ONLY here at reap -- never at detach -- so the
@@ -1069,6 +1091,13 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
     // vivarium sets it in the first place.
     child->phenotype      = parent->phenotype;
+    // VIVARIUM V-4a-0: the executable name is INHERITED (a fork-without-exec
+    // keeps running the parent's binary -- POSIX, and the honest answer for
+    // /proc/<pid>/exe). Every v1.0 spawn execs immediately afterwards and
+    // replaces it via proc_set_exe_path. Purely cosmetic (I-33): the Path is
+    // an immutable string nothing resolves through, and sharing the parent's
+    // is exactly right -- both Procs really are running that binary.
+    proc_set_exe_path(child, parent->exe_path);
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
@@ -1696,6 +1725,7 @@ struct peer_snapshot_ctx {
     u32    principal_id;  // OUT — A-1a: the peer's durable identity
     u32    primary_gid;   // OUT — A-1a: the peer's primary group
     bool   renderer;      // OUT — cfg-3: matched Proc IS g_console_renderer
+    int    pid;           // OUT — V-4a-0b: the peer's pid (the diorama's `self`)
     bool   found;         // OUT — set once an ALIVE Proc matched
 };
 
@@ -1713,6 +1743,10 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
         // (proc_for_each holds it across the walk) — a match implies a live
         // holder; compare-only, never a deref.
         c->renderer     = (g_console_renderer == p);
+        // V-4a-0b: the pid rides the SAME alive-gated snapshot as caps +
+        // identity, so a dead/reaped peer fail-closes to 0 -- never a stale
+        // pid a server could resolve against a REUSED table entry.
+        c->pid          = p->pid;
         c->found        = true;
         return 1;                 // first match wins — stop the walk
     }
@@ -1721,7 +1755,7 @@ static int peer_snapshot_cb(struct Proc *p, void *arg) {
 
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                    u32 *principal_out, u32 *primary_gid_out,
-                                   bool *renderer_out) {
+                                   bool *renderer_out, int *pid_out) {
     // 0 is the reserved fail-closed sentinel; no Proc is ever stamped 0,
     // so it can never match. Reject it before the scan. Out-params may be
     // NULL — the caller takes only what it needs.
@@ -1732,6 +1766,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                      .principal_id = PRINCIPAL_NONE,
                                      .primary_gid  = GID_NONE,
                                      .renderer     = false,
+                                     .pid          = 0,
                                      .found        = false };
     // proc_for_each holds g_proc_table_lock across the whole DFS, so the
     // callback's "is this Proc ALIVE" test and its field reads are one
@@ -1743,6 +1778,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
     if (principal_out)   *principal_out   = ctx.principal_id;
     if (primary_gid_out) *primary_gid_out = ctx.primary_gid;
     if (renderer_out)    *renderer_out    = ctx.renderer;
+    if (pid_out)         *pid_out         = ctx.pid;
     return true;
 }
 
@@ -1751,7 +1787,7 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
 // specs/corvus.tla ConnOpPeerWasLive) unchanged for current callers.
 bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
     if (!caps_out) return false;
-    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL);
+    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL, NULL, NULL);
 }
 
 // A-1a: proc_apply_identity — the single audited identity mutation site.

@@ -61,6 +61,7 @@ _Static_assert(PROC_STATE_INVALID == 0,
 struct Territory;
 struct HandleTable;
 struct Vma;
+struct Path;      // VIVARIUM V-4a-0: Proc.exe_path (the #66 namespace name)
 struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
 struct Spoor;       // 8a-1b debug_owner slot token (<thylacine/spoor.h>)
@@ -688,6 +689,44 @@ struct Proc {
     // by /proc/<pid>/status + /ctl/procs. NOT rfork-inherited by the field
     // itself, but the child re-execs and re-stamps its own name at exec_setup.
     char               name[PROC_NAME_MAX];
+
+    // VIVARIUM V-4a-0: the namespace name of the executable this Proc is
+    // running -- the #66 `Path` of the Spoor `exec_resolve_from_namespace`
+    // resolved, ref-held for the Proc's life. The source for
+    // `/proc/<pid>/exe`, which the diorama re-presents as Linux's
+    // `/proc/self/exe` (VIVARIUM.md section 6.3 Tier 1).
+    //
+    // COMPLEMENTARY TO `name[]` ABOVE, not redundant with it, though the two
+    // were written independently on separate branches and both originally
+    // claimed offset 352. `name[]` is a bounded COPY of the BASENAME, which is
+    // what a process listing wants and which survives a Path-alloc failure;
+    // `exe_path` is the FULL absolute path, which is what Linux's
+    // readlink("/proc/self/exe") means and which a basename cannot reconstruct.
+    // Deriving one from the other is a plausible later tidy-up -- recorded as a
+    // follow-up rather than done inside a merge resolution, since collapsing
+    // them changes both prowl's and the diorama's contracts.
+    //
+    // Why the kernel has to hold it: nothing else does. The Image cache is
+    // qid-keyed, the text Burrow knows no name -- so `/proc/<pid>/exe` cannot be
+    // rendered from any existing surface, and a userspace server cannot invent
+    // it without becoming an authority (VIVARIUM.md section 6.2). The resolver
+    // already holds exactly the right string; this pins a ref to it.
+    //
+    // STRICTLY NON-LOAD-BEARING (I-33, inherited from Path): nothing resolves,
+    // permits, or decides through it. NULL is a valid state and renders as an
+    // empty file -- kproc and the init-load `/joey` (which predates any
+    // namespace, so it takes the blob path) legitimately have none, and a
+    // Path-alloc failure leaves it NULL without failing the exec.
+    //
+    // Lifetime: set ONLY at the tail of a SUCCESSFUL exec_setup_from_spoor
+    // (proc_set_exe_path: ref-new-then-unref-old, so a re-exec never transits
+    // through a dangling pointer), rfork-INHERITED (a fork-without-exec keeps
+    // running the parent's binary; every v1.0 spawn then execs and replaces
+    // it), released at proc_free. Read locklessly by /proc: the Path string is
+    // immutable and its ref is held for the whole read window by the reader's
+    // g_proc_table_lock (the #57a-F2 envelope), exactly as format_ns reads the
+    // Territory's mount Paths.
+    struct Path       *exe_path;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -762,18 +801,26 @@ struct Proc {
 // renderer's claim under g_proc_table_lock); cleared on the holder's death.
 #define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
-_Static_assert(sizeof(struct Proc) == 384,
-               "prowl-1 appended name[PROC_NAME_MAX=32] (the process name) after "
-               "shared_map_pages @348..352: 352 -> 384. "
-               "The 352 baseline was the 328 baseline + the 8c-2 "
-               "#95 debug_focus_thread pointer @328 + the PTY-1a sid/pgid pair "
-               "@336/@340 + the PTY-1e report latches @344/@345 + the G-2 "
-               "shared_map_pages @348 in the former tail pad. "
+_Static_assert(sizeof(struct Proc) == 392,
+               "struct Proc size pinned at 392 bytes. The 352 baseline (the 328 "
+               "baseline + the 8c-2 #95 debug_focus_thread @328 + the PTY-1a "
+               "sid/pgid pair @336/@340 + the PTY-1e report latches @344/@345 + "
+               "the G-2 shared_map_pages @348 filling the former tail pad) then "
+               "prowl-1's name[PROC_NAME_MAX=32] @352 -> 384, then the VIVARIUM "
+               "V-4a-0 exe_path pointer @384 -> 392. prowl-1 and V-4a-0 were "
+               "written on separate branches and BOTH originally appended at 352; "
+               "the merge stacked them (see the field comments -- they are "
+               "complementary, basename-copy vs full-Path). "
                "Adding a field grows the SLUB cache; update this assert "
                "deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, name) == 352,
                "prowl-1 name[] appends after shared_map_pages @348+4=352; "
                "KP_ZERO leaves it \"\" until proc_set_name at exec.");
+_Static_assert(__builtin_offsetof(struct Proc, exe_path) == 384,
+               "VIVARIUM V-4a-0 exe_path (the #66 Path of the running executable, "
+               "the /proc/<pid>/exe source) appends after prowl-1's name[] @352+32 "
+               "= 384, itself 8-aligned. Every pre-existing offset stays stable; "
+               "KP_ZERO-fresh NULL == 'unknown name' (I-33).");
 _Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
                "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
                "pages) occupies the former 348..352 tail pad after the PTY-1e "
@@ -864,6 +911,20 @@ void proc_init(void);
 
 // Accessor for the kernel proc (PID 0). Returns NULL before proc_init.
 struct Proc *kproc(void);
+
+// VIVARIUM V-4a-0: record `path` as this Proc's executable name (Proc.exe_path;
+// the /proc/<pid>/exe source). Takes a ref on the NEW path BEFORE dropping the
+// OLD one, so a re-exec never leaves the field pointing at freed storage even
+// when both are the same Path. `path` may be NULL (an unnamed exec -- the blob
+// init-load path, or a #66 alloc failure): the field then becomes NULL and the
+// file renders empty, which is I-33's fail-soft, never an exec failure.
+//
+// Called ONLY from the tail of a successful exec_setup_from_spoor, in the
+// exec'ing Proc's own context before it has any peer thread, so it needs no
+// lock: the sole writer is the Proc itself and readers hold g_proc_table_lock,
+// which the exec'ing thread is not under. The rfork inherit and the proc_free
+// release are the other two lifecycle points.
+void proc_set_exe_path(struct Proc *p, struct Path *path);
 
 // 2B-F3: publish `p` as init — the orphan-adopter (ARCH section 7.9
 // step 6). Called once per boot from joey_thunk in the child's own
@@ -1635,9 +1696,13 @@ bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
 // holds the LIVE console-RENDERER role (the G-4 single-holder — the same
 // lock the claim/release/compare discipline uses covers the walk), feeding
 // the SRV_PEER_FLAG_CONSOLE_RENDERER stamp; fail-closed false on no match.
+// VIVARIUM V-4a-0b: `pid_out` reports the matched Proc's pid, feeding
+// srv_peer_info.pid. It rides the SAME alive-gated walk as caps + identity, so
+// a dead/reaped peer fail-closes to 0 -- never a stale pid a server could
+// resolve against a REUSED table entry.
 bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
                                    u32 *principal_out, u32 *primary_gid_out,
-                                   bool *renderer_out);
+                                   bool *renderer_out, int *pid_out);
 
 // =============================================================================
 // A-1a: identity mutation (the single audited write site).

@@ -41,6 +41,7 @@
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
+#include <thylacine/path.h>     // V-4a-0: Proc.exe_path rendering
 #include <thylacine/sched.h>  // prowl-3b: SCHED_BAND_* -- /proc/<pid>/sched band names
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
@@ -81,6 +82,10 @@ enum {
     PQS_KREGS    = 10,       // /proc/<pid>/kregs            (QTFILE; 8a-1b-gamma-3, I-39; RO, kernel-side frame)
     PQS_KSTACK   = 11,       // /proc/<pid>/kstack           (QTFILE; 8a-1b-gamma-3, I-39; RO, symbolized kernel bt)
     PQS_SCHED    = 12,       // /proc/<pid>/sched            (QTFILE; prowl-3b; RO, OQ-4 owner-or-CAP_HOSTOWNER)
+    // prowl-3b and VIVARIUM V-4a-0 were written on separate branches and both
+    // took subkind 12; the merge kept SCHED at 12 (already landed in main) and
+    // moved EXE to 13. Subkinds are kernel-internal qid encoding, not ABI.
+    PQS_EXE      = 13,       // /proc/<pid>/exe              (QTFILE; VIVARIUM V-4a-0; RO, the executable's namespace name)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -117,6 +122,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "wait",    PQS_WAIT    },
     { "kregs",   PQS_KREGS   },
     { "kstack",  PQS_KSTACK  },
+    { "exe",     PQS_EXE     },
     { "sched",   PQS_SCHED   },
 };
 
@@ -381,6 +387,39 @@ static size_t format_ns(struct Proc *p, char *buf, size_t cap) {
     return (size_t)territory_format_ns(p->territory, buf, (u64)cap);
 }
 
+// exe: the namespace name of the running executable (VIVARIUM V-4a-0) -- the
+// source the diorama re-presents as Linux's /proc/self/exe. NOT NUL- or
+// newline-terminated: a path is a byte string and Linux's readlink("/proc/self/
+// exe") yields the bare path, so a trailing newline here would land inside every
+// consumer's buffer. Empty (0 bytes) when the Proc has no recorded name -- kproc
+// and the blob-loaded init /joey, or a #66 Path alloc failure (I-33 fail-soft).
+//
+// Runs under g_proc_table_lock (proc_for_each), which keeps `p` alive; the Path
+// itself is immutable + ref-held for p's whole life, so the string is stable for
+// the copy. Same discipline as format_ns reading the Territory's mount Paths.
+//
+// Posture: ungated, like status / cmdline / ns (devproc.perm_enforced == false,
+// Plan 9 all-pids-visible). This adds nothing to the disclosure envelope --
+// /proc/<pid>/ns already renders the target's ENTIRE mount list with source
+// names, which strictly dominates one executable path. Visibility, not
+// authority (the #57a line); the I-26 two-axis gate on ctl writes is untouched.
+static size_t format_exe(struct Proc *p, char *buf, size_t cap) {
+    const struct Path *path = p->exe_path;
+    if (!path) return 0;
+    // Return the CLAMPED length, like every sibling generator (each fmt_* is
+    // cap-checked, so format_status/ns also return only what they produced).
+    // Load-bearing, not stylistic: devproc_read trusts this as the total and
+    // copies content[off .. off+n) out of a DEVPROC_READ_BUF (512) stack
+    // buffer. A Path may be up to SYS_OPEN_PATH_MAX (1024), so returning the
+    // TRUE length would let a read at off >= 512 copy adjacent kernel stack to
+    // EL0 -- an OOB read and an I-13 leak. Clamping makes a pathological path
+    // read as truncated (honest) instead.
+    size_t n = (size_t)path->len;
+    if (n > cap) n = cap;
+    for (size_t i = 0; i < n; i++) buf[i] = path->s[i];
+    return n;
+}
+
 // 8a-2a: the /proc/<pid>/ctl READ. ctl is write-only (empty read) EXCEPT the
 // self-scoped hardware-breakpoint verify result: if the READER is the Proc that
 // armed a verify (a self-read of its own ctl -- current_thread()->proc == p),
@@ -564,7 +603,8 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_SCHED:   return 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
     case PQS_STATUS:
     case PQS_CMDLINE:
-    case PQS_NS:      return 0444u;
+    case PQS_NS:
+    case PQS_EXE:     return 0444u;   // V-4a-0: an info file, same posture as ns
     case PQS_PID_DIR: return 0555u;
     default:          return 0u;
     }
@@ -776,6 +816,7 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_STATUS:  r->total = format_status(p, r->buf, r->cap);  break;
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
+    case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
         r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
@@ -824,7 +865,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // formats the readable file kinds.
     if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) return -1;
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
-        kind != PQS_CTL && kind != PQS_SCHED) return -1;
+        kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED) return -1;
 
     // prowl-3b (OQ-4): capture the reading Proc BEFORE the lock so the gated
     // PQS_SCHED kind can be authorized against the target found inside the walk.
