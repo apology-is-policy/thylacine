@@ -386,6 +386,7 @@ void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_attach_lazy_large(void);
+void test_sys_burrow_lazy_len_from_args(void);
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
 void test_torpor_wake_rejects_bad_args(void);
@@ -573,6 +574,7 @@ void test_devdev_walk_to_each_leaf(void);
 void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
+void test_devdev_stat_native_leaves(void);       // CL-4 merge: all-leaf shapes
 void test_devdev_cons_gate(void);
 void test_devdev_consctl_renderer_mint(void);    // #55
 void test_devdev_winsize_leaf(void);             // #55
@@ -1732,6 +1734,7 @@ struct test_case g_tests[] = {
     { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
     { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
+    { "sys_burrow.lazy_len_from_args",        test_sys_burrow_lazy_len_from_args,        false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
     { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },
@@ -1934,6 +1937,7 @@ struct test_case g_tests[] = {
     { "devdev.walk_unknown_misses",    test_devdev_walk_unknown_misses,    false, NULL },
     { "devdev.walk_pts_dir",           test_devdev_walk_pts_dir,           false, NULL },
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
+    { "devdev.stat_native_leaves",     test_devdev_stat_native_leaves,     false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },

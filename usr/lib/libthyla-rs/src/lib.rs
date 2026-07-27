@@ -1848,6 +1848,12 @@ pub unsafe fn t_burrow_attach_lazy(length: u64) -> i64 {
     asm!(
         "svc #0",
         inlateout("x0") x0,
+        // CL-4: the dispatch also accepts the Linux 6-arg anon-mmap shape
+        // (length in x1 when x0 == 0), so x1 must not be left holding whatever
+        // the compiler had live there -- otherwise length == 0 would return a
+        // mapping on one build and -1 on another. Pinning it 0 keeps the
+        // documented "length == 0 -> -1" above deterministically true.
+        in("x1") 0u64,
         in("x8") T_SYS_BURROW_ATTACH_LAZY,
         options(nostack)
     );

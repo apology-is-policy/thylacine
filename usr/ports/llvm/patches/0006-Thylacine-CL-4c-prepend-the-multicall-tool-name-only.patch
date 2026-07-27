@@ -1,0 +1,70 @@
+From e7d6be5f8acce407dd0b312b9d67629dbc251fcb Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 27 Jul 2026 06:44:31 +0200
+Subject: [PATCH 6/6] Thylacine CL-4c: prepend the multicall tool name only
+ when the exec path needs it
+
+The llvm multicall driver dispatches on argv[0], so a sub-invocation whose
+executable does not name the wanted tool must be told which to become; that is
+Driver::PrependArg. clang set it whenever `NeedsPrependArg || CanonicalPrefixes`,
+and CanonicalPrefixes defaults on, so a directly-invoked tool got PrependArg =
+filename(argv0) even though NeedsPrependArg was false. The comment justified the
+disjunct with "PrependArg will be null so setPrependArg will be a no-op" -- true
+only for non-multicall builds, where main() passes a null PrependArg. In a
+multicall build llvm-driver.cpp's MakeDriverArgs always supplies a name.
+
+That is harmless when the install uses symlinks, because getMainExecutable
+canonicalises bin/clang++ back to bin/llvm and the child really does need the
+name. It is wrong when the tool is a plain copy, or on a target where
+getMainExecutable cannot canonicalise at all and returns argv0: Path already
+names the tool, and Command::Execute emits [Path, "clang++", "-cc1", ...]. The
+cc1 child then fails clang_main's `Args[1] == "-cc1"` test, re-enters as a
+driver, and rejects "-cc1" as an unknown argument. The integrated path breaks
+identically, since ExecuteCC1Tool also reads ArgV[1].
+
+Prepend only when what we will exec does not already name the tool we need it to
+be. Symlink installs and `llvm clang++ ...` are unaffected; copy installs and
+canonicalisation-less targets now work. Thylacine is the latter on both counts:
+it has no symlinks, so /clade/bin/clang++ is a copy, and no /proc/self/exe.
+---
+ clang/tools/driver/driver.cpp | 24 ++++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/clang/tools/driver/driver.cpp b/clang/tools/driver/driver.cpp
+index 490136961..7d2d74c10 100644
+--- a/clang/tools/driver/driver.cpp
++++ b/clang/tools/driver/driver.cpp
+@@ -358,12 +358,24 @@ int clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
+                    /*Title=*/"clang LLVM compiler", VFS);
+   auto TargetAndMode = ToolChain::getTargetAndModeFromProgramName(ProgName);
+   TheDriver.setTargetAndMode(TargetAndMode);
+-  // If -canonical-prefixes is set, GetExecutablePath will have resolved Path
+-  // to the llvm driver binary, not clang. In this case, we need to use
+-  // PrependArg which should be clang-*. Checking just CanonicalPrefixes is
+-  // safe even in the normal case because PrependArg will be null so
+-  // setPrependArg will be a no-op.
+-  if (ToolContext.NeedsPrependArg || CanonicalPrefixes)
++  // PrependArg tells a sub-invocation which tool of the llvm multicall driver
++  // to become. It is needed exactly when the executable we will re-invoke
++  // (Path) does not itself name this tool: with -canonical-prefixes,
++  // GetExecutablePath resolves a tool-named *symlink* back to the llvm driver
++  // binary, so the child would dispatch on "llvm" and must be told the tool.
++  //
++  // When the tool is instead installed as a plain copy -- or on a target where
++  // getMainExecutable cannot canonicalise at all (no /proc/self/exe), so Path
++  // is just argv0 -- Path already names the tool and the child re-dispatches on
++  // argv[0]. Prepending there is not merely redundant but wrong: it shifts
++  // -cc1 to argv[2], the cc1 child fails clang_main's `Args[1] == "-cc1"` test
++  // and re-enters as a driver, and rejects its own -cc1 arguments. (The same
++  // shift breaks the in-process path, whose ExecuteCC1Tool reads ArgV[1] too.)
++  // So compare what we will exec against the tool we need it to be.
++  if (ToolContext.NeedsPrependArg ||
++      (CanonicalPrefixes && ToolContext.PrependArg &&
++       llvm::sys::path::filename(Path) !=
++           llvm::sys::path::filename(ToolContext.PrependArg)))
+     TheDriver.setPrependArg(ToolContext.PrependArg);
+ 
+   insertTargetAndModeArgs(TargetAndMode, Args, SavedStrings);
+-- 
+2.43.0
+
