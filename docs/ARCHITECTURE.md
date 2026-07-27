@@ -2271,11 +2271,13 @@ Out at v1.0: `epoll_*`, `inotify_*`, `io_uring_*`, `bpf`, `perf_event_open`, `pt
 
 **Network sockets are intentionally absent from the kernel syscall surface.** `socket`/`connect`/`bind`/`listen`/`accept`/`sendto`/`recvfrom` are NOT kernel syscalls (the network is 9P; NOVEL #1). Linux/pouch binaries reach them through a pouch boundary-line that translates each to `/net/tcp/clone` file operations (the Genode `socket_fs`-in-libc model); native programs use `/net` directly. See `NET-DESIGN.md` §7 (the #68 charter) -- this reconciles the long-standing ROADMAP §9.1 "socket shim" claim with §11.5's zero socket syscalls (HOLOTYPE W4-F2).
 
+**REFINEMENT (VIVARIUM R-2, 2026-07-23): the claim is "zero socket syscalls NATIVELY."** The pouch boundary-line is a COMPILE-TIME seam -- it works because we patch musl. An *unmodified* Linux binary (Phase 8's fourth pole) has no pouch libc and issues `socket(2)`/`connect(2)`/`sendto(2)` as raw syscalls, so the Linux **phenotype** must supply the BSD socket family as a translation onto the same `/net` file operations, in exactly one place. The native kernel surface stays socket-free (NOVEL #1 intact); the compatibility ABI does not get to be. See `docs/VIVARIUM.md` §1.3 + §5.5 (DESIGN).
+
 ### 11.6 Syscall ABI
 
 ARM64: x0-x7 carry up to 8 args; x8 carries the syscall number; `SVC #0` traps. Return value in x0; second return (e.g., for `pipe`) in x1. Errors signaled by negative x0 with errno in `errstr` (Plan 9 style); musl translates to negative-errno return.
 
-The kernel uses a monotonic syscall number territory; Linux syscall numbers don't overlap (kernel has its own numbering). The Linux shim has a separate entry path that decodes Linux numbers and dispatches.
+The kernel uses a monotonic syscall number territory. **CORRECTION (VIVARIUM R-1, 2026-07-23): an earlier revision of this paragraph claimed "Linux syscall numbers don't overlap (kernel has its own numbering)" — that is FALSE as-built.** Thylacine's numbers run `0..100` and Linux aarch64's run `0..~460`; they occupy the same low range and collide densely (Thylacine `SYS_WEFT_SHARE = 81` vs Linux `sync = 81`, etc.). `svc #0` + `x8` therefore CANNOT by itself tell the kernel which ABI the caller speaks. The Linux shim's "separate entry path" is consequently NOT a number-range split but a **per-Proc phenotype** consulted at syscall entry and set at exec from the ELF brand — the FreeBSD-`sysentvec` / illumos-LX mechanism, which every system that runs unmodified foreign binaries uses. See `docs/VIVARIUM.md` §1.2 + §5 (DESIGN; the architectural fork is open pending signoff).
 
 ### 11.7 Open design questions
 
