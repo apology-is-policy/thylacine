@@ -64,9 +64,33 @@ accessor and an existing lock-order precedent before budgeting either.**
 §6.8: the kernel emits a Thylacine-native table, the diorama translates. Anything
 else is phenotype leaking into the kernel.
 
-**NEXT: the rest of V-4b** — `/proc/<pid>/…` per-pid, `sys/kernel`, and
-`/self/{fd,environ,auxv}`. Then V-4c (`/sys` + Linux `/dev` + per-container mounts
-+ focused audit).
+**V-4b-3 is DONE**: the numeric `/proc/<pid>/…` dirs, the root pid enumeration,
+and `sys/kernel/{ostype,osrelease,version,hostname}`. **Pure userspace this time —
+kernel byte-unchanged** — and the reason is worth carrying forward: `/self` was
+*always* a per-pid render with the pid supplied by the connection's peer rather
+than by the path, so the pid had been a parameter from the start and per-pid was a
+generalization, not a new mechanism.
+
+Two design findings landed with it:
+
+- **§6.9 — the fourth source.** `sys/kernel/ostype` reformats nothing; the answer
+  *is* the phenotype. That is not a §6.2 violation (a constant carries no
+  information about the system, so there is nothing to leak), but the distinction
+  had to be written down or it becomes the loophole every later file is argued
+  through. The rule: *derived from kernel state needs a native source; a constant
+  declaring which ABI you are looking at is the phenotype speaking about itself.*
+- **§7.1 — the V-7 pid-visibility obligation.** The diorama's pid view matches
+  native `/proc`'s exactly (all-pids, Plan 9 posture), so there is no new
+  authority — but a contained Proc seeing every host pid is a leak, and that leak
+  is in native `/proc` + `/ctl/procs` first. Scoping the diorama alone would be
+  theatre. Owed at V-7, against the native surface.
+
+**NEXT: the V-4b remainder** — and it is three different-shaped jobs, not one
+(§6.10): `environ` needs a kernel source (`/env` is self-only by construction);
+`auxv` needs one too and its value should be weighed first; `fd` is **blocked on
+#66c**, the #926 handle-table lifetime restructure, which is a kernel chunk rather
+than a Vivarium one. Then V-4c (`/sys` + Linux `/dev` + per-container mounts +
+focused audit).
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

@@ -432,12 +432,23 @@ compatibility shim becomes a privilege hole.
 
 **Tier 1 — has a consumer TODAY** (this is why V-4 is not scaffolding):
 
-- **`/proc/self/exe`** — *the load-bearing one*. Nothing in the tree provides it
+- **`/proc/self/exe`** — *the load-bearing one*. Nothing in the tree provided it
   (grep-verified 2026-07-23), which is exactly why the Clade fork had to patch LLVM's
-  `getMainExecutable` to fall back to `argv[0]` (fork patch `0001`, CL-3). With
-  `/proc/self/exe` present, that fork delta can be revisited and LLVM's
-  upstream-shaped path works. A **pouch** program benefits immediately — it needs no
-  phenotype at all.
+  `getMainExecutable` to fall back to `argv[0]` (fork patch `0001`, CL-3).
+
+  **CORRECTION (V-4b-3): V-4a served this file, but not yet in the shape that
+  consumer needs, so the fork delta CANNOT be revisited yet.** Linux serves
+  `/proc/self/exe` as a **symlink** — `readlink()` yields the path, while
+  `open()`+`read()` yields the executable's *bytes*. The diorama serves a regular
+  file whose *contents* are the path, so `readlink()` returns `EINVAL` and LLVM
+  (which calls exactly `readlink`) still falls through to `argv[0]`; the LLVM patch
+  `0006` says as much in its own words. The blocker is structural rather than a
+  diorama bug: **there is no `SYS_READLINK` — Thylacine has no EL0 symlink surface
+  at all** (the 9P `Treadlink`/`Rreadlink` ops exist but are used only by the
+  kernel's own client and Loom's `READLINK` opcode). Tracked, with the likely
+  resolution being to translate `readlink()` in the **phenotype** (V-2's table)
+  rather than to grow a symlink surface — a total, stateless translation, which is
+  precisely what fork Option C's in-kernel fast path is for.
 - `/proc/self/cmdline`, `/proc/self/status`, `/proc/self/maps` — allocators, crash
   handlers, and every "what am I" probe.
 - `/proc/meminfo`, `/proc/cpuinfo`, `/proc/uptime`, `/proc/stat`.
@@ -460,7 +471,8 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4a** | **LANDED.** `usr/diorama` + Tier 1 + the selftest + `/bin/diorama-probe` (as-built: `docs/reference/141-diorama.md`) | **MET** -- the probe mounts the diorama itself and reads `/self/exe` back as `/bin/diorama-probe` |
 | **V-4b-1** | **LANDED.** `/self/cwd` + its kernel source `/proc/<pid>/cwd` | the probe reads a non-empty absolute cwd in-guest |
 | **V-4b-2** | **LANDED.** `/self/maps` + its kernel source `/proc/<pid>/maps` | the probe reads a Linux-shaped map with `[stack]` + a file-backed row naming the binary |
-| **V-4b** | the rest of Tier 2 (`/self/maps` + per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
+| **V-4b-3** | **LANDED.** the numeric `/proc/<pid>/…` dirs + the root pid enumeration + `sys/kernel/{ostype,osrelease,version,hostname}` | the probe reads its OWN pid's dir, finds itself in the root readdir, and gets ENOENT for a pid that cannot exist |
+| **V-4b** | the rest of Tier 2 (`self/{fd,environ,auxv}`) | see §6.10 — `fd` is blocked on the #66c handle-table lifetime, `environ`/`auxv` each need a kernel source |
 | **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
@@ -570,6 +582,15 @@ and for `maps` the lock discipline was already paid for. The pattern that keeps
 holding is narrower than "these need kernel work": **it is worth grepping for an
 existing accessor and an existing lock-order precedent before budgeting either.**
 
+**V-4b-3 is the counter-case, and it sharpens the rule.** Per-pid `/proc/<pid>/…`
+looked like the biggest of the three and needed **no kernel work at all** — because
+`/self` was never a special file. It was always a per-pid render with the pid
+supplied by the *connection's peer* rather than by the *path*, so the pid had been
+a parameter since V-4a and per-pid was a generalization of an existing mechanism.
+So the question to ask before budgeting is not only "does a native source exist"
+but **"is this file already being rendered under another name?"** — and here the
+answer was yes, five times over.
+
 ### 6.8 Where the Linux shape lives — the `maps` split
 
 `/proc/<pid>/maps` is the first file where the native and Linux renderings differ
@@ -608,6 +629,61 @@ A guard VMA is emitted, never hidden: `---p` with no pathname is byte-for-byte
 how Linux shows a `PROT_NONE` guard page, and dropping the row would make the map
 claim the range is free.
 
+### 6.9 The fourth source — the phenotype's self-description (V-4b-3)
+
+`/proc/sys/kernel/{ostype,osrelease,version}` are the first diorama files that do
+**not** reformat a native source. There is no kernel state to reformat: the answer
+*is* the phenotype. This looks like a violation of §6.2's "three sources" and is
+not, but the distinction has to be stated precisely or it becomes the loophole
+every future file is argued through.
+
+§6.2 exists to stop the diorama becoming an **authority** — serving something the
+native surface would have refused. A constant carries no information about the
+system at all, so there is nothing for it to leak; what it describes is this
+server's own property. Hence the rule to hold to, for every file added after
+these:
+
+> A value **derived from kernel state** needs a native source, no exceptions. A
+> **constant declaring which ABI the caller is looking at** is the phenotype
+> speaking about itself. If a file cannot be argued into the second category in
+> one sentence, it belongs in the first.
+
+Two of the four are worth their own note:
+
+- **`osrelease` = `6.1.0-thylacine`.** This is the one constant with teeth:
+  glibc-linked programs parse it and some refuse to start below a minimum kernel
+  (3.2 for modern glibc). 6.1 clears every such check. The `-thylacine` suffix is
+  the honesty — Linux's own convention carries local suffixes (`-generic`,
+  `-arch1-1`), so a parser that copes with real distro kernels copes with this,
+  while anything that *prints* the string tells the truth. **Stated tradeoff**: a
+  program could version-gate a feature on the number and take a path we do not
+  implement. Declaring low instead makes those same programs refuse to run at all,
+  which is strictly worse, and runtime feature probing — the overwhelmingly common
+  pattern, and the one Linux itself pushes people toward — degrades gracefully
+  where version-gating does not.
+- **`hostname` is NOT in this category.** It would be system state if Thylacine had
+  any; it does not (there is no hostname surface — `usr/coreutils/src/bin/uname.rs`
+  hardcodes `(none)` for exactly this reason). So the render is the answer the
+  *native tool already gives*: one answer for the system, not two. That it is also
+  byte-identical to real Linux with no hostname set — the kernel's
+  `init_uts_ns.name.nodename` is literally `(none)` — is a happy accident, not the
+  justification. If a hostname surface ever lands, this reads from it.
+
+### 6.10 What is left in V-4b, and what each actually costs
+
+Ground-truthed against the tree at V-4b-3, because the three remaining Tier-2
+files are *not* one chunk — they have very different blockers:
+
+| File | Native source | Status |
+|---|---|---|
+| `self/environ` | **none reachable** — `/env` (devenv, §9.7) resolves `current_thread()->proc->env` **by construction**, so the diorama reading it gets its OWN environment, never the peer's | needs a kernel source: `/proc/<pid>/environ` rendering `p->env`, the §6.7 pattern (a renderer over an existing group, like `/proc/<pid>/ns` over the Territory). Cheap and well-shaped. |
+| `self/auxv` | **none** — `exec_fill_auxv` writes the block onto the user stack at exec and nothing retains it | needs the kernel to *record* (or reconstruct) the auxv. Lower value than it looks: a program's own auxv arrives on its stack, and `/proc/self/auxv` is a fallback path used mainly by sanitizers and `ldd`. |
+| `self/fd` | **BLOCKED**, and not on us | `/proc/<pid>/fd` is deferred to **#66c** (ARCH §9.6.9): a cross-Proc fd-list read of a live peer races the #926 at-exit handle-table free, which runs outside `g_proc_table_lock` with lockless slot-zeroing. Closing it needs the #926 table-lifetime restructure — a death-path-lineage change that ARCH already says "warrants its own focused chunk + audit". **The diorama must not route around this**: there is no other native source for a Proc's fd list, and inventing one would be exactly the §6.7 failure. |
+
+So the honest sequencing is: `environ` is a normal kernel+userspace sub-chunk;
+`auxv` is a smaller one whose value should be weighed before building it; `fd`
+waits on a kernel chunk that is not a Vivarium chunk at all.
+
 ---
 
 ## 7. The vivarium — the container runner
@@ -625,6 +701,28 @@ surface beyond §4's.
 "No cgroups, no seccomp at v1.0; territory isolation is the boundary" (ROADMAP
 §9.1) — which is exactly right, because I-32/I-34 already provide the resource and
 hardware bounds cgroups/seccomp were retrofitted onto Linux to provide.
+
+### 7.1 Owed at V-7 — pid visibility (surfaced by V-4b-3)
+
+V-4b-3 gave the diorama the numeric `/proc/<pid>` dirs and a root enumeration, and
+that is the first time it answers about a Proc other than its caller. The
+containment question this raises belongs here rather than in §6, because it is
+**not a diorama question**:
+
+- The five per-pid files are `0444` with `devproc.perm_enforced == false` — Plan 9's
+  all-pids-visible posture — and `/ctl/procs` lists every Proc on the box. So the
+  diorama serves exactly what native `/proc` serves, to exactly the same readers.
+  §6.2 holds: no new authority.
+- But a *contained* Proc seeing every host pid is a leak across the container
+  boundary, and **that leak is in native `/proc` and `/ctl/procs` first.** Scoping
+  the diorama alone would be theatre — a contained Proc that can reach native
+  `/proc` reads around it.
+
+So: when V-7 builds a container territory, "which pids does it see" must be decided
+for the **native** surface (a per-territory pid view, or simply not mounting `/proc`
+and `/ctl` into the container), and the diorama then inherits the answer for free,
+because it only ever re-presents what it can itself read. Deciding it in the diorama
+would invert the design.
 
 ---
 

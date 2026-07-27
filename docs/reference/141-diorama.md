@@ -68,6 +68,16 @@ all, so a joey-mounted `/self/exe` would read empty.
 
 Honest gaps, deliberately not faked:
 
+- **`exe` is a regular file, where Linux has a symlink** — and this one is a real
+  fidelity gap, not a cosmetic one. On Linux `readlink("/proc/self/exe")` yields
+  the path while `open()`+`read()` yields the executable's *bytes*; here the file's
+  *contents* are the path, so `readlink()` fails with `EINVAL`. LLVM's
+  `getMainExecutable` — the consumer VIVARIUM §6.3 names as the reason this file is
+  load-bearing — calls exactly `readlink`, so it still falls through to `argv[0]`.
+  The blocker is structural: **there is no `SYS_READLINK`**; Thylacine has no EL0
+  symlink surface (the 9P `Treadlink` ops serve only the kernel's own client and
+  Loom). The likely fix is to translate `readlink()` in the *phenotype* rather than
+  grow a symlink surface. Tracked; §6.3 carries the correction.
 - `cmdline` serves `argv[0]` only — a running Proc retains no argv (`SYS_SPAWN`'s
   is consumed at exec). `argv[0] == the path` is the universal convention and is
   *derived*, not invented.
@@ -78,8 +88,77 @@ Honest gaps, deliberately not faked:
 - `MemAvailable` equals `MemFree`: without a reclaim model, any other number would
   be a fabrication.
 
-Deferred with their kernel prerequisites: `/proc/<pid>/…`, `/cpuinfo`, `/stat`,
-`/self/{fd,environ,auxv}`.
+Deferred with their kernel prerequisites: `/cpuinfo`, `/stat`,
+`/self/{fd,environ,auxv}` (see VIVARIUM §6.10 — `fd` is blocked on the #66c
+handle-table lifetime, and `environ`/`auxv` each need a kernel source).
+
+### The rest of the tree (V-4b-3)
+
+| Path | Content | Native source |
+|---|---|---|
+| `/<pid>/{exe,cmdline,status,cwd,maps}` | the same five files, for any live Proc | `/proc/<pid>/*` |
+| `/sys/kernel/ostype` | `Linux` | — the phenotype (see below) |
+| `/sys/kernel/osrelease` | `6.1.0-thylacine` | — the phenotype |
+| `/sys/kernel/version` | `#1 SMP Thylacine` | — the phenotype |
+| `/sys/kernel/hostname` | `(none)` | matches native `uname -n` |
+
+The root also **enumerates** the live pids (from `/ctl/procs`' first column), so a
+`ps` that readdirs `/proc` sees the numeric dirs Linux puts there.
+
+**Per-pid needed no kernel work**, which is worth stating because V-4b-1 and
+V-4b-2 both did: `/self` was *always* a per-pid render with the pid supplied by
+the connection's peer instead of by the path. The pid was a parameter from the
+start, so the sub-chunk is a generalization, not a new mechanism. The renderers
+cannot tell a `/self` read from a `/<pid>` read and must not need to.
+
+Two details that are not obvious:
+
+- **`/<pid>` resolves only for a LIVE Proc**, decided by a native `O_PATH` open of
+  `/proc/<pid>` — not by a table this server keeps. That makes a dead or
+  never-existent pid an honest `ENOENT`, which is how every Linux consumer detects
+  that a process is gone. `parse_pid` also refuses leading zeros (Linux ENOENTs
+  `/proc/01`), so one Proc never gets two names.
+- **`status` gets its ids from two different places on purpose.** `/self` uses the
+  kernel-stamped `srv_peer_info` — unforgeable, no parse, and the V-4a-0b
+  mechanism this server's identity story rests on. A per-pid read has no such
+  channel and parses `principal:`/`gid:` out of the native render. Same kernel
+  fields either way (devproc's `format_status` prints `p->principal_id` /
+  `p->primary_gid`, exactly what `srv_peer_info` stamps), so they cannot disagree;
+  unifying on the parse would have traded provenance for symmetry.
+
+**Visibility.** The five per-pid files are `0444` with
+`devproc.perm_enforced == false` — Plan 9's all-pids-visible posture — so the
+diorama serves exactly what native `/proc` serves, to exactly the same readers.
+What it does *not* do is scope the pid set to a container, because nothing does
+natively yet: `/ctl/procs` lists every Proc on the box. That containment question
+is owed at **V-7** and belongs to native `/proc` first — scoping it here alone
+would be theatre, since a contained Proc that can reach native `/proc` reads
+around us. Recorded in VIVARIUM §7.1.
+
+### `/sys/kernel` — the fourth source (V-4b-3)
+
+These are the first diorama files that do **not** reformat a native source, and
+the distinction matters more than the files do. §6.2 exists to stop the diorama
+becoming an *authority* — serving what the native surface would refuse. A constant
+carries no information about the system, so there is nothing to leak; what it
+describes is the phenotype, this server's own property.
+
+> A value **derived from kernel state** needs a native source, no exceptions. A
+> **constant declaring which ABI the caller is looking at** is the phenotype
+> speaking about itself.
+
+`osrelease` is the one with teeth: glibc-linked programs parse it and some refuse
+to start below a minimum kernel, so `6.1` clears every such check while
+`-thylacine` keeps the string honest (Linux's own convention carries local
+suffixes). The stated tradeoff — a program *could* version-gate a feature on the
+number — is the better of two bad options, since declaring low makes those same
+programs refuse to run at all.
+
+`hostname` is deliberately **not** in that category: it would be system state if
+Thylacine had any. It does not, so the render is the answer the native tool
+already gives (`uname -n` hardcodes `(none)` for the same reason) — one answer for
+the system, not two. That it also matches real Linux with no hostname set is a
+happy accident, not the justification.
 
 ### `/self/maps` — where the Linux shape lives (V-4b-2)
 
@@ -165,14 +244,27 @@ first.
   a file), render-buffer boundedness, decimal formatting, the key/value parser
   (including that a key must match at a *line start*, not mid-line), and the
   dead-peer-renders-empty property.
+  V-4b-3 adds: the `/sys/kernel` tree and its renders, the per-pid qid encoding
+  (round-trip, and that no static index can ever look like a pid node), the
+  per-pid walk, `parse_pid`'s rejections, the `/ctl/procs` pid-list parse
+  including the header skip, and the mid-line `gid:` parse.
 - `/bin/diorama-probe` — the in-guest gate, boot-fatal. Mounts the diorama itself,
   then asserts `/self/exe` == its own path, the `cmdline` NUL shape, the `status`
   `Name` basename, `meminfo`/`uptime` shape, and that a write-open is refused.
   This is the leg no unit test can reach: it exercises the kernel's `exe_path`
   record, the `srv_peer_info.pid` channel, peer resolution, and the 9P path in one
-  read.
+  read. V-4b-3 adds the legs that need a *live* pid: reading its OWN numeric dir,
+  checking the per-pid `Uid` against `getuid()` (the only place the native id
+  parse runs), `ENOENT` for a pid that cannot exist, finding itself in the root
+  readdir, and the `/sys/kernel` values.
+
+Every V-4b-3 mechanism was **revert-probed**, each failing at its own leg: dropping
+the existence check → `selftest FAIL: resolved a nonexistent pid`; disabling the
+per-pid id parse → `FAIL per-pid status has no Uid`; skipping the root's pid phase
+→ `FAIL root readdir did not list our own pid`.
 
 ## Status
 
-V-4a complete. Kernel byte-unchanged by this chunk (the two kernel prerequisites
-landed separately as V-4a-0 / V-4a-0b).
+V-4a + V-4b complete except `/self/{fd,environ,auxv}` (VIVARIUM §6.10). Kernel
+byte-unchanged by V-4a and V-4b-3; the V-4b-1 / V-4b-2 kernel sources landed with
+their own sub-chunks.

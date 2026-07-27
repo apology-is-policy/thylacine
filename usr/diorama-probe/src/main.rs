@@ -43,6 +43,31 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool {
     (0..=hay.len() - needle.len()).any(|i| &hay[i..i + needle.len()] == needle)
 }
 
+/// Write a decimal into `out`, returning its length. Used to build the
+/// `/dio/<pid>/...` paths and to look our own pid up in a readdir stream.
+fn put_dec_into(out: &mut [u8], mut v: u64) -> usize {
+    let mut tmp = [0u8; 20];
+    let mut i = 0;
+    if v == 0 {
+        tmp[i] = b'0';
+        i += 1;
+    }
+    while v > 0 {
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        i += 1;
+    }
+    let n = i;
+    if n > out.len() {
+        return 0;
+    }
+    while i > 0 {
+        i -= 1;
+        out[n - 1 - i] = tmp[i];
+    }
+    n
+}
+
 /// Print a decimal, so the probe can REPORT measured sizes rather than only
 /// asserting on them -- the maps buffer bounds are sized from this number.
 fn put_dec(mut v: u64) {
@@ -196,6 +221,157 @@ pub extern "C" fn rs_main() -> i64 {
     put_dec(pn as u64);
     t_putstr("\n");
 
+    // 6c. per-pid (V-4b-3): the same files under our OWN numeric dir. This is
+    //     the leg the selftest cannot reach -- it proves the numeric walk, the
+    //     native existence check behind it, and that a per-pid render reaches
+    //     the same Proc /self does. Reading OUR pid keeps the assertion exact
+    //     without depending on what else is running.
+    let me = libthyla_rs::identity::pid();
+    let mut dbuf = [0u8; 64];
+    let dn = {
+        let mut i = 0;
+        for &c in b"/dio/" {
+            dbuf[i] = c;
+            i += 1;
+        }
+        i += put_dec_into(&mut dbuf[i..], me as u64);
+        i
+    };
+    let mut xbuf = [0u8; 128];
+    {
+        let mut p = [0u8; 96];
+        p[..dn].copy_from_slice(&dbuf[..dn]);
+        let mut pn = dn;
+        for &c in b"/exe" {
+            p[pn] = c;
+            pn += 1;
+        }
+        let xn = match read_all(&p[..pn], &mut xbuf) {
+            Some(n) => n,
+            None => fail("open /dio/<pid>/exe"),
+        };
+        if xn != want.len() || &xbuf[..xn] != want {
+            fail("per-pid exe mismatch");
+        }
+    }
+    // status via the per-pid path takes the NATIVE id parse (the /self path
+    // uses the kernel-stamped peer instead), so this is the only place that
+    // branch runs. Uid must be present and must agree with our own.
+    {
+        let mut p = [0u8; 96];
+        p[..dn].copy_from_slice(&dbuf[..dn]);
+        let mut pn = dn;
+        for &c in b"/status" {
+            p[pn] = c;
+            pn += 1;
+        }
+        let mut sb = [0u8; 512];
+        let sn = match read_all(&p[..pn], &mut sb) {
+            Some(n) => n,
+            None => fail("open /dio/<pid>/status"),
+        };
+        if !contains(&sb[..sn], b"Uid:\t") {
+            fail("per-pid status has no Uid (the native id parse failed)");
+        }
+        // Match the whole "Uid:\t<uid>\t" prefix, not the bare number: the pid
+        // and the uid can coincide, and a bare substring search would then pass
+        // on the Pid line while the Uid line said something else entirely.
+        let mut uid_pat = [0u8; 32];
+        let mut up = 0usize;
+        for &c in b"Uid:\t" {
+            uid_pat[up] = c;
+            up += 1;
+        }
+        up += put_dec_into(&mut uid_pat[up..], libthyla_rs::identity::uid() as u64);
+        uid_pat[up] = b'\t';
+        up += 1;
+        if !contains(&sb[..sn], &uid_pat[..up]) {
+            fail("per-pid status Uid disagrees with getuid");
+        }
+    }
+    // A pid that cannot exist must be ENOENT, not a directory of empty files --
+    // that is how a Linux consumer detects that a process is gone.
+    {
+        let gone = b"/dio/4294967295/exe";
+        let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, gone.as_ptr(), gone.len(), T_OREAD) };
+        if fd >= 0 {
+            let _ = unsafe { t_close(fd) };
+            fail("a nonexistent pid RESOLVED");
+        }
+    }
+    // The root enumerates the live pids, so a `ps` that readdirs /proc sees
+    // them. Our own pid must be among them.
+    {
+        let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio".as_ptr(), 4, T_OREAD) };
+        if fd < 0 {
+            fail("open /dio for readdir");
+        }
+        let mut want_pid = [0u8; 24];
+        let wp = put_dec_into(&mut want_pid, me as u64);
+        let mut found = false;
+        let mut rounds = 0;
+        loop {
+            let mut db = [0u8; 2048];
+            let n = unsafe { libthyla_rs::t_readdir(fd, db.as_mut_ptr(), db.len()) };
+            if n <= 0 || rounds > 16 {
+                break;
+            }
+            rounds += 1;
+            // 9P2000.L dirent: qid(13) offset(8) type(1) namelen(2) name.
+            let mut off = 0usize;
+            let end = n as usize;
+            while off + 24 <= end {
+                let nl = db[off + 22] as usize | ((db[off + 23] as usize) << 8);
+                let ns = off + 24;
+                if ns + nl > end {
+                    break;
+                }
+                if &db[ns..ns + nl] == &want_pid[..wp] {
+                    found = true;
+                }
+                off = ns + nl;
+            }
+            if found {
+                break;
+            }
+        }
+        let _ = unsafe { t_close(fd) };
+        if !found {
+            fail("root readdir did not list our own pid");
+        }
+    }
+
+    // 6d. sys/kernel (V-4b-3): the phenotype's self-description.
+    {
+        let mut ob = [0u8; 64];
+        let on = match read_all(b"/dio/sys/kernel/ostype", &mut ob) {
+            Some(n) => n,
+            None => fail("open /dio/sys/kernel/ostype"),
+        };
+        if &ob[..on] != b"Linux\n" {
+            fail("ostype is not Linux");
+        }
+        let mut rb = [0u8; 64];
+        let rn = match read_all(b"/dio/sys/kernel/osrelease", &mut rb) {
+            Some(n) => n,
+            None => fail("open /dio/sys/kernel/osrelease"),
+        };
+        // A Linux consumer parses this as <major>.<minor>...; a major below 4
+        // is where glibc starts refusing to run at all.
+        if rn < 6 || !rb[0].is_ascii_digit() || rb[1] != b'.' || rb[0] - b'0' < 4 {
+            fail("osrelease would not satisfy a glibc kernel check");
+        }
+        let mut hb = [0u8; 64];
+        let hn = match read_all(b"/dio/sys/kernel/hostname", &mut hb) {
+            Some(n) => n,
+            None => fail("open /dio/sys/kernel/hostname"),
+        };
+        // Matches what native `uname -n` reports -- one answer, not two.
+        if &hb[..hn] != b"(none)\n" {
+            fail("hostname disagrees with uname");
+        }
+    }
+
     // 7. meminfo + uptime render from the system-wide native sources.
     let mut mbuf = [0u8; 256];
     let mn = match read_all(b"/dio/meminfo", &mut mbuf) {
@@ -223,6 +399,6 @@ pub extern "C" fn rs_main() -> i64 {
         fail("write-open was ALLOWED (read-only violated)");
     }
 
-    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+maps+meminfo+uptime OK; write refused)\n");
+    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+maps+meminfo+uptime OK; per-pid+enum+sys/kernel OK; write refused)\n");
     unsafe { t_exits(0) }
 }

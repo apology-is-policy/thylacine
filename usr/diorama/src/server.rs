@@ -90,9 +90,10 @@ const FILE_MODE: u32 = S_IFREG | 0o444;
 const P9_GETATTR_SIZE: u64 = 0x200;
 
 // ---------------------------------------------------------------------------
-// The static node table. Unlike ptyfs there are no dynamic slots -- every node
-// is known at compile time, so a qid path IS the node index and resolution can
-// never dangle.
+// The node table. Static nodes (the fixed tree: /self, /meminfo, /sys/...) use
+// the node index AS the qid path, so they can never dangle. V-4b-3 adds one
+// dynamic family -- the numeric /proc/<pid> dirs -- which cannot be a static
+// index because the pid set is a runtime fact.
 // ---------------------------------------------------------------------------
 
 const N_ROOT: u64 = 0;
@@ -104,7 +105,13 @@ const N_SELF_CWD: u64 = 5;
 const N_SELF_MAPS: u64 = 6;
 const N_MEMINFO: u64 = 7;
 const N_UPTIME: u64 = 8;
-const N_COUNT: u64 = 9;
+const N_SYS: u64 = 9;
+const N_SYS_KERNEL: u64 = 10;
+const N_OSTYPE: u64 = 11;
+const N_OSRELEASE: u64 = 12;
+const N_VERSION: u64 = 13;
+const N_HOSTNAME: u64 = 14;
+const N_COUNT: u64 = 15;
 
 struct Node {
     name: &'static [u8],
@@ -113,25 +120,143 @@ struct Node {
 }
 
 static NODES: [Node; N_COUNT as usize] = [
-    Node { name: b"",        parent: N_ROOT, is_dir: true  },
-    Node { name: b"self",    parent: N_ROOT, is_dir: true  },
-    Node { name: b"exe",     parent: N_SELF, is_dir: false },
-    Node { name: b"cmdline", parent: N_SELF, is_dir: false },
-    Node { name: b"status",  parent: N_SELF, is_dir: false },
-    Node { name: b"cwd",     parent: N_SELF, is_dir: false },
-    Node { name: b"maps",    parent: N_SELF, is_dir: false },
-    Node { name: b"meminfo", parent: N_ROOT, is_dir: false },
-    Node { name: b"uptime",  parent: N_ROOT, is_dir: false },
+    Node { name: b"",          parent: N_ROOT,       is_dir: true  },
+    Node { name: b"self",      parent: N_ROOT,       is_dir: true  },
+    Node { name: b"exe",       parent: N_SELF,       is_dir: false },
+    Node { name: b"cmdline",   parent: N_SELF,       is_dir: false },
+    Node { name: b"status",    parent: N_SELF,       is_dir: false },
+    Node { name: b"cwd",       parent: N_SELF,       is_dir: false },
+    Node { name: b"maps",      parent: N_SELF,       is_dir: false },
+    Node { name: b"meminfo",   parent: N_ROOT,       is_dir: false },
+    Node { name: b"uptime",    parent: N_ROOT,       is_dir: false },
+    Node { name: b"sys",       parent: N_ROOT,       is_dir: true  },
+    Node { name: b"kernel",    parent: N_SYS,        is_dir: true  },
+    Node { name: b"ostype",    parent: N_SYS_KERNEL, is_dir: false },
+    Node { name: b"osrelease", parent: N_SYS_KERNEL, is_dir: false },
+    Node { name: b"version",   parent: N_SYS_KERNEL, is_dir: false },
+    Node { name: b"hostname",  parent: N_SYS_KERNEL, is_dir: false },
 ];
 
+// --- the per-pid family (V-4b-3) -------------------------------------------
+//
+// A per-pid qid is (pid << 32) | kind -- the SAME SHAPE devproc uses for its own
+// qids (kernel/devproc.c::proc_qid_make), so the two read alike side by side.
+// It cannot collide with a static node index: pid 0 is never a live Proc
+// (g_next_pid starts at 1), so every per-pid path is >= 1<<32 while every static
+// index is < N_COUNT.
+//
+// The files are exactly /self's, because /self ALWAYS WAS a per-pid render with
+// the pid supplied by the connection's peer rather than by the path. That is why
+// this sub-chunk needed no kernel work: the pid was a parameter from the start.
+//
+// VISIBILITY -- and the V-7 obligation this creates. Serving OTHER Procs is the
+// first time the diorama answers about anything but its caller, so state the
+// boundary rather than leave it implied:
+//
+//   * The five files are 0444 with devproc.perm_enforced == false -- Plan 9's
+//     all-pids-visible posture. Any Proc can read any Proc's status/exe/cwd/maps
+//     natively. So the diorama serves EXACTLY what native /proc serves, to
+//     exactly the same set of readers: no new authority, section 6.2 intact.
+//   * What it does NOT do is scope the pid set to a container, because THERE IS
+//     NO SUCH SCOPING NATIVELY YET -- /ctl/procs lists every Proc on the box.
+//
+// So when V-7 gives a contained Proc its own territory, "which pids can I see"
+// becomes a real containment question, and it is a question about /proc and
+// /ctl/procs FIRST -- the diorama merely inherits whatever they decide. Scoping
+// it here alone would be theatre: a contained Proc that can reach native /proc
+// would just read around us. The obligation is therefore recorded against V-7 in
+// VIVARIUM.md section 7.1, not worked around here.
+const PID_SHIFT: u32 = 32;
+const PK_DIR: u32 = 0;
+const PK_EXE: u32 = 1;
+const PK_CMDLINE: u32 = 2;
+const PK_STATUS: u32 = 3;
+const PK_CWD: u32 = 4;
+const PK_MAPS: u32 = 5;
+
+struct PidFile {
+    name: &'static [u8],
+    kind: u32,
+}
+
+static PID_FILES: [PidFile; 5] = [
+    PidFile { name: b"exe",     kind: PK_EXE     },
+    PidFile { name: b"cmdline", kind: PK_CMDLINE },
+    PidFile { name: b"status",  kind: PK_STATUS  },
+    PidFile { name: b"cwd",     kind: PK_CWD     },
+    PidFile { name: b"maps",    kind: PK_MAPS    },
+];
+
+fn pid_qid(pid: u32, kind: u32) -> u64 {
+    ((pid as u64) << PID_SHIFT) | kind as u64
+}
+fn qid_pid(path: u64) -> u32 {
+    (path >> PID_SHIFT) as u32
+}
+fn qid_kind(path: u64) -> u32 {
+    path as u32
+}
+fn is_pid_node(path: u64) -> bool {
+    path >= (1u64 << PID_SHIFT)
+}
+
+/// Parse a whole component as a decimal pid. Rejects empty, non-digit,
+/// leading-zero and overflowing forms, so "01", "1x" and "99999999999" are all
+/// misses. Leading zeros are refused because Linux refuses them (/proc/01 is
+/// ENOENT there) and a compat layer that accepted them would give one Proc two
+/// names in a namespace where consumers treat the name as the identity.
+fn parse_pid(name: &[u8]) -> Option<u32> {
+    if name.is_empty() || name.len() > 10 || name[0] == b'0' {
+        return None; // a leading 0 also covers "0" itself: never a live Proc,
+                     // and 0 is the static-node range
+    }
+    let mut v: u64 = 0;
+    for &c in name {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v * 10 + (c - b'0') as u64;
+        if v > u32::MAX as u64 {
+            return None;
+        }
+    }
+    Some(v as u32)
+}
+
 fn node_is_dir(path: u64) -> bool {
+    if is_pid_node(path) {
+        return qid_kind(path) == PK_DIR;
+    }
     (path < N_COUNT) && NODES[path as usize].is_dir
 }
 
 /// Resolve one component under `dir`. `..` walks to the parent (the root's
-/// parent is itself, per 9P). Returns None on a miss -- there is no dynamic
-/// namespace here, so a miss is always a genuine ENOENT.
+/// parent is itself, per 9P).
+///
+/// A numeric component under the root names a LIVE Proc, and liveness is decided
+/// by a native open of `/proc/<pid>` -- not by a table this server keeps. That
+/// matters twice: it is the section 6.2 property (the answer comes from the
+/// surface the caller could have walked itself), and it is what makes a dead or
+/// never-existent pid an honest ENOENT rather than a directory of empty files,
+/// which is how every Linux consumer detects that a process is gone.
 fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
+    if is_pid_node(dir) {
+        if qid_kind(dir) != PK_DIR {
+            return None; // walking from a file has no meaning
+        }
+        if name == b"." {
+            return Some(dir);
+        }
+        if name == b".." {
+            return Some(N_ROOT);
+        }
+        for f in PID_FILES.iter() {
+            if f.name == name {
+                return Some(pid_qid(qid_pid(dir), f.kind));
+            }
+        }
+        return None;
+    }
     if dir >= N_COUNT || !NODES[dir as usize].is_dir {
         return None;
     }
@@ -145,6 +270,13 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
         let n = &NODES[i as usize];
         if n.parent == dir && i != N_ROOT && n.name == name {
             return Some(i);
+        }
+    }
+    if dir == N_ROOT {
+        if let Some(pid) = parse_pid(name) {
+            if native_pid_exists(pid) {
+                return Some(pid_qid(pid, PK_DIR));
+            }
         }
     }
     None
@@ -271,6 +403,60 @@ fn native_proc_path(pid: u32, leaf: &[u8], out: &mut [u8; 64]) -> usize {
     n
 }
 
+/// Does `pid` name a live Proc? Decided by a native `O_PATH` open of
+/// `/proc/<pid>`, which is devproc's own existence test (its walk_one calls
+/// proc_find_by_pid and misses on a dead pid). O_PATH because this asks only
+/// "does the name resolve" -- it opens nothing for reading.
+fn native_pid_exists(pid: u32) -> bool {
+    let mut r = Render::new();
+    r.push(b"/proc/");
+    r.push_dec(pid as u64);
+    let p = r.bytes();
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, p.as_ptr(), p.len(), T_OPATH) };
+    if fd < 0 {
+        return false;
+    }
+    let _ = unsafe { t_close(fd) };
+    true
+}
+
+/// The live pid list, from `/ctl/procs`' first column. Used only to ENUMERATE
+/// the root (Linux's /proc lists its processes); resolution never consults it,
+/// so a stale entry costs a readdir row, never a wrong answer.
+///
+/// COHERENCY: the list is re-read per Treaddir call, so a Proc that exits or
+/// spawns mid-enumeration shifts the indices the cookie counts against and can
+/// make a pid appear twice or not at all. Linux's own /proc readdir has exactly
+/// this property (its cookie is a position in the tgid list), and no consumer
+/// treats a single enumeration as a consistent snapshot.
+fn native_pid_list(out: &mut [u32]) -> usize {
+    let mut buf = [0u8; 2048]; // matches the kernel's DEVCTL_READ_BUF
+    let got = match read_native(b"/ctl/procs", &mut buf) {
+        Some(n) => n,
+        None => return 0,
+    };
+    parse_pid_list(&buf[..got], out)
+}
+
+/// The pure half of native_pid_list: first column of every line that parses as
+/// a pid. The header ("PID    PPID    ...") fails parse_pid and is skipped by
+/// the same rule as any junk, so no separate header-stripping step can drift
+/// out of sync with the kernel's format.
+pub fn parse_pid_list(text: &[u8], out: &mut [u32]) -> usize {
+    let mut n = 0usize;
+    for line in text.split(|&c| c == b'\n') {
+        if n >= out.len() {
+            break;
+        }
+        let end = line.iter().position(|&c| c == b' ').unwrap_or(line.len());
+        if let Some(pid) = parse_pid(&line[..end]) {
+            out[n] = pid;
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Parse "<key>:<spaces><decimal>" out of a native key/value render (the shape
 /// /proc/<pid>/status and /ctl/memory both use). Returns None if absent, so a
 /// consumer can omit a field rather than invent one.
@@ -304,50 +490,88 @@ pub fn parse_kv_dec(text: &[u8], key: &[u8]) -> Option<u64> {
     None
 }
 
+/// Parse the decimal that follows `marker` ANYWHERE in `text`. The line-start
+/// discipline of parse_kv_dec cannot reach a mid-line field, and the native
+/// status packs two on one line ("principal:<N> gid:<M>"). Callers must pass a
+/// marker specific enough not to match a prefix of another key -- " gid:" leads
+/// with the separating space for exactly that reason.
+pub fn parse_dec_after(text: &[u8], marker: &[u8]) -> Option<u64> {
+    if marker.is_empty() || text.len() < marker.len() {
+        return None;
+    }
+    for i in 0..=text.len() - marker.len() {
+        if &text[i..i + marker.len()] != marker {
+            continue;
+        }
+        let mut j = i + marker.len();
+        while j < text.len() && (text[j] == b' ' || text[j] == b'\t') {
+            j += 1;
+        }
+        let mut v: u64 = 0;
+        let mut any = false;
+        while j < text.len() && text[j].is_ascii_digit() {
+            v = v.wrapping_mul(10).wrapping_add((text[j] - b'0') as u64);
+            any = true;
+            j += 1;
+        }
+        return if any { Some(v) } else { None };
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
-// The renderers. Each takes the connection's peer (never a client-supplied id).
+// The renderers.
+//
+// Each takes a PID. For /self that pid comes from the connection's peer (the
+// kernel-stamped srv_peer_info, never a client-supplied id); for /<pid> it comes
+// from a path component that walk_child already proved names a live Proc. The
+// renderers themselves cannot tell the two apart, and must not need to: their
+// only source is /proc/<pid>/*, whose own gates decide what a caller may see.
 // ---------------------------------------------------------------------------
 
-/// /self/exe -- the executable's path, bare (no NUL, no newline: Linux's
+/// exe -- the executable's path, bare (no NUL, no newline: Linux's
 /// readlink("/proc/self/exe") yields a bare path). Empty when the kernel has no
 /// recorded name, which is a real state (kproc, the blob-loaded init).
-fn render_self_exe(peer: &TSrvPeerInfo, r: &mut Render) {
-    if peer.alive == 0 {
-        return; // dead peer -> empty, never a stale answer
-    }
+fn render_exe(pid: u32, r: &mut Render) {
     let mut pbuf = [0u8; 64];
-    let n = native_proc_path(peer.pid, b"exe", &mut pbuf);
+    let n = native_proc_path(pid, b"exe", &mut pbuf);
     let mut ebuf = [0u8; RENDER_MAX];
     if let Some(got) = read_native(&pbuf[..n], &mut ebuf) {
         r.push(&ebuf[..got]);
     }
 }
 
-/// /self/cmdline -- Linux serves NUL-separated argv. Thylacine has no argv on a
+/// cmdline -- Linux serves NUL-separated argv. Thylacine has no argv on a
 /// running Proc (SYS_SPAWN's argv is consumed at exec and not retained), so this
 /// serves argv[0] == the executable path, NUL-terminated, which is the universal
 /// convention and is DERIVED from a native source rather than invented. A Proc
 /// with no recorded exe renders empty, exactly as Linux does for a kernel thread.
-fn render_self_cmdline(peer: &TSrvPeerInfo, r: &mut Render) {
-    render_self_exe(peer, r);
+fn render_cmdline(pid: u32, r: &mut Render) {
+    render_exe(pid, r);
     if r.len > 0 {
         r.push(&[0u8]);
     }
 }
 
-/// /self/status -- the Linux key/value shape, filled only from fields we really
-/// have. Name comes from the exe's basename; Pid/Uid/Gid from the kernel-stamped
-/// peer; Threads/VmRSS from the native /proc/<pid>/status render.
-fn render_self_status(peer: &TSrvPeerInfo, r: &mut Render) {
-    if peer.alive == 0 {
-        return;
-    }
+/// status -- the Linux key/value shape, filled only from fields we really have.
+/// Name comes from the exe's basename; Threads/VmRSS from the native
+/// /proc/<pid>/status render.
+///
+/// `ids` is the kernel-stamped (principal, gid) when the caller has one -- which
+/// only /self does, from the connection's srv_peer_info. It is passed rather
+/// than always parsed because that channel is UNFORGEABLE and needs no parse,
+/// and it is the V-4a-0b mechanism this server's identity story rests on;
+/// dropping it for code tidiness would trade provenance for symmetry. A per-pid
+/// read has no such channel and parses the same two values out of the native
+/// render, which is the same kernel state (devproc's format_status prints
+/// p->principal_id / p->primary_gid, the identical fields srv_peer_info stamps).
+fn render_status(pid: u32, ids: Option<(u32, u32)>, r: &mut Render) {
     // Name: basename of the exe.
     let mut ebuf = [0u8; RENDER_MAX];
     let mut elen = 0usize;
     {
         let mut pbuf = [0u8; 64];
-        let n = native_proc_path(peer.pid, b"exe", &mut pbuf);
+        let n = native_proc_path(pid, b"exe", &mut pbuf);
         if let Some(got) = read_native(&pbuf[..n], &mut ebuf) {
             elen = got;
         }
@@ -363,35 +587,51 @@ fn render_self_status(peer: &TSrvPeerInfo, r: &mut Render) {
     r.push(b"\n");
 
     r.push(b"Pid:\t");
-    r.push_dec(peer.pid as u64);
+    r.push_dec(pid as u64);
     r.push(b"\n");
+
+    // Threads + VmRSS + (for a per-pid read) the ids, from the native render.
+    let mut sbuf = [0u8; RENDER_MAX];
+    let mut pbuf = [0u8; 64];
+    let n = native_proc_path(pid, b"status", &mut pbuf);
+    let got = read_native(&pbuf[..n], &mut sbuf).unwrap_or(0);
+    let text = &sbuf[..got];
 
     // Linux prints four ids (real/effective/saved/fs); Thylacine has one
     // principal, so all four columns are the same value -- honest, and it keeps
-    // a Linux parser that splits on whitespace working.
-    r.push(b"Uid:\t");
-    for k in 0..4 {
-        if k > 0 {
-            r.push(b"\t");
+    // a Linux parser that splits on whitespace working. A pid whose ids cannot
+    // be read renders no Uid/Gid line at all, rather than a fabricated 0 (which
+    // would read as root to every Linux consumer).
+    let uid_gid = match ids {
+        Some(v) => Some(v),
+        None => match (
+            parse_kv_dec(text, b"principal"),
+            parse_dec_after(text, b" gid:"),
+        ) {
+            (Some(u), Some(g)) => Some((u as u32, g as u32)),
+            _ => None,
+        },
+    };
+    if let Some((uid, gid)) = uid_gid {
+        r.push(b"Uid:\t");
+        for k in 0..4 {
+            if k > 0 {
+                r.push(b"\t");
+            }
+            r.push_dec(uid as u64);
         }
-        r.push_dec(peer.principal_id as u64);
-    }
-    r.push(b"\n");
-    r.push(b"Gid:\t");
-    for k in 0..4 {
-        if k > 0 {
-            r.push(b"\t");
+        r.push(b"\n");
+        r.push(b"Gid:\t");
+        for k in 0..4 {
+            if k > 0 {
+                r.push(b"\t");
+            }
+            r.push_dec(gid as u64);
         }
-        r.push_dec(peer.primary_gid as u64);
+        r.push(b"\n");
     }
-    r.push(b"\n");
 
-    // Threads + VmRSS from the native per-Proc render.
-    let mut sbuf = [0u8; RENDER_MAX];
-    let mut pbuf = [0u8; 64];
-    let n = native_proc_path(peer.pid, b"status", &mut pbuf);
-    if let Some(got) = read_native(&pbuf[..n], &mut sbuf) {
-        let text = &sbuf[..got];
+    {
         if let Some(t) = parse_kv_dec(text, b"threads") {
             r.push(b"Threads:\t");
             r.push_dec(t);
@@ -405,15 +645,12 @@ fn render_self_status(peer: &TSrvPeerInfo, r: &mut Render) {
     }
 }
 
-/// /self/cwd -- the caller's current working directory, bare (no NUL, no
-/// newline), from the kernel's /proc/<pid>/cwd (V-4b-1). Never empty for a live
-/// peer: an un-chdir'd Proc reads "/".
-fn render_self_cwd(peer: &TSrvPeerInfo, r: &mut Render) {
-    if peer.alive == 0 {
-        return; // dead peer -> empty, never a stale answer
-    }
+/// cwd -- the Proc's current working directory, bare (no NUL, no newline), from
+/// the kernel's /proc/<pid>/cwd (V-4b-1). Never empty for a live Proc: an
+/// un-chdir'd one reads "/".
+fn render_cwd(pid: u32, r: &mut Render) {
     let mut pbuf = [0u8; 64];
-    let n = native_proc_path(peer.pid, b"cwd", &mut pbuf);
+    let n = native_proc_path(pid, b"cwd", &mut pbuf);
     let mut cbuf = [0u8; RENDER_MAX];
     if let Some(got) = read_native(&pbuf[..n], &mut cbuf) {
         r.push(&cbuf[..got]);
@@ -561,23 +798,20 @@ fn maps_row(fields: &[&[u8]], exe: &[u8], r: &mut Render) -> bool {
     true
 }
 
-/// /self/maps -- the caller's address space in Linux's /proc/*/maps shape.
-fn render_self_maps(peer: &TSrvPeerInfo, r: &mut Render) {
-    if peer.alive == 0 {
-        return; // dead peer -> empty, never a stale address space
-    }
+/// maps -- the Proc's address space in Linux's /proc/*/maps shape.
+fn render_maps(pid: u32, r: &mut Render) {
     let mut pbuf = [0u8; 64];
 
     // The executable path, for FILE-backed rows. Absent is fine (a blob-loaded
     // Proc has no recorded exe) -- those rows then carry no pathname, which is
     // exactly how Linux shows a mapping it cannot name.
     let mut ebuf = [0u8; 256];
-    let n = native_proc_path(peer.pid, b"exe", &mut pbuf);
+    let n = native_proc_path(pid, b"exe", &mut pbuf);
     let elen = read_native(&pbuf[..n], &mut ebuf).unwrap_or(0);
     let exe = &ebuf[..elen];
 
     let mut mbuf = [0u8; 2048]; // matches the kernel's DEVPROC_READ_BUF
-    let n = native_proc_path(peer.pid, b"maps", &mut pbuf);
+    let n = native_proc_path(pid, b"maps", &mut pbuf);
     let mlen = match read_native(&pbuf[..n], &mut mbuf) {
         Some(v) => v,
         None => return,
@@ -669,18 +903,88 @@ fn render_uptime(r: &mut Render) {
     r.push(b" 0.00\n");
 }
 
+// ---------------------------------------------------------------------------
+// /sys/kernel -- the phenotype's self-description (V-4b-3).
+//
+// These are the FIRST diorama files that do not reformat a native source, and
+// the distinction is worth stating precisely rather than treating as an
+// exception. Section 6.2's rule exists to stop the diorama becoming an
+// AUTHORITY -- serving something the native surface would have refused. A
+// constant carries no information about the system at all, so it cannot leak
+// anything; what it describes is the phenotype itself, which is this server's
+// own property and nobody else's state.
+//
+// The discriminator to hold to, for every file added after this one: a value
+// DERIVED FROM KERNEL STATE needs a native source, no exceptions. A constant
+// declaring which ABI the caller is looking at is the phenotype speaking about
+// itself. If a file cannot be argued into the second category in one sentence,
+// it belongs in the first and needs a native source.
+const OSTYPE: &[u8] = b"Linux\n";
+
+// osrelease is the one constant with teeth: glibc-linked programs parse it and
+// some refuse to start on a kernel below their minimum (3.2 for modern glibc).
+// Declaring 6.1 clears every such check. The "-thylacine" suffix is the honesty
+// -- Linux's own convention carries local suffixes (-generic, -arch1-1), so a
+// parser that copes with real distro kernels copes with this, while anything
+// that prints the string tells the truth about what it is running on.
+//
+// STATED TRADEOFF: a program COULD version-gate a feature on this number and
+// take a path we do not implement. The alternative -- declaring a low version --
+// makes those same programs refuse to run at all, which is strictly worse, and
+// runtime feature probing (the overwhelmingly common pattern, and the one Linux
+// itself pushes people to) degrades gracefully where version-gating does not.
+const OSRELEASE: &[u8] = b"6.1.0-thylacine\n";
+const KVERSION: &[u8] = b"#1 SMP Thylacine\n";
+
+// hostname is NOT a constant of the same kind -- it would be system state if
+// Thylacine had any. It does not (there is no hostname surface; see
+// usr/coreutils/src/bin/uname.rs, which hardcodes the same answer for the same
+// reason), so the honest render is the one the native tool already gives. That
+// it is ALSO byte-identical to real Linux with no hostname set -- the kernel's
+// init_uts_ns.name.nodename is literally "(none)" -- is a happy accident, not
+// the justification. If a hostname surface ever lands, this reads from it.
+const HOSTNAME: &[u8] = b"(none)\n";
+
 /// Render `node` for `peer`. Directories render empty (they are read via
 /// Treaddir, not Tread).
 pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
     let mut r = Render::new();
+    if is_pid_node(node) {
+        // A per-pid read. walk_child proved the Proc live when the path was
+        // resolved; it can have exited since, in which case the native reads
+        // fail and every file renders empty -- the same outcome Linux gives for
+        // a pid that dies with a fid open, and never a stale answer.
+        let pid = qid_pid(node);
+        match qid_kind(node) {
+            PK_EXE => render_exe(pid, &mut r),
+            PK_CMDLINE => render_cmdline(pid, &mut r),
+            PK_STATUS => render_status(pid, None, &mut r),
+            PK_CWD => render_cwd(pid, &mut r),
+            PK_MAPS => render_maps(pid, &mut r),
+            _ => {}
+        }
+        return r;
+    }
+    // /self/*. The peer's liveness is checked HERE rather than inside each
+    // renderer: a dead peer must render empty rather than read /proc/<pid>/*
+    // for a pid that may since have been reused.
+    let alive = peer.alive != 0;
     match node {
-        N_SELF_EXE => render_self_exe(peer, &mut r),
-        N_SELF_CMDLINE => render_self_cmdline(peer, &mut r),
-        N_SELF_STATUS => render_self_status(peer, &mut r),
-        N_SELF_CWD => render_self_cwd(peer, &mut r),
-        N_SELF_MAPS => render_self_maps(peer, &mut r),
+        N_SELF_EXE if alive => render_exe(peer.pid, &mut r),
+        N_SELF_CMDLINE if alive => render_cmdline(peer.pid, &mut r),
+        N_SELF_STATUS if alive => render_status(
+            peer.pid,
+            Some((peer.principal_id, peer.primary_gid)),
+            &mut r,
+        ),
+        N_SELF_CWD if alive => render_cwd(peer.pid, &mut r),
+        N_SELF_MAPS if alive => render_maps(peer.pid, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
+        N_OSTYPE => r.push(OSTYPE),
+        N_OSRELEASE => r.push(OSRELEASE),
+        N_VERSION => r.push(KVERSION),
+        N_HOSTNAME => r.push(HOSTNAME),
         _ => {}
     }
     r
@@ -991,9 +1295,24 @@ impl Conn {
         }
         let budget = (a.count as usize).min(self.msize as usize - p9::P9_HDR_LEN - 4);
         let mut data: Vec<u8> = Vec::new();
-        // The cookie is the NEXT child index to emit, so it is strictly
-        // increasing and never 0 for a non-first entry -- the devproc/netd
-        // readdir discipline.
+
+        // A /<pid>/ directory: a fixed five-entry list, cookie = index + 1.
+        if is_pid_node(f.node) {
+            let pid = qid_pid(f.node);
+            let mut i = a.offset as usize;
+            while i < PID_FILES.len() {
+                let node = pid_qid(pid, PID_FILES[i].kind);
+                if !self.emit_dirent(&mut data, budget, node, (i + 1) as u64, PID_FILES[i].name) {
+                    break;
+                }
+                i += 1;
+            }
+            return p9::build_rreaddir(&mut self.out_buf, tag, &data);
+        }
+
+        // A static directory. The cookie is the NEXT child index to emit, so it
+        // is strictly increasing and never 0 for a non-first entry -- the
+        // devproc/netd readdir discipline.
         let mut child = a.offset;
         while child < N_COUNT {
             let next = child + 1; // the cookie to report for the FOLLOWING call
@@ -1001,26 +1320,74 @@ impl Conn {
                 child = next;
                 continue;
             }
-            let dt = if NODES[child as usize].is_dir { p9::DT_DIR } else { p9::DT_REG };
-            let mut scratch = [0u8; 64];
-            let used = match p9::pack_dirent(
-                &mut scratch,
-                0,
-                &self.qid_of(child),
+            if !self.emit_dirent(
+                &mut data,
+                budget,
+                child,
                 next,
-                dt,
                 NODES[child as usize].name,
             ) {
-                Ok(u) => u,
-                Err(_) => break,
-            };
-            if data.len() + used > budget {
-                break; // did not fit; `child` stays here so the client re-asks for it
+                break; // did not fit; `child` stays here so the client re-asks
             }
-            data.extend_from_slice(&scratch[..used]);
             child = next;
         }
+        // The root continues into the live pids once its static children are
+        // done, at cookies >= N_COUNT -- so a `ps` that readdirs /proc sees the
+        // numeric dirs Linux puts there. Reached only when the static phase ran
+        // to completion, so a budget-truncated call resumes in the right phase.
+        if f.node == N_ROOT && child >= N_COUNT {
+            let mut pids = [0u32; 64];
+            let n = native_pid_list(&mut pids);
+            let mut i = (child - N_COUNT) as usize;
+            while i < n {
+                let mut nm = Render::new();
+                nm.push_dec(pids[i] as u64);
+                let node = pid_qid(pids[i], PK_DIR);
+                if !self.emit_dirent(
+                    &mut data,
+                    budget,
+                    node,
+                    N_COUNT + i as u64 + 1,
+                    nm.bytes(),
+                ) {
+                    break;
+                }
+                i += 1;
+            }
+        }
         p9::build_rreaddir(&mut self.out_buf, tag, &data)
+    }
+
+    /// Pack one dirent if it fits the budget. Returns false when it did not fit
+    /// (or would not pack), leaving `data` untouched so the caller can stop with
+    /// its cursor still pointing at the unemitted entry.
+    ///
+    /// The scratch must be able to hold ANY name this server emits, because a
+    /// pack failure returns false WITHOUT advancing the cursor -- so a name that
+    /// can never fit would make a client re-ask for the same entry forever. A
+    /// dirent is 24 bytes of header plus the name; the longest names here are a
+    /// 10-digit pid and "osrelease" (9), so 64 is roughly double what is
+    /// reachable. KEEP THAT TRUE when adding a node: a long name belongs with a
+    /// bigger scratch, not with a silent truncation.
+    fn emit_dirent(
+        &self,
+        data: &mut Vec<u8>,
+        budget: usize,
+        node: u64,
+        cookie: u64,
+        name: &[u8],
+    ) -> bool {
+        let dt = if node_is_dir(node) { p9::DT_DIR } else { p9::DT_REG };
+        let mut scratch = [0u8; 64];
+        let used = match p9::pack_dirent(&mut scratch, 0, &self.qid_of(node), cookie, dt, name) {
+            Ok(u) => u,
+            Err(_) => return false,
+        };
+        if data.len() + used > budget {
+            return false;
+        }
+        data.extend_from_slice(&scratch[..used]);
+        true
     }
 
     fn h_getattr(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -1144,6 +1511,133 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("cross-parent name resolved");
     }
 
+    // --- V-4b-3: /sys/kernel, the phenotype's self-description
+    if walk_child(N_ROOT, b"sys") != Some(N_SYS) {
+        return Err("walk /sys");
+    }
+    if walk_child(N_SYS, b"kernel") != Some(N_SYS_KERNEL) {
+        return Err("walk /sys/kernel");
+    }
+    if walk_child(N_SYS_KERNEL, b"ostype") != Some(N_OSTYPE) {
+        return Err("walk /sys/kernel/ostype");
+    }
+    if walk_child(N_SYS_KERNEL, b"..") != Some(N_SYS) {
+        return Err("walk /sys/kernel/..");
+    }
+    // These render the SAME for any peer, dead or alive -- they describe the
+    // phenotype, not the Proc, so a peer-dependent answer would be a bug.
+    let dead = TSrvPeerInfo::default(); // alive == 0
+    if render(N_OSTYPE, &dead).bytes() != b"Linux\n" {
+        return Err("ostype");
+    }
+    if render(N_HOSTNAME, &dead).bytes() != b"(none)\n" {
+        return Err("hostname");
+    }
+    // osrelease must parse as Linux <major>.<minor>.<patch> with a major high
+    // enough to clear glibc's minimum-kernel refusal.
+    {
+        let rel = render(N_OSRELEASE, &dead);
+        let b = rel.bytes();
+        if b.len() < 6 || !b[0].is_ascii_digit() || b[1] != b'.' {
+            return Err("osrelease shape");
+        }
+        if b[0] - b'0' < 4 {
+            return Err("osrelease major too low for glibc");
+        }
+    }
+
+    // --- V-4b-3: per-pid qids. The encoding must round-trip and must never
+    //     collide with a static node index, which is what keeps a numeric path
+    //     from resolving onto /self or /meminfo.
+    if qid_pid(pid_qid(1234, PK_MAPS)) != 1234 || qid_kind(pid_qid(1234, PK_MAPS)) != PK_MAPS {
+        return Err("pid qid round-trip");
+    }
+    if !is_pid_node(pid_qid(1, PK_DIR)) {
+        return Err("pid qid not recognized");
+    }
+    for i in 0..N_COUNT {
+        if is_pid_node(i) {
+            return Err("a static node looked like a pid node");
+        }
+    }
+    if !node_is_dir(pid_qid(7, PK_DIR)) || node_is_dir(pid_qid(7, PK_EXE)) {
+        return Err("pid node dir-ness");
+    }
+    // A pid dir carries exactly /self's file set, and climbs to the root.
+    if walk_child(pid_qid(7, PK_DIR), b"maps") != Some(pid_qid(7, PK_MAPS)) {
+        return Err("walk /<pid>/maps");
+    }
+    if walk_child(pid_qid(7, PK_DIR), b"..") != Some(N_ROOT) {
+        return Err("walk /<pid>/..");
+    }
+    if walk_child(pid_qid(7, PK_DIR), b"nope").is_some() {
+        return Err("resolved a nonexistent per-pid file");
+    }
+    if walk_child(pid_qid(7, PK_MAPS), b"anything").is_some() {
+        return Err("walked into a per-pid file");
+    }
+
+    // --- V-4b-3: parse_pid is the resolution gate. Everything it rejects is a
+    //     name that never reaches the native existence check, so its rejections
+    //     are load-bearing, not cosmetic.
+    if parse_pid(b"1") != Some(1) || parse_pid(b"4294967295") != Some(4294967295) {
+        return Err("parse_pid decimal");
+    }
+    if parse_pid(b"0").is_some() {
+        return Err("parse_pid accepted 0 (the static range)");
+    }
+    if parse_pid(b"").is_some()
+        || parse_pid(b"1x").is_some()
+        || parse_pid(b"x1").is_some()
+        || parse_pid(b" 1").is_some()
+        || parse_pid(b"4294967296").is_some()
+        || parse_pid(b"99999999999").is_some()
+    {
+        return Err("parse_pid accepted garbage");
+    }
+    // Leading zeros are Linux-ENOENT, and accepting them would give one Proc
+    // two names in a namespace whose consumers treat the name as the identity.
+    if parse_pid(b"01").is_some() || parse_pid(b"007").is_some() {
+        return Err("parse_pid accepted a leading zero");
+    }
+    // A pid that cannot exist must MISS, so /proc/<gone> is ENOENT rather than a
+    // directory of empty files -- which is how a Linux consumer detects death.
+    if walk_child(N_ROOT, b"4294967295").is_some() {
+        return Err("resolved a nonexistent pid");
+    }
+
+    // --- V-4b-3: the /ctl/procs pid-list parse, incl. the header skip.
+    {
+        let procs = b"PID    PPID    NAME    STATE    THREADS\n\
+                      1    0    joey    ALIVE    1\n\
+                      42    1    ptyfs    ALIVE    2\n";
+        let mut pids = [0u32; 8];
+        let n = parse_pid_list(procs, &mut pids);
+        if n != 2 || pids[0] != 1 || pids[1] != 42 {
+            return Err("pid list parse");
+        }
+        // The bound is honored rather than overrunning the caller's array.
+        let mut one = [0u32; 1];
+        if parse_pid_list(procs, &mut one) != 1 {
+            return Err("pid list bound");
+        }
+    }
+
+    // --- V-4b-3: the mid-line decimal parse (native status packs
+    //     "principal:<N> gid:<M>" on one line, which parse_kv_dec cannot reach).
+    {
+        let st = b"pid:     42\nprincipal:1000 gid:100\nthreads: 2\n";
+        if parse_kv_dec(st, b"principal") != Some(1000) {
+            return Err("principal parse");
+        }
+        if parse_dec_after(st, b" gid:") != Some(100) {
+            return Err("gid parse");
+        }
+        if parse_dec_after(st, b" absent:").is_some() {
+            return Err("parse_dec_after invented a value");
+        }
+    }
+
     // --- the render buffer is bounded and cannot overrun
     let mut r = Render::new();
     for _ in 0..(RENDER_MAX + 64) {
@@ -1183,7 +1677,6 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // --- a dead peer renders EMPTY rather than a stale or fabricated answer
-    let dead = TSrvPeerInfo::default(); // alive == 0
     if !render(N_SELF_EXE, &dead).bytes().is_empty() {
         return Err("dead peer served an exe");
     }
