@@ -1464,6 +1464,7 @@ struct Dev devcons = {
     .walk     = devcons_walk,
     .stat     = devcons_stat,
     .stat_native = devcons_stat_native,      // #55: the is-a-cons qid contract
+                                             // (also CL-4's clang fstat fix)
 
     .open     = devcons_open,
     .create   = devcons_create,

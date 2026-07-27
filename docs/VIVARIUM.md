@@ -112,8 +112,12 @@ rather than claiming full POSIX signals at v1.0.
 ### 1.5 Finding R-4 — the brand hook already exists
 
 `kernel/elf.c:77`: `if (eh->e_ident[EI_OSABI] != ELFOSABI_NONE) return
-ELF_LOAD_BAD_OSABI;` (widened to accept `ELFOSABI_GNU` during the Clade arc), and
-`PT_INTERP` is already parsed at `elf.c:179`.
+ELF_LOAD_BAD_OSABI;` and `PT_INTERP` is already parsed at `elf.c:179`.
+
+(That check is **widened to also accept `ELFOSABI_GNU`** by the Clade arc -- committed
+on `clade-cl4-wip` @ `7cfcabce`, reaching `main` when that branch merges. On `main`
+today the check is still the narrow `!= ELFOSABI_NONE` form quoted above. Either form
+serves R-4 identically: the point is that the byte is already read at exec time.)
 
 `EI_OSABI` is **precisely the byte FreeBSD brands on**. So the detection hook sits
 exactly where it needs to, already reading the right field. Brand inference (§5.2)
@@ -679,8 +683,8 @@ a pouch is part of the animal, a vivarium is built around it.
     native Thylacine binaries carry. The byte cannot positively identify the v1.0
     target.
   - `ELFOSABI_GNU (3)` means "a GNU/LLVM toolchain emitted GNU extensions," not
-    "this is Linux" — Clade's own native output carries it (which is why `elf.c:77`
-    was widened to accept 3).
+    "this is Linux" — Clade's own native output carries it (which is why the Clade
+    arc widened `elf.c:77` to accept 3; see §1.5 for the branch state).
   - So `EI_OSABI` is **non-discriminating in both directions**; there is nothing to
     trade off. `PT_INTERP` is a strong positive signal but exists only on *dynamic*
     binaries — absent precisely on the static v1.0 target.

@@ -386,6 +386,7 @@ void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_attach_lazy_large(void);
+void test_sys_burrow_lazy_len_from_args(void);
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
 void test_torpor_wake_rejects_bad_args(void);
@@ -487,6 +488,8 @@ void test_devproc_walk_unknown_pid_misses(void);
 void test_devproc_walk_to_status_file(void);
 void test_devproc_walk_dotdot_to_root(void);
 void test_devproc_read_status_format(void);
+void test_proc_cpu_ns_accounting(void);     // prowl-1: name + run_ns substrate
+void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counters + per-CPU idle_ns
 void test_devproc_read_cmdline_kproc(void);
 void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
@@ -495,8 +498,12 @@ void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
+void test_devproc_sched_gate_predicate(void);       // prowl-3b: OQ-4 sched-view gate
+void test_devproc_sched_read_gated(void);           // prowl-5 F4: OQ-4 deny-wiring revert-probe
+void test_devproc_read_sched_format(void);          // prowl-3b: /proc/<pid>/sched read
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
+void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
 void test_devproc_debug_exitkill_terminates_on_close(void);
@@ -559,6 +566,7 @@ void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
+void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
 void test_devdev_bestiary_smoke(void);
@@ -567,6 +575,7 @@ void test_devdev_walk_to_each_leaf(void);
 void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
+void test_devdev_stat_native_leaves(void);       // CL-4 merge: all-leaf shapes
 void test_devdev_cons_gate(void);
 void test_devdev_consctl_renderer_mint(void);    // #55
 void test_devdev_winsize_leaf(void);             // #55
@@ -1726,6 +1735,7 @@ struct test_case g_tests[] = {
     { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
     { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
+    { "sys_burrow.lazy_len_from_args",        test_sys_burrow_lazy_len_from_args,        false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
     { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },
@@ -1833,6 +1843,8 @@ struct test_case g_tests[] = {
     { "devproc.walk_to_status_file",   test_devproc_walk_to_status_file,   false, NULL },
     { "devproc.walk_dotdot_to_root",   test_devproc_walk_dotdot_to_root,   false, NULL },
     { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
+    { "proc.cpu_ns_accounting",        test_proc_cpu_ns_accounting,        false, NULL },
+    { "scheduler.prowl_counters",      test_sched_prowl_counters,          false, NULL },
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
     { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
@@ -1841,8 +1853,12 @@ struct test_case g_tests[] = {
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
     { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
     { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
+    { "devproc.sched_gate_predicate",  test_devproc_sched_gate_predicate,  false, NULL },
+    { "devproc.sched_read_gated",      test_devproc_sched_read_gated,      false, NULL },
+    { "devproc.read_sched_format",     test_devproc_read_sched_format,     false, NULL },
     { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
+    { "devproc.ctl_suspend_resume_dispatch", test_devproc_ctl_suspend_resume_dispatch, false, NULL },
     { "devproc.debug_authorized_predicate",   test_devproc_debug_authorized_predicate,   false, NULL },
     { "devproc.debug_attach_detach_lifecycle", test_devproc_debug_attach_detach_lifecycle, false, NULL },
     { "devproc.debug_exitkill_terminates_on_close", test_devproc_debug_exitkill_terminates_on_close, false, NULL },
@@ -1914,6 +1930,7 @@ struct test_case g_tests[] = {
                                        test_devctl_read_kernel_base_format, false, NULL },
     { "devctl.kernel_base_gated",      test_devctl_kernel_base_gated,      false, NULL },
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
+    { "devctl.read_cpu_format",        test_devctl_read_cpu_format,        false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
     { "devdev.bestiary_smoke",         test_devdev_bestiary_smoke,         false, NULL },
@@ -1922,6 +1939,7 @@ struct test_case g_tests[] = {
     { "devdev.walk_unknown_misses",    test_devdev_walk_unknown_misses,    false, NULL },
     { "devdev.walk_pts_dir",           test_devdev_walk_pts_dir,           false, NULL },
     { "devdev.trivial_leaves",         test_devdev_trivial_leaves,         false, NULL },
+    { "devdev.stat_native_leaves",     test_devdev_stat_native_leaves,     false, NULL },
     { "devdev.cons_gate",              test_devdev_cons_gate,              false, NULL },
     { "devdev.renderer_gate",          test_devdev_renderer_gate,          false, NULL },
     { "devdev.consctl_renderer_mint",  test_devdev_consctl_renderer_mint,  false, NULL },

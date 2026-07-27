@@ -1,0 +1,125 @@
+pouch boundary-line patch 0030 - fopen("a") / O_APPEND seek-to-END.
+
+WHY THIS PATCH EXISTS (the gfx-4 merge decision, made honest).
+
+The aux track's 0024-pouch-fopen-create was DROPPED at the gfx-4 -> main
+merge as subsumed: main's 0023-pouch-fopen already routes fopen/tmpfile
+through the public open(), and main's 0024-pouch-fs-process-wires carries
+the same O_CREAT -> SYS_WALK_CREATE arm and the same O_TRUNC -> OTRUNC
+mapping. That reading was correct for those two arms.
+
+It was NOT correct for O_APPEND, which the dropped patch also carried and
+main's 0024 does not. The merge kept usr/pouch-hello/pouch-hello-fopen.c
+precisely as the regression that would hold the subsumption claim honest,
+and on the first post-merge boot it did exactly that:
+
+    pouch-hello-fopen: create OK
+    pouch-hello-fopen: FAIL append line1 (errno 38)
+
+i.e. fopen("a") + fputs("beta") overwrote "alpha" at offset 0 instead of
+extending the file. (The errno 38/ENOSYS in that line is incidental -- it
+is the stale errno left by the no-op fcntl below; the actual failure is
+the read-back content mismatch.)
+
+MECHANISM. Thylacine has no kernel append mode: an fd carries a plain
+cursor and SYS_WALK_OPEN has no O_APPEND-equivalent omode bit. musl's
+__fdopen handles append by asking the kernel for it --
+
+    if (*mode == 'a') {
+        int flags = __syscall(SYS_fcntl, fd, F_GETFL);
+        if (!(flags & O_APPEND))
+            __syscall(SYS_fcntl, fd, F_SETFL, flags | O_APPEND);
+        f->flags |= F_APP;
+    }
+
+-- and pouch answers F_SETFL with ENOSYS. So nothing positions the cursor
+and every append write lands at offset 0, clobbering the file.
+
+FIX. Seek to END once, at open, for any successful open carrying O_APPEND.
+
+Applied through a single helper (pouch_open_ret) rather than at one return
+site, because openat() has THREE successful-open exits -- create-ok,
+EEXIST-fallback-open, and plain-open -- and a per-site fix would silently
+miss one. (That is not hypothetical: the CL-4 audit's F2 was exactly this
+shape, a console fstat fix that covered one of two front doors.) The two
+remaining __syscall_ret sites are provably negative-only: one guards
+p < 0, the other is reached only when r < 0 and is not the EEXIST case.
+
+SEMANTICS, stated honestly. This makes SINGLE-WRITER append correct -- the
+config-file / log-file case fopen("a") is actually used for. CONCURRENT
+appenders may still interleave, because the seek and the write are not
+atomic. That atomicity is documented-ABSENT, not silently claimed; closing
+it needs a real kernel append mode (a v1.x SYS_WALK_OPEN omode bit), at
+which point this seek becomes redundant and should be removed with it.
+
+SYS_lseek is wired 1:1 to the kernel's SYS_LSEEK (= 51) by patch 0010
+(arch/aarch64/bits/syscall.h.in redefines __NR_lseek 0xFFFF -> 51).
+
+Files: src/fcntl/openat.c (one helper + three call-site retargets).
+Regression: usr/pouch-hello/pouch-hello-fopen.c "append" leg, boot-fatal
+via joey's #50 probe.
+
+--- a/src/fcntl/openat.c	2026-07-27 09:34:30
++++ b/src/fcntl/openat.c	2026-07-27 09:35:06
+@@ -22,12 +22,34 @@
+ #include <errno.h>
+ #include <stddef.h>
+ #include <string.h>
++#include <unistd.h>
+ #include "syscall.h"
+ #include "_pouch_fs.h"
+ 
+ /* SYS_open +OTRUNC (SYS_WALK_OPEN_OMODE_VALID includes OTRUNC = 0x10). */
+ #define POUCH_OTRUNC  0x10u
+ 
++/* O_APPEND (patch 0030). Thylacine has NO kernel append mode: an fd carries a
++ * plain cursor, and musl's __fdopen tries fcntl(F_SETFL, O_APPEND) -- which
++ * pouch answers ENOSYS -- so nothing positions the cursor. Without this seek
++ * fopen("a") writes at offset 0 and CLOBBERS the file it meant to extend.
++ *
++ * Applied HERE, at a single helper every successful-open exit routes through,
++ * rather than at one return site: openat() has three such exits (create-ok,
++ * EEXIST-fallback-open, plain-open) and a per-site fix would silently miss
++ * one. Error exits pass negatives through untouched.
++ *
++ * Single-writer append is thereby correct (the config-file / log-file case
++ * fopen("a") is actually used for). CONCURRENT appenders may interleave --
++ * that atomicity is documented-ABSENT, not silently claimed; it needs a real
++ * kernel append mode (a v1.x SYS_WALK_OPEN omode bit). */
++static int pouch_open_ret(long r, int flags)
++{
++	if (r >= 0 && (flags & O_APPEND))
++		__syscall(SYS_lseek, r, 0, SEEK_END);
++	return __syscall_ret(r);
++}
++
+ int openat(int fd, const char *filename, int flags, ...)
+ {
+ 	mode_t mode = 0;
+@@ -64,7 +86,7 @@
+ 
+ 		long r = __syscall(SYS_thyla_walk_create, p, leaf, strlen(leaf),
+ 		                   omode, (unsigned)mode & 0777u);
+-		if (r >= 0) { __syscall(SYS_close, p); return __syscall_ret(r); }
++		if (r >= 0) { __syscall(SYS_close, p); return pouch_open_ret(r, flags); }
+ 
+ 		/* Exists + no O_EXCL: open the existing file (+OTRUNC on O_TRUNC).
+ 		 * Any other create error propagates. */
+@@ -72,7 +94,7 @@
+ 			unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
+ 			long o = __syscall(SYS_thyla_open, (long)p, leaf, strlen(leaf), om);
+ 			__syscall(SYS_close, p);
+-			return __syscall_ret(o);
++			return pouch_open_ret(o, flags);
+ 		}
+ 		__syscall(SYS_close, p);
+ 		return __syscall_ret(r);
+@@ -81,6 +103,6 @@
+ 	/* Non-create open: one stalk-resolved open from the Territory root
+ 	 * (relative paths cwd-join via the FROM_ROOT arm). O_TRUNC -> +OTRUNC. */
+ 	unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
+-	return __syscall_ret(__syscall(SYS_thyla_open, POUCH_FROM_ROOT,
+-	                               filename, len, om));
++	return pouch_open_ret(__syscall(SYS_thyla_open, POUCH_FROM_ROOT,
++	                                filename, len, om), flags);
+ }

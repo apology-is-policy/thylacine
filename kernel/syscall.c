@@ -2427,13 +2427,21 @@ static s64 sys_getcwd_handler(u64 buf_va, u64 buf_len_raw, u64 a2, u64 a3) {
     struct Thread *t = current_thread();             if (!t) return -1;
     struct Proc *p = t->proc;                        if (!p || !p->territory) return -1;
     if (buf_len_raw == 0)                            return -1;
-    if (buf_len_raw > SYS_OPEN_PATH_MAX + 1)         return -1;
-    if (!sys_validate_user_buf(buf_va, buf_len_raw)) return -1;
 
+    // POSIX getcwd(buf, size) accepts ANY buffer large enough for the cwd -- do
+    // NOT reject an oversized one. The pre-fix `buf_len_raw > SYS_OPEN_PATH_MAX+1
+    // -> -1` broke every caller passing a PATH_MAX (4096) buffer -- GNU make,
+    // clang, git, configure scripts, the near-universal `getcwd(buf, PATH_MAX)`
+    // idiom (surfaced by the CL-1c make oracle; `make: getcwd: I/O error`). The
+    // cwd is bounded by SYS_OPEN_PATH_MAX, so compute it FIRST, then validate +
+    // copy EXACTLY len+1 bytes -- never the whole caller buffer. That both keeps
+    // a huge buf_len_raw from overflowing the range check and matches POSIX
+    // ("getcwd writes at most the pathname + NUL into the buffer").
     char scratch[SYS_OPEN_PATH_MAX + 1];
     int len = territory_getdot(p->territory, scratch, sizeof(scratch));
-    if (len < 0)                                     return -1;
-    if ((u64)len + 1 > buf_len_raw)                  return -1;   // path + NUL must fit
+    if (len < 0)                                      return -1;
+    if ((u64)len + 1 > buf_len_raw)                   return -1;   // path + NUL must fit the caller's buffer
+    if (!sys_validate_user_buf(buf_va, (u64)len + 1)) return -1;
 
     for (int i = 0; i <= len; i++) {                 // include the trailing NUL
         if (uaccess_store_u8(buf_va + (u64)i, (u8)scratch[i]) != 0) return -1;
@@ -4185,6 +4193,24 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 
     spin_unlock(&p->vma_lock);
     return (s64)vaddr;
+}
+
+// CL-4: pick the length out of SYS_BURROW_ATTACH_LAZY's two accepted calling
+// conventions. Pure + exported so the shape gate is unit-testable without a
+// live Proc; the full rationale lives at the dispatch site. Returns 0 -- which
+// sys_burrow_attach_lazy_for_proc rejects -- for anything that is neither the
+// native 1-arg form nor an anonymous-private Linux mmap, so a file-backed or
+// MAP_FIXED request keeps the pre-CL-4 fail-closed -1 instead of silently
+// receiving anonymous zero pages (ARCH 6.5: there is no file-backed mmap).
+u64 burrow_lazy_len_from_args(u64 x0, u64 x1, u64 flags, u64 fd_raw) {
+    if (x0 != 0) return x0;                  // native: length in x0
+    // Linux/aarch64 mmap flag encoding -- inherent to a shim whose whole job is
+    // to accept the Linux anon-mmap shape.
+    enum { LX_MAP_FIXED = 0x10, LX_MAP_ANONYMOUS = 0x20 };
+    if (!(flags & LX_MAP_ANONYMOUS)) return 0;   // file-backed -> fail closed
+    if (flags & LX_MAP_FIXED)        return 0;   // caller-chosen VA -> refused
+    if ((s64)fd_raw >= 0)            return 0;   // anon must carry fd == -1
+    return x1;                                   // Linux 6-arg: length in x1
 }
 
 static s64 sys_burrow_attach_lazy_handler(u64 length_raw) {
@@ -7402,9 +7428,42 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                       ctx->regs[1]);
         return;
 
-    case SYS_BURROW_ATTACH_LAZY:
-        ctx->regs[0] = (u64)sys_burrow_attach_lazy_handler(ctx->regs[0]);
+    case SYS_BURROW_ATTACH_LAZY: {
+        // CL-4: accept BOTH the native 1-arg ABI (length in x0) AND the Linux
+        // 6-arg anon-mmap ABI (addr in x0, length in x1). musl's __init_tls
+        // issues a RAW 6-arg mmap for a large-TLS binary such as clang++,
+        // bypassing the patched 1-arg __mmap wrapper -- and it is the ONLY raw
+        // SYS_mmap site in musl's whole src/ tree (src/env/__init_tls.c).
+        //
+        // The split is exact rather than heuristic, on three checked facts:
+        // that site passes a LITERAL 0 addr under a `tls_size > builtin_tls`
+        // guard (so x0==0 and x1>0 always); the patched __mmap rejects both
+        // len==0 and MAP_FIXED, so no wrapper call can present a non-zero x0
+        // that is really an address; and the native ABI's length is never
+        // legally 0 (sys_burrow_attach_lazy_for_proc rejects it).
+        //
+        // But selecting the 6-arg reading is NOT sufficient. The wrapper's
+        // refusals (file-backed, MAP_FIXED) are LIBC-side only -- the kernel
+        // sees just x0/x1 and would discard prot/flags/fd/off. A program that
+        // calls syscall(SYS_mmap, NULL, len, prot, MAP_PRIVATE, fd, off)
+        // directly (public in musl; the whole point of pouch is running ported
+        // code that mmaps files) would then receive a valid ANONYMOUS
+        // demand-zero mapping where it asked for a FILE -- reading zeros
+        // instead of file bytes, with no error. Before CL-4 that same call
+        // landed as handler(0) -> -1 -> MAP_FAILED: fail-closed and loud,
+        // which is what ARCH 6.5 ("no file-backed mmap by design") requires.
+        //
+        // So re-check the SHAPE (burrow_lazy_len_from_args), and honour the
+        // 6-arg reading only for the exact anonymous-private form the wrapper
+        // itself would have allowed. Everything else keeps the pre-CL-4 answer.
+        // This also makes a native caller's undefined x1 unreachable in
+        // practice, and the native wrappers pin x1 = 0 so that case stays
+        // deterministically -1.
+        u64 lazy_len = burrow_lazy_len_from_args(ctx->regs[0], ctx->regs[1],
+                                                 ctx->regs[3], ctx->regs[4]);
+        ctx->regs[0] = (u64)sys_burrow_attach_lazy_handler(lazy_len);
         return;
+    }
 
     case SYS_BURROW_DECOMMIT:
         ctx->regs[0] = (u64)sys_burrow_decommit_handler(ctx->regs[0],

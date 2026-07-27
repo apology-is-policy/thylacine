@@ -274,6 +274,12 @@ build_kernel() {
     # G-7b: cross-build TyrQuake + stage the shareware pak BEFORE the pool
     # fixture (populate_stratum_pool puts the stage at /quake).
     build_tyrquake
+    # Clade CL-1c: cross-build GNU make (the first parallel-spawner port;
+    # drives CL-1b's posix_spawn/wait4). Baked into the ramfs as /make.
+    build_gnumake
+    # Clade CL-2: cross-build the C++ runtime (libunwind+libc++abi+libc++) into
+    # the sysroot + the /pouch-hello-cxx prover. Skips if the LLVM fork is absent.
+    build_libcxx
     # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
     # lands in the ramfs alongside the pouch hello binaries. Incremental
     # on no-source-change rebuilds (CMake/ninja dep tracking inside
@@ -413,7 +419,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -468,7 +474,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "sdl-probe" "tyr-quake" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -1701,6 +1707,13 @@ build_stratum_pool_fixture() {
     # main`. Keyed on the staged GOROOT existing (build_go_goroot -- default-on
     # since Stage 6; THYLACINE_BAKE_GOROOT=0 opts out and removes the stage).
     local pool_size="64M"
+    # CL-4b: the device toolchain (/clade) is ~280M staged (2 multicall copies +
+    # resource headers + sysroot); at ~3.3x bake amplification + on-device /tmp
+    # compile churn a clade-only gate needs ~2 GiB. Stacks with GOROOT if both on.
+    local bake_clade=0
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
+        bake_clade=1
+    fi
     if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$BUILD_DIR/go/goroot" ]]; then
         # Sized against MEASURED consumption (2026-07-03, task #39): the bake
         # itself uses ~575M for ~170M logical (~3.3x FS amplification) and the
@@ -1710,6 +1723,10 @@ build_stratum_pool_fixture() {
         # commit-on-allocation-pressure (task #39, the P1.2 write-amp lever);
         # this is capacity so the gate boot isn't hostage to it.
         pool_size="2560M"
+    fi
+    if [[ "$bake_clade" == "1" ]]; then
+        # clade-only -> 2048M; stacked with GOROOT (2560M) -> 4096M.
+        if [[ "$pool_size" == "2560M" ]]; then pool_size="4096M"; else pool_size="2048M"; fi
     fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
@@ -1892,6 +1909,20 @@ populate_stratum_pool() {
                 || { echo "==> populate pool: sync after Go cache FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
             echo "==> populate pool: Go warm cache + probe source baked"
         fi
+    fi
+
+    # --- CL-4b: bake the device toolchain at /clade (gated). The CL-4 clang++
+    # gate boot sets THYLACINE_BAKE_CLADE=1; stage_clade must have assembled the
+    # tree. /clade/bin/{clang++,ld.lld} + /clade/lib/clang/N/include + /clade/sysroot.
+    # A single recursive `put` (a per-file loop is infeasible). ---
+    local clade_stage="$BUILD_DIR/clade/stage"
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$clade_stage/bin" ]]; then
+        echo "==> populate pool: baking device toolchain ($clade_stage -> /clade, $(du -sh "$clade_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$clade_stage" /clade \
+            || { echo "==> populate pool: put /clade FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /clade FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: device toolchain baked at /clade"
     fi
 
     # --- G-7b: the Quake shareware data (-> /quake; QBASEDIR=/quake is
@@ -2114,7 +2145,7 @@ build_pouch_progs() {
     rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-mallocng-torture pouch-hello-threads pouch-hello-exitgroup pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-net pouch-hello-signals pouch-hello-sodium pouch-hello-argv pouch-hello-fault pouch-hello-pty pouch-hello-fopen pouch-hello-fs pouch-hello-env pouch-hello-spawn; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
@@ -2423,6 +2454,498 @@ build_tyrquake() {
     ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
 }
 
+build_gnumake() {
+    # Clade CL-1c (docs/LLVM-DESIGN.md) -- cross-build GNU make 4.4.1 for
+    # aarch64-thylacine. make is the first REAL parallel-spawner port: its
+    # posix_spawn code path (USE_POSIX_SPAWN) drives CL-1b's posix_spawn +
+    # wait4 directly, and with MAKE_JOBSERVER left UNDEFINED a top-level
+    # `make -jN` runs the pure job_slots counter + blocking waitpid reap
+    # (no pipe/fifo/pselect/SIGCHLD), a clean fit for the Thylacine process
+    # substrate. The vendored tree (third_party/gnumake, pruned-pristine)
+    # is COPIED into build/pouch/gnumake-{src,lib}, the hand-derived Thylacine
+    # config.h (usr/ports/gnumake/config.h -- an autoconf reference config.h
+    # with the census flips: no fork/vfork/mkfifo/jobserver/dload, st_mtim)
+    # + the committed generated gnulib headers overwrite the copy, and the
+    # explicit 35-object list compiles with the pouch toolchain (libsodium
+    # idiom -- no cross make). See docs/LLVM-DESIGN.md section 16.12 +
+    # third_party/gnumake/PRUNE-MANIFEST.md.
+    local sysroot="$BUILD_DIR/sysroot"
+    local mk_vendor="$REPO_ROOT/third_party/gnumake"
+    local port_dir="$REPO_ROOT/usr/ports/gnumake"
+    local mk_src="$BUILD_DIR/pouch/gnumake-src"
+    local mk_obj="$BUILD_DIR/pouch/gnumake-obj"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local clang="$LLVM_PREFIX/bin/clang"
+
+    if [[ ! -f "$mk_vendor/src/job.c" ]]; then
+        echo "==> gnumake: vendored source missing at $mk_vendor" >&2
+        exit 1
+    fi
+    if sysroot_is_stale; then
+        echo "==> gnumake: pouch sysroot missing/stale -- building it first"
+        build_sysroot
+    fi
+
+    # Staleness: reuse the binary when newer than the tree + port + libc.a.
+    if [[ -f "$progs_out/make" ]]; then
+        local stale
+        stale="$(find "$mk_vendor" "$port_dir" -type f -newer "$progs_out/make" -print -quit 2>/dev/null)"
+        if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$progs_out/make" ]]; then
+            ledger "make (GNU make 4.4.1): REUSED (cached + up-to-date)"
+            return 0
+        fi
+    fi
+
+    echo "==> building GNU make 4.4.1 (aarch64-thylacine)"
+    rm -rf "$mk_src" "$mk_obj"
+    mkdir -p "$mk_src/src" "$mk_src/lib" "$mk_obj" "$progs_out"
+    # Copy the pruned-pristine tree, then apply the Thylacine port config
+    # (the SDL2/musl idiom -- the vendored tree is never edited).
+    cp "$mk_vendor"/src/*.c "$mk_vendor"/src/*.h "$mk_src/src/"
+    cp "$mk_vendor"/lib/*.c "$mk_vendor"/lib/*.h "$mk_vendor"/lib/*.in.h "$mk_src/lib/"
+    cp "$port_dir/config.h" "$mk_src/src/config.h"
+    cp "$port_dir"/generated/fnmatch.h "$port_dir"/generated/glob.h "$mk_src/lib/"
+    local p
+    for p in "$port_dir"/patches/*.patch; do
+        [[ -e "$p" ]] || continue
+        patch -s -p1 -t -d "$mk_src" -i "$p"
+    done
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -D_GNU_SOURCE=1 -DHAVE_CONFIG_H
+                   -DLIBDIR='"/usr/lib"' -DINCLUDEDIR='"/usr/include"'
+                   -DLOCALEDIR='"/usr/share/locale"'
+                   -I"$mk_src/src" -I"$mk_src/lib"
+                   -std=gnu11 -O2 -fno-pic -fno-stack-protector )
+
+    # The explicit object list (CL-1c census: 30 src + 5 lib gnulib). The
+    # alt-OS files (w32/vms/amiga), remote-cstms, guile-under-HAVE_GUILE,
+    # load-under-MAKE_LOAD, and lib/alloca.c (musl has alloca) are NOT built.
+    local src_objs=( ar arscan commands default dir expand file function
+                     getopt getopt1 guile hash implicit job load loadapi
+                     main misc output posixos read remake rule shuffle
+                     signame strcache variable version vpath remote-stub )
+    local lib_objs=( concat-filename findprog-in fnmatch glob getloadavg )
+
+    local n=0 f
+    for f in "${src_objs[@]}"; do
+        "$clang" "${cflags[@]}" -c "$mk_src/src/$f.c" -o "$mk_obj/src_$f.o"
+        n=$((n + 1))
+    done
+    for f in "${lib_objs[@]}"; do
+        "$clang" "${cflags[@]}" -c "$mk_src/lib/$f.c" -o "$mk_obj/lib_$f.o"
+        n=$((n + 1))
+    done
+    echo "    compiled $n objects"
+
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$mk_obj"/*.o \
+        -o "$progs_out/make"
+    echo "    make: $(wc -c < "$progs_out/make" | tr -d ' ') bytes (ET_EXEC, static)"
+    ledger "make (GNU make 4.4.1): BUILT"
+}
+
+build_libcxx() {
+    # Clade CL-2 (docs/LLVM-DESIGN.md) -- the C++ runtime: libunwind + libc++abi
+    # + libc++, static, cross-built for aarch64-thylacine against the pouch sysroot
+    # via LLVM_ENABLE_RUNTIMES (the "Alpine-proven musl pairing", section 5.6). The
+    # three archives + the c++/v1 headers install into build/sysroot; a C++ prover
+    # (/pouch-hello-cxx) exercises exceptions/RTTI/threads/TLS-dtors/iostreams/
+    # std::filesystem end to end.
+    #
+    # The runtime SOURCES live in the LLVM fork ($LLVMFORK, the durable arc artifact
+    # -- like the Go arc's $GOFORK), NOT vendored: CL-3/CL-4 build the whole
+    # toolchain from it. Absent fork -> skip cleanly (a fresh checkout still builds;
+    # the joey prover degrades to "not present").
+    #
+    # Config decisions (each ground-truthed; see LLVM-DESIGN.md section 16.14/16.15):
+    #   - Built with the FORK clang (CL-3): --target=aarch64-thylacine now hits the
+    #     real ThylacineTargetInfo (auto-defines __thylacine__/__unix__/_GNU_SOURCE)
+    #     + Thylacine ToolChain. Thylacine is NOT __linux__, so libc++'s atomic-wait
+    #     still takes the GENERIC pthread fallback (pouch routes pthread), NOT the
+    #     Linux direct-futex path (raw syscall(SYS_futex) is the 0xFFFF/ENOSYS
+    #     sentinel on pouch) -- the discriminator is __linux__, which stays undefined.
+    #   - CMAKE_SYSTEM_NAME=Linux: a CMAKE-TOOLING knob only (uses llvm-ar, not the
+    #     Apple libtool that rejects aarch64 ELF); the compiled code's OS stays
+    #     thylacine (the --target), so __linux__ is undefined in the emitted code.
+    #   - LIBCXX_HAS_PTHREAD_API=ON: forces libc++'s pthread thread-API selection
+    #     (the non-__linux__ OS can't auto-detect it -> "No thread API").
+    #   - LIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF: musl has no __cxa_thread_atexit_impl
+    #     -> use libc++abi's pthread-key fallback.
+    #   - __cxa_thread_atexit: guarded `#if __linux__ || __Fuchsia__ || __thylacine__`
+    #     (the fork guard patch, CL-3b). The CL-2 surgical -D__linux__ flag RETIRES:
+    #     libc++abi is now built WITHOUT __linux__, so its __cxx_contention_t is int64
+    #     (same as libc++/consumers) -- the CL-2-audit int32/int64 ODR split is not
+    #     merely inert now, it is ELIMINATED (F2b). cxa_guard keys on SYS_gettid
+    #     (unaffected; the concurrent-static-init seam is tracked separately).
+    #   - LIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF: Thylacine ships no IANA tzdb.
+    #   - CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY: the runtimes aren't built yet,
+    #     so a C++ link probe can't work (chicken-and-egg); compile-only probes.
+    local sysroot="$BUILD_DIR/sysroot"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local bdir="$BUILD_DIR/pouch/cxx-runtimes"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    # CL-3: build the C++ runtime with the FORK clang (the real Thylacine
+    # driver). This is what auto-defines __thylacine__ + retires the surgical
+    # -D__linux__/-D__thylacine__=1 flags.
+    local pouch_cc="${POUCH_CC:-$fork/build/bin/clang}"
+    local pouch_cxx="${POUCH_CXX:-$fork/build/bin/clang++}"
+    local clangxx="$pouch_cxx"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+
+    if [[ ! -f "$fork/runtimes/CMakeLists.txt" ]]; then
+        echo "==> libcxx (CL-2): LLVM fork not found at $fork -- skipping (set LLVMFORK)"
+        # Drop a stale prover so the ramfs bake cannot ship an outdated one.
+        rm -f "$progs_out/pouch-hello-cxx"
+        return 0
+    fi
+    if [[ ! -x "$pouch_cc" || ! -x "$pouch_cxx" ]]; then
+        echo "==> libcxx (CL-3): fork clang not built -- skipping the C++ runtime"
+        echo "    build it: ninja -C \"$fork/build\" clang clang-resource-headers"
+        rm -f "$progs_out/pouch-hello-cxx"
+        return 0
+    fi
+    if sysroot_is_stale; then
+        echo "==> libcxx (CL-2): pouch sysroot missing/stale -- building it first"
+        build_sysroot
+    fi
+
+    # Reuse the installed runtime when libc++.a is newer than the fork's libc++
+    # tree marker + this build.sh (a recipe/config change forces a rebuild).
+    local need_runtime=1
+    if [[ -f "$sysroot/lib/libc++.a" && -f "$sysroot/include/c++/v1/__config_site" ]]; then
+        if [[ "$sysroot/lib/libc++.a" -nt "$fork/libcxx/CMakeLists.txt" \
+              && "$sysroot/lib/libc++.a" -nt "$fork/libcxxabi/CMakeLists.txt" \
+              && "$sysroot/lib/libc++.a" -nt "$fork/libunwind/CMakeLists.txt" \
+              && "$sysroot/lib/libc++.a" -nt "${BASH_SOURCE[0]}" ]]; then
+            # F3: key freshness on ALL three runtime trees (a fork edit touching
+            # only libcxxabi/libunwind must still force a rebuild, not ship stale).
+            need_runtime=0
+            ledger "libcxx (libunwind+libc++abi+libc++): REUSED (cached + up-to-date)"
+        fi
+    fi
+
+    if [[ "$need_runtime" -eq 1 ]]; then
+        echo "==> building the C++ runtime (libunwind+libc++abi+libc++, aarch64-thylacine)"
+        # __thylacine__ is auto-defined by the fork ThylacineTargetInfo (CL-3);
+        # _GNU_SOURCE stays explicit -- the target auto-defines it only for C++,
+        # and libunwind/libc++abi have C/ASM TUs that need the musl POSIX surface.
+        local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
+        # (Re)configure when the CMake cache is absent OR this build.sh is newer
+        # than the cache -- so a CMake-flag change in THIS recipe actually takes
+        # effect (a stale cache would silently ignore it). Otherwise ninja is
+        # incremental over the existing cache. The reconfigure is paid once per
+        # build.sh edit, then the need_runtime reuse gate above skips it.
+        if [[ ! -f "$bdir/CMakeCache.txt" || "${BASH_SOURCE[0]}" -nt "$bdir/CMakeCache.txt" ]]; then
+            rm -rf "$bdir"
+            local cmake_args=(
+                -G Ninja -S "$fork/runtimes" -B "$bdir"
+                -DCMAKE_BUILD_TYPE=Release
+                -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+                -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY
+                -DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx"
+                -DLLVM_ENABLE_PER_TARGET_RUNTIME_DIR=OFF
+                -DCMAKE_C_COMPILER="$pouch_cc"
+                -DCMAKE_CXX_COMPILER="$pouch_cxx"
+                -DCMAKE_ASM_COMPILER="$pouch_cc"
+                -DCMAKE_C_COMPILER_TARGET=aarch64-thylacine
+                -DCMAKE_CXX_COMPILER_TARGET=aarch64-thylacine
+                -DCMAKE_ASM_COMPILER_TARGET=aarch64-thylacine
+                -DCMAKE_SYSROOT="$sysroot"
+                -DCMAKE_C_FLAGS="$cflags" -DCMAKE_CXX_FLAGS="$cflags"
+                -DCMAKE_ASM_FLAGS="-march=armv8-a+lse+pauth+bti"
+                -DCMAKE_AR="$LLVM_PREFIX/bin/llvm-ar"
+                -DCMAKE_RANLIB="$LLVM_PREFIX/bin/llvm-ranlib"
+                -DCMAKE_NM="$LLVM_PREFIX/bin/llvm-nm"
+                -DCMAKE_INSTALL_PREFIX="$bdir/install"
+                -DLIBCXX_ENABLE_SHARED=OFF   -DLIBCXX_ENABLE_STATIC=ON
+                -DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_ENABLE_STATIC=ON
+                -DLIBUNWIND_ENABLE_SHARED=OFF -DLIBUNWIND_ENABLE_STATIC=ON
+                -DLIBCXX_HAS_MUSL_LIBC=ON -DLIBCXX_CXX_ABI=libcxxabi
+                -DLIBCXXABI_USE_LLVM_UNWINDER=ON -DLIBCXXABI_ENABLE_STATIC_UNWINDER=OFF
+                -DLIBCXX_USE_COMPILER_RT=ON -DLIBCXXABI_USE_COMPILER_RT=ON
+                -DLIBUNWIND_USE_COMPILER_RT=ON
+                -DLIBCXX_ENABLE_THREADS=ON -DLIBCXXABI_ENABLE_THREADS=ON
+                -DLIBCXX_HAS_PTHREAD_API=ON
+                -DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF
+                -DLIBCXX_ENABLE_FILESYSTEM=ON
+                -DLIBCXX_ENABLE_TIME_ZONE_DATABASE=OFF
+                -DLIBCXX_ENABLE_EXCEPTIONS=ON -DLIBCXXABI_ENABLE_EXCEPTIONS=ON
+                -DLIBCXX_ENABLE_RTTI=ON
+                -DLIBCXX_INCLUDE_TESTS=OFF -DLIBCXX_INCLUDE_BENCHMARKS=OFF
+                -DLIBCXX_INCLUDE_DOCS=OFF -DLIBCXXABI_INCLUDE_TESTS=OFF
+                -DLIBUNWIND_INCLUDE_TESTS=OFF
+            )
+            cmake "${cmake_args[@]}" >/dev/null
+        fi
+        ninja -C "$bdir" install-unwind install-cxxabi install-cxx >/dev/null
+
+        # Stage the three archives + the c++/v1 header tree into the sysroot.
+        # The libunwind top-level headers (unwind.h etc.) are DELIBERATELY not
+        # copied -- they would shadow clang's resource unwind.h; no C++ consumer
+        # needs libunwind's public API.
+        local a
+        for a in libc++.a libc++abi.a libunwind.a; do
+            if [[ ! -f "$bdir/install/lib/$a" ]]; then
+                echo "    libcxx: expected archive $a not produced" >&2
+                exit 1
+            fi
+            cp "$bdir/install/lib/$a" "$sysroot/lib/$a"
+        done
+        # F4: clear the destination first -- cp -R MERGES, so a header removed or
+        # renamed across a fork bump would survive as a stale ghost that could
+        # shadow/misdirect a later include.
+        rm -rf "$sysroot/include/c++/v1"
+        mkdir -p "$sysroot/include/c++/v1"
+        cp -R "$bdir/install/include/c++/v1/." "$sysroot/include/c++/v1/"
+        # Toolchain-completeness gate: the exception personality + the TLS-dtor
+        # ABI must be defined, or every C++ throw / thread_local dies at link.
+        local defined sym
+        defined="$("$LLVM_PREFIX/bin/llvm-nm" --defined-only "$sysroot/lib/libc++abi.a" 2>/dev/null)"$'\n'
+        for sym in __gxx_personality_v0 __cxa_throw __cxa_thread_atexit; do
+            case "$defined" in
+                *" T $sym"$'\n'*) ;;
+                *) echo "    libcxx: libc++abi.a missing $sym -- C++ runtime incomplete" >&2
+                   exit 1 ;;
+            esac
+        done
+        # F2b (CL-3b): -D__linux__ is retired, so libc++abi's __cxx_contention_t
+        # is int64 -- identical to libc++/consumers. The CL-2 int32/int64 ODR
+        # split is ELIMINATED (not merely inert), and the old atomic-wait-symbol
+        # tripwire that pinned its inertness retires with it (LLVM-DESIGN 16.15).
+        ledger "libcxx (libunwind+libc++abi+libc++): BUILT"
+    fi
+
+    # The C++ prover (/pouch-hello-cxx). Compiled with the fork clang++ (the pouch
+    # C++ consumer flags: -std=c++20, explicit -isystem c++/v1, _GNU_SOURCE for the
+    # musl POSIX surface libc++ headers reference), then linked through the fork
+    # clang++ *driver* (CL-3): the Thylacine ToolChain adds --eh-frame-hdr (so
+    # libunwind finds .eh_frame via PT_GNU_EH_FRAME) + the three C++ archives + the
+    # CRT + libc + builtins. NOT part of build_pouch_progs (that path is C-only).
+    local cxxsrc="$REPO_ROOT/usr/pouch-hello/pouch-hello-cxx.cpp"
+    if [[ -f "$cxxsrc" ]]; then
+        mkdir -p "$progs_out"
+        echo "==> pouch prog (C++): pouch-hello-cxx"
+        # -Wno-potentially-evaluated-expression: the prover's typeid(*polymorphic)
+        # RTTI check intentionally evaluates its operand (that IS the runtime-type
+        # test) -- the warning is expected, not a defect.
+        "$clangxx" --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti \
+            -std=c++20 -O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 \
+            -Wno-potentially-evaluated-expression \
+            -isystem "$sysroot/include/c++/v1" -isystem "$sysroot/include" \
+            -c "$cxxsrc" -o "$progs_out/pouch-hello-cxx.o"
+        # The Thylacine ToolChain wraps -lc++ -lc++abi -lunwind in a --start-group
+        # itself, so their cross-references (libc++ -> libc++abi -> libunwind, +
+        # libc++abi -> libc++ for the new/terminate handlers) resolve regardless of
+        # scan order -- no hand-rolled group needed.
+        "$clangxx" --target=aarch64-thylacine --sysroot="$sysroot" \
+            "$progs_out/pouch-hello-cxx.o" -o "$progs_out/pouch-hello-cxx"
+        # Verify the layout the kernel ELF loader requires (ET_EXEC, no PT_DYNAMIC).
+        local elf_hdr elf_phdrs
+        elf_hdr="$("$readelf" -h "$progs_out/pouch-hello-cxx")"
+        elf_phdrs="$("$readelf" -l "$progs_out/pouch-hello-cxx")"
+        case "$elf_hdr" in
+            *"Type:"*EXEC*) ;;
+            *) echo "    pouch-hello-cxx: not ET_EXEC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+        esac
+        case "$elf_phdrs" in
+            *DYNAMIC*) echo "    pouch-hello-cxx: has PT_DYNAMIC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+        esac
+        echo "    pouch-hello-cxx: $(wc -c < "$progs_out/pouch-hello-cxx" | tr -d ' ') bytes (ET_EXEC, static)"
+    fi
+}
+
+build_clade() {
+    # Clade CL-4 (docs/LLVM-DESIGN.md section 16) -- the DEVICE TOOLCHAIN: a static
+    # aarch64-thylacine clang+lld multicall (bin/llvm), cross-built from the fork
+    # with the fork's own host clang, linked through the CL-3 Thylacine ToolChain
+    # against the pouch sysroot. The multicall dispatches clang/clang++/lld/ld.lld
+    # (F3 GENERATE_DRIVER; verified CL-0). Baked to /clade (CL-4b) so `clang++ -O2`
+    # compiles+links+runs on-device.
+    #
+    # Cross-build shape mirrors build_libcxx (fork clang + --target=aarch64-thylacine
+    # + the pouch sysroot), extended to the LLVM project itself: AArch64-only, static
+    # (kernel/elf.c requires ET_EXEC + 0 PT_DYNAMIC), the multicall driver. The fork's
+    # own build/bin host tblgens are reused so the cross-build needs no nested NATIVE
+    # host build.
+    local sysroot="$BUILD_DIR/sysroot"
+    local fork="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
+    local bdir="$BUILD_DIR/clade/llvm-build"
+    local pouch_cc="${POUCH_CC:-$fork/build/bin/clang}"
+    local pouch_cxx="${POUCH_CXX:-$fork/build/bin/clang++}"
+    local host_tblgen="$fork/build/bin/llvm-tblgen"
+    local host_clang_tblgen="$fork/build/bin/clang-tblgen"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+
+    if [[ ! -f "$fork/llvm/CMakeLists.txt" ]]; then
+        echo "==> clade (CL-4): LLVM fork not found at $fork -- skipping (set LLVMFORK)"
+        return 0
+    fi
+    if [[ ! -x "$pouch_cc" || ! -x "$pouch_cxx" ]]; then
+        echo "==> clade (CL-4): fork clang not built -- skipping the device toolchain"
+        echo "    build it: ninja -C \"$fork/build\" clang clang-resource-headers llvm-tblgen clang-tblgen"
+        return 0
+    fi
+    if [[ ! -x "$host_tblgen" || ! -x "$host_clang_tblgen" ]]; then
+        echo "==> clade (CL-4): fork host tblgens missing -- build them:"
+        echo "    ninja -C \"$fork/build\" llvm-tblgen clang-tblgen"
+        return 0
+    fi
+    if sysroot_is_stale; then
+        build_sysroot
+    fi
+    if [[ ! -f "$sysroot/lib/libc++.a" ]]; then
+        # The toolchain is C++ -- it links the pouch libc++ group. Ensure it exists.
+        build_libcxx
+    fi
+
+    # The multicall is a multi-hour build: reuse it when newer than this recipe
+    # AND the fork Support patch surface (Path.inc carries the CL-4 getMainExecutable
+    # port). A fork edit or a recipe change forces a rebuild.
+    local out="$bdir/bin/llvm"
+    if [[ -x "$out" \
+          && "$out" -nt "${BASH_SOURCE[0]}" \
+          && "$out" -nt "$fork/llvm/lib/Support/Unix/Path.inc" ]]; then
+        ledger "clade (clang+lld multicall): REUSED (cached + up-to-date)"
+        return 0
+    fi
+
+    echo "==> building the device toolchain (clang+lld multicall, aarch64-thylacine)"
+    echo "    NOTE: this is a LONG cross-build (hours; ~3 GiB build tree)."
+    # Explicit sysroot includes (like the C++ prover): -nostdlibinc + c++/v1 then
+    # the C include dir, so the sysroot owns every system header. _GNU_SOURCE for
+    # musl's GNU surface, which LLVM assumes under __unix__.
+    local cxxflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include/c++/v1 -isystem $sysroot/include -D_GNU_SOURCE=1"
+    local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
+    if [[ ! -f "$bdir/CMakeCache.txt" || "${BASH_SOURCE[0]}" -nt "$bdir/CMakeCache.txt" ]]; then
+        rm -rf "$bdir"
+        mkdir -p "$bdir"
+        local cmake_args=(
+            -G Ninja -S "$fork/llvm" -B "$bdir"
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+            -DCMAKE_C_COMPILER="$pouch_cc"
+            -DCMAKE_CXX_COMPILER="$pouch_cxx"
+            -DCMAKE_ASM_COMPILER="$pouch_cc"
+            -DCMAKE_C_COMPILER_TARGET=aarch64-thylacine
+            -DCMAKE_CXX_COMPILER_TARGET=aarch64-thylacine
+            -DCMAKE_ASM_COMPILER_TARGET=aarch64-thylacine
+            -DCMAKE_SYSROOT="$sysroot"
+            -DCMAKE_C_FLAGS="$cflags"
+            -DCMAKE_CXX_FLAGS="$cxxflags"
+            -DCMAKE_ASM_FLAGS="-march=armv8-a+lse+pauth+bti"
+            -DCMAKE_AR="$LLVM_PREFIX/bin/llvm-ar"
+            -DCMAKE_RANLIB="$LLVM_PREFIX/bin/llvm-ranlib"
+            -DCMAKE_NM="$LLVM_PREFIX/bin/llvm-nm"
+            # Cross-build: reuse the fork's host tblgens (no nested NATIVE build).
+            -DLLVM_USE_HOST_TOOLS=ON
+            -DLLVM_TABLEGEN="$host_tblgen"
+            -DCLANG_TABLEGEN="$host_clang_tblgen"
+            -DLLVM_NATIVE_TOOL_DIR="$fork/build/bin"
+            # The built binary RUNS on aarch64-thylacine + defaults codegen to it.
+            -DLLVM_TARGETS_TO_BUILD=AArch64
+            -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-thylacine
+            -DLLVM_HOST_TRIPLE=aarch64-unknown-thylacine
+            # clang;lld + the multicall driver (F3: lld is a member).
+            -DLLVM_ENABLE_PROJECTS="clang;lld"
+            -DLLVM_TOOL_LLVM_DRIVER_BUILD=ON
+            # Static, non-PIE ET_EXEC.
+            -DLLVM_BUILD_STATIC=ON
+            -DBUILD_SHARED_LIBS=OFF
+            -DLLVM_ENABLE_PIC=OFF
+            -DLLVM_LINK_LLVM_DYLIB=OFF
+            -DCLANG_LINK_CLANG_DYLIB=OFF
+            -DLLVM_ENABLE_THREADS=ON
+            # No optional deps (none in the sysroot; the host-header shadow gotcha).
+            -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF
+            -DLLVM_ENABLE_LIBXML2=OFF
+            -DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_CURL=OFF
+            -DLLVM_ENABLE_HTTPLIB=OFF -DLLVM_ENABLE_LIBPFM=OFF
+            -DLLVM_ENABLE_BINDINGS=OFF
+            # Trim: no tests/examples/docs/benchmarks/analyzer.
+            -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF
+            -DLLVM_BUILD_TOOLS=ON
+            -DCLANG_INCLUDE_TESTS=OFF -DCLANG_INCLUDE_DOCS=OFF
+            -DCLANG_ENABLE_STATIC_ANALYZER=OFF
+        )
+        cmake "${cmake_args[@]}"
+    fi
+    # Memory-aware -j: the worst LLVM TU peaks ~2.46 GiB RSS (CL-0), so clamp to
+    # ~1 job per 3 GiB of host RAM to avoid OOM/thrash on a small-RAM host.
+    # Override with CLADE_JOBS=N.
+    local memgib jobs ncpu
+    memgib=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 8589934592) / 1073741824 ))
+    ncpu=$(sysctl -n hw.ncpu 2>/dev/null || echo 4)
+    jobs=$(( memgib / 3 )); [[ "$jobs" -lt 1 ]] && jobs=1
+    [[ "$jobs" -gt "$ncpu" ]] && jobs="$ncpu"
+    jobs="${CLADE_JOBS:-$jobs}"
+    echo "    ninja -j$jobs (host RAM ${memgib} GiB, ncpu $ncpu)"
+    ninja -C "$bdir" -j"$jobs" llvm clang-resource-headers
+
+    if [[ ! -x "$out" ]]; then
+        echo "    clade: multicall $out not produced" >&2
+        exit 1
+    fi
+    # Verify the kernel ELF loader's acceptance shape (ET_EXEC, no PT_DYNAMIC).
+    case "$("$readelf" -h "$out")" in
+        *"Type:"*EXEC*) ;;
+        *) echo "    clade: bin/llvm not ET_EXEC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+    esac
+    case "$("$readelf" -l "$out")" in
+        *DYNAMIC*) echo "    clade: bin/llvm has PT_DYNAMIC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+    esac
+    ledger "clade (clang+lld multicall): BUILT ($(wc -c < "$out" | tr -d ' ') bytes, ET_EXEC static)"
+}
+
+stage_clade() {
+    # Clade CL-4b -- assemble build/clade/stage/, the /clade tree baked into the
+    # pool (populate_stratum_pool `put`s it when THYLACINE_BAKE_CLADE=1). Inputs:
+    # the cross-built multicall build/clade/llvm-build/bin/llvm (from build_clade,
+    # or pulled from the GCP builder into that path) + its resource headers + the
+    # pouch sysroot.
+    #
+    # Thylacine has no symlinks/hardlinks at v1.0, and the CL-4 getMainExecutable
+    # port resolves argv[0] to a REAL file (getprogpath verifies existence), so the
+    # multicall is COPIED under each dispatch name. The C++ gate needs exactly two:
+    # clang++ (the entry, invoked absolute) + ld.lld (clang++ execs it by name).
+    # A C-mode `clang` copy is a CL-5 add.
+    local xbuild="$BUILD_DIR/clade/llvm-build"
+    local llvm_bin="$xbuild/bin/llvm"
+    local stage="$BUILD_DIR/clade/stage"
+    local sysroot="$BUILD_DIR/sysroot"
+    local strip="$LLVM_PREFIX/bin/llvm-strip"
+
+    if [[ ! -f "$llvm_bin" ]]; then
+        echo "==> clade stage: no multicall at $llvm_bin -- run build_clade or pull it from the builder"
+        return 0
+    fi
+    local resdir; resdir="$(cd "$xbuild" 2>/dev/null && ls -d lib/clang/*/include 2>/dev/null | head -1)"
+    if [[ -z "$resdir" || ! -d "$xbuild/$resdir" ]]; then
+        echo "==> clade stage: resource headers (lib/clang/*/include) missing under $xbuild" >&2
+        exit 1
+    fi
+
+    echo "==> clade stage: assembling $stage (clang++ + ld.lld + resource headers + sysroot)"
+    rm -rf "$stage"
+    mkdir -p "$stage/bin" "$stage/$(dirname "$resdir")"
+    # Stripped copies under the dispatch names (argv[0]-dispatched multicall).
+    local stripped="$BUILD_DIR/clade/.llvm.stripped"
+    "$strip" -o "$stripped" "$llvm_bin" 2>/dev/null || cp "$llvm_bin" "$stripped"
+    cp "$stripped" "$stage/bin/clang++"
+    cp "$stripped" "$stage/bin/ld.lld"
+    chmod +x "$stage/bin/clang++" "$stage/bin/ld.lld"
+    rm -f "$stripped"
+    # Resource headers (stddef.h/stdint.h/... at InstalledDir/../lib/clang/N/include).
+    cp -R "$xbuild/$resdir" "$stage/$(dirname "$resdir")/"
+    # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
+    mkdir -p "$stage/sysroot"
+    cp -R "$sysroot/lib" "$stage/sysroot/lib"
+    cp -R "$sysroot/include" "$stage/sysroot/include"
+    echo "    clade stage: $(du -sh "$stage" | cut -f1) -- bin: $(ls "$stage/bin" | tr '\n' ' ')"
+}
+
 build_disk() {
     # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
     # virtio-blk-device.
@@ -2528,7 +3051,11 @@ case "$target" in
     pouch-progs) build_pouch_progs ;;
     sdl2)        build_sdl2        ;;
     tyrquake)    build_tyrquake    ;;
+    gnumake)     build_gnumake     ;;
+    libcxx)      build_libcxx      ;;
     quake-host)  build_quake_host  ;;
+    clade)       build_clade       ;;
+    stage-clade) stage_clade       ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;
@@ -2549,7 +3076,7 @@ case "$target" in
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, sdl2, tyrquake, gnumake, libcxx, stratumd, userspace, disk, pool, go-probes, all, clean" >&2
         exit 1
         ;;
 esac

@@ -22,6 +22,15 @@
 # Environment overrides:
 #   POUCH_SYSROOT  — sysroot path (default: <repo>/build/sysroot)
 #   LLVM_PREFIX    — LLVM install prefix (default: /opt/homebrew/opt/llvm)
+#   LLVMFORK       — the Clade LLVM fork (default: ~/projects/llvm-thylacine)
+#   POUCH_CC       — the compile driver (default: the fork clang if built)
+#
+# Since Clade CL-3 the fork clang KNOWS Triple::Thylacine (a real
+# ThylacineTargetInfo that auto-defines __thylacine__/__unix__/_GNU_SOURCE,
+# and a Thylacine ToolChain that drives ld.lld -- see docs/LLVM-DESIGN.md
+# §16.15). Prefer it. A fork-less checkout falls back to homebrew clang,
+# which treats "thylacine" as an unknown OS: fine as a *compiler* (it emits
+# the aarch64 ELF object), and pouch-ld does the link half.
 #
 # See docs/POUCH-DESIGN.md §9.
 set -euo pipefail
@@ -31,8 +40,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 POUCH_SYSROOT="${POUCH_SYSROOT:-$REPO_ROOT/build/sysroot}"
 LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
+LLVMFORK="${LLVMFORK:-$HOME/projects/llvm-thylacine}"
 
-exec "$LLVM_PREFIX/bin/clang" \
+POUCH_CC="${POUCH_CC:-$LLVMFORK/build/bin/clang}"
+[[ -x "$POUCH_CC" ]] || POUCH_CC="$LLVM_PREFIX/bin/clang"
+
+exec "$POUCH_CC" \
     --target=aarch64-thylacine \
     --sysroot="$POUCH_SYSROOT" \
     -march=armv8-a+lse+pauth+bti \

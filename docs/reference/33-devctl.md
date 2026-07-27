@@ -41,9 +41,10 @@ The Dev's vtable follows the directory-Dev pattern from devproc (`30-dev-spoor.m
 /ctl/devices                      path = CTL_KIND_DEVICES       QTFILE
 /ctl/kernel-base                  path = CTL_KIND_KERNEL_BASE   QTFILE
 /ctl/sched                        path = CTL_KIND_SCHED         QTFILE
+/ctl/cpu                          path = CTL_KIND_CPU           QTFILE
 ```
 
-Single-level layout — no per-pid axis (unlike devproc). Subkind enum values 1..5 are leaf kinds; 0 is the root sentinel. New leaves get the next sequential subkind; reserved range up to 31 (single byte) before nested directories need richer encoding.
+Single-level layout — no per-pid axis (unlike devproc). Subkind enum values 1..6 are leaf kinds; 0 is the root sentinel. New leaves get the next sequential subkind; reserved range up to 31 (single byte) before nested directories need richer encoding.
 
 ### Namespace residence (#57a)
 
@@ -61,12 +62,14 @@ Reaching `/ctl` through `stalk` required the same **reuse-`nc` walk fix** as dev
 
 ### `/ctl/procs`
 
+The system-wide process overview. **prowl-1 (PROWL-DESIGN.md §3) added the `NAME` + `CPU_NS` columns** (the #65 `PAGES`/`CHILDREN` columns predate it); **prowl-4 added the `PPID` column** (the tree view) **and the `STOPPED` run-state**:
+
 ```
-PID    STATE      THREADS
-0    ALIVE    1
+PID    PPID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS
+0    0    kproc    ALIVE    1    0    3    12345678
 ```
 
-Walks via `proc_for_each(callback, arg)` (added in P4-C; declared in `<thylacine/proc.h>`). The callback formats one row per Proc into the buffer. g_proc_table_lock held during iteration — `format_procs` runs the entire DFS under the lock; total cost is O(N_procs) with small per-proc text.
+Columns are whitespace-separated (a monitor splits on whitespace; process names are basenames, never contain spaces; an unstamped Proc reads `?`). `PPID` is the parent pid (`p->parent ? p->parent->pid : 0` — read under `g_proc_table_lock`, so `p->parent` is a valid Proc or NULL; kproc + a reparented orphan-root read 0), the edge a monitor builds a parent→child tree from. `CPU_NS` is the cumulative on-CPU time in ns (`proc_cpu_ns` = Σ `run_ns` over the Proc's threads) — the reader diffs it across polls for %CPU. **`STATE` is the effective run-state (prowl-4):** an ALIVE Proc with `job_stop_req` set (a monitor `suspend` via `/proc/<pid>/ctl`, or a Ctrl-Z via the pts path) reads **`STOPPED`** (the Unix `ps` T-state, via `procs_state_name` — a plain `state_name` otherwise); the DEBUG stop (`debug_stop_req`, the attach-gated debugger stop) is deliberately **not** surfaced here — it is the debugger's private I-39 view, not a job-control state a monitor should expose. `job_stop_req` is read atomically (a cross-Proc reader holds `g_proc_table_lock` via `proc_for_each` but no per-Proc lock). Walks via `proc_for_each(callback, arg)` (declared in `<thylacine/proc.h>`); the callback formats one row per Proc into the buffer, and `proc_cpu_ns` walks `p->threads` under the same `g_proc_table_lock` the DFS holds. `format_procs_cb` early-returns on buffer overflow (the #57a bound); prowl-1 bumped `DEVCTL_READ_BUF` 512 → 2048 so the wider lines do not truncate the listing before ~30 procs. Total cost is O(N_procs) with small per-proc text.
 
 ### `/ctl/memory`
 
@@ -109,7 +112,40 @@ KASLR diagnostics. seed_source is one of `dtb-kaslr-seed` / `dtb-rng-seed` / `cn
 runnable: 1
 ```
 
-Calls `sched_runnable_count()`. Per-band breakdown via `sched_runnable_count_band(band)` is held to a future sub-chunk that adds the band-specific output.
+Calls `sched_runnable_count()`. Per-band breakdown via `sched_runnable_count_band(band)` is held to a future sub-chunk that adds the band-specific output. (`/ctl/sched` also renders `cpus:` + the global work-conservation `wc:` / `wc-tickless:` lines — see `format_sched`.)
+
+### `/ctl/cpu` (prowl-3b)
+
+One row per online CPU — the per-core meter denominator `prowl` reads:
+
+```
+cpus: 4
+cpu idle_ns capacity
+0 42441000000 1024
+1 38102773311 1024
+2 40917552108 1024
+3 39558210447 1024
+```
+
+`idle_ns` is the cumulative ns that CPU spent parked in the idle loop
+(`sched_cpu_idle_ns(cpu)`, charged in `sched_idle_park` next to the global
+`g_wc_idle_ns` — prowl-3a); `capacity` is the normalized capacity class
+(`sched_cpu_capacity`, `SCHED_CAPACITY_SCALE`=1024 on a uniform topology). The
+reader derives **per-core utilization** the htop way: `1 - d(idle_ns)/d(wall)`
+diffed across two polls (the kernel keeps no instantaneous-rate state). Bounded
+by `smp_cpu_count()` (`<= DTB_MAX_CPUS`=8 rows); the accessors self-guard an
+out-of-range index. A DTB-declared CPU that never came online (a PSCI bring-up
+failure — `idle_ns` stuck at 0, indistinguishable from a pegged-100%-busy core
+via idle_ns alone) renders as `<i> offline` (gated on `g_cpu_online[i]`; the
+reader's 3-column parse skips the 2-column line → no bar), never a spurious full
+meter (prowl-5 F2; unreachable on QEMU-virt, which never fails PSCI). **All-visible** like the other coarse `/ctl` leaves
+(visibility-not-authority) — unlike `/proc/<pid>/sched`'s OQ-4-gated *per-thread*
+internals. Reads no per-CPU lock: `idle_ns` is a coherent `__atomic` snapshot of
+its sole (per-CPU idle) writer, `capacity` is boot-static.
+
+The **on-CPU thread** per core (§3.4's `/dev/sysstat` "who is on each CPU") is a
+v1.x add — it needs a per-CPU current-thread pointer + cross-CPU `Thread*`
+validation (a UAF concern the meter deliberately sidesteps).
 
 ---
 
@@ -185,7 +221,8 @@ When `specs/9p_client.tla` lands at Phase 4+, devctl's `/ctl/9p/` subdirectory w
 | `/ctl/memory` (phys allocator stats) | Landed (P4-D) |
 | `/ctl/devices` (bestiary listing) | Landed (P4-D) |
 | `/ctl/kernel-base` (KASLR diagnostics) | Landed (P4-D) |
-| `/ctl/sched` (runnable count) | Landed (P4-D) |
+| `/ctl/sched` (runnable count + wc stats) | Landed (P4-D) |
+| `/ctl/cpu` (per-CPU idle_ns + capacity; prowl-3b) | Landed (prowl-3b) |
 | Walk dispatch + offset-aware read | Landed (P4-D) |
 | In-kernel tests | 11 covering registration + per-leaf reads + walk misses + write rejection |
 | Bestiary count | 7 (devnone + cons + null + zero + random + proc + ctl) |

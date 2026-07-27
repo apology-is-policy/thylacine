@@ -1,0 +1,897 @@
+pouch boundary-line patch 0024 - CL-1a FS/process syscall wires.
+
+The Clade arc (docs/LLVM-DESIGN.md) sub-chunk CL-1a: wire the pouch
+FS/process syscalls that CL-0's census (LLVM-DESIGN.md section 16.1) found
+clang/lld/make demand per-compile/per-link, each onto an EXISTING,
+already-audited Thylacine kernel syscall (ZERO new kernel surface). The
+0xFFFF ENOSYS sentinels these replace made every compile fail at
+output-write (renameat), every header-search fail (getdents64), etc.
+
+Wired (Linux name -> Thylacine kernel primitive):
+  getpid    -> SYS_GETPID (72)         [temp-name mangling]
+  chdir     -> SYS_CHDIR (69)          [make -C]     (kernel wants path+len)
+  getcwd    -> SYS_GETCWD (70)         [cwd report]  (same (buf,size)->len)
+  ftruncate -> SYS_WSTAT (59) SIZE     [lld output image sizing]
+  fchmod    -> SYS_WSTAT (59) MODE
+  fchmodat/chmod -> open(O_PATH)+SYS_WSTAT MODE   [path form]
+  faccessat/access -> SYS_STAT (88) existence+owner-rwx probe
+  renameat/rename  -> SYS_RENAME (57)  [PER-COMPILE: clang temp+atomic .o]
+  unlinkat/unlink/rmdir -> SYS_UNLINK (58) (+REMOVEDIR)
+  mkdirat/mkdir    -> SYS_WALK_CREATE (54) DMDIR   [make output dirs]
+  readdir(DIR*)    -> SYS_READDIR (56) 9P-stream -> dirent translation
+                                       [PER-COMPILE: header-search dir scan]
+  open(O_CREAT)/openat -> SYS_WALK_CREATE (54)   [clang mkstemp +
+                     the .o output; create-mode fopen; PER-COMPILE]
+
+The FS-mutation kernel primitives (RENAME/UNLINK/WALK_CREATE) are
+PARENT-FD + leaf-name, not path-based, so the *at functions split their
+path into (parent-dir, leaf) via the new shared __pouch_open_parent
+(src/fcntl/_pouch_fs.c + src/internal/_pouch_fs.h): open the parent O_PATH
+(born R|W -- the A-1.7 navigation base the primitives accept; SYS_open
+resolves it through stalk, cwd-joining a relative path, LS-4) and hand
+(parent_fd, leaf) to the kernel. The /srv/ short-circuits in unlink()/
+chmod() (0014) are preserved by delegating their real path to the CL-1a
+*at variant. openat also lifts the stale "absolute-only" restriction
+(CL-1a wired chdir/getcwd, so a relative path cwd-joins via SYS_open's
+FROM_ROOT arm) and maps O_TRUNC -> +OTRUNC.
+
+Deferred to CL-1b (not clean 1:1 wires -- ground truth from CL-0):
+  - dup2/dup3: need dup-ONTO-a-chosen-fd; Thylacine SYS_DUP allocates a
+    kernel-chosen slot (that is dup(), not dup2/dup3). The child's fd
+    redirection maps onto the SYS_SPAWN_FULL_ARGV fd-list, not in-child
+    dup2 -- posix_spawn territory.
+  - pipe2: SYS_PIPE returns rd/wr in x0/x1 (a two-register svc return the
+    single-return syscall() macro cannot capture) -- needs a small asm
+    shim, landed with the process-substrate work.
+  - posix_spawn / wait4: the audit-bearing process-lifecycle rewrite.
+
+Invariants preserved:
+  - P-1 (no foreign syscall numbers): every wire maps 1:1 onto a
+    Thylacine kernel syscall (via the 0019 SYS_thyla_* self-contained
+    define idiom -- aarch64 LP64 has no legacy aliases to repoint).
+  - P-3 (no silently-wrong POSIX): AT_FDCWD-only forms reject a real
+    dirfd with -ENOTSUP; a trailing-slash path -> -EINVAL; bounds ->
+    -ENAMETOOLONG. No form silently misbehaves.
+  - P-4 (boundary-line discipline): touches only the lower-half .c files
+    + the two new pouch-internal files; the portable upper half and the
+    public headers are untouched.
+
+Files: 2 new (src/internal/_pouch_fs.h, src/fcntl/_pouch_fs.c) + 17
+rewritten lower-half .c files.
+
+diff --color -ruN musl-base/src/dirent/readdir.c b/src/dirent/readdir.c
+diff --color -ruN musl-base/src/dirent/readdir.c b/src/dirent/readdir.c
+--- a/src/dirent/readdir.c	2026-07-23 16:38:09
++++ b/src/dirent/readdir.c	2026-07-23 16:52:31
+@@ -1,8 +1,24 @@
++/* pouch boundary-line (CL-1a): readdir(DIR*) refills over Thylacine
++ * SYS_READDIR (56) and translates the raw 9P2000.L Treaddir stream into the
++ * Linux getdents64 struct-dirent records the rest of musl's dirent family
++ * already understands. getdents is PER-COMPILE load-bearing (clang scans
++ * header-search dirs, CL-0 §16.1), not just std::filesystem.
++ *
++ * 9P entry (kernel/include/thylacine/syscall.h): qid(13) + offset(8 LE) +
++ * type(1) + name_len(2 LE) + name. Within qid: type(1) + version(4) +
++ * path(8 LE); d_ino = qid.path, d_type = the separate Linux type byte.
++ *
++ * Sizing: a translated record round_up(offsetof(d_name)+L+1, 8) is at most
++ * ~a few bytes larger than its 9P source (24+L); requesting 3/4 of dir->buf
++ * of raw guarantees the translated form fits the full buffer, so no entry
++ * the kernel returned is ever dropped mid-batch. */
+ #include <dirent.h>
+ #include <errno.h>
+ #include <stddef.h>
++#include <string.h>
+ #include "__dirent.h"
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ typedef char dirstream_buf_alignment_check[1-2*(int)(
+ 	offsetof(struct __dirstream, buf) % sizeof(off_t))];
+@@ -10,14 +26,40 @@
+ struct dirent *readdir(DIR *dir)
+ {
+ 	struct dirent *de;
+-	
++
+ 	if (dir->buf_pos >= dir->buf_end) {
+-		int len = __syscall(SYS_getdents, dir->fd, dir->buf, sizeof dir->buf);
++		char raw[3 * sizeof dir->buf / 4];
++		long len = __syscall(SYS_thyla_readdir, dir->fd, raw, sizeof raw);
+ 		if (len <= 0) {
+-			if (len < 0 && len != -ENOENT) errno = -len;
++			if (len < 0) errno = -len;
+ 			return 0;
+ 		}
+-		dir->buf_end = len;
++		size_t ri = 0, wi = 0;
++		while (ri + 24 <= (size_t)len) {
++			unsigned long ino = 0, off = 0;
++			for (int k = 0; k < 8; k++)
++				ino |= (unsigned long)(unsigned char)raw[ri+5+k] << (8*k);
++			for (int k = 0; k < 8; k++)
++				off |= (unsigned long)(unsigned char)raw[ri+13+k] << (8*k);
++			unsigned char type = (unsigned char)raw[ri+21];
++			unsigned nlen = (unsigned char)raw[ri+22]
++			              | ((unsigned)(unsigned char)raw[ri+23] << 8);
++			if (ri + 24 + nlen > (size_t)len) break;   /* truncated tail */
++			if (nlen > 255) nlen = 255;
++			unsigned reclen = (offsetof(struct dirent, d_name) + nlen + 1 + 7) & ~7u;
++			if (wi + reclen > sizeof dir->buf) break;  /* sizing guarantees no-op */
++			de = (struct dirent *)(dir->buf + wi);
++			de->d_ino = ino;
++			de->d_off = (off_t)off;
++			de->d_reclen = (unsigned short)reclen;
++			de->d_type = type;
++			memcpy(de->d_name, raw + ri + 24, nlen);
++			de->d_name[nlen] = 0;
++			wi += reclen;
++			ri += 24 + nlen;
++		}
++		if (wi == 0) return 0;
++		dir->buf_end = (int)wi;
+ 		dir->buf_pos = 0;
+ 	}
+ 	de = (void *)(dir->buf + dir->buf_pos);
+diff --color -ruN musl-base/src/fcntl/_pouch_fs.c b/src/fcntl/_pouch_fs.c
+--- a/src/fcntl/_pouch_fs.c	1970-01-01 01:00:00
++++ b/src/fcntl/_pouch_fs.c	2026-07-23 16:50:40
+@@ -0,0 +1,50 @@
++/* pouch boundary-line shared FS substrate (CL-1a). See _pouch_fs.h. */
++#include <fcntl.h>
++#include <errno.h>
++#include <string.h>
++#include "syscall.h"
++#include "_pouch_fs.h"
++
++int __pouch_open_parent(int atfd, const char *path, const char **leaf)
++{
++	if (!path || !leaf) return -EFAULT;
++	if (atfd != AT_FDCWD) return -ENOTSUP;   /* AT_FDCWD only at v1.0 (P-3) */
++
++	size_t len = strnlen(path, POUCH_PATH_MAX + 1);
++	if (len == 0) return -ENOENT;
++	if (len > POUCH_PATH_MAX) return -ENAMETOOLONG;
++
++	/* Find the last '/'. Its right side is the leaf; its left side (or "."
++	 * when there is none) is the parent directory to open. */
++	const char *slash = 0;
++	for (size_t i = 0; i < len; i++)
++		if (path[i] == '/') slash = path + i;
++
++	char dir[POUCH_PATH_MAX + 1];
++	size_t dlen;
++	if (!slash) {
++		/* No '/': parent is the cwd. */
++		dir[0] = '.';
++		dlen = 1;
++		*leaf = path;
++	} else {
++		*leaf = slash + 1;
++		if (**leaf == '\0') return -EINVAL;   /* trailing slash: no leaf */
++		if (slash == path) {
++			/* Leaf directly under root ("/foo"). */
++			dir[0] = '/';
++			dlen = 1;
++		} else {
++			dlen = (size_t)(slash - path);
++			memcpy(dir, path, dlen);
++		}
++	}
++	dir[dlen] = '\0';
++
++	/* Open the parent O_PATH: born R|W (the A-1.7 navigation base the
++	 * FS-mutation primitives accept), resolved through stalk (cwd-join
++	 * for a relative dir). */
++	long fd = __syscall(SYS_thyla_open, POUCH_FROM_ROOT, dir, dlen, POUCH_OPATH);
++	if (fd < 0) return (int)fd;
++	return (int)fd;
++}
+diff --color -ruN musl-base/src/fcntl/openat.c b/src/fcntl/openat.c
+--- a/src/fcntl/openat.c	2026-07-23 16:38:09
++++ b/src/fcntl/openat.c	2026-07-23 17:01:16
+@@ -1,37 +1,32 @@
+-/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16b-beta cont;
+- * resolution moved onto the stalk resolver at PTY-3, patch 0021).
++/* pouch boundary-line: openat() over Thylacine's stalk resolution + the
++ * CL-1a O_CREAT arm (SYS_WALK_CREATE).
+  *
+- * openat() over Thylacine's SYS_open full-path stalk resolution.
+- * Absolute paths only at v1.0; AT_FDCWD only; O_RDONLY/W/RW only.
+- * See 0009-pouch-openat.patch + 0021-pouch-pty.patch for the design
+- * rationale.
++ * History: 0009 walked per-component; 0021 moved to SYS_open (65, stalk:
++ * ONE syscall, per-component X-search + mount-crossing + the real -errno).
++ * 0023 routed the stdio openers through this function but left O_CREAT as
++ * ENOTSUP -- "create-mode fopen/tmpfile wait on the SYS_WALK_CREATE openat
++ * wiring." CL-1a lands exactly that: clang creates its output .o + mkstemp
++ * temps via open(O_CREAT|O_EXCL), so a compile cannot write output without
++ * it (LLVM-DESIGN.md §16). File creation is per-compile load-bearing.
+  *
+- * PTY-3 (0021): the original 0009 body walked per-component via
+- * SYS_walk_open, opening EVERY intermediate with the FINAL omode --
+- * which structurally cannot open a write-mode file through a
+- * directory or across a mount (the first O_RDWR dir-open rejects; the
+- * first live instance was posix_openpt's open of /dev/pts/ptmx, which
+- * crosses devramfs -> devdev -> ptyfs). SYS_open (= 65, stalk-1) is
+- * the modern resolver the native t_open uses: ONE syscall, the full
+- * path, per-component X-search + mount-crossing INSIDE the resolver,
+- * and only the FINAL component is opened with the caller's omode. It
+- * also returns the REAL -errno (ER-1: T_E_NOENT walk-miss, T_E_ACCES
+- * perm denial, ...) where the old loop could only answer a blanket
+- * ENOENT. */
++ * Create arm: split the path into (parent-dir, leaf) via __pouch_open_parent,
++ * then SYS_WALK_CREATE the leaf (perm = mode & 0777, a regular file -- no
++ * DMDIR). O_EXCL surfaces the kernel's EEXIST verbatim; without O_EXCL an
++ * EEXIST falls back to opening the existing file (+OTRUNC if O_TRUNC).
++ *
++ * Relative paths are now resolved (CL-1a wired chdir/getcwd): SYS_open's
++ * FROM_ROOT arm cwd-joins a relative path (LS-4), so the old "absolute
++ * only" restriction is lifted -- make/clang emit cwd-relative paths. */
+ #include <fcntl.h>
+ #include <stdarg.h>
+ #include <errno.h>
+ #include <stddef.h>
+ #include <string.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+-/* Thylacine flag values (mirror kernel/include/thylacine/syscall.h
+- * and usr/lib/libt/include/thyla/syscall.h). */
+-#define POUCH_WALK_FROM_ROOT  ((long)(-1))
+-#define POUCH_OREAD           0u
+-#define POUCH_OWRITE          1u
+-#define POUCH_ORDWR           2u
+-#define POUCH_PATH_MAX        1024u   /* the kernel SYS_OPEN_PATH_MAX */
++/* SYS_open +OTRUNC (SYS_WALK_OPEN_OMODE_VALID includes OTRUNC = 0x10). */
++#define POUCH_OTRUNC  0x10u
+ 
+ int openat(int fd, const char *filename, int flags, ...)
+ {
+@@ -43,34 +38,13 @@
+ 		mode = va_arg(ap, mode_t);
+ 		va_end(ap);
+ 	}
+-	(void)mode;
+ 
+-	/* AT_FDCWD only at v1.0. */
+-	if (fd != AT_FDCWD) {
+-		errno = ENOTSUP;
+-		return -1;
+-	}
+-	/* Refuse O_CREAT / O_TMPFILE: the pouch arm doesn't synthesize
+-	 * inode creation. Other flags (O_TRUNC, O_APPEND, O_NONBLOCK,
+-	 * O_CLOEXEC, O_NOCTTY) are silently no-op at v1.0. */
+-	if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
+-		errno = ENOTSUP;
+-		return -1;
+-	}
+-	if (!filename) {
+-		errno = EFAULT;
+-		return -1;
+-	}
+-	/* Absolute paths only at v1.0 (pouch has no chdir surface, so a
+-	 * relative path has no well-defined base to advertise). */
+-	if (filename[0] != '/') {
+-		errno = ENOTSUP;
+-		return -1;
+-	}
++	if (fd != AT_FDCWD) { errno = ENOTSUP; return -1; }   /* AT_FDCWD only */
++	if (!filename) { errno = EFAULT; return -1; }
+ 
+-	/* Map POSIX O_RDONLY / O_WRONLY / O_RDWR to Thylacine T_OREAD /
+-	 * T_OWRITE / T_ORDWR. The kernel's stalk resolution enforces the
+-	 * actual envelope; pouch only translates the flag bits. */
++	/* O_TMPFILE (an unnamed inode) has no Thylacine primitive at v1.0. */
++	if ((flags & O_TMPFILE) == O_TMPFILE) { errno = ENOTSUP; return -1; }
++
+ 	unsigned long omode;
+ 	switch (flags & O_ACCMODE) {
+ 	case O_RDONLY: omode = POUCH_OREAD;  break;
+@@ -79,14 +53,34 @@
+ 	default:       errno = EINVAL; return -1;
+ 	}
+ 
+-	size_t len = strlen(filename);
+-	if (len > POUCH_PATH_MAX) {
+-		errno = ENAMETOOLONG;
+-		return -1;
++	size_t len = strnlen(filename, POUCH_PATH_MAX + 1);
++	if (!len) { errno = ENOENT; return -1; }
++	if (len > POUCH_PATH_MAX) { errno = ENAMETOOLONG; return -1; }
++
++	if (flags & O_CREAT) {
++		const char *leaf;
++		int p = __pouch_open_parent(AT_FDCWD, filename, &leaf);
++		if (p < 0) return __syscall_ret(p);
++
++		long r = __syscall(SYS_thyla_walk_create, p, leaf, strlen(leaf),
++		                   omode, (unsigned)mode & 0777u);
++		if (r >= 0) { __syscall(SYS_close, p); return __syscall_ret(r); }
++
++		/* Exists + no O_EXCL: open the existing file (+OTRUNC on O_TRUNC).
++		 * Any other create error propagates. */
++		if (r == -EEXIST && !(flags & O_EXCL)) {
++			unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
++			long o = __syscall(SYS_thyla_open, (long)p, leaf, strlen(leaf), om);
++			__syscall(SYS_close, p);
++			return __syscall_ret(o);
++		}
++		__syscall(SYS_close, p);
++		return __syscall_ret(r);
+ 	}
+ 
+-	/* One stalk-resolved open from the Territory root. The kernel
+-	 * answers the fd or the real -errno (seam-decoded). */
+-	return __syscall_ret(__syscall(SYS_open, POUCH_WALK_FROM_ROOT,
+-	                               filename, len, omode));
++	/* Non-create open: one stalk-resolved open from the Territory root
++	 * (relative paths cwd-join via the FROM_ROOT arm). O_TRUNC -> +OTRUNC. */
++	unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
++	return __syscall_ret(__syscall(SYS_thyla_open, POUCH_FROM_ROOT,
++	                               filename, len, om));
+ }
+diff --color -ruN musl-base/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
+--- a/src/internal/_pouch_fs.h	1970-01-01 01:00:00
++++ b/src/internal/_pouch_fs.h	2026-07-23 16:50:26
+@@ -0,0 +1,54 @@
++#ifndef _POUCH_FS_H
++#define _POUCH_FS_H
++
++/* pouch boundary-line shared FS substrate (CL-1a; docs/LLVM-DESIGN.md §12).
++ *
++ * Thylacine's FS-mutation kernel syscalls (SYS_RENAME 57 / SYS_UNLINK 58 /
++ * SYS_WALK_CREATE 54) are PARENT-FD + leaf-name primitives, not path-based
++ * like their POSIX/Linux counterparts. The POSIX *at functions therefore
++ * split their path into (parent-dir, leaf), open the parent O_PATH (which
++ * SYS_open resolves through the full stalk walk -- per-component X-search,
++ * cwd-join for a relative path, LS-4), and hand (parent_fd, leaf) to the
++ * kernel primitive. __pouch_open_parent is that shared split-and-open.
++ *
++ * The including .c file must `#include "syscall.h"` BEFORE this header:
++ * that pulls musl's internal src/include/features.h, where the `hidden`
++ * visibility macro lives (the _pouch_socket.h precedent). */
++
++/* Thylacine kernel syscall numbers (the 0019 SYS_thyla_* self-contained
++ * idiom -- aarch64's LP64 table has no legacy aliases to repoint). */
++#define SYS_thyla_open         65   /* stalk full-path open (start_fd, path, len, omode) */
++#define SYS_thyla_stat         88   /* POUNCE walk-query (path, len, &t_stat) */
++#define SYS_thyla_wstat        59   /* metadata set (fd, valid, mode, uid, gid, size) */
++#define SYS_thyla_readdir      56   /* 9P Treaddir stream (fd, buf, len) */
++#define SYS_thyla_rename       57   /* (olddir_fd, old, oldlen, newdir_fd, new, newlen) */
++#define SYS_thyla_unlink       58   /* (parent_fd, name, len, flags) */
++#define SYS_thyla_walk_create  54   /* (parent_fd, name, len, omode, perm) */
++#define SYS_thyla_chdir        69   /* (path, len) */
++#define SYS_thyla_getcwd       70   /* (buf, len) -> len */
++#define SYS_thyla_getpid       72   /* () -> pid */
++
++/* SYS_open sentinels / omode (mirror kernel/include/thylacine/syscall.h). */
++#define POUCH_FROM_ROOT   ((long)-1)   /* SYS_WALK_OPEN_FROM_ROOT */
++#define POUCH_OREAD       0u
++#define POUCH_OWRITE      1u
++#define POUCH_ORDWR       2u
++#define POUCH_OPATH       0x80u        /* SYS_WALK_OPEN_OPATH: walk-only, born R|W */
++
++/* SYS_wstat valid-mask bits. */
++#define POUCH_WSTAT_MODE  (1u << 0)
++#define POUCH_WSTAT_SIZE  (1u << 3)
++
++/* SYS_walk_create / SYS_unlink flag bits. */
++#define POUCH_DMDIR       0x80000000u  /* SYS_WALK_CREATE_DMDIR */
++#define POUCH_REMOVEDIR   0x200u       /* SYS_UNLINK_REMOVEDIR */
++
++#define POUCH_PATH_MAX    1024u        /* SYS_OPEN_PATH_MAX */
++
++/* Open the PARENT directory of `path` (O_PATH, born R|W) and set *leaf to
++ * the final component within `path`. Returns the parent fd (>= 0) or a
++ * negative -errno. AT_FDCWD only (a real dirfd -> -ENOTSUP); a relative
++ * path resolves against the Territory cwd via SYS_open's FROM_ROOT arm. */
++hidden int __pouch_open_parent(int atfd, const char *path, const char **leaf);
++
++#endif
+diff --color -ruN musl-base/src/stat/chmod.c b/src/stat/chmod.c
+--- a/src/stat/chmod.c	2026-07-23 16:38:09
++++ b/src/stat/chmod.c	2026-07-23 16:51:41
+@@ -1,15 +1,5 @@
+-/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16c-pre).
+- *
+- * chmod() with /srv/ short-circuit. A byte-mode SrvConn has no
+- * file-mode bits to set (the registry tracks owner + listening
+- * Proc but not POSIX permissions). The idiomatic post-bind chmod
+- * to clamp socket-file perms is a no-op on Thylacine's /srv;
+- * returning 0 satisfies the caller without a kernel call.
+- *
+- * Non-/srv paths fall through to the original syscall(SYS_fchmodat)
+- * delegation (ENOSYS via SYS_fchmodat = 0xFFFF today).
+- *
+- * See 0014-pouch-srv-stubs.patch for the design rationale. */
++/* pouch boundary-line: chmod() with the /srv/ short-circuit (0014) preserved,
++ * delegating the real path to the CL-1a fchmodat (SYS_WSTAT MODE). */
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <string.h>
+@@ -23,9 +13,5 @@
+ 			return 0;
+ 		}
+ 	}
+-#ifdef SYS_chmod
+-	return syscall(SYS_chmod, path, mode);
+-#else
+-	return syscall(SYS_fchmodat, AT_FDCWD, path, mode);
+-#endif
++	return fchmodat(AT_FDCWD, path, mode, 0);
+ }
+diff --color -ruN musl-base/src/stat/fchmod.c b/src/stat/fchmod.c
+--- a/src/stat/fchmod.c	2026-07-23 16:38:09
++++ b/src/stat/fchmod.c	2026-07-23 16:51:14
+@@ -1,19 +1,13 @@
++/* pouch boundary-line (CL-1a): fchmod -> Thylacine SYS_WSTAT (59) MODE axis
++ * (the 9 rwx bits only; setuid/setgid/sticky are rejected kernel-side, S5).
++ * The wstat write authority is identity (owner or CAP), not the fd rights
++ * (#47), so an O_PATH / O_RDONLY fd is accepted. */
+ #include <sys/stat.h>
+-#include <errno.h>
+-#include <fcntl.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ int fchmod(int fd, mode_t mode)
+ {
+-	int ret = __syscall(SYS_fchmod, fd, mode);
+-	if (ret != -EBADF || __syscall(SYS_fcntl, fd, F_GETFD) < 0)
+-		return __syscall_ret(ret);
+-
+-	char buf[15+3*sizeof(int)];
+-	__procfdname(buf, fd);
+-#ifdef SYS_chmod
+-	return syscall(SYS_chmod, buf, mode);
+-#else
+-	return syscall(SYS_fchmodat, AT_FDCWD, buf, mode);
+-#endif
++	return syscall(SYS_thyla_wstat, fd, POUCH_WSTAT_MODE,
++	               (unsigned)mode & 0777u, 0, 0, 0UL);
+ }
+diff --color -ruN musl-base/src/stat/fchmodat.c b/src/stat/fchmodat.c
+--- a/src/stat/fchmodat.c	2026-07-23 16:38:09
++++ b/src/stat/fchmodat.c	2026-07-23 16:51:41
+@@ -1,40 +1,29 @@
++/* pouch boundary-line (CL-1a): fchmodat(AT_FDCWD, path, mode, 0). Thylacine
++ * SYS_WSTAT is fd-based, so resolve the PATH to an O_PATH fd (born R|W;
++ * wstat's authority is identity not rights, #47) then set the MODE axis.
++ * flag != 0 (AT_SYMLINK_NOFOLLOW) is accepted and identical -- no symlinks
++ * at v1.0, G11. A real dirfd -> ENOTSUP (P-3). */
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <errno.h>
++#include <string.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ int fchmodat(int fd, const char *path, mode_t mode, int flag)
+ {
+-	if (!flag) return syscall(SYS_fchmodat, fd, path, mode);
++	if (!path) return __syscall_ret(-EFAULT);
++	if (fd != AT_FDCWD) return __syscall_ret(-ENOTSUP);
+ 
+-	int ret = __syscall(SYS_fchmodat2, fd, path, mode, flag);
+-	if (ret != -ENOSYS) return __syscall_ret(ret);
++	size_t len = strnlen(path, POUCH_PATH_MAX + 1);
++	if (!len) return __syscall_ret(-ENOENT);
++	if (len > POUCH_PATH_MAX) return __syscall_ret(-ENAMETOOLONG);
+ 
+-	if (flag != AT_SYMLINK_NOFOLLOW)
+-		return __syscall_ret(-EINVAL);
++	long pfd = __syscall(SYS_thyla_open, POUCH_FROM_ROOT, path, len, POUCH_OPATH);
++	if (pfd < 0) return __syscall_ret(pfd);
+ 
+-	struct stat st;
+-	int fd2;
+-	char proc[15+3*sizeof(int)];
+-
+-	if (fstatat(fd, path, &st, flag))
+-		return -1;
+-	if (S_ISLNK(st.st_mode))
+-		return __syscall_ret(-EOPNOTSUPP);
+-
+-	if ((fd2 = __syscall(SYS_openat, fd, path, O_RDONLY|O_PATH|O_NOFOLLOW|O_NOCTTY|O_CLOEXEC)) < 0) {
+-		if (fd2 == -ELOOP)
+-			return __syscall_ret(-EOPNOTSUPP);
+-		return __syscall_ret(fd2);
+-	}
+-
+-	__procfdname(proc, fd2);
+-	ret = stat(proc, &st);
+-	if (!ret) {
+-		if (S_ISLNK(st.st_mode)) ret = __syscall_ret(-EOPNOTSUPP);
+-		else ret = syscall(SYS_fchmodat, AT_FDCWD, proc, mode);
+-	}
+-
+-	__syscall(SYS_close, fd2);
+-	return ret;
++	long r = __syscall(SYS_thyla_wstat, (int)pfd, POUCH_WSTAT_MODE,
++	                   (unsigned)mode & 0777u, 0, 0, 0UL);
++	__syscall(SYS_close, (int)pfd);
++	return __syscall_ret(r);
+ }
+diff --color -ruN musl-base/src/stat/mkdir.c b/src/stat/mkdir.c
+--- a/src/stat/mkdir.c	2026-07-23 16:38:09
++++ b/src/stat/mkdir.c	2026-07-23 16:52:31
+@@ -1,12 +1,9 @@
++/* pouch boundary-line: mkdir() delegates to the CL-1a mkdirat. */
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include "syscall.h"
+ 
+ int mkdir(const char *path, mode_t mode)
+ {
+-#ifdef SYS_mkdir
+-	return syscall(SYS_mkdir, path, mode);
+-#else
+-	return syscall(SYS_mkdirat, AT_FDCWD, path, mode);
+-#endif
++	return mkdirat(AT_FDCWD, path, mode);
+ }
+diff --color -ruN musl-base/src/stat/mkdirat.c b/src/stat/mkdirat.c
+--- a/src/stat/mkdirat.c	2026-07-23 16:38:09
++++ b/src/stat/mkdirat.c	2026-07-23 16:52:31
+@@ -1,7 +1,28 @@
++/* pouch boundary-line (CL-1a): mkdirat -> Thylacine SYS_WALK_CREATE (54)
++ * with the DMDIR bit -- (parent_fd, leaf, len, omode, perm). make creates
++ * output directories, so mkdir is build-load-bearing. The parent is opened
++ * O_PATH (born R|W; SYS_WALK_CREATE needs RIGHT_WRITE on the parent, which
++ * the born-R|W navigation base provides). The returned dir fd is closed
++ * (mkdir does not keep it open). AT_FDCWD only. */
+ #include <sys/stat.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <string.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ int mkdirat(int fd, const char *path, mode_t mode)
+ {
+-	return syscall(SYS_mkdirat, fd, path, mode);
++	const char *leaf;
++	int p = __pouch_open_parent(fd, path, &leaf);
++	if (p < 0) return __syscall_ret(p);
++
++	/* perm: the 9 rwx bits (DMDIR selects directory creation; a new dir is
++	 * opened OREAD kernel-side). omode is ignored for a DMDIR create. */
++	unsigned perm = ((unsigned)mode & 0777u) | POUCH_DMDIR;
++	long r = __syscall(SYS_thyla_walk_create, p, leaf, strlen(leaf),
++	                   POUCH_OREAD, perm);
++	if (r >= 0) __syscall(SYS_close, (int)r);   /* mkdir keeps no fd */
++	__syscall(SYS_close, p);
++	return __syscall_ret(r < 0 ? r : 0);
+ }
+diff --color -ruN musl-base/src/stdio/rename.c b/src/stdio/rename.c
+--- a/src/stdio/rename.c	2026-07-23 16:38:09
++++ b/src/stdio/rename.c	2026-07-23 16:52:02
+@@ -1,14 +1,9 @@
++/* pouch boundary-line: rename() delegates to the CL-1a renameat. */
+ #include <stdio.h>
+ #include <fcntl.h>
+ #include "syscall.h"
+ 
+ int rename(const char *old, const char *new)
+ {
+-#if defined(SYS_rename)
+-	return syscall(SYS_rename, old, new);
+-#elif defined(SYS_renameat)
+-	return syscall(SYS_renameat, AT_FDCWD, old, AT_FDCWD, new);
+-#else
+-	return syscall(SYS_renameat2, AT_FDCWD, old, AT_FDCWD, new, 0);
+-#endif
++	return renameat(AT_FDCWD, old, AT_FDCWD, new);
+ }
+diff --color -ruN musl-base/src/unistd/access.c b/src/unistd/access.c
+--- a/src/unistd/access.c	2026-07-23 16:38:09
++++ b/src/unistd/access.c	2026-07-23 16:51:41
+@@ -1,12 +1,9 @@
++/* pouch boundary-line: access() delegates to the CL-1a faccessat. */
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include "syscall.h"
+ 
+ int access(const char *filename, int amode)
+ {
+-#ifdef SYS_access
+-	return syscall(SYS_access, filename, amode);
+-#else
+-	return syscall(SYS_faccessat, AT_FDCWD, filename, amode, 0);
+-#endif
++	return faccessat(AT_FDCWD, filename, amode, 0);
+ }
+diff --color -ruN musl-base/src/unistd/chdir.c b/src/unistd/chdir.c
+--- a/src/unistd/chdir.c	2026-07-23 16:38:09
++++ b/src/unistd/chdir.c	2026-07-23 16:51:14
+@@ -1,7 +1,13 @@
++/* pouch boundary-line (CL-1a): SYS_chdir = 0xFFFF -> Thylacine SYS_CHDIR
++ * (69), which takes (path_va, path_len) -- the kernel per-Proc cwd (LS-4).
++ * make -C and clang's working-dir changes ride this. */
+ #include <unistd.h>
++#include <string.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ int chdir(const char *path)
+ {
+-	return syscall(SYS_chdir, path);
++	if (!path) return __syscall_ret(-EFAULT);
++	return syscall(SYS_thyla_chdir, path, strlen(path));
+ }
+diff --color -ruN musl-base/src/unistd/faccessat.c b/src/unistd/faccessat.c
+--- a/src/unistd/faccessat.c	2026-07-23 16:38:09
++++ b/src/unistd/faccessat.c	2026-07-23 16:51:41
+@@ -1,61 +1,45 @@
++/* pouch boundary-line (CL-1a): faccessat(AT_FDCWD, path, amode, flag) ->
++ * a SYS_STAT (88) probe. Thylacine has no setuid, so euid == uid always
++ * and musl's privilege-drop clone dance is dead code -- this rewrite drops
++ * it (and its __clone/pipe2 dependencies, which are CL-1b). F_OK = the stat
++ * succeeds; R/W/X_OK = the owner rwx bits of the returned mode. A real
++ * dirfd -> ENOTSUP (P-3). */
+ #include <unistd.h>
+ #include <fcntl.h>
+-#include <sys/wait.h>
++#include <errno.h>
++#include <string.h>
+ #include "syscall.h"
+-#include "pthread_impl.h"
++#include "_pouch_fs.h"
+ 
+-struct ctx {
+-	int fd;
+-	const char *filename;
+-	int amode;
+-	int p;
+-};
+-
+-static int checker(void *p)
++/* Mirror of the first mode field of struct t_stat (offset 40). We only
++ * need st_mode, so read the 88-byte struct and pull the u32 at +40. */
++int faccessat(int fd, const char *path, int amode, int flag)
+ {
+-	struct ctx *c = p;
+-	int ret;
+-	if (__syscall(SYS_setregid, __syscall(SYS_getegid), -1)
+-	    || __syscall(SYS_setreuid, __syscall(SYS_geteuid), -1))
+-		__syscall(SYS_exit, 1);
+-	ret = __syscall(SYS_faccessat, c->fd, c->filename, c->amode, 0);
+-	__syscall(SYS_write, c->p, &ret, sizeof ret);
+-	return 0;
+-}
++	if (!path) return __syscall_ret(-EFAULT);
++	if (fd != AT_FDCWD) return __syscall_ret(-ENOTSUP);
++	if (flag & ~AT_EACCESS) return __syscall_ret(-EINVAL);
+ 
+-int faccessat(int fd, const char *filename, int amode, int flag)
+-{
+-	if (flag) {
+-		int ret = __syscall(SYS_faccessat2, fd, filename, amode, flag);
+-		if (ret != -ENOSYS) return __syscall_ret(ret);
+-	}
++	size_t len = strnlen(path, POUCH_PATH_MAX + 1);
++	if (!len) return __syscall_ret(-ENOENT);
++	if (len > POUCH_PATH_MAX) return __syscall_ret(-ENAMETOOLONG);
+ 
+-	if (flag & ~AT_EACCESS)
+-		return __syscall_ret(-EINVAL);
++	unsigned char t[88];
++	for (unsigned i = 0; i < sizeof t; i++) t[i] = 0;
++	long rc = __syscall(SYS_thyla_stat, path, len, t);
++	if (rc < 0) return __syscall_ret(rc);
++	if (rc != 0) return __syscall_ret(-ENOENT);
+ 
+-	if (!flag || (getuid()==geteuid() && getgid()==getegid()))
+-		return syscall(SYS_faccessat, fd, filename, amode);
++	if (amode == F_OK) return 0;
+ 
+-	char stack[1024];
+-	sigset_t set;
+-	pid_t pid;
+-	int status;
+-	int ret, p[2];
+-
+-	if (pipe2(p, O_CLOEXEC)) return __syscall_ret(-EBUSY);
+-	struct ctx c = { .fd = fd, .filename = filename, .amode = amode, .p = p[1] };
+-
+-	__block_all_sigs(&set);
+-	
+-	pid = __clone(checker, stack+sizeof stack, 0, &c);
+-	__syscall(SYS_close, p[1]);
+-
+-	if (pid<0 || __syscall(SYS_read, p[0], &ret, sizeof ret) != sizeof(ret))
+-		ret = -EBUSY;
+-	__syscall(SYS_close, p[0]);
+-	__sys_wait4(pid, &status, __WCLONE, 0);
+-
+-	__restore_sigs(&set);
+-
+-	return __syscall_ret(ret);
++	unsigned mode = (unsigned)t[40] | ((unsigned)t[41] << 8)
++	              | ((unsigned)t[42] << 16) | ((unsigned)t[43] << 24);
++	/* Owner rwx bits (0700). The process is the file owner in the common
++	 * on-device case; a stricter group/other check is the perm_check the
++	 * kernel already enforces at open -- access() is advisory. */
++	int have = 0;
++	if (mode & 0400) have |= R_OK;
++	if (mode & 0200) have |= W_OK;
++	if (mode & 0100) have |= X_OK;
++	if ((amode & have) != amode) return __syscall_ret(-EACCES);
++	return 0;
+ }
+diff --color -ruN musl-base/src/unistd/ftruncate.c b/src/unistd/ftruncate.c
+--- a/src/unistd/ftruncate.c	2026-07-23 16:38:09
++++ b/src/unistd/ftruncate.c	2026-07-23 16:51:14
+@@ -1,7 +1,14 @@
++/* pouch boundary-line (CL-1a): ftruncate -> Thylacine SYS_WSTAT (59) with
++ * the SIZE axis. lld's FileOutputBuffer sizes its output image with one
++ * ftruncate before writing (CL-0 §16.4). SYS_WSTAT needs RIGHT_WRITE on
++ * the fd for the SIZE axis (an fd opened O_WRONLY/O_RDWR). */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ int ftruncate(int fd, off_t length)
+ {
+-	return syscall(SYS_ftruncate, fd, __SYSCALL_LL_O(length));
++	/* SYS_WSTAT(fd, valid, mode, uid, gid, size); only size is honored. */
++	return syscall(SYS_thyla_wstat, fd, POUCH_WSTAT_SIZE, 0, 0, 0,
++	               (unsigned long)length);
+ }
+diff --color -ruN musl-base/src/unistd/getcwd.c b/src/unistd/getcwd.c
+--- a/src/unistd/getcwd.c	2026-07-23 16:38:09
++++ b/src/unistd/getcwd.c	2026-07-23 16:51:14
+@@ -1,8 +1,12 @@
++/* pouch boundary-line (CL-1a): SYS_getcwd = 0xFFFF -> Thylacine SYS_GETCWD
++ * (70). Same (buf, size) -> len shape as Linux; the kernel copies the
++ * cleaned absolute cwd, NUL-terminated. */
+ #include <unistd.h>
+ #include <errno.h>
+ #include <limits.h>
+ #include <string.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ char *getcwd(char *buf, size_t size)
+ {
+@@ -14,7 +18,7 @@
+ 		errno = EINVAL;
+ 		return 0;
+ 	}
+-	long ret = syscall(SYS_getcwd, buf, size);
++	long ret = syscall(SYS_thyla_getcwd, buf, size);
+ 	if (ret < 0)
+ 		return 0;
+ 	if (ret == 0 || buf[0] != '/') {
+diff --color -ruN musl-base/src/unistd/getpid.c b/src/unistd/getpid.c
+--- a/src/unistd/getpid.c	2026-07-23 16:38:09
++++ b/src/unistd/getpid.c	2026-07-23 16:51:14
+@@ -1,7 +1,11 @@
++/* pouch boundary-line (CL-1a): SYS_getpid = 0xFFFF -> Thylacine SYS_GETPID
++ * (72). getpid() is per-compile load-bearing for LLVM's temp-name mangling
++ * (Support unique-temp / getMainExecutable). */
+ #include <unistd.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ pid_t getpid(void)
+ {
+-	return __syscall(SYS_getpid);
++	return __syscall(SYS_thyla_getpid);
+ }
+diff --color -ruN musl-base/src/unistd/renameat.c b/src/unistd/renameat.c
+--- a/src/unistd/renameat.c	2026-07-23 16:38:09
++++ b/src/unistd/renameat.c	2026-07-23 16:52:02
+@@ -1,11 +1,27 @@
++/* pouch boundary-line (CL-1a): renameat -> Thylacine SYS_RENAME (57), a
++ * (olddir_fd, old_leaf, newdir_fd, new_leaf) primitive. clang writes every
++ * .o via temp + atomic rename, so rename is PER-COMPILE load-bearing
++ * (CL-0 §16.1). AT_FDCWD only; both endpoints resolved via __pouch_open_parent
++ * (POSIX rename requires both to be in the same filesystem, which the kernel
++ * SYS_RENAME's same-session check enforces). */
+ #include <stdio.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <string.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ int renameat(int oldfd, const char *old, int newfd, const char *new)
+ {
+-#ifdef SYS_renameat
+-	return syscall(SYS_renameat, oldfd, old, newfd, new);
+-#else
+-	return syscall(SYS_renameat2, oldfd, old, newfd, new, 0);
+-#endif
++	const char *oleaf, *nleaf;
++	int op = __pouch_open_parent(oldfd, old, &oleaf);
++	if (op < 0) return __syscall_ret(op);
++	int np = __pouch_open_parent(newfd, new, &nleaf);
++	if (np < 0) { __syscall(SYS_close, op); return __syscall_ret(np); }
++
++	long r = __syscall(SYS_thyla_rename, op, oleaf, strlen(oleaf),
++	                   np, nleaf, strlen(nleaf));
++	__syscall(SYS_close, np);
++	__syscall(SYS_close, op);
++	return __syscall_ret(r);
+ }
+diff --color -ruN musl-base/src/unistd/rmdir.c b/src/unistd/rmdir.c
+--- a/src/unistd/rmdir.c	2026-07-23 16:38:09
++++ b/src/unistd/rmdir.c	2026-07-23 16:52:02
+@@ -1,12 +1,10 @@
++/* pouch boundary-line: rmdir() delegates to the CL-1a unlinkat with the
++ * AT_REMOVEDIR flag (SYS_UNLINK REMOVEDIR). */
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include "syscall.h"
+ 
+ int rmdir(const char *path)
+ {
+-#ifdef SYS_rmdir
+-	return syscall(SYS_rmdir, path);
+-#else
+-	return syscall(SYS_unlinkat, AT_FDCWD, path, AT_REMOVEDIR);
+-#endif
++	return unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+ }
+diff --color -ruN musl-base/src/unistd/unlink.c b/src/unistd/unlink.c
+--- a/src/unistd/unlink.c	2026-07-23 16:38:09
++++ b/src/unistd/unlink.c	2026-07-23 16:52:02
+@@ -1,16 +1,5 @@
+-/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16c-pre).
+- *
+- * unlink() with /srv/ short-circuit. The Thylacine /srv registry
+- * has no file artifact; "unlinking" a /srv/<name> is the wrong
+- * abstraction for tearing down a registered service (close on the
+- * server's listener fd releases the slot). Returning 0 satisfies
+- * the idiomatic-prep "remove any stale socket file" dance without
+- * making any kernel call.
+- *
+- * Non-/srv paths fall through to the original syscall(SYS_unlinkat)
+- * delegation (ENOSYS via SYS_unlinkat = 0xFFFF today).
+- *
+- * See 0014-pouch-srv-stubs.patch for the design rationale. */
++/* pouch boundary-line: unlink() with the /srv/ short-circuit (0014)
++ * preserved, delegating the real path to the CL-1a unlinkat. */
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <string.h>
+@@ -24,9 +13,5 @@
+ 			return 0;
+ 		}
+ 	}
+-#ifdef SYS_unlink
+-	return syscall(SYS_unlink, path);
+-#else
+-	return syscall(SYS_unlinkat, AT_FDCWD, path, 0);
+-#endif
++	return unlinkat(AT_FDCWD, path, 0);
+ }
+diff --color -ruN musl-base/src/unistd/unlinkat.c b/src/unistd/unlinkat.c
+--- a/src/unistd/unlinkat.c	2026-07-23 16:38:09
++++ b/src/unistd/unlinkat.c	2026-07-23 16:52:02
+@@ -1,7 +1,22 @@
++/* pouch boundary-line (CL-1a): unlinkat -> Thylacine SYS_UNLINK (58), a
++ * (parent_fd, leaf, len, flags) primitive. AT_REMOVEDIR maps to the kernel
++ * REMOVEDIR flag. AT_FDCWD only. */
+ #include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <string.h>
+ #include "syscall.h"
++#include "_pouch_fs.h"
+ 
+ int unlinkat(int fd, const char *path, int flag)
+ {
+-	return syscall(SYS_unlinkat, fd, path, flag);
++	if (flag & ~AT_REMOVEDIR) return __syscall_ret(-EINVAL);
++	const char *leaf;
++	int p = __pouch_open_parent(fd, path, &leaf);
++	if (p < 0) return __syscall_ret(p);
++
++	unsigned kflag = (flag & AT_REMOVEDIR) ? POUCH_REMOVEDIR : 0u;
++	long r = __syscall(SYS_thyla_unlink, p, leaf, strlen(leaf), kflag);
++	__syscall(SYS_close, p);
++	return __syscall_ret(r);
+ }

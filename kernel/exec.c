@@ -31,6 +31,7 @@
 #include "../arch/arm64/hwfeat.h" // g_hw_features.linux_hwcap (the AT_HWCAP word)
 #include <thylacine/dev.h>      // REVENANT R-4: exe->dev->read for the file-backed path
 #include <thylacine/spoor.h>    // REVENANT R-4: spoor_ref / spoor_clunk
+#include <thylacine/path.h>     // prowl-1: exe->path->s -- the process name source
 #include <thylacine/image.h>    // REVENANT R-4: image_lookup_or_create (shared text)
 
 #include "../mm/phys.h"
@@ -584,6 +585,16 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
     } else {
         if (argv_data_len != 0)                    return -1;
     }
+
+    // prowl-1 (PROWL-DESIGN.md section 3.2): stamp the process name from the
+    // resolved binary path -- the UNFORGEABLE identity (the basename of what
+    // actually execs, not caller-controlled argv[0]). exe->path is the #66
+    // namespace name of the resolved Spoor ("/bin/corvus" -> "corvus"), fail-soft
+    // NULL on an OOM path-alloc (I-33) -> the name stays "" (the formatters show
+    // "?"). Runs in the CHILD's context (p == the execing Proc), before it reaches
+    // EL0 -- no concurrent reader observes a torn stamp.
+    if (exe->path)
+        proc_set_name(p, exe->path->s, (size_t)exe->path->len);
 
     // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
     //    binary. elf_load validates segment extents against the real file size.

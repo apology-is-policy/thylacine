@@ -12,7 +12,7 @@ Two distinct functions, the same Dev:
 
 1. **Process introspection** (read side). Userspace code (Phase 5+) opens `/proc/<pid>/status` and reads pid + state + thread count + (for zombies) exit_status. Same for `cmdline` and `ns`. The format is plain ASCII text — Plan 9 doesn't byte-pack /proc; the text is the contract.
 
-2. **Process control** (write side). Writing `kill` / `killgrp` to `/proc/<pid>/ctl` is the way one process terminates another. A-4b makes this real: the two-axis I-26 authority (owner OR `CAP_HOSTOWNER` OR `CAP_KILL`) is enforced at the write site, then `proc_group_terminate` cascades the target's thread-group. `stop` / `start` stay stubbed (scheduler integration, ARCH [OPEN Q 7.6.D]). See the `/proc/<pid>/ctl` section below for the full authority + dispatch contract.
+2. **Process control** (write side). Writing `kill` / `killgrp` to `/proc/<pid>/ctl` is the way one process terminates another. A-4b makes this real: the two-axis I-26 authority (owner OR `CAP_HOSTOWNER` OR `CAP_KILL`) is enforced at the write site, then `proc_group_terminate` cascades the target's thread-group. **prowl-4** adds the job-control pair `suspend` / `resume` (the unconditional Plan-9 /proc stop/cont, the SAME I-26 gate — a monitor pausing a process). The debug run-control verbs `attach`/`detach`/`stop`/`start`/`step`/`hw*` are the separate Go IDE Stage 8a surface (I-39; `134-debug-fs.md`). See the `/proc/<pid>/ctl` section below for the full authority + dispatch contract.
 
 The lifecycle primitives `rfork` / `exits` / `wait_pid` remain syscalls (per ARCH §11) — they manipulate the calling thread's own kernel state and can't be 9P-mediated. /proc supplements them with cross-process control.
 
@@ -41,6 +41,8 @@ int          proc_for_each(int (*cb)(struct Proc *, void *), void *arg);
 /proc/<pid>/cmdline           path = (pid << 32) | PQS_CMDLINE    QTFILE
 /proc/<pid>/ctl               path = (pid << 32) | PQS_CTL        QTFILE
 /proc/<pid>/ns                path = (pid << 32) | PQS_NS         QTFILE
+/proc/<pid>/sched             path = (pid << 32) | PQS_SCHED      QTFILE  (prowl-3b; OQ-4 owner-or-CAP_HOSTOWNER)
+/proc/<pid>/exe               path = (pid << 32) | PQS_EXE        QTFILE  (VIVARIUM V-4a-0; RO)
 ```
 
 Subkinds 5..15 reserved for `mem`, `fd/`, `wait`, `note`, `args`, etc. — added as the syscall surface needs them.
@@ -63,18 +65,34 @@ Becoming reachable through `stalk` required fixing `devproc_walk` to honor the *
 
 ### `/proc/<pid>/status`
 
+**prowl-1 (PROWL-DESIGN.md §3) brought this to Plan 9 parity** — it now carries the process name, cumulative on-CPU time, the parent pid, and the owning principal/gid, not just pid/state/threads.
+
 ```
+name:    <basename>          ← the execed binary's basename; "?" if unstamped
 pid:     <decimal>
 state:   ALIVE|ZOMBIE|INVALID
 threads: <decimal>
+cpu_ns:  <decimal>           ← cumulative on-CPU time in ns (Σ run_ns over threads)
+ppid:    <decimal>           ← parent pid; 0 if none
+principal:<decimal> gid:<decimal>
+pages:   <decimal>           ← live SYS_BURROW_ATTACH anon pages (#65)
+children:<decimal>           ← live direct children (#65)
 exit:    <decimal>           ← only present when state == ZOMBIE
 ```
 
+`cpu_ns` is **cumulative + monotonic** — a monitor derives %CPU by diffing it across two polls (`Δcpu_ns / Δwall`, the htop method); the kernel keeps no instantaneous-rate state. It is the sum of per-thread `run_ns` (`proc_cpu_ns`, walked under `g_proc_table_lock` via the `proc_for_each` read path — the #57a walk-safety); it does **not** include the currently-running thread's in-flight slice since its last switch-in (< 1 slice, negligible over a poll interval). `name` is the basename of the **resolved binary path** (`exec_setup_from_spoor` from the Spoor's #66 namespace name — unforgeable, not caller-controlled argv[0]); the boot chain (kproc/joey) is stamped its literal.
+
 Reading kproc's status (`/proc/0/status`) typically:
 ```
+name:    kproc
 pid:     0
 state:   ALIVE
 threads: 1
+cpu_ns:  12345678
+ppid:    0
+principal:4294967294 gid:4294967294
+pages:   0
+children:3
 ```
 
 ### `/proc/<pid>/cmdline`
@@ -91,12 +109,13 @@ Read returns 0 (write-only). Write parses a leading whitespace-delimited verb (A
 
 - `kill`    — terminate the target Proc's thread-group.
 - `killgrp` — terminate the target Proc's thread-group. At v1.0 (no cross-Proc process groups — no `setpgrp`) this is identical to `kill`; a distinct cross-Proc `killgrp` is a v1.x seam (pending process groups).
-- `stop` / `start` — recognized as future verbs but unimplemented (scheduler integration, ARCH [OPEN Q 7.6.D]); return `-1`.
+- `suspend` / `resume` — **the job-control stop/cont (prowl-4; PROWL-DESIGN.md §4.3).** `suspend` parks the target's threads (sets `job_stop_req`); `resume` un-parks them (clears it). This is the **unconditional Plan-9 `/proc` job stop** — a monitor pausing an arbitrary process by pid, the SIGTSTP/SIGCONT shape reached through the `/proc/<pid>/ctl` authority (not a controlling terminal). It is **uncatchable** exactly as `kill` is (no `tty:susp` note, no catchability gate — those are the pts SIGTSTP path's, `proc_job_stop_pgrp`), and gated by the SAME two-axis I-26 authority as kill (stopping is strictly weaker than the killing that authority already permits). It is **distinct** from the debug `stop` / `start` verbs below: those set `debug_stop_req` and require a debugger `attach` slot; `suspend`/`resume` set `job_stop_req` (I-20's second stop owner) and need no attach — the two compose per StopCompatI39 (a target both debug- and job-stopped stays parked until BOTH clear).
+- `attach` / `detach` / `stop` / `start` / `waitstop` / `step` / `hwbreak` / `hwrmbreak` / `hwwatch` / `hwrmwatch` / `hwverify` — the **debug** run-control + hardware-breakpoint verbs (Go IDE Stage 8a; I-39). These require the caller's ctl fd to own the debugger attach slot and set `debug_stop_req`; see `docs/reference/134-debug-fs.md` for the full contract. (The debug `stop`/`start` are NOT the job-control `suspend`/`resume` above.)
 - any other token — `-1`.
 
-An authorized `kill`/`killgrp` returns `n` (the byte count); a denied / refused / unknown write returns `-1`.
+An authorized `kill` / `killgrp` / `suspend` / `resume` returns `n` (the byte count); a denied / refused / unknown write returns `-1`.
 
-**Authority (two-axis, I-26).** A `kill`/`killgrp` is authorized iff:
+**Authority (two-axis, I-26).** A `kill` / `killgrp` / `suspend` / `resume` is authorized iff:
 
 - the caller is the target's **owner** — the ctl file is mode `0600` (owner-private), so the owner always holds the w-bit and this reduces to "same `principal_id` as the target" (covers killing your own processes; the parent-of-same-identity-child case is expressible as ownership); OR
 - the caller holds **`CAP_HOSTOWNER`** (the unified admin); OR
@@ -104,7 +123,9 @@ An authorized `kill`/`killgrp` returns `n` (the byte count); a denied / refused 
 
 The check is computed **directly** in `devproc_write` (NOT via `perm_check`): `CAP_DAC_OVERRIDE` — the generic fs-rwx admin — is deliberately **not** a kill axis. The A-4 capability split keeps fs-admin and process-kill orthogonal (mirrors Linux `CAP_DAC_OVERRIDE` vs `CAP_KILL`); an fs-admin is not implicitly a process-killer. No identity bypasses (I-22); containment is namespace visibility (I-1 — a Proc that cannot walk to `/proc/<pid>` cannot kill it).
 
-**kproc is unkillable.** A `kill` of pid 0 (the kernel proc) is refused *before* the authority check — even a `CAP_KILL` holder cannot terminate the kernel.
+**kproc is unkillable.** A `kill` of pid 0 (the kernel proc) is refused *before* the authority check — even a `CAP_KILL` holder cannot terminate the kernel. Likewise `suspend`/`resume` refuse kproc (and any non-ALIVE target) before the authority check.
+
+**Job-control dispatch (prowl-4).** `suspend` / `resume` resolve the target under `g_proc_table_lock` (the `proc_for_each` resolve+authorize idiom, `devproc_job_walk_cb`), refuse kproc + non-ALIVE, apply the I-26 gate above, then call `proc_job_stop_proc` / `proc_job_cont_proc` (`kernel/proc.c`). Those reuse the PTY-1f per-member job-control helpers: `suspend` = `proc_job_stop_one_locked` (set `job_stop_req` + latch the `WAIT_UNTRACED` stop report + wake the target's own sleepers) then the one hoisted `smp_resched_others()` reschedule IPI so a peer RUNNING at EL0 traps to its stop checkpoint; `resume` = `proc_job_resume_one_locked` (clear `job_stop_req` + latch the `WAIT_CONTINUED` cont report + wake the parked threads). The park is at the **same** EL0-return-tail / `sleep`-`tsleep` detour checkpoint the debug stop uses, so a suspended thread holds **no kernel lock** while parked. Both are non-blocking (unlike the debug `stop`/`waitstop`) + idempotent (a second `suspend` / a `resume` of a running Proc is a no-op). Death wins: a `suspend` racing a group-terminate sets a flag the die-check-before-stop-check tail ignores (the target dies); a suspended process that is later orphaned is hup+cont'd by the POSIX orphan rule. **Caveats** (job-control-inherent, not kernel-soundness): suspending a process that holds a userspace lock others wait on can wedge that *workload* (resumable via `resume`); suspending your own controlling shell is the same footgun class as killing it (already reachable via `kill`).
 
 **Dispatch.** Both verbs dispatch via `proc_group_terminate` uniformly (single + multi thread), under `g_proc_table_lock` via the `proc_for_each` resolve+authorize+kill idiom (the audited `sys_postnote` pattern — the target is alive under the lock, so no reap-UAF). `proc_group_terminate` is chosen over a bare note post because, post-#811, it is the only termination primitive whose death-wake is **total** (universal death-interruptible sleep): a single-thread target blocked in a non-notes sleep (e.g. `poll(-1)`) would not wake on a bare note post.
 
@@ -122,6 +143,49 @@ binds: <decimal>
 The Plan 9 `ns` substrate (#66b). One `mount` line per entry in the Proc's territory mount table, then the bind count. The **mountpoint** column is the namespace name the directory was mounted onto — the entry's refcounted `PgrpMount.mp_path` (a `Spoor.path`, #66a; `?` when the mountpoint had no retained name, e.g. a kernel-internal direct walk). The **source** column is the mounted tree's namespace name (`source->path`) when it has one, else `#<dc>` — the Plan 9 device spec (`#9`=9P, `#s`=srv, `#p`=proc, `#-`=devnone). Rendered by `territory.c::territory_format_ns` (so the `ns_lock` discipline stays in `territory.c`); `devproc.c::format_ns` is now a thin call into it. Per **I-33** the mount table keys on the `(dc, devno, qid.path)` identity, NEVER on `mp_path`, so the names are introspection-only — a wrong/absent name can only misreport this file, never change a resolution. A list longer than the read buffer (`DEVPROC_READ_BUF` = 512) truncates cleanly (best-effort introspection). Read it with the native `ns [pid]` tool (`usr/coreutils/src/bin/ns.rs`).
 
 The bind column stays a count: `binds[]` are abstract `path_id_t` pairs (no string names) at v1.0.
+
+### `/proc/<pid>/sched` (prowl-3b)
+
+The per-thread scheduler-introspection block — the deep half of the `prowl`
+scheduler view (`docs/PROWL-DESIGN.md` §3.3):
+
+```
+name:    stratumd
+pid:     47
+threads: 6
+tid band cpu run_ns nsched parks nmig state
+0 NORM 2 4821773110 45219 8801 214 SLP
+1 NORM 0 1099284551 12034 3310 41 RUN
+...
+```
+
+The header lines (`name`/`pid`/`threads`) then one space-separated row per thread:
+`tid`, `band` (INTR/NORM/IDLE, `Thread.band`), `cpu` (the last CPU it ran on —
+`-` until dispatched), `run_ns` (cumulative on-CPU ns), `nsched` (times it got the
+CPU — a busy-yield storm reads an astronomical rate), `parks` (`nsleeps`, voluntary
+sleeps), `nmig` (cross-CPU moves), `state` (RUN/RDY/SLP/EXIT). The counters are the
+prowl-3a per-thread accumulators (`docs/reference/15-scheduler.md`), read
+`__atomic` RELAXED; the reader diffs them across polls for per-thread rates.
+
+`format_sched` walks `p->threads` **under `g_proc_table_lock`** (via
+`devproc_read_cb`, the `proc_cpu_ns` #95 walk-safety) and bounds the walk: a row
+is written to a scratch offset and committed only once it fully fits, so a
+heavily-threaded Proc's tail truncates cleanly at a whole-row boundary (never a
+partial row, never past `DEVPROC_READ_BUF`=2048 — bumped from 512 for the
+per-thread rows).
+
+**Visibility (OQ-4).** This is the **deep** per-process view, so the read is gated
+`owner-or-CAP_HOSTOWNER` (`devproc_sched_authorized`, checked in-callback against
+the target found under the lock; a denial returns `-1`). The **summary**
+(name/%cpu/state/mem) stays all-visible via `/ctl/procs` + `/proc/<pid>/status`
+(the Plan 9 all-pids posture) — but a process's per-thread scheduler internals are
+its owner's own or the host operator's. The gate is **strictly narrower** than the
+kill (`+CAP_KILL`) and debug (`+CAP_DEBUG`) gates: reading scheduler telemetry is
+neither killing nor debugging, so those caps are deliberately not axes (I-22, the
+capability split stays orthogonal). Mode `0400` (owner); the `CAP_HOSTOWNER`
+override at the read site is the `perm_enforced=false` devproc idiom (as with the
+kill/debug gates). Composes I-1 + the `/ctl` visibility-not-authority posture; no
+new §28 invariant.
 
 ### `/proc/<pid>/exe`
 

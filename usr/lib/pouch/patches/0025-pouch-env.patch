@@ -1,0 +1,157 @@
+pouch boundary-line patch 0025 - CL-1b-0 populate environ from /env.
+
+The Clade arc (docs/LLVM-DESIGN.md) sub-chunk CL-1b-0. The kernel writes
+envp[0] = NULL for every program ("no envp at v1.0", exec.h): `environ` is
+empty in every pouch process. Thylacine's environment instead lives in the
+per-Proc /env device (the Plan 9 Egrp idiom -- a variable is the file
+/env/NAME, inherited by children via the kernel clone env_clone_into). CL-0's
+census (LLVM-DESIGN.md section 16.2) confirmed this crt boundary line is
+required: clang/lld read PATH/TMPDIR/etc. via getenv, and a spawned cc1/lld
+inherits its parent's /env through the rfork clone.
+
+This adds a crt hook that reads /env once at startup into a malloc'd
+"NAME=value" vector and points __environ at it, so getenv() AND environ
+iteration both work. It runs from __libc_start_main right after __init_libc
+(malloc + TLS up) and before the ctors (so a constructor's getenv sees a
+populated environ). Fail-soft: a missing/empty /env leaves __environ as the
+kernel's empty envp -- today's behaviour, never a crash.
+
+/env stays the source of truth. A later setenv mutates only this in-process
+copy; writing a change back to /env (and the posix_spawn envp arg, which the
+SYS_SPAWN_FULL_ARGV _pad_envp slot reserves) are v1.x kernel-surface lifts.
+
+Files:
+  src/env/_pouch_env.c          NEW -- __pouch_env_init(): readdir /env,
+                                open+read each NAME, build __environ.
+  src/env/__libc_start_main.c   call __pouch_env_init() after __init_libc.
+
+--- a/src/env/__libc_start_main.c	2026-07-23 19:20:52
++++ b/src/env/__libc_start_main.c	2026-07-23 19:21:58
+@@ -15,6 +15,9 @@
+ static void dummy1(void *p) {}
+ weak_alias(dummy1, __init_ssp);
+ 
++/* pouch boundary-line (CL-1b-0): populate __environ from the /env device. */
++hidden void __pouch_env_init(void);
++
+ #define AUX_CNT 38
+ 
+ #ifdef __GNUC__
+@@ -79,6 +82,11 @@
+ 	 * persisting for the entire process lifetime. */
+ 	__init_libc(envp, argv[0]);
+ 
++	/* pouch: the kernel passes no envp (envp[0]==NULL); the environment
++	 * lives in the /env device. Populate __environ from it before any ctor
++	 * or the app runs, so getenv()/environ see the inherited variables. */
++	__pouch_env_init();
++
+ 	/* Barrier against hoisting application code or anything using ssp
+ 	 * or thread pointer prior to its initialization above. */
+ 	lsm2_fn *stage2 = libc_start_main_stage2;
+--- a/src/env/_pouch_env.c	1970-01-01 01:00:00
++++ b/src/env/_pouch_env.c	2026-07-23 19:21:42
+@@ -0,0 +1,103 @@
++/* pouch boundary-line: populate `__environ` from the Thylacine /env device
++ * (Clade CL-1b-0). The kernel writes envp[0] = NULL for every program ("no
++ * envp at v1.0"), so `environ` is empty in a pouch process; the environment
++ * lives in the per-Proc /env Dev (the Plan 9 Egrp idiom -- a variable is the
++ * file /env/NAME, inherited by children via the kernel clone env_clone_into).
++ * This reads /env once at startup into a malloc'd "NAME=value" vector and
++ * points __environ at it, so getenv() + environ iteration both work.
++ *
++ * Called from __libc_start_main right after __init_libc (so malloc + the TLS
++ * are up) and before the ctors run (so a constructor's getenv sees a
++ * populated environ). Fail-soft: any error leaves __environ as the empty
++ * envp the kernel supplied -- a missing /env degrades to today's behaviour,
++ * never a crash. /env stays the source of truth; a later setenv only mutates
++ * this in-process copy (writing back to /env is a v1.x nicety).
++ */
++#include <dirent.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <stdlib.h>
++#include <string.h>
++#include "syscall.h"
++
++extern char **__environ;
++
++/* Bounds. ENV_NAME_MAX / ENV_VALUE_MAX live in the kernel; mirror generous
++ * caps so a hostile or oversized /env cannot exhaust the startup heap. */
++#define PGENV_MAX_VARS 512
++#define PGENV_NAME_MAX 256
++#define PGENV_VAL_MAX  8192
++
++/* Read the whole value of an opened /env/NAME fd into `buf` (up to cap-1),
++ * NUL-terminating. Returns the length, or -1 on a read error. The value has
++ * no trailing newline (the devenv contract). */
++static long read_value(int fd, char *buf, long cap)
++{
++	long off = 0;
++	for (;;) {
++		if (off >= cap - 1) break;      /* clamp oversized values */
++		long n = read(fd, buf + off, cap - 1 - off);
++		if (n < 0) return -1;
++		if (n == 0) break;              /* EOF */
++		off += n;
++	}
++	buf[off] = 0;
++	return off;
++}
++
++hidden void __pouch_env_init(void)
++{
++	DIR *d = opendir("/env");
++	if (!d) return;                     /* no /env -> empty environ, as before */
++
++	char **arr = NULL;
++	size_t n = 0, cap = 0;
++	char val[PGENV_VAL_MAX];
++	char path[6 + PGENV_NAME_MAX];      /* "/env/" + NAME + NUL */
++
++	struct dirent *de;
++	while ((de = readdir(d))) {
++		const char *name = de->d_name;
++		if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0)))
++			continue;                   /* skip . and .. */
++		if (name[0] == 0) continue;
++		size_t nl = strlen(name);
++		if (nl == 0 || nl >= PGENV_NAME_MAX) continue;
++		if (n >= PGENV_MAX_VARS) break;
++
++		/* Build /env/NAME and read the value. */
++		memcpy(path, "/env/", 5);
++		memcpy(path + 5, name, nl + 1);
++		int vfd = open(path, O_RDONLY);
++		if (vfd < 0) continue;          /* removed between readdir + open -> skip */
++		long vl = read_value(vfd, val, sizeof val);
++		close(vfd);
++		if (vl < 0) continue;
++
++		/* Compose "NAME=value" (NUL-terminated). */
++		char *entry = malloc(nl + 1 + (size_t)vl + 1);
++		if (!entry) break;              /* OOM -> finalize what we have */
++		memcpy(entry, name, nl);
++		entry[nl] = '=';
++		memcpy(entry + nl + 1, val, (size_t)vl);
++		entry[nl + 1 + (size_t)vl] = 0;
++
++		/* Append to the vector, growing by doubling (+1 slot for the
++		 * terminating NULL). */
++		if (n + 1 >= cap) {
++			size_t ncap = cap ? cap * 2 : 16;
++			char **narr = realloc(arr, ncap * sizeof *narr);
++			if (!narr) { free(entry); break; }
++			arr = narr;
++			cap = ncap;
++		}
++		arr[n++] = entry;
++	}
++
++	closedir(d);
++
++	if (arr) {
++		arr[n] = 0;                     /* cap guaranteed a spare slot above */
++		__environ = arr;
++	}
++}

@@ -47,6 +47,7 @@ enum {
     CTL_KIND_DEVICES    = 3,
     CTL_KIND_KERNEL_BASE = 4,
     CTL_KIND_SCHED      = 5,
+    CTL_KIND_CPU        = 6,
 };
 
 #define CTL_QID_ROOT_PATH  0ULL
@@ -121,6 +122,20 @@ static const char *state_name(enum proc_state s) {
     }
 }
 
+// prowl-4: the /ctl/procs STATE column shows the effective run-state -- an ALIVE
+// Proc with job_stop_req set (a monitor `suspend`, or a Ctrl-Z via the pts path)
+// reads STOPPED (the Unix `ps` T state), so a suspend is VISIBLE in the list.
+// The DEBUG stop (debug_stop_req, the attach-gated debugger stop) is deliberately
+// NOT surfaced here -- it is the debugger's private I-39 view, not a job-control
+// state a monitor should expose. job_stop_req is read atomically (a cross-Proc
+// reader holds g_proc_table_lock via proc_for_each but no per-Proc lock).
+static const char *procs_state_name(const struct Proc *p) {
+    if (p->state == PROC_STATE_ALIVE &&
+        __atomic_load_n(&p->job_stop_req, __ATOMIC_ACQUIRE) != 0)
+        return "STOPPED";
+    return state_name(p->state);
+}
+
 // =============================================================================
 // Per-leaf content generators.
 // =============================================================================
@@ -141,11 +156,33 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n && p->pid != 0) { s->overflow = true; return 1; }
     s->off += n;
 
+    // prowl-4 (the tree view): the parent pid as the second column. p->parent is
+    // stable under g_proc_table_lock (reparent + reap both hold it); NULL for
+    // kproc / a reparented orphan-root -> 0, exactly like /proc/<pid>/status.
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+    {
+        int ppid = p->parent ? p->parent->pid : 0;
+        n = fmt_sdec(s->buf, s->cap, s->off, ppid);
+        if (!n && ppid != 0) { s->overflow = true; return 1; }
+        s->off += n;
+    }
+
     n = fmt_str(s->buf, s->cap, s->off, "    ");
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
-    n = fmt_str(s->buf, s->cap, s->off, state_name(p->state));
+    // prowl-1: the process name ("?" if unstamped) as the third column.
+    n = fmt_str(s->buf, s->cap, s->off, p->name[0] ? p->name : "?");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+
+    n = fmt_str(s->buf, s->cap, s->off, procs_state_name(p));   // prowl-4: STOPPED if job-stopped
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
 
@@ -180,6 +217,19 @@ static int format_procs_cb(struct Proc *p, void *arg) {
         s->off += n;
     }
 
+    // prowl-1: cumulative on-CPU time (ns) as the trailing column -- the reader
+    // diffs it across polls for %CPU. proc_cpu_ns walks p->threads; safe here
+    // because format_procs runs under g_proc_table_lock (proc_for_each).
+    n = fmt_str(s->buf, s->cap, s->off, "    ");
+    if (!n) { s->overflow = true; return 1; }
+    s->off += n;
+    {
+        u64 cpu_ns = proc_cpu_ns(p);
+        n = fmt_udec(s->buf, s->cap, s->off, (unsigned long)cpu_ns);
+        if (!n && cpu_ns != 0) { s->overflow = true; return 1; }
+        s->off += n;
+    }
+
     n = fmt_str(s->buf, s->cap, s->off, "\n");
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
@@ -190,7 +240,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
 static size_t format_procs(char *buf, size_t cap) {
     size_t off = 0;
     size_t n;
-    n = fmt_str(buf, cap, off, "PID    STATE      THREADS    PAGES    CHILDREN\n");
+    n = fmt_str(buf, cap, off, "PID    PPID    NAME    STATE    THREADS    PAGES    CHILDREN    CPU_NS\n");
     if (!n) return 0;
     off += n;
 
@@ -311,6 +361,48 @@ static size_t format_sched(char *buf, size_t cap) {
     return off;
 }
 
+// prowl-3b (PROWL-DESIGN.md section 3.4): per-CPU stats -- one row per online CPU
+// with cumulative idle-park ns (the meter denominator: utilization = 1 -
+// d(idle_ns)/d(wall) diffed across polls) and the normalized capacity class. All-
+// visible like /ctl/sched (coarse per-CPU utilization, visibility-not-authority --
+// unlike /proc/<pid>/sched's OQ-4-gated per-thread internals). One-shot,
+// bounded by smp_cpu_count() (<= DTB_MAX_CPUS = 8 rows); the accessors self-guard
+// an out-of-range index. Reads no per-CPU lock: sched_cpu_idle_ns is a coherent
+// __atomic snapshot of the sole (per-CPU idle) writer, capacity is boot-static.
+static size_t format_cpu(char *buf, size_t cap) {
+    size_t off = 0;
+    size_t n;
+
+    n = fmt_str(buf, cap, off, "cpus: "); if (!n) return 0; off += n;
+    unsigned ncpus = smp_cpu_count();
+    n = fmt_udec(buf, cap, off, (unsigned long)ncpus); off += n;
+    n = fmt_str(buf, cap, off, "\ncpu idle_ns capacity\n"); if (!n) return 0; off += n;
+
+    for (unsigned i = 0; i < ncpus; i++) {
+        size_t row = off;
+        n = fmt_udec(buf, cap, row, (unsigned long)i); if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+        // prowl-5 F2: a DTB-declared CPU that never came online (a PSCI bring-up
+        // failure -- smp_init tolerates it and keeps counting the CPU) has
+        // idle_ns == 0 forever, which is INDISTINGUISHABLE from a pegged-100%-busy
+        // CPU via idle_ns alone -- so a naive util = 1 - idle/wall would render a
+        // DEAD core as a permanent full meter. Gate on the online flag: an offline
+        // CPU renders "offline" (a 2-column line the reader's 3-column parse skips
+        // -> no bar), never a spurious 100%. Unreachable on QEMU-virt (never fails
+        // PSCI); a real heterogeneous/failable board reaches it.
+        if (!g_cpu_online[i]) {
+            n = fmt_str(buf, cap, row, "offline"); if (!n) break; row += n;
+        } else {
+            n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_idle_ns(i)); if (!n) break; row += n;
+            n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+            n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_capacity(i)); if (!n) break; row += n;
+        }
+        n = fmt_str(buf, cap, row, "\n"); if (!n) break; row += n;
+        off = row;
+    }
+    return off;
+}
+
 // =============================================================================
 // Per-leaf table.
 // =============================================================================
@@ -327,6 +419,7 @@ static const struct ctl_leaf g_ctl_leaves[] = {
     { "devices",     CTL_KIND_DEVICES,     format_devices     },
     { "kernel-base", CTL_KIND_KERNEL_BASE, format_kernel_base },
     { "sched",       CTL_KIND_SCHED,       format_sched       },
+    { "cpu",         CTL_KIND_CPU,         format_cpu         },
 };
 
 #define CTL_LEAF_COUNT  (sizeof(g_ctl_leaves) / sizeof(g_ctl_leaves[0]))
@@ -465,7 +558,13 @@ static void devctl_close(struct Spoor *c) {
     dev_simple_close(c);
 }
 
-#define DEVCTL_READ_BUF 512
+// prowl-1 bumped 512 -> 2048: /ctl/procs formats the WHOLE listing into this
+// stack buffer (paginated by `off`), and the NAME + CPU_NS columns widen each
+// proc line ~2x, so 512 would truncate (via the format_procs_cb overflow
+// early-return) at ~9 procs -- fewer than a booted system runs. 2048 fits ~30
+// proc lines; a 2 KiB frame on the 16 KiB kstack is safe on the shallow Dev-read
+// path. Every /ctl leaf shares this cap (all fit comfortably).
+#define DEVCTL_READ_BUF 2048
 
 static long devctl_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;

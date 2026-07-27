@@ -393,9 +393,84 @@ struct Thread {
     bool               stop_unwound;
 
     u64                debug_stepover_va;
+
+    // prowl-1 (docs/PROWL-DESIGN.md section 3.1; I-8/I-17 untouched): cumulative
+    // on-CPU time telemetry. run_ns accumulates (now - switched_in_at) at every
+    // switch-OUT; the per-Proc cpu_ns a /proc reader reports is the sum over
+    // p->threads (proc_cpu_ns, under g_proc_table_lock). READ-ONLY -- NO
+    // scheduling decision reads run_ns, so EEVDF placement / the vd_t math /
+    // liveness / latency are byte-unchanged; this is telemetry, not policy.
+    //
+    // Concurrency: run_ns is written ONLY by this thread's own switch-out, which
+    // runs on exactly one CPU at a time (I-21 on_cpu -- a thread is never on two
+    // CPUs), so there is a single writer. A cross-Proc reader (devproc / devctl)
+    // uses __atomic_load_n and the writer __atomic_store_n for a coherent
+    // snapshot -- the page_count/thread_count lockless-reader pattern. RELAXED
+    // is sufficient: the value is a monotonic counter the reader diffs across
+    // polls (htop's method); no other memory is ordered against it.
+    //
+    // switched_in_at is the last switch-IN timestamp (timer_now_ns). It is
+    // owner-local -- set at switch-in and read at switch-out, both on this
+    // thread's own CPU (a thread does not migrate WHILE running) -- so it needs
+    // no atomics. 0 == "never switched in": the boot thread + the per-CPU idles
+    // become current WITHOUT a sched() switch-in stamp, so their first switch-out
+    // would compute (now - 0) = a bogus ~uptime delta; the switch-out guards on
+    // switched_in_at != 0 to drop that one-time boot-era fragment. KP_ZERO inits
+    // both to 0; NOT propagated by rfork (a child accrues its own time).
+    u64                run_ns;
+    u64                switched_in_at;
+
+    // prowl-3a (docs/PROWL-DESIGN.md section 3.3; I-8/I-17 untouched): the
+    // per-thread scheduler-introspection counters -- the /proc/<pid>/sched
+    // substrate. All READ-ONLY telemetry: NO scheduling decision reads any of
+    // them, so EEVDF placement / the vd_t math / liveness / latency are
+    // byte-unchanged; this is telemetry, not policy.
+    //
+    // Same single-writer discipline as run_ns (all stamped at the ONE switch
+    // chokepoint in sched()): nsched / last_cpu / nmigrations are written when
+    // THIS thread is switched IN, by the single CPU that picked it (a thread is
+    // picked by exactly one CPU -- I-21 on_cpu -- so there is one writer);
+    // nsleeps is written when it is switched OUT while SLEEPING, on its single
+    // running CPU. A cross-Proc reader (devproc / devctl) uses __atomic_load_n
+    // against the writer's __atomic_store_n for a coherent snapshot; RELAXED
+    // suffices -- these are monotonic counters the reader diffs across polls
+    // (htop's method), with no other memory ordered against them.
+    //
+    //   nsched       -- times switched IN (got the CPU): the dispatch count. A
+    //                   high rate flags scheduler CHURN -- a thread re-dispatched
+    //                   thousands of times/sec (a sleep/wake thrash, or a yield
+    //                   storm UNDER CONTENTION). NOTE it does NOT move for a SOLO
+    //                   busy-yielder on an otherwise-idle system: the #33
+    //                   sched_yield_hint fast-path skips the switch when the local
+    //                   queue holds only the pinned idle, so THAT case (the
+    //                   HVF-idle regression, DEBUGGING-PLAYBOOK 6.17) is named by
+    //                   %CPU / run_ns, not nsched -- nsched is the complementary
+    //                   "is it thrashing the scheduler" signal.
+    //   nsleeps      -- times switched OUT voluntarily (state == SLEEPING) --
+    //                   the "parks" the process list surfaces (OQ-5).
+    //   nmigrations  -- times dispatched on a DIFFERENT CPU than the previous
+    //                   dispatch (the first-ever dispatch is skipped via the
+    //                   nsched == 0 guard, so it is not miscounted as a move
+    //                   off the KP_ZERO last_cpu).
+    //   last_cpu     -- the CPU this thread most recently ran on (meaningful
+    //                   only once nsched > 0; the Linux /proc/<pid>/stat
+    //                   "processor" field). u16 spans DTB_MAX_CPUS with room.
+    //
+    // KP_ZERO inits all to 0; NOT propagated by rfork (a child accrues its own).
+    u64                nsched;
+    u64                nsleeps;
+    u64                nmigrations;
+    u16                last_cpu;
+    u16                _pad_prowl3[3];
 };
 
-_Static_assert(sizeof(struct Thread) == 1184,
+_Static_assert(sizeof(struct Thread) == 1232,
+               "prowl-3a appended the scheduler-introspection counters "
+               "nsched + nsleeps + nmigrations (3 x u64) + last_cpu (u16) + "
+               "pad at the tail: 1200 -> 1232 (READ-ONLY telemetry, the "
+               "/proc/<pid>/sched substrate). "
+               "prowl-1 appended run_ns + switched_in_at (2 x u64, the on-CPU "
+               "time telemetry) at the tail: 1184 -> 1200. "
                "8c-3 appended stop_unwinds + stop_no_park + stop_unwound (bools) in "
                "the debug_ss_armed padding -- no size change (#89 reader-role-release "
                "+ the F1 frame-atomic block-through + the F1-re-audit stop-unwound "

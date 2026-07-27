@@ -29,6 +29,8 @@
 #include <thylacine/page.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>       // prowl-1/3a: sched() + sched_cpu_idle_ns
+#include <thylacine/smp.h>         // prowl-3a: smp_cpu_count() -- last_cpu bound
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
@@ -52,6 +54,7 @@ void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
+void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
 // 8a-1b: the I-39 debug gate + the attach/detach/close slot lifecycle.
 void test_devproc_debug_authorized_predicate(void);
 void test_devproc_debug_attach_detach_lifecycle(void);
@@ -62,11 +65,18 @@ void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
+// prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
+void test_devproc_sched_gate_predicate(void);
+void test_devproc_sched_read_gated(void);
+void test_devproc_read_sched_format(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
+                                char *buf, size_t cap, bool *denied);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 
@@ -86,6 +96,19 @@ static bool contains(const char *haystack, size_t hlen, const char *needle) {
         if (j == nlen) return true;
     }
     return false;
+}
+
+// prowl-1: exact NUL-terminated string equality (proc_set_name basename check).
+static bool streq(const char *a, const char *b) {
+    while (*a && *b) { if (*a != *b) return false; a++; b++; }
+    return *a == *b;
+}
+
+// prowl-1: read kproc's cumulative cpu_ns under g_proc_table_lock (proc_for_each
+// holds it -- proc_cpu_ns's precondition). Stashes it via the void* arg.
+static int cpu_ns_cb(struct Proc *p, void *arg) {
+    if (p == kproc()) *(u64 *)arg = proc_cpu_ns(p);
+    return 0;
 }
 
 // Walk one component from c using devproc->walk; return the new Spoor or
@@ -291,8 +314,8 @@ void test_devproc_read_status_format(void) {
     struct Spoor *c = open_status_for_pid(0);
     TEST_ASSERT(c != NULL, "open /proc/0/status OK");
 
-    char buf[256];
-    long got = devproc.read(c, buf, 256, 0);
+    char buf[512];
+    long got = devproc.read(c, buf, 512, 0);
     TEST_ASSERT(got > 0, "read returns positive byte count");
 
     TEST_ASSERT(contains(buf, (size_t)got, "pid:"),     "status contains 'pid:'");
@@ -300,8 +323,104 @@ void test_devproc_read_status_format(void) {
     TEST_ASSERT(contains(buf, (size_t)got, "state:"),   "status contains 'state:'");
     TEST_ASSERT(contains(buf, (size_t)got, "ALIVE"),    "kproc state is ALIVE");
     TEST_ASSERT(contains(buf, (size_t)got, "threads:"), "status contains 'threads:'");
+    // prowl-1: Plan 9 parity -- name + cpu time + parent + owner.
+    TEST_ASSERT(contains(buf, (size_t)got, "name:"),    "status contains 'name:'");
+    TEST_ASSERT(contains(buf, (size_t)got, "kproc"),    "kproc status carries its name");
+    TEST_ASSERT(contains(buf, (size_t)got, "cpu_ns:"),  "status contains 'cpu_ns:'");
+    TEST_ASSERT(contains(buf, (size_t)got, "ppid:"),    "status contains 'ppid:'");
+    TEST_ASSERT(contains(buf, (size_t)got, "principal:"), "status contains 'principal:'");
 
     spoor_clunk(c);
+}
+
+// prowl-1 (PROWL-DESIGN.md section 3): the telemetry substrate --
+//   (a) proc_set_name extracts the basename correctly, and
+//   (b) the ctx-switch run_ns accounting is LIVE: kproc's cpu_ns accrues
+//       after forced yields and never decreases.
+void test_proc_cpu_ns_accounting(void);
+void test_proc_cpu_ns_accounting(void) {
+    // (a) proc_set_name basename extraction -- pure, on a stack Proc (only
+    // p->name is touched, so no other field need be valid).
+    struct Proc tp;
+    tp.name[0] = '\0';
+    proc_set_name(&tp, "/bin/corvus", 11);
+    TEST_ASSERT(streq(tp.name, "corvus"), "basename '/bin/corvus' -> 'corvus'");
+    proc_set_name(&tp, "joey", 4);
+    TEST_ASSERT(streq(tp.name, "joey"), "no-slash name kept whole");
+    proc_set_name(&tp, "/a/b/c/thing", 12);
+    TEST_ASSERT(streq(tp.name, "thing"), "deep-path basename -> 'thing'");
+    proc_set_name(&tp, "keep", 4);
+    proc_set_name(&tp, "/dir/", 5);           // trailing slash -> empty basename
+    TEST_ASSERT(streq(tp.name, "keep"), "trailing-slash keeps the prior name");
+    // Truncation: a > PROC_NAME_MAX-1 name stays NUL-terminated within bounds.
+    proc_set_name(&tp, "/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 41);
+    TEST_ASSERT(tp.name[PROC_NAME_MAX - 1u] == '\0', "long name stays NUL-terminated");
+
+    // (b) run_ns accounting. sched() yields kthread to its CPU's idle and back;
+    // each yield switches kthread OUT so its run_ns accrues (proc_cpu_ns sums
+    // over kproc's threads). A measurable busy slice between yields guarantees a
+    // nonzero delta even at a coarse CNTVCT resolution.
+    for (int i = 0; i < 8; i++) {
+        for (volatile int j = 0; j < 1000000; j++) { /* burn a measurable slice */ }
+        sched();
+    }
+    u64 cpu_ns = 0;
+    proc_for_each(cpu_ns_cb, &cpu_ns);        // proc_cpu_ns(kproc) under the lock
+    TEST_ASSERT(cpu_ns > 0, "kproc cpu_ns accrued after forced yields");
+
+    // Monotonic: another round of run never decreases the cumulative counter.
+    for (int i = 0; i < 8; i++) {
+        for (volatile int j = 0; j < 1000000; j++) { }
+        sched();
+    }
+    u64 cpu_ns2 = 0;
+    proc_for_each(cpu_ns_cb, &cpu_ns2);
+    TEST_ASSERT(cpu_ns2 >= cpu_ns, "cpu_ns is monotonic across polls");
+}
+
+// prowl-3a: the per-thread scheduler counters (nsched/nsleeps/nmigrations/
+// last_cpu) + the per-CPU idle_ns accessor -- the /proc/<pid>/sched + /ctl/cpu
+// substrate. Drives the SAME forced-yield vehicle as the run_ns test above: a
+// yield switches the running thread OUT then a peer/idle switches it back IN, so
+// nsched grows; the burned slice guarantees a real switch rather than a no-op.
+void test_sched_prowl_counters(void);
+void test_sched_prowl_counters(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL, "current thread present");
+
+    // nsched grows across forced yields (the switch chokepoint bumps it on
+    // switch-IN, exactly where run_ns accrues on switch-OUT above).
+    u64 n0 = __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
+    for (int i = 0; i < 8; i++) {
+        for (volatile int j = 0; j < 500000; j++) { /* burn a measurable slice */ }
+        sched();
+    }
+    u64 n1 = __atomic_load_n(&t->nsched, __ATOMIC_RELAXED);
+    TEST_ASSERT(n1 > n0, "nsched grows across forced yields");
+
+    // last_cpu is a valid online CPU index once the thread has been dispatched.
+    u16 lc = __atomic_load_n(&t->last_cpu, __ATOMIC_RELAXED);
+    TEST_ASSERT((unsigned)lc < smp_cpu_count(), "last_cpu is a valid CPU index");
+
+    // The other counters are monotonic across polls (the diff-across-polls
+    // contract the userspace reader depends on -- no wrap, no decrease).
+    u64 s0 = __atomic_load_n(&t->nsleeps, __ATOMIC_RELAXED);
+    u64 m0 = __atomic_load_n(&t->nmigrations, __ATOMIC_RELAXED);
+    for (int i = 0; i < 4; i++) {
+        for (volatile int j = 0; j < 200000; j++) { }
+        sched();
+    }
+    TEST_ASSERT(__atomic_load_n(&t->nsleeps, __ATOMIC_RELAXED) >= s0,
+                "nsleeps is monotonic across polls");
+    TEST_ASSERT(__atomic_load_n(&t->nmigrations, __ATOMIC_RELAXED) >= m0,
+                "nmigrations is monotonic across polls");
+
+    // Per-CPU idle_ns: CPU 0 (online) reads a coherent cumulative value without
+    // faulting; an out-of-range CPU reads a clean 0 (the accessor's bounds
+    // guard), never garbage.
+    (void)sched_cpu_idle_ns(0);
+    TEST_EXPECT_EQ(sched_cpu_idle_ns(9999u), (u64)0,
+                   "out-of-range CPU idle_ns reads 0");
 }
 
 void test_devproc_read_cmdline_kproc(void) {
@@ -468,6 +587,115 @@ void test_devproc_kill_authorized_predicate(void) {
     proc_free(target);
 }
 
+// prowl-3b: the OQ-4 deep-internals gate for /proc/<pid>/sched -- owner OR
+// CAP_HOSTOWNER, and STRICTLY NARROWER than the kill/debug gates (CAP_KILL,
+// CAP_DEBUG, CAP_DAC_OVERRIDE are deliberately NOT axes for scheduler telemetry).
+void test_devproc_sched_gate_predicate(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+
+    // 1. Different principal, no caps -> denied.
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "non-owner with no caps cannot read the sched view");
+
+    // 2. Same principal (owner) -> allowed.
+    caller->principal_id = 0xA11CEu;
+    TEST_ASSERT(devproc_sched_authorized(caller, target),
+                "the owner (same principal) can read its own sched view");
+
+    // 3. Different principal + CAP_HOSTOWNER -> allowed (the operator).
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    TEST_ASSERT(devproc_sched_authorized(caller, target),
+                "CAP_HOSTOWNER authorizes the sched view");
+
+    // 4-6. NARROWER than kill/debug: CAP_KILL / CAP_DEBUG / CAP_DAC_OVERRIDE are
+    //      NOT sched-view axes (reading telemetry is neither kill nor debug nor
+    //      fs-admin -- keep the capability split orthogonal, I-22).
+    caller->caps = CAP_KILL;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "CAP_KILL is NOT a sched-view axis");
+    caller->caps = CAP_DEBUG;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "CAP_DEBUG is NOT a sched-view axis");
+    caller->caps = CAP_DAC_OVERRIDE;
+    TEST_ASSERT(!devproc_sched_authorized(caller, target),
+                "CAP_DAC_OVERRIDE is NOT a sched-view axis");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// prowl-3b (prowl-5 F4): the OQ-4 DENY WIRING revert-probe. The predicate test
+// above covers the authority logic standalone; the format test below covers only
+// the allow leg (kproc-self). This drives the WIRED gate (devproc_sched_read_gated,
+// exactly what devproc_read_cb calls) with a synthetic caller, so dropping the
+// gate check makes the deny leg fail -- the coverage the real in-unit path
+// (kproc/CAP_ALL, always authorized) can never provide.
+void test_devproc_sched_read_gated(void) {
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+
+    char buf[2048];
+    bool denied;
+
+    // Non-owner, no caps -> DENIED, zero bytes formatted (no partial leak).
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    denied = false;
+    size_t n = devproc_sched_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(denied && n == 0, "non-owner sched read denied, no bytes formatted");
+
+    // Owner -> allowed; the block formats (at least the name/pid/threads header).
+    caller->principal_id = 0xA11CEu;
+    denied = true;
+    n = devproc_sched_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "owner sched read allowed, block formatted");
+
+    // CAP_HOSTOWNER (non-owner) -> allowed.
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    denied = true;
+    n = devproc_sched_read_gated(caller, target, buf, sizeof(buf), &denied);
+    TEST_ASSERT(!denied && n > 0, "CAP_HOSTOWNER sched read allowed");
+
+    caller->state = PROC_STATE_ZOMBIE;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    proc_free(target);
+}
+
+// prowl-3b: read /proc/0/sched (kproc reads its OWN sched view -> owner-gated
+// allow) and verify the per-thread block rendered -- the column header + the
+// proc name. The deny path is the predicate test above (the test runner runs as
+// kproc, so it cannot exercise a cross-principal denial here).
+void test_devproc_read_sched_format(void) {
+    struct Spoor *root   = devproc.attach("");
+    struct Spoor *piddir = walk_one(root, "0");
+    struct Spoor *sched  = walk_one(piddir, "sched");
+    spoor_unref(piddir);
+    spoor_unref(root);
+    TEST_ASSERT(sched != NULL, "walk to /proc/0/sched OK");
+    TEST_ASSERT(devproc.open(sched, 0) != NULL, "open sched");
+
+    char buf[2048];   // == DEVPROC_READ_BUF (devproc.c-private); a full sched read fits
+    long got = devproc.read(sched, buf, (long)sizeof(buf), 0);
+    TEST_ASSERT(got > 0, "sched read positive (owner-gated allow for kproc-self)");
+    TEST_ASSERT(contains(buf, (size_t)got, "name:"), "sched has the proc name");
+    TEST_ASSERT(contains(buf, (size_t)got, "tid band cpu"),
+                "sched has the per-thread column header");
+
+    spoor_clunk(sched);
+}
+
 // stat_native reports the target Proc as the per-pid object's owner, with the
 // Plan 9 /proc mode convention (ctl 0600, info files 0444); the dev apex -> -1.
 void test_devproc_stat_native_ctl_owner(void) {
@@ -600,6 +828,89 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     spoor_clunk(dctl);
     proc_test_unlink(dead);
     proc_free(dead);
+}
+
+// prowl-4: the job-control suspend/resume verb dispatch end-to-end (parse -> the
+// I-26 gate -> the job_stop_req flip). Proves (a) the owner path flips
+// job_stop_req WITHOUT terminating (strictly weaker than kill), idempotently;
+// (b) the SAME I-26 gate as kill denies a non-owner-no-cap caller (the deny is
+// non-vacuous -- the harness caller holds neither CAP_HOSTOWNER nor CAP_KILL);
+// (c) a non-ALIVE target is refused even for the owner. The suspend is
+// NON-TERMINAL, so unlike the kill test it asserts the target survives.
+void test_devproc_ctl_suspend_resume_dispatch(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "test thread has a proc");
+    struct Proc *caller = t->proc;
+    TEST_ASSERT(!(caller->caps & (CAP_HOSTOWNER | CAP_KILL)),
+                "test caller lacks CAP_HOSTOWNER/CAP_KILL (denied case is meaningful)");
+
+    const char suspend_cmd[] = "suspend";
+    const char resume_cmd[]  = "resume";
+    const long sn = (long)sizeof(suspend_cmd) - 1;   // 7
+    const long rn = (long)sizeof(resume_cmd) - 1;    // 6
+
+    // (a) OWNER-authorized suspend + resume: the job_stop_req flip, non-terminal.
+    struct Proc *owned = proc_alloc();
+    TEST_ASSERT(owned != NULL, "alloc owned target");
+    owned->principal_id = caller->principal_id;
+    owned->state        = PROC_STATE_ALIVE;
+    proc_test_link(owned);
+    struct Spoor *octl = open_ctl_for_pid(owned->pid);
+    TEST_ASSERT(octl != NULL, "open owned-target ctl");
+
+    TEST_EXPECT_EQ(devproc.write(octl, suspend_cmd, sn, 0), sn, "owner suspend returns n");
+    TEST_EXPECT_EQ((int)owned->job_stop_req, 1, "suspend set job_stop_req");
+    TEST_ASSERT(owned->stop_report_pending, "suspend latched the WAIT_UNTRACED report");
+    TEST_EXPECT_EQ(owned->group_exit_msg, (const char *)NULL,
+                   "suspend does NOT terminate -- strictly weaker than kill");
+
+    // Idempotent: a second suspend does not re-latch the report (the primitive's
+    // already-stopped guard). Consume the latch first to observe the no-re-arm.
+    owned->stop_report_pending = false;
+    TEST_EXPECT_EQ(devproc.write(octl, suspend_cmd, sn, 0), sn, "second suspend returns n");
+    TEST_ASSERT(!owned->stop_report_pending, "idempotent suspend did NOT re-latch");
+
+    TEST_EXPECT_EQ(devproc.write(octl, resume_cmd, rn, 0), rn, "owner resume returns n");
+    TEST_EXPECT_EQ((int)owned->job_stop_req, 0, "resume cleared job_stop_req");
+    TEST_ASSERT(owned->cont_report_pending, "resume latched the WAIT_CONTINUED report");
+
+    spoor_clunk(octl);
+    proc_test_unlink(owned);
+    owned->state = PROC_STATE_ZOMBIE;
+    proc_free(owned);
+
+    // (b) DENIED: a non-owned target, caller holds no cap -- the SAME I-26 gate
+    // as kill. The target must NOT be stopped.
+    struct Proc *other = proc_alloc();
+    TEST_ASSERT(other != NULL, "alloc non-owned target");
+    other->principal_id = (caller->principal_id == 0x0B0B0B0Bu) ? 0x0C0C0C0Cu
+                                                                : 0x0B0B0B0Bu;
+    other->state        = PROC_STATE_ALIVE;
+    proc_test_link(other);
+    struct Spoor *nctl = open_ctl_for_pid(other->pid);
+    TEST_ASSERT(nctl != NULL, "open non-owned-target ctl");
+    TEST_EXPECT_EQ(devproc.write(nctl, suspend_cmd, sn, 0), (long)-1,
+                   "non-owner suspend denied (-1) -- the I-26 gate");
+    TEST_EXPECT_EQ((int)other->job_stop_req, 0, "denied target NOT stopped");
+    spoor_clunk(nctl);
+    proc_test_unlink(other);
+    other->state = PROC_STATE_ZOMBIE;
+    proc_free(other);
+
+    // (c) a non-ALIVE target is refused even for the owner (mirrors kill (d)).
+    struct Proc *dead2 = proc_alloc();
+    TEST_ASSERT(dead2 != NULL, "alloc zombie target");
+    dead2->principal_id = caller->principal_id;
+    dead2->state        = PROC_STATE_ZOMBIE;
+    proc_test_link(dead2);
+    struct Spoor *dctl2 = open_ctl_for_pid(dead2->pid);
+    TEST_ASSERT(dctl2 != NULL, "open zombie-target ctl");
+    TEST_EXPECT_EQ(devproc.write(dctl2, suspend_cmd, sn, 0), (long)-1,
+                   "suspend of a non-ALIVE target refused even for the owner");
+    TEST_EXPECT_EQ((int)dead2->job_stop_req, 0, "non-ALIVE target NOT stopped");
+    spoor_clunk(dctl2);
+    proc_test_unlink(dead2);
+    proc_free(dead2);
 }
 
 // 8a-1b: the I-39 debug-authority predicate (owner OR CAP_DEBUG; kproc +

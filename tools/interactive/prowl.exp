@@ -1,0 +1,118 @@
+#!/usr/bin/expect -f
+# tools/interactive/prowl.exp -- prowl-2: the Kaua process monitor + the ut
+# raw-mode dance, over a real PTY.
+#
+# The runnable coverage no host test can reach (prowl's /ctl read + parse + the
+# Terminal/PollSource render + ut's raw-mode dance are all fd-bound):
+#   1. ut sees a raw command (console::is_raw_command("prowl")), flips the console
+#      to RAW, and hands prowl fd 0/1/2 (Inherit) -- so prowl launches, ACQUIRES
+#      THE SCREEN, reads /ctl/procs + /ctl/sched, and renders. A failed dance
+#      (fd 0 a dead pipe) -> prowl exits at once and the render assertions time out.
+#   2. prowl renders the banner (procs:/cpus:), the process table (the MEM(pg)
+#      header), and a REAL process (kproc, always pid 1) -- proving the kernel
+#      telemetry was read + parsed + drawn as live data, not an empty list.
+#   3. `q` quits; ut restores the prompt mode + the screen (the panic=abort
+#      backstop), so the post-quit command runs at a clean prompt.
+#
+# Assertion discipline: `lc_send "prowl"` echoes "prowl" at the cooked prompt, so
+# the assertions match tokens ONLY prowl's render produces (cpus:/MEM(pg)/kproc),
+# never "prowl" itself. TCG-default harness -> the terminal does not answer the
+# CPR size probe, so prowl falls back to 80x24 and renders regardless (ls-7's
+# pattern). The LS-CI wrapper retries the whole scenario up to 3x for host jitter.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# Launch prowl (a raw command). ut RAWs the console + Inherits fd 0/1/2.
+lc_send "prowl"
+# Let it launch: spawn -> ut RAW dance -> prowl probes size (fallback 80x24) ->
+# reads /ctl -> renders the first frame.
+sleep 2
+
+# The banner "procs: N   cpus: N" (proves launch + the /ctl/sched ncpus read).
+lc_expect "cpus:" "prowl banner rendered"
+# The process-list Table header (proves the table rendered).
+lc_expect "MEM(pg)" "prowl table header rendered"
+# A real process -- kproc is always pid 1, ALIVE, and the initial frame is
+# pid-sorted (all %CPU 0 until the first delta) so kproc is at the top: proves
+# /ctl/procs was read + parsed + drawn as real data.
+lc_expect "kproc" "prowl process list populated with live telemetry"
+lc_pass "prowl-2: launch + raw-mode dance + kernel-telemetry render"
+
+# Exercise the key path (no assert -- just prove no crash before the quit): cycle
+# the sort, move the cursor. A crash here would break the quit + restore below.
+lc_step "prowl: cycle sort (s) + move cursor (Down)"
+send "s"
+sleep 1
+send "\x1b\[B"
+sleep 1
+
+# prowl-3c: open the per-thread scheduler detail pane (d). Whichever process is
+# selected, the pane renders a line containing "sched" -- either "sched: <name>
+# ... tid band cpu ..." (an owned process, the OQ-4 gate allows) OR "sched detail
+# unavailable ..." (a SYSTEM process, michael is denied by the gate). Both prove
+# the /proc/<pid>/sched read + parse + detail render fired. Then close it (toggle
+# d again) to prove the toggle round-trips without a crash before the quit.
+lc_step "prowl: open the scheduler detail pane (d)"
+send "d"
+sleep 1
+lc_expect "sched" "prowl detail pane rendered (per-thread view or gated-unavailable)"
+send "d"
+sleep 1
+
+# prowl-4: toggle the parent->child tree view (t). The footer's mode token flips
+# to the UPPERCASE "TREE" (distinct from the lowercase "t tree" key hint), so the
+# match is unambiguous proof the toggle fired + the tree re-rendered (child procs
+# indented under kproc via the /ctl/procs PPID column). Then toggle back to flat.
+lc_step "prowl: toggle the tree view (t) + navigate in tree order"
+send "t"
+sleep 1
+lc_expect "TREE" "prowl tree view toggled on (footer mode token TREE)"
+# Navigate WHILE in tree mode (no re-assert): the cell-diff renderer does NOT
+# re-emit the unchanged "TREE" footer token, and a REVERSE-attr cursor highlight
+# is not text-matchable over a PTY -- so this exercises the display_order path
+# and the quit + console restore at the end prove prowl stayed alive + rendering.
+# The prowl-4 fix: move_selection steps display_order, so Down walks the TREE
+# order (kproc -> joey -> ambush-child ...), not the flat sorted rows.
+send "\x1b\[B"
+sleep 1
+send "\x1b\[B"
+sleep 1
+send "\x1b\[A"
+sleep 1
+send "t"
+sleep 1
+
+# prowl-4: job-control suspend (z) + resume (c) on the selected process, via
+# /proc/<pid>/ctl. The status line shows the outcome -- "suspended <pid> <name>"
+# (an owned target) OR "suspend <pid> denied" (a SYSTEM/kproc target michael's
+# I-26 authority cannot stop): EITHER proves the tool wrote the verb + the kernel
+# processed it (the deterministic allow/deny authorization is the kernel test
+# devproc.ctl_suspend_resume_dispatch). "suspend"/"resum" appear ONLY in the
+# status line (the footer hints read "z stop"/"c cont"), so the match is clean.
+lc_step "prowl: job-control suspend (z) + resume (c)"
+send "z"
+sleep 1
+lc_expect "suspend" "prowl suspend action fired (status reflects the /proc ctl write)"
+send "c"
+sleep 1
+lc_expect "resum" "prowl resume action fired (status reflects the /proc ctl write)"
+lc_pass "prowl-4: tree view + job-control suspend/resume"
+
+# Quit prowl with `q` (a raw keystroke, no CR). prowl exits -> ut restores the
+# prompt + re-emits the screen escapes -> the session prompt returns.
+lc_step "prowl: quit (q)"
+send "q"
+sleep 2
+
+# The restore proof: a normal command runs + prints at a clean prompt. The
+# upper-cased token appears ONLY in the tr output (we typed lowercase), so the
+# match is unambiguous proof prowl exited + ut restored a usable console.
+lc_run_expect "echo prowl-restored | tr a-z A-Z" "PROWL-RESTORED"
+lc_pass "prowl-2: quit + ut console restore"
+
+lc_quit
+lc_pass "LS-CI prowl: process monitor verified end to end"
+exit 0

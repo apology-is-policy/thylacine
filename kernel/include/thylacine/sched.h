@@ -358,6 +358,12 @@ struct sched_wc_stats {
 };
 void sched_wc_stats(struct sched_wc_stats *out);
 
+// prowl-3a (PROWL-DESIGN.md section 3.4): cumulative ns `cpu` spent idle-parked
+// -- the per-CPU meter denominator for /ctl/cpu (utilization = 1 - the idle_ns
+// fraction, diffed across polls). Coherent __atomic snapshot; 0 for an
+// out-of-range or not-yet-initialized CPU. READ-ONLY telemetry.
+u64 sched_cpu_idle_ns(unsigned cpu);
+
 // True iff any non-idle band on any CPU's run tree is non-empty (queued
 // runnable work exists somewhere). Reads ONLY the per-band head pointers
 // (never dereferences a Thread), so it is safe to call lock-free from the hot

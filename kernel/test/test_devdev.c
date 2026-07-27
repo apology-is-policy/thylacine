@@ -25,6 +25,7 @@ void test_devdev_walk_to_each_leaf(void);
 void test_devdev_walk_unknown_misses(void);
 void test_devdev_walk_pts_dir(void);
 void test_devdev_trivial_leaves(void);
+void test_devdev_stat_native_leaves(void);      // CL-4 merge: all-leaf shapes
 void test_devdev_cons_gate(void);
 void test_devdev_consctl_renderer_mint(void);   // #55
 void test_devdev_winsize_leaf(void);            // #55
@@ -127,6 +128,64 @@ void test_devdev_walk_pts_dir(void) {
     TEST_EXPECT_EQ(devdev.write(pts, "x", 1, 0), (long)-1, "pts write fails");
 
     spoor_unref(pts);
+}
+
+// devdev_stat_native covers EVERY leaf shape, not just cons. Both halves matter
+// and each came from a different branch, so the CL-4 merge had to synthesize
+// them rather than pick a side -- this pins the result:
+//
+//   - cons          -> cons_stat_native_fill, i.e. the ONE #55 is-a-cons fill
+//                      (S_IFCHR + the CONS_STAT_QID_FLAG marker that makes
+//                      isatty() true), shared with devcons so the two doors
+//                      cannot drift.
+//   - consctl       -> S_IFCHR but deliberately NO cons flag: it is the control
+//                      file, not a console, and must not read as a tty.
+//   - null/zero/... -> a real shape. This is CL-4's F2: clang's
+//                      FixupStandardFileDescriptors fstats its std fds and
+//                      treats failure (errno != EBADF) as fatal, so a statless
+//                      /dev/null makes `clang++ < /dev/null` die before it
+//                      emits anything. A -1 here is not cosmetic.
+//   - the dirs      -> S_IFDIR 0555 (world-searchable, so the resolver crosses).
+//   - anything else -> -1, rather than inventing a shape.
+void test_devdev_stat_native_leaves(void) {
+    struct t_stat st;
+
+    struct Spoor *cons = walk_to("cons");
+    TEST_ASSERT(cons != NULL, "walk cons");
+    TEST_EXPECT_EQ((long)devdev.stat_native(cons, &st), 0L, "cons stats");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR, "cons is S_IFCHR");
+    TEST_ASSERT((st.qid_path & CONS_STAT_QID_FLAG) != 0u,
+                "cons carries the is-a-cons marker (shared #55 fill)");
+    spoor_unref(cons);
+
+    struct Spoor *cc = walk_to("consctl");
+    TEST_ASSERT(cc != NULL, "walk consctl");
+    TEST_EXPECT_EQ((long)devdev.stat_native(cc, &st), 0L, "consctl stats");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR, "consctl is S_IFCHR");
+    TEST_ASSERT((st.qid_path & CONS_STAT_QID_FLAG) == 0u,
+                "consctl is NOT marked a cons (it is the control file)");
+    spoor_unref(cc);
+
+    // The CL-4 F2 leaves. `clang++ < /dev/null` depends on this being 0.
+    static const char *const trivial[] = { "null", "zero", "full", "random", "urandom" };
+    for (unsigned i = 0; i < sizeof(trivial) / sizeof(trivial[0]); i++) {
+        struct Spoor *s = walk_to(trivial[i]);
+        TEST_ASSERT(s != NULL, "walk trivial leaf");
+        TEST_EXPECT_EQ((long)devdev.stat_native(s, &st), 0L,
+                       "trivial leaf stats (CL-4 F2: clang fstats its std fds)");
+        TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFCHR, "trivial leaf is S_IFCHR");
+        TEST_ASSERT(st.uid == PRINCIPAL_SYSTEM && st.gid == GID_SYSTEM,
+                    "trivial leaf is system-owned");
+        spoor_unref(s);
+    }
+
+    // /dev itself is a searchable directory, or the resolver cannot cross onto it.
+    struct Spoor *root = devdev.attach("");
+    TEST_ASSERT(root != NULL, "attach /dev");
+    TEST_EXPECT_EQ((long)devdev.stat_native(root, &st), 0L, "/dev stats");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFDIR && (st.mode & 0111u) != 0u,
+                "/dev is a searchable directory");
+    spoor_unref(root);
 }
 
 // The trivial leaves are world-rw + UNGATED: these opens succeed regardless of
@@ -374,10 +433,12 @@ void test_devdev_winsize_leaf(void) {
     for (long i = 0; ok && i < n; i++) if (buf[i] != set[i]) ok = false;
     TEST_ASSERT(ok, "leaf reads winsize 132 50 after the verb");
 
-    // stat_native is cons-scoped: the cons leaf fills; winsize stays statless.
+    // winsize has no shape of its own, so it falls to the switch's default arm
+    // and stays statless. (The cons leaf and the trivial leaves DO fill -- see
+    // devdev.stat_native_leaves; the CL-4 merge widened this beyond cons.)
     struct t_stat st;
     TEST_EXPECT_EQ((long)devdev.stat_native(wsopen, &st), -1L,
-                   "winsize leaf is statless (the contract is cons-scoped)");
+                   "winsize leaf is statless (no shape -> the default arm)");
     struct Spoor *cons = walk_to("cons");
     TEST_ASSERT(cons != NULL, "walk cons");
     TEST_EXPECT_EQ((long)devdev.stat_native(cons, &st), 0L, "cons leaf stat fills");

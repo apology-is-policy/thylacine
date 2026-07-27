@@ -239,6 +239,11 @@ void proc_init(void) {
     g_kproc->principal_id = PRINCIPAL_SYSTEM;
     g_kproc->primary_gid  = GID_SYSTEM;
 
+    // prowl-1: name the kernel proc (the boot chain never execs, so it carries
+    // no resolved Spoor path -- stamp the literal so /proc/0 + /ctl/procs read
+    // "kproc" rather than the empty-name "?").
+    proc_set_name(g_kproc, "kproc", 5);
+
     // P2-Fc: kproc gets its own handle table. handle_init must run
     // before proc_init (main.c bootstrap order). Failures here panic —
     // boot can't continue without kproc.
@@ -957,6 +962,34 @@ bool proc_child_cap_ok(struct Proc *p) {
     bool ok = p->child_count < PROC_CHILD_MAX;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return ok;
+}
+
+// prowl-1 (PROWL-DESIGN.md section 3.2): stamp p->name with the basename of
+// `path` (the last '/'-delimited component). See proc.h for the concurrency
+// note (set once in the Proc's own exec path before it runs at EL0).
+void proc_set_name(struct Proc *p, const char *path, size_t len) {
+    if (!p || !path || len == 0) return;
+    size_t start = 0;
+    for (size_t i = 0; i < len; i++)
+        if (path[i] == '/') start = i + 1u;
+    if (start >= len) return;   // trailing-slash / empty basename -- keep prior
+    size_t j = 0;
+    for (size_t i = start; i < len && path[i] != '\0' && j < PROC_NAME_MAX - 1u; i++)
+        p->name[j++] = path[i];
+    p->name[j] = '\0';
+}
+
+// prowl-1 (PROWL-DESIGN.md section 3.1): the per-Proc cumulative on-CPU time =
+// sum of run_ns over the threads. PRECONDITION: caller holds g_proc_table_lock
+// (the threads-list mutation domain -- the formatters call this from inside
+// proc_for_each). Each run_ns is a single-writer field read __atomic for a
+// coherent cross-CPU snapshot (the page_count reader pattern).
+u64 proc_cpu_ns(const struct Proc *p) {
+    if (!p) return 0;
+    u64 total = 0;
+    for (const struct Thread *t = p->threads; t; t = t->next_in_proc)
+        total += __atomic_load_n(&t->run_ns, __ATOMIC_RELAXED);
+    return total;
 }
 
 // Shared internal worker for rfork + rfork_with_caps. The only difference
@@ -3245,6 +3278,36 @@ int proc_job_cont_pgrp(u32 pgid) {
     proc_for_each_walk(g_kproc, job_cont_cb, &ctx);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return ctx.visited;
+}
+
+// prowl-4: job-stop / job-cont a SINGLE Proc by pointer -- the /proc/<pid>/ctl
+// monitor path (a `suspend` / `resume` verb, I-26-gated in devproc exactly as the
+// `kill` verb). Reuse the PTY-1f per-member helpers: STOP sets job_stop_req +
+// wakes the target's own sleepers (proc_job_stop_one_locked) then issues the ONE
+// group-global reschedule IPI (the F2 hoist) so a peer RUNNING at EL0 traps to its
+// stop checkpoint; CONT clears job_stop_req + wakes the parked threads
+// (proc_job_resume_one_locked, which does its own wake walk). Caller holds
+// g_proc_table_lock (devproc's proc_for_each). Idempotent (a second stop / a
+// cont-of-a-running Proc is a no-op via the one_locked guards).
+//
+// UNCONDITIONAL -- unlike the pts SIGTSTP fan (proc_job_stop_pgrp) there is NO
+// tty:susp/tty:cont note and NO catchability gate (proc_tty_susp_would_stop_-
+// locked): a /proc stop is the Plan-9 `stop`, uncatchable exactly as the /proc
+// `kill` is, and stopping is strictly weaker than the killing the same I-26 gate
+// already authorizes. The stop_report/cont_report latches still fire, so the
+// target's PARENT sees the WAIT_UNTRACED / WAIT_CONTINUED edge -- correct: whoever
+// stops a process, its parent's wait reports the stop (the external-SIGTSTP shape;
+// a non-opt-in parent simply ignores the latch). A /proc-stopped process that is
+// later orphaned is cleaned by the existing POSIX orphan rule (hup+cont at the
+// parent's zombie flip) -- no new hazard. Composes I-20's stopOwners
+// (StopCompatI39): a target ALSO debugger-stopped stays parked on debug_stop_req
+// after a job resume, and vice-versa.
+bool proc_job_stop_proc(struct Proc *m) {
+    if (proc_job_stop_one_locked(m)) { smp_resched_others(); return true; }
+    return false;
+}
+void proc_job_cont_proc(struct Proc *m) {
+    proc_job_resume_one_locked(m);
 }
 
 // child_wait_ready_cond — wait_pid_for's sleep predicate (#344). Returns 1

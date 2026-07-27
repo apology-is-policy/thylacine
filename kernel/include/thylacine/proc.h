@@ -141,6 +141,15 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 // teardown (burrow_unmap / vma_drain), all under p->vma_lock; TCB-exempt.
 #define PROC_SHARED_MAP_MAX_PAGES  32768u   // 128 MiB at 4-KiB pages
 
+// prowl-1 (docs/PROWL-DESIGN.md section 3.2): the bounded process name -- the
+// basename of the execed binary (the resolved namespace path, not caller-
+// controlled argv[0]). Fixed-size to keep the Proc cache slot bounded; 32 covers
+// the longest v1.0 binary basename ("pouch-stratumd-boot-e2e" = 23) with margin.
+// A longer name truncates (best-effort telemetry). Set once at exec via
+// proc_set_name; KP_ZERO leaves it "" (a pre-exec / boot Proc reads empty ->
+// the formatters substitute "?").
+#define PROC_NAME_MAX   32u
+
 struct Proc {
     u64               magic;            // PROC_MAGIC
     int               pid;
@@ -555,10 +564,12 @@ struct Proc {
     // never run a debugger-stopped thread (StopCompatI39; the
     // BUGGY_DOUBLE_STOP counterexample). Death overrides both (the park
     // loop's group_exit_msg check precedes; GroupDie clears stopOwners).
-    // SET (RELEASE) by proc_job_stop_pgrp's uncaught-susp arm under
-    // g_proc_table_lock, CLEARED (RELEASE) by the job-resume paths under the
-    // same lock; READ (ACQUIRE) at the park predicate sites, exactly the
-    // debug_stop_req discipline. Occupies the pad slot after debug_stop_req
+    // SET (RELEASE) by proc_job_stop_pgrp's uncaught-susp arm (the pts SIGTSTP
+    // fan) AND proc_job_stop_proc (the prowl-4 /proc/<pid>/ctl `suspend`),
+    // both under g_proc_table_lock; CLEARED (RELEASE) by the job-resume paths
+    // (proc_job_cont_pgrp / proc_job_cont_proc) under the same lock; READ
+    // (ACQUIRE) at the park predicate sites, exactly the debug_stop_req
+    // discipline. Occupies the pad slot after debug_stop_req
     // (same cache line as the debug flag -- the tail's fast path reads both;
     // no struct growth). KP_ZERO -> 0; NOT propagated by rfork.
     u32                job_stop_req;
@@ -672,18 +683,34 @@ struct Proc {
     // struct Proc stays 352 bytes.
     u32                shared_map_pages;
 
+    // prowl-1 (PROWL-DESIGN.md section 3.2): the process name -- the basename of
+    // the execed binary. Set once at exec (proc_set_name, from the resolved
+    // Spoor path / the boot-chain literal); NUL-terminated, "" until set. Read
+    // by /proc/<pid>/status + /ctl/procs. NOT rfork-inherited by the field
+    // itself, but the child re-execs and re-stamps its own name at exec_setup.
+    char               name[PROC_NAME_MAX];
+
     // VIVARIUM V-4a-0: the namespace name of the executable this Proc is
     // running -- the #66 `Path` of the Spoor `exec_resolve_from_namespace`
     // resolved, ref-held for the Proc's life. The source for
     // `/proc/<pid>/exe`, which the diorama re-presents as Linux's
-    // `/proc/self/exe` (VIVARIUM.md §6.3 Tier 1).
+    // `/proc/self/exe` (VIVARIUM.md section 6.3 Tier 1).
+    //
+    // COMPLEMENTARY TO `name[]` ABOVE, not redundant with it, though the two
+    // were written independently on separate branches and both originally
+    // claimed offset 352. `name[]` is a bounded COPY of the BASENAME, which is
+    // what a process listing wants and which survives a Path-alloc failure;
+    // `exe_path` is the FULL absolute path, which is what Linux's
+    // readlink("/proc/self/exe") means and which a basename cannot reconstruct.
+    // Deriving one from the other is a plausible later tidy-up -- recorded as a
+    // follow-up rather than done inside a merge resolution, since collapsing
+    // them changes both prowl's and the diorama's contracts.
     //
     // Why the kernel has to hold it: nothing else does. The Image cache is
-    // qid-keyed, the text Burrow knows no name, and `struct Proc` carried no
-    // executable identity at all -- so `/proc/<pid>/exe` cannot be rendered
-    // from any existing surface, and a userspace server cannot invent it
-    // without becoming an authority (VIVARIUM.md §6.2). The resolver already
-    // holds exactly the right string; this pins a ref to it.
+    // qid-keyed, the text Burrow knows no name -- so `/proc/<pid>/exe` cannot be
+    // rendered from any existing surface, and a userspace server cannot invent
+    // it without becoming an authority (VIVARIUM.md section 6.2). The resolver
+    // already holds exactly the right string; this pins a ref to it.
     //
     // STRICTLY NON-LOAD-BEARING (I-33, inherited from Path): nothing resolves,
     // permits, or decides through it. NULL is a valid state and renders as an
@@ -774,21 +801,26 @@ struct Proc {
 // renderer's claim under g_proc_table_lock); cleared on the holder's death.
 #define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
-_Static_assert(sizeof(struct Proc) == 360,
-               "struct Proc size pinned at 360 bytes (the 328 baseline + the 8c-2 "
-               "#95 debug_focus_thread pointer @328 + the PTY-1a sid/pgid pair "
-               "@336/@340 + the PTY-1e report latches @344/@345 + the G-2 "
-               "shared_map_pages @348 filling the former tail pad, then the "
-               "VIVARIUM V-4a-0 exe_path pointer @352 -- the first genuine growth "
-               "since the 328 baseline, taken deliberately because no tail pad "
-               "remained and /proc/<pid>/exe has no other possible source. "
+_Static_assert(sizeof(struct Proc) == 392,
+               "struct Proc size pinned at 392 bytes. The 352 baseline (the 328 "
+               "baseline + the 8c-2 #95 debug_focus_thread @328 + the PTY-1a "
+               "sid/pgid pair @336/@340 + the PTY-1e report latches @344/@345 + "
+               "the G-2 shared_map_pages @348 filling the former tail pad) then "
+               "prowl-1's name[PROC_NAME_MAX=32] @352 -> 384, then the VIVARIUM "
+               "V-4a-0 exe_path pointer @384 -> 392. prowl-1 and V-4a-0 were "
+               "written on separate branches and BOTH originally appended at 352; "
+               "the merge stacked them (see the field comments -- they are "
+               "complementary, basename-copy vs full-Path). "
                "Adding a field grows the SLUB cache; update this assert "
                "deliberately so the change is intentional.");
-_Static_assert(__builtin_offsetof(struct Proc, exe_path) == 352,
+_Static_assert(__builtin_offsetof(struct Proc, name) == 352,
+               "prowl-1 name[] appends after shared_map_pages @348+4=352; "
+               "KP_ZERO leaves it \"\" until proc_set_name at exec.");
+_Static_assert(__builtin_offsetof(struct Proc, exe_path) == 384,
                "VIVARIUM V-4a-0 exe_path (the #66 Path of the running executable, "
-               "the /proc/<pid>/exe source) appends at 352 -- the next 8-aligned "
-               "slot past shared_map_pages @348 + its pad. Every existing offset "
-               "stays stable; KP_ZERO-fresh NULL == 'unknown name' (I-33).");
+               "the /proc/<pid>/exe source) appends after prowl-1's name[] @352+32 "
+               "= 384, itself 8-aligned. Every pre-existing offset stays stable; "
+               "KP_ZERO-fresh NULL == 'unknown name' (I-33).");
 _Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
                "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
                "pages) occupies the former 348..352 tail pad after the PTY-1e "
@@ -957,6 +989,30 @@ void proc_vma_uncharge(struct Proc *p);
 //   clamp-subtracts (never underflows past 0).
 bool proc_shared_map_charge(struct Proc *p, u32 npages);
 void proc_shared_map_uncharge(struct Proc *p, u32 npages);
+
+// prowl-1 (PROWL-DESIGN.md section 3): the process-monitor telemetry.
+//
+// proc_set_name -- stamp p->name with the BASENAME of `path` (the last
+//   '/'-delimited component), bounded to PROC_NAME_MAX-1 + NUL. Called once at
+//   exec (exec_setup_from_spoor from the resolved Spoor path; the boot chain
+//   passes its literal). A NULL / empty path leaves the name unchanged. No lock:
+//   the name is set in the Proc's OWN exec path before it runs at EL0, so no
+//   concurrent reader observes a torn write in practice; a /proc reader that
+//   races the one-time stamp sees either the old ("") or the new bytes of a
+//   fixed 32-byte field (never out of bounds).
+void proc_set_name(struct Proc *p, const char *path, size_t len);
+
+// proc_cpu_ns -- sum run_ns over p->threads (the per-Proc cumulative on-CPU
+//   time, PROWL-DESIGN section 3.1). PRECONDITION: the CALLER HOLDS
+//   g_proc_table_lock -- the threads list is mutated only under that lock
+//   (thread_link_into_proc / thread_unlink_from_proc), so the walk is coherent
+//   only while it is held; the formatters call this from inside proc_for_each
+//   (which holds it). Each run_ns is read __atomic (a single-writer coherent
+//   snapshot); the sum is a snapshot-of-snapshots, exact enough for the
+//   diff-across-polls %CPU the reader derives. Does NOT include the currently-
+//   running thread's in-flight slice since its last switch-in (< 1 slice; the
+//   design accepts the lag). Returns 0 for a NULL p.
+u64 proc_cpu_ns(const struct Proc *p);
 
 // proc_thread_cap_ok -- the thread-spawn gate. Returns true if the Proc is
 //   exempt OR thread_count < PROC_THREAD_MAX. Takes g_proc_table_lock for the
@@ -1273,6 +1329,19 @@ int proc_job_stop_pgrp(u32 pgid);
 // caught; a handler observes the note after resuming). pgid 0 refused.
 // Returns the count of ALIVE members visited.
 int proc_job_cont_pgrp(u32 pgid);
+
+// prowl-4: single-Proc job-control stop/cont -- the /proc/<pid>/ctl `suspend` /
+// `resume` verb path (a monitor pausing an arbitrary process by pid; I-26-gated
+// at the devproc write site, the same two-axis gate as `kill`). Caller holds
+// g_proc_table_lock. UNCONDITIONAL (no tty:susp/tty:cont note, no catchability
+// gate -- the Plan-9 `stop`, uncatchable like the /proc `kill`; stopping is
+// strictly weaker than the killing the gate already authorizes). Reuse the
+// PTY-1f per-member helpers: stop = proc_job_stop_one_locked + the one hoisted
+// smp_resched_others IPI; cont = proc_job_resume_one_locked (its own wake walk).
+// Idempotent. proc_job_stop_proc returns true iff `m` was freshly stopped.
+// See kernel/proc.c.
+bool proc_job_stop_proc(struct Proc *m);
+void proc_job_cont_proc(struct Proc *m);
 
 // 8a-1b-beta EL0-return-tail stop-check (specs/debug_stop.tla TailStep). Called
 // at every return-to-EL0 AFTER el0_return_die_check (+ notes on the sync tail),

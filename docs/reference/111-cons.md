@@ -581,6 +581,9 @@ runtime witness.
   the test's stack `poll_waiter` on the list — the next walk extincted on the
   reused frame's clobbered magic (`EXTINCTION: pw_wake`, poll.c's stale-hook
   guard, 2026-07-21 — the guard caught real corruption; the corruption was a
+  test-lifetime leak, not a production defect). Both tests now also run their
+  dance through an error-string helper so the hook is unregistered on EVERY
+  exit path — the structural rule: a stack poll hook never outlives its test.
   test-lifetime leak, not a production defect). All THREE cons poll-hook
   tests (`poll_deferred_wake`, `drain_poll_deferred_wake`,
   `cook_canonical_poll_edge` — the class sweep found the third carrying the

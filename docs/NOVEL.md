@@ -142,12 +142,35 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   alternatives-patcher already does exactly this transient dual-alias of `.text`
   internally). Exposed as a new code-Burrow kind + `SYS_ICACHE_SYNC(range)` (the
   W1.5 `dc cvau`/`ic ivau`/`dsb`/`isb` sequence) + a `CAP_JIT` capability
-  (elevation-only, non-rfork-grantable, the `CAP_HW_CREATE` class). NO v1.0
-  consumer (Go + Rust are AOT + W^X-clean), so DEFERRED — and distinct from the
+  (elevation-only, non-rfork-grantable, the `CAP_HW_CREATE` class). **SCHEDULED
+  WITH A CONSUMER (2026-07-23) — no longer a deferred capture:** the LLVM
+  keystone arc ("Clade", `docs/LLVM-DESIGN.md`, SIGNED OFF) is the first
+  consumer — Mesa's llvmpipe (an ORC shader JIT, CL-7) realizes this mechanism,
+  with a `DualMapMemoryMapper` over the code Burrow slotting into ORC's own
+  working/execution address split (no LLVM surgery, no `mprotect` emulation).
+  The primitive lands as the arc's kernel half (**CL-7k**) and mints invariant
+  **I-42** (executable JIT memory exists only as a code-Burrow RX alias whose
+  content arrived via the paired RW alias + an explicit `SYS_ICACHE_SYNC`; no
+  PTE ever W∧X; creation `CAP_JIT`-gated + non-heritable). Distinct from the
   imperium "just-in-time elevation" of Angle #12 (that is *privilege*; this is
-  *code generation*). When the managed-runtime era is in scope, the kernel
-  primitive folds into ARCH §6.6 (whose post-v1.0 pkey-shaped-syscall note now
-  points here). Audit-bearing (W^X + the `CAP_*` system).
+  *code generation*) and from ADVANCED-GO AG-2's **I-41** (the kernel's one
+  sanctioned text mutation — I-42 is userspace's one sanctioned code-emission
+  path). The kernel primitive supersedes ARCH §6.6's post-v1.0
+  pkey-shaped-syscall note (reconciled at the Clade scripture commit).
+  Audit-bearing (W^X-adjacent — the CL-7k focused round + the `CAP_*` system).
+
+- **The on-system toolchain as an LLVM keystone (#67 / D3 → the "Clade" arc)**
+  (`docs/LLVM-DESIGN.md`, SIGNED OFF 2026-07-23). The ROADMAP D3 / #67 deliverable
+  (clang/lld + make + git via Pouch) is reframed: it is not "a compiler port," it
+  is the **keystone dependency** whose cost is ~80% already committed (clang is
+  C++, so the C++ runtime port is forced either way) and whose four riders — the
+  C++ runtime (opening the whole ported-C++ category, none portable today), the
+  optimizing C toolchain (the static `llvm` multicall + `Triple::Thylacine`),
+  Mesa's llvmpipe (realizing the JIT capability above), and release-grade Rust —
+  are near-free on that one investment (the SerenityOS clade effect, observed in
+  the wild: their Zig port rode the LLVM port). Not a new NOVEL angle (mostly
+  deliberate integration, not invention) but the keystone that admits the modern
+  compiled-language family; recorded here so the #67 pole's shape is legible.
 
 - **Weft — a capability-scoped, zero-copy, batched network dataplane**
   (`docs/NET-THROUGHPUT.md`, **COMMITTED 2026-06-20** as a sequenced post-net arc, before

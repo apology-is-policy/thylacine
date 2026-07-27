@@ -124,6 +124,33 @@ static int read_exact(long fd, unsigned char *buf, size_t len) {
     return 0;
 }
 
+// mkt_file_eq (Clade CL-1c-2) -- open the file at absolute `path` and compare
+// its exact content to `expect`. Returns 1 iff the file is EXACTLY `expect_len`
+// bytes and byte-for-byte equal to `expect`; 0 on any open/read/length/content
+// mismatch. Used by the `make -j3` gate to verify each recipe's output file,
+// proving make ran the recipe (and, for the link, that it ran AFTER its
+// prerequisites). Uses read_exact (a loop) so a benign SHORT read of a small
+// file cannot false-FAIL a correct build (CL-1c-2 audit F2); a trailing EOF
+// probe rejects an over-long file.
+static int mkt_file_eq(const char *path, size_t path_len,
+                       const char *expect, size_t expect_len) {
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, path_len, T_OREAD);
+    if (fd < 0) return 0;
+    unsigned char buf[64];
+    int ok = 0;
+    if (expect_len <= sizeof(buf) &&
+        read_exact(fd, buf, expect_len) == 0) {
+        unsigned char extra;
+        if (t_read(fd, &extra, 1) == 0) {   // 0 == EOF: the file is exactly expect_len
+            ok = 1;
+            for (size_t i = 0; i < expect_len; i++)
+                if (buf[i] != (unsigned char)expect[i]) { ok = 0; break; }
+        }
+    }
+    (void)t_close(fd);
+    return ok;
+}
+
 // corvus_exchange — write a [verb|version|len_lo|len_hi|payload] request
 // frame, read a [status|len_lo|len_hi|payload] response frame. On
 // transport success returns 0 and fills *status + *resp_len; the
@@ -2179,6 +2206,186 @@ static int probe46_fstat_wronly(const char *tag, const char *dirpath,
     return 0;
 }
 
+// Clade CL-4c: the device-toolchain gate. When /clade is baked
+// (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
+// /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
+// /clade/bin/clang++ existing -> a normal (non-clade) boot skips it. joey-
+// spawned children are PRINCIPAL_SYSTEM (resource-exempt), so the compiler
+// allocates freely (the 256M PROC_PAGE_MAX cap + the F4 per-child budget are
+// the CL-5 concern -- a logged-in USER's non-exempt compile). Returns 0 PASS
+// / skip; -1 FAIL.
+static int clade_gate(void) {
+    char nb[24];
+    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang++", 18, T_OPATH);
+    if (probe < 0) {
+        t_putstr("joey: clade CL-4 /clade absent (THYLACINE_BAKE_CLADE not set) "
+                 "-- skipping\n");
+        return 0;  // not baked -> not a failure
+    }
+    (void)t_close(probe);
+
+    // Writable scratch on the pool root for the source + build outputs.
+    {
+        long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3, T_OREAD,
+                               T_WALK_CREATE_DMDIR | 0777u);
+        if (m >= 0) (void)t_close(m);
+    }
+
+
+    // Tier 1: does clang++ load + run at all? A trivial --version invocation
+    // surfaces getMainExecutable / Support-layer runtime faults cheaply. argv[0]
+    // ABSOLUTE so getMainExecutable's argv0 resolution (the CL-4 fork patch)
+    // finds the real file -> InstalledDir=/clade/bin.
+    static const char ver_argv[] = "/clade/bin/clang++\0--version";
+    long vst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                  ver_argv, (unsigned int)sizeof(ver_argv), 2,
+                                  120, 20, 0);
+    if (vst != 0) {
+        t_putstr("joey: clade CL-4 gate: clang++ --version FAILED rc=");
+        t_putstr(itoa_dec(vst, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: clade CL-4 clang++ --version OK\n");
+
+    // Write /tmp/hello.cpp. Deliberately a REAL C++ program, not a bare hello:
+    // <vector>/<string> exercise the libc++ headers + template instantiation,
+    // and the throw/catch round trip exercises the CL-2 C++ runtime end to end
+    // in a FRESHLY on-device-compiled binary -- libc++abi's personality routine
+    // + libunwind walking .eh_frame emitted by this very clang (-funwind-tables=2
+    // + ld.lld --eh-frame-hdr). A compile that links but cannot unwind would
+    // otherwise pass a printf-only gate. Exits 0 IFF sum(i*i,0..9)==285 AND the
+    // exception was caught with its payload intact.
+    static const char hello_cpp[] =
+        "#include <cstdio>\n"
+        "#include <vector>\n"
+        "#include <string>\n"
+        "#include <stdexcept>\n"
+        "static long sq(int x){\n"
+        "  if(x<0) throw std::runtime_error(\"neg\");\n"
+        "  return (long)x*x;\n"
+        "}\n"
+        "int main(){\n"
+        "  std::vector<int> v(10);\n"
+        "  for(int i=0;i<10;i++) v[i]=i;\n"
+        "  long s=0; for(int x:v) s+=sq(x);\n"
+        "  int eh=0;\n"
+        "  try { (void)sq(-1); }\n"
+        "  catch(const std::runtime_error &e){ eh = (std::string(e.what())==\"neg\"); }\n"
+        "  std::string tag(\"CLADE-HELLO\");\n"
+        "  std::printf(\"%s sum=%ld eh=%d\\n\", tag.c_str(), s, eh);\n"
+        "  return (s==285 && eh==1)?0:1;\n"
+        "}\n";
+    {
+        long td = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
+        if (td < 0) { t_putstr("joey: clade CL-4 open /tmp FAILED\n"); return -1; }
+        long sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
+        if (sf < 0) {  // self-heal a leftover on a preserved pool
+            (void)t_unlink(td, "hello.cpp", 9, 0);
+            sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
+        }
+        (void)t_close(td);
+        if (sf < 0) { t_putstr("joey: clade CL-4 create hello.cpp FAILED\n"); return -1; }
+        unsigned int srclen = (unsigned int)(sizeof(hello_cpp) - 1);  // drop the NUL
+        long wn = t_write(sf, hello_cpp, srclen);
+        (void)t_fsync(sf, 0);
+        (void)t_close(sf);
+        if (wn != (long)srclen) {
+            t_putstr("joey: clade CL-4 write hello.cpp SHORT\n"); return -1;
+        }
+    }
+
+    // Tier 2a: compile + link. clang++ execs /clade/bin/ld.lld by name (found via
+    // getMainExecutable -> InstalledDir). --sysroot=/clade/sysroot supplies the
+    // C++ headers + the static runtime + CRT. The default target is
+    // aarch64-unknown-thylacine (LLVM_DEFAULT_TARGET_TRIPLE), so no --target.
+    t_putstr("joey: clade CL-4 compiling /tmp/hello.cpp (clang++ -O2 -> ld.lld)\n");
+    // CL-4 DIAG (compile layer): getMainExecutable returns "" on Thylacine
+    // (realpath fails: no /proc/self/fd), so InstalledDir is empty and clang
+    // can't auto-find its resource dir / ld.lld. Work around with explicit
+    // -resource-dir + -B, and -v to surface clang's exact steps + any error.
+    // -v keeps clang's steps visible while the CL-4b getMainExecutable fix is
+    // validated (InstalledDir now resolves -> clang auto-finds its resource dir,
+    // cc1 self-spawn path, and ld.lld -- NO explicit -B/-resource-dir needed).
+    // No -no-canonical-prefixes here: the multicall must self-dispatch its own
+    // cc1 with the DEFAULT driver flags, which is exactly what fork commit
+    // CL-4c fixes (prepend the tool name only when the exec path does not
+    // already name it). A gate that needed the flag would prove nothing --
+    // no real build system passes it.
+    static const char cc_argv[] =
+        "/clade/bin/clang++\0-v\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
+    long cst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                  cc_argv, (unsigned int)sizeof(cc_argv), 7,
+                                  600, 20, 0);
+    if (cst != 0) {
+        t_putstr("joey: clade CL-4 gate: compile+link FAILED rc=");
+        t_putstr(itoa_dec(cst, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    long ho = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp/hello", 10, T_OPATH);
+    if (ho < 0) { t_putstr("joey: clade CL-4 gate: /tmp/hello not produced\n"); return -1; }
+    (void)t_close(ho);
+
+    // Tier 2b: run it. Its stdio is the console; "CLADE-HELLO sum=285 eh=1" prints +
+    // exit 0 confirms the computed check (proves the fresh ELF execs + runs).
+    t_putstr("joey: clade CL-4 running /tmp/hello\n");
+    static const char run_argv[] = "/tmp/hello";
+    long rst = go4c_spawn_wait_hb("/tmp/hello", 10,
+                                  run_argv, (unsigned int)sizeof(run_argv), 1,
+                                  60, 15, 0);
+    if (rst == 0) {
+        // Tier 2c: the separate compile + link shape every build system drives
+        // (make/cmake/cargo/go). Worth its own leg because `-c` is a SINGLE job,
+        // and Driver.cpp disables integrated-cc1 only when there is more than
+        // one -- so this path runs cc1 IN-PROCESS, exercising ExecuteCC1Tool's
+        // own `ArgV[1] == "-cc1"` dispatch rather than the spawn. Both are
+        // broken by a stale PrependArg, so covering only the spawn would leave
+        // half the surface unproven.
+        t_putstr("joey: clade CL-4 -c compile then link-only\n");
+        static const char co_argv[] =
+            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/hello.cpp\0-o\0/tmp/hello.o";
+        long ost = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                      co_argv, (unsigned int)sizeof(co_argv), 7,
+                                      600, 20, 0);
+        if (ost != 0) {
+            t_putstr("joey: clade CL-4 gate: -c compile FAILED rc=");
+            t_putstr(itoa_dec(ost, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        static const char lo_argv[] =
+            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0/tmp/hello.o\0-o\0/tmp/hello2";
+        long lst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                      lo_argv, (unsigned int)sizeof(lo_argv), 5,
+                                      600, 20, 0);
+        if (lst != 0) {
+            t_putstr("joey: clade CL-4 gate: link-only FAILED rc=");
+            t_putstr(itoa_dec(lst, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        static const char run2_argv[] = "/tmp/hello2";
+        long r2 = go4c_spawn_wait_hb("/tmp/hello2", 11,
+                                     run2_argv, (unsigned int)sizeof(run2_argv), 1,
+                                     60, 15, 0);
+        if (r2 != 0) {
+            t_putstr("joey: clade CL-4 gate: /tmp/hello2 exit rc=");
+            t_putstr(itoa_dec(r2, nb, sizeof(nb)));
+            t_putstr(" (want 0)\n");
+            return -1;
+        }
+    }
+    if (rst != 0) {
+        t_putstr("joey: clade CL-4 gate: /tmp/hello exit rc=");
+        t_putstr(itoa_dec(rst, nb, sizeof(nb)));
+        t_putstr(" (want 0)\n");
+        return -1;
+    }
+    t_putstr("joey: clade CL-4 gate: PASS\n");
+    return 0;
+}
+
 // CF-3 A+B always-run regression: bulk byte-I/O through the two-tier
 // syscall bounce + uaccess_copy_in/out + the 9P client payload clamp, on
 // the BULK-negotiated FS mount (CF-3 B: stratumd posts /srv/stratum-fs
@@ -2647,6 +2854,93 @@ int main(void) {
             }
             t_putstr("joey: go-env reaped status=0 -- GOOS=thylacine Stage 4a /env RUNS in-VM\n");
         }
+    }
+
+    // === /pouch-hello-env orchestration (Clade CL-1b-0: the pouch-env crt
+    // boundary line, patch 0025) ===
+    // Proves a POUCH process reads its environment through getenv()/environ,
+    // populated by __pouch_env_init from the /env device (envp[0] is NULL for
+    // every pouch program). joey sets PGENV1 + PGENVNUM on its OWN /env; the
+    // child inherits a COPY via env_clone_into (Plan 9 copy-on-rfork) and the
+    // crt reads them into __environ before main. joey UNSETs them after the
+    // spawn so they do not leak into the login session. Pre-pivot: /env is
+    // mounted in the boot namespace; a getenv miss surfaces as a FAIL.
+    {
+        long edir = t_open(T_WALK_OPEN_FROM_ROOT, "/env", 4, T_OPATH);
+        int env_set_ok = 0;
+        if (edir >= 0) {
+            long v1 = t_walk_create(edir, "PGENV1", 6, T_OWRITE, 0644);
+            if (v1 >= 0) {
+                if (t_write(v1, "clade-cl1b", 10) == 10) env_set_ok |= 1;
+                (void)t_close(v1);
+            }
+            long v2 = t_walk_create(edir, "PGENVNUM", 8, T_OWRITE, 0644);
+            if (v2 >= 0) {
+                if (t_write(v2, "1729", 4) == 4) env_set_ok |= 2;
+                (void)t_close(v2);
+            }
+        }
+        static const char phe_name[] = "pouch-hello-env";
+        int pe_rc = pouch_smoke_one(phe_name, sizeof(phe_name) - 1,
+                                    "ENV OK", 6);
+        // Unset AFTER the spawn -- the child's env was deep-copied at rfork.
+        if (edir >= 0) {
+            (void)t_unlink(edir, "PGENV1", 6, 0);
+            (void)t_unlink(edir, "PGENVNUM", 8, 0);
+            (void)t_close(edir);
+        }
+        if (env_set_ok != 3 || pe_rc != 0) {
+            t_putstr("joey: /pouch-hello-env FAILED (CL-1b-0 pouch-env regression)\n");
+            return 1;
+        }
+        t_putstr("joey: /pouch-hello-env PASS; CL-1b-0 pouch-env verified\n");
+    }
+
+    // === /pouch-hello-spawn orchestration (Clade CL-1b core: the process
+    // lifecycle, patch 0026 -- posix_spawn/wait4/dup2/pipe2) ===
+    // The audit-bearing gate: pouch-hello-spawn self-respawns (via argv[0])
+    // through pipe2 + posix_spawn (a stdout-redirect file_action) + waitpid,
+    // decoding WIFEXITED/WEXITSTATUS -- the exact shape the clang driver uses
+    // to run cc1/lld. It resolves its own bare name against the boot namespace
+    // (pre-pivot devramfs), so it runs here alongside the other pouch probes.
+    {
+        static const char phsp_name[] = "pouch-hello-spawn";
+        if (pouch_smoke_one(phsp_name, sizeof(phsp_name) - 1,
+                            "ALL SPAWN TESTS PASS", 20) != 0) {
+            t_putstr("joey: /pouch-hello-spawn FAILED (CL-1b posix_spawn/wait regression)\n");
+            return 1;
+        }
+        t_putstr("joey: /pouch-hello-spawn PASS; CL-1b posix_spawn/wait4/pipe2/dup2 verified\n");
+    }
+
+    // === /make --version orchestration (Clade CL-1c-1: the GNU make port) ===
+    // The first REAL toolchain program to run on Thylacine -- GNU make 4.4.1,
+    // cross-built by build_gnumake() against the pouch sysroot. `make --version`
+    // prints and exits before reading any Makefile or spawning a child, so it
+    // is the load-and-run smoke: the port's 35 objects link + start + the musl
+    // startup frame reaches main + stdio works. The `Built for aarch64-thylacine`
+    // line proves our derived config.h's MAKE_HOST reached the binary. The
+    // parallel-spawn gate (`make -j` driving CL-1b's posix_spawn over a real
+    // toy build) is CL-1c-2. argv = ["make","--version"], argc=2.
+    {
+        static const char mk_name[] = "make";
+        static const char mk_argv[] = "make\0--version";
+        static const char mk_m0[]   = "GNU Make 4.4.1";
+        static const char mk_m1[]   = "Built for aarch64-thylacine";
+        static const struct argv_marker mk_markers[] = {
+            { mk_m0, sizeof(mk_m0) - 1 },
+            { mk_m1, sizeof(mk_m1) - 1 },
+        };
+        if (pouch_smoke_one_argv(mk_name, sizeof(mk_name) - 1,
+                                 mk_argv, sizeof(mk_argv),
+                                 /*argc=*/2u,
+                                 mk_markers,
+                                 sizeof(mk_markers) / sizeof(mk_markers[0]),
+                                 /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0) {
+            t_putstr("joey: /make --version FAILED (CL-1c-1 GNU make port regression)\n");
+            return 1;
+        }
+        t_putstr("joey: /make --version PASS; CL-1c-1 GNU make 4.4.1 runs on Thylacine\n");
     }
 
     // === /go-goroutines orchestration (GOOS=thylacine Go-port, Stage 2) ===
@@ -3869,6 +4163,124 @@ int main(void) {
                 t_putstr("joey: Go-4b post-pivot /env re-graft OK\n");
             }
 
+            // === Clade CL-1c-2: the on-device `make -j3` gate ===
+            // The audit-bearing proof that GNU make (CL-1c-1) actually DRIVES
+            // CL-1b's posix_spawn/wait4 under -j parallelism -- the whole point
+            // of the make port. joey writes a self-contained toy project to the
+            // writable /tmp/mkt: 3 INDEPENDENT "compile" recipes (each a
+            // shell-free `/bin/cp` of a .c -> .o, so make's construct_command_argv
+            // fast-path spawns cp directly via CL-1b's posix_spawn -- no /bin/sh,
+            // which is correct since ut has no `-c` mode) + a "link" recipe that
+            // DEPENDS on all three. Under `make -j3` make starts the 3 compiles in
+            // parallel (the job_slots counter + blocking waitpid reap; MAKE_JOBSERVER
+            // is off), reaps them, then runs the dependent link. EVERYTHING is
+            // ABSOLUTE (`-f /tmp/mkt/Makefile`, `/bin/cp`, absolute target/prereq
+            // paths) so the gate has zero cwd / PATH / -C-chdir dependence. The
+            // gate verifies all four output files by exact content: a.o/b.o/c.o
+            // prove the 3 parallel compiles ran; prog (== a.o's content) proves
+            // the link ran AFTER its prerequisites (the DAG join). Boot-fatal:
+            // make is baked into every image, /tmp is writable post-pivot, so a
+            // failure is a real regression, never a silent skip.
+            {
+                static const char mkfile[] =
+                    "all: /tmp/mkt/prog\n"
+                    "/tmp/mkt/a.o: /tmp/mkt/a.c\n"
+                    "\t/bin/cp /tmp/mkt/a.c /tmp/mkt/a.o\n"
+                    "/tmp/mkt/b.o: /tmp/mkt/b.c\n"
+                    "\t/bin/cp /tmp/mkt/b.c /tmp/mkt/b.o\n"
+                    "/tmp/mkt/c.o: /tmp/mkt/c.c\n"
+                    "\t/bin/cp /tmp/mkt/c.c /tmp/mkt/c.o\n"
+                    "/tmp/mkt/prog: /tmp/mkt/a.o /tmp/mkt/b.o /tmp/mkt/c.o\n"
+                    "\t/bin/cp /tmp/mkt/a.o /tmp/mkt/prog\n";
+
+                // Create /tmp (the writable pool-root scratch) then /tmp/mkt.
+                // This probe runs BEFORE the Go-4c block that also mkdir's /tmp,
+                // so it must create it itself; both are idempotent (the pool
+                // persists across boots).
+                {
+                    long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3,
+                                           T_OREAD, T_WALK_CREATE_DMDIR | 0777u);
+                    if (m >= 0) (void)t_close(m);
+                }
+                long tmpd = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
+                long mkt = (tmpd >= 0) ? mkdir_or_open(tmpd, "mkt", 3) : -1;
+                if (tmpd >= 0) (void)t_close(tmpd);
+                if (mkt < 0) {
+                    t_putstr("joey: CL-1c-2 mkdir /tmp/mkt FAILED\n");
+                    return 1;
+                }
+                // /tmp is disk-backed (persists across boots), so unlink any
+                // stale inputs + outputs first -> a fresh build every boot (the
+                // gopls-probe idempotency pattern). ENOENT is ignored.
+                (void)t_unlink(mkt, "Makefile", 8, 0);
+                (void)t_unlink(mkt, "a.c", 3, 0); (void)t_unlink(mkt, "b.c", 3, 0);
+                (void)t_unlink(mkt, "c.c", 3, 0);
+                (void)t_unlink(mkt, "a.o", 3, 0); (void)t_unlink(mkt, "b.o", 3, 0);
+                (void)t_unlink(mkt, "c.o", 3, 0); (void)t_unlink(mkt, "prog", 4, 0);
+
+                int wrote = 1;
+                long f = t_walk_create(mkt, "Makefile", 8, T_OWRITE, 0644);
+                if (f >= 0) {
+                    if (t_write(f, mkfile, sizeof(mkfile) - 1) !=
+                        (long)(sizeof(mkfile) - 1)) wrote = 0;
+                    (void)t_close(f);
+                } else wrote = 0;
+                struct { const char *n; unsigned long nl; const char *c; }
+                    srcs[] = { {"a.c",3,"AAAA\n"}, {"b.c",3,"BBBB\n"},
+                               {"c.c",3,"CCCC\n"} };
+                for (int i = 0; i < 3; i++) {
+                    long sf = t_walk_create(mkt, srcs[i].n, srcs[i].nl,
+                                            T_OWRITE, 0644);
+                    if (sf >= 0) {
+                        if (t_write(sf, srcs[i].c, 5) != 5) wrote = 0;
+                        (void)t_close(sf);
+                    } else wrote = 0;
+                }
+                (void)t_close(mkt);
+                if (!wrote) {
+                    t_putstr("joey: CL-1c-2 toy project write FAILED "
+                             "(/tmp/mkt must be writable)\n");
+                    return 1;
+                }
+
+                // NOTE: the argv blob MUST end with a trailing NUL after the
+                // last arg -- the kernel SYS_SPAWN_FULL_ARGV parser reads argc
+                // NUL-terminated strings, and a 4-arg blob without the final
+                // terminator is rejected (spawn returns pid<=0). (make prints a
+                // benign `make: getcwd: I/O error` at startup -- joey's post-pivot
+                // cwd is unset and the kernel getcwd returns EIO -- but make
+                // handles it gracefully, and this ABSOLUTE-path build has zero
+                // cwd dependence, so it is a documented no-op here.)
+                static const char mk_path[] = "/bin/make";
+                static const char mk_argv[] =
+                    "make\0-f\0/tmp/mkt/Makefile\0-j3\0";
+                t_putstr("joey: CL-1c-2 running `make -f /tmp/mkt/Makefile "
+                         "-j3` (3 parallel cp compiles + a dependent link)\n");
+                long st = go4c_spawn_wait_hb(mk_path, sizeof(mk_path) - 1,
+                                             mk_argv, sizeof(mk_argv) - 1,
+                                             /*argc=*/4, /*max_sec=*/60,
+                                             /*hb_sec=*/20, /*caps=*/0ul);
+                char mkn[24];
+                t_putstr("joey: CL-1c-2 make -j3 reaped status=");
+                t_putstr(itoa_dec(st, mkn, sizeof(mkn)));
+                t_putstr("\n");
+                if (st != 0) {
+                    t_putstr("joey: /make -j3 FAILED (exit != 0; CL-1c-2 "
+                             "parallel-spawn regression)\n");
+                    return 1;
+                }
+                if (!mkt_file_eq("/tmp/mkt/a.o", 12, "AAAA\n", 5) ||
+                    !mkt_file_eq("/tmp/mkt/b.o", 12, "BBBB\n", 5) ||
+                    !mkt_file_eq("/tmp/mkt/c.o", 12, "CCCC\n", 5) ||
+                    !mkt_file_eq("/tmp/mkt/prog", 13, "AAAA\n", 5)) {
+                    t_putstr("joey: /make -j3 FAILED (output mismatch; a "
+                             "recipe did not run or ran out of DAG order)\n");
+                    return 1;
+                }
+                t_putstr("joey: /make -j3 PASS; CL-1c-2 GNU make drives CL-1b "
+                         "posix_spawn/wait4 under -j parallelism\n");
+            }
+
             // === Go Stage 4c: on-device `go build` (the GOOS=thylacine toolchain
             // runs ON the device) ===
             // The headline of the on-device-toolchain arc: the cross-built `go`
@@ -4430,6 +4842,11 @@ int main(void) {
                                  "program ON-DEVICE\n");
                     }
                 }
+
+                // (The clade CL-4 toolchain gate runs unconditionally further
+                // down, right before boot-complete -- see there. It must NOT be
+                // nested here: this region is skipped on a BAKE_GOROOT=0 boot,
+                // which is exactly the clade-only configuration.)
             }
 
             // net-2c-1: mount netd's /net on the pivoted root. netd (warden-
@@ -6067,6 +6484,55 @@ int main(void) {
                 t_putstr("joey: /fs-mut-smoke reaped status=0; LS-3b fs-mutation API verified\n");
             }
 
+            // === CL-1a: pouch FS/process wire prover (/bin/pouch-hello-fs) ===
+            // The Clade arc (docs/LLVM-DESIGN.md) sub-chunk CL-1a proof: a POSIX
+            // C program driving every FS/process boundary line 0024 added --
+            // open(O_CREAT)/mkdir -> SYS_WALK_CREATE, rename -> SYS_RENAME,
+            // unlink/rmdir -> SYS_UNLINK, readdir -> SYS_READDIR (9P-stream ->
+            // struct dirent), ftruncate/fchmod -> SYS_WSTAT, access -> SYS_STAT,
+            // chdir/getcwd/getpid -- end to end through the musl API, against the
+            // writable post-pivot Stratum FS (the wires' whole value is runtime
+            // behavior, so "compiles" is not "works"). pouch_smoke_one wires fd
+            // 0/1 to a pipe, reaps-before-drain, and checks the child exited 0 +
+            // printed "ALL WIRES PASS". Post-pivot /bin bind resolves the name.
+            {
+                static const char phfs_name[] = "/bin/pouch-hello-fs";
+                if (pouch_smoke_one(phfs_name, sizeof(phfs_name) - 1,
+                                    "ALL WIRES PASS", 14) != 0) {
+                    t_putstr("joey: /pouch-hello-fs FAILED (CL-1a wire regression)\n");
+                    return 1;
+                }
+                t_putstr("joey: /pouch-hello-fs PASS; CL-1a FS/process wires verified\n");
+            }
+
+            // === CL-2: the C++ runtime prover (/bin/pouch-hello-cxx) ===
+            // The Clade arc (docs/LLVM-DESIGN.md) CL-2 proof: a C++ program driving
+            // the full libunwind+libc++abi+libc++ stack END TO END -- exceptions
+            // (the unwinder + libc++abi personality), RTTI, std::thread + TLS
+            // destructors (__cxa_thread_atexit), iostreams, and std::filesystem
+            // (the CL-1a dirent/stat wires + the getcwd fix) -- against the writable
+            // post-pivot Stratum FS. Same pouch_smoke_one pipe/reap/marker check as
+            // pouch-hello-fs. Unlike the C provers, the C++ runtime is built from the
+            // LLVM fork ($LLVMFORK); an absent fork means the binary was not baked,
+            // so probe for it first and skip cleanly (a fresh checkout still boots),
+            // hard-failing ONLY when it is present but regresses.
+            {
+                static const char phcxx_name[] = "/bin/pouch-hello-cxx";
+                long cxx_probe = t_open(T_WALK_OPEN_FROM_ROOT, phcxx_name,
+                                        sizeof(phcxx_name) - 1, T_OREAD);
+                if (cxx_probe < 0) {
+                    t_putstr("joey: /pouch-hello-cxx NOT present (LLVM fork absent at build) -- skipping\n");
+                } else {
+                    (void)t_close(cxx_probe);
+                    if (pouch_smoke_one(phcxx_name, sizeof(phcxx_name) - 1,
+                                        "ALL C++ WIRES PASS", 18) != 0) {
+                        t_putstr("joey: /pouch-hello-cxx FAILED (CL-2 C++ runtime regression)\n");
+                        return 1;
+                    }
+                    t_putstr("joey: /pouch-hello-cxx PASS; CL-2 C++ runtime (EH/RTTI/threads/TLS-dtors/filesystem) verified\n");
+                }
+            }
+
             // === Go Stage 3a: fs file I/O (/go-fs) ===
             // The GOOS=thylacine Go-port Stage-3a proof: a Go binary driving the
             // new os + syscall packages end-to-end -- os.Mkdir / os.Create /
@@ -6810,6 +7276,40 @@ int main(void) {
         } else {
             t_putstr("joey: /srv/tapestry absent (no GPU environment); skipping\n");
         }
+    }
+
+    // CL-4: F2's in-guest proof. fstat on a /dev fd must SUCCEED and report a
+    // character device. The #57b namespace door mints devdev Spoors (not
+    // devcons), so before devdev_stat_native every /dev/* fd failed fstat --
+    // and clang's FixupStandardFileDescriptors treats a non-EBADF fstat failure
+    // as fatal, so `clang++ < /dev/null` died before emitting anything. Runs on
+    // every boot, clade or not, since /dev is always mounted.
+    {
+        long dn = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/null", 9, T_OREAD);
+        if (dn < 0) {
+            t_putstr("joey: CL-4 PROBE open(/dev/null) FAILED\n");
+            return 1;
+        }
+        struct t_stat dst = {0};
+        long dr = t_fstat(dn, &dst);
+        (void)t_close(dn);
+        // 0170000 = S_IFMT, 0020000 = S_IFCHR (libt does not export these).
+        if (dr != 0 || (dst.mode & 0170000u) != 0020000u) {
+            t_putstr("joey: CL-4 PROBE fstat(/dev/null) FAILED (rc/mode)\n");
+            return 1;
+        }
+        t_putstr("joey: CL-4 /dev fstat PROBE OK\n");
+    }
+
+    // CL-4: the on-device device-toolchain gate. BOOT-FATAL -- a toolchain
+    // regression must fail the boot, not merely print. clade_gate() returns 0
+    // when /clade is absent, so a normal (non-BAKE_CLADE) boot is unaffected.
+    // Placed here, before boot-complete, because it is the one spot every
+    // configuration reaches (the goroot region above is skipped on a
+    // clade-only pool) and joey is still console-attached.
+    if (clade_gate() != 0) {
+        t_putstr("joey: clade CL-4 gate FAILED\n");
+        return 1;
     }
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
