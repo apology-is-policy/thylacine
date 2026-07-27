@@ -118,10 +118,13 @@ Plus main's own Clade gates (`/clade` on-device, the pouch prover ladder incl.
 ## 6. What NOT to do
 
 - **Do not renumber main's pouch patches** to make room; move the aux three.
-- **Do not merge while the CL-4 WIP is uncommitted.** `kernel/exec.c` and
-  `kernel/syscall.c` are dirty in the main worktree; those are precisely the files
-  VIVARIUM V-1b needs next, and merging across dirty state is how the conflict gets
-  genuinely painful.
+- **Do not merge across a dirty main worktree.** *(STATUS UPDATE 2026-07-23, later
+  the same day: this has CLEARED — CL-4 is committed at `7cfcabce` on
+  `clade-cl4-wip`, and `kernel/exec.c` + `kernel/syscall.c` are clean again. Note
+  the CL-4 work is on its own branch, not yet in `main`, so the natural order is
+  `clade-cl4-wip` -> `main` FIRST, then `gfx-4` -> `main`. CL-4 also touched
+  `kernel/elf.c` and `kernel/syscall.c`, which VIVARIUM V-1b will touch next — so
+  landing CL-4 before the gfx-4 merge is what keeps V-1b conflict-free.)*
 - **Do not resolve `docs/reference/78-pouch.md` by taking one side.** Both tracks'
   documentation is real; it is a union, not a choice.
 

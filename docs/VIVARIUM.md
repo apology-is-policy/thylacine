@@ -391,6 +391,73 @@ Because each is a per-container mount, `uname`/`hostname`/`meminfo` can differ p
 container **without any namespacing machinery** — the property Linux needed six
 namespace types to get.
 
+### 6.1 The server shape (settled — the ptyfs precedent)
+
+`usr/diorama`, a **native libthyla-rs, device-less `/srv` server** — exactly
+`usr/ptyfs`'s shape (`usr/ptyfs/src/main.rs`), which is the newest and cleanest
+example in the tree: joey spawns it with `T_SPAWN_PERM_MAY_POST_SERVICE`, it posts
+`/srv/diorama`, joey mounts its tree, and it runs a **selftest before it serves** so
+a logic failure gates the boot instead of surfacing later as a mystery. It owns no
+hardware (so it is the corvus/ptyfs tier, NOT a warden-bound driver).
+
+It is **read-only**. There is no write path at v1.0: every file is a rendered view,
+`h_write` returns `E_PERM`. That single decision removes most of the surface a
+`/proc` would otherwise carry.
+
+### 6.2 Where the content comes from — and why I-43 holds by construction
+
+The diorama renders from three sources, all of which the calling Proc could already
+reach natively:
+
+| Source | Supplies |
+|---|---|
+| native `/proc` (devproc: `status`, `cmdline`, `ctl`) | per-Proc state |
+| native `/ctl` (`/ctl/procs`, `/ctl/mm/`, the boot/uptime counters) | system state |
+| the caller's own syscalls (`getpid`/`getuid`/`clock_gettime`) | identity + time |
+
+**The diorama can therefore never leak anything the native surface would not have
+handed over** — it is a *reformatter*, not a new authority. That is I-43 satisfied
+structurally rather than by review: the kernel's existing gates (`I-26` two-axis on
+`/proc/<pid>`, `CAP_HOSTOWNER` on `/ctl/kernel-base`, the #57a-F2 lifetime rules)
+run unchanged underneath, and a read the kernel refuses the diorama is a read the
+diorama cannot serve. **Do not "improve" a diorama file by reading kernel state
+through any path a native Proc could not use** — that is precisely how a
+compatibility shim becomes a privilege hole.
+
+### 6.3 The file set, in priority order
+
+**Tier 1 — has a consumer TODAY** (this is why V-4 is not scaffolding):
+
+- **`/proc/self/exe`** — *the load-bearing one*. Nothing in the tree provides it
+  (grep-verified 2026-07-23), which is exactly why the Clade fork had to patch LLVM's
+  `getMainExecutable` to fall back to `argv[0]` (fork patch `0001`, CL-3). With
+  `/proc/self/exe` present, that fork delta can be revisited and LLVM's
+  upstream-shaped path works. A **pouch** program benefits immediately — it needs no
+  phenotype at all.
+- `/proc/self/cmdline`, `/proc/self/status`, `/proc/self/maps` — allocators, crash
+  handlers, and every "what am I" probe.
+- `/proc/meminfo`, `/proc/cpuinfo`, `/proc/uptime`, `/proc/stat`.
+
+**Tier 2 — needed by the v1.0 target binaries**: `/proc/<pid>/…` (the same fields,
+subject to the native gate), `/proc/mounts`, `/proc/sys/kernel/{ostype,osrelease,
+version,hostname}`, `/proc/self/{cwd,fd/,environ,auxv}`.
+
+**Tier 3 — `/sys` + `/dev`**: minimal `/sys` (enough for `ldd` + allocator probes +
+CPU topology); Linux-shaped `/dev` is largely a **re-presentation** of what devdev
+and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts/`,
+`ptmx`, `fd/`, `std{in,out,err}`), not a reimplementation.
+
+### 6.4 Sub-chunks
+
+| # | Contents | Gate |
+|---|---|---|
+| **V-4a** | the `usr/diorama` crate (ptyfs skeleton) + Tier 1 + the selftest + joey mount + a boot probe | `/proc/self/exe` reads the running binary's path in-guest |
+| **V-4b** | Tier 2 (per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
+| **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
+
+**V-4 is UNBLOCKED** — pure userspace, no kernel file touched, so it neither waits
+on nor collides with the main track's Clade work.
+
 ---
 
 ## 7. The vivarium — the container runner
