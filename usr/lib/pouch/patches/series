@@ -46,8 +46,12 @@
 # moved). The aux 0024-pouch-fopen-create is DROPPED, not renumbered: main's
 # 0023-pouch-fopen already routes tmpfile/fopen through the public open(), and
 # main's 0024-pouch-fs-process-wires carries the same open(O_CREAT) ->
-# SYS_WALK_CREATE arm plus O_TRUNC -> OTRUNC, so it is subsumed. task #50 is
-# thereby closed by main's work; pouch-hello-fopen is retained as the
-# regression that holds that claim honest.
+# SYS_WALK_CREATE arm plus O_TRUNC -> OTRUNC, so THOSE ARMS are subsumed.
+# pouch-hello-fopen was retained as the regression that holds that claim
+# honest -- and on the first post-merge boot it falsified half of it: the
+# dropped patch ALSO carried an O_APPEND seek-to-END that main's 0024 does
+# not, so fopen("a") wrote at offset 0 and clobbered the file. That one arm
+# is ported back as 0030 below. task #50 is closed by 0023 + 0024 + 0030.
 0028-pouch-net-nonblock.patch
 0029-pouch-cons-winsize.patch
+0030-pouch-fopen-append.patch
