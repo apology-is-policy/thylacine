@@ -126,6 +126,28 @@ applied preemptively.
   its own environment. Found by self-audit while adding the stat slot, before it
   shipped; the regression is in `devenv.stat_native_shapes`.
 
+  **The stamp binds to the WALKING Proc, so an inherited fd reports a stale device
+  (V-4c-3 F4).** The `devno` is stamped at *walk* time from `env_proc()`, while
+  `devenv_stat_native` resolves size from `env_proc()` at *stat* time — and
+  `spoor_stat_native` then overwrites `out->devno` with the Spoor's stamped value,
+  which is exactly why the stamp lives in `walk`. So a Proc that walks `/env/FOO`
+  and then spawns a child hands the Spoor down: the child's `fstat` reports
+  `(parent_devno, id)` while its `read` returns the **child's** `FOO`. A fresh open
+  in the child yields `(child_devno, id)`, so `os.SameFile` on those two fds answers
+  "different files" for what is, by name, one variable.
+
+  This is a **file-identity divergence, not an isolation break** — I-1 holds, since
+  the content served is always the reading Proc's own. Nor does it reopen the Image
+  cache leg above: `exec_resolve_from_namespace` walks fresh, so it always stamps the
+  exec'ing Proc's devno.
+
+  Recorded rather than "fixed" because the alternative is worse. Re-stamping
+  `out->devno` from `env_proc()` inside `stat_native` would make `fstat` disagree
+  with the Spoor it was called on, and the honest statement is the one this device's
+  design already makes everywhere else: **an `/env` Spoor's *content* deliberately
+  rebinds to the caller, so its *device identity* is bound to whoever walked it.**
+  A caller that needs a stable identity should open in the Proc that will use it.
+
 There is **no per-Spoor private state** — the value lives in the Proc's `Env`, keyed
 by id — so `close` is the trivial `dev_simple_close` (no `aux`, no UAF surface).
 `perm_enforced == false`: a Proc's environment is its own; there is nothing to leak

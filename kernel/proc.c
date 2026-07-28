@@ -274,12 +274,37 @@ struct Proc *kproc(void) {
 // for the self-assignment case (proc_set_exe_path(p, p->exe_path), which the
 // rfork inherit reaches whenever a child re-execs the parent's own binary):
 // unref-first would drop the last ref and then ref freed storage.
+//
+// V-4c-3 F1: the swap runs under g_proc_table_lock because there is a CROSS-PROC
+// READER. devproc's format_exe dereferences p->exe_path (->len, ->s[i]) from
+// inside a proc_for_each callback -- i.e. holding this lock -- and this function
+// is reached at the exec tail (exec.c) on a Proc that rfork_internal has ALREADY
+// published into the table, whose thunk runs IRQ-enabled and preemptible. So the
+// two genuinely run concurrently on different CPUs, and an unlocked swap here
+// lets path_unref(old) drop the last ref and kfree the very Path the reader is
+// mid-copy out of -- freed slab bytes into an EL0-readable file (I-13).
+//
+// The original justification enumerated only WRITERS ("its own rfork, and its
+// proc_free") and was silent on the reader the same commit introduced. A lock
+// the writer never takes cannot serialize anything; writer-writer exclusion is
+// not the property this field needed.
+//
+// Reader-side ref-taking does NOT close it on its own: `path = p->exe_path;
+// path_ref(path);` still races between the load and the ref, so the writer has
+// to be serialized regardless -- which then makes the reader's plain load safe
+// for the whole callback, since it holds this lock across it. Non-sleeping under
+// the lock: path_unref is an atomic decrement plus at most a kfree, and the
+// g_proc_table_lock -> slab order is the one devproc's own walks already use.
+// No caller holds the lock already (exec's tail takes none; the rfork inherit
+// runs before proc_link_child publishes the child), so this cannot recurse.
 void proc_set_exe_path(struct Proc *p, struct Path *path) {
     if (!p) return;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     struct Path *old = p->exe_path;
     path_ref(path);        // NULL-safe
     p->exe_path = path;
     path_unref(old);       // NULL-safe
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
 // 2B-F3: publish `p` as init (the orphan-adopter). Called once per boot

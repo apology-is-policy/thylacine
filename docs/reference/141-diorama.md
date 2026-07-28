@@ -504,3 +504,66 @@ deputy act with its client's authority instead of its own.
 client read this natively" but "could the client read this natively *for this
 target*". A deputy with more authority than its client is as much a section 6.2
 violation as one that invents an answer.
+
+## The V-4c-3 audit close -- what the formal round changed
+
+The arc's focused round (Fable 5 at max effort; `MODEL(start) == MODEL(end)`, no
+fallback) closed **0 P0 / 1 P1 / 2 P2 / 5 P3**. The P1 is kernel-side and is
+recorded with `proc_set_exe_path`; the two P2s are here.
+
+### `msize` is negotiated without a floor, so the size caps must saturate
+
+`h_version` sets `msize = min(client_msize, SRV_MSIZE)` and `parse_tversion`
+accepts any `u32` -- **`0` included**. `h_read` and `h_readdir` then size their
+reply against `msize - P9_HDR_LEN - 4`, and `P9_HDR_LEN` is 7, so any negotiated
+`msize < 11` **underflows**.
+
+That is not a wrap. `usr/Cargo.toml` builds this crate with
+`overflow-checks = true` and `panic = "abort"`, and libthyla-rs' panic handler
+tail-calls `t_exits(1)` -- so the underflow **terminates the server**, and `/dio`
+dies for every mount on the box (`main.rs` has no restart). The reaching sequence
+is three messages from any Proc that can `open("/srv/diorama")`:
+`Tversion{msize:0}` -> `Tattach` (the root is a directory) -> `Treaddir`. No walk
+required.
+
+Both sites now use `(self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4)`,
+which is the spelling netd, ptyfs and corvus already share at exactly this
+expression -- the diorama was the outlier, not the innovator. A degenerate
+session then yields a zero-capacity read rather than a dead server: useless, but
+useless is a legal answer and death is not.
+
+A negotiation floor was considered and **declined**: saturating already makes the
+arithmetic safe, and adding a floor none of the three sibling servers have would
+buy nothing while making this one behave differently from the rest.
+
+### Walk-by-name and enumeration are DIFFERENT surfaces
+
+The whole `cpuN/cache/index0` subtree shipped **readdir-invisible**, and every
+test passed.
+
+`h_readdir` runs the static-node loop first. A cpu qid is `>= CPU_BASE` (`1<<24`)
+and every static node's parent is `< N_COUNT` (26), so no entry can ever match:
+the loop takes its `continue` on every iteration and leaves its cursor `child` at
+26. The cache-chain arm below was gated on `child == 0` -- so it could never run,
+on the first call or any other. `readdir("/sys/devices/system/cpu/cpu0")` was an
+empty directory, as were `cache/` and `cache/index0/`.
+
+The comment above that arm ("the cookie is simply 'have I emitted it yet' -- 0
+means not") described **`a.offset`**, the client's cursor. `child` is the *static
+loop's* cursor and had already been advanced past it. The fix is to gate on
+`a.offset`, which is what the comment always meant.
+
+Why nothing caught it is the durable part. `walk` resolved every level by name
+perfectly well -- the selftest drives `walk_child`, and `diorama-probe` opened the
+leaf by literal path. **Neither ever issued a `Treaddir` on a cpu node.** So the
+subtree was provably reachable and provably unlistable at the same time, and a
+consumer that enumerates to find `index*` (the portable way -- cache-level
+numbering is not fixed) saw nothing.
+
+`diorama-probe` now carries three `dir_lists()` legs asserting each level
+enumerates its single child. **Revert-probed**: restoring `child == 0` fails the
+boot with `diorama-probe: FAIL cpu0 readdir does not list 'cache' (V-4c-3 F3)`.
+
+**The rule to carry forward:** proving a path resolves says nothing about whether
+its parent lists it. A tree needs a test on both surfaces, and a probe that only
+ever opens literal paths is structurally blind to half of it.

@@ -2034,7 +2034,15 @@ impl Conn {
             return p9::build_rread(&mut self.out_buf, tag, &[]);
         }
         let avail = body.len() - off;
-        let cap = (a.count as usize).min(self.msize as usize - p9::P9_HDR_LEN - 4);
+        // V-4c-3 F2: saturating, because Tversion accepts any u32 msize
+        // (including 0) and negotiates min(client, SRV_MSIZE) with no floor, so
+        // a raw `msize - 11` UNDERFLOWS for any negotiated msize < 11. This
+        // crate builds with overflow-checks = true and panic = "abort", so that
+        // is not a wrap -- it terminates the server, and /dio dies for every
+        // mount on the box. Three messages from any Proc that can open
+        // /srv/diorama reach it. netd, ptyfs and corvus all spell this exact
+        // expression saturating; the diorama was the outlier.
+        let cap = (a.count as usize).min((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4));
         let n = avail.min(cap);
         p9::build_rread(&mut self.out_buf, tag, &body[off..off + n])
     }
@@ -2052,7 +2060,10 @@ impl Conn {
         if !node_is_dir(f.node) {
             return self.err(tag, p9::E_NOTDIR);
         }
-        let budget = (a.count as usize).min(self.msize as usize - p9::P9_HDR_LEN - 4);
+        // V-4c-3 F2: saturating -- see h_read for why a raw subtraction here is
+        // an abort rather than a wrap. Treaddir on the root is reachable with no
+        // walk at all, which is what made this the shortest path to the crash.
+        let budget = (a.count as usize).min((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4));
         let mut data: Vec<u8> = Vec::new();
 
         // A /<pid>/ directory: a fixed five-entry list, cookie = index + 1.
@@ -2133,7 +2144,21 @@ impl Conn {
         // V-4c-2c: the cache chain. Each level has exactly one child, so the
         // cookie is simply "have I emitted it yet" -- 0 means not, and any
         // non-zero cookie means the single entry is already behind us.
-        if is_cpu_node(f.node) && child == 0 {
+        //
+        // V-4c-3 F3: gate on `a.offset`, NOT on `child`. `child` is the STATIC
+        // loop's cursor, and that loop runs first over every static node looking
+        // for one whose parent is f.node. A cpu qid is >= CPU_BASE (1<<24) and
+        // every static parent is < N_COUNT (26), so no entry ever matches, every
+        // iteration takes the `continue`, and `child` exits the loop at N_COUNT
+        // -- never 0. The guard could therefore never fire, and the ENTIRE
+        // cpuN/cache/index0 subtree readdir'd as an empty directory.
+        //
+        // walk still resolved every level by name, which is exactly why nothing
+        // caught it: the selftest below drives walk_child, and diorama-probe
+        // opens the leaf by literal path. Neither issued a Treaddir on a cpu
+        // node. A consumer that ENUMERATES to find index* (the portable way --
+        // the index numbering is not fixed across cache levels) saw nothing.
+        if is_cpu_node(f.node) && a.offset == 0 {
             let n = qid_cpu(f.node);
             let one = match qid_cpu_kind(f.node) {
                 CK_DIR => Some((cpu_qid_kind(n, CK_CACHE), &b"cache"[..])),

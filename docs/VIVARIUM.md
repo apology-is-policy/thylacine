@@ -1264,9 +1264,36 @@ containment question this raises belongs here rather than in §6, because it is
 
 So: when V-7 builds a container territory, "which pids does it see" must be decided
 for the **native** surface (a per-territory pid view, or simply not mounting `/proc`
-and `/ctl` into the container), and the diorama then inherits the answer for free,
-because it only ever re-presents what it can itself read. Deciding it in the diorama
-would invert the design.
+and `/ctl` into the container). Deciding it in the diorama alone would invert the
+design.
+
+**Correction (V-4c-3 F6).** An earlier draft of this section closed by saying the
+diorama "then inherits the answer for free, because it only ever re-presents what it
+can itself read." That clause is **wrong**, and it is wrong in exactly the way §6.13
+warned about one section earlier.
+
+"What it can itself read" is not "what its **client** can read". Every native source
+in the server — `native_pid_exists`, `native_pid_list`, `read_ctl_cpu`, and the
+per-pid path builder — resolves with `T_WALK_OPEN_FROM_ROOT` against the
+**diorama's own** SYSTEM territory, not the caller's. So *withholding* `/proc` and
+`/ctl` from a container's territory does **not** withhold them from the container:
+the diorama still reads them, and still reformats them across the 9P boundary. The
+proposed remedy closes the native path and leaves the diorama standing as a read
+oracle for the whole surface it proxies — not merely as a pid enumerator.
+
+Nothing is exploitable today: no restricted territory exists before V-7, a
+logged-in Proc already has `/proc` and `/ctl` mounted, and all five per-pid files
+are `0444` ungated. This is a scripture correction plus a **V-7 obligation**, not a
+live defect.
+
+The two remedies that actually work are the ones §6.13 already named, and V-7 must
+pick one: a **per-container diorama** running as its container's principal (server
+and client authority coincide by construction — the same argument that makes
+`/self/environ` sound), or **MANDATE (I-35)**, which would let a deputy act with its
+client's authority rather than its own. The general lesson is §6.13's, restated at
+the level of the whole tree rather than one file: **a deputy's territory is part of
+its authority, and confining the client without confining the deputy confines
+nothing.**
 
 ---
 

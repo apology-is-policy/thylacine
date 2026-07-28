@@ -133,6 +133,55 @@ fn read_all(path: &[u8], out: &mut [u8]) -> Option<usize> {
     Some(total)
 }
 
+/// Does `dir` list an entry named `name`? (V-4c-3 F3.)
+///
+/// Takes the path as a SLICE and measures it, deliberately -- the raw `t_open`
+/// sites in this file carry an explicit length that a path edit has to move by
+/// hand, and that has bitten this probe before. Nothing here hardcodes one.
+///
+/// Exists because the V-4c-2c cpu/cache subtree shipped readdir-BROKEN and no
+/// test noticed: the selftest drives `walk_child`, and the leg below opens the
+/// leaf by literal path. Both resolve by NAME, and walk was fine -- it was
+/// enumeration that returned nothing. A consumer looking for `index*` without
+/// knowing the number (the portable way, since cache-level numbering is not
+/// fixed) saw an empty directory. So this asserts the property the other two
+/// legs structurally cannot.
+fn dir_lists(dir: &[u8], name: &[u8]) -> bool {
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, dir.as_ptr(), dir.len(), T_OREAD) };
+    if fd < 0 {
+        return false;
+    }
+    let mut found = false;
+    let mut rounds = 0;
+    loop {
+        let mut db = [0u8; 1024];
+        let n = unsafe { libthyla_rs::t_readdir(fd, db.as_mut_ptr(), db.len()) };
+        if n <= 0 || rounds > 8 {
+            break;
+        }
+        rounds += 1;
+        // 9P2000.L dirent: qid(13) offset(8) type(1) namelen(2) name.
+        let mut off = 0usize;
+        let end = n as usize;
+        while off + 24 <= end {
+            let nl = db[off + 22] as usize | ((db[off + 23] as usize) << 8);
+            let ns = off + 24;
+            if ns + nl > end {
+                break;
+            }
+            if &db[ns..ns + nl] == name {
+                found = true;
+            }
+            off = ns + nl;
+        }
+        if found {
+            break;
+        }
+    }
+    let _ = unsafe { t_close(fd) };
+    found
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     // 1. open=connect to the diorama (9P-mode -> a mountable dev9p root).
@@ -617,6 +666,25 @@ pub extern "C" fn rs_main() -> i64 {
         }
         if line < 16 || line > 2048 || (line & (line - 1)) != 0 {
             fail("cache line size is not a sane power of two");
+        }
+
+        // V-4c-3 F3 REGRESSION: the cache chain must ENUMERATE, not merely
+        // resolve by name. Every level has exactly one child, and each was
+        // readdir-invisible until the guard was fixed -- while the leaf above
+        // still opened fine by literal path, which is precisely how it shipped.
+        // Walk-by-name and enumeration are DIFFERENT surfaces; proving one says
+        // nothing about the other.
+        if !dir_lists(b"/dio/sys/devices/system/cpu/cpu0", b"cache") {
+            fail("cpu0 readdir does not list `cache` (V-4c-3 F3)");
+        }
+        if !dir_lists(b"/dio/sys/devices/system/cpu/cpu0/cache", b"index0") {
+            fail("cpu0/cache readdir does not list `index0` (V-4c-3 F3)");
+        }
+        if !dir_lists(
+            b"/dio/sys/devices/system/cpu/cpu0/cache/index0",
+            b"coherency_line_size",
+        ) {
+            fail("cache/index0 readdir does not list the leaf (V-4c-3 F3)");
         }
 
         // THE COMPOSITION PROOF. Bind the sysfs subtree at another path and read
