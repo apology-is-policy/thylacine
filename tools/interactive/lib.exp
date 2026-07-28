@@ -32,6 +32,42 @@
 
 # Pure-Tcl repo-root derivation -- NO `exec` (an exec before spawn is one of
 # several macOS expect 5.45 footguns; this file lives at tools/interactive/).
+# --- #60: make the byte stream byte-transparent -----------------------------
+#
+# THE CUT, ROOT-CAUSED (2026-07-28). expect was decoding the guest's serial
+# stream as UTF-8, and when a read landed mid-way through a multi-byte
+# character it reported EOF instead of waiting for the rest -- so the scenario
+# died with "unexpected EOF" while the VM was alive and the relay was healthy.
+#
+# The trace caught it exactly (`exp_internal`, post-login so the boot flood
+# stayed out of it):
+#     send: sending "ls /\r" to { exp6 }
+#     send: sending "echo T60MARK40\r" to { exp6 }
+#     expect: does "...[38;2;224;120;64m " match "T60MARK40"? no
+#     expect: read eof
+# Both sends succeeded; the last read stopped precisely at the byte before
+# `⊢` (U+22A2, 3 bytes) in ut's prompt, and the next event was EOF. That the
+# trace prints `⊢` rather than raw bytes is itself the proof that the
+# channel was being DECODED: `fconfigure -translation binary` is applied to
+# the pipe below, but `spawn -open` does not preserve it.
+#
+# This explains every property of the bug that made it look like magic: it
+# lands "always on a character boundary"; it correlates with bursts of 3-byte
+# glyphs (ut redraws the ⊢ prompt on EVERY keystroke, so a send is followed by
+# a burst of them -- hence "cuts land at or just after a send"); it is
+# probabilistic (it needs a read to split a character); and it is untouched by
+# -buffersize (probe 2) and by match_max, neither of which is in that path.
+#
+# iso8859-1 makes every byte a valid single-byte character, so a partial
+# sequence cannot exist and the decoder can never be caught mid-character.
+# Safe here: every pattern the scenarios match is ASCII (checked across all
+# 32 -- the only non-ASCII in this tree is in comments like this one).
+#
+# A/B, 120 rounds of bursty output each: default encoding cut at round 40 and
+# round 86; iso8859-1 completed 120/120 twice. Set BEFORE any channel is
+# opened, which is why it lives at the top of this file.
+encoding system iso8859-1
+
 set ::lc_repo [file normalize [file join [file dirname [info script]] .. ..]]
 set ::lc_boot_timeout [expr {[info exists ::env(LS_CI_BOOT_TIMEOUT)] ? $::env(LS_CI_BOOT_TIMEOUT) : 180}]
 set ::lc_cmd_timeout  [expr {[info exists ::env(LS_CI_CMD_TIMEOUT)]  ? $::env(LS_CI_CMD_TIMEOUT)  : 30}]
