@@ -474,6 +474,69 @@ pub extern "C" fn rs_main() -> i64 {
         fail("uptime shape");
     }
 
+    // V-4c-2c: the two Tier-1 stragglers. Both are checked for the fields a
+    // real consumer parses, not merely for a non-empty read -- and both are
+    // cross-checked against a SECOND source, which is the part that would catch
+    // a renderer emitting a well-shaped file full of nothing.
+    {
+        let mut sb = [0u8; 1024];
+        let sn = match read_all(b"/dio/proc/stat", &mut sb) {
+            Some(n) => n,
+            None => fail("open /dio/proc/stat"),
+        };
+        let st = &sb[..sn];
+        if sn < 4 || &st[..4] != b"cpu " {
+            fail("stat must open with the aggregate cpu line");
+        }
+        for k in [&b"cpu0 "[..], b"intr ", b"ctxt ", b"btime ", b"processes "] {
+            if !contains(st, k) {
+                fail("stat is missing a field");
+            }
+        }
+        // ctxt and intr are counters the kernel bumps on every switch and every
+        // IRQ, so by the time a userspace probe runs they cannot be zero. A
+        // literal " 0\n" for either means the column parsed as absent and the
+        // sum silently produced nothing -- a well-shaped lie, which is exactly
+        // what a presence-only check would pass.
+        if contains(st, b"intr 0\n") || contains(st, b"ctxt 0\n") {
+            fail("stat reported a zero counter (the column did not parse)");
+        }
+
+        let mut cb = [0u8; 1024];
+        let cn = match read_all(b"/dio/proc/cpuinfo", &mut cb) {
+            Some(n) => n,
+            None => fail("open /dio/proc/cpuinfo"),
+        };
+        let ci = &cb[..cn];
+        for k in [
+            &b"processor\t: 0\n"[..],
+            b"CPU implementer\t: 0x",
+            b"CPU architecture: 8\n",
+            b"CPU part\t: 0x",
+            b"CPU revision\t: ",
+        ] {
+            if !contains(ci, k) {
+                fail("cpuinfo is missing a field");
+            }
+        }
+        // BogoMIPS is OMITTED on purpose (section 6.17): a calibration artifact
+        // of a loop Thylacine does not run. Its presence would mean someone
+        // added a plausible number rather than a sourced one.
+        if contains(ci, b"BogoMIPS") {
+            fail("cpuinfo invented a BogoMIPS");
+        }
+        // Features must name at least fp+asimd: ARMv8 mandates both, so an
+        // empty Features line means the AT_HWCAP word never reached the render.
+        if !contains(ci, b"Features\t: fp asimd") {
+            fail("cpuinfo Features did not carry the hwcap word");
+        }
+        // 0x00 implementer is reserved -- it is what an unread MIDR looks like.
+        if contains(ci, b"CPU implementer\t: 0x00\n") {
+            fail("cpuinfo implementer is the unread-MIDR sentinel");
+        }
+        t_putstr("diorama-probe: stat+cpuinfo OK\n");
+    }
+
     // 8. V-4c-1: the /sys tree, and the composition mechanism that delivers it.
     //
     //    The diorama serves ONE tree whose children are named for the Linux
@@ -510,9 +573,7 @@ pub extern "C" fn rs_main() -> i64 {
         }
         t_putstr("\n");
 
-        // cpu0 exists as a dir (the legacy enumeration path counts these), and
-        // is EMPTY on purpose -- its Linux contents are hardware facts with no
-        // EL0 source, so serving a stub would be a fabrication.
+        // cpu0 exists as a dir -- the legacy enumeration path counts these.
         let c0 = unsafe {
             t_open(
                 T_WALK_OPEN_FROM_ROOT,
@@ -525,6 +586,34 @@ pub extern "C" fn rs_main() -> i64 {
             fail("walk .../cpu/cpu0");
         }
         let _ = unsafe { t_close(c0) };
+
+        // V-4c-2c: cpuN's cache leaf. V-4c-1 left this dir empty BECAUSE
+        // CTR_EL0 has no EL0 source; section 6.17 gave the kernel one, so the
+        // file now reports a real line size. A power-of-two >= 16 is the
+        // property a consumer sizing an allocation off it depends on -- and 0
+        // would mean the kernel never read the register, the exact failure a
+        // missed per-CPU call site produces.
+        let mut lb = [0u8; 32];
+        let ln = match read_all(
+            b"/dio/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size",
+            &mut lb,
+        ) {
+            Some(n) => n,
+            None => fail("open cpu0/cache/index0/coherency_line_size"),
+        };
+        let mut line: u64 = 0;
+        for i in 0..ln {
+            if lb[i] == b'\n' {
+                break;
+            }
+            if !lb[i].is_ascii_digit() {
+                fail("cache line size is not decimal");
+            }
+            line = line * 10 + (lb[i] - b'0') as u64;
+        }
+        if line < 16 || line > 2048 || (line & (line - 1)) != 0 {
+            fail("cache line size is not a sane power of two");
+        }
 
         // THE COMPOSITION PROOF. Bind the sysfs subtree at another path and read
         // the same file through the new name. A mount source may be ANY readable

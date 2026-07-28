@@ -66,7 +66,20 @@
 //   /sys/devices/system/cpu/online    file   the online cpulist  (V-4c-1)
 //   /sys/devices/system/cpu/possible  file   the declared cpulist
 //   /sys/devices/system/cpu/present   file   the declared cpulist
-//   /sys/devices/system/cpu/cpuN      dir    one per CPU (empty; see the family)
+//   /sys/devices/system/cpu/cpuN      dir    one per CPU (V-4c-1)
+//   .../cpuN/cache/index0/coherency_line_size  file  CTR_EL0.DminLine (V-4c-2c)
+//   /proc/stat            file     cpu/cpuN + intr/ctxt/btime/processes (V-4c-2c)
+//   /proc/cpuinfo         file     one block per online CPU, aarch64 shape
+//
+// The last three closed section 6.17's per-field question the way it decided:
+// GIVE THE KERNEL A SOURCE. MIDR_EL1 and CTR_EL0 are EL0-trapped (SCTLR_EL1.UCT
+// is clear in INIT_SCTLR_EL1_MMU_OFF -- an EL0 `mrs midr_el1` is snare:ill,
+// which is also why AT_HWCAP must never set hwcap_CPUID), and ctxt/intr had no
+// counter at all, so V-4c-2b added per-CPU columns to /ctl/cpu and this file
+// reformats them. Two fields were deliberately NOT built: BogoMIPS (no truth to
+// tell) and procs_running/procs_blocked (a live census). The one field with no
+// source that could not be omitted is the cpu-line user/system split -- see
+// push_stat_cpu_line, where the premise is stated at the site.
 //
 // Not served, each for its own recorded reason (VIVARIUM section 6.10):
 //   /self/fd    BLOCKED on #66c -- a cross-Proc fd-list read of a live peer
@@ -75,18 +88,8 @@
 //   /self/auxv  WEIGHED AND NOT BUILT (section 6.14): zero live readers, and a
 //               viv-launched binary receives its auxv on the stack by
 //               construction, since ld.so bootstraps out of AT_PHDR/AT_ENTRY.
-//   /proc/cpuinfo   Tier 1 by section 6.3, but only PARTLY sourced: ncpus comes
-//               from /ctl/cpu, while MIDR (implementer/part/variant/revision) is
-//               not EL0-readable at all -- an EL0 `mrs midr_el1` is snare:ill,
-//               which is also why AT_HWCAP must never set hwcap_CPUID.
-//   /proc/stat  Tier 1 by section 6.3, same shape: the cpu/cpuN idle columns come
-//               from /ctl/cpu and btime from uptime + REALTIME, but ctxt, intr
-//               and processes have no native source at all.
-//   .../cpuN/cache, .../cpuN/topology  the same shape a third time: CTR_EL0 is
-//               EL0-trapped exactly as MIDR_EL1 is.
-//               All three await ONE decision -- omit the unsourced fields, or
-//               give the kernel a source -- deliberately made once rather than
-//               piecemeal (section 6.15). That is the V-4c-2 design work.
+//   .../cpuN/topology  no source: core/cluster identity is not derivable from
+//               MPIDR alone on a board whose DTB we do not re-read here.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
@@ -169,7 +172,9 @@ const N_SYSFS_CPU: u64 = 20;
 const N_CPU_ONLINE: u64 = 21;
 const N_CPU_POSSIBLE: u64 = 22;
 const N_CPU_PRESENT: u64 = 23;
-const N_COUNT: u64 = 24;
+const N_STAT: u64 = 24;      // V-4c-2c
+const N_CPUINFO: u64 = 25;   // V-4c-2c
+const N_COUNT: u64 = 26;
 
 struct Node {
     name: &'static [u8],
@@ -204,6 +209,9 @@ static NODES: [Node; N_COUNT as usize] = [
     Node { name: b"online",    parent: N_SYSFS_CPU,       is_dir: false },
     Node { name: b"possible",  parent: N_SYSFS_CPU,       is_dir: false },
     Node { name: b"present",   parent: N_SYSFS_CPU,       is_dir: false },
+    // --- the two Tier-1 stragglers (V-4c-2c, sourced per section 6.17) ---
+    Node { name: b"stat",      parent: N_PROC,            is_dir: false },
+    Node { name: b"cpuinfo",   parent: N_PROC,            is_dir: false },
 ];
 
 // --- the per-pid family (V-4b-3) -------------------------------------------
@@ -312,11 +320,27 @@ fn parse_pid(name: &[u8]) -> Option<u32> {
 const CPU_BASE: u64 = 1 << 24; // above every static index, below the pid range
 const CPU_INDEX_MAX: u64 = 255; // bounds the readdir loop against a wild /ctl/cpu
 
+// V-4c-2c: a cpuN qid gains a KIND above the index. Bits 0..7 stay the CPU
+// index exactly as before and kind 0 stays the dir itself, so `cpu_qid(n)` is
+// bit-identical to the V-4c-1 encoding -- the subtree is an extension, not a
+// renumbering. Bits 8..15 hold the kind; CPU_BASE (bit 24) still separates the
+// whole range from the pid qids above it.
+const CK_DIR: u64 = 0; // cpuN
+const CK_CACHE: u64 = 1; // cpuN/cache
+const CK_INDEX0: u64 = 2; // cpuN/cache/index0
+const CK_LINESZ: u64 = 3; // cpuN/cache/index0/coherency_line_size
+
+fn cpu_qid_kind(n: u64, kind: u64) -> u64 {
+    CPU_BASE | (kind << 8) | n
+}
 fn cpu_qid(n: u64) -> u64 {
-    CPU_BASE | n
+    cpu_qid_kind(n, CK_DIR)
 }
 fn qid_cpu(path: u64) -> u64 {
-    path & !CPU_BASE
+    path & 0xFF
+}
+fn qid_cpu_kind(path: u64) -> u64 {
+    (path >> 8) & 0xFF
 }
 fn is_cpu_node(path: u64) -> bool {
     path >= CPU_BASE && !is_pid_node(path)
@@ -351,7 +375,8 @@ fn node_is_dir(path: u64) -> bool {
         return qid_kind(path) == PK_DIR;
     }
     if is_cpu_node(path) {
-        return true; // every cpuN node is the dir itself (no leaves yet)
+        // V-4c-2c: the cpuN subtree is dirs down to index0, then one leaf.
+        return qid_cpu_kind(path) != CK_LINESZ;
     }
     (path < N_COUNT) && NODES[path as usize].is_dir
 }
@@ -384,15 +409,32 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
         return None;
     }
     if is_cpu_node(dir) {
-        // An empty dir: only . and .. resolve. Everything else is an honest
-        // ENOENT rather than a stub, per the family's comment above.
+        let n = qid_cpu(dir);
+        let kind = qid_cpu_kind(dir);
         if name == b"." {
             return Some(dir);
         }
+        // V-4c-2c: `..` climbs the cache chain rather than always landing on
+        // .../system/cpu -- the V-4c-1 shortcut was correct only while cpuN was
+        // a leaf dir. A wrong parent here would let `cd cache/..` skip a level.
         if name == b".." {
-            return Some(N_SYSFS_CPU);
+            return Some(match kind {
+                CK_CACHE => cpu_qid(n),
+                CK_INDEX0 => cpu_qid_kind(n, CK_CACHE),
+                _ => N_SYSFS_CPU,
+            });
         }
-        return None;
+        // The cache subtree: single-child chains, so each level is a literal
+        // name match and there is no enumeration to get wrong. Sourced from
+        // /ctl/cpu's `cacheline` column (CTR_EL0.DminLine, decoded to bytes
+        // kernel-side so the arm64 register encoding never crosses into
+        // userspace -- section 6.8). Anything else is an honest ENOENT.
+        return match (kind, name) {
+            (CK_DIR, b"cache") => Some(cpu_qid_kind(n, CK_CACHE)),
+            (CK_CACHE, b"index0") => Some(cpu_qid_kind(n, CK_INDEX0)),
+            (CK_INDEX0, b"coherency_line_size") => Some(cpu_qid_kind(n, CK_LINESZ)),
+            _ => None,
+        };
     }
     if dir >= N_COUNT || !NODES[dir as usize].is_dir {
         return None;
@@ -679,6 +721,205 @@ pub fn parse_cpu_online(text: &[u8], out: &mut [bool]) -> usize {
         rows += 1;
     }
     rows
+}
+
+// --- V-4c-2c: the per-CPU columns (VIVARIUM section 6.17) ------------------
+//
+// Since V-4c-2b a /ctl/cpu data row is:
+//
+//     cpu idle_ns capacity ctxt intr cacheline midr
+//     0 123456 1024 98765 4321 64 0x410fd083
+//
+// with an offline CPU still rendering the two-token `<i> offline`. Parsed by
+// the same rule as parse_cpu_online: a line whose first field is not a decimal
+// index is junk (which is how the header skips itself), and a row shorter than
+// the column we want yields None rather than a guess.
+
+/// One CPU's V-4c-2b columns. `None` for a field the row did not carry, so a
+/// short/offline/truncated row can never be mistaken for a zero measurement.
+#[derive(Copy, Clone, Default)]
+pub struct CpuCols {
+    pub ctxt: Option<u64>,
+    pub intr: Option<u64>,
+    pub cacheline: Option<u64>,
+    pub midr: Option<u64>,
+}
+
+// parse_hex is defined once, below -- the kernel's fmt_uhex emits lowercase
+// `0x...` so the existing lowercase-only parser is exactly right, and a second
+// laxer copy would be a mirror verified only against itself (the #100 trap, and
+// the V-4b-4 duplicated-t_stat lesson).
+
+fn parse_u64(f: &[u8]) -> Option<u64> {
+    if f.is_empty() || f.len() > 20 {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for &c in f {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v.checked_mul(10)?.checked_add((c - b'0') as u64)?;
+    }
+    Some(v)
+}
+
+/// Parse CPU `want`'s columns out of a /ctl/cpu render. Every field is
+/// independently optional, so a kernel that has not grown a column yet (or a
+/// truncated read) degrades field-by-field instead of all-or-nothing.
+pub fn parse_cpu_cols(text: &[u8], want: u64) -> CpuCols {
+    let mut out = CpuCols::default();
+    for line in text.split(|&c| c == b'\n') {
+        let mut fields: [&[u8]; 8] = [b""; 8];
+        let nf = split_fields(line, &mut fields);
+        if nf < 2 {
+            continue;
+        }
+        match parse_u64(fields[0]) {
+            Some(i) if i == want => {}
+            _ => continue,
+        }
+        if fields[1] == b"offline" {
+            return out; // an offline CPU carries no measurements at all
+        }
+        // idle_ns=1 capacity=2 ctxt=3 intr=4 cacheline=5 midr=6
+        if nf > 3 {
+            out.ctxt = parse_u64(fields[3]);
+        }
+        if nf > 4 {
+            out.intr = parse_u64(fields[4]);
+        }
+        if nf > 5 {
+            out.cacheline = parse_u64(fields[5]);
+        }
+        if nf > 6 {
+            out.midr = parse_hex(fields[6]);
+        }
+        return out;
+    }
+    out
+}
+
+/// A /ctl/cpu render is bounded by the kernel's own 2 KiB leaf buffer; the
+/// widened V-4c-2b row is ~90 B x <= 8 CPUs plus two header lines.
+const CTL_CPU_MAX: usize = 2048;
+
+/// CPU `want`'s cumulative idle-park ns (column 1), or None when the row is
+/// absent, offline, or unparseable -- never 0, which would read as a pegged
+/// 100%-busy core (the prowl-5 F2 hazard, on the other side of the boundary).
+pub fn parse_cpu_idle_ns(text: &[u8], want: u64) -> Option<u64> {
+    for line in text.split(|&c| c == b'\n') {
+        let mut fields: [&[u8]; 8] = [b""; 8];
+        if split_fields(line, &mut fields) < 2 {
+            continue;
+        }
+        match parse_u64(fields[0]) {
+            Some(i) if i == want => return parse_u64(fields[1]),
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// The `0x`-prefixed hex value after a marker (the /ctl/cpu `hwcap:` line).
+/// The decimal twin of this is parse_dec_after; kept separate rather than
+/// generalized, because a parser that silently accepts both bases would read a
+/// bare `10` as sixteen somewhere down the line.
+pub fn parse_hex_after(text: &[u8], marker: &[u8]) -> Option<u64> {
+    if marker.is_empty() || text.len() < marker.len() {
+        return None;
+    }
+    for i in 0..=text.len() - marker.len() {
+        if &text[i..i + marker.len()] != marker {
+            continue;
+        }
+        let mut j = i + marker.len();
+        while j < text.len() && (text[j] == b' ' || text[j] == b'\t') {
+            j += 1;
+        }
+        let start = j;
+        while j < text.len() && text[j] != b'\n' && text[j] != b' ' {
+            j += 1;
+        }
+        return parse_hex(&text[start..j]);
+    }
+    None
+}
+
+/// The arm64 uapi HWCAP bit -> the name Linux prints in /proc/cpuinfo's
+/// `Features` line, in bit order. Kept to the bits hw_features_detect actually
+/// derives (arch/arm64/hwfeat.c): a name for a bit the kernel never sets could
+/// never appear, and a bit with no name here is silently dropped rather than
+/// printed as a number -- absent, not invented.
+const HWCAP_NAMES: [(u32, &[u8]); 11] = [
+    (0, b"fp"),
+    (1, b"asimd"),
+    (3, b"aes"),
+    (4, b"pmull"),
+    (5, b"sha1"),
+    (6, b"sha2"),
+    (7, b"crc32"),
+    (8, b"atomics"),
+    (17, b"sha3"),
+    (20, b"asimddp"),
+    (21, b"sha512"),
+];
+
+fn push_hwcap_names(r: &mut Render, hwcap: u64) {
+    for (bit, name) in HWCAP_NAMES.iter() {
+        if hwcap & (1u64 << bit) != 0 {
+            r.push(b" ");
+            r.push(name);
+        }
+    }
+}
+
+/// (CLOCK_MONOTONIC, CLOCK_REALTIME) in ns. Read as a pair so /proc/stat's
+/// btime (realtime - uptime) uses two samples taken back to back rather than
+/// two independent reads a scheduling gap apart.
+fn clock_pair_ns() -> (u64, u64) {
+    #[repr(C)]
+    struct Ts {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+    let read = |clk: u64| -> u64 {
+        let mut ts = Ts { tv_sec: 0, tv_nsec: 0 };
+        let rc = unsafe { libthyla_rs::t_clock_gettime(clk, &mut ts as *mut Ts as u64) };
+        if rc != 0 {
+            return 0;
+        }
+        (ts.tv_sec.max(0) as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(ts.tv_nsec.clamp(0, 999_999_999) as u64)
+    };
+    let mono = read(libthyla_rs::T_CLOCK_MONOTONIC);
+    let real = read(libthyla_rs::T_CLOCK_REALTIME);
+    (mono, real)
+}
+
+/// Procs created since boot, from /ctl/sched's `created:` -- the kernel's
+/// proc_total_created(), which is exactly Linux's forks-since-boot (its own
+/// kernel threads included, as ours counts kproc and joey).
+fn native_procs_created() -> u64 {
+    let mut buf = [0u8; 512];
+    let got = read_native(b"/ctl/sched", &mut buf).unwrap_or(0);
+    parse_dec_after(&buf[..got], b"created:").unwrap_or(0)
+}
+
+/// Sum a column across every CPU that reports it. Linux's `ctxt` and `intr` are
+/// system-wide totals; the kernel accounts them per-CPU (as Linux does
+/// internally), so the summation is the translation.
+pub fn sum_cpu_col(text: &[u8], ncpus: u64, pick: fn(&CpuCols) -> Option<u64>) -> u64 {
+    let mut total: u64 = 0;
+    let mut i = 0u64;
+    while i < ncpus && i <= CPU_INDEX_MAX {
+        if let Some(v) = pick(&parse_cpu_cols(text, i)) {
+            total = total.saturating_add(v);
+        }
+        i += 1;
+    }
+    total
 }
 
 /// Push a CPU set in Linux's cpulist format: comma-separated runs, each `a` or
@@ -1263,6 +1504,149 @@ fn render_uptime(r: &mut Render) {
     r.push(b" 0.00\n");
 }
 
+// --- /proc/stat + /proc/cpuinfo, the two Tier-1 stragglers (V-4c-2c) -------
+//
+// Every field here is sourced per section 6.17. The one exception is stated
+// where it happens, in render_stat's jiffies line, and is stated because a
+// positional column cannot be omitted the way a whole line can.
+
+/// Linux reports CPU time in USER_HZ, conventionally 100 Hz, regardless of the
+/// kernel's own tick. So a jiffy is 10 ms and the conversion is ns / 10^7.
+const NS_PER_JIFFY: u64 = 10_000_000;
+
+/// Push one `cpu`/`cpuN` line. `idle_ns` is measured; `busy_ns` is derived
+/// (elapsed minus idle) and therefore also measured -- what is NOT measured is
+/// how that busy time SPLITS between user and kernel.
+///
+/// THE STATED PREMISE (section 6.17): Thylacine has no EL0-vs-EL1 time
+/// accounting anywhere, so the split has no source and no material. Unlike
+/// every other unsourced field in this arc it cannot be omitted -- the columns
+/// are positional, so a missing middle column is a WRONG answer rather than an
+/// absent one. All non-idle time is therefore reported as `system`. Utilization
+/// (1 - idle/total), which is what essentially every consumer computes, is
+/// exactly right either way; a consumer that specifically wants the split gets
+/// a degenerate answer rather than a plausible fabricated distribution.
+/// Revisit this the day per-mode accounting lands.
+fn push_stat_cpu_line(r: &mut Render, label: &[u8], busy_ns: u64, idle_ns: u64) {
+    r.push(label);
+    //     user nice system idle iowait irq softirq steal guest guest_nice
+    // iowait/steal/guest are legitimately zero for us (no block-wait
+    // accounting, not a guest, no nested guests) -- those are honest zeros,
+    // not the fabricated kind.
+    r.push(b" 0 0 ");
+    r.push_dec(busy_ns / NS_PER_JIFFY);
+    r.push(b" ");
+    r.push_dec(idle_ns / NS_PER_JIFFY);
+    r.push(b" 0 0 0 0 0 0\n");
+}
+
+/// /proc/stat. cpu/cpuN from /ctl/cpu's idle_ns against CLOCK_MONOTONIC;
+/// ctxt and intr summed from the per-CPU columns V-4c-2b added; processes from
+/// /ctl/sched's `created:`; btime from REALTIME minus MONOTONIC.
+fn render_stat(r: &mut Render) {
+    let mut buf = [0u8; CTL_CPU_MAX];
+    let got = read_ctl_cpu(&mut buf);
+    let text = &buf[..got];
+    let ncpus = parse_cpu_count(text);
+
+    // Elapsed since boot IS CLOCK_MONOTONIC, and it is the denominator every
+    // per-CPU busy figure is derived against.
+    let (up_ns, real_ns) = clock_pair_ns();
+
+    // The aggregate `cpu` line is the sum over CPUs, exactly as Linux's is --
+    // NOT a single-CPU figure scaled up, which would misreport a partly-idle
+    // box. An offline CPU contributes nothing to either column.
+    let mut idle_total: u64 = 0;
+    let mut busy_total: u64 = 0;
+    let mut i = 0u64;
+    while i < ncpus && i <= CPU_INDEX_MAX {
+        if let Some(idle) = parse_cpu_idle_ns(text, i) {
+            idle_total = idle_total.saturating_add(idle);
+            busy_total = busy_total.saturating_add(up_ns.saturating_sub(idle));
+        }
+        i += 1;
+    }
+    push_stat_cpu_line(r, b"cpu", busy_total, idle_total);
+    i = 0;
+    while i < ncpus && i <= CPU_INDEX_MAX {
+        if let Some(idle) = parse_cpu_idle_ns(text, i) {
+            let mut label = Render::new();
+            label.push(b"cpu");
+            label.push_dec(i);
+            push_stat_cpu_line(r, label.bytes(), up_ns.saturating_sub(idle), idle);
+        }
+        i += 1;
+    }
+
+    r.push(b"intr ");
+    r.push_dec(sum_cpu_col(text, ncpus, |c| c.intr));
+    r.push(b"\nctxt ");
+    r.push_dec(sum_cpu_col(text, ncpus, |c| c.ctxt));
+
+    // btime is the wall-clock second the system booted: REALTIME now minus how
+    // long we have been up. Both halves are sourced (LS-K's RTC anchor and the
+    // monotonic counter), so this is a derivation, not an invention.
+    r.push(b"\nbtime ");
+    r.push_dec((real_ns.saturating_sub(up_ns)) / 1_000_000_000);
+
+    r.push(b"\nprocesses ");
+    r.push_dec(native_procs_created());
+    // procs_running/procs_blocked would each need a live state census; they are
+    // omitted rather than zeroed, which is the whole-line freedom the jiffies
+    // columns above do not have.
+    r.push(b"\n");
+}
+
+/// /proc/cpuinfo, one block per online CPU -- the aarch64 shape. `Features` is
+/// the AT_HWCAP word (already the arm64 uapi numbering, so the names map
+/// one-to-one); the four identity lines are MIDR_EL1's fields, which is what
+/// Linux prints there. BogoMIPS is OMITTED: it is a calibration artifact of a
+/// loop Thylacine does not run, and meaningless on Linux too.
+fn render_cpuinfo(r: &mut Render) {
+    let mut buf = [0u8; CTL_CPU_MAX];
+    let got = read_ctl_cpu(&mut buf);
+    let text = &buf[..got];
+    let ncpus = parse_cpu_count(text);
+    let hwcap = parse_hex_after(text, b"hwcap:").unwrap_or(0);
+
+    let mut i = 0u64;
+    while i < ncpus && i <= CPU_INDEX_MAX {
+        let cols = parse_cpu_cols(text, i);
+        // An offline CPU carries no MIDR, and Linux lists only online CPUs.
+        if let Some(midr) = cols.midr {
+            r.push(b"processor\t: ");
+            r.push_dec(i);
+            r.push(b"\nFeatures\t:");
+            push_hwcap_names(r, hwcap);
+            // "CPU architecture: 8" is a CONSTANT, not a measurement -- the
+            // section 6.9 category: a declaration about which ABI the caller
+            // sees. Every part we can run on is ARMv8.
+            r.push(b"\nCPU implementer\t: 0x");
+            r.push_hex((midr >> 24) & 0xFF, 2);
+            r.push(b"\nCPU architecture: 8\nCPU variant\t: 0x");
+            r.push_hex((midr >> 20) & 0xF, 1);
+            r.push(b"\nCPU part\t: 0x");
+            r.push_hex((midr >> 4) & 0xFFF, 3);
+            r.push(b"\nCPU revision\t: ");
+            r.push_dec(midr & 0xF);
+            r.push(b"\n\n");
+        }
+        i += 1;
+    }
+}
+
+/// cpuN/cache/index0/coherency_line_size -- CTR_EL0.DminLine, decoded to bytes
+/// kernel-side. Empty when the CPU reports none, never a plausible default: a
+/// consumer sizing an allocation off a guessed line size is exactly the harm.
+fn render_cpu_cacheline(cpu: u64, r: &mut Render) {
+    let mut buf = [0u8; CTL_CPU_MAX];
+    let got = read_ctl_cpu(&mut buf);
+    if let Some(v) = parse_cpu_cols(&buf[..got], cpu).cacheline {
+        r.push_dec(v);
+        r.push(b"\n");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // /sys/kernel -- the phenotype's self-description (V-4b-3).
 //
@@ -1342,11 +1726,19 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         N_SELF_ENVIRON if alive => render_environ(peer.pid, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
+        N_STAT => render_stat(&mut r),
+        N_CPUINFO => render_cpuinfo(&mut r),
         N_CPU_ONLINE | N_CPU_POSSIBLE | N_CPU_PRESENT => render_cpu_list(node, &mut r),
         N_OSTYPE => r.push(OSTYPE),
         N_OSRELEASE => r.push(OSRELEASE),
         N_VERSION => r.push(KVERSION),
         N_HOSTNAME => r.push(HOSTNAME),
+        // V-4c-2c: cpuN/cache/index0/coherency_line_size, the only leaf in the
+        // cpu subtree. Rendered by CPU index, so a heterogeneous board reports
+        // each core's own line size rather than the boot CPU's for all of them.
+        _ if is_cpu_node(node) && qid_cpu_kind(node) == CK_LINESZ => {
+            render_cpu_cacheline(qid_cpu(node), &mut r)
+        }
         _ => {}
     }
     r
@@ -1731,6 +2123,24 @@ impl Conn {
                     break;
                 }
                 i += 1;
+            }
+        }
+        // V-4c-2c: the cache chain. Each level has exactly one child, so the
+        // cookie is simply "have I emitted it yet" -- 0 means not, and any
+        // non-zero cookie means the single entry is already behind us.
+        if is_cpu_node(f.node) && child == 0 {
+            let n = qid_cpu(f.node);
+            let one = match qid_cpu_kind(f.node) {
+                CK_DIR => Some((cpu_qid_kind(n, CK_CACHE), &b"cache"[..])),
+                CK_CACHE => Some((cpu_qid_kind(n, CK_INDEX0), &b"index0"[..])),
+                CK_INDEX0 => Some((
+                    cpu_qid_kind(n, CK_LINESZ),
+                    &b"coherency_line_size"[..],
+                )),
+                _ => None,
+            };
+            if let Some((q, nm)) = one {
+                self.emit_dirent(&mut data, budget, q, 1, nm);
             }
         }
         p9::build_rreaddir(&mut self.out_buf, tag, &data)
@@ -2241,13 +2651,41 @@ pub fn selftest() -> Result<(), &'static str> {
     if !node_is_dir(cpu_qid(1)) {
         return Err("a cpuN node must be a dir");
     }
-    // The dir is EMPTY on purpose (see the family comment): its Linux contents
-    // are hardware facts with no EL0 source, and a stub would be a fabrication.
-    if walk_child(cpu_qid(0), b"cache").is_some() || walk_child(cpu_qid(0), b"online").is_some() {
+    // V-4c-2c: the cache chain now resolves -- V-4c-1 left the dir empty
+    // BECAUSE the values had no EL0 source, and section 6.17 gave the kernel
+    // one. The unsourced-child property still holds for everything else.
+    let cache = walk_child(cpu_qid(0), b"cache").ok_or("walk cpuN/cache")?;
+    let index0 = walk_child(cache, b"index0").ok_or("walk cpuN/cache/index0")?;
+    let linesz =
+        walk_child(index0, b"coherency_line_size").ok_or("walk coherency_line_size")?;
+    if !node_is_dir(cache) || !node_is_dir(index0) || node_is_dir(linesz) {
+        return Err("cache chain: dirs down to index0, then one leaf");
+    }
+    // Distinct qids: a collision would alias two files onto one identity.
+    if cache == index0 || index0 == linesz || cache == linesz || cache == cpu_qid(0) {
+        return Err("cache chain qids collide");
+    }
+    // Every level still belongs to CPU 0 and stays inside the cpu range.
+    for q in [cache, index0, linesz] {
+        if !is_cpu_node(q) || qid_cpu(q) != 0 || is_pid_node(q) {
+            return Err("cache chain escaped the cpu qid range");
+        }
+    }
+    // CPU 1's chain is a DIFFERENT chain -- the per-CPU property the whole
+    // subtree exists for (a heterogeneous board has per-core line sizes).
+    if walk_child(cpu_qid(1), b"cache") == Some(cache) {
+        return Err("cpu1 cache aliased cpu0's");
+    }
+    if walk_child(cpu_qid(0), b"online").is_some() || walk_child(cache, b"cache").is_some() {
         return Err("a cpuN dir served an unsourced child");
     }
+    // `..` climbs the chain rather than short-cutting to .../system/cpu, which
+    // was correct only while cpuN was a leaf dir.
     if walk_child(cpu_qid(0), b"..") != Some(N_SYSFS_CPU) {
         return Err("walk cpuN/..");
+    }
+    if walk_child(cache, b"..") != Some(cpu_qid(0)) || walk_child(index0, b"..") != Some(cache) {
+        return Err("cache chain .. skipped a level");
     }
 
     // --- V-4c-1: parse_cpu_name is the resolution gate, like parse_pid. Unlike

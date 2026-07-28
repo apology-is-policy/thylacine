@@ -354,9 +354,23 @@ and stopped — it never asked **is this value already published**. Producer and
 accessor are different searches, and finding the first is exactly what stops you
 running the second.
 
-**V-4c-2c then builds the diorama half**, and both land *before* V-4c-3 — which
-matters, because the two new counters sit on audit-trigger surfaces (the scheduler
-switch chokepoint and GIC dispatch), and V-4c-3 is the round that must cover them.
+**V-4c-2c LANDED** — the diorama half: `/proc/stat`, `/proc/cpuinfo`, and the
+`cpuN/cache/index0/coherency_line_size` leaf that lifts V-4c-1's deliberately-
+empty `cpuN` dir. The cpu qid gained a *kind* above the index, so `cpu_qid(n)`
+stays bit-identical and the subtree is an extension, not a renumbering.
+
+Two things the build settled. First, `walk_child` already had an
+`is_cpu_node(dir)` arm that returned early — a second arm appended lower in the
+same function would have been **unreachable**, and the cache subtree would have
+silently not resolved. Second, that existing arm hardcoded `..` → `.../system/cpu`,
+which was correct only while `cpuN` was a leaf dir; left alone, `cache/..` would
+have skipped a level. Both are the same shape: *V-4c-1's code was right for
+V-4c-1's tree, and extending the tree makes previously-correct shortcuts wrong.*
+
+**V-4c-2 is COMPLETE. V-4c-3 — the arc's focused audit — is next, and is a merge
+gate**: the two new counters sit on audit-trigger surfaces (the scheduler switch
+chokepoint and GIC dispatch), V-4b-1..6 and V-4c all landed on self-audit only,
+and devproc/devenv are ARCH §25.4 trigger surfaces.
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then
