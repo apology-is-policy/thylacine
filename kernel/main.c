@@ -312,6 +312,12 @@ void boot_main(void) {
     // running CPU actually implements. Set up `g_hw_features` early.
     hw_features_detect();
 
+    // V-4c-2b (VIVARIUM section 6.17): record THIS CPU's identity (MIDR_EL1 +
+    // the CTR_EL0 line size). Each secondary records its own in per_cpu_main --
+    // both registers are per-CPU by architecture and genuinely differ on a
+    // heterogeneous board, which is why /proc/cpuinfo has a per-processor block.
+    hw_cpu_ident_detect(0);
+
     // Go IDE Stage 8a-2: per-PE debug bring-up on the boot CPU (secondaries do
     // it in per_cpu_main). Clears the OS Lock (LOCKED at reset — it suppresses
     // debug exceptions) so a guest-programmed EL0 hardware breakpoint can

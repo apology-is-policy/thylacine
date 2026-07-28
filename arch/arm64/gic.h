@@ -154,6 +154,14 @@ void gic_eoi(u32 intid);
 // alternative would be to move dispatch into the IRQ handler itself.
 void gic_dispatch(u32 intid);
 
+// V-4c-2b (docs/VIVARIUM.md section 6.17): cumulative interrupts dispatched on
+// `cpu` -- counted at gic_dispatch, the universal entry, so it covers timer,
+// UART, IPIs and forwarded driver IRQs alike. The kernel source for the
+// diorama's /proc/stat `intr`. Distinct from irqfwd's kobj_irq_total_fires,
+// which counts only the userspace-driver-forwarded subset and stays that way.
+// 0 for an out-of-range CPU.
+u64 gic_cpu_irq_count(unsigned cpu);
+
 // P2-Cdc: per-CPU GIC bring-up for secondaries. On v3: wakes this CPU's
 // redistributor (clear ProcessorSleep, wait ChildrenAsleep), configures
 // the SGI/PPI bank (group 1 NS, default priority, all disabled), and

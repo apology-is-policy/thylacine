@@ -1143,7 +1143,7 @@ four of the five fields already have a kernel source and need only exposing.
 
 | Linux field | source status (verified) | decision |
 |---|---|---|
-| `stat: processes` | **exists** — `g_next_pid` (`kernel/proc.c:386`) is a monotonic `u32` from 1, bumped once per `proc_alloc` | **expose** — `g_next_pid − 1` *is* Linux's forks-since-boot |
+| `stat: processes` | **already exposed** — `proc_total_created()` (`kernel/proc.c:599`) over a dedicated `u64 g_proc_created`, and already covered by ~10 kernel tests (see the correction below) | **call it** — no kernel code at all |
 | `stat: intr` | **exists but PARTIAL** — `kobj_irq_total_fires()` (`kernel/irqfwd.c:124`) counts only IRQs forwarded to a userspace driver; timer, UART and IPIs never reach that hook | **widen, then expose** (see below) |
 | `stat: ctxt` | **material exists** — prowl's per-thread `nsched` (`kernel/sched.c:1414`); no global or per-CPU aggregate | **add a per-CPU counter** at the same chokepoint |
 | `cpuN/cache/…` | **exists in-kernel** — `CTR_EL0`, read at `arch/arm64/mmu.c:962`/`:982` for the I-cache stride, simply unexposed | **expose** |
@@ -1209,6 +1209,24 @@ This adds two counters to two audit-trigger surfaces — the scheduler switch
 chokepoint and the GIC dispatch path. Both are read-only telemetry that no
 decision consults (prowl's discipline, `PROWL-DESIGN §3.1`), and both land
 *before* V-4c-3, which is the arc's owed focused audit and must cover them.
+
+**Correction, found by building it (V-4c-2b).** This section originally named
+`g_next_pid − 1` as the `processes` source. That was wrong, and wrong in a way
+worth recording: **`proc_total_created()` already existed** (`kernel/proc.c:599`),
+over a dedicated `u64 g_proc_created` bumped in the same two places, declared in
+`proc.h`, and already asserted by roughly ten kernel tests. It is also strictly
+better than the derivation — a `u64` with no `INT_MAX` guard to reason about,
+purpose-built for exactly this question rather than a pid allocator repurposed by
+arithmetic. So the fifth exposure dissolved to **zero kernel code**: one call.
+
+This is §6.7's own lesson recurring — *grep for an existing accessor before
+budgeting* — and the interesting part is how it slipped past a pass that was
+explicitly doing that research. The grep went looking for **where the value is
+produced** and stopped the moment it found `g_next_pid`; it never asked the second
+question, **whether the value is already published**. Producer and accessor are
+different searches, and finding the first is what makes you stop doing the second.
+The comment naming `proc_total_created` was sitting nine lines above the
+`g_next_pid` line that got read.
 
 ---
 

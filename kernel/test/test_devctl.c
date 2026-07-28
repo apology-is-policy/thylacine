@@ -7,10 +7,15 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>     // V-4c-2b: sched_cpu_ctxt
+#include <thylacine/smp.h>       // V-4c-2b: smp_cpu_count
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF*
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+
+#include "../../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count
+#include "../../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident
 
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
@@ -137,14 +142,73 @@ void test_devctl_read_cpu_format(void) {
     struct Spoor *c = open_ctl_leaf("cpu");
     TEST_ASSERT(c != NULL, "open /ctl/cpu");
 
-    char buf[512];
-    long got = devctl.read(c, buf, 512, 0);
+    char buf[1024];
+    long got = devctl.read(c, buf, sizeof buf, 0);
     TEST_ASSERT(got > 0, "cpu read positive");
     TEST_ASSERT(contains(buf, (size_t)got, "cpus:"),    "has the cpus: count");
     TEST_ASSERT(contains(buf, (size_t)got, "idle_ns"),  "has the idle_ns column");
     TEST_ASSERT(contains(buf, (size_t)got, "capacity"), "has the capacity column");
 
+    // V-4c-2b (VIVARIUM section 6.17): the diorama's /proc/stat + /proc/cpuinfo
+    // sources. The header names them, and the hwcap line is a two-token line
+    // (so prowl's three-token row parse skips it, exactly as it skips "cpus:").
+    TEST_ASSERT(contains(buf, (size_t)got, "hwcap:"),    "V-4c-2b: has the hwcap line");
+    TEST_ASSERT(contains(buf, (size_t)got, "ctxt"),      "V-4c-2b: has the ctxt column");
+    TEST_ASSERT(contains(buf, (size_t)got, "intr"),      "V-4c-2b: has the intr column");
+    TEST_ASSERT(contains(buf, (size_t)got, "cacheline"), "V-4c-2b: has the cacheline column");
+    TEST_ASSERT(contains(buf, (size_t)got, "midr"),      "V-4c-2b: has the midr column");
+
     spoor_clunk(c);
+}
+
+// V-4c-2b (docs/VIVARIUM.md section 6.17): the four per-CPU kernel sources the
+// diorama needs, checked at the source rather than through the text -- a column
+// that renders but reports nothing is the failure this catches. Each value is
+// asserted for the property the diorama depends on, not merely for presence.
+void test_devctl_cpu_sources_live(void);
+void test_devctl_cpu_sources_live(void) {
+    // ctxt: the per-CPU context-switch count ADVANCES. Same forced-yield vehicle
+    // as prowl's per-thread nsched test -- a yield switches this thread out and
+    // back in, so the CPU that runs us must have counted switches. Summed over
+    // CPUs because a work-steal can land the resume on a different CPU than the
+    // one we started on, which would make a single-CPU delta legitimately zero.
+    u64 ctxt0 = 0;
+    for (unsigned i = 0; i < smp_cpu_count(); i++) ctxt0 += sched_cpu_ctxt(i);
+    for (int i = 0; i < 8; i++) {
+        for (volatile int j = 0; j < 500000; j++) { /* burn a measurable slice */ }
+        sched();
+    }
+    u64 ctxt1 = 0;
+    for (unsigned i = 0; i < smp_cpu_count(); i++) ctxt1 += sched_cpu_ctxt(i);
+    TEST_ASSERT(ctxt1 > ctxt0, "V-4c-2b: per-CPU ctxt advances across forced yields");
+
+    // intr: counted at gic_dispatch, the universal entry -- so the timer PPI
+    // alone guarantees a nonzero count by the time the test phase runs. This is
+    // exactly what distinguishes it from kobj_irq_total_fires, which counts only
+    // the userspace-driver-forwarded subset and can legitimately still be 0 here.
+    u64 intr = 0;
+    for (unsigned i = 0; i < smp_cpu_count(); i++) intr += gic_cpu_irq_count(i);
+    TEST_ASSERT(intr > 0, "V-4c-2b: per-CPU intr counts timer/UART, not just forwarded IRQs");
+
+    // The boot CPU always records an identity (per_cpu_main does the same for
+    // each secondary; a PSCI-failed CPU legitimately has none, hence the guard).
+    const struct hw_cpu_ident *id = hw_cpu_ident(0);
+    TEST_ASSERT(id != NULL, "V-4c-2b: CPU 0 recorded a hardware identity");
+
+    // cacheline: CTR_EL0.DminLine decoded to bytes. ARM ARM bounds DminLine to
+    // 4 bits, so the decode (4 << n) lands in [4, 32768]; every real part is a
+    // power of two of at least 16 bytes, which is what a consumer sizing an
+    // allocation off /sys/.../coherency_line_size relies on.
+    TEST_ASSERT(id->dcache_line >= 16 && id->dcache_line <= 2048,
+                "V-4c-2b: dcache line size is architecturally sane");
+    TEST_ASSERT((id->dcache_line & (id->dcache_line - 1)) == 0,
+                "V-4c-2b: dcache line size is a power of two");
+
+    // midr: the implementer field (bits 31:24) is never 0 on a real part -- 0 is
+    // reserved -- so a zero here means the register was never read, which is the
+    // exact failure a boot-CPU-only or never-called detect would produce.
+    TEST_ASSERT(((id->midr >> 24) & 0xFFu) != 0,
+                "V-4c-2b: MIDR implementer is populated");
 }
 
 void test_devctl_read_memory_format(void) {
@@ -235,10 +299,13 @@ void test_devctl_read_sched_format(void) {
     struct Spoor *c = open_ctl_leaf("sched");
     TEST_ASSERT(c != NULL, "open /ctl/sched");
 
-    char buf[128];
-    long got = devctl.read(c, buf, 128, 0);
+    char buf[512];
+    long got = devctl.read(c, buf, sizeof buf, 0);
     TEST_ASSERT(got > 0, "sched read positive");
     TEST_ASSERT(contains(buf, (size_t)got, "runnable:"), "has runnable:");
+    // V-4c-2b: the /proc/stat `processes` source -- the one field in section
+    // 6.17's set with no per-CPU form, so it lives in the global block.
+    TEST_ASSERT(contains(buf, (size_t)got, "created:"), "V-4c-2b: has created:");
 
     spoor_clunk(c);
 }

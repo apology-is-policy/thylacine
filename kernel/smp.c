@@ -20,6 +20,7 @@
 
 #include "../arch/arm64/gic.h"
 #include "../arch/arm64/hwdebug.h"     // 8a-2: hwdebug_init_cpu (per-PE OS-Lock unlock)
+#include "../arch/arm64/hwfeat.h"      // V-4c-2b: hw_cpu_ident_detect (per-CPU MIDR/CTR)
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/psci.h"
 #include "../arch/arm64/timer.h"
@@ -405,6 +406,12 @@ void per_cpu_main(int cpu_idx) {
     // it in boot_main). Clears the banked OS Lock so a guest-programmed EL0
     // hardware breakpoint can deliver if the debugged thread runs here.
     hwdebug_init_cpu();
+
+    // V-4c-2b (VIVARIUM section 6.17): record THIS secondary's hardware identity
+    // (MIDR_EL1 + the CTR_EL0 line size) into its own slot. Must run on the CPU
+    // it describes -- both registers are banked -- and before this CPU can run
+    // any EL0 code, which the idle-loop entry below guarantees.
+    hw_cpu_ident_detect((unsigned)cpu_idx);
 
     // VBAR_EL1 — install the kernel exception vector table. ISB so
     // any subsequent exception sees the new VBAR.

@@ -700,6 +700,25 @@ bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg) {
     return true;
 }
 
+// V-4c-2b (docs/VIVARIUM.md section 6.17): every INTID dispatched on each CPU --
+// the kernel source for the diorama's /proc/stat `intr`. Counted HERE, at the
+// universal entry, precisely because irqfwd's kobj_irq_total_fires counts only
+// the subset forwarded to a userspace driver (timer, UART and IPIs never reach
+// that hook). Publishing the narrower number under the wider field's name would
+// be fabrication with a plausible face, so the counter goes where every
+// interrupt actually arrives; kobj_irq_total_fires keeps its own honest meaning.
+//
+// The store is single-writer per CPU (handlers run IRQ-masked, and an SGI/PPI is
+// banked while an SPI is routed to one CPU), so no read-modify-write race
+// exists; a cross-CPU reader (devctl) __atomic_loads it, RELAXED -- a monotonic
+// counter, the same posture as CpuSched.idle_ns.
+static u64 g_cpu_irq_count[DTB_MAX_CPUS];
+
+u64 gic_cpu_irq_count(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return 0;
+    return __atomic_load_n(&g_cpu_irq_count[cpu], __ATOMIC_RELAXED);
+}
+
 void gic_dispatch(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) {
         extinction_with_addr("gic_dispatch: INTID out of range", (uintptr_t)intid);
@@ -708,6 +727,17 @@ void gic_dispatch(u32 intid) {
     if (!h) {
         extinction_with_addr("gic_dispatch: no handler for INTID", (uintptr_t)intid);
     }
+
+    // Count the dispatch, not the arrival: an out-of-range or handler-less INTID
+    // extincts above and never reaches here. smp_cpu_idx_self is one `mrs
+    // mpidr_el1` plus a mask, and ipi_resched_handler already uses it from this
+    // very path.
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS) {
+        __atomic_store_n(&g_cpu_irq_count[cpu],
+                         g_cpu_irq_count[cpu] + 1, __ATOMIC_RELAXED);
+    }
+
     h(intid, g_handlers[intid].arg);
 }
 

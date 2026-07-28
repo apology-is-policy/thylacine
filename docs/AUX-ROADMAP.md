@@ -339,9 +339,24 @@ the `kernel-base` precedent (`CAP_HOSTOWNER`-gated after the #57a F1 KASLR-slide
 leak) is not engaged; the added values are hardware description and event counts,
 carrying no address or layout secret.
 
-**V-4c-2b/c then build it**, and both land *before* V-4c-3 — which matters,
-because the two new counters sit on audit-trigger surfaces (the scheduler switch
-chokepoint and GIC dispatch), and V-4c-3 is the round that must cover them.
+**V-4c-2b LANDED** — the kernel sources. Two per-CPU counters (`gic_dispatch` for
+`intr`, the `sched()` switch chokepoint for `ctxt`), a per-CPU `hw_cpu_ident`
+recorded at bring-up (MIDR + the CTR_EL0 line size), and the hwcap word — all
+surfaced as `/ctl/cpu` columns plus one `/ctl/sched` scalar. 1216/1216.
+
+**And a correction the build produced**: the table above named `g_next_pid − 1`
+for `processes`. Wrong — **`proc_total_created()` already existed** (`proc.c:599`,
+a dedicated `u64`, ~10 tests), and is strictly better than the derivation. The
+fifth exposure dissolved to *zero kernel code*. That is §6.7's own lesson
+recurring, and the instructive part is how it slipped past a pass explicitly doing
+that research: the grep asked **where is this value produced**, found `g_next_pid`,
+and stopped — it never asked **is this value already published**. Producer and
+accessor are different searches, and finding the first is exactly what stops you
+running the second.
+
+**V-4c-2c then builds the diorama half**, and both land *before* V-4c-3 — which
+matters, because the two new counters sit on audit-trigger surfaces (the scheduler
+switch chokepoint and GIC dispatch), and V-4c-3 is the round that must cover them.
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

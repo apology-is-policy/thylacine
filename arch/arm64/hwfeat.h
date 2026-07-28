@@ -52,6 +52,29 @@ struct hw_features {
     u64  linux_hwcap;
 };
 
+// Per-CPU hardware identity (VIVARIUM §6.17): MIDR_EL1 and the D-cache
+// minimum line size decoded from CTR_EL0. Both are architecturally per-CPU
+// and genuinely DIFFER on a heterogeneous board — which is exactly why Linux
+// prints a per-`processor` block in /proc/cpuinfo. A boot-CPU-only read would
+// be wrong precisely where these values earn their keep, so each CPU records
+// its own at bring-up. Neither register is EL0-readable (`SCTLR_EL1.UCT` is
+// clear in `INIT_SCTLR_EL1_MMU_OFF`, so an EL0 `mrs` is `snare:ill`), which is
+// why the diorama cannot source them without the kernel exposing them.
+struct hw_cpu_ident {
+    u64  midr;          // MIDR_EL1 raw: implementer/variant/arch/part/revision
+    u32  dcache_line;   // bytes; CTR_EL0.DminLine decoded (4 << DminLine)
+    bool valid;         // this CPU has run hw_cpu_ident_detect
+};
+
+// Record the calling CPU's identity into slot `cpu`. Called once per CPU at
+// bring-up: boot_main for CPU 0, per_cpu_main for each secondary. Reads only
+// this CPU's banked registers, so it MUST run on the CPU it is recording.
+void hw_cpu_ident_detect(unsigned cpu);
+
+// Identity of `cpu`, or NULL if out of range or never brought up. A caller
+// must handle NULL: a DTB-declared CPU that failed PSCI never records one.
+const struct hw_cpu_ident *hw_cpu_ident(unsigned cpu);
+
 // Singleton populated by hw_features_detect at boot. Read-only after
 // init.
 extern struct hw_features g_hw_features;
