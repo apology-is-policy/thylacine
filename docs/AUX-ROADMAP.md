@@ -290,6 +290,26 @@ Two things the build settled that the scripture had left open:
   once rather than piecemeal. That is **V-4c-2**, with the per-container mount
   wiring; **V-4c-3** is the arc's owed focused audit (a merge gate).
 
+**V-4c-2 groundwork (researched; it mostly dissolves the fork).** Grepping for
+the sources first turns "one decision" into four exposures and one real question:
+
+| field | source status (verified) | cost |
+|---|---|---|
+| `stat: processes` | **exists** — `g_next_pid` (`proc.c:386`) is a monotonic atomic from 1, bumped per `proc_alloc`, so `−1` is exactly Linux's forks-since-boot | expose |
+| `stat: intr` | **exists but PARTIAL** — `kobj_irq_total_fires()` (`irqfwd.h:114`) counts only *forwarded* userspace-driver IRQs; timer/UART/kernel-internal are not counted | expose + widen, or label honestly |
+| `stat: ctxt` | **material exists** — prowl's per-thread `nsched` (`thread.h:460`); no global aggregate | aggregate |
+| `cpuN/cache` | **exists in-kernel** — `CTR_EL0` read at `mmu.c:962`/`:982` for I-cache strides, simply unexposed | expose |
+| `cpuinfo` MIDR | **none** — `grep MIDR` over `kernel/` + `arch/` returns nothing | new kernel read + surface |
+
+`intr` is the trap, and it is a shape the original note did not anticipate: a
+source *exists*, so the danger is no longer an invented zero but a **real number
+that means something narrower than the field it fills** — fabrication with a
+plausible face arriving by the back door. Either widen the counter or do not
+call it `intr`.
+
+(For any new `/ctl` file, check it against `kernel-base`, which is
+`CAP_HOSTOWNER`-gated after the #57a F1 KASLR-slide leak.)
+
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then
 `gfx-4` → `main`, and V-1b is clear. See `docs/MERGE-gfx-4.md`.
