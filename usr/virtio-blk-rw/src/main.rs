@@ -28,15 +28,34 @@
 //                 so the test is idempotent (a re-run sees the same
 //                 ground-truth bytes regardless of prior runs).
 //
-//   WRITE region: sectors [pass_sectors+1..2*pass_sectors+1). Pre-state
-//                 is irrelevant (mkdisk.py also wrote pattern A there
-//                 initially; a prior run may have left pattern B from
-//                 its own pass B). Pass B overwrites the whole region
-//                 with pattern B before pass C reads.
+//   WRITE region: sectors [pass_sectors+1..2*pass_sectors+1). Pass B
+//                 overwrites the whole region with pattern B before
+//                 pass C reads it back.
 //
 //   Pass A: READ + VERIFY pattern A over READ region. Mismatch → fail.
 //   Pass B: WRITE pattern B over WRITE region. No per-sector verify.
 //   Pass C: READ + VERIFY pattern B over WRITE region (write→readback).
+//
+// #87 -- WHY PATTERN B IS FRESHENED PER BOOT. This comment used to say the
+// write region's pre-state was "irrelevant, because pass B overwrites it
+// before pass C reads". That is right about INTENT and wrong about DETECTION,
+// and the difference is the whole value of pass C. Pattern B was a fully
+// deterministic LCG, and build/disk.img is a shared fixture nothing resets, so:
+//   fresh disk : a silently-dropped pass B leaves pattern A -> pass C reads
+//                A != B -> FAIL. The write proof WORKS.
+//   reused disk: the region ALREADY holds the identical pattern B from the
+//                previous boot -> the same dropped write reads stale-but-
+//                correct -> PASS. The write proof is DISARMED.
+// Since the fixture was never reset, every boot in practice was the second
+// case: this leg could not fail. Measured 2026-07-28 -- one boot leaves
+// 7,307,095 bytes of pattern B behind.
+//
+// So pattern B's seed is XORed with a per-boot nonce (CNTVCT_EL0, bit-mixed),
+// and the same nonce feeds pass B and pass C within one run. Stale content
+// from ANY previous boot now mismatches, so the leg detects a dropped write
+// again no matter how dirty the fixture is -- no fixture discipline required.
+// Pattern A must stay DETERMINISTIC: mkdisk.py bakes it, so its seed_xor stays
+// 0 and only pattern B is freshened.
 //
 // The two regions are non-overlapping (write starts at pass_sectors+1,
 // one sector past the read region). The READ region is never touched
@@ -72,6 +91,7 @@
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use libthyla_rs::{
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_SIGNAL,
     T_RIGHT_WRITE, t_dma_create, t_dma_map, t_exits, t_irq_create, t_irq_wait,
@@ -207,6 +227,39 @@ const PATTERN_A_INC: u64 = 0x1234_5678_90AB_CDEF;
 const PATTERN_B_MUL: u64 = 0xBF58_476D_1CE4_E5B9;
 const PATTERN_B_INC: u64 = 0x82F6_3B78_1656_67B1;
 const PATTERN_B_SEED_XOR: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
+// #87: the per-boot half of pattern B's seed. Set ONCE by seed_pattern_b()
+// before any pass runs, then read by Pattern::constants(). Zero until seeded,
+// which reproduces the old fixed-seed behaviour -- so a future caller that
+// forgets to seed degrades to "as before", never to a wrong verify (pass B and
+// pass C read the SAME value within a run either way).
+static PATTERN_B_NONCE: AtomicU64 = AtomicU64::new(0);
+
+// EL0-readable virtual counter. Advances continuously and is never reset by a
+// guest reboot, so its value at probe time differs across boots by however long
+// the machine has been up plus all boot jitter -- the property we need. Same
+// primitive usr/irq-bench uses for its EL0 timestamps (EL0VCTEN is set).
+#[inline(always)]
+fn read_cntvct() -> u64 {
+    let v: u64;
+    unsafe { asm!("mrs {0}, cntvct_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+// splitmix64 finalizer -- diffuses the counter's low-order bits across all 64,
+// so two boots whose CNTVCT differs by a handful of ticks still produce
+// completely unrelated seeds (a raw counter would leave the high bits equal).
+#[inline(always)]
+fn mix64(z0: u64) -> u64 {
+    let mut z = z0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn seed_pattern_b() {
+    PATTERN_B_NONCE.store(mix64(read_cntvct()), Ordering::Relaxed);
+}
 
 #[inline(always)]
 fn advance(state: u64, mul: u64, inc: u64) -> u64 {
@@ -576,8 +629,14 @@ enum Pattern { A, B }
 impl Pattern {
     fn constants(self) -> (u64, u64, u64) {
         match self {
+            // A's seed_xor stays 0 -- mkdisk.py bakes pattern A into the READ
+            // region at build time, so it MUST remain deterministic (#87).
             Pattern::A => (PATTERN_A_MUL, PATTERN_A_INC, 0),
-            Pattern::B => (PATTERN_B_MUL, PATTERN_B_INC, PATTERN_B_SEED_XOR),
+            Pattern::B => (
+                PATTERN_B_MUL,
+                PATTERN_B_INC,
+                PATTERN_B_SEED_XOR ^ PATTERN_B_NONCE.load(Ordering::Relaxed),
+            ),
         }
     }
 }
@@ -663,7 +722,13 @@ pub extern "C" fn rs_main() -> i64 {
     // VAs from kernel mode via the uaccess-fault dispatcher (see
     // arch/arm64/uaccess.{S,c,h}). The per-binary `pretouch_rodata_pages`
     // workaround that preceded P4-Ic7→P4-Jc is retired.
-    //
+
+    // #87: freshen pattern B BEFORE any pass runs, so pass B writes and pass C
+    // verifies the same per-boot bytes and no previous boot's residue can
+    // satisfy the read-back. Must precede run_pass; nothing above this point
+    // touches a pattern.
+    seed_pattern_b();
+
     // Phase 1: claim + map virtio-mmio bank.
     let mmio_base = match claim_virtio_mmio_bank() {
         Some(va) => va,

@@ -2959,6 +2959,12 @@ build_disk() {
     #                 prefix of sectors and writes a distinct pattern_b
     #                 to a non-overlapping region.
     #
+    # Only pattern_A is mirrored here -- it is BAKED into the image, so it must
+    # stay deterministic. pattern_B is NOT: since #87 the verifier freshens its
+    # seed per boot with a CNTVCT-derived nonce, so a previous boot's residue
+    # cannot satisfy its write->readback check. Do not "restore" a pattern_B
+    # mirror into mkdisk.py -- that would re-disarm the write proof.
+    #
     # Size (via THYLACINE_DISK_SIZE, default 16M):
     #   - 16M default = ample multi-sector range without slowing
     #     `tools/test.sh` (mkdisk.py runtime <500ms).
