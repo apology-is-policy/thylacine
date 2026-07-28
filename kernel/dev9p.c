@@ -917,10 +917,17 @@ static struct Walkqid *dev9p_walk_attrs(struct Spoor *c, struct Spoor *nc,
                                    (const u8 *const *)name, name_lens,
                                    &nwqid, qids, attrs);
     if (rc == -T_E_NOSYS) {
-        // The server does not speak the extension (netd's unknown-op arm:
-        // Rlerror E_NOSYS -- the one non-supporting server in the v1.0 set;
-        // Stratum implements the op). Latch it for the session and hand the
-        // resolver the fallback sentinel -- this is NOT a walk failure
+        // The server does not speak the extension: its unknown-op arm answers
+        // Rlerror E_NOSYS. That is the MAJORITY case, not an exception --
+        // Stratum is the only v1.0 server that implements the op, and every
+        // native userspace one (netd, ptyfs, tapestryd, and the VIVARIUM
+        // diorama) falls through to E_NOSYS. Stated as a class rather than by
+        // name because the list only grows, and because a reader reasoning
+        // about which sessions the Larder caches must not conclude from a
+        // single named example that the rest are cacheable: this latch is
+        // exactly what keeps them out (L1e, the cacheability gate). Latch it
+        // for the session and hand the resolver the fallback sentinel -- this
+        // is NOT a walk failure
         // (nothing about the path was learned). The abandoned new_fid number
         // is benign (monotonic allocator). A future foreign server replying
         // EOPNOTSUPP would need that code appended to the errno registry
