@@ -128,6 +128,12 @@ Scope: bounded (toolchain + start.S gating + one test file + the banner string +
 the doc reconciliations). W1 is **independently sound** — the LL/SC floor runs on
 every v8.0+ target with no further work — and lands before W1.5.
 
+**Scope caveat — W1 is the KERNEL only.** "Toolchain" above names exactly one
+file, the kernel's. The userspace / pouch toolchains kept `+lse` and were still
+emitting ARMv8.1 atomics long after W1 shipped — which §3 ("the v8.0 floor is the
+binding compile target") does not permit, and which #71 surfaced as a `snare:ill`
+on A72 in 111 of 172 binaries. That gap and its fix are **§4.6 (W1u)**.
+
 ---
 
 ## 4.5 W1.5 — boot-time LSE alternatives-patching (restore LSE, zero runtime cost)
@@ -208,6 +214,108 @@ broadening.
 shape, and the mmu scratch-map helper are authored at W1.5 implementation time
 (the `POUCH-DESIGN.md` deferred-per-chunk-detail pattern). W1.5 is its own
 sub-chunk with its own audit; it lands after W1 and before W2.
+
+---
+
+## 4.6 W1u — the USERSPACE v8.0 floor (outline-atomics)
+
+**W1 retargeted the kernel and stopped there.** Its Toolchain line names exactly
+one file (`cmake/Toolchain-aarch64-thylacine.cmake`) and its Scope line says so
+outright. But §3 declares the v8.0 floor **the binding compile target** — and
+userspace never came down with the kernel:
+
+| Component | flag | file |
+|---|---|---|
+| kernel | `-march=armv8-a` | `Toolchain-aarch64-thylacine.cmake` |
+| userspace C | `-march=armv8-a+lse+pauth+bti` | `Toolchain-aarch64-userspace.cmake` |
+| userspace Rust | `target-feature=+lse,...` | `usr/.cargo/config.toml` |
+| pouch / ports | `-march=armv8-a+lse+pauth+bti` | `Toolchain-aarch64-pouch.cmake` + `tools/build.sh` |
+
+**Measured consequence (#71, 2026-07-28):** on `-cpu cortex-a72` the kernel boots
+and passes **1209/1209** — the first real v8.0-core validation of W1/W1.5, and
+they work — and then userspace dies:
+
+```
+user fault: pid=1852 reason="snare:ill" pc=0x004067e0 -- terminating Proc
+  4067e0: 08e8fec9   casalb w8, w9, [x22]      <- FEAT_LSE, in the Rust allocator
+```
+
+**111 of 172 aarch64 ELFs carry LSE instructions.** The tail is the point:
+`alloc-smoke` has only two, in `ThylaAlloc::alloc`'s init lock, and that is
+enough to kill it. So on the RPi 400 — §3's *named first bare-metal board* —
+Thylacine would boot and then fail to run most of its own userland.
+
+### The technique: outline-atomics (user-voted 2026-07-28)
+
+§4 rejected `-moutline-atomics` **for the kernel**, and gave kernel-scoped
+reasons: a kernel detects its CPU at boot, so it should not pay a call+branch on
+every atomic, and Linux passes `-mno-outline-atomics` for exactly that reason.
+That paragraph also names outline-atomics, correctly, as *"a **userspace**
+portability technique (glibc / distro binaries that must run on any ARMv8
+part)"*. **None of the rejecting reasoning transfers to userspace**, which has no
+boot-time patcher. So the two halves of the system deliberately differ:
+
+- **kernel** — inline LL/SC + the W1.5 boot-time alternatives patcher (zero
+  steady-state branch).
+- **userspace** — `-moutline-atomics`: one binary, LL/SC on v8.0, LSE on v8.1+.
+
+**PAC/BTI are not implicated.** `paciasp`/`bti c` are HINT-space and NOP on cores
+lacking the feature (§4 says so; the disassembly agrees). **LSE is the only true
+`#UD` wall on A72**, so this touches exactly one flag per toolchain.
+
+### The mechanism, verified before adoption (not assumed)
+
+`-moutline-atomics` (clang) / `-C target-feature=+outline-atomics` (rustc) emit
+`bl __aarch64_cas1_acq_rel`-style calls instead of inline atomics. The helper:
+
+```
+__aarch64_cas1_acq_rel:
+  ldrb w16, [x16, #...]   ; __aarch64_have_lse_atomics
+  cbz  w16, .Lllsc        ; 0 -> LL/SC
+  casalb w0, w1, [x2]     ; 1 -> LSE
+```
+
+Four facts checked against real toolchain output, all four holding:
+
+1. **Both languages emit the same helper.** clang `--target=aarch64-…
+   -moutline-atomics` and rustc `--target aarch64-unknown-none -C
+   target-feature=+outline-atomics` each produce an undefined
+   `__aarch64_cas1_acq_rel`.
+2. **Rust already ships the helpers for `target_os = "none"`.** Rust's
+   `libcompiler_builtins` for `aarch64-unknown-none` **defines 52** of them, and
+   a `no_std` binary using them **links**. (The concern that
+   `compiler_builtins` gates aarch64 outline-atomics on `target_os = "linux"`
+   was checked and is **not** the case for the shipped rlib.)
+3. **C gets them from the already-vendored source.**
+   `third_party/compiler-rt/builtins/aarch64/lse.S` is present but excluded from
+   the build — `tools/build.sh` states the reason: `+lse` inlines the atomics so
+   the helpers are never called. Flipping the flag flips that premise.
+4. **It FAILS SAFE.** `__aarch64_have_lse_atomics` links as a **BSS** symbol —
+   zero-initialised — so the helper takes the LL/SC path unless something
+   actively sets it. **Correctness on A72 therefore requires no runtime wiring at
+   all**; it is the same "an unpatched site is correct by construction" property
+   W1.5 has, and it means a bug in the detect-and-set path can only cost speed,
+   never correctness.
+
+### Consequence for sequencing
+
+Because (4) makes correctness independent of detection, W1u splits into two
+independently-safe steps:
+
+- **W1u-a — correctness.** Flip the three userspace toolchains to
+  `-march=armv8-a -moutline-atomics` (keeping `-mbranch-protection=pac-ret+bti`)
+  and build `lse.S` into the pouch compiler-rt. Every target then runs
+  everywhere; LSE-capable cores temporarily run LL/SC.
+- **W1u-b — performance.** Set `__aarch64_have_lse_atomics = 1` at startup from
+  `getauxval(AT_HWCAP) & HWCAP_ATOMICS`. The truth source already exists —
+  `arch/arm64/hwfeat.c` already exports `THWCAP_ATOMICS` (bit 8), landed by the
+  CF-4 A AEAD work — so this is a wire-up, not a new kernel surface.
+
+**Verification bar.** `THYLACINE_ACCEL=tcg THYLACINE_CPU=cortex-a72` must reach
+`Thylacine boot OK`. This is load-bearing and non-obvious: the default
+`tools/test.sh` runs HVF `-cpu host` (an M2 — LSE present), so **a green default
+gate cannot detect an LSE regression**. The A72 boot is the only gate that can,
+and it joins the standing matrix for any change to these flags.
 
 ---
 
@@ -395,11 +503,20 @@ under QEMU (TCG + HVF) without any of W4.
 
 ## 8. Milestones + sequencing
 
-- **M1 = W1 + W1.5 + W2 + W3.** The same binary boots **QEMU-TCG** (gic-version=3
-  or 2) **AND HVF-on-M2** (gic-version=2, sidestepping the `ICC_*` wall) **AND is
-  A72-ISA-ready**. W1 is the LL/SC v8.0 floor (independently sound); W1.5 patches
-  LSE back in at boot on capable cores (§4.5). Delivers the faster-iteration win +
-  the bare-metal groundwork. Bounded; fully testable under QEMU.
+- **M1 = W1 + W1.5 + W1u + W2 + W3.** The same binary boots **QEMU-TCG**
+  (gic-version=3 or 2) **AND HVF-on-M2** (gic-version=2, sidestepping the `ICC_*`
+  wall) **AND is A72-ISA-ready**. W1 is the LL/SC v8.0 floor (independently
+  sound); W1.5 patches LSE back in at boot on capable cores (§4.5); **W1u brings
+  USERSPACE down to the same floor via outline-atomics (§4.6)**. Delivers the
+  faster-iteration win + the bare-metal groundwork. Bounded; fully testable under
+  QEMU.
+  - **"A72-ISA-ready" was KERNEL-ONLY until W1u** (#71, 2026-07-28). W1 shipped
+    the kernel floor and the milestone read as if the system were ready; in fact
+    the kernel passed 1209/1209 on `-cpu cortex-a72` while 111 of 172 userspace
+    binaries still carried `+lse` and died on `snare:ill`. The milestone is not
+    met until W1u lands **and the A72 boot is a standing gate** — the default
+    `tools/test.sh` runs HVF `-cpu host` (LSE present) and structurally cannot
+    catch this class.
 - **M2 = W4.** Actual RPi 400 hardware boot. The culminating, post-v1.0-sized
   platform port.
 
