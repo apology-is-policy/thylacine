@@ -404,6 +404,17 @@ capability-detecting consumers actually parse. The four identity lines are
 loop Thylacine does not run, and meaningless on Linux too); `procs_running` /
 `procs_blocked` (a live state census).
 
+**`CPU implementer` is legitimately `0x00` on some targets.** QEMU's TCG
+`-cpu max` reports `MIDR_EL1 = 0x000f0510` — it deliberately does not claim to be
+an ARM-implemented part — and that is the CPU `tools/test-interactive.sh` runs by
+default. Do not treat a zero implementer as a fault or as evidence the register
+was unread; ARMv8 requires only that `MIDR.Architecture` (19:16) read `0xF`, and
+an *unread* record is all-zero. This cost a boot-fatal `EXTINCTION` when a kernel
+test asserted the opposite: `tools/test.sh` runs HVF with `-cpu host` (Apple) and
+the interactive harness runs TCG with `-cpu max`, so **a green `test.sh` is not a
+sufficient gate for any assertion about a hardware register** — the two harnesses
+disagree about the hardware.
+
 ### The one stated premise
 
 `/proc/stat`'s `cpu` line reports **all non-idle time as `system`**, and this is
