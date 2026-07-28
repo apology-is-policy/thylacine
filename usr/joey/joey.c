@@ -60,6 +60,77 @@ static const char *itoa_dec(long v, char *buf, size_t buf_sz) {
     return buf;
 }
 
+// =============================================================================
+// #80: the long-lived-daemon registry -- what makes the reaper's line decidable
+// =============================================================================
+// reap_adopted_orphans (below) drains joey's ready zombies with a wait-ANY, so
+// the pid it reports spans two cases with opposite operational weight: a routine
+// adopted orphan, or one of joey's OWN boot servers dying (the most significant
+// event a session can witness). An earlier audit (F3) made the wording neutral
+// BECAUSE joey could not tell them apart. It can: joey knows every pid it
+// spawned. Recording the five it never waits for -- corvus, stratumd, ptyfs,
+// diorama, aurora; every other joey child is reaped by-pid at its spawn site --
+// lets the reaper name the daemon instead of hedging.
+//
+// Fail-SAFE direction matters: a miss must never downgrade "a server died" to
+// "routine hygiene", so a full table latches `g_joey_daemon_overflow` and the
+// reaper then reports UNKNOWN rather than assuming orphan. Bump the max when a
+// sixth daemon lands (the overflow line says so out loud).
+#define JOEY_DAEMON_MAX 8
+static struct { long pid; const char *name; } g_joey_daemons[JOEY_DAEMON_MAX];
+static unsigned int g_joey_daemon_count;
+static int          g_joey_daemon_overflow;
+
+// Deliberately SILENT: the selftest below overflows the table on purpose, and a
+// real-looking WARNING emitted from here would print on every boot and poison a
+// log grep. The latch is reported once, by the registry dump at boot-complete.
+static void joey_daemon_record(long pid, const char *name) {
+    if (pid <= 0) return;
+    if (g_joey_daemon_count >= JOEY_DAEMON_MAX) {
+        g_joey_daemon_overflow = 1;
+        return;
+    }
+    g_joey_daemons[g_joey_daemon_count].pid  = pid;
+    g_joey_daemons[g_joey_daemon_count].name = name;
+    g_joey_daemon_count++;
+}
+
+// NULL => pid is not a recorded daemon. Only trustworthy while the table has
+// never overflowed; the caller checks g_joey_daemon_overflow first.
+static const char *joey_daemon_name(long pid) {
+    for (unsigned int i = 0; i < g_joey_daemon_count; i++)
+        if (g_joey_daemons[i].pid == pid) return g_joey_daemons[i].name;
+    return (const char *)0;
+}
+
+#if THYLA_BOOT_PROBES
+// joey_daemon_registry_selftest -- #80. No daemon dies in a healthy boot, so
+// the reaper's DAEMON-EXITED branch and the overflow latch would both ship
+// having NEVER executed. Drive the decision logic on synthetic pids here, then
+// reset; must run BEFORE the first real joey_daemon_record. Returns 0 on pass.
+static int joey_daemon_registry_selftest(void) {
+    int ok = 1;
+    joey_daemon_record(101, "alpha");
+    joey_daemon_record(102, "beta");
+    ok = ok && joey_daemon_name(101) && joey_daemon_name(101)[0] == 'a';
+    ok = ok && joey_daemon_name(102) && joey_daemon_name(102)[0] == 'b';
+    ok = ok && joey_daemon_name(103) == (const char *)0;  // a miss stays a miss
+    joey_daemon_record(0, "ignored");                     // pid <= 0 is dropped
+    ok = ok && joey_daemon_name(0) == (const char *)0;
+    ok = ok && !g_joey_daemon_overflow;
+    // Fill one past the cap: the latch must fire, and the entries already in the
+    // table must survive it (an overflow drops the newcomer, never the record).
+    for (unsigned int i = g_joey_daemon_count; i <= JOEY_DAEMON_MAX; i++)
+        joey_daemon_record((long)(200 + i), "filler");
+    ok = ok && g_joey_daemon_overflow;
+    ok = ok && joey_daemon_name(101) && joey_daemon_name(101)[0] == 'a';
+    g_joey_daemon_count = 0;          // reset -- the real records start clean
+    g_joey_daemon_overflow = 0;
+    if (!ok) t_putstr("joey: #80 daemon-registry selftest FAILED\n");
+    return ok ? 0 : -1;
+}
+#endif /* THYLA_BOOT_PROBES (#80 registry selftest) */
+
 #if THYLA_BOOT_PROBES  /* #61: corvus-protocol + smoke-probe helpers (boot-test only) */
 // dirents_have_name — scan a t_readdir buffer (9P2000.L dirents: qid 13 +
 // offset 8 + type 1 + namelen 2 LE + name) for an EXACT name. A bare substring
@@ -983,6 +1054,7 @@ static int do_corvus_bringup(long storage_dup_fd) {
         t_putstr("joey: t_spawn_with_perms(\"corvus\") FAILED\n");
         return 1;
     }
+    joey_daemon_record(corvus_pid, "corvus");   // #80
     t_putstr("joey: spawned /sbin/corvus pid=");
     t_putstr(itoa_dec(corvus_pid, buf, sizeof(buf)));
     t_putstr("\n");
@@ -1922,12 +1994,27 @@ static void reap_adopted_orphans(void) {
         int st = 0;
         long r = t_wait_pid_for(-1, WAIT_WNOHANG, &st);
         if (r <= 0) break;
-        // Neutral wording + status (audit F3): joey cannot cheaply tell an
-        // adopted orphan from a direct daemon (stratumd / corvus) dying, and a
-        // dead boot server is the most operationally significant event a
-        // session can witness -- don't mislabel it as routine orphan hygiene.
+        // #80: decide the case instead of hedging. The audit-F3 neutral wording
+        // existed only because joey could not tell an adopted orphan from one
+        // of its own boot servers dying; the daemon registry now can, and the
+        // two get opposite labels because they carry opposite weight. On an
+        // overflowed registry, report UNKNOWN -- never downgrade a possible
+        // server death to routine hygiene. The kernel names the orphan itself
+        // at adoption ("proc: orphan pid=... name=..."), so the routine line
+        // stays greppable back to WHICH Proc without joey holding a name table.
         char nb[24];
-        t_putstr("joey: reaped child pid=");
+        const char *dn = g_joey_daemon_overflow ? (const char *)0
+                                                : joey_daemon_name(r);
+        if (dn) {
+            t_putstr("joey: DAEMON EXITED: ");
+            t_putstr(dn);
+            t_putstr(" pid=");
+        } else if (g_joey_daemon_overflow) {
+            t_putstr("joey: reaped child (daemon-or-orphan UNKNOWN: registry "
+                     "overflowed) pid=");
+        } else {
+            t_putstr("joey: reaped adopted orphan pid=");
+        }
         t_putstr(itoa_dec(r, nb, sizeof(nb)));
         t_putstr(" status=");
         t_putstr(itoa_dec(st, nb, sizeof(nb)));
@@ -2518,6 +2605,16 @@ static void sd_stderr_drain_main(void *arg) {
 int main(void) {
     char buf[24];
     t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
+
+#if THYLA_BOOT_PROBES
+    // #80: gate the daemon-registry decision logic BEFORE the first real record.
+    // Pure logic, no environment dependence -> a failure here is always a real
+    // defect, so it is boot-fatal (the ptyfs rule). Without it the DAEMON-EXITED
+    // branch would ship having never executed: no daemon dies in a healthy boot.
+    if (joey_daemon_registry_selftest() != 0) return 1;
+    t_putstr("joey: #80 daemon-registry selftest PASS "
+             "(record + lookup + miss + overflow latch)\n");
+#endif
 
 #if THYLA_BOOT_PROBES
     // === /hello orchestration (P5-spawn-wait) ===
@@ -3776,6 +3873,7 @@ int main(void) {
             (void)t_close(sd_wr);
             return 1;
         }
+        joey_daemon_record(sd_pid, "stratumd");   // #80
         // Drop joey's wr ref. Child's two refs remain. When stratumd
         // exits, the last wr ref drops; subsequent read on rd returns 0
         // (EOF) instead of blocking.
@@ -6772,6 +6870,7 @@ int main(void) {
             t_putstr("joey: t_spawn_with_perms(\"ptyfs\") FAILED\n");
             return 1;
         }
+        joey_daemon_record(ptyfs_pid, "ptyfs");   // #80
         // Bounded liveness connect (the connect_corvus idiom): wait for ptyfs to
         // post /srv/ptyfs. Its selftest runs BEFORE the post, so a connect
         // success also confirms the selftest passed -- a real gate for an
@@ -6888,6 +6987,7 @@ int main(void) {
                 t_putstr("joey: t_spawn_with_perms(\"diorama\") FAILED\n");
                 return 1;
             }
+            joey_daemon_record(dio_pid, "diorama");   // #80
             // Bounded liveness connect (the ptyfs/corvus idiom): its selftest
             // runs BEFORE the post, so a successful connect also gates a silent
             // selftest failure.
@@ -7269,6 +7369,7 @@ int main(void) {
                     t_putstr("joey: t_spawn_with_perms(\"/bin/aurora\") FAILED\n");
                     return 1;
                 }
+                joey_daemon_record(aur_pid, "aurora");   // #80
                 t_putstr("joey: aurora spawned pid=");
                 t_putstr(itoa_dec(aur_pid, dbuf, sizeof(dbuf)));
                 t_putstr(" (the console renderer; the gate's scanout owner)\n");
@@ -7310,6 +7411,29 @@ int main(void) {
     if (clade_gate() != 0) {
         t_putstr("joey: clade CL-4 gate FAILED\n");
         return 1;
+    }
+
+    // #80: dump the daemon registry before the banner. The reaper's ability to
+    // say "DAEMON EXITED" instead of "adopted orphan" is only as complete as
+    // this table, and the failure mode of a SIXTH daemon landing without a
+    // joey_daemon_record() call is silent (its death would read as routine
+    // orphan hygiene). Printing the contents makes that gap visible in every
+    // boot log rather than discoverable only at the moment it misleads -- the
+    // "no silent caps" discipline applied to a diagnostic.
+    {
+        char rb[24];
+        t_putstr("joey: daemon registry (#80; the reaper names these on exit):");
+        for (unsigned int i = 0; i < g_joey_daemon_count; i++) {
+            t_putstr(" ");
+            t_putstr(g_joey_daemons[i].name);
+            t_putstr("=");
+            t_putstr(itoa_dec(g_joey_daemons[i].pid, rb, sizeof(rb)));
+        }
+        if (g_joey_daemon_count == 0) t_putstr(" (none)");
+        if (g_joey_daemon_overflow)
+            t_putstr(" [OVERFLOWED -- bump JOEY_DAEMON_MAX; the reaper can no "
+                     "longer name a dying server]");
+        t_putstr("\n");
     }
 
     // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel

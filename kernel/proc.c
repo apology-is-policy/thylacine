@@ -851,6 +851,26 @@ static void proc_reparent_children(struct Proc *p) {
         c->parent = adopter;
         c->sibling = adopter->children;
         adopter->children = c;
+        // #80: name the orphan HERE, the one point where the kernel still holds
+        // both Procs. joey's reaper sees only a pid, so its "reaped child
+        // pid=N" was undecidable from the log alone -- this line pairs with it.
+        // Rare + notable by construction: Thylacine has no daemonize idiom (joey
+        // spawns its servers directly), so an adoption means some Proc exited
+        // with a live child, and a kproc-adopted one never gets reaped at all.
+        // uart_puts/putdec are the direct bounded FIFO path (no TX ring, no
+        // sleep, no lock) -- safe under g_proc_table_lock. name[] is always
+        // NUL-terminated (proc_set_name) and "" on a never-exec'd Proc.
+        uart_puts("proc: orphan pid=");
+        uart_putdec((u64)c->pid);
+        uart_puts(" name=\"");
+        uart_puts(c->name);
+        uart_puts("\" (parent pid=");
+        uart_putdec((u64)p->pid);
+        uart_puts(" name=\"");
+        uart_puts(p->name);
+        uart_puts("\" exiting) -> adopted by pid=");
+        uart_putdec((u64)adopter->pid);
+        uart_puts("\n");
         // #65 (I-32): reparent splices directly (no proc_link/unlink_child), so
         // rebase both counts to keep child_count == list length. p is dying
         // (its count is about to vanish) but track it symmetrically anyway.
