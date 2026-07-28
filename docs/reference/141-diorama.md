@@ -155,7 +155,8 @@ below that happens to share a name. The node table disambiguates them by parent.
 | `/sys/devices/system/cpu/online` | the online cpulist (`0-3`, `0,2-3`) | `/ctl/cpu` rows |
 | `/sys/devices/system/cpu/possible` | the declared cpulist | `/ctl/cpu` `cpus:` header |
 | `/sys/devices/system/cpu/present` | the declared cpulist | `/ctl/cpu` `cpus:` header |
-| `/sys/devices/system/cpu/cpuN` | one **empty** dir per CPU | `/ctl/cpu` `cpus:` header |
+| `/sys/devices/system/cpu/cpuN` | one dir per CPU | `/ctl/cpu` `cpus:` header |
+| `.../cpuN/cache/index0/coherency_line_size` | the D-cache line, bytes (V-4c-2c) | `/ctl/cpu` `cacheline` column |
 
 `/ctl/cpu` maps onto Linux's present-vs-online distinction exactly, and for free:
 its `cpus:` header is `smp_cpu_count()` — every CPU the **DTB declared**, including
@@ -172,7 +173,13 @@ An unreadable `/ctl/cpu` renders these **empty**, never `0` — a consumer readi
 | Missing | Why |
 |---|---|
 | `kernel_max` | Linux sources it from a compile-time `NR_CPUS`; Thylacine's `DTB_MAX_CPUS` is on no EL0-readable surface |
-| `cpuN/cache/…`, `cpuN/topology/` | hardware facts read from `CTR_EL0`, which is **EL0-trapped** (`SCTLR_EL1.UCT` is clear in `INIT_SCTLR_EL1_MMU_OFF`) exactly as `MIDR_EL1` is |
+| `cpuN/topology/` | core/cluster identity is not derivable from `MPIDR` alone on a board whose DTB the diorama does not re-read |
+
+`cpuN/cache/…` **was** in this table at V-4c-1, on the grounds that `CTR_EL0` is
+EL0-trapped (`SCTLR_EL1.UCT` is clear in `INIT_SCTLR_EL1_MMU_OFF`) exactly as
+`MIDR_EL1` is. §6.17 took the other branch of its own rule — *give the kernel a
+source* — so V-4c-2b reads `CTR_EL0` per-CPU at bring-up and surfaces the decoded
+line size as a `/ctl/cpu` column, and V-4c-2c serves the leaf.
 
 That makes a **third** instance of the per-field question VIVARIUM §6.15 raised
 for `cpuinfo` and `stat`, with an identical shape. All three await **one**
@@ -370,11 +377,65 @@ V-4c-1 landed the `/sys` tree and the world-root restructure (§6.16). Kernel
 byte-unchanged by V-4a, V-4b-3 and V-4c-1; the V-4b-1 / V-4b-2 / V-4b-5 / V-4b-6
 kernel sources landed with their own sub-chunks.
 
-**Owed:** V-4c-2 (the one per-field decision covering `cpuinfo`, `stat` and the
-`cpuN` contents, plus the per-container mount wiring V-7 consumes) and **V-4c-3,
-the arc's focused audit** — V-4b-1..6 and V-4c all landed on self-audit only, and
-devproc/devenv are ARCH §25.4 trigger surfaces, so the formal round is a merge
-gate.
+V-4c-2 landed in three parts: **2a** decided the per-field question once (§6.17),
+**2b** built the kernel sources, **2c** served them. The decision that covers all
+of it: *give the kernel a source, per-CPU, in the kernel's own shape — and omit
+only what has no truth to tell.*
+
+**Owed:** **V-4c-3, the arc's focused audit** — V-4b-1..6 and V-4c all landed on
+self-audit only, devproc/devenv are ARCH §25.4 trigger surfaces, and V-4c-2b put
+two new counters on two more (the scheduler switch chokepoint and GIC dispatch).
+The formal round is a **merge gate** for `gfx-4 → main`.
+
+
+## The two Tier-1 stragglers (V-4c-2c)
+
+| Path | Content | Native source |
+|---|---|---|
+| `/proc/stat` | `cpu`/`cpuN` jiffies, `intr`, `ctxt`, `btime`, `processes` | `/ctl/cpu` columns + `/ctl/sched` `created:` + the two clocks |
+| `/proc/cpuinfo` | one block per **online** CPU, aarch64 shape | `/ctl/cpu` `hwcap:` + `midr` |
+
+`Features` is the `AT_HWCAP` word, already carried in arm64 *uapi* numbering for
+the exec auxv, so the names map one-to-one — the CF-4 chunk paid for the field
+capability-detecting consumers actually parse. The four identity lines are
+`MIDR_EL1`'s fields, which is exactly what Linux prints there.
+
+**Omitted, each for a stated reason:** `BogoMIPS` (a calibration artifact of a
+loop Thylacine does not run, and meaningless on Linux too); `procs_running` /
+`procs_blocked` (a live state census).
+
+### The one stated premise
+
+`/proc/stat`'s `cpu` line reports **all non-idle time as `system`**, and this is
+the single place in the arc where a value is knowingly not what its column
+claims. Thylacine has no EL0-vs-EL1 time accounting anywhere, so the user/system
+split has no source *and no material*. Unlike every other unsourced field, it
+**cannot be omitted**: the columns are positional, so a missing middle column is
+a *wrong* answer rather than an absent one. Every available choice is wrong for a
+reader who wants the split; only the shape of the wrongness is ours to pick.
+
+Utilization (`1 − idle/total`) — what essentially every consumer computes — is
+exactly right either way, and a reader who specifically wants the split gets a
+degenerate answer rather than a plausible fabricated distribution. `iowait`,
+`steal` and `guest` are **honest** zeros (no block-wait accounting, not a guest).
+Revisit the day per-mode accounting lands.
+
+There *is* material for a plausible-looking split — attribute kernel threads'
+`run_ns` to `system` and user threads' to `user` — and it is rejected for the
+same reason a forwarded-IRQ-only counter cannot be called `intr`: it would be a
+different quantity wearing the field's name.
+
+### Trap: an early-returning arm makes a later one unreachable
+
+`walk_child` already had an `is_cpu_node(dir)` arm that returned early. Appending
+a second arm lower in the same function for the cache subtree compiled cleanly
+and would have been **dead code** — the feature would have shipped resolving
+nothing. The same arm also hardcoded `..` → `.../system/cpu`, correct only while
+`cpuN` was a leaf dir; unchanged, `cache/..` would have skipped a level.
+
+Both are one shape: **V-4c-1's code was right for V-4c-1's tree, and extending
+the tree turns previously-correct shortcuts into bugs.** Neither is caught by
+adding code and watching it compile.
 
 
 ## `/self/environ` -- and the first gated proxy (V-4b-6)
