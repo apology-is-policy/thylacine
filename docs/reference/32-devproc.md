@@ -378,7 +378,7 @@ P4-C + A-4b are impl-only — no new TLA+ module (per the 2026-05-23 spec-to-cod
 | `devproc.read_dir_returns_neg1` | Read on root QTDIR returns -1 (readdir deferred). |
 | `devproc.read_partial_offset` | Offset-aware slice; off >= total returns 0. |
 | `devproc.kill_authorized_predicate` | A-4b: the two-axis predicate — owner / CAP_KILL / CAP_HOSTOWNER allow; non-owner-no-cap denies; **CAP_DAC_OVERRIDE denies** (not a kill axis). |
-| `devproc.stat_native_ctl_owner` | A-4b: stat_native reports target uid/gid; ctl mode 0600, status 0444; dev apex -1. |
+| `devproc.stat_native_ctl_owner` | A-4b: stat_native reports target uid/gid; ctl mode 0600, status 0444. V-4b-4: the dev apex STATS (QTDIR, 0555, SYSTEM-owned) rather than answering -1. |
 | `devproc.write_ctl_kill_dispatch` | A-4b: owner kill + killgrp set `group_exit_msg`; non-owner denied (NULL); non-ALIVE refused. |
 
 The A-4b kill tests construct synthetic targets (no running thread, so `group_exit_msg` is the dispatch observable — the death step is the audited #809/#811 EL0-die-check path) and exercise the authority predicate + dispatch directly. Userspace E2E of `/proc/<pid>/ctl` is deferred with the namespace seam (see the ctl section). Future chunks add readdir-on-directory + multi-pid walk under concurrent rfork.
@@ -394,6 +394,7 @@ The A-4b kill tests construct synthetic targets (no running thread, so `group_ex
 | status / cmdline / ns / ctl read | Landed (P4-C) |
 | ctl write: `kill` / `killgrp` + two-axis authority (I-26) | Landed (A-4b) |
 | `devproc_stat_native` (per-pid owner + mode) | Landed (A-4b) |
+| `devproc_stat_native` (the `/proc` apex as a directory) | Landed (V-4b-4) |
 | Multi-step walk | Landed (P4-C) |
 | `proc_find_by_pid` + `proc_for_each` | Landed (P4-C; in `kernel/proc.c`) |
 | `walkqid_alloc` + `walkqid_free` | Landed (P4-C; in `kernel/spoor.c`) |
@@ -439,6 +440,27 @@ The owner axis is `caller->principal_id == target->principal_id`. At v1.0 the *e
 ### `devproc_stat_native` uses the lockless `proc_find_by_pid` window (A-4b audit F2)
 
 `stat_native` dereferences the bare pointer from `proc_find_by_pid` with no lock held — the documented v1.0 "no concurrent reap" window, the *same class* as `devproc_read` above. It is NOT on any authorization path: every `perm_check` site that consults `stat_native` is gated on `dev->perm_enforced`, and `devproc.perm_enforced == false`; stat_native serves only `SYS_FSTAT` introspection + `SEEK_END`. The KILL path does NOT use it (it resolves under `g_proc_table_lock` via `proc_for_each`). The general fix (deref inside a `proc_for_each` cb, as the kill path does) is the right shape if devproc ever gains concurrent reaping or perm-enforcement; tracks with the pre-existing `devproc_read` window.
+
+### The apex STATS but per-pid modes carry no file-type bits (V-4b-4; task #67)
+
+The `/proc` apex used to answer `-1` from `stat_native` ("no per-Proc owner"),
+which `spoor_stat_native` surfaces as `EIO` — so `stat("/proc")` failed, and with
+it `realpath()` on **any** path under `/proc` (musl's resolver walks each prefix
+and treats a non-`EINVAL` errno as fatal). "No owner" and "stat fails" are
+different statements; V-4b-4 makes the apex answer as the real directory it is —
+SYSTEM-owned, `0555`, matching devdev's `DEV_KIND_ROOT` and the devramfs synth
+dirs, where the X bit is what lets the resolver traverse onto the mount point and
+cross. Not an authority: `devproc.perm_enforced` is false, so no gate consults
+this mode (`devproc_kill_authorized` checks at the write, independently).
+
+Still open (task #67): `devproc_mode_for_kind` returns **bare permission bits** —
+`0555` for a pid dir, `0444` for `status`/`exe`/`cwd`/`maps` — with no
+`S_IFDIR`/`S_IFREG`, so a POSIX caller's `S_ISDIR("/proc/1234")` and
+`S_ISREG("/proc/1234/exe")` are both **false**. devdev sets `T_S_IFDIR|0555` for
+its dirs, so the two Devs disagree. The apex above deliberately matches the *local*
+per-pid shape (bare `0555`) rather than devdev's, so the fix stays uniform when it
+lands. Not a VIVARIUM-consumer bug: a Linux program in a Vivarium territory reads
+the *diorama's* `/proc`, which serves its own stat.
 
 ### Reads on root or pid_dir return -1 at v1.0
 

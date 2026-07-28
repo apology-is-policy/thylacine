@@ -22,6 +22,10 @@
 //   rename          -> SYS_RENAME
 //   readdir         -> SYS_READDIR (9P-stream -> struct dirent translation)
 //   unlink / rmdir  -> SYS_UNLINK (+REMOVEDIR)
+//   readlink        -> open+read of /proc/{self,<pid>}/{exe,cwd}, else the
+//                      truthful EINVAL/ENOENT (V-4b-4, patch 0031)
+//   realpath        -> no wire of its own: musl resolves in userspace atop
+//                      readlink, so it works only once readlink tells the truth
 //
 // On success: "pouch-hello-fs: ALL WIRES PASS" + exit 0. Any wire failing
 // prints "pouch-hello-fs: <wire> FAIL ..." and exits non-zero so joey's
@@ -31,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -61,6 +66,92 @@ int main(void) {
 		return fail("getcwd-pathmax", "PATH_MAX buffer rejected (F1 regression)");
 	if (strcmp(cwdbig, cwd0) != 0)
 		return fail("getcwd-pathmax", "PATH_MAX cwd disagrees with small-buf cwd");
+
+	// --- readlink on the /proc link-shaped files (V-4b-4, patch 0031) ---
+	// Linux serves /proc/{self,<pid>}/{exe,cwd} as SYMLINKS; Thylacine serves
+	// them as regular files whose CONTENTS are the path. The boundary-line
+	// translates. These run against NATIVE /proc (no diorama in this Proc's
+	// namespace), which is the point: the shim must not depend on one.
+	char lnk[256];
+	ssize_t ln = readlink("/proc/self/exe", lnk, sizeof lnk - 1);
+	if (ln < 0) return fail("readlink(exe)", "/proc/self/exe failed");
+	if (ln == 0) return fail("readlink(exe)", "empty target");
+	lnk[ln] = '\0';                    // readlink never NUL-terminates
+	if (lnk[0] != '/') return fail("readlink(exe)", "target not absolute");
+	if (!strstr(lnk, "pouch-hello-fs"))
+		return fail("readlink(exe)", "target is not this program");
+
+	// `self` must resolve to OUR pid, not the mounter's -- the shim rewrites
+	// self -> getpid() rather than passing it through, so the numeric spelling
+	// must produce a byte-identical answer.
+	char pidpath[64], lnk2[256];
+	snprintf(pidpath, sizeof pidpath, "/proc/%d/exe", (int)pid);
+	ssize_t ln2 = readlink(pidpath, lnk2, sizeof lnk2 - 1);
+	if (ln2 < 0) return fail("readlink(exe)", "numeric /proc/<pid>/exe failed");
+	lnk2[ln2] = '\0';
+	if (strcmp(lnk, lnk2) != 0)
+		return fail("readlink(exe)", "self and <pid> disagree");
+
+	// cwd is the other link-shaped file, and must agree with getcwd().
+	char lnkc[256];
+	ssize_t lnc = readlink("/proc/self/cwd", lnkc, sizeof lnkc - 1);
+	if (lnc < 0) return fail("readlink(cwd)", "/proc/self/cwd failed");
+	lnkc[lnc] = '\0';
+	if (strcmp(lnkc, cwd0) != 0) return fail("readlink(cwd)", "disagrees with getcwd");
+
+	// TRUNCATION is POSIX-silent: a short buffer yields the truncated length
+	// and still no NUL. Asking for 4 bytes of an absolute path must give "/" +
+	// 3 more, never a terminator inside the count.
+	char tbuf[8];
+	memset(tbuf, 'Z', sizeof tbuf);
+	ssize_t tn = readlink("/proc/self/exe", tbuf, 4);
+	if (tn != 4) return fail("readlink(trunc)", "short buffer did not truncate to 4");
+	if (tbuf[0] != '/') return fail("readlink(trunc)", "truncated target not a path");
+	if (tbuf[4] != 'Z') return fail("readlink(trunc)", "wrote past the buffer");
+
+	// --- readlink's GENERAL arm: no symlinks exist, so an existing path is
+	// EINVAL and an absent one is ENOENT. This is the pair musl's realpath()
+	// reads as its fork in the road -- under the old ENOSYS sentinel realpath
+	// failed on its first component, for every path on the system. ---
+	errno = 0;
+	if (readlink("/proc", lnk, sizeof lnk) >= 0)
+		return fail("readlink(dir)", "an existing path reported a link");
+	if (errno != EINVAL) return fail("readlink(dir)", "existing path errno not EINVAL");
+	errno = 0;
+	if (readlink("/no-such-path-here", lnk, sizeof lnk) >= 0)
+		return fail("readlink(absent)", "an absent path reported a link");
+	if (errno != ENOENT) return fail("readlink(absent)", "absent path errno not ENOENT");
+
+	// A /proc path whose pid field is a very long digit run must be REJECTED by
+	// the matcher and fall to the general arm -- not parsed. The matcher copies
+	// those digits into a fixed buffer, so an unbounded run would smash the
+	// stack; surviving this call and continuing is the regression.
+	//
+	// Deliberately NOT a run of zeros: devproc's parse_decimal accepts leading
+	// zeros, so "/proc/0000...0/exe" resolves to pid 0 (kproc) and genuinely
+	// EXISTS -- the general arm would then answer EINVAL, correctly, and the
+	// test would be asserting devproc's pid-parsing leniency rather than the
+	// buffer bound. A run of nines overflows past 31 bits and cannot name any
+	// Proc, so ENOENT is unambiguous.
+	errno = 0;
+	if (readlink("/proc/99999999999999999999999/exe", lnk, sizeof lnk) >= 0)
+		return fail("readlink(longpid)", "an impossible pid reported a link");
+	if (errno != ENOENT) return fail("readlink(longpid)", "long-pid errno not ENOENT");
+
+	// --- realpath: repaired for free by the EINVAL above (musl 1.2.x resolves
+	// in userspace; it never touches /proc/self/fd, contrary to the note the
+	// LLVM fork's getMainExecutable patch carries). Canonicalizing away "//",
+	// "/./" and a "/.." must land back on the real path. ---
+	// The buffer form of realpath() memcpy's up to PATH_MAX regardless of the
+	// result's length (musl copies out of its own PATH_MAX scratch), so the
+	// caller's buffer must BE PATH_MAX -- a shorter one is a silent overflow,
+	// not a truncation.
+	char rp[PATH_MAX];
+	if (!realpath("/", rp)) return fail("realpath", "root failed");
+	if (strcmp(rp, "/") != 0) return fail("realpath", "root not \"/\"");
+	if (!realpath("/proc/./", rp)) return fail("realpath", "/proc/./ failed");
+	if (strcmp(rp, "/proc") != 0) return fail("realpath", "/proc/./ not canonical");
+	if (realpath("/no-such-path-here", rp)) return fail("realpath", "absent path succeeded");
 
 	// --- mkdir a working dir at root (absolute) ---
 	const char *wdir = "/pouch-fs-probe";
@@ -132,6 +223,14 @@ int main(void) {
 	if (rename("a.txt", "b.txt") != 0) return fail("rename", "a.txt -> b.txt");
 	if (access("a.txt", F_OK) == 0) return fail("rename", "old name still present");
 	if (access("b.txt", F_OK) != 0) return fail("rename", "new name absent");
+
+	// --- realpath on a RELATIVE path (the form build tools actually use):
+	// resolves against the per-Proc cwd and comes back absolute. ---
+	char rpr[PATH_MAX];            // see the PATH_MAX note on the first realpath
+	if (!realpath("b.txt", rpr)) return fail("realpath", "relative b.txt failed");
+	if (rpr[0] != '/') return fail("realpath", "relative result not absolute");
+	if (strcmp(rpr, "/pouch-fs-probe/b.txt") != 0)
+		return fail("realpath", "relative result not cwd-joined");
 
 	// --- readdir: the working dir must contain exactly b.txt (+ . / ..) ---
 	DIR *d = opendir(".");

@@ -1912,3 +1912,116 @@ the build stage chmods both, single-user policy; the per-user game-dir
 copy is the v1.x shape). Untested-in-guest: the rmdir/AT_REMOVEDIR arm
 (no pouch mkdir surface to create a removable directory; the kernel
 SYS_UNLINK REMOVEDIR path carries its own kernel tests).
+
+---
+
+## `readlink` on a system with no symlinks — `0031-pouch-readlink.patch` (VIVARIUM V-4b-4)
+
+Two files: `src/unistd/readlinkat.c` (the implementation) and
+`src/unistd/readlink.c` (a one-line delegation — stock musl issues the
+raw `SYS_readlinkat` syscall there, so leaving it alone would route
+the caller that matters straight past this code and back into the
+`0xFFFF` ENOSYS sentinel).
+
+### The general arm — why `EINVAL` is the fix, not a nicety
+
+Thylacine has **no symlink surface at all**: there is no `SYS_READLINK`,
+and no EL0 path creates or observes one. The `0001` seam therefore
+parked `__NR_readlinkat` at the ENOSYS sentinel — which is the *wrong*
+answer rather than an absent one. On a symlink-free system the result
+is knowable for every path and POSIX already has the words: a path that
+exists and is not a symlink is `EINVAL`; a path that does not exist is
+that path's own error.
+
+The distinction is load-bearing because **musl's `realpath()` is a pure
+userspace resolver** (1.2.x — it does *not* use `/proc/self/fd`,
+contrary to the note the LLVM fork's `getMainExecutable` patch carries)
+that calls `readlink()` on each path prefix and reads the errno as a
+fork in the road:
+
+```c
+ssize_t k = readlink(output, stack, p);
+...
+if (k<0) { if (errno != EINVAL) return 0; /* not a link -> keep walking */ }
+```
+
+`EINVAL` means "not a link, continue"; **any** other errno is fatal. So
+under the ENOSYS sentinel `realpath()` failed on its *first component*,
+for every path on the system, for every ported program. The truthful
+`EINVAL` repairs it whole with no `realpath` patch: on a symlink-free
+system musl's resolver degenerates into exactly what realpath should do
+there — canonicalize `.`, `..`, duplicate slashes, and verify that
+every component exists.
+
+Verified by revert probe: with the general arm returning `-ENOSYS`,
+`realpath("/proc/./")` fails in-guest with errno 38 — and
+`realpath("/")` still passes, having no components to walk.
+
+The arm is one `SYS_STAT`, whose resolution errno (`ENOENT`/`ENOTDIR`/
+`EACCES`) passes through verbatim; that is what lets `realpath()` fail
+for the *right* reason.
+
+### The `/proc` arm — the phenotype's shape translation
+
+Linux presents four files as **symlinks** that Thylacine presents as
+**regular files whose contents are the target path**:
+`/proc/{self,<pid>}/{exe,cwd}`. Both kernel renders are deliberately
+bare bytes — no NUL, no newline — and `kernel/devproc.c` says so at
+`format_exe`/`format_cwd`, naming this consumer. So for those shapes
+`readlink` is an open + read and the byte count is the return value.
+
+It is **not** a licence to open-and-read arbitrary paths — that would
+make `readlink()` a file-contents oracle. The match is a closed
+whitelist of four path shapes, and a **miss is fail-safe**: an
+unmatched path falls to the general arm, whose answer for a regular
+file is `EINVAL`, which is literally true of every file we serve.
+
+`self` is **rewritten to the caller's own pid**, not passed through.
+Native `/proc` has no `self` entry (devproc's per-pid dirs are
+numeric), so a pass-through would resolve only under a mounted
+diorama; and the diorama's `self` resolves to the 9P connection's
+*peer* — the mounter — so under a shared mount it names the wrong Proc
+(VIVARIUM §6.6). A process knows its own pid. The arm is reachable at
+all only because V-4b-3 gave both servers numeric per-pid dirs.
+
+### Posture
+
+- **AT_FDCWD only**, matching `openat()` — a real dirfd is `ENOTSUP`
+  rather than a guess. Relative paths still resolve via the kernel's
+  cwd-join (LS-4), which is the form `realpath()` actually uses.
+- An **empty** `exe`/`cwd` render (kproc, a blob-loaded init, or an
+  I-33 fail-soft `Path` alloc failure) returns `-ENOENT`, not 0.
+  `realpath()` reads a 0 return as ENOENT anyway, and a direct caller
+  would otherwise take `""` for a real link target.
+- **Truncation is POSIX-silent**: copy `min(n, bufsize)`, never
+  NUL-terminate.
+
+### The kernel gap this surfaced
+
+`devproc_stat_native` answered `-1` for the `/proc` apex ("no per-Proc
+owner"), which `spoor_stat_native` surfaces as `EIO` — so `stat("/proc")`
+failed, and `realpath()` on *any* path under `/proc` with it. "No owner"
+and "stat fails" are different statements; the apex is a real directory
+and now answers as one (SYSTEM-owned, `0555`, the `devdev`
+`DEV_KIND_ROOT` / devramfs synth-dir posture). Regression:
+`devproc.stat_native_ctl_owner`.
+
+Two siblings in the same family are **tracked, not fixed** (task #67):
+`/ctl` and `/env` have no `stat_native` slot at all, and devproc's
+per-pid modes carry no `S_IFDIR`/`S_IFREG` bits (so `S_ISDIR("/proc/1234")`
+is false to a POSIX caller). Each needs a per-qid posture decision
+across a whole Dev.
+
+### Deliberately out
+
+`/proc/self/fd/<n>` — not served (task #65, blocked on the #66c
+handle-table lifetime), so it reaches the general arm and answers
+`ENOENT`. Honest: musl's `ttyname_r` reads it and fails either way,
+where before it failed with ENOSYS.
+
+**Proof**: `/bin/pouch-hello-fs` (boot-fatal via joey's `CL-1a wire
+regression` line) — readlinks its own `exe` against **native** `/proc`,
+checks `self` and `<pid>` agree byte-for-byte, checks `cwd` agrees with
+`getcwd()`, checks truncation writes exactly 4 bytes and not a fifth,
+checks the `EINVAL`/`ENOENT` pair, and canonicalizes with `realpath()`
+both absolutely and cwd-relative.

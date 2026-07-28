@@ -85,12 +85,41 @@ Two design findings landed with it:
   is in native `/proc` + `/ctl/procs` first. Scoping the diorama alone would be
   theatre. Owed at V-7, against the native surface.
 
-**NEXT: the V-4b remainder** — and it is three different-shaped jobs, not one
-(§6.10): `environ` needs a kernel source (`/env` is self-only by construction);
-`auxv` needs one too and its value should be weighed first; `fd` is **blocked on
-#66c**, the #926 handle-table lifetime restructure, which is a kernel chunk rather
-than a Vivarium one. Then V-4c (`/sys` + Linux `/dev` + per-container mounts +
-focused audit).
+**V-4b-4 is DONE** — the *shape* half (§6.11), which turned out bigger than the
+one file that named it (task #66). §6.2 governs where a value comes from; V-4b-4 is
+the second question: **in what shape does the consumer expect to read it?** Linux
+serves `/proc/{self,<pid>}/{exe,cwd}` as symlinks, we serve regular files whose
+contents are the path, and the consumer (`getMainExecutable`) calls `readlink`
+specifically. Thylacine has no symlink surface to grow, so the translation went
+into the **phenotype** — the pouch boundary-line — exactly as V-4b-3 predicted.
+
+The finding that made it larger: the seam had parked `readlink` at the `ENOSYS`
+sentinel, and on a symlink-free system that is the *wrong* answer rather than an
+absent one. musl's `realpath()` is a pure userspace resolver (it does **not** use
+`/proc/self/fd`, contrary to the note the LLVM fork's patch carries) that calls
+`readlink()` per path prefix and treats anything but `EINVAL` as fatal — so
+**`realpath()` was broken for every path on the system, for every ported program**.
+The truthful `EINVAL` repairs it whole with no `realpath` patch. Revert-probed:
+with the general arm back at `ENOSYS`, `realpath("/proc/./")` fails in-guest with
+errno 38, while `realpath("/")` still passes (no components to walk).
+
+It also surfaced a kernel gap and a family behind it (task #67): the `/proc` apex
+answered `-1` from `stat_native`, i.e. `EIO`, so `stat("/proc")` failed — fixed
+here (the apex is a real directory and now stats as one). Left tracked because each
+needs a per-qid posture decision across a whole Dev: `/ctl` and `/env` have no
+`stat_native` slot at all, and devproc's per-pid modes carry no `S_IFDIR`/`S_IFREG`.
+
+The LLVM fork delta is now *available* to drop, **not dropped**: that needs an LLVM
+rebuild + the Clade gates, which belong to the track owning that fork. Recording it
+as available rather than done is the correction V-4b-3 made to V-4a, applied to
+itself.
+
+**NEXT: the V-4b remainder** — three different-shaped jobs, not one (§6.10):
+`environ` needs a kernel source (`/env` is self-only by construction); `auxv` needs
+one too and its value should be weighed first; `fd` is **blocked on #66c**, the
+#926 handle-table lifetime restructure, which is a kernel chunk rather than a
+Vivarium one. Then V-4c (`/sys` + Linux `/dev` + per-container mounts + focused
+audit).
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

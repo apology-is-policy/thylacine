@@ -437,18 +437,24 @@ compatibility shim becomes a privilege hole.
   `getMainExecutable` to fall back to `argv[0]` (fork patch `0001`, CL-3).
 
   **CORRECTION (V-4b-3): V-4a served this file, but not yet in the shape that
-  consumer needs, so the fork delta CANNOT be revisited yet.** Linux serves
+  consumer needs, so the fork delta could not be revisited yet.** Linux serves
   `/proc/self/exe` as a **symlink** — `readlink()` yields the path, while
   `open()`+`read()` yields the executable's *bytes*. The diorama serves a regular
-  file whose *contents* are the path, so `readlink()` returns `EINVAL` and LLVM
-  (which calls exactly `readlink`) still falls through to `argv[0]`; the LLVM patch
-  `0006` says as much in its own words. The blocker is structural rather than a
-  diorama bug: **there is no `SYS_READLINK` — Thylacine has no EL0 symlink surface
-  at all** (the 9P `Treadlink`/`Rreadlink` ops exist but are used only by the
-  kernel's own client and Loom's `READLINK` opcode). Tracked, with the likely
-  resolution being to translate `readlink()` in the **phenotype** (V-2's table)
-  rather than to grow a symlink surface — a total, stateless translation, which is
-  precisely what fork Option C's in-kernel fast path is for.
+  file whose *contents* are the path, so `readlink()` failed and LLVM (which calls
+  exactly `readlink`) still fell through to `argv[0]`; the LLVM patch `0005` says as
+  much in its own words. The blocker was structural rather than a diorama bug:
+  **there is no `SYS_READLINK` — Thylacine has no EL0 symlink surface at all** (the
+  9P `Treadlink`/`Rreadlink` ops exist but are used only by the kernel's own client
+  and Loom's `READLINK` opcode).
+
+  **RESOLVED (V-4b-4)** by the predicted route — translating `readlink()` in the
+  **phenotype**, at the pouch boundary-line (§6.11), rather than growing a symlink
+  surface. `readlink("/proc/self/exe")` now returns the path in-guest, and
+  `realpath()` works, so LLVM's `__linux__` branch would run verbatim. **The fork
+  delta is not yet dropped**: doing so requires rebuilding the LLVM fork and
+  re-running the Clade gates, which belongs to the Clade track that owns that fork.
+  Recording it as available, not as done — the mistake this entry exists to correct
+  was claiming a consumer-level win from a mechanism that had not been run.
 - `/proc/self/cmdline`, `/proc/self/status`, `/proc/self/maps` — allocators, crash
   handlers, and every "what am I" probe.
 - `/proc/meminfo`, `/proc/cpuinfo`, `/proc/uptime`, `/proc/stat`.
@@ -472,6 +478,7 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4b-1** | **LANDED.** `/self/cwd` + its kernel source `/proc/<pid>/cwd` | the probe reads a non-empty absolute cwd in-guest |
 | **V-4b-2** | **LANDED.** `/self/maps` + its kernel source `/proc/<pid>/maps` | the probe reads a Linux-shaped map with `[stack]` + a file-backed row naming the binary |
 | **V-4b-3** | **LANDED.** the numeric `/proc/<pid>/…` dirs + the root pid enumeration + `sys/kernel/{ostype,osrelease,version,hostname}` | the probe reads its OWN pid's dir, finds itself in the root readdir, and gets ENOENT for a pid that cannot exist |
+| **V-4b-4** | **LANDED.** the *shape* half (§6.11): `readlink()` in the phenotype — the four `/proc` link-shaped paths, plus the truthful `EINVAL`/`ENOENT` that repairs `realpath()` system-wide; + the `/proc` apex stat | the prover readlinks its own `exe`/`cwd` in-guest against NATIVE `/proc`, `self` and `<pid>` agree, truncation is POSIX-silent, and `realpath()` canonicalizes |
 | **V-4b** | the rest of Tier 2 (`self/{fd,environ,auxv}`) | see §6.10 — `fd` is blocked on the #66c handle-table lifetime, `environ`/`auxv` each need a kernel source |
 | **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
 
@@ -683,6 +690,61 @@ files are *not* one chunk — they have very different blockers:
 So the honest sequencing is: `environ` is a normal kernel+userspace sub-chunk;
 `auxv` is a smaller one whose value should be weighed before building it; `fd`
 waits on a kernel chunk that is not a Vivarium chunk at all.
+
+### 6.11 The other half of the shape problem — `readlink` (V-4b-4)
+
+§6.2 governs *where a value comes from*. V-4b-4 is about the second, independent
+question the diorama raises: **in what SHAPE does a consumer expect to read it?**
+Serving the right bytes under the wrong shape is not compatibility.
+
+Four `/proc` files are the case in point. Linux presents
+`/proc/{self,<pid>}/{exe,cwd}` as **symlinks** — `readlink()` gives the target
+path — while Thylacine presents them as regular files whose *contents* are that
+path. Identical information, incompatible shape, and the consumer that matters
+(LLVM's `getMainExecutable`, §6.3) calls `readlink` specifically.
+
+Thylacine has no symlink surface to grow: there is no `SYS_READLINK`, and no EL0
+path creates or observes a symlink. So the translation belongs in the **phenotype**
+— concretely the pouch boundary-line (`0031-pouch-readlink.patch`), the layer whose
+entire job is presenting Thylacine mechanisms in Linux shape. For those four path
+shapes `readlink` is an open + read; the kernel renders both files as *bare bytes*,
+no NUL and no newline, and `kernel/devproc.c` says so at `format_exe`/`format_cwd`
+naming this consumer, so no reformatting is needed on either side.
+
+**The rule this establishes, and its limit.** Reading a file to answer `readlink`
+is only legitimate for a *closed whitelist* of paths the system defines; done
+generally it would turn `readlink()` into a file-contents oracle. The whitelist is
+four shapes, and a **miss is fail-safe**: an unmatched path falls to the general
+arm, whose answer for a regular file is `EINVAL`, which is literally true of every
+file we serve. `self` is rewritten to the caller's own pid rather than passed
+through — native `/proc` has no `self` entry at all, and the diorama's `self` names
+the *mounter* under a shared mount (§6.6), so a process asserting its own pid is
+both more portable and strictly more correct.
+
+**The finding that made this bigger than one file.** The seam had parked
+`readlink` at the `ENOSYS` sentinel, and on a system with no symlinks that is the
+*wrong* answer rather than an absent one — the result is knowable for every path,
+and POSIX has the word: `EINVAL`. It matters because musl's `realpath()` is a pure
+userspace resolver (1.2.x; it does **not** use `/proc/self/fd`, contrary to the note
+the LLVM fork's patch carries) that calls `readlink()` on each path prefix and reads
+the errno as a fork in the road — `EINVAL` means "not a link, keep walking", any
+other errno is fatal. Under `ENOSYS`, **`realpath()` failed on its first component,
+for every path on the system, for every ported program.** The truthful `EINVAL`
+repairs it whole with no `realpath` patch: on a symlink-free system musl's resolver
+degenerates into exactly what realpath should do there — canonicalize `.`, `..` and
+duplicate slashes, and verify every component exists. Demonstrated by revert probe:
+with the general arm returning `ENOSYS`, `realpath("/proc/./")` fails with errno 38
+in-guest (and `realpath("/")` still passes — no components to walk).
+
+**And a kernel gap it surfaced.** `devproc_stat_native` answered `-1` for the
+`/proc` apex ("no per-Proc owner"), which `spoor_stat_native` surfaces as `EIO` — so
+`stat("/proc")` failed, and `realpath()` on *any* path under `/proc` with it. "No
+owner" and "stat fails" are different statements; the apex is a real directory and
+now answers as one (SYSTEM-owned, `0555`, the `devdev` `DEV_KIND_ROOT` and devramfs
+synth-dir posture). Two siblings in the same family are tracked, not fixed here:
+`/ctl` and `/env` have no `stat_native` slot at all, and devproc's per-pid modes
+carry no `S_IFDIR`/`S_IFREG` bits — each needs a per-qid posture decision across a
+whole Dev, which is a chunk rather than a footnote.
 
 ---
 

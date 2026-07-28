@@ -753,9 +753,18 @@ void test_devproc_stat_native_ctl_owner(void) {
     spoor_unref(status);
     spoor_unref(piddir);
 
+    // The apex has no per-Proc owner, but it IS a directory and must STAT as
+    // one (V-4b-4). It used to answer -1, which spoor_stat_native surfaces as
+    // EIO -- so stat("/proc") failed, and realpath() on any path under /proc
+    // with it (musl's resolver walks each prefix). SYSTEM-owned + 0555, the
+    // devdev DEV_KIND_ROOT / devramfs synth-dir posture.
     struct Spoor *root2 = devproc.attach("");
-    TEST_EXPECT_EQ(devproc.stat_native(root2, &st), -1,
-                   "stat_native(dev apex) = -1 (no per-Proc owner)");
+    TEST_EXPECT_EQ(devproc.stat_native(root2, &st), 0,
+                   "stat_native(dev apex) ok (it is a real directory)");
+    TEST_EXPECT_EQ(st.qid_type, QTDIR,          "apex is QTDIR");
+    TEST_EXPECT_EQ(st.mode, (u32)0555u,         "apex mode = 0555 (world-searchable)");
+    TEST_EXPECT_EQ(st.uid, (u32)PRINCIPAL_SYSTEM, "apex uid = SYSTEM");
+    TEST_EXPECT_EQ(st.gid, (u32)GID_SYSTEM,       "apex gid = SYSTEM");
     spoor_unref(root2);
 
     proc_test_unlink(tgt);

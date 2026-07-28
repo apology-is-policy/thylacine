@@ -68,16 +68,19 @@ all, so a joey-mounted `/self/exe` would read empty.
 
 Honest gaps, deliberately not faked:
 
-- **`exe` is a regular file, where Linux has a symlink** — and this one is a real
-  fidelity gap, not a cosmetic one. On Linux `readlink("/proc/self/exe")` yields
-  the path while `open()`+`read()` yields the executable's *bytes*; here the file's
-  *contents* are the path, so `readlink()` fails with `EINVAL`. LLVM's
-  `getMainExecutable` — the consumer VIVARIUM §6.3 names as the reason this file is
-  load-bearing — calls exactly `readlink`, so it still falls through to `argv[0]`.
-  The blocker is structural: **there is no `SYS_READLINK`**; Thylacine has no EL0
-  symlink surface (the 9P `Treadlink` ops serve only the kernel's own client and
-  Loom). The likely fix is to translate `readlink()` in the *phenotype* rather than
-  grow a symlink surface. Tracked; §6.3 carries the correction.
+- **`exe` is a regular file, where Linux has a symlink** — a real fidelity gap, not
+  a cosmetic one. On Linux `readlink("/proc/self/exe")` yields the path while
+  `open()`+`read()` yields the executable's *bytes*; here the file's *contents* are
+  the path. **CLOSED at V-4b-4, in the phenotype rather than here**: there is no
+  `SYS_READLINK` and Thylacine has no EL0 symlink surface to grow (the 9P
+  `Treadlink` ops serve only the kernel's own client and Loom), so the pouch
+  boundary-line translates instead — `readlink` on the four link-shaped paths
+  (`/proc/{self,<pid>}/{exe,cwd}`) is an open + read of exactly this file. **The
+  diorama is unchanged and deliberately so**: serving these as regular files whose
+  contents are a path is the *native* shape, and it is the phenotype's job to
+  re-present it. See VIVARIUM §6.11 and `78-pouch.md`. Note the shim rewrites
+  `self` → the caller's own pid, so it does not depend on this server's `self`
+  resolution (nor on this server being mounted at all).
 - `cmdline` serves `argv[0]` only — a running Proc retains no argv (`SYS_SPAWN`'s
   is consumed at exec). `argv[0] == the path` is the universal convention and is
   *derived*, not invented.

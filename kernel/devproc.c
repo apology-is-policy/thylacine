@@ -806,7 +806,27 @@ static int devproc_stat_cb(struct Proc *p, void *arg) {
 static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out)                  return -1;
     u64 path = c->qid.path;
-    if (path == PROC_QID_ROOT_PATH)  return -1;   // dev apex: no per-Proc owner
+    if (path == PROC_QID_ROOT_PATH) {
+        // The /proc apex. It has no per-Proc owner -- but "no owner" and "stat
+        // fails" are different statements, and answering -1 made the second
+        // one. spoor_stat_native's failure surfaces as EIO, so stat("/proc")
+        // failed, and with it realpath() on EVERY path under /proc, since
+        // musl's resolver walks each prefix (V-4b-4). The apex is a real
+        // directory; answer as one, the way devdev's DEV_KIND_ROOT and the
+        // devramfs synth dirs answer for theirs -- SYSTEM-owned and
+        // world-searchable, the X bit being what lets the resolver traverse
+        // onto the mount point and cross. Not an authority: devproc's
+        // perm_enforced is false, so no gate consults this mode (the ctl
+        // kill-authority is devproc_kill_authorized's, checked at the write).
+        u8 *rz = (u8 *)out;
+        for (size_t i = 0; i < sizeof(*out); i++) rz[i] = 0;
+        out->uid      = PRINCIPAL_SYSTEM;
+        out->gid      = GID_SYSTEM;
+        out->mode     = 0555u;                  // bare perms, like PQS_PID_DIR
+        out->qid_path = path;
+        out->qid_type = QTDIR;
+        return 0;
+    }
     u32 kind = proc_qid_kind(path);
     int pid  = proc_qid_pid(path);
 
