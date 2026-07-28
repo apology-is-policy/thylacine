@@ -110,6 +110,14 @@ void uart_tx_irq_set_enabled(bool en);
 // RX clear-first discipline #172 established.
 void uart_tx_irq_clear(void);
 
+// #75-audit F2 (TEST-ONLY -- no production caller). Emulate a stalled host
+// serial consumer: uart_tx_try_putc returns false and TXIM arming is gated, so
+// the cons TX ring can never drain. This is how the room-wait park and the #67
+// deadline drop are reached deterministically; both are otherwise only
+// incidentally covered. RX and the direct uart_putc path are UNAFFECTED, so the
+// console keeps working for kernel prints across the stalled window.
+void uart_test_tx_stall(bool on);
+
 // #75. Bounded wait for the TX FIFO to drain to the wire. The extinction /
 // Halls path calls this before its own direct-DR dump so pre-crash ring output
 // is not lost; bounded for the same reason uart_putc is (HX-I -- a dying machine

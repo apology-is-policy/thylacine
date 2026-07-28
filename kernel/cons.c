@@ -290,6 +290,7 @@ struct cons_tx {
     bool        armed;                 // the IRQ-driven path is live (post-GIC)
     bool        writing;               // the writer role (one cons_output_write)
     u32         dropped;               // overrun + deadline drops (diagnostic)
+    u32         room_waits;            // times a writer entered the room-wait (diagnostic)
     struct poll_waiter_list role_waiters;
 };
 
@@ -422,6 +423,17 @@ static void cons_tx_count_drop(void) {
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
 }
 
+// Counts ENTRIES to the room-wait, not completed sleeps: the preceding kick may
+// have freed a slot, in which case tsleep's cond is already true and returns at
+// once. A rising count is the console telling you writers are back-pressuring on
+// a slow consumer -- the diagnostic sibling of `dropped`, which counts the ones
+// that gave up. Taking the ring lock here is free: the caller is about to sleep.
+static void cons_tx_count_room_wait(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    g_cons_tx.room_waits++;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+}
+
 static int cons_tx_has_room(void *arg) {
     (void)arg;
     return (int)(tx_count_load() < CONS_TX_RING_SIZE);
@@ -489,6 +501,77 @@ static void cons_tx_role_release(void) {
 // #75 test hook -- the release half of cons_test_tx_role_hold.
 void cons_test_tx_role_drop(void) { cons_tx_role_release(); }
 
+// #75-audit F2 test hooks. The role has a test (above); the ROOM-WAIT and the
+// #67 DEADLINE did not -- cons_emit_wait short-circuits on echo capture BEFORE
+// cons_tx_push_nowait, so the role test never reaches the ring at all. These let
+// a test stall the UART (uart_test_tx_stall), fill the ring for real, and drive
+// both legs deterministically.
+//
+// cons_test_tx_ring_free discards `n` bytes from the ring HEAD *without* writing
+// them to the UART. Discarding is what keeps the test HONEST about the console:
+// its filler is a ring's worth, thousands of bytes, and a test that flooded the
+// boot log to prove a point would be manufacturing the next harness-blindness
+// bug (#74/#85/#87) in order to test this one.
+//
+// `wake` is the load-bearing parameter, not a convenience. Passing FALSE frees
+// room WITHOUT waking, which is the only way to set up the state the I-9 leg
+// actually needs: a writer still parked while the ring has room. From there the
+// test unstalls and calls the REAL cons_tx_drain_from_irq over the couple of
+// bytes left, so the wake under test is production's freed-gated wakeup() --
+// not a re-implementation of it here. (tsleep re-checks its cond only on a wake,
+// so a silent free leaves the sleeper parked exactly as required.)
+u32 cons_test_tx_ring_free(u32 n, bool wake) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    u32 have  = tx_count_load();
+    u32 freed = (n < have) ? n : have;
+    g_cons_tx.head = (g_cons_tx.head + freed) & (CONS_TX_RING_SIZE - 1u);
+    tx_count_store(have - freed);
+    uart_tx_irq_set_enabled(tx_count_load() != 0u);
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    if (wake && freed != 0u) wakeup(&g_cons_tx_room);
+    return freed;
+}
+
+u32 cons_test_tx_ring_count(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    u32 c = tx_count_load();
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    return c;
+}
+
+// Read under the lock: `dropped` is written under it, and a lockless read would
+// be the C11 mixed-access race the F6 fix removed elsewhere in this file.
+u32 cons_test_tx_dropped(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    u32 d = g_cons_tx.dropped;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    return d;
+}
+
+// The park OBSERVABLE. Without it a test can only INFER that a writer parked
+// ("it ran and has not finished"), which is both timing-dependent and vacuous if
+// the test frees a slot before the writer reaches the wait. A rising count is
+// proof it got there.
+u32 cons_test_tx_room_waits(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    u32 w = g_cons_tx.room_waits;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    return w;
+}
+
+bool cons_test_tx_armed(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    bool a = g_cons_tx.armed;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+    return a;
+}
+
+// Exported so the test asserts against the REAL constants instead of mirroring
+// them -- a silently-drifted mirror is its own bug class (the struct t_stat
+// lesson: a per-mirror size assert proves only that mirror's self-consistency).
+u32 cons_test_tx_ring_capacity(void)  { return CONS_TX_RING_SIZE; }
+u64 cons_test_tx_room_wait_ns(void)   { return CONS_TX_ROOM_WAIT_NS; }
+
 // LS-8b: the echo / output sink. Console echo (cons_rx_input) AND program output
 // (cons_output_write) emit one cooked byte through cons_emit. In production it is
 // uart_putc; a test enables capture (cons_test_echo_capture) to buffer the bytes
@@ -546,6 +629,7 @@ static bool cons_emit_wait(u8 b) {
     for (;;) {
         if (cons_tx_push_nowait(b)) return true;
         cons_tx_kick();
+        cons_tx_count_room_wait();
         int ts = tsleep(&g_cons_tx_room, cons_tx_has_room, NULL,
                         timer_now_ns() + CONS_TX_ROOM_WAIT_NS);
         if (ts == TSLEEP_INTR) return false;            // #811 death -> short write

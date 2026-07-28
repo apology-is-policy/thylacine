@@ -508,12 +508,49 @@ acquire/release, so:
 bytes land contiguous. **Revert-probed** — deleting `cons_tx_role_acquire` from
 `cons_output_write` makes the suite read 1188/1189 FAIL on exactly that test.
 
-The **ring** has no dedicated test on purpose: every byte of console output on
-every boot flows through it, so a ring bug means no boot at all — the 1189-test
-boot, the login, and the aurora renderer are its integration proof. The
-byte-interleave itself is an SMP race that no deterministic single-threaded test
-can reproduce; the SMP gate and the `⊢`-tearing signature at 0/40 are its
+The ring's **steady-state** path needs no dedicated test: every byte of console
+output on every boot flows through it, so a ring bug means no boot at all — the
+full-suite boot, the login, and the aurora renderer are its integration proof.
+The byte-interleave itself is an SMP race that no deterministic single-threaded
+test can reproduce; the SMP gate and the `⊢`-tearing signature at 0/40 are its
 runtime witness.
+
+Its **back-pressure** path is a different matter, and `cons.tx_room_wait_and_deadline`
+(the #75-audit F2 item, owed at the close and now discharged) covers it. The role
+test above runs under echo capture, which short-circuits `cons_emit_wait` *before*
+`cons_tx_push_nowait` — so it never reaches the ring, and the two legs that only
+run when the ring fills had no deterministic proof at all:
+
+- **(A) the #67 deadline.** `uart_test_tx_stall(true)` emulates a stalled host
+  consumer, a `cap + 64` write is issued, and the call must return a **short
+  count** having actually waited (`elapsed >= CONS_TX_ROOM_WAIT_NS`). This is the
+  anti-wedge property of the trusted-path console: were it to regress, a paused
+  terminal would hang every console writer rather than dropping bytes — and a
+  hang here takes the console with it, so the failure would be silent.
+- **(B) the room-wait I-9 wake.** A second writer parks on the full ring (proved
+  by the `room_waits` counter rising, not by inferring from "it ran and has not
+  finished"); the test then silently frees all but two bytes (`wake == false`, so
+  the sleeper stays parked) and lets the **real** `cons_tx_drain_from_irq` move
+  those two. The wake under test is therefore production's own `freed`-gated
+  `wakeup()`, not a re-implementation in the test.
+
+Both legs are **revert-probed against production code**: making `cons_emit_wait`
+drop instantly instead of parking fails (A)'s elapsed assertion, and deleting the
+`if (freed) wakeup(...)` from `cons_tx_drain_from_irq` fails (B).
+
+Two properties of the test are deliberate rather than incidental. It **discards**
+its ring-sized filler instead of flushing it — only the two bytes (B) genuinely
+drains ever reach the wire, and those are spaces, so the boot log the gates parse
+is not polluted. And every assertion sits **outside** the stalled window, because
+`TEST_ASSERT` returns on failure: an assertion inside it would leave the ring
+stalled for the rest of the boot, and later tests writing real console bytes would
+then block 20 ms per byte against a ring that can never drain — converting a clean
+FAIL into a mystery timeout. A test's failure mode must not destroy the diagnosis.
+
+`cons_test_tx_room_waits()` exposes a counter that is also a genuine production
+diagnostic: a rising `room_waits` is the console reporting that writers are
+back-pressuring on a slow consumer, the sibling of `dropped` (which counts the
+ones that gave up).
 
 ## Error paths
 

@@ -139,12 +139,32 @@ static void uart_rx_set_enabled(bool en) {
     else    uart_imsc_update(0u, PL011_IMSC_RXIM | PL011_IMSC_RTIM);
 }
 
+// #75-audit F2 (test-only; production never sets this). Emulates the #67
+// scenario the cons TX ring's room-wait + deadline exist to survive: a stalled
+// host serial consumer whose TX FIFO never accepts another byte.
+//
+// Why not the uart_selftest_tx_bounded technique (swap pl011_base at a scratch
+// array whose FR reads TXFF forever): that test holds the swap IRQ-MASKED across
+// one uart_putc. The room-wait must be held across a 20 ms SLEEP with IRQs open,
+// during which the RX IRQ can touch a >0x3c offset the scratch array does not
+// cover and every other CPU's console byte would land in it. A flag on the
+// non-blocking primitive is narrower and sleep-safe: RX and the direct uart_putc
+// path keep working (so kernel prints during the window still reach the wire)
+// and only the ring's drain is starved.
+//
+// It MUST also suppress TXIM. A software-only stall creates a state the hardware
+// cannot: the ring says "FIFO full" while the real FIFO is EMPTY, so an armed
+// TXIM stays asserted against a drain that will never move a byte -- an IRQ
+// storm. Stalling therefore forces TXIM off first, then gates the arm.
+static bool g_uart_tx_test_stalled;   // relaxed-atomic: read in IRQ + process context
+
 // #75 / P1-F. Arm or disarm the PL011 TX interrupt. Called by the cons TX ring
 // (kernel/cons.c) under its ring lock, with the rule "TXIM armed iff the ring is
 // non-empty" evaluated in the same critical section -- so a drain that empties
 // the ring and a push that refills it can never leave a non-empty ring with TX
 // interrupts off (the silent-console wedge).
 void uart_tx_irq_set_enabled(bool en) {
+    if (__atomic_load_n(&g_uart_tx_test_stalled, __ATOMIC_RELAXED)) return;
     if (en) uart_imsc_update(PL011_IMSC_TXIM, 0u);
     else    uart_imsc_update(0u, PL011_IMSC_TXIM);
 }
@@ -164,10 +184,26 @@ void uart_tx_irq_clear(void) {
 // IRQ context (unlike uart_putc, whose bounded TXFF spin is #67's compromise for
 // the direct path).
 bool uart_tx_try_putc(char c) {
+    if (__atomic_load_n(&g_uart_tx_test_stalled, __ATOMIC_RELAXED)) return false;
     uintptr_t base = pl011_base;
     if (mmio_read32(base, PL011_FR) & PL011_FR_TXFF) return false;
     mmio_write32(base, PL011_DR, (uint32_t)(unsigned char)c);
     return true;
+}
+
+// #75-audit F2 test hook -- see g_uart_tx_test_stalled. Stalling forces TXIM OFF
+// before gating the arm, so the suppressed window can never leave the TX line
+// asserted. Unstalling only clears the gate: it deliberately does NOT re-arm,
+// because "TXIM armed iff the ring is non-empty" is the RING's invariant to
+// re-establish (its next drain does so) -- re-arming here against an empty ring
+// would be the very inversion the rule exists to prevent.
+void uart_test_tx_stall(bool on) {
+    if (on) {
+        uart_tx_irq_set_enabled(false);   // still ungated: takes effect
+        __atomic_store_n(&g_uart_tx_test_stalled, true, __ATOMIC_RELAXED);
+    } else {
+        __atomic_store_n(&g_uart_tx_test_stalled, false, __ATOMIC_RELAXED);
+    }
 }
 
 // True once the TX FIFO has fully drained to the wire.

@@ -113,6 +113,27 @@ void cons_test_tx_role_hold(void);
 void cons_test_tx_role_drop(void);
 bool cons_test_tx_role_held(void);
 
+// #75-audit F2 test hooks (test-only). The role test above runs under echo
+// capture, which short-circuits cons_emit_wait BEFORE the ring -- so the
+// ROOM-WAIT park and the #67 DEADLINE drop had no deterministic coverage at all.
+// Paired with uart_test_tx_stall (arch/arm64/uart.h) these drive both legs:
+// stall the UART, fill the ring for real, then either let the deadline fire or
+// free a slot and prove the parked writer wakes.
+//
+// cons_test_tx_ring_free DISCARDS n bytes from the head (never writing them to
+// the UART), keeping the test's ring-sized filler off the wire and out of the
+// boot log the gates parse. `wake == false` frees room WITHOUT waking, which is
+// how the test parks a writer over a ring that has room -- the setup that lets
+// the REAL cons_tx_drain_from_irq deliver the wake under test. Returns the
+// number of bytes actually freed.
+u32  cons_test_tx_ring_free(u32 n, bool wake);
+u32  cons_test_tx_ring_count(void);
+u32  cons_test_tx_dropped(void);
+u32  cons_test_tx_room_waits(void);
+bool cons_test_tx_armed(void);
+u32  cons_test_tx_ring_capacity(void);
+u64  cons_test_tx_room_wait_ns(void);
+
 // #174 backpressure: true iff the RX ring can accept at least one more byte
 // (count < CONS_RING_SIZE). The PL011 RX drain (uart_rx_handler / uart_rx_pump)
 // checks this BEFORE reading a byte out of the FIFO -- when the ring is full it

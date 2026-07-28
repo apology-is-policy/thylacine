@@ -46,6 +46,7 @@
 
 void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
+void test_cons_tx_room_wait_and_deadline(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
 void test_cons_rx_can_accept_boundary(void);
@@ -99,6 +100,11 @@ extern bool uart_rx_path_enabled(void);
 // #67: uart_putc's bounded-TXFF-spin self-test lives in arch/arm64/uart.c
 // (needs the static PL011 base + register offsets).
 extern bool uart_selftest_tx_bounded(void);
+
+// #75-audit F2: the stalled-consumer emulator (arch/arm64/uart.c) + the clock
+// the deadline assertion reads.
+extern void uart_test_tx_stall(bool on);
+extern u64  timer_now_ns(void);
 
 // #943 regression: the PL011 RX path must be live after boot (CR.UARTEN|RXE).
 // QEMU's PL011 resets with UARTEN clear, so this FAILS on the pre-fix kernel
@@ -1471,5 +1477,194 @@ void test_cons_tx_role_serializes_writers(void) {
 
     cons_test_echo_capture(false);
     test_kthread_join_free(w, &g_txr_exited);
+    cons_settle_mgr();
+}
+
+// ---------------------------------------------------------------------------
+// cons.tx_room_wait_and_deadline (#75-audit F2)
+// ---------------------------------------------------------------------------
+//
+// THE OWED TEST from the #75 close. tx_role_serializes_writers (above) covers
+// the writer role, but it runs under echo capture -- which short-circuits
+// cons_emit_wait BEFORE cons_tx_push_nowait -- so it never reaches the ring.
+// That left the ring's two wait/wake legs with no deterministic coverage:
+//
+//   (A) the #67 DEADLINE. A stalled host consumer must yield a bounded SHORT
+//       WRITE. This is the anti-wedge property of the trusted-path console: if
+//       it regressed, a paused terminal would HANG every console writer instead
+//       of dropping bytes -- and a hang here takes the console with it, so the
+//       failure would be silent.
+//   (B) the ROOM-WAIT I-9 wake. A writer parked on a full ring must resume when
+//       the drain frees a slot. A lost wake strands it for the whole deadline,
+//       and without (A) forever.
+//
+// uart_test_tx_stall emulates the stall (the FIFO never accepts AND TXIM arming
+// is gated -- a software-only stall against an EMPTY hardware FIFO would leave
+// the TX line asserted against a drain that can never progress: an IRQ storm).
+// The harness prints via uart_puts (direct), which the stall leaves alone, so
+// test output still reaches the console across the window.
+//
+// The filler is DISCARDED, never flushed. A test that dumped a ring's worth of
+// padding into the boot log to prove a point would be manufacturing the next
+// harness-blindness bug (#74/#85/#87) in order to test this one.
+//
+// NON-VACUOUS against PRODUCTION code (revert probes recorded in the commit):
+//   (A) make cons_emit_wait give up on a full ring without tsleeping at all
+//       (an instant drop) -> the elapsed assertion fails. Removing the
+//       TSLEEP_TIMEDOUT arm outright instead hangs the boot here, which is the
+//       same property observed the other way round.
+//   (B) drop the `if (freed) wakeup(...)` from cons_tx_drain_from_irq -> the
+//       parked writer is never woken, times out, and returns 0 instead of 1.
+
+#define TXW_FILL_MAX 9216u
+static u8 g_txw_fill[TXW_FILL_MAX];
+
+static volatile u32  g_txw_ran;
+static volatile long g_txw_ret;
+static volatile bool g_txw_exited;
+
+static void txw_writer(void) {
+    g_txw_ran++;
+    g_txw_ret = cons_output_write(" ", 1);   // SPACE: see the filler note below
+    g_txw_ran++;
+    test_kthread_park_terminal(&g_txw_exited);
+}
+
+void test_cons_tx_room_wait_and_deadline(void) {
+    const u32 cap      = cons_test_tx_ring_capacity();
+    const u64 deadline = cons_test_tx_room_wait_ns();
+
+    TEST_ASSERT(cap + 64u <= TXW_FILL_MAX,
+                "filler must exceed the ring -- grow TXW_FILL_MAX");
+    // Asserted, not assumed: cons_tx_arm() runs at boot_main before
+    // test_run_all(). Disarmed, every push takes the direct path and succeeds,
+    // so the ring could never fill and BOTH legs below would pass vacuously.
+    TEST_ASSERT(cons_test_tx_armed(),
+                "TX ring must be armed or this test is vacuous");
+
+    // SPACE deliberately, for two reasons. No NL, so ONLCR does not expand and
+    // one input byte is exactly one ring byte -- that is what makes the counts
+    // below exact. And part (B) genuinely drains a couple of bytes to the wire
+    // (that is the point: the wake must come from the real drain), so whatever
+    // survives lands in the boot log next to this test's own PASS line. Spaces
+    // are invisible there; '.' produced a "..PASS" that reads like corruption
+    // in a log whose trustworthiness is the whole reason this test exists.
+    for (u32 i = 0; i < TXW_FILL_MAX; i++) g_txw_fill[i] = (u8)' ';
+
+    cons_test_tx_ring_free(cap, true);
+    TEST_EXPECT_EQ(cons_test_tx_ring_count(), 0u, "ring empty before the test");
+
+    // --- (A) the #67 deadline: a stalled consumer yields a SHORT write -------
+    u32 dropped0 = cons_test_tx_dropped();
+    uart_test_tx_stall(true);
+    u64 t0      = timer_now_ns();
+    long ret    = cons_output_write(g_txw_fill, (long)(cap + 64u));
+    u64 elapsed = timer_now_ns() - t0;
+    uart_test_tx_stall(false);
+
+    // Sample and DISCARD before asserting, for the same reason part (B) does:
+    // TEST_ASSERT returns on failure, and a return with a ring's worth of filler
+    // still queued would let the next console write flush thousands of stray
+    // bytes into the boot log. Clean up first, judge second.
+    u32 a_dropped = cons_test_tx_dropped();
+    u32 a_cnt     = cons_test_tx_ring_count();
+    cons_test_tx_ring_free(cap, true);
+    u32 a_cnt_end = cons_test_tx_ring_count();
+
+    // Exact, not a range. In the kernel test phase there is provably no other
+    // console writer -- EL0 does not exist yet, and echo needs RX at a prompt
+    // that has not been printed. If this ever misses, something DID write to
+    // the console during the test phase and that is worth knowing.
+    TEST_EXPECT_EQ((u32)ret, cap,
+                   "short write: exactly a ring's worth accepted, the rest dropped");
+    TEST_ASSERT(ret < (long)(cap + 64u), "the write did NOT complete in full");
+    TEST_ASSERT(elapsed >= deadline,
+                "the writer PARKED for the deadline (not an instant drop)");
+    TEST_ASSERT(a_dropped > dropped0, "the deadline drop was counted");
+    TEST_EXPECT_EQ(a_cnt, cap, "ring holds the accepted bytes");
+    TEST_EXPECT_EQ(a_cnt_end, 0u,
+                   "filler discarded -- no test padding reached the console");
+
+    // --- (B) the room-wait I-9 wake -----------------------------------------
+    g_txw_ran = 0;
+    g_txw_ret = -999;
+    g_txw_exited = false;
+
+    // Part (A) asserted only AFTER its unstall, and part (B) does the same --
+    // it records into locals across the stalled window and asserts once the
+    // stall is lifted. This is deliberate: TEST_ASSERT returns from the test on
+    // failure, so an assertion INSIDE the window would leave the console TX ring
+    // permanently stalled, and every later test that writes real console bytes
+    // would then block 20 ms per byte against a ring that can never drain --
+    // turning a clean FAIL into a mystery timeout. A test's failure mode must
+    // not destroy the diagnosis (#74/#85/#87 are all that bug in other clothes).
+    uart_test_tx_stall(true);
+
+    // Fill to exactly full from this thread: every push fits, so this never
+    // parks and the role is released before the contender starts.
+    long b_filled   = cons_output_write(g_txw_fill, (long)cap);
+    u32  b_cnt_full = cons_test_tx_ring_count();
+    u32  waits0     = cons_test_tx_room_waits();
+
+    struct Thread *w = thread_create(kproc(), txw_writer);
+    u32 b_waits = waits0, b_ran_parked = 0, b_cnt_parked = 0;
+    u32 b_freed = 0, b_cnt_left = 0, b_ran_silent = 0;
+    if (w != NULL) {
+        ready(w);
+        // Wait for the PARK ITSELF, not for a proxy. Inferring the park from
+        // "it ran and has not finished" would be both timing-dependent and
+        // vacuous if we freed a slot before the writer reached the wait. The
+        // loop exits the moment it parks, keeping us well inside the deadline.
+        for (int spins = 0;
+             cons_test_tx_room_waits() == waits0 && g_txw_ran < 2u && spins < 10000;
+             spins++)
+            sched();
+        b_waits      = cons_test_tx_room_waits();
+        b_ran_parked = g_txw_ran;
+        b_cnt_parked = cons_test_tx_ring_count();
+
+        // Now make the wake come from PRODUCTION, not from this test. Silently
+        // discard all but two bytes (wake=false, so the writer stays parked
+        // even though the ring has room -- tsleep re-checks its cond only on a
+        // wake); the real cons_tx_drain_from_irq below then moves those two and
+        // delivers the wake under test. Two bytes is also all the filler that
+        // ever reaches the console from this test.
+        b_freed      = cons_test_tx_ring_free(cap - 2u, false);
+        b_cnt_left   = cons_test_tx_ring_count();
+        b_ran_silent = g_txw_ran;
+    }
+
+    uart_test_tx_stall(false);
+
+    // The drain runs before the assertions so the parked writer always gets its
+    // wake and completes -- otherwise a failing assertion here would strand it
+    // and the join below would have nothing to join.
+    u32  b_ran_done = 0;
+    long b_ret      = -999;
+    if (w != NULL) {
+        cons_tx_drain_from_irq();
+        for (int spins = 0; g_txw_ran < 2u && spins < 10000; spins++) sched();
+        b_ran_done = g_txw_ran;
+        b_ret      = g_txw_ret;
+    }
+    cons_test_tx_ring_free(cap, true);
+    u32 b_cnt_end = cons_test_tx_ring_count();
+
+    TEST_ASSERT(w != NULL, "thread_create");
+    TEST_EXPECT_EQ((u32)b_filled, cap, "ring filled to capacity without parking");
+    TEST_EXPECT_EQ(b_cnt_full, cap, "ring full");
+    TEST_ASSERT(b_waits > waits0, "the contender PARKED on the room-wait");
+    TEST_EXPECT_EQ(b_ran_parked, 1u, "parked writer has not completed");
+    TEST_EXPECT_EQ(b_cnt_parked, cap, "ring still full while parked");
+    TEST_EXPECT_EQ(b_freed, cap - 2u, "silently freed all but two bytes");
+    TEST_EXPECT_EQ(b_cnt_left, 2u, "two bytes left to drain");
+    TEST_EXPECT_EQ(b_ran_silent, 1u, "a silent free does NOT wake the writer");
+    TEST_EXPECT_EQ(b_ran_done, 2u, "writer woke and completed");
+    TEST_EXPECT_EQ(b_ret, 1L,
+                   "the parked byte was written -- a LOST wake in "
+                   "cons_tx_drain_from_irq would instead time out and return 0");
+    TEST_EXPECT_EQ(b_cnt_end, 0u, "filler discarded");
+
+    test_kthread_join_free(w, &g_txw_exited);
     cons_settle_mgr();
 }
