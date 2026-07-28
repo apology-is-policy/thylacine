@@ -417,10 +417,15 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
         // V-4c-2c: `..` climbs the cache chain rather than always landing on
         // .../system/cpu -- the V-4c-1 shortcut was correct only while cpuN was
         // a leaf dir. A wrong parent here would let `cd cache/..` skip a level.
+        // h_walk does NOT require the source to be a directory (9P lets a client
+        // walk from any unopened fid), so the LEAF's `..` is reachable too and
+        // must name index0 -- a catch-all landing on .../system/cpu here would
+        // skip two levels and be a wrong answer rather than an error.
         if name == b".." {
             return Some(match kind {
                 CK_CACHE => cpu_qid(n),
                 CK_INDEX0 => cpu_qid_kind(n, CK_CACHE),
+                CK_LINESZ => cpu_qid_kind(n, CK_INDEX0),
                 _ => N_SYSFS_CPU,
             });
         }
@@ -2686,6 +2691,12 @@ pub fn selftest() -> Result<(), &'static str> {
     }
     if walk_child(cache, b"..") != Some(cpu_qid(0)) || walk_child(index0, b"..") != Some(cache) {
         return Err("cache chain .. skipped a level");
+    }
+    // The LEAF's `..` is reachable too: h_walk does not require the source fid
+    // to be a directory, so a catch-all here would answer .../system/cpu and
+    // skip two levels -- a wrong answer rather than an error.
+    if walk_child(linesz, b"..") != Some(index0) {
+        return Err("leaf .. skipped two levels");
     }
 
     // --- V-4c-1: parse_cpu_name is the resolution gate, like parse_pid. Unlike
