@@ -56,8 +56,15 @@
 //   /meminfo         file     MemTotal/MemFree in kB
 //   /uptime          file     "<up> <idle>" seconds
 //
-// Deferred with their kernel prerequisites (VIVARIUM section 6.7):
-// /proc/<pid>/... , /cpuinfo, /stat, /self/{fd,auxv}.
+// Not served, each for its own recorded reason (VIVARIUM section 6.10):
+//   /self/fd    BLOCKED on #66c -- a cross-Proc fd-list read of a live peer
+//               races the #926 at-exit handle-table free. There is no other
+//               native source, and inventing one is the section 6.7 failure.
+//   /self/auxv  WEIGHED AND NOT BUILT (section 6.14): zero live readers, and a
+//               viv-launched binary receives its auxv on the stack by
+//               construction, since ld.so bootstraps out of AT_PHDR/AT_ENTRY.
+//   /cpuinfo    Tier 3, with /sys (V-4c).
+//   /stat       Tier 3.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;

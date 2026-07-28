@@ -481,7 +481,7 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4b-4** | **LANDED.** the *shape* half (§6.11): `readlink()` in the phenotype — the four `/proc` link-shaped paths, plus the truthful `EINVAL`/`ENOENT` that repairs `realpath()` system-wide; + the `/proc` apex stat | the prover readlinks its own `exe`/`cwd` in-guest against NATIVE `/proc`, `self` and `<pid>` agree, truncation is POSIX-silent, and `realpath()` canonicalizes |
 | **V-4b-5** | **LANDED.** the synthetic-Dev stat family (§6.12): `stat_native` for `/ctl` + `/env`, the POSIX file-type bits on devproc's modes, and the leading-zero pid reject that restores native-vs-diorama coherence | the prover stats `/ctl` + `/env` as directories in-guest, `S_ISDIR("/proc/<pid>")` is true, `realpath("/ctl/./procs")` canonicalizes, and a zero-padded pid does not resolve |
 | **V-4b-6** | **LANDED.** `/self/environ` (§6.13): a new kernel source `/proc/<pid>/environ` rendering the Env as Linux's NUL-separated block — offset-aware, and the first devproc info file to carry a real read gate | the prover sets a variable in its own `/env` and reads the record back through the diorama in-guest; the per-pid variant is proven ABSENT (the cross-principal leak) |
-| **V-4b** | the rest of Tier 2 (`self/{fd,auxv}`) | see §6.10 — `fd` is blocked on the #66c handle-table lifetime, `auxv` needs a kernel source and a value judgement first |
+| **V-4b** | **CLOSED.** the rest of Tier 2 (`self/{fd,auxv}`) is dispositioned, not built: `auxv` **weighed and deliberately not built** (§6.14 — zero live readers, and a `viv`-launched binary gets its auxv on the stack by construction); `fd` **blocked on #66c**, the #926 handle-table lifetime restructure, which is a kernel chunk and not a Vivarium one | both dispositions recorded with evidence + a named trigger; neither is a silent omission |
 | **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property — now including §6.13's **deputy-authority** half (a proxy must not be allowed where its client would be denied) — and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5/6 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
@@ -686,7 +686,7 @@ files are *not* one chunk — they have very different blockers:
 | File | Native source | Status |
 |---|---|---|
 | `self/environ` | **none reachable** — `/env` (devenv, §9.7) resolves `current_thread()->proc->env` **by construction**, so the diorama reading it gets its OWN environment, never the peer's | **DONE at V-4b-6** (§6.13). The §6.7 prediction held for the shape — a renderer over an existing group — but missed two things it could not have known from outside: the render had to be *offset-aware* rather than format-and-slice, and it is the first proxied file whose gate makes the *deputy's* authority differ from its client's. |
-| `self/auxv` | **none** — `exec_fill_auxv` writes the block onto the user stack at exec and nothing retains it | needs the kernel to *record* (or reconstruct) the auxv. Lower value than it looks: a program's own auxv arrives on its stack, and `/proc/self/auxv` is a fallback path used mainly by sanitizers and `ldd`. |
+| `self/auxv` | **none** — `exec_fill_auxv` writes the block onto the user stack at exec and nothing retains it | **WEIGHED AND NOT BUILT** (§6.14). Zero live readers in the tree (every consumer takes the stack path; SDL2's is compiled out twice on aarch64), and structurally: auxv-on-the-stack is a *prerequisite* of V-7, so a `viv`-launched binary always has one. Named trigger + the retained-copy-not-reconstruction constraint in §6.14. |
 | `self/fd` | **BLOCKED**, and not on us | `/proc/<pid>/fd` is deferred to **#66c** (ARCH §9.6.9): a cross-Proc fd-list read of a live peer races the #926 at-exit handle-table free, which runs outside `g_proc_table_lock` with lockless slot-zeroing. Closing it needs the #926 table-lifetime restructure — a death-path-lineage change that ARCH already says "warrants its own focused chunk + audit". **The diorama must not route around this**: there is no other native source for a Proc's fd list, and inventing one would be exactly the §6.7 failure. |
 
 So the honest sequencing was: `environ` a normal kernel+userspace sub-chunk
@@ -896,6 +896,53 @@ a file, ask not only "could the client read this natively" but "could the client
 read this natively *for this target*" — a deputy with more authority than its
 client is as much a §6.2 violation as one that invents an answer.** V-4b-1..5 never
 raised it because every file they proxy is world-readable.
+
+### 6.14 `auxv` — weighed, and deliberately not built (V-4b)
+
+§6.10 parked `self/auxv` behind "weigh the value first". Weighed at V-4b close:
+**not built**, and recorded here rather than left implicit, because an unbuilt
+Tier-2 file that nobody wrote down is exactly the silent omission the
+chunk-completeness rule exists to prevent.
+
+**The evidence.** Every `auxv` consumer in the tree reads it *from the stack*:
+`getauxval()` (musl saves `libc.auxv` in `__libc_start_main`) for the pouch side,
+and a hand-walk of the `_start` frame for `libthyla-rs` and the Go fork's
+`sysargs`. Exactly one file in the tree contains the string `/proc/self/auxv` —
+SDL2's `SDL_cpuinfo.c` — and both of its readers are compiled out on this target
+twice over: `CPU_haveARMSIMD`'s auxv arm sits under `#elif defined(__LINUX__)` in
+an `__arm__` chain that aarch64 exits at `!defined(__arm__) → return 0`, and
+`readProcAuxvForNeon` is guarded `defined(__arm__) && !defined(HAVE_GETAUXVAL)`
+while `usr/ports/sdl2/SDL_config.h` sets `HAVE_GETAUXVAL 1`. The live aarch64 NEON
+check is `getauxval(AT_HWCAP)` — the CF-4 A lever, on the stack. So the count of
+live `/proc/self/auxv` readers is zero, and the one port that could plausibly have
+needed it is already served.
+
+**Why "no consumer today" is a weak argument here, and what the real one is.**
+VIVARIUM's premise is *unmodified foreign* binaries, so an in-tree grep is poor
+evidence about a compat surface by construction. The argument that actually
+carries is structural: **auxv on the stack is a prerequisite of V-7, not an
+optional extra.** A Linux ELF bootstraps out of `AT_PHDR`/`AT_PHENT`/`AT_ENTRY`
+(and `AT_BASE` for the dynamic case) — `ld.so` and every static CRT read them from
+the initial frame — so `viv` cannot launch a foreign binary *at all* without
+building one. By the time anything runs under the vivarium it has its auxv.
+`/proc/self/auxv` is the fallback for a thread that never received an entry frame:
+code `dlopen`'d into a host that owns `_start` (Go's `os_linux.go` fallback exists
+for exactly this, and for Android where the file is unreadable anyway), or a
+sanitizer runtime initialized off the main path.
+
+**The trigger.** Build it when something needs its auxv without having been given
+one — the first `dlopen`-into-a-foreign-host case, or a sanitizer runtime under
+V-8. Not before.
+
+**The constraint, if it is ever built:** the source must be a *retained kernel
+copy*, which is what Linux does (`mm_struct.saved_auxv`), never a reconstruction.
+Most of the eight entries `exec_fill_auxv` writes are recomputable from state the
+kernel still holds — `AT_PAGESZ`, `AT_HWCAP` from `g_hw_features.linux_hwcap`,
+`AT_VDSO_CLOCK` from the shared page — but `AT_RANDOM` and `AT_PHDR` are per-exec
+*pointers into that process's own image and stack*. A recomputed answer for those
+is not a stale answer, it is a wrong one, and a consumer dereferences `AT_RANDOM`.
+§6.7 already ranks an invented answer as worse than an absent one; this is that
+rule with a segfault attached.
 
 ---
 

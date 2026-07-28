@@ -188,12 +188,32 @@ probe attempt landed on `devproc_kill_authorized` instead — the pattern matche
 identical line — which proved the I-26 kill gate covered but left mine unprobed
 until re-run.
 
-**NEXT: the rest of V-4b** — `auxv` needs a kernel source and its value should be
-weighed first (a program's own auxv arrives on its stack; `/proc/self/auxv` is a
-fallback used mainly by sanitizers and `ldd`); `fd` is **blocked on #66c**, the
-#926 handle-table lifetime restructure, which is a kernel chunk rather than a
-Vivarium one. Then V-4c (`/sys` + Linux `/dev` + per-container mounts + focused
-audit — now also owing a close on §6.13's deputy-authority rule).
+**V-4b is CLOSED.** Its last two files are dispositioned rather than built, each
+with its evidence written down (§6.14, §6.10) so that neither is a silent
+omission:
+
+* **`auxv` — weighed, and deliberately not built.** Zero live readers in the
+  tree: every consumer takes the stack path (`getauxval`, or a hand-walk of the
+  `_start` frame), and the one file containing the literal string — SDL2's
+  `SDL_cpuinfo.c` — is compiled out twice over on aarch64 (`!defined(__arm__)`,
+  and `HAVE_GETAUXVAL 1`). But an in-tree grep is weak evidence about a *compat*
+  surface, so the argument that carries is structural: **auxv on the stack is a
+  prerequisite of V-7, not an optional extra** — a Linux ELF bootstraps out of
+  `AT_PHDR`/`AT_ENTRY`, so `viv` cannot launch a foreign binary without building
+  one, and `/proc/self/auxv` is the fallback for a thread that never received an
+  entry frame (`dlopen`'d into a foreign host; a sanitizer off the main path).
+  That is the named trigger. Recorded with it: if it is ever built it must be a
+  *retained kernel copy* (Linux's `mm->saved_auxv`), never a reconstruction —
+  `AT_RANDOM` and `AT_PHDR` are per-exec pointers into the process's own stack and
+  image, so a recomputed answer is wrong rather than stale, and a consumer
+  dereferences `AT_RANDOM`.
+* **`fd` — blocked on #66c**, the #926 handle-table lifetime restructure: a
+  kernel chunk, not a Vivarium one. The diorama must not route around it.
+
+**NEXT: V-4c** — Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount
+wiring `viv` consumes at V-7 + the arc's focused audit, which now owes a close on
+§6.13's deputy-authority rule as well as §6.2's no-new-authority property and
+§6.12's file-identity claim.
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then
