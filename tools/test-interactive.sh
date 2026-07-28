@@ -127,6 +127,7 @@ echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS
 # read the preserved evidence -- do not reach for "host timing".
 fails=0
 infra_fails=0
+harness_fails=0
 skips=0
 attempts="${LS_CI_ATTEMPTS:-3}"
 for scen in "${scenarios[@]}"; do
@@ -205,6 +206,38 @@ for scen in "${scenarios[@]}"; do
             fails=$((fails + 1))
             continue
         fi
+        # A cut where the bridge reports the READER went away while the VM was
+        # still ALIVE is #60: the harness's own expect side closed the pipe.
+        # The guest booted, passed earlier legs, and was healthy at the cut --
+        # so "deterministic = a real regression" is the #74 fail-open pointed
+        # the other way, blaming the guest for a harness fault. Ground truth
+        # (2026-07-28, ls-gfx): three attempts, three different legs, all
+        # `reason=stdout-broken`, VM stat=S+/R+, cut bytes within 1 KB of each
+        # other -- #60's fingerprint, not a regression.
+        #
+        # This is NOT a pass: the scenario's remaining legs never ran, so
+        # coverage was LOST and the gate stays RED. It is only attributed
+        # honestly. Requiring EVERY attempt to carry the fingerprint is what
+        # keeps it from failing open -- one timeout, EXTINCTION, or genuine
+        # qemu exit among the attempts drops it to the real-regression branch.
+        n_att=0
+        n_cut=0
+        for s in "$BUILD_DIR/ls-ci-$name.attempt"*.steps; do
+            [[ -f "$s" ]] || continue
+            n_att=$((n_att + 1))
+            if grep -qa "bridge-at-fail:.*reason=stdout-broken" "$s" 2>/dev/null \
+               && grep -qa "^vm-at-fail:.*stat=" "$s" 2>/dev/null; then
+                n_cut=$((n_cut + 1))
+            fi
+        done
+        if [[ $n_att -gt 0 && $n_cut -eq $n_att ]]; then
+            echo "    HARNESS-FAIL: $name -- all $n_att attempt(s) cut by the serial relay losing its READER while the VM was ALIVE (#60). Coverage LOST; this says NOTHING about the guest:" >&2
+            grep -ha "bridge-at-fail:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps 2>/dev/null | sed 's/^/        /' >&2
+            echo "        evidence: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps}" >&2
+            harness_fails=$((harness_fails + 1))
+            fails=$((fails + 1))
+            continue
+        fi
         echo "    FAIL: $name -- all $attempts attempts failed (deterministic = a real regression, not a flake)" >&2
         echo "    --- steps ($steps; last attempt) ---" >&2
         cat "$steps" >&2 2>/dev/null || true
@@ -217,12 +250,12 @@ for scen in "${scenarios[@]}"; do
 done
 
 if [[ $fails -gt 0 ]]; then
-    if [[ $infra_fails -gt 0 ]]; then
-        echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed" \
-             "($infra_fails of them INFRA: the VM never started -- fix the environment," \
-             "then re-run; those results say NOTHING about the guest)." >&2
-    else
-        echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed." >&2
+    guest_fails=$((fails - infra_fails - harness_fails))
+    echo "==> LS-CI: FAIL -- $fails/${#scenarios[@]} scenario(s) failed" \
+         "($guest_fails guest, $infra_fails INFRA [VM never started], $harness_fails HARNESS [#60 relay cut, VM alive])." >&2
+    if [[ $infra_fails -gt 0 || $harness_fails -gt 0 ]]; then
+        echo "    Only the $guest_fails guest failure(s) say anything about Thylacine;" \
+             "the rest are environment/harness faults that LOST coverage -- re-run or fix the harness." >&2
     fi
     [[ $skips -gt 0 ]] && echo "    ($skips scenario(s) SKIPPED -- a missing optional host artifact, not a guest result)" >&2
     exit 1
