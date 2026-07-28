@@ -19,6 +19,27 @@
 # that cannot appear in the typed line anyway -- a `tr a-z A-Z` upper-cased token,
 # or a `cat: ` stderr prefix.
 #
+# Persistent-state discipline (#85 -- read this before writing a scenario that
+# writes to the pool). Every scenario boots against build/fixtures/pool.img and
+# MUTATES it. Since #85 the harness restores a pristine clone before every
+# ATTEMPT, so contamination no longer crosses scenario boundaries -- but two
+# rules still bind, because the restore is per-attempt, not per-boot:
+#
+#   1. HEAL AT START, never only at END. `lc_fail` is an `exit` -- no
+#      end-of-scenario cleanup EVER runs on the failing path, which is precisely
+#      how a failed ls-gfx-mode left `mode 1600 900` behind and broke geometry
+#      asserts in every later boot (#82). If your scenario writes persistent
+#      state, delete/normalize it in the FIRST boot before asserting anything.
+#   2. Deleting the target is what makes an assertion mean something. A leg that
+#      asserts "file X exists" without removing X first cannot distinguish "the
+#      mechanism works" from "something wrote this once, long ago" -- ls-gfx-play
+#      passed for five days that way, after the path it asserted had stopped
+#      being written (#83). A stale artifact must not be able to satisfy you.
+#
+# A scenario with its OWN multiple boots (ls-gfx-mode/-font/-osd-persist persist
+# state in boot 1 and read it back in boot 2) is unaffected: the restore fires
+# between attempts, never between a scenario's own boots.
+#
 # Env knobs (set by tools/test-interactive.sh):
 #   LS_CI_BOOT_TIMEOUT  seconds to reach the shell after spawn (default 180)
 #   LS_CI_CMD_TIMEOUT   seconds for a single command's output (default 30)
@@ -32,6 +53,42 @@
 
 # Pure-Tcl repo-root derivation -- NO `exec` (an exec before spawn is one of
 # several macOS expect 5.45 footguns; this file lives at tools/interactive/).
+# --- #60: make the byte stream byte-transparent -----------------------------
+#
+# THE CUT, ROOT-CAUSED (2026-07-28). expect was decoding the guest's serial
+# stream as UTF-8, and when a read landed mid-way through a multi-byte
+# character it reported EOF instead of waiting for the rest -- so the scenario
+# died with "unexpected EOF" while the VM was alive and the relay was healthy.
+#
+# The trace caught it exactly (`exp_internal`, post-login so the boot flood
+# stayed out of it):
+#     send: sending "ls /\r" to { exp6 }
+#     send: sending "echo T60MARK40\r" to { exp6 }
+#     expect: does "...[38;2;224;120;64m " match "T60MARK40"? no
+#     expect: read eof
+# Both sends succeeded; the last read stopped precisely at the byte before
+# `⊢` (U+22A2, 3 bytes) in ut's prompt, and the next event was EOF. That the
+# trace prints `⊢` rather than raw bytes is itself the proof that the
+# channel was being DECODED: `fconfigure -translation binary` is applied to
+# the pipe below, but `spawn -open` does not preserve it.
+#
+# This explains every property of the bug that made it look like magic: it
+# lands "always on a character boundary"; it correlates with bursts of 3-byte
+# glyphs (ut redraws the ⊢ prompt on EVERY keystroke, so a send is followed by
+# a burst of them -- hence "cuts land at or just after a send"); it is
+# probabilistic (it needs a read to split a character); and it is untouched by
+# -buffersize (probe 2) and by match_max, neither of which is in that path.
+#
+# iso8859-1 makes every byte a valid single-byte character, so a partial
+# sequence cannot exist and the decoder can never be caught mid-character.
+# Safe here: every pattern the scenarios match is ASCII (checked across all
+# 32 -- the only non-ASCII in this tree is in comments like this one).
+#
+# A/B, 120 rounds of bursty output each: default encoding cut at round 40 and
+# round 86; iso8859-1 completed 120/120 twice. Set BEFORE any channel is
+# opened, which is why it lives at the top of this file.
+encoding system iso8859-1
+
 set ::lc_repo [file normalize [file join [file dirname [info script]] .. ..]]
 set ::lc_boot_timeout [expr {[info exists ::env(LS_CI_BOOT_TIMEOUT)] ? $::env(LS_CI_BOOT_TIMEOUT) : 180}]
 set ::lc_cmd_timeout  [expr {[info exists ::env(LS_CI_CMD_TIMEOUT)]  ? $::env(LS_CI_CMD_TIMEOUT)  : 30}]
@@ -45,6 +102,148 @@ proc lc_step {msg} {
             puts $fh $msg
             close $fh
         }
+    }
+}
+
+# --- #78 expect-side instrumentation -------------------------------------
+#
+# The bridge instrument (b0ffd862) exonerated the relay: at every cut it was
+# perfectly current (~124 KB delivered, 1-5 bytes outstanding, ZERO idle in
+# BOTH directions) and reported `stdin_eof=1` -- the BENIGN teardown shape.
+# So expect closes its own spawn channel, mid-scenario, while the guest is
+# alive (stat R+) and the relay is healthy. All observed cuts land at or just
+# after a `send`, i.e. when expect WRITES.
+#
+# expect cannot report that to us by default: a failed `send` is a Tcl error
+# that unwinds past the scenario, and the resulting symptom downstream is a
+# bare EOF or timeout with the cause discarded. These two hooks keep it.
+
+# `exp_internal -f FILE 0` writes expect's OWN diagnostics (every byte sent,
+# every byte read, every match attempt, and the channel/EOF events) to FILE
+# and NOT to stderr -- so the transcript stays readable.
+#
+# OPT-IN, AND DELIBERATELY SO -- the trace is O(reads x buffer), NOT O(bytes):
+# expect re-prints the ENTIRE accumulated match buffer on EVERY match attempt,
+# and this harness runs `match_max 200000`. A full boot is hundreds of reads
+# against a buffer that can reach 200 KB, so an unbounded trace is a
+# multi-GB-per-attempt hazard, not a "~1 MB" one. A runaway log has already
+# ENOSPC-bricked this host once. Enable it for a single targeted repro, watch
+# the file, and never leave it on for a full-set or gate run.
+proc lc_trace_init {} {
+    if {![info exists ::env(LS_CI_EXPECT_TRACE)]} return
+    if {$::env(LS_CI_EXPECT_TRACE) eq "0"} return
+    set ::lc_trace /tmp/thyla-exptrace-[pid].log
+    file delete -force $::lc_trace
+    if {[catch {exp_internal -f $::lc_trace 0} err]} {
+        lc_step "TRACE: could not enable exp_internal ($err)"
+        unset ::lc_trace
+        return
+    }
+    lc_step "TRACE: exp_internal -> $::lc_trace"
+}
+
+# Move the trace next to the attempt evidence so a retry cannot destroy it
+# (the #72 lesson: the no-host-load discipline needs the artifact to LOOK at).
+proc lc_trace_preserve {} {
+    if {![info exists ::lc_trace] || ![file exists $::lc_trace]} return
+    # The pid keeps each ATTEMPT's trace distinct -- a fixed name would let a
+    # retry destroy the first failing attempt's evidence, which is the exact
+    # #72 mistake (a retry is a tolerance, never a diagnosis, and the evidence
+    # has to survive to be read).
+    set dst $::lc_repo/build/ls-ci-[file rootname [file tail $::argv0]].exptrace.[pid].log
+    if {[catch {file copy -force $::lc_trace $dst} err]} {
+        lc_step "TRACE: preserve failed ($err); live at $::lc_trace"
+        return
+    }
+    lc_step "TRACE: preserved -> $dst ([file size $dst] bytes)"
+}
+
+# Every write to the guest goes through here. A `send` that fails is the
+# single most informative event in the #78 hunt, and it is exactly the one
+# expect throws away by default.
+# --- infrastructure-vs-guest classification (the #74 fail-open lesson) ------
+#
+# MEASURED 2026-07-27: a full-set run reported 30/32 scenarios as "deterministic
+# = a real regression, not a flake". Ground truth from the vm logs was that 84
+# of 177 boots never started at all -- QEMU refused with
+#   -device virtio-blk-device,drive=pool0: Failed to get "write" lock
+# because another QEMU still held build/fixtures/pool.img. EVERY scenario shares
+# that one fixture, and 12 gfx scenarios legitimately switch to accel=hvf, so a
+# single lingering VM cascades into a whole run of bogus failures that look
+# exactly like a guest regression.
+#
+# The harness must never present "I could not run" as "the guest is broken".
+# This records the VM's OWN words in the steps under an INFRA: marker; the
+# wrapper keys on it to classify the attempt.
+proc lc_vm_infra_check {} {
+    if {![info exists ::lc_vmlog] || ![file exists $::lc_vmlog]} return
+    if {[catch {
+        set f [open $::lc_vmlog r]
+        set d [read $f]
+        close $f
+    }]} return
+    foreach {pat what} {
+        {Failed to get "write" lock}  "another QEMU holds a drive image (stale VM? concurrent run?)"
+        {Failed to bind socket}       "a stale socket file blocks the QMP/serial bind"
+        {Address already in use}      "a port/socket is already taken by another VM"
+        {could not open disk image}   "a drive image is missing or unreadable"
+    } {
+        if {[string first $pat $d] >= 0} {
+            lc_step "INFRA: $what -- the VM never started, so this attempt says NOTHING about the guest"
+            foreach line [split $d "\n"] {
+                if {[string first "qemu-system" $line] >= 0 &&
+                    ([string first "Failed" $line] >= 0 ||
+                     [string first "could not" $line] >= 0)} {
+                    lc_step "INFRA: qemu: [string trim $line]"
+                }
+            }
+            return
+        }
+    }
+}
+
+proc lc_raw_send {bytes what} {
+    if {[catch {send -- $bytes} err]} {
+        lc_step "SEND-ERROR during \[$what\]: $err"
+        lc_step "SEND-ERROR errorCode: $::errorCode"
+        lc_step "SEND-ERROR errorInfo: [string map {\n { | }} $::errorInfo]"
+        lc_fail "send failed during '$what': $err"
+    }
+}
+
+# Fail with the guest's OWN reason attached.
+#
+# An arm that matches a bare failure PREFIX (the battery's "tapestry-battery:
+# FAIL") consumes only the prefix; the reason is still unread in the buffer
+# when lc_fail exits, so it is lost. Ground truth (#82, ls-gfx-panes): three
+# preserved attempts ended at exactly "FAIL " / "FAIL s" -- the reason
+# ("synth rel never arrived" vs "synth rel got (dx,dy)", two very different
+# bugs) was raced away by our own teardown, leaving every gfx failure
+# reasonless. A check that cannot say WHY is barely a check (#74).
+#
+# The pattern REQUIRES the line terminator: matching any run of bytes would
+# return whatever happened to have arrived (" s") and reproduce the truncation
+# it exists to fix.
+# NOTE the timeout is set via the GLOBAL, not `expect -timeout 5 {...}`: expect
+# 5.45 (macOS) does not accept -timeout as an option here and silently matches
+# NOTHING, so the capture always fell through to "no reason" -- the exact
+# fail-open this proc exists to close. Caught by exercising the failure path
+# directly before committing; the passing path never runs it.
+proc lc_fail_detail {msg} {
+    global timeout
+    set lc_saved_timeout $timeout
+    set timeout 5
+    set detail ""
+    expect {
+        -re {^([^\r\n]*)[\r\n]} { set detail [string trim $expect_out(1,string)] }
+        timeout {}
+        eof {}
+    }
+    set timeout $lc_saved_timeout
+    if {$detail ne ""} {
+        lc_fail "$msg -- guest reason: $detail"
+    } else {
+        lc_fail "$msg (guest gave no reason within 5s)"
     }
 }
 
@@ -70,6 +269,11 @@ proc lc_fail {msg} {
             if {$d ne ""} { lc_step "bridge-at-fail: $d" }
         }
     }
+    # A VM that never started is NOT a scenario failure. Say so, loudly, in the
+    # steps -- the wrapper keys on the INFRA: marker to stop calling it "a real
+    # regression". See lc_vm_infra_check.
+    lc_vm_infra_check
+    lc_trace_preserve
     send_user "\nLS-CI FAIL: $msg\n"
     lc_vm_kill
     exit 1
@@ -106,7 +310,10 @@ proc lc_boot {} {
         : ([string equal $::tcl_platform(os) "Darwin"] ? "sock" : "pty")}]
     if {$transport eq "sock"} {
         set sock /tmp/thyla-serial-[pid].sock
-        set vmlog /tmp/thyla-vm-[pid].log
+        # Global: lc_vm_infra_check reads it on failure to tell a VM that never
+        # started from a guest that misbehaved.
+        set ::lc_vmlog /tmp/thyla-vm-[pid].log
+        set vmlog $::lc_vmlog
         file delete -force $sock
         lc_step "BOOT vm accel=$accel transport=sock timeout=${lc_boot_timeout}s"
         # server (wait) mode: qemu blocks until the bridge connects, so no
@@ -145,6 +352,22 @@ proc lc_boot {} {
         # Together they split "the bridge died" from "the guest died" -- expect
         # sees the same bare EOF either way, so without these two the cause is
         # unknowable and the temptation is to guess.
+        #
+        # HOW TO READ `reason=` (#78 -- the record is now discriminating; the
+        # relay header has the full rationale):
+        #   stdout-broken       expect had ALREADY closed stdin -> it was tearing
+        #                       down. This is the NORMAL end-of-session reason
+        #                       (a passing scenario ends exactly this way), so on
+        #                       a failure it is nearly contentless -- do NOT read
+        #                       it as a cause. It was read as one for three
+        #                       sessions of #78.
+        #   stdout-broken-live  expect was ALIVE (stdin still open) yet its read
+        #                       end was gone. THIS is the anomaly worth chasing.
+        #   socket-eof          QEMU closed the serial -- the guest really ended.
+        #   spool-overflow      a genuinely wedged reader (64 MiB undelivered).
+        # The counters (in/out/spool/idle_in/idle_out/up) size the burst the cut
+        # landed in, so the buffer-pressure correlation is checkable from the
+        # record rather than re-derived by hand each time.
         set ::lc_ncerr /tmp/thyla-ncerr-[pid].log
         file delete -force $::lc_ncerr
         set bridge $lc_repo/tools/interactive/serial-bridge.py
@@ -170,6 +393,7 @@ proc lc_boot {} {
         lc_step "BOOT spawn accel=$accel timeout=${lc_boot_timeout}s"
         spawn env THYLACINE_ACCEL=$accel $lc_repo/tools/run-vm.sh
     }
+    lc_trace_init
 }
 
 # Kill the socket-transport VM if one was started (no-op otherwise). The pty
@@ -209,7 +433,7 @@ proc lc_expect {pat phase} {
 # the editor accept it).
 proc lc_send {line} {
     lc_step "send: $line"
-    send "$line\r"
+    lc_raw_send "$line\r" "send: $line"
 }
 
 # Send a raw Ctrl-C (byte 0x03). The kernel console RX cooks it to the
@@ -217,7 +441,7 @@ proc lc_send {line} {
 # so 0x03 passes through to the guest. Used by the LS-5 scenarios.
 proc lc_ctrlc {} {
     lc_step "send Ctrl-C (0x03)"
-    send "\x03"
+    lc_raw_send "\x03" "Ctrl-C"
 }
 
 # Run `cmd` and assert its OUTPUT contains `expected` (exact). The editor does
@@ -241,7 +465,7 @@ proc lc_login {user pass} {
         eof                     { lc_fail "qemu exited before login prompt" }
     }
     lc_step "send user: $user"
-    send "$user\r"
+    lc_raw_send "$user\r" "login user"
     expect {
         -ex "password: "  { lc_step "password prompt" }
         -re {EXTINCTION:} { lc_extinction_fail "extinction at password prompt" }
@@ -249,7 +473,7 @@ proc lc_login {user pass} {
         eof               { lc_fail "qemu exited at password prompt" }
     }
     lc_step "send password (masked)"
-    send "$pass\r"
+    lc_raw_send "$pass\r" "login password"
     expect {
         -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
         -ex "login incorrect"         { lc_fail "auth rejected for $user" }
@@ -269,7 +493,9 @@ proc lc_quit {} {
     lc_send "exit"
     sleep 1
     lc_step "quit qemu (Ctrl-A x)"
-    send "\001x"
+    # NOT lc_raw_send: at teardown the channel is expected to be going away,
+    # so a write error here is benign and must not turn a PASS into a FAIL.
+    catch {send -- "\001x"}
     expect {
         eof     { lc_step "EOF clean" }
         timeout { lc_step "EOF timeout (wrapper will reap qemu)" }

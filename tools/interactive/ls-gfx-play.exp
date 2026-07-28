@@ -98,6 +98,16 @@ proc qk_ptr {op} {
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
+# #83 pre-clean: make the config-persistence leg at the bottom assert a file
+# THIS RUN created. That leg used to assert a path nothing had written for
+# five days -- it kept passing only on a leftover in the never-reset shared
+# pool (#85). Removing the target up front is what makes a stale artifact
+# unable to satisfy the assertion; without it, the leg cannot tell "the
+# mechanism works" from "someone wrote this file once, long ago".
+lc_send "rm /home/michael/.tyrquake/id1/config.cfg"
+lc_send "echo play-preclean-done"
+lc_expect "play-preclean-done" "config.cfg pre-clean drained"
+
 # Launch INTO THE GAME (+map start skips the demo loop; a demo would route
 # most keys to the menu -- keys.c demoplayback special-case).
 lc_send "tyr-quake -window -nosound +map start"
@@ -230,14 +240,23 @@ sleep 2
 lc_run_expect "whoami" "1000"
 lc_pass "play: clean quit -- ut is back in the foreground reading the console"
 
-# Task #50: config persistence. Host_Shutdown writes config.cfg into
-# com_gamedir (/quake/id1) via fopen("w") -- the 0024 create arm over
-# SYS_WALK_CREATE, into the world-writable baked game dir, as the
-# session user. Its presence after the quit proves the LIVE chain
-# (quake -> fopen create -> dev9p -> Stratum), the user-facing
-# consequence the mechanism exists for.
-lc_run_expect "ls /quake/id1" "config.cfg"
-lc_pass "play: config.cfg persisted (create-mode fopen live end-to-end)"
+# Task #50: config persistence. Host_Shutdown -> COM_FOpenFileCreate writes
+# config.cfg into com_gamedir -- which is the LAST game directory added, i.e.
+# $HOME/.tyrquake/id1 whenever HOME is set (common.c:2050), NOT the baked
+# /quake/id1. HOME became visible to pouch programs at CL-1b-0 (e53cef01),
+# which populates environ from the /env device; BEFORE that getenv("HOME")
+# returned NULL in every pouch process, com_gamedir was /quake/id1, and this
+# leg correctly asserted THAT path (#50, bcab595e). The write target moved
+# silently on 2026-07-23 and the leg kept passing on a stale pool artifact
+# until a freshly-regenerated pool exposed it (#83).
+#
+# Presence after the quit proves the LIVE chain IN THIS BOOT: quake -> fopen
+# create -> COM_CreatePath's mkdir chain (four levels, into the user's own
+# encrypted home) -> dev9p -> Stratum. Durability across a REBOOT is
+# deliberately NOT claimed here: Quake never fsyncs and lc_quit is a hard
+# power-off, so uncommitted state is rolled back by design.
+lc_run_expect "ls /home/michael/.tyrquake/id1" "config.cfg"
+lc_pass "play: config.cfg written to the userdir (create-mode fopen + mkdir chain live end-to-end)"
 
 lc_quit
 lc_pass "ls-gfx-play: keystrokes reach a running game through the compositor (AURORA-CONFIG 2.1)"
