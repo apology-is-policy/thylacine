@@ -238,7 +238,13 @@ file-identity claim.
 Two supporting findings, both from the same grep pass:
 
 * `/sys` is thin — the entire tree holds exactly **one** `/sys` path (SDL2's
-  cache-line-size read), and it is a *soft* read whose failure is benign.
+  cache-line-size read), and it is a *soft* read whose failure is benign. But it
+  is a **second tree**, not a subdirectory: the diorama's existing `N_SYS` nodes
+  are `/proc/sys/kernel/…`, a different thing sharing a name. One server exporting
+  two trees is `Tattach` with a different `aname` (Stratum's `ds:<name>` is the
+  in-tree precedent), and `h_attach` currently **ignores `aname`** and always
+  lands on `N_ROOT` — so that dispatch is the real work, and the per-container
+  mount wiring wants it anyway since V-7 attaches twice per container.
 * `cpuinfo` and `stat` are Tier 1 by §6.3 but have **no in-guest consumer today**
   (`config.guess` is a host script; SDL2's is the `__ANDROID__` branch), and both
   are only *partly* sourceable: `MIDR_EL1` is not EL0-readable at all, and

@@ -1008,6 +1008,16 @@ worthless (a compat surface's consumers are foreign by definition — §6.14's
 caveat), but it does mean it is a small, low-risk tree serving `devices/system/cpu/`
 topology, not a project.
 
+One mechanism note for whoever builds it, found in the same pass: `/sys` is a
+**second tree**, not a subdirectory. The diorama's existing `N_SYS`/`N_SYS_KERNEL`
+nodes are `/proc/sys/kernel/…` — a different thing that happens to share a name.
+A container mounts `/proc` and `/sys` separately, and 9P's answer for one server
+exporting two trees is **`Tattach` with a different `aname`** (Stratum's `ds:<name>`
+form is the in-tree precedent). Today `h_attach` **ignores `aname` entirely** and
+every attach lands on `N_ROOT`, so the aname dispatch is the actual work — small,
+but a real mechanism rather than a table entry, and the per-container mount wiring
+wants it regardless, since V-7 will attach twice for every container.
+
 **And the same pass found two Tier-1 stragglers.** §6.3 lists `/proc/cpuinfo` and
 `/proc/stat` under *Tier 1 — has a consumer TODAY*, and neither has ever been
 served; the V-4a/V-4b sub-chunks quietly carried them as "deferred with their
