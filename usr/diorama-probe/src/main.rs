@@ -530,10 +530,14 @@ pub extern "C" fn rs_main() -> i64 {
         if !contains(ci, b"Features\t: fp asimd") {
             fail("cpuinfo Features did not carry the hwcap word");
         }
-        // 0x00 implementer is reserved -- it is what an unread MIDR looks like.
-        if contains(ci, b"CPU implementer\t: 0x00\n") {
-            fail("cpuinfo implementer is the unread-MIDR sentinel");
-        }
+        // NOT asserted: that the implementer is non-zero. QEMU's TCG `-cpu max`
+        // reports MIDR 0x000f0510 -- implementer 0x00, deliberately not claiming
+        // to be an ARM-implemented part -- and that is the CPU the interactive
+        // harness runs by DEFAULT. "implementer != 0" is a plausible-looking
+        // liveness check that is simply false on a supported target. The real
+        // liveness proof is the cache line size above: it comes from the same
+        // per-CPU record, and an unread record reports 0, which the
+        // power-of-two check already rejects.
         t_putstr("diorama-probe: stat+cpuinfo OK\n");
     }
 

@@ -4,6 +4,7 @@
 
 #include "test.h"
 
+
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/proc.h>
@@ -207,8 +208,17 @@ void test_devctl_cpu_sources_live(void) {
     // midr: the implementer field (bits 31:24) is never 0 on a real part -- 0 is
     // reserved -- so a zero here means the register was never read, which is the
     // exact failure a boot-CPU-only or never-called detect would produce.
-    TEST_ASSERT(((id->midr >> 24) & 0xFFu) != 0,
-                "V-4c-2b: MIDR implementer is populated");
+    // midr: the discriminator has to be a property that is true of EVERY part we
+    // can run on, not one that merely looks diagnostic. "implementer != 0" fails
+    // that test and was WRONG: QEMU's TCG `-cpu max` reports 0x000f0510, whose
+    // implementer IS 0x00 -- it deliberately does not claim to be an
+    // ARM-implemented part, and the interactive harness runs exactly that CPU by
+    // default. What actually distinguishes a read register from an unread one:
+    // an unread slot is BSS zero, while ARMv8 REQUIRES MIDR.Architecture (19:16)
+    // to read 0xF ("use the ID registers"), so a real part can never be all-zero.
+    TEST_ASSERT(id->midr != 0, "V-4c-2b: MIDR was actually read (unread reads 0)");
+    TEST_ASSERT(((id->midr >> 16) & 0xFu) == 0xFu,
+                "V-4c-2b: MIDR.Architecture is the ARMv8 0xF sentinel");
 }
 
 void test_devctl_read_memory_format(void) {
