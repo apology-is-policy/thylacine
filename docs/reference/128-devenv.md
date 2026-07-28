@@ -276,3 +276,34 @@ is a Stage-4b seam — mirror the `/dev` re-graft (pre-pivot `O_PATH` grab + pos
 - **Snapshot, not live.** Per the Plan 9 semantics above, `os.Setenv` does not write
   back to `/env`; cross-process propagation is via inheritance at spawn, not a shared
   live view.
+
+
+## The flat block -- `env_render_environ` (VIVARIUM V-4b-6)
+
+`long env_render_environ(struct Proc *p, s64 off, void *buf, long n)` renders the
+whole environment as Linux's NUL-separated `NAME=VALUE\0` block, copying only
+`[off, off+n)`. It is the source behind `/proc/<pid>/environ` (see
+`docs/reference/32-devproc.md`); the renderer lives here, with the lock, on the
+`territory_format_ns` pattern.
+
+Three properties worth keeping straight:
+
+* **Cross-Proc, unlike every other entry point in this file.** The per-name ops
+  are driven by devenv for the CALLING Proc; this one is driven by devproc for a
+  `p` it resolved under `g_proc_table_lock`. Nothing here checks identity -- the
+  disclosure gate lives at that call site (`devproc_owner_or_hostowner`). Do not
+  add a second caller without carrying the gate.
+* **Offset-aware**, because an `Env` can hold a quarter-megabyte and devproc's
+  format buffer is 2 KiB. Records wholly before the window are skipped in O(1)
+  via a running `pos`, so a sequential read stays linear overall.
+* **Skips what the Linux shape cannot carry** -- a `'='` in a name, a NUL in a
+  value. Emitting either raw corrupts the block rather than truncating it.
+
+Lock: `e->lock`, taken here and nested under the caller's `g_proc_table_lock`.
+That edge is acyclic on the same ground as `ns_lock` and `vma_lock` -- `e->lock`
+is a leaf, and nothing held under it takes `g_proc_table_lock` (env.c touches no
+other kernel lock but the slab's).
+
+Coherence: one lock hold makes a single read internally consistent; a SEQUENCE of
+reads racing a concurrent set/unset can tear, exactly as Linux's can (there the
+block is user memory the target may rewrite mid-read).

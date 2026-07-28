@@ -26,7 +26,8 @@ extern crate alloc;
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use libthyla_rs::{
-    t_close, t_exits, t_mount, t_open, t_putstr, t_read, T_MREPL, T_OREAD, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_exits, t_mount, t_open, t_putstr, t_read, t_walk_create, t_write, T_MREPL, T_OPATH,
+    T_OREAD, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
 };
 
 fn fail(msg: &str) -> ! {
@@ -221,6 +222,50 @@ pub extern "C" fn rs_main() -> i64 {
     put_dec(pn as u64);
     t_putstr("\n");
 
+    // 6b2. environ (V-4b-6): the environment as a NUL-separated block. The probe
+    //      SETS the variable itself first, so the assertion is exact and does not
+    //      depend on what the boot chain happened to leave in our inherited /env.
+    //      That makes this the whole chain in one read: a /env write reaches the
+    //      kernel Env, /proc/<pid>/environ renders it (through the owner gate --
+    //      the diorama is SYSTEM and so are we), and the diorama passes it
+    //      through. None of it is reachable from the diorama's own selftest,
+    //      which has no environment of its own to render.
+    {
+        let edir = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/env".as_ptr(), 4, T_OPATH) };
+        if edir < 0 {
+            fail("open /env");
+        }
+        let v = unsafe { t_walk_create(edir, b"DIOENVTEST".as_ptr(), 10, T_OWRITE, 0o644) };
+        if v < 0 {
+            fail("create /env/DIOENVTEST");
+        }
+        if unsafe { t_write(v, b"v4b6-ok".as_ptr(), 7) } != 7 {
+            fail("write /env/DIOENVTEST");
+        }
+        let _ = unsafe { t_close(v) };
+        let _ = unsafe { t_close(edir) };
+
+        let mut envbuf = [0u8; 4096];
+        let en = match read_all(b"/dio/self/environ", &mut envbuf) {
+            Some(n) => n,
+            None => fail("open /dio/self/environ"),
+        };
+        let env = &envbuf[..en];
+        // The record, terminator included -- so this pins the ENCODING, not just
+        // that the name appears somewhere.
+        if !contains(env, b"DIOENVTEST=v4b6-ok\0") {
+            fail("environ has no DIOENVTEST=v4b6-ok record");
+        }
+        // Linux's block ends on a record boundary; a consumer splitting on NUL
+        // must not find a headless tail.
+        if en == 0 || env[en - 1] != 0 {
+            fail("environ does not end on a record terminator");
+        }
+        t_putstr("diorama-probe: environ bytes=");
+        put_dec(en as u64);
+        t_putstr("\n");
+    }
+
     // 6c. per-pid (V-4b-3): the same files under our OWN numeric dir. This is
     //     the leg the selftest cannot reach -- it proves the numeric walk, the
     //     native existence check behind it, and that a per-pid render reaches
@@ -252,6 +297,25 @@ pub extern "C" fn rs_main() -> i64 {
         };
         if xn != want.len() || &xbuf[..xn] != want {
             fail("per-pid exe mismatch");
+        }
+    }
+    // V-4b-6: environ is NOT served under /<pid>, even our own. The diorama is
+    // SYSTEM, so the kernel would let it read any SYSTEM Proc's environ and it
+    // would then hand those bytes to a client of any principal -- the section 6.2
+    // deputy-as-authority leak. /self is the only sound target. This is the LIVE
+    // proof of the omission; the diorama's selftest pins the walk table.
+    {
+        let mut p = [0u8; 96];
+        p[..dn].copy_from_slice(&dbuf[..dn]);
+        let mut pn = dn;
+        for &c in b"/environ" {
+            p[pn] = c;
+            pn += 1;
+        }
+        let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, p.as_ptr(), pn, T_OREAD) };
+        if fd >= 0 {
+            let _ = unsafe { t_close(fd) };
+            fail("/dio/<pid>/environ resolved -- the cross-principal leak is back");
         }
     }
     // status via the per-pid path takes the NATIVE id parse (the /self path
@@ -399,6 +463,6 @@ pub extern "C" fn rs_main() -> i64 {
         fail("write-open was ALLOWED (read-only violated)");
     }
 
-    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+maps+meminfo+uptime OK; per-pid+enum+sys/kernel OK; write refused)\n");
+    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+maps+environ+meminfo+uptime OK; per-pid+enum+sys/kernel OK; write refused)\n");
     unsafe { t_exits(0) }
 }

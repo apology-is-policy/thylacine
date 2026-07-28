@@ -480,8 +480,9 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4b-3** | **LANDED.** the numeric `/proc/<pid>/…` dirs + the root pid enumeration + `sys/kernel/{ostype,osrelease,version,hostname}` | the probe reads its OWN pid's dir, finds itself in the root readdir, and gets ENOENT for a pid that cannot exist |
 | **V-4b-4** | **LANDED.** the *shape* half (§6.11): `readlink()` in the phenotype — the four `/proc` link-shaped paths, plus the truthful `EINVAL`/`ENOENT` that repairs `realpath()` system-wide; + the `/proc` apex stat | the prover readlinks its own `exe`/`cwd` in-guest against NATIVE `/proc`, `self` and `<pid>` agree, truncation is POSIX-silent, and `realpath()` canonicalizes |
 | **V-4b-5** | **LANDED.** the synthetic-Dev stat family (§6.12): `stat_native` for `/ctl` + `/env`, the POSIX file-type bits on devproc's modes, and the leading-zero pid reject that restores native-vs-diorama coherence | the prover stats `/ctl` + `/env` as directories in-guest, `S_ISDIR("/proc/<pid>")` is true, `realpath("/ctl/./procs")` canonicalizes, and a zero-padded pid does not resolve |
-| **V-4b** | the rest of Tier 2 (`self/{fd,environ,auxv}`) | see §6.10 — `fd` is blocked on the #66c handle-table lifetime, `environ`/`auxv` each need a kernel source |
-| **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property, and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
+| **V-4b-6** | **LANDED.** `/self/environ` (§6.13): a new kernel source `/proc/<pid>/environ` rendering the Env as Linux's NUL-separated block — offset-aware, and the first devproc info file to carry a real read gate | the prover sets a variable in its own `/env` and reads the record back through the diorama in-guest; the per-pid variant is proven ABSENT (the cross-principal leak) |
+| **V-4b** | the rest of Tier 2 (`self/{fd,auxv}`) | see §6.10 — `fd` is blocked on the #66c handle-table lifetime, `auxv` needs a kernel source and a value judgement first |
+| **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property — now including §6.13's **deputy-authority** half (a proxy must not be allowed where its client would be denied) — and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5/6 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
 work. It is *almost* pure userspace: see §6.5 for the one kernel prerequisite the
@@ -684,13 +685,13 @@ files are *not* one chunk — they have very different blockers:
 
 | File | Native source | Status |
 |---|---|---|
-| `self/environ` | **none reachable** — `/env` (devenv, §9.7) resolves `current_thread()->proc->env` **by construction**, so the diorama reading it gets its OWN environment, never the peer's | needs a kernel source: `/proc/<pid>/environ` rendering `p->env`, the §6.7 pattern (a renderer over an existing group, like `/proc/<pid>/ns` over the Territory). Cheap and well-shaped. |
+| `self/environ` | **none reachable** — `/env` (devenv, §9.7) resolves `current_thread()->proc->env` **by construction**, so the diorama reading it gets its OWN environment, never the peer's | **DONE at V-4b-6** (§6.13). The §6.7 prediction held for the shape — a renderer over an existing group — but missed two things it could not have known from outside: the render had to be *offset-aware* rather than format-and-slice, and it is the first proxied file whose gate makes the *deputy's* authority differ from its client's. |
 | `self/auxv` | **none** — `exec_fill_auxv` writes the block onto the user stack at exec and nothing retains it | needs the kernel to *record* (or reconstruct) the auxv. Lower value than it looks: a program's own auxv arrives on its stack, and `/proc/self/auxv` is a fallback path used mainly by sanitizers and `ldd`. |
 | `self/fd` | **BLOCKED**, and not on us | `/proc/<pid>/fd` is deferred to **#66c** (ARCH §9.6.9): a cross-Proc fd-list read of a live peer races the #926 at-exit handle-table free, which runs outside `g_proc_table_lock` with lockless slot-zeroing. Closing it needs the #926 table-lifetime restructure — a death-path-lineage change that ARCH already says "warrants its own focused chunk + audit". **The diorama must not route around this**: there is no other native source for a Proc's fd list, and inventing one would be exactly the §6.7 failure. |
 
-So the honest sequencing is: `environ` is a normal kernel+userspace sub-chunk;
-`auxv` is a smaller one whose value should be weighed before building it; `fd`
-waits on a kernel chunk that is not a Vivarium chunk at all.
+So the honest sequencing was: `environ` a normal kernel+userspace sub-chunk
+(landed, V-4b-6); `auxv` a smaller one whose value should be weighed before
+building it; `fd` waiting on a kernel chunk that is not a Vivarium chunk at all.
 
 ### 6.11 The other half of the shape problem — `readlink` (V-4b-4)
 
@@ -813,6 +814,88 @@ gate consults these modes. What a mode does here is *document* the gate that liv
 at the read site — which is why `/ctl/kernel-base` is `0400` rather than `0444`
 (`CAP_HOSTOWNER`, #57a F1), and why `/env` reports the **calling** Proc as owner
 (every devenv op resolves the caller's own env, so that is simply true).
+
+### 6.13 The environment, and the first gated proxy (V-4b-6)
+
+`/proc/self/environ` needed a kernel source, as §6.10 predicted. What §6.10 did
+*not* predict is that it would be the first file in this arc where the diorama's
+own authority and its client's differ — and that turns out to be the interesting
+half.
+
+**The source.** `/proc/<pid>/environ` renders the per-Proc `Env` as Linux's flat
+`NAME=VALUE\0` block. The renderer lives in `env.c`, where the lock discipline
+already is (the `territory_format_ns` shape), and devproc calls it.
+
+It is **offset-aware**, unlike every other `/proc` file, which formats into a
+2 KiB `DEVPROC_READ_BUF` and slices. That would not do here: an `Env` holds up to
+64 values of 4096 bytes, and a single long `PATH` overflows the buffer on its own.
+The failure mode of a format-and-slice render is *silently dropping environment
+variables* — which does not look like an error to the consumer, it looks like the
+variable was never set, and sends it down a different path with nothing to notice.
+So the render walks records, skips wholly-before-window ones in O(1), and copies
+only `[off, off+n)`. One *call* is still clamped (8 KiB, because the copy runs
+with IRQs off under `g_proc_table_lock`), but a clamp is a **short read**, which
+is POSIX-legal and which every `/proc` consumer already loops through — the file
+itself is unbounded.
+
+**Entries the Linux shape cannot carry are skipped, not mangled.** Linux's
+environment is a `char*[]` of NUL-terminated `NAME=VALUE` strings, so the encoding
+cannot carry a `'='` inside a NAME (the first one *is* the separator) or a NUL
+inside a VALUE (the NUL *is* the terminator). Thylacine's `/env` is looser —
+`name_valid` rejects only NUL and `/`. Emitting such an entry raw would not
+truncate the answer, it would **corrupt** it: a `'='` in the name makes one
+variable parse as a prefix of another's value, and a NUL in the value splits the
+record so its tail parses as a variable that was never set. Both hand a consumer a
+wrong value it has no way to distrust, where absence is a state every `getenv`
+caller already handles. `/env` stays the complete truth; the reformatter says
+nothing it cannot say correctly.
+
+**The gate, and why this file is 0400.** `exe`/`cwd`/`ns`/`maps` are `0444`
+all-pids-visible on the argument that they disclose nothing a peer could not
+already read (`/proc/<pid>/ns` strictly dominates any of them). That argument does
+not extend here: `/env` resolves `current_thread()->proc->env` **by
+construction**, so *nothing today lets one Proc read another's environment*, and
+environment variables are where secrets live by universal convention. So this file
+is a genuinely new cross-Proc disclosure and carries a real owner-or-`CAP_HOSTOWNER`
+check at the read site — the same policy `sched` uses (extracted into one
+`devproc_owner_or_hostowner` so the two cannot drift), and the same posture Linux
+itself takes (`0400` plus `ptrace_may_access`). `CAP_DEBUG` is deliberately not an
+axis: this is an info file, and a debugger's authority to stop and single-step a
+Proc is a different grant from a reader's authority to see its internals.
+
+**The self-audit find: a gate cuts both ways, and the second way is the leak.**
+The gate keys on the *reader*. For a 9P server proxying the file, the reader is
+the **server**, not its client — and the obvious consequence (the SYSTEM boot
+diorama is *denied* a user-principal client's environ) is benign: the client loses
+a file and gains nothing.
+
+The non-obvious consequence is the opposite one. The diorama runs as
+`PRINCIPAL_SYSTEM`, so the kernel would **allow** it to read any SYSTEM Proc's
+environ — and it would then hand those bytes to a client of any principal, who
+natively would have been denied. `/srv` is the shared immortal boot registry
+re-grafted post-pivot, so a logged-in user Proc can mount the diorama; the leak
+was reachable, not theoretical. That is exactly the deputy-as-authority failure
+§6.2 forbids, and it appeared now rather than at V-4b-1..5 because environ is the
+first proxied file whose native gate is anything but "everyone".
+
+The fix keeps the diorama a pure reformatter: **`environ` is served under `/self`
+only.** `/self` is sound by construction — the target is the connection's own
+peer, so a read the kernel allows is a read of the client's own environment, which
+it could have done itself, and a read the kernel denies renders empty. A walk to
+`/<pid>/environ` is an honest ENOENT. Replicating the kernel's owner check against
+`peer.principal_id` was considered and rejected: it would work, but it turns a
+component whose entire design property is *having no policy* into a policy point,
+to serve a file no v1.0 consumer reads. Two things would make the per-pid variant
+servable, and neither is a change in the diorama — a per-container diorama running
+as its container's principal (V-7), where server and client authority coincide by
+construction, or MANDATE (I-35), which would let a deputy act with its client's
+authority instead of its own.
+
+The generalized lesson, and the one to carry into V-4c and V-7: **before proxying
+a file, ask not only "could the client read this natively" but "could the client
+read this natively *for this target*" — a deputy with more authority than its
+client is as much a §6.2 violation as one that invents an answer.** V-4b-1..5 never
+raised it because every file they proxy is world-readable.
 
 ---
 

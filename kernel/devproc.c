@@ -38,6 +38,7 @@
 #include <thylacine/burrow.h>   // V-4b-2: struct Burrow -- /proc/<pid>/maps backing type + file identity
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/env.h>      // V-4b-6: env_render_environ -- /proc/<pid>/environ
 #include <thylacine/exec.h>     // V-4b-2: EXEC_USER_STACK_BASE / EXEC_USER_VDSO_BASE -- maps role tags
 #include <thylacine/extinction.h>
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
@@ -91,6 +92,7 @@ enum {
     PQS_EXE      = 13,       // /proc/<pid>/exe              (QTFILE; VIVARIUM V-4a-0; RO, the executable's namespace name)
     PQS_CWD      = 14,       // /proc/<pid>/cwd              (QTFILE; VIVARIUM V-4b-1; RO, the Territory's cwd)
     PQS_MAPS     = 15,       // /proc/<pid>/maps             (QTFILE; VIVARIUM V-4b-2; RO, the VMA table)
+    PQS_ENVIRON  = 16,       // /proc/<pid>/environ          (QTFILE; VIVARIUM V-4b-6; RO, owner-or-CAP_HOSTOWNER)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -131,6 +133,7 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "cwd",     PQS_CWD     },
     { "maps",    PQS_MAPS    },
     { "sched",   PQS_SCHED   },
+    { "environ", PQS_ENVIRON },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -785,6 +788,15 @@ static u32 devproc_mode_for_kind(u32 kind) {
     case PQS_KREGS:   return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
     case PQS_KSTACK:  return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
     case PQS_SCHED:   return T_S_IFREG | 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
+    // V-4b-6: 0400 -- Linux's own mode for environ, and for Linux's own reason.
+    // Environment variables are where secrets live by universal convention
+    // (tokens, passwords, keys), and unlike exe/cwd/ns/maps NOTHING discloses
+    // another Proc's environment today: /env resolves current_thread()->proc->env
+    // by construction, so it is self-only. This file is therefore a genuinely NEW
+    // cross-Proc disclosure, which is why it carries a real gate at the read site
+    // (devproc_owner_or_hostowner) rather than inheriting the 0444 all-pids-
+    // visible posture its info-file siblings share.
+    case PQS_ENVIRON: return T_S_IFREG | 0400u;
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:
@@ -1059,6 +1071,10 @@ static long devproc_regs_rw(struct Spoor *c, void *buf, long n, s64 off, bool is
 // devproc_debug_poll_never).
 static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off);
 static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off);
+// V-4b-6: /proc/<pid>/environ. Its own path rather than a format_* case because
+// it is offset-aware -- see the definition for why a format-and-slice render is
+// the wrong shape for an environment.
+static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off);
 
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -1078,6 +1094,7 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (kind == PQS_KREGS)  return devproc_regs_rw(c, buf, n, off, false);
     if (kind == PQS_KSTACK) return devproc_kstack_read(c, buf, n, off);
     if (kind == PQS_WAIT)   return devproc_wait_read(c, buf, n, off);
+    if (kind == PQS_ENVIRON) return devproc_environ_read(c, buf, n, off);
 
     // Root + pid_dir reads return -1 (directories -- readdir lands with 9P
     // readdir). ctl is write-only at v1.0 (reads return empty; Plan 9: ctl is
@@ -1089,6 +1106,10 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     // and the only one whose omission fails SILENTLY as a plain -1 rather than
     // an ENOENT at walk. V-4b-2 was written missing exactly this and the read
     // returned -1 with the file resolving fine -- add new kinds here too.
+    //
+    // A kind with its OWN read path (mem/regs/kregs/kstack/wait/environ) returns
+    // above and is deliberately absent here: this list gates the format-and-slice
+    // machinery, and adding one would route it there as well, formatting nothing.
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
         kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED &&
         kind != PQS_CWD && kind != PQS_MAPS) return -1;
@@ -1159,7 +1180,17 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 // identity bypasses. Composes I-1 (a confined user sees full detail only on its
 // own Procs) + the /ctl visibility-not-authority posture; NO new §28 invariant.
 // Non-static: the kernel test suite exercises the predicate.
-bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
+// The owner-or-host-owner policy, shared by every per-Proc file that discloses
+// MORE than devproc's ambient all-pids-visible set (prowl-3b's OQ-4 gate on
+// sched; V-4b-6's on environ). Extracted rather than copied so the two cannot
+// drift into two subtly different policies -- if this predicate ever gains an
+// axis, it gains it for every gated file at once, which is the point.
+//
+// Deliberately NOT the I-39 predicate (devproc_debug_authorized), which also
+// admits CAP_DEBUG: these are info files, not debug surfaces, and a debugger's
+// authority to stop and single-step a Proc is a different grant from a reader's
+// authority to see its internals.
+bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (caller->principal_id == target->principal_id)  return true;   // owner
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
@@ -1167,6 +1198,10 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER)
         return true;                                                   // host owner
     return false;
+}
+
+bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
+    return devproc_owner_or_hostowner(caller, target);
 }
 
 // =============================================================================
@@ -2210,6 +2245,95 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
     u8 *o = (u8 *)buf;
     for (size_t i = 0; i < copy; i++) o[i] = (u8)content[(size_t)off + i];
     return (long)copy;
+}
+
+// =============================================================================
+// VIVARIUM V-4b-6: /proc/<pid>/environ -- the flat NUL-separated environment
+// block, the source the diorama re-presents as Linux's /proc/self/environ.
+//
+// GATED, unlike its info-file siblings. exe/cwd/ns/maps are 0444 all-pids-
+// visible on the argument that they disclose nothing a peer could not already
+// read (/proc/<pid>/ns discloses strictly more than any of them). That argument
+// does NOT extend here: /env resolves current_thread()->proc->env BY
+// CONSTRUCTION, so today NOTHING lets one Proc read another's environment, and
+// environment variables are where secrets live by universal convention. So this
+// file is a real new cross-Proc disclosure and carries the owner-or-CAP_HOSTOWNER
+// gate -- the same policy sched uses, and the same posture Linux itself takes
+// (mode 0400 plus a ptrace_may_access check).
+//
+// A denial is -1, formatting nothing: no partial leak, and the same shape the
+// sched gate returns. devproc.perm_enforced is false, so the 0400 mode is
+// documentation and THIS is the enforcement.
+//
+// A NOTE FOR PROXIES (VIVARIUM section 6.2). The gate keys on the READER, so a
+// 9P server proxying this file for a client is authorized as ITSELF, not as its
+// client -- deliberately, since a deputy that could read a peer's environment on
+// the peer's say-so would be an authority. That cuts BOTH ways and a proxy must
+// reason about both:
+//
+//   * it may be denied where its client would be allowed (the shared boot
+//     diorama is SYSTEM, so a user-principal client's environ reads -1). Benign:
+//     the client loses a file, gains nothing.
+//   * it may be ALLOWED WHERE ITS CLIENT WOULD BE DENIED -- a SYSTEM proxy can
+//     read any SYSTEM Proc's environ and hand the bytes to a client of any
+//     principal. That is a real leak, and it is the proxy's to prevent: the
+//     diorama serves environ for its connection's own peer only, never for an
+//     arbitrary pid (usr/diorama/src/server.rs::render_environ).
+//
+// The general fix for both is a deputy that acts with its CLIENT's authority --
+// MANDATE (I-35), reserved and unbuilt. Until then, a proxy of this file must
+// either target only its own peer or be running as its client's principal.
+struct devproc_environ_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    void        *buf;
+    long         n;
+    s64          off;
+    long         result;   // bytes copied, or -1 (not found / denied)
+};
+
+static int devproc_environ_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_environ_ctx *k = (struct devproc_environ_ctx *)arg;
+    if (target->pid != k->target_pid) return 0;                 // keep walking
+    if (!devproc_owner_or_hostowner(k->caller, target)) {
+        k->result = -1;                                          // denied: no bytes
+        return 1;
+    }
+    // Renders under target->env's lock, nested inside the g_proc_table_lock
+    // proc_for_each already holds. That edge is NEW but acyclic on the same
+    // ground as ns_lock and vma_lock: env->lock is a LEAF -- nothing held under
+    // it takes g_proc_table_lock (env.c touches no other kernel lock but the
+    // slab's). g_proc_table_lock is what keeps `target` -- and so its Env --
+    // alive for the render, since env_free runs from proc_free.
+    k->result = env_render_environ(target, k->off, k->buf, k->n);
+    return 1;
+}
+
+// Per-call byte bound. The FILE is unbounded (that is the point of the
+// offset-aware render), but one call copies at most this much, because the copy
+// runs with IRQs off under g_proc_table_lock and a caller may legally ask for
+// SYS_RW_MAX (128 KiB). A short read is POSIX-legal and every /proc consumer
+// already loops to EOF -- Linux's own seq_file reads are short-by-page.
+#define DEVPROC_ENVIRON_READ_MAX 8192L
+
+static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf || n < 0) return -1;
+    if (off < 0)             return -1;
+    if (n == 0)              return 0;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    if (n > DEVPROC_ENVIRON_READ_MAX) n = DEVPROC_ENVIRON_READ_MAX;
+
+    struct devproc_environ_ctx k = {
+        .target_pid = proc_qid_pid(c->qid.path),
+        .caller     = t->proc,
+        .buf        = buf,
+        .n          = n,
+        .off        = off,
+        .result     = -1,        // a pid the walk never matches reads as an error
+    };
+    proc_for_each(devproc_environ_walk_cb, &k);
+    return k.result;
 }
 
 // =============================================================================

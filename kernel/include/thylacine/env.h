@@ -94,4 +94,19 @@ bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
 bool env_size(struct Proc *p, u64 id, u64 *out_len);
 u32  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under it)
 
+// --- the flat block (devproc) -----------------------------------------------
+// env_render_environ renders the whole environment as Linux's NUL-separated
+// "NAME=VALUE\0" block for /proc/<pid>/environ (VIVARIUM V-4b-6), copying only
+// [off, off+n). Unlike the per-name ops this is CROSS-PROC -- the caller is
+// devproc, resolving `p` under g_proc_table_lock, not necessarily the Proc that
+// owns the Env -- so its DISCLOSURE gate lives at that call site (owner or
+// CAP_HOSTOWNER, devproc_owner_or_hostowner). Nothing here checks identity; do
+// not add a second caller without carrying the gate.
+//
+// Offset-aware because an Env can hold a quarter-megabyte, far past devproc's
+// 2 KiB format buffer; entries the Linux shape cannot encode ('=' in a name, NUL
+// in a value) are skipped rather than mangled. Both are argued at the definition.
+// Returns bytes copied (0 at EOF / no Env), or -1 on a bad argument.
+long env_render_environ(struct Proc *p, s64 off, void *buf, long n);
+
 #endif /* THYLACINE_ENV_H */

@@ -27,6 +27,7 @@
 #include <thylacine/burrow.h>          // V-4b-2: burrow_create_anon/map -- /proc/<pid>/maps
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/env.h>             // V-4b-6: env_create/write -- /proc/<pid>/environ
 #include <thylacine/exec.h>            // V-4b-2: EXEC_USER_STACK_BASE -- the maps role tag
 #include <thylacine/page.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
@@ -69,6 +70,7 @@ void test_devproc_debug_step_cancel_on_stop(void);
 void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);            // VIVARIUM V-4b-1
 void test_devproc_maps(void);                // VIVARIUM V-4b-2
+void test_devproc_environ(void);             // VIVARIUM V-4b-6
 // prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
 void test_devproc_sched_gate_predicate(void);
 void test_devproc_sched_read_gated(void);
@@ -79,6 +81,7 @@ void test_devproc_read_sched_format(void);
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 extern void proc_test_link(struct Proc *p);
@@ -2076,6 +2079,127 @@ void test_devproc_maps(void) {
     long stack_at = index_of(buf, (size_t)n, " stack\n");
     TEST_ASSERT(guard_at >= 0 && stack_at >= 0 && guard_at < stack_at,
                 "V-4b-2: rows are emitted in ascending-VA order");
+}
+
+// VIVARIUM V-4b-6: /proc/<pid>/environ -- the gate, the wiring, the 0400 mode,
+// and the short-read-not-truncation property of the per-call clamp.
+//
+// The gate's DENY leg is only reachable through the predicate: devproc_environ_-
+// read takes its caller from current_thread(), and the in-kernel runner is always
+// kproc (CAP_ALL, so always CAP_HOSTOWNER). Driving the predicate directly with a
+// synthetic (caller, target) pair is the prowl-5-F4 precedent -- without it a
+// wiring regression that dropped the gate would leave every test green.
+void test_devproc_environ(void) {
+    // --- the gate ----------------------------------------------------------
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: a non-owner without caps cannot read a peer's environ");
+    caller->principal_id = 0xA11CEu;
+    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: the owner can");
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: CAP_HOSTOWNER can");
+    // CAP_DEBUG is deliberately NOT an axis: environ is an info file, and a
+    // debugger's authority to stop a Proc is a different grant from a reader's.
+    caller->caps = CAP_DEBUG;
+    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: CAP_DEBUG alone is not an environ axis");
+    caller->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(target);
+
+    // --- the live read -----------------------------------------------------
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "proc_alloc environ target");
+    tgt->principal_id = current_thread()->proc->principal_id;   // owner -> allowed
+    tgt->state        = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+
+    u64 a = env_create(tgt, "A", 1);
+    u64 b = env_create(tgt, "BB", 2);
+    TEST_ASSERT(a != 0 && b != 0, "populate the target's env");
+    TEST_EXPECT_EQ(env_write(tgt, a, 0, "1", 1),  1L, "A=1");
+    TEST_EXPECT_EQ(env_write(tgt, b, 0, "22", 2), 2L, "BB=22");
+
+    struct Spoor *c = open_pidfile_for(tgt->pid, "environ", 0);
+    TEST_ASSERT(c != NULL, "walk + open /proc/<pid>/environ");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ(devproc.stat_native(c, &st), 0, "stat_native(environ) ok");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0400u),
+                   "V-4b-6: environ is 0400 -- gated, unlike its 0444 siblings");
+
+    char buf[64];
+    long n = devproc.read(c, buf, (long)sizeof(buf), 0);
+    const char want[] = "A=1\0BB=22\0";
+    const long wlen = (long)sizeof(want) - 1;
+    TEST_EXPECT_EQ(n, wlen, "V-4b-6: the read is wired to the env render");
+    bool same = (n == wlen);
+    for (long i = 0; same && i < wlen; i++) same = (buf[i] == want[i]);
+    TEST_ASSERT(same, "V-4b-6: /proc/<pid>/environ serves the NUL-separated block");
+    spoor_clunk(c);
+
+    // --- the per-call clamp is a SHORT READ, not a truncation ---------------
+    //
+    // One call copies at most DEVPROC_ENVIRON_READ_MAX (8 KiB) because it runs
+    // with IRQs off; the FILE is unbounded. The property that makes that safe is
+    // that a consumer looping from the returned offset still gets everything --
+    // so build a block past the clamp and prove the loop completes. (Off the
+    // stack: 12 KiB of environment needs a real buffer.)
+    for (int i = 0; i < 3; i++) {
+        char nm[4] = { 'V', (char)('0' + i), '\0', '\0' };
+        u64 id = env_create(tgt, nm, 2);
+        TEST_ASSERT(id != 0, "create a big var");
+        char chunk[512];
+        for (size_t k = 0; k < sizeof(chunk); k++) chunk[k] = (char)('a' + i);
+        for (int off = 0; off < 4096; off += (int)sizeof(chunk)) {
+            TEST_EXPECT_EQ(env_write(tgt, id, off, chunk, (long)sizeof(chunk)),
+                           (long)sizeof(chunk), "fill 4 KiB");
+        }
+    }
+    // 2 small records + 3 * (2 name + 1 '=' + 4096 value + 1 NUL) = 12307 bytes.
+    const long big_total = wlen + 3 * (2 + 1 + 4096 + 1);
+    TEST_ASSERT(big_total > 8192L, "the block really does exceed the clamp");
+
+    struct page *pg = alloc_pages(2, KP_ZERO);          // 16 KiB
+    TEST_ASSERT(pg != NULL, "alloc a 16 KiB read buffer");
+    char *big = (char *)pa_to_kva(page_to_pa(pg));
+
+    struct Spoor *c2 = open_pidfile_for(tgt->pid, "environ", 0);
+    TEST_ASSERT(c2 != NULL, "re-open environ");
+    long first = devproc.read(c2, big, 16384L, 0);
+    TEST_EXPECT_EQ(first, 8192L,
+                   "V-4b-6: one call clamps at DEVPROC_ENVIRON_READ_MAX");
+
+    long total = first;
+    for (int guard = 0; guard < 8; guard++) {
+        long k = devproc.read(c2, big + total, 16384L - total, total);
+        if (k <= 0) break;
+        total += k;
+    }
+    TEST_EXPECT_EQ(total, big_total,
+                   "V-4b-6: looping past the clamp reads the WHOLE environment");
+    // The first two records survived the big ones -- so the clamp shortened the
+    // call, it did not drop content (the failure mode a format-and-slice render
+    // would have had).
+    same = true;
+    for (long i = 0; same && i < wlen; i++) same = (big[i] == want[i]);
+    TEST_ASSERT(same, "V-4b-6: the head of the block is unchanged by the clamp");
+    spoor_clunk(c2);
+    free_pages(pg, 2);
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
 }
 
 void test_devproc_read_cwd(void) {

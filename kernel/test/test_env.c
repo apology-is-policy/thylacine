@@ -23,6 +23,8 @@ void test_env_overwrite_truncate(void);
 void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
+void test_env_render_environ(void);              // VIVARIUM V-4b-6
+void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
 void test_env_clone_deep_independent(void);
 void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
@@ -131,6 +133,109 @@ void test_env_iter_order(void) {
     id = 0;
     TEST_ASSERT(env_iter(p, 0, &id, nm, sizeof(nm), &nl) && id == a, "A still first");
     TEST_ASSERT(env_iter(p, id, &id, nm, sizeof(nm), &nl) && id == c, "skips removed B -> C");
+    edrop(p);
+}
+
+// VIVARIUM V-4b-6: the flat "NAME=VALUE\0" block behind /proc/<pid>/environ.
+// Pins the encoding, the id ordering, the offset windowing (which is the whole
+// reason this render is not a format-and-slice like its /proc siblings), and the
+// skip rule for entries the Linux shape cannot carry.
+void test_env_render_environ(void) {
+    struct Proc *p = emk();
+    char buf[256];
+
+    // No Env at all -> an empty file, not an error. (A Proc that never set a
+    // variable carries env == NULL; -1 here would make every such /proc/<pid>/
+    // environ read fail instead of reading empty, which is what Linux does for a
+    // kernel thread.)
+    TEST_EXPECT_EQ(env_render_environ(p, 0, buf, (long)sizeof(buf)), 0L,
+                   "V-4b-6: a Proc with no env renders an empty block");
+
+    u64 a = env_create(p, "A", 1);
+    u64 b = env_create(p, "BB", 2);
+    TEST_ASSERT(a != 0 && b != 0 && a < b, "two vars, ids monotonic");
+    TEST_EXPECT_EQ(env_write(p, a, 0, "1", 1), 1L, "A=1");
+    TEST_EXPECT_EQ(env_write(p, b, 0, "22", 2), 2L, "BB=22");
+
+    // Records are NUL-TERMINATED (not NUL-separated): the block ends with one,
+    // exactly like Linux's, so a consumer that reads to EOF and splits on NUL
+    // gets two records rather than two-and-an-empty-tail.
+    const char want[] = "A=1\0BB=22\0";
+    const long wlen = (long)sizeof(want) - 1;      // 10: drop the literal's own NUL
+    long n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    TEST_EXPECT_EQ(n, wlen, "V-4b-6: block is NAME=VALUE NUL per var, id order");
+    TEST_ASSERT(bytes_eq(buf, want, wlen), "V-4b-6: block bytes exact");
+
+    // Past EOF reads 0 (the read loop's terminator), never -1.
+    TEST_EXPECT_EQ(env_render_environ(p, wlen, buf, (long)sizeof(buf)), 0L,
+                   "V-4b-6: off at EOF -> 0");
+    TEST_EXPECT_EQ(env_render_environ(p, wlen + 99, buf, (long)sizeof(buf)), 0L,
+                   "V-4b-6: off past EOF -> 0");
+
+    // THE OFFSET WINDOW. Read the block back 3 bytes at a time and reassemble:
+    // this is what a real consumer does, and it is the property a format-and-
+    // slice render could not provide for an environment larger than the devproc
+    // buffer. A window that starts or ends mid-record must still be exact.
+    char asm_[64];
+    long got = 0;
+    for (long off = 0; off < wlen; off += 3) {
+        long k = env_render_environ(p, off, asm_ + got, 3);
+        TEST_ASSERT(k > 0, "V-4b-6: a windowed read inside the block makes progress");
+        got += k;
+    }
+    TEST_EXPECT_EQ(got, wlen, "V-4b-6: windowed reads reassemble the whole block");
+    TEST_ASSERT(bytes_eq(asm_, want, wlen), "V-4b-6: reassembled bytes match");
+
+    // An empty value still renders its record ("NAME=\0") -- set-but-empty and
+    // unset are different states, and getenv distinguishes them.
+    u64 c = env_create(p, "C", 1);
+    TEST_ASSERT(c != 0, "create C with no value");
+    n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    const char want2[] = "A=1\0BB=22\0C=\0";
+    TEST_EXPECT_EQ(n, (long)sizeof(want2) - 1, "V-4b-6: empty value renders NAME=");
+    TEST_ASSERT(bytes_eq(buf, want2, (long)sizeof(want2) - 1),
+                "V-4b-6: empty-value record bytes exact");
+    TEST_ASSERT(env_unset(p, "C", 1), "drop C");
+
+    // THE SKIP RULE. A value containing a NUL cannot be encoded (the NUL IS the
+    // record terminator), so the entry is omitted WHOLE rather than emitted and
+    // silently split -- a split would make its tail parse as a NAME=VALUE that
+    // was never set. The rest of the block is unaffected.
+    u64 d = env_create(p, "D", 1);
+    TEST_ASSERT(d != 0, "create D");
+    TEST_EXPECT_EQ(env_write(p, d, 0, "x\0y", 3), 3L, "D's value carries a NUL");
+    n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    TEST_EXPECT_EQ(n, wlen, "V-4b-6: a NUL-bearing value is skipped, not split");
+    TEST_ASSERT(bytes_eq(buf, want, wlen), "V-4b-6: the other records survive it");
+
+    edrop(p);
+}
+
+// The other half of the skip rule: a NAME containing '=' cannot be encoded
+// either (the first '=' IS the separator, so "X=Y" with value "1" would read
+// back as name "X" value "Y=1" -- one variable masquerading as another). Its own
+// test because reaching it needs env_create's back door: devenv's walk passes a
+// single path component, which cannot contain '/' but CAN contain '='.
+void test_env_render_environ_eq_in_name(void) {
+    struct Proc *p = emk();
+    u64 ok  = env_create(p, "K", 1);
+    u64 bad = env_create(p, "X=Y", 3);
+    TEST_ASSERT(ok != 0, "create K");
+    TEST_ASSERT(bad != 0, "'=' in a name is legal in /env (only NUL and / are not)");
+    TEST_EXPECT_EQ(env_write(p, ok,  0, "v", 1), 1L, "K=v");
+    TEST_EXPECT_EQ(env_write(p, bad, 0, "1", 1), 1L, "X=Y gets a value too");
+
+    char buf[64];
+    long n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    const char want[] = "K=v\0";
+    TEST_EXPECT_EQ(n, (long)sizeof(want) - 1,
+                   "V-4b-6: a '=' in a name is skipped, not mis-attributed");
+    TEST_ASSERT(bytes_eq(buf, want, n), "V-4b-6: only the encodable record renders");
+
+    // And /env still serves it natively -- the skip is the LINUX render declining
+    // to speak, not the variable disappearing. This is what keeps the reformatter
+    // honest (VIVARIUM section 6.2: the native surface stays the truth).
+    TEST_EXPECT_EQ(env_lookup(p, "X=Y", 3), bad, "/env still resolves the name");
     edrop(p);
 }
 

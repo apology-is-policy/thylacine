@@ -495,6 +495,7 @@ void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
 void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
 void test_devproc_maps(void);                  // VIVARIUM V-4b-2
+void test_devproc_environ(void);               // VIVARIUM V-4b-6
 void test_devproc_read_ctl_returns_zero(void);
 void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
@@ -607,6 +608,8 @@ void test_env_overwrite_truncate(void);
 void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
+void test_env_render_environ(void);              // VIVARIUM V-4b-6
+void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
 void test_env_clone_deep_independent(void);
 void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
@@ -1854,6 +1857,7 @@ struct test_case g_tests[] = {
     { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
     { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
     { "devproc.maps",                 test_devproc_maps,                  false, NULL },
+    { "devproc.environ",              test_devproc_environ,               false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
     { "devproc.write_ctl_rejects",     test_devproc_write_ctl_rejects,     false, NULL },
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
@@ -1975,6 +1979,8 @@ struct test_case g_tests[] = {
     { "env.unset_monotonic",           test_env_unset_monotonic,           false, NULL },
     { "env.iter_order",                test_env_iter_order,                false, NULL },
     { "env.bounds",                    test_env_bounds,                    false, NULL },
+    { "env.render_environ",            test_env_render_environ,            false, NULL },
+    { "env.render_environ_eq_in_name", test_env_render_environ_eq_in_name, false, NULL },
     { "env.clone_deep_independent",    test_env_clone_deep_independent,    false, NULL },
     { "env.free_null_tolerant",        test_env_free_null_tolerant,        false, NULL },
     { "devenv.bestiary",               test_devenv_bestiary,               false, NULL },

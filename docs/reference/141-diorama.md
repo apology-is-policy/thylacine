@@ -274,3 +274,60 @@ per-pid id parse → `FAIL per-pid status has no Uid`; skipping the root's pid p
 V-4a + V-4b complete except `/self/{fd,environ,auxv}` (VIVARIUM §6.10). Kernel
 byte-unchanged by V-4a and V-4b-3; the V-4b-1 / V-4b-2 kernel sources landed with
 their own sub-chunks.
+
+
+## `/self/environ` -- and the first gated proxy (V-4b-6)
+
+The environment as Linux serves it: NUL-terminated `NAME=VALUE` records back to
+back, straight from the kernel's `/proc/<pid>/environ`. A **passthrough**, unique
+among these renderers -- the kernel source is already in Linux's exact shape,
+because Thylacine's `/env` has no flat form for it to be in a *different* shape
+from. The block is synthesized for this purpose, so there is no translation to get
+wrong and adding one would only add a place to lose bytes.
+
+The only local work is a **whole-record trim**: `RENDER_MAX` bounds what this
+server serves, and a block cut mid-record would hand the consumer a truncated
+value that parses as a complete one. `trim_to_last_record` backs up to the last
+terminator (it is its own function so the selftest can drive it -- the live path
+cannot produce a truncated block on demand). No terminator at all means one record
+longer than the buffer: serve nothing rather than a headless fragment.
+
+### Why it is `/self` only
+
+This is the one asymmetry in the tree, and it is the whole of section 6.2.
+
+`/proc/<pid>/environ` is owner-or-`CAP_HOSTOWNER` (unlike the `0444` siblings),
+because nothing else in the system discloses another Proc's environment. That gate
+keys on the **reader** -- which is this server, not its client.
+
+* **`/self/environ` is sound.** The target is the connection's own peer, so a read
+  the kernel allows is a read of the CLIENT's own environment, which the client
+  could have performed itself. A read the kernel denies (a user-principal peer,
+  since the shared boot diorama runs as SYSTEM) renders empty. Either way the
+  client gains nothing it did not already have.
+* **`/<pid>/environ` would NOT be sound, and is absent.** This server is
+  `PRINCIPAL_SYSTEM`, so the kernel would ALLOW it to read any SYSTEM Proc's
+  environ -- and it would hand those bytes to a client of any principal, who
+  natively would have been denied. `/srv` is the shared immortal boot registry
+  re-grafted post-pivot, so a logged-in user Proc can mount this server: the leak
+  was reachable, not theoretical. It is the deputy-as-authority failure section
+  6.2 forbids, and it surfaces now rather than at V-4b-1..5 because environ is the
+  first proxied file whose native gate is anything but "everyone".
+
+A walk to `/<pid>/environ` is an honest ENOENT, and both the selftest and
+`/bin/diorama-probe` assert the miss (a resolution is boot-fatal -- the selftest
+runs before the `/srv/diorama` post, so a regression takes the server down rather
+than shipping the leak).
+
+Replicating the kernel's owner check against `peer.principal_id` was considered
+and rejected: it would work, but it turns a component whose entire design property
+is *having no policy* into a policy point, to serve a file no v1.0 consumer reads.
+Two things make the per-pid variant servable, neither a change here -- a
+per-container diorama running as its container's principal (V-7), where server and
+client authority coincide by construction, or MANDATE (I-35), which would let a
+deputy act with its client's authority instead of its own.
+
+**The rule to carry forward:** before proxying a file, ask not only "could the
+client read this natively" but "could the client read this natively *for this
+target*". A deputy with more authority than its client is as much a section 6.2
+violation as one that invents an answer.

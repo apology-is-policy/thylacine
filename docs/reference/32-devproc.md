@@ -45,6 +45,7 @@ int          proc_for_each(int (*cb)(struct Proc *, void *), void *arg);
 /proc/<pid>/exe               path = (pid << 32) | PQS_EXE        QTFILE  (VIVARIUM V-4a-0; RO)
 /proc/<pid>/cwd               path = (pid << 32) | PQS_CWD        QTFILE  (VIVARIUM V-4b-1; RO)
 /proc/<pid>/maps              path = (pid << 32) | PQS_MAPS       QTFILE  (VIVARIUM V-4b-2; RO)
+/proc/<pid>/environ           path = (pid << 32) | PQS_ENVIRON    QTFILE  (VIVARIUM V-4b-6; RO, owner-or-CAP_HOSTOWNER)
 ```
 
 Subkinds 5..15 reserved for `mem`, `fd/`, `wait`, `note`, `args`, etc. — added as the syscall surface needs them.
@@ -499,3 +500,49 @@ Acceptable while live-Proc count is bounded. Phase 5+ adds a hash table or RB-tr
 - `docs/reference/31-trivial-devs.md` — leaf-file Devs (cons / null / zero / random) for context.
 - `docs/reference/14-process-model.md` — Proc + Thread lifecycle (the source-of-truth for what /proc/<pid>/status reports).
 - `specs/notes.tla` (planned, Phase 5+) — note delivery; the future ctl-write dispatch routes here.
+
+
+### `/proc/<pid>/environ` (VIVARIUM V-4b-6)
+
+The per-Proc environment as Linux's flat block -- `NAME=VALUE\0` records back to
+back, in `Env` id order (the same order `/env` readdir emits). The source the
+diorama re-presents as `/proc/self/environ`.
+
+**Its own read path (`devproc_environ_read`), not a `format_*` case, because it
+is OFFSET-AWARE.** Every other info file formats into `DEVPROC_READ_BUF` (2 KiB)
+and slices, which caps the file at 2 KiB; an `Env` holds up to
+`ENV_MAX_ENTRIES` (64) values of `ENV_VALUE_MAX` (4096) each, and one long `PATH`
+overflows that buffer alone. A format-and-slice render would then *silently drop
+environment variables* -- indistinguishable to the consumer from never having been
+set. So the render (`env_render_environ`, `kernel/env.c`) walks records and copies
+only the requested window, skipping wholly-before-window records in O(1).
+
+One CALL is clamped to `DEVPROC_ENVIRON_READ_MAX` (8 KiB) because the copy runs
+with IRQs off under `g_proc_table_lock`; the FILE is unbounded. That is a short
+read, which is POSIX-legal and which every `/proc` consumer loops through --
+Linux's own `seq_file` reads are short-by-page. `stat` reports size 0 (generated
+at read), so consumers read to EOF.
+
+**Gated: owner or `CAP_HOSTOWNER`** (`devproc_owner_or_hostowner`), unlike the
+`0444` info files beside it. Those are ungated on the argument that they disclose
+nothing a peer could not already read -- `/proc/<pid>/ns` strictly dominates them.
+That argument does not extend here: `/env` (devenv) resolves
+`current_thread()->proc->env` **by construction**, so nothing else in the system
+lets one Proc read another's environment, and environment variables carry secrets
+by universal convention. Same posture as Linux (`0400` + `ptrace_may_access`).
+`CAP_DEBUG` is deliberately NOT an axis -- this is an info file, and a debugger's
+authority to stop a Proc is a different grant from a reader's. A denial is `-1`
+with nothing formatted (no partial leak). `devproc.perm_enforced` is false, so the
+`0400` mode is documentation and the read-site check is the enforcement.
+
+**Entries the Linux shape cannot encode are skipped**, not emitted: a `'='` in a
+NAME or a NUL in a VALUE would make one variable parse as another's value, or
+split a record so its tail parses as a variable that was never set. Absence is a
+state consumers handle; a wrong value presented as authoritative is not. `/env`
+remains the complete truth.
+
+**Note for proxies.** The gate keys on the READER, so a 9P server proxying this
+file is authorized as itself. That cuts both ways: it may be denied where its
+client would be allowed (benign), and it may be **allowed where its client would
+be denied** (a leak the proxy must prevent). See `docs/reference/141-diorama.md`
+and `docs/VIVARIUM.md` section 6.13.

@@ -152,12 +152,48 @@ exactly the reverted assertion; the in-guest prover reaches its `/ctl`, `/env` a
 `S_ISDIR` legs before failing at the padded-pid one; and dropping the `devno` stamp
 fails `devenv.stat_native_shapes` at "the walked Spoor carries it".
 
-**NEXT: the V-4b remainder** — three different-shaped jobs, not one (§6.10):
-`environ` needs a kernel source (`/env` is self-only by construction); `auxv` needs
-one too and its value should be weighed first; `fd` is **blocked on #66c**, the
+**V-4b-6 is DONE** — `/self/environ` (§6.13; task #65 part 1). A new kernel
+source `/proc/<pid>/environ` renders the per-Proc `Env` as Linux's flat
+`NAME=VALUE\0` block. Two things the §6.7 prediction ("a renderer over an existing
+group") could not have known from outside:
+
+* it had to be **offset-aware** rather than format-and-slice. An `Env` holds up to
+  64 x 4096 bytes against devproc's 2 KiB buffer, and the failure mode of
+  format-and-slice is *silently dropping environment variables* — which reads to
+  the consumer as never-set, not as an error. One call clamps at 8 KiB (the copy
+  runs IRQs-off); the file does not.
+* it is the **first devproc info file with a real read gate** — owner-or-
+  `CAP_HOSTOWNER`, because `/env` is self-only by construction so nothing else
+  discloses a peer's environment, and environment variables carry secrets by
+  convention. Same posture Linux takes.
+
+**The self-audit find:** a gate that keys on the READER cuts both ways, and the
+second way is a leak. The diorama is SYSTEM, so the kernel would let it read any
+SYSTEM Proc's environ and hand those bytes to a client of any principal — who
+natively would have been denied. `/srv` is the shared boot registry re-grafted
+post-pivot, so a user session can mount the diorama: reachable, not theoretical.
+Fixed by serving environ under `/self` ONLY (sound by construction: the target is
+the connection's own peer). Replicating the owner check against `peer.principal_id`
+was rejected — it makes a component whose design property is having no policy into
+a policy point, for a file no v1.0 consumer reads. The generalized rule, recorded
+for V-4c/V-7: *before proxying a file, ask not only "could the client read this
+natively" but "could the client read this natively FOR THIS TARGET".*
+
+Revert-probed in four boots: all four kernel-side claims at once (gate/clamp/skip/
+windowing) — each test fails at exactly its reverted assertion; the gate alone
+(which also fails BOTH sched-gate tests, proving the shared-predicate extraction is
+live); the diorama trim alone (selftest FAIL → the server refuses to post, boot-
+visible); and the cross-principal fix alone (same boot-fatal signal). An earlier
+probe attempt landed on `devproc_kill_authorized` instead — the pattern matched an
+identical line — which proved the I-26 kill gate covered but left mine unprobed
+until re-run.
+
+**NEXT: the rest of V-4b** — `auxv` needs a kernel source and its value should be
+weighed first (a program's own auxv arrives on its stack; `/proc/self/auxv` is a
+fallback used mainly by sanitizers and `ldd`); `fd` is **blocked on #66c**, the
 #926 handle-table lifetime restructure, which is a kernel chunk rather than a
 Vivarium one. Then V-4c (`/sys` + Linux `/dev` + per-container mounts + focused
-audit).
+audit — now also owing a close on §6.13's deputy-authority rule).
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

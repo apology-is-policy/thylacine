@@ -52,11 +52,12 @@
 //   /self/status     file     Linux-shaped Name/Pid/Uid/Gid/Threads/VmRSS
 //   /self/cwd        file     the working directory (V-4b-1)
 //   /self/maps       file     the address space, Linux column layout (V-4b-2)
+//   /self/environ    file     the environment, NUL-separated (V-4b-6; /self ONLY)
 //   /meminfo         file     MemTotal/MemFree in kB
 //   /uptime          file     "<up> <idle>" seconds
 //
 // Deferred with their kernel prerequisites (VIVARIUM section 6.7):
-// /proc/<pid>/... , /cpuinfo, /stat, /self/{fd,environ,auxv}.
+// /proc/<pid>/... , /cpuinfo, /stat, /self/{fd,auxv}.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
@@ -103,15 +104,16 @@ const N_SELF_CMDLINE: u64 = 3;
 const N_SELF_STATUS: u64 = 4;
 const N_SELF_CWD: u64 = 5;
 const N_SELF_MAPS: u64 = 6;
-const N_MEMINFO: u64 = 7;
-const N_UPTIME: u64 = 8;
-const N_SYS: u64 = 9;
-const N_SYS_KERNEL: u64 = 10;
-const N_OSTYPE: u64 = 11;
-const N_OSRELEASE: u64 = 12;
-const N_VERSION: u64 = 13;
-const N_HOSTNAME: u64 = 14;
-const N_COUNT: u64 = 15;
+const N_SELF_ENVIRON: u64 = 7;
+const N_MEMINFO: u64 = 8;
+const N_UPTIME: u64 = 9;
+const N_SYS: u64 = 10;
+const N_SYS_KERNEL: u64 = 11;
+const N_OSTYPE: u64 = 12;
+const N_OSRELEASE: u64 = 13;
+const N_VERSION: u64 = 14;
+const N_HOSTNAME: u64 = 15;
+const N_COUNT: u64 = 16;
 
 struct Node {
     name: &'static [u8],
@@ -127,6 +129,7 @@ static NODES: [Node; N_COUNT as usize] = [
     Node { name: b"status",    parent: N_SELF,       is_dir: false },
     Node { name: b"cwd",       parent: N_SELF,       is_dir: false },
     Node { name: b"maps",      parent: N_SELF,       is_dir: false },
+    Node { name: b"environ",   parent: N_SELF,       is_dir: false },
     Node { name: b"meminfo",   parent: N_ROOT,       is_dir: false },
     Node { name: b"uptime",    parent: N_ROOT,       is_dir: false },
     Node { name: b"sys",       parent: N_ROOT,       is_dir: true  },
@@ -798,6 +801,83 @@ fn maps_row(fields: &[&[u8]], exe: &[u8], r: &mut Render) -> bool {
     true
 }
 
+/// environ -- the environment as Linux serves it: NUL-terminated "NAME=VALUE"
+/// records, back to back, from the kernel's /proc/<pid>/environ (V-4b-6).
+///
+/// A PASSTHROUGH, uniquely among these renderers: the kernel source is already
+/// in Linux's exact shape, because Thylacine's own /env has no flat form to be
+/// in a different shape FROM -- the block is synthesized for this purpose. So
+/// there is no translation to get wrong, and adding one would only add a place
+/// to lose bytes.
+///
+/// GATED at the source, and that is why this file exists under `/self` ONLY --
+/// the one asymmetry in this tree, and the reason for it is the whole of
+/// section 6.2.
+///
+/// /proc/<pid>/environ is owner-or-CAP_HOSTOWNER (unlike the 0444 siblings)
+/// because nothing else discloses another Proc's environment and environment
+/// variables carry secrets by convention. That gate keys on the READER -- which
+/// is THIS SERVER, not its client. So:
+///
+///   * `/self/environ` is sound. The target is the peer's own pid, so a read
+///     that the kernel allows is a read of the CLIENT's own environment, which
+///     the client could have done itself. A read the kernel denies (a user-
+///     principal peer, since the shared boot diorama runs as SYSTEM) renders
+///     empty. Either way the client gains nothing it did not have.
+///   * `/<pid>/environ` would NOT be sound, and is therefore absent. This server
+///     is SYSTEM, so the kernel would ALLOW it to read any SYSTEM Proc's
+///     environment -- and it would then hand those bytes to a client of any
+///     principal, who natively would have been denied. That is precisely the
+///     deputy-as-authority failure section 6.2 forbids, and unlike its siblings
+///     (all 0444, all readable by anyone natively) environ is the first proxied
+///     file where the client's authority and this server's differ.
+///
+/// A walk to `/<pid>/environ` is therefore an honest ENOENT. Two things would
+/// make it servable, and neither is a change here: a per-container diorama
+/// running as ITS container's principal (V-7), where server and client authority
+/// coincide by construction; or MANDATE (I-35), which would let a deputy act
+/// with its client's authority rather than its own. Replicating the kernel's
+/// owner check against `peer.principal_id` was considered and rejected -- it
+/// would work, but it makes a component whose entire design property is having
+/// no policy into a policy point, to serve a file no v1.0 consumer reads.
+///
+/// Truncation is to a WHOLE RECORD. RENDER_MAX bounds what this server serves,
+/// and a block cut mid-record would hand the consumer a truncated value that
+/// parses as a complete one -- so trim back to the last terminator. Unconditional
+/// because it is a no-op on an untruncated block (which already ends in a NUL).
+fn render_environ(pid: u32, r: &mut Render) {
+    let mut pbuf = [0u8; 64];
+    let n = native_proc_path(pid, b"environ", &mut pbuf);
+    let mut ebuf = [0u8; RENDER_MAX];
+    // A DENIAL arrives as Some(0), not None: the open succeeds (devproc gates at
+    // the read, not the open) and the read returns -1, which read_native reports
+    // as zero bytes. None means the open itself failed -- a gone pid. Both render
+    // empty, which is what makes the deny path indistinguishable from an empty
+    // environment, exactly as it should be.
+    let got = match read_native(&pbuf[..n], &mut ebuf) {
+        Some(g) => g,
+        None => return,
+    };
+    r.push(&ebuf[..trim_to_last_record(&ebuf[..got])]);
+}
+
+/// Length of the longest prefix of `block` that ends on a record boundary -- i.e.
+/// everything up to and including the last NUL. 0 when there is none, which means
+/// a single record longer than the whole buffer: serve nothing rather than a
+/// headless fragment that would parse as a complete NAME=VALUE.
+///
+/// Its own function so the selftest can drive it with a synthetic block; the live
+/// path cannot produce a truncated one on demand (it would need a >4 KiB
+/// environment on the reading Proc). The maps_row precedent.
+pub fn trim_to_last_record(block: &[u8]) -> usize {
+    for i in (0..block.len()).rev() {
+        if block[i] == 0 {
+            return i + 1;
+        }
+    }
+    0
+}
+
 /// maps -- the Proc's address space in Linux's /proc/*/maps shape.
 fn render_maps(pid: u32, r: &mut Render) {
     let mut pbuf = [0u8; 64];
@@ -979,6 +1059,7 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         ),
         N_SELF_CWD if alive => render_cwd(peer.pid, &mut r),
         N_SELF_MAPS if alive => render_maps(peer.pid, &mut r),
+        N_SELF_ENVIRON if alive => render_environ(peer.pid, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
         N_OSTYPE => r.push(OSTYPE),
@@ -1489,6 +1570,9 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(N_SELF, b"maps") != Some(N_SELF_MAPS) {
         return Err("walk /self/maps");
     }
+    if walk_child(N_SELF, b"environ") != Some(N_SELF_ENVIRON) {
+        return Err("walk /self/environ");
+    }
     if walk_child(N_ROOT, b"meminfo") != Some(N_MEMINFO) {
         return Err("walk /meminfo");
     }
@@ -1566,6 +1650,12 @@ pub fn selftest() -> Result<(), &'static str> {
     // A pid dir carries exactly /self's file set, and climbs to the root.
     if walk_child(pid_qid(7, PK_DIR), b"maps") != Some(pid_qid(7, PK_MAPS)) {
         return Err("walk /<pid>/maps");
+    }
+    // environ is deliberately absent under /<pid> -- see render_environ. A miss
+    // here is the property; resolving it would mean this server had started
+    // laundering its own read authority to clients of another principal.
+    if walk_child(pid_qid(7, PK_DIR), b"environ").is_some() {
+        return Err("/<pid>/environ resolved -- the cross-principal leak is back");
     }
     if walk_child(pid_qid(7, PK_DIR), b"..") != Some(N_ROOT) {
         return Err("walk /<pid>/..");
@@ -1691,6 +1781,26 @@ pub fn selftest() -> Result<(), &'static str> {
     }
     if !render(N_SELF_MAPS, &dead).bytes().is_empty() {
         return Err("dead peer served a maps");
+    }
+    if !render(N_SELF_ENVIRON, &dead).bytes().is_empty() {
+        return Err("dead peer served an environ");
+    }
+
+    // --- V-4b-6: the environ whole-record trim, driven directly. The live path
+    // cannot produce a truncated block on demand (it would want a >4 KiB
+    // environment on this very Proc), and the property is the one that keeps a
+    // truncated read from parsing as a complete variable.
+    if trim_to_last_record(b"A=1\0BB=22\0") != 10 {
+        return Err("trim shortened a whole block");
+    }
+    if trim_to_last_record(b"A=1\0BB=2") != 4 {
+        return Err("trim kept a partial trailing record");
+    }
+    if trim_to_last_record(b"LONGVAR=abc") != 0 {
+        return Err("trim served a headless fragment");
+    }
+    if trim_to_last_record(b"") != 0 {
+        return Err("trim of an empty block");
     }
 
     // --- V-4b-2: the native-maps -> Linux-maps translation, driven directly so
