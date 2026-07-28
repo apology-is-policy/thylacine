@@ -37,6 +37,10 @@ SETTLE="${THYLACINE_IDLE_SETTLE:-12}"
 SAMPLES="${THYLACINE_IDLE_SAMPLES:-5}"
 BOOT_TO="${THYLACINE_IDLE_BOOT_TO:-150}"
 LOG="$(mktemp /tmp/thyla-idle-gate.XXXXXX.log)"
+# #89: THIS tree's absolute disk path -- the discriminator every process match
+# below is scoped to. Mirrors run-vm.sh's resolution (we cd'd to the repo root
+# above), so the pattern is exactly the string qemu carries on its cmdline.
+DISK_IMG="${THYLACINE_DISK_IMG:-$PWD/build/disk.img}"
 
 # HVF gate: SKIP (exit 0) if the host cannot run HVF, so this is safe in a
 # TCG-only CI without failing the pipeline.
@@ -57,12 +61,20 @@ for _ in $(seq 1 "$BOOT_TO"); do
     kill -0 "$RUNPID" 2>/dev/null || { echo "ci-idle-gate: FAIL (qemu exited before boot OK; see $LOG)"; exit 1; }
     sleep 1
 done
-[ "$booted" = 1 ] || { echo "ci-idle-gate: FAIL (no boot OK within ${BOOT_TO}s; see $LOG)"; kill "$RUNPID" 2>/dev/null; pkill -f "qemu-system-aarch64.*disk.img" 2>/dev/null; exit 1; }
+[ "$booted" = 1 ] || { echo "ci-idle-gate: FAIL (no boot OK within ${BOOT_TO}s; see $LOG)"; kill "$RUNPID" 2>/dev/null; pkill -f "$DISK_IMG" 2>/dev/null; exit 1; }
 
 sleep "$SETTLE"
 
-QPID=$(pgrep -f "qemu-system-aarch64.*disk.img" | head -1)
-[ -n "$QPID" ] || { echo "ci-idle-gate: FAIL (qemu pid vanished after boot)"; kill "$RUNPID" 2>/dev/null; exit 1; }
+# #89: match on THIS tree's absolute disk path, never a bare `.*disk.img`.
+# A sibling worktree (thylacine-aux) runs its own qemu off
+# <...>/thylacine-aux/build/disk.img, which a loose pattern matches too -- so
+# the old form could KILL another agent's VM, and worse, `head -1` could select
+# it and we would then sample the WRONG process and report a bogus idle number.
+# A silently-wrong measurement is the failure mode to design against here, so an
+# ambiguous match is a loud FAIL rather than a pick.
+QPID=$(pgrep -f "$DISK_IMG" || true)
+QN=$(printf '%s\n' "$QPID" | grep -c . || true)
+[ "$QN" = 1 ] || { echo "ci-idle-gate: FAIL (expected exactly 1 qemu on $DISK_IMG, found $QN: $QPID) -- do not run this gate alongside another VM on the same tree; the idle number would be ambiguous either way"; kill "$RUNPID" 2>/dev/null; exit 1; }
 
 sum=0; k=0; samples=""
 for _ in $(seq 1 "$SAMPLES"); do
