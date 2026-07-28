@@ -1473,3 +1473,101 @@ void test_cons_tx_role_serializes_writers(void) {
     test_kthread_join_free(w, &g_txr_exited);
     cons_settle_mgr();
 }
+
+// ---------------------------------------------------------------------------
+// cons.sys_puts_uses_shared_console_path (#76)
+// ---------------------------------------------------------------------------
+//
+// THE #76 REGRESSION. SYS_PUTS must emit through cons_output_write -- the ONE
+// console-output implementation (#57b) -- and not through a uart_putc loop of
+// its own.
+//
+// Pre-fix, sys_puts_handler walked the user buffer byte-by-byte into the
+// LOCK-FREE uart_putc: the pre-P1-F shape, left behind in this caller when
+// P1-F converted cons_output_write. That cost two properties at once:
+//
+//   - the WRITER ROLE, so a t_putstr shredded a concurrent /dev/cons write at
+//     byte granularity. Observed live in LS-CI: a login prompt emerged as
+//     `patapestrssyd: mworodd:e`, which is "password: " (login, via fd 1)
+//     interleaved byte-for-byte with "tapestryd: mode " (tapestryd, via
+//     t_putstr). A role only some writers take excludes nobody.
+//   - the DRAIN TAP, which fires from cons_emit / cons_emit_wait only, so
+//     nothing written via SYS_PUTS ever reached the G-4 renderer: the native
+//     diagnostic stream was invisible on the graphical console while looking
+//     perfectly normal on serial.
+//
+// The DRAIN is what makes this deterministically testable. The role's absence
+// shows up only under a race, but the tap's absence is visible from a single
+// thread -- and both properties live behind the SAME call, so proving SYS_PUTS
+// reaches the drain proves it took the shared path and the role comes with it.
+//
+// It has to run at EL0. sys_puts_handler takes a USER VA, and kproc has no
+// user address space (pgtable_root == 0), so no in-kernel caller can reach it
+// at all -- a unit test of the handler is not merely awkward, it is
+// impossible. /hello is the vehicle: an established spawn-and-reap binary
+// (sys_spawn_with_fds.zero_count_succeeds) whose entire output is one
+// t_putstr, so every byte the drain sees came through SYS_PUTS.
+//
+// Echo capture stays OFF deliberately -- the bytes take the real ring and the
+// real UART, so this exercises the production path end to end rather than the
+// short-circuit, and the extra serial line is the same one the spawn test
+// already prints.
+//
+// NON-VACUOUS: restore the uart_putc loop in sys_puts_handler and the drain
+// captures nothing -- `have` is 0 and the assert below fails.
+//
+// The count is sampled with the NON-BLOCKING cons_test_drain_count() before
+// any cons_drain_read(). cons_drain_read SLEEPS on an armed-but-empty drain,
+// so reading first would turn a pre-fix run into a BOOT HANG instead of a
+// failed test -- and a hang reports nothing.
+
+extern int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name,
+                                       size_t name_len,
+                                       const u32 *fds, u32 fd_count);
+
+void test_cons_sys_puts_uses_shared_console_path(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+
+    int st = 0;
+    while (wait_pid(&st) > 0) { /* drain stragglers */ }
+
+    cons_test_reset();
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+
+    int pid = sys_spawn_with_fds_for_proc(t->proc, "hello", 5, NULL, 0);
+    int status = -1;
+    int reaped = (pid > 0) ? wait_pid(&status) : -1;
+
+    // Sample + DISARM before asserting. TEST_ASSERT returns on failure, and a
+    // drain left open makes every later drain test fail with a single-open -1
+    // instead of its own verdict -- one broken test reporting as three.
+    u32  have = cons_test_drain_count();
+    u8   dbuf[128];
+    long dn = (have > 0u) ? cons_drain_read(dbuf, (long)sizeof dbuf) : 0;
+    cons_drain_close();
+    cons_test_reset();
+
+    TEST_ASSERT(pid > 0, "spawned /hello");
+    TEST_EXPECT_EQ(reaped, pid, "reaped /hello");
+    TEST_EXPECT_EQ(status, 0, "/hello exited 0");
+
+    // THE PROPERTY: the child's t_putstr reached the drain, so SYS_PUTS went
+    // through cons_output_write (role-held, tapped) rather than uart_putc.
+    TEST_ASSERT(have > 0u, "SYS_PUTS output reached the drain tap");
+    TEST_ASSERT(dn > 0, "drain read returned the tapped bytes");
+
+    // Search rather than assert at offset 0. The property is "the child's bytes
+    // reached the tap", NOT "nothing else wrote to the console" -- pinning the
+    // match to offset 0 would couple this test to the second, and a future cons
+    // write anywhere in the spawn path would then fail it with a message
+    // blaming SYS_PUTS. Finding the marker anywhere still proves the routing.
+    static const u8 want[] = { 'h','e','l','l','o',' ','f','r','o','m' };
+    bool found = false;
+    for (long i = 0; !found && i + (long)sizeof(want) <= dn; i++) {
+        u32 k = 0;
+        while (k < sizeof(want) && dbuf[i + (long)k] == want[k]) k++;
+        found = (k == sizeof(want));
+    }
+    TEST_ASSERT(found, "drain holds /hello's SYS_PUTS bytes verbatim");
+}

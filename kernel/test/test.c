@@ -555,6 +555,7 @@ void test_cons_cook_line_overflow(void);         // LS-8b
 void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
 void test_cons_drain_tap_mirrors_output(void);       // G-4
+void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_cons_drain_feed_runs_discipline(void);     // G-4
 void test_cons_drain_overflow_drops_oldest(void);    // G-4
 void test_cons_drain_close_and_reopen_epoch(void);   // G-4
@@ -1926,6 +1927,7 @@ struct test_case g_tests[] = {
     { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
     { "cons.drain_tap_mirrors_output", test_cons_drain_tap_mirrors_output, false, NULL },
+    { "cons.sys_puts_uses_shared_console_path", test_cons_sys_puts_uses_shared_console_path, false, NULL },
     { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
     { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
     { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },
