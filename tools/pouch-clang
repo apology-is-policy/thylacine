@@ -32,6 +32,13 @@
 # which treats "thylacine" as an unknown OS: fine as a *compiler* (it emits
 # the aarch64 ELF object), and pouch-ld does the link half.
 #
+# W1u (#71): -march is the ARMv8.0 floor, with -moutline-atomics so an
+# atomic becomes a call to a libclang_rt.builtins.a helper that branches on
+# __aarch64_have_lse_atomics. `+lse` inlined FEAT_LSE (v8.1) instructions,
+# which #UD on a Cortex-A72 -- and this wrapper builds the pouch-hello
+# provers, so it was the last ungated LSE in the tree. See PORTABILITY.md
+# §4.6. Callers add their own -mbranch-protection for PAC/BTI.
+#
 # See docs/POUCH-DESIGN.md §9.
 set -euo pipefail
 
@@ -48,5 +55,6 @@ POUCH_CC="${POUCH_CC:-$LLVMFORK/build/bin/clang}"
 exec "$POUCH_CC" \
     --target=aarch64-thylacine \
     --sysroot="$POUCH_SYSROOT" \
-    -march=armv8-a+lse+pauth+bti \
+    -march=armv8-a \
+    -moutline-atomics \
     "$@"

@@ -95,8 +95,18 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 # NOT set here: -ffreestanding (pouch programs are HOSTED — pouch is the
 # libc); -std (each project picks its own); -O / -g (CMAKE_BUILD_TYPE
 # drives those).
+#
+# W1u (#71): the v8.0 floor + outline-atomics. `+lse` inlined FEAT_LSE
+# (v8.1) atomics, which are an undefined instruction on a Cortex-A72 --
+# the ARMv8.0 floor PORTABILITY.md section 3 binds us to. The helpers
+# live in libclang_rt.builtins.a (pouch-ld supplies it) and branch on
+# __aarch64_have_lse_atomics, so one binary runs on both. Dropping
+# `+pauth+bti` from -march costs no hardening: -mbranch-protection below
+# is what emits paciasp/bti, and those are HINT-space (NOPs on parts
+# without the feature) -- the kernel's -march=armv8-a does the same.
 set(_pouch_c_flags
-    "-march=armv8-a+lse+pauth+bti"
+    "-march=armv8-a"
+    "-moutline-atomics"
     "-nostdlibinc"
     "-isystem ${THYLACINE_SYSROOT}/include"
     "-D__thylacine__=1"
@@ -107,7 +117,9 @@ set(_pouch_c_flags
     "-mbranch-protection=pac-ret+bti"
 )
 string(JOIN " " CMAKE_C_FLAGS_INIT ${_pouch_c_flags})
-set(CMAKE_ASM_FLAGS_INIT "-march=armv8-a+lse+pauth+bti")
+# No -moutline-atomics for ASM: it is a codegen flag with nothing to
+# lower. Hand-written .S that wants LSE must state its own `.arch`.
+set(CMAKE_ASM_FLAGS_INIT "-march=armv8-a")
 
 # Link via tools/pouch-ld — the link half of the pouch toolchain. Drives
 # ld.lld directly with the static/W^X/non-PIE link line + auto-supplies

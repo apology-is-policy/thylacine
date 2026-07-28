@@ -57,8 +57,8 @@
 // toolchain is compiled with -mgeneral-regs-only so the C-side doesn't
 // emit FP/SIMD instructions, but the cpu_switch_context save/restore
 // path explicitly handles V0..V31 + FPSR + FPCR. `.arch_extension fp`
-// is additive over the prevailing `-march=armv8-a+lse+...` profile;
-// it doesn't override hardening features. Per Arm GAS reference 6.3.
+// is additive over the prevailing `-march=armv8-a` profile; it doesn't
+// override hardening features. Per Arm GAS reference 6.3.
 .arch_extension fp
 
 .section ".text", "ax"

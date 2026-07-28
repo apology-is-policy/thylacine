@@ -58,7 +58,19 @@ set(THYLACINE_USERSPACE_TARGET_TRIPLE "aarch64-none-elf"
 
 set(THYLACINE_USERSPACE_C_FLAGS
     "--target=${THYLACINE_USERSPACE_TARGET_TRIPLE}"
-    "-march=armv8-a+lse+pauth+bti"
+    # W1u (#71): the ARMv8.0 floor, matching the kernel. `+lse` inlined
+    # FEAT_LSE (v8.1) atomics, which #UD on a Cortex-A72.
+    #
+    # Deliberately NO -moutline-atomics here, unlike pouch: this link line
+    # is -nostdlib + -Wl,--no-undefined and supplies no compiler-rt, so a
+    # call to __aarch64_* would be a link error. At the v8.0 floor clang
+    # lowers an atomic to an inline LL/SC loop, which needs no helper at
+    # all -- that is what makes omitting the flag safe here, not an absence
+    # of atomics (thread-probe uses them; it just gets ldaxr/stlxr).
+    #
+    # Dropping `+pauth+bti` costs no hardening: -mbranch-protection below
+    # is the emitter, and paciasp/bti are HINT-space (NOPs where absent).
+    "-march=armv8-a"
     "-ffreestanding"
     "-fno-builtin"
     "-fno-common"

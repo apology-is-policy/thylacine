@@ -132,7 +132,8 @@ every v8.0+ target with no further work — and lands before W1.5.
 file, the kernel's. The userspace / pouch toolchains kept `+lse` and were still
 emitting ARMv8.1 atomics long after W1 shipped — which §3 ("the v8.0 floor is the
 binding compile target") does not permit, and which #71 surfaced as a `snare:ill`
-on A72 in 111 of 172 binaries. That gap and its fix are **§4.6 (W1u)**.
+on A72 — 893 unguarded LSE instructions across 101 binaries. That gap and its fix
+are **§4.6 (W1u)**.
 
 ---
 
@@ -240,10 +241,29 @@ user fault: pid=1852 reason="snare:ill" pc=0x004067e0 -- terminating Proc
   4067e0: 08e8fec9   casalb w8, w9, [x22]      <- FEAT_LSE, in the Rust allocator
 ```
 
-**111 of 172 aarch64 ELFs carry LSE instructions.** The tail is the point:
-`alloc-smoke` has only two, in `ThylaAlloc::alloc`'s init lock, and that is
-enough to kill it. So on the RPi 400 — §3's *named first bare-metal board* —
-Thylacine would boot and then fail to run most of its own userland.
+**111 of 172 aarch64 ELFs carry LSE instructions — but only 101 of them carry
+LSE that can actually fire.** The distinction is the whole shape of the fix, and
+it is measured, not assumed: disassembling every binary and asking, per LSE
+instruction, whether a runtime flag test guards it gives
+
+| kind | binaries | LSE insns | guarded? |
+|---|---|---|---|
+| **Go** | 9 | **5087** (85%) | **yes** — every one branches on `runtime.arm64HasATOMICS` |
+| Rust | 91 | 234 | no |
+| pouch C/C++ | 10 | 659 | no |
+| native C | 0 | 0 | — |
+
+**Go is already safe and needs no change.** At `GOARM64=v8.0` (the default,
+which we never override) the Go compiler emits *both* an LSE and an LL/SC path
+behind a `ldrb`/`tbz` on `runtime.arm64HasATOMICS` — fed by `cpu.ARM64.HasATOMICS`
+← `hwcapInit` ← the `AT_HWCAP` word the CF-4 A work already wired. Go holds 85%
+of the tree's LSE instructions, so counting instructions rather than *reachable*
+ones overstates the defect by an order of magnitude.
+
+What remains is 893 unguarded instructions across 101 binaries, and the tail is
+the point: `alloc-smoke` has only two, in `ThylaAlloc::alloc`'s init lock, and
+that is enough to kill it. So on the RPi 400 — §3's *named first bare-metal
+board* — Thylacine would boot and then fail to run most of its own userland.
 
 ### The technique: outline-atomics (user-voted 2026-07-28)
 
@@ -302,10 +322,41 @@ Four facts checked against real toolchain output, all four holding:
 Because (4) makes correctness independent of detection, W1u splits into two
 independently-safe steps:
 
-- **W1u-a — correctness.** Flip the three userspace toolchains to
+- **W1u-a — correctness. LANDED 2026-07-28.** Flip the userspace toolchains to
   `-march=armv8-a -moutline-atomics` (keeping `-mbranch-protection=pac-ret+bti`)
   and build `lse.S` into the pouch compiler-rt. Every target then runs
-  everywhere; LSE-capable cores temporarily run LL/SC.
+  everywhere; LSE-capable cores temporarily run LL/SC. As built:
+
+  | site | change |
+  |---|---|
+  | `usr/.cargo/config.toml` | `+lse` -> `+outline-atomics` (PAC/BTI feats kept) |
+  | `cmake/Toolchain-aarch64-pouch.cmake` | C flags + `CMAKE_ASM_FLAGS_INIT` |
+  | `cmake/Toolchain-aarch64-userspace.cmake` | plain `-march=armv8-a`, **no** outline (see below) |
+  | `tools/pouch-clang` | the wrapper's own `-march` |
+  | `tools/build.sh` | 8 C/C++ sites + 2 ASM sites + the compiler-rt recipe |
+
+  Two asymmetries are deliberate. **Native C** (`aarch64-none-elf`) gets the bare
+  v8.0 floor and *not* `-moutline-atomics`: its link line is `-nostdlib
+  -Wl,--no-undefined` with no compiler-rt, so a `__aarch64_*` call would be a
+  link error. What makes omitting it safe is that at the floor clang lowers an
+  atomic to an inline LL/SC loop needing no helper — not an absence of atomics
+  (`thread-probe` uses them; it simply gets `ldaxr`/`stlxr`).
+  **compiler-rt itself** likewise stays outline-free — it *is* the helpers' home
+  archive, so compiling it to call them would be self-referential. Result: **0 unguarded LSE across all 172 binaries** (from
+  893), and `THYLACINE_CPU=cortex-a72` reaches `Thylacine boot OK` with
+  1209/1209, 0 `snare:ill`, 0 EXTINCTION.
+
+  The 125 `lse.S` variants mirror the vendored CMakeLists' own
+  pattern x size x model loop (16-byte forms exist only for `cas`:
+  6*5*5 - 5*1*5 = 125); the count is asserted in the recipe, and the archive
+  verification now gates on `__aarch64_*` being defined so a missing helper
+  fails at the sysroot step rather than three build stages later.
+
+  **Note on `+outline-atomics` in rustc**: it is not a *stable* target-feature
+  and rustc warns once per crate. The emitted code was verified directly
+  (helper call + gated helper body) and the toolchain version is pinned, so the
+  warning is noise rather than risk — but a rustc bump should re-check the
+  codegen, not just the build.
 - **W1u-b — performance.** Set `__aarch64_have_lse_atomics = 1` at startup from
   `getauxval(AT_HWCAP) & HWCAP_ATOMICS`. The truth source already exists —
   `arch/arm64/hwfeat.c` already exports `THWCAP_ATOMICS` (bit 8), landed by the
@@ -512,9 +563,10 @@ under QEMU (TCG + HVF) without any of W4.
   QEMU.
   - **"A72-ISA-ready" was KERNEL-ONLY until W1u** (#71, 2026-07-28). W1 shipped
     the kernel floor and the milestone read as if the system were ready; in fact
-    the kernel passed 1209/1209 on `-cpu cortex-a72` while 111 of 172 userspace
-    binaries still carried `+lse` and died on `snare:ill`. The milestone is not
-    met until W1u lands **and the A72 boot is a standing gate** — the default
+    the kernel passed 1209/1209 on `-cpu cortex-a72` while 101 userspace
+    binaries still carried unguarded `+lse` and died on `snare:ill`. The
+    milestone is not met until W1u lands **and the A72 boot is a standing
+    gate** — the default
     `tools/test.sh` runs HVF `-cpu host` (LSE present) and structurally cannot
     catch this class.
 - **M2 = W4.** Actual RPi 400 hardware boot. The culminating, post-v1.0-sized

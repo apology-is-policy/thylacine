@@ -1074,12 +1074,15 @@ build_compiler_rt() {
     # aarch64-specific files. Deliberately excluded:
     #   - generic fp_mode.c — superseded by aarch64/fp_mode.c, the FPCR-reading
     #     arch override (compiler-rt's filter_builtin_sources drops it likewise).
-    #   - aarch64/lse.S outline atomics — pouch-clang compiles every TU with
-    #     -march=...+lse, so clang emits LSE atomic instructions inline and the
-    #     __aarch64_{cas,swp,ldadd,...} outline helpers are never called.
     #   - aarch64/emupac.cpp + the SME files — PAC emulation / SME ABI support,
     #     referenced only by code built with -mbranch-protection or +sme, which
     #     pouch's -march baseline does not enable.
+    #
+    # aarch64/lse.S IS built (W1u, #71) — it was excluded while pouch-clang
+    # compiled every TU with -march=...+lse and inlined the atomics. That is
+    # exactly what W1u reverses: the baseline is now the v8.0 floor with
+    # -moutline-atomics, so clang emits calls to these helpers and a missing
+    # lse.S is an undefined-symbol link failure, not dead weight.
     local sysroot="$BUILD_DIR/sysroot"
     local crt_src="$REPO_ROOT/third_party/compiler-rt/builtins"
     local crt_obj="$BUILD_DIR/pouch/compiler-rt-obj"
@@ -1119,7 +1122,12 @@ build_compiler_rt() {
     # resource headers (stdint.h / limits.h / stdarg.h / unwind.h — all
     # compiler-provided) while -isystem supplies pouch's libc headers for the
     # few OS-touching files (emutls.c, enable_execute_stack.c, ...).
-    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+    #
+    # W1u (#71): the v8.0 floor, and deliberately NO -moutline-atomics here.
+    # These ARE the outline helpers' home archive; compiling them to call
+    # __aarch64_* would be self-referential. Any atomic inside a builtin
+    # lowers to an inline LL/SC loop, which runs on every ARMv8 part.
+    local cflags=( --target=aarch64-thylacine -march=armv8-a
                    -std=gnu11 -O2 -fno-builtin -fomit-frame-pointer
                    -fno-stack-protector -fno-pic
                    -nostdlibinc -isystem "$sysroot/include" -I"$crt_src" )
@@ -1137,6 +1145,37 @@ build_compiler_rt() {
     done
     echo "    compiled $n objects"
 
+    # W1u (#71): the outline-atomics helpers. One lse.S TU per
+    # (pattern, size, model) triple, mirroring the vendored CMakeLists'
+    # own loop (aarch64_SOURCES, "foreach(pat ...) foreach(size ...)
+    # foreach(model ...)") — 16-byte forms exist only for cas, so the
+    # count is 6*5*5 - 5*1*5 = 125.
+    #
+    # -DHAS_ASM_LSE is what COMPILER_RT_HAS_ASM_LSE would set: it selects
+    # `.arch armv8-a+lse` INSIDE lse.S, so the fast path assembles as real
+    # LSE even though the TU baseline is v8.0. Without it the helper still
+    # builds but its "fast" path is a second LL/SC loop — correct, pointless.
+    local asmflags=( --target=aarch64-thylacine -march=armv8-a
+                     -DHAS_ASM_LSE -I"$crt_src" )
+    local pat size model lse_n=0
+    for pat in cas swp ldadd ldclr ldeor ldset; do
+        for size in 1 2 4 8 16; do
+            for model in 1 2 3 4 5; do
+                [[ "$size" == "16" && "$pat" != "cas" ]] && continue
+                "$clang" "${asmflags[@]}" \
+                    "-DL_${pat}" "-DSIZE=${size}" "-DMODEL=${model}" \
+                    -c "$crt_src/aarch64/lse.S" \
+                    -o "$crt_obj/lse-${pat}${size}-${model}.o"
+                lse_n=$((lse_n + 1))
+            done
+        done
+    done
+    if [[ "$lse_n" -ne 125 ]]; then
+        echo "    compiler-rt: expected 125 lse.S variants, built $lse_n" >&2
+        exit 1
+    fi
+    echo "    compiled $lse_n outline-atomics helpers (lse.S)"
+
     # Archive + symbol index.
     mkdir -p "$sysroot/lib"
     rm -f "$archive"
@@ -1147,8 +1186,15 @@ build_compiler_rt() {
     # libc but no runtime links a static hello, but not printf.
     local defined sym fail=0
     defined="$("$LLVM_PREFIX/bin/llvm-nm" --defined-only "$archive" 2>/dev/null)"$'\n'
+    # The __aarch64_* entries are the W1u (#71) gate: with -moutline-atomics
+    # on the userspace baseline, a missing helper is a link failure in every
+    # pouch program that touches an atomic, so verify them here rather than
+    # discovering it three build stages later.
     for sym in __addtf3 __subtf3 __multf3 __divtf3 __eqtf2 __extenddftf2 \
-               __trunctfdf2 __fixtfdi __floatditf; do
+               __trunctfdf2 __fixtfdi __floatditf \
+               __aarch64_cas1_acq_rel __aarch64_cas8_acq_rel \
+               __aarch64_swp4_rel __aarch64_ldadd8_acq_rel \
+               __aarch64_ldclr4_relax __aarch64_ldset2_acq; do
         case "$defined" in
             *" T $sym"$'\n'*) ;;
             *) echo "    compiler-rt: builtin $sym not defined in the archive" >&2
@@ -1361,7 +1407,7 @@ build_libsodium() {
     #        emit a config.h.
     #      - SODIUM_STATIC — expands SODIUM_EXPORT to nothing (no
     #        visibility attribute needed for a static-archive build).
-    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
                    -fno-stack-protector
                    # -nostdlibinc (NOT -nostdinc): the armcrypto TUs include
@@ -2250,7 +2296,7 @@ build_sdl2() {
     cp "$port_dir"/thylacine/*.c "$port_dir"/thylacine/*.h \
         "$sdl_src/src/video/thylacine/"
 
-    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
                    -fno-stack-protector
                    -nostdlibinc -isystem "$sysroot/include"
@@ -2419,7 +2465,7 @@ build_tyrquake() {
         r_main r_misc r_sky r_sprite r_surf r_vars
     )
 
-    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
                    -fno-stack-protector -fcommon
                    -nostdlibinc -isystem "$sysroot/include"
@@ -2511,7 +2557,7 @@ build_gnumake() {
         patch -s -p1 -t -d "$mk_src" -i "$p"
     done
 
-    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -nostdlibinc -isystem "$sysroot/include"
                    -D_GNU_SOURCE=1 -DHAVE_CONFIG_H
                    -DLIBDIR='"/usr/lib"' -DINCLUDEDIR='"/usr/include"'
@@ -2631,7 +2677,7 @@ build_libcxx() {
         # __thylacine__ is auto-defined by the fork ThylacineTargetInfo (CL-3);
         # _GNU_SOURCE stays explicit -- the target auto-defines it only for C++,
         # and libunwind/libc++abi have C/ASM TUs that need the musl POSIX surface.
-        local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
+        local cflags="-march=armv8-a -moutline-atomics -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
         # (Re)configure when the CMake cache is absent OR this build.sh is newer
         # than the cache -- so a CMake-flag change in THIS recipe actually takes
         # effect (a stale cache would silently ignore it). Otherwise ninja is
@@ -2654,7 +2700,7 @@ build_libcxx() {
                 -DCMAKE_ASM_COMPILER_TARGET=aarch64-thylacine
                 -DCMAKE_SYSROOT="$sysroot"
                 -DCMAKE_C_FLAGS="$cflags" -DCMAKE_CXX_FLAGS="$cflags"
-                -DCMAKE_ASM_FLAGS="-march=armv8-a+lse+pauth+bti"
+                -DCMAKE_ASM_FLAGS="-march=armv8-a"
                 -DCMAKE_AR="$LLVM_PREFIX/bin/llvm-ar"
                 -DCMAKE_RANLIB="$LLVM_PREFIX/bin/llvm-ranlib"
                 -DCMAKE_NM="$LLVM_PREFIX/bin/llvm-nm"
@@ -2730,7 +2776,7 @@ build_libcxx() {
         # -Wno-potentially-evaluated-expression: the prover's typeid(*polymorphic)
         # RTTI check intentionally evaluates its operand (that IS the runtime-type
         # test) -- the warning is expected, not a defect.
-        "$clangxx" --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti \
+        "$clangxx" --target=aarch64-thylacine -march=armv8-a -moutline-atomics \
             -std=c++20 -O2 -fno-pie -nostdlibinc -D_GNU_SOURCE=1 \
             -Wno-potentially-evaluated-expression \
             -isystem "$sysroot/include/c++/v1" -isystem "$sysroot/include" \
@@ -2816,8 +2862,8 @@ build_clade() {
     # Explicit sysroot includes (like the C++ prover): -nostdlibinc + c++/v1 then
     # the C include dir, so the sysroot owns every system header. _GNU_SOURCE for
     # musl's GNU surface, which LLVM assumes under __unix__.
-    local cxxflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include/c++/v1 -isystem $sysroot/include -D_GNU_SOURCE=1"
-    local cflags="-march=armv8-a+lse+pauth+bti -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
+    local cxxflags="-march=armv8-a -moutline-atomics -fno-pic -nostdlibinc -isystem $sysroot/include/c++/v1 -isystem $sysroot/include -D_GNU_SOURCE=1"
+    local cflags="-march=armv8-a -moutline-atomics -fno-pic -nostdlibinc -isystem $sysroot/include -D_GNU_SOURCE=1"
     if [[ ! -f "$bdir/CMakeCache.txt" || "${BASH_SOURCE[0]}" -nt "$bdir/CMakeCache.txt" ]]; then
         rm -rf "$bdir"
         mkdir -p "$bdir"
@@ -2834,7 +2880,7 @@ build_clade() {
             -DCMAKE_SYSROOT="$sysroot"
             -DCMAKE_C_FLAGS="$cflags"
             -DCMAKE_CXX_FLAGS="$cxxflags"
-            -DCMAKE_ASM_FLAGS="-march=armv8-a+lse+pauth+bti"
+            -DCMAKE_ASM_FLAGS="-march=armv8-a"
             -DCMAKE_AR="$LLVM_PREFIX/bin/llvm-ar"
             -DCMAKE_RANLIB="$LLVM_PREFIX/bin/llvm-ranlib"
             -DCMAKE_NM="$LLVM_PREFIX/bin/llvm-nm"

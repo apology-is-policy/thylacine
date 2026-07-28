@@ -50,9 +50,18 @@ rustflags = [
     "-C", "relocation-model=static",
     "-C", "code-model=small",
 
-    # ARMv8-A baseline + LSE atomics + PAC/BTI hardening to match the
-    # C side's `-march=armv8-a+lse+pauth+bti`. Rust's target-feature
-    # syntax is independent of clang's -march.
+    # ARMv8-A baseline + PAC/BTI hardening, matching the C side's
+    # `-march=armv8-a -moutline-atomics`. Rust's target-feature syntax
+    # is independent of clang's -march.
+    #
+    # W1u (#71): `+lse` used to be here, and it inlined FEAT_LSE (v8.1)
+    # atomics -- `casalb` in ThylaAlloc's init lock alone was enough to
+    # kill EVERY allocating Rust binary on a Cortex-A72 with snare:ill.
+    # `+outline-atomics` instead calls `__aarch64_*` helpers that branch
+    # on `__aarch64_have_lse_atomics`, so one binary runs on both v8.0
+    # and v8.1+ cores. The flag is a zero-init BSS symbol, so the LL/SC
+    # path is what runs until something sets it -- correct by default,
+    # which is the same fail-safe property W1.5 gives the kernel.
     #
     # FP/SIMD enabled (P4-Ic5-FP): the kernel now saves/restores
     # Q0..Q31 + FPSR + FPCR on every context switch (eager save/restore
@@ -61,5 +70,5 @@ rustflags = [
     # use any AArch64 Advanced SIMD instruction. rustc's default
     # codegen for memset/memcpy intrinsics (NEON `dup v0.4h` etc.)
     # works without traps.
-    "-C", "target-feature=+lse,+paca,+pacg,+bti",
+    "-C", "target-feature=+outline-atomics,+paca,+pacg,+bti",
 ]
