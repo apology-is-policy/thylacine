@@ -307,8 +307,41 @@ that means something narrower than the field it fills** — fabrication with a
 plausible face arriving by the back door. Either widen the counter or do not
 call it `intr`.
 
-(For any new `/ctl` file, check it against `kernel-base`, which is
-`CAP_HOSTOWNER`-gated after the #57a F1 KASLR-slide leak.)
+**V-4c-2a DECIDED** (§6.17, scripture-first, no code). Two things the research
+found that the table above had not:
+
+* **`cpuinfo`'s `Features` line is already sourced** — `g_hw_features.linux_hwcap`
+  carries the arm64 *uapi* bit numbers for the exec auxv, so the CF-4 AT_HWCAP
+  chunk already paid for the field that capability-detecting consumers actually
+  parse. Only the MIDR *identity* quartet is unsourced.
+* **A sixth instance nobody had counted**: `stat`'s `cpu`/`cpuN` jiffies line. No
+  EL0-vs-EL1 time accounting exists anywhere in the tree, and — unlike every other
+  field — it **cannot be omitted**, because the columns are positional, so a
+  missing middle column is a wrong answer rather than an absent one. All non-idle
+  time is reported as `system` under a *stated premise* (the pattern `maps`
+  already uses); utilization, which is what essentially every consumer computes,
+  is exactly right either way.
+
+The rule covering all seven: **give the kernel a source, per-CPU, in the kernel's
+own shape — and omit only what has no truth to tell.** Per-CPU is not a detail: it
+makes both new counters free (each CPU stores to a line it already owns), it is
+how Linux accounts them, and it is the only form that stays correct on a
+heterogeneous board — where `MIDR_EL1` genuinely differs per core, which is why
+Linux prints a per-`processor` block at all.
+
+The exposures land as **columns on `/ctl/cpu`** (whose row already *is* the
+kernel's native per-CPU description — a `/proc`-shaped kernel file would be §6.8's
+phenotype leaking inward) plus one global scalar on `/ctl/sched`. Appending is
+safe: prowl's parser takes three tokens positionally and ignores the rest, and an
+`offline` row stays two tokens and is still skipped — which is also right for the
+diorama, since Linux lists only online CPUs as `cpuN`. So no new `/ctl` file, and
+the `kernel-base` precedent (`CAP_HOSTOWNER`-gated after the #57a F1 KASLR-slide
+leak) is not engaged; the added values are hardware description and event counts,
+carrying no address or layout secret.
+
+**V-4c-2b/c then build it**, and both land *before* V-4c-3 — which matters,
+because the two new counters sit on audit-trigger surfaces (the scheduler switch
+chokepoint and GIC dispatch), and V-4c-3 is the round that must cover them.
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

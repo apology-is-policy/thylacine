@@ -492,7 +492,9 @@ arrive by the *same* mechanism — which is the finding, not a coincidence.
 | **V-4b** | **CLOSED.** the rest of Tier 2 (`self/{fd,auxv}`) is dispositioned, not built: `auxv` **weighed and deliberately not built** (§6.14 — zero live readers, and a `viv`-launched binary gets its auxv on the stack by construction); `fd` **blocked on #66c**, the #926 handle-table lifetime restructure, which is a kernel chunk and not a Vivarium one | both dispositions recorded with evidence + a named trigger; neither is a silent omission |
 | **V-4c** | **RESCOPED by §6.15** (scripture-first, no code written): `/dev` is *not* a diorama tree — a read-only server cannot serve `/dev/null`, and native devdev already serves it correctly — so V-4c is a minimal `/sys` + the per-container mount wiring (now the substantive half, since bind is the answer for `/dev` as well as the delivery for `/proc`) + the two Tier-1 stragglers `cpuinfo`/`stat`, each only partly sourced + the focused audit | audit close on the §6.2 no-new-authority property — now including §6.13's **deputy-authority** half (a proxy must not be allowed where its client would be denied) — and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5/6 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
 | **V-4c-1** | **LANDED.** one server, two trees, **by bind** (§6.16): the root becomes the synthetic *world* with `proc` and `sys` as siblings, and `/sys/devices/system/cpu/{online,possible,present}` + the `cpuN` dirs land, all sourced from `/ctl/cpu`. The aname route §6.15 named is **closed**, not merely harder — `devsrv_open_connect` attaches with a hardcoded empty aname and `SYS_ATTACH_9P_SRV` is byte-mode-gated — and `SYS_MOUNT` already takes a subdirectory, so this cost **no kernel change** | the prover reads the cpulists in-guest AND binds `/dio/sys` at a second path, reading the same bytes through the new name — the composition V-7 depends on, proven rather than assumed; the sibling-isolation and online-mask selftest legs are revert-probed (each fails the boot when broken) |
-| **V-4c-2** | the per-field decision, now with **three** instances of one shape (`cpuinfo`'s MIDR, `stat`'s ctxt/intr/processes, `cpuN/cache`'s CTR_EL0) — omit, or give the kernel a source; "report 0" is fabrication with a plausible face. Then the per-container mount wiring V-7 consumes | one decision covering all three, not three ad-hoc ones |
+| **V-4c-2a** | **DECIDED (§6.17), scripture-first, no code.** The three recorded instances turned out to be **five exposures, one trap, and a sixth instance nobody had counted**: four fields already have a kernel source, `intr`'s source is real but *narrower than the field* (the back-door fabrication), and `stat`'s user/system split has no material at all and cannot be omitted because the columns are positional | one rule covering all seven: give the kernel a source, per-CPU, in the kernel's own shape — and omit only what has no truth to tell |
+| **V-4c-2b** | the kernel sources §6.17 calls for: the two per-CPU counters (`gic_dispatch`, the `sched()` switch chokepoint), the per-CPU MIDR read at bring-up, `CTR_EL0` + the hwcap word surfaced, `g_next_pid` accessor — all landing as `/ctl/cpu` columns + one `/ctl/sched` scalar | each new column read back in-guest; prowl unaffected (positional 3-token parse); the two counters advance under load |
+| **V-4c-2c** | the diorama half: `/proc/stat`, `/proc/cpuinfo`, `cpuN/cache/index0/coherency_line_size` | the prover reads all three in-guest and cross-checks `cpuinfo`'s Features against the native `AT_HWCAP`, and `stat`'s cpu count against `/sys/…/cpu/online` |
 | **V-4c-3** | the arc's **focused audit** — OWED across V-4b-1..6 + V-4c, all of which landed on self-audit only, and a **merge gate** for `gfx-4 → main` | as the V-4c row above: §6.2 no-new-authority, §6.13 deputy-authority, §6.12 file-identity |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
@@ -1129,6 +1131,84 @@ reports, and their existence is what the legacy "count the `cpuN` entries"
 enumeration path reads (busybox `nproc`, older glibc `_SC_NPROCESSORS_CONF`).
 Modern consumers read the range files one level up, which is why those were the
 ones worth sourcing first.
+
+### 6.17 The unsourced fields, decided once (V-4c-2)
+
+§6.15 and §6.16 accumulated three instances of one shape — `cpuinfo`'s `MIDR_EL1`,
+`stat`'s `ctxt`/`intr`/`processes`, and `cpuN/cache`'s `CTR_EL0` — and deliberately
+deferred them to **one** decision rather than three ad-hoc ones. Grepping for the
+sources before deciding (§6.7's discipline, and the **third** time in three
+sub-chunks that doing so has changed the answer) mostly **dissolves** the fork:
+four of the five fields already have a kernel source and need only exposing.
+
+| Linux field | source status (verified) | decision |
+|---|---|---|
+| `stat: processes` | **exists** — `g_next_pid` (`kernel/proc.c:386`) is a monotonic `u32` from 1, bumped once per `proc_alloc` | **expose** — `g_next_pid − 1` *is* Linux's forks-since-boot |
+| `stat: intr` | **exists but PARTIAL** — `kobj_irq_total_fires()` (`kernel/irqfwd.c:124`) counts only IRQs forwarded to a userspace driver; timer, UART and IPIs never reach that hook | **widen, then expose** (see below) |
+| `stat: ctxt` | **material exists** — prowl's per-thread `nsched` (`kernel/sched.c:1414`); no global or per-CPU aggregate | **add a per-CPU counter** at the same chokepoint |
+| `cpuN/cache/…` | **exists in-kernel** — `CTR_EL0`, read at `arch/arm64/mmu.c:962`/`:982` for the I-cache stride, simply unexposed | **expose** |
+| `cpuinfo: Features` | **exists** — `g_hw_features.linux_hwcap` (`arch/arm64/hwfeat.h:52`), already carrying the arm64 *uapi* bit numbers for the exec auxv | **expose** — the AT_HWCAP chunk already paid for this |
+| `cpuinfo: implementer/variant/part/revision` | **none** — `grep MIDR` over `kernel/` + `arch/` returns nothing | **read it**, per-CPU at bring-up |
+| `cpuinfo: BogoMIPS` | **none, and none possible** | **omit** |
+
+**The rule that covers all seven**, and the reason it is one decision and not
+seven: *give the kernel a source, per-CPU, in the kernel's own shape — and omit
+only what has no truth to tell.* Per-CPU is not a detail. It is what makes the two
+new counters free (each CPU stores to a line it already owns and is already
+writing — `sched()` holds `cs`, and `gic_dispatch` runs on the CPU taking the
+IRQ), it is how Linux itself accounts both, and it is the only form that stays
+correct on a heterogeneous board, where `MIDR_EL1` genuinely differs per core —
+which is precisely why Linux prints a per-`processor` block. A boot-CPU-only MIDR
+would be wrong exactly where the field earns its keep. (That is the AT_HWCAP row's
+recorded seam arriving early, on a value that cannot be papered over with an AND.)
+
+**`intr` is the trap, and it is a shape §6.15 did not anticipate.** A source
+*exists*, so the danger is no longer an invented zero but a **real number that
+means something narrower than the field it fills** — fabrication with a plausible
+face, arriving by the back door. `kobj_irq_total_fires` is truthful about what it
+counts; publishing it as `intr` would not be. The fix is not to relabel it but to
+count at the **universal** entry: `gic_dispatch` (`arch/arm64/gic.c:703`) is where
+*every* INTID arrives before routing. `kobj_irq_total_fires` stays exactly as it
+is — the driver-forwarded subset it has always honestly been.
+
+**The sixth instance, which nobody had counted: `stat`'s `cpu`/`cpuN` jiffies
+line.** Per-CPU `idle_ns` is sourced (prowl-3b), and `iowait`/`steal`/`guest` are
+legitimately zero for us — but **no EL0-vs-EL1 time accounting exists anywhere in
+the tree**, so the user/system split has no source and no material. Unlike every
+field above, this one cannot be omitted: the columns are positional, so a missing
+middle column is not an absent answer but a wrong one. Every available choice is
+wrong for a reader who wants the split; only the *shape* of the wrongness is ours
+to pick. So: **all non-idle time is reported as `system`, under a stated premise**,
+the pattern `maps` already uses for its `/self/exe` substitution. The premise —
+"Thylacine does not account user-vs-kernel time separately" — is true, checkable,
+and named at the render site, so it is visible rather than hidden, and flagged for
+revisit if per-mode accounting ever lands. Utilization (`1 − idle/total`), which is
+what essentially every consumer computes, is exactly right either way.
+
+There *is* material for a plausible-looking split — attribute kernel threads'
+`run_ns` to `system` and user threads' to `user` — and it is rejected for the same
+reason `intr` is: it would be a different quantity wearing the field's name.
+
+**What is omitted, and why each is not a silent omission.** `BogoMIPS` has no
+truth to tell (it is a calibration artifact of a loop Thylacine does not run, and
+is meaningless on Linux too). `kernel_max` stays omitted per §6.16. `CPU
+architecture: 8` is emitted as a constant — the §6.9 category, a declaration about
+which ABI the caller sees rather than a measurement of the machine.
+
+**Where the exposures land.** Not in a `/proc`-shaped kernel file — that would be
+§6.8's phenotype leaking inward. The per-CPU values (`ctxt`, `intr`, cache line
+size, the MIDR quartet) become **columns on the existing `/ctl/cpu` table**, whose
+row already *is* the kernel's native per-CPU description. Appending is safe:
+prowl's parser (`usr/prowl/src/sample.rs:242`) matches three tokens positionally
+and ignores the rest, and an `offline` row stays two tokens and is still skipped —
+which is also the right answer for the diorama, since Linux lists only online CPUs
+as `cpuN`. The one global scalar (`processes`) has no per-CPU form and no natural
+row, so it joins `/ctl/sched`'s global block beside `runnable`.
+
+This adds two counters to two audit-trigger surfaces — the scheduler switch
+chokepoint and the GIC dispatch path. Both are read-only telemetry that no
+decision consults (prowl's discipline, `PROWL-DESIGN §3.1`), and both land
+*before* V-4c-3, which is the arc's owed focused audit and must cover them.
 
 ---
 
