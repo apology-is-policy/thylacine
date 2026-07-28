@@ -357,16 +357,99 @@ independently-safe steps:
   (helper call + gated helper body) and the toolchain version is pinned, so the
   warning is noise rather than risk — but a rustc bump should re-check the
   codegen, not just the build.
-- **W1u-b — performance.** Set `__aarch64_have_lse_atomics = 1` at startup from
-  `getauxval(AT_HWCAP) & HWCAP_ATOMICS`. The truth source already exists —
-  `arch/arm64/hwfeat.c` already exports `THWCAP_ATOMICS` (bit 8), landed by the
-  CF-4 A AEAD work — so this is a wire-up, not a new kernel surface.
+- **W1u-b — performance. LANDED 2026-07-28.** Set `__aarch64_have_lse_atomics`
+  at startup from `AT_HWCAP & HWCAP_ATOMICS`. The truth source already existed —
+  `arch/arm64/hwfeat.c` exports `THWCAP_ATOMICS` (bit 8), landed by the CF-4 A
+  AEAD work — so this is a wire-up, not a new kernel surface. **The kernel is
+  byte-unchanged.**
+
+  The two userspace worlds need separate wiring because they get their helpers
+  from different runtimes, and *neither* runtime sets the flag on a bare target:
+
+  | world | flag defined by | set by |
+  |---|---|---|
+  | Rust (91 bins) | Rust's `compiler_builtins` (hidden, zero-init BSS) | `libthyla-rs`'s `_start` |
+  | pouch C/C++ (5 bins) | compiler-rt `cpu_model/aarch64.c` | a priority-90 ELF constructor |
+  | Go (9 bins) | — | *nothing to do*: Go gates on its own `runtime.arm64HasATOMICS`, already fed by `AT_HWCAP` |
+  | native C | — | *nothing to do*: no outline atomics (inline LL/SC; see W1u-a) |
+
+  **Rust.** `_start` already walked the auxv for `AT_VDSO_CLOCK`; that walk
+  generalises to service every tag it cares about, and `AT_HWCAP` bit 8 now
+  publishes into the flag byte the helpers load. One walk, one `stlrb`.
+
+  **pouch.** compiler-rt's detection is a per-OS `#if` chain ending in `#else /*
+  leave it false */` — Thylacine lands there. The missing arm is supplied by
+  `usr/lib/pouch/compiler-rt/aarch64-thylacine.c`, which **textually includes**
+  the vendored `cpu_model/aarch64.c` and appends the constructor;
+  `build_compiler_rt` compiles that in place of the vendored file. Three
+  variants were live and only this one is both linked and durable:
+
+  - a `#elif defined(__thylacine__)` arm inside `third_party/compiler-rt` reads
+    best, but the drop is byte-pristine (Thylacine's other `__thylacine__` arm
+    lives in the LLVM fork, CL-3b) and an edit there is **silently lost on a
+    re-vendor** — the failure mode is a perf regression nobody notices;
+  - `-D__linux__` for that one TU would take their Linux arm verbatim, but it
+    also silently re-routes the FMV block below it;
+  - a separate object holding only the constructor would **never be linked** —
+    an archive member is pulled in only to resolve an undefined symbol, and
+    nothing references a constructor.
+
+  Textual inclusion puts the constructor in the same object that *defines* the
+  flag, so it arrives exactly when outline atomics do; a re-vendor that moves
+  the file is a build error, not a silent regression. The recipe additionally
+  asserts the object has a non-empty `.init_array` — the constructor is the
+  whole point and would otherwise die quietly.
+
+  **Proof.** Both `/alloc-smoke` (Rust) and `/pouch-hello` (C) assert
+  *agreement*: `__aarch64_have_lse_atomics == (AT_HWCAP & HWCAP_ATOMICS)`, then
+  drive a real helper and check the arithmetic. Agreement — not a fixed value —
+  is the CPU-independent form: it fails on an M2 stuck on LL/SC *and* on an A72
+  claiming LSE, and both provers are boot-fatal, so it holds on every gate. A
+  `hwcap != 0` guard keeps it from passing vacuously (the kernel always reports
+  at least FP|ASIMD).
+
+  **Measured** (`cpubench atomics` — a same-binary A/B that clears the flag,
+  restores it, alternates 5 rounds and keeps the min per arm; it never *sets*
+  the flag, since forcing the LSE arm on a v8.0 core is a `snare:ill`):
+
+  | host | LL/SC arm | native arm | |
+  |---|---|---|---|
+  | M2 (HVF, FEAT_LSE) | 4.72 ns/op | 4.16 ns/op | **1.13x** |
+  | Cortex-A72 (TCG) | 22.054 ns/op | 22.004 ns/op | both LL/SC, as they must be |
+
+  The A72 row is the methodology check, not a result: with no FEAT_LSE both
+  phases run identical code, and they land within **0.2%** — so the harness's
+  noise floor is ~0.2% and the M2 delta is ~65x that. Signal, not drift.
+
+  Read 1.13x for what it is. W1u-a cost two things — inline LSE became a *call*,
+  and the call took the *LL/SC arm*. W1u-b recovers only the second. The
+  call-and-branch wrapper (`bl` / `adrp` / `ldrb` / `cbz` / `ret` around one
+  instruction) is inherent to outline-atomics and nothing recovers it: it is the
+  price of one binary running on both v8.0 and v8.1+, which is the W1u premise.
+  The measurement is also *uncontended*, which is where LL/SC looks best — a
+  contended line makes its retry loop live. So 1.13x is a floor on the win and
+  **not** "the W1u-a regression, undone".
 
 **Verification bar.** `THYLACINE_ACCEL=tcg THYLACINE_CPU=cortex-a72` must reach
 `Thylacine boot OK`. This is load-bearing and non-obvious: the default
 `tools/test.sh` runs HVF `-cpu host` (an M2 — LSE present), so **a green default
 gate cannot detect an LSE regression**. The A72 boot is the only gate that can,
 and it joins the standing matrix for any change to these flags.
+
+**A build trap this arc walked into, twice.** `tools/build.sh all` reuses a
+cached sysroot, and `sysroot_is_stale` originally watched only
+`usr/lib/pouch/patches/`. W1u-b's new file lives in `usr/lib/pouch/compiler-rt/`,
+so the first full build silently reused a sysroot that predated it and the change
+looked inert — the artifact, not the source, is what told the truth. The watch
+now covers both directories; a change to the *recipe* (`tools/build.sh` itself)
+still needs an explicit `tools/build.sh sysroot`. The durable backstop is the
+boot probe: a stale `libclang_rt` fails `/pouch-hello`'s agreement check.
+
+The second trap was in the guard added to catch the first: `llvm-readelf -S … |
+grep -q init_array` under `set -o pipefail` reports the *producer's* status, and
+a `-q` grep can SIGPIPE it — so it rejected a perfectly good object. Capture the
+output, then match it. (Same family as #74: a check that cannot report what it
+claims to report.)
 
 ---
 

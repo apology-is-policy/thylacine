@@ -67,8 +67,58 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
 
+// W1u-b (#71): the object the outline-atomics prover hammers. A static (not a
+// local) so its address genuinely escapes; `black_box` below then keeps the
+// optimizer from folding the RMW away and leaving nothing to prove.
+static LSE_PROBE: AtomicU32 = AtomicU32::new(7);
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // ====================================================================
+    // W1u-b (#71): outline atomics take their FEAT_LSE arm iff AT_HWCAP
+    // says the CPU has it.
+    // ====================================================================
+    //
+    // This binary is where #71 first bit: W1u-a's predecessor inlined a
+    // FEAT_LSE `casalb` into ThylaAlloc's init lock, so alloc-smoke died on
+    // `snare:ill` at its first allocation on a Cortex-A72. W1u-a made every
+    // atomic RMW a call to __aarch64_*, which branches on a byte
+    // compiler_builtins zero-initializes and never sets; W1u-b sets it from
+    // the auxv in _start.
+    //
+    // Assert AGREEMENT, not a value -- the expected answer differs per CPU
+    // (M2/`-cpu max`: set; Cortex-A72: clear), so agreement is the one check
+    // that catches both directions and runs everywhere. The hwcap != 0 guard
+    // keeps it from passing vacuously on an empty auxv: the kernel always
+    // reports at least FP|ASIMD (arch/arm64/hwfeat.c).
+    let hwcap = libthyla_rs::hwcap();
+    if hwcap == 0 {
+        t_putstr("alloc-smoke: AT_HWCAP absent (auxv walk broken) FAILED\n");
+        return 1;
+    }
+    let expect_lse = hwcap & (1 << 8) != 0;
+    if libthyla_rs::have_lse_atomics() != expect_lse {
+        t_putstr(if expect_lse {
+            "alloc-smoke: LSE present but outline atomics stuck on LL/SC FAILED\n"
+        } else {
+            "alloc-smoke: outline atomics claim LSE on a core without it FAILED\n"
+        });
+        return 1;
+    }
+    // Drive a real helper: whichever arm the flag selected must execute and
+    // compute correctly -- on ARMv8.0 the LL/SC retry loop, on FEAT_LSE a
+    // single ldaddal.
+    let probe = core::hint::black_box(&LSE_PROBE);
+    if probe.fetch_add(35, Ordering::AcqRel) != 7 || probe.load(Ordering::Acquire) != 42 {
+        t_putstr("alloc-smoke: outline-atomics RMW wrong result FAILED\n");
+        return 1;
+    }
+    t_putstr(if expect_lse {
+        "alloc-smoke: outline atomics OK (#71: FEAT_LSE arm, agrees with AT_HWCAP)\n"
+    } else {
+        "alloc-smoke: outline atomics OK (#71: LL/SC arm, agrees with AT_HWCAP)\n"
+    });
+
     // Box — single heap word + Drop.
     let b: Box<u32> = Box::new(0xDEADBEEF);
     if *b != 0xDEADBEEF {

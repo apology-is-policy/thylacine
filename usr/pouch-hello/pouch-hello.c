@@ -30,9 +30,15 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <string.h>
+#include <sys/auxv.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+// W1u-b (#71). compiler-rt's outline-atomics helpers branch on this byte;
+// usr/lib/pouch/compiler-rt/aarch64-thylacine.c sets it from AT_HWCAP in a
+// priority-90 constructor. Declared hidden to match the definition.
+extern _Bool __aarch64_have_lse_atomics __attribute__((visibility("hidden")));
 
 // emit — write the whole NUL-terminated string to stdout, looping on
 // short writes. Returns 0 on success, -1 if a write makes no progress.
@@ -220,6 +226,49 @@ int main(void) {
             return 1;
         }
         if (emit("pouch-hello: clock_gettime ok (wired to 75: MONOTONIC advances, REALTIME > 2020)\n") != 0)
+            return 1;
+    }
+
+    // W1u-b (#71): outline atomics take their FEAT_LSE arm iff AT_HWCAP says
+    // the CPU has it. W1u-a compiled pouch at the ARMv8.0 floor with
+    // -moutline-atomics, so every atomic RMW is a call to __aarch64_*, which
+    // loads __aarch64_have_lse_atomics and branches. compiler-rt leaves that
+    // byte false on platforms it does not know; the Thylacine arm sets it.
+    //
+    // Assert AGREEMENT, not a value -- the expected answer differs per CPU
+    // (M2/`-cpu max`: set; Cortex-A72: clear), and asserting agreement catches
+    // BOTH failure directions with one CPU-independent check. hw != 0 keeps it
+    // from passing vacuously if the auxv were empty: the kernel always reports
+    // at least FP|ASIMD (arch/arm64/hwfeat.c), so a zero word means the
+    // constructor read nothing and the flag is false for the wrong reason.
+    {
+        unsigned long hw = getauxval(AT_HWCAP);
+        if (hw == 0) {
+            (void)emit("pouch-hello: FAIL AT_HWCAP absent (kernel auxv or getauxval broken)\n");
+            return 1;
+        }
+        _Bool expect = (hw & HWCAP_ATOMICS) != 0;
+        if (__aarch64_have_lse_atomics != expect) {
+            (void)emit(expect
+                       ? "pouch-hello: FAIL LSE present but outline atomics stuck on LL/SC\n"
+                       : "pouch-hello: FAIL outline atomics claim LSE on a core without it\n");
+            return 1;
+        }
+        // Drive a real helper. Whichever arm the flag selected has to execute
+        // and compute correctly -- on ARMv8.0 the LL/SC retry loop, on FEAT_LSE
+        // a single ldaddal. The asm barrier makes the object opaque so the
+        // optimizer cannot fold the RMW away and leave nothing to prove.
+        static unsigned lse_probe = 7;
+        unsigned *p = &lse_probe;
+        __asm__ volatile("" : "+r"(p) : : "memory");
+        unsigned prev = __atomic_fetch_add(p, 35, __ATOMIC_ACQ_REL);
+        if (prev != 7 || __atomic_load_n(p, __ATOMIC_ACQUIRE) != 42) {
+            (void)emit("pouch-hello: FAIL outline-atomics RMW wrong result\n");
+            return 1;
+        }
+        if (emit(expect
+                 ? "pouch-hello: outline atomics ok (#71: FEAT_LSE arm, agrees with AT_HWCAP)\n"
+                 : "pouch-hello: outline atomics ok (#71: LL/SC arm, agrees with AT_HWCAP)\n") != 0)
             return 1;
     }
 

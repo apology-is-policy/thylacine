@@ -683,12 +683,12 @@ void test_srvconn_role_park_second_writer(void) {
     struct Thread *pb = thread_create(kproc(), rp_send_producer_b);
     TEST_ASSERT(pa != NULL && pb != NULL, "thread_create x2");
     ready(pa);
-    sched();
+    SC_YIELD_UNTIL(g_rp_ran_a >= 1u && pa->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_rp_ran_a, 1u, "producer A parked mid-send (ring full)");
     TEST_ASSERT(cn->s2c.writing == true, "A holds the writing role");
 
     ready(pb);
-    sched();
+    SC_YIELD_UNTIL(g_rp_ran_b >= 1u && pb->state == THREAD_SLEEPING);
     // THE #354 ASSERTION: B contended the held role and PARKED -- it did
     // NOT return -1. Pre-fix this reads g_rp_ret_b == -1 with ran_b == 2.
     TEST_EXPECT_EQ(g_rp_ran_b, 1u, "producer B parked on the ROLE");
@@ -713,7 +713,7 @@ void test_srvconn_role_park_second_writer(void) {
         remain -= want;
         sched();   // let A (then B) resume as room frees
     }
-    sched();
+    SC_YIELD_UNTIL(g_rp_ran_a >= 2u && g_rp_ran_b >= 2u);
     TEST_EXPECT_EQ(g_rp_ran_a, 2u, "producer A completed");
     TEST_EXPECT_EQ(g_rp_ran_b, 2u, "producer B completed after the role park");
     TEST_EXPECT_EQ(g_rp_ret_a, (long)sizeof g_rp_payload_a, "A whole payload");
@@ -777,12 +777,12 @@ void test_srvconn_role_park_second_reader(void) {
     struct Thread *cb = thread_create(kproc(), rr_recv_consumer_b);
     TEST_ASSERT(ca != NULL && cb != NULL, "thread_create x2");
     ready(ca);
-    sched();
+    SC_YIELD_UNTIL(g_rr_ran_a >= 1u && ca->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_rr_ran_a, 1u, "consumer A parked on empty s2c");
     TEST_ASSERT(cn->s2c.reading == true, "A holds the reading role");
 
     ready(cb);
-    sched();
+    SC_YIELD_UNTIL(g_rr_ran_b >= 1u && cb->state == THREAD_SLEEPING);
     // THE #354 ASSERTION: B parked on the role instead of returning -1.
     TEST_EXPECT_EQ(g_rr_ran_b, 1u, "consumer B parked on the ROLE");
     TEST_EXPECT_EQ(g_rr_ret_b, -999L,
@@ -792,15 +792,19 @@ void test_srvconn_role_park_second_reader(void) {
     // releases the role; B acquires and parks on data.
     fill_pattern(g_sc_chunk, 64, 0x21);
     TEST_EXPECT_EQ(srvconn_server_send(cn, g_sc_chunk, 64), 64L, "send #1");
-    sched();
+    SC_YIELD_UNTIL(g_rr_ran_a >= 2u);
     TEST_EXPECT_EQ(g_rr_ran_a, 2u, "consumer A completed");
     TEST_EXPECT_EQ(g_rr_ret_a, 64L, "A read the first chunk");
     TEST_ASSERT(check_pattern(g_rr_buf_a, 64, 0x21), "A's bytes intact");
 
-    sched();   // B acquires the freed role + parks on data
+    // B acquires the role A just released and parks on data. `reading` is the
+    // observable: A's release (inside its recv, so already done once ran_a
+    // reached 2) clears it, and B's acquire sets it again. B's STATE cannot
+    // serve here -- it is SLEEPING both before and after the handoff.
+    SC_YIELD_UNTIL(cn->s2c.reading == true);
     fill_pattern(g_sc_chunk, 64, 0x42);
     TEST_EXPECT_EQ(srvconn_server_send(cn, g_sc_chunk, 64), 64L, "send #2");
-    sched();
+    SC_YIELD_UNTIL(g_rr_ran_b >= 2u);
     TEST_EXPECT_EQ(g_rr_ran_b, 2u, "consumer B completed after the role park");
     TEST_EXPECT_EQ(g_rr_ret_b, 64L, "B read the second chunk");
     TEST_ASSERT(check_pattern(g_rr_buf_b, 64, 0x42), "B's bytes intact");
@@ -988,7 +992,7 @@ void test_srvconn_client_send_blocking_poll_edge(void) {
 
     // The poller registers + parks on the EMPTY c2s first.
     ready(tp);
-    sched();
+    SC_YIELD_UNTIL(g_pe_ran_p >= 1u && tp->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_pe_ran_p, 1u, "poller parked on the empty ring");
     TEST_EXPECT_EQ(tp->state, THREAD_SLEEPING, "poller is SLEEPING in poll");
 

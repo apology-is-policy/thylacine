@@ -65,7 +65,7 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 use core::time::Duration;
 
 #[global_allocator]
@@ -636,6 +636,114 @@ fn mode_single(budget: Duration) -> u64 {
         ops_per_s / 1_000_000
     ));
     ops_per_s
+}
+
+// =============================================================================
+// atomics -- W1u-b (#71): what the outline-atomics arm actually costs.
+// =============================================================================
+//
+// W1u-a moved userspace to the ARMv8.0 floor with -moutline-atomics, so every
+// atomic RMW is `bl __aarch64_<op>`, which loads __aarch64_have_lse_atomics and
+// branches: set -> one LSE instruction; clear -> an LL/SC retry loop. W1u-b sets
+// that byte from AT_HWCAP. This mode measures the delta the flag buys.
+//
+// It is a SAME-BINARY A/B -- same code, same cache state, same core, only the
+// flag differs -- so there is no cross-build noise to argue about. The call,
+// the ldrb and the branch are common to BOTH phases; the delta isolates exactly
+// the arm W1u-b selects, and nothing else.
+//
+// Safety: the bench only ever CLEARS the byte and restores what _start
+// published. It must never set it, because forcing the LSE arm on a core
+// without FEAT_LSE is a `snare:ill` -- clearing is correct everywhere, which is
+// the same fail-safe direction the zero-initialized default has.
+//
+// SCOPE, stated plainly -- this measures ONE of the two costs W1u-a introduced:
+//
+//   inline LSE (pre-W1u-a)  1 instruction          -- NOT measured here
+//   outline + LSE (today)   bl/adrp/ldrb/cbz/ret around it
+//   outline + LL/SC         ... plus the retry loop
+//
+// The A/B covers the second gap (the arm), which is what W1u-b actually
+// recovers. The first gap -- the call-and-branch wrapper -- is inherent to
+// outline-atomics and is NOT recovered by anything: it is the price of one
+// binary running on both v8.0 and v8.1+, which is the W1u design choice. Do not
+// read this ratio as "the W1u-a regression, undone"; it is the part of it that
+// a runtime flag can undo.
+//
+// Also UNCONTENDED (one thread, a hot line). That is the dominant shape --
+// allocator locks, refcounts -- but it is NOT where LL/SC hurts most; a
+// contended line makes the retry loop live. Read the ratio as a floor.
+extern "C" {
+    // Defined by compiler_builtins (hidden, zero-init BSS); every __aarch64_*
+    // helper loads it. Declared here rather than exposing a public setter from
+    // libthyla-rs: a writable knob on this byte has no legitimate library use.
+    static __aarch64_have_lse_atomics: AtomicU8;
+}
+
+static ATOMIC_TARGET: AtomicU64 = AtomicU64::new(0);
+
+/// One timed run of `iters` uncontended RMWs. Returns ns/op scaled by 1000
+/// (i.e. picoseconds/op) so a sub-nanosecond difference is still visible.
+fn atomics_run(iters: u64) -> u64 {
+    let target = core::hint::black_box(&ATOMIC_TARGET);
+    let t = Instant::now();
+    for _ in 0..iters {
+        target.fetch_add(1, Ordering::AcqRel);
+    }
+    let ns = t.elapsed().as_nanos() as u64;
+    if iters > 0 {
+        ns.saturating_mul(1000) / iters
+    } else {
+        0
+    }
+}
+
+fn mode_atomics(iters: u64) {
+    // SAFETY: single-threaded here; the byte is written only by _start and by
+    // this mode, and only ever to its published value or to 0 (always correct).
+    let native = unsafe { __aarch64_have_lse_atomics.load(Ordering::Acquire) };
+    let lse = native != 0;
+
+    // Warm the line + the helper's I-cache so round 1 does not pay for both.
+    atomics_run(iters / 10 + 1);
+
+    // ALTERNATE the arms and keep the MIN of each. The delta here is single-
+    // digit percent, which one A-then-B sample cannot distinguish from drift:
+    // alternating makes any thermal/scheduling trend hit both arms equally, and
+    // min-of-N is the standard microbenchmark estimator (the fastest run is the
+    // one with the least interference, and interference is one-sided).
+    const ROUNDS: usize = 5;
+    let per = iters / ROUNDS as u64 + 1;
+    let mut llsc_ps = u64::MAX;
+    let mut native_ps = u64::MAX;
+    for _ in 0..ROUNDS {
+        unsafe { __aarch64_have_lse_atomics.store(0, Ordering::Release) };
+        llsc_ps = llsc_ps.min(atomics_run(per));
+        unsafe { __aarch64_have_lse_atomics.store(native, Ordering::Release) };
+        native_ps = native_ps.min(atomics_run(per));
+    }
+
+    t_putstr(&format!(
+        "atomics: {} uncontended fetch_add -- LL/SC {}.{:03} ns/op, native {}.{:03} ns/op\n",
+        iters,
+        llsc_ps / 1000,
+        llsc_ps % 1000,
+        native_ps / 1000,
+        native_ps % 1000
+    ));
+    if lse {
+        // permille so an under-2x speedup still reads precisely.
+        let ratio = if native_ps > 0 { llsc_ps.saturating_mul(1000) / native_ps } else { 0 };
+        t_putstr(&format!(
+            "atomics: FEAT_LSE arm active (#71 W1u-b) -- {}.{:02}x vs LL/SC\n",
+            ratio / 1000,
+            (ratio % 1000) / 10
+        ));
+    } else {
+        t_putstr(
+            "atomics: no FEAT_LSE on this core -- both phases ran LL/SC (the ARMv8.0 floor)\n",
+        );
+    }
 }
 
 /// scale -- N long-running CPU threads, the will-it-scale efficiency. Time one
@@ -1261,6 +1369,7 @@ fn run_all(pool: &mut StackPool, cpus: usize) {
         cpus
     ));
     mode_idle(500); // first -- labels the build (high parks/s = tickful, low = tickless).
+    mode_atomics(4_000_000);
     mode_single(Duration::from_millis(200));
     mode_scale(pool, cpus, 30_000_000);
     mode_yield(pool, cpus, 100, 500);
@@ -1380,6 +1489,9 @@ pub extern "C" fn rs_main() -> i64 {
         Some("idle") => {
             mode_idle(p3.unwrap_or(1_000));
         }
+        Some("atomics") => {
+            mode_atomics(p3.unwrap_or(2_000_000));
+        }
         Some("mixed") => {
             let iters = p3.unwrap_or(500);
             if !pool.ensure(n) {
@@ -1401,6 +1513,10 @@ pub extern "C" fn rs_main() -> i64 {
                 cpus
             ));
             let wc0 = wc_snapshot();
+            // W1u-b (#71): cheap (~20 ms) and it puts the LSE-vs-LL/SC arm cost
+            // in every boot log, so a regression that silently drops the flag
+            // shows up as the two phases converging.
+            mode_atomics(1_000_000);
             mode_single(Duration::from_millis(120));
             // scale work sized so a single worker runs ~a few hundred ms (well
             // above spawn noise, but the probe stays ~1s total).

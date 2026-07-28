@@ -2655,7 +2655,7 @@ extern "C" {
 unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) -> i64 {
     RT_ARGC.store(argc, Ordering::Release);
     RT_ARGV.store(argv as *mut *const u8, Ordering::Release);
-    capture_vdso_clock(argc, argv);
+    capture_auxv(argc, argv);
     rs_main()
 }
 
@@ -2680,6 +2680,7 @@ pub(crate) fn rt_raw_args() -> (usize, *const *const u8) {
 // =============================================================================
 
 const AT_NULL_TAG: usize = 0;
+const AT_HWCAP_TAG: usize = 16; // standard SysV AT_HWCAP (CF-4 A)
 const AT_VDSO_CLOCK_TAG: usize = 0x5654;
 const VDSO_CLOCK_MAGIC: u64 = 0x5644534f4c4b3031; // "VDSOLK01"
 const VDSO_CLOCK_VERSION: u64 = 1;
@@ -2700,9 +2701,11 @@ struct VdsoClock {
 static RT_VDSO_CLOCK: AtomicPtr<VdsoClock> = AtomicPtr::new(core::ptr::null_mut());
 
 // Walk the auxv (after argv + envp on the initial stack -- the _start frame
-// gives argc + &argv[0]) for AT_VDSO_CLOCK; validate magic/version/freq and
-// cache the page.
-unsafe fn capture_vdso_clock(argc: usize, argv: *const *const u8) {
+// gives argc + &argv[0]) once, servicing every tag we care about: AT_VDSO_CLOCK
+// (validate magic/version/freq and cache the page) and AT_HWCAP (publish
+// FEAT_LSE to the outline-atomics helpers). One walk, because the auxv is short
+// and a second pass would cost another cache-cold stride for no benefit.
+unsafe fn capture_auxv(argc: usize, argv: *const *const u8) {
     if argv.is_null() {
         return;
     }
@@ -2719,19 +2722,93 @@ unsafe fn capture_vdso_clock(argc: usize, argv: *const *const u8) {
         if tag == AT_NULL_TAG {
             return;
         }
-        if tag == AT_VDSO_CLOCK_TAG {
-            let pg = *a.add(1) as *const VdsoClock;
-            if !pg.is_null()
-                && (*pg).magic == VDSO_CLOCK_MAGIC
-                && (*pg).version == VDSO_CLOCK_VERSION
-                && (*pg).freq != 0
-            {
-                RT_VDSO_CLOCK.store(pg as *mut VdsoClock, Ordering::Release);
+        match tag {
+            AT_VDSO_CLOCK_TAG => {
+                let pg = *a.add(1) as *const VdsoClock;
+                if !pg.is_null()
+                    && (*pg).magic == VDSO_CLOCK_MAGIC
+                    && (*pg).version == VDSO_CLOCK_VERSION
+                    && (*pg).freq != 0
+                {
+                    RT_VDSO_CLOCK.store(pg as *mut VdsoClock, Ordering::Release);
+                }
             }
-            return;
+            AT_HWCAP_TAG => publish_have_lse_atomics(*a.add(1)),
+            _ => {}
         }
         a = a.add(2);
     }
+}
+
+// =============================================================================
+// FEAT_LSE publication for outline atomics (W1u-b, #71).
+// =============================================================================
+//
+// W1u-a compiled every Rust binary with `+outline-atomics`, so an atomic RMW
+// becomes `bl __aarch64_<op>`, and that helper branches on the byte
+// `__aarch64_have_lse_atomics`: set -> one LSE instruction; clear -> an LL/SC
+// retry loop. compiler_builtins DEFINES the byte (zero-initialized) and never
+// sets it -- on a bare-metal target there is no OS for it to ask. Thylacine has
+// one: the kernel publishes AT_HWCAP (arch/arm64/hwfeat.c, landed by CF-4 A),
+// so _start answers the question the helpers are asking.
+//
+// Leaving it clear is CORRECT on every ARMv8 part -- LL/SC is the v8.0 floor --
+// which is what let W1u-a land the A72 fix on its own. This is purely the speed
+// half: it must never be set on a core whose AT_HWCAP does not claim ATOMICS,
+// because a false positive is a `snare:ill` on the first atomic.
+//
+// The `+lse` bit is 8, matching the kernel's THWCAP_ATOMICS, musl's
+// bits/hwcap.h, and compiler-rt's cpu_model/aarch64/hwcap.inc.
+const HWCAP_ATOMICS: usize = 1 << 8;
+
+// The raw AT_HWCAP word as delivered by this exec. Zero means "the auxv walk
+// never saw the tag" -- distinguishable from a real word because the kernel
+// always reports at least FP|ASIMD (arch/arm64/hwfeat.c), which is what lets a
+// prover tell a broken walk apart from a featureless CPU.
+static RT_HWCAP: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" {
+    // Defined (hidden, zero-init BSS) by compiler_builtins' outline-atomics
+    // support; every __aarch64_* helper loads it with a plain `ldrb`. Hidden
+    // visibility bounds it to this link unit, which is what makes a per-binary
+    // store the right granularity -- there is no shared copy to race.
+    static __aarch64_have_lse_atomics: core::sync::atomic::AtomicU8;
+}
+
+// Store-release rather than a plain byte store: the helpers read it with a
+// relaxed `ldrb` from every thread, and a peer thread's address space is
+// published by the spawn syscall (a full barrier) long after this runs, so the
+// release side is free and makes the pairing explicit instead of implied.
+// AtomicU8::store lowers to `stlrb` -- a plain store-release, NOT an RMW, so it
+// does not itself route through an outline helper.
+#[inline]
+fn publish_have_lse_atomics(hwcap: usize) {
+    RT_HWCAP.store(hwcap, Ordering::Release);
+    if hwcap & HWCAP_ATOMICS != 0 {
+        // SAFETY: the symbol is a single byte owned by compiler_builtins,
+        // written exactly once here before rs_main() and read-only thereafter.
+        unsafe { __aarch64_have_lse_atomics.store(1, Ordering::Release) };
+    }
+}
+
+/// The `AT_HWCAP` feature word this process was exec'd with, or 0 if the auxv
+/// carried no such tag. Bit meanings are Linux uapi (`HWCAP_*`); the kernel
+/// derives the word from the CPU ID registers at boot.
+#[inline]
+pub fn hwcap() -> usize {
+    RT_HWCAP.load(Ordering::Acquire)
+}
+
+/// Whether the outline-atomics helpers in THIS binary will take their FEAT_LSE
+/// arm. Reads the same byte `__aarch64_cas*` / `__aarch64_ldadd*` / ... branch
+/// on, so it reports what the CPU is actually executing -- not a cached guess.
+/// Must equal `hwcap() & HWCAP_ATOMICS != 0`; a prover asserting that agreement
+/// catches both a broken auxv walk and a false positive that would `snare:ill`
+/// on an ARMv8.0 core.
+#[inline]
+pub fn have_lse_atomics() -> bool {
+    // SAFETY: a plain byte read of a symbol written once at startup.
+    unsafe { __aarch64_have_lse_atomics.load(Ordering::Acquire) != 0 }
 }
 
 #[inline(always)]

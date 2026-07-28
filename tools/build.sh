@@ -212,9 +212,20 @@ sysroot_is_stale() {
     local libc="$BUILD_DIR/sysroot/lib/libc.a"
     [[ -f "$libc" ]] || return 0
     [[ -f "$BUILD_DIR/sysroot/lib/libclang_rt.builtins.a" ]] || return 0
-    if [[ -n "$(find "$REPO_ROOT/usr/lib/pouch/patches" -type f -newer "$libc" 2>/dev/null)" ]]; then
-        return 0
-    fi
+    # Every in-tree SOURCE the sysroot is built from. `patches/` is the musl
+    # boundary-line series; `compiler-rt/` is the Thylacine arm of the builtins
+    # (W1u-b, #71) -- it was NOT watched when it landed, so a `build.sh all`
+    # happily reused a sysroot predating it and the change looked inert.
+    # A change to the RECIPE (this file) still needs an explicit
+    # `tools/build.sh sysroot`; watching build.sh would rebuild the sysroot on
+    # every unrelated edit. The durable backstop is the boot probe: a stale
+    # libclang_rt fails /pouch-hello's outline-atomics agreement check.
+    local d
+    for d in patches compiler-rt; do
+        if [[ -n "$(find "$REPO_ROOT/usr/lib/pouch/$d" -type f -newer "$libc" 2>/dev/null)" ]]; then
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -1109,7 +1120,10 @@ build_compiler_rt() {
     # Conditional generic additions (CMakeLists: non-Fuchsia / non-baremetal),
     # then the two aarch64-specific files.
     sources+=( emutls.c enable_execute_stack.c eprintf.c gcc_personality_v0.c clear_cache.c )
-    sources+=( cpu_model/aarch64.c aarch64/fp_mode.c )
+    # cpu_model/aarch64.c is deliberately absent: it is compiled below through
+    # usr/lib/pouch/compiler-rt/aarch64-thylacine.c, which textually includes it
+    # and appends the Thylacine LSE-detection arm (W1u-b, #71).
+    sources+=( aarch64/fp_mode.c )
 
     if [[ "${#sources[@]}" -lt 150 ]]; then
         echo "    compiler-rt: source list too short (${#sources[@]}) — CMakeLists parse failed" >&2
@@ -1143,6 +1157,38 @@ build_compiler_rt() {
         "$clang" "${cflags[@]}" -c "$crt_src/$f" -o "$obj"
         n=$((n + 1))
     done
+
+    # W1u-b (#71): the CPU-model TU, compiled from OUR wrapper rather than the
+    # vendored file. The wrapper #includes cpu_model/aarch64.c and appends the
+    # constructor that sets __aarch64_have_lse_atomics from AT_HWCAP -- see that
+    # file's header for why textual inclusion, and not a patch or a sibling
+    # object, is the only variant that both survives a re-vendor loudly AND
+    # actually gets linked.
+    local cpumodel_src="$REPO_ROOT/usr/lib/pouch/compiler-rt/aarch64-thylacine.c"
+    local cpumodel_obj="$crt_obj/cpu_model-aarch64-thylacine.o"
+    if [[ ! -f "$cpumodel_src" ]]; then
+        echo "    compiler-rt: Thylacine cpu_model wrapper missing at $cpumodel_src" >&2
+        exit 1
+    fi
+    "$clang" "${cflags[@]}" -c "$cpumodel_src" -o "$cpumodel_obj"
+    n=$((n + 1))
+    # The constructor is the whole point of the wrapper, and it dies quietly:
+    # drop the attribute (or let a re-vendor move the flag out of that TU) and
+    # everything still builds, links, and boots -- just slowly, forever. An
+    # empty .init_array here means the probe never runs.
+    # Capture first, then match: `readelf | grep -q` under `set -o pipefail`
+    # reports the PRODUCER's status, and a -q grep can SIGPIPE it -- the check
+    # would then fail on a perfectly good object (it did, on first run).
+    local cpumodel_sections
+    cpumodel_sections="$("$LLVM_PREFIX/bin/llvm-readelf" -S "$cpumodel_obj" 2>&1 || true)"
+    case "$cpumodel_sections" in
+        *init_array*) ;;
+        *)
+            echo "    compiler-rt: $cpumodel_obj has no .init_array -- the AT_HWCAP" >&2
+            echo "                 LSE constructor was dropped (W1u-b, #71)" >&2
+            exit 1
+            ;;
+    esac
     echo "    compiled $n objects"
 
     # W1u (#71): the outline-atomics helpers. One lse.S TU per
