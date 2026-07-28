@@ -54,17 +54,54 @@ each client mount privately. `/bin/diorama-probe` does exactly that, which is wh
 makes the V-4a gate meaningful — joey is blob-loaded and has no recorded exe at
 all, so a joey-mounted `/self/exe` would read empty.
 
-## The tree (V-4a, Tier 1)
+## The root is the WORLD, not `/proc` (V-4c-1)
+
+Since V-4c-1 the served root is the synthetic Linux **world**, and its children
+are named for the mount points Linux expects. A container **binds** each where it
+belongs; the diorama itself has no opinion about where it is mounted.
+
+```
+/            the world
+/proc/…      -> bind at /proc
+/sys/…       -> bind at /sys
+```
+
+**Why bind rather than a second `Tattach` aname.** 9P's own answer for one server
+exporting two trees is an aname (Stratum's `ds:<name>`), and that route is
+**closed here**: `devsrv_open_connect` attaches a 9P-mode `/srv` service with a
+hardcoded *empty* aname, and `SYS_ATTACH_9P_SRV` — which does carry one — is
+byte-mode-gated and rejects a 9P-mode conn (soundly: such a conn already has a
+kernel-owned `p9_client` on its rings, and a second would interleave frames). An
+aname would therefore need a new kernel ABI. Binding needs none: `SYS_MOUNT`
+accepts **any readable Spoor**, a subdirectory included (`sys_mount_for_proc`
+gates on `RIGHT_READ` alone). It is also the mechanism VIVARIUM §6.15 already
+chose for `/dev`, so both halves of Tier 3 arrive the same way.
+
+**A bound subtree is sealed.** The server records `/sys`'s parent as the world
+root, so the obvious question is whether a container can walk `/sys/..` into
+`/proc`. It cannot: `stalk` resolves `..` by **popping its own trail**
+(`kernel/stalk.c`) and never sends a `Twalk("..")`, so `<mount>/..` lands on the
+mount point's parent *in the client's namespace*. The server-side parent link is
+unreachable through a bind. (Same property that contains `..` at `root_spoor` for
+I-28.)
+
+**Shorthand used below.** Outside the tree tables this doc writes `/self/maps`,
+`/<pid>/environ` and the like — the *node* names, as the server's own code does.
+Their served paths all carry the `/proc` prefix since V-4c-1. Kept deliberately:
+those sentences are about renderers, and prefixing every one would add noise
+without adding clarity.
+
+## The `/proc` tree (V-4a, Tier 1)
 
 | Path | Content | Native source |
 |---|---|---|
-| `/self/exe` | the executable's path, **bare** (no NUL, no newline) | `/proc/<pid>/exe` (V-4a-0) |
-| `/self/cwd` | the working directory, **bare** | `/proc/<pid>/cwd` (V-4b-1) |
-| `/self/maps` | the address space, Linux column layout | `/proc/<pid>/maps` (V-4b-2) |
-| `/self/cmdline` | `argv[0]`, NUL-terminated | derived from `exe` |
-| `/self/status` | `Name`/`Pid`/`Uid`/`Gid`/`Threads`/`VmRSS` | peer + `/proc/<pid>/status` |
-| `/meminfo` | `MemTotal`/`MemFree`/`MemAvailable` in kB | `/ctl/memory` page counts |
-| `/uptime` | `<up> <idle>` seconds | `CLOCK_MONOTONIC` |
+| `/proc/self/exe` | the executable's path, **bare** (no NUL, no newline) | `/proc/<pid>/exe` (V-4a-0) |
+| `/proc/self/cwd` | the working directory, **bare** | `/proc/<pid>/cwd` (V-4b-1) |
+| `/proc/self/maps` | the address space, Linux column layout | `/proc/<pid>/maps` (V-4b-2) |
+| `/proc/self/cmdline` | `argv[0]`, NUL-terminated | derived from `exe` |
+| `/proc/self/status` | `Name`/`Pid`/`Uid`/`Gid`/`Threads`/`VmRSS` | peer + `/proc/<pid>/status` |
+| `/proc/meminfo` | `MemTotal`/`MemFree`/`MemAvailable` in kB | `/ctl/memory` page counts |
+| `/proc/uptime` | `<up> <idle>` seconds | `CLOCK_MONOTONIC` |
 
 Honest gaps, deliberately not faked:
 
@@ -95,18 +132,56 @@ Deferred with their kernel prerequisites: `/cpuinfo`, `/stat`,
 `/self/{fd,environ,auxv}` (see VIVARIUM §6.10 — `fd` is blocked on the #66c
 handle-table lifetime, and `environ`/`auxv` each need a kernel source).
 
-### The rest of the tree (V-4b-3)
+### The rest of the `/proc` tree (V-4b-3)
 
 | Path | Content | Native source |
 |---|---|---|
-| `/<pid>/{exe,cmdline,status,cwd,maps}` | the same five files, for any live Proc | `/proc/<pid>/*` |
-| `/sys/kernel/ostype` | `Linux` | — the phenotype (see below) |
-| `/sys/kernel/osrelease` | `6.1.0-thylacine` | — the phenotype |
-| `/sys/kernel/version` | `#1 SMP Thylacine` | — the phenotype |
-| `/sys/kernel/hostname` | `(none)` | matches native `uname -n` |
+| `/proc/<pid>/{exe,cmdline,status,cwd,maps}` | the same five files, for any live Proc | `/proc/<pid>/*` |
+| `/proc/sys/kernel/ostype` | `Linux` | — the phenotype (see below) |
+| `/proc/sys/kernel/osrelease` | `6.1.0-thylacine` | — the phenotype |
+| `/proc/sys/kernel/version` | `#1 SMP Thylacine` | — the phenotype |
+| `/proc/sys/kernel/hostname` | `(none)` | matches native `uname -n` |
 
-The root also **enumerates** the live pids (from `/ctl/procs`' first column), so a
-`ps` that readdirs `/proc` sees the numeric dirs Linux puts there.
+`/proc` also **enumerates** the live pids (from `/ctl/procs`' first column), so a
+`ps` that readdirs it sees the numeric dirs Linux puts there.
+
+Note `/proc/sys/…` is Linux's **sysctl** tree — a different thing from the `/sys`
+below that happens to share a name. The node table disambiguates them by parent.
+
+### The `/sys` tree (V-4c-1)
+
+| Path | Content | Native source |
+|---|---|---|
+| `/sys/devices/system/cpu/online` | the online cpulist (`0-3`, `0,2-3`) | `/ctl/cpu` rows |
+| `/sys/devices/system/cpu/possible` | the declared cpulist | `/ctl/cpu` `cpus:` header |
+| `/sys/devices/system/cpu/present` | the declared cpulist | `/ctl/cpu` `cpus:` header |
+| `/sys/devices/system/cpu/cpuN` | one **empty** dir per CPU | `/ctl/cpu` `cpus:` header |
+
+`/ctl/cpu` maps onto Linux's present-vs-online distinction exactly, and for free:
+its `cpus:` header is `smp_cpu_count()` — every CPU the **DTB declared**, including
+one that failed PSCI bring-up, which the kernel keeps counting (prowl-5 F2) — and
+its per-row `offline` marker is precisely the online subset. So all three files are
+*sourced* rather than guessed. On QEMU-virt the two sets coincide (PSCI never
+fails there); the distinction is real on a board where it can.
+
+An unreadable `/ctl/cpu` renders these **empty**, never `0` — a consumer reading
+`0` would conclude one CPU exists.
+
+**Deliberately absent, each for a stated reason:**
+
+| Missing | Why |
+|---|---|
+| `kernel_max` | Linux sources it from a compile-time `NR_CPUS`; Thylacine's `DTB_MAX_CPUS` is on no EL0-readable surface |
+| `cpuN/cache/…`, `cpuN/topology/` | hardware facts read from `CTR_EL0`, which is **EL0-trapped** (`SCTLR_EL1.UCT` is clear in `INIT_SCTLR_EL1_MMU_OFF`) exactly as `MIDR_EL1` is |
+
+That makes a **third** instance of the per-field question VIVARIUM §6.15 raised
+for `cpuinfo` and `stat`, with an identical shape. All three await **one**
+decision — omit the unsourced fields, or give the kernel a source — made once
+rather than piecemeal (V-4c-2). The `cpuN` dirs themselves are not fabrications:
+each names a CPU the kernel reports, and their existence is what the legacy
+"count the `cpuN` entries" path reads (busybox `nproc`, older glibc
+`_SC_NPROCESSORS_CONF`). Modern consumers read the range files one level up,
+which is why those were the ones worth sourcing first.
 
 **Per-pid needed no kernel work**, which is worth stating because V-4b-1 and
 V-4b-2 both did: `/self` was *always* a per-pid render with the pid supplied by
@@ -264,16 +339,42 @@ first.
   parse runs), `ENOENT` for a pid that cannot exist, finding itself in the root
   readdir, and the `/sys/kernel` values.
 
+V-4c-1 adds to the selftest: the world-root structure and the **sibling isolation**
+(`/proc` must not reach the sysfs tree, `/sys` must not reach proc's), pids
+resolving under `/proc` and *not* at the world root, the `/sys` walk, the cpu qid
+encoding (round-trip, and that it can alias neither a static index nor a pid),
+`parse_cpu_name`'s rejections, the `/ctl/cpu` count + online-mask parse including
+the header skip and the **fail-safe** on a truncated render, the cpulist run
+encoder, and that `kernel_max` does *not* resolve. It adds to the probe: the
+cpulists read in place, `cpu0` walkable-but-empty, and the **composition proof** —
+binding `/dio/sys` at a second path and reading identical bytes through the new
+name, which is what V-7 depends on.
+
 Every V-4b-3 mechanism was **revert-probed**, each failing at its own leg: dropping
 the existence check → `selftest FAIL: resolved a nonexistent pid`; disabling the
 per-pid id parse → `FAIL per-pid status has no Uid`; skipping the root's pid phase
-→ `FAIL root readdir did not list our own pid`.
+→ `FAIL root readdir did not list our own pid`. Both V-4c-1 legs likewise: breaking
+the online/offline distinction → `selftest FAIL: cpu online mask`; re-parenting a
+sysfs node under `/proc` → `FAIL: /proc leaked the sysfs tree`. In every case
+`/sbin/diorama` never posts and the boot fails, so these gates are boot-fatal
+rather than decorative.
 
 ## Status
 
-V-4a + V-4b complete except `/self/{fd,environ,auxv}` (VIVARIUM §6.10). Kernel
-byte-unchanged by V-4a and V-4b-3; the V-4b-1 / V-4b-2 kernel sources landed with
-their own sub-chunks.
+V-4a + V-4b **closed**: `environ` built (V-4b-6, below), `auxv` weighed and
+deliberately **not built** (VIVARIUM §6.14 — zero live readers, and a `viv`-launched
+binary receives its auxv on the stack by construction), `fd` blocked on #66c (the
+#926 handle-table lifetime restructure, a kernel chunk).
+
+V-4c-1 landed the `/sys` tree and the world-root restructure (§6.16). Kernel
+byte-unchanged by V-4a, V-4b-3 and V-4c-1; the V-4b-1 / V-4b-2 / V-4b-5 / V-4b-6
+kernel sources landed with their own sub-chunks.
+
+**Owed:** V-4c-2 (the one per-field decision covering `cpuinfo`, `stat` and the
+`cpuN` contents, plus the per-container mount wiring V-7 consumes) and **V-4c-3,
+the arc's focused audit** — V-4b-1..6 and V-4c all landed on self-audit only, and
+devproc/devenv are ARCH §25.4 trigger surfaces, so the formal round is a merge
+gate.
 
 
 ## `/self/environ` -- and the first gated proxy (V-4b-6)
