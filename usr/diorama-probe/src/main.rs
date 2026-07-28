@@ -94,6 +94,24 @@ fn put_dec(mut v: u64) {
     }
 }
 
+/// Make a directory under `parent_fd`, tolerating one that already exists --
+/// joey's mkdir_or_open shape. Nothing here treats the result as an assertion;
+/// the caller's next step (a mount, a walk) is what actually has to work.
+fn mkdir_ok(parent_fd: i64, name: &[u8], perm: u32) {
+    let fd = unsafe {
+        t_walk_create(
+            parent_fd,
+            name.as_ptr(),
+            name.len(),
+            T_OREAD,
+            libthyla_rs::T_WALK_CREATE_DMDIR | perm,
+        )
+    };
+    if fd >= 0 {
+        let _ = unsafe { t_close(fd) };
+    }
+}
+
 /// Read a whole file into `out`; returns the byte count or None.
 fn read_all(path: &[u8], out: &mut [u8]) -> Option<usize> {
     let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
@@ -133,7 +151,7 @@ pub extern "C" fn rs_main() -> i64 {
     //    peer. A wrong answer here means the peer resolution regressed; an empty
     //    one means the kernel stopped recording exe_path at exec.
     let mut buf = [0u8; 128];
-    let n = match read_all(b"/dio/self/exe", &mut buf) {
+    let n = match read_all(b"/dio/proc/self/exe", &mut buf) {
         Some(n) => n,
         None => fail("open /dio/self/exe"),
     };
@@ -151,7 +169,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 4. cmdline is the same path, NUL-terminated (the Linux argv[0] shape).
     let mut cbuf = [0u8; 128];
-    let cn = match read_all(b"/dio/self/cmdline", &mut cbuf) {
+    let cn = match read_all(b"/dio/proc/self/cmdline", &mut cbuf) {
         Some(n) => n,
         None => fail("open /dio/self/cmdline"),
     };
@@ -161,7 +179,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 5. status carries our own pid + a Linux-shaped Name line.
     let mut sbuf = [0u8; 512];
-    let sn = match read_all(b"/dio/self/status", &mut sbuf) {
+    let sn = match read_all(b"/dio/proc/self/status", &mut sbuf) {
         Some(n) => n,
         None => fail("open /dio/self/status"),
     };
@@ -175,7 +193,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 6. cwd (V-4b-1): never empty for a live peer -- an un-chdir'd Proc is "/".
     let mut wbuf = [0u8; 128];
-    let wn = match read_all(b"/dio/self/cwd", &mut wbuf) {
+    let wn = match read_all(b"/dio/proc/self/cwd", &mut wbuf) {
         Some(n) => n,
         None => fail("open /dio/self/cwd"),
     };
@@ -189,7 +207,7 @@ pub extern "C" fn rs_main() -> i64 {
     //     neither is reachable from the diorama's own selftest, which has no
     //     live address space to render.
     let mut pbuf = [0u8; 4096];
-    let pn = match read_all(b"/dio/self/maps", &mut pbuf) {
+    let pn = match read_all(b"/dio/proc/self/maps", &mut pbuf) {
         Some(n) => n,
         None => fail("open /dio/self/maps"),
     };
@@ -246,7 +264,7 @@ pub extern "C" fn rs_main() -> i64 {
         let _ = unsafe { t_close(edir) };
 
         let mut envbuf = [0u8; 4096];
-        let en = match read_all(b"/dio/self/environ", &mut envbuf) {
+        let en = match read_all(b"/dio/proc/self/environ", &mut envbuf) {
             Some(n) => n,
             None => fail("open /dio/self/environ"),
         };
@@ -275,7 +293,7 @@ pub extern "C" fn rs_main() -> i64 {
     let mut dbuf = [0u8; 64];
     let dn = {
         let mut i = 0;
-        for &c in b"/dio/" {
+        for &c in b"/dio/proc/" {
             dbuf[i] = c;
             i += 1;
         }
@@ -315,7 +333,7 @@ pub extern "C" fn rs_main() -> i64 {
         let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, p.as_ptr(), pn, T_OREAD) };
         if fd >= 0 {
             let _ = unsafe { t_close(fd) };
-            fail("/dio/<pid>/environ resolved -- the cross-principal leak is back");
+            fail("/dio/proc/<pid>/environ resolved -- the cross-principal leak is back");
         }
     }
     // status via the per-pid path takes the NATIVE id parse (the /self path
@@ -356,19 +374,21 @@ pub extern "C" fn rs_main() -> i64 {
     // A pid that cannot exist must be ENOENT, not a directory of empty files --
     // that is how a Linux consumer detects that a process is gone.
     {
-        let gone = b"/dio/4294967295/exe";
+        let gone = b"/dio/proc/4294967295/exe";
         let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, gone.as_ptr(), gone.len(), T_OREAD) };
         if fd >= 0 {
             let _ = unsafe { t_close(fd) };
             fail("a nonexistent pid RESOLVED");
         }
     }
-    // The root enumerates the live pids, so a `ps` that readdirs /proc sees
-    // them. Our own pid must be among them.
+    // /proc enumerates the live pids, so a `ps` that readdirs it sees them. Our
+    // own pid must be among them. (These two raw t_open calls carry an EXPLICIT
+    // length -- unlike read_all, which takes a slice and measures it -- so a
+    // path edit here must move the number with it.)
     {
-        let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio".as_ptr(), 4, T_OREAD) };
+        let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio/proc".as_ptr(), 9, T_OREAD) };
         if fd < 0 {
-            fail("open /dio for readdir");
+            fail("open /dio/proc for readdir");
         }
         let mut want_pid = [0u8; 24];
         let wp = put_dec_into(&mut want_pid, me as u64);
@@ -408,7 +428,7 @@ pub extern "C" fn rs_main() -> i64 {
     // 6d. sys/kernel (V-4b-3): the phenotype's self-description.
     {
         let mut ob = [0u8; 64];
-        let on = match read_all(b"/dio/sys/kernel/ostype", &mut ob) {
+        let on = match read_all(b"/dio/proc/sys/kernel/ostype", &mut ob) {
             Some(n) => n,
             None => fail("open /dio/sys/kernel/ostype"),
         };
@@ -416,7 +436,7 @@ pub extern "C" fn rs_main() -> i64 {
             fail("ostype is not Linux");
         }
         let mut rb = [0u8; 64];
-        let rn = match read_all(b"/dio/sys/kernel/osrelease", &mut rb) {
+        let rn = match read_all(b"/dio/proc/sys/kernel/osrelease", &mut rb) {
             Some(n) => n,
             None => fail("open /dio/sys/kernel/osrelease"),
         };
@@ -426,7 +446,7 @@ pub extern "C" fn rs_main() -> i64 {
             fail("osrelease would not satisfy a glibc kernel check");
         }
         let mut hb = [0u8; 64];
-        let hn = match read_all(b"/dio/sys/kernel/hostname", &mut hb) {
+        let hn = match read_all(b"/dio/proc/sys/kernel/hostname", &mut hb) {
             Some(n) => n,
             None => fail("open /dio/sys/kernel/hostname"),
         };
@@ -438,7 +458,7 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 7. meminfo + uptime render from the system-wide native sources.
     let mut mbuf = [0u8; 256];
-    let mn = match read_all(b"/dio/meminfo", &mut mbuf) {
+    let mn = match read_all(b"/dio/proc/meminfo", &mut mbuf) {
         Some(n) => n,
         None => fail("open /dio/meminfo"),
     };
@@ -446,7 +466,7 @@ pub extern "C" fn rs_main() -> i64 {
         fail("meminfo shape");
     }
     let mut ubuf = [0u8; 64];
-    let un = match read_all(b"/dio/uptime", &mut ubuf) {
+    let un = match read_all(b"/dio/proc/uptime", &mut ubuf) {
         Some(n) => n,
         None => fail("open /dio/uptime"),
     };
@@ -454,7 +474,106 @@ pub extern "C" fn rs_main() -> i64 {
         fail("uptime shape");
     }
 
-    // 8. READ-ONLY: opening any diorama file for write must be refused. This is
+    // 8. V-4c-1: the /sys tree, and the composition mechanism that delivers it.
+    //
+    //    The diorama serves ONE tree whose children are named for the Linux
+    //    mount points; a container BINDS each where it belongs. This leg proves
+    //    the binding end to end, because that is the part no selftest can reach
+    //    and the part V-7 depends on -- and because the alternative it replaces
+    //    (a second Tattach with a different aname) is UNREACHABLE for a 9P-mode
+    //    /srv service: the kernel's open=connect path attaches with a hardcoded
+    //    empty aname, and SYS_ATTACH_9P_SRV is byte-mode-gated.
+    {
+        // The cpulists, read in place first.
+        let mut ob = [0u8; 64];
+        let on = match read_all(b"/dio/sys/devices/system/cpu/online", &mut ob) {
+            Some(n) => n,
+            None => fail("open /sys/devices/system/cpu/online"),
+        };
+        // Non-empty and digit-led: an empty render is what an unreadable
+        // /ctl/cpu produces, so this also proves the source was reached.
+        if on == 0 || !ob[0].is_ascii_digit() || ob[on - 1] != b'\n' {
+            fail("cpu online shape");
+        }
+        let mut pb = [0u8; 64];
+        let pn = match read_all(b"/dio/sys/devices/system/cpu/present", &mut pb) {
+            Some(n) => n,
+            None => fail("open /sys/devices/system/cpu/present"),
+        };
+        if pn == 0 || !pb[0].is_ascii_digit() {
+            fail("cpu present shape");
+        }
+        t_putstr("diorama-probe: cpu online=");
+        for i in 0..on.saturating_sub(1) {
+            let c = [ob[i]];
+            t_putstr(unsafe { core::str::from_utf8_unchecked(&c) });
+        }
+        t_putstr("\n");
+
+        // cpu0 exists as a dir (the legacy enumeration path counts these), and
+        // is EMPTY on purpose -- its Linux contents are hardware facts with no
+        // EL0 source, so serving a stub would be a fabrication.
+        let c0 = unsafe {
+            t_open(
+                T_WALK_OPEN_FROM_ROOT,
+                b"/dio/sys/devices/system/cpu/cpu0".as_ptr(),
+                32,
+                T_OPATH,
+            )
+        };
+        if c0 < 0 {
+            fail("walk .../cpu/cpu0");
+        }
+        let _ = unsafe { t_close(c0) };
+
+        // THE COMPOSITION PROOF. Bind the sysfs subtree at another path and read
+        // the same file through the new name. A mount source may be ANY readable
+        // Spoor -- a subdirectory included (sys_mount_for_proc gates on
+        // RIGHT_READ alone) -- which is exactly why no kernel change was needed.
+        // The mount point is ours and throwaway; mounts are per-Proc, so this is
+        // invisible to every other Proc on the box.
+        //
+        // The bound subtree is also genuinely SEALED, which is what makes this a
+        // sound answer rather than a convenient one: stalk resolves ".." by
+        // POPPING ITS OWN TRAIL (kernel/stalk.c, the ".." arm) and never sends a
+        // Twalk("..") to the server, so `<mount>/..` lands on the mount point's
+        // parent in the CLIENT's namespace -- it cannot climb the server-side
+        // parent link into the world root and back down into /proc.
+        //
+        // /tmp is NOT guaranteed to exist here: joey creates it inside the clade
+        // gate, which returns early when /clade is not baked -- and which runs
+        // AFTER this probe, so on a clade-baked boot WE are the one that makes
+        // it. Hence 0777, matching clade_gate's own create exactly: whichever
+        // runs first must leave the same directory behind. Both levels tolerate
+        // "already there" -- a create failure is not the assertion, the mount is.
+        mkdir_ok(T_WALK_OPEN_FROM_ROOT, b"tmp", 0o777);
+        let tmp = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/tmp".as_ptr(), 4, T_OPATH) };
+        if tmp < 0 {
+            fail("open /tmp (create failed?)");
+        }
+        mkdir_ok(tmp, b"dio-sys", 0o755);
+        let _ = unsafe { t_close(tmp) };
+
+        let src = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio/sys".as_ptr(), 8, T_OPATH) };
+        if src < 0 {
+            fail("open /dio/sys as a bind source");
+        }
+        if unsafe { t_mount(b"/tmp/dio-sys".as_ptr(), 12, src, T_MREPL) } != 0 {
+            fail("bind /dio/sys -- a subdirectory must be mountable");
+        }
+        let _ = unsafe { t_close(src) };
+
+        let mut bb = [0u8; 64];
+        let bn = match read_all(b"/tmp/dio-sys/devices/system/cpu/online", &mut bb) {
+            Some(n) => n,
+            None => fail("read through the bind"),
+        };
+        if bn != on || bb[..bn] != ob[..on] {
+            fail("the bound view disagrees with the source");
+        }
+    }
+
+    // 9. READ-ONLY: opening any diorama file for write must be refused. This is
     //    the property that keeps the whole surface small, so it is worth a gate.
     //    Uses the imported T_OWRITE, deliberately: this leg used to redeclare it
     //    as a function-scope `const`, and Rust scopes block items over the WHOLE
@@ -464,12 +583,12 @@ pub extern "C" fn rs_main() -> i64 {
     //    (both 1), so nothing was wrong; but a shadow that reaches backwards is
     //    a name whose meaning can be changed by an edit that never touches its
     //    users. The compiler said so -- "unused import: T_OWRITE" was the tell.
-    let w = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio/self/exe".as_ptr(), 13, T_OWRITE) };
+    let w = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio/proc/self/exe".as_ptr(), 18, T_OWRITE) };
     if w >= 0 {
         let _ = unsafe { t_close(w) };
         fail("write-open was ALLOWED (read-only violated)");
     }
 
-    t_putstr("diorama-probe: PASS (/self/exe=/bin/diorama-probe; cmdline+status+cwd+maps+environ+meminfo+uptime OK; per-pid+enum+sys/kernel OK; write refused)\n");
+    t_putstr("diorama-probe: PASS (/proc/self/exe=/bin/diorama-probe; cmdline+status+cwd+maps+environ+meminfo+uptime OK; per-pid+enum+proc/sys/kernel OK; /sys cpulists + subtree bind OK; write refused)\n");
     unsafe { t_exits(0) }
 }

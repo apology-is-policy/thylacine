@@ -42,19 +42,31 @@
 // mode and is deliberately not offered.
 //
 // ---------------------------------------------------------------------------
-// The tree (V-4a Tier 1 + V-4b)
+// The tree (V-4a Tier 1 + V-4b + V-4c)
 // ---------------------------------------------------------------------------
 //
-//   /                dir
-//   /self            dir      the calling connection's own Proc
-//   /self/exe        file     its executable's path   <- the V-4a gate
-//   /self/cmdline    file     argv[0], NUL-terminated (Linux shape)
-//   /self/status     file     Linux-shaped Name/Pid/Uid/Gid/Threads/VmRSS
-//   /self/cwd        file     the working directory (V-4b-1)
-//   /self/maps       file     the address space, Linux column layout (V-4b-2)
-//   /self/environ    file     the environment, NUL-separated (V-4b-6; /self ONLY)
-//   /meminfo         file     MemTotal/MemFree in kB
-//   /uptime          file     "<up> <idle>" seconds
+// The ROOT IS THE WORLD, not /proc: its children are named for the mount points
+// Linux expects, and a container BINDS each where it belongs (V-4c-1; see the
+// node table for why binding rather than a second Tattach aname).
+//
+//   /                     dir
+//   /proc                 dir      -> bind at /proc
+//   /proc/self            dir      the calling connection's own Proc
+//   /proc/self/exe        file     its executable's path   <- the V-4a gate
+//   /proc/self/cmdline    file     argv[0], NUL-terminated (Linux shape)
+//   /proc/self/status     file     Linux-shaped Name/Pid/Uid/Gid/Threads/VmRSS
+//   /proc/self/cwd        file     the working directory (V-4b-1)
+//   /proc/self/maps       file     the address space, Linux column layout (V-4b-2)
+//   /proc/self/environ    file     the environment, NUL-separated (V-4b-6; self ONLY)
+//   /proc/<pid>/...       dir      every live Proc, same file set (V-4b-3)
+//   /proc/meminfo         file     MemTotal/MemFree in kB
+//   /proc/uptime          file     "<up> <idle>" seconds
+//   /proc/sys/kernel/...  files    ostype/osrelease/version/hostname (V-4b-3)
+//   /sys                  dir      -> bind at /sys
+//   /sys/devices/system/cpu/online    file   the online cpulist  (V-4c-1)
+//   /sys/devices/system/cpu/possible  file   the declared cpulist
+//   /sys/devices/system/cpu/present   file   the declared cpulist
+//   /sys/devices/system/cpu/cpuN      dir    one per CPU (empty; see the family)
 //
 // Not served, each for its own recorded reason (VIVARIUM section 6.10):
 //   /self/fd    BLOCKED on #66c -- a cross-Proc fd-list read of a live peer
@@ -63,13 +75,18 @@
 //   /self/auxv  WEIGHED AND NOT BUILT (section 6.14): zero live readers, and a
 //               viv-launched binary receives its auxv on the stack by
 //               construction, since ld.so bootstraps out of AT_PHDR/AT_ENTRY.
-//   /cpuinfo    Tier 1 by section 6.3, but only PARTLY sourced: ncpus comes from
-//               /ctl/cpu, while MIDR (implementer/part/variant/revision) is not
-//               EL0-readable at all -- an EL0 `mrs midr_el1` is snare:ill, which
-//               is also why AT_HWCAP must never set hwcap_CPUID. V-4c.
-//   /stat       Tier 1 by section 6.3, same shape: the cpu/cpuN idle columns come
+//   /proc/cpuinfo   Tier 1 by section 6.3, but only PARTLY sourced: ncpus comes
+//               from /ctl/cpu, while MIDR (implementer/part/variant/revision) is
+//               not EL0-readable at all -- an EL0 `mrs midr_el1` is snare:ill,
+//               which is also why AT_HWCAP must never set hwcap_CPUID.
+//   /proc/stat  Tier 1 by section 6.3, same shape: the cpu/cpuN idle columns come
 //               from /ctl/cpu and btime from uptime + REALTIME, but ctxt, intr
-//               and processes have no native source at all. V-4c.
+//               and processes have no native source at all.
+//   .../cpuN/cache, .../cpuN/topology  the same shape a third time: CTR_EL0 is
+//               EL0-trapped exactly as MIDR_EL1 is.
+//               All three await ONE decision -- omit the unsourced fields, or
+//               give the kernel a source -- deliberately made once rather than
+//               piecemeal (section 6.15). That is the V-4c-2 design work.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
@@ -103,29 +120,56 @@ const FILE_MODE: u32 = S_IFREG | 0o444;
 const P9_GETATTR_SIZE: u64 = 0x200;
 
 // ---------------------------------------------------------------------------
-// The node table. Static nodes (the fixed tree: /self, /meminfo, /sys/...) use
-// the node index AS the qid path, so they can never dangle. V-4b-3 adds one
-// dynamic family -- the numeric /proc/<pid> dirs -- which cannot be a static
-// index because the pid set is a runtime fact.
+// The node table. Static nodes use the node index AS the qid path, so they can
+// never dangle. Two dynamic families hang off it: the numeric /proc/<pid> dirs
+// (V-4b-3) and the /sys .../cpu/cpuN dirs (V-4c-1), neither of which can be a
+// static index because both sets are runtime facts.
+//
+// THE ROOT IS THE SYNTHETIC LINUX WORLD, NOT /proc (restructured at V-4c-1).
+// Its children are named for the mount points Linux expects -- `proc` and `sys`
+// -- and a container BINDS each where it belongs, which is the mechanism
+// section 6.15 already chose for /dev. That correction matters twice:
+//
+//   * It is what makes ONE server able to serve TWO Linux trees. 9P's other
+//     answer -- a second `Tattach` with a different `aname` (Stratum's
+//     `ds:<name>` form) -- is UNREACHABLE for this server: a 9P-mode /srv
+//     service is reached by open=connect, and the kernel's connect path
+//     (devsrv.c::devsrv_open_connect) attaches with a hardcoded EMPTY aname.
+//     SYS_ATTACH_9P_SRV does carry one, but is byte-mode-gated and rejects a
+//     9P-mode conn for a sound reason (a second p9_client over the same rings
+//     would interleave frames). Binding needs no kernel change at all, because
+//     SYS_MOUNT takes any readable Spoor -- a subdirectory included.
+//   * It keeps the served trees HONEST. Hanging `sys` off a root that IS /proc
+//     would put a `/proc/sys`-shaped directory in the namespace that Linux has
+//     never had -- section 6.15's "fabrication with a plausible face", one
+//     level up from the per-field version.
 // ---------------------------------------------------------------------------
 
 const N_ROOT: u64 = 0;
-const N_SELF: u64 = 1;
-const N_SELF_EXE: u64 = 2;
-const N_SELF_CMDLINE: u64 = 3;
-const N_SELF_STATUS: u64 = 4;
-const N_SELF_CWD: u64 = 5;
-const N_SELF_MAPS: u64 = 6;
-const N_SELF_ENVIRON: u64 = 7;
-const N_MEMINFO: u64 = 8;
-const N_UPTIME: u64 = 9;
-const N_SYS: u64 = 10;
-const N_SYS_KERNEL: u64 = 11;
-const N_OSTYPE: u64 = 12;
-const N_OSRELEASE: u64 = 13;
-const N_VERSION: u64 = 14;
-const N_HOSTNAME: u64 = 15;
-const N_COUNT: u64 = 16;
+const N_PROC: u64 = 1;
+const N_SELF: u64 = 2;
+const N_SELF_EXE: u64 = 3;
+const N_SELF_CMDLINE: u64 = 4;
+const N_SELF_STATUS: u64 = 5;
+const N_SELF_CWD: u64 = 6;
+const N_SELF_MAPS: u64 = 7;
+const N_SELF_ENVIRON: u64 = 8;
+const N_MEMINFO: u64 = 9;
+const N_UPTIME: u64 = 10;
+const N_PROC_SYS: u64 = 11;
+const N_PROC_SYS_KERNEL: u64 = 12;
+const N_OSTYPE: u64 = 13;
+const N_OSRELEASE: u64 = 14;
+const N_VERSION: u64 = 15;
+const N_HOSTNAME: u64 = 16;
+const N_SYSFS: u64 = 17;
+const N_SYSFS_DEVICES: u64 = 18;
+const N_SYSFS_SYSTEM: u64 = 19;
+const N_SYSFS_CPU: u64 = 20;
+const N_CPU_ONLINE: u64 = 21;
+const N_CPU_POSSIBLE: u64 = 22;
+const N_CPU_PRESENT: u64 = 23;
+const N_COUNT: u64 = 24;
 
 struct Node {
     name: &'static [u8],
@@ -134,22 +178,32 @@ struct Node {
 }
 
 static NODES: [Node; N_COUNT as usize] = [
-    Node { name: b"",          parent: N_ROOT,       is_dir: true  },
-    Node { name: b"self",      parent: N_ROOT,       is_dir: true  },
-    Node { name: b"exe",       parent: N_SELF,       is_dir: false },
-    Node { name: b"cmdline",   parent: N_SELF,       is_dir: false },
-    Node { name: b"status",    parent: N_SELF,       is_dir: false },
-    Node { name: b"cwd",       parent: N_SELF,       is_dir: false },
-    Node { name: b"maps",      parent: N_SELF,       is_dir: false },
-    Node { name: b"environ",   parent: N_SELF,       is_dir: false },
-    Node { name: b"meminfo",   parent: N_ROOT,       is_dir: false },
-    Node { name: b"uptime",    parent: N_ROOT,       is_dir: false },
-    Node { name: b"sys",       parent: N_ROOT,       is_dir: true  },
-    Node { name: b"kernel",    parent: N_SYS,        is_dir: true  },
-    Node { name: b"ostype",    parent: N_SYS_KERNEL, is_dir: false },
-    Node { name: b"osrelease", parent: N_SYS_KERNEL, is_dir: false },
-    Node { name: b"version",   parent: N_SYS_KERNEL, is_dir: false },
-    Node { name: b"hostname",  parent: N_SYS_KERNEL, is_dir: false },
+    Node { name: b"",          parent: N_ROOT,            is_dir: true  },
+    // --- the /proc tree ---
+    Node { name: b"proc",      parent: N_ROOT,            is_dir: true  },
+    Node { name: b"self",      parent: N_PROC,            is_dir: true  },
+    Node { name: b"exe",       parent: N_SELF,            is_dir: false },
+    Node { name: b"cmdline",   parent: N_SELF,            is_dir: false },
+    Node { name: b"status",    parent: N_SELF,            is_dir: false },
+    Node { name: b"cwd",       parent: N_SELF,            is_dir: false },
+    Node { name: b"maps",      parent: N_SELF,            is_dir: false },
+    Node { name: b"environ",   parent: N_SELF,            is_dir: false },
+    Node { name: b"meminfo",   parent: N_PROC,            is_dir: false },
+    Node { name: b"uptime",    parent: N_PROC,            is_dir: false },
+    Node { name: b"sys",       parent: N_PROC,            is_dir: true  },
+    Node { name: b"kernel",    parent: N_PROC_SYS,        is_dir: true  },
+    Node { name: b"ostype",    parent: N_PROC_SYS_KERNEL, is_dir: false },
+    Node { name: b"osrelease", parent: N_PROC_SYS_KERNEL, is_dir: false },
+    Node { name: b"version",   parent: N_PROC_SYS_KERNEL, is_dir: false },
+    Node { name: b"hostname",  parent: N_PROC_SYS_KERNEL, is_dir: false },
+    // --- the /sys tree (V-4c-1) ---
+    Node { name: b"sys",       parent: N_ROOT,            is_dir: true  },
+    Node { name: b"devices",   parent: N_SYSFS,           is_dir: true  },
+    Node { name: b"system",    parent: N_SYSFS_DEVICES,   is_dir: true  },
+    Node { name: b"cpu",       parent: N_SYSFS_SYSTEM,    is_dir: true  },
+    Node { name: b"online",    parent: N_SYSFS_CPU,       is_dir: false },
+    Node { name: b"possible",  parent: N_SYSFS_CPU,       is_dir: false },
+    Node { name: b"present",   parent: N_SYSFS_CPU,       is_dir: false },
 ];
 
 // --- the per-pid family (V-4b-3) -------------------------------------------
@@ -238,9 +292,66 @@ fn parse_pid(name: &[u8]) -> Option<u32> {
     Some(v as u32)
 }
 
+// --- the per-CPU family (V-4c-1) -------------------------------------------
+//
+// /sys/devices/system/cpu/cpuN. Like the pid family this is a runtime set, so
+// it cannot be a static index; unlike the pid family it needs no kind field yet
+// because the dirs are EMPTY. That emptiness is deliberate, not an oversight:
+// the contents Linux puts there (`cache/index0/coherency_line_size`,
+// `topology/`) are hardware facts with NO EL0 source -- CTR_EL0 is trapped for
+// EL0 (SCTLR_EL1.UCT is clear in INIT_SCTLR_EL1_MMU_OFF), exactly as MIDR_EL1
+// is -- so serving them means either fabricating a plausible number or giving
+// the kernel a source. That is the same per-field decision section 6.15 defers
+// for cpuinfo/stat, and it is deliberately made ONCE, for all three, rather
+// than piecemeal here.
+//
+// The dir itself is not a fabrication: it genuinely names a CPU the kernel
+// reports, and its existence is what the legacy "count the cpuN entries"
+// enumeration path (busybox nproc, older glibc _SC_NPROCESSORS_CONF) reads.
+// Modern consumers read the `online`/`present` range files one level up.
+const CPU_BASE: u64 = 1 << 24; // above every static index, below the pid range
+const CPU_INDEX_MAX: u64 = 255; // bounds the readdir loop against a wild /ctl/cpu
+
+fn cpu_qid(n: u64) -> u64 {
+    CPU_BASE | n
+}
+fn qid_cpu(path: u64) -> u64 {
+    path & !CPU_BASE
+}
+fn is_cpu_node(path: u64) -> bool {
+    path >= CPU_BASE && !is_pid_node(path)
+}
+
+/// Parse a whole component as `cpu<N>`, returning N. Rejects `cpu`, `cpu0x1`,
+/// `cpu01` and an out-of-range index by the same rules parse_pid uses -- except
+/// that `cpu0` IS valid here, because unlike a pid, 0 is a real CPU index.
+fn parse_cpu_name(name: &[u8]) -> Option<u64> {
+    if name.len() < 4 || &name[..3] != b"cpu" {
+        return None;
+    }
+    let digits = &name[3..];
+    if digits.len() > 1 && digits[0] == b'0' {
+        return None; // "cpu01" would give one CPU two names
+    }
+    let mut v: u64 = 0;
+    for &c in digits {
+        if !c.is_ascii_digit() {
+            return None;
+        }
+        v = v * 10 + (c - b'0') as u64;
+        if v > CPU_INDEX_MAX {
+            return None;
+        }
+    }
+    Some(v)
+}
+
 fn node_is_dir(path: u64) -> bool {
     if is_pid_node(path) {
         return qid_kind(path) == PK_DIR;
+    }
+    if is_cpu_node(path) {
+        return true; // every cpuN node is the dir itself (no leaves yet)
     }
     (path < N_COUNT) && NODES[path as usize].is_dir
 }
@@ -263,12 +374,23 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
             return Some(dir);
         }
         if name == b".." {
-            return Some(N_ROOT);
+            return Some(N_PROC);
         }
         for f in PID_FILES.iter() {
             if f.name == name {
                 return Some(pid_qid(qid_pid(dir), f.kind));
             }
+        }
+        return None;
+    }
+    if is_cpu_node(dir) {
+        // An empty dir: only . and .. resolve. Everything else is an honest
+        // ENOENT rather than a stub, per the family's comment above.
+        if name == b"." {
+            return Some(dir);
+        }
+        if name == b".." {
+            return Some(N_SYSFS_CPU);
         }
         return None;
     }
@@ -287,10 +409,21 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
             return Some(i);
         }
     }
-    if dir == N_ROOT {
+    if dir == N_PROC {
         if let Some(pid) = parse_pid(name) {
             if native_pid_exists(pid) {
                 return Some(pid_qid(pid, PK_DIR));
+            }
+        }
+    }
+    // cpuN under .../system/cpu, live iff the kernel reports that many CPUs.
+    // Same discipline as the pid arm: existence is decided by a NATIVE read
+    // (/ctl/cpu), never by a table this server keeps, so an index the kernel
+    // does not have is an honest ENOENT.
+    if dir == N_SYSFS_CPU {
+        if let Some(n) = parse_cpu_name(name) {
+            if n < native_cpu_count() {
+                return Some(cpu_qid(n));
             }
         }
     }
@@ -453,6 +586,14 @@ fn native_pid_list(out: &mut [u32]) -> usize {
     parse_pid_list(&buf[..got], out)
 }
 
+/// The declared CPU count, live from /ctl/cpu. Used to decide whether a `cpuN`
+/// component names a real CPU -- the cpu-family twin of native_pid_exists.
+fn native_cpu_count() -> u64 {
+    let mut buf = [0u8; 1024];
+    let got = read_ctl_cpu(&mut buf);
+    parse_cpu_count(&buf[..got])
+}
+
 /// The pure half of native_pid_list: first column of every line that parses as
 /// a pid. The header ("PID    PPID    ...") fails parse_pid and is skipped by
 /// the same rule as any junk, so no separate header-stripping step can drift
@@ -470,6 +611,105 @@ pub fn parse_pid_list(text: &[u8], out: &mut [u32]) -> usize {
         }
     }
     n
+}
+
+// --- /ctl/cpu, the source for the whole /sys cpu tree (V-4c-1) -------------
+//
+// The native render is a header plus one row per CPU:
+//
+//     cpus: 4
+//     cpu idle_ns capacity
+//     0 123456 1024
+//     1 offline
+//
+// `cpus:` is smp_cpu_count() -- every CPU the DTB DECLARED, including one that
+// failed PSCI bring-up, which the kernel keeps counting (prowl-5 F2). That is
+// exactly Linux's `present`/`possible` set, and the rows' `offline` marker is
+// exactly its `online` subset -- so both files below are SOURCED, not guessed.
+// The mapping is a happy one and worth stating plainly: it exists because
+// devctl already had to make the same present-vs-online distinction for prowl.
+
+/// Read /ctl/cpu into `buf`, returning the used slice length. Separate from the
+/// parsers so the pure halves stay selftest-able with no VM.
+fn read_ctl_cpu(buf: &mut [u8]) -> usize {
+    read_native(b"/ctl/cpu", buf).unwrap_or(0)
+}
+
+/// The declared CPU count from /ctl/cpu's header. 0 when the source is
+/// unreadable, which renders every cpu file empty rather than inventing a count.
+pub fn parse_cpu_count(text: &[u8]) -> u64 {
+    parse_dec_after(text, b"cpus:").unwrap_or(0).min(CPU_INDEX_MAX + 1)
+}
+
+/// Fill `out[i]` with CPU i's online state. FAIL-SAFE: `out` is written only
+/// where a row parses, so a truncated or malformed render leaves the caller's
+/// `false` in place -- this never claims a CPU is online without a row saying so.
+/// Returns the number of rows that parsed.
+///
+/// The "cpu idle_ns capacity" header is skipped by the same rule as any junk
+/// (its first field fails the decimal parse), so no separate header-stripping
+/// step can drift out of sync with the kernel's format -- the parse_pid_list
+/// discipline.
+pub fn parse_cpu_online(text: &[u8], out: &mut [bool]) -> usize {
+    let mut rows = 0usize;
+    for line in text.split(|&c| c == b'\n') {
+        let mut fields: [&[u8]; 4] = [b""; 4];
+        let nf = split_fields(line, &mut fields);
+        if nf < 2 {
+            continue;
+        }
+        let mut idx: u64 = 0;
+        let mut any = false;
+        for &c in fields[0] {
+            if !c.is_ascii_digit() {
+                any = false;
+                break;
+            }
+            idx = idx * 10 + (c - b'0') as u64;
+            any = true;
+            if idx > CPU_INDEX_MAX {
+                any = false;
+                break;
+            }
+        }
+        if !any || idx as usize >= out.len() {
+            continue;
+        }
+        out[idx as usize] = fields[1] != b"offline";
+        rows += 1;
+    }
+    rows
+}
+
+/// Push a CPU set in Linux's cpulist format: comma-separated runs, each `a` or
+/// `a-b` ("0-3", "0,2-3", "0"). Emits nothing at all for an empty set, so an
+/// unreadable source renders an empty file rather than a misleading "0".
+pub fn push_cpu_list(r: &mut Render, set: &[bool]) {
+    let mut i = 0usize;
+    let mut first = true;
+    while i < set.len() {
+        if !set[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i + 1 < set.len() && set[i + 1] {
+            i += 1;
+        }
+        if !first {
+            r.push(b",");
+        }
+        first = false;
+        r.push_dec(start as u64);
+        if i > start {
+            r.push(b"-");
+            r.push_dec(i as u64);
+        }
+        i += 1;
+    }
+    if !first {
+        r.push(b"\n");
+    }
 }
 
 /// Parse "<key>:<spaces><decimal>" out of a native key/value render (the shape
@@ -961,6 +1201,34 @@ fn render_meminfo(r: &mut Render) {
     }
 }
 
+/// /sys/devices/system/cpu/{online,possible,present}.
+///
+/// `possible` and `present` are the DECLARED set (every CPU /ctl/cpu's header
+/// counts); `online` is the subset whose row is not `offline`. On QEMU-virt the
+/// two coincide, because PSCI bring-up never fails there -- the distinction is
+/// real on a board where it can, which is precisely why devctl reports it.
+///
+/// An unreadable source renders EMPTY (push_cpu_list emits nothing for an empty
+/// set), never "0" -- a consumer that reads "0" would conclude one CPU exists.
+fn render_cpu_list(node: u64, r: &mut Render) {
+    let mut buf = [0u8; 1024];
+    let got = read_ctl_cpu(&mut buf);
+    let count = parse_cpu_count(&buf[..got]) as usize;
+    if count == 0 {
+        return;
+    }
+    let mut set = [false; (CPU_INDEX_MAX + 1) as usize];
+    if node == N_CPU_ONLINE {
+        parse_cpu_online(&buf[..got], &mut set[..count]);
+    } else {
+        // possible / present: the declared set, all of it.
+        for s in set[..count].iter_mut() {
+            *s = true;
+        }
+    }
+    push_cpu_list(r, &set[..count]);
+}
+
 /// /uptime -- "<seconds-up> <seconds-idle>", from CLOCK_MONOTONIC (ns since
 /// boot). Linux's second field is aggregate idle time, which Thylacine does not
 /// track per-CPU here; 0 is the honest placeholder (Linux itself reports 0 on
@@ -1074,6 +1342,7 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         N_SELF_ENVIRON if alive => render_environ(peer.pid, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
+        N_CPU_ONLINE | N_CPU_POSSIBLE | N_CPU_PRESENT => render_cpu_list(node, &mut r),
         N_OSTYPE => r.push(OSTYPE),
         N_OSRELEASE => r.push(OSRELEASE),
         N_VERSION => r.push(KVERSION),
@@ -1424,11 +1693,11 @@ impl Conn {
             }
             child = next;
         }
-        // The root continues into the live pids once its static children are
-        // done, at cookies >= N_COUNT -- so a `ps` that readdirs /proc sees the
+        // /proc continues into the live pids once its static children are done,
+        // at cookies >= N_COUNT -- so a `ps` that readdirs /proc sees the
         // numeric dirs Linux puts there. Reached only when the static phase ran
         // to completion, so a budget-truncated call resumes in the right phase.
-        if f.node == N_ROOT && child >= N_COUNT {
+        if f.node == N_PROC && child >= N_COUNT {
             let mut pids = [0u32; 64];
             let n = native_pid_list(&mut pids);
             let mut i = (child - N_COUNT) as usize;
@@ -1443,6 +1712,22 @@ impl Conn {
                     N_COUNT + i as u64 + 1,
                     nm.bytes(),
                 ) {
+                    break;
+                }
+                i += 1;
+            }
+        }
+        // .../system/cpu continues into the live cpuN dirs, by the same
+        // two-phase cookie rule -- the enumeration path older consumers use to
+        // COUNT CPUs (busybox nproc greps this listing).
+        if f.node == N_SYSFS_CPU && child >= N_COUNT {
+            let n = native_cpu_count();
+            let mut i = child - N_COUNT;
+            while i < n {
+                let mut nm = Render::new();
+                nm.push(b"cpu");
+                nm.push_dec(i);
+                if !self.emit_dirent(&mut data, budget, cpu_qid(i), N_COUNT + i + 1, nm.bytes()) {
                     break;
                 }
                 i += 1;
@@ -1569,9 +1854,28 @@ pub fn post_srv_diorama() -> Result<i64, ()> {
 // ---------------------------------------------------------------------------
 
 pub fn selftest() -> Result<(), &'static str> {
+    // --- V-4c-1: the root is the WORLD, and its children are the Linux mount
+    //     points. A container binds each; nothing here is reachable from the
+    //     other, which is what makes one server able to serve two trees.
+    if walk_child(N_ROOT, b"proc") != Some(N_PROC) {
+        return Err("walk /proc");
+    }
+    if walk_child(N_ROOT, b"sys") != Some(N_SYSFS) {
+        return Err("walk /sys");
+    }
+    // The two trees are SIBLINGS, not nested: /proc must not contain the sysfs
+    // tree and /sys must not contain proc's. A hit either way would put a
+    // directory in a container's namespace that Linux has never had.
+    if walk_child(N_PROC, b"devices").is_some() {
+        return Err("/proc leaked the sysfs tree");
+    }
+    if walk_child(N_SYSFS, b"self").is_some() || walk_child(N_SYSFS, b"meminfo").is_some() {
+        return Err("/sys leaked the proc tree");
+    }
+
     // --- the static tree resolves exactly as declared
-    if walk_child(N_ROOT, b"self") != Some(N_SELF) {
-        return Err("walk /self");
+    if walk_child(N_PROC, b"self") != Some(N_SELF) {
+        return Err("walk /proc/self");
     }
     if walk_child(N_SELF, b"exe") != Some(N_SELF_EXE) {
         return Err("walk /self/exe");
@@ -1585,8 +1889,8 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(N_SELF, b"environ") != Some(N_SELF_ENVIRON) {
         return Err("walk /self/environ");
     }
-    if walk_child(N_ROOT, b"meminfo") != Some(N_MEMINFO) {
-        return Err("walk /meminfo");
+    if walk_child(N_PROC, b"meminfo") != Some(N_MEMINFO) {
+        return Err("walk /proc/meminfo");
     }
     // A file has no children, and a miss is a miss.
     if walk_child(N_SELF_EXE, b"anything").is_some() {
@@ -1596,8 +1900,11 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("resolved a nonexistent name");
     }
     // `..` climbs; the root's parent is itself.
-    if walk_child(N_SELF, b"..") != Some(N_ROOT) {
+    if walk_child(N_SELF, b"..") != Some(N_PROC) {
         return Err("walk ..");
+    }
+    if walk_child(N_PROC, b"..") != Some(N_ROOT) {
+        return Err("walk /proc/..");
     }
     if walk_child(N_ROOT, b"..") != Some(N_ROOT) {
         return Err("root .. must be root");
@@ -1607,18 +1914,20 @@ pub fn selftest() -> Result<(), &'static str> {
         return Err("cross-parent name resolved");
     }
 
-    // --- V-4b-3: /sys/kernel, the phenotype's self-description
-    if walk_child(N_ROOT, b"sys") != Some(N_SYS) {
-        return Err("walk /sys");
+    // --- V-4b-3: /proc/sys/kernel, the phenotype's self-description. NOTE the
+    //     path: this is the SYSCTL tree, a different thing from the /sys the
+    //     root now carries, which happens to share a name.
+    if walk_child(N_PROC, b"sys") != Some(N_PROC_SYS) {
+        return Err("walk /proc/sys");
     }
-    if walk_child(N_SYS, b"kernel") != Some(N_SYS_KERNEL) {
-        return Err("walk /sys/kernel");
+    if walk_child(N_PROC_SYS, b"kernel") != Some(N_PROC_SYS_KERNEL) {
+        return Err("walk /proc/sys/kernel");
     }
-    if walk_child(N_SYS_KERNEL, b"ostype") != Some(N_OSTYPE) {
-        return Err("walk /sys/kernel/ostype");
+    if walk_child(N_PROC_SYS_KERNEL, b"ostype") != Some(N_OSTYPE) {
+        return Err("walk /proc/sys/kernel/ostype");
     }
-    if walk_child(N_SYS_KERNEL, b"..") != Some(N_SYS) {
-        return Err("walk /sys/kernel/..");
+    if walk_child(N_PROC_SYS_KERNEL, b"..") != Some(N_PROC_SYS) {
+        return Err("walk /proc/sys/kernel/..");
     }
     // These render the SAME for any peer, dead or alive -- they describe the
     // phenotype, not the Proc, so a peer-dependent answer would be a bug.
@@ -1669,7 +1978,7 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(pid_qid(7, PK_DIR), b"environ").is_some() {
         return Err("/<pid>/environ resolved -- the cross-principal leak is back");
     }
-    if walk_child(pid_qid(7, PK_DIR), b"..") != Some(N_ROOT) {
+    if walk_child(pid_qid(7, PK_DIR), b"..") != Some(N_PROC) {
         return Err("walk /<pid>/..");
     }
     if walk_child(pid_qid(7, PK_DIR), b"nope").is_some() {
@@ -1704,8 +2013,14 @@ pub fn selftest() -> Result<(), &'static str> {
     }
     // A pid that cannot exist must MISS, so /proc/<gone> is ENOENT rather than a
     // directory of empty files -- which is how a Linux consumer detects death.
-    if walk_child(N_ROOT, b"4294967295").is_some() {
+    if walk_child(N_PROC, b"4294967295").is_some() {
         return Err("resolved a nonexistent pid");
+    }
+    // V-4c-1: pids live under /proc, NOT at the world root. Pre-restructure this
+    // name reached the native existence check at the root; now it must not, or a
+    // container's `/` would carry Linux's process dirs.
+    if walk_child(N_ROOT, b"1").is_some() {
+        return Err("a pid resolved at the world root");
     }
 
     // --- V-4b-3: the /ctl/procs pid-list parse, incl. the header skip.
@@ -1882,6 +2197,132 @@ pub fn selftest() -> Result<(), &'static str> {
     let up = render(N_UPTIME, &dead);
     if up.bytes().is_empty() {
         return Err("uptime empty");
+    }
+
+    // --- V-4c-1: the /sys tree.
+    if walk_child(N_SYSFS, b"devices") != Some(N_SYSFS_DEVICES)
+        || walk_child(N_SYSFS_DEVICES, b"system") != Some(N_SYSFS_SYSTEM)
+        || walk_child(N_SYSFS_SYSTEM, b"cpu") != Some(N_SYSFS_CPU)
+    {
+        return Err("walk /sys/devices/system/cpu");
+    }
+    if walk_child(N_SYSFS_CPU, b"online") != Some(N_CPU_ONLINE)
+        || walk_child(N_SYSFS_CPU, b"present") != Some(N_CPU_PRESENT)
+        || walk_child(N_SYSFS_CPU, b"possible") != Some(N_CPU_POSSIBLE)
+    {
+        return Err("walk /sys/.../cpu/{online,present,possible}");
+    }
+    if walk_child(N_SYSFS_CPU, b"..") != Some(N_SYSFS_SYSTEM) {
+        return Err("walk /sys/.../cpu/..");
+    }
+    // kernel_max is DELIBERATELY absent: Linux sources it from a compile-time
+    // NR_CPUS, and Thylacine's equivalent (DTB_MAX_CPUS) is not on any surface
+    // EL0 can read. Omitting beats reporting the present count under a name that
+    // means something else -- section 6.15's rule, applied to the one file here
+    // that has no source.
+    if walk_child(N_SYSFS_CPU, b"kernel_max").is_some() {
+        return Err("kernel_max resolved -- it has no native source");
+    }
+
+    // --- V-4c-1: the cpu qid family. Same two properties the pid family needs:
+    //     the encoding round-trips, and it can never alias a static index or a
+    //     pid (which is what stops `cpu3` resolving onto /proc/self or a Proc).
+    if qid_cpu(cpu_qid(3)) != 3 || !is_cpu_node(cpu_qid(0)) {
+        return Err("cpu qid round-trip");
+    }
+    for i in 0..N_COUNT {
+        if is_cpu_node(i) {
+            return Err("a static node looked like a cpu node");
+        }
+    }
+    if is_cpu_node(pid_qid(1, PK_DIR)) || is_pid_node(cpu_qid(7)) {
+        return Err("the cpu and pid ranges overlap");
+    }
+    if !node_is_dir(cpu_qid(1)) {
+        return Err("a cpuN node must be a dir");
+    }
+    // The dir is EMPTY on purpose (see the family comment): its Linux contents
+    // are hardware facts with no EL0 source, and a stub would be a fabrication.
+    if walk_child(cpu_qid(0), b"cache").is_some() || walk_child(cpu_qid(0), b"online").is_some() {
+        return Err("a cpuN dir served an unsourced child");
+    }
+    if walk_child(cpu_qid(0), b"..") != Some(N_SYSFS_CPU) {
+        return Err("walk cpuN/..");
+    }
+
+    // --- V-4c-1: parse_cpu_name is the resolution gate, like parse_pid. Unlike
+    //     parse_pid, 0 is VALID here -- cpu0 is a real CPU.
+    if parse_cpu_name(b"cpu0") != Some(0) || parse_cpu_name(b"cpu12") != Some(12) {
+        return Err("parse_cpu_name decimal");
+    }
+    if parse_cpu_name(b"cpu").is_some()
+        || parse_cpu_name(b"cpux").is_some()
+        || parse_cpu_name(b"cpu1x").is_some()
+        || parse_cpu_name(b"CPU0").is_some()
+        || parse_cpu_name(b"cpu01").is_some()
+        || parse_cpu_name(b"cpu256").is_some()
+        || parse_cpu_name(b"").is_some()
+    {
+        return Err("parse_cpu_name accepted garbage");
+    }
+
+    // --- V-4c-1: the /ctl/cpu parse. The kernel's `offline` marker (prowl-5 F2)
+    //     is what separates Linux's `online` set from its `present` set, so the
+    //     two files below disagree for a REASON that is sourced, not invented.
+    {
+        let ctl = b"cpus: 4\ncpu idle_ns capacity\n0 123 1024\n1 offline\n2 456 1024\n3 789 1024\n";
+        if parse_cpu_count(ctl) != 4 {
+            return Err("cpu count parse");
+        }
+        let mut set = [false; 4];
+        if parse_cpu_online(ctl, &mut set) != 4 {
+            return Err("cpu online row count");
+        }
+        if set != [true, false, true, true] {
+            return Err("cpu online mask");
+        }
+        // The list renderer emits Linux's cpulist runs.
+        let mut r = Render::new();
+        push_cpu_list(&mut r, &set);
+        if r.bytes() != b"0,2-3\n" {
+            return Err("cpulist runs");
+        }
+        let mut r2 = Render::new();
+        push_cpu_list(&mut r2, &[true, true, true, true]);
+        if r2.bytes() != b"0-3\n" {
+            return Err("cpulist single run");
+        }
+        let mut r3 = Render::new();
+        push_cpu_list(&mut r3, &[true]);
+        if r3.bytes() != b"0\n" {
+            return Err("cpulist single cpu");
+        }
+        // An empty set renders NOTHING -- not "0", which a consumer would read
+        // as one CPU. This is the unreadable-source path.
+        let mut r4 = Render::new();
+        push_cpu_list(&mut r4, &[false, false]);
+        if !r4.bytes().is_empty() {
+            return Err("cpulist empty set must render empty");
+        }
+    }
+    // FAIL-SAFE: a truncated render leaves un-rowed CPUs alone, so this can
+    // never promote a CPU to online without a row saying so.
+    {
+        let truncated = b"cpus: 4\ncpu idle_ns capacity\n0 123 1024\n";
+        let mut set = [false; 4];
+        parse_cpu_online(truncated, &mut set);
+        if set != [true, false, false, false] {
+            return Err("truncated /ctl/cpu invented an online CPU");
+        }
+        // A header-only render yields nothing at all.
+        let mut none = [false; 4];
+        if parse_cpu_online(b"cpus: 4\ncpu idle_ns capacity\n", &mut none) != 0 {
+            return Err("header row parsed as a CPU");
+        }
+    }
+    // An unreadable source renders an EMPTY file rather than a misleading count.
+    if parse_cpu_count(b"") != 0 || parse_cpu_count(b"garbage\n") != 0 {
+        return Err("cpu count from a bad source");
     }
 
     Ok(())

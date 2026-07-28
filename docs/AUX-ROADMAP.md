@@ -245,6 +245,16 @@ Two supporting findings, both from the same grep pass:
   in-tree precedent), and `h_attach` currently **ignores `aname`** and always
   lands on `N_ROOT` — so that dispatch is the real work, and the per-container
   mount wiring wants it anyway since V-7 attaches twice per container.
+  > **Half of that was wrong, and V-4c-1 corrected it** (§6.16). `/sys` is
+  > indeed a second tree — but the aname route is **closed**, not merely harder:
+  > `devsrv_open_connect` attaches a 9P-mode service with a hardcoded *empty*
+  > aname, and `SYS_ATTACH_9P_SRV` (which does carry one) is byte-mode-gated and
+  > rejects a 9P-mode conn for a sound reason. Serving `/sys` that way would
+  > need a **new kernel ABI**. The answer was the one §6.15 had already chosen
+  > for `/dev` one paragraph earlier: **bind**. `SYS_MOUNT` takes any readable
+  > Spoor, subdirectory included, so the diorama serves ONE tree whose root is
+  > the *world* with `proc` and `sys` as siblings — **no kernel change at all**.
+  > Recurring lesson: ground-truth the mechanism before the table entry.
 * `cpuinfo` and `stat` are Tier 1 by §6.3 but have **no in-guest consumer today**
   (`config.guess` is a host script; SDL2's is the `__ANDROID__` branch), and both
   are only *partly* sourceable: `MIDR_EL1` is not EL0-readable at all, and
@@ -252,6 +262,33 @@ Two supporting findings, both from the same grep pass:
   §6.7 question with a third answer the doc did not have: for a line-parsed file,
   omitting a line and fabricating one are different failures, and "report 0" is
   fabrication with a plausible face.
+
+**V-4c-1 LANDED** — one server, two trees, by bind (§6.16). The diorama root is
+now the synthetic *world*; today's content moved to `/proc/…` and `/sys` joined it
+as a sibling, carrying `devices/system/cpu/{online,possible,present}` plus one
+`cpuN` dir per CPU. Every byte is sourced from `/ctl/cpu`, whose `cpus:` header is
+the *declared* set and whose `offline` row marker (prowl-5 F2) is exactly Linux's
+present-vs-online distinction — a gift from devctl having had to make that same
+distinction for prowl. The prover reads the cpulists AND **binds `/dio/sys` at a
+second path**, reading identical bytes through the new name: the composition V-7
+depends on, proven rather than assumed. Both new selftest legs are revert-probed
+(each fails the boot when broken). 1215/1215 · boot OK · 0 EXT.
+
+Two things the build settled that the scripture had left open:
+
+* **A bound subtree is genuinely sealed.** The worry was `..` — the server still
+  records `/sys`'s parent as the world root, so could a container climb out into
+  `/proc`? No: `stalk` resolves `..` by *popping its own trail* and never sends a
+  `Twalk("..")`, so `<mount>/..` lands on the mount point's parent in the
+  **client's** namespace. Same property that contains `..` at `root_spoor` for
+  I-28, doing double duty.
+* **The per-field question now has a THIRD instance** with an identical shape.
+  `cpuN/cache/index0/coherency_line_size` reads `CTR_EL0`, which is EL0-trapped
+  exactly as `MIDR_EL1` is (`SCTLR_EL1.UCT` clear in `INIT_SCTLR_EL1_MMU_OFF`).
+  So `cpuinfo`'s MIDR, `stat`'s ctxt/intr/processes, and the `cpuN` contents all
+  await **one** decision — omit, or give the kernel a source — deliberately made
+  once rather than piecemeal. That is **V-4c-2**, with the per-container mount
+  wiring; **V-4c-3** is the arc's owed focused audit (a merge gate).
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

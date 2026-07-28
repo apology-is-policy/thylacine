@@ -469,10 +469,12 @@ subject to the native gate), `/proc/mounts`, `/proc/sys/kernel/{ostype,osrelease
 version,hostname}`, `/proc/self/{cwd,fd/,environ,auxv}`.
 
 **Tier 3 — `/sys` + `/dev`**: minimal `/sys` (enough for `ldd` + allocator probes +
-CPU topology). **`/dev` was corrected out of the diorama at V-4c (§6.15)**: it is
-composed by bind from the native devdev + ptyfs trees, with the missing Linux
-entries landing in the phenotype or in `viv`, because a read-only server cannot
-serve `/dev/null`.
+CPU topology) — **the CPU-topology half LANDED at V-4c-1** (§6.16), served as a
+sibling tree of `proc` under one root and delivered by bind. **`/dev` was corrected
+out of the diorama at V-4c (§6.15)**: it is composed by bind from the native devdev
++ ptyfs trees, with the missing Linux entries landing in the phenotype or in `viv`,
+because a read-only server cannot serve `/dev/null`. Both halves of Tier 3 thus
+arrive by the *same* mechanism — which is the finding, not a coincidence.
 
 ### 6.4 Sub-chunks
 
@@ -489,6 +491,9 @@ serve `/dev/null`.
 | **V-4b-6** | **LANDED.** `/self/environ` (§6.13): a new kernel source `/proc/<pid>/environ` rendering the Env as Linux's NUL-separated block — offset-aware, and the first devproc info file to carry a real read gate | the prover sets a variable in its own `/env` and reads the record back through the diorama in-guest; the per-pid variant is proven ABSENT (the cross-principal leak) |
 | **V-4b** | **CLOSED.** the rest of Tier 2 (`self/{fd,auxv}`) is dispositioned, not built: `auxv` **weighed and deliberately not built** (§6.14 — zero live readers, and a `viv`-launched binary gets its auxv on the stack by construction); `fd` **blocked on #66c**, the #926 handle-table lifetime restructure, which is a kernel chunk and not a Vivarium one | both dispositions recorded with evidence + a named trigger; neither is a silent omission |
 | **V-4c** | **RESCOPED by §6.15** (scripture-first, no code written): `/dev` is *not* a diorama tree — a read-only server cannot serve `/dev/null`, and native devdev already serves it correctly — so V-4c is a minimal `/sys` + the per-container mount wiring (now the substantive half, since bind is the answer for `/dev` as well as the delivery for `/proc`) + the two Tier-1 stragglers `cpuinfo`/`stat`, each only partly sourced + the focused audit | audit close on the §6.2 no-new-authority property — now including §6.13's **deputy-authority** half (a proxy must not be allowed where its client would be denied) — and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5/6 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
+| **V-4c-1** | **LANDED.** one server, two trees, **by bind** (§6.16): the root becomes the synthetic *world* with `proc` and `sys` as siblings, and `/sys/devices/system/cpu/{online,possible,present}` + the `cpuN` dirs land, all sourced from `/ctl/cpu`. The aname route §6.15 named is **closed**, not merely harder — `devsrv_open_connect` attaches with a hardcoded empty aname and `SYS_ATTACH_9P_SRV` is byte-mode-gated — and `SYS_MOUNT` already takes a subdirectory, so this cost **no kernel change** | the prover reads the cpulists in-guest AND binds `/dio/sys` at a second path, reading the same bytes through the new name — the composition V-7 depends on, proven rather than assumed; the sibling-isolation and online-mask selftest legs are revert-probed (each fails the boot when broken) |
+| **V-4c-2** | the per-field decision, now with **three** instances of one shape (`cpuinfo`'s MIDR, `stat`'s ctxt/intr/processes, `cpuN/cache`'s CTR_EL0) — omit, or give the kernel a source; "report 0" is fabrication with a plausible face. Then the per-container mount wiring V-7 consumes | one decision covering all three, not three ad-hoc ones |
+| **V-4c-3** | the arc's **focused audit** — OWED across V-4b-1..6 + V-4c, all of which landed on self-audit only, and a **merge gate** for `gfx-4 → main` | as the V-4c row above: §6.2 no-new-authority, §6.13 deputy-authority, §6.12 file-identity |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
 work. It is *almost* pure userspace: see §6.5 for the one kernel prerequisite the
@@ -1018,6 +1023,12 @@ every attach lands on `N_ROOT`, so the aname dispatch is the actual work — sma
 but a real mechanism rather than a table entry, and the per-container mount wiring
 wants it regardless, since V-7 will attach twice for every container.
 
+> **CORRECTED at V-4c-1 (see §6.16).** The paragraph above is kept because it is
+> half right and the half it gets wrong is instructive: `/sys` *is* a second tree,
+> but **the aname dispatch is not the work, and cannot be** — an aname is
+> unreachable from EL0 for a 9P-mode `/srv` service. The answer is the one §6.15
+> had already chosen one paragraph earlier, for `/dev`: **bind**.
+
 **And the same pass found two Tier-1 stragglers.** §6.3 lists `/proc/cpuinfo` and
 `/proc/stat` under *Tier 1 — has a consumer TODAY*, and neither has ever been
 served; the V-4a/V-4b sub-chunks quietly carried them as "deferred with their
@@ -1046,6 +1057,78 @@ matter:
   failures, and "report 0" is fabrication with a plausible face. Deciding that —
   omit, or give the kernel a source — is V-4c's real design work on these two,
   and it is deliberately not being decided here alongside the `/dev` correction.
+
+### 6.16 One server, two trees — by bind, not by aname (V-4c-1)
+
+§6.15 left `/sys` needing a **second tree** and named `Tattach` with a different
+`aname` as the mechanism. Ground-truthing that before writing it — the §6.7
+discipline again, and the second time in two sub-chunks that it has changed the
+answer — showed the aname route is not merely harder than assumed but **closed**,
+and that the right answer was already sitting in §6.15's own `/dev` finding.
+
+**Why aname is unreachable here.** There are exactly two kernel paths to a
+mountable dev9p root, and neither delivers a client-chosen aname to a 9P-mode
+service:
+
+| Path | Carries an aname? | Reaches the diorama? |
+|---|---|---|
+| `open("/srv/x")` → `devsrv_open_connect` | **No** — `kernel/devsrv.c` calls `srvconn_attach_dev9p_root(cn, NULL, 0, …)`, hardcoded empty | Yes — this is how every client reaches it |
+| `SYS_ATTACH_9P_SRV(fd, aname, …)` | Yes | **No** — byte-mode-gated, and rejects a 9P-mode conn |
+
+The byte-mode gate is not an oversight to lift: a 9P-mode conn already has a
+kernel-owned `p9_client` driving its rings, and a second one over the same rings
+would interleave frames. So serving `/sys` by aname would need a *new kernel ABI*
+— a syscall issuing an additional `Tattach` on an existing session — which is
+exactly the kind of thing this arc should not add without a much better reason
+than "the first mechanism that came to mind".
+
+**The answer, which costs nothing.** `SYS_MOUNT` takes **any readable Spoor**,
+not only a tree root (`sys_mount_for_proc` gates on `RIGHT_READ` and nothing
+else). So the diorama serves ONE tree whose root is the synthetic *world*, with
+children named for the mount points Linux expects — `proc` and `sys` — and a
+container binds each where it belongs. That is Plan 9's namespace answer, it is
+byte-identical to the mechanism §6.15 chose for `/dev` one paragraph earlier,
+and it needs no kernel change at all.
+
+Two consequences worth stating, because they are what make this *sound* rather
+than merely convenient:
+
+* **The root had to move.** Today's root content is now `/proc/…`. Hanging `sys`
+  off a root that IS `/proc` would put a `/proc/sys`-shaped directory into every
+  container's namespace that Linux has never had — §6.15's "fabrication with a
+  plausible face", one level up from the per-field version. The cost was one
+  probe's paths; V-7 does not exist yet, so there was no other consumer.
+* **A bound subtree is genuinely sealed.** The obvious worry is `..`: the server
+  still records `/sys`'s parent as the world root, so could a container climb
+  `/sys/..` into `/proc`? No — `stalk` resolves `..` by **popping its own trail**
+  (`kernel/stalk.c`, the `..` arm) and never sends `Twalk("..")` to a server, so
+  `<mount>/..` lands on the mount point's parent *in the client's namespace*.
+  The server-side parent link is unreachable through a bind. (This is the same
+  property that contains `..` at `root_spoor` for I-28; it is doing double duty.)
+
+**What landed.** `/sys/devices/system/cpu/{online,possible,present}` plus one
+`cpuN` dir per CPU — all sourced from `/ctl/cpu`, whose `cpus:` header is the
+*declared* set and whose `offline` row marker (prowl-5 F2) is exactly Linux's
+present-vs-online distinction. That mapping is a gift from devctl having had to
+make the same distinction for prowl, and it means both files are sourced rather
+than guessed.
+
+**What did not, and why — the same question a third time.** `kernel_max` is
+omitted: Linux sources it from a compile-time `NR_CPUS`, and Thylacine's
+equivalent (`DTB_MAX_CPUS`) is on no EL0-readable surface. The `cpuN` dirs are
+**empty**: their Linux contents (`cache/index0/coherency_line_size`, `topology/`)
+are hardware facts read from `CTR_EL0`, which is EL0-trapped exactly as
+`MIDR_EL1` is (`SCTLR_EL1.UCT` is clear in `INIT_SCTLR_EL1_MMU_OFF`). So the
+per-field question §6.15 raised for `cpuinfo` and `stat` now has a **third**
+instance with an identical shape, and all three await **one** decision — omit the
+unsourced fields, or give the kernel a source — deliberately made once rather
+than piecemeal. That is V-4c-2's design work.
+
+The dirs themselves are not fabrications: each genuinely names a CPU the kernel
+reports, and their existence is what the legacy "count the `cpuN` entries"
+enumeration path reads (busybox `nproc`, older glibc `_SC_NPROCESSORS_CONF`).
+Modern consumers read the range files one level up, which is why those were the
+ones worth sourcing first.
 
 ---
 
