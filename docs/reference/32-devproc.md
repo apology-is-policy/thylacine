@@ -313,7 +313,7 @@ The Walkqid is `kmalloc`-allocated by `walkqid_alloc(nname)` (added in P4-C; dec
 - **Per-pid file table** (g_proc_pid_files[] — name + subkind for status/cmdline/ctl/ns).
 - **Tiny formatters** (`fmt_udec`, `fmt_sdec`, `fmt_str`) — no libc; ~30 LOC of byte-level integer/string formatting into a stack buffer.
 - **Content generators** (`format_status`, `format_cmdline`, `format_ns`) — produce up to `cap` bytes; return total bytes that would be produced, allowing offset-aware reads.
-- **`parse_decimal`** — strict pid parser (rejects empty, leading `-`, non-digits, overflow past 31 bits).
+- **`parse_decimal`** — strict pid parser (rejects empty, leading `-`, non-digits, overflow past 31 bits, and — since V-4b-5 — a **leading zero on a multi-digit name**, which is Linux's own rule in `fs/proc/base.c::name_to_int`). Without the last one a single Proc answers to unboundedly many names (`/proc/7`, `/proc/07`, `/proc/00000007`), so the pid → name map stops being injective: readdir lists a name that is not the only name, a path-keyed cache holds N entries for one Proc, and native `/proc` disagrees with the VIVARIUM diorama (whose `parse_pid` already rejected them) about which paths exist. `"0"` itself stays legal — kproc is pid 0.
 - **`walk_one`** — qid-by-qid step dispatch.
 - **Vtable functions** — `attach`, `walk`, `open`, `close`, `read`, `write`, plus the standard stubs.
 
@@ -441,7 +441,7 @@ The owner axis is `caller->principal_id == target->principal_id`. At v1.0 the *e
 
 `stat_native` dereferences the bare pointer from `proc_find_by_pid` with no lock held — the documented v1.0 "no concurrent reap" window, the *same class* as `devproc_read` above. It is NOT on any authorization path: every `perm_check` site that consults `stat_native` is gated on `dev->perm_enforced`, and `devproc.perm_enforced == false`; stat_native serves only `SYS_FSTAT` introspection + `SEEK_END`. The KILL path does NOT use it (it resolves under `g_proc_table_lock` via `proc_for_each`). The general fix (deref inside a `proc_for_each` cb, as the kill path does) is the right shape if devproc ever gains concurrent reaping or perm-enforcement; tracks with the pre-existing `devproc_read` window.
 
-### The apex STATS but per-pid modes carry no file-type bits (V-4b-4; task #67)
+### The apex stats, and the modes carry file-type bits (V-4b-4 + V-4b-5; task #67 CLOSED)
 
 The `/proc` apex used to answer `-1` from `stat_native` ("no per-Proc owner"),
 which `spoor_stat_native` surfaces as `EIO` — so `stat("/proc")` failed, and with
@@ -453,14 +453,25 @@ dirs, where the X bit is what lets the resolver traverse onto the mount point an
 cross. Not an authority: `devproc.perm_enforced` is false, so no gate consults
 this mode (`devproc_kill_authorized` checks at the write, independently).
 
-Still open (task #67): `devproc_mode_for_kind` returns **bare permission bits** —
-`0555` for a pid dir, `0444` for `status`/`exe`/`cwd`/`maps` — with no
-`S_IFDIR`/`S_IFREG`, so a POSIX caller's `S_ISDIR("/proc/1234")` and
-`S_ISREG("/proc/1234/exe")` are both **false**. devdev sets `T_S_IFDIR|0555` for
-its dirs, so the two Devs disagree. The apex above deliberately matches the *local*
-per-pid shape (bare `0555`) rather than devdev's, so the fix stays uniform when it
-lands. Not a VIVARIUM-consumer bug: a Linux program in a Vivarium territory reads
-the *diorama's* `/proc`, which serves its own stat.
+V-4b-5 closed the other half. `devproc_mode_for_kind` used to return **bare
+permission bits** — `0555` for a pid dir, `0444` for `status`/`exe`/`cwd`/`maps` —
+with no `S_IFDIR`/`S_IFREG`, so a POSIX caller's `S_ISDIR("/proc/1234")` and
+`S_ISREG("/proc/1234/exe")` were both **false**. That is not cosmetic: `S_ISDIR`
+and `S_ISREG` read the `S_IFMT` field *alone*, and every walker that classifies
+before it descends — `find`, `ftw`/`nftw`, `du`, a shell glob, Go's
+`os.FileInfo.IsDir`, and the readdir-then-stat loop any `/proc` reader is built
+from — reads a typeless entry as not-a-directory and stops. The type bits now come
+out of the same switch as the permissions, so the two cannot drift, and `qid_type`
+(which already carried the distinction for Thylacine-native callers) agrees with
+them by construction. An unclassifiable subkind returns `-1` rather than a
+typeless mode: walk produces only known kinds, so it is unreachable, but reporting
+`S_IFMT == 0` would hand a POSIX caller exactly the stat the type bits exist to
+prevent.
+
+Note that a *diorama* `/proc` — what a Linux program in a Vivarium territory
+actually reads — serves its own stat, so this was never a VIVARIUM-consumer bug.
+It was a native-caller bug, and the reason it stayed invisible is that nothing
+native had classified a `/proc` entry by mode before.
 
 ### Reads on root or pid_dir return -1 at v1.0
 

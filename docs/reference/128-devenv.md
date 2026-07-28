@@ -85,6 +85,46 @@ applied preemptively.
   `os.Create` `O_TRUNC` flow); the root has no truncate.
 - **unlink** (`devenv_unlink` → `env_unset`): removes by name (`os.Remove`).
   `SYS_UNLINK_REMOVEDIR` rejected (no directories).
+- **stat_native** (`devenv_stat_native` → `env_size`; VIVARIUM V-4b-5): the root is
+  `S_IFDIR | 0755`, an entry is `S_IFREG | 0644` with `size` = the value length; an
+  entry gone since the walk returns `-1` (the monotonic-id guarantee, which every
+  other op already honours). Before V-4b-5 there was **no slot at all**, so
+  `stat("/env")`, `fstat` on an `/env` fd, and `lseek(SEEK_END)` all failed with
+  `EIO` — and, since musl's `realpath()` walks each path prefix and treats any errno
+  but `EINVAL` as fatal, `realpath()` of anything beneath `/env` with them.
+
+  Two things about it are deliberate. **The size is real**, unlike `/ctl`'s (see
+  `33-devctl.md`): an `/env` value is a stored byte string with a definite length,
+  not a report generated at read time, so a caller that fstats and then reads that
+  many bytes gets exactly the value — and `SEEK_END`, which is this same call behind
+  a different syscall, lands on it. **The owner is the caller**: every devenv op
+  resolves the *calling* Proc's env, so a Proc statting `/env` is statting its own,
+  and reporting its own principal with `0755`/`0644` says exactly what is true —
+  you may read and write your environment, and nobody else's is reachable from
+  here. A child that inherits an `/env` fd across spawn therefore stats against
+  *its* env, not the parent's, the same rebinding `read` and `write` already do.
+
+  **The per-Env device number, and why devenv is the only Dev that needs one.**
+  `spoor_stat_native` reports `(devno, qid.path)` as the file identity (#100), and
+  every *other* Dev's qid namespace is global — a devproc qid packs the global pid,
+  a devctl qid is a leaf kind, devramfs qids are tree-wide — so their Spoors can
+  carry the static `devno == 0` and the pair still names exactly one file. devenv's
+  namespace is **per-Proc**: `next_id` restarts at 1 in every `Env`, so without a
+  discriminator two Procs' entirely unrelated variables would both report `(0, 1)`
+  and claim to be the same file. `struct Env` therefore carries a `devno` minted
+  from `spoor_next_devno()` at `env_alloc` (a clone gets its own — a copied
+  environment is a copy, not the same file), and `devenv_walk` stamps it onto the
+  walked Spoor, which is where it has to land: `spoor_stat_native` overwrites
+  whatever `stat_native` put in `out->devno` with the Spoor's own value.
+
+  This is not only about `fstat` agreeing with itself. The REVENANT Image cache is
+  keyed on `(dc, devno, qid_path, exec, offset, size)`, and `exec_resolve_from_
+  namespace` gates only on `dev->read` plus a non-zero `st.size` — so once `/env`
+  entries report a real size, `exec("/env/FOO")` reaches that cache. With colliding
+  identities it would serve one Proc the cached text of another Proc's variable,
+  which is an I-1 leak out of a device whose whole premise is that a Proc sees only
+  its own environment. Found by self-audit while adding the stat slot, before it
+  shipped; the regression is in `devenv.stat_native_shapes`.
 
 There is **no per-Spoor private state** — the value lives in the Proc's `Env`, keyed
 by id — so `close` is the trivial `dev_simple_close` (no `aux`, no UAF surface).

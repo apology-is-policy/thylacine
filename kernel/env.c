@@ -15,6 +15,7 @@
 #include <thylacine/page.h>     // KP_ZERO
 #include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/spoor.h>    // V-4b-5: spoor_next_devno -- the per-Env device number
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"          // kmalloc / kfree
@@ -28,6 +29,13 @@ static struct Env *env_alloc(void) {
     if (!e) return NULL;
     spin_lock_init(&e->lock);
     __atomic_store_n(&e->ref, 1, __ATOMIC_RELAXED);
+    // A fresh device number per Env (V-4b-5). Ids are per-Env and restart at 1,
+    // so (devno, qid.path) would otherwise name a DIFFERENT file in every Proc
+    // while claiming to be the same one -- and the REVENANT Image cache is keyed
+    // on exactly that pair, so an exec of an /env path would serve one Proc the
+    // bytes of another's variable (an I-1 leak). A clone gets its own, because a
+    // copied environment is a copy, not the same file.
+    e->devno   = spoor_next_devno();
     e->next_id = 1;                 // 0 is the free-slot sentinel; ids start at 1
     e->count   = 0;
     return e;
@@ -170,6 +178,30 @@ void env_truncate(struct Proc *p, u64 id) {
         e->entries[i].len   = 0;
     }
     spin_unlock(&e->lock);
+}
+
+// The Env's device number (V-4b-5). Lock-free: assigned once at env_alloc, before
+// the Env is published, and never mutated. 0 means "no env yet" -- honest, and
+// harmless because an Env that does not exist has no entries to be confused with.
+u32 env_devno(struct Proc *p) {
+    if (!p) return 0;
+    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
+    return e ? e->devno : 0;
+}
+
+// The stat step (V-4b-5). Same id -> entry resolution under the same lock as
+// every other op, so a variable removed between the walk and the stat reports
+// gone rather than another variable's length (the monotonic-id guarantee).
+bool env_size(struct Proc *p, u64 id, u64 *out_len) {
+    if (!p || !out_len) return false;
+    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
+    if (!e) return false;
+    spin_lock(&e->lock);
+    int i = find_by_id_locked(e, id);
+    if (i < 0) { spin_unlock(&e->lock); return false; }
+    *out_len = (u64)e->entries[i].len;
+    spin_unlock(&e->lock);
+    return true;
 }
 
 long env_read(struct Proc *p, u64 id, s64 off, void *buf, long n) {

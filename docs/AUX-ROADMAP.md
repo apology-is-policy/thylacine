@@ -105,14 +105,52 @@ errno 38, while `realpath("/")` still passes (no components to walk).
 
 It also surfaced a kernel gap and a family behind it (task #67): the `/proc` apex
 answered `-1` from `stat_native`, i.e. `EIO`, so `stat("/proc")` failed — fixed
-here (the apex is a real directory and now stats as one). Left tracked because each
-needs a per-qid posture decision across a whole Dev: `/ctl` and `/env` have no
-`stat_native` slot at all, and devproc's per-pid modes carry no `S_IFDIR`/`S_IFREG`.
+here (the apex is a real directory and now stats as one). The rest was left tracked
+because each member needed a per-qid posture decision across a whole Dev.
 
 The LLVM fork delta is now *available* to drop, **not dropped**: that needs an LLVM
 rebuild + the Clade gates, which belong to the track owning that fork. Recording it
 as available rather than done is the correction V-4b-3 made to V-4a, applied to
 itself.
+
+**V-4b-5 is DONE** — the synthetic-Dev stat family (§6.12; task #67), three gaps
+closed together because they are one question asked of three Devs: *what does this
+synthetic object claim to be?*
+
+`/ctl` and `/env` had **no `stat_native` slot at all**, so `stat()` on the
+directory, `fstat` on any fd beneath it, `lseek(SEEK_END)`, and — by the §6.11
+mechanism — `realpath()` of anything underneath, all failed with `EIO`. Both now
+answer, and they answer *differently about size*, which is the interesting part: a
+`/ctl` file is generated at read time (so a size measured at `stat` is stale before
+the read, and 0 is the honest answer — Linux's `/proc/meminfo` convention), while
+an `/env` value is stored (so its size is real, and `SEEK_END` lands on it).
+
+devproc's modes carried **no file-type bits**, so `S_ISDIR("/proc/<pid>")` was
+false and every POSIX walker that classifies before descending stopped there.
+
+And a fourth found while writing the prover's regression rather than while
+designing the fix: `parse_decimal` accepted **leading zeros**, so one Proc answered
+to unboundedly many names — which meant native `/proc` and the diorama disagreed
+about which paths exist, and coherence between the two is the point of §6.2. Linux
+rejects them for the same reason; `"0"` stays legal (kproc).
+
+**Self-audit caught the one that mattered most, before it shipped.** Reporting a
+size for `/env` entries has a consequence beyond `fstat`: `exec_resolve_from_
+namespace` gates only on `dev->read` and a non-zero size, so a real size makes
+`exec("/env/FOO")` reach the REVENANT Image cache — keyed on `(dc, devno,
+qid_path, …)`. Every other Dev's qid namespace is global, so a static `devno == 0`
+still leaves that pair unique; **devenv's is per-Proc** (ids restart at 1 in every
+`Env`), so two Procs' unrelated variables both reported `(0, 1)` and the cache
+would serve one Proc another's bytes — an I-1 leak out of the one device whose
+premise is that a Proc sees only its own environment. Fixed with a per-`Env`
+`devno` stamped onto the walked Spoor. The identity was equally wrong before, but
+nothing had asked: **reporting a field that was never reported is a claim, and the
+claim has to be true before the report is added.**
+
+Revert-probed in three boots: all three kernel tests fail on pre-fix code at
+exactly the reverted assertion; the in-guest prover reaches its `/ctl`, `/env` and
+`S_ISDIR` legs before failing at the padded-pid one; and dropping the `devno` stamp
+fails `devenv.stat_native_shapes` at "the walked Spoor carries it".
 
 **NEXT: the V-4b remainder** — three different-shaped jobs, not one (§6.10):
 `environ` needs a kernel source (`/env` is self-only by construction); `auxv` needs

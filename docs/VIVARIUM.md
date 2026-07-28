@@ -479,8 +479,9 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4b-2** | **LANDED.** `/self/maps` + its kernel source `/proc/<pid>/maps` | the probe reads a Linux-shaped map with `[stack]` + a file-backed row naming the binary |
 | **V-4b-3** | **LANDED.** the numeric `/proc/<pid>/…` dirs + the root pid enumeration + `sys/kernel/{ostype,osrelease,version,hostname}` | the probe reads its OWN pid's dir, finds itself in the root readdir, and gets ENOENT for a pid that cannot exist |
 | **V-4b-4** | **LANDED.** the *shape* half (§6.11): `readlink()` in the phenotype — the four `/proc` link-shaped paths, plus the truthful `EINVAL`/`ENOENT` that repairs `realpath()` system-wide; + the `/proc` apex stat | the prover readlinks its own `exe`/`cwd` in-guest against NATIVE `/proc`, `self` and `<pid>` agree, truncation is POSIX-silent, and `realpath()` canonicalizes |
+| **V-4b-5** | **LANDED.** the synthetic-Dev stat family (§6.12): `stat_native` for `/ctl` + `/env`, the POSIX file-type bits on devproc's modes, and the leading-zero pid reject that restores native-vs-diorama coherence | the prover stats `/ctl` + `/env` as directories in-guest, `S_ISDIR("/proc/<pid>")` is true, `realpath("/ctl/./procs")` canonicalizes, and a zero-padded pid does not resolve |
 | **V-4b** | the rest of Tier 2 (`self/{fd,environ,auxv}`) | see §6.10 — `fd` is blocked on the #66c handle-table lifetime, `environ`/`auxv` each need a kernel source |
-| **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
+| **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property, and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
 work. It is *almost* pure userspace: see §6.5 for the one kernel prerequisite the
@@ -741,10 +742,77 @@ in-guest (and `realpath("/")` still passes — no components to walk).
 `stat("/proc")` failed, and `realpath()` on *any* path under `/proc` with it. "No
 owner" and "stat fails" are different statements; the apex is a real directory and
 now answers as one (SYSTEM-owned, `0555`, the `devdev` `DEV_KIND_ROOT` and devramfs
-synth-dir posture). Two siblings in the same family are tracked, not fixed here:
+synth-dir posture). Two siblings in the same family were tracked, not fixed there:
 `/ctl` and `/env` have no `stat_native` slot at all, and devproc's per-pid modes
 carry no `S_IFDIR`/`S_IFREG` bits — each needs a per-qid posture decision across a
-whole Dev, which is a chunk rather than a footnote.
+whole Dev, which is a chunk rather than a footnote. That chunk is §6.12.
+
+### 6.12 The synthetic-Dev stat family (V-4b-5)
+
+The three gaps V-4b-4 surfaced, closed together because they are one question
+asked of three Devs: *what does this synthetic object claim to be?*
+
+**`/ctl` and `/env` had no `stat_native` slot at all**, so `spoor_stat_native`
+returned `-1` → `EIO` for `stat()` on the directory, for `fstat` on any fd beneath
+it, for `lseek(SEEK_END)` — and, by the §6.11 mechanism, for `realpath()` of
+anything underneath. Both now answer. The interesting part is that they answer
+*differently about size*, and the difference is the point:
+
+| | `/ctl` leaf | `/env` entry |
+|---|---|---|
+| content | generated at read time from live state | a stored byte string |
+| size | **0** | **real** |
+
+A `/ctl` file's length measured at `stat` is already stale when the read runs, so
+a caller that fstat'd, malloc'd, and read exactly that many bytes would truncate a
+table that grew in between — which is why Linux reports 0 for `/proc/meminfo` and
+readers loop to EOF. An `/env` value does not move unless someone writes it, so
+its size is honest, and `SEEK_END` (the same call behind a different syscall)
+lands on it. devhw and devpci already reported real sizes and were already right:
+a DTB property and a PCI config register do not change between stat and read.
+"Report the size" and "report 0" are both correct answers to different questions.
+
+**devproc's modes carried no file-type bits.** `S_ISDIR`/`S_ISREG` read the
+`S_IFMT` field *alone*, so a bare `0555` left a pid directory typeless, and every
+POSIX walker that classifies before descending — `find`, `nftw`, `du`, a shell
+glob, Go's `os.FileInfo.IsDir`, and the readdir-then-stat loop any `/proc` reader
+is built from — read it as not-a-directory and stopped. `qid_type` had carried the
+distinction for Thylacine-native callers all along; the type bits carry it for
+POSIX ones, emitted from the same switch so the two cannot drift.
+
+**And a fourth, found while writing the prover's regression rather than while
+designing the fix**: devproc's `parse_decimal` accepted **leading zeros**, so
+`/proc/7`, `/proc/07`, and `/proc/00000007` all resolved to pid 7. One Proc
+answering to unboundedly many names is not a curiosity — it breaks injectivity, so
+readdir lists a name that is not *the* name, a path-keyed cache holds N entries for
+one Proc, and **native `/proc` disagrees with the diorama about which paths
+exist** (the diorama's `parse_pid` already rejected them). Coherence between the
+two renderings is the entire point of §6.2, so the divergence mattered more than
+the leniency did. Linux rejects them for the same reason
+(`fs/proc/base.c::name_to_int`); `"0"` alone stays legal, because kproc is pid 0.
+
+**And a fifth, caught by self-audit before it shipped — the one that mattered
+most.** Reporting a size for `/env` entries has a consequence beyond `fstat`:
+`exec_resolve_from_namespace` gates only on `dev->read` and a non-zero `st.size`,
+so a real size makes `exec("/env/FOO")` reach the REVENANT Image cache — which is
+keyed on `(dc, devno, qid_path, …)`. Every *other* Dev's qid namespace is global,
+so a static `devno == 0` still leaves that pair unique; **devenv's is per-Proc**
+(`next_id` restarts at 1 in every `Env`), so two Procs' unrelated variables both
+reported `(0, 1)`. The cache would then serve one Proc the text of another's
+variable — an I-1 leak out of the one device whose entire premise is that a Proc
+sees only its own environment. `struct Env` now carries a `devno` minted at
+`env_alloc`, stamped onto the walked Spoor by `devenv_walk` (it has to land there:
+`spoor_stat_native` overwrites `out->devno` with the Spoor's own). The lesson is
+narrow and worth keeping: **reporting a field that was previously never reported
+is a claim, and the claim has to be true before the report is added** — the
+identity was equally wrong before, but nothing had asked.
+
+None of this is an authority change: all three Devs run `perm_enforced == false`,
+and every `perm_check` site in `stalk`/`syscall.c` is gated on that flag, so no
+gate consults these modes. What a mode does here is *document* the gate that lives
+at the read site — which is why `/ctl/kernel-base` is `0400` rather than `0444`
+(`CAP_HOSTOWNER`, #57a F1), and why `/env` reports the **calling** Proc as owner
+(every devenv op resolves the caller's own env, so that is simply true).
 
 ---
 

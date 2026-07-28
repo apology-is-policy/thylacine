@@ -26,6 +26,9 @@
 //                      truthful EINVAL/ENOENT (V-4b-4, patch 0031)
 //   realpath        -> no wire of its own: musl resolves in userspace atop
 //                      readlink, so it works only once readlink tells the truth
+//   stat            -> SYS_STAT on the synthetic Devs: /ctl + /env stat as the
+//                      directories they are, and a /proc entry's S_IFMT lets
+//                      S_ISDIR/S_ISREG classify it (V-4b-5)
 //
 // On success: "pouch-hello-fs: ALL WIRES PASS" + exit 0. Any wire failing
 // prints "pouch-hello-fs: <wire> FAIL ..." and exits non-zero so joey's
@@ -127,12 +130,12 @@ int main(void) {
 	// those digits into a fixed buffer, so an unbounded run would smash the
 	// stack; surviving this call and continuing is the regression.
 	//
-	// Deliberately NOT a run of zeros: devproc's parse_decimal accepts leading
-	// zeros, so "/proc/0000...0/exe" resolves to pid 0 (kproc) and genuinely
-	// EXISTS -- the general arm would then answer EINVAL, correctly, and the
-	// test would be asserting devproc's pid-parsing leniency rather than the
-	// buffer bound. A run of nines overflows past 31 bits and cannot name any
-	// Proc, so ENOENT is unambiguous.
+	// Deliberately a run of NINES, not zeros. It overflows past 31 bits and so
+	// cannot name any Proc, which makes ENOENT unambiguous. (When this was
+	// written devproc's parse_decimal accepted leading zeros, so a run of zeros
+	// resolved to pid 0 and genuinely existed; V-4b-5 has since fixed that, and
+	// the zero-padded case is asserted on its own below. Nines still isolate the
+	// buffer bound from the pid-parsing rule, which is the point here.)
 	errno = 0;
 	if (readlink("/proc/99999999999999999999999/exe", lnk, sizeof lnk) >= 0)
 		return fail("readlink(longpid)", "an impossible pid reported a link");
@@ -152,6 +155,38 @@ int main(void) {
 	if (!realpath("/proc/./", rp)) return fail("realpath", "/proc/./ failed");
 	if (strcmp(rp, "/proc") != 0) return fail("realpath", "/proc/./ not canonical");
 	if (realpath("/no-such-path-here", rp)) return fail("realpath", "absent path succeeded");
+
+	// --- the synthetic Devs stat, and their file TYPES are readable (V-4b-5) ---
+	// /ctl and /env had no stat_native slot at all, so stat() on them returned
+	// EIO -- and realpath() of anything beneath them with it, since musl walks
+	// each prefix. devproc had a slot but reported bare permission bits with no
+	// S_IFMT, so S_ISDIR of a pid directory was FALSE and every POSIX walker
+	// that decides whether to descend (find, nftw, a shell glob) stopped there.
+	struct stat sb;
+	if (stat("/ctl", &sb) != 0) return fail("stat(/ctl)", "failed");
+	if (!S_ISDIR(sb.st_mode)) return fail("stat(/ctl)", "not a directory");
+	if (stat("/ctl/procs", &sb) != 0) return fail("stat(/ctl/procs)", "failed");
+	if (!S_ISREG(sb.st_mode)) return fail("stat(/ctl/procs)", "not a regular file");
+	if (!realpath("/ctl/./procs", rp)) return fail("realpath(/ctl)", "failed");
+	if (strcmp(rp, "/ctl/procs") != 0) return fail("realpath(/ctl)", "not canonical");
+
+	if (stat("/env", &sb) != 0) return fail("stat(/env)", "failed");
+	if (!S_ISDIR(sb.st_mode)) return fail("stat(/env)", "not a directory");
+
+	// A pid directory must classify AS a directory, and its files as files.
+	if (stat(pidpath, &sb) != 0) return fail("stat(/proc/<pid>/exe)", "failed");
+	if (!S_ISREG(sb.st_mode)) return fail("stat(/proc/<pid>/exe)", "not a regular file");
+	char piddir[64];
+	snprintf(piddir, sizeof piddir, "/proc/%ld", (long)pid);
+	if (stat(piddir, &sb) != 0) return fail("stat(/proc/<pid>)", "failed");
+	if (!S_ISDIR(sb.st_mode)) return fail("stat(/proc/<pid>)", "S_ISDIR is false");
+
+	// A zero-padded pid does not name a Proc (V-4b-5) -- Linux's own rule. One
+	// Proc must have exactly one name, or native /proc and the VIVARIUM diorama
+	// disagree about which paths exist.
+	char padded[64];
+	snprintf(padded, sizeof padded, "/proc/0%ld", (long)pid);
+	if (stat(padded, &sb) == 0) return fail("stat(padded pid)", "a zero-padded pid resolved");
 
 	// --- mkdir a working dir at root (absolute) ---
 	const char *wdir = "/pouch-fs-probe";

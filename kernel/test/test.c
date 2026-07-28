@@ -571,6 +571,7 @@ void test_devctl_read_sched_format(void);
 void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
+void test_devctl_stat_native_shapes(void);      // V-4b-5: /ctl stats as a dir; leaves as files
 void test_devdev_bestiary_smoke(void);
 void test_devdev_attach_returns_dir(void);
 void test_devdev_walk_to_each_leaf(void);
@@ -611,6 +612,7 @@ void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
 void test_devenv_walk_reuse_nc(void);
 void test_devenv_walk_read(void);
+void test_devenv_stat_native_shapes(void);      // V-4b-5: /env stats; entry size is real
 
 void test_allowance_null_is_broad(void);
 void test_allowance_mmio_containment(void);
@@ -1937,6 +1939,7 @@ struct test_case g_tests[] = {
     { "devctl.read_cpu_format",        test_devctl_read_cpu_format,        false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
+    { "devctl.stat_native_shapes",     test_devctl_stat_native_shapes,     false, NULL },
     { "devdev.bestiary_smoke",         test_devdev_bestiary_smoke,         false, NULL },
     { "devdev.attach_returns_dir",     test_devdev_attach_returns_dir,     false, NULL },
     { "devdev.walk_to_each_leaf",      test_devdev_walk_to_each_leaf,      false, NULL },
@@ -1977,6 +1980,7 @@ struct test_case g_tests[] = {
     { "devenv.bestiary",               test_devenv_bestiary,               false, NULL },
     { "devenv.walk_reuse_nc",          test_devenv_walk_reuse_nc,          false, NULL },
     { "devenv.walk_read",              test_devenv_walk_read,              false, NULL },
+    { "devenv.stat_native_shapes",     test_devenv_stat_native_shapes,     false, NULL },
 
     { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
     { "allowance.mmio_containment",         test_allowance_mmio_containment,         false, NULL },

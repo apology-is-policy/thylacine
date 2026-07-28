@@ -612,6 +612,18 @@ static size_t format_ctl_read(struct Proc *p, char *buf, size_t cap) {
 
 static bool parse_decimal(const char *s, int *out) {
     if (!s || !*s) return false;
+    // Reject a LEADING ZERO on a multi-digit name (VIVARIUM V-4b-5), which is
+    // Linux's own rule in fs/proc/base.c::name_to_int ("if (len > 1 && *name ==
+    // '0') goto out"). Without it one Proc answers to unboundedly many names --
+    // /proc/7, /proc/07, /proc/00000007 all walk to pid 7 -- so the pid -> name
+    // map stops being injective. Three things then go wrong at once: readdir
+    // lists a name that is not the only name (any dedup keyed on the path is
+    // wrong), the VIVARIUM diorama and native /proc DISAGREE about whether a
+    // path exists (the diorama's parse_pid already rejects these, so the two
+    // /proc renderings of one system diverge -- and coherence between them is
+    // the whole point of section 6.2), and a cache keyed by path holds N
+    // entries for one Proc. "0" itself stays legal: kproc is pid 0.
+    if (s[0] == '0' && s[1] != '\0') return false;
     unsigned long v = 0;
     for (const char *p = s; *p; p++) {
         if (*p < '0' || *p > '9') return false;
@@ -753,24 +765,34 @@ static int devproc_stat(struct Spoor *c, u8 *dp, int n) {
 // Per-subkind mode (A-4b). ctl is 0600 (owner rw — the kill-authority gate);
 // the info files are 0444 (world-readable, Plan 9 /proc convention); the pid
 // dir is 0555.
+//
+// The FILE-TYPE bits are part of the mode, not decoration (VIVARIUM V-4b-5).
+// POSIX splits st_mode into a type field (S_IFMT) and permissions, and S_ISDIR
+// / S_ISREG read the type field ALONE -- so a bare 0555 says "a thing with rx
+// for everyone" and leaves the type as 0, which is no type at all. Every caller
+// that classifies before it descends (find, ftw/nftw, du, a shell glob, Go's
+// os.FileInfo.IsDir, and the readdir-then-stat loop any /proc walker is built
+// from) then reads a pid directory as NOT-a-directory and stops. The qid_type
+// below already carried the distinction for Thylacine-native callers; this
+// carries it for POSIX ones, out of the same switch so the two cannot drift.
 static u32 devproc_mode_for_kind(u32 kind) {
     switch (kind) {
-    case PQS_CTL:     return 0600u;
-    case PQS_MEM:     return 0600u;   // 8a-1b-gamma-1: owner-private (I-39-gated at the RW site)
-    case PQS_REGS:    return 0600u;   // 8a-1b-gamma-2: owner-private (I-39-gated at the RW site)
-    case PQS_FPREGS:  return 0600u;
-    case PQS_WAIT:    return 0400u;   // 8a-1b-gamma-3: RO notification (I-39-gated at the read site)
-    case PQS_KREGS:   return 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
-    case PQS_KSTACK:  return 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
-    case PQS_SCHED:   return 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
+    case PQS_CTL:     return T_S_IFREG | 0600u;
+    case PQS_MEM:     return T_S_IFREG | 0600u;   // 8a-1b-gamma-1: owner-private (I-39-gated at the RW site)
+    case PQS_REGS:    return T_S_IFREG | 0600u;   // 8a-1b-gamma-2: owner-private (I-39-gated at the RW site)
+    case PQS_FPREGS:  return T_S_IFREG | 0600u;
+    case PQS_WAIT:    return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO notification (I-39-gated at the read site)
+    case PQS_KREGS:   return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
+    case PQS_KSTACK:  return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
+    case PQS_SCHED:   return T_S_IFREG | 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:
     case PQS_EXE:
     case PQS_CWD:
-    case PQS_MAPS:    return 0444u;   // V-4a-0 / V-4b-1 / V-4b-2: info files, ns's posture
-    case PQS_PID_DIR: return 0555u;
-    default:          return 0u;
+    case PQS_MAPS:    return T_S_IFREG | 0444u;   // V-4a-0 / V-4b-1 / V-4b-2: info files, ns's posture
+    case PQS_PID_DIR: return T_S_IFDIR | 0555u;
+    default:          return 0u;                  // no type, no perms -- see stat_native
     }
 }
 
@@ -822,13 +844,23 @@ static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
         for (size_t i = 0; i < sizeof(*out); i++) rz[i] = 0;
         out->uid      = PRINCIPAL_SYSTEM;
         out->gid      = GID_SYSTEM;
-        out->mode     = 0555u;                  // bare perms, like PQS_PID_DIR
+        out->mode     = T_S_IFDIR | 0555u;      // same shape as PQS_PID_DIR
+        out->nlink    = 1;
+        out->blksize  = 4096;
         out->qid_path = path;
         out->qid_type = QTDIR;
         return 0;
     }
     u32 kind = proc_qid_kind(path);
     int pid  = proc_qid_pid(path);
+
+    u32 mode = devproc_mode_for_kind(kind);
+    // A qid whose subkind this Dev cannot classify is not a typeless file; it
+    // is a Spoor we have no business describing. Walk produces only the known
+    // kinds, so this is unreachable -- but reporting mode 0 (S_IFMT == 0, no
+    // type at all) would hand a POSIX caller a stat it cannot classify, which
+    // is exactly the failure the type bits above exist to prevent.
+    if (mode == 0)                   return -1;
 
     struct devproc_stat_ctx s = { .pid = pid, .found = false, .uid = 0, .gid = 0 };
     proc_for_each(devproc_stat_cb, &s);           // snapshot the owner under the lock
@@ -838,7 +870,9 @@ static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     for (size_t i = 0; i < sizeof(*out); i++) z[i] = 0;
     out->uid      = s.uid;
     out->gid      = s.gid;
-    out->mode     = devproc_mode_for_kind(kind);
+    out->mode     = mode;
+    out->nlink    = 1;
+    out->blksize  = 4096;
     out->qid_path = path;
     out->qid_type = (kind == PQS_PID_DIR) ? QTDIR : QTFILE;
     return 0;

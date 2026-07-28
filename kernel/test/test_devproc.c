@@ -716,7 +716,9 @@ void test_devproc_read_sched_format(void) {
 }
 
 // stat_native reports the target Proc as the per-pid object's owner, with the
-// Plan 9 /proc mode convention (ctl 0600, info files 0444); the dev apex -> -1.
+// Plan 9 /proc mode convention (ctl 0600, info files 0444) and the POSIX
+// file-type bits (V-4b-5); the dev apex stats as the directory it is (V-4b-4);
+// and a zero-padded pid does not name a Proc (V-4b-5).
 void test_devproc_stat_native_ctl_owner(void) {
     struct Proc *tgt = proc_alloc();
     TEST_ASSERT(tgt != NULL, "proc_alloc target");
@@ -742,15 +744,28 @@ void test_devproc_stat_native_ctl_owner(void) {
     TEST_EXPECT_EQ(devproc.stat_native(ctl, &st), 0, "stat_native(ctl) ok");
     TEST_EXPECT_EQ(st.uid, tgt->principal_id, "ctl uid = target principal");
     TEST_EXPECT_EQ(st.gid, tgt->primary_gid,  "ctl gid = target primary_gid");
-    TEST_EXPECT_EQ(st.mode, (u32)0600u,       "ctl mode = 0600 (owner-private)");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0600u),
+                   "ctl mode = S_IFREG|0600 (owner-private)");
     TEST_EXPECT_EQ(st.qid_type, QTFILE,       "ctl is QTFILE");
     spoor_unref(ctl);
 
     struct Spoor *status = walk_one(piddir, "status");
     TEST_ASSERT(status != NULL, "walk to status");
     TEST_EXPECT_EQ(devproc.stat_native(status, &st), 0, "stat_native(status) ok");
-    TEST_EXPECT_EQ(st.mode, (u32)0444u, "status mode = 0444 (world-readable)");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0444u),
+                   "status mode = S_IFREG|0444 (world-readable)");
     spoor_unref(status);
+
+    // The FILE-TYPE bits (V-4b-5). S_ISDIR/S_ISREG read S_IFMT alone, so a bare
+    // 0555 left a pid dir classified as no-type -- and every POSIX walker that
+    // decides whether to descend (find, nftw, a shell glob, Go's IsDir) read it
+    // as not-a-directory and stopped. qid_type already said QTDIR for native
+    // callers; this is the same fact in the shape a ported one reads.
+    TEST_EXPECT_EQ(devproc.stat_native(piddir, &st), 0, "stat_native(piddir) ok");
+    TEST_EXPECT_EQ(st.mode & (u32)T_S_IFMT, (u32)T_S_IFDIR,
+                   "pid dir S_IFMT = S_IFDIR (S_ISDIR is true)");
+    TEST_EXPECT_EQ(st.mode & ~(u32)T_S_IFMT, (u32)0555u, "pid dir perms = 0555");
+    TEST_EXPECT_EQ(st.qid_type, QTDIR,        "pid dir is QTDIR");
     spoor_unref(piddir);
 
     // The apex has no per-Proc owner, but it IS a directory and must STAT as
@@ -762,10 +777,30 @@ void test_devproc_stat_native_ctl_owner(void) {
     TEST_EXPECT_EQ(devproc.stat_native(root2, &st), 0,
                    "stat_native(dev apex) ok (it is a real directory)");
     TEST_EXPECT_EQ(st.qid_type, QTDIR,          "apex is QTDIR");
-    TEST_EXPECT_EQ(st.mode, (u32)0555u,         "apex mode = 0555 (world-searchable)");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFDIR | 0555u),
+                   "apex mode = S_IFDIR|0555 (world-searchable)");
     TEST_EXPECT_EQ(st.uid, (u32)PRINCIPAL_SYSTEM, "apex uid = SYSTEM");
     TEST_EXPECT_EQ(st.gid, (u32)GID_SYSTEM,       "apex gid = SYSTEM");
     spoor_unref(root2);
+
+    // Leading zeros do NOT name a Proc (V-4b-5), Linux's own rule
+    // (fs/proc/base.c::name_to_int). Without it one Proc answers to unboundedly
+    // many names, so the pid -> name map stops being injective and native /proc
+    // disagrees with the diorama (whose parse_pid already rejects them) about
+    // whether a path exists. "0" itself stays legal -- kproc is pid 0.
+    struct Spoor *root3 = devproc.attach("");
+    TEST_ASSERT(root3 != NULL, "attach for the leading-zero probe");
+    char padded[16];
+    padded[0] = '0';
+    for (int i = 0; i <= pn; i++) padded[1 + i] = pidstr[i];   // "0" + pid + NUL
+    struct Spoor *bogus = walk_one(root3, padded);
+    TEST_EXPECT_EQ(bogus, NULL, "walk to a zero-padded pid is a miss");
+    if (bogus) spoor_unref(bogus);
+    // ... and the un-padded spelling still resolves, so the reject is narrow.
+    struct Spoor *plain = walk_one(root3, pidstr);
+    TEST_ASSERT(plain != NULL, "the un-padded pid still walks");
+    spoor_unref(plain);
+    spoor_unref(root3);
 
     proc_test_unlink(tgt);
     tgt->state = PROC_STATE_ZOMBIE;

@@ -27,6 +27,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF* (devctl_stat_native)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -545,6 +546,53 @@ static int devctl_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
+// SYS_FSTAT / SYS_STAT surface (VIVARIUM V-4b-5). /ctl had no stat_native at
+// all, so spoor_stat_native returned -1 -> EIO for stat("/ctl") AND for fstat
+// on every open /ctl fd -- and, because musl's realpath() walks each path
+// prefix and treats any errno but EINVAL as fatal, EIO on the directory broke
+// realpath() for every path underneath it too. The apex is a real directory and
+// the leaves are real files; say so.
+//
+// SIZE IS DELIBERATELY 0 for the leaves, and that is not laziness. Every /ctl
+// file is generated at read time from live state -- the process table, the
+// buddy free lists, the per-CPU meters -- so any length measured here is
+// already stale when the read runs, and a caller that trusted it (fstat, then
+// malloc, then one read of exactly that many bytes) would silently truncate a
+// growing table. Linux reports 0 for /proc/meminfo and friends for exactly this
+// reason, and the world's readers loop to EOF. devhw and devpci DO report real
+// sizes, and correctly: their content is a static DTB property or a PCI config
+// register, which does not move between the stat and the read.
+//
+// Not an authority: devctl.perm_enforced is false, so no gate consults this
+// mode. It DOCUMENTS the gates that live at the read sites -- kernel-base is
+// 0400 because devctl_kernel_base_readable requires CAP_HOSTOWNER (#57a F1: it
+// discloses the live KASLR slide, an I-16 secret), so advertising it 0444 would
+// have the mode lie about a file the caller cannot in fact read.
+static int devctl_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+
+    out->qid_path = c->qid.path;
+    out->nlink    = 1;
+    out->blksize  = 4096;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+
+    if (c->qid.path == CTL_QID_ROOT_PATH) {
+        out->mode     = T_S_IFDIR | 0555u;
+        out->qid_type = QTDIR;
+        return 0;
+    }
+
+    u32 kind = (u32)c->qid.path;
+    if (!leaf_for_kind(kind)) return -1;        // a qid this Dev does not serve
+
+    out->mode     = T_S_IFREG |
+                    ((kind == CTL_KIND_KERNEL_BASE) ? 0400u : 0444u);
+    out->qid_type = QTFILE;
+    return 0;
+}
+
 static struct Spoor *devctl_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
@@ -643,6 +691,7 @@ struct Dev devctl = {
     .attach   = devctl_attach,
     .walk     = devctl_walk,
     .stat     = devctl_stat,
+    .stat_native = devctl_stat_native,   // V-4b-5: stat("/ctl") + fstat on a /ctl fd
 
     .open     = devctl_open,
     .create   = devctl_create,

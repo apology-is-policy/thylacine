@@ -120,7 +120,10 @@ Two details that are not obvious:
   `/proc/<pid>` — not by a table this server keeps. That makes a dead or
   never-existent pid an honest `ENOENT`, which is how every Linux consumer detects
   that a process is gone. `parse_pid` also refuses leading zeros (Linux ENOENTs
-  `/proc/01`), so one Proc never gets two names.
+  `/proc/01`), so one Proc never gets two names. **Native devproc used to accept
+  them**, so the two renderings of one system disagreed about which paths exist —
+  a §6.2 coherence break, closed at V-4b-5 by teaching `parse_decimal` the same
+  rule. The diorama's side was right all along and did not change.
 - **`status` gets its ids from two different places on purpose.** `/self` uses the
   kernel-stamped `srv_peer_info` — unforgeable, no parse, and the V-4a-0b
   mechanism this server's identity story rests on. A per-pid read has no such

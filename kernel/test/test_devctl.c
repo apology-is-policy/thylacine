@@ -8,6 +8,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF*
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -24,6 +25,7 @@ void test_devctl_read_sched_format(void);
 void test_devctl_read_cpu_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
+void test_devctl_stat_native_shapes(void);
 
 // =============================================================================
 // Helpers.
@@ -262,4 +264,48 @@ void test_devctl_read_dir_returns_neg1(void) {
                    "directory read returns -1 (readdir deferred)");
 
     spoor_clunk(root);
+}
+
+// stat_native: the apex is a directory, the leaves are regular files, and the
+// FILE-TYPE bits are present (VIVARIUM V-4b-5). /ctl had no stat_native at all,
+// so spoor_stat_native returned -1 -> EIO for stat("/ctl") AND for realpath()
+// of anything under it (musl's resolver walks each prefix and treats any errno
+// but EINVAL as fatal).
+void test_devctl_stat_native_shapes(void) {
+    struct t_stat st;
+
+    struct Spoor *root = devctl.attach("");
+    TEST_ASSERT(root != NULL, "attach /ctl");
+    TEST_ASSERT(devctl.stat_native != NULL, "/ctl has a stat_native slot");
+    TEST_EXPECT_EQ(devctl.stat_native(root, &st), 0, "stat_native(/ctl) ok");
+    TEST_EXPECT_EQ(st.mode & (u32)T_S_IFMT, (u32)T_S_IFDIR,
+                   "/ctl S_IFMT = S_IFDIR (S_ISDIR is true)");
+    TEST_EXPECT_EQ(st.mode & ~(u32)T_S_IFMT, (u32)0555u, "/ctl perms = 0555");
+    TEST_EXPECT_EQ(st.qid_type, QTDIR,            "/ctl is QTDIR");
+    TEST_EXPECT_EQ(st.uid, (u32)PRINCIPAL_SYSTEM, "/ctl uid = SYSTEM");
+    TEST_EXPECT_EQ(st.gid, (u32)GID_SYSTEM,       "/ctl gid = SYSTEM");
+    spoor_unref(root);
+
+    struct Spoor *procs = open_ctl_leaf("procs");
+    TEST_ASSERT(procs != NULL, "open /ctl/procs");
+    TEST_EXPECT_EQ(devctl.stat_native(procs, &st), 0, "stat_native(procs) ok");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0444u), "procs = S_IFREG|0444");
+    TEST_EXPECT_EQ(st.qid_type, QTFILE,               "procs is QTFILE");
+    // Generated at read time from the live process table, so no size can be
+    // promised in advance -- a caller that fstat'd, malloc'd, and read exactly
+    // that many bytes would truncate a table that grew in between. Linux
+    // reports 0 for /proc/meminfo for the same reason.
+    TEST_EXPECT_EQ(st.size, (u64)0, "a generated report advertises no size");
+    spoor_clunk(procs);
+
+    // The mode DOCUMENTS the read-site gate: kernel-base needs CAP_HOSTOWNER
+    // (#57a F1 -- it discloses the live KASLR slide), so advertising it
+    // world-readable would have the mode lie about a file most callers cannot
+    // in fact read.
+    struct Spoor *kb = open_ctl_leaf("kernel-base");
+    TEST_ASSERT(kb != NULL, "open /ctl/kernel-base");
+    TEST_EXPECT_EQ(devctl.stat_native(kb, &st), 0, "stat_native(kernel-base) ok");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0400u),
+                   "kernel-base = S_IFREG|0400 (the CAP_HOSTOWNER gate, stated)");
+    spoor_clunk(kb);
 }

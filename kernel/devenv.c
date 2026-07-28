@@ -135,6 +135,18 @@ static struct Walkqid *devenv_walk(struct Spoor *c, struct Spoor *nc,
         if (!cur) { walkqid_free(wq); return NULL; }
     }
 
+    // Stamp the CALLING Proc's Env device number (V-4b-5). Every other Dev's qid
+    // namespace is global, so its Spoors can carry the static devno 0 and
+    // (devno, qid.path) still names one file tree-wide. devenv's is PER-PROC --
+    // entry ids restart at 1 in every Env -- so without this two Procs' unrelated
+    // variables both report (0, 1) and claim to be the same file. That is not
+    // only a wrong `fstat`: the REVENANT Image cache is keyed on exactly that
+    // pair, so an exec of an /env path would serve one Proc the cached text of
+    // another Proc's variable, which is an I-1 leak. `spoor_stat_native` reports
+    // whatever the Spoor carries (the #100 stamp), so the value has to land here
+    // rather than in stat_native, which cannot outlive that overwrite.
+    cur->devno = env_devno(p);
+
     int n = 0;
     for (int i = 0; i < nname; i++) {
         struct Qid next;
@@ -151,6 +163,53 @@ static struct Walkqid *devenv_walk(struct Spoor *c, struct Spoor *nc,
 static int devenv_stat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
     return -1;
+}
+
+// SYS_FSTAT / SYS_STAT surface (VIVARIUM V-4b-5). /env had no stat_native at
+// all, so spoor_stat_native returned -1 -> EIO for stat("/env"), for fstat on
+// every open /env/NAME fd, and -- since musl's realpath() walks each prefix and
+// treats any errno but EINVAL as fatal -- for realpath() of anything beneath it.
+//
+// UNLIKE /ctl, the SIZE HERE IS REAL. An /env entry is a stored byte string with
+// a definite length, not a report generated at read time, so a caller that
+// fstats and then reads that many bytes gets exactly the value. That also makes
+// lseek(SEEK_END) work, which is the same question asked through a different
+// syscall (spoor_stat_native is what services it).
+//
+// OWNER IS THE CALLER, and that is the honest answer rather than a convenient
+// one: /env is per-Proc content behind a global mount, so every op -- walk,
+// read, write, and now stat -- resolves the CALLING Proc's own environment
+// (env_proc()). A Proc statting /env is statting its own, so reporting its own
+// principal as the owner with 0644/0755 says exactly what is true: you may read
+// and write your environment, and nobody else's is reachable from here. (A child
+// that inherits an /env fd across spawn therefore stats against ITS env, not the
+// parent's -- the same rebinding read and write already do.) No authority is
+// claimed: devenv.perm_enforced is false, so no gate consults this mode.
+static int devenv_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    struct Proc *p = env_proc();
+    if (!p) return -1;
+
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    out->qid_path = c->qid.path;
+    out->nlink    = 1;
+    out->blksize  = 4096;
+    out->uid      = p->principal_id;
+    out->gid      = p->primary_gid;
+
+    if (c->qid.path == ENV_QID_ROOT) {
+        out->mode     = T_S_IFDIR | 0755u;
+        out->qid_type = QTDIR;
+        return 0;
+    }
+
+    u64 len = 0;
+    if (!env_size(p, c->qid.path, &len)) return -1;   // gone since walk
+    out->size     = len;
+    out->blocks   = (len + 511u) / 512u;
+    out->mode     = T_S_IFREG | 0644u;
+    out->qid_type = QTFILE;
+    return 0;
 }
 
 static struct Spoor *devenv_open(struct Spoor *c, int omode) {
@@ -298,6 +357,7 @@ struct Dev devenv = {
     .attach   = devenv_attach,
     .walk     = devenv_walk,
     .stat     = devenv_stat,
+    .stat_native = devenv_stat_native,   // V-4b-5: stat("/env") + fstat/SEEK_END on an entry
 
     .open     = devenv_open,
     .create   = devenv_create,

@@ -13,6 +13,7 @@
 #include <thylacine/env.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF*
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -27,6 +28,7 @@ void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
 void test_devenv_walk_reuse_nc(void);
 void test_devenv_walk_read(void);
+void test_devenv_stat_native_shapes(void);
 
 // proc_alloc gives a fresh Proc with a NULL (empty) env; ZOMBIE + proc_free
 // releases it (env_free runs in proc_free). Mirrors test_allowance.c::amk/adrop.
@@ -299,4 +301,77 @@ void test_devenv_walk_read(void) {
     spoor_unref(vf);
     spoor_unref(root);
     env_free(p);  // restore the current Proc to an empty env
+}
+
+// stat_native: /env is a directory, an entry is a regular file with a REAL
+// size, and both are owned by the calling Proc (VIVARIUM V-4b-5). /env had no
+// stat_native at all, so stat("/env"), fstat on an /env fd, and lseek(SEEK_END)
+// all failed -- and realpath() of anything under it with them.
+void test_devenv_stat_native_shapes(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);                              // start from a clean env
+
+    u64 id = env_create(p, "STATVAR", 7);
+    TEST_ASSERT(id != 0, "create STATVAR");
+    TEST_EXPECT_EQ(env_write(p, id, 0, "abcde", 5), (long)5, "write 5 bytes");
+
+    struct t_stat st;
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env");
+    TEST_ASSERT(devenv.stat_native != NULL, "/env has a stat_native slot");
+    TEST_EXPECT_EQ(devenv.stat_native(root, &st), 0, "stat_native(/env) ok");
+    TEST_EXPECT_EQ(st.mode & (u32)T_S_IFMT, (u32)T_S_IFDIR,
+                   "/env S_IFMT = S_IFDIR (S_ISDIR is true)");
+    TEST_EXPECT_EQ(st.mode & ~(u32)T_S_IFMT, (u32)0755u, "/env perms = 0755");
+    TEST_EXPECT_EQ(st.qid_type, QTDIR,          "/env is QTDIR");
+    // Your environment is yours: every devenv op resolves the CALLING Proc's
+    // env, so the owner it reports is the caller, not a system principal.
+    TEST_EXPECT_EQ(st.uid, p->principal_id,     "/env uid = the calling Proc");
+    TEST_EXPECT_EQ(st.gid, p->primary_gid,      "/env gid = the calling Proc");
+
+    const char *names[1] = { "STATVAR" };
+    struct Walkqid *wq = devenv.walk(root, NULL, names, 1);
+    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk /env/STATVAR");
+    struct Spoor *vf = wq->spoor;
+    walkqid_free(wq);
+
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), 0, "stat_native(STATVAR) ok");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0644u), "entry = S_IFREG|0644");
+    TEST_EXPECT_EQ(st.qid_type, QTFILE,               "entry is QTFILE");
+    // UNLIKE a /ctl report, a stored value has a definite length that does not
+    // move between the stat and the read -- so the size is real, and
+    // lseek(SEEK_END) (which is this same call) lands on it.
+    TEST_EXPECT_EQ(st.size, (u64)5, "entry size = the value length");
+    TEST_EXPECT_EQ(env_write(p, id, 5, "fgh", 3), (long)3, "extend to 8 bytes");
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), 0, "re-stat ok");
+    TEST_EXPECT_EQ(st.size, (u64)8, "size tracks the value");
+
+    // The FILE IDENTITY must be unique tree-wide. Every other Dev's qid namespace
+    // is global, so its Spoors carry the static devno 0 and (devno, qid.path)
+    // still names one file; devenv's ids are PER-PROC and restart at 1, so
+    // without a per-Env devno two Procs' unrelated variables both report (0, 1)
+    // and claim to be the same file -- a wrong fstat, and (because the REVENANT
+    // Image cache is keyed on that pair) an exec of an /env path serving one Proc
+    // another's bytes. spoor_stat_native reports the SPOOR's devno (#100), so the
+    // walk is what must stamp it.
+    TEST_ASSERT(env_devno(p) != 0, "a live Env has a device number");
+    TEST_EXPECT_EQ(vf->devno, env_devno(p), "the walked Spoor carries it");
+    struct Proc *q = emk();
+    TEST_ASSERT(q != NULL, "second Proc");
+    TEST_ASSERT(env_create(q, "STATVAR", 7) != 0, "same name in a second env");
+    TEST_ASSERT(env_devno(q) != env_devno(p),
+                "two Procs' envs are different devices (no identity collision)");
+    edrop(q);
+
+    // A variable removed between the walk and the stat reports GONE rather than
+    // another variable's length -- the monotonic-id guarantee, which every
+    // other devenv op already honours.
+    TEST_ASSERT(env_unset(p, "STATVAR", 7), "unset STATVAR");
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), -1, "a stale entry qid -> -1");
+
+    spoor_unref(vf);
+    spoor_unref(root);
+    env_free(p);                              // restore an empty env
 }
