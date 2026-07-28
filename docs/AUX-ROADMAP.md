@@ -1,6 +1,6 @@
 # Aux track roadmap
 
-**As of 2026-07-23. Branch `gfx-4` @ `11ebf755`, clean + pushed (both mirrors).**
+**As of 2026-07-28. Branch `gfx-4` @ `45186b64`, clean + pushed (both mirrors).**
 
 Supersedes the narrow `usr/apps/AUX-ROADMAP.md` (the old userspace-apps-only aux
 agent). This track now owns the graphics arc, the Aurora environment, and — new
