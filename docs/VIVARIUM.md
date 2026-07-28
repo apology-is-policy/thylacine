@@ -386,10 +386,15 @@ Ordinary userspace 9P servers, mounted **into the container's territory only**:
   `sys/kernel/{ostype,osrelease,version,hostname}`. Sourced from the *native*
   `/proc` (devproc) + `/ctl` where they already carry the data.
 - **`/sys`** — minimal: enough for `ldd`, allocator probes, and CPU topology reads.
-- **`/dev`** — Linux-shaped: `null`, `zero`, `full`, `random`, `urandom`, `tty`,
-  `pts/`, `ptmx`, `fd/`, `std{in,out,err}`. Most of these already exist behind
-  Thylacine's `/dev` (devdev) and `/dev/pts` (ptyfs); the diorama is largely a
-  **re-presentation**, not a reimplementation.
+- **`/dev`** — **NOT a diorama tree. Corrected at V-4c; see §6.15.** This bullet
+  originally asked the diorama to present `null`/`zero`/`full`/`random`/`urandom`/
+  `tty`/`pts/`/`ptmx`/`fd/`/`std{in,out,err}` as a "re-presentation, not a
+  reimplementation" — but the diorama is read-only by §6.1, and `/dev/null` is
+  defined by *accepting writes*. Native devdev already serves these correctly, so
+  routing them through a read-only server would break working files. A container's
+  `/dev` is composed by **bind**, in its own territory; the entries devdev lacks
+  land in the phenotype (`ptmx` — already done at PTY-3 — and `fd/`/`std*`) or in
+  `viv` (`tty`, a bind of the container's own pts).
 
 Because each is a per-container mount, `uname`/`hostname`/`meminfo` can differ per
 container **without any namespacing machinery** — the property Linux needed six
@@ -464,9 +469,10 @@ subject to the native gate), `/proc/mounts`, `/proc/sys/kernel/{ostype,osrelease
 version,hostname}`, `/proc/self/{cwd,fd/,environ,auxv}`.
 
 **Tier 3 — `/sys` + `/dev`**: minimal `/sys` (enough for `ldd` + allocator probes +
-CPU topology); Linux-shaped `/dev` is largely a **re-presentation** of what devdev
-and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts/`,
-`ptmx`, `fd/`, `std{in,out,err}`), not a reimplementation.
+CPU topology). **`/dev` was corrected out of the diorama at V-4c (§6.15)**: it is
+composed by bind from the native devdev + ptyfs trees, with the missing Linux
+entries landing in the phenotype or in `viv`, because a read-only server cannot
+serve `/dev/null`.
 
 ### 6.4 Sub-chunks
 
@@ -482,7 +488,7 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4b-5** | **LANDED.** the synthetic-Dev stat family (§6.12): `stat_native` for `/ctl` + `/env`, the POSIX file-type bits on devproc's modes, and the leading-zero pid reject that restores native-vs-diorama coherence | the prover stats `/ctl` + `/env` as directories in-guest, `S_ISDIR("/proc/<pid>")` is true, `realpath("/ctl/./procs")` canonicalizes, and a zero-padded pid does not resolve |
 | **V-4b-6** | **LANDED.** `/self/environ` (§6.13): a new kernel source `/proc/<pid>/environ` rendering the Env as Linux's NUL-separated block — offset-aware, and the first devproc info file to carry a real read gate | the prover sets a variable in its own `/env` and reads the record back through the diorama in-guest; the per-pid variant is proven ABSENT (the cross-principal leak) |
 | **V-4b** | **CLOSED.** the rest of Tier 2 (`self/{fd,auxv}`) is dispositioned, not built: `auxv` **weighed and deliberately not built** (§6.14 — zero live readers, and a `viv`-launched binary gets its auxv on the stack by construction); `fd` **blocked on #66c**, the #926 handle-table lifetime restructure, which is a kernel chunk and not a Vivarium one | both dispositions recorded with evidence + a named trigger; neither is a silent omission |
-| **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property — now including §6.13's **deputy-authority** half (a proxy must not be allowed where its client would be denied) — and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5/6 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
+| **V-4c** | **RESCOPED by §6.15** (scripture-first, no code written): `/dev` is *not* a diorama tree — a read-only server cannot serve `/dev/null`, and native devdev already serves it correctly — so V-4c is a minimal `/sys` + the per-container mount wiring (now the substantive half, since bind is the answer for `/dev` as well as the delivery for `/proc`) + the two Tier-1 stragglers `cpuinfo`/`stat`, each only partly sourced + the focused audit | audit close on the §6.2 no-new-authority property — now including §6.13's **deputy-authority** half (a proxy must not be allowed where its client would be denied) — and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5/6 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
 work. It is *almost* pure userspace: see §6.5 for the one kernel prerequisite the
@@ -943,6 +949,93 @@ kernel still holds — `AT_PAGESZ`, `AT_HWCAP` from `g_hw_features.linux_hwcap`,
 is not a stale answer, it is a wrong one, and a consumer dereferences `AT_RANDOM`.
 §6.7 already ranks an invented answer as worse than an absent one; this is that
 rule with a segfault attached.
+
+### 6.15 `/dev` is not a diorama tree (V-4c, scripture-first)
+
+Ground-truthing Tier 3 before writing it — the discipline §6.7 exists to enforce —
+found that **§6's third bullet contradicts §6.1**, and that the contradiction is
+not close. This section corrects it. No code was written first; that is the point
+of the pattern.
+
+**The collision.** §6.1 makes the diorama read-only — `h_write` returns `E_PERM`
+for every file, unconditionally (`server.rs`, the `P9_TWRITE` arm) — and calls
+that decision load-bearing, because it "removes most of the surface a `/proc`
+would otherwise carry". §6's `/dev` bullet then asks the same server to present
+`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts/`, `ptmx`. But
+**`/dev/null` is *defined* by accepting writes.** So is `/dev/tty`, and so is
+`/dev/ptmx`. A read-only `/dev/null` is not a compatibility shim for `/dev/null`;
+it is a file that silently fails the one operation it exists for.
+
+**And it would be a downgrade, not a win.** Native devdev already implements these
+correctly: `devdev_write` consumes for `NULL`/`ZERO`/`RANDOM`/`URANDOM` and
+*fails* for `FULL`, which is the right Linux shape (the errno is the generic `-1`
+rather than `ENOSPC` — a real but much smaller gap, and one that belongs to
+devdev). Routing them through the diorama would take files that work today and
+break them. That generalizes past this arc, so it is worth stating as a rule
+beside §6.2's:
+
+> **A re-presentation that loses a capability the native tree already has is a
+> downgrade wearing a compatibility label.** §6.2 forbids the diorama from
+> serving *more* than the native surface would. This is the other edge: do not
+> route a file through the diorama that the native tree already serves *better*.
+
+**The composition mechanism already exists, and it is the Thylacine one.** A
+container's `/dev` is assembled by **bind**, in the container's own territory —
+which is what `viv` does at V-7 and what joey already does at boot. Per-container
+divergence needs no server: it is the same property §6 claims for `uname`, gotten
+the same way. Interposing a 9P server buys nothing and costs a hop.
+
+**The residue resolves without the diorama too** — each of the entries native
+`/dev` lacks lands somewhere that already owns the question:
+
+| Missing entry | Where it belongs | Why |
+|---|---|---|
+| `/dev/ptmx` | **already done**, in the phenotype (PTY-3) | `0021-pouch-pty.patch` redirects `posix_openpt`/`openpty` to `/dev/pts/ptmx`, and says so in its own words: "`/dev/ptmx` is a compat symlink Thylacine cannot provide". That is §6.11's shape-in-the-phenotype pattern, landed before it was named. |
+| `/dev/std{in,out,err}`, `/dev/fd/N` | the phenotype | `open("/dev/fd/N")` is `dup(N)`. No kernel and no server. Honest caveat to record with it: Linux *reopens* the underlying file (fresh flags, independent offset) where `dup` shares the offset — right for the common `cmd < /dev/fd/3` / `cmd > /dev/stderr` uses, and the same simplification the BSDs' fdescfs makes. |
+| `/dev/tty` | `viv` (V-7), as a bind | The controlling terminal is already kernel state — `ct_sid` on the pts entry (PTY-1d). A container's `/dev/tty` is a bind of its own pts slave, decided when `viv` builds the territory, not rendered by a server that would have to guess which terminal the *caller* controls. |
+
+**So V-4c's scope is smaller and better than specced**: a minimal `/sys`, and the
+per-container mount wiring — which this finding promotes from an afterthought to
+the substantive half, since binding is now the answer for `/dev` as well as the
+delivery mechanism for `/proc`.
+
+**`/sys`, ground-truthed the same way**, is thin: the entire tree contains exactly
+one `/sys` path — SDL2's `SDL_GetCPUCacheLineSize` reading
+`/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size` — and it is a
+*soft* read: `SDL_CACHELINE_SIZE` (128) is assigned first and the file only
+overrides it, so a failed `fopen` is entirely benign. That does not make `/sys`
+worthless (a compat surface's consumers are foreign by definition — §6.14's
+caveat), but it does mean it is a small, low-risk tree serving `devices/system/cpu/`
+topology, not a project.
+
+**And the same pass found two Tier-1 stragglers.** §6.3 lists `/proc/cpuinfo` and
+`/proc/stat` under *Tier 1 — has a consumer TODAY*, and neither has ever been
+served; the V-4a/V-4b sub-chunks quietly carried them as "deferred with their
+kernel prerequisites". Ground-truthed now, two things are true at once, and both
+matter:
+
+* **The "consumer TODAY" claim does not survive a grep.** The only in-tree
+  `/proc/cpuinfo` readers are libsodium's `config.guess` (a *host* build script)
+  and SDL2's `__ANDROID__` branch; `/proc/stat` appears only in PROWL-DESIGN.md,
+  describing what Linux's htop does. So the tier assignment was made from what
+  Linux programs typically read rather than from this tree — the same gap §6.14
+  found for `auxv`. (It becomes live the moment a `./configure` runs in-guest,
+  which the Clade arc's on-device toolchain makes a real V-8 scenario.)
+* **Both are only *partly* sourceable, and the unsourced fields are the
+  interesting part.** `cpuinfo`'s processor count comes from `/ctl/cpu` and its
+  `Features` line is `AT_HWCAP`, but `CPU implementer`/`part`/`variant`/`revision`
+  come from `MIDR_EL1`, which **EL0 cannot read at all** — an EL0 `mrs midr_el1`
+  is `snare:ill`, which is the same reason `AT_HWCAP` must never advertise
+  `hwcap_CPUID`. `/proc/stat`'s `cpu`/`cpuN` idle columns come from `/ctl/cpu`'s
+  per-CPU `idle_ns` and `btime` from `uptime` + `CLOCK_REALTIME`, but `ctxt`,
+  `intr` and `processes` have no native source whatsoever.
+
+  So each raises §6.7's question per *field* rather than per *file*, and it has a
+  third answer neither §6.7 nor §6.9 covers yet: a Linux consumer parses these
+  line-by-line, so **omitting** a line and **fabricating** one are different
+  failures, and "report 0" is fabrication with a plausible face. Deciding that —
+  omit, or give the kernel a source — is V-4c's real design work on these two,
+  and it is deliberately not being decided here alongside the `/dev` correction.
 
 ---
 

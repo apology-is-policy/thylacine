@@ -456,7 +456,14 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 8. READ-ONLY: opening any diorama file for write must be refused. This is
     //    the property that keeps the whole surface small, so it is worth a gate.
-    const T_OWRITE: u32 = 1;
+    //    Uses the imported T_OWRITE, deliberately: this leg used to redeclare it
+    //    as a function-scope `const`, and Rust scopes block items over the WHOLE
+    //    block rather than from their declaration onward -- so that local
+    //    silently captured the name for every earlier use site too, 220 lines
+    //    up, including the V-4b-6 /env create. The values happened to agree
+    //    (both 1), so nothing was wrong; but a shadow that reaches backwards is
+    //    a name whose meaning can be changed by an edit that never touches its
+    //    users. The compiler said so -- "unused import: T_OWRITE" was the tell.
     let w = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/dio/self/exe".as_ptr(), 13, T_OWRITE) };
     if w >= 0 {
         let _ = unsafe { t_close(w) };

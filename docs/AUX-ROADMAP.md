@@ -210,10 +210,42 @@ omission:
 * **`fd` — blocked on #66c**, the #926 handle-table lifetime restructure: a
   kernel chunk, not a Vivarium one. The diorama must not route around it.
 
-**NEXT: V-4c** — Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount
-wiring `viv` consumes at V-7 + the arc's focused audit, which now owes a close on
-§6.13's deputy-authority rule as well as §6.2's no-new-authority property and
-§6.12's file-identity claim.
+**V-4c is RESCOPED before any of it was written** (§6.15, scripture-first —
+the design-conversation pattern, landed as docs with no code). Ground-truthing
+Tier 3 found that **§6's `/dev` bullet contradicts §6.1**: the diorama is
+read-only (`h_write` → `E_PERM`, unconditional), and `/dev/null` is *defined* by
+accepting writes. Native devdev already implements `null`/`zero`/`full`/`random`/
+`urandom` correctly — `/dev/full` even fails writes, the right shape — so routing
+them through the diorama would take files that work today and break them. The
+rule that generalizes, recorded beside §6.2's: **a re-presentation that loses a
+capability the native tree already has is a downgrade wearing a compatibility
+label.**
+
+A container's `/dev` is composed by **bind**, in its own territory — the same
+mechanism `viv` uses at V-7 and joey already uses at boot. The entries devdev
+lacks land where the question already lives: `/dev/ptmx` is **already done** in
+the phenotype (PTY-3's redirect, whose patch says in its own words that
+"`/dev/ptmx` is a compat symlink Thylacine cannot provide"); `/dev/std{in,out,err}`
+and `/dev/fd/N` are `dup(N)` at the boundary-line; `/dev/tty` is a bind of the
+container's own pts, which `viv` knows and a server would have to guess.
+
+So **V-4c = a minimal `/sys` + the per-container mount wiring** (promoted from
+afterthought to the substantive half) **+ the two Tier-1 stragglers** `cpuinfo`
+and `stat` **+ the arc's focused audit**, which owes a close on §6.13's
+deputy-authority rule as well as §6.2's no-new-authority property and §6.12's
+file-identity claim.
+
+Two supporting findings, both from the same grep pass:
+
+* `/sys` is thin — the entire tree holds exactly **one** `/sys` path (SDL2's
+  cache-line-size read), and it is a *soft* read whose failure is benign.
+* `cpuinfo` and `stat` are Tier 1 by §6.3 but have **no in-guest consumer today**
+  (`config.guess` is a host script; SDL2's is the `__ANDROID__` branch), and both
+  are only *partly* sourceable: `MIDR_EL1` is not EL0-readable at all, and
+  `ctxt`/`intr`/`processes` have no native source. That makes them a per-*field*
+  §6.7 question with a third answer the doc did not have: for a line-parsed file,
+  omitting a line and fabricating one are different failures, and "report 0" is
+  fabrication with a plausible face.
 
 **V-1b is merge-ordered, not blocked-forever**: it wants `kernel/exec.c` +
 `kernel/syscall.c`, which CL-4 also touched. Land `clade-cl4-wip` → `main` → then

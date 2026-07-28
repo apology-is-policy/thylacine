@@ -63,8 +63,13 @@
 //   /self/auxv  WEIGHED AND NOT BUILT (section 6.14): zero live readers, and a
 //               viv-launched binary receives its auxv on the stack by
 //               construction, since ld.so bootstraps out of AT_PHDR/AT_ENTRY.
-//   /cpuinfo    Tier 3, with /sys (V-4c).
-//   /stat       Tier 3.
+//   /cpuinfo    Tier 1 by section 6.3, but only PARTLY sourced: ncpus comes from
+//               /ctl/cpu, while MIDR (implementer/part/variant/revision) is not
+//               EL0-readable at all -- an EL0 `mrs midr_el1` is snare:ill, which
+//               is also why AT_HWCAP must never set hwcap_CPUID. V-4c.
+//   /stat       Tier 1 by section 6.3, same shape: the cpu/cpuN idle columns come
+//               from /ctl/cpu and btime from uptime + REALTIME, but ctxt, intr
+//               and processes have no native source at all. V-4c.
 
 use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
