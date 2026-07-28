@@ -42,6 +42,9 @@ set qmp "$repo/build/qmp.sock"
 set hostq "$repo/build/quake/host/tyr-quake"
 set basedir "$repo/build/quake/stage"
 set dedlog "$repo/build/ls-gfx-mp-server.log"
+# #89: the stdin-keeper's follow target. A tree-scoped path rather than
+# /dev/null PURELY so teardown can name it -- see mp_server_stop.
+set stdinkeep "$repo/build/ls-gfx-mp-stdin-keep"
 
 if {![file executable $hostq]} {
     puts "LS-CI SKIP: host server absent ($hostq) -- run tools/build.sh quake-host"
@@ -54,9 +57,15 @@ if {![file executable $hostq]} {
 # via script(1) line-buffers the server output; held-open stdin keeps the
 # dedicated console alive. Torn down on EVERY exit path by the hook below.
 proc mp_server_start {} {
-    global hostq basedir dedlog
+    global hostq basedir dedlog stdinkeep
     file delete -force $dedlog
-    exec sh -c "tail -f /dev/null | script -q $dedlog $hostq -dedicated 2 -basedir $basedir +sys_ticrate 10 +map e1m1 >/dev/null 2>&1 &"
+    # The keeper follows an empty tree-scoped file instead of /dev/null: both
+    # block forever emitting nothing (tail -f parks at EOF either way), but
+    # only this one gives teardown a pattern that cannot name a bystander.
+    # It must EXIST first -- `tail -f` on a missing path errors out and exits
+    # (that is -F's job, not -f's), which would EOF the server console.
+    close [open $stdinkeep w]
+    exec sh -c "tail -f $stdinkeep | script -q $dedlog $hostq -dedicated 2 -basedir $basedir +sys_ticrate 10 +map e1m1 >/dev/null 2>&1 &"
     for {set i 0} {$i < 50} {incr i} {
         if {[file exists $dedlog] && ![catch {exec grep -a -q "Quake Initialized" $dedlog}]} {
             return 1
@@ -65,9 +74,21 @@ proc mp_server_start {} {
     }
     return 0
 }
+# #89: both patterns name THIS tree by absolute path. The old forms were
+# `tyr-quake -dedicated` (matches any worktree's server) and, far worse,
+# `tail -f /dev/null` -- HOST-WIDE. That idiom is a generic stdin-keeper /
+# keepalive, so the old teardown could kill a bystander that had nothing to do
+# with Thylacine, and a sibling worktree's run for certain (the #59 class:
+# two trees gating concurrently shot each other's processes).
+#
+# Scoped patterns rather than a pidfile ON PURPOSE: a pidfile left behind by a
+# crashed run names a pid the OS has since recycled, so teardown would kill an
+# arbitrary innocent process -- reintroducing exactly this bug class in a form
+# that is harder to see. A path-derived pattern cannot go stale.
 proc mp_server_stop {} {
-    catch {exec pkill -f "tyr-quake -dedicated"}
-    catch {exec pkill -f "tail -f /dev/null"}
+    global hostq stdinkeep
+    catch {exec pkill -f "$hostq -dedicated"}
+    catch {exec pkill -f "tail -f $stdinkeep"}
 }
 rename exit __mp_real_exit
 proc exit {{code 0}} {
