@@ -69,6 +69,112 @@ if [[ ! -f "$POOL" ]]; then
     "$REPO_ROOT/tools/build.sh" pool
 fi
 
+# --- #85: per-attempt pool isolation ------------------------------------------
+# Every scenario boots against the SAME pool.img and MUTATES it, and nothing ever
+# reset it -- so the fixture carried whatever the previous 31 scenarios left
+# behind. That is the worst property a test fixture can have, because it fails in
+# BOTH directions:
+#   #82: a FAILED ls-gfx-mode leaves `mode 1600 900` in /lib/aurora/config, and
+#        every later boot inherits a 1600x900 display -- breaking geometry
+#        asserts in scenarios that do not heal (ls-gfx-panes does not). A false
+#        RED, blamed on a merge for a day.
+#   #83: a config.cfg written by some earlier run satisfied ls-gfx-play's
+#        assertion trivially, so the leg kept passing for five days after the
+#        path it was asserting stopped being written. A false GREEN -- it MASKED
+#        a real failure, which is strictly worse.
+# Measured contamination at the time of writing: the live pool differed from
+# pristine in 73,911,951 bytes.
+#
+# The machinery already existed and LS-CI was simply the one gate not using it:
+# build.sh maintains `.baked-snapshot` twins, and both smp-multiboot.sh and
+# chase-bench.sh already restore from them before every boot. cp -c is an APFS
+# clonefile; falls back to a plain copy off APFS.
+#
+# COST, measured on the real shape (2.5 GB image, ~70 MiB divergence, restoring
+# over an EXISTING destination): ~30 ms, flat across repetitions. Note that a
+# clone to a FRESH path is ~2 ms -- the extra cost is unlinking the old file, so
+# do not quote the 2 ms figure for this path. A full 32-scenario gate does <=96
+# restores = ~3 s against a run measured in tens of minutes. Space is near-free
+# (CoW, and only ONE divergence is live at a time -- each restore frees the last).
+#
+# Scope is the ATTEMPT, not the scenario. An attempt is a full re-run from the
+# top, so a failed attempt's mutations must not poison its own retry (exactly
+# #82's shape). A scenario's own multiple boots live INSIDE one attempt --
+# ls-gfx-mode/-font/-osd-persist deliberately persist state in boot 1 and read it
+# back in boot 2 -- so they are untouched by construction.
+#
+# The key twin is validated coherent before restoring: the ramfs bakes the key,
+# so ONLY the pool matching the live key may be restored. LS_CI_POOL_RESTORE=0
+# opts out (e.g. to reproduce a contamination bug deliberately).
+POOL_SNAP="$POOL.baked-snapshot"
+KEYFILE="$BUILD_DIR/fixtures/system.key"
+KEY_SNAP="$KEYFILE.baked-snapshot"
+pool_restored=0
+pool_restore() {
+    [[ "${LS_CI_POOL_RESTORE:-1}" == "0" ]] && return 0
+    [[ -f "$POOL_SNAP" && -f "$POOL" ]] || return 0
+    if ! cmp -s "$KEYFILE" "$KEY_SNAP" 2>/dev/null; then
+        [[ $pool_restored -eq 0 ]] && echo "    (pool restore SKIPPED: system.key does not match its snapshot -- stale twins? re-run tools/build.sh pool)" >&2
+        pool_restored=-1
+        return 0
+    fi
+    # A restore that fails part-way leaves a TRUNCATED pool, and booting on it
+    # would surface as guest corruption -- the #74/#60 fail-open shape, where
+    # the harness's own fault gets read as a Thylacine defect. Refuse to boot on
+    # a fixture whose state we do not know.
+    if ! { cp -c "$POOL_SNAP" "$POOL" 2>/dev/null || cp "$POOL_SNAP" "$POOL"; }; then
+        echo "==> FATAL: pool restore failed -- $POOL may be partial/truncated." >&2
+        echo "    Refusing to boot on an unknown fixture (it would read as guest corruption)." >&2
+        echo "    Check free space, or re-run 'tools/build.sh pool'." >&2
+        exit 1
+    fi
+    pool_restored=1
+}
+if [[ ! -f "$POOL_SNAP" ]]; then
+    echo "==> NOTE: no pool snapshot ($POOL_SNAP) -- scenarios will share a mutable pool (#85)." >&2
+    echo "    Re-run 'tools/build.sh pool' to mint the pristine twin." >&2
+fi
+
+# build/disk.img is the SECOND shared mutable fixture (the virtio-blk scratch
+# device), and it carries a masking hazard of its own -- #87. usr/virtio-blk-rw
+# runs every boot as pass A read-verify / pass B write / pass C read-back, and
+# pass C is the only proof the write landed. On a FRESH disk the write region
+# holds pattern A, so a silently-dropped pass B makes pass C read A != B and
+# FAIL. On a REUSED disk the region already holds pattern B from the last boot,
+# so the same dropped write reads a stale B and PASSES. Reusing the fixture
+# therefore disarms the write proof -- #83's stale-artifact class again.
+#
+# Restoring per attempt makes every LS-CI boot a "boot 1", so the leg can fail
+# again here. It is a MITIGATION, not the fix: test.sh and smp-multiboot.sh
+# share the same fixture and stay exposed until #87's guest-side fresh-pattern
+# fix lands. Unlike the pool there is no build.sh-maintained twin, so mint one
+# with mkdisk.py (deterministic, ~0.45 s, once) and clone from it thereafter.
+DISK="$BUILD_DIR/disk.img"
+DISK_SNAP="$DISK.pristine"
+disk_restore() {
+    [[ "${LS_CI_POOL_RESTORE:-1}" == "0" ]] && return 0
+    [[ -f "$DISK" ]] || return 0
+    local want have
+    want="$(wc -c < "$DISK" | tr -d ' ')"
+    have="$([[ -f "$DISK_SNAP" ]] && wc -c < "$DISK_SNAP" | tr -d ' ' || echo 0)"
+    # Mint (or re-mint on a size change -- THYLACINE_DISK_SIZE varies for the
+    # 1 GiB stress config, and a wrong-sized twin would silently resize the
+    # device under the guest).
+    if [[ "$want" != "$have" ]]; then
+        command -v python3 >/dev/null 2>&1 || return 0
+        python3 "$REPO_ROOT/tools/mkdisk.py" "$DISK_SNAP" "$want" >/dev/null 2>&1 || return 0
+    fi
+    # Same fail-closed rule as the pool: a partial disk.img would fail the
+    # boot's pattern-A verify and read as a guest defect. A MISSING python3 is
+    # different -- that degrades silently to the shared fixture above, which is
+    # merely the old behaviour, not an unknown one.
+    if ! { cp -c "$DISK_SNAP" "$DISK" 2>/dev/null || cp "$DISK_SNAP" "$DISK"; }; then
+        echo "==> FATAL: disk restore failed -- $DISK may be partial/truncated." >&2
+        echo "    Refusing to boot on an unknown fixture (it would read as guest corruption)." >&2
+        exit 1
+    fi
+}
+
 # --- relay preflight (host-only, ~4s, no QEMU) ---
 # serial-bridge.py is the carrier EVERY scenario below depends on, and its two
 # load-bearing properties (never back-pressure the guest; emit a DISCRIMINATING
@@ -108,7 +214,14 @@ if [[ ${#scenarios[@]} -eq 0 ]]; then
 fi
 
 mkdir -p "$BUILD_DIR"
-echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS_CI_BOOT_TIMEOUT}s cmd<=${LS_CI_CMD_TIMEOUT}s"
+if [[ "${LS_CI_POOL_RESTORE:-1}" == "0" ]]; then
+    pool_iso="pool=SHARED (LS_CI_POOL_RESTORE=0 -- contamination possible, #85)"
+elif [[ -f "$POOL_SNAP" ]]; then
+    pool_iso="pool=per-attempt"
+else
+    pool_iso="pool=SHARED (no snapshot, #85)"
+fi
+echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS_CI_BOOT_TIMEOUT}s cmd<=${LS_CI_CMD_TIMEOUT}s $pool_iso"
 
 # Bounded retry per scenario. It does NOT mask a real regression: a genuine
 # break (e.g. LS-2 reverted) fails EVERY attempt deterministically (the output is
@@ -151,6 +264,11 @@ for scen in "${scenarios[@]}"; do
         : > "$steps"
         reap_qemu
         sleep 0.5
+        # #85: pristine fixtures for this attempt. STRICTLY after reap_qemu +
+        # the settle -- overwriting an image out from under a live VM is how you
+        # manufacture the corruption this gate exists to detect.
+        pool_restore
+        disk_restore   # the virtio-blk scratch device (#87 masking)
         # Run expect UNDER `script` so its stdio is a real PTY. macOS expect 5.45
         # corrupts its own std channels inside `spawn` when its stdout is NOT a tty
         # (a `>file` redirect OR a pipe) -- it aborts with "Tcl_RegisterChannel:

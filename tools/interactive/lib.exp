@@ -19,6 +19,27 @@
 # that cannot appear in the typed line anyway -- a `tr a-z A-Z` upper-cased token,
 # or a `cat: ` stderr prefix.
 #
+# Persistent-state discipline (#85 -- read this before writing a scenario that
+# writes to the pool). Every scenario boots against build/fixtures/pool.img and
+# MUTATES it. Since #85 the harness restores a pristine clone before every
+# ATTEMPT, so contamination no longer crosses scenario boundaries -- but two
+# rules still bind, because the restore is per-attempt, not per-boot:
+#
+#   1. HEAL AT START, never only at END. `lc_fail` is an `exit` -- no
+#      end-of-scenario cleanup EVER runs on the failing path, which is precisely
+#      how a failed ls-gfx-mode left `mode 1600 900` behind and broke geometry
+#      asserts in every later boot (#82). If your scenario writes persistent
+#      state, delete/normalize it in the FIRST boot before asserting anything.
+#   2. Deleting the target is what makes an assertion mean something. A leg that
+#      asserts "file X exists" without removing X first cannot distinguish "the
+#      mechanism works" from "something wrote this once, long ago" -- ls-gfx-play
+#      passed for five days that way, after the path it asserted had stopped
+#      being written (#83). A stale artifact must not be able to satisfy you.
+#
+# A scenario with its OWN multiple boots (ls-gfx-mode/-font/-osd-persist persist
+# state in boot 1 and read it back in boot 2) is unaffected: the restore fires
+# between attempts, never between a scenario's own boots.
+#
 # Env knobs (set by tools/test-interactive.sh):
 #   LS_CI_BOOT_TIMEOUT  seconds to reach the shell after spawn (default 180)
 #   LS_CI_CMD_TIMEOUT   seconds for a single command's output (default 30)
