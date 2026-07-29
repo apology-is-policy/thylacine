@@ -2387,6 +2387,152 @@ static int probe79_notdir(void) {
     return 0;
 }
 
+// #81 always-run regression: "." and ".." out of a non-directory are ENOTDIR.
+//
+// The kernel test drives an in-file fixture whose qid.type comes from a static
+// table. Only this probe exercises a dev9p tip, whose QTDIR bit came off the 9P
+// wire -- and that is exactly where the RISK of this gate lives: the two
+// directory legs below prove the gate does NOT break real directories on the
+// real filesystem. If dev9p ever stopped stamping QTDIR on a walked directory
+// Spoor, they would fail here while the fixture test stayed green.
+//
+// Self-contained (creates its own file + directory) so it cannot go vacuous if
+// the bake layout changes. Boot-fatal.
+static int probe81_dot_notdir(void) {
+    char nb[24];
+    static const char fn[] = "p81-dot-probe";
+    static const char dn[] = "p81-dot-dir";
+    static const char f_dotdot[] = "/p81-dot-probe/..";
+    static const char f_dot[]    = "/p81-dot-probe/.";
+    static const char d_dotdot[] = "/p81-dot-dir/..";
+    static const char d_dot[]    = "/p81-dot-dir/.";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe81 open root FAILED\n"); return -1; }
+
+    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe81 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(fd);
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        // Boot-fatal, not skipped: without the directory the two regression
+        // legs below would fail for the wrong reason, and the probe would look
+        // like it caught a gate bug when it only caught its own setup.
+        t_putstr("joey: probe81 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(dd);
+
+    // Out of / at a regular FILE -> -T_E_NOTDIR (20). Pre-#81 the first
+    // RESOLVED (popping back to "/") and the second handed the file back.
+    long rc_fdd = t_open(T_WALK_OPEN_FROM_ROOT, f_dotdot, sizeof(f_dotdot) - 1,
+                         T_OPATH);
+    long rc_fd  = t_open(T_WALK_OPEN_FROM_ROOT, f_dot, sizeof(f_dot) - 1,
+                         T_OPATH);
+
+    // The same tokens on a real DIRECTORY must still resolve -- the regression
+    // a too-eager gate would trip, on a dev9p Spoor rather than a fixture one.
+    long rc_ddd = t_open(T_WALK_OPEN_FROM_ROOT, d_dotdot, sizeof(d_dotdot) - 1,
+                         T_OPATH);
+    long rc_dd  = t_open(T_WALK_OPEN_FROM_ROOT, d_dot, sizeof(d_dot) - 1,
+                         T_OPATH);
+    // ".." at the containment floor is still the no-op clamp (I-28): the base
+    // is a directory, so the gate passes and root resolves to itself.
+    long rc_root = t_open(T_WALK_OPEN_FROM_ROOT, "/..", 3, T_OPATH);
+
+    // depth 0 with a FILE as the base -- openat(file_fd, ".."). The '..' clamp
+    // made this invisible before: at depth 0 the pop is a no-op, so both tokens
+    // simply handed the file straight back.
+    long base = t_open(T_WALK_OPEN_FROM_ROOT, fn, sizeof(fn) - 1, T_OPATH);
+    long rc_basedd = (base < 0) ? 1 : t_open(base, "..", 2, T_OPATH);
+    long rc_based  = (base < 0) ? 1 : t_open(base, ".", 1, T_OPATH);
+
+    // The SINGLE-HOP siblings (the gate #80 recorded as owed to #81): walking
+    // or creating a name out of a file fd. These do NOT go through stalk --
+    // sys_walk_open_handler / sys_walk_create_handler resolve one component
+    // directly -- so the resolver gate above cannot cover them.
+    long rc_wo = (base < 0) ? 1 : t_walk_open(base, "x", 1, T_OREAD);
+    long rc_wc = (base < 0) ? 1
+                            : t_walk_create(base, "x", 1, T_OWRITE, 0644u);
+    // Mode-independence, measured rather than assumed: pre-gate the two calls
+    // above answered EACCES because the X-search saw a 0644 file's missing x
+    // bit. On a 0755 file they would have sailed past it and answered ENOENT
+    // instead -- the same situation, two errnos. This leg pins the 0755 half,
+    // so a gate re-ordered behind the permission check fails here.
+    static const char xn[] = "p81-dot-exec";
+    long xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    if (xfd < 0) {
+        (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+        xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    }
+    if (xfd >= 0) (void)t_close(xfd);
+    long xbase = t_open(T_WALK_OPEN_FROM_ROOT, xn, sizeof(xn) - 1, T_OPATH);
+    long rc_xwo = (xbase < 0) ? 1 : t_walk_open(xbase, "x", 1, T_OREAD);
+    if (rc_xwo >= 0) (void)t_close(rc_xwo);
+    if (xbase  >= 0) (void)t_close(xbase);
+    (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+    if (rc_wo >= 0) (void)t_close(rc_wo);
+    if (rc_wc >= 0) (void)t_close(rc_wc);
+
+    if (rc_fdd  >= 0) (void)t_close(rc_fdd);
+    if (rc_fd   >= 0) (void)t_close(rc_fd);
+    if (rc_ddd  >= 0) (void)t_close(rc_ddd);
+    if (rc_dd   >= 0) (void)t_close(rc_dd);
+    if (rc_root >= 0) (void)t_close(rc_root);
+    if (rc_basedd >= 0) (void)t_close(rc_basedd);
+    if (rc_based  >= 0) (void)t_close(rc_based);
+    if (base    >= 0) (void)t_close(base);
+    (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_fdd != -20 || rc_fd != -20 || rc_basedd != -20 || rc_based != -20 ||
+        rc_wo != -20 || rc_wc != -20 || rc_xwo != -20 ||
+        rc_ddd < 0 || rc_dd < 0 || rc_root < 0) {
+        t_putstr("joey: probe81 FAILED walkopen=");
+        t_putstr(itoa_dec(rc_wo, nb, sizeof(nb)));
+        t_putstr(" walkcreate=");
+        t_putstr(itoa_dec(rc_wc, nb, sizeof(nb)));
+        t_putstr(" walkopen0755=");
+        t_putstr(itoa_dec(rc_xwo, nb, sizeof(nb)));
+        t_putstr(" file..=");
+        t_putstr(itoa_dec(rc_fdd, nb, sizeof(nb)));
+        t_putstr(" file.=");
+        t_putstr(itoa_dec(rc_fd, nb, sizeof(nb)));
+        t_putstr(" basefd..=");
+        t_putstr(itoa_dec(rc_basedd, nb, sizeof(nb)));
+        t_putstr(" basefd.=");
+        t_putstr(itoa_dec(rc_based, nb, sizeof(nb)));
+        t_putstr(" (want -20 x4) dir..=");
+        t_putstr(itoa_dec(rc_ddd, nb, sizeof(nb)));
+        t_putstr(" dir.=");
+        t_putstr(itoa_dec(rc_dd, nb, sizeof(nb)));
+        t_putstr(" root..=");
+        t_putstr(itoa_dec(rc_root, nb, sizeof(nb)));
+        t_putstr(" (want >=0 x3)\n");
+        return -1;
+    }
+    t_putstr("joey: probe81 OK ('.'/'..' out of a file -> ENOTDIR, incl. a "
+             "file dirfd + the single-hop walk/create; a real dir + the root "
+             "clamp still resolve)\n");
+    return 0;
+}
+
 // #80 always-run regression: a failed FS name-op reports WHY.
 //
 // The kernel test (dev9p.unlink_rename_errno) drives a synthetic responder, so
@@ -6401,6 +6547,12 @@ int main(void) {
             // the unlink/rename verdict survives, and the kernel-originated
             // rejects are specific. Boot-fatal.
             if (probe80_errno() != 0)
+                return 1;
+
+            // #81 always-run regression: '.'/'..' out of a non-directory are
+            // ENOTDIR -- and, the risk side of that gate, the same tokens on a
+            // real dev9p directory still resolve. Boot-fatal.
+            if (probe81_dot_notdir() != 0)
                 return 1;
 
             // CF-3 A always-run regression: bulk byte-I/O (the two-tier

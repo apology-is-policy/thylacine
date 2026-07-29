@@ -398,7 +398,7 @@ clarity bar there, and the discipline is not to force it.
 
 ## Tests
 
-- `kernel/test/test_stalk.c` -- 12 unit tests against an in-file fixture Dev
+- `kernel/test/test_stalk.c` -- unit tests against an in-file fixture Dev
   (`stalkfix`, a nested qid-based tree, since devramfs is flat): `resolve_multi`,
   `resolve_deep`, `leading_and_double_slash`, `dot_noop`, `dotdot_pop`,
   `dotdot_containment` (cannot escape the base), `xsearch_deny` (a 0644 dir with
@@ -479,14 +479,53 @@ Two properties are deliberate and load-bearing:
   Spoors sets `QTDIR`, and `spoor_clone` copies `qid`, so mount crossings and
   0-element clone-walks preserve directory-ness.
 
-One thing it deliberately does **not** cover:
+### `.` and `..` out of a non-directory (#81, the dot gate)
 
-- `/file/..` and `/file/.`. `stalk` resolves `.` and `..` lexically *before*
-  the gate (that lexical pop is how `..` is contained at `root_spoor`), so
-  `/etc/passwd/..` pops back to `/etc` and succeeds where POSIX answers
-  ENOTDIR. Pre-existing, and gating it means teaching the dot path to consult
-  node types — i.e. touching the containment surface, which wants its own
-  reasoning (task #81).
+> Task numbers are recycled across eras: the "(#81)" at *O_PATH is a navigation
+> base* above is a different, older bug (the `CWALKONLY` byte-I/O block). This
+> section and *The single-hop `qid.type` gate* below are the dot-gate #81.
+
+`.` and `..` are path *components*, so the position they resolve in must be a
+directory too — `/etc/passwd/..` is ENOTDIR, not a lexical pop back to `/etc`.
+`stalk` handles both tokens itself (they never reach `Dev.walk`), so the #79
+gate above — which sits on the real-component path — never saw them, and a
+file tip silently accepted both: `a/b/..` popped back to `a`, `a/b/.` handed
+back `b`. Both now fail `T_E_NOTDIR` via `stalk_tip_is_dir`.
+
+Three properties are deliberate:
+
+- **The type is read UNCROSSED**, unlike the #79 gate (which runs after
+  cross-on-descent). `..` pops a *trail entry*, and the pop lands on
+  `trail[depth-2]` whichever Spoor occupies the tip, so crossing would spend a
+  `clone_walk_zero` to read a type and change nothing. And `.` must leave the
+  resolution exactly where it was: `/mnt/.` has to mean `/mnt`, and under
+  `STALK_MOUNT` `/mnt` deliberately does *not* cross (MREPL re-keys the mount
+  point's own identity) — so crossing on `.` would make `/mnt/.` return the
+  mounted root while `/mnt` returned the mount point, a divergence the gate
+  would be *introducing*. `stalk.dot_notdir_mount` pins exactly that equality.
+  The two types can disagree only for a mount whose point and root differ in
+  kind (a directory grafted onto a file — `mount()` does not gate on type);
+  nothing in-tree builds one.
+- **I-28 is strengthened, not touched.** The gate can only turn a resolution
+  that used to succeed into a failure — it never moves a pop further up — so
+  no path that previously stopped at `start` can now pass it. At depth 0 the
+  subject is `start` itself, so `openat()` on a non-directory fd answers
+  ENOTDIR instead of handing the file back.
+- **There is no "type fetch failed" case.** `qid.type` is a field on every
+  Spoor, so the gate takes no lock, issues no RPC, and cannot itself fail.
+
+Scope, stated precisely because one leg is *not* covered:
+
+| path form | example | gated? |
+|---|---|---|
+| absolute | `open("/a/b/..")` | yes |
+| dirfd-relative | `openat(dirfd, "b/..")` | yes |
+| cwd-relative | `open("b/..")` | **no** — `cwd_lexical_resolve` normalizes the dots away before `stalk` ever sees them (task #83; it is the LS-4 name-based-cwd design, not an oversight) |
+
+A **trailing slash** (`open("/file/")`) is the same family and still resolves;
+it is task #82, kept separate because it needs gates in the POUNCE `STALK_STAT`
+query and FID-LIFECYCLE cached-open early returns, which the dot gate does not
+touch. `..` also does not require X on the directory it pops out of (task #84).
 
 `sys_open_handler`
 returns `-1` on `path_len == 0` or `> SYS_OPEN_PATH_MAX`, an invalid user buffer,
@@ -518,10 +557,30 @@ Two seams recorded rather than papered over:
 - **The clone-walk failure in `SYS_WALK_CREATE` is genuinely ambiguous** — a
   leaf Dev answers NULL because it is not a directory, while dev9p can answer
   NULL on fid-pool exhaustion. It reports `EIO`, because `ENOTDIR` would be a
-  lie in the second case. Making the first half precise wants a `qid.type` gate
-  on the parent — the single-hop twin of the #79 gate above — which is a
-  resolution change rather than an errno one, and is tracked with #81 rather
-  than smuggled into an errno rollout.
+  lie in the second case. #80 recorded a `qid.type` gate on the parent as the
+  fix and deferred it to #81, which **landed it** — see below.
+
+### The single-hop `qid.type` gate (#81)
+
+Both handlers now gate the source on `src->qid.type & QTDIR` before the
+permission check, the single-hop twin of #79's resolver gate. The `!dev->walk`
+check above only proves the *Dev* has a walk slot; a walkable Dev's **file**
+Spoor sails past it.
+
+#80 justified this gate as disambiguating the clone-walk NULL. Measuring it
+showed that is not the reachable case: walking or creating a name out of a
+**0644** file answered `EACCES`, because the X-search reached the file first
+and denied on its missing x bit — while a **0755** file would have sailed past
+and reported `ENOENT`. Same situation, two errnos, chosen by a bit with no
+bearing on the question. So the gate's real job is #79's: make the answer
+mode-independent by testing type first. (Disambiguating the clone-walk NULL is
+still true, and now largely moot — a non-directory no longer reaches it.)
+
+`joey`'s `probe81` pins both halves on the real disk FS, including the 0755 leg
+that would go quiet if the gate were ever re-ordered behind the permission
+check. All 18 Devs were checked when the gate landed: every walkable root
+stamps `QTDIR` (eight via `dev_simple_attach`, dev9p and devsrv at birth), and
+the `QTFILE` roots are exactly the hierarchy-less leaves the gate should reject.
 
 ## Performance characteristics
 

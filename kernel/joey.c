@@ -71,9 +71,20 @@
 // blob over 65 KiB. The A-1b corvus identity-DB harness (RESOLVE/
 // GROUP_CREATE round-trips) pushes it past 128 KiB. The accumulating
 // net boot probes (net-2c/3a/3b/3c each add a /net fid-machine harness)
-// pushed it past 256 KiB at net-3c; 384 KiB restores headroom for the
-// remaining net arc (net-3d..net-8) and later orchestration.
-#define JOEY_BLOB_MAX (512u * 1024u)
+// pushed it past 256 KiB at net-3c, then 384, then 512.
+//
+// #81 tripped it again at 524952 B -- 664 B over 512 KiB, i.e. the bound was
+// already 99.87% full and the NEXT probe of any size was going to trip it.
+// 640 KiB restores ~115 KiB of headroom (a boot probe costs ~1 KiB, mostly
+// diagnostic strings, so that is room for a hundred-odd more).
+//
+// Sizing is deliberately incremental rather than generous: this is a STATIC
+// BSS array, filled once during bringup and handed to exec_setup, and it is
+// never released -- so every KiB here is permanently-resident kernel memory
+// holding a stale copy of an ELF that has already been mapped. Making it a
+// boot-time-only allocation is tracked separately; until then the bound is
+// grown by the smallest step that clears the trend.
+#define JOEY_BLOB_MAX (640u * 1024u)
 static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the

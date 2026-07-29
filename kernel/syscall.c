@@ -2203,6 +2203,21 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // walk-fail arm below.
     if (!src->dev || !src->dev->walk)                 { spoor_clunk(src); return -T_E_NOTDIR; }
     if (!src->dev->open)                              { spoor_clunk(src); return -T_E_OPNOTSUPP; }
+    // #81: the single-hop twin of stalk's #79 gate -- the thing being searched
+    // must BE a directory. The check above only proves the DEV has a walk slot;
+    // a walkable Dev's FILE Spoor passes it.
+    //
+    // MEASURED pre-gate behaviour (not inferred): walking a name out of a 0644
+    // file answered -T_E_ACCES, because the X-search below reached the file
+    // first and denied on its missing x bit. A 0755 file would instead have
+    // sailed past the X-search and reported the walk-miss as ENOENT. That is
+    // exactly the #79 mode-dependence -- the same situation answering two
+    // different errnos depending on a bit with no bearing on the question --
+    // so the gate goes BEFORE the X-search, not after it.
+    //
+    // Placed after the mount cross above, so a mount point is judged by the
+    // tree it actually resolves to.
+    if (!(src->qid.type & QTDIR))                     { spoor_clunk(src); return -T_E_NOTDIR; }
 
     // A-2d (IDENTITY-DESIGN.md 3.7.1): search (X) permission on the source
     // directory before walking into it. Gated on the Dev's perm_enforced flag
@@ -3029,6 +3044,15 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // with no create slot genuinely cannot create, and OPNOTSUPP says so.
     if (!src->dev || !src->dev->walk)   { spoor_clunk(src); return -T_E_NOTDIR; }
     if (!src->dev->create)              { spoor_clunk(src); return -T_E_OPNOTSUPP; }
+    // #81: creating INTO a non-directory -- the gate #80 recorded as owed here.
+    // #80 framed it as disambiguating the clone-walk NULL below; MEASURING it
+    // showed that is not the reachable case. Creating into a 0644 file answered
+    // -T_E_ACCES, because the W|X check below denied on the file's mode long
+    // before any clone-walk was attempted. So the gate's real job is the same
+    // as #79's: make the answer mode-INDEPENDENT by testing type first.
+    // (Disambiguating the clone-walk NULL remains true and is now moot for the
+    // common case, since a non-directory no longer reaches it.)
+    if (!(src->qid.type & QTDIR))       { spoor_clunk(src); return -T_E_NOTDIR; }
 
     // A-2d: write + search (W|X) permission on the parent directory before
     // creating in it. Gated on perm_enforced -- LIVE for dev9p since the A-3b

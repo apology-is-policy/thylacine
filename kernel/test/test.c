@@ -704,6 +704,8 @@ void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
 void test_stalk_err_codes(void);
 void test_stalk_notdir(void);                                  // #79
+void test_stalk_dot_notdir(void);                              // #81
+void test_stalk_dot_notdir_mount(void);                        // #81
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_open_replace(void);
@@ -2943,6 +2945,8 @@ struct test_case g_tests[] = {
     { "stalk.missing_component",       test_stalk_missing_component,       false, NULL },
     { "stalk.err_codes",               test_stalk_err_codes,               false, NULL },
     { "stalk.notdir",                  test_stalk_notdir,                  false, NULL },
+    { "stalk.dot_notdir",              test_stalk_dot_notdir,              false, NULL },
+    { "stalk.dot_notdir_mount",        test_stalk_dot_notdir_mount,        false, NULL },
     { "stalk.opath_no_open",           test_stalk_opath_no_open,           false, NULL },
     { "stalk.open_root",               test_stalk_open_root,               false, NULL },
     { "stalk.open_replace",            test_stalk_open_replace,            false, NULL },

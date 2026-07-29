@@ -82,7 +82,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention; mount-busy) |
 | `T_E_EXIST`     | 17    | `EEXIST`     | Already exists (mount over existing point; create-excl) |
 | `T_E_NODEV`     | 19    | `ENODEV`     | The backing endpoint disappeared (the Loom device-gone terminal CQE; MENAGERIE §10) |
-| `T_E_NOTDIR`    | 20    | `ENOTDIR`    | A path prefix component is not a directory, so resolution cannot continue through it (`/bin/ls/foo`). Computed by `stalk` from the parent's `QTDIR` bit BEFORE the X-search, so the answer does not turn on the meaningless x bit of a non-directory (#79) |
+| `T_E_NOTDIR`    | 20    | `ENOTDIR`    | A path prefix component is not a directory, so resolution cannot continue through it (`/bin/ls/foo`). Computed from the `QTDIR` bit BEFORE the X-search, so the answer does not turn on the meaningless x bit of a non-directory. Three producers, all the same rule: `stalk`'s real-component gate (#79); `stalk`'s `.`/`..` gate, since both are path components and the position they resolve in must be a directory too (#81); and the single-hop `SYS_WALK_OPEN` / `SYS_WALK_CREATE` handlers, on both the source's type and a source Dev with no `.walk` slot (#80, #81) |
 | `T_E_INVAL`     | 22    | `EINVAL`     | Invalid argument |
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
