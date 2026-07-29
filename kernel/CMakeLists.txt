@@ -24,6 +24,7 @@ set(KERNEL_SRCS
     fault_test.c
     proc.c
     perm.c
+    vivarium.c
     allowance.c
     thread.c
     sched.c
@@ -147,6 +148,7 @@ set(KERNEL_TEST_SRCS
     test/test_burrow.c
     test/test_image.c
     test/test_elf.c
+    test/test_vivarium.c
     test/test_asid.c
     test/test_directmap.c
     test/test_proc_pgtable.c

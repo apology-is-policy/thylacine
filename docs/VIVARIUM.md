@@ -1230,6 +1230,66 @@ The comment naming `proc_total_created` was sitting nine lines above the
 
 ---
 
+### 6.18 The translation table, tier by tier (V-2a, as-built)
+
+`kernel/vivarium.c` + `<thylacine/vivarium.h>` land the in-kernel half of Option
+C. `vivarium_translate(linux_nr, args, out)` is **pure** — no Proc, no uaccess,
+no locks, no allocation — and returns `VIV_TRANSLATED` / `VIV_FORWARD` /
+`VIV_ENOSYS`. Nothing is wired into `syscall_dispatch`; see "why the table came
+first" below.
+
+**Applying §4's rule to the calls a static `hello` makes produced a smaller table
+than expected, and that is the result, not a shortfall.** Of nine candidates,
+five qualify:
+
+| Linux | tier | why |
+|---|---|---|
+| `read` 63 → `SYS_READ` 9 | **T1** | args identical in order, width, meaning |
+| `write` 64 → `SYS_WRITE` 10 | **T1** | ditto |
+| `close` 57 → `SYS_CLOSE` 11 | **T1** | ditto |
+| `lseek` 62 → `SYS_LSEEK` 51 | **T1** | `T_SEEK_*` are 0/1/2, so are Linux's `SEEK_*` — the enumerations coincide, so there is nothing to map |
+| `exit_group` 94 → `SYS_EXIT_GROUP` 60 | **T1** | args identical |
+| `openat` 56 | T2 (V-2b) | Linux passes a NUL-terminated path; `SYS_OPEN` wants an explicit `path_len`, so translating means scanning user memory. Plus `AT_FDCWD` → `SYS_WALK_OPEN_FROM_ROOT` and `O_*` → `omode`. Still total + stateless, so admissible — just not a renumber |
+| `fstat` 80 | T2 (V-2b) | `t_stat` is 88 B, Linux aarch64 `struct stat` is 128 B with a different field order: a struct conversion written to user memory |
+| `mmap` 222 | FORWARD | addr hints, `PROT_*`, `MAP_FIXED`/`ANONYMOUS`/`PRIVATE`, fd-backing are **policy** |
+| `munmap` 215 | FORWARD | **the instructive one — see below** |
+| `brk` 214 | ENOSYS | no counterpart at all; the heap is Burrow-based. Both musl and glibc fall back to `mmap`, so an honest ENOSYS is serviceable where faking success would strand the allocator |
+
+**`munmap` is why "total" is the word that does the work.** `munmap(addr, len)`
+and `SYS_BURROW_DETACH(vaddr, length)` take the same two words in the same order
+and read as a free row. They are not equivalent: `burrow_detach` requires an exact
+VMA match and explicitly refuses a partial detach (`syscall.h:611-620`), while
+Linux permits partial and multi-mapping unmaps. The renumber would be silently
+wrong for a legal class of inputs. **Arguments aligning is not semantics
+aligning** — every row's equivalence must be checked against the Thylacine side's
+documented contract, not its signature. The rejections are therefore stored as an
+explicit list with per-entry reasons, not left to fall through a default: a number
+we have rejected and one we have never considered are different facts.
+
+**Why the table came before the branch (V-1b).** V-1a landed `Proc.phenotype` but
+**nothing can set it to `PHENO_LINUX`** — verified, not assumed: `exec.c` never
+touches the field, the only assignment in the tree is the rfork inherit, and
+`PHENO_LINUX` appears nowhere outside its own enum. A dispatch branch would today
+be branching on a field that is provably always 0 — dead code, and unprovable
+end-to-end. Two further reasons make table-first the *proper* order rather than
+merely the available one:
+
+- **The declaration's correct shape is not yet knowable.** Every peer system
+  except FreeBSD has the **container** declare (illumos LX zones, Starnix,
+  gVisor); FreeBSD is the lone inference-based design and also the one whose CVE
+  history §4 cites when rejecting Option A. §5.2 already concludes the fused
+  container+phenotype object is the right granularity — and that object is V-7.
+  Designing a per-spawn declaration ABI now means guessing a granularity the
+  research says is probably wrong.
+- **Reversibility is asymmetric.** A syscall signature is append-only ABI and
+  every caller churns; a table is data and can be rewritten freely. Under genuine
+  uncertainty the reversible half goes first.
+
+V-2b promotes `openat` + `fstat` to T2 translators. V-1b remains the declaration +
+the branch, and stays gated on V-7's object being decided.
+
+---
+
 ## 7. The vivarium — the container runner
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel
