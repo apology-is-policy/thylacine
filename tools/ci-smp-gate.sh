@@ -82,12 +82,44 @@ for row in "${MATRIX[@]}"; do
     if [[ "$san" == "-" ]]; then need_default=1; else need_ubsan=1; fi
 done
 
+# #101: build.sh RE-BAKES the pool from the ambient environment, and
+# THYLACINE_BAKE_CLADE defaults to 0. A bare `build.sh kernel` here therefore
+# produced a pool with NO /clade even when the tree had a staged device
+# toolchain -- so a CL-6 gate ran 40 boots in which clangd was simply absent
+# (lsp-probe skips an absent server by design) and still reported 40/40 PASS.
+# A gate that cannot see the feature reports success identically to one that
+# verified it, which is the #72 / #74 failure class.
+#
+# So: default the bake ON when the tree is configured for it, and ALWAYS print
+# what was chosen. The caller can still force either way by exporting the var.
+if [[ -z "${THYLACINE_BAKE_CLADE:-}" && -d "$REPO_ROOT/build/clade/stage/bin" ]]; then
+    export THYLACINE_BAKE_CLADE=1
+fi
+echo "== ci-smp-gate: bake config -- CLADE=${THYLACINE_BAKE_CLADE:-0} GOROOT=${THYLACINE_BAKE_GOROOT:-1} =="
+
 echo "== ci-smp-gate: building kernels (default=$need_default ubsan=$need_ubsan) =="
 if [[ $need_default -eq 1 ]]; then
     "$REPO_ROOT/tools/build.sh" kernel || { echo "ci-smp-gate: default kernel build FAILED" >&2; exit 1; }
 fi
 if [[ $need_ubsan -eq 1 ]]; then
     "$REPO_ROOT/tools/build.sh" kernel --sanitize=undefined || { echo "ci-smp-gate: ubsan kernel build FAILED" >&2; exit 1; }
+fi
+
+# Prove the bake actually happened rather than trusting the flag. A staged
+# toolchain that did not reach the pool is exactly the silent-miss above, and
+# the pool is what the boots read -- so verify the artifact, not the intent.
+if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
+    if [[ ! -f "$REPO_ROOT/build/fixtures/pool.img" ]]; then
+        echo "ci-smp-gate: BAKE_CLADE=1 but no pool.img was produced" >&2; exit 1
+    fi
+    # 5120M (clade+goroot) / 3072M (clade alone); a goroot-only pool is 2560M.
+    pool_bytes=$(wc -c < "$REPO_ROOT/build/fixtures/pool.img" | tr -d ' ')
+    if [[ "$pool_bytes" -lt $((3072 * 1024 * 1024)) ]]; then
+        echo "ci-smp-gate: BAKE_CLADE=1 but pool.img is only $pool_bytes bytes --" >&2
+        echo "  too small to hold /clade, so the boots would run WITHOUT clangd." >&2
+        exit 1
+    fi
+    echo "== ci-smp-gate: clade bake verified (pool.img $pool_bytes bytes) =="
 fi
 
 echo "== ci-smp-gate: multi-boot matrix (N=$N per config) =="
