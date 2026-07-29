@@ -866,12 +866,14 @@ _Static_assert(__builtin_offsetof(struct Proc, page_budget) == 392,
                "after page_peak took 284..288. Every pre-existing offset is "
                "unchanged.");
 _Static_assert(sizeof(struct Proc) == 400,
-               "struct Proc size pinned at 392 bytes. The 352 baseline (the 328 "
+               "struct Proc size pinned at 400 bytes. The 352 baseline (the 328 "
                "baseline + the 8c-2 #95 debug_focus_thread @328 + the PTY-1a "
                "sid/pgid pair @336/@340 + the PTY-1e report latches @344/@345 + "
                "the G-2 shared_map_pages @348 filling the former tail pad) then "
                "prowl-1's name[PROC_NAME_MAX=32] @352 -> 384, then the VIVARIUM "
-               "V-4a-0 exe_path pointer @384 -> 392. prowl-1 and V-4a-0 were "
+               "V-4a-0 exe_path pointer @384 -> 392, then CL-5's page_budget "
+               "@392 -> 400 (the u32 plus 4 bytes of new tail pad; page_peak "
+               "took the last reusable hole at 284). prowl-1 and V-4a-0 were "
                "written on separate branches and BOTH originally appended at 352; "
                "the merge stacked them (see the field comments -- they are "
                "complementary, basename-copy vs full-Path). "

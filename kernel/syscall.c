@@ -6052,12 +6052,26 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // one-way mapping as sys_spawn_with_fds_thunk (apply_spawn_perms).
     apply_spawn_perms(p, perm_flags);
 
-    // CL-5: stamp the parent-resolved anon budget BEFORE exec_setup -- the exec
-    // image's own pages are charged against it, so a child spawned with a
-    // REDUCED budget must be bound from its very first charge, not from its
-    // first EL0 instruction. rfork already copied the parent's budget, so this
-    // is a no-op unless a specific budget was requested.
-    p->page_budget = page_budget;
+    // CL-5: stamp the parent-resolved anon budget before the child can charge
+    // anything. Between rfork and here the child has run only apply_spawn_perms
+    // (flag RMWs; no charge, no mapping), so nothing observes the inherited
+    // value except a /proc reader.
+    //
+    // NOTE the ordering argument, precisely: exec is NOT the first charger.
+    // kernel/exec.c calls proc_page_charge ZERO times -- exec's segments and
+    // stack are eager burrow_create_anon, which the #65 posture deliberately
+    // leaves uncharged ("exec-image one-shot bounded"). The only three chargers
+    // are SYS_BURROW_ATTACH, the Loom ring, and the lazy-anon fault arm, all of
+    // which are post-userland_enter. So the stamp is safe with MORE margin than
+    // "before exec" claims -- and stamping before exec anyway means a FUTURE
+    // exec-time charge (the recorded REVENANT per-page I-32 seam) is bounded
+    // automatically rather than needing this ordering revisited.
+    //
+    // Corollary worth not misreading: a REDUCED budget does not today bound a
+    // child's exec-image anon. That gap is the seam's, not this mechanism's.
+    // Atomic store -- devproc reads this lockless cross-Proc (the page_count /
+    // page_peak / vma_count discipline).
+    __atomic_store_n(&p->page_budget, page_budget, __ATOMIC_RELEASE);
 
     // A-1a: apply the parent-vetted identity override BEFORE any user-
     // observable state (fd install / exec / userland_enter). The parent

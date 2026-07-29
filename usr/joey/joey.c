@@ -2385,8 +2385,9 @@ static int probe_cl5_page_budget(void) {
         // carrying the parent's budget and the spawn THUNK stamps the requested
         // one, so an immediate read legitimately catches the inherited value --
         // reading once and asserting would be a race, not a test. (The window is
-        // sound: nothing charges a page between rfork and the stamp, because
-        // exec_setup -- the first charger -- runs after it.) Not vacuous: if the
+        // sound: nothing charges a page between rfork and the stamp -- the
+        // three chargers are all post-userland_enter, and exec charges nothing
+        // at all.) Not vacuous: if the
         // stamp never happened we never observe `want` and the probe fails.
         unsigned int got = 0;
         int matched = 0;

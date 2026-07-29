@@ -277,11 +277,24 @@ actually needs the memory. One raise at the build root covers the whole tree.
 ### Known caveats / footguns
 
 - **The stamp window.** `rfork` creates the child carrying the *inherited*
-  budget; the spawn thunk stamps the resolved one. Sound today only because
-  nothing charges a page before `exec_setup`, which runs after the stamp. **A
-  future charger placed earlier would break this and must move the stamp.** An
-  observer reading `/proc/<pid>/budget` immediately after spawn can legitimately
-  catch the inherited value — wait for the observable, do not sample it.
+  budget; the spawn thunk stamps the resolved one. Between the two the child
+  runs only `apply_spawn_perms` (flag RMWs — no charge, no mapping), and the
+  three chargers (`SYS_BURROW_ATTACH`, the Loom ring, the lazy-anon fault arm)
+  are all post-`userland_enter`. **A future charger placed earlier would break
+  this and must move the stamp.** An observer reading `/proc/<pid>/budget`
+  immediately after spawn can legitimately catch the inherited value — wait for
+  the observable, do not sample it.
+- **Exec charges nothing — so a reduced budget does not bound exec-image anon.**
+  `kernel/exec.c` calls `proc_page_charge` zero times: exec's segments and stack
+  are eager `burrow_create_anon`, which the #65 posture deliberately leaves
+  uncharged ("exec-image one-shot bounded"). Do not read the reduced-budget
+  sandboxing primitive as covering it. Post-REVENANT ("a binary of any size
+  execs") that #65-era justification is weaker than when it was written, and
+  what actually holds the line is graceful OOM (an `alloc_pages` failure fails
+  the exec cleanly, never a box extinction). Closing it is the recorded REVENANT
+  **per-page I-32 charge** seam; the stamp is deliberately placed before exec so
+  that seam lands bounded without revisiting this ordering. *(CL-5 audit F1 —
+  the pre-fix comments claimed exec was the first charger. It is not.)*
 - **The TCB never consults a budget.** `PRINCIPAL_SYSTEM` is exempt via
   `proc_resource_exempt`, and `rfork` inherits the principal — so anything joey
   spawns (including the clade gate's `clang++`) is unbounded. That exemption is
