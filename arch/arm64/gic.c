@@ -53,6 +53,7 @@
 #include "gic.h"
 
 #include "exception.h"
+#include "hwfeat.h"     // CACHE_LINE_MAX_BYTES for the per-CPU counter padding
 #include "mmu.h"
 #include "uart.h"
 
@@ -712,11 +713,45 @@ bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg) {
 // banked while an SPI is routed to one CPU), so no read-modify-write race
 // exists; a cross-CPU reader (devctl) __atomic_loads it, RELAXED -- a monotonic
 // counter, the same posture as CpuSched.idle_ns.
-static u64 g_cpu_irq_count[DTB_MAX_CPUS];
+//
+// V-4c-3 F5 (task #73): each slot is padded to a whole coherency granule. The
+// obvious `static u64 g_cpu_irq_count[DTB_MAX_CPUS]` is 64 bytes at
+// DTB_MAX_CPUS == 8 -- one granule, written by every CPU on every interrupt,
+// making it the worst false-sharing site the kernel could have (the timer PPI
+// alone hits it at tick rate on every core, before any device IRQ or IPI). The
+// original reasoning was right about correctness and simply silent about
+// sharing; the sibling counter added in the same commit, CpuSched.nctxt, got
+// the right geometry for free by living inside a large per-CPU struct.
+//
+// The counter stays HERE rather than moving into CpuSched. Folding it there
+// would remove a global, but gic owns interrupt dispatch the way sched owns
+// context switches, and CpuSched is file-private to sched.c -- so the fold
+// would add a cross-TU call on the hottest path in the kernel and point
+// arch/arm64 at the scheduler's internals to save 1 KiB of BSS.
+//
+// The alignment attribute is load-bearing, not decoration: padding each slot to
+// a granule separates the slots from EACH OTHER, but only aligning the array
+// keeps slot 0 from sharing a granule with whatever BSS precedes it.
+struct irq_count_slot {
+    u64 n;
+    u8  pad[CACHE_LINE_MAX_BYTES - sizeof(u64)];
+};
+_Static_assert(sizeof(struct irq_count_slot) == CACHE_LINE_MAX_BYTES,
+               "irq_count_slot must be exactly one coherency granule");
+
+static struct irq_count_slot g_cpu_irq_count[DTB_MAX_CPUS]
+    __attribute__((aligned(CACHE_LINE_MAX_BYTES)));
 
 u64 gic_cpu_irq_count(unsigned cpu) {
     if (cpu >= DTB_MAX_CPUS) return 0;
-    return __atomic_load_n(&g_cpu_irq_count[cpu], __ATOMIC_RELAXED);
+    return __atomic_load_n(&g_cpu_irq_count[cpu].n, __ATOMIC_RELAXED);
+}
+
+// Test hook (gic.cpu_irq_counter_geometry): the padding above is a compile-time
+// constant, so it can only be validated against the hardware at runtime.
+const void *gic_cpu_irq_count_slot_addr(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return 0;
+    return &g_cpu_irq_count[cpu];
 }
 
 void gic_dispatch(u32 intid) {
@@ -734,8 +769,8 @@ void gic_dispatch(u32 intid) {
     // very path.
     unsigned cpu = smp_cpu_idx_self();
     if (cpu < DTB_MAX_CPUS) {
-        __atomic_store_n(&g_cpu_irq_count[cpu],
-                         g_cpu_irq_count[cpu] + 1, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_cpu_irq_count[cpu].n,
+                         g_cpu_irq_count[cpu].n + 1, __ATOMIC_RELAXED);
     }
 
     h(intid, g_handlers[intid].arg);

@@ -63,8 +63,33 @@ struct hw_features {
 struct hw_cpu_ident {
     u64  midr;          // MIDR_EL1 raw: implementer/variant/arch/part/revision
     u32  dcache_line;   // bytes; CTR_EL0.DminLine decoded (4 << DminLine)
+    u32  cwg;           // bytes; CTR_EL0.CWG decoded (4 << CWG). 0 == the part
+                        // declines to say (see CACHE_LINE_MAX_BYTES).
     bool valid;         // this CPU has run hw_cpu_ident_detect
 };
+
+// Padding size for per-CPU data that different CPUs write on a hot path, so no
+// two CPUs' slots land in one coherency granule (false sharing).
+//
+// MEASURED, not assumed: both accels report CWG == DminLine == 64 --
+// HVF `-cpu host` (the real Apple M2 dev host) and TCG `-cpu max` alike. An
+// earlier draft of this comment asserted that Apple silicon reports a 128-byte
+// CWG and justified the constant with it; one boot falsified that, and the
+// number below now rests on the margin argument instead.
+//
+// 128 is deliberately 2x the largest granule any target reports, because the
+// two failure directions are not symmetric: over-padding wastes 512 bytes of
+// BSS exactly once, while under-padding silently restores the contention the
+// padding exists to remove -- with no symptom a test would catch. Margin is
+// also the only defence available, because CTR_EL0 exposes DminLine and CWG
+// but NOT the line size of outer cache levels, so any hardware-queried pad is
+// a lower bound on the granule that actually governs sharing, never the
+// answer.
+//
+// It must be a compile-time constant because struct layout is. `cwg` records
+// what the hardware claims and gic.cpu_irq_counter_geometry fails loudly if a
+// target ever outgrows this, so the number cannot go quietly stale.
+#define CACHE_LINE_MAX_BYTES 128u
 
 // Record the calling CPU's identity into slot `cpu`. Called once per CPU at
 // bring-up: boot_main for CPU 0, per_cpu_main for each secondary. Reads only

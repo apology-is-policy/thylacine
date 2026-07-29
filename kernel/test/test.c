@@ -76,6 +76,7 @@ void test_slub_leak_10k(void);
 void test_slub_kmalloc_overflow_guard(void);
 void test_slub_cache_destroy_guards(void);
 void test_gic_init_smoke(void);
+void test_gic_cpu_irq_counter_geometry(void);  // V-4c-3 F5 (#73)
 void test_timer_tick_increments(void);
 void test_timer_oneshot_tval_clamps(void);
 void test_timer_arm_oneshot_restores(void);
@@ -1319,6 +1320,7 @@ struct test_case g_tests[] = {
     { "slub.kmalloc_overflow_guard",   test_slub_kmalloc_overflow_guard,   false, NULL },
     { "slub.cache_destroy_guards",     test_slub_cache_destroy_guards,     false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
+    { "gic.cpu_irq_counter_geometry",  test_gic_cpu_irq_counter_geometry,  false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
     { "timer.oneshot_tval_clamps",     test_timer_oneshot_tval_clamps,     false, NULL },
     { "timer.arm_oneshot_restores",    test_timer_arm_oneshot_restores,    false, NULL },
