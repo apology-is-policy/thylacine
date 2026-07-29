@@ -1651,9 +1651,31 @@ wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
 | V-7 | `viv` | OCI unpack → territory + diorama + phenotype → spawn | **an Alpine shell runs** (ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
 
-Sequencing note: V-1..V-3 are kernel-track (main); V-4/V-5/V-7 are userspace and
-aux-shaped; V-6 is kernel and audit-bearing. The arc can therefore run split across
-both tracks after V-3.
+Track note: V-1..V-3 are kernel-track (main); V-4/V-5/V-7 are userspace and
+aux-shaped; V-6 is kernel and audit-bearing.
+
+**Sequencing — CORRECTED 2026-07-29. The numeric order is not the dependency
+order, and this row previously said the arc could split "after V-3".** V-2c
+falsified that: **V-1b cannot precede V-7.** `Proc.phenotype` exists but nothing
+can set it to `PHENO_LINUX` (verified — `exec.c` never touches the field, the only
+assignment is the rfork inherit, and `PHENO_LINUX` appears nowhere outside its own
+enum), because per the Q3 resolution + §12.1 the **container** is what declares a
+phenotype. So a dispatch branch written before V-7 would branch on a provably-zero
+field: dead code, unprovable end-to-end. The landed V-2 translation tables
+correspondingly have **no caller** yet, by design (§6.19/§6.20).
+
+The real order, and the standing plan (user-directed 2026-07-29):
+
+1. **The queued bugs first** — #80 (`SYS_WALK_OPEN` bare `-1`), #81 (`/file/..`
+   lexical dots), and **#66c/#926** (the handle-table lifetime restructure, which
+   is what unblocks `self/fd`). #80 shares a fix shape with the tracked
+   unlink-path errno-loss; they are efficiently done together.
+2. **V-7** — the container object, which is what makes a phenotype declarable. Its
+   §7.1 obligation (pid visibility) must be decided on the **native** surface.
+3. **V-1b** — the declaration + the syscall-entry dispatch branch; this is what
+   gives V-2's tables their first caller, and `docs/reference/NN-vivarium.md`
+   lands with it.
+4. **V-3 / V-5 / V-6**, then **V-8** (the I-43 focused audit + close).
 
 ---
 
