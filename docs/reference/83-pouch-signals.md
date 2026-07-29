@@ -238,6 +238,19 @@ something specific rather than merely looking different:
   from reading as a *terminal* — the same reason `devdev` withholds the cons
   flag from `consctl`. `notes.fstat_reports_chr` asserts both bits.
 
+  The flag namespace is small enough to enumerate, so it is enumerated rather
+  than asserted. Exactly three things set either bit:
+
+  | user | bit | reported mode | is-a-terminal? |
+  |---|---|---|---|
+  | ptyfs `PTS_FLAG` (`server.rs`) | 40 | `S_IFCHR` | yes — intended |
+  | netd `CONN_FLAG` (`server.rs`) | 40 | `S_IFREG` | no — fails the `S_ISCHR` pre-gate |
+  | cons `CONS_STAT_QID_FLAG` (`cons.h`) | 41 | `S_IFCHR` | yes — intended |
+
+  A notes fd (`qid_path == 0`, `S_IFCHR`) collides with none of them. Any
+  future Dev that adopts the `S_IFCHR` posture must be checked against this
+  table before it stamps a qid.
+
 Unlike a pipe (#96), the qid is deliberately **not** stamped per-open. The
 notes Spoor is a stateless marker whose queue is resolved from the running
 Thread — handed to another Proc, it reads *that* Proc's notes — so there is no
