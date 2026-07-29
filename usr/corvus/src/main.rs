@@ -113,7 +113,7 @@ use libthyla_rs::{
     t_getrandom, t_mlockall, t_open, t_poll, t_putstr, t_read, t_rename,
     t_set_dumpable, t_set_traceable, t_srv_accept, t_srv_peer, t_unlink, t_walk_create,
     t_walk_open, t_write, TPollFd, TSrvPeerInfo, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE,
-    T_CAP_HOSTOWNER, T_CAP_KILL, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
+    T_CAP_HOSTOWNER, T_CAP_JIT, T_CAP_KILL, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -1250,6 +1250,22 @@ static CLEARANCE_LEVELS: &[ClearanceLevel] = &[
     ClearanceLevel {
         name: b"supervisor",
         caps: T_CAP_KILL,
+        auth_required: AUTH_REQ_RE_AUTH,
+        time_bound_ns: 0,
+    },
+    // jit (CL-7k / I-42): the authority to create a dual-mapped code region --
+    // the only path by which userspace-emitted bytes become executable. This is
+    // the level the comment above anticipated: CAP_JIT, unlike CAP_HW_CREATE,
+    // IS in CAP_GRANTABLE_CLEARANCE (it is elevation-only, which I-42 requires
+    // so the capability is never inherited), so it is grantable exactly here.
+    //
+    // Its consumer is a runtime that compiles at run time -- Mesa's llvmpipe
+    // shader JIT at CL-7, later a wasm or JS engine. Routing it through a
+    // clearance rather than a spawn-time grant is what keeps "who may emit
+    // code" an explicit, bounded, auditable act rather than an ambient one.
+    ClearanceLevel {
+        name: b"jit",
+        caps: T_CAP_JIT,
         auth_required: AUTH_REQ_RE_AUTH,
         time_bound_ns: 0,
     },

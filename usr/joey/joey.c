@@ -1615,6 +1615,35 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
     t_putstr("joey: CLEARANCE_GRANT michael fs-admin ok (eligibility recorded)\n");
 
+    // === CL-7k: CLEARANCE_GRANT michael jit (I-42 code-emission authority) ===
+    // Same shape as fs-admin above. CAP_JIT is elevation-only, so a clearance is
+    // the ONLY way any Proc can ever hold it -- which is exactly the point of
+    // I-42's non-heritable clause, and why the jit-prover has to walk this path
+    // rather than being spawned with the capability.
+    {
+        size_t o = 0;
+        for (int i = 0; i < 33; i++) tx[o++] = token[i];
+        tx[o++] = 0;   // subject_kind = user
+        tx[o++] = 7;   // subject_len
+        const char m2[] = "michael";
+        for (int i = 0; i < 7; i++) tx[o++] = (unsigned char)m2[i];
+        tx[o++] = 3;   // level_len
+        const char lv2[] = "jit";
+        for (int i = 0; i < 3; i++) tx[o++] = (unsigned char)lv2[i];
+        pl = o;
+    }
+    if (corvus_exchange(conn_fd, 16, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: CLEARANCE_GRANT michael jit transport FAILED\n");
+        return 1;
+    }
+    if (st != 0) {
+        t_putstr("joey: CLEARANCE_GRANT michael jit unexpected status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: CLEARANCE_GRANT michael jit ok (eligibility recorded)\n");
+
     // === SESSION_CLOSE ===
     if (corvus_exchange(conn_fd, 3, token, 33, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: SESSION_CLOSE transport FAILED\n");
@@ -7418,6 +7447,29 @@ int main(void) {
                 return 1;
             }
             t_putstr("joey: /legate-prover reaped status=0; legate E2E verified\n");
+
+        // === CL-7k-2: the I-42 JIT prover ===
+        // Boot-fatal, and deliberately so. It is the ONLY place that proves a
+        // CPU at EL0 fetches and executes bytes this system just wrote -- the
+        // kernel tests can verify the PTEs and the aliasing, but they cannot
+        // branch into a JITed function. It also proves the capability gate from
+        // the outside: the SAME process is refused before its clearance redeem
+        // and succeeds after, so CAP_JIT is the only variable.
+        {
+            const char jp_name[] = "/bin/jit-prover";
+            long jp_pid = t_spawn(jp_name, sizeof(jp_name) - 1);
+            if (jp_pid <= 0) {
+                t_putstr("joey: t_spawn(\"jit-prover\") FAILED\n");
+                return 1;
+            }
+            int jp_status = -1;
+            long jp_reaped = t_wait_pid_for((int)jp_pid, 0, &jp_status);
+            if (jp_reaped != jp_pid || jp_status != 0) {
+                t_putstr("joey: /jit-prover orchestration FAILED (I-42 E2E)\n");
+                return 1;
+            }
+            t_putstr("joey: /jit-prover reaped status=0; I-42 JIT E2E verified\n");
+        }
         }
 #endif /* THYLA_BOOT_PROBES (legate E2E prover) */
     }

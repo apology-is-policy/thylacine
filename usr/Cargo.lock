@@ -677,6 +677,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jit-prover"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "kaua"
 version = "0.1.0"
 dependencies = [

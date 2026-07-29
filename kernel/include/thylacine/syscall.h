@@ -1827,9 +1827,15 @@ enum {
     //   permanently-undefined AArch64 UDF #0 -- so executing an un-emitted
     //   page traps rather than running residue.
     //
-    //   Errors: -EPERM (no CAP_JIT), -EINVAL (length 0 or > JIT_REGION_MAX,
-    //   unaligned out_va), -ENOMEM (page budget, no VA gap, or allocator),
-    //   -EFAULT (out_va not writable by the caller).
+    //   Errors: -EACCES (no CAP_JIT), -EINVAL (length 0 or > JIT_REGION_MAX),
+    //   -ENOMEM (page budget, no VA gap, or allocator), -EFAULT (out_va not
+    //   writable by the caller).
+    //
+    //   The denial is -T_E_ACCES (13), NOT -T_E_PERM: errno.h forbids a
+    //   handler returning -T_E_PERM because its value (1) collides with the
+    //   kernel's flat -1 generic-failure sentinel, so userspace decodes it as
+    //   "unspecified failure" and a caller could never tell "you lack CAP_JIT"
+    //   from "something broke". Same choice SYS_CLOCK_SETTIME's cap gate makes.
     SYS_JIT_CREATE = 101,   // arg: length (x0), out_va (x1)
 
     // SYS_JIT_DESTROY(writer_va) -> 0 / -errno.

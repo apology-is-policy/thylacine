@@ -73,7 +73,22 @@
 // net boot probes (net-2c/3a/3b/3c each add a /net fid-machine harness)
 // pushed it past 256 KiB at net-3c; 384 KiB restores headroom for the
 // remaining net arc (net-3d..net-8) and later orchestration.
-#define JOEY_BLOB_MAX (512u * 1024u)
+//
+// CL-7k-2 -> 768 KiB, and the MEASUREMENT is the reason rather than the
+// symptom: at the 512 KiB bound joey had reached 523,656 bytes -- 99.88% full,
+// 632 bytes of headroom. The ~50 lines this chunk added (a CLEARANCE_GRANT
+// block + a prover spawn, 7.3 KiB compiled) tipped it, but ANY next addition
+// would have, so bumping to "just past what tipped it" would buy one more
+// chunk at most. That is what the 36 -> 65 -> 128 -> 256 -> 384 -> 512 history
+// above is a record of. 768 KiB is a deliberate step out of that cycle.
+//
+// This buffer is static kernel BSS, so the headroom is not free -- and the
+// growth curve says the static-blob approach has a visible end. The real fix
+// when this next binds is to stop slurping init whole: joey is an ordinary ELF
+// on the ramfs, and REVENANT (I-36) already demand-pages file-backed text for
+// every OTHER binary. Init is the one exec that predates a namespace to
+// resolve through, which is why it is special-cased here.
+#define JOEY_BLOB_MAX (768u * 1024u)
 static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the

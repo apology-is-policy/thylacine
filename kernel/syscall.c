@@ -4368,7 +4368,7 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // the capability learns nothing about which lengths or addresses would
     // have been acceptable (the SYS_CLOCK_SETTIME cap-before-buffer ordering).
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
-        return -T_E_PERM;
+        return -T_E_ACCES;
 
     if (length_raw == 0)                             return -T_E_INVAL;
     if (length_raw > JIT_REGION_MAX)                 return -T_E_INVAL;
@@ -4448,7 +4448,7 @@ s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
     // run, so validate it there-and-back: check the cap first (so a capless
     // caller learns nothing from the buffer check), then the buffer, then act.
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
-        return -T_E_PERM;
+        return -T_E_ACCES;
     if (!sys_validate_user_buf(out_va, sizeof(struct t_jit_region)))
         return -T_E_FAULT;
 
@@ -4460,8 +4460,11 @@ s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
     // takes vma_lock, so doing this under the lock would self-deadlock. This is
     // the REVENANT R-5-F1 rule (no faulting uaccess under a lock the fault path
     // needs) obeyed at the point where it costs nothing.
+    // uaccess_copy_out returns 0 on success / -1 on fault -- NOT a byte count
+    // (arch/arm64/uaccess.h). Comparing against sizeof(reg) would treat every
+    // successful copy as a fault.
     struct t_jit_region reg = { .writer_va = wva, .exec_va = xva };
-    if (uaccess_copy_out(out_va, &reg, sizeof(reg)) != (s64)sizeof(reg)) {
+    if (uaccess_copy_out(out_va, &reg, sizeof(reg)) != 0) {
         // The caller never learns where the region landed, so it could never
         // destroy it -- tear it down here rather than leak a region with no
         // reachable name. sys_jit_destroy_for_proc is the same teardown the

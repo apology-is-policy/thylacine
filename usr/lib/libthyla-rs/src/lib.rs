@@ -78,6 +78,7 @@ pub mod fs;
 pub mod hardware;
 pub mod identity;
 pub mod io;
+pub mod jit;
 pub mod loom;
 pub mod net;
 pub mod ninep;
@@ -207,6 +208,10 @@ pub const T_SYS_LSEEK: u64            = 51;
 pub const T_SYS_PREAD: u64            = 85;
 pub const T_SYS_PWRITE: u64           = 86;
 pub const T_SYS_YIELD: u64            = 87;
+// I-42 / CL-7k -- the JIT capability (docs/JIT-ON-WX-DESIGN.md).
+pub const T_SYS_JIT_CREATE: u64       = 101;    // (length, out_va) -> 0; CAP_JIT-gated
+pub const T_SYS_JIT_DESTROY: u64      = 102;    // (writer_va) -> 0
+pub const T_SYS_ICACHE_SYNC: u64      = 103;    // (vaddr, length) -> 0
 pub const T_SYS_STAT: u64             = 88;
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups. EPERM
 // contours arrive as -13 (EACCES -- the kernel errno.h -1-alias rule);
@@ -609,6 +614,8 @@ pub const T_CAP_GRANT_CLEARANCE: u64 = 1 << 6;   // fork-grantable; corvus-only;
 pub const T_CAP_DAC_OVERRIDE: u64    = 1 << 7;   // elevation-only; perm_check rwx bypass
 pub const T_CAP_CHOWN: u64           = 1 << 8;   // elevation-only; chown/chgrp-to-any
 pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identity kill override
+pub const T_CAP_DEBUG: u64           = 1 << 10;  // elevation-only; cross-Proc debug authority (I-39)
+pub const T_CAP_JIT: u64             = 1 << 11;  // elevation-only; code-Burrow creation (I-42)
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.
@@ -2399,6 +2406,64 @@ pub unsafe fn t_pwrite(spoor_fd: i64, buf: *const u8, len: usize, off: i64) -> i
         in("x2") len as u64,
         in("x3") off,
         in("x8") T_SYS_PWRITE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_jit_create — mint a dual-mapped code region (I-42; CAP_JIT-gated).
+// Writes a `struct t_jit_region` {writer_va, exec_va} to `out_va`. Returns 0,
+// or -errno (-EPERM without CAP_JIT, -EINVAL on a bad length, -ENOMEM, -EFAULT
+// on an unwritable out_va).
+//
+// # Safety
+// `out_va` must point to 16 writable bytes owned by the caller.
+#[inline(always)]
+pub unsafe fn t_jit_create(length: u64, out_va: u64) -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") length => x0,
+        in("x1") out_va,
+        in("x8") T_SYS_JIT_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_jit_destroy — tear down BOTH aliases of the region whose WRITER alias
+// starts at `writer_va`, and free its pages. Returns 0, or -EINVAL if
+// writer_va is not the base of a live code region of this Proc.
+//
+// # Safety
+// Any pointer into either alias is dangling afterwards.
+#[inline(always)]
+pub unsafe fn t_jit_destroy(writer_va: u64) -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") writer_va => x0,
+        in("x8") T_SYS_JIT_DESTROY,
+        options(nostack)
+    );
+    x0
+}
+
+// t_icache_sync — publish emitted bytes over [vaddr, vaddr+length): clean the
+// D-cache to PoU and invalidate the I-cache, so a fetch through the exec alias
+// sees what was written through the writer alias. The range must lie within a
+// single alias of one of the caller's live code regions. Returns 0 / -EINVAL.
+//
+// # Safety
+// The range must name memory the caller owns as a code region.
+#[inline(always)]
+pub unsafe fn t_icache_sync(vaddr: u64, length: u64) -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") vaddr => x0,
+        in("x1") length,
+        in("x8") T_SYS_ICACHE_SYNC,
         options(nostack)
     );
     x0

@@ -134,16 +134,16 @@ void test_jit_create_requires_cap(void) {
 
     // A capless Proc is refused. Note this is the DEFAULT capability state --
     // an absent gate would let this through.
-    TEST_EXPECT_EQ(sys_jit_create_for_proc(p, JIT_LEN, out), -T_E_PERM,
-        "a Proc without CAP_JIT must be refused (-EPERM)");
+    TEST_EXPECT_EQ(sys_jit_create_for_proc(p, JIT_LEN, out), -T_E_ACCES,
+        "a Proc without CAP_JIT must be refused (-EACCES)");
 
     // The cap is checked BEFORE argument validation, so a capless caller
     // cannot probe which lengths would have been acceptable. Both of these
     // are invalid-length requests; both must still report EPERM, not EINVAL.
-    TEST_EXPECT_EQ(sys_jit_create_for_proc(p, 0, out), -T_E_PERM,
-        "capless + zero length -> EPERM (cap checked before args)");
-    TEST_EXPECT_EQ(sys_jit_create_for_proc(p, JIT_REGION_MAX + 1, out), -T_E_PERM,
-        "capless + oversize -> EPERM (cap checked before args)");
+    TEST_EXPECT_EQ(sys_jit_create_for_proc(p, 0, out), -T_E_ACCES,
+        "capless + zero length -> EACCES (cap checked before args)");
+    TEST_EXPECT_EQ(sys_jit_create_for_proc(p, JIT_REGION_MAX + 1, out), -T_E_ACCES,
+        "capless + oversize -> EACCES (cap checked before args)");
 
     // No region was created, so nothing was charged.
     TEST_EXPECT_EQ(p->page_count, 0u,
