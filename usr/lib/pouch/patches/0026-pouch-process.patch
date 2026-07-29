@@ -122,7 +122,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +	unsigned int identity_flags;       /* 76 */
 +	unsigned long long allowance_va;   /* 80 */
 +	unsigned int allowance_flags;      /* 88 */
-+	unsigned int _pad_allow;           /* 92 -- must be 0 */
++	unsigned int page_budget;          /* 92 -- CL-5 anon budget; 0 == inherit */
 +};
 +_Static_assert(sizeof(struct pouch_spawn_args) == 96,
 +	"struct pouch_spawn_args must match the kernel sys_spawn_args ABI");

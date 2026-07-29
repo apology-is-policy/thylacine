@@ -302,7 +302,7 @@ struct t_sys_spawn_args {
     // allowance (the broad default for every non-warden caller).
     unsigned long  allowance_va;     // 80 — user-VA of a struct t_allowance_desc
     unsigned int   allowance_flags;  // 88 — T_SPAWN_ALLOWANCE_SET
-    unsigned int   _pad_allow;       // 92 — must be 0 at v1.0
+    unsigned int   page_budget;      // 92 — CL-5: anon page budget; 0 == inherit
 };
 _Static_assert(sizeof(struct t_sys_spawn_args) == 96,
                "struct t_sys_spawn_args must mirror the kernel's "
@@ -345,8 +345,9 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, allowance_va) == 80,
                "t_sys_spawn_args.allowance_va at ABI offset 80");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, allowance_flags) == 88,
                "t_sys_spawn_args.allowance_flags at ABI offset 88");
-_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, _pad_allow) == 92,
-               "t_sys_spawn_args._pad_allow at ABI offset 92");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, page_budget) == 92,
+               "t_sys_spawn_args.page_budget at ABI offset 92 (CL-5 claimed the\n"
+               "               former _pad_allow slot; 0 == inherit)");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

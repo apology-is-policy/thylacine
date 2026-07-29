@@ -277,6 +277,21 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
         n = fmt_str(buf, cap, off, "children:");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, (int)kids);    if (!n && kids != 0) return 0; off += n;
         n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+        // CL-5: the peak anon commit (Linux VmHWM). Monotonic, so a read taken
+        // any time after the peak reports it -- and a read of a ZOMBIE (which
+        // can no longer charge) reports the FINAL peak with no sampling race.
+        // That is how a short-lived compiler's true footprint is measured.
+        u32 peak  = __atomic_load_n(&p->page_peak, __ATOMIC_ACQUIRE);
+        n = fmt_str(buf, cap, off, "peak:    ");   if (!n) return 0; off += n;
+        n = fmt_sdec(buf, cap, off, (int)peak);    if (!n && peak != 0) return 0; off += n;
+        n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
+        // CL-5: the budget peak is measured AGAINST. Reported next to it because
+        // "how close did this come to dying" is the question both answer, and
+        // neither is interpretable alone.
+        u32 budget = __atomic_load_n(&p->page_budget, __ATOMIC_ACQUIRE);
+        n = fmt_str(buf, cap, off, "budget:  ");   if (!n) return 0; off += n;
+        n = fmt_sdec(buf, cap, off, (int)budget);  if (!n && budget != 0) return 0; off += n;
+        n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
     }
 
     if (p->state == PROC_STATE_ZOMBIE) {

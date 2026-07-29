@@ -193,6 +193,12 @@ static void proc_init_fields(struct Proc *p, int pid) {
     p->sid   = (u32)pid;
     p->pgid  = (u32)pid;
     p->state = PROC_STATE_ALIVE;
+    // CL-5: seed the anon budget to the historical constant. This is the ONE
+    // chokepoint every Proc passes through (proc_alloc for user Procs, proc_init
+    // for kproc), which matters because KP_ZERO would otherwise leave it 0 --
+    // and a 0 budget refuses EVERY charge, i.e. a Proc that cannot fault in a
+    // single anon page. rfork_internal overwrites it with the parent's.
+    p->page_budget = PROC_PAGE_MAX;
     poll_waiter_list_init(&p->child_waiters);   // #344: multi-waiter child-reap
     // P3-Bcb: pgtable_root + context_id left at 0 by KP_ZERO. proc_alloc
     // (post-phys_init) installs a real pgtable_root and leaves context_id 0
@@ -930,9 +936,16 @@ bool proc_page_charge(struct Proc *p, u32 npages) {
     // /proc reader coherent.
     u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
     if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
-    if (!proc_resource_exempt(p) && cur + npages > PROC_PAGE_MAX)
-        return false;                                // over cap -> caller -ENOMEM
+    // CL-5: cap against this Proc's own budget, not the global constant. A Proc
+    // that never asked for a raise carries page_budget == PROC_PAGE_MAX, so this
+    // is byte-identical to the pre-CL-5 decision for every existing caller.
+    if (!proc_resource_exempt(p) && cur + npages > p->page_budget)
+        return false;                                // over budget -> caller -ENOMEM
     __atomic_store_n(&p->page_count, cur + npages, __ATOMIC_RELEASE);
+    // CL-5: the exact high-water mark. Under the same vma_lock, so this is the
+    // true peak -- no sampler can catch the peak of a 200 ms compiler process.
+    if (cur + npages > __atomic_load_n(&p->page_peak, __ATOMIC_RELAXED))
+        __atomic_store_n(&p->page_peak, cur + npages, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -1143,6 +1156,12 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // an immutable string nothing resolves through, and sharing the parent's
     // is exactly right -- both Procs really are running that binary.
     proc_set_exe_path(child, parent->exe_path);
+    // CL-5: the anon budget is INHERITED (Linux rlimit semantics). Load-bearing:
+    // the pouch programs in the middle of a build chain (make, clang) call
+    // posix_spawn and know nothing about budgets, so only inheritance can carry
+    // a raise from the build root down to cc1. A raise is a spawn-time decision
+    // (sys_spawn_args.page_budget, authority-gated); rfork alone never widens it.
+    child->page_budget    = parent->page_budget;
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
     // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
@@ -1661,6 +1680,46 @@ void proc_mark_may_post_service(struct Proc *p) {
     // in the spawn thunk pre-EL0, never the live console owner -- but the
     // all-RMWs-atomic posture closes the class.)
     __atomic_or_fetch(&p->proc_flags, PROC_FLAG_MAY_POST_SERVICE, __ATOMIC_RELAXED);
+}
+
+// CL-5: resolve a spawn's requested page_budget against the parent's authority.
+// ONE function so both spawn entry points share the decision -- the
+// spawn_perm_grant_check discipline (grant authority lives in exactly one
+// place). Returns the child's budget, or 0 to REFUSE the spawn.
+u32 proc_spawn_budget_resolve(const struct Proc *parent, u32 req) {
+    if (!parent) return 0;                      // fail-closed on a bad caller
+    u32 inherited = parent->page_budget;
+    // A parent whose own budget is somehow unset would otherwise hand its child
+    // a 0 (= refuse-every-charge) budget. Treat it as the default; the invariant
+    // is that a live Proc always carries a nonzero budget.
+    if (inherited == 0) inherited = PROC_PAGE_MAX;
+    if (req == 0) return inherited;             // the compatible default
+    // The hard cap binds EVERY request, authority or not: this is what keeps
+    // the box-cliff protection: no Proc can ever demand unbounded memory.
+    if (req > PROC_PAGE_HARD_MAX) return 0;     // refuse (never silently clamp)
+    if (req <= inherited) return req;           // reduction needs no authority
+    if (proc_may_raise_page_budget(parent)) return req;
+    return 0;                                   // raise without authority -> refuse
+}
+
+// CL-5: the page-budget raise authority. Same one-way / atomic-RMW / never-
+// rfork-propagated discipline as proc_mark_may_post_service above.
+void proc_mark_may_raise_page_budget(struct Proc *p) {
+    if (!p)                    extinction("proc_mark_may_raise_page_budget(NULL)");
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_mark_may_raise_page_budget on corrupted Proc");
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_mark_may_raise_page_budget on non-ALIVE Proc");
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_MAY_RAISE_PAGE_BUDGET,
+                      __ATOMIC_RELAXED);
+}
+
+bool proc_may_raise_page_budget(const struct Proc *p) {
+    // Fail-closed on NULL/corrupt: this gates a resource RAISE, so the safe
+    // default is "may not raise" (the child then gets the parent's budget).
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED)
+            & PROC_FLAG_MAY_RAISE_PAGE_BUDGET) != 0;
 }
 
 bool proc_may_post_service(const struct Proc *p) {

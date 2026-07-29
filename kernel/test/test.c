@@ -178,6 +178,9 @@ void test_pts_tty_tstp_stop_cont_seam(void);
 void test_pts_teardown_hup_cont(void);
 void test_resource_exempt_only_system(void);
 void test_resource_page_charge_caps(void);
+void test_resource_page_peak_high_water(void);
+void test_resource_spawn_budget_resolve(void);
+void test_resource_measured_compile_needs_raise(void);
 void test_resource_thread_cap_ok(void);
 void test_resource_child_cap_ok(void);
 void test_resource_child_count_tracks_list(void);
@@ -1474,6 +1477,9 @@ struct test_case g_tests[] = {
     { "proc.job_stop_orphan_rule",     test_proc_job_stop_orphan_rule,     false, NULL },
     { "resource.exempt_only_system",   test_resource_exempt_only_system,   false, NULL },
     { "resource.page_charge_caps",     test_resource_page_charge_caps,     false, NULL },
+    { "resource.page_peak_high_water", test_resource_page_peak_high_water,  false, NULL },
+    { "resource.spawn_budget_resolve", test_resource_spawn_budget_resolve,  false, NULL },
+    { "resource.measured_compile_needs_raise", test_resource_measured_compile_needs_raise, false, NULL },
     { "resource.thread_cap_ok",        test_resource_thread_cap_ok,        false, NULL },
     { "resource.child_cap_ok",         test_resource_child_cap_ok,         false, NULL },
     { "resource.child_count_tracks_list",

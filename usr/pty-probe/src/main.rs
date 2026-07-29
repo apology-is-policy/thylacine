@@ -110,7 +110,7 @@ fn emulator() -> i64 {
         identity_flags: 0,
         allowance_va: 0,
         allowance_flags: 0,
-        _pad_allow: 0,
+        page_budget: 0,
     };
     let child_pid = unsafe { t_spawn_full_argv(&req) };
     if child_pid <= 0 {

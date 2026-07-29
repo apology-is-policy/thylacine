@@ -108,7 +108,23 @@ struct debug_hw;    // 8a-2b per-Proc HW-breakpoint table (arch/arm64/hwdebug.h)
 //                      pins THREAD_KSTACK_TOTAL bytes of UNSWAPPABLE kernel
 //                      kstack (256 threads -> 8 MiB kstacks).
 //   PROC_CHILD_MAX  -- live DIRECT children (the direct-fork rate).
-#define PROC_PAGE_MAX   65536u   // 256 MiB at 4-KiB pages
+#define PROC_PAGE_MAX   65536u   // 256 MiB at 4-KiB pages -- the DEFAULT budget
+// CL-5 (Clade F4; docs/LLVM-DESIGN.md section 7): PROC_PAGE_MAX is the DEFAULT
+// per-Proc anon budget, not a constant ceiling -- a Proc carries its own
+// `page_budget`, seeded to PROC_PAGE_MAX and raisable at spawn up to this hard
+// cap. Measured on-device (the clade gate's CL-5 probe, `page_peak`): a 1959-byte
+// template-heavy C++ TU costs 64066 pages (250 MiB) through cc1, and real project
+// TUs project to ~500-650 MiB (host-measured 735-867 MiB RSS scaled by the
+// device's measured 0.70 anon fraction). So 256 MiB does not fit one real
+// compile, let alone `make -jN` -- yet raising the DEFAULT 8x for every Proc
+// would weaken the fork-bomb floor system-wide (the rejected option (a)).
+//
+// The hard cap is what keeps the box-cliff protection: a raise cannot exceed it,
+// so no Proc can demand unbounded memory, and physical exhaustion still fails
+// the fault -> proc_fault_terminate (graceful OOM, never a box extinction).
+// 4 GiB covers a real TU (~650 MiB) and a clang-sized lld link (~2-4 GiB) with
+// room, and is the value LLVM-DESIGN.md section 7 proposed before measurement.
+#define PROC_PAGE_HARD_MAX  1048576u   // 4 GiB at 4-KiB pages
 // CF-3 A audit F1: per-Proc cap on TRANSIENT byte-I/O bounce heap (the
 // SYS_RW_MAX kmalloc tier in the read/write/pread/pwrite handlers).
 // 512 KiB = four concurrent 128-KiB bulk ops -- ample for the measured
@@ -505,6 +521,18 @@ struct Proc {
     // Like page_count, it is a resource axis, not a privilege axis (orthogonal to I-22).
     u32                vma_count;
 
+    // CL-5 (docs/LLVM-DESIGN.md section 7): the high-water mark of page_count --
+    // peak anon commit over the Proc's life, the Linux /proc/<pid>/status VmHWM
+    // analog. Occupies the 284..288 pad between vma_count and env, so struct Proc
+    // does not grow. Stamped in proc_page_charge under the same p->vma_lock that
+    // makes page_count exact, so it is an EXACT peak, not a sampled one -- which
+    // is the whole point: a poller cannot see the peak of a process that runs for
+    // 200 ms, and "how close did this compile come to its budget" is unanswerable
+    // without it. NEVER decremented (uncharge leaves it), never rfork-propagated
+    // (KP_ZERO -> 0). Pure telemetry: no policy reads it. External readers use
+    // __atomic_load_n for a coherent cross-Proc snapshot, as page_count's do.
+    u32                page_peak;
+
     // G15 (ARCH section 9.7): the per-Proc environment group -- the Plan 9 Egrp
     // surfaced as the per-Proc /env directory (devenv). Lazily allocated (NULL ==
     // empty), deep-COPIED across rfork by env_clone_into (the Plan 9 default-copy;
@@ -727,6 +755,31 @@ struct Proc {
     // g_proc_table_lock (the #57a-F2 envelope), exactly as format_ns reads the
     // Territory's mount Paths.
     struct Path       *exe_path;
+
+    // CL-5 (Clade F4; docs/LLVM-DESIGN.md section 7): this Proc's anon-page
+    // budget -- what proc_page_charge caps against, replacing the former
+    // hardcoded PROC_PAGE_MAX. Seeded to PROC_PAGE_MAX (so an unmodified Proc is
+    // byte-identical to pre-CL-5) and bounded by PROC_PAGE_HARD_MAX.
+    //
+    // INHERITED across rfork/spawn, and that is load-bearing rather than
+    // incidental: the toolchain chain is ut -> make -> clang -> cc1, and make and
+    // clang are POUCH ports calling posix_spawn. They know nothing about
+    // Thylacine budgets, so a spawn-time-only budget could never reach cc1 --
+    // the process that actually needs the memory -- without patching every link.
+    // Inheritance means ONE raise at the build root covers the whole tree. This
+    // is why Linux rlimits are inherited across fork/exec too.
+    //
+    // A spawn may LOWER a child's budget with no authority (monotonic reduction,
+    // the I-2 shape -- a free sandboxing primitive). RAISING requires
+    // SPAWN_PERM_MAY_RAISE_PAGE_BUDGET, gated exactly like the audited
+    // SPAWN_PERM_MAY_POST_SERVICE one-hop delegation (console-attached, or a
+    // caller that already holds it).
+    //
+    // Never 0 on a live Proc: proc_alloc seeds it, rfork copies it, and the
+    // spawn path validates into [1, PROC_PAGE_HARD_MAX]. PRINCIPAL_SYSTEM is
+    // exempt from the cap entirely (proc_resource_exempt), so the TCB's budget
+    // is maintained but not consulted.
+    u32                page_budget;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -800,8 +853,19 @@ struct Proc {
 // stamp succeeds only while g_console_renderer is NULL (proc_set_console_-
 // renderer's claim under g_proc_table_lock); cleared on the holder's death.
 #define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
+// PROC_FLAG_MAY_RAISE_PAGE_BUDGET (CL-5) -- kernel-stamped from
+// SPAWN_PERM_MAY_RAISE_PAGE_BUDGET; the authority to spawn a child whose
+// page_budget exceeds this Proc's own. One-hop delegable (a holder may confer
+// it), NOT propagated by rfork. See the SPAWN_PERM_* comment in syscall.h.
+#define PROC_FLAG_MAY_RAISE_PAGE_BUDGET (1u << 10)
 
-_Static_assert(sizeof(struct Proc) == 392,
+_Static_assert(__builtin_offsetof(struct Proc, page_budget) == 392,
+               "CL-5 page_budget appends after the V-4a-0 exe_path @384+8=392. "
+               "This is a DELIBERATE growth of struct Proc (392 -> 400, the u32 "
+               "plus 4 bytes of new tail pad) -- there was no pad left to reuse "
+               "after page_peak took 284..288. Every pre-existing offset is "
+               "unchanged.");
+_Static_assert(sizeof(struct Proc) == 400,
                "struct Proc size pinned at 392 bytes. The 352 baseline (the 328 "
                "baseline + the 8c-2 #95 debug_focus_thread @328 + the PTY-1a "
                "sid/pgid pair @336/@340 + the PTY-1e report latches @344/@345 + "
@@ -872,6 +936,11 @@ _Static_assert(__builtin_offsetof(struct Proc, debug_owner) == 304,
                "8a-1b debug_owner (the I-39 one-debugger attach slot) appends after "
                "bounce_bytes (offset 304, the next 8-aligned slot past the u64 @296); "
                "existing offsets stay stable (KP_ZERO inits it NULL = not debugged).");
+_Static_assert(__builtin_offsetof(struct Proc, page_peak) == 284,
+               "CL-5 page_peak fills the 284..288 pad between vma_count @280 and "
+               "the 8-aligned env @288 -- struct Proc does NOT grow. If this ever "
+               "moves, re-check that it still lands in padding rather than pushing "
+               "every later offset.");
 _Static_assert(__builtin_offsetof(struct Proc, vma_count) == 280,
                "I-32 fourth-axis vma_count appends after the I-34 allowance pointer "
                "(offset 280); existing offsets stay stable (KP_ZERO inits it 0).");
@@ -1773,6 +1842,24 @@ void proc_mark_may_post_service(struct Proc *p);
 // proc_may_post_service — true iff `p` carries PROC_FLAG_MAY_POST_SERVICE.
 // Returns false for a NULL / corrupted `p` (fail-closed).
 bool proc_may_post_service(const struct Proc *p);
+
+// CL-5 (docs/LLVM-DESIGN.md section 7): the page-budget RAISE authority --
+// PROC_FLAG_MAY_RAISE_PAGE_BUDGET, stamped from SPAWN_PERM_MAY_RAISE_PAGE_BUDGET.
+// A holder may spawn a child whose page_budget exceeds its own (bounded by
+// PROC_PAGE_HARD_MAX). LOWERING never needs this. Fail-closed on NULL/corrupt.
+void proc_mark_may_raise_page_budget(struct Proc *p);
+bool proc_may_raise_page_budget(const struct Proc *p);
+
+// proc_spawn_budget_resolve -- the single authority decision for a spawn's
+// requested page_budget. `req` is the caller's ABI field: 0 means "inherit"
+// (every pre-CL-5 caller zero-fills the struct, so this is the compatible
+// default). Returns the child's budget, or 0 if the request must be REFUSED.
+//
+// Rules: inherit on 0; refuse anything over PROC_PAGE_HARD_MAX (the cap is
+// unbypassable, so no authority can demand unbounded memory); allow any value
+// at-or-below the parent's own budget with no authority (monotonic reduction --
+// the I-2 shape); require PROC_FLAG_MAY_RAISE_PAGE_BUDGET to exceed it.
+u32 proc_spawn_budget_resolve(const struct Proc *parent, u32 req);
 
 // =============================================================================
 // LS-5: the self-managing-notes mark (P2 default disposition, ARCH 8.8.2).

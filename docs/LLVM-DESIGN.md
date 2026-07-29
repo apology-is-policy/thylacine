@@ -268,6 +268,84 @@ Options (F4 — resolved: **(b)**):
   change → audit-bearing, its own focused round; composes I-32 without
   renumbering.
 
+### 7.1 As-built (CL-5) — measured, then built
+
+**The estimates above were replaced by measurement before anything was
+built.** The instrument is `Proc.page_peak` (the anon high-water, the Linux
+`VmHWM` analog), surfaced as `peak:` in `/proc/<pid>/status` and read by the
+clade gate. It is exact rather than sampled: it is stamped under the same
+`vma_lock` that makes `page_count` exact, and a read of a ZOMBIE (which can no
+longer charge) reports the final value — which is the only way to measure a
+process that lives 200 ms.
+
+On-device, via the CL-5 probe in the clade gate:
+
+| invocation | peak anon |
+|---|---|
+| `clang++ -O2 hello.cpp -o hello` (driver; spawns cc1 + ld.lld) | 128 pages (0.5 MiB) |
+| `clang++ -O2 -c hello.cpp` (**cc1 in-process**) | 11441 pages (44.7 MiB) |
+| `clang++ ... hello.o -o hello2` (driver; spawns ld.lld) | 127 pages (0.5 MiB) |
+| `clang++ -O2 -c stress.cpp` (**cc1 in-process**, template-heavy) | **64066 pages (250 MiB)** |
+
+Two things follow, and the second is the one that mattered:
+
+1. **Only the in-process (`-c`) figure measures a compiler.** The driver forks
+   cc1 and ld.lld, so its own peak is half a megabyte — a fork-and-wait shell.
+   Any future measurement of this path must use `-c` or reach the grandchild.
+2. **A 1959-byte template-heavy TU costs 250 MiB — 97.8% of the default
+   budget.** It fits, with 5.7 MiB to spare. A *real* project TU does not: on
+   the host, `DAGCombiner.cpp` / `AArch64ISelLowering.cpp` / `SemaExpr.cpp`
+   measure 735 / 798 / 867 MiB RSS, and the device's anon fraction (0.46 at
+   hello, 0.70 at stress — it rises as heap overtakes text) puts them at
+   roughly **500–650 MiB, 2–2.5× the default**. The 4 GiB hard cap proposed
+   above survives contact with the numbers: it covers a real TU with room, and
+   a clang-sized lld link at 2–4 GiB.
+
+**Note the gate does not itself hit the cap**: joey is `PRINCIPAL_SYSTEM` and
+`rfork` inherits the principal, so the gate's clang++ is resource-*exempt* and
+never consults a budget. The measurement is what a real (non-exempt) user's
+build would be charged. That exemption is exactly why this collision has been
+invisible so far.
+
+**The mechanism.** `Proc.page_budget` (pages) replaces the hardcoded constant
+in `proc_page_charge`, seeded to `PROC_PAGE_MAX` so an untouched Proc is
+byte-identical to pre-CL-5, and bounded by `PROC_PAGE_HARD_MAX` = 4 GiB.
+
+It is **inherited** across rfork/spawn, and that is load-bearing rather than
+incidental. The chain is `ut → make → clang → cc1`; `make` and `clang` are
+*pouch ports* calling `posix_spawn`, with no notion of a Thylacine budget. A
+spawn-time-only budget could therefore never reach cc1 — the process that
+actually needs the memory — without patching every link. Inheritance means one
+raise at the build root covers the whole tree. (This is why Linux rlimits are
+inherited across fork/exec too.)
+
+Authority is split by direction:
+
+- **Lowering** a child's budget needs none — monotonic reduction, the I-2
+  shape, and a free sandboxing primitive.
+- **Raising** it above the spawner's own requires
+  `SPAWN_PERM_MAY_RAISE_PAGE_BUDGET`, gated exactly like the audited
+  `SPAWN_PERM_MAY_POST_SERVICE` one-hop delegation (console-attached, or an
+  existing holder) so joey → login → shell → build-driver can carry it
+  without any of them being console-attached.
+- **Nothing** exceeds `PROC_PAGE_HARD_MAX`, authority or not. That is what
+  preserves the box-cliff protection; graceful OOM
+  (`proc_fault_terminate`) remains the real backstop.
+
+An over-cap or unauthorized request **fails the spawn** rather than being
+silently clamped — a clamp would hand back a budget the caller did not ask for
+and hide the misconfiguration until it surfaced as an opaque OOM.
+
+The ABI field claims the reserved `_pad_allow` slot in `sys_spawn_args`
+(offset 92), so the struct does not grow and every existing caller — all of
+which zero-fill — keeps the historical behaviour by construction: **0 means
+inherit**.
+
+v1.x seams: the per-user *aggregate* quota (the cgroups-equivalent, reading
+the same counters) is unchanged as the recorded I-32 seam; and a shell-level
+ergonomic for requesting a raise (a `ulimit`-shaped verb) is unbuilt — today
+the raise is a spawn-time decision made by whatever launches the build.
+
 ---
 
 ## 8. The JIT capability (realizing JIT-ON-WX; proposed I-42)

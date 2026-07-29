@@ -219,3 +219,74 @@ cost (the counters are touched only at attach/detach/spawn/reap).
   even the TCB (with measured stratumd ceilings) is a future hardening.
 - The aggregate / per-user quota (cgroup-equivalent) is a **recorded SEAM**, not
   built. It reads these per-Proc counters; `vma_drain` is its uncharge hook.
+
+---
+
+## CL-5: the per-Proc page BUDGET (the Clade F4 lift)
+
+Since CL-5 the page axis caps against a **per-Proc budget** rather than the
+`PROC_PAGE_MAX` constant. `proc_page_charge` reads `p->page_budget`; everything
+else about the axis is unchanged.
+
+### Why
+
+Measured, not assumed (`docs/LLVM-DESIGN.md` §7.1): a 1959-byte template-heavy
+C++ TU costs **64066 pages (250 MiB) — 97.8% of the 256 MiB default** through
+cc1 on-device, and a real project TU projects to **500–650 MiB**. The default
+does not fit real compilation. Raising the default instead would have weakened
+the fork-bomb floor ~8× for every Proc, which is why F4 chose a per-Proc budget.
+
+### The fields
+
+- **`Proc.page_budget`** (u32 pages, @392) — what the charge caps against.
+  Seeded to `PROC_PAGE_MAX` in `proc_init_fields`, the one chokepoint every Proc
+  passes through (`proc_alloc` for user Procs, `proc_init` for kproc). It is
+  never 0 on a live Proc — a 0 budget would refuse every charge, i.e. a Proc
+  that cannot fault in a single anon page.
+- **`Proc.page_peak`** (u32 pages, @284, in existing padding) — the anon
+  high-water, the Linux `VmHWM` analog. Stamped under the same `vma_lock` that
+  makes `page_count` exact, so it is an *exact* peak, not a sampled one. Never
+  decremented; not moved by a refused charge. Pure telemetry: **no policy reads
+  it.** Both are surfaced as `peak:` / `budget:` in `/proc/<pid>/status`.
+
+### The rules
+
+| request (`sys_spawn_args.page_budget`) | outcome |
+|---|---|
+| `0` | inherit the spawner's budget — the compatible default |
+| `<=` the spawner's own | granted, **no authority needed** (monotonic reduction, the I-2 shape) |
+| `>` the spawner's own | requires `SPAWN_PERM_MAY_RAISE_PAGE_BUDGET` |
+| `>` `PROC_PAGE_HARD_MAX` (4 GiB) | **refused for everyone**, authority or not |
+
+Refused means **the spawn fails with -1** — never a silent clamp, which would
+hand back a budget the caller did not ask for and hide the misconfiguration
+until it resurfaced as an opaque OOM. The single decision lives in
+`proc_spawn_budget_resolve`.
+
+### Inheritance is load-bearing
+
+The budget is copied to the child in `rfork_internal`. This is not incidental
+convenience: the toolchain chain is `ut → make → clang → cc1`, and `make` and
+`clang` are **pouch ports calling `posix_spawn`** with no notion of a Thylacine
+budget. A spawn-time-only budget could never reach cc1 — the process that
+actually needs the memory. One raise at the build root covers the whole tree.
+(Linux rlimits are inherited across fork/exec for the same reason.)
+
+`rfork` alone still never *widens* a budget; only an authority-gated spawn does.
+
+### Known caveats / footguns
+
+- **The stamp window.** `rfork` creates the child carrying the *inherited*
+  budget; the spawn thunk stamps the resolved one. Sound today only because
+  nothing charges a page before `exec_setup`, which runs after the stamp. **A
+  future charger placed earlier would break this and must move the stamp.** An
+  observer reading `/proc/<pid>/budget` immediately after spawn can legitimately
+  catch the inherited value — wait for the observable, do not sample it.
+- **The TCB never consults a budget.** `PRINCIPAL_SYSTEM` is exempt via
+  `proc_resource_exempt`, and `rfork` inherits the principal — so anything joey
+  spawns (including the clade gate's `clang++`) is unbounded. That exemption is
+  precisely why this collision stayed invisible until it was measured.
+- The raise authority is a `SPAWN_PERM_*` bit, so like its siblings it is
+  **not** propagated by `rfork` — but the budget it grants *is*. That asymmetry
+  is deliberate: it is what lets a raise survive down through pouch programs
+  that could never re-request one.

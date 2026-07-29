@@ -124,6 +124,147 @@ void test_resource_page_charge_caps(void) {
     res_drop(p); res_drop(sys);
 }
 
+// CL-5: page_peak is the high-water mark of page_count -- the number the F4
+// budget is sized against, and the one thing a poller structurally cannot
+// measure on a short-lived process. It must rise with the peak, NEVER fall on
+// an uncharge (that is what makes a post-mortem read of a ZOMBIE exact), and a
+// REFUSED charge must not move it (it charged nothing).
+void test_resource_page_peak_high_water(void) {
+    struct Proc *p = res_make(A_REAL_USER);
+    TEST_EXPECT_EQ(p->page_peak, 0u, "a fresh Proc has no peak");
+
+    TEST_ASSERT(proc_page_charge(p, 100u), "charge 100");
+    TEST_EXPECT_EQ(p->page_peak, 100u, "peak tracks the first charge");
+
+    TEST_ASSERT(proc_page_charge(p, 50u), "charge 50 more");
+    TEST_EXPECT_EQ(p->page_peak, 150u, "peak follows page_count up");
+
+    // The load-bearing property: releasing memory does NOT lower the peak.
+    proc_page_uncharge(p, 140u);
+    TEST_EXPECT_EQ(p->page_count, 10u, "uncharge lowered the live count");
+    TEST_EXPECT_EQ(p->page_peak, 150u, "peak does NOT follow page_count down");
+
+    // A re-charge below the previous peak leaves the peak alone.
+    TEST_ASSERT(proc_page_charge(p, 20u), "charge back up to 30");
+    TEST_EXPECT_EQ(p->page_count, 30u, "live count 30");
+    TEST_EXPECT_EQ(p->page_peak, 150u, "peak unchanged below the high-water");
+
+    // ...and one that exceeds it raises it.
+    TEST_ASSERT(proc_page_charge(p, 200u), "charge past the old peak");
+    TEST_EXPECT_EQ(p->page_peak, 230u, "peak rises past the old high-water");
+
+    // A REFUSED charge charges nothing, so it must not move the peak either --
+    // otherwise a Proc that merely ASKED for the cap would report having used it.
+    u32 before = p->page_peak;
+    TEST_ASSERT(!proc_page_charge(p, PROC_PAGE_MAX), "over-cap charge refused");
+    TEST_EXPECT_EQ(p->page_peak, before, "a refused charge does not move the peak");
+    TEST_ASSERT(!proc_page_charge(p, 0xFFFFFFFFu), "overflowing charge refused");
+    TEST_EXPECT_EQ(p->page_peak, before, "a refused overflow does not move the peak");
+
+    res_drop(p);
+}
+
+// CL-5: the spawn-time budget resolver -- the single authority decision.
+// Rules: 0 inherits; <= the parent's own budget needs no authority (monotonic
+// reduction, the I-2 shape); above it needs PROC_FLAG_MAY_RAISE_PAGE_BUDGET;
+// over PROC_PAGE_HARD_MAX is refused for EVERYONE (the cap is what preserves
+// the box-cliff protection, so no authority may exceed it).
+void test_resource_spawn_budget_resolve(void) {
+    struct Proc *plain = res_make(A_REAL_USER);      // no raise authority
+    TEST_EXPECT_EQ(plain->page_budget, PROC_PAGE_MAX,
+                   "a fresh Proc carries the default budget");
+
+    // 0 == inherit. This is the compatibility contract: every pre-CL-5 caller
+    // zero-fills sys_spawn_args, so it MUST resolve to the parent's budget.
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, 0u), PROC_PAGE_MAX,
+                   "0 inherits the parent's budget");
+
+    // Reduction is always allowed -- a free sandboxing primitive.
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, 1024u), 1024u,
+                   "a smaller budget needs no authority");
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, PROC_PAGE_MAX), PROC_PAGE_MAX,
+                   "exactly the parent's budget needs no authority");
+
+    // A RAISE without authority is refused (0 == refuse the spawn).
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, PROC_PAGE_MAX + 1u), 0u,
+                   "raising without authority is refused");
+
+    // With the flag, the raise is granted...
+    struct Proc *raiser = res_make(A_REAL_USER);
+    proc_mark_may_raise_page_budget(raiser);
+    TEST_ASSERT(proc_may_raise_page_budget(raiser), "the raise flag reads back");
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(raiser, PROC_PAGE_HARD_MAX),
+                   PROC_PAGE_HARD_MAX, "an authorized raise to the hard cap");
+
+    // ...but NEVER past the hard cap, flag or not. This is the property the
+    // box-cliff protection rests on.
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(raiser, PROC_PAGE_HARD_MAX + 1u), 0u,
+                   "even an authorized raise cannot exceed PROC_PAGE_HARD_MAX");
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(plain, 0xFFFFFFFFu), 0u,
+                   "a wild budget is refused, not clamped");
+
+    // Fail-closed on a NULL parent.
+    TEST_EXPECT_EQ(proc_spawn_budget_resolve(NULL, 0u), 0u,
+                   "NULL parent is refused (fail-closed)");
+
+    res_drop(plain); res_drop(raiser);
+}
+
+// CL-5: the measurement that motivates the whole mechanism, pinned as a test.
+// The clade gate measured a 1959-byte template-heavy C++ TU at 64066 pages
+// (250 MiB) through cc1 -- see the CL-5 probe in usr/joey/joey.c. Note the gate
+// runs it as PRINCIPAL_SYSTEM (joey's child), which is resource-EXEMPT, so that
+// boot never consults a budget at all; the numbers below are what a real
+// (non-exempt) user would be measured against. If these stop holding, the
+// budget constant moved and LLVM-DESIGN.md
+// section 7 needs re-deriving. NOTE the stressor FITS the default (64066 of
+// 65536 = 97.8%); it is a REAL project TU (~2x+) that does not.
+#define CL5_MEASURED_CC1_PEAK_PAGES 64066u
+
+void test_resource_measured_compile_needs_raise(void) {
+    struct Proc *p = res_make(A_REAL_USER);          // NOT exempt -- a real user
+
+    // The measured stressor FITS the default -- but only just. 64066 of 65536
+    // pages is 97.8% of the budget, i.e. 1470 pages (5.7 MiB) of headroom for a
+    // 1959-BYTE source file. Asserted as a fact, and as a tripwire: if a future
+    // change pushes this over, the default budget stopped covering even the
+    // trivial case.
+    _Static_assert(CL5_MEASURED_CC1_PEAK_PAGES < PROC_PAGE_MAX,
+                   "the measured stressor is expected to fit the default budget");
+    TEST_ASSERT(proc_page_charge(p, CL5_MEASURED_CC1_PEAK_PAGES),
+                "the measured cc1 peak fits the default budget (97.8% of it)");
+    TEST_EXPECT_EQ(p->page_peak, CL5_MEASURED_CC1_PEAK_PAGES,
+                   "the high-water recorded the measured peak");
+    proc_page_uncharge(p, CL5_MEASURED_CC1_PEAK_PAGES);
+
+    // A REAL project TU does not. The stressor is 1959 bytes; DAGCombiner.cpp
+    // is 1.2 MB and measured 735 MiB RSS on the host, which scales to ~500-650
+    // MiB of device anon at the 0.70 anon fraction measured between the two
+    // device data points. 2x the stressor is the CONSERVATIVE bottom of that
+    // range and already exceeds the default -- so the collision is real without
+    // needing the projection to be precise.
+    u32 real_tu = CL5_MEASURED_CC1_PEAK_PAGES * 2u;   // ~500 MiB
+    TEST_ASSERT(real_tu > PROC_PAGE_MAX, "a real TU exceeds the default budget");
+    TEST_ASSERT(!proc_page_charge(p, real_tu),
+                "a real project TU does NOT fit the default 256 MiB budget");
+    TEST_EXPECT_EQ(p->page_count, 0u, "the refused charge committed nothing");
+
+    // ...and DOES fit once the budget is raised. That is the whole mechanism.
+    p->page_budget = real_tu + 32768u;               // +128 MiB of headroom
+    TEST_ASSERT(proc_page_charge(p, real_tu),
+                "a real project TU fits a raised budget");
+    TEST_EXPECT_EQ(p->page_count, real_tu, "the raised charge committed in full");
+
+    // The TCB is exempt regardless of budget -- which is exactly why the clade
+    // gate's own clang++ (spawned by joey, PRINCIPAL_SYSTEM) does not hit this.
+    struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
+    sys->page_budget = 1u;                            // absurdly small
+    TEST_ASSERT(proc_page_charge(sys, CL5_MEASURED_CC1_PEAK_PAGES),
+                "PRINCIPAL_SYSTEM ignores the budget entirely");
+
+    res_drop(p); res_drop(sys);
+}
+
 void test_resource_thread_cap_ok(void) {
     struct Proc *p = res_make(A_REAL_USER);   // non-exempt
 

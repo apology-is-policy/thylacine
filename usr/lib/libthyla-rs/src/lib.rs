@@ -382,7 +382,7 @@ pub struct TSpawnArgs {
     // Leave allowance_flags == 0 to inherit the parent's allowance (broad).
     pub allowance_va:    u64, // 80 — user-VA of a TAllowanceDesc
     pub allowance_flags: u32, // 88 — T_SPAWN_ALLOWANCE_SET
-    pub _pad_allow:      u32, // 92 — must be 0 at v1.0
+    pub page_budget:     u32, // 92 — CL-5: anon page budget; 0 == inherit
 }
 // Compile-time pin matching kernel's _Static_assert(sizeof(...) == 96).
 const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 96);

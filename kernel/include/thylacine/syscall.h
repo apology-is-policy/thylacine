@@ -1937,10 +1937,29 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
 // designate it). Single-holder: the grant is refused while a live renderer
 // holds the role. NOT a cap (rfork does not propagate it).
 #define SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
+// SPAWN_PERM_MAY_RAISE_PAGE_BUDGET (CL-5; docs/LLVM-DESIGN.md section 7) stamps
+// PROC_FLAG_MAY_RAISE_PAGE_BUDGET on the child: the authority to spawn a child
+// whose page_budget EXCEEDS the spawner's own. LOWERING a child's budget needs
+// no authority at all (monotonic reduction, the I-2 shape -- a free sandboxing
+// primitive), so this bit gates exactly one direction.
+//
+// Gated like MAY_POST_SERVICE (a console-attached granter OR a Proc that
+// already holds the bit) -- the audited #827b one-hop delegation. That shape is
+// what lets joey confer it on /sbin/login, login on the session shell, and the
+// shell on a build driver, without any of them being console-attached.
+//
+// A raise is still bounded by PROC_PAGE_HARD_MAX, so this bit buys a LARGER
+// budget, never an unbounded one: the box-cliff protection does not rest on it.
+// NOT a cap (rfork does not propagate it) -- but note the BUDGET ITSELF is
+// inherited, so a raised child passes its budget to its own children without
+// needing this bit. That is deliberate: it is what carries a raise down through
+// pouch programs (make, clang) that cannot set a budget themselves.
+#define SPAWN_PERM_MAY_RAISE_PAGE_BUDGET (1u << 4)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
                                       SPAWN_PERM_CONSOLE_TRUSTED | \
                                       SPAWN_PERM_CONSOLE_OWNER | \
-                                      SPAWN_PERM_CONSOLE_RENDERER)
+                                      SPAWN_PERM_CONSOLE_RENDERER | \
+                                      SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id
@@ -2506,7 +2525,18 @@ struct sys_spawn_args {
     // zero-fills this struct, gets the as-built broad behavior).
     u64 allowance_va;    // user-VA of a struct t_allowance_desc (0 unless SET)
     u32 allowance_flags; // SPAWN_ALLOWANCE_* bits; outside SPAWN_ALLOWANCE_FLAGS_ALL → -1
-    u32 _pad_allow;      // must be 0 at v1.0 (8-alignment + forward-compat slot)
+    // CL-5 (Clade F4): the child's anon page budget, in 4-KiB pages. Claims the
+    // former _pad_allow forward-compat slot, so the struct does NOT grow and
+    // every existing caller -- all of which zero-fill -- keeps the historical
+    // behaviour by construction: 0 means INHERIT the spawner's budget.
+    //
+    // Non-zero requests a specific budget. <= the spawner's own is always
+    // allowed (monotonic reduction, no authority). ABOVE it requires
+    // SPAWN_PERM_MAY_RAISE_PAGE_BUDGET. Anything over PROC_PAGE_HARD_MAX is
+    // REFUSED outright (never clamped -- a silent clamp would hand back a
+    // budget the caller did not ask for and hide the misconfiguration).
+    // Resolved by proc_spawn_budget_resolve; a refusal fails the spawn with -1.
+    u32 page_budget;
 };
 
 _Static_assert(sizeof(struct sys_spawn_args) == 96,
@@ -2549,8 +2579,10 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, allowance_va) == 80,
                "sys_spawn_args.allowance_va at ABI offset 80");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, allowance_flags) == 88,
                "sys_spawn_args.allowance_flags at ABI offset 88");
-_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_allow) == 92,
-               "sys_spawn_args._pad_allow at ABI offset 92");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, page_budget) == 92,
+               "CL-5 sys_spawn_args.page_budget REUSES the former _pad_allow "
+               "slot at ABI offset 92 -- the struct stays 96 bytes and every "
+               "zero-filling caller keeps the pre-CL-5 behaviour (0 == inherit).");
 
 struct exception_context;
 

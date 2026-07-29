@@ -5711,6 +5711,14 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
         if (!proc_is_console_attached(p))                          return -1;
         if (proc_test_console_renderer() != NULL)                  return -1;
     }
+    // CL-5: MAY_RAISE_PAGE_BUDGET takes the MAY_POST_SERVICE one-hop shape
+    // (console-attached OR an existing holder), so joey -> login -> shell ->
+    // build-driver can carry it without any of them being console-attached.
+    // Note this gates conferring the AUTHORITY; the raise it authorizes is
+    // still bounded by PROC_PAGE_HARD_MAX in proc_spawn_budget_resolve.
+    if ((perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET)
+            && !proc_is_console_attached(p)
+            && !proc_may_raise_page_budget(p))                     return -1;
     return 0;
 }
 
@@ -5742,6 +5750,9 @@ void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
         // drain/feed open gate refuses it -- fail-closed, never an extinction
         // (the child is otherwise a valid Proc).
         (void)proc_set_console_renderer(p);
+    }
+    if (perm_flags & SPAWN_PERM_MAY_RAISE_PAGE_BUDGET) {
+        proc_mark_may_raise_page_budget(p);   // CL-5: the raise authority
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("apply_spawn_perms: unknown SPAWN_PERM_* bit");
@@ -6001,6 +6012,12 @@ struct spawn_full_argv_args {
     // thunk before exec when allowance.set; else the child keeps rfork's
     // inherited allowance -- NULL for a broad parent's child).
     struct spawn_allowance allowance;
+    // CL-5: the RESOLVED anon page budget. The parent computed it (it needs the
+    // parent's own budget + raise authority, neither reachable from the child),
+    // so the thunk only stamps. Always non-zero: proc_spawn_budget_resolve
+    // returns the inherited budget when the caller asked for none, and a 0 from
+    // it means REFUSE, which fails the spawn before we ever get here.
+    u32            page_budget;
 };
 
 __attribute__((noreturn))
@@ -6014,6 +6031,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     u32     argv_data_len = sa->argv_data_len;
     u32     argc          = sa->argc;
     struct spawn_identity identity = sa->identity;   // A-1a: copy before kfree
+    u32     page_budget   = sa->page_budget;         // CL-5: copy before kfree
     struct spawn_allowance allowance;                // step 5: copy before kfree
     spawn_allowance_copy(&allowance, &sa->allowance);
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
@@ -6033,6 +6051,13 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // the parent gate-checked them in sys_spawn_full_argv_for_proc. Same
     // one-way mapping as sys_spawn_with_fds_thunk (apply_spawn_perms).
     apply_spawn_perms(p, perm_flags);
+
+    // CL-5: stamp the parent-resolved anon budget BEFORE exec_setup -- the exec
+    // image's own pages are charged against it, so a child spawned with a
+    // REDUCED budget must be bound from its very first charge, not from its
+    // first EL0 instruction. rfork already copied the parent's budget, so this
+    // is a no-op unless a specific budget was requested.
+    p->page_budget = page_budget;
 
     // A-1a: apply the parent-vetted identity override BEFORE any user-
     // observable state (fd install / exec / userland_enter). The parent
@@ -6106,8 +6131,9 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
-        const u32 *fds, u32 fd_count,
         caps_t cap_mask, u32 perm_flags,
+        const u32 *fds, u32 fd_count,
+        u32 eff_budget,
         const struct spawn_identity *id,
         const struct spawn_allowance *want_allowance) {
     if (!p)                                            return -1;
@@ -6189,6 +6215,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // Menagerie step 5: carry the parent-vetted allowance bundle (NULL ->
     // KP_ZERO left allowance.set false -> the child inherits via rfork).
     if (want_allowance) spawn_allowance_copy(&sa->allowance, want_allowance);
+    sa->page_budget   = eff_budget;   // CL-5: parent-resolved; the thunk stamps it
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -6211,16 +6238,26 @@ static int sys_spawn_full_argv_with_perms_for_proc(
 // kernel tests; the identity is passed as scalars (not the internal struct
 // spawn_identity) so the test file needs no kernel-internal type. set_identity ==
 // false (the back-compat path) means the child inherits the parent's identity.
-int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+int sys_spawn_full_argv_budget_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
         caps_t cap_mask, u32 perm_flags,
         bool set_identity, u32 principal_id, u32 primary_gid,
         const u32 *supp_gids, u32 supp_gid_count,
-        const struct spawn_allowance *want_allowance) {
+        const struct spawn_allowance *want_allowance,
+        u32 req_budget) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
+
+    // CL-5: resolve the requested anon budget against the caller's own budget +
+    // raise authority. 0 back means REFUSE (over the hard cap, or a raise
+    // without SPAWN_PERM_MAY_RAISE_PAGE_BUDGET) -- fail the spawn rather than
+    // silently clamping, so a misconfigured build fails loudly instead of
+    // dying later with an opaque OOM. Resolved in the PARENT's context because
+    // only the parent's budget + flags decide it.
+    u32 eff_budget = proc_spawn_budget_resolve(p, req_budget);
+    if (eff_budget == 0)                                return -1;
 
     // Menagerie step 5: gate a conferred allowance as a NARROWING vs the
     // caller's OWN allowance (I-2's hardware-axis analog; allowance.tla). A
@@ -6264,9 +6301,28 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
 
     return sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
                                                    argv_data, argv_data_len,
-                                                   argc, fds, fd_count,
-                                                   cap_mask, perm_flags, eff_id,
-                                                   want_allowance);
+                                                   argc, cap_mask, perm_flags,
+                                                   fds, fd_count, eff_budget,
+                                                   eff_id, want_allowance);
+}
+
+// Back-compat entry: no budget request (0 == inherit the spawner's). Keeps the
+// pre-CL-5 signature for the existing callers + the kernel test suite.
+int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count,
+        const struct spawn_allowance *want_allowance) {
+    return sys_spawn_full_argv_budget_for_proc(p, name, name_len, argv_data,
+                                               argv_data_len, argc, fds,
+                                               fd_count, cap_mask, perm_flags,
+                                               set_identity, principal_id,
+                                               primary_gid, supp_gids,
+                                               supp_gid_count, want_allowance,
+                                               /*req_budget=*/0u);
 }
 
 // Back-compat entry: inherit identity (no SET). Unchanged signature for
@@ -6346,7 +6402,11 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     // copy-in / in the identity entry (so an over-count or a too-wide ask is a
     // clean -1, never a buffer overrun).
     if (req->allowance_flags & ~(u32)SPAWN_ALLOWANCE_FLAGS_ALL) return -1;
-    if (req->_pad_allow != 0)                          return -1;
+    // CL-5: page_budget claims the former _pad_allow slot, so the old
+    // "must be 0" reject is REPLACED by a range check. 0 still means inherit.
+    // The authority decision (raise vs reduce) is NOT made here -- it needs the
+    // caller's Proc, so it lives in proc_spawn_budget_resolve at the entry.
+    if (req->page_budget > PROC_PAGE_HARD_MAX)         return -1;
     if ((req->allowance_flags & SPAWN_ALLOWANCE_SET) &&
         req->allowance_va == 0)                        return -1;
     return 0;
@@ -6492,14 +6552,15 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
             argv_kbuf[i] = (char)b;
         }
     }
-    s64 rc = (s64)sys_spawn_full_argv_identity_for_proc(
+    s64 rc = (s64)sys_spawn_full_argv_budget_for_proc(
         p, name, (size_t)req.name_len,
         argv_kbuf, req.argv_data_len, req.argc,
         fds_kbuf, req.fd_count,
         (caps_t)req.cap_mask, req.perm_flags,
         set_identity, req.principal_id, req.primary_gid,
         supp_kbuf, supp_count,
-        set_allowance ? &allow_kbuf : NULL);
+        set_allowance ? &allow_kbuf : NULL,
+        req.page_budget);                 // CL-5: 0 == inherit
     if (argv_kbuf) kfree(argv_kbuf);
     return rc;
 }

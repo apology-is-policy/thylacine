@@ -2162,10 +2162,98 @@ static long go4c_spawn_wait(const char *name, unsigned int name_len,
 // finish within max_sec (so a hung child cannot wedge the boot -- joey reports
 // + proceeds to login, abandoning the orphan). A coarse busy-spin throttles the
 // WNOHANG/clock syscall rate; the child runs on a peer CPU under -smp.
-static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
+// CL-5: read /proc/<pid>/status and pull out the peak-anon-pages high-water
+// (the "peak:" line) plus whether the Proc has become a ZOMBIE (the "exit:"
+// line, which devproc emits only in that state). Returns 1 if the status was
+// read, 0 if the Proc is gone / unreadable. *is_zombie tells the caller the
+// peak it just read is FINAL -- a zombie can no longer charge a page, so
+// reading BEFORE the reap is exact, where sampling a live process is not.
+static int proc_status_field(long pid, const char *key, unsigned int keylen,
+                             unsigned int *out);
+
+static int proc_status_peak(long pid, unsigned int *peak_out, int *is_zombie) {
+    char path[32];
+    char nb[24];
+    const char *ds = itoa_dec(pid, nb, sizeof(nb));
+    unsigned int pl = 0;
+    const char *pfx = "/proc/";
+    for (unsigned int i = 0; i < 6; i++) path[pl++] = pfx[i];
+    for (unsigned int i = 0; ds[i] && pl < sizeof(path) - 8; i++) path[pl++] = ds[i];
+    const char *sfx = "/status";
+    for (unsigned int i = 0; i < 7; i++) path[pl++] = sfx[i];
+
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, pl, T_OREAD);
+    if (fd < 0) return 0;
+    char buf[512];
+    long n = t_read(fd, buf, sizeof(buf) - 1);
+    (void)t_close(fd);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+
+    *is_zombie = 0;
+    for (long i = 0; i + 5 <= n; i++) {
+        if (buf[i]=='e' && buf[i+1]=='x' && buf[i+2]=='i' && buf[i+3]=='t' && buf[i+4]==':') {
+            *is_zombie = 1; break;
+        }
+    }
+    for (long i = 0; i + 5 <= n; i++) {
+        if (buf[i]=='p' && buf[i+1]=='e' && buf[i+2]=='a' && buf[i+3]=='k' && buf[i+4]==':') {
+            long j = i + 5;
+            while (j < n && buf[j] == ' ') j++;
+            unsigned int v = 0;
+            while (j < n && buf[j] >= '0' && buf[j] <= '9') v = v * 10u + (unsigned int)(buf[j++] - '0');
+            *peak_out = v;
+            return 1;
+        }
+    }
+    return 0;   // no peak: line -- an old kernel; caller leaves *peak_out alone
+}
+
+// CL-5: read one "<key>:" decimal field out of /proc/<pid>/status. Used by the
+// budget probe; kept separate from proc_status_peak so the hot wait loop stays
+// a single read.
+static int proc_status_field(long pid, const char *key, unsigned int keylen,
+                             unsigned int *out) {
+    char path[32];
+    char nb[24];
+    const char *ds = itoa_dec(pid, nb, sizeof(nb));
+    unsigned int pl = 0;
+    const char *pfx = "/proc/";
+    for (unsigned int i = 0; i < 6; i++) path[pl++] = pfx[i];
+    for (unsigned int i = 0; ds[i] && pl < sizeof(path) - 8; i++) path[pl++] = ds[i];
+    const char *sfx = "/status";
+    for (unsigned int i = 0; i < 7; i++) path[pl++] = sfx[i];
+
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, pl, T_OREAD);
+    if (fd < 0) return 0;
+    char buf[512];
+    long n = t_read(fd, buf, sizeof(buf) - 1);
+    (void)t_close(fd);
+    if (n <= 0) return 0;
+    for (long i = 0; i + (long)keylen <= n; i++) {
+        unsigned int k = 0;
+        while (k < keylen && buf[i + (long)k] == key[k]) k++;
+        if (k != keylen) continue;
+        long j = i + (long)keylen;
+        while (j < n && buf[j] == ' ') j++;
+        unsigned int v = 0;
+        int got = 0;
+        while (j < n && buf[j] >= '0' && buf[j] <= '9') { v = v * 10u + (unsigned int)(buf[j++] - '0'); got = 1; }
+        if (!got) return 0;
+        *out = v;
+        return 1;
+    }
+    return 0;
+}
+
+// peak_out (CL-5, may be NULL): when non-NULL the wait polls /proc/<pid>/status
+// FIRST and only reaps once the status says ZOMBIE, so the peak read is the
+// final one. With NULL the loop is byte-identical to the pre-CL-5 shape.
+static long go4c_spawn_wait_hb_peak(const char *name, unsigned int name_len,
                                const char *argv_blob, unsigned int argv_len,
                                unsigned int argc, unsigned long max_sec,
-                               unsigned long hb_sec, unsigned long cap_mask) {
+                               unsigned long hb_sec, unsigned long cap_mask,
+                               unsigned int *peak_out) {
     long cfd = t_console_open();
     unsigned int fds[3] = { 0, 0, 0 };
     unsigned int fd_count = 0;
@@ -2193,10 +2281,29 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
     unsigned long next_hb = hb_sec;
     char hb[24];
     for (;;) {
+        // CL-5: when a peak is wanted, look at /proc/<pid>/status BEFORE the
+        // reap. Reaping first would free the Proc and take the number with it;
+        // sampling a live child would report whatever it happened to hold at
+        // that instant. Only once status says ZOMBIE is the peak final -- then
+        // reap. Deliberately ordered, not opportunistic.
+        if (peak_out) {
+            unsigned int pk = 0;
+            int zomb = 0;
+            // FAIL-SAFE: only defer the reap when the status actually READ. A
+            // /proc that is unreadable (absent, gone, an older kernel with no
+            // "peak:" line) must degrade to the plain reap below -- deferring
+            // on a failed read would spin to max_sec and turn a missing
+            // measurement into a spurious timeout.
+            if (proc_status_peak(pid, &pk, &zomb)) {
+                if (pk > *peak_out) *peak_out = pk;
+                if (!zomb) goto cl5_wait;   // alive -- its peak is not final yet
+            }
+        }
         int st = -1;
         long r = t_wait_pid_for((int)pid, WAIT_WNOHANG, &st);
         if (r == pid) return (long)st;
         if (r < 0) return -1;
+    cl5_wait:;
         unsigned long el = 0;
         if (t_clock_gettime(T_CLOCK_MONOTONIC, &now) == 0 &&
             now.tv_sec >= t0.tv_sec) {
@@ -2214,6 +2321,15 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
     }
 }
 
+// The historical shape -- every pre-CL-5 caller reaches the identical loop.
+static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
+                               const char *argv_blob, unsigned int argv_len,
+                               unsigned int argc, unsigned long max_sec,
+                               unsigned long hb_sec, unsigned long cap_mask) {
+    return go4c_spawn_wait_hb_peak(name, name_len, argv_blob, argv_len, argc,
+                                   max_sec, hb_sec, cap_mask, (unsigned int *)0);
+}
+
 // #46 regression probe: fstat on a WRITE-ONLY fd must work + see the
 // write's size. The cmd/go putIndexEntry shape driven natively against a
 // pool-backed dir: create a fresh 66-char -a name T_OWRITE (an
@@ -2229,6 +2345,95 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
 // the /go-cache pair below is bake-config-gated) + against /go-cache
 // pre/post the go builds in bake boots. Returns 0 OK / -1 (boot-fatal
 // at the call sites).
+// CL-5 (docs/LLVM-DESIGN.md section 7): the spawn-time page-budget probe.
+// Drives the REAL SYS_SPAWN_FULL_ARGV ABI path -- the kernel unit tests cover
+// proc_spawn_budget_resolve in isolation, but only this exercises the full
+// chain: user struct -> uaccess copy -> range validate -> resolve against the
+// caller's authority -> sa -> the child thunk's stamp.
+//
+// joey is console-attached but does NOT hold MAY_RAISE_PAGE_BUDGET (nothing
+// grants it to init), so joey is exactly the "may reduce, may not raise" case
+// -- which is the interesting one to pin. Boot-fatal.
+static int probe_cl5_page_budget(void) {
+    // (a) A REDUCED budget is accepted with no authority, and the child really
+    //     carries it. /pouch-hello runs briefly; the wait helper reads its
+    //     status while it is alive (or as a ZOMBIE), so the stamp is observable.
+    const unsigned int want = 8192u;   // 32 MiB -- well under the 256 MiB default
+    {
+        long cfd = t_console_open();
+        unsigned int fds[3] = { 0, 0, 0 };
+        unsigned int nfd = 0;
+        if (cfd >= 0) { fds[0] = fds[1] = fds[2] = (unsigned int)cfd; nfd = 3; }
+        static const char pa[] = "/pouch-hello";
+        struct t_sys_spawn_args req = {
+            .name_va       = (unsigned long)pa,
+            .argv_data_va  = (unsigned long)pa,
+            .fd_list_va    = (unsigned long)fds,
+            .name_len      = 12,
+            .argv_data_len = 13,
+            .argc          = 1,
+            .fd_count      = nfd,
+            .page_budget   = want,
+        };
+        long pid = t_spawn_full_argv(&req);
+        if (cfd >= 0) (void)t_close(cfd);
+        if (pid <= 0) {
+            t_putstr("joey: CL-5 probe: reduced-budget spawn FAILED\n");
+            return -1;
+        }
+        // WAIT for the observable, do not sample it. rfork creates the child
+        // carrying the parent's budget and the spawn THUNK stamps the requested
+        // one, so an immediate read legitimately catches the inherited value --
+        // reading once and asserting would be a race, not a test. (The window is
+        // sound: nothing charges a page between rfork and the stamp, because
+        // exec_setup -- the first charger -- runs after it.) Not vacuous: if the
+        // stamp never happened we never observe `want` and the probe fails.
+        unsigned int got = 0;
+        int matched = 0;
+        for (int i = 0; i < 4000; i++) {
+            if (proc_status_field(pid, "budget:", 7, &got) && got == want) {
+                matched = 1;
+                break;
+            }
+            for (volatile unsigned long z = 0; z < 20000UL; z++) { }
+        }
+        int st = -1;
+        (void)t_wait_pid_for((int)pid, 0, &st);
+        if (!matched) {
+            char nb2[24];
+            t_putstr("joey: CL-5 probe: child budget never became ");
+            t_putstr(itoa_dec((long)want, nb2, sizeof(nb2)));
+            t_putstr(" (last read ");
+            t_putstr(itoa_dec((long)got, nb2, sizeof(nb2)));
+            t_putstr(")\n");
+            return -1;
+        }
+    }
+
+    // (b) A RAISE without SPAWN_PERM_MAY_RAISE_PAGE_BUDGET is REFUSED. joey's
+    //     own budget is the default, so asking for one page more is a raise.
+    // (c) A request over PROC_PAGE_HARD_MAX is refused for everyone -- rejected
+    //     at validation, before the authority question is even asked.
+    static const char pa2[] = "/pouch-hello";
+    struct t_sys_spawn_args bad = {
+        .name_va = (unsigned long)pa2, .argv_data_va = (unsigned long)pa2,
+        .name_len = 12, .argv_data_len = 13, .argc = 1,
+        .page_budget = 65536u + 1u,          // one page over the default
+    };
+    if (t_spawn_full_argv(&bad) > 0) {
+        t_putstr("joey: CL-5 probe: unauthorized RAISE was accepted\n");
+        return -1;
+    }
+    bad.page_budget = 1048576u + 1u;          // over PROC_PAGE_HARD_MAX
+    if (t_spawn_full_argv(&bad) > 0) {
+        t_putstr("joey: CL-5 probe: over-hard-cap budget was accepted\n");
+        return -1;
+    }
+    t_putstr("joey: CL-5 page-budget probe OK (reduce accepted + stamped; "
+             "unauthorized raise and over-hard-cap both refused)\n");
+    return 0;
+}
+
 static int probe46_fstat_wronly(const char *tag, const char *dirpath,
                                 unsigned int dirlen, const char *name66,
                                 unsigned int nl) {
@@ -2401,15 +2606,28 @@ static int clade_gate(void) {
     // no real build system passes it.
     static const char cc_argv[] =
         "/clade/bin/clang++\0-v\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
-    long cst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+    unsigned int cc_peak = 0;   // CL-5: peak anon pages, read before the reap
+    long cst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
                                   cc_argv, (unsigned int)sizeof(cc_argv), 7,
-                                  600, 20, 0);
+                                  600, 20, 0, &cc_peak);
     if (cst != 0) {
         t_putstr("joey: clade CL-4 gate: compile+link FAILED rc=");
         t_putstr(itoa_dec(cst, nb, sizeof(nb)));
         t_putstr("\n");
         return -1;
     }
+    // CL-5 (LLVM-DESIGN.md section 7): the number the F4 page-budget is sized
+    // against -- the DRIVER's own peak. Note what this does and does not cover:
+    // the driver spawns cc1 and ld.lld as separate Procs, each with its own
+    // independent PROC_PAGE_MAX, so the cap that actually binds a build is the
+    // largest SINGLE process, not the sum. Reported in pages and MiB.
+    t_putstr("joey: clade CL-5 clang++ driver peak=");
+    t_putstr(itoa_dec((long)cc_peak, nb, sizeof(nb)));
+    t_putstr(" pages (");
+    t_putstr(itoa_dec((long)(cc_peak / 256u), nb, sizeof(nb)));
+    t_putstr(" MiB) of cap ");
+    t_putstr(itoa_dec((long)(65536u / 256u), nb, sizeof(nb)));
+    t_putstr(" MiB\n");
     long ho = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp/hello", 10, T_OPATH);
     if (ho < 0) { t_putstr("joey: clade CL-4 gate: /tmp/hello not produced\n"); return -1; }
     (void)t_close(ho);
@@ -2432,9 +2650,13 @@ static int clade_gate(void) {
         t_putstr("joey: clade CL-4 -c compile then link-only\n");
         static const char co_argv[] =
             "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/hello.cpp\0-o\0/tmp/hello.o";
-        long ost = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+        unsigned int co_peak = 0;
+        long ost = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
                                       co_argv, (unsigned int)sizeof(co_argv), 7,
-                                      600, 20, 0);
+                                      600, 20, 0, &co_peak);
+        t_putstr("joey: clade CL-5 clang++ -c peak=");
+        t_putstr(itoa_dec((long)co_peak, nb, sizeof(nb)));
+        t_putstr(" pages\n");
         if (ost != 0) {
             t_putstr("joey: clade CL-4 gate: -c compile FAILED rc=");
             t_putstr(itoa_dec(ost, nb, sizeof(nb)));
@@ -2443,9 +2665,13 @@ static int clade_gate(void) {
         }
         static const char lo_argv[] =
             "/clade/bin/clang++\0--sysroot=/clade/sysroot\0/tmp/hello.o\0-o\0/tmp/hello2";
-        long lst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+        unsigned int lo_peak = 0;
+        long lst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
                                       lo_argv, (unsigned int)sizeof(lo_argv), 5,
-                                      600, 20, 0);
+                                      600, 20, 0, &lo_peak);
+        t_putstr("joey: clade CL-5 clang++ link-only peak=");
+        t_putstr(itoa_dec((long)lo_peak, nb, sizeof(nb)));
+        t_putstr(" pages\n");
         if (lst != 0) {
             t_putstr("joey: clade CL-4 gate: link-only FAILED rc=");
             t_putstr(itoa_dec(lst, nb, sizeof(nb)));
@@ -2469,6 +2695,96 @@ static int clade_gate(void) {
         t_putstr(" (want 0)\n");
         return -1;
     }
+    // ---- CL-5 (docs/LLVM-DESIGN.md section 7): size the F4 page budget. ----
+    // hello.cpp is a floor, not a workload: it measures what clang costs to
+    // START, not to COMPILE. This TU is deliberately template-heavy (16 Bag<K,V>
+    // instantiations over distinct type pairs + 8 string/vector ones + a
+    // compile-time Fib + sort/unique/hash churn per instantiation) so the
+    // frontend and the -O2 middle-end both do real work. On the host it costs
+    // 3.7x hello.cpp (359 MiB vs 97 MiB), which is the ratio that makes it a
+    // useful probe of where PROC_PAGE_MAX actually binds.
+    //
+    // Compiled with -c so cc1 runs IN-PROCESS -- the spawned-cc1 path reports
+    // only the driver's own ~0.5 MiB, which measures nothing.
+    //
+    // REPORT-ONLY, never a gate: if this TU exceeds PROC_PAGE_MAX the fault
+    // path proc_fault_terminates it (graceful OOM, by design), and that outcome
+    // is the measurement -- not a boot failure.
+    {
+        static const char stress_cpp[] =
+        "#include <algorithm>\n"
+        "#include <functional>\n"
+        "#include <map>\n"
+        "#include <memory>\n"
+        "#include <set>\n"
+        "#include <string>\n"
+        "#include <tuple>\n"
+        "#include <unordered_map>\n"
+        "#include <vector>\n"
+        "template <int N> struct Fib { static const long v = Fib<N-1>::v + Fib<N-2>::v; };\n"
+        "template <> struct Fib<0> { static const long v = 0; };\n"
+        "template <> struct Fib<1> { static const long v = 1; };\n"
+        "template <typename K, typename V> struct Bag {\n"
+        "  std::map<K,V> m; std::unordered_map<K,V> u; std::vector<std::pair<K,V>> v;\n"
+        "  std::set<K> s; std::shared_ptr<std::vector<V>> p;\n"
+        "  void add(const K& k, const V& val){ m[k]=val; u[k]=val; v.push_back({k,val}); s.insert(k); }\n"
+        "  long total() const { long t=0; for (auto&[a,b]:m) t+=(long)m.size(); for(auto&x:s) t+=1; return t+(long)(u.size()+v.size()); }\n"
+        "};\n"
+        "template <typename T> static long churn(std::vector<T>& xs) {\n"
+        "  std::sort(xs.begin(), xs.end());\n"
+        "  std::stable_sort(xs.begin(), xs.end(), std::greater<T>());\n"
+        "  auto it = std::unique(xs.begin(), xs.end());\n"
+        "  xs.erase(it, xs.end());\n"
+        "  long acc = 0; for (auto& x : xs) acc += (long)std::hash<T>{}(x);\n"
+        "  return acc;\n"
+        "}\n"
+        "typedef long long ll; typedef unsigned long ul; typedef unsigned char uc;\n"
+        "typedef unsigned short us; typedef unsigned int ui;\n"
+        "#define MK(n, K, V) static long f##n(){ Bag<K,V> b; b.add(K(), V()); std::vector<K> xs(8); return b.total()+churn(xs); }\n"
+        "MK(0,int,long) MK(1,long,int) MK(2,ui,double) MK(3,char,int)\n"
+        "MK(4,short,long) MK(5,ll,int) MK(6,ul,float) MK(7,double,int)\n"
+        "MK(8,float,long) MK(9,uc,double) MK(10,us,long) MK(11,int,double)\n"
+        "MK(12,long,float) MK(13,ui,ll) MK(14,char,double) MK(15,short,float)\n"
+        "#define MKS(n) static long g##n(){ Bag<std::string,std::vector<int>> b; b.add(\"k\" #n, {1,2,3}); return b.total(); }\n"
+        "MKS(0) MKS(1) MKS(2) MKS(3) MKS(4) MKS(5) MKS(6) MKS(7)\n"
+        "int main(){\n"
+        "  long t = Fib<40>::v;\n"
+        "  t += f0()+f1()+f2()+f3()+f4()+f5()+f6()+f7()+f8()+f9()+f10()+f11()+f12()+f13()+f14()+f15();\n"
+        "  t += g0()+g1()+g2()+g3()+g4()+g5()+g6()+g7();\n"
+        "  return (int)(t & 1);\n"
+        "}\n"        ;
+        long td2 = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
+        if (td2 >= 0) {
+            long sf2 = t_walk_create(td2, "stress.cpp", 10, T_OWRITE, 0644u);
+            if (sf2 < 0) {
+                (void)t_unlink(td2, "stress.cpp", 10, 0);
+                sf2 = t_walk_create(td2, "stress.cpp", 10, T_OWRITE, 0644u);
+            }
+            (void)t_close(td2);
+            if (sf2 >= 0) {
+                unsigned int sl = (unsigned int)(sizeof(stress_cpp) - 1);
+                long wn2 = t_write(sf2, stress_cpp, sl);
+                (void)t_fsync(sf2, 0);
+                (void)t_close(sf2);
+                if (wn2 == (long)sl) {
+                    static const char st_argv[] =
+                        "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/stress.cpp\0-o\0/tmp/stress.o";
+                    unsigned int st_peak = 0;
+                    long sst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
+                                                       st_argv, (unsigned int)sizeof(st_argv), 7,
+                                                       900, 30, 0, &st_peak);
+                    t_putstr("joey: clade CL-5 stress-TU cc1 peak=");
+                    t_putstr(itoa_dec((long)st_peak, nb, sizeof(nb)));
+                    t_putstr(" pages (");
+                    t_putstr(itoa_dec((long)(st_peak / 256u), nb, sizeof(nb)));
+                    t_putstr(" MiB) rc=");
+                    t_putstr(itoa_dec(sst, nb, sizeof(nb)));
+                    t_putstr(" cap=256 MiB\n");
+                }
+            }
+        }
+    }
+
     t_putstr("joey: clade CL-4 gate: PASS\n");
     return 0;
 }
@@ -3717,6 +4033,8 @@ int main(void) {
         }
         t_putstr("joey: probe #66b /proc/0/ns mount-list OK\n");
     }
+    // CL-5: the spawn-time page budget, driven through the real ABI.
+    if (probe_cl5_page_budget() != 0) return 1;
     // Menagerie devhw: prove /hw is reachable + walkable through the REAL
     // namespace -- the load-bearing path the kernel tests cannot exercise
     // (stalk crosses the /hw mount, devhw's reuse-nc walk descends multiple
