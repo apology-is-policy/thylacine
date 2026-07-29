@@ -25,9 +25,12 @@ On top of that it adds its own convictions:
 - We want to be usable -- transparent POSIX compatibility layer
   - Vendored and patched [musl](https://musl.libc.org) (an alternative c stdlib implementation used by, e.g., [Alpine Linux](https://www.alpinelinux.org))
   - Recompiled POSIX/Linux software just runs, its POSIX surface translated to Thylacine syscalls in userspace; static Linux binaries run best-effort
+  - Vivarium: A runtime Linux binary compatibility layer: Maps syscalls in real time and exposes an Linux sysroot namespace via an adaptor 9P server (Diorama)
 - Native Go port with a flagship TUI programming and debugging experience
   - Natively symbolized stack traces all the way to the kernel depths
   - What kind of Plan 9-heritage OS would it be without Ken Thompson's language as its primary user-facing toolchain? (Also, porting Rust's compiler on-device is nowhere near as easy -- though our native userspace is Rust.)
+- LLVM port opens a whole new world for toolchains
+- Mesa port bring GL capability
 - A rich, media-capable, tabs-and-panes-based text terminal is the only UI
   - I don't believe in the concept of a desktop and windows in 2026. Most modern desktops now veer towards docking, which is Thylacine implements from the start in the form of a multimedia-capable graphical terminal the likes of [i3wm](https://i3wm.org) with substantial [Acme](https://en.wikipedia.org/wiki/Acme_(text_editor)) influence (Rob Pike, the author of Acme, is one of the Bell Labs' holy trinity that we revere (except for the mouse thing -- what was that?)).
 - A new made-to-measure (but portable) COW filesystem -- Stratum.
