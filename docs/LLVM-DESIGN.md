@@ -1384,11 +1384,92 @@ way on the first run:
    `-moutline-atomics`, and task #91 exists because an LSE regression there is
    **silent**.
 
-**Owed:** an in-guest C/C++ diagnostics round-trip, the CL-6 twin of the gopls
-E2E (#76). Host unit tests are not the vehicle — `lsp_host.rs` lives in the
-binary crate, which `lib.rs` documents as not host-testable ("the bin needs the
-backend"), and moving a server table into the pure editor engine to win a
+**The gate: `lsp-probe`, generalized rather than forked.** The owed in-guest
+round-trip is the CL-6 twin of the gopls E2E (#76), and it is the SAME probe.
+Host unit tests were never the vehicle — `lsp_host.rs` lives in the binary
+crate, which `lib.rs` documents as not host-testable ("the bin needs the
+backend"), and moving a server table into the pure editor engine to win an
 `ends_with` test is the wrong trade.
+
+The probe's chain (spawn → `initialize` → `initialized` → `didOpen` → wait for
+`publishDiagnostics` carrying a planted identifier at a planted line) is
+*protocol*, not language: only the binary, workspace, `languageId`, and error
+position differ. So the differences moved into a `PROBES` table and the loop
+runs one session per present server. Forking a second probe would have
+duplicated ~300 lines of session loop whose two copies could then drift — and a
+drifted copy still passes its own gate, which is the failure mode that produced
+#100's sibling, the `struct t_stat` mirrors.
+
+**Three sessions, and the third is the one that earned its keep.** They are
+deliberately separate claims, so their failures are distinguishable in the boot
+log:
+
+| session | claims | result |
+|---|---|---|
+| `gopls` | the generalized client did not regress the working path | 83 ms, peak 7 MiB |
+| `clangd` | the protocol round-trip works for C++ | 185 ms, peak 5 MiB |
+| `clangd+headers` | clangd is actually *configured* — `#include` resolves | 1281 ms, peak **145 MiB** |
+
+CL-6's done-definition is "diagnostics/**hover/def** on a C++ file", so the
+first and third sessions assert all three. Hover and definition are pure
+protocol — the same `parley` code for every language — which makes it tempting
+to infer them from the Go side. That inference is precisely what "clangd will
+find its headers" was, so they are asked for instead:
+
+```
+[gopls]          hover OK -- "func Probe() int"
+                 definition OK -> file:///tmp/lspp/main.go:2
+[clangd+headers] hover OK -- "class vector<int, std::allocator<int>>"
+                 definition OK -> file:///clade/sysroot/include/c++/v1/__vector/vector.h:86
+```
+
+The definition target is the load-bearing one: landing *inside libc++* proves
+clangd **indexed** the header, which no diagnostic can show — a file can be
+found and never indexed. (It also confirms hover/def on the Go side, which
+8e-2c had only unit coverage for.)
+
+The include-free spec cannot prove the third thing: a clangd that resolves **no
+header at all** still reports the planted undefined identifier, so it would pass
+while `#include` — most of what makes an editor useful for C++ — is completely
+broken. That is why `ProbeSpec` carries `forbid`, a list of messages that must
+be ABSENT, checked *before* the planted match so a forbidden diagnostic cannot
+be masked by a successful one.
+
+It caught exactly that on first run: **`'vector' file not found`**. The cause
+was a wrong claim in this codebase's own comment, mine: I had written that
+`--sysroot` alone lets the driver derive `c++/v1`, generalizing from the /storm
+Makefile (**C-only**, so silent on the question) and the libc++ CMake flags
+(which build libc++ *itself*, headers supplied by CMake). The one recipe that
+compiles a C++ TU **against** installed libc++ — build.sh's `/pouch-hello-cxx`
+consumer line, ~100 lines below the one I read — says the opposite explicitly,
+and its own comment names it: "the pouch C++ consumer flags: … **explicit
+-isystem c++/v1**". `-nostdlibinc` suppresses the standard *library* include
+dirs, C++ ones included. The probe's compile command now mirrors that recipe
+byte-for-byte, with a comment saying the flag is load-bearing and that this spec
+is what fails if someone "simplifies" it.
+
+**#100, answered with a number rather than re-guessed.** The probe reads the
+server's peak anon commit from `/proc/<pid>/status` before the reap (the
+kernel's `peak` is monotonic, so a live read cannot under-report; reading after
+the reap is impossible — the reap frees the Proc and the counter with it) and
+prints `peak=N MiB/BUDGET MiB` on every PASS line.
+
+The axis is the right one: `page_count`/`page_peak` count anon pages, exactly
+what `PROC_PAGE_MAX` bounds, and clangd's 44 MB of text is file-backed via
+REVENANT so it is *not* on this axis — 146 MiB is genuinely heap. Cross-checked
+against CL-5's cc1 measurement (250 MiB, 97.8% of budget, on a 1959-byte
+template-heavy TU): same axis, same frontend, directly comparable.
+
+So **one `#include <vector>` costs 57% of the default budget**, and a real
+project header set will exceed it. The risk is confirmed, not hypothetical —
+and the trivial-file number alone (5 MiB) would have been reassuring and wrong.
+The fix is not built here: the kernel half already exists (`sys_spawn_args`
+`page_budget` @92 + the `SPAWN_PERM_MAY_RAISE_PAGE_BUDGET` gate, CL-5), but
+`Command` has no setter, and whether nora may confer a raised budget on its
+clangd child is a privilege question, not a plumbing one. Its own chunk.
+
+**Still owed:** a `compile_commands.json` generator, so a real project gets
+these flags without hand-writing the database.
 
 ## 17. Revision history
 

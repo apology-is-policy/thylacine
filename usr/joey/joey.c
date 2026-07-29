@@ -5435,16 +5435,31 @@ int main(void) {
                                 // + the two fork-grantable user caps
                                 // (crypto/rand at gopls init). The probe brings
                                 // its own workspace and chdirs to it, so joey's
-                                // cwd does not matter. Budget above the probe's
-                                // own 240s so a probe-side timeout reports its
-                                // reason rather than being killed mid-diagnosis.
+                                // cwd does not matter.
+                                //
+                                // The budget must cover the probe's OWN budget
+                                // for EVERY session it runs, not one of them:
+                                // since CL-6 it drives one per baked language
+                                // server plus clangd's separate header-config
+                                // session (gopls, clangd, clangd+headers), each
+                                // deadline-bounded at 240s, so 3 x 240 + margin.
+                                // Sized above rather than at, so a probe-side
+                                // timeout reports its own reason instead of
+                                // being killed mid-diagnosis -- the difference
+                                // between a boot log that names the broken
+                                // server and one that just stops. This is a
+                                // WORST case, not an expectation; the 30s
+                                // heartbeat is what makes a real hang visible
+                                // long before it. Tighten from measured
+                                // per-session times, not from a guess.
                                 static const char argv_lspp[] = "/bin/lsp-probe\0";
                                 const char lspp_path[] = "/bin/lsp-probe";
                                 t_putstr("joey: go8e-2 running /bin/lsp-probe "
-                                         "(live gopls LSP round-trip)\n");
+                                         "(live LSP round-trip, one session per "
+                                         "baked server)\n");
                                 long st_lspp = go4c_spawn_wait_hb(
                                     lspp_path, sizeof(lspp_path) - 1, argv_lspp,
-                                    sizeof(argv_lspp) - 1, 1, 300, 30,
+                                    sizeof(argv_lspp) - 1, 1, 800, 30,
                                     T_CAP_CSPRNG_READ | T_CAP_LOCK_PAGES);
                                 t_putstr("joey: go8e-2 lsp-probe reaped status=");
                                 t_putstr(itoa_dec(st_lspp, gpn, sizeof(gpn)));
