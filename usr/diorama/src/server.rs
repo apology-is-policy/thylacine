@@ -370,6 +370,23 @@ fn parse_cpu_name(name: &[u8]) -> Option<u64> {
     Some(v)
 }
 
+/// The parent of a cpu-range node, total over every kind INCLUDING the leaf.
+///
+/// Its own function rather than a match inside `walk_child` so the chain's parent
+/// relation stays right whether or not the is-a-directory gate lets the leaf
+/// reach it. V-4c-2c's warning was that a catch-all `..` here would answer
+/// .../system/cpu from the leaf and skip TWO levels -- a wrong answer rather than
+/// an error. The gate now makes that unreachable, but a gate and a wrong answer
+/// behind it is one edit away from being a wrong answer again.
+fn cpu_parent(n: u64, kind: u64) -> u64 {
+    match kind {
+        CK_CACHE => cpu_qid(n),
+        CK_INDEX0 => cpu_qid_kind(n, CK_CACHE),
+        CK_LINESZ => cpu_qid_kind(n, CK_INDEX0),
+        _ => N_SYSFS_CPU, // CK_DIR: cpuN sits directly under .../system/cpu
+    }
+}
+
 fn node_is_dir(path: u64) -> bool {
     if is_pid_node(path) {
         return qid_kind(path) == PK_DIR;
@@ -391,10 +408,19 @@ fn node_is_dir(path: u64) -> bool {
 /// never-existent pid an honest ENOENT rather than a directory of empty files,
 /// which is how every Linux consumer detects that a process is gone.
 fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
+    // V-4c-3 SA-2 (#71): nothing is a child of a FILE -- `.` and `..` included.
+    // Linux answers ENOTDIR for `<regular file>/anything`, and h_walk turns this
+    // None into exactly that errno when the source fid is the one at fault.
+    //
+    // ONE gate here rather than one per arm, because per-arm was not uniform: the
+    // pid and static arms each carried their own, the cpu arm did not, and so the
+    // cache leaf was the single node in the whole tree from which `..` resolved.
+    // It also makes `dir < N_COUNT` a precondition of the static arm below, which
+    // is what keeps its NODES index in bounds.
+    if !node_is_dir(dir) {
+        return None;
+    }
     if is_pid_node(dir) {
-        if qid_kind(dir) != PK_DIR {
-            return None; // walking from a file has no meaning
-        }
         if name == b"." {
             return Some(dir);
         }
@@ -417,17 +443,8 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
         // V-4c-2c: `..` climbs the cache chain rather than always landing on
         // .../system/cpu -- the V-4c-1 shortcut was correct only while cpuN was
         // a leaf dir. A wrong parent here would let `cd cache/..` skip a level.
-        // h_walk does NOT require the source to be a directory (9P lets a client
-        // walk from any unopened fid), so the LEAF's `..` is reachable too and
-        // must name index0 -- a catch-all landing on .../system/cpu here would
-        // skip two levels and be a wrong answer rather than an error.
         if name == b".." {
-            return Some(match kind {
-                CK_CACHE => cpu_qid(n),
-                CK_INDEX0 => cpu_qid_kind(n, CK_CACHE),
-                CK_LINESZ => cpu_qid_kind(n, CK_INDEX0),
-                _ => N_SYSFS_CPU,
-            });
+            return Some(cpu_parent(n, kind));
         }
         // The cache subtree: single-child chains, so each level is a literal
         // name match and there is no enumeration to get wrong. Sourced from
@@ -441,9 +458,9 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
             _ => None,
         };
     }
-    if dir >= N_COUNT || !NODES[dir as usize].is_dir {
-        return None;
-    }
+    // The is-a-dir gate at the top already proved `dir < N_COUNT` for anything
+    // reaching here (node_is_dir bounds its own NODES index), so this arm indexes
+    // in range by construction.
     if name == b"." {
         return Some(dir);
     }
@@ -554,6 +571,26 @@ impl Render {
             self.len = mark;
         }
     }
+    /// Discard the first `n` bytes, so what remains begins at file offset `n`.
+    ///
+    /// This is how `render` honors a Tread offset for the files that build
+    /// themselves whole (V-4c-3 SA-3, #72). It lives here rather than as a slice
+    /// in `h_read` so that `render`'s contract can be the SAME sentence for every
+    /// node -- "the bytes at [off, ...)" -- whether the renderer produced the
+    /// whole file or, as environ does, only that window. A caller that had to
+    /// know which is a caller that can get it wrong.
+    fn drop_prefix(&mut self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        if n >= self.len as u64 {
+            self.len = 0;
+            return;
+        }
+        let n = n as usize;
+        self.buf.copy_within(n..self.len, 0);
+        self.len -= n;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -576,6 +613,45 @@ fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
             break;
         }
         let n = unsafe { libthyla_rs::t_read(fd, out.as_mut_ptr().add(total), out.len() - total) };
+        if n <= 0 {
+            break;
+        }
+        total += n as usize;
+    }
+    let _ = unsafe { t_close(fd) };
+    Some(total)
+}
+
+/// Read a native file into `out` starting at byte `off`. Same degrade-to-None
+/// contract as `read_native`.
+///
+/// POSITIONED, so it is NOT a drop-in for `read_native`: `t_pread` fails ESPIPE
+/// on a Dev that is not `.seekable` (#37), and devctl is not -- so every `/ctl`
+/// source in this file (meminfo, stat, cpuinfo, the cpu lists, the cache line
+/// size) must keep using the cursor reader. devproc IS seekable, which is what
+/// makes the one caller here, `render_environ`, legal.
+fn read_native_at(path: &[u8], off: u64, out: &mut [u8]) -> Option<usize> {
+    if off > i64::MAX as u64 {
+        return Some(0); // past any possible file: EOF, not an error
+    }
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        return None;
+    }
+    let mut total = 0usize;
+    loop {
+        if total >= out.len() {
+            break;
+        }
+        // Saturating and re-bounded per iteration: `off` is a client-supplied
+        // Tread offset, so nothing upstream constrains it.
+        let at = off.saturating_add(total as u64);
+        if at > i64::MAX as u64 {
+            break;
+        }
+        let n = unsafe {
+            libthyla_rs::t_pread(fd, out.as_mut_ptr().add(total), out.len() - total, at as i64)
+        };
         if n <= 0 {
             break;
         }
@@ -1340,11 +1416,11 @@ fn maps_row(fields: &[&[u8]], exe: &[u8], r: &mut Render) -> bool {
 /// would work, but it makes a component whose entire design property is having
 /// no policy into a policy point, to serve a file no v1.0 consumer reads.
 ///
-/// Truncation is to a WHOLE RECORD. RENDER_MAX bounds what this server serves,
-/// and a block cut mid-record would hand the consumer a truncated value that
-/// parses as a complete one -- so trim back to the last terminator. Unconditional
-/// because it is a no-op on an untruncated block (which already ends in a NUL).
-fn render_environ(pid: u32, r: &mut Render) {
+/// There is no truncation to describe. Since V-4c-3 SA-3 (#72) this serves the
+/// WINDOW at `off`, so what does not fit in one read continues at the next
+/// offset. The whole-record trim it used to carry belonged to a cap that dropped
+/// the tail outright, and it retired with that cap.
+fn render_environ(pid: u32, off: u64, r: &mut Render) {
     let mut pbuf = [0u8; 64];
     let n = native_proc_path(pid, b"environ", &mut pbuf);
     let mut ebuf = [0u8; RENDER_MAX];
@@ -1353,28 +1429,22 @@ fn render_environ(pid: u32, r: &mut Render) {
     // as zero bytes. None means the open itself failed -- a gone pid. Both render
     // empty, which is what makes the deny path indistinguishable from an empty
     // environment, exactly as it should be.
-    let got = match read_native(&pbuf[..n], &mut ebuf) {
+    let got = match read_native_at(&pbuf[..n], off, &mut ebuf) {
         Some(g) => g,
         None => return,
     };
-    r.push(&ebuf[..trim_to_last_record(&ebuf[..got])]);
-}
-
-/// Length of the longest prefix of `block` that ends on a record boundary -- i.e.
-/// everything up to and including the last NUL. 0 when there is none, which means
-/// a single record longer than the whole buffer: serve nothing rather than a
-/// headless fragment that would parse as a complete NAME=VALUE.
-///
-/// Its own function so the selftest can drive it with a synthetic block; the live
-/// path cannot produce a truncated one on demand (it would need a >4 KiB
-/// environment on the reading Proc). The maps_row precedent.
-pub fn trim_to_last_record(block: &[u8]) -> usize {
-    for i in (0..block.len()).rev() {
-        if block[i] == 0 {
-            return i + 1;
-        }
-    }
-    0
+    // Pushed VERBATIM -- no record trim. Until V-4c-3 SA-3 (#72) this read the
+    // file's first 4 KiB and dropped back to the last NUL, so a record straddling
+    // the boundary was discarded and every record after it was LOST: an Env holds
+    // up to ENV_MAX_ENTRIES x ENV_VALUE_MAX, and past 4 KiB the tail simply
+    // vanished. That is the failure the kernel side built an offset-aware
+    // env_render_environ to avoid, re-imposed one layer up, and it does not look
+    // like an error to a consumer -- it looks like the variable was never set.
+    //
+    // A window has no tail to discard: the straddling record continues at the
+    // next offset, exactly as it does through the native file. So the trim is not
+    // merely unnecessary here, it would be the bug.
+    r.push(&ebuf[..got]);
 }
 
 /// maps -- the Proc's address space in Linux's /proc/*/maps shape.
@@ -1564,10 +1634,19 @@ fn render_stat(r: &mut Render) {
     i = 0;
     while i < ncpus && i <= CPU_INDEX_MAX {
         if let Some(idle) = parse_cpu_idle_ns(text, i) {
+            // Whole LINES here (V-4c-3 SA-3, #72) -- the same commit discipline
+            // as cpuinfo's blocks, at this file's unit. A truncated `cpuN` row
+            // would hand a jiffies parser a short column count, and the lines
+            // after it are what carry intr/ctxt/btime.
+            let mark = r.len();
             let mut label = Render::new();
             label.push(b"cpu");
             label.push_dec(i);
             push_stat_cpu_line(r, label.bytes(), up_ns.saturating_sub(idle), idle);
+            if r.len() == RENDER_MAX {
+                r.truncate_to(mark);
+                break;
+            }
         }
         i += 1;
     }
@@ -1608,6 +1687,13 @@ fn render_cpuinfo(r: &mut Render) {
         let cols = parse_cpu_cols(text, i);
         // An offline CPU carries no MIDR, and Linux lists only online CPUs.
         if let Some(midr) = cols.midr {
+            // V-4c-3 SA-3 (#72): commit whole BLOCKS, the render_maps row idiom
+            // at the unit a cpuinfo consumer actually parses. A block is ~150 B,
+            // so RENDER_MAX holds about 27 -- unreachable at DTB_MAX_CPUS = 8,
+            // but the failure if it were reached is a half block with a
+            // `processor` line and no `CPU part`, which reads as a malformed
+            // entry rather than a short file. Whole lines would not be enough.
+            let mark = r.len();
             r.push(b"processor\t: ");
             r.push_dec(i);
             r.push(b"\nFeatures\t:");
@@ -1624,6 +1710,10 @@ fn render_cpuinfo(r: &mut Render) {
             r.push(b"\nCPU revision\t: ");
             r.push_dec(midr & 0xF);
             r.push(b"\n\n");
+            if r.len() == RENDER_MAX {
+                r.truncate_to(mark);
+                break;
+            }
         }
         i += 1;
     }
@@ -1683,9 +1773,19 @@ const KVERSION: &[u8] = b"#1 SMP Thylacine\n";
 // the justification. If a hostname surface ever lands, this reads from it.
 const HOSTNAME: &[u8] = b"(none)\n";
 
-/// Render `node` for `peer`. Directories render empty (they are read via
-/// Treaddir, not Tread).
-pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
+/// Render `node` for `peer`: the bytes at `[off, ...)`, bounded by RENDER_MAX.
+/// Directories render empty (they are read via Treaddir, not Tread).
+///
+/// Almost every renderer here builds its WHOLE file and `render` drops the first
+/// `off` bytes at the end, because every one of their sources is bounded far
+/// under RENDER_MAX -- /ctl/cpu at DTB_MAX_CPUS, a fixed-shape status block, a
+/// single path. `environ` is the exception and the reason `off` exists at all:
+/// its source is an Env of up to ENV_MAX_ENTRIES x ENV_VALUE_MAX bytes, so it
+/// renders the window directly and returns early (V-4c-3 SA-3, #72).
+///
+/// The contract is the same sentence either way, which is the point -- `h_read`
+/// takes what it is given and does no offset arithmetic of its own.
+pub fn render(node: u64, peer: &TSrvPeerInfo, off: u64) -> Render {
     let mut r = Render::new();
     if is_pid_node(node) {
         // A per-pid read. walk_child proved the Proc live when the path was
@@ -1701,12 +1801,24 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
             PK_MAPS => render_maps(pid, &mut r),
             _ => {}
         }
+        // No environ in PID_FILES -- the kernel serves a Proc's environment to
+        // its owner only, and the diorama answers for its connection's own peer
+        // and never for an arbitrary pid. So every per-pid file is whole-render.
+        r.drop_prefix(off);
         return r;
     }
     // /self/*. The peer's liveness is checked HERE rather than inside each
     // renderer: a dead peer must render empty rather than read /proc/<pid>/*
     // for a pid that may since have been reused.
     let alive = peer.alive != 0;
+    // The one windowed renderer, so it returns before the drop_prefix below --
+    // its Render already BEGINS at `off`. A dead peer still renders empty.
+    if node == N_SELF_ENVIRON {
+        if alive {
+            render_environ(peer.pid, off, &mut r);
+        }
+        return r;
+    }
     match node {
         N_SELF_EXE if alive => render_exe(peer.pid, &mut r),
         N_SELF_CMDLINE if alive => render_cmdline(peer.pid, &mut r),
@@ -1717,7 +1829,6 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         ),
         N_SELF_CWD if alive => render_cwd(peer.pid, &mut r),
         N_SELF_MAPS if alive => render_maps(peer.pid, &mut r),
-        N_SELF_ENVIRON if alive => render_environ(peer.pid, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
         N_STAT => render_stat(&mut r),
@@ -1735,6 +1846,7 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         }
         _ => {}
     }
+    r.drop_prefix(off);
     r
 }
 
@@ -1954,6 +2066,19 @@ impl Conn {
         if a.newfid != a.fid && self.fid_find(a.newfid).is_some() {
             return self.err(tag, p9::E_INVAL);
         }
+        // V-4c-3 SA-2 (#71): walking a NAME from a file is ENOTDIR, Linux's own
+        // answer, rather than the ENOENT an empty partial walk would produce.
+        // Scoped to nwname > 0 because a ZERO-length walk is how a client clones
+        // a fid, and cloning a fid that names a file is legal 9P.
+        //
+        // Only the SOURCE gets a real errno. A walk that dies at element k > 0
+        // returns k qids and no error at all -- 9P2000.L's partial-walk rule
+        // leaves no room to say why -- so `dir/file/x` reports "file" resolved
+        // and nothing after it. That is what v9fs does on Linux too: the client
+        // re-walks from the file it did reach and collects the ENOTDIR then.
+        if a.nwname > 0 && !node_is_dir(src_fid.node) {
+            return self.err(tag, p9::E_NOTDIR);
+        }
 
         let mut cur = src_fid.node;
         let mut qids: Vec<p9::Qid> = Vec::new();
@@ -2016,13 +2141,12 @@ impl Conn {
             return self.err(tag, p9::E_ISDIR);
         }
         let peer = self.peer();
-        let r = render(f.node, &peer);
+        // V-4c-3 SA-3 (#72): render is given the offset and hands back the bytes
+        // AT it, so there is no slice to get wrong here. An offset past the end
+        // yields an empty Render, which is the EOF the old `off >= body.len()`
+        // early return produced.
+        let r = render(f.node, &peer, a.offset);
         let body = r.bytes();
-        let off = a.offset as usize;
-        if off >= body.len() {
-            return p9::build_rread(&mut self.out_buf, tag, &[]);
-        }
-        let avail = body.len() - off;
         // V-4c-3 F2: saturating, because Tversion accepts any u32 msize
         // (including 0) and negotiates min(client, SRV_MSIZE) with no floor, so
         // a raw `msize - 11` UNDERFLOWS for any negotiated msize < 11. This
@@ -2032,8 +2156,8 @@ impl Conn {
         // /srv/diorama reach it. netd, ptyfs and corvus all spell this exact
         // expression saturating; the diorama was the outlier.
         let cap = (a.count as usize).min((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4));
-        let n = avail.min(cap);
-        p9::build_rread(&mut self.out_buf, tag, &body[off..off + n])
+        let n = body.len().min(cap);
+        p9::build_rread(&mut self.out_buf, tag, &body[..n])
     }
 
     fn h_readdir(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -2208,11 +2332,29 @@ impl Conn {
         };
         let f = self.fids[i].unwrap();
         let is_dir = node_is_dir(f.node);
-        let size = if is_dir {
+        // V-4c-3 SA-3 (#72): environ reports 0, not a rendered length.
+        //
+        // The self-sufficient reason: its content is a WINDOW now, so there is no
+        // total to report without reading the whole file on every stat -- and the
+        // pre-#72 answer, the TRUNCATED length, was a lie the moment an
+        // environment passed 4 KiB. 0 is the only number here that is not a
+        // guess, and it says the true thing: read to EOF.
+        //
+        // It also matches the source. devproc_stat_native (kernel/devproc.c)
+        // zeroes the whole t_stat and never sets size for ANY /proc file --
+        // verified, not assumed -- so this reports what the surface it
+        // re-presents reports. Linux is understood to do the same for
+        // /proc/*/environ, generated rather than stored; that corroborates the
+        // choice but is not what it rests on.
+        //
+        // Deliberately NOT extended to the rest: their sources are bounded, one
+        // render measures them exactly, and a stat that agrees with its read is
+        // worth more than symmetry with a zero.
+        let size = if is_dir || f.node == N_SELF_ENVIRON {
             0u64
         } else {
             let peer = self.peer();
-            render(f.node, &peer).bytes().len() as u64
+            render(f.node, &peer, 0).bytes().len() as u64
         };
         let q = self.qid_of(f.node);
         let mode = if is_dir { DIR_MODE } else { FILE_MODE };
@@ -2321,8 +2463,14 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(N_PROC, b"meminfo") != Some(N_MEMINFO) {
         return Err("walk /proc/meminfo");
     }
-    // A file has no children, and a miss is a miss.
-    if walk_child(N_SELF_EXE, b"anything").is_some() {
+    // A file has no children, and a miss is a miss. V-4c-3 SA-2 (#71) extends
+    // that to the two names every path normalizer tries: `<file>/..` and
+    // `<file>/.` must MISS, or a walker probing a component to classify it reads
+    // a file as a directory.
+    if walk_child(N_SELF_EXE, b"anything").is_some()
+        || walk_child(N_SELF_EXE, b"..").is_some()
+        || walk_child(N_SELF_EXE, b".").is_some()
+    {
         return Err("walked into a file");
     }
     if walk_child(N_ROOT, b"nope").is_some() {
@@ -2361,16 +2509,16 @@ pub fn selftest() -> Result<(), &'static str> {
     // These render the SAME for any peer, dead or alive -- they describe the
     // phenotype, not the Proc, so a peer-dependent answer would be a bug.
     let dead = TSrvPeerInfo::default(); // alive == 0
-    if render(N_OSTYPE, &dead).bytes() != b"Linux\n" {
+    if render(N_OSTYPE, &dead, 0).bytes() != b"Linux\n" {
         return Err("ostype");
     }
-    if render(N_HOSTNAME, &dead).bytes() != b"(none)\n" {
+    if render(N_HOSTNAME, &dead, 0).bytes() != b"(none)\n" {
         return Err("hostname");
     }
     // osrelease must parse as Linux <major>.<minor>.<patch> with a major high
     // enough to clear glibc's minimum-kernel refusal.
     {
-        let rel = render(N_OSRELEASE, &dead);
+        let rel = render(N_OSRELEASE, &dead, 0);
         let b = rel.bytes();
         if b.len() < 6 || !b[0].is_ascii_digit() || b[1] != b'.' {
             return Err("osrelease shape");
@@ -2413,7 +2561,10 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(pid_qid(7, PK_DIR), b"nope").is_some() {
         return Err("resolved a nonexistent per-pid file");
     }
-    if walk_child(pid_qid(7, PK_MAPS), b"anything").is_some() {
+    if walk_child(pid_qid(7, PK_MAPS), b"anything").is_some()
+        || walk_child(pid_qid(7, PK_MAPS), b"..").is_some()
+        || walk_child(pid_qid(7, PK_MAPS), b".").is_some()
+    {
         return Err("walked into a per-pid file");
     }
 
@@ -2553,40 +2704,62 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // --- a dead peer renders EMPTY rather than a stale or fabricated answer
-    if !render(N_SELF_EXE, &dead).bytes().is_empty() {
+    if !render(N_SELF_EXE, &dead, 0).bytes().is_empty() {
         return Err("dead peer served an exe");
     }
-    if !render(N_SELF_STATUS, &dead).bytes().is_empty() {
+    if !render(N_SELF_STATUS, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a status");
     }
-    if !render(N_SELF_CMDLINE, &dead).bytes().is_empty() {
+    if !render(N_SELF_CMDLINE, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a cmdline");
     }
-    if !render(N_SELF_CWD, &dead).bytes().is_empty() {
+    if !render(N_SELF_CWD, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a cwd");
     }
-    if !render(N_SELF_MAPS, &dead).bytes().is_empty() {
+    if !render(N_SELF_MAPS, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a maps");
     }
-    if !render(N_SELF_ENVIRON, &dead).bytes().is_empty() {
+    if !render(N_SELF_ENVIRON, &dead, 0).bytes().is_empty() {
         return Err("dead peer served an environ");
     }
 
-    // --- V-4b-6: the environ whole-record trim, driven directly. The live path
-    // cannot produce a truncated block on demand (it would want a >4 KiB
-    // environment on this very Proc), and the property is the one that keeps a
-    // truncated read from parsing as a complete variable.
-    if trim_to_last_record(b"A=1\0BB=22\0") != 10 {
-        return Err("trim shortened a whole block");
+    // --- V-4c-3 SA-3 (#72): the offset contract. This REPLACES the environ
+    // whole-record trim legs, because the trim is gone: environ is a real window
+    // now, so a record straddling the boundary continues at the next offset
+    // instead of being dropped along with everything after it.
+    //
+    // drop_prefix is what carries the offset for every whole-render file, so its
+    // three boundaries are pinned directly -- shortening by too much or too
+    // little would serve the wrong bytes silently, at an offset the client never
+    // sees questioned.
+    {
+        let mut r = Render::new();
+        r.push(b"0123456789");
+        r.drop_prefix(0);
+        if r.bytes() != b"0123456789" {
+            return Err("drop_prefix(0) moved bytes");
+        }
+        r.drop_prefix(4);
+        if r.bytes() != b"456789" {
+            return Err("drop_prefix mid-buffer");
+        }
+        r.drop_prefix(6);
+        if !r.bytes().is_empty() {
+            return Err("drop_prefix of the whole buffer");
+        }
+        let mut r2 = Render::new();
+        r2.push(b"abc");
+        r2.drop_prefix(9999); // past the end: EOF, never an underflow
+        if !r2.bytes().is_empty() {
+            return Err("drop_prefix past the end");
+        }
     }
-    if trim_to_last_record(b"A=1\0BB=2") != 4 {
-        return Err("trim kept a partial trailing record");
+    // End to end through render, on a node whose content is a constant.
+    if render(N_OSTYPE, &dead, 2).bytes() != b"nux\n" {
+        return Err("render ignored the offset");
     }
-    if trim_to_last_record(b"LONGVAR=abc") != 0 {
-        return Err("trim served a headless fragment");
-    }
-    if trim_to_last_record(b"") != 0 {
-        return Err("trim of an empty block");
+    if !render(N_OSTYPE, &dead, 6).bytes().is_empty() {
+        return Err("render past the end was not EOF");
     }
 
     // --- V-4b-2: the native-maps -> Linux-maps translation, driven directly so
@@ -2653,7 +2826,7 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // --- uptime is always renderable and monotonic-shaped
-    let up = render(N_UPTIME, &dead);
+    let up = render(N_UPTIME, &dead, 0);
     if up.bytes().is_empty() {
         return Err("uptime empty");
     }
@@ -2736,11 +2909,23 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(cache, b"..") != Some(cpu_qid(0)) || walk_child(index0, b"..") != Some(cache) {
         return Err("cache chain .. skipped a level");
     }
-    // The LEAF's `..` is reachable too: h_walk does not require the source fid
-    // to be a directory, so a catch-all here would answer .../system/cpu and
-    // skip two levels -- a wrong answer rather than an error.
-    if walk_child(linesz, b"..") != Some(index0) {
-        return Err("leaf .. skipped two levels");
+    // V-4c-3 SA-2 (#71): the LEAF is a file, so NOTHING resolves from it -- `..`
+    // and `.` included. This is the leg that changed: the cache leaf used to be
+    // the one node in the tree from which `..` walked, because the cpu arm had no
+    // is-a-dir gate while the pid and static arms did.
+    if walk_child(linesz, b"..").is_some() || walk_child(linesz, b".").is_some() {
+        return Err("a file served .. or .");
+    }
+    // The parent relation itself still holds for every kind including the leaf.
+    // It is checked HERE rather than through walk_child precisely because the
+    // gate now hides it: a `_ =>` catch-all would answer .../system/cpu from the
+    // leaf and skip two levels, and nothing else would notice.
+    if cpu_parent(0, CK_CACHE) != cpu_qid(0)
+        || cpu_parent(0, CK_INDEX0) != cache
+        || cpu_parent(0, CK_LINESZ) != index0
+        || cpu_parent(0, CK_DIR) != N_SYSFS_CPU
+    {
+        return Err("cpu_parent skipped a level");
     }
 
     // --- V-4c-1: parse_cpu_name is the resolution gate, like parse_pid. Unlike

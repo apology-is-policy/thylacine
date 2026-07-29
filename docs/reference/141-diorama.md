@@ -306,8 +306,15 @@ a `/proc` would otherwise carry, and the probe gates it.
   the node index, so resolution can never dangle — no dynamic slots, hence none of
   the slot-reuse hazards netd and ptyfs must defend against (net-3d F1).
 - **Bounded renders.** Every write goes through `Render::push`, which is
-  cap-checked against `RENDER_MAX` (1024); an over-long render truncates rather
-  than overruns.
+  cap-checked against `RENDER_MAX` (4096); an over-long render truncates rather
+  than overruns. (This line said 1024 until #72 — the constant moved and the
+  prose did not, the same stale-comment class the V-4c-3 round found twice.)
+- **`render` takes the read offset.** Its contract is one sentence for every
+  node: *the bytes at `[off, ...)`*. Almost every renderer builds its whole file
+  and `render` drops the first `off` bytes at the end, because their sources are
+  bounded far under `RENDER_MAX`. `environ` is the exception and the reason the
+  parameter exists — it renders that window directly (#72, below). `h_read` does
+  no offset arithmetic of its own, so it cannot get the two cases confused.
 - **Live peer, per use.** `t_srv_peer` is queried per read rather than cached at
   accept: `alive`/`pid` are alive-gated, so a peer that exited renders **empty**
   instead of a stale answer. The selftest pins this (`alive == 0` → empty).
@@ -458,12 +465,15 @@ because Thylacine's `/env` has no flat form for it to be in a *different* shape
 from. The block is synthesized for this purpose, so there is no translation to get
 wrong and adding one would only add a place to lose bytes.
 
-The only local work is a **whole-record trim**: `RENDER_MAX` bounds what this
-server serves, and a block cut mid-record would hand the consumer a truncated
-value that parses as a complete one. `trim_to_last_record` backs up to the last
-terminator (it is its own function so the selftest can drive it -- the live path
-cannot produce a truncated block on demand). No terminator at all means one record
-longer than the buffer: serve nothing rather than a headless fragment.
+There is no local work left at all. Since #72 (below) the read is a **window**:
+`render_environ` `t_pread`s the native file at the requested offset and pushes
+the bytes verbatim, so a record straddling a buffer boundary simply continues at
+the next offset, exactly as it does through the native file.
+
+Until #72 it read the first 4 KiB and backed up to the last NUL — a
+whole-record trim that was locally correct and globally the bug, because
+everything past the trim was *gone*, not deferred. `trim_to_last_record` is
+retired with the cap that made it necessary.
 
 ### Why it is `/self` only
 
@@ -623,7 +633,97 @@ form fails the boot with `diorama: selftest FAIL: parse_kv_dec wrapped an
 over-long digit run into a value`. `u64::MAX` itself still parses, and an
 overflowing key does not poison a later well-formed one.
 
-Still open from the same round: #71 (`<file>/..` resolves where Linux gives
-`ENOTDIR`) and #72 (`RENDER_MAX` re-caps `environ` at 4 KiB). Both need a
-deliberate re-shape of the walk arm and the render path respectively, not a
-drive-by.
+## The V-4c-3 shape pass (#71 + #72)
+
+The round's last two P3s, closed together because both are the same kind of
+claim: the diorama answers as a **9P server**, and its shape has to be right at
+that surface rather than at "whatever our own kernel happens to ask for".
+
+### #71 — nothing is a child of a file
+
+SA-2 reported that `h_walk` does not gate on the source fid being a directory, so
+`/dio/proc/self/exe/..` resolves where Linux gives `ENOTDIR`. **That example was
+wrong**, and the scope with it: `walk_child` already gated in two of its three
+arms — the per-pid arm on `qid_kind != PK_DIR`, the static arm on
+`!NODES[dir].is_dir` — so both `exe/..` and `<pid>/maps/..` already missed. Only
+the **cpu arm** was ungated, which made the cache leaf
+`cpuN/cache/index0/coherency_line_size` the single node in the whole tree from
+which `..` (and `.`) walked. The note generalized one deliberate exemption into a
+missing gate; reading `h_walk` alone it is true that the gate is not *there*, but
+it does not follow that there is no gate.
+
+The fix hoists **one** gate to the top of `walk_child` and deletes the two
+per-arm ones it subsumes. The exemption goes away rather than growing a special
+case, and `dir < N_COUNT` becomes a precondition of the static arm — which is
+what keeps its `NODES` index in bounds.
+
+The cpu `..` match moves out to `cpu_parent(n, kind)`, **total over every kind
+including the leaf**. The gate now makes the leaf case unreachable, and that is
+exactly why the arm has to stay correct: V-4c-2c's warning was that a `_ =>`
+catch-all would answer `.../system/cpu` from the leaf and skip *two* levels — a
+wrong answer rather than an error — and a gate with a wrong answer behind it is
+one edit away from being a wrong answer again.
+
+`h_walk` additionally answers **`ENOTDIR`** rather than the `ENOENT` an empty
+partial walk produced, scoped to `nwname > 0` because a zero-length walk is how a
+client clones a fid and cloning a fid that names a file is legal 9P.
+
+**What is and is not reachable in-guest.** Neither half is observable through
+Thylacine's own resolver, and the reason is worth recording:
+
+* `stalk` normalizes `..` itself — it pops its trail (`kernel/stalk.c:237`), which
+  is what contains resolution at `root_spoor` for I-28 — so `..` never reaches a
+  Dev. Only a direct 9P client sees it.
+* `Dev.walk` returns a `Walkqid *` with no errno channel, so stalk's
+  single-component arm pins `err = T_E_NOENT` (`stalk.c:522/551`) and the new
+  `ENOTDIR` is collapsed on the way out. That is a kernel-side gap affecting
+  every Dev, not a diorama one — **task #79**, the same class as the tracked
+  unlink-path and #99 create-path errno losses.
+
+So the coverage is the selftest, revert-probed twice: disabling the gate fails
+the boot with `diorama: selftest FAIL: walked into a file`, and folding
+`cpu_parent`'s leaf arm into the catch-all fails it with `cpu_parent skipped a
+level`.
+
+### #72 — `environ` is a window, not a slice
+
+SA-3 reported that `h_read` renders whole-file into a 4096-byte `Render` and
+slices, capping **every** file at `RENDER_MAX`. For the bounded ones that is far
+above the content; for `environ` it was the binding constraint, and it re-imposed
+precisely the failure V-4b-6's offset-aware `env_render_environ` exists to
+prevent — an `Env` holds up to `ENV_MAX_ENTRIES × ENV_VALUE_MAX`, and past 4 KiB
+the tail vanished. Vanished *silently*: a dropped variable does not read as a
+truncated file, it reads as a variable that was never set.
+
+`render` now takes the offset. `environ` fetches its window with `read_native_at`
+(a `t_pread` reader, **not** a drop-in for `read_native` — devctl is not
+`.seekable`, so every `/ctl` source in the file must keep the cursor reader or
+take `ESPIPE`), and every other renderer keeps building whole and gets
+`Render::drop_prefix(off)` applied for it.
+
+`h_getattr` reports **size 0** for `environ` alone. The self-sufficient reason is
+that its content is a window: there is no total to report without reading the
+whole file on every stat, and the pre-#72 answer — the *truncated* length — was a
+lie the moment an environment passed 4 KiB. 0 is the only number here that is not
+a guess, and it says the true thing: read to EOF.
+
+It also matches the source. `devproc_stat_native` zeroes the whole `t_stat` and
+never sets size for **any** `/proc` file (verified in `kernel/devproc.c`, not
+assumed), so this reports what the surface it re-presents reports. Linux is
+understood to do the same for `/proc/*/environ`, generated rather than stored;
+that corroborates the choice but is not what it rests on. Deliberately not
+extended to the rest: their sources are bounded, one render measures them
+exactly, and a stat that agrees with its read is worth more than symmetry with a
+zero.
+
+The latent sibling SA-3 also named is closed: `render_cpuinfo` and
+`render_stat`'s per-CPU loop now **commit whole units** (the `render_maps` row
+idiom), so an overflow drops a whole block or line rather than cutting one in
+half. Unreachable at `DTB_MAX_CPUS = 8` either way.
+
+Proven in-guest by a new probe leg that builds a deliberately >4 KiB environment
+through `/env` and checks the last record survives: `diorama-probe: environ>cap
+bytes=5055`. Revert-probed — restoring the whole-render path fails the boot with
+`diorama-probe: FAIL environ stopped at the render cap -- the >4 KiB tail was
+dropped`. The pre-existing `environ bytes=19` leg cannot see this, because at
+that size a whole-file render and a windowed one are the same bytes.
