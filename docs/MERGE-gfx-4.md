@@ -61,7 +61,46 @@ loosen one to make a merge pass.
 
 ---
 
-## Round 3: OUTSTANDING (notes written 2026-07-29 by the aux agent)
+## Round 3: DONE (2026-07-29, by the main agent)
+
+`gfx-4` @ **`df9de8d4`** merged into `main` at **`93593a6f`**. All 26 outstanding
+commits are in: VIVARIUM **V-4b** (1..6 + close), **V-4c** (1, 2a/2b/2c, 3), and
+**#76**. The aux notes below were accurate — the overlap was exactly the twelve
+files they name, and re-measuring at the current tips (main had moved on by
+W1u-a/W1u-b, which touch none of them) reproduced the same list.
+
+**Three conflicts, all resolved by keeping both sides.** One correction to the
+notes: CLAUDE.md and `docs/ARCHITECTURE.md` carry **different text** for the same
+LS-8 row (ARCH is the authoritative prosecution copy — 12445 chars vs CLAUDE's
+10483), so they were merged **separately**. Copying one result into both would
+have silently truncated the ARCH row.
+
+**What the auto-merges needed, and this is the part worth carrying forward.** The
+notes predicted conflicts in `tools/interactive/*`; git produced **none** — it
+merged them silently. That is the more dangerous outcome, not the safer one, so
+each was checked in both directions:
+
+| Check | Result |
+|---|---|
+| Six harness files vs main's pre-merge versions | **byte-identical** — no union, no duplicated logic |
+| Aux-only lines in any of the six | **zero** — preferring main drops nothing (the notes' claim, verified rather than taken) |
+| All three cons TX tests registered in `test.c` **and running** | ✅ all three PASS |
+| Suite arithmetic | base 1208 + main's 1 + aux's 9 = **1218**, matches observed |
+| `_Static_assert(sizeof(struct Proc) == 392)` | holds |
+| #80's `kernel/proc.c` hunk | every added line re-checked present |
+| `docs/reference/111-cons.md` | both sides' sections survive |
+| pouch series numbering | no duplicate numbers; `0031` in `series`, 31/31 parity |
+
+**Gates on the merged tree**: default suite **1218/1218** + boot OK + 0
+EXTINCTION; SMP gate **40/40 PASS, 0 corruption**; LS-CI **31/32 + 1 expected
+SKIP** (`ls-gfx-mp`, a missing optional host artifact — build it with
+`tools/build.sh quake-host` if you want 32/32).
+
+**V-1b is now unblocked**: both halves of its stated condition are met.
+
+---
+
+## Round 3: the aux-side notes (written 2026-07-29, before the merge)
 
 `gfx-4` is at **`15617895`**, pushed to both mirrors. The last `gfx-4` commit
 already in `main` is **`7b917e55`** (round 2), so **25 commits are outstanding**:
