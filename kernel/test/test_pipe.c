@@ -48,6 +48,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/pipe.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // #96: struct t_stat + T_S_IFIFO
 #include <thylacine/types.h>
 
 // =============================================================================
@@ -389,4 +390,60 @@ void test_pipe_compose_with_spoor_transport(void) {
     spoor_clunk(wr1);
     spoor_clunk(rd2);
     spoor_clunk(wr2);
+}
+
+// #96 -- fstat(2) on a pipe must SUCCEED and report S_IFIFO.
+//
+// Found by the CL-5 build storm: GNU make hands every concurrent job but the
+// first the read end of a broken pipe on fd 0, and clang's
+// FixupStandardFileDescriptors treats a non-EBADF fstat failure on fd 0/1/2 as
+// FATAL -- so `make -j4` had job 1 succeed and its siblings exit 1 with no
+// diagnostic at all. devpipe simply had no .stat_native, and
+// spoor_stat_native returns -1 when the slot is NULL.
+//
+// This drives spoor_stat_native -- the exact function SYS_FSTAT calls -- not
+// the vtable slot directly, so a future refactor that reintroduces the NULL
+// slot fails here.
+void test_pipe_fstat_reports_fifo(void) {
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create returns 0");
+
+    struct t_stat st;
+    // Poison, so a stat_native that returns 0 without filling the struct
+    // cannot pass by leaving stale zeroes that happen to look right.
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xA5;
+    TEST_EXPECT_EQ(spoor_stat_native(rd, &st), 0,
+        "fstat on the READ end succeeds (pre-#96 this returned -1)");
+    TEST_EXPECT_EQ((long)(st.mode & T_S_IFMT), (long)T_S_IFIFO,
+        "read end reports S_IFIFO");
+    TEST_EXPECT_EQ((long)(st.mode & 07777u), 0600L,
+        "read end reports 0600");
+    TEST_EXPECT_EQ((long)st.size, 0L, "pipe reports size 0");
+    TEST_EXPECT_EQ((long)st.nlink, 1L, "pipe reports nlink 1");
+
+    struct t_stat st_w;
+    for (size_t i = 0; i < sizeof(st_w); i++) ((u8 *)&st_w)[i] = 0xA5;
+    TEST_EXPECT_EQ(spoor_stat_native(wr, &st_w), 0,
+        "fstat on the WRITE end succeeds");
+    TEST_EXPECT_EQ((long)(st_w.mode & T_S_IFMT), (long)T_S_IFIFO,
+        "write end reports S_IFIFO");
+    // One pipe, one inode: the two ends are the same object.
+    TEST_ASSERT(st.qid_path == st_w.qid_path,
+        "both ends of ONE pipe share a qid_path");
+    TEST_ASSERT(st.qid_path != 0,
+        "qid_path is stamped (0 was the historical unset value)");
+
+    // ...but two DIFFERENT pipes must not look like the same file, or any
+    // caller doing file-identity comparison silently conflates them.
+    struct Spoor *rd2 = NULL, *wr2 = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd2, &wr2), 0, "second pipe_create returns 0");
+    struct t_stat st2;
+    TEST_EXPECT_EQ(spoor_stat_native(rd2, &st2), 0, "fstat on pipe 2 succeeds");
+    TEST_ASSERT(st2.qid_path != st.qid_path,
+        "two DISTINCT pipes report distinct qid_paths");
+
+    spoor_clunk(rd2);
+    spoor_clunk(wr2);
+    spoor_clunk(rd);
+    spoor_clunk(wr);
 }

@@ -346,6 +346,108 @@ the same counters) is unchanged as the recorded I-32 seam; and a shell-level
 ergonomic for requesting a raise (a `ulimit`-shaped verb) is unbuilt — today
 the raise is a spawn-time decision made by whatever launches the build.
 
+### 7.2 The build storm (CL-5) — as-built
+
+The charter's second half: *`make -jN` of a nontrivial project completes on
+the device; numbers recorded, no committed target.*
+
+**The project is GNU make 4.4.1 building itself.** Chosen over the charter's
+sketched `zlib` for three reasons, each of which turns out to matter more than
+the name on the tin:
+
+1. It is **already Thylacine-configured** — `usr/ports/gnumake/config.h` is the
+   hand-derived autoconf output. Thylacine has no POSIX shell, so a project
+   whose build begins with `./configure` cannot be built on-device at all.
+2. It is **self-referential**: `/bin/make` (cross-built on the host) builds a
+   new make from source, and the result is an *executable we can run*.
+3. **Zero new vendoring**, and the object census is literally shared with
+   `build_gnumake` (`GNUMAKE_SRC_OBJS`/`GNUMAKE_LIB_OBJS` in `tools/build.sh`),
+   so the storm builds exactly what the host cross-build builds. A hand-copied
+   object list would have rotted at the first census change.
+
+`stage_storm` materializes `/storm` (sources + a **generated** Makefile) and
+`stage_clade` gained a third multicall copy, a **C-mode `clang`** — a `clang++`
+copy sets `CCCIsCXX` and would compile the storm's `.c` sources as C++.
+
+Every recipe is **shell-free by construction**: GNU make's metachar set is
+``#;\"*?[]&|<>(){}$`^`` (`src/job.c` `sh_chars_sh`), so the three
+`-D LIBDIR='"..."'`-style flags the host build passes had to move into a
+generated `-include storm-defs.h` — the double quote alone would have dragged
+every recipe onto a `/bin/sh` that does not exist.
+
+**The proof chain is four links, because only the last two are hard to fake:**
+`make` exits 0 → the artifact is ~380 KiB → **it runs** (`--version`) → **it
+drives a build of its own** (a recipe executes, output verified). A toolchain
+that miscompiles can still satisfy the first two.
+
+#### Measured (2026-07-29, `-smp 4`, 2 GiB, HVF)
+
+| | |
+|---|---|
+| First `clang -c` of the boot (cold Image cache) | **1158 ms** |
+| Per-TU once clang is resident | **~79 ms** (2759 ms / 35 TUs) |
+| Peak anon for the largest TU (`main.c`, 121 KiB) | **2823 pages / 11 MiB** |
+| `make -B -j1` (35 TUs + link) | **2759 ms** |
+| `make -B -j4` (35 TUs + link) | **1033 ms** |
+| Parallel speedup on 4 vCPUs | **2.67×** |
+| Artifact | 380304 B (host cross-build: 380232 B) |
+
+Both passes run `-B` (always-make): the pool persists across boots, so without
+it the second boot would find every object current and exit 0 having compiled
+nothing — a vacuous pass indistinguishable from a real one.
+
+The `-j1` control is kept permanently, not just as a baseline: it is the
+differential that **diagnosed #96** (below), and if the storm ever reddens
+again it says immediately whether parallelism is the variable.
+
+Note the first-invocation cost (1158 ms) versus the resident cost (~79 ms) —
+a **~15×** spread. That is the REVENANT Image cache paying for the 95 MiB
+multicall, and it is why the per-TU figure is only meaningful once warm.
+
+#### What the storm found: #96 (fstat on a pipe)
+
+The storm's first run failed in a way no existing gate could have caught, and
+the shape is worth recording.
+
+`make -j4` had **job 1 succeed and every concurrent sibling exit 1 with no
+diagnostic at all**, in under 180 ms. `-j1` over the identical cold tree
+completed and produced a working binary. That one differential localized it to
+parallelism, and from there the mechanism is a three-link chain:
+
+1. GNU make gives the real stdin to only **one** job; every other concurrent
+   job gets `get_bad_stdin()` (`src/posixos.c`) — the read end of a broken
+   pipe — dup2'd onto fd 0.
+2. clang's `FixupStandardFileDescriptors` fstats fds 0/1/2 at startup and
+   treats a **non-EBADF failure as fatal**. This is CL-4 masking layer 3,
+   already fixed twice: once for the console, once for `/dev`.
+3. `devpipe` had **no `.stat_native`**, and `spoor_stat_native` returns -1 when
+   the slot is NULL. So fstat on a pipe failed, and clang died before its
+   diagnostic engine could say why.
+
+**The pipe was the third door, and nothing had ever opened it** — no pouch
+program had had a pipe on a standard fd at startup until now. POSIX *requires*
+`fstat(2)` on a pipe to succeed and report `S_IFIFO`, so this was a real gap
+well beyond the storm: any program in a shell pipeline is on that path.
+
+Pointedly, **the CL-1c-2 `make -j3` gate could not have caught it**: its
+children are `/bin/cp`, which produce no output and are verified by file
+content — a silently-broken concurrent child looks exactly like a working one.
+It took a child that *talks* to make the failure visible.
+
+Fixed by `devpipe_stat_native` (`T_S_IFIFO | 0600`, size 0), plus a monotonic
+`qid.path` stamped into **both** ends so fstat reports one inode per pipe and
+distinguishes two pipes — a same-inode-for-every-pipe report is the kind of
+latent wrong answer that surfaces much later inside someone's file-identity
+comparison. Regression `pipe.fstat_reports_fifo`, revert-probed.
+
+The completeness sweep (the CL-4 F2 lesson — that fix covered only one door)
+found **8 Devs lack `.stat_native`**, of which exactly two are EL0-reachable on
+a live fd: `pipe` (fixed) and `devnotes` (task #97 — fail-closed, no consumer,
+and its `st_mode` type is a real ABI choice not worth guessing at mid-storm).
+`null`/`zero`/`full`/`random` are reachable only through `/dev`, whose `devdev`
+owns the Spoor and has `stat_native`; `devcap` and `devnone` are mounted
+nowhere.
+
 ---
 
 ## 8. The JIT capability (realizing JIT-ON-WX; proposed I-42)
@@ -452,7 +554,7 @@ no bolted-on chasing).
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite. **LANDED** (§16.14; `build_libcxx` via `LLVM_ENABLE_RUNTIMES` against the pouch sysroot from `$LLVMFORK`; `0027-pouch-remove` fixed the surfaced `remove(3)` gap). | **DONE:** `pouch-hello-cxx: ALL C++ WIRES PASS` (EH + RTTI + threads + TLS-dtors + iostreams + std::filesystem) on-device; boot OK, 0 EXT, suite 1196/1196 | **CLOSED 0 P0 / 1 P1 / 0 P2 / 4 P3, NOT dirty** (Opus-4.8-max + self-audit; F1 dead-`remove_all` masking-diagnostic FIXED, `-D__linux__` ODR resolved SOUND against the real llvm-thylacine source; F2/F3/F4 folded, F2b/F5 tracked); `memory/audit_cl2_closed_list.md` | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired. **CL-3a LANDED** (the driver — 8-file fork change-map + `ThylacineTargetInfo` + a Fuchsia-templated `Thylacine` ToolChain; fork commit `df919c8dd`; §16.15a). **CL-3b LANDED — THE CL-3 ARC IS COMPLETE** (the wrapper retirement: `pouch-clang`/`pouch-ld`/`build_libcxx` onto the fork driver, fork-less fallback kept; F2b closed at the root — the fork `__cxa_thread_atexit` guard gains `__thylacine__`, so `-D__linux__` retires and the int32/int64 split is ELIMINATED; §16.15b). | **DONE:** the real triple cross-builds byte-compatible artifacts; fork-driver-linked `pouch-hello-*` + a fork-clang-built, `clang++`-driver-linked `pouch-hello-cxx` boot + `ALL C++ WIRES PASS`; boot OK, 0 EXT, suite 1196/1196, SMP 40/40 (kernel byte-unchanged) | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade`. **LANDED — THE CL-4 ARC IS COMPLETE** (§16.16): a five-layer masking stack (ELF OSABI / raw 6-arg mmap / console fstat / empty InstalledDir / the cc1-argv prepend); fork commits `ce5a1c519` (CL-4b) + `e7d6be5f8` (CL-4c); durable patches `usr/ports/llvm/patches/0001..0006`. | **DONE:** `clang++ -O2` compiles, links (ld.lld), and runs a real C++ program on-device — STL + a live throw/catch — via spawned cc1, in-process cc1 (`-c`), and link-only; `CLADE-HELLO sum=285 eh=1`, suite 1197/1197, boot OK, 0 EXT | focused round CLOSED 0 P0 / 2 P1 / 1 P2 / 3 P3, NOT dirty (`memory/audit_cl4_closed_list.md`) | — |
-| **CL-5** | Build storms: on-device parallel builds of real projects (zlib → sqlite → an LLVM subset); the F4 budget mechanism lands; perf measured (the CHASE toolkit) | `make -jN` of a nontrivial project completes; numbers recorded, no committed target | the F4 kernel change gets its own round | ThinLTO, sanitizers-on-device: out |
+| **CL-5** | Build storms + the F4 budget mechanism. **LANDED** (§7.1 mechanism, §7.2 storm): the spawn-time per-Proc page budget (measured first — a 1959-byte template-heavy TU costs 250 MiB, 97.8% of the default), and the on-device storm — **GNU make 4.4.1 builds itself under `make -jN`** (35 TUs; `-j1` 2759 ms / `-j4` 1033 ms = **2.67×** on 4 vCPUs; the artifact runs AND drives a build of its own). The storm found **#96** (fstat on a pipe returned -1 → every concurrent `-j4` job died silently). | **DONE:** `make -jN` of a real project completes on-device; numbers recorded, no committed target | **DONE:** F4 mechanism round CLOSED 0/0/0/3 (`memory/audit_cl5_closed_list.md`); the storm is pure build-system + a 1-slot Dev addition | ThinLTO, sanitizers-on-device: out. **zlib/sqlite/LLVM-subset** not built — GNU make was chosen instead (already Thylacine-configured; no `./configure` is runnable without a POSIX shell) |
 | **CL-6** | clangd + Nora C/C++ | diagnostics/hover/def in Nora on a C++ file | none (userspace client) | lldb-dap → post-arc |
 | **CL-7k** | The JIT capability (kernel): code Burrow + `SYS_ICACHE_SYNC` + `CAP_JIT`; I-42 | the `libthyla_rs::jit` prover (emit→sync→call; ungated Proc **denied**) | **prosecute hard** (W^X-adjacent; own focused round; F8 spec posture) | — |
 | **CL-7** | Mesa/llvmpipe + SDL-GL + GLQuake | **GLQuake renders via llvmpipe through Tapestry**; gears smoke in CI | focused round (the ORC mapper + the GL glue's weave lifetime) | lavapipe → stretch |

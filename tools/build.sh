@@ -301,6 +301,13 @@ build_kernel() {
     # (the toolchain ships in the default image); THYLACINE_BAKE_GOROOT=0 opts
     # out for a fast iteration loop, and an absent fork skips gracefully.
     build_go_goroot
+    # Clade CL-5: assemble the build-storm payload (/storm) before the pool
+    # fixture. Cheap (source copies + a generated Makefile) and derived from
+    # the tree, so it must be re-staged on every clade-gate build rather than
+    # left to a manual step like stage_clade's multi-hundred-MiB copy.
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
+        stage_storm
+    fi
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
     # gets copied into the cpio at /etc/stratum/system.key.
@@ -1799,9 +1806,12 @@ build_stratum_pool_fixture() {
     # main`. Keyed on the staged GOROOT existing (build_go_goroot -- default-on
     # since Stage 6; THYLACINE_BAKE_GOROOT=0 opts out and removes the stage).
     local pool_size="64M"
-    # CL-4b: the device toolchain (/clade) is ~280M staged (2 multicall copies +
-    # resource headers + sysroot); at ~3.3x bake amplification + on-device /tmp
-    # compile churn a clade-only gate needs ~2 GiB. Stacks with GOROOT if both on.
+    # CL-4b: the device toolchain (/clade) is ~375M staged (CL-5 made it THREE
+    # multicall copies -- clang++/ld.lld/clang -- plus resource headers and the
+    # sysroot); at ~3.3x bake amplification that is ~1.25 GiB before a single
+    # on-device compile. Add the CL-5 build storm's own churn (35 objects + a
+    # linked make, written into /storm/out) and a clade gate needs ~3 GiB.
+    # Stacks with GOROOT if both on.
     local bake_clade=0
     if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
         bake_clade=1
@@ -1817,8 +1827,8 @@ build_stratum_pool_fixture() {
         pool_size="2560M"
     fi
     if [[ "$bake_clade" == "1" ]]; then
-        # clade-only -> 2048M; stacked with GOROOT (2560M) -> 4096M.
-        if [[ "$pool_size" == "2560M" ]]; then pool_size="4096M"; else pool_size="2048M"; fi
+        # clade-only -> 3072M; stacked with GOROOT (2560M) -> 5120M.
+        if [[ "$pool_size" == "2560M" ]]; then pool_size="5120M"; else pool_size="3072M"; fi
     fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
@@ -2015,6 +2025,19 @@ populate_stratum_pool() {
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /clade FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: device toolchain baked at /clade"
+    fi
+
+    # --- CL-5: bake the build-storm payload at /storm (rides the same gate --
+    # a storm without /clade has no compiler to drive). Small (~2 MiB of real
+    # project sources + a generated Makefile) next to /clade's ~280 MiB. ---
+    local storm_stage="$BUILD_DIR/storm/stage"
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -f "$storm_stage/Makefile" ]]; then
+        echo "==> populate pool: baking build-storm payload ($storm_stage -> /storm, $(du -sh "$storm_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$storm_stage" /storm \
+            || { echo "==> populate pool: put /storm FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /storm FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: build-storm payload baked at /storm"
     fi
 
     # --- G-7b: the Quake shareware data (-> /quake; QBASEDIR=/quake is
@@ -2546,6 +2569,46 @@ build_tyrquake() {
     ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
 }
 
+# --- the GNU make port's source-prep + object census, shared by the host
+# cross-build (build_gnumake) and the on-device build storm (stage_storm).
+# ONE definition: a Makefile generated from a hand-copied list would rot the
+# moment the census changes, and the storm's whole value is that it builds
+# the SAME project the host build does.
+#
+# The explicit object list (CL-1c census: 30 src + 5 lib gnulib). The alt-OS
+# files (w32/vms/amiga), remote-cstms, guile-under-HAVE_GUILE, load-under-
+# MAKE_LOAD, and lib/alloca.c (musl has alloca) are NOT built.
+GNUMAKE_SRC_OBJS=( ar arscan commands default dir expand file function
+                   getopt getopt1 guile hash implicit job load loadapi
+                   main misc output posixos read remake rule shuffle
+                   signame strcache variable version vpath remote-stub )
+GNUMAKE_LIB_OBJS=( concat-filename findprog-in fnmatch glob getloadavg )
+
+prepare_gnumake_src() {
+    # Materialize the buildable GNU make tree at $1: the pruned-pristine
+    # vendored sources + the Thylacine port config (the SDL2/musl idiom --
+    # the vendored tree is never edited).
+    local dest="$1"
+    local mk_vendor="$REPO_ROOT/third_party/gnumake"
+    local port_dir="$REPO_ROOT/usr/ports/gnumake"
+
+    if [[ ! -f "$mk_vendor/src/job.c" ]]; then
+        echo "==> gnumake: vendored source missing at $mk_vendor" >&2
+        exit 1
+    fi
+    rm -rf "$dest"
+    mkdir -p "$dest/src" "$dest/lib"
+    cp "$mk_vendor"/src/*.c "$mk_vendor"/src/*.h "$dest/src/"
+    cp "$mk_vendor"/lib/*.c "$mk_vendor"/lib/*.h "$mk_vendor"/lib/*.in.h "$dest/lib/"
+    cp "$port_dir/config.h" "$dest/src/config.h"
+    cp "$port_dir"/generated/fnmatch.h "$port_dir"/generated/glob.h "$dest/lib/"
+    local p
+    for p in "$port_dir"/patches/*.patch; do
+        [[ -e "$p" ]] || continue
+        patch -s -p1 -t -d "$dest" -i "$p"
+    done
+}
+
 build_gnumake() {
     # Clade CL-1c (docs/LLVM-DESIGN.md) -- cross-build GNU make 4.4.1 for
     # aarch64-thylacine. make is the first REAL parallel-spawner port: its
@@ -2589,19 +2652,9 @@ build_gnumake() {
     fi
 
     echo "==> building GNU make 4.4.1 (aarch64-thylacine)"
-    rm -rf "$mk_src" "$mk_obj"
-    mkdir -p "$mk_src/src" "$mk_src/lib" "$mk_obj" "$progs_out"
-    # Copy the pruned-pristine tree, then apply the Thylacine port config
-    # (the SDL2/musl idiom -- the vendored tree is never edited).
-    cp "$mk_vendor"/src/*.c "$mk_vendor"/src/*.h "$mk_src/src/"
-    cp "$mk_vendor"/lib/*.c "$mk_vendor"/lib/*.h "$mk_vendor"/lib/*.in.h "$mk_src/lib/"
-    cp "$port_dir/config.h" "$mk_src/src/config.h"
-    cp "$port_dir"/generated/fnmatch.h "$port_dir"/generated/glob.h "$mk_src/lib/"
-    local p
-    for p in "$port_dir"/patches/*.patch; do
-        [[ -e "$p" ]] || continue
-        patch -s -p1 -t -d "$mk_src" -i "$p"
-    done
+    rm -rf "$mk_obj"
+    mkdir -p "$mk_obj" "$progs_out"
+    prepare_gnumake_src "$mk_src"
 
     local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -nostdlibinc -isystem "$sysroot/include"
@@ -2611,14 +2664,8 @@ build_gnumake() {
                    -I"$mk_src/src" -I"$mk_src/lib"
                    -std=gnu11 -O2 -fno-pic -fno-stack-protector )
 
-    # The explicit object list (CL-1c census: 30 src + 5 lib gnulib). The
-    # alt-OS files (w32/vms/amiga), remote-cstms, guile-under-HAVE_GUILE,
-    # load-under-MAKE_LOAD, and lib/alloca.c (musl has alloca) are NOT built.
-    local src_objs=( ar arscan commands default dir expand file function
-                     getopt getopt1 guile hash implicit job load loadapi
-                     main misc output posixos read remake rule shuffle
-                     signame strcache variable version vpath remote-stub )
-    local lib_objs=( concat-filename findprog-in fnmatch glob getloadavg )
+    local src_objs=( "${GNUMAKE_SRC_OBJS[@]}" )
+    local lib_objs=( "${GNUMAKE_LIB_OBJS[@]}" )
 
     local n=0 f
     for f in "${src_objs[@]}"; do
@@ -3002,7 +3049,8 @@ stage_clade() {
     # port resolves argv[0] to a REAL file (getprogpath verifies existence), so the
     # multicall is COPIED under each dispatch name. The C++ gate needs exactly two:
     # clang++ (the entry, invoked absolute) + ld.lld (clang++ execs it by name).
-    # A C-mode `clang` copy is a CL-5 add.
+    # CL-5 adds the third: a C-mode `clang`, which the build storm needs -- a
+    # clang++ copy sets CCCIsCXX and would compile the storm's .c sources as C++.
     local xbuild="$BUILD_DIR/clade/llvm-build"
     local llvm_bin="$xbuild/bin/llvm"
     local stage="$BUILD_DIR/clade/stage"
@@ -3027,7 +3075,8 @@ stage_clade() {
     "$strip" -o "$stripped" "$llvm_bin" 2>/dev/null || cp "$llvm_bin" "$stripped"
     cp "$stripped" "$stage/bin/clang++"
     cp "$stripped" "$stage/bin/ld.lld"
-    chmod +x "$stage/bin/clang++" "$stage/bin/ld.lld"
+    cp "$stripped" "$stage/bin/clang"
+    chmod +x "$stage/bin/clang++" "$stage/bin/ld.lld" "$stage/bin/clang"
     rm -f "$stripped"
     # Resource headers (stddef.h/stdint.h/... at InstalledDir/../lib/clang/N/include).
     cp -R "$xbuild/$resdir" "$stage/$(dirname "$resdir")/"
@@ -3036,6 +3085,111 @@ stage_clade() {
     cp -R "$sysroot/lib" "$stage/sysroot/lib"
     cp -R "$sysroot/include" "$stage/sysroot/include"
     echo "    clade stage: $(du -sh "$stage" | cut -f1) -- bin: $(ls "$stage/bin" | tr '\n' ' ')"
+}
+
+stage_storm() {
+    # Clade CL-5 (docs/LLVM-DESIGN.md section 12, the CL-5 row) -- assemble
+    # build/storm/stage/, the /storm tree baked into the pool alongside /clade.
+    # This is the BUILD STORM's payload: a real project's real sources plus a
+    # generated Makefile, so the device toolchain can be driven by GNU make
+    # under -jN exactly as a developer would drive it.
+    #
+    # The project is GNU make itself. Three reasons it beats a fresh vendored
+    # tree (zlib was the charter's first sketch):
+    #   1. It is ALREADY Thylacine-configured -- usr/ports/gnumake/config.h is
+    #      the hand-derived autoconf output, so the storm needs no ./configure
+    #      (Thylacine has no POSIX shell, so a configure script cannot run).
+    #   2. The build is SELF-REFERENTIAL: /bin/make (cross-built on the host)
+    #      builds a new make from source, and the result is an executable we
+    #      can RUN. "It completed" is a weak proof; "the artifact it produced
+    #      runs and reports its own version" is a strong one.
+    #   3. Zero new vendoring, and the object census is shared with
+    #      build_gnumake, so the storm builds exactly what the host build does.
+    #
+    # Recipes are SHELL-FREE by construction (CL-1c-2's F4 seam: Thylacine has
+    # no /bin/sh, so make must take its no-shell fast path). GNU make's
+    # metachar set is "#;\"*?[]&|<>(){}$`^~!" (src/job.c sh_chars_sh) -- note
+    # the double quote, which is why LIBDIR/INCLUDEDIR/LOCALEDIR move from
+    # -D'"..."' flags into a generated -include header instead.
+    local sysroot="$BUILD_DIR/sysroot"
+    local stage="$BUILD_DIR/storm/stage"
+    local mk="$stage/gnumake"
+
+    prepare_gnumake_src "$mk"
+
+    # The three path macros the host cross-build passes as -DFOO='"..."'.
+    # A quoted -D would drag every recipe onto the (nonexistent) shell.
+    cat > "$mk/src/storm-defs.h" <<'EOF'
+/* Generated by tools/build.sh stage_storm (Clade CL-5).
+ * The host cross-build passes these as -DLIBDIR='"/usr/lib"' etc; a quoted
+ * -D contains a double quote, which is in GNU make's shell-metachar set and
+ * would force every recipe onto a shell Thylacine does not have. Same
+ * values, delivered via -include. */
+#ifndef LIBDIR
+#define LIBDIR "/usr/lib"
+#endif
+#ifndef INCLUDEDIR
+#define INCLUDEDIR "/usr/include"
+#endif
+#ifndef LOCALEDIR
+#define LOCALEDIR "/usr/share/locale"
+#endif
+EOF
+
+    # Generate the Makefile. Absolute on-device paths throughout (CL-1c-2:
+    # Thylacine has no cwd-relative recipe resolution in make's spawn path).
+    local mkf="$stage/Makefile"
+    {
+        echo "# Generated by tools/build.sh stage_storm (Clade CL-5) -- do not edit."
+        echo "# The on-device build storm: GNU make 4.4.1 builds itself with the"
+        echo "# device clang, under \`make -jN\`. Every recipe is shell-free."
+        echo
+        echo "CC = /clade/bin/clang"
+        echo "S  = /storm/gnumake/src"
+        echo "L  = /storm/gnumake/lib"
+        echo "O  = /storm/out"
+        echo "CFLAGS = -march=armv8-a -moutline-atomics -nostdlibinc \\"
+        echo "         -isystem /clade/sysroot/include \\"
+        echo "         -D_GNU_SOURCE=1 -DHAVE_CONFIG_H \\"
+        echo "         -include /storm/gnumake/src/storm-defs.h \\"
+        echo "         -I/storm/gnumake/src -I/storm/gnumake/lib \\"
+        echo "         -std=gnu11 -O2 -fno-pic -fno-stack-protector"
+        echo "LDFLAGS = --sysroot=/clade/sysroot"
+        echo
+        # Conservative header dependency: every object depends on every header
+        # in the tree. That is what a hand-written Makefile without a depfile
+        # generator does, it is always CORRECT (over-approximate, never stale),
+        # and it makes make do real dependency work -- ~35 x 40 stats, which
+        # exercises the FS path as well as the compiler.
+        printf 'HDRS ='
+        local h
+        for h in "$mk/src"/*.h; do printf ' $(S)/%s' "$(basename "$h")"; done
+        for h in "$mk/lib"/*.h; do printf ' $(L)/%s' "$(basename "$h")"; done
+        printf '\n\n'
+
+        local objs=() f
+        for f in "${GNUMAKE_SRC_OBJS[@]}"; do objs+=( "\$(O)/src_$f.o" ); done
+        for f in "${GNUMAKE_LIB_OBJS[@]}"; do objs+=( "\$(O)/lib_$f.o" ); done
+
+        echo "OBJS = ${objs[*]}"
+        echo
+        echo "all: \$(O)/make"
+        echo
+        for f in "${GNUMAKE_SRC_OBJS[@]}"; do
+            echo "\$(O)/src_$f.o: \$(S)/$f.c \$(HDRS)"
+            printf '\t$(CC) $(CFLAGS) -c $(S)/%s.c -o $(O)/src_%s.o\n' "$f" "$f"
+        done
+        for f in "${GNUMAKE_LIB_OBJS[@]}"; do
+            echo "\$(O)/lib_$f.o: \$(L)/$f.c \$(HDRS)"
+            printf '\t$(CC) $(CFLAGS) -c $(L)/%s.c -o $(O)/lib_%s.o\n' "$f" "$f"
+        done
+        echo
+        echo "\$(O)/make: \$(OBJS)"
+        printf '\t$(CC) $(LDFLAGS) -o $(O)/make $(OBJS)\n'
+    } > "$mkf"
+
+    local nobj=$(( ${#GNUMAKE_SRC_OBJS[@]} + ${#GNUMAKE_LIB_OBJS[@]} ))
+    echo "==> storm stage: $stage -- GNU make 4.4.1, $nobj objects ($(du -sh "$stage" | cut -f1))"
 }
 
 build_disk() {
@@ -3154,6 +3308,7 @@ case "$target" in
     quake-host)  build_quake_host  ;;
     clade)       build_clade       ;;
     stage-clade) stage_clade       ;;
+    stage-storm) stage_storm       ;;
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;

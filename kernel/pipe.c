@@ -23,6 +23,7 @@
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // #96: struct t_stat + T_S_IFIFO
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -78,6 +79,11 @@ static struct kmem_cache *g_endpoint_cache;
 static u64                g_pipe_allocated;
 static u64                g_pipe_freed;
 static bool               g_pipe_initialized;
+// #96: monotonic pipe identity, stamped into BOTH ends' qid.path so fstat can
+// report a distinct (and stable) inode per pipe. Starts at 1 -- 0 is the
+// historical "unset" value every pipe carried, so leaving it unused keeps a
+// stale-qid read distinguishable from a real one.
+static u64                g_pipe_next_qid = 1;
 
 // =============================================================================
 // Ring buffer ops.
@@ -166,6 +172,44 @@ static struct Walkqid *devpipe_walk(struct Spoor *c, struct Spoor *nc,
 static int devpipe_stat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
     return -1;
+}
+
+// #96 -- SYS_FSTAT on a pipe fd. POSIX requires fstat(2) on a pipe to SUCCEED
+// and report S_IFIFO; before this, devpipe had no .stat_native at all, so
+// spoor_stat_native returned -1 for every pipe.
+//
+// That is not cosmetic. clang's FixupStandardFileDescriptors fstats fds 0/1/2
+// at startup and treats a non-EBADF failure as FATAL -- the CL-4 masking layer
+// 3, already fixed once for the console and once for /dev. The pipe was the
+// THIRD door, and nothing had ever opened it because no pouch program had had
+// a pipe on a standard fd at startup until the CL-5 build storm: GNU make gives
+// the real stdin to only ONE job and hands every concurrent sibling the read
+// end of a broken pipe (get_bad_stdin), so `make -j4` had job 1 succeed and its
+// siblings die silently. Any program in a shell pipeline is on this path.
+//
+// Both ends of one pipe share the ring's id as qid.path (the POSIX convention:
+// one pipe, one inode), so fstat can tell two distinct pipes apart -- a
+// same-inode-for-every-pipe report is the kind of latent wrong answer that
+// surfaces much later inside someone's file-identity comparison.
+static int devpipe_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || c->dc != DEVPIPE_DC || !out) return -1;
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    // 0600: a pipe is readable+writable by its owner and reachable by no one
+    // else -- it has no name in any namespace, so group/other bits are moot.
+    out->mode     = T_S_IFIFO | 0600u;
+    out->nlink    = 1;
+    out->qid_path = c->qid.path;
+    out->qid_vers = c->qid.vers;
+    out->qid_type = c->qid.type;
+    out->devno    = c->devno;
+    // A pipe has no length: POSIX leaves st_size unspecified for FIFOs and
+    // Linux reports 0. Reporting the buffered byte count would invite a caller
+    // to size a read against it, which races the peer by construction.
+    out->size     = 0;
+    out->blksize  = PIPE_BUF_SIZE;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+    return 0;
 }
 
 static struct Spoor *devpipe_open(struct Spoor *c, int omode) {
@@ -425,6 +469,7 @@ struct Dev devpipe = {
     .attach   = devpipe_attach,
     .walk     = devpipe_walk,
     .stat     = devpipe_stat,
+    .stat_native = devpipe_stat_native,   // #96
     .open     = devpipe_open,
     .create   = devpipe_create,
     .close    = devpipe_close,
@@ -539,6 +584,17 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end) {
     wr->aux = wr_priv;
     rd->qid.type = 0;                        // QTFILE
     wr->qid.type = 0;
+    // #96: give the pipe an identity. BOTH ends share it -- one pipe, one
+    // inode, the POSIX convention -- so fstat can distinguish two pipes while
+    // still reporting the two ends of one pipe as the same object. Monotonic
+    // and never reused; qid.path was previously left 0 for every pipe, and
+    // nothing keys on it for dc == DEVPIPE_DC (the Larder is dev9p-only; the
+    // cons/pts qid flags are dc-gated), so stamping it is inert elsewhere.
+    {
+        u64 id = __atomic_fetch_add(&g_pipe_next_qid, 1u, __ATOMIC_RELAXED);
+        rd->qid.path = id;
+        wr->qid.path = id;
+    }
 
     __atomic_fetch_add(&g_pipe_allocated, 1u, __ATOMIC_RELAXED);
     *out_read_end  = rd;

@@ -2790,6 +2790,266 @@ static int clade_gate(void) {
     return 0;
 }
 
+// Clade CL-5: the BUILD STORM. `make -jN` drives the device clang over a real
+// project's real sources, on the device, and the artifact it produces RUNS.
+//
+// The project is GNU make 4.4.1 itself (staged at /storm by tools/build.sh
+// stage_storm; see the rationale there). The proof chain is deliberately three
+// links, because only the last one is hard to fake:
+//   1. `make -j4` exits 0                -- the storm completed
+//   2. /storm/outB/make exists, ~370 KiB -- it produced a plausible artifact
+//   3. /storm/outB/make --version exits 0 -- the artifact RUNS
+// A toolchain that miscompiles can still satisfy (1) and (2). Only (3) says the
+// bytes were right, and only (4) -- the device-built make then DRIVING a build
+// of its own -- says the artifact is a working tool rather than a binary that
+// merely survives --version.
+//
+// Gated on /storm/Makefile: a normal (non-clade) boot skips silently.
+static int clade_storm_gate(void) {
+    char nb[24];
+    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/Makefile", 15, T_OPATH);
+    if (probe < 0) {
+        t_putstr("joey: clade CL-5 storm: /storm absent -- skipping\n");
+        return 0;  // not baked -> not a failure
+    }
+    (void)t_close(probe);
+    // The C-mode driver copy (stage_clade adds it for CL-5). Without it the
+    // storm's .c sources would be compiled as C++ by a clang++ copy.
+    probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang", 16, T_OPATH);
+    if (probe < 0) {
+        t_putstr("joey: clade CL-5 storm FAILED: /clade/bin/clang missing "
+                 "(stale /clade bake -- re-run stage_clade)\n");
+        return -1;
+    }
+    (void)t_close(probe);
+
+    // The build directory. /storm is baked SYSTEM-owned; joey is SYSTEM.
+    {
+        long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm", 6, T_OPATH);
+        if (sd < 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: cannot open /storm\n");
+            return -1;
+        }
+        long od = mkdir_or_open(sd, "out", 3);
+        (void)t_close(sd);
+        if (od < 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: cannot create /storm/out\n");
+            return -1;
+        }
+        (void)t_close(od);
+    }
+
+    // --- The per-TU memory number, measured before the storm. -------------
+    // The storm's own peak is MAKE's peak, which is small and uninteresting;
+    // the compilers are grandchildren joey cannot see. So measure one TU
+    // directly: main.c, the largest source in the project (121 KiB). This is
+    // the number that pairs with -jN to give the concurrent footprint, and it
+    // is the first peak this project has ever recorded for real C (as opposed
+    // to the CL-5 stress TU's deliberately template-heavy C++).
+    {
+        static const char one_argv[] =
+            "/clade/bin/clang\0-march=armv8-a\0-moutline-atomics\0-nostdlibinc"
+            "\0-isystem\0/clade/sysroot/include\0-D_GNU_SOURCE=1\0-DHAVE_CONFIG_H"
+            "\0-include\0/storm/gnumake/src/storm-defs.h"
+            "\0-I/storm/gnumake/src\0-I/storm/gnumake/lib"
+            "\0-std=gnu11\0-O2\0-fno-pic\0-fno-stack-protector"
+            "\0-c\0/storm/gnumake/src/main.c\0-o\0/storm/out/probe_main.o";
+        unsigned int one_peak = 0;
+        long t0 = go4c_now_ms();
+        long ost = go4c_spawn_wait_hb_peak("/clade/bin/clang", 16,
+                                           one_argv, (unsigned int)sizeof(one_argv), 20,
+                                           600, 60, 0, &one_peak);
+        long dt = go4c_now_ms() - t0;
+        t_putstr("joey: clade CL-5 storm one-TU (main.c, 121 KiB) peak=");
+        t_putstr(itoa_dec((long)one_peak, nb, sizeof(nb)));
+        t_putstr(" pages (");
+        t_putstr(itoa_dec((long)(one_peak / 256u), nb, sizeof(nb)));
+        t_putstr(" MiB) ms=");
+        t_putstr(itoa_dec(dt, nb, sizeof(nb)));
+        t_putstr(" rc=");
+        t_putstr(itoa_dec(ost, nb, sizeof(nb)));
+        t_putstr("\n");
+        if (ost != 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: one-TU compile rc != 0\n");
+            return -1;
+        }
+    }
+
+    // --- The storm itself. ------------------------------------------------
+    // -j4 matches the default -smp 4. Every recipe is shell-free by
+    // construction (stage_storm), so make takes its no-shell fast path and
+    // spawns clang directly through CL-1b's posix_spawn -- Thylacine has no
+    // /bin/sh, so a single metachar in the generated command lines would fail
+    // the whole storm rather than degrade.
+    //
+    // Two passes into SEPARATE output dirs: -j1 (the serial CONTROL) then -j4
+    // (the storm). Both are worth keeping permanently:
+    //   * the control is the differential that DIAGNOSED #96 -- the first storm
+    //     boot had -j4's first job succeed and its concurrent siblings exit 1
+    //     with no diagnostic at all, while -j1 over the identical cold tree
+    //     completed; that one comparison separated "make-spawned clang is
+    //     broken" from "CONCURRENT make-spawned clang is broken" and pointed
+    //     straight at GNU make's bad_stdin -> fstat-on-a-pipe. If the storm
+    //     ever reddens again, the control says immediately which it is.
+    //   * -j1 vs -j4 wall time IS the parallel-speedup number the CL-5 charter
+    //     asks to record.
+    //
+    // -B (always-make) on both: the pool persists across boots, so without it
+    // the second boot would find every object up to date and exit 0 having
+    // compiled NOTHING -- a vacuous pass that looks exactly like a real one.
+    long sst = -1;
+    long serial_ms = 0, par_ms = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        const char *jf   = pass ? "-j4" : "-j1";
+        const char *od   = pass ? "/storm/outB" : "/storm/outA";
+        const char *odir = pass ? "outB" : "outA";
+        {
+            long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm", 6, T_OPATH);
+            if (sd >= 0) {
+                long od2 = mkdir_or_open(sd, odir, 4);
+                if (od2 >= 0) (void)t_close(od2);
+                (void)t_close(sd);
+            }
+        }
+        // argv: make -f /storm/Makefile -B <-jN> O=<outdir>. `O=` overrides
+        // the Makefile's output dir from the command line, so the two passes
+        // do not share objects; -B forces every recipe to run even though the
+        // pool still holds the previous boot's outputs.
+        char sa[96];
+        unsigned int n = 0;
+        const char *parts[6] = { "make", "-f", "/storm/Makefile", "-B", jf, od };
+        for (int i = 0; i < 6; i++) {
+            const char *p = parts[i];
+            if (i == 5) { sa[n++] = 'O'; sa[n++] = '='; }
+            unsigned int l = 0; while (p[l]) l++;
+            for (unsigned int k = 0; k < l; k++) sa[n++] = p[k];
+            sa[n++] = '\0';
+        }
+        t_putstr("joey: clade CL-5 storm: running `make -f /storm/Makefile -B ");
+        t_putstr(jf);
+        t_putstr(" O=");
+        t_putstr(od);
+        t_putstr("` (GNU make 4.4.1 builds itself, 35 TUs)\n");
+        long st0 = go4c_now_ms();
+        sst = go4c_spawn_wait_hb("/bin/make", 9, sa, n, 6,
+                                 /*max_sec=*/1800, /*hb_sec=*/30, /*caps=*/0ul);
+        long sdt = go4c_now_ms() - st0;
+        if (pass) par_ms = sdt; else serial_ms = sdt;
+        t_putstr("joey: clade CL-5 storm: make ");
+        t_putstr(jf);
+        t_putstr(" reaped rc=");
+        t_putstr(itoa_dec(sst, nb, sizeof(nb)));
+        t_putstr(" wall_ms=");
+        t_putstr(itoa_dec(sdt, nb, sizeof(nb)));
+        t_putstr("\n");
+        if (sst != 0) {
+            t_putstr("joey: clade CL-5 storm FAILED (make ");
+            t_putstr(jf);
+            t_putstr(" exit != 0)\n");
+            return -1;
+        }
+    }
+    // The parallel-speedup number the CL-5 charter asks to record. Reported as
+    // hundredths so it needs no float: 400 == 4.00x.
+    if (par_ms > 0) {
+        t_putstr("joey: clade CL-5 storm: serial_ms=");
+        t_putstr(itoa_dec(serial_ms, nb, sizeof(nb)));
+        t_putstr(" parallel_ms=");
+        t_putstr(itoa_dec(par_ms, nb, sizeof(nb)));
+        t_putstr(" speedup_x100=");
+        t_putstr(itoa_dec((serial_ms * 100) / par_ms, nb, sizeof(nb)));
+        t_putstr("\n");
+    }
+    // Link 2: a plausible artifact. The host cross-build of the same 35
+    // objects is ~380 KiB; anything under 64 KiB means the link silently
+    // produced a stub.
+    {
+        long fd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/outB/make", 16, T_OREAD);
+        if (fd < 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: /storm/outB/make not produced\n");
+            return -1;
+        }
+        long sz = t_lseek(fd, 0, T_SEEK_END);
+        (void)t_close(fd);
+        t_putstr("joey: clade CL-5 storm: /storm/outB/make = ");
+        t_putstr(itoa_dec(sz, nb, sizeof(nb)));
+        t_putstr(" bytes\n");
+        if (sz < 65536) {
+            t_putstr("joey: clade CL-5 storm FAILED: artifact implausibly small\n");
+            return -1;
+        }
+    }
+
+    // Link 3: it RUNS. A miscompile can still link a right-sized binary.
+    {
+        static const char nv_argv[] = "/storm/outB/make\0--version";
+        long nst = go4c_spawn_wait_hb("/storm/outB/make", 16,
+                                      nv_argv, (unsigned int)sizeof(nv_argv), 2,
+                                      120, 30, 0);
+        if (nst != 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: device-built make "
+                     "--version rc=");
+            t_putstr(itoa_dec(nst, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        t_putstr("joey: clade CL-5 storm: device-built make --version OK\n");
+    }
+
+    // Link 4: it WORKS. The device-built make drives a build of its own --
+    // one shell-free /bin/cp recipe, the CL-1c-2 shape. This is what
+    // separates "the binary starts" from "the binary is a working tool".
+    {
+        static const char self_mk[] =
+            "all: /storm/outB/selftest.out\n"
+            "/storm/outB/selftest.out: /storm/Makefile\n"
+            "\t/bin/cp /storm/Makefile /storm/outB/selftest.out\n";
+        long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/outB", 11, T_OPATH);
+        if (sd >= 0) {
+            long mf = t_walk_create(sd, "selftest.mk", 11, T_OWRITE, 0644u);
+            if (mf < 0) {
+                (void)t_unlink(sd, "selftest.mk", 11, 0);
+                mf = t_walk_create(sd, "selftest.mk", 11, T_OWRITE, 0644u);
+            }
+            (void)t_unlink(sd, "selftest.out", 12, 0);  // force the recipe to run
+            (void)t_close(sd);
+            if (mf >= 0) {
+                unsigned int sl = (unsigned int)(sizeof(self_mk) - 1);
+                long wn = t_write(mf, self_mk, sl);
+                (void)t_fsync(mf, 0);
+                (void)t_close(mf);
+                if (wn == (long)sl) {
+                    static const char sm_argv[] =
+                        "/storm/outB/make\0-f\0/storm/outB/selftest.mk";
+                    long mst = go4c_spawn_wait_hb("/storm/outB/make", 16,
+                                                  sm_argv, (unsigned int)sizeof(sm_argv), 3,
+                                                  120, 30, 0);
+                    if (mst != 0) {
+                        t_putstr("joey: clade CL-5 storm FAILED: device-built "
+                                 "make could not drive a build, rc=");
+                        t_putstr(itoa_dec(mst, nb, sizeof(nb)));
+                        t_putstr("\n");
+                        return -1;
+                    }
+                    long ck = t_open(T_WALK_OPEN_FROM_ROOT,
+                                     "/storm/outB/selftest.out", 24, T_OREAD);
+                    if (ck < 0) {
+                        t_putstr("joey: clade CL-5 storm FAILED: device-built "
+                                 "make exited 0 but ran no recipe\n");
+                        return -1;
+                    }
+                    (void)t_close(ck);
+                    t_putstr("joey: clade CL-5 storm: device-built make DROVE "
+                             "a build (recipe ran, output verified)\n");
+                }
+            }
+        }
+    }
+
+    t_putstr("joey: clade CL-5 build storm: PASS\n");
+    return 0;
+}
+
 // CF-3 A+B always-run regression: bulk byte-I/O through the two-tier
 // syscall bounce + uaccess_copy_in/out + the 9P client payload clamp, on
 // the BULK-negotiated FS mount (CF-3 B: stratumd posts /srv/stratum-fs
@@ -7729,6 +7989,14 @@ int main(void) {
     // clade-only pool) and joey is still console-attached.
     if (clade_gate() != 0) {
         t_putstr("joey: clade CL-4 gate FAILED\n");
+        return 1;
+    }
+
+    // CL-5: the build storm. Same gating (skips silently without /storm) and
+    // the same boot-fatal posture -- an on-device build that stops completing
+    // is a toolchain or kernel regression, not a soft signal.
+    if (clade_storm_gate() != 0) {
+        t_putstr("joey: clade CL-5 build storm FAILED\n");
         return 1;
     }
 

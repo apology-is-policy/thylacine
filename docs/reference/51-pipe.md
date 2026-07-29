@@ -173,6 +173,44 @@ Each test spawns a consumer thread that performs a blocking op; the boot thread 
 
 ---
 
+## `fstat` on a pipe (#96)
+
+`devpipe.stat_native` reports `T_S_IFIFO | 0600`, `nlink` 1, `size` 0,
+`blksize` `PIPE_BUF_SIZE`. POSIX requires `fstat(2)` on a pipe to succeed and
+report `S_IFIFO`; the pouch boundary-line passes `t_stat.mode` straight through
+to `st_mode`, so `S_ISFIFO` works unchanged.
+
+`size` is deliberately 0 rather than the buffered byte count. POSIX leaves
+`st_size` unspecified for FIFOs and Linux reports 0; reporting the count would
+invite a caller to size a read against it, which races the peer by
+construction.
+
+**Both ends of one pipe share a `qid.path`**, drawn from a monotonic counter at
+`pipe_create` (never reused; starts at 1, so the historical unset value 0 stays
+distinguishable). That is the POSIX convention — one pipe, one inode — and it
+lets `fstat` tell two distinct pipes apart. Nothing else keys on a pipe's
+`qid.path`, so the stamp is inert outside `stat_native`. The consumers that
+*do* key on a Spoor's `qid.path` were each checked: the Larder is dev9p-only;
+the cons/pts qid flag bits are dc-gated; the REVENANT FILE Burrow
+(`burrow.c::file_qid_path`) and the Image cache (`image.c`) are reached only
+from `exec`, which resolves through `stalk` — and a pipe has no name in any
+namespace; territory mount keys need a `QTDIR`, and `devpipe_walk` returns
+NULL. In any case the stamp is *monotonically* safer than what it replaced:
+before it, **every** pipe carried `qid.path == 0`, so any keying that could
+see a pipe was already colliding.
+
+`.seekable` stays false, so this does **not** enable `lseek`/`pread` on a pipe
+— the flag has decoupled "can fstat" from "can seek" since RW-4 R2-F2, and
+`sys_prw.pipe_not_seekable` pins it.
+
+*Why this was missing until CL-5:* no pouch program had ever had a pipe on fd
+0/1/2 at startup. GNU make's `-jN` hands every concurrent job but the first the
+read end of a broken pipe on fd 0 (`get_bad_stdin`), and clang treats a
+non-EBADF fstat failure on a standard fd as fatal — so the on-device build
+storm's parallel jobs died silently. See `docs/LLVM-DESIGN.md` §7.2.
+
+---
+
 ## Error paths
 
 - `pipe_create` returns -1 if any of ring / endpoint / Spoor allocation fails. Full rollback of partial state.

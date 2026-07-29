@@ -2251,13 +2251,19 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 #define T_SEEK_END  2
 
 // POSIX-shaped mode bits used in struct t_stat.mode. Subset that v1.0
-// devs actually populate (regular file / directory / character device);
-// kept inline rather than pulling in a POSIX header so the kernel does
-// not learn a libc.
+// devs actually populate (regular file / directory / character device /
+// FIFO); kept inline rather than pulling in a POSIX header so the kernel
+// does not learn a libc.
 #define T_S_IFMT    0170000u
 #define T_S_IFREG   0100000u
 #define T_S_IFDIR   0040000u
 #define T_S_IFCHR   0020000u
+// #96: pipes. POSIX requires fstat(2) on a pipe fd to succeed and report
+// S_IFIFO; before CL-5 devpipe had no .stat_native at all, so fstat on a
+// pipe returned -1 and any program that treats that as fatal died. The
+// pouch boundary-line passes t_stat.mode straight through to st_mode, so
+// this value must stay POSIX S_IFIFO (0010000) for S_ISFIFO to work.
+#define T_S_IFIFO   0010000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
 // (mode, uid, gid, size) register arguments the kernel applies. Chosen to
