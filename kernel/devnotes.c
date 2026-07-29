@@ -22,6 +22,7 @@
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>              // t_stat + T_S_IF* (devnotes_stat_native)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -30,6 +31,10 @@
 // QTFILE — Plan 9 qid type for a regular file. The note Spoor is leaf-
 // shaped; no walking, no subdirectories.
 #define QTFILE  0x00
+
+// The device character. Named so the vtable and the stat_native guard
+// cannot drift apart (the DEVPIPE_DC precedent).
+#define DEVNOTES_DC  'n'
 
 static void devnotes_reset(void)    { /* no-op */ }
 static void devnotes_init(void)     { /* no-op */ }
@@ -49,6 +54,60 @@ static struct Walkqid *devnotes_walk(struct Spoor *c, struct Spoor *nc,
 static int devnotes_stat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
     return -1;
+}
+
+// #97 (the #96 sibling, found by the same sweep): POSIX fstat on a notes fd.
+// devnotes had a 9P .stat -- which returns -1 -- but no .stat_native, so
+// SYS_FSTAT fell through spoor_stat_native's NULL-slot arm and also returned
+// -1. Fail-closed, but wrong: a caller that treats a non-EBADF fstat failure
+// on a standard fd as FATAL (clang does exactly that on fds 0/1/2 -- the CL-4
+// layer-3 shape that #96 hit through a pipe) would die on any Proc that had
+// put its notes fd there.
+//
+// Shape: a character device. That is the tree's posture for a device-backed
+// unseekable byte stream (cons and pts both present S_IFCHR). Adding this
+// slot does NOT make the fd seekable -- .seekable stays false, so lseek and
+// pread keep failing ESPIPE; stat_native and seekability were deliberately
+// decoupled at RW-4 R2-F2 so exactly this kind of fix cannot smuggle in
+// positioned I/O on a stream.
+//
+// qid_path stays 0 (what dev_simple_attach mints); it is NOT stamped per-open
+// the way a pipe's is. Two independent reasons:
+//   - The Spoor is a STATELESS marker whose queue is resolved from the running
+//     Thread (see the file header) -- it can even be handed to another Proc,
+//     where it reads THAT Proc's notes. There is no per-instance object for an
+//     inode number to name, and stamping the opener's identity would be
+//     actively wrong, since the fd's meaning follows the reader.
+//   - Bits 40 and 41 must stay clear. pouch decodes is-a-pts as S_ISCHR + bit
+//     40 and is-a-cons as S_ISCHR + bit 41; a stamped qid that happened to set
+//     either would make a notes fd read as a terminal. This is the same reason
+//     devdev withholds the cons flag from consctl.
+// The /dev/tty precedent covers the result: one identity, per-process content.
+//
+// 0666 SYSTEM matches the world-usable /dev leaves (null/zero/full/random).
+// Truthful rather than cosmetic: ANY Proc may open and read its own notes, so
+// a tighter mode would become a lie the moment devnotes were perm_enforced.
+static int devnotes_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || c->dc != DEVNOTES_DC || !out) return -1;
+    // Byte-zero first (I-13): every field this fill does not set reaches EL0
+    // as a defined zero, with no stack garbage in the pad.
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+
+    out->mode     = T_S_IFCHR | 0666u;
+    out->nlink    = 1;
+    out->qid_path = c->qid.path;
+    out->qid_vers = c->qid.vers;
+    out->qid_type = c->qid.type;
+    // Redundant via spoor_stat_native (#100 stamps it after a clean fill), but
+    // set here too so a direct vtable call is correct standalone.
+    out->devno    = c->devno;
+    out->size     = 0;   // a pending-note count would race the reader
+    // Not advisory here: devnotes_read REJECTS n < sizeof(struct note_record),
+    // so this is the minimum viable read buffer, not a preference.
+    out->blksize  = (u32)sizeof(struct note_record);
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+    return 0;
 }
 
 static struct Spoor *devnotes_open(struct Spoor *c, int omode) {
@@ -279,7 +338,7 @@ static struct Spoor *devnotes_power(struct Spoor *c, int on) {
 }
 
 struct Dev devnotes = {
-    .dc       = 'n',
+    .dc       = DEVNOTES_DC,
     .name     = "notes",
 
     .reset    = devnotes_reset,
@@ -289,6 +348,7 @@ struct Dev devnotes = {
     .attach   = devnotes_attach,
     .walk     = devnotes_walk,
     .stat     = devnotes_stat,
+    .stat_native = devnotes_stat_native,   // #97
 
     .open     = devnotes_open,
     .create   = devnotes_create,

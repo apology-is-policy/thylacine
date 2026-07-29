@@ -27,10 +27,13 @@
 
 #include "test.h"
 
+#include <thylacine/dev.h>
 #include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // #97: struct t_stat + T_S_IFCHR
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -859,4 +862,46 @@ void test_notes_die_pending_predicate(void) {
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+// notes.fstat_reports_chr — #97 (the #96 sibling): POSIX fstat on a notes fd.
+//
+// Pre-#97 devnotes had no .stat_native, so SYS_FSTAT returned -1 on a notes
+// fd. Fail-closed but wrong, and #96 shows the cost is real: a caller that
+// treats a non-EBADF fstat failure on a standard fd as FATAL (clang does)
+// dies on a Proc that put its notes fd on 0/1/2.
+//
+// Drives spoor_stat_native -- the exact function SYS_FSTAT calls -- not the
+// vtable slot, so a refactor that reintroduces the NULL slot fails here.
+void test_notes_fstat_reports_chr(void) {
+    struct Spoor *c = devnotes.attach(NULL);
+    TEST_ASSERT(c != NULL, "devnotes attach yields a Spoor");
+
+    struct t_stat st;
+    // Poison: a stat_native returning 0 without filling must not pass by
+    // leaving stale zeroes that happen to look right.
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xA5;
+
+    TEST_EXPECT_EQ(spoor_stat_native(c, &st), 0,
+        "fstat on a notes fd succeeds (pre-#97 this returned -1)");
+    TEST_EXPECT_EQ((long)(st.mode & T_S_IFMT), (long)T_S_IFCHR,
+        "notes reports S_IFCHR");
+    TEST_EXPECT_EQ((long)(st.mode & 07777u), 0666L,
+        "notes reports 0666 (any Proc may open its own)");
+    TEST_EXPECT_EQ((long)st.size, 0L, "notes reports size 0");
+    TEST_EXPECT_EQ((long)st.nlink, 1L, "notes reports nlink 1");
+    // Not advisory: devnotes_read rejects a buffer smaller than this.
+    TEST_EXPECT_EQ((long)st.blksize, (long)sizeof(struct note_record),
+        "blksize is the minimum viable read (sizeof note_record)");
+
+    // The load-bearing property. pouch decodes is-a-pts as S_ISCHR + qid bit
+    // 40 and is-a-cons as S_ISCHR + qid bit 41. Now that a notes fd reports
+    // S_IFCHR, those bits are all that keep it from reading as a TERMINAL --
+    // so a future change that stamps a qid here must not touch them.
+    TEST_ASSERT((st.qid_path & (1ULL << 40)) == 0,
+        "notes qid does NOT set the is-a-pts bit (40)");
+    TEST_ASSERT((st.qid_path & (1ULL << 41)) == 0,
+        "notes qid does NOT set the is-a-cons bit (41)");
+
+    spoor_clunk(c);
 }

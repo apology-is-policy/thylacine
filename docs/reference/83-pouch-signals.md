@@ -209,6 +209,42 @@ a pts's minting server originates terminal events), so `kill()` /
 `raise()` of these signums answer `EPERM` at the pouch layer (the
 POSIX-shaped errno; the kernel would refuse with a bare -1 anyway).
 
+## `fstat` on a notes fd (#97)
+
+A notes fd reports as a **character device**: `S_IFCHR | 0666`, SYSTEM-owned,
+`size` 0, `nlink` 1, `blksize` = `sizeof(struct note_record)`.
+
+Before #97, `devnotes` had a 9P `.stat` (which returns -1) but no
+`.stat_native`, so `SYS_FSTAT` fell through `spoor_stat_native`'s NULL-slot arm
+and returned -1. Fail-closed, but wrong — and the cost is not hypothetical:
+#96 was the identical gap on a *pipe*, and it manifested as every concurrent
+`make -j4` job dying silently, because clang treats a non-`EBADF` `fstat`
+failure on fds 0/1/2 as fatal. A Proc that puts its notes fd on a standard
+descriptor would hit exactly that.
+
+Three properties are load-bearing, in the sense that changing them breaks
+something specific rather than merely looking different:
+
+- **`blksize` is a minimum, not a preference.** `devnotes_read` *rejects*
+  `n < sizeof(struct note_record)`, so this value is the smallest buffer that
+  can ever succeed.
+- **The fd is NOT seekable.** `.seekable` stays false, so `lseek`/`pread` keep
+  failing `ESPIPE`. `stat_native` and seekability were deliberately decoupled
+  at RW-4 R2-F2 precisely so adding this slot cannot smuggle positioned I/O
+  onto a stream.
+- **`qid_path` stays 0, and bits 40/41 must stay clear.** pouch decodes
+  is-a-pts as `S_ISCHR` + bit 40 and is-a-cons as `S_ISCHR` + bit 41. Now that
+  a notes fd reports `S_IFCHR`, those clear bits are the only thing keeping it
+  from reading as a *terminal* — the same reason `devdev` withholds the cons
+  flag from `consctl`. `notes.fstat_reports_chr` asserts both bits.
+
+Unlike a pipe (#96), the qid is deliberately **not** stamped per-open. The
+notes Spoor is a stateless marker whose queue is resolved from the running
+Thread — handed to another Proc, it reads *that* Proc's notes — so there is no
+per-instance object for an inode number to name, and stamping the opener's
+identity would be actively wrong since the fd's meaning follows the reader.
+The `/dev/tty` precedent covers the result: one identity, per-process content.
+
 ## Known caveats / footguns
 
 - **SIG_DFL `SIGTSTP` is IGNORE, not STOP, in pouch (PTY-3 seam)**. The
