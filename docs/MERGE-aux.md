@@ -1,4 +1,25 @@
-# Merge handoff: `gfx-4` -> `main`
+# Merge handoff: the aux track -> `main`
+
+**The current aux branch is `aux-2`** (cut from `main` @ `f16bf242`, 2026-07-29).
+
+`gfx-4` is **RETIRED** -- fully merged at round 3 and no longer committed to.
+Rounds 1-3 below are its history and are kept because the *pattern* is what
+carries forward, not the branch.
+
+**Why the branch was renamed.** `gfx-1..gfx-4` were named for the graphics arc
+(G-0..G-7, Aurora Track B). That arc ended, the branch kept going, and it picked
+up VIVARIUM -- so the name became actively misleading. The fix is not a better
+topic name: a branch named for its *content* always eventually rots, because
+content changes. `aux-2` is named for its **owner**, which does not change. The
+`-2` marks a generation -- it increments only on a deliberate fresh cut from
+`main`, a rare event, which also makes later merge archaeology easier ("aux-2 was
+cut from main at `f16bf242`").
+
+The aux track carries several concurrent streams (VIVARIUM, Halcyon G-8/G-9,
+polish). One owner-named branch matches that; one branch per arc would mean
+several live bases to keep current for work that is not actually independent.
+
+---
 
 ## Round 1: DONE (2026-07-27, by the main agent)
 
