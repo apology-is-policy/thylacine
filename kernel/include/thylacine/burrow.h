@@ -123,6 +123,31 @@ enum burrow_type {
     // fields, no kobj. burrow_free_internal frees every resident page (order 0) +
     // kfrees the array (mirrors the FILE arm, minus the spoor_clunk).
     BURROW_TYPE_ANON_LAZY = 5,
+    // I-42 (CL-7k; docs/JIT-ON-WX-DESIGN.md, LLVM-DESIGN.md §8):
+    // BURROW_TYPE_CODE — an anonymous, eagerly-allocated region that is the ONLY
+    // backing object from which userspace may hold an EXECUTABLE mapping. Backing
+    // is identical to BURROW_TYPE_ANON (one contiguous alloc_pages chunk in
+    // `pages`/`order`); the type is not a different allocator, it is a different
+    // ADMISSIBILITY. It exists so "this region may carry an RX alias" is a property
+    // the KERNEL mints at creation under CAP_JIT — never one a caller asserts at map
+    // time. That is the G-2 WEAVE discipline (a shareable DMA region is minted by
+    // SYS_DMA_CREATE_WEAVE, not flagged by its creator) applied to the W^X boundary:
+    // with the property carried by the object, "may I map this executable?" is
+    // answered by a field the caller cannot forge, and every future mapping path
+    // gets the gate for free rather than having to remember it.
+    //
+    // The I-42 mechanism is TWO aliases of this one physical region in ONE Proc:
+    // RW at VA_w (the JIT writes) and RX at VA_x (it executes). No PTE is ever
+    // W AND X — each alias is a separate VMA with a separate, fixed prot, so
+    // I-12 holds at page granularity exactly as it does for any other mapping.
+    // This is the Lazarus W1.5 LSE alternatives-patcher's own discipline (it
+    // writes .text through a transient RW-not-X scratch alias while the canonical
+    // mapping stays RO+X) turned outward for userspace.
+    //
+    // Emitted bytes become fetchable only after an explicit SYS_ICACHE_SYNC over
+    // the range — the D-cache-clean / I-cache-invalidate sequence the architecture
+    // requires between a data write and an instruction fetch of the same address.
+    BURROW_TYPE_CODE    = 6,
 };
 
 struct page;
@@ -298,6 +323,27 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
 // Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, SLUB
 // OOM, or filepages-array OOM.
 struct Burrow *burrow_create_anon_lazy(size_t size);
+
+// I-42 / CL-7k: burrow_create_code — the dual-mappable CODE Burrow, the only
+// backing object from which userspace may hold an executable mapping
+// (docs/JIT-ON-WX-DESIGN.md; LLVM-DESIGN.md §8). Allocation is byte-identical to
+// burrow_create_anon (one eager contiguous KP_ZERO chunk); the ONLY difference
+// is `type`, which is the kernel-minted, create-immutable admissibility token
+// the RX-mapping gate reads.
+//
+// KP_ZERO is load-bearing here, not incidental hygiene: a code page handed back
+// with stale contents would be a region the Proc can EXECUTE without having
+// written it. Zero-filled AArch64 decodes as UDF #0 (an always-undefined
+// encoding), so an un-emitted page faults rather than running whatever the
+// previous owner left behind.
+//
+// Callers MUST hold CAP_JIT (enforced at the syscall boundary, not here — this
+// is the mechanism; kernel tests drive it directly). handle_count starts at 1
+// (the construction reference), mapping_count 0, exactly as burrow_create_anon.
+//
+// Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, or
+// allocator OOM.
+struct Burrow *burrow_create_code(size_t size);
 
 // Increment handle_count. Maps to spec's HandleOpen action. Called by
 // handle_dup (and Phase 4's handle_transfer_via_9p) for KOBJ_BURROW

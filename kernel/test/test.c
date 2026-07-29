@@ -247,6 +247,16 @@ void test_vmo_refcount_lifecycle(void);
 void test_vmo_map_unmap_lifecycle(void);
 void test_vmo_handles_x_mappings_matrix(void);
 void test_vmo_via_handle_table(void);
+
+// I-42 / CL-7k: the JIT capability (kernel/test/test_jit.c).
+void test_jit_create_requires_cap(void);
+void test_jit_create_rejects_bad_args(void);
+void test_jit_dual_alias_pte_wx_clean(void);
+void test_jit_charges_once_per_region(void);
+void test_jit_destroy_tears_down_both(void);
+void test_jit_destroy_rejects_non_writer(void);
+void test_jit_icache_sync_gate(void);
+void test_jit_write_through_writer_visible_at_exec(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
@@ -1558,6 +1568,17 @@ struct test_case g_tests[] = {
     { "burrow.via_handle_table",          test_vmo_via_handle_table,          false, NULL },
     { "burrow.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { "burrow.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
+
+    // I-42 / CL-7k: the JIT capability. jit.dual_alias_pte_wx_clean is the
+    // invariant test -- it reads the real L3 descriptors, not the VMA prots.
+    { "jit.create_requires_cap",          test_jit_create_requires_cap,       false, NULL },
+    { "jit.create_rejects_bad_args",      test_jit_create_rejects_bad_args,   false, NULL },
+    { "jit.dual_alias_pte_wx_clean",      test_jit_dual_alias_pte_wx_clean,   false, NULL },
+    { "jit.charges_once_per_region",      test_jit_charges_once_per_region,   false, NULL },
+    { "jit.destroy_tears_down_both",      test_jit_destroy_tears_down_both,   false, NULL },
+    { "jit.destroy_rejects_non_writer",   test_jit_destroy_rejects_non_writer, false, NULL },
+    { "jit.icache_sync_gate",             test_jit_icache_sync_gate,          false, NULL },
+    { "jit.write_visible_at_exec_alias",  test_jit_write_through_writer_visible_at_exec, false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
     { "burrow.file_create_close_round_trip",   test_vmo_file_create_close_round_trip,   false, NULL },
     { "burrow.file_create_failure_retains_spoor", test_vmo_file_create_failure_retains_spoor, false, NULL },

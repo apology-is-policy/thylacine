@@ -1793,7 +1793,109 @@ enum {
     //   claimable past RETIRING), netd's GC of a minted-but-never-claimed
     //   flow id (#289 -- a client that died between Tweft and claim).
     SYS_WEFT_UNSHARE = 100,      // arg: share_id (x0)
+
+    // ===================================================================
+    // I-42 -- the JIT capability (CL-7k; docs/JIT-ON-WX-DESIGN.md,
+    // LLVM-DESIGN.md section 8). The ONLY path by which bytes a Proc wrote
+    // become bytes it can execute.
+    // ===================================================================
+
+    // SYS_JIT_CREATE(length, out_va) -> 0 / -errno. CAP_JIT-gated.
+    //   Allocate a CODE Burrow of `length` bytes (rounded up to whole pages)
+    //   and install BOTH of its aliases in the caller's own address space:
+    //   a WRITER alias mapped RW and an EXEC alias mapped RX, each a separate
+    //   VMA over the same physical pages. Writes {writer_va, exec_va} as a
+    //   `struct t_jit_region` to out_va.
+    //
+    //   ONE syscall installs BOTH aliases, deliberately. Splitting create from
+    //   map would admit a state in which an RX alias exists with no writer (or
+    //   a writer with no RX), and would put the rollback for a half-installed
+    //   pair on the caller. Here the pair is installed under a single
+    //   vma_lock hold and either both aliases exist or neither does -- on a
+    //   W^X boundary that atomicity is worth more than the flexibility. It is
+    //   also exactly the shape the scripture specifies for the userspace
+    //   layer: "create -> (writer_ptr, exec_ptr)".
+    //
+    //   The two aliases are INDEPENDENT VMAs at unrelated VAs. No PTE is ever
+    //   W AND X: the writer alias is RW (UXN set, never executable) and the
+    //   exec alias is RX (AP_RO, never writable). I-12 holds at page
+    //   granularity exactly as for any other mapping -- the code Burrow does
+    //   not relax the W^X check, it just holds two views that each satisfy it.
+    //
+    //   Emitted bytes are NOT fetchable until SYS_ICACHE_SYNC has run over
+    //   them (below). Freshly-created pages are zero, which decodes as the
+    //   permanently-undefined AArch64 UDF #0 -- so executing an un-emitted
+    //   page traps rather than running residue.
+    //
+    //   Errors: -EPERM (no CAP_JIT), -EINVAL (length 0 or > JIT_REGION_MAX,
+    //   unaligned out_va), -ENOMEM (page budget, no VA gap, or allocator),
+    //   -EFAULT (out_va not writable by the caller).
+    SYS_JIT_CREATE = 101,   // arg: length (x0), out_va (x1)
+
+    // SYS_JIT_DESTROY(writer_va) -> 0 / -errno.
+    //   Tear down BOTH aliases of the code region whose WRITER alias starts at
+    //   writer_va, and free the backing pages. Identified by the writer VA
+    //   alone: the kernel remembers the pairing, so a caller cannot destroy
+    //   half a region or pass two VAs that name different regions.
+    //
+    //   NOT CAP_JIT-gated. Destroying your own mapping is not an exercise of
+    //   the emission authority, and gating it would mean a Proc whose legate
+    //   scope expired could no longer free the code it had already created --
+    //   turning a capability expiry into a memory leak. Authority to create is
+    //   the scarce thing; authority to release is not.
+    //
+    //   Errors: -EINVAL (writer_va is not the base of a live code region of
+    //   this Proc). Idempotent only in the sense that a second call fails
+    //   cleanly; it never tears down an unrelated mapping.
+    SYS_JIT_DESTROY = 102,  // arg: writer_va (x0)
+
+    // SYS_ICACHE_SYNC(vaddr, length) -> 0 / -errno.
+    //   Publish emitted bytes: clean the data cache to the point of
+    //   unification and invalidate the instruction cache over the range, so a
+    //   subsequent fetch through the EXEC alias sees what was written through
+    //   the WRITER alias. This is the `dc cvau` / `dsb ish` / `ic ivau` /
+    //   `dsb ish` / `isb` sequence the architecture requires between a data
+    //   write and an instruction fetch of the same location -- the same dance
+    //   the kernel's own W1.5 alternatives-patcher performs, lifted to a
+    //   syscall.
+    //
+    //   The range must lie within ONE of the caller's code-region aliases
+    //   (either the writer or the exec alias -- both name the same physical
+    //   pages, so either is a valid way to name the range). Confining it to a
+    //   code region is what makes this "publish my JIT output" rather than a
+    //   general cache-maintenance primitive over arbitrary process memory,
+    //   which is the I-42 region-confinement property.
+    //
+    //   NOT CAP_JIT-gated, and it does not need to be: the range check already
+    //   requires the caller to own a code region, which it could only have
+    //   obtained by holding CAP_JIT at create. Gating it again would mean a
+    //   Proc whose legate expired mid-compile could no longer publish the
+    //   region it legitimately owns -- a half-state with no security value.
+    //
+    //   Errors: -EINVAL (range empty, wraps, or is not contained in a single
+    //   live code-region alias of this Proc).
+    SYS_ICACHE_SYNC = 103,  // arg: vaddr (x0), length (x1)
 };
+
+// SYS_JIT_CREATE out-parameter: the two aliases of one code region.
+// `writer_va` is RW (emit here), `exec_va` is RX (call here). Both cover
+// exactly `length` rounded up to whole pages, and both are page-aligned.
+// The offset of an instruction is identical in the two aliases, so a JIT
+// computes branch targets in exec-alias coordinates while writing at
+// writer_va + off -- ORC's native working/execution address split.
+struct t_jit_region {
+    u64 writer_va;
+    u64 exec_va;
+};
+_Static_assert(sizeof(struct t_jit_region) == 16, "t_jit_region ABI: size");
+_Static_assert(__builtin_offsetof(struct t_jit_region, writer_va) == 0, "t_jit_region ABI: writer_va@0");
+_Static_assert(__builtin_offsetof(struct t_jit_region, exec_va) == 8,   "t_jit_region ABI: exec_va@8");
+
+// Largest single code region (I-42). 64 MiB is generous for a shader/method
+// JIT while staying well inside the I-32 per-Proc page budget, so a code
+// region can never be the instrument that exhausts a Proc's memory floor --
+// the pages are charged against PROC_PAGE_MAX exactly like SYS_BURROW_ATTACH's.
+#define JIT_REGION_MAX  (64u * 1024u * 1024u)
 
 // SYS_PTY_REGISTER ops.
 #define PTY_REG_MINT   0u

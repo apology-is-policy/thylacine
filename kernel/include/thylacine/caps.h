@@ -140,8 +140,37 @@ typedef u64 caps_t;
 // shared text). docs/DEBUG-FS-DESIGN.md; Go IDE Stage 8a.
 #define CAP_DEBUG           (1ull << 10)
 
+// CAP_JIT — elevation-only. The authority to create a CODE Burrow: the
+// dual-mapped executable region (RW at VA_w, RX at VA_x) that is the ONLY
+// path by which userspace-emitted bytes ever become executable (I-42;
+// docs/JIT-ON-WX-DESIGN.md, realized by the Clade arc — LLVM-DESIGN.md §8).
+// A holder may call SYS_JIT_CREATE; nothing else in the tree consults it.
+//
+// ELEVATION-ONLY, and that is load-bearing, not stylistic: I-42's own text
+// requires the capability be "non-heritable", so it MUST be rfork-stripped —
+// which is exactly what membership in CAP_ELEVATION_ONLY (and exclusion from
+// CAP_ALL) delivers. Clearance-grantable like CAP_DEBUG, so a Proc that needs
+// to JIT acquires it through a corvus-mediated, scope- and time-bounded
+// legate rather than by inheritance.
+//
+// NOTE on the scripture wording: JIT-ON-WX-DESIGN.md, LLVM-DESIGN.md §8 and
+// ARCH §28 I-42 each describe CAP_JIT as "elevation-only, non-rfork-grantable,
+// the CAP_HW_CREATE class". The first two properties are unambiguous and are
+// what is implemented here. The trailing phrase is a loose analogy meaning
+// "gates a powerful create operation" — read literally it is WRONG, because
+// CAP_HW_CREATE is fork-grantable (a member of CAP_ALL), which would directly
+// contradict both "non-rfork-grantable" beside it and I-42's "non-heritable"
+// clause. Do not "fix" this bit toward CAP_ALL on the strength of that phrase.
+//
+// What it does NOT confer (the JIT-ON-WX caveat #1, as policy): CAP_JIT
+// controls WHO MAY EMIT code and WHERE (a specific Burrow, never arbitrary
+// process memory). It says nothing about what the emitted code may DO — JITed
+// code runs with the Proc's own capability set and namespace, no more. For
+// untrusted JIT the confinement instrument is the namespace, not this bit.
+#define CAP_JIT             (1ull << 11)
+
 // Reserved for Phase 5+ (one bit per capability domain; next free bit is
-// 1<<11):
+// 1<<12):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
 //   CAP_NET_RAW      — open raw network sockets / Ethernet frames.
@@ -157,9 +186,11 @@ typedef u64 caps_t;
 // ~CAP_ELEVATION_ONLY (A-4-pre). All five are acquired ONLY through the
 // `cap` device: CAP_HOSTOWNER (the unified fs-admin authority) plus the
 // A-4 finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL —
-// plus CAP_DEBUG (the Stage-8a cross-Proc debug authority).
+// plus CAP_DEBUG (the Stage-8a cross-Proc debug authority) and CAP_JIT (the
+// CL-7k code-emission authority; I-42 requires it be non-heritable, so its
+// membership here is an invariant obligation, not a style choice).
 // Maps to specs/handles.tla::ElevationOnly.
-#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG)
+#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
 
 // CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
 // Proc may legitimately hold from creation, and the mask kproc gets at

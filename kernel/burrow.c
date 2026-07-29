@@ -292,6 +292,48 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
     return v;
 }
 
+// I-42 / CL-7k: the dual-mappable CODE Burrow (docs/JIT-ON-WX-DESIGN.md).
+// Backing is byte-identical to burrow_create_anon -- one eager contiguous
+// KP_ZERO chunk -- and deliberately so: the type is an ADMISSIBILITY token, not
+// a different allocator. Keeping the backing identical means the CODE arm of
+// every downstream switch (free, acquire-liveness, demand-page) is the ANON arm,
+// so the new type adds a gate without adding a lifetime.
+//
+// KP_ZERO is load-bearing, not hygiene: an executable page handed back with a
+// previous owner's bytes would be code the Proc can RUN without having emitted
+// it. All-zero AArch64 is UDF #0 (permanently undefined), so an un-emitted page
+// traps instead of executing residue.
+struct Burrow *burrow_create_code(size_t size) {
+    if (!g_vmo_cache) extinction("burrow_create_code before burrow_init");
+    if (size == 0)    return NULL;
+    // Same overflow guard as burrow_create_anon: size + PAGE_SIZE - 1 must not
+    // wrap, or an enormous request would silently become a tiny page_count.
+    if (size > SIZE_MAX - (PAGE_SIZE - 1)) return NULL;
+
+    struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
+    if (!v) return NULL;
+
+    size_t page_count = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    unsigned order = order_for_pages(page_count);
+
+    struct page *pages = alloc_pages(order, KP_ZERO);
+    if (!pages) {
+        kmem_cache_free(g_vmo_cache, v);
+        return NULL;
+    }
+
+    v->magic         = VMO_MAGIC;
+    v->type          = BURROW_TYPE_CODE;
+    v->size          = page_count * PAGE_SIZE;
+    v->page_count    = page_count;
+    v->handle_count  = 1;            // construction reference
+    v->mapping_count = 0;
+    v->pages         = pages;
+    v->order         = order;
+    g_vmo_created++;
+    return v;
+}
+
 // Internal: release pages + struct when both counts have reached 0.
 // The caller has already verified the precondition.
 //
@@ -315,8 +357,16 @@ static void burrow_free_internal(struct Burrow *v) {
 
     switch (v->type) {
     case BURROW_TYPE_ANON:
+    case BURROW_TYPE_CODE:
+        // I-42: a CODE Burrow's backing IS an ANON Burrow's -- one contiguous
+        // eager chunk -- so it frees identically. The type differs only in what
+        // it AUTHORIZES (an RX alias), never in what it owns, which is why it
+        // shares this arm rather than duplicating it. The two aliases a code
+        // region carries are VMAs, and both must be gone before this runs: the
+        // #847 dual count reaches {0,0} only after each alias's vma_free has
+        // dropped its own mapping_count, so the pages outlive BOTH views.
         if (!v->pages)
-            extinction("burrow_free_internal(ANON) with pages already NULL (double-free)");
+            extinction("burrow_free_internal(ANON/CODE) with pages already NULL (double-free)");
         free_pages(v->pages, v->order);
         v->pages = NULL;
         break;
@@ -467,9 +517,11 @@ void burrow_acquire_mapping(struct Burrow *v) {
     // P4-Ic1: per-type liveness. ANON: pages alive; MMIO/DMA: the kobj held.
     switch (v->type) {
     case BURROW_TYPE_ANON:
+    case BURROW_TYPE_CODE:
+        // I-42: identical backing -> identical liveness test (see the free arm).
         if (!v->pages) {
             spin_unlock(&v->lock);
-            extinction("burrow_acquire_mapping of ANON BURROW with NULL pages (UAF)");
+            extinction("burrow_acquire_mapping of ANON/CODE BURROW with NULL pages (UAF)");
         }
         break;
     case BURROW_TYPE_MMIO:

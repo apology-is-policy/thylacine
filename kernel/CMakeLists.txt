@@ -167,6 +167,7 @@ set(KERNEL_TEST_SRCS
     test/test_devhw.c
     test/test_devpci.c
     test/test_env.c
+    test/test_jit.c
     test/test_allowance.c
     test/test_cpio.c
     test/test_devramfs.c

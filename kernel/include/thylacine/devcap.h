@@ -68,8 +68,11 @@ struct Spoor;
 // clearance-grantable so a dev-session debugger acquires it via the same
 // scope- and time-bounded legate the fs-admin caps use (docs/DEBUG-FS-DESIGN.md
 // section 7.1) -- the register-gate + redeem-subset check are mask-driven, so
-// no devcap.c change is needed.
-#define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG)
+// no devcap.c change is needed. CAP_JIT (CL-7k / I-42) joins on the same
+// footing: a Proc that must emit code (an llvmpipe-backed GL app) acquires the
+// authority through a bounded legate rather than by inheritance, which is what
+// keeps I-42's "non-heritable" clause true of every path, not just rfork.
+#define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL | CAP_DEBUG | CAP_JIT)
 
 // RW-5 SA-2 -- pin the I-25 member-unelevated invariant at compile time. BOTH
 // grantable sets MUST be entirely elevation-only. The load-bearing consequence:

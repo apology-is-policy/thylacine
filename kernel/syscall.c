@@ -4296,6 +4296,333 @@ static s64 sys_burrow_decommit_handler(u64 vaddr_raw, u64 length_raw) {
 }
 
 // =============================================================================
+// I-42 / CL-7k -- the JIT capability (docs/JIT-ON-WX-DESIGN.md; LLVM-DESIGN.md
+// section 8). SYS_JIT_CREATE / SYS_JIT_DESTROY / SYS_ICACHE_SYNC: the only path
+// by which bytes a Proc wrote become bytes it can execute.
+//
+// The mechanism is two aliases of one physical region in ONE Proc -- RW at
+// VA_w, RX at VA_x -- so no PTE is ever W AND X and I-12 holds at page
+// granularity. Nothing here relaxes the W^X check: each alias is an ordinary
+// VMA whose prot make_user_pte_l3 encodes exactly as it does for any other
+// mapping. What is new is only that a CODE Burrow is ADMITTED to carry an RX
+// alias at all, and that admission is minted by the kernel at create under
+// CAP_JIT -- never asserted by the caller at map time (the G-2 WEAVE
+// discipline).
+//
+// This is the kernel's own Lazarus W1.5 alternatives-patcher turned outward:
+// that code already writes .text through a transient RW-not-X scratch alias
+// while the canonical mapping stays RO+X, and already performs the
+// dc cvau / ic ivau / dsb / isb publish sequence. CL-7k exposes the same
+// already-trusted mechanism to userspace behind a capability.
+// =============================================================================
+
+// The EXEC alias paired with `writer` -- the other VMA of this Proc backed by
+// the same CODE Burrow. Unambiguous by construction: a CODE Burrow is created
+// with exactly two mappings and is never cross-Proc shareable
+// (burrow_share_into admits ANON only), so at most one peer can exist.
+//
+s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
+
+// PRECONDITION: caller holds p->vma_lock (walks p->vmas).
+static struct Vma *jit_find_peer_locked(struct Proc *p, const struct Vma *writer) {
+    for (struct Vma *v = p->vmas; v; v = v->next) {
+        if (v != writer && v->burrow == writer->burrow)
+            return v;
+    }
+    return NULL;
+}
+
+// Is `v` the WRITER alias of a live code region? The writer is the RW alias;
+// the exec alias is RX. Both are required to be CODE-backed -- a caller must
+// not be able to name an ordinary RW anon mapping and have the JIT paths act
+// on it.
+static bool jit_vma_is_writer(const struct Vma *v) {
+    return v && v->burrow &&
+           v->burrow->magic == VMO_MAGIC &&
+           v->burrow->type == BURROW_TYPE_CODE &&
+           (v->prot & VMA_PROT_WRITE) != 0 &&
+           (v->prot & VMA_PROT_EXEC) == 0;
+}
+
+// The MECHANISM behind SYS_JIT_CREATE: mint a code region and install BOTH of
+// its aliases, returning the pair through kernel pointers.
+//
+// Split out from the syscall body so the copy-out to userspace is the only
+// thing sys_jit_create_for_proc adds. That separation is not cosmetic: it is
+// what lets the kernel tests drive the real create path at all. A test runs in
+// kproc context, so any out_va it could pass is a KERNEL address, which
+// sys_validate_user_buf correctly refuses -- without this split every
+// mechanism test would fail on the ABI plumbing and prove nothing about the
+// mechanism. (The copy-out arm itself is exercised by the in-guest prover,
+// which is a real EL0 Proc with a real user buffer.)
+s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
+                          u64 *out_writer, u64 *out_exec) {
+    if (!p || !out_writer || !out_exec)              return -T_E_INVAL;
+
+    // CAP_JIT is THE gate on this whole surface: it is the authority to make
+    // writable bytes executable at all. ACQUIRE load -- proc_become_legate
+    // writes caps cross-thread (the A-4a clearance redeem), so a Proc can
+    // acquire the cap while another of its threads is running.
+    //
+    // Checked FIRST, before any argument validation, so that a Proc without
+    // the capability learns nothing about which lengths or addresses would
+    // have been acceptable (the SYS_CLOCK_SETTIME cap-before-buffer ordering).
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
+        return -T_E_PERM;
+
+    if (length_raw == 0)                             return -T_E_INVAL;
+    if (length_raw > JIT_REGION_MAX)                 return -T_E_INVAL;
+
+    // JIT_REGION_MAX is page-aligned, so the rounded length cannot exceed it
+    // and the addition cannot overflow.
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    u32 npages = (u32)(length / PAGE_SIZE);
+
+    spin_lock(&p->vma_lock);
+
+    // I-32: charge ONCE for the region, not once per alias. The two aliases are
+    // two views of ONE set of physical pages -- charging twice would bill a JIT
+    // double for memory it holds once, and the uncharge at destroy would then
+    // have to know to refund twice. One region, one charge.
+    if (!proc_page_charge(p, npages)) {
+        spin_unlock(&p->vma_lock);
+        return -T_E_NOMEM;
+    }
+
+    struct Burrow *b = burrow_create_code(length);
+    if (!b) {
+        proc_page_uncharge(p, npages);
+        spin_unlock(&p->vma_lock);
+        return -T_E_NOMEM;
+    }
+
+    // Both gaps are found and both VMAs installed under ONE lock hold, so a
+    // sibling thread cannot claim either gap between them and no observer ever
+    // sees a half-installed region. The writer alias is inserted BEFORE the
+    // second gap search, so vma_find_gap cannot hand back the range we just
+    // took -- the two aliases are necessarily disjoint.
+    u64 wva = 0, xva = 0;
+    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &wva) != 0)
+        goto fail_unref;
+    if (burrow_map(p, b, wva, length, VMA_PROT_RW) != 0)
+        goto fail_unref;
+
+    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &xva) != 0)
+        goto fail_unmap_writer;
+    // VMA_PROT_RX: readable + executable, NOT writable. vma_alloc rejects W|X
+    // outright, so this prot could never carry a write bit even by mistake --
+    // the W^X guarantee for the exec alias is the same one every other mapping
+    // in the system gets, not a special case.
+    if (burrow_map(p, b, xva, length, VMA_PROT_RX) != 0)
+        goto fail_unmap_writer;
+
+    // Drop the construction handle: the two mappings now own the Burrow
+    // (handle_count 0, mapping_count 2). The #847 dual count frees the pages
+    // only when BOTH aliases are gone -- which is exactly the lifetime a
+    // dual-mapped region needs, with no new refcount to get wrong.
+    burrow_unref(b);
+    spin_unlock(&p->vma_lock);
+
+    *out_writer = wva;
+    *out_exec   = xva;
+    return 0;
+
+fail_unmap_writer:
+    (void)burrow_unmap(p, wva, length);
+    // burrow_unmap dropped the writer's mapping ref; the construction handle
+    // below is then the last reference and frees the Burrow.
+fail_unref:
+    burrow_unref(b);
+    proc_page_uncharge(p, npages);
+    spin_unlock(&p->vma_lock);
+    return -T_E_NOMEM;
+}
+
+// SYS_JIT_CREATE: the mechanism above, plus the copy-out of the alias pair.
+s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va) {
+    if (!p)                                          return -T_E_INVAL;
+
+    // The out-buffer check comes AFTER the cap check inside the core would
+    // run, so validate it there-and-back: check the cap first (so a capless
+    // caller learns nothing from the buffer check), then the buffer, then act.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_JIT) == 0)
+        return -T_E_PERM;
+    if (!sys_validate_user_buf(out_va, sizeof(struct t_jit_region)))
+        return -T_E_FAULT;
+
+    u64 wva = 0, xva = 0;
+    s64 rc = sys_jit_create_region(p, length_raw, &wva, &xva);
+    if (rc != 0) return rc;
+
+    // Copy out with NO lock held. uaccess can fault -> demand-page -> which
+    // takes vma_lock, so doing this under the lock would self-deadlock. This is
+    // the REVENANT R-5-F1 rule (no faulting uaccess under a lock the fault path
+    // needs) obeyed at the point where it costs nothing.
+    struct t_jit_region reg = { .writer_va = wva, .exec_va = xva };
+    if (uaccess_copy_out(out_va, &reg, sizeof(reg)) != (s64)sizeof(reg)) {
+        // The caller never learns where the region landed, so it could never
+        // destroy it -- tear it down here rather than leak a region with no
+        // reachable name. sys_jit_destroy_for_proc is the same teardown the
+        // caller would have performed, so this cannot diverge from it.
+        (void)sys_jit_destroy_for_proc(p, wva);
+        return -T_E_FAULT;
+    }
+    return 0;
+}
+
+static s64 sys_jit_create_handler(u64 length_raw, u64 out_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -T_E_INVAL;
+    return sys_jit_create_for_proc(t->proc, length_raw, out_va);
+}
+
+// SYS_JIT_DESTROY: tear down BOTH aliases of the region whose writer alias
+// starts at writer_va, and free the backing pages.
+//
+// Identified by the WRITER VA alone rather than by a (writer, exec) pair: the
+// kernel already knows the pairing (they share a Burrow), so taking one name
+// makes it structurally impossible to destroy half a region or to pass two VAs
+// belonging to different regions. Not CAP_JIT-gated -- see the syscall.h note;
+// releasing memory you already own is not an exercise of the emit authority,
+// and gating it would turn a capability expiry into a leak.
+s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
+    if (!p)                                          return -T_E_INVAL;
+    if (writer_va & (PAGE_SIZE - 1))                 return -T_E_INVAL;
+
+    spin_lock(&p->vma_lock);
+
+    struct Vma *w = vma_lookup(p, writer_va);
+    // Must be the BASE of the writer alias, not merely a VA inside it -- a
+    // partial teardown has no meaning for a code region.
+    if (!w || w->vaddr_start != writer_va || !jit_vma_is_writer(w)) {
+        spin_unlock(&p->vma_lock);
+        return -T_E_INVAL;
+    }
+
+    struct Vma *x = jit_find_peer_locked(p, w);
+    if (!x) {
+        // A writer alias with no peer is a kernel invariant violation, not a
+        // user error: SYS_JIT_CREATE installs both or neither, and nothing
+        // else can remove one alias of a code region (SYS_BURROW_DETACH's
+        // window check does not distinguish them, but it exact-matches
+        // geometry and would take the whole VMA -- which is why destroy
+        // refuses to guess rather than tearing down a lone half).
+        spin_unlock(&p->vma_lock);
+        return -T_E_INVAL;
+    }
+
+    u64 length  = w->vaddr_end - w->vaddr_start;
+    u64 exec_va = x->vaddr_start;
+    u32 npages  = (u32)(length / PAGE_SIZE);
+
+    // Order is immaterial to correctness -- the #847 dual count frees the pages
+    // only after the second unmap -- but tearing the EXEC alias down first
+    // means that at no instant does an executable view of the region outlive
+    // its writable partner, which keeps the "code is reachable only as a
+    // complete region" reading true even mid-teardown.
+    int rc_x = burrow_unmap(p, exec_va, length);
+    int rc_w = burrow_unmap(p, writer_va, length);
+    if (rc_x == 0 && rc_w == 0)
+        proc_page_uncharge(p, npages);
+    spin_unlock(&p->vma_lock);
+
+    return (rc_x == 0 && rc_w == 0) ? 0 : -T_E_INVAL;
+}
+
+static s64 sys_jit_destroy_handler(u64 writer_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -T_E_INVAL;
+    return sys_jit_destroy_for_proc(t->proc, writer_va);
+}
+
+// SYS_ICACHE_SYNC: publish emitted bytes over [vaddr, vaddr+length).
+//
+// The cache maintenance runs on the KERNEL DIRECT-MAP alias of the backing
+// pages, never on the user VA. That is a safety property, not an
+// implementation detail: `dc cvau` / `ic ivau` are memory operations that can
+// take translation faults, and a user VA is exactly the address a hostile or
+// merely unlucky caller can arrange to be unmapped. The direct map is
+// guaranteed present for all RAM, so no cache op here can fault.
+//
+// It is also architecturally exact. ARMv8 requires data caches to behave as
+// PIPT, so cleaning ANY VA that maps the PA cleans the same line the user's
+// write through the RW alias dirtied; and IC IVAU is specified to invalidate
+// every alias of the PA. This is precisely how Linux's flush_icache_range
+// publishes module text written through the linear map.
+s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length) {
+    if (!p)                                          return -T_E_INVAL;
+    if (length == 0)                                 return -T_E_INVAL;
+    if (vaddr + length < vaddr)                      return -T_E_INVAL;  // wrap
+    if (length > JIT_REGION_MAX)                     return -T_E_INVAL;
+
+    spin_lock(&p->vma_lock);
+
+    // The range must be contained in ONE alias of ONE live code region. Either
+    // alias names the range legitimately (both map the same physical pages), so
+    // a JIT may sync through whichever pointer it happens to hold.
+    struct Vma *v = vma_lookup(p, vaddr);
+    if (!v || !v->burrow || v->burrow->magic != VMO_MAGIC ||
+        v->burrow->type != BURROW_TYPE_CODE ||
+        vaddr + length > v->vaddr_end) {
+        spin_unlock(&p->vma_lock);
+        return -T_E_INVAL;
+    }
+
+    struct Burrow *b = v->burrow;
+    if (!b->pages) {
+        spin_unlock(&p->vma_lock);
+        return -T_E_INVAL;
+    }
+    // Byte offset of the range within the Burrow, and a handle ref so the
+    // pages survive a sibling thread's concurrent SYS_JIT_DESTROY while we
+    // sync outside the lock.
+    u64 off = (vaddr - v->vaddr_start) + v->burrow_offset;
+    paddr_t base_pa = page_to_pa(b->pages);
+    u64 bsize = (u64)b->size;
+    burrow_ref(b);
+
+    spin_unlock(&p->vma_lock);
+
+    // Defensive: the VMA span was validated against vaddr_end above, and
+    // burrow_map installs a VMA no larger than its Burrow, so this cannot
+    // trip -- but the arithmetic below indexes physical memory, so it is
+    // checked rather than assumed.
+    if (off + length > bsize) {
+        burrow_unref(b);
+        return -T_E_INVAL;
+    }
+
+    // Walk page by page: the region is physically contiguous (a CODE Burrow is
+    // one alloc_pages chunk), but the direct map is addressed per page and
+    // arch_icache_sync_range takes a kernel VA, so sync each page's span.
+    // Bounded by JIT_REGION_MAX / PAGE_SIZE iterations.
+    u64 done = 0;
+    while (done < length) {
+        u64 cur      = off + done;
+        u64 page_off = cur & (PAGE_SIZE - 1);
+        u64 chunk    = PAGE_SIZE - page_off;
+        if (chunk > length - done) chunk = length - done;
+        u8 *kva = (u8 *)pa_to_kva(base_pa + (cur & ~(u64)(PAGE_SIZE - 1)));
+        arch_icache_sync_range(kva + page_off, (size_t)chunk);
+        done += chunk;
+    }
+
+    // Dropped outside vma_lock. If a sibling destroyed the region while we
+    // synced, this is the last reference and frees it here -- correct, and the
+    // reason the ref was taken at all.
+    burrow_unref(b);
+    return 0;
+}
+
+static s64 sys_icache_sync_handler(u64 vaddr, u64 length) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -T_E_INVAL;
+    return sys_icache_sync_for_proc(t->proc, vaddr, length);
+}
+
+// =============================================================================
 // Weft -- the per-flow capability network dataplane EL0 delivery (Weft-6a-2;
 // NET-THROUGHPUT.md section 6). kernel/weft.c owns the share_id registry + the
 // binding lifecycle; these two syscalls wire a /net flow's shared ring into a
@@ -7483,6 +7810,19 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_WEFT_UNSHARE:
         ctx->regs[0] = (u64)sys_weft_unshare_handler(ctx->regs[0]);
+        return;
+
+    // I-42 / CL-7k: the JIT capability.
+    case SYS_JIT_CREATE:
+        ctx->regs[0] = (u64)sys_jit_create_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_JIT_DESTROY:
+        ctx->regs[0] = (u64)sys_jit_destroy_handler(ctx->regs[0]);
+        return;
+
+    case SYS_ICACHE_SYNC:
+        ctx->regs[0] = (u64)sys_icache_sync_handler(ctx->regs[0], ctx->regs[1]);
         return;
 
     case SYS_WALK_CREATE:

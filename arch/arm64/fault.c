@@ -416,6 +416,15 @@ static enum fault_result demand_page_locked(struct Proc *p,
     bool    device_memory;
     switch (vma->burrow->type) {
     case BURROW_TYPE_ANON:
+    case BURROW_TYPE_CODE:
+        // I-42 (CL-7k): a CODE Burrow resolves exactly like ANON -- same
+        // contiguous eager chunk, same Normal-WB attrs. It shares this arm
+        // BECAUSE it must: both aliases of a code region fault through here, and
+        // each installs the PTE at its OWN vma->prot (RW for the writer alias,
+        // RX for the exec alias). The W^X decision therefore stays entirely in
+        // make_user_pte_l3, which is what makes "no PTE is ever W AND X" a
+        // property of the encoder rather than of this dispatch -- there is no
+        // code-specific PTE path that could drift away from I-12.
         if (!vma->burrow->pages)            return FAULT_UNHANDLED_USER;
         page_pa = page_to_pa(vma->burrow->pages) +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
