@@ -119,6 +119,14 @@ struct ProbeSpec {
     /// cannot: that clangd INDEXED the header, not merely found it. A
     /// definition that resolves into libc++ is the evidence.
     intel_at: Option<(u32, u32)>,
+    /// Substring the definition's URI must contain.
+    ///
+    /// Without this the probe only asserts that SOME definition came back,
+    /// while the comment claimed the target proved header indexing -- a claim
+    /// the code did not enforce. For the with-headers spec the target landing
+    /// in libc++ IS the proof, so it is checked rather than eyeballed. URIs are
+    /// percent-encoded on the wire, hence `c%2B%2B` for `c++`.
+    def_uri_contains: Option<&'static str>,
     /// Diagnostic-message substrings that must NOT appear for this file.
     ///
     /// The planted-error assertion alone is satisfiable while the server is
@@ -149,6 +157,7 @@ static PROBES: &[ProbeSpec] = &[
         bad_line: 3,
         // `Probe` on line 2 (`func Probe() int {`).
         intel_at: Some((2, 6)),
+        def_uri_contains: Some("/tmp/lspp/main.go"),
         forbid: &[],
     },
     ProbeSpec {
@@ -173,6 +182,7 @@ static PROBES: &[ProbeSpec] = &[
         // Deliberately none: this spec's whole job is the protocol claim, and
         // an index-dependent assertion here would blur it with the next one.
         intel_at: None,
+        def_uri_contains: None,
         forbid: &[],
     },
     // The toolchain-config claim, deliberately SEPARATE from the protocol claim
@@ -222,6 +232,9 @@ static PROBES: &[ProbeSpec] = &[
         // `vector` spans columns 6..12). A definition here must resolve INTO
         // libc++ -- which is the header-indexing proof.
         intel_at: Some((3, 8)),
+        // Landing in libc++ is the header-INDEXING proof; "found on disk" is
+        // only what `forbid` rules out.
+        def_uri_contains: Some("/c%2B%2B/v1/"),
         forbid: &["file not found", "'vector' file not found"],
     },
 ];
@@ -681,9 +694,21 @@ fn dispatch(
                 Some(l) => l,
                 _ => fail(spec, "definition returned nothing at the probed position"),
             };
-            // The URI is the payload: for the with-headers spec it must land
-            // INSIDE libc++, which is what proves clangd indexed the header
-            // rather than merely finding it on disk.
+            // The URI is the payload, so it is CHECKED, not just printed: for
+            // the with-headers spec it must land inside libc++, which is what
+            // proves clangd indexed the header rather than merely finding it.
+            if let Some(want) = spec.def_uri_contains {
+                if !loc.uri.contains(want) {
+                    t_putstr("lsp-probe: FAIL [");
+                    t_putstr(spec.name);
+                    t_putstr("] -- definition resolved to \"");
+                    t_putstr(&loc.uri);
+                    t_putstr("\", expected it to contain \"");
+                    t_putstr(want);
+                    t_putstr("\"\n");
+                    unsafe { t_exits(1) }
+                }
+            }
             t_putstr("lsp-probe: [");
             t_putstr(spec.name);
             t_putstr("] definition OK -> ");

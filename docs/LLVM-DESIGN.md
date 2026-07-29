@@ -1420,8 +1420,12 @@ find its headers" was, so they are asked for instead:
 [gopls]          hover OK -- "func Probe() int"
                  definition OK -> file:///tmp/lspp/main.go:2
 [clangd+headers] hover OK -- "class vector<int, std::allocator<int>>"
-                 definition OK -> file:///clade/sysroot/include/c++/v1/__vector/vector.h:86
+                 definition OK -> file:///clade/sysroot/include/c%2B%2B/v1/__vector/vector.h:86
 ```
+
+(`c%2B%2B` is `c++` — LSP locations are URIs, so the `+`s are percent-encoded
+on the wire. Quoted verbatim rather than prettified, so a future reader greps
+the boot log for what is actually in it.)
 
 The definition target is the load-bearing one: landing *inside libc++* proves
 clangd **indexed** the header, which no diagnostic can show — a file can be
