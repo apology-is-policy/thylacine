@@ -880,8 +880,10 @@ fn push_hwcap_names(r: &mut Render, hwcap: u64) {
 }
 
 /// (CLOCK_MONOTONIC, CLOCK_REALTIME) in ns. Read as a pair so /proc/stat's
-/// btime (realtime - uptime) uses two samples taken back to back rather than
-/// two independent reads a scheduling gap apart.
+/// btime (realtime - uptime) comes from ONE clock sample rather than two
+/// independent reads a scheduling gap apart. (The "two samples taken back to
+/// back" this comment used to claim was the best the old raw-syscall form could
+/// do; the vDSO path now makes it literally one -- V-4c-3 SA-4.)
 fn clock_pair_ns() -> (u64, u64) {
     // V-4c-3 SA-4: was a local t_timespec mirror plus two raw t_clock_gettime
     // calls, which silently opted out of the #343 vDSO on a file a monitoring
