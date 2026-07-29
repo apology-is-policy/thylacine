@@ -189,6 +189,22 @@ static bool path_has_dotdot(const char *path, u64 pathlen) {
     return false;
 }
 
+// path_has_trailing_slash -- POSIX 4.13: a pathname holding at least one
+// non-'/' character and ending in one or more '/' characters names a
+// DIRECTORY. The tokenizer collapses separator runs, so without this the
+// trailing '/' is simply dropped and `/etc/passwd/` resolves the file (#82).
+//
+// The "at least one non-'/'" clause is why this scans back rather than testing
+// the last byte: "/" and "//" have NO component before the trailing run, so
+// the rule does not apply to them at all (they name the base, which the caller
+// already vouched for). "" is likewise exempt.
+static bool path_has_trailing_slash(const char *path, u64 pathlen) {
+    if (pathlen == 0 || path[pathlen - 1] != '/') return false;
+    u64 t = pathlen;
+    while (t > 0 && path[t - 1] == '/') t--;
+    return t > 0;   // a real component precedes the trailing separator run
+}
+
 // stalk() -- the errp==NULL convenience wrapper (the common, errno-agnostic
 // API the bulk of callers + the test suite use). The errno-rollout consumers
 // (SYS_OPEN) call stalk_err() directly.
@@ -239,6 +255,11 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     struct t_stat carried;
     bool          carried_valid = false;
     int           logical_depth = 0;
+
+    // #82: does this path end in a separator, asserting a directory? Computed
+    // once from the RAW path -- the tokenizer below drops the trailing run, so
+    // by the time resolution finishes nothing remembers it was there.
+    bool          trailing_slash = path_has_trailing_slash(path, pathlen);
 
     // Cross the BASE: `start` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
@@ -447,6 +468,18 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                         }
                     }
                     if (!co_mount) {
+                        // #82: this exit never reaches the quarry gate below,
+                        // so re-state it here on the leaf's fused record. That
+                        // record IS the quarry: the scan above proved no
+                        // component -- the leaf included -- is a mount point,
+                        // so no cross is owed and crossed == uncrossed. Before
+                        // the R/W check, the same type-before-permission order
+                        // the quarry gate uses.
+                        if (trailing_slash && !(sts[nrun - 1].qid_type & QTDIR)) {
+                            spoor_clunk(co);
+                            err = T_E_NOTDIR;
+                            goto fail;
+                        }
                         if (parent->dev->perm_enforced &&
                             perm_check(p, &sts[nrun - 1],
                                        perm_want_for_omode(omode)) != 0) {
@@ -641,6 +674,17 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
 
             // Full walk, no split.
             if (query) {
+                // #82: the third gate site -- this exit skips the quarry too.
+                // The leaf record IS the would-be quarry: the split post-scan
+                // above tests EVERY component for mount membership in the
+                // query form (`bound` is false when nc == NULL, so the
+                // leaf-of-a-bind-walk carve-out cannot apply), so reaching
+                // here proves nothing in the run is a mount point.
+                if (trailing_slash && !(sts[nrun - 1].qid_type & QTDIR)) {
+                    walkqid_free(w);
+                    err = T_E_NOTDIR;
+                    goto fail;
+                }
                 // The 1-RPC stat: the leaf's fused record is the answer; no
                 // quarry Spoor / fid ever existed -- nothing to clunk, on
                 // either end. Success exit WITHOUT touching *errp.
@@ -780,6 +824,31 @@ per_component:
             carried_valid = false;   // the record described the mount point
         }
     }
+
+    // #82: a trailing '/' asserts the path names a DIRECTORY. Gate the QUARRY,
+    // and deliberately AFTER the cross above -- unlike #81's dot gate, which
+    // reads the tip UNCROSSED. The two ask different questions of the same
+    // field:
+    //   - `.`/`..` are about WHERE RESOLUTION STANDS. Under STALK_MOUNT a mount
+    //     point deliberately does not cross, so `/mnt/.` must equal `/mnt`;
+    //     crossing there would INTRODUCE a divergence.
+    //   - a trailing slash is about WHAT THE PATH NAMES, which is the crossed
+    //     result: `/mnt/` names the MOUNTED ROOT, not the shadowed point.
+    // The distinction is observable, not academic: nothing requires a mount
+    // point and its mounted root to agree on type (territory.c's mount() has no
+    // QTDIR check), so a directory mounted over a file makes `/mnt/` legal and
+    // a file mounted over a directory makes it ENOTDIR -- gating the uncrossed
+    // point would be wrong in BOTH directions. Placing it on the quarry gets
+    // every amode right for free, because the quarry is by construction the
+    // thing the resolution names (STALK_MOUNT's uncrossed quarry included: a
+    // trailing slash there asserts the MOUNT POINT is a directory, which is
+    // exactly what SYS_MOUNT names).
+    //
+    // BEFORE the final-hop R/W gate, matching #79's type-before-permission
+    // ordering: `open("/a/file/", O_RDONLY)` on an unreadable file is ENOTDIR,
+    // not EACCES -- the answer must not turn on a mode bit that has no bearing
+    // on whether the path is even well-formed.
+    if (trailing_slash && !(quarry->qid.type & QTDIR)) { err = T_E_NOTDIR; goto fail; }
 
     // Final hop. STALK_WALK (O_PATH) + STALK_MOUNT + STALK_STAT return the
     // resolved quarry unopened (a navigation / create / chroot / mount /

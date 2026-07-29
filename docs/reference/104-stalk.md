@@ -505,7 +505,8 @@ Three properties are deliberate:
   would be *introducing*. `stalk.dot_notdir_mount` pins exactly that equality.
   The two types can disagree only for a mount whose point and root differ in
   kind (a directory grafted onto a file — `mount()` does not gate on type);
-  nothing in-tree builds one.
+  nothing on the boot path builds one, though `stalk.trailing_slash_mount`
+  builds both directions deliberately, to pin #82's *opposite* choice below.
 - **I-28 is strengthened, not touched.** The gate can only turn a resolution
   that used to succeed into a failure — it never moves a pop further up — so
   no path that previously stopped at `start` can now pass it. At depth 0 the
@@ -522,10 +523,69 @@ Scope, stated precisely because one leg is *not* covered:
 | dirfd-relative | `openat(dirfd, "b/..")` | yes |
 | cwd-relative | `open("b/..")` | **no** — `cwd_lexical_resolve` normalizes the dots away before `stalk` ever sees them (task #83; it is the LS-4 name-based-cwd design, not an oversight) |
 
-A **trailing slash** (`open("/file/")`) is the same family and still resolves;
-it is task #82, kept separate because it needs gates in the POUNCE `STALK_STAT`
-query and FID-LIFECYCLE cached-open early returns, which the dot gate does not
-touch. `..` also does not require X on the directory it pops out of (task #84).
+`..` also does not require X on the directory it pops out of (task #84).
+
+### A trailing slash asserts a directory (#82)
+
+POSIX 4.13: a pathname holding at least one non-`/` character and ending in one
+or more `/` characters names a **directory**. The tokenizer collapses separator
+runs, so pre-#82 the trailing `/` was simply dropped and `/etc/passwd/`
+resolved the file. `path_has_trailing_slash` records the fact once from the raw
+path — nothing downstream remembers the separator was there — and three gates
+consume it.
+
+**Three sites, because two success exits never reach the quarry.** `stalk_core`
+has exactly three success returns, and the gate has to sit on each:
+
+| site | exit | subject |
+|---|---|---|
+| A | the ordinary `return quarry` | `quarry->qid.type`, **after** the cross |
+| B | the FID-LIFECYCLE cached-open `return co` | `sts[nrun-1].qid_type` |
+| C | the POUNCE `STALK_STAT` walk-query `return NULL` (with `stat_done`) | `sts[nrun-1].qid_type` |
+
+B and C read the leaf's fused record rather than a Spoor, and that is exactly
+the quarry: both exits are reachable only after a scan has proved no component
+in the run — the leaf included — is a mount point, so no cross is owed and
+crossed and uncrossed coincide. All three sit **before** the final permission
+check, matching #79's type-before-permission ordering: `open("/a/file/",
+O_RDONLY)` on an unreadable file is ENOTDIR, not EACCES.
+
+**The subject is the CROSSED quarry — the opposite of the dot gate**, and for a
+principled reason. The two gates ask different questions of the same field:
+
+- `.`/`..` are about **where resolution stands**, so they read the tip
+  *uncrossed* (`/mnt/.` must equal `/mnt`).
+- a trailing slash is about **what the path names**, which is the crossed
+  result: `/mnt/` names the mounted root, not the shadowed point.
+
+This is observable, not academic. `territory.c`'s `mount()` has no type check,
+so a mount point and its root need not agree — and then gating the uncrossed
+point is wrong in *both* directions: a file mounted over a directory would make
+`/mnt/` wrongly legal, and a directory mounted over a file would make it
+wrongly ENOTDIR. `stalk.trailing_slash_mount` builds both and fails if the gate
+moves above the cross. Placing it on the quarry also gets every amode right for
+free, because the quarry is by construction the thing the resolution names —
+including `STALK_MOUNT`, whose deliberately-uncrossed quarry *is* what
+`SYS_MOUNT` names.
+
+`"/"` and `"//"` are **exempt**: POSIX scopes the rule to pathnames with at
+least one non-`/` character, and they have no component before the trailing
+run. That is why the discriminator scans back from the end instead of testing
+the last byte. A trailing slash on a *missing* path is still ENOENT — the gate
+never pre-empts a real walk miss.
+
+Scope is the same shape as the dot gate: absolute and dirfd-relative paths are
+gated, cwd-relative ones are not (`cwd_lexical_resolve` rebuilds the path
+component-by-component and never emits a trailing separator — task #83 covers
+both legs). `SYS_CHDIR` always routes through that cleaner, but it has carried
+its own explicit `QTDIR` check since LS-4, so `chdir("file/")` was never wrong.
+
+**Not covered — the userspace splitter.** `unlink("f/")` does not reach this
+gate at all: pouch's `__pouch_open_parent` splits a path into (parent, leaf) and
+rejects a trailing slash with `EINVAL` before any syscall. That is its own
+defect in both directions — `EINVAL` where POSIX says ENOTDIR for a file, and a
+rejection where `rmdir("dir/")` should simply work — and it is tracked
+separately (task #86); it is a boundary-line bug, not a resolver one.
 
 `sys_open_handler`
 returns `-1` on `path_len == 0` or `> SYS_OPEN_PATH_MAX`, an invalid user buffer,

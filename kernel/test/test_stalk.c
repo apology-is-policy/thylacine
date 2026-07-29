@@ -61,6 +61,8 @@ void test_stalk_missing_component(void);
 void test_stalk_notdir(void);                  // #79
 void test_stalk_dot_notdir(void);              // #81
 void test_stalk_dot_notdir_mount(void);        // #81 (uncrossed-tip choice)
+void test_stalk_trailing_slash(void);          // #82
+void test_stalk_trailing_slash_mount(void);    // #82 (crossed-quarry choice)
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_open_replace(void);
@@ -709,6 +711,118 @@ void test_stalk_dot_notdir(void) {
     spoor_unref(root);
 }
 
+// #82: a trailing '/' asserts the path names a DIRECTORY (POSIX 4.13). The
+// tokenizer collapses separator runs, so pre-fix the trailing '/' was simply
+// dropped and `a/b/` resolved the file. THREE gate sites, because two success
+// exits never reach the quarry -- each leg below drives exactly one of them, so
+// removing any single gate fails a distinct assertion.
+void test_stalk_trailing_slash(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    int e;
+    struct Spoor *q;
+    struct t_stat st;
+    g_fix_co_enable = false;   // site A/C legs take the normal path
+
+    // -- Site A: the quarry gate (the ordinary resolution path).
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ -> NULL (b is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "trailing slash on a file -> NOTDIR");
+    TEST_EXPECT_EQ(spoor_total_allocated() - spoor_total_freed(), live_before,
+                   "the quarry gate's failure path leaks no Spoor");
+
+    // A run of trailing separators is the same assertion.
+    e = -12345;
+    q = stalk_err(&p, root, "a/b///", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/// -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "a run of trailing slashes -> NOTDIR");
+
+    // Mode-independence (#79's property): xfile is 0755, so an x-bit-first
+    // ordering would look correct on 0644 `b` alone. Both files answer NOTDIR.
+    e = -12345;
+    q = stalk_err(&p, root, "xfile/", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "xfile/ -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "trailing slash on a 0755 file -> NOTDIR");
+
+    // O_PATH (STALK_WALK) is gated too -- Linux answers ENOTDIR there as well.
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/", 4, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ (O_PATH) -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "O_PATH is gated as well");
+
+    // The DIRECTORY case must keep working -- the regression a too-eager gate
+    // trips, and overwhelmingly the common shape (`ls /usr/`, `$(DIR)/`).
+    q = stalk_err(&p, root, "a/deep/", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/ still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "a/deep/ -> qid 3 (deep)");
+    spoor_clunk(q);
+    q = stalk_err(&p, root, "a/", 2, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/ still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)1, "a/ -> qid 1");
+    spoor_clunk(q);
+
+    // "/" and "//" are EXEMPT: POSIX scopes the rule to a pathname with at
+    // least one non-'/' character, and they have no component before the
+    // trailing run. (This is why the discriminator scans back instead of
+    // testing the last byte.)
+    q = stalk_err(&p, root, "/", 1, STALK_WALK, 0, &e);
+    TEST_ASSERT(q != NULL, "\"/\" resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)0, "\"/\" -> the root");
+    spoor_clunk(q);
+    q = stalk_err(&p, root, "//", 2, STALK_WALK, 0, &e);
+    TEST_ASSERT(q != NULL, "\"//\" resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)0, "\"//\" -> the root");
+    spoor_clunk(q);
+
+    // A trailing slash on a MISSING path is still ENOENT -- the gate must not
+    // pre-empt a real walk miss.
+    e = -12345;
+    q = stalk_err(&p, root, "a/nope/", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/nope/ -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "a missing component still reports NOENT");
+
+    // -- Site C: the STALK_STAT walk-query fast path, which returns from the
+    // fused leaf record WITHOUT ever materializing a quarry.
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b/", 4, &st, &e), (u64)-1,
+                   "stat a/b/ fails");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "the stat query path gates too");
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/deep/", 7, &st, &e), (u64)0,
+                   "stat a/deep/ still succeeds");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)3, "and reports the directory");
+
+    // -- Site B: the FID-LIFECYCLE cached-open arm, the other quarry-skipping
+    // exit. Assert the arm actually RAN, else this leg silently re-tests site A.
+    g_fix_co_enable = true;
+    g_fix_co_calls = 0;
+    live_before = spoor_total_allocated() - spoor_total_freed();
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ via the cached-open arm -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "the cached-open arm gates too");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 1ull,
+                   "the cached-open arm ran (this leg is not site A in disguise)");
+    TEST_EXPECT_EQ(spoor_total_allocated() - spoor_total_freed(), live_before,
+                   "the cached-open gate clunks its minted Spoor");
+    g_fix_co_enable = false;
+
+    // The per-component loop (no walk_attrs) reaches the same verdict.
+    struct Spoor *root_nowa = fix_root_nowa();
+    TEST_ASSERT(root_nowa != NULL, "fix_root_nowa");
+    e = -12345;
+    q = stalk_err(&p, root_nowa, "a/b/", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ (no walk_attrs) -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "per-component loop agrees: NOTDIR");
+    spoor_unref(root_nowa);
+
+    spoor_unref(root);
+}
+
 void test_stalk_opath_no_open(void) {
     struct Proc p; mkproc_system(&p);
     struct Spoor *root = fix_root();
@@ -865,6 +979,68 @@ void test_stalk_dot_notdir_mount(void) {
     territory_unref(p.territory);
     spoor_clunk(src);
     spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// #82: the trailing-slash gate reads the CROSSED quarry -- the OPPOSITE of
+// #81's dot gate one test up, and deliberately so. The two ask different
+// questions of the same field: `.`/`..` are about WHERE RESOLUTION STANDS
+// (so `/mnt/.` must equal `/mnt`, uncrossed), a trailing slash about WHAT THE
+// PATH NAMES (which is the crossed result). The distinction is observable, not
+// academic: territory.c's mount() has no type check, so a mount point and its
+// mounted root need not agree -- and then gating the uncrossed point is wrong
+// in BOTH directions. Both are built here.
+void test_stalk_trailing_slash_mount(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    g_fix_co_enable = false;
+
+    int e;
+    struct Spoor *q;
+
+    // (1) A FILE mounted over a DIRECTORY mount point. `loop` now RESOLVES to
+    //     a file, so `loop/` names a file -> ENOTDIR. A gate on the uncrossed
+    //     point would read QTDIR and wrongly ACCEPT.
+    struct Spoor *bfile = stalk(&p, root, "a/b", 3, STALK_WALK, 0);
+    struct Spoor *mpdir = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(bfile != NULL && mpdir != NULL, "resolve a/b + loop");
+    TEST_EXPECT_EQ((u64)(bfile->qid.type & QTDIR), 0ull, "a/b is a file");
+    TEST_EXPECT_EQ((u64)(mpdir->qid.type & QTDIR), (u64)QTDIR, "loop is a directory");
+    TEST_EXPECT_EQ(mount(p.territory, bfile, mpdir, 0), 0, "mount the file onto loop");
+
+    e = -12345;
+    q = stalk_err(&p, root, "loop/", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "loop/ -> NULL (the mount crosses to a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR,
+                   "file-over-dir: loop/ is NOTDIR (the CROSSED type decides)");
+
+    // Without the slash it still resolves -- to the mounted file.
+    q = stalk_err(&p, root, "loop", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "loop still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, 2ull, "loop -> the mounted file (qid 2)");
+    spoor_clunk(q);
+
+    // (2) The converse: a DIRECTORY mounted over a FILE mount point. `xfile`
+    //     now RESOLVES to a directory, so `xfile/` is LEGAL. A gate on the
+    //     uncrossed point would read QTFILE and wrongly REJECT.
+    struct Spoor *adir  = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mpfil = stalk(&p, root, "xfile", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(adir != NULL && mpfil != NULL, "resolve a + xfile");
+    TEST_EXPECT_EQ((u64)(mpfil->qid.type & QTDIR), 0ull, "xfile is a file");
+    TEST_EXPECT_EQ(mount(p.territory, adir, mpfil, 0), 0, "mount a onto xfile");
+
+    q = stalk_err(&p, root, "xfile/", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "xfile/ resolves (the mount crosses to a directory)");
+    TEST_EXPECT_EQ((u64)q->qid.path, 1ull,
+                   "dir-over-file: xfile/ -> the mounted dir (qid 1)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(bfile);
+    spoor_clunk(mpdir);
+    spoor_clunk(adir);
+    spoor_clunk(mpfil);
     spoor_unref(root);
 }
 

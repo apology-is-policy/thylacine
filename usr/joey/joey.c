@@ -2398,6 +2398,133 @@ static int probe79_notdir(void) {
 //
 // Self-contained (creates its own file + directory) so it cannot go vacuous if
 // the bake layout changes. Boot-fatal.
+// #82: a trailing '/' asserts the path names a DIRECTORY (POSIX 4.13). This
+// proves the gate over the REAL FS (dev9p/Stratum Spoors, not the synthetic
+// fixture ones) on every boot -- and, measured rather than assumed, it reaches
+// all THREE gate sites: the O_PATH legs take the quarry gate, the stat leg
+// takes the SYS_STAT walk-query, and the OREAD leg takes the FID-LIFECYCLE
+// cached-open arm (a freshly-created file is fully page-cached, so the arm
+// engages; with only that gate reverted this leg is the ONE that flips to
+// resolving, which is how the routing was established). The OREAD leg is
+// fail-safe either way: should the arm ever decline, the resolution falls
+// through to the quarry gate, which answers the same -T_E_NOTDIR.
+static int probe82_trailing_slash(void) {
+    char nb[24];
+    static const char fn[] = "p82-slash-probe";
+    static const char dn[] = "p82-slash-dir";
+    static const char xn[] = "p82-slash-exec";
+    static const char f_sl[]  = "/p82-slash-probe/";
+    static const char f_sl3[] = "/p82-slash-probe///";
+    static const char d_sl[]  = "/p82-slash-dir/";
+    static const char x_sl[]  = "/p82-slash-exec/";
+    static const char miss[]  = "/p82-slash-nope/";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe82 open root FAILED\n"); return -1; }
+
+    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe82 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(fd);
+
+    long xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    if (xfd < 0) {
+        (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+        xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    }
+    if (xfd >= 0) (void)t_close(xfd);
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        // Boot-fatal, not skipped: without the directory the regression legs
+        // below would fail for the wrong reason, and the probe would look like
+        // it caught a gate bug when it only caught its own setup.
+        t_putstr("joey: probe82 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(dd);
+
+    // A trailing slash on a regular FILE -> -T_E_NOTDIR (20). Pre-#82 the
+    // tokenizer dropped the separator and every one of these RESOLVED.
+    long rc_f   = t_open(T_WALK_OPEN_FROM_ROOT, f_sl,  sizeof(f_sl)  - 1, T_OPATH);
+    long rc_f3  = t_open(T_WALK_OPEN_FROM_ROOT, f_sl3, sizeof(f_sl3) - 1, T_OPATH);
+    // Mode-independence (#79's property): 0755 answers the same as 0644, so a
+    // gate re-ordered behind the X-search fails here.
+    long rc_x   = t_open(T_WALK_OPEN_FROM_ROOT, x_sl,  sizeof(x_sl)  - 1, T_OPATH);
+    // The STALK_OPEN quarry path (not just O_PATH's STALK_WALK).
+    long rc_fo  = t_open(T_WALK_OPEN_FROM_ROOT, f_sl,  sizeof(f_sl)  - 1, T_OREAD);
+
+    // A real DIRECTORY must still resolve -- the regression a too-eager gate
+    // trips, and by far the common shape (`ls /usr/`, a `$(DIR)/` expansion).
+    long rc_d   = t_open(T_WALK_OPEN_FROM_ROOT, d_sl, sizeof(d_sl) - 1, T_OPATH);
+    // "/" is EXEMPT: no component precedes the trailing run (POSIX scopes the
+    // rule to pathnames holding at least one non-'/' character).
+    long rc_root = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+
+    // The gate must not pre-empt a genuine walk miss: still ENOENT (-2), which
+    // is what os.IsNotExist branches on.
+    long rc_miss = t_open(T_WALK_OPEN_FROM_ROOT, miss, sizeof(miss) - 1, T_OPATH);
+
+    // Site C: the SYS_STAT walk-query fast path returns from the fused leaf
+    // record without ever materializing a quarry, so it needs its own gate.
+    struct t_stat st;
+    long rc_sf = t_stat_path(f_sl, sizeof(f_sl) - 1, &st);
+    long rc_sd = t_stat_path(d_sl, sizeof(d_sl) - 1, &st);
+
+    if (rc_f    >= 0) (void)t_close(rc_f);
+    if (rc_f3   >= 0) (void)t_close(rc_f3);
+    if (rc_x    >= 0) (void)t_close(rc_x);
+    if (rc_fo   >= 0) (void)t_close(rc_fo);
+    if (rc_d    >= 0) (void)t_close(rc_d);
+    if (rc_root >= 0) (void)t_close(rc_root);
+    if (rc_miss >= 0) (void)t_close(rc_miss);
+    (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+    (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_f != -20 || rc_f3 != -20 || rc_x != -20 || rc_fo != -20 ||
+        rc_sf != -20 || rc_miss != -2 || rc_d < 0 || rc_root < 0 || rc_sd != 0) {
+        t_putstr("joey: probe82 FAILED file/=");
+        t_putstr(itoa_dec(rc_f, nb, sizeof(nb)));
+        t_putstr(" file///=");
+        t_putstr(itoa_dec(rc_f3, nb, sizeof(nb)));
+        t_putstr(" exec0755/=");
+        t_putstr(itoa_dec(rc_x, nb, sizeof(nb)));
+        t_putstr(" fileOREAD/=");
+        t_putstr(itoa_dec(rc_fo, nb, sizeof(nb)));
+        t_putstr(" stat(file/)=");
+        t_putstr(itoa_dec(rc_sf, nb, sizeof(nb)));
+        t_putstr(" (want -20 x5) miss/=");
+        t_putstr(itoa_dec(rc_miss, nb, sizeof(nb)));
+        t_putstr(" (want -2) dir/=");
+        t_putstr(itoa_dec(rc_d, nb, sizeof(nb)));
+        t_putstr(" root=");
+        t_putstr(itoa_dec(rc_root, nb, sizeof(nb)));
+        t_putstr(" stat(dir/)=");
+        t_putstr(itoa_dec(rc_sd, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: probe82 OK (a trailing '/' on a file -> ENOTDIR, open + "
+             "stat; a real dir, \"/\", and a genuine miss are unaffected)\n");
+    return 0;
+}
+
 static int probe81_dot_notdir(void) {
     char nb[24];
     static const char fn[] = "p81-dot-probe";
@@ -6553,6 +6680,12 @@ int main(void) {
             // ENOTDIR -- and, the risk side of that gate, the same tokens on a
             // real dev9p directory still resolve. Boot-fatal.
             if (probe81_dot_notdir() != 0)
+                return 1;
+
+            // #82 always-run regression: a trailing '/' asserts a directory --
+            // and, the risk side of that gate, a real dev9p directory + "/" +
+            // a genuine walk miss are unaffected. Boot-fatal.
+            if (probe82_trailing_slash() != 0)
                 return 1;
 
             // CF-3 A always-run regression: bulk byte-I/O (the two-tier
