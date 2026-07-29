@@ -2852,6 +2852,33 @@ pub(crate) fn vdso_now_ns(clk_id: u64) -> Option<u64> {
     }
 }
 
+/// `(CLOCK_MONOTONIC, CLOCK_REALTIME)` in ns from ONE counter sample, or None if
+/// the vDSO page is absent.
+///
+/// Not merely two `vdso_now_ns` calls spliced together: both values derive from
+/// a single `CNTVCT_EL0` read, so `realtime - monotonic` is exactly the wall
+/// offset with no interval between the samples. That difference IS boot wall
+/// time (`/proc/stat`'s `btime`), and computing it from two separately-sampled
+/// clocks lets any delay between them -- a preemption, an interrupt -- leak in
+/// as error.
+#[inline]
+pub(crate) fn vdso_now_pair_ns() -> Option<(u64, u64)> {
+    let pg = RT_VDSO_CLOCK.load(Ordering::Acquire);
+    if pg.is_null() {
+        return None;
+    }
+    // SAFETY: as vdso_now_ns -- a validated kernel-mapped RO page, write-once
+    // non-zero freq, and a single aligned u64 read volatile so a concurrent
+    // settime update is observed rather than cached.
+    unsafe {
+        let freq = (*pg).freq;
+        let cnt = read_cntvct();
+        let mono = (cnt / freq) * 1_000_000_000 + (cnt % freq) * 1_000_000_000 / freq;
+        let real = mono.wrapping_add(core::ptr::read_volatile(&(*pg).wall_offset_ns));
+        Some((mono, real))
+    }
+}
+
 // =============================================================================
 // Panic handler.
 // =============================================================================

@@ -567,3 +567,63 @@ boot with `diorama-probe: FAIL cpu0 readdir does not list 'cache' (V-4c-3 F3)`.
 **The rule to carry forward:** proving a path resolves says nothing about whether
 its parent lists it. A tree needs a test on both surfaces, and a probe that only
 ever opens literal paths is structurally blind to half of it.
+
+---
+
+## The V-4c-3 P3 hygiene pass (tasks #74 + #75)
+
+Two findings the audit deliberately tracked rather than fixed mid-close, both
+about *consistency* with disciplines this file already applies elsewhere.
+
+### The renderers had opted out of the vDSO without saying so (SA-4)
+
+`clock_pair_ns` and `render_uptime` each declared a private `t_timespec` mirror
+and called `libthyla_rs::t_clock_gettime` raw. Correct, and correctness was
+never the issue: `libthyla_rs::time` takes the #343 vDSO page first (a
+`CNTVCT_EL0` read, no syscall), so going around it cost two syscalls per
+`/proc/stat` render and one per `/proc/uptime` — on precisely the files a
+monitoring tool reads in a loop.
+
+The reason it happened is worth keeping. `render_uptime` **documented** its
+workaround ("`libthyla_rs::time` keeps its `TimeSpec` private and `Instant`
+exposes no 'since boot' accessor"), and that was a true statement of a real API
+gap. What it could not document was the cost, because the fast path lived behind
+the API being bypassed. The author solved the problem they could see.
+
+Fixed in libthyla-rs, not here — patching it diorama-side would only have
+relocated the duplication. `time::monotonic_realtime_ns()` and
+`Instant::since_boot()` now serve both sites, and the pair reader derives both
+clocks from **one** counter sample, which is strictly better than what the
+bypass could do: `btime` is `realtime - monotonic`, and two separately-taken
+samples let a preemption between them leak into that difference. Three
+`t_timespec` mirrors in the Rust tree are back down to one.
+
+### Wrapping accumulation in a `panic = "abort"` server (F7)
+
+`parse_kv_dec` and `parse_dec_after` accumulated digits with
+`wrapping_mul(10).wrapping_add(..)` and no length bound, so a long enough digit
+run silently produced *some* `u64`. `parse_u64`, ten lines away, had used
+`checked_mul`/`checked_add` all along — the audit's claim that the parsers were
+bounds-checked was scoped to `parse_u64` only.
+
+The consequence lands where the values are consumed: `VmRSS` and the three
+`meminfo` fields multiply by 4 to convert pages to kB, and under
+`overflow-checks = true` an unchecked `* 4` **panics** — which with
+`panic = "abort"` is the same server death the `msize` underflow produced. Not
+reachable: both sources are kernel-generated and bounded (`/ctl/memory` by
+`phys_total_pages()`, `/proc/<pid>/status` pages by `PROC_PAGE_MAX`). It was
+tracked because an inconsistency with the file's own saturating/checked
+discipline is the kind of thing that stops being unreachable quietly.
+
+Both parsers now use the `checked_*` form and return `None` — an unrepresentable
+number is not a value, and "absent" is the honest reading — and the four `* 4`
+sites use `saturating_mul(4)`, matching `sum_cpu_col` / `clock_pair_ns` /
+`render_stat`. The selftest covers it, **revert-probed**: restoring the wrapping
+form fails the boot with `diorama: selftest FAIL: parse_kv_dec wrapped an
+over-long digit run into a value`. `u64::MAX` itself still parses, and an
+overflowing key does not poison a later well-formed one.
+
+Still open from the same round: #71 (`<file>/..` resolves where Linux gives
+`ENOTDIR`) and #72 (`RENDER_MAX` re-caps `environ` at 4 KiB). Both need a
+deliberate re-shape of the walk arm and the render path respectively, not a
+drive-by.

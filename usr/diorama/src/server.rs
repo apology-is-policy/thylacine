@@ -883,24 +883,13 @@ fn push_hwcap_names(r: &mut Render, hwcap: u64) {
 /// btime (realtime - uptime) uses two samples taken back to back rather than
 /// two independent reads a scheduling gap apart.
 fn clock_pair_ns() -> (u64, u64) {
-    #[repr(C)]
-    struct Ts {
-        tv_sec: i64,
-        tv_nsec: i64,
-    }
-    let read = |clk: u64| -> u64 {
-        let mut ts = Ts { tv_sec: 0, tv_nsec: 0 };
-        let rc = unsafe { libthyla_rs::t_clock_gettime(clk, &mut ts as *mut Ts as u64) };
-        if rc != 0 {
-            return 0;
-        }
-        (ts.tv_sec.max(0) as u64)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(ts.tv_nsec.clamp(0, 999_999_999) as u64)
-    };
-    let mono = read(libthyla_rs::T_CLOCK_MONOTONIC);
-    let real = read(libthyla_rs::T_CLOCK_REALTIME);
-    (mono, real)
+    // V-4c-3 SA-4: was a local t_timespec mirror plus two raw t_clock_gettime
+    // calls, which silently opted out of the #343 vDSO on a file a monitoring
+    // tool reads in a loop. The shared reader takes the vDSO page (no syscall)
+    // AND derives both values from one counter sample, so btime's
+    // realtime - monotonic is exactly the wall offset rather than two samples
+    // with a schedulable gap between them.
+    libthyla_rs::time::monotonic_realtime_ns()
 }
 
 /// Procs created since boot, from /ctl/sched's `created:` -- the kernel's
@@ -973,10 +962,16 @@ pub fn parse_kv_dec(text: &[u8], key: &[u8]) -> Option<u64> {
             while j < text.len() && (text[j] == b' ' || text[j] == b'\t') {
                 j += 1;
             }
+            // V-4c-3 F7: checked, matching parse_u64. The wrapping form this
+            // replaced turned an over-long digit run into an arbitrary u64 with
+            // no signal -- and the callers multiply the result by 4 under
+            // overflow-checks, so a fabricated value became a panic in a
+            // panic=abort server. An unrepresentable number is not a value:
+            // None (the same answer as "absent") is the honest reading.
             let mut v: u64 = 0;
             let mut any = false;
             while j < text.len() && text[j].is_ascii_digit() {
-                v = v.wrapping_mul(10).wrapping_add((text[j] - b'0') as u64);
+                v = v.checked_mul(10)?.checked_add((text[j] - b'0') as u64)?;
                 any = true;
                 j += 1;
             }
@@ -1008,10 +1003,11 @@ pub fn parse_dec_after(text: &[u8], marker: &[u8]) -> Option<u64> {
         while j < text.len() && (text[j] == b' ' || text[j] == b'\t') {
             j += 1;
         }
+        // V-4c-3 F7: checked, as in parse_kv_dec above.
         let mut v: u64 = 0;
         let mut any = false;
         while j < text.len() && text[j].is_ascii_digit() {
-            v = v.wrapping_mul(10).wrapping_add((text[j] - b'0') as u64);
+            v = v.checked_mul(10)?.checked_add((text[j] - b'0') as u64)?;
             any = true;
             j += 1;
         }
@@ -1140,7 +1136,10 @@ fn render_status(pid: u32, ids: Option<(u32, u32)>, r: &mut Render) {
         }
         if let Some(pages) = parse_kv_dec(text, b"pages") {
             r.push(b"VmRSS:\t");
-            r.push_dec(pages * 4); // 4 KiB pages -> kB, the Linux unit
+            // V-4c-3 F7: saturating, like every other arithmetic site in this
+            // file. Under overflow-checks an unchecked `* 4` panics, and
+            // panic = "abort" makes a panic the death of the whole server.
+            r.push_dec(pages.saturating_mul(4)); // 4 KiB pages -> kB, the Linux unit
             r.push(b" kB\n");
         }
     }
@@ -1432,17 +1431,17 @@ fn render_meminfo(r: &mut Render) {
     let text = &buf[..got];
     if let Some(total) = parse_kv_dec(text, b"total") {
         r.push(b"MemTotal:       ");
-        r.push_dec(total * 4);
+        r.push_dec(total.saturating_mul(4));
         r.push(b" kB\n");
     }
     if let Some(free) = parse_kv_dec(text, b"free") {
         r.push(b"MemFree:        ");
-        r.push_dec(free * 4);
+        r.push_dec(free.saturating_mul(4));
         r.push(b" kB\n");
         // Linux consumers overwhelmingly read MemAvailable; without a reclaim
         // model the honest value is MemFree, not a fabricated estimate.
         r.push(b"MemAvailable:   ");
-        r.push_dec(free * 4);
+        r.push_dec(free.saturating_mul(4));
         r.push(b" kB\n");
     }
 }
@@ -1480,26 +1479,14 @@ fn render_cpu_list(node: u64, r: &mut Render) {
 /// track per-CPU here; 0 is the honest placeholder (Linux itself reports 0 on
 /// some virtualized configurations, and no consumer treats it as an error).
 fn render_uptime(r: &mut Render) {
-    // libthyla_rs::time keeps its TimeSpec private and Instant exposes no
-    // "since boot" accessor, so read the clock directly. The layout is the
-    // kernel-pinned struct t_timespec (two i64, 16 bytes).
-    #[repr(C)]
-    struct Ts {
-        tv_sec: i64,
-        tv_nsec: i64,
-    }
-    let mut ts = Ts { tv_sec: 0, tv_nsec: 0 };
-    let rc = unsafe {
-        libthyla_rs::t_clock_gettime(
-            libthyla_rs::T_CLOCK_MONOTONIC,
-            &mut ts as *mut Ts as u64,
-        )
-    };
-    if rc != 0 {
-        return;
-    }
-    let secs = ts.tv_sec.max(0) as u64;
-    let hund = (ts.tv_nsec.clamp(0, 999_999_999) as u64) / 10_000_000;
+    // V-4c-3 SA-4: the comment that used to sit here explained that
+    // libthyla_rs::time kept its TimeSpec private and Instant exposed no
+    // "since boot" accessor, so this read the clock directly. That was a real
+    // API gap, and going around it silently cost the #343 vDSO fast path.
+    // Instant::since_boot closes it.
+    let up = libthyla_rs::time::Instant::now().since_boot();
+    let secs = up.as_secs();
+    let hund = (up.subsec_nanos() as u64) / 10_000_000;
     r.push_dec(secs);
     r.push(b".");
     if hund < 10 {
@@ -2492,6 +2479,36 @@ pub fn selftest() -> Result<(), &'static str> {
         }
         if parse_dec_after(st, b" absent:").is_some() {
             return Err("parse_dec_after invented a value");
+        }
+    }
+
+    // --- V-4c-3 F7: an over-long digit run must not become an arbitrary value.
+    //     Both parsers used to accumulate with wrapping_mul/wrapping_add and no
+    //     length bound, so 30 digits silently produced some u64 -- which the
+    //     meminfo and status renderers then multiply by 4. Under
+    //     overflow-checks that multiply panics, and with panic = "abort" the
+    //     panic is the whole server dying. The sources are kernel-generated and
+    //     bounded, so this was never reachable; it is the inconsistency with the
+    //     checked/saturating discipline used everywhere else in the file that
+    //     makes it worth closing. None is the honest answer for a number that
+    //     does not fit.
+    {
+        let huge = b"total: 99999999999999999999999999 pages\nfree: 12 pages\n";
+        if parse_kv_dec(huge, b"total").is_some() {
+            return Err("parse_kv_dec wrapped an over-long digit run into a value");
+        }
+        // The overflowing key must not poison a later well-formed one.
+        if parse_kv_dec(huge, b"free") != Some(12) {
+            return Err("parse_kv_dec lost a good key after an over-long one");
+        }
+        let huge2 = b"x pid: 99999999999999999999999999\n";
+        if parse_dec_after(huge2, b"pid:").is_some() {
+            return Err("parse_dec_after wrapped an over-long digit run into a value");
+        }
+        // u64::MAX itself is representable and must still parse.
+        let max = b"total: 18446744073709551615 pages\n";
+        if parse_kv_dec(max, b"total") != Some(u64::MAX) {
+            return Err("parse_kv_dec rejected u64::MAX");
         }
     }
 
