@@ -255,6 +255,7 @@ void test_jit_dual_alias_pte_wx_clean(void);
 void test_jit_charges_once_per_region(void);
 void test_jit_destroy_tears_down_both(void);
 void test_jit_destroy_rejects_non_writer(void);
+void test_jit_alias_not_detachable(void);
 void test_jit_icache_sync_gate(void);
 void test_jit_write_through_writer_visible_at_exec(void);
 void test_vmo_handle_table_orphan_cleanup(void);
@@ -1577,6 +1578,7 @@ struct test_case g_tests[] = {
     { "jit.charges_once_per_region",      test_jit_charges_once_per_region,   false, NULL },
     { "jit.destroy_tears_down_both",      test_jit_destroy_tears_down_both,   false, NULL },
     { "jit.destroy_rejects_non_writer",   test_jit_destroy_rejects_non_writer, false, NULL },
+    { "jit.alias_not_detachable",         test_jit_alias_not_detachable,      false, NULL },
     { "jit.icache_sync_gate",             test_jit_icache_sync_gate,          false, NULL },
     { "jit.write_visible_at_exec_alias",  test_jit_write_through_writer_visible_at_exec, false, NULL },
     { "burrow.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },

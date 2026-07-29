@@ -1878,6 +1878,25 @@ enum {
     //   Proc whose legate expired mid-compile could no longer publish the
     //   region it legitimately owns -- a half-state with no security value.
     //
+    //   CROSS-PE CONTRACT (CL-7k-3 audit F2). The `ic ivau` is Inner-Shareable
+    //   BROADCAST, so the CACHE half is cross-CPU correct -- every PE's I-cache
+    //   drops the stale lines. The trailing `isb`, however, retires prefetched
+    //   instructions on the CALLING PE only. A DIFFERENT thread, on a different
+    //   CPU, that has previously executed at those exec-alias addresses may
+    //   still hold them prefetched, and the architecture permits it to run them.
+    //
+    //   So: publish makes the bytes FETCHABLE everywhere; a PE other than the
+    //   caller must additionally take a context-synchronization event before
+    //   branching in. Any syscall or exception return is one, so a thread woken
+    //   through the kernel is already covered -- the exposed case is a peer
+    //   spin-waiting on a flag in userspace with no intervening trap.
+    //
+    //   Nothing at v1.0 drives this (the JIT surface has no threaded consumer
+    //   yet), but the named first consumer -- LLVM ORC's DualMapMemoryMapper --
+    //   has exactly the emit-on-one-thread / execute-on-a-worker shape, so
+    //   CL-7 must either honor this contract or make this syscall broadcast an
+    //   ISB to the Proc's other running threads.
+    //
     //   Errors: -EINVAL (range empty, wraps, or is not contained in a single
     //   live code-region alias of this Proc).
     SYS_ICACHE_SYNC = 103,  // arg: vaddr (x0), length (x1)

@@ -143,6 +143,14 @@ impl CodeRegion {
     /// REQUIRED between emitting and calling. Skipping it is not a performance
     /// choice -- the instruction cache may still hold the region's previous
     /// contents, so the CPU can execute bytes that are no longer there.
+    ///
+    /// **Cross-thread callers**: this makes the bytes fetchable on every CPU
+    /// (the kernel's I-cache invalidate is Inner-Shareable broadcast), but it
+    /// only retires prefetched instructions on the CPU that called it. A peer
+    /// thread that has already executed at these addresses must take a
+    /// context-synchronization event before branching in again -- any syscall
+    /// or exception return is one, so a thread woken through the kernel is
+    /// covered; a peer spin-waiting on a userspace flag is not.
     pub fn publish(&self) -> bool {
         unsafe { t_icache_sync(self.writer as u64, self.len as u64) == 0 }
     }

@@ -2413,8 +2413,9 @@ pub unsafe fn t_pwrite(spoor_fd: i64, buf: *const u8, len: usize, off: i64) -> i
 
 // t_jit_create — mint a dual-mapped code region (I-42; CAP_JIT-gated).
 // Writes a `struct t_jit_region` {writer_va, exec_va} to `out_va`. Returns 0,
-// or -errno (-EPERM without CAP_JIT, -EINVAL on a bad length, -ENOMEM, -EFAULT
-// on an unwritable out_va).
+// or -errno (-EACCES without CAP_JIT, -EINVAL on a bad length, -ENOMEM, -EFAULT
+// on an unwritable out_va). EACCES, not EPERM: errno.h forbids a handler
+// returning -T_E_PERM, whose value (1) aliases the flat -1 failure sentinel.
 //
 // # Safety
 // `out_va` must point to 16 writable bytes owned by the caller.

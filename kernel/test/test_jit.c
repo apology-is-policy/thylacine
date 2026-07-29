@@ -43,6 +43,7 @@ s64 sys_jit_create_for_proc(struct Proc *p, u64 length_raw, u64 out_va);
 s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va);
 s64 sys_icache_sync_for_proc(struct Proc *p, u64 vaddr, u64 length);
 s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
+s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 #define JIT_LEN     (2u * 4096u)     // two pages -- exercises the per-page loop
 #define ONE_PAGE    4096ull
@@ -347,6 +348,56 @@ void test_jit_destroy_rejects_non_writer(void) {
         "the anon mapping survives the refused destroy");
 
     TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "cleanup");
+    jit_drop_proc(p);
+}
+
+// ---------------------------------------------------------------------------
+// A code alias is not detachable through SYS_BURROW_DETACH (self-audit F1).
+//
+// The pair carries ONE I-32 charge. Detach knows nothing about the pair, so
+// letting it through would refund that charge TWICE -- and a CAP_JIT holder
+// looping create-then-detach-both could drive its page_count to zero while its
+// real usage never moved, then allocate a fresh PROC_PAGE_MAX. A bound a
+// capability holder can zero is not a bound. It would also orphan the surviving
+// alias, which SYS_JIT_DESTROY then refuses (no peer) -- unreleasable until
+// Proc exit.
+// ---------------------------------------------------------------------------
+void test_jit_alias_not_detachable(void) {
+    struct Proc *p = jit_make_proc(/*with_cap=*/true);
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    struct t_jit_region reg = { 0, 0 };
+    TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
+        "create succeeds");
+    u32 charged = p->page_count;
+    TEST_EXPECT_EQ(charged, (u32)(JIT_LEN / 4096u), "one charge for the region");
+
+    // BOTH aliases must be refused -- either one alone breaks the pair.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, reg.exec_va, JIT_LEN), -1,
+        "SYS_BURROW_DETACH must refuse the EXEC alias of a code region");
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, reg.writer_va, JIT_LEN), -1,
+        "SYS_BURROW_DETACH must refuse the WRITER alias of a code region");
+
+    // Refused means untouched: both aliases live, the charge unchanged. If the
+    // gate were absent, the two calls above would have refunded 2x one charge
+    // and page_count would read 0 here.
+    TEST_ASSERT(vma_lookup(p, reg.writer_va) != NULL, "writer alias survives");
+    TEST_ASSERT(vma_lookup(p, reg.exec_va) != NULL,   "exec alias survives");
+    TEST_EXPECT_EQ(p->page_count, charged,
+        "a refused detach must not refund the region's charge");
+
+    // And the region is still destroyable the ONLY correct way.
+    TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0,
+        "SYS_JIT_DESTROY still works after the refused detaches");
+    TEST_EXPECT_EQ(p->page_count, 0u, "destroy refunds exactly once");
+
+    // A plain anon mapping is of course still detachable -- the gate is narrow.
+    s64 anon = sys_burrow_attach_for_proc(p, 4096);
+    TEST_ASSERT(anon > 0, "burrow_attach");
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, (u64)anon, 4096), 0,
+        "an ordinary anon mapping is still detachable");
+    TEST_EXPECT_EQ(p->page_count, 0u, "anon detach refunds");
+
     jit_drop_proc(p);
 }
 

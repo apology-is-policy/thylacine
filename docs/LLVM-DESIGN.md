@@ -1475,6 +1475,98 @@ clangd child is a privilege question, not a plumbing one. Its own chunk.
 **Still owed:** a `compile_commands.json` generator, so a real project gets
 these flags without hand-writing the database.
 
+### 16.18 CL-7k as-built (the JIT capability, I-42)
+
+`1f0e66c0` kernel + `5633d056` userspace. Full as-built reference:
+`docs/reference/145-jit.md`.
+
+**The estimate held.** §8 predicted "the kernel pieces are small" and they were
+— but the reason is worth recording: **nothing needed relaxing**. The VMA layer
+already rejects W|X per mapping, `make_user_pte_l3` already encodes AP/UXN from
+prot, and `vma_find_gap` already hands out disjoint ranges. Two aliases of one
+Burrow were therefore *already* expressible; what was missing was a syscall to
+ask for them and a rule about who may. The W^X design paid for itself here: a
+system that enforced W^X with a mutable per-page bit would have had to grow a
+new enforcement path for this, and that path is where the bugs would live.
+
+Three shape decisions, each with a live alternative:
+
+- **One syscall installs both aliases.** Splitting create from map would admit
+  an RX-alias-with-no-writer state and push the half-installed rollback onto the
+  caller. Both go in under one `vma_lock` hold. Also literally §8's own
+  userspace shape: *create → (writer_ptr, exec_ptr)*.
+- **`SYS_ICACHE_SYNC` syncs the kernel direct map, never the user VA.** `dc
+  cvau`/`ic ivau` can take translation faults, and a user VA is exactly what a
+  caller can arrange to be unmapped. Architecturally exact on ARMv8 (PIPT data
+  caches; `IC IVAU` invalidates all aliases of the PA) — the same reason Linux's
+  `flush_icache_range` works on linear-map addresses for module text.
+- **DESTROY and SYNC are not CAP_JIT-gated.** Authority to *create* is scarce;
+  releasing or publishing what you already own is not. Gating them would turn a
+  legate-scope expiry into a leak.
+
+**CAP_JIT is elevation-only** (`CAP_ELEVATION_ONLY` + `CAP_GRANTABLE_CLEARANCE`,
+like `CAP_DEBUG`), which is an invariant obligation rather than taste: I-42's
+text requires non-heritability. Consequence: a corvus clearance is the *only*
+path to the capability. A `jit` clearance level lands in `usr/corvus` — the
+level table's own comment had anticipated exactly this, noting that a `hw-dev`
+level was impossible because `CAP_HW_CREATE` is fork-grantable, while `CAP_JIT`
+is not.
+
+**A scripture-wording defect, recorded not silently resolved.** All three
+documents (JIT-ON-WX, this file §8, ARCH §28 I-42) say *"elevation-only,
+non-rfork-grantable, the `CAP_HW_CREATE` class"*. Read literally the trailing
+phrase is **wrong** — `CAP_HW_CREATE` is fork-grantable, which contradicts both
+the words beside it and I-42's non-heritable clause. Implemented per the
+explicit properties; flagged in `caps.h` so a later reader does not "fix" the
+bit toward `CAP_ALL`.
+
+**Three defects, all found by measuring:**
+
+1. The cap denial returned `-T_E_PERM`, which `errno.h` **forbids** (value 1
+   collides with the flat `-1` generic sentinel, so libthyla-rs decodes it as
+   `Io`). A capless caller would have been told "I/O error". Now `-T_E_ACCES`.
+   The kernel test asserted the wrong constant and passed — caught by reading
+   `err.rs`'s TRAPS note while writing the client.
+2. `uaccess_copy_out` returns 0/-1, **not a byte count**; the check against
+   `sizeof(reg)` made every *successful* create report EFAULT and tear itself
+   down. Structurally invisible to the kernel tests, which drive the mechanism
+   *below* the copy-out. The in-guest prover caught it on its first real run.
+3. **Self-audit:** `SYS_BURROW_DETACH` accepted a code alias. One region carries
+   ONE I-32 charge but has TWO aliases, so detaching both refunded it twice —
+   a CAP_JIT holder could loop create-then-detach-both to drive `page_count` to
+   zero while real usage never moved, then allocate a fresh `PROC_PAGE_MAX`. A
+   bound a capability holder can zero is not a bound. Now refused outright: the
+   JIT syscalls own that lifetime, and the same condition closes the orphaned-
+   alias leak (detach one, and `SYS_JIT_DESTROY` refuses the survivor for having
+   no peer).
+
+**Proof.** The invariant test asserts on **real L3 page-table entries**, not VMA
+prots — the prot is intent, the PTE is what the MMU consults — and on both
+aliases resolving to the **same physical page**, without which "dual map" is
+unproven. Revert-probed: mapping the exec alias RW fails the suite on exactly
+*"exec PTE is AP_RO (not writable)"*. The detach gate is revert-probed too.
+
+In-guest (`/jit-prover`, boot-fatal), one process across the capability
+boundary so `CAP_JIT` is the only variable:
+
+    ungated create REFUSED (no CAP_JIT) -- correct
+    CAP_JIT acquired via the jit clearance
+    JITed fn(35,100) = 142 -- emitted, published, EXECUTED
+    re-emitted fn returns 99 -- icache invalidate is live
+
+The re-emit leg matters: a missing icache invalidate shows up there as "the old
+function keeps running" — no fault, no crash, just a stale answer.
+
+Also: `JOEY_BLOB_MAX` 512 → 768 KiB. Measured before bumping — joey was at
+523,656 of 524,288 bytes (**99.88% full**) *before* this chunk. Any next
+addition would have tipped it; the 36→65→128→256→384→512 history is a record of
+bumping to just-past-what-tipped-it.
+
+**NEXT: CL-7** (Mesa/llvmpipe + GLQuake) — the ORC `DualMapMemoryMapper` over
+`CodeRegion` is its first consumer.
+
+---
+
 ## 17. Revision history
 
 | Date | Change |

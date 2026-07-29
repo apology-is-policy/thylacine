@@ -4154,6 +4154,35 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // vma_lock so the count is stable. (For a wrong-base/length detach, burrow_unmap
     // returns -1 and the uncharge is skipped.)
     struct Vma *dvma = vma_lookup(p, vaddr_raw);
+
+    // I-42 (CL-7k self-audit): a CODE alias is NOT detachable here. A code
+    // region is a PAIR of aliases over one charge, and this syscall has no
+    // concept of the pair, so it gets both halves of that wrong:
+    //
+    //   - ACCOUNTING (the I-32 defeat). Create charges npages ONCE for the
+    //     region. Detaching the exec alias uncharges npages and detaching the
+    //     writer alias uncharges npages AGAIN -- one charge, two refunds. The
+    //     clamp in proc_page_uncharge stops the wrap but not the drift: a
+    //     CAP_JIT holder could loop create-then-detach-both, driving its
+    //     page_count to 0 while its real usage never changed, and then allocate
+    //     a full PROC_PAGE_MAX again. That defeats the per-Proc bound for
+    //     exactly the class of Proc (a JIT-capable app) it exists to bound.
+    //
+    //   - LIFETIME. Detaching one alias leaves the other orphaned: its peer is
+    //     gone, so SYS_JIT_DESTROY refuses it and the region survives until
+    //     Proc exit with no way to release it.
+    //
+    // Refusing is the right fix rather than teaching detach to find the peer:
+    // the JIT syscalls own this lifetime, and one condition here keeps that
+    // ownership total. Self-inflicted either way -- a Proc can only do this to
+    // its own region -- but a bound that a capability holder can zero is not a
+    // bound.
+    if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
+        dvma->burrow->type == BURROW_TYPE_CODE) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+
     u32 uncharge = (u32)(length / PAGE_SIZE);    // eager default (the whole span)
     if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
         dvma->burrow->type == BURROW_TYPE_ANON_LAZY)
@@ -4396,6 +4425,29 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
         return -T_E_NOMEM;
     }
 
+    // CL-7k-3 audit F1: invalidate the I-cache over the fresh pages BEFORE any
+    // RX PTE can name them.
+    //
+    // KP_ZERO zeroes MEMORY; it does not touch the instruction cache. Nothing on
+    // the free path does either -- burrow_unmap clears PTEs and broadcasts TLBI
+    // (a TLB operation), and free_pages does no cache maintenance at all. So a
+    // recycled page can still carry I-cache lines holding a PREVIOUS code
+    // region's instructions, and a Proc that branches into a page it has not
+    // published would fetch them instead of taking the UDF #0 that all-zero
+    // memory promises. That promise is stated in four places; this is what makes
+    // it true rather than requiring it be weakened.
+    //
+    // It also restores consistency: every other executable backing in the tree
+    // syncs at acquisition for exactly this reason (kernel/exec.c:121 and :522,
+    // arch/arm64/fault.c:705 and :876 -- the REVENANT arm's comment names the
+    // hazard as "a stale line from a prior occupant of this recycled PA").
+    // A code Burrow was the sole exception.
+    //
+    // One call, not a per-page loop: a CODE Burrow is one contiguous
+    // alloc_pages chunk, so its direct-map range is contiguous too. Bounded by
+    // JIT_REGION_MAX -- the same ceiling the mandatory publish already pays.
+    arch_icache_sync_range(pa_to_kva(page_to_pa(b->pages)), length);
+
     // Both gaps are found and both VMAs installed under ONE lock hold, so a
     // sibling thread cannot claim either gap between them and no observer ever
     // sees a half-installed region. The writer alias is inserted BEFORE the
@@ -4519,6 +4571,24 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     u64 length  = w->vaddr_end - w->vaddr_start;
     u64 exec_va = x->vaddr_start;
     u32 npages  = (u32)(length / PAGE_SIZE);
+
+    // CL-7k-3 audit F3: validate the exec alias' geometry BEFORE touching
+    // either mapping. Both burrow_unmaps below are issued unconditionally, so
+    // if the exec unmap could fail while the writer unmap succeeded, the result
+    // would be an orphaned RX alias with no writer -- the exact residue
+    // jit.destroy_tears_down_both calls "must never survive", and one this
+    // syscall then permanently refuses to clean up (no peer -> -EINVAL),
+    // stranding its I-32 charge until Proc exit.
+    //
+    // Unreachable today: create installs both aliases at the same length. But
+    // that is an UNASSERTED invariant of this function, and the neighbouring
+    // unreachability claim just below (that nothing else can remove one alias)
+    // was FALSE until this round's detach gate landed. Assert it rather than
+    // inherit it.
+    if (x->vaddr_end - x->vaddr_start != length) {
+        spin_unlock(&p->vma_lock);
+        return -T_E_INVAL;
+    }
 
     // Order is immaterial to correctness -- the #847 dual count frees the pages
     // only after the second unmap -- but tearing the EXEC alias down first
