@@ -562,6 +562,10 @@ void test_vivarium_rejects_are_deliberate(void);
 void test_vivarium_unknown_forwards(void);
 void test_vivarium_fails_closed(void);
 void test_vivarium_no_wide_alias(void);
+void test_vivarium_openat_domain(void);                  // VIVARIUM V-2b
+void test_vivarium_openat_at_fdcwd(void);
+void test_vivarium_openat_build(void);
+void test_vivarium_stat_to_linux(void);
 void test_cons_drain_feed_runs_discipline(void);     // G-4
 void test_cons_drain_overflow_drops_oldest(void);    // G-4
 void test_cons_drain_close_and_reopen_epoch(void);   // G-4
@@ -1940,6 +1944,10 @@ struct test_case g_tests[] = {
     { "vivarium.unknown_forwards",       test_vivarium_unknown_forwards,       false, NULL },
     { "vivarium.fails_closed",           test_vivarium_fails_closed,           false, NULL },
     { "vivarium.no_wide_alias",          test_vivarium_no_wide_alias,          false, NULL },
+    { "vivarium.openat_domain",          test_vivarium_openat_domain,          false, NULL },
+    { "vivarium.openat_at_fdcwd",        test_vivarium_openat_at_fdcwd,        false, NULL },
+    { "vivarium.openat_build",           test_vivarium_openat_build,           false, NULL },
+    { "vivarium.stat_to_linux",          test_vivarium_stat_to_linux,          false, NULL },
     { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
     { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
     { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },

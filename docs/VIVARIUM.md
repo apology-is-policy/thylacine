@@ -1249,8 +1249,8 @@ five qualify:
 | `close` 57 → `SYS_CLOSE` 11 | **T1** | ditto |
 | `lseek` 62 → `SYS_LSEEK` 51 | **T1** | `T_SEEK_*` are 0/1/2, so are Linux's `SEEK_*` — the enumerations coincide, so there is nothing to map |
 | `exit_group` 94 → `SYS_EXIT_GROUP` 60 | **T1** | args identical |
-| `openat` 56 | T2 (V-2b) | Linux passes a NUL-terminated path; `SYS_OPEN` wants an explicit `path_len`, so translating means scanning user memory. Plus `AT_FDCWD` → `SYS_WALK_OPEN_FROM_ROOT` and `O_*` → `omode`. Still total + stateless, so admissible — just not a renumber |
-| `fstat` 80 | T2 (V-2b) | `t_stat` is 88 B, Linux aarch64 `struct stat` is 128 B with a different field order: a struct conversion written to user memory |
+| `openat` 56 | **T2** (built, §6.19) | Linux passes a NUL-terminated path; `SYS_OPEN` wants an explicit `path_len`, so translating means scanning user memory. Plus `AT_FDCWD` → `SYS_WALK_OPEN_FROM_ROOT` and `O_*` → `omode`. *(V-2a said "still total + stateless"; V-2b found that wrong — see §6.19.)* |
+| `fstat` 80 | **T2** (built, §6.19) | `t_stat` is 88 B, Linux aarch64 `struct stat` is 128 B with a different field order: a struct conversion. This one **is** total |
 | `mmap` 222 | FORWARD | addr hints, `PROT_*`, `MAP_FIXED`/`ANONYMOUS`/`PRIVATE`, fd-backing are **policy** |
 | `munmap` 215 | FORWARD | **the instructive one — see below** |
 | `brk` 214 | ENOSYS | no counterpart at all; the heap is Burrow-based. Both musl and glibc fall back to `mmap`, so an honest ENOSYS is serviceable where faking success would strand the allocator |
@@ -1285,8 +1285,124 @@ merely the available one:
   every caller churns; a table is data and can be rewritten freely. Under genuine
   uncertainty the reversible half goes first.
 
-V-2b promotes `openat` + `fstat` to T2 translators. V-1b remains the declaration +
-the branch, and stays gated on V-7's object being decided.
+V-2b (§6.19) promotes `openat` + `fstat` to T2 translators. V-1b remains the
+declaration + the branch, and stays gated on V-7's object being decided.
+
+### 6.19 Tier 2 — the translators (V-2b, as-built)
+
+A T1 row is a renumber, so one table and one loop serve every row. A T2 call is a
+real translation, so each gets its own named function. They stay **pure**, which is
+a constraint rather than a convenience:
+
+- **`vivarium_openat_decide(dirfd, flags, &start_fd, &omode)`** makes the entire
+  decision without touching user memory. **`vivarium_openat_build(...)`** assembles
+  the call from a `path_len` the *caller* measured. The measurement is hoisted out
+  deliberately — see "why decide before measure" below.
+- **`vivarium_stat_to_linux(const struct t_stat *, struct viv_linux_stat *)`** is
+  data-in/data-out. Its shell (`spoor_stat_native` into a kernel `t_stat`, then one
+  128-byte copy-out) touches no translation logic at all.
+
+`struct viv_linux_stat` is the Linux aarch64 `struct stat`, pinned at 128 bytes with
+per-field offset asserts exactly as `struct t_stat` is — it is an ABI type the
+kernel writes into a guest buffer. The layout was taken from
+`third_party/musl/arch/aarch64/bits/stat.h` in-tree, not from memory.
+
+#### The argument domain — a refinement of §4, and the real finding
+
+§4 admits "a pure renumber plus an argument-order/**flag-bit mapping**". A flag map
+is inherently **partial**: `openat` accepts flags (`O_CREAT`, `O_DIRECTORY`,
+`O_APPEND`) that `SYS_OPEN` has no way to honour. So a T2 row is admitted over a
+**stated argument domain**, and a call outside it forwards.
+
+This is not a loosening of "total" — it is *stricter* in practice, because it
+replaces "openat is a table row" (which §4's illustrative list implies, and which
+V-2a's own note repeated) with a per-call check. The property that matters:
+
+> the translator never silently mistranslates; it either produces an
+> exactly-equivalent call or declines.
+
+Declining is always safe — the supervisor is strictly more capable. Accepting a flag
+we cannot honour is the failure mode the whole tier exists to prevent.
+
+**A flag may be ignored only when it requests behaviour we already provide
+unconditionally.** Three qualify, and each rests on a structural fact rather than on
+"nothing seems to break":
+
+| flag | why ignoring it is *correct*, not merely harmless |
+|---|---|
+| `O_CLOEXEC` | Asks that the fd not survive exec. Thylacine has no close-on-exec concept because there is nothing to opt out of: a spawned child "inherits no Spoor handles" (`syscall.h:327`) and `SYS_SPAWN_WITH_FDS` passes an **explicit** list |
+| `O_NOCTTY` | Asks not to acquire a controlling terminal. Thylacine acquires one only via the explicit `SYS_TTY_ACQUIRE` (PTY-1), never implicitly on open — already relied on by the pouch pty patch |
+| `O_LARGEFILE` | Asks that >2 GiB offsets be permitted. Every Thylacine offset is 64-bit, exactly as on 64-bit Linux, whose kernel force-sets the bit internally |
+
+Contrast the rejects, where ignoring the bit is a **wrong answer**: `O_CREAT` would
+turn "create if absent" into `ENOENT`; `O_DIRECTORY` would turn `ENOTDIR` into a
+successful open of a regular file; `O_APPEND` would silently corrupt a log writer.
+`O_NOFOLLOW` is rejected on a different basis worth naming — ignoring it is harmless
+*today* only because the resolver has no symlinks, and would become wrong the moment
+they land with nothing to catch it. **A flag whose correctness depends on a feature
+being absent is a trap, not an admission.**
+
+Two further domain notes:
+
+- **`AT_FDCWD` ↔ `SYS_WALK_OPEN_FROM_ROOT` is exact, not approximate.** `SYS_OPEN`
+  with the sentinel joins a *relative* path against the per-Proc cwd (LS-4) and
+  resolves an *absolute* one from the Territory root — precisely `AT_FDCWD`. Both
+  sides make the absolute/relative split identically, so nothing needs inspecting.
+  It is compared as a **signed 32-bit** value: `dirfd` is an `int`, so x0 may arrive
+  sign-extended *or* merely zero-extended, and both mean −100. Recognising only one
+  would work on some toolchains and silently forward every `open()` on others.
+- **A real dirfd forwards at V-2b.** Not because the fd would not carry (a
+  phenotyped Proc's fds *are* Thylacine handles) but because Linux ignores the
+  dirfd for an absolute path, and deciding that needs the path's first byte out of
+  user memory. `open()` never generates it — musl compiles every `open()` to
+  `AT_FDCWD`; only the `*at()` family passes a real fd. V-2c can revisit it with the
+  path already measured.
+
+#### Why decide before measure
+
+Measuring the path is a user-memory read that can fault. Doing it before knowing
+whether the call is translatable would waste the read on every forwarded call *and*
+let a call we are going to hand to the supervisor anyway take a fault inside the
+kernel fast path, on a buffer the supervisor would have validated itself. The API is
+shaped so the wrong order is awkward.
+
+#### Notes on the stat conversion
+
+`st_dev ← t_stat.devno` and `st_ino ← t_stat.qid_path`: the `(devno, qid.path)` pair
+*is* Thylacine's file identity (#100), and is already the pair userspace maps onto
+`(st_dev, st_ino)` — pouch patch `0010` does exactly this and gopls's robustio keys
+`FileID` on it. The correspondence is inherited, not invented here.
+
+The output is **zeroed wholesale before filling**, by byte loop (the kernel links no
+`memset` — `dev9p.c:701` does the same for the same reason). That is an **I-13**
+obligation: the buffer is copied to a guest, so any word left unwritten — a reserved
+field today, a field added tomorrow — would ship a slice of the kernel stack. The
+test poisons the destination with `0xA5` and asserts **not one of the 128 bytes
+survives**, which catches a future field addition that the per-field asserts would
+not. The nsec words stay 0: `t_stat` carries whole seconds only, and 0 is the honest
+"unknown sub-second" the native surface already gives.
+
+Coverage: `vivarium.openat_domain` (every admission and every reject, by name),
+`openat_at_fdcwd` (both encodings; a real dirfd forwards; the high half of `dirfd`
+is not consulted), `openat_build` (argument order; unused words zeroed),
+`stat_to_linux` (field carry + the no-leak sweep). Revert-probed: comparing the raw
+`u64` for `AT_FDCWD` fails `openat_at_fdcwd`, and dropping the zero loop fails
+`stat_to_linux` — 1225/1227, exactly two tests, no collateral.
+
+#### Still deliberately absent
+
+The **impure shells** — the uaccess path scan for `openat`, and
+`spoor_stat_native` + the 128-byte copy-out for `fstat` — are *not* built here.
+They have no caller until V-1b's dispatch branch exists, and writing an
+unreachable uaccess helper would repeat exactly the mistake V-2a declined to make.
+There is likewise **no `docs/reference/NN-vivarium.md` yet**: a reference doc
+describes as-built runtime behaviour, and this surface has none until it is
+reachable. It lands with the dispatcher.
+
+Named V-2c candidates, in rough order of value: `O_CREAT` routed to
+`SYS_WALK_CREATE` (a second target, not a flag map — task #50 tracks the userspace
+half); a real dirfd, decidable once the path is measured; and `newfstatat` 79,
+which is `fstat`'s path-taking sibling and reuses both translators as-is.
 
 ---
 
