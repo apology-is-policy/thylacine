@@ -1251,8 +1251,10 @@ five qualify:
 | `exit_group` 94 → `SYS_EXIT_GROUP` 60 | **T1** | args identical |
 | `openat` 56 | **T2** (built, §6.19) | Linux passes a NUL-terminated path; `SYS_OPEN` wants an explicit `path_len`, so translating means scanning user memory. Plus `AT_FDCWD` → `SYS_WALK_OPEN_FROM_ROOT` and `O_*` → `omode`. *(V-2a said "still total + stateless"; V-2b found that wrong — see §6.19.)* |
 | `fstat` 80 | **T2** (built, §6.19) | `t_stat` is 88 B, Linux aarch64 `struct stat` is 128 B with a different field order: a struct conversion. This one **is** total |
+| `newfstatat` 79 | **T2** (built, §6.20) | `stat()`/`lstat()` compile to *this* on aarch64, so it is the row that matters for real binaries. `SYS_STAT` 88 is its exact counterpart |
 | `mmap` 222 | FORWARD | addr hints, `PROT_*`, `MAP_FIXED`/`ANONYMOUS`/`PRIVATE`, fd-backing are **policy** |
 | `munmap` 215 | FORWARD | **the instructive one — see below** |
+| `statx` 291 | FORWARD | musl-aarch64 issues *this* instead of 79 (§6.20). A request mask + a 256 B struct with per-field validity bits — a bigger translator, not this shape |
 | `brk` 214 | ENOSYS | no counterpart at all; the heap is Burrow-based. Both musl and glibc fall back to `mmap`, so an honest ENOSYS is serviceable where faking success would strand the allocator |
 
 **`munmap` is why "total" is the word that does the work.** `munmap(addr, len)`
@@ -1403,6 +1405,121 @@ Named V-2c candidates, in rough order of value: `O_CREAT` routed to
 `SYS_WALK_CREATE` (a second target, not a flag map — task #50 tracks the userspace
 half); a real dirfd, decidable once the path is measured; and `newfstatat` 79,
 which is `fstat`'s path-taking sibling and reuses both translators as-is.
+
+> **V-2c checked all three, and two of these three sentences were wrong.**
+> `newfstatat` was the good call and is built (§6.20). `O_CREAT` is **not
+> admissible at all**, and the real-dirfd blocker is not the path measurement.
+> The corrected analysis is §6.20; this paragraph is left standing because the
+> arc's pattern — each chunk's candidate list corrected by the next chunk's
+> ground truth — is itself the record worth keeping.
+
+### 6.20 Tier 2 — `newfstatat`, and two corrections (V-2c, as-built)
+
+**`newfstatat` 79 is the stat row that matters.** There is no `stat(2)` on
+aarch64: `stat()` and `lstat()` both compile to `newfstatat`. `SYS_STAT`
+(`syscall.h:1603`) is its counterpart, and the correspondence is unusually clean —
+`SYS_STAT` takes `(path_va, path_len, stat_va)` and **no base argument at all**,
+because it is hardcoded to "absolute from the Territory root, relative joined with
+the LS-4 cwd". That is precisely the `AT_FDCWD` rule, and it is not two
+implementations that happen to agree: `sys_stat_for_proc` and `sys_open_handler`
+call the same `territory_resolve_cwd`.
+
+**`vivarium_fstatat_decide(dirfd, flags)` returns a verdict and nothing else**, and
+that emptiness is the finding. `openat` had to compute a rewritten `start_fd`
+because `SYS_OPEN` *takes* one; here there is nothing to rewrite. The consequence
+cuts both ways: `AT_FDCWD` is free, and a real dirfd is not merely unimplemented
+but **inexpressible** — there is no argument to put it in.
+
+**There is no `vivarium_fstatat_build`,** and its absence is structural rather than
+an omission. `openat` gets a build function because its translation ends in a
+native `SYS_OPEN` the dispatcher can run. This one cannot: `SYS_STAT` copies out an
+88-byte `t_stat`, and the guest's buffer wants the 128-byte Linux layout, so
+dispatching `SYS_STAT` at the guest's pointer would write the wrong struct into it.
+The shell must call `sys_stat_for_proc` into a *kernel* `t_stat`, run it through
+`vivarium_stat_to_linux`, and copy out 128 bytes. **`newfstatat` is `openat`'s
+front half joined to `fstat`'s back half, and the missing build function is what
+that join looks like.**
+
+The flag domain is one admission and four rejects:
+
+| flag | verdict | why |
+|---|---|---|
+| `0` | admit | plain `stat()` |
+| `AT_NO_AUTOMOUNT` | admit as a **no-op** | a Thylacine namespace is composed *explicitly*; nothing mounts as a side effect of traversal. That is a property of the Plan 9 model, not a v1.0 gap — there is no automount to defer, ever |
+| `AT_SYMLINK_NOFOLLOW` | **reject** | the costly one — see below |
+| `AT_EMPTY_PATH` | reject | means "operate on `dirfd` itself"; serving it would mean **synthesising** a `"."` the caller never passed. Translating maps what you were given, not what you were not |
+| `AT_REMOVEDIR`, `AT_SYMLINK_FOLLOW` | reject | not valid on `fstatat` (they belong to `unlinkat`/`linkat`); Linux answers `EINVAL`. Forwarded rather than errored — minting errors is not the table's job, the same call `openat` makes for `(flags & O_ACCMODE) == 3` |
+
+**Why `AT_SYMLINK_NOFOLLOW` is rejected even though the kernel says it is safe.**
+This is what `lstat()` compiles to, so rejecting it forwards every `lstat` — real
+lost reach, so the reasoning has to hold. `SYS_STAT`'s own contract says *"Symlinks
+do not exist at v1.0 (G11), so stat == lstat"* (`syscall.h:1615`), which reads like
+a licence to admit it. It is not. That equivalence is scoped to v1.0 and holds
+**only because the feature is absent** — the O_NOFOLLOW trap V-2b named, on the
+stat surface. Admitting it would mean that the day symlinks land, every `lstat()`
+in every Linux guest silently reports the *target* instead of the link, with
+nothing in this file or in any build that would fail. Forwarding costs a supervisor
+round trip; admitting costs correctness later, silently. **A flag whose correctness
+depends on a feature being absent is a trap, not an admission** — and the rule is
+worth more than the reach it costs here.
+
+#### `statx` is why 79 is not the whole stat story
+
+musl on aarch64 defines no `__NR_fstatat` (only `__NR_newfstatat`), so `SYS_fstatat`
+is undefined, so its `fstatat.c` compiles the 79 path **out** and issues `statx`
+(291) instead — verified in `third_party/musl`, not assumed. Go and glibc *do* use
+79. Those are the binaries VIVARIUM exists to run: a musl target is one we could
+rebuild through pouch, so 79 is still the right row to build first, and `statx` is
+recorded as a deliberate FORWARD rather than an oversight.
+
+#### Correction 1 — `O_CREAT` cannot be routed to `SYS_WALK_CREATE`
+
+V-2b filed this as V-2c's top candidate ("a second target, not a flag map"). It is
+not admissible at all. **Three independent blockers, any one fatal:**
+
+1. **Shape.** `SYS_WALK_CREATE` takes a **single component** name and rejects `/`
+   (`syscall.h:1105`); `openat` takes a path. Routing means splitting the path,
+   resolving the parent as a separate `O_PATH` open, and closing that handle on
+   every exit — two syscalls and an intermediate handle, i.e. exactly the state and
+   logic §4 excludes.
+2. **Semantics.** Plain `O_CREAT` (no `O_EXCL`) means "create if absent, **open** if
+   present". `SYS_WALK_CREATE` always creates, returning `-EEXIST` otherwise. A
+   try-create-then-open retry is control flow, not a mapping.
+3. **The sharpest, because it is silent.** `SYS_WALK_CREATE`'s `FROM_ROOT` sentinel
+   resolves at the caller's Territory **root** (`syscall.c:2968`, no cwd join),
+   while `SYS_OPEN`'s identical-looking sentinel joins a relative path against the
+   LS-4 **cwd** first (`syscall.c:2870`). The "obvious" `AT_FDCWD` mapping would
+   therefore create the file in the **wrong directory** whenever `cwd != "/"` —
+   wrong for a legal class of inputs, with no error. That is the `munmap` failure
+   mode precisely: *two sentinels that look identical and are not.*
+
+There is no create-by-path syscall in the tree (the only other cwd-joining site,
+`exec_resolve_from_namespace`, resolves a binary to exec). Task #50 tracks the
+userspace half; the kernel half wants a syscall that does not exist.
+
+#### Correction 2 — a real dirfd is blocked by handle *state*, not by the path
+
+V-2b said the blocker was that Linux ignores `dirfd` for an absolute path, so
+deciding needs the path's first byte, and "V-2c can revisit it with the path
+already measured". Measuring would not have helped: it leaves the **relative** case
+untouched, and there the blocker is handle state, which §4 excludes outright.
+
+A Linux dirfd comes from `open(dir, O_RDONLY|O_DIRECTORY)` — a **normally-opened**
+handle. *"9P forbids Twalk from an OPENED fid, so a normally-opened handle is NOT a
+valid base for … walking … CHILDREN; an O_PATH handle IS"* (`syscall.h:2370`). So
+the dirfd Linux programs actually produce is not a usable `SYS_OPEN` `start_fd`;
+only an `O_PATH` one is. The failure is loud (a walk error, not corruption) but
+still wrong for the common legal input — and telling the two handles apart means
+reading the handle table. Left as a FORWARD: the supervisor holds the process's fd
+view anyway and is the right place to resolve one.
+
+Coverage: `vivarium.fstatat_domain` (the admission, all four rejects by name, an
+unadmitted bit forwarding *beside* an admitted one, both `AT_FDCWD` encodings, a
+real dirfd, the high half of `dirfd` unread), plus the `newfstatat`-is-T2 and
+`statx`-forwards rows in `rejects_are_deliberate`. Revert-probed with two probes in
+one build: admitting `AT_SYMLINK_NOFOLLOW` fails `fstatat_domain`, and flipping the
+79 row to FORWARD fails `rejects_are_deliberate` — **1226/1228, exactly two tests,
+no collateral.**
 
 ---
 

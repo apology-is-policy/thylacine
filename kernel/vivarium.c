@@ -62,6 +62,17 @@ struct viv_row {
 //             (syscall.h:2143); Linux aarch64 `struct stat` is 128 with a
 //             different field order. The translation is a struct conversion.
 //             This one IS total: every t_stat maps, with no argument domain.
+//   newfstatat — TIER-2 (V-2c). `stat()`/`lstat()` compile to THIS on aarch64,
+//             so it is the row that matters for real binaries; SYS_STAT (88) is
+//             its exact counterpart. See vivarium_fstatat_decide.
+//   statx   — FORWARD, and it is the reason newfstatat is not the whole story.
+//             musl-on-aarch64 defines no __NR_fstatat, so its fstatat.c compiles
+//             the newfstatat path OUT and issues statx (291) instead -- verified
+//             in third_party/musl, not assumed. Go and glibc DO use 79, and
+//             those are the binaries VIVARIUM exists to run (a musl target we
+//             could rebuild through pouch), so 79 is still the right row to
+//             build first. statx wants a request MASK and a 256-byte struct with
+//             per-field validity bits -- a bigger translator, not this shape.
 //   mmap    — FORWARD. addr hints, PROT_*, MAP_FIXED/ANONYMOUS/PRIVATE and
 //             fd-backed mappings are POLICY. SYS_BURROW_ATTACH_LAZY takes a
 //             length and nothing else. This is the "needs judgement" case the
@@ -101,11 +112,13 @@ struct viv_reject {
 };
 
 static const struct viv_reject g_viv_rejects[] = {
-    { VIV_LINUX_OPENAT, VIV_TIER2   },  // V-2b: vivarium_openat_decide/_build
-    { VIV_LINUX_FSTAT,  VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
-    { VIV_LINUX_MMAP,   VIV_FORWARD },  // policy: addr/prot/flags/fd-backing
-    { VIV_LINUX_MUNMAP, VIV_FORWARD },  // NOT total: burrow_detach is exact-match
-    { VIV_LINUX_BRK,    VIV_ENOSYS  },  // no counterpart; libc falls back to mmap
+    { VIV_LINUX_OPENAT,     VIV_TIER2   },  // V-2b: vivarium_openat_decide/_build
+    { VIV_LINUX_FSTAT,      VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
+    { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
+    { VIV_LINUX_MMAP,       VIV_FORWARD },  // policy: addr/prot/flags/fd-backing
+    { VIV_LINUX_MUNMAP,     VIV_FORWARD },  // NOT total: burrow_detach exact-match
+    { VIV_LINUX_STATX,      VIV_FORWARD },  // wants a mask + a 256-byte struct
+    { VIV_LINUX_BRK,        VIV_ENOSYS  },  // no counterpart; libc falls to mmap
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -196,9 +209,29 @@ enum {
 //
 //   O_CREAT      SYS_OPEN cannot create. Creation is SYS_WALK_CREATE, a different
 //                syscall taking a `perm`. Ignoring the bit turns "create it if
-//                absent" into ENOENT. (V-2c could route it; that is a second
-//                target, not a flag map -- and task #50 already tracks the
-//                userspace half.)
+//                absent" into ENOENT.
+//                CORRECTION to the V-2b note that stood here ("V-2c could route
+//                it; that is a second target, not a flag map"): V-2c checked,
+//                and routing it is NOT admissible -- three independent blockers,
+//                any one fatal. (1) SHAPE: SYS_WALK_CREATE takes a SINGLE
+//                COMPONENT name and rejects '/' (syscall.h:1105); openat takes a
+//                path. Routing means splitting the path, resolving the parent as
+//                a separate O_PATH open, and closing that handle on every exit --
+//                two syscalls and an intermediate handle, i.e. the state and
+//                logic section 4 excludes. (2) SEMANTICS: plain O_CREAT (no
+//                O_EXCL) means "create if absent, OPEN if present", and
+//                SYS_WALK_CREATE always creates, returning -EEXIST otherwise. A
+//                try-create-then-open retry is control flow, not a mapping.
+//                (3) The sharpest, because it is silent: SYS_WALK_CREATE's
+//                FROM_ROOT sentinel resolves at the caller's Territory ROOT
+//                (syscall.c:2968, no cwd join), while SYS_OPEN's identical-looking
+//                sentinel joins a relative path against the LS-4 cwd first
+//                (syscall.c:2870). So the "obvious" AT_FDCWD mapping would create
+//                the file in the WRONG DIRECTORY whenever cwd != "/" -- wrong for
+//                a legal class of inputs with no error, which is exactly the
+//                munmap failure this tier exists to refuse. Task #50 tracks the
+//                userspace half; the kernel half wants a create-by-PATH syscall
+//                that does not exist.
 //   O_DIRECTORY  Requires the target BE a directory (Linux: ENOTDIR otherwise).
 //                SYS_OPEN has no such check, so ignoring it turns an error into
 //                a successful open of a regular file. The worst kind of wrong.
@@ -226,14 +259,26 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
 
     // AT_FDCWD only, at V-2b.
     //
-    // A REAL dirfd is excluded not because the fd would not carry across -- a
-    // phenotyped Proc's fds ARE Thylacine handles, so the number passes through
-    // unchanged -- but because Linux IGNORES the dirfd when the path is
-    // ABSOLUTE, and deciding that requires reading the path's first byte out of
-    // user memory. That would make this function impure for a case that
-    // `open()` never generates (musl compiles every open() to AT_FDCWD; only the
-    // *at() family passes a real fd). Purity is worth more than the *at()
-    // family here; V-2c can revisit it with the path already measured.
+    // A REAL dirfd is excluded. The V-2b note here said the blocker was that
+    // Linux ignores the dirfd for an ABSOLUTE path, so deciding needs the path's
+    // first byte -- and that "V-2c can revisit it with the path already
+    // measured". V-2c looked, and that framing was too shallow: measuring the
+    // path would not rescue the RELATIVE case, because the blocker there is
+    // handle STATE, which section 4 excludes outright.
+    //
+    // Concretely: a Linux dirfd comes from open(dir, O_RDONLY|O_DIRECTORY) --
+    // a NORMALLY-OPENED handle. "9P forbids Twalk from an OPENED fid, so a
+    // normally-opened handle is NOT a valid base for ... walking ... CHILDREN;
+    // an O_PATH handle IS" (syscall.h:2370). So the dirfd Linux programs
+    // actually produce is not a usable SYS_OPEN start_fd; only an O_PATH one is.
+    // The failure is loud (a walk error, not corruption) but it is still wrong
+    // for the common legal input, and telling the two handles apart means
+    // reading the handle table -- state this function is forbidden to touch.
+    //
+    // Left as a FORWARD rather than a hack, because the supervisor holds the
+    // process's fd view anyway and is the right place to resolve one. The reach
+    // lost is small: musl compiles every open() to AT_FDCWD, and only the *at()
+    // family passes a real fd.
     if (dfd != VIV_AT_FDCWD) return VIV_FORWARD;
 
     if (fl & ~VIV_OPENAT_ADMITTED) return VIV_FORWARD;
@@ -323,4 +368,62 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
     out->st_atime_sec = (s64)in->atime_sec;
     out->st_mtime_sec = (s64)in->mtime_sec;
     out->st_ctime_sec = (s64)in->ctime_sec;
+}
+
+// The `newfstatat` flags SYS_STAT can honour EXACTLY. Same admission rule as
+// openat's: a flag may be ignored ONLY when it asks for behaviour we already
+// provide unconditionally.
+//
+//   AT_NO_AUTOMOUNT  ADMITTED AS A NO-OP. It asks "do not trigger an automount
+//                    while resolving". A Thylacine namespace is composed
+//                    EXPLICITLY -- SYS_MOUNT / bind, per-Territory -- and
+//                    nothing mounts as a side effect of traversal. That is a
+//                    property of the Plan 9 namespace model, not a v1.0 gap:
+//                    there is no automount to defer, ever. (Nothing known sets
+//                    it -- glibc and Go both pass 0 -- so this is admitted for
+//                    correctness, not reach. The V-2b precedent is O_LARGEFILE,
+//                    equally unset by musl-aarch64 and equally correct.)
+//
+// And the rejects, each because ignoring it would be a silent wrong answer:
+//
+//   AT_SYMLINK_NOFOLLOW  REJECTED -- and this is the one that costs reach, so
+//                    the reasoning matters. It is what musl/glibc/Go compile
+//                    `lstat()` into, so rejecting it forwards every lstat.
+//                    SYS_STAT's own contract says "Symlinks do not exist at
+//                    v1.0 (G11), so stat == lstat" (syscall.h:1615), which looks
+//                    like a licence to admit it. It is not. That equivalence is
+//                    scoped to v1.0 and holds only because the feature is
+//                    ABSENT -- exactly the O_NOFOLLOW trap V-2b named, and the
+//                    day symlinks land there is nothing in this file, or in a
+//                    build, that would fail. Admitting it would mean every
+//                    lstat() in every Linux guest silently reporting the TARGET
+//                    instead of the link, with no tripwire. Forwarding costs a
+//                    supervisor round trip; admitting costs correctness later.
+//   AT_EMPTY_PATH    An empty path means "operate on dirfd itself" (with
+//                    AT_FDCWD: the cwd). SYS_STAT requires path_len >= 1, and
+//                    serving it would mean SYNTHESISING a "." argument the
+//                    caller never passed. Translating is mapping what you were
+//                    given, not inventing what you were not.
+//   AT_REMOVEDIR / AT_SYMLINK_FOLLOW
+//                    Not valid on fstatat at all (they belong to unlinkat /
+//                    linkat); Linux answers EINVAL. Forwarded rather than
+//                    rejected here, on the same ground as openat's
+//                    (flags & O_ACCMODE) == 3: minting errors is not this
+//                    table's job.
+#define VIV_FSTATAT_ADMITTED ((u32)VIV_AT_NO_AUTOMOUNT)
+
+enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags) {
+    // Both are `int` in the Linux ABI, so only the low 32 bits are significant;
+    // `dirfd` is compared signed for the AT_FDCWD sign-extension reason spelled
+    // out in vivarium_openat_decide.
+    s32 dfd = (s32)(u32)dirfd;
+    u32 fl  = (u32)flags;
+
+    // AT_FDCWD only -- here not as a v1.0 restriction but because SYS_STAT has
+    // no base argument to carry anything else. See vivarium_fstatat_decide's
+    // header comment.
+    if (dfd != VIV_AT_FDCWD)        return VIV_FORWARD;
+    if (fl & ~VIV_FSTATAT_ADMITTED) return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
 }

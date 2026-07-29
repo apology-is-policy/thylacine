@@ -107,10 +107,12 @@ enum {
     VIV_LINUX_LSEEK      = 62,
     VIV_LINUX_READ       = 63,
     VIV_LINUX_WRITE      = 64,
+    VIV_LINUX_NEWFSTATAT = 79,
     VIV_LINUX_FSTAT      = 80,
     VIV_LINUX_BRK        = 214,
     VIV_LINUX_MUNMAP     = 215,
     VIV_LINUX_MMAP       = 222,
+    VIV_LINUX_STATX      = 291,
     VIV_LINUX_EXIT_GROUP = 94,
 };
 
@@ -191,6 +193,16 @@ enum {
 // zero-extended (0x00000000FFFFFF9C), and both must be recognised.
 #define VIV_AT_FDCWD (-100)
 
+// The `flags` word the *at() family carries (musl `include/fcntl.h`). Distinct
+// from the O_* space above: these qualify the RESOLUTION, not the open.
+enum {
+    VIV_AT_SYMLINK_NOFOLLOW = 0x100,
+    VIV_AT_REMOVEDIR        = 0x200,
+    VIV_AT_SYMLINK_FOLLOW   = 0x400,
+    VIV_AT_NO_AUTOMOUNT     = 0x800,
+    VIV_AT_EMPTY_PATH       = 0x1000,
+};
+
 // Decide whether an `openat` is inside the translatable domain, and compute the
 // two rewritten arguments. PURE — no user memory, no Proc, no locks.
 //
@@ -269,5 +281,29 @@ _Static_assert(__builtin_offsetof(struct viv_linux_stat, st_ctime_nsec) == 112, 
 // stack frame cannot leak into a guest through the gaps. That is an I-13
 // obligation, not tidiness.
 void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out);
+
+// Decide whether a `newfstatat` is inside the translatable domain (V-2c).
+// PURE, and the smallest translator here: it returns a verdict and NOTHING else.
+//
+// That emptiness is the finding. `openat` had to compute a rewritten start_fd
+// because SYS_OPEN TAKES one; SYS_STAT does not take a base at all — it is
+// hardcoded to "absolute from the Territory root, relative joined with the LS-4
+// cwd" (syscall.h:1605), which IS the AT_FDCWD rule. `sys_stat_for_proc` and
+// `sys_open_handler` perform that join with the same `territory_resolve_cwd`
+// call, so the correspondence is one implementation, not two that agree.
+//
+// The consequence cuts both ways: AT_FDCWD is free, and a REAL dirfd is not
+// merely unimplemented but INEXPRESSIBLE — there is no argument to put it in.
+//
+// WHY THERE IS NO `vivarium_fstatat_build`. `openat` gets one because its
+// translation ends in a native SYS_OPEN the dispatcher can run. This one cannot:
+// SYS_STAT copies out an 88-byte `struct t_stat`, and the guest's buffer wants
+// the 128-byte Linux layout, so dispatching SYS_STAT at the guest's pointer
+// would write the wrong struct into it. The shell must instead call
+// `sys_stat_for_proc` into a KERNEL t_stat, run it through
+// `vivarium_stat_to_linux`, and copy out 128 bytes — exactly `fstat`'s shape.
+// So `newfstatat` is `openat`'s front half joined to `fstat`'s back half, and
+// the missing build function is what that join looks like.
+enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags);
 
 #endif // THYLACINE_VIVARIUM_H

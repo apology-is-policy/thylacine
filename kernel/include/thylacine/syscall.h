@@ -1336,6 +1336,11 @@ enum {
     // single-component fast path until its callers migrate).
     //   x0 = start_fd : a KOBJ_SPOOR handle (RIGHT_READ) OR
     //                   SYS_WALK_OPEN_FROM_ROOT ((u64)-1) for the Territory root.
+    //                   With the sentinel, a RELATIVE path is first joined
+    //                   against the LS-4 cwd (`territory_resolve_cwd`) -- i.e.
+    //                   the sentinel is POSIX AT_FDCWD, not "root" alone. NOTE
+    //                   the asymmetry with SYS_WALK_CREATE, whose identically-
+    //                   named sentinel does NOT join and always means the root.
     //   x1 = path_va  : user-VA of the path bytes (NUL-free; '/'-separated).
     //   x2 = path_len : 1 .. SYS_OPEN_PATH_MAX.
     //   x3 = omode    : OREAD/OWRITE/ORDWR/OEXEC (+ OTRUNC); SYS_WALK_OPEN_OPATH
@@ -1604,7 +1609,7 @@ enum {
     // docs/POUNCE-DESIGN.md section 7)
     //   Path-stat in ONE syscall: resolve `path` through the caller's
     //   Territory (absolute from root_spoor; relative joined with the LS-4
-    //   cwd, exactly like SYS_OPEN's FROM_ROOT arm) and fill the 80-byte
+    //   cwd, exactly like SYS_OPEN's FROM_ROOT arm) and fill the 88-byte
     //   struct t_stat at stat_va with the LEAF's metadata. The X-search is
     //   identical to the O_PATH walk-open + SYS_FSTAT + close emulation it
     //   replaces (POSIX stat authority = the path X-search only; the leaf's

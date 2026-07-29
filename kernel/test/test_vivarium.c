@@ -16,9 +16,10 @@
 //   vivarium.openat_at_fdcwd        both AT_FDCWD encodings; a real dirfd forwards
 //   vivarium.openat_build           SYS_OPEN's argument order
 //   vivarium.stat_to_linux          88B -> 128B, incl. the I-13 no-leak property
+//   vivarium.fstatat_domain         the AT_* domain; AT_FDCWD-only is structural
 //
-// The T2 tests (V-2b) stay just as pure: `vivarium_openat_decide` never reads
-// user memory by construction, and the stat conversion is data-in/data-out.
+// The T2 tests (V-2b/V-2c) stay just as pure: neither decide function reads user
+// memory by construction, and the stat conversion is data-in/data-out.
 
 #include "test.h"
 
@@ -35,6 +36,7 @@ void test_vivarium_openat_domain(void);
 void test_vivarium_openat_at_fdcwd(void);
 void test_vivarium_openat_build(void);
 void test_vivarium_stat_to_linux(void);
+void test_vivarium_fstatat_domain(void);
 
 // A recognisable argument vector: every word distinct and non-zero, so a
 // dropped, duplicated, or reordered word is visible rather than accidentally
@@ -97,9 +99,19 @@ void test_vivarium_rejects_are_deliberate(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FSTAT, args, &out),
                    (int)VIV_TIER2, "fstat is T2 (88B t_stat -> 128B stat)");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_NEWFSTATAT, args, &out),
+                   (int)VIV_TIER2, "newfstatat is T2 (V-2c; SYS_STAT + the conversion)");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MMAP, args, &out),
                    (int)VIV_FORWARD, "mmap forwards (addr/prot/flags are policy)");
+
+    // statx is the reason newfstatat is not the whole stat story: musl-aarch64
+    // defines no __NR_fstatat, so its fstatat.c compiles the 79 path out and
+    // issues 291 instead. Go and glibc do use 79. Pinned as a deliberate
+    // FORWARD so promoting it later is a decision, not a drive-by.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_STATX, args, &out),
+                   (int)VIV_FORWARD, "statx forwards (a mask + a 256B struct, not this shape)");
 
     // The instructive one. munmap's arguments align 1:1 with SYS_BURROW_DETACH,
     // so it looks like a free renumber; it is excluded because burrow_detach
@@ -262,12 +274,16 @@ void test_vivarium_openat_at_fdcwd(void) {
     viv_expect_open((u64)0xFFFFFF9Cu, VIV_O_RDONLY, 0u,
                     "AT_FDCWD zero-extended is recognised");
 
-    // A real dirfd is out of domain at V-2b: Linux ignores it for an ABSOLUTE
-    // path, and deciding that needs the path's first byte out of user memory.
+    // A real dirfd is out of domain, permanently rather than pending: a Linux
+    // dirfd is a NORMALLY-OPENED handle, and 9P forbids Twalk from an opened fid
+    // (syscall.h:2370), so it is not a usable SYS_OPEN start_fd -- and telling it
+    // apart from an O_PATH one means reading handle state this function may not
+    // touch. (V-2b filed this as "revisit once the path is measured"; V-2c found
+    // that would not have helped.)
     u64 start_fd = 0xBADu;
     u32 omode    = 0xBADu;
     TEST_EXPECT_EQ((int)vivarium_openat_decide(3, VIV_O_RDONLY, &start_fd, &omode),
-                   (int)VIV_FORWARD, "a real dirfd forwards (the *at() family, V-2c)");
+                   (int)VIV_FORWARD, "a real dirfd forwards (handle state, not a gap)");
 
     // Only the LOW 32 BITS are significant -- `dirfd` is an `int`. A high-half
     // value that is not AT_FDCWD in its low word must not be mistaken for one.
@@ -370,4 +386,72 @@ void test_vivarium_stat_to_linux(void) {
     vivarium_stat_to_linux(NULL, &out);
     vivarium_stat_to_linux(&in, NULL);
     TEST_EXPECT_EQ(out.st_ino, (u64)0x2222, "NULL in/out is a no-op, not a scribble");
+}
+
+// -----------------------------------------------------------------------------
+// TIER 2 (V-2c) -- newfstatat
+// -----------------------------------------------------------------------------
+
+static void viv_expect_statat(u64 dirfd, u64 flags, const char *what) {
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(dirfd, flags),
+                   (int)VIV_TRANSLATED, what);
+}
+
+static void viv_expect_statat_forwards(u64 flags, const char *what) {
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, flags),
+                   (int)VIV_FORWARD, what);
+}
+
+void test_vivarium_fstatat_domain(void) {
+    // Plain stat() -- flags 0. This is the row that carries the value: on
+    // aarch64, stat() compiles to newfstatat, not to a stat(2) of its own.
+    viv_expect_statat(VIV_T_ATCWD, 0, "flags 0 (plain stat) translates");
+
+    // The one no-op admission. A Thylacine namespace is composed explicitly, so
+    // nothing mounts as a side effect of traversal -- the flag asks for what we
+    // do unconditionally, and by construction of the model rather than by a
+    // feature being unbuilt.
+    viv_expect_statat(VIV_T_ATCWD, VIV_AT_NO_AUTOMOUNT,
+                      "AT_NO_AUTOMOUNT is a no-op (nothing mounts on traversal)");
+
+    // The costly reject, pinned by name because it is the one a future reader
+    // will be tempted to admit: SYS_STAT's contract literally says "stat ==
+    // lstat" at v1.0. That equivalence holds only because SYMLINKS ARE ABSENT,
+    // so admitting it would silently return the target's metadata the day they
+    // land -- the O_NOFOLLOW trap, on the stat surface.
+    viv_expect_statat_forwards(VIV_AT_SYMLINK_NOFOLLOW,
+                               "AT_SYMLINK_NOFOLLOW forwards (lstat; correct only while symlinks are absent)");
+
+    // Serving this would mean synthesising a "." the caller never passed.
+    viv_expect_statat_forwards(VIV_AT_EMPTY_PATH,
+                               "AT_EMPTY_PATH forwards (SYS_STAT needs a real path)");
+
+    // Not valid on fstatat at all -- Linux answers EINVAL. Forwarded rather than
+    // rejected here: minting errors is not the table's job (openat's accmode-3
+    // decision, applied consistently).
+    viv_expect_statat_forwards(VIV_AT_REMOVEDIR,
+                               "AT_REMOVEDIR forwards (unlinkat's flag; Linux EINVAL)");
+    viv_expect_statat_forwards(VIV_AT_SYMLINK_FOLLOW,
+                               "AT_SYMLINK_FOLLOW forwards (linkat's flag; Linux EINVAL)");
+
+    // An unadmitted bit forwards even in combination with an admitted one --
+    // the check is a whole-word mask, not a scan for known flags.
+    viv_expect_statat_forwards(VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW,
+                               "a rejected bit forwards even beside an admitted one");
+    viv_expect_statat_forwards(0x80000000u, "an unknown high bit forwards");
+
+    // Both AT_FDCWD encodings, for the openat sign-extension reason.
+    viv_expect_statat((u64)(s64)-100, 0, "AT_FDCWD sign-extended is recognised");
+    viv_expect_statat((u64)0xFFFFFF9Cu, 0, "AT_FDCWD zero-extended is recognised");
+
+    // A real dirfd forwards -- and here that is STRUCTURAL, not a v1.0 limit:
+    // SYS_STAT takes (path, len, out) and has no base argument at all, so there
+    // is nowhere for a dirfd to go. Contrast openat, which at least HAS a
+    // start_fd it could carry.
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(3, 0), (int)VIV_FORWARD,
+                   "a real dirfd forwards (SYS_STAT has no base argument)");
+
+    // Only the low 32 bits of dirfd are significant.
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0),
+                   (int)VIV_FORWARD, "the high half of dirfd is not consulted");
 }
