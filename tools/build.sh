@@ -2942,11 +2942,17 @@ build_clade() {
     # The multicall is a multi-hour build: reuse it when newer than this recipe
     # AND the fork Support patch surface (Path.inc carries the CL-4 getMainExecutable
     # port). A fork edit or a recipe change forces a rebuild.
+    #
+    # BOTH artifacts gate the reuse (CL-6): clangd is a separate binary, not a
+    # multicall member (it has no GENERATE_DRIVER -- LLVM-DESIGN section 16.5),
+    # so a tree carrying only bin/llvm is a PARTIAL build that must not report
+    # itself cached. That is the state every pre-CL-6 tree is in.
     local out="$bdir/bin/llvm"
-    if [[ -x "$out" \
+    local outd="$bdir/bin/clangd"
+    if [[ -x "$out" && -x "$outd" \
           && "$out" -nt "${BASH_SOURCE[0]}" \
           && "$out" -nt "$fork/llvm/lib/Support/Unix/Path.inc" ]]; then
-        ledger "clade (clang+lld multicall): REUSED (cached + up-to-date)"
+        ledger "clade (clang+lld multicall + clangd): REUSED (cached + up-to-date)"
         return 0
     fi
 
@@ -2987,8 +2993,24 @@ build_clade() {
             -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-thylacine
             -DLLVM_HOST_TRIPLE=aarch64-unknown-thylacine
             # clang;lld + the multicall driver (F3: lld is a member).
-            -DLLVM_ENABLE_PROJECTS="clang;lld"
+            # CL-6 adds clang-tools-extra for clangd -- which is NOT a multicall
+            # member (no GENERATE_DRIVER; LLVM-DESIGN section 16.5) and links
+            # against the same clang libs, so it rides this one cross-config
+            # rather than a second tree.
+            -DLLVM_ENABLE_PROJECTS="clang;lld;clang-tools-extra"
             -DLLVM_TOOL_LLVM_DRIVER_BUILD=ON
+            # clangd trim (CL-6). TIDY_CHECKS=OFF drops ALL_CLANG_TIDY_CHECKS --
+            # a large slab of code the CL-6 gate (diagnostics/hover/definition)
+            # does not use; clangd still links clangTidy/clangTidyUtils, which
+            # its CMakeLists does unconditionally, so the core is intact.
+            # DEXP is a developer index-explorer tool, not the server. REMOTE
+            # needs gRPC (absent from the sysroot). MALLOC_TRIM is glibc-only
+            # and we are musl -- inert either way, off so it is not a puzzle.
+            -DCLANGD_TIDY_CHECKS=OFF
+            -DCLANGD_BUILD_DEXP=OFF
+            -DCLANGD_ENABLE_REMOTE=OFF
+            -DCLANGD_BUILD_XPC=OFF
+            -DCLANGD_MALLOC_TRIM=OFF
             # Static, non-PIE ET_EXEC.
             -DLLVM_BUILD_STATIC=ON
             -DBUILD_SHARED_LIBS=OFF
@@ -3021,21 +3043,28 @@ build_clade() {
     [[ "$jobs" -gt "$ncpu" ]] && jobs="$ncpu"
     jobs="${CLADE_JOBS:-$jobs}"
     echo "    ninja -j$jobs (host RAM ${memgib} GiB, ncpu $ncpu)"
-    ninja -C "$bdir" -j"$jobs" llvm clang-resource-headers
+    ninja -C "$bdir" -j"$jobs" llvm clang-resource-headers clangd
 
-    if [[ ! -x "$out" ]]; then
-        echo "    clade: multicall $out not produced" >&2
-        exit 1
-    fi
-    # Verify the kernel ELF loader's acceptance shape (ET_EXEC, no PT_DYNAMIC).
-    case "$("$readelf" -h "$out")" in
-        *"Type:"*EXEC*) ;;
-        *) echo "    clade: bin/llvm not ET_EXEC -- kernel/elf.c would reject it" >&2; exit 1 ;;
-    esac
-    case "$("$readelf" -l "$out")" in
-        *DYNAMIC*) echo "    clade: bin/llvm has PT_DYNAMIC -- kernel/elf.c would reject it" >&2; exit 1 ;;
-    esac
+    # Both binaries face the same kernel loader, so both get the same check.
+    # Checking only the multicall would let a dynamically-linked clangd reach
+    # the pool and fail at exec on-device, where the diagnosis is far away
+    # from the cause.
+    local art
+    for art in "$out" "$outd"; do
+        if [[ ! -x "$art" ]]; then
+            echo "    clade: $art not produced" >&2
+            exit 1
+        fi
+        case "$("$readelf" -h "$art")" in
+            *"Type:"*EXEC*) ;;
+            *) echo "    clade: $art not ET_EXEC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+        esac
+        case "$("$readelf" -l "$art")" in
+            *DYNAMIC*) echo "    clade: $art has PT_DYNAMIC -- kernel/elf.c would reject it" >&2; exit 1 ;;
+        esac
+    done
     ledger "clade (clang+lld multicall): BUILT ($(wc -c < "$out" | tr -d ' ') bytes, ET_EXEC static)"
+    ledger "clade (clangd): BUILT ($(wc -c < "$outd" | tr -d ' ') bytes, ET_EXEC static)"
 }
 
 stage_clade() {
@@ -3053,6 +3082,7 @@ stage_clade() {
     # clang++ copy sets CCCIsCXX and would compile the storm's .c sources as C++.
     local xbuild="$BUILD_DIR/clade/llvm-build"
     local llvm_bin="$xbuild/bin/llvm"
+    local clangd_bin="$xbuild/bin/clangd"
     local stage="$BUILD_DIR/clade/stage"
     local sysroot="$BUILD_DIR/sysroot"
     local strip="$LLVM_PREFIX/bin/llvm-strip"
@@ -3078,6 +3108,17 @@ stage_clade() {
     cp "$stripped" "$stage/bin/clang"
     chmod +x "$stage/bin/clang++" "$stage/bin/ld.lld" "$stage/bin/clang"
     rm -f "$stripped"
+    # CL-6: clangd is its OWN binary (not a multicall dispatch name), so it is
+    # copied once under its own name -- no argv[0] games. Optional: a tree
+    # built before CL-6 has only the multicall, and the C++ toolchain must
+    # still stage from it. nora treats a missing /clade/bin/clangd as "no
+    # language server" (lsp_host.rs), so the image degrades rather than breaks.
+    if [[ -f "$clangd_bin" ]]; then
+        "$strip" -o "$stage/bin/clangd" "$clangd_bin" 2>/dev/null || cp "$clangd_bin" "$stage/bin/clangd"
+        chmod +x "$stage/bin/clangd"
+    else
+        echo "    clade stage: no clangd at $clangd_bin -- staging without it (CL-6 C/C++ IDE off)"
+    fi
     # Resource headers (stddef.h/stdint.h/... at InstalledDir/../lib/clang/N/include).
     cp -R "$xbuild/$resdir" "$stage/$(dirname "$resdir")/"
     # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.

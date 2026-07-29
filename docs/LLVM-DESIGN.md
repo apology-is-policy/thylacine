@@ -1323,6 +1323,73 @@ the very bug being fixed.
 Proof: suite **1197/1197**, `clade CL-4 gate: PASS` on both invocations, boot OK,
 0 EXTINCTION.
 
+### 16.17 CL-6 as-built (clangd + the Nora C/C++ client)
+
+**The "near-zero client work" estimate in §11 was half right, and the half it
+elided is the half that mattered.** Recorded here because the correction is
+more useful than the original claim.
+
+TRUE: `parley` — the whole 3919-line protocol layer — needed **zero** changes.
+Every `go`/`gopls` mention in it is a comment or a test fixture. LSP really is
+language-agnostic, and the client really did generalize without touching a line
+of protocol code.
+
+INCOMPLETE: `nora/src/lsp_host.rs`, the binary-side glue, was gopls-**bound** in
+four load-bearing places — the binary path, the `didOpen` `languageId` (a
+literal `"go"`), the workspace-root marker (`go.mod`), and the extension gate —
+and, structurally, **there was no language dispatch at all**: `Lsp::start(path)`
+took a path and decided nothing. A second server needed a concept the code did
+not have. Small, but an abstraction rather than a substitution: ~150 lines.
+
+The shape now is a `ServerSpec` table (suffix→`languageId`, binary, root
+markers, status-message name) with `lang_for()` as the dispatch, and `Lsp`
+holding its own spec for the session. Adding a language is a row, not a code
+path. Two details worth keeping:
+
+- The type is `ServerSpec`, not `Lang`, because `nora::Lang` already exists —
+  the syntax highlighter's language enum, re-exported from `lib.rs`.
+- An earlier draft of the table carried a comment claiming the suffix order was
+  load-bearing ("`.h` would shadow `.hpp`"). **That was wrong**, and checking it
+  took one command: `"x.hpp".ends_with(".h")` is `false` — a suffix match is not
+  a prefix match. Order within a spec's list is cosmetic; order *across* `LANGS`
+  is not.
+
+**Packaging.** clangd is its own static binary at `/clade/bin/clangd`, not a
+multicall dispatch name (§16.5: no `GENERATE_DRIVER`). It rides the one CL-4
+cross-config with `clang-tools-extra` added, trimmed by `CLANGD_TIDY_CHECKS=OFF`
+(drops `ALL_CLANG_TIDY_CHECKS`; clangd still links `clangTidy`/`clangTidyUtils`,
+which its CMakeLists does unconditionally), plus DEXP/REMOTE/XPC/MALLOC_TRIM off.
+`stage_clade` copies it when present and says so when absent — a pre-CL-6 tree
+still stages a working C++ toolchain, and nora treats a missing binary as "no
+language server", so the image degrades instead of breaking.
+
+**The builder.** `tools/clade-gcp-build.sh` cross-builds this on a disposable
+`t2a-standard-16` spot VM, because `build_clade` sizes its jobs as
+(host RAM GiB / 3) against 2.46 GiB worst-case TUs — an 8 GiB dev box gets
+**-j2**. The script deliberately duplicates **no** configuration: the VM clones
+this repo and runs the real `tools/build.sh` (`sysroot`, `libcxx`, `clade`) with
+the local working copy of `build.sh` overlaid, so the cmake args cannot drift
+from the recipe they mirror. Two things it must get right, both learned the hard
+way on the first run:
+
+1. The detached launch needs `< /dev/null`. Redirecting only stdout and stderr
+   leaves the child holding the ssh channel's **stdin**, so the launcher hangs
+   for the build's entire duration while the build itself runs fine.
+2. `LLVM_PREFIX`/`LLD_PREFIX` point at the **fork's own** stage-1 build, not the
+   distro's llvm. `build_sysroot` uses a *stock* clang (the triple is driven
+   explicitly — "clang treats thylacine as an unknown OS"), and on the dev box
+   that stock clang is 22.1.4 while Ubuntu ships 18. Four majors of skew on the
+   sysroot everything else links against is not worth accepting when the fork
+   toolchain is already being built: the v8.0 userspace floor (#71) rides
+   `-moutline-atomics`, and task #91 exists because an LSE regression there is
+   **silent**.
+
+**Owed:** an in-guest C/C++ diagnostics round-trip, the CL-6 twin of the gopls
+E2E (#76). Host unit tests are not the vehicle — `lsp_host.rs` lives in the
+binary crate, which `lib.rs` documents as not host-testable ("the bin needs the
+backend"), and moving a server table into the pure editor engine to win a
+`ends_with` test is the wrong trade.
+
 ## 17. Revision history
 
 | Date | Change |

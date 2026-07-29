@@ -150,13 +150,13 @@ pub extern "C" fn rs_main() -> i64 {
     // defect.
     let notes = libthyla_rs::notes::Notes::open_self().ok();
 
-    // Bring up gopls for a Go buffer. Absent / unspawnable / non-Go all mean
-    // "no language server" -- a fully supported state in which nora behaves
-    // exactly as it did before 8e (NORA-IDE-UX section 6: never block the UI).
-    let mut lsp = match ed.filename.as_deref() {
-        Some(p) if lsp_host::is_go(p) => Lsp::start(p),
-        _ => None,
-    };
+    // Bring up whichever server claims this buffer (gopls for .go, clangd for
+    // C/C++). Unclaimed / absent / unspawnable all mean "no language server"
+    // -- a fully supported state in which nora behaves exactly as it did
+    // before 8e (NORA-IDE-UX section 6: never block the UI). The dispatch
+    // lives in `Lsp::start`, so there is nothing here to keep in sync with the
+    // language table.
+    let mut lsp = ed.filename.as_deref().and_then(Lsp::start);
     // No debug session until the user runs `:debug` (8e-3e). It spawns Ambush
     // then; a buffer that never debugs pays nothing.
     let mut dap: Option<Dap> = None;

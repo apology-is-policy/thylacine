@@ -1,16 +1,24 @@
-// nora's gopls session (Stage 8e-2b) -- the binary-side glue between
-// `parley::lsp` (the pure client) and `parley::transport` (the persistent
-// child). Everything protocol-shaped lives in parley; everything
-// terminal-shaped lives in main.rs; this file is the seam that owns the
-// process lifetime and translates LSP coordinates into `nora::diag`.
+// nora's language-server session (Stage 8e-2b; multi-language at CL-6) -- the
+// binary-side glue between `parley::lsp` (the pure client) and
+// `parley::transport` (the persistent child). Everything protocol-shaped lives
+// in parley; everything terminal-shaped lives in main.rs; this file is the
+// seam that owns the process lifetime and translates LSP coordinates into
+// `nora::diag`.
 //
 // DESIGN NOTES a reader will want:
 //
-//   * The editor NEVER blocks on gopls. Requests are fired; answers land on a
-//     later poll-wake and mark the frame dirty. A gopls that is slow, wedged,
-//     or absent costs the editor nothing -- `Lsp::start` returning None is a
-//     fully supported state (no toolchain in the image, a non-Go file, a
-//     confined namespace), and the editor behaves exactly as it did before 8e.
+//   * LSP is language-agnostic and so is everything below this file -- parley
+//     needed ZERO changes to add C/C++. A server is a row in `LANGS`: the
+//     suffixes it claims, the `languageId` to call them, its binary, and its
+//     workspace-root markers. Anything a new language needs beyond those four
+//     facts is a bug in this file's abstraction, not a reason to fork it.
+//
+//   * The editor NEVER blocks on the server. Requests are fired; answers land
+//     on a later poll-wake and mark the frame dirty. A server that is slow,
+//     wedged, or absent costs the editor nothing -- `Lsp::start` returning
+//     None is a fully supported state (no toolchain in the image, an unclaimed
+//     file type, a confined namespace), and the editor behaves exactly as it
+//     did before 8e.
 //
 //   * Document sync fires on SAVE and on leaving Insert mode, never per
 //     keystroke. A full-document didChange per keypress is the byte-storm
@@ -36,14 +44,84 @@ use nora::diag::{Diagnostics, LineDiag, Severity};
 use nora::editor::{Candidate, Editor, LspRequest};
 use nora::text;
 
-/// Where the Go toolchain ships in the default image (Stage 8d) -- beside `go`
-/// and `gofmt` on the pool, on the login PATH.
-const GOPLS_PATH: &str = "/goroot/bin/gopls";
+/// A language server nora knows how to drive.
+///
+/// The protocol is language-agnostic (that is `parley`'s whole job), so a
+/// server is fully described by four facts: which files it claims, what to
+/// call them on the wire, what binary to run, and how to recognize a
+/// workspace root. Adding a language is a row here, not a code path.
+struct ServerSpec {
+    /// Filename suffix -> LSP `languageId`, first match wins.
+    ///
+    /// These suffixes do not shadow each other (`"x.hpp".ends_with(".h")` is
+    /// FALSE -- a suffix match is not a prefix match, so `.h` cannot swallow
+    /// `.hpp`), so the order WITHIN this list is cosmetic. Order across
+    /// `LANGS` is not: a suffix claimed by two servers goes to the first.
+    exts: &'static [(&'static str, &'static str)],
+    /// The server binary, absolute (spawn does no PATH search).
+    bin: &'static str,
+    /// Workspace-root markers, nearest ancestor wins.
+    roots: &'static [&'static str],
+    /// Prefix for this server's status messages.
+    name: &'static str,
+}
 
-/// How far up the tree to look for the enclosing `go.mod`. A module root is a
+impl ServerSpec {
+    /// This server's `languageId` for `path`, or None if it does not claim it.
+    fn language_id(&self, path: &str) -> Option<&'static str> {
+        self.exts
+            .iter()
+            .find(|(ext, _)| path.ends_with(ext))
+            .map(|(_, id)| *id)
+    }
+}
+
+/// The servers nora ships with. A file is offered to the first entry that
+/// claims its suffix; an entry whose binary is absent is simply skipped, so an
+/// image without a toolchain behaves exactly as it did before 8e.
+static LANGS: &[ServerSpec] = &[
+    // Go (8e-2). Ships beside `go`/`gofmt` on the pool (Stage 8d).
+    ServerSpec {
+        exts: &[(".go", "go")],
+        bin: "/goroot/bin/gopls",
+        roots: &["go.mod"],
+        name: "gopls",
+    },
+    // C/C++ (CL-6), from the Clade device toolchain. `compile_commands.json`
+    // first: it is the only marker that also tells clangd HOW to compile, and
+    // a tree that has one wants that directory as the root even when a
+    // higher CMakeLists.txt exists.
+    //
+    // `.h` maps to "cpp" because clangd's own default for an ambiguous header
+    // is C++. The languageId is only a fallback anyway -- when a compile
+    // command exists it is authoritative, so a C-only project with a
+    // compile_commands.json is unaffected by this choice.
+    ServerSpec {
+        exts: &[
+            (".cpp", "cpp"),
+            (".cxx", "cpp"),
+            (".cc", "cpp"),
+            (".hpp", "cpp"),
+            (".hxx", "cpp"),
+            (".hh", "cpp"),
+            (".h", "cpp"),
+            (".c", "c"),
+        ],
+        bin: "/clade/bin/clangd",
+        roots: &["compile_commands.json", ".clangd", "CMakeLists.txt"],
+        name: "clangd",
+    },
+];
+
+/// The server that claims `path`, if any -- the language dispatch.
+fn lang_for(path: &str) -> Option<&'static ServerSpec> {
+    LANGS.iter().find(|l| l.language_id(path).is_some())
+}
+
+/// How far up the tree to look for a workspace-root marker. A root is a
 /// handful of components above a source file in any sane layout; the cap keeps
 /// a pathological path from walking to `/` one stat at a time.
-const MODULE_SEARCH_DEPTH: usize = 32;
+const ROOT_SEARCH_DEPTH: usize = 32;
 
 /// Poll tags. fd 0 keeps tag 0 so the stdin arm reads naturally.
 pub const TAG_STDIN: Tag = 0;
@@ -53,8 +131,17 @@ pub const TAG_LSP_ERR: Tag = 2;
 /// #55c: the editor's note queue (tty:winch — the console resize signal).
 pub const TAG_NOTES: Tag = 5;
 
-/// A live gopls session.
+/// A live language-server session.
+///
+/// One server per editor, chosen at launch from the file's suffix. A buffer of
+/// a DIFFERENT language is not served (`open_current` declines it) rather than
+/// restarting the server underneath the user -- the same fail-soft the
+/// no-server case already gets. Swapping servers on `:e other.cpp` is the
+/// obvious follow-on and needs a teardown/respawn dance, not a table change.
 pub struct Lsp {
+    /// Which server this is -- fixes the languageId, root markers, and the
+    /// set of files it will accept for the session's lifetime.
+    lang: &'static ServerSpec,
     srv: Server,
     cl: lsp::Client,
     /// The document we have told gopls about, and its version.
@@ -78,33 +165,46 @@ pub struct Lsp {
 }
 
 impl Lsp {
-    /// Spawn gopls for the workspace enclosing `path` and fire `initialize`.
+    /// Spawn the server that claims `path` and fire `initialize`.
     ///
     /// `None` (never an error the user must dismiss) when there is no usable
-    /// server: gopls absent, the spawn refused, or the handshake could not be
-    /// written. Editing must not depend on a language server existing.
+    /// server: no entry claims the suffix, the binary is absent, the spawn was
+    /// refused, or the handshake could not be written. Editing must not depend
+    /// on a language server existing.
     pub fn start(path: &str) -> Option<Lsp> {
-        // Cheap gate first: a missing binary is the common case on a non-bake
-        // image, and probing it costs one stat vs a failed spawn.
-        if !fs::exists(GOPLS_PATH) {
+        let lang = lang_for(path)?;
+        // Cheap gate: a missing binary is the common case on a non-bake image
+        // (no /goroot, or no /clade), and probing it costs one stat vs a
+        // failed spawn.
+        if !fs::exists(lang.bin) {
             return None;
         }
         let abs = absolutize(path)?;
-        let root = module_root(&abs);
+        let root = workspace_root(&abs, lang.roots);
         let root_uri = lsp::path_to_uri(&root);
 
-        let mut cmd = Command::new(GOPLS_PATH);
-        // No env plumbing: libthyla-rs Command has no envp (v1.0), so gopls
-        // inherits nora's environment wholesale -- which is what we want. The
-        // 8d port proved gopls needs PATH (to resolve `go` via LookPath) and
-        // CAP_CSPRNG_READ (crypto/rand at init); both arrive from login
-        // through ut through nora by inheritance. A per-Command env override
-        // would be a kernel-ABI item, not a workaround to invent here.
+        let mut cmd = Command::new(lang.bin);
+        // No env plumbing: libthyla-rs Command has no envp (v1.0), so the
+        // server inherits nora's environment wholesale -- which is what we
+        // want. The 8d port proved gopls needs PATH (to resolve `go` via
+        // LookPath) and CAP_CSPRNG_READ (crypto/rand at init); both arrive
+        // from login through ut through nora by inheritance. A per-Command env
+        // override would be a kernel-ABI item, not a workaround to invent
+        // here.
+        //
+        // The same inheritance carries the CL-5 per-Proc PAGE BUDGET, and
+        // `Command` cannot raise it (process.rs passes `page_budget: 0` =
+        // inherit). clangd holds an AST plus a preamble cache, and CL-5
+        // measured one template-heavy TU at 250 MiB against a 256 MiB
+        // default -- so a server that dies on its first real translation unit
+        // is a BUDGET symptom, not a port bug. Measure before plumbing a
+        // setter (task #100).
         let srv = Server::spawn(&mut cmd).ok()?;
 
         let mut cl = lsp::Client::new();
         let init = cl.initialize(&root_uri);
         let mut l = Lsp {
+            lang,
             srv,
             cl,
             open_uri: None,
@@ -242,7 +342,7 @@ impl Lsp {
             }
             Action::Log(_) => false,
             Action::Failed(msg) => {
-                ed.set_status(alloc::format!("gopls: {}", msg));
+                ed.set_status(alloc::format!("{}: {}", self.lang.name, msg));
                 true
             }
             Action::Hover(Some(text)) => {
@@ -411,11 +511,17 @@ impl Lsp {
             Some(p) => p,
             None => return,
         };
-        if !is_go(&path) {
-            // Remember the miss so a non-Go buffer is not re-probed every pass.
-            self.open_name = ed.filename.clone();
-            return;
-        }
+        // Only files THIS server claims. A Go buffer opened in a clangd
+        // session (or vice versa) is declined, not mis-served.
+        let language_id = match self.lang.language_id(&path) {
+            Some(id) => id,
+            None => {
+                // Remember the miss so a foreign buffer is not re-probed every
+                // pass.
+                self.open_name = ed.filename.clone();
+                return;
+            }
+        };
         let uri = lsp::path_to_uri(&path);
         if self.open_uri.as_deref() == Some(uri.as_str()) {
             self.open_name = ed.filename.clone();
@@ -429,7 +535,7 @@ impl Lsp {
         }
         let text = ed.text.content();
         self.version = 1;
-        let open = self.cl.did_open(&uri, "go", self.version, &text);
+        let open = self.cl.did_open(&uri, language_id, self.version, &text);
         if self.send(&open).is_ok() {
             self.synced_rev = ed.text.rev();
             self.synced = true;
@@ -512,10 +618,6 @@ impl Lsp {
     }
 }
 
-/// Is this a Go source file (the only language 8e-2 speaks)?
-pub fn is_go(path: &str) -> bool {
-    path.ends_with(".go")
-}
 
 /// Make `path` absolute against the cwd. `None` when the cwd is unreadable.
 fn absolutize(path: &str) -> Option<String> {
@@ -530,19 +632,26 @@ fn absolutize(path: &str) -> Option<String> {
     Some(cwd)
 }
 
-/// The workspace root for `abs_path`: the nearest ancestor directory holding a
-/// `go.mod`, else the file's own directory (a single-file workspace -- gopls
-/// copes, with reduced results).
-fn module_root(abs_path: &str) -> String {
+/// The workspace root for `abs_path`: the nearest ancestor directory holding
+/// any of `markers`, else the file's own directory (a single-file workspace --
+/// both gopls and clangd cope, with reduced results).
+///
+/// NEAREST ancestor, not best marker: the walk stops at the first directory
+/// containing ANY marker rather than preferring a stronger marker further up.
+/// That is deliberate -- an inner `compile_commands.json` describes the code
+/// being edited more precisely than an outer `CMakeLists.txt` does.
+fn workspace_root(abs_path: &str, markers: &[&str]) -> String {
     let mut dir = parent_of(abs_path);
-    for _ in 0..MODULE_SEARCH_DEPTH {
-        let mut probe = String::from(&dir);
-        if !probe.ends_with('/') {
-            probe.push('/');
-        }
-        probe.push_str("go.mod");
-        if fs::exists(&probe) {
-            return dir;
+    for _ in 0..ROOT_SEARCH_DEPTH {
+        for m in markers {
+            let mut probe = String::from(&dir);
+            if !probe.ends_with('/') {
+                probe.push('/');
+            }
+            probe.push_str(m);
+            if fs::exists(&probe) {
+                return dir;
+            }
         }
         if dir == "/" {
             break;
