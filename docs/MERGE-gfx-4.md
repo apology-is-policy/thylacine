@@ -58,3 +58,82 @@ loosen one to make a merge pass.
   are clean now).
 - **Do not "fix" the `struct Proc` size assert by loosening it.** If it fires, the
   merge dropped or duplicated a field — that is the assert doing its job.
+
+---
+
+## Round 3: OUTSTANDING (notes written 2026-07-29 by the aux agent)
+
+`gfx-4` is at **`15617895`**, pushed to both mirrors. The last `gfx-4` commit
+already in `main` is **`7b917e55`** (round 2), so **25 commits are outstanding**:
+the whole of VIVARIUM **V-4b** (1..6 + close), **V-4c** (1, 2a/2b/2c, 3), and
+**#76** (which is not VIVARIUM -- it rode the same branch).
+
+`gfx-4`'s base is **17 commits stale** w.r.t. `origin/main`. Per the working
+pattern above, aux owes a merge of `origin/main` into `gfx-4` first; that has NOT
+been done yet, so whoever moves first should expect to resolve the conflicts
+below either way.
+
+### The overlap, measured (not guessed)
+
+Twelve files were touched on both sides since the merge base. Three groups:
+
+**1. The console TX surface -- the one that needs real attention.**
+`kernel/test/test_cons.c` + `docs/reference/111-cons.md`.
+
+Main's **`7daf61e5`** ("#75 audit F2: the owed room-wait + #67 deadline test for
+the cons TX ring") and aux's **`15617895`** (#76, SYS_PUTS joins the writer role)
+are *both* P1-F console work, from opposite ends. They **compose in meaning** --
+different mechanisms on one surface -- but **conflict textually**, because both
+append a test to the same file and both rewrite sections of the same reference
+doc.
+
+Resolve by **keeping both**, not by choosing:
+  - Both tests must survive. They assert different properties: main's is the
+    room-wait / #67 deadline behaviour of the ring; aux's
+    (`cons.sys_puts_uses_shared_console_path`) is that SYS_PUTS routes through
+    `cons_output_write` at all.
+  - Both doc sections must survive in `111-cons.md`. Aux replaced the old
+    "SYS_PUTS bypasses the ring + role" bullet with a struck-through CLOSED entry
+    plus a new "SYS_PUTS joins the shared path (#76)" section; main's F2 work adds
+    its own coverage text. Neither supersedes the other.
+  - **Post-merge semantic check**: the suite count should be main's + aux's new
+    tests, and BOTH cons tests must appear in the run. If either vanished, the
+    merge dropped a test -- that is the failure mode to look for here, and it is
+    silent (a dropped test does not fail, it just stops existing).
+
+**2. `kernel/proc.c`** -- main's `1060a75d` (#80, the EXITKILL reaper line) vs
+aux's V-4c-3 `proc_set_exe_path` locking fix. Different functions; expected to
+merge cleanly. The tripwire is the same as both prior rounds: the
+`sizeof(struct Proc)` `_Static_assert`. If it fires, a field was dropped or
+duplicated -- **do not loosen it**.
+
+**3. `tools/interactive/*` + `tools/test-interactive.sh` -- the duplication
+trap.** Aux's **`9b5d5b15`** is a *manual re-application* of main's own seven
+LS-CI harness fixes (648 insertions across 6 files), so the same logical changes
+exist on both sides with **no shared ancestry** -- git will show conflicts that
+look alarming but are largely the same content arriving twice. Main is also
+**newer** here (`cfe18c65`, #89, landed after the aux port).
+
+  - **Prefer main's side on these six files**, and *verify* rather than union the
+    hunks. Unioning duplicates logic.
+  - Checked: `454921bf` (the aux-side `reap_qemu` tree-scoping fix) is already in
+    **both** branches, so there is no aux-only harness fix at risk in this group.
+
+Also touched by both, low risk: `CLAUDE.md` and `docs/ARCHITECTURE.md` -- both
+sides append to different `section 25.4` rows (aux added a `#76 ADDENDUM` to the
+LS-8 row's P1-F addendum). Take both additions.
+
+### Why this round matters beyond hygiene
+
+**V-1b is gated on it.** The aux roadmap records V-1b as "merge-ordered, not
+blocked-forever": it wants `kernel/exec.c` + `kernel/syscall.c`, which CL-4 also
+touched, and the stated unblock condition is "land `clade-cl4-wip` -> `main` ->
+then `gfx-4` -> `main`". `clade-cl4-wip` is now **fully contained in `main`** (0
+commits ahead), so **round 3 is the only remaining half of that condition.**
+
+### State of the aux gates at `15617895`
+
+Everything below was run on the aux side at the tip, so a clean merge should
+reproduce it: default suite **1217/1217** + boot OK + 0 EXTINCTION; SMP gate
+**40/40 PASS, 0 corruption**; LS-CI **32/32 with zero retries**; spec `cons_poll`
+clean + liveness clean + `cons_poll_buggy_lost_wake` counterexample.
