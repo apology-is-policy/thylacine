@@ -2109,18 +2109,35 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
 
+    // #80 (errno-rollout, ER-1): every failure below answers a SPECIFIC -T_E_*
+    // rather than the flat -1. The flat sentinel is rendered EIO by the pouch
+    // boundary-line and mapped to Error::Io by libthyla-rs, so before this a
+    // permission denial, a bad fd, and a malformed argument were one
+    // indistinguishable "I/O error" to every caller. The walk-miss arms were
+    // already upgraded (they are the Go-build keystone); this finishes the
+    // handler. The `!t` / `!p` preamble guards above stay -1 -- they are
+    // structurally unreachable from EL0 (no current thread) and share that shape
+    // with every other handler in this file.
+    //
+    // Blast radius: SYS_WALK_OPEN's consumers are libthyla-rs (fs::, via
+    // file::with_parent_dir) and libt. pouch reached it until PTY-3, when patch
+    // 0021 repointed openat onto SYS_OPEN -- so no pouch program observes these
+    // returns today.
+
     // Validate name length cap. name_len_raw == 0 is rejected: a zero-
     // length name is a clone-walk (nname=0 in the 9P sense), which has
     // no userspace use case for an opened fd at v1.0 — the attach root
     // is already opened.
-    if (name_len_raw == 0)                            return -1;
-    if (name_len_raw > SYS_WALK_OPEN_NAME_MAX)        return -1;
-    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+    if (name_len_raw == 0)                            return -T_E_INVAL;
+    if (name_len_raw > SYS_WALK_OPEN_NAME_MAX)        return -T_E_INVAL;
+    // A user buffer that does not validate is EFAULT, not EINVAL: the caller's
+    // pointer is bad, its length is fine.
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -T_E_FAULT;
 
     // Validate omode bit set. Rejecting unknown bits lets future bits be
     // added without ambiguity (an old kernel rejects a new bit; a new
     // kernel accepts both old + new bits).
-    if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID)  return -1;
+    if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID)  return -T_E_INVAL;
 
     // Resolve the source Spoor. Two source paths share the rest of the
     // handler:
@@ -2144,16 +2161,22 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // the result fd.
     struct Spoor *src;
     if (spoor_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
-        if (!p->territory)                            return -1;
+        // #80: "the caller has no root to walk from" is a state error, not a bad
+        // fd -- no fd was named. A Proc reaches this only before its first
+        // SYS_CHROOT.
+        if (!p->territory)                            return -T_E_INVAL;
         // RW-4 SA-F1: atomic read+ref under the Territory ns_lock. The prior
         // read-then-spoor_ref left a UAF window: a concurrent pivot_root could
         // swap root_spoor + clunk the old one to zero between the read and the
         // ref. territory_root_ref closes it.
         src = territory_root_ref(p->territory);
-        if (!src)                                     return -1;
+        if (!src)                                     return -T_E_INVAL;
     } else {
+        // #80: covers both "no such handle" and "the handle lacks RIGHT_READ" --
+        // EBADF either way, which is what POSIX says about an fd that cannot
+        // serve the requested operation.
         src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);   // ref-held
-        if (!src)                                     return -1;
+        if (!src)                                     return -T_E_BADF;
     }
 
     // #957: cross the SOURCE if it is a mount point (Plan 9 domount on the
@@ -2168,10 +2191,18 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // src's identity (dc/devno/qid), not src->dev, so it precedes the dev-check.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, src, &crossed) < 0)    { spoor_clunk(src); return -1; }
+        if (stalk_cross_mounts(p, src, &crossed) < 0)    { spoor_clunk(src); return -T_E_IO; }
         if (crossed) { spoor_clunk(src); src = crossed; }
     }
-    if (!src->dev || !src->dev->walk || !src->dev->open) { spoor_clunk(src); return -1; }
+    // #80: split what was one flat reject, so a caller learns which end was at
+    // fault -- no walk slot means not a searchable directory (ENOTDIR, the #79
+    // vocabulary); walkable but no open slot means the operation is simply
+    // absent (OPNOTSUPP). Both arms are DEFENSIVE at v1.0: all 18 Devs fill
+    // .walk, and a Spoor reaching here always carries a dev. The reachable
+    // not-a-directory case is a walk slot that RETURNS NULL, which lands on the
+    // walk-fail arm below.
+    if (!src->dev || !src->dev->walk)                 { spoor_clunk(src); return -T_E_NOTDIR; }
+    if (!src->dev->open)                              { spoor_clunk(src); return -T_E_OPNOTSUPP; }
 
     // A-2d (IDENTITY-DESIGN.md 3.7.1): search (X) permission on the source
     // directory before walking into it. Gated on the Dev's perm_enforced flag
@@ -2181,8 +2212,11 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // additive to the handle-RIGHT gate above (capability axis); both must hold.
     if (src->dev->perm_enforced) {
         struct t_stat src_st;
-        if (spoor_stat_native(src, &src_st) != 0)        { spoor_clunk(src); return -1; }
-        if (perm_check(p, &src_st, PERM_X) != 0)         { spoor_clunk(src); return -1; }
+        if (spoor_stat_native(src, &src_st) != 0)        { spoor_clunk(src); return -T_E_IO; }
+        // #80: a denied X-search is EACCES. errno.h forbids returning
+        // -T_E_PERM (it collides with the flat sentinel), so ACCES is the
+        // registry's permission-denied code -- the same one stalk_err writes.
+        if (perm_check(p, &src_st, PERM_X) != 0)         { spoor_clunk(src); return -T_E_ACCES; }
     }
 
     // Copy the name into kernel scratch + validate component shape.
@@ -2206,13 +2240,15 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
     for (u64 i = 0; i < name_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -1; }
-        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -1; }
+        // #80: the load failed on the caller's page -> EFAULT; a byte the
+        // component grammar forbids -> EINVAL.
+        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -T_E_FAULT; }
+        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -T_E_INVAL; }
         name_scratch[i] = (char)b;
     }
-    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -1; }
+    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -T_E_INVAL; }
     if (name_len_raw == 2 && name_scratch[0] == '.' &&
-                              name_scratch[1] == '.') { spoor_clunk(src); return -1; }
+                              name_scratch[1] == '.') { spoor_clunk(src); return -T_E_INVAL; }
     // Unconditional NUL terminator — REQUIRED for dev9p_walk's strlen scan.
     name_scratch[name_len_raw] = '\0';
 
@@ -2221,7 +2257,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // new fid). The clone starts at ref=1; spoor_clunk on failure runs
     // dev->close (clunks the fid if walk had progressed) + drops the ref.
     struct Spoor *nc = spoor_clone(src);
-    if (!nc)                                          { spoor_clunk(src); return -1; }
+    if (!nc)                                          { spoor_clunk(src); return -T_E_NOMEM; }
 
     // Issue the walk. Pack the single name + length into one-element
     // arrays for the dev vtable's nname-style signature. dev9p_walk
@@ -2261,7 +2297,9 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         walkqid_free(w);
         nc->aux = NULL;
         spoor_unref(nc);
-        return -1;
+        // #80: a Dev violating the reuse-nc convention is a kernel-internal
+        // contract breach, not anything the caller did -> EIO.
+        return -T_E_IO;
     }
     // F-16b-gamma close: reject partial walks. A Dev whose walk reports
     // nqid < nname (here always 1 for the single-component v1.0
@@ -2305,7 +2343,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // installed handle's rights are derived from it.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, nc, &crossed) < 0)  { spoor_clunk(nc); return -1; }
+        if (stalk_cross_mounts(p, nc, &crossed) < 0)  { spoor_clunk(nc); return -T_E_IO; }
         if (crossed) { spoor_clunk(nc); nc = crossed; }
     }
 
@@ -2326,10 +2364,10 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // actually opened -- not off src.
         if (nc->dev->perm_enforced) {
             struct t_stat nc_st;
-            if (spoor_stat_native(nc, &nc_st) != 0)  { spoor_clunk(nc); return -1; }
+            if (spoor_stat_native(nc, &nc_st) != 0)  { spoor_clunk(nc); return -T_E_IO; }
             if (perm_check(p, &nc_st, perm_want_for_omode((u32)omode_raw)) != 0) {
                 spoor_clunk(nc);
-                return -1;
+                return -T_E_ACCES;   // #80: the target denies this access mode
             }
         }
         // Issue the open. Dev.open returns EITHER nc opened in place (dev9p /
@@ -2346,7 +2384,12 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         struct Spoor *opened = nc->dev->open(nc, (int)omode_raw);
         if (!opened) {
             spoor_clunk(nc);
-            return -1;
+            // #80 seam: Dev.open returns Spoor* with no errno channel -- the
+            // same shape that forced #99's create_errno side-channel. Until it
+            // grows one, a failed open is EIO. Reachable causes today are a
+            // dev9p Tlopen refusal and a devsrv connect failure; the walk
+            // already succeeded, so this is never "no such file".
+            return -T_E_IO;
         }
         if (opened != nc) {
             // #66 (audit F2): transplant the walked name onto the connection
@@ -2391,7 +2434,10 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);
-        return -1;
+        // #80 seam: POSIX names a full per-process fd table EMFILE (24), which
+        // is not in the errno registry (an ERRORS.md append needs signoff).
+        // ENOMEM is the registered out-of-resources code and is at least true.
+        return -T_E_NOMEM;
     }
     return (s64)fd;
 }
@@ -2949,18 +2995,18 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     if (!p)                                          return -1;
 
     // Name length cap (same shape as SYS_WALK_OPEN; single-component only).
-    if (name_len_raw == 0)                            return -1;
-    if (name_len_raw > SYS_WALK_OPEN_NAME_MAX)        return -1;
-    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+    if (name_len_raw == 0)                            return -T_E_INVAL;
+    if (name_len_raw > SYS_WALK_OPEN_NAME_MAX)        return -T_E_INVAL;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -T_E_FAULT;
 
     // omode bit validation (reject unknown bits; forward-compat).
-    if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID)  return -1;
+    if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID)  return -T_E_INVAL;
 
     // perm bit validation: only the low-9 mode bits + DMDIR are permitted at
     // v1.0. Any other DM* bit (DMAPPEND / DMEXCL / DMTMP / ...) -> -1, so a
     // future bit cannot be silently dropped. Also reject the full 64-bit raw
     // having bits above 32 (perm is a u32 ABI field).
-    if (perm_raw & ~(u64)SYS_WALK_CREATE_PERM_VALID)  return -1;
+    if (perm_raw & ~(u64)SYS_WALK_CREATE_PERM_VALID)  return -T_E_INVAL;
     u32 perm = (u32)perm_raw;
 
     // Resolve the parent directory Spoor. RIGHT_WRITE is the gate: create
@@ -2969,16 +3015,20 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // pivoted Territory root, same as SYS_WALK_OPEN.
     struct Spoor *src;
     if (parent_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
-        if (!p->territory)                            return -1;
+        if (!p->territory)                            return -T_E_INVAL;
         // RW-4 SA-F1: atomic read+ref under ns_lock (closes the read-then-ref
         // UAF window vs a concurrent pivot_root).
         src = territory_root_ref(p->territory);
-        if (!src)                                     return -1;
+        if (!src)                                     return -T_E_INVAL;
     } else {
         src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);   // ref-held
-        if (!src)                                     return -1;
+        if (!src)                                     return -T_E_BADF;
     }
-    if (!src->dev || !src->dev->walk || !src->dev->create) { spoor_clunk(src); return -1; }
+    // #80: split the flat reject, as on the open side. The .walk arm is
+    // DEFENSIVE (all 18 Devs fill the slot); the .create arm is LIVE -- a Dev
+    // with no create slot genuinely cannot create, and OPNOTSUPP says so.
+    if (!src->dev || !src->dev->walk)   { spoor_clunk(src); return -T_E_NOTDIR; }
+    if (!src->dev->create)              { spoor_clunk(src); return -T_E_OPNOTSUPP; }
 
     // A-2d: write + search (W|X) permission on the parent directory before
     // creating in it. Gated on perm_enforced -- LIVE for dev9p since the A-3b
@@ -2988,8 +3038,8 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // before the create attempt. fail-closed on no stat.
     if (src->dev->perm_enforced) {
         struct t_stat parent_st;
-        if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -1; }
-        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  { spoor_clunk(src); return -1; }
+        if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -T_E_IO; }
+        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  { spoor_clunk(src); return -T_E_ACCES; }
     }
 
     // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
@@ -2997,13 +3047,14 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
     for (u64 i = 0; i < name_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -1; }
-        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -1; }
+        // #80: bad caller page -> EFAULT; forbidden component byte -> EINVAL.
+        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -T_E_FAULT; }
+        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -T_E_INVAL; }
         name_scratch[i] = (char)b;
     }
-    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -1; }
+    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -T_E_INVAL; }
     if (name_len_raw == 2 && name_scratch[0] == '.' &&
-                              name_scratch[1] == '.') { spoor_clunk(src); return -1; }
+                              name_scratch[1] == '.') { spoor_clunk(src); return -T_E_INVAL; }
     name_scratch[name_len_raw] = '\0';
 
     // stalk-3b (STALK-DESIGN.md §5.3 / D2): a CREATE against a /srv directory
@@ -3016,7 +3067,7 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     if (src->dc == 's' && src->aux &&
         *(const u64 *)src->aux == SRV_REGISTRY_MAGIC) {
         if (perm & ~(SYS_WALK_CREATE_DMSRVBYTE |
-                     SYS_WALK_CREATE_DMSRVBULK))        { spoor_clunk(src); return -1; }
+                     SYS_WALK_CREATE_DMSRVBULK))        { spoor_clunk(src); return -T_E_INVAL; }
         enum srv_mode mode = (perm & SYS_WALK_CREATE_DMSRVBYTE)
                                  ? SRV_MODE_BYTE : SRV_MODE_9P;
         bool bulk = (perm & SYS_WALK_CREATE_DMSRVBULK) != 0;   // CF-3 B ring class
@@ -3033,7 +3084,7 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // (e.g. a dev9p Tlcreate), where the high bits would corrupt the wire
     // perm -- reject them.
     if (perm & (SYS_WALK_CREATE_DMSRVBYTE |
-                SYS_WALK_CREATE_DMSRVBULK))               { spoor_clunk(src); return -1; }
+                SYS_WALK_CREATE_DMSRVBULK))               { spoor_clunk(src); return -T_E_INVAL; }
 
     // Clone the parent, then CLONE-walk so nc carries its own fid at the
     // parent dir (a 0-component walk). create then mutates nc's fid into the
@@ -3055,7 +3106,7 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // Only dev9p replaces nc->aux with a real fresh fid -- the only Dev whose
     // create actually creates at v1.0.
     struct Spoor *nc = spoor_clone(src);
-    if (!nc)                                          { spoor_clunk(src); return -1; }
+    if (!nc)                                          { spoor_clunk(src); return -T_E_NOMEM; }
 
     struct Walkqid *w = src->dev->walk(src, nc, NULL, 0);
     // #844: src's last use is the clone-walk above; release the borrow now.
@@ -3067,7 +3118,15 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         // running close (close would clunk src's fid through the shared aux).
         nc->aux = NULL;
         spoor_unref(nc);
-        return -1;
+        // #80: this arm is genuinely ambiguous -- a leaf Dev (cons/null/zero,
+        // per shape (a) above) answers NULL because it is not a directory,
+        // while dev9p can answer NULL on fid-pool exhaustion. EIO is the honest
+        // choice; reporting ENOTDIR would be a lie in the second case. Making
+        // the not-a-directory half precise wants a qid.type gate on the parent
+        // -- the single-hop twin of the #79 stalk gate -- which is a resolution
+        // change, not an errno one, and is tracked with #81 rather than
+        // smuggled into this rollout.
+        return -T_E_IO;
     }
     // Defense-in-depth: the reuse-nc contract (same rationale as
     // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT
@@ -3081,7 +3140,7 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         walkqid_free(w);
         nc->aux = NULL;
         spoor_unref(nc);
-        return -1;
+        return -T_E_IO;      // #80: Dev broke the reuse-nc contract
     }
     walkqid_free(w);
 
@@ -3114,7 +3173,7 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     if (opened != nc) {
         spoor_clunk(opened);
         spoor_clunk(nc);
-        return -1;
+        return -T_E_IO;      // #80: Dev broke the reuse-nc contract
     }
 
     // #66: append the created name to nc's namespace name. nc SHARES src's Path
@@ -3135,7 +3194,7 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);
-        return -1;
+        return -T_E_NOMEM;   // #80: full fd table (EMFILE unregistered)
     }
     return (s64)fd;
 }
@@ -3312,21 +3371,30 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     // matches SYS_WALK_CREATE's name-validate-then-resolve order).
     char old_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
     char new_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
-    if (sys_copy_component(oldname_va, oldname_len_raw, old_scratch) != 0) return -1;
-    if (sys_copy_component(newname_va, newname_len_raw, new_scratch) != 0) return -1;
+    if (sys_copy_component(oldname_va, oldname_len_raw, old_scratch) != 0) return -T_E_INVAL;
+    if (sys_copy_component(newname_va, newname_len_raw, new_scratch) != 0) return -T_E_INVAL;
 
     // #844: od + nd are REF-HELD borrows; spoor_clunk BOTH on every exit. od==nd
     // (same dir fd / both FROM_ROOT) means each resolve took a ref -> two clunks
     // balance. Held across the (possibly blocking) stat + rename 9P ops.
     struct Spoor *od = sys_resolve_dir_wr(p, olddir_fd_raw);
-    if (!od)                                          return -1;
+    if (!od)                                          return -T_E_BADF;
     struct Spoor *nd = sys_resolve_dir_wr(p, newdir_fd_raw);
-    if (!nd)                                        { spoor_clunk(od); return -1; }
-    if (!od->dev || !od->dev->rename)              { spoor_clunk(od); spoor_clunk(nd); return -1; }
+    if (!nd)                                        { spoor_clunk(od); return -T_E_BADF; }
+    // #80: a Dev with no .rename slot cannot perform the operation at all --
+    // OPNOTSUPP, distinguishable from every verdict the slot itself can return
+    // (devramfs leaves it NULL, so `mv` inside the boot ramfs says so plainly
+    // instead of reporting a generic I/O error).
+    if (!od->dev || !od->dev->rename)              { spoor_clunk(od); spoor_clunk(nd); return -T_E_OPNOTSUPP; }
     // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
     // both directories MUST be on the same Dev (dev9p_rename adds the same-
     // session guard). Rejected here before any Dev op.
-    if (od->dev != nd->dev)                        { spoor_clunk(od); spoor_clunk(nd); return -1; }
+    //
+    // #80 seam: POSIX names this case EXDEV (18), which a caller like `mv` reads
+    // as "fall back to copy+unlink". EXDEV is not in the errno registry, and
+    // adding it is an ERRORS.md append needing signoff -- so this stays EINVAL
+    // for now and the cross-Dev copy fallback remains the caller's own policy.
+    if (od->dev != nd->dev)                        { spoor_clunk(od); spoor_clunk(nd); return -T_E_INVAL; }
 
     // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
     // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
@@ -3334,16 +3402,18 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     // A-3b). od->dev == nd->dev here, so one flag governs both.
     if (od->dev->perm_enforced) {
         struct t_stat ost, nst;
-        if (spoor_stat_native(od, &ost) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -1; }
-        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -1; }
-        if (spoor_stat_native(nd, &nst) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -1; }
-        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -1; }
+        if (spoor_stat_native(od, &ost) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -T_E_IO; }
+        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -T_E_ACCES; }
+        if (spoor_stat_native(nd, &nst) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -T_E_IO; }
+        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -T_E_ACCES; }
     }
 
+    // #80: the Dev now returns a specific -T_E_* (see the .rename contract in
+    // <thylacine/dev.h>); forward it verbatim rather than flattening to -1.
     int rc = od->dev->rename(od, old_scratch, nd, new_scratch);
     spoor_clunk(od);
     spoor_clunk(nd);
-    return rc == 0 ? 0 : -1;
+    return rc;
 }
 
 static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
@@ -3353,31 +3423,38 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
 
-    // Only 0 or SYS_UNLINK_REMOVEDIR permitted; any other bit -> -1 (so a future
-    // flag cannot be silently dropped, same discipline as SYS_WALK_CREATE perm).
-    if (flags_raw & ~(u64)SYS_UNLINK_REMOVEDIR)       return -1;
+    // Only 0 or SYS_UNLINK_REMOVEDIR permitted; any other bit -> EINVAL (so a
+    // future flag cannot be silently dropped, same discipline as
+    // SYS_WALK_CREATE perm).
+    if (flags_raw & ~(u64)SYS_UNLINK_REMOVEDIR)       return -T_E_INVAL;
 
     char scratch[SYS_WALK_OPEN_NAME_MAX + 1];
-    if (sys_copy_component(name_va, name_len_raw, scratch) != 0) return -1;
+    if (sys_copy_component(name_va, name_len_raw, scratch) != 0) return -T_E_INVAL;
 
     // #844: c is a REF-HELD borrow; spoor_clunk on every exit (held across the
     // possibly-blocking stat + unlink 9P ops).
     struct Spoor *c = sys_resolve_dir_wr(p, parent_fd_raw);
-    if (!c)                                          return -1;
-    if (!c->dev || !c->dev->unlink)                { spoor_clunk(c); return -1; }
+    if (!c)                                          return -T_E_BADF;
+    // #80: no .unlink slot => this Dev cannot remove at all (devramfs) --
+    // OPNOTSUPP, distinct from any verdict the slot itself returns.
+    if (!c->dev || !c->dev->unlink)                { spoor_clunk(c); return -T_E_OPNOTSUPP; }
 
     // A-3b (closes A-2d audit F2): W|X on the parent dir to remove an entry
     // (POSIX). Gated on perm_enforced (dev9p enforces from A-3b; devramfs
     // leaves .unlink NULL).
     if (c->dev->perm_enforced) {
         struct t_stat cst;
-        if (spoor_stat_native(c, &cst) != 0)              { spoor_clunk(c); return -1; }
-        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    { spoor_clunk(c); return -1; }
+        if (spoor_stat_native(c, &cst) != 0)              { spoor_clunk(c); return -T_E_IO; }
+        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    { spoor_clunk(c); return -T_E_ACCES; }
     }
 
+    // #80: the Dev now returns a specific -T_E_* (see the .unlink contract in
+    // <thylacine/dev.h>); forward it verbatim. This is what lets a caller
+    // distinguish "that is a directory" from "that directory is not empty" from
+    // "you may not write here" -- all three were one flat -1 before.
     int rc = c->dev->unlink(c, scratch, (u32)flags_raw);
     spoor_clunk(c);
-    return rc == 0 ? 0 : -1;
+    return rc;
 }
 
 // =============================================================================

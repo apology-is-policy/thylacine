@@ -2387,6 +2387,100 @@ static int probe79_notdir(void) {
     return 0;
 }
 
+// #80 always-run regression: a failed FS name-op reports WHY.
+//
+// The kernel test (dev9p.unlink_rename_errno) drives a synthetic responder, so
+// it proves the plumbing carries whatever the server said. Only this probe can
+// say what STRATUM actually says -- and the two failure legs deliberately assert
+// the STRUCTURAL property (a specific errno, never the flat -1) rather than a
+// guessed number, because the exact verdict is the server's to choose and
+// pinning an unmeasured constant here would be writing fiction. The values are
+// printed so the real ones are on the record every boot.
+//
+// The three kernel-ORIGINATED legs are exact: those numbers are ours.
+//
+// Self-contained (creates its own directory + file) so it cannot go vacuous if
+// the bake layout changes. Boot-fatal.
+static int probe80_errno(void) {
+    char nb[24];
+    static const char dn[] = "p80-errno-dir";
+    static const char fn[] = "inner";
+    static const char absent[] = "p80-errno-absent";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe80 open root FAILED\n"); return -1; }
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        t_putstr("joey: probe80 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    // A child inside it -- what makes the rmdir leg a NON-EMPTY rmdir rather
+    // than a successful one. Without this the leg passes vacuously (rc == 0
+    // trips the assertion, so it fails loudly rather than silently, but the
+    // create is still the thing that makes the leg mean what it claims).
+    long ifd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (ifd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(dd, fn, sizeof(fn) - 1, 0);
+        ifd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (ifd < 0) {
+        t_putstr("joey: probe80 inner create FAILED rc=");
+        t_putstr(itoa_dec(ifd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(dd); (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(ifd);
+
+    // (a) unlink a DIRECTORY without REMOVEDIR -- POSIX EISDIR or EPERM.
+    long rc_isdir = t_unlink(pd, dn, sizeof(dn) - 1, 0);
+    // (b) rmdir a NON-EMPTY directory -- POSIX ENOTEMPTY (or EEXIST).
+    long rc_notempty = t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    // (c) unlink something absent -- ENOENT, ours to guarantee.
+    long rc_absent = t_unlink(pd, absent, sizeof(absent) - 1, 0);
+    // (d) SYS_WALK_OPEN on a handle that is not a live fd -- EBADF. 4096 is
+    // chosen to sit well past PROC_HANDLE_MAX (256), so the lookup misses on
+    // the range check rather than on an empty-but-in-range slot; both are EBADF
+    // but the out-of-range form cannot be accidentally satisfied by a slot this
+    // Proc happens to hold.
+    long rc_badfd = t_walk_open(4096, fn, sizeof(fn) - 1, T_OREAD);
+    // (e) SYS_WALK_OPEN with ".." -- the component grammar rejects it: EINVAL.
+    long rc_dotdot = t_walk_open(pd, "..", 2, T_OREAD);
+
+    if (rc_badfd  >= 0) (void)t_close(rc_badfd);
+    if (rc_dotdot >= 0) (void)t_close(rc_dotdot);
+    (void)t_unlink(dd, fn, sizeof(fn) - 1, 0);
+    (void)t_close(dd);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    // A specific errno, never 0 (the op must fail) and never the flat -1 (the
+    // generic sentinel this closed). -1 is what BOTH legs returned pre-fix.
+    int bad = 0;
+    if (rc_isdir    == 0 || rc_isdir    == -1) bad = 1;
+    if (rc_notempty == 0 || rc_notempty == -1) bad = 1;
+    if (rc_absent != -2 || rc_badfd != -9 || rc_dotdot != -22) bad = 1;
+
+    t_putstr(bad ? "joey: probe80 FAILED" : "joey: probe80 OK");
+    t_putstr(" (unlink-a-dir=");
+    t_putstr(itoa_dec(rc_isdir, nb, sizeof(nb)));
+    t_putstr(" rmdir-non-empty=");
+    t_putstr(itoa_dec(rc_notempty, nb, sizeof(nb)));
+    t_putstr(" [both: specific, not -1] absent=");
+    t_putstr(itoa_dec(rc_absent, nb, sizeof(nb)));
+    t_putstr(" badfd=");
+    t_putstr(itoa_dec(rc_badfd, nb, sizeof(nb)));
+    t_putstr(" dotdot=");
+    t_putstr(itoa_dec(rc_dotdot, nb, sizeof(nb)));
+    t_putstr(bad ? " [want -2 -9 -22])\n" : ")\n");
+    return bad ? -1 : 0;
+}
+
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
 // /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
@@ -6301,6 +6395,12 @@ int main(void) {
             // #79 always-run regression: ENOTDIR through a file, on the real
             // disk FS (the dev9p parent's QTDIR comes off the wire). Boot-fatal.
             if (probe79_notdir() != 0)
+                return 1;
+
+            // #80 always-run regression: a failed FS name-op reports WHY --
+            // the unlink/rename verdict survives, and the kernel-originated
+            // rejects are specific. Boot-fatal.
+            if (probe80_errno() != 0)
                 return 1;
 
             // CF-3 A always-run regression: bulk byte-I/O (the two-tier

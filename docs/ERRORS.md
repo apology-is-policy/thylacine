@@ -284,8 +284,22 @@ trigger surfaces; self + Fable audit before the arc closes):
 - **ER-2** — FS mutation: `SYS_WALK_CREATE` → `EEXIST`/`NOENT`/`NOTDIR`,
   `SYS_UNLINK`/`SYS_RENAME` → `NOENT`/`NOTEMPTY`/..., `SYS_FSTAT`/`LSEEK`/
   `READDIR`/`FSYNC`/`WSTAT`/`CHDIR` → their specific errnos.
+  **The name-op half LANDED at #80**: `Dev.rename`/`Dev.unlink` no longer
+  flatten the server's verdict (no side-channel was needed — unlike
+  `Dev.create`, those slots already return `int`; the value was simply being
+  discarded), and `SYS_UNLINK`/`SYS_RENAME` forward it. **Measured on the live
+  Stratum FS**: unlink-a-directory → `EISDIR` (21), rmdir-a-non-empty-directory
+  → `ENOTEMPTY` (39). A server errno with no `T_E_*` name crosses BY VALUE, so
+  neither needed a registry append — only kernel-ORIGINATED errnos must be
+  named here. The `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR` half
+  is still owed.
 - **ER-3** — the rest of the surface: the local-validation `-1` sites
   (`EBADF`/`EINVAL`/`ACCES`/`FAULT`/...) across the syscall families.
+  **The four FS name-op handlers LANDED at #80** (`SYS_WALK_OPEN`,
+  `SYS_WALK_CREATE`, `SYS_RENAME`, `SYS_UNLINK` — every local reject now
+  answers a specific code). The `!t`/`!p` preamble guards deliberately stay
+  `-1`: they are structurally unreachable from EL0. The other syscall
+  families are still owed.
 - **ER-4** — pouch `__syscall_ret` rework (the `-1 -> EIO` special case is
   now reachable only by the residual truly-generic returns; verify pouch
   programs observe the correct errnos).

@@ -81,6 +81,35 @@ s64 dev9p_create_errno(struct Spoor *c) {
     return (e <= -2 && e >= -4095) ? (s64)e : -1;
 }
 
+// #80: bound a wire errno on its way to becoming a syscall return.
+//
+// Unlike the create path (#99), the mutation vtable slots ALREADY have an errno
+// channel -- `Dev.rename` / `Dev.unlink` return `int`, and p9_client_renameat /
+// _unlinkat return the server's `-errno`. The #99 `create_errno` side-channel
+// exists only because `Dev.create` returns a Spoor* with no room for a cause;
+// here the value merely has to stop being discarded. This helper is the one
+// gate it passes on the way out.
+//
+// map_error() already collapses ecode 0 and anything past 4095 to -EIO, so `rc`
+// arrives in [-4095,-1]. Exactly one value cannot cross the syscall boundary
+// intact: -1 (the server said EPERM) collides with the flat generic-failure
+// sentinel that the pouch boundary-line renders as EIO -- see the T_E_PERM
+// warning in <thylacine/errno.h>. Fold it onto T_E_ACCES, the registry's
+// sanctioned stand-in for the permission-denied class, so the caller at least
+// learns the class instead of "something broke". Anything outside the window is
+// a 9P-client-layer bug rather than a server verdict -> EIO.
+//
+// Note what does NOT need a registry entry: a server errno with no T_E_* name
+// (EISDIR 21, ENOTEMPTY 39, EXDEV 18, ...) crosses BY VALUE. pouch's
+// __syscall_ret and libthyla-rs's Error::from_syscall_return both map numerically,
+// so the motivating cases (unlink-a-directory, rmdir-a-non-empty-directory)
+// reach userspace correctly with no ABI append at all. Only errnos the KERNEL
+// originates need to be named in the registry.
+static int dev9p_wire_errno(int rc) {
+    if (rc == -T_E_PERM) return -T_E_ACCES;
+    return (rc <= -2 && rc >= -4095) ? rc : -T_E_IO;
+}
+
 // -- G2: the dir-fid cache (docs/FID-LIFECYCLE-DESIGN.md section 4) ------------
 //
 // The table lives on p9_client (per-session, like the Larder); ALL policy is
@@ -1903,13 +1932,16 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
                         struct Spoor *newdir, const char *newname) {
     struct dev9p_priv *od = priv_of(olddir);
     struct dev9p_priv *nd = priv_of(newdir);
-    if (!od || !nd) return -1;
-    if (od->fid == P9_NOFID || nd->fid == P9_NOFID) return -1;   // fidless Spoor
-    if (od->client != nd->client) return -1;     // renameat is within one session
-    if (!oldname || !newname) return -1;
+    // #80: the local rejects below are all "these arguments cannot name a
+    // renameat" -> EINVAL. They are distinct from the wire verdicts, which pass
+    // through dev9p_wire_errno at the tail.
+    if (!od || !nd) return -T_E_INVAL;
+    if (od->fid == P9_NOFID || nd->fid == P9_NOFID) return -T_E_INVAL;  // fidless Spoor
+    if (od->client != nd->client) return -T_E_INVAL;  // renameat is within one session
+    if (!oldname || !newname) return -T_E_INVAL;
     size_t ol = 0; while (oldname[ol] != '\0') ol++;
     size_t nl = 0; while (newname[nl] != '\0') nl++;
-    if (ol == 0 || nl == 0) return -1;
+    if (ol == 0 || nl == 0) return -T_E_INVAL;
     // G2 reuse-hazard: a rename that REPLACES an existing dir deletes the
     // DEST inode -- resolve its qid from the (newdir, newname) binding before
     // the wire op. The SOURCE keeps its inode across a rename (fids track
@@ -1919,7 +1951,14 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
                                         newname, nl, &g2victim);
     int rc = p9_client_renameat(od->client, od->fid, (const u8 *)oldname, ol,
                                 nd->fid, (const u8 *)newname, nl);
-    if (rc != 0) { od->fid_suspect = true; nd->fid_suspect = true; return -1; }
+    // #80: propagate the server's verdict instead of flattening it. A rename
+    // onto a non-empty directory (ENOTEMPTY), across devices (EXDEV), or onto a
+    // directory from a file (EISDIR) each reaches the caller as itself.
+    if (rc != 0) {
+        od->fid_suspect = true;
+        nd->fid_suspect = true;
+        return dev9p_wire_errno(rc);
+    }
     if (g2have) {
         s64 g2df = dirfid_drop(od->client, g2victim);
         if (g2df >= 0) (void)p9_client_clunk_async(od->client, (u32)g2df);
@@ -1948,11 +1987,13 @@ static int dev9p_rename(struct Spoor *olddir, const char *oldname,
 // rmdir an empty directory. The flags arg is passed straight to the wire.
 static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     struct dev9p_priv *p = priv_of(parent);
-    if (!p) return -1;
-    if (p->fid == P9_NOFID) return -1;   // fidless (cached-open) Spoor
-    if (!name) return -1;
+    // #80: local argument rejects -> EINVAL; the wire verdict passes through
+    // dev9p_wire_errno at the tail.
+    if (!p) return -T_E_INVAL;
+    if (p->fid == P9_NOFID) return -T_E_INVAL;   // fidless (cached-open) Spoor
+    if (!name) return -T_E_INVAL;
     size_t nl = 0; while (name[nl] != '\0') nl++;
-    if (nl == 0) return -1;
+    if (nl == 0) return -T_E_INVAL;
     // G2 reuse-hazard (BEFORE the wire op mutates the dentry set): resolve
     // the victim's qid from the cached (parent, name) binding while it still
     // exists -- the parked dir fid the drop below must kill is keyed by it.
@@ -1960,7 +2001,12 @@ static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
     bool g2have  = larder_dentry_lookup(&p->client->larder, parent->qid.path,
                                         name, nl, &g2victim);
     int rc = p9_client_unlinkat(p->client, p->fid, (const u8 *)name, nl, flags);
-    if (rc != 0) { p->fid_suspect = true; return -1; }
+    // #80: propagate the server's verdict instead of flattening it to -1
+    // (== T_E_PERM, which the pouch boundary-line renders as the generic EIO).
+    // This is the motivating case: unlink-on-a-directory answers EISDIR (or
+    // EPERM->EACCES) and rmdir-on-a-non-empty-directory answers ENOTEMPTY,
+    // where both previously collapsed into one indistinguishable failure.
+    if (rc != 0) { p->fid_suspect = true; return dev9p_wire_errno(rc); }
     if (g2have) {
         // Drop + clunk the victim's parked fid (a fresh walk of a REUSED
         // qid.path must never be served a fid for the dead object), and

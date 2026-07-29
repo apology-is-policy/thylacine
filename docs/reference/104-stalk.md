@@ -479,11 +479,8 @@ Two properties are deliberate and load-bearing:
   Spoors sets `QTDIR`, and `spoor_clone` copies `qid`, so mount crossings and
   0-element clone-walks preserve directory-ness.
 
-Two things it deliberately does **not** cover:
+One thing it deliberately does **not** cover:
 
-- The single-hop `SYS_WALK_OPEN` handler, which returns a bare `-1` for
-  *every* failure and so has no ENOENT to lose — a separate errno-rollout
-  gap (task #80), not this one.
 - `/file/..` and `/file/.`. `stalk` resolves `.` and `..` lexically *before*
   the gate (that lexical pop is how `..` is contained at `root_spoor`), so
   `/etc/passwd/..` pops back to `/etc` and succeeds where POSIX answers
@@ -495,7 +492,36 @@ Two things it deliberately does **not** cover:
 returns `-1` on `path_len == 0` or `> SYS_OPEN_PATH_MAX`, an invalid user buffer,
 an unknown omode bit, a missing `root_spoor` (FROM_ROOT with no chroot), a
 missing/RIGHT_READ-failing `start_fd` handle, an embedded NUL in the path, or a
-full handle table (the quarry is clunked).
+full handle table (the quarry is clunked). Those local rejects are the residual
+ER-3 sweep for this handler; the *resolution* verdict already carries its real
+errno via `stalk_err`.
+
+### The single-hop siblings (`SYS_WALK_OPEN` / `SYS_WALK_CREATE`, #80)
+
+`SYS_WALK_OPEN` used to answer a bare `-1` for every failure except the
+walk-miss, so a permission denial, a bad fd, and a malformed name were one
+indistinguishable "I/O error" to the caller. Since **#80** each local reject
+answers a specific code — `EBADF` (no such handle / no `RIGHT_READ`), `EINVAL`
+(bad length, forbidden component byte, `.`/`..`, no pivoted root), `EFAULT` (a
+bad user buffer or a faulting name load), `ENOTDIR` (a source Dev with no
+`.walk` — not a searchable directory), `EOPNOTSUPP` (walkable but no `.open` /
+`.create`), `EACCES` (X-search or access-mode denial), `ENOMEM` (clone OOM or a
+full fd table), `EIO` (a Dev contract breach or a `Dev.open` failure).
+`SYS_WALK_CREATE` got the same sweep. Both keep the structurally-unreachable
+`!t`/`!p` preamble guards at `-1`.
+
+Two seams recorded rather than papered over:
+
+- **`Dev.open` has no errno channel** (it returns `Spoor *`), so a failed open
+  is `EIO`. This is the same shape that forced #99's `create_errno`
+  side-channel; it would want the same treatment or a widened slot signature.
+- **The clone-walk failure in `SYS_WALK_CREATE` is genuinely ambiguous** — a
+  leaf Dev answers NULL because it is not a directory, while dev9p can answer
+  NULL on fid-pool exhaustion. It reports `EIO`, because `ENOTDIR` would be a
+  lie in the second case. Making the first half precise wants a `qid.type` gate
+  on the parent — the single-hop twin of the #79 gate above — which is a
+  resolution change rather than an errno one, and is tracked with #81 rather
+  than smuggled into an errno rollout.
 
 ## Performance characteristics
 

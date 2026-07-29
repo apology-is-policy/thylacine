@@ -298,18 +298,45 @@ not be opened no longer reports an opaque `-1`. Regressions:
 asserts the `-17` return AND that the `(parent,name)` dentry is dropped) + the
 `go-fs` step 6b concurrent-race + step 6c deterministic O_EXCL-EEXIST probes.
 
-## Error paths (`SYS_RENAME` / `SYS_UNLINK` -> -1)
+## Error paths (`SYS_RENAME` / `SYS_UNLINK`)
 
-- either dir fd not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; FROM_ROOT with no
-  pivoted root
-- name bounds: 0 / > 64 / contains `/` or `\0` / is `.` or `..` (either name)
-- rename: the two dir fds are on different Devs (cross-Dev), or different `dev9p`
-  sessions (same Dev, different `p9_client`)
-- backing Dev has no `.rename` (rename) / `.unlink` (unlink)
-- unlink: `flags` has any bit outside `SYS_UNLINK_REMOVEDIR`
-- the 9P server rejects (`Rlerror`): rename — source `ENOENT`, dest is a
-  non-empty directory, `EXDEV`, permission; unlink — `ENOENT`, `ENOTEMPTY`
-  (rmdir on a non-empty dir), `EISDIR`/`ENOTDIR` mode mismatch, permission
+Since **#80** (ERRORS.md stage ER-2) these answer a SPECIFIC `-T_E_*`; they
+previously flattened every failure to `-1`, which the pouch boundary-line
+renders `EIO` and `libthyla-rs` maps to `Error::Io`. That flattening is what
+forced musl's `remove()` onto the lstat-dispatch workaround (patch `0027`):
+its classic form branches on the unlink-a-directory errno, which never arrived.
+
+Unlike the create path (#99), no side-channel was needed — `Dev.rename` and
+`Dev.unlink` already return `int`, and `p9_client_renameat`/`_unlinkat` already
+return the server's `-errno`. The bug was purely that the value was discarded.
+
+| Condition | Return |
+|---|---|
+| either dir fd not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; FROM_ROOT with no pivoted root | `-T_E_BADF` |
+| name bounds: 0 / > 64 / contains `/` or `\0` / is `.` or `..` (either name) | `-T_E_INVAL` |
+| rename: the two dir fds are on different Devs, or different `dev9p` sessions | `-T_E_INVAL` (POSIX would say `EXDEV`; unregistered — see below) |
+| backing Dev has no `.rename` / `.unlink` (devramfs) | `-T_E_OPNOTSUPP` |
+| unlink: `flags` has any bit outside `SYS_UNLINK_REMOVEDIR` | `-T_E_INVAL` |
+| the parent dir denies `W\|X` (`perm_enforced` Devs) | `-T_E_ACCES` |
+| the 9P server rejects (`Rlerror`) | the server's `-errno`, bounded by `dev9p_wire_errno` |
+
+**Measured** against the live Stratum FS (joey's `probe80`, every boot):
+`unlink` of a directory → `-21` (`EISDIR`); `unlink(REMOVEDIR)` of a non-empty
+directory → `-39` (`ENOTEMPTY`); a missing name → `-2` (`ENOENT`).
+
+Two boundary notes on the pass-through:
+
+- **A server errno needs no registry entry.** `EISDIR` (21) and `ENOTEMPTY`
+  (39) have no `T_E_*` name and do not need one — pouch's `__syscall_ret` and
+  `Error::from_syscall_return` both map numerically, so the value crosses
+  intact. Only errnos the KERNEL originates must be named in `errno.h`.
+- **`EPERM` is the one value that cannot cross intact.** `-1` collides with the
+  flat generic-failure sentinel, so `dev9p_wire_errno` folds a server `EPERM`
+  onto `EACCES` — the registry's sanctioned permission-denied code. Losing
+  `EPERM`-vs-`EACCES` is a far smaller lie than reporting a permission problem
+  as an I/O error. `EXDEV` (cross-Dev rename) is likewise unregistered and
+  reported as `EINVAL`; a caller wanting the copy-and-remove fallback that
+  `EXDEV` conventionally triggers must apply its own policy for now.
 
 ## Tests
 
@@ -320,6 +347,20 @@ asserts the `-17` return AND that the `(parent,name)` dentry is dropped) + the
   `Tmkdir` + walk + `Tlopen`; asserts the returned Spoor is opened.
 - `kernel/test/test_dev.c::vtable_slot_coverage` — every Dev still fills `.create`
   (now the widened signature); `devnone.create(...) == NULL`.
+- `kernel/test/test_dev9p.c::test_dev9p_unlink_rename_errno_propagates` (#80
+  regression) — injects `Rlerror(ENOTEMPTY)`, `Rlerror(EISDIR)` and
+  `Rlerror(EPERM)` and asserts each surfaces as itself (EPERM folded to
+  `EACCES`), plus that a local reject is `EINVAL`. **Revert-probed**: restoring
+  `dev9p_unlink`'s `return -1` fails it (1230/1231).
+- `usr/joey/joey.c::probe80_errno` (#80, boot-fatal, every boot) — the layer the
+  kernel fixture cannot reach. Its two failure legs assert the STRUCTURAL
+  property (a specific errno, never the flat `-1`) rather than a guessed
+  number, because the exact verdict is the server's to choose; the measured
+  values are printed every boot. The three kernel-originated legs are exact
+  (`ENOENT`/`EBADF`/`EINVAL`). **Revert-probed**: restoring
+  `sys_unlink_handler`'s `return rc == 0 ? 0 : -1` leaves the kernel test
+  PASSING at 1231/1231 and fails only this probe — the two tests cover
+  different layers and neither alone catches both regressions.
 - `kernel/test/test_dev9p.c::test_dev9p_fsync` — `dev9p_fsync` -> `Tsync` (full +
   datasync) returns 0.
 - `kernel/test/test_dev9p.c::test_dev9p_readdir` — `dev9p_readdir` -> `Treaddir`

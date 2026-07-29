@@ -1073,6 +1073,7 @@ void test_dev9p_poll_regular_file_always_ready(void);
 void test_dev9p_poll_cancel_at_close(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
+void test_dev9p_unlink_rename_errno_propagates(void);
 void test_dev9p_stat_native_maps_getattr(void);
 void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_prw_wire_offset_and_cursor(void);
@@ -2611,6 +2612,7 @@ struct test_case g_tests[] = {
     { "dev9p.poll_cancel_at_close",    test_dev9p_poll_cancel_at_close,    false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
+    { "dev9p.unlink_rename_errno",     test_dev9p_unlink_rename_errno_propagates, false, NULL },
     { "dev9p.stat_native_maps_getattr",
                                        test_dev9p_stat_native_maps_getattr, false, NULL },
     { "dev9p.wstat_native_drives_setattr",

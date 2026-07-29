@@ -136,6 +136,19 @@ pub enum Error {
     /// Maps `T_E_TIMEDOUT` = 110 (POSIX `ETIMEDOUT`).
     TimedOut,
 
+    /// Target is a directory where a non-directory was required (e.g.
+    /// `unlink` of a directory -- use `remove_dir`). POSIX `EISDIR` = 21.
+    ///
+    /// The kernel has no `T_E_ISDIR` constant and does not need one: this is a
+    /// SERVER verdict that crosses the syscall boundary by value (#80). It is
+    /// enumerated here only so callers read "is a directory" instead of the
+    /// `Other(21)` catch-all's "kernel error".
+    IsADirectory,
+
+    /// Directory not empty: `remove_dir` on a populated directory.
+    /// POSIX `ENOTEMPTY` = 39. Server-originated, like `IsADirectory` (#80).
+    DirectoryNotEmpty,
+
     /// Pass-through for errno values not enumerated above. The carried
     /// integer is the positive errno reported by the kernel (i.e.,
     /// `-rc` where `rc` was the syscall return). Lets unknown errors
@@ -177,10 +190,12 @@ impl Error {
             Error::Busy             => 16,
             Error::Exists           => 17,
             Error::NotADirectory    => 20,
+            Error::IsADirectory     => 21,
             Error::InvalidArgument  => 22,
             Error::BrokenPipe       => 32,
             Error::OutOfRange       => 34,
             Error::NotImplemented   => 38,
+            Error::DirectoryNotEmpty => 39,
             Error::TimedOut         => 110,
             Error::Other(e)         => e,
             // Library-only variants have no POSIX errno mapping.
@@ -256,10 +271,12 @@ impl From<i32> for Error {
             16  => Error::Busy,
             17  => Error::Exists,
             20  => Error::NotADirectory,
+            21  => Error::IsADirectory,
             22  => Error::InvalidArgument,
             32  => Error::BrokenPipe,
             34  => Error::OutOfRange,
             38  => Error::NotImplemented,
+            39  => Error::DirectoryNotEmpty,
             110 => Error::TimedOut,
             n   => Error::Other(n),
         }
@@ -280,10 +297,12 @@ impl fmt::Display for Error {
             Error::Busy             => "resource busy",
             Error::Exists           => "already exists",
             Error::NotADirectory    => "not a directory",
+            Error::IsADirectory     => "is a directory",
             Error::InvalidArgument  => "invalid argument",
             Error::BrokenPipe       => "broken pipe",
             Error::OutOfRange       => "result out of range",
             Error::NotImplemented   => "function not implemented",
+            Error::DirectoryNotEmpty => "directory not empty",
             Error::TimedOut         => "operation timed out",
             Error::Other(_)         => "kernel error",
             Error::UnexpectedEof    => "unexpected end of file",
