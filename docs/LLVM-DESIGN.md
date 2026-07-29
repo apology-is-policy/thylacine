@@ -404,6 +404,58 @@ Note the first-invocation cost (1158 ms) versus the resident cost (~79 ms) —
 a **~15×** spread. That is the REVENANT Image cache paying for the 95 MiB
 multicall, and it is why the per-TU figure is only meaningful once warm.
 
+#### Host-vs-device par (2026-07-29) — the device is within ~1.2× on warm serial compile
+
+The storm Makefile is fully parameterized (`CC`/`S`/`L`/`O`/`CFLAGS`/`LDFLAGS`),
+so the *same* 35 TUs can be driven host-side with the *same* fork clang at the
+*same* target triple and flags. What differs is only the execution environment:
+native macOS versus Thylacine under HVF, and APFS versus Stratum.
+
+| | host | device | ratio |
+|---|---|---|---|
+| `make -B -j1` | **2400 ms** | 2830 ms | **1.18×** |
+| `make -B -j4` | 677 ms | 1268 ms | 1.87× |
+| per-TU warm (total / 35) | **68.6 ms** | **80.9 ms** | **1.18×** |
+| artifact | 380232 B | 380304 B | — |
+
+**Measured under matched contention** (a sibling tree's VM held ~2.7 of 8
+cores). That is disclosed rather than hidden because it is *paired*: the device
+figures in this table are from the same window, not the clear-host 2759/1033
+above. An unpaired ratio — contended host against clear-host device — would
+bias in the device's favour, which is the flattering direction and so the one
+to refuse. The `-j1` row is the robust one: at one job neither side is
+core-starved, and both `-j1` figures moved <3% from their clear-host values.
+The `-j4` row is softer (the device's `-j4` was 23% off its clear-host value),
+so read it as *approximately* 1.5–1.9×.
+
+Decomposing the host side explains the near-parity rather than leaving it
+surprising:
+
+| host measurement | |
+|---|---|
+| `clang --version` (pure process startup) | 18.9 ms |
+| empty TU `-c` | 22.6 ms |
+| `main.c` (largest TU) `-c` | 168.6 ms |
+
+So ~19 ms of every host invocation is startup — ~28% of the 68.6 ms average
+TU. The device pays the same shape but amortizes its 95 MiB multicall through
+the REVENANT Image cache after the first invocation.
+
+**The interesting comparison is against the go build's 45–53×** (task #34).
+Same device, same era, two orders of magnitude apart in ratio — because the
+gap was never CPU. Under HVF the guest executes on the same M2 cores; once
+clang is resident this workload is compute-bound and lands at near-native. The
+go build's gap is FS-metadata-bound (~75k walk/getattr/clunk round trips
+versus 35 TUs' handful of opens). This measurement isolates that from an
+independent direction and corroborates task #60's conclusion — the levers are
+Image-cache retention and metadata round-trip reduction, not raw compute.
+
+Two honest limits. **HVF is virtualization on the same silicon**, so this is a
+virtualization-overhead number, not a different-hardware number — the bare-metal
+comparison is Lazarus's to make. And a clear-host confirmation of both sides
+is still worth taking when the machine is quiet; it should move `-j4` more
+than `-j1`.
+
 #### What the storm found: #96 (fstat on a pipe)
 
 The storm's first run failed in a way no existing gate could have caught, and
@@ -554,7 +606,7 @@ no bolted-on chasing).
 | **CL-2** | The C++ runtime: libunwind + libc++abi + libc++ static into the sysroot; prover suite. **LANDED** (§16.14; `build_libcxx` via `LLVM_ENABLE_RUNTIMES` against the pouch sysroot from `$LLVMFORK`; `0027-pouch-remove` fixed the surfaced `remove(3)` gap). | **DONE:** `pouch-hello-cxx: ALL C++ WIRES PASS` (EH + RTTI + threads + TLS-dtors + iostreams + std::filesystem) on-device; boot OK, 0 EXT, suite 1196/1196 | **CLOSED 0 P0 / 1 P1 / 0 P2 / 4 P3, NOT dirty** (Opus-4.8-max + self-audit; F1 dead-`remove_all` masking-diagnostic FIXED, `-D__linux__` ODR resolved SOUND against the real llvm-thylacine source; F2/F3/F4 folded, F2b/F5 tracked); `memory/audit_cl2_closed_list.md` | — |
 | **CL-3** | The triple: `Triple::Thylacine` + clang ToolChain + lld default in `llvm-thylacine`; wrappers retired. **CL-3a LANDED** (the driver — 8-file fork change-map + `ThylacineTargetInfo` + a Fuchsia-templated `Thylacine` ToolChain; fork commit `df919c8dd`; §16.15a). **CL-3b LANDED — THE CL-3 ARC IS COMPLETE** (the wrapper retirement: `pouch-clang`/`pouch-ld`/`build_libcxx` onto the fork driver, fork-less fallback kept; F2b closed at the root — the fork `__cxa_thread_atexit` guard gains `__thylacine__`, so `-D__linux__` retires and the int32/int64 split is ELIMINATED; §16.15b). | **DONE:** the real triple cross-builds byte-compatible artifacts; fork-driver-linked `pouch-hello-*` + a fork-clang-built, `clang++`-driver-linked `pouch-hello-cxx` boot + `ALL C++ WIRES PASS`; boot OK, 0 EXT, suite 1196/1196, SMP 40/40 (kernel byte-unchanged) | none (host-side) | — |
 | **CL-4** | Support-layer port + the device toolchain: mmap detours, Program/Path/Process/Signals/DynamicLibrary; static multicall cross-built + baked to `/clade`. **LANDED — THE CL-4 ARC IS COMPLETE** (§16.16): a five-layer masking stack (ELF OSABI / raw 6-arg mmap / console fstat / empty InstalledDir / the cc1-argv prepend); fork commits `ce5a1c519` (CL-4b) + `e7d6be5f8` (CL-4c); durable patches `usr/ports/llvm/patches/0001..0006`. | **DONE:** `clang++ -O2` compiles, links (ld.lld), and runs a real C++ program on-device — STL + a live throw/catch — via spawned cc1, in-process cc1 (`-c`), and link-only; `CLADE-HELLO sum=285 eh=1`, suite 1197/1197, boot OK, 0 EXT | focused round CLOSED 0 P0 / 2 P1 / 1 P2 / 3 P3, NOT dirty (`memory/audit_cl4_closed_list.md`) | — |
-| **CL-5** | Build storms + the F4 budget mechanism. **LANDED** (§7.1 mechanism, §7.2 storm): the spawn-time per-Proc page budget (measured first — a 1959-byte template-heavy TU costs 250 MiB, 97.8% of the default), and the on-device storm — **GNU make 4.4.1 builds itself under `make -jN`** (35 TUs; `-j1` 2759 ms / `-j4` 1033 ms = **2.67×** on 4 vCPUs; the artifact runs AND drives a build of its own). The storm found **#96** (fstat on a pipe returned -1 → every concurrent `-j4` job died silently). | **DONE:** `make -jN` of a real project completes on-device; numbers recorded, no committed target | **DONE:** F4 mechanism round CLOSED 0/0/0/3 (`memory/audit_cl5_closed_list.md`); the storm is pure build-system + a 1-slot Dev addition | ThinLTO, sanitizers-on-device: out. **zlib/sqlite/LLVM-subset** not built — GNU make was chosen instead (already Thylacine-configured; no `./configure` is runnable without a POSIX shell) |
+| **CL-5** | Build storms + the F4 budget mechanism. **LANDED** (§7.1 mechanism, §7.2 storm): the spawn-time per-Proc page budget (measured first — a 1959-byte template-heavy TU costs 250 MiB, 97.8% of the default), and the on-device storm — **GNU make 4.4.1 builds itself under `make -jN`** (35 TUs; `-j1` 2759 ms / `-j4` 1033 ms = **2.67×** on 4 vCPUs; the artifact runs AND drives a build of its own). The storm found **#96** (fstat on a pipe returned -1 → every concurrent `-j4` job died silently) and, via the same sweep, **#97** (the notes-fd twin). **Host-vs-device par**: the same 35 TUs driven host-side with the same fork clang put the device within **~1.18×** on warm serial compile (68.6 vs 80.9 ms/TU) — versus the go build's 45–53×, because that gap is FS-metadata-bound, not CPU. | **DONE:** `make -jN` of a real project completes on-device; numbers recorded, no committed target | **DONE:** F4 mechanism round CLOSED 0/0/0/3 (`memory/audit_cl5_closed_list.md`); the storm is pure build-system + a 1-slot Dev addition | ThinLTO, sanitizers-on-device: out. **zlib/sqlite/LLVM-subset** not built — GNU make was chosen instead (already Thylacine-configured; no `./configure` is runnable without a POSIX shell) |
 | **CL-6** | clangd + Nora C/C++ | diagnostics/hover/def in Nora on a C++ file | none (userspace client) | lldb-dap → post-arc |
 | **CL-7k** | The JIT capability (kernel): code Burrow + `SYS_ICACHE_SYNC` + `CAP_JIT`; I-42 | the `libthyla_rs::jit` prover (emit→sync→call; ungated Proc **denied**) | **prosecute hard** (W^X-adjacent; own focused round; F8 spec posture) | — |
 | **CL-7** | Mesa/llvmpipe + SDL-GL + GLQuake | **GLQuake renders via llvmpipe through Tapestry**; gears smoke in CI | focused round (the ORC mapper + the GL glue's weave lifetime) | lavapipe → stretch |
