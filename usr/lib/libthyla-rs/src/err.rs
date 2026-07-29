@@ -103,6 +103,14 @@ pub enum Error {
     /// Maps `T_E_EXIST` = 17 (POSIX `EEXIST`).
     Exists,
 
+    /// Not a directory: a path prefix component names something that is
+    /// not a directory, so resolution could not continue through it
+    /// (`/bin/ls/foo`). Distinct from `NotFound` -- that one means the
+    /// component is absent and the path could exist later; this one means
+    /// the path can never resolve as written.
+    /// Maps `T_E_NOTDIR` = 20 (POSIX `ENOTDIR`).
+    NotADirectory,
+
     /// Invalid argument: structurally malformed (NULL where non-NULL
     /// required, out-of-range integer, alignment violated, size
     /// exceeds bound).
@@ -168,6 +176,7 @@ impl Error {
             Error::BadAddress       => 14,
             Error::Busy             => 16,
             Error::Exists           => 17,
+            Error::NotADirectory    => 20,
             Error::InvalidArgument  => 22,
             Error::BrokenPipe       => 32,
             Error::OutOfRange       => 34,
@@ -246,6 +255,7 @@ impl From<i32> for Error {
             14  => Error::BadAddress,
             16  => Error::Busy,
             17  => Error::Exists,
+            20  => Error::NotADirectory,
             22  => Error::InvalidArgument,
             32  => Error::BrokenPipe,
             34  => Error::OutOfRange,
@@ -269,6 +279,7 @@ impl fmt::Display for Error {
             Error::BadAddress       => "bad address",
             Error::Busy             => "resource busy",
             Error::Exists           => "already exists",
+            Error::NotADirectory    => "not a directory",
             Error::InvalidArgument  => "invalid argument",
             Error::BrokenPipe       => "broken pipe",
             Error::OutOfRange       => "result out of range",

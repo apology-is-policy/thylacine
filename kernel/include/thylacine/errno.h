@@ -144,6 +144,20 @@
 // EEXIST.
 #define T_E_EXIST      17
 
+// Not a directory -- a path prefix component names something that is not
+// a directory, so resolution cannot continue THROUGH it (#79). The
+// resolver's answer for `/bin/ls/foo`: `ls` exists and was reached, but
+// it cannot be searched. Distinct from T_E_NOENT ("no such component"),
+// which is what stalk reported for this case before the gate existed --
+// and the distinction is load-bearing, because ENOENT is what
+// os.IsNotExist / errno == ENOENT branch on to mean "safe to create".
+//
+// Deliberately NOT a permission failure: the x bit on a non-directory is
+// meaningless for traversal, so a 0755 file and a 0644 file are equally
+// un-traversable and must answer identically. The gate therefore precedes
+// the X-search check (see kernel/stalk.c). POSIX: ENOTDIR.
+#define T_E_NOTDIR     20
+
 // Invalid argument. Use when a syscall argument is structurally
 // malformed (NULL where non-NULL required; out-of-range integer;
 // alignment violated; size exceeds bound). POSIX: EINVAL.
@@ -199,6 +213,7 @@ _Static_assert(T_E_ACCES     == 13,  "T_E_ACCES ABI pin (POSIX EACCES)");
 _Static_assert(T_E_FAULT     == 14,  "T_E_FAULT ABI pin (POSIX EFAULT)");
 _Static_assert(T_E_BUSY      == 16,  "T_E_BUSY ABI pin (POSIX EBUSY)");
 _Static_assert(T_E_EXIST     == 17,  "T_E_EXIST ABI pin (POSIX EEXIST)");
+_Static_assert(T_E_NOTDIR    == 20,  "T_E_NOTDIR ABI pin (POSIX ENOTDIR)");
 _Static_assert(T_E_INVAL     == 22,  "T_E_INVAL ABI pin (POSIX EINVAL)");
 _Static_assert(T_E_PIPE      == 32,  "T_E_PIPE ABI pin (POSIX EPIPE)");
 _Static_assert(T_E_RANGE     == 34,  "T_E_RANGE ABI pin (POSIX ERANGE)");

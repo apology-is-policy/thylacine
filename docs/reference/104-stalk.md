@@ -443,10 +443,55 @@ clarity bar there, and the discipline is not to force it.
 
 ## Error paths
 
-`stalk` returns `NULL` (mapped to `-1` by `sys_open_handler`) on: a missing
-component (`Dev.walk` miss), a per-component X-search denial, the final R/W
-denial, `Dev.open` failure, a component longer than `SYS_WALK_OPEN_NAME_MAX`,
-trail-depth overflow, or `spoor_clone` / `walkqid` OOM. `sys_open_handler`
+`stalk` returns `NULL` on: a missing component (`Dev.walk` miss →
+`T_E_NOENT`), resolution through a non-directory (`T_E_NOTDIR`), a
+per-component X-search denial or the final R/W denial (`T_E_ACCES`),
+`Dev.open` failure, a component longer than `SYS_WALK_OPEN_NAME_MAX` or
+trail-depth overflow (`T_E_INVAL`), or `spoor_clone` / `walkqid` OOM
+(`T_E_IO`). `stalk_err` writes the cause to `*errp` so `sys_open_handler`
+returns the real `-errno`; the bare `stalk()` wrapper passes `NULL`.
+
+### `T_E_NOTDIR` — searching through a file (#79)
+
+Before a component is walked, the directory being searched must actually be
+one: `stalk` tests `parent->qid.type & QTDIR` and fails `T_E_NOTDIR`
+otherwise. The POUNCE partial-walk arm makes the same test against the fused
+record of the miss's parent (`sts[k-1].qid_type`), since a batch can walk
+*into* a file before stopping.
+
+Two properties are deliberate and load-bearing:
+
+- **It precedes the X-search.** The x bit on a non-directory says nothing
+  about whether it can be traversed, so gating on permission first would
+  answer `EACCES` for a 0644 file and `ENOTDIR` for a 0755 one — the errno
+  would turn on an irrelevant bit. Ordering type first makes the answer
+  mode-independent. It discloses nothing new: reaching the gate already
+  required X on every ancestor, and a plain `stat` of the same node (which
+  needs only that same ancestor X) already reveals its type.
+- **The resolver computes it; it does not transport it.** `Dev.walk` returns
+  `struct Walkqid *` with no errno channel, so a Dev's own ENOTDIR could not
+  reach EL0 even if it sent one. `qid.type` is used because it is total (every
+  Spoor carries one, no fetch, no RPC) and because it is what the bit is
+  *for* — `dev9p.c` describes the kernel-side `QT*` superset as
+  distinguishing "DIR vs FILE for walk-time directory checks". `QTFILE` is
+  `0x00`, so a Dev that never sets the field reads as "file", which is correct
+  for the leaf Devs that have no hierarchy; every Dev that mints directory
+  Spoors sets `QTDIR`, and `spoor_clone` copies `qid`, so mount crossings and
+  0-element clone-walks preserve directory-ness.
+
+Two things it deliberately does **not** cover:
+
+- The single-hop `SYS_WALK_OPEN` handler, which returns a bare `-1` for
+  *every* failure and so has no ENOENT to lose — a separate errno-rollout
+  gap (task #80), not this one.
+- `/file/..` and `/file/.`. `stalk` resolves `.` and `..` lexically *before*
+  the gate (that lexical pop is how `..` is contained at `root_spoor`), so
+  `/etc/passwd/..` pops back to `/etc` and succeeds where POSIX answers
+  ENOTDIR. Pre-existing, and gating it means teaching the dot path to consult
+  node types — i.e. touching the containment surface, which wants its own
+  reasoning (task #81).
+
+`sys_open_handler`
 returns `-1` on `path_len == 0` or `> SYS_OPEN_PATH_MAX`, an invalid user buffer,
 an unknown omode bit, a missing `root_spoor` (FROM_ROOT with no chroot), a
 missing/RIGHT_READ-failing `start_fd` handle, an embedded NUL in the path, or a
@@ -454,8 +499,11 @@ full handle table (the quarry is clunked).
 
 ## Performance characteristics
 
-One `Dev.walk` per path component; for dev9p each hop is a `Tgetattr` (the
-X-search) + a `Twalk` round-trip (no batching at v1.0). devramfs / the fixture
+One `Dev.walk` per path component on the per-component loop; a run of
+components collapses into one `Dev.walk_attrs` where the Dev has the slot (the
+POUNCE — see above; this line previously said "no batching at v1.0", which
+P-3 retired). For dev9p a per-component hop is a `Tgetattr` (the X-search) + a
+`Twalk` round-trip. devramfs / the fixture
 resolve locally (no RPC). The trail + scratch are stack-allocated (no heap
 allocation in the resolver beyond the Spoor clones, which are SLUB).
 

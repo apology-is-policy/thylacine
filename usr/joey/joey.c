@@ -2293,6 +2293,100 @@ static int probe46_fstat_wronly(const char *tag, const char *dirpath,
     return 0;
 }
 
+// #79 always-run regression: resolving THROUGH a file answers ENOTDIR.
+//
+// The kernel test proves the resolver arms; this proves the errno survives the
+// whole EL0 return path (stalk -> sys_open's clamp -> the syscall ABI) against
+// the REAL disk filesystem, where the parent is a dev9p Spoor whose QTDIR bit
+// came off the 9P wire rather than from an in-kernel fixture table.
+//
+// Self-contained: it creates its own file rather than naming a pool path, so
+// it cannot go vacuous if the bake layout changes (the shared-fixture lesson --
+// a probe that silently stops testing is worse than one that fails).
+// Boot-fatal.
+static int probe79_notdir(void) {
+    char nb[24];
+    static const char nm[] = "p79-notdir-probe";
+    static const char through[] = "/p79-notdir-probe/x";
+    static const char missing[] = "/p79-absent-dir/x";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe79 open root FAILED\n"); return -1; }
+
+    long fd = t_walk_create(pd, nm, sizeof(nm) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+        fd = t_walk_create(pd, nm, sizeof(nm) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe79 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(fd);
+
+    // A real directory to miss UNDER, so the POUNCE partial-walk arm resolves
+    // its verdict from a fused record with k > 0. Self-made rather than a pool
+    // path, so the leg cannot go vacuous if the bake layout changes.
+    static const char dn[] = "p79-notdir-dir";
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        // Boot-fatal rather than skipped: if the directory is absent, the
+        // `under` leg below misses at its FIRST component (k == 0), which
+        // returns ENOENT for the wrong reason and passes without ever
+        // reaching the POUNCE arm it exists to test. A leg that can pass
+        // vacuously is worse than no leg.
+        t_putstr("joey: probe79 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(dd);
+
+    // Through a regular file -> -T_E_NOTDIR (20). Before #79 this was -2
+    // (ENOENT), which os.IsNotExist reads as "absent, safe to create".
+    long rc_through = t_open(T_WALK_OPEN_FROM_ROOT, through,
+                             sizeof(through) - 1, T_OREAD);
+    // A genuinely absent FIRST component must STILL be -T_E_NOENT (2) -- the
+    // gate must not have blanket-converted every resolution failure.
+    long rc_missing = t_open(T_WALK_OPEN_FROM_ROOT, missing,
+                             sizeof(missing) - 1, T_OREAD);
+    // A miss UNDER a real directory (k > 0) must also still be ENOENT. This is
+    // the leg the kernel fixture cannot vouch for: the POUNCE arm reads the
+    // miss-parent's type out of `sts[k-1].qid_type`, which on dev9p is filled
+    // from the per-component ATTR qid -- a different wire array than the walk
+    // qids the base gate reads. If a server left attr qids zero, the parent
+    // would read as a file and this would come back -20 instead of -2.
+    static const char under[] = "/p79-notdir-dir/absent";
+    long rc_under = t_open(T_WALK_OPEN_FROM_ROOT, under,
+                           sizeof(under) - 1, T_OREAD);
+
+    if (rc_through >= 0) (void)t_close(rc_through);
+    if (rc_missing >= 0) (void)t_close(rc_missing);
+    if (rc_under   >= 0) (void)t_close(rc_under);
+    (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_through != -20 || rc_missing != -2 || rc_under != -2) {
+        t_putstr("joey: probe79 FAILED through=");
+        t_putstr(itoa_dec(rc_through, nb, sizeof(nb)));
+        t_putstr(" (want -20) missing=");
+        t_putstr(itoa_dec(rc_missing, nb, sizeof(nb)));
+        t_putstr(" under=");
+        t_putstr(itoa_dec(rc_under, nb, sizeof(nb)));
+        t_putstr(" (want -2 -2)\n");
+        return -1;
+    }
+    t_putstr("joey: probe79 OK (through a file -> ENOTDIR; absent + "
+             "miss-under-a-dir -> ENOENT)\n");
+    return 0;
+}
+
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
 // /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
@@ -6203,6 +6297,11 @@ int main(void) {
                                          sizeof(p46_root) - 1) != 0)
                     return 1;
             }
+
+            // #79 always-run regression: ENOTDIR through a file, on the real
+            // disk FS (the dev9p parent's QTDIR comes off the wire). Boot-fatal.
+            if (probe79_notdir() != 0)
+                return 1;
 
             // CF-3 A always-run regression: bulk byte-I/O (the two-tier
             // syscall bounce + uaccess_copy_in/out). Boot-fatal.

@@ -58,6 +58,7 @@ void test_stalk_dotdot_pop(void);
 void test_stalk_dotdot_containment(void);
 void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
+void test_stalk_notdir(void);                  // #79
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_open_replace(void);
@@ -113,6 +114,14 @@ static const struct fixnode g_fix[] = {
     { 6, 5, "sekret", QTFILE, 0600u },
     { 7, 0, "loop",   QTDIR,  0755u },
     { 8, 1, "nor",    QTFILE, 0200u },   // owner write-only: the leaf-R deny
+    { 9, 0, "xfile",  QTFILE, 0755u },   // #79: an EXECUTABLE file. The only
+                                         // node whose x bit is set while it is
+                                         // not a directory -- without it the
+                                         // ENOTDIR gate could not be shown to
+                                         // be mode-INDEPENDENT (every other
+                                         // file here lacks x, so an x-first
+                                         // ordering would answer EACCES and
+                                         // look equally correct).
 };
 #define FIX_LOOP_PATH 7u
 
@@ -535,6 +544,73 @@ void test_stalk_err_codes(void) {
     // the wrapper stalk() == stalk_err(..., NULL): a NULL errp must not fault.
     struct Spoor *wrap = stalk(&p, root, "a/nope", 6, STALK_OPEN, 0);
     TEST_ASSERT(wrap == NULL, "stalk() wrapper (errp==NULL) resolves the miss to NULL, no fault");
+
+    spoor_unref(root);
+}
+
+// #79: resolution THROUGH a non-directory answers T_E_NOTDIR, not T_E_NOENT.
+//
+// The pre-fix behaviour was worse than imprecise -- it was mode-dependent: a
+// 0644 file denied the X-search and reported ACCES, while a 0755 file passed it
+// and reported NOENT, so the errno turned on a bit that has nothing to do with
+// whether the thing can be searched. Both legs below are asserted for exactly
+// that reason; `xfile` (0755) exists in the fixture only to make the second one
+// expressible.
+//
+// Non-vacuity: reverting either gate flips a specific leg -- the base gate
+// changes `a/b/./x` and the nowa leg, the POUNCE partial arm changes `a/b/x`.
+void test_stalk_notdir(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    int e;
+
+    // The POUNCE partial-walk arm: the batch gathers [a, b, x] and the server
+    // walks 2 of 3, so the miss's parent is the fused record sts[1] (`b`, a
+    // file) rather than the run base.
+    e = -12345;
+    struct Spoor *q = stalk_err(&p, root, "a/b/x", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/x -> NULL (b is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "through a 0644 file -> NOTDIR (was ACCES)");
+
+    // The base gate: the '.' ends the run at `b`, so the next iteration opens
+    // with a FILE as the directory-to-search.
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/./x", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/./x -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "base gate: file as the search dir -> NOTDIR");
+
+    // Mode-independence: 0755 sets the x bit, so the X-search would have PASSED
+    // and the old answer was NOENT -- a different errno for the same situation.
+    e = -12345;
+    q = stalk_err(&p, root, "xfile/y", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "xfile/y -> NULL (xfile is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "through a 0755 file -> NOTDIR (was NOENT)");
+
+    // The per-component loop reaches the same verdict (pounce/loop parity).
+    struct Spoor *root_nowa = fix_root_nowa();
+    TEST_ASSERT(root_nowa != NULL, "fix_root_nowa");
+    e = -12345;
+    q = stalk_err(&p, root_nowa, "a/b/x", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/x (no walk_attrs) -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "per-component loop agrees: NOTDIR");
+    spoor_unref(root_nowa);
+
+    // The gate must not fire on a file as the FINAL component -- it guards
+    // searching THROUGH a node, never naming one. This is the regression that
+    // a too-eager gate would trip.
+    struct Spoor *ok = stalk_err(&p, root, "a/b", 3, STALK_OPEN, 0, &e);
+    TEST_ASSERT(ok != NULL, "a/b still resolves (a file as the leaf is not gated)");
+    spoor_clunk(ok);
+
+    // A real X-search denial is still ACCES: `nox` IS a directory (0644), so
+    // the type gate passes and the permission check remains the authority.
+    // Ordering type-before-permission must not have swallowed this.
+    e = -12345;
+    struct Spoor *deny = stalk_err(&p, root, "nox/sekret", 10, STALK_OPEN, 0, &e);
+    TEST_ASSERT(deny == NULL, "nox/sekret -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "a directory without x is still ACCES, not NOTDIR");
 
     spoor_unref(root);
 }

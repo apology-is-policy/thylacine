@@ -265,6 +265,35 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
             parent = start;
         }
 
+        // #79: the thing we are about to search must BE a directory. Without
+        // this, resolution walked a real component out of a file and reported
+        // the Dev's miss as T_E_NOENT -- so `/bin/ls/foo` answered "no such
+        // file" instead of ENOTDIR, and `os.IsNotExist` (the errno a build
+        // tool branches on to decide "safe to create") read TRUE for a path
+        // that can never exist. Note this is the resolver computing the answer
+        // itself, NOT transporting one: a Dev.walk returns `struct Walkqid *`
+        // with no errno channel, so a Dev's own ENOTDIR could not have reached
+        // EL0 even if it sent one.
+        //
+        // BEFORE the X-search check below, deliberately: the x bit on a
+        // non-directory is meaningless for traversal, so gating on it first
+        // would answer EACCES for a 0644 file and ENOTDIR for a 0755 one --
+        // the errno would turn on a bit that has no bearing on the question.
+        // This ordering discloses nothing new: reaching the gate already
+        // required X on every ancestor, and a plain stat() of `parent` (which
+        // needs only that same ancestor X) already reveals its type.
+        //
+        // qid.type is the signal because it is TOTAL -- every Spoor carries
+        // one, with no fetch and no RPC -- and because it is what dev9p.c
+        // already says it is for ("the kernel-side QT* superset only
+        // distinguishes DIR vs FILE for walk-time directory checks"). QTFILE
+        // is 0x00, so a Dev that never sets the field reads as "file", which
+        // is correct for the leaf Devs (null/zero/full/random/devnotes/pipe)
+        // that have no hierarchy to walk. Every Dev that DOES mint directory
+        // Spoors sets QTDIR, and spoor_clone copies qid -- so a mount cross
+        // and a 0-element clone-walk both preserve directory-ness.
+        if (!(parent->qid.type & QTDIR))  { err = T_E_NOTDIR; goto fail; }
+
         // =====================================================================
         // POUNCE (docs/POUNCE-DESIGN.md §5) -- batch the maximal run of
         // consecutive real components through ONE Dev.walk_attrs call (one wire
@@ -543,6 +572,17 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                 // an X-denial on the miss's parent masks the miss.
                 walkqid_free(w);
                 if (nc) { nc->aux = NULL; spoor_unref(nc); }   // never bound on partial
+                // #79: the batch's own not-a-directory case. The miss's parent
+                // is component k-1, whose fused record vouches for its type --
+                // so a run over `/a/file/c` stops at k=2 with sts[1] naming a
+                // non-directory, and the answer is ENOTDIR, not "no such c".
+                // Same ordering as the base gate above (type before X, for the
+                // same reason). k == 0 means the miss's parent is the run BASE,
+                // already gated before the batch was issued.
+                if (k > 0 && !(sts[k - 1].qid_type & QTDIR)) {
+                    err = T_E_NOTDIR;
+                    goto fail;
+                }
                 if (k > 0 && parent->dev->perm_enforced &&
                     perm_check(p, &sts[k - 1], PERM_X) != 0) {
                     err = T_E_ACCES;
