@@ -364,6 +364,13 @@ void sched_wc_stats(struct sched_wc_stats *out);
 // out-of-range or not-yet-initialized CPU. READ-ONLY telemetry.
 u64 sched_cpu_idle_ns(unsigned cpu);
 
+// V-4c-2b (docs/VIVARIUM.md section 6.17): cumulative context switches performed
+// on `cpu`, stamped at the same switch chokepoint as prowl's per-thread nsched.
+// The kernel source for the diorama's /proc/stat `ctxt` (which the diorama sums
+// across CPUs). READ-ONLY telemetry; no scheduling decision consults it. 0 for
+// an out-of-range or never-brought-up CPU.
+u64 sched_cpu_ctxt(unsigned cpu);
+
 // True iff any non-idle band on any CPU's run tree is non-empty (queued
 // runnable work exists somewhere). Reads ONLY the per-band head pointers
 // (never dereferences a Thread), so it is safe to call lock-free from the hot

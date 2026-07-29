@@ -43,6 +43,9 @@ int          proc_for_each(int (*cb)(struct Proc *, void *), void *arg);
 /proc/<pid>/ns                path = (pid << 32) | PQS_NS         QTFILE
 /proc/<pid>/sched             path = (pid << 32) | PQS_SCHED      QTFILE  (prowl-3b; OQ-4 owner-or-CAP_HOSTOWNER)
 /proc/<pid>/exe               path = (pid << 32) | PQS_EXE        QTFILE  (VIVARIUM V-4a-0; RO)
+/proc/<pid>/cwd               path = (pid << 32) | PQS_CWD        QTFILE  (VIVARIUM V-4b-1; RO)
+/proc/<pid>/maps              path = (pid << 32) | PQS_MAPS       QTFILE  (VIVARIUM V-4b-2; RO)
+/proc/<pid>/environ           path = (pid << 32) | PQS_ENVIRON    QTFILE  (VIVARIUM V-4b-6; RO, owner-or-CAP_HOSTOWNER)
 ```
 
 Subkinds 5..15 reserved for `mem`, `fd/`, `wait`, `note`, `args`, etc. — added as the syscall surface needs them.
@@ -209,6 +212,81 @@ Content is `Proc.exe_path`, a ref-held `struct Path` (#66) — the very Path `st
 
 ---
 
+### `/proc/<pid>/cwd`
+
+```
+/home/michael
+```
+
+The Territory's current working directory (VIVARIUM **V-4b-1**) — the source the diorama re-presents as Linux's `/proc/self/cwd`. Mode `0444`; bare bytes, no NUL and no newline, for the same reason as `exe` (`readlink("/proc/self/cwd")` yields a bare path).
+
+`format_cwd` is a thin call into `territory_getdot`, which already owned the `dot_lock` discipline — the `format_ns` → `territory_format_ns` shape, with the lock staying in `territory.c`. **No new kernel state was needed**: the Territory has carried `dot_path` since LS-4 and devproc simply never surfaced it.
+
+The nested `g_proc_table_lock → dot_lock` acquire is acyclic for the same reason `ns_lock` is: `dot_lock` is a documented leaf guarding only `dot_path`, nothing held under it takes `g_proc_table_lock`, and the resolve is bounded CPU with no allocation and no blocking.
+
+**Unlike `exe`, this file is never empty for a live Proc.** A NULL `dot_path` renders `"/"` (`territory_getdot`'s own contract), so a Linux consumer always gets a usable path. A Proc torn down past its `territory_unref` renders empty rather than faulting.
+
+---
+
+### `/proc/<pid>/maps`
+
+```
+start-end perms off type file role
+0x400000-0x402000 r-xp 0x0 file 0x0:0x20 -
+0x402000-0x403000 rw-p 0x0 anon - -
+0x7feff000-0x7ff00000 ---p 0x0 none - guard
+0x7ff00000-0x80000000 rw-p 0x0 anon - stack
+0xc0000000-0xc0001000 r--p 0x0 anon - vdso
+```
+
+The Proc's address-space table (VIVARIUM **V-4b-2**) — the source the diorama re-presents as Linux's `/proc/self/maps`. Mode `0444`. One line per VMA in ascending-VA order (`vma_insert`'s contract), after a header line naming the columns.
+
+**Six FIXED columns.** An optional trailing column would make the line ambiguous to split, so absent values render `-`:
+
+| Column | Meaning |
+|---|---|
+| `start-end` | the VA range, `0x`-prefixed (house style; the diorama strips the prefix for Linux) |
+| `perms` | `r`/`w`/`x` from `vma->prot`, then `p` or `s` |
+| `off` | `vma->burrow_offset` |
+| `type` | the backing: `anon` · `lazy` · `file` · `mmio` · `dma` · `none` |
+| `file` | `<devno>:<qid.path>` for a FILE Burrow, else `-` |
+| `role` | `stack` · `vdso` · `guard` · `-` |
+
+`s` means `VMA_FLAG_SHARED_IN` — the backing Burrow is *another* Proc's memory mapped cross-Proc (a netd flow ring, a tapestryd weave), which is exactly Linux's `MAP_SHARED` sense of writes propagating. A FILE Burrow is read-only and shared via the Image cache, but writes cannot propagate through it, so it renders `p`, matching Linux's `MAP_PRIVATE` file mapping.
+
+`none` is a guard VMA — `vma_alloc_guard` is the only producer of a NULL-Burrow VMA.
+
+**The `file` column is scalars, deliberately not a pointer chase.** `file_devno` / `file_qid_path` are the cache-key values the Burrow sampled at create and are immutable for its whole life. Chasing `burrow->spoor->path` for a name instead would be unsound: `Spoor.path` is *mutable* (a walk calls `spoor_path_extend` / `spoor_path_transplant`), and "nothing walks a pinned exec Spoor today" is a latent-P1 trap, not a lifetime argument. The pair is also Thylacine's own file identity — the `(dev, qid.path)` that `t_stat` exposes and `sameFile` compares (#100).
+
+**The `role` column keeps the layout constants in the kernel.** They are derived from `exec.h` (`EXEC_USER_STACK_BASE`, `EXEC_USER_VDSO_BASE`), so no consumer — including the diorama, which turns them into Linux's `[stack]` / `[vdso]` tags — has to hardcode them.
+
+The walk runs the same `VMA_MAGIC` check every `vma.c` list walker does. That is not optional for a diagnostic read: a freed entry's `burrow` is a dangling pointer, and dereferencing it for the `file` column would copy freed slab bytes into a file EL0 reads — an I-13 leak. Loud extinction is the correct failure for a corrupted list.
+
+**Lock.** `p->vma_lock`, nested under the `g_proc_table_lock` that `proc_for_each` already holds. That order is **established and audited in this same file**: `devproc_mem_walk_cb` (8a-1b-gamma-1) takes exactly this pair for the cross-Proc `/proc/<pid>/mem` copy, on the recorded ground that `vma_lock` is a leaf below `g_proc_table_lock` (nothing under `vma_lock` takes `g_proc_table_lock`). The walk is bounded CPU under the leaf: no allocation, no blocking, and no nested Burrow lock — every field read is a plain scalar on the Burrow, whose liveness the VMA's own mapping ref guarantees for the whole walk.
+
+**Truncation** uses the `format_sched` row-commit idiom: a row is built at a scratch offset and committed only once it wholly fits, so an address space with more VMAs than the buffer holds truncates at a whole-line boundary rather than emitting a partial row. That truncation is *also* what bounds the lock hold — the first field that does not fit breaks the loop, so the walk is bounded by the **output buffer** (~30 rows), not by the VMA count. A Proc at `PROC_VMA_MAX` (65536 VMAs) holds `vma_lock`, and IRQs, for tens of rows rather than 65536. Do not "fix" the truncation by continuing past a full buffer without re-deriving that bound. Measured: a small native binary renders 5 rows / ~200 B native (292 B in the wider Linux shape), against a `DEVPROC_READ_BUF` of 2048 — roughly 14× headroom. Completeness for a very large address space is the same v1.x offset-aware multi-read `ns` wants.
+
+**Posture.** `0444`, ungated — the `exe` / `cwd` / `ns` posture. Sound **today** because Thylacine has no *user-space* ASLR: every VA here is either an `exec.h` constant or an ELF link address, so the layout is not a secret, and `/proc/<pid>/ns` already discloses strictly more. None of these are kernel VAs, so **I-16** (the KASLR slide) is not engaged — unlike `/proc/<pid>/kstack`, which had to gate its raw addresses for exactly that reason (8b-1d F1).
+
+> **Forward obligation.** If user ASLR ever lands, this posture must be revisited in the same chunk. `maps` would then leak the randomized layout, which is the whole point of the mitigation.
+
+---
+
+## Adding a readable per-pid file
+
+Four places, and the fourth fails **silently**:
+
+1. `enum` — a new `PQS_*` subkind.
+2. `g_proc_pid_files[]` — the name, so `walk` resolves it.
+3. `devproc_read_cb` — the `format_*` dispatch.
+4. `proc_qid_mode` — the mode.
+5. **The kind whitelist in `devproc_read`.** Omit this and the file resolves
+   fine at walk, then every read returns a bare `-1` with nothing pointing at
+   the cause. V-4b-2 was written missing exactly this; its unit test caught it
+   on the first run, which is the argument for writing the test first.
+
+---
+
 ## Walk semantics
 
 `devproc.walk(c, nc, name[], nname)` supports multi-step walks. Each step calls a private `walk_one(cur_path, name, *out_qid)`:
@@ -236,7 +314,7 @@ The Walkqid is `kmalloc`-allocated by `walkqid_alloc(nname)` (added in P4-C; dec
 - **Per-pid file table** (g_proc_pid_files[] — name + subkind for status/cmdline/ctl/ns).
 - **Tiny formatters** (`fmt_udec`, `fmt_sdec`, `fmt_str`) — no libc; ~30 LOC of byte-level integer/string formatting into a stack buffer.
 - **Content generators** (`format_status`, `format_cmdline`, `format_ns`) — produce up to `cap` bytes; return total bytes that would be produced, allowing offset-aware reads.
-- **`parse_decimal`** — strict pid parser (rejects empty, leading `-`, non-digits, overflow past 31 bits).
+- **`parse_decimal`** — strict pid parser (rejects empty, leading `-`, non-digits, overflow past 31 bits, and — since V-4b-5 — a **leading zero on a multi-digit name**, which is Linux's own rule in `fs/proc/base.c::name_to_int`). Without the last one a single Proc answers to unboundedly many names (`/proc/7`, `/proc/07`, `/proc/00000007`), so the pid → name map stops being injective: readdir lists a name that is not the only name, a path-keyed cache holds N entries for one Proc, and native `/proc` disagrees with the VIVARIUM diorama (whose `parse_pid` already rejected them) about which paths exist. `"0"` itself stays legal — kproc is pid 0.
 - **`walk_one`** — qid-by-qid step dispatch.
 - **Vtable functions** — `attach`, `walk`, `open`, `close`, `read`, `write`, plus the standard stubs.
 
@@ -301,7 +379,7 @@ P4-C + A-4b are impl-only — no new TLA+ module (per the 2026-05-23 spec-to-cod
 | `devproc.read_dir_returns_neg1` | Read on root QTDIR returns -1 (readdir deferred). |
 | `devproc.read_partial_offset` | Offset-aware slice; off >= total returns 0. |
 | `devproc.kill_authorized_predicate` | A-4b: the two-axis predicate — owner / CAP_KILL / CAP_HOSTOWNER allow; non-owner-no-cap denies; **CAP_DAC_OVERRIDE denies** (not a kill axis). |
-| `devproc.stat_native_ctl_owner` | A-4b: stat_native reports target uid/gid; ctl mode 0600, status 0444; dev apex -1. |
+| `devproc.stat_native_ctl_owner` | A-4b: stat_native reports target uid/gid; ctl mode 0600, status 0444. V-4b-4: the dev apex STATS (QTDIR, 0555, SYSTEM-owned) rather than answering -1. |
 | `devproc.write_ctl_kill_dispatch` | A-4b: owner kill + killgrp set `group_exit_msg`; non-owner denied (NULL); non-ALIVE refused. |
 
 The A-4b kill tests construct synthetic targets (no running thread, so `group_exit_msg` is the dispatch observable — the death step is the audited #809/#811 EL0-die-check path) and exercise the authority predicate + dispatch directly. Userspace E2E of `/proc/<pid>/ctl` is deferred with the namespace seam (see the ctl section). Future chunks add readdir-on-directory + multi-pid walk under concurrent rfork.
@@ -317,6 +395,7 @@ The A-4b kill tests construct synthetic targets (no running thread, so `group_ex
 | status / cmdline / ns / ctl read | Landed (P4-C) |
 | ctl write: `kill` / `killgrp` + two-axis authority (I-26) | Landed (A-4b) |
 | `devproc_stat_native` (per-pid owner + mode) | Landed (A-4b) |
+| `devproc_stat_native` (the `/proc` apex as a directory) | Landed (V-4b-4) |
 | Multi-step walk | Landed (P4-C) |
 | `proc_find_by_pid` + `proc_for_each` | Landed (P4-C; in `kernel/proc.c`) |
 | `walkqid_alloc` + `walkqid_free` | Landed (P4-C; in `kernel/spoor.c`) |
@@ -363,6 +442,38 @@ The owner axis is `caller->principal_id == target->principal_id`. At v1.0 the *e
 
 `stat_native` dereferences the bare pointer from `proc_find_by_pid` with no lock held — the documented v1.0 "no concurrent reap" window, the *same class* as `devproc_read` above. It is NOT on any authorization path: every `perm_check` site that consults `stat_native` is gated on `dev->perm_enforced`, and `devproc.perm_enforced == false`; stat_native serves only `SYS_FSTAT` introspection + `SEEK_END`. The KILL path does NOT use it (it resolves under `g_proc_table_lock` via `proc_for_each`). The general fix (deref inside a `proc_for_each` cb, as the kill path does) is the right shape if devproc ever gains concurrent reaping or perm-enforcement; tracks with the pre-existing `devproc_read` window.
 
+### The apex stats, and the modes carry file-type bits (V-4b-4 + V-4b-5; task #67 CLOSED)
+
+The `/proc` apex used to answer `-1` from `stat_native` ("no per-Proc owner"),
+which `spoor_stat_native` surfaces as `EIO` — so `stat("/proc")` failed, and with
+it `realpath()` on **any** path under `/proc` (musl's resolver walks each prefix
+and treats a non-`EINVAL` errno as fatal). "No owner" and "stat fails" are
+different statements; V-4b-4 makes the apex answer as the real directory it is —
+SYSTEM-owned, `0555`, matching devdev's `DEV_KIND_ROOT` and the devramfs synth
+dirs, where the X bit is what lets the resolver traverse onto the mount point and
+cross. Not an authority: `devproc.perm_enforced` is false, so no gate consults
+this mode (`devproc_kill_authorized` checks at the write, independently).
+
+V-4b-5 closed the other half. `devproc_mode_for_kind` used to return **bare
+permission bits** — `0555` for a pid dir, `0444` for `status`/`exe`/`cwd`/`maps` —
+with no `S_IFDIR`/`S_IFREG`, so a POSIX caller's `S_ISDIR("/proc/1234")` and
+`S_ISREG("/proc/1234/exe")` were both **false**. That is not cosmetic: `S_ISDIR`
+and `S_ISREG` read the `S_IFMT` field *alone*, and every walker that classifies
+before it descends — `find`, `ftw`/`nftw`, `du`, a shell glob, Go's
+`os.FileInfo.IsDir`, and the readdir-then-stat loop any `/proc` reader is built
+from — reads a typeless entry as not-a-directory and stops. The type bits now come
+out of the same switch as the permissions, so the two cannot drift, and `qid_type`
+(which already carried the distinction for Thylacine-native callers) agrees with
+them by construction. An unclassifiable subkind returns `-1` rather than a
+typeless mode: walk produces only known kinds, so it is unreachable, but reporting
+`S_IFMT == 0` would hand a POSIX caller exactly the stat the type bits exist to
+prevent.
+
+Note that a *diorama* `/proc` — what a Linux program in a Vivarium territory
+actually reads — serves its own stat, so this was never a VIVARIUM-consumer bug.
+It was a native-caller bug, and the reason it stayed invisible is that nothing
+native had classified a `/proc` entry by mode before.
+
 ### Reads on root or pid_dir return -1 at v1.0
 
 The Plan 9 idiom is "read on a directory returns synthesized 9P stat records (one per child entry)". v1.0 P4-C returns -1 — readdir lands when the 9P interpreter or in-kernel readdir helper lands. Tests pin -1; replacing it requires explicit code change.
@@ -389,3 +500,49 @@ Acceptable while live-Proc count is bounded. Phase 5+ adds a hash table or RB-tr
 - `docs/reference/31-trivial-devs.md` — leaf-file Devs (cons / null / zero / random) for context.
 - `docs/reference/14-process-model.md` — Proc + Thread lifecycle (the source-of-truth for what /proc/<pid>/status reports).
 - `specs/notes.tla` (planned, Phase 5+) — note delivery; the future ctl-write dispatch routes here.
+
+
+### `/proc/<pid>/environ` (VIVARIUM V-4b-6)
+
+The per-Proc environment as Linux's flat block -- `NAME=VALUE\0` records back to
+back, in `Env` id order (the same order `/env` readdir emits). The source the
+diorama re-presents as `/proc/self/environ`.
+
+**Its own read path (`devproc_environ_read`), not a `format_*` case, because it
+is OFFSET-AWARE.** Every other info file formats into `DEVPROC_READ_BUF` (2 KiB)
+and slices, which caps the file at 2 KiB; an `Env` holds up to
+`ENV_MAX_ENTRIES` (64) values of `ENV_VALUE_MAX` (4096) each, and one long `PATH`
+overflows that buffer alone. A format-and-slice render would then *silently drop
+environment variables* -- indistinguishable to the consumer from never having been
+set. So the render (`env_render_environ`, `kernel/env.c`) walks records and copies
+only the requested window, skipping wholly-before-window records in O(1).
+
+One CALL is clamped to `DEVPROC_ENVIRON_READ_MAX` (8 KiB) because the copy runs
+with IRQs off under `g_proc_table_lock`; the FILE is unbounded. That is a short
+read, which is POSIX-legal and which every `/proc` consumer loops through --
+Linux's own `seq_file` reads are short-by-page. `stat` reports size 0 (generated
+at read), so consumers read to EOF.
+
+**Gated: owner or `CAP_HOSTOWNER`** (`devproc_owner_or_hostowner`), unlike the
+`0444` info files beside it. Those are ungated on the argument that they disclose
+nothing a peer could not already read -- `/proc/<pid>/ns` strictly dominates them.
+That argument does not extend here: `/env` (devenv) resolves
+`current_thread()->proc->env` **by construction**, so nothing else in the system
+lets one Proc read another's environment, and environment variables carry secrets
+by universal convention. Same posture as Linux (`0400` + `ptrace_may_access`).
+`CAP_DEBUG` is deliberately NOT an axis -- this is an info file, and a debugger's
+authority to stop a Proc is a different grant from a reader's. A denial is `-1`
+with nothing formatted (no partial leak). `devproc.perm_enforced` is false, so the
+`0400` mode is documentation and the read-site check is the enforcement.
+
+**Entries the Linux shape cannot encode are skipped**, not emitted: a `'='` in a
+NAME or a NUL in a VALUE would make one variable parse as another's value, or
+split a record so its tail parses as a variable that was never set. Absence is a
+state consumers handle; a wrong value presented as authoritative is not. `/env`
+remains the complete truth.
+
+**Note for proxies.** The gate keys on the READER, so a 9P server proxying this
+file is authorized as itself. That cuts both ways: it may be denied where its
+client would be allowed (benign), and it may be **allowed where its client would
+be denied** (a leak the proxy must prevent). See `docs/reference/141-diorama.md`
+and `docs/VIVARIUM.md` section 6.13.

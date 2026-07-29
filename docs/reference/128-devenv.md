@@ -85,6 +85,68 @@ applied preemptively.
   `os.Create` `O_TRUNC` flow); the root has no truncate.
 - **unlink** (`devenv_unlink` → `env_unset`): removes by name (`os.Remove`).
   `SYS_UNLINK_REMOVEDIR` rejected (no directories).
+- **stat_native** (`devenv_stat_native` → `env_size`; VIVARIUM V-4b-5): the root is
+  `S_IFDIR | 0755`, an entry is `S_IFREG | 0644` with `size` = the value length; an
+  entry gone since the walk returns `-1` (the monotonic-id guarantee, which every
+  other op already honours). Before V-4b-5 there was **no slot at all**, so
+  `stat("/env")`, `fstat` on an `/env` fd, and `lseek(SEEK_END)` all failed with
+  `EIO` — and, since musl's `realpath()` walks each path prefix and treats any errno
+  but `EINVAL` as fatal, `realpath()` of anything beneath `/env` with them.
+
+  Two things about it are deliberate. **The size is real**, unlike `/ctl`'s (see
+  `33-devctl.md`): an `/env` value is a stored byte string with a definite length,
+  not a report generated at read time, so a caller that fstats and then reads that
+  many bytes gets exactly the value — and `SEEK_END`, which is this same call behind
+  a different syscall, lands on it. **The owner is the caller**: every devenv op
+  resolves the *calling* Proc's env, so a Proc statting `/env` is statting its own,
+  and reporting its own principal with `0755`/`0644` says exactly what is true —
+  you may read and write your environment, and nobody else's is reachable from
+  here. A child that inherits an `/env` fd across spawn therefore stats against
+  *its* env, not the parent's, the same rebinding `read` and `write` already do.
+
+  **The per-Env device number, and why devenv is the only Dev that needs one.**
+  `spoor_stat_native` reports `(devno, qid.path)` as the file identity (#100), and
+  every *other* Dev's qid namespace is global — a devproc qid packs the global pid,
+  a devctl qid is a leaf kind, devramfs qids are tree-wide — so their Spoors can
+  carry the static `devno == 0` and the pair still names exactly one file. devenv's
+  namespace is **per-Proc**: `next_id` restarts at 1 in every `Env`, so without a
+  discriminator two Procs' entirely unrelated variables would both report `(0, 1)`
+  and claim to be the same file. `struct Env` therefore carries a `devno` minted
+  from `spoor_next_devno()` at `env_alloc` (a clone gets its own — a copied
+  environment is a copy, not the same file), and `devenv_walk` stamps it onto the
+  walked Spoor, which is where it has to land: `spoor_stat_native` overwrites
+  whatever `stat_native` put in `out->devno` with the Spoor's own value.
+
+  This is not only about `fstat` agreeing with itself. The REVENANT Image cache is
+  keyed on `(dc, devno, qid_path, exec, offset, size)`, and `exec_resolve_from_
+  namespace` gates only on `dev->read` plus a non-zero `st.size` — so once `/env`
+  entries report a real size, `exec("/env/FOO")` reaches that cache. With colliding
+  identities it would serve one Proc the cached text of another Proc's variable,
+  which is an I-1 leak out of a device whose whole premise is that a Proc sees only
+  its own environment. Found by self-audit while adding the stat slot, before it
+  shipped; the regression is in `devenv.stat_native_shapes`.
+
+  **The stamp binds to the WALKING Proc, so an inherited fd reports a stale device
+  (V-4c-3 F4).** The `devno` is stamped at *walk* time from `env_proc()`, while
+  `devenv_stat_native` resolves size from `env_proc()` at *stat* time — and
+  `spoor_stat_native` then overwrites `out->devno` with the Spoor's stamped value,
+  which is exactly why the stamp lives in `walk`. So a Proc that walks `/env/FOO`
+  and then spawns a child hands the Spoor down: the child's `fstat` reports
+  `(parent_devno, id)` while its `read` returns the **child's** `FOO`. A fresh open
+  in the child yields `(child_devno, id)`, so `os.SameFile` on those two fds answers
+  "different files" for what is, by name, one variable.
+
+  This is a **file-identity divergence, not an isolation break** — I-1 holds, since
+  the content served is always the reading Proc's own. Nor does it reopen the Image
+  cache leg above: `exec_resolve_from_namespace` walks fresh, so it always stamps the
+  exec'ing Proc's devno.
+
+  Recorded rather than "fixed" because the alternative is worse. Re-stamping
+  `out->devno` from `env_proc()` inside `stat_native` would make `fstat` disagree
+  with the Spoor it was called on, and the honest statement is the one this device's
+  design already makes everywhere else: **an `/env` Spoor's *content* deliberately
+  rebinds to the caller, so its *device identity* is bound to whoever walked it.**
+  A caller that needs a stable identity should open in the Proc that will use it.
 
 There is **no per-Spoor private state** — the value lives in the Proc's `Env`, keyed
 by id — so `close` is the trivial `dev_simple_close` (no `aux`, no UAF surface).
@@ -236,3 +298,34 @@ is a Stage-4b seam — mirror the `/dev` re-graft (pre-pivot `O_PATH` grab + pos
 - **Snapshot, not live.** Per the Plan 9 semantics above, `os.Setenv` does not write
   back to `/env`; cross-process propagation is via inheritance at spawn, not a shared
   live view.
+
+
+## The flat block -- `env_render_environ` (VIVARIUM V-4b-6)
+
+`long env_render_environ(struct Proc *p, s64 off, void *buf, long n)` renders the
+whole environment as Linux's NUL-separated `NAME=VALUE\0` block, copying only
+`[off, off+n)`. It is the source behind `/proc/<pid>/environ` (see
+`docs/reference/32-devproc.md`); the renderer lives here, with the lock, on the
+`territory_format_ns` pattern.
+
+Three properties worth keeping straight:
+
+* **Cross-Proc, unlike every other entry point in this file.** The per-name ops
+  are driven by devenv for the CALLING Proc; this one is driven by devproc for a
+  `p` it resolved under `g_proc_table_lock`. Nothing here checks identity -- the
+  disclosure gate lives at that call site (`devproc_owner_or_hostowner`). Do not
+  add a second caller without carrying the gate.
+* **Offset-aware**, because an `Env` can hold a quarter-megabyte and devproc's
+  format buffer is 2 KiB. Records wholly before the window are skipped in O(1)
+  via a running `pos`, so a sequential read stays linear overall.
+* **Skips what the Linux shape cannot carry** -- a `'='` in a name, a NUL in a
+  value. Emitting either raw corrupts the block rather than truncating it.
+
+Lock: `e->lock`, taken here and nested under the caller's `g_proc_table_lock`.
+That edge is acyclic on the same ground as `ns_lock` and `vma_lock` -- `e->lock`
+is a leaf, and nothing held under it takes `g_proc_table_lock` (env.c touches no
+other kernel lock but the slab's).
+
+Coherence: one lock hold makes a single read internally consistent; a SEQUENCE of
+reads racing a concurrent set/unset can tear, exactly as Linux's can (there the
+block is user memory the target may rewrite mid-read).

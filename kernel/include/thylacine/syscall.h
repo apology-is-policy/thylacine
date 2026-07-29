@@ -7,10 +7,17 @@
 //   SYS_EXITS(status)    — terminate calling process. Maps to kernel
 //                           exits("ok"/"fail") based on status==0 / !=0.
 //                           Never returns.
-//   SYS_PUTS(buf, len)   — write `len` bytes from `buf` to UART for
-//                           operator visibility / test diagnostic.
-//                           Returns `len` on success, -1 on argument
-//                           validation failure (NULL / oversized).
+//   SYS_PUTS(buf, len)   — write `len` bytes from `buf` to the console
+//                           for operator visibility / test diagnostic.
+//                           #76: goes through cons_output_write, so it is
+//                           atomic against every other console writer,
+//                           reaches the G-4 renderer drain, and honours
+//                           ONLCR -- identical treatment to a /dev/cons
+//                           write. Returns the count ACCEPTED, which may
+//                           be short of `len` if the #67 stalled-consumer
+//                           deadline or a #811 death cuts the write off;
+//                           -1 on argument validation failure (NULL /
+//                           oversized / bad user VA) or a copy-in fault.
 //
 // AArch64 ABI (matches Linux for familiarity):
 //   x8       = syscall number

@@ -24,8 +24,11 @@
 #include "../../arch/arm64/exception.h"  // 8a-1b-gamma-2: struct exception_context (the regs test's synthetic trapframe)
 #include "../../mm/phys.h"               // alloc_pages / free_pages
 
+#include <thylacine/burrow.h>          // V-4b-2: burrow_create_anon/map -- /proc/<pid>/maps
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/env.h>             // V-4b-6: env_create/write -- /proc/<pid>/environ
+#include <thylacine/exec.h>            // V-4b-2: EXEC_USER_STACK_BASE -- the maps role tag
 #include <thylacine/page.h>
 #include <thylacine/path.h>            // V-4a-0: /proc/<pid>/exe
 #include <thylacine/proc.h>
@@ -65,6 +68,9 @@ void test_devproc_debug_kregs_kstack_wait(void);
 void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_devproc_read_exe(void);            // VIVARIUM V-4a-0
+void test_devproc_read_cwd(void);            // VIVARIUM V-4b-1
+void test_devproc_maps(void);                // VIVARIUM V-4b-2
+void test_devproc_environ(void);             // VIVARIUM V-4b-6
 // prowl-3b: /proc/<pid>/sched read + the OQ-4 owner-or-CAP_HOSTOWNER gate.
 void test_devproc_sched_gate_predicate(void);
 void test_devproc_sched_read_gated(void);
@@ -75,6 +81,7 @@ void test_devproc_read_sched_format(void);
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *target);
 bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target);
+bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target);
 size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 extern void proc_test_link(struct Proc *p);
@@ -96,6 +103,21 @@ static bool contains(const char *haystack, size_t hlen, const char *needle) {
         if (j == nlen) return true;
     }
     return false;
+}
+
+// V-4b-2: byte offset of the first occurrence of `needle`, or -1. Distinct from
+// contains() because an ordering check needs the POSITION, not the presence --
+// scanning with contains() matches at every index and yields 0 for everything.
+static long index_of(const char *haystack, size_t hlen, const char *needle) {
+    size_t nlen = 0;
+    while (needle[nlen]) nlen++;
+    if (nlen == 0 || nlen > hlen) return -1;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        size_t j = 0;
+        while (j < nlen && haystack[i + j] == needle[j]) j++;
+        if (j == nlen) return (long)i;
+    }
+    return -1;
 }
 
 // prowl-1: exact NUL-terminated string equality (proc_set_name basename check).
@@ -697,7 +719,9 @@ void test_devproc_read_sched_format(void) {
 }
 
 // stat_native reports the target Proc as the per-pid object's owner, with the
-// Plan 9 /proc mode convention (ctl 0600, info files 0444); the dev apex -> -1.
+// Plan 9 /proc mode convention (ctl 0600, info files 0444) and the POSIX
+// file-type bits (V-4b-5); the dev apex stats as the directory it is (V-4b-4);
+// and a zero-padded pid does not name a Proc (V-4b-5).
 void test_devproc_stat_native_ctl_owner(void) {
     struct Proc *tgt = proc_alloc();
     TEST_ASSERT(tgt != NULL, "proc_alloc target");
@@ -723,21 +747,63 @@ void test_devproc_stat_native_ctl_owner(void) {
     TEST_EXPECT_EQ(devproc.stat_native(ctl, &st), 0, "stat_native(ctl) ok");
     TEST_EXPECT_EQ(st.uid, tgt->principal_id, "ctl uid = target principal");
     TEST_EXPECT_EQ(st.gid, tgt->primary_gid,  "ctl gid = target primary_gid");
-    TEST_EXPECT_EQ(st.mode, (u32)0600u,       "ctl mode = 0600 (owner-private)");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0600u),
+                   "ctl mode = S_IFREG|0600 (owner-private)");
     TEST_EXPECT_EQ(st.qid_type, QTFILE,       "ctl is QTFILE");
     spoor_unref(ctl);
 
     struct Spoor *status = walk_one(piddir, "status");
     TEST_ASSERT(status != NULL, "walk to status");
     TEST_EXPECT_EQ(devproc.stat_native(status, &st), 0, "stat_native(status) ok");
-    TEST_EXPECT_EQ(st.mode, (u32)0444u, "status mode = 0444 (world-readable)");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0444u),
+                   "status mode = S_IFREG|0444 (world-readable)");
     spoor_unref(status);
+
+    // The FILE-TYPE bits (V-4b-5). S_ISDIR/S_ISREG read S_IFMT alone, so a bare
+    // 0555 left a pid dir classified as no-type -- and every POSIX walker that
+    // decides whether to descend (find, nftw, a shell glob, Go's IsDir) read it
+    // as not-a-directory and stopped. qid_type already said QTDIR for native
+    // callers; this is the same fact in the shape a ported one reads.
+    TEST_EXPECT_EQ(devproc.stat_native(piddir, &st), 0, "stat_native(piddir) ok");
+    TEST_EXPECT_EQ(st.mode & (u32)T_S_IFMT, (u32)T_S_IFDIR,
+                   "pid dir S_IFMT = S_IFDIR (S_ISDIR is true)");
+    TEST_EXPECT_EQ(st.mode & ~(u32)T_S_IFMT, (u32)0555u, "pid dir perms = 0555");
+    TEST_EXPECT_EQ(st.qid_type, QTDIR,        "pid dir is QTDIR");
     spoor_unref(piddir);
 
+    // The apex has no per-Proc owner, but it IS a directory and must STAT as
+    // one (V-4b-4). It used to answer -1, which spoor_stat_native surfaces as
+    // EIO -- so stat("/proc") failed, and realpath() on any path under /proc
+    // with it (musl's resolver walks each prefix). SYSTEM-owned + 0555, the
+    // devdev DEV_KIND_ROOT / devramfs synth-dir posture.
     struct Spoor *root2 = devproc.attach("");
-    TEST_EXPECT_EQ(devproc.stat_native(root2, &st), -1,
-                   "stat_native(dev apex) = -1 (no per-Proc owner)");
+    TEST_EXPECT_EQ(devproc.stat_native(root2, &st), 0,
+                   "stat_native(dev apex) ok (it is a real directory)");
+    TEST_EXPECT_EQ(st.qid_type, QTDIR,          "apex is QTDIR");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFDIR | 0555u),
+                   "apex mode = S_IFDIR|0555 (world-searchable)");
+    TEST_EXPECT_EQ(st.uid, (u32)PRINCIPAL_SYSTEM, "apex uid = SYSTEM");
+    TEST_EXPECT_EQ(st.gid, (u32)GID_SYSTEM,       "apex gid = SYSTEM");
     spoor_unref(root2);
+
+    // Leading zeros do NOT name a Proc (V-4b-5), Linux's own rule
+    // (fs/proc/base.c::name_to_int). Without it one Proc answers to unboundedly
+    // many names, so the pid -> name map stops being injective and native /proc
+    // disagrees with the diorama (whose parse_pid already rejects them) about
+    // whether a path exists. "0" itself stays legal -- kproc is pid 0.
+    struct Spoor *root3 = devproc.attach("");
+    TEST_ASSERT(root3 != NULL, "attach for the leading-zero probe");
+    char padded[16];
+    padded[0] = '0';
+    for (int i = 0; i <= pn; i++) padded[1 + i] = pidstr[i];   // "0" + pid + NUL
+    struct Spoor *bogus = walk_one(root3, padded);
+    TEST_EXPECT_EQ(bogus, NULL, "walk to a zero-padded pid is a miss");
+    if (bogus) spoor_unref(bogus);
+    // ... and the un-padded spelling still resolves, so the reject is narrow.
+    struct Spoor *plain = walk_one(root3, pidstr);
+    TEST_ASSERT(plain != NULL, "the un-padded pid still walks");
+    spoor_unref(plain);
+    spoor_unref(root3);
 
     proc_test_unlink(tgt);
     tgt->state = PROC_STATE_ZOMBIE;
@@ -1930,4 +1996,226 @@ void test_devproc_read_exe(void) {
     TEST_EXPECT_EQ(path_total_allocated() - alloc0,
                    path_total_freed() - freed0,
                    "V-4a-0: exe Path refs balance (no leak, no double-free)");
+}
+
+// VIVARIUM V-4b-1: /proc/<pid>/cwd -- the Territory's cwd, the source the diorama
+// re-presents as Linux's /proc/self/cwd. Unlike exe this is never empty for a
+// live Proc: a NULL dot_path means "/" (territory_getdot's contract), so the
+// Linux consumer always gets a usable path. Bare bytes, like exe.
+// VIVARIUM V-4b-2: /proc/<pid>/maps -- the VMA table the diorama re-presents as
+// Linux's /proc/self/maps. Builds a synthetic address space with one VMA of each
+// shape the renderer discriminates (a plain anon mapping, an anon mapping AT the
+// exec stack base, and a guard VMA with no backing Burrow), then reads the file
+// and checks each row. Revert-probe anchors are noted per assert.
+void test_devproc_maps(void) {
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "alloc maps target");
+    tgt->state = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+
+    // (1) a plain RW anon mapping, well clear of the exec layout constants.
+    const u64 plain_va = 0x0000000010000000ull;
+    struct Burrow *b1 = burrow_create_anon(PAGE_SIZE);
+    int rc1 = b1 ? burrow_map(tgt, b1, plain_va, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (b1) burrow_unref(b1);            // the mapping ref keeps it alive
+
+    // (2) an anon mapping exactly at the stack base -> role "stack".
+    struct Burrow *b2 = burrow_create_anon(PAGE_SIZE);
+    int rc2 = b2 ? burrow_map(tgt, b2, EXEC_USER_STACK_BASE, PAGE_SIZE, VMA_PROT_RW) : -1;
+    if (b2) burrow_unref(b2);
+
+    // (3) a guard VMA: no Burrow, prot == 0 -> type "none", role "guard".
+    struct Vma *g = vma_alloc_guard(EXEC_USER_STACK_GUARD_BASE, EXEC_USER_STACK_BASE);
+    int rc3 = -1;
+    if (g) {
+        rc3 = vma_insert(tgt, g);
+        if (rc3 != 0) vma_free(g);
+    }
+
+    char buf[1024];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
+    long n = -999;
+    struct Spoor *c = open_pidfile_for(tgt->pid, "maps", 0);
+    if (c) { n = devproc.read(c, buf, (long)sizeof(buf) - 1, 0); spoor_clunk(c); }
+    if (n > 0) buf[n] = '\0'; else buf[0] = '\0';
+
+    // Cleanup BEFORE any assert can return and strand the table link. proc_free
+    // runs vma_drain, which releases every mapping ref -- and since we already
+    // dropped our handle refs, that frees both Burrows (the I-7 dual count).
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+
+    // --- Assert (safe: nothing linked) ---
+    TEST_EXPECT_EQ((long)rc1, 0L, "V-4b-2: mapped the plain anon VMA");
+    TEST_EXPECT_EQ((long)rc2, 0L, "V-4b-2: mapped the stack-base anon VMA");
+    TEST_EXPECT_EQ((long)rc3, 0L, "V-4b-2: inserted the guard VMA");
+    TEST_ASSERT(n > 0, "V-4b-2: /proc/<pid>/maps reads non-empty");
+
+    // The header names the columns, so a consumer can split without a schema.
+    TEST_ASSERT(contains(buf, (size_t)n, "start-end perms off type file role\n"),
+                "V-4b-2: maps leads with the column header");
+
+    // The plain mapping: RW, private, anon-backed, no file identity, no role.
+    // Revert-probe: flip the perms order, or emit `s` unconditionally, and the
+    // "rw-p" here fails.
+    TEST_ASSERT(contains(buf, (size_t)n, "0x10000000-0x10001000 rw-p 0x0 anon - -\n"),
+                "V-4b-2: the plain anon row is exactly rw-p/anon/-/-");
+
+    // The stack mapping: same shape, but the role column names it. Revert-probe:
+    // drop the EXEC_USER_STACK_BASE arm from maps_role_name and this fails while
+    // the row above still passes -- so the two are independently pinned.
+    TEST_ASSERT(contains(buf, (size_t)n, " rw-p 0x0 anon - stack\n"),
+                "V-4b-2: the VMA at the exec stack base carries role \"stack\"");
+
+    // The guard VMA: prot == 0 renders "---p", a NULL Burrow renders type "none"
+    // AND role "guard" -- the two are separate arms, so this pins both.
+    TEST_ASSERT(contains(buf, (size_t)n, " ---p 0x0 none - guard\n"),
+                "V-4b-2: a guard VMA is ---p / none / guard");
+
+    // Ascending order is vma_insert's contract; the renderer must not reorder.
+    // The guard sits one page below the stack, so its row must precede it.
+    long guard_at = index_of(buf, (size_t)n, " guard\n");
+    long stack_at = index_of(buf, (size_t)n, " stack\n");
+    TEST_ASSERT(guard_at >= 0 && stack_at >= 0 && guard_at < stack_at,
+                "V-4b-2: rows are emitted in ascending-VA order");
+}
+
+// VIVARIUM V-4b-6: /proc/<pid>/environ -- the gate, the wiring, the 0400 mode,
+// and the short-read-not-truncation property of the per-call clamp.
+//
+// The gate's DENY leg is only reachable through the predicate: devproc_environ_-
+// read takes its caller from current_thread(), and the in-kernel runner is always
+// kproc (CAP_ALL, so always CAP_HOSTOWNER). Driving the predicate directly with a
+// synthetic (caller, target) pair is the prowl-5-F4 precedent -- without it a
+// wiring regression that dropped the gate would leave every test green.
+void test_devproc_environ(void) {
+    // --- the gate ----------------------------------------------------------
+    struct Proc *caller = proc_alloc();
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(caller && target, "proc_alloc caller + target");
+    target->principal_id = 0xA11CEu;
+
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = 0;
+    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: a non-owner without caps cannot read a peer's environ");
+    caller->principal_id = 0xA11CEu;
+    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: the owner can");
+    caller->principal_id = 0xB0Bu;
+    caller->caps         = CAP_HOSTOWNER;
+    TEST_ASSERT(devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: CAP_HOSTOWNER can");
+    // CAP_DEBUG is deliberately NOT an axis: environ is an info file, and a
+    // debugger's authority to stop a Proc is a different grant from a reader's.
+    caller->caps = CAP_DEBUG;
+    TEST_ASSERT(!devproc_owner_or_hostowner(caller, target),
+                "V-4b-6: CAP_DEBUG alone is not an environ axis");
+    caller->state = PROC_STATE_ZOMBIE;
+    proc_free(caller);
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(target);
+
+    // --- the live read -----------------------------------------------------
+    struct Proc *tgt = proc_alloc();
+    TEST_ASSERT(tgt != NULL, "proc_alloc environ target");
+    tgt->principal_id = current_thread()->proc->principal_id;   // owner -> allowed
+    tgt->state        = PROC_STATE_ALIVE;
+    proc_test_link(tgt);
+
+    u64 a = env_create(tgt, "A", 1);
+    u64 b = env_create(tgt, "BB", 2);
+    TEST_ASSERT(a != 0 && b != 0, "populate the target's env");
+    TEST_EXPECT_EQ(env_write(tgt, a, 0, "1", 1),  1L, "A=1");
+    TEST_EXPECT_EQ(env_write(tgt, b, 0, "22", 2), 2L, "BB=22");
+
+    struct Spoor *c = open_pidfile_for(tgt->pid, "environ", 0);
+    TEST_ASSERT(c != NULL, "walk + open /proc/<pid>/environ");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ(devproc.stat_native(c, &st), 0, "stat_native(environ) ok");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0400u),
+                   "V-4b-6: environ is 0400 -- gated, unlike its 0444 siblings");
+
+    char buf[64];
+    long n = devproc.read(c, buf, (long)sizeof(buf), 0);
+    const char want[] = "A=1\0BB=22\0";
+    const long wlen = (long)sizeof(want) - 1;
+    TEST_EXPECT_EQ(n, wlen, "V-4b-6: the read is wired to the env render");
+    bool same = (n == wlen);
+    for (long i = 0; same && i < wlen; i++) same = (buf[i] == want[i]);
+    TEST_ASSERT(same, "V-4b-6: /proc/<pid>/environ serves the NUL-separated block");
+    spoor_clunk(c);
+
+    // --- the per-call clamp is a SHORT READ, not a truncation ---------------
+    //
+    // One call copies at most DEVPROC_ENVIRON_READ_MAX (8 KiB) because it runs
+    // with IRQs off; the FILE is unbounded. The property that makes that safe is
+    // that a consumer looping from the returned offset still gets everything --
+    // so build a block past the clamp and prove the loop completes. (Off the
+    // stack: 12 KiB of environment needs a real buffer.)
+    for (int i = 0; i < 3; i++) {
+        char nm[4] = { 'V', (char)('0' + i), '\0', '\0' };
+        u64 id = env_create(tgt, nm, 2);
+        TEST_ASSERT(id != 0, "create a big var");
+        char chunk[512];
+        for (size_t k = 0; k < sizeof(chunk); k++) chunk[k] = (char)('a' + i);
+        for (int off = 0; off < 4096; off += (int)sizeof(chunk)) {
+            TEST_EXPECT_EQ(env_write(tgt, id, off, chunk, (long)sizeof(chunk)),
+                           (long)sizeof(chunk), "fill 4 KiB");
+        }
+    }
+    // 2 small records + 3 * (2 name + 1 '=' + 4096 value + 1 NUL) = 12307 bytes.
+    const long big_total = wlen + 3 * (2 + 1 + 4096 + 1);
+    TEST_ASSERT(big_total > 8192L, "the block really does exceed the clamp");
+
+    struct page *pg = alloc_pages(2, KP_ZERO);          // 16 KiB
+    TEST_ASSERT(pg != NULL, "alloc a 16 KiB read buffer");
+    char *big = (char *)pa_to_kva(page_to_pa(pg));
+
+    struct Spoor *c2 = open_pidfile_for(tgt->pid, "environ", 0);
+    TEST_ASSERT(c2 != NULL, "re-open environ");
+    long first = devproc.read(c2, big, 16384L, 0);
+    TEST_EXPECT_EQ(first, 8192L,
+                   "V-4b-6: one call clamps at DEVPROC_ENVIRON_READ_MAX");
+
+    long total = first;
+    for (int guard = 0; guard < 8; guard++) {
+        long k = devproc.read(c2, big + total, 16384L - total, total);
+        if (k <= 0) break;
+        total += k;
+    }
+    TEST_EXPECT_EQ(total, big_total,
+                   "V-4b-6: looping past the clamp reads the WHOLE environment");
+    // The first two records survived the big ones -- so the clamp shortened the
+    // call, it did not drop content (the failure mode a format-and-slice render
+    // would have had).
+    same = true;
+    for (long i = 0; same && i < wlen; i++) same = (big[i] == want[i]);
+    TEST_ASSERT(same, "V-4b-6: the head of the block is unchanged by the clamp");
+    spoor_clunk(c2);
+    free_pages(pg, 2);
+
+    proc_test_unlink(tgt);
+    tgt->state = PROC_STATE_ZOMBIE;
+    proc_free(tgt);
+}
+
+void test_devproc_read_cwd(void) {
+    // kproc always exists and has a territory, so its cwd is renderable and --
+    // never having chdir'd -- is the "/" default. That pins BOTH the wiring and
+    // the never-empty property in one read.
+    struct Spoor *c = open_pidfile_for(0, "cwd", 0);
+    TEST_ASSERT(c != NULL, "open /proc/0/cwd");
+    char buf[64];
+    for (size_t i = 0; i < sizeof(buf); i++) buf[i] = (char)0xAA;
+    long n = devproc.read(c, buf, (long)sizeof(buf), 0);
+    spoor_clunk(c);
+
+    TEST_EXPECT_EQ(n, 1L, "V-4b-1: an un-chdir'd Proc's cwd is \"/\" (1 byte)");
+    TEST_ASSERT(n == 1 && buf[0] == '/',
+                "V-4b-1: cwd renders \"/\" -- bare, no NUL, no newline");
+    // Revert-probe anchor: appending a terminator makes n == 2 and fails above.
+    TEST_ASSERT(buf[1] == (char)0xAA, "V-4b-1: nothing written past the path");
 }

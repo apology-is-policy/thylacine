@@ -493,6 +493,9 @@ void test_sched_prowl_counters(void);       // prowl-3a: per-thread sched counte
 void test_devproc_read_cmdline_kproc(void);
 void test_devproc_read_ns_format(void);
 void test_devproc_read_exe(void);              // VIVARIUM V-4a-0
+void test_devproc_read_cwd(void);              // VIVARIUM V-4b-1
+void test_devproc_maps(void);                  // VIVARIUM V-4b-2
+void test_devproc_environ(void);               // VIVARIUM V-4b-6
 void test_devproc_read_ctl_returns_zero(void);
 void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
@@ -553,6 +556,7 @@ void test_cons_cook_line_overflow(void);         // LS-8b
 void test_cons_cook_mode_flip_fresh_line(void);  // LS-8b audit F1
 void test_cons_cook_canonical_poll_edge(void);   // LS-8b audit F2a
 void test_cons_drain_tap_mirrors_output(void);       // G-4
+void test_cons_sys_puts_uses_shared_console_path(void);  // #76
 void test_cons_drain_feed_runs_discipline(void);     // G-4
 void test_cons_drain_overflow_drops_oldest(void);    // G-4
 void test_cons_drain_close_and_reopen_epoch(void);   // G-4
@@ -568,8 +572,10 @@ void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
 void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read
+void test_devctl_cpu_sources_live(void);            // V-4c-2b: the /proc/stat + cpuinfo sources
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
+void test_devctl_stat_native_shapes(void);      // V-4b-5: /ctl stats as a dir; leaves as files
 void test_devdev_bestiary_smoke(void);
 void test_devdev_attach_returns_dir(void);
 void test_devdev_walk_to_each_leaf(void);
@@ -605,11 +611,14 @@ void test_env_overwrite_truncate(void);
 void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
+void test_env_render_environ(void);              // VIVARIUM V-4b-6
+void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
 void test_env_clone_deep_independent(void);
 void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
 void test_devenv_walk_reuse_nc(void);
 void test_devenv_walk_read(void);
+void test_devenv_stat_native_shapes(void);      // V-4b-5: /env stats; entry size is real
 
 void test_allowance_null_is_broad(void);
 void test_allowance_mmio_containment(void);
@@ -1849,6 +1858,9 @@ struct test_case g_tests[] = {
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
     { "devproc.read_exe",              test_devproc_read_exe,              false, NULL },
+    { "devproc.read_cwd",              test_devproc_read_cwd,              false, NULL },
+    { "devproc.maps",                 test_devproc_maps,                  false, NULL },
+    { "devproc.environ",              test_devproc_environ,               false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
     { "devproc.write_ctl_rejects",     test_devproc_write_ctl_rejects,     false, NULL },
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
@@ -1917,6 +1929,7 @@ struct test_case g_tests[] = {
     { "cons.cook_mode_flip_fresh_line", test_cons_cook_mode_flip_fresh_line, false, NULL },
     { "cons.cook_canonical_poll_edge", test_cons_cook_canonical_poll_edge, false, NULL },
     { "cons.drain_tap_mirrors_output", test_cons_drain_tap_mirrors_output, false, NULL },
+    { "cons.sys_puts_uses_shared_console_path", test_cons_sys_puts_uses_shared_console_path, false, NULL },
     { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
     { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
     { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },
@@ -1926,6 +1939,7 @@ struct test_case g_tests[] = {
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },
     { "devctl.walk_unknown_misses",    test_devctl_walk_unknown_misses,    false, NULL },
     { "devctl.read_procs_format",      test_devctl_read_procs_format,      false, NULL },
+    { "devctl.cpu_sources_live",       test_devctl_cpu_sources_live,       false, NULL },
     { "devctl.read_memory_format",     test_devctl_read_memory_format,     false, NULL },
     { "devctl.read_devices_format",    test_devctl_read_devices_format,    false, NULL },
     { "devctl.read_kernel_base_format",
@@ -1935,6 +1949,7 @@ struct test_case g_tests[] = {
     { "devctl.read_cpu_format",        test_devctl_read_cpu_format,        false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
+    { "devctl.stat_native_shapes",     test_devctl_stat_native_shapes,     false, NULL },
     { "devdev.bestiary_smoke",         test_devdev_bestiary_smoke,         false, NULL },
     { "devdev.attach_returns_dir",     test_devdev_attach_returns_dir,     false, NULL },
     { "devdev.walk_to_each_leaf",      test_devdev_walk_to_each_leaf,      false, NULL },
@@ -1970,11 +1985,14 @@ struct test_case g_tests[] = {
     { "env.unset_monotonic",           test_env_unset_monotonic,           false, NULL },
     { "env.iter_order",                test_env_iter_order,                false, NULL },
     { "env.bounds",                    test_env_bounds,                    false, NULL },
+    { "env.render_environ",            test_env_render_environ,            false, NULL },
+    { "env.render_environ_eq_in_name", test_env_render_environ_eq_in_name, false, NULL },
     { "env.clone_deep_independent",    test_env_clone_deep_independent,    false, NULL },
     { "env.free_null_tolerant",        test_env_free_null_tolerant,        false, NULL },
     { "devenv.bestiary",               test_devenv_bestiary,               false, NULL },
     { "devenv.walk_reuse_nc",          test_devenv_walk_reuse_nc,          false, NULL },
     { "devenv.walk_read",              test_devenv_walk_read,              false, NULL },
+    { "devenv.stat_native_shapes",     test_devenv_stat_native_shapes,     false, NULL },
 
     { "allowance.null_is_broad",            test_allowance_null_is_broad,            false, NULL },
     { "allowance.mmio_containment",         test_allowance_mmio_containment,         false, NULL },

@@ -27,9 +27,41 @@
 #include "hwfeat.h"
 #include "hwdebug.h"
 
+#include <thylacine/dtb.h>
 #include <thylacine/types.h>
 
 struct hw_features g_hw_features;
+
+// VIVARIUM §6.17: per-CPU identity, one slot per DTB-declared CPU. Written
+// exactly once by the CPU it describes, at bring-up, before that CPU can run
+// any EL0 code; read afterwards by /ctl/cpu. Single-writer-then-read-only, so
+// the reads take no lock — the same posture as g_hw_features itself.
+static struct hw_cpu_ident g_cpu_ident[DTB_MAX_CPUS];
+
+void hw_cpu_ident_detect(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return;
+
+    u64 midr, ctr;
+    __asm__ __volatile__("mrs %0, midr_el1" : "=r"(midr));
+    __asm__ __volatile__("mrs %0, ctr_el0"  : "=r"(ctr));
+
+    // CTR_EL0.DminLine (bits 19:16) is log2 of the minimum D-cache line in
+    // WORDS, so the line is (4 << DminLine) bytes — the same decode
+    // mmu.c::arch_icache_sync_range does for IminLine. Reporting bytes rather
+    // than the raw register keeps the arm64 encoding on this side of the
+    // boundary: the diorama's job is Linux shape, not register layout (§6.8).
+    g_cpu_ident[cpu].midr        = midr;
+    g_cpu_ident[cpu].dcache_line = 4u << ((u32)((ctr >> 16) & 0xFu));
+
+    // Publish LAST: a cross-CPU reader that sees valid must see both fields.
+    __atomic_store_n(&g_cpu_ident[cpu].valid, true, __ATOMIC_RELEASE);
+}
+
+const struct hw_cpu_ident *hw_cpu_ident(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return NULL;
+    if (!__atomic_load_n(&g_cpu_ident[cpu].valid, __ATOMIC_ACQUIRE)) return NULL;
+    return &g_cpu_ident[cpu];
+}
 
 static inline u64 read_id_aa64isar0_el1(void) {
     u64 v;

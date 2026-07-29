@@ -488,10 +488,11 @@ acquire/release, so:
   a ring-fitting write's whole cooked run under one lock hold) is a v1.x
   enhancement (#79); it carries a two-ring (serial + the G-4 aurora drain)
   lock-ordering design not worth rushing onto the trusted-path surface.
-- **`SYS_PUTS` (`t_putstr`) bypasses the ring + role** — the always-on diagnostic
-  UART channel writes `uart_putc` directly, so it can interleave with `/dev/cons`
-  writes at the FIFO. Deliberate (the diagnostic channel is independent of the Dev)
-  and pre-existing.
+- ~~**`SYS_PUTS` (`t_putstr`) bypasses the ring + role.**~~ **CLOSED at #76.**
+  `sys_puts_handler` now stages the user buffer into a `u8 scratch[SYS_RW_STACK]`
+  with one `uaccess_copy_in` and emits it through `cons_output_write`, so it is
+  role-held, ring-buffered, drain-tapped and ONLCR-cooked — identical treatment to
+  a `/dev/cons` write. See "SYS_PUTS joins the shared path (#76)" below.
 - **A debug/job-control stop mid-`cons_output_write` holds the writer role** for
   the stop's duration; other console writers park (never spin/extinct) until it
   resumes. A new liveness seam (the console analog of the #89/8c-3 reader-role
@@ -501,7 +502,69 @@ acquire/release, so:
   inside extinction, where the ring is unavailable by construction. Post-boot
   kernel prints are diagnostic and rare; tightening this is v1.x.
 
+### SYS_PUTS joins the shared path (#76, as-built)
+
+P1-F converted `cons_output_write` but left `sys_puts_handler`'s byte-by-byte
+lock-free `uart_putc` loop in place as a *documented, deliberate* seam: the
+diagnostic channel, the reasoning went, must work independently of the console
+Dev, and the accepted price was interleaving at the FIFO. The seam was live and
+the price was underestimated on both counts.
+
+**The predicted cost arrived, on the trusted path.** LS-CI caught a login prompt
+rendered as `patapestrssyd: mworodd:e` — `"password: "` (login, via fd 1 →
+`cons_output_write`, role-held) shredded byte-for-byte by `"tapestryd: mode "`
+(tapestryd, via `t_putstr`). This is exactly the "two programs, one on each path"
+case §23.5.2 named. SYS_PUTS is not a niche channel: **83 binaries** reach it via
+`libthyla_rs::t_putstr` / `libt::t_puts`, making it *the* native diagnostic
+stream. A role only some writers take excludes nobody.
+
+**The unstated cost was the worse one.** `cons_drain_tap` fires from `cons_emit`
+and `cons_emit_wait` only, so nothing written via SYS_PUTS ever reached the G-4
+renderer. Under a graphical console the seam's own justification inverts: the
+direct path did not make the diagnostic channel *more* reliably available, it
+made it available **never** — perfectly normal on serial, absent on the
+framebuffer.
+
+**The independence rationale never required the direct path.** `cons_output_write`
+is the shared cons-layer function (#57b), not the Dev: reaching it needs no fd,
+Spoor, handle, namespace or open. SYS_PUTS keeps every bit of its independence by
+calling it. Pre-GIC boot still falls through to the direct bounded `uart_putc`
+inside `cons_tx_push_nowait`, and extinction/Halls are untouched (they use
+`uart_puts` / HX-I paths, and a dying kernel issues no EL0 syscall).
+
+Three deliberate consequences:
+
+- **The copy-in happens BEFORE the role is claimed.** Faulting a user page can
+  sleep, and holding the console role across an unbounded page-in would stall
+  every other console writer behind it. Staging first bounds the role to the
+  emit. (`cons_output_write` may sleep at all only because `spoor_write_common`
+  holds no lock across `dev->write`.)
+- **A copy-in fault now emits nothing** — whole-op EFAULT. The old loop pushed
+  the readable prefix to the console before failing.
+- **The return may be SHORT** where it was previously len-or-−1: `cons_output_write`
+  cuts a write off on the #67 stalled-consumer deadline or a #811 death, and
+  reporting that honestly beats claiming bytes that were dropped. No caller
+  inspects the count — every `t_puts`/`t_putstr` use in `usr/` is for side effect.
+
+**ONLCR is load-bearing here, not cosmetic.** Closing the tap gap newly exposes
+this output to aurora, whose VT does not synthesize CR on LF (#36), so bare-LF
+writes would staircase the moment they became visible. Routing through
+`cons_output_write` fixes the visibility and the line endings in one stroke.
+
 ### Coverage
+
+`cons.sys_puts_uses_shared_console_path` pins #76. It has to spawn a **real EL0
+binary** (`/hello`, whose entire output is one `t_putstr`): `sys_puts_handler`
+takes a USER VA and kproc has `pgtable_root == 0`, so no in-kernel caller can
+reach it at all — a unit test of the handler is not awkward but *impossible*. The
+drain is the observable: the role's absence shows only under a race, the tap's
+absence shows from one thread, and both live behind the same call, so proving
+SYS_PUTS reaches the drain proves it took the shared path. The count is sampled
+with the **non-blocking** `cons_test_drain_count()` before any `cons_drain_read()`
+— that read *sleeps* on an armed-but-empty drain, so reading first would turn a
+pre-fix run into a boot **hang** instead of a failed test, and a hang reports
+nothing. **Revert-probed**: restoring the `uart_putc` loop gives 1216/1217 FAIL on
+exactly `SYS_PUTS output reached the drain tap`.
 
 `cons.tx_role_serializes_writers` pins the property: with the role held, a second
 `cons_output_write` **parks** and emits nothing; on release it completes and its

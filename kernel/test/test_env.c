@@ -13,6 +13,7 @@
 #include <thylacine/env.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF*
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -22,11 +23,14 @@ void test_env_overwrite_truncate(void);
 void test_env_unset_monotonic(void);
 void test_env_iter_order(void);
 void test_env_bounds(void);
+void test_env_render_environ(void);              // VIVARIUM V-4b-6
+void test_env_render_environ_eq_in_name(void);   // VIVARIUM V-4b-6
 void test_env_clone_deep_independent(void);
 void test_env_free_null_tolerant(void);
 void test_devenv_bestiary(void);
 void test_devenv_walk_reuse_nc(void);
 void test_devenv_walk_read(void);
+void test_devenv_stat_native_shapes(void);
 
 // proc_alloc gives a fresh Proc with a NULL (empty) env; ZOMBIE + proc_free
 // releases it (env_free runs in proc_free). Mirrors test_allowance.c::amk/adrop.
@@ -129,6 +133,109 @@ void test_env_iter_order(void) {
     id = 0;
     TEST_ASSERT(env_iter(p, 0, &id, nm, sizeof(nm), &nl) && id == a, "A still first");
     TEST_ASSERT(env_iter(p, id, &id, nm, sizeof(nm), &nl) && id == c, "skips removed B -> C");
+    edrop(p);
+}
+
+// VIVARIUM V-4b-6: the flat "NAME=VALUE\0" block behind /proc/<pid>/environ.
+// Pins the encoding, the id ordering, the offset windowing (which is the whole
+// reason this render is not a format-and-slice like its /proc siblings), and the
+// skip rule for entries the Linux shape cannot carry.
+void test_env_render_environ(void) {
+    struct Proc *p = emk();
+    char buf[256];
+
+    // No Env at all -> an empty file, not an error. (A Proc that never set a
+    // variable carries env == NULL; -1 here would make every such /proc/<pid>/
+    // environ read fail instead of reading empty, which is what Linux does for a
+    // kernel thread.)
+    TEST_EXPECT_EQ(env_render_environ(p, 0, buf, (long)sizeof(buf)), 0L,
+                   "V-4b-6: a Proc with no env renders an empty block");
+
+    u64 a = env_create(p, "A", 1);
+    u64 b = env_create(p, "BB", 2);
+    TEST_ASSERT(a != 0 && b != 0 && a < b, "two vars, ids monotonic");
+    TEST_EXPECT_EQ(env_write(p, a, 0, "1", 1), 1L, "A=1");
+    TEST_EXPECT_EQ(env_write(p, b, 0, "22", 2), 2L, "BB=22");
+
+    // Records are NUL-TERMINATED (not NUL-separated): the block ends with one,
+    // exactly like Linux's, so a consumer that reads to EOF and splits on NUL
+    // gets two records rather than two-and-an-empty-tail.
+    const char want[] = "A=1\0BB=22\0";
+    const long wlen = (long)sizeof(want) - 1;      // 10: drop the literal's own NUL
+    long n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    TEST_EXPECT_EQ(n, wlen, "V-4b-6: block is NAME=VALUE NUL per var, id order");
+    TEST_ASSERT(bytes_eq(buf, want, wlen), "V-4b-6: block bytes exact");
+
+    // Past EOF reads 0 (the read loop's terminator), never -1.
+    TEST_EXPECT_EQ(env_render_environ(p, wlen, buf, (long)sizeof(buf)), 0L,
+                   "V-4b-6: off at EOF -> 0");
+    TEST_EXPECT_EQ(env_render_environ(p, wlen + 99, buf, (long)sizeof(buf)), 0L,
+                   "V-4b-6: off past EOF -> 0");
+
+    // THE OFFSET WINDOW. Read the block back 3 bytes at a time and reassemble:
+    // this is what a real consumer does, and it is the property a format-and-
+    // slice render could not provide for an environment larger than the devproc
+    // buffer. A window that starts or ends mid-record must still be exact.
+    char asm_[64];
+    long got = 0;
+    for (long off = 0; off < wlen; off += 3) {
+        long k = env_render_environ(p, off, asm_ + got, 3);
+        TEST_ASSERT(k > 0, "V-4b-6: a windowed read inside the block makes progress");
+        got += k;
+    }
+    TEST_EXPECT_EQ(got, wlen, "V-4b-6: windowed reads reassemble the whole block");
+    TEST_ASSERT(bytes_eq(asm_, want, wlen), "V-4b-6: reassembled bytes match");
+
+    // An empty value still renders its record ("NAME=\0") -- set-but-empty and
+    // unset are different states, and getenv distinguishes them.
+    u64 c = env_create(p, "C", 1);
+    TEST_ASSERT(c != 0, "create C with no value");
+    n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    const char want2[] = "A=1\0BB=22\0C=\0";
+    TEST_EXPECT_EQ(n, (long)sizeof(want2) - 1, "V-4b-6: empty value renders NAME=");
+    TEST_ASSERT(bytes_eq(buf, want2, (long)sizeof(want2) - 1),
+                "V-4b-6: empty-value record bytes exact");
+    TEST_ASSERT(env_unset(p, "C", 1), "drop C");
+
+    // THE SKIP RULE. A value containing a NUL cannot be encoded (the NUL IS the
+    // record terminator), so the entry is omitted WHOLE rather than emitted and
+    // silently split -- a split would make its tail parse as a NAME=VALUE that
+    // was never set. The rest of the block is unaffected.
+    u64 d = env_create(p, "D", 1);
+    TEST_ASSERT(d != 0, "create D");
+    TEST_EXPECT_EQ(env_write(p, d, 0, "x\0y", 3), 3L, "D's value carries a NUL");
+    n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    TEST_EXPECT_EQ(n, wlen, "V-4b-6: a NUL-bearing value is skipped, not split");
+    TEST_ASSERT(bytes_eq(buf, want, wlen), "V-4b-6: the other records survive it");
+
+    edrop(p);
+}
+
+// The other half of the skip rule: a NAME containing '=' cannot be encoded
+// either (the first '=' IS the separator, so "X=Y" with value "1" would read
+// back as name "X" value "Y=1" -- one variable masquerading as another). Its own
+// test because reaching it needs env_create's back door: devenv's walk passes a
+// single path component, which cannot contain '/' but CAN contain '='.
+void test_env_render_environ_eq_in_name(void) {
+    struct Proc *p = emk();
+    u64 ok  = env_create(p, "K", 1);
+    u64 bad = env_create(p, "X=Y", 3);
+    TEST_ASSERT(ok != 0, "create K");
+    TEST_ASSERT(bad != 0, "'=' in a name is legal in /env (only NUL and / are not)");
+    TEST_EXPECT_EQ(env_write(p, ok,  0, "v", 1), 1L, "K=v");
+    TEST_EXPECT_EQ(env_write(p, bad, 0, "1", 1), 1L, "X=Y gets a value too");
+
+    char buf[64];
+    long n = env_render_environ(p, 0, buf, (long)sizeof(buf));
+    const char want[] = "K=v\0";
+    TEST_EXPECT_EQ(n, (long)sizeof(want) - 1,
+                   "V-4b-6: a '=' in a name is skipped, not mis-attributed");
+    TEST_ASSERT(bytes_eq(buf, want, n), "V-4b-6: only the encodable record renders");
+
+    // And /env still serves it natively -- the skip is the LINUX render declining
+    // to speak, not the variable disappearing. This is what keeps the reformatter
+    // honest (VIVARIUM section 6.2: the native surface stays the truth).
+    TEST_EXPECT_EQ(env_lookup(p, "X=Y", 3), bad, "/env still resolves the name");
     edrop(p);
 }
 
@@ -299,4 +406,77 @@ void test_devenv_walk_read(void) {
     spoor_unref(vf);
     spoor_unref(root);
     env_free(p);  // restore the current Proc to an empty env
+}
+
+// stat_native: /env is a directory, an entry is a regular file with a REAL
+// size, and both are owned by the calling Proc (VIVARIUM V-4b-5). /env had no
+// stat_native at all, so stat("/env"), fstat on an /env fd, and lseek(SEEK_END)
+// all failed -- and realpath() of anything under it with them.
+void test_devenv_stat_native_shapes(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL, "current proc");
+    struct Proc *p = t->proc;
+    env_free(p);                              // start from a clean env
+
+    u64 id = env_create(p, "STATVAR", 7);
+    TEST_ASSERT(id != 0, "create STATVAR");
+    TEST_EXPECT_EQ(env_write(p, id, 0, "abcde", 5), (long)5, "write 5 bytes");
+
+    struct t_stat st;
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env");
+    TEST_ASSERT(devenv.stat_native != NULL, "/env has a stat_native slot");
+    TEST_EXPECT_EQ(devenv.stat_native(root, &st), 0, "stat_native(/env) ok");
+    TEST_EXPECT_EQ(st.mode & (u32)T_S_IFMT, (u32)T_S_IFDIR,
+                   "/env S_IFMT = S_IFDIR (S_ISDIR is true)");
+    TEST_EXPECT_EQ(st.mode & ~(u32)T_S_IFMT, (u32)0755u, "/env perms = 0755");
+    TEST_EXPECT_EQ(st.qid_type, QTDIR,          "/env is QTDIR");
+    // Your environment is yours: every devenv op resolves the CALLING Proc's
+    // env, so the owner it reports is the caller, not a system principal.
+    TEST_EXPECT_EQ(st.uid, p->principal_id,     "/env uid = the calling Proc");
+    TEST_EXPECT_EQ(st.gid, p->primary_gid,      "/env gid = the calling Proc");
+
+    const char *names[1] = { "STATVAR" };
+    struct Walkqid *wq = devenv.walk(root, NULL, names, 1);
+    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk /env/STATVAR");
+    struct Spoor *vf = wq->spoor;
+    walkqid_free(wq);
+
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), 0, "stat_native(STATVAR) ok");
+    TEST_EXPECT_EQ(st.mode, (u32)(T_S_IFREG | 0644u), "entry = S_IFREG|0644");
+    TEST_EXPECT_EQ(st.qid_type, QTFILE,               "entry is QTFILE");
+    // UNLIKE a /ctl report, a stored value has a definite length that does not
+    // move between the stat and the read -- so the size is real, and
+    // lseek(SEEK_END) (which is this same call) lands on it.
+    TEST_EXPECT_EQ(st.size, (u64)5, "entry size = the value length");
+    TEST_EXPECT_EQ(env_write(p, id, 5, "fgh", 3), (long)3, "extend to 8 bytes");
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), 0, "re-stat ok");
+    TEST_EXPECT_EQ(st.size, (u64)8, "size tracks the value");
+
+    // The FILE IDENTITY must be unique tree-wide. Every other Dev's qid namespace
+    // is global, so its Spoors carry the static devno 0 and (devno, qid.path)
+    // still names one file; devenv's ids are PER-PROC and restart at 1, so
+    // without a per-Env devno two Procs' unrelated variables both report (0, 1)
+    // and claim to be the same file -- a wrong fstat, and (because the REVENANT
+    // Image cache is keyed on that pair) an exec of an /env path serving one Proc
+    // another's bytes. spoor_stat_native reports the SPOOR's devno (#100), so the
+    // walk is what must stamp it.
+    TEST_ASSERT(env_devno(p) != 0, "a live Env has a device number");
+    TEST_EXPECT_EQ(vf->devno, env_devno(p), "the walked Spoor carries it");
+    struct Proc *q = emk();
+    TEST_ASSERT(q != NULL, "second Proc");
+    TEST_ASSERT(env_create(q, "STATVAR", 7) != 0, "same name in a second env");
+    TEST_ASSERT(env_devno(q) != env_devno(p),
+                "two Procs' envs are different devices (no identity collision)");
+    edrop(q);
+
+    // A variable removed between the walk and the stat reports GONE rather than
+    // another variable's length -- the monotonic-id guarantee, which every
+    // other devenv op already honours.
+    TEST_ASSERT(env_unset(p, "STATVAR", 7), "unset STATVAR");
+    TEST_EXPECT_EQ(devenv.stat_native(vf, &st), -1, "a stale entry qid -> -1");
+
+    spoor_unref(vf);
+    spoor_unref(root);
+    env_free(p);                              // restore an empty env
 }

@@ -129,6 +129,16 @@ struct CpuSched {
     // slot, cs stable across the park); a cross-CPU reader (devctl) __atomic_loads
     // it. RELAXED -- a monotonic counter the reader diffs across polls.
     u64            idle_ns;
+
+    // V-4c-2b (docs/VIVARIUM.md section 6.17): context switches performed ON
+    // this CPU -- the kernel source for the diorama's /proc/stat `ctxt`. Stamped
+    // at the SAME single switch chokepoint as prowl's per-thread nsched, from
+    // the `cs` already in hand, so it costs one store to a line this CPU is
+    // already writing. Single-writer per CPU (the switching CPU owns its own
+    // slot); a cross-CPU reader (devctl) __atomic_loads it, RELAXED, exactly as
+    // for idle_ns. READ-ONLY telemetry: no scheduling decision reads it, so
+    // I-8 / I-17 / the EEVDF math are untouched (the prowl-3a discipline).
+    u64            nctxt;
 };
 
 static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
@@ -1416,6 +1426,14 @@ void sched(void) {
             __atomic_store_n(&next->nmigrations,
                              next->nmigrations + 1, __ATOMIC_RELAXED);
         __atomic_store_n(&next->last_cpu, this_cpu, __ATOMIC_RELAXED);
+
+        // V-4c-2b (VIVARIUM section 6.17): the per-CPU context-switch count, the
+        // /proc/stat `ctxt` source. Same chokepoint, same single-writer-per-CPU
+        // discipline, same read-only-telemetry posture as the counters above --
+        // and `cs` is already in hand, so this is one store to a line this CPU
+        // owns. Counted for EVERY switch (idle included), which is what Linux's
+        // `ctxt` counts.
+        __atomic_store_n(&cs->nctxt, cs->nctxt + 1, __ATOMIC_RELAXED);
     }
 
     cpu_switch_context(&prev->ctx, &next->ctx);
@@ -1608,6 +1626,16 @@ u64 sched_cpu_idle_ns(unsigned cpu) {
     if (cpu >= DTB_MAX_CPUS) return 0;
     if (!g_cpu_sched[cpu].initialized) return 0;
     return __atomic_load_n(&g_cpu_sched[cpu].idle_ns, __ATOMIC_RELAXED);
+}
+
+// V-4c-2b (VIVARIUM section 6.17): cumulative context switches performed on
+// `cpu` -- the /proc/stat `ctxt` source, summed across CPUs by the diorama.
+// Same guards as sched_cpu_idle_ns: a never-brought-up secondary reads a clean
+// 0 rather than garbage.
+u64 sched_cpu_ctxt(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return 0;
+    if (!g_cpu_sched[cpu].initialized) return 0;
+    return __atomic_load_n(&g_cpu_sched[cpu].nctxt, __ATOMIC_RELAXED);
 }
 
 // Best-effort snapshot of every runnable thread across ALL CPUs' run trees

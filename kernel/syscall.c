@@ -13,6 +13,7 @@
 #include <thylacine/9p_wire.h>            // struct p9_weft_geom (Weft-6a-2)
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
+#include <thylacine/cons.h>               // cons_output_write (SYS_PUTS; #76)
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/devramfs.h>
@@ -159,9 +160,42 @@ static void sys_exit_group_handler(u64 status) {
 // bound. ARM IHI 0487 D5.2.4: with 48-bit VAs and no TBI, valid
 // TTBR0 addresses occupy bits [46:0]; bit 47 is the TTBR selector.
 
+// #76: SYS_PUTS routes through cons_output_write -- the ONE console-output
+// implementation (#57b) -- instead of its own byte-by-byte uart_putc loop.
+//
+// The loop was the pre-P1-F shape #75 exists to eliminate, left behind in this
+// caller when P1-F converted cons_output_write. SYS_PUTS is the native
+// diagnostic channel (83 binaries reach it via libthyla_rs::t_putstr /
+// libt::t_puts), so the defect was not niche -- it carried TWO:
+//
+//   1. NO WRITER ROLE. uart_putc is lock-free, so a SYS_PUTS interleaved at
+//      BYTE granularity with a concurrent /dev/cons writer -- which does hold
+//      the role -- and with peer SYS_PUTS callers. Observed live: an LS-CI
+//      login prompt came out as `patapestrssyd: mworodd:e`, i.e. "password: "
+//      (login, via fd 1 -> cons_output_write) shredded byte-for-byte against
+//      "tapestryd: mode " (tapestryd, via t_putstr). A role that only some
+//      writers take excludes nobody.
+//
+//   2. NO DRAIN TAP. cons_drain_tap fires from cons_emit / cons_emit_wait
+//      only, so nothing written via SYS_PUTS ever reached the G-4 renderer:
+//      the whole native diagnostic stream was INVISIBLE on the graphical
+//      console while appearing normally on serial.
+//
+// Routing here fixes both at once, and the ONLCR that comes with it is
+// required rather than incidental: (2) newly exposes this output to aurora,
+// whose VT does not synthesize CR on LF (#36), so bare-LF writes would
+// staircase the moment they became visible.
+//
+// The copy-in happens BEFORE the role is claimed, deliberately. Faulting a
+// user page can sleep, and holding the console role across an unbounded
+// page-in would stall every other console writer behind it; staging first
+// bounds the role to the emit. This is the CF-3 A byte-I/O staging shape
+// (`u8 scratch[SYS_RW_STACK]` + one bulk uaccess), and SYS_PUTS's existing
+// 4096 cap already equals SYS_RW_STACK -- naming the constant makes the
+// buffer and the cap the same fact instead of two that agree today.
 static s64 sys_puts_handler(u64 buf_va, u64 len) {
     if (len == 0)            return 0;
-    if (len > 4096)          return -1;
+    if (len > SYS_RW_STACK)  return -1;
     if (buf_va == 0)         return -1;
 
     // R7 F127 close + R12-uaccess F210 close: reject any VA outside
@@ -174,21 +208,29 @@ static s64 sys_puts_handler(u64 buf_va, u64 len) {
     if (buf_va + len < buf_va)                        return -1;
     if (buf_va + len > UACCESS_USER_VA_TOP)           return -1;
 
-    // R12-uaccess: read one byte at a time via uaccess_load_u8. The
-    // asm primitive returns 0 on success (byte in `c`) or -1 if the
-    // fault dispatcher couldn't demand-page the user VA (no VMA /
-    // perm denied / OOM during sub-table alloc). On -1 we propagate
-    // the failure to the SYS_PUTS caller and report how many bytes
-    // were successfully written via the return path's negative
-    // convention. v1.0 reports -1 (EFAULT-equivalent) regardless of
-    // partial progress; Phase 5+ may refine to a partial-write byte
-    // count once the syscall ABI gains a richer error/return surface.
-    for (u64 i = 0; i < len; i++) {
-        u8 c;
-        if (uaccess_load_u8(buf_va + i, &c) != 0) return -1;
-        uart_putc((char)c);
-    }
-    return (s64)len;
+    // Stage the whole buffer into kernel memory first. uaccess_copy_in
+    // returns 0, or -1 if the fault dispatcher couldn't demand-page the
+    // user VA (no VMA / perm denied / OOM during sub-table alloc); on -1
+    // the buffer's tail is unspecified, so -1 is a whole-op EFAULT here
+    // and nothing is emitted. Emitting nothing on a partial fault is a
+    // deliberate improvement on the old loop, which pushed the readable
+    // prefix to the console before failing.
+    u8 scratch[SYS_RW_STACK];
+    if (uaccess_copy_in(scratch, buf_va, len) != 0) return -1;
+
+    // Role-held, ring-buffered, drain-tapped, ONLCR-cooked -- identical
+    // treatment to a /dev/cons write, which is the point: one console,
+    // one writer discipline.
+    //
+    // The return may now be SHORT (< len) where it was previously len-or-
+    // -1: cons_output_write cuts a write off on the #67 stalled-consumer
+    // deadline or a #811 death, and reporting that honestly is strictly
+    // better than claiming bytes we dropped. No caller inspects the count
+    // (every t_puts/t_putstr use in usr/ is for side effect), so this
+    // widens the contract without breaking a consumer. A negative return
+    // stays -1 so the "any negative is failure" reading is unchanged.
+    long w = cons_output_write(scratch, (long)len);
+    return (w < 0) ? -1 : (s64)w;
 }
 
 // =============================================================================

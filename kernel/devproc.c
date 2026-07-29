@@ -35,8 +35,11 @@
 // proc.c for this chunk). Lookup is O(N) DFS through the kproc tree;
 // acceptable while the live-Proc count is bounded.
 
+#include <thylacine/burrow.h>   // V-4b-2: struct Burrow -- /proc/<pid>/maps backing type + file identity
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/env.h>      // V-4b-6: env_render_environ -- /proc/<pid>/environ
+#include <thylacine/exec.h>     // V-4b-2: EXEC_USER_STACK_BASE / EXEC_USER_VDSO_BASE -- maps role tags
 #include <thylacine/extinction.h>
 #include <thylacine/joey.h>   // 8a-2c F2: boot_is_complete() -- gate hwverify to the boot window
 #include <thylacine/proc.h>
@@ -48,6 +51,7 @@
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>      // V-4b-2: struct Vma -- the /proc/<pid>/maps walk
 
 #include "../arch/arm64/timer.h"        // 8a-1b-beta: timer_now_ns -- the stop-wait poll deadline
 #include "../arch/arm64/hwdebug.h"      // 8a-2a: the self-scoped EL0 hardware-breakpoint verify
@@ -86,6 +90,9 @@ enum {
     // took subkind 12; the merge kept SCHED at 12 (already landed in main) and
     // moved EXE to 13. Subkinds are kernel-internal qid encoding, not ABI.
     PQS_EXE      = 13,       // /proc/<pid>/exe              (QTFILE; VIVARIUM V-4a-0; RO, the executable's namespace name)
+    PQS_CWD      = 14,       // /proc/<pid>/cwd              (QTFILE; VIVARIUM V-4b-1; RO, the Territory's cwd)
+    PQS_MAPS     = 15,       // /proc/<pid>/maps             (QTFILE; VIVARIUM V-4b-2; RO, the VMA table)
+    PQS_ENVIRON  = 16,       // /proc/<pid>/environ          (QTFILE; VIVARIUM V-4b-6; RO, owner-or-CAP_HOSTOWNER)
 };
 
 #define PROC_QID_ROOT_PATH  0ULL
@@ -123,7 +130,10 @@ static const struct proc_pid_file g_proc_pid_files[] = {
     { "kregs",   PQS_KREGS   },
     { "kstack",  PQS_KSTACK  },
     { "exe",     PQS_EXE     },
+    { "cwd",     PQS_CWD     },
+    { "maps",    PQS_MAPS    },
     { "sched",   PQS_SCHED   },
+    { "environ", PQS_ENVIRON },
 };
 
 #define PROC_PID_FILE_COUNT \
@@ -387,6 +397,161 @@ static size_t format_ns(struct Proc *p, char *buf, size_t cap) {
     return (size_t)territory_format_ns(p->territory, buf, (u64)cap);
 }
 
+// cwd: the Territory's current working directory (VIVARIUM V-4b-1) -- the source
+// the diorama re-presents as Linux's /proc/self/cwd. Like exe, BARE bytes: no NUL
+// and no newline, because readlink("/proc/self/cwd") yields a bare path.
+//
+// A thin call into territory_getdot, which owns the dot_lock discipline (the
+// format_ns / territory_format_ns shape -- the lock stays in territory.c). The
+// nested g_proc_table_lock -> dot_lock acquire is acyclic for the same reason
+// ns_lock is: dot_lock is a documented LEAF guarding only dot_path, and nothing
+// held under it takes g_proc_table_lock. The resolve is bounded CPU under the
+// leaf -- no alloc, no block.
+//
+// NULL dot_path renders "/" (territory_getdot's own contract), so unlike exe this
+// file is never empty for a live Proc. A NULL territory (a Proc torn down past
+// its territory_unref) renders empty rather than faulting.
+static size_t format_cwd(struct Proc *p, char *buf, size_t cap) {
+    if (!p->territory) return 0;
+    int n = territory_getdot(p->territory, buf, (u64)cap);
+    if (n < 0) return 0;                 // buffer too small -> empty, never partial
+    // territory_getdot NUL-terminates; the file is the bare path, so the total
+    // EXCLUDES that terminator (it is already not counted in n).
+    return (size_t)n;
+}
+
+// maps: the Proc's address-space table (VIVARIUM V-4b-2) -- the source the
+// diorama re-presents as Linux's /proc/self/maps. Six fixed whitespace-separated
+// columns, one line per VMA, after a header line:
+//
+//   start-end            perms off        type file      role
+//   0x400000-0x452000    r-xp 0x0         file 0x3:0x412 -
+//   0x7ff00000-0x80000000 rw-p 0x0        anon -         stack
+//
+// Columns are FIXED (never omitted) -- an optional trailing column would make
+// the line ambiguous to split. Absent values render "-".
+//
+//   perms  4 chars: r/w/x from vma->prot, then p|s. `s` iff VMA_FLAG_SHARED_IN
+//          -- the backing Burrow is ANOTHER Proc's memory mapped cross-Proc
+//          (a netd flow ring / a tapestryd weave), which is exactly Linux's
+//          MAP_SHARED sense (writes propagate). A FILE Burrow is read-only and
+//          shared by the Image cache, but writes cannot propagate through it,
+//          so it is `p` -- matching Linux's MAP_PRIVATE file mapping.
+//   type   the backing: anon | lazy | file | mmio | dma | none. `none` is a
+//          guard VMA (vma_alloc_guard is the only producer of a NULL burrow).
+//   file   `<devno>:<qid.path>` for a FILE Burrow, else "-". These are the
+//          cache-key SCALARS the Burrow sampled at create -- deliberately NOT
+//          a chase through burrow->spoor->path: Spoor.path is mutable (a walk
+//          calls spoor_path_extend / _transplant), and "nothing walks a pinned
+//          exec Spoor today" is the latent-P1 trap, not a lifetime argument.
+//          The scalars are immutable for the Burrow's whole life. This pair is
+//          also Thylacine's own file identity -- the (dev, qid.path) that
+//          t_stat exposes and sameFile compares (#100).
+//   role   stack | vdso | guard | "-", derived from the exec.h layout
+//          constants. Native-useful (a maps viewer wants it) and what the
+//          diorama translates into Linux's [stack] / [vdso] tags -- so no
+//          consumer has to hardcode the layout.
+//
+// Lock: p->vma_lock, nested under the g_proc_table_lock proc_for_each already
+// holds. That order is ESTABLISHED and audited in this file -- devproc_mem_walk_-
+// cb (8a-1b-gamma-1) takes exactly this pair for the cross-Proc /proc/<pid>/mem
+// copy, on the recorded ground that vma_lock is a leaf below g_proc_table_lock
+// (nothing under vma_lock takes g_proc_table_lock). The walk is bounded CPU
+// under the leaf: no alloc, no block, no nested Burrow lock (every field read
+// is a plain scalar on the Burrow, and the VMA's mapping ref keeps that Burrow
+// alive for the whole walk).
+//
+// Truncation: the format_sched row-commit idiom -- a row is built at a scratch
+// offset and committed only once it wholly fits, so an address space with more
+// VMAs than the buffer holds truncates at a whole-line boundary rather than
+// emitting a partial row. (Completeness for a very large address space is the
+// same v1.x offset-aware multi-read that ns wants.)
+//
+// That truncation is ALSO what bounds the lock hold: the first field that does
+// not fit breaks the loop, so the walk is bounded by the OUTPUT BUFFER (~30
+// rows), not by the VMA count. A Proc sitting at PROC_VMA_MAX (65536 VMAs)
+// therefore holds vma_lock -- and IRQs -- for tens of rows, not 65536. Do not
+// "fix" the truncation by continuing the walk past a full buffer without
+// re-deriving that bound.
+//
+// Posture: 0444, ungated -- the exe / cwd / ns posture (devproc.perm_enforced
+// == false, Plan 9 all-pids-visible). Sound TODAY because Thylacine has no
+// USER-space ASLR: every VA here is either an exec.h constant or an ELF link
+// address, so the layout is not a secret, and /proc/<pid>/ns already discloses
+// strictly more. None of these are kernel VAs, so I-16 (the KASLR slide) is not
+// engaged -- unlike /proc/<pid>/kstack, which had to gate its raw addresses for
+// exactly that reason (8b-1d F1). FORWARD OBLIGATION: if user ASLR ever lands,
+// this posture must be revisited in the same chunk -- maps would then leak the
+// randomized layout, which is the whole point of the mitigation.
+static const char *maps_type_name(const struct Vma *v) {
+    if (!v->burrow) return "none";           // guard VMA -- no backing object
+    switch (v->burrow->type) {
+    case BURROW_TYPE_ANON:      return "anon";
+    case BURROW_TYPE_ANON_LAZY: return "lazy";
+    case BURROW_TYPE_FILE:      return "file";
+    case BURROW_TYPE_MMIO:      return "mmio";
+    case BURROW_TYPE_DMA:       return "dma";
+    default:                    return "?";
+    }
+}
+
+static const char *maps_role_name(const struct Vma *v) {
+    if (!v->burrow)                                    return "guard";
+    if (v->vaddr_start == EXEC_USER_STACK_BASE)        return "stack";
+    if (v->vaddr_start == EXEC_USER_VDSO_BASE)         return "vdso";
+    return "-";
+}
+
+static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
+    size_t off = 0, n;
+    n = fmt_str(buf, cap, off, "start-end perms off type file role\n");
+    if (!n) return 0;
+    off += n;
+
+    irq_state_t vs = spin_lock_irqsave(&p->vma_lock);
+    for (struct Vma *v = p->vmas; v; v = v->next) {
+        // The house SLUB-clobber defense every vma.c list walker runs
+        // (vma_lookup / vma_insert / vma_remove / vma_find_gap). Not optional
+        // here just because this is a diagnostic read: a freed entry's
+        // `burrow` is a dangling pointer, and dereferencing it below would
+        // copy freed slab bytes into a file EL0 reads -- an I-13 leak. Loud is
+        // the correct failure for a corrupted list.
+        if (v->magic != VMA_MAGIC) extinction("format_maps: corrupted VMA list entry");
+        size_t row = off;                    // scratch: commit only a whole row
+        n = fmt_hex(buf, cap, row, v->vaddr_start);      if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, "-");                 if (!n) break; row += n;
+        n = fmt_hex(buf, cap, row, v->vaddr_end);        if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+
+        char perms[5];
+        perms[0] = (v->prot & VMA_PROT_READ)  ? 'r' : '-';
+        perms[1] = (v->prot & VMA_PROT_WRITE) ? 'w' : '-';
+        perms[2] = (v->prot & VMA_PROT_EXEC)  ? 'x' : '-';
+        perms[3] = (v->flags & VMA_FLAG_SHARED_IN) ? 's' : 'p';
+        perms[4] = '\0';
+        n = fmt_str(buf, cap, row, perms);               if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+        n = fmt_hex(buf, cap, row, v->burrow_offset);    if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, maps_type_name(v));   if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+
+        if (v->burrow && v->burrow->type == BURROW_TYPE_FILE) {
+            n = fmt_hex(buf, cap, row, (u64)v->burrow->file_devno);   if (!n) break; row += n;
+            n = fmt_str(buf, cap, row, ":");                          if (!n) break; row += n;
+            n = fmt_hex(buf, cap, row, v->burrow->file_qid_path);     if (!n) break; row += n;
+        } else {
+            n = fmt_str(buf, cap, row, "-");                          if (!n) break; row += n;
+        }
+        n = fmt_str(buf, cap, row, " ");                 if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, maps_role_name(v));   if (!n) break; row += n;
+        n = fmt_str(buf, cap, row, "\n");                if (!n) break; row += n;
+        off = row;                           // commit the complete row
+    }
+    spin_unlock_irqrestore(&p->vma_lock, vs);
+    return off;
+}
+
 // exe: the namespace name of the running executable (VIVARIUM V-4a-0) -- the
 // source the diorama re-presents as Linux's /proc/self/exe. NOT NUL- or
 // newline-terminated: a path is a byte string and Linux's readlink("/proc/self/
@@ -450,6 +615,18 @@ static size_t format_ctl_read(struct Proc *p, char *buf, size_t cap) {
 
 static bool parse_decimal(const char *s, int *out) {
     if (!s || !*s) return false;
+    // Reject a LEADING ZERO on a multi-digit name (VIVARIUM V-4b-5), which is
+    // Linux's own rule in fs/proc/base.c::name_to_int ("if (len > 1 && *name ==
+    // '0') goto out"). Without it one Proc answers to unboundedly many names --
+    // /proc/7, /proc/07, /proc/00000007 all walk to pid 7 -- so the pid -> name
+    // map stops being injective. Three things then go wrong at once: readdir
+    // lists a name that is not the only name (any dedup keyed on the path is
+    // wrong), the VIVARIUM diorama and native /proc DISAGREE about whether a
+    // path exists (the diorama's parse_pid already rejects these, so the two
+    // /proc renderings of one system diverge -- and coherence between them is
+    // the whole point of section 6.2), and a cache keyed by path holds N
+    // entries for one Proc. "0" itself stays legal: kproc is pid 0.
+    if (s[0] == '0' && s[1] != '\0') return false;
     unsigned long v = 0;
     for (const char *p = s; *p; p++) {
         if (*p < '0' || *p > '9') return false;
@@ -591,22 +768,43 @@ static int devproc_stat(struct Spoor *c, u8 *dp, int n) {
 // Per-subkind mode (A-4b). ctl is 0600 (owner rw — the kill-authority gate);
 // the info files are 0444 (world-readable, Plan 9 /proc convention); the pid
 // dir is 0555.
+//
+// The FILE-TYPE bits are part of the mode, not decoration (VIVARIUM V-4b-5).
+// POSIX splits st_mode into a type field (S_IFMT) and permissions, and S_ISDIR
+// / S_ISREG read the type field ALONE -- so a bare 0555 says "a thing with rx
+// for everyone" and leaves the type as 0, which is no type at all. Every caller
+// that classifies before it descends (find, ftw/nftw, du, a shell glob, Go's
+// os.FileInfo.IsDir, and the readdir-then-stat loop any /proc walker is built
+// from) then reads a pid directory as NOT-a-directory and stops. The qid_type
+// below already carried the distinction for Thylacine-native callers; this
+// carries it for POSIX ones, out of the same switch so the two cannot drift.
 static u32 devproc_mode_for_kind(u32 kind) {
     switch (kind) {
-    case PQS_CTL:     return 0600u;
-    case PQS_MEM:     return 0600u;   // 8a-1b-gamma-1: owner-private (I-39-gated at the RW site)
-    case PQS_REGS:    return 0600u;   // 8a-1b-gamma-2: owner-private (I-39-gated at the RW site)
-    case PQS_FPREGS:  return 0600u;
-    case PQS_WAIT:    return 0400u;   // 8a-1b-gamma-3: RO notification (I-39-gated at the read site)
-    case PQS_KREGS:   return 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
-    case PQS_KSTACK:  return 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
-    case PQS_SCHED:   return 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
+    case PQS_CTL:     return T_S_IFREG | 0600u;
+    case PQS_MEM:     return T_S_IFREG | 0600u;   // 8a-1b-gamma-1: owner-private (I-39-gated at the RW site)
+    case PQS_REGS:    return T_S_IFREG | 0600u;   // 8a-1b-gamma-2: owner-private (I-39-gated at the RW site)
+    case PQS_FPREGS:  return T_S_IFREG | 0600u;
+    case PQS_WAIT:    return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO notification (I-39-gated at the read site)
+    case PQS_KREGS:   return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO kernel frame (I-39-gated at the read site)
+    case PQS_KSTACK:  return T_S_IFREG | 0400u;   // 8a-1b-gamma-3: RO symbolized bt (I-39-gated at the read site)
+    case PQS_SCHED:   return T_S_IFREG | 0400u;   // prowl-3b: RO deep internals (OQ-4-gated at the read site)
+    // V-4b-6: 0400 -- Linux's own mode for environ, and for Linux's own reason.
+    // Environment variables are where secrets live by universal convention
+    // (tokens, passwords, keys), and unlike exe/cwd/ns/maps NOTHING discloses
+    // another Proc's environment today: /env resolves current_thread()->proc->env
+    // by construction, so it is self-only. This file is therefore a genuinely NEW
+    // cross-Proc disclosure, which is why it carries a real gate at the read site
+    // (devproc_owner_or_hostowner) rather than inheriting the 0444 all-pids-
+    // visible posture its info-file siblings share.
+    case PQS_ENVIRON: return T_S_IFREG | 0400u;
     case PQS_STATUS:
     case PQS_CMDLINE:
     case PQS_NS:
-    case PQS_EXE:     return 0444u;   // V-4a-0: an info file, same posture as ns
-    case PQS_PID_DIR: return 0555u;
-    default:          return 0u;
+    case PQS_EXE:
+    case PQS_CWD:
+    case PQS_MAPS:    return T_S_IFREG | 0444u;   // V-4a-0 / V-4b-1 / V-4b-2: info files, ns's posture
+    case PQS_PID_DIR: return T_S_IFDIR | 0555u;
+    default:          return 0u;                  // no type, no perms -- see stat_native
     }
 }
 
@@ -642,9 +840,39 @@ static int devproc_stat_cb(struct Proc *p, void *arg) {
 static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out)                  return -1;
     u64 path = c->qid.path;
-    if (path == PROC_QID_ROOT_PATH)  return -1;   // dev apex: no per-Proc owner
+    if (path == PROC_QID_ROOT_PATH) {
+        // The /proc apex. It has no per-Proc owner -- but "no owner" and "stat
+        // fails" are different statements, and answering -1 made the second
+        // one. spoor_stat_native's failure surfaces as EIO, so stat("/proc")
+        // failed, and with it realpath() on EVERY path under /proc, since
+        // musl's resolver walks each prefix (V-4b-4). The apex is a real
+        // directory; answer as one, the way devdev's DEV_KIND_ROOT and the
+        // devramfs synth dirs answer for theirs -- SYSTEM-owned and
+        // world-searchable, the X bit being what lets the resolver traverse
+        // onto the mount point and cross. Not an authority: devproc's
+        // perm_enforced is false, so no gate consults this mode (the ctl
+        // kill-authority is devproc_kill_authorized's, checked at the write).
+        u8 *rz = (u8 *)out;
+        for (size_t i = 0; i < sizeof(*out); i++) rz[i] = 0;
+        out->uid      = PRINCIPAL_SYSTEM;
+        out->gid      = GID_SYSTEM;
+        out->mode     = T_S_IFDIR | 0555u;      // same shape as PQS_PID_DIR
+        out->nlink    = 1;
+        out->blksize  = 4096;
+        out->qid_path = path;
+        out->qid_type = QTDIR;
+        return 0;
+    }
     u32 kind = proc_qid_kind(path);
     int pid  = proc_qid_pid(path);
+
+    u32 mode = devproc_mode_for_kind(kind);
+    // A qid whose subkind this Dev cannot classify is not a typeless file; it
+    // is a Spoor we have no business describing. Walk produces only the known
+    // kinds, so this is unreachable -- but reporting mode 0 (S_IFMT == 0, no
+    // type at all) would hand a POSIX caller a stat it cannot classify, which
+    // is exactly the failure the type bits above exist to prevent.
+    if (mode == 0)                   return -1;
 
     struct devproc_stat_ctx s = { .pid = pid, .found = false, .uid = 0, .gid = 0 };
     proc_for_each(devproc_stat_cb, &s);           // snapshot the owner under the lock
@@ -654,7 +882,9 @@ static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
     for (size_t i = 0; i < sizeof(*out); i++) z[i] = 0;
     out->uid      = s.uid;
     out->gid      = s.gid;
-    out->mode     = devproc_mode_for_kind(kind);
+    out->mode     = mode;
+    out->nlink    = 1;
+    out->blksize  = 4096;
     out->qid_path = path;
     out->qid_type = (kind == PQS_PID_DIR) ? QTDIR : QTFILE;
     return 0;
@@ -817,6 +1047,8 @@ static int devproc_read_cb(struct Proc *p, void *arg) {
     case PQS_CMDLINE: r->total = format_cmdline(p, r->buf, r->cap); break;
     case PQS_NS:      r->total = format_ns(p, r->buf, r->cap);      break;
     case PQS_EXE:     r->total = format_exe(p, r->buf, r->cap);     break;  // V-4a-0
+    case PQS_CWD:     r->total = format_cwd(p, r->buf, r->cap);     break;  // V-4b-1
+    case PQS_MAPS:    r->total = format_maps(p, r->buf, r->cap);    break;  // V-4b-2
     case PQS_CTL:     r->total = format_ctl_read(p, r->buf, r->cap); break;  // 8a-2a hwverify result; else empty
     case PQS_SCHED:                            // prowl-3b: OQ-4 owner-or-CAP_HOSTOWNER
         r->total = devproc_sched_read_gated(r->caller, p, r->buf, r->cap, &r->denied);
@@ -839,6 +1071,10 @@ static long devproc_regs_rw(struct Spoor *c, void *buf, long n, s64 off, bool is
 // devproc_debug_poll_never).
 static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off);
 static long devproc_wait_read(struct Spoor *c, void *buf, long n, s64 off);
+// V-4b-6: /proc/<pid>/environ. Its own path rather than a format_* case because
+// it is offset-aware -- see the definition for why a format-and-slice render is
+// the wrong shape for an environment.
+static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off);
 
 static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!c || !buf) return -1;
@@ -858,14 +1094,25 @@ static long devproc_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (kind == PQS_KREGS)  return devproc_regs_rw(c, buf, n, off, false);
     if (kind == PQS_KSTACK) return devproc_kstack_read(c, buf, n, off);
     if (kind == PQS_WAIT)   return devproc_wait_read(c, buf, n, off);
+    if (kind == PQS_ENVIRON) return devproc_environ_read(c, buf, n, off);
 
     // Root + pid_dir reads return -1 (directories -- readdir lands with 9P
     // readdir). ctl is write-only at v1.0 (reads return empty; Plan 9: ctl is
     // for commands). Validate the kind BEFORE the lookup so the callback only
     // formats the readable file kinds.
     if (c->qid.path == PROC_QID_ROOT_PATH || kind == PQS_PID_DIR) return -1;
+    // NOTE: this whitelist is the FOURTH place a new readable file must be
+    // registered (after g_proc_pid_files, devproc_read_cb, and proc_qid_mode),
+    // and the only one whose omission fails SILENTLY as a plain -1 rather than
+    // an ENOENT at walk. V-4b-2 was written missing exactly this and the read
+    // returned -1 with the file resolving fine -- add new kinds here too.
+    //
+    // A kind with its OWN read path (mem/regs/kregs/kstack/wait/environ) returns
+    // above and is deliberately absent here: this list gates the format-and-slice
+    // machinery, and adding one would route it there as well, formatting nothing.
     if (kind != PQS_STATUS && kind != PQS_CMDLINE && kind != PQS_NS &&
-        kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED) return -1;
+        kind != PQS_CTL && kind != PQS_EXE && kind != PQS_SCHED &&
+        kind != PQS_CWD && kind != PQS_MAPS) return -1;
 
     // prowl-3b (OQ-4): capture the reading Proc BEFORE the lock so the gated
     // PQS_SCHED kind can be authorized against the target found inside the walk.
@@ -933,7 +1180,17 @@ bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *targe
 // identity bypasses. Composes I-1 (a confined user sees full detail only on its
 // own Procs) + the /ctl visibility-not-authority posture; NO new §28 invariant.
 // Non-static: the kernel test suite exercises the predicate.
-bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
+// The owner-or-host-owner policy, shared by every per-Proc file that discloses
+// MORE than devproc's ambient all-pids-visible set (prowl-3b's OQ-4 gate on
+// sched; V-4b-6's on environ). Extracted rather than copied so the two cannot
+// drift into two subtly different policies -- if this predicate ever gains an
+// axis, it gains it for every gated file at once, which is the point.
+//
+// Deliberately NOT the I-39 predicate (devproc_debug_authorized), which also
+// admits CAP_DEBUG: these are info files, not debug surfaces, and a debugger's
+// authority to stop and single-step a Proc is a different grant from a reader's
+// authority to see its internals.
+bool devproc_owner_or_hostowner(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (caller->principal_id == target->principal_id)  return true;   // owner
     // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
@@ -941,6 +1198,10 @@ bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *targ
     if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & CAP_HOSTOWNER)
         return true;                                                   // host owner
     return false;
+}
+
+bool devproc_sched_authorized(const struct Proc *caller, const struct Proc *target) {
+    return devproc_owner_or_hostowner(caller, target);
 }
 
 // =============================================================================
@@ -1984,6 +2245,95 @@ static long devproc_kstack_read(struct Spoor *c, void *buf, long n, s64 off) {
     u8 *o = (u8 *)buf;
     for (size_t i = 0; i < copy; i++) o[i] = (u8)content[(size_t)off + i];
     return (long)copy;
+}
+
+// =============================================================================
+// VIVARIUM V-4b-6: /proc/<pid>/environ -- the flat NUL-separated environment
+// block, the source the diorama re-presents as Linux's /proc/self/environ.
+//
+// GATED, unlike its info-file siblings. exe/cwd/ns/maps are 0444 all-pids-
+// visible on the argument that they disclose nothing a peer could not already
+// read (/proc/<pid>/ns discloses strictly more than any of them). That argument
+// does NOT extend here: /env resolves current_thread()->proc->env BY
+// CONSTRUCTION, so today NOTHING lets one Proc read another's environment, and
+// environment variables are where secrets live by universal convention. So this
+// file is a real new cross-Proc disclosure and carries the owner-or-CAP_HOSTOWNER
+// gate -- the same policy sched uses, and the same posture Linux itself takes
+// (mode 0400 plus a ptrace_may_access check).
+//
+// A denial is -1, formatting nothing: no partial leak, and the same shape the
+// sched gate returns. devproc.perm_enforced is false, so the 0400 mode is
+// documentation and THIS is the enforcement.
+//
+// A NOTE FOR PROXIES (VIVARIUM section 6.2). The gate keys on the READER, so a
+// 9P server proxying this file for a client is authorized as ITSELF, not as its
+// client -- deliberately, since a deputy that could read a peer's environment on
+// the peer's say-so would be an authority. That cuts BOTH ways and a proxy must
+// reason about both:
+//
+//   * it may be denied where its client would be allowed (the shared boot
+//     diorama is SYSTEM, so a user-principal client's environ reads -1). Benign:
+//     the client loses a file, gains nothing.
+//   * it may be ALLOWED WHERE ITS CLIENT WOULD BE DENIED -- a SYSTEM proxy can
+//     read any SYSTEM Proc's environ and hand the bytes to a client of any
+//     principal. That is a real leak, and it is the proxy's to prevent: the
+//     diorama serves environ for its connection's own peer only, never for an
+//     arbitrary pid (usr/diorama/src/server.rs::render_environ).
+//
+// The general fix for both is a deputy that acts with its CLIENT's authority --
+// MANDATE (I-35), reserved and unbuilt. Until then, a proxy of this file must
+// either target only its own peer or be running as its client's principal.
+struct devproc_environ_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    void        *buf;
+    long         n;
+    s64          off;
+    long         result;   // bytes copied, or -1 (not found / denied)
+};
+
+static int devproc_environ_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_environ_ctx *k = (struct devproc_environ_ctx *)arg;
+    if (target->pid != k->target_pid) return 0;                 // keep walking
+    if (!devproc_owner_or_hostowner(k->caller, target)) {
+        k->result = -1;                                          // denied: no bytes
+        return 1;
+    }
+    // Renders under target->env's lock, nested inside the g_proc_table_lock
+    // proc_for_each already holds. That edge is NEW but acyclic on the same
+    // ground as ns_lock and vma_lock: env->lock is a LEAF -- nothing held under
+    // it takes g_proc_table_lock (env.c touches no other kernel lock but the
+    // slab's). g_proc_table_lock is what keeps `target` -- and so its Env --
+    // alive for the render, since env_free runs from proc_free.
+    k->result = env_render_environ(target, k->off, k->buf, k->n);
+    return 1;
+}
+
+// Per-call byte bound. The FILE is unbounded (that is the point of the
+// offset-aware render), but one call copies at most this much, because the copy
+// runs with IRQs off under g_proc_table_lock and a caller may legally ask for
+// SYS_RW_MAX (128 KiB). A short read is POSIX-legal and every /proc consumer
+// already loops to EOF -- Linux's own seq_file reads are short-by-page.
+#define DEVPROC_ENVIRON_READ_MAX 8192L
+
+static long devproc_environ_read(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf || n < 0) return -1;
+    if (off < 0)             return -1;
+    if (n == 0)              return 0;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    if (n > DEVPROC_ENVIRON_READ_MAX) n = DEVPROC_ENVIRON_READ_MAX;
+
+    struct devproc_environ_ctx k = {
+        .target_pid = proc_qid_pid(c->qid.path),
+        .caller     = t->proc,
+        .buf        = buf,
+        .n          = n,
+        .off        = off,
+        .result     = -1,        // a pid the walk never matches reads as an error
+    };
+    proc_for_each(devproc_environ_walk_cb, &k);
+    return k.result;
 }
 
 // =============================================================================

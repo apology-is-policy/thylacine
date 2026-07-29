@@ -386,10 +386,15 @@ Ordinary userspace 9P servers, mounted **into the container's territory only**:
   `sys/kernel/{ostype,osrelease,version,hostname}`. Sourced from the *native*
   `/proc` (devproc) + `/ctl` where they already carry the data.
 - **`/sys`** — minimal: enough for `ldd`, allocator probes, and CPU topology reads.
-- **`/dev`** — Linux-shaped: `null`, `zero`, `full`, `random`, `urandom`, `tty`,
-  `pts/`, `ptmx`, `fd/`, `std{in,out,err}`. Most of these already exist behind
-  Thylacine's `/dev` (devdev) and `/dev/pts` (ptyfs); the diorama is largely a
-  **re-presentation**, not a reimplementation.
+- **`/dev`** — **NOT a diorama tree. Corrected at V-4c; see §6.15.** This bullet
+  originally asked the diorama to present `null`/`zero`/`full`/`random`/`urandom`/
+  `tty`/`pts/`/`ptmx`/`fd/`/`std{in,out,err}` as a "re-presentation, not a
+  reimplementation" — but the diorama is read-only by §6.1, and `/dev/null` is
+  defined by *accepting writes*. Native devdev already serves these correctly, so
+  routing them through a read-only server would break working files. A container's
+  `/dev` is composed by **bind**, in its own territory; the entries devdev lacks
+  land in the phenotype (`ptmx` — already done at PTY-3 — and `fd/`/`std*`) or in
+  `viv` (`tty`, a bind of the container's own pts).
 
 Because each is a per-container mount, `uname`/`hostname`/`meminfo` can differ per
 container **without any namespacing machinery** — the property Linux needed six
@@ -432,12 +437,29 @@ compatibility shim becomes a privilege hole.
 
 **Tier 1 — has a consumer TODAY** (this is why V-4 is not scaffolding):
 
-- **`/proc/self/exe`** — *the load-bearing one*. Nothing in the tree provides it
+- **`/proc/self/exe`** — *the load-bearing one*. Nothing in the tree provided it
   (grep-verified 2026-07-23), which is exactly why the Clade fork had to patch LLVM's
-  `getMainExecutable` to fall back to `argv[0]` (fork patch `0001`, CL-3). With
-  `/proc/self/exe` present, that fork delta can be revisited and LLVM's
-  upstream-shaped path works. A **pouch** program benefits immediately — it needs no
-  phenotype at all.
+  `getMainExecutable` to fall back to `argv[0]` (fork patch `0001`, CL-3).
+
+  **CORRECTION (V-4b-3): V-4a served this file, but not yet in the shape that
+  consumer needs, so the fork delta could not be revisited yet.** Linux serves
+  `/proc/self/exe` as a **symlink** — `readlink()` yields the path, while
+  `open()`+`read()` yields the executable's *bytes*. The diorama serves a regular
+  file whose *contents* are the path, so `readlink()` failed and LLVM (which calls
+  exactly `readlink`) still fell through to `argv[0]`; the LLVM patch `0005` says as
+  much in its own words. The blocker was structural rather than a diorama bug:
+  **there is no `SYS_READLINK` — Thylacine has no EL0 symlink surface at all** (the
+  9P `Treadlink`/`Rreadlink` ops exist but are used only by the kernel's own client
+  and Loom's `READLINK` opcode).
+
+  **RESOLVED (V-4b-4)** by the predicted route — translating `readlink()` in the
+  **phenotype**, at the pouch boundary-line (§6.11), rather than growing a symlink
+  surface. `readlink("/proc/self/exe")` now returns the path in-guest, and
+  `realpath()` works, so LLVM's `__linux__` branch would run verbatim. **The fork
+  delta is not yet dropped**: doing so requires rebuilding the LLVM fork and
+  re-running the Clade gates, which belongs to the Clade track that owns that fork.
+  Recording it as available, not as done — the mistake this entry exists to correct
+  was claiming a consumer-level win from a mechanism that had not been run.
 - `/proc/self/cmdline`, `/proc/self/status`, `/proc/self/maps` — allocators, crash
   handlers, and every "what am I" probe.
 - `/proc/meminfo`, `/proc/cpuinfo`, `/proc/uptime`, `/proc/stat`.
@@ -447,9 +469,12 @@ subject to the native gate), `/proc/mounts`, `/proc/sys/kernel/{ostype,osrelease
 version,hostname}`, `/proc/self/{cwd,fd/,environ,auxv}`.
 
 **Tier 3 — `/sys` + `/dev`**: minimal `/sys` (enough for `ldd` + allocator probes +
-CPU topology); Linux-shaped `/dev` is largely a **re-presentation** of what devdev
-and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts/`,
-`ptmx`, `fd/`, `std{in,out,err}`), not a reimplementation.
+CPU topology) — **the CPU-topology half LANDED at V-4c-1** (§6.16), served as a
+sibling tree of `proc` under one root and delivered by bind. **`/dev` was corrected
+out of the diorama at V-4c (§6.15)**: it is composed by bind from the native devdev
++ ptyfs trees, with the missing Linux entries landing in the phenotype or in `viv`,
+because a read-only server cannot serve `/dev/null`. Both halves of Tier 3 thus
+arrive by the *same* mechanism — which is the finding, not a coincidence.
 
 ### 6.4 Sub-chunks
 
@@ -458,8 +483,19 @@ and ptyfs already serve (`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pt
 | **V-4a-0** | **LANDED.** The kernel prerequisite §6.5 found: `Proc.exe_path` + `/proc/<pid>/exe` | `/proc/<ptyfs-pid>/exe` reads `/bin/ptyfs` in-guest (joey, boot-fatal) |
 | **V-4a-0b** | **LANDED.** The second prerequisite §6.6 found: `srv_peer_info.pid` (how the server resolves `self`) | a live peer snapshot reports its pid; a dead one fail-closes to 0 |
 | **V-4a** | **LANDED.** `usr/diorama` + Tier 1 + the selftest + `/bin/diorama-probe` (as-built: `docs/reference/141-diorama.md`) | **MET** -- the probe mounts the diorama itself and reads `/self/exe` back as `/bin/diorama-probe` |
-| **V-4b** | Tier 2 (per-pid + `sys/kernel` + `self/{fd,environ,auxv}`) | a pouch probe reads its own `status`/`maps`; a peer pid respects the native gate |
-| **V-4c** | Tier 3 (`/sys` + Linux-shaped `/dev`) + the per-container mount wiring (consumed by `viv`, V-7) + the focused audit | audit close on the §6.2 no-new-authority property |
+| **V-4b-1** | **LANDED.** `/self/cwd` + its kernel source `/proc/<pid>/cwd` | the probe reads a non-empty absolute cwd in-guest |
+| **V-4b-2** | **LANDED.** `/self/maps` + its kernel source `/proc/<pid>/maps` | the probe reads a Linux-shaped map with `[stack]` + a file-backed row naming the binary |
+| **V-4b-3** | **LANDED.** the numeric `/proc/<pid>/…` dirs + the root pid enumeration + `sys/kernel/{ostype,osrelease,version,hostname}` | the probe reads its OWN pid's dir, finds itself in the root readdir, and gets ENOENT for a pid that cannot exist |
+| **V-4b-4** | **LANDED.** the *shape* half (§6.11): `readlink()` in the phenotype — the four `/proc` link-shaped paths, plus the truthful `EINVAL`/`ENOENT` that repairs `realpath()` system-wide; + the `/proc` apex stat | the prover readlinks its own `exe`/`cwd` in-guest against NATIVE `/proc`, `self` and `<pid>` agree, truncation is POSIX-silent, and `realpath()` canonicalizes |
+| **V-4b-5** | **LANDED.** the synthetic-Dev stat family (§6.12): `stat_native` for `/ctl` + `/env`, the POSIX file-type bits on devproc's modes, and the leading-zero pid reject that restores native-vs-diorama coherence | the prover stats `/ctl` + `/env` as directories in-guest, `S_ISDIR("/proc/<pid>")` is true, `realpath("/ctl/./procs")` canonicalizes, and a zero-padded pid does not resolve |
+| **V-4b-6** | **LANDED.** `/self/environ` (§6.13): a new kernel source `/proc/<pid>/environ` rendering the Env as Linux's NUL-separated block — offset-aware, and the first devproc info file to carry a real read gate | the prover sets a variable in its own `/env` and reads the record back through the diorama in-guest; the per-pid variant is proven ABSENT (the cross-principal leak) |
+| **V-4b** | **CLOSED.** the rest of Tier 2 (`self/{fd,auxv}`) is dispositioned, not built: `auxv` **weighed and deliberately not built** (§6.14 — zero live readers, and a `viv`-launched binary gets its auxv on the stack by construction); `fd` **blocked on #66c**, the #926 handle-table lifetime restructure, which is a kernel chunk and not a Vivarium one | both dispositions recorded with evidence + a named trigger; neither is a silent omission |
+| **V-4c** | **RESCOPED by §6.15** (scripture-first, no code written): `/dev` is *not* a diorama tree — a read-only server cannot serve `/dev/null`, and native devdev already serves it correctly — so V-4c is a minimal `/sys` + the per-container mount wiring (now the substantive half, since bind is the answer for `/dev` as well as the delivery for `/proc`) + the two Tier-1 stragglers `cpuinfo`/`stat`, each only partly sourced + the focused audit | audit close on the §6.2 no-new-authority property — now including §6.13's **deputy-authority** half (a proxy must not be allowed where its client would be denied) — and on §6.12's file-identity claim (devenv is an ARCH §25.4 trigger surface; V-4b-5/6 landed on self-audit, as V-4b-1..4 did, with the formal round scheduled here) |
+| **V-4c-1** | **LANDED.** one server, two trees, **by bind** (§6.16): the root becomes the synthetic *world* with `proc` and `sys` as siblings, and `/sys/devices/system/cpu/{online,possible,present}` + the `cpuN` dirs land, all sourced from `/ctl/cpu`. The aname route §6.15 named is **closed**, not merely harder — `devsrv_open_connect` attaches with a hardcoded empty aname and `SYS_ATTACH_9P_SRV` is byte-mode-gated — and `SYS_MOUNT` already takes a subdirectory, so this cost **no kernel change** | the prover reads the cpulists in-guest AND binds `/dio/sys` at a second path, reading the same bytes through the new name — the composition V-7 depends on, proven rather than assumed; the sibling-isolation and online-mask selftest legs are revert-probed (each fails the boot when broken) |
+| **V-4c-2a** | **DECIDED (§6.17), scripture-first, no code.** The three recorded instances turned out to be **five exposures, one trap, and a sixth instance nobody had counted**: four fields already have a kernel source, `intr`'s source is real but *narrower than the field* (the back-door fabrication), and `stat`'s user/system split has no material at all and cannot be omitted because the columns are positional | one rule covering all seven: give the kernel a source, per-CPU, in the kernel's own shape — and omit only what has no truth to tell |
+| **V-4c-2b** | the kernel sources §6.17 calls for: the two per-CPU counters (`gic_dispatch`, the `sched()` switch chokepoint), the per-CPU MIDR read at bring-up, `CTR_EL0` + the hwcap word surfaced, `g_next_pid` accessor — all landing as `/ctl/cpu` columns + one `/ctl/sched` scalar | each new column read back in-guest; prowl unaffected (positional 3-token parse); the two counters advance under load |
+| **V-4c-2c** | **LANDED.** the diorama half: `/proc/stat`, `/proc/cpuinfo`, and the `cpuN/cache/index0/coherency_line_size` leaf that lifts V-4c-1's deliberately-empty `cpuN`. The cpu qid gains a *kind* above the index, so `cpu_qid(n)` stays bit-identical and the subtree is an extension rather than a renumbering | the prover reads all three in-guest and asserts the properties a consumer depends on, not mere presence: `intr`/`ctxt` must be NONZERO (a zero means the column did not parse -- a well-shaped lie a presence check would pass), the line size must be a power of two >= 16, `Features` must carry at least `fp asimd`, the implementer must not be the reserved `0x00` unread-MIDR sentinel, and `BogoMIPS` must be ABSENT |
+| **V-4c-3** | the arc's **focused audit** — OWED across V-4b-1..6 + V-4c, all of which landed on self-audit only, and a **merge gate** for `gfx-4 → main` | as the V-4c row above: §6.2 no-new-authority, §6.13 deputy-authority, §6.12 file-identity |
 
 **V-4 is UNBLOCKED** — it neither waits on nor collides with the main track's Clade
 work. It is *almost* pure userspace: see §6.5 for the one kernel prerequisite the
@@ -548,13 +584,649 @@ structural.
 
 Expect the question again, at least at:
 
-- `/proc/self/cwd` — the Territory *has* `dot_path` (LS-4), but devproc does not
-  expose it. Same shape as `exe`: a renderer, not a new mechanism.
-- `/proc/self/maps` — the VMA list is likewise unexposed. Bigger, because the
-  format carries permissions and backing-file names.
+- `/proc/self/cwd` — **DONE at V-4b-1**, and it played out exactly as predicted: a
+  renderer, not a new mechanism. The Territory already had `dot_path` and
+  `territory_getdot` already owned the `dot_lock` discipline, so `/proc/<pid>/cwd`
+  is a thin call into it (the `format_ns` → `territory_format_ns` shape), and the
+  diorama re-presents it unchanged. No new kernel state at all — cheaper even than
+  `exe`, which had to *grow* a field.
+- `/proc/self/maps` — **DONE at V-4b-2.** The prediction was right that the VMA
+  list was unexposed and that a walk needs `vma_lock` rather than an existing
+  accessor, but wrong about the lock being the hard part: `devproc_mem_walk_cb`
+  (8a-1b-gamma-1) had *already* established and audited the
+  `g_proc_table_lock → vma_lock` nest for cross-Proc `/proc/<pid>/mem`, so the
+  ordering argument was inherited rather than made. The real work was the
+  translation split — see §6.8.
 
-Both are Tier 2 / **V-4b**, and both should be budgeted as *kernel + userspace*,
-not userspace alone.
+Both were Tier 2 / **V-4b**, and the prediction to budget them as *kernel +
+userspace* held for both, though for `cwd` the kernel half was a pure renderer
+and for `maps` the lock discipline was already paid for. The pattern that keeps
+holding is narrower than "these need kernel work": **it is worth grepping for an
+existing accessor and an existing lock-order precedent before budgeting either.**
+
+**V-4b-3 is the counter-case, and it sharpens the rule.** Per-pid `/proc/<pid>/…`
+looked like the biggest of the three and needed **no kernel work at all** — because
+`/self` was never a special file. It was always a per-pid render with the pid
+supplied by the *connection's peer* rather than by the *path*, so the pid had been
+a parameter since V-4a and per-pid was a generalization of an existing mechanism.
+So the question to ask before budgeting is not only "does a native source exist"
+but **"is this file already being rendered under another name?"** — and here the
+answer was yes, five times over.
+
+### 6.8 Where the Linux shape lives — the `maps` split
+
+`/proc/<pid>/maps` is the first file where the native and Linux renderings differ
+enough to force the question: which layer speaks Linux?
+
+The answer is the one the whole design implies — **the kernel stays Thylacine and
+the diorama does the phenotype.** The kernel emits a native six-column table
+(`0x`-prefixed ranges, a backing-`type` column, a `devno:qid` file identity, a
+`role` column) that a Thylacine tool would want; the diorama translates it into
+Linux's column layout. Letting the kernel emit Linux's shape directly would be
+phenotype leaking into the kernel, which is exactly the inversion VIVARIUM
+exists to avoid. The `status` file set the precedent: native `key: value`, Linux
+`Name:`/`Pid:`/`Uid:` out here.
+
+Three translations are worth recording because each was a judgement call:
+
+- **`dev`.** Thylacine's `devno` is flat — no major/minor split. It renders as
+  `00:<devno>`, and that is *not* a fabricated major: Linux uses `00:xx` for
+  every filesystem with no backing block device (tmpfs, and 9P mounts
+  specifically), which is precisely what a Stratum mount is.
+- **The pathname column** comes from `/proc/<pid>/exe`, under a stated premise:
+  at v1.0 the only FILE Burrows in an address space are the exec'd binary's
+  segments (`burrow_create_file` has exactly one caller, `image_lookup_or_create`,
+  from exec, and there is no file-mmap syscall). The premise is written down at
+  the call site rather than assumed away — **when a file-mmap surface lands, the
+  kernel line must start carrying a path and the diorama must read it instead of
+  substituting `exe`.**
+- **`[vdso]`.** Thylacine's vdso is a read-only *data* page (the clock struct),
+  so it renders `r--p`, not Linux's `r-xp` code vDSO. The tag is still worth
+  emitting — the consumers that look for `[vdso]` in maps (sanitizers) do so to
+  *exclude* the region, which is correct here too — but nothing should read the
+  tag as promising an ELF object. Thylacine publishes no `AT_SYSINFO_EHDR`
+  (it uses the private `AT_VDSO_CLOCK`), so no correct Linux program goes looking.
+
+A guard VMA is emitted, never hidden: `---p` with no pathname is byte-for-byte
+how Linux shows a `PROT_NONE` guard page, and dropping the row would make the map
+claim the range is free.
+
+### 6.9 The fourth source — the phenotype's self-description (V-4b-3)
+
+`/proc/sys/kernel/{ostype,osrelease,version}` are the first diorama files that do
+**not** reformat a native source. There is no kernel state to reformat: the answer
+*is* the phenotype. This looks like a violation of §6.2's "three sources" and is
+not, but the distinction has to be stated precisely or it becomes the loophole
+every future file is argued through.
+
+§6.2 exists to stop the diorama becoming an **authority** — serving something the
+native surface would have refused. A constant carries no information about the
+system at all, so there is nothing for it to leak; what it describes is this
+server's own property. Hence the rule to hold to, for every file added after
+these:
+
+> A value **derived from kernel state** needs a native source, no exceptions. A
+> **constant declaring which ABI the caller is looking at** is the phenotype
+> speaking about itself. If a file cannot be argued into the second category in
+> one sentence, it belongs in the first.
+
+Two of the four are worth their own note:
+
+- **`osrelease` = `6.1.0-thylacine`.** This is the one constant with teeth:
+  glibc-linked programs parse it and some refuse to start below a minimum kernel
+  (3.2 for modern glibc). 6.1 clears every such check. The `-thylacine` suffix is
+  the honesty — Linux's own convention carries local suffixes (`-generic`,
+  `-arch1-1`), so a parser that copes with real distro kernels copes with this,
+  while anything that *prints* the string tells the truth. **Stated tradeoff**: a
+  program could version-gate a feature on the number and take a path we do not
+  implement. Declaring low instead makes those same programs refuse to run at all,
+  which is strictly worse, and runtime feature probing — the overwhelmingly common
+  pattern, and the one Linux itself pushes people toward — degrades gracefully
+  where version-gating does not.
+- **`hostname` is NOT in this category.** It would be system state if Thylacine had
+  any; it does not (there is no hostname surface — `usr/coreutils/src/bin/uname.rs`
+  hardcodes `(none)` for exactly this reason). So the render is the answer the
+  *native tool already gives*: one answer for the system, not two. That it is also
+  byte-identical to real Linux with no hostname set — the kernel's
+  `init_uts_ns.name.nodename` is literally `(none)` — is a happy accident, not the
+  justification. If a hostname surface ever lands, this reads from it.
+
+### 6.10 What is left in V-4b, and what each actually costs
+
+Ground-truthed against the tree at V-4b-3, because the three remaining Tier-2
+files are *not* one chunk — they have very different blockers:
+
+| File | Native source | Status |
+|---|---|---|
+| `self/environ` | **none reachable** — `/env` (devenv, §9.7) resolves `current_thread()->proc->env` **by construction**, so the diorama reading it gets its OWN environment, never the peer's | **DONE at V-4b-6** (§6.13). The §6.7 prediction held for the shape — a renderer over an existing group — but missed two things it could not have known from outside: the render had to be *offset-aware* rather than format-and-slice, and it is the first proxied file whose gate makes the *deputy's* authority differ from its client's. |
+| `self/auxv` | **none** — `exec_fill_auxv` writes the block onto the user stack at exec and nothing retains it | **WEIGHED AND NOT BUILT** (§6.14). Zero live readers in the tree (every consumer takes the stack path; SDL2's is compiled out twice on aarch64), and structurally: auxv-on-the-stack is a *prerequisite* of V-7, so a `viv`-launched binary always has one. Named trigger + the retained-copy-not-reconstruction constraint in §6.14. |
+| `self/fd` | **BLOCKED**, and not on us | `/proc/<pid>/fd` is deferred to **#66c** (ARCH §9.6.9): a cross-Proc fd-list read of a live peer races the #926 at-exit handle-table free, which runs outside `g_proc_table_lock` with lockless slot-zeroing. Closing it needs the #926 table-lifetime restructure — a death-path-lineage change that ARCH already says "warrants its own focused chunk + audit". **The diorama must not route around this**: there is no other native source for a Proc's fd list, and inventing one would be exactly the §6.7 failure. |
+
+So the honest sequencing was: `environ` a normal kernel+userspace sub-chunk
+(landed, V-4b-6); `auxv` a smaller one whose value should be weighed before
+building it; `fd` waiting on a kernel chunk that is not a Vivarium chunk at all.
+
+### 6.11 The other half of the shape problem — `readlink` (V-4b-4)
+
+§6.2 governs *where a value comes from*. V-4b-4 is about the second, independent
+question the diorama raises: **in what SHAPE does a consumer expect to read it?**
+Serving the right bytes under the wrong shape is not compatibility.
+
+Four `/proc` files are the case in point. Linux presents
+`/proc/{self,<pid>}/{exe,cwd}` as **symlinks** — `readlink()` gives the target
+path — while Thylacine presents them as regular files whose *contents* are that
+path. Identical information, incompatible shape, and the consumer that matters
+(LLVM's `getMainExecutable`, §6.3) calls `readlink` specifically.
+
+Thylacine has no symlink surface to grow: there is no `SYS_READLINK`, and no EL0
+path creates or observes a symlink. So the translation belongs in the **phenotype**
+— concretely the pouch boundary-line (`0031-pouch-readlink.patch`), the layer whose
+entire job is presenting Thylacine mechanisms in Linux shape. For those four path
+shapes `readlink` is an open + read; the kernel renders both files as *bare bytes*,
+no NUL and no newline, and `kernel/devproc.c` says so at `format_exe`/`format_cwd`
+naming this consumer, so no reformatting is needed on either side.
+
+**The rule this establishes, and its limit.** Reading a file to answer `readlink`
+is only legitimate for a *closed whitelist* of paths the system defines; done
+generally it would turn `readlink()` into a file-contents oracle. The whitelist is
+four shapes, and a **miss is fail-safe**: an unmatched path falls to the general
+arm, whose answer for a regular file is `EINVAL`, which is literally true of every
+file we serve. `self` is rewritten to the caller's own pid rather than passed
+through — native `/proc` has no `self` entry at all, and the diorama's `self` names
+the *mounter* under a shared mount (§6.6), so a process asserting its own pid is
+both more portable and strictly more correct.
+
+**The finding that made this bigger than one file.** The seam had parked
+`readlink` at the `ENOSYS` sentinel, and on a system with no symlinks that is the
+*wrong* answer rather than an absent one — the result is knowable for every path,
+and POSIX has the word: `EINVAL`. It matters because musl's `realpath()` is a pure
+userspace resolver (1.2.x; it does **not** use `/proc/self/fd`, contrary to the note
+the LLVM fork's patch carries) that calls `readlink()` on each path prefix and reads
+the errno as a fork in the road — `EINVAL` means "not a link, keep walking", any
+other errno is fatal. Under `ENOSYS`, **`realpath()` failed on its first component,
+for every path on the system, for every ported program.** The truthful `EINVAL`
+repairs it whole with no `realpath` patch: on a symlink-free system musl's resolver
+degenerates into exactly what realpath should do there — canonicalize `.`, `..` and
+duplicate slashes, and verify every component exists. Demonstrated by revert probe:
+with the general arm returning `ENOSYS`, `realpath("/proc/./")` fails with errno 38
+in-guest (and `realpath("/")` still passes — no components to walk).
+
+**And a kernel gap it surfaced.** `devproc_stat_native` answered `-1` for the
+`/proc` apex ("no per-Proc owner"), which `spoor_stat_native` surfaces as `EIO` — so
+`stat("/proc")` failed, and `realpath()` on *any* path under `/proc` with it. "No
+owner" and "stat fails" are different statements; the apex is a real directory and
+now answers as one (SYSTEM-owned, `0555`, the `devdev` `DEV_KIND_ROOT` and devramfs
+synth-dir posture). Two siblings in the same family were tracked, not fixed there:
+`/ctl` and `/env` have no `stat_native` slot at all, and devproc's per-pid modes
+carry no `S_IFDIR`/`S_IFREG` bits — each needs a per-qid posture decision across a
+whole Dev, which is a chunk rather than a footnote. That chunk is §6.12.
+
+### 6.12 The synthetic-Dev stat family (V-4b-5)
+
+The three gaps V-4b-4 surfaced, closed together because they are one question
+asked of three Devs: *what does this synthetic object claim to be?*
+
+**`/ctl` and `/env` had no `stat_native` slot at all**, so `spoor_stat_native`
+returned `-1` → `EIO` for `stat()` on the directory, for `fstat` on any fd beneath
+it, for `lseek(SEEK_END)` — and, by the §6.11 mechanism, for `realpath()` of
+anything underneath. Both now answer. The interesting part is that they answer
+*differently about size*, and the difference is the point:
+
+| | `/ctl` leaf | `/env` entry |
+|---|---|---|
+| content | generated at read time from live state | a stored byte string |
+| size | **0** | **real** |
+
+A `/ctl` file's length measured at `stat` is already stale when the read runs, so
+a caller that fstat'd, malloc'd, and read exactly that many bytes would truncate a
+table that grew in between — which is why Linux reports 0 for `/proc/meminfo` and
+readers loop to EOF. An `/env` value does not move unless someone writes it, so
+its size is honest, and `SEEK_END` (the same call behind a different syscall)
+lands on it. devhw and devpci already reported real sizes and were already right:
+a DTB property and a PCI config register do not change between stat and read.
+"Report the size" and "report 0" are both correct answers to different questions.
+
+**devproc's modes carried no file-type bits.** `S_ISDIR`/`S_ISREG` read the
+`S_IFMT` field *alone*, so a bare `0555` left a pid directory typeless, and every
+POSIX walker that classifies before descending — `find`, `nftw`, `du`, a shell
+glob, Go's `os.FileInfo.IsDir`, and the readdir-then-stat loop any `/proc` reader
+is built from — read it as not-a-directory and stopped. `qid_type` had carried the
+distinction for Thylacine-native callers all along; the type bits carry it for
+POSIX ones, emitted from the same switch so the two cannot drift.
+
+**And a fourth, found while writing the prover's regression rather than while
+designing the fix**: devproc's `parse_decimal` accepted **leading zeros**, so
+`/proc/7`, `/proc/07`, and `/proc/00000007` all resolved to pid 7. One Proc
+answering to unboundedly many names is not a curiosity — it breaks injectivity, so
+readdir lists a name that is not *the* name, a path-keyed cache holds N entries for
+one Proc, and **native `/proc` disagrees with the diorama about which paths
+exist** (the diorama's `parse_pid` already rejected them). Coherence between the
+two renderings is the entire point of §6.2, so the divergence mattered more than
+the leniency did. Linux rejects them for the same reason
+(`fs/proc/base.c::name_to_int`); `"0"` alone stays legal, because kproc is pid 0.
+
+**And a fifth, caught by self-audit before it shipped — the one that mattered
+most.** Reporting a size for `/env` entries has a consequence beyond `fstat`:
+`exec_resolve_from_namespace` gates only on `dev->read` and a non-zero `st.size`,
+so a real size makes `exec("/env/FOO")` reach the REVENANT Image cache — which is
+keyed on `(dc, devno, qid_path, …)`. Every *other* Dev's qid namespace is global,
+so a static `devno == 0` still leaves that pair unique; **devenv's is per-Proc**
+(`next_id` restarts at 1 in every `Env`), so two Procs' unrelated variables both
+reported `(0, 1)`. The cache would then serve one Proc the text of another's
+variable — an I-1 leak out of the one device whose entire premise is that a Proc
+sees only its own environment. `struct Env` now carries a `devno` minted at
+`env_alloc`, stamped onto the walked Spoor by `devenv_walk` (it has to land there:
+`spoor_stat_native` overwrites `out->devno` with the Spoor's own). The lesson is
+narrow and worth keeping: **reporting a field that was previously never reported
+is a claim, and the claim has to be true before the report is added** — the
+identity was equally wrong before, but nothing had asked.
+
+None of this is an authority change: all three Devs run `perm_enforced == false`,
+and every `perm_check` site in `stalk`/`syscall.c` is gated on that flag, so no
+gate consults these modes. What a mode does here is *document* the gate that lives
+at the read site — which is why `/ctl/kernel-base` is `0400` rather than `0444`
+(`CAP_HOSTOWNER`, #57a F1), and why `/env` reports the **calling** Proc as owner
+(every devenv op resolves the caller's own env, so that is simply true).
+
+### 6.13 The environment, and the first gated proxy (V-4b-6)
+
+`/proc/self/environ` needed a kernel source, as §6.10 predicted. What §6.10 did
+*not* predict is that it would be the first file in this arc where the diorama's
+own authority and its client's differ — and that turns out to be the interesting
+half.
+
+**The source.** `/proc/<pid>/environ` renders the per-Proc `Env` as Linux's flat
+`NAME=VALUE\0` block. The renderer lives in `env.c`, where the lock discipline
+already is (the `territory_format_ns` shape), and devproc calls it.
+
+It is **offset-aware**, unlike every other `/proc` file, which formats into a
+2 KiB `DEVPROC_READ_BUF` and slices. That would not do here: an `Env` holds up to
+64 values of 4096 bytes, and a single long `PATH` overflows the buffer on its own.
+The failure mode of a format-and-slice render is *silently dropping environment
+variables* — which does not look like an error to the consumer, it looks like the
+variable was never set, and sends it down a different path with nothing to notice.
+So the render walks records, skips wholly-before-window ones in O(1), and copies
+only `[off, off+n)`. One *call* is still clamped (8 KiB, because the copy runs
+with IRQs off under `g_proc_table_lock`), but a clamp is a **short read**, which
+is POSIX-legal and which every `/proc` consumer already loops through — the file
+itself is unbounded.
+
+**Entries the Linux shape cannot carry are skipped, not mangled.** Linux's
+environment is a `char*[]` of NUL-terminated `NAME=VALUE` strings, so the encoding
+cannot carry a `'='` inside a NAME (the first one *is* the separator) or a NUL
+inside a VALUE (the NUL *is* the terminator). Thylacine's `/env` is looser —
+`name_valid` rejects only NUL and `/`. Emitting such an entry raw would not
+truncate the answer, it would **corrupt** it: a `'='` in the name makes one
+variable parse as a prefix of another's value, and a NUL in the value splits the
+record so its tail parses as a variable that was never set. Both hand a consumer a
+wrong value it has no way to distrust, where absence is a state every `getenv`
+caller already handles. `/env` stays the complete truth; the reformatter says
+nothing it cannot say correctly.
+
+**The gate, and why this file is 0400.** `exe`/`cwd`/`ns`/`maps` are `0444`
+all-pids-visible on the argument that they disclose nothing a peer could not
+already read (`/proc/<pid>/ns` strictly dominates any of them). That argument does
+not extend here: `/env` resolves `current_thread()->proc->env` **by
+construction**, so *nothing today lets one Proc read another's environment*, and
+environment variables are where secrets live by universal convention. So this file
+is a genuinely new cross-Proc disclosure and carries a real owner-or-`CAP_HOSTOWNER`
+check at the read site — the same policy `sched` uses (extracted into one
+`devproc_owner_or_hostowner` so the two cannot drift), and the same posture Linux
+itself takes (`0400` plus `ptrace_may_access`). `CAP_DEBUG` is deliberately not an
+axis: this is an info file, and a debugger's authority to stop and single-step a
+Proc is a different grant from a reader's authority to see its internals.
+
+**The self-audit find: a gate cuts both ways, and the second way is the leak.**
+The gate keys on the *reader*. For a 9P server proxying the file, the reader is
+the **server**, not its client — and the obvious consequence (the SYSTEM boot
+diorama is *denied* a user-principal client's environ) is benign: the client loses
+a file and gains nothing.
+
+The non-obvious consequence is the opposite one. The diorama runs as
+`PRINCIPAL_SYSTEM`, so the kernel would **allow** it to read any SYSTEM Proc's
+environ — and it would then hand those bytes to a client of any principal, who
+natively would have been denied. `/srv` is the shared immortal boot registry
+re-grafted post-pivot, so a logged-in user Proc can mount the diorama; the leak
+was reachable, not theoretical. That is exactly the deputy-as-authority failure
+§6.2 forbids, and it appeared now rather than at V-4b-1..5 because environ is the
+first proxied file whose native gate is anything but "everyone".
+
+The fix keeps the diorama a pure reformatter: **`environ` is served under `/self`
+only.** `/self` is sound by construction — the target is the connection's own
+peer, so a read the kernel allows is a read of the client's own environment, which
+it could have done itself, and a read the kernel denies renders empty. A walk to
+`/<pid>/environ` is an honest ENOENT. Replicating the kernel's owner check against
+`peer.principal_id` was considered and rejected: it would work, but it turns a
+component whose entire design property is *having no policy* into a policy point,
+to serve a file no v1.0 consumer reads. Two things would make the per-pid variant
+servable, and neither is a change in the diorama — a per-container diorama running
+as its container's principal (V-7), where server and client authority coincide by
+construction, or MANDATE (I-35), which would let a deputy act with its client's
+authority instead of its own.
+
+The generalized lesson, and the one to carry into V-4c and V-7: **before proxying
+a file, ask not only "could the client read this natively" but "could the client
+read this natively *for this target*" — a deputy with more authority than its
+client is as much a §6.2 violation as one that invents an answer.** V-4b-1..5 never
+raised it because every file they proxy is world-readable.
+
+### 6.14 `auxv` — weighed, and deliberately not built (V-4b)
+
+§6.10 parked `self/auxv` behind "weigh the value first". Weighed at V-4b close:
+**not built**, and recorded here rather than left implicit, because an unbuilt
+Tier-2 file that nobody wrote down is exactly the silent omission the
+chunk-completeness rule exists to prevent.
+
+**The evidence.** Every `auxv` consumer in the tree reads it *from the stack*:
+`getauxval()` (musl saves `libc.auxv` in `__libc_start_main`) for the pouch side,
+and a hand-walk of the `_start` frame for `libthyla-rs` and the Go fork's
+`sysargs`. Exactly one file in the tree contains the string `/proc/self/auxv` —
+SDL2's `SDL_cpuinfo.c` — and both of its readers are compiled out on this target
+twice over: `CPU_haveARMSIMD`'s auxv arm sits under `#elif defined(__LINUX__)` in
+an `__arm__` chain that aarch64 exits at `!defined(__arm__) → return 0`, and
+`readProcAuxvForNeon` is guarded `defined(__arm__) && !defined(HAVE_GETAUXVAL)`
+while `usr/ports/sdl2/SDL_config.h` sets `HAVE_GETAUXVAL 1`. The live aarch64 NEON
+check is `getauxval(AT_HWCAP)` — the CF-4 A lever, on the stack. So the count of
+live `/proc/self/auxv` readers is zero, and the one port that could plausibly have
+needed it is already served.
+
+**Why "no consumer today" is a weak argument here, and what the real one is.**
+VIVARIUM's premise is *unmodified foreign* binaries, so an in-tree grep is poor
+evidence about a compat surface by construction. The argument that actually
+carries is structural: **auxv on the stack is a prerequisite of V-7, not an
+optional extra.** A Linux ELF bootstraps out of `AT_PHDR`/`AT_PHENT`/`AT_ENTRY`
+(and `AT_BASE` for the dynamic case) — `ld.so` and every static CRT read them from
+the initial frame — so `viv` cannot launch a foreign binary *at all* without
+building one. By the time anything runs under the vivarium it has its auxv.
+`/proc/self/auxv` is the fallback for a thread that never received an entry frame:
+code `dlopen`'d into a host that owns `_start` (Go's `os_linux.go` fallback exists
+for exactly this, and for Android where the file is unreadable anyway), or a
+sanitizer runtime initialized off the main path.
+
+**The trigger.** Build it when something needs its auxv without having been given
+one — the first `dlopen`-into-a-foreign-host case, or a sanitizer runtime under
+V-8. Not before.
+
+**The constraint, if it is ever built:** the source must be a *retained kernel
+copy*, which is what Linux does (`mm_struct.saved_auxv`), never a reconstruction.
+Most of the eight entries `exec_fill_auxv` writes are recomputable from state the
+kernel still holds — `AT_PAGESZ`, `AT_HWCAP` from `g_hw_features.linux_hwcap`,
+`AT_VDSO_CLOCK` from the shared page — but `AT_RANDOM` and `AT_PHDR` are per-exec
+*pointers into that process's own image and stack*. A recomputed answer for those
+is not a stale answer, it is a wrong one, and a consumer dereferences `AT_RANDOM`.
+§6.7 already ranks an invented answer as worse than an absent one; this is that
+rule with a segfault attached.
+
+### 6.15 `/dev` is not a diorama tree (V-4c, scripture-first)
+
+Ground-truthing Tier 3 before writing it — the discipline §6.7 exists to enforce —
+found that **§6's third bullet contradicts §6.1**, and that the contradiction is
+not close. This section corrects it. No code was written first; that is the point
+of the pattern.
+
+**The collision.** §6.1 makes the diorama read-only — `h_write` returns `E_PERM`
+for every file, unconditionally (`server.rs`, the `P9_TWRITE` arm) — and calls
+that decision load-bearing, because it "removes most of the surface a `/proc`
+would otherwise carry". §6's `/dev` bullet then asks the same server to present
+`null`, `zero`, `full`, `random`, `urandom`, `tty`, `pts/`, `ptmx`. But
+**`/dev/null` is *defined* by accepting writes.** So is `/dev/tty`, and so is
+`/dev/ptmx`. A read-only `/dev/null` is not a compatibility shim for `/dev/null`;
+it is a file that silently fails the one operation it exists for.
+
+**And it would be a downgrade, not a win.** Native devdev already implements these
+correctly: `devdev_write` consumes for `NULL`/`ZERO`/`RANDOM`/`URANDOM` and
+*fails* for `FULL`, which is the right Linux shape (the errno is the generic `-1`
+rather than `ENOSPC` — a real but much smaller gap, and one that belongs to
+devdev). Routing them through the diorama would take files that work today and
+break them. That generalizes past this arc, so it is worth stating as a rule
+beside §6.2's:
+
+> **A re-presentation that loses a capability the native tree already has is a
+> downgrade wearing a compatibility label.** §6.2 forbids the diorama from
+> serving *more* than the native surface would. This is the other edge: do not
+> route a file through the diorama that the native tree already serves *better*.
+
+**The composition mechanism already exists, and it is the Thylacine one.** A
+container's `/dev` is assembled by **bind**, in the container's own territory —
+which is what `viv` does at V-7 and what joey already does at boot. Per-container
+divergence needs no server: it is the same property §6 claims for `uname`, gotten
+the same way. Interposing a 9P server buys nothing and costs a hop.
+
+**The residue resolves without the diorama too** — each of the entries native
+`/dev` lacks lands somewhere that already owns the question:
+
+| Missing entry | Where it belongs | Why |
+|---|---|---|
+| `/dev/ptmx` | **already done**, in the phenotype (PTY-3) | `0021-pouch-pty.patch` redirects `posix_openpt`/`openpty` to `/dev/pts/ptmx`, and says so in its own words: "`/dev/ptmx` is a compat symlink Thylacine cannot provide". That is §6.11's shape-in-the-phenotype pattern, landed before it was named. |
+| `/dev/std{in,out,err}`, `/dev/fd/N` | the phenotype | `open("/dev/fd/N")` is `dup(N)`. No kernel and no server. Honest caveat to record with it: Linux *reopens* the underlying file (fresh flags, independent offset) where `dup` shares the offset — right for the common `cmd < /dev/fd/3` / `cmd > /dev/stderr` uses, and the same simplification the BSDs' fdescfs makes. |
+| `/dev/tty` | `viv` (V-7), as a bind | The controlling terminal is already kernel state — `ct_sid` on the pts entry (PTY-1d). A container's `/dev/tty` is a bind of its own pts slave, decided when `viv` builds the territory, not rendered by a server that would have to guess which terminal the *caller* controls. |
+
+**So V-4c's scope is smaller and better than specced**: a minimal `/sys`, and the
+per-container mount wiring — which this finding promotes from an afterthought to
+the substantive half, since binding is now the answer for `/dev` as well as the
+delivery mechanism for `/proc`.
+
+**`/sys`, ground-truthed the same way**, is thin: the entire tree contains exactly
+one `/sys` path — SDL2's `SDL_GetCPUCacheLineSize` reading
+`/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size` — and it is a
+*soft* read: `SDL_CACHELINE_SIZE` (128) is assigned first and the file only
+overrides it, so a failed `fopen` is entirely benign. That does not make `/sys`
+worthless (a compat surface's consumers are foreign by definition — §6.14's
+caveat), but it does mean it is a small, low-risk tree serving `devices/system/cpu/`
+topology, not a project.
+
+One mechanism note for whoever builds it, found in the same pass: `/sys` is a
+**second tree**, not a subdirectory. The diorama's existing `N_SYS`/`N_SYS_KERNEL`
+nodes are `/proc/sys/kernel/…` — a different thing that happens to share a name.
+A container mounts `/proc` and `/sys` separately, and 9P's answer for one server
+exporting two trees is **`Tattach` with a different `aname`** (Stratum's `ds:<name>`
+form is the in-tree precedent). Today `h_attach` **ignores `aname` entirely** and
+every attach lands on `N_ROOT`, so the aname dispatch is the actual work — small,
+but a real mechanism rather than a table entry, and the per-container mount wiring
+wants it regardless, since V-7 will attach twice for every container.
+
+> **CORRECTED at V-4c-1 (see §6.16).** The paragraph above is kept because it is
+> half right and the half it gets wrong is instructive: `/sys` *is* a second tree,
+> but **the aname dispatch is not the work, and cannot be** — an aname is
+> unreachable from EL0 for a 9P-mode `/srv` service. The answer is the one §6.15
+> had already chosen one paragraph earlier, for `/dev`: **bind**.
+
+**And the same pass found two Tier-1 stragglers.** §6.3 lists `/proc/cpuinfo` and
+`/proc/stat` under *Tier 1 — has a consumer TODAY*, and neither has ever been
+served; the V-4a/V-4b sub-chunks quietly carried them as "deferred with their
+kernel prerequisites". Ground-truthed now, two things are true at once, and both
+matter:
+
+* **The "consumer TODAY" claim does not survive a grep.** The only in-tree
+  `/proc/cpuinfo` readers are libsodium's `config.guess` (a *host* build script)
+  and SDL2's `__ANDROID__` branch; `/proc/stat` appears only in PROWL-DESIGN.md,
+  describing what Linux's htop does. So the tier assignment was made from what
+  Linux programs typically read rather than from this tree — the same gap §6.14
+  found for `auxv`. (It becomes live the moment a `./configure` runs in-guest,
+  which the Clade arc's on-device toolchain makes a real V-8 scenario.)
+* **Both are only *partly* sourceable, and the unsourced fields are the
+  interesting part.** `cpuinfo`'s processor count comes from `/ctl/cpu` and its
+  `Features` line is `AT_HWCAP`, but `CPU implementer`/`part`/`variant`/`revision`
+  come from `MIDR_EL1`, which **EL0 cannot read at all** — an EL0 `mrs midr_el1`
+  is `snare:ill`, which is the same reason `AT_HWCAP` must never advertise
+  `hwcap_CPUID`. `/proc/stat`'s `cpu`/`cpuN` idle columns come from `/ctl/cpu`'s
+  per-CPU `idle_ns` and `btime` from `uptime` + `CLOCK_REALTIME`, but `ctxt`,
+  `intr` and `processes` have no native source whatsoever.
+
+  So each raises §6.7's question per *field* rather than per *file*, and it has a
+  third answer neither §6.7 nor §6.9 covers yet: a Linux consumer parses these
+  line-by-line, so **omitting** a line and **fabricating** one are different
+  failures, and "report 0" is fabrication with a plausible face. Deciding that —
+  omit, or give the kernel a source — is V-4c's real design work on these two,
+  and it is deliberately not being decided here alongside the `/dev` correction.
+
+### 6.16 One server, two trees — by bind, not by aname (V-4c-1)
+
+§6.15 left `/sys` needing a **second tree** and named `Tattach` with a different
+`aname` as the mechanism. Ground-truthing that before writing it — the §6.7
+discipline again, and the second time in two sub-chunks that it has changed the
+answer — showed the aname route is not merely harder than assumed but **closed**,
+and that the right answer was already sitting in §6.15's own `/dev` finding.
+
+**Why aname is unreachable here.** There are exactly two kernel paths to a
+mountable dev9p root, and neither delivers a client-chosen aname to a 9P-mode
+service:
+
+| Path | Carries an aname? | Reaches the diorama? |
+|---|---|---|
+| `open("/srv/x")` → `devsrv_open_connect` | **No** — `kernel/devsrv.c` calls `srvconn_attach_dev9p_root(cn, NULL, 0, …)`, hardcoded empty | Yes — this is how every client reaches it |
+| `SYS_ATTACH_9P_SRV(fd, aname, …)` | Yes | **No** — byte-mode-gated, and rejects a 9P-mode conn |
+
+The byte-mode gate is not an oversight to lift: a 9P-mode conn already has a
+kernel-owned `p9_client` driving its rings, and a second one over the same rings
+would interleave frames. So serving `/sys` by aname would need a *new kernel ABI*
+— a syscall issuing an additional `Tattach` on an existing session — which is
+exactly the kind of thing this arc should not add without a much better reason
+than "the first mechanism that came to mind".
+
+**The answer, which costs nothing.** `SYS_MOUNT` takes **any readable Spoor**,
+not only a tree root (`sys_mount_for_proc` gates on `RIGHT_READ` and nothing
+else). So the diorama serves ONE tree whose root is the synthetic *world*, with
+children named for the mount points Linux expects — `proc` and `sys` — and a
+container binds each where it belongs. That is Plan 9's namespace answer, it is
+byte-identical to the mechanism §6.15 chose for `/dev` one paragraph earlier,
+and it needs no kernel change at all.
+
+Two consequences worth stating, because they are what make this *sound* rather
+than merely convenient:
+
+* **The root had to move.** Today's root content is now `/proc/…`. Hanging `sys`
+  off a root that IS `/proc` would put a `/proc/sys`-shaped directory into every
+  container's namespace that Linux has never had — §6.15's "fabrication with a
+  plausible face", one level up from the per-field version. The cost was one
+  probe's paths; V-7 does not exist yet, so there was no other consumer.
+* **A bound subtree is genuinely sealed.** The obvious worry is `..`: the server
+  still records `/sys`'s parent as the world root, so could a container climb
+  `/sys/..` into `/proc`? No — `stalk` resolves `..` by **popping its own trail**
+  (`kernel/stalk.c`, the `..` arm) and never sends `Twalk("..")` to a server, so
+  `<mount>/..` lands on the mount point's parent *in the client's namespace*.
+  The server-side parent link is unreachable through a bind. (This is the same
+  property that contains `..` at `root_spoor` for I-28; it is doing double duty.)
+
+**What landed.** `/sys/devices/system/cpu/{online,possible,present}` plus one
+`cpuN` dir per CPU — all sourced from `/ctl/cpu`, whose `cpus:` header is the
+*declared* set and whose `offline` row marker (prowl-5 F2) is exactly Linux's
+present-vs-online distinction. That mapping is a gift from devctl having had to
+make the same distinction for prowl, and it means both files are sourced rather
+than guessed.
+
+**What did not, and why — the same question a third time.** `kernel_max` is
+omitted: Linux sources it from a compile-time `NR_CPUS`, and Thylacine's
+equivalent (`DTB_MAX_CPUS`) is on no EL0-readable surface. The `cpuN` dirs are
+**empty**: their Linux contents (`cache/index0/coherency_line_size`, `topology/`)
+are hardware facts read from `CTR_EL0`, which is EL0-trapped exactly as
+`MIDR_EL1` is (`SCTLR_EL1.UCT` is clear in `INIT_SCTLR_EL1_MMU_OFF`). So the
+per-field question §6.15 raised for `cpuinfo` and `stat` now has a **third**
+instance with an identical shape, and all three await **one** decision — omit the
+unsourced fields, or give the kernel a source — deliberately made once rather
+than piecemeal. That is V-4c-2's design work.
+
+The dirs themselves are not fabrications: each genuinely names a CPU the kernel
+reports, and their existence is what the legacy "count the `cpuN` entries"
+enumeration path reads (busybox `nproc`, older glibc `_SC_NPROCESSORS_CONF`).
+Modern consumers read the range files one level up, which is why those were the
+ones worth sourcing first.
+
+### 6.17 The unsourced fields, decided once (V-4c-2)
+
+§6.15 and §6.16 accumulated three instances of one shape — `cpuinfo`'s `MIDR_EL1`,
+`stat`'s `ctxt`/`intr`/`processes`, and `cpuN/cache`'s `CTR_EL0` — and deliberately
+deferred them to **one** decision rather than three ad-hoc ones. Grepping for the
+sources before deciding (§6.7's discipline, and the **third** time in three
+sub-chunks that doing so has changed the answer) mostly **dissolves** the fork:
+four of the five fields already have a kernel source and need only exposing.
+
+| Linux field | source status (verified) | decision |
+|---|---|---|
+| `stat: processes` | **already exposed** — `proc_total_created()` (`kernel/proc.c:599`) over a dedicated `u64 g_proc_created`, and already covered by ~10 kernel tests (see the correction below) | **call it** — no kernel code at all |
+| `stat: intr` | **exists but PARTIAL** — `kobj_irq_total_fires()` (`kernel/irqfwd.c:124`) counts only IRQs forwarded to a userspace driver; timer, UART and IPIs never reach that hook | **widen, then expose** (see below) |
+| `stat: ctxt` | **material exists** — prowl's per-thread `nsched` (`kernel/sched.c:1414`); no global or per-CPU aggregate | **add a per-CPU counter** at the same chokepoint |
+| `cpuN/cache/…` | **exists in-kernel** — `CTR_EL0`, read at `arch/arm64/mmu.c:962`/`:982` for the I-cache stride, simply unexposed | **expose** |
+| `cpuinfo: Features` | **exists** — `g_hw_features.linux_hwcap` (`arch/arm64/hwfeat.h:52`), already carrying the arm64 *uapi* bit numbers for the exec auxv | **expose** — the AT_HWCAP chunk already paid for this |
+| `cpuinfo: implementer/variant/part/revision` | **none** — `grep MIDR` over `kernel/` + `arch/` returns nothing | **read it**, per-CPU at bring-up |
+| `cpuinfo: BogoMIPS` | **none, and none possible** | **omit** |
+
+**The rule that covers all seven**, and the reason it is one decision and not
+seven: *give the kernel a source, per-CPU, in the kernel's own shape — and omit
+only what has no truth to tell.* Per-CPU is not a detail. It is what makes the two
+new counters free (each CPU stores to a line it already owns and is already
+writing — `sched()` holds `cs`, and `gic_dispatch` runs on the CPU taking the
+IRQ), it is how Linux itself accounts both, and it is the only form that stays
+correct on a heterogeneous board, where `MIDR_EL1` genuinely differs per core —
+which is precisely why Linux prints a per-`processor` block. A boot-CPU-only MIDR
+would be wrong exactly where the field earns its keep. (That is the AT_HWCAP row's
+recorded seam arriving early, on a value that cannot be papered over with an AND.)
+
+**`intr` is the trap, and it is a shape §6.15 did not anticipate.** A source
+*exists*, so the danger is no longer an invented zero but a **real number that
+means something narrower than the field it fills** — fabrication with a plausible
+face, arriving by the back door. `kobj_irq_total_fires` is truthful about what it
+counts; publishing it as `intr` would not be. The fix is not to relabel it but to
+count at the **universal** entry: `gic_dispatch` (`arch/arm64/gic.c:703`) is where
+*every* INTID arrives before routing. `kobj_irq_total_fires` stays exactly as it
+is — the driver-forwarded subset it has always honestly been.
+
+**The sixth instance, which nobody had counted: `stat`'s `cpu`/`cpuN` jiffies
+line.** Per-CPU `idle_ns` is sourced (prowl-3b), and `iowait`/`steal`/`guest` are
+legitimately zero for us — but **no EL0-vs-EL1 time accounting exists anywhere in
+the tree**, so the user/system split has no source and no material. Unlike every
+field above, this one cannot be omitted: the columns are positional, so a missing
+middle column is not an absent answer but a wrong one. Every available choice is
+wrong for a reader who wants the split; only the *shape* of the wrongness is ours
+to pick. So: **all non-idle time is reported as `system`, under a stated premise**,
+the pattern `maps` already uses for its `/self/exe` substitution. The premise —
+"Thylacine does not account user-vs-kernel time separately" — is true, checkable,
+and named at the render site, so it is visible rather than hidden, and flagged for
+revisit if per-mode accounting ever lands. Utilization (`1 − idle/total`), which is
+what essentially every consumer computes, is exactly right either way.
+
+There *is* material for a plausible-looking split — attribute kernel threads'
+`run_ns` to `system` and user threads' to `user` — and it is rejected for the same
+reason `intr` is: it would be a different quantity wearing the field's name.
+
+**What is omitted, and why each is not a silent omission.** `BogoMIPS` has no
+truth to tell (it is a calibration artifact of a loop Thylacine does not run, and
+is meaningless on Linux too). `kernel_max` stays omitted per §6.16. `CPU
+architecture: 8` is emitted as a constant — the §6.9 category, a declaration about
+which ABI the caller sees rather than a measurement of the machine.
+
+**Where the exposures land.** Not in a `/proc`-shaped kernel file — that would be
+§6.8's phenotype leaking inward. The per-CPU values (`ctxt`, `intr`, cache line
+size, the MIDR quartet) become **columns on the existing `/ctl/cpu` table**, whose
+row already *is* the kernel's native per-CPU description. Appending is safe:
+prowl's parser (`usr/prowl/src/sample.rs:242`) matches three tokens positionally
+and ignores the rest, and an `offline` row stays two tokens and is still skipped —
+which is also the right answer for the diorama, since Linux lists only online CPUs
+as `cpuN`. The one global scalar (`processes`) has no per-CPU form and no natural
+row, so it joins `/ctl/sched`'s global block beside `runnable`.
+
+This adds two counters to two audit-trigger surfaces — the scheduler switch
+chokepoint and the GIC dispatch path. Both are read-only telemetry that no
+decision consults (prowl's discipline, `PROWL-DESIGN §3.1`), and both land
+*before* V-4c-3, which is the arc's owed focused audit and must cover them.
+
+**Correction, found by building it (V-4c-2b).** This section originally named
+`g_next_pid − 1` as the `processes` source. That was wrong, and wrong in a way
+worth recording: **`proc_total_created()` already existed** (`kernel/proc.c:599`),
+over a dedicated `u64 g_proc_created` bumped in the same two places, declared in
+`proc.h`, and already asserted by roughly ten kernel tests. It is also strictly
+better than the derivation — a `u64` with no `INT_MAX` guard to reason about,
+purpose-built for exactly this question rather than a pid allocator repurposed by
+arithmetic. So the fifth exposure dissolved to **zero kernel code**: one call.
+
+This is §6.7's own lesson recurring — *grep for an existing accessor before
+budgeting* — and the interesting part is how it slipped past a pass that was
+explicitly doing that research. The grep went looking for **where the value is
+produced** and stopped the moment it found `g_next_pid`; it never asked the second
+question, **whether the value is already published**. Producer and accessor are
+different searches, and finding the first is what makes you stop doing the second.
+The comment naming `proc_total_created` was sitting nine lines above the
+`g_next_pid` line that got read.
 
 ---
 
@@ -573,6 +1245,55 @@ surface beyond §4's.
 "No cgroups, no seccomp at v1.0; territory isolation is the boundary" (ROADMAP
 §9.1) — which is exactly right, because I-32/I-34 already provide the resource and
 hardware bounds cgroups/seccomp were retrofitted onto Linux to provide.
+
+### 7.1 Owed at V-7 — pid visibility (surfaced by V-4b-3)
+
+V-4b-3 gave the diorama the numeric `/proc/<pid>` dirs and a root enumeration, and
+that is the first time it answers about a Proc other than its caller. The
+containment question this raises belongs here rather than in §6, because it is
+**not a diorama question**:
+
+- The five per-pid files are `0444` with `devproc.perm_enforced == false` — Plan 9's
+  all-pids-visible posture — and `/ctl/procs` lists every Proc on the box. So the
+  diorama serves exactly what native `/proc` serves, to exactly the same readers.
+  §6.2 holds: no new authority.
+- But a *contained* Proc seeing every host pid is a leak across the container
+  boundary, and **that leak is in native `/proc` and `/ctl/procs` first.** Scoping
+  the diorama alone would be theatre — a contained Proc that can reach native
+  `/proc` reads around it.
+
+So: when V-7 builds a container territory, "which pids does it see" must be decided
+for the **native** surface (a per-territory pid view, or simply not mounting `/proc`
+and `/ctl` into the container). Deciding it in the diorama alone would invert the
+design.
+
+**Correction (V-4c-3 F6).** An earlier draft of this section closed by saying the
+diorama "then inherits the answer for free, because it only ever re-presents what it
+can itself read." That clause is **wrong**, and it is wrong in exactly the way §6.13
+warned about one section earlier.
+
+"What it can itself read" is not "what its **client** can read". Every native source
+in the server — `native_pid_exists`, `native_pid_list`, `read_ctl_cpu`, and the
+per-pid path builder — resolves with `T_WALK_OPEN_FROM_ROOT` against the
+**diorama's own** SYSTEM territory, not the caller's. So *withholding* `/proc` and
+`/ctl` from a container's territory does **not** withhold them from the container:
+the diorama still reads them, and still reformats them across the 9P boundary. The
+proposed remedy closes the native path and leaves the diorama standing as a read
+oracle for the whole surface it proxies — not merely as a pid enumerator.
+
+Nothing is exploitable today: no restricted territory exists before V-7, a
+logged-in Proc already has `/proc` and `/ctl` mounted, and all five per-pid files
+are `0444` ungated. This is a scripture correction plus a **V-7 obligation**, not a
+live defect.
+
+The two remedies that actually work are the ones §6.13 already named, and V-7 must
+pick one: a **per-container diorama** running as its container's principal (server
+and client authority coincide by construction — the same argument that makes
+`/self/environ` sound), or **MANDATE (I-35)**, which would let a deputy act with its
+client's authority rather than its own. The general lesson is §6.13's, restated at
+the level of the whole tree rather than one file: **a deputy's territory is part of
+its authority, and confining the client without confining the deputy confines
+nothing.**
 
 ---
 

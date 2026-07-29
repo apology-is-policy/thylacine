@@ -39,6 +39,13 @@ struct Env {
     int              ref;           // 1 at v1.0 (RFENVG sharing deferred); accessed
                                     // via __atomic_* (the territory_ref/unref pattern)
     spin_lock_t      lock;          // serializes every access
+    u32              devno;         // Plan 9 Chan.dev for THIS Env (V-4b-5). Every
+                                    // other Dev's qid namespace is global, so a
+                                    // devno of 0 still leaves (devno, qid.path)
+                                    // unique; devenv's is PER-PROC -- ids restart
+                                    // at 1 in every Env -- so without a per-Env
+                                    // devno two Procs' unrelated variables claim
+                                    // the same file identity. See devenv_walk.
     u64              next_id;       // monotonic id source (>= 1; never reuses)
     int              count;         // live entries (the DoS bound)
     struct EnvEntry  entries[ENV_MAX_ENTRIES];
@@ -71,6 +78,11 @@ void env_free(struct Proc *p);
 //   env_iter     the readdir step -- the live entry with the smallest id
 //                strictly greater than after_id (so cookies strictly increase);
 //                copies its name; true if one exists.
+//   env_size     the entry's value length -- the stat step (V-4b-5). Honest
+//                here in a way it is NOT for a generated report like /ctl: a
+//                stored value has a definite length that does not change
+//                between the stat and the read unless someone writes it.
+//                false if the entry is gone (the monotonic-id guarantee).
 u64  env_lookup(struct Proc *p, const char *name, u32 name_len);
 u64  env_create(struct Proc *p, const char *name, u32 name_len);
 void env_truncate(struct Proc *p, u64 id);
@@ -79,5 +91,22 @@ long env_write(struct Proc *p, u64 id, s64 off, const void *buf, long n);
 bool env_unset(struct Proc *p, const char *name, u32 name_len);
 bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
               u32 name_cap, u32 *name_len_out);
+bool env_size(struct Proc *p, u64 id, u64 *out_len);
+u32  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under it)
+
+// --- the flat block (devproc) -----------------------------------------------
+// env_render_environ renders the whole environment as Linux's NUL-separated
+// "NAME=VALUE\0" block for /proc/<pid>/environ (VIVARIUM V-4b-6), copying only
+// [off, off+n). Unlike the per-name ops this is CROSS-PROC -- the caller is
+// devproc, resolving `p` under g_proc_table_lock, not necessarily the Proc that
+// owns the Env -- so its DISCLOSURE gate lives at that call site (owner or
+// CAP_HOSTOWNER, devproc_owner_or_hostowner). Nothing here checks identity; do
+// not add a second caller without carrying the gate.
+//
+// Offset-aware because an Env can hold a quarter-megabyte, far past devproc's
+// 2 KiB format buffer; entries the Linux shape cannot encode ('=' in a name, NUL
+// in a value) are skipped rather than mangled. Both are argued at the definition.
+// Returns bytes copied (0 at EOF / no Env), or -1 on a bad argument.
+long env_render_environ(struct Proc *p, s64 off, void *buf, long n);
 
 #endif /* THYLACINE_ENV_H */

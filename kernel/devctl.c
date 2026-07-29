@@ -27,9 +27,12 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // V-4b-5: struct t_stat + T_S_IF* (devctl_stat_native)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/gic.h"      // V-4c-2b: gic_cpu_irq_count (/proc/stat intr)
+#include "../arch/arm64/hwfeat.h"   // V-4c-2b: hw_cpu_ident + linux_hwcap (/proc/cpuinfo)
 #include "../arch/arm64/kaslr.h"
 #include "../mm/phys.h"
 
@@ -327,6 +330,16 @@ static size_t format_sched(char *buf, size_t cap) {
     n = fmt_udec(buf, cap, off, (unsigned long)smp_cpu_count()); off += n;
     n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
 
+    // V-4c-2b (docs/VIVARIUM.md section 6.17): Procs created since boot -- the
+    // source for the diorama's /proc/stat `processes` (Linux: forks since boot,
+    // its own kernel threads included, which is what proc_total_created counts
+    // too). The one field in section 6.17's set with no per-CPU form, so it joins
+    // the global block here rather than becoming a /ctl/cpu column. The accessor
+    // already existed (R5-H F79) -- the exposure is this line.
+    n = fmt_str(buf, cap, off, "created: "); if (!n) return 0; off += n;
+    n = fmt_udec(buf, cap, off, (unsigned long)proc_total_created()); off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+
     // work-conservation (TI-4d): how much idle time was spent parked while work
     // was queued elsewhere (a steal/handoff gap). A high starved fraction =
     // queued-but-unstolen work; ~0 = a genuinely sequential workload. ns -> ms.
@@ -376,7 +389,25 @@ static size_t format_cpu(char *buf, size_t cap) {
     n = fmt_str(buf, cap, off, "cpus: "); if (!n) return 0; off += n;
     unsigned ncpus = smp_cpu_count();
     n = fmt_udec(buf, cap, off, (unsigned long)ncpus); off += n;
-    n = fmt_str(buf, cap, off, "\ncpu idle_ns capacity\n"); if (!n) return 0; off += n;
+    n = fmt_str(buf, cap, off, "\n"); if (!n) return 0; off += n;
+
+    // V-4c-2b (docs/VIVARIUM.md section 6.17): the CPU-feature word, in the same
+    // arm64-uapi numbering exec_fill_auxv publishes as AT_HWCAP -- the source for
+    // the diorama's /proc/cpuinfo `Features` line, which is the field
+    // capability-detecting consumers actually parse. Boot-CPU-derived like the
+    // auxv word itself (the AT_HWCAP row's recorded heterogeneity seam), so it is
+    // a header line rather than a per-CPU column: reporting it per-row would
+    // claim a per-CPU truth the value does not carry. Two tokens, so prowl's
+    // three-token row parse skips it exactly as it skips "cpus:".
+    n = fmt_str(buf, cap, off, "hwcap: "); if (!n) return 0; off += n;
+    n = fmt_uhex(buf, cap, off, g_hw_features.linux_hwcap); off += n;
+
+    // The row columns, appended-only: prowl (usr/prowl/src/sample.rs) matches
+    // three tokens positionally and ignores the rest, so widening the row is
+    // compatible. An `offline` row stays TWO tokens and is still skipped -- which
+    // is also right for the diorama, since Linux lists only online CPUs as cpuN.
+    n = fmt_str(buf, cap, off, "\ncpu idle_ns capacity ctxt intr cacheline midr\n");
+    if (!n) return 0; off += n;
 
     for (unsigned i = 0; i < ncpus; i++) {
         size_t row = off;
@@ -396,6 +427,23 @@ static size_t format_cpu(char *buf, size_t cap) {
             n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_idle_ns(i)); if (!n) break; row += n;
             n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
             n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_capacity(i)); if (!n) break; row += n;
+
+            // V-4c-2b: the /proc/stat + /proc/cpuinfo sources. ctxt and intr are
+            // monotonic per-CPU event counts the reader sums (or diffs); cacheline
+            // and midr are boot-static hardware description. A CPU that never
+            // recorded an identity (PSCI bring-up failure -- the same case the
+            // `offline` marker above covers, but hw_cpu_ident is independently
+            // guarded) reports 0 rather than a neighbour's values.
+            const struct hw_cpu_ident *id = hw_cpu_ident(i);
+            n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+            n = fmt_udec(buf, cap, row, (unsigned long)sched_cpu_ctxt(i)); if (!n) break; row += n;
+            n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+            n = fmt_udec(buf, cap, row, (unsigned long)gic_cpu_irq_count(i)); if (!n) break; row += n;
+            n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+            n = fmt_udec(buf, cap, row, (unsigned long)(id ? id->dcache_line : 0u));
+            if (!n) break; row += n;
+            n = fmt_str(buf, cap, row, " "); if (!n) break; row += n;
+            n = fmt_uhex(buf, cap, row, id ? id->midr : 0ull); if (!n) break; row += n;
         }
         n = fmt_str(buf, cap, row, "\n"); if (!n) break; row += n;
         off = row;
@@ -545,6 +593,53 @@ static int devctl_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
+// SYS_FSTAT / SYS_STAT surface (VIVARIUM V-4b-5). /ctl had no stat_native at
+// all, so spoor_stat_native returned -1 -> EIO for stat("/ctl") AND for fstat
+// on every open /ctl fd -- and, because musl's realpath() walks each path
+// prefix and treats any errno but EINVAL as fatal, EIO on the directory broke
+// realpath() for every path underneath it too. The apex is a real directory and
+// the leaves are real files; say so.
+//
+// SIZE IS DELIBERATELY 0 for the leaves, and that is not laziness. Every /ctl
+// file is generated at read time from live state -- the process table, the
+// buddy free lists, the per-CPU meters -- so any length measured here is
+// already stale when the read runs, and a caller that trusted it (fstat, then
+// malloc, then one read of exactly that many bytes) would silently truncate a
+// growing table. Linux reports 0 for /proc/meminfo and friends for exactly this
+// reason, and the world's readers loop to EOF. devhw and devpci DO report real
+// sizes, and correctly: their content is a static DTB property or a PCI config
+// register, which does not move between the stat and the read.
+//
+// Not an authority: devctl.perm_enforced is false, so no gate consults this
+// mode. It DOCUMENTS the gates that live at the read sites -- kernel-base is
+// 0400 because devctl_kernel_base_readable requires CAP_HOSTOWNER (#57a F1: it
+// discloses the live KASLR slide, an I-16 secret), so advertising it 0444 would
+// have the mode lie about a file the caller cannot in fact read.
+static int devctl_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+
+    out->qid_path = c->qid.path;
+    out->nlink    = 1;
+    out->blksize  = 4096;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+
+    if (c->qid.path == CTL_QID_ROOT_PATH) {
+        out->mode     = T_S_IFDIR | 0555u;
+        out->qid_type = QTDIR;
+        return 0;
+    }
+
+    u32 kind = (u32)c->qid.path;
+    if (!leaf_for_kind(kind)) return -1;        // a qid this Dev does not serve
+
+    out->mode     = T_S_IFREG |
+                    ((kind == CTL_KIND_KERNEL_BASE) ? 0400u : 0444u);
+    out->qid_type = QTFILE;
+    return 0;
+}
+
 static struct Spoor *devctl_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
@@ -643,6 +738,7 @@ struct Dev devctl = {
     .attach   = devctl_attach,
     .walk     = devctl_walk,
     .stat     = devctl_stat,
+    .stat_native = devctl_stat_native,   // V-4b-5: stat("/ctl") + fstat on a /ctl fd
 
     .open     = devctl_open,
     .create   = devctl_create,

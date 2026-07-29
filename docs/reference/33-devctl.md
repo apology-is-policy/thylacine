@@ -163,6 +163,43 @@ Multi-step walk supported via the same `walkqid_alloc / spoor_clone / walk_one` 
 
 ---
 
+## `stat_native` (VIVARIUM V-4b-5)
+
+`/ctl` had **no `stat_native` slot at all**, so `spoor_stat_native` returned `-1`
+and `stat("/ctl")` — plus `fstat` on every open `/ctl` fd, and `lseek(SEEK_END)`,
+which is the same call behind a different syscall — failed with `EIO`. Because
+musl's `realpath()` walks each path prefix and treats any errno but `EINVAL` as
+fatal, that also broke `realpath()` for everything underneath. The apex is a real
+directory and the leaves are real files; `devctl_stat_native` says so.
+
+| qid | mode | size |
+|---|---|---|
+| root | `S_IFDIR \| 0555` | 0 |
+| `kernel-base` | `S_IFREG \| 0400` | 0 |
+| every other leaf | `S_IFREG \| 0444` | 0 |
+
+All SYSTEM-owned; an unrecognized leaf kind returns `-1`.
+
+**The size is deliberately 0**, and that is a decision rather than a shortcut.
+Every `/ctl` file is generated at read time from live state — the process table,
+the buddy free lists, the per-CPU meters — so a length measured at `stat` is
+already stale when the read runs, and a caller that trusted it (fstat, malloc,
+one read of exactly that many bytes) would silently truncate a table that grew in
+between. Linux reports 0 for `/proc/meminfo` and friends for exactly this reason,
+and readers loop to EOF. devhw and devpci *do* report real sizes, correctly: their
+content is a static DTB property or a PCI config register, which does not move
+between the stat and the read. (devenv likewise reports a real size — an `/env`
+value is stored, not generated. See `128-devenv.md`.)
+
+**Not an authority.** `devctl.perm_enforced` is false, so no gate consults this
+mode; every `perm_check` site in `stalk`/`syscall.c` is gated on that flag. What
+the mode does is *document* the gates that live at the read sites — `kernel-base`
+is `0400` because `devctl_kernel_base_readable` requires `CAP_HOSTOWNER` (#57a F1:
+it discloses the live KASLR slide, an I-16 secret), so advertising it `0444` would
+have the mode lie about a file most callers cannot in fact read.
+
+---
+
 ## Implementation
 
 `kernel/devctl.c` (~280 LOC). Structure:

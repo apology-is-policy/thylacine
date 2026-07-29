@@ -15,6 +15,7 @@
 #include <thylacine/page.h>     // KP_ZERO
 #include <thylacine/proc.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/spoor.h>    // V-4b-5: spoor_next_devno -- the per-Env device number
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"          // kmalloc / kfree
@@ -28,6 +29,13 @@ static struct Env *env_alloc(void) {
     if (!e) return NULL;
     spin_lock_init(&e->lock);
     __atomic_store_n(&e->ref, 1, __ATOMIC_RELAXED);
+    // A fresh device number per Env (V-4b-5). Ids are per-Env and restart at 1,
+    // so (devno, qid.path) would otherwise name a DIFFERENT file in every Proc
+    // while claiming to be the same one -- and the REVENANT Image cache is keyed
+    // on exactly that pair, so an exec of an /env path would serve one Proc the
+    // bytes of another's variable (an I-1 leak). A clone gets its own, because a
+    // copied environment is a copy, not the same file.
+    e->devno   = spoor_next_devno();
     e->next_id = 1;                 // 0 is the free-slot sentinel; ids start at 1
     e->count   = 0;
     return e;
@@ -172,6 +180,30 @@ void env_truncate(struct Proc *p, u64 id) {
     spin_unlock(&e->lock);
 }
 
+// The Env's device number (V-4b-5). Lock-free: assigned once at env_alloc, before
+// the Env is published, and never mutated. 0 means "no env yet" -- honest, and
+// harmless because an Env that does not exist has no entries to be confused with.
+u32 env_devno(struct Proc *p) {
+    if (!p) return 0;
+    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
+    return e ? e->devno : 0;
+}
+
+// The stat step (V-4b-5). Same id -> entry resolution under the same lock as
+// every other op, so a variable removed between the walk and the stat reports
+// gone rather than another variable's length (the monotonic-id guarantee).
+bool env_size(struct Proc *p, u64 id, u64 *out_len) {
+    if (!p || !out_len) return false;
+    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
+    if (!e) return false;
+    spin_lock(&e->lock);
+    int i = find_by_id_locked(e, id);
+    if (i < 0) { spin_unlock(&e->lock); return false; }
+    *out_len = (u64)e->entries[i].len;
+    spin_unlock(&e->lock);
+    return true;
+}
+
 long env_read(struct Proc *p, u64 id, s64 off, void *buf, long n) {
     if (!p || !buf) return -1;
     if (n < 0 || off < 0) return -1;
@@ -264,6 +296,107 @@ bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
     *name_len_out = nlen;
     spin_unlock(&e->lock);
     return true;
+}
+
+// =============================================================================
+// The flat environment block (VIVARIUM V-4b-6) -- the source /proc/<pid>/environ
+// serves and the diorama re-presents as Linux's /proc/self/environ.
+// =============================================================================
+
+// Can this entry be encoded in the Linux environment shape at all? Linux's
+// environment is a char*[] of NUL-terminated "NAME=VALUE" strings, so the
+// encoding cannot carry a '=' inside a NAME (the first '=' IS the separator) or
+// a NUL inside a VALUE (the NUL IS the terminator). Thylacine's /env is looser:
+// name_valid rejects only NUL and '/', and a value is raw bytes.
+//
+// An unencodable entry is therefore SKIPPED rather than emitted, because emitting
+// it raw would not truncate the answer, it would CORRUPT it: a '=' in the name
+// makes one variable parse as a prefix of another's value, and a NUL in the value
+// splits the record so its tail parses as a fresh NAME=VALUE that was never set.
+// Both hand a consumer a WRONG value it has no way to distrust, where absence is
+// a state every getenv caller already handles. /env stays the complete truth --
+// this render is a reformatter, and it says nothing it cannot say correctly.
+static bool env_linux_encodable(const struct EnvEntry *en, u32 nlen) {
+    if (nlen == 0) return false;                       // name_valid bars it at create
+    for (u32 i = 0; i < nlen; i++) {
+        if (en->name[i] == '=') return false;
+    }
+    for (u32 i = 0; i < en->len; i++) {
+        if (en->value[i] == '\0') return false;
+    }
+    return true;
+}
+
+// Render the environment as "NAME=VALUE\0" records in increasing-id order (the
+// env_iter ordering), copying only the window [off, off+n). Returns the byte
+// count -- 0 at or past EOF, and 0 for a Proc with no Env (an empty environment
+// is an empty file, not an error).
+//
+// OFFSET-AWARE BY CONSTRUCTION, unlike every other /proc file, which formats the
+// whole thing into a 2 KiB devproc buffer and slices. That would not do here: an
+// Env holds up to ENV_MAX_ENTRIES (64) values of ENV_VALUE_MAX (4096) bytes, a
+// quarter-megabyte, and a SINGLE long PATH would overflow the buffer on its own.
+// The failure mode of a format-and-slice render is silently dropping environment
+// variables -- which does not look like an error to the consumer, it looks like
+// the variable was never set, and sends it down a different path with nothing to
+// notice. Records wholly before the window are skipped in O(1) via `pos`, so a
+// sequential read of a large environment stays linear overall.
+//
+// Coherence: one lock hold makes each read internally consistent, but a SEQUENCE
+// of reads racing a concurrent set/unset can tear (a later record shifts). Linux
+// has exactly this property -- there the block is user memory the target may
+// rewrite mid-read -- so consumers already tolerate it.
+long env_render_environ(struct Proc *p, s64 off, void *buf, long n) {
+    if (!p || !buf)       return -1;
+    if (n < 0 || off < 0) return -1;
+    if (n == 0)           return 0;
+    struct Env *e = __atomic_load_n(&p->env, __ATOMIC_ACQUIRE);
+    if (!e) return 0;                       // no environment -> empty file
+
+    u8  *o      = (u8 *)buf;
+    long copied = 0;
+    u64  pos    = 0;                        // file offset of the next record
+    u64  after  = 0;                        // id cursor (records emit in id order)
+
+    spin_lock(&e->lock);
+    for (;;) {
+        // The live entry with the smallest id strictly greater than `after` --
+        // env_iter's ordering, so the block's record order matches readdir's.
+        int best = -1;
+        u64 best_id = 0;
+        for (int i = 0; i < ENV_MAX_ENTRIES; i++) {
+            u64 id = e->entries[i].id;
+            if (id != 0 && id > after && (best < 0 || id < best_id)) {
+                best = i; best_id = id;
+            }
+        }
+        if (best < 0) break;
+        after = best_id;                    // advance BEFORE any skip -> terminates
+
+        struct EnvEntry *en = &e->entries[best];
+        u32 nlen = 0;
+        while (nlen < ENV_NAME_MAX && en->name[nlen] != '\0') nlen++;
+        if (!env_linux_encodable(en, nlen)) continue;   // contributes no bytes at all
+
+        u64 reclen = (u64)nlen + 1 + (u64)en->len + 1;  // NAME '=' VALUE '\0'
+        if (pos + reclen <= (u64)off) {                 // wholly before the window
+            pos += reclen;
+            continue;
+        }
+        for (u64 k = 0; k < reclen && copied < n; k++) {
+            if (pos + k < (u64)off) continue;           // partial record: skip the head
+            u8 b;
+            if      (k <  nlen)        b = (u8)en->name[k];
+            else if (k == nlen)        b = (u8)'=';
+            else if (k <  reclen - 1)  b = (u8)en->value[k - nlen - 1];
+            else                       b = 0;           // the record terminator
+            o[copied++] = b;
+        }
+        pos += reclen;
+        if (copied >= n) break;
+    }
+    spin_unlock(&e->lock);
+    return copied;
 }
 
 // =============================================================================

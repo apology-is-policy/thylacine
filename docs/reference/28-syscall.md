@@ -46,7 +46,7 @@ Phase 5+ extends to a u64 exit_status carrying the full integer payload.
 
 Never returns.
 
-#### `SYS_PUTS(buf, len)` — write to UART
+#### `SYS_PUTS(buf, len)` — write to the console
 
 | AArch64 reg | Meaning |
 |---|---|
@@ -54,9 +54,13 @@ Never returns.
 | `x0`  | pointer to bytes (user VA) |
 | `x1`  | byte count |
 
-Returns `len` on success; `-1` on validation failure (NULL buf, `len > 4096`, kernel-half VA per R7 F127, or `vaddr + length > USER_VA_TOP` per R12-vaddr) or on uaccess fault (no VMA covers the user page / permission denied / OOM during demand-page sub-table alloc).
+Returns the byte count **accepted**; `-1` on validation failure (NULL buf, `len > SYS_RW_STACK` (4096), kernel-half VA per R7 F127, or `vaddr + length > USER_VA_TOP` per R12-vaddr) or on uaccess fault (no VMA covers the user page / permission denied / OOM during demand-page sub-table alloc).
 
-The kernel reads `len` bytes one at a time via `uaccess_load_u8` (`arch/arm64/uaccess.S`). Each byte read may fault if the user page is in the VMA tree but not yet PTE-installed — the kernel-mode sync fault dispatcher (`exception_sync_curr_el`) catches the fault, demand-pages the user page via `userland_demand_page`, and ERETs back to retry the `ldrb`. If demand-paging fails (no VMA / permission denied), the dispatcher transfers control to `uaccess_load_u8`'s fixup label which returns -1 to `sys_puts_handler`, which then returns -1 as the syscall result. See `docs/reference/40-uaccess.md` for the full mechanism. Pre-R12-uaccess, each userspace binary that spilled `.rodata` past page 0 had to `pretouch_rodata_pages()` from EL0 before the first SYS_PUTS — that discipline is retired.
+Since **#76** the accepted count may be **short of `len`**: the emit runs through `cons_output_write`, which cuts a write off on the #67 stalled-consumer deadline or a #811 death rather than hanging. It was previously always `len`-or-`-1`. No caller inspects the count (every `t_puts`/`t_putstr` use in `usr/` is for side effect), and any negative return is still exactly `-1`, so the "negative means failure" reading is unchanged.
+
+The kernel stages the whole buffer into a `u8 scratch[SYS_RW_STACK]` with **one** `uaccess_copy_in` (`arch/arm64/uaccess.S`), then emits it via `cons_output_write`. The copy may fault if a user page is in the VMA tree but not yet PTE-installed — the kernel-mode sync fault dispatcher (`exception_sync_curr_el`) catches it, demand-pages via `userland_demand_page`, and ERETs back to retry. If demand-paging fails (no VMA / permission denied), the dispatcher transfers control to the primitive's fixup label, `uaccess_copy_in` returns -1, and `sys_puts_handler` returns -1 having emitted **nothing** — a whole-op EFAULT. (The pre-#76 per-byte `uaccess_load_u8` loop pushed the readable prefix to the console *before* returning -1, i.e. it reported writing nothing while having written something.) See `docs/reference/40-uaccess.md` for the fault mechanism. Pre-R12-uaccess, each userspace binary that spilled `.rodata` past page 0 had to `pretouch_rodata_pages()` from EL0 before the first SYS_PUTS — that discipline is retired.
+
+**The staging order is deliberate**: the copy-in completes *before* the console writer role is claimed. Faulting a user page can sleep, and holding the role across an unbounded page-in would stall every other console writer behind it. Because the emit goes through `cons_output_write`, SYS_PUTS output is role-held (atomic against other console writers), ring-buffered, mirrored to the G-4 renderer drain, and ONLCR-cooked — identical treatment to a `/dev/cons` write. See `docs/reference/111-cons.md` ("SYS_PUTS joins the shared path") and ARCH §23.5.2.
 
 ## Implementation
 
