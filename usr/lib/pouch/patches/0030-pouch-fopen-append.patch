@@ -59,8 +59,8 @@ Files: src/fcntl/openat.c (one helper + three call-site retargets).
 Regression: usr/pouch-hello/pouch-hello-fopen.c "append" leg, boot-fatal
 via joey's #50 probe.
 
---- a/src/fcntl/openat.c	2026-07-27 09:34:30
-+++ b/src/fcntl/openat.c	2026-07-27 09:35:06
+--- a/src/fcntl/openat.c	2026-07-30 09:00:00
++++ b/src/fcntl/openat.c	2026-07-30 09:00:00
 @@ -22,12 +22,34 @@
  #include <errno.h>
  #include <stddef.h>
@@ -96,25 +96,25 @@ via joey's #50 probe.
  int openat(int fd, const char *filename, int flags, ...)
  {
  	mode_t mode = 0;
-@@ -64,7 +86,7 @@
+@@ -77,7 +99,7 @@
  
- 		long r = __syscall(SYS_thyla_walk_create, p, leaf, strlen(leaf),
+ 		long r = __syscall(SYS_thyla_walk_create, p, leaf, llen,
  		                   omode, (unsigned)mode & 0777u);
 -		if (r >= 0) { __syscall(SYS_close, p); return __syscall_ret(r); }
 +		if (r >= 0) { __syscall(SYS_close, p); return pouch_open_ret(r, flags); }
  
  		/* Exists + no O_EXCL: open the existing file (+OTRUNC on O_TRUNC).
  		 * Any other create error propagates. */
-@@ -72,7 +94,7 @@
+@@ -85,7 +107,7 @@
  			unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
- 			long o = __syscall(SYS_thyla_open, (long)p, leaf, strlen(leaf), om);
+ 			long o = __syscall(SYS_thyla_open, (long)p, leaf, llen, om);
  			__syscall(SYS_close, p);
 -			return __syscall_ret(o);
 +			return pouch_open_ret(o, flags);
  		}
  		__syscall(SYS_close, p);
  		return __syscall_ret(r);
-@@ -81,6 +103,6 @@
+@@ -94,6 +116,6 @@
  	/* Non-create open: one stalk-resolved open from the Territory root
  	 * (relative paths cwd-join via the FROM_ROOT arm). O_TRUNC -> +OTRUNC. */
  	unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
