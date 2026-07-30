@@ -405,31 +405,55 @@ fs::remove_dir(path)   -> SYS_UNLINK(parent, name, REMOVEDIR)
 fs::rename(from, to)   -> SYS_RENAME(from_parent, from_name, to_parent, to_name)
 ```
 
-All four resolve the parent directory through one shared helper,
-`fs::file::with_parent_dir(path, |parent_fd, basename| ...)`, which walks the
-parent chain and hands the closure the parent dir fd + the final component name
-(the `(parent, name)` shape these syscalls take). **The intermediates are walked
-with `T_OPATH`, not `T_OREAD`** — two reasons, both load-bearing:
+All four split the path lexically at its LAST component -- and nowhere else
+(`fs::file::split_parent_leaf`, #87) -- then open the parent prefix through
+the KERNEL stalk resolver (`fs::file::with_parent_fd`: one
+`SYS_OPEN(FROM_ROOT, parent_prefix, T_OPATH)`) and drive the syscall on the
+`(parent_fd, leaf)` pair. Nothing in libthyla-rs resolves `.` / `..` or drops
+a trailing separator anymore: **the pre-#87 `cwd_join_clean` popped `..`
+without proving the popped component existed and dropped `.` / trailing
+slashes lexically** (the userspace twin of the kernel #83 join defect and the
+pouch #86 splitter defect), so `fs::remove_file("nope/../x")` removed `x`,
+`remove_file("f/")` deleted the very file the slash asserts is a directory,
+and an absolute path's `..` was rejected outright.
+
+The parent prefix keeps its own trailing separator (`"a/b/"` for `"a/b/f"`),
+so the kernel's audited #82 gate answers `NotADirectory` when a prefix
+component is not a directory -- exactly Linux's parent-walk-first ordering --
+and any `.` / `..` INSIDE the prefix resolves kernel-side with I-28
+containment (a relative prefix joins the per-Proc cwd kernel-side, #83
+verbatim). A bare relative leaf (`"f"`) opens `"."` (the cwd, which must
+still exist and be searchable -- the #81 dot gate); an all-separator prefix
+(`"/f"`) uses the `FROM_ROOT` sentinel directly. **The parent opens with
+`T_OPATH`, not `T_OREAD`** -- two reasons, both load-bearing:
 
 1. **RIGHT_WRITE on the parent.** `sys_walk_create_handler` / `sys_unlink_handler`
    / `sys_rename_handler` resolve the parent fd with `RIGHT_WRITE` (the directory
    is mutated). Since A-3b an `T_OREAD` open yields a `RIGHT_READ`-only handle,
    which those handlers reject; `T_OPATH` is born `RIGHT_READ | RIGHT_WRITE` (the
-   navigation/capability base), so the final parent is a valid mutation target.
+   navigation/capability base), so the parent is a valid mutation target.
 2. **X-only traversal.** `T_OPATH` is exempt from the open-mode R/W `perm_check`
    but still X-searched per component (POSIX: you need search, not read, to
    traverse a directory). `T_OREAD` would wrongly require read on each ancestor.
 
-This is the same discipline `File::open_create_at_path` uses, and switching *its*
-intermediate walk from `T_OREAD` to `T_OPATH` (same chunk) **fixed a latent
-`File::create` depth>=2 bug**: a `File::create("/a/b/c")` previously walked `/a/b`
-with `T_OREAD` (RIGHT_READ-only) and then failed the `SYS_WALK_CREATE` parent
-`RIGHT_WRITE` gate. The fix was pulled forward as a proper-completion dependency
-of `touch`/`cp`/`tee` (which create files, often at depth).
+Each caller then applies its POSIX leaf row (Linux-shaped -- the #86
+per-caller table one layer up):
 
-`with_parent_dir` closes the owned parent handle after the closure returns (success
-or error); `FROM_ROOT` is used for a single-component path (the syscalls resolve it
-to the Territory root). `fs::rename` nests two `with_parent_dir` calls so both
+| leaf | `create_dir` | `remove_file` | `remove_dir` | `rename` (either side) |
+|---|---|---|---|---|
+| trailing `/` | strips (the leaf IS a dir) | one stat of the slash-terminated path (the kernel #82 gate): Ok => `IsADirectory`, else the real error -- **never reaches SYS_UNLINK** (stripped, it would delete the file) | strips (REMOVEDIR enforces; #80 carries the server's `NotADirectory`) | the `do_renameat2` rule: one stat of the slash-terminated SOURCE; a dir source proceeds stripped |
+| `.` | `Exists` | `IsADirectory` | `InvalidArgument` (POSIX) | `Busy` |
+| `..` | `Exists` | `IsADirectory` | `DirectoryNotEmpty` | `Busy` |
+| `/` (all-separators) | `Exists` | `IsADirectory` | `Busy` | `Busy` |
+
+`File::open_create_at_path` rides the same machinery: a PLAIN open hands the
+whole path to `open_stalk` (SYS_OPEN -- so `File::open("a/../f")` resolves
+for real and `File::open("f/")` answers `NotADirectory`); the CREATE legs
+split + apply the Linux O_CREAT rows (a trailing slash or `.` / `..` leaf ->
+`IsADirectory` unconditionally).
+
+`with_parent_fd` closes the opened parent handle after the closure returns
+(success or error). `fs::rename` nests two `with_parent_fd` calls so both
 parents are held open across the rename. **Recursion footgun for callers**:
 `fs::read_dir` yields `.` and `..` (Stratum returns them as cookies 1/2), so a
 recursive `rm -r` / `cp -r` MUST skip them — the coreutils do.
@@ -440,11 +464,17 @@ recursive `rm -r` / `cp -r` MUST skip them — the coreutils do.
 cross-Dev move would need copy+remove — not emulated).
 
 **Always-on regression**: `usr/fs-mut-smoke` — joey spawns it post-pivot (the
-writable Stratum FS) and gates the boot on a 0 exit. 13 checks: `create_dir` at
-depth, **depth-3 `File::create` + write + read-back** (the fix), `rename`
-atomic-replace, `remove_file` / `remove_dir`, and `NotFound` on a removed path.
-Idempotent (reclaims a stale `/fs-mut-smoke` tree before building a fresh one, since
-the pool persists). The interactive companion is `tools/interactive/ls-3b.exp`.
+writable Stratum FS) and gates the boot on a 0 exit. 55 checks: `create_dir` at
+depth, **depth-3 `File::create` + write + read-back**, the LS-4 relative /
+`..`-bearing cwd legs, `rename` atomic-replace, `remove_file` / `remove_dir`,
+`NotFound` on a removed path, and the 34 **#87 resolution-row legs** — every
+leaf row above with exact-variant asserts plus the two survival legs
+(`remove_file("f/")` and `remove_file("nope/../f")` must leave `f` alive; the
+pre-#87 code deleted it both ways — revert-probed: the pre-fix library fails
+16 of 55 boot-fatally). Idempotent (reclaims every name any leg can leave —
+in BOTH file/dir forms, since broken code can leave either — before building
+fresh, since the pool persists). The interactive companion is
+`tools/interactive/ls-3b.exp`.
 
 ## Known caveats / footguns
 

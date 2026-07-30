@@ -303,10 +303,11 @@ own (host-baked).
 
 `stalk()` is not the only path resolver: the single-hop `SYS_WALK_OPEN`
 (`sys_walk_open_handler`, "walk ONE component from a parent fd") and its
-create/rename/unlink siblings are the lower-level primitive that libthyla-rs
-`fs::` navigates with (`file::with_parent_dir` walks the parent chain
-component-by-component via `t_walk_open`; `File::open` / `create_dir` / `rename`
-build paths this way). Plan 9 has no non-crossing walk -- ALL walking crosses
+create/rename/unlink siblings are the lower-level primitive libthyla-rs `fs::`
+drives its FINAL component with (since #87 the parent PREFIX resolves through
+stalk itself -- `file::with_parent_fd` is one `SYS_OPEN(prefix, T_OPATH)` --
+and only the leaf rides `t_walk_open` / `t_walk_create` / `t_unlink` /
+`t_rename`). Plan 9 has no non-crossing walk -- ALL walking crosses
 mounts -- so `sys_walk_open_handler` calls `stalk_cross_mounts` at BOTH the
 **source** (before the X-search + walk: walk INTO the mounted root if the parent
 fd is a mount point -- mirrors stalk's base cross) and the **result** (after the
