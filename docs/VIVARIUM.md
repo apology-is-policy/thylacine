@@ -442,6 +442,20 @@ this exact translation in userspace); errno is already POSIX-aligned by `ERRORS.
 - **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/`SA_RESTART`/queued
   `siginfo`/`tgkill` fidelity.
 
+**CORRECTION to Tier 1, 2026-07-30 (V-6 entry; user-voted).** The clause *"restores
+`pstate`/`pc` from user memory at `rt_sigreturn`"* described Linux's mechanism, not
+the one Thylacine should build — and measuring the kernel found a strictly safer
+shape that this section did not know existed. Thylacine's note delivery already
+saves the interrupted user context into **kernel-side per-Thread fields**
+(`Thread.note_saved_regs[31]`/`note_saved_sp_el0`/`note_saved_elr`/
+`note_saved_spsr`), a deliberate divergence from Plan 9 (whose `notify` pushes a
+`Ureg` the handler's `noted` reads back). Those four fields are a field-for-field
+match for the register half of Linux's `mcontext_t`. So Tier 1 pushes a frame the
+handler can **read**, and restores from the **kernel** copy — which makes the
+escalation hazard this section flagged impossible by construction rather than
+merely guarded. §6.22 is the design; the audit-trigger row in §8 is restated to
+match.
+
 ### 5.5 Sockets (R-2)
 
 The Linux socket family is **translated to `/net` file operations** — the same
@@ -1715,6 +1729,123 @@ breaking only the *shell* — leaving the table intact — keeps the unit suite 
 full **1239/1239 PASS** while the in-guest leg fails at `L16`. The pure tests
 prove the decision; the guest legs prove the plumbing.
 
+### 6.22 Signals — the frame shape (V-6, design)
+
+R-3 (§1.4) called signals "the genuine hard part", and §5.4 sized Tier 1 as
+"kernel-built `ucontext` frame on the user stack + `rt_sigreturn`" — the shape
+every peer builds. Measuring the kernel at V-6's entry found that Thylacine
+already owns most of the mechanism, and owns it in a **safer** shape than the one
+scripture specified.
+
+**The substrate.** `SYS_NOTIFY`/`SYS_NOTED` already deliver an asynchronous note
+to a user handler and return from it: the EL0-return tail saves the interrupted
+context, rewrites the exception frame to land at the handler, and `SYS_NOTED`
+restores. That machinery is audited across four rounds. Crucially, the save is
+**kernel-side** — into per-`Thread` fields — and those fields are a field-for-field
+match for the register half of Linux's `mcontext_t`:
+
+| `Thread` (`thread.h:247`) | Linux `mcontext_t` (aarch64) |
+|---|---|
+| `note_saved_regs[31]` | `regs[31]` (x0–x30) |
+| `note_saved_sp_el0` | `sp` |
+| `note_saved_elr` | `pc` |
+| `note_saved_spsr` | `pstate` |
+
+Only `fault_address` has no counterpart, and it is derivable (`FAR_EL1` for the
+`snare:*` faults, 0 otherwise).
+
+**This is a Plan 9 divergence Thylacine already made, in the safe direction.**
+Plan 9's `notify` pushes a `Ureg` onto the user stack and `noted` reads it back;
+Thylacine saves in the kernel instead. The capability-microkernel SOTA agrees —
+seL4 manipulates a faulting thread's state through its TCB capability, Genode
+notifies a handler thread; neither reconstructs registers from a user stack. Only
+the Linux *emulators* (gVisor's Sentry, Starnix) rebuild the real frame, because
+bug-compatibility is their product.
+
+**DECISION (user-voted 2026-07-30): the frame is pushed for reading; the restore
+is from the kernel.** Delivery writes a real `siginfo_t` + `ucontext_t` to the
+user stack, so a handler that *reads* them — a crash reporter printing
+`uc_mcontext.pc`, anything consulting `si_addr` — works. `rt_sigreturn` then
+restores from the `Thread` snapshot and **ignores whatever the handler wrote to
+the frame**.
+
+The gain is not a smaller diff, it is a deleted hazard. §8's audit-trigger row
+warned that Tier 1 "restores `pstate`/`pc` from user memory at `rt_sigreturn` — a
+classic privilege-escalation shape. Must reject any frame that would elevate."
+Under this design **no field of the user frame ever reaches `pstate`, `pc`, or
+`sp`**, so there is no frame to reject and no validator to get wrong. The row is
+restated accordingly: the obligation becomes proving the restore reads only
+kernel state, which is a structural property rather than a sanitising pass.
+
+The cost is a fidelity limit, named rather than buried: **writing to
+`uc_mcontext` does not change where execution resumes.** That breaks
+signal-driven control transfer — Go's `sigpanic` injection and JIT
+deoptimisation both rewrite the saved `pc`. Neither reaches this path at v1.0
+(the Go fork is native, and an executable anonymous mapping is `CAP_JIT`/I-42
+territory that §6.21 already refuses), and the limit belongs in §9's DEGRADED
+tier. It costs fidelity, never authority: the frame is the guest's own stack,
+every gate is unchanged, and I-43 is untouched.
+
+**The disposition table is new per-Proc state, and it has to be.** Pouch keeps
+its sigtab in *userspace* (`__pouch_sigtab`, patch `0007`) because the pouch libc
+is ours to patch; a Vivarium guest's libc is not, so the kernel must hold it.
+Lazily allocated and freed at `proc_free`, the `p->env`/`debug_hw` pattern.
+
+**The signal↔note map.** Every row is an existing note, so Tier 0 is a decode
+rather than new machinery:
+
+| Linux | note | disposition |
+|---|---|---|
+| `SIGINT`, `SIGTERM` | `interrupt` | catchable; default terminate (LS-5) |
+| `SIGKILL` | `kill` | non-catchable both sides (I-19 N-4) |
+| `SIGPIPE` | `pipe` | catchable; maskable |
+| `SIGCHLD` | `child_exit` | catchable; default ignore |
+| `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | catchable; default terminate |
+| `SIGHUP`/`SIGQUIT`/`SIGWINCH`/`SIGTSTP`/`SIGCONT` | `tty:*` | PTY-1 semantics |
+| `SIGALRM`, `SIGUSR1/2`, `SIGABRT` | — | no note exists; see below |
+
+`SIGTERM` sharing `interrupt` with `SIGINT` is inherited from the pouch mapping
+and is a stated v1.0 imprecision, not an oversight.
+
+**The argument domains** (V-2b's rule, unchanged):
+
+- **`rt_sigaction` (134)** requires `SA_RESTORER` set when installing a real
+  handler. Measured: musl compiles with `-D_XOPEN_SOURCE=700`, which exposes
+  `SA_RESTORER` in `arch/aarch64/bits/signal.h`, so `struct k_sigaction` carries
+  a `restorer` and `sigaction.c` always fills it with `__restore_rt`
+  (`mov x8,#139; svc 0`). **The guest therefore supplies its own return
+  trampoline** and Thylacine needs none. The flag is self-describing, so the
+  struct's two shapes are distinguishable rather than guessed. A guest that omits
+  it (glibc on aarch64 relies on a vDSO trampoline instead) declines — supplying
+  one would mean making Thylacine's vDSO page executable, and it is deliberately
+  RO+XN.
+- **`rt_sigprocmask` (135)** maps onto the existing per-`Thread` `note_mask`,
+  which already exists for exactly this reason ("so multi-thread Procs can have
+  different threads accept different signals — POSIX `pthread_sigmask`
+  semantics", `notes.h:107`). Bits outside the mapped set decline.
+- **`kill` (129) / `tkill` (130) / `tgkill` (131)** map to `notes_post_pid`,
+  under the *existing* I-26 two-axis gate. A phenotype must not become a way to
+  signal a Proc the caller could not otherwise reach.
+- **`rt_sigreturn` (139)** is the phenotyped spelling of `SYS_NOTED(NCONT)`.
+
+`sigaltstack` (132), `rt_sigsuspend` (133), `rt_sigpending` (136),
+`rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
+explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
+file's standard that a number never considered and one considered-and-rejected
+are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
+`SIGABRT` is reachable only via `raise`, which is `tkill` to self, so it
+terminates rather than running a handler.
+
+**What Tier 2 still owes**, unchanged from §5.4: queued `siginfo`, `SA_RESTART`
+(a restartable syscall needs the EINTR plumbing LS-8 defers), `SA_NODEFER` and
+`SA_ONSTACK`. Thylacine's `in_handler` blocks *all* delivery for the duration
+where Linux blocks only the delivered signal plus `sa_mask` — a stated
+imprecision in the conservative direction.
+
+---
+
+## 7. The vivarium — the container runner
+
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel
 surface beyond §4's.
 
@@ -1889,7 +2020,7 @@ caller reaches. (`I-42` is Clade's; `I-43` is the next free number.)
 | The syscall entry phenotype branch | The privilege boundary: a mis-branded Proc decodes numbers wrong. Prosecute I-43 completeness — *no* translated path may bypass a gate. |
 | Brand detection at exec | Mis-branding is the attack: a native binary branded Linux (or vice versa) decodes every syscall wrong. Fail-closed. |
 | The supervisor forward channel (B/C) | **New wait/wake on the death lineage** — I-9 register-then-observe, death-interruptibility (#811), no lost/double reply, supervisor death unwinds every parked guest. Spec-first. |
-| Signal frame construction (§5.4 Tier 1) | Writes a frame to a user stack and restores `pstate`/`pc` from user memory at `rt_sigreturn` — a classic privilege-escalation shape. Must reject any frame that would elevate. |
+| Signal delivery + `rt_sigreturn` (§6.22) | **RESTATED at V-6.** The original hazard — "restores `pstate`/`pc` from user memory, a classic privilege-escalation shape; must reject any frame that would elevate" — describes Linux's mechanism, and §6.22 does not build it: the restore reads the kernel-side `Thread` snapshot, so no user-frame field reaches `pstate`/`pc`/`sp` and there is no validator to get wrong. The obligation becomes proving that structural property holds on every path, plus: delivery is on the **death/notes lineage** (I-9/I-19, #809/#811/LS-5), so prosecute no-lost/no-double delivery, `kill` staying non-catchable through the phenotype, and the frame push failing *closed* (an unwritable user stack must re-enqueue, never half-deliver). `kill`/`tkill`/`tgkill` must not widen I-26's two-axis gate. |
 | Socket translation | Every `/net` op must run with the *guest's* authority, never the supervisor's (I-43 + I-1). |
 | The diorama servers | `/proc/<pid>` cross-Proc reads are the #57a-F2 class (UAF/lifetime under `g_proc_table_lock`) and an info-leak surface (KASLR, other principals' data). |
 
@@ -1927,6 +2058,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own |
 | **`exit(N)` is boolean** (task #91) | Any nonzero status reports 1, a Thylacine-wide v1.0 property (`sys_exit_group_handler` collapses to `exits("fail")`). A shell reading `$?` in a container sees 0-or-1 |
 | **`/proc/self` names the mounter** (task #90) | The per-container diorama reports `viv` rather than the reading Proc |
+| **A signal handler's `ucontext` is read-only** (§6.22) | The frame is written to the user stack and is accurate to read, but `rt_sigreturn` restores from the kernel-side `Thread` snapshot, so *writing* `uc_mcontext` does not change where execution resumes. Breaks signal-driven control transfer (Go's `sigpanic`, JIT deoptimisation); neither reaches this path at v1.0. Bought deliberately: it is what makes the `rt_sigreturn` escalation surface structurally absent rather than merely guarded |
 
 ---
 
@@ -1940,7 +2072,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. The shape is decided by **V-5**, the first chunk that genuinely needs a destination; §4.1 records the three live candidates and the peer evidence so V-5 does not re-derive them. `specs/phenotype.tla` lands with whatever V-5 chooses | (deferred; the gate travels with V-5) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
 | V-5 | Sockets | The `/net` translation | **`curl` fetches a URL** (ROADMAP §9.2) |
-| V-6 | Signals | Tier 0, then Tier 1 (audit-bearing) | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
+| V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
 | V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
 
@@ -1982,8 +2114,23 @@ for V-1b/V-7. The order from here:
    optimisation. It applies a rule that is *already binding* (V-2b), so it needs
    no new decision.
 2. **V-6** — signals. Kernel-side either way, so it is independent of §4.1.
+   Its own premise was re-checked at entry the way §4.1 re-checked V-3's, and
+   unlike V-3's it **holds**: the notes substrate exists, every row of the
+   signal↔note map lands on a live note, and a consumer is available
+   (`viv-pheno-probe` issues raw Linux numbers). §6.22 is the design.
 3. **V-5** — sockets, which **decides V-3's shape** and then builds it.
 4. **V-8** — the I-43 focused audit + close.
+
+**A gap this arc does not chunk, recorded at V-6's entry (task #93).** The ARC
+gate is "an Alpine shell runs", but a shell forks before it does anything else,
+and **no V-chunk builds `clone`/`execve`/`wait4`**. §2's table correctly says the
+*native* counterparts exist (`rfork`, the `SYS_SPAWN_*` family, `SYS_WAIT_PID`),
+but the translation is not a renumber — `SYS_SPAWN_*` takes a program where
+`clone` takes a continuation, and `fork()` has no native counterpart at all. So
+they are unclassified → `FORWARD` → `ENOSYS`, and a guest shell cannot fork. This
+does not block V-6 (signals are needed either way), but it is a hole between the
+arc as chunked and the arc gate; it wants its own scripture pass, weighed at V-8
+or promoted sooner if the ARC gate is attempted.
 
 ---
 
