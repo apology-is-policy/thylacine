@@ -14,9 +14,10 @@
 #
 # It composes tools/smp-multiboot.sh (which re-runs tools/test.sh N times
 # against ONE built kernel and classifies each failure as CORRUPTION vs
-# benign host-TIMING vs OTHER). This driver builds each needed kernel ONCE
-# up front (so the N boots reuse the ELF instead of rebuilding per boot),
-# runs every requested config, and aggregates.
+# EXTERNAL-KILL vs inject-miss vs benign host-TIMING vs OTHER). This driver
+# builds each needed kernel ONCE up front (so the N boots reuse the ELF
+# instead of rebuilding per boot), runs every requested config, and
+# aggregates.
 #
 # Usage:
 #   tools/ci-smp-gate.sh                 # full matrix, N=10
@@ -43,10 +44,12 @@
 # evidence behind it. For a quick pre-push check use SMP_GATE_CONFIGS to run
 # the amplifier subset.
 #
-# Exit 0 iff every requested config reports 0 CORRUPTION and 0 OTHER across
-# all N boots. Benign host-TIMING failures are reported but do not fail the
-# gate (DEBUGGING-PLAYBOOK section 6: do not conflate host-fragility with
-# scheduler corruption).
+# Exit 0 iff every requested config reports 0 CORRUPTION, 0 EXTERNAL-KILL,
+# and 0 OTHER across all N boots. Benign host-TIMING failures are reported
+# but do not fail the gate (DEBUGGING-PLAYBOOK section 6: do not conflate
+# host-fragility with scheduler corruption). An EXTERNAL-KILL (#88) is not a
+# guest defect either, but it FAILS loudly under its honest label so outside
+# interference with the VM is seen, never absorbed.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -747,7 +747,9 @@ tools/test.sh
 
 # SMP soundness gate (single boots lie -- multi-boot or it didn't happen).
 # Builds default + UBSan kernels, multi-boots smp4/smp8 x default/UBSan N>=10,
-# classifies CORRUPTION vs benign host-TIMING. Fails iff any boot corrupts.
+# classifies CORRUPTION vs EXTERNAL-KILL (#88: QEMU's own 'terminating on
+# signal' report -- someone outside killed the VM) vs benign host-TIMING vs
+# OTHER. Fails iff any boot corrupts, is externally killed, or is unclassified.
 tools/ci-smp-gate.sh                    # full matrix, N=10 (or: make smp-gate)
 SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier subset
 
