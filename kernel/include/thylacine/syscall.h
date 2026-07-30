@@ -1971,6 +1971,30 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
 #define SPAWN_ALLOWANCE_SET          (1u << 0)
 #define SPAWN_ALLOWANCE_FLAGS_ALL    (SPAWN_ALLOWANCE_SET)
 
+// VIVARIUM V-1b (docs/VIVARIUM.md section 12.1): sys_spawn_args.pheno_flags
+// bits. SPAWN_PHENO_LINUX stamps the child Proc PHENO_LINUX in the spawn thunk
+// (before exec / before EL0), so every syscall the child ever issues is decoded
+// through the Linux translation table (kernel/vivarium.c). Descendants inherit
+// the phenotype via rfork (proc.c), which is section 12.1 rule 2: within a
+// declared-Linux vivarium every exec is PHENO_LINUX.
+//
+// DELIBERATELY UNGATED -- and that is I-43 doing the work, not an oversight:
+// a phenotype confers ABI SHAPE, NEVER AUTHORITY. Every translated call lands
+// on the same sys_*_for_proc body, behind the same capability / namespace /
+// permission / resource gates, that a native caller reaches. A parent that
+// mis-declares its child gains nothing it could not get by spawning a binary
+// of its own authorship natively -- the mis-branded child merely decodes its
+// own numbers wrong and breaks itself. Contrast every SPAWN_PERM_* bit, which
+// DOES confer a role and is therefore gate-checked.
+//
+// Only SYS_SPAWN_FULL_ARGV carries the declaration (the struct has the field;
+// the register-argument spawn variants cannot declare and always spawn native
+// -- section 12.1 rule 3). The v1.0 producer is `viv`, which sets the bit on a
+// container's ENTRYPOINT spawn when the bundle manifest's annotation
+// `org.thylacine.phenotype` says "linux".
+#define SPAWN_PHENO_LINUX            (1u << 0)
+#define SPAWN_PHENO_FLAGS_ALL        (SPAWN_PHENO_LINUX)
+
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
 // allowance_va at it with SPAWN_ALLOWANCE_SET; the kernel uaccess-copies it,
@@ -2511,14 +2535,21 @@ struct sys_spawn_args {
     // zero-fills this struct, gets the as-built broad behavior).
     u64 allowance_va;    // user-VA of a struct t_allowance_desc (0 unless SET)
     u32 allowance_flags; // SPAWN_ALLOWANCE_* bits; outside SPAWN_ALLOWANCE_FLAGS_ALL → -1
-    u32 _pad_allow;      // must be 0 at v1.0 (8-alignment + forward-compat slot)
+    // VIVARIUM V-1b: the phenotype declaration (section 12.1 rule 1). This
+    // consumed the `_pad_allow` forward-compat slot exactly as that slot's
+    // contract prescribed (the _pad_envp precedent): same offset (92), and 0
+    // -- what every pre-V-1b caller zero-fills -- means "inherit", which is
+    // byte-identical to the old must-be-0 behavior. SPAWN_PHENO_LINUX stamps
+    // the child PHENO_LINUX before EL0; ungated (I-43: shape, never
+    // authority). Unknown bits are rejected (-1), the _pad_envp rationale.
+    u32 pheno_flags;     // SPAWN_PHENO_* bits; outside SPAWN_PHENO_FLAGS_ALL -> -1
 };
 
 _Static_assert(sizeof(struct sys_spawn_args) == 96,
                "struct sys_spawn_args is a SYS_SPAWN_FULL_ARGV ABI type "
                "— pinned at 96 bytes (A-1a appended the identity block at "
                "56..80; the Menagerie step-5 allowance block appended at "
-               "80..96: allowance_va 8 + allowance_flags 4 + _pad_allow 4); "
+               "80..96: allowance_va 8 + allowance_flags 4 + pheno_flags 4); "
                "no implicit padding");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, name_va) == 0,
                "sys_spawn_args.name_va at ABI offset 0");
@@ -2554,8 +2585,10 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, allowance_va) == 80,
                "sys_spawn_args.allowance_va at ABI offset 80");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, allowance_flags) == 88,
                "sys_spawn_args.allowance_flags at ABI offset 88");
-_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_allow) == 92,
-               "sys_spawn_args._pad_allow at ABI offset 92");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, pheno_flags) == 92,
+               "sys_spawn_args.pheno_flags at ABI offset 92 (the consumed "
+               "_pad_allow forward-compat slot; 0 == inherit == the pre-V-1b "
+               "must-be-0 behavior)");
 
 struct exception_context;
 

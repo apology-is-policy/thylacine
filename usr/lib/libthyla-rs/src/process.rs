@@ -448,7 +448,7 @@ impl Command {
             identity_flags: id_flags,
             allowance_va: allow_va,
             allowance_flags: allow_flags,
-            _pad_allow: 0,
+            pheno_flags: 0,
         };
 
         // SAFETY: every pointer in args_record points into a buffer

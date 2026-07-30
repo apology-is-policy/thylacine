@@ -382,12 +382,22 @@ pub struct TSpawnArgs {
     // Leave allowance_flags == 0 to inherit the parent's allowance (broad).
     pub allowance_va:    u64, // 80 — user-VA of a TAllowanceDesc
     pub allowance_flags: u32, // 88 — T_SPAWN_ALLOWANCE_SET
-    pub _pad_allow:      u32, // 92 — must be 0 at v1.0
+    // VIVARIUM V-1b: the phenotype declaration (docs/VIVARIUM.md section 12.1
+    // rule 1). Consumed the former `_pad_allow` must-be-0 slot at the same
+    // offset, so 0 — what every existing caller writes — still means
+    // "inherit". Set T_SPAWN_PHENO_LINUX to spawn a child whose syscall
+    // numbers are decoded as Linux aarch64. Ungated (I-43: a phenotype
+    // confers ABI shape, never authority).
+    pub pheno_flags:     u32, // 92 — T_SPAWN_PHENO_*
 }
 // Compile-time pin matching kernel's _Static_assert(sizeof(...) == 96).
 const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 96);
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_va) == 80);
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_flags) == 88);
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, pheno_flags) == 92);
+
+// VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
+pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;
 
 // A-1a: identity_flags bits (mirror SPAWN_IDENTITY_* in the kernel header).
 pub const T_SPAWN_IDENTITY_SET: u32 = 1 << 0;

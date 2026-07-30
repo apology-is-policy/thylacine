@@ -7747,6 +7747,133 @@ int main(void) {
                 }
                 t_putstr("joey: V-7 viv-probe (containered) PASS\n");
             }
+
+            // === VIVARIUM V-1b gate: the phenotype, from both vantages.
+            // Boot-fatal, and deliberately TWO legs, because either alone
+            // could pass for the wrong reason.
+            //
+            // Leg A -- the DISCRIMINATOR. The same binary, spawned with NO
+            // declaration, asserts that a Linux syscall number is NOT
+            // translated (brk 214 falls to the native dispatcher's default and
+            // answers -1, not -ENOSYS). Without this leg, leg B's success
+            // would not prove the phenotype caused it.
+            //
+            // Leg B -- the CHAIN. A container whose manifest declares
+            // `org.thylacine.phenotype: linux`, whose entrypoint then speaks
+            // ONLY raw Linux numbers: openat/read/lseek/fstat/newfstatat/
+            // write/close all move real bytes, the two stat paths cross-check
+            // each other's file identity, the documented AT_SYMLINK_NOFOLLOW
+            // reject stays rejected, and the process terminates through Linux
+            // exit_group -- so a clean reap is itself the last assertion. A
+            // nonzero status names the failing leg.
+            {
+                const char pnative[] = "/bin/viv-pheno-probe";
+                const char pargv[]   = "/bin/viv-pheno-probe\0native";
+                struct t_sys_spawn_args preq = {
+                    .name_va       = (unsigned long)pnative,
+                    .argv_data_va  = (unsigned long)pargv,
+                    .name_len      = sizeof(pnative) - 1,
+                    .argv_data_len = sizeof(pargv),
+                    .argc          = 2,
+                };
+                long ppid = t_spawn_full_argv(&preq);
+                if (ppid <= 0) {
+                    t_putstr("joey: V-1b spawn viv-pheno-probe(native) FAILED\n");
+                    return 1;
+                }
+                int  pst  = 0;
+                long pgot = t_wait_pid_for((int)ppid, 0, &pst);
+                if (pgot != ppid || pst != 0) {
+                    t_putstr("joey: V-1b native-mode leg FAILED rc=");
+                    t_putstr(itoa_dec(pst, pbuf, sizeof(pbuf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+
+                const char hb[] = "/vivarium/pheno/config.json";
+                long hfd = t_open(T_WALK_OPEN_FROM_ROOT, hb, sizeof(hb) - 1,
+                                  T_OPATH);
+                if (hfd < 0) {
+                    t_putstr("joey: V-1b /vivarium/pheno bundle MISSING -- "
+                             "stale pool? re-run tools/build.sh with "
+                             "THYLACINE_MKFS_PRESERVE=0\n");
+                    return 1;
+                }
+                (void)t_close(hfd);
+
+                // STAMP THE MARKER FILE WITH A SENTINEL FIRST. The container
+                // reports its verdict by writing into this file (its exit
+                // status cannot carry a leg number -- Thylacine's status is
+                // boolean at v1.0, task #91), and joey reads it back from
+                // OUTSIDE the container -- which is also what proves Linux
+                // write(64) moved real bytes. The pool is PRESERVEd across
+                // boots, so without this stamp a stale "OK" from a previous
+                // boot would pass a broken run. Same fixture-freshness rule
+                // the LS-CI reset exists for.
+                const char hm[] = "/vivarium/pheno/rootfs/pheno-scratch";
+                long mfd = t_open(T_WALK_OPEN_FROM_ROOT, hm, sizeof(hm) - 1,
+                                  T_OWRITE | T_OTRUNC);
+                if (mfd < 0) {
+                    t_putstr("joey: V-1b marker file unopenable\n");
+                    return 1;
+                }
+                if (t_write(mfd, "??\n", 3) != 3) {
+                    t_putstr("joey: V-1b marker stamp FAILED\n");
+                    (void)t_close(mfd);
+                    return 1;
+                }
+                (void)t_close(mfd);
+
+                const char hname[] = "/bin/viv";
+                const char hargv[] = "/bin/viv\0run\0/vivarium/pheno";
+                struct t_sys_spawn_args hreq = {
+                    .name_va       = (unsigned long)hname,
+                    .argv_data_va  = (unsigned long)hargv,
+                    .name_len      = sizeof(hname) - 1,
+                    .argv_data_len = sizeof(hargv),
+                    .argc          = 3,
+                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+                };
+                long hpid = t_spawn_full_argv(&hreq);
+                if (hpid <= 0) {
+                    t_putstr("joey: V-1b spawn /bin/viv (pheno) FAILED\n");
+                    return 1;
+                }
+                int  hst  = 0;
+                long hgot = t_wait_pid_for((int)hpid, 0, &hst);
+
+                // Read the container's verdict from joey's OWN territory. Do
+                // this whether or not the status is clean: the marker is what
+                // names the failing property, and a wedged/killed container
+                // still leaves whatever it managed to write.
+                char hmark[8];
+                for (unsigned i = 0; i < sizeof(hmark); i++) hmark[i] = 0;
+                long rfd = t_open(T_WALK_OPEN_FROM_ROOT, hm, sizeof(hm) - 1,
+                                  T_OREAD);
+                long hn = (rfd < 0) ? -1 : t_read(rfd, hmark, sizeof(hmark) - 1);
+                if (rfd >= 0) (void)t_close(rfd);
+
+                int marked_ok = (hn >= 3 && hmark[0] == 'O' && hmark[1] == 'K');
+                if (hgot != hpid || hst != 0 || !marked_ok) {
+                    t_putstr("joey: V-1b linux-phenotype leg FAILED marker=");
+                    // The marker is the diagnostic: "L07" names the leg, "??"
+                    // means the container never spoke, "OK" with a nonzero
+                    // status means the exit path itself misbehaved.
+                    if (hn > 0) {
+                        for (long i = 0; i < hn; i++) {
+                            if (hmark[i] == '\n') hmark[i] = 0;
+                        }
+                        t_putstr(hmark);
+                    } else {
+                        t_putstr("<unreadable>");
+                    }
+                    t_putstr(" status=");
+                    t_putstr(itoa_dec(hst, pbuf, sizeof(pbuf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                t_putstr("joey: V-1b phenotype (native + containered linux) PASS\n");
+            }
 #endif
         }
 

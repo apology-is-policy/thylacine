@@ -1401,6 +1401,11 @@ There is likewise **no `docs/reference/NN-vivarium.md` yet**: a reference doc
 describes as-built runtime behaviour, and this surface has none until it is
 reachable. It lands with the dispatcher.
 
+> **Both landed at V-1b, as promised.** The shells are `viv_tier2` /
+> `viv_measure_user_path` / `viv_stat_copy_out` in `kernel/syscall.c` — kept
+> there, not in `vivarium.c`, so the pure halves stay unit-testable with no
+> kernel plumbing. The reference doc is `docs/reference/145-vivarium.md`.
+
 Named V-2c candidates, in rough order of value: `O_CREAT` routed to
 `SYS_WALK_CREATE` (a second target, not a flag map — task #50 tracks the userspace
 half); a real dirfd, decidable once the path is measured; and `newfstatat` 79,
@@ -1732,7 +1737,7 @@ wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
 | # | Chunk | Contents | Gate |
 |---|---|---|---|
 | V-0 | Scripture | This document; the §4 fork resolved; `ARCH §11.5/§11.6` corrected (R-1, R-2); I-43 minted; NOVEL entry | user signoff |
-| V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof | native suite byte-unchanged; a branded no-op binary reaches the Linux path |
+| V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof. **V-1a LANDED** (the field + the advisory `elf_brand_hint`). **V-1b LANDED**: the declaration (`SPAWN_PHENO_LINUX` in `sys_spawn_args.pheno_flags`, consuming the must-be-0 `_pad_allow` slot at offset 92 -> a zero-filled pre-V-1b request still means inherit) + the syscall-entry branch (T1 renumber-in-place then FALL THROUGH to the native switch; the three T2 shells over the V-2 pure translators; FORWARD and ENOSYS kept as separate arms so V-3 is a one-line change) + `sys_fstat_for_proc` extracted so the phenotyped path shares the native core + rule 4's advisory diagnostic (the hint's first caller, on an already-failed load) + `viv`'s `org.thylacine.phenotype` manifest annotation | native suite byte-unchanged (1237/1237); **PASS in-boot on two vantages** -- leg A `viv-pheno-probe native` proves a Linux number is NOT translated without a declaration (`brk` -> -1, not -ENOSYS), leg B `viv run /vivarium/pheno` proves the whole chain with a container entrypoint that speaks only raw Linux numbers and moves real bytes (openat/read/lseek/fstat/newfstatat/write/close, the two stat paths cross-checked on `(st_dev, st_ino)`, the `AT_SYMLINK_NOFOLLOW` reject still rejecting) and dies through Linux `exit_group`; revert-probed |
 | V-2 | The translation table | The §4-C stateless 1:1 set; the split rule enforced | a static `hello` (built by *Linux* toolchain) runs and exits 0 |
 | V-3 | Supervisor channel | The forward mechanism + `specs/phenotype.tla` model-first (if B/C) | spec TLC-green + park/wake audit |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
@@ -1834,6 +1839,22 @@ Brand detection is **advisory input to a declaration**, never an inference:
 4. `PT_INTERP` / `EI_OSABI` / `NT_GNU_ABI_TAG` are used only to *warn* on an obvious
    mismatch (a Linux-interp binary exec'd outside a vivarium gets a diagnostic and a
    clean failure, not a silent mis-decode).
+
+**As-built (V-1b).** Rule 1 is `sys_spawn_args.pheno_flags & SPAWN_PHENO_LINUX`,
+set by `viv` from the manifest's `annotations["org.thylacine.phenotype"]` on the
+container's **entrypoint** spawn only (the per-container diorama stays native —
+it is a Thylacine server that happens to serve a Linux-shaped world). Rule 2 is
+the ordinary `rfork` inherit in `rfork_internal`. Rule 3 is realised in the
+ABI's *shape* rather than in a check: only `SYS_SPAWN_FULL_ARGV` carries the
+field, so the register-argument spawn variants cannot declare at all. Rule 4 is
+`elf_brand_hint`'s single caller in `exec_setup_from_spoor`, consulted **only
+after** `elf_load` has already failed with `HAS_INTERP`/`HAS_DYNAMIC` — so it
+can explain an outcome but never change one, which is the fail-safe direction
+Q3 forced. The declaration is deliberately **ungated**; `ARCHITECTURE.md §28
+I-43` and `docs/reference/145-vivarium.md` §3 carry the argument for why that is
+sound (every translated Linux number collides with a live native one, so a
+mis-declared Proc mis-decodes its own calls behind its own gates and reaches
+nothing new).
 
 ### 12.2 Owed: a native brand (v1.x seam)
 

@@ -1257,6 +1257,7 @@ void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void);
 void test_sys_spawn_full_argv_validate_req_golden(void);
 void test_sys_spawn_full_argv_validate_req_rejects_pad_envp(void);
 void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void);
+void test_sys_spawn_full_argv_validate_req_pheno_flags(void);
 void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void);
 void test_sys_spawn_full_argv_rejects_non_console_attached_perm_flags(void);
 void test_stratumd_stub_round_trip(void);
@@ -2809,6 +2810,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_full_argv.validate_req_golden",       test_sys_spawn_full_argv_validate_req_golden,       false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_pad_envp", test_sys_spawn_full_argv_validate_req_rejects_pad_envp, false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_unknown_perm_bits", test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits, false, NULL },
+    { "sys_spawn_full_argv.validate_req_pheno_flags", test_sys_spawn_full_argv_validate_req_pheno_flags, false, NULL },
     { "sys_spawn_full_argv.validate_req_rejects_oversize_fields", test_sys_spawn_full_argv_validate_req_rejects_oversize_fields, false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },

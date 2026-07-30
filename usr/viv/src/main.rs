@@ -50,7 +50,7 @@ use libthyla_rs::{
     t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_open, t_pipe, t_poll, t_putstr,
     t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create, t_write, TPollFd,
     TSpawnArgs, T_MREPL, T_OPATH, T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_MAY_POST_SERVICE,
-    T_WALK_OPEN_FROM_ROOT,
+    T_SPAWN_PHENO_LINUX, T_WALK_OPEN_FROM_ROOT,
 };
 
 // Manifest bounds (fail closed past any of them; the kernel's own spawn/env
@@ -72,6 +72,10 @@ struct Manifest {
     env: Vec<(String, String)>,
     cwd: String,
     net_granted: bool,
+    // VIVARIUM section 12.1 rule 1: the CONTAINER declares the phenotype, and
+    // this manifest annotation is the only thing in the system that can. The
+    // ELF byte is a hint that may never decide (the Q3 resolution).
+    pheno_linux: bool,
 }
 
 fn say(msg: &str) {
@@ -125,7 +129,8 @@ fn sleep_ms(pipe_rd: i64, ms: i32) {
 /// viv's own transient opens recycle low fd numbers, so a late fstat(0) can
 /// see e.g. the diorama ctl fd at slot 0 and mis-endow a half-empty trio
 /// (which fails the whole spawn at the kernel's fd bump). caps 0 always.
-fn spawn_raw(name: &str, args: &[String], perm_flags: u32, with_stdio: bool) -> i64 {
+fn spawn_raw(name: &str, args: &[String], perm_flags: u32, with_stdio: bool,
+             pheno_flags: u32) -> i64 {
     let mut argv_buf: Vec<u8> = Vec::new();
     argv_buf.extend_from_slice(name.as_bytes());
     argv_buf.push(0);
@@ -155,7 +160,7 @@ fn spawn_raw(name: &str, args: &[String], perm_flags: u32, with_stdio: bool) -> 
         identity_flags: 0,
         allowance_va: 0,
         allowance_flags: 0,
-        _pad_allow: 0,
+        pheno_flags,
     };
     unsafe { t_spawn_full_argv(&req as *const _) }
 }
@@ -239,7 +244,24 @@ fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
         .and_then(|v| v.as_str())
         == Some("granted");
 
-    Ok(Manifest { root_path: root_path.to_string(), args, env, cwd, net_granted })
+    // The phenotype declaration. Absent / anything but "linux" -> native, so a
+    // bundle that predates V-1b, or one written by a tool that knows nothing
+    // about phenotypes, gets the safe default (section 12.1 rule 3's spirit:
+    // never inferred into a non-default ABI, only declared into one).
+    let pheno_linux = doc
+        .get("annotations")
+        .and_then(|a| a.get("org.thylacine.phenotype"))
+        .and_then(|v| v.as_str())
+        == Some("linux");
+
+    Ok(Manifest {
+        root_path: root_path.to_string(),
+        args,
+        env,
+        cwd,
+        net_granted,
+        pheno_linux,
+    })
 }
 
 /// Set our own /env to exactly the manifest's set: the entrypoint inherits the
@@ -348,7 +370,8 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     let my_pid = unsafe { t_getpid() };
     let dio_args = [String::from("--vivarium"), format!("{}", my_pid)];
     let dio_pid =
-        spawn_raw("/bin/diorama", &dio_args, T_SPAWN_PERM_MAY_POST_SERVICE as u32, stdio_born);
+        spawn_raw("/bin/diorama", &dio_args, T_SPAWN_PERM_MAY_POST_SERVICE as u32,
+                  stdio_born, /*pheno_flags=*/0);
     if dio_pid <= 0 {
         return Err(String::from("spawn /bin/diorama"));
     }
@@ -481,7 +504,12 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     }
 
     // --- the entrypoint ----------------------------------------------------
-    let child_pid = spawn_raw(&m.args[0], &m.args[1..], 0, stdio_born);
+    // The declaration lands HERE and only here: the diorama above is a native
+    // Thylacine server that happens to serve a Linux-shaped world, so it spawns
+    // native. Only the container's own entrypoint carries the manifest's
+    // phenotype -- and its descendants inherit it via rfork (rule 2).
+    let pheno = if m.pheno_linux { T_SPAWN_PHENO_LINUX } else { 0 };
+    let child_pid = spawn_raw(&m.args[0], &m.args[1..], 0, stdio_born, pheno);
     if child_pid <= 0 {
         // Name the failure class for the operator: OEXEC (3) runs the same
         // leaf perm gate + Dev open the spawn-time resolve runs, so a failed

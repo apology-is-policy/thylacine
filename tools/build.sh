@@ -433,7 +433,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -941,6 +941,47 @@ stage_viv_bundles() {
 }
 VIVEOF
     echo "==> viv bundles: probe bundle staged at $pb"
+
+    # The V-1b phenotype bundle. Same recipe shape as the probe bundle, but its
+    # manifest DECLARES `org.thylacine.phenotype: linux` -- the only thing in
+    # the system that can set PHENO_LINUX (VIVARIUM section 12.1 rule 1). Its
+    # entrypoint then speaks raw Linux syscall numbers and nothing else, so a
+    # clean exit proves the whole chain: manifest -> viv -> the spawn
+    # declaration -> the kernel's syscall-entry branch -> the translated call.
+    local pheno_bin="$USR_RS_BUILD/$USR_RS_TARGET/release/viv-pheno-probe"
+    if [[ -f "$pheno_bin" ]]; then
+        local hb="$vstage/pheno"
+        mkdir -p "$hb/rootfs/bin" "$hb/rootfs/proc" "$hb/rootfs/sys" \
+                 "$hb/rootfs/dev" "$hb/rootfs/net" "$hb/rootfs/env"
+        cp "$pheno_bin" "$hb/rootfs/bin/viv-pheno-probe"
+        chmod 0755 "$hb/rootfs/bin/viv-pheno-probe"
+        # An empty writable file the probe fills through Linux write(64) and
+        # then reads back: a write proven by its return value proves only the
+        # renumber; proven by the bytes coming back it proves the data path.
+        # (It cannot CREATE one -- O_CREAT is deliberately not translatable,
+        # VIVARIUM section 6.20 correction 1 -- so the bundle supplies it.)
+        : > "$hb/rootfs/pheno-scratch"
+        chmod 0666 "$hb/rootfs/pheno-scratch"
+        for leaf in null zero full random urandom tty; do
+            : > "$hb/rootfs/dev/$leaf"
+            chmod 0666 "$hb/rootfs/dev/$leaf"
+        done
+        cat > "$hb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": false },
+    "process": {
+        "args": ["/bin/viv-pheno-probe", "linux"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": { "org.thylacine.phenotype": "linux" }
+}
+VIVEOF
+        echo "==> viv bundles: pheno bundle staged at $hb"
+    else
+        echo "==> viv bundles: viv-pheno-probe not built -- pheno bundle skipped" >&2
+    fi
 
     local tarball="${THYLACINE_ALPINE_TARBALL:-}"
     if [[ -z "$tarball" ]]; then

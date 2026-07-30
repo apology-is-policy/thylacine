@@ -49,6 +49,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/torpor.h>
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>         // the Linux translation table (V-1b branch)
 #include <thylacine/vma.h>
 #include <thylacine/weft.h>             // share_id registry + binding (SYS_WEFT_*; Weft-6a-2)
 
@@ -1519,17 +1520,14 @@ int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
     return rc;
 }
 
-static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
-
-    // user-VA range validation. The full struct must lie within the
-    // user-VA bound; sys_validate_user_buf rejects an out-of-range
-    // base or end. Alignment is not required — the per-byte store
-    // loop tolerates any alignment.
-    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
+// Inner — kernel-side core (the #37 *_for_proc testable shape): resolve `hraw`
+// in `p`'s handle table and fill a KERNEL `struct t_stat`. Extracted at V-1b so
+// the native handler and the VIVARIUM `fstat` translator share ONE body: the
+// kind gate, the ref discipline and the Dev call are literally the same code
+// for a phenotyped and a native caller, which is how I-43 ("shape, never
+// authority") holds by construction rather than by review.
+static s64 sys_fstat_for_proc(struct Proc *p, u64 hraw, struct t_stat *out_k) {
+    if (!p || !out_k)                                return -1;
 
     // No rights mask (#46): fstat observes metadata, not content -- POSIX
     // fstat(2) works on ANY valid fd (Linux: O_WRONLY, O_PATH, anything;
@@ -1556,16 +1554,33 @@ static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
 
     // Fill a kernel-scratch t_stat from the Dev. Failing the Dev's
     // stat_native (NULL slot or error return) maps to -1 here.
+    if (spoor_stat_native(c, out_k) != 0)           { spoor_clunk(c); return -1; }
+    spoor_clunk(c);
+    return 0;
+}
+
+static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // user-VA range validation. The full struct must lie within the
+    // user-VA bound; sys_validate_user_buf rejects an out-of-range
+    // base or end. Alignment is not required — the per-byte store
+    // loop tolerates any alignment.
+    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
+
     struct t_stat ks;
-    if (spoor_stat_native(c, &ks) != 0)             { spoor_clunk(c); return -1; }
+    s64 rc = sys_fstat_for_proc(p, hraw, &ks);
+    if (rc != 0)                                     return rc;
 
     // Copy out to user-VA. Per-byte uaccess_store_u8; on fault the user-VA may
     // have partially-written bytes (consistent with SYS_READ).
     const u8 *src = (const u8 *)&ks;
     for (u64 i = 0; i < sizeof(struct t_stat); i++) {
-        if (uaccess_store_u8(stat_va + i, src[i]) != 0) { spoor_clunk(c); return -1; }
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
     }
-    spoor_clunk(c);
     return 0;
 }
 
@@ -6132,6 +6147,10 @@ struct spawn_full_argv_args {
     // thunk before exec when allowance.set; else the child keeps rfork's
     // inherited allowance -- NULL for a broad parent's child).
     struct spawn_allowance allowance;
+    // VIVARIUM V-1b: stamp the child PHENO_LINUX in the thunk (section 12.1
+    // rule 1 -- the vivarium's declaration). false -> the child keeps the
+    // phenotype rfork inherited (a native parent's child stays native).
+    bool pheno_linux;
 };
 
 __attribute__((noreturn))
@@ -6147,6 +6166,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     struct spawn_identity identity = sa->identity;   // A-1a: copy before kfree
     struct spawn_allowance allowance;                // step 5: copy before kfree
     spawn_allowance_copy(&allowance, &sa->allowance);
+    bool    pheno_linux   = sa->pheno_linux;         // V-1b: copy before kfree
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -6164,6 +6184,14 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // the parent gate-checked them in sys_spawn_full_argv_for_proc. Same
     // one-way mapping as sys_spawn_with_fds_thunk (apply_spawn_perms).
     apply_spawn_perms(p, perm_flags);
+
+    // VIVARIUM V-1b: stamp the declared phenotype BEFORE exec_setup and
+    // before EL0 -- the child has no peer thread yet, so a plain store is
+    // race-free (the identity/allowance set-once-before-EL0 contract), and
+    // exec can already read it for the section 12.1 rule-4 mismatch
+    // diagnostic. Descendants inherit it via rfork (rule 2). No gate: a
+    // phenotype confers ABI shape, never authority (I-43).
+    if (pheno_linux) p->phenotype = PHENO_LINUX;
 
     // A-1a: apply the parent-vetted identity override BEFORE any user-
     // observable state (fd install / exec / userland_enter). The parent
@@ -6240,7 +6268,8 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         const u32 *fds, u32 fd_count,
         caps_t cap_mask, u32 perm_flags,
         const struct spawn_identity *id,
-        const struct spawn_allowance *want_allowance) {
+        const struct spawn_allowance *want_allowance,
+        u32 pheno_flags) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -6251,6 +6280,7 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     if (fd_count > SYS_SPAWN_MAX_FDS)                   return -1;
     if (fd_count > 0 && !fds)                           return -1;
     if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
+    if (pheno_flags & ~SPAWN_PHENO_FLAGS_ALL)           return -1;
 
     // argv validation. Both shapes accepted: (argc=0, argv_data_len=0,
     // argv_data=NULL) is the "no argv" case (equivalent to legacy
@@ -6320,6 +6350,9 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // Menagerie step 5: carry the parent-vetted allowance bundle (NULL ->
     // KP_ZERO left allowance.set false -> the child inherits via rfork).
     if (want_allowance) spawn_allowance_copy(&sa->allowance, want_allowance);
+    // V-1b: carry the phenotype declaration (0 -> KP_ZERO left it false ->
+    // the child inherits via rfork).
+    sa->pheno_linux = (pheno_flags & SPAWN_PHENO_LINUX) != 0;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -6349,9 +6382,14 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
         caps_t cap_mask, u32 perm_flags,
         bool set_identity, u32 principal_id, u32 primary_gid,
         const u32 *supp_gids, u32 supp_gid_count,
-        const struct spawn_allowance *want_allowance) {
+        const struct spawn_allowance *want_allowance,
+        u32 pheno_flags) {
     if (!p)                                             return -1;
     if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
+    // V-1b: unknown pheno bits reject (forward-compat); the known bit needs
+    // NO grant gate -- a phenotype confers ABI shape, never authority (I-43),
+    // so any Proc may declare its child's decode mode. See SPAWN_PHENO_LINUX.
+    if (pheno_flags & ~SPAWN_PHENO_FLAGS_ALL)           return -1;
 
     // Menagerie step 5: gate a conferred allowance as a NARROWING vs the
     // caller's OWN allowance (I-2's hardware-axis analog; allowance.tla). A
@@ -6397,7 +6435,7 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
                                                    argv_data, argv_data_len,
                                                    argc, fds, fd_count,
                                                    cap_mask, perm_flags, eff_id,
-                                                   want_allowance);
+                                                   want_allowance, pheno_flags);
 }
 
 // Back-compat entry: inherit identity (no SET). Unchanged signature for
@@ -6416,7 +6454,8 @@ int sys_spawn_full_argv_for_proc(struct Proc *p,
                                                  /*set_identity=*/false,
                                                  PRINCIPAL_INVALID, GID_INVALID,
                                                  NULL, 0u,
-                                                 /*want_allowance=*/NULL);
+                                                 /*want_allowance=*/NULL,
+                                                 /*pheno_flags=*/0u);
 }
 
 // uaccess-loader helper: copy the struct sys_spawn_args from user memory
@@ -6471,13 +6510,17 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     if ((req->identity_flags & SPAWN_IDENTITY_SET) &&
         req->supp_gid_count > PROC_SUPP_GIDS_MAX)      return -1;
     // Menagerie step 5: allowance_flags must carry no unknown bits (forward-
-    // compat, same rationale as _pad_envp); _pad_allow must be 0; a SET request
-    // requires a non-NULL descriptor VA (the handler then copies + count-bounds
-    // it). The mmio/irq count bounds + the narrowing gate are checked after the
-    // copy-in / in the identity entry (so an over-count or a too-wide ask is a
-    // clean -1, never a buffer overrun).
+    // compat, same rationale as _pad_envp); a SET request requires a non-NULL
+    // descriptor VA (the handler then copies + count-bounds it). The mmio/irq
+    // count bounds + the narrowing gate are checked after the copy-in / in the
+    // identity entry (so an over-count or a too-wide ask is a clean -1, never
+    // a buffer overrun).
     if (req->allowance_flags & ~(u32)SPAWN_ALLOWANCE_FLAGS_ALL) return -1;
-    if (req->_pad_allow != 0)                          return -1;
+    // VIVARIUM V-1b: pheno_flags replaced the must-be-0 _pad_allow slot; the
+    // reject set narrows from "any nonzero" to "any UNKNOWN bit" -- a pre-V-1b
+    // caller (zero-fill) is byte-identical, and a future flag still cannot
+    // silently land on this kernel (the _pad_envp rationale).
+    if (req->pheno_flags & ~(u32)SPAWN_PHENO_FLAGS_ALL) return -1;
     if ((req->allowance_flags & SPAWN_ALLOWANCE_SET) &&
         req->allowance_va == 0)                        return -1;
     return 0;
@@ -6630,7 +6673,8 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         (caps_t)req.cap_mask, req.perm_flags,
         set_identity, req.principal_id, req.primary_gid,
         supp_kbuf, supp_count,
-        set_allowance ? &allow_kbuf : NULL);
+        set_allowance ? &allow_kbuf : NULL,
+        req.pheno_flags);
     if (argv_kbuf) kfree(argv_kbuf);
     return rc;
 }
@@ -7137,7 +7181,211 @@ static s64 sys_console_open_handler(void) {
 // Dispatch entry.
 // =============================================================================
 
+// =============================================================================
+// VIVARIUM V-1b — the syscall-entry phenotype branch (docs/VIVARIUM.md §4/§5).
+// =============================================================================
+//
+// This is the piece V-2 built its tables for and deliberately left uncalled:
+// "nothing here is wired into syscall_dispatch ... the dispatch branch would
+// today be branching on a field that is provably always 0" (vivarium.h). V-7
+// landed the container object that can now declare the field, so the branch
+// becomes reachable and provable in the same chunk that gives it a producer.
+//
+// I-43 -- A PHENOTYPE CONFERS ABI SHAPE, NEVER AUTHORITY -- is what this code
+// has to uphold, and the shape below is chosen so it holds BY CONSTRUCTION
+// rather than by review:
+//
+//   * A TIER-1 row is a RENUMBER PERFORMED IN PLACE. We rewrite ctx->regs and
+//     then FALL THROUGH into the native switch, so the call lands on the very
+//     same `sys_*_handler` -- with the same capability gate, the same stalk
+//     resolution, the same perm_check, the same resource charge -- that a
+//     native caller reaches. There is no parallel implementation to keep in
+//     sync, and therefore no way for a gate to be present on one path and
+//     absent on the other.
+//   * A TIER-2 row calls the SAME `sys_*_for_proc` core the native handler
+//     calls (that is why sys_fstat_for_proc was extracted above). The only
+//     phenotype-specific code is argument reshaping and struct conversion --
+//     both PURE, both in kernel/vivarium.c, both unit-tested.
+//
+// WHY A MIS-DECLARED PHENOTYPE IS NOT A PRIVILEGE BUG, stated plainly because
+// the declaration is deliberately ungated: every Linux number this table
+// translates ALSO exists as a live native number (56 openat vs SYS_READDIR,
+// 64 write vs SYS_CONSOLE_OPEN, 94 exit_group vs SYS_TTY_SIGNAL, ...). So a
+// native Proc wrongly branded Linux does mis-decode its own numbers -- and
+// that is exactly as far as it goes: the mis-decoded call still passes every
+// gate the native caller would have faced, on the mis-brander's own Proc,
+// with its own authority. It breaks itself and reaches nothing new. (The
+// collision list is also why §12.1 rule 3 -- outside a vivarium the phenotype
+// is ALWAYS native -- is load-bearing, and why the ELF byte may never decide.)
+//
+// FORWARD AT V-1b. §4's Option C sends a non-translatable call to a userspace
+// supervisor, which is V-3. Until it exists, FORWARD and ENOSYS necessarily
+// collapse to the same wire answer: -ENOSYS, the honest "this kernel cannot
+// serve it" that §9's ladder promises ("ENOSYS is a supported outcome; a lie
+// is not"). They are kept as SEPARATE case arms below so V-3's diff is the
+// FORWARD arm alone.
+
+// Measure a Linux NUL-terminated path in user memory. Linux hands a pointer;
+// SYS_OPEN/SYS_STAT want an explicit length, and that measurement is the one
+// impure part of the `openat`/`newfstatat` translations -- deliberately kept
+// HERE rather than in vivarium.c, so the pure translators stay unit-testable
+// with no kernel plumbing (vivarium.h "why the decide/build split").
+//
+// Bounded by SYS_OPEN_PATH_MAX: an unterminated path is a reject, never a
+// runaway scan. Validates each byte's VA before loading it -- the length is
+// unknown up front, so the usual validate-then-copy prologue cannot be used.
+// Returns 0 with *len_out set (>= 1), or a negative -errno.
+static s64 viv_measure_user_path(u64 path_va, u32 *len_out) {
+    if (!len_out)                                    return -(s64)T_E_INVAL;
+    for (u64 i = 0; i <= SYS_OPEN_PATH_MAX; i++) {
+        if (!sys_validate_user_buf(path_va + i, 1))  return -(s64)T_E_FAULT;
+        u8 b = 0;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0') {
+            if (i == 0)                              return -(s64)T_E_NOENT;
+            *len_out = (u32)i;
+            return 0;
+        }
+    }
+    // Linux answers ENAMETOOLONG here. That code is NOT in the errno registry
+    // (docs/ERRORS.md is ABI-bearing and its additions need signoff), and the
+    // native surface answers a bare -1 for the same input -- which a Linux
+    // guest would read as EPERM, a wrong answer. -EINVAL is the honest
+    // available one: an error, correctly attributed to the argument. The
+    // ENAMETOOLONG registration is a named ER-x seam, shared with #83's
+    // observation that SYS_OPEN has the same gap.
+    return -(s64)T_E_INVAL;
+}
+
+// Convert a kernel `t_stat` into the 128-byte Linux layout and copy it out.
+// The conversion itself is vivarium_stat_to_linux (pure, I-13-zeroed); this
+// shell only moves bytes. Per-byte store, the sys_fstat_handler shape.
+static s64 viv_stat_copy_out(u64 stat_va, const struct t_stat *ks) {
+    if (!sys_validate_user_buf(stat_va, sizeof(struct viv_linux_stat)))
+        return -(s64)T_E_FAULT;
+    struct viv_linux_stat ls;
+    vivarium_stat_to_linux(ks, &ls);
+    const u8 *src = (const u8 *)&ls;
+    for (u64 i = 0; i < sizeof(ls); i++) {
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -(s64)T_E_FAULT;
+    }
+    return 0;
+}
+
+// The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
+// the uaccess + native-core work that translator deliberately refuses to do.
+static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
+    switch (linux_nr) {
+    case VIV_LINUX_OPENAT: {
+        // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags.
+        u64 start_fd = 0;
+        u32 omode    = 0;
+        if (vivarium_openat_decide(args[0], args[2], &start_fd, &omode)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
+        // DECIDE BEFORE MEASURE: the measurement is a faultable user read, and
+        // a call we were going to hand to the supervisor must not take that
+        // fault in the kernel fast path (vivarium.h).
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[1], &path_len);
+        if (m != 0)                                  return m;
+        struct viv_call c;
+        vivarium_openat_build(start_fd, args[1], path_len, omode, &c);
+        return sys_open_handler(c.args[0], c.args[1], c.args[2], c.args[3]);
+    }
+
+    case VIV_LINUX_FSTAT: {
+        // fstat(fd, statbuf): x0 fd, x1 statbuf.
+        struct t_stat ks;
+        s64 rc = sys_fstat_for_proc(p, args[0], &ks);
+        if (rc != 0)                                 return rc;
+        return viv_stat_copy_out(args[1], &ks);
+    }
+
+    case VIV_LINUX_NEWFSTATAT: {
+        // newfstatat(dirfd, path, statbuf, flags): x0 dirfd, x1 path,
+        // x2 statbuf, x3 flags. openat's front half joined to fstat's back
+        // half -- which is exactly why vivarium.c has no _fstatat_build.
+        if (vivarium_fstatat_decide(args[0], args[3]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;             // notably: every lstat()
+        u32 path_len = 0;
+        s64 m = viv_measure_user_path(args[1], &path_len);
+        if (m != 0)                                  return m;
+        // Copy the path into kernel scratch, exactly as sys_stat_handler does
+        // (sys_stat_for_proc's contract is kernel memory, NUL-terminated).
+        // The re-read is a SECOND user-memory read, so a peer thread may have
+        // rewritten the buffer since the measurement. The kernel copy is
+        // well-formed either way (we take exactly path_len bytes and terminate
+        // ourselves), and an embedded NUL is rejected exactly as
+        // sys_stat_handler rejects it -- sys_stat_for_proc's contract is a
+        // NUL-free path, and honouring it here keeps the two callers identical.
+        char path_scratch[SYS_OPEN_PATH_MAX + 1];
+        for (u32 i = 0; i < path_len; i++) {
+            u8 b = 0;
+            if (uaccess_load_u8(args[1] + i, &b) != 0) return -(s64)T_E_FAULT;
+            if (b == '\0')                             return -(s64)T_E_INVAL;
+            path_scratch[i] = (char)b;
+        }
+        path_scratch[path_len] = '\0';
+        struct t_stat ks;
+        s64 rc = sys_stat_for_proc(p, path_scratch, path_len, &ks);
+        if (rc != 0)                                 return rc;
+        return viv_stat_copy_out(args[2], &ks);
+    }
+
+    default:
+        // vivarium_translate said TIER2 for a number with no shell here. That
+        // is a table/shell disagreement -- fail closed, never dispatch.
+        return -(s64)T_E_NOSYS;
+    }
+}
+
+// The branch. Returns true when the caller should CONTINUE into the native
+// switch (a T1 row, ctx rewritten in place); false when the call is already
+// complete and ctx->regs[0] holds its result.
+static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
+    u64 args[VIV_NARGS];
+    for (u32 i = 0; i < VIV_NARGS; i++) args[i] = ctx->regs[i];
+
+    struct viv_call call;
+    switch (vivarium_translate(ctx->regs[8], args, &call)) {
+    case VIV_TRANSLATED:
+        ctx->regs[8] = call.nr;
+        for (u32 i = 0; i < VIV_NARGS; i++) ctx->regs[i] = call.args[i];
+        return true;                            // the NATIVE handler runs
+
+    case VIV_TIER2:
+        ctx->regs[0] = (u64)viv_tier2(p, ctx->regs[8], args);
+        return false;
+
+    case VIV_FORWARD:
+        // V-3 hands this to the userspace supervisor. Until then the honest
+        // answer is the same one ENOSYS gives; this arm exists so that change
+        // is one line.
+        ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
+        return false;
+
+    case VIV_ENOSYS:
+    default:
+        ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
+        return false;
+    }
+}
+
 void syscall_dispatch(struct exception_context *ctx) {
+    // VIVARIUM V-1b: a phenotyped Proc's numbers are decoded through the
+    // translation table before anything else looks at them. A native Proc
+    // (phenotype == PHENO_NATIVE, the default and every Proc outside a
+    // declared-Linux vivarium) skips this entirely -- one predictable branch
+    // on an already-hot cache line, and the native path is byte-unchanged.
+    {
+        struct Thread *vt = current_thread();
+        struct Proc   *vp = vt ? vt->proc : NULL;
+        if (vp && vp->phenotype == PHENO_LINUX) {
+            if (!viv_linux_dispatch(ctx, vp)) return;
+        }
+    }
+
     u64 nr = ctx->regs[8];
 
     switch (nr) {

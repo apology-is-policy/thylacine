@@ -270,6 +270,13 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // a live renderer holds the role). joey grants it to /bin/aurora.
 #define T_SPAWN_PERM_CONSOLE_RENDERER  (1u << 3)
 
+// VIVARIUM V-1b: t_sys_spawn_args.pheno_flags bits (mirror SPAWN_PHENO_* in
+// the kernel header). T_SPAWN_PHENO_LINUX declares the child's ABI to be Linux
+// aarch64 -- its syscall numbers are decoded through the translation table.
+// UNGATED, unlike every T_SPAWN_PERM_* bit above: a phenotype confers ABI
+// SHAPE, never AUTHORITY (I-43), so a mis-declared child breaks only itself.
+#define T_SPAWN_PHENO_LINUX            (1u << 0)
+
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
 #define T_SYS_SPAWN_ARGV_MAX        512u
@@ -303,7 +310,11 @@ struct t_sys_spawn_args {
     // allowance (the broad default for every non-warden caller).
     unsigned long  allowance_va;     // 80 — user-VA of a struct t_allowance_desc
     unsigned int   allowance_flags;  // 88 — T_SPAWN_ALLOWANCE_SET
-    unsigned int   _pad_allow;       // 92 — must be 0 at v1.0
+    // VIVARIUM V-1b: the phenotype declaration (docs/VIVARIUM.md 12.1 rule 1),
+    // consuming the former `_pad_allow` must-be-0 slot at the same offset — a
+    // zeroed struct still means "inherit". T_SPAWN_PHENO_LINUX spawns a child
+    // whose syscall numbers decode as Linux aarch64. Ungated (I-43).
+    unsigned int   pheno_flags;      // 92 — T_SPAWN_PHENO_*
 };
 _Static_assert(sizeof(struct t_sys_spawn_args) == 96,
                "struct t_sys_spawn_args must mirror the kernel's "
@@ -346,8 +357,8 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, allowance_va) == 80,
                "t_sys_spawn_args.allowance_va at ABI offset 80");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, allowance_flags) == 88,
                "t_sys_spawn_args.allowance_flags at ABI offset 88");
-_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, _pad_allow) == 92,
-               "t_sys_spawn_args._pad_allow at ABI offset 92");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, pheno_flags) == 92,
+               "t_sys_spawn_args.pheno_flags at ABI offset 92");
 
 // Menagerie step 5: T_SPAWN_ALLOWANCE_SET (mirror SPAWN_ALLOWANCE_SET) + the
 // hardware-allowance descriptor (mirror struct t_allowance_desc). A C caller

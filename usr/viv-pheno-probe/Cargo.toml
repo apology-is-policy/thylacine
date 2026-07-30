@@ -1,0 +1,11 @@
+[package]
+name = "viv-pheno-probe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+
+[[bin]]
+name = "viv-pheno-probe"
+path = "src/main.rs"

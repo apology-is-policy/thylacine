@@ -34,6 +34,7 @@
 #include <thylacine/path.h>     // prowl-1: exe->path->s -- the process name source
 #include <thylacine/image.h>    // REVENANT R-4: image_lookup_or_create (shared text)
 
+#include "../arch/arm64/uart.h" // VIVARIUM 12.1 rule 4: the brand-mismatch diagnostic
 #include "../mm/phys.h"
 #include "../mm/slub.h"         // REVENANT R-4: kmalloc/kfree for the ELF header read
 
@@ -603,6 +604,20 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
     if (!hdr)                                  return -1;
     struct elf_image img;
     int r = elf_load(hdr, exe_size, &img);
+    // VIVARIUM section 12.1 rule 4: the ELF brand is ADVISORY -- it may never
+    // decide a phenotype (rule 3: outside a vivarium the answer is always
+    // native), but an obvious mismatch should earn "a diagnostic and a clean
+    // failure, not a silent mis-decode". This is that diagnostic, and it is
+    // the hint function's first caller. Consulted ONLY on an already-failed
+    // load, so it can never change an outcome -- it only explains one. The
+    // failure is the pre-existing dynamic-binary reject (v1.0 is static-only,
+    // section 9's OUT list); before this, a user got a bare -1.
+    if (r == ELF_LOAD_HAS_INTERP || r == ELF_LOAD_HAS_DYNAMIC) {
+        if (elf_brand_hint(hdr, hdr_got) == ELF_BRAND_LINUX_LIKELY) {
+            uart_puts("exec: dynamic Linux binary rejected -- Thylacine v1.0 "
+                      "runs statically-linked ELF only (VIVARIUM section 9)\n");
+        }
+    }
     kfree(hdr);
     if (r != ELF_LOAD_OK)                      return -1;
 

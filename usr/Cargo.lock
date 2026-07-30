@@ -1796,6 +1796,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "viv-pheno-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "viv-probe"
 version = "0.1.0"
 dependencies = [
