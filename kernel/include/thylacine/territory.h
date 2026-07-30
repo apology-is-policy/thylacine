@@ -71,8 +71,14 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // masse; each clone deep-copies mounts[] + bumps a spoor_ref per entry, so the cap
 // stays modest to hold the per-clone cost in check. G15 (Go Stage 4a) adds /env
 // (devenv) as a boot mount + a post-pivot re-graft (pre+post like the others),
-// so the cap grows 16 -> 20 to keep headroom under the #80 orphan accumulation.
-#define PGRP_MAX_MOUNTS  20
+// so the cap grew 16 -> 20 to keep headroom under the #80 orphan accumulation.
+// V-7 (the vivarium) grows it 20 -> 32: a container runner INHERITS the session
+// territory (~15-16 entries incl. the #80 orphaned pre-pivot generation) and
+// adds its diorama mount plus up to ~10 recipe mounts (proc/sys/env + the /dev
+// leaves + net/tty) on top -- at 20 the recipe overflowed the table and the
+// first over-cap mount failed the container. 32 covers the recipe with
+// headroom; the per-clone deep-copy cost stays ~1.3 KiB per spawn.
+#define PGRP_MAX_MOUNTS  32
 
 // Path identifier. At v1.0 abstract `u32` — bind/mount take whatever
 // numeric ID the caller decides on (tests pick small integers). The

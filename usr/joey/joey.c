@@ -7700,6 +7700,53 @@ int main(void) {
                     return 1;
                 }
             }
+
+            // === VIVARIUM V-7 gate: a viv-assembled container, proven from
+            // the inside. Boot-fatal. joey spawns `viv run /vivarium/probe`
+            // with MAY_POST_SERVICE (viv confers it on its per-container
+            // diorama; joey is the grant root). viv assembles the section-7.2
+            // territory -- bundle rootfs as /, the per-container diorama's
+            // /proc + /sys, the /dev leaf binds, the manifest env -- and
+            // spawns /bin/viv-probe inside it; the probe's legs (host absent,
+            // pid view == {self}, principal == invoker's, live /dev binds)
+            // are the gate. viv exits with the probe's status.
+            {
+                const char vb[] = "/vivarium/probe/config.json";
+                long bfd = t_open(T_WALK_OPEN_FROM_ROOT, vb, sizeof(vb) - 1,
+                                  T_OPATH);
+                if (bfd < 0) {
+                    t_putstr("joey: V-7 /vivarium/probe bundle MISSING -- "
+                             "stale pool? re-run tools/build.sh with "
+                             "THYLACINE_MKFS_PRESERVE=0\n");
+                    return 1;
+                }
+                (void)t_close(bfd);
+
+                const char vname[]  = "/bin/viv";
+                const char vargv[]  = "/bin/viv\0run\0/vivarium/probe";
+                struct t_sys_spawn_args vreq = {
+                    .name_va       = (unsigned long)vname,
+                    .argv_data_va  = (unsigned long)vargv,
+                    .name_len      = sizeof(vname) - 1,
+                    .argv_data_len = sizeof(vargv),
+                    .argc          = 3,
+                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+                };
+                long vpid = t_spawn_full_argv(&vreq);
+                if (vpid <= 0) {
+                    t_putstr("joey: V-7 spawn /bin/viv FAILED\n");
+                    return 1;
+                }
+                int  vst  = 0;
+                long vgot = t_wait_pid_for((int)vpid, 0, &vst);
+                if (vgot != vpid || vst != 0) {
+                    t_putstr("joey: V-7 viv-probe (containered) FAILED rc=");
+                    t_putstr(itoa_dec(vst, pbuf, sizeof(pbuf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                t_putstr("joey: V-7 viv-probe (containered) PASS\n");
+            }
 #endif
         }
 

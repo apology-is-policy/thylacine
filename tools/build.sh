@@ -301,6 +301,9 @@ build_kernel() {
     # (the toolchain ships in the default image); THYLACINE_BAKE_GOROOT=0 opts
     # out for a fast iteration loop, and an absent fork skips gracefully.
     build_go_goroot
+    # VIVARIUM V-7: stage the container bundles BEFORE the pool fixture so
+    # populate_stratum_pool can `stratum-fs put` them at /vivarium.
+    stage_viv_bundles
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
     # gets copied into the cpio at /etc/stratum/system.key.
@@ -430,7 +433,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -848,7 +851,11 @@ emit_corvus_recovery_header() {
     local cm_manifest="$REPO_ROOT/tools/corvus-mint/Cargo.toml"
     local cm_bin="$REPO_ROOT/tools/corvus-mint/target/release/corvus-mint"
     echo "==> Generating system recovery phrase header (corvus-mint emit-phrase)"
-    cargo build --manifest-path "$cm_manifest" --release $verbose \
+    # Subshell-cd to the repo root: cargo discovers .cargo/config from the CWD,
+    # not the manifest path, so a build.sh invoked from usr/ would silently pin
+    # usr/.cargo/config.toml's bare-metal target onto this HOST tool (getrandom
+    # then fails E0463 "can't find crate for std").
+    ( cd "$REPO_ROOT" && cargo build --manifest-path "$cm_manifest" --release $verbose ) \
         || { echo "==> corvus-mint BUILD FAILED (recovery header)" >&2; exit 1; }
     mkdir -p "$GEN_DIR"
     "$cm_bin" emit-phrase "$CORVUS_RECOVERY_HEADER" \
@@ -885,6 +892,91 @@ build_userspace() {
         echo "==> Skipping userspace Rust: rustup target $USR_RS_TARGET not installed."
         echo "    Install via: rustup target add $USR_RS_TARGET"
     fi
+}
+
+# VIVARIUM V-7: stage the container bundles (docs/VIVARIUM.md section 7.2) for
+# populate_stratum_pool to `put` at /vivarium. The PROBE bundle (the V-7 boot
+# gate's fixture: rootfs = the native viv-probe + a marker + the recipe's
+# mount anchors, manifest = run it) is synthetic and always staged when
+# viv-probe built -- no network, no external input, so the default build stays
+# hermetic. The ALPINE bundle stages only when a minirootfs tarball is
+# available (THYLACINE_ALPINE_TARBALL=<path>, or dropped into build/cache/);
+# its consumer is the ARC gate ("an Alpine shell runs" -- needs V-1b + V-2),
+# so absence is a loud skip, never a build failure.
+stage_viv_bundles() {
+    local probe_bin="$USR_RS_BUILD/$USR_RS_TARGET/release/viv-probe"
+    local vstage="$BUILD_DIR/vivarium"
+    rm -rf "$vstage"
+    if [[ ! -f "$probe_bin" ]]; then
+        echo "==> viv bundles: viv-probe not built -- skipping the stage" >&2
+        return 0
+    fi
+    local pb="$vstage/probe" leaf
+    mkdir -p "$pb/rootfs/bin" "$pb/rootfs/etc" "$pb/rootfs/proc" "$pb/rootfs/sys" \
+             "$pb/rootfs/dev" "$pb/rootfs/net" "$pb/rootfs/env"
+    cp "$probe_bin" "$pb/rootfs/bin/viv-probe"
+    chmod 0755 "$pb/rootfs/bin/viv-probe"
+    echo "thylacine-vivarium-probe-bundle" > "$pb/rootfs/etc/viv-marker"
+    # Mount ANCHORS for the /dev leaves + /dev/tty: plain empty files the
+    # recipe binds the devdev leaves over (a mount needs an existing mount
+    # point to key on; the proc/sys/net/env anchor DIRS above likewise).
+    for leaf in null zero full random urandom tty; do
+        : > "$pb/rootfs/dev/$leaf"
+        chmod 0666 "$pb/rootfs/dev/$leaf"
+    done
+    # The gate manifest. VIV_EXPECT_UID = PRINCIPAL_SYSTEM (0xFFFFFFFE): the
+    # boot gate's invoker is joey, and the probe compares getuid() against the
+    # value -- the expectation travels with the bundle (the gate's fixture),
+    # so viv itself adds no state to the container.
+    cat > "$pb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/viv-probe"],
+        "env": ["VIV_EXPECT_UID=4294967294"],
+        "cwd": "/"
+    },
+    "annotations": {}
+}
+VIVEOF
+    echo "==> viv bundles: probe bundle staged at $pb"
+
+    local tarball="${THYLACINE_ALPINE_TARBALL:-}"
+    if [[ -z "$tarball" ]]; then
+        tarball="$(ls "$REPO_ROOT/build/cache"/alpine-minirootfs-*-aarch64.tar.gz 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        local ab="$vstage/alpine"
+        mkdir -p "$ab/rootfs"
+        if tar -xzf "$tarball" -C "$ab/rootfs" 2>/dev/null; then
+            mkdir -p "$ab/rootfs/proc" "$ab/rootfs/sys" "$ab/rootfs/dev" \
+                     "$ab/rootfs/net" "$ab/rootfs/env"
+            for leaf in null zero full random urandom tty; do
+                : > "$ab/rootfs/dev/$leaf"
+                chmod 0666 "$ab/rootfs/dev/$leaf"
+            done
+            cat > "$ab/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh"],
+        "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"],
+        "cwd": "/"
+    },
+    "annotations": {}
+}
+VIVEOF
+            echo "==> viv bundles: Alpine bundle staged from $tarball"
+        else
+            rm -rf "$ab"
+            echo "==> viv bundles: untar of $tarball FAILED -- Alpine bundle skipped" >&2
+        fi
+    else
+        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine bundle skipped (the ARC gate's fixture, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+    fi
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" ))"
 }
 
 build_sysroot() {
@@ -2035,6 +2127,21 @@ populate_stratum_pool() {
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: Quake shareware baked at /quake"
+    fi
+
+    # --- VIVARIUM V-7: the container bundles (-> /vivarium; staged by
+    # stage_viv_bundles per docs/VIVARIUM.md section 7.2). The probe bundle is
+    # the V-7 boot gate's fixture -- joey spawns `viv run /vivarium/probe`
+    # boot-fatally -- so a preserved pool missing it is STALE: re-run once
+    # with THYLACINE_MKFS_PRESERVE=0. ---
+    local viv_stage="$BUILD_DIR/vivarium"
+    if [[ -d "$viv_stage/probe/rootfs" ]]; then
+        echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
+            || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: viv bundles baked at /vivarium"
     fi
 
     # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---

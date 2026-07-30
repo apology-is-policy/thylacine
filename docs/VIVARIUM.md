@@ -1625,6 +1625,7 @@ the manifest does not name:
 | `/` | the bundle's rootfs dataset | the image root IS the world (step 2) |
 | `/proc`, `/sys` | binds of the **per-container diorama**'s world (the §6.16 one-server-two-trees-by-bind composition, proven at V-4c-1) | §7.1's resolution, below |
 | `/dev` | assembled **by bind** per §6's finding (the trivial devdev leaves; `/dev/tty` = a bind of the pts slave `viv`'s session controls, per its §6 row; omitted when `viv` has none) | binding is the answer for `/dev`; no server interposed |
+| `/env` | a bind of the kernel env device (as-built completion, V-7) | zero-authority substrate: devenv resolves the **calling** Proc's own `Env` at op time, so one bind serves every container Proc its own environment (native binaries read env through `/env`); carries nothing across the boundary |
 | `/net` | only if the manifest grants it | I-1: the namespace firewall is the grant |
 
 Native `/proc` and `/ctl` are **not mounted** into the container — a
@@ -1651,6 +1652,14 @@ because `devproc.perm_enforced == false` means principal alignment alone scopes
 - **The principal is aligned** — the diorama runs as the container's principal,
   which keeps the `/self/*` files sound by the `/self/environ`
   authority-coincidence argument, and is defense-in-depth for everything else.
+  *As-built precision (V-7 self-audit):* soundness here is an **authority**
+  claim and holds; the `self` **content** answers the connection's peer, and
+  the container's one connection was opened by `viv` — so `/proc/self/*` read
+  by a container Proc reports the *runner*, not the reader (9P carries no
+  per-op caller identity; the kernel client multiplexes every territory member
+  over the one session). Same-principal data, never a cross-boundary leak, but
+  wrong content for a multi-Proc container's self-readers — task #90; weighed
+  at V-2/V-8 (a per-op identity channel would be a new kernel surface).
 
 **The container principal is the invoker's** at v1.0. A container is a
 namespace-confined process tree of the user who ran `viv`, not a new identity —
@@ -1729,7 +1738,7 @@ wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
 | V-5 | Sockets | The `/net` translation | **`curl` fetches a URL** (ROADMAP §9.2) |
 | V-6 | Signals | Tier 0, then Tier 1 (audit-bearing) | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
-| V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked Alpine bundle → territory + per-container diorama + `/dev` binds → #58 spawn | the native `viv-probe` gate (§7.2); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
+| V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
 
 Track note: V-1..V-3 are kernel-track (main); V-4/V-5/V-7 are userspace and
