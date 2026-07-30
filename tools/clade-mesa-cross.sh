@@ -81,7 +81,7 @@ emit() {
 # THE TOOLCHAIN FLAGS LIVE HERE, NOT IN c_args, AND THAT IS LOAD-BEARING.
 # Measured (CL-7a): meson's compiler-CHECK path drops the '-isystem <dir>' pair
 # out of cross-file c_args while keeping every other flag -- so a check compiled
-# with '-nostdlibinc' and no include path, and `cc.get_define('ETIME')` died on
+# with '-nostdlibinc' and no include path, and cc.get_define('ETIME') died on
 # "'errno.h' file not found" at meson.build:1111, nowhere near the real cause.
 # (The sanity check DOES get the full list, so the two paths disagree; the obvious
 # suspect, remove_linkerlike_args, filters none of these -- the drop is elsewhere

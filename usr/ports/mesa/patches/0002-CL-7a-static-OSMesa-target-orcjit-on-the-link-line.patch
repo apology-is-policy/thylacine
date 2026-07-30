@@ -1,0 +1,316 @@
+From b76f8ec4b3bc9c0571299cc2fe61a9c47699a2dc Mon Sep 17 00:00:00 2001
+From: clade <clade@thylacine>
+Date: Thu, 30 Jul 2026 12:47:44 +0000
+Subject: [PATCH 2/3] CL-7a: static OSMesa target + orcjit on the link line
+
+The target is a rewrite, not a port: upstream builds a shared_library and
+Thylacine has no dynamic loader, and three names the 25.0.7 original used
+are gone at 26.1.6 (libglapi_static, osmesa_lib_name, with_shared_glapi).
+
+llvm_modules gains 'orcjit' under llvm_with_orcjit. Without it a static ORC
+build has no libLLVMOrcJIT.a on the link line; upstream never notices
+because distros link a shared libLLVM.
+
+osmesa_prove.c is the link proof AND the on-device prover -- a
+static_library that builds proves nothing, since making an archive resolves
+no symbols.
+---
+ meson.build                                |  16 +++
+ src/gallium/meson.build                    |   1 +
+ src/gallium/targets/osmesa/meson.build     |  55 ++++++++++
+ src/gallium/targets/osmesa/osmesa_prove.c  | 118 +++++++++++++++++++++
+ src/gallium/targets/osmesa/osmesa_target.c |  56 ++++++++++
+ 5 files changed, 246 insertions(+)
+ create mode 100644 src/gallium/targets/osmesa/meson.build
+ create mode 100644 src/gallium/targets/osmesa/osmesa_prove.c
+ create mode 100644 src/gallium/targets/osmesa/osmesa_target.c
+
+diff --git a/meson.build b/meson.build
+index 0059514..fa82575 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1899,6 +1899,22 @@ endif
+ llvm_has_mcjit = host_machine.cpu_family() in ['aarch64', 'arm', 'ppc', 'ppc64', 's390x', 'x86', 'x86_64']
+ llvm_with_orcjit = get_option('llvm-orcjit') or not llvm_has_mcjit
+ 
++# Thylacine (Clade CL-7a): a STATIC llvmpipe link needs the ORC library named on
++# the link line. llvm_modules above does not include it, and 'engine' does not
++# pull it in (measured: engine+mcjit yields ExecutionEngine/MCJIT/OrcShared/
++# OrcTargetProcess/RuntimeDyld and NOT OrcJIT/JITLink) -- so with
++# -Dllvm-orcjit=true, gallivm/lp_bld_init_orc.cpp compiles and then fails to
++# link on undefined llvm::orc::* symbols. Upstream does not meet this because
++# distros link a SHARED libLLVM, where every symbol is present regardless of the
++# module list, and because llvm_has_mcjit makes ORC non-default on every common
++# CPU family. static + ORC is the untested combination, and it is the one
++# Thylacine requires: no dynamic loader, and ORC's MemoryMapper is the seam the
++# W^X JIT plugs into. REQUIRED rather than optional on purpose -- a missing ORC
++# library must fail at configure, not at link.
++if llvm_with_orcjit
++  llvm_modules += 'orcjit'
++endif
++
+ if (with_amd_vk or with_gallium_radeonsi) and amd_with_llvm
+   _llvm_version = '>= 18.0.0'
+ elif with_clc or llvm_with_orcjit
+diff --git a/src/gallium/meson.build b/src/gallium/meson.build
+index 19f7c1a..d95ecb5 100644
+--- a/src/gallium/meson.build
++++ b/src/gallium/meson.build
+@@ -234,6 +234,7 @@ if with_dri
+ endif
+ if with_osmesa
+   subdir('frontends/osmesa')
++  subdir('targets/osmesa')
+ endif
+ if with_platform_haiku
+   subdir('frontends/hgl')
+diff --git a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
+new file mode 100644
+index 0000000..eae8f17
+--- /dev/null
++++ b/src/gallium/targets/osmesa/meson.build
+@@ -0,0 +1,55 @@
++# Copyright © 2017 Intel Corporation
++# SPDX-License-Identifier: MIT
++#
++# Thylacine (Clade CL-7a): the OSMesa target as a STATIC archive.
++#
++# This is a rewrite of the 25.0.7 original rather than a patch to it, for two
++# reasons. Upstream builds a `shared_library` here, and Thylacine has no dynamic
++# loader at all (kernel/elf.c requires ET_EXEC with no PT_DYNAMIC) -- so every
++# shared-only mechanism goes: the version script, the .def custom_target, the
++# soversion/version/darwin_versions triple, and the symbols-check test. And three
++# names the original referenced no longer exist at 26.1.6: `libglapi_static`,
++# `osmesa_lib_name` and `with_shared_glapi` (the GL entry points now come out of
++# libmesa, which the frontend already includes ../../../mesa/glapi for).
++#
++# link_whole, not link_with: the consumer is NOT meson. build.sh links a
++# Thylacine binary by hand, and meson only resolves a static target's link_with
++# transitively for a meson consumer -- so a bare link_with would leave build.sh
++# to reconstruct the whole closure by hand, in the right order.
++#
++# AND NOTE WHAT PROVES WHAT. A `static_library` target that builds proves almost
++# nothing: an archive is a bag of objects, and no symbol resolution happens while
++# making one. A missing ORC library, a missing glapi symbol, an unresolved
++# llvmpipe entry point -- all of them produce a perfectly good-looking .a. The
++# executable below is the actual evidence. `needs_exe_wrapper` stops meson from
++# trying to RUN it on the builder; linking it is the proof, running it on-device
++# is the next one.
++
++libosmesa = static_library(
++  'OSMesa',
++  'osmesa_target.c',
++  include_directories : [
++    inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_gallium_winsys,
++    inc_gallium_drivers,
++  ],
++  link_whole : [libosmesa_st, libgallium, libmesa, libws_null],
++  dependencies : [
++    dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
++  ],
++  install : true,
++)
++
++# The link proof, and the on-device prover, in one file: meson links it here to
++# demonstrate the symbol closure closes, and the same binary runs under Thylacine
++# to demonstrate that llvmpipe actually rasterises -- which on this target means
++# the CL-7k dual-mapped JIT executed generated code under I-42's W^X.
++osmesa_prove = executable(
++  'osmesa-prove',
++  'osmesa_prove.c',
++  include_directories : [inc_include, inc_src],
++  link_with : [libosmesa],
++  dependencies : [
++    dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
++  ],
++  install : true,
++)
+diff --git a/src/gallium/targets/osmesa/osmesa_prove.c b/src/gallium/targets/osmesa/osmesa_prove.c
+new file mode 100644
+index 0000000..3080242
+--- /dev/null
++++ b/src/gallium/targets/osmesa/osmesa_prove.c
+@@ -0,0 +1,118 @@
++/*
++ * osmesa_prove.c -- the CL-7a OSMesa/llvmpipe prover.
++ * SPDX-License-Identifier: MIT
++ *
++ * Two jobs, one file. On the builder, meson LINKS this to prove the static
++ * OSMesa closure actually closes (making libOSMesa.a proves nothing -- an
++ * archive is a bag of objects and resolves no symbols). On Thylacine, it RUNS
++ * to prove llvmpipe rasterises, which on this target means gallivm compiled
++ * shaders through ORC's MemoryMapper and executed them out of a dual-mapped
++ * code Burrow under I-42's W^X (CL-7k).
++ *
++ * It deliberately does more than clear the buffer. A glClear can be a memset
++ * fast path that never reaches the JIT at all, so a clear-only prover is the
++ * assertion-satisfiable-by-a-broken-system shape: it would pass with the whole
++ * shader pipeline dead. Drawing a triangle forces vertex+fragment shader
++ * compilation, and checking pixels INSIDE and OUTSIDE it proves rasterisation
++ * placed geometry where geometry belongs rather than painting the buffer.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "GL/osmesa.h"
++#include "GL/gl.h"
++
++#define W 64
++#define H 64
++
++/* RGBA at (x, y); OSMesa's origin is bottom-left. */
++static const unsigned char *px(const unsigned char *buf, int x, int y)
++{
++    return buf + ((size_t)y * W + (size_t)x) * 4;
++}
++
++static int near(int got, int want, int tol)
++{
++    int d = got - want;
++    if (d < 0)
++        d = -d;
++    return d <= tol;
++}
++
++int main(void)
++{
++    OSMesaContext ctx;
++    unsigned char *buf;
++    const unsigned char *p;
++    int fails = 0;
++
++    ctx = OSMesaCreateContextExt(OSMESA_RGBA, 16, 0, 0, NULL);
++    if (!ctx) {
++        printf("osmesa-prove: FAIL OSMesaCreateContextExt returned NULL\n");
++        return 1;
++    }
++
++    buf = malloc((size_t)W * H * 4);
++    if (!buf) {
++        printf("osmesa-prove: FAIL out of memory\n");
++        return 1;
++    }
++    memset(buf, 0xAB, (size_t)W * H * 4);   /* a value neither draw produces */
++
++    if (!OSMesaMakeCurrent(ctx, buf, GL_UNSIGNED_BYTE, W, H)) {
++        printf("osmesa-prove: FAIL OSMesaMakeCurrent\n");
++        return 1;
++    }
++
++    printf("osmesa-prove: GL_VERSION  = %s\n", (const char *)glGetString(GL_VERSION));
++    printf("osmesa-prove: GL_RENDERER = %s\n", (const char *)glGetString(GL_RENDERER));
++
++    /* Stage 1: clear to blue. Possibly a memset fast path -- necessary, not
++     * sufficient, which is exactly why stage 2 exists. */
++    glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
++    glClear(GL_COLOR_BUFFER_BIT);
++    glFinish();
++
++    p = px(buf, 1, 1);
++    if (!near(p[0], 0, 4) || !near(p[1], 0, 4) || !near(p[2], 255, 4)) {
++        printf("osmesa-prove: FAIL clear: corner is %u,%u,%u want 0,0,255\n",
++               p[0], p[1], p[2]);
++        fails++;
++    }
++
++    /* Stage 2: a red triangle over the middle. This one cannot be faked --
++     * it needs vertex transform + fragment shading + rasterisation, i.e. the
++     * JIT. Covers the centre, leaves the corners clear-coloured. */
++    glColor3f(1.0f, 0.0f, 0.0f);
++    glBegin(GL_TRIANGLES);
++    glVertex3f(-0.8f, -0.8f, 0.0f);
++    glVertex3f( 0.8f, -0.8f, 0.0f);
++    glVertex3f( 0.0f,  0.8f, 0.0f);
++    glEnd();
++    glFinish();
++
++    p = px(buf, W / 2, H / 3);              /* inside the triangle */
++    if (!near(p[0], 255, 8) || !near(p[1], 0, 8) || !near(p[2], 0, 8)) {
++        printf("osmesa-prove: FAIL raster: interior is %u,%u,%u want 255,0,0\n",
++               p[0], p[1], p[2]);
++        fails++;
++    }
++    p = px(buf, 1, H - 2);                  /* outside it, still blue */
++    if (!near(p[2], 255, 8) || !near(p[0], 0, 8)) {
++        printf("osmesa-prove: FAIL raster: exterior is %u,%u,%u want 0,0,255\n",
++               p[0], p[1], p[2]);
++        fails++;
++    }
++
++    OSMesaDestroyContext(ctx);
++    free(buf);
++
++    if (fails) {
++        printf("osmesa-prove: FAIL (%d checks)\n", fails);
++        return 1;
++    }
++    printf("osmesa-prove: PASS (clear + triangle raster verified %dx%d)\n", W, H);
++    return 0;
++}
+diff --git a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
+new file mode 100644
+index 0000000..25985dd
+--- /dev/null
++++ b/src/gallium/targets/osmesa/osmesa_target.c
+@@ -0,0 +1,56 @@
++/*
++ * Copyright (c) 2013  Brian Paul   All Rights Reserved.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a
++ * copy of this software and associated documentation files (the "Software"),
++ * to deal in the Software without restriction, including without limitation
++ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
++ * and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included
++ * in all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
++ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
++ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
++ * OTHER DEALINGS IN THE SOFTWARE.
++ */
++
++
++#include "target-helpers/inline_sw_helper.h"
++#include "target-helpers/inline_debug_helper.h"
++
++#include "sw/null/null_sw_winsys.h"
++
++
++struct pipe_screen *
++osmesa_create_screen(void);
++
++
++struct pipe_screen *
++osmesa_create_screen(void)
++{
++   struct sw_winsys *winsys;
++   struct pipe_screen *screen;
++
++   /* We use a null software winsys since we always just render to ordinary
++    * driver resources.
++    */
++   winsys = null_sw_create();
++   if (!winsys)
++      return NULL;
++
++   /* Create llvmpipe or softpipe screen */
++   screen = sw_screen_create(winsys);
++   if (!screen) {
++      winsys->destroy(winsys);
++      return NULL;
++   }
++
++   /* Inject optional trace, debug, etc. wrappers */
++   return debug_screen_wrap(screen);
++}
+-- 
+2.43.0
+

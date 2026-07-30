@@ -1,0 +1,228 @@
+From 6129b3d8b8f68b51caf5c8cea3e7025812068905 Mon Sep 17 00:00:00 2001
+From: Thylacine Clade <clade@thylacine.invalid>
+Date: Thu, 30 Jul 2026 14:13:39 +0000
+Subject: [PATCH 3/3] Thylacine CL-7a-2: the OS-port layer, and close the
+ llvmpipe link
+
+Registers Thylacine with Mesa's OS-detection layer and links the two glapi
+halves, so the OSMesa/llvmpipe symbol closure actually closes for
+aarch64-thylacine.
+
+detect_os.h joins at the DETECT_OS_POSIX_LITE tier -- the tier Fuchsia
+introduced, and the honest one. Thylacine is a capability microkernel with a
+partial POSIX libc (pouch/musl): pthreads, mmap, poll, clock_gettime,
+nanosleep, sched_yield and BSD sockets are present; fork, a dynamic loader and
+/proc/self/exe are not. Before this, every DETECT_OS_* was 0 and Mesa compiled
+as if for a freestanding target with no OS at all.
+
+Four arms follow, each added the way Managarm was added to the same lists:
+
+  os_time.c   both clock_nanosleep arms. pouch's __clock_nanosleep is built on
+              the kernel's wait-on-address primitive and supports
+              CLOCK_MONOTONIC *and* TIMER_ABSTIME, so Thylacine takes Mesa's
+              preferred sleep path rather than a degraded fallback. (The
+              include block above is already satisfied by the POSIX_LITE tier.)
+
+  os_misc.c   the <unistd.h> arm. os_get_total_physical_memory and
+              os_get_page_size need no arm of their own: both are gated on
+              HAVE_SYSCONF, which the cross configure detects from musl.
+
+  log.c       makes u_process.h visible. log.c calls util_get_process_name()
+              under `#if !DETECT_OS_WINDOWS` but includes its header under
+              `#if DETECT_OS_POSIX`, so any POSIX_LITE-only platform compiles
+              the call with no declaration in scope. That is latent for Fuchsia
+              too; fixing it there would mean widening the gate to POSIX_LITE,
+              which would also newly compile <syslog.h> on Fuchsia. Untestable
+              from here, so Thylacine joins the arm instead of shipping an
+              unverifiable change to someone else's platform.
+
+  drm.h       takes the __GNU__ (Hurd) escape to <sys/ioctl.h> rather than
+              BSD's <sys/ioccom.h>. llvmpipe's lp_texture.c includes
+              drm_fourcc.h under a bare `#ifndef _WIN32` and uses
+              DRM_FORMAT_MOD_LINEAR under that same gate, so the include cannot
+              simply be skipped without also editing driver logic. drm.h's
+              __linux__ arm wants <linux/types.h> and <asm/ioctl.h> -- neither
+              is in the pouch sysroot, so claiming __linux__ would fail too
+              (measured). Its #else arm is the portable one: it typedefs
+              __u8..__u64 from <stdint.h> itself and needs only the
+              ioctl-encoding macros, which musl has in bits/ioctl.h. Thylacine
+              is exactly the Hurd shape here. Raw __thylacine__, not
+              DETECT_OS_THYLACINE: this is a vendored uapi header and must not
+              depend on Mesa's detect_os.h.
+
+Then the link. glapi is a PAIR at 26.1.6 and neither half lives in libmesa,
+which is what this target's first cut assumed: libglapi (shared-glapi/core.c)
+carries the _mesa_glapi_* dispatch and the noop table, while libglapi_bridge
+(glapi/libgl_public.c) carries the 1300 public gl* entry points whose only
+undefined symbol is _mesa_glapi_tls_Dispatch from its partner. On Linux the
+split is invisible because libGL.so links the bridge and resolves the dispatch
+dynamically from libglapi.so; a static target has to name both halves.
+
+Worth recording how that was found. The 210 MB libOSMesa.a built perfectly
+well while missing every GL entry point, and built again, just as happily,
+with only half of them present. An archive is a bag of objects and resolves no
+symbols, so it cannot fail this way. Only linking osmesa-prove ever said so --
+which is the reason that executable exists.
+
+Result: 982/982 objects compile and osmesa-prove links -- a 142 MB
+statically-linked aarch64 ET_EXEC, no PT_DYNAMIC, segments R / R+E / RW (no
+RWX), 1300 GL entry points, 13 OSMesa entry points and 3282 ORC/JIT symbols.
+The only undefined symbols are _DYNAMIC (local; the usual static-binary
+artifact) and two weak optional hooks.
+---
+ include/drm-uapi/drm.h                 |  2 +-
+ src/gallium/targets/osmesa/meson.build | 14 +++++++++++++-
+ src/util/detect_os.h                   | 14 ++++++++++++++
+ src/util/log.c                         |  8 ++++----
+ src/util/os_misc.c                     |  2 +-
+ src/util/os_time.c                     |  4 ++--
+ 6 files changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/include/drm-uapi/drm.h b/include/drm-uapi/drm.h
+index ceb0f9e..28b9fa2 100644
+--- a/include/drm-uapi/drm.h
++++ b/include/drm-uapi/drm.h
+@@ -45,7 +45,7 @@ typedef unsigned int drm_handle_t;
+ 
+ #include <stdint.h>
+ #include <sys/types.h>
+-#if defined(__GNU__)
++#if defined(__GNU__) || defined(__thylacine__)
+ #include <sys/ioctl.h>
+ #else
+ #include <sys/ioccom.h>
+diff --git a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
+index eae8f17..e7b11cb 100644
+--- a/src/gallium/targets/osmesa/meson.build
++++ b/src/gallium/targets/osmesa/meson.build
+@@ -32,7 +32,19 @@ libosmesa = static_library(
+     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_gallium_winsys,
+     inc_gallium_drivers,
+   ],
+-  link_whole : [libosmesa_st, libgallium, libmesa, libws_null],
++  # glapi is a PAIR at 26.1.6, and neither half is inside libmesa -- which is
++  # what the first cut of this file assumed. libglapi (shared-glapi/core.c) has
++  # the _mesa_glapi_* dispatch and the noop table; libglapi_bridge
++  # (glapi/libgl_public.c) has the 1300 public gl* entry points, whose only
++  # undefined symbol is _mesa_glapi_tls_Dispatch from its partner. On Linux the
++  # split exists because libGL.so links the bridge and dynamically resolves the
++  # dispatch from libglapi.so; a static target needs both halves explicitly.
++  #
++  # The archive built perfectly well with neither, and again with only one. Only
++  # linking the executable below ever said so.
++  link_whole : [
++    libosmesa_st, libgallium, libmesa, libws_null, libglapi, libglapi_bridge,
++  ],
+   dependencies : [
+     dep_thread, dep_clock, dep_unwind, driver_swrast, idep_mesautil,
+   ],
+diff --git a/src/util/detect_os.h b/src/util/detect_os.h
+index 7403724..d5b0587 100644
+--- a/src/util/detect_os.h
++++ b/src/util/detect_os.h
+@@ -91,6 +91,17 @@
+ #define DETECT_OS_POSIX 1
+ #endif
+ 
++/*
++ * Thylacine is a capability microkernel with a partial POSIX libc: pthreads,
++ * mmap, poll, clock_gettime, nanosleep (on the kernel's wait-on-address
++ * primitive), sched_yield and BSD sockets are present; fork, a dynamic loader
++ * and /proc/self/exe are not. That is the POSIX_LITE tier, not POSIX.
++ */
++#if defined(__thylacine__)
++#define DETECT_OS_THYLACINE 1
++#define DETECT_OS_POSIX_LITE 1
++#endif
++
+ 
+ /*
+  * Make sure DETECT_OS_* are always defined, so that they can be used with #if
+@@ -134,6 +145,9 @@
+ #ifndef DETECT_OS_SOLARIS
+ #define DETECT_OS_SOLARIS 0
+ #endif
++#ifndef DETECT_OS_THYLACINE
++#define DETECT_OS_THYLACINE 0
++#endif
+ #ifndef DETECT_OS_POSIX
+ #define DETECT_OS_POSIX 0
+ #endif
+diff --git a/src/util/log.c b/src/util/log.c
+index b594a8f..bea288b 100644
+--- a/src/util/log.c
++++ b/src/util/log.c
+@@ -31,7 +31,7 @@
+ #include "util/ralloc.h"
+ #include "util/u_debug.h"
+ 
+-#if DETECT_OS_POSIX
++#if DETECT_OS_POSIX || DETECT_OS_THYLACINE
+ #include <syslog.h>
+ #include "util/u_process.h"
+ #endif
+@@ -168,7 +168,7 @@ mesa_log_init_once(void)
+    }
+ #endif
+ 
+-#if DETECT_OS_POSIX
++#if DETECT_OS_POSIX || DETECT_OS_THYLACINE
+    if (mesa_log_control & MESA_LOG_CONTROL_SYSLOG)
+       openlog(util_get_process_name(), LOG_NDELAY | LOG_PID, LOG_USER);
+ #endif
+@@ -316,7 +316,7 @@ logger_file(enum mesa_log_level level,
+       free(msg);
+ }
+ 
+-#if DETECT_OS_POSIX
++#if DETECT_OS_POSIX || DETECT_OS_THYLACINE
+ 
+ static inline int
+ level_to_syslog(enum mesa_log_level l)
+@@ -349,7 +349,7 @@ logger_syslog(enum mesa_log_level level,
+       free(msg);
+ }
+ 
+-#endif /* DETECT_OS_POSIX */
++#endif /* DETECT_OS_POSIX || DETECT_OS_THYLACINE */
+ 
+ #if DETECT_OS_ANDROID
+ 
+diff --git a/src/util/os_misc.c b/src/util/os_misc.c
+index ee2b790..480dd7e 100644
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -58,7 +58,7 @@
+ #  include <unistd.h>
+ #  include <log/log.h>
+ #  include <cutils/properties.h>
+-#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
++#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM || DETECT_OS_THYLACINE
+ #  include <unistd.h>
+ #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
+ #  include <sys/resource.h>
+diff --git a/src/util/os_time.c b/src/util/os_time.c
+index 71fc7e3..96e88d4 100644
+--- a/src/util/os_time.c
++++ b/src/util/os_time.c
+@@ -64,7 +64,7 @@ os_time_get_nano(void)
+ void
+ os_time_nanosleep_until(int64_t deadline)
+ {
+-#if DETECT_OS_LINUX || DETECT_OS_MANAGARM
++#if DETECT_OS_LINUX || DETECT_OS_MANAGARM || DETECT_OS_THYLACINE
+    struct timespec time;
+    time.tv_sec = deadline / INT64_C(1000000000);
+    time.tv_nsec = deadline % INT64_C(1000000000);
+@@ -80,7 +80,7 @@ os_time_nanosleep_until(int64_t deadline)
+ void
+ os_time_sleep(int64_t usecs)
+ {
+-#if DETECT_OS_LINUX || DETECT_OS_MANAGARM || DETECT_OS_FUCHSIA
++#if DETECT_OS_LINUX || DETECT_OS_MANAGARM || DETECT_OS_FUCHSIA || DETECT_OS_THYLACINE
+    struct timespec time;
+    time.tv_sec = usecs / 1000000;
+    time.tv_nsec = (usecs % 1000000) * 1000;
+-- 
+2.43.0
+

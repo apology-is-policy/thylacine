@@ -628,7 +628,7 @@ no bolted-on chasing).
 | **CL-5** | Build storms + the F4 budget mechanism. **LANDED** (§7.1 mechanism, §7.2 storm): the spawn-time per-Proc page budget (measured first — a 1959-byte template-heavy TU costs 250 MiB, 97.8% of the default), and the on-device storm — **GNU make 4.4.1 builds itself under `make -jN`** (35 TUs; `-j1` 2759 ms / `-j4` 1033 ms = **2.67×** on 4 vCPUs; the artifact runs AND drives a build of its own). The storm found **#96** (fstat on a pipe returned -1 → every concurrent `-j4` job died silently) and, via the same sweep, **#97** (the notes-fd twin). **Host-vs-device par**: the same 35 TUs driven host-side with the same fork clang put the device within **~1.29×** on warm serial compile (61.1 vs 78.8 ms/TU, both clear-host) — versus the go build's 45–53×, because that gap is FS-metadata-bound, not CPU. | **DONE:** `make -jN` of a real project completes on-device; numbers recorded, no committed target | **DONE:** F4 mechanism round CLOSED 0/0/0/3 (`memory/audit_cl5_closed_list.md`); the storm is pure build-system + a 1-slot Dev addition | ThinLTO, sanitizers-on-device: out. **zlib/sqlite/LLVM-subset** not built — GNU make was chosen instead (already Thylacine-configured; no `./configure` is runnable without a POSIX shell) |
 | **CL-6** | clangd + Nora C/C++ | diagnostics/hover/def in Nora on a C++ file | none (userspace client) | lldb-dap → post-arc |
 | **CL-7k** | The JIT capability (kernel): code Burrow + `SYS_ICACHE_SYNC` + `CAP_JIT`; I-42 | the `libthyla_rs::jit` prover (emit→sync→call; ungated Proc **denied**) | **prosecute hard** (W^X-adjacent; own focused round; F8 spec posture) | — |
-| **CL-7** | Mesa/llvmpipe + SDL-GL + GLQuake. **Entry decision LANDED (§16.19)**: pin `mesa-26.1.6`; frontend fork resolved to option (i) — resurrect gallium OSMesa in `mesa-thylacine` (6 files / 1,392 lines, **zero C changes**, compiles against LLVM 22.1.8); EGL surfaceless rejected as structurally incompatible (the DRI loader `dlopen`s its driver; static-only Thylacine can't host it; GLES-only, no `libGL`). Three build requirements found + recorded: `-Dllvm-orcjit=true` MANDATORY (aarch64 is in Mesa's `llvm_has_mcjit` list, so ORC is NOT auto-selected — a forgetful build silently gets MCJIT and bypasses the CL-7k mapper), `LLVM_ENABLE_RTTI=ON` REQUIRED on the clade LLVM (the ORC backend's `dynamic_cast` cannot build without it — so CL-7a starts with a clade rebuild), and MCJIT must be linkable + the LLVM library set complete (`--shared-mode` enumerates everything). Owed to CL-7a: a shim cross `llvm-config` (`NATIVE/bin/llvm-config` reports its own 4-archive libdir, not the target's 207), the full llvmpipe link, the on-device run. | **GLQuake renders via llvmpipe through Tapestry**; gears smoke in CI | focused round (the ORC mapper + the GL glue's weave lifetime) | lavapipe → stretch |
+| **CL-7** | Mesa/llvmpipe + SDL-GL + GLQuake. **Entry decision LANDED (§16.19)**: pin `mesa-26.1.6`; frontend fork resolved to option (i) — resurrect gallium OSMesa in `mesa-thylacine` (6 files / 1,392 lines, **zero C changes**, compiles against LLVM 22.1.8); EGL surfaceless rejected as structurally incompatible (the DRI loader `dlopen`s its driver; static-only Thylacine can't host it; GLES-only, no `libGL`). Three build requirements found + recorded: `-Dllvm-orcjit=true` MANDATORY (aarch64 is in Mesa's `llvm_has_mcjit` list, so ORC is NOT auto-selected — a forgetful build silently gets MCJIT and bypasses the CL-7k mapper), `LLVM_ENABLE_RTTI=ON` REQUIRED on the clade LLVM (the ORC backend's `dynamic_cast` cannot build without it — so CL-7a starts with a clade rebuild), and MCJIT must be linkable + the LLVM library set complete (`--shared-mode` enumerates everything). Owed to CL-7a: a shim cross `llvm-config` (`NATIVE/bin/llvm-config` reports its own 4-archive libdir, not the target's 207) — **DONE at CL-7a-1 (§16.20)**; the full llvmpipe link — **DONE at CL-7a-2 (§16.21): `osmesa-prove` links, a 142 MB static aarch64 `ET_EXEC`, 1300 GL entry points, no `PT_DYNAMIC`, no RWX segment**; the on-device run — **still owed (CL-7b)**. | **GLQuake renders via llvmpipe through Tapestry**; gears smoke in CI | focused round (the ORC mapper + the GL glue's weave lifetime) | lavapipe → stretch |
 | **CL-8a** | Rust cross target + std-over-pouch | a std Rust program runs on-device | boundary audit (std's OS seam) | CL-8b → follow-on arc |
 | **CL-9** | Arc close: the D3 self-host story — device clang rebuilds clang (stage-2) | stage-2 completes on the 8–16 GiB config | consolidated close + SMP gates | stage-3 byte-compare → stretch |
 
@@ -1171,6 +1171,134 @@ Nothing needs it — only the **cross** LLVM's RTTI matters, because that is
 what Mesa links — so the recipe stays as-is and a future stage-1 re-run
 simply reconverges to it. Noted rather than "fixed" so the next reader does
 not mistake the difference for a missing flag.
+
+### 16.21 CL-7a-2 as-built: the OS-port layer, and the link that closed
+
+CL-7a-1 left a precisely-scoped remainder: the llvmpipe build failed in three
+translation units on "Unsupported OS" and a missing `util_get_process_name`.
+That count was **incomplete, and knowably so** — it came from a `ninja` run
+without `-k 0`, which stops at the first failure, so it was never the whole
+set. This pass built with `-k 0` from the start: 979 objects compiled, and the
+real remainder was four TUs, not three.
+
+#### The tier decision
+
+Mesa detects the OS in `src/util/detect_os.h`, and before this every
+`DETECT_OS_*` was 0 for us — Mesa was compiling as if for a freestanding
+target with no operating system at all. The question was which tier to join,
+and the answer was already in the header: **`DETECT_OS_POSIX_LITE`**, the tier
+Fuchsia introduced and the only one that sets a POSIX flag *without* claiming
+full POSIX.
+
+That is the honest description. Thylacine has pthreads, mmap, poll,
+`clock_gettime`, nanosleep, `sched_yield` and BSD sockets; it does not have
+fork, a dynamic loader, or `/proc/self/exe`. Fuchsia — a capability
+microkernel with a partial POSIX libc — is the same shape, which is why the
+tier exists.
+
+#### Four arms, and what ground truth changed about each
+
+Each arm was added the way Managarm was added to the same lists — a new OS
+joins an existing condition rather than getting a bespoke branch.
+
+**`os_time.c`** takes *both* `clock_nanosleep` arms, including the
+`TIMER_ABSTIME` one. The seam table's syscall numbers say
+`__NR_nanosleep 0xFFFF` and `__NR_clock_nanosleep 0xFFFF`, which reads as "no
+sleep on this platform" — and that reading is **wrong**.
+`usr/lib/pouch/patches/0022-pouch-nanosleep.patch` (landed for the SDL seam)
+*rewrote the caller*: `__clock_nanosleep` — which `nanosleep()`, `usleep()`
+and `clock_nanosleep()` all route through — is built on `SYS_TORPOR_WAIT` and
+supports `CLOCK_MONOTONIC` and `TIMER_ABSTIME` both. The syscall number is
+dead code. So Thylacine takes Mesa's *preferred* sleep path, not a fallback.
+(The patch stack is a stack: a later patch can invalidate an earlier one's
+number without touching it. Reading only the seam file gets this backwards in
+either direction.)
+
+**`os_misc.c`** needs only the `<unistd.h>` arm.
+`os_get_total_physical_memory` and `os_get_page_size` need no arm at all:
+both are gated on `HAVE_SYSCONF`, which the cross configure detects from musl
+(confirmed in the emitted compile line).
+
+**`log.c`** is a genuine upstream latent bug. It calls
+`util_get_process_name()` under `#if !DETECT_OS_WINDOWS` but includes the
+declaring header under `#if DETECT_OS_POSIX` — so *any* POSIX_LITE-only
+platform compiles the call with no declaration in scope. Fuchsia has this too.
+Fixing it *there* would mean widening the gate to `POSIX_LITE`, which would
+also newly compile `<syslog.h>` on Fuchsia; that is not testable from here, so
+Thylacine joins the arm rather than shipping an unverifiable change to someone
+else's platform. The latency is recorded, not fixed.
+
+**`include/drm-uapi/drm.h`** was the fourth TU and the one CL-7a-1 never saw.
+llvmpipe's `lp_texture.c` includes `drm_fourcc.h` under a bare
+`#ifndef _WIN32`, and uses `DRM_FORMAT_MOD_LINEAR` under that *same* gate
+rather than under `HAVE_LIBDRM` — so the include cannot simply be skipped
+without also editing driver logic. `drm.h` then forks on platform, and the
+tempting fix is the wrong one: its `__linux__` arm wants `<linux/types.h>` and
+`<asm/ioctl.h>`, and **neither is in the pouch sysroot**, so claiming
+`__linux__` would have failed too (measured before choosing). Its `#else` arm
+is the portable one — it typedefs `__u8..__u64` from `<stdint.h>` itself and
+needs only the ioctl-encoding macros — and its single non-portable line,
+`<sys/ioccom.h>`, already carries a `__GNU__` (Hurd) escape to
+`<sys/ioctl.h>`. Thylacine is exactly the Hurd shape: not Linux, not BSD, musl
+headers with `_IO`/`_IOR`/`_IOW`/`_IOWR` in `bits/ioctl.h`. One line.
+
+#### The archive lies; only the executable tells the truth
+
+With those four arms, all 982 objects compiled and `libOSMesa.a` built — 210
+MB of it. It was also missing **every GL entry point**, and building it again
+with half of them supplied succeeded just as quietly. An archive is a bag of
+objects; no symbol resolution happens while making one, so it cannot fail this
+way. The `osmesa-prove` executable that CL-7a-1 added specifically to answer
+"what proves what" is the only thing that ever said so.
+
+What it found: **glapi is a pair at 26.1.6, and neither half is in libmesa** —
+which is what this target's first cut assumed. `libglapi`
+(`glapi/shared-glapi/core.c`) carries the `_mesa_glapi_*` dispatch and the
+noop table; `libglapi_bridge` (`glapi/glapi/libgl_public.c`) carries the 1300
+public `gl*` entry points, and its *only* undefined symbol is
+`_mesa_glapi_tls_Dispatch` from its partner. On Linux the split is invisible
+because `libGL.so` links the bridge and resolves the dispatch dynamically from
+`libglapi.so`; a static target has to name both halves explicitly.
+
+Worth knowing if you touch glapi: aarch64 takes the **generic C** entry path.
+`_GLAPI_ENTRY_ARCH_TLS_H` is defined only for x86, x86-64 and ppc64le, so the
+hand-written TLS assembly stubs — and the `#error "Unsupported architecture"`
+sitting next to them — are not in play here at all.
+
+#### The result, and why the binary is loadable
+
+`osmesa-prove` links: a **142 MB statically-linked aarch64 `ET_EXEC`**, 1300 GL
+entry points, 13 OSMesa entry points, 3282 ORC/JIT symbols. Checked against
+what `kernel/elf.c` actually validates, because a binary that cannot be
+`exec`'d would make CL-7b a surprise:
+
+- **No `PT_DYNAMIC`** — the loader rejects it explicitly (`elf.c:185`).
+- **`ET_EXEC` + `EM_AARCH64` + ELF64 + LSB** — all four gates pass.
+- **`OS/ABI: UNIX - GNU`** is accepted (`elf.c:77`), and deliberately so: the
+  comment there names Clade-produced binaries as the reason.
+- Segments are `R` / `R E` / `RW` / `RW` — **no RWX**, so I-12 is untroubled
+  before the JIT even starts.
+- Undefined symbols: `_DYNAMIC` (local; the usual static-binary artifact) plus
+  two **weak** optional hooks (`__cxa_thread_atexit_impl`, a glapi TLS init).
+  **Zero strong undefined.**
+
+#### The delta, and where it lives
+
+Three patches, 14 files, in `usr/ports/mesa/patches/` — the same
+patches-are-the-durable-form policy as `usr/ports/llvm`, and more load-bearing
+here because the Mesa fork lives on a GCP disk that exists to be thrown away.
+The series is **round-trip verified**, not merely written: applied with
+`git am` to a pristine `mesa-26.1.6` worktree it reproduces the fork's tree
+hash exactly (`bb4a37cc…`).
+
+#### One defect in my own tooling
+
+`tools/clade-mesa-cross.sh` wrote `` `cc.get_define('ETIME')` `` — markdown
+backticks — inside an **unquoted** heredoc, so bash tried to execute it as a
+command substitution on every emit. It printed a syntax error to stderr,
+returned 0 anyway, and silently truncated that line of the emitted cross
+file's comment. Fixed, and the rest of `tools/` swept for the same shape
+(clean).
 
 ### 16.7 The memory re-measure (§7 / F4)
 
@@ -1975,3 +2103,4 @@ bumping to just-past-what-tipped-it.
 | 2026-07-24 | **CL-3b landed — THE CL-3 ARC IS COMPLETE** (§16.15b): the wrapper retirement + F2b closed. `tools/pouch-clang` prefers the fork clang; `tools/pouch-ld` becomes a thin shim over the fork driver (which supplies CRT+libc+builtins), the hand-rolled `ld.lld` kept only as the fork-less fallback; `build_libcxx` builds the C++ runtime with the fork clang/clang++ and links the prover through the `clang++` driver. **F2b closed at the root**: a 1-line fork guard patch (`libcxxabi/.../cxa_thread_atexit.cpp`: `#if __linux__ || __Fuchsia__ || __thylacine__`, recompiled by `build_libcxx` — no clang rebuild) retires the surgical `-D__linux__`, so libc++abi's `__cxx_contention_t` is `int64` like everyone else — the CL-2 int32/int64 ODR split is ELIMINATED, not merely inert; the old tripwire retires. Also dropped the redundant `-D__thylacine__=1` (now auto-defined). Proven in-guest: fork-driver-linked `pouch-hello-*` + fork-clang-built `pouch-hello-cxx` boot; `ALL C++ WIRES PASS` (with `-D__linux__` gone), boot OK, 0 EXTINCTION, suite 1196/1196, SMP 40/40 (default+UBSan × smp4/smp8 N=10) 0 corruption. Kernel byte-unchanged (host toolchain only). **The SMP gate caught + closed the pre-existing cxa_guard/gettid seam** (`bug_cxa_guard_gettid.md`): 1/40 (ubsan-smp4) false-aborted a concurrent static-init because libc++abi's `__cxa_guard` used `syscall(SYS_gettid)`=ENOSYS (shared bogus id). Fixed by a fork `cxa_guard_impl.h` `PlatformThreadID` `__thylacine__` branch using `pthread_self()` (a real per-thread id; no ABI change — dissolves the ESCALATE) + a deterministic `pouch-hello-cxx` wire-7 regression (reliable abort pre-fix, passes post-fix, runs every boot); re-gate 40/40 clean. A cleanup-collateral detour: the disk prune had removed `~/.rustup/toolchains/` — restored (stable 1.97.1 + `aarch64-unknown-none`). Seam carried: unlink-path errno-loss. NEXT: CL-4 (the device toolchain + Support-layer port). |
 | 2026-07-27 | **CL-4 landed — THE CL-4 ARC IS COMPLETE** (section 16.16): `clang++ -O2` compiles, links via `ld.lld`, and runs a real C++ program ON THE DEVICE. Five masking layers, found in order: (1) `elf_load` rejected `ELFOSABI_GNU`, which lld stamps for `SHF_GNU_RETAIN` on `.bss` -- a link-time flag with no runtime meaning (ground-truthed on the UNSTRIPPED 122 MB binary: 340,474 symbols, zero `STT_GNU_IFUNC`, zero `R_AARCH64_IRELATIVE`, no `PT_DYNAMIC`); (2) musl's `__init_tls` issues a RAW 6-arg Linux mmap for clang++'s 1232-byte TLS, bypassing the patched 1-arg `__mmap`; (3) clang's `FixupStandardFileDescriptors` fstats fds 0/1/2 and treats a non-EBADF failure as fatal, but the console had no `.stat_native`; (4) fork CL-4b `ce5a1c519` -- no `/proc/self/exe`, so `getMainExecutable` returned "" and `InstalledDir` was empty; (5) fork CL-4c `e7d6be5f8` -- the multicall's `PrependArg` is set whenever `NeedsPrependArg || CanonicalPrefixes`, so a directly-invoked COPY got the tool name prepended anyway, shifting `-cc1` to argv[2] and making the cc1 child re-enter as a driver (upstream-shaped: copy-based multicall installs on Linux are broken identically). The opening theory 'dies pre-main' was REFUTED by a syscall trace showing zero EL0 syscalls. `-no-canonical-prefixes` served as a free on-device confirmation that also unmasked the rest of the driver surface, proving no layer 6 before spending on the cross-build (one spot VM, torn down). Durable fork delta now `usr/ports/llvm/patches/0001..0006` (this also captured CL-4b, which had never reached the durable set). Gate is boot-fatal with NO special driver flags and covers spawned cc1, in-process cc1 (`-c`), and link-only, against a program with `<vector>`/`<string>` and a live throw/catch -- so libc++abi + libunwind are proven on a freshly on-device-compiled binary, not just printf. **Focused audit CLOSED 0 P0 / 2 P1 / 1 P2 / 3 P3, NOT dirty** (Fable 5 max + self-audit): F1 [P1] the 6-arg acceptance converted a fail-closed refusal into SILENT WRONG DATA (a direct file-backed `syscall(SYS_mmap, ...)` got anonymous zeros instead of `MAP_FAILED`) -> gated on the exact anonymous-private shape via the unit-testable `burrow_lazy_len_from_args`, revert-probed 1196/1197 FAIL; F2 [P1] the fstat fix covered only the `SYS_CONSOLE_OPEN` door, so `clang++ < /dev/null` reproduced the same bug through `/dev` -> `devdev_stat_native`; F3 [P2] `x0 ? x0 : x1` voided libthyla-rs's documented `length == 0 -> -1` nondeterministically -> `in("x1") 0` pinned. Suite 1197/1197, `clade CL-4 gate: PASS`, boot OK, 0 EXTINCTION. `memory/audit_cl4_closed_list.md`. NEXT: CL-5. |
 | 2026-07-30 | **CL-7 entry decision LANDED (section 16.19): the section-16.6 frontend fork RESOLVED to option (i) by measurement, per its own instruction.** Pin = **`mesa-26.1.6`** (section 4's "current 25.x-era release" was a year stale; OSMesa confirmed absent, 0 files in the tree mention it). **Option (i) COMPILES**: the 25.0.7 gallium OSMesa frontend grafted onto 26.1.6 and built against fork LLVM 22.1.8 -> a 385,464-byte AArch64 object defining all nine public `OSMesa*` entry points, with **ZERO C source changes**; the whole drift is 3 build-graph fixes (`inc_mapi` gone; `glapi/glapi.h` moved to `src/mesa/glapi/glapi/`; `with_shared_glapi`/`libglapi_static` gone, referenced only by the outer target boilerplate Thylacine rewrites static). Corrected section 16.6's "ONE file": the measured delta is **6 files / 1,392 insertions** (+ ~40 lines of our own static target build file). **Option (ii) rejected as STRUCTURALLY incompatible, not merely larger**: `-Ddefault_library=static` still emits 4 shared libs because `src/loader/loader.c:883` `dlopen`s the gallium driver (the DRI loader model IS dynamic loading; Thylacine is static-only), it yields GLES-only with no `libGL` (the gate is GLQuake, desktop GL), and it is ~36x the surface (~37,500 lines vs 1,392). Option (iii) stays the follow-on refinement OF (i). **Three build requirements found, all of the wrong-default-that-builds-clean family**: (a) **`-Dllvm-orcjit=true` is MANDATORY** and section 16.6's stated mechanism was WRONG -- `llvm_has_mcjit` is a CPU-FAMILY list that INCLUDES aarch64, so ORC is not auto-selected; measured both ways (`GALLIVM_USE_ORCJIT=1` with, `=0` without), and the `=0` path bypasses ORC's `MemoryMapper` -- the exact seam CL-7k's `DualMapMemoryMapper` plugs into -- so a forgetful build would silently defeat I-42 and still compile. (b) **`LLVM_ENABLE_RTTI=ON` is REQUIRED** on the clade LLVM (neither `clade-stage1.sh` nor `build_clade` set it, so both inherit upstream's RTTI-off default): Mesa then demands `-Dcpp_rtti=false`, which makes `lp_bld_init_orc.cpp:246`'s `dynamic_cast<orc::SimpleCompiler&>` fail outright -- the ORC path CANNOT build against an RTTI-less LLVM, so RTTI is the only resolution (and the distro-standard setting). PROVEN: stage1 rebuilt RTTI=ON (3,237 edges) -> `--has-rtti YES` -> the ORC backend (6,522,552-byte object) AND the resurrected frontend both compile, 0 errors, `USE_ORCJIT=1`. CL-7a therefore starts with a clade-LLVM rebuild. (c) Mesa names `'mcjit'` in `llvm_modules` UNCONDITIONALLY even for ORC, and `llvm-config --shared-mode` takes NO module list so it enumerates every component and rejects a partial tree WHOLESALE (19 unbuilt libs were doing exactly that) -- both closed in `tools/clade-keep-build.sh` (MCJIT+Interpreter moved to required; new stage 3b completes the set from llvm-config's own complaint and asserts `--shared-mode` passes). Owed to CL-7a: a shim cross `llvm-config` (`NATIVE/bin/llvm-config` reports its own 4-archive libdir, not the target's 207), the full llvmpipe link, the on-device run. Instrument: `thyla-keep` (stopped after). Thylacine tree: docs + `tools/` only. |
+| 2026-07-30 | **CL-7a-2 landed (section 16.21): the Mesa OS-port layer, and the llvmpipe link CLOSES.** Thylacine joins Mesa's `detect_os.h` at the **`DETECT_OS_POSIX_LITE`** tier -- the tier Fuchsia introduced, and the honest one (pthreads/mmap/poll/clock_gettime/nanosleep/sched_yield/sockets yes; fork, dynamic loader, `/proc/self/exe` no). Before this every `DETECT_OS_*` was 0 and Mesa compiled as if for a freestanding target. CL-7a-1's "exactly 3 failing TUs" was **incomplete and knowably so** -- it came from a ninja run without `-k 0`, which stops at the first failure; building with `-k 0` from the start gave 979 objects and a fourth TU. Four arms, each added the way Managarm was added to the same lists: `os_time.c` takes **both** clock_nanosleep arms incl. `TIMER_ABSTIME` (the seam numbers say `__NR_nanosleep 0xFFFF`, which reads as "no sleep here" and is WRONG -- `0022-pouch-nanosleep.patch` rewrote the *caller* onto `SYS_TORPOR_WAIT`, so the number is dead code and Thylacine takes Mesa's PREFERRED path, not a fallback); `os_misc.c` the `<unistd.h>` arm (the memory/page-size functions need none -- gated on `HAVE_SYSCONF`, which the cross configure detects from musl); `log.c` the u_process.h include (a genuine **upstream latent bug**: it calls `util_get_process_name()` under `!DETECT_OS_WINDOWS` but includes the header under `DETECT_OS_POSIX`, so any POSIX_LITE-only platform -- Fuchsia included -- compiles the call undeclared; fixing it *there* would newly compile `<syslog.h>` on Fuchsia, untestable from here, so we join the arm rather than ship an unverifiable change to someone else's platform); and `drm-uapi/drm.h`, the fourth TU CL-7a-1 never saw -- `lp_texture.c` includes `drm_fourcc.h` under a bare `#ifndef _WIN32` and uses `DRM_FORMAT_MOD_LINEAR` under that SAME gate, so the include cannot be skipped, and the tempting fix is wrong (drm.h's `__linux__` arm wants `<linux/types.h>`+`<asm/ioctl.h>`, **neither in the pouch sysroot** -- measured before choosing), so Thylacine takes the existing `__GNU__` (Hurd) escape to `<sys/ioctl.h>`: one line. **Then the archive lied and the executable told the truth.** All 982 objects compiled and the 210 MB `libOSMesa.a` built while missing EVERY GL entry point -- and built again just as quietly with only half supplied. An archive resolves no symbols, so it cannot fail that way; the `osmesa-prove` executable CL-7a-1 added to answer "what proves what" is the only thing that said so. It found that **glapi is a PAIR at 26.1.6 and neither half is in libmesa** (this target's first cut assumed otherwise): `libglapi` (shared-glapi/core.c) has the `_mesa_glapi_*` dispatch, `libglapi_bridge` (glapi/libgl_public.c) has the 1300 public `gl*` entry points whose only undefined symbol is its partner's `_mesa_glapi_tls_Dispatch`. On Linux the split is invisible because libGL.so links the bridge and resolves the dispatch dynamically; a static target must name both. (Aarch64 takes glapi's generic **C** entry path -- `_GLAPI_ENTRY_ARCH_TLS_H` is x86/x86-64/ppc64le only, so the TLS asm stubs and their `#error "Unsupported architecture"` are not in play.) **Result: `osmesa-prove` links** -- a 142 MB statically-linked aarch64 `ET_EXEC`, 1300 GL + 13 OSMesa entry points, 3282 ORC/JIT symbols; checked against what `kernel/elf.c` actually validates so CL-7b is not a surprise: no `PT_DYNAMIC` (rejected at elf.c:185), `ET_EXEC`/`EM_AARCH64`/ELF64/LSB all pass, `OS/ABI: UNIX - GNU` accepted at elf.c:77 (deliberately -- the comment names Clade binaries), segments R / R+E / RW with **no RWX**, and zero STRONG undefined symbols (`_DYNAMIC` local + two weak optional hooks). Delta = 3 patches / 14 files in `usr/ports/mesa/patches/`, **round-trip verified**: `git am` onto a pristine `mesa-26.1.6` worktree reproduces the fork tree hash exactly (`bb4a37cc`). One defect in my own tooling: `clade-mesa-cross.sh` had markdown backticks inside an UNQUOTED heredoc, so bash tried to execute `cc.get_define('ETIME')` on every emit -- stderr noise, rc=0 anyway, and a silently truncated comment in the generated cross file; fixed, and `tools/` swept for the same shape (clean). Kernel byte-unchanged. NEXT: CL-7b (the on-device run). |
