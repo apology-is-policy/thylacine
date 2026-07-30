@@ -1530,10 +1530,12 @@ no collateral.**
 surface beyond §4's.
 
 1. Fetch/unpack an OCI image (layers → a Stratum dataset; the reflink/snapshot
-   machinery makes layering natural).
+   machinery makes layering natural). *v1.0 realization: §7.2 — `viv` consumes a
+   pre-assembled bundle; image acquisition is the v1.x sibling tool.*
 2. Build the territory: the image root as `/`, the diorama mounts, `/net` if the
    manifest grants it, the resource floor (I-32) and hardware allowance (I-34).
-3. Set the phenotype (§5.2).
+3. Set the phenotype (§5.2). *Lands at V-1b per §10's corrected sequencing; a
+   V-7 container spawns `PHENO_NATIVE`.*
 4. Spawn the entrypoint via the #58 namespace-exec path.
 
 "No cgroups, no seccomp at v1.0; territory isolation is the boundary" (ROADMAP
@@ -1589,6 +1591,82 @@ the level of the whole tree rather than one file: **a deputy's territory is part
 its authority, and confining the client without confining the deputy confines
 nothing.**
 
+**RESOLVED (2026-07-30): the per-container diorama — see §7.2.** MANDATE stays the
+general deputy answer and stays RESERVED at Phase 8; V-7 does not pull it forward.
+
+### 7.2 The v1.0 realization — bundle-consumer `viv` (user-voted 2026-07-30)
+
+**`viv` is the runtime half of the OCI split, and only that.** The OCI ecosystem
+itself factors "run a container" into two tools: the *runtime* (runc) consumes a
+pre-assembled **bundle** — a directory holding `rootfs/` plus `config.json` — and
+the *image* tooling (umoci, skopeo) turns registry images into bundles. Adopting
+the same seam means step 1's fetch/unpack half is not a silently dropped
+obligation but a separately-owned sibling: at v1.0 the bundle is **host-baked**
+(the 16c host-bake precedent — `tools/build.sh` unpacks an Alpine ARM64 rootfs
+into a pool dataset at build time, using host-side tar+gzip), and the in-guest
+image tool (`viv pull`: registry, TLS, JSON manifests, layer tar.gz →
+per-layer datasets with the reflink layering) is a **named v1.x seam**. The tree
+has no native tar reader and no inflate today (verified 2026-07-30), and
+building them buys no v1.0 fidelity the baked bundle does not already deliver;
+§9's OUT list carries the entry.
+
+**The manifest is a `config.json` subset** (OCI runtime-spec shaped, so a future
+`viv pull`'s output composes without translation): v1.0 reads `root.path`,
+`process.args`, `process.env`, `process.cwd`, and the annotation
+`org.thylacine.net` (`"granted"` mounts `/net`). Unknown fields are ignored;
+missing required fields fail closed. The phenotype declaration (§12.1 rule 1)
+rides this same manifest once V-1b lands the kernel side.
+
+**The territory recipe** — assembled by `viv`; the container inherits nothing
+the manifest does not name:
+
+| Mount | Source | Why |
+|---|---|---|
+| `/` | the bundle's rootfs dataset | the image root IS the world (step 2) |
+| `/proc`, `/sys` | binds of the **per-container diorama**'s world (the §6.16 one-server-two-trees-by-bind composition, proven at V-4c-1) | §7.1's resolution, below |
+| `/dev` | assembled **by bind** per §6's finding (the trivial devdev leaves; `/dev/tty` = a bind of the pts slave `viv`'s session controls, per its §6 row; omitted when `viv` has none) | binding is the answer for `/dev`; no server interposed |
+| `/net` | only if the manifest grants it | I-1: the namespace firewall is the grant |
+
+Native `/proc` and `/ctl` are **not mounted** into the container — a
+per-territory pid *view* would be a new kernel surface §7 forbids, and
+not-mounting is the sound native half of §7.1 once the deputy is confined too.
+The container is I-32 resource-floored and I-34-narrowed (no hardware allowance
+conferred).
+
+**§7.1's resolution, precisely.** Each `viv run` spawns its own diorama
+instance, and two distinct properties do two distinct jobs — stated separately
+because `devproc.perm_enforced == false` means principal alignment alone scopes
+*nothing* about pid reads:
+
+- **Pid scoping is a container-tree filter on the diorama's export.** The
+  per-container diorama holds its native sources (`/proc`, `/ctl`) in its own
+  territory, *unreachable by the container* (the container speaks only 9P to
+  it); both enumeration and per-pid existence answer only for pids in the
+  container's process tree — membership by ppid-descent from the entrypoint
+  (the `/ctl/procs` PPID column). A pid outside the tree does not resolve, so
+  the diorama cannot be a read oracle for the surface the native mounts
+  withheld (the F6 close). Pids are **host-numbered** — consistent with what
+  `getpid()` returns inside the container, which is what `busybox ps`
+  correlates; a virtualized pid-1 namespace is a named v1.x seam.
+- **The principal is aligned** — the diorama runs as the container's principal,
+  which keeps the `/self/*` files sound by the `/self/environ`
+  authority-coincidence argument, and is defense-in-depth for everything else.
+
+**The container principal is the invoker's** at v1.0. A container is a
+namespace-confined process tree of the user who ran `viv`, not a new identity —
+no new principal machinery, and the per-container diorama inherits the right
+principal by plain spawn (no `CAP_SET_IDENTITY` anywhere in the path). A
+fresh-principal-per-container (stronger user↔container isolation) is a v1.x
+upgrade riding A-5's identity machinery.
+
+**The V-7 gate is a native prover** (`usr/viv-probe`, spawned inside a
+viv-assembled container): the bundle rootfs is `/` (its tree resolves; host
+paths do not); `/proc` and `/sys` serve from the per-container diorama; host
+pids outside the container tree neither enumerate nor resolve; host `/srv`
+names are unreachable; `/net` is absent unless granted; the I-32 floor holds.
+"An Alpine shell runs" (§10's V-7 row) is the **arc** gate — it additionally
+needs V-1b's declaration + dispatch and V-2's tables, and lands with them.
+
 ---
 
 ## 8. Invariants and audit surface
@@ -1631,7 +1709,9 @@ non-trivial script.* Concretely `curl`, `wget`, `python3`, `busybox`, `redis-cli
   signals Tier 0 (+Tier 1 if the arc allows).
 - OUT at v1.0, by decision and stated plainly: `epoll` (v1.1 candidate), `inotify`
   (degrade), `io_uring`, `bpf`, `perf_event_open`, `ptrace`, glibc-dynamic
-  (best-effort), `AF_INET6`, cgroups/seccomp, and full signal fidelity (Tier 2).
+  (best-effort), `AF_INET6`, cgroups/seccomp, full signal fidelity (Tier 2), and
+  in-guest OCI image acquisition (`viv pull` — registry/TLS/layer-unpack; the
+  v1.0 bundle is host-baked, §7.2).
 
 A Linux binary needing anything in the OUT list gets a clean `ENOSYS`, never a silent
 wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
@@ -1649,7 +1729,7 @@ wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
 | V-5 | Sockets | The `/net` translation | **`curl` fetches a URL** (ROADMAP §9.2) |
 | V-6 | Signals | Tier 0, then Tier 1 (audit-bearing) | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
-| V-7 | `viv` | OCI unpack → territory + diorama + phenotype → spawn | **an Alpine shell runs** (ROADMAP §9.2) |
+| V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked Alpine bundle → territory + per-container diorama + `/dev` binds → #58 spawn | the native `viv-probe` gate (§7.2); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
 
 Track note: V-1..V-3 are kernel-track (main); V-4/V-5/V-7 are userspace and
