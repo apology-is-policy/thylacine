@@ -117,7 +117,81 @@ const NR_MUNMAP: u64 = 215;
 const NR_MMAP: u64 = 222;
 const NR_MPROTECT: u64 = 226;
 const NR_RT_SIGACTION: u64 = 134;
+const NR_RT_SIGRETURN: u64 = 139;
 const NR_RT_SIGPROCMASK: u64 = 135;
+
+// ---------------------------------------------------------------------------
+// The V-6c signal handler, its trampoline, and the evidence it leaves behind.
+//
+// WHY THE RESTORER IS OURS. vivarium_sigaction_decide REQUIRES SA_RESTORER for
+// a real handler: Thylacine will not synthesise a sigreturn trampoline, because
+// the only place to put one is the vDSO page and that page is deliberately
+// RO+XN. So the guest supplies it -- which is exactly what musl does, and this
+// is the same two instructions musl's __restore_rt compiles to.
+//
+// NO FP/SIMD ANYWHERE IN HERE. Note delivery does not save Q0-Q31 (task #96),
+// so a handler that touched them would corrupt the interrupted computation.
+// Integer stores into statics only.
+// ---------------------------------------------------------------------------
+
+core::arch::global_asm!(
+    ".globl viv_restore_rt",
+    ".type viv_restore_rt, @function",
+    "viv_restore_rt:",
+    "    mov x8, #139",          // __NR_rt_sigreturn
+    "    svc #0",
+    "    brk #0",                // unreachable: sigreturn does not return
+);
+
+extern "C" {
+    fn viv_restore_rt();
+}
+
+// The frame offsets the handler reads, from the ucontext base (x2).
+//   uc_mcontext        @ 176
+//   ... .pc            @ 176 + 264
+//   ... .__reserved[0] @ 176 + 288   (the _aarch64_ctx terminator)
+const UC_MCONTEXT: usize = 176;
+const MC_PC: usize = 264;
+const MC_RESERVED: usize = 288;
+
+static mut SIG_FIRED: u64 = 0;
+static mut SIG_SIGNO: u64 = 0;
+static mut SIG_INFO_VA: u64 = 0;
+static mut SIG_UC_VA: u64 = 0;
+static mut SIG_SI_SIGNO: u32 = 0;
+static mut SIG_UC_PC: u64 = 0;
+static mut SIG_UC_END_MAGIC: u32 = 0xFFFF_FFFF;
+
+extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
+    unsafe {
+        SIG_FIRED += 1;
+        SIG_SIGNO = signo as u64;
+        SIG_INFO_VA = info as u64;
+        SIG_UC_VA = uc as u64;
+        if !info.is_null() {
+            SIG_SI_SIGNO = core::ptr::read_unaligned(info as *const u32);
+        }
+        if !uc.is_null() {
+            SIG_UC_PC = core::ptr::read_unaligned(
+                uc.add(UC_MCONTEXT + MC_PC) as *const u64);
+            SIG_UC_END_MAGIC = core::ptr::read_unaligned(
+                uc.add(UC_MCONTEXT + MC_RESERVED) as *const u32);
+        }
+    }
+}
+
+fn handler_addr() -> u64 { viv_sig_handler as usize as u64 }
+fn restorer_addr() -> u64 { viv_restore_rt as usize as u64 }
+fn sig_fired() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_FIRED) } }
+fn sig_signo() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_SIGNO) } }
+fn sig_info_va() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_INFO_VA) } }
+fn sig_uc_va() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_UC_VA) } }
+fn sig_si_signo() -> u32 { unsafe { core::ptr::read_volatile(&raw const SIG_SI_SIGNO) } }
+fn sig_uc_pc() -> u64 { unsafe { core::ptr::read_volatile(&raw const SIG_UC_PC) } }
+fn sig_uc_end_magic() -> u32 {
+    unsafe { core::ptr::read_volatile(&raw const SIG_UC_END_MAGIC) }
+}
 
 // V-2d. Values from third_party/musl (generic include/sys/mman.h plus the two
 // aarch64 additions in arch/aarch64/bits/mman.h) -- the same source the kernel
@@ -387,6 +461,7 @@ unsafe fn run_linux() -> ! {
     // lazily-allocated per-Proc table, and the oldact writeback -- which no
     // pure test can see.
     const SIG_BLOCK: u64 = 0;
+    const SIG_UNBLOCK: u64 = 1;
     const SIG_DFL: u64 = 0;
     const SIG_IGN: u64 = 1;
     const SIGHUP: u64 = 1;
@@ -396,6 +471,8 @@ unsafe fn run_linux() -> ! {
     const SIGCHLD: u64 = 17;
     const SIGKILL: u64 = 9;
     const SIGWINCH: u64 = 28;
+    const SA_RESTORER: u64 = 0x0400_0000;
+    const SA_SIGINFO: u64 = 4;
     let bit = |s: u64| 1u64 << (s - 1);
 
     // A `struct k_sigaction`: handler, flags, restorer, mask. The 32-byte
@@ -469,14 +546,13 @@ unsafe fn run_linux() -> ! {
         b"L29\n"
     );
 
-    // A real HANDLER declines: the Tier-1 frame that would call it is V-6c, and
-    // accepting an install we never honour would leave the guest believing it
-    // is protected. Proven from INSIDE, which is the only vantage that shows a
-    // Linux binary cannot obtain one today.
-    ksa = [0x400000, 0x0400_0000 /* SA_RESTORER */, 0x400000, 0];
+    // V-6b pinned this leg as DECLINING and said it would invert when the frame
+    // landed. It has: a handler WITH a restorer installs, and L32-L35 below
+    // prove it actually runs.
+    ksa = [0x400000, SA_RESTORER, 0x400100, 0];
     leg!(
         rep,
-        svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8) == NEG_ENOSYS,
+        svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8) == 0,
         b"L30\n"
     );
 
@@ -494,6 +570,88 @@ unsafe fn run_linux() -> ! {
                 == NEG_ENOSYS,
         b"L31\n"
     );
+
+    // --- L32-L36: the Tier-1 frame, delivered for real (V-6c) ---------------
+    //
+    // Everything above proves the TABLE. These prove the HANDLER RUNS -- which
+    // is the whole of V-6c, and the difference between an install and a stored
+    // lie.
+    //
+    // The signal is SELF-INFLICTED and therefore race-free: viv hands this
+    // process fd 0 as the write end of a pipe with NO READER, so `write()`
+    // makes the kernel post `pipe` synchronously, and it is delivered at that
+    // very syscall's return to EL0. No other Proc has to time anything, and
+    // the handler is provably installed first because WE install it.
+    //
+    // If delivery is broken the default action for SIGPIPE is terminate, so a
+    // regression does not produce a wrong answer -- it kills this process and
+    // joey reports the marker that was current when it died.
+
+    // The disposition round-trips through the table with the restorer intact.
+    // (L28 proved that for SIG_IGN; this is the handler shape, where the
+    // restorer is the field that matters -- it is the only way back out.)
+    ksa = [handler_addr(), SA_RESTORER | SA_SIGINFO, restorer_addr(), 0];
+    old = [0xDEAD; 4];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64,
+             &mut old as *mut u64 as u64, 8) == 0
+            && old[0] == SIG_IGN,     // L27 left SIGPIPE ignored
+        b"L32\n"
+    );
+
+    // Fire it. A one-byte write to the reader-less fd 0. The write itself must
+    // report the error (that is the EPIPE a program actually reads); the note
+    // is the SECOND effect, and the two are separate legs so a failure names
+    // which link broke.
+    let byte: u8 = b'x';
+    let wrc = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    leg!(rep, wrc < 0, b"L33\n");
+
+    // SIGPIPE is still BLOCKED from L24, and that is deliberate: over-blocking
+    // must DEFER a signal, never lose it (the claim viv_notemask_to_sigset's
+    // header makes about the honest over-report). So the handler must NOT have
+    // run yet, even though the note is queued.
+    leg!(rep, sig_fired() == 0, b"L34\n");
+
+    // Unblock, and the deferred note is delivered at THIS syscall's own return
+    // to EL0 -- the handler runs, sees its own signal number, and returns
+    // through the guest's own trampoline. We are still executing, which is the
+    // proof that rt_sigreturn worked: had it not, we would be at whatever
+    // address the restorer's `svc` left us.
+    set = bit(SIGPIPE);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_UNBLOCK, &set as *const u64 as u64, 0, 8);
+    leg!(rep, sig_fired() == 1 && sig_signo() == SIGPIPE as u64, b"L35\n");
+
+    // The three pointer arguments are the aarch64 delivery contract:
+    // x1 = &siginfo, x2 = &ucontext, and the ucontext sits exactly 128 bytes
+    // (sizeof siginfo_t) above the siginfo. A wrong frame size shows up here
+    // before it shows up as a corrupted guest.
+    leg!(
+        rep,
+        sig_info_va() != 0 && sig_uc_va() == sig_info_va() + 128,
+        b"L36\n"
+    );
+
+    // The frame CONTENT the handler read out of its own ucontext:
+    //   si_signo            == SIGPIPE
+    //   uc_mcontext.pc      != 0        (the interrupted PC is real)
+    //   the _aarch64_ctx chain terminator is present, so a guest walking
+    //   __reserved stops at once instead of following stack garbage.
+    leg!(
+        rep,
+        sig_si_signo() == SIGPIPE as u32
+            && sig_uc_pc() != 0
+            && sig_uc_end_magic() == 0,
+        b"L37\n"
+    );
+
+    // rt_sigreturn OUTSIDE a handler must be INTERCEPTED, not forwarded. The
+    // two answers are distinguishable and that is the point: -1 means the
+    // dispatcher routed it to SYS_NOTED (which refused, correctly, because no
+    // handler is running), while -ENOSYS would mean the interception is gone --
+    // in which case every real handler would run once and never return.
+    leg!(rep, svc4(NR_RT_SIGRETURN, 0, 0, 0, 0) == -1, b"L38\n");
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

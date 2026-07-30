@@ -818,6 +818,113 @@ bool thread_die_pending(struct Thread *t) {
     return false;
 }
 
+// VIVARIUM V-6c: deliver the head note to a Linux-phenotype handler.
+//
+// Enters with q->lock HELD and the note still queued; ALWAYS releases it. The
+// caller has established that `act` is a real handler (not SIG_DFL/SIG_IGN).
+//
+// The frame is written for READING and `rt_sigreturn` restores from the
+// per-Thread snapshot below -- so no field of the user frame ever reaches
+// pstate, pc or sp, and §8's "reject any frame that would elevate" obligation
+// is discharged structurally rather than by a validator. See VIVARIUM.md §6.22.
+static void notes_deliver_linux_locked(struct exception_context *ctx,
+                                       struct Proc *p, struct Thread *t,
+                                       struct NoteQueue *q,
+                                       enum viv_signote sn,
+                                       const struct viv_ksigaction *act) {
+    u64 signum = viv_signote_to_signal(sn);
+    if (signum == 0) {                  // defence in depth: no entry can exist
+        spin_unlock(&q->lock);          // for a note no signal maps to
+        return;
+    }
+
+    // The Linux aarch64 stack layout, growing DOWN from the interrupted sp:
+    //     sp0
+    //     [ frame_record { fp, lr } ]   <- next_frame, keeps the chain walkable
+    //     [ rt_sigframe             ]   <- sigframe, and the handler's own sp
+    u64 sp0 = ctx->sp;
+    if (sp0 < (u64)VIV_SIGFRAME_TOTAL + 16u) {     // +16 for the align-down slack
+        spin_unlock(&q->lock);
+        return;                          // note stays queued; retried next tail
+    }
+    u64 next_frame = (sp0 - VIV_FRAME_RECORD_SIZE) & ~(u64)0xf;
+    u64 sigframe   = next_frame - VIV_SIGFRAME_SIZE;
+    if (sigframe == 0 || sigframe >= next_frame ||
+        next_frame >= UACCESS_USER_VA_TOP) {
+        spin_unlock(&q->lock);
+        return;
+    }
+
+    // Build in kernel memory, then ONE copy-out. The alternative -- the
+    // per-byte loop the Plan 9 path uses for its 16-byte name -- would be ~600
+    // store calls with q->lock held.
+    struct viv_sigframe_head frame;
+    vivarium_build_sigframe(&frame, signum,
+                            viv_notemask_to_sigset(t->note_mask, &g_viv_notebits),
+                            ctx->regs, ctx->sp, ctx->elr, ctx->spsr);
+
+    // uaccess faults here route through p->vma_lock (acyclic with q->lock) and
+    // the buddy allocator is non-blocking, so holding q->lock across the copy is
+    // safe -- the same argument the note-name push makes. It additionally
+    // depends on the target being ANONYMOUS memory: a REVENANT file-backed page
+    // CAN sleep in its demand-page arm, and sleeping under a spinlock would be
+    // fatal. The target is the guest's own stack, which is anon by construction
+    // (exec_map_user_stack), and no writable mapping is file-backed at v1.0.
+    u64 fr[2] = { ctx->regs[29], ctx->regs[30] };   // fp, lr of the interrupted frame
+    if (uaccess_copy_out(sigframe, &frame, sizeof(frame)) != 0 ||
+        uaccess_copy_out(next_frame, fr, sizeof(fr)) != 0) {
+        spin_unlock(&q->lock);
+        return;                          // nothing consumed yet -- see below
+    }
+
+    // Consume LAST. Everything that can fail has already succeeded, so unlike
+    // the Plan 9 path there is no re-enqueue case to get wrong: a failure above
+    // simply leaves the note queued for the next return to EL0.
+    struct Note popped;
+    if (!notes_dequeue_locked(p, t, &popped)) {
+        spin_unlock(&q->lock);
+        return;
+    }
+    spin_unlock(&q->lock);
+
+    // The kernel-side save that makes the frame read-only in effect.
+    for (u32 i = 0; i < 31; i++) t->note_saved_regs[i] = ctx->regs[i];
+    t->note_saved_sp_el0 = ctx->sp;
+    t->note_saved_elr    = ctx->elr;
+    t->note_saved_spsr   = ctx->spsr;
+    for (u32 i = 0; i < NOTE_NAME_MAX; i++)
+        t->note_handling_name[i] = popped.name[i];
+    t->in_handler = true;
+
+    // SA_RESETHAND: Linux restores SIG_DFL before invoking the handler, which is
+    // what makes the one-shot `sysv_signal` idiom safe against a second signal
+    // arriving mid-handler. Cheap to honour and wrong to skip.
+    if (act->flags & VIV_SA_RESETHAND) {
+        struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+        struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL, .flags = 0,
+                                      .restorer = 0, .mask = 0 };
+        (void)viv_sigtab_set(tab, sn, &dfl);
+    }
+
+    // The aarch64 signal-delivery register contract (Linux's setup_return):
+    //   x0 = signum, x1 = &siginfo, x2 = &ucontext, x29 = &next_frame->fp,
+    //   x30 = the guest's own restorer, sp = the frame, pc = the handler.
+    //
+    // Linux sets x1/x2 only under SA_SIGINFO and otherwise leaves them holding
+    // the interrupted values. We always build the full frame, so pointing at it
+    // unconditionally is strictly more defined than that -- a `void h(int)`
+    // handler simply ignores them.
+    ctx->regs[0]  = signum;
+    ctx->regs[1]  = sigframe;                                    // siginfo_t *
+    ctx->regs[2]  = sigframe + VIV_SIGINFO_SIZE;                 // ucontext_t *
+    ctx->regs[29] = next_frame;
+    ctx->regs[30] = act->restorer;   // vivarium_sigaction_decide required it
+    ctx->sp       = sigframe;
+    ctx->elr      = act->handler;
+    // spsr unchanged: the handler runs at EL0 with the PSTATE the syscall
+    // entered with, exactly as the Plan 9 note path leaves it.
+}
+
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 void notes_deliver_at_el0_return(struct exception_context *ctx) {
     if (!ctx) return;
@@ -914,6 +1021,56 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     if (t->in_handler) {
         spin_unlock(&q->lock);
         return;
+    }
+
+    // -----------------------------------------------------------------------
+    // VIVARIUM V-6c: Linux-phenotype delivery.
+    //
+    // This sits ABOVE the handler_va branch, not below it, because a Linux
+    // guest never calls SYS_NOTIFY: its handler lives in the per-Proc sigtab
+    // and `handler_va` is 0, so leaving this underneath would route every
+    // Linux signal straight into the Plan 9 no-handler path.
+    //
+    // A PHENO_LINUX Proc is not self-managing by construction (there is no
+    // translation row for SYS_NOTE_OPEN and a native number reaches the table
+    // first), but the check is kept: it is the predicate that means "someone
+    // else consumes this queue", and reading the disposition table would be
+    // wrong if that were ever true.
+    // -----------------------------------------------------------------------
+    if (p->phenotype == PHENO_LINUX && !proc_is_self_managing_notes(p)) {
+        enum viv_signote sn = viv_signote_from_note_name(candidate.name);
+        // The 32-byte entry is read by the OWNING thread only; the sole
+        // cross-thread reader is notes_post's SIG_IGN hook, which touches one
+        // naturally-aligned u64 (single-copy-atomic on aarch64 -- old or new,
+        // never torn). A guest cannot make a second thread either: clone is in
+        // no table row, so a PHENO_LINUX Proc is single-threaded at v1.0. Both
+        // halves of that argument have to hold when process creation lands.
+        struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+        struct viv_ksigaction act;
+        bool have_handler = viv_sigtab_note_handler(tab, sn, &act);
+
+        // DISCARD, two causes and one action:
+        //   SIG_IGN -- notes_post already drops these at generation, but a note
+        //     queued BEFORE the install is still sitting here. Linux discards
+        //     pending signals when a disposition becomes SIG_IGN, and this is
+        //     the only place that can happen.
+        //   SIG_DFL whose Linux default is "ignore" (SIGCHLD/SIGWINCH/SIGCONT).
+        //     Nothing will ever consume it -- a Linux guest has no notes fd --
+        //     so leaving it queued would fill the ring and start failing posts.
+        if (!have_handler && (viv_sigtab_note_ignored(tab, sn) ||
+                              viv_signote_default_is_ignore(sn))) {
+            struct Note drop;
+            (void)notes_dequeue_locked(p, t, &drop);
+            spin_unlock(&q->lock);
+            return;
+        }
+
+        if (have_handler) {
+            notes_deliver_linux_locked(ctx, p, t, q, sn, &act);
+            return;                     // the helper owns the unlock either way
+        }
+        // Otherwise SIG_DFL with a terminating default: fall through to the
+        // handler_va == 0 branch below, which IS the LS-5 default-terminate.
     }
 
     // No async handler registered.

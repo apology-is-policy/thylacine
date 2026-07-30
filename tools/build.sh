@@ -975,7 +975,10 @@ VIVEOF
         "env": [],
         "cwd": "/"
     },
-    "annotations": { "org.thylacine.phenotype": "linux" }
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.sigpipe-selftest": "yes"
+    }
 }
 VIVEOF
         echo "==> viv bundles: pheno bundle staged at $hb"

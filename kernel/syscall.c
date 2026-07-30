@@ -7295,16 +7295,10 @@ static int viv_store_u64(u64 va, u64 v) {
     return 0;
 }
 
-// The NOTE_BIT_* numbering, handed to the pure mask translators so vivarium.c
-// keeps knowing nothing about notes.h. One definition, both directions.
-static const struct viv_notebit_map g_viv_notebits = {
-    .interrupt  = NOTE_BIT_INTERRUPT,
-    .kill       = NOTE_BIT_KILL,
-    .pipe       = NOTE_BIT_PIPE,
-    .child_exit = NOTE_BIT_CHILD_EXIT,
-    .snare      = NOTE_BIT_SNARE,
-    .tty        = NOTE_BIT_TTY,
-};
+// The NOTE_BIT_* numbering lives in `g_viv_notebits` (vivarium.c) -- V-6c moved
+// it there when delivery became a SECOND consumer. Two files each carrying a
+// `static` copy is the mirror-drift trap: each one's asserts would verify only
+// itself.
 
 // Get (or lazily create) this Proc's Linux disposition table.
 //
@@ -7448,12 +7442,21 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         // Two user structs, both the fixed 32-byte aarch64 shape (see
         // VIV_KSIGACTION_SIZE for why that is a constant and not a runtime
         // discrimination).
-        u64 handler = VIV_SIG_DFL, flags = 0;
+        struct viv_ksigaction act = { .handler = VIV_SIG_DFL, .flags = 0,
+                                      .restorer = 0, .mask = 0 };
         if (args[1] != 0) {
             if (!sys_validate_user_buf(args[1], VIV_KSIGACTION_SIZE))
                 return -(s64)T_E_FAULT;
-            if (viv_load_u64(args[1], &handler) != 0) return -(s64)T_E_FAULT;
-            if (viv_load_u64(args[1] + VIV_KSIGACTION_OFF_FLAGS, &flags) != 0)
+            // The whole struct, not just the two fields the decision needs:
+            // V-6c honours the handler AND the restorer (the guest's return
+            // trampoline), so a partial read would install a handler with no
+            // way back.
+            if (viv_load_u64(args[1], &act.handler) != 0) return -(s64)T_E_FAULT;
+            if (viv_load_u64(args[1] + VIV_KSIGACTION_OFF_FLAGS, &act.flags) != 0)
+                return -(s64)T_E_FAULT;
+            if (viv_load_u64(args[1] + VIV_KSIGACTION_OFF_RESTORER,
+                             &act.restorer) != 0) return -(s64)T_E_FAULT;
+            if (viv_load_u64(args[1] + VIV_KSIGACTION_OFF_MASK, &act.mask) != 0)
                 return -(s64)T_E_FAULT;
         }
 
@@ -7461,29 +7464,34 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         // range, same sigsetsize, same "is this a signal we model at all" test.
         // Answering a query about a signal we do not track would mean inventing
         // a disposition for it.
-        if (vivarium_sigaction_decide(args[0], handler, flags, args[3])
+        if (vivarium_sigaction_decide(args[0], act.handler, act.flags, args[3])
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;
 
         enum viv_signote note = viv_signal_note(args[0]);
 
         // Report the PREVIOUS disposition before installing the new one, so a
-        // save/restore pair round-trips. Zero for flags/restorer/mask is not a
-        // placeholder: no flag was honoured, no trampoline recorded, and there
-        // is no during-handler mask because there are no handlers yet. Writing
-        // the full struct matters -- musl reads ksa_old.mask out of an
-        // UNINITIALISED stack local, so a short write leaves it holding
-        // whatever was on the stack.
+        // save/restore pair round-trips. Writing the FULL struct matters --
+        // musl reads ksa_old.mask out of an UNINITIALISED stack local, so a
+        // short write leaves it holding whatever was on the stack.
         if (args[2] != 0) {
             if (!sys_validate_user_buf(args[2], VIV_KSIGACTION_SIZE))
                 return -(s64)T_E_FAULT;
             struct viv_sigtab *cur = __atomic_load_n(&p->sigtab,
                                                      __ATOMIC_ACQUIRE);
-            u64 old = viv_sigtab_note_ignored(cur, note) ? VIV_SIG_IGN
-                                                         : VIV_SIG_DFL;
-            if (viv_store_u64(args[2], old) != 0)             return -(s64)T_E_FAULT;
-            for (u32 off = 8; off < VIV_KSIGACTION_SIZE; off += 8)
-                if (viv_store_u64(args[2] + off, 0) != 0)     return -(s64)T_E_FAULT;
+            struct viv_ksigaction prev = { .handler = VIV_SIG_DFL, .flags = 0,
+                                           .restorer = 0, .mask = 0 };
+            if (!viv_sigtab_note_handler(cur, note, &prev) &&
+                viv_sigtab_note_ignored(cur, note))
+                prev.handler = VIV_SIG_IGN;
+            if (viv_store_u64(args[2], prev.handler) != 0)
+                return -(s64)T_E_FAULT;
+            if (viv_store_u64(args[2] + VIV_KSIGACTION_OFF_FLAGS, prev.flags) != 0)
+                return -(s64)T_E_FAULT;
+            if (viv_store_u64(args[2] + VIV_KSIGACTION_OFF_RESTORER,
+                              prev.restorer) != 0) return -(s64)T_E_FAULT;
+            if (viv_store_u64(args[2] + VIV_KSIGACTION_OFF_MASK, prev.mask) != 0)
+                return -(s64)T_E_FAULT;
         }
 
         if (args[1] == 0) return 0;         // query only; nothing to install
@@ -7493,12 +7501,12 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         // merely RESETS dispositions (the common post-fork cleanup) from
         // allocating anything at all.
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
-        if (handler == VIV_SIG_DFL && !tab) return 0;
+        if (act.handler == VIV_SIG_DFL && !tab) return 0;
         if (!tab) {
             tab = viv_sigtab_of(p);
             if (!tab) return -(s64)T_E_NOMEM;
         }
-        (void)viv_sigtab_set_ignored(tab, note, handler == VIV_SIG_IGN);
+        (void)viv_sigtab_set(tab, note, &act);
         return 0;
     }
 
@@ -7563,6 +7571,28 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
 // switch (a T1 row, ctx rewritten in place); false when the call is already
 // complete and ctx->regs[0] holds its result.
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
+    // rt_sigreturn is the phenotyped spelling of SYS_NOTED(NCONT) (§6.22), and
+    // it is handled HERE rather than by a table row or a viv_tier2 case because
+    // it is the one signal call that REWRITES THE EXCEPTION FRAME instead of
+    // returning a value. Both of the other shapes are wrong for it:
+    //
+    //   * a T1 renumber copies the six argument words verbatim, but Linux's
+    //     rt_sigreturn takes NO arguments -- x0 holds whatever the handler
+    //     returned -- so SYS_NOTED would read a garbage sub-command where it
+    //     needs a literal 0.
+    //   * viv_tier2 returns an s64 the caller stores into regs[0], which would
+    //     immediately overwrite the x0 that notes_noted_restore just restored.
+    //
+    // It is also why the reject table has no row for 139: a VIV_TIER2 row whose
+    // shell does not exist is the "table declares a capability the code lacks"
+    // failure viv_tier2's default arm fails closed on. The interception IS the
+    // implementation, and the in-guest handler round-trip is its regression --
+    // delete this branch and every guest handler runs once and then dies.
+    if (ctx->regs[8] == VIV_LINUX_RT_SIGRETURN) {
+        sys_noted_handler(ctx, 0);      // NCONT: restore from the Thread snapshot
+        return false;                   // ctx is already final; write no result
+    }
+
     u64 args[VIV_NARGS];
     for (u32 i = 0; i < VIV_NARGS; i++) args[i] = ctx->regs[i];
 

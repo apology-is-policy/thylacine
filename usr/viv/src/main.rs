@@ -76,6 +76,7 @@ struct Manifest {
     // this manifest annotation is the only thing in the system that can. The
     // ELF byte is a hint that may never decide (the Q3 resolution).
     pheno_linux: bool,
+    sigpipe_selftest: bool,
 }
 
 fn say(msg: &str) {
@@ -130,7 +131,7 @@ fn sleep_ms(pipe_rd: i64, ms: i32) {
 /// see e.g. the diorama ctl fd at slot 0 and mis-endow a half-empty trio
 /// (which fails the whole spawn at the kernel's fd bump). caps 0 always.
 fn spawn_raw(name: &str, args: &[String], perm_flags: u32, with_stdio: bool,
-             pheno_flags: u32) -> i64 {
+             pheno_flags: u32, fd0_override: i64) -> i64 {
     let mut argv_buf: Vec<u8> = Vec::new();
     argv_buf.extend_from_slice(name.as_bytes());
     argv_buf.push(0);
@@ -140,16 +141,27 @@ fn spawn_raw(name: &str, args: &[String], perm_flags: u32, with_stdio: bool,
         argv_buf.push(0);
         argc += 1;
     }
-    let have_stdio = with_stdio;
+    // fd0_override endows exactly ONE fd, landing at the child's fd 0, and
+    // takes precedence over stdio: the sigpipe selftest wants a known-dead
+    // write end there and nothing else.
+    let have_stdio = with_stdio && fd0_override < 0;
     let fd_list: [u32; 3] = [0, 1, 2];
+    let fd_one: [u32; 1] = [if fd0_override < 0 { 0 } else { fd0_override as u32 }];
+    let (fd_va, fd_n): (u64, u32) = if fd0_override >= 0 {
+        (fd_one.as_ptr() as u64, 1)
+    } else if have_stdio {
+        (fd_list.as_ptr() as u64, 3)
+    } else {
+        (0, 0)
+    };
     let req = TSpawnArgs {
         name_va: name.as_ptr() as u64,
         argv_data_va: argv_buf.as_ptr() as u64,
-        fd_list_va: if have_stdio { fd_list.as_ptr() as u64 } else { 0 },
+        fd_list_va: fd_va,
         name_len: name.len() as u32,
         argv_data_len: argv_buf.len() as u32,
         argc,
-        fd_count: if have_stdio { 3 } else { 0 },
+        fd_count: fd_n,
         perm_flags,
         _pad_envp: 0,
         cap_mask: 0,
@@ -254,6 +266,23 @@ fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
         .and_then(|v| v.as_str())
         == Some("linux");
 
+    // A BUNDLE-SCOPED test facility (VIVARIUM.md section 6.22): hand the
+    // entrypoint fd 0 as the write end of a pipe with NO READER, so its own
+    // `write()` makes the kernel post `pipe` -- a SIGPIPE the guest inflicts on
+    // ITSELF, synchronously, with no second Proc timing anything. It is the
+    // only way a v1.0 Linux guest can cause a catchable signal at all: kill and
+    // clone are not table rows, so nothing else can generate one.
+    //
+    // Scoped to the bundle that asks, rather than an argv flag, so every other
+    // container's fd endowment is byte-unchanged. It confers no authority --
+    // viv is the entrypoint's parent and already holds a kill channel on it,
+    // which is strictly stronger than handing it a dead pipe.
+    let sigpipe_selftest = doc
+        .get("annotations")
+        .and_then(|a| a.get("org.thylacine.sigpipe-selftest"))
+        .and_then(|v| v.as_str())
+        == Some("yes");
+
     Ok(Manifest {
         root_path: root_path.to_string(),
         args,
@@ -261,6 +290,7 @@ fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
         cwd,
         net_granted,
         pheno_linux,
+        sigpipe_selftest,
     })
 }
 
@@ -371,7 +401,7 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     let dio_args = [String::from("--vivarium"), format!("{}", my_pid)];
     let dio_pid =
         spawn_raw("/bin/diorama", &dio_args, T_SPAWN_PERM_MAY_POST_SERVICE as u32,
-                  stdio_born, /*pheno_flags=*/0);
+                  stdio_born, /*pheno_flags=*/0, /*fd0_override=*/-1);
     if dio_pid <= 0 {
         return Err(String::from("spawn /bin/diorama"));
     }
@@ -509,7 +539,23 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     // native. Only the container's own entrypoint carries the manifest's
     // phenotype -- and its descendants inherit it via rfork (rule 2).
     let pheno = if m.pheno_linux { T_SPAWN_PHENO_LINUX } else { 0 };
-    let child_pid = spawn_raw(&m.args[0], &m.args[1..], 0, stdio_born, pheno);
+
+    // The sigpipe selftest fd, if the bundle asked for one. The READ end is
+    // closed BEFORE the spawn, so the pipe is already reader-less when the
+    // child's first write lands -- there is no window in which the write could
+    // succeed instead.
+    let mut sp_w: i64 = -1;
+    if m.sigpipe_selftest {
+        let (r, w) = unsafe { t_pipe() };
+        if r >= 0 && w >= 0 {
+            let _ = unsafe { t_close(r) };
+            sp_w = w;
+        }
+    }
+    let child_pid = spawn_raw(&m.args[0], &m.args[1..], 0, stdio_born, pheno, sp_w);
+    if sp_w >= 0 {
+        let _ = unsafe { t_close(sp_w) };
+    }
     if child_pid <= 0 {
         // Name the failure class for the operator: OEXEC (3) runs the same
         // leaf perm gate + Dev open the spawn-time resolve runs, so a failed

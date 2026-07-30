@@ -675,19 +675,121 @@ enum viv_signote viv_signote_from_note_name(const char *name) {
     return VIV_SIGNOTE_NONE;
 }
 
+// THE canonical NOTE_BIT_* map (vivarium.h says why there is exactly one).
+// This file already includes notes.h for the canonical note-name literals, so
+// the numbering is taken from its defining header rather than retyped.
+const struct viv_notebit_map g_viv_notebits = {
+    .interrupt  = NOTE_BIT_INTERRUPT,
+    .kill       = NOTE_BIT_KILL,
+    .pipe       = NOTE_BIT_PIPE,
+    .child_exit = NOTE_BIT_CHILD_EXIT,
+    .snare      = NOTE_BIT_SNARE,
+    .tty        = NOTE_BIT_TTY,
+};
+
+u64 viv_signote_to_signal(enum viv_signote note) {
+    if (note == VIV_SIGNOTE_NONE) return 0;
+    for (u64 sig = 1; sig <= VIV_NSIG; sig++)
+        if (viv_signal_note(sig) == note) return sig;
+    return 0;
+}
+
+bool viv_signote_default_is_ignore(enum viv_signote note) {
+    switch (note) {
+    // SIGCHLD / SIGWINCH: POSIX default is to discard. SIGCONT's default is
+    // "continue", which for a Proc already running (and a Proc at its EL0
+    // return tail IS running) is indistinguishable from discarding.
+    case VIV_SIGNOTE_CHILD_EXIT:
+    case VIV_SIGNOTE_TTY_WINCH:
+    case VIV_SIGNOTE_TTY_CONT:
+        return true;
+
+    // Everything else terminates, stops, or has no note. TTY_SUSP is the one
+    // worth naming: its default is STOP, and Thylacine's kernel NDFLT-stop arm
+    // is unbuilt (task #15, an ABI decision needing signoff). Reporting
+    // "ignore" for it would be a lie in the opposite direction from the one
+    // V-6b spent its time removing.
+    default:
+        return false;
+    }
+}
+
 bool viv_sigtab_note_ignored(const struct viv_sigtab *tab,
                              enum viv_signote note) {
     if (!tab) return false;                       // no table == nothing ignored
     if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
-    return tab->ignored[(u32)note] != 0;
+    return tab->act[(u32)note].handler == VIV_SIG_IGN;
 }
 
-bool viv_sigtab_set_ignored(struct viv_sigtab *tab, enum viv_signote note,
-                            bool ignored) {
-    if (!tab) return false;
+bool viv_sigtab_note_handler(const struct viv_sigtab *tab,
+                             enum viv_signote note,
+                             struct viv_ksigaction *out) {
+    if (!tab || !out) return false;
     if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
-    tab->ignored[(u32)note] = ignored ? 1u : 0u;
+
+    const struct viv_ksigaction *a = &tab->act[(u32)note];
+    // SIG_DFL is 0 and SIG_IGN is 1 -- neither is an address to jump to. A
+    // zeroed table therefore reads as all-default with no separate init.
+    if (a->handler == VIV_SIG_DFL || a->handler == VIV_SIG_IGN) return false;
+
+    *out = *a;
     return true;
+}
+
+bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
+                    const struct viv_ksigaction *act) {
+    if (!tab || !act) return false;
+    if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
+    tab->act[(u32)note] = *act;
+    return true;
+}
+
+void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,
+                             u64 sigmask, const u64 *regs31,
+                             u64 sp, u64 pc, u64 pstate) {
+    if (!out) return;
+
+    // Zero EVERY byte first, pads included. The buffer is a kernel stack frame
+    // and the copy-out hands it to a guest, so an unwritten gap is a kernel
+    // memory disclosure (I-13) rather than untidiness.
+    u8 *raw = (u8 *)out;
+    for (u32 i = 0; i < (u32)sizeof(*out); i++) raw[i] = 0;
+
+    out->info.si_signo = (s32)signum;
+    out->info.si_errno = 0;
+    out->info.si_code  = VIV_SI_KERNEL;
+    // _sifields stays zero: a note carries a 16-byte name and one u32 arg, so
+    // si_pid / si_uid / si_status have no source. SI_KERNEL is the si_code that
+    // claims nothing about them.
+
+    out->uc.uc_flags = 0;
+    out->uc.uc_link  = 0;
+
+    // stack_t: SS_DISABLE. sigaltstack(2) is an explicit ENOSYS row, so there
+    // is never an alternate stack to describe, and reporting one would be the
+    // stored lie the whole signal surface is written to avoid.
+    out->uc.ss_sp    = 0;
+    out->uc.ss_flags = 2;                          // SS_DISABLE
+    out->uc.ss_size  = 0;
+
+    out->uc.uc_sigmask[0] = sigmask;               // words 1..15 stay zero
+
+    // The interrupted context, field-for-field. This is what makes the frame
+    // worth writing: a crash reporter reading uc_mcontext.pc gets the real
+    // faulting PC even though writing to it changes nothing.
+    out->uc.uc_mcontext.fault_address = 0;
+    if (regs31)
+        for (u32 i = 0; i < 31; i++) out->uc.uc_mcontext.regs[i] = regs31[i];
+    out->uc.uc_mcontext.sp     = sp;
+    out->uc.uc_mcontext.pc     = pc;
+    out->uc.uc_mcontext.pstate = pstate;
+
+    // The _aarch64_ctx chain terminator: magic 0, size 0. Already zero from the
+    // wipe above, but written explicitly because it is a PROTOCOL value the
+    // guest parses, not incidental padding -- a reader deleting the wipe must
+    // see that these two must survive.
+    out->uc.uc_mcontext.end_magic = 0;
+    out->uc.uc_mcontext.end_size  = 0;
 }
 
 enum viv_verdict vivarium_sigaction_decide(u64 signum, u64 handler, u64 flags,
@@ -754,12 +856,11 @@ enum viv_verdict vivarium_sigaction_decide(u64 signum, u64 handler, u64 flags,
     // gone -- the failure V-6a's own comment calls a stored lie.
     if (signum == VIV_SIGCHLD && handler == VIV_SIG_IGN) return VIV_FORWARD;
 
-    // V-6b: a REAL handler needs the Tier-1 frame, which is V-6c. Until it
-    // exists, declining is the honest answer and ACCEPTING would be the
-    // dangerous one -- a guest whose sigaction succeeded believes its handler
-    // will run. DELETE THIS LINE when delivery lands; nothing else here changes.
-    if (handler != VIV_SIG_DFL && handler != VIV_SIG_IGN) return VIV_FORWARD;
-
+    // V-6b's handler-declines line stood HERE and is GONE at V-6c: the Tier-1
+    // frame exists, so a real handler is now installable and will actually run.
+    // The SA_RESTORER gate above is what remains, and it is permanent rather
+    // than provisional -- the guest supplying its own return trampoline is the
+    // reason Thylacine needs no executable vDSO page.
     return VIV_TRANSLATED;
 }
 

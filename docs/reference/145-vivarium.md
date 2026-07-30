@@ -402,3 +402,68 @@ in the **pool** (the bundle rootfs), and a preserved pool skips populate, so the
 container keeps running the previous binary while joey and viv — which live in
 the cpio — update normally. That asymmetry produces two identical-looking boots
 and is worth remembering.
+
+### The Tier-1 frame -- a Linux handler that runs (V-6c)
+
+V-6c lifts the one line V-6b left: a real handler installs, and it runs.
+
+**What the guest gets.** Delivery writes `siginfo_t` + `ucontext_t` (4688 bytes)
+to the guest stack, with a 16-byte `{fp, lr}` frame record above it so a
+backtrace from inside a handler walks into the interrupted code, and enters the
+handler with the aarch64 contract: `x0` signum, `x1` &siginfo, `x2` &ucontext,
+`x29` &frame_record, `x30` the guest's own `SA_RESTORER` trampoline, `sp` the
+frame, `pc` the handler. `rt_sigreturn` is intercepted in `viv_linux_dispatch`
+and routed to `SYS_NOTED(NCONT)`.
+
+**The restore does NOT read the frame** -- it reads the per-`Thread` snapshot
+the delivery path saved. That is the design decision from VIVARIUM.md 6.22, and
+its value is a deleted hazard rather than a smaller diff: no field of the user
+frame ever reaches `pstate`, `pc` or `sp`, so the "reject any frame that would
+elevate" obligation has no validator to get wrong. The named cost is that
+writing to `uc_mcontext` is inert.
+
+**Two things measuring corrected, again.**
+
+`sizeof(struct sigcontext)` is **4384** and `__reserved` starts at **288**, not
+280. musl declares the tail as `long double __reserved[256]`, which on aarch64
+is 16 bytes per element AND 16-aligned. Compiling that declaration with the host
+`cc` on an arm64 Mac answers 2328, because macOS `long double` is 8 bytes -- so
+the first layout probe was wrong in a way that would have put every mcontext
+field the guest reads 8 bytes out of place. The numbers were re-taken under
+`--target=aarch64-linux-gnu` and are now `_Static_assert`ed.
+
+The kernel writes the first **600** bytes plus an 8-byte `_aarch64_ctx`
+terminator, and leaves the rest of `__reserved` alone. That is not a shortcut:
+the region is the guest's own stack below its own sp, so nothing crosses a
+boundary, and an EMPTY record chain is the truthful report -- note delivery does
+not save Q0-Q31 (task #96), so an FPSIMD record would claim state that is not
+there.
+
+**Two deliberate delivery behaviours beyond "call the handler".** A `SIG_IGN`
+disposition drops a note that was already queued when the disposition changed
+(Linux discards pending signals on `SIG_IGN`; the V-6b post-time hook cannot
+catch one that arrived first), and a `SIG_DFL` whose Linux default is *ignore*
+(SIGCHLD/SIGWINCH/SIGCONT) is dropped rather than left in the ring -- a Linux
+guest has no notes fd, so nothing would ever consume it and the queue would
+fill. `SA_RESETHAND` is honoured: the disposition returns to `SIG_DFL` before
+the handler is entered.
+
+**Proving it in-guest needed the one signal a v1.0 guest can raise.** `kill`,
+`tkill` and `clone` are not table rows, so a Linux guest can signal neither
+another Proc nor itself through the obvious route -- and cannot spawn a thread
+to race its own disposition table either, which is what makes the lock-free
+`viv_sigtab` sound today (the only cross-thread reader is `notes_post`'s
+`SIG_IGN` hook, and it touches one naturally-aligned `u64`). What remains is
+self-infliction: the bundle declares `org.thylacine.sigpipe-selftest`, `viv`
+hands the entrypoint fd 0 as the write end of a reader-less pipe, and the
+guest's own `write()` makes the kernel post `pipe`. Synchronous, no second Proc
+in the timing.
+
+The gate also pins that masking **defers** rather than loses: with SIGPIPE
+blocked the handler must not run, and must run at the `rt_sigprocmask` that
+unblocks it.
+
+Revert-probed three ways, each failing at its own layer: removing the
+`rt_sigreturn` interception kills the guest outright (its restorer's `svc`
+returns `-ENOSYS` into a `brk`); removing the delivery arm fails exactly the
+handler-ran leg; zeroing the frame's saved `pc` fails the pure unit test.

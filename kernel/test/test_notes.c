@@ -893,7 +893,9 @@ void test_notes_linux_sigign_discard(void) {
     // A NATIVE Proc is unaffected even with a table hung off it -- the gate is
     // the phenotype, and this asserts the branch is not simply always-on.
     p->sigtab = tab;
-    (void)viv_sigtab_set_ignored(tab, VIV_SIGNOTE_PIPE, true);
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_PIPE, &ign);
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, 7u, NULL, true), 0,
                    "native Proc: post accepted");
     TEST_EXPECT_EQ(p->notes->count, 1u,
@@ -920,7 +922,7 @@ void test_notes_linux_sigign_discard(void) {
                    "linux: interrupt still posts");
     TEST_EXPECT_EQ(p->notes->count, 1u, "linux: interrupt was queued");
 
-    (void)viv_sigtab_set_ignored(tab, VIV_SIGNOTE_TTY_WINCH, true);
+    (void)viv_sigtab_set(tab, VIV_SIGNOTE_TTY_WINCH, &ign);
     TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_HUP, 2u, NULL, true), 0,
                    "linux: tty:hup posts though tty:winch is ignored");
     TEST_EXPECT_EQ(p->notes->count, 2u,

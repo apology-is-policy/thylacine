@@ -1836,6 +1836,41 @@ are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
 `SIGABRT` is reachable only via `raise`, which is `tkill` to self, so it
 terminates rather than running a handler.
 
+**AS BUILT (V-6c).** The frame is `siginfo_t` (128) + `ucontext_t` (4560) =
+4688 bytes, plus a 16-byte `{fp, lr}` frame record above it so a backtrace from
+inside a handler still walks into the interrupted code. Delivery sets the
+aarch64 contract -- `x0` signum, `x1` &siginfo, `x2` &ucontext, `x29`
+&frame_record, `x30` the guest's own restorer, `sp` the frame, `pc` the handler
+-- and `rt_sigreturn` (139) is intercepted in `viv_linux_dispatch` and routed to
+`SYS_NOTED(NCONT)`, which restores from the `Thread` snapshot.
+
+Two layout facts that cost a measurement each, recorded so nobody re-derives
+them wrong:
+
+- `sizeof(struct sigcontext)` is **4384**, and `__reserved` begins at **288**,
+  not 280. musl declares it `long double __reserved[256]`, which is 16 bytes
+  per element and 16-ALIGNED on aarch64. Compiling the same declaration with the
+  host `cc` on an arm64 Mac gives 2328 -- macOS `long double` is 8 bytes. The
+  numbers here were confirmed under `--target=aarch64-linux-gnu` before being
+  written down.
+- The kernel writes only the first **600** bytes of the frame (siginfo +
+  ucontext through the mcontext head) plus an 8-byte `_aarch64_ctx` terminator.
+  The remaining ~4 KiB of `__reserved` is left untouched: it is the guest's own
+  stack below its own sp, so nothing crosses a boundary, and an empty record
+  chain is the honest report -- note delivery does not save Q0-Q31 (task #96),
+  so an FPSIMD record would be a lie.
+
+**A v1.0 Linux guest can only signal ITSELF**, and that shaped the gate. `kill`,
+`tkill` and `clone` are not table rows, so no guest can generate a signal for
+another Proc or spawn a thread to race its own disposition table. The
+`viv-pheno-probe` gate therefore uses the one self-inflicted route that exists:
+the bundle declares `org.thylacine.sigpipe-selftest`, `viv` hands the entrypoint
+fd 0 as the write end of a reader-less pipe, and the guest's own `write()` makes
+the kernel post `pipe`. No second Proc times anything. The gate additionally
+pins that a BLOCKED signal is *deferred* rather than lost: the handler must not
+run while SIGPIPE is masked, and must run at the `rt_sigprocmask` that unblocks
+it.
+
 **What Tier 2 still owes**, unchanged from §5.4: queued `siginfo`, `SA_RESTART`
 (a restartable syscall needs the EINTR plumbing LS-8 defers), `SA_NODEFER` and
 `SA_ONSTACK`. Thylacine's `in_handler` blocks *all* delivery for the duration
@@ -2058,6 +2093,8 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own |
 | **`exit(N)` is boolean** (task #91) | Any nonzero status reports 1, a Thylacine-wide v1.0 property (`sys_exit_group_handler` collapses to `exits("fail")`). A shell reading `$?` in a container sees 0-or-1 |
 | **`/proc/self` names the mounter** (task #90) | The per-container diorama reports `viv` rather than the reading Proc |
+| **A signal handler cannot use FP/SIMD safely** (§6.22, task #96) | Note delivery saves x0-x30/sp/pc/pstate and NOT Q0-Q31, so a handler that touches floating point or an autovectorised routine clobbers the interrupted computation. PRE-EXISTING on the native note path (pouch handlers have it today); the phenotype makes it reachable by ordinary compiled C. Not an authority question -- the registers are the Proc's own. The frame's `_aarch64_ctx` chain is terminated immediately rather than carrying a false FPSIMD record, so a guest that looks is told the state is absent |
+| **`siginfo` carries the signal number only** (§6.22) | `si_signo`/`si_errno`/`si_code` are filled and the `_sifields` union is zeroed, with `si_code = SI_KERNEL` -- the one value that claims nothing about the union. A note carries a 16-byte name and one u32 arg, so `si_pid`, `si_uid`, `si_status` and `si_addr` have no source. Queued `siginfo` is the Tier-2 item §5.4 already names |
 | **A signal handler's `ucontext` is read-only** (§6.22) | The frame is written to the user stack and is accurate to read, but `rt_sigreturn` restores from the kernel-side `Thread` snapshot, so *writing* `uc_mcontext` does not change where execution resumes. Breaks signal-driven control transfer (Go's `sigpanic`, JIT deoptimisation); neither reaches this path at v1.0. Bought deliberately: it is what makes the `rt_sigreturn` escalation surface structurally absent rather than merely guarded |
 
 ---
@@ -2072,7 +2109,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. The shape is decided by **V-5**, the first chunk that genuinely needs a destination; §4.1 records the three live candidates and the peer evidence so V-5 does not re-derive them. `specs/phenotype.tla` lands with whatever V-5 chooses | (deferred; the gate travels with V-5) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
 | V-5 | Sockets | The `/net` translation | **`curl` fetches a URL** (ROADMAP §9.2) |
-| V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land. **V-6a** landed the decode; **V-6b** landed dispositions (`rt_sigaction` for `SIG_DFL`/`SIG_IGN` + `rt_sigprocmask` + the per-Proc `viv_sigtab` + the post-time discard), and corrected two V-6a facts by measuring musl -- the `k_sigaction` layout is arch-fixed at 32 bytes rather than flag-chosen, and SIGTERM had to be evicted from `interrupt` because a shared note cannot carry two independent dispositions (task #95). A real HANDLER still declines; **V-6c** is the Tier-1 frame that lifts that one line | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
+| V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land. **V-6a** landed the decode; **V-6b** landed dispositions (`rt_sigaction` for `SIG_DFL`/`SIG_IGN` + `rt_sigprocmask` + the per-Proc `viv_sigtab` + the post-time discard), and corrected two V-6a facts by measuring musl -- the `k_sigaction` layout is arch-fixed at 32 bytes rather than flag-chosen, and SIGTERM had to be evicted from `interrupt` because a shared note cannot carry two independent dispositions (task #95). **V-6c** landed the Tier-1 frame: a real handler installs and RUNS, `rt_sigreturn` is the phenotyped spelling of `SYS_NOTED(NCONT)`, and the sigtab widened to the whole `k_sigaction`. **V-6 IS COMPLETE** | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
 | V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
 

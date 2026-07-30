@@ -501,9 +501,15 @@ struct viv_ksigaction {
     u64 restorer;
     u64 mask;
 };
-#define VIV_KSIGACTION_SIZE      32u
-#define VIV_KSIGACTION_OFF_FLAGS  8u
-#define VIV_KSIGACTION_OFF_MASK  24u
+#define VIV_KSIGACTION_SIZE         32u
+#define VIV_KSIGACTION_OFF_FLAGS     8u
+#define VIV_KSIGACTION_OFF_RESTORER 16u
+#define VIV_KSIGACTION_OFF_MASK     24u
+_Static_assert(sizeof(struct viv_ksigaction) == VIV_KSIGACTION_SIZE,
+               "the kernel-side mirror must match the size the guest sends");
+_Static_assert(__builtin_offsetof(struct viv_ksigaction, flags)    == VIV_KSIGACTION_OFF_FLAGS,    "flags @8");
+_Static_assert(__builtin_offsetof(struct viv_ksigaction, restorer) == VIV_KSIGACTION_OFF_RESTORER, "restorer @16");
+_Static_assert(__builtin_offsetof(struct viv_ksigaction, mask)     == VIV_KSIGACTION_OFF_MASK,     "mask @24");
 
 // Which note carries a given Linux signal. PURE.
 //
@@ -567,6 +573,33 @@ bool viv_signal_owns_note_exclusively(u64 signum);
 // SIGSEGV handler is told so, rather than discovering it at the first fault.
 bool viv_signote_is_deliverable(enum viv_signote note);
 
+// Which Linux signal owns this note -- the inverse of `viv_signal_note`. PURE.
+//
+// Well-defined ONLY because `viv_signal_owns_note_exclusively` gates every
+// disposition write, so a note with a live entry has exactly one signal behind
+// it. Computed by SCANNING for the same reason the exclusivity check does: a
+// second table would be a second thing to keep in step.
+//
+// Returns 0 for a note no signal maps to. Delivery needs this to fill
+// `si_signo` and x0, which is the whole reason the exclusivity rule is load-
+// bearing rather than merely tidy.
+u64 viv_signote_to_signal(enum viv_signote note);
+
+// Is this note's LINUX default action "ignore"? PURE.
+//
+// SIGCHLD, SIGWINCH and SIGCONT are the three whose default is to do nothing.
+// It matters because Thylacine's queue holds an undelivered note until someone
+// reads it, and a Linux guest has no notes fd to read one with (there is no
+// translation row for SYS_NOTE_OPEN, and a native number reaches the table
+// first) -- so without this the queue would fill with notes nothing will ever
+// consume. Dropping them at delivery is what Linux does and what keeps the
+// queue bounded.
+//
+// SIGTSTP is deliberately NOT here: its default is STOP, not ignore, and the
+// kernel NDFLT-stop arm is an unbuilt ABI decision (task #15). Claiming
+// "ignore" for it would be a stored lie in the other direction.
+bool viv_signote_default_is_ignore(enum viv_signote note);
+
 // Per-Proc signal disposition. Lazily allocated on a Proc's first translatable
 // `rt_sigaction`; freed at proc_free. NOT inherited across rfork -- the
 // `handler_va` precedent (notes.h F13), and the POSIX-exec rule agrees for
@@ -575,8 +608,14 @@ bool viv_signote_is_deliverable(enum viv_signote note);
 // Indexed by `enum viv_signote`, NOT by signal number -- legitimate ONLY
 // because `viv_signal_owns_note_exclusively` gates every write, so each live
 // entry has exactly one signal behind it.
+//
+// V-6c widened this from `u8 ignored[]` to the whole `k_sigaction`. V-6b stored
+// only what it could honour, which was one bit; delivery needs the handler
+// address, SA_RESTORER (the guest's return trampoline) and the flags. A zeroed
+// table reads as all-SIG_DFL, which is the correct initial state, so the lazy
+// allocation needs no separate initialiser.
 struct viv_sigtab {
-    u8 ignored[VIV_SIGNOTE_COUNT];   // 1 == the owning signal is SIG_IGN
+    struct viv_ksigaction act[VIV_SIGNOTE_COUNT];
 };
 
 // The reverse step: which note kind is this note NAME? PURE.
@@ -591,11 +630,18 @@ enum viv_signote viv_signote_from_note_name(const char *name);
 // (a Proc that never called rt_sigaction has no table and ignores nothing).
 bool viv_sigtab_note_ignored(const struct viv_sigtab *tab, enum viv_signote note);
 
+// Does this Proc have a REAL handler for `note` -- neither SIG_DFL nor SIG_IGN?
+// PURE + NULL-safe. On true, `*out` receives the whole recorded k_sigaction
+// (handler + flags + restorer + mask); on false `*out` is untouched, so a
+// caller that ignores the return cannot deliver to a stale address.
+bool viv_sigtab_note_handler(const struct viv_sigtab *tab, enum viv_signote note,
+                             struct viv_ksigaction *out);
+
 // Record a disposition. Returns false (and changes nothing) if the note is out
-// of range -- the caller has already run the domain check, so this is
-// defence-in-depth on the array index.
-bool viv_sigtab_set_ignored(struct viv_sigtab *tab, enum viv_signote note,
-                            bool ignored);
+// of range or `act` is NULL -- the caller has already run the domain check, so
+// this is defence-in-depth on the array index.
+bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
+                    const struct viv_ksigaction *act);
 
 // Decide whether an `rt_sigaction` is inside the translatable domain. PURE.
 //
@@ -618,10 +664,6 @@ bool viv_sigtab_set_ignored(struct viv_sigtab *tab, enum viv_signote note,
 //
 //   * The signal must EXCLUSIVELY own its note (above) -- a shared note cannot
 //     carry two independent dispositions.
-//   * A real HANDLER declines, because the Tier-1 frame that would call it is
-//     V-6c. Accepting an install we would never honour is exactly the silent
-//     mistranslation §4 forbids, and it is worse than ENOSYS: the guest would
-//     believe it is protected. One line moves when the frame lands.
 //   * SIG_IGN on SIGCHLD declines. On Linux that is not "ignore", it is
 //     AUTO-REAP -- the child never becomes a zombie. Thylacine has no such
 //     mode, so honouring the surface meaning while dropping the real one would
@@ -663,6 +705,16 @@ struct viv_notebit_map {
 };
 u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m);
 
+// THE canonical instance, filled from notes.h's NOTE_BIT_* in vivarium.c.
+//
+// The map is still a PARAMETER rather than a global read inside the
+// translators, because that is what keeps them unit-testable against a
+// synthetic numbering. But there is exactly ONE kernel instance, because two
+// consumers (the syscall shells and the delivery path) each hand-rolling a
+// copy is precisely the mirror-drift trap: a per-file `static` verifies only
+// that FILE's numbering, never that it agrees with the other's.
+extern const struct viv_notebit_map g_viv_notebits;
+
 // The inverse: report a NOTE_BIT_* mask back as a Linux `sigset_t` word. PURE.
 //
 // Deliberately reports EVERY signal a set bit actually blocks, which makes the
@@ -676,5 +728,141 @@ u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m);
 // Signals with no note are never reported blocked: nothing can deliver them, so
 // "blocked" would describe a state that does not exist.
 u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m);
+
+// -----------------------------------------------------------------------------
+// TIER 1 -- the signal frame (V-6c). See VIVARIUM.md §6.22.
+//
+// THE SHAPE, and why it deletes a hazard rather than guarding one. Delivery
+// writes a real `siginfo_t` + `ucontext_t` to the guest's stack so a handler
+// that READS them works, but `rt_sigreturn` restores from the kernel-side
+// `Thread` snapshot and ignores the frame entirely. §8's audit-trigger row
+// originally warned that Tier 1 "restores pstate/pc from user memory -- a
+// classic privilege-escalation shape; must reject any frame that would
+// elevate". Under this design NO field of the user frame ever reaches pstate,
+// pc or sp, so there is no frame to reject and no validator to get wrong.
+//
+// The stated cost, in §9's DEGRADED tier: writing to `uc_mcontext` does not
+// change where execution resumes. That breaks signal-driven control transfer
+// (Go's sigpanic, JIT deoptimisation); neither reaches this path at v1.0.
+//
+// THE LAYOUT IS THE TARGET'S, NOT THE HOST'S -- and that distinction cost a
+// measurement. `struct sigcontext` ends in musl's `long double __reserved[256]`,
+// which is 16 bytes per element on aarch64 (4096 bytes, 16-ALIGNED, so it lands
+// at 288 rather than 280) but only 8 on an arm64 Mac. Compiling the layout probe
+// with the host cc gave sizeof == 2328; the same probe under
+// `--target=aarch64-linux-gnu` gives 4384, and that is the number the guest
+// uses. The offsets below were confirmed by _Static_assert against the real
+// target compiler before being written down.
+//
+// WHAT IS WRITTEN vs WHAT IS RESERVED. `sigcontext.__reserved` is a 4096-byte
+// area holding a chain of `struct _aarch64_ctx { u32 magic; u32 size; }` records
+// (FPSIMD, ESR, SVE...). We write only the 8-byte TERMINATOR -- magic 0, size 0
+// -- so a guest that walks the chain stops immediately and correctly concludes
+// "no extension records". The remaining 4088 bytes are left as they were, which
+// is the guest's OWN stack memory below its own sp: it could read those bytes
+// before the signal and can read them after, so nothing crosses a boundary and
+// I-13 is untouched. Zeroing them would cost 4 KiB of copy per delivery to hide
+// data from the process that owns it.
+//
+// The absent FPSIMD record is HONEST rather than lazy: note delivery does not
+// save or restore Q0-Q31 at all (task #96 -- a pre-existing property of the
+// native note path, which V-6c makes more reachable), so a record claiming to
+// hold them would be a lie. An empty chain says exactly what is true.
+// -----------------------------------------------------------------------------
+
+// Sizes of the FULL Linux structures -- what the stack pointer must skip, as
+// distinct from the prefix this file actually writes.
+#define VIV_SIGINFO_SIZE      128u    // siginfo_t
+#define VIV_UCONTEXT_SIZE    4560u    // ucontext_t (176 header + 4384 mcontext)
+#define VIV_SIGFRAME_SIZE    (VIV_SIGINFO_SIZE + VIV_UCONTEXT_SIZE)   // 4688
+#define VIV_FRAME_RECORD_SIZE 16u     // { fp, lr } -- the walkable frame chain
+#define VIV_SIGFRAME_TOTAL   (VIV_SIGFRAME_SIZE + VIV_FRAME_RECORD_SIZE)
+
+// `si_code` for a kernel-generated signal (Linux `SI_KERNEL`). Chosen over
+// SI_USER because it is the one value that claims NOTHING about the union: a
+// note carries a 16-byte name and one u32 arg, so si_pid / si_uid / si_status /
+// si_addr have no source. SI_USER would invite a guest to read si_pid and get a
+// confident zero.
+#define VIV_SI_KERNEL 0x80
+
+// The Linux aarch64 `siginfo_t` (128 bytes). Only the three leading ints have a
+// source here; the union is zeroed rather than guessed at.
+struct viv_linux_siginfo {
+    s32 si_signo;       //   0
+    s32 si_errno;       //   4
+    s32 si_code;        //   8
+    s32 __pad0;         //  12
+    u8  __pad1[112];    //  16 -- the _sifields union, deliberately all zero
+};
+_Static_assert(sizeof(struct viv_linux_siginfo) == VIV_SIGINFO_SIZE,
+               "siginfo_t is 128 bytes on Linux aarch64");
+_Static_assert(__builtin_offsetof(struct viv_linux_siginfo, si_signo) == 0, "si_signo @0");
+_Static_assert(__builtin_offsetof(struct viv_linux_siginfo, si_errno) == 4, "si_errno @4");
+_Static_assert(__builtin_offsetof(struct viv_linux_siginfo, si_code)  == 8, "si_code @8");
+
+// The WRITTEN prefix of `struct sigcontext` -- through the first 8 bytes of
+// `__reserved`, which carry the record-chain terminator. The full struct is 4384
+// bytes; the 4088 past this are the guest's own untouched stack (see above).
+struct viv_linux_mcontext_head {
+    u64 fault_address;  //   0 -- 0: no deliverable note is fault-generated
+    u64 regs[31];       //   8 -- x0..x30
+    u64 sp;             // 256
+    u64 pc;             // 264
+    u64 pstate;         // 272
+    u8  __pad_res[8];   // 280 -- __reserved is 16-aligned, so it starts at 288
+    u32 end_magic;      // 288 -- _aarch64_ctx.magic == 0 (end of chain)
+    u32 end_size;       // 292 -- _aarch64_ctx.size  == 0
+};
+_Static_assert(sizeof(struct viv_linux_mcontext_head) == 296, "mcontext head 296");
+_Static_assert(__builtin_offsetof(struct viv_linux_mcontext_head, regs)      ==   8, "regs @8");
+_Static_assert(__builtin_offsetof(struct viv_linux_mcontext_head, sp)        == 256, "sp @256");
+_Static_assert(__builtin_offsetof(struct viv_linux_mcontext_head, pc)        == 264, "pc @264");
+_Static_assert(__builtin_offsetof(struct viv_linux_mcontext_head, pstate)    == 272, "pstate @272");
+_Static_assert(__builtin_offsetof(struct viv_linux_mcontext_head, end_magic) == 288,
+               "sigcontext.__reserved is __aligned__(16), so it begins at 288 -- "
+               "NOT 280. Getting this wrong puts every mcontext field the guest "
+               "reads 8 bytes out of place.");
+
+// The WRITTEN prefix of `ucontext_t`, which is everything up to and including
+// the mcontext head.
+struct viv_linux_ucontext_head {
+    u64 uc_flags;       //   0
+    u64 uc_link;        //   8 -- 0: no linked context
+    u64 ss_sp;          //  16 -- stack_t uc_stack; SS_DISABLE, we have no altstack
+    s32 ss_flags;       //  24
+    u32 __pad_ss;       //  28
+    u64 ss_size;        //  32
+    u64 uc_sigmask[16]; //  40 -- sigset_t is 128 bytes in musl userspace
+    u8  __pad_mctx[8];  // 168 -- uc_mcontext is 16-aligned, so it starts at 176
+    struct viv_linux_mcontext_head uc_mcontext;   // 176
+};
+_Static_assert(sizeof(struct viv_linux_ucontext_head) == 472, "ucontext head 472");
+_Static_assert(__builtin_offsetof(struct viv_linux_ucontext_head, ss_sp)       ==  16, "uc_stack @16");
+_Static_assert(__builtin_offsetof(struct viv_linux_ucontext_head, uc_sigmask)  ==  40, "uc_sigmask @40");
+_Static_assert(__builtin_offsetof(struct viv_linux_ucontext_head, uc_mcontext) == 176, "uc_mcontext @176");
+
+// The contiguous head of Linux's `struct rt_sigframe { siginfo info; ucontext uc; }`.
+// One kernel-side buffer, one copy-out.
+struct viv_sigframe_head {
+    struct viv_linux_siginfo       info;   //   0
+    struct viv_linux_ucontext_head uc;     // 128
+};
+_Static_assert(sizeof(struct viv_sigframe_head) == 600, "written frame head 600");
+_Static_assert(sizeof(struct viv_sigframe_head) <= VIV_SIGFRAME_SIZE,
+               "the written prefix must fit inside the frame the sp reserves");
+
+// Build the frame head. PURE -- plain data in, plain data out; the caller owns
+// the buffer and performs the copy-out, exactly the vivarium_stat_to_linux
+// split.
+//
+// `out` is fully written including every pad, so a stale kernel stack frame
+// cannot reach a guest through the gaps (I-13).
+//
+// `regs31` must point to 31 words (x0..x30) -- the INTERRUPTED context, which
+// the caller has already snapshotted. `sigmask` is the Linux sigset word the
+// guest should see as blocked at delivery.
+void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,
+                             u64 sigmask, const u64 *regs31,
+                             u64 sp, u64 pc, u64 pstate);
 
 #endif // THYLACINE_VIVARIUM_H

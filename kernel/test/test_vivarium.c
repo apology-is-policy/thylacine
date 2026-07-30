@@ -646,13 +646,11 @@ void test_vivarium_sigaction_domain(void) {
     const u64 H = 0x400000;   // a plausible handler VA
     const u64 R = VIV_SA_RESTORER;
 
-    // V-6b: a real handler DECLINES, because the Tier-1 frame that would call
-    // it is V-6c. Accepting the install and never running the handler is the
-    // silent mistranslation §4 forbids -- and worse than ENOSYS, because the
-    // guest would believe it is protected. This assertion INVERTS when delivery
-    // lands; that is the point of pinning it.
-    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, H, R, 8) == VIV_FORWARD,
-                "a real handler declines until V-6c can deliver to it");
+    // V-6b pinned this as VIV_FORWARD ("a real handler declines until V-6c can
+    // deliver to it") and said the assertion would INVERT when the frame landed.
+    // It has: the Tier-1 frame exists, so a handler with a restorer installs.
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, H, R, 8) == VIV_TRANSLATED,
+                "V-6c: a real handler with SA_RESTORER now installs");
 
     // SIG_DFL / SIG_IGN need no trampoline -- nothing returns from them. This
     // is the load-bearing case: signal(SIGPIPE, SIG_IGN) is the single most
@@ -893,39 +891,70 @@ void test_vivarium_sigtab(void) {
 
     // The table itself. A Proc with no table ignores nothing -- which is why a
     // NULL-safe read matters: it is the state every native Proc is in forever.
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN };
+    struct viv_ksigaction dfl = { .handler = VIV_SIG_DFL };
+    struct viv_ksigaction hnd = { .handler = 0x400000, .flags = VIV_SA_RESTORER,
+                                  .restorer = 0x400100, .mask = 0 };
+    struct viv_ksigaction got;
+
     TEST_ASSERT(!viv_sigtab_note_ignored(NULL, VIV_SIGNOTE_PIPE),
                 "no table -> nothing ignored");
-    TEST_ASSERT(!viv_sigtab_set_ignored(NULL, VIV_SIGNOTE_PIPE, true),
+    TEST_ASSERT(!viv_sigtab_set(NULL, VIV_SIGNOTE_PIPE, &ign),
                 "setting through a NULL table fails rather than faulting");
+    TEST_ASSERT(!viv_sigtab_note_handler(NULL, VIV_SIGNOTE_PIPE, &got),
+                "no table -> no handler");
 
     struct viv_sigtab tab;
-    for (u32 i = 0; i < VIV_SIGNOTE_COUNT; i++) tab.ignored[i] = 0;
+    for (u32 i = 0; i < (u32)sizeof(tab); i++) ((u8 *)&tab)[i] = 0;
 
+    // A ZEROED table reads as all-SIG_DFL. That is what lets the lazy
+    // allocation in viv_sigtab_of skip an initialiser -- kzalloc IS the init.
     TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_PIPE),
                 "fresh table ignores nothing");
-    TEST_ASSERT(viv_sigtab_set_ignored(&tab, VIV_SIGNOTE_PIPE, true), "set");
+    TEST_ASSERT(!viv_sigtab_note_handler(&tab, VIV_SIGNOTE_PIPE, &got),
+                "fresh table has no handler -- zero IS SIG_DFL");
+
+    TEST_ASSERT(viv_sigtab_set(&tab, VIV_SIGNOTE_PIPE, &ign), "set IGN");
     TEST_ASSERT(viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_PIPE), "pipe ignored");
+    TEST_ASSERT(!viv_sigtab_note_handler(&tab, VIV_SIGNOTE_PIPE, &got),
+                "SIG_IGN is not a handler -- delivery must never jump to 1");
 
     // Entries are INDEPENDENT: ignoring one note must not ignore its neighbours.
     // With the tty family sharing a mask bit but not a note, this is the
     // property that lets a guest ignore SIGWINCH while SIGHUP still kills it.
     TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_INTERRUPT),
                 "ignoring pipe did not touch interrupt");
-    TEST_ASSERT(viv_sigtab_set_ignored(&tab, VIV_SIGNOTE_TTY_WINCH, true), "winch");
+    TEST_ASSERT(viv_sigtab_set(&tab, VIV_SIGNOTE_TTY_WINCH, &ign), "winch");
     TEST_ASSERT(viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_TTY_WINCH), "winch set");
     TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_TTY_HUP),
                 "tty:hup stays deliverable though it shares a MASK bit");
 
+    // V-6c: a REAL handler round-trips whole. The restorer is the part that
+    // matters most -- it is the guest's own trampoline and the only way back
+    // out of the handler.
+    TEST_ASSERT(viv_sigtab_set(&tab, VIV_SIGNOTE_INTERRUPT, &hnd), "set handler");
+    TEST_ASSERT(viv_sigtab_note_handler(&tab, VIV_SIGNOTE_INTERRUPT, &got),
+                "handler reported");
+    TEST_ASSERT(got.handler == 0x400000 && got.restorer == 0x400100 &&
+                got.flags == VIV_SA_RESTORER,
+                "the whole k_sigaction survives, restorer included");
+    TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_INTERRUPT),
+                "a handler is not 'ignored'");
+
     // Clearing is a real operation, not just a set -- SIG_DFL after SIG_IGN.
-    TEST_ASSERT(viv_sigtab_set_ignored(&tab, VIV_SIGNOTE_PIPE, false), "clear");
+    TEST_ASSERT(viv_sigtab_set(&tab, VIV_SIGNOTE_PIPE, &dfl), "clear");
     TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_PIPE), "pipe restored");
 
     // Out of range is refused rather than writing past the array.
-    TEST_ASSERT(!viv_sigtab_set_ignored(&tab, (enum viv_signote)VIV_SIGNOTE_COUNT,
-                                        true),
+    TEST_ASSERT(!viv_sigtab_set(&tab, (enum viv_signote)VIV_SIGNOTE_COUNT, &ign),
                 "out-of-range note refused");
     TEST_ASSERT(!viv_sigtab_note_ignored(&tab, (enum viv_signote)VIV_SIGNOTE_COUNT),
                 "out-of-range read refused");
+    TEST_ASSERT(!viv_sigtab_note_handler(&tab, (enum viv_signote)VIV_SIGNOTE_COUNT,
+                                         &got),
+                "out-of-range handler read refused");
+    TEST_ASSERT(!viv_sigtab_note_handler(&tab, VIV_SIGNOTE_INTERRUPT, NULL),
+                "a NULL out-pointer is refused rather than written through");
 }
 
 // -----------------------------------------------------------------------------
@@ -975,4 +1004,126 @@ void test_vivarium_notemask_to_sigset(void) {
     TEST_ASSERT(back & (1ULL << (VIV_SIGSEGV - 1)), "SIGSEGV survives");
 
     TEST_ASSERT(viv_notemask_to_sigset(~0ULL, NULL) == 0, "NULL map -> 0");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.signote_reverse — note -> signal, and the Linux default table (V-6c).
+//
+// The reverse direction is what delivery uses to fill si_signo and x0, so it is
+// the point where the V-6b exclusivity rule stops being tidiness and becomes
+// load-bearing: without it there would be no single answer to give.
+// -----------------------------------------------------------------------------
+void test_vivarium_signote_reverse(void);
+void test_vivarium_signote_reverse(void) {
+    // Every signal that owns its note exclusively must round-trip through both
+    // directions. Driven from viv_signal_note itself so a future row cannot be
+    // added to one direction and forgotten in the other.
+    for (u64 sig = 1; sig <= VIV_NSIG; sig++) {
+        enum viv_signote n = viv_signal_note(sig);
+        if (n == VIV_SIGNOTE_NONE) continue;
+        if (!viv_signal_owns_note_exclusively(sig)) continue;
+        TEST_ASSERT(viv_signote_to_signal(n) == sig,
+                    "an exclusively-owned note maps back to its own signal");
+    }
+
+    TEST_ASSERT(viv_signote_to_signal(VIV_SIGNOTE_NONE) == 0,
+                "NONE maps to no signal");
+    TEST_ASSERT(viv_signote_to_signal(VIV_SIGNOTE_INTERRUPT) == VIV_SIGINT,
+                "interrupt is SIGINT's alone since V-6b evicted SIGTERM");
+
+    // The Linux default-action table. Only these three do nothing by default;
+    // getting the set wrong either drops a signal that should kill (too many)
+    // or lets a queue fill with notes nothing consumes (too few).
+    TEST_ASSERT(viv_signote_default_is_ignore(VIV_SIGNOTE_CHILD_EXIT), "SIGCHLD");
+    TEST_ASSERT(viv_signote_default_is_ignore(VIV_SIGNOTE_TTY_WINCH), "SIGWINCH");
+    TEST_ASSERT(viv_signote_default_is_ignore(VIV_SIGNOTE_TTY_CONT), "SIGCONT");
+
+    TEST_ASSERT(!viv_signote_default_is_ignore(VIV_SIGNOTE_INTERRUPT), "SIGINT kills");
+    TEST_ASSERT(!viv_signote_default_is_ignore(VIV_SIGNOTE_TTY_HUP), "SIGHUP kills");
+    TEST_ASSERT(!viv_signote_default_is_ignore(VIV_SIGNOTE_TTY_QUIT), "SIGQUIT kills");
+    TEST_ASSERT(!viv_signote_default_is_ignore(VIV_SIGNOTE_PIPE), "SIGPIPE kills");
+    TEST_ASSERT(!viv_signote_default_is_ignore(VIV_SIGNOTE_KILL), "SIGKILL kills");
+    TEST_ASSERT(!viv_signote_default_is_ignore(VIV_SIGNOTE_NONE), "NONE");
+
+    // SIGTSTP's default is STOP, not ignore. Reporting "ignore" would silently
+    // discard a job-control signal; the kernel NDFLT-stop arm is task #15.
+    TEST_ASSERT(!viv_signote_default_is_ignore(VIV_SIGNOTE_TTY_SUSP),
+                "SIGTSTP defaults to STOP, which is not 'ignore'");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.sigframe — the Tier-1 frame the guest reads (V-6c).
+// -----------------------------------------------------------------------------
+void test_vivarium_sigframe(void);
+void test_vivarium_sigframe(void) {
+    // The layout constants ARE the ABI. These are the numbers the aarch64
+    // target compiler produces for musl's own declarations; the host compiler
+    // gives 2328/2496 instead, because macOS `long double` is 8 bytes where
+    // aarch64's is 16. Measuring on the wrong target is how that goes wrong.
+    TEST_ASSERT(VIV_SIGINFO_SIZE == 128, "siginfo_t 128");
+    TEST_ASSERT(VIV_UCONTEXT_SIZE == 4560, "ucontext_t 4560");
+    TEST_ASSERT(VIV_SIGFRAME_SIZE == 4688, "rt_sigframe 4688");
+    TEST_ASSERT((VIV_SIGFRAME_SIZE % 16u) == 0,
+                "the frame size must be a multiple of 16 or the handler's sp "
+                "loses its AAPCS64 alignment");
+    TEST_ASSERT((VIV_SIGFRAME_TOTAL % 16u) == 0, "total 16-aligned");
+
+    // Poison the buffer first: the builder must overwrite EVERY byte, pads
+    // included, or a kernel stack frame reaches the guest (I-13).
+    struct viv_sigframe_head f;
+    for (u32 i = 0; i < (u32)sizeof(f); i++) ((u8 *)&f)[i] = 0xA5;
+
+    u64 regs[31];
+    for (u32 i = 0; i < 31; i++) regs[i] = 0x1000 + i;
+
+    vivarium_build_sigframe(&f, VIV_SIGINT, 0x5ULL, regs,
+                            0x7ff00000ull, 0x400abcull, 0x60000000ull);
+
+    TEST_ASSERT(f.info.si_signo == (s32)VIV_SIGINT, "si_signo");
+    TEST_ASSERT(f.info.si_errno == 0, "si_errno");
+    TEST_ASSERT(f.info.si_code == VIV_SI_KERNEL, "si_code = SI_KERNEL");
+
+    // The union must be ZERO, not poison: SI_KERNEL says "no further fields",
+    // and leaking 0xA5 there would be a kernel-memory disclosure that a guest
+    // could read as si_pid.
+    for (u32 i = 0; i < (u32)sizeof(f.info.__pad1); i++)
+        TEST_ASSERT(f.info.__pad1[i] == 0, "siginfo union zeroed, not poisoned");
+    TEST_ASSERT(f.info.__pad0 == 0, "siginfo pad zeroed");
+
+    TEST_ASSERT(f.uc.uc_flags == 0 && f.uc.uc_link == 0, "ucontext header");
+    TEST_ASSERT(f.uc.ss_flags == 2 && f.uc.ss_sp == 0 && f.uc.ss_size == 0,
+                "SS_DISABLE: sigaltstack is an ENOSYS row, so there is never "
+                "an alternate stack to describe");
+    TEST_ASSERT(f.uc.uc_sigmask[0] == 0x5ULL, "the saved mask is reported");
+    for (u32 i = 1; i < 16; i++)
+        TEST_ASSERT(f.uc.uc_sigmask[i] == 0, "sigset words 1..15 zeroed");
+    for (u32 i = 0; i < (u32)sizeof(f.uc.__pad_mctx); i++)
+        TEST_ASSERT(f.uc.__pad_mctx[i] == 0, "the mcontext alignment pad zeroed");
+
+    // The interrupted context, which is the whole reason the frame is worth
+    // writing: a crash reporter reading uc_mcontext.pc gets the real PC.
+    for (u32 i = 0; i < 31; i++)
+        TEST_ASSERT(f.uc.uc_mcontext.regs[i] == 0x1000 + i, "regs mirrored");
+    TEST_ASSERT(f.uc.uc_mcontext.sp == 0x7ff00000ull, "sp");
+    TEST_ASSERT(f.uc.uc_mcontext.pc == 0x400abcull, "pc");
+    TEST_ASSERT(f.uc.uc_mcontext.pstate == 0x60000000ull, "pstate");
+    TEST_ASSERT(f.uc.uc_mcontext.fault_address == 0,
+                "no deliverable note is fault-generated -- snare:* never "
+                "reaches a queue, so there is no faulting address to report");
+
+    // The _aarch64_ctx chain terminator. A guest walking uc_mcontext.__reserved
+    // must stop at once rather than following whatever was on the stack.
+    TEST_ASSERT(f.uc.uc_mcontext.end_magic == 0 && f.uc.uc_mcontext.end_size == 0,
+                "the record chain is terminated immediately -- no FPSIMD record "
+                "is claimed, because note delivery does not save V regs (#96)");
+
+    // NULL is refused rather than dereferenced.
+    vivarium_build_sigframe(NULL, VIV_SIGINT, 0, regs, 0, 0, 0);
+
+    // A NULL regs pointer leaves the register block zero rather than faulting.
+    struct viv_sigframe_head g;
+    vivarium_build_sigframe(&g, VIV_SIGPIPE, 0, NULL, 1, 2, 3);
+    TEST_ASSERT(g.uc.uc_mcontext.regs[0] == 0 && g.uc.uc_mcontext.regs[30] == 0,
+                "NULL regs -> zeroed register block, no fault");
+    TEST_ASSERT(g.info.si_signo == (s32)VIV_SIGPIPE, "second build is clean");
 }
