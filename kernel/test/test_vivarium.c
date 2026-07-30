@@ -26,6 +26,7 @@
 
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/notes.h>        // V-6b: the canonical note-name literals
 #include <thylacine/vivarium.h>
 
 void test_vivarium_t1_renumbers(void);
@@ -592,8 +593,9 @@ void test_vivarium_signal_map(void) {
     // Every mapped row, checked individually.
     TEST_ASSERT(viv_signal_note(VIV_SIGINT)   == VIV_SIGNOTE_INTERRUPT,
                 "SIGINT -> interrupt");
-    TEST_ASSERT(viv_signal_note(VIV_SIGTERM)  == VIV_SIGNOTE_INTERRUPT,
-                "SIGTERM shares interrupt at v1.0");
+    TEST_ASSERT(viv_signal_note(VIV_SIGTERM)  == VIV_SIGNOTE_NONE,
+                "SIGTERM has NO note: V-6b evicted it from `interrupt` so a "
+                "per-signal disposition is representable at all");
     TEST_ASSERT(viv_signal_note(VIV_SIGKILL)  == VIV_SIGNOTE_KILL,
                 "SIGKILL -> kill");
     TEST_ASSERT(viv_signal_note(VIV_SIGPIPE)  == VIV_SIGNOTE_PIPE,
@@ -644,9 +646,13 @@ void test_vivarium_sigaction_domain(void) {
     const u64 H = 0x400000;   // a plausible handler VA
     const u64 R = VIV_SA_RESTORER;
 
-    // The admitted shape: a real handler WITH the guest's own trampoline.
-    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, H, R, 8) == VIV_TRANSLATED,
-                "handler + SA_RESTORER is admitted");
+    // V-6b: a real handler DECLINES, because the Tier-1 frame that would call
+    // it is V-6c. Accepting the install and never running the handler is the
+    // silent mistranslation §4 forbids -- and worse than ENOSYS, because the
+    // guest would believe it is protected. This assertion INVERTS when delivery
+    // lands; that is the point of pinning it.
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, H, R, 8) == VIV_FORWARD,
+                "a real handler declines until V-6c can deliver to it");
 
     // SIG_DFL / SIG_IGN need no trampoline -- nothing returns from them. This
     // is the load-bearing case: signal(SIGPIPE, SIG_IGN) is the single most
@@ -682,6 +688,33 @@ void test_vivarium_sigaction_domain(void) {
     // No note carries it -> a disposition we could record but never act on.
     TEST_ASSERT(vivarium_sigaction_decide(14, H, R, 8) == VIV_FORWARD,
                 "SIGALRM declines: no note carries it");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGTERM, VIV_SIG_IGN, 0, 8)
+                    == VIV_FORWARD,
+                "SIGTERM declines: V-6b left it with no note of its own");
+
+    // UNDELIVERABLE notes take SIG_DFL and nothing else. An EL0 fault runs
+    // proc_fault_terminate -> exits() without ever calling notes_post, so there
+    // is no queue entry to catch or ignore -- but SIG_DFL is exactly what
+    // already happens, so admitting it stores no lie.
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGSEGV, VIV_SIG_DFL, 0, 8)
+                    == VIV_TRANSLATED,
+                "SIGSEGV + SIG_DFL admitted: terminate is what already happens");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGSEGV, VIV_SIG_IGN, 0, 8)
+                    == VIV_FORWARD,
+                "SIGSEGV + SIG_IGN declines: nothing to ignore, the fault "
+                "terminates before any queue is consulted");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGBUS, H, R, 8) == VIV_FORWARD,
+                "a SIGBUS handler declines: it could never be called");
+
+    // SIGCHLD + SIG_IGN is Linux's AUTO-REAP, not "ignore". Thylacine reaps
+    // only through wait_pid, so honouring the surface meaning would leave a
+    // guest with zombies it believes are gone.
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGCHLD, VIV_SIG_IGN, 0, 8)
+                    == VIV_FORWARD,
+                "SIGCHLD + SIG_IGN declines: it means auto-reap on Linux");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGCHLD, VIV_SIG_DFL, 0, 8)
+                    == VIV_TRANSLATED,
+                "SIGCHLD + SIG_DFL is still fine");
 
     // Range and sigsetsize.
     TEST_ASSERT(vivarium_sigaction_decide(0,  H, R, 8) == VIV_FORWARD, "sig 0");
@@ -707,11 +740,15 @@ void test_vivarium_sigset_to_notemask(void) {
     TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGCHLD - 1), &m) == (1ULL << 3),
                 "SIGCHLD -> NOTE_BIT_CHILD_EXIT");
 
-    // SIGINT and SIGTERM share `interrupt`, so both produce the same bit and
-    // the union is still one bit -- not two.
+    // SIGINT now owns `interrupt` alone, and SIGTERM contributes NOTHING --
+    // the V-6b eviction. Before it, this union produced the same single bit for
+    // a different reason (a collapse); asserting the union AND the SIGTERM-only
+    // case separately is what tells the two apart.
     u64 both = (1ULL << (VIV_SIGINT - 1)) | (1ULL << (VIV_SIGTERM - 1));
     TEST_ASSERT(viv_sigset_to_notemask(both, &m) == (1ULL << 0),
-                "SIGINT|SIGTERM collapse to one interrupt bit");
+                "SIGINT|SIGTERM -> the interrupt bit (from SIGINT alone)");
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGTERM - 1), &m) == 0,
+                "SIGTERM alone contributes no bit: it has no note");
 
     // The whole snare family folds onto ONE bit, because notes.h has a single
     // NOTE_BIT_SNARE covering the fault family.
@@ -750,4 +787,192 @@ void test_vivarium_sigset_to_notemask(void) {
     TEST_ASSERT(vivarium_sigprocmask_decide(3, 8) == VIV_FORWARD, "bad how");
     TEST_ASSERT(vivarium_sigprocmask_decide(VIV_SIG_BLOCK, 16) == VIV_FORWARD,
                 "sigsetsize must be 8");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.signal_exclusivity — the domain rule that makes a per-signal
+// disposition representable at all (V-6b, §6.22).
+// -----------------------------------------------------------------------------
+//
+// A disposition is per-SIGNAL; a note carries no signal identity. So a signal
+// may only carry one if it is the ONLY signal mapped to its note -- otherwise
+// honouring the request silences a second signal the guest said nothing about.
+// This is also what makes the REVERSE direction (note -> signal) well-defined,
+// which is what the notes_post discard needs.
+void test_vivarium_signal_exclusivity(void) {
+    // Every mapped signal owns its note outright. V-6b made this universal by
+    // evicting SIGTERM from `interrupt`; before that, SIGINT failed here -- and
+    // SIGINT is precisely the signal a shell ignores.
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGINT),
+                "SIGINT owns `interrupt` alone (the V-6b eviction)");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGPIPE),  "SIGPIPE");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGCHLD),  "SIGCHLD");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGKILL),  "SIGKILL");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGHUP),   "SIGHUP");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGQUIT),  "SIGQUIT");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGWINCH), "SIGWINCH");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGTSTP),  "SIGTSTP");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGCONT),  "SIGCONT");
+
+    // The tty family shares ONE MASK BIT but five distinct NAMES, so each still
+    // owns its own note. That distinction is the whole reason the reverse map
+    // takes a name rather than a bit.
+    TEST_ASSERT(viv_signal_note(VIV_SIGHUP) != viv_signal_note(VIV_SIGQUIT),
+                "tty:hup and tty:quit are different notes despite one mask bit");
+
+    // Each fault signal owns its own snare note too -- they are separate notes
+    // that merely share NOTE_BIT_SNARE.
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGSEGV), "SIGSEGV");
+    TEST_ASSERT(viv_signal_owns_note_exclusively(VIV_SIGBUS),  "SIGBUS");
+
+    // An unmapped signal owns nothing -- there is no note to own.
+    TEST_ASSERT(!viv_signal_owns_note_exclusively(VIV_SIGTERM),
+                "SIGTERM owns nothing: no note");
+    TEST_ASSERT(!viv_signal_owns_note_exclusively(14), "SIGALRM owns nothing");
+    TEST_ASSERT(!viv_signal_owns_note_exclusively(0),  "0 is not a signal");
+    TEST_ASSERT(!viv_signal_owns_note_exclusively(65), "65 is past the range");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.signote_deliverable — which notes can actually reach a queue.
+// -----------------------------------------------------------------------------
+//
+// MEASURED against notes.c, not assumed: g_known_notes holds interrupt / kill /
+// pipe / child_exit / tty:*, and NOT snare:*. proc_fault_terminate calls
+// exits(name) directly, so a fault never reaches notes_post at all.
+void test_vivarium_signote_deliverable(void) {
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_INTERRUPT),  "interrupt");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_KILL),       "kill");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_PIPE),       "pipe");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_CHILD_EXIT), "child_exit");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TTY_HUP),    "tty:hup");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TTY_QUIT),   "tty:quit");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TTY_WINCH),  "tty:winch");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TTY_SUSP),   "tty:susp");
+    TEST_ASSERT(viv_signote_is_deliverable(VIV_SIGNOTE_TTY_CONT),   "tty:cont");
+
+    // The snare family is NOT in g_known_notes. A SIGSEGV handler could never
+    // be called, so the domain refuses to store one.
+    TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_SEGV), "snare:segv");
+    TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_BUS),  "snare:bus");
+    TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_ILL),  "snare:ill");
+    TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_SNARE_FPE),  "snare:fpe");
+    TEST_ASSERT(!viv_signote_is_deliverable(VIV_SIGNOTE_NONE),       "NONE");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.sigtab — the disposition table + the note-name reverse map (V-6b).
+// -----------------------------------------------------------------------------
+void test_vivarium_sigtab(void) {
+    // The reverse map ROUND-TRIPS against the forward one for every deliverable
+    // signal. Driving it from the forward map means a future edit to either
+    // direction alone fails here rather than drifting silently.
+    struct { u64 sig; const char *name; } rt[] = {
+        { VIV_SIGINT,   NOTE_NAME_INTERRUPT  },
+        { VIV_SIGKILL,  NOTE_NAME_KILL       },
+        { VIV_SIGPIPE,  NOTE_NAME_PIPE       },
+        { VIV_SIGCHLD,  NOTE_NAME_CHILD_EXIT },
+        { VIV_SIGHUP,   NOTE_NAME_TTY_HUP    },
+        { VIV_SIGQUIT,  NOTE_NAME_TTY_QUIT   },
+        { VIV_SIGWINCH, NOTE_NAME_TTY_WINCH  },
+        { VIV_SIGTSTP,  NOTE_NAME_TTY_SUSP   },
+        { VIV_SIGCONT,  NOTE_NAME_TTY_CONT   },
+    };
+    for (u32 i = 0; i < sizeof(rt) / sizeof(rt[0]); i++) {
+        TEST_ASSERT(viv_signote_from_note_name(rt[i].name)
+                        == viv_signal_note(rt[i].sig),
+                    "note name round-trips to the signal's own note");
+    }
+
+    // Anything not in the supported set decodes to NONE -- never to a signal.
+    TEST_ASSERT(viv_signote_from_note_name("snare:segv") == VIV_SIGNOTE_NONE,
+                "snare:* is not postable, so it decodes to nothing");
+    TEST_ASSERT(viv_signote_from_note_name("nonesuch") == VIV_SIGNOTE_NONE,
+                "an unknown name is never treated as a signal");
+    TEST_ASSERT(viv_signote_from_note_name(NULL) == VIV_SIGNOTE_NONE, "NULL");
+
+    // The table itself. A Proc with no table ignores nothing -- which is why a
+    // NULL-safe read matters: it is the state every native Proc is in forever.
+    TEST_ASSERT(!viv_sigtab_note_ignored(NULL, VIV_SIGNOTE_PIPE),
+                "no table -> nothing ignored");
+    TEST_ASSERT(!viv_sigtab_set_ignored(NULL, VIV_SIGNOTE_PIPE, true),
+                "setting through a NULL table fails rather than faulting");
+
+    struct viv_sigtab tab;
+    for (u32 i = 0; i < VIV_SIGNOTE_COUNT; i++) tab.ignored[i] = 0;
+
+    TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_PIPE),
+                "fresh table ignores nothing");
+    TEST_ASSERT(viv_sigtab_set_ignored(&tab, VIV_SIGNOTE_PIPE, true), "set");
+    TEST_ASSERT(viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_PIPE), "pipe ignored");
+
+    // Entries are INDEPENDENT: ignoring one note must not ignore its neighbours.
+    // With the tty family sharing a mask bit but not a note, this is the
+    // property that lets a guest ignore SIGWINCH while SIGHUP still kills it.
+    TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_INTERRUPT),
+                "ignoring pipe did not touch interrupt");
+    TEST_ASSERT(viv_sigtab_set_ignored(&tab, VIV_SIGNOTE_TTY_WINCH, true), "winch");
+    TEST_ASSERT(viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_TTY_WINCH), "winch set");
+    TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_TTY_HUP),
+                "tty:hup stays deliverable though it shares a MASK bit");
+
+    // Clearing is a real operation, not just a set -- SIG_DFL after SIG_IGN.
+    TEST_ASSERT(viv_sigtab_set_ignored(&tab, VIV_SIGNOTE_PIPE, false), "clear");
+    TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_PIPE), "pipe restored");
+
+    // Out of range is refused rather than writing past the array.
+    TEST_ASSERT(!viv_sigtab_set_ignored(&tab, (enum viv_signote)VIV_SIGNOTE_COUNT,
+                                        true),
+                "out-of-range note refused");
+    TEST_ASSERT(!viv_sigtab_note_ignored(&tab, (enum viv_signote)VIV_SIGNOTE_COUNT),
+                "out-of-range read refused");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.notemask_to_sigset — reporting a mask back honestly (V-6b).
+// -----------------------------------------------------------------------------
+void test_vivarium_notemask_to_sigset(void) {
+    const struct viv_notebit_map m = {
+        .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
+        .snare = 4, .tty = 5,
+    };
+
+    TEST_ASSERT(viv_notemask_to_sigset(1ULL << 2, &m)
+                    == (1ULL << (VIV_SIGPIPE - 1)),
+                "the pipe bit reports exactly SIGPIPE");
+
+    // THE HONEST OVER-REPORT. One tty bit blocks five signals, so reading the
+    // mask back names all five. Showing the guest the tidy answer it asked for
+    // while blocking wider is the lie this avoids.
+    u64 tty = viv_notemask_to_sigset(1ULL << 5, &m);
+    TEST_ASSERT(tty & (1ULL << (VIV_SIGWINCH - 1)), "SIGWINCH reported");
+    TEST_ASSERT(tty & (1ULL << (VIV_SIGHUP - 1)),
+                "SIGHUP reported too -- blocking SIGWINCH really does block it");
+    TEST_ASSERT(tty & (1ULL << (VIV_SIGQUIT - 1)), "SIGQUIT reported");
+    TEST_ASSERT(tty & (1ULL << (VIV_SIGTSTP - 1)), "SIGTSTP reported");
+    TEST_ASSERT(tty & (1ULL << (VIV_SIGCONT - 1)), "SIGCONT reported");
+    TEST_ASSERT((tty & (1ULL << (VIV_SIGPIPE - 1))) == 0,
+                "and nothing outside the family");
+
+    // SIGKILL is never blocked, so it is never reported blocked -- the mirror
+    // of the forward direction dropping it.
+    TEST_ASSERT((viv_notemask_to_sigset(~0ULL, &m) & (1ULL << (VIV_SIGKILL - 1)))
+                    == 0,
+                "block-everything still never reports SIGKILL");
+
+    // A signal with no note is never reported blocked: nothing can deliver it,
+    // so "blocked" would describe a state that does not exist.
+    TEST_ASSERT((viv_notemask_to_sigset(~0ULL, &m) & (1ULL << (VIV_SIGTERM - 1)))
+                    == 0,
+                "SIGTERM is never reported blocked -- it has no note");
+
+    // Round-trip on the shape musl sends: block-all, read back, and every
+    // signal that CAN be blocked appears.
+    u64 notes = viv_sigset_to_notemask(~0ULL, &m);
+    u64 back  = viv_notemask_to_sigset(notes, &m);
+    TEST_ASSERT(back & (1ULL << (VIV_SIGINT - 1)),  "SIGINT survives the round trip");
+    TEST_ASSERT(back & (1ULL << (VIV_SIGCHLD - 1)), "SIGCHLD survives");
+    TEST_ASSERT(back & (1ULL << (VIV_SIGSEGV - 1)), "SIGSEGV survives");
+
+    TEST_ASSERT(viv_notemask_to_sigset(~0ULL, NULL) == 0, "NULL map -> 0");
 }

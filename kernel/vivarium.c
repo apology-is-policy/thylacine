@@ -5,6 +5,7 @@
 
 #include <thylacine/vivarium.h>
 
+#include <thylacine/notes.h>            // V-6b: the canonical note-name literals
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
@@ -142,16 +143,19 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_BRK,        VIV_ENOSYS  },  // no counterpart; libc falls to mmap
 
     // The signal family (V-6, §6.22).
+    { VIV_LINUX_RT_SIGACTION,   VIV_TIER2 },  // V-6b: vivarium_sigaction_decide
+    { VIV_LINUX_RT_SIGPROCMASK, VIV_TIER2 },  // V-6b: vivarium_sigprocmask_decide
     //
-    // NOT YET LISTED, deliberately: rt_sigaction (134), rt_sigprocmask (135),
-    // kill (129), tkill (130), tgkill (131). Their PURE translators exist below
-    // and are unit-tested, but their shells do not, and a VIV_TIER2 row whose
-    // shell is missing would be a table that DECLARES a capability the code does
-    // not have -- `viv_tier2`'s default arm calls exactly that a "table/shell
-    // disagreement" and fails closed. So the rows land with the shells, in the
-    // same commit, and until then these numbers FORWARD like any unclassified
-    // call. This mirrors V-2: the translation tables landed before V-1b gave
-    // them a caller, by design (§6.19/§6.20).
+    // STILL NOT LISTED, deliberately: kill (129), tkill (130), tgkill (131).
+    // Their shells do not exist, and a VIV_TIER2 row whose shell is missing
+    // would be a table that DECLARES a capability the code does not have --
+    // `viv_tier2`'s default arm calls exactly that a "table/shell disagreement"
+    // and fails closed. So a row lands WITH its shell, in the same commit, and
+    // until then the number FORWARDs like any unclassified call. (They are also
+    // the only signal rows that are an AUTHORITY question rather than a
+    // disposition one: they name another Proc, so they must reuse an existing
+    // cross-Proc gate verbatim -- SYS_POSTNOTE's parent-only check or I-26's
+    // two-axis one -- never invent a third.)
     //
     // The ENOSYS rows below are NOT in that state -- they are live decisions,
     // correct today, and each has its own reason rather than a blanket
@@ -548,12 +552,28 @@ enum viv_signote viv_signal_note(u64 signum) {
     // non-catchable (I-19 N-4), the `tty:*` family already carries PTY-1
     // semantics.
     switch (signum) {
-    // SIGTERM SHARES `interrupt` with SIGINT at v1.0. Inherited from the pouch
-    // mapping (POUCH-DESIGN §6.4) and a stated imprecision, not an oversight:
-    // both default-terminate, so the observable difference is only which one a
-    // handler sees -- and Tier 1 resolves that by recording the signum
-    // alongside, so the handler is called with the number the guest sent.
-    case VIV_SIGINT:   case VIV_SIGTERM:  return VIV_SIGNOTE_INTERRUPT;
+    // V-6b BROKE THE SIGINT/SIGTERM COLLAPSE. V-6a inherited the pouch mapping
+    // (POUCH-DESIGN §6.4) where both land on `interrupt`, and called it "a
+    // stated imprecision, not an oversight" on the grounds that both
+    // default-terminate. Building dispositions showed the collapse is not
+    // imprecise, it is UNREPRESENTABLE: `sigaction(SIGINT, SIG_IGN)` with
+    // SIGTERM at SIG_DFL has no answer on a shared note -- honour it and
+    // SIGTERM goes silent too, refuse it and a Proc that asked to ignore Ctrl-C
+    // dies on Ctrl-C. And that particular call is the one a shell makes.
+    //
+    // So `interrupt` belongs to SIGINT alone -- it IS the Ctrl-C note (LS-5;
+    // the console path posts it by that name) -- and SIGTERM declines until it
+    // has a note of its own. NOTHING REGRESSES: no v1.0 path posts SIGTERM (no
+    // `kill` row exists yet), so its entry here was reachable only through the
+    // mask conversion. A guest asking about SIGTERM got ENOSYS before this
+    // change and gets ENOSYS after it.
+    //
+    // THE SEAM: a real SIGTERM wants its own supported note name (`terminate`)
+    // and its own NOTE_BIT -- an addition to I-19's closed supported set, which
+    // is ABI-bearing and needs signoff (the tasks #15/#16 shape). It becomes
+    // load-bearing when `kill` lands, because THAT is what would first generate
+    // a SIGTERM.
+    case VIV_SIGINT:                      return VIV_SIGNOTE_INTERRUPT;
     case VIV_SIGKILL:                     return VIV_SIGNOTE_KILL;
     case VIV_SIGPIPE:                     return VIV_SIGNOTE_PIPE;
     case VIV_SIGCHLD:                     return VIV_SIGNOTE_CHILD_EXIT;
@@ -569,6 +589,8 @@ enum viv_signote viv_signal_note(u64 signum) {
 
     // NOT a gap, and worth naming so a future reader does not "fix" it by
     // inventing a delivery:
+    //   SIGTERM  — see above: it wants its own note, and inventing a shared one
+    //              is what V-6b just undid.
     //   SIGALRM  — no timer note exists; setitimer/alarm are themselves ENOSYS,
     //              so nothing could post it.
     //   SIGUSR1/2 — no general-purpose note; a note has a fixed 16-byte name
@@ -578,6 +600,94 @@ enum viv_signote viv_signal_note(u64 signum) {
     //   32..64   — the realtime range, which requires queued siginfo (Tier 2).
     default: return VIV_SIGNOTE_NONE;
     }
+}
+
+bool viv_signal_owns_note_exclusively(u64 signum) {
+    enum viv_signote mine = viv_signal_note(signum);
+    if (mine == VIV_SIGNOTE_NONE) return false;
+
+    // SCAN rather than list. If a future row adds a second signal to a note,
+    // this narrows the domain by itself -- no separate table to keep in step,
+    // and no chance of the map and the exclusivity claim disagreeing.
+    for (u64 other = 1; other <= VIV_NSIG; other++) {
+        if (other == signum) continue;
+        if (viv_signal_note(other) == mine) return false;
+    }
+    return true;
+}
+
+bool viv_signote_is_deliverable(enum viv_signote note) {
+    switch (note) {
+    // In `g_known_notes` (notes.c), so `notes_post` accepts them and the
+    // EL0-return-tail dispatcher can see them.
+    case VIV_SIGNOTE_INTERRUPT:
+    case VIV_SIGNOTE_KILL:
+    case VIV_SIGNOTE_PIPE:
+    case VIV_SIGNOTE_CHILD_EXIT:
+    case VIV_SIGNOTE_TTY_HUP:
+    case VIV_SIGNOTE_TTY_QUIT:
+    case VIV_SIGNOTE_TTY_WINCH:
+    case VIV_SIGNOTE_TTY_SUSP:
+    case VIV_SIGNOTE_TTY_CONT:
+        return true;
+
+    // NOT in g_known_notes, and `proc_fault_terminate` never calls notes_post
+    // -- an EL0 fault runs `exits(name)` straight away. There is no queue entry
+    // to catch, ignore or mask, so the only truthful disposition is SIG_DFL.
+    case VIV_SIGNOTE_SNARE_SEGV:
+    case VIV_SIGNOTE_SNARE_BUS:
+    case VIV_SIGNOTE_SNARE_ILL:
+    case VIV_SIGNOTE_SNARE_FPE:
+    case VIV_SIGNOTE_NONE:
+    default:
+        return false;
+    }
+}
+
+// Bounded name compare, the notes.c `notes_name_eq` discipline: stop at
+// NOTE_NAME_MAX so an unterminated 16-byte buffer is still safe to read.
+static bool viv_name_eq(const char *a, const char *b) {
+    for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
+        if (a[i] != b[i]) return false;
+        if (a[i] == 0)    return true;
+    }
+    return false;
+}
+
+enum viv_signote viv_signote_from_note_name(const char *name) {
+    if (!name) return VIV_SIGNOTE_NONE;
+
+    // The names are notes.h's canonical literals, so this cannot drift from the
+    // posters. `kill` is present for completeness of the decode; nothing can put
+    // it in a disposition table (vivarium_sigaction_decide refuses SIGKILL).
+    if (viv_name_eq(name, NOTE_NAME_INTERRUPT))  return VIV_SIGNOTE_INTERRUPT;
+    if (viv_name_eq(name, NOTE_NAME_KILL))       return VIV_SIGNOTE_KILL;
+    if (viv_name_eq(name, NOTE_NAME_PIPE))       return VIV_SIGNOTE_PIPE;
+    if (viv_name_eq(name, NOTE_NAME_CHILD_EXIT)) return VIV_SIGNOTE_CHILD_EXIT;
+    if (viv_name_eq(name, NOTE_NAME_TTY_HUP))    return VIV_SIGNOTE_TTY_HUP;
+    if (viv_name_eq(name, NOTE_NAME_TTY_QUIT))   return VIV_SIGNOTE_TTY_QUIT;
+    if (viv_name_eq(name, NOTE_NAME_TTY_WINCH))  return VIV_SIGNOTE_TTY_WINCH;
+    if (viv_name_eq(name, NOTE_NAME_TTY_SUSP))   return VIV_SIGNOTE_TTY_SUSP;
+    if (viv_name_eq(name, NOTE_NAME_TTY_CONT))   return VIV_SIGNOTE_TTY_CONT;
+
+    // snare:* deliberately absent -- viv_signote_is_deliverable says why, and a
+    // name that never reaches notes_post has nothing to decode here.
+    return VIV_SIGNOTE_NONE;
+}
+
+bool viv_sigtab_note_ignored(const struct viv_sigtab *tab,
+                             enum viv_signote note) {
+    if (!tab) return false;                       // no table == nothing ignored
+    if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
+    return tab->ignored[(u32)note] != 0;
+}
+
+bool viv_sigtab_set_ignored(struct viv_sigtab *tab, enum viv_signote note,
+                            bool ignored) {
+    if (!tab) return false;
+    if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
+    tab->ignored[(u32)note] = ignored ? 1u : 0u;
+    return true;
 }
 
 enum viv_verdict vivarium_sigaction_decide(u64 signum, u64 handler, u64 flags,
@@ -622,6 +732,33 @@ enum viv_verdict vivarium_sigaction_decide(u64 signum, u64 handler, u64 flags,
     if (handler != VIV_SIG_DFL && handler != VIV_SIG_IGN &&
         !(flags & VIV_SA_RESTORER))
         return VIV_FORWARD;
+
+    // A disposition is per-SIGNAL; a note carries no signal identity. Where two
+    // signals share a note the request is not approximable, it is unanswerable
+    // -- see viv_signal_owns_note_exclusively. SIG_DFL is exempt: it is the
+    // state every signal is already in, so recording it changes nothing and can
+    // disagree with nothing.
+    if (handler != VIV_SIG_DFL && !viv_signal_owns_note_exclusively(signum))
+        return VIV_FORWARD;
+
+    // Same exemption, same reason: SIG_DFL for an undeliverable note is already
+    // true (an EL0 fault terminates), so admitting it stores no lie. Catching or
+    // ignoring one would.
+    if (handler != VIV_SIG_DFL && !viv_signote_is_deliverable(viv_signal_note(signum)))
+        return VIV_FORWARD;
+
+    // SIGCHLD + SIG_IGN is Linux's AUTO-REAP, not "ignore" (POSIX leaves it
+    // unspecified; Linux made it the no-zombies idiom and programs use it for
+    // exactly that). Thylacine reaps only through wait_pid. Admitting this by
+    // its surface meaning would leave a guest with zombies it believes are
+    // gone -- the failure V-6a's own comment calls a stored lie.
+    if (signum == VIV_SIGCHLD && handler == VIV_SIG_IGN) return VIV_FORWARD;
+
+    // V-6b: a REAL handler needs the Tier-1 frame, which is V-6c. Until it
+    // exists, declining is the honest answer and ACCEPTING would be the
+    // dangerous one -- a guest whose sigaction succeeded believes its handler
+    // will run. DELETE THIS LINE when delivery lands; nothing else here changes.
+    if (handler != VIV_SIG_DFL && handler != VIV_SIG_IGN) return VIV_FORWARD;
 
     return VIV_TRANSLATED;
 }
@@ -673,6 +810,43 @@ u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m) {
         // whole call instead would refuse the wide masks musl routinely sends.
         case VIV_SIGNOTE_NONE: break;
         }
+    }
+    return out;
+}
+
+u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m) {
+    if (!m) return 0;
+
+    // Built by asking, of each signal, "is the bit that would block YOU set?".
+    // Running it in this direction is what makes the coarse tty bit report
+    // honestly: five signals ask about the same bit and all five answer yes.
+    u64 out = 0;
+    for (u64 sig = 1; sig <= VIV_NSIG; sig++) {
+        u64 bit;
+        switch (viv_signal_note(sig)) {
+        case VIV_SIGNOTE_INTERRUPT:  bit = 1ULL << m->interrupt;  break;
+        case VIV_SIGNOTE_PIPE:       bit = 1ULL << m->pipe;       break;
+        case VIV_SIGNOTE_CHILD_EXIT: bit = 1ULL << m->child_exit; break;
+
+        case VIV_SIGNOTE_SNARE_SEGV:
+        case VIV_SIGNOTE_SNARE_BUS:
+        case VIV_SIGNOTE_SNARE_ILL:
+        case VIV_SIGNOTE_SNARE_FPE:  bit = 1ULL << m->snare;      break;
+
+        case VIV_SIGNOTE_TTY_HUP:
+        case VIV_SIGNOTE_TTY_QUIT:
+        case VIV_SIGNOTE_TTY_WINCH:
+        case VIV_SIGNOTE_TTY_SUSP:
+        case VIV_SIGNOTE_TTY_CONT:   bit = 1ULL << m->tty;        break;
+
+        // SIGKILL is never blocked, so it is never reported blocked -- the
+        // exact mirror of the forward direction dropping it. A guest that
+        // blocks everything and reads it back correctly does NOT see SIGKILL.
+        case VIV_SIGNOTE_KILL:
+        case VIV_SIGNOTE_NONE:
+        default:                     continue;
+        }
+        if (notemask & bit) out |= 1ULL << (sig - 1);
     }
     return out;
 }

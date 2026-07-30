@@ -62,6 +62,7 @@ struct Territory;
 struct HandleTable;
 struct Vma;
 struct Path;      // VIVARIUM V-4a-0: Proc.exe_path (the #66 namespace name)
+struct viv_sigtab;  // VIVARIUM V-6b: Proc.sigtab (Linux signal dispositions)
 struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
 struct Spoor;       // 8a-1b debug_owner slot token (<thylacine/spoor.h>)
@@ -727,6 +728,23 @@ struct Proc {
     // g_proc_table_lock (the #57a-F2 envelope), exactly as format_ns reads the
     // Territory's mount Paths.
     struct Path       *exe_path;
+
+    // VIVARIUM V-6b: the per-Proc Linux signal disposition table, or NULL.
+    //
+    // Lazily allocated on the Proc's first TRANSLATED `rt_sigaction` (so a
+    // native Proc, and a guest that never touches signals, pays only this
+    // pointer) and freed at proc_free. NOT rfork-inherited: the `handler_va`
+    // precedent (notes.h F13) plus the fact that v1.0 Proc creation always
+    // replaces the binary, so a parent's dispositions describe code the child
+    // is not running.
+    //
+    // Installed with a compare-exchange, loser frees -- the alloc happens
+    // outside every lock (the 8a-2b debug_hw shape). Entry writes are
+    // independent single bytes, so concurrent `rt_sigaction` calls from peer
+    // threads cannot tear one another; a delivery racing a disposition change
+    // may observe either value, which is the same latitude POSIX gives
+    // (sigaction is not ordered against a signal already in flight).
+    struct viv_sigtab *sigtab;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -801,13 +819,14 @@ struct Proc {
 // renderer's claim under g_proc_table_lock); cleared on the holder's death.
 #define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
-_Static_assert(sizeof(struct Proc) == 392,
+_Static_assert(sizeof(struct Proc) == 400,
                "struct Proc size pinned at 392 bytes. The 352 baseline (the 328 "
                "baseline + the 8c-2 #95 debug_focus_thread @328 + the PTY-1a "
                "sid/pgid pair @336/@340 + the PTY-1e report latches @344/@345 + "
                "the G-2 shared_map_pages @348 filling the former tail pad) then "
                "prowl-1's name[PROC_NAME_MAX=32] @352 -> 384, then the VIVARIUM "
-               "V-4a-0 exe_path pointer @384 -> 392. prowl-1 and V-4a-0 were "
+               "V-4a-0 exe_path pointer @384 -> 392, then the V-6b sigtab "
+               "pointer @392 -> 400. prowl-1 and V-4a-0 were "
                "written on separate branches and BOTH originally appended at 352; "
                "the merge stacked them (see the field comments -- they are "
                "complementary, basename-copy vs full-Path). "
@@ -816,6 +835,11 @@ _Static_assert(sizeof(struct Proc) == 392,
 _Static_assert(__builtin_offsetof(struct Proc, name) == 352,
                "prowl-1 name[] appends after shared_map_pages @348+4=352; "
                "KP_ZERO leaves it \"\" until proc_set_name at exec.");
+_Static_assert(__builtin_offsetof(struct Proc, sigtab) == 392,
+               "VIVARIUM V-6b sigtab (the per-Proc Linux signal dispositions) "
+               "appends after exe_path @384+8 = 392. KP_ZERO-fresh NULL == "
+               "'every signal is SIG_DFL', which is the correct initial state "
+               "AND the correct state for a native Proc that never has one.");
 _Static_assert(__builtin_offsetof(struct Proc, exe_path) == 384,
                "VIVARIUM V-4a-0 exe_path (the #66 Path of the running executable, "
                "the /proc/<pid>/exe source) appends after prowl-1's name[] @352+32 "

@@ -116,6 +116,8 @@ const NR_BRK: u64 = 214;
 const NR_MUNMAP: u64 = 215;
 const NR_MMAP: u64 = 222;
 const NR_MPROTECT: u64 = 226;
+const NR_RT_SIGACTION: u64 = 134;
+const NR_RT_SIGPROCMASK: u64 = 135;
 
 // V-2d. Values from third_party/musl (generic include/sys/mman.h plus the two
 // aarch64 additions in arch/aarch64/bits/mman.h) -- the same source the kernel
@@ -374,6 +376,124 @@ unsafe fn run_linux() -> ! {
     leg!(rep, n > 0 && !(-4095..0).contains(&n), b"L23\n");
     (n as *mut u64).write_volatile(0xDEAD_BEEF);   // writable despite PROT_NONE
     let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
+
+    // --- L24-L31: signals (V-6b) --------------------------------------------
+    // musl calls BOTH of these before main(): __init_tls / pthread_create go
+    // through rt_sigprocmask, and any signal() is an rt_sigaction. Until this
+    // chunk both were ENOSYS.
+    //
+    // The kernel unit tests cover the DECISION (which requests are in domain);
+    // these legs cover the PLUMBING -- the uaccess of two user structs, the
+    // lazily-allocated per-Proc table, and the oldact writeback -- which no
+    // pure test can see.
+    const SIG_BLOCK: u64 = 0;
+    const SIG_DFL: u64 = 0;
+    const SIG_IGN: u64 = 1;
+    const SIGHUP: u64 = 1;
+    const SIGINT: u64 = 2;
+    const SIGSEGV: u64 = 11;
+    const SIGPIPE: u64 = 13;
+    const SIGCHLD: u64 = 17;
+    const SIGKILL: u64 = 9;
+    const SIGWINCH: u64 = 28;
+    let bit = |s: u64| 1u64 << (s - 1);
+
+    // A `struct k_sigaction`: handler, flags, restorer, mask. The 32-byte
+    // aarch64 shape -- fixed by the arch, not chosen per call.
+    let mut ksa: [u64; 4];
+    let mut old: [u64; 4];
+    let mut set: u64;
+    let mut oldset: u64 = 0;
+
+    // Blocking a signal is accepted at all.
+    set = bit(SIGPIPE);
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64,
+             &mut oldset as *mut u64 as u64, 8) == 0,
+        b"L24\n"
+    );
+
+    // ... and it TOOK EFFECT: query the mask back and SIGPIPE is in it. A
+    // translation that accepted the call and dropped it would pass L24.
+    oldset = 0;
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut oldset as *mut u64 as u64, 8) == 0
+            && (oldset & bit(SIGPIPE)) != 0,
+        b"L25\n"
+    );
+
+    // THE HONEST OVER-REPORT (§9's DEGRADED tier). The tty family shares ONE
+    // note-mask bit, so blocking SIGWINCH really does block SIGHUP -- and the
+    // readback SAYS SO rather than showing the guest the tidy answer it asked
+    // for. This leg asserts the divergence so it cannot go stale silently.
+    set = bit(SIGWINCH);
+    oldset = 0;
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
+    leg!(
+        rep,
+        svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, 0, &mut oldset as *mut u64 as u64, 8) == 0
+            && (oldset & bit(SIGWINCH)) != 0
+            && (oldset & bit(SIGHUP)) != 0,
+        b"L26\n"
+    );
+
+    // SIG_IGN on SIGPIPE -- the single most common signal call in real
+    // programs. Accepting it allocates the per-Proc table.
+    ksa = [SIG_IGN, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, &ksa as *const u64 as u64, 0, 8) == 0,
+        b"L27\n"
+    );
+
+    // The disposition ROUND-TRIPS: query it back and the table returns SIG_IGN.
+    // This is the leg that proves the table was allocated, written and read --
+    // and that the oldact writeback lands at the right offsets.
+    old = [0xDEAD; 4];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGPIPE, 0, &mut old as *mut u64 as u64, 8) == 0
+            && old[0] == SIG_IGN
+            && old[3] == 0,          // mask zeroed, not left as our sentinel
+        b"L28\n"
+    );
+
+    // A DIFFERENT signal is unaffected -- per-signal, not a blanket mute.
+    old = [0xDEAD; 4];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGINT, 0, &mut old as *mut u64 as u64, 8) == 0
+            && old[0] == SIG_DFL,
+        b"L29\n"
+    );
+
+    // A real HANDLER declines: the Tier-1 frame that would call it is V-6c, and
+    // accepting an install we never honour would leave the guest believing it
+    // is protected. Proven from INSIDE, which is the only vantage that shows a
+    // Linux binary cannot obtain one today.
+    ksa = [0x400000, 0x0400_0000 /* SA_RESTORER */, 0x400000, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGINT, &ksa as *const u64 as u64, 0, 8) == NEG_ENOSYS,
+        b"L30\n"
+    );
+
+    // The three permanent declines, each for its own reason: SIGKILL is
+    // uncatchable, SIGSEGV's note never reaches a queue (the fault terminates
+    // first), and SIGCHLD+SIG_IGN means AUTO-REAP on Linux, which Thylacine
+    // cannot do.
+    ksa = [SIG_IGN, 0, 0, 0];
+    leg!(
+        rep,
+        svc4(NR_RT_SIGACTION, SIGKILL, &ksa as *const u64 as u64, 0, 8) == NEG_ENOSYS
+            && svc4(NR_RT_SIGACTION, SIGSEGV, &ksa as *const u64 as u64, 0, 8)
+                == NEG_ENOSYS
+            && svc4(NR_RT_SIGACTION, SIGCHLD, &ksa as *const u64 as u64, 0, 8)
+                == NEG_ENOSYS,
+        b"L31\n"
+    );
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

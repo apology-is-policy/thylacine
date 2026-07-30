@@ -7272,6 +7272,63 @@ static s64 viv_stat_copy_out(u64 stat_va, const struct t_stat *ks) {
     return 0;
 }
 
+// uaccess.h exposes u8 and u32 primitives only (sys_note_mask_handler says the
+// same where it hand-rolls its own 8-byte writeback), so the signal shells --
+// which move u64 sigsets and handler pointers -- get byte-wise pairs here.
+// Little-endian by construction, matching every other multi-byte marshalling in
+// this file. Caller has already bounds-checked the whole span.
+static int viv_load_u64(u64 va, u64 *out) {
+    u64 v = 0;
+    for (u32 i = 0; i < 8; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(va + i, &b) != 0) return -1;
+        v |= (u64)b << (8u * i);
+    }
+    *out = v;
+    return 0;
+}
+
+static int viv_store_u64(u64 va, u64 v) {
+    for (u32 i = 0; i < 8; i++) {
+        if (uaccess_store_u8(va + i, (u8)(v >> (8u * i))) != 0) return -1;
+    }
+    return 0;
+}
+
+// The NOTE_BIT_* numbering, handed to the pure mask translators so vivarium.c
+// keeps knowing nothing about notes.h. One definition, both directions.
+static const struct viv_notebit_map g_viv_notebits = {
+    .interrupt  = NOTE_BIT_INTERRUPT,
+    .kill       = NOTE_BIT_KILL,
+    .pipe       = NOTE_BIT_PIPE,
+    .child_exit = NOTE_BIT_CHILD_EXIT,
+    .snare      = NOTE_BIT_SNARE,
+    .tty        = NOTE_BIT_TTY,
+};
+
+// Get (or lazily create) this Proc's Linux disposition table.
+//
+// The allocation happens OUTSIDE every lock and is published with a
+// compare-exchange, the 8a-2b debug_hw shape: peer threads racing their first
+// rt_sigaction each bring a candidate, exactly one wins, the losers free theirs.
+// Returns NULL only on OOM, which the caller reports rather than papering over.
+static struct viv_sigtab *viv_sigtab_of(struct Proc *p) {
+    struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+    if (tab) return tab;
+
+    struct viv_sigtab *cand =
+        (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    if (!cand) return NULL;
+
+    struct viv_sigtab *expected = NULL;
+    if (__atomic_compare_exchange_n(&p->sigtab, &expected, cand, false,
+                                    __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+        return cand;
+
+    kfree(cand);            // lost the race; `expected` is the winner
+    return expected;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
@@ -7382,6 +7439,117 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         // conflated. Claiming success on a partial overlap would leave a mapping
         // the guest believes is gone. Declining is honest; faking is not.
         return -(s64)T_E_NOSYS;
+    }
+
+    case VIV_LINUX_RT_SIGACTION: {
+        // rt_sigaction(sig, act, oldact, sigsetsize): x0 sig, x1 act,
+        // x2 oldact, x3 sigsetsize.
+        //
+        // Two user structs, both the fixed 32-byte aarch64 shape (see
+        // VIV_KSIGACTION_SIZE for why that is a constant and not a runtime
+        // discrimination).
+        u64 handler = VIV_SIG_DFL, flags = 0;
+        if (args[1] != 0) {
+            if (!sys_validate_user_buf(args[1], VIV_KSIGACTION_SIZE))
+                return -(s64)T_E_FAULT;
+            if (viv_load_u64(args[1], &handler) != 0) return -(s64)T_E_FAULT;
+            if (viv_load_u64(args[1] + VIV_KSIGACTION_OFF_FLAGS, &flags) != 0)
+                return -(s64)T_E_FAULT;
+        }
+
+        // A pure QUERY (act == NULL) is decided as a SIG_DFL set: same signal
+        // range, same sigsetsize, same "is this a signal we model at all" test.
+        // Answering a query about a signal we do not track would mean inventing
+        // a disposition for it.
+        if (vivarium_sigaction_decide(args[0], handler, flags, args[3])
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+
+        enum viv_signote note = viv_signal_note(args[0]);
+
+        // Report the PREVIOUS disposition before installing the new one, so a
+        // save/restore pair round-trips. Zero for flags/restorer/mask is not a
+        // placeholder: no flag was honoured, no trampoline recorded, and there
+        // is no during-handler mask because there are no handlers yet. Writing
+        // the full struct matters -- musl reads ksa_old.mask out of an
+        // UNINITIALISED stack local, so a short write leaves it holding
+        // whatever was on the stack.
+        if (args[2] != 0) {
+            if (!sys_validate_user_buf(args[2], VIV_KSIGACTION_SIZE))
+                return -(s64)T_E_FAULT;
+            struct viv_sigtab *cur = __atomic_load_n(&p->sigtab,
+                                                     __ATOMIC_ACQUIRE);
+            u64 old = viv_sigtab_note_ignored(cur, note) ? VIV_SIG_IGN
+                                                         : VIV_SIG_DFL;
+            if (viv_store_u64(args[2], old) != 0)             return -(s64)T_E_FAULT;
+            for (u32 off = 8; off < VIV_KSIGACTION_SIZE; off += 8)
+                if (viv_store_u64(args[2] + off, 0) != 0)     return -(s64)T_E_FAULT;
+        }
+
+        if (args[1] == 0) return 0;         // query only; nothing to install
+
+        // SIG_DFL is the state a Proc with no table is already in, so it only
+        // needs a table when there is one to clear. That keeps a guest which
+        // merely RESETS dispositions (the common post-fork cleanup) from
+        // allocating anything at all.
+        struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+        if (handler == VIV_SIG_DFL && !tab) return 0;
+        if (!tab) {
+            tab = viv_sigtab_of(p);
+            if (!tab) return -(s64)T_E_NOMEM;
+        }
+        (void)viv_sigtab_set_ignored(tab, note, handler == VIV_SIG_IGN);
+        return 0;
+    }
+
+    case VIV_LINUX_RT_SIGPROCMASK: {
+        // rt_sigprocmask(how, set, oldset, sigsetsize): x0 how, x1 set,
+        // x2 oldset, x3 sigsetsize.
+        //
+        // The target is the per-THREAD note_mask, which is the right
+        // granularity by construction: notes.h built it "so multi-thread Procs
+        // can have different threads accept different signals -- POSIX
+        // pthread_sigmask semantics".
+        if (vivarium_sigprocmask_decide(args[0], args[3]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
+
+        struct Thread *t = current_thread();
+        if (!t) return -(s64)T_E_INVAL;
+
+        u64 want = 0;
+        if (args[1] != 0) {
+            if (!sys_validate_user_buf(args[1], sizeof(u64)))
+                return -(s64)T_E_FAULT;
+            if (viv_load_u64(args[1], &want) != 0) return -(s64)T_E_FAULT;
+        }
+
+        // Read the old mask BEFORE mutating, and report it out FIRST, so a
+        // faulting oldset pointer leaves the mask untouched -- the same
+        // observable atomicity sys_note_mask_handler restores by hand on its
+        // own writeback failure.
+        u64 old_notes = t->note_mask;
+        if (args[2] != 0) {
+            if (!sys_validate_user_buf(args[2], sizeof(u64)))
+                return -(s64)T_E_FAULT;
+            if (viv_store_u64(args[2],
+                              viv_notemask_to_sigset(old_notes,
+                                                     &g_viv_notebits)) != 0)
+                return -(s64)T_E_FAULT;
+        }
+
+        if (args[1] == 0) return 0;         // query only
+
+        u64 bits = viv_sigset_to_notemask(want, &g_viv_notebits);
+        switch (args[0]) {
+        case VIV_SIG_BLOCK:   t->note_mask = old_notes | bits;   break;
+        case VIV_SIG_UNBLOCK: t->note_mask = old_notes & ~bits;  break;
+        // SETMASK replaces outright. Sound here because a Linux-phenotype Proc
+        // reaches note_mask through this row only -- SYS_NOTE_MASK is a native
+        // number a guest does not call.
+        case VIV_SIG_SETMASK: t->note_mask = bits;               break;
+        default:              return -(s64)T_E_INVAL;   // decide screened this
+        }
+        return 0;
     }
 
     default:

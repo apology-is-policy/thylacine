@@ -33,8 +33,10 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>     // V-6b: the Linux disposition discard
 
 #include "../../arch/arm64/timer.h"
+#include "../../mm/slub.h"          // V-6b: a real sigtab, so proc_free frees it
 
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -857,6 +859,79 @@ void test_notes_die_pending_predicate(void) {
     __atomic_and_fetch(&kproc()->proc_flags,
                        ~PROC_FLAG_INTR_TERMINATE_PENDING, __ATOMIC_RELEASE);
 
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// linux_sigign_discard (VIVARIUM V-6b)
+// ---------------------------------------------------------------------------
+//
+// A PHENO_LINUX Proc that has set SIG_IGN for a signal discards that signal's
+// note AT GENERATION, exactly as Linux does -- and reports SUCCESS, because on
+// Linux `kill()` to a process ignoring the signal succeeds.
+//
+// This is the ONE V-6b path with no in-guest leg: proving it from inside a
+// container would need the guest to make something post it a note, and the two
+// generators (write-to-closed-pipe, console Ctrl-C) are both out of a
+// vivarium's reach. So the proof lives here, where the queue is directly
+// observable.
+//
+// Post-time and NOT delivery-time is the property under test. An ignored note
+// that reached the queue would occupy a slot, arm the LS-5c terminate latch,
+// and leave blocked threads unwinding *_INTR until the EL0-return tail got
+// round to dropping it -- so `count` staying 0 is the assertion, not just
+// "the note never fired".
+void test_notes_linux_sigign_discard(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    struct viv_sigtab *tab =
+        (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+
+    // A NATIVE Proc is unaffected even with a table hung off it -- the gate is
+    // the phenotype, and this asserts the branch is not simply always-on.
+    p->sigtab = tab;
+    (void)viv_sigtab_set_ignored(tab, VIV_SIGNOTE_PIPE, true);
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, 7u, NULL, true), 0,
+                   "native Proc: post accepted");
+    TEST_EXPECT_EQ(p->notes->count, 1u,
+                   "native Proc: the note was QUEUED -- phenotype gates this");
+
+    // Drain it so the next assertion reads a clean queue.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(p->notes->count, 0u, "queue drained");
+
+    // Now the Linux phenotype: the same post is discarded, and SUCCEEDS.
+    p->phenotype = PHENO_LINUX;
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_PIPE, 9u, NULL, true), 0,
+                   "linux + SIG_IGN: post reports success (Linux kill() does)");
+    TEST_EXPECT_EQ(p->notes->count, 0u,
+                   "linux + SIG_IGN: nothing was queued at all");
+
+    // A DIFFERENT note is untouched -- the discard is per-note, not a blanket
+    // mute. tty:hup shares NOTE_BIT_TTY with tty:winch but is its own note, so
+    // this also pins that the table is keyed by note and not by mask bit.
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_INTERRUPT, 1u, NULL, true), 0,
+                   "linux: interrupt still posts");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "linux: interrupt was queued");
+
+    (void)viv_sigtab_set_ignored(tab, VIV_SIGNOTE_TTY_WINCH, true);
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_HUP, 2u, NULL, true), 0,
+                   "linux: tty:hup posts though tty:winch is ignored");
+    TEST_EXPECT_EQ(p->notes->count, 2u,
+                   "tty:hup queued -- one MASK bit, but separate dispositions");
+    TEST_EXPECT_EQ(notes_post(p, NOTE_NAME_TTY_WINCH, 3u, NULL, true), 0,
+                   "linux: tty:winch accepted");
+    TEST_EXPECT_EQ(p->notes->count, 2u, "tty:winch discarded, not queued");
+
+    // proc_free releases the table; a leak here would show up as a slab
+    // imbalance rather than a failed assertion, which is why the alloc is real
+    // rather than a stack struct.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }

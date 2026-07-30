@@ -29,6 +29,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vivarium.h>     // V-6b: the Linux signal disposition decode
 
 #include "../arch/arm64/timer.h"
 #include "../mm/slub.h"
@@ -328,6 +329,29 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
 
     // Validate name is in the v1.0 supported set.
     if (notes_name_to_bit(name) < 0) return -1;
+
+    // VIVARIUM V-6b: a Linux-phenotype Proc that has set SIG_IGN for the signal
+    // this note carries DISCARDS it here, at generation, exactly as Linux does
+    // -- and returns SUCCESS, because on Linux `kill()` to a process ignoring
+    // the signal succeeds.
+    //
+    // POST-time and not delivery-time, which was the first sketch: an ignored
+    // note that reached the queue would occupy one of 16 slots, would ARM the
+    // LS-5c terminate latch (notes_arm_intr_terminate_locked runs on the
+    // enqueue path, and an ignoring Proc has no handler and is not
+    // self-managing, so it passes every arm gate), and would then leave every
+    // blocked thread unwinding *_INTR until the tail got round to discarding
+    // it. Never posting means none of that machinery is touched at all.
+    //
+    // `kill` is deliberately NOT exempted here: SIGKILL cannot reach this
+    // point, because vivarium_sigaction_decide refuses SIGKILL outright, so no
+    // guest can put VIV_SIGNOTE_KILL in its table. The uncatchable note stays
+    // uncatchable by construction rather than by a special case (I-19 N-4).
+    if (p->phenotype == PHENO_LINUX) {
+        struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+        if (tab && viv_sigtab_note_ignored(tab, viv_signote_from_note_name(name)))
+            return 0;
+    }
 
     u32 sender_pid = sender ? (u32)sender->pid : 0u;
     u64 ts = timer_now_ns();

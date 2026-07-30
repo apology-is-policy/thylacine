@@ -476,25 +476,34 @@ enum { VIV_SIG_BLOCK = 0, VIV_SIG_UNBLOCK = 1, VIV_SIG_SETMASK = 2 };
 // `restorer` member and `sigaction.c` always fills it with `__restore_rt`
 // (`mov x8,#139; svc 0`).
 //
-// A libc that does NOT set SA_RESTORER sends the 24-byte shape instead (handler,
-// flags, mask -- no restorer). The two are distinguishable rather than guessed,
-// because the FLAG ITSELF says which was sent. `viv_ksigaction_mask_off` is that
-// discrimination, kept here so both readers agree.
+// V-6b CORRECTION. V-6a shipped this as a RUNTIME discrimination -- helpers that
+// returned 24 or 32 depending on whether the caller set SA_RESTORER -- on the
+// theory that a libc omitting the flag sends the shorter shape. Reading musl
+// showed the layout is fixed by the ARCH, not chosen per call:
+//
+//   * `src/internal/ksigaction.h` gates `restorer` on `#ifdef SA_RESTORER`, a
+//     COMPILE-time arch property. aarch64 has no override in `arch/aarch64/`,
+//     and its `bits/signal.h` defines SA_RESTORER, so the member is always there.
+//   * `sigaction.c` sets `ksa.flags |= SA_RESTORER` UNCONDITIONALLY for every
+//     install -- `signal(SIGPIPE, SIG_IGN)` included. There is no musl call that
+//     arrives without it.
+//   * Linux copies `sizeof(struct sigaction)` from `act` regardless of flags. If
+//     the kernel wanted 24 on aarch64, musl's 32-byte struct would land `mask`
+//     8 bytes past where the kernel reads it and every install would carry the
+//     wrong mask -- so musl working at all is the proof.
+//
+// So the size is a CONSTANT here, matching what Linux itself reads, and a guest
+// that sends a short buffer gets the same fault it would get on Linux rather
+// than a shape we invented for it.
 struct viv_ksigaction {
     u64 handler;
     u64 flags;
     u64 restorer;
     u64 mask;
 };
-
-// Byte offset of the `mask` member in the shape a guest sending `flags` sends,
-// and the total size to read. The restorer is present iff SA_RESTORER is set.
-static inline u32 viv_ksigaction_mask_off(u64 flags) {
-    return (flags & VIV_SA_RESTORER) ? 24u : 16u;
-}
-static inline u32 viv_ksigaction_size(u64 flags) {
-    return (flags & VIV_SA_RESTORER) ? 32u : 24u;
-}
+#define VIV_KSIGACTION_SIZE      32u
+#define VIV_KSIGACTION_OFF_FLAGS  8u
+#define VIV_KSIGACTION_OFF_MASK  24u
 
 // Which note carries a given Linux signal. PURE.
 //
@@ -504,7 +513,8 @@ static inline u32 viv_ksigaction_size(u64 flags) {
 // the realtime range.
 enum viv_signote {
     VIV_SIGNOTE_NONE = 0,
-    VIV_SIGNOTE_INTERRUPT,       // SIGINT, SIGTERM  (shared at v1.0)
+    VIV_SIGNOTE_INTERRUPT,       // SIGINT only -- see viv_signal_note for why
+                                 // V-6b evicted SIGTERM from this row
     VIV_SIGNOTE_KILL,            // SIGKILL          (non-catchable both sides)
     VIV_SIGNOTE_PIPE,            // SIGPIPE
     VIV_SIGNOTE_CHILD_EXIT,      // SIGCHLD
@@ -520,6 +530,72 @@ enum viv_signote {
 };
 
 enum viv_signote viv_signal_note(u64 signum);
+
+// One past the last real note kind -- the array bound for a per-note table.
+#define VIV_SIGNOTE_COUNT ((u32)VIV_SIGNOTE_TTY_CONT + 1u)
+
+// Does `signum` EXCLUSIVELY own its note -- is it the ONLY Linux signal this
+// map routes there? PURE.
+//
+// V-6b found this the hard way. A DISPOSITION is per-signal, but the note
+// substrate carries no signal identity: the poster posts the NAME "interrupt",
+// and SIGINT and SIGTERM both land on it. So `sigaction(SIGINT, SIG_IGN)` with
+// SIGTERM left at SIG_DFL is NOT REPRESENTABLE -- honouring it silences SIGTERM
+// too, and not honouring it kills a Proc that asked to ignore Ctrl-C. Both
+// directions are wrong, which means the call is outside the domain, not merely
+// approximated. It declines.
+//
+// Computed by SCANNING the map rather than listing exclusive signals, so it can
+// never drift: adding a second signal to any note automatically narrows the
+// domain instead of silently making one of the two wrong. The exclusivity rule
+// is also what makes the REVERSE direction (note -> signal) well-defined, which
+// is what delivery needs to answer "is this note ignored?".
+bool viv_signal_owns_note_exclusively(u64 signum);
+
+// Can a note of this kind actually REACH a Proc's queue? PURE.
+//
+// MEASURED, not assumed: `g_known_notes` (notes.c) holds interrupt / kill /
+// pipe / child_exit / tty:{winch,susp,cont,quit,hup} -- and NOT the snare:*
+// family. `proc_fault_terminate` calls `exits(name)` DIRECTLY without going
+// through `notes_post`, so an EL0 fault terminates its Proc before any queue
+// or mask is consulted (notes.h says the same of NOTE_BIT_SNARE: "this bit has
+// no consumer today").
+//
+// The consequence for the phenotype is sharp and permanent-until-v1.x: SIGSEGV,
+// SIGBUS, SIGILL and SIGFPE can be given SIG_DFL (terminate -- which is what
+// already happens) but can NEVER be caught or ignored. A guest that installs a
+// SIGSEGV handler is told so, rather than discovering it at the first fault.
+bool viv_signote_is_deliverable(enum viv_signote note);
+
+// Per-Proc signal disposition. Lazily allocated on a Proc's first translatable
+// `rt_sigaction`; freed at proc_free. NOT inherited across rfork -- the
+// `handler_va` precedent (notes.h F13), and the POSIX-exec rule agrees for
+// handlers. SIG_IGN's survival across exec is a stated fidelity gap (§9).
+//
+// Indexed by `enum viv_signote`, NOT by signal number -- legitimate ONLY
+// because `viv_signal_owns_note_exclusively` gates every write, so each live
+// entry has exactly one signal behind it.
+struct viv_sigtab {
+    u8 ignored[VIV_SIGNOTE_COUNT];   // 1 == the owning signal is SIG_IGN
+};
+
+// The reverse step: which note kind is this note NAME? PURE.
+//
+// Takes the name rather than a bit because NOTE_BIT_TTY is one bit for five
+// distinct names, and a disposition has to tell tty:winch from tty:hup. Returns
+// VIV_SIGNOTE_NONE for anything unrecognised, so an unknown name is never
+// treated as a signal.
+enum viv_signote viv_signote_from_note_name(const char *name);
+
+// Is the note carrying `note` currently ignored by this Proc? PURE + NULL-safe
+// (a Proc that never called rt_sigaction has no table and ignores nothing).
+bool viv_sigtab_note_ignored(const struct viv_sigtab *tab, enum viv_signote note);
+
+// Record a disposition. Returns false (and changes nothing) if the note is out
+// of range -- the caller has already run the domain check, so this is
+// defence-in-depth on the array index.
+bool viv_sigtab_set_ignored(struct viv_sigtab *tab, enum viv_signote note,
+                            bool ignored);
 
 // Decide whether an `rt_sigaction` is inside the translatable domain. PURE.
 //
@@ -537,6 +613,22 @@ enum viv_signote viv_signal_note(u64 signum);
 // is deliberately RO+XN (I-12/I-13) -- making it executable to serve a
 // compatibility row would be a real weakening of an audited surface. SIG_DFL and
 // SIG_IGN need no trampoline and are admitted without it.
+//
+// AT V-6b THE DOMAIN IS NARROWER STILL, and deliberately so:
+//
+//   * The signal must EXCLUSIVELY own its note (above) -- a shared note cannot
+//     carry two independent dispositions.
+//   * A real HANDLER declines, because the Tier-1 frame that would call it is
+//     V-6c. Accepting an install we would never honour is exactly the silent
+//     mistranslation §4 forbids, and it is worse than ENOSYS: the guest would
+//     believe it is protected. One line moves when the frame lands.
+//   * SIG_IGN on SIGCHLD declines. On Linux that is not "ignore", it is
+//     AUTO-REAP -- the child never becomes a zombie. Thylacine has no such
+//     mode, so honouring the surface meaning while dropping the real one would
+//     leave a guest leaking zombies it believes were reaped.
+//   * The note must be DELIVERABLE (above), so a SIGSEGV handler or an ignored
+//     SIGBUS is refused rather than stored where nothing will ever read it.
+//     SIG_DFL is still admitted for those -- terminate is what already happens.
 //
 // `sigsetsize` must be 8 (Linux checks `sizeof(sigset_t)` and musl passes
 // `_NSIG/8` == 8).
@@ -570,5 +662,19 @@ struct viv_notebit_map {
     u8 interrupt, kill, pipe, child_exit, snare, tty;
 };
 u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m);
+
+// The inverse: report a NOTE_BIT_* mask back as a Linux `sigset_t` word. PURE.
+//
+// Deliberately reports EVERY signal a set bit actually blocks, which makes the
+// coarseness VISIBLE instead of hidden. NOTE_BIT_TTY is one bit for five signals
+// (notes.h: "per-kind masking is a v1.x extension"), so blocking SIGWINCH really
+// does block SIGHUP as well -- and a guest that reads its mask back is told so,
+// rather than being shown the tidy answer it asked for while the system does
+// something wider. Over-blocking DEFERS a signal, it does not lose one; the
+// honest report is what keeps that a stated cost rather than a surprise.
+//
+// Signals with no note are never reported blocked: nothing can deliver them, so
+// "blocked" would describe a state that does not exist.
+u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m);
 
 #endif // THYLACINE_VIVARIUM_H

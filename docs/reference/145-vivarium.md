@@ -267,6 +267,72 @@ exactly that a "table/shell disagreement" and fails closed. The rows land with
 the shells. Six siblings ARE live now, as explicit `ENOSYS` rows, each with its
 own reason rather than a blanket "not yet": `sigaltstack`, `rt_sigsuspend`,
 `rt_sigpending`, `rt_sigtimedwait`, `rt_sigqueueinfo`, `restart_syscall`.
+(V-6b promoted the first two of those five; `kill`/`tkill`/`tgkill` still wait
+for their shells, and they are also the only signal rows that are an *authority*
+question rather than a disposition one — they name another Proc, so they must
+reuse an existing cross-Proc gate verbatim, never invent a third.)
+
+### Dispositions, and the two things building them corrected (V-6b)
+
+V-6b makes `rt_sigaction` and `rt_sigprocmask` real. `rt_sigprocmask` maps onto
+the per-`Thread` `note_mask`; `rt_sigaction` records `SIG_DFL`/`SIG_IGN` in a
+lazily-allocated per-`Proc` `struct viv_sigtab` (`Proc.sigtab`, freed at
+`proc_free`, not `rfork`-inherited — the `handler_va` precedent), and an ignored
+signal's note is then **discarded at generation** inside `notes_post`, exactly as
+Linux discards it, returning success because Linux's `kill()` to a process
+ignoring the signal succeeds.
+
+Post-time and not delivery-time is the load-bearing choice. An ignored note that
+reached the queue would occupy one of 16 slots, would arm the LS-5c terminate
+latch (an ignoring Proc has no handler and is not self-managing, so it passes
+every arm gate), and would leave blocked threads unwinding `*_INTR` until the
+EL0-return tail got round to dropping it. Never posting touches none of that.
+
+**A real handler still declines**, and that is deliberate rather than
+unfinished: the Tier-1 frame that would call it is V-6c, and accepting an install
+we would never honour is the silent mistranslation §4 forbids — worse than
+`ENOSYS`, because the guest would believe it is protected. One line in
+`vivarium_sigaction_decide` moves when delivery lands.
+
+Two corrections came out of building this, both from measuring rather than
+reasoning:
+
+**The `k_sigaction` layout is fixed by the arch, not chosen per call.** V-6a
+shipped runtime helpers returning 24 or 32 bytes depending on whether the caller
+set `SA_RESTORER`. Reading musl showed the member is gated on a *compile-time*
+`#ifdef`, aarch64 has no `ksigaction.h` override, and `sigaction.c` sets the flag
+unconditionally — and Linux copies `sizeof(struct sigaction)` regardless of
+flags, so musl working at all proves the kernel expects 32. It is now a constant.
+
+**SIGTERM lost its note.** V-6a mapped SIGINT and SIGTERM both onto `interrupt`
+and called it "a stated imprecision". Dispositions showed it is not imprecise but
+*unrepresentable*: a note carries no signal identity, so `sigaction(SIGINT,
+SIG_IGN)` with SIGTERM at `SIG_DFL` has no correct answer — honour it and SIGTERM
+goes silent, refuse it and a Proc that asked to ignore Ctrl-C dies on Ctrl-C. And
+that is the call a shell makes. So `interrupt` belongs to SIGINT alone (it *is*
+the Ctrl-C note) and SIGTERM declines until it has one of its own. Nothing
+regressed: no v1.0 path posts SIGTERM, so the entry was reachable only through
+the mask conversion. `viv_signal_owns_note_exclusively` now enforces the property
+by *scanning* the map, so a future edit that re-shares a note narrows the domain
+automatically instead of silently making one of the two signals wrong. The
+`terminate` note SIGTERM wants is an I-19 supported-set addition needing signoff
+(task #95), load-bearing when `kill` lands.
+
+**Two permanent declines worth naming.** `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE`
+take `SIG_DFL` and nothing else: measured against `notes.c`, the `snare:*` family
+is not in `g_known_notes` and `proc_fault_terminate` calls `exits()` directly, so
+a fault never reaches a queue — there is nothing to catch or ignore, and
+terminate is what already happens. And `SIGCHLD` + `SIG_IGN` declines because on
+Linux that is **auto-reap**, not "ignore"; Thylacine reaps only through
+`wait_pid`, so honouring the surface meaning would leave a guest with zombies it
+believes are gone.
+
+**The mask reports back honestly.** `viv_notemask_to_sigset` names *every* signal
+a set bit actually blocks. `NOTE_BIT_TTY` is one bit for five signals, so
+blocking `SIGWINCH` really does block `SIGHUP` — and a guest reading its mask
+back is told so, rather than shown the tidy answer it asked for while the system
+does something wider. Over-blocking defers a signal; it does not lose one. The
+in-guest leg L26 asserts the divergence so it cannot go stale silently.
 
 ## 7. Known limits at V-2d
 

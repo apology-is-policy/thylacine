@@ -594,6 +594,14 @@ void proc_free(struct Proc *p) {
     hwdebug_free(p->debug_hw);
     p->debug_hw = NULL;
 
+    // VIVARIUM V-6b: release the per-Proc Linux signal dispositions. Same
+    // discipline as debug_hw -- freed ONLY here at reap, so the EL0-return-tail
+    // reader (notes_deliver_at_el0_return) can never see it disappear under a
+    // live thread: every thread of `p` was reaped and on_cpu-spun before
+    // proc_free runs, so no CPU is inside a delivery for this Proc.
+    kfree(p->sigtab);
+    p->sigtab = NULL;
+
     // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
     // free in the rolling-ASID model -- the Proc's context_id is simply
     // dropped; its hardware ASID value stays reserved in the current

@@ -430,6 +430,7 @@ void test_proc_wait_pid_concurrent_waiters_both_reap(void);
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
 void test_notes_post_ordering(void);
+void test_notes_linux_sigign_discard(void);      // VIVARIUM V-6b
 void test_notes_unknown_name_rejected(void);
 void test_notes_snare_forge_rejected(void);
 void test_notes_queue_full_returns_minus1(void);
@@ -573,6 +574,10 @@ void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
 void test_vivarium_sigaction_domain(void);               // VIVARIUM V-6a
 void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
+void test_vivarium_signal_exclusivity(void);             // VIVARIUM V-6b
+void test_vivarium_signote_deliverable(void);            // VIVARIUM V-6b
+void test_vivarium_sigtab(void);                         // VIVARIUM V-6b
+void test_vivarium_notemask_to_sigset(void);             // VIVARIUM V-6b
 void test_cons_drain_feed_runs_discipline(void);     // G-4
 void test_cons_drain_overflow_drops_oldest(void);    // G-4
 void test_cons_drain_close_and_reopen_epoch(void);   // G-4
@@ -1813,6 +1818,7 @@ struct test_case g_tests[] = {
     { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
     { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },
     { "notes.post_ordering",                   test_notes_post_ordering,                   false, NULL },
+    { "notes.linux_sigign_discard",            test_notes_linux_sigign_discard,            false, NULL },
     { "notes.unknown_name_rejected",           test_notes_unknown_name_rejected,           false, NULL },
     { "notes.snare_forge_rejected",            test_notes_snare_forge_rejected,            false, NULL },
     { "notes.queue_full_returns_minus1",       test_notes_queue_full_returns_minus1,       false, NULL },
@@ -1970,6 +1976,10 @@ struct test_case g_tests[] = {
     { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },
     { "vivarium.sigaction_domain",       test_vivarium_sigaction_domain,       false, NULL },
     { "vivarium.sigset_to_notemask",     test_vivarium_sigset_to_notemask,     false, NULL },
+    { "vivarium.signal_exclusivity",     test_vivarium_signal_exclusivity,     false, NULL },
+    { "vivarium.signote_deliverable",    test_vivarium_signote_deliverable,    false, NULL },
+    { "vivarium.sigtab",                 test_vivarium_sigtab,                 false, NULL },
+    { "vivarium.notemask_to_sigset",     test_vivarium_notemask_to_sigset,     false, NULL },
     { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
     { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
     { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },
