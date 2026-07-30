@@ -224,10 +224,17 @@ return quarry
 - **Relative-path / cwd resolution is a handler-level join (LS-4), not a `stalk`
   change.** `stalk` is *always* handed an absolute-from-`root_spoor` path. A
   Proc's cwd is a cleaned absolute string (`Territory.dot_path`, `NULL`==`"/"`);
-  for a relative path the syscall handler forms `clean(join(dot_path, relpath))`
+  for a relative path the syscall handler forms `join(dot_path, relpath)`
   *before* calling `stalk` — exactly POSIX `openat(AT_FDCWD, …)`. So I-28
   containment is unchanged and gains **no new mechanism**: even a hostile
   un-cleaned join is re-clamped at `root_spoor` by the `..` rule above.
+  **Since #83 the join is verbatim** (`cwd_join`) rather than a `clean(join(…))`:
+  the join deliberately does *not* interpret `.`/`..`/a trailing separator, so
+  those reach `stalk` and get the same gates the absolute spelling gets.
+  Cleaning them at the handler was a resolution bug — a lexical `..` pops a
+  component without proving it exists — and this paragraph's own containment
+  argument is what makes the verbatim form safe: it is precisely the "hostile
+  un-cleaned join" the `..` rule already covers.
   `SYS_CHDIR` resolves + X-checks the target directory and swaps `dot_path`
   under the territory lock; `SYS_GETCWD` returns it. **Name-based for v1.0**; a
   handle-based `dot` Spoor that starts the walk mid-tree — the rename-robust

@@ -1337,7 +1337,7 @@ enum {
     //   x0 = start_fd : a KOBJ_SPOOR handle (RIGHT_READ) OR
     //                   SYS_WALK_OPEN_FROM_ROOT ((u64)-1) for the Territory root.
     //                   With the sentinel, a RELATIVE path is first joined
-    //                   against the LS-4 cwd (`territory_resolve_cwd`) -- i.e.
+    //                   against the LS-4 cwd (`territory_join_cwd`) -- i.e.
     //                   the sentinel is POSIX AT_FDCWD, not "root" alone. NOTE
     //                   the asymmetry with SYS_WALK_CREATE, whose identically-
     //                   named sentinel does NOT join and always means the root.

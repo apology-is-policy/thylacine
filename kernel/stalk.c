@@ -175,9 +175,15 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
 // Spoors), which is incompatible with `..`'s pop-one-component semantics --
 // a pop into the middle of a pounced run has no Spoor to land on. Any ".."
 // in the path therefore disables the pounce wholesale and the resolver runs
-// today's per-component loop (the design's stated worst case). Resolved
-// paths in the motivating workloads are lexically cleaned ('..'-free): the
-// cwd join cleans (LS-4), and toolchain paths are absolute.
+// today's per-component loop (the design's stated worst case). Toolchain paths
+// in the motivating workloads are absolute and '..'-free, so the pounce
+// applies to them.
+//
+// #83 note: the cwd join no longer collapses '..' (collapsing it popped
+// components that were never walked -- see cwd_join), so a cwd-relative path
+// SPELLED with '..' now takes this per-component path. That is the same cost
+// an absolute path spelled with '..' has always paid, on exactly the paths
+// that were previously resolving incorrectly.
 static bool path_has_dotdot(const char *path, u64 pathlen) {
     u64 i = 0;
     while (i < pathlen) {

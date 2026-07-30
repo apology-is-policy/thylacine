@@ -1422,7 +1422,8 @@ aarch64: `stat()` and `lstat()` both compile to `newfstatat`. `SYS_STAT`
 because it is hardcoded to "absolute from the Territory root, relative joined with
 the LS-4 cwd". That is precisely the `AT_FDCWD` rule, and it is not two
 implementations that happen to agree: `sys_stat_for_proc` and `sys_open_handler`
-call the same `territory_resolve_cwd`.
+call the same `territory_join_cwd` (renamed from `territory_resolve_cwd` at #83,
+when the join stopped resolving dots -- see docs/reference/104-stalk.md).
 
 **`vivarium_fstatat_decide(dirfd, flags)` returns a verdict and nothing else**, and
 that emptiness is the finding. `openat` had to compute a rewritten `start_fd`

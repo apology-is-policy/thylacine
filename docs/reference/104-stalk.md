@@ -329,29 +329,57 @@ one-component-stalk symmetry + correctness if a mount-point fd ever exists.
 directory ("dot", the Plan 9 concept) lives a layer ABOVE it as a **name-based**
 cleaned path string on the Territory (`Territory.dot_path`; `NULL` == `"/"`,
 heap-allocated lazily, freed at `territory_unref`). A relative path is joined to
-`dot_path` and lexically cleaned into an absolute path BEFORE `stalk` runs --
-exactly POSIX `openat(AT_FDCWD, ...)`. So **I-28 containment is unchanged and
-gains no new mechanism**: `stalk` is still handed an absolute-from-root path and
-re-clamps `..` at `root_spoor`, so even a hostile un-cleaned join cannot escape.
+`dot_path` into an absolute path BEFORE `stalk` runs -- exactly POSIX
+`openat(AT_FDCWD, ...)`. So **I-28 containment is unchanged and gains no new
+mechanism**: `stalk` is still handed an absolute-from-root path and re-clamps
+`..` at `root_spoor`, so even a hostile un-cleaned join cannot escape.
 
+**#83 separated the two jobs.** Joining and canonicalizing had been one
+function, and doing both on the resolution path was a real resolution bug: the
+lexical pop removed a component *without proving it existed or was a
+directory*, so a cwd-relative `f/..` (f a FILE) or even `nonexistent/..` opened
+successfully while the absolute spelling of the same path correctly answered
+ENOTDIR / ENOENT. The two are now distinct, with exactly one production caller
+of the canonicalizer:
+
+- **`territory.c::cwd_join(dot, input, inlen, out, outcap)`** -- the RESOLUTION
+  join. Pure (no-lock, no-alloc). An absolute `input` ignores `dot`; a relative
+  one is appended to it with a single `/`. **VERBATIM**: `.`, `..` and a
+  trailing separator all survive into the joined path, so `stalk` interprets
+  them with the same #79/#81/#82 gates the absolute spelling gets. Returns the
+  output length or -1 if it would not fit `outcap`. Unit-tested in isolation
+  (`territory.cwd_join`).
+- **`territory_join_cwd(p, ...)`** -- the locked wrapper: reads `dot_path` under
+  the per-Territory leaf `dot_lock` (the join is bounded CPU, so holding the
+  lock across it is safe) and calls `cwd_join`. The SYS_OPEN / SYS_STAT / exec
+  relative-path entry point, and the first half of SYS_CHDIR.
 - **`territory.c::cwd_lexical_resolve(dot, input, inlen, out, outcap)`** -- the
-  pure (no-lock, no-alloc) join + clean: an absolute `input` ignores `dot`; a
-  relative one is seeded with `dot`'s components; `.` is dropped, `//` collapsed,
-  `..` pops the last component (clamped at `/`); an empty result -> `"/"`.
-  Returns the output length or -1 if it would not fit `outcap`. Unit-tested in
-  isolation (`territory.cwd_lexical`).
-- **`territory_resolve_cwd(p, ...)`** -- the locked wrapper: reads `dot_path`
-  under the per-Territory leaf `dot_lock` (the lexical resolve is bounded CPU, so
-  holding the lock across it is safe) and calls `cwd_lexical_resolve`. The
-  SYS_CHDIR + SYS_OPEN-relative-join entry point.
+  CANONICALIZER: join + drop `.` + collapse `//` + pop `..` (clamped at `/`) +
+  drop a trailing separator; an empty result -> `"/"`. Since #83 its ONLY
+  production role is computing the string SYS_CHDIR stores in `dot_path`. It is
+  **not** a resolution primitive -- it pops components lexically, without
+  proving they exist. Unit-tested in isolation (`territory.cwd_lexical`).
 - **`territory_getdot` / `territory_setdot`** -- read / replace `dot_path` under
   `dot_lock`. `setdot` kmalloc's the new copy BEFORE taking the lock, swaps, then
   frees the old OUTSIDE the lock (readers copy under the lock and never retain
   the pointer -> no UAF). `"/"` is stored as the `NULL` sentinel.
 
-`SYS_CHDIR = 69`(path, len) resolves the cleaned target from `root_spoor`,
-requires it to be a directory (`QTDIR`) the caller can SEARCH (the open-path
-`perm_check(PERM_X)`, gated on `Dev.perm_enforced`), then swaps `dot_path`.
+`SYS_CHDIR = 69`(path, len) is the one caller that needs BOTH jobs, in three
+ordered steps: (1) `territory_join_cwd` -- join VERBATIM; (2) `stalk` the join
+from `root_spoor`, requiring a directory (`QTDIR`) the caller can SEARCH (the
+open-path `perm_check(PERM_X)`, gated on `Dev.perm_enforced`); (3)
+`cwd_lexical_resolve` the *already-stalked* join -- with `dot == NULL`, since
+the join is already absolute, so `dot_path` is NOT re-read and a peer thread's
+concurrent chdir cannot make the stored string disagree with what stalk
+validated -- then swap `dot_path`.
+
+Step (1) is what makes `cd f/..` (f a FILE) and `cd nonexistent/..` fail: before
+#83 the collapse handed stalk the parent, which IS a directory, so the QTDIR
+check passed while checking the wrong object entirely. Step (3) is what keeps
+`dot_path` canonical -- without it `cd d; cd ..` would store
+`/dir/d/..` and grow without bound across repeated `cd ..`. Resolution would
+still work in that state, so only `getcwd` observes the difference; the
+`probe83` cwd leg is the regression that pins it.
 `SYS_GETCWD = 70`(buf, len) copies `dot_path` out NUL-terminated (`-1` if the
 path + NUL does not fit). `sys_open_handler` applies the join ONLY for the
 FROM_ROOT sentinel + a relative path; an absolute path or an explicit dirfd is
@@ -515,13 +543,14 @@ Three properties are deliberate:
 - **There is no "type fetch failed" case.** `qid.type` is a field on every
   Spoor, so the gate takes no lock, issues no RPC, and cannot itself fail.
 
-Scope, stated precisely because one leg is *not* covered:
+Scope — all three path forms are gated (the cwd-relative leg was the #83 gap,
+now closed):
 
 | path form | example | gated? |
 |---|---|---|
 | absolute | `open("/a/b/..")` | yes |
 | dirfd-relative | `openat(dirfd, "b/..")` | yes |
-| cwd-relative | `open("b/..")` | **no** — `cwd_lexical_resolve` normalizes the dots away before `stalk` ever sees them (task #83; it is the LS-4 name-based-cwd design, not an oversight) |
+| cwd-relative | `open("b/..")` | yes, **since #83** — the cwd join is verbatim, so the dots reach this gate. Before #83 the join collapsed them and a cwd-relative `f/..` on a FILE resolved. |
 
 `..` also does not require X on the directory it pops out of (task #84).
 
@@ -574,11 +603,12 @@ run. That is why the discriminator scans back from the end instead of testing
 the last byte. A trailing slash on a *missing* path is still ENOENT — the gate
 never pre-empts a real walk miss.
 
-Scope is the same shape as the dot gate: absolute and dirfd-relative paths are
-gated, cwd-relative ones are not (`cwd_lexical_resolve` rebuilds the path
-component-by-component and never emits a trailing separator — task #83 covers
-both legs). `SYS_CHDIR` always routes through that cleaner, but it has carried
-its own explicit `QTDIR` check since LS-4, so `chdir("file/")` was never wrong.
+Scope is the same shape as the dot gate, and closed the same way: absolute,
+dirfd-relative **and (since #83) cwd-relative** paths are all gated. Before #83
+the join rebuilt the path component-by-component and never emitted a trailing
+separator, so `open("f/")` from the cwd resolved the file. `SYS_CHDIR` still
+canonicalizes for storage, but it has carried its own explicit `QTDIR` check
+since LS-4, so `chdir("file/")` was never wrong.
 
 **Not covered — the userspace splitter.** `unlink("f/")` does not reach this
 gate at all: pouch's `__pouch_open_parent` splits a path into (parent, leaf) and
@@ -586,6 +616,63 @@ rejects a trailing slash with `EINVAL` before any syscall. That is its own
 defect in both directions — `EINVAL` where POSIX says ENOTDIR for a file, and a
 rejection where `rmdir("dir/")` should simply work — and it is tracked
 separately (task #86); it is a boundary-line bug, not a resolver one.
+
+### A cwd-relative path resolves like its absolute spelling (#83)
+
+The #79/#81/#82 gates all live in `stalk`, so they only bind what `stalk`
+actually sees. The LS-4 cwd join used to resolve `.`/`..` and drop a trailing
+separator *before* calling `stalk`, so every one of those gates was bypassed for
+the most common path form in a shell. Measured on the pre-fix tree, from a cwd
+of `/p83-cwd-dir` holding a file `f`:
+
+| expression | pre-#83 | correct |
+|---|---|---|
+| `open("f/..")` | fd 2 | ENOTDIR |
+| `open("f/.")` | fd 3 | ENOTDIR |
+| `open("f/")` | fd 4 | ENOTDIR |
+| `stat("f/")`, `stat("f/..")` | 0 | ENOTDIR |
+| `open("nope/..")` | **fd 5** | ENOENT |
+| `chdir("f/..")`, `chdir("nope/..")` | 0 | fail |
+
+The last two rows are the ones that make this a resolution bug rather than a
+conformance nit: a lexical `..` pops a component **without proving it exists**,
+so a path traversing a directory that is not there opened successfully, and
+`chdir` passed a `QTDIR` check against the parent it had already massaged the
+path into — checking the wrong object entirely.
+
+The fix is a unification rather than a fourth gate: `cwd_join` hands `stalk` the
+path verbatim, so cwd-relative resolution runs *the same code* as absolute
+resolution instead of a parallel lexical one. Canonicalization survives only
+where it is actually needed — the string `SYS_CHDIR` stores.
+
+Consequences worth knowing:
+
+- **I-28 is unaffected.** Containment never rested on the join. `stalk` clamps
+  `..` at its trail floor exactly as it already did for an absolute path
+  containing `..`, which is the case the LS-4 design explicitly reasoned about
+  ("a hostile un-cleaned join cannot escape"). Strictly less code participates
+  in containment now, not more.
+- **A cwd-relative path spelled with `..` no longer pounces.** `path_has_dotdot`
+  disables the POUNCE wholesale, and `..` now survives the join. That is the
+  same cost an absolute `..` path has always paid, on exactly the paths that
+  were previously resolving incorrectly.
+- **The joined path is longer**, since `..` no longer cancels a component. It is
+  still bounded by `SYS_OPEN_PATH_MAX` (1024) and a deep cwd plus many `..`
+  could now hit that bound where it previously collapsed away — an honest
+  rejection, though it currently surfaces as a bare `-1` rather than
+  ENAMETOOLONG (which is not yet in the errno registry; ER-x territory).
+- **A deleted cwd now fails relative resolution**, because the join's leading
+  components get walked. That matches POSIX and Linux.
+
+Regressions: `territory.cwd_join` (dots and the trailing separator survive;
+`"/"` does not double; overflow rejected) and joey's always-run boot-fatal
+`probe83` (every row of the table above, plus the regressions `d/..`, `d/.`,
+`d/`, `.`, `..`, `f`, and the `cd d; cd ..` → `getcwd() == "/p83-cwd-dir"`
+canonicality leg). Each layer was revert-probed independently and fails at its
+own assertion: collapsing inside `cwd_join` fails the unit test; reverting only
+the production call site fails `probe83`'s divergence and chdir-gate legs while
+the unit test still passes; skipping the canonicalize step fails only the
+`getcwd` leg, with `cwd='/p83-cwd-dir/d/..'`.
 
 `sys_open_handler`
 returns `-1` on `path_len == 0` or `> SYS_OPEN_PATH_MAX`, an invalid user buffer,
@@ -666,7 +753,7 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
 - **stalk-3 (pending)**: devsrv per-territory + namespace-resident `/srv` +
   retire `SYS_SRV_CONNECT` / `SYS_POST_SERVICE`.
 - **LS-4a (landed)**: the per-Proc cwd substrate -- `Territory.dot_path` +
-  `dot_lock`, `cwd_lexical_resolve` / `territory_resolve_cwd` / `getdot` /
+  `dot_lock`, `cwd_lexical_resolve` / `territory_join_cwd` / `getdot` /
   `setdot`, `SYS_CHDIR = 69` / `SYS_GETCWD = 70`, and the `sys_open_handler`
   relative->cwd join. Name-based (a cleaned path string); I-28 preserved (no new
   mechanism). Kernel tests `territory.cwd_lexical` + `territory.cwd_dot`. The
@@ -689,10 +776,13 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
   cannot escape) and is the v1.0 containment choice; full cross-mount `..`
   fidelity (Plan 9 `Chan->mh` back-pointers) is a v1.x refinement.
 - **The per-Proc cwd is name-based + combined-length-bounded (LS-4; audit F1).**
-  `cwd_lexical_resolve` joins `dot_path` (<= `SYS_OPEN_PATH_MAX`) with the
-  relative input into one buffer; a deep cwd + a long relative path whose
-  *joined* length exceeds `SYS_OPEN_PATH_MAX` is rejected (`-1`) even though it
-  would resolve from root. This is the same combined-length bound the
+  `cwd_join` joins `dot_path` (<= `SYS_OPEN_PATH_MAX`) with the relative input
+  into one buffer; a deep cwd + a long relative path whose *joined* length
+  exceeds `SYS_OPEN_PATH_MAX` is rejected (`-1`) even though it would resolve
+  from root. Since **#83** the join no longer collapses `..`, so a path spelled
+  with many `..` is longer than it used to be and reaches that bound sooner —
+  an honest rejection, but it surfaces as a bare `-1` rather than
+  ENAMETOOLONG (not yet in the errno registry). This is the same combined-length bound the
   single-component surfaces carry; there is no overflow (every write is
   capacity-guarded). Separately, renaming an ancestor of a live cwd makes
   `dot_path` stale (the Proc re-`cd`s) -- the name-based v1.0 limitation; the

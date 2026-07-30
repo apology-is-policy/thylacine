@@ -289,7 +289,7 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 // because SYS_OPEN TAKES one; SYS_STAT does not take a base at all — it is
 // hardcoded to "absolute from the Territory root, relative joined with the LS-4
 // cwd" (syscall.h:1605), which IS the AT_FDCWD rule. `sys_stat_for_proc` and
-// `sys_open_handler` perform that join with the same `territory_resolve_cwd`
+// `sys_open_handler` perform that join with the same `territory_join_cwd`
 // call, so the correspondence is one implementation, not two that agree.
 //
 // The consequence cuts both ways: AT_FDCWD is free, and a REAL dirfd is not

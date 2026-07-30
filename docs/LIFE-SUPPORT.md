@@ -224,11 +224,18 @@ As-built design:
   `ENOTDIR`/`ENOENT`/`EACCES`.
 - **`SYS_GETCWD = 70`**`(buf, len)`: copy out `dot_path`; `-ERANGE` if too small.
 - **Resolution:** for a path-taking syscall (`SYS_OPEN`) with the sentinel
-  start-fd and a **relative** path, the handler joins `clean(join(dot_path,
-  path))` before `stalk` — exactly POSIX `openat(AT_FDCWD, …)`. Absolute paths
-  and an explicit start-fd are unchanged. `..` falls out of the lexical clean.
-  **I-28 is PRESERVED with zero new mechanism**: `stalk` is *always* handed an
-  absolute-from-`root_spoor` path and clamps `..` at `root_spoor` itself, so a
+  start-fd and a **relative** path, the handler joins `dot_path` + `path` before
+  `stalk` — exactly POSIX `openat(AT_FDCWD, …)`. Absolute paths and an explicit
+  start-fd are unchanged. **Since #83 the join is VERBATIM** — `.`, `..` and a
+  trailing separator survive into the path `stalk` receives, so it applies the
+  same #79/#81/#82 gates a cwd-relative path gets when spelled absolutely.
+  (Collapsing them here was the #83 bug: a lexical `..` pops a component without
+  proving it exists, so `f/..` on a *file* and even `nonexistent/..` resolved
+  successfully. `..` now falls out of *stalk's* trail pop, not a lexical clean;
+  the canonicalizer survives only to compute the string `SYS_CHDIR` stores.)
+  **I-28 is PRESERVED with zero new mechanism** — indeed it is now enforced by
+  strictly less code: `stalk` is *always* handed an absolute-from-`root_spoor`
+  path and clamps `..` at `root_spoor` itself, so a
   maliciously un-cleaned join cannot escape. Native `libthyla-rs` `fs::`
   mutations (which navigate parent dirs single-hop) join via `SYS_GETCWD`; the
   kernel `SYS_OPEN` join covers `File::open` + every ported (musl) program's

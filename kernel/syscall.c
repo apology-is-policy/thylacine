@@ -1662,13 +1662,14 @@ s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
 
     // LS-4: a relative path resolves against the Territory cwd — the same
     // join SYS_OPEN's FROM_ROOT arm performs (stalk re-clamps '..' at
-    // root_spoor, so the join cannot escape containment; I-28).
+    // root_spoor, so the join cannot escape containment; I-28). #83: the join
+    // is verbatim, so stalk applies its own '.'/'..'/trailing-slash gates.
     char joined[SYS_OPEN_PATH_MAX + 1];
     const char *rpath = path;
     u64 rlen = path_len;
     if (path[0] != '/') {
-        int jl = territory_resolve_cwd(p->territory, path, path_len,
-                                       joined, sizeof(joined));
+        int jl = territory_join_cwd(p->territory, path, path_len,
+                                    joined, sizeof(joined));
         if (jl < 0) { spoor_clunk(start); return -1; }
         rpath = joined;
         rlen  = (u64)jl;
@@ -2487,25 +2488,49 @@ static s64 sys_chdir_handler(u64 path_va, u64 path_len_raw, u64 a2, u64 a3) {
     }
     path_scratch[path_len_raw] = '\0';
 
-    // Resolve + clean against the cwd (relative) or root (absolute).
-    char cleaned[SYS_OPEN_PATH_MAX + 1];
-    int cl = territory_resolve_cwd(p->territory, path_scratch, path_len_raw,
-                                   cleaned, sizeof(cleaned));
-    if (cl < 0)                                      return -1;
+    // #83: SYS_CHDIR is the one caller that needs BOTH cwd jobs, and it needs
+    // them in this order.
+    //
+    // (1) JOIN verbatim, for the physical check. "."/".."/a trailing separator
+    // survive so stalk gates them -- so `cd f/..` where f is a FILE, or
+    // `cd nonexistent/..`, fail here rather than being lexically massaged into
+    // the parent that happens to exist.
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    int jl = territory_join_cwd(p->territory, path_scratch, path_len_raw,
+                                joined, sizeof(joined));
+    if (jl < 0)                                      return -1;
 
-    // Resolve the cleaned absolute path from the Territory root to verify it
+    // (2) Resolve the joined absolute path from the Territory root to verify it
     // exists, is a directory, and the caller holds X (search). stalk borrows
     // root (never refs/clunks it); RW-4 SA-F1: territory_root_ref takes the ref
     // ATOMICALLY under ns_lock (a plain read-then-ref raced a concurrent
     // pivot_root's swap+clunk-to-zero). Released at the uniform exit clunk below.
     struct Spoor *root = territory_root_ref(p->territory);
     if (!root)                                       return -1;
-    // `cleaned` is already an absolute, lexically-resolved path (no `.`/`..`
-    // remain), so stalk's own `..` clamp at root_spoor is a redundant safety net
-    // here -- the containment was already established by cwd_lexical_resolve.
-    struct Spoor *q = stalk(p, root, cleaned, (u64)cl, STALK_WALK, 0);
+    struct Spoor *q = stalk(p, root, joined, (u64)jl, STALK_WALK, 0);
     spoor_clunk(root);
     if (!q)                                          return -1;
+
+    // (3) CANONICALIZE for storage -- dot_path is getcwd's answer and the seed
+    // for the next join, so it must stay clean (else `cd ..` would grow the
+    // string without bound). Run on `joined`, which is already absolute, so
+    // dot == NULL and dot_path is NOT re-read: a peer thread's concurrent
+    // chdir cannot make the stored string disagree with the path stalk just
+    // validated. Every component this pops was physically walked in (2), and
+    // with no symlinks (G11) the lexical pop and stalk's trail pop consume the
+    // same component sequence -- so `cleaned` names exactly what stalk landed
+    // on. Computed before the perm gate below so a failure costs nothing.
+    //
+    // The output REUSES path_scratch, whose last read was the join in (1) --
+    // so this step adds no stack (the handler already carries two
+    // SYS_OPEN_PATH_MAX buffers, and a third would be ~19% of the 16 KiB
+    // kernel stack in one frame, above a stalk() that nests its own trail).
+    // The two buffers do not alias, and the cleaned form is never longer than
+    // its input.
+    char *cleaned = path_scratch;
+    int cl = cwd_lexical_resolve((const char *)0, joined, (u64)jl,
+                                 cleaned, sizeof(path_scratch));
+    if (cl < 0)                                      { spoor_clunk(q); return -1; }
 
     s64 rc = -1;
     if (q->qid.type & QTDIR) {
@@ -2929,17 +2954,22 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     path_scratch[path_len_raw] = '\0';
 
     // LS-4: a RELATIVE path with the FROM_ROOT sentinel resolves against the
-    // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). Join + lexically clean
-    // dot + path into an absolute path, then resolve from root (start is already
-    // root_spoor). An explicit start-fd (a dirfd) or an absolute path is
-    // unchanged. stalk still re-clamps ".." at root_spoor, so the join cannot
-    // escape containment (I-28 preserved; no new mechanism).
+    // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). Join dot + path into
+    // an absolute path, then resolve from root (start is already root_spoor).
+    // An explicit start-fd (a dirfd) or an absolute path is unchanged. stalk
+    // still re-clamps ".." at root_spoor, so the join cannot escape containment
+    // (I-28 preserved; no new mechanism).
+    //
+    // #83: the join is VERBATIM -- "."/".."/a trailing separator survive into
+    // `joined` so stalk gates them exactly as it gates the absolute spelling.
+    // Collapsing them here popped never-walked components, so `f/..`, `f/.`,
+    // `f/` and even `nonexistent/..` opened successfully.
     char joined[SYS_OPEN_PATH_MAX + 1];
     const char *rpath = path_scratch;
     u64 rlen = path_len_raw;
     if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT && path_scratch[0] != '/') {
-        int jl = territory_resolve_cwd(p->territory, path_scratch, path_len_raw,
-                                       joined, sizeof(joined));
+        int jl = territory_join_cwd(p->territory, path_scratch, path_len_raw,
+                                    joined, sizeof(joined));
         if (jl < 0) { spoor_clunk(start); return -1; }
         rpath = joined;
         rlen  = (u64)jl;
@@ -5369,7 +5399,7 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
 
     // start = the Territory root (atomic ref under ns_lock, RW-4 SA-F1). An
     // absolute name resolves from it directly; a relative name is cwd-joined
-    // (territory_resolve_cwd) into an absolute path first -- exactly SYS_OPEN.
+    // (territory_join_cwd) into an absolute path first -- exactly SYS_OPEN.
     struct Spoor *start = territory_root_ref(p->territory);
     if (!start)                                    return NULL;
 
@@ -5377,8 +5407,8 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
     const char *rpath = name;
     u64 rlen = (u64)name_len;
     if (name[0] != '/') {
-        int jl = territory_resolve_cwd(p->territory, name, (u64)name_len,
-                                       joined, sizeof(joined));
+        int jl = territory_join_cwd(p->territory, name, (u64)name_len,
+                                    joined, sizeof(joined));
         if (jl < 0)                                { spoor_clunk(start); return NULL; }
         rpath = joined;
         rlen  = (u64)jl;

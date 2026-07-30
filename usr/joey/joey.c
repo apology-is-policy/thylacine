@@ -2408,6 +2408,179 @@ static int probe79_notdir(void) {
 // resolving, which is how the routing was established). The OREAD leg is
 // fail-safe either way: should the arm ever decline, the resolution falls
 // through to the quarry gate, which answers the same -T_E_NOTDIR.
+// probe83 -- a CWD-RELATIVE path must resolve with the SAME semantics as the
+// absolute spelling of the same path. Pre-#83 it did not: the LS-4 cwd join
+// resolved "." / ".." lexically and dropped a trailing separator, so a
+// cwd-relative path never reached stalk's #79/#81/#82 gates and `f/..`,
+// `f/.`, `f/` and even `nonexistent/..` all quietly succeeded.
+//
+// Deliberately run from a NON-root cwd, so the ".." legs pop something real
+// rather than clamping at the floor -- the trivial case would pass either way.
+static int probe83_cwd_relative(void) {
+    char nb[24];
+    static const char dn[] = "p83-cwd-dir";
+    static const char fn[] = "f";
+    static const char sn[] = "d";
+    static const char cwd[] = "/p83-cwd-dir";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe83 open root FAILED\n"); return -1; }
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        t_putstr("joey: probe83 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+
+    long fd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(dd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (fd >= 0) (void)t_close(fd);
+    long sd = mkdir_or_open(dd, sn, sizeof(sn) - 1);
+    if (fd < 0 || sd < 0) {
+        // Boot-fatal, not skipped: without both children the legs below would
+        // fail for the wrong reason and the probe would look like it caught a
+        // resolver bug when it only caught its own setup.
+        t_putstr("joey: probe83 setup FAILED f=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr(" d=");
+        t_putstr(itoa_dec(sd, nb, sizeof(nb)));
+        t_putstr("\n");
+        if (sd >= 0) (void)t_close(sd);
+        (void)t_close(dd);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(sd);
+    (void)t_close(dd);
+
+    if (t_chdir(cwd, sizeof(cwd) - 1) < 0) {
+        t_putstr("joey: probe83 chdir FAILED\n");
+        (void)t_close(pd);
+        return -1;
+    }
+
+    // The divergence legs. Each is the cwd-relative spelling of a path whose
+    // ABSOLUTE spelling probe81/probe82 already pin at -20 / -2.
+    long rc_fdd  = t_open(T_WALK_OPEN_FROM_ROOT, "f/..",    4, T_OPATH);
+    long rc_fd   = t_open(T_WALK_OPEN_FROM_ROOT, "f/.",     3, T_OPATH);
+    long rc_fsl  = t_open(T_WALK_OPEN_FROM_ROOT, "f/",      2, T_OPATH);
+    // The sharpest leg: lexical ".." popped a component that was never walked,
+    // so a path THROUGH A MISSING DIRECTORY succeeded.
+    long rc_mdd  = t_open(T_WALK_OPEN_FROM_ROOT, "nope/..", 7, T_OPATH);
+    // Site C (the SYS_STAT walk-query) needs the join to be honest too.
+    struct t_stat st;
+    long rc_sfsl = t_stat_path("f/", 2, &st);
+    long rc_sfdd = t_stat_path("f/..", 4, &st);
+
+    // Regressions: the ordinary relative shapes must keep working. `..` from a
+    // non-root cwd is the one `cd ..` depends on, and `.` / a trailing slash on
+    // a real directory are by far the common spellings.
+    long rc_ddd  = t_open(T_WALK_OPEN_FROM_ROOT, "d/..",    4, T_OPATH);
+    long rc_dd   = t_open(T_WALK_OPEN_FROM_ROOT, "d/.",     3, T_OPATH);
+    long rc_dsl  = t_open(T_WALK_OPEN_FROM_ROOT, "d/",      2, T_OPATH);
+    long rc_dot  = t_open(T_WALK_OPEN_FROM_ROOT, ".",       1, T_OPATH);
+    long rc_up   = t_open(T_WALK_OPEN_FROM_ROOT, "..",      2, T_OPATH);
+    long rc_plain= t_open(T_WALK_OPEN_FROM_ROOT, "f",       1, T_OPATH);
+
+    // SYS_CHDIR is the one caller that needs BOTH cwd jobs, so it gets its own
+    // legs. The join half: `cd f/..` must fail because f is a FILE -- pre-#83
+    // the lexical collapse turned it into the parent, which IS a directory, so
+    // the chdir succeeded and the QTDIR check it passed was checking the wrong
+    // object entirely.
+    long rc_cdf  = t_chdir("f/..",    4);
+    long rc_cdm  = t_chdir("nope/..", 7);
+
+    // The canonicalize half: after `cd d` + `cd ..` the STORED cwd must be
+    // exactly "/p83-cwd-dir" again. If step 3 were dropped, dot_path would
+    // accumulate ("/p83-cwd-dir/d/..") and grow without bound across repeated
+    // `cd ..` -- resolution would still work, so only getcwd catches it.
+    long rc_cdd  = t_chdir("d", 1);
+    long rc_cdup = t_chdir("..", 2);
+    char cwdbuf[64];
+    long cwdlen  = t_getcwd(cwdbuf, sizeof(cwdbuf));
+    int  cwd_ok  = (cwdlen == (long)(sizeof(cwd) - 1));
+    for (long i = 0; cwd_ok && i < cwdlen; i++)
+        if (cwdbuf[i] != cwd[i]) cwd_ok = 0;
+
+    (void)t_chdir("/", 1);
+
+    if (rc_fdd   >= 0) (void)t_close(rc_fdd);
+    if (rc_fd    >= 0) (void)t_close(rc_fd);
+    if (rc_fsl   >= 0) (void)t_close(rc_fsl);
+    if (rc_mdd   >= 0) (void)t_close(rc_mdd);
+    if (rc_ddd   >= 0) (void)t_close(rc_ddd);
+    if (rc_dd    >= 0) (void)t_close(rc_dd);
+    if (rc_dsl   >= 0) (void)t_close(rc_dsl);
+    if (rc_dot   >= 0) (void)t_close(rc_dot);
+    if (rc_up    >= 0) (void)t_close(rc_up);
+    if (rc_plain >= 0) (void)t_close(rc_plain);
+
+    long cd2 = t_open(T_WALK_OPEN_FROM_ROOT, cwd, sizeof(cwd) - 1, T_OPATH);
+    if (cd2 >= 0) {
+        (void)t_unlink(cd2, fn, sizeof(fn) - 1, 0);
+        (void)t_unlink(cd2, sn, sizeof(sn) - 1, T_UNLINK_REMOVEDIR);
+        (void)t_close(cd2);
+    }
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_fdd != -20 || rc_fd != -20 || rc_fsl != -20 ||
+        rc_sfsl != -20 || rc_sfdd != -20 || rc_mdd != -2 ||
+        rc_ddd < 0 || rc_dd < 0 || rc_dsl < 0 ||
+        rc_dot < 0 || rc_up < 0 || rc_plain < 0 ||
+        rc_cdf >= 0 || rc_cdm >= 0 ||
+        rc_cdd != 0 || rc_cdup != 0 || !cwd_ok) {
+        t_putstr("joey: probe83 FAILED f/..=");
+        t_putstr(itoa_dec(rc_fdd, nb, sizeof(nb)));
+        t_putstr(" f/.=");
+        t_putstr(itoa_dec(rc_fd, nb, sizeof(nb)));
+        t_putstr(" f/=");
+        t_putstr(itoa_dec(rc_fsl, nb, sizeof(nb)));
+        t_putstr(" stat(f/)=");
+        t_putstr(itoa_dec(rc_sfsl, nb, sizeof(nb)));
+        t_putstr(" stat(f/..)=");
+        t_putstr(itoa_dec(rc_sfdd, nb, sizeof(nb)));
+        t_putstr(" (want -20 x5) nope/..=");
+        t_putstr(itoa_dec(rc_mdd, nb, sizeof(nb)));
+        t_putstr(" (want -2) d/..=");
+        t_putstr(itoa_dec(rc_ddd, nb, sizeof(nb)));
+        t_putstr(" d/.=");
+        t_putstr(itoa_dec(rc_dd, nb, sizeof(nb)));
+        t_putstr(" d/=");
+        t_putstr(itoa_dec(rc_dsl, nb, sizeof(nb)));
+        t_putstr(" .=");
+        t_putstr(itoa_dec(rc_dot, nb, sizeof(nb)));
+        t_putstr(" ..=");
+        t_putstr(itoa_dec(rc_up, nb, sizeof(nb)));
+        t_putstr(" f=");
+        t_putstr(itoa_dec(rc_plain, nb, sizeof(nb)));
+        t_putstr(" cd(f/..)=");
+        t_putstr(itoa_dec(rc_cdf, nb, sizeof(nb)));
+        t_putstr(" cd(nope/..)=");
+        t_putstr(itoa_dec(rc_cdm, nb, sizeof(nb)));
+        t_putstr(" (want <0) cd(d)=");
+        t_putstr(itoa_dec(rc_cdd, nb, sizeof(nb)));
+        t_putstr(" cd(..)=");
+        t_putstr(itoa_dec(rc_cdup, nb, sizeof(nb)));
+        t_putstr(" cwd='");
+        if (cwdlen > 0) { cwdbuf[sizeof(cwdbuf) - 1] = '\0'; t_putstr(cwdbuf); }
+        t_putstr("' (want '");
+        t_putstr(cwd);
+        t_putstr("')\n");
+        return -1;
+    }
+    t_putstr("joey: probe83 OK (a cwd-relative path resolves like its absolute "
+             "spelling: f/.. f/. f/ -> ENOTDIR, nope/.. -> ENOENT; chdir gated "
+             "+ cwd stays canonical)\n");
+    return 0;
+}
+
 static int probe82_trailing_slash(void) {
     char nb[24];
     static const char fn[] = "p82-slash-probe";
@@ -6686,6 +6859,12 @@ int main(void) {
             // and, the risk side of that gate, a real dev9p directory + "/" +
             // a genuine walk miss are unaffected. Boot-fatal.
             if (probe82_trailing_slash() != 0)
+                return 1;
+
+            // #83 always-run regression: a cwd-relative path resolves with the
+            // SAME semantics as its absolute spelling -- the #79/#81/#82 gates
+            // are not bypassed by the LS-4 join. Boot-fatal.
+            if (probe83_cwd_relative() != 0)
                 return 1;
 
             // CF-3 A always-run regression: bulk byte-I/O (the two-tier
