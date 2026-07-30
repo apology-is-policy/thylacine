@@ -115,6 +115,20 @@ enum {
     VIV_LINUX_MPROTECT   = 226,
     VIV_LINUX_STATX      = 291,
     VIV_LINUX_EXIT_GROUP = 94,
+
+    // The signal family (V-6, §6.22). Contiguous in Linux's aarch64 table.
+    VIV_LINUX_RESTART_SYSCALL = 128,
+    VIV_LINUX_KILL            = 129,
+    VIV_LINUX_TKILL           = 130,
+    VIV_LINUX_TGKILL          = 131,
+    VIV_LINUX_SIGALTSTACK     = 132,
+    VIV_LINUX_RT_SIGSUSPEND   = 133,
+    VIV_LINUX_RT_SIGACTION    = 134,
+    VIV_LINUX_RT_SIGPROCMASK  = 135,
+    VIV_LINUX_RT_SIGPENDING   = 136,
+    VIV_LINUX_RT_SIGTIMEDWAIT = 137,
+    VIV_LINUX_RT_SIGQUEUEINFO = 138,
+    VIV_LINUX_RT_SIGRETURN    = 139,
 };
 
 // -----------------------------------------------------------------------------
@@ -404,5 +418,157 @@ enum {
 // or VIV_FORWARD. Never ENOSYS: `mmap` exists.
 enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
                                       u64 fd, u64 offset);
+
+// -----------------------------------------------------------------------------
+// TIER 0/2 — signals (V-6). See VIVARIUM.md §6.22.
+//
+// Thylacine has no POSIX signals; it has Plan 9 NOTES (I-19). Every row below is
+// a decode onto a note that ALREADY EXISTS, which is what makes Tier 0 a
+// translation rather than new machinery.
+//
+// THE PIECE THAT IS NEW: the per-Proc disposition table. Pouch keeps its sigtab
+// in USERSPACE (`__pouch_sigtab`, patch 0007) because the pouch libc is ours to
+// patch -- it registers ONE bootstrap via SYS_NOTIFY and dispatches per-signal
+// itself. A Vivarium guest's libc is not ours, so that architecture is simply
+// unavailable and the kernel has to hold the table. It is the reason `rt_sigaction`
+// is a shell with state rather than a pure row.
+// -----------------------------------------------------------------------------
+
+// Linux aarch64 signal numbers (musl `arch/aarch64/bits/signal.h`, read from the
+// tree). Only the ones a row actually names are listed; the rest are handled by
+// range checks, so an unlisted number is not a silent gap.
+enum {
+    VIV_SIGHUP  = 1,  VIV_SIGINT  = 2,  VIV_SIGQUIT = 3,  VIV_SIGILL  = 4,
+    VIV_SIGABRT = 6,  VIV_SIGBUS  = 7,  VIV_SIGFPE  = 8,  VIV_SIGKILL = 9,
+    VIV_SIGSEGV = 11, VIV_SIGPIPE = 13, VIV_SIGTERM = 15, VIV_SIGCHLD = 17,
+    VIV_SIGCONT = 18, VIV_SIGSTOP = 19, VIV_SIGTSTP = 20, VIV_SIGWINCH = 28,
+};
+
+// Linux's `_NSIG` is 65 and signals are 1..64 inclusive.
+#define VIV_NSIG 64
+
+// `sa_handler` sentinels (generic musl `include/signal.h`).
+#define VIV_SIG_DFL 0UL
+#define VIV_SIG_IGN 1UL
+#define VIV_SIG_ERR ((u64)-1)
+
+// `sa_flags` bits (musl `arch/aarch64/bits/signal.h`).
+enum {
+    VIV_SA_NOCLDSTOP = 1,
+    VIV_SA_NOCLDWAIT = 2,
+    VIV_SA_SIGINFO   = 4,
+    VIV_SA_ONSTACK   = 0x08000000,
+    VIV_SA_RESTART   = 0x10000000,
+    VIV_SA_NODEFER   = 0x40000000,
+    VIV_SA_RESETHAND = 0x80000000,
+    VIV_SA_RESTORER  = 0x04000000,
+};
+
+// `rt_sigprocmask` how-values (generic musl `include/signal.h`).
+enum { VIV_SIG_BLOCK = 0, VIV_SIG_UNBLOCK = 1, VIV_SIG_SETMASK = 2 };
+
+// The kernel-ABI sigaction struct the GUEST sends -- musl's `struct k_sigaction`
+// with SA_RESTORER present, which is the shape aarch64 musl actually emits.
+//
+// MEASURED, not assumed: musl compiles with `-D_XOPEN_SOURCE=700` (its Makefile
+// line 50), which satisfies the guard exposing SA_RESTORER in
+// `arch/aarch64/bits/signal.h:114`, so `src/internal/ksigaction.h` includes the
+// `restorer` member and `sigaction.c` always fills it with `__restore_rt`
+// (`mov x8,#139; svc 0`).
+//
+// A libc that does NOT set SA_RESTORER sends the 24-byte shape instead (handler,
+// flags, mask -- no restorer). The two are distinguishable rather than guessed,
+// because the FLAG ITSELF says which was sent. `viv_ksigaction_mask_off` is that
+// discrimination, kept here so both readers agree.
+struct viv_ksigaction {
+    u64 handler;
+    u64 flags;
+    u64 restorer;
+    u64 mask;
+};
+
+// Byte offset of the `mask` member in the shape a guest sending `flags` sends,
+// and the total size to read. The restorer is present iff SA_RESTORER is set.
+static inline u32 viv_ksigaction_mask_off(u64 flags) {
+    return (flags & VIV_SA_RESTORER) ? 24u : 16u;
+}
+static inline u32 viv_ksigaction_size(u64 flags) {
+    return (flags & VIV_SA_RESTORER) ? 32u : 24u;
+}
+
+// Which note carries a given Linux signal. PURE.
+//
+// VIV_SIGNOTE_NONE means "no note in the tree carries this signal" -- the row
+// declines rather than inventing a delivery. That is the honest answer for
+// SIGALRM (no timer note), SIGUSR1/2 (no general-purpose note), and the rest of
+// the realtime range.
+enum viv_signote {
+    VIV_SIGNOTE_NONE = 0,
+    VIV_SIGNOTE_INTERRUPT,       // SIGINT, SIGTERM  (shared at v1.0)
+    VIV_SIGNOTE_KILL,            // SIGKILL          (non-catchable both sides)
+    VIV_SIGNOTE_PIPE,            // SIGPIPE
+    VIV_SIGNOTE_CHILD_EXIT,      // SIGCHLD
+    VIV_SIGNOTE_SNARE_SEGV,      // SIGSEGV
+    VIV_SIGNOTE_SNARE_BUS,       // SIGBUS
+    VIV_SIGNOTE_SNARE_ILL,       // SIGILL
+    VIV_SIGNOTE_SNARE_FPE,       // SIGFPE
+    VIV_SIGNOTE_TTY_HUP,         // SIGHUP
+    VIV_SIGNOTE_TTY_QUIT,        // SIGQUIT
+    VIV_SIGNOTE_TTY_WINCH,       // SIGWINCH
+    VIV_SIGNOTE_TTY_SUSP,        // SIGTSTP
+    VIV_SIGNOTE_TTY_CONT,        // SIGCONT
+};
+
+enum viv_signote viv_signal_note(u64 signum);
+
+// Decide whether an `rt_sigaction` is inside the translatable domain. PURE.
+//
+// `signum` must be 1..64, must not be SIGKILL/SIGSTOP (POSIX: uncatchable, and
+// Linux itself answers EINVAL), and must map to a note -- a disposition we can
+// record but could never act on would be a stored lie.
+//
+// `handler` must not be SIG_ERR (POSIX-invalid; the pouch layer's F11 audit
+// close found the same thing -- without the check a bootstrap calls h(sig) at
+// address -1).
+//
+// THE ARGUMENT DOMAIN: installing a REAL handler requires SA_RESTORER, because
+// the guest's own trampoline is how the handler returns. Thylacine will not
+// synthesise one: the alternative is a vDSO sigreturn page, and Thylacine's vDSO
+// is deliberately RO+XN (I-12/I-13) -- making it executable to serve a
+// compatibility row would be a real weakening of an audited surface. SIG_DFL and
+// SIG_IGN need no trampoline and are admitted without it.
+//
+// `sigsetsize` must be 8 (Linux checks `sizeof(sigset_t)` and musl passes
+// `_NSIG/8` == 8).
+enum viv_verdict vivarium_sigaction_decide(u64 signum, u64 handler, u64 flags,
+                                           u64 sigsetsize);
+
+// Decide whether an `rt_sigprocmask` is inside the translatable domain. PURE.
+//
+// The target is the per-Thread `note_mask`, which exists for exactly this reason
+// ("so multi-thread Procs can have different threads accept different signals --
+// POSIX pthread_sigmask semantics", notes.h:107).
+//
+// `how` must be one of BLOCK/UNBLOCK/SETMASK; `sigsetsize` must be 8. The MASK
+// VALUE is not judged here -- bits naming signals with no note are dropped by
+// `viv_sigset_to_notemask` rather than declining the whole call, because musl
+// blocks wide masks (`__block_all_sigs` sets every bit) on paths where declining
+// would break an otherwise-translatable program.
+enum viv_verdict vivarium_sigprocmask_decide(u64 how, u64 sigsetsize);
+
+// Convert a Linux `sigset_t` word into the kernel's NOTE_BIT_* mask. PURE.
+//
+// Bits naming signals with no note are DROPPED, deliberately: the alternative is
+// to refuse a mask musl routinely sends. The consequence -- blocking SIGALRM has
+// no effect because nothing can deliver SIGALRM either -- is consistent rather
+// than lossy.
+//
+// `out_bits` receives a mask of (1u << NOTE_BIT_*) values; the NOTE_BIT_*
+// numbering is notes.h's and is passed in by the caller so this file stays free
+// of kernel headers.
+struct viv_notebit_map {
+    u8 interrupt, kill, pipe, child_exit, snare, tty;
+};
+u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m);
 
 #endif // THYLACINE_VIVARIUM_H

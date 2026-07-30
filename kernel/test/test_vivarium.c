@@ -579,3 +579,175 @@ void test_vivarium_mmap_domain(void) {
     // (EINVAL for 0, ENOMEM for too-large), so it is not a decide parameter at
     // all -- this asserts the signature has not grown one by accident.
 }
+
+// -----------------------------------------------------------------------------
+// vivarium.signal_map — the signal<->note decode (V-6, §6.22).
+//
+// Asserts each mapped signal by NAME rather than sweeping a range, so a future
+// edit that silently re-points SIGPIPE at the wrong note fails here. The
+// UNMAPPED set is asserted just as explicitly: those are decisions (no note
+// carries them), not gaps, and collapsing them into "default" would lose that.
+// -----------------------------------------------------------------------------
+void test_vivarium_signal_map(void) {
+    // Every mapped row, checked individually.
+    TEST_ASSERT(viv_signal_note(VIV_SIGINT)   == VIV_SIGNOTE_INTERRUPT,
+                "SIGINT -> interrupt");
+    TEST_ASSERT(viv_signal_note(VIV_SIGTERM)  == VIV_SIGNOTE_INTERRUPT,
+                "SIGTERM shares interrupt at v1.0");
+    TEST_ASSERT(viv_signal_note(VIV_SIGKILL)  == VIV_SIGNOTE_KILL,
+                "SIGKILL -> kill");
+    TEST_ASSERT(viv_signal_note(VIV_SIGPIPE)  == VIV_SIGNOTE_PIPE,
+                "SIGPIPE -> pipe");
+    TEST_ASSERT(viv_signal_note(VIV_SIGCHLD)  == VIV_SIGNOTE_CHILD_EXIT,
+                "SIGCHLD -> child_exit");
+    TEST_ASSERT(viv_signal_note(VIV_SIGSEGV)  == VIV_SIGNOTE_SNARE_SEGV,
+                "SIGSEGV -> snare:segv");
+    TEST_ASSERT(viv_signal_note(VIV_SIGBUS)   == VIV_SIGNOTE_SNARE_BUS,
+                "SIGBUS -> snare:bus");
+    TEST_ASSERT(viv_signal_note(VIV_SIGILL)   == VIV_SIGNOTE_SNARE_ILL,
+                "SIGILL -> snare:ill");
+    TEST_ASSERT(viv_signal_note(VIV_SIGFPE)   == VIV_SIGNOTE_SNARE_FPE,
+                "SIGFPE -> snare:fpe");
+    TEST_ASSERT(viv_signal_note(VIV_SIGHUP)   == VIV_SIGNOTE_TTY_HUP,
+                "SIGHUP -> tty:hup");
+    TEST_ASSERT(viv_signal_note(VIV_SIGQUIT)  == VIV_SIGNOTE_TTY_QUIT,
+                "SIGQUIT -> tty:quit");
+    TEST_ASSERT(viv_signal_note(VIV_SIGWINCH) == VIV_SIGNOTE_TTY_WINCH,
+                "SIGWINCH -> tty:winch");
+    TEST_ASSERT(viv_signal_note(VIV_SIGTSTP)  == VIV_SIGNOTE_TTY_SUSP,
+                "SIGTSTP -> tty:susp");
+    TEST_ASSERT(viv_signal_note(VIV_SIGCONT)  == VIV_SIGNOTE_TTY_CONT,
+                "SIGCONT -> tty:cont");
+
+    // The UNMAPPED set, asserted by name. Each is a decision with a reason
+    // recorded at the mapper's default arm; a future "fix" that invents a
+    // delivery for one of these must come here and say why.
+    TEST_ASSERT(viv_signal_note(14) == VIV_SIGNOTE_NONE, "SIGALRM: no timer note");
+    TEST_ASSERT(viv_signal_note(10) == VIV_SIGNOTE_NONE, "SIGUSR1: no note");
+    TEST_ASSERT(viv_signal_note(12) == VIV_SIGNOTE_NONE, "SIGUSR2: no note");
+    TEST_ASSERT(viv_signal_note(VIV_SIGABRT) == VIV_SIGNOTE_NONE,
+                "SIGABRT: reachable only via raise()");
+    TEST_ASSERT(viv_signal_note(VIV_SIGSTOP) == VIV_SIGNOTE_NONE,
+                "SIGSTOP: uncatchable, no note");
+    TEST_ASSERT(viv_signal_note(34) == VIV_SIGNOTE_NONE,
+                "realtime range needs queued siginfo (Tier 2)");
+
+    // Out of range both ways -- 0 is not a signal, 65 is past _NSIG-1.
+    TEST_ASSERT(viv_signal_note(0)  == VIV_SIGNOTE_NONE, "0 is not a signal");
+    TEST_ASSERT(viv_signal_note(65) == VIV_SIGNOTE_NONE, "65 is past the range");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.sigaction_domain — the rt_sigaction argument domain (V-6, §6.22).
+// -----------------------------------------------------------------------------
+void test_vivarium_sigaction_domain(void) {
+    const u64 H = 0x400000;   // a plausible handler VA
+    const u64 R = VIV_SA_RESTORER;
+
+    // The admitted shape: a real handler WITH the guest's own trampoline.
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, H, R, 8) == VIV_TRANSLATED,
+                "handler + SA_RESTORER is admitted");
+
+    // SIG_DFL / SIG_IGN need no trampoline -- nothing returns from them. This
+    // is the load-bearing case: signal(SIGPIPE, SIG_IGN) is the single most
+    // common signal call in real programs and it must work with no handler
+    // machinery at all.
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_IGN, 0, 8)
+                    == VIV_TRANSLATED,
+                "SIG_IGN admitted without SA_RESTORER");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGPIPE, VIV_SIG_DFL, 0, 8)
+                    == VIV_TRANSLATED,
+                "SIG_DFL admitted without SA_RESTORER");
+
+    // THE ARGUMENT DOMAIN: a real handler WITHOUT a restorer declines. We will
+    // not synthesise one -- the only alternative is an executable vDSO page,
+    // and the vDSO is deliberately RO+XN (I-12/I-13).
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, H, 0, 8) == VIV_FORWARD,
+                "handler without SA_RESTORER declines");
+
+    // Uncatchable by POSIX; Linux answers EINVAL for both. Recording a
+    // disposition for SIGKILL would be a stored lie -- I-19's N-4 makes the
+    // `kill` note non-catchable on the Thylacine side too.
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGKILL, H, R, 8) == VIV_FORWARD,
+                "SIGKILL declines");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGSTOP, H, R, 8) == VIV_FORWARD,
+                "SIGSTOP declines");
+
+    // SIG_ERR is POSIX-invalid. Without this check the recorded handler is -1
+    // and a later delivery jumps there (the pouch layer's F11 audit close).
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, VIV_SIG_ERR, R, 8)
+                    == VIV_FORWARD,
+                "SIG_ERR declines");
+
+    // No note carries it -> a disposition we could record but never act on.
+    TEST_ASSERT(vivarium_sigaction_decide(14, H, R, 8) == VIV_FORWARD,
+                "SIGALRM declines: no note carries it");
+
+    // Range and sigsetsize.
+    TEST_ASSERT(vivarium_sigaction_decide(0,  H, R, 8) == VIV_FORWARD, "sig 0");
+    TEST_ASSERT(vivarium_sigaction_decide(65, H, R, 8) == VIV_FORWARD, "sig 65");
+    TEST_ASSERT(vivarium_sigaction_decide(VIV_SIGINT, H, R, 16) == VIV_FORWARD,
+                "sigsetsize must be 8");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.sigset_to_notemask — the mask decode (V-6, §6.22).
+// -----------------------------------------------------------------------------
+void test_vivarium_sigset_to_notemask(void) {
+    // The real NOTE_BIT_* numbering, passed in so vivarium.c stays free of
+    // kernel headers. These values are notes.h's.
+    const struct viv_notebit_map m = {
+        .interrupt = 0, .kill = 1, .pipe = 2, .child_exit = 3,
+        .snare = 4, .tty = 5,
+    };
+
+    // One signal -> one bit.
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGPIPE - 1), &m) == (1ULL << 2),
+                "SIGPIPE -> NOTE_BIT_PIPE");
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGCHLD - 1), &m) == (1ULL << 3),
+                "SIGCHLD -> NOTE_BIT_CHILD_EXIT");
+
+    // SIGINT and SIGTERM share `interrupt`, so both produce the same bit and
+    // the union is still one bit -- not two.
+    u64 both = (1ULL << (VIV_SIGINT - 1)) | (1ULL << (VIV_SIGTERM - 1));
+    TEST_ASSERT(viv_sigset_to_notemask(both, &m) == (1ULL << 0),
+                "SIGINT|SIGTERM collapse to one interrupt bit");
+
+    // The whole snare family folds onto ONE bit, because notes.h has a single
+    // NOTE_BIT_SNARE covering the fault family.
+    u64 faults = (1ULL << (VIV_SIGSEGV - 1)) | (1ULL << (VIV_SIGBUS - 1)) |
+                 (1ULL << (VIV_SIGILL - 1))  | (1ULL << (VIV_SIGFPE - 1));
+    TEST_ASSERT(viv_sigset_to_notemask(faults, &m) == (1ULL << 4),
+                "the snare family folds onto one bit");
+
+    // SIGKILL is DROPPED, not translated. This is what makes musl's
+    // __block_all_sigs (which sets every bit, SIGKILL included) translatable
+    // at all -- and it agrees with both sides: POSIX says SIGKILL is unmaskable
+    // and I-19's N-4 says the `kill` note bypasses the mask.
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << (VIV_SIGKILL - 1), &m) == 0,
+                "SIGKILL is never maskable");
+
+    // Unmapped signals are dropped rather than declining the whole call.
+    TEST_ASSERT(viv_sigset_to_notemask(1ULL << 13 /* SIGALRM */, &m) == 0,
+                "SIGALRM drops: nothing can deliver it either");
+
+    // The wide mask musl actually sends: every bit set. Everything mappable
+    // appears, SIGKILL does not.
+    u64 all = viv_sigset_to_notemask(~0ULL, &m);
+    TEST_ASSERT((all & (1ULL << 1)) == 0, "block-all still excludes kill");
+    TEST_ASSERT(all == ((1ULL << 0) | (1ULL << 2) | (1ULL << 3) |
+                        (1ULL << 4) | (1ULL << 5)),
+                "block-all covers exactly the five maskable notes");
+
+    // Fail closed on a NULL map rather than dereferencing it.
+    TEST_ASSERT(viv_sigset_to_notemask(~0ULL, NULL) == 0, "NULL map -> 0");
+
+    // The `how`/sigsetsize domain.
+    TEST_ASSERT(vivarium_sigprocmask_decide(VIV_SIG_BLOCK, 8) == VIV_TRANSLATED,
+                "SIG_BLOCK admitted");
+    TEST_ASSERT(vivarium_sigprocmask_decide(VIV_SIG_SETMASK, 8) == VIV_TRANSLATED,
+                "SIG_SETMASK admitted");
+    TEST_ASSERT(vivarium_sigprocmask_decide(3, 8) == VIV_FORWARD, "bad how");
+    TEST_ASSERT(vivarium_sigprocmask_decide(VIV_SIG_BLOCK, 16) == VIV_FORWARD,
+                "sigsetsize must be 8");
+}

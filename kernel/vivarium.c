@@ -140,6 +140,39 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_MPROTECT,   VIV_ENOSYS  },  // V-2d: no prot-mutation syscall (I-12)
     { VIV_LINUX_STATX,      VIV_FORWARD },  // wants a mask + a 256-byte struct
     { VIV_LINUX_BRK,        VIV_ENOSYS  },  // no counterpart; libc falls to mmap
+
+    // The signal family (V-6, §6.22).
+    //
+    // NOT YET LISTED, deliberately: rt_sigaction (134), rt_sigprocmask (135),
+    // kill (129), tkill (130), tgkill (131). Their PURE translators exist below
+    // and are unit-tested, but their shells do not, and a VIV_TIER2 row whose
+    // shell is missing would be a table that DECLARES a capability the code does
+    // not have -- `viv_tier2`'s default arm calls exactly that a "table/shell
+    // disagreement" and fails closed. So the rows land with the shells, in the
+    // same commit, and until then these numbers FORWARD like any unclassified
+    // call. This mirrors V-2: the translation tables landed before V-1b gave
+    // them a caller, by design (§6.19/§6.20).
+    //
+    // The ENOSYS rows below are NOT in that state -- they are live decisions,
+    // correct today, and each has its own reason rather than a blanket
+    // "not yet":
+    //   sigaltstack   — an alternate signal stack is only meaningful once
+    //                   delivery honours SA_ONSTACK, which it does not.
+    //   rt_sigsuspend — atomically swap the mask and sleep; needs the mask to be
+    //                   a wait predicate, which note_mask is not.
+    //   rt_sigpending — Thylacine's queue is per-Proc and consumed exactly once
+    //                   (I-19 N-2); "pending but undelivered" is not a state it
+    //                   distinguishes.
+    //   rt_sigtimedwait / rt_sigqueueinfo — queued siginfo, which notes do not
+    //                   carry (a note has a 16-byte name and one u32 arg).
+    //   restart_syscall — the kernel-internal restart continuation, meaningless
+    //                   without SA_RESTART.
+    { VIV_LINUX_SIGALTSTACK,     VIV_ENOSYS },
+    { VIV_LINUX_RT_SIGSUSPEND,   VIV_ENOSYS },
+    { VIV_LINUX_RT_SIGPENDING,   VIV_ENOSYS },
+    { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_ENOSYS },
+    { VIV_LINUX_RT_SIGQUEUEINFO, VIV_ENOSYS },
+    { VIV_LINUX_RESTART_SYSCALL, VIV_ENOSYS },
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -501,4 +534,145 @@ enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
     // shell reproduces both exactly. Forwarding on length here would answer
     // ENOSYS for a call Linux gives a specific errno.
     return VIV_TRANSLATED;
+}
+
+// =============================================================================
+// SIGNALS — the pure layer (V-6). See VIVARIUM.md §6.22.
+// =============================================================================
+
+enum viv_signote viv_signal_note(u64 signum) {
+    // Every row is a note that ALREADY EXISTS in notes.h. That is the whole
+    // reason Tier 0 is a decode rather than new machinery -- and it is also the
+    // reason the DEFAULT dispositions are already correct without any code
+    // here: `interrupt` already default-terminates (LS-5), `kill` is already
+    // non-catchable (I-19 N-4), the `tty:*` family already carries PTY-1
+    // semantics.
+    switch (signum) {
+    // SIGTERM SHARES `interrupt` with SIGINT at v1.0. Inherited from the pouch
+    // mapping (POUCH-DESIGN §6.4) and a stated imprecision, not an oversight:
+    // both default-terminate, so the observable difference is only which one a
+    // handler sees -- and Tier 1 resolves that by recording the signum
+    // alongside, so the handler is called with the number the guest sent.
+    case VIV_SIGINT:   case VIV_SIGTERM:  return VIV_SIGNOTE_INTERRUPT;
+    case VIV_SIGKILL:                     return VIV_SIGNOTE_KILL;
+    case VIV_SIGPIPE:                     return VIV_SIGNOTE_PIPE;
+    case VIV_SIGCHLD:                     return VIV_SIGNOTE_CHILD_EXIT;
+    case VIV_SIGSEGV:                     return VIV_SIGNOTE_SNARE_SEGV;
+    case VIV_SIGBUS:                      return VIV_SIGNOTE_SNARE_BUS;
+    case VIV_SIGILL:                      return VIV_SIGNOTE_SNARE_ILL;
+    case VIV_SIGFPE:                      return VIV_SIGNOTE_SNARE_FPE;
+    case VIV_SIGHUP:                      return VIV_SIGNOTE_TTY_HUP;
+    case VIV_SIGQUIT:                     return VIV_SIGNOTE_TTY_QUIT;
+    case VIV_SIGWINCH:                    return VIV_SIGNOTE_TTY_WINCH;
+    case VIV_SIGTSTP:                     return VIV_SIGNOTE_TTY_SUSP;
+    case VIV_SIGCONT:                     return VIV_SIGNOTE_TTY_CONT;
+
+    // NOT a gap, and worth naming so a future reader does not "fix" it by
+    // inventing a delivery:
+    //   SIGALRM  — no timer note exists; setitimer/alarm are themselves ENOSYS,
+    //              so nothing could post it.
+    //   SIGUSR1/2 — no general-purpose note; a note has a fixed 16-byte name
+    //              from a closed set, so there is nothing to carry them.
+    //   SIGABRT  — reachable only via raise() == tkill(self), which terminates.
+    //   SIGSTOP  — uncatchable by POSIX and rejected by the sigaction domain.
+    //   32..64   — the realtime range, which requires queued siginfo (Tier 2).
+    default: return VIV_SIGNOTE_NONE;
+    }
+}
+
+enum viv_verdict vivarium_sigaction_decide(u64 signum, u64 handler, u64 flags,
+                                           u64 sigsetsize) {
+    // Linux checks sizeof(sigset_t) FIRST and answers EINVAL; musl passes
+    // _NSIG/8 == 8 at every call site. A different size means a caller whose
+    // sigset layout we have not reasoned about.
+    if (sigsetsize != 8) return VIV_FORWARD;
+
+    // 1..64. Linux's own check is `sig-1u >= _NSIG-1`, i.e. the same range.
+    if (signum < 1 || signum > VIV_NSIG) return VIV_FORWARD;
+
+    // SIGKILL and SIGSTOP are uncatchable by POSIX and Linux answers EINVAL for
+    // both. Declining is the honest answer: pretending to install a handler for
+    // SIGKILL would be a stored lie, and I-19's N-4 makes `kill` non-catchable
+    // on the Thylacine side too, so the two agree.
+    if (signum == VIV_SIGKILL || signum == VIV_SIGSTOP) return VIV_FORWARD;
+
+    // SIG_ERR is POSIX-invalid. Without this the recorded handler is -1 and a
+    // later delivery jumps there -- the pouch layer's F11 audit close found the
+    // identical hole in the userspace bootstrap.
+    if (handler == VIV_SIG_ERR) return VIV_FORWARD;
+
+    // No note carries this signal, so a disposition for it could be recorded
+    // but never acted on. Recording it would be storing a lie; forwarding says
+    // "this system cannot do that", which is true.
+    if (viv_signal_note(signum) == VIV_SIGNOTE_NONE) return VIV_FORWARD;
+
+    // THE ARGUMENT DOMAIN. Installing a REAL handler requires SA_RESTORER,
+    // because the guest's own trampoline is how the handler returns -- musl
+    // always supplies one (measured: it compiles with -D_XOPEN_SOURCE=700,
+    // which exposes SA_RESTORER, so sigaction.c fills ksa.restorer with
+    // __restore_rt). Thylacine will not synthesise a substitute: the only
+    // alternative is a vDSO sigreturn trampoline, and the vDSO page is
+    // deliberately RO+XN (I-12/I-13). Weakening an audited surface to serve a
+    // compatibility row is not a trade this arc makes.
+    //
+    // SIG_DFL and SIG_IGN need no trampoline -- nothing returns from them -- so
+    // they are admitted without the flag. That matters: `signal(SIGPIPE,
+    // SIG_IGN)` is the single most common signal call in real programs, and it
+    // works here with no handler machinery at all.
+    if (handler != VIV_SIG_DFL && handler != VIV_SIG_IGN &&
+        !(flags & VIV_SA_RESTORER))
+        return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
+}
+
+enum viv_verdict vivarium_sigprocmask_decide(u64 how, u64 sigsetsize) {
+    // A caller may pass `set == NULL` to read the mask without setting it, so
+    // `how` is only meaningful when setting -- but Linux validates it
+    // regardless, and so do we: a bad `how` is EINVAL on Linux, and admitting
+    // it here would mean choosing an arbitrary interpretation.
+    if (how != VIV_SIG_BLOCK && how != VIV_SIG_UNBLOCK && how != VIV_SIG_SETMASK)
+        return VIV_FORWARD;
+    if (sigsetsize != 8) return VIV_FORWARD;
+    return VIV_TRANSLATED;
+}
+
+u64 viv_sigset_to_notemask(u64 sigset, const struct viv_notebit_map *m) {
+    if (!m) return 0;
+
+    u64 out = 0;
+    // Signals are 1-based; bit (n-1) of the sigset word names signal n.
+    for (u64 sig = 1; sig <= VIV_NSIG; sig++) {
+        if (!(sigset & (1ULL << (sig - 1)))) continue;
+
+        switch (viv_signal_note(sig)) {
+        case VIV_SIGNOTE_INTERRUPT:  out |= 1ULL << m->interrupt;  break;
+        case VIV_SIGNOTE_PIPE:       out |= 1ULL << m->pipe;       break;
+        case VIV_SIGNOTE_CHILD_EXIT: out |= 1ULL << m->child_exit; break;
+
+        case VIV_SIGNOTE_SNARE_SEGV:
+        case VIV_SIGNOTE_SNARE_BUS:
+        case VIV_SIGNOTE_SNARE_ILL:
+        case VIV_SIGNOTE_SNARE_FPE:  out |= 1ULL << m->snare;      break;
+
+        case VIV_SIGNOTE_TTY_HUP:
+        case VIV_SIGNOTE_TTY_QUIT:
+        case VIV_SIGNOTE_TTY_WINCH:
+        case VIV_SIGNOTE_TTY_SUSP:
+        case VIV_SIGNOTE_TTY_CONT:   out |= 1ULL << m->tty;        break;
+
+        // KILL is NEVER maskable. I-19's N-4 makes it non-catchable and
+        // mask-bypassing on the Thylacine side, and POSIX says the same of
+        // SIGKILL, so the two agree and there is nothing to translate. musl's
+        // __block_all_sigs sets every bit including SIGKILL's; silently
+        // dropping it here is what makes that call translatable at all.
+        case VIV_SIGNOTE_KILL: break;
+
+        // No note carries it, so blocking it is a no-op -- CONSISTENT rather
+        // than lossy, because nothing can deliver it either. Declining the
+        // whole call instead would refuse the wide masks musl routinely sends.
+        case VIV_SIGNOTE_NONE: break;
+        }
+    }
+    return out;
 }

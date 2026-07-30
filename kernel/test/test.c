@@ -570,6 +570,9 @@ void test_vivarium_openat_build(void);
 void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);                 // VIVARIUM V-2c
 void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
+void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
+void test_vivarium_sigaction_domain(void);               // VIVARIUM V-6a
+void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
 void test_cons_drain_feed_runs_discipline(void);     // G-4
 void test_cons_drain_overflow_drops_oldest(void);    // G-4
 void test_cons_drain_close_and_reopen_epoch(void);   // G-4
@@ -1964,6 +1967,9 @@ struct test_case g_tests[] = {
     { "vivarium.stat_to_linux",          test_vivarium_stat_to_linux,          false, NULL },
     { "vivarium.fstatat_domain",         test_vivarium_fstatat_domain,         false, NULL },
     { "vivarium.mmap_domain",            test_vivarium_mmap_domain,            false, NULL },
+    { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },
+    { "vivarium.sigaction_domain",       test_vivarium_sigaction_domain,       false, NULL },
+    { "vivarium.sigset_to_notemask",     test_vivarium_sigset_to_notemask,     false, NULL },
     { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
     { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
     { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },

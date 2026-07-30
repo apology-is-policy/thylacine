@@ -222,6 +222,52 @@ an allow-list of two bits rather than "everything but `PROT_EXEC`", because
 aarch64 musl also defines `PROT_BTI`/`PROT_MTE` and generic musl
 `PROT_GROWSDOWN`/`GROWSUP`; a deny-list would have admitted all four silently.
 
+### The signal pure layer (V-6a)
+
+V-6a lands the *decode*, not yet the shells. Three pure functions, unit-tested,
+with no caller — deliberately, and for the same reason V-2's tables landed before
+V-1b gave them one (`VIVARIUM.md` §6.19/§6.20).
+
+`viv_signal_note(signum)` is the map from a Linux signal onto the Plan 9 note
+that carries it. Every row lands on a note that already exists, which is what
+makes Tier 0 a decode rather than new machinery — and it is why the *default*
+dispositions are already correct with no code: `interrupt` already
+default-terminates (LS-5), `kill` is already non-catchable (I-19 N-4), the
+`tty:*` family already carries PTY-1 semantics. The unmapped set is asserted just
+as explicitly as the mapped one (`SIGALRM` has no timer note, `SIGUSR1/2` no
+general-purpose note, the realtime range needs queued `siginfo`), because those
+are decisions with reasons, not gaps.
+
+`vivarium_sigaction_decide` carries the argument domain. The one worth knowing:
+**installing a real handler requires `SA_RESTORER`**, because the guest's own
+trampoline is how the handler returns. Measured, musl always supplies one — it
+compiles with `-D_XOPEN_SOURCE=700`, which exposes `SA_RESTORER` in
+`arch/aarch64/bits/signal.h`, so `sigaction.c` fills `ksa.restorer` with
+`__restore_rt` (`mov x8,#139; svc 0`). Thylacine will not synthesise a
+substitute: the only alternative is a vDSO sigreturn trampoline, and the vDSO
+page is deliberately RO+XN (I-12/I-13). `SIG_DFL` and `SIG_IGN` need no
+trampoline and are admitted without the flag, which matters — `signal(SIGPIPE,
+SIG_IGN)` is the commonest signal call in real programs and it works here with no
+handler machinery at all.
+
+`viv_sigset_to_notemask` folds a Linux `sigset_t` onto the per-`Thread`
+`note_mask` that already exists for exactly this purpose. Two behaviours are
+load-bearing rather than incidental: **`SIGKILL` is dropped, never translated**
+(POSIX says unmaskable, I-19 N-4 says the `kill` note bypasses the mask — the two
+agree, so there is nothing to translate), and **unmapped signals are dropped
+rather than declining the whole call**. Together those are what make musl's
+`__block_all_sigs` — which sets *every* bit — translatable at all.
+
+**What is NOT in the table yet, and why.** `rt_sigaction` (134),
+`rt_sigprocmask` (135), `kill` (129), `tkill` (130) and `tgkill` (131) have their
+translators but no shells, so they are *absent* from the reject table rather than
+listed as `VIV_TIER2`. A `VIV_TIER2` row whose shell is missing would be a table
+declaring a capability the code does not have — `viv_tier2`'s default arm calls
+exactly that a "table/shell disagreement" and fails closed. The rows land with
+the shells. Six siblings ARE live now, as explicit `ENOSYS` rows, each with its
+own reason rather than a blanket "not yet": `sigaltstack`, `rt_sigsuspend`,
+`rt_sigpending`, `rt_sigtimedwait`, `rt_sigqueueinfo`, `restart_syscall`.
+
 ## 7. Known limits at V-2d
 
 - **`FORWARD` = `ENOSYS`, and V-3 is deferred rather than pending.** Measured at
