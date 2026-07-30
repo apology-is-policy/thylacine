@@ -1622,8 +1622,8 @@ returns a kernel-chosen vaddr. The admitted domain:
 | argument | admitted | why |
 |---|---|---|
 | `addr` | **any** | Without `MAP_FIXED`, Linux states `addr` is *a hint* the kernel may ignore; the caller learns the real address from the return value. Ignoring it is conforming, not a compromise |
-| `len` | `0 < len <= BURROW_ATTACH_MAX` | `len == 0` is `EINVAL` on both sides |
-| `prot` | **any without `PROT_EXEC`** | see below |
+| `len` | not judged in `_decide` at all | it is a *semantic* question, not a domain one. The shell answers `EINVAL` for 0 (Linux's own answer) and lets the target refuse the rest, which becomes `ENOMEM` — so both of Linux's errors survive instead of collapsing into the decline. The lazy bound is `BURROW_RESERVE_MAX` (1 GiB), not `BURROW_ATTACH_MAX` |
+| `prot` | any subset of `PROT_READ\|PROT_WRITE` (so `PROT_NONE` too) | see below. Measured: aarch64 musl also defines `PROT_BTI`/`PROT_MTE`, and generic musl `PROT_GROWSDOWN`/`GROWSUP` — none honourable, so the admission is an allow-list of the two bits, not "everything but `PROT_EXEC`" |
 | `flags` | exactly `MAP_PRIVATE\|MAP_ANONYMOUS` | measured: both musl `pthread_create` sites and all four mallocng sites pass exactly this. `MAP_STACK`/`MAP_NORESERVE` are *not* passed by musl, so admitting them would be speculation |
 | `fd` | `-1` | Linux ignores `fd` under `MAP_ANONYMOUS`; requiring `-1` is conforming and is what musl and glibc emit |
 | `offset` | `0` | anonymous |
@@ -1650,7 +1650,7 @@ one loses:
   assumption that the `PROT_NONE` mapping is already usable, which is precisely
   what Thylacine produces.
 
-So: **any prot without `PROT_EXEC` is admitted and yields RW.** The consequence
+So: **any subset of `PROT_READ|PROT_WRITE` is admitted and yields RW.** The consequence
 is named rather than buried — *guard pages are not protective under the Linux
 phenotype, and a `PROT_READ` anonymous mapping is writable* — and it belongs in
 §9's ladder. It is a fidelity loss, never an authority grant: the pages are the
@@ -1677,25 +1677,43 @@ unmapped range succeeds*, while detach returns `-1`. So the translation is wrong
 in both directions.
 
 This is the first T2 row whose domain is a question about **state**, not about
-arguments, so the decide/build split cannot hold its usual shape: no pure
-function can know whether a VMA matches. The shell therefore decides by asking
-the machinery that already owns the answer rather than re-deriving it — attempt
-`sys_burrow_detach_for_proc`, and on refusal use `vma_lookup` to separate *no
-mapping there* (Linux: success, return 0) from *a mapping that is not an exact
-match* (decline). It re-implements no matching logic, which is what keeps it a
+arguments, so it has no pure `_decide` at all — no pure function can know whether
+a VMA matches. The resolution is that it needs none: **`sys_burrow_detach_for_proc`
+already enforces the exact match**, so the shell simply attempts it and reads the
+answer. Success means the semantics were exactly Linux's; refusal means the call
+was outside the domain, and declines. Nothing re-derives the matching logic,
+there is no second lookup and therefore no window to race, and the row stays a
 decode rather than a second implementation.
 
+The one divergence is named rather than papered over: Linux `munmap` of an
+**unmapped** range *succeeds*, and this declines it. Distinguishing "nothing
+there" from "a partial overlap" needs a range scan the VMA API does not expose
+(`vma_lookup` is a point probe, so it cannot see a VMA lying strictly inside the
+range), and the two must not be conflated — claiming success on a partial
+overlap would leave a mapping the guest believes is gone, which is exactly the
+silent wrong answer the rule forbids. Declining is honest; faking success is not.
+
 The exact-match subset is the one that matters: a program unmaps what it mapped,
-and mallocng frees whole groups it allocated whole. The two-step is a benign
-self-race (a peer thread of the guest could map into the window between the
-attempt and the lookup) — the guest racing itself in its own address space, which
-Linux does not define either.
+and mallocng frees whole groups it allocated whole. It is also not load-bearing
+for liveness — measured, mallocng **ignores `munmap`'s return** at both of its
+call sites (`free.c:148`, `malloc.c:318`), so a declined unmap costs memory, not
+correctness.
 
 Coverage: `vivarium.mmap_domain` (each admitted argument and each decline by
 name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-ENOSYS
-and `mmap`/`munmap`-are-T2 rows in `rejects_are_deliberate`, and prover legs in
-`viv-pheno-probe` that mmap, write through the mapping, read it back, and unmap —
-the end-to-end proof that the pages are real and the round trip closes.
+and `mmap`/`munmap`-are-T2 rows in `rejects_are_deliberate`, and `viv-pheno-probe`
+legs **L16–L23**: mmap 8 KiB, write a pattern through both ends of the mapping,
+read it back, unmap it exactly, then assert in-guest that `PROT_EXEC` and
+`MAP_FIXED` are refused, that `mprotect` answers `ENOSYS` *specifically* (musl
+depends on that errno, not merely on failure), and — deliberately — that a
+`PROT_NONE` mapping is writable, so the degradation cannot go stale unnoticed.
+
+The two layers are not redundant, which V-2d's revert probes demonstrate rather
+than assert. Reverting the `mmap` table row, or widening the prot allow-list to
+admit `PROT_EXEC`, fails **exactly two** unit tests and nothing else. But
+breaking only the *shell* — leaving the table intact — keeps the unit suite at a
+full **1239/1239 PASS** while the in-guest leg fails at `L16`. The pure tests
+prove the decision; the guest legs prove the plumbing.
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel
 surface beyond §4's.

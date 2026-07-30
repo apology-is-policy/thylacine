@@ -7333,6 +7333,57 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         return viv_stat_copy_out(args[2], &ks);
     }
 
+    case VIV_LINUX_MMAP: {
+        // mmap(addr, len, prot, flags, fd, offset): x0..x5.
+        if (vivarium_mmap_decide(args[0], args[2], args[3], args[4], args[5])
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;             // out of domain
+
+        // `len` is judged HERE, not in the pure decide, so each side's error
+        // semantics are reproduced exactly rather than collapsed to ENOSYS:
+        // Linux answers EINVAL for 0 ...
+        if (args[1] == 0) return -(s64)T_E_INVAL;
+
+        // ... and ENOMEM for a length it cannot satisfy, which is precisely the
+        // set sys_burrow_attach_lazy_for_proc refuses (0 / over the lazy cap /
+        // no free gap / OOM). Translating its -1 rather than passing it through
+        // matters: Thylacine signals failure with a bare -1, and a Linux libc
+        // reads -1 as -EPERM.
+        s64 rc = sys_burrow_attach_lazy_for_proc(p, args[1]);
+        if (rc < 0) return -(s64)T_E_NOMEM;
+
+        // A user VA is below 2^47, so a successful return is never mistaken for
+        // an errno -- the [-4095,-1] band a Linux caller checks is unreachable.
+        return rc;
+    }
+
+    case VIV_LINUX_MUNMAP: {
+        // munmap(addr, len): x0 addr, x1 len.
+        //
+        // No pure _decide: this row's domain is a question about STATE (does a
+        // VMA match?), and sys_burrow_detach_for_proc ALREADY answers it -- it
+        // enforces the exact match itself. So the shell attempts it and reads
+        // the answer instead of re-deriving the check, which is what keeps this
+        // a decode rather than a second implementation, and leaves no second
+        // lookup to race against.
+        //
+        // The two argument errors are reproduced up front because Linux gives
+        // them a specific errno that a decline would replace with ENOSYS.
+        if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
+        if (args[1] == 0)              return -(s64)T_E_INVAL;
+
+        if (sys_burrow_detach_for_proc(p, args[0], args[1]) == 0) return 0;
+
+        // Outside the exact-match subset. This DECLINES a case Linux would
+        // succeed on -- unmapping a range with nothing mapped in it -- and that
+        // is deliberate: telling that apart from a PARTIAL overlap needs a range
+        // scan the VMA API does not expose (vma_lookup is a point probe, blind
+        // to a VMA lying strictly inside the range), and the two must not be
+        // conflated. Claiming success on a partial overlap would leave a mapping
+        // the guest believes is gone. Declining is honest; faking is not.
+        return -(s64)T_E_NOSYS;
+    }
+
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That
         // is a table/shell disagreement -- fail closed, never dispatch.

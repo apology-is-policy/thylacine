@@ -1,9 +1,11 @@
 # 145 — Vivarium: the phenotype and the syscall-entry branch
 
-**Status**: as-built at V-1b. The declaration (`SPAWN_PHENO_LINUX`), the
-syscall-entry branch, and the Tier-1/Tier-2 dispatch shells are live and
-boot-gated. The userspace supervisor (V-3), sockets (V-5) and signals (V-6) are
-not built; a call that needs them answers `-ENOSYS`.
+**Status**: as-built at V-2d. The declaration (`SPAWN_PHENO_LINUX`), the
+syscall-entry branch, and the Tier-1/Tier-2 dispatch shells — including `mmap`
+and `munmap` — are live and boot-gated. Sockets (V-5) and signals (V-6) are not
+built; a call that needs them answers `-ENOSYS`. **V-3's supervisor is deferred,
+and not merely unbuilt**: its sketched destination cannot serve the forwarded set
+at all (§7 below, and `VIVARIUM.md` §4.1). Its shape is decided by V-5.
 
 Design: `docs/VIVARIUM.md` (§4 the hybrid split, §5 the mechanism, §12.1 the
 declaration rules, §8 invariant **I-43**). Invariant: `ARCHITECTURE.md §28
@@ -94,6 +96,19 @@ the Linux call supplies**. That is true of all five current rows
 breaks silently, because the extra register would carry whatever the Linux
 caller happened to leave there.
 
+**The re-check, performed for V-2d's rows.** `mmap` 222, `munmap` 215 and
+`mprotect` 226 collide with *no* native number — all three are currently
+unassigned (the highest assigned native number is 256, sparsely), so natively
+they reach the dispatcher's `default:` and answer `-1`. The argument still holds,
+but by a different clause than the collision table's: a mis-declared Proc issuing
+222 now receives an anonymous mapping where it would have received `-1`, and that
+is not new authority because **both targets are ungated syscalls that operate
+only on the caller's own address space** — `SYS_BURROW_ATTACH_LAZY` (83) and
+`SYS_BURROW_DETACH` (38) require no capability and the Proc could call either
+directly. `mprotect` dispatches nothing at all. Arity: `mmap` supplies six
+arguments and the shell reads exactly `args[0..5]`; `munmap` supplies two and the
+shell reads `args[0..1]`.
+
 ## 4. The dispatch path
 
 ```
@@ -175,9 +190,51 @@ rejection. It can never change an outcome — only explain one — which is §12
 rule 4 ("a diagnostic and a clean failure, not a silent mis-decode") with the
 fail-safe direction preserved.
 
-## 7. Known limits at V-1b
+### The memory rows (V-2d)
 
-- **`FORWARD` = `ENOSYS`.** No supervisor yet (V-3).
+- **`mmap` (222) → `SYS_BURROW_ATTACH_LAZY`** over a stated domain: any `addr`
+  (a hint Linux licenses the kernel to ignore), any prot within
+  `PROT_READ|PROT_WRITE`, exactly `MAP_PRIVATE|MAP_ANONYMOUS`, `fd == -1`,
+  `offset == 0`. `len` is judged in the *shell*, not the pure decide, so Linux's
+  own errors survive: `EINVAL` for 0, `ENOMEM` for anything the target refuses.
+  Translating that refusal matters — Thylacine signals failure with a bare `-1`,
+  which a Linux libc would read as `-EPERM`.
+- **`munmap` (215) → `SYS_BURROW_DETACH`**, exact-match subset. This row has no
+  pure `_decide` because its domain is a question about *state*; the resolution
+  is that it needs none, since `sys_burrow_detach_for_proc` already enforces the
+  match. Attempt, and read the answer.
+- **`mprotect` (226) → `ENOSYS`**, recorded rather than left to the default.
+
+**The protection degradation.** Thylacine anonymous memory is always RW/XN and
+there is no prot-mutation syscall (an I-12 choice), so `PROT_NONE` yields a
+*writable* mapping. That is admitted deliberately: `PROT_NONE` is the dominant
+anonymous shape in musl (thread guard pages, mallocng meta areas), so declining
+it means malloc never initialises. musl itself sanctions the outcome —
+`mallocng/malloc.c:92` reads `if (mprotect(...) && errno != ENOSYS) return 0;`,
+anticipating a system without `mprotect` and proceeding on the assumption that
+the mapping is usable. Published in `VIVARIUM.md` §9's DEGRADED tier, and pinned
+by prover leg L23 so that implementing real `PROT_NONE` later fails the gate and
+forces the ladder entry to be updated rather than going stale.
+
+`PROT_EXEC` is refused, not degraded — I-42/`CAP_JIT` territory, and W^X (I-12)
+forbids the RW-and-X region the naive translation would produce. The admission is
+an allow-list of two bits rather than "everything but `PROT_EXEC`", because
+aarch64 musl also defines `PROT_BTI`/`PROT_MTE` and generic musl
+`PROT_GROWSDOWN`/`GROWSUP`; a deny-list would have admitted all four silently.
+
+## 7. Known limits at V-2d
+
+- **`FORWARD` = `ENOSYS`, and V-3 is deferred rather than pending.** Measured at
+  V-3's entry: no syscall lets one Proc mutate another's address space, handle
+  table, or process tree, so a peer supervisor Proc could serve essentially
+  nothing of `ARCH §11.5`'s top-50. The peers avoid this because a compat
+  supervisor must either *be* the guest (Starnix's restricted mode, same thread)
+  or *own* it (Plan 9 `linuxemu` over `/proc`; gVisor's Sentry). `VIVARIUM.md`
+  §4.1 carries the three live candidates; V-5 decides.
+- **The calculus this inverts.** §6.19's "declining is always safe (the
+  supervisor is strictly more capable)" was true with a live supervisor and is
+  false now — a declined call is a guest-visible failure. A T2 translator must
+  admit everything it can prove exactly equivalent, not the easy minimum.
 - **The exit status is boolean.** `exit_group(N)` reports 1 for any nonzero N —
   a Thylacine-wide v1.0 property (`sys_exits_handler` /
   `sys_exit_group_handler` collapse to `exits("fail")`), not a Vivarium one, but
@@ -200,6 +257,16 @@ fail-safe direction preserved.
 | the `pheno_flags` ABI gate (accept 0, accept the bit, reject unknown) | `sys_spawn_full_argv.validate_req_pheno_flags` |
 | **the discriminator** — a native Proc leaves a Linux number untranslated | joey's V-1b leg A: `viv-pheno-probe native` (asserts `brk` → -1, not -ENOSYS) |
 | **the chain** — manifest → viv → declaration → branch → translated call | joey's V-1b leg B: `viv run /vivarium/pheno`, whose entrypoint speaks only raw Linux numbers |
+| the mmap argument domain, each admission and decline by name | `vivarium.mmap_domain` |
+| **the memory round trip** — map, write through it, read it back, unmap | leg B's L16–L23 |
+
+The two layers are not redundant, and V-2d's revert probes show exactly why.
+Reverting the `mmap` table row *or* widening the prot allow-list to admit
+`PROT_EXEC` fails precisely two unit tests and no others. But breaking only the
+*shell* — leaving the table intact — keeps the unit suite at a full **1239/1239
+PASS** while the in-guest leg fails at `L16`. The pure tests prove the
+*decision*; the guest legs prove the *plumbing*; neither can see the other's
+bugs.
 
 Leg B's prover (`usr/viv-pheno-probe`) reports through a **file**, not its exit
 status: the status is boolean (§7), so per-leg codes would all arrive as 1 and

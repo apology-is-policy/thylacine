@@ -17,8 +17,9 @@
 //   vivarium.openat_build           SYS_OPEN's argument order
 //   vivarium.stat_to_linux          88B -> 128B, incl. the I-13 no-leak property
 //   vivarium.fstatat_domain         the AT_* domain; AT_FDCWD-only is structural
+//   vivarium.mmap_domain            the anon-private domain; PROT_EXEC refused
 //
-// The T2 tests (V-2b/V-2c) stay just as pure: neither decide function reads user
+// The T2 tests (V-2b/V-2c/V-2d) stay just as pure: no decide function reads user
 // memory by construction, and the stat conversion is data-in/data-out.
 
 #include "test.h"
@@ -37,6 +38,7 @@ void test_vivarium_openat_at_fdcwd(void);
 void test_vivarium_openat_build(void);
 void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);
+void test_vivarium_mmap_domain(void);
 
 // A recognisable argument vector: every word distinct and non-zero, so a
 // dropped, duplicated, or reordered word is visible rather than accidentally
@@ -103,8 +105,14 @@ void test_vivarium_rejects_are_deliberate(void) {
                    (int)VIV_TIER2, "newfstatat is T2 (V-2c; SYS_STAT + the conversion)");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
+    // mmap + munmap are TIER-2 since V-2d. V-2a rejected both on facts that
+    // still hold; what changed is what FORWARD COSTS -- §4.1 defers V-3, so a
+    // decline is now ENOSYS rather than "the supervisor serves it", and mmap is
+    // on musl's critical path. The stated argument domain admits the shape musl
+    // sends and declines the rest.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MMAP, args, &out),
-                   (int)VIV_FORWARD, "mmap forwards (addr/prot/flags are policy)");
+                   (int)VIV_TIER2, "mmap is T2 (V-2d; the anon-private domain)");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
     // statx is the reason newfstatat is not the whole stat story: musl-aarch64
     // defines no __NR_fstatat, so its fstatat.c compiles the 79 path out and
@@ -114,12 +122,22 @@ void test_vivarium_rejects_are_deliberate(void) {
                    (int)VIV_FORWARD, "statx forwards (a mask + a 256B struct, not this shape)");
 
     // The instructive one. munmap's arguments align 1:1 with SYS_BURROW_DETACH,
-    // so it looks like a free renumber; it is excluded because burrow_detach
-    // refuses a partial detach while Linux permits one, i.e. the translation is
-    // not TOTAL. This assert is the guard against someone "fixing" the omission.
+    // so it looks like a free RENUMBER -- and it is still not one: burrow_detach
+    // refuses a partial detach while Linux permits one AND succeeds on an
+    // unmapped range. It is T2, not T1, and this assert is the guard against
+    // someone "simplifying" it into the renumber table.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MUNMAP, args, &out),
-                   (int)VIV_FORWARD,
-                   "munmap forwards -- args align but burrow_detach is exact-match only");
+                   (int)VIV_TIER2,
+                   "munmap is T2, never T1 -- burrow_detach is exact-match only");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+
+    // mprotect is recorded rather than left to the default. It would reach
+    // ENOSYS anyway via the fallthrough, but the file's standard is that a
+    // number never considered and one considered-and-rejected are different
+    // facts. Thylacine has NO prot-mutation syscall (I-12), and musl tolerates
+    // exactly this (mallocng/malloc.c:92 checks `errno != ENOSYS`).
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MPROTECT, args, &out),
+                   (int)VIV_ENOSYS, "mprotect is ENOSYS -- no prot-mutation syscall exists");
 
     // brk is the one honest ENOSYS: there is no break pointer to move at all, and
     // both musl and glibc fall back to mmap when brk reports unavailable.
@@ -454,4 +472,110 @@ void test_vivarium_fstatat_domain(void) {
     // Only the low 32 bits of dirfd are significant.
     TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0),
                    (int)VIV_FORWARD, "the high half of dirfd is not consulted");
+}
+
+// The mmap argument domain (V-2d). Each admitted argument and each decline is
+// asserted BY NAME, because the domain is the whole safety argument for this
+// row: a widening that admits a flag we cannot honour is precisely the failure
+// mode the tier exists to prevent.
+void test_vivarium_mmap_domain(void) {
+    const u64 ok_flags = (u64)(VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS);
+    const u64 rw       = (u64)(VIV_PROT_READ | VIV_PROT_WRITE);
+
+    // The shape musl actually sends -- mallocng malloc.c:249/310 and
+    // pthread_create.c:303, all of them (addr 0, RW, PRIVATE|ANON, fd -1, 0).
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw, ok_flags, (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "anon-private RW is the admitted shape");
+
+    // PROT_NONE is admitted, and it is the DOMINANT anonymous shape in musl --
+    // the thread guard page (pthread_create.c:295) and mallocng's meta areas
+    // (malloc.c:82). Declining it would mean malloc never initialises. It
+    // yields a WRITABLE mapping: a stated fidelity degradation (VIVARIUM.md §9),
+    // sanctioned by musl's own ENOSYS-tolerant mprotect.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, (u64)VIV_PROT_NONE, ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "PROT_NONE admitted (guard pages / meta areas)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, (u64)VIV_PROT_READ, ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "PROT_READ admitted (yields RW -- degraded, §9)");
+
+    // PROT_EXEC is the hard line: an executable anonymous mapping is CAP_JIT /
+    // I-42 territory and W^X (I-12) forbids the RW-and-X region the naive
+    // translation would produce. This is the single most important decline here.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw | (u64)VIV_PROT_EXEC, ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_EXEC declines -- I-12 W^X / I-42 CAP_JIT");
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, (u64)VIV_PROT_EXEC, ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_EXEC alone declines too");
+
+    // The allow-list is two bits, NOT "everything except PROT_EXEC" -- these
+    // three would all have slipped through a deny-list.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw | (u64)VIV_PROT_BTI, ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_BTI declines (aarch64; not honourable)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw | (u64)VIV_PROT_MTE, ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_MTE declines (aarch64; real semantics)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw | (u64)VIV_PROT_GROWSDOWN,
+                                             ok_flags, (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_GROWSDOWN declines (mapping growth)");
+
+    // MAP_FIXED / MAP_FIXED_NOREPLACE are where `addr` stops being a hint and
+    // becomes a REQUIREMENT -- and the target picks the address, so they cannot
+    // be honoured. Both spellings.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0x40000000ull, rw,
+                                             ok_flags | (u64)VIV_MAP_FIXED,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED declines -- addr is a requirement");
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0x40000000ull, rw,
+                                             ok_flags | (u64)VIV_MAP_FIXED_NOREPLACE,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED_NOREPLACE declines too");
+
+    // ... but a non-NULL addr WITHOUT MAP_FIXED is admitted and ignored: Linux
+    // specifies it as a hint the kernel may disregard, and the caller reads the
+    // real address from the return. Ignoring it is conforming, not a compromise.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0x40000000ull, rw, ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "a bare addr hint is admitted and ignored");
+
+    // MAP_SHARED has no anonymous counterpart to share.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw,
+                                             (u64)(VIV_MAP_SHARED | VIV_MAP_ANONYMOUS),
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED declines");
+
+    // Exact flags equality, not a mask test. MAP_STACK and MAP_NORESERVE are
+    // arguably honourable, but MEASURED musl sends neither -- admitting a flag
+    // no caller sends would be speculation dressed as generosity.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw, ok_flags | (u64)VIV_MAP_STACK,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "MAP_STACK declines (unmeasured, so unadmitted)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw, ok_flags | (u64)VIV_MAP_NORESERVE,
+                                             (u64)-1, 0),
+                   (int)VIV_FORWARD, "MAP_NORESERVE declines (unmeasured)");
+
+    // File-backed mmap is out: the row's whole target is anonymous memory.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw, ok_flags, 3, 0),
+                   (int)VIV_FORWARD, "a real fd declines -- no file-backed mapping");
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw, ok_flags, (u64)-1, 4096),
+                   (int)VIV_FORWARD, "a nonzero offset declines");
+
+    // `fd` is an int: a caller may leave x4 sign-extended or merely
+    // zero-extended, and BOTH spellings of -1 must be recognised -- the same
+    // trap AT_FDCWD carries in vivarium_openat_decide.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, rw, ok_flags, 0xFFFFFFFFull, 0),
+                   (int)VIV_TRANSLATED, "zero-extended -1 fd is recognised");
+
+    // The high halves of prot/flags/fd are NOT significant (all `int` in the
+    // Linux ABI), so garbage there must not flip a verdict.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(0, 0xDEADBEEF00000000ull | rw,
+                                             0xCAFE000000000000ull | ok_flags,
+                                             (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "the high half of prot/flags is unread");
+
+    // No length judgement here: `len` is a SEMANTIC question the shell answers
+    // (EINVAL for 0, ENOMEM for too-large), so it is not a decide parameter at
+    // all -- this asserts the signature has not grown one by accident.
 }

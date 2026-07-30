@@ -112,6 +112,7 @@ enum {
     VIV_LINUX_BRK        = 214,
     VIV_LINUX_MUNMAP     = 215,
     VIV_LINUX_MMAP       = 222,
+    VIV_LINUX_MPROTECT   = 226,
     VIV_LINUX_STATX      = 291,
     VIV_LINUX_EXIT_GROUP = 94,
 };
@@ -305,5 +306,103 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 // So `newfstatat` is `openat`'s front half joined to `fstat`'s back half, and
 // the missing build function is what that join looks like.
 enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags);
+
+// -----------------------------------------------------------------------------
+// TIER 2 — `mmap` (V-2d). See VIVARIUM.md §6.21.
+//
+// V-2a classified `mmap` FORWARD as "the 'needs judgement' case the rule exists
+// to exclude". §4.1 changed what FORWARD costs: V-3 is deferred, so FORWARD now
+// means ENOSYS, and `mmap` is on musl's critical path twice over
+// (`__init_tls.c:137` for TLS; mallocng for every heap area). A guest cannot
+// reach main() without it. So it is promoted the same way `openat` was — over a
+// STATED ARGUMENT DOMAIN, which is the tool V-2b already built.
+//
+// The target is SYS_BURROW_ATTACH_LAZY: it takes a length, picks the address,
+// and produces a demand-zero RW/XN anonymous region.
+//
+// THE PROTECTION QUESTION, and why the strict answer loses. Thylacine anonymous
+// memory is ALWAYS RW/XN and there is NO prot-mutation syscall anywhere — that
+// is an I-12 design choice, not a gap. So this row cannot honour PROT_NONE or a
+// read-only PROT_READ exactly; it grants read+write regardless.
+//
+// Declining every prot but PROT_READ|PROT_WRITE would be the letter of §6.19's
+// "never silently mistranslate". But PROT_NONE is the DOMINANT anonymous shape
+// in musl -- the thread guard page (pthread_create.c:295) and mallocng's meta
+// areas (malloc.c:82) -- so declining it means malloc never initialises and
+// nothing runs at all. Admitting it is a STATED FIDELITY DEGRADATION, and musl
+// itself is the evidence that it is the sanctioned one:
+//
+//     mallocng/malloc.c:92 -- if (mprotect(p, pagesize, PROT_READ|PROT_WRITE)
+//                                 && errno != ENOSYS) return 0;
+//
+// The libc ANTICIPATES a system with no mprotect and proceeds on the assumption
+// that the PROT_NONE mapping is already usable, which is exactly what Thylacine
+// produces. The consequence is named in VIVARIUM.md §9's DEGRADED tier rather
+// than buried here: guard pages are NOT protective under the Linux phenotype,
+// and a PROT_READ anonymous mapping is writable. It costs FIDELITY, never
+// AUTHORITY -- the pages are the guest's own, every gate is unchanged, and
+// nothing crosses a Proc boundary, so I-43 is untouched.
+//
+// PROT_EXEC is the hard line and is REFUSED, not degraded. An executable
+// anonymous mapping is what CAP_JIT / I-42 governs (JIT-ON-WX-DESIGN.md), and
+// W^X (I-12) forbids the RW-and-X region the naive translation would produce.
+// The admission is therefore an ALLOW-LIST of two bits rather than "everything
+// except PROT_EXEC" -- measured, aarch64 musl also defines PROT_BTI/PROT_MTE and
+// generic musl PROT_GROWSDOWN/PROT_GROWSUP, none of which we can honour either.
+// -----------------------------------------------------------------------------
+
+// Linux `prot` bits. Generic musl `include/sys/mman.h`, plus the two aarch64
+// additions from `arch/aarch64/bits/mman.h` -- read from the tree, not recalled.
+enum {
+    VIV_PROT_NONE       = 0,
+    VIV_PROT_READ       = 1,
+    VIV_PROT_WRITE      = 2,
+    VIV_PROT_EXEC       = 4,
+    VIV_PROT_BTI        = 0x10,        // aarch64
+    VIV_PROT_MTE        = 0x20,        // aarch64
+    VIV_PROT_GROWSDOWN  = 0x01000000,
+    VIV_PROT_GROWSUP    = 0x02000000,
+};
+
+// Linux `flags` bits (generic musl `include/sys/mman.h`).
+enum {
+    VIV_MAP_SHARED          = 0x01,
+    VIV_MAP_PRIVATE         = 0x02,
+    VIV_MAP_FIXED           = 0x10,
+    VIV_MAP_ANONYMOUS       = 0x20,
+    VIV_MAP_NORESERVE       = 0x4000,
+    VIV_MAP_STACK           = 0x20000,
+    VIV_MAP_FIXED_NOREPLACE = 0x100000,
+};
+
+// The only admitted `flags` word -- an EXACT match, not a mask test.
+//
+// MAP_STACK and MAP_NORESERVE are absent DELIBERATELY. Both are arguably
+// honourable (MAP_STACK is a no-op on Linux; Thylacine's lazy anon already IS
+// the no-reserve behaviour), but MEASURED, musl passes neither: both
+// pthread_create sites and all four mallocng sites pass exactly
+// MAP_PRIVATE|MAP_ANON. Admitting a flag no caller sends would be speculation
+// dressed as generosity, and this file's standard is that each admission is a
+// claim about behaviour that has to be justified individually.
+#define VIV_MMAP_FLAGS_ADMITTED ((u32)(VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS))
+
+// Decide whether an `mmap` is inside the translatable domain. PURE -- no user
+// memory, no Proc, no locks.
+//
+// `addr` is accepted at ANY value and deliberately ignored: without MAP_FIXED,
+// Linux specifies `addr` as a HINT the kernel may disregard, and the caller
+// learns the real address from the return value. Ignoring it is conforming, not
+// a compromise. MAP_FIXED / MAP_FIXED_NOREPLACE -- where the address is a
+// REQUIREMENT -- are outside the admitted flags word and therefore decline.
+//
+// `len` is NOT judged here. It is a semantic question, not a domain one: Linux
+// answers EINVAL for 0 and ENOMEM for too-large, and the shell produces both
+// exactly (0 up front; the target's own refusal for the rest). Forwarding on
+// length would answer ENOSYS for a call Linux gives a specific errno.
+//
+// Returns VIV_TRANSLATED (the shell may call SYS_BURROW_ATTACH_LAZY with `len`)
+// or VIV_FORWARD. Never ENOSYS: `mmap` exists.
+enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
+                                      u64 fd, u64 offset);
 
 #endif // THYLACINE_VIVARIUM_H

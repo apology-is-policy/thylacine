@@ -84,6 +84,25 @@ unsafe fn svc4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     x0
 }
 
+/// Six arguments -- `mmap` is the only caller, and it needs all of them.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn svc6(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    let mut x0: i64 = a0 as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") a1,
+        in("x2") a2,
+        in("x3") a3,
+        in("x4") a4,
+        in("x5") a5,
+        in("x8") nr,
+        options(nostack)
+    );
+    x0
+}
+
 // Linux aarch64 numbers under test (the kernel/vivarium.c table's own set).
 const NR_OPENAT: u64 = 56;
 const NR_CLOSE: u64 = 57;
@@ -95,6 +114,19 @@ const NR_FSTAT: u64 = 80;
 const NR_EXIT_GROUP: u64 = 94;
 const NR_BRK: u64 = 214;
 const NR_MUNMAP: u64 = 215;
+const NR_MMAP: u64 = 222;
+const NR_MPROTECT: u64 = 226;
+
+// V-2d. Values from third_party/musl (generic include/sys/mman.h plus the two
+// aarch64 additions in arch/aarch64/bits/mman.h) -- the same source the kernel
+// table read, so a drift between the two shows up here as a failed leg.
+const PROT_NONE: u64 = 0;
+const PROT_READ: u64 = 1;
+const PROT_WRITE: u64 = 2;
+const PROT_EXEC: u64 = 4;
+const MAP_PRIVATE: u64 = 0x02;
+const MAP_FIXED: u64 = 0x10;
+const MAP_ANON: u64 = 0x20;
 
 const AT_FDCWD: u64 = (-100i64) as u64;
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
@@ -107,6 +139,10 @@ const SEEK_SET: u64 = 0;
 // the same number falls to syscall_dispatch's `default:`, which answers -1 --
 // and that difference is exactly what leg 1 measures.
 const NEG_ENOSYS: i64 = -38;
+
+// V-2d: the T2 shells reproduce Linux's ARGUMENT errors exactly rather than
+// collapsing them into a decline, so EINVAL is a distinct expected answer.
+const NEG_EINVAL: i64 = -22;
 
 // The Linux aarch64 `struct stat` (128 bytes; kernel/include/thylacine/
 // vivarium.h `struct viv_linux_stat` is the kernel's copy of this layout).
@@ -194,11 +230,13 @@ unsafe fn run_linux() -> ! {
     // "the phenotype is live" from "the phenotype did nothing".
     leg!(rep, svc3(NR_BRK, 0, 0, 0) == NEG_ENOSYS, b"L01\n");
 
-    // --- L02: a FORWARD row answers honestly too ----------------------------
-    // munmap is rejected for a REASON (burrow_detach refuses a partial detach
-    // while Linux permits one), so it must not be silently mistranslated.
-    // Until V-3's supervisor exists it shares brk's wire answer.
-    leg!(rep, svc3(NR_MUNMAP, 0, 0, 0) == NEG_ENOSYS, b"L02\n");
+    // --- L02: an argument error is Linux's, not a decline -------------------
+    // Was `munmap -> ENOSYS` while munmap was a FORWARD row. V-2d makes it T2,
+    // and the shell reproduces Linux's OWN answer for len == 0 (EINVAL) rather
+    // than collapsing it into the decline. This leg is what caught the change:
+    // it failed the moment the disposition moved, which is the point of pinning
+    // dispositions in the prover.
+    leg!(rep, svc3(NR_MUNMAP, 0, 0, 0) == NEG_EINVAL, b"L02\n");
 
     // --- L03-L06: openat + read + lseek move real bytes ---------------------
     let fd = svc4(NR_OPENAT, AT_FDCWD, SELF_PATH.as_ptr() as u64, O_RDONLY, 0);
@@ -263,6 +301,79 @@ unsafe fn run_linux() -> ! {
     );
 
     leg!(rep, svc3(NR_CLOSE, fd as u64, 0, 0) == 0, b"L14\n");
+
+    // --- L16-L23: mmap + munmap (V-2d) --------------------------------------
+    // The row a Linux guest cannot reach main() without: musl mmaps for TLS
+    // (__init_tls.c:137) and mallocng mmaps every heap area.
+    const MAP_LEN: u64 = 8192;
+    let m = svc6(
+        NR_MMAP,
+        0,
+        MAP_LEN,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANON,
+        (-1i64) as u64,
+        0,
+    );
+    // A successful mmap must not land in the errno band a Linux caller checks.
+    leg!(rep, m > 0 && !(-4095..0).contains(&m), b"L16\n");
+
+    // The pages are REAL: write a pattern through the mapping and read it back.
+    // A translation that returned a plausible-looking address without backing
+    // it would pass L16 and fail here, which is why this leg exists separately.
+    let p = m as *mut u64;
+    p.write_volatile(0x5649564152494f4d);          // "VIVARIOM"
+    p.add((MAP_LEN / 8 - 1) as usize).write_volatile(0xA5A5_5A5A_1234_5678);
+    leg!(rep, p.read_volatile() == 0x5649564152494f4d, b"L17\n");
+    leg!(
+        rep,
+        p.add((MAP_LEN / 8 - 1) as usize).read_volatile() == 0xA5A5_5A5A_1234_5678,
+        b"L18\n"
+    );
+
+    // The exact-match subset: unmapping what we mapped succeeds.
+    leg!(rep, svc3(NR_MUNMAP, m as u64, MAP_LEN, 0) == 0, b"L19\n");
+
+    // PROT_EXEC is the hard line, not a degradation: an executable anonymous
+    // mapping is CAP_JIT / I-42 territory and W^X (I-12) forbids it. Proven
+    // from INSIDE the guest, which is the only vantage that shows a Linux
+    // binary cannot obtain one.
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0, MAP_LEN, PROT_READ | PROT_WRITE | PROT_EXEC,
+             MAP_PRIVATE | MAP_ANON, (-1i64) as u64, 0) == NEG_ENOSYS,
+        b"L20\n"
+    );
+
+    // MAP_FIXED is where `addr` stops being a hint and becomes a requirement.
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0) == NEG_ENOSYS,
+        b"L21\n"
+    );
+
+    // mprotect is the explicit ENOSYS row. musl DEPENDS on this answer being
+    // ENOSYS specifically: mallocng/malloc.c:92 proceeds when mprotect fails
+    // with ENOSYS and gives up on any other error, so a different errno here
+    // would break malloc rather than degrade it.
+    leg!(
+        rep,
+        svc3(NR_MPROTECT, 0x40000000, 4096, PROT_READ | PROT_WRITE) == NEG_ENOSYS,
+        b"L22\n"
+    );
+
+    // THE DEGRADATION, pinned deliberately (VIVARIUM.md §9's DEGRADED tier).
+    // PROT_NONE is admitted and yields a WRITABLE mapping, because Thylacine
+    // anonymous memory is always RW/XN and there is no prot-mutation syscall.
+    // This leg asserts the divergence rather than hiding it: should real
+    // PROT_NONE ever land, this fails and forces the ladder entry to be
+    // updated instead of silently going stale.
+    let n = svc6(NR_MMAP, 0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANON,
+                 (-1i64) as u64, 0);
+    leg!(rep, n > 0 && !(-4095..0).contains(&n), b"L23\n");
+    (n as *mut u64).write_volatile(0xDEAD_BEEF);   // writable despite PROT_NONE
+    let _ = svc3(NR_MUNMAP, n as u64, 4096, 0);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

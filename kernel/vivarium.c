@@ -73,17 +73,37 @@ struct viv_row {
 //             could rebuild through pouch), so 79 is still the right row to
 //             build first. statx wants a request MASK and a 256-byte struct with
 //             per-field validity bits -- a bigger translator, not this shape.
-//   mmap    — FORWARD. addr hints, PROT_*, MAP_FIXED/ANONYMOUS/PRIVATE and
-//             fd-backed mappings are POLICY. SYS_BURROW_ATTACH_LAZY takes a
-//             length and nothing else. This is the "needs judgement" case the
-//             rule exists to exclude.
-//   munmap  — FORWARD, and this is the instructive one. The arguments line up
-//             perfectly — munmap(addr, len) vs SYS_BURROW_DETACH(vaddr, length)
-//             — and it LOOKS like a free row. It is not: burrow_detach requires
-//             an exact VMA match and explicitly refuses a partial detach
-//             (syscall.h:611-620), while Linux permits partial and
-//             multi-mapping unmaps. The renumber would be silently WRONG for a
-//             legal class of inputs, which is exactly what "total" forbids.
+//   mmap    — TIER-2 since V-2d. The V-2a note that stood here said "addr
+//             hints, PROT_*, MAP_* and fd-backed mappings are POLICY ... the
+//             'needs judgement' case the rule exists to exclude". The facts
+//             were right; the conclusion was overtaken. §4.1 defers V-3, so
+//             FORWARD now means ENOSYS rather than "the supervisor handles it",
+//             and mmap is on musl's critical path twice (__init_tls.c:137 for
+//             TLS, mallocng for every heap area) -- a guest cannot reach main()
+//             without it. The STATED ARGUMENT DOMAIN (V-2b's tool, built for
+//             exactly this) admits the shape musl actually sends and declines
+//             the policy-bearing rest. See vivarium_mmap_decide.
+//   munmap  — TIER-2 since V-2d, and still the instructive one. The arguments
+//             line up perfectly -- munmap(addr, len) vs
+//             SYS_BURROW_DETACH(vaddr, length) -- and it LOOKS like a free row.
+//             It is not: burrow_detach requires an exact VMA match and refuses
+//             a partial detach (syscall.h:611-620), while Linux permits partial
+//             and multi-mapping unmaps AND *succeeds* on an unmapped range. So
+//             a bare renumber is wrong in two directions, which is exactly what
+//             "total" forbids. What rescues it is that the check already
+//             exists: burrow_detach ITSELF enforces the exact match, so the T2
+//             shell attempts it and reads the answer -- success means the
+//             semantics were exactly Linux's, refusal declines. No pure
+//             _decide exists for this row because the domain is a question
+//             about STATE, not about arguments.
+//   mprotect— ENOSYS, and recorded rather than left to the default. It would
+//             reach ENOSYS anyway (no row -> vivarium_translate's fallthrough),
+//             but this file's standard is that a number never considered and a
+//             number considered and rejected are different facts. Thylacine has
+//             NO prot-mutation syscall at all -- an I-12 design choice, not a
+//             gap -- so there is nothing to translate to. musl tolerates this
+//             BY CONSTRUCTION: mallocng/malloc.c:92 reads `if (mprotect(...)
+//             && errno != ENOSYS) return 0;`.
 //   brk     — ENOSYS, honestly. Thylacine's heap is Burrow-based; there is no
 //             break pointer, so there is nothing to translate to. Reporting
 //             ENOSYS lets a libc fall back to its mmap path, which is what musl
@@ -115,8 +135,9 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_OPENAT,     VIV_TIER2   },  // V-2b: vivarium_openat_decide/_build
     { VIV_LINUX_FSTAT,      VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
     { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
-    { VIV_LINUX_MMAP,       VIV_FORWARD },  // policy: addr/prot/flags/fd-backing
-    { VIV_LINUX_MUNMAP,     VIV_FORWARD },  // NOT total: burrow_detach exact-match
+    { VIV_LINUX_MMAP,       VIV_TIER2   },  // V-2d: vivarium_mmap_decide
+    { VIV_LINUX_MUNMAP,     VIV_TIER2   },  // V-2d: the exact-match subset
+    { VIV_LINUX_MPROTECT,   VIV_ENOSYS  },  // V-2d: no prot-mutation syscall (I-12)
     { VIV_LINUX_STATX,      VIV_FORWARD },  // wants a mask + a 256-byte struct
     { VIV_LINUX_BRK,        VIV_ENOSYS  },  // no counterpart; libc falls to mmap
 };
@@ -425,5 +446,59 @@ enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags) {
     if (dfd != VIV_AT_FDCWD)        return VIV_FORWARD;
     if (fl & ~VIV_FSTATAT_ADMITTED) return VIV_FORWARD;
 
+    return VIV_TRANSLATED;
+}
+
+// =============================================================================
+// TIER 2 — mmap (V-2d). See <thylacine/vivarium.h> and VIVARIUM.md §6.21.
+// =============================================================================
+
+// The `prot` bits SYS_BURROW_ATTACH_LAZY's fixed RW/XN mapping can stand in for.
+//
+// An ALLOW-LIST of two bits, not "everything except PROT_EXEC", and the
+// difference is load-bearing: aarch64 musl also defines PROT_BTI and PROT_MTE,
+// and generic musl PROT_GROWSDOWN/PROT_GROWSUP. None of those is honourable
+// either, and a deny-list would have admitted all four silently.
+//
+// PROT_NONE (== 0) is INSIDE the list, and is the one deliberate fidelity
+// degradation: it yields a writable mapping. That is argued in full in the
+// header -- musl's own ENOSYS-tolerant mprotect is the evidence it is the
+// sanctioned outcome -- and published in VIVARIUM.md §9's DEGRADED tier.
+#define VIV_MMAP_PROT_ADMITTED ((u32)(VIV_PROT_READ | VIV_PROT_WRITE))
+
+enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
+                                      u64 fd, u64 offset) {
+    // `addr` is IGNORED, not merely unchecked. Without MAP_FIXED, Linux
+    // specifies it as a hint the kernel may disregard, and the caller reads the
+    // real address out of the return value -- so ignoring it is conforming.
+    // MAP_FIXED and MAP_FIXED_NOREPLACE, where the address becomes a
+    // REQUIREMENT, are outside VIV_MMAP_FLAGS_ADMITTED and so decline below.
+    (void)addr;
+
+    // Linux passes `prot`, `flags` and `fd` as `int`: only the low 32 bits are
+    // significant, exactly as in vivarium_openat_decide.
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+
+    // PROT_EXEC is refused rather than degraded. An executable anonymous
+    // mapping is CAP_JIT / I-42 territory (JIT-ON-WX-DESIGN.md), and W^X (I-12)
+    // forbids the RW-and-X region the naive translation would produce. It falls
+    // out of the allow-list below, but it is the one bit worth naming: a future
+    // widening that reaches for "all prots" must not take it with them.
+    if (pr & ~VIV_MMAP_PROT_ADMITTED) return VIV_FORWARD;
+
+    // EXACT equality, not a mask test: a flag we have not reasoned about must
+    // decline rather than ride along.
+    if (fl != VIV_MMAP_FLAGS_ADMITTED) return VIV_FORWARD;
+
+    // Anonymous. Linux ignores `fd` under MAP_ANONYMOUS, so requiring -1 is
+    // stricter than the letter -- and is what musl and glibc both emit.
+    if ((s32)(u32)fd != -1) return VIV_FORWARD;
+    if (offset != 0)        return VIV_FORWARD;
+
+    // NOTE the absence of a length check. `len` is a SEMANTIC question, not a
+    // domain one: Linux answers EINVAL for 0 and ENOMEM for too-large, and the
+    // shell reproduces both exactly. Forwarding on length here would answer
+    // ENOSYS for a call Linux gives a specific errno.
     return VIV_TRANSLATED;
 }
