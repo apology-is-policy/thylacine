@@ -61,6 +61,7 @@ void test_stalk_missing_component(void);
 void test_stalk_notdir(void);                  // #79
 void test_stalk_dot_notdir(void);              // #81
 void test_stalk_dot_notdir_mount(void);        // #81 (uncrossed-tip choice)
+void test_stalk_dot_xsearch(void);             // #84
 void test_stalk_trailing_slash(void);          // #82
 void test_stalk_trailing_slash_mount(void);    // #82 (crossed-quarry choice)
 void test_stalk_opath_no_open(void);
@@ -205,8 +206,14 @@ static int fix_stat_qid(u64 qid_path, struct t_stat *out) {
     return 0;
 }
 
+// #84: counted, so the dot-arm X-check can PROVE it consumed the pounce's
+// carried leaf record instead of issuing a fresh stat (the cost claim in
+// stalk_tip_may_search is measured here, not asserted).
+static int g_fix_stat_calls;
+
 static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
+    g_fix_stat_calls++;
     return fix_stat_qid(c->qid.path, out);
 }
 
@@ -979,6 +986,118 @@ void test_stalk_dot_notdir_mount(void) {
     territory_unref(p.territory);
     spoor_clunk(src);
     spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// #84: '.' and '..' are lookups performed IN the tip, so they need X there --
+// the check the real-component arm has always made and the dot arms skipped.
+//
+// Measured on a POSIX host (non-root, owner of a `chmod 000` directory d):
+// stat("d") SUCCEEDS (that lookup happens in d's PARENT) while stat("d/."),
+// stat("d/..") and stat("d/x") are ALL EACCES, and fstatat(dirfd_of_d, ".")
+// is EACCES too -- so depth 0 counts, with `start` as the subject. `nox`
+// (QTDIR, 0644 -- owner rw-, no x) is the fixture's twin of that directory.
+void test_stalk_dot_xsearch(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+    int e;
+
+    // Pre-#84 these two RESOLVED: '..' popped back to the root (qid 0) and '.'
+    // stayed on nox (qid 5) -- while the sibling `nox/sekret` was denied. That
+    // asymmetry is the bug.
+    struct Spoor *q = stalk_err(&p, root, "nox/..", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/.. -> NULL (no x on nox)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "'..' out of a no-x dir -> ACCES");
+
+    q = stalk_err(&p, root, "nox/.", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/. -> NULL (no x on nox)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "'.' in a no-x dir -> ACCES");
+
+    // A trailing dot is not special: the component still resolves IN nox.
+    q = stalk_err(&p, root, "nox/../a", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/../a -> NULL (denied before the pop)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "denied mid-path, never NOENT");
+
+    // DEPTH 0: the subject is `start`. Reaching nox as a base needs x on the
+    // ROOT only (0755), which is exactly why stat("d000") succeeds on POSIX --
+    // so this base is obtainable, and then '.' / '..' in it must deny.
+    struct Spoor *noxdir = stalk(&p, root, "nox", 3, STALK_WALK, 0);
+    TEST_ASSERT(noxdir != NULL, "nox itself resolves (x on root suffices)");
+
+    q = stalk_err(&p, noxdir, ".", 1, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "openat(nox, \".\") -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "depth-0 '.' -> ACCES");
+
+    q = stalk_err(&p, noxdir, "..", 2, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "openat(nox, \"..\") -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "depth-0 '..' -> ACCES");
+    spoor_clunk(noxdir);
+
+    // ORDER: type BEFORE permission. `b` is a 0644 FILE, so BOTH gates would
+    // fire -- POSIX answers ENOTDIR (measured: a 0000 regular file gives
+    // ENOTDIR for both tokens, never EACCES). Putting the X-check first would
+    // flip this to ACCES.
+    q = stalk_err(&p, root, "a/b/..", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/.. -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "type wins over permission ('..')");
+    q = stalk_err(&p, root, "a/b/.", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/. -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "type wins over permission ('.')");
+
+    // CONTROL: a searchable (0755) directory is unaffected in both arms.
+    q = stalk_err(&p, root, "a/deep/.", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/. still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "a/deep/. -> qid 3");
+    spoor_clunk(q);
+    q = stalk_err(&p, root, "a/deep/../b", 11, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/../b still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "a/deep/../b -> qid 2");
+    spoor_clunk(q);
+
+    // COST -- two A/Bs, MEASURED. Each compares the same resolution with and
+    // without a trailing '.', so the delta is attributable to this gate alone
+    // (an absolute count would pin unrelated resolver internals: the STALK_OPEN
+    // final-hop R/W check stats too).
+    //
+    // (1) POUNCE path: a '.' breaks a run but does not disable pouncing, so the
+    // run that produced the tip fused its attrs into the walk and `carried`
+    // describes exactly the object this gate judges -> the check is FREE.
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, root, "a/deep", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep resolves (cost baseline)");
+    int plain = g_fix_stat_calls;
+    spoor_clunk(q);
+
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, root, "a/deep/.", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/. resolves (cost probe)");
+    TEST_EXPECT_EQ((u64)g_fix_stat_calls, (u64)plain,
+                   "'.' adds NO stat -- the gate consumed the carried record");
+    spoor_clunk(q);
+
+    // (2) PER-COMPONENT path (the nowa twin: no walk_attrs -- the shape EVERY
+    // '..' path takes, since path_has_dotdot disables pouncing). No carried
+    // record here, so the gate costs exactly ONE stat: the same call the
+    // real-component arm makes at this same position. Not a new cost class --
+    // and on dev9p that call is a Larder attr-cache hit (that cache exists for
+    // precisely this traffic; see dev9p_stat_native).
+    struct Spoor *rn = fix_root_nowa();
+    TEST_ASSERT(rn != NULL, "fix_root_nowa");
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, rn, "a/deep", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "nowa a/deep resolves");
+    int plain_nowa = g_fix_stat_calls;
+    spoor_clunk(q);
+
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, rn, "a/deep/.", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "nowa a/deep/. resolves");
+    TEST_EXPECT_EQ((u64)g_fix_stat_calls, (u64)(plain_nowa + 1),
+                   "no carried record -> exactly one stat, an ordinary hop's cost");
+    spoor_clunk(q);
+    spoor_unref(rn);
+
     spoor_unref(root);
 }
 

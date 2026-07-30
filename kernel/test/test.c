@@ -707,6 +707,7 @@ void test_stalk_err_codes(void);
 void test_stalk_notdir(void);                                  // #79
 void test_stalk_dot_notdir(void);                              // #81
 void test_stalk_dot_notdir_mount(void);                        // #81
+void test_stalk_dot_xsearch(void);                             // #84
 void test_stalk_trailing_slash(void);                          // #82
 void test_stalk_trailing_slash_mount(void);                    // #82
 void test_stalk_opath_no_open(void);
@@ -2951,6 +2952,7 @@ struct test_case g_tests[] = {
     { "stalk.notdir",                  test_stalk_notdir,                  false, NULL },
     { "stalk.dot_notdir",              test_stalk_dot_notdir,              false, NULL },
     { "stalk.dot_notdir_mount",        test_stalk_dot_notdir_mount,        false, NULL },
+    { "stalk.dot_xsearch",              test_stalk_dot_xsearch,              false, NULL },
     { "stalk.trailing_slash",          test_stalk_trailing_slash,          false, NULL },
     { "stalk.trailing_slash_mount",    test_stalk_trailing_slash_mount,    false, NULL },
     { "stalk.opath_no_open",           test_stalk_opath_no_open,           false, NULL },

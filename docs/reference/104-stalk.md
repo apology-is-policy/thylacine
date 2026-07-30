@@ -552,7 +552,63 @@ now closed):
 | dirfd-relative | `openat(dirfd, "b/..")` | yes |
 | cwd-relative | `open("b/..")` | yes, **since #83** — the cwd join is verbatim, so the dots reach this gate. Before #83 the join collapsed them and a cwd-relative `f/..` on a FILE resolved. |
 
-`..` also does not require X on the directory it pops out of (task #84).
+### `.` and `..` need X where they are resolved (#84, the dot X-search)
+
+POSIX resolves `.` and `..` **inside** the current directory, so they are
+lookups like any other and require search permission on the directory
+performing them. Measured on a POSIX host (non-root, owner of a `chmod 000`
+directory `d`):
+
+| call | result | why |
+|---|---|---|
+| `stat("d")` | **ok** | the lookup of `d` happens in d's PARENT |
+| `stat("d/.")` | **EACCES** | `.` is resolved IN d |
+| `stat("d/..")` | **EACCES** | so is `..` |
+| `stat("d/x")` | **EACCES** | the ordinary component — the rule stalk already enforced |
+| `fstatat(dirfd_of_d, ".")` | **EACCES** | depth 0 counts; the subject is `start` |
+
+The real-component arm has always X-checked its parent; the dot arms never
+reach that arm, so pre-#84 `d000/..` resolved while the sibling `d000/x` was
+denied. That asymmetry was the bug. `stalk_tip_may_search` closes it in both
+arms — the task named only `..`, but the two measure identically in every row,
+exactly as #81 found for the type gate.
+
+- **Order: type BEFORE permission.** A 0000 *regular file* answers ENOTDIR for
+  both tokens, never EACCES (measured). That is also #79's rule — the x bit on
+  a non-directory is meaningless. `stalk.dot_notdir` guards the ordering
+  independently of the #84 test: swapping the two gates fails both.
+- **Same UNCROSSED subject as the type gate**, and required rather than merely
+  consistent: crossing on `.` would move resolution (`/mnt/.` must still mean
+  `/mnt`), so the two halves of one gate must read one object. A mount whose
+  point and root differ in X is judged by the point — which grants nothing,
+  since `.` stays put, `..` pops to a Spoor the caller already holds, and any
+  real component crosses and X-checks the mounted root as always.
+- **I-28 is strengthened, not touched** — same argument as the type gate: this
+  can only turn a success into a failure.
+- **No single-hop twin** (unlike #81): `SYS_WALK_OPEN` and the name-op
+  validator reject `.` / `..` outright with `-T_E_INVAL`, so no dot ever
+  reaches a permission decision outside these two arms.
+
+Cost — two A/Bs, **measured** in `stalk.dot_xsearch` (the same resolution with
+and without a trailing `.`, so the delta is attributable to the gate alone):
+
+| path shape | without `.` | with `.` | delta |
+|---|---|---|---|
+| pounce (a run fused the tip's attrs into the walk) | 1 | 1 | **0 — free** |
+| per-component (`nowa`; the shape every `..` path takes) | 3 | 4 | **+1** |
+
+So the gate is free wherever a `carried` record exists, and otherwise costs
+exactly the one `stat_native` an ordinary component pays at the same position —
+not a new cost class. On dev9p that call is a Larder attr-cache hit; that cache
+exists for precisely this traffic (see `dev9p_stat_native`).
+
+Coverage note: an in-guest **denial** probe is not possible from the boot
+chain — joey holds `CAP_ALL`, and `CAP_HOSTOWNER` short-circuits `perm_check`,
+so a 000 directory stays searchable for it and such a probe would pass on the
+unfixed kernel too. The denial is proven by `stalk.dot_xsearch`, whose Proc has
+`caps = CAP_NONE` (real `stalk`, real `perm_check`, real perm-enforcing Dev).
+What the guest proves is the positive direction: probe81/82/83 for the boot
+chain, and `ergo-1(e)` (`cd ../..`) for a real non-SYSTEM session user.
 
 ### A trailing slash asserts a directory (#82)
 

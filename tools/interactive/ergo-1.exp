@@ -43,6 +43,20 @@ lc_send "cd"
 lc_run_expect "pwd" "/home/michael"
 lc_pass "ergo-1(d): bare `cd` returns to \$home (#113)"
 
+# #84: '..' is now a lookup performed IN the tip, so it runs an X-search there.
+# This is the only LS-CI leg that walks up as a REAL session user -- joey holds
+# CAP_HOSTOWNER and so bypasses perm_check entirely, making an in-guest DENIAL
+# unobservable from the boot chain; what a real user can prove is the positive
+# direction, that an over-eager gate has not broken `cd ..`.
+#
+# We are in /home/michael from (d). `cd ../..` reaches / -- asserted via the
+# "srv" mount entry that (c) already established, NOT via pwd: lc_expect is an
+# exact SUBSTRING match, so a `pwd` matched against "/home" would also match
+# "/home/michael" and pass even if the walk-up had failed entirely.
+lc_send "cd ../.."
+lc_run_expect "la" "srv"
+lc_pass "ergo-1(e): `cd ../..` walks up as a real user (#84 X-search gate)"
+
 lc_quit
 lc_pass "LS-CI ergo-1: ut Phase-1 ergonomics (home + aliases) verified"
 exit 0

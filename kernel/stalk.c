@@ -82,6 +82,58 @@ static bool stalk_tip_is_dir(struct Spoor **trail, int depth,
     return (tip->qid.type & QTDIR) != 0;
 }
 
+// stalk_tip_may_search -- may the caller SEARCH the current resolution
+// position? Same subject as stalk_tip_is_dir: the trail tip, or `start` at
+// depth 0. Returns 0, or the errno to fail with.
+//
+// #84: POSIX resolves "." and ".." INSIDE the current directory, so they are
+// lookups like any other and require X (search) on the directory performing
+// them. Measured on a POSIX host, non-root: with `chmod 000 d`, `stat("d")`
+// SUCCEEDS (the lookup happens in d's parent) while `stat("d/.")`,
+// `stat("d/..")` and `stat("d/x")` are all EACCES. The real-component arm has
+// always X-checked its parent; the dot arms never reach that arm, so `d000/..`
+// resolved where the sibling `d000/x` was denied. Both tokens need it -- the
+// task named only '..', but the two measure identically in every row, exactly
+// as #81 found for the type gate.
+//
+// ORDER: the caller runs stalk_tip_is_dir FIRST. That is #79's rule (the x bit
+// on a non-directory is meaningless) and it is what POSIX does: a 0000 REGULAR
+// FILE answers ENOTDIR for `f/..`, not EACCES -- measured, both tokens. Type
+// before permission also keeps this gate free in the common failure.
+//
+// COST: `carried` when the pounce fused the tip's attrs into the walk that
+// produced it (the '.' case -- a '.' breaks a pounce RUN but does not disable
+// pouncing, so the previous run's leaf record describes exactly this tip),
+// else one spoor_stat_native. That stat is NOT a new cost class: it is the
+// same call the real-component arm makes at this same position, and on dev9p
+// it is served from the Larder attr cache -- which exists for precisely this
+// traffic ("the base X-check (stalk.c) re-stat storm", dev9p_stat_native).
+// A '..' path never pounces at all (path_has_dotdot), so nothing is slowed
+// that was fast.
+//
+// The subject is UNCROSSED, matching stalk_tip_is_dir -- required, not merely
+// consistent: crossing on '.' would move resolution (`/mnt/.` must still mean
+// `/mnt`, the divergence that comment refuses to introduce), so the two halves
+// of one gate must read one object. A mount whose point and root differ in X
+// is therefore judged by the point. That grants nothing: '.' stays put and
+// '..' pops to a Spoor the caller already holds, and reaching any real
+// component crosses and X-checks the mounted root as always.
+static int stalk_tip_may_search(struct Proc *p, struct Spoor **trail, int depth,
+                                struct Spoor *start, const struct t_stat *carried,
+                                bool carried_valid) {
+    struct Spoor *tip = (depth > 0) ? trail[depth - 1] : start;
+    if (!tip->dev || !tip->dev->perm_enforced) return 0;
+
+    struct t_stat st;
+    if (carried_valid) {
+        st = *carried;
+    } else {
+        int sr = spoor_stat_native(tip, &st);
+        if (sr != 0) return err_code(sr);
+    }
+    return (perm_check(p, &st, PERM_X) != 0) ? T_E_ACCES : 0;
+}
+
 // Clunk every owned trail entry trail[0..depth). Used both on the success path
 // (after the quarry is popped, this releases the ancestors) and on every
 // failure path.
@@ -292,6 +344,11 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         if (clen == 1 && path[s] == '.') {
             if (!stalk_tip_is_dir(trail, depth, start))
                                                  { err = T_E_NOTDIR; goto fail; }
+            // #84: '.' is a lookup performed IN the tip, so it needs X there.
+            // Type first (a non-directory is ENOTDIR, never EACCES).
+            int se = stalk_tip_may_search(p, trail, depth, start,
+                                          &carried, carried_valid);
+            if (se != 0)                         { err = se;         goto fail; }
             continue;
         }
 
@@ -309,6 +366,13 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         if (clen == 2 && path[s] == '.' && path[s + 1] == '.') {
             if (!stalk_tip_is_dir(trail, depth, start))
                                                  { err = T_E_NOTDIR; goto fail; }
+            // #84: the pop is a lookup of ".." performed IN the tip, so it
+            // needs X on the directory being popped OUT of -- checked BEFORE
+            // the pop, while that directory is still the subject. Containment
+            // is untouched: the gate can only turn a success into a failure.
+            int se = stalk_tip_may_search(p, trail, depth, start,
+                                          &carried, carried_valid);
+            if (se != 0)                         { err = se;         goto fail; }
             if (depth > 0) spoor_clunk(trail[--depth]);
             carried_valid = false;   // hygiene; unreachable while pounce_ok
             continue;
