@@ -310,6 +310,85 @@ objective. Option B alone is the purist answer and would be defensible if per-sy
 latency proves acceptable; Option A alone should be rejected on trust-surface grounds
 regardless of convenience.
 
+### 4.1 The forward *destination* — an unresolved premise (V-3 entry, 2026-07-30)
+
+Option C's split rule is sound and stands. Its other half — "everything else
+**forwards to the userspace supervisor**" — names a destination that, measured
+against the tree, cannot serve what it is supposed to serve. This was found on
+entry to V-3, before any of it was built.
+
+**The verified fact.** No syscall lets one Proc mutate another Proc's address
+space, handle table, or process tree. `burrow_share_into` (`kernel/burrow.c:790`)
+and `handle_alloc(struct Proc *p, ...)` both *take* a target Proc, but neither is
+reachable from EL0 for a Proc other than the caller; `I-4` records the 9P
+handle-transfer path as still future. So a separate supervisor Proc cannot serve
+`mmap`, `munmap`, `mprotect`, `brk`, `openat`, `close`, `pipe2`, `dup3`, `clone`,
+`execve`, `socket`, `futex`, `chdir`, or an `ioctl`/`read`/`write` on a guest fd.
+That is substantially all of `ARCH §11.5`'s top-50: the forwarded set a
+supervisor Proc could actually serve is **empty**.
+
+It is not a corner case. `third_party/musl/src/env/__init_tls.c:137` mmaps for
+TLS whenever it exceeds the builtin block, and mallocng needs
+`mmap`/`madvise`/`mremap` — a Linux guest cannot reach `main` without `mmap`.
+
+**Why the peers do not have this problem.** The research that should have
+accompanied §4 originally:
+
+- **Heritage — Plan 9 `linuxemu`.** A *userspace* program that intercepts
+  syscalls through the **`/proc` debug interface**: the traced process halts in
+  the kernel at each syscall and the tracer drives it. It works because the
+  tracer never acts *for* the guest — it makes the **guest** act, by rewriting
+  the guest's own registers. Thylacine has this mechanism already: the I-39
+  debug-fs, modeled in `specs/debug_stop.tla` and audited at 8a/8b/8c.
+- **SOTA — Fuchsia Starnix.** Restricted mode (`zx_restricted_enter`): the
+  Starnix kernel runs in the *normal mode of the same thread* that runs the Linux
+  code. No IPC, no context switch. Fuchsia built it (RFC-0261, *"Fast and
+  efficient user space kernel emulation"*) precisely because the
+  separate-process approach was too slow. It needs a hardware/kernel mode
+  Thylacine does not have.
+- **gVisor** reaches the same place by a third road: the Sentry *owns* the
+  guest's address space (via ptrace, or as a VM), which is exactly the authority
+  a Thylacine supervisor Proc lacks.
+
+The common shape: a compat supervisor works only when it either **is** the guest
+(same thread), or **owns** the guest (debug/VM authority). "A peer Proc on the
+other end of a ring" is neither, and that is the premise §4 assumed without
+checking.
+
+**Decision (user-voted 2026-07-30): V-3 is DEFERRED, and its destination is
+decided by V-5.** Building the channel now would repeat the arc's own corrected
+error — V-2's tables deliberately had no caller until V-7 made one possible
+(§6.18 "why the table came first"), and a forward channel with an empty servable
+set is the same mistake one layer up. Sockets (V-5) are the first chunk that
+genuinely needs a destination, and its requirement — multi-step orchestration
+(`open /net/tcp/clone`, read the number, open `ctl`) that no single
+call-and-reply can express — is what will decide the shape. The live candidates,
+recorded so V-5 does not re-derive them:
+
+1. **Debug-injection** (the heritage answer): the supervisor stops the guest at a
+   forwarded call, rewrites its registers so the **guest** performs the work with
+   its own authority, and resumes. I-43 holds trivially. Near-zero new kernel
+   surface — `proc_debug_fault_stop` is already the template. Costs a stop +
+   several `/proc` ops + a resume per forward, and occupies the guest's debug
+   slot.
+2. **A native helper thread inside the guest Proc** (Starnix-by-threads): threads
+   of one Proc share address space, handle table, Territory *and* authority, so a
+   helper can serve everything with exactly the guest's rights. Needs the
+   phenotype to become per-Thread and a new intra-Proc park/wake.
+3. **As sketched** (a ring to a peer Proc) — only viable with new cross-Proc
+   mmap/handle-install/spawn authority, each a new privilege relationship needing
+   its own invariant. That is the trust surface choosing C over A was meant to
+   avoid.
+
+**The consequence that binds code today: with no supervisor, `FORWARD` means
+`ENOSYS`, which inverts the argument-domain calculus.** §6.19 argues "declining
+is always safe (the supervisor is strictly more capable)". That was true with a
+live supervisor and is **false now** — a declined call is a guest-visible
+failure, not a slow path. So a T2 translator must admit everything it can prove
+*exactly equivalent*, not merely the minimum that is easy to defend. Narrowness
+is no longer free. (This is what promotes `mmap`/`munmap` from §6.18's FORWARD
+rows to T2 rows under the rule V-2b already established — see §6.21.)
+
 ---
 
 ## 5. Mechanism (settled, given any of A/B/C)
@@ -1527,9 +1606,96 @@ one build: admitting `AT_SYMLINK_NOFOLLOW` fails `fstatat_domain`, and flipping 
 79 row to FORWARD fails `rejects_are_deliberate` — **1226/1228, exactly two tests,
 no collateral.**
 
----
+### 6.21 Tier 2 — `mmap`, `munmap`, and the protection question (V-2d, design)
 
-## 7. The vivarium — the container runner
+§4.1 defers V-3 and thereby makes `FORWARD` mean `ENOSYS`, so `mmap` — which
+V-2a classified FORWARD as "the 'needs judgement' case the rule exists to
+exclude" — stops being a slow path and becomes a wall. It is on musl's critical
+path twice over (`__init_tls.c:137` for TLS, mallocng for every heap area), so a
+Linux guest cannot reach `main` without it. V-2b's argument-domain rule is
+exactly the tool: `openat` was promoted the same way, and `vivarium.c` already
+carries that correction of a V-2a FORWARD.
+
+**`mmap` (222) → `SYS_BURROW_ATTACH_LAZY` (83).** The target takes a length and
+returns a kernel-chosen vaddr. The admitted domain:
+
+| argument | admitted | why |
+|---|---|---|
+| `addr` | **any** | Without `MAP_FIXED`, Linux states `addr` is *a hint* the kernel may ignore; the caller learns the real address from the return value. Ignoring it is conforming, not a compromise |
+| `len` | `0 < len <= BURROW_ATTACH_MAX` | `len == 0` is `EINVAL` on both sides |
+| `prot` | **any without `PROT_EXEC`** | see below |
+| `flags` | exactly `MAP_PRIVATE\|MAP_ANONYMOUS` | measured: both musl `pthread_create` sites and all four mallocng sites pass exactly this. `MAP_STACK`/`MAP_NORESERVE` are *not* passed by musl, so admitting them would be speculation |
+| `fd` | `-1` | Linux ignores `fd` under `MAP_ANONYMOUS`; requiring `-1` is conforming and is what musl and glibc emit |
+| `offset` | `0` | anonymous |
+
+`MAP_FIXED` and `MAP_FIXED_NOREPLACE` decline: there they are a requirement, not
+a hint, and the target chooses the address. `MAP_SHARED` declines — no shared
+anonymous memory exists to map.
+
+**The protection question, decided explicitly.** Thylacine anonymous memory is
+always RW/XN, and **there is no prot-mutation syscall at all** — that is an I-12
+design choice, not a gap. So a phenotyped `mmap` cannot honour `PROT_NONE` or
+`PROT_READ` exactly; it grants read+write regardless. Two options, and the strict
+one loses:
+
+- Declining every prot but `PROT_READ|PROT_WRITE` is the letter of §6.19's "never
+  silently mistranslate". But `PROT_NONE` is the *dominant* anonymous shape in
+  musl — the guard page (`pthread_create.c:295`) and mallocng's meta areas
+  (`malloc.c:82`) — so declining it means malloc never initialises and nothing
+  runs at all.
+- Admitting it is a **stated fidelity degradation**, and musl itself is the
+  evidence that it is the sanctioned one: `mallocng/malloc.c:92` reads
+  `if (mprotect(p, pagesize, PROT_READ|PROT_WRITE) && errno != ENOSYS) return 0;`
+  — the libc *anticipates* a system without `mprotect` and proceeds on the
+  assumption that the `PROT_NONE` mapping is already usable, which is precisely
+  what Thylacine produces.
+
+So: **any prot without `PROT_EXEC` is admitted and yields RW.** The consequence
+is named rather than buried — *guard pages are not protective under the Linux
+phenotype, and a `PROT_READ` anonymous mapping is writable* — and it belongs in
+§9's ladder. It is a fidelity loss, never an authority grant: the pages are the
+guest's own, every gate is unchanged, and nothing crosses a Proc boundary, so
+I-43 is untouched.
+
+`PROT_EXEC` is the hard line and declines. An executable anonymous mapping is
+what `CAP_JIT`/I-42 governs (`JIT-ON-WX-DESIGN.md`); a phenotype must never hand
+one out, and W^X (I-12) forbids the RW-and-X mapping the naive translation would
+produce.
+
+**`mprotect` (226) becomes an explicit `ENOSYS` row.** It is currently unclassified,
+so it reaches `ENOSYS` through `vivarium_translate`'s default — the right answer
+by accident. The file's own standard is that "a number we have never considered
+and one we have considered and rejected are different facts", so it is recorded
+with its reason: musl tolerates `ENOSYS` here by construction, and Thylacine has
+no prot-mutation syscall to translate to.
+
+**`munmap` (215) → `SYS_BURROW_DETACH` (38), over a domain the arguments cannot
+express.** V-2a's rejection stands on its facts: detach demands an exact VMA
+match while Linux permits partial and multi-mapping unmaps, and — the part that
+makes a bare renumber worse than merely incomplete — *Linux `munmap` of an
+unmapped range succeeds*, while detach returns `-1`. So the translation is wrong
+in both directions.
+
+This is the first T2 row whose domain is a question about **state**, not about
+arguments, so the decide/build split cannot hold its usual shape: no pure
+function can know whether a VMA matches. The shell therefore decides by asking
+the machinery that already owns the answer rather than re-deriving it — attempt
+`sys_burrow_detach_for_proc`, and on refusal use `vma_lookup` to separate *no
+mapping there* (Linux: success, return 0) from *a mapping that is not an exact
+match* (decline). It re-implements no matching logic, which is what keeps it a
+decode rather than a second implementation.
+
+The exact-match subset is the one that matters: a program unmaps what it mapped,
+and mallocng frees whole groups it allocated whole. The two-step is a benign
+self-race (a peer thread of the guest could map into the window between the
+attempt and the lookup) — the guest racing itself in its own address space, which
+Linux does not define either.
+
+Coverage: `vivarium.mmap_domain` (each admitted argument and each decline by
+name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-ENOSYS
+and `mmap`/`munmap`-are-T2 rows in `rejects_are_deliberate`, and prover legs in
+`viv-pheno-probe` that mmap, write through the mapping, read it back, and unmap —
+the end-to-end proof that the pages are real and the round trip closes.
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel
 surface beyond §4's.
@@ -1730,6 +1896,20 @@ non-trivial script.* Concretely `curl`, `wget`, `python3`, `busybox`, `redis-cli
 A Linux binary needing anything in the OUT list gets a clean `ENOSYS`, never a silent
 wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
 
+**DEGRADED — the third tier (added at V-2d).** IN and OUT are not exhaustive: a
+call can be served, and correct enough to run real programs, while differing from
+Linux in a way a program could in principle observe. Those belong neither in the
+silence of IN nor the honesty of OUT, so they are listed here explicitly. The
+standing rule is that a degradation may cost **fidelity**, never **authority** or
+**containment** — a difference confined to the guest's own state is a listable
+degradation; anything that changes what the guest can *reach* is not, and is OUT.
+
+| Degradation | Detail |
+|---|---|
+| **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own |
+| **`exit(N)` is boolean** (task #91) | Any nonzero status reports 1, a Thylacine-wide v1.0 property (`sys_exit_group_handler` collapses to `exits("fail")`). A shell reading `$?` in a container sees 0-or-1 |
+| **`/proc/self` names the mounter** (task #90) | The per-container diorama reports `viv` rather than the reading Proc |
+
 ---
 
 ## 10. Build arc — V-0..V-8
@@ -1739,7 +1919,7 @@ wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
 | V-0 | Scripture | This document; the §4 fork resolved; `ARCH §11.5/§11.6` corrected (R-1, R-2); I-43 minted; NOVEL entry | user signoff |
 | V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof. **V-1a LANDED** (the field + the advisory `elf_brand_hint`). **V-1b LANDED**: the declaration (`SPAWN_PHENO_LINUX` in `sys_spawn_args.pheno_flags`, consuming the must-be-0 `_pad_allow` slot at offset 92 -> a zero-filled pre-V-1b request still means inherit) + the syscall-entry branch (T1 renumber-in-place then FALL THROUGH to the native switch; the three T2 shells over the V-2 pure translators; FORWARD and ENOSYS kept as separate arms so V-3 is a one-line change) + `sys_fstat_for_proc` extracted so the phenotyped path shares the native core + rule 4's advisory diagnostic (the hint's first caller, on an already-failed load) + `viv`'s `org.thylacine.phenotype` manifest annotation | native suite byte-unchanged (1237/1237); **PASS in-boot on two vantages** -- leg A `viv-pheno-probe native` proves a Linux number is NOT translated without a declaration (`brk` -> -1, not -ENOSYS), leg B `viv run /vivarium/pheno` proves the whole chain with a container entrypoint that speaks only raw Linux numbers and moves real bytes (openat/read/lseek/fstat/newfstatat/write/close, the two stat paths cross-checked on `(st_dev, st_ino)`, the `AT_SYMLINK_NOFOLLOW` reject still rejecting) and dies through Linux `exit_group`; revert-probed |
 | V-2 | The translation table | The §4-C stateless 1:1 set; the split rule enforced | a static `hello` (built by *Linux* toolchain) runs and exits 0 |
-| V-3 | Supervisor channel | The forward mechanism + `specs/phenotype.tla` model-first (if B/C) | spec TLC-green + park/wake audit |
+| V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. The shape is decided by **V-5**, the first chunk that genuinely needs a destination; §4.1 records the three live candidates and the peer evidence so V-5 does not re-derive them. `specs/phenotype.tla` lands with whatever V-5 chooses | (deferred; the gate travels with V-5) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
 | V-5 | Sockets | The `/net` translation | **`curl` fetches a URL** (ROADMAP §9.2) |
 | V-6 | Signals | Tier 0, then Tier 1 (audit-bearing) | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
@@ -1771,6 +1951,21 @@ The real order, and the standing plan (user-directed 2026-07-29):
    gives V-2's tables their first caller, and `docs/reference/NN-vivarium.md`
    lands with it.
 4. **V-3 / V-5 / V-6**, then **V-8** (the I-43 focused audit + close).
+
+**CORRECTED AGAIN 2026-07-30, at V-3's entry, and for the same reason as the
+first correction.** V-3 cannot precede V-5: §4.1 shows the forward channel's
+sketched destination has an empty servable set, so building it now would be a
+mechanism without a consumer — precisely the error the paragraph above corrects
+for V-1b/V-7. The order from here:
+
+1. **V-2d** — `mmap` + `munmap` as argument-domain T2 rows (§6.21). This is the
+   unblocking work: `mmap` is on musl's critical path (TLS + malloc), and §4.1's
+   inverted calculus makes it a compatibility requirement rather than an
+   optimisation. It applies a rule that is *already binding* (V-2b), so it needs
+   no new decision.
+2. **V-6** — signals. Kernel-side either way, so it is independent of §4.1.
+3. **V-5** — sockets, which **decides V-3's shape** and then builds it.
+4. **V-8** — the I-43 focused audit + close.
 
 ---
 
