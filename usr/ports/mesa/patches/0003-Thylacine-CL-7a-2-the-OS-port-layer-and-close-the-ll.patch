@@ -1,7 +1,7 @@
 From 6129b3d8b8f68b51caf5c8cea3e7025812068905 Mon Sep 17 00:00:00 2001
 From: Thylacine Clade <clade@thylacine.invalid>
 Date: Thu, 30 Jul 2026 14:13:39 +0000
-Subject: [PATCH 3/3] Thylacine CL-7a-2: the OS-port layer, and close the
+Subject: [PATCH 3/4] Thylacine CL-7a-2: the OS-port layer, and close the
  llvmpipe link
 
 Registers Thylacine with Mesa's OS-detection layer and links the two glapi

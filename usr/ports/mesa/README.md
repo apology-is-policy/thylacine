@@ -33,7 +33,7 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`bb4a37cca7488ca96813eff091e07bd190bbdaf0`). Re-check it after any refresh —
+(`b32a1ca2847e19d8aefb156313cfb7084597d253`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
@@ -139,6 +139,34 @@ set wrong* (CL-7 entry / CL-7a-1):
     `__u8..__u64` from `<stdint.h>` itself and needs only the ioctl-encoding
     macros, which musl has in `bits/ioctl.h`. Thylacine is exactly the Hurd shape
     here.
+
+- `0004` — CL-7b-1: JIT through the I-42 dual-mapped code Burrow. Three edits,
+  and the first was found only by checking a symbol after a build that reported
+  success.
+
+  **`USE_JITLINK` had to gain `__thylacine__`, and this is the load-bearing
+  one.** That macro selects the object *linking layer* and is a **different
+  axis** from `GALLIVM_USE_ORCJIT`, which selects ORC vs MCJIT — conflating them
+  cost a build here. aarch64 is not in the `USE_JITLINK` list (RISCV,
+  LoongArch and Win32 only), so the ORC path still ran on
+  `RTDyldObjectLinkingLayer`, whose `SectionMemoryManager` allocates RW and then
+  calls `mprotect` to add `PROT_EXEC`. Thylacine has no mprotect at all, and
+  `MemoryMapper` is a **JITLink-only** seam — so on RTDyld the dual-map mapper
+  is never even consulted. Third wrong-default-that-builds-clean in this arc
+  after `llvm_has_mcjit` and `LLVM_ENABLE_RTTI`, and the quietest of the three:
+  the build succeeds, the binary links, and the fault is at runtime.
+
+  With JITLink selected, the `ObjectLinkingLayer` takes
+  `MapperJITLinkMemoryManager` over `DualMapMemoryMapper` (llvm-thylacine)
+  instead of `InProcessMemoryManager`. Reservation granularity is 1 MiB: each
+  reservation is one `SYS_JIT_CREATE`, charged whole against the per-Proc page
+  budget (I-32), and a larger allocation rounds up to a multiple of it, so
+  nothing is capped by the choice.
+
+  `osmesa_prove.c` also calls `SYS_JIT_CREATE` directly before any of Mesa runs.
+  llvmpipe reaches the same syscall eventually, but behind enough machinery that
+  a missing capability, a broken mapper and an unrelated gallivm fault all
+  present identically as "OSMesaCreateContextExt returned NULL".
 
 ## Refresh (when the fork changes)
 

@@ -1,0 +1,161 @@
+From be63d45ce669b366a306a79ce23abc9aa048d5a1 Mon Sep 17 00:00:00 2001
+From: Thylacine Clade <clade@thylacine.invalid>
+Date: Thu, 30 Jul 2026 14:47:04 +0000
+Subject: [PATCH 4/4] Thylacine CL-7b-1: JIT through the I-42 dual-mapped code
+ Burrow
+
+Three edits, one of which was found only by checking a symbol.
+
+lp_bld_init_orc.c had to join the USE_JITLINK list. That macro selects the
+object LINKING LAYER and is a different axis from GALLIVM_USE_ORCJIT, which
+selects ORC vs MCJIT -- conflating them cost a build. aarch64 is not in the
+list (it is RISCV/LoongArch/Win32 only), so the ORC path still ran on RTDyld,
+whose SectionMemoryManager allocates RW and then mprotects PROT_EXEC on. There
+is no mprotect on Thylacine at all, and MemoryMapper is a JITLink-only seam, so
+on RTDyld the dual-map mapper is never even consulted. Third
+wrong-default-that-builds-clean in this arc after llvm_has_mcjit and
+LLVM_ENABLE_RTTI, and the quietest: the build succeeds and the fault is at
+runtime.
+
+The ObjectLinkingLayer then takes MapperJITLinkMemoryManager over
+DualMapMemoryMapper (llvm-thylacine) instead of InProcessMemoryManager: one
+physical region, an RW writer alias and an RX exec alias, published with an
+explicit icache sync. Reservation granularity 1 MiB -- each reservation is one
+SYS_JIT_CREATE charged whole against the per-Proc page budget, and larger
+allocations round up, so nothing is capped by it.
+
+osmesa_prove.c calls SYS_JIT_CREATE directly before any of Mesa runs. llvmpipe
+reaches the same syscall eventually, but behind enough machinery that a missing
+capability, a broken mapper and an unrelated gallivm fault all look identical
+("OSMesaCreateContextExt returned NULL"). Ten lines separate them.
+---
+ .../auxiliary/gallivm/lp_bld_init_orc.cpp     | 39 ++++++++++++++++++-
+ src/gallium/targets/osmesa/osmesa_prove.c     | 39 +++++++++++++++++++
+ 2 files changed, 77 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp b/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
+index 16357fb..416687b 100644
+--- a/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
++++ b/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
+@@ -37,6 +37,10 @@
+ #include <llvm/ADT/StringMap.h>
+ #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+ #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
++#ifdef __thylacine__
++#include <llvm/ExecutionEngine/Orc/MapperJITLinkMemoryManager.h>
++#include <llvm/ExecutionEngine/Orc/MemoryMapper.h>
++#endif
+ #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
+ #include <llvm/ExecutionEngine/ObjectCache.h>
+ #include "llvm/ExecutionEngine/JITLink/JITLink.h"
+@@ -56,7 +60,18 @@
+ /* conflict with ObjectLinkingLayer.h */
+ #include "util/u_memory.h"
+ 
+-#if DETECT_ARCH_RISCV64 == 1 || DETECT_ARCH_RISCV32 == 1 || DETECT_ARCH_LOONGARCH64 == 1 || (defined(_WIN32) && LLVM_VERSION_MAJOR >= 15)
++/* Thylacine (CL-7b) joins this list, and it is load-bearing rather than a
++ * preference. This selects the OBJECT LINKING LAYER, which is a different axis
++ * from GALLIVM_USE_ORCJIT (that one selects ORC vs MCJIT). aarch64 is absent
++ * here, so without this the ORC path still runs on RTDyld, whose
++ * SectionMemoryManager allocates RW and then calls mprotect to add PROT_EXEC --
++ * and Thylacine has no mprotect at all. MemoryMapper is a JITLink-only seam, so
++ * on RTDyld the dual-map mapper is never even consulted.
++ *
++ * The failure this prevents is silent: the build succeeds, the binary links,
++ * and the shader compile faults at runtime. Third wrong-default-that-builds-
++ * clean in this arc, after llvm_has_mcjit and LLVM_ENABLE_RTTI. */
++#if DETECT_ARCH_RISCV64 == 1 || DETECT_ARCH_RISCV32 == 1 || DETECT_ARCH_LOONGARCH64 == 1 || (defined(_WIN32) && LLVM_VERSION_MAJOR >= 15) || defined(__thylacine__)
+ /* use ObjectLinkingLayer (JITLINK backend) */
+ #define USE_JITLINK
+ #endif
+@@ -345,8 +360,30 @@ LPJit::LPJit() :jit_dylib_count(0) {
+ #else
+             [&](ExecutionSession &ES, const llvm::Triple &TT) {
+ #endif
++#ifdef __thylacine__
++               /* Thylacine (CL-7b): InProcessMemoryManager cannot work here.
++                * It allocates RW and then raises the mapping to RX, but this
++                * system has no mprotect at all and its mmap ignores PROT --
++                * so the allocation succeeds, the code lands, and nothing is
++                * ever executable. I-42 supplies a dual-mapped code Burrow
++                * instead: one physical region, an RW writer alias and an RX
++                * exec alias, published with an explicit icache sync. See
++                * llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp.
++                *
++                * 1 MiB reservation granularity: every reservation is one
++                * SYS_JIT_CREATE and is charged whole against the per-Proc page
++                * budget (I-32), so slabs want to be big enough that shader
++                * modules are sub-allocated out of AvailableMemory rather than
++                * reserved one-for-one. An allocation larger than this is
++                * rounded up to a multiple of it, so nothing is capped by it.
++                */
++               return std::make_unique<ObjectLinkingLayer>(
++                  ES, ExitOnErr(MapperJITLinkMemoryManager::CreateWithMapper<
++                                   DualMapMemoryMapper>(1024 * 1024)));
++#else
+                return std::make_unique<ObjectLinkingLayer>(
+                   ES, ExitOnErr(llvm::jitlink::InProcessMemoryManager::Create()));
++#endif
+             })
+ #else
+ #if LLVM_USE_INTEL_JITEVENTS
+diff --git a/src/gallium/targets/osmesa/osmesa_prove.c b/src/gallium/targets/osmesa/osmesa_prove.c
+index 3080242..afb71e5 100644
+--- a/src/gallium/targets/osmesa/osmesa_prove.c
++++ b/src/gallium/targets/osmesa/osmesa_prove.c
+@@ -27,6 +27,43 @@
+ #define W 64
+ #define H 64
+ 
++#ifdef __thylacine__
++#include <stdint.h>
++
++/* Ask the kernel for a code region directly, before any of Mesa runs.
++ *
++ * llvmpipe reaches the same syscall eventually, through gallivm -> ORC ->
++ * DualMapMemoryMapper, but it reaches it behind enough machinery that a
++ * failure there is ambiguous: "OSMesaCreateContextExt returned NULL" is what
++ * a missing capability, a broken mapper and an unrelated gallivm problem all
++ * look like. Ten lines here separate them, and they run before anything that
++ * could mask the answer. */
++static void thyla_jit_probe(void)
++{
++    struct { uint64_t writer_va, exec_va; } reg = { 0, 0 };
++    register long x0 __asm__("x0") = 4096;
++    register long x1 __asm__("x1") = (long)(uintptr_t)&reg;
++    register long x8 __asm__("x8") = 101;   /* SYS_JIT_CREATE */
++    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
++
++    if (x0 == 0) {
++        printf("osmesa-prove: I-42 probe OK (writer=%p exec=%p) -- CAP_JIT held\n",
++               (void *)(uintptr_t)reg.writer_va, (void *)(uintptr_t)reg.exec_va);
++        register long d0 __asm__("x0") = (long)reg.writer_va;
++        register long d8 __asm__("x8") = 102;   /* SYS_JIT_DESTROY */
++        __asm__ volatile("svc #0" : "+r"(d0) : "r"(d8) : "memory", "cc");
++        printf("osmesa-prove: I-42 probe destroy rc=%ld\n", d0);
++    } else if (x0 == -13) {
++        printf("osmesa-prove: I-42 probe EACCES -- no CAP_JIT, llvmpipe cannot JIT\n");
++    } else {
++        printf("osmesa-prove: I-42 probe FAILED rc=%ld\n", x0);
++    }
++    fflush(stdout);
++}
++#else
++static void thyla_jit_probe(void) {}
++#endif
++
+ /* RGBA at (x, y); OSMesa's origin is bottom-left. */
+ static const unsigned char *px(const unsigned char *buf, int x, int y)
+ {
+@@ -48,6 +85,8 @@ int main(void)
+     const unsigned char *p;
+     int fails = 0;
+ 
++    thyla_jit_probe();
++
+     ctx = OSMesaCreateContextExt(OSMESA_RGBA, 16, 0, 0, NULL);
+     if (!ctx) {
+         printf("osmesa-prove: FAIL OSMesaCreateContextExt returned NULL\n");
+-- 
+2.43.0
+

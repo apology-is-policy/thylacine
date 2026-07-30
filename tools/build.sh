@@ -3133,6 +3133,16 @@ stage_clade() {
     fi
     # Resource headers (stddef.h/stdint.h/... at InstalledDir/../lib/clang/N/include).
     cp -R "$xbuild/$resdir" "$stage/$(dirname "$resdir")/"
+    # Clade CL-7b: llvmpipe's prover, staged alongside the toolchain because it
+    # is the same arc's payload and rides the same /clade bake -- a separate
+    # tree would need its own pool plumbing for one file. Cross-built on the
+    # GCP builder (Mesa + LLVM archives are ~200 MB of inputs that do not live
+    # here), pulled to build/clade/gl/ and staged stripped. Optional: a tree
+    # without it stages fine and joey's gl_probe() skips.
+    if [[ -f "$BUILD_DIR/clade/gl/osmesa-prove" ]]; then
+        cp "$BUILD_DIR/clade/gl/osmesa-prove" "$stage/bin/osmesa-prove"
+        chmod +x "$stage/bin/osmesa-prove"
+    fi
     # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
     mkdir -p "$stage/sysroot"
     cp -R "$sysroot/lib" "$stage/sysroot/lib"
