@@ -1384,6 +1384,32 @@ way on the first run:
    `-moutline-atomics`, and task #91 exists because an LSE regression there is
    **silent**.
 
+**The permanent builder (CL-7, #108/#110).** Once the wanted artifact stops
+being the multicall binary and becomes the *build tree* — CL-7 links Mesa against
+the cross-LLVM's 207 static libraries — a disposable VM is the wrong shape, since
+each iteration re-creates ~45 GiB of LLVM. `tools/clade-keep-build.sh` drives a
+machine that is **stopped, never deleted** (`thyla-keep`; the name sits outside
+`clade-gcp-build.sh`'s `clade-builder-*` prefix precisely so that tool's teardown
+cannot reach it), whose `/build` disk persists, turning a 24-minute cold build
+into an incremental `ninja`. Its stage 3 adds the ORC/ExecutionEngine slice that
+clang and lld never needed — the reason #108 looked like "there is no linkable
+LLVM" when 127 libraries were already sitting in the tree.
+
+Stage 1 is now `tools/clade-stage1.sh`, called by **both** drivers. It is the one
+part of the build `build.sh` cannot express (every `build.sh` target *consumes* a
+fork clang that already knows the triple), so the recipe has to live somewhere —
+and it must live in exactly one place, or the copy passes its own checks while
+silently disagreeing with the original, which is this tree's `struct t_stat`
+failure mode (#100). Three bugs surfaced only once the VM-only copies came under
+review, all of the same family — **a failure that reports success**: an empty
+`ninja $WANT` silently meant *build everything* while its verify loop iterated
+zero times; that empty list masked a SIGPIPE-under-`pipefail` race in the verify
+loop itself (`readelf | grep -m1` on a multi-member archive, which loses the race
+to a file and wins it to a tty); and bash does not inherit an `ERR` trap into
+functions, so a dead stage left its status file reading `running` forever. The
+recipe's own drift test is cheap and worth keeping: re-run stage 1 against an
+existing tree and require `ninja: no work to do.`
+
 **The gate: `lsp-probe`, generalized rather than forked.** The owed in-guest
 round-trip is the CL-6 twin of the gopls E2E (#76), and it is the SAME probe.
 Host unit tests were never the vehicle — `lsp_host.rs` lives in the binary

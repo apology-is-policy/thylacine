@@ -135,9 +135,13 @@ cmd_run() {
     # The WORKING COPY of build.sh, which may carry uncommitted recipe edits.
     # This is the whole anti-drift story: the VM runs this exact file.
     cp "$REPO_ROOT/tools/build.sh" "$payload/build.sh"
+    # Stage 1's recipe, shared verbatim with clade-keep-build.sh. It used to be
+    # inlined in the remote script below; two builder drivers now need it, and a
+    # hand-copied second mirror is the #100 failure mode.
+    cp "$REPO_ROOT/tools/clade-stage1.sh" "$payload/clade-stage1.sh"
     write_remote_script > "$payload/remote-build.sh"
 
-    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh remote-build.sh
+    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh clade-stage1.sh remote-build.sh
     gc compute scp "$payload/payload.tgz" "$name:~/payload.tgz" --zone="$ZONE" >/dev/null
 
     say "launching the build (detached; it survives an ssh drop)"
@@ -253,54 +257,18 @@ if [[ ! -d ~/llvm-thylacine ]]; then
   git clone --depth 1 --branch "TAG_PLACEHOLDER" \
       https://github.com/llvm/llvm-project.git ~/llvm-thylacine
 fi
-cd ~/llvm-thylacine
-git config user.email builder@thylacine.local
-git config user.name  "Clade Builder"
-# Idempotent: re-running must not stack the series twice.
-if ! git log --oneline -1 | grep -q Thylacine; then
-  git am ~/payload/patches/*.patch
-fi
-git log --oneline -"$(ls ~/payload/patches/*.patch | wc -l)"
-
 phase "stage 1: the fork's HOST toolchain (a stock clang cannot target aarch64-thylacine)"
-# The system clang only BOOTSTRAPS this; the product is the fork's own 22.1.8.
-#
-# The binutils + lld are built here on purpose. build.sh reaches for
-# llvm-ar/ranlib/nm/strip/readelf and ld.lld under $LLVM_PREFIX/$LLD_PREFIX,
-# and pointing those at the distro's llvm-18 would build the pouch sysroot
-# with a compiler four majors adrift from the one that builds everything
-# linked against it. That skew is not hypothetical in THIS tree: the v8.0
-# userspace floor (#71) rides -moutline-atomics, and task #91 is open
-# precisely because an LSE regression there is SILENT. One toolchain version
-# end to end removes the whole question.
-# NO "skip if bin/clang exists" guard. That guard is what makes a resumed run
-# WRONG rather than merely slow: a tree from an earlier run can have clang and
-# still be missing the binutils/lld this stage now also produces, and the guard
-# would skip straight past them into a stage 2 that needs them. cmake is
-# seconds when the cache is current and ninja is a no-op when everything is
-# built -- ninja already IS the incremental guard, so hand-rolling one only
-# adds a staleness bug.
-cmake -G Ninja -S ~/llvm-thylacine/llvm -B ~/llvm-thylacine/build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLVM_ENABLE_PROJECTS="clang;lld" \
-  -DLLVM_TARGETS_TO_BUILD="AArch64" \
-  -DLLVM_ENABLE_ASSERTIONS=OFF \
-  -DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
-  -DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF \
-  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-  -DLLVM_USE_LINKER=lld
-ninja -C ~/llvm-thylacine/build -j"$(nproc)" \
-  clang clang-resource-headers llvm-tblgen clang-tblgen \
-  llvm-ar llvm-ranlib llvm-nm llvm-strip llvm-readelf lld
-~/llvm-thylacine/build/bin/clang --version | head -2
-# Prove the fork driver actually knows the triple BEFORE spending an hour on
-# stage 2 -- this is the one thing that makes the fork necessary at all.
-echo 'int main(void){return 0;}' > /tmp/t.c
-if ! ~/llvm-thylacine/build/bin/clang --target=aarch64-thylacine -c /tmp/t.c -o /tmp/t.o 2>/tmp/t.err; then
-  echo "FORK DRIVER DOES NOT KNOW aarch64-thylacine -- the patch series did not apply as expected:"
-  cat /tmp/t.err; exit 1
-fi
-echo "fork driver knows aarch64-thylacine: OK"
+# The recipe -- patch series, cmake, ninja target list, and the triple probe --
+# lives in tools/clade-stage1.sh, shared verbatim with clade-keep-build.sh. It
+# was inlined here until a second builder driver needed it; keeping two copies
+# is the failure mode this file's header warns about (#100), so there is now one
+# original and two callers. Build dir is the default ($src/build), which is what
+# build.sh's hardcoded "$fork/build/bin/..." lookups expect.
+chmod +x ~/payload/clade-stage1.sh
+~/payload/clade-stage1.sh \
+    --src ~/llvm-thylacine \
+    --jobs "$(nproc)" \
+    --patches ~/payload/patches
 
 phase "clone thylacine + overlay the working-copy build.sh"
 if [[ ! -d ~/thylacine ]]; then
@@ -328,7 +296,12 @@ tools/build.sh clade
 phase "verify"
 ls -la ~/thylacine/build/clade/llvm-build/bin/llvm ~/thylacine/build/clade/llvm-build/bin/clangd
 # Read the artifact with the toolchain that produced it.
-~/llvm-thylacine/build/bin/llvm-readelf -h ~/thylacine/build/clade/llvm-build/bin/clangd | head -12
+# sed, not `head -12`: an early-exiting reader under `set -o pipefail` makes the
+# writer die on SIGPIPE and the pipeline yield 141, aborting the run for no
+# reason. It only fires when the writer still has output buffered, so it is
+# intermittent -- pre-existing here, and the same race that did fire in the
+# permanent builder's stage-3 verify.
+~/llvm-thylacine/build/bin/llvm-readelf -h ~/thylacine/build/clade/llvm-build/bin/clangd | sed -n '1,12p'
 status "OK"
 echo "BUILD OK"
 REMOTE
