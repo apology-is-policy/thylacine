@@ -139,9 +139,15 @@ cmd_sync() {
     # running the exact file under review is the whole anti-drift story.
     cp "$REPO_ROOT/tools/build.sh"        "$payload/build.sh"
     cp "$REPO_ROOT/tools/clade-stage1.sh" "$payload/clade-stage1.sh"
+    # CL-7a: the Mesa cross-build inputs. The shim llvm-config is not a
+    # convenience -- meson RUNS it during configure, so it is as much a build
+    # input on this machine as build.sh is.
+    cp "$REPO_ROOT/tools/clade-llvm-config-cross.sh" "$payload/clade-llvm-config-cross.sh"
+    cp "$REPO_ROOT/tools/clade-mesa-cross.sh"        "$payload/clade-mesa-cross.sh"
     write_remote_driver > "$payload/keep-stage.sh"
 
-    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh clade-stage1.sh keep-stage.sh
+    tar -C "$payload" -czf "$payload/payload.tgz" patches build.sh clade-stage1.sh \
+        clade-llvm-config-cross.sh clade-mesa-cross.sh keep-stage.sh
     gc compute scp "$payload/payload.tgz" "$INSTANCE:~/payload.tgz" \
         --zone="$ZONE" --strict-host-key-checking=no >/dev/null
 
@@ -149,9 +155,12 @@ cmd_sync() {
         tar -xzf payload.tgz -C payload
         chmod +x payload/keep-stage.sh payload/clade-stage1.sh payload/build.sh
         mkdir -p $THYLA_SRC/tools
-        cp payload/build.sh        $THYLA_SRC/tools/build.sh
-        cp payload/clade-stage1.sh $THYLA_SRC/tools/clade-stage1.sh
-        chmod +x $THYLA_SRC/tools/build.sh $THYLA_SRC/tools/clade-stage1.sh
+        cp payload/build.sh                    $THYLA_SRC/tools/build.sh
+        cp payload/clade-stage1.sh             $THYLA_SRC/tools/clade-stage1.sh
+        cp payload/clade-llvm-config-cross.sh  $THYLA_SRC/tools/clade-llvm-config-cross.sh
+        cp payload/clade-mesa-cross.sh         $THYLA_SRC/tools/clade-mesa-cross.sh
+        chmod +x $THYLA_SRC/tools/build.sh $THYLA_SRC/tools/clade-stage1.sh \
+                 $THYLA_SRC/tools/clade-llvm-config-cross.sh $THYLA_SRC/tools/clade-mesa-cross.sh
         echo synced"
     say "synced"
 }
@@ -405,35 +414,64 @@ do_stage3() {
   [[ "$fail" -eq 0 ]] || { echo "STAGE 3 FAILED"; exit 1; }
   echo "total LLVM .a libs: $(ls "$L"/lib/*.a | wc -l)"
 
-  # Mesa's meson probes `llvm-config --shared-mode` -- a query that takes NO
-  # module list, so llvm-config enumerates EVERY component it knows about and
-  # errors on the first archive that is absent. Meson treats any error there as
-  # "dependency not found", so a partially-built LLVM is rejected WHOLESALE even
-  # when every module Mesa actually asked for resolves cleanly. Building the
-  # requested slice is therefore not sufficient: the set has to be complete.
+  # Complete the set Mesa will actually LINK -- WITHOUT executing the cross tree's
+  # own llvm-config.
   #
-  # Derive the remainder from llvm-config's own complaint rather than hardcoding
-  # a list that would rot against the next LLVM.
-  phase "stage 3b: complete the library set (llvm-config --shared-mode must pass)"
-  local lc="$L/bin/llvm-config"
-  if [[ ! -x "$lc" ]]; then
-    if grep -qx "bin/llvm-config" <<< "$known"; then ninja -j"$JOBS" llvm-config; fi
+  # NEVER RUN $L/bin/llvm-config ON THE BUILDER. Measured (CL-7a): it is an
+  # aarch64-thylacine static binary, and on this Linux host it does not fail --
+  # it SPINS. Two instances burned 1343s and 348s of CPU in state R before being
+  # killed, with the stage reporting "running" the whole time. The previous
+  # version of this stage BUILT that binary and then ran `--shared-mode` on it,
+  # which is exactly how it hung. It had never executed before today: the cross
+  # tree carried no bin/llvm-config, so every prior run took the early-return
+  # below and the stage was recorded as working on the strength of a path that
+  # never ran.
+  #
+  # The shim (tools/clade-llvm-config-cross.sh) answers about this tree using the
+  # HOST llvm-config for the component graph plus the tree's own CMakeCache for
+  # facts, so it runs on the builder by construction. Its --libs assert also asks
+  # a TIGHTER question than `--shared-mode` did: which archives are missing for
+  # the modules Mesa actually requests, rather than for all ~130 components. That
+  # builds what is needed instead of everything.
+  phase "stage 3b: complete the set Mesa links (via the cross llvm-config shim)"
+  local shim="$THYLA_SRC/tools/clade-llvm-config-cross.sh"
+  if [[ ! -x "$shim" ]]; then
+    echo "  ASSERT FAILED: no shim at $shim -- run 'sync' first"; exit 1
   fi
-  if [[ ! -x "$lc" ]]; then
-    echo "  note: no llvm-config in the cross tree -- see the CL-7 cross-llvm-config seam"
-    return 0
-  fi
-  local sm_err miss
-  sm_err="$("$lc" --shared-mode 2>&1 >/dev/null || true)"
-  miss="$(sed -n 's|^llvm-config: error: missing: .*/lib/lib\([A-Za-z0-9_]*\)\.a$|\1|p' <<< "$sm_err" | sort -u | tr '\n' ' ')"
+  # Mesa 26.1.6's llvm_modules for a llvmpipe+osmesa+orcjit configure, read off a
+  # real cross configure (LLVM-DESIGN 16.20) rather than guessed. 'orcjit' is ours
+  # (upstream omits it, and a static ORC link needs it).
+  local mesa_modules="bitwriter core engine executionengine instcombine mcdisassembler
+                      mcjit native scalaropts transformutils coroutines lto orcjit"
+  local shimlog shimerr miss
+  shimlog="$(mktemp)"; shimerr="$(mktemp)"
+  CLADE_LLVM_TARGET_TREE="$L" CLADE_LLVM_CONFIG_LOG="$shimlog" \
+      "$shim" --link-static --libs $mesa_modules >/dev/null 2>"$shimerr" || true
+  # The shim's machine-readable contract: one "MISSING ARCHIVES: libFoo.a ..." line.
+  #
+  # `|| true` on the substitution is load-bearing, not decoration: a filter that
+  # matches nothing exits 1, and under `set -e` with `pipefail` that aborts the
+  # whole stage -- so "nothing is missing", the SUCCESS case, would read as a
+  # stage failure. (It did, first run.)
+  miss="$( { sed -n 's/^MISSING ARCHIVES://p' "$shimlog" \
+             | tr ' ' '\n' | sed 's/^lib//; s/\.a$//' | sort -u | tr '\n' ' '; } || true )"
   if [[ -n "${miss// /}" ]]; then
-    echo "  completing $(wc -w <<< "$miss") absent libraries"
+    echo "  completing $(wc -w <<< "$miss") absent libraries:$miss"
     ninja -j"$JOBS" $miss
+  else
+    echo "  every archive Mesa links is already present"
   fi
-  "$lc" --shared-mode >/dev/null 2>&1 \
-    || { echo "ASSERT FAILED: llvm-config --shared-mode still errors -- Mesa will report LLVM not-found"; exit 1; }
-  echo "  --shared-mode: $("$lc" --shared-mode)  (Mesa's LLVM probe will pass)"
-  echo "  --has-rtti:    $("$lc" --has-rtti)  (Mesa requires YES for gallivm's ORC backend)"
+  if ! CLADE_LLVM_TARGET_TREE="$L" "$shim" --link-static --libs $mesa_modules \
+         >/dev/null 2>"$shimerr"; then
+    # Show the shim's own words. Discarding them is how a precise error becomes
+    # "something went wrong in llvm-config somewhere".
+    echo "ASSERT FAILED: the shim still cannot answer --libs. It said:"
+    sed 's/^/    /' "$shimerr"
+    rm -f "$shimlog" "$shimerr"; exit 1
+  fi
+  rm -f "$shimlog" "$shimerr"
+  echo "  archives Mesa links: $(CLADE_LLVM_TARGET_TREE="$L" "$shim" --link-static --libs $mesa_modules | tr ' ' '\n' | grep -c '^-l')"
+  echo "  --has-rtti: $(CLADE_LLVM_TARGET_TREE="$L" "$shim" --has-rtti)  (Mesa requires YES for gallivm's ORC backend)"
 }
 
 case "${1:-}" in

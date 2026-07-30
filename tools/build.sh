@@ -2990,17 +2990,18 @@ build_clade() {
             -DLLVM_NATIVE_TOOL_DIR="$fork/build/bin"
             # The built binary RUNS on aarch64-thylacine + defaults codegen to it.
             -DLLVM_TARGETS_TO_BUILD=AArch64
-            # CL-7 REQUIREMENT, deliberately NOT set yet (LLVM-DESIGN section 16.19b):
-            # Mesa/llvmpipe needs -DLLVM_ENABLE_RTTI=ON here. Upstream LLVM defaults
-            # RTTI OFF; with it off Mesa refuses to configure, and its own suggested
-            # escape (-Dcpp_rtti=false) makes gallivm's ORC backend fail outright
-            # (lp_bld_init_orc.cpp:246 dynamic_cast). So the ORC path -- the seam
-            # CL-7k's DualMapMemoryMapper plugs into -- CANNOT build against an
-            # RTTI-less LLVM; RTTI is the only resolution, and it is what distros
-            # shipping llvmpipe already do. Adding the flag rebuilds this whole tree
-            # and changes the baked /clade artifact, so it lands WITH the CL-7a
-            # rebuild + re-gate rather than desyncing the recorded config from the
-            # pool that is currently gated. Do not add it as a drive-by.
+            # RTTI is ON for Mesa/llvmpipe (CL-7a; LLVM-DESIGN section 16.19b).
+            # Upstream LLVM defaults it OFF, and that default is unusable here: with
+            # RTTI off Mesa's configure refuses outright -- measured, in its own
+            # words, "LLVM was built without RTTI, so Mesa must also disable RTTI"
+            # -- and its suggested escape (-Dcpp_rtti=false) then breaks gallivm's
+            # ORC backend on a dynamic_cast over llvm::orc types. So the ORC path,
+            # which is the seam CL-7k's DualMapMemoryMapper plugs into, CANNOT be
+            # built against an RTTI-less LLVM. Every distro shipping llvmpipe sets
+            # this. Cost: a slightly larger clang/clangd (typeinfo emission), which
+            # is why it landed WITH the CL-7a rebuild + device re-gate rather than
+            # as a drive-by that would desync this recipe from the baked pool.
+            -DLLVM_ENABLE_RTTI=ON
             -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-unknown-thylacine
             -DLLVM_HOST_TRIPLE=aarch64-unknown-thylacine
             # clang;lld + the multicall driver (F3: lld is a member).

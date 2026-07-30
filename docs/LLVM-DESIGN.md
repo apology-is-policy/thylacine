@@ -959,6 +959,219 @@ Not yet measured (CL-7a's own work): a full llvmpipe *link*, and the
 on-device run. The smoke proves configure + the two load-bearing
 compiles, which is what the frontend decision needed.
 
+### 16.20 CL-7a: the cross plumbing (and what a cross configure found)
+
+CL-7a's first act is deliberately **not** the RTTI rebuild. The rebuild is
+the expensive step (a full cross LLVM), and §16.19 had already been wrong
+twice about what Mesa needs — so the order is: build the cross plumbing,
+run a cross *configure* against the existing RTTI-off tree, harvest the
+complete requirement set, and only then pay for one rebuild. That order
+found three things a rebuild-first sequence would have hit an hour later.
+
+#### The two tools
+
+`tools/clade-llvm-config-cross.sh` — a cross `llvm-config`. It splits the
+incoming questions by **authority**: the component *graph* ("what does
+`orcjit` pull in?") is a property of the LLVM version and is delegated to
+the fork's host `llvm-config`, which is the real implementation and cannot
+drift from LLVM's own dependency tables; every *path* and every *target
+fact* (version, triples, targets-built, RTTI, build mode) is read out of
+the cross tree's own generated headers and `CMakeCache.txt`. Three
+deliberate behaviours:
+
+- every archive it names in a `--libs` answer is checked to exist, and a
+  miss is a loud FATAL listing all of them, because meson reports any
+  llvm-config error as the flat "dependency LLVM found: NO";
+- `--shared-mode` answers `static` **without** enumerating all ~130
+  components (the §16.19c trap), which is true by construction here and
+  moves the completeness check to `--libs`, where it is load-bearing;
+- an unknown query is delegated, path-rewritten, and logged as UNHANDLED
+  rather than confidently answered.
+
+`tools/clade-mesa-cross.sh` — emits the meson cross file. **Every path in
+it is read out of the cross LLVM's own `CMakeCache.txt`** (compiler,
+binutils, sysroot). That is not convenience: Mesa's objects get linked
+against that LLVM, so a cross file naming a *different* compiler or a
+different sysroot describes a toolchain the LLVM was never built with, and
+the mismatch surfaces as an inscrutable link or runtime failure rather
+than an error.
+
+#### Finding 1: toolchain flags cannot live in `c_args`
+
+The first cross configure died at `meson.build:1111: ERROR: Could not get
+define 'ETIME'`, with `'errno.h' file not found`. The probe command line
+carried `-nostdlibinc` **but not the `-isystem` that makes it survivable**:
+meson's compiler-*check* path drops the `-isystem <dir>` pair out of
+cross-file `c_args` while keeping every other flag (`-march`,
+`-moutline-atomics`, `-fno-pic`, `-D_GNU_SOURCE` all present). The sanity
+check, by contrast, gets the full list — so the two paths disagree. The
+obvious suspect at the assembly site, `remove_linkerlike_args`, filters
+none of these (read: its sets are `-Wl,`, `-L`, `-framework`,
+`-headerpad_max_install_names`), so the drop is elsewhere in meson's
+`CompilerArgs` machinery and is **not recorded here as a mechanism we
+proved.**
+
+The fix is structural rather than archaeological: toolchain flags belong in
+the compiler **exelist** (`[binaries] c = [...]`), which nothing filters —
+`--target=` and `--sysroot=` survived every path. `-moutline-atomics` moves
+there for the same reason and a stronger one: it is a flag whose absence
+compiles perfectly and faults on an A72 (#71/#91), so it must not sit
+anywhere a build system is free to drop it.
+
+#### Finding 2: `llvm_modules` never contains `orcjit`
+
+With `-Dllvm-orcjit=true`, `src/gallium/auxiliary/meson.build:391` compiles
+`gallivm/lp_bld_init_orc.cpp` (22 `orc::` references) — but the LLVM link
+line comes from `llvm_modules`, which is:
+
+```
+llvm_modules = ['bitwriter','engine','mcdisassembler','mcjit','core',
+                'executionengine','scalaropts','transformutils','instcombine']
+llvm_optional_modules = ['coroutines']          # + 'lto' when draw_with_llvm
+```
+
+**No `orcjit`, and `engine` does not pull it** — measured: `llvm-config
+--link-static --libs engine mcjit` yields ExecutionEngine, MCJIT,
+OrcShared, OrcTargetProcess, RuntimeDyld and *not* OrcJIT or JITLink. So a
+**static** ORC build has no `libLLVMOrcJIT.a` on its link line and fails on
+undefined `llvm::orc::*` symbols. Upstream never meets this because
+distros link a *shared* libLLVM, where every symbol is present regardless
+of the module list, and because `llvm_has_mcjit` makes ORC non-default on
+every common CPU family — **static + ORC is an untested upstream
+combination**, and it is precisely the combination Thylacine requires
+(no dynamic loader, I-42 W^X via ORC's `MemoryMapper`).
+
+Fix: `llvm_modules += 'orcjit'` under `llvm_with_orcjit`, in the Mesa
+fork — **required, not optional**, on the same reasoning that moved MCJIT
+out of stage 3's optional list (§16.19c): a missing ORC library must fail
+at configure, not at link. Measured delta: `orcjit` adds exactly four
+archives — `LLVMOrcJIT`, `LLVMJITLink`, `LLVMOption`, `LLVMWindowsDriver`
+— **all four already present** in the cross tree, so the rebuild's target
+list is unchanged.
+
+#### Finding 3: the cross `llvm-config` does not fail on the builder -- it SPINS
+
+§16.19 said LLVM's cross build "does produce `NATIVE/bin/llvm-config`" reporting
+its own subbuild. That is wrong for this configuration: with
+`LLVM_USE_HOST_TOOLS=ON` and the fork's host tblgens there is no NATIVE subbuild,
+so `<cross tree>/bin/llvm-config` is an **aarch64-thylacine static binary**. And
+running it on the Linux builder does not error out -- it **spins**. Two instances
+were caught in state `R` having burned 1343 s and 348 s of CPU, with the stage
+reporting "running" the whole time:
+
+```
+27623  1343  R  llvm-config  .../clade/llvm-build/bin/llvm-config --shared-mode
+28886   348  R  llvm-config  .../clade/llvm-build/bin/llvm-config --version
+```
+
+That is a **hang, not a crash**, which is the worse failure mode: it is
+indistinguishable from a slow build. It also means the shim's justification is
+stronger than "it reports the wrong paths" -- the cross binary cannot be run at
+all.
+
+The stage that ran it was `clade-keep-build.sh`'s own stage 3b, added at #110 and
+recorded there as working. **Its load-bearing path had never executed**: every
+prior run found no `bin/llvm-config` in the cross tree and took the early-return,
+so the "verified" claim rested on a branch that was never taken. (The 207-archive
+tree it was credited with producing came from the #110 empty-`ninja` bug building
+everything.) Stage 3b now uses the shim instead, and asks a tighter question --
+which archives are missing for the modules Mesa actually links, rather than for
+all ~130 components -- so it builds what is needed, cannot hang, and no longer
+needs `--shared-mode` at all. It answers in under a second: **73 archives, none
+missing, `--has-rtti: YES`.**
+
+#### Finding 4: a build-tree LLVM splits its headers, and the shim must not merge them
+
+Measured, on both trees:
+
+| dir | `llvm-c/Core.h` | `llvm/Config/llvm-config.h` |
+|---|---|---|
+| `<llvm source>/include` | present | absent |
+| `<objroot>/include` | absent | present |
+
+So a consumer needs **both** `-I` paths, and that is exactly what `--cppflags`
+emits. The source half is *shared* between the host and cross builds (one fork
+tree, two object dirs), so it must pass through **unrewritten**. The first version
+of the shim rewrote the host `--includedir` onto the cross tree, which collapsed
+the pair into a single path holding the generated config and none of the real
+headers -- and gallivm died on `'llvm-c/Core.h' file not found`, again nowhere
+near the cause. The shim now answers `--includedir` from the cross tree's
+`LLVM_SOURCE_DIR` and rewrites only the object paths. With that fixed the gallivm
+ORC backend **cross-compiles clean**: rc=0, 0 errors, an 875,792-byte
+aarch64-thylacine object.
+
+#### The harvest: the cross tree is already complete
+
+With the plumbing working, meson resolved LLVM (`llvm-config found: YES
+… 22.1.8`, `Run-time dependency LLVM … found: YES`) and asked for twelve
+modules: `bitwriter core engine executionengine instcombine mcdisassembler
+mcjit native scalaropts transformutils coroutines lto`. That closure is
+**69 archives, none missing** from the cross tree; with `orcjit`, **73,
+none missing**. So the RTTI rebuild changes exactly one thing — the flag —
+and needs no new ninja targets.
+
+And the configure then stopped **naming RTTI**, in Mesa's own words:
+
+```
+ERROR: LLVM was built without RTTI, so Mesa must also disable RTTI.
+       Use an LLVM built with LLVM_ENABLE_RTTI or add cpp_rtti=false.
+```
+
+That diagnosis exists only because the shim reports the cross tree's *real*
+`LLVM_ENABLE_RTTI` from its cache instead of a hardcoded answer — the
+honesty is what makes the error land in the right place. §16.19b is now
+confirmed independently, from the cross direction.
+
+Everything else that came back `NO` (zlib, libzstd, expat, libdrm,
+libudev, libdisplay-info) is non-fatal: the DRI/GLX/EGL platform deps are
+disabled by the option set, and none blocked configure.
+
+#### Where the Mesa delta lives
+
+The Mesa fork stays **on the builder**, and its delta is carried in this
+repo as a numbered patch series — the `usr/lib/pouch/patches/` model, not
+the `llvm-thylacine` local-fork model. The two are different for a reason
+that matters: the LLVM fork also builds the *host* toolchain the dev
+machine itself uses, so it must exist locally; **nothing on the dev machine
+needs a Mesa tree** (~500 MB checkout, and the build only ever runs on the
+32-core builder). Patches-in-repo keeps the delta reviewable and lets any
+builder reconstruct the tree from `mesa-26.1.6` + the series.
+
+#### Two defects in my own tooling, and a probe that lied twice
+
+Recorded because the shapes recur. The shim (a) logged its argv *after* its
+precondition checks, so a precondition failure logged only a FATAL and no
+argv — and (b) passed the component list to every delegated query, which
+real `llvm-config` rejects with `components given, but unused`, turning a
+working configure into a FATAL on `--ldflags`. Both are now covered by a
+27-check self-test, including an A/B that deletes an archive to prove the
+missing-archive assert can actually fire.
+
+A third, in the *fix* for the stage-3b hang: the new completeness check piped its
+filter into `grep .`, which exits 1 when nothing matches -- so under `set -e` with
+`pipefail`, "nothing is missing" (the SUCCESS case) aborted the stage. This is the
+trailing-filter trap the project has now met five times, and it was written into
+the very patch that removed a hang. Reproduced and fixed with a two-second local
+A/B rather than another builder round-trip.
+
+The probes lied twice in the same session, both times by **showing nothing
+and being read as nothing-happened**: a `grep '^ARGV:'` over the shim log
+reported "empty" when the log held the FATAL that explained everything, and
+an earlier module-list check ran under zsh — which does not word-split an
+unquoted parameter — so `llvm-config` received one giant component name and
+an rc-only assertion "passed" for entirely the wrong reason. Both are the
+[[feedback-assertion-satisfiable-by-broken]] shape: before trusting a check
+that returns nothing, prove its pattern can match something.
+
+#### A benign recorded drift
+
+The builder's *host* stage-1 tree currently carries `LLVM_ENABLE_RTTI=ON`
+from the §16.19b proof, while `tools/clade-stage1.sh` does not set it.
+Nothing needs it — only the **cross** LLVM's RTTI matters, because that is
+what Mesa links — so the recipe stays as-is and a future stage-1 re-run
+simply reconverges to it. Noted rather than "fixed" so the next reader does
+not mistake the difference for a missing flag.
+
 ### 16.7 The memory re-measure (§7 / F4)
 
 From the pinned 22.1.8 static build (AArch64-only, Release, `-j16`,
