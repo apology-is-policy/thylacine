@@ -156,8 +156,13 @@ invention — the point is the keystone. Two genuinely novel realizations:
   kernel today) — one-version discipline: the cross-compiler that builds the
   device toolchain IS the device toolchain, one major, one bug surface.
   Upgrade cadence follows the host pin. [FORK F2]
-- **Mesa**: pinned at CL-7 entry (a current 25.x-era release); the CL-0
-  spike confirms gallium-OSMesa + ORC-gallivm state in the pinned release.
+- **Mesa**: **pinned at `mesa-26.1.6`** (resolved at CL-7 entry, §16.19;
+  the earlier "a current 25.x-era release" was written a year before the
+  arc reached CL-7). The CL-0 spike's OSMesa premise was corrected in
+  §16.6 and settled by measurement in §16.19: the gallium OSMesa frontend
+  is resurrected in `mesa-thylacine` (6 files / 1,392 lines, zero C
+  changes), and ORC-gallivm requires **both** `-Dllvm-orcjit=true` and an
+  `LLVM_ENABLE_RTTI=ON` LLVM.
 - **Vendoring: sibling fork repos**, the `go-thylacine` precedent —
   `~/projects/llvm-thylacine`, `~/projects/mesa-thylacine`,
   `~/projects/rust-thylacine`, each a pinned-SHA fork carrying a small,
@@ -558,8 +563,12 @@ The path of least invention, per the OSMesa verification:
 1. **Mesa port via Pouch** (the C/C++ mix now buildable): gallium llvmpipe
    + the **gallium OSMesa frontend** — off-screen render into client
    memory, no DRI/GBM/dmabuf/EGL, ORC-gallivm over the §8 mapper.
-   *(§16.6: upstream removed the OSMesa frontend post-design — the
-   frontend piece is a CL-7 entry decision; the delivery shape stands.)*
+   *(§16.6: upstream removed the OSMesa frontend post-design. RESOLVED at
+   CL-7 entry — §16.19: the frontend is resurrected in `mesa-thylacine`
+   at pin `mesa-26.1.6` and compiles with zero C changes; EGL surfaceless
+   was rejected as structurally incompatible, not merely larger, because
+   the DRI loader dlopens its driver and Thylacine is static-only. The
+   delivery shape stands unchanged.)*
 2. **SDL-GL glue**: `SDL_thylacine` grows a GL context path — OSMesa
    context rendering into (or blitted into) the surface's **weave**, then
    the existing tear-free `tpresent`. Stock SDL-GL programs recompile.
@@ -619,7 +628,7 @@ no bolted-on chasing).
 | **CL-5** | Build storms + the F4 budget mechanism. **LANDED** (§7.1 mechanism, §7.2 storm): the spawn-time per-Proc page budget (measured first — a 1959-byte template-heavy TU costs 250 MiB, 97.8% of the default), and the on-device storm — **GNU make 4.4.1 builds itself under `make -jN`** (35 TUs; `-j1` 2759 ms / `-j4` 1033 ms = **2.67×** on 4 vCPUs; the artifact runs AND drives a build of its own). The storm found **#96** (fstat on a pipe returned -1 → every concurrent `-j4` job died silently) and, via the same sweep, **#97** (the notes-fd twin). **Host-vs-device par**: the same 35 TUs driven host-side with the same fork clang put the device within **~1.29×** on warm serial compile (61.1 vs 78.8 ms/TU, both clear-host) — versus the go build's 45–53×, because that gap is FS-metadata-bound, not CPU. | **DONE:** `make -jN` of a real project completes on-device; numbers recorded, no committed target | **DONE:** F4 mechanism round CLOSED 0/0/0/3 (`memory/audit_cl5_closed_list.md`); the storm is pure build-system + a 1-slot Dev addition | ThinLTO, sanitizers-on-device: out. **zlib/sqlite/LLVM-subset** not built — GNU make was chosen instead (already Thylacine-configured; no `./configure` is runnable without a POSIX shell) |
 | **CL-6** | clangd + Nora C/C++ | diagnostics/hover/def in Nora on a C++ file | none (userspace client) | lldb-dap → post-arc |
 | **CL-7k** | The JIT capability (kernel): code Burrow + `SYS_ICACHE_SYNC` + `CAP_JIT`; I-42 | the `libthyla_rs::jit` prover (emit→sync→call; ungated Proc **denied**) | **prosecute hard** (W^X-adjacent; own focused round; F8 spec posture) | — |
-| **CL-7** | Mesa/llvmpipe + SDL-GL + GLQuake | **GLQuake renders via llvmpipe through Tapestry**; gears smoke in CI | focused round (the ORC mapper + the GL glue's weave lifetime) | lavapipe → stretch |
+| **CL-7** | Mesa/llvmpipe + SDL-GL + GLQuake. **Entry decision LANDED (§16.19)**: pin `mesa-26.1.6`; frontend fork resolved to option (i) — resurrect gallium OSMesa in `mesa-thylacine` (6 files / 1,392 lines, **zero C changes**, compiles against LLVM 22.1.8); EGL surfaceless rejected as structurally incompatible (the DRI loader `dlopen`s its driver; static-only Thylacine can't host it; GLES-only, no `libGL`). Three build requirements found + recorded: `-Dllvm-orcjit=true` MANDATORY (aarch64 is in Mesa's `llvm_has_mcjit` list, so ORC is NOT auto-selected — a forgetful build silently gets MCJIT and bypasses the CL-7k mapper), `LLVM_ENABLE_RTTI=ON` REQUIRED on the clade LLVM (the ORC backend's `dynamic_cast` cannot build without it — so CL-7a starts with a clade rebuild), and MCJIT must be linkable + the LLVM library set complete (`--shared-mode` enumerates everything). Owed to CL-7a: a shim cross `llvm-config` (`NATIVE/bin/llvm-config` reports its own 4-archive libdir, not the target's 207), the full llvmpipe link, the on-device run. | **GLQuake renders via llvmpipe through Tapestry**; gears smoke in CI | focused round (the ORC mapper + the GL glue's weave lifetime) | lavapipe → stretch |
 | **CL-8a** | Rust cross target + std-over-pouch | a std Rust program runs on-device | boundary audit (std's OS seam) | CL-8b → follow-on arc |
 | **CL-9** | Arc close: the D3 self-host story — device clang rebuilds clang (stage-2) | stage-2 completes on the 8–16 GiB config | consolidated close + SMP gates | stage-3 byte-compare → stretch |
 
@@ -806,6 +815,149 @@ deferred there):
 In all three the §9 delivery (off-screen render → weave → `tpresent`)
 stands; only the frontend piece moves. Decide at CL-7 entry with a
 configure smoke against the candidate pin.
+
+**RESOLVED at CL-7 entry (2026-07-30) → option (i). See §16.19 for the
+smoke that decided it, and for three CL-7 build requirements it found
+that this section got wrong.**
+
+### 16.19 CL-7 entry: the frontend smoke (§16.6 RESOLVED → option (i))
+
+The §16.6 fork is closed on measurement, per its own instruction. The
+pin is **`mesa-26.1.6`** — §4's "a current 25.x-era release" is a year
+stale; 25.0.x is four minor releases back, and OSMesa is confirmed
+absent at the pin (`src/gallium/frontends/` holds d3d10umd, dri, glx,
+hgl, lavapipe, mediafoundation, rusticl, teflon, va, wgl — and 0 files
+anywhere in the tree mention osmesa).
+
+**Option (i) is adopted, and it COMPILES.** The 25.0.7 frontend was
+grafted onto 26.1.6 and built against the fork's LLVM 22.1.8: a
+385,464-byte AArch64 object defining all nine public entry points
+(`OSMesaCreateContext` / `…Ext` / `…Attribs`, `MakeCurrent`,
+`DestroyContext`, `GetColorBuffer`, `GetProcAddress`, `PixelStore`,
+`GetIntegerv`). **Zero C source changes.** The entire drift is three
+build-graph fixes:
+
+1. `inc_mapi` no longer exists → drop it from the frontend's include list.
+2. `glapi/glapi.h` moved to `src/mesa/glapi/glapi/` → put `src/mesa/glapi`
+   on the include path. (Note `inc_glapi` is defined as
+   `src/mesa/glapi/glapi` — one level too deep to resolve
+   `#include <glapi/glapi.h>`; the parent is what is wanted.)
+3. `with_shared_glapi` / `libglapi_static` are gone — referenced only by
+   the outer `targets/osmesa` boilerplate, which Thylacine rewrites
+   **static** anyway (see below).
+
+**Correction to §16.6's "ONE file".** The measured delta is **6 files /
+1,392 insertions** for the frontend half — `osmesa.c` (1,029),
+`include/GL/osmesa.h` (332), two `meson.build`, and 4 hook lines across
+`meson.build` / `meson.options` / `src/gallium/meson.build`. Upstream
+also ships `src/gallium/targets/osmesa/` (`osmesa_target.c`,
+`osmesa.sym`, `osmesa-symbols.txt`, `osmesa.def.in`, `meson.build`) for
+the outer library; Thylacine replaces that with a `static_library()`,
+so it is ~40 lines of our own build file rather than carried upstream
+code. Still comfortably inside §4's "small, enumerable delta" — but it
+is eight files, not one.
+
+**Why (ii) is not merely bigger — it is structurally incompatible.**
+Three measured facts, any one of which is disqualifying:
+
+- **It cannot be static.** With `-Ddefault_library=static` the EGL
+  configuration *still* emits four shared libraries: `libEGL.so`,
+  `libGLESv1_CM.so`, `libGLESv2.so`, and `libgallium-26.1.6.so`. That is
+  not a build-flag oversight — `src/loader/loader.c:883` does
+  `dlopen(path, RTLD_NOW | RTLD_LOCAL)` to load the gallium driver. The
+  DRI loader model *is* dynamic loading, and Thylacine is static-only
+  with no dynamic loader (F3). By contrast the OSMesa *frontend* is
+  already a `static_library()` upstream; only its outer wrapper is
+  shared, and that wrapper is ours.
+- **It yields GLES, not desktop GL.** With `glx=disabled` and no glvnd,
+  no configuration produces `libGL` — the EGL path gives GLES 1/2 only.
+  §9's acceptance gate is **GLQuake**, which is desktop GL.
+- **It is ~36× the surface**: `src/egl` 24,895 lines + the DRI frontend
+  10,525 + `src/loader` 2,057 ≈ 37,500 lines across 74+ files, versus
+  1,392.
+
+Option (iii) is unchanged as the follow-on refinement of (i): once the
+frontend is ours, replacing its copy-out-at-`glFlush` with a direct
+weave write is a local change inside a file we already carry. So (i) is
+also the staging for (iii), not an alternative to it.
+
+#### Three build requirements the smoke found
+
+All three are the same shape this project keeps meeting — **a wrong
+default that configures and builds cleanly**:
+
+**(a) `-Dllvm-orcjit=true` is MANDATORY, and §16.6's reasoning above is
+wrong.** This section claims meson "auto-selects ORC whenever the LLVM
+build lacks MCJIT". It does not probe the LLVM build at all:
+
+```
+llvm_has_mcjit = host_machine.cpu_family() in ['aarch64','arm','ppc','ppc64','s390x','x86','x86_64']
+llvm_with_orcjit = get_option('llvm-orcjit') or not llvm_has_mcjit
+```
+
+It is a **CPU-family list, and aarch64 is in it** — so on our target ORC
+is *not* auto-selected. Measured both ways: with the option,
+`GALLIVM_USE_ORCJIT=1`; without it, `=0`. A build that forgets the flag
+gets the **MCJIT** path, which does not go through ORC's `MemoryMapper`
+— the exact seam CL-7k's `DualMapMemoryMapper` plugs into (§8, §16.18).
+It would then try to allocate RWX and fail under I-42's strict W^X,
+having configured and compiled without a murmur. Treat the flag as
+load-bearing and assert `GALLIVM_USE_ORCJIT=1` in the build.
+
+**(b) the clade LLVM must be built `-DLLVM_ENABLE_RTTI=ON`.** Neither
+`tools/clade-stage1.sh` nor `build.sh::build_clade` set it, so both
+inherit upstream LLVM's RTTI-**off** default. Mesa then refuses to
+configure ("LLVM was built without RTTI, so Mesa must also disable
+RTTI"), and `-Dcpp_rtti=false` — Mesa's own suggested escape — makes
+`lp_bld_init_orc.cpp:246` fail outright:
+
+```
+error: 'dynamic_cast' not permitted with '-fno-rtti'
+      auto &sc = dynamic_cast<llvm::orc::SimpleCompiler &>(irc);
+```
+
+So **the ORC path cannot be built against an RTTI-less LLVM at all** —
+the two requirements are in direct contradiction and RTTI is the only
+resolution. Proven: stage1 rebuilt with `LLVM_ENABLE_RTTI=ON` (3,237
+edges), `llvm-config --has-rtti` → `YES`, after which the ORC backend
+(6,522,552-byte object) *and* the resurrected OSMesa frontend both
+compile with 0 errors and `GALLIVM_USE_ORCJIT=1`. This is also the
+distro-standard setting — Debian/Fedora enable RTTI in LLVM precisely
+so Mesa can link it. Consequence for sequencing: CL-7a begins with a
+clade-LLVM rebuild, since the `/clade` toolchain shipped at CL-4/CL-5
+was built RTTI-off.
+
+**(c) Mesa needs MCJIT *linkable*, and needs the library set
+COMPLETE.** Two separate traps, both now closed in
+`tools/clade-keep-build.sh`:
+
+- `llvm_modules` (meson.build:1877) names `'mcjit'` **unconditionally**,
+  even for an ORC build — so `libLLVMMCJIT.a` and `libLLVMInterpreter.a`
+  must exist. Stage 3 had MCJIT in its *optional* list, which would have
+  printed "note: optional absent — skipping", passed, and failed only
+  later at Mesa configure. Now required.
+- Meson probes `llvm-config --shared-mode`, a query taking **no module
+  list**, so llvm-config enumerates every component it knows and errors
+  on the first absent archive. Meson treats any error there as
+  "dependency not found" — so a partially-built LLVM is rejected
+  *wholesale* even when every requested module resolves. 19 unbuilt
+  libraries were doing exactly that. Stage 3b now completes the set from
+  llvm-config's own complaint and asserts `--shared-mode` passes.
+
+#### The remaining CL-7a plumbing seam: a cross `llvm-config`
+
+Mesa's LLVM detection is `config-tool` only on non-Windows
+(`method : host_machine.system() == 'windows' ? 'auto' : 'config-tool'`),
+so a cross build needs a **host-runnable llvm-config reporting TARGET
+paths**. LLVM's cross build does produce `NATIVE/bin/llvm-config`, but it
+reports its own subbuild: `--libdir` = `…/NATIVE/lib`, which holds **4**
+archives against the target tree's **207**. So it cannot drive the cross
+configure as-is. CL-7a supplies a shim `llvm-config` in the meson cross
+file's `[binaries]` — small, and the standard technique for cross-Mesa.
+
+Not yet measured (CL-7a's own work): a full llvmpipe *link*, and the
+on-device run. The smoke proves configure + the two load-bearing
+compiles, which is what the frontend decision needed.
 
 ### 16.7 The memory re-measure (§7 / F4)
 
@@ -1609,3 +1761,4 @@ bumping to just-past-what-tipped-it.
 | 2026-07-24 | **CL-3a landed** (§16.15a): the real driver in the fork (`~/projects/llvm-thylacine` @ 22.1.8, branch `thylacine`, commit `df919c8dd` — NOT pushed; the fork origin is read-only upstream). Eight files: `Triple::Thylacine` (enum/name/parse/`isOSThylacine`) + the `getToolChain` dispatch + a Fuchsia-templated `Thylacine` `ToolChain` whose `Linker::ConstructJob` reproduces `tools/pouch-ld` verbatim + a `ThylacineTargetInfo` (auto-defines `__thylacine__`/`__unix__`/`_GNU_SOURCE`-for-C++). Verified host-side: `-dumpmachine` → `aarch64-unknown-thylacine`; the C/C++ `-###` link lines == `pouch-ld`/the C++ group (`ld.lld`, no Darwin `ld64`); real C+C++ links → valid static `ET_EXEC`, 0 `PT_DYNAMIC`. **CL-3's gate MET.** Host-build gotcha fixed (Homebrew `uuid.h` shadow → `-DLLVM_ENABLE_{ZLIB,ZSTD,LIBXML2,TERMINFO,LIBEDIT,CURL,HTTPLIB}=OFF`). Thylacine tree unchanged (fork-only). |
 | 2026-07-24 | **CL-3b landed — THE CL-3 ARC IS COMPLETE** (§16.15b): the wrapper retirement + F2b closed. `tools/pouch-clang` prefers the fork clang; `tools/pouch-ld` becomes a thin shim over the fork driver (which supplies CRT+libc+builtins), the hand-rolled `ld.lld` kept only as the fork-less fallback; `build_libcxx` builds the C++ runtime with the fork clang/clang++ and links the prover through the `clang++` driver. **F2b closed at the root**: a 1-line fork guard patch (`libcxxabi/.../cxa_thread_atexit.cpp`: `#if __linux__ || __Fuchsia__ || __thylacine__`, recompiled by `build_libcxx` — no clang rebuild) retires the surgical `-D__linux__`, so libc++abi's `__cxx_contention_t` is `int64` like everyone else — the CL-2 int32/int64 ODR split is ELIMINATED, not merely inert; the old tripwire retires. Also dropped the redundant `-D__thylacine__=1` (now auto-defined). Proven in-guest: fork-driver-linked `pouch-hello-*` + fork-clang-built `pouch-hello-cxx` boot; `ALL C++ WIRES PASS` (with `-D__linux__` gone), boot OK, 0 EXTINCTION, suite 1196/1196, SMP 40/40 (default+UBSan × smp4/smp8 N=10) 0 corruption. Kernel byte-unchanged (host toolchain only). **The SMP gate caught + closed the pre-existing cxa_guard/gettid seam** (`bug_cxa_guard_gettid.md`): 1/40 (ubsan-smp4) false-aborted a concurrent static-init because libc++abi's `__cxa_guard` used `syscall(SYS_gettid)`=ENOSYS (shared bogus id). Fixed by a fork `cxa_guard_impl.h` `PlatformThreadID` `__thylacine__` branch using `pthread_self()` (a real per-thread id; no ABI change — dissolves the ESCALATE) + a deterministic `pouch-hello-cxx` wire-7 regression (reliable abort pre-fix, passes post-fix, runs every boot); re-gate 40/40 clean. A cleanup-collateral detour: the disk prune had removed `~/.rustup/toolchains/` — restored (stable 1.97.1 + `aarch64-unknown-none`). Seam carried: unlink-path errno-loss. NEXT: CL-4 (the device toolchain + Support-layer port). |
 | 2026-07-27 | **CL-4 landed — THE CL-4 ARC IS COMPLETE** (section 16.16): `clang++ -O2` compiles, links via `ld.lld`, and runs a real C++ program ON THE DEVICE. Five masking layers, found in order: (1) `elf_load` rejected `ELFOSABI_GNU`, which lld stamps for `SHF_GNU_RETAIN` on `.bss` -- a link-time flag with no runtime meaning (ground-truthed on the UNSTRIPPED 122 MB binary: 340,474 symbols, zero `STT_GNU_IFUNC`, zero `R_AARCH64_IRELATIVE`, no `PT_DYNAMIC`); (2) musl's `__init_tls` issues a RAW 6-arg Linux mmap for clang++'s 1232-byte TLS, bypassing the patched 1-arg `__mmap`; (3) clang's `FixupStandardFileDescriptors` fstats fds 0/1/2 and treats a non-EBADF failure as fatal, but the console had no `.stat_native`; (4) fork CL-4b `ce5a1c519` -- no `/proc/self/exe`, so `getMainExecutable` returned "" and `InstalledDir` was empty; (5) fork CL-4c `e7d6be5f8` -- the multicall's `PrependArg` is set whenever `NeedsPrependArg || CanonicalPrefixes`, so a directly-invoked COPY got the tool name prepended anyway, shifting `-cc1` to argv[2] and making the cc1 child re-enter as a driver (upstream-shaped: copy-based multicall installs on Linux are broken identically). The opening theory 'dies pre-main' was REFUTED by a syscall trace showing zero EL0 syscalls. `-no-canonical-prefixes` served as a free on-device confirmation that also unmasked the rest of the driver surface, proving no layer 6 before spending on the cross-build (one spot VM, torn down). Durable fork delta now `usr/ports/llvm/patches/0001..0006` (this also captured CL-4b, which had never reached the durable set). Gate is boot-fatal with NO special driver flags and covers spawned cc1, in-process cc1 (`-c`), and link-only, against a program with `<vector>`/`<string>` and a live throw/catch -- so libc++abi + libunwind are proven on a freshly on-device-compiled binary, not just printf. **Focused audit CLOSED 0 P0 / 2 P1 / 1 P2 / 3 P3, NOT dirty** (Fable 5 max + self-audit): F1 [P1] the 6-arg acceptance converted a fail-closed refusal into SILENT WRONG DATA (a direct file-backed `syscall(SYS_mmap, ...)` got anonymous zeros instead of `MAP_FAILED`) -> gated on the exact anonymous-private shape via the unit-testable `burrow_lazy_len_from_args`, revert-probed 1196/1197 FAIL; F2 [P1] the fstat fix covered only the `SYS_CONSOLE_OPEN` door, so `clang++ < /dev/null` reproduced the same bug through `/dev` -> `devdev_stat_native`; F3 [P2] `x0 ? x0 : x1` voided libthyla-rs's documented `length == 0 -> -1` nondeterministically -> `in("x1") 0` pinned. Suite 1197/1197, `clade CL-4 gate: PASS`, boot OK, 0 EXTINCTION. `memory/audit_cl4_closed_list.md`. NEXT: CL-5. |
+| 2026-07-30 | **CL-7 entry decision LANDED (section 16.19): the section-16.6 frontend fork RESOLVED to option (i) by measurement, per its own instruction.** Pin = **`mesa-26.1.6`** (section 4's "current 25.x-era release" was a year stale; OSMesa confirmed absent, 0 files in the tree mention it). **Option (i) COMPILES**: the 25.0.7 gallium OSMesa frontend grafted onto 26.1.6 and built against fork LLVM 22.1.8 -> a 385,464-byte AArch64 object defining all nine public `OSMesa*` entry points, with **ZERO C source changes**; the whole drift is 3 build-graph fixes (`inc_mapi` gone; `glapi/glapi.h` moved to `src/mesa/glapi/glapi/`; `with_shared_glapi`/`libglapi_static` gone, referenced only by the outer target boilerplate Thylacine rewrites static). Corrected section 16.6's "ONE file": the measured delta is **6 files / 1,392 insertions** (+ ~40 lines of our own static target build file). **Option (ii) rejected as STRUCTURALLY incompatible, not merely larger**: `-Ddefault_library=static` still emits 4 shared libs because `src/loader/loader.c:883` `dlopen`s the gallium driver (the DRI loader model IS dynamic loading; Thylacine is static-only), it yields GLES-only with no `libGL` (the gate is GLQuake, desktop GL), and it is ~36x the surface (~37,500 lines vs 1,392). Option (iii) stays the follow-on refinement OF (i). **Three build requirements found, all of the wrong-default-that-builds-clean family**: (a) **`-Dllvm-orcjit=true` is MANDATORY** and section 16.6's stated mechanism was WRONG -- `llvm_has_mcjit` is a CPU-FAMILY list that INCLUDES aarch64, so ORC is not auto-selected; measured both ways (`GALLIVM_USE_ORCJIT=1` with, `=0` without), and the `=0` path bypasses ORC's `MemoryMapper` -- the exact seam CL-7k's `DualMapMemoryMapper` plugs into -- so a forgetful build would silently defeat I-42 and still compile. (b) **`LLVM_ENABLE_RTTI=ON` is REQUIRED** on the clade LLVM (neither `clade-stage1.sh` nor `build_clade` set it, so both inherit upstream's RTTI-off default): Mesa then demands `-Dcpp_rtti=false`, which makes `lp_bld_init_orc.cpp:246`'s `dynamic_cast<orc::SimpleCompiler&>` fail outright -- the ORC path CANNOT build against an RTTI-less LLVM, so RTTI is the only resolution (and the distro-standard setting). PROVEN: stage1 rebuilt RTTI=ON (3,237 edges) -> `--has-rtti YES` -> the ORC backend (6,522,552-byte object) AND the resurrected frontend both compile, 0 errors, `USE_ORCJIT=1`. CL-7a therefore starts with a clade-LLVM rebuild. (c) Mesa names `'mcjit'` in `llvm_modules` UNCONDITIONALLY even for ORC, and `llvm-config --shared-mode` takes NO module list so it enumerates every component and rejects a partial tree WHOLESALE (19 unbuilt libs were doing exactly that) -- both closed in `tools/clade-keep-build.sh` (MCJIT+Interpreter moved to required; new stage 3b completes the set from llvm-config's own complaint and asserts `--shared-mode` passes). Owed to CL-7a: a shim cross `llvm-config` (`NATIVE/bin/llvm-config` reports its own 4-archive libdir, not the target's 207), the full llvmpipe link, the on-device run. Instrument: `thyla-keep` (stopped after). Thylacine tree: docs + `tools/` only. |

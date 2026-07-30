@@ -352,9 +352,19 @@ do_stage3() {
   [[ -x "$readelf" ]] || { echo "ASSERT FAILED: no llvm-readelf at $readelf (run stage1)"; exit 1; }
 
   # Required: gallivm's ORC path cannot link without these.
-  local required="LLVMOrcJIT LLVMExecutionEngine LLVMJITLink LLVMOrcShared LLVMOrcTargetProcess LLVMRuntimeDyld"
-  # Optional: present in 22.x, but version-dependent across LLVM releases.
-  local optional="LLVMMCJIT LLVMOrcDebugging"
+  #
+  # LLVMMCJIT is REQUIRED, not optional, and that is counter-intuitive enough to
+  # spell out: Mesa's meson names 'mcjit' in `llvm_modules` UNCONDITIONALLY
+  # (meson.build:1877 at 26.1.6), and the `llvm-orcjit` option only raises the
+  # minimum LLVM version and sets -DGALLIVM_USE_ORCJIT. So an ORC-only Mesa
+  # still needs the MCJIT component LINKABLE, even though it will not use it.
+  # Had MCJIT stayed in the optional list, a future LLVM that drops it would
+  # print "note: optional absent -- skipping", pass stage 3, and only fail much
+  # later at Mesa configure -- the same failure-reports-success shape as the
+  # empty-ninja bug above.
+  local required="LLVMOrcJIT LLVMExecutionEngine LLVMJITLink LLVMOrcShared LLVMOrcTargetProcess LLVMRuntimeDyld LLVMMCJIT LLVMInterpreter"
+  # Optional: genuinely version-dependent, and nothing links against it.
+  local optional="LLVMOrcDebugging"
 
   phase "stage 3: JIT/ORC libraries -j$JOBS"
   cd "$L"
@@ -394,6 +404,36 @@ do_stage3() {
   done
   [[ "$fail" -eq 0 ]] || { echo "STAGE 3 FAILED"; exit 1; }
   echo "total LLVM .a libs: $(ls "$L"/lib/*.a | wc -l)"
+
+  # Mesa's meson probes `llvm-config --shared-mode` -- a query that takes NO
+  # module list, so llvm-config enumerates EVERY component it knows about and
+  # errors on the first archive that is absent. Meson treats any error there as
+  # "dependency not found", so a partially-built LLVM is rejected WHOLESALE even
+  # when every module Mesa actually asked for resolves cleanly. Building the
+  # requested slice is therefore not sufficient: the set has to be complete.
+  #
+  # Derive the remainder from llvm-config's own complaint rather than hardcoding
+  # a list that would rot against the next LLVM.
+  phase "stage 3b: complete the library set (llvm-config --shared-mode must pass)"
+  local lc="$L/bin/llvm-config"
+  if [[ ! -x "$lc" ]]; then
+    if grep -qx "bin/llvm-config" <<< "$known"; then ninja -j"$JOBS" llvm-config; fi
+  fi
+  if [[ ! -x "$lc" ]]; then
+    echo "  note: no llvm-config in the cross tree -- see the CL-7 cross-llvm-config seam"
+    return 0
+  fi
+  local sm_err miss
+  sm_err="$("$lc" --shared-mode 2>&1 >/dev/null || true)"
+  miss="$(sed -n 's|^llvm-config: error: missing: .*/lib/lib\([A-Za-z0-9_]*\)\.a$|\1|p' <<< "$sm_err" | sort -u | tr '\n' ' ')"
+  if [[ -n "${miss// /}" ]]; then
+    echo "  completing $(wc -w <<< "$miss") absent libraries"
+    ninja -j"$JOBS" $miss
+  fi
+  "$lc" --shared-mode >/dev/null 2>&1 \
+    || { echo "ASSERT FAILED: llvm-config --shared-mode still errors -- Mesa will report LLVM not-found"; exit 1; }
+  echo "  --shared-mode: $("$lc" --shared-mode)  (Mesa's LLVM probe will pass)"
+  echo "  --has-rtti:    $("$lc" --has-rtti)  (Mesa requires YES for gallivm's ORC backend)"
 }
 
 case "${1:-}" in
