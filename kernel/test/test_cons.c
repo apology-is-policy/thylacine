@@ -164,6 +164,44 @@ static void cbr_consumer_entry(void) {
     test_kthread_park_terminal(&g_cbr_exited);   // #109: EXITING park (was for(;;)sched())
 }
 
+// #89: the dance body returns an error string (NULL = ok) instead of asserting,
+// so the caller can RELEASE AND REAP the consumer on EVERY exit -- the same #58
+// structural rule the poll dance below already follows, applied to the kthread
+// instead of the poll hook. A failing mid-dance TEST_ASSERT used to `return`
+// straight past test_kthread_join_free, leaving the consumer PARKED inside
+// devcons_read; the next test's cons_rx_input then woke that orphan, which
+// drained the byte out from under it. Observed exactly so: this test failed on
+// its SLEEPING assert, and cons.poll_deferred_wake (registered later) then
+// failed "buffered data: POLLIN not ready on re-sample" in the SAME boot -- one
+// leak, two red tests.
+static const char *cons_blocking_read_dance(struct Thread *consumer) {
+    // SMP (#20/#28 spin-until): ready() may place the consumer on a PEER CPU, so
+    // ONE sched() does not guarantee it has both run AND completed its park --
+    // the observed failure had ran == 1 (it ran) with state != SLEEPING (not yet
+    // parked). Bounded, so a real lost-park regression still FAILS.
+    { int spins = 0;
+      while ((g_cbr_ran < 1 || consumer->state != THREAD_SLEEPING) && spins++ < 100000)
+          sched(); }
+    if (g_cbr_ran != 1)                     return "consumer ran + parked in devcons_read";
+    if (consumer->state != THREAD_SLEEPING) return "consumer SLEEPING inside devcons_read";
+
+    // Producer: feed one byte. cons_rx_input enqueues it + wakeup()s the data
+    // Rendez. The invariant is NO LOST WAKEUP -- i.e. no longer SLEEPING. Do not
+    // pin RUNNABLE exactly: a peer CPU may already have dispatched it to RUNNING,
+    // which is a scheduling transient, not a correctness difference (#28's
+    // relax-to-the-real-invariant rule).
+    cons_rx_input((u8)'q', false);
+    if (consumer->state == THREAD_SLEEPING)
+        return "consumer still SLEEPING after cons_rx_input (lost wakeup)";
+
+    // Consumer resumes inside devcons_read, drains 'q', returns 1, parks.
+    { int spins = 0; while (g_cbr_ran < 2 && spins++ < 100000) sched(); }
+    if (g_cbr_ran != 2)                 return "consumer resumed post-wake";
+    if (g_cbr_ret != 1L)                return "devcons_read returned exactly 1 byte";
+    if ((long)g_cbr_byte != (long)'q')  return "the woken read returned 'q'";
+    return NULL;
+}
+
 void test_cons_blocking_read_wakeup(void) {
     cons_test_reset();
     g_cbr_ran = 0; g_cbr_ret = -1; g_cbr_byte = -1; g_cbr_exited = false;
@@ -173,26 +211,19 @@ void test_cons_blocking_read_wakeup(void) {
     TEST_ASSERT(consumer != NULL, "thread_create(consumer)");
     ready(consumer);
 
-    // Yield: consumer runs, sets ran=1, calls devcons.read on the empty ring,
-    // parks on g_cons_data_rendez (SLEEPING); sched picks the main thread back.
-    sched();
-    TEST_EXPECT_EQ(g_cbr_ran, 1, "consumer ran + parked in devcons_read");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "consumer SLEEPING inside devcons_read");
+    const char *err = cons_blocking_read_dance(consumer);
 
-    // Producer: feed one byte. cons_rx_input enqueues it + wakeup()s the data
-    // Rendez -> the consumer becomes RUNNABLE (a lost wakeup would leave it SLEEPING).
-    cons_rx_input((u8)'q', false);
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE, "consumer woken by cons_rx_input");
-
-    // Yield: consumer resumes inside devcons_read, drains 'q', returns 1, parks.
-    sched();
-    TEST_EXPECT_EQ(g_cbr_ran, 2, "consumer resumed post-wake");
-    TEST_EXPECT_EQ(g_cbr_ret, 1L, "devcons_read returned exactly 1 byte");
-    TEST_EXPECT_EQ((long)g_cbr_byte, (long)'q', "the woken read returned 'q'");
-
+    // Release BEFORE joining: test_kthread_join_free spins UNBOUNDED on the
+    // terminal-park flag, so joining a consumer still parked in devcons_read
+    // would hang the boot. A byte unblocks it; the read's outcome no longer
+    // matters (the verdict is already latched in `err`), and cons_test_reset
+    // clears whatever is left in the ring.
+    if (g_cbr_ran < 2) cons_rx_input((u8)'z', false);
     test_kthread_join_free(consumer, &g_cbr_exited);
-    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after consumer freed");
     cons_test_reset();
+
+    TEST_ASSERT(err == NULL, err ? err : "cons_blocking_read_dance");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "run tree empty after consumer freed");
 }
 
 void test_cons_ring_fill_drain(void) {
