@@ -298,11 +298,32 @@ trigger surfaces; self + Fable audit before the arc closes):
   **The four FS name-op handlers LANDED at #80** (`SYS_WALK_OPEN`,
   `SYS_WALK_CREATE`, `SYS_RENAME`, `SYS_UNLINK` — every local reject now
   answers a specific code). The `!t`/`!p` preamble guards deliberately stay
-  `-1`: they are structurally unreachable from EL0. The other syscall
-  families are still owed.
+  `-1`: they are structurally unreachable from EL0.
+  **The byte-I/O family LANDED at #100** (`SYS_READ`, `SYS_WRITE`,
+  `SYS_PREAD`, `SYS_PWRITE`, `SYS_CLOSE`, `SYS_LSEEK` — the handle, O_PATH,
+  missing-vtable, user-buffer, whence and offset gates), together with the
+  pipe Dev, where `T_E_PIPE` had been defined and ABI-pinned since this
+  scripture landed **with no emitter anywhere in the tree**: a write to a
+  closed pipe returned the flat `-1`, so EPIPE was unobtainable through
+  *both* boundaries. That is the shape to watch for elsewhere in the
+  rollout — a registered code with zero emitters is a contract stated and
+  not kept, and four separate comments (in `pipe.c`, `sys_write_handler`,
+  `0007-pouch-signals.patch`, and the Go fork's ABI header) asserted the
+  behaviour the code did not implement.
+  **RESIDUAL**: three sites mean POSIX `ESPIPE` and still return `-1`
+  (`SYS_LSEEK` and the positioned `SYS_PREAD`/`SYS_PWRITE` arms on a
+  non-seekable Dev). `T_E_SPIPE` (29) is not registered and appending it is
+  signoff-bearing per CLAUDE.md, so they were left honest rather than given
+  a plausible-but-wrong `EINVAL`. Tracked as task #106.
+  The remaining syscall families are still owed.
 - **ER-4** — pouch `__syscall_ret` rework (the `-1 -> EIO` special case is
   now reachable only by the residual truly-generic returns; verify pouch
-  programs observe the correct errnos).
+  programs observe the correct errnos). Note #100 already moved the pouch
+  boundary for the byte-I/O family without touching the patch: a specific
+  `-T_E_*` lands in the `[-4095,-2]` window `__syscall_ret` already decodes,
+  so pouch sees the real errno and the `-1` case is simply no longer taken.
+  The rework is what finally REMOVES that case, and cannot land until the
+  ER-3 sweep leaves no `-1`-returning handler behind it.
 - **ER-5** — focused Fable + self audit over the swept surface, SMP gate,
   in-VM Go-build proof, close.
 
