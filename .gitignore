@@ -47,3 +47,6 @@ __pycache__/
 # Local config overrides
 .env.local
 *.local
+
+# Obsidian workspace state (the repo root is the Obsidian root)
+.obsidian/
