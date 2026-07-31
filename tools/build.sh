@@ -1830,6 +1830,21 @@ build_stratum_pool_fixture() {
         # clade-only -> 3072M; stacked with GOROOT (2560M) -> 5120M.
         if [[ "$pool_size" == "2560M" ]]; then pool_size="5120M"; else pool_size="3072M"; fi
     fi
+    # #101: the SILENT-DESTRUCTION warning. This function is reached by every
+    # `build.sh kernel` (build_kernel calls it) as well as `build.sh pool`, so
+    # any harness that builds before testing re-mints pool.img from the AMBIENT
+    # environment. A staged clade with the flag unset therefore does not merely
+    # skip the bake -- it DESTROYS an existing clade pool, and the next clade
+    # run then boots a pool whose toolchain is silently gone. That is one half
+    # of #101 (the other, "requested but did not land", is verified after the
+    # populate); it cannot be an error, because a deliberate small-pool rebuild
+    # is legitimate, but it must never again be silent.
+    if [[ "$bake_clade" != "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
+        echo "==> WARNING: a clade toolchain is staged at $BUILD_DIR/clade/stage but"
+        echo "    THYLACINE_BAKE_CLADE is not 1, so this pool is being minted WITHOUT"
+        echo "    /clade -- replacing any clade-baked pool.img. Re-bake with"
+        echo "    THYLACINE_BAKE_CLADE=1 before any clade/GL gate. (#101)"
+    fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
@@ -2189,6 +2204,85 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" read /etc/ssl/certs/ca-certificates.crt | cmp -s - "$cabundle_src" \
         || { echo "==> populate pool: ca-certificates.crt readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /etc/ssl/certs/ca-certificates.crt baked + readback-verified ($(grep -c 'BEGIN CERTIFICATE' "$cabundle_src" | tr -d ' ') roots, NET-DESIGN s9)"
+
+    # --- #101: VERIFY THE ARTIFACT, NOT THE INTENT --------------------------
+    # Every large payload above is `put` behind a flag, and a flag that is set
+    # proves nothing about what reached the pool. The CL-6 close shipped a
+    # 40-boot SMP gate whose pool contained no /clade at all and reported
+    # "40/40 PASS": the harness re-baked without the flag, so the feature under
+    # test was ABSENT and the run was byte-indistinguishable from one that had
+    # actually verified it (the #72/#74 fail-open class).
+    #
+    # This lives HERE, at the bake, rather than in each harness. ci-smp-gate.sh
+    # grew a private copy of the pool-SIZE table -- but size is a proxy for the
+    # SIZING decision, which a FAILED `put` would still satisfy, and five other
+    # harnesses had no check at all. A `stat` of a path that exists only if the
+    # payload landed is the artifact itself, and putting it at the single
+    # chokepoint means every caller of build.sh inherits it, including harnesses
+    # nobody has written yet.
+    #
+    # Paths are recomputed rather than reusing the locals above: several are
+    # declared inside the branch that puts them, so reading them here would
+    # silently evaluate to empty on exactly the path that skipped the put.
+    local vp_goroot="$BUILD_DIR/go/goroot"
+    local vp_gocache="$BUILD_DIR/go/gocache"
+    local vp_go4c="$BUILD_DIR/go/go4c"
+    local vp_clade="$BUILD_DIR/clade/stage"
+    local vp_storm="$BUILD_DIR/storm/stage"
+    local vp_quake="$BUILD_DIR/quake/stage"
+
+    # /thylacine-version is written unconditionally near the top of this
+    # function, so it is the POSITIVE CONTROL: it proves `stat` can see a file
+    # that is definitely there. Without it, an all-missing result would be
+    # ambiguous between "the payloads are absent" and "this check is broken",
+    # and a check that cannot tell those apart is not a check.
+    if ! "$stratum_fs_bin" -s "$sock_path" stat /thylacine-version >/dev/null 2>&1; then
+        echo "==> populate pool: BAKE VERIFY IS BROKEN -- the /thylacine-version sentinel" >&2
+        echo "    is absent, so a 'payload missing' verdict here would prove nothing." >&2
+        kill -TERM "$stratumd_pid"; exit 1
+    fi
+
+    local bake_want=""
+    if [[ "${THYLACINE_BAKE_GOROOT:-1}" == "1" && -d "$vp_goroot" ]]; then
+        bake_want="$bake_want
+GOROOT /goroot/bin/go"
+        if [[ -d "$vp_gocache" && -d "$vp_go4c" ]]; then
+            bake_want="$bake_want
+GOCACHE /go-cache
+GO4C /go4c"
+        fi
+    fi
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$vp_clade/bin" ]]; then
+        bake_want="$bake_want
+CLADE /clade/bin/clang++"
+    fi
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -f "$vp_storm/Makefile" ]]; then
+        bake_want="$bake_want
+STORM /storm/Makefile"
+    fi
+    if [[ -f "$vp_quake/id1/pak0.pak" ]]; then
+        bake_want="$bake_want
+QUAKE /quake/id1/pak0.pak"
+    fi
+
+    local bake_missing=""
+    local bake_present=""
+    while read -r bl bp; do
+        [[ -n "$bl" ]] || continue
+        if "$stratum_fs_bin" -s "$sock_path" stat "$bp" >/dev/null 2>&1; then
+            bake_present="$bake_present $bl"
+        else
+            bake_missing="$bake_missing $bl($bp)"
+        fi
+    done <<< "$bake_want"
+
+    if [[ -n "$bake_missing" ]]; then
+        echo "==> populate pool: BAKE VERIFY FAILED -- staged and requested, but NOT in the pool:$bake_missing" >&2
+        echo "    A harness that boots this image would exercise the payload's ABSENCE and" >&2
+        echo "    report PASS identically to a run that had verified it (#101)." >&2
+        kill -TERM "$stratumd_pid"; exit 1
+    fi
+    echo "==> populate pool: bake config CLADE=${THYLACINE_BAKE_CLADE:-0} GOROOT=${THYLACINE_BAKE_GOROOT:-1}; payloads verified PRESENT in the pool:${bake_present:- (none gated on)}"
 
     # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
     # pool + flushes on its way out, so the pool.img bytes after this
