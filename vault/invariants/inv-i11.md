@@ -3,7 +3,7 @@ id: inv-i11
 type: inv
 title: "I-11 — per-9P-session fid identity stable for the fid's open lifetime"
 number: I-11
-guards: [sub-kernel-ninep-client]
+guards: [sub-kernel-ninep-client, sub-kernel-ninep-session]
 validated-by: [spec-9p-client]
 strength: spec
 created: 2026-07-31

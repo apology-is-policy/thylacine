@@ -3,8 +3,8 @@ id: inv-i9
 type: inv
 title: "I-9 — no wakeup lost between cond-check and sleep"
 number: I-9
-guards: [sub-kernel-ninep-client]
-validated-by: [spec-reader-frame, spec-9p-client, gate-smp]
+guards: [sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll]
+validated-by: [spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
 strength: spec
 created: 2026-07-31
 updated: 2026-07-31
@@ -27,9 +27,9 @@ includes:
 
 > Backfill note: the guard and validator sets above are PARTIAL — the full
 > ARCH §28 row also binds the scheduler, poll, pipe, cons, tsleep, torpor,
-> dev9p.poll, and Weft surfaces (specs `scheduler`/`poll`/`cons_poll`/
-> `net_poll`/`weft_readiness`/`tsleep`/`death_wake`). Those edges join as
-> their dossiers land in the sweep.
+> and Weft surfaces (specs `scheduler`/`poll`/`cons_poll`/
+> `weft_readiness`/`tsleep`/`death_wake`). Those edges join as their
+> dossiers land in the sweep. (dev9p.poll joined at the 9P-area sweep.)
 
 ## Enforcement
 
@@ -42,6 +42,12 @@ death) · `reader_recv_frame` + `thread_reader_blocks_death` (frame-atomicity:
 `stop_no_park` held for the recv tenure, `stop_unwinds = (got == 0)`
 per-chunk, guarding all four `thread_die_pending` sites in `sleep()`/
 `tsleep()`).
+
+On the dev9p.poll surface: PROBE-then-observe — the poller's hook is
+registered and a covering non-terminal readiness probe is outstanding
+BEFORE the not-ready sample returns (`dev9p_poll`); the kthread's park
+cond re-checks the registry count under the rendez lock
+([[sub-kernel-ninep-dev9p-poll]]).
 
 ## Validation
 

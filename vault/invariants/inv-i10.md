@@ -3,7 +3,7 @@ id: inv-i10
 type: inv
 title: "I-10 — per-9P-session tag uniqueness"
 number: I-10
-guards: [sub-kernel-ninep-client]
+guards: [sub-kernel-ninep-client, sub-kernel-ninep-session]
 validated-by: [spec-9p-client]
 strength: spec
 created: 2026-07-31

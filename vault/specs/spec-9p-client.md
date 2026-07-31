@@ -2,7 +2,7 @@
 id: spec-9p-client
 type: spec
 title: "9p_client.tla"
-models: [sub-kernel-ninep-client]
+models: [sub-kernel-ninep-client, sub-kernel-ninep-session]
 pins: [inv-i10, inv-i11]
 cfgs:
   - "9p_client.cfg -- clean (TagAndOpAccounting + FidStability + BoundedOutstanding; 462/197 states, depth 9)"

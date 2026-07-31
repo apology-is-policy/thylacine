@@ -9,8 +9,14 @@ design:
   - "docs/FID-LIFECYCLE-DESIGN.md"
 chunks:
   - chg-2026-06-24-349-flow-control
+  - chg-2026-07-11-wb-staging
+  - chg-2026-07-11-fid-lifecycle
   - chg-2026-07-13-375-spill
   - chg-2026-07-13-5253-send-dispositions
+  - chg-2026-07-13-g1-write-populate
+  - chg-2026-07-13-g2-dirfid
+  - chg-2026-07-13-g34-downgrade-genscope
+  - chg-2026-07-19-99-create-errno
 follow-ons: []
 created: 2026-07-31
 ---

@@ -5,6 +5,9 @@ title: "The identity / convergence detour (A-1a .. A-5c + its preempts)"
 status: active
 design: ["docs/IDENTITY-DESIGN.md", "docs/STALK-DESIGN.md"]
 chunks:
+  - chg-2026-05-28-fs-alpha
+  - chg-2026-05-28-fs-beta
+  - chg-2026-05-29-fs-gamma
   - chg-2026-06-03-841-pipeline
   - chg-2026-06-04-845-tflush
 follow-ons: []
