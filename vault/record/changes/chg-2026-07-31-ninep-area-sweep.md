@@ -4,7 +4,7 @@ type: chg
 title: "The 9P-area sweep: wire, session, transports, attach, dev9p, dev9p.poll"
 date: 2026-07-31
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["9b4df105"]
 touched:
   - moc-kernel-ninep
   - inv-i9
