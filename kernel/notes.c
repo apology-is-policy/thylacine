@@ -276,11 +276,37 @@ static u32 notes_name_terminate_latch(const char *name) {
     return 0;
 }
 
+// V-8 F2: does THIS Proc have a live handler for `name`? The `handler_va` test
+// below answers that for a native Proc, and answers it WRONG for a phenotyped
+// one: a Linux guest never calls SYS_NOTIFY -- its handler lives in the per-Proc
+// sigtab and `handler_va` stays 0 (see the phenotype branch in
+// notes_deliver_at_el0_return, which sits above the handler_va branch for
+// exactly this reason). So the "someone will catch this, do not treat it as
+// uncaught" exemption never applied to a phenotyped Proc.
+//
+// Left unfixed that is a HANG, not a fidelity gap. The latch makes
+// thread_die_pending() true for every unmasked thread, so every sleep()/tsleep()
+// returns SLEEP_INTR at once. On the delivery SUCCESS path the latch is drained
+// by notes_drain_intr_locked and it self-corrects -- but both frame-push failure
+// returns (an sp too close to the bottom of the guest's mapped stack, or a
+// faulting copy-out) leave the note queued AND the latch armed, and every
+// EL0-return tail retries and fails identically. The guest then spins at 100%
+// forever: it never runs its handler, never blocks, and never terminates.
+static bool notes_proc_has_live_handler(struct Proc *p, const char *name) {
+    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return true;
+    if (p->phenotype != PHENO_LINUX) return false;
+
+    const struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
+    if (!tab) return false;                 // all-SIG_DFL: genuinely uncaught
+    struct viv_ksigaction act;
+    return viv_sigtab_note_handler(tab, viv_signote_from_note_name(name), &act);
+}
+
 static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
     u32 latch = notes_name_terminate_latch(name);
     if (latch == 0) return;
     if (p == kproc()) return;
-    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return;
+    if (notes_proc_has_live_handler(p, name)) return;
     if (proc_is_self_managing_notes(p)) return;
     __atomic_or_fetch(&p->proc_flags, latch, __ATOMIC_RELEASE);
 }
