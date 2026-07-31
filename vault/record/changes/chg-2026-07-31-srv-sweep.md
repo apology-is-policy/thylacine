@@ -4,7 +4,7 @@ type: chg
 title: "The srv-area sweep: srvconn + devsrv dossiers + the P5/stalk-3/#348/CF-3B audit backfill"
 date: 2026-07-31
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["b892047c"]
 touched:
   - moc-kernel
   - moc-kernel-ninep
