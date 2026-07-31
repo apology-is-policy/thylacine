@@ -50,3 +50,7 @@ __pycache__/
 
 # Obsidian workspace state (the repo root is the Obsidian root)
 .obsidian/
+
+# Vault operator scratch (Obsidian dailies, canvases) -- never load-bearing (R8)
+vault/journal/
+vault/**/*.canvas

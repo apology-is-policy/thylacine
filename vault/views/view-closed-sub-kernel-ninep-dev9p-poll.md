@@ -6,8 +6,8 @@ query: closed:sub-kernel-ninep-dev9p-poll
 ---
 # Do-not-re-report preamble — sub-kernel-ninep-dev9p-poll
 
-Generated from `fnd-*` notes (`meta/lint.py --render`; also emitted
-on-demand by `lint.py --closed sub-kernel-ninep-dev9p-poll`). Paste or
+Generated from `fnd-*` notes (`quaestor render`; also emitted
+on-demand by `quaestor closed sub-kernel-ninep-dev9p-poll`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->

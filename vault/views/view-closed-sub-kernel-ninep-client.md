@@ -6,8 +6,8 @@ query: closed:sub-kernel-ninep-client
 ---
 # Do-not-re-report preamble — the 9P client
 
-Generated from `fnd-*` notes (`meta/lint.py --render`; also emitted
-on-demand by `lint.py --closed sub-kernel-ninep-client`). Paste or
+Generated from `fnd-*` notes (`quaestor render`; also emitted
+on-demand by `quaestor closed sub-kernel-ninep-client`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 Replaces: `memory/audit_{841,845,349,375_spill,5253,8c3,90}_closed_list.md`
 for this surface.

@@ -7,7 +7,7 @@ created: {YYYY-MM-DD}
 ---
 # {The view}
 
-Generated -- do not edit between the markers (meta/lint.py --render).
+Generated -- do not edit between the markers (quaestor render).
 
 <!-- generated:begin -->
 <!-- generated:end -->

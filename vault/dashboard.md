@@ -6,7 +6,7 @@ query: dashboard
 ---
 # Dashboard
 
-Generated — do not edit between the markers (`meta/lint.py --render`).
+Generated — do not edit between the markers (`quaestor render`).
 
 <!-- generated:begin -->
 ## Arcs
@@ -18,7 +18,7 @@ Generated — do not edit between the markers (`meta/lint.py --render`).
 | [[arc-identity-detour]] | active | 5 |
 | [[arc-net]] | active | 3 |
 | [[arc-pouch-boot]] | active | 1 |
-| [[arc-vault]] | active | 3 |
+| [[arc-vault]] | active | 4 |
 
 ## Open seams: 10
 
@@ -37,10 +37,10 @@ Generated — do not edit between the markers (`meta/lint.py --render`).
 
 - 2026-07-31 [[chg-2026-07-31-ninep-area-sweep]] — The 9P-area sweep: wire, session, transports, attach, dev9p, dev9p.poll
 - 2026-07-31 [[chg-2026-07-31-ninep-pilot]] — The 9P-client pilot: one subsystem end-to-end across all four planes
+- 2026-07-31 [[chg-2026-07-31-quaestor]] — Quaestor: the Go vault registrar + MCP layer; lint.py retired
 - 2026-07-31 [[chg-2026-07-31-vault-commit-0]] — Commit 0: the vault schema, linter, spine, and views
 - 2026-07-19 [[chg-2026-07-19-90-death-block-through]] — #90: frame-atomic reader-recv DEATH block-through (spec-first)
 - 2026-07-19 [[chg-2026-07-19-99-create-errno]] — #99: propagate the real create errno + drop the stale negative dentry on EEXIST
 - 2026-07-17 [[chg-2026-07-17-8c3-reader-role]] — 8c-3 (#89): frame-atomic release of the reader role across a debug stop
 - 2026-07-13 [[chg-2026-07-13-375-spill]] — #375: spill -- out_buf never re-read after the park drops c->lock
-- 2026-07-13 [[chg-2026-07-13-5253-send-dispositions]] — #52/#53: never-sent tag reclaim + flush-EAGAIN rollback
 <!-- generated:end -->

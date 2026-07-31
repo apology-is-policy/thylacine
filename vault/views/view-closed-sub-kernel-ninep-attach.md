@@ -6,8 +6,8 @@ query: closed:sub-kernel-ninep-attach
 ---
 # Do-not-re-report preamble — sub-kernel-ninep-attach
 
-Generated from `fnd-*` notes (`meta/lint.py --render`; also emitted
-on-demand by `lint.py --closed sub-kernel-ninep-attach`). Paste or
+Generated from `fnd-*` notes (`quaestor render`; also emitted
+on-demand by `quaestor closed sub-kernel-ninep-attach`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->

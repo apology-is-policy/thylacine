@@ -6,8 +6,8 @@ query: closed:sub-kernel-ninep-transport
 ---
 # Do-not-re-report preamble — sub-kernel-ninep-transport
 
-Generated from `fnd-*` notes (`meta/lint.py --render`; also emitted
-on-demand by `lint.py --closed sub-kernel-ninep-transport`). Paste or
+Generated from `fnd-*` notes (`quaestor render`; also emitted
+on-demand by `quaestor closed sub-kernel-ninep-transport`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->

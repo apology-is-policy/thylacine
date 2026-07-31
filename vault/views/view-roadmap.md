@@ -7,7 +7,7 @@ query: roadmap
 # Roadmap — arcs by status
 
 Generated from note fields — do not edit between the markers
-(`meta/lint.py --render`). Replaces: phase-status landed-chunk tables.
+(`quaestor render`). Replaces: phase-status landed-chunk tables.
 
 <!-- generated:begin -->
 | arc | status | chunks landed | follow-ons |
@@ -17,5 +17,5 @@ Generated from note fields — do not edit between the markers
 | [[arc-identity-detour]] | active | 5 |  |
 | [[arc-net]] | active | 3 | seam-221-idle-pump-wake, seam-223-pump-tail-starvation |
 | [[arc-pouch-boot]] | active | 1 | seam-848-pivot-walk-race |
-| [[arc-vault]] | active | 3 |  |
+| [[arc-vault]] | active | 4 |  |
 <!-- generated:end -->

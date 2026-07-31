@@ -369,16 +369,40 @@ grep, GitHub, and non-Obsidian agents all see current tables.
 | `view-mirrors` | abi × `mirrors`, flagging chgs that touched an abi without `mirrors-checked` | ad-hoc mirror sweeps |
 | `dashboard` | arc status + open-seam counts + last N chgs | `project_active.md`'s status half |
 
-## 8. Enforcement: the linter
+## 8. Enforcement: quaestor
 
-`vault/meta/lint.py` (plain YAML+markdown reader, no Obsidian dependency),
-wired as a pre-commit hook. Checks:
+`vault/meta/quaestor/` — a Go binary (stdlib-only, no Obsidian dependency),
+the vault's registrar and the **one schema authority**. It grew from the
+commit-0 `lint.py` and replaced it after a 15/15 parity gate (identical
+verdicts over the full corpus AND identical failures under every
+sabotage-probe class — dangling edge, stale view, dropped dossier section,
+unterminated flow list, deferred-without-seam, Record body edit,
+non-closure field, closure-without-linking-chg, plus the allowed cases);
+the probe classes live on as its committed `go test` suite
+(`lint_test.go`), and the frontmatter grammar's exact behaviors are pinned
+in `front_test.go`. Never introduce a second implementation of any check
+in this section (the R6 mirror-drift hazard applied to the schema itself),
+and never swap the frontmatter parser for a real YAML library: **the
+restricted subset is schema law** — scalars, single-line `[a, b]` flow
+lists, block `- item` lists, flow maps kept raw (presence-only); a
+multi-line flow list fails loudly rather than parsing.
+
+Subcommands: `lint` (below; the hook runs `quaestor lint --staged`),
+`render` (rewrite generated view bodies), `closed <sub-id>` (the
+do-not-re-report preamble), `new` (typed note factory from
+`vault/meta/templates/`), `query` (fnd/seam by surface + status),
+`backlinks` (incoming edges + wikilinks), `close` (closure-field flip on a
+Record note, refusing everything else by construction), `id` (shape +
+collision check), `serve` (the MCP layer: newline-delimited JSON-RPC over
+stdio exposing the same operations as tools; wired via `.mcp.json`).
+
+`quaestor lint` checks:
 
 1. `id` == filename; `type` valid; required fields present per §5; enums valid.
 2. No dangling `[[links]]` or unknown ids in edge fields.
-3. Record-plane immutability: a modified `record/**` file older than the commit
-   fails unless the only changed keys are §5.3 closure fields AND a chg note in
-   the same commit links it.
+3. Record-plane immutability (`--staged`): a modified `record/**` file older
+   than the commit fails unless the only changed keys are §5.3 closure fields
+   AND a chg note in the same commit links it.
 4. `updated` forbidden on Record plane; required-fresh on Present-plane edits.
 5. R6: a chg whose `touched` includes an abi with non-empty `mirrors` must
    carry `mirrors-checked` covering the set.
@@ -387,8 +411,11 @@ wired as a pre-commit hook. Checks:
    view fails the commit).
 8. Citation style: `file:line` patterns outside `record/` are flagged (R4).
 
-The linter is the schema's teeth; without it this document is aspiration. It
-ships in the same commit as the schema.
+Notes live under `vault/` excluding `vault/meta/` (prose + machinery) and
+`vault/journal/` — the operator's Obsidian scratch (daily notes, canvases,
+whiteboards; never load-bearing per R8; git-ignored).
+
+Quaestor is the schema's teeth; without it this document is aspiration.
 
 ## 9. Worked examples (abbreviated but real)
 
