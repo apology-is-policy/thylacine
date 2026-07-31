@@ -22,5 +22,11 @@ Generated from note fields — do not edit between the markers
 | [[seam-848-pivot-walk-race]] | open | sub-kernel-ninep-attach | fnd-16c-r1-f6 | task #848 |
 | [[seam-90-hung-server]] | open | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
+| [[seam-larder-cacheable-proxy]] | open | sub-kernel-larder, sub-kernel-ninep-dev9p | chg-2026-07-09-larder-l1e |  |
+| [[seam-larder-lazy-array-robustness]] | open | sub-kernel-larder | fnd-25-r1-f1 |  |
+| [[seam-larder-loom-bypass]] | open | sub-kernel-larder | fnd-l1f-r1-f2 |  |
+| [[seam-larder-reused-dir-dentries]] | open | sub-kernel-larder | fnd-term2-r1-f1 |  |
+| [[seam-larder-shrinker]] | open | sub-kernel-larder | fnd-29-r1-f1 |  |
+| [[seam-larder-stale-child-attr]] | open | sub-kernel-larder | fnd-l1f-r1-f3 |  |
 | [[seam-wb-close-flush-slot]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 <!-- generated:end -->

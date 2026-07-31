@@ -9,6 +9,7 @@ chunks:
   - chg-2026-07-31-ninep-pilot
   - chg-2026-07-31-ninep-area-sweep
   - chg-2026-07-31-quaestor
+  - chg-2026-07-31-larder-sweep
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"

@@ -367,10 +367,12 @@ kmalloc per walk; the attrs scratch on the walk_attrs RPC path (heap — 16
   close-flush error slot is the v1.x lift.
 - [[seam-co-fidless-wstat]] — fchmod/fchown on a cached-open fd fails
   loud (no fid to Tsetattr; no v1.0 consumer does this).
-- The Loom-async-mutation bypass of the wb/Larder invalidates is
-  self-inflicted-reachable only (L1f-F2 wording); rename/unlink leave the
-  moved file's OWN attr stale in metadata-only fields (L1f-F3) — both
-  recorded at the Larder surface's sweep.
+- [[seam-larder-loom-bypass]] — the Loom-async-mutation bypass of the
+  wb/Larder invalidates (self-inflicted-reachable only, L1f-F2 wording);
+  [[seam-larder-stale-child-attr]] — rename/unlink leave the moved
+  file's OWN attr stale in metadata-only fields (L1f-F3);
+  [[seam-larder-cacheable-proxy]] — the Twalkgetattr-success latch as
+  the cacheability proxy. All three live on [[sub-kernel-larder]].
 
 ## Caveats
 

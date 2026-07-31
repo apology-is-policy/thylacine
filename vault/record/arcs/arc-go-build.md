@@ -9,13 +9,21 @@ design:
   - "docs/FID-LIFECYCLE-DESIGN.md"
 chunks:
   - chg-2026-06-24-349-flow-control
+  - chg-2026-07-09-larder-l1c
+  - chg-2026-07-09-larder-l1d
+  - chg-2026-07-09-larder-l1e
+  - chg-2026-07-09-larder-l1f
   - chg-2026-07-11-wb-staging
   - chg-2026-07-11-fid-lifecycle
+  - chg-2026-07-11-b1-loose
+  - chg-2026-07-11-d44-read-band
+  - chg-2026-07-12-term2-dentry-name
   - chg-2026-07-13-375-spill
   - chg-2026-07-13-5253-send-dispositions
   - chg-2026-07-13-g1-write-populate
   - chg-2026-07-13-g2-dirfid
   - chg-2026-07-13-g34-downgrade-genscope
+  - chg-2026-07-14-term4-close
   - chg-2026-07-19-99-create-errno
 follow-ons: []
 created: 2026-07-31

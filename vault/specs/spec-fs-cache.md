@@ -2,7 +2,7 @@
 id: spec-fs-cache
 type: spec
 title: "fs_cache.tla"
-models: [sub-kernel-ninep-dev9p]
+models: [sub-kernel-ninep-dev9p, sub-kernel-larder]
 pins: [inv-i38]
 cfgs:
   - "fs_cache.cfg -- clean (Invariants: the Open/Read/OwnWrite discipline over content tokens)"
@@ -37,6 +37,9 @@ and the dir-fid cache (fids are identity, not content).
 | `Refetch` | the gen-guarded installs after each RPC |
 | `StageWrite` / `FlushClose` | `wb_write_prepare` / `wb_flush_locked` (+ the G1 own-install on FlushClose) |
 
-The Larder mechanism itself joins `models` at its sweep
-(`sub-kernel-larder`); today the model's actions all map into dev9p call
-sites.
+The dev9p rows are the POLICY sites; the mechanism they drive —
+`larder_attr_serve`/`_install`/`_invalidate`, `larder_page_serve`/
+`_install`/`_install_own`, `larder_pages_snapshot` (the Open
+linearization for the fidless cached-open) — lives on
+[[sub-kernel-larder]], whose gen ring is the impl realization of the
+model's ATOMIC Open across the RPC-shaped populate window.

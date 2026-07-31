@@ -30,9 +30,10 @@ Bottom-up through the stack:
   policy + write-behind + cached-open + the weft arms.
 - [[sub-kernel-ninep-dev9p-poll]] — the readiness bridge + the global
   poll-pump kthread (the net arc's one kernel ABI).
-- (sweep-pending: the Larder mechanism (`kernel/larder.c`,
-  `docs/reference/132-larder.md`) · netd's server half
-  (`docs/reference/121-netd.md`).)
+- [[sub-kernel-larder]] — the guest-side FS cache mechanism (attr +
+  dentry + page sub-caches, the gen ring, the cached-open readers;
+  dev9p holds the policy).
+- (sweep-pending: netd's server half (`docs/reference/121-netd.md`).)
 
 ## Cross-cutting
 

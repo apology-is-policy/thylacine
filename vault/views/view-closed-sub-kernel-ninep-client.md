@@ -13,7 +13,7 @@ Replaces: `memory/audit_{841,845,349,375_spill,5253,8c3,90}_closed_list.md`
 for this surface.
 
 <!-- generated:begin -->
-32 closed findings on [[sub-kernel-ninep-client]] — do NOT re-report
+33 closed findings on [[sub-kernel-ninep-client]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -49,4 +49,5 @@ here; see the seam inbox):
 - [[fnd-8c3-r2-f2]] [P3] Comments claimed t->proc == NULL for kproc threads (wrong immunity) (fixed) — Fixed (three comments). A guard justified by the wrong mechanism invites a
 - [[fnd-8c3-r3-f1]] [P3] The fix's own doc-rot: comments described the removed re-read (fixed) — Fixed: both reworded to the stop_unwound latch; an optional symmetry clear
 - [[fnd-90-r1-f1]] [P3] The revert-probe covered tsleep() only; production rides sleep() (fixed) — Fixed in-close: added the sleep()-path test (blocks a pending death through
+- [[fnd-b1-r1-f3]] [P3] p9_client_init did not explicitly zero the loose/cacheable/wga latches (fixed) — Fixed: the three flags explicitly zeroed in `p9_client_init` — init
 <!-- generated:end -->
