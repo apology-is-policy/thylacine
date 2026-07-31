@@ -592,6 +592,63 @@ When token/time budget is low:
 - Summarize to the user: what landed, what's queued, what the next session picks up.
 - Do NOT land partial work just to close a chunk.
 
+### The checkpoint contract (binding; every time you hand back)
+
+A **checkpoint** is any turn that returns control to the user at a resting point
+— a landed chunk, a closed audit, a surfaced fork, a stopping report. At every
+checkpoint, do these three WITHOUT BEING ASKED. They exist because the user
+cannot see what you can see, and the cost of them guessing is real.
+
+**1. Account for every attached shell, monitor, and background task.**
+
+Enumerate what is still running and dispose of it explicitly:
+
+- Kill anything whose work is finished or whose exit condition can no longer be
+  met, then say so.
+- For anything deliberately left alive, name it and why in one line
+  ("`ci-smp-gate` running, ~20 min, this is the gate we're waiting on").
+- If nothing is running, **say "nothing running"** — silence is not the same
+  statement.
+
+**Why this is binding, not tidiness:** an attached session reads to the user as
+"Claude is still working, do not interrupt." A stray poller therefore does not
+just waste a process — it silently converts a finished turn into an apparent
+in-progress one and stalls the human. Verify with a real check (`ps` scoped to
+the tree/session path), not from memory of what you launched; kill strays by
+explicit **PID**, never by pattern (see the unscoped-`pkill` rule). Worked
+failure, this project: two clusters in ONE session — three self-matching
+`pgrep -f` loops, then six `until grep` waiters whose patterns were
+unsatisfiable (one producer stopped, another's marker filtered away by the
+author's own `| tail -N`) — each spun for over an hour while the user watched an
+"active" session that was doing nothing. See
+[[feedback-unbounded-until-waiters]].
+
+**2. Leave the handoff already written, not offered.**
+
+If the tree is in a compactable state (clean, green, no open audit round), the
+handoff must ALREADY be current when you hand back — `project_active.md`,
+`project_next_session.md`, the phase status doc, any open-finding notes — so the
+user can type `/compact` or "keep going" without a preparatory round-trip. Do
+not ask "shall I write the handoff?"; do not wait for the compaction to be
+announced. The Handoff protocol above says what to write; this says *when*:
+**at every checkpoint, in advance.** State the posture in one clause
+("handoff current at `<tip>`") so the user knows the choice is free.
+
+If the state is NOT compactable (uncommitted work, red tests, an audit round in
+flight), say that instead and name the one thing that would make it compactable.
+
+**3. Say what is next, and show the road.**
+
+After the substantive report, always close with:
+
+- **Next**: the single immediate next action.
+- **Ahead**: a one-line progression of the queued chunks on the current arc, in
+  order, ending at the arc's close (e.g.
+  `#118 libunwind FDE segv -> gl_probe gate -> port patches -> CL-7b close`).
+
+Keep it to one line. The purpose is orientation — the user should be able to see
+where the current chunk sits in the arc without opening the tracker.
+
 ---
 
 ## Reference documentation discipline (load-bearing)
@@ -925,6 +982,14 @@ Recommendation format: short, includes rationale. "Working tree clean at tip X; 
 
 Do NOT recommend compaction mid-chunk or with uncommitted state.
 
+**The handoff is ready before you recommend anything.** Per the checkpoint
+contract, a compactable state means the handoff docs are ALREADY written — so
+this section is only about whether to *suggest* compacting, never about whether
+the user *could*. The user decides when to compact; your job is to make sure
+that decision never costs a preparatory round-trip. When the state is
+compactable and you are not recommending it, still say so in a clause
+("compactable if you want it; otherwise next is Y").
+
 ---
 
 ## When to recommend `/effort max`
@@ -1062,12 +1127,24 @@ End-of-iteration summaries (the response to a completed audit / chunk) follow a 
 **Posture**: <suites> × (default + ASan + TSan) green. <spec count> specs
 clean. test_<X> at <count>.
 
-**Next**: <queued chunk(s) with deps>.
+**Running**: <nothing running | what is alive and why, one line each>.
+
+**Handoff**: current at <tip> — compactable. | NOT compactable: <the one
+blocker>.
+
+**Next**: <the single immediate next action>.
+**Ahead**: <chunk> -> <chunk> -> <chunk> -> <arc close>.
 
 **Memory**: <files updated>.
 ```
 
 This structure lets the user (or a future session reading the conversation log) reconstruct state in under 30 seconds.
+
+The last four fields are the checkpoint contract made concrete — `Running`
+answers "is Claude still working?", `Handoff` answers "can I compact right
+now?", and `Next`/`Ahead` answer "where are we in the arc?". Emit all four at
+every checkpoint even when the answer is boring; a missing field reads as an
+unknown, and the whole point is that the user should not have to ask.
 
 ---
 
