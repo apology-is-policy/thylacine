@@ -8,6 +8,7 @@ design:
   - "docs/LARDER-DESIGN.md"
   - "docs/FID-LIFECYCLE-DESIGN.md"
 chunks:
+  - chg-2026-06-23-gonet3c-net-over-net
   - chg-2026-06-24-349-flow-control
   - chg-2026-06-24-348-s2c-blocking
   - chg-2026-07-08-cf3b-bulk-ring

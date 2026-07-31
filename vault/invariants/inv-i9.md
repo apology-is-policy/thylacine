@@ -3,7 +3,7 @@ id: inv-i9
 type: inv
 title: "I-9 — no wakeup lost between cond-check and sleep"
 number: I-9
-guards: [sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn]
+guards: [sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server]
 validated-by: [spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
 strength: spec
 created: 2026-07-31
@@ -30,7 +30,8 @@ includes:
 > and Weft surfaces (specs `scheduler`/`poll`/`cons_poll`/
 > `weft_readiness`/`tsleep`/`death_wake`). Those edges join as their
 > dossiers land in the sweep. (dev9p.poll joined at the 9P-area sweep;
-> srvconn at the srv-area sweep.)
+> srvconn at the srv-area sweep; netd's userspace analog at the netd
+> sweep.)
 
 ## Enforcement
 
@@ -57,6 +58,17 @@ happens-before pairing at all five blocking loops · the drain-wakes on
 every consume path · teardown's complete wake set (both rendezes, both
 wrendezes, both role lists, the poll list) · the per-chunk POLLIN edge
 in the blocking client send (the deferred edge was [[fnd-cf3b-r1-f1]]).
+
+On the netd surface ([[sub-netd-server]], the USERSPACE analog): the
+deferred-reply engines' no-lost-completion rests on serve-loop ORDER,
+not a lock — `net.poll` (observe every stack edge delivered this tick)
+runs before the `poll_*` delivery passes and before any dispatch that
+can park a new pending, and netd is single-threaded, so no edge lands
+between an empty-observe and its park unobserved. The net-4d F1 guards
+(second-read-empty + re-write-reject on a deferred cs/dns fid) close
+the held-tag clobber; `Disp::Deferred` guarantees at most one reply per
+held tag. This is the server half [[spec-net-poll]] abstracts as the
+readiness edge.
 
 ## Validation
 

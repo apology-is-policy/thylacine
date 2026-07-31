@@ -2,7 +2,7 @@
 id: spec-net-poll
 type: spec
 title: "net_poll.tla"
-models: [sub-kernel-ninep-dev9p-poll]
+models: [sub-kernel-ninep-dev9p-poll, sub-netd-server]
 pins: [inv-i9]
 cfgs:
   - "net_poll.cfg -- clean (NoMissedNetPoll: no readiness edge lost between the sample and the park)"
@@ -15,11 +15,14 @@ updated: 2026-07-31
 ## Abstraction
 
 One QTPOLL Spoor, one poller, one kthread, one netd socket; readiness is a
-boolean edge. Deliberately beneath the model: the multi-client pump
-fairness (F1/R2-F1 — prose + the collect bound), the widen/union
-machinery, OOM degrades, memory ordering of the cached-revents bridge, and
-the #845 abandon plumbing. The teardown lifetime is its own module —
-[[spec-net-poll-teardown]].
+boolean edge. The netd socket abstracts [[sub-netd-server]]'s `ready`
+file (`check_ready` + the `PendingReady` defer) — the server half whose
+mask-check-then-park realizes the probe semantics the kernel pump relies
+on. Deliberately beneath the model: the multi-client pump fairness
+(F1/R2-F1 — prose + the collect bound), the widen/union machinery, OOM
+degrades, memory ordering of the cached-revents bridge, netd's
+serve-loop-order I-9 analog, and the #845 abandon plumbing. The teardown
+lifetime is its own module — [[spec-net-poll-teardown]].
 
 ## Action-site map
 
