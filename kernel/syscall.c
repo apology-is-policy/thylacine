@@ -1300,9 +1300,13 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
         }
         if (!heap_scratch) len = SYS_RW_STACK;
     }
+    // #100 (ER-3): a copy-in fault is EFAULT. This is the arm that actually
+    // fires on a genuinely unmapped page -- sys_validate_user_buf above is only
+    // a range check, so fixing that one and leaving this is exactly the
+    // "the fix on site N stops you asking about site N+1" shape.
     if (uaccess_copy_in(scratch, buf_va, len) != 0) {
         if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
-        return -1;
+        return -T_E_FAULT;
     }
     s64 wr = sys_write_for_proc(p, (hidx_t)hraw, scratch, len);
     if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
@@ -1388,7 +1392,7 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
     // user-VA are not "uncopied" but bytes consumed beyond the fault are
     // LOST. Documented caveat (unchanged from the per-byte era).
     if (got > 0 && uaccess_copy_out(buf_va, scratch, (u64)got) != 0)
-        got = -1;
+        got = -T_E_FAULT;   // #100 (ER-3): see the copy-in twin
     if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
     return got;
 }
@@ -1433,7 +1437,7 @@ static s64 sys_pread_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
     // SYS_READ nothing is LOST on a fault: the cursor never moved, so the
     // caller can simply repeat the pread.
     if (got > 0 && uaccess_copy_out(buf_va, scratch, (u64)got) != 0)
-        got = -1;
+        got = -T_E_FAULT;   // #100 (ER-3): see the copy-in twin
     if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
     return got;
 }
@@ -1458,9 +1462,13 @@ static s64 sys_pwrite_handler(u64 hraw, u64 buf_va, u64 len, u64 off_raw) {
         }
         if (!heap_scratch) len = SYS_RW_STACK;
     }
+    // #100 (ER-3): a copy-in fault is EFAULT. This is the arm that actually
+    // fires on a genuinely unmapped page -- sys_validate_user_buf above is only
+    // a range check, so fixing that one and leaving this is exactly the
+    // "the fix on site N stops you asking about site N+1" shape.
     if (uaccess_copy_in(scratch, buf_va, len) != 0) {
         if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }
-        return -1;
+        return -T_E_FAULT;
     }
     s64 wr = sys_pwrite_for_proc(p, (hidx_t)hraw, scratch, len, (s64)off_raw);
     if (heap_scratch) { kfree(heap_scratch); sys_bounce_uncharge(p, len); }

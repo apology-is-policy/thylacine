@@ -2960,10 +2960,15 @@ static int probe100_errno(void) {
     static const char fn[] = "p100-errno-file";
     long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
     if (pd < 0) { t_putstr("joey: probe100 open root FAILED\n"); return -1; }
-    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    // T_ORDWR, not T_OWRITE: the read-side EFAULT leg needs a fd open for
+    // READING, or it stops at the RIGHT_READ gate with EBADF and never
+    // reaches the copy-out arm it exists to exercise. That is exactly what
+    // the first draft did -- caught only because these legs assert the EXACT
+    // code (`rfault=-9`); a `< 0` check would have gone green on the wrong gate.
+    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_ORDWR, 0644u);
     if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
         (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
-        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_ORDWR, 0644u);
     }
     if (fd < 0) {
         t_putstr("joey: probe100 create FAILED rc=");
@@ -2985,6 +2990,37 @@ static int probe100_errno(void) {
     long rc_whence    = t_lseek(fd, 0, 99);
     long rc_negoff    = t_lseek(fd, -1, T_SEEK_SET);
 
+    // Bad-buffer rejects on a GOOD fd -> EFAULT (-14). 0x7000_0000_0000 is
+    // 112 TiB: below UACCESS_USER_VA_TOP (2^47 = 128 TiB) so it PASSES the
+    // range pre-check, and far above every mapping this Proc has (stack tops
+    // at 2 GiB, vDSO at 3 GiB, burrows above 4 GiB) so the uaccess copy then
+    // faults. That is the point -- it reaches the COPY arm, which is the one
+    // that fires on a genuinely unmapped page, rather than stopping at the
+    // cheap range check.
+    //
+    // HONEST LIMIT: both arms now answer -14, so these two legs alone cannot
+    // say WHICH one fired. Only a revert probe distinguishes them, and that is
+    // how the copy arm was established -- do not read a green here as proof
+    // the copy arm specifically is right.
+    //
+    // The write leg reads FROM the bad VA; the read leg writes TO it. Both are
+    // harmless while the VA is unmapped, and both fail loudly (wrong value) if
+    // a future layout ever maps it -- they do not corrupt silently.
+    unsigned char *badp = (unsigned char *)0x700000000000ull;
+    long rc_wfault    = t_write(fd, badp, 16);
+
+    // The read leg needs the file to HAVE bytes and the cursor at 0. The
+    // copy-out arm is guarded `got > 0 && uaccess_copy_out(...)`, so on an
+    // empty file the Dev returns 0, the copy never runs, and the leg reports a
+    // clean 0 -- which is the second way this probe caught its own setup
+    // (rfault=0 before this write existed). Establish the precondition
+    // explicitly rather than inheriting whatever the earlier legs left.
+    unsigned char seed[16];
+    for (int i = 0; i < 16; i++) seed[i] = (unsigned char)('a' + (i & 15));
+    long rc_seed = t_write(fd, seed, sizeof(seed));
+    long rc_rew  = t_lseek(fd, 0, T_SEEK_SET);
+    long rc_rfault    = t_read(fd, badp, 16);
+
     (void)t_close(fd);
     (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
     (void)t_close(pd);
@@ -2996,6 +3032,13 @@ static int probe100_errno(void) {
     if (rc_seek_bad  != -9)  bad = 1;
     if (rc_whence    != -22) bad = 1;
     if (rc_negoff    != -22) bad = 1;
+    if (rc_wfault    != -14) bad = 1;
+    if (rc_rfault    != -14) bad = 1;
+    // The read leg's PRECONDITIONS are asserted too: if either the seeding
+    // write or the rewind silently failed, rfault would be measuring an empty
+    // file rather than the copy-out arm.
+    if (rc_seed      != 16)  bad = 1;
+    if (rc_rew       != 0)   bad = 1;
 
     t_putstr(bad ? "joey: probe100 FAILED" : "joey: probe100 OK");
     t_putstr(" (close=");
@@ -3010,7 +3053,15 @@ static int probe100_errno(void) {
     t_putstr(itoa_dec(rc_whence, nb, sizeof(nb)));
     t_putstr(" negoff=");
     t_putstr(itoa_dec(rc_negoff, nb, sizeof(nb)));
-    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22])\n" : ")\n");
+    t_putstr(" wfault=");
+    t_putstr(itoa_dec(rc_wfault, nb, sizeof(nb)));
+    t_putstr(" rfault=");
+    t_putstr(itoa_dec(rc_rfault, nb, sizeof(nb)));
+    t_putstr(" seed=");
+    t_putstr(itoa_dec(rc_seed, nb, sizeof(nb)));
+    t_putstr(" rew=");
+    t_putstr(itoa_dec(rc_rew, nb, sizeof(nb)));
+    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22 -14 -14 16 0])\n" : ")\n");
     return bad ? -1 : 0;
 }
 
