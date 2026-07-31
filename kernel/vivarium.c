@@ -185,13 +185,13 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_SOCKET,      VIV_TIER2   },  // V-5a: vivarium_socket_decide
     { VIV_LINUX_CONNECT,     VIV_TIER2   },  // V-5a: the ctl-write + fd swap
     //
-    // V-5b (the server path). These are a coherent group -- a listening socket
-    // is announce + a deferred accept -- so they land together rather than
-    // dribbling in, which is also why none is TIER2 yet.
-    { VIV_LINUX_BIND,        VIV_FORWARD },
-    { VIV_LINUX_LISTEN,      VIV_FORWARD },
-    { VIV_LINUX_ACCEPT,      VIV_FORWARD },
-    { VIV_LINUX_ACCEPT4,     VIV_FORWARD },
+    // V-5b (the server path). A coherent group -- a listening socket is a bind
+    // remembered, an announce written, and an accept that re-walks -- so they
+    // landed together.
+    { VIV_LINUX_BIND,        VIV_TIER2   },  // V-5b: remembered, not written
+    { VIV_LINUX_LISTEN,      VIV_TIER2   },  // V-5b: the announce ctl verb
+    { VIV_LINUX_ACCEPT,      VIV_TIER2   },  // V-5b: open(listen) -> M -> data
+    { VIV_LINUX_ACCEPT4,     VIV_TIER2   },  // V-5b: accept + a refused flags word
     //
     // V-5a's remainder (the client path's edges): each needs the ctl re-walk,
     // which lands with them.
@@ -720,25 +720,39 @@ struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
     if (!tab || fd < 0) return NULL;
     for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
         if (tab->s[i].state == VIV_SOCK_FREE) {
-            tab->s[i].fd    = fd;
-            tab->s[i].proto = (u8)proto;
-            tab->s[i].state = VIV_SOCK_FRESH;
-            tab->s[i].n     = n;
+            tab->s[i].fd         = fd;
+            tab->s[i].proto      = (u8)proto;
+            tab->s[i].state      = VIV_SOCK_FRESH;
+            tab->s[i].n          = n;
+            tab->s[i].bound_addr = 0;   // a fresh socket carries no bind
+            tab->s[i].bound_port = 0;
             return &tab->s[i];
         }
     }
     return NULL;   // full -> EMFILE
 }
 
+bool viv_socktab_has_room(const struct viv_socktab *tab) {
+    if (!tab) return false;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++)
+        if (tab->s[i].state == VIV_SOCK_FREE) return true;
+    return false;
+}
+
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
     struct viv_sock *e = viv_socktab_find(tab, fd);
     if (!e) return;
-    // Clear the whole entry, not just the state: a stale fd/proto/n left in a
-    // freed slot would be visible to a later claim that only sets some fields.
-    e->fd    = -1;
-    e->proto = 0;
-    e->state = VIV_SOCK_FREE;
-    e->n     = 0;
+    // Clear the WHOLE entry, not just the state. A stale field left in a freed
+    // slot would be visible to any future claim that forgets to set it -- and
+    // the bind fields make that concrete: a recycled slot still carrying the
+    // previous socket's port would let a listen() announce a port this socket
+    // never asked for.
+    e->fd         = -1;
+    e->proto      = 0;
+    e->state      = VIV_SOCK_FREE;
+    e->n          = 0;
+    e->bound_addr = 0;
+    e->bound_port = 0;
 }
 
 bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
@@ -800,8 +814,8 @@ const char *vivarium_net_proto_dir(enum viv_net_proto proto) {
     }
 }
 
-bool vivarium_sockaddr_in_parse(const u8 *sa, u64 salen,
-                                u8 out_ip4[4], u16 *out_port) {
+bool vivarium_sockaddr_in_parse_any(const u8 *sa, u64 salen,
+                                    u8 out_ip4[4], u16 *out_port) {
     // struct sockaddr_in { sa_family_t sin_family; in_port_t sin_port;
     //                      struct in_addr sin_addr; ... } -- family at 0 (2
     //  bytes), port at 2 (2 bytes, NETWORK order), addr at 4 (4 bytes, the
@@ -814,15 +828,35 @@ bool vivarium_sockaddr_in_parse(const u8 *sa, u64 salen,
 
     // Network order: high byte first. Read the bytes directly rather than
     // depending on an ntohs, exactly as the pouch boundary-line does.
-    u16 port = (u16)(((u16)sa[2] << 8) | (u16)sa[3]);
-    if (port == 0)                    return false;   // netd's dial parser refuses it
-
+    *out_port  = (u16)(((u16)sa[2] << 8) | (u16)sa[3]);
     out_ip4[0] = sa[4];
     out_ip4[1] = sa[5];
     out_ip4[2] = sa[6];
     out_ip4[3] = sa[7];
-    *out_port  = port;
     return true;
+}
+
+bool vivarium_sockaddr_in_parse(const u8 *sa, u64 salen,
+                                u8 out_ip4[4], u16 *out_port) {
+    u16 port = 0;
+    if (!vivarium_sockaddr_in_parse_any(sa, salen, out_ip4, &port)) return false;
+    if (port == 0) return false;   // netd's dial parser refuses it
+    *out_port = port;
+    return true;
+}
+
+u32 vivarium_sockaddr_in_build(u8 *buf, u32 buflen, const u8 ip4[4], u16 port) {
+    if (!buf || !ip4 || buflen < 16) return 0;
+    for (u32 i = 0; i < 16; i++) buf[i] = 0;   // sin_zero[8] must be zero
+    buf[0]  = (u8)(VIV_AF_INET & 0xFF);        // family, little-endian host
+    buf[1]  = (u8)((VIV_AF_INET >> 8) & 0xFF);
+    buf[2]  = (u8)(port >> 8);                 // port, NETWORK order
+    buf[3]  = (u8)(port & 0xFF);
+    buf[4]  = ip4[0];
+    buf[5]  = ip4[1];
+    buf[6]  = ip4[2];
+    buf[7]  = ip4[3];
+    return 16;
 }
 
 // Append a decimal u32. Returns the new offset, or `buflen + 1` to signal
@@ -861,6 +895,107 @@ u32 vivarium_net_cmd_ipport(char *buf, u32 buflen, const char *verb,
     // One check for every stage: any overflow poisoned `off` past buflen.
     if (off > buflen) return 0;
     return off;
+}
+
+u32 vivarium_net_cmd_announce(char *buf, u32 buflen, const u8 ip4[4], u16 port) {
+    if (!buf || !ip4 || buflen == 0) return 0;
+
+    // 0.0.0.0 is INADDR_ANY, whose Plan 9 spelling is the `*` wildcard. A
+    // concrete address keeps its dotted quad -- see the header for why these
+    // two reach different listeners in netd and must not be collapsed.
+    if (ip4[0] == 0 && ip4[1] == 0 && ip4[2] == 0 && ip4[3] == 0) {
+        u32 off = 0;
+        const char *verb = "announce *!";
+        for (u32 i = 0; verb[i] != '\0'; i++) off = viv_put_char(buf, buflen, off, verb[i]);
+        off = viv_put_dec(buf, buflen, off, port);
+        if (off > buflen) return 0;
+        return off;
+    }
+    return vivarium_net_cmd_ipport(buf, buflen, "announce", ip4, port);
+}
+
+bool vivarium_parse_ipport(const char *buf, u32 len, u8 out_ip4[4], u16 *out_port) {
+    if (!buf || !out_ip4 || !out_port || len == 0) return false;
+
+    u8  oct[4] = {0, 0, 0, 0};
+    u32 i      = 0;
+
+    for (u32 k = 0; k < 4; k++) {
+        if (k > 0) {
+            if (i >= len || buf[i] != '.') return false;
+            i++;
+        }
+        u32 v    = 0;
+        u32 seen = 0;
+        while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+            v = v * 10u + (u32)(buf[i] - '0');
+            if (v > 255) return false;         // not an octet
+            i++;
+            seen++;
+            if (seen > 3) return false;
+        }
+        if (seen == 0) return false;
+        oct[k] = (u8)v;
+    }
+
+    if (i >= len || buf[i] != '!') return false;
+    i++;
+
+    u32 port = 0;
+    u32 seen = 0;
+    while (i < len && buf[i] >= '0' && buf[i] <= '9') {
+        port = port * 10u + (u32)(buf[i] - '0');
+        if (port > 65535) return false;
+        i++;
+        seen++;
+    }
+    if (seen == 0) return false;
+
+    // Anything after the port must be line padding, never more address.
+    while (i < len) {
+        char c = buf[i];
+        if (c != '\n' && c != ' ' && c != '\0') return false;
+        i++;
+    }
+
+    for (u32 k = 0; k < 4; k++) out_ip4[k] = oct[k];
+    *out_port = (u16)port;
+    return true;
+}
+
+bool vivarium_listen_decide(enum viv_net_proto proto, enum viv_sock_state state,
+                            u16 bound_port, s32 *out_err) {
+    if (!out_err) return false;
+
+    // A datagram socket has no listen file at all: netd's walk rejects `listen`
+    // outside /net/tcp, and ctl_announce refuses a non-TCP slot. EOPNOTSUPP is
+    // the POSIX code for exactly this ("not a type that supports listen").
+    if (proto != VIV_NET_TCP) { *out_err = T_E_OPNOTSUPP; return false; }
+
+    switch (state) {
+    case VIV_SOCK_LISTENING:
+        // Already listening. POSIX lets a repeat listen() succeed (it may only
+        // adjust the backlog, which netd owns), so this is a quiet 0 rather
+        // than an error -- and re-announcing would fail anyway, the socket
+        // being already open.
+        *out_err = 0;
+        return false;
+    case VIV_SOCK_CONNECTED:
+        *out_err = T_E_INVAL;
+        return false;
+    case VIV_SOCK_FRESH:
+        break;
+    default:
+        *out_err = T_E_INVAL;
+        return false;
+    }
+
+    // netd's announce parser rejects port 0, and inventing an ephemeral one
+    // here would be a translation the guest did not ask for.
+    if (bound_port == 0) { *out_err = T_E_OPNOTSUPP; return false; }
+
+    *out_err = 0;
+    return true;
 }
 
 bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n) {

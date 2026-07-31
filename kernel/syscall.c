@@ -7493,6 +7493,17 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
     if (!e)                       return -(s64)T_E_NOTSOCK;
     if (e->state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
+    if (e->state == VIV_SOCK_LISTENING) return -(s64)T_E_ISCONN;
+
+    // A CONSTRAINED bind cannot be honoured: netd's dial verb takes only the
+    // REMOTE endpoint (its `!local` suffix is parsed and ignored), so a client
+    // that bound a specific source port would silently get an ephemeral one --
+    // exactly the mistranslation the argument domain forbids. Decline instead.
+    //
+    // An UNCONSTRAINED bind (0.0.0.0:0) asks for nothing netd is not already
+    // doing, so it proceeds -- which is also why the table needs no `bound`
+    // flag: "bound to anything" and "not bound" are the same request here.
+    if (e->bound_port != 0 || e->bound_addr != 0) return -(s64)T_E_OPNOTSUPP;
 
     // Copy the sockaddr into kernel memory before looking at it -- the parse is
     // pure and must never read user memory twice (a peer thread rewriting it
@@ -7556,6 +7567,229 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
 
     e->state = VIV_SOCK_CONNECTED;
     return 0;
+}
+
+// Copy a guest sockaddr into kernel memory. Shared by connect/bind, and for the
+// same reason both need it: the parse must never read user memory twice, or a
+// peer thread could rewrite the family between the check and the address read.
+static s64 viv_copy_sockaddr(u64 addr_va, u64 addrlen, u8 *out /* [128] */) {
+    if (addrlen == 0 || addrlen > 128)            return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(addr_va, addrlen)) return -(s64)T_E_FAULT;
+    for (u64 i = 0; i < addrlen; i++)
+        if (uaccess_load_u8(addr_va + i, &out[i]) != 0) return -(s64)T_E_FAULT;
+    return 0;
+}
+
+// bind(fd, addr, addrlen).
+//
+// REMEMBERED, NOT WRITTEN. netd has no `bind` ctl verb at all -- a local
+// endpoint reaches it only as the argument of `announce` (a server) and is
+// simply unavailable to a client. So bind records the request, and listen()
+// spends it. That is the same shape the pouch boundary-line arrived at.
+//
+// The visible consequence is that a bind to a port already in use SUCCEEDS
+// here and fails later at listen(), where netd's announce is refused. Linux
+// reports EADDRINUSE from bind. That is a DEGRADED answer -- the error moves,
+// it does not vanish -- and it is recorded as one in VIVARIUM.md section 9.
+static s64 viv_sock_bind(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e)                             return -(s64)T_E_NOTSOCK;
+    if (e->state != VIV_SOCK_FRESH)     return -(s64)T_E_INVAL;
+
+    u8  sa[128];
+    s64 rc = viv_copy_sockaddr(addr_va, addrlen, sa);
+    if (rc < 0) return rc;
+
+    // The PERMISSIVE parse: bind(0.0.0.0:0) is an ordinary request, not the
+    // malformed address connect() would refuse.
+    u8  ip4[4];
+    u16 port = 0;
+    if (!vivarium_sockaddr_in_parse_any(sa, addrlen, ip4, &port)) {
+        u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
+        return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
+    }
+
+    e->bound_addr = ((u32)ip4[0] << 24) | ((u32)ip4[1] << 16)
+                  | ((u32)ip4[2] << 8)  |  (u32)ip4[3];
+    e->bound_port = port;
+    return 0;
+}
+
+// listen(fd, backlog).
+//
+// Writes `announce` to ctl -- which the fd still IS, and stays: unlike connect,
+// listen performs NO swap. The listening fd must remain ctl because that is
+// what accept() re-walks from and what holds the listener's reference.
+//
+// `backlog` is dropped. netd owns its accept queue (depth 1 today) and offers
+// no way to ask for another, so honouring the number is not possible; Linux
+// itself treats the value as a hint and silently clamps it to a system
+// maximum, so a caller cannot distinguish this from an ordinary clamp.
+static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
+    (void)backlog;
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e) return -(s64)T_E_NOTSOCK;
+
+    s32 err = 0;
+    if (!vivarium_listen_decide((enum viv_net_proto)e->proto,
+                                (enum viv_sock_state)e->state,
+                                e->bound_port, &err))
+        return -(s64)err;      // err == 0 is the already-LISTENING success
+
+    u8 ip4[4] = { (u8)(e->bound_addr >> 24), (u8)(e->bound_addr >> 16),
+                  (u8)(e->bound_addr >> 8),  (u8)(e->bound_addr) };
+
+    char cmd[48];
+    u32  clen = vivarium_net_cmd_announce(cmd, sizeof(cmd), ip4, e->bound_port);
+    if (clen == 0) return -(s64)T_E_INVAL;
+
+    s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+    if (w < 0) {
+        // netd refuses an announce for a port already listening, a socket
+        // already open, or a port it will not take. EADDRINUSE is the one a
+        // server actually branches on, and it is the likely cause.
+        return -(s64)T_E_ADDRINUSE;
+    }
+
+    e->state = VIV_SOCK_LISTENING;
+    return 0;
+}
+
+// accept(fd, addr, addrlen) / accept4(fd, addr, addrlen, flags).
+//
+// Unlike connect, this SWAPS NOTHING: it returns a NEW fd, and the fd it needs
+// is the one sys_open_kpath_for_proc already hands back for `data`. So the
+// sequence is a straight walk --
+//
+//   open(/net/tcp/N/listen)   BLOCKS; netd holds the Rlopen until a call lands,
+//                             then REBINDS this fid onto the accepted
+//                             connection's ctl and replies (net-3a)
+//   read(that fd)          -> M, the accepted connection's number
+//   open(/net/tcp/M/data)  -> the fd accept() returns
+//   close(the listen fd)      M's ctl; data holds M's reference now
+//
+// The listener N is untouched throughout: netd re-arms it with a fresh socket
+// during the swap, so it stays ANNOUNCED and the next accept() blocks again.
+static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
+                           u64 addrlen_va, u64 flags) {
+    // accept4's flags are SOCK_NONBLOCK/SOCK_CLOEXEC -- refused for exactly the
+    // reason socket() refuses them, and refused here rather than masked so a
+    // guest asking for a non-blocking accepted socket does not silently get a
+    // blocking one.
+    if (flags != 0) return -(s64)T_E_INVAL;
+
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e)                                return -(s64)T_E_NOTSOCK;
+    if (e->state != VIV_SOCK_LISTENING)    return -(s64)T_E_INVAL;
+
+    // Ask BEFORE blocking. Past this point a real peer is connected, and
+    // discovering a full table then would mean hanging up on it.
+    if (!viv_socktab_has_room(tab))        return -(s64)T_E_MFILE;
+
+    enum viv_net_proto proto = (enum viv_net_proto)e->proto;
+
+    char path[64];
+    u32  plen = viv_net_path(path, sizeof(path), proto, true, e->n, "listen");
+    if (plen == 0) return -(s64)T_E_INVAL;
+
+    // THE BLOCK. Propagate the open's own errno rather than flattening it:
+    // netd answers ENOMEM when its deferred-accept table is full, and ENOMEM is
+    // a documented accept(2) error that a server can act on.
+    s64 lfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                      2u /* ORDWR */);
+    if (lfd < 0) return lfd;
+
+    // The fid is now the ACCEPTED connection's ctl, so reading it yields M.
+    u8  nbuf[16];
+    s64 got = spoor_read_common(p, (hidx_t)lfd, nbuf, sizeof(nbuf), false, 0);
+    u32 m   = 0;
+    if (got <= 0 || !vivarium_parse_conn_n((const char *)nbuf, (u32)got, &m)) {
+        handle_close(p, (hidx_t)lfd);
+        return -(s64)T_E_IO;
+    }
+
+    // Read the peer endpoint BEFORE the ctl fd goes away -- not because ctl is
+    // needed for it (remote is walked from the root), but because a failure
+    // here should leave the connection tidy, and ctl is the handle that tidies.
+    u8  rip[4] = {0, 0, 0, 0};
+    u16 rport  = 0;
+    bool have_peer = false;
+    if (addr_va != 0 && addrlen_va != 0) {
+        char rpath[64];
+        u32  rlen = viv_net_path(rpath, sizeof(rpath), proto, true, m, "remote");
+        if (rlen != 0) {
+            s64 rfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                              rpath, rlen, 0u /* OREAD */);
+            if (rfd >= 0) {
+                u8  rbuf[32];
+                s64 rgot = spoor_read_common(p, (hidx_t)rfd, rbuf, sizeof(rbuf),
+                                             false, 0);
+                if (rgot > 0)
+                    have_peer = vivarium_parse_ipport((const char *)rbuf,
+                                                      (u32)rgot, rip, &rport);
+                handle_close(p, (hidx_t)rfd);
+            }
+        }
+    }
+
+    char dpath[64];
+    u32  dlen = viv_net_path(dpath, sizeof(dpath), proto, true, m, "data");
+    if (dlen == 0) {
+        handle_close(p, (hidx_t)lfd);
+        return -(s64)T_E_INVAL;
+    }
+    s64 dfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, dpath, dlen,
+                                      2u /* ORDWR */);
+    if (dfd < 0) {
+        handle_close(p, (hidx_t)lfd);
+        return -(s64)T_E_CONNABORTED;
+    }
+
+    // data now holds M's reference, so ctl is disposable -- the same ledger
+    // connect() relies on, and the reason a Linux socket can be ONE fd when the
+    // Plan 9 connection is two files.
+    handle_close(p, (hidx_t)lfd);
+
+    if (!viv_socktab_claim(tab, (s32)dfd, proto, m)) {
+        handle_close(p, (hidx_t)dfd);      // frees M
+        return -(s64)T_E_MFILE;
+    }
+    struct viv_sock *ne = viv_socktab_find(tab, (s32)dfd);
+    if (ne) ne->state = VIV_SOCK_CONNECTED;   // born connected; the fd IS data
+
+    // The peer address is a value-result parameter: *addrlen in is the caller's
+    // buffer size, out is the FULL size, and a short buffer truncates. Failing
+    // to write it would be a silent mistranslation -- a Linux server reads the
+    // struct unconditionally -- so a failure here is reported, not ignored.
+    if (addr_va != 0 && addrlen_va != 0) {
+        u32 cap = 0;
+        if (!sys_validate_user_buf(addrlen_va, 4) ||
+            uaccess_load_u32(addrlen_va, &cap) != 0)
+            return -(s64)T_E_FAULT;
+
+        // If `remote` could not be read we still return the fd -- the peer is
+        // genuinely connected, and failing the accept would be worse than a
+        // degraded address -- but the struct is written as 0.0.0.0:0 rather
+        // than left holding the caller's stale bytes.
+        static const u8 zero_ip[4] = {0, 0, 0, 0};
+        u8  sa[16];
+        u32 salen = vivarium_sockaddr_in_build(sa, sizeof(sa),
+                                               have_peer ? rip : zero_ip,
+                                               have_peer ? rport : 0);
+        u32 wr = (cap < salen) ? cap : salen;
+        if (wr != 0) {
+            if (!sys_validate_user_buf(addr_va, wr)) return -(s64)T_E_FAULT;
+            for (u32 i = 0; i < wr; i++)
+                if (uaccess_store_u8(addr_va + i, sa[i]) != 0)
+                    return -(s64)T_E_FAULT;
+        }
+        if (uaccess_store_u32(addrlen_va, salen) != 0) return -(s64)T_E_FAULT;
+    }
+
+    return dfd;
 }
 
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
@@ -7802,6 +8036,24 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
     case VIV_LINUX_CONNECT:
         // connect(fd, addr, addrlen): x0 fd, x1 addr, x2 addrlen.
         return viv_sock_connect(p, args[0], args[1], args[2]);
+
+    case VIV_LINUX_BIND:
+        // bind(fd, addr, addrlen): x0 fd, x1 addr, x2 addrlen.
+        return viv_sock_bind(p, args[0], args[1], args[2]);
+
+    case VIV_LINUX_LISTEN:
+        // listen(fd, backlog): x0 fd, x1 backlog.
+        return viv_sock_listen(p, args[0], args[1]);
+
+    case VIV_LINUX_ACCEPT:
+        // accept(fd, addr, addrlen): x0 fd, x1 addr, x2 addrlen. Linux defines
+        // accept as accept4 with no flags, and so does this -- one body, with
+        // the flags word pinned to 0 rather than a second near-copy.
+        return viv_sock_accept(p, args[0], args[1], args[2], 0);
+
+    case VIV_LINUX_ACCEPT4:
+        // accept4(fd, addr, addrlen, flags): x0..x3.
+        return viv_sock_accept(p, args[0], args[1], args[2], args[3]);
 
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That

@@ -587,6 +587,12 @@ void test_vivarium_net_cmd(void);
 void test_vivarium_conn_n(void);
 void test_vivarium_socktab(void);
 void test_vivarium_socktab_close_hook(void);                        // VIVARIUM V-6c
+void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM V-5b
+void test_vivarium_listen_decide(void);
+void test_vivarium_announce_cmd(void);
+void test_vivarium_parse_ipport(void);
+void test_vivarium_sockaddr_build(void);
+void test_vivarium_sockaddr_parse_any(void);
 void test_cons_drain_feed_runs_discipline(void);     // G-4
 void test_cons_drain_overflow_drops_oldest(void);    // G-4
 void test_cons_drain_close_and_reopen_epoch(void);   // G-4
@@ -1998,6 +2004,12 @@ struct test_case g_tests[] = {
     { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },
     { "vivarium.socktab",              test_vivarium_socktab,              false, NULL },
     { "vivarium.socktab_close_hook",   test_vivarium_socktab_close_hook,   false, NULL },
+    { "vivarium.socktab_bind_fields",  test_vivarium_socktab_bind_fields,  false, NULL },
+    { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
+    { "vivarium.announce_cmd",         test_vivarium_announce_cmd,         false, NULL },
+    { "vivarium.parse_ipport",         test_vivarium_parse_ipport,         false, NULL },
+    { "vivarium.sockaddr_build",       test_vivarium_sockaddr_build,       false, NULL },
+    { "vivarium.sockaddr_parse_any",   test_vivarium_sockaddr_parse_any,   false, NULL },
     { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
     { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
     { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },

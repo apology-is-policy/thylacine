@@ -667,14 +667,22 @@ enum viv_net_proto {
     VIV_NET_UDP = 1,
 };
 
-// A socket's lifecycle position. FRESH means the fd still denotes `ctl`;
-// CONNECTED means it has been swapped onto `data`. The distinction is what
-// tells a second connect() from a first (Linux: EISCONN) and what tells
-// getsockname() whether an endpoint exists yet.
+// A socket's lifecycle position, which is also WHICH FILE THE FD DENOTES:
+//
+//   FRESH      -> the fd is the connection's `ctl`  (fresh, or bound, or both)
+//   LISTENING  -> the fd is STILL `ctl` (announce is a ctl write, not a swap)
+//   CONNECTED  -> the fd has been swapped onto `data`
+//
+// So the ctl/data split is FRESH|LISTENING vs CONNECTED, not FRESH vs the rest:
+// a listening socket keeps its ctl fd forever, because that is the fd `accept`
+// re-walks from and the fd whose reference keeps the listener alive. Anything
+// that writes a ctl verb (connect, announce) requires a non-CONNECTED fd, and
+// anything that moves bytes requires CONNECTED.
 enum viv_sock_state {
     VIV_SOCK_FREE      = 0,   // the entry is not in use (zeroed table = all free)
     VIV_SOCK_FRESH     = 1,
     VIV_SOCK_CONNECTED = 2,
+    VIV_SOCK_LISTENING = 3,
 };
 
 // Bounded: a guest must not be able to grow kernel memory without bound (the
@@ -684,14 +692,22 @@ enum viv_sock_state {
 #define VIV_SOCK_MAX 64u
 
 struct viv_sock {
-    s32 fd;      // the guest's fd; < 0 when the entry is free
-    u8  proto;   // enum viv_net_proto
-    u8  state;   // enum viv_sock_state
-    u16 _pad;
-    u32 n;       // the /net connection number
-    u32 _pad2;
+    s32 fd;          // the guest's fd; < 0 when the entry is free
+    u32 n;           // the /net connection number
+    u32 bound_addr;  // bind(): the requested local address, host order (0 = any)
+    u16 bound_port;  // bind(): the requested local port,    host order (0 = any)
+    u8  proto;       // enum viv_net_proto
+    u8  state;       // enum viv_sock_state
 };
 
+// THERE IS DELIBERATELY NO `bound` FLAG. An unbound socket and one bound to
+// 0.0.0.0:0 are indistinguishable in EVERY path this table feeds:
+//   * listen()  needs a concrete non-zero port either way (netd's announce
+//               parser rejects port 0), so both are refused identically;
+//   * connect() is unconstrained by both, so both proceed identically.
+// A flag would therefore be state that no reader could ever branch on. If a
+// future row makes the two differ -- getsockname() on a bound-but-idle socket
+// is the candidate -- add it THEN, with the reader that needs it.
 _Static_assert(sizeof(struct viv_sock) == 16, "viv_sock pinned at 16 bytes");
 
 // The per-Proc table (Proc.socktab). Lazily allocated on the first translated
@@ -726,6 +742,13 @@ struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
 // close hook run unconditionally for a phenotyped Proc.
 void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
 
+// True when a claim would succeed. PURE. accept() asks BEFORE it blocks: it is
+// about to make a real inbound connection exist, and discovering afterwards
+// that the table is full means accepting a peer only to hang up on it. (claim()
+// still returns NULL on a full table -- this is the courtesy check, not the
+// safety one.)
+bool viv_socktab_has_room(const struct viv_socktab *tab);
+
 // Decide whether a `socket(domain, type, protocol)` is inside the translatable
 // domain, and if so which /net protocol directory it names. PURE.
 //
@@ -759,11 +782,52 @@ const char *vivarium_net_proto_dir(enum viv_net_proto proto);
 bool vivarium_sockaddr_in_parse(const u8 *sa, u64 salen,
                                 u8 out_ip4[4], u16 *out_port);
 
+// The same parse WITHOUT the port-0 rejection, for bind(), where 0.0.0.0:0 is
+// the ordinary "any address, any port" request rather than a malformed one.
+// PURE. vivarium_sockaddr_in_parse is this plus `port != 0`.
+bool vivarium_sockaddr_in_parse_any(const u8 *sa, u64 salen,
+                                    u8 out_ip4[4], u16 *out_port);
+
+// Build a Linux `struct sockaddr_in` (the accept() peer-address out-parameter)
+// into `buf`. PURE. Returns 16 -- the fixed sockaddr_in size -- or 0 if `buflen`
+// is short. The bytes are laid out exactly as Linux expects: family LE, port and
+// address BOTH network order.
+u32 vivarium_sockaddr_in_build(u8 *buf, u32 buflen, const u8 ip4[4], u16 port);
+
 // Build a netd ctl command line: "<verb> a.b.c.d!port". PURE. Returns the
 // length written, or 0 if it would not fit (which the caller must treat as a
 // refusal, never as a zero-length write).
 u32 vivarium_net_cmd_ipport(char *buf, u32 buflen, const char *verb,
                             const u8 ip4[4], u16 port);
+
+// Build the `announce` ctl verb. PURE. An address of 0.0.0.0 becomes Plan 9's
+// wildcard `announce *!port`; a concrete address becomes `announce a.b.c.d!port`.
+//
+// The distinction is not cosmetic. netd migrates a listener announced on an
+// EXPLICIT 127.x address onto its loopback stack, while a `*` listener stays on
+// the NIC and does NOT span loopback -- so a guest binding 127.0.0.1 and a guest
+// binding INADDR_ANY reach genuinely different listeners, and rendering one as
+// the other would silently move the server.
+u32 vivarium_net_cmd_announce(char *buf, u32 buflen, const u8 ip4[4], u16 port);
+
+// Parse netd's `a.b.c.d!port` endpoint rendering (the `remote` / `local` files)
+// back into octets + host-order port. PURE -- the inverse of the ipport builder.
+// Returns false on any malformation, on a >255 octet, or on a >65535 port, so a
+// garbled endpoint file can never become a plausible-looking peer address.
+bool vivarium_parse_ipport(const char *buf, u32 len, u8 out_ip4[4], u16 *out_port);
+
+// Decide whether listen() may proceed on a socket in this state. PURE.
+//
+// Writes the POSIX errno to *out_err and returns false when it may not:
+//   * a UDP socket cannot listen at all         -> EOPNOTSUPP
+//   * a CONNECTED socket cannot listen          -> EINVAL
+//   * an unbound (or port-0) socket cannot      -> EOPNOTSUPP
+// The last is a DEGRADED answer, not an equivalent one: Linux would auto-bind an
+// ephemeral port, and netd's announce parser rejects port 0 outright. Declining
+// is the honest half of the argument domain -- and harmless in practice, because
+// discovering an auto-bound port needs getsockname(), which is not a row yet.
+bool vivarium_listen_decide(enum viv_net_proto proto, enum viv_sock_state state,
+                            u16 bound_port, s32 *out_err);
 
 // Parse the decimal connection number netd returns when a `clone`/`ctl` fid is
 // read. PURE. Returns false on empty, non-decimal, or out-of-range input --

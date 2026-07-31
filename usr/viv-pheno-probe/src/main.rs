@@ -113,7 +113,11 @@ const NR_NEWFSTATAT: u64 = 79;
 const NR_FSTAT: u64 = 80;
 // The socket family (V-5). aarch64 has no socketcall; each is its own number.
 const NR_SOCKET: u64 = 198;
+const NR_BIND: u64 = 200;
+const NR_LISTEN: u64 = 201;
+const NR_ACCEPT: u64 = 202;
 const NR_CONNECT: u64 = 203;
+const NR_ACCEPT4: u64 = 242;
 const AF_INET: u64 = 2;
 const AF_INET6: u64 = 10;
 const SOCK_STREAM: u64 = 1;
@@ -123,6 +127,7 @@ const SOCK_SEQPACKET: u64 = 5;
 // POSIX errno values a Linux libc compares against (musl generic bits/errno.h).
 const ENOTSOCK: i64 = 88;
 const EPROTONOSUPPORT: i64 = 93;
+const EOPNOTSUPP: i64 = 95;
 const EAFNOSUPPORT: i64 = 97;
 const EISCONN: i64 = 106;
 const NR_EXIT_GROUP: u64 = 94;
@@ -767,6 +772,205 @@ unsafe fn run_linux() -> ! {
     let sfd2 = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
     leg!(rep, sfd2 >= 0, b"L51\n");
     leg!(rep, svc3(NR_CLOSE, sfd2 as u64, 0, 0) == 0, b"L52\n");
+
+    // --- V-5b: the server path ---------------------------------------------
+    // THE WHOLE ROUND-TRIP RUNS IN THIS ONE SINGLE-THREADED PROCESS, which is
+    // not a shortcut but the only shape available: a PHENO_LINUX Proc cannot
+    // spawn a thread (clone is not a table row) and cannot fork. It works
+    // because TCP establishes in netd's STACK, not in accept(): the client's
+    // connect() completes the handshake against the announced listener, and
+    // the server's accept() then finds the connection already waiting. That is
+    // exactly what a listen backlog is.
+
+    // The refusals first, none of which touch /net.
+    leg!(rep, svc3(NR_BIND, rep as u64, 0, 0) == -ENOTSOCK, b"L53\n");
+    leg!(rep, svc3(NR_LISTEN, rep as u64, 1, 0) == -ENOTSOCK, b"L54\n");
+    leg!(rep, svc3(NR_ACCEPT, rep as u64, 0, 0) == -ENOTSOCK, b"L55\n");
+
+    // A UDP socket cannot listen: netd's walk has no `listen` file outside
+    // /net/tcp, and ctl_announce refuses a non-TCP slot outright.
+    let ufd = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    leg!(rep, ufd >= 0, b"L56\n");
+    leg!(rep, svc3(NR_LISTEN, ufd as u64, 1, 0) == -EOPNOTSUPP, b"L57\n");
+    leg!(rep, svc3(NR_CLOSE, ufd as u64, 0, 0) == 0, b"L58\n");
+
+    // The server. bind() is REMEMBERED, not written -- netd has no bind verb,
+    // so nothing has reached it yet at this point.
+    let srv = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, srv >= 0, b"L59\n");
+
+    // An unbound TCP socket cannot listen either: Linux would auto-bind an
+    // ephemeral port, netd's announce parser rejects port 0, and inventing one
+    // would be a translation the guest did not ask for. So it DECLINES.
+    leg!(rep, svc3(NR_LISTEN, srv as u64, 1, 0) == -EOPNOTSUPP, b"L60\n");
+
+    // 127.0.0.1:7789. The address must be EXPLICIT loopback, not INADDR_ANY:
+    // netd migrates an explicitly-announced 127.x listener onto its loopback
+    // stack, while a `*` listener stays on the NIC and never sees this
+    // connect. The wildcard/concrete split in the announce builder is what
+    // makes that reachable.
+    let srv_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x6D, // sin_port = 7789, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    leg!(
+        rep,
+        svc3(NR_BIND, srv as u64, srv_sa.as_ptr() as u64, srv_sa.len() as u64) == 0,
+        b"L61\n"
+    );
+
+    // accept() before listen() is EINVAL -- and, critically, does NOT block.
+    leg!(rep, svc3(NR_ACCEPT, srv as u64, 0, 0) == -22, b"L62\n");
+
+    leg!(rep, svc3(NR_LISTEN, srv as u64, 1, 0) == 0, b"L63\n");
+    // A repeat listen() is a POSIX success, not an error.
+    leg!(rep, svc3(NR_LISTEN, srv as u64, 5, 0) == 0, b"L64\n");
+
+    // accept4 with flags is REFUSED for the same reason socket() refuses
+    // SOCK_NONBLOCK: a guest that asked for a non-blocking accepted socket and
+    // got a blocking one blocks where it expected EAGAIN.
+    leg!(
+        rep,
+        svc4(NR_ACCEPT4, srv as u64, 0, 0, SOCK_NONBLOCK) == -22,
+        b"L65\n"
+    );
+
+    // The client. A CONSTRAINED bind before connect() must be DECLINED rather
+    // than silently ignored: netd's dial verb carries only the remote endpoint,
+    // so honouring a source port is impossible and pretending to would be the
+    // mistranslation the argument domain forbids.
+    let cbad = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, cbad >= 0, b"L66\n");
+    let cb_sa: [u8; 16] = [AF_INET as u8, 0, 0x30, 0x39, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    leg!(
+        rep,
+        svc3(NR_BIND, cbad as u64, cb_sa.as_ptr() as u64, cb_sa.len() as u64) == 0,
+        b"L67\n"
+    );
+    leg!(
+        rep,
+        svc3(NR_CONNECT, cbad as u64, srv_sa.as_ptr() as u64, srv_sa.len() as u64)
+            == -EOPNOTSUPP,
+        b"L68\n"
+    );
+    leg!(rep, svc3(NR_CLOSE, cbad as u64, 0, 0) == 0, b"L69\n");
+
+    // The real client. This connect completes the handshake against the
+    // listener, so the server's accept below has a connection waiting.
+    let cli = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, cli >= 0, b"L70\n");
+    leg!(
+        rep,
+        svc3(NR_CONNECT, cli as u64, srv_sa.as_ptr() as u64, srv_sa.len() as u64) == 0,
+        b"L71\n"
+    );
+
+    // THE ACCEPT. Returns a NEW fd -- unlike connect, which swaps in place --
+    // and fills the peer address as a value-result parameter.
+    let mut peer: [u8; 16] = [0xAA; 16];
+    // NOT 16. addrlen is value-result, so seeding it with the answer would make
+    // the "plen == 16" leg below satisfiable by a kernel that never writes it.
+    // 0xFFFF is a large-enough capacity for the full copy AND a value only the
+    // kernel can turn into 16.
+    let mut plen: u32 = 0xFFFF;
+    let afd = svc3(
+        NR_ACCEPT,
+        srv as u64,
+        peer.as_mut_ptr() as u64,
+        &mut plen as *mut u32 as u64,
+    );
+    leg!(rep, afd >= 0, b"L72\n");
+    leg!(rep, afd != srv && afd != cli, b"L73\n");
+    // The peer address was written: AF_INET, and the loopback address the
+    // client dialled from. Its PORT is ephemeral, so only the family and
+    // address are asserted -- asserting a port netd chose would be asserting
+    // netd's allocator, not this translation.
+    leg!(rep, plen == 16, b"L74\n");
+    leg!(rep, peer[0] == AF_INET as u8 && peer[1] == 0, b"L75\n");
+    leg!(
+        rep,
+        peer[4] == 127 && peer[5] == 0 && peer[6] == 0 && peer[7] == 1,
+        b"L76\n"
+    );
+
+    // THE BYTES CROSS. Both fds now denote `data` files, so these are
+    // untranslated T1 read/write -- which is the point of the whole design:
+    // once a socket is connected, the hot path has no socket code in it.
+    let msg = b"v5b";
+    leg!(
+        rep,
+        svc3(NR_WRITE, cli as u64, msg.as_ptr() as u64, msg.len() as u64) == 3,
+        b"L77\n"
+    );
+    let mut got = [0u8; 8];
+    let n = svc3(NR_READ, afd as u64, got.as_mut_ptr() as u64, got.len() as u64);
+    leg!(rep, n == 3, b"L78\n");
+    leg!(rep, got[0] == b'v' && got[1] == b'5' && got[2] == b'b', b"L79\n");
+
+    // And back the other way, so the accepted fd is proven writable too.
+    let msg2 = b"ok";
+    leg!(
+        rep,
+        svc3(NR_WRITE, afd as u64, msg2.as_ptr() as u64, msg2.len() as u64) == 2,
+        b"L80\n"
+    );
+    let mut got2 = [0u8; 8];
+    let n2 = svc3(NR_READ, cli as u64, got2.as_mut_ptr() as u64, got2.len() as u64);
+    leg!(rep, n2 == 2, b"L81\n");
+    leg!(rep, got2[0] == b'o' && got2[1] == b'k', b"L82\n");
+
+    // The accepted fd IS a tracked socket, in CONNECTED state. EINVAL (a
+    // connected socket cannot listen) rather than ENOTSOCK (no entry at all)
+    // is what distinguishes the two -- and it is the ONLY leg that would catch
+    // accept() forgetting to claim its socktab entry, since read/write on the
+    // returned fd work either way (they are untranslated T1 rows on a real
+    // Spoor, indifferent to whether the socket table knows about it).
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -22, b"L83\n");
+
+    // The listener SURVIVED the accept -- netd re-armed N with a fresh socket
+    // during the swap, so it is still ANNOUNCED. If accept had consumed the
+    // listener, a server could accept exactly one connection ever.
+    leg!(rep, svc3(NR_LISTEN, srv as u64, 1, 0) == 0, b"L84\n");
+
+    // ...and prove it by ACCEPTING A SECOND CONNECTION, which is the claim
+    // `listen() == 0` only gestures at: that asserts the socktab state, this
+    // asserts netd actually re-armed the listening socket.
+    let cli2 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, cli2 >= 0, b"L85\n");
+    leg!(
+        rep,
+        svc3(NR_CONNECT, cli2 as u64, srv_sa.as_ptr() as u64, srv_sa.len() as u64) == 0,
+        b"L86\n"
+    );
+
+    // A SHORT addrlen, to pin the value-result truncation: the address is
+    // clipped to the caller's buffer, but *addrlen reports the FULL size, so a
+    // Linux caller can tell it was truncated. Byte 8 must stay untouched.
+    let mut peer2: [u8; 16] = [0xBB; 16];
+    let mut plen2: u32 = 8;
+    let afd2 = svc3(
+        NR_ACCEPT,
+        srv as u64,
+        peer2.as_mut_ptr() as u64,
+        &mut plen2 as *mut u32 as u64,
+    );
+    leg!(rep, afd2 >= 0, b"L87\n");
+    leg!(rep, plen2 == 16, b"L88\n");
+    leg!(rep, peer2[0] == AF_INET as u8 && peer2[4] == 127, b"L89\n");
+    leg!(rep, peer2[8] == 0xBB, b"L90\n");
+    leg!(rep, svc3(NR_CLOSE, afd2 as u64, 0, 0) == 0, b"L91\n");
+    leg!(rep, svc3(NR_CLOSE, cli2 as u64, 0, 0) == 0, b"L92\n");
+
+    leg!(rep, svc3(NR_CLOSE, afd as u64, 0, 0) == 0, b"L93\n");
+    leg!(rep, svc3(NR_CLOSE, cli as u64, 0, 0) == 0, b"L94\n");
+    leg!(rep, svc3(NR_CLOSE, srv as u64, 0, 0) == 0, b"L95\n");
+    // The close hook covers the accepted fd too: its socktab entry was claimed
+    // by accept(), so it must be released by close() like any other. Paired
+    // with L83, this brackets the entry's whole life: EINVAL while open,
+    // ENOTSOCK once closed.
+    leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -ENOTSOCK, b"L96\n");
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

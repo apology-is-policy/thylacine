@@ -1337,3 +1337,225 @@ void test_vivarium_socktab_close_hook(void) {
                 "the new socket carries its OWN (proto, N) -- no bleed from the "
                 "previous tenant of this index");
 }
+
+// V-5b: the bind fields are part of the recycled-slot contract too. A slot that
+// kept the previous socket's port would let listen() announce a port THIS
+// socket never asked for -- the close-hook bug wearing a different hat.
+void test_vivarium_socktab_bind_fields(void);
+void test_vivarium_socktab_bind_fields(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0;
+        tab.s[i].bound_addr = 0; tab.s[i].bound_port = 0;
+    }
+
+    TEST_ASSERT(viv_socktab_has_room(&tab), "an empty table has room");
+    TEST_ASSERT(!viv_socktab_has_room(NULL), "NULL has no room (and does not fault)");
+
+    struct viv_sock *s = viv_socktab_claim(&tab, 7, VIV_NET_TCP, 3);
+    TEST_ASSERT(s != NULL, "claim fd 7");
+    TEST_ASSERT(s->bound_addr == 0 && s->bound_port == 0,
+                "a fresh socket carries NO bind");
+
+    s->bound_addr = 0x7F000001u;   // 127.0.0.1
+    s->bound_port = 7789;
+    s->state      = VIV_SOCK_LISTENING;
+
+    viv_socktab_drop(&tab, 7);
+
+    struct viv_sock *s2 = viv_socktab_claim(&tab, 7, VIV_NET_TCP, 4);
+    TEST_ASSERT(s2 != NULL, "reclaim fd 7");
+    TEST_ASSERT(s2->bound_port == 0 && s2->bound_addr == 0,
+                "the recycled slot carries NO stale bind -- if it did, this "
+                "socket's listen() would announce 127.0.0.1!7789");
+    TEST_ASSERT(s2->state == VIV_SOCK_FRESH, "and it is FRESH, not LISTENING");
+
+    // has_room is the accept()-before-blocking check: it must go false exactly
+    // when a claim would fail, or accept blocks, takes a real peer, and then
+    // has to hang up on it.
+    u32 claimed = 1;
+    for (s32 fd = 200; claimed < VIV_SOCK_MAX; fd++) {
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1)) break;
+        claimed++;
+    }
+    TEST_ASSERT(claimed == VIV_SOCK_MAX, "filled to VIV_SOCK_MAX");
+    TEST_ASSERT(!viv_socktab_has_room(&tab), "a full table reports no room");
+    TEST_ASSERT(viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1) == NULL,
+                "and a claim on it does fail -- has_room agrees with claim");
+}
+
+// V-5b: the listen() decision table. Every arm is a REFUSAL a guest can
+// provoke, so each gets its own POSIX code rather than a shared EINVAL.
+void test_vivarium_listen_decide(void);
+void test_vivarium_listen_decide(void) {
+    s32 err = -1;
+
+    TEST_ASSERT(vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_FRESH, 80, &err),
+                "a bound fresh TCP socket may listen");
+    TEST_ASSERT(err == 0, "and reports no error");
+
+    // UDP has no listen file at all -- netd's walk rejects `listen` outside
+    // /net/tcp, so this must never reach a walk.
+    err = -1;
+    TEST_ASSERT(!vivarium_listen_decide(VIV_NET_UDP, VIV_SOCK_FRESH, 80, &err),
+                "a UDP socket may not listen");
+    TEST_ASSERT(err == T_E_OPNOTSUPP, "and says EOPNOTSUPP, the POSIX code");
+
+    // Port 0 means Linux would auto-bind an ephemeral port. netd's announce
+    // parser rejects port 0, and inventing one would be a translation the
+    // guest did not ask for -- so this DECLINES.
+    err = -1;
+    TEST_ASSERT(!vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_FRESH, 0, &err),
+                "an unbound (port 0) socket may not listen");
+    TEST_ASSERT(err == T_E_OPNOTSUPP, "declined, not mis-announced on port 0");
+
+    err = -1;
+    TEST_ASSERT(!vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_CONNECTED, 80, &err),
+                "a connected socket may not listen");
+    TEST_ASSERT(err == T_E_INVAL, "EINVAL, per POSIX");
+
+    // A repeat listen() is a POSIX success, not an error: it may only adjust a
+    // backlog netd owns. false + err 0 is the "already done" signal.
+    err = -1;
+    TEST_ASSERT(!vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_LISTENING, 80, &err),
+                "a listening socket does not re-announce");
+    TEST_ASSERT(err == 0, "but reports SUCCESS -- a repeat listen() is legal");
+
+    TEST_ASSERT(!vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_FRESH, 80, NULL),
+                "NULL out_err is refused, not dereferenced");
+}
+
+// V-5b: the announce builder. The wildcard/concrete split is load-bearing --
+// netd migrates an EXPLICIT 127.x listener onto its loopback stack while a `*`
+// listener stays on the NIC, so these two reach different listeners.
+void test_vivarium_announce_cmd(void);
+void test_vivarium_announce_cmd(void) {
+    char buf[48];
+
+    const u8 any[4] = {0, 0, 0, 0};
+    u32 n = vivarium_net_cmd_announce(buf, sizeof(buf), any, 7789);
+    TEST_ASSERT(n == 15, "`announce *!7789` is 15 bytes: 8 verb + 1 space + 2 + 4 port");
+    TEST_ASSERT(buf[0]=='a' && buf[9]=='*' && buf[10]=='!' && buf[11]=='7',
+                "INADDR_ANY renders as the Plan 9 wildcard `announce *!7789`");
+
+    const u8 lo[4] = {127, 0, 0, 1};
+    n = vivarium_net_cmd_announce(buf, sizeof(buf), lo, 7789);
+    TEST_ASSERT(n == 23, "announce 127.0.0.1!7789 is 23 bytes");
+    TEST_ASSERT(buf[9]=='1' && buf[10]=='2' && buf[11]=='7' && buf[12]=='.',
+                "a concrete address keeps its dotted quad -- rendering it as `*` "
+                "would move the listener off netd's loopback stack");
+
+    // Overflow is a refusal, never a truncated verb: a short write here would
+    // announce a DIFFERENT port than the guest asked for.
+    TEST_ASSERT(vivarium_net_cmd_announce(buf, 5, lo, 7789) == 0,
+                "a buffer too small refuses");
+    TEST_ASSERT(vivarium_net_cmd_announce(buf, 12, any, 7789) == 0,
+                "including for the wildcard form");
+    TEST_ASSERT(vivarium_net_cmd_announce(NULL, sizeof(buf), lo, 80) == 0,
+                "NULL refused");
+}
+
+// V-5b: the endpoint parser -- the inverse of the ipport builder, reading
+// netd's `remote` file for accept()'s peer address. A garbled endpoint must
+// never become a plausible-looking address.
+void test_vivarium_parse_ipport(void);
+void test_vivarium_parse_ipport(void) {
+    u8  ip[4];
+    u16 port = 0;
+
+    TEST_ASSERT(vivarium_parse_ipport("127.0.0.1!7789", 14, ip, &port), "parses");
+    TEST_ASSERT(ip[0]==127 && ip[1]==0 && ip[2]==0 && ip[3]==1, "octets");
+    TEST_ASSERT(port == 7789, "port");
+
+    TEST_ASSERT(vivarium_parse_ipport("10.0.2.15!80\n", 13, ip, &port),
+                "a trailing newline is line padding, not garbage");
+    TEST_ASSERT(ip[0]==10 && ip[3]==15 && port == 80, "and parses correctly");
+
+    TEST_ASSERT(vivarium_parse_ipport("0.0.0.0!0", 9, ip, &port),
+                "the all-zero endpoint is well-formed");
+    TEST_ASSERT(port == 0, "port 0 is legal HERE -- unlike a dial, this is a report");
+
+    // Round-trip against the builder they must stay inverse to.
+    char cmd[48];
+    const u8 src[4] = {192, 168, 1, 200};
+    u32 cn = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", src, 65535);
+    TEST_ASSERT(cn > 8, "built");
+    TEST_ASSERT(vivarium_parse_ipport(cmd + 8, cn - 8, ip, &port),
+                "the builder's payload parses back");
+    TEST_ASSERT(ip[0]==192 && ip[1]==168 && ip[2]==1 && ip[3]==200 && port==65535,
+                "round-trip is exact");
+
+    TEST_ASSERT(!vivarium_parse_ipport("127.0.0!80", 10, ip, &port), "3 octets refused");
+    TEST_ASSERT(!vivarium_parse_ipport("127.0.0.1.2!80", 14, ip, &port), "5 octets refused");
+    TEST_ASSERT(!vivarium_parse_ipport("256.0.0.1!80", 12, ip, &port), "a >255 octet refused");
+    TEST_ASSERT(!vivarium_parse_ipport("127.0.0.1!70000", 15, ip, &port), "a >65535 port refused");
+    TEST_ASSERT(!vivarium_parse_ipport("127.0.0.1", 9, ip, &port), "a missing port refused");
+    TEST_ASSERT(!vivarium_parse_ipport("127.0.0.1!", 10, ip, &port), "an empty port refused");
+    TEST_ASSERT(!vivarium_parse_ipport("127.0.0.1!80x", 13, ip, &port), "trailing garbage refused");
+    TEST_ASSERT(!vivarium_parse_ipport("", 0, ip, &port), "empty refused");
+    TEST_ASSERT(!vivarium_parse_ipport(NULL, 4, ip, &port), "NULL refused");
+    TEST_ASSERT(!vivarium_parse_ipport("1234.0.0.1!80", 13, ip, &port),
+                "a 4-digit octet refused before it can overflow");
+}
+
+// V-5b: the peer-address builder. accept() writes this into guest memory, so
+// the byte layout is a Linux ABI, not an internal choice.
+void test_vivarium_sockaddr_build(void);
+void test_vivarium_sockaddr_build(void) {
+    u8 sa[16];
+    for (u32 i = 0; i < 16; i++) sa[i] = 0xAA;
+
+    const u8 ip[4] = {10, 0, 2, 15};
+    TEST_ASSERT(vivarium_sockaddr_in_build(sa, sizeof(sa), ip, 7789) == 16,
+                "sockaddr_in is 16 bytes");
+    TEST_ASSERT(sa[0] == 2 && sa[1] == 0, "family AF_INET, little-endian");
+    TEST_ASSERT(sa[2] == (7789 >> 8) && sa[3] == (7789 & 0xFF),
+                "port in NETWORK order");
+    TEST_ASSERT(sa[4]==10 && sa[5]==0 && sa[6]==2 && sa[7]==15, "address octets");
+    for (u32 i = 8; i < 16; i++)
+        TEST_ASSERT(sa[i] == 0, "sin_zero is zeroed -- no stack bytes leak to EL0");
+
+    TEST_ASSERT(vivarium_sockaddr_in_build(sa, 15, ip, 80) == 0, "a short buffer refuses");
+    TEST_ASSERT(vivarium_sockaddr_in_build(NULL, 16, ip, 80) == 0, "NULL refused");
+
+    // The parse is its inverse for the address half.
+    u8  back[4];
+    u16 bport = 0;
+    TEST_ASSERT(vivarium_sockaddr_in_build(sa, sizeof(sa), ip, 7789) == 16, "rebuild");
+    TEST_ASSERT(vivarium_sockaddr_in_parse(sa, 16, back, &bport), "parses back");
+    TEST_ASSERT(back[0]==10 && back[3]==15 && bport==7789, "round-trip is exact");
+}
+
+// V-5b: bind()'s parse accepts what connect()'s refuses. 0.0.0.0:0 is an
+// ordinary bind and a malformed dial, so the two callers need different
+// strictness over the same bytes.
+void test_vivarium_sockaddr_parse_any(void);
+void test_vivarium_sockaddr_parse_any(void) {
+    u8  sa[16] = {0};
+    u8  ip[4];
+    u16 port = 0xFFFF;
+
+    sa[0] = 2; sa[1] = 0;                       // AF_INET
+    sa[2] = 0; sa[3] = 0;                       // port 0
+    sa[4] = 0; sa[5] = 0; sa[6] = 0; sa[7] = 0; // 0.0.0.0
+
+    TEST_ASSERT(vivarium_sockaddr_in_parse_any(sa, 16, ip, &port),
+                "bind(0.0.0.0:0) parses -- it is INADDR_ANY, not malformed");
+    TEST_ASSERT(port == 0, "and reports port 0");
+    TEST_ASSERT(!vivarium_sockaddr_in_parse(sa, 16, ip, &port),
+                "while the STRICT parse refuses it -- a dial to port 0 is "
+                "meaningless and netd rejects it");
+
+    sa[2] = 0x1E; sa[3] = 0x61;                 // port 7777, network order
+    TEST_ASSERT(vivarium_sockaddr_in_parse_any(sa, 16, ip, &port), "a real port parses");
+    TEST_ASSERT(port == 7777, "network-order port decoded");
+    TEST_ASSERT(vivarium_sockaddr_in_parse(sa, 16, ip, &port), "and the strict parse agrees");
+
+    sa[0] = 10;                                  // AF_INET6
+    TEST_ASSERT(!vivarium_sockaddr_in_parse_any(sa, 16, ip, &port),
+                "AF_INET6 refused by BOTH -- v6 has no /net representation");
+    sa[0] = 2;
+    TEST_ASSERT(!vivarium_sockaddr_in_parse_any(sa, 7, ip, &port), "a short address refused");
+    TEST_ASSERT(!vivarium_sockaddr_in_parse_any(NULL, 16, ip, &port), "NULL refused");
+}

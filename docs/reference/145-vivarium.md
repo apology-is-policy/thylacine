@@ -575,3 +575,80 @@ assertion; removing its outgoing-kind gate fails the I-5 one; leaving a stale
 socktab entry fails the close-hook regression; skipping the connect swap (while
 still reporting success) fails in-guest **L46** and only L46; removing the close
 hook fails in-guest **L50**.
+
+---
+
+## The server path -- a connection accepted, from one thread (V-5b)
+
+`bind`/`listen`/`accept`/`accept4` join the T2 family. The scripture is
+VIVARIUM.md section 5.5.3; what follows is what the code does and what the
+gates actually prove.
+
+### Three verbs, three different shapes
+
+`bind` writes nothing. netd has no bind ctl verb, so the request is recorded in
+the socktab (`bound_addr`/`bound_port`, repacked into the existing 16 bytes) and
+`listen` spends it. `listen` writes `announce` to the fd -- which is still `ctl`
+and stays `ctl`, because that is what `accept` re-walks from. `accept` walks
+`listen` -> reads the accepted connection number -> opens its `data`, and
+returns *that* fd; there is no swap, because the fd it needs is the one the open
+already produced.
+
+The one place a `bound` flag might seem wanted is deliberately absent: an
+unbound socket and one bound to `0.0.0.0:0` are indistinguishable in every path
+that reads the fields, so the flag would be state no reader could branch on.
+The header says so, and says to add it with the reader that first needs it.
+
+### The wildcard is not cosmetic
+
+`vivarium_net_cmd_announce` renders `0.0.0.0` as `announce *!port` and a
+concrete address as `announce a.b.c.d!port`. netd migrates an explicitly-
+announced `127.x` listener onto its loopback stack while a `*` listener stays on
+the NIC, so collapsing the two would move the server to a different interface --
+which is also why the in-guest gate binds `127.0.0.1` explicitly rather than
+`INADDR_ANY`.
+
+### One thread, both ends
+
+The gate drives a server AND a client from the same single-threaded process,
+because a `PHENO_LINUX` Proc can neither `clone` nor `fork`. That works because
+TCP establishes in netd's stack rather than in `accept()`: the client's
+`connect()` completes the handshake against the announced listener, and the
+server's `accept()` finds the connection already waiting. The bytes then cross
+in both directions over untranslated T1 `read`/`write`, which is the point of
+the whole design -- once a socket is connected there is no socket code on the
+hot path.
+
+A second client is then connected and accepted, which is the claim
+`listen() == 0` only gestures at: that asserts socktab state, the second accept
+asserts netd actually re-armed the listening socket.
+
+### Coverage
+
+Six new pure unit tests (`vivarium.socktab_bind_fields` / `listen_decide` /
+`announce_cmd` / `parse_ipport` / `sockaddr_build` / `sockaddr_parse_any`) and
+forty-four in-guest legs (L53-L96).
+
+Revert-probed four ways, each failing at its own layer:
+
+| Sabotage | Fails at |
+|---|---|
+| The constrained-bind decline removed from `connect` | in-guest **L68** |
+| `accept` does not claim its socktab entry | in-guest **L83** |
+| `listen`'s bound-port requirement removed | unit `1261/1262`, boot-fatal |
+| The peer-address fill removed from `accept` | in-guest **L74** |
+
+Two of those are worth naming, because writing the probe is what produced them.
+
+**L83 exists because the sabotage would otherwise have been invisible.** An
+`accept` that forgot to claim a socktab entry still returns a working fd:
+`read`/`write` on it are untranslated T1 rows on a real Spoor, indifferent to
+whether the socket table knows about it. Nothing else in the leg set could tell.
+L83 asserts `listen(accepted_fd) == EINVAL` -- *connected*, not *not a socket* --
+and paired with L96's `ENOTSOCK` after close it brackets the entry's whole life.
+
+**L74 was satisfiable by a kernel that never wrote it.** `addrlen` is
+value-result, and the probe originally seeded it with 16 -- the answer -- so
+"it equals 16" proved nothing. It is now seeded `0xFFFF`, a capacity large
+enough for the full copy and a value only the kernel can turn into 16. Probe 4
+fails there; before the change it would have passed.

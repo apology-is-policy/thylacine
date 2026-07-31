@@ -586,6 +586,61 @@ atomicity argument, and **it evaporates the moment process creation lands (task
 — which was true at V-6b and false once entries widened to 32 bytes; corrected in
 the same commit as this section, task #97.)
 
+#### 5.5.3 The server path — `bind` remembered, `listen` spent, `accept` walked
+
+The client path swaps an fd; the server path does three different things, and
+each is shaped by something netd does rather than by a choice made here.
+
+**`bind` is remembered, not written.** netd has no `bind` ctl verb at all. A
+local endpoint reaches it only as the argument of `announce` — and is simply
+unavailable to a client. So `bind()` records the request in the socktab and
+`listen()` spends it. The pouch boundary-line arrived at the same shape
+independently, which is some evidence it is the shape the server offers rather
+than a preference.
+
+Two consequences are listed in §9: a port collision surfaces at `listen` instead
+of `bind`, and a *constrained* bind before `connect` is refused outright, because
+netd's dial verb carries only the remote endpoint and pretending otherwise would
+hand the client an ephemeral source port while telling it it had the one it
+asked for. An *unconstrained* bind (`0.0.0.0:0`) asks for nothing netd is not
+already doing and proceeds — which is also why the table needs no `bound` flag:
+"bound to anything" and "not bound" are the same request everywhere it is read.
+
+**`listen` writes `announce`, and performs no swap.** The fd stays `ctl`. That is
+not an omission: `ctl` is the file `accept` re-walks from, and the reference that
+keeps the listener alive. So the ctl/data split is `FRESH|LISTENING` vs
+`CONNECTED`, not `FRESH` vs everything else.
+
+The wildcard is load-bearing. `0.0.0.0` renders as Plan 9's `announce *!port`, a
+concrete address as `announce a.b.c.d!port` — and netd treats them differently:
+an explicitly-announced `127.x` listener is migrated onto its loopback stack,
+while a `*` listener stays on the NIC and does not span loopback. Rendering one
+as the other would silently move the server to a different interface.
+
+**`accept` walks, and swaps nothing.** netd holds the `Rlopen` for
+`/net/tcp/N/listen` until a call lands, then rebinds that fid onto the accepted
+connection's `ctl` and replies. So:
+
+```
+open(/net/tcp/N/listen)  -> BLOCKS; returns a fid that is now M's ctl
+read(it)                 -> M
+open(/net/tcp/M/data)    -> the fd accept() returns
+close(the listen fid)       data holds M's reference now
+```
+
+The fd `accept` returns is the one `sys_open_kpath_for_proc` already produced for
+`data`, so unlike `connect` there is nothing to move. The listener N is untouched
+— netd re-arms it with a fresh socket during the swap — which is what lets a
+server accept more than one connection.
+
+**The whole round-trip is provable in ONE single-threaded process**, which is not
+a testing shortcut but the only shape available: a `PHENO_LINUX` Proc can neither
+`clone` nor `fork`. It works because TCP establishes in netd's *stack*, not in
+`accept()`: the client's `connect()` completes the handshake against the
+announced listener, and the server's `accept()` then finds the connection already
+waiting. That is precisely what a listen backlog is, and it is why the in-guest
+gate can drive server and client from the same thread.
+
 ---
 
 ## 6. The diorama — the synthetic Linux world
@@ -2217,6 +2272,11 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **A signal handler cannot use FP/SIMD safely** (§6.22, task #96) | Note delivery saves x0-x30/sp/pc/pstate and NOT Q0-Q31, so a handler that touches floating point or an autovectorised routine clobbers the interrupted computation. PRE-EXISTING on the native note path (pouch handlers have it today); the phenotype makes it reachable by ordinary compiled C. Not an authority question -- the registers are the Proc's own. The frame's `_aarch64_ctx` chain is terminated immediately rather than carrying a false FPSIMD record, so a guest that looks is told the state is absent |
 | **`siginfo` carries the signal number only** (§6.22) | `si_signo`/`si_errno`/`si_code` are filled and the `_sifields` union is zeroed, with `si_code = SI_KERNEL` -- the one value that claims nothing about the union. A note carries a 16-byte name and one u32 arg, so `si_pid`, `si_uid`, `si_status` and `si_addr` have no source. Queued `siginfo` is the Tier-2 item §5.4 already names |
 | **A signal handler's `ucontext` is read-only** (§6.22) | The frame is written to the user stack and is accurate to read, but `rt_sigreturn` restores from the kernel-side `Thread` snapshot, so *writing* `uc_mcontext` does not change where execution resumes. Breaks signal-driven control transfer (Go's `sigpanic`, JIT deoptimisation); neither reaches this path at v1.0. Bought deliberately: it is what makes the `rt_sigreturn` escalation surface structurally absent rather than merely guarded |
+| **`bind` reports address collisions late** (§5.5.3, V-5b) | netd has no `bind` ctl verb — a local endpoint reaches it only as the argument of `announce` — so `bind()` is *remembered* and `listen()` spends it. A port already in use therefore succeeds at `bind` and fails at `listen` with `EADDRINUSE`. The error moves; it does not vanish. A server that reports "cannot bind" one line later is the whole visible effect |
+| **`listen` will not auto-bind** (§5.5.3, V-5b) | Linux binds an ephemeral port when `listen()` is called on an unbound socket; netd's announce parser rejects port 0, and inventing a port would be a translation the guest did not ask for, so this answers `EOPNOTSUPP`. Harmless in practice because discovering an auto-bound port needs `getsockname`, which is not a row yet — a server that cannot learn its own port cannot use one |
+| **`connect` after a *constrained* `bind` is refused** (§5.5.3, V-5b) | netd's dial verb carries the REMOTE endpoint only (its `!local` suffix is parsed and ignored), so a client that bound a specific source port cannot be honoured and gets `EOPNOTSUPP` rather than a silent ephemeral port. An *unconstrained* bind (`0.0.0.0:0`) asks for nothing netd is not already doing and proceeds normally |
+| **`listen`'s backlog is netd's** (§5.5.3, V-5b) | The `backlog` argument is dropped: netd owns its accept queue (depth 1 today) and exposes no way to request another. Linux also treats the value as a hint and clamps it to a system maximum, so a caller cannot distinguish this from an ordinary clamp — but a second connection arriving before the first is accepted is refused rather than queued |
+| **`accept`'s peer address degrades to `0.0.0.0:0`** (§5.5.3, V-5b) | The address comes from a second read of the connection's `remote` file. If that read fails the accept still succeeds — the peer genuinely is connected, and failing would be worse — and the `sockaddr_in` is written all-zero rather than left holding the caller's stale bytes. Not reachable in normal operation; listed because a caller cannot tell it apart from a genuine `0.0.0.0` peer |
 
 ---
 
@@ -2229,7 +2289,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | V-2 | The translation table | The §4-C stateless 1:1 set; the split rule enforced | a static `hello` (built by *Linux* toolchain) runs and exits 0 |
 | V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1; and V-5 did NOT claim it (user-voted 2026-07-31) — §4.1.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. V-5 was expected to decide the shape, and instead **measured that sockets need no supervisor**: every step is work the calling Proc could do for itself, so the kernel performs it with the caller's own authority (§5.5). The fork therefore moves to the next chunk that needs a destination it cannot synthesise — on present evidence **process creation (#93)**. The three candidates + the peer evidence stand recorded in §4.1 for it. `specs/phenotype.tla` lands with whatever that chunk chooses | (deferred; the gate travels with whichever chunk builds it) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
-| V-5 | Sockets | The `/net` translation, **in the kernel phenotype as a T2 family** (§5.5, user-voted 2026-07-31). **V-5a** the substrate + the client path: `handle_replace`, `Proc.socktab`, and `socket`/`connect`/`shutdown`/`getsockname`/`getpeername`/`sendto`/`recvfrom` — `read`/`write`/`close` need no row, which is the design's point. **V-5b** the server path: `bind`/`listen`/`accept`/`accept4` over netd's deferred-accept. **V-5c** readiness: `ppoll`/`pselect6` over the `QTPOLL` `ready` file. **V-5d** the focused audit + close | **`curl` fetches a URL** (ROADMAP §9.2); V-5a's own gate is an in-guest TCP round-trip over the resident loopback |
+| V-5 | Sockets | The `/net` translation, **in the kernel phenotype as a T2 family** (§5.5, user-voted 2026-07-31). **V-5a** the substrate + the client path: `handle_replace`, `Proc.socktab`, and `socket`/`connect`/`shutdown`/`getsockname`/`getpeername`/`sendto`/`recvfrom` — `read`/`write`/`close` need no row, which is the design's point. **V-5b** the server path: `bind`/`listen`/`accept`/`accept4` over netd's deferred-accept (LANDED -- section 5.5.3; the in-guest gate drives a full server+client TCP round-trip from ONE single-threaded process). **V-5c** readiness: `ppoll`/`pselect6` over the `QTPOLL` `ready` file. **V-5d** the focused audit + close | **`curl` fetches a URL** (ROADMAP §9.2); V-5a's own gate is an in-guest TCP round-trip over the resident loopback |
 | V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land. **V-6a** landed the decode; **V-6b** landed dispositions (`rt_sigaction` for `SIG_DFL`/`SIG_IGN` + `rt_sigprocmask` + the per-Proc `viv_sigtab` + the post-time discard), and corrected two V-6a facts by measuring musl -- the `k_sigaction` layout is arch-fixed at 32 bytes rather than flag-chosen, and SIGTERM had to be evicted from `interrupt` because a shared note cannot carry two independent dispositions (task #95). **V-6c** landed the Tier-1 frame: a real handler installs and RUNS, `rt_sigreturn` is the phenotyped spelling of `SYS_NOTED(NCONT)`, and the sigtab widened to the whole `k_sigaction`. **V-6 IS COMPLETE** | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
 | V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |

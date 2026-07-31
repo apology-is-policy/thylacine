@@ -235,6 +235,17 @@
 // AF_INET. POSIX: EAFNOSUPPORT.
 #define T_E_AFNOSUPPORT 97
 
+// Address already in use -- netd refused an `announce` for this port. The
+// V-5b listen() reports it, not bind(): bind is remembered rather than
+// written, so the collision surfaces where the announce actually happens.
+// POSIX: EADDRINUSE.
+#define T_E_ADDRINUSE  98
+
+// The connection was aborted before it could be handed back -- an accept()
+// whose listen fid produced a connection number the data open then refused.
+// POSIX: ECONNABORTED.
+#define T_E_CONNABORTED 103
+
 // The socket is already connected: a second connect() on a CONNECTED entry.
 // POSIX: EISCONN.
 #define T_E_ISCONN     106
@@ -261,6 +272,8 @@ _Static_assert(T_E_MFILE          == 24,  "T_E_MFILE ABI pin (POSIX EMFILE)");
 _Static_assert(T_E_NOTSOCK        == 88,  "T_E_NOTSOCK ABI pin (POSIX ENOTSOCK)");
 _Static_assert(T_E_PROTONOSUPPORT == 93,  "T_E_PROTONOSUPPORT ABI pin (POSIX EPROTONOSUPPORT)");
 _Static_assert(T_E_AFNOSUPPORT    == 97,  "T_E_AFNOSUPPORT ABI pin (POSIX EAFNOSUPPORT)");
+_Static_assert(T_E_ADDRINUSE      == 98,  "T_E_ADDRINUSE ABI pin (POSIX EADDRINUSE)");
+_Static_assert(T_E_CONNABORTED    == 103, "T_E_CONNABORTED ABI pin (POSIX ECONNABORTED)");
 _Static_assert(T_E_ISCONN         == 106, "T_E_ISCONN ABI pin (POSIX EISCONN)");
 _Static_assert(T_E_NOTCONN        == 107, "T_E_NOTCONN ABI pin (POSIX ENOTCONN)");
 _Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNREFUSED)");
