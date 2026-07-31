@@ -3139,8 +3139,16 @@ stage_clade() {
     # GCP builder (Mesa + LLVM archives are ~200 MB of inputs that do not live
     # here), pulled to build/clade/gl/ and staged stripped. Optional: a tree
     # without it stages fine and joey's gl_probe() skips.
+    # Stripped HERE rather than on the way down from the builder: the comment
+    # above claimed "staged stripped" while the code only copied, so the
+    # property held solely because whoever fetched the binary remembered to
+    # strip it first. That is a property resting on a habit -- and the fetched
+    # artifact is 142 MB unstripped against 68 MB stripped, so forgetting
+    # silently doubles what the pool carries. Same shape as clang/clangd above,
+    # and the same fall-back-to-copy if llvm-strip is absent.
     if [[ -f "$BUILD_DIR/clade/gl/osmesa-prove" ]]; then
-        cp "$BUILD_DIR/clade/gl/osmesa-prove" "$stage/bin/osmesa-prove"
+        "$strip" -o "$stage/bin/osmesa-prove" "$BUILD_DIR/clade/gl/osmesa-prove" 2>/dev/null \
+            || cp "$BUILD_DIR/clade/gl/osmesa-prove" "$stage/bin/osmesa-prove"
         chmod +x "$stage/bin/osmesa-prove"
     fi
     # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
