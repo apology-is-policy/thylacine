@@ -50,7 +50,7 @@ use libthyla_rs::{
     t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_open, t_pipe, t_poll, t_putstr,
     t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create, t_write, TPollFd,
     TSpawnArgs, T_MREPL, T_OPATH, T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_MAY_POST_SERVICE,
-    T_SPAWN_PHENO_LINUX, T_WALK_OPEN_FROM_ROOT,
+    T_SPAWN_PHENO_LINUX, T_WAIT_WNOHANG, T_WALK_OPEN_FROM_ROOT,
 };
 
 // Manifest bounds (fail closed past any of them; the kernel's own spawn/env
@@ -185,6 +185,15 @@ fn wait_status(pid: i64) -> i64 {
         return -1;
     }
     st as i64
+}
+
+/// Has `pid` already exited? REAPS it when so -- the caller must not reap
+/// again (a by-pid wait for a non-child returns -1 rather than blocking, so a
+/// double reap is harmless, but writing `kill` to a reaped pid's /proc path is
+/// not something to do on purpose).
+fn child_exited(pid: i64) -> bool {
+    let mut st: i32 = 0;
+    unsafe { t_wait_pid_for(pid as i32, T_WAIT_WNOHANG, &mut st as *mut i32) == pid }
 }
 
 fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
@@ -411,10 +420,19 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     // the next run.
     let (pr, pw) = unsafe { t_pipe() };
     let mut dio_root: i64 = -1;
+    let mut dio_died = false;
     if pr >= 0 {
         for _ in 0..50 {
             dio_root = open_from_root("/srv/viv-dio", T_OREAD);
             if dio_root >= 0 {
+                break;
+            }
+            // A dead diorama can never post, so stop the moment our own child
+            // is gone instead of burning the whole 5s. #101: the likely reason
+            // it is gone is that a concurrent `viv run` already held the fixed
+            // name, so its post failed -- worth telling apart from a timeout.
+            if child_exited(dio_pid) {
+                dio_died = true;
                 break;
             }
             sleep_ms(pr, 100);
@@ -423,6 +441,16 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
         let _ = unsafe { t_close(pw) };
     }
     if dio_root < 0 {
+        if dio_died {
+            // Already reaped by child_exited -- do NOT reap_diorama again.
+            return Err(String::from(
+                "the container diorama exited before posting /srv/viv-dio. \
+                 Usually that means another `viv run` is already using it: \
+                 the name is fixed, so containers cannot run concurrently \
+                 yet (a known limit, not a fault in this bundle). \
+                 Otherwise check the diorama selftest line on the console.",
+            ));
+        }
         reap_diorama(dio_pid, -1);
         return Err(String::from("/srv/viv-dio never came up (diorama selftest?)"));
     }

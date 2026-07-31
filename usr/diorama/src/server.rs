@@ -760,6 +760,13 @@ fn viv_members(out: &mut [u32]) -> usize {
     compute_members(&pairs[..np], runner, VIV_SELF.load(Ordering::Relaxed), out)
 }
 
+/// The #101 attach gate, as a pure decision so its truth table is testable
+/// without a live connection. `runner == 0` is the shared boot diorama --
+/// unfiltered by design, so there is no gate at all there.
+pub fn viv_attach_allowed(runner: u32, peer_alive: u32, peer_pid: u32) -> bool {
+    runner == 0 || (peer_alive != 0 && peer_pid == runner)
+}
+
 fn viv_is_member(pid: u32) -> bool {
     let mut members = [0u32; VIV_PROCS_MAX];
     let n = viv_members(&mut members);
@@ -2189,6 +2196,33 @@ impl Conn {
         if !self.version_done {
             return self.err(tag, p9::E_PROTO);
         }
+        // V-8 F3 (#101): /srv/viv-dio is a FIXED name (post_srv_diorama, and
+        // fixed on purpose -- task #33), so it is first-come-first-served. A
+        // SECOND concurrent `viv run` opening it lands HERE, on the FIRST
+        // container's server; ungated it would mount container A's /proc into
+        // container B, so B enumerates A's processes. That fails OPEN.
+        //
+        // The check has to be here and not in the runner, because at the point
+        // the runner holds the connection it has nothing to compare: SYS_SRV_
+        // PEER is server-side only (the client endpoint is refused outright --
+        // kernel/syscall.c sys_srv_peer_for_proc), the registry's poster_pid
+        // is never exposed to EL0, and membership is ppid-descent from an
+        // ENTRYPOINT THAT DOES NOT EXIST YET, so every diorama's member set is
+        // equally empty. Here the peer pid is kernel-stamped and unforgeable.
+        //
+        // Gating ATTACH (not each op) makes the cross-mount impossible rather
+        // than merely detectable: every fid descends from the attach root, so
+        // the refusal fails the opener's SYS_OPEN outright -- which is the
+        // "the runner fails closed" this mode's header note already promised.
+        let runner = viv_runner();
+        if runner != 0 {
+            // self.peer() is a syscall, so only the vivarium mode pays for it;
+            // the shared boot diorama's attach path is untouched.
+            let peer = self.peer();
+            if !viv_attach_allowed(runner, peer.alive, peer.pid) {
+                return self.err(tag, p9::E_PERM);
+            }
+        }
         let a = match p9::parse_tattach(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -2569,12 +2603,24 @@ impl Conn {
 /// a fixed name rebinds one tombstone across sequential runs. A CONCURRENT
 /// second container collides here and the runner fails closed -- concurrent
 /// containers are a v1.x seam riding the #33 registry-lifecycle fix.
+/// The service name this server posts, mode-dependent. Exposed so the startup
+/// failure message can name the ACTUAL name: a vivarium diorama posts viv-dio
+/// but used to report "/srv/diorama FAILED" -- precisely the wrong name on the
+/// collision path (#101), which is the one path where that message matters.
+pub fn srv_name() -> &'static str {
+    if viv_runner() != 0 {
+        "viv-dio"
+    } else {
+        "diorama"
+    }
+}
+
 pub fn post_srv_diorama() -> Result<i64, ()> {
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 {
         return Err(());
     }
-    let name: &[u8] = if viv_runner() != 0 { b"viv-dio" } else { b"diorama" };
+    let name: &[u8] = srv_name().as_bytes();
     let listener = unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD, 0) };
     let _ = unsafe { t_close(srv) };
     if listener < 0 {
@@ -2829,6 +2875,38 @@ pub fn selftest() -> Result<(), &'static str> {
         let cyclic = [(40u32, 41u32), (41u32, 40u32), (10u32, 1u32), (11u32, 10u32)];
         if compute_members(&cyclic, 10, 11, &mut m) != 0 {
             return Err("vivarium cycle handled wrong");
+        }
+    }
+
+    // --- V-8 F3 (#101): the attach gate's truth table.
+    //
+    // Note the vector directly above: pre-entrypoint membership is EMPTY, so
+    // at the moment a runner holds a fresh connection there is nothing in the
+    // TREE to tell two dioramas apart. The peer pid is the only discriminator
+    // that exists that early, which is why the gate is peer-based.
+    {
+        // Our own runner attaches.
+        if !viv_attach_allowed(10, 1, 10) {
+            return Err("attach gate refused our own runner");
+        }
+        // A SECOND concurrent `viv run` attaches: the whole point.
+        if viv_attach_allowed(10, 1, 11) {
+            return Err("attach gate admitted a foreign runner");
+        }
+        // An unreadable peer is an unknown peer -- fail closed, matching
+        // Conn::peer()'s own default-on-error contract (a zeroed info would
+        // otherwise read as pid 0, which must never match a live runner).
+        if viv_attach_allowed(10, 0, 10) {
+            return Err("attach gate admitted a dead peer");
+        }
+        if viv_attach_allowed(10, 0, 0) {
+            return Err("attach gate admitted an unreadable peer");
+        }
+        // The shared boot diorama is deliberately unfiltered: runner == 0
+        // means no gate, so every peer -- including an unreadable one --
+        // attaches exactly as it did before this check existed.
+        if !viv_attach_allowed(0, 1, 99) || !viv_attach_allowed(0, 0, 0) {
+            return Err("attach gate filtered the shared diorama");
         }
     }
 

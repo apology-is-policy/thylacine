@@ -72,7 +72,9 @@ pub extern "C" fn rs_main() -> i64 {
     let listener = match server::post_srv_diorama() {
         Ok(l) => l,
         Err(()) => {
-            t_putstr("diorama: post /srv/diorama FAILED\n");
+            t_putstr("diorama: post /srv/");
+            t_putstr(server::srv_name());
+            t_putstr(" FAILED (already posted?)\n");
             return 1;
         }
     };

@@ -1046,3 +1046,75 @@ reason that had nothing to do with a leak. The fix was to the measurement, not
 the kernel -- take both runs with the same sockets held. A regression that fails
 for the wrong reason is worth exactly as little as one that passes for the wrong
 reason.
+
+## V-8 F3 [P2] -- the fixed diorama name was first-come-first-served
+
+`/srv/viv-dio` is a FIXED name, and deliberately so: the boot `SrvRegistry`
+never frees a dead entry (task #33), so a per-container unique name would burn
+a registry slot on every `viv run` forever, where a fixed one rebinds a single
+tombstone across sequential runs. `post_srv_diorama`'s comment already promised
+the consequence -- "a CONCURRENT second container collides here and the runner
+fails closed". It did not. The runner polled the name and took the first
+success, so a second `viv run` from the same shell mounted the FIRST
+container's diorama and enumerated its processes. It failed OPEN.
+
+### Why the check is in the server, not the runner
+
+The finding proposed a per-runner name; that conflicts with the decision above.
+The obvious alternative -- have the runner verify it got its own -- turns out
+to be impossible with the identity available at that moment, and each way of
+trying is instructive:
+
+* `SYS_SRV_PEER` is **server-side only**. `sys_srv_peer_for_proc` refuses a
+  client endpoint outright ("a client-side query would mis-report the caller's
+  OWN identity"), and refuses this handle a second time over: a 9P-mode connect
+  yields a dev9p root, and `devsrv_conn_of` returns NULL for anything that is
+  not a devsrv connection Spoor.
+* The registry records `poster_pid`, kernel-stamped -- but nothing outside a
+  kernel test ever reads it. Exposing it is new ABI.
+* Membership cannot help either. It is ppid-descent from the container
+  ENTRYPOINT, which does not exist yet when the runner holds the connection, so
+  every diorama's member set is equally empty. The selftest vector asserting
+  exactly that ("vivarium pre-entrypoint not empty") sits directly above the
+  gate's own vectors.
+
+The server has what the runner lacks: `Conn::peer()` already queries the
+kernel-stamped peer per use, in the direction the kernel supports. So the gate
+lives in `h_attach` -- and gating ATTACH rather than each op is what makes the
+cross-mount impossible rather than merely detectable, since every fid descends
+from the attach root. A refused attach fails the opener's `SYS_OPEN`, which is
+the fail-closed the comment promised.
+
+`viv_attach_allowed(runner, peer_alive, peer_pid)` is a pure decision so its
+truth table runs in the boot-fatal selftest. `runner == 0` -- the shared boot
+diorama -- is no gate at all, and does not even pay for the `peer()` syscall.
+
+### Concurrent containers are still unsupported
+
+This makes the failure honest, not the limit go away. The runner now stops
+polling the moment its own diorama exits (a dead diorama can never post) and
+says so: another `viv run` holds the name, which is a known limit rather than a
+fault in the bundle. Lifting it is the #33 registry-lifecycle work.
+
+### The probes, and why two were needed
+
+Boot OK proves the ALLOW branch -- a real `viv run` still mounts its own
+diorama -- but it does **not** prove the gate is wired: an `if (false)` gate
+would pass it identically. So the deny branch needs its own proof, and joey is
+the only place a non-runner can reach a vivarium diorama (inside the container
+`/srv` is not bound, so `viv-probe` cannot attempt it). joey spawns one whose
+declared runner is a pid it cannot be, proves the service actually POSTED via
+an O_PATH walk -- devsrv's *open* is the connect, so O_PATH is not itself
+gated, and without this precondition a diorama that never came up would satisfy
+the assertion just as well -- then attempts the open it has no right to.
+
+Two reverts, two different failure points, neither visible to the other:
+
+| sabotage | selftest | joey leg | unit suite |
+|---|---|---|---|
+| gate removed from `h_attach` | PASS | **FAIL** -- foreign runner mounted it | 1272/1272 PASS |
+| `viv_attach_allowed` always true | **FAIL** | (never reached) | -- |
+
+The first reproduces the original defect exactly. That the unit suite reads a
+full 1272/1272 through it is the same blindness #100 recorded: pure tests prove
+the decision, guest legs prove the plumbing.
