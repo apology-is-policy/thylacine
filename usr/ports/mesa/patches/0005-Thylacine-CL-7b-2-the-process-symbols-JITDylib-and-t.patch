@@ -1,0 +1,315 @@
+From 5082e9263b1b8af4f7498d6d86334a99b2ba543c Mon Sep 17 00:00:00 2001
+From: Thylacine Clade <claude@thylacine.local>
+Date: Fri, 31 Jul 2026 16:34:30 +0200
+Subject: [PATCH] Thylacine CL-7b-2: the process-symbols JITDylib and the
+ CAP_JIT clearance
+
+Two independent things stood between an osmesa-prove that links and a JIT that
+runs, and both presented as the same symptom -- OSMesaCreateContextExt
+returning NULL.
+
+The first is LLJIT's process-symbols setup. LLJIT links process symbols by
+default, and the default setup reaches them through dlopen(NULL), which a
+statically linked musl binary cannot do: LLJITBuilder::create() itself fails
+with "Dynamic loading not supported" and the JIT never comes up. Turning the
+flag off does not help either -- the generic LLVM IR platform then refuses with
+"Native platforms require a process symbols JITDylib". Neither state is
+reachable by configuration, so the JITDylib is supplied explicitly, populated
+from a table fixed at link time (llvm-thylacine's ThylacineProcessSymbols.cpp).
+
+The second is that CAP_JIT is elevation-only: it is stripped at every fork, so
+no parent can hand it to a child at spawn and no amount of privilege in joey
+helps. The only way any Proc ever holds it is to walk the corvus clearance path
+itself and redeem the grant, which is what osmesa_prove.c now does before any
+GL runs. That is why a GL program on Thylacine is a capability client rather
+than an ordinary binary. The shape mirrors usr/jit-prover/src/main.rs, which
+proves the same path in the same boot.
+
+Reaching corvus needs SYS_OPEN (65), not SYS_WALK_OPEN (34): 34 walks exactly
+one path component, so it cannot resolve "/srv/corvus". Measured, not assumed
+-- with 34 the open failed every retry and the prover reported "cannot reach
+/srv/corvus" while jit-prover connected fine in the same boot.
+
+The probe also becomes a verdict. It returned void and only printed, so a boot
+with no CAP_JIT ran on to OSMesaCreateContextExt anyway and reported the
+generic NULL-context failure, which is indistinguishable from a broken mapper
+or an unrelated gallivm fault. It now returns non-zero at every station, which
+is what lets joey's gl_gate treat rc=0 as a strong assertion and parse no
+output at all.
+---
+ .../auxiliary/gallivm/lp_bld_init_orc.cpp     |  13 ++
+ src/gallium/targets/osmesa/osmesa_prove.c     | 198 +++++++++++++++++-
+ 2 files changed, 208 insertions(+), 3 deletions(-)
+
+diff --git a/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp b/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
+index 416687b..ad3797c 100644
+--- a/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
++++ b/src/gallium/auxiliary/gallivm/lp_bld_init_orc.cpp
+@@ -38,6 +38,7 @@
+ #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+ #include <llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h>
+ #ifdef __thylacine__
++#include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
+ #include <llvm/ExecutionEngine/Orc/MapperJITLinkMemoryManager.h>
+ #include <llvm/ExecutionEngine/Orc/MemoryMapper.h>
+ #endif
+@@ -352,6 +353,18 @@ LPJit::LPJit() :jit_dylib_count(0) {
+    lljit = ExitOnErr(
+       LLJITBuilder()
+          .setJITTargetMachineBuilder(std::move(JTMB))
++#ifdef __thylacine__
++         /* Thylacine (CL-7b-2): LLJIT links process symbols by default, and
++          * the default setup reaches them through dlopen(NULL) -- which a
++          * statically linked musl binary cannot do, so LLJITBuilder::create()
++          * itself fails with "Dynamic loading not supported" and the JIT never
++          * comes up. Turning the flag off does not help: the generic LLVM IR
++          * platform then refuses with "Native platforms require a process
++          * symbols JITDylib". So supply the JITDylib ourselves, populated from
++          * a table fixed at link time. See llvm/lib/ExecutionEngine/Orc/
++          * ThylacineProcessSymbols.cpp. */
++         .setProcessSymbolsJITDylibSetup(llvm::orc::thylacineProcessSymbolsSetup)
++#endif
+ #ifdef USE_JITLINK
+          .setObjectLinkingLayerCreator(
+ #if LLVM_VERSION_MAJOR >= 21
+diff --git a/src/gallium/targets/osmesa/osmesa_prove.c b/src/gallium/targets/osmesa/osmesa_prove.c
+index afb71e5..1959aae 100644
+--- a/src/gallium/targets/osmesa/osmesa_prove.c
++++ b/src/gallium/targets/osmesa/osmesa_prove.c
+@@ -29,6 +29,189 @@
+ 
+ #ifdef __thylacine__
+ #include <stdint.h>
++#include <unistd.h>
++
++/* CAP_JIT is elevation-only: it is stripped at every fork, so no parent can
++ * hand it to a child at spawn and no amount of privilege in joey helps. The
++ * only way any Proc ever holds it is to walk the corvus clearance path itself
++ * and redeem the grant. That is what this does, and it is why a GL program on
++ * Thylacine is a capability client rather than an ordinary binary.
++ *
++ * The shape mirrors usr/jit-prover/src/main.rs, which proves the same path in
++ * the same boot. Raw svc rather than libc wrappers because pouch's musl has no
++ * syscall numbers for these; osmesa_prove.c already does this for
++ * SYS_JIT_CREATE below. */
++#define THYLA_SYS_CAP_USE    33
++/* SYS_OPEN (65), not SYS_WALK_OPEN (34): 34 walks exactly ONE path component,
++ * so it cannot resolve "/srv/corvus". jit-prover reaches corvus through
++ * libthyla_rs::t_open, which is this syscall -- "supersedes t_walk_open for
++ * paths of more than one component". Measured: with 34 the open failed every
++ * retry and the prover reported "cannot reach /srv/corvus" while jit-prover
++ * connected fine in the same boot. */
++#define THYLA_SYS_OPEN       65
++#define THYLA_CAP_JIT        (1ull << 11)
++#define THYLA_FROM_ROOT      (-1L)
++#define THYLA_OREAD          0
++#define THYLA_ORDWR          2
++
++static long thyla_open(long dirfd, const char *name, unsigned long len,
++                       unsigned long omode)
++{
++    register long x0 __asm__("x0") = dirfd;
++    register long x1 __asm__("x1") = (long)(uintptr_t)name;
++    register long x2 __asm__("x2") = (long)len;
++    register long x3 __asm__("x3") = (long)omode;
++    register long x8 __asm__("x8") = THYLA_SYS_OPEN;
++    __asm__ volatile("svc #0"
++                     : "+r"(x0)
++                     : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
++                     : "memory", "cc");
++    return x0;
++}
++
++static long thyla_cap_use(unsigned long long mask)
++{
++    register long x0 __asm__("x0") = (long)mask;
++    register long x8 __asm__("x8") = THYLA_SYS_CAP_USE;
++    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
++    return x0;
++}
++
++static int thyla_rd(int fd, void *p, size_t n)
++{
++    unsigned char *b = (unsigned char *)p;
++    size_t off = 0;
++    while (off < n) {
++        ssize_t r = read(fd, b + off, n - off);
++        if (r <= 0)
++            return -1;
++        off += (size_t)r;
++    }
++    return 0;
++}
++
++static int thyla_wr(int fd, const void *p, size_t n)
++{
++    const unsigned char *b = (const unsigned char *)p;
++    size_t off = 0;
++    while (off < n) {
++        ssize_t w = write(fd, b + off, n - off);
++        if (w <= 0)
++            return -1;
++        off += (size_t)w;
++    }
++    return 0;
++}
++
++/* One corvus request/response. Request: verb, version, len16 LE, payload.
++ * Response: status, len16 LE, payload. */
++static int thyla_corvus(int fd, unsigned char verb,
++                        const unsigned char *pl, size_t pl_len,
++                        unsigned char *rx, size_t rx_cap, size_t *rx_len,
++                        unsigned char *status)
++{
++    unsigned char hdr[4], rh[3];
++    size_t n;
++
++    hdr[0] = verb;
++    hdr[1] = 1;                                     /* protocol version */
++    hdr[2] = (unsigned char)(pl_len & 0xff);
++    hdr[3] = (unsigned char)((pl_len >> 8) & 0xff);
++    if (thyla_wr(fd, hdr, sizeof hdr) != 0)
++        return -1;
++    if (pl_len && thyla_wr(fd, pl, pl_len) != 0)
++        return -1;
++    if (thyla_rd(fd, rh, sizeof rh) != 0)
++        return -1;
++    n = (size_t)rh[1] | ((size_t)rh[2] << 8);
++    if (n > rx_cap)
++        return -1;
++    if (n && thyla_rd(fd, rx, n) != 0)
++        return -1;
++    *status = rh[0];
++    *rx_len = n;
++    return 0;
++}
++
++static int thyla_acquire_jit(void)
++{
++    static const char PASS[] = "correct-horse-battery-staple-v1";
++    unsigned char pl[128], rx[256], token[33];
++    unsigned long long granted = 0;
++    size_t o, rl, pw;
++    unsigned char st;
++    long root = -1, ctl;
++    int i;
++
++    for (i = 0; i < 16 && root < 0; i++)
++        root = thyla_open(THYLA_FROM_ROOT, "/srv/corvus", 11, THYLA_OREAD);
++    if (root < 0) {
++        printf("osmesa-prove: FAIL cannot reach /srv/corvus\n");
++        return -1;
++    }
++    ctl = thyla_open(root, "ctl", 3, THYLA_ORDWR);
++    close((int)root);
++    if (ctl < 0) {
++        printf("osmesa-prove: FAIL cannot open corvus ctl\n");
++        return -1;
++    }
++
++    /* AUTH. */
++    o = 0;
++    pl[o++] = 7;
++    memcpy(pl + o, "michael", 7);
++    o += 7;
++    pw = sizeof(PASS) - 1;
++    pl[o++] = (unsigned char)(pw & 0xff);
++    pl[o++] = (unsigned char)((pw >> 8) & 0xff);
++    memcpy(pl + o, PASS, pw);
++    o += pw;
++    if (thyla_corvus((int)ctl, 1, pl, o, rx, sizeof rx, &rl, &st) != 0 ||
++        st != 0 || rl != sizeof token) {
++        printf("osmesa-prove: FAIL corvus AUTH\n");
++        return -1;
++    }
++    memcpy(token, rx, sizeof token);
++
++    /* CLEARANCE_ACTIVATE("jit"). CLEARANCE_LIST, which /jit-prover does first,
++     * is skipped on purpose: it re-proves the clearance machinery that prover
++     * already exercises exhaustively in this same boot, and ACTIVATE fails
++     * identically if the principal is not eligible. */
++    o = 0;
++    memcpy(pl + o, token, sizeof token);
++    o += sizeof token;
++    pl[o++] = 3;
++    memcpy(pl + o, "jit", 3);
++    o += 3;
++    memset(pl + o, 0, 16);              /* self_restrict, valid_until_req */
++    o += 16;
++    if (thyla_corvus((int)ctl, 15, pl, o, rx, sizeof rx, &rl, &st) != 0 ||
++        st != 0 || rl != 12) {
++        printf("osmesa-prove: FAIL corvus CLEARANCE_ACTIVATE(jit)\n");
++        return -1;
++    }
++    for (i = 0; i < 8; i++)
++        granted |= (unsigned long long)rx[4 + i] << (8 * i);
++    if (granted != THYLA_CAP_JIT) {
++        printf("osmesa-prove: FAIL clearance granted 0x%llx, want CAP_JIT\n",
++               granted);
++        return -1;
++    }
++    if (thyla_cap_use(granted) != 0) {
++        printf("osmesa-prove: FAIL redeeming the CAP_JIT grant\n");
++        return -1;
++    }
++
++    /* ctl is deliberately left open for the life of the process, as
++     * /jit-prover does. The capability is already ours -- the legate scope is
++     * torn down by the holder's own death, not by a session close (see
++     * proc_legate_teardown_if_root) -- but there is no reason to exercise that
++     * distinction here, and the jit level carries time_bound_ns 0 so nothing
++     * expires underneath us. */
++    printf("osmesa-prove: CAP_JIT acquired via the corvus jit clearance\n");
++    fflush(stdout);
++    return 0;
++}
+ 
+ /* Ask the kernel for a code region directly, before any of Mesa runs.
+  *
+@@ -38,7 +221,7 @@
+  * a missing capability, a broken mapper and an unrelated gallivm problem all
+  * look like. Ten lines here separate them, and they run before anything that
+  * could mask the answer. */
+-static void thyla_jit_probe(void)
++static int thyla_jit_probe(void)
+ {
+     struct { uint64_t writer_va, exec_va; } reg = { 0, 0 };
+     register long x0 __asm__("x0") = 4096;
+@@ -53,15 +236,19 @@ static void thyla_jit_probe(void)
+         register long d8 __asm__("x8") = 102;   /* SYS_JIT_DESTROY */
+         __asm__ volatile("svc #0" : "+r"(d0) : "r"(d8) : "memory", "cc");
+         printf("osmesa-prove: I-42 probe destroy rc=%ld\n", d0);
++        fflush(stdout);
++        return 0;
+     } else if (x0 == -13) {
+         printf("osmesa-prove: I-42 probe EACCES -- no CAP_JIT, llvmpipe cannot JIT\n");
+     } else {
+         printf("osmesa-prove: I-42 probe FAILED rc=%ld\n", x0);
+     }
+     fflush(stdout);
++    return 1;
+ }
+ #else
+-static void thyla_jit_probe(void) {}
++static int thyla_acquire_jit(void) { return 0; }
++static int thyla_jit_probe(void) { return 0; }
+ #endif
+ 
+ /* RGBA at (x, y); OSMesa's origin is bottom-left. */
+@@ -85,7 +272,12 @@ int main(void)
+     const unsigned char *p;
+     int fails = 0;
+ 
+-    thyla_jit_probe();
++    if (thyla_acquire_jit() != 0)
++        return 1;
++    if (thyla_jit_probe() != 0) {
++        printf("osmesa-prove: FAIL no CAP_JIT after the clearance redeem\n");
++        return 1;
++    }
+ 
+     ctx = OSMesaCreateContextExt(OSMESA_RGBA, 16, 0, 0, NULL);
+     if (!ctx) {
+-- 
+2.43.0
+

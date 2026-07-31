@@ -33,10 +33,30 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`b32a1ca2847e19d8aefb156313cfb7084597d253`). Re-check it after any refresh —
+(`414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
+
+At CL-7b-2 that recipe stopped being a claim and became the *only* way the work
+survived, so it was exercised end to end on a **different machine** (macOS,
+different git) from the one the series was generated on. A fresh clone of the
+tag plus `git am` of `0001..0004` reproduced
+`b32a1ca2847e19d8aefb156313cfb7084597d253` — the hash recorded here before this
+refresh — which is what makes the reconstruction a fact about the *patches*
+rather than a fact about one disk. `0005` was generated from that
+reconstruction and then re-applied *from the emitted file* onto the `0004` tip
+to confirm it lands on `414b19f2…`; a patch that is only known to match the
+working tree it came from has not been checked at all.
+
+`tools/clade-stage1.sh --patches usr/ports/mesa/patches --tag mesa-26.1.6
+--src /build/src/mesa` reconciles a builder fork against this series — it is
+generic, nothing in it is LLVM-specific — and since #117 it handles *growth*
+correctly: it compares `git patch-id --stable` per commit and `git am`s only the
+patches the fork does not already carry. It refuses if the fork holds Thylacine
+changes that are **not** in the series, which is the correct behaviour and
+exactly the state this directory exists to prevent. A drifted fork is not worth
+reconciling by hand: reset to the tag and re-run the recipe above.
 
 ## Cross-configure and build
 
@@ -168,9 +188,54 @@ set wrong* (CL-7 entry / CL-7a-1):
   a missing capability, a broken mapper and an unrelated gallivm fault all
   present identically as "OSMesaCreateContextExt returned NULL".
 
-## Refresh (when the fork changes)
+- `0005` — CL-7b-2: the process-symbols JITDylib, and `CAP_JIT` as a clearance
+  the program walks for itself. Two independent things stood between an
+  `osmesa-prove` that *links* and a JIT that *runs*, and both present as that
+  same NULL context.
+
+  LLJIT links process symbols by default, and its default setup reaches them
+  through `dlopen(NULL)` — which a statically linked musl binary cannot do, so
+  `LLJITBuilder::create()` itself fails with "Dynamic loading not supported" and
+  the JIT never comes up. Turning the flag *off* does not help: the generic LLVM
+  IR platform then refuses with "Native platforms require a process symbols
+  JITDylib". Neither state is reachable by configuration, so the JITDylib is
+  supplied explicitly, populated from a table fixed at link time
+  (llvm-thylacine's `ThylacineProcessSymbols.cpp`).
+
+  `CAP_JIT` is **elevation-only**: stripped at every fork, so no parent can hand
+  it to a child at spawn and no amount of privilege in joey helps. The only way
+  any Proc ever holds it is to walk the corvus clearance path itself and redeem
+  the grant, which `osmesa_prove.c` now does before any GL runs. That is the
+  concrete sense in which a GL program on Thylacine is a *capability client*
+  rather than an ordinary binary. Reaching corvus needs `SYS_OPEN` (65), **not**
+  `SYS_WALK_OPEN` (34): 34 walks exactly one path component, so it cannot
+  resolve `/srv/corvus`. Measured, not reasoned — with 34 the open failed every
+  retry and the prover reported "cannot reach /srv/corvus" while `jit-prover`
+  connected fine in the same boot.
+
+  The probe also becomes a **verdict**. It returned `void` and only printed, so
+  a boot with no `CAP_JIT` ran on to `OSMesaCreateContextExt` anyway and reported
+  the generic NULL-context failure — indistinguishable from a broken mapper or
+  an unrelated gallivm fault, which is precisely the ambiguity `0004` had already
+  been bitten by. It now returns non-zero at every station, and that is what lets
+  joey's `gl_gate` treat `rc=0` as a strong assertion and parse no output at all.
+
+## Refresh — per arc, not "when the fork stops changing"
 
 ```bash
 git -C /build/src/mesa format-patch --quiet mesa-26.1.6..HEAD \
     -o <thylacine-repo>/usr/ports/mesa/patches
 ```
+
+**Refresh at the close of every arc**, even mid-iteration. The tempting policy —
+"regenerate once the fork settles" — is backwards, because it leaves the durable
+form maximally stale exactly while the work is newest, least reproducible, and
+most expensive to re-derive. CL-7b-2 is the worked example: its six Mesa edits
+lived only in a throwaway script in `/private/tmp` while the arc was declared
+complete, so the most valuable state in the port had no copy in any repo, on
+either machine, at the moment it mattered most. The same lag had grown to eight
+commits on `usr/ports/llvm` in the same arc.
+
+The cost of refreshing early is a patch file that gets superseded. The cost of
+refreshing late is measured in builder rounds, and once, nearly in the work
+itself.
