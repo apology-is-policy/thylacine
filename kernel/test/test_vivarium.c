@@ -144,6 +144,31 @@ void test_vivarium_rejects_are_deliberate(void) {
     // both musl and glibc fall back to mmap when brk reports unavailable.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_BRK, args, &out),
                    (int)VIV_ENOSYS, "brk is ENOSYS -- no counterpart, libc falls back");
+
+    // V-5c. ppoll carries the whole poll family on aarch64 (no plain poll(2)),
+    // so this is what musl's poll() becomes.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_PPOLL, args, &out),
+                   (int)VIV_TIER2, "ppoll is T2 (V-5c; the ready-file fd swap)");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+
+    // pselect6 is the sibling shape -- three fd_sets rather than a pollfd array
+    // -- and lands with its own reshape. Pinned as a deliberate FORWARD so
+    // promoting it is a decision rather than a drive-by.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_PSELECT6, args, &out),
+                   (int)VIV_FORWARD, "pselect6 forwards until its fd_set reshape lands");
+
+    // THE COLLISION RE-CHECK, made executable. These are the first two rows
+    // BELOW the highest native syscall number, so the "above the ceiling"
+    // argument that discharged every earlier row does not apply -- 72 is
+    // SYS_GETPID and 73 is SYS_GETUID. The safety argument does not rest on
+    // there being no collision; it rests on a PHENO_LINUX Proc being unable to
+    // reach a native number at all (every number it issues is translated, and
+    // an unclassified one is ENOSYS). This assert pins the collision as a KNOWN
+    // fact, so a future reader finds it stated rather than discovering it.
+    TEST_ASSERT(VIV_LINUX_PSELECT6 == SYS_GETPID,
+                "pselect6 collides with SYS_GETPID -- known, and reachable by neither");
+    TEST_ASSERT(VIV_LINUX_PPOLL == SYS_GETUID,
+                "ppoll collides with SYS_GETUID -- known, and reachable by neither");
 }
 
 void test_vivarium_unknown_forwards(void) {
@@ -1424,6 +1449,92 @@ void test_vivarium_listen_decide(void) {
 
     TEST_ASSERT(!vivarium_listen_decide(VIV_NET_TCP, VIV_SOCK_FRESH, 80, NULL),
                 "NULL out_err is refused, not dereferenced");
+}
+
+// V-5c: the ppoll timeout conversion. The rounding direction is the whole test
+// -- truncating a sub-millisecond wait to 0 turns a poll into a spin, and a
+// spin is the failure a poll loop would never notice and never stop paying for.
+void test_vivarium_timespec_to_ms(void);
+void test_vivarium_timespec_to_ms(void) {
+    s32 ms = -99, err = -1;
+
+    TEST_ASSERT(vivarium_timespec_to_ms(0, 0, &ms, &err), "zero timespec converts");
+    TEST_ASSERT(ms == 0, "and is 0 ms -- a genuine non-blocking poll");
+
+    TEST_ASSERT(vivarium_timespec_to_ms(2, 500000000, &ms, &err), "2.5s converts");
+    TEST_ASSERT(ms == 2500, "to 2500 ms");
+
+    // ROUNDS UP. 1 nanosecond is not zero, and 0 means "do not wait".
+    TEST_ASSERT(vivarium_timespec_to_ms(0, 1, &ms, &err), "1ns converts");
+    TEST_ASSERT(ms == 1, "UP to 1 ms -- never down to 0, which would spin");
+
+    TEST_ASSERT(vivarium_timespec_to_ms(0, 999999, &ms, &err), "999999ns converts");
+    TEST_ASSERT(ms == 1, "up to 1 ms");
+    TEST_ASSERT(vivarium_timespec_to_ms(0, 1000000, &ms, &err), "exactly 1ms converts");
+    TEST_ASSERT(ms == 1, "to 1 ms exactly -- the round-up adds nothing here");
+
+    // Saturation, not overflow. The multiply is guarded BEFORE it happens.
+    TEST_ASSERT(vivarium_timespec_to_ms(0x7FFFFFFFFFFF, 0, &ms, &err),
+                "an absurd timeout converts rather than overflowing");
+    TEST_ASSERT(ms == 0x7FFFFFFF, "saturated at INT32_MAX ms");
+
+    // Linux's own validation.
+    err = -1;
+    TEST_ASSERT(!vivarium_timespec_to_ms(-1, 0, &ms, &err), "negative sec refused");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
+    err = -1;
+    TEST_ASSERT(!vivarium_timespec_to_ms(0, -1, &ms, &err), "negative nsec refused");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
+    err = -1;
+    TEST_ASSERT(!vivarium_timespec_to_ms(0, 1000000000, &ms, &err),
+                "nsec >= 1e9 refused -- that is a malformed timespec, not 1s");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
+
+    TEST_ASSERT(!vivarium_timespec_to_ms(0, 0, NULL, &err), "NULL out_ms refused");
+    TEST_ASSERT(!vivarium_timespec_to_ms(0, 0, &ms, NULL), "NULL out_err refused");
+}
+
+// V-5c: the ppoll argument domain. Two of the three refusals are ENOSYS rather
+// than EINVAL, and that distinction is the point -- the arguments are valid
+// Linux, and it is this kernel that cannot serve them.
+void test_vivarium_ppoll_decide(void);
+void test_vivarium_ppoll_decide(void) {
+    s32 err = -1;
+
+    TEST_ASSERT(vivarium_ppoll_decide(1, 0, &err), "one fd, no sigmask, is served");
+    TEST_ASSERT(err == 0, "with no error");
+    TEST_ASSERT(vivarium_ppoll_decide(POLL_MAX_NFDS, 0, &err),
+                "exactly POLL_MAX_NFDS fds is served -- the bound is inclusive");
+
+    // ppoll's whole reason to exist over poll() is the ATOMIC mask swap. There
+    // is no way to do that here, and doing it approximately would re-open the
+    // race the caller chose ppoll to close.
+    err = -1;
+    TEST_ASSERT(!vivarium_ppoll_decide(1, 0x40000000, &err), "a sigmask is refused");
+    TEST_ASSERT(err == T_E_NOSYS,
+                "as ENOSYS -- the shape is unserved, the argument is not wrong");
+
+    // Linux reads nfds == 0 as a timed sleep. There is no native sleep syscall
+    // to route it to, and SYS_POLL rejects nfds == 0 outright.
+    err = -1;
+    TEST_ASSERT(!vivarium_ppoll_decide(0, 0, &err), "nfds == 0 is refused");
+    TEST_ASSERT(err == T_E_NOSYS, "as ENOSYS -- it is a sleep, not a poll");
+
+    // This one IS a bad value: the native cap is a real bound a caller must
+    // respect, so it gets the POSIX code for a bad argument.
+    err = -1;
+    TEST_ASSERT(!vivarium_ppoll_decide(POLL_MAX_NFDS + 1, 0, &err),
+                "over the native cap is refused");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL -- a real out-of-range argument");
+
+    // Checked in the order a caller can act on: someone using ppoll FOR its
+    // signal semantics must learn that is the unserved part.
+    err = -1;
+    TEST_ASSERT(!vivarium_ppoll_decide(0, 0x40000000, &err),
+                "both wrong at once is refused");
+    TEST_ASSERT(err == T_E_NOSYS, "reporting the sigmask, which is checked first");
+
+    TEST_ASSERT(!vivarium_ppoll_decide(1, 0, NULL), "NULL out_err is refused");
 }
 
 // V-5b: the announce builder. The wildcard/concrete split is load-bearing --

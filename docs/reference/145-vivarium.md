@@ -652,3 +652,122 @@ value-result, and the probe originally seeded it with 16 -- the answer -- so
 "it equals 16" proved nothing. It is now seeded `0xFFFF`, a capacity large
 enough for the full copy and a value only the kernel can turn into 16. Probe 4
 fails there; before the change it would have passed.
+
+---
+
+## Readiness -- the fd that gets polled is not the fd that gets read (V-5c-1)
+
+`ppoll` is the poll family on aarch64: the generic ABI dropped plain `poll(2)`
+and `select(2)`, so musl's `poll()` and `select()` both arrive at 73 and 72.
+V-5c-1 lands `ppoll`; `pselect6`'s three-`fd_set` reshape is V-5c-2.
+
+### The array needs nothing; the fd needs everything
+
+`<thylacine/poll.h>` is deliberately Linux-shaped -- 8 bytes, `fd` at 0, `events`
+at 4, `revents` at 6, and the same event values. So `viv_ppoll` copies the array
+in and out unchanged, and the entire translation is the **fd**.
+
+A `/net` socket cannot be polled on its own fd. That fd names
+`/net/<proto>/N/data`, an ordinary dev9p file, and dev9p reports an ordinary file
+as always-ready -- correct for a file, useless for a socket. netd publishes
+readiness on a sibling, `/net/<proto>/N/ready`, whose qid carries `QTPOLL`, and
+`dev9p.poll` probes exactly that bit. So the translator opens the sibling, polls
+*that*, and restores the caller's own fd number before returning. Polling the
+socket's own fd returns "ready" instantly and defeats every wait -- the same bug
+the pouch boundary-line hit at net-6b-3.
+
+The `ready` fd is opened **per call**. Caching it (pouch's choice) would place a
+handle the guest never asked for into the guest's own fd-number space, where the
+guest can close it and where it breaks POSIX's lowest-available-fd guarantee. In
+pouch that hazard is absent because there the ready fd *is* a guest fd its own
+libc opened. Here the guest cannot see it, so it must not outlive the call -- and
+it is unobservable for exactly the reason the socktab needs no lock (a
+`PHENO_LINUX` Proc is single-threaded). Both properties end together at task #93.
+
+### The measurement that changed the design
+
+The first version of these legs asserted a zero-timeout `POLLOUT` on a freshly
+accepted socket. It failed -- and finding out why is the substance of this
+sub-chunk.
+
+netd's readiness probe is **asynchronous**. `dev9p.poll` *submits* a probe and
+answers from a cache; a freshly-opened `ready` fd has no cached value, so the
+first poll of it returns not-ready no matter what the socket is doing. Combined
+with the per-call open, *every* poll is a first poll. A strict zero-timeout scan
+would therefore report "nothing ready" for a plainly writable socket, and a
+caller looping on timeout 0 would never make progress at all.
+
+So a caller-supplied timeout of **0** gets a 10 ms budget when a socket is
+actually in the array (`VIV_PPOLL_PROBE_MS`). That changes the latency, never the
+answer: what comes back is netd's real verdict rather than an approximation of
+it, and a probe that misses even that budget yields not-ready, which the caller
+retries. A caller's own timeout is never touched. This is a mitigation, not a
+closure -- task #98 holds the two real fixes (a poll core that holds Spoors
+rather than fd indices, so the ready fd can be cached outside the guest's fd
+space; or a synchronous readiness query), both on the audited net-6b surface.
+
+**The same measurement condemned a leg that was passing.** L107 asserts that an
+announced listener with no call pending does *not* report `POLLIN`. With a zero
+timeout it passed -- because the probe had not answered yet, not because the
+listener was quiet. It tested nothing. It now uses a real timeout and is
+explicitly documented as meaningful only paired with L110, which shows the same
+fd *does* report `POLLIN` once a call arrives. The same pairing rule governs the
+connected-socket legs: `POLLOUT` is asserted **first**, so that the `POLLIN`
+timeout below it is a real silence rather than an unanswered question.
+
+### The netd half -- #220, finally live
+
+POSIX defines `POLLIN` on a listener as "a connection is pending -- `accept` will
+not block". netd computed readiness from `can_recv()`, which is false for a
+listening socket in every state, so `poll(listener, POLLIN)` deferred forever
+while a real client sat connected. A server that polls before accepting -- the
+entire point of poll -- could never learn it had a caller. This was a documented
+seam from net-6b-4 and became reachable the moment a Linux guest could poll at
+all.
+
+`slot_poll_readable` now reports an announced slot via `accept_ready`, the *same*
+predicate `poll_accepts` uses to decide a deferred accept may complete, so a
+poller and an accepter cannot disagree about whether a call has arrived. The
+window is not narrow: netd swaps a listener only when some fid is already blocked
+in `open(listen)`, so a server that polls first leaves the established call
+sitting in the listener's socket until it chooses to accept.
+
+### The collision re-check, which finally has work to do
+
+Every earlier V-table row is above 100, the highest assigned native syscall
+number, so ARCH section 25.4's mandated collision re-check was discharged by
+construction. These two are not: **72 is `SYS_GETPID` and 73 is `SYS_GETUID`.**
+
+The argument still holds, for a different reason. A `PHENO_LINUX` Proc cannot
+reach a native number *at all* -- every number it issues goes through
+`vivarium_translate`, and an unclassified one lands on FORWARD, which with V-3
+deferred is ENOSYS. It never had getpid or getuid to lose. In the other
+direction, a native program mis-declared `PHENO_LINUX` issuing native 72 now
+dispatches the pselect6 translator over getpid's absent (hence garbage)
+arguments: it reads user memory the caller owns, bounds-checked, and polls fds
+the caller already holds, so the worst outcome is EFAULT or a block, never
+authority. A mis-declared Proc is comprehensively broken either way; I-43 governs
+what it can *reach*.
+
+A future row below 100 owes the same paragraph. `vivarium.rejects_are_deliberate`
+asserts both collisions by name, so the fact is stated rather than discovered.
+
+### Coverage
+
+Two new pure unit tests (`vivarium.timespec_to_ms` / `vivarium.ppoll_decide`) and
+twenty-eight in-guest legs (L97-L124). Suite 1262 -> 1264.
+
+Revert-probed four ways, each failing at a different layer and a different file:
+
+| Sabotage | Fails at |
+|---|---|
+| The ready-file translation removed (poll the socket fd itself) | in-guest **L107** |
+| The #220 listener fix removed from netd | in-guest **L110** |
+| The zero-timeout probe budget removed | in-guest **L113** |
+| The sigmask decline removed | unit `1263/1264`, boot-fatal |
+
+Probe 1 fails *earlier* than designed and that is worth noting: the very first
+socket poll catches it, because an untranslated socket fd is an ordinary
+always-ready file and the leg expecting silence gets noise. Probe 4 fails at the
+unit layer before the in-guest leg can run -- the cheaper test catching it first,
+the same ordering V-5b saw.

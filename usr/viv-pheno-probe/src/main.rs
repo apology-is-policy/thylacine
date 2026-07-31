@@ -118,6 +118,10 @@ const NR_LISTEN: u64 = 201;
 const NR_ACCEPT: u64 = 202;
 const NR_CONNECT: u64 = 203;
 const NR_ACCEPT4: u64 = 242;
+// Readiness (V-5c). aarch64 has no plain poll(2)/select(2), so ppoll IS poll --
+// and 73 collides with the NATIVE SYS_GETUID, which is safe only because a
+// PHENO_LINUX Proc can never reach a native number (kernel/vivarium.h).
+const NR_PPOLL: u64 = 73;
 const AF_INET: u64 = 2;
 const AF_INET6: u64 = 10;
 const SOCK_STREAM: u64 = 1;
@@ -125,6 +129,7 @@ const SOCK_DGRAM: u64 = 2;
 const SOCK_NONBLOCK: u64 = 0o4000;
 const SOCK_SEQPACKET: u64 = 5;
 // POSIX errno values a Linux libc compares against (musl generic bits/errno.h).
+const ENOSYS: i64 = 38;
 const ENOTSOCK: i64 = 88;
 const EPROTONOSUPPORT: i64 = 93;
 const EOPNOTSUPP: i64 = 95;
@@ -971,6 +976,199 @@ unsafe fn run_linux() -> ! {
     // with L83, this brackets the entry's whole life: EINVAL while open,
     // ENOTSOCK once closed.
     leg!(rep, svc3(NR_LISTEN, afd as u64, 1, 0) == -ENOTSOCK, b"L96\n");
+
+    // --- V-5c: readiness ----------------------------------------------------
+    // A Linux `struct pollfd` -- and the native one is byte-identical, which is
+    // why only the FD needs translating.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    const POLLIN: i16 = 0x001;
+    const POLLOUT: i16 = 0x004;
+
+    // The argument domain first, since these need no sockets at all. Each is a
+    // shape this kernel cannot serve, and each says so with its own code.
+    let mut pfd = [PollFd { fd: rep as i32, events: POLLIN, revents: 0 }];
+    let ts_zero: [i64; 2] = [0, 0];
+
+    // nfds == 0 is Linux for "sleep for the timeout". There is no native sleep
+    // to route it to, and SYS_POLL rejects nfds == 0 outright.
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 0, ts_zero.as_ptr() as u64, 0, 8, 0) == -ENOSYS,
+        b"L97\n"
+    );
+    // Over the native cap: a genuinely out-of-range argument, so EINVAL.
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 65, ts_zero.as_ptr() as u64, 0, 8, 0) == -22,
+        b"L98\n"
+    );
+    // A sigmask asks for an ATOMIC mask swap, which is ppoll's entire reason to
+    // exist over poll() and has no counterpart here. Declined, never approximated.
+    let sigmask: [u64; 1] = [0];
+    leg!(
+        rep,
+        svc6(
+            NR_PPOLL,
+            pfd.as_mut_ptr() as u64,
+            1,
+            ts_zero.as_ptr() as u64,
+            sigmask.as_ptr() as u64,
+            8,
+            0
+        ) == -ENOSYS,
+        b"L99\n"
+    );
+    // A malformed timespec is Linux's own EINVAL, not ours.
+    let ts_bad: [i64; 2] = [0, 1_000_000_000];
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_bad.as_ptr() as u64, 0, 8, 0) == -22,
+        b"L100\n"
+    );
+
+    // A NON-socket fd passes through untranslated. The report file is a regular
+    // file, and a regular file is always ready -- so this also proves the
+    // translation is not applied indiscriminately.
+    pfd[0] = PollFd { fd: rep as i32, events: POLLIN, revents: 0 };
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_zero.as_ptr() as u64, 0, 8, 0) == 1,
+        b"L101\n"
+    );
+    leg!(rep, pfd[0].revents & POLLIN != 0, b"L102\n");
+    // ...and the caller's own fd number came back unchanged. The kernel polled a
+    // different handle underneath; if that leaked into the array the guest would
+    // be holding a readiness-file fd where it wrote a socket.
+    leg!(rep, i64::from(pfd[0].fd) == rep, b"L103\n");
+
+    // Now the real thing: a fresh server + client pair, polled at both ends.
+    let srv3 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, srv3 >= 0, b"L104\n");
+    // A DIFFERENT port from the V-5b pair above (7789): those listeners are
+    // closed by now, but netd's announce would refuse a live collision, and a
+    // port clash would read as a poll bug rather than the setup error it is.
+    let srv3_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x6C, // sin_port = 7788, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    leg!(
+        rep,
+        svc3(NR_BIND, srv3 as u64, srv3_sa.as_ptr() as u64, srv3_sa.len() as u64) == 0,
+        b"L105\n"
+    );
+    leg!(rep, svc3(NR_LISTEN, srv3 as u64, 1, 0) == 0, b"L106\n");
+
+    // THE #220 LEG, half one: an announced listener with NO call pending must
+    // NOT report POLLIN. If it did, a select()-loop server would spin calling
+    // accept() on nothing.
+    //
+    // ON ITS OWN THIS LEG PROVES NOTHING -- a kernel that never reported
+    // readiness for anything would pass it. It is meaningful only PAIRED with
+    // L110 below, which shows the same fd DOES report POLLIN once a call
+    // arrives: together they say the signal fires when it should and not when
+    // it should not. (Nor is a real timeout optional here: with a zero timeout
+    // this leg would pass because netd's probe had not answered yet, which is
+    // the same nothing wearing a different disguise -- task #98.)
+    let ts_200ms: [i64; 2] = [0, 200_000_000];
+    pfd[0] = PollFd { fd: srv3 as i32, events: POLLIN, revents: 0 };
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_200ms.as_ptr() as u64, 0, 8, 0) == 0,
+        b"L107\n"
+    );
+
+    let cli3 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, cli3 >= 0, b"L108\n");
+    leg!(
+        rep,
+        svc3(NR_CONNECT, cli3 as u64, srv3_sa.as_ptr() as u64, srv3_sa.len() as u64) == 0,
+        b"L109\n"
+    );
+
+    // THE #220 LEG, half two, and the reason this chunk touches netd at all.
+    // POSIX defines POLLIN on a listener as "a connection is pending -- accept
+    // will not block". netd computed readiness from can_recv(), which is false
+    // for a listening socket in EVERY state, so this returned 0 forever while a
+    // real client sat connected. A server that polls before accepting -- the
+    // whole point of poll -- could never learn it had a caller.
+    let ts_2s: [i64; 2] = [2, 0];
+    pfd[0] = PollFd { fd: srv3 as i32, events: POLLIN, revents: 0 };
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_2s.as_ptr() as u64, 0, 8, 0) == 1,
+        b"L110\n"
+    );
+    leg!(rep, pfd[0].revents & POLLIN != 0, b"L111\n");
+
+    let afd3 = svc3(NR_ACCEPT, srv3 as u64, 0, 0);
+    leg!(rep, afd3 >= 0, b"L112\n");
+
+    // POLLOUT FIRST, and the order is the point: an accepted socket is writable
+    // at once, so this establishes that readiness for THIS fd is being answered
+    // truthfully before anything below asks it to stay silent.
+    //
+    // It also pins the zero-timeout mitigation. netd's readiness probe is
+    // ASYNCHRONOUS -- the first poll of a freshly-opened `ready` fd submits it
+    // and cannot answer it -- so a literal zero-timeout scan would report
+    // not-ready for a plainly writable socket. viv_ppoll gives a caller-supplied
+    // 0 a small budget for the probe to land (task #98), and this leg is what
+    // says so: remove the budget and it fails.
+    pfd[0] = PollFd { fd: afd3 as i32, events: POLLOUT, revents: 0 };
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_zero.as_ptr() as u64, 0, 8, 0) == 1,
+        b"L113\n"
+    );
+    leg!(rep, pfd[0].revents & POLLOUT != 0, b"L114\n");
+
+    // NOW the silence means something. A connected socket with an empty receive
+    // buffer must TIME OUT on POLLIN -- and this is THE leg that proves the
+    // readiness-file translation, because the socket's own fd names
+    // /net/tcp/N/data, an ordinary dev9p file, and an ordinary file is
+    // ALWAYS-READY. Without the swap to the QTPOLL `ready` sibling this would
+    // return 1 immediately and every poll-driven read would spin.
+    let ts_100ms: [i64; 2] = [0, 100_000_000];
+    pfd[0] = PollFd { fd: afd3 as i32, events: POLLIN, revents: 0 };
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_100ms.as_ptr() as u64, 0, 8, 0) == 0,
+        b"L115\n"
+    );
+    leg!(rep, pfd[0].revents == 0, b"L116\n");
+
+    // And once the peer sends, POLLIN arrives -- through the DEFERRED path,
+    // since the bytes are not there when the poll parks.
+    leg!(
+        rep,
+        svc3(NR_WRITE, cli3 as u64, b"hi".as_ptr() as u64, 2) == 2,
+        b"L117\n"
+    );
+    pfd[0] = PollFd { fd: afd3 as i32, events: POLLIN, revents: 0 };
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 1, ts_2s.as_ptr() as u64, 0, 8, 0) == 1,
+        b"L118\n"
+    );
+    leg!(rep, pfd[0].revents & POLLIN != 0, b"L119\n");
+    let mut got3 = [0u8; 8];
+    leg!(
+        rep,
+        svc3(NR_READ, afd3 as u64, got3.as_mut_ptr() as u64, got3.len() as u64) == 2,
+        b"L120\n"
+    );
+    leg!(rep, got3[0] == b'h' && got3[1] == b'i', b"L121\n");
+
+    leg!(rep, svc3(NR_CLOSE, afd3 as u64, 0, 0) == 0, b"L122\n");
+    leg!(rep, svc3(NR_CLOSE, cli3 as u64, 0, 0) == 0, b"L123\n");
+    leg!(rep, svc3(NR_CLOSE, srv3 as u64, 0, 0) == 0, b"L124\n");
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

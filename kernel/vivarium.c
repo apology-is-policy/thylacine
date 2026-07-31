@@ -6,6 +6,7 @@
 #include <thylacine/vivarium.h>
 
 #include <thylacine/notes.h>            // V-6b: the canonical note-name literals
+#include <thylacine/poll.h>             // V-5c: POLL_MAX_NFDS bounds the domain
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
@@ -217,6 +218,12 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_GETSOCKOPT,  VIV_ENOSYS },
     { VIV_LINUX_SENDMSG,     VIV_ENOSYS },
     { VIV_LINUX_RECVMSG,     VIV_ENOSYS },
+
+    // Readiness (V-5c, section 5.5.4). aarch64 has no plain poll/select, so
+    // these two carry the whole family -- musl's poll() and select() are
+    // wrappers over them, and a server that multiplexes reaches them either way.
+    { VIV_LINUX_PPOLL,       VIV_TIER2   },  // V-5c: the ready-file translation
+    { VIV_LINUX_PSELECT6,    VIV_FORWARD },  // V-5c-2: the fd_set reshape
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -1013,6 +1020,66 @@ bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n) {
     }
     if (seen == 0) return false;
     *out_n = (u32)v;
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// Readiness (V-5c, section 5.5.4).
+// -----------------------------------------------------------------------------
+
+bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err) {
+    if (!out_ms || !out_err) return false;
+    *out_err = 0;
+
+    // Linux's own validation, and it must come first: a negative field is not a
+    // short wait, it is a malformed request.
+    if (sec < 0 || nsec < 0 || nsec >= 1000000000) {
+        *out_err = (s32)T_E_INVAL;
+        return false;
+    }
+
+    // Saturate before multiplying rather than after, so the multiply itself can
+    // never overflow. INT32_MAX ms is ~24.8 days; a caller wanting longer gets a
+    // shorter wait and loops.
+    const s64 max_ms = 0x7FFFFFFF;
+    if (sec > max_ms / 1000) {
+        *out_ms = (s32)max_ms;
+        return true;
+    }
+
+    // Round UP: a non-zero nanosecond remainder must not vanish, because 0 means
+    // "do not wait at all" and would silently convert a brief wait into a spin.
+    s64 ms = sec * 1000 + (nsec + 999999) / 1000000;
+    if (ms > max_ms) ms = max_ms;
+    *out_ms = (s32)ms;
+    return true;
+}
+
+bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err) {
+    if (!out_err) return false;
+    *out_err = 0;
+
+    // The atomic mask swap has no counterpart -- see the header. Checked FIRST
+    // so a caller using ppoll for its signal semantics learns that is the
+    // unserved part, rather than being told its nfds is wrong.
+    if (sigmask_va != 0) {
+        *out_err = (s32)T_E_NOSYS;
+        return false;
+    }
+
+    // A timed sleep wearing a poll's clothes. Native SYS_POLL rejects nfds == 0
+    // and there is no native sleep to route it to.
+    if (nfds == 0) {
+        *out_err = (s32)T_E_NOSYS;
+        return false;
+    }
+
+    // A real bad value, so a real POSIX error.
+    if (nfds > POLL_MAX_NFDS) {
+        *out_err = (s32)T_E_INVAL;
+        return false;
+    }
+
     return true;
 }
 

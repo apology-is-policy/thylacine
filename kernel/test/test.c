@@ -589,6 +589,8 @@ void test_vivarium_socktab(void);
 void test_vivarium_socktab_close_hook(void);                        // VIVARIUM V-6c
 void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM V-5b
 void test_vivarium_listen_decide(void);
+void test_vivarium_timespec_to_ms(void);
+void test_vivarium_ppoll_decide(void);
 void test_vivarium_announce_cmd(void);
 void test_vivarium_parse_ipport(void);
 void test_vivarium_sockaddr_build(void);
@@ -2006,6 +2008,8 @@ struct test_case g_tests[] = {
     { "vivarium.socktab_close_hook",   test_vivarium_socktab_close_hook,   false, NULL },
     { "vivarium.socktab_bind_fields",  test_vivarium_socktab_bind_fields,  false, NULL },
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
+    { "vivarium.timespec_to_ms",       test_vivarium_timespec_to_ms,       false, NULL },
+    { "vivarium.ppoll_decide",         test_vivarium_ppoll_decide,         false, NULL },
     { "vivarium.announce_cmd",         test_vivarium_announce_cmd,         false, NULL },
     { "vivarium.parse_ipport",         test_vivarium_parse_ipport,         false, NULL },
     { "vivarium.sockaddr_build",       test_vivarium_sockaddr_build,       false, NULL },

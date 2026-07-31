@@ -7071,6 +7071,38 @@ static s64 sys_cap_grant_clearance_handler(u64 cap_mask, u64 target_stripes,
 // state.
 // =============================================================================
 
+// Write back the `revents` field (2 bytes at offset 6) of each pollfd, and
+// NOTHING else -- `fd` and `events` are the caller's, and V-5c's ppoll depends
+// on that: it polls a TRANSLATED fd, so rewriting the fd field would hand the
+// guest a readiness-file handle where it wrote a socket.
+//
+// Per-byte uaccess_store_u8 with fault fixup; on a partial fault, scrub the
+// bytes already written back to zero so userspace can never observe a torn
+// revents (the sys_srv_peer_handler pattern). Returns 0, or -1 on that fault.
+static int poll_writeback_revents(u64 fds_va, const struct pollfd *kfds, u64 nfds) {
+    for (u64 i = 0; i < nfds; i++) {
+        u64 rev_va  = fds_va + i * sizeof(struct pollfd)
+                              + __builtin_offsetof(struct pollfd, revents);
+        const u8 *rb = (const u8 *)&kfds[i].revents;
+        for (u64 j = 0; j < sizeof(kfds[i].revents); j++) {
+            if (uaccess_store_u8(rev_va + j, rb[j]) != 0) {
+                // Scrub everything written so far -- this pollfd plus every
+                // earlier one.
+                for (u64 ii = 0; ii <= i; ii++) {
+                    u64 sva = fds_va + ii * sizeof(struct pollfd)
+                                       + __builtin_offsetof(struct pollfd, revents);
+                    u64 lim = (ii == i) ? j : sizeof(kfds[ii].revents);
+                    for (u64 jj = 0; jj < lim; jj++) {
+                        (void)uaccess_store_u8(sva + jj, 0);
+                    }
+                }
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
     struct Thread *t = current_thread();
     if (!t)                                                  return -1;
@@ -7106,30 +7138,7 @@ static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
     s64 result = sys_poll_for_proc(p, kfds, nfds, timeout_ms);
     if (result < 0) return result;
 
-    // Write back: only the `revents` field (2 bytes at offset 6 per
-    // pollfd). Per-byte uaccess_store_u8 with fault fixup; on a partial
-    // fault, scrub the bytes already written back to zero so userspace
-    // can't observe a torn revents (sys_srv_peer_handler pattern).
-    for (u64 i = 0; i < nfds; i++) {
-        u64 rev_va  = fds_va + i * sizeof(struct pollfd)
-                              + __builtin_offsetof(struct pollfd, revents);
-        const u8 *rb = (const u8 *)&kfds[i].revents;
-        for (u64 j = 0; j < sizeof(kfds[i].revents); j++) {
-            if (uaccess_store_u8(rev_va + j, rb[j]) != 0) {
-                // Scrub everything we've written so far — this pollfd
-                // plus every earlier one.
-                for (u64 ii = 0; ii <= i; ii++) {
-                    u64 sva = fds_va + ii * sizeof(struct pollfd)
-                                       + __builtin_offsetof(struct pollfd, revents);
-                    u64 lim = (ii == i) ? j : sizeof(kfds[ii].revents);
-                    for (u64 jj = 0; jj < lim; jj++) {
-                        (void)uaccess_store_u8(sva + jj, 0);
-                    }
-                }
-                return -1;
-            }
-        }
-    }
+    if (poll_writeback_revents(fds_va, kfds, nfds) != 0) return -1;
     return result;
 }
 
@@ -7792,6 +7801,139 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     return dfd;
 }
 
+// ppoll(fds, nfds, tmo_p, sigmask, sigsetsize) -> ready count.
+//
+// The pollfd ARRAY needs no conversion: <thylacine/poll.h> is deliberately
+// Linux-shaped -- 8 bytes, fd at 0, events at 4, revents at 6, and the same
+// POLLIN/POLLOUT/POLLERR/POLLHUP values. So the only translation is the FD, and
+// only for a socket.
+//
+// WHY A SOCKET FD CANNOT BE POLLED DIRECTLY. A /net socket's fd names
+// `/net/<proto>/N/data`, an ORDINARY dev9p file -- and dev9p reports an ordinary
+// file as POSIX always-ready, which is correct for a file and useless for a
+// socket. netd publishes readiness on a SIBLING, `/net/<proto>/N/ready`, whose
+// qid carries the reserved QTPOLL bit; dev9p.poll probes exactly that bit, and a
+// poll on it becomes a non-consuming readiness Tread that netd answers or
+// defers. So a poll on the socket's own fd would return "ready" instantly and
+// defeat the wait -- the exact bug the pouch boundary-line hit at net-6b-3, and
+// it is the same bug here for the same reason.
+//
+// THE READY FD IS OPENED PER CALL, NOT CACHED, AND THAT IS DELIBERATE. Caching
+// it in the socktab (what pouch does) would put a handle the guest never asked
+// for into the guest's OWN fd-number space, where the guest could close it --
+// after which the cached number would name whatever object was allocated next,
+// and poll would report a stranger's readiness as this socket's. In pouch that
+// hazard does not exist, because there the ready fd IS a guest fd that the
+// guest's own libc opened and tracks. Here the guest cannot see it, so it must
+// not outlive the call.
+//
+// The transient fd is unobservable for EXACTLY the reason the socktab needs no
+// lock -- a PHENO_LINUX Proc is single-threaded (clone is not a row), so nothing
+// can look at the handle table while this one blocks in poll. Both properties
+// evaporate together when process creation lands (VIVARIUM.md task #93); the
+// caching option becomes available then only if the fd-space problem above is
+// solved first.
+static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
+                     u64 sigmask_va) {
+    s32 err = 0;
+    if (!vivarium_ppoll_decide(nfds, sigmask_va, &err)) return -(s64)err;
+
+    // A NULL timespec is Linux for "block indefinitely", which is the native
+    // negative timeout.
+    s32 timeout_ms = -1;
+    if (tmo_va != 0) {
+        // Linux's struct timespec is two 8-byte fields; t_timespec matches it
+        // field-for-field, so this is a copy rather than a conversion.
+        struct t_timespec ts;
+        if (!sys_validate_user_buf(tmo_va, sizeof(ts)))         return -(s64)T_E_FAULT;
+        if (uaccess_copy_in(&ts, tmo_va, sizeof(ts)) != 0)      return -(s64)T_E_FAULT;
+        if (!vivarium_timespec_to_ms(ts.tv_sec, ts.tv_nsec, &timeout_ms, &err))
+            return -(s64)err;
+    }
+
+    u64 buf_bytes = nfds * sizeof(struct pollfd);
+    if (!sys_validate_user_buf(fds_va, buf_bytes))      return -(s64)T_E_FAULT;
+
+    struct pollfd kfds[POLL_MAX_NFDS];
+    u8 *kbytes = (u8 *)kfds;
+    for (u64 i = 0; i < buf_bytes; i++) {
+        if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0) return -(s64)T_E_FAULT;
+    }
+
+    // Translate each socket fd to a freshly-opened readiness fd, remembering
+    // which entries we opened so every one is closed on every exit below.
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    s32  opened[POLL_MAX_NFDS];
+    bool any_socket = false;
+    for (u64 i = 0; i < nfds; i++) opened[i] = -1;
+
+    if (tab) {
+        for (u64 i = 0; i < nfds; i++) {
+            if (kfds[i].fd < 0) continue;          // caller-disabled entry
+            struct viv_sock *e = viv_socktab_find(tab, kfds[i].fd);
+            if (!e) continue;                      // an ordinary file: as-is
+
+            char path[64];
+            u32  plen = viv_net_path(path, sizeof(path),
+                                     (enum viv_net_proto)e->proto, true, e->n,
+                                     "ready");
+            s64 rfd = (plen == 0)
+                          ? -1
+                          : sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT,
+                                                    path, plen, 0u /* OREAD */);
+            if (rfd < 0) {
+                // The socket is in the table but its readiness file will not
+                // open -- a dead connection, or a /net that went away. POLLNVAL
+                // is the POSIX answer for an fd that cannot be polled, and it is
+                // per-pollfd: one broken socket must not fail the whole call for
+                // the fds beside it.
+                kfds[i].fd = -1;
+                continue;
+            }
+            opened[i]  = (s32)rfd;
+            kfds[i].fd = (s32)rfd;
+            any_socket = true;
+        }
+    }
+
+    // A ZERO TIMEOUT STILL NEEDS A MOMENT, and the reason is a property of the
+    // object rather than a shortcut. Readiness for a /net socket lives in netd,
+    // one RPC away: dev9p's .poll SUBMITS an async probe and answers from a
+    // cache that the freshly-opened `ready` fd does not yet have. So a strict
+    // zero-timeout scan would report "nothing ready" for a socket that is
+    // plainly writable -- and a caller polling with timeout 0 in a loop would
+    // never make progress at all.
+    //
+    // Giving the probe a small budget changes the LATENCY, not the ANSWER: what
+    // comes back is netd's real verdict rather than an approximation of it. If
+    // the probe misses even this, the call reports not-ready and the caller
+    // retries, which is the safe direction. A caller-supplied timeout is never
+    // touched -- only the literal 0 is widened, and only when a socket is
+    // actually in the array.
+    //
+    // This is a mitigation, not a closure (task #98): a slow or loaded path can
+    // still miss the budget. Closing it needs either a poll core that holds
+    // Spoors rather than fd indices (so the ready fd can be cached OUTSIDE the
+    // guest's fd-number space) or a synchronous readiness query on dev9p_poll.
+    if (timeout_ms == 0 && any_socket) timeout_ms = VIV_PPOLL_PROBE_MS;
+
+    s64 result = sys_poll_for_proc(p, kfds, nfds, timeout_ms);
+
+    // Restore the caller's own fd numbers BEFORE anything else looks at kfds:
+    // the write-back only touches revents, but a future reader of this array
+    // must not see readiness handles where the guest wrote sockets.
+    for (u64 i = 0; i < nfds; i++) {
+        if (opened[i] >= 0) {
+            handle_close(p, (hidx_t)opened[i]);
+            opened[i] = -1;
+        }
+    }
+
+    if (result < 0) return result;
+    if (poll_writeback_revents(fds_va, kfds, nfds) != 0) return -(s64)T_E_FAULT;
+    return result;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
@@ -8054,6 +8196,12 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
     case VIV_LINUX_ACCEPT4:
         // accept4(fd, addr, addrlen, flags): x0..x3.
         return viv_sock_accept(p, args[0], args[1], args[2], args[3]);
+
+    case VIV_LINUX_PPOLL:
+        // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize): x0..x4. sigsetsize is
+        // read only via the sigmask decline, which needs no size -- Linux itself
+        // skips that check when the mask is NULL.
+        return viv_ppoll(p, args[0], args[1], args[2], args[3]);
 
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That

@@ -151,6 +151,33 @@ enum {
     VIV_LINUX_SENDMSG     = 211,
     VIV_LINUX_RECVMSG     = 212,
     VIV_LINUX_ACCEPT4     = 242,
+
+    // Readiness (V-5c, section 5.5.4). aarch64 has NO plain poll(2) or
+    // select(2) -- the generic ABI dropped them -- so these two ARE the poll
+    // family, and musl's poll()/select() are thin wrappers over them.
+    //
+    // THE COLLISION RE-CHECK, WHICH FINALLY HAS WORK TO DO. Every row above is
+    // > 100 (the highest assigned native number), so the ARCH section 25.4
+    // mandate was discharged by construction. These two are NOT: 72 is
+    // SYS_GETPID and 73 is SYS_GETUID. So the argument has to be made per
+    // number, and it still holds -- but for a different reason:
+    //
+    //   * A PHENO_LINUX Proc CANNOT REACH A NATIVE NUMBER AT ALL. Every number
+    //     it issues goes through vivarium_translate, and an unclassified one
+    //     lands on FORWARD -> ENOSYS (viv_linux_dispatch). It never had getpid
+    //     or getuid to lose, and adding these rows takes nothing away.
+    //   * A NATIVE program MIS-DECLARED as PHENO_LINUX issuing native 72
+    //     intending getpid now dispatches the pselect6 translator over
+    //     getpid's (absent, hence garbage) arguments. The translator reads
+    //     user memory the caller owns, bounds-checked, and polls fds the
+    //     caller already holds -- so the worst outcome is EFAULT or a block,
+    //     never authority. A mis-declared Proc is comprehensively broken
+    //     either way; I-43 is about what it can REACH, not whether it works.
+    //
+    // A future row below 100 owes the same paragraph. Do not reach for the
+    // ceiling argument again without checking the number.
+    VIV_LINUX_PSELECT6    = 72,
+    VIV_LINUX_PPOLL       = 73,
 };
 
 // -----------------------------------------------------------------------------
@@ -833,6 +860,52 @@ bool vivarium_listen_decide(enum viv_net_proto proto, enum viv_sock_state state,
 // read. PURE. Returns false on empty, non-decimal, or out-of-range input --
 // which the caller must treat as a protocol failure rather than connection 0.
 bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n);
+
+// -----------------------------------------------------------------------------
+// Readiness (V-5c, section 5.5.4).
+// -----------------------------------------------------------------------------
+
+// Convert a Linux `struct timespec` to the native SYS_POLL millisecond timeout.
+// PURE.
+//
+// ROUNDS UP. A sub-millisecond timeout must not become 0: 0 means "return
+// immediately" to SYS_POLL, so truncating would turn a caller's 100us wait into
+// a busy loop -- the one conversion error a poll loop would never notice and
+// never stop paying for. Linux rounds a ppoll timeout up to the next tick for
+// the same reason.
+//
+// SATURATES at INT32_MAX ms (~24.8 days) rather than overflowing. A caller
+// asking for longer gets a shorter wait than it asked for and then loops --
+// which is what a poll caller does anyway.
+//
+// Returns false with *out_err = EINVAL for a malformed timespec (a negative
+// field, or tv_nsec >= 1e9), matching Linux's own validation.
+bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err);
+
+// Decide whether a ppoll() is inside the translatable domain. PURE.
+//
+// THE ARGUMENT DOMAIN, and note that both declines below are shapes rather than
+// bad values -- ENOSYS, not EINVAL, because the arguments are perfectly valid
+// Linux and it is this kernel that cannot serve them:
+//
+//   * sigmask != NULL -- ppoll's WHOLE REASON TO EXIST over poll() is that it
+//     swaps the signal mask ATOMICALLY with the wait. Thylacine has no way to
+//     do that, and doing it non-atomically re-opens exactly the race the caller
+//     chose ppoll to close. Honouring it approximately would be the silent
+//     mistranslation this tier exists to prevent. (musl's poll() passes NULL,
+//     so the common path is unaffected.)
+//   * nfds == 0 -- Linux reads this as "sleep for the timeout"; native SYS_POLL
+//     rejects it, and there is no native sleep syscall to route it to.
+//
+// nfds > POLL_MAX_NFDS is EINVAL rather than ENOSYS: that IS a bad value, and
+// the native cap is the real bound a caller must respect.
+bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err);
+
+// The budget a caller-requested timeout of 0 gets when the array holds a /net
+// socket, so netd's async readiness probe has a chance to land (task #98; the
+// reasoning is at the use site in viv_ppoll). Small enough that a zero-timeout
+// poll is still "immediate", generous enough for a loopback round trip.
+#define VIV_PPOLL_PROBE_MS 10
 
 // The reverse step: which note kind is this note NAME? PURE.
 //
