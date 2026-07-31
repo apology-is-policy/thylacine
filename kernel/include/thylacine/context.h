@@ -156,4 +156,22 @@ static inline void fp_enable_this_cpu(void) {
     __asm__ __volatile__("msr CPACR_EL1, %0\nisb\n" :: "r"(cpacr));
 }
 
+// Size of a standalone FP/SIMD save area: V0..V31 (32 x 16 B) + FPSR + FPCR.
+// The offsets are baked into fp_save_area / fp_restore_area in context.S,
+// so a change here is a change there.
+#define FP_AREA_SIZE   520
+#define FP_AREA_FPSR   512
+#define FP_AREA_FPCR   516
+
+// FP/SIMD save + restore to a caller-supplied 520-byte, 16-byte-aligned
+// area (arch/arm64/context.S; task #96). Layout: V0..V31 @ [0,512),
+// FPSR @ 512, FPCR @ 516 — see FP_AREA_SIZE / struct Thread's
+// note_saved_fp.
+//
+// For the note-handler path ONLY. A handler runs on the SAME thread with
+// no context switch, so cpu_switch_context's eager save does not apply
+// and the interrupted EL0 code's V registers would otherwise be clobbered.
+void fp_save_area(void *area);
+void fp_restore_area(const void *area);
+
 #endif // THYLACINE_CONTEXT_H

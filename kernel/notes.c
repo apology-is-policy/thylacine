@@ -22,6 +22,7 @@
 
 #include <thylacine/notes.h>
 
+#include <thylacine/context.h>      // #96: fp_save_area / fp_restore_area
 #include <thylacine/extinction.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
@@ -892,6 +893,16 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
     t->note_saved_sp_el0 = ctx->sp;
     t->note_saved_elr    = ctx->elr;
     t->note_saved_spsr   = ctx->spsr;
+    // Task #96: and the FP/SIMD half. Unlike the GP registers above -- which
+    // come from the `ctx` snapshot the vector code took at EL0 entry -- these
+    // are read from the LIVE hardware registers, which still hold the
+    // interrupted EL0 values because the kernel never clobbers V regs
+    // (-mgeneral-regs-only; the only SIMD in the tree is cpu_switch_context's
+    // own save/restore, which round-trips them). Same invariant that path has
+    // relied on since P4-Ic5. Revert-probed: disabling this line keeps the
+    // kernel suite green AND keeps the native leg passing, and fails the
+    // phenotype prover at exactly L157 -- the two save sites are independent.
+    fp_save_area(t->note_saved_fp);
     for (u32 i = 0; i < NOTE_NAME_MAX; i++)
         t->note_handling_name[i] = popped.name[i];
     t->in_handler = true;
@@ -1148,6 +1159,14 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     t->note_saved_sp_el0 = ctx->sp;
     t->note_saved_elr    = ctx->elr;
     t->note_saved_spsr   = ctx->spsr;
+    // Task #96: and the FP/SIMD half, from the live hardware registers. See
+    // the twin call in notes_deliver_linux_locked for why that is sound.
+    // BOTH delivery paths must save; the restore is shared, so a save missing
+    // here would leave the native Plan 9 path silently corrupting FP while
+    // the phenotype path was fixed -- revert-probed: disabling this line keeps
+    // the kernel suite fully green and fails the in-guest leg with V0 = 0x00
+    // (the zeroed save area written back by the still-live restore).
+    fp_save_area(t->note_saved_fp);
 
     // Remember the note name for NDFLT's default action (F10 audit close
     // copies this into the Proc's exit_msg_buf on NDFLT path).
@@ -1188,6 +1207,10 @@ int notes_noted_restore(struct exception_context *ctx, struct Thread *t) {
     ctx->sp   = t->note_saved_sp_el0;
     ctx->elr  = t->note_saved_elr;
     ctx->spsr = t->note_saved_spsr;
+    // Task #96: restore the FP/SIMD half, undoing whatever the handler left
+    // in V0-V31. Written to the live hardware registers rather than to `ctx`
+    // (which has no FP fields); the eret out to EL0 carries them.
+    fp_restore_area(t->note_saved_fp);
 
     // Clear in-handler state. note_handling_name is left intact — it
     // becomes dead state after in_handler clears (no consumer reads it

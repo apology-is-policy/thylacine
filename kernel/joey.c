@@ -433,7 +433,21 @@ void joey_run(void) {
     }
 
     int status = -42;
-    int reaped = wait_pid(&status);
+    // Task #94: BY PID, not reap-any. kproc is the Proc the orphan rule
+    // reparents to, so a reap-any here races adoption: when /joey fails and
+    // bringup unwinds, an adopted orphan can be handed over first, `reaped !=
+    // pid` fires, and the LAST line of a failed boot names a wrong-pid reap
+    // instead of the real cause -- pointing a reader at the wrong subsystem
+    // exactly when a gate breaks. (#94 diagnosed this as the usr/joey.c
+    // reap-any sites; measuring found those already converted by the U-7-pre
+    // lift, and the two that remain are the init orphan-reaper loops, where
+    // reap-any is correct. This kproc-side site was the actual one.)
+    //
+    // /joey is init and does not exit in normal operation, so this returns
+    // only on a failure -- which is precisely when the diagnostic has to be
+    // right. An orphan left unreaped here is not a leak: the next line
+    // extincts.
+    int reaped = wait_pid_for(pid, 0, &status);
     if (reaped != pid) {
         extinction_with_addr("joey: wait_pid returned wrong pid", (u64)reaped);
     }

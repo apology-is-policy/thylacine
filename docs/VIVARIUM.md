@@ -2143,8 +2143,15 @@ them wrong:
   ucontext through the mcontext head) plus an 8-byte `_aarch64_ctx` terminator.
   The remaining ~4 KiB of `__reserved` is left untouched: it is the guest's own
   stack below its own sp, so nothing crosses a boundary, and an empty record
-  chain is the honest report -- note delivery does not save Q0-Q31 (task #96),
-  so an FPSIMD record would be a lie.
+  chain remains the honest report. **CORRECTED at V-8**: the original reason
+  was that note delivery did not save Q0-Q31 at all (task #96), so an FPSIMD
+  record would have been a lie. Delivery now DOES save and restore them, so the
+  guest's FP state is genuinely preserved -- but the kernel still does not
+  serialise it into the frame, so the record is absent rather than wrong. A
+  guest that only wants its registers back gets them; a guest that wants to
+  READ them out of `uc_mcontext` still cannot. Emitting a real `fpsimd_context`
+  is the remaining half, and it is now a pure reporting change with the hard
+  part (the save) already done.
 
 **A v1.0 Linux guest can only signal ITSELF**, and that shaped the gate. `kill`,
 `tkill` and `clone` are not table rows, so no guest can generate a signal for
@@ -2379,7 +2386,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own |
 | **`exit(N)` is boolean** (task #91) | Any nonzero status reports 1, a Thylacine-wide v1.0 property (`sys_exit_group_handler` collapses to `exits("fail")`). A shell reading `$?` in a container sees 0-or-1 |
 | **`/proc/self` names the mounter** (task #90) | The per-container diorama reports `viv` rather than the reading Proc |
-| **A signal handler cannot use FP/SIMD safely** (§6.22, task #96) | Note delivery saves x0-x30/sp/pc/pstate and NOT Q0-Q31, so a handler that touches floating point or an autovectorised routine clobbers the interrupted computation. PRE-EXISTING on the native note path (pouch handlers have it today); the phenotype makes it reachable by ordinary compiled C. Not an authority question -- the registers are the Proc's own. The frame's `_aarch64_ctx` chain is terminated immediately rather than carrying a false FPSIMD record, so a guest that looks is told the state is absent |
+| **A handler's `ucontext` carries no FPSIMD record** (§6.22, task #96) | **NARROWED at V-8 -- the register corruption it used to describe is FIXED.** Note delivery now saves and restores Q0-Q31 + FPSR + FPCR around a handler (`fp_save_area`/`fp_restore_area`, a 520-byte block on `struct Thread`), so a handler may use floating point and autovectorised routines freely and the interrupted computation resumes intact. This was never an authority question -- the registers are the Proc's own -- but it was silent data corruption, PRE-EXISTING on the native note path and made reachable by ordinary compiled C once the phenotype landed. What REMAINS degraded is only the *reporting*: the frame's `_aarch64_ctx` chain is still terminated immediately rather than carrying an `fpsimd_context`, so a guest that walks `__reserved` looking for its FP state is told the record is absent rather than being handed one. Absent-and-honest, not present-and-wrong; and the state itself is now genuinely preserved underneath |
 | **`siginfo` carries the signal number only** (§6.22) | `si_signo`/`si_errno`/`si_code` are filled and the `_sifields` union is zeroed, with `si_code = SI_KERNEL` -- the one value that claims nothing about the union. A note carries a 16-byte name and one u32 arg, so `si_pid`, `si_uid`, `si_status` and `si_addr` have no source. Queued `siginfo` is the Tier-2 item §5.4 already names |
 | **A signal handler's `ucontext` is read-only** (§6.22) | The frame is written to the user stack and is accurate to read, but `rt_sigreturn` restores from the kernel-side `Thread` snapshot, so *writing* `uc_mcontext` does not change where execution resumes. Breaks signal-driven control transfer (Go's `sigpanic`, JIT deoptimisation); neither reaches this path at v1.0. Bought deliberately: it is what makes the `rt_sigreturn` escalation surface structurally absent rather than merely guarded |
 | **`bind` reports address collisions late** (§5.5.3, V-5b) | netd has no `bind` ctl verb — a local endpoint reaches it only as the argument of `announce` — so `bind()` is *remembered* and `listen()` spends it. A port already in use therefore succeeds at `bind` and fails at `listen` with `EADDRINUSE`. The error moves; it does not vanish. A server that reports "cannot bind" one line later is the whole visible effect |
@@ -2484,6 +2491,44 @@ they are unclassified → `FORWARD` → `ENOSYS`, and a guest shell cannot fork.
 does not block V-6 (signals are needed either way), but it is a hole between the
 arc as chunked and the arc gate; it wants its own scripture pass, weighed at V-8
 or promoted sooner if the ARC gate is attempted.
+
+---
+
+## 10.1 V-8 — the arc close, and what is deliberately NOT built
+
+V-8 is the close: the focused audit over the arc's unaudited surface, the SMP
+gate, the reference doc, the fidelity ladder (section 9), and -- the part that
+takes judgement -- a **disposition for every tracked task the arc raised**. A
+close that leaves those as an undifferentiated backlog has not closed anything.
+
+**The audit scope was chosen by measuring, not by assuming.** Two prior rounds
+exist: V-4c-3 covered the arc through V-4c-2, and V-5d covered the socket
+family. Everything between and after was unaudited -- and V-6 (signals) is
+marked "kernel and audit-bearing" in this document's own track note and had
+never received a round. So V-8's audit is V-1b + V-2d + V-6a/b/c + V-7, not a
+formality.
+
+### FIXED in V-8
+
+| Task | Why it was fixed here rather than deferred |
+|---|---|
+| **#96** FP/SIMD not saved across note delivery | A real correctness defect -- silent corruption of an interrupted computation, PRE-EXISTING on the native path and made reachable by ordinary compiled C once the phenotype landed. Small, well-understood fix; benefits native pouch and the phenotype identically; and it sits squarely on V-8's own audit surface, so fixing it first meant the round prosecuted the final state. `docs/reference/83-pouch-signals.md` |
+| **#94** a failing pheno gate extincts naming the wrong thing | Cheap, and it costs a reader the exact wrong minutes when a gate breaks. **The enqueued diagnosis was wrong**: it named the `usr/joey.c` reap-any sites, but measuring found those already converted by the U-7-pre lift and the two that remain are the init orphan-reaper loops, where reap-any is correct. The actual site was `kernel/joey.c` -- the kproc reaping userspace-init, which is also the Proc the orphan rule reparents to, so it could legitimately reap an adopted orphan first and then extinct naming *that* |
+
+### DEFERRED, with the reason
+
+| Task | Disposition |
+|---|---|
+| **#93** process creation (clone/execve/wait4) | **The named next chunk, and the arc gate's blocker** -- "an Alpine shell runs" needs `fork`. Not a renumber: Linux `clone(flags, stack, ptid, tls, ctid)` versus a `SYS_SPAWN_*` family that takes a *program* rather than a continuation, and `fork()` has no native counterpart at all. Wants its own scripture pass. It also **falsifies two premises the socket family rests on** -- both the socktab's lock-freedom and the transient-fd invisibility assume a `PHENO_LINUX` Proc cannot spawn a thread -- so `viv_sock_connect`'s re-read of `e->proto`/`e->n` after a blocking write is the first line to revisit when it lands |
+| **#91** exit status is boolean | Thylacine-wide, not vivarium-specific, and `docs/ERRORS.md` is ABI-bearing -- the exit-status **encoding** needs user signoff before any impl. Touches the death path (#809/#811), so it wants its own chunk with the usual death-lineage care |
+| **#95** SIGTERM needs its own note | An I-19 supported-set addition = an ABI change to the notes surface. Signoff |
+| **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly |
+| **#90** container `/proc/self` names the mounter | The remedies section 6.13 names both need a per-op identity channel, which is a new kernel surface |
+| **#99** pouch `select(2)`'s four defects | Userspace pouch, and the kernel translator already avoids all four (V-5c-2). Tracked, not arc-blocking |
+
+The through-line: **#96 and #94 were fixed because they are defects; the rest
+are deferred because they are DESIGN, and design that touches an ABI needs a
+vote rather than a commit.**
 
 ---
 

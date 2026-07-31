@@ -362,3 +362,82 @@ thread_user_trampoline:
 1:  wfe
     b       1b
 .size thread_user_trampoline, . - thread_user_trampoline
+
+// ---------------------------------------------------------------------------
+// Standalone FP/SIMD save + restore to a caller-supplied area (task #96).
+//
+// cpu_switch_context's eager save covers a thread that is switched OUT.
+// A NOTE HANDLER runs on the SAME thread with no switch, so nothing in
+// that path preserves the interrupted EL0 code's V registers: the handler
+// clobbers them (any float arithmetic, any autovectorised memcpy) and the
+// interrupted computation resumes with corrupt state. These two helpers
+// give kernel/notes.c an explicit save/restore around handler delivery.
+//
+// The Thread's ctx.fp_v slot CANNOT be borrowed for this: if the handler
+// is preempted, cpu_switch_context writes the HANDLER's FP state there and
+// destroys the interrupted snapshot. Hence a separate area.
+//
+// Area layout (520 bytes, 16-byte aligned — same shape as ctx's, minus the
+// leading GP region so offsets start at 0):
+//   V0..V31 @ [0, 512)   FPSR @ 512   FPCR @ 516
+//
+// x0 = area. x1/x2 are AAPCS64 scratch. CPACR_EL1.FPEN must already be
+// 0b11 (fp_enable_this_cpu, called from boot_main + per_cpu_main).
+.globl fp_save_area
+.type fp_save_area, %function
+fp_save_area:
+    bti     c
+    stp     q0,  q1,  [x0, #0]
+    stp     q2,  q3,  [x0, #32]
+    stp     q4,  q5,  [x0, #64]
+    stp     q6,  q7,  [x0, #96]
+    stp     q8,  q9,  [x0, #128]
+    stp     q10, q11, [x0, #160]
+    stp     q12, q13, [x0, #192]
+    stp     q14, q15, [x0, #224]
+    stp     q16, q17, [x0, #256]
+    stp     q18, q19, [x0, #288]
+    stp     q20, q21, [x0, #320]
+    stp     q22, q23, [x0, #352]
+    stp     q24, q25, [x0, #384]
+    stp     q26, q27, [x0, #416]
+    stp     q28, q29, [x0, #448]
+    stp     q30, q31, [x0, #480]
+    mrs     x1, S3_3_C4_C4_1        // FPSR
+    mrs     x2, S3_3_C4_C4_0        // FPCR
+    str     w1, [x0, #512]
+    str     w2, [x0, #516]
+    ret
+.size fp_save_area, . - fp_save_area
+
+.globl fp_restore_area
+.type fp_restore_area, %function
+fp_restore_area:
+    bti     c
+    ldp     q0,  q1,  [x0, #0]
+    ldp     q2,  q3,  [x0, #32]
+    ldp     q4,  q5,  [x0, #64]
+    ldp     q6,  q7,  [x0, #96]
+    ldp     q8,  q9,  [x0, #128]
+    ldp     q10, q11, [x0, #160]
+    ldp     q12, q13, [x0, #192]
+    ldp     q14, q15, [x0, #224]
+    ldp     q16, q17, [x0, #256]
+    ldp     q18, q19, [x0, #288]
+    ldp     q20, q21, [x0, #320]
+    ldp     q22, q23, [x0, #352]
+    ldp     q24, q25, [x0, #384]
+    ldp     q26, q27, [x0, #416]
+    ldp     q28, q29, [x0, #448]
+    ldp     q30, q31, [x0, #480]
+    ldr     w1, [x0, #512]
+    ldr     w2, [x0, #516]
+    msr     S3_3_C4_C4_1, x1        // FPSR
+    msr     S3_3_C4_C4_0, x2        // FPCR
+    // Same reasoning as cpu_switch_context's (R12-FP F167): a direct FPCR
+    // write needs an ISB before subsequent FP instructions observe the new
+    // rounding-mode / trap-enable bits. The eret out to EL0 is itself
+    // context-synchronizing, but a kernel-side test caller is not.
+    isb
+    ret
+.size fp_restore_area, . - fp_restore_area

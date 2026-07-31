@@ -203,8 +203,47 @@ extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
             SIG_UC_END_MAGIC = core::ptr::read_unaligned(
                 uc.add(UC_MCONTEXT + MC_RESERVED) as *const u32);
         }
+        // Task #96: be a handler that touches FP/SIMD, which is what ordinary
+        // compiled C does the moment it uses a float or an autovectorised
+        // memcpy. Explicit asm so the clobber is guaranteed -- a handler that
+        // happened not to touch V registers would let the L40 check below pass
+        // on a kernel with no FP save at all. (Legs L155-L157, numbered at the END
+        // of the space rather than here: L39-L41 were already taken just below,
+        // and renumbering 100+ existing markers to keep these positional would
+        // be a far larger change than an out-of-order triple.)
+        core::arch::asm!(
+            "movi v0.16b,  #0x11", "movi v1.16b,  #0x11",
+            "movi v2.16b,  #0x11", "movi v3.16b,  #0x11",
+            "movi v4.16b,  #0x11", "movi v5.16b,  #0x11",
+            "movi v6.16b,  #0x11", "movi v7.16b,  #0x11",
+            "movi v8.16b,  #0x11", "movi v9.16b,  #0x11",
+            "movi v10.16b, #0x11", "movi v11.16b, #0x11",
+            "movi v12.16b, #0x11", "movi v13.16b, #0x11",
+            "movi v14.16b, #0x11", "movi v15.16b, #0x11",
+            "movi v16.16b, #0x11", "movi v17.16b, #0x11",
+            "movi v18.16b, #0x11", "movi v19.16b, #0x11",
+            "movi v20.16b, #0x11", "movi v21.16b, #0x11",
+            "movi v22.16b, #0x11", "movi v23.16b, #0x11",
+            "movi v24.16b, #0x11", "movi v25.16b, #0x11",
+            "movi v26.16b, #0x11", "movi v27.16b, #0x11",
+            "movi v28.16b, #0x11", "movi v29.16b, #0x11",
+            "movi v30.16b, #0x11", "movi v31.16b, #0x11",
+            out("v0") _,  out("v1") _,  out("v2") _,  out("v3") _,
+            out("v4") _,  out("v5") _,  out("v6") _,  out("v7") _,
+            out("v8") _,  out("v9") _,  out("v10") _, out("v11") _,
+            out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            out("v20") _, out("v21") _, out("v22") _, out("v23") _,
+            out("v24") _, out("v25") _, out("v26") _, out("v27") _,
+            out("v28") _, out("v29") _, out("v30") _, out("v31") _,
+            options(nostack),
+        );
     }
 }
+
+// Task #96 sentinel buffers for the phenotype-path FP check (L39-L41).
+static mut FP_SENT: [u8; 512] = [0; 512];
+static mut FP_SEEN: [u8; 512] = [0; 512];
 
 fn handler_addr() -> u64 { viv_sig_handler as usize as u64 }
 fn restorer_addr() -> u64 { viv_restore_rt as usize as u64 }
@@ -677,6 +716,82 @@ unsafe fn run_linux() -> ! {
     // handler is running), while -ENOSYS would mean the interception is gone --
     // in which case every real handler would run once and never return.
     leg!(rep, svc4(NR_RT_SIGRETURN, 0, 0, 0, 0) == -1, b"L38\n");
+
+    // --- Task #96: FP/SIMD survives a handler, on the PHENOTYPE path --------
+    //
+    // A handler runs on the SAME thread with no context switch, so
+    // cpu_switch_context's eager FP save never fires and the handler's V
+    // registers would otherwise leak back into the interrupted computation.
+    // The pouch prover covers the NATIVE delivery site
+    // (notes_deliver_at_el0_return); this covers notes_deliver_linux_locked,
+    // the other save site. The restore is shared, so between them every part
+    // of the fix is exercised in-guest -- and it matters most HERE, because
+    // this is the path an ordinary compiled-C guest reaches.
+    //
+    // Block, queue a note, then deliver it from inside ONE asm block. The
+    // block is not stylistic: a Rust-level svc4() is an ordinary call, and
+    // AAPCS64 lets a call clobber V0-V7 and V16-V31, so a check written
+    // around the call could not tell the bug apart from the ABI.
+    unsafe {
+        for k in 0..32usize {
+            for j in 0..16usize { FP_SENT[k * 16 + j] = (0x40 + k) as u8; }
+        }
+    }
+    set = bit(SIGPIPE);
+    let _ = svc4(NR_RT_SIGPROCMASK, SIG_BLOCK, &set as *const u64 as u64, 0, 8);
+    let fired_before = sig_fired();
+    let wrc2 = unsafe { svc3(NR_WRITE, 0, &byte as *const u8 as u64, 1) };
+    // Queued but blocked: the handler must NOT have run yet, or the sentinel
+    // was never at risk and L40 would prove nothing.
+    leg!(rep, wrc2 < 0 && sig_fired() == fired_before, b"L155\n");
+
+    unsafe {
+        let sp = &raw const FP_SENT as *const u8;
+        let dp = &raw mut FP_SEEN as *mut u8;
+        core::arch::asm!(
+            "ldp q0,  q1,  [{s}, #0]",   "ldp q2,  q3,  [{s}, #32]",
+            "ldp q4,  q5,  [{s}, #64]",  "ldp q6,  q7,  [{s}, #96]",
+            "ldp q8,  q9,  [{s}, #128]", "ldp q10, q11, [{s}, #160]",
+            "ldp q12, q13, [{s}, #192]", "ldp q14, q15, [{s}, #224]",
+            "ldp q16, q17, [{s}, #256]", "ldp q18, q19, [{s}, #288]",
+            "ldp q20, q21, [{s}, #320]", "ldp q22, q23, [{s}, #352]",
+            "ldp q24, q25, [{s}, #384]", "ldp q26, q27, [{s}, #416]",
+            "ldp q28, q29, [{s}, #448]", "ldp q30, q31, [{s}, #480]",
+            "svc #0",                    // handler delivered at this eret edge
+            "stp q0,  q1,  [{d}, #0]",   "stp q2,  q3,  [{d}, #32]",
+            "stp q4,  q5,  [{d}, #64]",  "stp q6,  q7,  [{d}, #96]",
+            "stp q8,  q9,  [{d}, #128]", "stp q10, q11, [{d}, #160]",
+            "stp q12, q13, [{d}, #192]", "stp q14, q15, [{d}, #224]",
+            "stp q16, q17, [{d}, #256]", "stp q18, q19, [{d}, #288]",
+            "stp q20, q21, [{d}, #320]", "stp q22, q23, [{d}, #352]",
+            "stp q24, q25, [{d}, #384]", "stp q26, q27, [{d}, #416]",
+            "stp q28, q29, [{d}, #448]", "stp q30, q31, [{d}, #480]",
+            s = in(reg) sp,
+            d = in(reg) dp,
+            in("x8") NR_RT_SIGPROCMASK,
+            inout("x0") SIG_UNBLOCK => _,
+            in("x1") &set as *const u64 as u64,
+            inout("x2") 0u64 => _,
+            inout("x3") 8u64 => _,
+            out("v0") _,  out("v1") _,  out("v2") _,  out("v3") _,
+            out("v4") _,  out("v5") _,  out("v6") _,  out("v7") _,
+            out("v8") _,  out("v9") _,  out("v10") _, out("v11") _,
+            out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            out("v20") _, out("v21") _, out("v22") _, out("v23") _,
+            out("v24") _, out("v25") _, out("v26") _, out("v27") _,
+            out("v28") _, out("v29") _, out("v30") _, out("v31") _,
+        );
+    }
+
+    // The handler ran (so the registers really were exposed to it) ...
+    leg!(rep, sig_fired() == fired_before + 1, b"L156\n");
+    // ... and every V register came back exactly as it went in.
+    leg!(
+        rep,
+        unsafe { (0..512).all(|i| FP_SEEN[i] == FP_SENT[i]) },
+        b"L157\n"
+    );
 
     // --- V-5a: sockets -----------------------------------------------------
     // The container's manifest grants /net, so these run against the LIVE netd

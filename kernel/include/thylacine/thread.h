@@ -462,9 +462,43 @@ struct Thread {
     u64                nmigrations;
     u16                last_cpu;
     u16                _pad_prowl3[3];
+
+    // Task #96: the FP/SIMD half of the note-delivery context save.
+    //
+    // `note_saved_regs` above preserves x0-x30/sp/elr/spsr across a handler;
+    // this preserves V0-V31 + FPSR + FPCR. Both are needed for the same
+    // reason and neither is optional: a handler runs on THIS thread with no
+    // context switch, so cpu_switch_context's eager FP save (which covers a
+    // thread switched OUT) never fires, and the handler's first autovectorised
+    // memcpy or float operation silently corrupts the interrupted
+    // computation's registers.
+    //
+    // ctx.fp_v cannot serve here. It is the switch-out slot: if the handler
+    // is preempted, cpu_switch_context stores the HANDLER's FP state into it
+    // and the interrupted snapshot is gone.
+    //
+    // Inline rather than heap for the same reason the GP block is (see
+    // note_saved_* above): delivery must be alloc-free, because a kmalloc
+    // failure mid-delivery would silently drop the handler invocation.
+    // Costs 520 B/Thread; the dedicated "thread" kmem_cache goes from 3 to 2
+    // objects per 4 KiB slab, ~100 KiB total at v1.0 thread counts.
+    //
+    // _Alignas(16) is REQUIRED, not decorative: fp_save_area/fp_restore_area
+    // reach it with STP/LDP (SIMD&FP) pair instructions.
+    _Alignas(16) u8    note_saved_fp[FP_AREA_SIZE];
 };
 
-_Static_assert(sizeof(struct Thread) == 1232,
+_Static_assert(sizeof(struct Thread) == 1760,
+               "task #96 appended note_saved_fp[520] (_Alignas(16)) -- the "
+               "FP/SIMD half of the note-delivery context save: 1232 -> 1760 "
+               "(520 payload + 8 trailing pad to the struct's 16-byte "
+               "alignment). DELIBERATE and load-bearing: without it a note "
+               "handler's first autovectorised memcpy or float operation "
+               "silently corrupts the interrupted computation's V registers. "
+               "The dedicated `thread` kmem_cache drops from 3 to 2 objects "
+               "per 4 KiB slab (~100 KiB total at v1.0 thread counts) -- the "
+               "cost was weighed against a lazy/heap area and rejected "
+               "because delivery must stay alloc-free. "
                "prowl-3a appended the scheduler-introspection counters "
                "nsched + nsleeps + nmigrations (3 x u64) + last_cpu (u16) + "
                "pad at the tail: 1200 -> 1232 (READ-ONLY telemetry, the "

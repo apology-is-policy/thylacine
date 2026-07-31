@@ -101,6 +101,7 @@ void test_context_round_trip(void);
 void test_context_switch_irq_safe(void);
 void test_fp_cpacr_enabled(void);
 void test_fp_round_trip_v_regs_fpsr_fpcr(void);
+void test_fp_note_area_round_trip(void);
 void test_sched_dispatch_smoke(void);
 void test_sched_runnable_count(void);
 void test_sched_runnable_count_excludes_idle(void);
@@ -1381,6 +1382,7 @@ struct test_case g_tests[] = {
     { "fp.cpacr_enabled",              test_fp_cpacr_enabled,              false, NULL },
     { "fp.round_trip_v_regs_fpsr_fpcr",
                                        test_fp_round_trip_v_regs_fpsr_fpcr, false, NULL },
+    { "fp.note_area_round_trip",       test_fp_note_area_round_trip,       false, NULL },
     { "scheduler.dispatch_smoke",      test_sched_dispatch_smoke,          false, NULL },
     { "scheduler.runnable_count",      test_sched_runnable_count,          false, NULL },
     { "scheduler.runnable_count_excludes_idle",
