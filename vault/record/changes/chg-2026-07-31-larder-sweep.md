@@ -4,7 +4,7 @@ type: chg
 title: "The Larder sweep: the guest-FS-cache mechanism dossier + the full L1/B1/D44/term audit backfill"
 date: 2026-07-31
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["0afb10c2"]
 touched:
   - moc-kernel-ninep
   - sub-kernel-ninep-dev9p
