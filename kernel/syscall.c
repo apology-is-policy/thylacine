@@ -1107,21 +1107,33 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
 // kernel-attached no-direct-I/O guard moved with it into devsrv_write.
 static s64 spoor_write_common(struct Proc *p, hidx_t h, const u8 *kbuf,
                               u64 len, bool positioned, s64 off) {
+    // #100 (ER-3): the local rejects name their reason. `!p`/`!kbuf` stay a flat
+    // -1 per the ERRORS.md preamble-guard rule -- they are internal-invariant
+    // violations reachable only from a kernel caller (the EL0 handler always
+    // passes its own scratch buffer), not caller errors.
     if (!p || (!kbuf && len > 0))                    return -1;
-    if (positioned && off < 0)                       return -1;
+    if (positioned && off < 0)                       return -T_E_INVAL;
     // #844: c is a REF-HELD Spoor (the lookup transferred the ref); it keeps c
     // alive across the blocking dev->write even if a sibling closes the fd.
     // spoor_clunk on EVERY exit after the lookup.
     struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
-    if (!c)                                          return -1;
+    // The lookup folds three rejects into one NULL -- no such handle, wrong kobj
+    // kind, missing RIGHT_WRITE. All three are EBADF in POSIX terms (a write to
+    // a fd not open for writing is EBADF, not EACCES), so one code covers them.
+    if (!c)                                          return -T_E_BADF;
     // #81: a T_OPATH navigation handle is NOT a byte-I/O channel (it is born R|W
     // for create/walk-target use but perm_check-exempt at open). Reject every
     // write, including len 0, so it cannot serve content (IDENTITY-DESIGN 9.4 #81).
-    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
+    // Linux answers EBADF for read/write on an O_PATH descriptor; so do we.
+    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -T_E_BADF; }
+    // ESPIPE is the POSIX answer here, but T_E_SPIPE (29) is not in the errno
+    // registry and appending one is signoff-bearing (CLAUDE.md: ERRORS.md is
+    // ABI-bearing). Left at the flat -1 rather than answering a plausible-but-
+    // wrong EINVAL -- status quo, not a new wrongness. See #100's residual note.
     if (positioned && (!c->dev || !c->dev->seekable)) { spoor_clunk(c); return -1; }
     if (len == 0)                                  { spoor_clunk(c); return 0; }
-    if (!c->dev || !c->dev->write)                 { spoor_clunk(c); return -1; }
-    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -1; }
+    if (!c->dev || !c->dev->write)                 { spoor_clunk(c); return -T_E_INVAL; }
+    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -T_E_INVAL; }
     long n = c->dev->write(c, kbuf, (long)len, positioned ? off : c->offset);
     // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
     // returns -T_E_* for an ecode in 2..4095) instead of collapsing to -1.
@@ -1167,20 +1179,22 @@ s64 sys_pwrite_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len,
 // handle that once routed here was retired with SYS_SRV_CONNECT (stalk-3c).
 static s64 spoor_read_common(struct Proc *p, hidx_t h, u8 *kbuf, u64 len,
                              bool positioned, s64 off) {
+    // #100 (ER-3): see the spoor_write_common twin for the disposition of each
+    // reject, including why the non-seekable arm stays a flat -1.
     if (!p || (!kbuf && len > 0))                    return -1;
-    if (positioned && off < 0)                       return -1;
+    if (positioned && off < 0)                       return -T_E_INVAL;
     // #844: c is a REF-HELD Spoor; it stays alive across the blocking
     // dev->read even if a sibling closes the fd. spoor_clunk on EVERY exit.
     struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_READ);
-    if (!c)                                          return -1;
+    if (!c)                                          return -T_E_BADF;
     // #81: a T_OPATH navigation handle is NOT a byte-I/O channel -- reject every
     // read (the perm_check-exempt O_PATH open would otherwise be a read-bypass,
     // e.g. the 0400 /system.key via /bin/system.key). IDENTITY-DESIGN 9.4 #81.
-    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -1; }
+    if (c->flag & CWALKONLY)                       { spoor_clunk(c); return -T_E_BADF; }
     if (positioned && (!c->dev || !c->dev->seekable)) { spoor_clunk(c); return -1; }
     if (len == 0)                                  { spoor_clunk(c); return 0; }
-    if (!c->dev || !c->dev->read)                  { spoor_clunk(c); return -1; }
-    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -1; }
+    if (!c->dev || !c->dev->read)                  { spoor_clunk(c); return -T_E_INVAL; }
+    if (positioned && len > (u64)INT64_MAX - (u64)off) { spoor_clunk(c); return -T_E_INVAL; }
     long n = c->dev->read(c, kbuf, (long)len, positioned ? off : c->offset);
     // #3 (Area F errno-rollout): propagate a Dev's real -errno (dev9p now
     // returns -T_E_*) instead of collapsing to -1; clamp an out-of-window
@@ -1239,7 +1253,7 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -T_E_FAULT;   // #100
 
     // Weft zero-copy fast-path: a large write whose buffer points into a
     // weft-bound /net data fd's shared ring goes through the ring (no copy-in,
@@ -1256,13 +1270,15 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     if (len == 0) {
         // Validate the handle even for zero-length writes (POSIX
         // discipline: bad fd should return -EBADF regardless of len).
+        // #100 (ER-3): it now DOES -- this comment stated the intent while the
+        // code below returned the flat -1 that reads as EPERM to a Linux guest.
         // #844: the lookup transfers a Spoor ref; release it immediately
         // (validation only -- no I/O on a zero-length write).
         struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
-        if (!c0)                                     return -1;
+        if (!c0)                                     return -T_E_BADF;
         // #81 F1: the gate must cover the len==0 fast-path too (it short-circuits
         // before sys_write_for_proc) -- an O_PATH handle does NO byte I/O, incl. 0.
-        if (c0->flag & CWALKONLY)                  { spoor_clunk(c0); return -1; }
+        if (c0->flag & CWALKONLY)                  { spoor_clunk(c0); return -T_E_BADF; }
         spoor_clunk(c0);
         return 0;
     }
@@ -1328,7 +1344,7 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -T_E_FAULT;   // #100
 
     // Weft zero-copy fast-path (RX): a large read whose buffer points into a
     // weft-bound /net data fd's shared ring recvs through the ring (no copy-out,
@@ -1344,10 +1360,10 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
 
     if (len == 0) {
         struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
-        if (!c0)                                     return -1;   // #844: validate + release
+        if (!c0)                              return -T_E_BADF;   // #844: validate + release
         // #81 F1: the gate must cover the len==0 fast-path too (it short-circuits
         // before sys_read_for_proc) -- an O_PATH handle does NO byte I/O, incl. 0.
-        if (c0->flag & CWALKONLY)                  { spoor_clunk(c0); return -1; }
+        if (c0->flag & CWALKONLY)                  { spoor_clunk(c0); return -T_E_BADF; }
         spoor_clunk(c0);
         return 0;
     }
@@ -1473,7 +1489,11 @@ static s64 sys_close_handler(u64 hraw) {
     if (!t)                                          return -1;
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
-    return (s64)handle_close(p, (hidx_t)hraw);
+    // #100 (ER-3): handle_close's own -1 means "no such slot / not a live
+    // handle" -- EBADF, the only failure close(2) has. Mapped HERE rather than
+    // inside handle_close so the internal contract (and its ~20 kernel callers,
+    // which test == 0 or ignore the result) stays byte-unchanged.
+    return handle_close(p, (hidx_t)hraw) == 0 ? 0 : (s64)(-T_E_BADF);
 }
 
 // =============================================================================
@@ -1591,17 +1611,18 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     if (!p)                                          return -1;
 
     // Whence range check before any handle work — cheap reject of
-    // structurally invalid calls.
+    // structurally invalid calls. #100 (ER-3): EINVAL, POSIX's answer for an
+    // unrecognized whence.
     if (whence_raw != T_SEEK_SET &&
         whence_raw != T_SEEK_CUR &&
-        whence_raw != T_SEEK_END)                    return -1;
+        whence_raw != T_SEEK_END)                    return -T_E_INVAL;
 
     // No rights mask: lseek manipulates the per-Spoor cursor, not content.
     // #844: c is REF-HELD (sys_lookup_rw_handle kind-gates to KOBJ_SPOOR +
     // RIGHT 0); the ref keeps c alive across the SEEK_END dev->stat_native
     // (which may block). spoor_clunk on EVERY exit below.
     struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
-    if (!c)                                           return -1;
+    if (!c)                                           return -T_E_BADF;   // #100
 
     // Reject lseek on a non-seekable Dev (POSIX lseek(2) on a pipe -> ESPIPE).
     // RW-4 R2-F2: the old `dev->stat_native == NULL` heuristic broke when #957
@@ -1609,38 +1630,55 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     // regressing lseek to succeed on an offset their read/write ignore. The
     // explicit dev->seekable flag (devramfs + dev9p only) decouples fstat-ability
     // from seekability.
+    //
+    // #100 (ER-3) RESIDUAL: ESPIPE is what POSIX names, and it is precisely
+    // what this arm means -- but T_E_SPIPE (29) is not in the registry, and
+    // appending an errno is signoff-bearing (CLAUDE.md: ERRORS.md is ABI-bearing,
+    // updates require user signoff). Answering EINVAL instead would be the
+    // "differently wrong" trap #100's own analysis warns about, so this stays
+    // at the flat -1 until the append is approved. The three sibling sites are
+    // the positioned arms of spoor_{read,write}_common.
     if (!c->dev->seekable)                          { spoor_clunk(c); return -1; }
 
     s64 offset = (s64)offset_raw;
     s64 new_off;
 
+    // #100 (ER-3): every arm below rejects because the RESULTING OFFSET is
+    // unrepresentable or negative, which is exactly what POSIX lseek(2) names
+    // EINVAL for -- so unlike the ESPIPE arm above, there is a correct code
+    // available and no guessing involved. (EOVERFLOW would be the finer answer
+    // for the two pure-overflow guards, but T_E_OVERFLOW is not in the registry
+    // and the outcome is the same class: no valid offset exists.) The two
+    // stat-failure arms are EIO -- the size could not be determined.
     switch (whence_raw) {
     case T_SEEK_SET:
-        if (offset < 0)                             { spoor_clunk(c); return -1; }
+        if (offset < 0)                             { spoor_clunk(c); return -T_E_INVAL; }
         new_off = offset;
         break;
     case T_SEEK_CUR: {
         s64 cur = c->offset;
-        if (offset > 0 && cur > INT64_MAX - offset) { spoor_clunk(c); return -1; }
-        if (offset < 0 && cur < INT64_MIN - offset) { spoor_clunk(c); return -1; }
+        if (offset > 0 && cur > INT64_MAX - offset) { spoor_clunk(c); return -T_E_INVAL; }
+        if (offset < 0 && cur < INT64_MIN - offset) { spoor_clunk(c); return -T_E_INVAL; }
         new_off = cur + offset;
-        if (new_off < 0)                            { spoor_clunk(c); return -1; }
+        if (new_off < 0)                            { spoor_clunk(c); return -T_E_INVAL; }
         break;
     }
     case T_SEEK_END: {
         struct t_stat ks;
-        if (spoor_stat_native(c, &ks) != 0)         { spoor_clunk(c); return -1; }
+        if (spoor_stat_native(c, &ks) != 0)         { spoor_clunk(c); return -T_E_IO; }
         s64 size = (s64)ks.size;
-        if (size < 0)                               { spoor_clunk(c); return -1; }
-        if (offset > 0 && size > INT64_MAX - offset){ spoor_clunk(c); return -1; }
-        if (offset < 0 && size < INT64_MIN - offset){ spoor_clunk(c); return -1; }
+        if (size < 0)                               { spoor_clunk(c); return -T_E_IO; }
+        if (offset > 0 && size > INT64_MAX - offset){ spoor_clunk(c); return -T_E_INVAL; }
+        if (offset < 0 && size < INT64_MIN - offset){ spoor_clunk(c); return -T_E_INVAL; }
         new_off = size + offset;
-        if (new_off < 0)                            { spoor_clunk(c); return -1; }
+        if (new_off < 0)                            { spoor_clunk(c); return -T_E_INVAL; }
         break;
     }
     default:
+        // Unreachable: whence was range-checked above. Kept as a fail-closed
+        // backstop, and EINVAL for the same reason the range check is.
         spoor_clunk(c);
-        return -1;
+        return -T_E_INVAL;
     }
 
     c->offset = new_off;

@@ -36,6 +36,7 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
@@ -219,14 +220,17 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
         "consumer SLEEPING on full write");
 
     // Boot closes the read end. devpipe_close sets read_eof + wakes
-    // write_rendez. Consumer wakes; sees read_eof; returns -1 (EPIPE).
+    // write_rendez. Consumer wakes; sees read_eof; returns -T_E_PIPE.
     spoor_clunk(g_rd);
     TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
         "consumer wakes to RUNNABLE after close");
 
     sched();
-    TEST_EXPECT_EQ(g_consumer_result, -1L,
-        "consumer write returns -1 (EPIPE) after read end closed");
+    // #100 (ER-3): the value matters -- this is the BLOCKED writer's arm, so
+    // it proves the errno survives the wake path too, not just the immediate
+    // read_eof reject the non-blocking sibling covers.
+    TEST_EXPECT_EQ(g_consumer_result, (long)(-T_E_PIPE),
+        "consumer write returns -T_E_PIPE after read end closed");
 
     thread_free(consumer);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_wr);

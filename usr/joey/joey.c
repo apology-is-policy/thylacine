@@ -2927,6 +2927,93 @@ static int probe80_errno(void) {
     return bad ? -1 : 0;
 }
 
+// #100 (ER-3) always-run regression: the T1 byte-I/O syscalls report WHY.
+//
+// This probe exists because the kernel unit suite STRUCTURALLY CANNOT cover
+// these paths. sys_close_handler and sys_lseek_handler are static, take raw
+// user-register arguments, and are reachable only through the SVC dispatch --
+// so before #100 their error paths had NO test at all, and the kernel tests
+// that do exist call the *_for_proc inners, one layer below the handler. Only
+// an EL0 caller drives the real thing.
+//
+// Every value asserted here is kernel-ORIGINATED, so it is ours to pin exactly
+// (the probe80_errno convention). The flat -1 is what every one of these
+// returned pre-#100: EIO through pouch's __syscall_ret, and errno=1 = EPERM to
+// a stock-musl vivarium guest, which is the whole defect.
+//
+// Unlike the #84 family, no leg here is a permission denial, so joey holding
+// CAP_HOSTOWNER does not make the probe structurally incapable -- these are
+// fd-validity and argument-validity rejects, which no capability bypasses.
+// Boot-fatal.
+static int probe100_errno(void) {
+    char nb[24];
+    unsigned char b[8];
+    const long BADFD = 999999;   // far outside PROC_HANDLE_MAX
+
+    // A real, SEEKABLE fd for the argument legs. Self-contained -- it creates
+    // its own file rather than naming a baked path, for probe80's reason (it
+    // cannot go vacuous if the bake layout changes) and for one more: an
+    // earlier draft opened a path that exists later in the boot, and failed at
+    // its own setup. Seekability is load-bearing here: on a non-seekable Dev
+    // the offset leg would exit at the (still flat -1) ESPIPE arm without ever
+    // reaching the gate this probe is about.
+    static const char fn[] = "p100-errno-file";
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe100 open root FAILED\n"); return -1; }
+    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe100 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+
+    // Handle-validity rejects -> EBADF (-9).
+    long rc_close_bad = t_close(BADFD);
+    long rc_read_bad  = t_read(BADFD, b, sizeof(b));
+    long rc_write_bad = t_write(BADFD, b, sizeof(b));
+    long rc_seek_bad  = t_lseek(BADFD, 0, T_SEEK_SET);
+
+    // Argument-validity rejects on a GOOD fd -> EINVAL (-22). Using a live fd
+    // is what separates these from the EBADF legs: a bad-fd reject here would
+    // mean the whence/offset gate never ran.
+    long rc_whence    = t_lseek(fd, 0, 99);
+    long rc_negoff    = t_lseek(fd, -1, T_SEEK_SET);
+
+    (void)t_close(fd);
+    (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+    (void)t_close(pd);
+
+    int bad = 0;
+    if (rc_close_bad != -9)  bad = 1;
+    if (rc_read_bad  != -9)  bad = 1;
+    if (rc_write_bad != -9)  bad = 1;
+    if (rc_seek_bad  != -9)  bad = 1;
+    if (rc_whence    != -22) bad = 1;
+    if (rc_negoff    != -22) bad = 1;
+
+    t_putstr(bad ? "joey: probe100 FAILED" : "joey: probe100 OK");
+    t_putstr(" (close=");
+    t_putstr(itoa_dec(rc_close_bad, nb, sizeof(nb)));
+    t_putstr(" read=");
+    t_putstr(itoa_dec(rc_read_bad, nb, sizeof(nb)));
+    t_putstr(" write=");
+    t_putstr(itoa_dec(rc_write_bad, nb, sizeof(nb)));
+    t_putstr(" lseek-badfd=");
+    t_putstr(itoa_dec(rc_seek_bad, nb, sizeof(nb)));
+    t_putstr(" whence=");
+    t_putstr(itoa_dec(rc_whence, nb, sizeof(nb)));
+    t_putstr(" negoff=");
+    t_putstr(itoa_dec(rc_negoff, nb, sizeof(nb)));
+    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22])\n" : ")\n");
+    return bad ? -1 : 0;
+}
+
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
 // /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
@@ -4265,20 +4352,29 @@ int main(void) {
                 t_putstr("joey: probe #81 /system.key T_OPATH open FAILED\n");
                 return 1;
             }
+            // #100 (ER-3): these two legs used to assert `!= -1`. They now pin
+            // the exact code, -T_E_BADF (-9), which is kernel-ORIGINATED and so
+            // ours to state (the probe80_errno convention). That is strictly
+            // stronger: `!= -1` accepted ANY error, so it could not tell the
+            // #81 denial apart from an unrelated failure, and it would have gone
+            // green on a gate that denied for the wrong reason.
             unsigned char op_buf[16];
             long op_rd = t_read(op_fd, op_buf, sizeof(op_buf));
-            if (op_rd != -1) {
-                t_putstr("joey: #81 LEAK -- T_OPATH read of /system.key NOT denied (got ");
+            if (op_rd != -9) {
+                t_putstr("joey: #81 LEAK -- T_OPATH read of /system.key not denied with EBADF (got ");
                 t_putstr(itoa_dec(op_rd, buf, sizeof(buf)));
                 t_putstr(")\n");
                 (void)t_close(op_fd);
                 return 1;
             }
             // #81 F1 (the syscall-entry len==0 fast-path): a 0-length SYS_READ on
-            // an O_PATH handle must ALSO return -1 (the handler short-circuits
+            // an O_PATH handle must ALSO be denied (the handler short-circuits
             // before the gated inner sys_read_for_proc). Drives the real syscall.
-            if (t_read(op_fd, op_buf, 0) != -1) {
-                t_putstr("joey: #81 F1 -- zero-length T_OPATH read NOT denied at the syscall\n");
+            long op_rd0 = t_read(op_fd, op_buf, 0);
+            if (op_rd0 != -9) {
+                t_putstr("joey: #81 F1 -- zero-length T_OPATH read not denied with EBADF (got ");
+                t_putstr(itoa_dec(op_rd0, buf, sizeof(buf)));
+                t_putstr(")\n");
                 (void)t_close(op_fd);
                 return 1;
             }
@@ -4286,7 +4382,7 @@ int main(void) {
         }
         t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");
         t_putstr("joey: probe A-2a owner=system + SYS_WSTAT reject paths OK\n");
-        t_putstr("joey: probe #81 T_OPATH-read of /system.key DENIED (-1) OK\n");
+        t_putstr("joey: probe #81 T_OPATH-read of /system.key DENIED (EBADF) OK\n");
     }
     // #66: fd2path -- the namespace name a fd was reached by (Plan 9 fd2path).
     // Proves SYS_FD2PATH end-to-end on the REAL boot namespace: the "/" attach
@@ -6847,6 +6943,13 @@ int main(void) {
             // the unlink/rename verdict survives, and the kernel-originated
             // rejects are specific. Boot-fatal.
             if (probe80_errno() != 0)
+                return 1;
+
+            // #100 always-run regression: the T1 byte-I/O syscalls report WHY.
+            // The only coverage of sys_close_handler / sys_lseek_handler error
+            // paths anywhere -- they are unreachable from the kernel suite.
+            // Boot-fatal.
+            if (probe100_errno() != 0)
                 return 1;
 
             // #81 always-run regression: '.'/'..' out of a non-directory are

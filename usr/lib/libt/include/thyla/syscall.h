@@ -748,7 +748,10 @@ static inline long t_pipe(long *out_rd_fd, long *out_wr_fd) {
 }
 
 // t_read — read up to `len` bytes from `fd` into `buf`. Returns bytes
-// read (>0), 0 on EOF, -1 on error. Per-call cap is 128 KiB
+// read (>0), 0 on EOF, or a negative errno on error (#100/ER-3: the
+// local rejects are -T_E_BADF / -T_E_INVAL / -T_E_FAULT; a Dev error
+// carries the Dev's own code -- e.g. -T_E_PIPE on a closed pipe).
+// Test with `< 0`, never `== -1`. Per-call cap is 128 KiB
 // (kernel-side SYS_RW_MAX, CF-3 A; a single 9P RPC's payload is still
 // msize-clamped, so short reads stay normal); userspace loops.
 __attribute__((always_inline))
@@ -767,7 +770,8 @@ static inline long t_read(long fd, void *buf, size_t len) {
 }
 
 // t_write — write up to `len` bytes from `buf` to `fd`. Returns bytes
-// written (>=0), -1 on error.
+// written (>=0), or a negative errno on error (#100/ER-3; see t_read).
+// Test with `< 0`, never `== -1`.
 __attribute__((always_inline))
 static inline long t_write(long fd, const void *buf, size_t len) {
     register long x0 __asm__("x0") = fd;
@@ -1002,7 +1006,7 @@ static inline long t_tty_cont(long fd, long pgid) {
 // t_close — release the handle at `fd`. For KOBJ_SPOOR handles the
 // kernel's release path routes through spoor_clunk (sets pipe EOF +
 // wakes the other side per P5-pipe-blocking). Returns 0 on success,
-// -1 on invalid fd.
+// -T_E_BADF on an invalid fd (#100/ER-3).
 __attribute__((always_inline))
 static inline long t_close(long fd) {
     register long x0 __asm__("x0") = fd;
@@ -2100,8 +2104,11 @@ static inline long t_weft_map(long data_fd, unsigned long hint_va) {
 }
 
 // t_lseek — reposition the per-Spoor offset cursor on `fd`. Returns the
-// new offset (>= 0) on success, -1 on bad fd / bad whence / underflow /
-// overflow / SEEK_END on a Dev without native stat.
+// new offset (>= 0) on success, else a negative errno (#100/ER-3):
+// -T_E_BADF on a bad fd, -T_E_INVAL on a bad whence or an unrepresentable
+// resulting offset, -T_E_IO when SEEK_END cannot learn the size. The
+// non-seekable-Dev reject is still the flat -1 -- ESPIPE is what it means,
+// but T_E_SPIPE is not registered and the append is signoff-bearing.
 __attribute__((always_inline))
 static inline long t_lseek(long fd, long offset, long whence) {
     register long x0 __asm__("x0") = fd;

@@ -42,6 +42,7 @@
 #include "test.h"
 
 #include <thylacine/9p_session.h>
+#include <thylacine/errno.h>
 #include <thylacine/9p_spoor_transport.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
@@ -127,17 +128,20 @@ void test_pipe_read_on_empty_returns_zero(void) {
 void test_pipe_write_to_full_returns_zero(void) {
     // Renamed semantics under P5-pipe-blocking: write to full WOULD
     // sleep; to test the non-sleeping path we close the read end first,
-    // which sets read_eof so write returns -1 (EPIPE) immediately.
+    // which sets read_eof so write fails immediately.
     struct Spoor *rd = NULL, *wr = NULL;
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
 
     // Close read end first → read_eof = true.
     spoor_clunk(rd);
 
-    // Write returns -1 (EPIPE) regardless of buffer state.
+    // #100 (ER-3): -T_E_PIPE, regardless of buffer state. This assertion
+    // used to read `-1L` under the message "returns -1 (EPIPE)" -- the name
+    // stated the intent while the value pinned the defect, so the test
+    // passed for years on a pipe that could not produce EPIPE at all.
     u8 extra = 0xAB;
-    TEST_EXPECT_EQ(dev_write(wr, &extra, 1L), -1L,
-        "write with read_eof returns -1 (EPIPE)");
+    TEST_EXPECT_EQ(dev_write(wr, &extra, 1L), (long)(-T_E_PIPE),
+        "write with read_eof returns -T_E_PIPE");
 
     spoor_clunk(wr);
 }
@@ -218,8 +222,8 @@ void test_pipe_read_on_write_end_rejected(void) {
     dev_write(wr, payload, 4L);
 
     u8 got[8];
-    TEST_EXPECT_EQ(dev_read(wr, got, 8L), -1L,
-        "read on write end returns -1");
+    TEST_EXPECT_EQ(dev_read(wr, got, 8L), (long)(-T_E_BADF),
+        "read on write end returns -T_E_BADF");
 
     spoor_clunk(rd);
     spoor_clunk(wr);
@@ -230,8 +234,8 @@ void test_pipe_write_on_read_end_rejected(void) {
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
 
     u8 payload[4] = { 0xAA, 0xBB, 0xCC, 0xDD };
-    TEST_EXPECT_EQ(dev_write(rd, payload, 4L), -1L,
-        "write on read end returns -1");
+    TEST_EXPECT_EQ(dev_write(rd, payload, 4L), (long)(-T_E_BADF),
+        "write on read end returns -T_E_BADF");
 
     spoor_clunk(rd);
     spoor_clunk(wr);

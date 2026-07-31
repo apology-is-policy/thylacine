@@ -1217,6 +1217,7 @@ void test_sys_rw_write_then_read_round_trip(void);
 void test_sys_rw_rights_check(void);
 void test_sys_rw_zero_length_validates_fd(void);
 void test_sys_rw_read_after_close_returns_eof(void);
+void test_sys_rw_write_after_read_close_returns_epipe(void);
 void test_sys_prw_pipe_not_seekable(void);
 void test_sys_pread_devramfs_offset_and_cursor(void);
 void test_sys_prw_rights_and_walkonly(void);
@@ -2800,6 +2801,7 @@ struct test_case g_tests[] = {
     { "sys_rw.rights_check",                           test_sys_rw_rights_check,                           false, NULL },
     { "sys_rw.zero_length_validates_fd",               test_sys_rw_zero_length_validates_fd,               false, NULL },
     { "sys_rw.read_after_close_returns_eof",           test_sys_rw_read_after_close_returns_eof,           false, NULL },
+    { "sys_rw.write_after_read_close_returns_epipe",   test_sys_rw_write_after_read_close_returns_epipe,   false, NULL },
     { "sys_prw.pipe_not_seekable",                      test_sys_prw_pipe_not_seekable,                      false, NULL },
     { "sys_prw.pread_devramfs_offset_and_cursor",       test_sys_pread_devramfs_offset_and_cursor,           false, NULL },
     { "sys_prw.rights_and_walkonly",                    test_sys_prw_rights_and_walkonly,                    false, NULL },
