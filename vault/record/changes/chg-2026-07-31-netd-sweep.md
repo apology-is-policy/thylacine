@@ -4,7 +4,7 @@ type: chg
 title: "The netd sweep: the first userspace area — nic + server dossiers + the net/weft audit backfill"
 date: 2026-07-31
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["88d87812"]
 touched:
   - inv-i9
   - spec-net-poll
