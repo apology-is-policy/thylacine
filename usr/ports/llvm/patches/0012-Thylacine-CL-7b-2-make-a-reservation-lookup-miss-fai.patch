@@ -1,0 +1,213 @@
+From cb02a5b1927bb28aa5b22bcf8e8c1435d0df861e Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 31 Jul 2026 10:54:12 +0200
+Subject: [PATCH 12/14] Thylacine CL-7b-2: make a reservation-lookup miss fail
+ loudly, and trace it
+
+#118 presents as a SIGSEGV inside memcpy at address 0x2000, called from
+jitlink::BasicLayout::apply(). The faulting instruction is `stp x6, x7, [x0]`,
+a store, so the bad pointer is the destination -- Seg.WorkingMem, which is
+whatever this mapper's prepare() handed back. 0x2000 is not a plausible
+address; it is a page-aligned offset from approximately zero.
+
+writerFor() could produce exactly that and say nothing. It guarded its lookup
+with an assert, which a release build compiles out, and then did `R--` on an
+iterator that may be begin() -- undefined behaviour on a std::map. The result
+is not a crash at the mistake but a plausible-looking pointer computed from
+the tree's sentinel node, returned to a caller who stores through it and dies
+somewhere with nothing on the stack naming the mapper.
+
+The lookup had a second silent hole: upper_bound()-1 finds the greatest base
+<= Addr, which is weaker than "Addr is inside that reservation". An address
+past the end of the highest region lands on it just as readily. Both the
+prepare() path and initialize()'s open-coded copy of the same lookup are now
+containment-checked, span included.
+
+So: no UB on a miss, and a miss is reported rather than computed. prepare()
+has no error channel -- ORC's contract is that the address came from reserve()
+and must resolve -- so a miss there is a bug in this mapper and it now dies
+naming the address and every reservation held, instead of handing the caller
+a pointer. reserve() also refuses a success that left the out-parameter unset,
+which is the one other way a reservation based at zero could be minted.
+
+Whether #118 is a miss or a zero-based reservation is still unmeasured; the
+static reading says the structure is right, so the answer is in runtime state.
+A budgeted trace (16 lines, then silent) prints what reserve() got from the
+kernel and what each prepare() resolved to, which distinguishes the two
+without another round.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RXubKBEPsQ7gdi7N6wG5mK
+---
+ .../llvm/ExecutionEngine/Orc/MemoryMapper.h   |  5 +-
+ .../Orc/ThylacineMemoryMapper.cpp             | 91 ++++++++++++++++++-
+ 2 files changed, 89 insertions(+), 7 deletions(-)
+
+diff --git a/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h b/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h
+index 63f8ecf0b..9bb9ce8b9 100644
+--- a/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h
++++ b/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h
+@@ -177,8 +177,9 @@ private:
+     std::vector<ExecutorAddr> Allocations;
+   };
+ 
+-  /// Exec address -> writer address. Caller must hold Mutex.
+-  char *writerFor(ExecutorAddr Addr);
++  /// Exec address -> writer address, or null if [Addr, Addr+Span) is not
++  /// wholly inside a held reservation. Caller must hold Mutex.
++  char *writerFor(ExecutorAddr Addr, size_t Span = 0);
+ 
+   std::mutex Mutex;
+   /// Ordered, unlike InProcessMemoryMapper's DenseMap: prepare() has to find
+diff --git a/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+index 66c643aef..b05252726 100644
+--- a/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
++++ b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+@@ -41,12 +41,16 @@
+ #include "llvm/ADT/STLExtras.h"
+ #include "llvm/ExecutionEngine/Orc/Shared/AllocationActions.h"
+ #include "llvm/Support/Error.h"
++#include "llvm/Support/ErrorHandling.h"
+ #include "llvm/Support/Process.h"
++#include "llvm/Support/raw_ostream.h"
+ 
++#include <atomic>
+ #include <cassert>
+ #include <cstdint>
+ #include <cstring>
+ #include <future>
++#include <string>
+ 
+ namespace {
+ 
+@@ -94,6 +98,23 @@ long icacheSync(uint64_t VA, size_t Length) {
+ // worth naming: it is the difference between "this system cannot JIT" and
+ // "this process was not permitted to", and a caller that cannot tell them
+ // apart will misreport a capability problem as a broken port.
++// A bounded bring-up trace. This mapper sits between two layers that both
++// report badly: ORC's prepare() has no error channel, and a wrong writer
++// pointer surfaces as a fault inside memcpy, with nothing on the faulting
++// stack naming the mapper or saying whether reserve() or the lookup produced
++// it. A budget rather than a flag because the interesting calls are the first
++// few -- once one allocation maps correctly they all do, and an unbounded
++// trace would bury a shader compile in address bookkeeping.
++std::atomic<unsigned> TraceBudget{16};
++
++bool traceBudget() {
++  unsigned B = TraceBudget.load(std::memory_order_relaxed);
++  while (B != 0 && !TraceBudget.compare_exchange_weak(
++                       B, B - 1, std::memory_order_relaxed))
++    ;
++  return B != 0;
++}
++
+ llvm::Error jitError(const char *What, long RC) {
+   if (RC == -13)
+     return llvm::make_error<llvm::StringError>(
+@@ -127,6 +148,20 @@ void DualMapMemoryMapper::reserve(size_t NumBytes,
+   if (long RC = jitCreate(NumBytes, &R))
+     return OnReserved(jitError("SYS_JIT_CREATE", RC));
+ 
++  // Success with an unfilled out-parameter would be indistinguishable from a
++  // real region here, and would hand out a reservation based at zero -- every
++  // later prepare() then resolves to a small offset from null. Nothing in the
++  // ABI permits it, which is exactly why it is worth one branch to refuse
++  // rather than to discover downstream.
++  if (R.WriterVA == 0 || R.ExecVA == 0)
++    return OnReserved(make_error<StringError>(
++        "SYS_JIT_CREATE reported success but left the region unset",
++        inconvertibleErrorCode()));
++
++  if (traceBudget())
++    errs() << "[thyla-jit] reserve " << NumBytes << " -> exec "
++           << (void *)R.ExecVA << " writer " << (void *)R.WriterVA << "\n";
++
+   {
+     std::lock_guard<std::mutex> Lock(Mutex);
+     auto &Res = Reservations[ExecutorAddr(R.ExecVA)];
+@@ -140,21 +175,61 @@ void DualMapMemoryMapper::reserve(size_t NumBytes,
+   OnReserved(ExecutorAddrRange(ExecutorAddr(R.ExecVA), NumBytes));
+ }
+ 
+-char *DualMapMemoryMapper::writerFor(ExecutorAddr Addr) {
++char *DualMapMemoryMapper::writerFor(ExecutorAddr Addr, size_t Span) {
+   auto R = Reservations.upper_bound(Addr);
+-  assert(R != Reservations.begin() && "address is outside every reservation");
++  // An assert is not enough here, and the difference is not academic: a release
++  // build compiles it out, and `R--` on begin() is undefined behaviour on a map
++  // iterator. What that produced in practice was not a crash at the mistake but
++  // a plausible-looking pointer computed from the tree's sentinel, handed back
++  // to a caller that memcpy'd through it and died somewhere else entirely.
++  if (R == Reservations.begin())
++    return nullptr; // below every reservation, or none are held
+   R--;
++
++  // upper_bound()-1 finds the greatest base <= Addr, which is a weaker claim
++  // than "Addr is inside that reservation" -- an address past the end of the
++  // last region lands on it just as readily. Bound the hit, span included, or
++  // the miss is silent again one region further along.
++  ExecutorAddrDiff Off = Addr - R->first;
++  if (Off > R->second.Size || Span > R->second.Size - Off)
++    return nullptr;
++
+   // Same-offset-in-both-aliases is the kernel's contract, not an assumption:
+   // one Burrow, two views, so an instruction sits at the same displacement from
+   // each base. That is what lets a JIT compute branch targets in exec
+   // coordinates while storing the bytes through the writer.
+-  return reinterpret_cast<char *>(R->second.WriterBase) + (Addr - R->first);
++  return reinterpret_cast<char *>(R->second.WriterBase) + Off;
+ }
+ 
+ char *DualMapMemoryMapper::prepare(jitlink::LinkGraph &G, ExecutorAddr Addr,
+                                    size_t ContentSize) {
+   std::lock_guard<std::mutex> Lock(Mutex);
+-  return writerFor(Addr);
++  char *W = writerFor(Addr, ContentSize);
++
++  if (!W) {
++    // prepare() has no error channel -- ORC's contract is that the address came
++    // from reserve() and therefore must resolve, so a miss is a bug in this
++    // mapper rather than a runtime condition to report. Die naming it. The
++    // alternative is what happened before: return the miss as a pointer and let
++    // the caller fault inside memcpy, where nothing on the stack mentions the
++    // mapper and the address looks like an offset from zero.
++    std::string Msg;
++    raw_string_ostream OS(Msg);
++    OS << "DualMapMemoryMapper::prepare: " << (void *)Addr.getValue() << " + "
++       << ContentSize << " is inside no reservation (" << Reservations.size()
++       << " held";
++    for (const auto &KV : Reservations)
++      OS << "; exec " << (void *)KV.first.getValue() << " writer "
++         << (void *)KV.second.WriterBase << " size " << KV.second.Size;
++    OS << ")";
++    report_fatal_error(Twine(OS.str()));
++  }
++
++  if (traceBudget())
++    errs() << "[thyla-jit] prepare " << (void *)Addr.getValue() << " + "
++           << ContentSize << " -> writer " << (void *)W << "\n";
++
++  return W;
+ }
+ 
+ void DualMapMemoryMapper::initialize(MemoryMapper::AllocInfo &AI,
+@@ -171,9 +246,15 @@ void DualMapMemoryMapper::initialize(MemoryMapper::AllocInfo &AI,
+     auto R = Reservations.upper_bound(AI.MappingBase);
+     if (R == Reservations.begin())
+       return OnInitialized(make_error<StringError>(
+-          "DualMapMemoryMapper: allocation outside every reservation",
++          "DualMapMemoryMapper: allocation below every reservation",
+           inconvertibleErrorCode()));
+     R--;
++    // Containment, not just ordering -- see writerFor(). An address past the
++    // end of the highest reservation also lands on it.
++    if (AI.MappingBase - R->first >= R->second.Size)
++      return OnInitialized(make_error<StringError>(
++          "DualMapMemoryMapper: allocation outside every reservation",
++          inconvertibleErrorCode()));
+     WriterBase = R->second.WriterBase;
+     ExecBase = R->first;
+   }
+-- 
+2.43.0
+

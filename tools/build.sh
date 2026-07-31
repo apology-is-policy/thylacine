@@ -3146,10 +3146,17 @@ stage_clade() {
     # artifact is 142 MB unstripped against 68 MB stripped, so forgetting
     # silently doubles what the pool carries. Same shape as clang/clangd above,
     # and the same fall-back-to-copy if llvm-strip is absent.
+    # Absence is announced rather than silent, for the same reason clangd's is
+    # above: joey's gl_gate() skips when the binary is missing, so a GL half
+    # that quietly failed to arrive looks exactly like a boot that never had
+    # one -- green, and proving nothing. This line is where that difference
+    # becomes visible, and it is the only place that knows it.
     if [[ -f "$BUILD_DIR/clade/gl/osmesa-prove" ]]; then
         "$strip" -o "$stage/bin/osmesa-prove" "$BUILD_DIR/clade/gl/osmesa-prove" 2>/dev/null \
             || cp "$BUILD_DIR/clade/gl/osmesa-prove" "$stage/bin/osmesa-prove"
         chmod +x "$stage/bin/osmesa-prove"
+    else
+        echo "    clade stage: no osmesa-prove at $BUILD_DIR/clade/gl/ -- staging without it (CL-7b GL gate will skip)"
     fi
     # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
     mkdir -p "$stage/sysroot"

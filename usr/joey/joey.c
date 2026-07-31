@@ -2819,24 +2819,34 @@ static int clade_gate(void) {
     return 0;
 }
 
-// Clade CL-7b-1: llvmpipe on the device. Runs the OSMesa prover, which clears
+// Clade CL-7b-2: llvmpipe on the device. Runs the OSMesa prover, which clears
 // a buffer and rasterises a triangle -- a clear alone could be a memset fast
 // path that never reaches a shader, so only the triangle proves gallivm
 // compiled code and ORC executed it out of a dual-mapped code Burrow (I-42).
 //
-// NOT boot-fatal at CL-7b-1, deliberately. The prover cannot pass yet: CAP_JIT
-// is elevation-only, so a joey-spawned child does not hold it and
-// SYS_JIT_CREATE must refuse. What is being measured here is everything
-// underneath -- that a 68 MB static binary execs, that musl and Mesa come up,
-// and that the failure lands on the capability rather than somewhere earlier.
-// The prover prints its own I-42 probe line before touching GL precisely so
-// that distinction is legible. CL-7b-2 adds the clearance and makes this a
-// gate.
-static void gl_probe(void) {
+// BOOT-FATAL since CL-7b-2, when the prover first became able to pass. At
+// CL-7b-1 it could not: CAP_JIT is elevation-only, so a joey-spawned child
+// does not inherit it and SYS_JIT_CREATE had to refuse. The prover now walks
+// the corvus jit clearance itself, exactly as /bin/jit-prover does, and holds
+// the capability by the time it touches GL.
+//
+// A zero exit is a strong assertion, not a weak one -- the prover returns
+// non-zero for every station on the way: it cannot reach /srv/corvus, the
+// principal is not eligible for the jit level, the grant is not CAP_JIT, the
+// redeem fails, SYS_JIT_CREATE still refuses afterwards, context creation
+// returns NULL, or any of the rasterised pixels are wrong. So this gate does
+// not need to parse the child's output to know what it proved.
+//
+// What it deliberately does NOT do is fail when the binary is absent. That
+// configuration is real (a clade bake from a builder run predating CL-7a-2
+// stages fine without a GL half), and it is stage_clade's job to say so at
+// bake time -- which it now does, out loud, rather than dropping the file in
+// silence. A gate that also owned that decision would be guessing.
+static int gl_gate(void) {
     char nb[24];
     long p = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/osmesa-prove", 23, T_OPATH);
     if (p < 0) {
-        return;  // not baked -- normal boot, nothing to say
+        return 0;  // not baked -- normal boot, nothing to say
     }
     (void)t_close(p);
 
@@ -2852,6 +2862,11 @@ static void gl_probe(void) {
     t_putstr(" pages (");
     t_putstr(itoa_dec((long)(peak / 256u), nb, sizeof(nb)));
     t_putstr(" MiB)\n");
+    if (rc != 0) {
+        return 1;
+    }
+    t_putstr("joey: clade CL-7b GL gate: PASS\n");
+    return 0;
 }
 
 // Clade CL-5: the BUILD STORM. `make -jN` drives the device clang over a real
@@ -8094,8 +8109,12 @@ int main(void) {
         return 1;
     }
 
-    // CL-7b-1: llvmpipe. Reports, does not gate -- see gl_probe().
-    gl_probe();
+    // CL-7b-2: llvmpipe. Boot-fatal, like the two gates around it -- see
+    // gl_gate(). Skips silently when the GL half was not baked.
+    if (gl_gate() != 0) {
+        t_putstr("joey: clade CL-7b GL gate FAILED\n");
+        return 1;
+    }
 
     // CL-5: the build storm. Same gating (skips silently without /storm) and
     // the same boot-fatal posture -- an on-device build that stops completing

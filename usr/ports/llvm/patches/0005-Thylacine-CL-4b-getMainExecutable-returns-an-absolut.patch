@@ -1,7 +1,7 @@
 From ce5a1c519b93f50d7ba4cad1323fb9a25a8a4549 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Sat, 25 Jul 2026 06:50:49 +0200
-Subject: [PATCH 5/6] Thylacine CL-4b: getMainExecutable returns an absolute
+Subject: [PATCH 05/14] Thylacine CL-4b: getMainExecutable returns an absolute
  argv0 directly
 
 getprogpath routes through test_dir -> realpath(), which fails on Thylacine

@@ -1,0 +1,457 @@
+From ca850c6e1fb0e9af5863addb6207dec49864d959 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Thu, 30 Jul 2026 16:48:55 +0200
+Subject: [PATCH 07/14] Thylacine CL-7b: an ORC MemoryMapper over the I-42
+ dual-mapped code Burrow
+
+InProcessMemoryMapper cannot work on Thylacine, and not for a small reason.
+W^X is enforced at page-table granularity with no way to change a mapping's
+protections afterwards: there is no mprotect syscall at all, and mmap accepts a
+PROT argument only to ignore it. So the upstream shape -- reserve RW, write,
+raise to RX -- fails at its last step, and fails late: the reserve succeeds,
+the content lands, and only the protect call reports that nothing here will
+ever be executable.
+
+I-42 answers with two mappings instead of one mutable one. A code Burrow is one
+physical region with an RW writer alias and an RX exec alias at unrelated
+virtual addresses; no page is ever writable and executable, so W^X holds
+unchanged. Emission goes to the writer, execution to the exec alias, and
+SYS_ICACHE_SYNC publishes one to the other.
+
+This fits ORC exactly because ORC already draws the same line. prepare() hands
+back working memory that need not be the address code runs at -- SharedMemoryMapper
+exists because a JIT writing into another process writes at its own mapping of
+shared pages and links against the executor's. The two aliases are that same
+split with both halves in one address space, so this is SharedMemoryMapper's
+addressing over InProcessMemoryMapper's bookkeeping. The delta is four methods:
+reserve is SYS_JIT_CREATE, prepare adds the writer/exec displacement, initialize
+zero-fills through the writer and publishes instead of calling mprotect, and
+release is SYS_JIT_DESTROY (which names the WRITER alias -- the kernel remembers
+the pairing, so half a region cannot be released).
+
+Two things worth knowing for whoever touches this next. Upstream's initialize()
+memsets the zero-fill tail at the executor address; here that is the read-only
+alias, and it is the one place a faithful copy would fault rather than
+misbehave. And a segment asking for Write gets the exec alias's RX like every
+other, so JIT'd code writing to its own data section at runtime would fault --
+link-time writes are fine because JITLink routes all content through prepare().
+Recorded rather than rejected: failing initialize() on a Write group would
+refuse allocations that work, and the GOT and stubs llvmpipe emits are written
+only during linking.
+---
+ .../llvm/ExecutionEngine/Orc/MemoryMapper.h   |  64 ++++
+ llvm/lib/ExecutionEngine/Orc/CMakeLists.txt   |   1 +
+ .../Orc/ThylacineMemoryMapper.cpp             | 307 ++++++++++++++++++
+ 3 files changed, 372 insertions(+)
+ create mode 100644 llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+
+diff --git a/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h b/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h
+index 41c308926..63f8ecf0b 100644
+--- a/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h
++++ b/llvm/include/llvm/ExecutionEngine/Orc/MemoryMapper.h
+@@ -18,6 +18,7 @@
+ #include "llvm/Support/Compiler.h"
+ #include "llvm/Support/Process.h"
+ 
++#include <map>
+ #include <mutex>
+ 
+ namespace llvm {
+@@ -127,6 +128,69 @@ private:
+   size_t PageSize;
+ };
+ 
++#if defined(__thylacine__)
++
++/// Thylacine (Clade CL-7b): maps JIT memory onto an I-42 dual-mapped code
++/// Burrow -- one physical region with an RW writer alias and an RX exec alias.
++///
++/// Thylacine has no mprotect and its mmap ignores PROT, so InProcessMemoryMapper
++/// cannot raise a mapping to executable and this is the only mapper that works
++/// there. Reservations are keyed and handed out in EXEC-alias coordinates
++/// (relocations must resolve to where code is fetched); prepare() returns the
++/// matching writer-alias pointer, exactly as SharedMemoryMapper returns a local
++/// mapping of remote pages. See ThylacineMemoryMapper.cpp.
++///
++/// Requires the process to hold CAP_JIT; reserve() reports a distinguishable
++/// permission error if it does not.
++class LLVM_ABI DualMapMemoryMapper final : public MemoryMapper {
++public:
++  DualMapMemoryMapper(size_t PageSize);
++
++  static Expected<std::unique_ptr<DualMapMemoryMapper>> Create();
++
++  unsigned int getPageSize() override { return PageSize; }
++
++  void reserve(size_t NumBytes, OnReservedFunction OnReserved) override;
++
++  char *prepare(jitlink::LinkGraph &G, ExecutorAddr Addr,
++                size_t ContentSize) override;
++
++  void initialize(AllocInfo &AI, OnInitializedFunction OnInitialized) override;
++
++  void deinitialize(ArrayRef<ExecutorAddr> Allocations,
++                    OnDeinitializedFunction OnDeInitialized) override;
++
++  void release(ArrayRef<ExecutorAddr> Reservations,
++               OnReleasedFunction OnRelease) override;
++
++  ~DualMapMemoryMapper() override;
++
++private:
++  struct Allocation {
++    size_t Size;
++    std::vector<shared::WrapperFunctionCall> DeinitializationActions;
++  };
++
++  struct Reservation {
++    uint64_t WriterBase;
++    size_t Size;
++    std::vector<ExecutorAddr> Allocations;
++  };
++
++  /// Exec address -> writer address. Caller must hold Mutex.
++  char *writerFor(ExecutorAddr Addr);
++
++  std::mutex Mutex;
++  /// Ordered, unlike InProcessMemoryMapper's DenseMap: prepare() has to find
++  /// the reservation *containing* an address, not one keyed by it.
++  std::map<ExecutorAddr, Reservation> Reservations;
++  DenseMap<ExecutorAddr, Allocation> Allocations;
++
++  size_t PageSize;
++};
++
++#endif // __thylacine__
++
+ class LLVM_ABI SharedMemoryMapper final : public MemoryMapper {
+ public:
+   struct SymbolAddrs {
+diff --git a/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt b/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt
+index 8c78c0250..1cc69b357 100644
+--- a/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt
++++ b/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt
+@@ -44,6 +44,7 @@ add_llvm_component_library(LLVMOrcJIT
+   MachOPlatform.cpp
+   MapperJITLinkMemoryManager.cpp
+   MemoryMapper.cpp
++  ThylacineMemoryMapper.cpp
+   ELFNixPlatform.cpp
+   Mangling.cpp
+   ObjectLinkingLayer.cpp
+diff --git a/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+new file mode 100644
+index 000000000..66c643aef
+--- /dev/null
++++ b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+@@ -0,0 +1,307 @@
++//===- ThylacineMemoryMapper.cpp - JIT over a dual-mapped code Burrow -----===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// Thylacine (Clade CL-7b): an orc::MemoryMapper backed by the I-42 code
++// Burrow.
++//
++// InProcessMemoryMapper cannot work here, and not for a small reason.
++// Thylacine enforces W^X at page-table granularity with no way to change a
++// mapping's protections after the fact: there is no mprotect syscall at all,
++// and mmap accepts a PROT argument only to ignore it (every anonymous mapping
++// comes back RW). So the upstream shape -- reserve RW, write, then raise to RX
++// -- fails at its last step, and fails *late*: the reserve succeeds, the
++// content lands, and only the protect call reports that nothing here will ever
++// be executable.
++//
++// I-42 answers this with two mappings instead of one mutable one. A code
++// Burrow is a single physical region with a WRITER alias mapped RW and an EXEC
++// alias mapped RX, at unrelated virtual addresses; no page is ever writable and
++// executable, so W^X holds unchanged. Emission goes to the writer alias,
++// execution to the exec alias, and SYS_ICACHE_SYNC publishes one to the other.
++//
++// The reason this fits ORC so exactly is that ORC already draws the same line.
++// MemoryMapper::prepare() hands back *working memory* that need not be the
++// address the code will run at -- SharedMemoryMapper exists because a JIT
++// writing into another process writes at its own mapping of shared pages and
++// links against the executor's. Thylacine's two aliases are that same split
++// with both halves in one address space, so this mapper is essentially
++// SharedMemoryMapper's addressing over InProcessMemoryMapper's bookkeeping.
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/ExecutionEngine/Orc/MemoryMapper.h"
++
++#if defined(__thylacine__)
++
++#include "llvm/ADT/STLExtras.h"
++#include "llvm/ExecutionEngine/Orc/Shared/AllocationActions.h"
++#include "llvm/Support/Error.h"
++#include "llvm/Support/Process.h"
++
++#include <cassert>
++#include <cstdint>
++#include <cstring>
++#include <future>
++
++namespace {
++
++// The I-42 syscall trio (kernel/include/thylacine/syscall.h). Issued as inline
++// SVC rather than through libc: musl has no wrapper for a Thylacine-private
++// number, and routing them through syscall(3) would put this file at the mercy
++// of the pouch seam's number mapping. The numbers are ABI.
++enum : long {
++  SYS_JIT_CREATE = 101,
++  SYS_JIT_DESTROY = 102,
++  SYS_ICACHE_SYNC = 103,
++};
++
++// struct t_jit_region -- the SYS_JIT_CREATE out-parameter. Layout is pinned by
++// _Static_assert on the kernel side; mirrored here.
++struct JitRegion {
++  uint64_t WriterVA;
++  uint64_t ExecVA;
++};
++
++long jitCreate(size_t Length, JitRegion *Out) {
++  register long x0 __asm__("x0") = (long)Length;
++  register long x1 __asm__("x1") = (long)(uintptr_t)Out;
++  register long x8 __asm__("x8") = SYS_JIT_CREATE;
++  __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
++  return x0;
++}
++
++long jitDestroy(uint64_t WriterVA) {
++  register long x0 __asm__("x0") = (long)WriterVA;
++  register long x8 __asm__("x8") = SYS_JIT_DESTROY;
++  __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory", "cc");
++  return x0;
++}
++
++long icacheSync(uint64_t VA, size_t Length) {
++  register long x0 __asm__("x0") = (long)VA;
++  register long x1 __asm__("x1") = (long)Length;
++  register long x8 __asm__("x8") = SYS_ICACHE_SYNC;
++  __asm__ volatile("svc #0" : "+r"(x0) : "r"(x1), "r"(x8) : "memory", "cc");
++  return x0;
++}
++
++// Thylacine returns -errno in x0. -13 (EACCES) is the CAP_JIT denial and is
++// worth naming: it is the difference between "this system cannot JIT" and
++// "this process was not permitted to", and a caller that cannot tell them
++// apart will misreport a capability problem as a broken port.
++llvm::Error jitError(const char *What, long RC) {
++  if (RC == -13)
++    return llvm::make_error<llvm::StringError>(
++        llvm::Twine(What) + ": permission denied (no CAP_JIT). A Thylacine "
++                            "process must hold the JIT capability before it "
++                            "can create executable memory.",
++        llvm::inconvertibleErrorCode());
++  return llvm::make_error<llvm::StringError>(
++      llvm::Twine(What) + " failed, rc=" + llvm::Twine(RC),
++      llvm::inconvertibleErrorCode());
++}
++
++} // namespace
++
++namespace llvm {
++namespace orc {
++
++DualMapMemoryMapper::DualMapMemoryMapper(size_t PageSize)
++    : PageSize(PageSize) {}
++
++Expected<std::unique_ptr<DualMapMemoryMapper>> DualMapMemoryMapper::Create() {
++  auto PageSize = sys::Process::getPageSize();
++  if (!PageSize)
++    return PageSize.takeError();
++  return std::make_unique<DualMapMemoryMapper>(*PageSize);
++}
++
++void DualMapMemoryMapper::reserve(size_t NumBytes,
++                                  OnReservedFunction OnReserved) {
++  JitRegion R = {0, 0};
++  if (long RC = jitCreate(NumBytes, &R))
++    return OnReserved(jitError("SYS_JIT_CREATE", RC));
++
++  {
++    std::lock_guard<std::mutex> Lock(Mutex);
++    auto &Res = Reservations[ExecutorAddr(R.ExecVA)];
++    Res.WriterBase = R.WriterVA;
++    Res.Size = NumBytes;
++  }
++
++  // The reservation is handed out in EXEC-alias coordinates: that is where the
++  // code will be fetched from, so that is the address space relocations must be
++  // resolved in. The writer alias never appears in a LinkGraph.
++  OnReserved(ExecutorAddrRange(ExecutorAddr(R.ExecVA), NumBytes));
++}
++
++char *DualMapMemoryMapper::writerFor(ExecutorAddr Addr) {
++  auto R = Reservations.upper_bound(Addr);
++  assert(R != Reservations.begin() && "address is outside every reservation");
++  R--;
++  // Same-offset-in-both-aliases is the kernel's contract, not an assumption:
++  // one Burrow, two views, so an instruction sits at the same displacement from
++  // each base. That is what lets a JIT compute branch targets in exec
++  // coordinates while storing the bytes through the writer.
++  return reinterpret_cast<char *>(R->second.WriterBase) + (Addr - R->first);
++}
++
++char *DualMapMemoryMapper::prepare(jitlink::LinkGraph &G, ExecutorAddr Addr,
++                                   size_t ContentSize) {
++  std::lock_guard<std::mutex> Lock(Mutex);
++  return writerFor(Addr);
++}
++
++void DualMapMemoryMapper::initialize(MemoryMapper::AllocInfo &AI,
++                                     OnInitializedFunction OnInitialized) {
++  ExecutorAddr MinAddr(~0ULL);
++  ExecutorAddr MaxAddr(0);
++
++  // Resolve the reservation once. initialize() has an error channel, unlike
++  // prepare(), so an unreserved MappingBase is reported rather than asserted.
++  uint64_t WriterBase = 0;
++  ExecutorAddr ExecBase;
++  {
++    std::lock_guard<std::mutex> Lock(Mutex);
++    auto R = Reservations.upper_bound(AI.MappingBase);
++    if (R == Reservations.begin())
++      return OnInitialized(make_error<StringError>(
++          "DualMapMemoryMapper: allocation outside every reservation",
++          inconvertibleErrorCode()));
++    R--;
++    WriterBase = R->second.WriterBase;
++    ExecBase = R->first;
++  }
++  auto WriterFor = [&](ExecutorAddr A) {
++    return reinterpret_cast<char *>(WriterBase) + (A - ExecBase);
++  };
++
++  for (auto &Segment : AI.Segments) {
++    auto Base = AI.MappingBase + Segment.Offset;
++    auto Size = Segment.ContentSize + Segment.ZeroFillSize;
++
++    if (Base < MinAddr)
++      MinAddr = Base;
++    if (Base + Size > MaxAddr)
++      MaxAddr = Base + Size;
++
++    // Zero-fill through the WRITER alias. Upstream memsets at Base, which is an
++    // exec-alias address here and therefore read-only -- the one place a
++    // faithful copy of InProcessMemoryMapper would fault instead of misbehave.
++    std::memset(WriterFor(Base + Segment.ContentSize), 0, Segment.ZeroFillSize);
++
++    // No protection call, and none possible: both aliases were fixed at create.
++    // A segment asking for Write gets the exec alias's RX like every other, so
++    // JIT'd code that writes to its own data section at RUNTIME would fault.
++    // Link-time writes are unaffected -- JITLink routes all content through
++    // prepare(), i.e. the writer alias -- which covers the GOT and stubs, the
++    // only writable groups llvmpipe is known to emit. Recorded rather than
++    // rejected: failing initialize() on a Write group would refuse allocations
++    // that work.
++    if ((Segment.AG.getMemProt() & MemProt::Exec) == MemProt::Exec) {
++      // Publish: clean-to-PoU + I-cache invalidate, so a fetch through the exec
++      // alias sees what the writer alias stored. Data-only segments need none
++      // -- ARMv8 data caches are PIPT, so a load through either alias of the
++      // same physical page is already coherent; it is only the instruction
++      // fetch path that has to be told.
++      if (long RC = icacheSync(Base.getValue(), Size))
++        return OnInitialized(jitError("SYS_ICACHE_SYNC", RC));
++    }
++  }
++
++  auto DeinitializeActions = shared::runFinalizeActions(AI.Actions);
++  if (!DeinitializeActions)
++    return OnInitialized(DeinitializeActions.takeError());
++
++  {
++    std::lock_guard<std::mutex> Lock(Mutex);
++    auto &Alloc = Allocations[MinAddr];
++    Alloc.Size = MaxAddr - MinAddr;
++    Alloc.DeinitializationActions = std::move(*DeinitializeActions);
++    Reservations[AI.MappingBase].Allocations.push_back(MinAddr);
++  }
++
++  OnInitialized(MinAddr);
++}
++
++void DualMapMemoryMapper::deinitialize(
++    ArrayRef<ExecutorAddr> Bases,
++    MemoryMapper::OnDeinitializedFunction OnDeinitialized) {
++  Error AllErr = Error::success();
++
++  {
++    std::lock_guard<std::mutex> Lock(Mutex);
++    for (auto Base : llvm::reverse(Bases)) {
++      if (Error Err = shared::runDeallocActions(
++              Allocations[Base].DeinitializationActions))
++        AllErr = joinErrors(std::move(AllErr), std::move(Err));
++      // Upstream resets protections to RW here so the range can be reused.
++      // Nothing to reset: the aliases have carried fixed permissions since
++      // create, and reuse writes through the writer alias exactly as the first
++      // use did.
++      Allocations.erase(Base);
++    }
++  }
++
++  OnDeinitialized(std::move(AllErr));
++}
++
++void DualMapMemoryMapper::release(ArrayRef<ExecutorAddr> Bases,
++                                  OnReleasedFunction OnReleased) {
++  Error Err = Error::success();
++
++  for (auto Base : Bases) {
++    std::vector<ExecutorAddr> AllocAddrs;
++    uint64_t WriterBase = 0;
++    {
++      std::lock_guard<std::mutex> Lock(Mutex);
++      auto It = Reservations.find(Base);
++      if (It == Reservations.end())
++        continue;
++      WriterBase = It->second.WriterBase;
++      AllocAddrs.swap(It->second.Allocations);
++    }
++
++    std::promise<MSVCPError> P;
++    auto F = P.get_future();
++    deinitialize(AllocAddrs, [&](Error Err) { P.set_value(std::move(Err)); });
++    if (Error E = F.get())
++      Err = joinErrors(std::move(Err), std::move(E));
++
++    // Destroy names the WRITER alias, not the exec alias the reservation is
++    // keyed by. The kernel remembers the pairing and tears down both, which is
++    // why there is no way to release half a region.
++    if (long RC = jitDestroy(WriterBase))
++      Err = joinErrors(std::move(Err), jitError("SYS_JIT_DESTROY", RC));
++
++    std::lock_guard<std::mutex> Lock(Mutex);
++    Reservations.erase(Base);
++  }
++
++  OnReleased(std::move(Err));
++}
++
++DualMapMemoryMapper::~DualMapMemoryMapper() {
++  std::vector<ExecutorAddr> ReservationAddrs;
++  {
++    std::lock_guard<std::mutex> Lock(Mutex);
++    ReservationAddrs.reserve(Reservations.size());
++    for (const auto &R : Reservations)
++      ReservationAddrs.push_back(R.first);
++  }
++
++  std::promise<MSVCPError> P;
++  auto F = P.get_future();
++  release(ReservationAddrs, [&](Error Err) { P.set_value(std::move(Err)); });
++  cantFail(F.get());
++}
++
++} // namespace orc
++} // namespace llvm
++
++#endif // __thylacine__
+-- 
+2.43.0
+

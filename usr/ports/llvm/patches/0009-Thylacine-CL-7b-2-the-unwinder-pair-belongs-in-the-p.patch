@@ -1,0 +1,96 @@
+From 15be8d9854b2ed5341c2d23d3cf8288f6fbd6aae Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 31 Jul 2026 07:32:57 +0200
+Subject: [PATCH 09/14] Thylacine CL-7b-2: the unwinder pair belongs in the
+ process-symbols table
+
+The device run got past the dlopen and straight into the next thing the JIT
+asks the process for:
+
+    JIT session error: could not register eh-frame:
+      __register_frame function not found
+    Failed to materialize symbols: { (jit_size_function_0, { size }) }
+
+ORC's EH-frame registration resolves __register_frame/__deregister_frame
+THROUGH the process-symbols JITDylib rather than linking them, so their
+absence is not a link error -- it is a run-time failure that takes every
+materialization with it. The table had a libc/libm category and simply
+lacked an unwinder category; libunwind.a supplies both symbols as T.
+
+Declared the way llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp
+declares them. libunwind spells the parameter `const void *` and these have C
+linkage, so a wrong signature here would link silently instead of failing the
+build -- which is the reason the declaration is copied from a known-good
+source in this tree rather than written from memory.
+
+Also corrects an overclaim in the table's own comment. The self-checking
+property is real but narrower than it said: an absent name fails to compile,
+and a cast to a signature the named function does not have fails to compile,
+but binding a name to a DIFFERENT function of compatible type does not --
+<cmath> supplies a real float sin(float) overload, so Add("sinf", &::sin)
+cast to float(float) compiles. Both halves measured on the host toolchain
+rather than argued.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RXubKBEPsQ7gdi7N6wG5mK
+---
+ .../Orc/ThylacineProcessSymbols.cpp           | 29 +++++++++++++++++--
+ 1 file changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp b/llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp
+index 89c620ad5..ec41562b7 100644
+--- a/llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp
++++ b/llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp
+@@ -56,6 +56,17 @@
+ #include <cmath>
+ #include <cstring>
+ 
++// The unwinder pair, declared exactly as llvm/lib/ExecutionEngine/RuntimeDyld/
++// RTDyldMemoryManager.cpp declares them. libunwind spells the parameter
++// `const void *`; the two are ABI-identical for a pointer, and matching LLVM's
++// own declaration inside an LLVM file is the honest precedent.
++//
++// These have C linkage, so unlike every entry below them a WRONG signature here
++// would link silently rather than fail the build -- which is exactly why the
++// declaration is copied from a known-good source instead of written from memory.
++extern "C" void __register_frame(void *);
++extern "C" void __deregister_frame(void *);
++
+ namespace llvm {
+ namespace orc {
+ 
+@@ -71,8 +82,13 @@ Expected<JITDylibSP> thylacineProcessSymbolsSetup(LLJIT &J) {
+   };
+ 
+   // Every entry takes the address of the real library function, which is what
+-  // makes this list self-checking: a name this sysroot does not provide will
+-  // not compile.
++  // makes this list self-checking -- but be precise about how far that goes.
++  // It catches a name this sysroot does not provide, and a cast to a signature
++  // the named function does not have. It does NOT catch binding one name to a
++  // different function of compatible type: <cmath> supplies a real
++  // `float sin(float)` overload, so writing Add("sinf", &::sin) cast to
++  // float(float) compiles happily. Both halves of that were measured, not
++  // assumed.
+   //
+   // The signature in each macro is load-bearing, not decoration. <cmath>
+   // injects C++ overloads of the double-named functions into the global
+@@ -85,6 +101,15 @@ Expected<JITDylibSP> thylacineProcessSymbolsSetup(LLJIT &J) {
+ #define THYLA_D1(f) Add(#f, reinterpret_cast<void *>(static_cast<double (*)(double)>(&::f)))
+ #define THYLA_D2(f) Add(#f, reinterpret_cast<void *>(static_cast<double (*)(double, double)>(&::f)))
+ 
++  // The unwinder. ORC's EH-frame registration resolves these THROUGH this
++  // JITDylib rather than linking them, so their absence is not a link error --
++  // it is a run-time "could not register eh-frame: __register_frame function
++  // not found", and every materialization that follows fails with it. Measured
++  // on-device: that is exactly the next thing the JIT asked for once the dlopen
++  // was out of the way, and libunwind.a supplies both.
++  Add("__register_frame", reinterpret_cast<void *>(&::__register_frame));
++  Add("__deregister_frame", reinterpret_cast<void *>(&::__deregister_frame));
++
+   // Emitted by the backend for aggregate copies and initialisation, not by
+   // anything in the IR the JIT client wrote. No overload set, so no cast.
+   Add("memcpy", reinterpret_cast<void *>(&::memcpy));
+-- 
+2.43.0
+

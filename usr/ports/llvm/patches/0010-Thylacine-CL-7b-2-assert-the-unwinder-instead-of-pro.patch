@@ -1,0 +1,118 @@
+From ee6d8c65911e80b501d0f92b820d519ba5c03643 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 31 Jul 2026 07:41:46 +0200
+Subject: [PATCH 10/14] Thylacine CL-7b-2: assert the unwinder instead of
+ probing for it
+
+Adding __register_frame to the process-symbols table did not fix the device
+failure, and finding out why corrected the mechanism: that lookup never goes
+through the JITDylib at all.
+
+config-ix.cmake settles HAVE_(DE)REGISTER_FRAME with check_symbol_exists,
+which compiles AND LINKS a probe program. The aarch64-thylacine cross
+configure has no libunwind on its link line, so the probe fails and LLVM
+concludes the platform has no unwinder. Both consumers then take their #else
+arm and resolve __register_frame through
+DynamicLibrary::SearchForAddressOfSymbol -- a lookup that a statically linked
+binary with no loader can never satisfy, no matter what the binary defines.
+The error message only exists in that arm, so seeing it on-device is itself
+proof the defines were absent.
+
+The probe's ANSWER is wrong, not its question: libunwind.a supplies both
+symbols and every Thylacine binary reaching this code links the C++ runtime
+that carries them (llvm-nm on the built osmesa-prove: both defined T). So
+assert it.
+
+Asserting in the two source files rather than in the CMake cache is
+deliberate. config.h is included nearly everywhere, so answering it there
+regenerates the header and rebuilds the whole cross tree for a fact that two
+translation units consume. Keeping it beside the code that depends on it also
+survives a build configured some other way. The #ifndef guards mean a future
+toolchain whose probe succeeds simply wins. If the assertion ever becomes
+untrue the result is a loud undefined-symbol link error, not a silent
+runtime fallback -- the failure mode moves from invisible to unmissable.
+
+RTDyldMemoryManager.cpp is not on the CL-7 path (gallivm reaches ORC/JITLink)
+but carries the identical defect, so it gets the identical fix. A latent bug
+is still a bug.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RXubKBEPsQ7gdi7N6wG5mK
+---
+ .../Orc/TargetProcess/RegisterEHFrames.cpp    | 29 +++++++++++++++++++
+ .../RuntimeDyld/RTDyldMemoryManager.cpp       | 19 ++++++++++++
+ 2 files changed, 48 insertions(+)
+
+diff --git a/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp b/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp
+index 1856181e3..d539bfdb2 100644
+--- a/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp
++++ b/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp
+@@ -13,6 +13,35 @@
+ #include "llvm/Support/DynamicLibrary.h"
+ #include "llvm/Support/raw_ostream.h"
+ 
++// Thylacine (CL-7b-2): assert the unwinder rather than probing for it.
++//
++// config-ix.cmake settles HAVE_(DE)REGISTER_FRAME with check_symbol_exists,
++// which COMPILES AND LINKS a probe. A cross configure for aarch64-thylacine has
++// no libunwind on its link line, so the probe fails and LLVM concludes the
++// platform has no unwinder -- taking the fallback arm below, which resolves
++// __register_frame through DynamicLibrary::SearchForAddressOfSymbol. Thylacine
++// binaries are statically linked and there is no loader, so that lookup can
++// NEVER succeed: measured on-device as "could not register eh-frame:
++// __register_frame function not found", with every JIT materialization failing
++// behind it, so llvmpipe could not compile a single shader.
++//
++// The probe's answer is wrong, not its question. libunwind.a supplies both
++// symbols, and every Thylacine binary that reaches this code links the C++
++// runtime that carries them (verified with llvm-nm on the built osmesa-prove:
++// both defined T). Asserting it here rather than in the CMake cache keeps the
++// fact next to the code that depends on it, costs one translation unit to
++// rebuild instead of regenerating config.h, and cannot be lost by a build that
++// configures LLVM some other way. If it ever becomes untrue the result is a
++// loud undefined-symbol link error, not a silent runtime fallback.
++#if defined(__thylacine__)
++#ifndef HAVE_REGISTER_FRAME
++#define HAVE_REGISTER_FRAME 1
++#endif
++#ifndef HAVE_DEREGISTER_FRAME
++#define HAVE_DEREGISTER_FRAME 1
++#endif
++#endif // __thylacine__
++
+ #define DEBUG_TYPE "orc"
+ 
+ using namespace llvm;
+diff --git a/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp b/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp
+index 10160ddbf..0b534a657 100644
+--- a/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp
++++ b/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp
+@@ -25,6 +25,25 @@
+ #include <unistd.h>
+ #endif
+ 
++// Thylacine (CL-7b-2): the same assertion as
++// lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp -- see the long
++// comment there for why config-ix.cmake's check_symbol_exists probe answers
++// wrongly on a cross build, and why a SearchForAddressOfSymbol fallback can
++// never work on a statically linked system with no loader.
++//
++// Mesa's gallivm reaches the ORC/JITLink path, not this one, so this file is
++// not on the CL-7 critical path. It carries the identical defect, though, and a
++// latent one is still one -- anything that does take the RTDyld path would fail
++// the same way for the same reason.
++#if defined(__thylacine__)
++#ifndef HAVE_REGISTER_FRAME
++#define HAVE_REGISTER_FRAME 1
++#endif
++#ifndef HAVE_DEREGISTER_FRAME
++#define HAVE_DEREGISTER_FRAME 1
++#endif
++#endif // __thylacine__
++
+ namespace llvm {
+ 
+ RTDyldMemoryManager::~RTDyldMemoryManager() = default;
+-- 
+2.43.0
+

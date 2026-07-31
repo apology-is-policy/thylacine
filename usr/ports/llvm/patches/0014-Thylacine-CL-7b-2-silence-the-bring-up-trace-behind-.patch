@@ -1,0 +1,76 @@
+From 251b5b5dc9d8c7fe6f262a22b9c40f495332a8ac Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 31 Jul 2026 11:43:59 +0200
+Subject: [PATCH 14/14] Thylacine CL-7b-2: silence the bring-up trace behind
+ THYLA_JIT_TRACE
+
+The mapper's two trace lines printed on every boot once llvmpipe started
+working, which is fifteen lines of address bookkeeping in front of a shader
+compile that has nothing to say. Gate them on THYLA_JIT_TRACE rather than
+delete them: they are what named #118 after two build rounds of a segv whose
+faulting address no reservation was anywhere near, and re-deriving them at
+the next bring-up on this surface costs a build round that exporting a
+variable does not.
+
+Not LLVM_DEBUG, which compiles out of a release build -- the device runs
+release, so that would remove the diagnostic from exactly the configuration
+that needs it. A plain getenv, read once.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+---
+ .../Orc/ThylacineMemoryMapper.cpp             | 29 ++++++++++++++-----
+ 1 file changed, 22 insertions(+), 7 deletions(-)
+
+diff --git a/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+index 0739f097e..78c27c4eb 100644
+--- a/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
++++ b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+@@ -48,6 +48,7 @@
+ #include <atomic>
+ #include <cassert>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
+ #include <future>
+ #include <string>
+@@ -98,16 +99,30 @@ long icacheSync(uint64_t VA, size_t Length) {
+ // worth naming: it is the difference between "this system cannot JIT" and
+ // "this process was not permitted to", and a caller that cannot tell them
+ // apart will misreport a capability problem as a broken port.
+-// A bounded bring-up trace. This mapper sits between two layers that both
+-// report badly: ORC's prepare() has no error channel, and a wrong writer
+-// pointer surfaces as a fault inside memcpy, with nothing on the faulting
+-// stack naming the mapper or saying whether reserve() or the lookup produced
+-// it. A budget rather than a flag because the interesting calls are the first
+-// few -- once one allocation maps correctly they all do, and an unbounded
+-// trace would bury a shader compile in address bookkeeping.
++// A bounded bring-up trace, off unless THYLA_JIT_TRACE is set in the
++// environment. This mapper sits between two layers that both report badly:
++// ORC's prepare() has no error channel, and a wrong writer pointer surfaces
++// as a fault inside memcpy, with nothing on the faulting stack naming the
++// mapper or saying whether reserve() or the lookup produced it. That is not a
++// hypothetical -- it is how CL-7b-2 spent two build rounds on a segv whose
++// address no reservation was anywhere near, and these two lines are what
++// finally named it. So the trace is kept and silenced rather than deleted:
++// the next bring-up on this surface will want it, and rebuilding it then
++// costs a build round that setting a variable does not.
++//
++// A budget rather than a flag because the interesting calls are the first few
++// -- once one allocation maps correctly they all do, and an unbounded trace
++// would bury a shader compile in address bookkeeping.
++//
++// Deliberately not LLVM_DEBUG: that compiles out of a release build, and the
++// device runs release. A diagnostic that is absent exactly where it is needed
++// is not a diagnostic.
+ std::atomic<unsigned> TraceBudget{16};
+ 
+ bool traceBudget() {
++  static const bool Enabled = ::getenv("THYLA_JIT_TRACE") != nullptr;
++  if (!Enabled)
++    return false;
+   unsigned B = TraceBudget.load(std::memory_order_relaxed);
+   while (B != 0 && !TraceBudget.compare_exchange_weak(
+                        B, B - 1, std::memory_order_relaxed))
+-- 
+2.43.0
+
