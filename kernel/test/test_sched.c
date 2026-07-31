@@ -329,6 +329,13 @@ static void notify_test_thread(void) {
     // window). If notify is DISABLED (the no_ipi test) this thread is never run
     // -> it stays RUNNABLE on cpu0's tree and thread_free removes it; both
     // terminals are safe.
+    //
+    // "Both TERMINALS are safe" is not "any moment is safe": between being
+    // stolen and reaching EXITING this thread is RUNNING on the peer, and
+    // thread_free treats a RUNNING victim as fatal. Reaching a terminal is the
+    // caller's obligation -- see the cleanup wait in
+    // test_sched_notify_idle_peer_smoke, which exists because that inference
+    // was once made the other way.
     current_thread()->state = THREAD_EXITING;
     sched();
     // Unreachable -- EXITING is never re-dispatched.
@@ -416,10 +423,72 @@ void test_sched_notify_idle_peer_smoke(void) {
     TEST_ASSERT(any_secondary_received,
         "at least one secondary received IPI_RESCHED via notify_idle_peer");
 
-    // Cleanup. The secondary ran the thread (g_notify_test_ran > 0 -> it
-    // reached its EXITING terminal off-cpu), or -- if the IPI raced -- it is
-    // still RUNNABLE in a tree. thread_free accepts both (its on_cpu-spin covers
-    // the EXITING-but-still-on_cpu window).
+    // Cleanup: wait for the thread's TERMINAL, not for the IPI.
+    //
+    // The IPI counter is the wrong event to free on. g_ipi_resched_count
+    // increments inside the IPI HANDLER -- when the secondary RECEIVES the
+    // interrupt, strictly BEFORE it runs sched(), steals t, and sets it
+    // RUNNING. So the deliver-wait above lands in the MIDDLE of the window it
+    // appears to close, and the free two statements later can catch t RUNNING
+    // on the peer. thread_free treats that as fatal BY DESIGN (#788: a RUNNING
+    // victim is a kstack UAF mid-cpu_switch_context), so it extincts --
+    // "thread_free of RUNNING thread", observed 1-in-10 on default-smp4.
+    //
+    // Two things let that stand. The spin-until pass which fixed the PREVIOUS
+    // 1-in-10 red in this same test (5af01124) hardened the settle wait and the
+    // deliver wait and left this third one alone; and the comment that used to
+    // sit here cited "g_notify_test_ran > 0" as proof of the EXITING terminal
+    // while nothing ever READ g_notify_test_ran -- it was zeroed above and
+    // otherwise appeared only in that sentence. The evidence was named in prose
+    // and never collected. Collect it.
+    //
+    // The terminal is two facts: the thread RAN (its own increment) and it has
+    // LEFT dispatch (state != RUNNING). Both are needed. state != RUNNING alone
+    // is still racy in the never-ran case -- a RUNNABLE t can be stolen and set
+    // RUNNING between our check and thread_free's -- whereas a thread that has
+    // run to EXITING is never re-dispatched (see notify_test_thread), so no CPU
+    // can put it back on-dispatch behind us. state is monotonic for this thread
+    // (RUNNABLE -> RUNNING -> EXITING), so a cross-CPU read cannot go backward;
+    // the load is atomic-relaxed to say "polled from another CPU" rather than
+    // resting on the call in the loop body to force a reload. thread_free's
+    // on_cpu spin then absorbs the residual EXITING-but-still-on_cpu window,
+    // which is the part it IS designed to absorb.
+    //
+    // Budget expiry is a genuine signal, not a tolerated miss: TI-4b push
+    // placement makes "the secondary runs it" deterministic (notify_test_thread
+    // documents this -- the "still RUNNABLE" branch the old comment allowed for
+    // is stale pull-era reasoning), so 200 ms without a terminal means something
+    // is actually wrong. It reports under its OWN message so a cleanup-precondition
+    // failure is never mistaken for an IPI failure -- and a failed assert is a
+    // far better outcome here than the extinction it replaces.
+    const int TERMINAL_BUDGET_TICKS = 200;
+    bool ran = false, left_dispatch = false;
+    for (int i = 0; i < TERMINAL_BUDGET_TICKS; i++) {
+        ran           = (g_notify_test_ran > 0);
+        left_dispatch =
+            __atomic_load_n(&t->state, __ATOMIC_RELAXED) != THREAD_RUNNING;
+        if (ran && left_dispatch) break;
+        timer_busy_wait_ticks(1);
+    }
+
+    // Report WHICH fact is missing. "never ran" (no steal happened) and "ran
+    // but never left the CPU" are different defects, and a single combined
+    // message would make the next reader guess which one they are looking at.
+    //
+    // On either failure path t is deliberately NOT freed: it may still be
+    // RUNNING, and thread_free extincts on precisely the condition being
+    // reported -- turning a diagnosable test failure back into the kstack-UAF
+    // guard we are here to avoid. The cost is one leaked kthread on an already-
+    // failing boot (a failed test fails the suite, which fails the boot), and it
+    // matches the deliver-wait assert above, which has always left t behind on
+    // its own failure path.
+    TEST_ASSERT(ran,
+        "readied thread never ran -- no secondary stole it, so the free "
+        "precondition cannot be established");
+    TEST_ASSERT(left_dispatch,
+        "readied thread ran but never left dispatch within budget "
+        "(the free precondition, not the IPI itself)");
+
     thread_free(t);
 }
 
