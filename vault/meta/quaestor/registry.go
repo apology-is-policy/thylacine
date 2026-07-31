@@ -55,13 +55,34 @@ func (r *Registry) OfType(t string) []*Note {
 	return out
 }
 
-func repoRoot() string {
+// repoRoot resolves the vault's repo root. Order: an explicit --root flag
+// (the hook passes it -- inside a git hook GIT_DIR is a RELATIVE path and
+// `go -C` moves the child's cwd, so `git rev-parse` there resolves
+// nothing: the fail-open the first live hook run exposed); then git; then
+// a walk-up from cwd looking for vault/meta. Callers must still fail
+// CLOSED on an empty registry -- a root with no notes is never "clean".
+func repoRoot(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err == nil {
-		return strings.TrimSpace(string(out))
+		top := strings.TrimSpace(string(out))
+		if _, serr := os.Stat(filepath.Join(top, "vault", "meta")); serr == nil {
+			return top
+		}
 	}
 	wd, _ := os.Getwd()
-	return wd
+	for dir := wd; ; {
+		if _, serr := os.Stat(filepath.Join(dir, "vault", "meta")); serr == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return wd
+		}
+		dir = parent
+	}
 }
 
 func isRecord(rel string) bool {

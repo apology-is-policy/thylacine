@@ -122,6 +122,17 @@ func TestFixtureLintsClean(t *testing.T) {
 	wantClean(t, fails, warns)
 }
 
+func TestEmptyRegistryFailsClosed(t *testing.T) {
+	// The gate must never pass open: a root with no notes (wrong root,
+	// hook-context cwd drift, a vanished vault) is a FAILURE, not a
+	// vacuous green. The first live hook run passed exactly this way.
+	root := t.TempDir()
+	code := lintRun(root, "--all")
+	if code == 0 {
+		t.Fatal("lint on an empty root returned success (the gate passed open)")
+	}
+}
+
 func TestDanglingEdgeFails(t *testing.T) {
 	root := fixture(t)
 	mutate(t, root, "vault/record/findings/fnd-t-r1-f1.md",

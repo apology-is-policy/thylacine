@@ -22,6 +22,9 @@ const usage = `quaestor -- the vault registrar (vault/meta/schema.md section 8)
   quaestor close <id> --status S [--fixed-by C] [--regression R] [--seam S]
   quaestor id <candidate>       check an id for shape + collisions
   quaestor serve                MCP server on stdio (newline-delimited JSON-RPC)
+
+  --root DIR (any command)      explicit repo root -- hooks pass it (relative
+                                GIT_DIR + go -C defeat git-based discovery)
 `
 
 func lintRun(root, mode string) int {
@@ -34,6 +37,14 @@ func lintRun(root, mode string) int {
 	}
 	fails, warns := validate(reg, preErrors)
 	fails = append(fails, checkViews(reg)...)
+	if reg.Len() == 0 {
+		// FAIL CLOSED: an empty registry means the root is wrong or the
+		// vault is gone -- a gate that validates nothing must not pass
+		// (the first live hook run passed open exactly this way).
+		fails = append(fails, fmt.Sprintf(
+			"no notes found under %s/vault -- wrong root? "+
+				"an empty registry never passes", root))
+	}
 	if mode == "--staged" {
 		sf, sw := stagedChecks(root, reg)
 		fails = append(fails, sf...)
@@ -54,8 +65,21 @@ func lintRun(root, mode string) int {
 }
 
 func main() {
-	root := repoRoot()
-	args := os.Args[1:]
+	// Global --root DIR (stripped wherever it appears): the pre-commit
+	// hook passes it explicitly because git-hook context (relative
+	// GIT_DIR + the `go -C` cwd) defeats git-based root discovery.
+	rootFlag := ""
+	var args []string
+	raw := os.Args[1:]
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == "--root" && i+1 < len(raw) {
+			rootFlag = raw[i+1]
+			i++
+			continue
+		}
+		args = append(args, raw[i])
+	}
+	root := repoRoot(rootFlag)
 	if len(args) == 0 {
 		fmt.Print(usage)
 		os.Exit(2)
