@@ -4,7 +4,7 @@ type: chg
 title: "Quaestor: the Go vault registrar + MCP layer; lint.py retired"
 date: 2026-07-31
 arc: arc-vault
-commits: ["(pending)"]
+commits: ["70fe484f", "1a8e24e1"]
 touched:
   - home
   - dashboard
