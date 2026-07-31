@@ -353,6 +353,7 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_exec_setup_bss_tail_icache_synced(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -1700,6 +1701,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.setup_auxv_no_phdr_segment",
                                        test_exec_setup_auxv_no_phdr_segment,
+                                                                           false, NULL },
+    { "exec.setup_bss_tail_icache_synced",
+                                       test_exec_setup_bss_tail_icache_synced,
                                                                            false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },

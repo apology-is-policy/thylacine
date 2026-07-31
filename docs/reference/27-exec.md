@@ -172,6 +172,18 @@ The frame is written into the stack BURROW's backing pages through the kernel di
 
 **Freestanding binaries are unaffected.** Thylacine-native binaries built against `libt` / `libthyla-rs` have a `_start` that calls `main` directly and never reads the stack frame; the 144-byte frame simply sits above their initial sp, ignored. The frame is consumed only by a SysV-aware C runtime (pouch). Every existing binary (joey, corvus, the bringup probes) boots unchanged with the new sp.
 
+### I-cache coherence spans the whole executable segment (#107)
+
+Both eager paths — `exec_map_segment` (blob) and `map_eager_from_file` — route their I-cache maintenance through `exec_make_exec_coherent(kva, size)`, where **`size` is the whole page-rounded segment span, not `filesz`**, and the call is **not** gated on `filesz > 0`.
+
+The rule is easy to get wrong in the other direction, because the bytes past `filesz` really are zero: `alloc_pages(KP_ZERO)` zeroed them. But that zeroing is a *data-side* write. It does not evict I-cache lines that a prior occupant of those recycled physical pages may have left behind — nothing in `mm/` performs any I-cache maintenance on free or alloc — and the tail is mapped executable along with the rest of the segment. A branch into it would therefore fetch stale instructions rather than trapping on the zeros. Zeroed memory and an I-cache with no stale lines for those PAs are different properties.
+
+This is the rule the REVENANT FILE fault arm already applied: `arch/arm64/fault.c` syncs `PAGE_SIZE` per page-in, not the valid byte count, and its comment states the same hazard ("EL0 could fetch a stale line from a prior occupant of this recycled PA -> wrong-instruction execution"). The two eager paths were the ones that had drifted from it.
+
+Reachability: no binary this tree's toolchain emits has the shape — a scan of all 794 ELFs in `build/` + `usr/` found 794 `PF_X` PT_LOADs, every one with `memsz == filesz`, because `ld` places `.bss` in a separate RW PT_LOAD. A normal `PF_R|PF_X` segment therefore satisfies `round_up(filesz) == round_up(memsz)` and takes the *file-backed* dispatch arm, where per-page `PAGE_SIZE` syncs already covered it. The eager arm receives exactly the `memsz > filesz` case — which `elf_load` accepts, since it rejects only `filesz > memsz` — so a crafted ELF reaches it, and any Proc that can write and exec a file can craft one. Narrow reachability is not a disposition; the comment claiming the tail was safe was wrong regardless.
+
+The `filesz == 0` ungating matters for the same reason: a `PF_X` PT_LOAD with `filesz == 0` and non-zero `memsz` is pure bss, loads fine, and under the old `if (seg->filesz > 0)` nesting would have been mapped executable with **no** maintenance at all.
+
 ## Data structures
 
 No new data structures at P3-Eb. `exec_setup` writes to existing surfaces:
@@ -226,7 +238,7 @@ Phase 5+ exec(2) syscall semantics — exec replaces the calling Proc's image at
 
 ## Tests
 
-`kernel/test/test_exec.c` — eight tests:
+`kernel/test/test_exec.c` — nine tests:
 
 - `exec.setup_smoke`: minimal valid ELF; verify single segment VMA at vaddr + user stack VMA + entry/sp out params.
 - `exec.setup_segment_data_copied`: ELF with 256 bytes of recognizable data; verify bytes are copied into BURROW backing pages (read via direct map); tail of page is zero.
@@ -236,6 +248,7 @@ Phase 5+ exec(2) syscall semantics — exec replaces the calling Proc's image at
 - `exec.user_stack_guard`: verify the user-stack guard VMA — present at `[GUARD_BASE, STACK_BASE)`, `prot==0`, `burrow==NULL`, distinct from the stack VMA — and that a VMA overlapping the guard is rejected by `vma_insert` (the reservation property). Closes corvus-bringup-d audit F7.
 - `exec.setup_auxv` (P6-pouch-kernel-auxv): ELF whose first PT_LOAD covers the program headers; reads the System V startup frame back from the stack BURROW and verifies the argc/argv/envp NULLs, all six auxv entries (types + values), a resolved `AT_PHDR`, `sp == EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE` (16-aligned), and the `AT_RANDOM` block in-range + CSPRNG-populated (non-zero).
 - `exec.setup_auxv_no_phdr_segment` (P6-pouch-kernel-auxv): ELF whose loaded segments do not cover the phdr table; verifies the unresolved-fallback path — `AT_PHDR == 0` / `AT_PHNUM == 0` — with the rest of the frame well-formed.
+- `exec.setup_bss_tail_icache_synced` (#107): a `PF_R|PF_X` segment with `filesz == 0x40` and `memsz == 0x2000`; asserts the I-cache maintenance was issued at the segment's kernel VA over the **whole two-page span**, not the 0x40 copied bytes. Emulated targets model a coherent I-cache, so the stale fetch itself is unobservable in-guest — the assertion is that the *work was done*, the same posture as the W1.5 patcher's `g_alt_applied == g_alt_total`. Revert-probed: narrowing the span back to `seg->filesz` takes the suite to 1232/1233 FAIL on exactly this assertion.
 
 Each test synthesizes an ELF in a static aligned buffer (`g_elf_blob`); the same idiom as `test_elf.c::build_elf`.
 

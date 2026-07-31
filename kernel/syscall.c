@@ -4438,9 +4438,10 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // it true rather than requiring it be weakened.
     //
     // It also restores consistency: every other executable backing in the tree
-    // syncs at acquisition for exactly this reason (kernel/exec.c:121 and :522,
-    // arch/arm64/fault.c:705 and :876 -- the REVENANT arm's comment names the
-    // hazard as "a stale line from a prior occupant of this recycled PA").
+    // syncs at acquisition for exactly this reason (kernel/exec.c's two eager
+    // paths + arch/arm64/fault.c's FILE demand-page arms -- the REVENANT arm's
+    // comment names the hazard as "a stale line from a prior occupant of this
+    // recycled PA"). Named, not cited by line: #107 moved the exec.c pair.
     // A code Burrow was the sole exception.
     //
     // One call, not a per-page loop: a CODE Burrow is one contiguous
