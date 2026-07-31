@@ -46,6 +46,9 @@
 #define THYLACINE_VIVARIUM_H
 
 #include <thylacine/types.h>
+// For `struct pollfd` + POLL_MAX_NFDS: the pselect6 translator's OUTPUT type is
+// the native pollfd, so the ABI it converts INTO belongs in this header's view.
+#include <thylacine/poll.h>
 
 // `struct t_stat` is forward-declared rather than pulled in from <syscall.h>.
 // A pointer parameter needs no definition, and V-1b will make syscall.c the
@@ -894,12 +897,143 @@ bool vivarium_timespec_to_ms(s64 sec, s64 nsec, s32 *out_ms, s32 *out_err);
 //     chose ppoll to close. Honouring it approximately would be the silent
 //     mistranslation this tier exists to prevent. (musl's poll() passes NULL,
 //     so the common path is unaffected.)
-//   * nfds == 0 -- Linux reads this as "sleep for the timeout"; native SYS_POLL
-//     rejects it, and there is no native sleep syscall to route it to.
-//
 // nfds > POLL_MAX_NFDS is EINVAL rather than ENOSYS: that IS a bad value, and
 // the native cap is the real bound a caller must respect.
+//
+// nfds == 0 IS SERVED, and it did not used to be. Linux reads it as "sleep for
+// the timeout", and V-5c-1 declined it because native SYS_POLL rejects nfds == 0
+// and there is no native sleep SYSCALL to route it to. That reasoning looked one
+// layer too high: there is no sleep syscall, but there has always been a sleep
+// PRIMITIVE -- `tsleep` with a deadline and a cond that is never true, which is
+// what poll's own slow path parks on. V-5c-2 needed it anyway for
+// `select(0, NULL, NULL, NULL, &tv)`, the classic portable sleep, so both
+// zero-fd forms now route to `viv_timed_sleep` and neither declines.
 bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err);
+
+// -----------------------------------------------------------------------------
+// pselect6 (V-5c-2) -- the fd_set reshape.
+//
+// The one T2 row whose translation is a genuine CHANGE OF REPRESENTATION rather
+// than a renumber or a field copy: three 1024-bit bitmaps in, one pollfd array
+// out, and three bitmaps back. It is also the row with the most ways to be
+// subtly wrong, so the whole conversion is PURE and unit-driven, and the shell
+// in syscall.c does nothing but uaccess and the poll call.
+//
+// THE PRIOR ART IS IN THIS TREE, AND IT IS WRONG IN FOUR WAYS. pouch's
+// userspace select() (`usr/lib/pouch/patches/0005-pouch-poll.patch`) performs
+// this same translation over native SYS_POLL. Reading it before writing this
+// was worth more than the writing: every one of its four defects is a decision
+// point here (task #99).
+//
+//   * IT CAPS THE WRONG AXIS. It rejects any fd >= 64 with EBADF, on the stated
+//     grounds that "the handle would be unreachable through any Thylacine
+//     syscall". That was true when PROC_HANDLE_MAX was 64; commit ffcc64b7 split
+//     PROC_HANDLE_MAX (256, the fd-VALUE ceiling) from POLL_MAX_NFDS (64, the
+//     pollfd-ARRAY ceiling) and made it false. The cap belongs on the COUNT of
+//     contributing fds -- a select over fds 200 and 201 is two pollfds and is
+//     fine; a select over 65 low fds is not.
+//   * IT TRANSLATES exceptfds TO POLLPRI, which native poll has no bit for, so
+//     the request is silently dropped and the exceptfds bit can never be set. A
+//     select waiting ONLY on exceptfds therefore blocks forever instead of
+//     failing. Silently-never-true is the mistranslation this tier exists to
+//     prevent; see the exceptfds note on the scan function below.
+//   * IT FORWARDS POLLHUP INTO THE WRITE SET, commented "(Linux semantics)".
+//     Linux's POLLOUT_SET is POLLOUT|POLLERR; POLLHUP is in POLLIN_SET only.
+//   * IT COUNTS FDS, NOT BITS. See the return-value note below.
+//
+// None of this makes pouch's select unusable -- it makes it a boundary-line that
+// drifted from the kernel underneath it. This one is written against the kernel
+// as it is today, with the constants named rather than copied.
+// -----------------------------------------------------------------------------
+
+// An fd_set is a fixed 1024-bit bitmap (musl `include/sys/select.h`:
+// FD_SETSIZE 1024). The ABI is the caller's `fd_set *`, so this is the size of
+// the object, not a tunable.
+#define VIV_FD_SETSIZE   1024
+#define VIV_FD_SET_BYTES (VIV_FD_SETSIZE / 8)
+
+// Decide whether a pselect6() is inside the translatable domain, and clamp nfds.
+// PURE.
+//
+// `nfds` arrives as a signed Linux `int` widened to 64 bits, so the negative
+// case is real and must be checked as signed.
+//
+//   * sigmask != NULL -- declines for EXACTLY ppoll's reason (the atomic mask
+//     swap has no counterpart), and note that pselect6 packs it indirectly: the
+//     6th argument is a POINTER to {const sigset_t *ss; size_t ss_len;} because
+//     aarch64 caps a syscall at 6 registers. So a NULL 6th argument and a
+//     non-NULL pointer to a NULL ss are different things; only the former is
+//     unambiguously "no mask", and the latter is declined rather than peeked at.
+//   * nfds < 0 -- EINVAL, Linux's own check.
+//
+// CLAMPING IS LINUX'S BEHAVIOUR, NOT A SHORTCUT. `core_sys_select` does
+// `if (n > max_fds) n = max_fds;` -- bits above the fd table are simply not
+// scanned. Our handle table is a FIXED PROC_HANDLE_MAX entries (never grown), so
+// "max_fds" here is a constant, and clamping to it is exactly what Linux does on
+// a process whose table happens to be that size. A bit set above the clamp names
+// an fd that cannot exist, so ignoring it loses nothing; a bit set BELOW it that
+// names no open handle still becomes POLLNVAL -> EBADF, which is also Linux.
+bool vivarium_pselect6_decide(s64 nfds, u64 sigmask_va, u32 *out_nfds,
+                              s32 *out_err);
+
+// How many bytes of an fd_set cover the low `nfds` bits, rounded up to the
+// 8-byte granule Linux uses (FDS_BYTES: FDS_LONGS(nr) * sizeof(long)). PURE.
+//
+// Copying only these bytes rather than the full 128 is fidelity, not thrift:
+// Linux's get_fd_set/set_fd_set touch exactly this much, so a caller that sized
+// its allocation to its nfds -- legal, and done by code that keeps fd_sets in
+// packed structs -- must not take a fault here that it would not take there.
+u32 vivarium_fdset_bytes(u32 nfds);
+
+// Scan three fd_sets into a pollfd array. PURE.
+//
+// A NULL set pointer means "all zero" (Linux passes NULL for an unwanted set).
+// `out_cap` is the caller's array length; the count of CONTRIBUTING fds is what
+// the native ceiling applies to.
+//
+// EXCEPTFDS DECLINES RATHER THAN NEVER-FIRES. Native poll has no POLLPRI: the
+// requestable set is (POLLIN|POLLOUT), full stop. So there is no honest way to
+// represent "wake me on out-of-band data", and the two dishonest ways are both
+// worse than declining -- dropping the bit silently (pouch) turns a pure
+// exceptfds wait into an infinite block, and treating it as POLLIN would report
+// ordinary data as an exception. A NULL or all-zero exceptfds is not a request
+// and passes through untouched; only a SET bit inside [0, nfds) declines.
+//
+// Returns false with ENOSYS for a set exceptfds bit, EINVAL if more than
+// `out_cap` fds contribute.
+bool vivarium_fdset_to_pollfds(const u8 *rd, const u8 *wr, const u8 *ex,
+                               u32 nfds, struct pollfd *out, u32 out_cap,
+                               u32 *out_count, s32 *out_err);
+
+// Map poll results back into three fd_sets and count the ready BITS. PURE.
+//
+// The three output buffers are ZEROED FIRST and then have only ready bits set --
+// select reports its result by overwriting the caller's sets, so a bit the
+// caller asked about and did not get back must come home clear.
+//
+// THE REVERSE MAPPING IS DELIBERATELY ASYMMETRIC. Linux's do_select tests
+//     POLLIN_SET  = POLLIN  | POLLHUP | POLLERR
+//     POLLOUT_SET = POLLOUT | POLLERR
+// POLLHUP is in the read set and NOT the write set, which is not an oversight:
+// a peer that hung up leaves data readable (then EOF, which read() must be
+// allowed to observe), while writing to it is an error rather than a completion.
+// Each test is additionally gated on the fd having been REQUESTED in that
+// direction, so an errored fd the caller only listed in readfds comes back in
+// readfds only.
+//
+// THE RETURN IS A COUNT OF BITS, NOT OF FDS. Linux increments retval once per
+// bit set, so an fd ready for both reading and writing counts TWICE and the
+// return can exceed the number of fds passed in. Callers written against that
+// contract loop "while (n-- > 0) find the next set bit" and stop one short if
+// the count is per-fd -- which is pouch's fourth defect.
+//
+// POLLNVAL FAILS THE WHOLE CALL. poll reports a bad fd per-entry; select has no
+// per-fd error channel, so POSIX makes an invalid fd anywhere EBADF for the
+// entire call. Returns false with EBADF, leaving the output buffers untouched --
+// on an error Linux does not write the sets back at all.
+bool vivarium_pollfds_to_fdset(const struct pollfd *pfds, u32 count,
+                               u8 *rd, u8 *wr, u8 *ex, u32 *out_bits,
+                               s32 *out_err);
 
 // The budget a caller-requested timeout of 0 gets when the array holds a /net
 // socket, so netd's async readiness probe has a chance to land (task #98; the

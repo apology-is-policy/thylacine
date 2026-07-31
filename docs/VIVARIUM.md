@@ -697,6 +697,44 @@ swaps a listener when some fid is already blocked in `open(listen)`, so a server
 that polls first leaves the established call sitting in the listener's socket
 until it chooses to accept.
 
+**`pselect6` is the same readiness, wearing a different shape** (V-5c-2). Three
+1024-bit bitmaps in, one pollfd array out, three bitmaps back — the one T2 row
+whose translation is a genuine change of *representation* rather than a renumber
+or a field copy. The conversion is pure and unit-driven; the shell is uaccess and
+the same `viv_poll_translated` core `ppoll` uses, so the socket→`ready` fd swap
+above is shared rather than reimplemented.
+
+The prior art is in this tree and it is wrong in four ways. pouch's userspace
+`select()` performs this identical translation over native `SYS_POLL`
+(`0005-pouch-poll.patch`), and reading it before writing this was worth more than
+the writing — each of its defects is a decision point here (task #99):
+
+* **It caps the wrong axis.** It rejects any fd ≥ 64 with `EBADF`, justified as
+  "the handle would be unreachable through any Thylacine syscall". That was true
+  when `PROC_HANDLE_MAX` was 64; commit `ffcc64b7` split `PROC_HANDLE_MAX` (256,
+  the fd *value* ceiling) from `POLL_MAX_NFDS` (64, the pollfd *array* ceiling)
+  and made it false. The bound belongs on the count of contributing fds.
+* **It maps `exceptfds` to `POLLPRI`**, which native poll cannot report, so the
+  request is silently dropped and a pure-`exceptfds` wait blocks forever.
+* **It forwards `POLLHUP` into the write set**, commented "(Linux semantics)".
+  Linux's `POLLOUT_SET` is `POLLOUT|POLLERR`; `POLLHUP` is in `POLLIN_SET` only.
+  The asymmetry is not an oversight — a peer that hung up leaves data readable,
+  while writing to it is an error rather than a completion.
+* **It counts fds, not bits.** Linux increments `retval` once per *set bit*, so
+  an fd ready both ways counts twice and the return can exceed the number of fds
+  passed in. A caller looping `while (n-- > 0) find the next set bit` stops one
+  short against a per-fd count.
+
+**Both zero-fd forms now sleep.** `select(0, NULL, NULL, NULL, &tv)` is the
+classic portable sleep and `poll(NULL, 0, ms)` is its twin. V-5c-1 declined
+`ppoll`'s on the grounds that "there is no native sleep syscall to route it to" —
+which was true and one layer too high: there is no sleep *syscall*, but there has
+always been a sleep *primitive*, `tsleep` with a deadline and a cond that is never
+true, which is what poll's own slow path parks on. `sys_poll_sleep_for` makes it
+reachable, `sys_poll_for_proc`'s `nfds == 0` rejection is deliberately left alone
+(it is a native ABI a native caller may rely on), and the `ppoll` decline is
+retired.
+
 ---
 
 ## 6. The diorama — the synthetic Linux world
@@ -2335,8 +2373,10 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **`accept`'s peer address degrades to `0.0.0.0:0`** (§5.5.3, V-5b) | The address comes from a second read of the connection's `remote` file. If that read fails the accept still succeeds — the peer genuinely is connected, and failing would be worse — and the `sockaddr_in` is written all-zero rather than left holding the caller's stale bytes. Not reachable in normal operation; listed because a caller cannot tell it apart from a genuine `0.0.0.0` peer |
 | **A zero-timeout `ppoll` over a socket takes up to 10 ms** (§5.5.4, V-5c, task #98) | Readiness lives in netd, one RPC away, and the probe is asynchronous — so a literal zero-timeout scan would answer "nothing ready" for a plainly writable socket, and a caller looping on timeout 0 would never progress. A requested 0 therefore gets a 10 ms budget when a socket is in the array. The *answer* is netd's real verdict; only the latency differs, and a caller-supplied timeout is never touched. A probe that misses the budget yields not-ready and the caller retries |
 | **`ppoll` with a `sigmask` is refused** (§5.5.4, V-5c) | The atomic mask swap is ppoll's entire reason to exist over `poll()`, and doing it non-atomically would re-open the exact race the caller chose ppoll to close. `ENOSYS` rather than an approximation. musl's `poll()` passes NULL, so the common path is unaffected; only a program using ppoll *for its signal semantics* is |
-| **`ppoll` with `nfds == 0` is refused** (§5.5.4, V-5c) | Linux reads it as a timed sleep. `SYS_POLL` rejects `nfds == 0` and there is no native sleep syscall to route it to, so it answers `ENOSYS` rather than returning immediately and pretending to have waited |
-| **`select`/`pselect6` is not served yet** (§5.5.4, V-5c) | The three `fd_set`s are a different shape from a pollfd array and land with their own reshape (V-5c-2). Until then `pselect6` FORWARDs, which with V-3 deferred means `ENOSYS`. musl's `poll()` path is unaffected; a `select()`-based program is |
+| **`pselect6` with a `sigmask` is refused** (§5.5.4, V-5c-2) | Same reason as `ppoll`'s, and note the sixth argument is a POINTER to `{ss, ss_len}` — aarch64 caps a syscall at six registers — so a non-NULL pair is declined without being dereferenced. A NULL sixth argument is unambiguously "no mask", which is the common path |
+| **A set `exceptfds` bit is refused** (§5.5.4, V-5c-2) | Native poll has no `POLLPRI`: the requestable set is `(POLLIN\|POLLOUT)`, full stop. Dropping the bit silently — what pouch's userspace `select` does (task #99 F-b) — turns a *pure* `exceptfds` wait into an infinite block rather than an error, and mapping it to `POLLIN` would report ordinary data as an exception. A NULL or all-zero `exceptfds` is not a request and passes through |
+| **More than 64 CONTRIBUTING fds is refused** (§5.5.4, V-5c-2) | `POLL_MAX_NFDS` bounds the pollfd ARRAY. Note this is a bound on the *count*, not on fd *values*: a `select` over fds 200 and 201 is two pollfds and is fine. (pouch's `select` caps the wrong axis and returns `EBADF` for any fd ≥ 64 — task #99 F-a) |
+| **An `nfds` above the fd table is CLAMPED, not refused** (§5.5.4, V-5c-2) | Which is Linux's own `if (n > max_fds) n = max_fds`. A bit above the table names an fd that cannot exist, so it is simply not scanned. A bit *below* the clamp naming no open handle still becomes `POLLNVAL` → `EBADF`, which is also Linux |
 
 ---
 
@@ -2349,7 +2389,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | V-2 | The translation table | The §4-C stateless 1:1 set; the split rule enforced | a static `hello` (built by *Linux* toolchain) runs and exits 0 |
 | V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1; and V-5 did NOT claim it (user-voted 2026-07-31) — §4.1.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. V-5 was expected to decide the shape, and instead **measured that sockets need no supervisor**: every step is work the calling Proc could do for itself, so the kernel performs it with the caller's own authority (§5.5). The fork therefore moves to the next chunk that needs a destination it cannot synthesise — on present evidence **process creation (#93)**. The three candidates + the peer evidence stand recorded in §4.1 for it. `specs/phenotype.tla` lands with whatever that chunk chooses | (deferred; the gate travels with whichever chunk builds it) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
-| V-5 | Sockets | The `/net` translation, **in the kernel phenotype as a T2 family** (§5.5, user-voted 2026-07-31). **V-5a** the substrate + the client path: `handle_replace`, `Proc.socktab`, and `socket`/`connect`/`shutdown`/`getsockname`/`getpeername`/`sendto`/`recvfrom` — `read`/`write`/`close` need no row, which is the design's point. **V-5b** the server path: `bind`/`listen`/`accept`/`accept4` over netd's deferred-accept (LANDED -- section 5.5.3; the in-guest gate drives a full server+client TCP round-trip from ONE single-threaded process). **V-5c** readiness over the `QTPOLL` `ready` file: **V-5c-1 LANDED** -- `ppoll` (which IS the poll family on aarch64) as a T2 row that swaps a socket fd for its `ready` sibling, plus the netd half of #220 (a listener now reports `POLLIN` when a call is pending, via the same `accept_ready` predicate `poll_accepts` uses); the first two rows BELOW the native number ceiling, so §5.5.4 carries the per-number collision re-check the ARCH §25.4 row mandates. **V-5c-2** is `pselect6`'s `fd_set` reshape. **V-5d** the focused audit + close | **`curl` fetches a URL** (ROADMAP §9.2); V-5a's own gate is an in-guest TCP round-trip over the resident loopback |
+| V-5 | Sockets | The `/net` translation, **in the kernel phenotype as a T2 family** (§5.5, user-voted 2026-07-31). **V-5a** the substrate + the client path: `handle_replace`, `Proc.socktab`, and `socket`/`connect`/`shutdown`/`getsockname`/`getpeername`/`sendto`/`recvfrom` — `read`/`write`/`close` need no row, which is the design's point. **V-5b** the server path: `bind`/`listen`/`accept`/`accept4` over netd's deferred-accept (LANDED -- section 5.5.3; the in-guest gate drives a full server+client TCP round-trip from ONE single-threaded process). **V-5c** readiness over the `QTPOLL` `ready` file: **V-5c-1 LANDED** -- `ppoll` (which IS the poll family on aarch64) as a T2 row that swaps a socket fd for its `ready` sibling, plus the netd half of #220 (a listener now reports `POLLIN` when a call is pending, via the same `accept_ready` predicate `poll_accepts` uses); the first two rows BELOW the native number ceiling, so §5.5.4 carries the per-number collision re-check the ARCH §25.4 row mandates. **V-5c-2 LANDED** -- `pselect6`'s `fd_set` reshape (three 1024-bit bitmaps in, one pollfd array out, three back), plus the zero-fd sleep that BOTH forms needed: `select(0, NULL, NULL, NULL, &tv)` is the classic portable sleep, so `sys_poll_sleep_for` was added and `ppoll`'s `nfds == 0` decline retired with it. **V-5d** the focused audit + close | **`curl` fetches a URL** (ROADMAP §9.2); V-5a's own gate is an in-guest TCP round-trip over the resident loopback |
 | V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land. **V-6a** landed the decode; **V-6b** landed dispositions (`rt_sigaction` for `SIG_DFL`/`SIG_IGN` + `rt_sigprocmask` + the per-Proc `viv_sigtab` + the post-time discard), and corrected two V-6a facts by measuring musl -- the `k_sigaction` layout is arch-fixed at 32 bytes rather than flag-chosen, and SIGTERM had to be evicted from `interrupt` because a shared note cannot carry two independent dispositions (task #95). **V-6c** landed the Tier-1 frame: a real handler installs and RUNS, `rt_sigreturn` is the phenotyped spelling of `SYS_NOTED(NCONT)`, and the sigtab widened to the whole `k_sigaction`. **V-6 IS COMPLETE** | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
 | V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |

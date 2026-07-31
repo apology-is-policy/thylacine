@@ -5,6 +5,7 @@
 
 #include <thylacine/vivarium.h>
 
+#include <thylacine/handle.h>           // V-5c-2: PROC_HANDLE_MAX = the fd clamp
 #include <thylacine/notes.h>            // V-6b: the canonical note-name literals
 #include <thylacine/poll.h>             // V-5c: POLL_MAX_NFDS bounds the domain
 #include <thylacine/syscall.h>
@@ -223,7 +224,7 @@ static const struct viv_reject g_viv_rejects[] = {
     // these two carry the whole family -- musl's poll() and select() are
     // wrappers over them, and a server that multiplexes reaches them either way.
     { VIV_LINUX_PPOLL,       VIV_TIER2   },  // V-5c: the ready-file translation
-    { VIV_LINUX_PSELECT6,    VIV_FORWARD },  // V-5c-2: the fd_set reshape
+    { VIV_LINUX_PSELECT6,    VIV_TIER2   },  // V-5c-2: the fd_set reshape
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -1067,19 +1068,173 @@ bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err) {
         return false;
     }
 
-    // A timed sleep wearing a poll's clothes. Native SYS_POLL rejects nfds == 0
-    // and there is no native sleep to route it to.
-    if (nfds == 0) {
-        *out_err = (s32)T_E_NOSYS;
-        return false;
-    }
-
     // A real bad value, so a real POSIX error.
     if (nfds > POLL_MAX_NFDS) {
         *out_err = (s32)T_E_INVAL;
         return false;
     }
 
+    // nfds == 0 is DELIBERATELY NOT REJECTED HERE. It is Linux's "sleep for the
+    // timeout", and the caller routes it to viv_timed_sleep rather than to the
+    // native poll (which does reject nfds == 0). See the header.
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+// pselect6 -- the fd_set reshape (V-5c-2). All PURE; the header carries the
+// reasoning, including the four defects in pouch's userspace twin (task #99)
+// that each of these decisions is the counterpart of.
+// -----------------------------------------------------------------------------
+
+// Read bit `fd` of an fd_set, NULL-safe (a NULL set is "no bits requested").
+//
+// ENDIANNESS. musl's FD_SET is
+//     fds_bits[d / (8*sizeof(long))] |= 1UL << (d % (8*sizeof(long)))
+// i.e. bit d of a 64-bit long. On a LITTLE-endian target -- aarch64 as Thylacine
+// builds it -- byte b of that long holds bits [8b, 8b+8), so bit d lands at byte
+// d/8, bit d%8, and the byte-wise form below is exact. It would be wrong on a
+// big-endian port, which is why this is spelled out rather than assumed.
+static bool viv_fdset_bit(const u8 *set, u32 fd) {
+    if (!set) return false;
+    return ((set[fd >> 3] >> (fd & 7u)) & 1u) != 0;
+}
+
+static void viv_fdset_set_bit(u8 *set, u32 fd) {
+    set[fd >> 3] |= (u8)(1u << (fd & 7u));
+}
+
+bool vivarium_pselect6_decide(s64 nfds, u64 sigmask_va, u32 *out_nfds,
+                              s32 *out_err) {
+    if (!out_nfds || !out_err) return false;
+    *out_err  = 0;
+    *out_nfds = 0;
+
+    // Checked first, exactly as in ppoll: a caller reaching for pselect6's
+    // signal semantics should learn THAT is the unserved part.
+    if (sigmask_va != 0) {
+        *out_err = (s32)T_E_NOSYS;
+        return false;
+    }
+
+    // Linux's own check, and it must be signed: nfds is an `int`.
+    if (nfds < 0) {
+        *out_err = (s32)T_E_INVAL;
+        return false;
+    }
+
+    // Clamp to the fd table, which is Linux's `if (n > max_fds) n = max_fds`.
+    // PROC_HANDLE_MAX is NAMED rather than copied on purpose -- pouch's select
+    // hardcoded this bound, the kernel later split PROC_HANDLE_MAX from
+    // POLL_MAX_NFDS, and the copy silently became a bug (task #99 F-a).
+    u64 n = (u64)nfds;
+    if (n > PROC_HANDLE_MAX) n = PROC_HANDLE_MAX;
+    *out_nfds = (u32)n;
+    return true;
+}
+
+u32 vivarium_fdset_bytes(u32 nfds) {
+    // Linux FDS_BYTES: FDS_LONGS(nr) * sizeof(long), i.e. whole 8-byte units.
+    u32 longs = (nfds + 63u) / 64u;
+    u32 bytes = longs * 8u;
+    if (bytes > VIV_FD_SET_BYTES) bytes = VIV_FD_SET_BYTES;
+    return bytes;
+}
+
+bool vivarium_fdset_to_pollfds(const u8 *rd, const u8 *wr, const u8 *ex,
+                               u32 nfds, struct pollfd *out, u32 out_cap,
+                               u32 *out_count, s32 *out_err) {
+    if (!out || !out_count || !out_err) return false;
+    *out_err   = 0;
+    *out_count = 0;
+
+    u32 n = 0;
+    for (u32 fd = 0; fd < nfds; fd++) {
+        // Decline BEFORE building anything. A set exceptfds bit has no native
+        // representation, and the alternative -- dropping it and polling the
+        // rest -- turns a wait that can never be satisfied into an infinite
+        // block instead of an error.
+        if (viv_fdset_bit(ex, fd)) {
+            *out_err = (s32)T_E_NOSYS;
+            return false;
+        }
+
+        s16 events = 0;
+        if (viv_fdset_bit(rd, fd)) events |= POLLIN;
+        if (viv_fdset_bit(wr, fd)) events |= POLLOUT;
+        if (events == 0) continue;
+
+        // THE CEILING IS ON CONTRIBUTING FDS, NOT ON FD VALUES. A select over
+        // fds 200 and 201 is two pollfds and fits; a select over 65 low fds does
+        // not. This is pouch's F-a inverted.
+        if (n >= out_cap) {
+            *out_err = (s32)T_E_INVAL;
+            return false;
+        }
+        out[n].fd      = (s32)fd;
+        out[n].events  = events;
+        out[n].revents = 0;
+        n++;
+    }
+
+    *out_count = n;
+    return true;
+}
+
+bool vivarium_pollfds_to_fdset(const struct pollfd *pfds, u32 count,
+                               u8 *rd, u8 *wr, u8 *ex, u32 *out_bits,
+                               s32 *out_err) {
+    if ((!pfds && count != 0) || !out_bits || !out_err) return false;
+    *out_err  = 0;
+    *out_bits = 0;
+
+    // POLLNVAL anywhere fails the WHOLE call -- select has no per-fd error
+    // channel the way poll does. Checked before any output buffer is touched,
+    // because on an error Linux leaves the caller's sets unmodified.
+    for (u32 i = 0; i < count; i++) {
+        if ((pfds[i].revents & POLLNVAL) != 0) {
+            *out_err = (s32)T_E_BADF;
+            return false;
+        }
+    }
+
+    // select reports by OVERWRITING: a bit the caller asked about and did not
+    // get back must come home clear.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) {
+        if (rd) rd[i] = 0;
+        if (wr) wr[i] = 0;
+        if (ex) ex[i] = 0;   // every set bit already declined; stays zero.
+    }
+
+    for (u32 i = 0; i < count; i++) {
+        s16 rev = pfds[i].revents;
+        if (rev == 0) continue;
+
+        s32 fd = pfds[i].fd;
+        // Defensive: the scan above only ever emits fds inside the clamp, so
+        // this cannot fire -- but the write below is an unchecked bit index.
+        if (fd < 0 || fd >= (s32)VIV_FD_SETSIZE) continue;
+
+        // POLLIN_SET = POLLIN|POLLHUP|POLLERR, gated on having been REQUESTED
+        // for reading, so an errored fd listed only in readfds comes back only
+        // in readfds.
+        if (rd && (pfds[i].events & POLLIN) != 0 &&
+            (rev & (POLLIN | POLLHUP | POLLERR)) != 0) {
+            viv_fdset_set_bit(rd, (u32)fd);
+            (*out_bits)++;
+        }
+
+        // POLLOUT_SET = POLLOUT|POLLERR -- NO POLLHUP, which is the asymmetry
+        // pouch's F-c gets wrong. A hung-up peer leaves data readable; writing
+        // to it is an error, not a completion.
+        if (wr && (pfds[i].events & POLLOUT) != 0 &&
+            (rev & (POLLOUT | POLLERR)) != 0) {
+            viv_fdset_set_bit(wr, (u32)fd);
+            (*out_bits)++;
+        }
+    }
+
+    // *out_bits counts BITS, so an fd ready both ways has just counted twice.
+    // That is Linux's contract and pouch's F-d.
     return true;
 }
 

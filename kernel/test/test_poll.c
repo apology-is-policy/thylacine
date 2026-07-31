@@ -34,6 +34,9 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+// V-5c-2: poll.sleep_for_waits MEASURES the sleep, so it needs the clock.
+#include "../../arch/arm64/timer.h"
+
 extern s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds,
                              u64 nfds, s32 timeout_ms);
 
@@ -995,4 +998,39 @@ void test_poll_max_nfds(void) {
     TEST_ASSERT(all_pollnval, "every revents = POLLNVAL");
 
     drop_test_proc(p);
+}
+
+// V-5c-2: the zero-fd sleep. `select(0, NULL, NULL, NULL, &tv)` is the classic
+// portable sleep and `poll(NULL, 0, ms)` is its twin; both route here, because
+// sys_poll_for_proc rejects nfds == 0 and that rejection is a native ABI worth
+// leaving alone.
+//
+// THIS TEST MEASURES THE CLOCK ON PURPOSE. The in-guest leg (viv-pheno-probe
+// L97) can only assert that the call returns 0, which a kernel that never
+// waited at all would also satisfy -- the phenotype has no clock_gettime row,
+// so the guest cannot tell the difference. Here timer_now_ns() is reachable, so
+// this is the half that proves the sleep is a sleep.
+void test_poll_sleep_for_waits(void);
+void test_poll_sleep_for_waits(void) {
+    // A zero timeout is a no-op, not a trip through the scheduler.
+    u64 t0 = timer_now_ns();
+    TEST_EXPECT_EQ(sys_poll_sleep_for(0), (s64)0, "a zero sleep returns 0");
+    u64 zero_elapsed = timer_now_ns() - t0;
+    TEST_ASSERT(zero_elapsed < 5000000ull,
+                "and returns promptly -- it must not park for a zero timeout");
+
+    // A real timeout must actually consume wall time. The floor is deliberately
+    // under the request (the deadline is a floor, and the tick granularity plus
+    // scheduling can land slightly either side of an exact 40 ms), but it is far
+    // enough above zero that a no-op implementation cannot pass.
+    t0 = timer_now_ns();
+    TEST_EXPECT_EQ(sys_poll_sleep_for(40), (s64)0, "a 40ms sleep returns 0");
+    u64 elapsed = timer_now_ns() - t0;
+    TEST_ASSERT(elapsed >= 20000000ull,
+                "and actually waited -- a no-op return would land near zero");
+
+    // Nothing signals the private Rendez, so the wait ends on its deadline
+    // rather than on a wake. A sleep that returned early every time would fail
+    // the floor above; one that never returned would hang the suite here.
+    TEST_EXPECT_EQ(sys_poll_sleep_for(10), (s64)0, "a short sleep also returns 0");
 }

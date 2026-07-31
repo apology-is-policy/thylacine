@@ -591,6 +591,10 @@ void test_vivarium_socktab_bind_fields(void);                       // VIVARIUM 
 void test_vivarium_listen_decide(void);
 void test_vivarium_timespec_to_ms(void);
 void test_vivarium_ppoll_decide(void);
+void test_vivarium_pselect6_decide(void);
+void test_vivarium_fdset_bytes(void);
+void test_vivarium_fdset_to_pollfds(void);
+void test_vivarium_pollfds_to_fdset(void);
 void test_vivarium_announce_cmd(void);
 void test_vivarium_parse_ipport(void);
 void test_vivarium_sockaddr_build(void);
@@ -1203,6 +1207,7 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void);
 void test_poll_null_obj_spoor_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
+void test_poll_sleep_for_waits(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
 void test_sys_pipe_handle_close_releases_one_end(void);
@@ -2010,6 +2015,10 @@ struct test_case g_tests[] = {
     { "vivarium.listen_decide",        test_vivarium_listen_decide,        false, NULL },
     { "vivarium.timespec_to_ms",       test_vivarium_timespec_to_ms,       false, NULL },
     { "vivarium.ppoll_decide",         test_vivarium_ppoll_decide,         false, NULL },
+    { "vivarium.pselect6_decide",      test_vivarium_pselect6_decide,      false, NULL },
+    { "vivarium.fdset_bytes",          test_vivarium_fdset_bytes,          false, NULL },
+    { "vivarium.fdset_to_pollfds",     test_vivarium_fdset_to_pollfds,     false, NULL },
+    { "vivarium.pollfds_to_fdset",     test_vivarium_pollfds_to_fdset,     false, NULL },
     { "vivarium.announce_cmd",         test_vivarium_announce_cmd,         false, NULL },
     { "vivarium.parse_ipport",         test_vivarium_parse_ipport,         false, NULL },
     { "vivarium.sockaddr_build",       test_vivarium_sockaddr_build,       false, NULL },
@@ -2779,6 +2788,7 @@ struct test_case g_tests[] = {
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },
+    { "poll.sleep_for_waits",                   test_poll_sleep_for_waits,                   false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
     { "sys_pipe.handle_close_releases_one_end",        test_sys_pipe_handle_close_releases_one_end,        false, NULL },

@@ -18,6 +18,10 @@
 //   vivarium.stat_to_linux          88B -> 128B, incl. the I-13 no-leak property
 //   vivarium.fstatat_domain         the AT_* domain; AT_FDCWD-only is structural
 //   vivarium.mmap_domain            the anon-private domain; PROT_EXEC refused
+//   vivarium.pselect6_decide        the domain + the PROC_HANDLE_MAX nfds clamp
+//   vivarium.fdset_bytes            FDS_BYTES -- Linux's 8-byte-granular copy
+//   vivarium.fdset_to_pollfds       3 fd_sets -> pollfds; exceptfds DECLINES
+//   vivarium.pollfds_to_fdset       the asymmetric reverse map; a count of BITS
 //
 // The T2 tests (V-2b/V-2c/V-2d) stay just as pure: no decide function reads user
 // memory by construction, and the stat conversion is data-in/data-out.
@@ -26,6 +30,7 @@
 
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/handle.h>       // V-5c-2: PROC_HANDLE_MAX, asserted BY NAME
 #include <thylacine/notes.h>        // V-6b: the canonical note-name literals
 #include <thylacine/vivarium.h>
 
@@ -151,11 +156,12 @@ void test_vivarium_rejects_are_deliberate(void) {
                    (int)VIV_TIER2, "ppoll is T2 (V-5c; the ready-file fd swap)");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
-    // pselect6 is the sibling shape -- three fd_sets rather than a pollfd array
-    // -- and lands with its own reshape. Pinned as a deliberate FORWARD so
-    // promoting it is a decision rather than a drive-by.
+    // pselect6 is the sibling shape -- three fd_sets rather than a pollfd array.
+    // V-5c-1 pinned it as a deliberate FORWARD "so promoting it is a decision
+    // rather than a drive-by"; V-5c-2 is that decision, and this line changing
+    // is what made it one.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_PSELECT6, args, &out),
-                   (int)VIV_FORWARD, "pselect6 forwards until its fd_set reshape lands");
+                   (int)VIV_TIER2, "pselect6 is T2 (V-5c-2; the fd_set reshape)");
 
     // THE COLLISION RE-CHECK, made executable. These are the first two rows
     // BELOW the highest native syscall number, so the "above the ceiling"
@@ -1514,11 +1520,13 @@ void test_vivarium_ppoll_decide(void) {
     TEST_ASSERT(err == T_E_NOSYS,
                 "as ENOSYS -- the shape is unserved, the argument is not wrong");
 
-    // Linux reads nfds == 0 as a timed sleep. There is no native sleep syscall
-    // to route it to, and SYS_POLL rejects nfds == 0 outright.
+    // nfds == 0 is Linux's timed sleep, and it is SERVED -- it was refused until
+    // V-5c-2. SYS_POLL still rejects nfds == 0 (deliberately), so the decision
+    // this asserts is that the domain check must LET IT THROUGH for the caller
+    // to route to sys_poll_sleep_for rather than reject it here.
     err = -1;
-    TEST_ASSERT(!vivarium_ppoll_decide(0, 0, &err), "nfds == 0 is refused");
-    TEST_ASSERT(err == T_E_NOSYS, "as ENOSYS -- it is a sleep, not a poll");
+    TEST_ASSERT(vivarium_ppoll_decide(0, 0, &err), "nfds == 0 is served -- a sleep");
+    TEST_ASSERT(err == 0, "with no error");
 
     // This one IS a bad value: the native cap is a real bound a caller must
     // respect, so it gets the POSIX code for a bad argument.
@@ -1531,10 +1539,241 @@ void test_vivarium_ppoll_decide(void) {
     // signal semantics must learn that is the unserved part.
     err = -1;
     TEST_ASSERT(!vivarium_ppoll_decide(0, 0x40000000, &err),
-                "both wrong at once is refused");
+                "a sigmask is refused even on the sleep shape");
     TEST_ASSERT(err == T_E_NOSYS, "reporting the sigmask, which is checked first");
 
     TEST_ASSERT(!vivarium_ppoll_decide(1, 0, NULL), "NULL out_err is refused");
+}
+
+// V-5c-2: the pselect6 argument domain + the nfds clamp.
+void test_vivarium_pselect6_decide(void);
+void test_vivarium_pselect6_decide(void) {
+    s32 err = -1;
+    u32 n   = 99;
+
+    TEST_ASSERT(vivarium_pselect6_decide(8, 0, &n, &err), "8 fds, no sigmask, served");
+    TEST_ASSERT(err == 0 && n == 8, "nfds passes through untouched");
+
+    TEST_ASSERT(vivarium_pselect6_decide(0, 0, &n, &err), "nfds == 0 is served");
+    TEST_ASSERT(n == 0, "as zero -- the caller routes it to the sleep");
+
+    // Same refusal as ppoll's, same reason, same code.
+    err = -1;
+    TEST_ASSERT(!vivarium_pselect6_decide(8, 0x40000000, &n, &err),
+                "a sigmask pair pointer is refused");
+    TEST_ASSERT(err == T_E_NOSYS, "as ENOSYS -- unserved shape, not a bad value");
+
+    // nfds is an int, so negative is reachable and IS a bad value.
+    err = -1;
+    TEST_ASSERT(!vivarium_pselect6_decide(-1, 0, &n, &err), "negative nfds refused");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
+
+    // THE CLAMP, which is Linux's `if (n > max_fds) n = max_fds` and NOT an
+    // error. A bit above the fd table names an fd that cannot exist, so Linux
+    // simply does not scan it -- and neither do we.
+    err = -1;
+    TEST_ASSERT(vivarium_pselect6_decide(100000, 0, &n, &err),
+                "an absurd nfds is CLAMPED, not refused -- Linux does not error here");
+    TEST_ASSERT(n == PROC_HANDLE_MAX, "clamped to the fd table, not to FD_SETSIZE");
+    TEST_ASSERT(err == 0, "with no error");
+
+    // The clamp is at PROC_HANDLE_MAX, and the value below it must survive: this
+    // is the assertion that would have caught pouch's F-a, where the bound was
+    // copied as 64 and the kernel later moved it.
+    TEST_ASSERT(vivarium_pselect6_decide(200, 0, &n, &err) && n == 200,
+                "fd 199 is a perfectly ordinary handle -- 64 is NOT the ceiling");
+
+    TEST_ASSERT(!vivarium_pselect6_decide(1, 0, NULL, &err), "NULL out_nfds refused");
+    TEST_ASSERT(!vivarium_pselect6_decide(1, 0, &n, NULL),   "NULL out_err refused");
+}
+
+// V-5c-2: FDS_BYTES -- how much of an fd_set covers the low nfds bits.
+void test_vivarium_fdset_bytes(void);
+void test_vivarium_fdset_bytes(void) {
+    // Rounded up to whole 8-byte longs, which is what Linux's get_fd_set and
+    // set_fd_set touch. Copying more could fault on a caller that sized its
+    // allocation to its nfds; copying less would miss a requested bit.
+    TEST_ASSERT(vivarium_fdset_bytes(0)  == 0,  "no fds needs no bytes");
+    TEST_ASSERT(vivarium_fdset_bytes(1)  == 8,  "1 fd still rounds to a whole long");
+    TEST_ASSERT(vivarium_fdset_bytes(64) == 8,  "64 fds is exactly one long");
+    TEST_ASSERT(vivarium_fdset_bytes(65) == 16, "65 spills into a second");
+    TEST_ASSERT(vivarium_fdset_bytes(256) == 32, "the clamp ceiling is 4 longs");
+    TEST_ASSERT(vivarium_fdset_bytes(1024) == VIV_FD_SET_BYTES,
+                "a full fd_set is 128 bytes");
+    TEST_ASSERT(vivarium_fdset_bytes(100000) == VIV_FD_SET_BYTES,
+                "and it never exceeds the object, whatever it is asked");
+}
+
+// V-5c-2: the forward conversion, three fd_sets -> a pollfd array.
+void test_vivarium_fdset_to_pollfds(void);
+void test_vivarium_fdset_to_pollfds(void) {
+    u8 rd[VIV_FD_SET_BYTES], wr[VIV_FD_SET_BYTES], ex[VIV_FD_SET_BYTES];
+    struct pollfd out[POLL_MAX_NFDS];
+    u32 count = 99;
+    s32 err   = -1;
+
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0; wr[i] = 0; ex[i] = 0; }
+
+    // An fd in BOTH sets is ONE pollfd asking for both directions -- not two
+    // entries. That is what lets the reverse map count it twice later.
+    rd[0] = (u8)(1u << 3);             // fd 3 readable
+    wr[0] = (u8)((1u << 3) | (1u << 5)); // fd 3 writable, fd 5 writable
+    TEST_ASSERT(vivarium_fdset_to_pollfds(rd, wr, NULL, 8, out, POLL_MAX_NFDS,
+                                          &count, &err),
+                "a two-set scan converts");
+    TEST_ASSERT(count == 2, "fd 3 (both) and fd 5 (write) are TWO pollfds, not three");
+    TEST_ASSERT(out[0].fd == 3 && out[0].events == (POLLIN | POLLOUT),
+                "fd 3 asks for both directions in one entry");
+    TEST_ASSERT(out[1].fd == 5 && out[1].events == POLLOUT, "fd 5 asks to write");
+    TEST_ASSERT(out[0].revents == 0 && out[1].revents == 0, "revents starts clear");
+
+    // NULL sets are Linux's "I do not want this direction".
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0; wr[i] = 0; }
+    rd[0] = (u8)(1u << 1);
+    TEST_ASSERT(vivarium_fdset_to_pollfds(rd, NULL, NULL, 8, out, POLL_MAX_NFDS,
+                                          &count, &err),
+                "NULL write + NULL except is fine");
+    TEST_ASSERT(count == 1 && out[0].fd == 1 && out[0].events == POLLIN,
+                "only the read request survives");
+
+    // nfds BOUNDS THE SCAN. A bit above it is simply not looked at -- this is
+    // what makes the decide-stage clamp safe.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) rd[i] = 0;
+    rd[1] = (u8)(1u << 0);             // fd 8
+    TEST_ASSERT(vivarium_fdset_to_pollfds(rd, NULL, NULL, 8, out, POLL_MAX_NFDS,
+                                          &count, &err),
+                "a bit at fd 8 with nfds 8 converts");
+    TEST_ASSERT(count == 0, "and contributes nothing -- the range is [0, nfds)");
+    TEST_ASSERT(vivarium_fdset_to_pollfds(rd, NULL, NULL, 9, out, POLL_MAX_NFDS,
+                                          &count, &err) && count == 1,
+                "the same bit with nfds 9 does contribute");
+
+    // A HIGH fd VALUE IS FINE -- the ceiling is on the COUNT. This is pouch's
+    // F-a as an assertion: it would return EBADF here, and there is nothing
+    // wrong with polling fd 200.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) rd[i] = 0;
+    rd[25] = (u8)(1u << 0);            // fd 200
+    TEST_ASSERT(vivarium_fdset_to_pollfds(rd, NULL, NULL, 256, out,
+                                          POLL_MAX_NFDS, &count, &err),
+                "fd 200 converts -- a high fd VALUE is not an error");
+    TEST_ASSERT(count == 1 && out[0].fd == 200, "as one pollfd naming fd 200");
+
+    // ... and the count ceiling really does bite, on LOW fds.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) rd[i] = 0xFF;
+    err = -1;
+    TEST_ASSERT(!vivarium_fdset_to_pollfds(rd, NULL, NULL, POLL_MAX_NFDS + 1, out,
+                                           POLL_MAX_NFDS, &count, &err),
+                "65 contributing fds overflows the array");
+    TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
+
+    // EXCEPTFDS DECLINES. pouch maps it to POLLPRI, which native poll cannot
+    // report, so its select blocks forever on a pure-exceptfds wait instead of
+    // failing (F-b). Declining is the honest answer.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0; ex[i] = 0; }
+    ex[0] = (u8)(1u << 2);
+    err = -1;
+    TEST_ASSERT(!vivarium_fdset_to_pollfds(NULL, NULL, ex, 8, out, POLL_MAX_NFDS,
+                                           &count, &err),
+                "a SET exceptfds bit is refused");
+    TEST_ASSERT(err == T_E_NOSYS, "as ENOSYS -- there is no POLLPRI to map it to");
+
+    // An all-zero exceptfds is not a request and must pass -- select callers
+    // routinely pass a zeroed set they never check.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) ex[i] = 0;
+    rd[0] = (u8)(1u << 2);
+    TEST_ASSERT(vivarium_fdset_to_pollfds(rd, NULL, ex, 8, out, POLL_MAX_NFDS,
+                                          &count, &err) && count == 1,
+                "an all-zero exceptfds passes through");
+
+    // A set exceptfds bit ABOVE nfds is out of range and must not decline.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) ex[i] = 0;
+    ex[1] = (u8)(1u << 0);             // fd 8
+    TEST_ASSERT(vivarium_fdset_to_pollfds(rd, NULL, ex, 8, out, POLL_MAX_NFDS,
+                                          &count, &err),
+                "an exceptfds bit outside [0, nfds) is not a request");
+}
+
+// V-5c-2: the reverse conversion -- the asymmetric mapping and the BIT count.
+void test_vivarium_pollfds_to_fdset(void);
+void test_vivarium_pollfds_to_fdset(void) {
+    u8 rd[VIV_FD_SET_BYTES], wr[VIV_FD_SET_BYTES], ex[VIV_FD_SET_BYTES];
+    struct pollfd pfds[4];
+    u32 bits = 99;
+    s32 err  = -1;
+
+    // Pre-dirty the outputs: select OVERWRITES, so a stale bit must be cleared.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0xFF; wr[i] = 0xFF; ex[i] = 0xFF; }
+
+    // fd 3 asked both ways and is ready both ways -> TWO bits, ONE fd. This is
+    // the contract pouch's F-d gets wrong by counting fds.
+    pfds[0] = (struct pollfd){ .fd = 3, .events = POLLIN | POLLOUT,
+                               .revents = POLLIN | POLLOUT };
+    TEST_ASSERT(vivarium_pollfds_to_fdset(pfds, 1, rd, wr, ex, &bits, &err),
+                "a both-ways-ready fd converts");
+    TEST_ASSERT(bits == 2, "and counts TWICE -- the return is BITS, not fds");
+    TEST_ASSERT((rd[0] & (1u << 3)) != 0, "set in readfds");
+    TEST_ASSERT((wr[0] & (1u << 3)) != 0, "and in writefds");
+    TEST_ASSERT(rd[1] == 0 && wr[1] == 0 && ex[0] == 0,
+                "and every other byte was CLEARED -- select overwrites");
+
+    // THE ASYMMETRY. POLLHUP is in Linux's POLLIN_SET and NOT in POLLOUT_SET, so
+    // a hung-up fd asked about both ways comes back READABLE ONLY. pouch reports
+    // it writable too (F-c), commented "(Linux semantics)".
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0; wr[i] = 0; }
+    pfds[0] = (struct pollfd){ .fd = 2, .events = POLLIN | POLLOUT,
+                               .revents = POLLHUP };
+    TEST_ASSERT(vivarium_pollfds_to_fdset(pfds, 1, rd, wr, NULL, &bits, &err),
+                "a hung-up fd converts");
+    TEST_ASSERT((rd[0] & (1u << 2)) != 0, "POLLHUP reports READABLE");
+    TEST_ASSERT((wr[0] & (1u << 2)) == 0,
+                "and NOT writable -- POLLHUP is not in POLLOUT_SET");
+    TEST_ASSERT(bits == 1, "so it is one bit, not two");
+
+    // POLLERR is in BOTH sets, so an errored fd asked both ways comes back both.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0; wr[i] = 0; }
+    pfds[0] = (struct pollfd){ .fd = 4, .events = POLLIN | POLLOUT,
+                               .revents = POLLERR };
+    TEST_ASSERT(vivarium_pollfds_to_fdset(pfds, 1, rd, wr, NULL, &bits, &err),
+                "an errored fd converts");
+    TEST_ASSERT((rd[0] & (1u << 4)) != 0 && (wr[0] & (1u << 4)) != 0,
+                "POLLERR reports in BOTH directions");
+    TEST_ASSERT(bits == 2, "as two bits");
+
+    // ... but only in the directions the caller ASKED about. An errored fd the
+    // caller listed only in readfds must not appear in writefds.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0; wr[i] = 0; }
+    pfds[0] = (struct pollfd){ .fd = 4, .events = POLLIN, .revents = POLLERR };
+    TEST_ASSERT(vivarium_pollfds_to_fdset(pfds, 1, rd, wr, NULL, &bits, &err),
+                "a read-only-requested errored fd converts");
+    TEST_ASSERT((rd[0] & (1u << 4)) != 0, "reports readable");
+    TEST_ASSERT((wr[0] & (1u << 4)) == 0, "and NOT writable -- it was never asked");
+    TEST_ASSERT(bits == 1, "as one bit");
+
+    // POLLNVAL FAILS THE WHOLE CALL. poll reports a bad fd per-entry; select has
+    // no per-fd error channel, so POSIX makes it EBADF for everything.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0xAA; wr[i] = 0xAA; }
+    pfds[0] = (struct pollfd){ .fd = 1, .events = POLLIN, .revents = POLLIN };
+    pfds[1] = (struct pollfd){ .fd = 2, .events = POLLIN, .revents = POLLNVAL };
+    err = -1;
+    TEST_ASSERT(!vivarium_pollfds_to_fdset(pfds, 2, rd, wr, NULL, &bits, &err),
+                "POLLNVAL anywhere fails the call");
+    TEST_ASSERT(err == T_E_BADF, "as EBADF, not as a per-fd result");
+    TEST_ASSERT(rd[0] == 0xAA,
+                "and the caller's sets are UNTOUCHED -- Linux does not write "
+                "them back on an error");
+
+    // Nothing ready is a legal, common answer: zero bits and clear sets.
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0xFF; wr[i] = 0xFF; }
+    pfds[0] = (struct pollfd){ .fd = 1, .events = POLLIN, .revents = 0 };
+    TEST_ASSERT(vivarium_pollfds_to_fdset(pfds, 1, rd, wr, NULL, &bits, &err),
+                "a timed-out poll converts");
+    TEST_ASSERT(bits == 0, "with no bits");
+    TEST_ASSERT(rd[0] == 0 && wr[0] == 0, "and fully cleared sets");
+
+    TEST_ASSERT(!vivarium_pollfds_to_fdset(pfds, 1, rd, wr, NULL, NULL, &err),
+                "NULL out_bits refused");
+    TEST_ASSERT(!vivarium_pollfds_to_fdset(NULL, 1, rd, wr, NULL, &bits, &err),
+                "NULL pfds with a non-zero count refused");
 }
 
 // V-5b: the announce builder. The wildcard/concrete split is load-bearing --

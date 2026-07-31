@@ -122,6 +122,7 @@ const NR_ACCEPT4: u64 = 242;
 // and 73 collides with the NATIVE SYS_GETUID, which is safe only because a
 // PHENO_LINUX Proc can never reach a native number (kernel/vivarium.h).
 const NR_PPOLL: u64 = 73;
+const NR_PSELECT6: u64 = 72;
 const AF_INET: u64 = 2;
 const AF_INET6: u64 = 10;
 const SOCK_STREAM: u64 = 1;
@@ -995,11 +996,17 @@ unsafe fn run_linux() -> ! {
     let mut pfd = [PollFd { fd: rep as i32, events: POLLIN, revents: 0 }];
     let ts_zero: [i64; 2] = [0, 0];
 
-    // nfds == 0 is Linux for "sleep for the timeout". There is no native sleep
-    // to route it to, and SYS_POLL rejects nfds == 0 outright.
+    // nfds == 0 is Linux for "sleep for the timeout", and it is SERVED -- this
+    // leg asserted -ENOSYS until V-5c-2 taught the zero-fd forms to route to a
+    // real timed sleep. A zero timeout makes it a no-op that returns 0.
+    //
+    // THIS LEG PROVES PLUMBING, NOT BEHAVIOUR: a kernel that returned 0 without
+    // ever waiting would pass it, because nothing here can read a clock (the
+    // phenotype has no clock_gettime row). That the sleep actually SLEEPS is
+    // measured in `poll.sleep_for_waits`, where timer_now_ns() is reachable.
     leg!(
         rep,
-        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 0, ts_zero.as_ptr() as u64, 0, 8, 0) == -ENOSYS,
+        svc6(NR_PPOLL, pfd.as_mut_ptr() as u64, 0, ts_zero.as_ptr() as u64, 0, 8, 0) == 0,
         b"L97\n"
     );
     // Over the native cap: a genuinely out-of-range argument, so EINVAL.
@@ -1169,6 +1176,133 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_CLOSE, afd3 as u64, 0, 0) == 0, b"L122\n");
     leg!(rep, svc3(NR_CLOSE, cli3 as u64, 0, 0) == 0, b"L123\n");
     leg!(rep, svc3(NR_CLOSE, srv3 as u64, 0, 0) == 0, b"L124\n");
+
+    // --- V-5c-2: pselect6, the fd_set reshape -------------------------------
+    // Three 1024-bit bitmaps in, one pollfd array out, three bitmaps back. The
+    // conversion itself is unit-driven (vivarium.fdset_*); these legs prove the
+    // PLUMBING -- that x0..x5 arrive where the translator expects them, that the
+    // sets are read from and written back to the caller's own memory, and that
+    // the declines are reachable through a real syscall rather than only in a
+    // direct call to the pure function.
+    //
+    // fd_set is 128 bytes = 16 u64 words; bit `fd` lives in word fd/64.
+    let mut rdset: [u64; 16] = [0; 16];
+    let mut wrset: [u64; 16] = [0; 16];
+    let mut exset: [u64; 16] = [0; 16];
+
+    // A zero timeout, so every leg below returns without waiting.
+    let ts0: [i64; 2] = [0, 0];
+
+    // The rep fd is an ordinary open file, which POSIX says is ALWAYS ready --
+    // both for reading and for writing. So asking about it both ways must come
+    // back with BOTH bits set, and the return must be 2: the count is of BITS,
+    // not of fds, which is the contract a caller's "while (n--) find next bit"
+    // loop depends on.
+    rdset[(rep as usize) / 64] = 1u64 << ((rep as usize) % 64);
+    wrset[(rep as usize) / 64] = 1u64 << ((rep as usize) % 64);
+    let n_ready = svc6(
+        NR_PSELECT6,
+        (rep + 1) as u64,
+        rdset.as_mut_ptr() as u64,
+        wrset.as_mut_ptr() as u64,
+        0,
+        ts0.as_ptr() as u64,
+        0,
+    );
+    leg!(rep, n_ready == 2, b"L125\n");
+    leg!(
+        rep,
+        rdset[(rep as usize) / 64] & (1u64 << ((rep as usize) % 64)) != 0,
+        b"L126\n"
+    );
+    leg!(
+        rep,
+        wrset[(rep as usize) / 64] & (1u64 << ((rep as usize) % 64)) != 0,
+        b"L127\n"
+    );
+
+    // THE SETS ARE OVERWRITTEN, NOT MERGED. A bit the caller set for an fd that
+    // did NOT become ready must come home CLEAR -- that is how select reports.
+    // Bit 0 is asked about and is not a live fd here... which would be POLLNVAL
+    // and EBADF, so instead assert the property on a set the kernel never
+    // reports into: a zeroed exceptfds passed alongside a ready read.
+    rdset = [0; 16];
+    wrset = [0; 16];
+    exset = [0; 16];
+    rdset[(rep as usize) / 64] = 1u64 << ((rep as usize) % 64);
+    let n_ex = svc6(
+        NR_PSELECT6,
+        (rep + 1) as u64,
+        rdset.as_mut_ptr() as u64,
+        0,
+        exset.as_mut_ptr() as u64,
+        ts0.as_ptr() as u64,
+        0,
+    );
+    leg!(rep, n_ex == 1, b"L128\n");
+    leg!(rep, exset.iter().all(|w| *w == 0), b"L129\n");
+
+    // A SET exceptfds bit declines. There is no POLLPRI to map it to, and the
+    // alternative -- dropping it and polling the rest -- turns a pure exceptfds
+    // wait into an infinite block instead of an error.
+    exset = [0; 16];
+    exset[(rep as usize) / 64] = 1u64 << ((rep as usize) % 64);
+    leg!(
+        rep,
+        svc6(
+            NR_PSELECT6,
+            (rep + 1) as u64,
+            0,
+            0,
+            exset.as_mut_ptr() as u64,
+            ts0.as_ptr() as u64,
+            0,
+        ) == -ENOSYS,
+        b"L130\n"
+    );
+
+    // A sigmask declines for ppoll's reason -- the atomic mask swap has no
+    // counterpart. Note the sixth argument is a POINTER TO A PAIR, not a mask.
+    let sigpair: [u64; 2] = [0, 8];
+    leg!(
+        rep,
+        svc6(
+            NR_PSELECT6,
+            (rep + 1) as u64,
+            rdset.as_mut_ptr() as u64,
+            0,
+            0,
+            ts0.as_ptr() as u64,
+            sigpair.as_ptr() as u64,
+        ) == -ENOSYS,
+        b"L131\n"
+    );
+
+    // A negative nfds is Linux's own EINVAL.
+    leg!(
+        rep,
+        svc6(NR_PSELECT6, (-1i64) as u64, 0, 0, 0, ts0.as_ptr() as u64, 0) == -22,
+        b"L132\n"
+    );
+
+    // Every set NULL is the zero-fd form: `select(0, NULL, NULL, NULL, &tv)`,
+    // the classic portable sleep. With a zero timeout it is a no-op returning 0.
+    // (Like L97, this proves the ROUTING, not that the sleep sleeps -- that is
+    // measured in poll.sleep_for_waits, where a clock is reachable.)
+    leg!(
+        rep,
+        svc6(NR_PSELECT6, 0, 0, 0, 0, ts0.as_ptr() as u64, 0) == 0,
+        b"L133\n"
+    );
+
+    // An absurd nfds is CLAMPED, not refused -- Linux does the same, because a
+    // bit above the fd table names an fd that cannot exist. With no sets passed
+    // there is nothing to find, so this is the sleep form again.
+    leg!(
+        rep,
+        svc6(NR_PSELECT6, 100000, 0, 0, 0, ts0.as_ptr() as u64, 0) == 0,
+        b"L134\n"
+    );
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

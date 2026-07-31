@@ -373,3 +373,39 @@ unregister_and_return:
     }
     return ready_count;
 }
+
+// A cond that is never true, so the wait below can only end on its deadline (or
+// on a death-interrupt). Deliberately not `poll_any_ready` — there is nothing to
+// be ready.
+static int poll_never(void *arg) {
+    (void)arg;
+    return 0;
+}
+
+s64 sys_poll_sleep_for(s32 timeout_ms) {
+    // A zero-length sleep is a no-op, not a trip through the scheduler.
+    if (timeout_ms == 0) return 0;
+
+    struct Rendez r;
+    rendez_init(&r);
+
+    // The same deadline arithmetic as the slow path above, and it must stay the
+    // same: 0 is the "no deadline" sentinel, so a computed 0 (or a u64 wrap) has
+    // to be nudged off it or an intended wait becomes an infinite one.
+    u64 deadline_ns = 0;
+    if (timeout_ms > 0) {
+        u64 now = timer_now_ns();
+        u64 add = (u64)timeout_ms * 1000000ull;
+        u64 dl  = now + add;
+        if (dl < now) dl = (u64)-1ll;
+        if (dl == 0)  dl = 1;
+        deadline_ns = dl;
+    }
+
+    // Nothing will ever signal `r`, so this returns TSLEEP_TIMEDOUT on the
+    // deadline, or TSLEEP_INTR if the Proc is being terminated (#811). Both are
+    // "the wait is over"; the death case unwinds at the EL0 return tail, so
+    // there is nothing to report differently here.
+    (void)tsleep(&r, poll_never, NULL, deadline_ns);
+    return 0;
+}

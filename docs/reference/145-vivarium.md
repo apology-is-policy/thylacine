@@ -771,3 +771,77 @@ socket poll catches it, because an untranslated socket fd is an ordinary
 always-ready file and the leg expecting silence gets noise. Probe 4 fails at the
 unit layer before the in-guest leg can run -- the cheaper test catching it first,
 the same ordering V-5b saw.
+
+## V-5c-2 -- pselect6, the fd_set reshape
+
+`pselect6` is the one T2 row whose translation is a genuine change of
+*representation*: three 1024-bit bitmaps in, one pollfd array out, three bitmaps
+back. Everything else in the tier is a renumber, a flag map, or a struct copy.
+
+The socket->`ready` fd swap is not reimplemented. `viv_poll_translated` was
+factored out of V-5c-1's `viv_ppoll` and both rows call it, which forced one
+real change: the helper now RESTORES the caller's fd numbers rather than merely
+closing what it opened. For `ppoll` that is tidiness (the write-back touches only
+`revents`); for `pselect6` it is load-bearing, because `pfds[i].fd` is the BIT
+INDEX to set in the caller's `fd_set`, so a left-behind readiness handle would
+report the wrong fd as ready.
+
+### The prior art was wrong four times
+
+pouch's userspace `select()` (`0005-pouch-poll.patch`) performs this identical
+translation over native `SYS_POLL`. Measuring it before writing this was worth
+more than the writing -- every defect is a decision point here, and three of the
+four are directly asserted by the new unit tests (task #99):
+
+| pouch defect | What this does instead | Pinned by |
+|---|---|---|
+| **F-a** rejects any fd >= 64 with `EBADF` -- the bound copied from `PROC_HANDLE_MAX` when it was 64, left behind when `ffcc64b7` split it from `POLL_MAX_NFDS` (256 vs 64) | The ceiling is on the COUNT of contributing fds; fd 200 is an ordinary handle | `vivarium.fdset_to_pollfds`, "fd 200 converts" |
+| **F-b** maps `exceptfds` to `POLLPRI`, which native poll cannot report, so a pure-`exceptfds` wait blocks forever | A SET bit DECLINES with `ENOSYS`; NULL or all-zero passes | `vivarium.fdset_to_pollfds`, "a SET exceptfds bit is refused" |
+| **F-c** forwards `POLLHUP` into the write set, commented "(Linux semantics)" | `POLLIN_SET = POLLIN\|POLLHUP\|POLLERR`, `POLLOUT_SET = POLLOUT\|POLLERR` | `vivarium.pollfds_to_fdset`, "NOT writable" |
+| **F-d** returns a count of fds | A count of BITS -- an fd ready both ways counts twice | `vivarium.pollfds_to_fdset`, "counts TWICE" |
+
+F-a is the one with a real user (anything holding more than 64 open files) and
+the one whose lesson generalises: the constant was COPIED rather than NAMED, so
+when the kernel moved it the copy silently became a bug. `vivarium_pselect6_decide`
+references `PROC_HANDLE_MAX` by name for exactly that reason, and the same stale
+conflation was found and fixed in `poll.h`'s own comment while passing through.
+
+### The sleep that both forms needed
+
+`select(0, NULL, NULL, NULL, &tv)` is the classic portable sleep. V-5c-1 declined
+`ppoll`'s twin on the grounds that "there is no native sleep syscall to route it
+to" -- true, and one layer too high: there is no sleep *syscall*, but there has
+always been a sleep *primitive*. `sys_poll_sleep_for` is poll's own slow path
+with the fd array removed -- a private Rendez nothing can signal, a cond that is
+never true, and the same deadline arithmetic -- so it ends on its deadline or on
+a death-interrupt (#811), holding no lock, handle, or ref across the wait.
+
+`sys_poll_for_proc`'s `nfds == 0` rejection is deliberately NOT relaxed: it is a
+native ABI a native caller may rely on. This is a separate entry point.
+
+### Coverage
+
+Four new pure unit tests (`vivarium.pselect6_decide` / `fdset_bytes` /
+`fdset_to_pollfds` / `pollfds_to_fdset`), one measured kernel test
+(`poll.sleep_for_waits`), and ten in-guest legs (L125-L134). Suite 1264 -> 1269.
+
+`poll.sleep_for_waits` reads the clock ON PURPOSE. The in-guest leg can only
+assert that the call returns 0, which a kernel that never waited would also
+satisfy -- the phenotype has no `clock_gettime` row, so the guest cannot tell the
+difference. The unit test is the half that proves the sleep is a sleep.
+
+Revert-probed five ways, each failing at its own assertion:
+
+| Sabotage | Fails at |
+|---|---|
+| `POLLHUP` added to `POLLOUT_SET` | unit `vivarium.pollfds_to_fdset`, "NOT writable" |
+| The write-side bit stops incrementing (counts fds) | unit `vivarium.pollfds_to_fdset`, "counts TWICE" |
+| pouch's F-a reproduced (cap on fd VALUE) | unit `vivarium.fdset_to_pollfds`, "fd 200 converts" |
+| `sys_poll_sleep_for` returns without waiting | unit `poll.sleep_for_waits`, "actually waited" |
+| The table row reverted to `VIV_FORWARD` | in-guest **L125** -- unit suite fully GREEN |
+
+The last probe is the one worth keeping. With the table assertion neutralised so
+the probe could reach the guest, the unit suite passed **1269/1269** while the
+in-guest leg failed: the two layers genuinely see different bugs, which is the
+whole reason both exist. The unit tests prove the DECISION; the guest legs prove
+the PLUMBING; neither is a substitute for the other.

@@ -7833,39 +7833,27 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
 // evaporate together when process creation lands (VIVARIUM.md task #93); the
 // caching option becomes available then only if the fd-space problem above is
 // solved first.
-static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
-                     u64 sigmask_va) {
-    s32 err = 0;
-    if (!vivarium_ppoll_decide(nfds, sigmask_va, &err)) return -(s64)err;
-
-    // A NULL timespec is Linux for "block indefinitely", which is the native
-    // negative timeout.
-    s32 timeout_ms = -1;
-    if (tmo_va != 0) {
-        // Linux's struct timespec is two 8-byte fields; t_timespec matches it
-        // field-for-field, so this is a copy rather than a conversion.
-        struct t_timespec ts;
-        if (!sys_validate_user_buf(tmo_va, sizeof(ts)))         return -(s64)T_E_FAULT;
-        if (uaccess_copy_in(&ts, tmo_va, sizeof(ts)) != 0)      return -(s64)T_E_FAULT;
-        if (!vivarium_timespec_to_ms(ts.tv_sec, ts.tv_nsec, &timeout_ms, &err))
-            return -(s64)err;
-    }
-
-    u64 buf_bytes = nfds * sizeof(struct pollfd);
-    if (!sys_validate_user_buf(fds_va, buf_bytes))      return -(s64)T_E_FAULT;
-
-    struct pollfd kfds[POLL_MAX_NFDS];
-    u8 *kbytes = (u8 *)kfds;
-    for (u64 i = 0; i < buf_bytes; i++) {
-        if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0) return -(s64)T_E_FAULT;
-    }
-
-    // Translate each socket fd to a freshly-opened readiness fd, remembering
-    // which entries we opened so every one is closed on every exit below.
+// Poll a pollfd array on the guest's behalf: translate each /net socket fd to a
+// freshly-opened readiness fd, run the native poll, then close every fd opened
+// and PUT THE CALLER'S OWN fd NUMBERS BACK.
+//
+// The restore is load-bearing for pselect6 and merely tidy for ppoll, which is
+// why it lives here rather than in either caller. ppoll writes back only the
+// `revents` field, so a readiness handle left in `kfds[i].fd` would never reach
+// the guest; pselect6 uses `kfds[i].fd` as the BIT INDEX to set in the caller's
+// fd_set, so a left-behind readiness handle would report the wrong fd as ready.
+// One shared helper, one invariant: on return, kfds[] holds the caller's fds.
+static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
+                               s32 timeout_ms) {
     struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
     s32  opened[POLL_MAX_NFDS];
+    s32  orig[POLL_MAX_NFDS];
     bool any_socket = false;
-    for (u64 i = 0; i < nfds; i++) opened[i] = -1;
+
+    for (u64 i = 0; i < nfds; i++) {
+        opened[i] = -1;
+        orig[i]   = kfds[i].fd;
+    }
 
     if (tab) {
         for (u64 i = 0; i < nfds; i++) {
@@ -7886,7 +7874,9 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
                 // open -- a dead connection, or a /net that went away. POLLNVAL
                 // is the POSIX answer for an fd that cannot be polled, and it is
                 // per-pollfd: one broken socket must not fail the whole call for
-                // the fds beside it.
+                // the fds beside it. (pselect6 then turns that POLLNVAL into a
+                // whole-call EBADF, which is select's own contract -- the split
+                // belongs to the caller, not here.)
                 kfds[i].fd = -1;
                 continue;
             }
@@ -7919,19 +7909,144 @@ static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
 
     s64 result = sys_poll_for_proc(p, kfds, nfds, timeout_ms);
 
-    // Restore the caller's own fd numbers BEFORE anything else looks at kfds:
-    // the write-back only touches revents, but a future reader of this array
-    // must not see readiness handles where the guest wrote sockets.
+    // Close what we opened and restore what the caller wrote -- on EVERY path,
+    // including the error one, because the transient fds must not outlive the
+    // call and the caller's array must not carry our handles back out.
     for (u64 i = 0; i < nfds; i++) {
         if (opened[i] >= 0) {
             handle_close(p, (hidx_t)opened[i]);
             opened[i] = -1;
         }
+        kfds[i].fd = orig[i];
     }
+
+    return result;
+}
+
+// Read a Linux `struct timespec *` into a native millisecond timeout, with NULL
+// meaning "block indefinitely" (the native negative timeout). Shared by ppoll
+// and pselect6, which take the identical argument.
+static bool viv_timeout_from_timespec(u64 tmo_va, s32 *out_ms, s32 *out_err) {
+    if (tmo_va == 0) { *out_ms = -1; return true; }
+
+    // Linux's struct timespec is two 8-byte fields; t_timespec matches it
+    // field-for-field, so this is a copy rather than a conversion.
+    struct t_timespec ts;
+    if (!sys_validate_user_buf(tmo_va, sizeof(ts)) ||
+        uaccess_copy_in(&ts, tmo_va, sizeof(ts)) != 0) {
+        *out_err = (s32)T_E_FAULT;
+        return false;
+    }
+    return vivarium_timespec_to_ms(ts.tv_sec, ts.tv_nsec, out_ms, out_err);
+}
+
+static s64 viv_ppoll(struct Proc *p, u64 fds_va, u64 nfds, u64 tmo_va,
+                     u64 sigmask_va) {
+    s32 err = 0;
+    if (!vivarium_ppoll_decide(nfds, sigmask_va, &err)) return -(s64)err;
+
+    s32 timeout_ms = -1;
+    if (!viv_timeout_from_timespec(tmo_va, &timeout_ms, &err)) return -(s64)err;
+
+    // nfds == 0 is Linux's "sleep for the timeout". The native poll rejects it
+    // (deliberately -- see sys_poll_sleep_for), so it routes to the sleep rather
+    // than declining as it did before V-5c-2.
+    if (nfds == 0) return sys_poll_sleep_for(timeout_ms);
+
+    u64 buf_bytes = nfds * sizeof(struct pollfd);
+    if (!sys_validate_user_buf(fds_va, buf_bytes))      return -(s64)T_E_FAULT;
+
+    struct pollfd kfds[POLL_MAX_NFDS];
+    u8 *kbytes = (u8 *)kfds;
+    for (u64 i = 0; i < buf_bytes; i++) {
+        if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0) return -(s64)T_E_FAULT;
+    }
+
+    s64 result = viv_poll_translated(p, kfds, nfds, timeout_ms);
 
     if (result < 0) return result;
     if (poll_writeback_revents(fds_va, kfds, nfds) != 0) return -(s64)T_E_FAULT;
     return result;
+}
+
+// pselect6(nfds, readfds, writefds, exceptfds, tmo, sigmask_and_size)
+//   -> count of ready BITS.
+//
+// The conversion is entirely in kernel/vivarium.c and unit-driven; this shell is
+// uaccess plus the poll call. The only judgement here is the ORDER, which is
+// chosen so that a call destined to fail does so before touching anything:
+// decide, then timeout, then read the sets, then translate-and-poll, and only
+// then write the sets back.
+//
+// THE SIXTH ARGUMENT IS A POINTER TO A PAIR, not a mask. aarch64 caps a syscall
+// at six registers and pselect6 needs seven things, so Linux packs the last two
+// into `struct { const sigset_t *ss; size_t ss_len; }` and passes its address.
+// A NULL sixth argument is unambiguously "no signal mask"; anything non-NULL is
+// declined without being dereferenced, since a non-NULL pair holding a NULL ss
+// is a distinction we do not need to make in order to say no.
+static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
+                        u64 ex_va, u64 tmo_va, u64 sigmask_va) {
+    s32 err   = 0;
+    u32 nfds  = 0;
+    if (!vivarium_pselect6_decide((s64)nfds_arg, sigmask_va, &nfds, &err))
+        return -(s64)err;
+
+    s32 timeout_ms = -1;
+    if (!viv_timeout_from_timespec(tmo_va, &timeout_ms, &err)) return -(s64)err;
+
+    // Copy in only the bytes covering [0, nfds) -- see vivarium_fdset_bytes.
+    // Zeroed in full so the scan and the write-back both see defined bytes even
+    // where the caller's object was shorter than the whole 128.
+    u8 rd[VIV_FD_SET_BYTES], wr[VIV_FD_SET_BYTES], ex[VIV_FD_SET_BYTES];
+    for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) { rd[i] = 0; wr[i] = 0; ex[i] = 0; }
+
+    u32 set_bytes = vivarium_fdset_bytes(nfds);
+    struct { u64 va; u8 *buf; } sets[3] = {
+        { rd_va, rd }, { wr_va, wr }, { ex_va, ex },
+    };
+    if (set_bytes != 0) {
+        for (u32 s = 0; s < 3; s++) {
+            if (sets[s].va == 0) continue;
+            if (!sys_validate_user_buf(sets[s].va, set_bytes) ||
+                uaccess_copy_in(sets[s].buf, sets[s].va, set_bytes) != 0)
+                return -(s64)T_E_FAULT;
+        }
+    }
+
+    struct pollfd kfds[POLL_MAX_NFDS];
+    u32 count = 0;
+    if (!vivarium_fdset_to_pollfds(rd_va ? rd : NULL, wr_va ? wr : NULL,
+                                   ex_va ? ex : NULL, nfds, kfds,
+                                   POLL_MAX_NFDS, &count, &err))
+        return -(s64)err;
+
+    // No fd contributes: `select(0, NULL, NULL, NULL, &tv)`, the classic
+    // portable sleep, and equally `select(n, ...)` with every set empty. Nothing
+    // to poll and nothing to write back -- the sets are already all-zero, which
+    // is exactly what select reports when nothing became ready.
+    if (count == 0) return sys_poll_sleep_for(timeout_ms);
+
+    s64 result = viv_poll_translated(p, kfds, count, timeout_ms);
+    if (result < 0) return result;
+
+    u32 bits = 0;
+    if (!vivarium_pollfds_to_fdset(kfds, count, rd_va ? rd : NULL,
+                                   wr_va ? wr : NULL, ex_va ? ex : NULL,
+                                   &bits, &err))
+        return -(s64)err;
+
+    // Write back last. A fault here has already consumed the wait, but the
+    // caller's sets are its only channel for the answer, so there is nothing to
+    // report but EFAULT -- the same position every copy-out syscall is in.
+    for (u32 s = 0; s < 3; s++) {
+        if (sets[s].va == 0) continue;
+        for (u32 i = 0; i < set_bytes; i++) {
+            if (uaccess_store_u8(sets[s].va + i, sets[s].buf[i]) != 0)
+                return -(s64)T_E_FAULT;
+        }
+    }
+
+    return (s64)bits;
 }
 
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
@@ -8202,6 +8317,13 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         // read only via the sigmask decline, which needs no size -- Linux itself
         // skips that check when the mask is NULL.
         return viv_ppoll(p, args[0], args[1], args[2], args[3]);
+
+    case VIV_LINUX_PSELECT6:
+        // pselect6(nfds, rd, wr, ex, tmo, sigmask_and_size): x0..x5 -- the one
+        // row that uses all six argument registers, which is why the signal
+        // mask arrives packed behind a pointer.
+        return viv_pselect6(p, args[0], args[1], args[2], args[3], args[4],
+                            args[5]);
 
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That
