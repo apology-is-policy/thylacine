@@ -129,6 +129,28 @@ enum {
     VIV_LINUX_RT_SIGTIMEDWAIT = 137,
     VIV_LINUX_RT_SIGQUEUEINFO = 138,
     VIV_LINUX_RT_SIGRETURN    = 139,
+
+    // The socket family (V-5, section 5.5). Contiguous in Linux's aarch64
+    // table; aarch64 has no socketcall multiplexer, so each is its own number.
+    // All are above 100, the highest assigned NATIVE syscall number, so the
+    // collision re-check the ARCH section 25.4 row mandates is discharged by
+    // construction for every row here.
+    VIV_LINUX_SOCKET      = 198,
+    VIV_LINUX_SOCKETPAIR  = 199,
+    VIV_LINUX_BIND        = 200,
+    VIV_LINUX_LISTEN      = 201,
+    VIV_LINUX_ACCEPT      = 202,
+    VIV_LINUX_CONNECT     = 203,
+    VIV_LINUX_GETSOCKNAME = 204,
+    VIV_LINUX_GETPEERNAME = 205,
+    VIV_LINUX_SENDTO      = 206,
+    VIV_LINUX_RECVFROM    = 207,
+    VIV_LINUX_SETSOCKOPT  = 208,
+    VIV_LINUX_GETSOCKOPT  = 209,
+    VIV_LINUX_SHUTDOWN    = 210,
+    VIV_LINUX_SENDMSG     = 211,
+    VIV_LINUX_RECVMSG     = 212,
+    VIV_LINUX_ACCEPT4     = 242,
 };
 
 // -----------------------------------------------------------------------------
@@ -617,6 +639,136 @@ bool viv_signote_default_is_ignore(enum viv_signote note);
 struct viv_sigtab {
     struct viv_ksigaction act[VIV_SIGNOTE_COUNT];
 };
+
+// -----------------------------------------------------------------------------
+// SOCKETS (V-5) -- the per-Proc socket table.
+//
+// Linux fuses into one fd what /net splits across three files, so a translated
+// socket carries state no fd and no path can hold. docs/VIVARIUM.md section 5.5
+// has the design and the measurements; the short version:
+//
+//   socket()  open /net/<proto>/clone -> the fid BECOMES ctl; read it for N
+//   connect() write the verb to ctl; open .../N/data; SWAP the fd onto data
+//   read/write/close  untranslated -- T1 rows on an ordinary Spoor fd
+//
+// `N` is re-readable from ctl, but only while the fd still IS ctl. `proto` is
+// knowable ONLY at socket(), where the guest passes SOCK_STREAM/SOCK_DGRAM and
+// never mentions it again. Recovering it later would mean decoding netd's qid
+// layout -- REFUSED, because /net is a mount point that need not be netd, and
+// decoding a foreign server's qid as netd's is exactly the silent
+// mistranslation the argument-domain rule exists to forbid. So proto is
+// REMEMBERED. That is the whole reason this table exists.
+// -----------------------------------------------------------------------------
+
+// The /net protocol directories. Values are internal (never crossing to EL0),
+// so they are ordinals, not an ABI.
+enum viv_net_proto {
+    VIV_NET_TCP = 0,
+    VIV_NET_UDP = 1,
+};
+
+// A socket's lifecycle position. FRESH means the fd still denotes `ctl`;
+// CONNECTED means it has been swapped onto `data`. The distinction is what
+// tells a second connect() from a first (Linux: EISCONN) and what tells
+// getsockname() whether an endpoint exists yet.
+enum viv_sock_state {
+    VIV_SOCK_FREE      = 0,   // the entry is not in use (zeroed table = all free)
+    VIV_SOCK_FRESH     = 1,
+    VIV_SOCK_CONNECTED = 2,
+};
+
+// Bounded: a guest must not be able to grow kernel memory without bound (the
+// I-32 posture). 64 is generous against PROC_HANDLE_MAX (256) while keeping the
+// table under a page; a guest that exhausts it gets EMFILE, which is a POSIX
+// answer rather than an extinction.
+#define VIV_SOCK_MAX 64u
+
+struct viv_sock {
+    s32 fd;      // the guest's fd; < 0 when the entry is free
+    u8  proto;   // enum viv_net_proto
+    u8  state;   // enum viv_sock_state
+    u16 _pad;
+    u32 n;       // the /net connection number
+    u32 _pad2;
+};
+
+_Static_assert(sizeof(struct viv_sock) == 16, "viv_sock pinned at 16 bytes");
+
+// The per-Proc table (Proc.socktab). Lazily allocated on the first translated
+// socket(), CAS-installed, freed at proc_free, NOT rfork-inherited -- the
+// viv_sigtab shape exactly.
+//
+// LOCK-FREE, AND WHY (the same argument sigtab carries, and the same warning).
+// Entries are read and written with no lock. That is sound because a
+// PHENO_LINUX Proc CANNOT SPAWN A THREAD -- clone/clone3 are not table rows, so
+// they FORWARD to ENOSYS -- and a single-threaded Proc has no peer to race.
+// This is a property of the TRANSLATION TABLE, not of the data, and it
+// EVAPORATES the moment process creation lands (VIVARIUM.md task #93).
+// Re-derive it there; do not assume this comment still holds.
+struct viv_socktab {
+    struct viv_sock s[VIV_SOCK_MAX];
+};
+
+// Find the entry for `fd`, or NULL. PURE + NULL-safe.
+struct viv_sock *viv_socktab_find(struct viv_socktab *tab, s32 fd);
+
+// Claim a free entry for `fd` in state FRESH. Returns the entry, or NULL if the
+// table is full (-> EMFILE) or `tab` is NULL. Does NOT check for a duplicate
+// fd: the caller has just been handed that fd by handle_alloc, so it cannot
+// already be in the table -- an entry left behind by a closed fd would be the
+// close-hook bug this table's drop path exists to prevent, and a duplicate here
+// would be its symptom rather than its cause.
+struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
+                                   enum viv_net_proto proto, u32 n);
+
+// Release the entry for `fd`, if any. Idempotent -- an fd with no entry (a
+// plain file, or a socket already dropped) is a no-op, which is what lets the
+// close hook run unconditionally for a phenotyped Proc.
+void viv_socktab_drop(struct viv_socktab *tab, s32 fd);
+
+// Decide whether a `socket(domain, type, protocol)` is inside the translatable
+// domain, and if so which /net protocol directory it names. PURE.
+//
+// THE ARGUMENT DOMAIN. AF_INET only: AF_INET6 has no /net representation at
+// v1.0 and is refused honestly (EAFNOSUPPORT) rather than silently served as
+// v4. SOCK_STREAM -> tcp, SOCK_DGRAM -> udp; SOCK_SEQPACKET/SOCK_RAW have no
+// /net analogue. `protocol` must be 0 or the family default (IPPROTO_TCP/UDP);
+// anything else names a protocol netd does not speak.
+//
+// SOCK_NONBLOCK/SOCK_CLOEXEC in the type word are REFUSED rather than ignored:
+// a guest that asks for a non-blocking socket and silently gets a blocking one
+// hangs where it expected EAGAIN, which is the mistranslation this tier exists
+// to prevent. (Both are v1.x rows -- NONBLOCK needs a /net readiness story,
+// CLOEXEC needs an exec that preserves fds.)
+//
+// Returns true + writes *out_proto when translatable; false leaves *out_proto
+// untouched and the caller answers the errno in *out_err.
+bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
+                            enum viv_net_proto *out_proto, s32 *out_err);
+
+// The /net protocol directory name for a proto ("tcp" / "udp"). PURE; never
+// NULL for a value the decide function produced.
+const char *vivarium_net_proto_dir(enum viv_net_proto proto);
+
+// Parse a Linux `struct sockaddr_in` (already copied into kernel memory) into
+// its four address octets + host-order port. PURE.
+//
+// Returns false when the family is not AF_INET, the length is short, or the
+// port is 0 (netd's dial parser rejects it, and a connect to port 0 is
+// meaningless) -- so a malformed address can never reach the ctl writer.
+bool vivarium_sockaddr_in_parse(const u8 *sa, u64 salen,
+                                u8 out_ip4[4], u16 *out_port);
+
+// Build a netd ctl command line: "<verb> a.b.c.d!port". PURE. Returns the
+// length written, or 0 if it would not fit (which the caller must treat as a
+// refusal, never as a zero-length write).
+u32 vivarium_net_cmd_ipport(char *buf, u32 buflen, const char *verb,
+                            const u8 ip4[4], u16 port);
+
+// Parse the decimal connection number netd returns when a `clone`/`ctl` fid is
+// read. PURE. Returns false on empty, non-decimal, or out-of-range input --
+// which the caller must treat as a protocol failure rather than connection 0.
+bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n);
 
 // The reverse step: which note kind is this note NAME? PURE.
 //

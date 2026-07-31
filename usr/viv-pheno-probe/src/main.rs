@@ -111,6 +111,20 @@ const NR_READ: u64 = 63;
 const NR_WRITE: u64 = 64;
 const NR_NEWFSTATAT: u64 = 79;
 const NR_FSTAT: u64 = 80;
+// The socket family (V-5). aarch64 has no socketcall; each is its own number.
+const NR_SOCKET: u64 = 198;
+const NR_CONNECT: u64 = 203;
+const AF_INET: u64 = 2;
+const AF_INET6: u64 = 10;
+const SOCK_STREAM: u64 = 1;
+const SOCK_DGRAM: u64 = 2;
+const SOCK_NONBLOCK: u64 = 0o4000;
+const SOCK_SEQPACKET: u64 = 5;
+// POSIX errno values a Linux libc compares against (musl generic bits/errno.h).
+const ENOTSOCK: i64 = 88;
+const EPROTONOSUPPORT: i64 = 93;
+const EAFNOSUPPORT: i64 = 97;
+const EISCONN: i64 = 106;
 const NR_EXIT_GROUP: u64 = 94;
 const NR_BRK: u64 = 214;
 const NR_MUNMAP: u64 = 215;
@@ -652,6 +666,107 @@ unsafe fn run_linux() -> ! {
     // handler is running), while -ENOSYS would mean the interception is gone --
     // in which case every real handler would run once and never return.
     leg!(rep, svc4(NR_RT_SIGRETURN, 0, 0, 0, 0) == -1, b"L38\n");
+
+    // --- V-5a: sockets -----------------------------------------------------
+    // The container's manifest grants /net, so these run against the LIVE netd
+    // through the guest's own territory -- which is the point: a translated
+    // socket call reaches exactly what this Proc could reach by opening /net
+    // by hand (I-43), and nothing more.
+
+    // The argument domain, refused BEFORE anything touches /net. Each errno is
+    // one a Linux program acts on differently, so collapsing them to EINVAL
+    // would change behaviour, not just the message.
+    leg!(
+        rep,
+        svc3(NR_SOCKET, AF_INET6, SOCK_STREAM, 0) == -EAFNOSUPPORT,
+        b"L39\n"
+    );
+    leg!(
+        rep,
+        svc3(NR_SOCKET, AF_INET, SOCK_SEQPACKET, 0) == -EPROTONOSUPPORT,
+        b"L40\n"
+    );
+    // SOCK_NONBLOCK is REFUSED, not silently dropped. A guest that asked for a
+    // non-blocking socket and got a blocking one blocks where it expected
+    // EAGAIN -- the exact mistranslation the argument domain exists to prevent.
+    leg!(
+        rep,
+        svc3(NR_SOCKET, AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0) == -22,
+        b"L41\n"
+    );
+
+    // A real UDP socket. UDP is the deterministic choice: netd's udp_connect
+    // binds a local port and records the remote with NO handshake, so this
+    // proves the whole path without needing a peer or a live network.
+    let sfd = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    leg!(rep, sfd >= 0, b"L42\n");
+
+    // The fd currently denotes the connection's `ctl` file. Record its qid.
+    let mut cst = core::mem::zeroed::<LinuxStat>();
+    leg!(
+        rep,
+        svc3(NR_FSTAT, sfd as u64, &mut cst as *mut LinuxStat as u64, 0) == 0,
+        b"L43\n"
+    );
+    let ctl_ino = cst.st_ino;
+
+    // connect() to 127.0.0.1:9 (discard). sockaddr_in: family LE, port NETWORK
+    // order, then the four address octets.
+    let sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0, 9, // sin_port = 9, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    leg!(
+        rep,
+        svc3(NR_CONNECT, sfd as u64, sa.as_ptr() as u64, sa.len() as u64) == 0,
+        b"L44\n"
+    );
+
+    // THE FD IDENTITY CHANGE, observed. The same fd number now denotes the
+    // connection's `data` file -- a DIFFERENT object with a different qid. This
+    // is the mechanism the whole design rests on: after this point read/write
+    // on this fd are untranslated T1 rows on an ordinary Spoor.
+    let mut dst = core::mem::zeroed::<LinuxStat>();
+    leg!(
+        rep,
+        svc3(NR_FSTAT, sfd as u64, &mut dst as *mut LinuxStat as u64, 0) == 0,
+        b"L45\n"
+    );
+    leg!(rep, dst.st_ino != ctl_ino, b"L46\n");
+
+    // A second connect is EISCONN, which means the socktab state advanced --
+    // not merely that the fd changed.
+    leg!(
+        rep,
+        svc3(NR_CONNECT, sfd as u64, sa.as_ptr() as u64, sa.len() as u64) == -EISCONN,
+        b"L47\n"
+    );
+
+    // connect() on an fd that is not a socket is ENOTSOCK, not a dial written
+    // to some unrelated file.
+    leg!(
+        rep,
+        svc3(NR_CONNECT, rep as u64, sa.as_ptr() as u64, sa.len() as u64) == -ENOTSOCK,
+        b"L48\n"
+    );
+
+    // THE CLOSE HOOK, live. Close the socket, then confirm the fd index no
+    // longer resolves to a socket. Without the hook the entry would survive,
+    // and a later connect() on whatever reused this index would dial a
+    // stranger's connection.
+    leg!(rep, svc3(NR_CLOSE, sfd as u64, 0, 0) == 0, b"L49\n");
+    leg!(
+        rep,
+        svc3(NR_CONNECT, sfd as u64, sa.as_ptr() as u64, sa.len() as u64) == -ENOTSOCK,
+        b"L50\n"
+    );
+
+    // And the table recycles: a fresh socket still works after the close.
+    let sfd2 = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    leg!(rep, sfd2 >= 0, b"L51\n");
+    leg!(rep, svc3(NR_CLOSE, sfd2 as u64, 0, 0) == 0, b"L52\n");
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

@@ -977,7 +977,8 @@ VIVEOF
     },
     "annotations": {
         "org.thylacine.phenotype": "linux",
-        "org.thylacine.sigpipe-selftest": "yes"
+        "org.thylacine.sigpipe-selftest": "yes",
+        "org.thylacine.net": "granted"
     }
 }
 VIVEOF

@@ -602,6 +602,13 @@ void proc_free(struct Proc *p) {
     kfree(p->sigtab);
     p->sigtab = NULL;
 
+    // VIVARIUM V-5: release the per-Proc Linux socket table, same discipline.
+    // The entries hold no references -- a socket's ctl/data Spoors live in the
+    // handle table and were released by the handle-table teardown above, so
+    // this frees the (proto, N) bookkeeping only and can never orphan a fid.
+    kfree(p->socktab);
+    p->socktab = NULL;
+
     // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
     // free in the rolling-ASID model -- the Proc's context_id is simply
     // dropped; its hardware ASID value stays reserved in the current

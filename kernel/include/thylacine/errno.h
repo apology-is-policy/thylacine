@@ -196,6 +196,57 @@
 // ECANCELED.
 #define T_E_CANCELED   125
 
+// ---------------------------------------------------------------------------
+// The socket family (VIVARIUM V-5, docs/VIVARIUM.md section 5.5).
+//
+// Appended under the precedent this file already records twice -- T_E_NODEV
+// (Menagerie build-arc 4) and T_E_CANCELED (Loom-5): a sub-chunk appends a
+// POSIX-FIXED errno when it is executing already-ratified scripture. The
+// socket family was user-voted 2026-07-31, and section 5.5 has carried
+// "AF_INET6 -> EAFNOSUPPORT at v1.0, honestly" since V-0's signoff, so the
+// name was ratified before the number was needed.
+//
+// The VALUES are not a choice: every one is read from
+// third_party/musl/arch/generic/bits/errno.h, which is what a Linux guest's
+// libc will compare against. They are pinned below like every other entry.
+//
+// Why the phenotype needs its own errnos at all: a Linux program distinguishes
+// these, and collapsing them (to EINVAL, say) would make a guest retry a
+// connection that can never succeed, or treat a full table as a bad argument.
+// The whole point of the boundary-line is that the guest's own error handling
+// keeps working.
+// ---------------------------------------------------------------------------
+
+// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full.
+// POSIX: EMFILE.
+#define T_E_MFILE      24
+
+// The fd is not a socket. Returned when a socket call names an fd with no
+// socktab entry -- a plain file, or a socket whose entry was dropped.
+// POSIX: ENOTSOCK.
+#define T_E_NOTSOCK    88
+
+// Protocol not supported: a SOCK_* type or IPPROTO_* the /net tree has no
+// directory for (SOCK_SEQPACKET, SOCK_RAW, a mismatched protocol number).
+// POSIX: EPROTONOSUPPORT.
+#define T_E_PROTONOSUPPORT 93
+
+// Address family not supported -- AF_INET6 and everything that is not
+// AF_INET. POSIX: EAFNOSUPPORT.
+#define T_E_AFNOSUPPORT 97
+
+// The socket is already connected: a second connect() on a CONNECTED entry.
+// POSIX: EISCONN.
+#define T_E_ISCONN     106
+
+// The socket is not connected -- a getpeername()/shutdown() on an entry still
+// in FRESH. POSIX: ENOTCONN.
+#define T_E_NOTCONN    107
+
+// Connection refused. netd rejected the dial, or the data open failed after
+// the connect verb was accepted. POSIX: ECONNREFUSED.
+#define T_E_CONNREFUSED 111
+
 // ABI pins: changing a value here is an ABI break. The boundary-line
 // patch (and any future POSIX-aware userspace) depends on these
 // matching the AArch64 POSIX errno numbers.
@@ -204,6 +255,15 @@ _Static_assert(T_E_PERM      == 1,   "T_E_PERM ABI pin (POSIX EPERM)");
 _Static_assert(T_E_NOENT     == 2,   "T_E_NOENT ABI pin (POSIX ENOENT)");
 _Static_assert(T_E_SRCH      == 3,   "T_E_SRCH ABI pin (POSIX ESRCH)");
 _Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)");
+// The V-5 socket family. Values read from musl's generic bits/errno.h, which
+// is what a Linux guest's libc compares against.
+_Static_assert(T_E_MFILE          == 24,  "T_E_MFILE ABI pin (POSIX EMFILE)");
+_Static_assert(T_E_NOTSOCK        == 88,  "T_E_NOTSOCK ABI pin (POSIX ENOTSOCK)");
+_Static_assert(T_E_PROTONOSUPPORT == 93,  "T_E_PROTONOSUPPORT ABI pin (POSIX EPROTONOSUPPORT)");
+_Static_assert(T_E_AFNOSUPPORT    == 97,  "T_E_AFNOSUPPORT ABI pin (POSIX EAFNOSUPPORT)");
+_Static_assert(T_E_ISCONN         == 106, "T_E_ISCONN ABI pin (POSIX EISCONN)");
+_Static_assert(T_E_NOTCONN        == 107, "T_E_NOTCONN ABI pin (POSIX ENOTCONN)");
+_Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNREFUSED)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");

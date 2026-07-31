@@ -467,3 +467,111 @@ Revert-probed three ways, each failing at its own layer: removing the
 `rt_sigreturn` interception kills the guest outright (its restorer's `svc`
 returns `-ENOSYS` into a `brk`); removing the delivery arm fails exactly the
 handler-ran leg; zeroing the frame's saved `pc` fails the pure unit test.
+
+---
+
+## Sockets -- the fd that changes what it means (V-5a)
+
+`docs/VIVARIUM.md` section 5.5 is the design; this is what landed.
+
+A Linux socket is one fd. A `/net` connection is three files (`ctl`, `data`, and
+the metadata leaves) under a directory that netd mints on demand. Reconciling
+them is the whole of V-5a, and the shape follows from five properties of netd
+that were **measured, not assumed** -- each of them is a place the obvious
+design would have been wrong:
+
+| measured | consequence |
+|---|---|
+| opening `clone` mints a connection and rebinds that fid onto its `ctl`; the fid holds the connection's **only** reference (`slot_ref` 0->1) | the socket fd must survive until something else binds the connection -- dropping it early *frees* the connection |
+| opening a TCP `data` file **defers** its `Rlopen` until ESTABLISHED (#257) | `data` cannot be pre-opened at `socket()`; it opens only after the dial |
+| **any** fid on the connection holds a reference (`fid_set`/`fid_clunk`) | once `data` is open, `ctl` is disposable |
+| reading a `ctl` fid yields N in decimal (`file_content`: `FK_CTL => push_dec(n)`) | the connection number is recoverable from the fd -- while the fd is still `ctl` |
+| `read`/`write`/`close` are **T1 renumber rows** | if the socket fd *is* the `data` fd, the entire data path needs no translation at all |
+
+So the socket fd **changes what it denotes at `connect`**: `ctl` from `socket()`
+onward, `data` afterwards. That is what keeps the hot path free, and it is why
+`handle_replace` exists -- `handle_dup` allocates a *new* slot, and
+close-then-alloc cannot reserve the index against a peer thread.
+
+### What the kernel has to remember, and why it is not more
+
+`Proc.socktab` holds `(proto, N, state)` per socket, in the `Proc.sigtab` shape:
+lazily allocated, CAS-installed, freed at `proc_free`, not `rfork`-inherited,
+bounded at `VIV_SOCK_MAX`.
+
+It is the *minimum*, and the two ways to avoid it were both examined:
+
+- **`N`** is re-readable from `ctl` -- but only while the fd still is `ctl`,
+  which stops being true at exactly the moment the rest of the socket's life
+  begins.
+- **`proto`** is knowable only at `socket()`. Recovering it later means decoding
+  netd's qid layout (`CONN_FLAG | proto<<32 | N<<8 | filekind`), and that is
+  **refused**: `/net` is a mount point and need not be netd. Decoding a foreign
+  server's qid as netd's is precisely the silent mistranslation the
+  argument-domain rule exists to forbid, so `proto` is remembered instead.
+- **`Spoor.path`** would carry the name, and is forbidden by **I-33**, which
+  makes path retention explicitly non-load-bearing.
+
+### Why this is in the kernel, and why I-43 is structural here
+
+Every `/net` operation goes through `sys_open_kpath_for_proc` -- the same
+resolution core `SYS_OPEN` uses, **extracted rather than duplicated** so a
+socket open passes through the same `stalk`, the same per-component
+`perm_check`, and the same omode-derived rights as any other open. A translated
+socket call therefore reaches exactly what the guest could reach by opening
+`/net` by hand; a container whose territory has no `/net` gets a walk failure,
+not a bypass.
+
+That is also the finding that dissolved V-3 (section 4.1.1): the multi-step
+orchestration sockets need is an argument against a *ring*, not against the
+kernel doing the work with the caller's own authority.
+
+### The argument domain
+
+`AF_INET` only. `SOCK_STREAM` -> `tcp`, `SOCK_DGRAM` -> `udp`. `AF_INET6` is
+`EAFNOSUPPORT` and `SOCK_SEQPACKET`/`SOCK_RAW` are `EPROTONOSUPPORT` -- distinct
+errnos because a Linux program acts on them differently, and collapsing them to
+`EINVAL` would make a guest retry an address that can never work.
+
+`SOCK_NONBLOCK` and `SOCK_CLOEXEC` in the type word are **refused, not masked
+off**. A guest that asks for a non-blocking socket and silently receives a
+blocking one blocks where it expected `EAGAIN`.
+
+Landed as honest declines with their reasons in the table: `setsockopt`/
+`getsockopt` (`/net` exposes no option surface, and answering "success" to a
+`TCP_NODELAY` nothing honours is the silent lie this tier exists to prevent),
+`socketpair`, `sendmsg`/`recvmsg` (scatter-gather plus `SCM_RIGHTS`, which is
+I-4's domain). `bind`/`listen`/`accept` are V-5b; `shutdown`/`getsockname`/
+`getpeername`/`sendto`/`recvfrom` are V-5a's remainder.
+
+### The close hook -- the sharpest bug this chunk could have had
+
+`close()` stays a T1 row falling through to the native handler, so fd teardown
+keeps one implementation. The socktab entry is dropped by a **hook** in
+`viv_linux_dispatch`, before the translation runs.
+
+Without it, `close()` frees the fd *index* while the entry survives; the next
+fd-creating syscall gets that index back; and a later `connect()` finds a stale
+entry and writes a dial verb **to a stranger's connection**. The hook is
+unconditional for a phenotyped Proc and `viv_socktab_drop` is a no-op for an fd
+with no entry, so an ordinary file's close costs one NULL test.
+
+### Coverage
+
+Six pure unit tests (`vivarium.socket_domain` / `sockaddr` / `net_cmd` /
+`conn_n` / `socktab` / `socktab_close_hook`) plus `handles.replace`, and
+fourteen in-guest legs (L39-L52) against the **live** netd through the
+container's own territory -- the bundle declares `org.thylacine.net: granted`.
+
+UDP is the deterministic choice for the live legs: netd's `udp_connect` binds a
+local port and records the remote with **no handshake**, so the whole path is
+proven without a peer or a live network. The identity change is observed
+directly -- `fstat` before and after `connect` returns different `st_ino`,
+because `ctl` and `data` are different qids.
+
+Revert-probed five ways, each failing at its own layer and nowhere else:
+letting `handle_replace` inherit the outgoing slot's rights fails the I-6
+assertion; removing its outgoing-kind gate fails the I-5 one; leaving a stale
+socktab entry fails the close-hook regression; skipping the connect swap (while
+still reporting success) fails in-guest **L46** and only L46; removing the close
+hook fails in-guest **L50**.

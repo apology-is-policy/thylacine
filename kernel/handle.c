@@ -461,6 +461,57 @@ int handle_close(struct Proc *p, hidx_t h) {
     return 0;
 }
 
+// VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in
+// place. The header carries the rationale + the invariant argument; this body
+// is close's capture-under-lock followed by an install into the SAME slot,
+// with the outgoing release outside the lock exactly as close does it.
+int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                   rights_t rights, void *obj) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+
+    if (h < 0 || h >= PROC_HANDLE_MAX)      return -1;
+    if (!valid_alloc_args(kind, rights))    return -1;
+
+    // The narrow gate (I-5 / I-6, header). Checked BEFORE the lock and before
+    // anything is disturbed, so a refusal leaves the caller's reference intact
+    // and the table untouched. The outgoing kind is checked under the lock,
+    // where it can be read without racing a peer's close.
+    if (kind != KOBJ_SPOOR)                 return -1;
+
+    spin_lock(&t->lock);
+    struct Handle *slot = &t->slots[h];
+    if (slot->magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    if (slot->kind != KOBJ_SPOOR) {
+        // Refuse to replace anything but a Spoor. A hardware slot in
+        // particular must not be reachable here: quietly dropping a
+        // KObj_MMIO/IRQ/DMA/PCI handle out of a live fd is a lifetime event
+        // I-5 gives no path for, and this primitive is not the place to
+        // invent one.
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    enum kobj_kind old_kind = slot->kind;
+    void          *old_obj  = slot->obj;
+
+    // Overwrite in place. The index does not change, which is the entire
+    // point -- the guest is holding this number. Rights come from the caller
+    // (derived from the incoming object's open mode); the outgoing slot's
+    // rights are DISCARDED, never OR'd or inherited.
+    slot->kind   = kind;
+    slot->rights = rights;
+    slot->obj    = obj;
+    spin_unlock(&t->lock);
+
+    // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and after
+    // the new object is already installed, so the slot is never momentarily
+    // empty for a peer thread to allocate into.
+    handle_release_obj(old_kind, old_obj);
+    return 0;
+}
+
 int handle_get(struct Proc *p, hidx_t h, struct Handle *out) {
     // Zero the snapshot first so every -1 path leaves a clean, put-safe struct
     // (handle_put treats magic != HANDLE_MAGIC as a no-op).

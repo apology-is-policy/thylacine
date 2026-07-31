@@ -2927,16 +2927,22 @@ s64 sys_clock_settime_handler(u64 clk_id, u64 ts_va, u64 a2, u64 a3) {
     return 0;
 }
 
-static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
-                            u64 path_len_raw, u64 omode_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                          return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                          return -1;
-
-    if (path_len_raw == 0)                           return -1;
-    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -1;
-    if (!sys_validate_user_buf(path_va, path_len_raw)) return -1;
+// VIVARIUM V-5: the resolution + install core, taking the path in KERNEL
+// memory. sys_open_handler is this with a user-buffer copy in front; the
+// phenotype's socket translators call it directly with paths they built
+// themselves ("/net/tcp/clone", "/net/tcp/7/data").
+//
+// EXTRACTED RATHER THAN DUPLICATED, which the I-43 row requires of every T2
+// shell: there is exactly ONE implementation of "resolve a path in this Proc's
+// Territory and install the result as an fd", so a socket open passes through
+// the same stalk, the same per-component perm_check, and the same
+// omode-derived rights as any other open. A second copy would be a second
+// place for a gate to go missing.
+static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
+                                   const char *kpath, u64 klen, u64 omode_raw) {
+    if (!p || !kpath)                                return -1;
+    if (klen == 0)                                   return -1;
+    if (klen > SYS_OPEN_PATH_MAX)                    return -1;
     if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID) return -1;
 
     // Resolve the base Spoor (BORROWED — stalk never refs/clunks it). FROM_ROOT
@@ -2955,18 +2961,7 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
         if (!start)                                  return -1;
     }
 
-    // Copy the path into kernel scratch + reject embedded NUL (truncation /
-    // wire-leak vector). '/' is ALLOWED here (multi-component) — stalk
-    // tokenizes it. The scratch is one byte over so the NUL terminator below
-    // is always writable even at the max length.
-    char path_scratch[SYS_OPEN_PATH_MAX + 1];
-    for (u64 i = 0; i < path_len_raw; i++) {
-        u8 b;
-        if (uaccess_load_u8(path_va + i, &b) != 0)   { spoor_clunk(start); return -1; }
-        if (b == '\0')                               { spoor_clunk(start); return -1; }
-        path_scratch[i] = (char)b;
-    }
-    path_scratch[path_len_raw] = '\0';
+    const char *path_scratch = kpath;
 
     // LS-4: a RELATIVE path with the FROM_ROOT sentinel resolves against the
     // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). Join dot + path into
@@ -2981,9 +2976,9 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     // `f/` and even `nonexistent/..` opened successfully.
     char joined[SYS_OPEN_PATH_MAX + 1];
     const char *rpath = path_scratch;
-    u64 rlen = path_len_raw;
+    u64 rlen = klen;
     if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT && path_scratch[0] != '/') {
-        int jl = territory_join_cwd(p->territory, path_scratch, path_len_raw,
+        int jl = territory_join_cwd(p->territory, path_scratch, klen,
                                     joined, sizeof(joined));
         if (jl < 0) { spoor_clunk(start); return -1; }
         rpath = joined;
@@ -3023,6 +3018,37 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
         return -1;
     }
     return (s64)fd;
+}
+
+// SYS_OPEN: the user-buffer front half of sys_open_kpath_for_proc. Everything
+// below the copy -- base resolution, the cwd join, stalk, rights, install --
+// lives in the core so the phenotype's kernel-path callers share it exactly.
+static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
+                            u64 path_len_raw, u64 omode_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -1;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -1;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -1;
+
+    // Copy the path into kernel scratch + reject embedded NUL (truncation /
+    // wire-leak vector). '/' is ALLOWED here (multi-component) — stalk
+    // tokenizes it. The scratch is one byte over so the NUL terminator below
+    // is always writable even at the max length.
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -1;
+        if (b == '\0')                               return -1;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    return sys_open_kpath_for_proc(p, start_fd_raw, path_scratch,
+                                   path_len_raw, omode_raw);
 }
 
 // =============================================================================
@@ -7323,6 +7349,215 @@ static struct viv_sigtab *viv_sigtab_of(struct Proc *p) {
     return expected;
 }
 
+// =============================================================================
+// SOCKETS (V-5) -- the impure half. docs/VIVARIUM.md section 5.5.
+//
+// Every /net operation here goes through sys_open_kpath_for_proc, which is the
+// SAME resolution core SYS_OPEN uses: the caller's Territory, the caller's
+// per-component perm_check, the caller's omode-derived rights. That is what
+// makes I-43 structural for sockets -- a translated socket call reaches
+// exactly what the guest could reach by opening /net by hand, and a container
+// whose territory has no /net gets a walk failure rather than a bypass.
+// =============================================================================
+
+// The socket table's lazy allocator -- viv_sigtab_of's twin, same CAS shape.
+static struct viv_socktab *viv_socktab_of(struct Proc *p) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    if (tab) return tab;
+
+    struct viv_socktab *cand =
+        (struct viv_socktab *)kzalloc(sizeof(struct viv_socktab), 0);
+    if (!cand) return NULL;
+
+    // A KP_ZERO table has every entry state == VIV_SOCK_FREE, which is right,
+    // but fd == 0 -- and 0 is a VALID fd. Stamp the free marker so a lookup for
+    // fd 0 cannot match an unused entry. (find() also tests state, so this is
+    // belt-and-braces; it costs one pass at first socket() and removes the need
+    // for every future reader to remember the ordering.)
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) cand->s[i].fd = -1;
+
+    struct viv_socktab *expected = NULL;
+    if (__atomic_compare_exchange_n(&p->socktab, &expected, cand, false,
+                                    __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+        return cand;
+
+    kfree(cand);            // lost the race; `expected` is the winner
+    return expected;
+}
+
+// Build "/net/<proto>/<tail>" or "/net/<proto>/<n>/<tail>" into `buf`.
+// Returns the length, or 0 on overflow (which every caller treats as a
+// refusal). Kernel-side only -- these paths are constructed, never echoed
+// from the guest, so there is no injection surface: `proto` comes from a
+// two-value enum and `n` is a u32 rendered as decimal.
+static u32 viv_net_path(char *buf, u32 buflen, enum viv_net_proto proto,
+                        bool have_n, u32 n, const char *tail) {
+    const char *pd  = vivarium_net_proto_dir(proto);
+    u32         off = 0;
+
+    #define VIV_PUT(s) do {                                   \
+        for (u32 i_ = 0; (s)[i_] != '\0'; i_++) {             \
+            if (off >= buflen) return 0;                      \
+            buf[off++] = (s)[i_];                             \
+        }                                                     \
+    } while (0)
+
+    VIV_PUT("/net/");
+    VIV_PUT(pd);
+    if (off >= buflen) return 0;
+    buf[off++] = '/';
+    if (have_n) {
+        char dec[11];
+        u32  dn = 0;
+        u32  v  = n;
+        if (v == 0) dec[dn++] = '0';
+        while (v > 0 && dn < sizeof(dec) - 1) { dec[dn++] = (char)('0' + (v % 10)); v /= 10; }
+        for (u32 i = 0; i < dn; i++) {
+            if (off >= buflen) return 0;
+            buf[off++] = dec[dn - 1 - i];
+        }
+        if (off >= buflen) return 0;
+        buf[off++] = '/';
+    }
+    VIV_PUT(tail);
+    #undef VIV_PUT
+
+    if (off >= buflen) return 0;   // room for the NUL the core does not need
+    buf[off] = '\0';               //   but a mis-sized caller would
+    return off;
+}
+
+// socket(domain, type, protocol) -> fd.
+//
+// Opens /net/<proto>/clone ORDWR. netd's clone idiom rebinds that fid onto the
+// new connection's `ctl`, and that fid holds the connection's ONLY reference
+// (slot_ref 0->1) -- so this fd must survive until connect() binds `data`, and
+// dropping it early frees the connection. Reading it yields N.
+static s64 viv_sock_socket(struct Proc *p, u64 domain, u64 type, u64 protocol) {
+    enum viv_net_proto proto;
+    s32                derr = 0;
+    if (!vivarium_socket_decide(domain, type, protocol, &proto, &derr))
+        return -(s64)derr;
+
+    // The table is claimed BEFORE the open would otherwise succeed, so a full
+    // table costs nothing on /net. (A claim needs the fd, so the order is:
+    // check room, open, claim -- see the rollback below if the claim still
+    // fails, which it cannot today but would if VIV_SOCK_MAX were raced.)
+    struct viv_socktab *tab = viv_socktab_of(p);
+    if (!tab) return -(s64)T_E_NOMEM;
+
+    char path[64];
+    u32  plen = viv_net_path(path, sizeof(path), proto, false, 0, "clone");
+    if (plen == 0) return -(s64)T_E_INVAL;
+
+    s64 fd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                     2u /* ORDWR */);
+    if (fd < 0) {
+        // No /net in this territory, or netd refused the mint. ENETDOWN would
+        // be a guess about which; the walk's own errno is the honest answer,
+        // and a Linux caller handles ENOENT/EACCES from socket() poorly enough
+        // that translating to ENETDOWN would hide a namespace mistake.
+        return fd;
+    }
+
+    // Read N off the ctl fid -- the documented Plan 9 idiom, and netd serves it
+    // (file_content: FK_CTL => push_dec(n)).
+    u8  nbuf[16];
+    s64 got = spoor_read_common(p, (hidx_t)fd, nbuf, sizeof(nbuf), false, 0);
+    u32 n   = 0;
+    if (got <= 0 || !vivarium_parse_conn_n((const char *)nbuf, (u32)got, &n)) {
+        handle_close(p, (hidx_t)fd);
+        return -(s64)T_E_IO;       // a /net that does not speak the idiom
+    }
+
+    if (!viv_socktab_claim(tab, (s32)fd, proto, n)) {
+        handle_close(p, (hidx_t)fd);   // drops the ctl ref -> netd frees the conn
+        return -(s64)T_E_MFILE;
+    }
+    return fd;
+}
+
+// connect(fd, addr, addrlen).
+//
+// Writes the dial verb to `ctl` (which the fd currently IS), opens `data`, and
+// SWAPS the fd onto data. Ordering is load-bearing in both directions:
+//   * data cannot be opened before the verb -- netd DEFERS the Rlopen until
+//     ESTABLISHED (#257), so an early open would block on a socket that is not
+//     going anywhere;
+//   * ctl cannot be released before data is open -- it holds the connection's
+//     only reference, and netd frees the connection at zero.
+// handle_replace does both correctly by construction: it installs the new
+// object first and releases the old one after.
+static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen) {
+    struct viv_socktab *tab = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+    struct viv_sock    *e   = viv_socktab_find(tab, (s32)(s64)fd_raw);
+    if (!e)                       return -(s64)T_E_NOTSOCK;
+    if (e->state == VIV_SOCK_CONNECTED) return -(s64)T_E_ISCONN;
+
+    // Copy the sockaddr into kernel memory before looking at it -- the parse is
+    // pure and must never read user memory twice (a peer thread rewriting it
+    // between the family check and the address read is the classic TOCTOU).
+    if (addrlen == 0 || addrlen > 128)                  return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(addr_va, addrlen))       return -(s64)T_E_FAULT;
+    u8 sa[128];
+    for (u64 i = 0; i < addrlen; i++) {
+        if (uaccess_load_u8(addr_va + i, &sa[i]) != 0)  return -(s64)T_E_FAULT;
+    }
+
+    u8  ip4[4];
+    u16 port = 0;
+    if (!vivarium_sockaddr_in_parse(sa, addrlen, ip4, &port)) {
+        // Wrong family is EAFNOSUPPORT; a short/degenerate address is EINVAL.
+        // Telling them apart matters: a guest that gets EINVAL for an AF_INET6
+        // address retries it.
+        u16 fam = (u16)((u16)sa[0] | ((u16)sa[1] << 8));
+        return (fam != 2) ? -(s64)T_E_AFNOSUPPORT : -(s64)T_E_INVAL;
+    }
+
+    char cmd[48];
+    u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
+    if (clen == 0)                return -(s64)T_E_INVAL;
+
+    s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
+    if (w < 0)                    return -(s64)T_E_CONNREFUSED;
+
+    char path[64];
+    u32  plen = viv_net_path(path, sizeof(path),
+                             (enum viv_net_proto)e->proto, true, e->n, "data");
+    if (plen == 0)                return -(s64)T_E_INVAL;
+
+    // BLOCKS for TCP until ESTABLISHED (netd's deferred Rlopen). That is the
+    // correct POSIX shape for a blocking connect(), and it is why SOCK_NONBLOCK
+    // is refused at socket() rather than silently ignored.
+    s64 dfd = sys_open_kpath_for_proc(p, SYS_WALK_OPEN_FROM_ROOT, path, plen,
+                                      2u /* ORDWR */);
+    if (dfd < 0)                  return -(s64)T_E_CONNREFUSED;
+
+    // Take the data Spoor OUT of its temporary fd and put it in the socket's
+    // fd. handle_get holds a ref across the move so the object cannot be freed
+    // between the two steps.
+    struct Handle dh;
+    if (handle_get(p, (hidx_t)dfd, &dh) < 0) {
+        handle_close(p, (hidx_t)dfd);
+        return -(s64)T_E_IO;
+    }
+    // The ref handle_get took becomes the socket fd's ref; closing the
+    // temporary fd drops the temporary's own ref, leaving exactly one.
+    struct Spoor *dsp = (struct Spoor *)dh.obj;
+    rights_t      dr  = dh.rights;
+    spoor_ref(dsp);                       // the ref handle_replace will install
+    handle_put(&dh);                      // release the borrowed one
+    handle_close(p, (hidx_t)dfd);         // retire the temporary fd
+
+    if (handle_replace(p, (hidx_t)fd_raw, KOBJ_SPOOR, dr, dsp) < 0) {
+        spoor_clunk(dsp);
+        return -(s64)T_E_IO;
+    }
+
+    e->state = VIV_SOCK_CONNECTED;
+    return 0;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
@@ -7560,6 +7795,14 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         return 0;
     }
 
+    case VIV_LINUX_SOCKET:
+        // socket(domain, type, protocol): x0, x1, x2.
+        return viv_sock_socket(p, args[0], args[1], args[2]);
+
+    case VIV_LINUX_CONNECT:
+        // connect(fd, addr, addrlen): x0 fd, x1 addr, x2 addrlen.
+        return viv_sock_connect(p, args[0], args[1], args[2]);
+
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That
         // is a table/shell disagreement -- fail closed, never dispatch.
@@ -7595,6 +7838,26 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
 
     u64 args[VIV_NARGS];
     for (u32 i = 0; i < VIV_NARGS; i++) args[i] = ctx->regs[i];
+
+    // V-5: close() releases the socket table entry before the native close
+    // runs. This is a HOOK rather than a T2 row on purpose -- close must stay a
+    // T1 renumber that falls through to the native handler, so the fd teardown
+    // itself keeps exactly one implementation.
+    //
+    // WITHOUT THIS the fd index is freed while its (proto, N) entry survives,
+    // and the next fd-creating syscall gets that index back -- so a later
+    // connect() on an unrelated file would find a stale entry and write a dial
+    // verb to a STRANGER'S connection. It is the sharpest bug this chunk can
+    // have, which is why the drop happens here, unconditionally, before the
+    // close can possibly succeed.
+    //
+    // viv_socktab_drop is a no-op for an fd with no entry (every ordinary
+    // file), and the table pointer is read without allocating, so a guest that
+    // never made a socket pays one NULL test per close.
+    if (ctx->regs[8] == VIV_LINUX_CLOSE) {
+        struct viv_socktab *st = __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+        if (st) viv_socktab_drop(st, (s32)(s64)ctx->regs[0]);
+    }
 
     struct viv_call call;
     switch (vivarium_translate(ctx->regs[8], args, &call)) {

@@ -241,6 +241,7 @@ void test_handles_dup_lifecycle(void);
 void test_handles_full_table_oom(void);
 void test_handles_kind_classifiers(void);
 void test_handles_srv_kind(void);
+void test_handles_replace(void);
 void test_vmo_create_close_round_trip(void);
 void test_vmo_refcount_lifecycle(void);
 void test_vmo_map_unmap_lifecycle(void);
@@ -579,7 +580,13 @@ void test_vivarium_signote_deliverable(void);            // VIVARIUM V-6b
 void test_vivarium_sigtab(void);                         // VIVARIUM V-6b
 void test_vivarium_notemask_to_sigset(void);             // VIVARIUM V-6b
 void test_vivarium_signote_reverse(void);                 // VIVARIUM V-6c
-void test_vivarium_sigframe(void);                        // VIVARIUM V-6c
+void test_vivarium_sigframe(void);
+void test_vivarium_socket_domain(void);
+void test_vivarium_sockaddr(void);
+void test_vivarium_net_cmd(void);
+void test_vivarium_conn_n(void);
+void test_vivarium_socktab(void);
+void test_vivarium_socktab_close_hook(void);                        // VIVARIUM V-6c
 void test_cons_drain_feed_runs_discipline(void);     // G-4
 void test_cons_drain_overflow_drops_oldest(void);    // G-4
 void test_cons_drain_close_and_reopen_epoch(void);   // G-4
@@ -1576,6 +1583,7 @@ struct test_case g_tests[] = {
     { "handles.full_table_oom",        test_handles_full_table_oom,        false, NULL },
     { "handles.kind_classifiers",      test_handles_kind_classifiers,      false, NULL },
     { "handles.srv_kind",              test_handles_srv_kind,              false, NULL },
+    { "handles.replace",               test_handles_replace,               false, NULL },
     { "burrow.create_close_round_trip",   test_vmo_create_close_round_trip,   false, NULL },
     { "burrow.refcount_lifecycle",        test_vmo_refcount_lifecycle,        false, NULL },
     { "burrow.map_unmap_lifecycle",       test_vmo_map_unmap_lifecycle,       false, NULL },
@@ -1984,6 +1992,12 @@ struct test_case g_tests[] = {
     { "vivarium.notemask_to_sigset",     test_vivarium_notemask_to_sigset,     false, NULL },
     { "vivarium.signote_reverse",       test_vivarium_signote_reverse,       false, NULL },
     { "vivarium.sigframe",              test_vivarium_sigframe,              false, NULL },
+    { "vivarium.socket_domain",        test_vivarium_socket_domain,        false, NULL },
+    { "vivarium.sockaddr",             test_vivarium_sockaddr,             false, NULL },
+    { "vivarium.net_cmd",              test_vivarium_net_cmd,              false, NULL },
+    { "vivarium.conn_n",               test_vivarium_conn_n,               false, NULL },
+    { "vivarium.socktab",              test_vivarium_socktab,              false, NULL },
+    { "vivarium.socktab_close_hook",   test_vivarium_socktab_close_hook,   false, NULL },
     { "cons.drain_feed_runs_discipline", test_cons_drain_feed_runs_discipline, false, NULL },
     { "cons.drain_overflow_drops_oldest", test_cons_drain_overflow_drops_oldest, false, NULL },
     { "cons.drain_close_and_reopen_epoch", test_cons_drain_close_and_reopen_epoch, false, NULL },

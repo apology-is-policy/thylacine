@@ -229,6 +229,44 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
 
+// Swap what a LIVE handle denotes, in place, keeping the same slot index.
+// Returns 0 on success, -1 on any refusal (out-of-range h, empty slot, bad
+// args, or a kind outside the permitted pair). On success the outgoing object
+// is released exactly once; on any refusal nothing is touched and the caller
+// still owns the reference it passed in.
+//
+// WHY THIS EXISTS, AND WHY IT IS THIS NARROW (VIVARIUM V-5, docs/VIVARIUM.md
+// section 5.5.1). A Linux `connect()` must turn the guest's socket fd from the
+// /net connection's `ctl` file into its `data` file, and the guest is holding a
+// SPECIFIC fd number it will then read()/write(). handle_dup cannot serve --
+// it allocates a NEW slot. close-then-alloc cannot serve either: the freed
+// index is not reserved, so a peer thread's fd-creating syscall can take it.
+//
+// KOBJ_SPOOR -> KOBJ_SPOOR ONLY. This is deliberately narrower than "not a
+// hardware kind", because the primitive has exactly one caller and a narrow
+// gate is a cheap audit. Widening it means re-deriving these, none of which
+// the current restriction has to argue:
+//
+//   * I-5 (hardware handles are non-transferable): with hw kinds excluded on
+//     BOTH sides, no path here can make a KObj_MMIO/IRQ/DMA/PCI handle appear
+//     at, or vanish from, an arbitrary fd. A widened version would have to.
+//   * I-6 (rights reduce monotonically): rights come from the CALLER, which
+//     derives them from the incoming object's open mode exactly as
+//     sys_open_handler does. They are NEVER inherited from the outgoing slot
+//     -- inheriting would let a READ-only ctl fd become a WRITE-capable data
+//     fd for free, which is a monotonicity break dressed as a convenience.
+//   * The #844 lock discipline: the slot swap happens under t->lock so a peer
+//     thread sees either the old object or the new one, never a torn slot;
+//     the outgoing release runs OUTSIDE the lock because it may sleep
+//     (spoor_clunk's Dev close hook).
+//
+// There is NO EL0 caller and there must not be one: this is reached only from
+// the phenotype's socket translators, which have already validated the guest's
+// arguments. Exposing it as a syscall would be a new ABI with none of the
+// above applied by whoever called it.
+int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                   rights_t rights, void *obj);
+
 // Look up a handle into a caller-owned snapshot, with a reference HELD on
 // the underlying kobj. Returns 0 on success (*out filled: kind / rights /
 // obj, magic == HANDLE_MAGIC, and the obj's refcount bumped so it stays alive

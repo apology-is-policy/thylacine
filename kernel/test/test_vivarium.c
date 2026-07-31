@@ -1127,3 +1127,213 @@ void test_vivarium_sigframe(void) {
                 "NULL regs -> zeroed register block, no fault");
     TEST_ASSERT(g.info.si_signo == (s32)VIV_SIGPIPE, "second build is clean");
 }
+
+// =============================================================================
+// SOCKETS (V-5). The pure half: the argument domain, the address parse, the
+// command builder, the connection-number parse, and the table.
+// =============================================================================
+
+void test_vivarium_socket_domain(void);
+void test_vivarium_socket_domain(void) {
+    enum viv_net_proto proto = (enum viv_net_proto)0xff;
+    s32 err = 0;
+
+    // The two admitted shapes.
+    TEST_ASSERT(vivarium_socket_decide(2, 1, 0, &proto, &err) && proto == VIV_NET_TCP,
+                "AF_INET + SOCK_STREAM -> tcp");
+    TEST_ASSERT(vivarium_socket_decide(2, 2, 0, &proto, &err) && proto == VIV_NET_UDP,
+                "AF_INET + SOCK_DGRAM -> udp");
+    // The family default protocol number is the same call.
+    TEST_ASSERT(vivarium_socket_decide(2, 1, 6, &proto, &err) && proto == VIV_NET_TCP,
+                "IPPROTO_TCP is the STREAM default, not a different socket");
+    TEST_ASSERT(vivarium_socket_decide(2, 2, 17, &proto, &err) && proto == VIV_NET_UDP,
+                "IPPROTO_UDP is the DGRAM default");
+
+    // AF_INET6 declines with the errno a guest can act on -- NOT EINVAL, which
+    // would make it retry the same address.
+    TEST_ASSERT(!vivarium_socket_decide(10, 1, 0, &proto, &err), "AF_INET6 declines");
+    TEST_ASSERT(err == T_E_AFNOSUPPORT, "AF_INET6 -> EAFNOSUPPORT, not EINVAL");
+    TEST_ASSERT(!vivarium_socket_decide(1, 1, 0, &proto, &err), "AF_UNIX declines here");
+    TEST_ASSERT(err == T_E_AFNOSUPPORT, "AF_UNIX -> EAFNOSUPPORT (the /srv path is pouch's)");
+
+    // The type-word flags are REFUSED, not masked off. This is the leg that
+    // matters: silently dropping SOCK_NONBLOCK gives the guest a blocking
+    // socket where it expected EAGAIN.
+    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 04000, 0, &proto, &err),
+                "SOCK_NONBLOCK is refused, never ignored");
+    TEST_ASSERT(err == T_E_INVAL, "SOCK_NONBLOCK -> EINVAL");
+    TEST_ASSERT(!vivarium_socket_decide(2, 1 | 02000000, 0, &proto, &err),
+                "SOCK_CLOEXEC is refused, never ignored");
+
+    // No /net analogue.
+    TEST_ASSERT(!vivarium_socket_decide(2, 5, 0, &proto, &err), "SOCK_SEQPACKET declines");
+    TEST_ASSERT(err == T_E_PROTONOSUPPORT, "SOCK_SEQPACKET -> EPROTONOSUPPORT");
+    TEST_ASSERT(!vivarium_socket_decide(2, 3, 0, &proto, &err), "SOCK_RAW declines");
+    // A protocol number that contradicts the type.
+    TEST_ASSERT(!vivarium_socket_decide(2, 1, 17, &proto, &err),
+                "SOCK_STREAM + IPPROTO_UDP is not a socket netd can serve");
+
+    // Fail closed on NULL outputs.
+    TEST_ASSERT(!vivarium_socket_decide(2, 1, 0, NULL, &err), "NULL proto -> false");
+    TEST_ASSERT(!vivarium_socket_decide(2, 1, 0, &proto, NULL), "NULL err -> false");
+
+    TEST_ASSERT(vivarium_net_proto_dir(VIV_NET_TCP)[0] == 't', "tcp dir");
+    TEST_ASSERT(vivarium_net_proto_dir(VIV_NET_UDP)[0] == 'u', "udp dir");
+}
+
+void test_vivarium_sockaddr(void);
+void test_vivarium_sockaddr(void) {
+    u8  ip[4];
+    u16 port = 0;
+
+    // AF_INET 10.0.2.2:80. family little-endian, port NETWORK order (hi,lo).
+    u8 sa[16] = { 2, 0, 0, 80, 10, 0, 2, 2 };
+    TEST_ASSERT(vivarium_sockaddr_in_parse(sa, sizeof(sa), ip, &port), "parses");
+    TEST_ASSERT(ip[0] == 10 && ip[1] == 0 && ip[2] == 2 && ip[3] == 2, "octets in order");
+    TEST_ASSERT(port == 80, "port is network order (hi byte first)");
+
+    // A port above 255 exercises both bytes -- 0x1F90 == 8080.
+    sa[2] = 0x1F; sa[3] = 0x90;
+    TEST_ASSERT(vivarium_sockaddr_in_parse(sa, sizeof(sa), ip, &port) && port == 8080,
+                "two-byte port assembles correctly");
+
+    // Refusals: wrong family, short buffer, port 0.
+    sa[0] = 10;
+    TEST_ASSERT(!vivarium_sockaddr_in_parse(sa, sizeof(sa), ip, &port), "AF_INET6 refused");
+    sa[0] = 2;
+    TEST_ASSERT(!vivarium_sockaddr_in_parse(sa, 7, ip, &port), "short sockaddr refused");
+    sa[2] = 0; sa[3] = 0;
+    TEST_ASSERT(!vivarium_sockaddr_in_parse(sa, sizeof(sa), ip, &port),
+                "port 0 refused -- netd's dial parser rejects it");
+    TEST_ASSERT(!vivarium_sockaddr_in_parse(NULL, 16, ip, &port), "NULL refused");
+}
+
+void test_vivarium_net_cmd(void);
+void test_vivarium_net_cmd(void) {
+    char buf[48];
+    u8   ip[4] = { 10, 0, 2, 2 };
+
+    u32 n = vivarium_net_cmd_ipport(buf, sizeof(buf), "connect", ip, 80);
+    // Compare against the literal rather than a hand-counted length -- a
+    // hardcoded count is a second thing to get wrong, and it would be checking
+    // my arithmetic rather than the builder.
+    const char *want = "connect 10.0.2.2!80";
+    u32 wl = 0; while (want[wl]) wl++;
+    TEST_ASSERT(n == wl, "length matches the literal");
+    for (u32 i = 0; i < wl; i++) TEST_ASSERT(buf[i] == want[i], "byte matches");
+
+    // A 0.0.0.0 address still renders every octet.
+    u8 z[4] = { 0, 0, 0, 0 };
+    u32 zn = vivarium_net_cmd_ipport(buf, sizeof(buf), "connect", z, 1);
+    TEST_ASSERT(zn == 17 && buf[8] == '0' && buf[9] == '.', "zero octets render as 0");
+
+    // Overflow returns 0 rather than a truncated command -- a short write to
+    // netd's ctl would be a DIFFERENT dial, which is the whole hazard.
+    TEST_ASSERT(vivarium_net_cmd_ipport(buf, 8, "connect", ip, 80) == 0,
+                "no room -> 0, never a truncated verb");
+    TEST_ASSERT(vivarium_net_cmd_ipport(NULL, 48, "connect", ip, 80) == 0, "NULL -> 0");
+}
+
+void test_vivarium_conn_n(void);
+void test_vivarium_conn_n(void) {
+    u32 n = 0xffffffffu;
+    TEST_ASSERT(vivarium_parse_conn_n("0", 1, &n) && n == 0, "connection 0 is valid");
+    TEST_ASSERT(vivarium_parse_conn_n("7", 1, &n) && n == 7, "single digit");
+    TEST_ASSERT(vivarium_parse_conn_n("123", 3, &n) && n == 123, "multi digit");
+    // netd may pad the line; stop at the first terminator rather than failing.
+    TEST_ASSERT(vivarium_parse_conn_n("42\n", 3, &n) && n == 42, "newline terminates");
+    TEST_ASSERT(vivarium_parse_conn_n("42 ", 3, &n) && n == 42, "space terminates");
+    TEST_ASSERT(vivarium_parse_conn_n("9\0abc", 5, &n) && n == 9, "NUL terminates");
+
+    // Refusals -- each would otherwise yield connection 0 and dial a stranger.
+    TEST_ASSERT(!vivarium_parse_conn_n("", 0, &n), "empty refused");
+    TEST_ASSERT(!vivarium_parse_conn_n("\n", 1, &n), "terminator-only refused");
+    TEST_ASSERT(!vivarium_parse_conn_n("x", 1, &n), "non-decimal refused");
+    TEST_ASSERT(!vivarium_parse_conn_n("1x", 2, &n), "trailing garbage refused");
+    TEST_ASSERT(!vivarium_parse_conn_n("99999999999", 11, &n), "u32 overflow refused");
+    TEST_ASSERT(!vivarium_parse_conn_n(NULL, 1, &n), "NULL refused");
+}
+
+void test_vivarium_socktab(void);
+void test_vivarium_socktab(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0;
+    }
+
+    TEST_ASSERT(viv_socktab_find(&tab, 0) == NULL, "fd 0 does not match a free entry");
+    TEST_ASSERT(viv_socktab_find(NULL, 3) == NULL, "NULL table is safe");
+
+    struct viv_sock *a = viv_socktab_claim(&tab, 0, VIV_NET_TCP, 5);
+    TEST_ASSERT(a != NULL && a->fd == 0 && a->n == 5, "fd 0 is a claimable socket");
+    TEST_ASSERT(a->state == VIV_SOCK_FRESH, "a new socket is FRESH, not CONNECTED");
+    TEST_ASSERT(viv_socktab_find(&tab, 0) == a, "found by fd");
+    TEST_ASSERT(viv_socktab_find(&tab, 1) == NULL, "a different fd does not match");
+
+    struct viv_sock *b = viv_socktab_claim(&tab, 9, VIV_NET_UDP, 2);
+    TEST_ASSERT(b != NULL && b != a && b->proto == VIV_NET_UDP, "second, distinct");
+
+    // Drop clears the WHOLE entry: a later claim must not inherit stale state.
+    viv_socktab_drop(&tab, 0);
+    TEST_ASSERT(viv_socktab_find(&tab, 0) == NULL, "dropped");
+    TEST_ASSERT(viv_socktab_find(&tab, 9) == b, "the sibling survives the drop");
+    viv_socktab_drop(&tab, 0);              // idempotent
+    viv_socktab_drop(&tab, 12345);          // an fd that was never a socket
+    viv_socktab_drop(NULL, 9);              // NULL-safe
+
+    struct viv_sock *c = viv_socktab_claim(&tab, 0, VIV_NET_TCP, 77);
+    TEST_ASSERT(c != NULL && c->n == 77 && c->state == VIV_SOCK_FRESH,
+                "a reused slot carries no stale (proto, N) -- the close-hook "
+                "bug this table exists to prevent would show up here");
+
+    // Exhaustion is EMFILE-shaped (NULL), not a wrap or an overwrite.
+    u32 claimed = 2;
+    for (s32 fd = 100; claimed < VIV_SOCK_MAX; fd++) {
+        if (!viv_socktab_claim(&tab, fd, VIV_NET_TCP, 1)) break;
+        claimed++;
+    }
+    TEST_ASSERT(claimed == VIV_SOCK_MAX, "the table fills to exactly VIV_SOCK_MAX");
+    TEST_ASSERT(viv_socktab_claim(&tab, 9999, VIV_NET_TCP, 1) == NULL,
+                "a full table refuses rather than overwriting");
+}
+
+// The close hook's regression (V-5). The hook lives in viv_linux_dispatch,
+// which needs a phenotyped Proc at EL0, so this drives the TABLE operation the
+// hook performs and pins the property the hook exists to guarantee: after a
+// drop, the index is reusable and carries NOTHING from its previous tenant.
+//
+// Without the hook, close() frees the fd INDEX while the entry survives, the
+// next fd-creating syscall gets that index back, and a later connect() finds a
+// stale entry -- writing a dial verb to a STRANGER'S connection. That is the
+// failure this asserts is impossible once drop has run.
+void test_vivarium_socktab_close_hook(void);
+void test_vivarium_socktab_close_hook(void) {
+    static struct viv_socktab tab;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        tab.s[i].fd = -1; tab.s[i].state = VIV_SOCK_FREE;
+        tab.s[i].proto = 0; tab.s[i].n = 0;
+    }
+
+    // fd 4 is a TCP socket on connection 11, and gets connected.
+    struct viv_sock *s = viv_socktab_claim(&tab, 4, VIV_NET_TCP, 11);
+    TEST_ASSERT(s != NULL, "claim fd 4");
+    s->state = VIV_SOCK_CONNECTED;
+
+    // close(4) -- the hook.
+    viv_socktab_drop(&tab, 4);
+
+    // The kernel hands index 4 back to an unrelated open(). A socket call on it
+    // must now say "not a socket", NOT resolve to connection 11.
+    TEST_ASSERT(viv_socktab_find(&tab, 4) == NULL,
+                "a recycled fd index resolves to NO socket -- if this finds an "
+                "entry, connect() on an unrelated file would dial connection 11");
+
+    // And when fd 4 legitimately becomes a socket again, it is a FRESH one.
+    struct viv_sock *s2 = viv_socktab_claim(&tab, 4, VIV_NET_UDP, 3);
+    TEST_ASSERT(s2 != NULL, "reclaim fd 4");
+    TEST_ASSERT(s2->state == VIV_SOCK_FRESH, "the new socket is FRESH, not CONNECTED");
+    TEST_ASSERT(s2->proto == VIV_NET_UDP && s2->n == 3,
+                "the new socket carries its OWN (proto, N) -- no bleed from the "
+                "previous tenant of this index");
+}

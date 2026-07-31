@@ -63,6 +63,7 @@ struct HandleTable;
 struct Vma;
 struct Path;      // VIVARIUM V-4a-0: Proc.exe_path (the #66 namespace name)
 struct viv_sigtab;  // VIVARIUM V-6b: Proc.sigtab (Linux signal dispositions)
+struct viv_socktab; // VIVARIUM V-5:  Proc.socktab (Linux socket state)
 struct Allowance;   // I-34 hardware allowance (<thylacine/allowance.h>)
 struct Env;         // G15 per-Proc environment group (<thylacine/env.h>)
 struct Spoor;       // 8a-1b debug_owner slot token (<thylacine/spoor.h>)
@@ -760,6 +761,20 @@ struct Proc {
     // is the latitude POSIX gives (sigaction is not ordered against a signal
     // already in flight). That part was and remains true.
     struct viv_sigtab *sigtab;
+
+    // VIVARIUM V-5: the per-Proc Linux socket table, or NULL.
+    //
+    // The sigtab's exact shape and lifetime: lazily allocated on the Proc's
+    // first translated socket(), CAS-installed outside every lock, freed at
+    // proc_free, NOT rfork-inherited. It holds the (proto, N, state) tuple a
+    // translated socket needs and that neither the fd nor any path can carry
+    // -- docs/VIVARIUM.md section 5.5.2 has the measurement showing why.
+    //
+    // The SAME lock-free argument applies, with the same warning: it is sound
+    // only because a PHENO_LINUX Proc cannot spawn a thread (clone is not a
+    // table row), a property of the TRANSLATION TABLE that evaporates when
+    // process creation lands (#93).
+    struct viv_socktab *socktab;
 };
 
 // VIVARIUM: the phenotype values (Proc.phenotype; docs/VIVARIUM.md §5.1).
@@ -834,14 +849,16 @@ struct Proc {
 // renderer's claim under g_proc_table_lock); cleared on the holder's death.
 #define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
-_Static_assert(sizeof(struct Proc) == 400,
-               "struct Proc size pinned at 392 bytes. The 352 baseline (the 328 "
+_Static_assert(sizeof(struct Proc) == 408,
+               "struct Proc size pinned at 408 bytes (the message said 392 while "
+               "the value said 400 -- corrected at V-5). The 352 baseline (the 328 "
                "baseline + the 8c-2 #95 debug_focus_thread @328 + the PTY-1a "
                "sid/pgid pair @336/@340 + the PTY-1e report latches @344/@345 + "
                "the G-2 shared_map_pages @348 filling the former tail pad) then "
                "prowl-1's name[PROC_NAME_MAX=32] @352 -> 384, then the VIVARIUM "
                "V-4a-0 exe_path pointer @384 -> 392, then the V-6b sigtab "
-               "pointer @392 -> 400. prowl-1 and V-4a-0 were "
+               "pointer @392 -> 400, then the V-5 socktab pointer @400 -> 408. "
+               "prowl-1 and V-4a-0 were "
                "written on separate branches and BOTH originally appended at 352; "
                "the merge stacked them (see the field comments -- they are "
                "complementary, basename-copy vs full-Path). "
@@ -850,6 +867,10 @@ _Static_assert(sizeof(struct Proc) == 400,
 _Static_assert(__builtin_offsetof(struct Proc, name) == 352,
                "prowl-1 name[] appends after shared_map_pages @348+4=352; "
                "KP_ZERO leaves it \"\" until proc_set_name at exec.");
+_Static_assert(__builtin_offsetof(struct Proc, socktab) == 400,
+               "VIVARIUM V-5 socktab (the per-Proc Linux socket state) appends "
+               "after sigtab @392+8 = 400. KP_ZERO-fresh NULL == 'this Proc has "
+               "no sockets', correct both initially and for every native Proc.");
 _Static_assert(__builtin_offsetof(struct Proc, sigtab) == 392,
                "VIVARIUM V-6b sigtab (the per-Proc Linux signal dispositions) "
                "appends after exe_path @384+8 = 392. KP_ZERO-fresh NULL == "

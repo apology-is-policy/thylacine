@@ -177,6 +177,46 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_RT_SIGTIMEDWAIT, VIV_ENOSYS },
     { VIV_LINUX_RT_SIGQUEUEINFO, VIV_ENOSYS },
     { VIV_LINUX_RESTART_SYSCALL, VIV_ENOSYS },
+
+    // The socket family (V-5, section 5.5). socket + connect land at V-5a with
+    // their shells; the rest are honest declines until their own sub-chunk,
+    // under the same rule the signal family states above -- a VIV_TIER2 row
+    // whose shell does not exist would declare a capability the code lacks.
+    { VIV_LINUX_SOCKET,      VIV_TIER2   },  // V-5a: vivarium_socket_decide
+    { VIV_LINUX_CONNECT,     VIV_TIER2   },  // V-5a: the ctl-write + fd swap
+    //
+    // V-5b (the server path). These are a coherent group -- a listening socket
+    // is announce + a deferred accept -- so they land together rather than
+    // dribbling in, which is also why none is TIER2 yet.
+    { VIV_LINUX_BIND,        VIV_FORWARD },
+    { VIV_LINUX_LISTEN,      VIV_FORWARD },
+    { VIV_LINUX_ACCEPT,      VIV_FORWARD },
+    { VIV_LINUX_ACCEPT4,     VIV_FORWARD },
+    //
+    // V-5a's remainder (the client path's edges): each needs the ctl re-walk,
+    // which lands with them.
+    { VIV_LINUX_SHUTDOWN,    VIV_FORWARD },
+    { VIV_LINUX_GETSOCKNAME, VIV_FORWARD },
+    { VIV_LINUX_GETPEERNAME, VIV_FORWARD },
+    { VIV_LINUX_SENDTO,      VIV_FORWARD },
+    { VIV_LINUX_RECVFROM,    VIV_FORWARD },
+    //
+    // Live decisions, not deferrals:
+    //   socketpair    — AF_UNIX only in practice, and /srv has no
+    //                   mint-a-connected-pair operation; a guest that wanted a
+    //                   pipe should use pipe2.
+    //   setsockopt /  — /net exposes no option surface at all. Answering
+    //   getsockopt      "success" to a TCP_NODELAY the stack ignores is the
+    //                   silent lie this tier exists to prevent; ENOSYS lets the
+    //                   guest's own fallback run. (Linux libcs routinely
+    //                   tolerate a failing setsockopt for tuning options.)
+    //   sendmsg /     — scatter-gather plus control messages (SCM_RIGHTS is fd
+    //   recvmsg         passing, which is I-4's domain, not a socket detail).
+    { VIV_LINUX_SOCKETPAIR,  VIV_ENOSYS },
+    { VIV_LINUX_SETSOCKOPT,  VIV_ENOSYS },
+    { VIV_LINUX_GETSOCKOPT,  VIV_ENOSYS },
+    { VIV_LINUX_SENDMSG,     VIV_ENOSYS },
+    { VIV_LINUX_RECVMSG,     VIV_ENOSYS },
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -642,6 +682,203 @@ bool viv_signote_is_deliverable(enum viv_signote note) {
     default:
         return false;
     }
+}
+
+// =============================================================================
+// SOCKETS (V-5) -- the pure half. The header carries the design; these are the
+// decisions and the string work, kept out of the shells so they unit-test with
+// synthetic input and no Proc.
+// =============================================================================
+
+// Linux socket constants, taken from third_party/musl (not from memory):
+//   AF_INET / AF_INET6      include/netinet/in.h  (2 / 10)
+//   SOCK_STREAM / SOCK_DGRAM  arch/aarch64/bits/socket.h via include/sys/socket.h
+//   SOCK_NONBLOCK / SOCK_CLOEXEC  the type-word flag bits (04000 / 02000000)
+//   IPPROTO_TCP / IPPROTO_UDP  include/netinet/in.h (6 / 17)
+enum {
+    VIV_AF_INET        = 2,
+    VIV_AF_INET6       = 10,
+    VIV_SOCK_STREAM    = 1,
+    VIV_SOCK_DGRAM     = 2,
+    VIV_SOCK_NONBLOCK  = 04000,
+    VIV_SOCK_CLOEXEC   = 02000000,
+    VIV_IPPROTO_TCP    = 6,
+    VIV_IPPROTO_UDP    = 17,
+};
+
+struct viv_sock *viv_socktab_find(struct viv_socktab *tab, s32 fd) {
+    if (!tab || fd < 0) return NULL;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab->s[i].state != VIV_SOCK_FREE && tab->s[i].fd == fd)
+            return &tab->s[i];
+    }
+    return NULL;
+}
+
+struct viv_sock *viv_socktab_claim(struct viv_socktab *tab, s32 fd,
+                                   enum viv_net_proto proto, u32 n) {
+    if (!tab || fd < 0) return NULL;
+    for (u32 i = 0; i < VIV_SOCK_MAX; i++) {
+        if (tab->s[i].state == VIV_SOCK_FREE) {
+            tab->s[i].fd    = fd;
+            tab->s[i].proto = (u8)proto;
+            tab->s[i].state = VIV_SOCK_FRESH;
+            tab->s[i].n     = n;
+            return &tab->s[i];
+        }
+    }
+    return NULL;   // full -> EMFILE
+}
+
+void viv_socktab_drop(struct viv_socktab *tab, s32 fd) {
+    struct viv_sock *e = viv_socktab_find(tab, fd);
+    if (!e) return;
+    // Clear the whole entry, not just the state: a stale fd/proto/n left in a
+    // freed slot would be visible to a later claim that only sets some fields.
+    e->fd    = -1;
+    e->proto = 0;
+    e->state = VIV_SOCK_FREE;
+    e->n     = 0;
+}
+
+bool vivarium_socket_decide(u64 domain, u64 type, u64 protocol,
+                            enum viv_net_proto *out_proto, s32 *out_err) {
+    s32 err = T_E_INVAL;
+    if (!out_proto || !out_err) { if (out_err) *out_err = T_E_INVAL; return false; }
+
+    if (domain == VIV_AF_INET6) {
+        // Honest, not silent: serving a v6 socket over v4 /net would connect
+        // the guest to somewhere it did not ask for.
+        *out_err = T_E_AFNOSUPPORT;
+        return false;
+    }
+    if (domain != VIV_AF_INET) {
+        *out_err = T_E_AFNOSUPPORT;
+        return false;
+    }
+
+    // The type word carries flags in its high bits. REFUSE them rather than
+    // masking them off -- a guest that asked for SOCK_NONBLOCK and silently
+    // received a blocking socket blocks where it expected EAGAIN.
+    if (type & (u64)(VIV_SOCK_NONBLOCK | VIV_SOCK_CLOEXEC)) {
+        *out_err = T_E_INVAL;
+        return false;
+    }
+
+    enum viv_net_proto proto;
+    switch (type) {
+    case VIV_SOCK_STREAM:
+        proto = VIV_NET_TCP;
+        if (protocol != 0 && protocol != VIV_IPPROTO_TCP) {
+            *out_err = T_E_PROTONOSUPPORT;
+            return false;
+        }
+        break;
+    case VIV_SOCK_DGRAM:
+        proto = VIV_NET_UDP;
+        if (protocol != 0 && protocol != VIV_IPPROTO_UDP) {
+            *out_err = T_E_PROTONOSUPPORT;
+            return false;
+        }
+        break;
+    default:
+        // SOCK_SEQPACKET / SOCK_RAW / anything else: no /net analogue.
+        *out_err = T_E_PROTONOSUPPORT;
+        return false;
+    }
+
+    (void)err;
+    *out_proto = proto;
+    return true;
+}
+
+const char *vivarium_net_proto_dir(enum viv_net_proto proto) {
+    switch (proto) {
+    case VIV_NET_UDP: return "udp";
+    case VIV_NET_TCP:
+    default:          return "tcp";
+    }
+}
+
+bool vivarium_sockaddr_in_parse(const u8 *sa, u64 salen,
+                                u8 out_ip4[4], u16 *out_port) {
+    // struct sockaddr_in { sa_family_t sin_family; in_port_t sin_port;
+    //                      struct in_addr sin_addr; ... } -- family at 0 (2
+    //  bytes), port at 2 (2 bytes, NETWORK order), addr at 4 (4 bytes, the
+    //  octets a.b.c.d in memory order).
+    if (!sa || !out_ip4 || !out_port) return false;
+    if (salen < 8)                    return false;
+
+    u16 family = (u16)((u16)sa[0] | ((u16)sa[1] << 8));   // little-endian host
+    if (family != VIV_AF_INET)        return false;
+
+    // Network order: high byte first. Read the bytes directly rather than
+    // depending on an ntohs, exactly as the pouch boundary-line does.
+    u16 port = (u16)(((u16)sa[2] << 8) | (u16)sa[3]);
+    if (port == 0)                    return false;   // netd's dial parser refuses it
+
+    out_ip4[0] = sa[4];
+    out_ip4[1] = sa[5];
+    out_ip4[2] = sa[6];
+    out_ip4[3] = sa[7];
+    *out_port  = port;
+    return true;
+}
+
+// Append a decimal u32. Returns the new offset, or `buflen + 1` to signal
+// overflow -- a sentinel strictly greater than any valid offset, so one check
+// at the end catches an overflow from any stage.
+static u32 viv_put_dec(char *buf, u32 buflen, u32 off, u32 v) {
+    char tmp[10];
+    u32  n = 0;
+    if (v == 0) tmp[n++] = '0';
+    while (v > 0 && n < sizeof(tmp)) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+    if (off > buflen || buflen - off < n) return buflen + 1;
+    for (u32 i = 0; i < n; i++) buf[off + i] = tmp[n - 1 - i];
+    return off + n;
+}
+
+static u32 viv_put_char(char *buf, u32 buflen, u32 off, char c) {
+    if (off >= buflen) return buflen + 1;
+    buf[off] = c;
+    return off + 1;
+}
+
+u32 vivarium_net_cmd_ipport(char *buf, u32 buflen, const char *verb,
+                            const u8 ip4[4], u16 port) {
+    if (!buf || !verb || !ip4 || buflen == 0) return 0;
+
+    u32 off = 0;
+    for (u32 i = 0; verb[i] != '\0'; i++) off = viv_put_char(buf, buflen, off, verb[i]);
+    off = viv_put_char(buf, buflen, off, ' ');
+    for (u32 i = 0; i < 4; i++) {
+        if (i) off = viv_put_char(buf, buflen, off, '.');
+        off = viv_put_dec(buf, buflen, off, ip4[i]);
+    }
+    off = viv_put_char(buf, buflen, off, '!');
+    off = viv_put_dec(buf, buflen, off, port);
+
+    // One check for every stage: any overflow poisoned `off` past buflen.
+    if (off > buflen) return 0;
+    return off;
+}
+
+bool vivarium_parse_conn_n(const char *buf, u32 len, u32 *out_n) {
+    if (!buf || !out_n || len == 0) return false;
+
+    u64 v     = 0;
+    u32 seen  = 0;
+    for (u32 i = 0; i < len; i++) {
+        char c = buf[i];
+        if (c == '\n' || c == ' ' || c == '\0') break;   // netd may pad the line
+        if (c < '0' || c > '9')                 return false;
+        v = v * 10u + (u64)(c - '0');
+        if (v > 0xFFFFFFFFull)                  return false;
+        seen++;
+    }
+    if (seen == 0) return false;
+    *out_n = (u32)v;
+    return true;
 }
 
 // Bounded name compare, the notes.c `notes_name_eq` discipline: stop at

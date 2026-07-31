@@ -377,3 +377,90 @@ void test_handles_srv_kind(void) {
 
     test_proc_drop(p);
 }
+
+// =============================================================================
+// handle_replace (VIVARIUM V-5). The three gates that make this primitive
+// auditable are the whole test: the index is preserved, rights come from the
+// caller rather than the outgoing slot, and every kind but KOBJ_SPOOR is
+// refused on BOTH sides.
+// =============================================================================
+void test_handles_replace(void);
+void test_handles_replace(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    // A KOBJ_SPOOR slot with a NULL obj: handle_alloc permits NULL for test
+    // paths, and handle_release_obj's Spoor arm is NULL-safe, so this exercises
+    // the slot mechanics without needing a live Dev.
+    hidx_t h = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
+    TEST_ASSERT(h >= 0, "handle_alloc(SPOOR) returned -1");
+    u64 count_before = handle_table_count(p->handles);
+
+    // THE INDEX IS PRESERVED. That is the entire reason the primitive exists --
+    // the guest is holding this number across connect().
+    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, NULL) == 0,
+                "replace of a live Spoor slot succeeds");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), count_before,
+        "replace does not change the number of live handles");
+
+    // RIGHTS COME FROM THE CALLER, NOT THE OUTGOING SLOT. A slot that was
+    // READ-only is now R|W because the caller said so -- and, more importantly,
+    // the reverse direction narrows rather than OR-ing.
+    struct Handle got;
+    TEST_ASSERT(handle_get(p, h, &got) == 0, "handle_get after replace");
+    TEST_EXPECT_EQ(got.rights, (u64)(RIGHT_READ | RIGHT_WRITE),
+        "rights are the caller's, exactly");
+    handle_put(&got);
+
+    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_READ, NULL) == 0, "narrowing replace");
+    TEST_ASSERT(handle_get(p, h, &got) == 0, "handle_get after narrowing");
+    TEST_EXPECT_EQ(got.rights, (u64)RIGHT_READ,
+        "rights NARROWED -- the outgoing R|W was discarded, never inherited or "
+        "OR'd (an inherited right would be an I-6 monotonicity break)");
+    handle_put(&got);
+
+    // THE INCOMING KIND IS GATED. Every non-Spoor kind is refused, so no path
+    // here can make a hardware handle appear at an arbitrary fd (I-5).
+    TEST_ASSERT(handle_replace(p, h, KOBJ_MMIO, RIGHT_READ, NULL) < 0,
+                "incoming KOBJ_MMIO refused (I-5)");
+    TEST_ASSERT(handle_replace(p, h, KOBJ_BURROW, RIGHT_READ, NULL) < 0,
+                "incoming KOBJ_BURROW refused");
+    TEST_ASSERT(handle_replace(p, h, KOBJ_PROCESS, RIGHT_READ, NULL) < 0,
+                "incoming KOBJ_PROCESS refused -- the gate is an ALLOW-list of "
+                "one kind, not a deny-list of hardware");
+
+    // The refusals left the slot exactly as it was.
+    TEST_ASSERT(handle_get(p, h, &got) == 0, "slot survives a refused replace");
+    TEST_EXPECT_EQ(got.kind, KOBJ_SPOOR, "kind unchanged by refusal");
+    TEST_EXPECT_EQ(got.rights, (u64)RIGHT_READ, "rights unchanged by refusal");
+    handle_put(&got);
+
+    // THE OUTGOING KIND IS GATED TOO. A non-Spoor slot cannot be replaced --
+    // quietly dropping a hardware handle out of a live fd is a lifetime event
+    // I-5 gives no path for.
+    hidx_t hp = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, p);
+    TEST_ASSERT(hp >= 0, "handle_alloc(PROCESS) returned -1");
+    TEST_ASSERT(handle_replace(p, hp, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+                "outgoing KOBJ_PROCESS refused");
+    TEST_ASSERT(handle_get(p, hp, &got) == 0, "the PROCESS slot survives");
+    TEST_EXPECT_EQ(got.kind, KOBJ_PROCESS, "outgoing kind unchanged");
+    handle_put(&got);
+
+    // Argument validation, all fail-closed.
+    TEST_ASSERT(handle_replace(p, -1, KOBJ_SPOOR, RIGHT_READ, NULL) < 0, "negative fd");
+    TEST_ASSERT(handle_replace(p, PROC_HANDLE_MAX, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+                "out-of-range fd");
+    TEST_ASSERT(handle_replace(p, h, KOBJ_SPOOR, RIGHT_NONE, NULL) < 0,
+                "RIGHT_NONE refused (valid_alloc_args)");
+    TEST_ASSERT(handle_replace(p, h, KOBJ_INVALID, RIGHT_READ, NULL) < 0,
+                "KOBJ_INVALID refused");
+
+    // An empty slot is not replaceable -- replace is not a back-door alloc.
+    hidx_t hfree = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
+    TEST_ASSERT(hfree >= 0, "third alloc");
+    TEST_ASSERT(handle_close(p, hfree) == 0, "close it");
+    TEST_ASSERT(handle_replace(p, hfree, KOBJ_SPOOR, RIGHT_READ, NULL) < 0,
+                "replacing a CLOSED slot is refused -- replace never creates");
+
+    test_proc_drop(p);
+}
