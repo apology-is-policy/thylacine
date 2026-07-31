@@ -10,7 +10,8 @@ The kernel-side 9P2000.L stack: wire codec, session state machine, transport
 backends, the shared multi-Proc client, the dev9p Dev that mounts it into
 namespaces, the dev9p.poll readiness bridge, the Larder guest-side cache, and
 the attach/srvconn glue. Every FS mount (Stratum system FS, per-user homes,
-netd `/net`, corvus) resolves through this stack.
+netd `/net`, corvus) resolves through this stack, carried in production by
+the `/srv` layer ([[moc-kernel-srv]]).
 
 ## Children
 

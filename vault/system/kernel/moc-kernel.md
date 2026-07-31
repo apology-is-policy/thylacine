@@ -14,6 +14,8 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
 
 - [[moc-kernel-ninep]] — the 9P stack (the pilot area; other area MOCs land
   with the per-subsystem sweep).
+- [[moc-kernel-srv]] — the `/srv` service layer (registry + per-connection
+  transport; the 9P stack's production carrier).
 
 ## Cross-cutting
 

@@ -3,7 +3,7 @@ id: inv-i9
 type: inv
 title: "I-9 — no wakeup lost between cond-check and sleep"
 number: I-9
-guards: [sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll]
+guards: [sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn]
 validated-by: [spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
 strength: spec
 created: 2026-07-31
@@ -29,7 +29,8 @@ includes:
 > ARCH §28 row also binds the scheduler, poll, pipe, cons, tsleep, torpor,
 > and Weft surfaces (specs `scheduler`/`poll`/`cons_poll`/
 > `weft_readiness`/`tsleep`/`death_wake`). Those edges join as their
-> dossiers land in the sweep. (dev9p.poll joined at the 9P-area sweep.)
+> dossiers land in the sweep. (dev9p.poll joined at the 9P-area sweep;
+> srvconn at the srv-area sweep.)
 
 ## Enforcement
 
@@ -48,6 +49,14 @@ registered and a covering non-terminal readiness probe is outstanding
 BEFORE the not-ready sample returns (`dev9p_poll`); the kthread's park
 cond re-checks the registry count under the rendez lock
 ([[sub-kernel-ninep-dev9p-poll]]).
+
+On the srvconn surface ([[sub-kernel-srvconn]]): the role park's
+register-then-observe (`chan_role_acquire` — hook registered under the
+chan lock before tsleep re-samples the flag) · the chan-cond/wake
+happens-before pairing at all five blocking loops · the drain-wakes on
+every consume path · teardown's complete wake set (both rendezes, both
+wrendezes, both role lists, the poll list) · the per-chunk POLLIN edge
+in the blocking client send (the deferred edge was [[fnd-cf3b-r1-f1]]).
 
 ## Validation
 

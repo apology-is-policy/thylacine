@@ -12,10 +12,11 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | arc | status | chunks landed | follow-ons |
 |---|---|---|---|
-| [[arc-go-build]] | active | 17 |  |
+| [[arc-corvus-srv]] | active | 1 | seam-srv-registry-lifecycle |
+| [[arc-go-build]] | active | 19 |  |
 | [[arc-go-ide]] | active | 2 |  |
-| [[arc-identity-detour]] | active | 5 |  |
+| [[arc-identity-detour]] | active | 8 |  |
 | [[arc-net]] | active | 3 | seam-221-idle-pump-wake, seam-223-pump-tail-starvation |
 | [[arc-pouch-boot]] | active | 1 | seam-848-pivot-walk-race |
-| [[arc-vault]] | active | 5 |  |
+| [[arc-vault]] | active | 6 |  |
 <!-- generated:end -->

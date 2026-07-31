@@ -9,6 +9,8 @@ design:
   - "docs/FID-LIFECYCLE-DESIGN.md"
 chunks:
   - chg-2026-06-24-349-flow-control
+  - chg-2026-06-24-348-s2c-blocking
+  - chg-2026-07-08-cf3b-bulk-ring
   - chg-2026-07-09-larder-l1c
   - chg-2026-07-09-larder-l1d
   - chg-2026-07-09-larder-l1e

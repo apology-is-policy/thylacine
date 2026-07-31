@@ -142,7 +142,7 @@ sends under `c->lock` and gives the recv side to exactly one elected reader
 at a time ([[sub-kernel-ninep-client]]). The mq backend carries its own
 spinlock because the multi-in-flight tests drive it from concurrent
 contexts. The srvconn backend's blocking recv inherits srvconn's
-rendez/deadline machinery (that surface's own dossier documents it — the
+rendez/deadline machinery ([[sub-kernel-srvconn]] documents it — the
 transport only forwards).
 
 ## Invariants enforced
