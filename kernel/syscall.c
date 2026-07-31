@@ -7538,8 +7538,12 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
     u32  clen = vivarium_net_cmd_ipport(cmd, sizeof(cmd), "connect", ip4, port);
     if (clen == 0)                return -(s64)T_E_INVAL;
 
+    // A ctl verb is all-or-nothing: netd parses the whole buffer or rejects it,
+    // so a SHORT write means a truncated command was accepted, not a slow one.
+    // Unreachable today (clen <= 48, far under any negotiated msize) and checked
+    // anyway, because "wrote some of a command" must never read as success.
     s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
-    if (w < 0)                    return -(s64)T_E_CONNREFUSED;
+    if (w != (s64)clen)           return -(s64)T_E_CONNREFUSED;
 
     char path[64];
     u32  plen = viv_net_path(path, sizeof(path),
@@ -7561,6 +7565,18 @@ static s64 viv_sock_connect(struct Proc *p, u64 fd_raw, u64 addr_va, u64 addrlen
         handle_close(p, (hidx_t)dfd);
         return -(s64)T_E_IO;
     }
+    // V-5d F5: check the KIND before the cast. handle_replace has a Spoor-only
+    // gate, but it runs four lines below -- after spoor_ref would already have
+    // incremented a refcount at an offset that is only a Spoor's by assumption.
+    // Unreachable today (sys_open_kpath_for_proc allocates KOBJ_SPOOR
+    // unconditionally, and no peer thread can swap the slot), so this is the
+    // gate order made to match the header's claim rather than a live defect.
+    if (dh.kind != KOBJ_SPOOR) {
+        handle_put(&dh);
+        handle_close(p, (hidx_t)dfd);
+        return -(s64)T_E_IO;
+    }
+
     // The ref handle_get took becomes the socket fd's ref; closing the
     // temporary fd drops the temporary's own ref, leaving exactly one.
     struct Spoor *dsp = (struct Spoor *)dh.obj;
@@ -7654,8 +7670,9 @@ static s64 viv_sock_listen(struct Proc *p, u64 fd_raw, u64 backlog) {
     u32  clen = vivarium_net_cmd_announce(cmd, sizeof(cmd), ip4, e->bound_port);
     if (clen == 0) return -(s64)T_E_INVAL;
 
+    // All-or-nothing, exactly as connect's dial verb -- see the note there.
     s64 w = spoor_write_common(p, (hidx_t)fd_raw, (const u8 *)cmd, clen, false, 0);
-    if (w < 0) {
+    if (w != (s64)clen) {
         // netd refuses an announce for a port already listening, a socket
         // already open, or a port it will not take. EADDRINUSE is the one a
         // server actually branches on, and it is the likely cause.
@@ -7773,11 +7790,27 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
     // buffer size, out is the FULL size, and a short buffer truncates. Failing
     // to write it would be a silent mistranslation -- a Linux server reads the
     // struct unconditionally -- so a failure here is reported, not ignored.
+    // V-5d F2: EVERY exit from here unwinds the accept.
+    //
+    // By this point the accept has fully committed -- `dfd` is an open handle,
+    // the socktab entry is claimed, and netd's connection M is live and held by
+    // `dfd` alone. A bare `return -EFAULT` would leave the guest owning all
+    // three and TELL IT NOTHING, since the fd number is the return value it
+    // just lost: one handle (of PROC_HANDLE_MAX), one socktab entry (of
+    // VIV_SOCK_MAX) and one netd slot (of netd's MAX_SLOTS, which is shared
+    // across every /net client on the box) burned per call, reclaimable only by
+    // Proc death. Linux unwinds here too -- __sys_accept4's move_addr_to_user
+    // failure goes to out_fd: fput(newfile); put_unused_fd(newfd).
+    //
+    // The drop must precede the close: viv_socktab_drop is keyed on the fd, so
+    // closing first would leave an entry pointing at a number the next
+    // fd-creating call can be handed -- the stale-entry bug the close hook
+    // exists to prevent, reintroduced from the other end.
     if (addr_va != 0 && addrlen_va != 0) {
         u32 cap = 0;
         if (!sys_validate_user_buf(addrlen_va, 4) ||
             uaccess_load_u32(addrlen_va, &cap) != 0)
-            return -(s64)T_E_FAULT;
+            goto fault_unwind;
 
         // If `remote` could not be read we still return the fd -- the peer is
         // genuinely connected, and failing the accept would be worse than a
@@ -7790,15 +7823,20 @@ static s64 viv_sock_accept(struct Proc *p, u64 fd_raw, u64 addr_va,
                                                have_peer ? rport : 0);
         u32 wr = (cap < salen) ? cap : salen;
         if (wr != 0) {
-            if (!sys_validate_user_buf(addr_va, wr)) return -(s64)T_E_FAULT;
+            if (!sys_validate_user_buf(addr_va, wr)) goto fault_unwind;
             for (u32 i = 0; i < wr; i++)
                 if (uaccess_store_u8(addr_va + i, sa[i]) != 0)
-                    return -(s64)T_E_FAULT;
+                    goto fault_unwind;
         }
-        if (uaccess_store_u32(addrlen_va, salen) != 0) return -(s64)T_E_FAULT;
+        if (uaccess_store_u32(addrlen_va, salen) != 0) goto fault_unwind;
     }
 
     return dfd;
+
+fault_unwind:
+    viv_socktab_drop(tab, (s32)dfd);
+    handle_close(p, (hidx_t)dfd);     // drops M's last ref -> netd frees it
+    return -(s64)T_E_FAULT;
 }
 
 // ppoll(fds, nfds, tmo_p, sigmask, sigsetsize) -> ready count.
@@ -7871,7 +7909,18 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
                                                     path, plen, 0u /* OREAD */);
             if (rfd < 0) {
                 // The socket is in the table but its readiness file will not
-                // open -- a dead connection, or a /net that went away. POLLNVAL
+                // open -- a dead connection, a /net that went away, or (V-5d F6)
+                // a TRANSIENT shortage: the handle table full, or a kmalloc
+                // shortfall inside the open. The three answer alike, and for the
+                // third that is a real divergence -- Linux never turns a
+                // resource shortage into EBADF on select. It is also partly
+                // self-inflicted, since this design spends one guest-fd-space
+                // handle per polled socket, so a guest polling near its ceiling
+                // can drive itself into it. Left as-is deliberately: the fix is
+                // to stop consuming guest fd numbers at all, which is the same
+                // change #98 needs (a poll core that holds Spoors), and
+                // splitting the arm now would encode the fd-space design it
+                // should replace. POLLNVAL
                 // is the POSIX answer for an fd that cannot be polled, and it is
                 // per-pollfd: one broken socket must not fail the whole call for
                 // the fds beside it. (pselect6 then turns that POLLNVAL into a
@@ -7907,7 +7956,61 @@ static s64 viv_poll_translated(struct Proc *p, struct pollfd *kfds, u64 nfds,
     // guest's fd-number space) or a synchronous readiness query on dev9p_poll.
     if (timeout_ms == 0 && any_socket) timeout_ms = VIV_PPOLL_PROBE_MS;
 
-    s64 result = sys_poll_for_proc(p, kfds, nfds, timeout_ms);
+    // V-5d F1: COMPACT AWAY THE CALLER-DISABLED ENTRIES BEFORE POLLING.
+    //
+    // Linux and the native poll disagree about a negative fd, and the
+    // disagreement is total. poll(2): "If fd is negative, then the
+    // corresponding events field is ignored and the revents field returns
+    // zero" -- the entry is INERT and contributes nothing to the count. That is
+    // how every fixed-array event loop disables a slot without compacting.
+    // Thylacine's poll says the opposite and documents it (poll.h: "negative =>
+    // POLLNVAL"): poll_scan_one returns 1 for such an entry, which is a
+    // perfectly good NATIVE ABI and is not Linux's.
+    //
+    // Passing them through is therefore not a pass-through at all. ANY
+    // caller-disabled entry makes ready_count > 0 on the first scan, the native
+    // poll takes its fast path, and a ppoll asked to block forever RETURNS AT
+    // ONCE with POLLNVAL on exactly the slots the caller had switched off -- a
+    // hard spin, plus a revents a robust event loop reads as "this fd died".
+    // (It would also defeat the #98 probe budget: the fast path fires before
+    // VIV_PPOLL_PROBE_MS can be spent, so a socket beside a disabled slot would
+    // report not-ready forever.)
+    //
+    // Subtracting them from the result afterwards would fix the count and the
+    // revents and NOT the blocking, so they must not reach the native poll at
+    // all. `orig` is the discriminator that makes this exact: orig[i] < 0 is
+    // the CALLER's disable, while orig[i] >= 0 with kfds[i].fd < 0 is OURS
+    // (a readiness file that would not open), and that one is still owed its
+    // POLLNVAL. Compaction only ever moves an entry DOWN, so src[j] >= j and
+    // the scatter can run high-to-low in place without clobbering.
+    u32 src[POLL_MAX_NFDS];
+    u32 dense = 0;
+    for (u64 i = 0; i < nfds; i++) {
+        if (orig[i] < 0) continue;              // inert, per POSIX
+        if (dense != (u32)i) kfds[dense] = kfds[i];
+        src[dense] = (u32)i;
+        dense++;
+    }
+
+    s64 result;
+    if (dense == 0) {
+        // Every entry disabled: there is nothing to wait ON, but there is still
+        // a timeout to wait FOR -- the same shape as nfds == 0, so it routes to
+        // the same primitive rather than returning early.
+        result = sys_poll_sleep_for(timeout_ms);
+    } else {
+        result = sys_poll_for_proc(p, kfds, dense, timeout_ms);
+
+        // Scatter the answers back to the slots the caller used. High-to-low:
+        // src[j] >= j, so every write lands at or above the read.
+        for (u32 j = dense; j-- > 0; ) kfds[src[j]] = kfds[j];
+    }
+
+    // The inert entries report zero, which is the whole of Linux's contract for
+    // them. Their fd is restored by the loop below like any other.
+    for (u64 i = 0; i < nfds; i++) {
+        if (orig[i] < 0) kfds[i].revents = 0;
+    }
 
     // Close what we opened and restore what the caller wrote -- on EVERY path,
     // including the error one, because the transient fds must not outlive the
@@ -7988,7 +8091,7 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
                         u64 ex_va, u64 tmo_va, u64 sigmask_va) {
     s32 err   = 0;
     u32 nfds  = 0;
-    if (!vivarium_pselect6_decide((s64)nfds_arg, sigmask_va, &nfds, &err))
+    if (!vivarium_pselect6_decide(nfds_arg, sigmask_va, &nfds, &err))
         return -(s64)err;
 
     s32 timeout_ms = -1;
@@ -8020,20 +8123,33 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
                                    POLL_MAX_NFDS, &count, &err))
         return -(s64)err;
 
-    // No fd contributes: `select(0, NULL, NULL, NULL, &tv)`, the classic
-    // portable sleep, and equally `select(n, ...)` with every set empty. Nothing
-    // to poll and nothing to write back -- the sets are already all-zero, which
-    // is exactly what select reports when nothing became ready.
-    if (count == 0) return sys_poll_sleep_for(timeout_ms);
-
-    s64 result = viv_poll_translated(p, kfds, count, timeout_ms);
-    if (result < 0) return result;
-
     u32 bits = 0;
-    if (!vivarium_pollfds_to_fdset(kfds, count, rd_va ? rd : NULL,
-                                   wr_va ? wr : NULL, ex_va ? ex : NULL,
-                                   &bits, &err))
-        return -(s64)err;
+    if (count == 0) {
+        // No fd contributes: `select(0, NULL, NULL, NULL, &tv)`, the classic
+        // portable sleep, and equally `select(n, ...)` with every set empty.
+        // Nothing to poll -- but there is still something to write back.
+        s64 slept = sys_poll_sleep_for(timeout_ms);
+        if (slept < 0) return slept;
+
+        // Linux writes the sets back on this path too: it copies FDS_BYTES(n)
+        // bytes out of a buffer it zeroed, so a bit the caller set ABOVE nfds --
+        // in range of the COPY even though out of range of the SCAN -- comes
+        // home clear. Falling through to the shared write-back with the buffers
+        // zeroed reproduces that. (The count > 0 path gets the same zeroing for
+        // free inside vivarium_pollfds_to_fdset.) A well-formed caller never
+        // sets such a bit; the cost of matching anyway is three memsets.
+        for (u32 i = 0; i < VIV_FD_SET_BYTES; i++) {
+            rd[i] = 0; wr[i] = 0; ex[i] = 0;
+        }
+    } else {
+        s64 result = viv_poll_translated(p, kfds, count, timeout_ms);
+        if (result < 0) return result;
+
+        if (!vivarium_pollfds_to_fdset(kfds, count, rd_va ? rd : NULL,
+                                       wr_va ? wr : NULL, ex_va ? ex : NULL,
+                                       &bits, &err))
+            return -(s64)err;
+    }
 
     // Write back last. A fault here has already consumed the wait, but the
     // caller's sets are its only channel for the answer, so there is nothing to

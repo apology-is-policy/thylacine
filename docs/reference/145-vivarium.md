@@ -845,3 +845,204 @@ the probe could reach the guest, the unit suite passed **1269/1269** while the
 in-guest leg failed: the two layers genuinely see different bugs, which is the
 whole reason both exist. The unit tests prove the DECISION; the guest legs prove
 the PLUMBING; neither is a substitute for the other.
+
+## V-5d -- the focused audit (the self-audit half)
+
+The formal prosecutor round is recorded in `memory/audit_vivarium_closed_list.md`.
+This section is the concurrent self-audit's own findings, which were fixed in the
+V-5d commit.
+
+### SA-1 [P2] -- the close hook's completeness was an unstated precondition
+
+The socktab keys on the fd NUMBER, so an entry has to be dropped whenever that
+number is freed. Exactly one place does it: the hook in `viv_linux_dispatch`,
+which fires on `VIV_LINUX_CLOSE` and nothing else. The hook's comment explains
+why the drop is needed and never states the fact that makes it SUFFICIENT --
+that `close` is the only fd-freeing row.
+
+It is: `dup` (23), `dup3` (24) and `close_range` (436) were absent from the
+table entirely, so they FORWARD to ENOSYS. But absent is a weak defence, and
+this file's own standard says so -- "a number never considered and one
+considered and rejected are different facts". Each of the three is a near-trivial
+renumber (`dup3` -> `SYS_DUP` is nearly one), so adding one as an ordinary T1 row
+is an easy and invisible mistake, and it would reintroduce precisely the bug the
+hook exists to prevent: a freed fd number whose `(proto, N)` entry survives to be
+handed to the next fd-creating call, so a later `connect()` writes a dial verb to
+a stranger's connection.
+
+FIX: the three numbers are now named in the enum and listed in `g_viv_rejects`
+with the coupling stated, and `vivarium.fd_freeing_rows` asserts none of them is
+served. The assertion message names the remedy ("extend the socktab close hook
+before serving it") rather than the symptom, because the failure will be read by
+someone who is mid-way through adding a row and does not yet know why they
+cannot.
+
+### SA-2 [P2] -- the fd restore was load-bearing and untested
+
+`viv_poll_translated` swaps each `/net` socket's fd for a freshly-opened
+readiness fd, and restores the caller's own numbers before returning. That
+restore is cosmetic for `ppoll` (only `revents` is written back) and LOAD-BEARING
+for `pselect6`, where `pfds[i].fd` is the BIT INDEX to set in the caller's
+`fd_set` -- an unrestored array reports the readiness handle's number as the
+ready fd, a number the guest never opened. V-5c-2's commit message called this
+the chunk's headline correction.
+
+Nothing tested it. Every `pselect6` leg used the report file -- an ordinary file,
+never translated, so `opened[i]` stays -1 and the fd is never rewritten. `L103`,
+whose comment claims to test exactly this ("the kernel polled a different handle
+underneath"), polls a regular file too, so it is satisfiable with the restore
+deleted. **Removing the restore left the entire gate green.**
+
+FIX: `L135`-`L141` run `pselect6` over a real connected UDP socket. `L138` is the
+restore proof (the returned bit must be the socket's); `L139`-`L140` are the
+overwrite proof (a bit set going in for an fd that does NOT become ready must
+come home clear -- which `L129` could not give, since it asserted a set that was
+already zero on entry).
+
+### SA-3 [P3] -- the two write-back paths disagreed above nfds
+
+Linux copies `FDS_BYTES(n)` bytes back out of a buffer it zeroed, so a bit the
+caller set ABOVE `nfds` -- in range of the COPY though out of range of the SCAN --
+comes home clear. The `count > 0` path already matched (the reverse map zeroes
+before it sets). The `count == 0` path returned early and wrote nothing, so such
+a bit survived. A well-formed caller never sets one; the two paths disagreeing is
+the part worth fixing.
+
+FIX: `count == 0` zeroes the buffers and falls through to the shared write-back.
+Pinned by `L142`-`L143`.
+
+### SA-4 [P3] -- a short ctl-verb write read as success
+
+`connect` and `listen` both write a verb to the connection's `ctl` file and
+tested only `w < 0`. A ctl verb is all-or-nothing -- netd parses the whole buffer
+or rejects it -- so a SHORT write would mean a TRUNCATED command was accepted,
+which is a different event from a slow one and must not read as success. It is
+unreachable today (a verb is at most 48 bytes, far under any negotiated msize),
+and the check costs nothing, so both sites now compare against the full length.
+
+## V-5d -- the formal round (Fable 5, max effort)
+
+`MODEL(start) == MODEL(end) == Fable 5` -- no fallback, so the round carried full
+lineage independence from the Opus implementation agent.
+
+**0 P0 / 1 P1 / 1 P2 / 4 P3. NOT dirty** -- the P1 is a local restructure inside
+one helper, the P2 a four-arm unwind; neither touches a wait/wake protocol or
+lifts a lock-order rule, so no round-2 is owed. Every fix is revert-probed.
+
+### F1 [P1] -- a negative fd made a blocking `ppoll` return instantly
+
+Linux and the native poll disagree about a negative fd, totally. poll(2): *"If
+`fd` is negative, then the corresponding `events` field is ignored and the
+`revents` field returns zero"* -- the entry is INERT and contributes nothing to
+the count. That is how every fixed-array event loop disables a slot without
+compacting. Thylacine's poll says the opposite and documents it (`poll.h`:
+"negative => POLLNVAL"): `poll_scan_one` returns 1 for such an entry.
+
+`viv_poll_translated` skipped them (`if (kfds[i].fd < 0) continue;  // caller-
+disabled entry`) and let them reach the native poll unchanged. So ANY disabled
+slot made `ready_count > 0` on the first scan, the native fast path fired, and a
+`ppoll` asked to block forever **returned at once** with `POLLNVAL` on exactly
+the slots the caller had switched off -- a hard spin at 100% CPU, plus a
+`revents` a robust event loop reads as "this fd died, tear it down". It also
+defeated the #98 probe budget: the fast path fires before `VIV_PPOLL_PROBE_MS`
+can be spent, so a socket beside a disabled slot reports not-ready forever.
+
+Subtracting them from the result afterwards would have fixed the count and the
+`revents` and **not the blocking**, so they must not reach the native poll at
+all. FIX: compact them out before polling and route the all-disabled case to
+`sys_poll_sleep_for` -- the same primitive `nfds == 0` already uses, which makes
+the two cases one shape. `orig[]` is the discriminator that makes it exact:
+`orig[i] < 0` is the CALLER's disable, `orig[i] >= 0` with `kfds[i].fd < 0` is
+OURS (a readiness file that would not open), and that one is still owed its
+`POLLNVAL`.
+
+The comment `// caller-disabled entry` shows the case was noticed. What was
+never asked is what the native poll *does* with it -- the round's own summary of
+the pattern: **the guard that exists is what stops you asking whether it is the
+right guard.**
+
+### F2 [P2] -- a failed `accept` kept the connection
+
+By the peer-address write-back the accept has fully committed: `dfd` is open,
+the socktab entry is claimed, and netd's connection `M` is live and held by
+`dfd` alone. All four `uaccess` failure arms did a bare `return -EFAULT`,
+handing the guest three resources and telling it nothing -- the fd number was
+the return value it just lost. Per call: one handle (of `PROC_HANDLE_MAX`), one
+socktab entry (of `VIV_SOCK_MAX`), and one **netd slot** (of `MAX_SLOTS`, shared
+across every `/net` client on the box), reclaimable only by Proc death. Linux
+unwinds here -- `__sys_accept4`'s `move_addr_to_user` failure goes to `out_fd:
+fput(newfile); put_unused_fd(newfd)`.
+
+Not new authority (the ceiling is the documented #65-class bound and I-43
+holds), but the guest cannot clean up after itself, which the native path
+allows. FIX: all four arms `goto fault_unwind`, which drops the socktab entry
+BEFORE closing the fd -- closing first would leave an entry naming a number the
+next fd-creating call can be handed, which is the stale-entry bug the close hook
+exists to prevent, reintroduced from the other end.
+
+The sibling `viv_sock_connect` gets the identical situation right, and every
+*earlier* arm in `accept` unwinds correctly. Only the tail stopped.
+
+### F3 [P3] -- `nfds` was tested as 64-bit where Linux passes an `int`
+
+`vivarium_pselect6_decide` took `s64` and tested `nfds < 0`. A caller leaving x0
+merely zero-extended (`0x00000000FFFFFFFF` for `int n = -1`) yields a POSITIVE
+4294967295, which was then **clamped to `PROC_HANDLE_MAX` and served** where
+Linux answers `EINVAL` -- working on one toolchain and not another. This is
+exactly what `vivarium_openat_decide`'s `(s32)(u32)dirfd` exists to prevent, and
+its comment says so. FIX: the same truncation, inside the pure decide so a unit
+test can see it. The existing `L132` leg passes a *sign*-extended -1 and cannot
+distinguish; the new unit leg passes the zero-extended form.
+
+### F4 [P3] -- the mis-declared-phenotype claim was incomplete
+
+The number-collision argument for rows 72/73 said the worst outcome of a
+mis-declared Proc issuing native `getpid` is "EFAULT or a block". `pselect6`
+also *writes* up to three 32-byte `fd_set` results to caller-register-controlled
+addresses. The load-bearing half is correct -- bounds-checked, confined to the
+caller's own address space, confers nothing, so **I-43 holds** -- but the
+enumeration was wrong, and this paragraph is the I-43 discharge the next reader
+leans on. Corrected. (The prior round's lesson: *a claim in a comment is exactly
+as unverified as one in chat.*)
+
+### F5 [P3] -- the kind gate ran after the operation it protects
+
+`viv_sock_connect` cast `dh.obj` to `struct Spoor *` and `spoor_ref`'d it without
+testing `dh.kind`. `handle_replace`'s Spoor-only gate would catch a non-Spoor --
+four lines later, after the ref had already been taken at an offset that is only
+a Spoor's by assumption. Unreachable today, and now checked in the order the
+header claims.
+
+### F6 [P3] -- a transient shortage answers `EBADF`
+
+The readiness-open failure arm maps a dead connection, a vanished `/net`, and a
+TRANSIENT resource shortage onto one `POLLNVAL`, which `pselect6` escalates to a
+whole-call `EBADF`. Linux never turns a resource shortage into `EBADF` on
+select. Left as-is deliberately and documented: the fix is to stop consuming
+guest fd numbers at all, which is the same change #98 needs, and splitting the
+arm now would encode the fd-space design it should replace.
+
+### The revert probes
+
+| Sabotage | Fails at |
+|---|---|
+| The `kfds[i].fd = orig[i]` restore removed | in-guest **L138** -- unit suite fully GREEN (1270/1270) |
+| The `count == 0` early return restored | in-guest **L143** -- unit suite fully GREEN (1270/1270) |
+| `dup` added as an ordinary T1 row | unit `vivarium.fd_freeing_rows`, 1269/1270 |
+| F1: the caller-disabled pass-through restored | in-guest **L144** -- unit suite fully GREEN |
+| F2: the leaking bare `return -EFAULT` restored | in-guest **L154** -- unit suite fully GREEN |
+
+Four of the five land in the guest with the unit suite untouched. That is the
+L125 lesson recurring, and sharper here: these
+are not merely properties the unit layer happens not to cover, they are
+properties it CANNOT cover, because the object under test (`viv_poll_translated`)
+is a static function that needs a live Proc, a live handle table and a live
+`/net` mount. The guest legs are the only layer that can see them.
+
+**The F2 leg failed on its first run against CORRECT code**, and the reason is
+worth keeping: it measured a run of fds *before* the client socket existed and
+compared it against a run taken *after*, so the two differed by one fd for a
+reason that had nothing to do with a leak. The fix was to the measurement, not
+the kernel -- take both runs with the same sockets held. A regression that fails
+for the wrong reason is worth exactly as little as one that passes for the wrong
+reason.

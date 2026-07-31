@@ -105,6 +105,13 @@ enum viv_verdict vivarium_translate(u64 linux_nr, const u64 *args_in,
 // diff next to its number. (Linux's aarch64 table is stable ABI — these values
 // are fixed for all time by the Linux kernel's own compatibility promise.)
 enum {
+    // THE fd-FREEING SET. `close` is the only one that is a row, and that is a
+    // PRECONDITION of the socktab close hook rather than a coincidence -- see
+    // the hook in viv_linux_dispatch and vivarium.fd_freeing_rows_stay_unserved.
+    VIV_LINUX_DUP         = 23,
+    VIV_LINUX_DUP3        = 24,
+    VIV_LINUX_CLOSE_RANGE = 436,
+
     VIV_LINUX_OPENAT     = 56,
     VIV_LINUX_CLOSE      = 57,
     VIV_LINUX_LSEEK      = 62,
@@ -173,7 +180,10 @@ enum {
     //     intending getpid now dispatches the pselect6 translator over
     //     getpid's (absent, hence garbage) arguments. The translator reads
     //     user memory the caller owns, bounds-checked, and polls fds the
-    //     caller already holds -- so the worst outcome is EFAULT or a block,
+    //     caller already holds -- so the worst outcome is EFAULT, a block, or
+    //     (V-5d F4) a BOUNDED WRITE of up to three 32-byte fd_set results into
+    //     addresses the caller's own registers named, which is still the
+    //     caller's own address space and still confers nothing;
     //     never authority. A mis-declared Proc is comprehensively broken
     //     either way; I-43 is about what it can REACH, not whether it works.
     //
@@ -973,7 +983,7 @@ bool vivarium_ppoll_decide(u64 nfds, u64 sigmask_va, s32 *out_err);
 // a process whose table happens to be that size. A bit set above the clamp names
 // an fd that cannot exist, so ignoring it loses nothing; a bit set BELOW it that
 // names no open handle still becomes POLLNVAL -> EBADF, which is also Linux.
-bool vivarium_pselect6_decide(s64 nfds, u64 sigmask_va, u32 *out_nfds,
+bool vivarium_pselect6_decide(u64 nfds_raw, u64 sigmask_va, u32 *out_nfds,
                               s32 *out_err);
 
 // How many bytes of an fd_set cover the low `nfds` bits, rounded up to the

@@ -1304,6 +1304,215 @@ unsafe fn run_linux() -> ! {
         b"L134\n"
     );
 
+    // --- V-5d SA-2: pselect6 over a REAL SOCKET -----------------------------
+    // Every leg above uses `rep`, an ordinary file -- which is never translated,
+    // so `opened[i]` stays -1 and the fd in the pollfd array is never rewritten.
+    // That makes all of them blind to the restore in viv_poll_translated, and
+    // L103 above (which claims to test it) blind for the same reason: it also
+    // polls a regular file. Delete the restore loop and the whole gate stays
+    // green -- which is why these legs exist.
+    //
+    // A socket fd IS translated: the kernel opens the connection's `ready`
+    // sibling and polls THAT. For ppoll the substitution is invisible (only
+    // `revents` is written back), but pselect6 uses the pollfd's fd as the BIT
+    // INDEX, so an unrestored array reports the READINESS handle's number as
+    // the ready fd -- a number the guest never opened.
+    let psock = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    leg!(rep, psock >= 0, b"L135\n");
+    leg!(
+        rep,
+        svc3(NR_CONNECT, psock as u64, sa.as_ptr() as u64, sa.len() as u64) == 0,
+        b"L136\n"
+    );
+
+    // A real timeout, not zero: readiness for a /net socket is one RPC away, so
+    // a zero-timeout answer would be "not yet" rather than the truth (task #98,
+    // and the same reason L107 spends 200ms).
+    let ts_200: [i64; 2] = [0, 200_000_000];
+    rdset = [0; 16];
+    wrset = [0; 16];
+    wrset[(psock as usize) / 64] = 1u64 << ((psock as usize) % 64);
+    leg!(
+        rep,
+        svc6(
+            NR_PSELECT6,
+            (psock + 1) as u64,
+            0,
+            wrset.as_mut_ptr() as u64,
+            0,
+            ts_200.as_ptr() as u64,
+            0,
+        ) == 1,
+        b"L137\n"
+    );
+    // THE RESTORE PROOF. The bit that came back must be the SOCKET's, not the
+    // readiness handle's.
+    leg!(
+        rep,
+        wrset[(psock as usize) / 64] & (1u64 << ((psock as usize) % 64)) != 0,
+        b"L138\n"
+    );
+
+    // THE OVERWRITE PROOF, which L129 could not give: a bit set GOING IN for an
+    // fd that does not become ready must come home CLEAR. A connected UDP socket
+    // with nothing sent to it is writable but not readable, so asking about the
+    // read side alone is a wait that times out -- and the bit must be gone.
+    rdset = [0; 16];
+    rdset[(psock as usize) / 64] = 1u64 << ((psock as usize) % 64);
+    leg!(
+        rep,
+        svc6(
+            NR_PSELECT6,
+            (psock + 1) as u64,
+            rdset.as_mut_ptr() as u64,
+            0,
+            0,
+            ts_200.as_ptr() as u64,
+            0,
+        ) == 0,
+        b"L139\n"
+    );
+    leg!(rep, rdset.iter().all(|w| *w == 0), b"L140\n");
+    leg!(rep, svc3(NR_CLOSE, psock as u64, 0, 0) == 0, b"L141\n");
+
+    // --- V-5d SA-3: a bit ABOVE nfds is cleared too -------------------------
+    // Linux copies FDS_BYTES(n) bytes back out of a buffer it zeroed, so a bit
+    // above nfds but inside the same 8-byte unit is in range of the COPY even
+    // though it was out of range of the SCAN -- and comes home clear. nfds = 1
+    // examines fd 0 only, so bit 5 is never looked at, and the call is the
+    // no-fd sleep form returning 0.
+    rdset = [0; 16];
+    rdset[0] = 1u64 << 5;
+    leg!(
+        rep,
+        svc6(NR_PSELECT6, 1, rdset.as_mut_ptr() as u64, 0, 0, ts0.as_ptr() as u64, 0) == 0,
+        b"L142\n"
+    );
+    leg!(rep, rdset[0] == 0, b"L143\n");
+
+    // --- V-5d F1: a NEGATIVE fd is INERT ------------------------------------
+    // poll(2): "If fd is negative, then the corresponding events field is
+    // ignored and the revents field returns zero." It contributes nothing to
+    // the count -- that is how a fixed-array event loop disables a slot without
+    // compacting. Thylacine's NATIVE poll says the opposite and documents it
+    // (negative => POLLNVAL, and poll_scan_one counts it READY), which is a fine
+    // native ABI and is not Linux's.
+    //
+    // So the translator cannot pass these through: any disabled slot would make
+    // the native fast path fire, and a ppoll asked to block FOREVER would return
+    // AT ONCE, every time. This leg is the one that catches that, and it needs a
+    // real timeout to do it -- with ts0 a correct kernel and a broken one both
+    // return promptly, and the leg would prove nothing.
+    let mut pfd2 = [
+        PollFd { fd: -1, events: POLLIN, revents: 0 },
+        PollFd { fd: -1, events: POLLIN, revents: 0 },
+    ];
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd2.as_mut_ptr() as u64, 1, ts_200.as_ptr() as u64, 0, 8, 0) == 0,
+        b"L144\n"
+    );
+    leg!(rep, pfd2[0].revents == 0, b"L145\n");
+
+    // And MIXED: an always-ready regular file beside a disabled slot must report
+    // exactly one ready fd -- not two, and not the file's readiness lost to the
+    // disabled slot's early return.
+    pfd2[0] = PollFd { fd: rep as i32, events: POLLIN, revents: 0 };
+    pfd2[1] = PollFd { fd: -1, events: POLLIN, revents: 0 };
+    leg!(
+        rep,
+        svc6(NR_PPOLL, pfd2.as_mut_ptr() as u64, 2, ts_200.as_ptr() as u64, 0, 8, 0) == 1,
+        b"L146\n"
+    );
+    leg!(
+        rep,
+        pfd2[0].revents & POLLIN != 0 && pfd2[1].revents == 0 && pfd2[1].fd == -1,
+        b"L147\n"
+    );
+
+    // --- V-5d F2: a failed accept must not keep the connection --------------
+    // By the time accept writes the peer address it has fully committed: the
+    // accepted fd is open, its socktab entry is claimed, and netd's connection
+    // is live and held by that fd ALONE. A bare EFAULT there hands the guest
+    // three resources and tells it nothing -- the fd number was the return
+    // value it just lost -- so they are reclaimable only by Proc death. netd's
+    // slot pool is shared across every /net client on the box, which is what
+    // lifts this above a self-inflicted leak.
+    //
+    // MEASURING IT NEEDS A RUN OF fds, NOT ONE. accept internally opens listen,
+    // remote and data and closes two of them, so a single probe fd lands on the
+    // same number whether or not the third leaked. Comparing a RUN taken before
+    // against the same run taken after is independent of that internal
+    // ordering: a leak anywhere in the low range shifts the tail.
+    let srv4 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(rep, srv4 >= 0, b"L148\n");
+    let srv4_sa: [u8; 16] = [
+        AF_INET as u8, 0, // sin_family
+        0x1E, 0x6E, // sin_port = 7790, network order
+        127, 0, 0, 1, // sin_addr
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    leg!(
+        rep,
+        svc3(NR_BIND, srv4 as u64, srv4_sa.as_ptr() as u64, srv4_sa.len() as u64) == 0,
+        b"L149\n"
+    );
+    leg!(rep, svc3(NR_LISTEN, srv4 as u64, 1, 0) == 0, b"L150\n");
+
+    // THE CLIENT COMES FIRST, and the ordering is the whole measurement. Taking
+    // `before` while cli4 did not yet exist would compare a landscape without
+    // the client against one with it -- the two runs would differ by one fd for
+    // a reason that has nothing to do with a leak, and the leg would fail
+    // against correct code. (It did, on the first run of this probe.)
+    let cli4 = svc3(NR_SOCKET, AF_INET, SOCK_STREAM, 0);
+    leg!(
+        rep,
+        cli4 >= 0
+            && svc3(NR_CONNECT, cli4 as u64, srv4_sa.as_ptr() as u64, srv4_sa.len() as u64)
+                == 0,
+        b"L151\n"
+    );
+
+    let mut before = [0i64; 3];
+    for k in 0..3 {
+        before[k] = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    }
+    for k in 0..3 {
+        svc3(NR_CLOSE, before[k] as u64, 0, 0);
+    }
+    leg!(rep, before[0] >= 0 && before[1] >= 0 && before[2] >= 0, b"L152\n");
+
+    // A call is pending, so accept commits -- and then fails on the address
+    // write-back, because addrlen names an address that cannot be read. That is
+    // the FIRST of the four arms, reached before anything is written.
+    let mut peer_sa = [0u8; 16];
+    leg!(
+        rep,
+        svc4(
+            NR_ACCEPT4,
+            srv4 as u64,
+            peer_sa.as_mut_ptr() as u64,
+            1, /* an unreadable addrlen pointer */
+            0,
+        ) == -14, /* EFAULT */
+        b"L153\n"
+    );
+
+    let mut after = [0i64; 3];
+    for k in 0..3 {
+        after[k] = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    }
+    leg!(
+        rep,
+        after[0] == before[0] && after[1] == before[1] && after[2] == before[2],
+        b"L154\n"
+    );
+    for k in 0..3 {
+        svc3(NR_CLOSE, after[k] as u64, 0, 0);
+    }
+    svc3(NR_CLOSE, cli4 as u64, 0, 0);
+    svc3(NR_CLOSE, srv4 as u64, 0, 0);
+
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its
     // own territory. If the renumber were wrong the bytes would not be there,

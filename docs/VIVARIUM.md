@@ -575,6 +575,22 @@ It is unavoidable, and the alternatives were measured rather than assumed:
 
 So the table is the honest answer, and it is small.
 
+**A SECOND property of the table rather than of the data (V-5d SA-1).** The
+socktab keys on the fd NUMBER, so an entry must be dropped whenever that number
+is freed — and exactly one place does it, the `close` hook in
+`viv_linux_dispatch`. That hook is COMPLETE only because `close` is the ONLY
+fd-freeing row. `dup` (23), `dup3` (24) and `close_range` (436) all free an fd
+and all decline, which is what makes the single hook sufficient; each is also a
+near-trivial renumber, so serving one as an ordinary T1 row is an easy and
+invisible mistake that would reintroduce the exact bug the hook prevents — a
+freed fd number whose `(proto, N)` entry survives to be handed to the next
+fd-creating call, so a later `connect()` writes a dial verb to a stranger's
+connection. The three are therefore NAMED and declined explicitly rather than
+merely absent, and `vivarium.fd_freeing_rows` asserts it: **an fd-freeing row
+lands with its socktab drop, in the same commit.** (Like the threading property
+below, this is a fact about the translation table that a future row can
+falsify — not an invariant of the code.)
+
 **A thread-safety property that is a property of the TABLE, not of the data.**
 `socktab` (like `sigtab`) is read and written without a lock. That is sound today
 only because **a `PHENO_LINUX` Proc cannot spawn a thread** — `clone`/`clone3` are

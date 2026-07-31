@@ -22,6 +22,7 @@
 //   vivarium.fdset_bytes            FDS_BYTES -- Linux's 8-byte-granular copy
 //   vivarium.fdset_to_pollfds       3 fd_sets -> pollfds; exceptfds DECLINES
 //   vivarium.pollfds_to_fdset       the asymmetric reverse map; a count of BITS
+//   vivarium.fd_freeing_rows        close is the ONLY served fd-freeing call
 //
 // The T2 tests (V-2b/V-2c/V-2d) stay just as pure: no decide function reads user
 // memory by construction, and the stat conversion is data-in/data-out.
@@ -1565,7 +1566,15 @@ void test_vivarium_pselect6_decide(void) {
 
     // nfds is an int, so negative is reachable and IS a bad value.
     err = -1;
-    TEST_ASSERT(!vivarium_pselect6_decide(-1, 0, &n, &err), "negative nfds refused");
+    TEST_ASSERT(!vivarium_pselect6_decide((u64)(s64)-1, 0, &n, &err),
+                "negative nfds refused (sign-extended -- what musl passes)");
+    // V-5d F3. The SAME -1 left merely ZERO-extended, which a different libc or
+    // a hand-rolled wrapper may produce. Before the truncation this read as
+    // 4294967295 -- positive, therefore CLAMPED to PROC_HANDLE_MAX and served,
+    // so select(-1, ...) worked on one toolchain and was EINVAL on another.
+    TEST_ASSERT(!vivarium_pselect6_decide(0x00000000FFFFFFFFull, 0, &n, &err),
+                "negative nfds refused (zero-extended -- the same -1)");
+    TEST_EXPECT_EQ(err, (s32)T_E_INVAL, "and it is EINVAL, not a clamp");
     TEST_ASSERT(err == T_E_INVAL, "as EINVAL");
 
     // THE CLAMP, which is Linux's `if (n > max_fds) n = max_fds` and NOT an
@@ -1908,4 +1917,50 @@ void test_vivarium_sockaddr_parse_any(void) {
     sa[0] = 2;
     TEST_ASSERT(!vivarium_sockaddr_in_parse_any(sa, 7, ip, &port), "a short address refused");
     TEST_ASSERT(!vivarium_sockaddr_in_parse_any(NULL, 16, ip, &port), "NULL refused");
+}
+
+// V-5d SA-1. The socktab keys on the fd NUMBER, so an entry must be dropped
+// whenever that number is freed -- and exactly one place does it: the close
+// hook in viv_linux_dispatch, which fires on VIV_LINUX_CLOSE alone.
+//
+// That is SUFFICIENT only while close is the ONLY fd-freeing row, and nothing
+// in the code says so. This test says it. Each number below frees an fd on
+// Linux and each is a near-trivial renumber (dup3 -> SYS_DUP is nearly one), so
+// adding one as an ordinary T1 row is an easy and invisible mistake -- and it
+// would reintroduce precisely the bug the hook exists to prevent: a freed fd
+// number whose (proto, N) entry survives to be handed to the next fd-creating
+// call, so a later connect() writes a dial verb to a stranger's connection.
+//
+// If this test fails, the fix is NOT to delete the line. It is to extend the
+// close hook to the newly-served number, in the same commit.
+void test_vivarium_fd_freeing_rows_stay_unserved(void);
+void test_vivarium_fd_freeing_rows_stay_unserved(void) {
+    u64 args[VIV_NARGS];
+    struct viv_call out;
+    viv_fill_args(args);
+
+    static const struct { u64 nr; const char *what; } frees_an_fd[] = {
+        { VIV_LINUX_DUP,         "dup" },
+        { VIV_LINUX_DUP3,        "dup3 (dup2 does not exist on aarch64)" },
+        { VIV_LINUX_CLOSE_RANGE, "close_range" },
+    };
+
+    for (u32 i = 0; i < 3; i++) {
+        out.nr = 0xDEADu;
+        enum viv_verdict v = vivarium_translate(frees_an_fd[i].nr, args, &out);
+        TEST_ASSERT(v != VIV_TRANSLATED && v != VIV_TIER2,
+                    "an fd-freeing call is not served -- extend the socktab "
+                    "close hook before serving it");
+        TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu,
+                       "a declined verdict leaves out untouched");
+        (void)frees_an_fd[i].what;
+    }
+
+    // And the converse, so the test cannot pass by the numbers simply being
+    // absent from the table: close IS served, and it is the one the hook keys
+    // on. A reader arriving here learns the whole rule from one function.
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_CLOSE, args, &out),
+                   (int)VIV_TRANSLATED, "close is served (T1) -- the hook's subject");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)SYS_CLOSE, "and renumbers to the native close");
 }

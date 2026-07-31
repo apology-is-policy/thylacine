@@ -595,6 +595,7 @@ void test_vivarium_pselect6_decide(void);
 void test_vivarium_fdset_bytes(void);
 void test_vivarium_fdset_to_pollfds(void);
 void test_vivarium_pollfds_to_fdset(void);
+void test_vivarium_fd_freeing_rows_stay_unserved(void);
 void test_vivarium_announce_cmd(void);
 void test_vivarium_parse_ipport(void);
 void test_vivarium_sockaddr_build(void);
@@ -2019,6 +2020,7 @@ struct test_case g_tests[] = {
     { "vivarium.fdset_bytes",          test_vivarium_fdset_bytes,          false, NULL },
     { "vivarium.fdset_to_pollfds",     test_vivarium_fdset_to_pollfds,     false, NULL },
     { "vivarium.pollfds_to_fdset",     test_vivarium_pollfds_to_fdset,     false, NULL },
+    { "vivarium.fd_freeing_rows",      test_vivarium_fd_freeing_rows_stay_unserved, false, NULL },
     { "vivarium.announce_cmd",         test_vivarium_announce_cmd,         false, NULL },
     { "vivarium.parse_ipport",         test_vivarium_parse_ipport,         false, NULL },
     { "vivarium.sockaddr_build",       test_vivarium_sockaddr_build,       false, NULL },

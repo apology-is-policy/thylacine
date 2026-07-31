@@ -135,6 +135,21 @@ struct viv_reject {
 };
 
 static const struct viv_reject g_viv_rejects[] = {
+    // THE fd-FREEING SET, and the reason it is listed at all. The V-5 socktab
+    // keys on the fd NUMBER, so the entry has to be dropped whenever that
+    // number is freed -- which the close hook in viv_linux_dispatch does, for
+    // close and ONLY for close. That is sufficient today because close is the
+    // only fd-freeing row, and THAT is the fact this block exists to record.
+    //
+    // Each of these looks like a trivial renumber (dup3 -> SYS_DUP is nearly
+    // one), and adding one as a plain T1 row would silently reintroduce the
+    // exact bug the hook exists to prevent: a freed fd number whose (proto, N)
+    // entry survives, handed to the next fd-creating call. Promoting any of
+    // them means extending the hook in the same commit.
+    { VIV_LINUX_DUP,         VIV_FORWARD },
+    { VIV_LINUX_DUP3,        VIV_FORWARD },
+    { VIV_LINUX_CLOSE_RANGE, VIV_FORWARD },
+
     { VIV_LINUX_OPENAT,     VIV_TIER2   },  // V-2b: vivarium_openat_decide/_build
     { VIV_LINUX_FSTAT,      VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
     { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
@@ -1103,7 +1118,7 @@ static void viv_fdset_set_bit(u8 *set, u32 fd) {
     set[fd >> 3] |= (u8)(1u << (fd & 7u));
 }
 
-bool vivarium_pselect6_decide(s64 nfds, u64 sigmask_va, u32 *out_nfds,
+bool vivarium_pselect6_decide(u64 nfds_raw, u64 sigmask_va, u32 *out_nfds,
                               s32 *out_err) {
     if (!out_nfds || !out_err) return false;
     *out_err  = 0;
@@ -1116,7 +1131,13 @@ bool vivarium_pselect6_decide(s64 nfds, u64 sigmask_va, u32 *out_nfds,
         return false;
     }
 
-    // Linux's own check, and it must be signed: nfds is an `int`.
+    // Linux's own check, and it must be signed AND 32-bit: nfds is an `int`, so
+    // only the low word is significant. A caller may leave x0 sign-extended
+    // (0xFFFFFFFFFFFFFFFF) or merely zero-extended (0x00000000FFFFFFFF) and both
+    // mean -1; testing the raw 64-bit value would refuse one and silently CLAMP
+    // the other to PROC_HANDLE_MAX -- working on some toolchains and not others,
+    // exactly what vivarium_openat_decide's `(s32)(u32)dirfd` exists to avoid.
+    s64 nfds = (s64)(s32)(u32)nfds_raw;
     if (nfds < 0) {
         *out_err = (s32)T_E_INVAL;
         return false;
