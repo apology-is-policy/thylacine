@@ -268,7 +268,7 @@ chmod +x ~/payload/clade-stage1.sh
 ~/payload/clade-stage1.sh \
     --src ~/llvm-thylacine \
     --jobs "$(nproc)" \
-    --patches ~/payload/patches
+    --patches ~/payload/patches --tag "TAG_PLACEHOLDER"
 
 phase "clone thylacine + overlay the working-copy build.sh"
 if [[ ! -d ~/thylacine ]]; then

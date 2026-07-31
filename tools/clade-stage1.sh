@@ -28,23 +28,28 @@
 # hand-rolling a second one only adds a staleness bug.
 #
 # Usage:
-#   tools/clade-stage1.sh --src DIR [--build DIR] [--jobs N] [--patches DIR]
+#   tools/clade-stage1.sh --src DIR [--build DIR] [--jobs N]
+#                         [--patches DIR --tag REF]
 #
 #   --src      the LLVM fork checkout (upstream tag + the Thylacine commits)
 #   --build    where to build (default: $src/build). If it differs from
 #              $src/build, a symlink is established -- see below.
 #   --jobs     ninja parallelism (default: nproc)
-#   --patches  if given, `git am` the *.patch there into --src first (the VM
-#              flow ships the fork as a patch series rather than a whole tree)
+#   --patches  if given, reconcile --src's series against the *.patch there (the
+#              VM flow ships the fork as a patch series rather than a whole tree)
+#   --tag      the upstream base the series applies onto; REQUIRED with
+#              --patches, because reconciling means knowing where the series
+#              starts
 set -euo pipefail
 
-SRC=""; BUILD=""; JOBS=""; PATCHES=""
+SRC=""; BUILD=""; JOBS=""; PATCHES=""; TAG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --src)     SRC="$2";     shift 2 ;;
         --build)   BUILD="$2";   shift 2 ;;
         --jobs)    JOBS="$2";    shift 2 ;;
         --patches) PATCHES="$2"; shift 2 ;;
+        --tag)     TAG="$2";     shift 2 ;;
         *) echo "clade-stage1: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
@@ -78,16 +83,78 @@ if [[ "$BUILD" != "$SRC/build" ]]; then
     phase "linked $SRC/build -> $BUILD (build.sh hardcodes \$fork/build)"
 fi
 
+# RECONCILE the series -- do not merely "apply it if it looks absent".
+#
+# The guard this replaces was `git log -1 | grep -q Thylacine`: skip the `git am`
+# when the tip is already a Thylacine commit. That is idempotent, and it is also
+# WRONG the moment the series GROWS -- which is the normal way this fork moves.
+# On the permanent builder (whose whole point is a tree that survives) a sync
+# that added a new fork commit would find a Thylacine tip, skip the apply, and
+# build the OLD source while reporting success end to end. It is exactly the
+# green-but-built-nothing shape this file's header warns about, one guard down.
+# Caught before it cost a build, because the new commit was mine and I looked.
+#
+# Comparison is by `git patch-id --stable`, not by subject: format-patch FOLDS a
+# long Subject: across continuation lines, so subject parsing is fragile in
+# precisely the case that matters (a descriptive commit message). patch-id
+# hashes the DIFF, gives identical values for a patch file and for the commit it
+# became (verified on this series, 8/8), and so answers the real question --
+# "is this exact change already applied here?"
+#
+# Three outcomes, and the middle one is why this is not just a reset:
+#   identical  -> nothing to do
+#   prefix     -> `am` only the new tail. This is the common case (the series is
+#                 append-only in practice) and it is worth special-casing: a
+#                 reset+re-am would rewrite every file the WHOLE series touches,
+#                 including core headers like Triple.h, and both this build tree
+#                 AND the cross-LLVM tree built from the same source would then
+#                 rebuild the world. Applying just the tail touches just the
+#                 tail's files.
+#   divergent  -> reset to the base and re-apply. Correct for an amended or
+#                 reordered series; pays the rebuild, which is the honest price
+#                 of having changed history.
 if [[ -n "$PATCHES" ]]; then
-    phase "apply the fork patch series from $PATCHES"
+    phase "reconcile the fork patch series from $PATCHES"
     local_n="$(ls "$PATCHES"/*.patch 2>/dev/null | wc -l | tr -d ' ')"
     [[ "$local_n" -gt 0 ]] || die "no *.patch files in $PATCHES"
+    [[ -n "$TAG" ]] || die "--patches requires --tag (the base the series applies onto)"
+    git -C "$SRC" rev-parse --verify -q "$TAG^{commit}" >/dev/null \
+        || die "base ref '$TAG' does not exist in $SRC"
     git -C "$SRC" config user.email builder@thylacine.local
     git -C "$SRC" config user.name  "Clade Builder"
-    # Idempotent: a re-run must not stack the series twice.
-    if ! git -C "$SRC" log --oneline -1 | grep -q Thylacine; then
+
+    want="$(for p in "$PATCHES"/*.patch; do
+                git patch-id --stable < "$p" | cut -d' ' -f1
+            done)"
+    have="$(git -C "$SRC" log --reverse --format=%H "$TAG..HEAD" | while read -r h; do
+                git -C "$SRC" show "$h" | git patch-id --stable | cut -d' ' -f1
+            done)"
+    n_want="$(grep -c . <<< "$want" || true)"
+    n_have="$(grep -c . <<< "$have" || true)"
+
+    if [[ "$want" == "$have" ]]; then
+        echo "series already applied verbatim ($n_have commits) -- nothing to do"
+    elif [[ "$n_have" -lt "$n_want" && "$(head -n "$n_have" <<< "$want")" == "$have" ]]; then
+        # Append-only: apply patches $n_have+1 .. $n_want, in order.
+        echo "applied series is a prefix ($n_have of $n_want) -- applying the $(( n_want - n_have )) new patch(es)"
+        # A glob straight into an array, not `mapfile`: mapfile is bash 4+, and
+        # this script is also run from a bash-3.2 dev host. format-patch's names
+        # are zero-padded, so glob order IS series order.
+        all_patches=("$PATCHES"/*.patch)
+        git -C "$SRC" am "${all_patches[@]:$n_have}"
+    else
+        echo "applied series DIVERGES from the payload ($n_have applied vs $n_want wanted)"
+        echo "resetting to $TAG and re-applying the whole series"
+        git -C "$SRC" reset --hard "$TAG"
         git -C "$SRC" am "$PATCHES"/*.patch
     fi
+
+    # Assert the outcome rather than trusting the branch taken above.
+    have="$(git -C "$SRC" log --reverse --format=%H "$TAG..HEAD" | while read -r h; do
+                git -C "$SRC" show "$h" | git patch-id --stable | cut -d' ' -f1
+            done)"
+    [[ "$want" == "$have" ]] \
+        || die "series reconcile FAILED: $SRC does not match the payload after applying"
     git -C "$SRC" log --oneline -"$local_n" | cat
 fi
 

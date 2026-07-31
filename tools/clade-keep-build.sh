@@ -306,7 +306,7 @@ do_stage1() {
   # "$fork/build/bin/..." lookups require.
   "$THYLA_SRC/tools/clade-stage1.sh" \
       --src "$FORK_SRC" --build "$FORK_BUILD" --jobs "$JOBS" \
-      --patches ~/payload/patches
+      --patches ~/payload/patches --tag "$LLVM_TAG"
 }
 
 do_stage2() {
