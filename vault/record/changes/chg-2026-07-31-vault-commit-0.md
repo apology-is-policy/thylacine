@@ -4,7 +4,7 @@ type: chg
 title: "Commit 0: the vault schema, linter, spine, and views"
 date: 2026-07-31
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["2f7d8c18"]
 touched: []
 established: [home, dashboard, view-invariants, view-seams, view-audit-triggers, view-roadmap, arc-vault]
 closed: []
