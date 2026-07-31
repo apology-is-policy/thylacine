@@ -739,11 +739,26 @@ struct Proc {
     // is not running.
     //
     // Installed with a compare-exchange, loser frees -- the alloc happens
-    // outside every lock (the 8a-2b debug_hw shape). Entry writes are
-    // independent single bytes, so concurrent `rt_sigaction` calls from peer
-    // threads cannot tear one another; a delivery racing a disposition change
-    // may observe either value, which is the same latitude POSIX gives
-    // (sigaction is not ordered against a signal already in flight).
+    // outside every lock (the 8a-2b debug_hw shape).
+    //
+    // LOCK-FREE ENTRY ACCESS, AND WHY (task #97 -- this paragraph replaced a
+    // WRONG one). Entries are read and written with no lock. That is sound
+    // because a PHENO_LINUX Proc **cannot spawn a thread**: `clone`/`clone3`
+    // are not table rows, so they FORWARD -> ENOSYS (VIVARIUM.md task #93).
+    // A single-threaded Proc has no peer to race, so there is nothing to
+    // serialise. This is a property of the TRANSLATION TABLE, not of the data
+    // -- and it EVAPORATES the moment process creation lands. Re-derive it
+    // there; do not assume this comment still holds.
+    //
+    // The claim this replaced ("entry writes are independent single bytes, so
+    // concurrent rt_sigaction calls cannot tear") was true at V-6b, when an
+    // entry was one u8. V-6c widened entries to a 32-byte viv_ksigaction and
+    // did not update the reason, leaving a false argument that read as
+    // reassuring -- exactly what stops the next reader re-checking.
+    //
+    // A delivery racing a disposition change may observe either value, which
+    // is the latitude POSIX gives (sigaction is not ordered against a signal
+    // already in flight). That part was and remains true.
     struct viv_sigtab *sigtab;
 };
 

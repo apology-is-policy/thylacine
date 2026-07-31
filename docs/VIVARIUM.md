@@ -389,6 +389,55 @@ failure, not a slow path. So a T2 translator must admit everything it can prove
 is no longer free. (This is what promotes `mmap`/`munmap` from §6.18's FORWARD
 rows to T2 rows under the rule V-2b already established — see §6.21.)
 
+### 4.1.1 V-5's answer, measured — sockets need no supervisor at all
+
+**Resolved 2026-07-31 (user-voted), at V-5's entry, by measuring `/net` rather
+than reasoning from the paragraph above.** The three candidates are all
+*supervisor* shapes, and the requirement §4.1 predicted would choose between them
+turns out not to be a requirement for a supervisor at all. The sentence "sockets
+need multi-step orchestration that no single call-and-reply can express" is an
+argument against a **ring**. It is not an argument against the **kernel** doing
+the orchestration, and the kernel does exactly this kind of orchestration already:
+`exec_resolve_from_namespace` resolves a path in the caller's Territory, with the
+caller's authority, and hands back a Spoor.
+
+What the measurement found (`usr/netd/src/server.rs`, not scripture):
+
+- Opening `clone` **mints** a connection and rebinds that fid onto its `ctl`;
+  that fid holds the connection's only reference (`slot_ref`, 0→1). Drop it before
+  another fid binds and the connection is freed.
+- Opening a TCP `data` file **defers** the `Rlopen` until ESTABLISHED (#257). So
+  `data` cannot be pre-opened at `socket()` — it is openable only after the
+  `connect` verb is written.
+- **Any** fid bound to a connection holds a reference (`fid_set`/`fid_clunk`, via
+  `path_conn_n`), so once `data` is open the `ctl` fid is disposable.
+- Reading a `ctl` fid yields the connection number in decimal
+  (`file_content`: `FK_CTL => c.push_dec(n)`) — the Plan 9 idiom, live.
+- `read`/`write`/`close` are **T1 renumber rows** that fall through to the native
+  switch. So if the socket fd *is* the `data` fd, the entire data path needs no
+  translation whatsoever.
+
+Those five facts compose into the design: **the socket fd changes identity at
+`connect`** (`ctl` → `data`), which is what makes the hot path free, and the only
+thing that must survive the `socket()`→`connect()` gap is the tuple
+`(proto, N, state)`. `N` is re-readable from `ctl` by the documented protocol;
+`proto` is knowable only at `socket()` and cannot be recovered later without
+decoding netd's private qid layout — which the kernel must not do, because `/net`
+is a mount point and need not be netd. So the state is small, real, and
+unavoidable: a per-Proc table, exactly the shape `Proc.sigtab` took at V-6.
+
+**Therefore V-3 stays deferred and V-5 does not build it.** Its fork moves to the
+next chunk that genuinely needs a destination, which on present evidence is
+**process creation (task #93)** — `clone`/`execve`/`wait4`, where the guest's
+request really is "make a *new* process exist", something no in-kernel
+translation of the caller's own authority can synthesise from `SYS_SPAWN_*`'s
+program-not-continuation shape. The three candidates above stand recorded for it.
+
+The rule this establishes, and which the next chunk should apply before reaching
+for a supervisor: **ask first whether the kernel can perform the call with the
+caller's own authority.** A supervisor is needed only when the work is something
+the caller could not do for itself — not merely when it takes several steps.
+
 ---
 
 ## 5. Mechanism (settled, given any of A/B/C)
@@ -459,11 +508,83 @@ match.
 ### 5.5 Sockets (R-2)
 
 The Linux socket family is **translated to `/net` file operations** — the same
-mapping the pouch boundary-line (`0016`) already implements and proved, relocated to
-whichever side §4 chooses. Under Option C it forwards to the supervisor, which is
-also where `/net` already naturally lives. `AF_UNIX` maps to the existing `/srv`
-byte-mode services (the `0006` patch's proven mapping). `AF_INET6` → `EAFNOSUPPORT`
-at v1.0, honestly.
+mapping the pouch boundary-line (`0016`) already implements and proved, relocated
+into the kernel phenotype as a T2 family (§4.1.1, user-voted 2026-07-31; the
+earlier "forwards to the supervisor under Option C" reading is superseded — there
+is no supervisor, and sockets do not need one). `AF_UNIX` maps to the existing
+`/srv` byte-mode services (the `0006` patch's proven mapping). `AF_INET6` →
+`EAFNOSUPPORT` at v1.0, honestly.
+
+**Why the kernel and not a server.** Every step is something the calling Proc
+could already do for itself: `stalk` into its own Territory, read, write, install
+an fd in its own handle table. So I-43 holds *by construction* rather than by
+review — a translated socket call reaches exactly what the guest could have
+reached by opening `/net` by hand, and a container whose territory has no `/net`
+gets `ENETDOWN` from the walk, not a privileged bypass. This is the same argument
+the diorama rests on (§6.2): a reformatter, never a new authority.
+
+#### 5.5.1 The fd identity change (the load-bearing mechanism)
+
+`/net` splits across three files what Linux fuses into one fd. The resolution:
+
+| Linux | `/net` |
+|---|---|
+| `socket(AF_INET, SOCK_STREAM)` | open `/net/tcp/clone` → the fid *becomes* `ctl`; read it for `N` |
+| `connect(fd, addr)` | write `connect a.b.c.d!port` → `ctl`; open `/net/tcp/N/data` |
+| `read`/`write`/`close` | **untranslated** — T1 rows on the `data` fd |
+| `shutdown` | write `hangup` → a freshly re-walked `ctl` |
+| `getsockname`/`getpeername` | read `/net/tcp/N/local` / `remote` |
+
+The socket fd is the `ctl` fd from `socket()` until `connect()`, and the `data` fd
+afterwards. `connect` performs that swap **in place**, via a new
+`handle_replace(p, fd, kind, rights, obj)` primitive — `handle_dup` cannot serve,
+because it allocates a *new* slot and the guest is holding a specific number.
+
+Three properties make the swap correct, each measured in §4.1.1:
+
+1. The `ctl` fid must be held until `data` binds, or netd frees the connection
+   (`slot_ref` 0→1 at the clone-mint). The swap opens `data` **before** releasing
+   `ctl`, so the reference count never transits zero.
+2. `data` cannot be opened earlier, because netd defers its `Rlopen` to
+   ESTABLISHED (#257). So the swap is at `connect` and nowhere else.
+3. After the swap the fd needs no further translation forever — which is the
+   entire point, and why `read`/`write` must **not** grow a socket check. Putting
+   one on the hottest path in the system to serve a phenotype would be the wrong
+   trade even if it were correct.
+
+#### 5.5.2 `Proc.socktab` — the state, and why it is unavoidable
+
+`(proto, N, state)` per socket, in a lazily-allocated per-Proc table: the
+`Proc.sigtab` shape (V-6), CAS-installed outside every lock, freed at `proc_free`,
+not `rfork`-inherited, bounded (`VIV_SOCK_MAX`) so a guest cannot grow kernel
+memory without bound — the I-32 posture, with the socket count charged to the
+guest's own handle table besides.
+
+It is unavoidable, and the alternatives were measured rather than assumed:
+
+- **`N`** is re-readable from `ctl`, but only while the fd still *is* `ctl`.
+- **`proto`** is knowable only at `socket()` (the guest passes `SOCK_STREAM` /
+  `SOCK_DGRAM` there and never again). Recovering it later would mean decoding
+  netd's qid layout (`CONN_FLAG | proto<<32 | N<<8 | filekind`) — **rejected**:
+  `/net` is a mount point, need not be netd, and a foreign server's qid decoded as
+  netd's is a silent mistranslation, the one failure mode §6.19's argument-domain
+  rule exists to prevent.
+- **`Spoor.path`** would carry the name — **forbidden by I-33**, which makes path
+  retention explicitly non-load-bearing. Reading it here would convert a cosmetic
+  field into a correctness dependency.
+
+So the table is the honest answer, and it is small.
+
+**A thread-safety property that is a property of the TABLE, not of the data.**
+`socktab` (like `sigtab`) is read and written without a lock. That is sound today
+only because **a `PHENO_LINUX` Proc cannot spawn a thread** — `clone`/`clone3` are
+not table rows, so they FORWARD to `ENOSYS` — and a single-threaded Proc has no
+peer to race. This is *not* a property of the entries being small or of any
+atomicity argument, and **it evaporates the moment process creation lands (task
+#93)**. Both tables must be re-derived there, and the field comments say so.
+(V-6c left the opposite claim on `sigtab` — that byte-sized entries could not tear
+— which was true at V-6b and false once entries widened to 32 bytes; corrected in
+the same commit as this section, task #97.)
 
 ---
 
@@ -2106,9 +2227,9 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | V-0 | Scripture | This document; the §4 fork resolved; `ARCH §11.5/§11.6` corrected (R-1, R-2); I-43 minted; NOVEL entry | user signoff |
 | V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof. **V-1a LANDED** (the field + the advisory `elf_brand_hint`). **V-1b LANDED**: the declaration (`SPAWN_PHENO_LINUX` in `sys_spawn_args.pheno_flags`, consuming the must-be-0 `_pad_allow` slot at offset 92 -> a zero-filled pre-V-1b request still means inherit) + the syscall-entry branch (T1 renumber-in-place then FALL THROUGH to the native switch; the three T2 shells over the V-2 pure translators; FORWARD and ENOSYS kept as separate arms so V-3 is a one-line change) + `sys_fstat_for_proc` extracted so the phenotyped path shares the native core + rule 4's advisory diagnostic (the hint's first caller, on an already-failed load) + `viv`'s `org.thylacine.phenotype` manifest annotation | native suite byte-unchanged (1237/1237); **PASS in-boot on two vantages** -- leg A `viv-pheno-probe native` proves a Linux number is NOT translated without a declaration (`brk` -> -1, not -ENOSYS), leg B `viv run /vivarium/pheno` proves the whole chain with a container entrypoint that speaks only raw Linux numbers and moves real bytes (openat/read/lseek/fstat/newfstatat/write/close, the two stat paths cross-checked on `(st_dev, st_ino)`, the `AT_SYMLINK_NOFOLLOW` reject still rejecting) and dies through Linux `exit_group`; revert-probed |
 | V-2 | The translation table | The §4-C stateless 1:1 set; the split rule enforced | a static `hello` (built by *Linux* toolchain) runs and exits 0 |
-| V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. The shape is decided by **V-5**, the first chunk that genuinely needs a destination; §4.1 records the three live candidates and the peer evidence so V-5 does not re-derive them. `specs/phenotype.tla` lands with whatever V-5 chooses | (deferred; the gate travels with V-5) |
+| V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1; and V-5 did NOT claim it (user-voted 2026-07-31) — §4.1.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. V-5 was expected to decide the shape, and instead **measured that sockets need no supervisor**: every step is work the calling Proc could do for itself, so the kernel performs it with the caller's own authority (§5.5). The fork therefore moves to the next chunk that needs a destination it cannot synthesise — on present evidence **process creation (#93)**. The three candidates + the peer evidence stand recorded in §4.1 for it. `specs/phenotype.tla` lands with whatever that chunk chooses | (deferred; the gate travels with whichever chunk builds it) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
-| V-5 | Sockets | The `/net` translation | **`curl` fetches a URL** (ROADMAP §9.2) |
+| V-5 | Sockets | The `/net` translation, **in the kernel phenotype as a T2 family** (§5.5, user-voted 2026-07-31). **V-5a** the substrate + the client path: `handle_replace`, `Proc.socktab`, and `socket`/`connect`/`shutdown`/`getsockname`/`getpeername`/`sendto`/`recvfrom` — `read`/`write`/`close` need no row, which is the design's point. **V-5b** the server path: `bind`/`listen`/`accept`/`accept4` over netd's deferred-accept. **V-5c** readiness: `ppoll`/`pselect6` over the `QTPOLL` `ready` file. **V-5d** the focused audit + close | **`curl` fetches a URL** (ROADMAP §9.2); V-5a's own gate is an in-guest TCP round-trip over the resident loopback |
 | V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land. **V-6a** landed the decode; **V-6b** landed dispositions (`rt_sigaction` for `SIG_DFL`/`SIG_IGN` + `rt_sigprocmask` + the per-Proc `viv_sigtab` + the post-time discard), and corrected two V-6a facts by measuring musl -- the `k_sigaction` layout is arch-fixed at 32 bytes rather than flag-chosen, and SIGTERM had to be evicted from `interrupt` because a shared note cannot carry two independent dispositions (task #95). **V-6c** landed the Tier-1 frame: a real handler installs and RUNS, `rt_sigreturn` is the phenotyped spelling of `SYS_NOTED(NCONT)`, and the sigtab widened to the whole `k_sigaction`. **V-6 IS COMPLETE** | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
 | V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
 | V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
@@ -2157,6 +2278,25 @@ for V-1b/V-7. The order from here:
    (`viv-pheno-probe` issues raw Linux numbers). §6.22 is the design.
 3. **V-5** — sockets, which **decides V-3's shape** and then builds it.
 4. **V-8** — the I-43 focused audit + close.
+
+**CORRECTED A THIRD TIME 2026-07-31, at V-5's entry — and this time the
+correction is that the expected decision did not need making.** Step 3 above
+assumed V-5 would pick a supervisor shape and build it. Measuring `/net` first
+(§4.1.1) found that sockets are translatable in the kernel with the caller's own
+authority, so **V-5 builds no supervisor and V-3 stays deferred**. The order from
+here:
+
+1. **V-5a..V-5d** — sockets as a T2 family (§5.5): substrate + client, then
+   server, then readiness, then the focused audit.
+2. **V-8** — the I-43 focused audit + close, where #93 (process creation) is
+   weighed and, if built, inherits V-3's fork.
+
+The generalisable lesson, and the reason this correction reads like the previous
+two: **each was a mechanism assumed rather than measured, and each was wrong in
+the direction of "more machinery than the tree needs".** V-1b was expected to
+precede V-7 and could not; V-3 was expected to precede V-5 and had an empty
+servable set; V-5 was expected to need a supervisor and does not. Before building
+a channel, check what the existing authority already reaches.
 
 **A gap this arc does not chunk, recorded at V-6's entry (task #93).** The ARC
 gate is "an Alpine shell runs", but a shell forks before it does anything else,
