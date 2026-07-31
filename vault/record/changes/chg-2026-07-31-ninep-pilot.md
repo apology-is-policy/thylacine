@@ -4,7 +4,7 @@ type: chg
 title: "The 9P-client pilot: one subsystem end-to-end across all four planes"
 date: 2026-07-31
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["719c8bc3"]
 touched: []
 established:
   - moc-kernel
