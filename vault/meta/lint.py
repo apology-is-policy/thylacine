@@ -237,6 +237,14 @@ def validate(reg, pre_errors):
                 fails.append(f"{n.rel}: {field}='{f[field]}' not in {sorted(allowed)}")
         if is_record(n.rel) and "updated" in f:
             fails.append(f"{n.rel}: 'updated' is forbidden on the Record plane")
+        # a flow list split across lines silently degrades in this parser --
+        # fail loudly instead (use a block list). Found by the 9P pilot.
+        for field, val in f.items():
+            if isinstance(val, str) and val.startswith("[") \
+                    and not val.rstrip().endswith("]"):
+                fails.append(f"{n.rel}: '{field}' looks like an unterminated "
+                             f"flow list (multi-line [..] is unsupported; "
+                             f"use a block list)")
         # edge resolution
         for field, val in f.items():
             if field not in STRICT_EDGE_FIELDS:
@@ -389,6 +397,27 @@ def render_roadmap(reg):
     return "\n".join(out)
 
 
+def render_closed(reg, sub_id):
+    """The do-not-re-report preamble for a surface (replaces the
+    memory/audit_*_closed_list.md files; transcluded into prosecutor
+    prompts)."""
+    fnds = [n for n in reg.values() if n.front.get("type") == "fnd"
+            and sub_id in (n.front.get("surface") or [])
+            and n.front.get("status") in ("fixed", "documented", "withdrawn")]
+    out = [f"{len(fnds)} closed findings on [[{sub_id}]] — do NOT re-report",
+           f"these in a future round (open/deferred findings are NOT listed",
+           f"here; see the seam inbox):", ""]
+    for n in sorted(fnds, key=lambda x: x.id):
+        f = n.front
+        disp = ""
+        m = re.search(r"^##\s+Disposition\s*$\n+(.+?)$", n.body, re.M)
+        if m:
+            disp = " — " + m.group(1).strip()
+        out.append(f"- [[{n.id}]] [{f.get('severity')}] "
+                   f"{f.get('title', '')} ({f.get('status')}){disp}")
+    return "\n".join(out)
+
+
 RENDERERS = {
     "dashboard": render_dashboard,
     "invariants": render_invariants,
@@ -404,14 +433,17 @@ def view_notes(reg):
 
 def rendered_body(note, reg):
     q = note.front.get("query")
-    fn = RENDERERS.get(q)
-    if fn is None:
+    if q in RENDERERS:
+        body = RENDERERS[q](reg)
+    elif isinstance(q, str) and q.startswith("closed:"):
+        body = render_closed(reg, q.split(":", 1)[1])
+    else:
         return None, f"{note.rel}: no renderer for query '{q}'"
     if GEN_BEGIN not in note.raw or GEN_END not in note.raw:
         return None, f"{note.rel}: missing {GEN_BEGIN}/{GEN_END} markers"
     pre, rest = note.raw.split(GEN_BEGIN, 1)
     _, post = rest.split(GEN_END, 1)
-    new = pre + GEN_BEGIN + "\n" + fn(reg) + "\n" + GEN_END + post
+    new = pre + GEN_BEGIN + "\n" + body + "\n" + GEN_END + post
     return new, None
 
 
@@ -509,19 +541,8 @@ def staged_checks(root, reg):
 
 
 def print_closed(reg, sub_id):
-    fnds = [n for n in reg.values() if n.front.get("type") == "fnd"
-            and sub_id in (n.front.get("surface") or [])
-            and n.front.get("status") in ("fixed", "documented", "withdrawn")]
-    print(f"# Do-not-re-report preamble for {sub_id} "
-          f"({len(fnds)} closed findings)\n")
-    for n in sorted(fnds, key=lambda x: x.id):
-        f = n.front
-        line1 = ""
-        m = re.search(r"^##\s+Disposition\s*$\n+(.+?)$", n.body, re.M)
-        if m:
-            line1 = " — " + m.group(1).strip()
-        print(f"- {n.id} [{f.get('severity')}] {f.get('title', '')} "
-              f"({f.get('status')}){line1}")
+    print(f"# Do-not-re-report preamble for {sub_id}\n")
+    print(render_closed(reg, sub_id))
 
 
 def main(argv):

@@ -12,5 +12,7 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | # | invariant | strength | guards | validated by |
 |---|---|---|---|---|
-| (none yet) | | | | |
+| I-10 | [[inv-i10]] | spec | sub-kernel-ninep-client | spec-9p-client |
+| I-11 | [[inv-i11]] | spec | sub-kernel-ninep-client | spec-9p-client |
+| I-9 | [[inv-i9]] | spec | sub-kernel-ninep-client | spec-reader-frame, spec-9p-client, gate-smp |
 <!-- generated:end -->

@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR/vault/meta/hook-readlog.py\" ] || python3 \"$CLAUDE_PROJECT_DIR/vault/meta/hook-readlog.py\" || true"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR/vault/meta/hook-dossier-nag.py\" ] || python3 \"$CLAUDE_PROJECT_DIR/vault/meta/hook-dossier-nag.py\" || true"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -4,14 +4,14 @@ type: arc
 title: "The vault migration"
 status: active
 design: [vault/meta/schema.md, vault/meta/workflow.md]
-chunks: [chg-2026-07-31-vault-commit-0]
+chunks: [chg-2026-07-31-vault-commit-0, chg-2026-07-31-ninep-pilot]
 follow-ons: []
 exit-criteria:
-  - "[ ] Pilot: the 9P client end-to-end across all planes"
+  - "[x] Pilot: the 9P client end-to-end across all planes"
   - "[ ] Sweep by subsystem (reference docs absorbed, stubs left)"
   - "[ ] Registry passes (invariants, specs, ABIs, locks, hazards, glossary, gates, seams, measurements)"
   - "[ ] View cutover (CLAUDE.md shrinks to constitution + pointers)"
-  - "[ ] Session hooks wired in .claude/settings.json (tier 3)"
+  - "[x] Session hooks wired in .claude/settings.json (tier 3)"
   - "[ ] Stub deletion after the full-corpus verification chg"
 created: 2026-07-31
 ---

@@ -12,5 +12,5 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | surface | code | invariants | prosecution |
 |---|---|---|---|
-| (none yet) | | | |
+| [[sub-kernel-ninep-client]] | kernel/9p_client.c, kernel/9p_session.c, kernel/9p_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_mq.c, kernel/9p_attach.c, kernel/include/thylacine/9p_client.h | inv-i9, inv-i10, inv-i11 | What an auditor attacks here (the single home of the trigger-row content for |
 <!-- generated:end -->
