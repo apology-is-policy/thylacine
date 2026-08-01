@@ -6,6 +6,7 @@ status: active
 design: ["docs/LLVM-DESIGN.md"]
 chunks:
   - chg-2026-07-24-getcwd-oversized
+  - chg-2026-07-29-96-pipe-fstat
 follow-ons: []
 created: 2026-08-01
 ---

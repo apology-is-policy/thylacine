@@ -7,6 +7,8 @@ design: ["docs/ARCHITECTURE.md 8.4"]
 chunks:
   - chg-2026-06-05-863-smp-soundness-core
   - chg-2026-06-05-864-hmp-foundation
+  - chg-2026-05-31-807-magazines
+  - chg-2026-05-31-808-directmap-pagemap
 follow-ons: [seam-hmp-push, seam-sparse-mpidr]
 created: 2026-08-01
 ---

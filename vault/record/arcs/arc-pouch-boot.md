@@ -6,6 +6,8 @@ status: active
 design: ["docs/POUCH-DESIGN.md"]
 chunks:
   - chg-2026-05-26-16c-attach-srv
+  - chg-2026-05-23-torpor
+  - chg-2026-05-26-16bg-hardening-f3f4f5
 follow-ons: [seam-848-pivot-walk-race]
 created: 2026-07-31
 ---

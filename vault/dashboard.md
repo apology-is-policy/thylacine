@@ -13,24 +13,26 @@ Generated — do not edit between the markers (`quaestor render`).
 
 | arc | status | chunks |
 |---|---|---|
-| [[arc-clade]] | active | 1 |
+| [[arc-clade]] | active | 2 |
 | [[arc-corvus-srv]] | active | 3 |
-| [[arc-deep-smp-review]] | active | 2 |
-| [[arc-go-build]] | active | 25 |
+| [[arc-deep-smp-review]] | active | 4 |
+| [[arc-go-build]] | active | 27 |
 | [[arc-go-ide]] | active | 2 |
-| [[arc-holotype-rw]] | active | 7 |
+| [[arc-holotype-rw]] | active | 9 |
 | [[arc-identity-detour]] | active | 12 |
-| [[arc-life-support]] | active | 1 |
+| [[arc-life-support]] | active | 2 |
 | [[arc-net]] | active | 12 |
+| [[arc-phase1-foundation]] | complete | 3 |
 | [[arc-phase2-lifecycle]] | active | 4 |
+| [[arc-phase5-ipc]] | complete | 3 |
 | [[arc-phase5-namespace]] | active | 3 |
-| [[arc-pouch-boot]] | active | 1 |
-| [[arc-pty]] | active | 2 |
+| [[arc-pouch-boot]] | active | 3 |
+| [[arc-pty]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 11 |
+| [[arc-vault]] | active | 12 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 46
+## Open seams: 54
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -48,6 +50,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-932-devsrv-readdir]] (sub-kernel-devsrv)
 - [[seam-9p-tag-block-on-full]] (sub-kernel-ninep-session)
 - [[seam-affinity-mask]] (sub-kernel-sched-smp)
+- [[seam-buddy-bulk-op]] (sub-kernel-mm-phys)
 - [[seam-close-flush-unbounded]] (sub-kernel-death)
 - [[seam-co-fidless-wstat]] (sub-kernel-ninep-dev9p)
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
@@ -63,30 +66,37 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-larder-shrinker]] (sub-kernel-larder)
 - [[seam-larder-stale-child-attr]] (sub-kernel-larder)
 - [[seam-legate-member-sweep-race]] (sub-kernel-proc)
+- [[seam-mm-directmap-cap-absolute]] (sub-kernel-mm-phys)
 - [[seam-mount-graph-unmodeled]] (sub-kernel-territory)
 - [[seam-netd-host-tests]] (sub-netd-server, sub-netd-nic)
+- [[seam-poll-heap-waiters]] (sub-kernel-poll)
+- [[seam-poll-srv-registry-retain]] (sub-kernel-poll)
 - [[seam-posix-pathname-form-gates]] (sub-kernel-stalk)
 - [[seam-proc-find-no-refcount]] (sub-kernel-proc)
 - [[seam-rfnameg-shared-territory]] (sub-kernel-territory)
 - [[seam-rfork-flags-unimplemented]] (sub-kernel-proc)
 - [[seam-runq-rbtree]] (sub-kernel-sched)
 - [[seam-sak-revoke-note]] (sub-kernel-proc)
+- [[seam-slub-debug-mode]] (sub-kernel-mm-slub)
 - [[seam-sparse-mpidr]] (sub-kernel-sched-smp)
 - [[seam-srv-9p-connect-unit]] (sub-kernel-devsrv)
 - [[seam-srv-registry-lifecycle]] (sub-kernel-devsrv)
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
 - [[seam-timerwait-sharding]] (sub-kernel-rendez)
+- [[seam-torpor-cross-proc]] (sub-kernel-torpor)
+- [[seam-torpor-lock-wake-spin]] (sub-kernel-torpor)
+- [[seam-torpor-reclaim-uaccess]] (sub-kernel-torpor)
 - [[seam-union-mount-walk]] (sub-kernel-territory, sub-kernel-stalk)
 - [[seam-wb-close-flush-slot]] (sub-kernel-ninep-dev9p)
 
 ## Recent changes
 
 - 2026-08-01 [[chg-2026-07-31-stalk-sweep]] — The stalk sweep: the resolver + the Path substrate + the namespace audit backfill
+- 2026-08-01 [[chg-2026-08-01-mm-ipc-sweep]] — Vault sweep batch 9: memory + ipc-wake
 - 2026-08-01 [[chg-2026-08-01-proc-thread-sweep]] — The proc/thread sweep: the death lineage, and a doc that contradicts itself four lines apart
 - 2026-08-01 [[chg-2026-08-01-sched-sweep]] — Vault sweep: the scheduler area (dispatch, the SMP protocol, the wait/wake primitive)
 - 2026-08-01 [[chg-2026-08-01-territory-sweep]] — The territory sweep: the namespace tables, the two locks, and a dead bind graph
 - 2026-07-31 [[chg-2026-07-31-larder-sweep]] — The Larder sweep: the guest-FS-cache mechanism dossier + the full L1/B1/D44/term audit backfill
 - 2026-07-31 [[chg-2026-07-31-netd-sweep]] — The netd sweep: the first userspace area — nic + server dossiers + the net/weft audit backfill
 - 2026-07-31 [[chg-2026-07-31-ninep-area-sweep]] — The 9P-area sweep: wire, session, transports, attach, dev9p, dev9p.poll
-- 2026-07-31 [[chg-2026-07-31-ninep-pilot]] — The 9P-client pilot: one subsystem end-to-end across all four planes
 <!-- generated:end -->

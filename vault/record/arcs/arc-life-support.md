@@ -6,6 +6,7 @@ status: active
 design: ["docs/LIFE-SUPPORT.md"]
 chunks:
   - chg-2026-06-09-ls4-cwd
+  - chg-2026-06-10-ls5c-widen
 follow-ons: []
 created: 2026-08-01
 ---

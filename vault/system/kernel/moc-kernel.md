@@ -23,6 +23,11 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
 - [[moc-kernel-scheduling]] — dispatch, the SMP protocol, and the
   wait/wake primitive (what decides where a Thread runs, and what
   happens when it stops).
+- [[moc-kernel-memory]] — the physical allocator stack (phys/buddy/
+  magazines + SLUB; where every kernel byte comes from).
+- [[moc-kernel-ipc-wake]] — the wake consumers (poll, pipe, torpor;
+  [[inv-i9]] instantiated three ways over the scheduling area's
+  primitive).
 
 ## Cross-cutting
 

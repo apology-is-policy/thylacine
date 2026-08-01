@@ -12,20 +12,22 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | arc | status | chunks landed | follow-ons |
 |---|---|---|---|
-| [[arc-clade]] | active | 1 |  |
+| [[arc-clade]] | active | 2 |  |
 | [[arc-corvus-srv]] | active | 3 | seam-srv-registry-lifecycle |
-| [[arc-deep-smp-review]] | active | 2 | seam-hmp-push, seam-sparse-mpidr |
-| [[arc-go-build]] | active | 25 |  |
+| [[arc-deep-smp-review]] | active | 4 | seam-hmp-push, seam-sparse-mpidr |
+| [[arc-go-build]] | active | 27 |  |
 | [[arc-go-ide]] | active | 2 |  |
-| [[arc-holotype-rw]] | active | 7 |  |
+| [[arc-holotype-rw]] | active | 9 |  |
 | [[arc-identity-detour]] | active | 12 |  |
-| [[arc-life-support]] | active | 1 |  |
+| [[arc-life-support]] | active | 2 |  |
 | [[arc-net]] | active | 12 | seam-221-idle-pump-wake, seam-223-pump-tail-starvation, seam-220-netd-listener-poll, seam-56-netd-cancelled-tag, seam-240-lo-redial, seam-242-selftest-nonfatal, seam-netd-host-tests |
 | [[arc-phase2-lifecycle]] | active | 4 |  |
 | [[arc-phase5-namespace]] | active | 3 |  |
-| [[arc-pouch-boot]] | active | 1 | seam-848-pivot-walk-race |
-| [[arc-pty]] | active | 2 |  |
+| [[arc-pouch-boot]] | active | 3 | seam-848-pivot-walk-race |
+| [[arc-pty]] | active | 3 |  |
 | [[arc-tickless-idle]] | active | 2 | seam-tickless-bare-metal |
-| [[arc-vault]] | active | 11 |  |
+| [[arc-vault]] | active | 12 |  |
 | [[arc-weft]] | active | 4 |  |
+| [[arc-phase1-foundation]] | complete | 3 | seam-buddy-bulk-op, seam-slub-debug-mode |
+| [[arc-phase5-ipc]] | complete | 3 | seam-poll-heap-waiters, seam-poll-srv-registry-retain |
 <!-- generated:end -->

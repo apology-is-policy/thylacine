@@ -3,7 +3,7 @@ id: inv-i24
 type: inv
 title: "I-24 — group termination is atomic, exactly-once, and total"
 number: I-24
-guards: [sub-kernel-death]
+guards: [sub-kernel-death, sub-kernel-torpor]
 validated-by: [spec-death-wake, gate-smp]
 strength: spec
 created: 2026-08-01
@@ -42,8 +42,10 @@ Zircon convergent; the seL4 synchronous stall was rejected):
   (`el0_return_die_check`, on both the sync and IRQ-from-EL0 tails), and
   the three delivery vehicles guarantee it gets there — the #811 universal
   death-wake for rendez sleepers, `torpor_wake_all_for_proc` for futex
-  sleepers, and a broadcast `smp_resched_others` (with the periodic tick as
-  the floor) for peers running at EL0.
+  sleepers ([[sub-kernel-torpor]] — whose post-register die-pending
+  re-check under `torpor_lock` closes the register-after-walk race on
+  the futex leg), and a broadcast `smp_resched_others` (with the
+  periodic tick as the floor) for peers running at EL0.
 
 The status a terminating Proc reaps with is read from the recorded
 `group_exit_msg`, not from the last Thread's own exit — which is what makes

@@ -3,8 +3,8 @@ id: inv-i9
 type: inv
 title: "I-9 — no wakeup lost between cond-check and sleep"
 number: I-9
-guards: [sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server]
-validated-by: [spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
+guards: [sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server, sub-kernel-poll, sub-kernel-pipe, sub-kernel-torpor]
+validated-by: [spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, spec-poll, spec-pipe, gate-smp]
 strength: spec
 created: 2026-07-31
 updated: 2026-08-01
@@ -26,15 +26,17 @@ includes:
   register-then-observe.
 
 > Backfill note: the guard and validator sets above are PARTIAL — the full
-> ARCH §28 row also binds the poll, pipe, cons, torpor and Weft surfaces
-> (specs `poll`/`cons_poll`/`weft_readiness`). Those edges join as their
-> dossiers land in the sweep. (dev9p.poll joined at the 9P-area sweep;
-> srvconn at the srv-area sweep; netd's userspace analog at the netd
-> sweep; the **death-wake leg DISCHARGED** at the execution-area sweep;
-> the **scheduler / tsleep / tickless legs DISCHARGED** at the
+> ARCH §28 row also binds the cons and Weft surfaces (specs
+> `cons_poll`/`weft_readiness`). Those edges join as their dossiers land
+> in the sweep. (dev9p.poll joined at the 9P-area sweep; srvconn at the
+> srv-area sweep; netd's userspace analog at the netd sweep; the
+> **death-wake leg DISCHARGED** at the execution-area sweep; the
+> **scheduler / tsleep / tickless legs DISCHARGED** at the
 > scheduling-area sweep — [[sub-kernel-rendez]] is the primitive the
-> invariant is stated about, and [[spec-scheduler]] / [[spec-tsleep]] /
-> [[spec-sched-tickless]] are now above the line.)
+> invariant is stated about; the **poll / pipe / torpor legs DISCHARGED**
+> at the ipc-wake sweep — [[spec-poll]] + [[spec-pipe]] above the line,
+> torpor's leg at PROSE strength by design, the suspension's first
+> worked example.)
 
 ## Enforcement
 
@@ -86,6 +88,16 @@ between an empty-observe and its park unobserved. The net-4d F1 guards
 the held-tag clobber; `Disp::Deferred` guarantees at most one reply per
 held tag. This is the server half [[spec-net-poll]] abstracts as the
 readiness edge.
+
+On the ipc-wake surfaces: [[sub-kernel-poll]] — install-and-sample in
+one locked step per fd (`dev->poll` under the object lock; the hook
+flag is the cross-lock handoff, `ready`-before-`wakeup` on the
+producer walk); [[sub-kernel-pipe]] — every state-enabling mutation
+carries its wake (the four wakes ↔ [[spec-pipe]]'s four buggy cfgs);
+[[sub-kernel-torpor]] — compare + register under `torpor_lock`, the
+same lock every wake walk takes (the PROSE proof; plus the
+post-register die-pending re-check that closes the cascade race,
+[[inv-i24]]'s futex leg).
 
 ## Validation
 

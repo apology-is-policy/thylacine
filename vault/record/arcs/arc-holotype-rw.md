@@ -12,6 +12,8 @@ chunks:
   - chg-2026-05-31-801-steal-claim
   - chg-2026-06-11-rw11-wake-preemption
   - chg-2026-06-13-107-sched-toctou
+  - chg-2026-06-10-rw1-allocator
+  - chg-2026-06-10-rw2-poll-retain
 follow-ons: []
 created: 2026-08-01
 ---

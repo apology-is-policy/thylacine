@@ -18,12 +18,12 @@ Generated from note fields — do not edit between the markers
 | I-17 | [[inv-i17]] | prose | sub-kernel-sched | spec-scheduler, gate-smp |
 | I-18 | [[inv-i18]] | spec | sub-kernel-sched-smp | spec-scheduler, gate-smp |
 | I-21 | [[inv-i21]] | spec | sub-kernel-sched-smp, sub-kernel-thread | spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp |
-| I-24 | [[inv-i24]] | spec | sub-kernel-death | spec-death-wake, gate-smp |
+| I-24 | [[inv-i24]] | spec | sub-kernel-death, sub-kernel-torpor | spec-death-wake, gate-smp |
 | I-28 | [[inv-i28]] | prose | sub-kernel-stalk | gate-smp |
 | I-3 | [[inv-i3]] | spec | sub-kernel-territory | spec-territory, gate-smp |
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc | gate-smp |
 | I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-stalk, sub-kernel-territory | gate-smp |
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |
 | I-8 | [[inv-i8]] | spec | sub-kernel-sched, sub-kernel-sched-smp, sub-kernel-rendez | spec-scheduler, spec-sched-alpha, spec-sched-rebalance, spec-sched-tickless, gate-smp |
-| I-9 | [[inv-i9]] | spec | sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server | spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp |
+| I-9 | [[inv-i9]] | spec | sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server, sub-kernel-poll, sub-kernel-pipe, sub-kernel-torpor | spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, spec-poll, spec-pipe, gate-smp |
 <!-- generated:end -->
