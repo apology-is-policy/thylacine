@@ -434,7 +434,65 @@ independently-safe steps:
 `Thylacine boot OK`. This is load-bearing and non-obvious: the default
 `tools/test.sh` runs HVF `-cpu host` (an M2 — LSE present), so **a green default
 gate cannot detect an LSE regression**. The A72 boot is the only gate that can,
-and it joins the standing matrix for any change to these flags.
+and it joins the standing matrix for any change to these flags. Since #91 it has
+an enforcer rather than only a sentence: `make test-a72`.
+
+### The floor's guard (#91)
+
+`#71` shipped for months because **nothing checked**. `tools/check-v80-floor.py`
+is the check, run automatically at the tail of `build_ramfs` — the chokepoint
+every ramfs bake passes through, so a new toolchain site cannot ship an
+above-floor binary without meeting it. It is deliberately fatal and has no skip
+switch, because a guard that can be waved past is the state we were already in.
+
+Two checks, because they fail differently:
+
+| check | what it proves | blind to | cost |
+|---|---|---|---|
+| **source** | no tracked build input asks for a baseline above `armv8-a` (incl. rust `target-feature=+lse` and a `GOARM64` override) | a vendored `.S` with its own `.arch`, a prebuilt archive, a dependency shipping its own flags | ~0.3 s |
+| **binaries** | no shipped aarch64 ELF carries an LSE instruction that a runtime check cannot skip | nothing in the shipped set — it measures the artifact | ~7 s (ramfs); ~6 min with `--all` |
+
+The binary check is the load-bearing one, and #71's own postmortem says why:
+`tools/pouch-clang` "was found only because measuring the OUTPUT left 2 ungated
+instructions... **Enumerating the files you expect is not the same as measuring
+what shipped.**" Three more `-march` sites have appeared since W1u
+(`clade-mesa-cross.sh`, `joey.c`, `lsp-probe`) — the same mode, three more times.
+
+**What "gated" means.** Both LSE producers emit the same shape — load a feature
+byte, conditionally branch *over* the LSE:
+
+```
+outline-atomics (compiler-rt: all C/C++/Rust)   Go runtime (GOARM64=v8.0)
+    ldrb w16, [x16, #0x588]                         ldrb w2, [x27, #0x357]
+    cbz  w16, .Lllsc                                tbz  w2, #0x0, .Lllsc
+    casalb w0, w1, [x2]                             swpalb w2, w3, [x0]
+```
+
+So one structural rule covers both. It is deliberately **not** symbol-based: the
+shipped clade toolchain (`clang`, `clang++`, `ld.lld`, `clangd`, baked to
+`/clade`) is fully **stripped**, so there are no symbols to allowlist — and Go's
+`ambush` is stripped too, yet its 887 LSE instructions are correctly read as
+gated. Symbol allowlisting would have had to give up on both.
+
+**Scope: userspace only.** The kernel is at the floor too but reaches it a
+different way — the W1.5 boot patcher rewrites LL/SC into LSE *in place*, so
+kernel LSE lives in `.altinstr_replacement` with no branch before it. It is
+gated by `apply_alternatives`, not by a runtime test, and this checker would
+correctly call it ungated. Do not point `--binaries` at the kernel ELF.
+
+**The checker proves itself before it is believed.** Every run assembles a
+fixture carrying one gated and one ungated LSE and requires the ungated one to
+be flagged *and* the gated one not to be. Without that, the whole scan is
+satisfiable by a broken system — a wrong `objdump`, an ELF filter matching
+nothing, or a mnemonic regex matching nothing all yield "0 ungated", which is
+indistinguishable from a clean tree. Two further controls guard the same
+direction: zero ELFs found, or zero LSE found across a non-empty set, are both
+hard failures rather than a pass.
+
+Verified end-to-end by re-injecting the original defect: putting `+lse` back
+into `usr/.cargo/config.toml` and rebuilding makes the source check name the
+file:line, and the binary check flag the LSE in `ThylaAlloc::alloc` — the exact
+function from the #71 report.
 
 **A build trap this arc walked into, twice.** `tools/build.sh all` reuses a
 cached sysroot, and `sysroot_is_stale` originally watched only

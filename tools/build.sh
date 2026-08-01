@@ -533,6 +533,22 @@ EOF
     python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out"
     echo "==> ramfs cpio: $ramfs_out"
     ledger "ramfs.cpio: REBUILT (bakes the current userspace binaries + system.key)"
+
+    # #91: the ARMv8.0 floor, checked HERE because this is the chokepoint --
+    # every path that bakes a ramfs passes through it, so a new toolchain site
+    # cannot ship an above-floor binary without meeting this. (The #101
+    # lesson: verify at the chokepoint, not by copying a check into each
+    # harness.) ~7 s. The big pool payloads -- /clade, /goroot -- are the
+    # `--all` scan, run by `make check-floor`; they are ~6 min and change only
+    # when the builder rebuilds them.
+    #
+    # Deliberately FATAL, and deliberately without a skip switch: #71 shipped
+    # for months precisely because nothing failed. A checker that cannot
+    # verify itself stops the build rather than passing quietly.
+    echo "==> v8.0 floor check (task #91)"
+    python3 "$REPO_ROOT/tools/check-v80-floor.py" \
+        || { echo "==> v8.0 floor check FAILED -- see PORTABILITY.md section 3" >&2
+             exit 1; }
 }
 
 # GOOS=thylacine Go-port (Stage 1): cross-compile the runtime-direct Go probe

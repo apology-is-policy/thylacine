@@ -808,6 +808,15 @@ tools/test.sh
 tools/ci-smp-gate.sh                    # full matrix, N=10 (or: make smp-gate)
 SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier subset
 
+# ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
+# tail of every ramfs bake; these are the extras. `check-floor` adds the big pool
+# payloads (/clade, /goroot, ~6 min); `test-a72` is PORTABILITY.md section 3's
+# verification bar -- the ONLY gate that can see an LSE regression, since the
+# default test.sh runs HVF -cpu host (M2, LSE present) and is structurally blind.
+tools/check-v80-floor.py            # fast: source + the ramfs binaries (~7 s)
+tools/check-v80-floor.py --all      # + /clade + /goroot   (or: make check-floor)
+make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
+
 # Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --
 # login + assert rendered command output (the test that would have caught LS-1).
 # Optional gate (SKIPs without `expect`). THYLACINE_ACCEL=tcg default; bounded

@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate idle-gate run run-tcg gdb specs help
+.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -55,6 +55,20 @@ smp-gate:
 idle-gate:
 	@tools/ci-idle-gate.sh
 
+# #91: the FULL ARMv8.0 floor scan, including the big pool payloads (/clade,
+# /goroot). build.sh already runs the fast ramfs scan on every bake; this adds
+# the ~6 min tail that only matters when the builder has rebuilt the device
+# toolchain.
+check-floor:
+	@tools/check-v80-floor.py --all
+
+# #91: the A72 boot. PORTABILITY.md section 3 names this the verification bar
+# for the floor -- an ARMv8.0-only core, so any LSE that a runtime check did
+# not skip is a real #UD rather than an unsupported config. It was a bar with
+# no enforcer until this target existed.
+test-a72:
+	@THYLACINE_ACCEL=tcg THYLACINE_CPU=cortex-a72 tools/test.sh
+
 run:
 	@tools/run-vm.sh
 
@@ -93,6 +107,10 @@ help:
 	@echo "               optional gate, SKIPs without 'expect'. THYLACINE_ACCEL=tcg default."
 	@echo "  smp-gate   — SMP soundness CI gate: multi-boot the smp4/smp8 x default/UBSan"
 	@echo "               matrix N>=10 (single boots lie). SMP_GATE_N / SMP_GATE_CONFIGS env."
+	@echo "  check-floor— #91: full ARMv8.0 floor scan incl. /clade + /goroot (~6 min)."
+	@echo "               build.sh already runs the fast ramfs scan on every bake."
+	@echo "  test-a72   — boot on -cpu cortex-a72 (ARMv8.0-only): the floor's"
+	@echo "               verification bar, PORTABILITY.md section 3."
 	@echo "  run        — launch a dev VM (interactive UART)"
 	@echo "  gdb        — launch dev VM with GDB stub on :1234, halted at entry"
 	@echo "  specs      — run all TLA+ specs under specs/"
