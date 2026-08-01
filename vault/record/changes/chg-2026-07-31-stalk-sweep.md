@@ -4,7 +4,7 @@ type: chg
 title: "The stalk sweep: the resolver + the Path substrate + the namespace audit backfill"
 date: 2026-08-01
 arc: arc-vault
-commits: ["*(pending)*"]
+commits: ["e3a1ab5b"]
 touched:
   - moc-kernel
   - haz-single-waiter-rendez
