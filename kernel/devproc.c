@@ -269,7 +269,7 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     // no per-Proc lock. page_count == live SYS_BURROW_ATTACH anon pages;
     // child_count == live direct children.
     {
-        u32 pages = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+        u32 pages = p->as ? __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) : 0u;
         u32 kids  = __atomic_load_n(&p->child_count, __ATOMIC_ACQUIRE);
         n = fmt_str(buf, cap, off, "pages:   ");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, (int)pages);   if (!n && pages != 0) return 0; off += n;
@@ -508,8 +508,13 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
     if (!n) return 0;
     off += n;
 
-    irq_state_t vs = spin_lock_irqsave(&p->vma_lock);
-    for (struct Vma *v = p->vmas; v; v = v->next) {
+    // LINEAGE L-1: a kernel-only Proc (kproc, which the /proc walk reaches) has
+    // no address space and so no mappings -- the header alone, which is exactly
+    // what an empty VMA list produced before the extraction.
+    if (!p->as) return off;
+
+    irq_state_t vs = spin_lock_irqsave(&p->as->lock);
+    for (struct Vma *v = p->as->vmas; v; v = v->next) {
         // The house SLUB-clobber defense every vma.c list walker runs
         // (vma_lookup / vma_insert / vma_remove / vma_find_gap). Not optional
         // here just because this is a diagnostic read: a freed entry's
@@ -548,7 +553,7 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
         n = fmt_str(buf, cap, row, "\n");                if (!n) break; row += n;
         off = row;                           // commit the complete row
     }
-    spin_unlock_irqrestore(&p->vma_lock, vs);
+    spin_unlock_irqrestore(&p->as->lock, vs);
     return off;
 }
 
@@ -1324,11 +1329,11 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     if (!devproc_debug_authorized(m->caller, target))   { m->result = -1; return 1; }  // I-39
     if (!devproc_target_fully_stopped(target))          { m->result = -1; return 1; }  // stopped-only
 
-    irq_state_t vs = spin_lock_irqsave(&target->vma_lock);
+    irq_state_t vs = spin_lock_irqsave(&target->as->lock);
     m->result = m->is_write
-        ? mmu_cross_proc_write(target->pgtable_root, m->vaddr, m->kbuf, m->len)
-        : mmu_cross_proc_read(target->pgtable_root,  m->vaddr, m->kbuf, m->len);
-    spin_unlock_irqrestore(&target->vma_lock, vs);
+        ? mmu_cross_proc_write(target->as->pgtable_root, m->vaddr, m->kbuf, m->len)
+        : mmu_cross_proc_read(target->as->pgtable_root,  m->vaddr, m->kbuf, m->len);
+    spin_unlock_irqrestore(&target->as->lock, vs);
     return 1;
 }
 

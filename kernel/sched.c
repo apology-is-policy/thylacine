@@ -941,7 +941,7 @@ void ready(struct Thread *t) {
 void sched_mark_interactive(struct Thread *t) {
     if (!t) return;
     if (t->magic != THREAD_MAGIC) return;
-    if (!t->proc || t->proc->pgtable_root == 0) return;   // kernel thread: stays NORMAL
+    if (!t->proc || !t->proc->as) return;                 // kernel thread: stays NORMAL
     if (t->band != SCHED_BAND_NORMAL) return;             // idempotent; never touch IDLE
     t->band = SCHED_BAND_INTERACTIVE;
 }
@@ -985,9 +985,9 @@ void sched_arm_clear_on_cpu(struct Thread *prev) {
 // the per-CPU active slot the resolve publishes into is the right one.
 void sched_install_asid_ttbr0(struct Thread *next) {
     struct Proc *p = next->proc;
-    if (p && p->pgtable_root != 0) {
-        u64 asid = asid_resolve(&p->context_id, smp_cpu_idx_self());
-        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)p->pgtable_root;
+    if (p && p->as) {
+        u64 asid = asid_resolve(&p->as->context_id, smp_cpu_idx_self());
+        next->ctx.ttbr0 = (asid << ASID_TTBR0_SHIFT) | (u64)p->as->pgtable_root;
     }
 }
 

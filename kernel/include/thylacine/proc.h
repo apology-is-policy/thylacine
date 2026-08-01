@@ -20,8 +20,9 @@
 #ifndef THYLACINE_PROC_H
 #define THYLACINE_PROC_H
 
+#include <thylacine/addrspace.h> // struct AddrSpace (LINEAGE L-1: Proc.as)
 #include <thylacine/caps.h>     // caps_t (P4-Ic3 rfork_with_caps signature)
-#include <thylacine/page.h>     // paddr_t (P3-Bcb pgtable_root)
+#include <thylacine/page.h>     // paddr_t
 #include <thylacine/rendez.h>
 #include <thylacine/poll.h>      // poll_waiter_list -- the multi-waiter child-reap wait (#344)
 #include <thylacine/spinlock.h>
@@ -210,33 +211,23 @@ struct Proc {
     // forward-looking for the Phase 5+ syscall surface.
     struct HandleTable *handles;
 
-    // P3-Bcb: per-Proc address space.
+    // P3-Bcb / LINEAGE L-1: the address space. Page-table root, rolling-ASID
+    // context, VMA list, the VMA lock and the three I-32 memory axes all live
+    // in one refcounted object, so that L-3 (rfork RFMEM) and L-5 (fork) can
+    // give two Procs one address space -- which was unrepresentable while these
+    // were inline fields here. See <thylacine/addrspace.h> for the membership
+    // argument for each field.
     //
-    // pgtable_root is the PA of this Proc's L0 translation table for
-    // TTBR0 (user-half). Allocated at proc_alloc, freed at proc_free.
-    // kproc gets pgtable_root = 0 because (a) it's allocated before
-    // phys_init / buddy and (b) kernel-only Procs never need a user-
-    // half mapping. P3-Bd loads pgtable_root into TTBR0_EL1 at context
-    // switch; P3-Be handles the kproc kernel-only path.
+    // NULL means kernel-only. kproc is built by proc_init via a direct KP_ZERO
+    // alloc and never calls proc_alloc, so it never acquires one. This pointer
+    // IS the old `pgtable_root == 0` test: every kernel-Proc check now reads
+    // `p->as == NULL`. (The mmu API's own `pgtable_root == 0` rejects are
+    // parameter validation on a bare paddr_t -- a different question, unchanged.)
     //
-    // context_id is the rolling-ASID context (generation | hardware ASID) --
-    // RW-1 B-F1; ARCH section 6.2.1. Replaces the per-Proc-permanent u16 asid.
-    // 0 == "never assigned" (always misses). Resolved + re-stamped at context
-    // switch by asid_resolve (the pre-hook) into the high bits of TTBR0_EL1;
-    // never allocated at create nor freed at reap (rollover recycles the
-    // space). kproc keeps context_id = 0 (pgtable_root == 0 -> kernel TTBR0,
-    // bypassing the allocator). Accessed via __atomic_* (the fast path is
-    // lockless). See arch/arm64/asid.{c,h}.
-    paddr_t            pgtable_root;
-    u64                context_id;
-
-    // P3-Da: per-Proc VMA list (sorted by vaddr_start ascending). Each
-    // VMA describes a contiguous user-VA range with permissions +
-    // backing BURROW. The list is the address-space description against
-    // which page faults are dispatched (P3-Dc); the per-Proc pgtable
-    // (TTBR0) is the runtime translation built on demand from the
-    // VMA list as faults fire.
-    struct Vma        *vmas;
+    // Allocated by addrspace_alloc in proc_alloc; released by addrspace_unref
+    // in proc_free at exactly the point the inline page-table destroy used to
+    // run -- after vma_drain, before the Proc struct is freed.
+    struct AddrSpace  *as;
 
     // P4-Ib: per-Proc capability bitmask. Drawn from CAP_* in
     // <thylacine/caps.h>. Capabilities monotonically reduce: rfork's
@@ -332,25 +323,10 @@ struct Proc {
     // identity (CORVUS-DESIGN.md §6.3; specs/corvus.tla ConnRecord.peer).
     u64                stripes;
 
-    // P6-pouch-mem: per-Proc lock serializing VMA-list mutation. Held by
-    // EVERY VMA-list mutator: SYS_BURROW_ATTACH / SYS_BURROW_DETACH (find-gap
-    // + vma_insert / vma_remove) AND SYS_MMIO_MAP / SYS_DMA_MAP (the
-    // burrow_map -> vma_insert in the HW-driver map paths; #713 vma_lock
-    // audit F1). P6 #713: it is now ALSO held by the page-fault demand-page
-    // reader (userland_demand_page) across its vma_lookup -> burrow-resolve
-    // -> mmu_install_user_pte sequence. That is the multi-thread-Proc
-    // SMP-safety fix: stratumd (the first heavily multi-threaded Proc, and
-    // the CAP_HW_CREATE holder that calls SYS_MMIO_MAP / SYS_DMA_MAP) raced
-    // the previously-unlocked reader against a sibling thread's VMA-list
-    // mutation -> a freed/half-unlinked VMA -> a leaf PTE aliasing a recycled
-    // (possibly kernel) page. exec_setup's burrow_map calls and vma_drain remain
-    // unlocked deliberately: both run while the Proc is single-threaded by
-    // construction (exec precedes the first thread_spawn; vma_drain runs at
-    // proc_free with thread_count == 0), so no concurrent fault or mutator
-    // can race them. KP_ZERO at proc_alloc / proc_init zero-inits it to the
-    // valid unlocked state (SPIN_LOCK_INIT == (spin_lock_t){ 0 }).
-    spin_lock_t        vma_lock;
-    u32                _pad_vma_lock;     // explicit 8-byte-align padding
+    // (LINEAGE L-1: the VMA lock moved to AddrSpace.lock -- it serializes the
+    // VMA list, so it belongs to the address space that owns the list, not to
+    // any one Proc sharing it. Reached as `&p->as->lock`; the #713 discipline
+    // and the lock order are unchanged. See <thylacine/addrspace.h>.)
 
     // P6-pouch-signals-impl (sub-chunk 13a): per-Proc note state.
     //
@@ -456,17 +432,12 @@ struct Proc {
     // allocator toward the box-killing cliff. `thread_count` (above) is the
     // third counter.
     //
-    // page_count -- live anonymous pages committed via SYS_BURROW_ATTACH (the
-    //   user-unbounded memory-bomb vector; anon is eager at v1.0 so attach is
-    //   the single charge point). Charged += npages on a successful attach,
-    //   -= npages on a successful detach, both UNDER `vma_lock` (the lock that
-    //   already serializes the attach/detach path) -- so the page cap is
-    //   EXACT (no TOCTOU overshoot). NOT charged: pgtable sub-tables
-    //   (transitively bounded by mapped VA <= page_count), kstacks (bounded by
-    //   the thread cap), the exec image (one-shot, bounded by the binary). At
-    //   exit the Proc + this counter vanish together (no surviving aggregate at
-    //   v1.0; vma_drain is the SEAM hook where a future aggregate uncharges).
-    //   External stat readers use __atomic_load_n (a coherent snapshot).
+    // page_count -- moved to AddrSpace.page_count at LINEAGE L-1 (it counts the
+    //   ADDRESS SPACE's pages, so sharing an address space must mean sharing one
+    //   charge; the per-Proc cap becomes a per-AS cap, and a fork bomb is still
+    //   bounded because N children means N address spaces). Reached as
+    //   `p->as->page_count`; the charge discipline is unchanged -- under the AS
+    //   lock, so the cap stays EXACT, with __atomic_load_n for stat readers.
     // child_count -- live DIRECT children == the length of the `children` list.
     //   ++ at proc_link_child, -- at proc_unlink_child, and re-based at
     //   proc_reparent_children (adopter += N) -- all under g_proc_table_lock.
@@ -478,7 +449,6 @@ struct Proc {
     // counts -- KP_ZERO). PRINCIPAL_SYSTEM Procs (the TCB) maintain the
     // counters for observability but are EXEMPT from the caps
     // (proc_resource_exempt).
-    u32                page_count;
     u32                child_count;
 
     // I-34 (ARCH section 28; docs/MENAGERIE.md section 4; specs/allowance.tla):
@@ -494,18 +464,11 @@ struct Proc {
     // NULL (broad/none). See <thylacine/allowance.h>.
     struct Allowance  *allowance;
 
-    // I-32 FOURTH axis (overcommit, ARCH section 6.5): live VMA count -- the DoS
-    // bound a free (uncharged-at-attach) SYS_BURROW_ATTACH_LAZY reservation needs
-    // (eager self-limits at ~PROC_PAGE_MAX VMAs since each charges >=1 page). ++ at
-    // vma_insert (gated on PROC_VMA_MAX unless exempt), -- at vma_remove, both under
-    // p->vma_lock (the VMA-list mutation domain) -> the cap is EXACT. Counted
-    // uniformly for every VMA (attach / exec image / guard / DMA / Weft share). NOT
-    // propagated by rfork (KP_ZERO -> 0). PRINCIPAL_SYSTEM is exempt from the CAP
-    // (the count is still maintained for observability). All accesses use __atomic_*;
-    // a FUTURE /proc reader (none is wired at this commit -- audit F2) MUST use
-    // __atomic_load_n for a coherent cross-Proc snapshot, as page_count's reader does.
-    // Like page_count, it is a resource axis, not a privilege axis (orthogonal to I-22).
-    u32                vma_count;
+    // (LINEAGE L-1: the I-32 FOURTH axis, vma_count, moved to
+    // AddrSpace.vma_count -- it bounds the VMA slab, and the VMA list lives in
+    // the address space. Reached as `p->as->vma_count`; the discipline is
+    // unchanged -- ++ at vma_insert gated on PROC_VMA_MAX unless exempt, -- at
+    // vma_remove, both under the AS lock so the cap stays EXACT.)
 
     // G15 (ARCH section 9.7): the per-Proc environment group -- the Plan 9 Egrp
     // surfaced as the per-Proc /env directory (devenv). Lazily allocated (NULL ==
@@ -676,14 +639,13 @@ struct Proc {
     // shared_map_pages @348, so struct Proc stays 352 bytes.
     u8                 phenotype;
 
-    // G-2 (the I-32 FIFTH axis; TAPESTRY.md §18.12 R2-F3): pages of OTHER
-    // Procs' memory currently shared INTO this Proc via burrow_share_into
-    // (SHARED_IN-flagged VMAs). Charged/uncharged under p->vma_lock (exact);
-    // atomic store for lockless /proc readers, like page_count. KP_ZERO-fresh
-    // 0; never rfork-inherited (a child has no shared-in mappings -- its
-    // address space starts empty). Occupies the former 348..352 tail pad, so
-    // struct Proc stays 352 bytes.
-    u32                shared_map_pages;
+    // (LINEAGE L-1: the I-32 FIFTH axis, shared_map_pages, moved to
+    // AddrSpace.shared_map_pages -- vma.h states its invariant as
+    // `shared_map_pages == sum of pages of SHARED_IN VMAs`, and both the charge
+    // and the uncharge run off the VMA list, which lives in the address space.
+    // Two Procs sharing an AS would otherwise keep divergent counts for one VMA
+    // set, and the uncharge would not know whose counter to decrement. Reached
+    // as `p->as->shared_map_pages`; the discipline is unchanged.)
 
     // prowl-1 (PROWL-DESIGN.md section 3.2): the process name -- the basename of
     // the execed binary. Set once at exec (proc_set_name, from the resolved
@@ -849,120 +811,123 @@ struct Proc {
 // renderer's claim under g_proc_table_lock); cleared on the holder's death.
 #define PROC_FLAG_CONSOLE_RENDERER  (1u << 9)
 
-_Static_assert(sizeof(struct Proc) == 408,
-               "struct Proc size pinned at 408 bytes (the message said 392 while "
-               "the value said 400 -- corrected at V-5). The 352 baseline (the 328 "
-               "baseline + the 8c-2 #95 debug_focus_thread @328 + the PTY-1a "
-               "sid/pgid pair @336/@340 + the PTY-1e report latches @344/@345 + "
-               "the G-2 shared_map_pages @348 filling the former tail pad) then "
-               "prowl-1's name[PROC_NAME_MAX=32] @352 -> 384, then the VIVARIUM "
-               "V-4a-0 exe_path pointer @384 -> 392, then the V-6b sigtab "
-               "pointer @392 -> 400, then the V-5 socktab pointer @400 -> 408. "
-               "prowl-1 and V-4a-0 were "
-               "written on separate branches and BOTH originally appended at 352; "
-               "the merge stacked them (see the field comments -- they are "
-               "complementary, basename-copy vs full-Path). "
-               "Adding a field grows the SLUB cache; update this assert "
-               "deliberately so the change is intentional.");
-_Static_assert(__builtin_offsetof(struct Proc, name) == 352,
-               "prowl-1 name[] appends after shared_map_pages @348+4=352; "
-               "KP_ZERO leaves it \"\" until proc_set_name at exec.");
-_Static_assert(__builtin_offsetof(struct Proc, socktab) == 400,
-               "VIVARIUM V-5 socktab (the per-Proc Linux socket state) appends "
-               "after sigtab @392+8 = 400. KP_ZERO-fresh NULL == 'this Proc has "
-               "no sockets', correct both initially and for every native Proc.");
-_Static_assert(__builtin_offsetof(struct Proc, sigtab) == 392,
-               "VIVARIUM V-6b sigtab (the per-Proc Linux signal dispositions) "
-               "appends after exe_path @384+8 = 392. KP_ZERO-fresh NULL == "
-               "'every signal is SIG_DFL', which is the correct initial state "
-               "AND the correct state for a native Proc that never has one.");
-_Static_assert(__builtin_offsetof(struct Proc, exe_path) == 384,
-               "VIVARIUM V-4a-0 exe_path (the #66 Path of the running executable, "
-               "the /proc/<pid>/exe source) appends after prowl-1's name[] @352+32 "
-               "= 384, itself 8-aligned. Every pre-existing offset stays stable; "
-               "KP_ZERO-fresh NULL == 'unknown name' (I-33).");
-_Static_assert(__builtin_offsetof(struct Proc, shared_map_pages) == 348,
-               "G-2 shared_map_pages (the I-32 fifth axis: cross-Proc shared-in "
-               "pages) occupies the former 348..352 tail pad after the PTY-1e "
-               "report latches; KP_ZERO-fresh 0, never rfork-inherited.");
-_Static_assert(__builtin_offsetof(struct Proc, phenotype) == 347,
-               "VIVARIUM phenotype (the per-Proc ABI mode, I-43) occupies the "
-               "LAST tail pad byte @347, between debug_exitkill @346 and "
-               "shared_map_pages @348 -- no struct growth (stays 352). "
-               "KP_ZERO-fresh 0 == PHENO_NATIVE is the fail-safe default.");
-_Static_assert(__builtin_offsetof(struct Proc, debug_exitkill) == 346,
-               "EXITKILL debug_exitkill (I-39 die-with-launcher, DEBUG-FS §5d) "
-               "occupies a tail pad byte @346 between cont_report_pending @345 and "
-               "shared_map_pages @348 -- no struct growth (stays 352); KP_ZERO-fresh "
-               "false, never rfork-inherited (per-slot debug state).");
-_Static_assert(__builtin_offsetof(struct Proc, debug_focus_thread) == 328,
-               "8c-2 #95 debug_focus_thread (the debug-fs focus M) appends after "
-               "debug_hw (offset 328, the next 8-aligned slot past the pointer @320); "
-               "existing offsets stay stable (KP_ZERO inits it NULL = report head).");
-_Static_assert(__builtin_offsetof(struct Proc, sid) == 336,
-               "PTY-1a sid (the POSIX session id) follows debug_focus_thread (offset "
-               "336, the next 4-aligned slot); rfork-INHERITED, unlike the KP_ZERO "
-               "debug/report fields around it.");
-_Static_assert(__builtin_offsetof(struct Proc, pgid) == 340,
-               "PTY-1a pgid (the POSIX process-group id) follows sid (offset 340).");
-_Static_assert(__builtin_offsetof(struct Proc, stop_report_pending) == 344,
-               "PTY-1e stop_report_pending appends after pgid (offset 344; "
-               "KP_ZERO-fresh false, never rfork-inherited).");
-_Static_assert(__builtin_offsetof(struct Proc, cont_report_pending) == 345,
-               "PTY-1e cont_report_pending follows (offset 345).");
-_Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 320,
-               "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
-               "after debug_stop_req (offset 320, the next 8-aligned slot past the "
-               "u32 @312 + its pad -- the pad PTY-1f's job_stop_req now occupies); "
-               "existing offsets stay stable (KP_ZERO inits it NULL = no "
-               "breakpoints).");
-_Static_assert(__builtin_offsetof(struct Proc, job_stop_req) == 316,
-               "PTY-1f job_stop_req (the second stop owner, I-20) occupies the pad "
-               "slot after debug_stop_req @312 -- same cache line as the debug flag "
-               "(the EL0-return tail's fast path reads both), NO struct growth, "
-               "every existing offset stable.");
-_Static_assert(__builtin_offsetof(struct Proc, debug_stop_req) == 312,
-               "8a-1b-beta debug_stop_req (the I-39 per-Proc debugger stop flag) "
-               "appends after debug_owner (offset 312, the next slot past the Spoor* "
-               "@304); existing offsets stay stable (KP_ZERO inits it 0 = run).");
-_Static_assert(__builtin_offsetof(struct Proc, bounce_bytes) == 296,
-               "CF-3 A bounce_bytes appends after the G15 env pointer (offset 296); "
-               "existing offsets stay stable (KP_ZERO inits it 0).");
-_Static_assert(__builtin_offsetof(struct Proc, debug_owner) == 304,
-               "8a-1b debug_owner (the I-39 one-debugger attach slot) appends after "
-               "bounce_bytes (offset 304, the next 8-aligned slot past the u64 @296); "
-               "existing offsets stay stable (KP_ZERO inits it NULL = not debugged).");
-_Static_assert(__builtin_offsetof(struct Proc, vma_count) == 280,
-               "I-32 fourth-axis vma_count appends after the I-34 allowance pointer "
-               "(offset 280); existing offsets stay stable (KP_ZERO inits it 0).");
-_Static_assert(__builtin_offsetof(struct Proc, env) == 288,
-               "G15 per-Proc env pointer appends after vma_count (offset 288, the "
-               "next 8-aligned slot past the u32 @280 + its pad); existing offsets "
-               "stay stable (KP_ZERO inits it NULL = empty).");
-_Static_assert(__builtin_offsetof(struct Proc, page_count) == 264,
-               "#65 resource-floor counters append after the A-4a legate "
-               "block; existing offsets stay stable (KP_ZERO inits them 0).");
-_Static_assert(__builtin_offsetof(struct Proc, child_count) == 268,
-               "child_count follows page_count in the #65 resource-floor "
-               "block (offset 268).");
-_Static_assert(__builtin_offsetof(struct Proc, allowance) == 272,
-               "I-34 hardware-allowance pointer appends after the #65 "
-               "resource-floor block (offset 272, 8-byte aligned); existing "
-               "offsets stay stable (KP_ZERO inits it NULL = broad).");
-_Static_assert(__builtin_offsetof(struct Proc, principal_id) == 168,
-               "A-1a identity block appends after handler_va; existing "
-               "offsets must stay stable (KP_ZERO inits the new tail).");
-_Static_assert(__builtin_offsetof(struct Proc, group_exit_msg) == 240,
-               "SYS_EXIT_GROUP group_exit_msg appends after the A-1a identity "
-               "block; existing offsets stay stable (KP_ZERO inits it NULL).");
-_Static_assert(__builtin_offsetof(struct Proc, legate_session_id) == 248,
-               "A-4a legate block appends after group_exit_msg; existing "
-               "offsets stay stable (KP_ZERO inits the new tail to "
-               "not-a-legate).");
+// LINEAGE L-1 re-based EVERY offset below: extracting struct AddrSpace removed
+// seven fields from struct Proc and added one pointer, so the struct went
+// 408 -> 376 bytes. The ASSERT EXPRESSION is the authoritative number; the
+// message prose carries only each field's landing RATIONALE. Absolute offsets
+// were deliberately stripped from that prose -- duplicating the number in a
+// comment is what made it go stale here in the first place.
+_Static_assert(sizeof(struct Proc) == 376,
+ "struct Proc size pinned at 376 bytes. LINEAGE L-1 took it 408 -> 376: "
+ "seven fields left for struct AddrSpace and one pointer replaced them. "
+ "The growth history below is the PRE-L-1 layout's, kept because its "
+ "reasoning still explains why each field landed where it did. "
+ "(An earlier message said 392 while the value said 400 -- corrected at "
+ "V-5; this line said 408 while the value said 376 -- corrected at L-1. "
+ "Twice now the prose and the number have disagreed, which is why the "
+ "block header says the assert expression is the authority.) "
+ "The 352 baseline (the 328 "
+ "baseline + the 8c-2 #95 debug_focus_thread + the PTY-1a "
+ "sid/pgid pair + the PTY-1e report latches + "
+ "the G-2 shared_map_pages filling the former tail pad) then "
+ "prowl-1's name[PROC_NAME_MAX=32] -> 384, then the VIVARIUM "
+ "V-4a-0 exe_path pointer -> 392, then the V-6b sigtab "
+ "pointer -> 400, then the V-5 socktab pointer -> 408. "
+ "prowl-1 and V-4a-0 were "
+ "written on separate branches and BOTH originally appended at 352; "
+ "the merge stacked them (see the field comments -- they are "
+ "complementary, basename-copy vs full-Path). "
+ "Adding a field grows the SLUB cache; update this assert "
+ "deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, name) == 316,
+ "prowl-1 name[] appends after shared_map_pages+4=352; "
+ "KP_ZERO leaves it \"\" until proc_set_name at exec.");
+_Static_assert(__builtin_offsetof(struct Proc, socktab) == 368,
+ "VIVARIUM V-5 socktab (the per-Proc Linux socket state) appends "
+ "after sigtab+8 = 400. KP_ZERO-fresh NULL == 'this Proc has "
+ "no sockets', correct both initially and for every native Proc.");
+_Static_assert(__builtin_offsetof(struct Proc, sigtab) == 360,
+ "VIVARIUM V-6b sigtab (the per-Proc Linux signal dispositions) "
+ "appends after exe_path+8 = 392. KP_ZERO-fresh NULL == "
+ "'every signal is SIG_DFL', which is the correct initial state "
+ "AND the correct state for a native Proc that never has one.");
+_Static_assert(__builtin_offsetof(struct Proc, exe_path) == 352,
+ "VIVARIUM V-4a-0 exe_path (the #66 Path of the running executable, "
+ "the /proc/<pid>/exe source) appends after prowl-1's name[]+32 "
+ "= 384, itself 8-aligned. Every pre-existing offset stays stable; "
+ "KP_ZERO-fresh NULL == 'unknown name' (I-33).");
+_Static_assert(__builtin_offsetof(struct Proc, phenotype) == 315,
+ "VIVARIUM phenotype (the per-Proc ABI mode, I-43) occupies the "
+ "LAST tail pad byte, between debug_exitkill and "
+ "the former shared_map_pages slot -- no struct growth. "
+ "KP_ZERO-fresh 0 == PHENO_NATIVE is the fail-safe default.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_exitkill) == 314,
+ "EXITKILL debug_exitkill (I-39 die-with-launcher, DEBUG-FS §5d) "
+ "occupies a tail pad byte between cont_report_pending and "
+ "the former shared_map_pages slot -- no struct growth; KP_ZERO-fresh "
+ "false, never rfork-inherited (per-slot debug state).");
+_Static_assert(__builtin_offsetof(struct Proc, debug_focus_thread) == 296,
+ "8c-2 #95 debug_focus_thread (the debug-fs focus M) appends after "
+ "debug_hw (the next 8-aligned slot past the pointer); "
+ "existing offsets stay stable (KP_ZERO inits it NULL = report head).");
+_Static_assert(__builtin_offsetof(struct Proc, sid) == 304,
+ "PTY-1a sid (the POSIX session id) follows debug_focus_thread (offset "
+ "336, the next 4-aligned slot); rfork-INHERITED, unlike the KP_ZERO "
+ "debug/report fields around it.");
+_Static_assert(__builtin_offsetof(struct Proc, pgid) == 308,
+ "PTY-1a pgid (the POSIX process-group id) follows sid.");
+_Static_assert(__builtin_offsetof(struct Proc, stop_report_pending) == 312,
+ "PTY-1e stop_report_pending appends after pgid ("
+ "KP_ZERO-fresh false, never rfork-inherited).");
+_Static_assert(__builtin_offsetof(struct Proc, cont_report_pending) == 313,
+ "PTY-1e cont_report_pending follows.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_hw) == 288,
+ "8a-2b debug_hw (the per-Proc HW-breakpoint table pointer) appends "
+ "after debug_stop_req (the next 8-aligned slot past the "
+ "u32 + its pad -- the pad PTY-1f's job_stop_req now occupies); "
+ "existing offsets stay stable (KP_ZERO inits it NULL = no "
+ "breakpoints).");
+_Static_assert(__builtin_offsetof(struct Proc, job_stop_req) == 284,
+ "PTY-1f job_stop_req (the second stop owner, I-20) occupies the pad "
+ "slot after debug_stop_req -- same cache line as the debug flag "
+ "(the EL0-return tail's fast path reads both), NO struct growth, "
+ "every existing offset stable.");
+_Static_assert(__builtin_offsetof(struct Proc, debug_stop_req) == 280,
+ "8a-1b-beta debug_stop_req (the I-39 per-Proc debugger stop flag) "
+ "appends after debug_owner (the next slot past the Spoor* "
+ "the Spoor*); existing offsets stay stable (KP_ZERO inits it 0 = run).");
+_Static_assert(__builtin_offsetof(struct Proc, bounce_bytes) == 264,
+ "CF-3 A bounce_bytes appends after the G15 env pointer; "
+ "existing offsets stay stable (KP_ZERO inits it 0).");
+_Static_assert(__builtin_offsetof(struct Proc, debug_owner) == 272,
+ "8a-1b debug_owner (the I-39 one-debugger attach slot) appends after "
+ "bounce_bytes (the next 8-aligned slot past the u64); "
+ "existing offsets stay stable (KP_ZERO inits it NULL = not debugged).");
+_Static_assert(__builtin_offsetof(struct Proc, env) == 256,
+ "G15 per-Proc env pointer appends after vma_count (the "
+ "next 8-aligned slot past the u32 + its pad); existing offsets "
+ "stay stable (KP_ZERO inits it NULL = empty).");
+_Static_assert(__builtin_offsetof(struct Proc, child_count) == 240,
+ "child_count follows page_count in the #65 resource-floor "
+ "block.");
+_Static_assert(__builtin_offsetof(struct Proc, allowance) == 248,
+ "I-34 hardware-allowance pointer appends after the #65 "
+ "resource-floor block (8-byte aligned); existing "
+ "offsets stay stable (KP_ZERO inits it NULL = broad).");
+_Static_assert(__builtin_offsetof(struct Proc, principal_id) == 144,
+ "A-1a identity block appends after handler_va; existing "
+ "offsets must stay stable (KP_ZERO inits the new tail).");
+_Static_assert(__builtin_offsetof(struct Proc, group_exit_msg) == 216,
+ "SYS_EXIT_GROUP group_exit_msg appends after the A-1a identity "
+ "block; existing offsets stay stable (KP_ZERO inits it NULL).");
+_Static_assert(__builtin_offsetof(struct Proc, legate_session_id) == 224,
+ "A-4a legate block appends after group_exit_msg; existing "
+ "offsets stay stable (KP_ZERO inits the new tail to "
+ "not-a-legate).");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
-               "magic must be at offset 0 so SLUB's freelist write on "
-               "kmem_cache_free clobbers it (double-free defense — "
-               "P2-A audit R4 F42)");
+ "magic must be at offset 0 so SLUB's freelist write on "
+ "kmem_cache_free clobbers it (double-free defense — "
+ "P2-A audit R4 F42)");
 
 // Bring up the process subsystem. Allocates the kernel proc (PID 0) via
 // SLUB; subsequent thread_init wires kthread to kproc. Must be called

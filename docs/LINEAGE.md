@@ -239,17 +239,75 @@ struct AddrSpace {
     paddr_t     pgtable_root;
     u64         context_id;     // rolling ASID (I-31)
     struct Vma *vmas;
-    u32         page_count;     // the I-32 axis   (u32 today, keep the width)
-    u32         vma_count;      // the I-32 VMA axis
+    u32         page_count;        // the I-32 RSS axis   (u32 today, keep the width)
+    u32         vma_count;         // the I-32 VMA-slab axis
+    u32         shared_map_pages;  // the I-32 cross-Proc shared-in axis (G-2)
 };
 ```
 
+**SEVEN fields, corrected at L-1 from the six this section originally listed.**
+`shared_map_pages` belongs by exactly the argument that moves `page_count`:
+`vma.h` states its invariant as `shared_map_pages == Σ pages of SHARED_IN VMAs`,
+and both the charge and the uncharge run off the VMA list — which lives here.
+Two Procs sharing an address space would otherwise keep divergent counts for one
+VMA set, and the uncharge would not know whose counter to decrement.
+
 `struct Proc` keeps a `struct AddrSpace *as`. Procs with `as == NULL` are
-kernel-only (kproc), replacing today's `pgtable_root == 0` test — which appears
-at **13 sites** across `kernel/` and `arch/` (measured) and must be converted
-**as a set**, not one at a time. A half-converted predicate is the failure mode
-here: a missed site does not fail to build, it silently treats a live user AS
-as a kernel Proc.
+kernel-only (kproc), replacing today's `pgtable_root == 0` test.
+
+**Of the 13 `pgtable_root == 0` sites, NINE convert — also corrected at L-1.**
+The count was right; the claim that all 13 convert was wrong. The other four
+(`arch/arm64/mmu.c` in `mmu_install_user_pte` / `mmu_uninstall_user_pte` /
+`mmu_uninstall_user_range` / `cross_proc_resolve`) are defensive checks on a
+`paddr_t pgtable_root` **parameter**, and the mmu API correctly keeps taking a
+bare root — that layer has no business knowing what a Proc is. They are
+parameter validation, not the kernel-Proc test.
+
+The nine must be converted **as a set**: a missed predicate does not fail to
+build, it silently treats a live user address space as a kernel Proc.
+
+#### The method is forced, not chosen
+
+Two of the seven field names are **overloaded in this tree**:
+
+- `struct Burrow.page_count` (`burrow.h`) — the burrow's own page count, which
+  has nothing to do with `Proc.page_count`, and which accounts for most of
+  `burrow.c`'s ~39 mentions of the name.
+- `psci_cpu_on(u64 target, u64 entry_point, u64 context_id)` — the PSCI ABI
+  parameter, unrelated to the rolling-ASID context.
+
+So a grep- or sed-driven rename corrupts unrelated code *silently*. The
+conversion must instead be **compiler-driven**: delete the fields from
+`struct Proc` first, and the compiler reports every real site while being
+structurally incapable of flagging `v->page_count` or a `u64` parameter. That
+is why "the compiler is the completeness gate" is the right method here rather
+than merely a convenient one — and the measurement bore it out: 239 reported
+sites, every one of them on `struct Proc`, zero false positives.
+
+The gate has exactly **two** blind spots, and they are mirror images of each
+other.
+
+**The nine predicates.** After the fields move, `p->as->pgtable_root == 0` still
+*compiles*, and NULL-derefs on a kernel-only Proc. Nine is small enough to
+enumerate exhaustively, which is what makes the split safe — the compiler owns
+the ~230 value reads, and the nine are converted and re-read by hand.
+
+**Value reads that used to yield 0 for a kernel-only Proc**, which now
+dereference NULL. Also not compile errors. The reachable ones were the
+Proc-table walkers — `/ctl/procs` and `/proc/<pid>` walk a tree whose root *is*
+kproc — plus `format_maps`, and `vma_drain` and the device quiesce on
+`proc_free`'s rollback path, where a Proc can reach teardown having failed
+before `addrspace_alloc` ran. Each must yield what the old inline field produced
+(0, or an empty VMA list), which is what makes the refactor byte-for-byte rather
+than merely compiling.
+
+This second class is not theoretical, and L-1 proved it rather than asserting
+it: **removing either the `devctl.c` guard or the `proc_page_charge` guard makes
+the kernel extinct during boot** with `unhandled kernel translation fault 0x20`.
+`0x20` is precisely `page_count`'s offset in `struct AddrSpace` (`ref` 0, `lock`
+4, `pgtable_root` 8, `context_id` 16, `vmas` 24, `page_count` **32**) — the two
+probes fault at the same address because both read that field. A guard that
+cannot be shown to fail is a guard nobody has tested.
 
 Two decisions this forces, both taken here:
 
@@ -362,7 +420,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | Chunk | Scope | Gate |
 |---|---|---|
 | **L-0** | This document + the ARCH §25.4 row + the §28 invariant number + `VIVARIUM.md` §9/§10 updates. **Scripture only, no code.** | user signoff |
-| **L-1** | `struct AddrSpace` extraction. Pure refactor: `ref` is 1 everywhere, nothing shares yet. | byte-for-byte behavioural identity — full suite + SMP gate + `asid.tla` re-run; the `pgtable_root == 0` → `as == NULL` conversion complete as a set |
+| **L-1** ✅ **LANDED** | `struct AddrSpace` extraction. Pure refactor: `ref` is 1 everywhere, nothing shares yet. **Seven** fields moved; `struct Proc` 408 → 376 B; 239 compiler-enumerated conversion sites across 22 files; 23 offset asserts re-baselined. As-built: `docs/reference/146-addrspace.md`. | **MET** — 1272/1272 → 1276/1276 (the four new `addrspace.*`), boot OK, 0 EXTINCTION, `asid.tla` clean (443457 states, depth 18), SMP gate; the nine Proc-field predicates converted as a set (the four `mmu.c` parameter checks correctly did not) |
 | **L-2** | `execve` (stage 1) + the peer-thread cascade. | a native binary execs another in-place; a **failed** execve returns with the caller intact (revert-probed); a multi-thread Proc's peers are all off-CPU before the swap |
 | **L-3** | `rfork(RFPROC\|RFMEM)` + VFORK suspend (stage 2). | a stock `posix_spawn` binary runs in a vivarium; parent-suspend released on both exec and exit; a killed parent unwinds (#811) |
 | **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |

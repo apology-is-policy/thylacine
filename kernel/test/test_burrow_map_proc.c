@@ -140,7 +140,7 @@ void test_vmo_map_proc_constraints(void) {
 
     TEST_EXPECT_EQ(burrow_mapping_count(v), mapping_before,
         "rejected map calls must NOT touch mapping_count");
-    TEST_ASSERT(p->vmas == NULL, "rejected map calls must NOT install a VMA");
+    TEST_ASSERT(p->as->vmas == NULL, "rejected map calls must NOT install a VMA");
 
     drop_proc(p);
     burrow_unref(v);
@@ -424,7 +424,7 @@ void test_burrow_share_into_constraints(void) {
         "W+X prot rejected");
     TEST_EXPECT_EQ(burrow_mapping_count(v), mapping_before,
         "rejected shares must NOT touch mapping_count");
-    TEST_ASSERT(guest->vmas == NULL, "rejected shares must NOT install a VMA");
+    TEST_ASSERT(guest->as->vmas == NULL, "rejected shares must NOT install a VMA");
 
     // A second share at the SAME VA within one Proc -> overlap rejected, the
     // mapping_count++ that vma_alloc took rolled back.

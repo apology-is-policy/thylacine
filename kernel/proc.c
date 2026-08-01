@@ -362,15 +362,15 @@ struct Proc *proc_alloc(void) {
         return NULL;
     }
 
-    // P3-Bcb / RW-1 B-F1: per-Proc page-table root. A fresh L0 (KP_ZERO; all
-    // 512 entries invalid), installed in TTBR0_EL1 at context switch so each
-    // Proc's user-half is independent. The ASID is NOT assigned here:
-    // context_id stays 0 ("never assigned", KP_ZERO) and the rolling allocator
-    // stamps it at the first context switch (asid_resolve, the context-switch
-    // pre-hook; ARCH section 6.2.1). There is no ASID-space exhaustion to roll
-    // back from -- rollover recycles the space.
-    p->pgtable_root = proc_pgtable_create();
-    if (p->pgtable_root == 0) {
+    // P3-Bcb / RW-1 B-F1 / LINEAGE L-1: the address space -- a fresh L0 plus the
+    // VMA list, the VMA lock and the I-32 memory axes, in one refcounted object
+    // (see <thylacine/addrspace.h>). addrspace_alloc creates the page table and
+    // leaves context_id at 0 ("never assigned"), which the rolling allocator
+    // stamps at the first context switch. On OOM it has already freed whatever
+    // it got, so the rollback below is the same ZOMBIE + proc_free as every
+    // other alloc step -- proc_free's addrspace_unref(NULL) is a clean no-op.
+    p->as = addrspace_alloc();
+    if (!p->as) {
         p->state = PROC_STATE_ZOMBIE;
         proc_free(p);
         return NULL;
@@ -492,7 +492,9 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // (b) device-register claims held ONLY by a BURROW_TYPE_MMIO mapping (fd
     // closed after SYS_MMIO_MAP). Independent of (a): a NULL handle table does
     // not imply no mapped devices.
-    for (struct Vma *v = p->vmas; v; v = v->next) {
+    // LINEAGE L-1: `as == NULL` (kernel-only Proc, or a proc_alloc rollback that
+    // failed before addrspace_alloc) means no VMA list, so no mapped devices.
+    for (struct Vma *v = p->as ? p->as->vmas : NULL; v; v = v->next) {
         struct Burrow *b = v->burrow;
         if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
         struct KObj_MMIO *k = b->kobj_mmio;
@@ -626,10 +628,8 @@ void proc_free(struct Proc *p) {
     //     per-CPU flush_pending local flush before the value goes live again.
     // (Matches the Linux model: no TLB flush at mm teardown; reclaim at
     // rollover.)
-    if (p->pgtable_root != 0) {
-        proc_pgtable_destroy(p->pgtable_root);
-        p->pgtable_root = 0;
-    }
+    addrspace_unref(p->as);
+    p->as = NULL;
 
     kmem_cache_free(g_proc_cache, p);
     // R5-H F79: atomic counter bump.
@@ -938,72 +938,72 @@ bool proc_resource_exempt(const struct Proc *p) {
 }
 
 bool proc_page_charge(struct Proc *p, u32 npages) {
-    if (!p) return false;
+    if (!p || !p->as) return false;   // no address space: nothing to charge
     // Caller holds p->vma_lock (the attach/detach serialization domain), so the
     // load + the cap decision + the store are atomic against sibling attaches
     // -> the page cap is EXACT. The atomic store keeps a lockless cross-Proc
     // /proc reader coherent.
-    u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
+    u32 cur = __atomic_load_n(&p->as->page_count, __ATOMIC_RELAXED);
     if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
     if (!proc_resource_exempt(p) && cur + npages > PROC_PAGE_MAX)
         return false;                                // over cap -> caller -ENOMEM
-    __atomic_store_n(&p->page_count, cur + npages, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->page_count, cur + npages, __ATOMIC_RELEASE);
     return true;
 }
 
 void proc_page_uncharge(struct Proc *p, u32 npages) {
-    if (!p) return;
+    if (!p || !p->as) return;         // no address space: nothing to uncharge
     // Caller holds p->vma_lock. Clamp so an over-uncharge (should never happen --
     // every uncharge matches a charge) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
+    u32 cur = __atomic_load_n(&p->as->page_count, __ATOMIC_RELAXED);
     u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&p->page_count, nv, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->page_count, nv, __ATOMIC_RELEASE);
 }
 
 bool proc_vma_charge(struct Proc *p) {
-    if (!p) return false;
+    if (!p || !p->as) return false;   // no address space: nothing to charge
     // Caller holds p->vma_lock (the vma_insert/vma_remove domain), so the load + the
     // cap decision + the store are atomic against a sibling attach -> the VMA cap is
     // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent. The
     // I-32 fourth axis: the bound a free SYS_BURROW_ATTACH_LAZY reservation needs.
-    u32 cur = __atomic_load_n(&p->vma_count, __ATOMIC_RELAXED);
+    u32 cur = __atomic_load_n(&p->as->vma_count, __ATOMIC_RELAXED);
     if (cur == 0xFFFFFFFFu) return false;            // counter saturation (refuse)
     if (!proc_resource_exempt(p) && cur >= PROC_VMA_MAX)
         return false;                                // over cap -> vma_insert rejects
-    __atomic_store_n(&p->vma_count, cur + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->vma_count, cur + 1, __ATOMIC_RELEASE);
     return true;
 }
 
 void proc_vma_uncharge(struct Proc *p) {
-    if (!p) return;
+    if (!p || !p->as) return;         // no address space: nothing to uncharge
     // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches a
     // charge) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->vma_count, __ATOMIC_RELAXED);
+    u32 cur = __atomic_load_n(&p->as->vma_count, __ATOMIC_RELAXED);
     u32 nv  = (cur > 0) ? cur - 1 : 0;
-    __atomic_store_n(&p->vma_count, nv, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->vma_count, nv, __ATOMIC_RELEASE);
 }
 
 bool proc_shared_map_charge(struct Proc *p, u32 npages) {
-    if (!p) return false;
+    if (!p || !p->as) return false;   // no address space: nothing to charge
     // Caller holds p->vma_lock (burrow_share_into's precondition -- the same
     // domain as the SHARED_IN-flagged VMA teardown), so the load + the cap
     // decision + the store are atomic against sibling shares -> the cap is
     // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent.
-    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
+    u32 cur = __atomic_load_n(&p->as->shared_map_pages, __ATOMIC_RELAXED);
     if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
     if (!proc_resource_exempt(p) && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
         return false;                                // over cap -> the share fails clean
-    __atomic_store_n(&p->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
     return true;
 }
 
 void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
-    if (!p) return;
+    if (!p || !p->as) return;         // no address space: nothing to uncharge
     // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches
     // a charge -- the SHARED_IN flag pairs them) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
+    u32 cur = __atomic_load_n(&p->as->shared_map_pages, __ATOMIC_RELAXED);
     u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&p->shared_map_pages, nv, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->shared_map_pages, nv, __ATOMIC_RELEASE);
 }
 
 bool proc_thread_cap_ok(struct Proc *p) {

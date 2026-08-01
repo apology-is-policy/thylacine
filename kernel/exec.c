@@ -381,9 +381,9 @@ static int exec_setup_argv_body(struct Proc *p,
                                 u64 *entry_out, u64 *sp_out) {
     if (!p || !blob || !entry_out || !sp_out) return -1;
     if (p->magic != PROC_MAGIC)                return -1;
-    if (p->pgtable_root == 0)                  return -1;     // kproc rejected
+    if (!p->as)                                return -1;     // kproc rejected
     // v1.0: no replace-in-place; p must be clean.
-    if (p->vmas != NULL)                       return -1;
+    if (p->as->vmas != NULL)                   return -1;
 
     // argv invariants (defense-in-depth — the syscall body has already
     // checked these, but exec_setup_with_argv is exported to other
@@ -573,8 +573,8 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
                           u64 *entry_out, u64 *sp_out) {
     if (!p || !exe || !entry_out || !sp_out)   return -1;
     if (p->magic != PROC_MAGIC)                return -1;
-    if (p->pgtable_root == 0)                  return -1;     // kproc rejected
-    if (p->vmas != NULL)                       return -1;     // clean address space only
+    if (!p->as)                                return -1;     // kproc rejected
+    if (p->as->vmas != NULL)                   return -1;     // clean address space only
     if (!exe->dev || !exe->dev->read)          return -1;
     if (exe_size == 0 || exe_size > EXEC_FILE_MAX) return -1;
 

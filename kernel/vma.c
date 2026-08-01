@@ -152,7 +152,7 @@ int vma_insert(struct Proc *p, struct Vma *v) {
     //   - The insertion point (last node with start < v->start).
     //   - Any overlap with existing VMAs.
     struct Vma *prev = NULL;
-    struct Vma *cur  = p->vmas;
+    struct Vma *cur  = p->as->vmas;
     while (cur) {
         if (cur->magic != VMA_MAGIC) extinction("vma_insert: corrupted list entry");
         if (ranges_overlap(v->vaddr_start, v->vaddr_end,
@@ -179,7 +179,7 @@ int vma_insert(struct Proc *p, struct Vma *v) {
     v->prev = prev;
     v->next = cur;
     if (prev) prev->next = v;
-    else      p->vmas    = v;
+    else      p->as->vmas    = v;
     if (cur)  cur->prev  = v;
 
     return 0;
@@ -190,7 +190,7 @@ void vma_remove(struct Proc *p, struct Vma *v) {
     if (v->magic != VMA_MAGIC)   extinction("vma_remove of corrupted Vma");
 
     if (v->prev) v->prev->next = v->next;
-    else         p->vmas       = v->next;
+    else         p->as->vmas       = v->next;
     if (v->next) v->next->prev = v->prev;
 
     v->next = NULL;
@@ -206,7 +206,7 @@ void vma_remove(struct Proc *p, struct Vma *v) {
 struct Vma *vma_lookup(struct Proc *p, u64 vaddr) {
     if (!p) return NULL;
 
-    for (struct Vma *cur = p->vmas; cur; cur = cur->next) {
+    for (struct Vma *cur = p->as->vmas; cur; cur = cur->next) {
         if (cur->magic != VMA_MAGIC) extinction("vma_lookup: corrupted list entry");
         if (vaddr >= cur->vaddr_start && vaddr < cur->vaddr_end) return cur;
         // Sorted-list optimization: if cur->vaddr_start > vaddr, every
@@ -235,7 +235,7 @@ int vma_find_gap(struct Proc *p, u64 length,
     // sum is ever formed — overflow-free for any window in the 2^47
     // user-VA space.
     u64 cand = window_start;
-    for (struct Vma *cur = p->vmas; cur; cur = cur->next) {
+    for (struct Vma *cur = p->as->vmas; cur; cur = cur->next) {
         if (cur->magic != VMA_MAGIC)
             extinction("vma_find_gap: corrupted list entry");
         // A VMA entirely at/below `cand` does not constrain it.
@@ -265,6 +265,10 @@ int vma_find_gap(struct Proc *p, u64 length,
 
 void vma_drain(struct Proc *p) {
     if (!p) return;
+    // LINEAGE L-1: no address space means no VMA list to drain -- a kernel-only
+    // Proc, or a proc_alloc rollback that failed before addrspace_alloc ran (the
+    // path proc_free reaches with a partially-built Proc).
+    if (!p->as) return;
 
     // G-3 (the reaper-audit F1 fix): vma_drain now TAKES p->vma_lock --
     // retiring its lockless exemption. The weft reaper's cross-Proc
@@ -275,9 +279,9 @@ void vma_drain(struct Proc *p) {
     // proc_free's callers are otherwise single-threaded here (the
     // original exemption argument), so the lock is uncontended on every
     // path but the rare reclaim race.
-    spin_lock(&p->vma_lock);
-    while (p->vmas) {
-        struct Vma *v = p->vmas;
+    spin_lock(&p->as->lock);
+    while (p->as->vmas) {
+        struct Vma *v = p->as->vmas;
         // G-2: a SHARED_IN VMA's teardown uncharges the shared-in budget (the
         // burrow_share_into pairing). Moot for a dying Proc's counters but
         // keeps the invariant (shared_map_pages == Σ flagged-VMA pages) exact
@@ -288,7 +292,7 @@ void vma_drain(struct Proc *p) {
         vma_remove(p, v);
         vma_free(v);
     }
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 }
 
 // =============================================================================

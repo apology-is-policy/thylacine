@@ -1417,7 +1417,7 @@ void test_devproc_debug_mem(void) {
 
     struct Proc *tgt = proc_alloc();
     TEST_ASSERT(tgt != NULL, "alloc mem target (with a real pgtable_root)");
-    TEST_ASSERT(tgt->pgtable_root != 0, "target has a pgtable_root");
+    TEST_ASSERT(tgt->as && tgt->as->pgtable_root != 0, "target has a pgtable_root");
     tgt->principal_id = caller->principal_id;   // owner -> I-39 authorized
     tgt->state        = PROC_STATE_ALIVE;
 
@@ -1432,29 +1432,29 @@ void test_devproc_debug_mem(void) {
     u8 *rw_kva = (u8 *)pa_to_kva(rw_pa);
     u8 *ro_kva = (u8 *)pa_to_kva(ro_pa);
     for (int i = 0; i < 64; i++) { rw_kva[i] = (u8)(0xA0 + i); ro_kva[i] = (u8)(0x50 + i); }
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->pgtable_root, 0, RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
-    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->pgtable_root, 0, RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as->pgtable_root, 0, RW_VA, rw_pa, VMA_PROT_RW,   false), 0, "map RW page");
+    TEST_EXPECT_EQ(mmu_install_user_pte(tgt->as->pgtable_root, 0, RO_VA, ro_pa, VMA_PROT_READ, false), 0, "map RO page");
 
     // --- Layer 1: the raw cross-Proc resolver ---
     u8 buf[64], wbuf[64];
-    long got = mmu_cross_proc_read(tgt->pgtable_root, RW_VA, buf, 64);
+    long got = mmu_cross_proc_read(tgt->as->pgtable_root, RW_VA, buf, 64);
     TEST_EXPECT_EQ(got, 64L, "cross_proc_read reads the RW page span");
     bool match = true; for (int i = 0; i < 64; i++) if (buf[i] != (u8)(0xA0 + i)) match = false;
     TEST_ASSERT(match, "cross_proc_read returns the RW page bytes");
 
     for (int i = 0; i < 64; i++) wbuf[i] = (u8)(0x11 + i);
-    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->pgtable_root, RW_VA, wbuf, 64), 64L, "cross_proc_write writes the RW page");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, RW_VA, wbuf, 64), 64L, "cross_proc_write writes the RW page");
     match = true; for (int i = 0; i < 64; i++) if (rw_kva[i] != (u8)(0x11 + i)) match = false;
     TEST_ASSERT(match, "cross_proc_write landed the bytes in the target page");
 
     // RO leaf: read OK, write REFUSED (W^X / Image cache) + the page untouched.
-    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->pgtable_root, RO_VA, buf, 64), 64L, "cross_proc_read reads an RO page");
-    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->pgtable_root, RO_VA, wbuf, 64), 0L, "cross_proc_write REFUSES an RO leaf");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->as->pgtable_root, RO_VA, buf, 64), 64L, "cross_proc_read reads an RO page");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, RO_VA, wbuf, 64), 0L, "cross_proc_write REFUSES an RO leaf");
     TEST_ASSERT(ro_kva[0] == 0x50, "the RO page was NOT modified by the refused write");
 
     // A non-resident VA -> 0 (not resident; no fault-in).
-    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->pgtable_root,  GAP_VA, buf,  64), 0L, "read of a hole returns 0");
-    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->pgtable_root, GAP_VA, wbuf, 64), 0L, "write of a hole returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_read(tgt->as->pgtable_root,  GAP_VA, buf,  64), 0L, "read of a hole returns 0");
+    TEST_EXPECT_EQ(mmu_cross_proc_write(tgt->as->pgtable_root, GAP_VA, wbuf, 64), 0L, "write of a hole returns 0");
 
     // --- Layer 2: the devproc mem-file path (I-39 + stopped-only) ---
     proc_test_link(tgt);

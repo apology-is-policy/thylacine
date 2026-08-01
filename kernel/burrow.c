@@ -615,7 +615,7 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
     // we ignore the rc (vma_free still runs).
     // RW-1 B-F1: the asid arg is vestigial (mmu_uninstall_user_range does an
     // all-ASID `tlbi vaae1is`); pass 0 now that the Proc has no permanent ASID.
-    (void)mmu_uninstall_user_range(p->pgtable_root, 0,
+    (void)mmu_uninstall_user_range(p->as->pgtable_root, 0,
                                    vaddr, want_end);
 
     // G-2: a SHARED_IN VMA's teardown uncharges the client's shared-in budget
@@ -663,7 +663,7 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
     //    freed to the buddy, so no stale PTE/TLB entry aliases a recycled page (the
     //    burrow_unmap / "MMU user-PTE clear + TLBI" discipline). Idempotent on
     //    never-faulted pages. asid arg vestigial (all-ASID tlbi). Held under vma_lock.
-    (void)mmu_uninstall_user_range(p->pgtable_root, 0, vaddr, end);
+    (void)mmu_uninstall_user_range(p->as->pgtable_root, 0, vaddr, end);
 
     // 2. Free the resident slot pages + count them. The range maps to filepages
     //    slots; slot = (vma->burrow_offset + (page_va - vma->vaddr_start)) / PAGE_SIZE

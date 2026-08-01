@@ -540,7 +540,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
     // 5. Install the leaf PTE in the per-Proc TTBR0 tree. The asid arg is
     // vestigial (the install does an all-ASID `tlbi vaae1is`); pass 0 -- the
     // Proc's rolling ASID is resolved at context switch, not here (RW-1 B-F1).
-    int rc = mmu_install_user_pte(p->pgtable_root, 0,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
                                   page_va, page_pa, vma->prot,
                                   device_memory);
     if (rc != 0)                         return FAULT_UNHANDLED_USER;
@@ -621,7 +621,7 @@ static enum fault_result file_install_locked(struct Proc *p,
     // I-12 holds by construction). Each FILE slot is its own order-0 page, so
     // the PA is the slot page's PA (no contiguous-chunk offset). The asid arg
     // is vestigial (all-ASID tlbi); pass 0 (RW-1 B-F1).
-    int rc = mmu_install_user_pte(p->pgtable_root, 0, freq->page_va,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0, freq->page_va,
                                   page_to_pa(resident), vma->prot, /*device=*/false);
     if (rc != 0) return FAULT_UNHANDLED_USER;
     return FAULT_HANDLED;
@@ -695,9 +695,9 @@ static enum fault_result file_demand_page_single(struct Proc *p,
     if (freq->exec)
         arch_icache_sync_range(kva, PAGE_SIZE);
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     r = file_install_locked(p, fi, freq, newpg);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
 out:
     return r;
@@ -795,7 +795,7 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
 
     // Install the leaf PTE at vma->prot (R+X for text, never writable -- W^X /
     // I-12). The asid arg is vestigial (all-ASID tlbi); pass 0.
-    int rc = mmu_install_user_pte(p->pgtable_root, 0, freq->page_va,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0, freq->page_va,
                                   page_to_pa(fault_pg), vma->prot, /*device=*/false);
     if (rc != 0) return FAULT_UNHANDLED_USER;
     return FAULT_HANDLED;
@@ -876,10 +876,10 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
 
     // Install under the re-acquired vma_lock; free any un-adopted (loser/bail)
     // pages OUTSIDE v->lock (file_install_cluster_locked NULL'd the adopted ones).
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     enum fault_result r =
         file_install_cluster_locked(p, fi, freq, cstart, ncluster, clpages);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     for (size_t i = 0; i < ncluster; i++)
         if (clpages[i]) free_pages(clpages[i], 0);
     return r;
@@ -901,7 +901,7 @@ enum fault_result userland_demand_page(struct Proc *p,
                                        const struct fault_info *fi) {
     if (!p || !fi)                       return FAULT_UNHANDLED_USER;
     if (p->magic != PROC_MAGIC)          return FAULT_UNHANDLED_USER;
-    if (p->pgtable_root == 0)            return FAULT_UNHANDLED_USER;
+    if (!p->as)                          return FAULT_UNHANDLED_USER;
 
     // Fast path under vma_lock: resolve + install (ANON/MMIO/DMA + a FILE
     // resident-hit). On a BURROW_TYPE_FILE miss, demand_page_locked sets
@@ -909,9 +909,9 @@ enum fault_result userland_demand_page(struct Proc *p,
     // (the blocking dev->read cannot run under a spinlock -- the I-36 condition-5
     // death-interruptible page-in).
     struct file_fault_req freq = {0};
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     enum fault_result r = demand_page_locked(p, fi, &freq);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     if (freq.needed)
         return file_demand_page_slow(p, fi, &freq);

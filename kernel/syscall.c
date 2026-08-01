@@ -478,16 +478,16 @@ static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // vma_lookup (or another mapper) races this vma_insert. Lock order
     // vma_lock -> buddy zone->lock holds (burrow_unref-on-failure ->
     // free_pages). burrow_create_mmio stays outside (no VMA touch).
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     int rc = burrow_map(p, b, vaddr, km->size, prot);
     if (rc < 0) {
         burrow_unref(b);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         handle_put(&hh);
         return -1;
     }
     burrow_unref(b);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     handle_put(&hh);
     return 0;
 }
@@ -679,16 +679,16 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // so it MUST hold p->vma_lock -- same discipline as SYS_BURROW_ATTACH /
     // SYS_MMIO_MAP. stratumd (multi-thread, CAP_HW_CREATE) maps its
     // virtio-blk DMA buffer here concurrently with sibling-thread faults.
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     int rc = burrow_map(p, b, vaddr, kd->size, prot);
     if (rc < 0) {
         burrow_unref(b);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         handle_put(&hh);
         return -1;
     }
     burrow_unref(b);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     // PA fits in 40 bits at v1.0 (TCR.IPS bound; mmu.c:668). The s64 cast is
     // safe — no valid PA has the sign bit set. Read kd->pa before handle_put
@@ -838,16 +838,16 @@ s64 sys_pci_map_bar_handler(u64 hraw, u64 vaddr, u64 bar_index, u64 prot_raw) {
     // discipline). Lock order vma_lock -> buddy zone->lock holds. km->size is the
     // full decoded BAR size; the user maps the whole BAR and indexes the
     // VIRTIO_PCI_CAP regions within it.
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     int rc = burrow_map(p, b, vaddr, km->size, prot);
     if (rc < 0) {
         burrow_unref(b);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         handle_put(&hh);
         return -1;
     }
     burrow_unref(b);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     handle_put(&hh);
     return 0;
 }
@@ -3839,7 +3839,7 @@ static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
     if (!p)                                          return -T_E_INVAL;
     if (p->magic != PROC_MAGIC)                      return -T_E_INVAL;
     if (p == kproc())                                return -T_E_INVAL;
-    if (p->pgtable_root == 0)                        return -T_E_INVAL;
+    if (!p->as)                                      return -T_E_INVAL;
 
     // entry_va: must be non-NULL + 4-byte aligned + within user VA.
     //
@@ -4303,7 +4303,7 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     // work in page units.
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
 
     // Pick a free VA — first-fit in the burrow-attach window. The gap is
     // chosen and the VMA installed under one lock hold, so a sibling
@@ -4311,7 +4311,7 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     u64 vaddr;
     if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
                      EXEC_USER_BURROW_TOP, &vaddr) != 0) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
 
@@ -4322,7 +4322,7 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     // every failure path below + on SYS_BURROW_DETACH.
     u32 npages = (u32)(length / PAGE_SIZE);
     if (!proc_page_charge(p, npages)) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -T_E_NOMEM;
     }
 
@@ -4331,7 +4331,7 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     struct Burrow *b = burrow_create_anon(length);
     if (!b) {
         proc_page_uncharge(p, npages);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
 
@@ -4344,12 +4344,12 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
         burrow_unref(b);
         proc_page_uncharge(p, npages);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
     burrow_unref(b);
 
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     // vaddr is in [EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP) — far
     // below the s64 sign bit, so a valid base is never mistaken for -1.
@@ -4385,7 +4385,7 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
     if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
     // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
     // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
@@ -4405,7 +4405,7 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     int rc = burrow_unmap(p, vaddr_raw, length);
     if (rc == 0 && uncharge)
         proc_page_uncharge(p, uncharge);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     return (s64)rc;
 }
@@ -4442,12 +4442,12 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
 
     u64 vaddr;
     if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
                      EXEC_USER_BURROW_TOP, &vaddr) != 0) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
 
@@ -4456,7 +4456,7 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     // the free reservation; a non-TCB Proc at PROC_VMA_MAX fails burrow_map below.
     struct Burrow *b = burrow_create_anon_lazy(length);
     if (!b) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
 
@@ -4467,12 +4467,12 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     // only ref; burrow_unref frees the empty lazy Burrow (no pages committed).
     if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
         burrow_unref(b);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
     burrow_unref(b);
 
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     return (s64)vaddr;
 }
 
@@ -4520,11 +4520,11 @@ s64 sys_burrow_decommit_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) 
     if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
     if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     // burrow_decommit does the per-page PTE clear (+ TLBI before free) + page free +
     // page_count uncharge, and rejects a non-ANON_LAZY / out-of-VMA range.
     int rc = burrow_decommit(p, vaddr_raw, length);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     return (s64)rc;
 }
 
@@ -4574,10 +4574,10 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     // TEMPORARY ref so v survives the gap between dropping vma_lock and
     // weft_share_register taking its own (registration) ref -- a multi-thread
     // netd could SYS_BURROW_DETACH the ring concurrently in that window.
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     struct Vma *vma = vma_lookup(p, ring_va);
     if (!vma || vma->burrow == NULL || vma->vaddr_start != ring_va) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
     struct Burrow *v = vma->burrow;
@@ -4592,19 +4592,19 @@ s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw) {
     bool share_weave = (v->type == BURROW_TYPE_DMA &&
                         v->kobj_dma != NULL && v->kobj_dma->weave);
     if (v->type != BURROW_TYPE_ANON && !share_weave) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
     if (vma->prot & VMA_PROT_EXEC) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
     if ((u64)burrow_get_size(v) != ring_size) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         return -1;
     }
     burrow_ref(v);                       // temp ref: keep v alive across the gap
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     u64 share_id = weft_share_register(p, v);   // takes its OWN registration pin
     burrow_unref(v);                            // drop the temp ref
@@ -4654,19 +4654,19 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     // charges the guest's shared-in budget (Proc.shared_map_pages, the I-32
     // fifth axis -- R2-F3): the pages are the SHARER's commit, so page_count is
     // untouched, but the cross-Proc pin is bounded + accounted.
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     u64 va;
     if (vma_find_gap(p, bsize, EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP, &va) != 0) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         burrow_unref(v);                 // drop the claimed registration pin
         return -1;
     }
     if (burrow_share_into(p, v, va, VMA_PROT_RW) != 0) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         burrow_unref(v);
         return -1;
     }
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     // Build the binding -- it will OWN the registration pin (transferred from
     // the claim). RING: compute the kernel-private ring view (geometry) from
@@ -4679,9 +4679,9 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
         ? weft_binding_alloc_weave(v, va, (u32)bsize, p->pid)
         : weft_binding_alloc(v, va, (u32)bsize, ring_entries);
     if (!b) {
-        spin_lock(&p->vma_lock);
+        spin_lock(&p->as->lock);
         (void)burrow_unmap(p, va, bsize);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         burrow_unref(v);
         return -1;
     }
@@ -4694,9 +4694,9 @@ static s64 weft_map_claimed(struct Proc *p, struct dev9p_priv *priv,
     struct weft_binding *expected = NULL;
     if (!__atomic_compare_exchange_n(&priv->weft, &expected, b, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        spin_lock(&p->vma_lock);
+        spin_lock(&p->as->lock);
         (void)burrow_unmap(p, va, bsize);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         weft_binding_release(b);         // unrefs b->burrow (the pin) + frees b
         return (s64)expected->guest_va;  // expected == the winner's live binding
     }
@@ -4820,26 +4820,26 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // its handle_count ref, so the ring stays alive while EITHER side holds it
     // (the #847 dual-refcount). vma_find_gap + burrow_map under one vma_lock so
     // a sibling thread cannot claim the same gap.
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     u64 vaddr;
     if (vma_find_gap(p, (size_t)l->ring_size, EXEC_USER_BURROW_BASE,
                      EXEC_USER_BURROW_TOP, &vaddr) != 0) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         loom_unref(l);
         return -1;
     }
     if (!proc_page_charge(p, ring_pages)) {
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         loom_unref(l);
         return -1;                                   // over the per-Proc page cap
     }
     if (burrow_map(p, l->ring, vaddr, (size_t)l->ring_size, VMA_PROT_RW) != 0) {
         proc_page_uncharge(p, ring_pages);
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         loom_unref(l);
         return -1;
     }
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     // Loom-4c: spawn the SQPOLL poll-thread BEFORE installing the handle, so
     // every failure path below reclaims it through loom_unref -> loom_free's
@@ -4848,10 +4848,10 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // skipped the join there. The kthread immediately parks (no SQEs yet).
     if (flags & LOOM_SETUP_SQPOLL) {
         if (loom_start_sqpoll(l) != 0) {
-            spin_lock(&p->vma_lock);
+            spin_lock(&p->as->lock);
             (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
             proc_page_uncharge(p, ring_pages);       // #65: the ring VMA freed
-            spin_unlock(&p->vma_lock);
+            spin_unlock(&p->as->lock);
             loom_unref(l);
             return -1;
         }
@@ -4864,10 +4864,10 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // mapping_count to 0 via burrow_unmap).
     hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
     if (fd < 0) {
-        spin_lock(&p->vma_lock);
+        spin_lock(&p->as->lock);
         (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
         proc_page_uncharge(p, ring_pages);           // #65: the ring VMA freed
-        spin_unlock(&p->vma_lock);
+        spin_unlock(&p->as->lock);
         loom_unref(l);
         return -1;
     }
@@ -4977,9 +4977,9 @@ static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
     for (u64 i = 0; i < sizeof(struct loom_params); i++) {
         if (uaccess_store_u8(params_va + i, src[i]) != 0) {
             (void)handle_close(p, fd);
-            spin_lock(&p->vma_lock);
+            spin_lock(&p->as->lock);
             (void)burrow_unmap(p, kp.ring_va, (size_t)kp.ring_size);
-            spin_unlock(&p->vma_lock);
+            spin_unlock(&p->as->lock);
             return -1;
         }
     }
