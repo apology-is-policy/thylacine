@@ -8,6 +8,12 @@ chunks:
   - chg-2026-05-26-16c-attach-srv
   - chg-2026-05-23-torpor
   - chg-2026-05-26-16bg-hardening-f3f4f5
+  - chg-2026-05-25-16b-beta-hw-openat
+  - chg-2026-05-25-16b-gamma-syscalls
+  - chg-2026-05-25-16b-gamma-mount-close
+  - chg-2026-05-26-16bg-hardening-3b
+  - chg-2026-05-26-16bg-hardening-3c
+  - chg-2026-05-26-16c-pre
 follow-ons: [seam-848-pivot-walk-race]
 created: 2026-07-31
 ---

@@ -8,6 +8,7 @@ chunks:
   - chg-2026-07-17-pty1-sessions-groups
   - chg-2026-07-23-prowl4-suspend-resume
   - chg-2026-07-18-19-stop-wake
+  - chg-2026-07-18-pty3
 follow-ons: []
 created: 2026-08-01
 ---

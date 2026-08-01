@@ -28,7 +28,7 @@ Schema: `vault/meta/schema.md` (binding). Operating loop:
 
 ## The spine
 
-`system/kernel/` · `system/userspace/` · `system/boundary/` (ABIs, wire
+[[moc-kernel]] · [[moc-userspace]] · [[moc-boundary]] (ABIs, wire
 protocols, registries — deliberately neither kernel nor userspace) ·
 `system/substrate/` (QEMU/HVF/TCG, boards, builders, harness) ·
 `system/stratum/` (the sibling-system integration surface).

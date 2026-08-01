@@ -3,7 +3,7 @@ id: inv-i24
 type: inv
 title: "I-24 — group termination is atomic, exactly-once, and total"
 number: I-24
-guards: [sub-kernel-death, sub-kernel-torpor]
+guards: [sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signal]
 validated-by: [spec-death-wake, gate-smp]
 strength: spec
 created: 2026-08-01
@@ -50,6 +50,18 @@ Zircon convergent; the seL4 synchronous stall was rejected):
 The status a terminating Proc reaps with is read from the recorded
 `group_exit_msg`, not from the last Thread's own exit — which is what makes
 a killed multi-thread Proc report the *kill's* reason rather than `"ok"`.
+
+**The POSIX consumers.** Two pouch surfaces route into the cascade and are
+bound by it rather than enforcing it. `_Exit` — which pouch's `abort()`
+and mallocng's `assert` both reach ([[sub-pouch-process]]) — maps to
+`SYS_EXIT_GROUP`; before it existed, both overrides carried an explicit
+safe-use envelope, because `SYS_EXITS` with live peers extincted the
+kernel. And a SIG_DFL terminating disposition ([[sub-pouch-signal]])
+reaches `NDFLT` → `exits` → `proc_group_terminate`, which is what makes an
+uncaught fatal signal terminate the whole Proc as POSIX requires; the
+13a-era kernel gate that REFUSED `NDFLT` in a multi-thread Proc is retired,
+and the pouch-side fallback for that refusal now survives only as
+defense-in-depth ([[fnd-signals13b-r1-f2]]).
 
 ## Validation
 

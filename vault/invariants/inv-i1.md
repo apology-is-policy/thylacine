@@ -3,7 +3,7 @@ id: inv-i1
 type: inv
 title: "I-1 — Territory operations in Proc A don't affect Proc B"
 number: I-1
-guards: [sub-kernel-territory, sub-kernel-devsrv]
+guards: [sub-kernel-territory, sub-kernel-devsrv, sub-pouch-net]
 validated-by: [spec-territory, gate-smp]
 strength: spec
 created: 2026-07-31

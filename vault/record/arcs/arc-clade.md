@@ -7,6 +7,11 @@ design: ["docs/LLVM-DESIGN.md"]
 chunks:
   - chg-2026-07-24-getcwd-oversized
   - chg-2026-07-29-96-pipe-fstat
+  - chg-2026-07-23-cl1a-fs-wires
+  - chg-2026-07-23-cl1b0-env
+  - chg-2026-07-23-cl1b-process
+  - chg-2026-07-24-cl2-cxx-runtime
+  - chg-2026-07-27-30-fopen-append
 follow-ons: []
 created: 2026-08-01
 ---

@@ -13,7 +13,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 | arc | status | chunks |
 |---|---|---|
-| [[arc-clade]] | active | 2 |
+| [[arc-clade]] | active | 7 |
 | [[arc-corvus-srv]] | active | 3 |
 | [[arc-deep-smp-review]] | active | 4 |
 | [[arc-go-build]] | active | 27 |
@@ -21,18 +21,21 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-holotype-rw]] | active | 9 |
 | [[arc-identity-detour]] | active | 12 |
 | [[arc-life-support]] | active | 2 |
-| [[arc-net]] | active | 12 |
+| [[arc-net]] | active | 14 |
 | [[arc-phase1-foundation]] | complete | 3 |
 | [[arc-phase2-lifecycle]] | active | 4 |
 | [[arc-phase5-ipc]] | complete | 3 |
 | [[arc-phase5-namespace]] | active | 3 |
-| [[arc-pouch-boot]] | active | 3 |
-| [[arc-pty]] | active | 3 |
+| [[arc-phase6-pouch]] | complete | 6 |
+| [[arc-pouch-boot]] | active | 9 |
+| [[arc-pty]] | active | 4 |
+| [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 12 |
+| [[arc-vault]] | active | 13 |
+| [[arc-vivarium]] | active | 1 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 54
+## Open seams: 67
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -72,6 +75,19 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-poll-heap-waiters]] (sub-kernel-poll)
 - [[seam-poll-srv-registry-retain]] (sub-kernel-poll)
 - [[seam-posix-pathname-form-gates]] (sub-kernel-stalk)
+- [[seam-pouch-dirfd]] (sub-pouch-fs)
+- [[seam-pouch-dup2-target]] (sub-pouch-process)
+- [[seam-pouch-errno-channel]] (sub-pouch-seam, sub-pouch-fs, sub-pouch-net)
+- [[seam-pouch-forkpty]] (sub-pouch-tty)
+- [[seam-pouch-guard-pages]] (sub-pouch-thread, sub-pouch-process)
+- [[seam-pouch-process-shared]] (sub-pouch-thread)
+- [[seam-pouch-readyfd-aba]] (sub-pouch-net)
+- [[seam-pouch-select-fd-bound]] (sub-pouch-net)
+- [[seam-pouch-sendmsg]] (sub-pouch-net)
+- [[seam-pouch-sigmask-per-thread]] (sub-pouch-signal)
+- [[seam-pouch-sigtstp-ignore]] (sub-pouch-signal, sub-pouch-tty)
+- [[seam-pouch-sock-single-user]] (sub-pouch-net)
+- [[seam-pouch-spawn-envp]] (sub-pouch-process)
 - [[seam-proc-find-no-refcount]] (sub-kernel-proc)
 - [[seam-rfnameg-shared-territory]] (sub-kernel-territory)
 - [[seam-rfork-flags-unimplemented]] (sub-kernel-proc)
@@ -93,10 +109,10 @@ Generated — do not edit between the markers (`quaestor render`).
 
 - 2026-08-01 [[chg-2026-07-31-stalk-sweep]] — The stalk sweep: the resolver + the Path substrate + the namespace audit backfill
 - 2026-08-01 [[chg-2026-08-01-mm-ipc-sweep]] — Vault sweep batch 9: memory + ipc-wake
+- 2026-08-01 [[chg-2026-08-01-pouch-sweep]] — vault sweep: the pouch boundary line
 - 2026-08-01 [[chg-2026-08-01-proc-thread-sweep]] — The proc/thread sweep: the death lineage, and a doc that contradicts itself four lines apart
 - 2026-08-01 [[chg-2026-08-01-sched-sweep]] — Vault sweep: the scheduler area (dispatch, the SMP protocol, the wait/wake primitive)
 - 2026-08-01 [[chg-2026-08-01-territory-sweep]] — The territory sweep: the namespace tables, the two locks, and a dead bind graph
 - 2026-07-31 [[chg-2026-07-31-larder-sweep]] — The Larder sweep: the guest-FS-cache mechanism dossier + the full L1/B1/D44/term audit backfill
 - 2026-07-31 [[chg-2026-07-31-netd-sweep]] — The netd sweep: the first userspace area — nic + server dossiers + the net/weft audit backfill
-- 2026-07-31 [[chg-2026-07-31-ninep-area-sweep]] — The 9P-area sweep: wire, session, transports, attach, dev9p, dev9p.poll
 <!-- generated:end -->

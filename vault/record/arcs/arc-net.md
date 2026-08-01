@@ -17,6 +17,8 @@ chunks:
   - chg-2026-06-21-netd-221-poll-cadence
   - chg-2026-06-21-netd-293-connect-sweep
   - chg-2026-07-22-52-nonblock
+  - chg-2026-06-18-net5-af-inet
+  - chg-2026-06-18-net6a2-datacalls
 follow-ons: [seam-221-idle-pump-wake, seam-223-pump-tail-starvation, seam-220-netd-listener-poll, seam-56-netd-cancelled-tag, seam-240-lo-redial, seam-242-selftest-nonfatal, seam-netd-host-tests]
 created: 2026-07-31
 ---

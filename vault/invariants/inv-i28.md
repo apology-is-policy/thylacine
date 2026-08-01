@@ -3,7 +3,7 @@ id: inv-i28
 type: inv
 title: "I-28 — path resolution contained + per-component X-search"
 number: I-28
-guards: [sub-kernel-stalk]
+guards: [sub-kernel-stalk, sub-pouch-fs, sub-pouch-net]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
@@ -42,6 +42,16 @@ an absolute path the resolver then contains). The territory half (the
 mount-table serialization + `root_spoor` swap under `ns_lock`) and the
 exec/spawn half gain their `guards` edges at those surfaces' sweeps — the
 backfill-hook pattern.
+
+**The POSIX side composes it and cannot widen it.** Every pouch path
+operation ([[sub-pouch-fs]]) is one `SYS_open` or `SYS_STAT` through this
+resolver, and every pouch socket address ([[sub-pouch-net]]) is an
+absolute `/srv` or `/net` path resolved the same way — so a ported
+program reaches exactly what its Territory names, and pouch holds no
+resolution logic of its own to get wrong. That is the substantive reason
+the PTY-3 migration off the per-component walk loop was a correctness fix
+rather than a simplification: the loop was doing the resolver's job with
+the resolver's guarantees missing.
 
 ## Validation
 

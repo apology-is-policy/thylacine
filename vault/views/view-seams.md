@@ -52,6 +52,19 @@ Generated from note fields — do not edit between the markers
 | [[seam-poll-heap-waiters]] | open | sub-kernel-poll | chg-2026-06-24-355-poll-decouple | #355 companion |
 | [[seam-poll-srv-registry-retain]] | open | sub-kernel-poll | chg-2026-06-10-rw2-poll-retain | RW-2 R2-poll F1 (#18) |
 | [[seam-posix-pathname-form-gates]] | open | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
+| [[seam-pouch-dirfd]] | open | sub-pouch-fs | chg-2026-07-23-cl1a-fs-wires | CL-1a |
+| [[seam-pouch-dup2-target]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
+| [[seam-pouch-errno-channel]] | open | sub-pouch-seam, sub-pouch-fs, sub-pouch-net | chg-2026-05-22-p6-syscall-seam | POUCH-DESIGN.md 5.1 |
+| [[seam-pouch-forkpty]] | open | sub-pouch-tty | chg-2026-07-18-pty3 | PTY-3 |
+| [[seam-pouch-guard-pages]] | open | sub-pouch-thread, sub-pouch-process | chg-2026-05-23-p6-threads-b | threads-9b F2 |
+| [[seam-pouch-process-shared]] | open | sub-pouch-thread | chg-2026-05-23-p6-threads-b | POUCH-DESIGN.md 8.2 |
+| [[seam-pouch-readyfd-aba]] | open | sub-pouch-net | chg-2026-06-18-net6b4-close | #222 |
+| [[seam-pouch-select-fd-bound]] | open | sub-pouch-net | chg-2026-06-24-355-poll-decouple | #355 companion |
+| [[seam-pouch-sendmsg]] | open | sub-pouch-net | chg-2026-06-18-net6a2-datacalls | #214 |
+| [[seam-pouch-sigmask-per-thread]] | open | sub-pouch-signal | chg-2026-05-24-p6-signals-b | signals-13b F-SELF-1 |
+| [[seam-pouch-sigtstp-ignore]] | open | sub-pouch-signal, sub-pouch-tty | chg-2026-07-18-pty3 | PTY-3 |
+| [[seam-pouch-sock-single-user]] | open | sub-pouch-net | chg-2026-05-23-p6-sockets | sockets-12 F4 |
+| [[seam-pouch-spawn-envp]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-proc-find-no-refcount]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-rfnameg-shared-territory]] | open | sub-kernel-territory | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-rfork-flags-unimplemented]] | open | sub-kernel-proc | chg-2026-05-05-p2d-rfork-exits-wait | unfiled |

@@ -17,6 +17,7 @@ chunks:
   - chg-2026-08-01-proc-thread-sweep
   - chg-2026-08-01-sched-sweep
   - chg-2026-08-01-mm-ipc-sweep
+  - chg-2026-08-01-pouch-sweep
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"

@@ -22,6 +22,8 @@ dossiers.
 
 - The native/ported split (ARCHITECTURE.md section 3.5): authored-within
   → libthyla-rs, ported → pouch. Every service here is native unless its
-  dossier says otherwise.
+  dossier says otherwise; the ported half's translation layer is
+  [[moc-pouch-seam]], which lives on the boundary plane because both
+  halves must agree on it.
 - Kernel boundaries these Procs stand on: [[moc-kernel-srv]] (post/
   connect), [[moc-kernel-ninep]] (the mounts that reach them).
