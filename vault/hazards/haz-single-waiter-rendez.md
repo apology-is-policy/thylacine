@@ -3,9 +3,9 @@ id: haz-single-waiter-rendez
 type: haz
 title: "Single-waiter Rendez on shared-reachable state"
 applies-to: [global]
-instances: [fnd-349-r1-f1]
+instances: [fnd-349-r1-f1, fnd-rw4-rev2-f1]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-01
 ---
 ## The failure shape
 

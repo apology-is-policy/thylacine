@@ -11,7 +11,7 @@ on-demand by `quaestor closed sub-kernel-srvconn`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-12 closed findings on [[sub-kernel-srvconn]] — do NOT re-report
+13 closed findings on [[sub-kernel-srvconn]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -26,5 +26,6 @@ here; see the seam inbox):
 - [[fnd-p5srv-r1-f10]] [P3] client_deadline_ns defaults to 0 — unsafe-by-default for any future blocking caller (documented) — Documented: the default-0 is retained deliberately as the
 - [[fnd-p5srv-r1-f12]] [P3] client_fid uninitialized at create — soundness rested on the handshake_done gate alone (documented) — Documented at the time; RETIRED WHOLESALE at
 - [[fnd-p5srv-r1-f8]] [P3] A burst of hung handshakes can transiently exhaust SRV_MAX_CONNS (documented) — Documented, no code: with the F1 deadline fix even a hung handshake
+- [[fnd-rw4-rev2-f1]] [P1] RW-4 R2-F1: byte-mode /srv blocking recv extincts on a 2nd concurrent reader (fixed) — Fixed at `ee30f559`: a per-`srvconn_chan` `bool reading` single-reader
 - [[fnd-stalk3c-r1-f2]] [P3] Residual stale references to the retired /srv symbols across seven files' comments (fixed) — Fixed: all reworded to create=post / open=connect /
 <!-- generated:end -->

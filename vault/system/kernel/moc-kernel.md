@@ -16,6 +16,8 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
   with the per-subsystem sweep).
 - [[moc-kernel-srv]] — the `/srv` service layer (registry + per-connection
   transport; the 9P stack's production carrier).
+- [[moc-kernel-namespace]] — pathname resolution (the stalk resolver, the
+  POUNCE fused walk, the Path name-retention substrate).
 
 ## Cross-cutting
 

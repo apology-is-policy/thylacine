@@ -8,11 +8,15 @@ chunks:
   - chg-2026-05-28-fs-alpha
   - chg-2026-05-28-fs-beta
   - chg-2026-05-29-fs-gamma
+  - chg-2026-06-02-stalk1
+  - chg-2026-06-02-stalk2
   - chg-2026-06-02-stalk3a-registry
   - chg-2026-06-03-841-pipeline
   - chg-2026-06-03-stalk3b-open-connect
   - chg-2026-06-03-stalk3c-retire
+  - chg-2026-06-04-844-handle-lifetime
   - chg-2026-06-04-845-tflush
+  - chg-2026-06-09-957-single-hop-cross
 follow-ons: []
 created: 2026-07-31
 ---

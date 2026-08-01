@@ -13,9 +13,10 @@ Generated from note fields — do not edit between the markers
 | arc | status | chunks landed | follow-ons |
 |---|---|---|---|
 | [[arc-corvus-srv]] | active | 1 | seam-srv-registry-lifecycle |
-| [[arc-go-build]] | active | 20 |  |
+| [[arc-go-build]] | active | 23 |  |
 | [[arc-go-ide]] | active | 2 |  |
-| [[arc-identity-detour]] | active | 8 |  |
+| [[arc-holotype-rw]] | active | 3 |  |
+| [[arc-identity-detour]] | active | 12 |  |
 | [[arc-net]] | active | 12 | seam-221-idle-pump-wake, seam-223-pump-tail-starvation, seam-220-netd-listener-poll, seam-56-netd-cancelled-tag, seam-240-lo-redial, seam-242-selftest-nonfatal, seam-netd-host-tests |
 | [[arc-pouch-boot]] | active | 1 | seam-848-pivot-walk-race |
 | [[arc-vault]] | active | 6 |  |

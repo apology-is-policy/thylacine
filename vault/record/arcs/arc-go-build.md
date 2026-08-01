@@ -11,6 +11,8 @@ chunks:
   - chg-2026-06-23-gonet3c-net-over-net
   - chg-2026-06-24-349-flow-control
   - chg-2026-06-24-348-s2c-blocking
+  - chg-2026-06-24-er1-resolution-keystone
+  - chg-2026-07-07-pounce
   - chg-2026-07-08-cf3b-bulk-ring
   - chg-2026-07-09-larder-l1c
   - chg-2026-07-09-larder-l1d
@@ -28,6 +30,7 @@ chunks:
   - chg-2026-07-13-g34-downgrade-genscope
   - chg-2026-07-14-term4-close
   - chg-2026-07-19-99-create-errno
+  - chg-2026-07-19-100-devno
 follow-ons: []
 created: 2026-07-31
 ---
