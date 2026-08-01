@@ -96,6 +96,41 @@ static unsigned order_for_pages(size_t page_count) {
     return order;
 }
 
+// #106: the number of physical pages an EAGER Burrow of `size` bytes actually
+// OCCUPIES -- the buddy's power-of-two rounding, not the page-rounded request.
+// Every I-32 charge site must use this, never size / PAGE_SIZE.
+//
+// alloc_pages(order) takes 1 << order pages out of the buddy -- its KP_ZERO
+// loop zeroes (1 << order) << PAGE_SHIFT bytes, which is the allocation's own
+// statement of its size -- so a 2049-page request occupies 4096. Charging the
+// request instead of the occupancy let a Proc hold up to ~2x its I-32 budget:
+// page_count could read at most PROC_PAGE_MAX while real occupancy approached
+// twice that. Bounded at 2x (the next order is never more than double), which
+// is why this is an understated floor rather than an unbounded hole.
+//
+// The waste itself is deliberate and STAYS. A Burrow's backing must be ONE
+// physically contiguous run -- exec's direct-map alias, loom_create's ring_kva,
+// and the weft ring view all index v->pages as a single chunk -- and a buddy
+// allocator buys that contiguity with power-of-two rounding. Accounting for the
+// waste is the fix available to us; eliminating it would mean giving up
+// contiguity, which is load-bearing.
+//
+// Shares order_for_pages with burrow_create_anon / burrow_create_code, so the
+// charge and the allocation cannot drift apart by construction;
+// burrow.backing_pages_matches_alloc pins that agreement against a REAL
+// Burrow's recorded order, so a future change to either side that breaks the
+// correspondence fails a test rather than silently re-opening the undercount.
+//
+// Returns 0 for exactly the two inputs that cannot produce a Burrow at all
+// (size 0, and a size whose page round-up would wrap) -- the same two guards
+// the creators reject on, so a caller that charges before creating and a
+// creator that then refuses agree on "no pages".
+size_t burrow_backing_pages(size_t size) {
+    if (size == 0)                          return 0;
+    if (size > SIZE_MAX - (PAGE_SIZE - 1))  return 0;
+    return (size_t)1u << order_for_pages((size + PAGE_SIZE - 1) / PAGE_SIZE);
+}
+
 struct Burrow *burrow_create_anon(size_t size) {
     if (!g_vmo_cache) extinction("burrow_create_anon before burrow_init");
     if (size == 0)    return NULL;

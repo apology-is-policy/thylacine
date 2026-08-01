@@ -27,8 +27,8 @@ Generated from note fields — do not edit between the markers
 | [[arc-pty]] | active | 4 |  |
 | [[arc-tapestry]] | active | 3 |  |
 | [[arc-tickless-idle]] | active | 2 | seam-tickless-bare-metal |
-| [[arc-vault]] | active | 13 |  |
-| [[arc-vivarium]] | active | 1 |  |
+| [[arc-vault]] | active | 14 |  |
+| [[arc-vivarium]] | active | 2 |  |
 | [[arc-weft]] | active | 4 |  |
 | [[arc-phase1-foundation]] | complete | 3 | seam-buddy-bulk-op, seam-slub-debug-mode |
 | [[arc-phase5-ipc]] | complete | 3 | seam-poll-heap-waiters, seam-poll-srv-registry-retain |

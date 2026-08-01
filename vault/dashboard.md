@@ -31,11 +31,11 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-pty]] | active | 4 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 13 |
-| [[arc-vivarium]] | active | 1 |
+| [[arc-vault]] | active | 14 |
+| [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 67
+## Open seams: 71
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -46,9 +46,12 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-372-latched-double-xcheck]] (sub-kernel-stalk)
 - [[seam-56-netd-cancelled-tag]] (sub-kernel-ninep-client)
 - [[seam-66c-proc-fd]] (sub-kernel-path, sub-kernel-territory)
+- [[seam-70-tcg-watchpoint]] (sub-substrate-machine, sub-substrate-gates)
+- [[seam-791-smp1-joey]] (sub-substrate-machine, sub-substrate-gates)
 - [[seam-80-pivot-orphan-mounts]] (sub-kernel-territory)
 - [[seam-841-mi-harness]] (sub-kernel-ninep-client)
 - [[seam-845-untrusted-server]] (sub-kernel-ninep-client)
+- [[seam-87-disk-write-proof]] (sub-substrate-interactive, sub-substrate-gates)
 - [[seam-90-hung-server]] (sub-kernel-ninep-client)
 - [[seam-932-devsrv-readdir]] (sub-kernel-devsrv)
 - [[seam-9p-tag-block-on-full]] (sub-kernel-ninep-session)
@@ -59,6 +62,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
 - [[seam-eevdf-math]] (sub-kernel-sched)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)
+- [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-fid-monotonic-reclaim]] (sub-kernel-ninep-client)
 - [[seam-handle-based-dot]] (sub-kernel-territory)
 - [[seam-hmp-push]] (sub-kernel-sched-smp)
@@ -108,11 +112,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-08-01 [[chg-2026-07-31-stalk-sweep]] — The stalk sweep: the resolver + the Path substrate + the namespace audit backfill
+- 2026-08-01 [[chg-2026-08-01-94-kproc-wait-by-pid]] — #94: kproc waits for joey by pid
 - 2026-08-01 [[chg-2026-08-01-mm-ipc-sweep]] — Vault sweep batch 9: memory + ipc-wake
 - 2026-08-01 [[chg-2026-08-01-pouch-sweep]] — vault sweep: the pouch boundary line
 - 2026-08-01 [[chg-2026-08-01-proc-thread-sweep]] — The proc/thread sweep: the death lineage, and a doc that contradicts itself four lines apart
 - 2026-08-01 [[chg-2026-08-01-sched-sweep]] — Vault sweep: the scheduler area (dispatch, the SMP protocol, the wait/wake primitive)
+- 2026-08-01 [[chg-2026-08-01-substrate-sweep]] — vault sweep: the substrate
 - 2026-08-01 [[chg-2026-08-01-territory-sweep]] — The territory sweep: the namespace tables, the two locks, and a dead bind graph
-- 2026-07-31 [[chg-2026-07-31-larder-sweep]] — The Larder sweep: the guest-FS-cache mechanism dossier + the full L1/B1/D44/term audit backfill
-- 2026-07-31 [[chg-2026-07-31-netd-sweep]] — The netd sweep: the first userspace area — nic + server dossiers + the net/weft audit backfill
 <!-- generated:end -->

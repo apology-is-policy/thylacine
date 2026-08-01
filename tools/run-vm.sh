@@ -153,6 +153,15 @@ if [[ -f "$POOL_IMG" ]]; then
         -drive "if=none,id=pool0,format=raw,file=$POOL_IMG,cache=writeback"
         -device virtio-blk-device,drive=pool0
     )
+    # #101: say WHICH pool is being booted. run-vm does not produce the image,
+    # so it cannot have the silent-re-bake defect -- but it is the last place
+    # the choice is visible before a boot, and the CL-6 investigation burned
+    # time on "which pool did those 40 boots actually use?". Size is a coarse
+    # tell (64M bootstrap / 2560M goroot / 3072M clade / 5120M both), not a
+    # verification -- build.sh verifies the payloads at bake time.
+    echo "==> run-vm: pool $POOL_IMG ($(wc -c < "$POOL_IMG" | tr -d ' ') bytes)" >&2
+else
+    echo "==> run-vm: no pool image at $POOL_IMG -- booting without /srv/stratum-fs" >&2
 fi
 
 # P4-Ja: virtio-net-device backing. QEMU's user-mode network (slirp)

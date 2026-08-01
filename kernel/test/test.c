@@ -187,6 +187,9 @@ void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
 void test_resource_vma_cap(void);
+void test_resource_attach_charges_buddy_rounded(void);
+void test_resource_detach_shared_in_keeps_page_count(void);
+void test_burrow_backing_pages_matches_alloc(void);
 
 void test_exec_ns_resolve_absolute_ok(void);
 void test_exec_ns_resolve_relative_ok(void);
@@ -204,6 +207,7 @@ void test_proc_identity_peer_snapshot_by_stripes(void);
 void test_proc_wait_pid_for_no_match(void);
 void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
 void test_proc_wait_pid_for_selects_target(void);
+void test_proc_wait_pid_for_skips_adopted_orphan_zombie(void);
 void test_proc_wait_pid_for_pgrp_selectors(void);
 void test_proc_wait_pid_for_report_not_reap(void);
 void test_proc_wait_pid_syscall_untraced_flag(void);
@@ -353,6 +357,7 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_exec_setup_bss_tail_icache_synced(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -1475,6 +1480,8 @@ struct test_case g_tests[] = {
                                        test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
     { "proc.wait_pid_for_selects_target",
                                        test_proc_wait_pid_for_selects_target, false, NULL },
+    { "proc.wait_pid_for_skips_adopted_orphan_zombie",
+                                       test_proc_wait_pid_for_skips_adopted_orphan_zombie, false, NULL },
     { "proc.wait_pid_for_pgrp_selectors",
                                        test_proc_wait_pid_for_pgrp_selectors, false, NULL },
     { "proc.wait_pid_for_report_not_reap",
@@ -1507,6 +1514,12 @@ struct test_case g_tests[] = {
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
     { "resource.vma_cap",              test_resource_vma_cap,              false, NULL },
+    { "resource.attach_charges_buddy_rounded",
+                                       test_resource_attach_charges_buddy_rounded, false, NULL },
+    { "resource.detach_shared_in_keeps_page_count",
+                                       test_resource_detach_shared_in_keeps_page_count, false, NULL },
+    { "burrow.backing_pages_matches_alloc",
+                                       test_burrow_backing_pages_matches_alloc, false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
     { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
     { "proc_identity.apply_sets_fields",
@@ -1700,6 +1713,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.setup_auxv_no_phdr_segment",
                                        test_exec_setup_auxv_no_phdr_segment,
+                                                                           false, NULL },
+    { "exec.setup_bss_tail_icache_synced",
+                                       test_exec_setup_bss_tail_icache_synced,
                                                                            false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
@@ -3035,8 +3051,23 @@ void test_run_all(void) {
         }
     }
 
+    // The waits' positive control (test.h). "spun" counts guards that actually
+    // had to wait; a zero there means every one of them is inert on this
+    // config, which no pass/fail signal would ever reveal.
+    uart_puts("    [test] yield-waits: ");
+    uart_putdec(g_test_yield_calls);
+    uart_puts(" invoked, ");
+    uart_putdec(g_test_yield_spun);
+    uart_puts(" actually waited, ");
+    uart_putdec(g_test_yield_deep);
+    uart_puts(" needed >1 yield\n");
+
     current_test = NULL;
 }
+
+unsigned g_test_yield_calls;
+unsigned g_test_yield_spun;
+unsigned g_test_yield_deep;
 
 bool test_all_passed(void) {
     return failed_count == 0;

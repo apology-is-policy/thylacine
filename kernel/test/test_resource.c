@@ -28,11 +28,14 @@
 
 #include "test.h"
 
+#include <thylacine/burrow.h>       // #106/#122: burrow_backing_pages + share_into
+#include <thylacine/exec.h>         // #122: EXEC_USER_BURROW_BASE/TOP for the gap search
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>          // #122: vma_find_gap + VMA_PROT_RW
 
 #include "../include/thylacine/errno.h"
 
@@ -53,6 +56,8 @@ void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
 void test_resource_vma_cap(void);
+void test_resource_attach_charges_buddy_rounded(void);
+void test_resource_detach_shared_in_keeps_page_count(void);
 
 #define A_REAL_USER 1000u
 
@@ -416,4 +421,87 @@ void test_resource_vma_cap(void) {
     __atomic_store_n(&sys->vma_count, 0u, __ATOMIC_RELEASE);
 
     res_drop(p); res_drop(sys);
+}
+
+// #106: the eager attach must charge what the BUDDY takes, not what was asked.
+//
+// Every pre-#106 test on this path used PAGE_SIZE or 2*PAGE_SIZE -- both exact
+// powers of two -- so the whole suite was structurally blind to the rounding:
+// the charge and the occupancy agree for precisely the sizes it exercised.
+// This one attaches 3 pages, the smallest request whose buddy order rounds up,
+// and asserts the charge is 4. Under the old `length / PAGE_SIZE` it is 3.
+void test_resource_attach_charges_buddy_rounded(void) {
+    struct Proc *p = res_make(A_REAL_USER);          // non-exempt
+
+    // 3 pages -> order 2 -> 4 pages actually taken out of the buddy.
+    const u64 kLen  = 3u * PAGE_SIZE;
+    const u32 kWant = 4u;
+    TEST_EXPECT_EQ((u32)burrow_backing_pages((size_t)kLen), kWant,
+                   "3 pages must round to 4 (the helper agrees before we attach)");
+
+    s64 va = sys_burrow_attach_for_proc(p, kLen);
+    TEST_ASSERT(va >= 0, "the 3-page attach succeeds");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kWant,
+                   "#106: attach charges the buddy-rounded occupancy, not length/PAGE_SIZE");
+
+    // And the refund must MATCH -- an uncharge computed the old way would leave
+    // a permanent +1 residue per attach/detach cycle, which is the same floor
+    // corruption in the opposite direction.
+    s64 d = sys_burrow_detach_for_proc(p, (u64)va, kLen);
+    TEST_EXPECT_EQ(d, 0L, "detach ok");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), 0u,
+                   "#106: detach refunds exactly the rounded charge (no residue)");
+
+    res_drop(p);
+}
+
+// #122: SYS_BURROW_DETACH must not refund page_count for a VMA that charged a
+// DIFFERENT axis. burrow_share_into (the SYS_WEFT_MAP substrate) charges the
+// client's shared_map_pages and deliberately leaves page_count alone, but it
+// places the VMA in the burrow-attach window, so the detach path sees it.
+//
+// The pre-charge below is LOAD-BEARING, not scene-setting: proc_page_uncharge
+// clamps at 0, so on a Proc whose page_count is already 0 the spurious refund
+// is invisible and this test would pass against the broken code. Starting at a
+// nonzero count is what makes "unchanged" a claim that can fail.
+void test_resource_detach_shared_in_keeps_page_count(void) {
+    struct Proc *p = res_make(A_REAL_USER);          // non-exempt
+
+    const u32 kPre = 100u;                            // the residue a bad refund eats into
+    TEST_ASSERT(proc_page_charge(p, kPre), "pre-charge the page floor");
+
+    // A 3-page ANON Burrow standing in for a sharer's ring. burrow_share_into
+    // maps the WHOLE Burrow, so the share length is v->size.
+    struct Burrow *v = burrow_create_anon(3u * PAGE_SIZE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon failed");
+    size_t vsize = burrow_get_size(v);
+
+    spin_lock(&p->vma_lock);
+    u64 va;
+    int gap = vma_find_gap(p, vsize, EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP, &va);
+    int shared = (gap == 0) ? burrow_share_into(p, v, va, VMA_PROT_RW) : -1;
+    spin_unlock(&p->vma_lock);
+    TEST_EXPECT_EQ(gap, 0, "found a gap for the share");
+    TEST_EXPECT_EQ(shared, 0, "burrow_share_into succeeded");
+
+    // The share charged the FIFTH axis only -- this is the invariant the detach
+    // must respect, asserted here so a change to burrow_share_into that started
+    // charging page_count would land as a failure here rather than silently
+    // making the detach refund correct again.
+    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre,
+                   "the share does not touch page_count");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->shared_map_pages, __ATOMIC_ACQUIRE),
+                   (u32)(vsize / PAGE_SIZE),
+                   "the share charges shared_map_pages (the mapping extent)");
+
+    s64 d = sys_burrow_detach_for_proc(p, va, (u64)vsize);
+    TEST_EXPECT_EQ(d, 0L, "detach of the shared-in region ok");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre,
+                   "#122: detaching a SHARED_IN VMA must not refund page_count");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->shared_map_pages, __ATOMIC_ACQUIRE), 0u,
+                   "the shared-in charge IS refunded (by burrow_unmap, off the flag)");
+
+    burrow_unref(v);                                  // drop our construction ref
+    __atomic_store_n(&p->page_count, 0u, __ATOMIC_RELEASE);
+    res_drop(p);
 }

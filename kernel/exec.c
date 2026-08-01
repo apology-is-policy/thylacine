@@ -57,6 +57,35 @@ static u64 round_up_page(u64 x) {
     return (x + PAGE_SIZE - 1) & ~(u64)(PAGE_SIZE - 1);
 }
 
+// #107 test observable: the span the eager paths last asked the arch layer to
+// make instruction-coherent. Kept HERE rather than in arch_icache_sync_range so
+// only the exec path can write it -- a concurrent demand-page sync on another
+// CPU cannot pollute what the test reads (and the arch helper, which runs per
+// page-in fault, gains nothing).
+static u64    g_exec_icache_last_addr;
+static size_t g_exec_icache_last_len;
+
+void exec_icache_last_for_test(u64 *addr_out, size_t *len_out) {
+    if (addr_out) *addr_out = g_exec_icache_last_addr;
+    if (len_out)  *len_out  = g_exec_icache_last_len;
+}
+
+// Make an eagerly-populated executable segment instruction-coherent.
+//
+// `len` is the whole PAGE-ROUNDED segment span, NOT the copied byte count
+// (#107). The bytes past filesz are zeroed by KP_ZERO, but that zeroing is a
+// DATA-side write: it does not evict I-cache lines that a prior occupant of
+// these recycled PAs may have left behind, and the tail is mapped executable
+// along with the rest of the segment. A branch into it would then fetch stale
+// instructions rather than trapping on the zeros. This is the rule the FILE
+// fault arm already applies (arch/arm64/fault.c syncs PAGE_SIZE, not the valid
+// byte count) -- the eager paths are the two that had drifted from it.
+static void exec_make_exec_coherent(void *kva, size_t len) {
+    g_exec_icache_last_addr = (u64)(uintptr_t)kva;
+    g_exec_icache_last_len  = len;
+    arch_icache_sync_range(kva, len);
+}
+
 // Map a single PT_LOAD segment into the Proc's address space.
 //
 // Steps:
@@ -95,32 +124,38 @@ static int exec_map_segment(struct Proc *p, const void *blob,
     // Copy filesz bytes from blob[file_offset..] → burrow's first page (offset 0).
     // The BURROW's pages start at offset 0; vmaddr_start corresponds to
     // BURROW offset 0 (the segment is page-aligned).
+    u8 *burrow_kva = (u8 *)pa_to_kva(page_to_pa(burrow->pages));
     if (seg->filesz > 0) {
-        u8 *burrow_kva = (u8 *)pa_to_kva(page_to_pa(burrow->pages));
         const u8 *src = (const u8 *)blob + seg->file_offset;
         for (size_t i = 0; i < seg->filesz; i++) {
             burrow_kva[i] = src[i];
         }
-
-        // R7 F134 close: cache maintenance for executable segments.
-        // Bytes were written via the data path (D-cache); EL0 fetches
-        // them via I-cache. ARM ARM B2.4.2 requires `dc cvau` (clean
-        // to PoU) + `ic ivau` (invalidate I-cache to PoU) per cache
-        // line + DSB/ISB to make instruction visibility atomic with
-        // the data write. Without this, the I-cache may serve stale
-        // bytes from a prior occupant of the same physical page —
-        // critical at Phase 4+ when different binaries can share PA
-        // recycling. v1.0 P3-F masks the hazard because /init's blob
-        // bytes don't change across iterations.
-        //
-        // Only required when segment is executable. RW-only segments
-        // (data, bss) don't need I-cache maintenance. REVENANT R-4 routed
-        // this through the shared arch helper (correct CTR_EL0 line sizes
-        // vs the prior hardcoded 64B; same helper the FILE fault arm uses).
-        if (seg->flags & PF_X)
-            arch_icache_sync_range(burrow_kva, seg->filesz);
     }
-    // [filesz, size) stays zero from KP_ZERO.
+    // [filesz, size) stays zero from KP_ZERO -- as DATA. See below: zeroed
+    // memory is not the same as an I-cache with no stale lines for these PAs.
+
+    // R7 F134 close: cache maintenance for executable segments.
+    // Bytes were written via the data path (D-cache); EL0 fetches
+    // them via I-cache. ARM ARM B2.4.2 requires `dc cvau` (clean
+    // to PoU) + `ic ivau` (invalidate I-cache to PoU) per cache
+    // line + DSB/ISB to make instruction visibility atomic with
+    // the data write. Without this, the I-cache may serve stale
+    // bytes from a prior occupant of the same physical page —
+    // critical at Phase 4+ when different binaries can share PA
+    // recycling. v1.0 P3-F masks the hazard because /init's blob
+    // bytes don't change across iterations.
+    //
+    // Only required when segment is executable. RW-only segments
+    // (data, bss) don't need I-cache maintenance. REVENANT R-4 routed
+    // this through the shared arch helper (correct CTR_EL0 line sizes
+    // vs the prior hardcoded 64B; same helper the FILE fault arm uses).
+    //
+    // #107: the span is `size` (whole page-rounded segment), not filesz, and
+    // the call is NOT gated on filesz > 0 -- elf_load rejects only
+    // filesz > memsz, so a PF_X segment with filesz == 0 (pure bss) loads and
+    // would otherwise map executable with no maintenance at all.
+    if (seg->flags & PF_X)
+        exec_make_exec_coherent(burrow_kva, size);
 
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map(p, burrow, seg->vaddr, size, prot);
@@ -504,8 +539,8 @@ static int map_eager_from_file(struct Proc *p, struct Spoor *exe,
     struct Burrow *b = burrow_create_anon(size);
     if (!b)                                  return -1;
 
+    u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
     if (seg->filesz > 0) {
-        u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
         size_t got = 0;
         while (got < seg->filesz) {
             long n = exe->dev->read(exe, kva + got, (long)(seg->filesz - got),
@@ -515,13 +550,17 @@ static int map_eager_from_file(struct Proc *p, struct Spoor *exe,
             got += (size_t)n;
         }
         if (got != seg->filesz) { burrow_unref(b); return -1; }   // truncated -> no partial map
-
-        // A PF_X segment routed here (memsz extends past the file pages) still
-        // executes its loaded bytes -> I-cache maintenance on the copied range.
-        if (seg->flags & PF_X)
-            arch_icache_sync_range(kva, seg->filesz);
     }
-    // [filesz, size) stays zero (KP_ZERO from alloc_pages) = .bss.
+    // [filesz, size) stays zero (KP_ZERO from alloc_pages) = .bss -- as DATA.
+
+    // A PF_X segment routed here (memsz extends past the file pages) still
+    // executes its loaded bytes -> I-cache maintenance. #107: over the whole
+    // page-rounded span, not just the copied range, and not gated on
+    // filesz > 0 -- this is precisely the path that receives a segment whose
+    // memsz exceeds its filesz, so the un-synced tail is the COMMON case here
+    // rather than an edge one. exec_make_exec_coherent carries the argument.
+    if (seg->flags & PF_X)
+        exec_make_exec_coherent(kva, size);
 
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map(p, b, seg->vaddr, size, prot);

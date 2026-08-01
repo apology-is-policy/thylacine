@@ -6,7 +6,7 @@ proves: "0-corruption SMP soundness: default+UBSan kernels x smp4/smp8, N>=10 bo
 blind-to: "Races below the sampling rate (N=10 per config is a sample, not a proof); deterministic-interleaving bug classes (the owed multi-in-flight harness, seam-841-mi-harness); accel-specific behavior outside the run's accel (test.sh runs HVF, test-interactive TCG -- different CPUs); anything whose failure mode is a wrong-but-plausible result rather than a corruption signature. It proves absence-of-corruption-in-N-boots, never absence-of-race."
 invocation: "tools/ci-smp-gate.sh (make smp-gate); subset via SMP_GATE_CONFIGS=\"default-smp4 ubsan-smp4\" -- the full 4-config matrix sits AT the Bash 600s ceiling, so split it (feedback-smp-gate-split)."
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-01
 ---
 ## Method
 
@@ -20,10 +20,43 @@ non-explanation, so an unexplained red boot is a race to hunt, never a wave.
 
 ## Classification rules
 
-CORRUPTION = any EXTINCTION, assert, UAF signature, wrong-result marker.
-TIMING = harness-side latency artifacts whose guest end-state is proven
-healthy. "Could not classify" is HARD (an unverified pattern check fails
-silent; a gate that cannot parse its log fails open).
+**Four classes, and two of them fail the gate** (corrected 2026-08-01
+against `tools/smp-multiboot.sh`; this note previously described two):
+
+| Class | Fails? | Anchored on |
+|---|---|---|
+| CORRUPTION | yes | EXACT extinction strings — `invalid prev state`, `stack canary mismatch`, `kernel stack overflow`, `already on_cpu`, `#860`, `not RUNNABLE-and-off-cpu`, `corrupted current`, `sched: deadlock` |
+| INJECT-MISS | no | the full green-guest proof (all five conjuncts, below) |
+| TIMING | no | EMITTED warn strings only — `[SOFT-WARN]`, the irq-bench CI-budget text |
+| OTHER | **yes** | nothing; an unclassified nonzero exit |
+
+OTHER failing is the load-bearing choice: an unexplained red is surfaced,
+never absorbed. There is deliberately no bucket for "probably fine", and
+"could not classify" is HARD — an unverified pattern check fails silent, and
+a gate that cannot parse its log fails open.
+
+**INJECT-MISS requires proving the guest GREEN, not merely proving the
+injection missed**: the `AWAITING_QMP_KEY` sentinel present, a clean
+`virtio-input: SKIP`, the banner present, no `EXTINCTION:`, and no suite
+FAIL line. A boot that merely *also* missed injection stays CORRUPTION or
+OTHER.
+
+**Two precision rules, both learned by being wrong.** CORRUPTION uses exact
+strings because a bare `canary` matched the benign `canaries` hardening
+banner and the `canary: initialized` boot line — a false positive on every
+healthy boot. TIMING is anchored on emitted warn text and **never on test
+names**: the pre-#362 pattern contained `stalk.*lifetime`, which matched the
+PASSING line `[test] stalk.lifetime_no_leak ... PASS` present in every log,
+making TIMING a catch-all that absorbed any nonzero exit. It buried 23 of 40
+inject-misses — "and a real unclassified failure would have been too."
+
+Every boot restores `pool.img` from its baked snapshot first (go4c probes
+age the fixture with ~6x CoW amplification; a long matrix would otherwise
+drift toward the timeout and eventually ENOSPC into false reds), and the key
+twin is compared before the restore so only the pool matching the live key
+can be installed. Both the guest serial log AND the harness stdout are
+captured on every non-PASS — a post-banner verdict step leaves no trace in
+the serial log, which is why one 2026-07-19 OTHER was undiagnosable.
 
 ## History
 

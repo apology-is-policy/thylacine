@@ -99,6 +99,25 @@ state — which is what dissolved the old `r->lock → proc_table_lock`
 inversion candidate and let the `wait_active` guard (which had to *refuse*
 a second concurrent waiter, breaking parallel `go build`) be retired.
 
+**The by-pid selector had to reach the kernel's own caller too (#94).**
+U-7-pre built the filter and converted the userspace callers, but left the
+site that *motivated* it — `kernel/joey.c`'s kproc-waits-for-joey — on the
+reap-any form, so the hazard the filter exists to close stayed live in the
+kernel. It was reachable, not hypothetical, and the ordering is the whole
+bug: when joey exits early its daemon children re-parent to kproc,
+`proc_reparent_children` splices each onto the **front** of
+`kproc->children` (ahead of joey), and the scan breaks on the first ZOMBIE
+it meets. So an already-dead daemon was reaped *instead of* joey, and the
+`reaped != pid` check extincted with "wrong pid" — discarding joey's exit
+status, i.e. the boot-failure diagnostic, on precisely the branches where a
+daemon dying is *why* joey is exiting. kproc now waits by pid. Orphan fate
+is unchanged: kproc has never reaped orphans as a service (init is the
+reaper; kproc adopts only once init is gone), and the site performed a
+single incidental reap before extincting on it. Pinned by
+`proc.wait_pid_for_skips_adopted_orphan_zombie`, which builds the boot's
+exact arrangement — an adopted orphan ZOMBIE ahead of the target, with
+distinct statuses so the pid *and* the status each discriminate.
+
 ## Data structures
 
 `struct Proc` is 400 bytes, grown strictly by appending, with **every**

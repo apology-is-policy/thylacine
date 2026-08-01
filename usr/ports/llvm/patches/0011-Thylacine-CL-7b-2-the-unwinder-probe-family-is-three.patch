@@ -1,0 +1,111 @@
+From 331428120507a7267efa283f5b928d7dd86ea61d Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 31 Jul 2026 07:57:29 +0200
+Subject: [PATCH 11/14] Thylacine CL-7b-2: the unwinder probe family is three
+ facts, not two
+
+The previous commit asserted HAVE_REGISTER_FRAME and HAVE_DEREGISTER_FRAME
+and stopped there. That got __register_frame CALLED, and then called the
+WRONG WAY: measured on-device as libunwind rejecting what it was handed --
+"__unw_add_dynamic_fde: bad fde: FDE is really a CIE", twice -- followed by a
+snare:segv in the prover.
+
+libgcc's __register_frame takes a whole .eh_frame section; libunwind's takes
+one FDE. LLVM tells them apart by probing for __unw_add_dynamic_fde, as this
+tree's own comment above processFDE says in as many words. So asserting the
+first two facts alone tells LLVM "an unwinder exists" while leaving it to use
+the libgcc calling convention against libunwind -- strictly worse than the
+lookup failure it replaced, because a failed lookup is an error message and a
+mismatched convention is a segfault.
+
+All three probes are check_symbol_exists against a link line with no
+libunwind, so all three fail for one reason and all three are answered
+together or not at all. __unw_add_dynamic_fde is defined T in the same
+libunwind.a as the other two (verified with llvm-nm before asserting it).
+
+The lesson is the fix's shape, not its content: when a configure probe answers
+wrongly, the unit to correct is the whole family of facts that probe settles.
+Half a platform assertion is not half-safe.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RXubKBEPsQ7gdi7N6wG5mK
+---
+ .../Orc/TargetProcess/RegisterEHFrames.cpp    | 28 ++++++++++++++-----
+ .../RuntimeDyld/RTDyldMemoryManager.cpp       |  7 +++++
+ 2 files changed, 28 insertions(+), 7 deletions(-)
+
+diff --git a/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp b/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp
+index d539bfdb2..13ab84012 100644
+--- a/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp
++++ b/llvm/lib/ExecutionEngine/Orc/TargetProcess/RegisterEHFrames.cpp
+@@ -25,14 +25,25 @@
+ // __register_frame function not found", with every JIT materialization failing
+ // behind it, so llvmpipe could not compile a single shader.
+ //
+-// The probe's answer is wrong, not its question. libunwind.a supplies both
++// The probe's answer is wrong, not its question. libunwind.a supplies these
+ // symbols, and every Thylacine binary that reaches this code links the C++
+-// runtime that carries them (verified with llvm-nm on the built osmesa-prove:
+-// both defined T). Asserting it here rather than in the CMake cache keeps the
+-// fact next to the code that depends on it, costs one translation unit to
+-// rebuild instead of regenerating config.h, and cannot be lost by a build that
+-// configures LLVM some other way. If it ever becomes untrue the result is a
+-// loud undefined-symbol link error, not a silent runtime fallback.
++// runtime that carries them (verified with llvm-nm on the built osmesa-prove).
++// Asserting it here rather than in the CMake cache keeps the fact next to the
++// code that depends on it, costs one translation unit to rebuild instead of
++// regenerating config.h, and cannot be lost by a build that configures LLVM
++// some other way. If it ever becomes untrue the result is a loud
++// undefined-symbol link error, not a silent runtime fallback.
++//
++// THE FAMILY IS THREE FACTS, NOT TWO, and the third is what makes the first
++// two usable. libgcc's __register_frame takes a whole .eh_frame section;
++// libunwind's takes ONE FDE, and LLVM tells them apart by probing for
++// __unw_add_dynamic_fde (see the comment above processFDE in
++// RuntimeDyld/RTDyldMemoryManager.cpp). Asserting only the first two says "the
++// unwinder exists" while leaving LLVM to call it the libgcc way: measured
++// on-device as libunwind rejecting the section start with "bad fde: FDE is
++// really a CIE", twice, followed by a snare:segv. All three probes fail for
++// the SAME reason -- no libunwind on the cross configure's link line -- so all
++// three are answered together or the answer is worse than useless.
+ #if defined(__thylacine__)
+ #ifndef HAVE_REGISTER_FRAME
+ #define HAVE_REGISTER_FRAME 1
+@@ -40,6 +51,9 @@
+ #ifndef HAVE_DEREGISTER_FRAME
+ #define HAVE_DEREGISTER_FRAME 1
+ #endif
++#ifndef HAVE_UNW_ADD_DYNAMIC_FDE
++#define HAVE_UNW_ADD_DYNAMIC_FDE 1
++#endif
+ #endif // __thylacine__
+ 
+ #define DEBUG_TYPE "orc"
+diff --git a/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp b/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp
+index 0b534a657..a0bcaf369 100644
+--- a/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp
++++ b/llvm/lib/ExecutionEngine/RuntimeDyld/RTDyldMemoryManager.cpp
+@@ -35,6 +35,10 @@
+ // not on the CL-7 critical path. It carries the identical defect, though, and a
+ // latent one is still one -- anything that does take the RTDyld path would fail
+ // the same way for the same reason.
++// HAVE_UNW_ADD_DYNAMIC_FDE is the third of the family and belongs with the
++// other two: it is what selects the per-FDE processFDE walk below over the
++// whole-section libgcc convention, exactly as this file's own comment above
++// processFDE explains.
+ #if defined(__thylacine__)
+ #ifndef HAVE_REGISTER_FRAME
+ #define HAVE_REGISTER_FRAME 1
+@@ -42,6 +46,9 @@
+ #ifndef HAVE_DEREGISTER_FRAME
+ #define HAVE_DEREGISTER_FRAME 1
+ #endif
++#ifndef HAVE_UNW_ADD_DYNAMIC_FDE
++#define HAVE_UNW_ADD_DYNAMIC_FDE 1
++#endif
+ #endif // __thylacine__
+ 
+ namespace llvm {
+-- 
+2.43.0
+

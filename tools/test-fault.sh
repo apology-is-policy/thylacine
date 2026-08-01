@@ -95,9 +95,22 @@ for variant in $selected; do
     log_file="$BUILD_DIR_BASE/test-fault-$variant.log"
 
     echo "==> [$variant] building..."
-    "$REPO_ROOT/tools/build.sh" kernel \
+    # #101: capture rather than discard. --build-dir redirects only KERNEL_BUILD,
+    # NOT $BUILD_DIR, so `fixtures` stays build/fixtures -- every variant here
+    # re-mints the SHARED pool.img from the ambient environment, N times per run,
+    # for a harness that never reads the pool at all. That is invisible waste at
+    # best and, with a clade toolchain staged but the flag unset, a silent
+    # destruction of a clade-baked pool (#101). Surfacing build.sh's bake config
+    # line makes both visible without restoring the full build spew.
+    bake_log="$BUILD_DIR_BASE/test-fault-$variant-build.log"
+    if ! "$REPO_ROOT/tools/build.sh" kernel \
         --build-dir="$build_dir" \
-        -- -DTHYLACINE_FAULT_TEST="$variant" >/dev/null
+        -- -DTHYLACINE_FAULT_TEST="$variant" > "$bake_log" 2>&1; then
+        echo "==> [$variant] BUILD FAILED -- tail of $bake_log:" >&2
+        tail -20 "$bake_log" >&2
+        exit 2
+    fi
+    grep -E '^==> (populate pool: bake config|WARNING: a clade)' "$bake_log" || true
 
     echo "==> [$variant] booting (expecting: $expect)..."
     THYLACINE_BUILD_DIR="$build_dir" "$REPO_ROOT/tools/run-vm.sh" --no-share \

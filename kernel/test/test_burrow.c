@@ -557,3 +557,52 @@ void test_vmo_file_resident_pages_freed(void) {
     TEST_ASSERT(free_after + SLOP >= free_before,
         "resident pages must not leak across many create/install/free cycles");
 }
+
+// #106: burrow_backing_pages must equal what the allocator actually took.
+//
+// This is the ANTI-DRIFT test, and it deliberately does not hard-code any
+// expected order table: it creates a REAL Burrow and compares the helper's
+// answer against v->order, the value the Burrow itself hands to free_pages.
+// So it fails if EITHER side changes without the other -- which is the only
+// failure mode that silently re-opens the I-32 undercount, since a charge
+// computed from a stale rounding rule looks perfectly reasonable at its call
+// site. (The pre-#106 charge expression, size / PAGE_SIZE, is exactly what
+// this comparison rejects for every non-power-of-two size below.)
+void test_burrow_backing_pages_matches_alloc(void) {
+    // Sizes chosen so the set contains both fixed points (a request that is
+    // already a power-of-two page count, where the helper must NOT inflate)
+    // and worst cases (2^k + 1 pages, where it must nearly double).
+    static const size_t kSizes[] = {
+        1,                      // sub-page -> 1 page
+        4096,                   // exactly 1 page (fixed point)
+        4097,                   // 2 pages
+        3 * 4096,               // 3 -> 4 (the smallest real round-up)
+        4 * 4096,               // fixed point
+        5 * 4096,               // 5 -> 8
+        (1u << 11) * 4096,      // 2048 pages, fixed point
+        ((1u << 11) + 1) * 4096 // 2049 -> 4096: the ~2x worst case from #106
+    };
+
+    for (unsigned i = 0; i < sizeof(kSizes) / sizeof(kSizes[0]); i++) {
+        size_t want = burrow_backing_pages(kSizes[i]);
+        TEST_ASSERT(want != 0, "burrow_backing_pages returned 0 for a creatable size");
+
+        struct Burrow *v = burrow_create_anon(kSizes[i]);
+        TEST_ASSERT(v != NULL, "burrow_create_anon failed");
+        TEST_EXPECT_EQ(want, (size_t)1u << v->order,
+            "burrow_backing_pages must equal the allocator's own 1 << order");
+        // And it must never UNDER-state the request -- an occupancy below the
+        // page-rounded page_count would be an over-refund, the other direction.
+        TEST_ASSERT(want >= v->page_count,
+            "backing pages must cover the whole requested page count");
+        burrow_unref(v);
+    }
+
+    // The two inputs that produce no Burrow at all answer 0, so a charge-then-
+    // create caller and a creator that then refuses agree on "no pages".
+    TEST_EXPECT_EQ(burrow_backing_pages(0), (size_t)0, "size 0 -> 0 pages");
+    TEST_EXPECT_EQ(burrow_backing_pages((size_t)-1), (size_t)0,
+        "a size whose page round-up would wrap -> 0 pages (no silent truncation)");
+    TEST_ASSERT(burrow_create_anon((size_t)-1) == NULL,
+        "and the creator refuses the same size (the guards agree)");
+}

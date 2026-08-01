@@ -3,7 +3,7 @@ id: home
 type: moc
 title: "The vault — entry"
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-01
 ---
 # The vault
 
@@ -30,5 +30,6 @@ Schema: `vault/meta/schema.md` (binding). Operating loop:
 
 [[moc-kernel]] · [[moc-userspace]] · [[moc-boundary]] (ABIs, wire
 protocols, registries — deliberately neither kernel nor userspace) ·
-`system/substrate/` (QEMU/HVF/TCG, boards, builders, harness) ·
-`system/stratum/` (the sibling-system integration surface).
+[[moc-substrate]] (QEMU/HVF/TCG, boards, builders, harness — what the
+system runs on and is judged by) · `system/stratum/` (the sibling-system
+integration surface).

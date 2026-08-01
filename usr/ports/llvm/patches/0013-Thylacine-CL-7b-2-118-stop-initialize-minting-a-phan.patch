@@ -1,0 +1,82 @@
+From 1a92b68139051f95b2601ac6b3b18d7815c5e090 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Fri, 31 Jul 2026 11:05:02 +0200
+Subject: [PATCH 13/14] Thylacine CL-7b-2: #118 -- stop initialize() minting a
+ phantom reservation
+
+The instrumented round printed the whole fault:
+
+  reserve 1048576 -> exec 0x1004ae000 writer 0x1003ae000
+  prepare 0x1004ae000 / af000 / b0000 / b1000  -- all resolve correctly
+  LLVM ERROR: prepare 0x1004b2000 is inside no reservation
+      (2 held; exec 0x1004ae000 writer 0x1003ae000 size 1048576;
+               exec 0x1004b0000 writer 0x0        size 0)
+
+Two reservations, from one reserve(). The second was minted by initialize():
+
+  Reservations[AI.MappingBase].Allocations.push_back(MinAddr);
+
+AI.MappingBase is the ALLOCATION's base, which equals the reservation's base
+only for the first allocation out of a fresh region. MapperJITLinkMemoryManager
+carves later allocations from the leftover it parked in AvailableMemory, so
+they start partway in -- and operator[] on a std::map inserts a default entry
+for a key it does not find. {WriterBase 0, Size 0}, at 0x1004b0000.
+
+That entry is then the greatest base <= every later address, so it wins the
+containment lookup in writerFor(): 0x1004b2000 resolved to 0 + 0x2000, and
+BasicLayout::apply stored through it. Hence a SIGSEGV at 0x2000 with no
+reservation anywhere near zero -- the address was manufactured by the lookup.
+
+The line is inherited verbatim from InProcessMemoryMapper, and it is correct
+there: that mapper's Reservations is a DenseMap and its prepare() returns the
+address unchanged, so lookups are key-exact and a stray entry is inert. The
+defect is in this adaptation. Making the container ordered, so prepare() can
+ask which region CONTAINS an address, changed what a spurious key costs, and
+the insert that assumed key-exactness came along unexamined.
+
+Fixed by recording against the containing reservation's base -- already
+resolved at the top of initialize() -- through find() rather than operator[],
+so this code path can no longer create a reservation at all. If the reservation
+is gone (concurrent release), the record is skipped: release() has already
+drained its allocations, so there is nothing to attach.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01RXubKBEPsQ7gdi7N6wG5mK
+---
+ .../Orc/ThylacineMemoryMapper.cpp             | 20 ++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+index b05252726..0739f097e 100644
+--- a/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
++++ b/llvm/lib/ExecutionEngine/Orc/ThylacineMemoryMapper.cpp
+@@ -304,7 +304,25 @@ void DualMapMemoryMapper::initialize(MemoryMapper::AllocInfo &AI,
+     auto &Alloc = Allocations[MinAddr];
+     Alloc.Size = MaxAddr - MinAddr;
+     Alloc.DeinitializationActions = std::move(*DeinitializeActions);
+-    Reservations[AI.MappingBase].Allocations.push_back(MinAddr);
++    // Key this by the RESERVATION's base, not by AI.MappingBase. The two are
++    // the same address only for the first allocation out of a fresh region;
++    // every later one is carved from the leftover and starts partway in.
++    //
++    // The line this replaces came from InProcessMemoryMapper, where
++    // Reservations is a DenseMap and every lookup is key-exact -- so an
++    // operator[] insert at a non-base key is inert there. Here the container is
++    // ordered, because prepare() asks it which region CONTAINS an address, and
++    // under those semantics the inserted default entry {WriterBase 0, Size 0}
++    // is not inert: it becomes the greatest base <= every subsequent address
++    // and wins the lookup, resolving writer pointers to 0 + offset.
++    //
++    // That is #118 exactly. One spurious entry at 0x1004b0000 sent the third
++    // allocation's segment at 0x1004b2000 to writer 0x2000, and
++    // BasicLayout::apply stored through it.
++    //
++    // find(), not operator[], so this can never mint a reservation again.
++    if (auto It = Reservations.find(ExecBase); It != Reservations.end())
++      It->second.Allocations.push_back(MinAddr);
+   }
+ 
+   OnInitialized(MinAddr);
+-- 
+2.43.0
+

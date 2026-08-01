@@ -1,0 +1,251 @@
+From ce053eea1b4ceaa1f8fc706b52966795fb2df9cb Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Thu, 30 Jul 2026 19:46:01 +0200
+Subject: [PATCH 08/14] Thylacine CL-7b-2: a process-symbols JITDylib for a
+ host with no loader
+
+LLJIT links process symbols by default, and the default setup reaches them the
+only way a hosted platform can: EPCDynamicLibrarySearchGenerator ->
+SelfExecutorProcessControl::loadDylib(nullptr) -> dlopen(NULL). Every Thylacine
+binary is statically linked and musl's static dlopen is a stub, so
+LLJITBuilder::create() itself returned "Dynamic loading not supported" and
+llvmpipe never came up.
+
+Two simpler repairs are both wrong, which is why this file exists rather than a
+one-liner.
+
+Making dlopen(NULL) succeed with a sentinel handle buys an empty namespace:
+SelfExecutorProcessControl::lookupSymbolsAsync resolves through
+DynamicLibrary::getAddressOfSymbol(), which calls HandleSet::DLSym() on that
+handle directly and never consults SearchForAddressOfSymbol() -- so
+DynamicLibrary::AddSymbol(), the mechanism that exists for exactly this
+situation, is not on the path.
+
+setLinkProcessSymbolsByDefault(false) fails one step later and just as
+fatally: setUpGenericLLVMIRPlatform() opens by requiring a process-symbols
+JITDylib and errors with "Native platforms require a process symbols JITDylib".
+
+setProcessSymbolsJITDylibSetup() is the seam that fits. The platform gets its
+JITDylib, the default link order is unchanged, and the contents come from a
+table fixed at link time instead of a loader at run time -- the honest
+description of a static system.
+
+Each entry takes the address of the real function, so a name this sysroot does
+not provide is a build error rather than a silent hole. The signature in each
+macro is load-bearing, not decoration: <cmath> injects C++ overloads of the
+double-named functions into the global namespace, so a bare &::acos does not
+compile at all. That was caught by compiling the table, not by reading it.
+
+The table is deliberately "what a static host can name", not "what llvmpipe
+needs" -- the second set is not knowable from here. A symbol the JIT wants and
+this table lacks fails at lookup, by name, in ORC's usual "Symbols not found",
+which is the diagnostic that says what to add.
+---
+ .../llvm/ExecutionEngine/Orc/ExecutionUtils.h |  14 ++
+ llvm/lib/ExecutionEngine/Orc/CMakeLists.txt   |   1 +
+ .../Orc/ThylacineProcessSymbols.cpp           | 156 ++++++++++++++++++
+ 3 files changed, 171 insertions(+)
+ create mode 100644 llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp
+
+diff --git a/llvm/include/llvm/ExecutionEngine/Orc/ExecutionUtils.h b/llvm/include/llvm/ExecutionEngine/Orc/ExecutionUtils.h
+index e42c90256..bb6944346 100644
+--- a/llvm/include/llvm/ExecutionEngine/Orc/ExecutionUtils.h
++++ b/llvm/include/llvm/ExecutionEngine/Orc/ExecutionUtils.h
+@@ -383,6 +383,20 @@ private:
+   ObjectLinkingLayer &L;
+ };
+ 
++#if defined(__thylacine__)
++
++class LLJIT;
++
++/// Build the process-symbols JITDylib for a statically linked Thylacine host.
++///
++/// Pass to LLJITBuilder::setProcessSymbolsJITDylibSetup(). The default setup
++/// reaches process symbols via dlopen(NULL), which a static musl binary cannot
++/// do; this one populates the JITDylib from a table fixed at link time. See
++/// ThylacineProcessSymbols.cpp for why the two simpler repairs do not work.
++LLVM_ABI Expected<JITDylibSP> thylacineProcessSymbolsSetup(LLJIT &J);
++
++#endif // __thylacine__
++
+ } // end namespace orc
+ } // end namespace llvm
+ 
+diff --git a/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt b/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt
+index 1cc69b357..50d3bec1b 100644
+--- a/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt
++++ b/llvm/lib/ExecutionEngine/Orc/CMakeLists.txt
+@@ -45,6 +45,7 @@ add_llvm_component_library(LLVMOrcJIT
+   MapperJITLinkMemoryManager.cpp
+   MemoryMapper.cpp
+   ThylacineMemoryMapper.cpp
++  ThylacineProcessSymbols.cpp
+   ELFNixPlatform.cpp
+   Mangling.cpp
+   ObjectLinkingLayer.cpp
+diff --git a/llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp b/llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp
+new file mode 100644
+index 000000000..89c620ad5
+--- /dev/null
++++ b/llvm/lib/ExecutionEngine/Orc/ThylacineProcessSymbols.cpp
+@@ -0,0 +1,156 @@
++//===- ThylacineProcessSymbols.cpp - Process symbols without a loader ----===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// Thylacine (Clade CL-7b): the process-symbols JITDylib for a statically
++// linked host with no dynamic loader.
++//
++// LLJIT links process symbols by default, and the default setup reaches them
++// the only way a hosted platform can: EPCDynamicLibrarySearchGenerator ->
++// SelfExecutorProcessControl::loadDylib(nullptr) -> dlopen(NULL). On Thylacine
++// every binary is statically linked and musl's static dlopen is a stub that
++// fails with "Dynamic loading not supported", so LLJITBuilder::create() itself
++// returns an error and the JIT never comes up at all.
++//
++// Two obvious repairs are both wrong, and it is worth writing down why.
++//
++// Making dlopen(NULL) succeed with a sentinel handle buys nothing:
++// SelfExecutorProcessControl::lookupSymbolsAsync resolves through
++// DynamicLibrary::getAddressOfSymbol(), which calls HandleSet::DLSym() on that
++// handle directly and never consults SearchForAddressOfSymbol(). So
++// DynamicLibrary::AddSymbol() -- the mechanism that exists for exactly this
++// situation -- is not on the path, and the sentinel would name a namespace in
++// which nothing can ever be found.
++//
++// Turning the flag off with setLinkProcessSymbolsByDefault(false) fails one
++// step later and just as fatally: setUpGenericLLVMIRPlatform() begins by
++// requiring a process-symbols JITDylib and errors out with "Native platforms
++// require a process symbols JITDylib" when there is none.
++//
++// The seam that does fit is setProcessSymbolsJITDylibSetup(). The platform gets
++// its JITDylib, the default link order is unchanged, and the contents come from
++// a table built at compile time instead of a loader at run time -- which is the
++// honest description of a static system. Each entry takes the address of a real
++// libc/libm function, so a name that this sysroot does not provide is a *build*
++// error rather than a silent hole.
++//
++// The table is deliberately "what a static host can name", not "what llvmpipe
++// needs": the second set is not knowable from here. A symbol the JIT wants and
++// this table lacks fails at lookup, by name, in ORC's usual "Symbols not found"
++// error -- which is the diagnostic that tells us what to add.
++//
++//===----------------------------------------------------------------------===//
++
++#include "llvm/ExecutionEngine/Orc/ExecutionUtils.h"
++
++#if defined(__thylacine__)
++
++#include "llvm/ExecutionEngine/Orc/Core.h"
++#include "llvm/ExecutionEngine/Orc/LLJIT.h"
++#include "llvm/Support/Error.h"
++
++#include <cmath>
++#include <cstring>
++
++namespace llvm {
++namespace orc {
++
++Expected<JITDylibSP> thylacineProcessSymbolsSetup(LLJIT &J) {
++  auto &ES = J.getExecutionSession();
++  auto &JD = ES.createBareJITDylib("<Process Symbols>");
++
++  SymbolMap M;
++  auto Add = [&](StringRef Name, void *Addr) {
++    M[ES.intern(Name)] = ExecutorSymbolDef(
++        ExecutorAddr::fromPtr(Addr),
++        JITSymbolFlags::Exported | JITSymbolFlags::Callable);
++  };
++
++  // Every entry takes the address of the real library function, which is what
++  // makes this list self-checking: a name this sysroot does not provide will
++  // not compile.
++  //
++  // The signature in each macro is load-bearing, not decoration. <cmath>
++  // injects C++ overloads of the double-named functions into the global
++  // namespace, so a bare &::acos is ambiguous and will not compile; the
++  // static_cast picks the C function the JIT will actually call. (The
++  // f-suffixed names have no overload set and would have worked bare -- doing
++  // them the same way keeps one rule instead of two.)
++#define THYLA_F1(f) Add(#f, reinterpret_cast<void *>(static_cast<float (*)(float)>(&::f)))
++#define THYLA_F2(f) Add(#f, reinterpret_cast<void *>(static_cast<float (*)(float, float)>(&::f)))
++#define THYLA_D1(f) Add(#f, reinterpret_cast<void *>(static_cast<double (*)(double)>(&::f)))
++#define THYLA_D2(f) Add(#f, reinterpret_cast<void *>(static_cast<double (*)(double, double)>(&::f)))
++
++  // Emitted by the backend for aggregate copies and initialisation, not by
++  // anything in the IR the JIT client wrote. No overload set, so no cast.
++  Add("memcpy", reinterpret_cast<void *>(&::memcpy));
++  Add("memmove", reinterpret_cast<void *>(&::memmove));
++  Add("memset", reinterpret_cast<void *>(&::memset));
++  Add("memcmp", reinterpret_cast<void *>(&::memcmp));
++
++  // libm: the calls that survive lowering when the target has no instruction
++  // for them. Both widths -- a float-only shader still reaches the double
++  // forms through constant folding and promotion.
++  THYLA_F1(acosf);      THYLA_D1(acos);
++  THYLA_F1(asinf);      THYLA_D1(asin);
++  THYLA_F1(atanf);      THYLA_D1(atan);
++  THYLA_F2(atan2f);     THYLA_D2(atan2);
++  THYLA_F1(ceilf);      THYLA_D1(ceil);
++  THYLA_F2(copysignf);  THYLA_D2(copysign);
++  THYLA_F1(cosf);       THYLA_D1(cos);
++  THYLA_F1(coshf);      THYLA_D1(cosh);
++  THYLA_F1(expf);       THYLA_D1(exp);
++  THYLA_F1(exp2f);      THYLA_D1(exp2);
++  THYLA_F1(expm1f);     THYLA_D1(expm1);
++  THYLA_F1(fabsf);      THYLA_D1(fabs);
++  THYLA_F2(fdimf);      THYLA_D2(fdim);
++  THYLA_F1(floorf);     THYLA_D1(floor);
++  THYLA_F2(fmaxf);      THYLA_D2(fmax);
++  THYLA_F2(fminf);      THYLA_D2(fmin);
++  THYLA_F2(fmodf);      THYLA_D2(fmod);
++  THYLA_F2(hypotf);     THYLA_D2(hypot);
++  THYLA_F1(logf);       THYLA_D1(log);
++  THYLA_F1(log10f);     THYLA_D1(log10);
++  THYLA_F1(log1pf);     THYLA_D1(log1p);
++  THYLA_F1(log2f);      THYLA_D1(log2);
++  THYLA_F1(nearbyintf); THYLA_D1(nearbyint);
++  THYLA_F2(powf);       THYLA_D2(pow);
++  THYLA_F2(remainderf); THYLA_D2(remainder);
++  THYLA_F1(rintf);      THYLA_D1(rint);
++  THYLA_F1(roundf);     THYLA_D1(round);
++  THYLA_F1(sinf);       THYLA_D1(sin);
++  THYLA_F1(sinhf);      THYLA_D1(sinh);
++  THYLA_F1(sqrtf);      THYLA_D1(sqrt);
++  THYLA_F1(tanf);       THYLA_D1(tan);
++  THYLA_F1(tanhf);      THYLA_D1(tanh);
++  THYLA_F1(truncf);     THYLA_D1(trunc);
++
++  // The odd signatures out.
++  Add("fmaf", reinterpret_cast<void *>(
++                  static_cast<float (*)(float, float, float)>(&::fmaf)));
++  Add("fma", reinterpret_cast<void *>(
++                 static_cast<double (*)(double, double, double)>(&::fma)));
++  Add("ldexpf", reinterpret_cast<void *>(
++                    static_cast<float (*)(float, int)>(&::ldexpf)));
++  Add("ldexp", reinterpret_cast<void *>(
++                   static_cast<double (*)(double, int)>(&::ldexp)));
++
++#undef THYLA_F1
++#undef THYLA_F2
++#undef THYLA_D1
++#undef THYLA_D2
++
++  if (auto Err = JD.define(absoluteSymbols(std::move(M))))
++    return std::move(Err);
++
++  return &JD;
++}
++
++} // namespace orc
++} // namespace llvm
++
++#endif // __thylacine__
+-- 
+2.43.0
+

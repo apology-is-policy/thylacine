@@ -1,7 +1,7 @@
 From e7d6be5f8acce407dd0b312b9d67629dbc251fcb Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Mon, 27 Jul 2026 06:44:31 +0200
-Subject: [PATCH 6/6] Thylacine CL-4c: prepend the multicall tool name only
+Subject: [PATCH 06/14] Thylacine CL-4c: prepend the multicall tool name only
  when the exec path needs it
 
 The llvm multicall driver dispatches on argv[0], so a sub-invocation whose

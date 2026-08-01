@@ -117,7 +117,7 @@ void test_rendez_basic_handoff(void) {
     // sleep observes cond=0, transitions consumer → SLEEPING under
     // r->lock, drops lock, calls sched. sched picks boot (only
     // runnable thread); switches back. We resume here.
-    sched();
+    TEST_YIELD_UNTIL(g_handoff_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
 
     // Resumed in boot. Consumer ran once and is now SLEEPING on
     // g_handoff_rendez.
@@ -138,8 +138,8 @@ void test_rendez_basic_handoff(void) {
 
     TEST_EXPECT_EQ(n, 1,
         "wakeup reported exactly one waiter woken");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer must be RUNNABLE after wakeup");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer left the rendez after wakeup");
     TEST_ASSERT(g_handoff_rendez.waiter == NULL,
         "rendez waiter must be cleared after wakeup");
     // #811 (ARCH §8.8.1): the WAKER no longer clears rendez_blocked_on -- only
@@ -155,14 +155,14 @@ void test_rendez_basic_handoff(void) {
     // re-evaluates cond (now true), exits the loop, returns from
     // sleep. Increments counter to 2. Calls sched to come back. We
     // resume here.
-    sched();
+    TEST_YIELD_UNTIL(g_handoff_run_cnt >= 2u);
 
     TEST_EXPECT_EQ(g_handoff_run_cnt, 2u,
         "consumer must have run again post-wake");
     TEST_EXPECT_EQ(current_thread(), kthread(),
         "back in boot kthread after final yield");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer must be RUNNABLE (suspended inside sched after handoff)");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer is not blocked (suspended inside sched after handoff)");
     // #811: the owner cleared its backref on resume (under wait_lock) before
     // returning from sleep.
     TEST_ASSERT(consumer->rendez_blocked_on == NULL,
@@ -233,7 +233,7 @@ void test_rendez_death_interrupts_sleep(void) {
 
     // Yield: consumer runs, increments to 1, parks SLEEPING on g_death_rendez
     // (its register-then-observe sees group_exit_msg == NULL, so it sleeps).
-    sched();
+    TEST_YIELD_UNTIL(g_death_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_death_run_cnt, 1u, "consumer ran once before sleeping");
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
@@ -259,12 +259,12 @@ void test_rendez_death_interrupts_sleep(void) {
     // #811 close is that on resume it observes group_exit_msg and returns
     // SLEEP_INTR instead (asserted after the yield below): run_cnt reaches 2.
     TEST_EXPECT_EQ(woke, 1, "the per-sleeper wake reports exactly one waiter");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "sleeper readied by the cascade-equivalent wake");
 
     // Yield: consumer resumes inside sleep; the resume-path group_exit_msg
     // check fires -> SLEEP_INTR, increments to 2, parks.
-    sched();
+    TEST_YIELD_UNTIL(g_death_run_cnt >= 2u);
 
     TEST_EXPECT_EQ(g_death_run_cnt, 2u, "consumer resumed after the death-wake");
     TEST_EXPECT_EQ(g_death_sleep_rc, SLEEP_INTR,
@@ -342,7 +342,7 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
     struct Thread *consumer = thread_create(g_intr_proc, intr_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 1u, "consumer ran once before sleeping");
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
@@ -359,9 +359,9 @@ void test_rendez_intr_terminate_interrupts_sleep(void) {
     proc_interrupt_terminate_wake(g_intr_proc);
     proc_table_lock_release(s);
 
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "sleeper readied by the terminate wake");
-    sched();
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 2u);
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "consumer resumed after the wake");
     TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
@@ -398,7 +398,7 @@ void test_rendez_intr_terminate_register_observe(void) {
     struct Thread *consumer = thread_create(g_intr_proc, intr_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 2u);
 
     // One yield: the consumer's FIRST sleep observed the latch at its
     // post-register check and returned synchronously -- never SLEEPING.
@@ -441,7 +441,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
         thread_create(g_intr_proc, intr_masked_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "masked consumer parked");
 
@@ -454,7 +454,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
     irq_state_t s = proc_table_lock_acquire();
     proc_interrupt_terminate_wake(g_intr_proc);
     proc_table_lock_release(s);
-    sched();
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 1u,
         "masked consumer absorbed the wake and re-slept (no INTR)");
@@ -470,7 +470,7 @@ void test_rendez_intr_terminate_masked_sleeps_through(void) {
     // proc_group_terminate would broadcast an IPI and wake idle secondaries).
     __atomic_store_n(&g_intr_proc->group_exit_msg, "killed", __ATOMIC_RELEASE);
     (void)wakeup(&g_intr_rendez);
-    sched();
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 2u);
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "death-wake resumed the masked consumer");
     TEST_EXPECT_EQ(g_intr_sleep_rc, SLEEP_INTR,
@@ -507,7 +507,7 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
         thread_create(g_intr_proc, intr_tsleep_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 1u, "consumer ran once before tsleeping");
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
@@ -518,7 +518,7 @@ void test_rendez_intr_terminate_interrupts_tsleep(void) {
     irq_state_t s = proc_table_lock_acquire();
     proc_interrupt_terminate_wake(g_intr_proc);
     proc_table_lock_release(s);
-    sched();
+    TEST_YIELD_UNTIL(g_intr_run_cnt >= 2u);
 
     TEST_EXPECT_EQ(g_intr_run_cnt, 2u, "consumer resumed after the wake");
     TEST_EXPECT_EQ(g_intr_sleep_rc, TSLEEP_INTR,
@@ -732,7 +732,7 @@ void test_rendez_reader_frame_blocks_death_sleep(void) {
         thread_create(g_rfs_proc, rfs_reader_consumer_entry);
     TEST_ASSERT(consumer != NULL, "thread_create(consumer) failed");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(g_rfs_run_cnt >= 1u && consumer->state == THREAD_SLEEPING);
 
     // Blocked through the pending death on the register-then-observe check
     // (SLEEPING, run_cnt==1); a bug there would unwind (run_cnt==2, not SLEEPING).
@@ -750,7 +750,7 @@ void test_rendez_reader_frame_blocks_death_sleep(void) {
     g_rfs_cond = 1;
     int woke = wakeup(&g_rfs_rendez);
     TEST_EXPECT_EQ(woke, 1, "wakeup reported exactly one waiter");
-    sched();
+    TEST_YIELD_UNTIL(g_rfs_run_cnt >= 2u);
 
     TEST_EXPECT_EQ(g_rfs_run_cnt, 2u, "reader resumed to completion");
     TEST_EXPECT_EQ(g_rfs_sleep_rc, SLEEP_OK,

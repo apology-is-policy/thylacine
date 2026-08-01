@@ -23,9 +23,12 @@ Generated from note fields — do not edit between the markers
 | [[seam-372-latched-double-xcheck]] | open | sub-kernel-stalk | fnd-pounce-p5-f1 | task #372 |
 | [[seam-56-netd-cancelled-tag]] | open | sub-kernel-ninep-client | fnd-5253-r1-f1 | task #56 |
 | [[seam-66c-proc-fd]] | open | sub-kernel-path, sub-kernel-territory | fnd-66b-r1-f1 | task #66c |
+| [[seam-70-tcg-watchpoint]] | open | sub-substrate-machine, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #70 |
+| [[seam-791-smp1-joey]] | open | sub-substrate-machine, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #791 |
 | [[seam-80-pivot-orphan-mounts]] | open | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-841-mi-harness]] | open | sub-kernel-ninep-client | chg-2026-06-03-841-pipeline | standing (carried across #841/#845/#349/#375/#52-#53/Loom/8c-3/#90) |
 | [[seam-845-untrusted-server]] | open | sub-kernel-ninep-client | fnd-845-r1-f1 | v1.x (the n_uname trust-stamp seam family) |
+| [[seam-87-disk-write-proof]] | open | sub-substrate-interactive, sub-substrate-gates | chg-2026-08-01-substrate-sweep | #87 |
 | [[seam-90-hung-server]] | open | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-932-devsrv-readdir]] | open | sub-kernel-devsrv | fnd-957-r1-f2 | task #932 |
 | [[seam-9p-tag-block-on-full]] | open | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
@@ -36,6 +39,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
+| [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-hmp-push]] | open | sub-kernel-sched-smp | chg-2026-06-05-864-hmp-foundation | ARCH 8.4.4 -- the verification boundary |

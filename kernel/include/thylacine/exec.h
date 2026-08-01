@@ -333,4 +333,13 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
 __attribute__((noreturn))
 extern void userland_enter(u64 entry_pc, u64 user_sp);
 
+// #107 test observable: the (kernel VA, length) span the eager exec paths last
+// asked the arch layer to make instruction-coherent. Emulated targets model a
+// coherent I-cache, so a stale-instruction fetch is not observable in-guest at
+// all -- what IS checkable is that the maintenance was issued over the whole
+// executable span rather than only the copied bytes. Same posture as the W1.5
+// patcher's `g_alt_applied == g_alt_total` gate: assert the work was done, not
+// that the hardware misbehaved. Nothing in production reads this.
+void exec_icache_last_for_test(u64 *addr_out, size_t *len_out);
+
 #endif // THYLACINE_EXEC_H

@@ -102,7 +102,7 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void) {
     ready(consumer);
     // Yield to consumer. It enters dev_read; pipe is empty, !write_eof
     // → sleeps on read_rendez. Scheduler picks boot again; we resume.
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer should be SLEEPING after reaching dev_read on empty");
 
@@ -112,14 +112,14 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void) {
     TEST_EXPECT_EQ(dev_write(g_wr, payload, (long)sizeof(payload)),
                    (long)sizeof(payload),
         "boot writes payload");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer wakes to RUNNABLE after write");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer left the rendez after write");
 
     // Yield. Consumer resumes inside sleep's loop; cond_can_read TRUE
     // (count > 0); sleep returns; loop re-takes lock; drains; wakes
     // (no waiting writer — no-op); returns. Consumer sets
     // g_consumer_result + sched()s back.
-    sched();
+    TEST_YIELD_UNTIL(g_consumer_result != -999);
     TEST_EXPECT_EQ(g_consumer_result, (long)sizeof(payload),
         "consumer drained payload-length bytes");
     for (size_t i = 0; i < sizeof(payload); i++) {
@@ -152,17 +152,17 @@ void test_pipe_blocking_read_wakes_sleeping_writer(void) {
     struct Thread *consumer = thread_create(kproc(), consumer_write_one_byte_entry);
     TEST_ASSERT(consumer != NULL, "thread_create");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer should be SLEEPING after reaching dev_write on full");
 
     // Boot drains 10 bytes — makes space — wakes write_rendez.
     u8 drain[10];
     TEST_EXPECT_EQ(dev_read(g_rd, drain, 10L), 10L, "boot drains 10 bytes");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer wakes to RUNNABLE after read");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer left the rendez after read");
 
-    sched();
+    TEST_YIELD_UNTIL(g_consumer_result != -999);
     TEST_EXPECT_EQ(g_consumer_result, 1L,
         "consumer wrote 1 byte after wake");
 
@@ -180,17 +180,17 @@ void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void) {
     struct Thread *consumer = thread_create(kproc(), consumer_read_entry);
     TEST_ASSERT(consumer != NULL, "thread_create");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer SLEEPING on empty read");
 
     // Boot closes the write end. devpipe_close sets write_eof + wakes
     // read_rendez. Consumer wakes; sees write_eof; returns 0 (EOF).
     spoor_clunk(g_wr);
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer wakes to RUNNABLE after close");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer left the rendez after close");
 
-    sched();
+    TEST_YIELD_UNTIL(g_consumer_result != -999);
     TEST_EXPECT_EQ(g_consumer_result, 0L,
         "consumer read returns 0 (EOF) after write end closed");
 
@@ -214,17 +214,17 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
     struct Thread *consumer = thread_create(kproc(), consumer_write_one_byte_entry);
     TEST_ASSERT(consumer != NULL, "thread_create");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer SLEEPING on full write");
 
     // Boot closes the read end. devpipe_close sets read_eof + wakes
     // write_rendez. Consumer wakes; sees read_eof; returns -1 (EPIPE).
     spoor_clunk(g_rd);
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer wakes to RUNNABLE after close");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer left the rendez after close");
 
-    sched();
+    TEST_YIELD_UNTIL(g_consumer_result != -999);
     TEST_EXPECT_EQ(g_consumer_result, -1L,
         "consumer write returns -1 (EPIPE) after read end closed");
 

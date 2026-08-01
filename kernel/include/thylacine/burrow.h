@@ -482,6 +482,21 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length);
 // vma_lock). Returns 0 for a NULL / corrupted / non-ANON_LAZY Burrow.
 u32 burrow_lazy_resident_count(struct Burrow *v);
 
+// #106: burrow_backing_pages — the number of physical pages an EAGER Burrow of
+// `size` bytes actually OCCUPIES, i.e. the buddy's power-of-two rounding rather
+// than the page-rounded request. THIS is the I-32 charge unit for every eager
+// anon/code region; size / PAGE_SIZE understates it by up to 2x, which is
+// exactly enough for a Proc to hold twice its page budget.
+//
+// Pairs both ways: a charge site computes it from the requested length before
+// creating the Burrow (so an over-budget Proc never reaches the allocator), and
+// the matching uncharge recomputes it from the VMA's length -- the same input,
+// hence the same answer. Returns 0 for size 0 and for a size whose page
+// round-up would wrap (the inputs on which burrow_create_anon /
+// burrow_create_code refuse to produce a Burrow at all). Full rationale,
+// including why the underlying waste is deliberate, at the definition.
+size_t burrow_backing_pages(size_t size);
+
 // =============================================================================
 // Weft-2 / I-37: cross-Proc Burrow share (the per-flow dataplane ring).
 // =============================================================================

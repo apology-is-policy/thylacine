@@ -6,6 +6,7 @@ status: active
 start: 2026-07-26
 chunks:
   - chg-2026-07-28-v4b4-readlink
+  - chg-2026-08-01-94-kproc-wait-by-pid
 created: 2026-08-01
 ---
 The containers arc (`docs/VIVARIUM.md`): the phenotype -- what a

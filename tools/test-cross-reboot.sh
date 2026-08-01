@@ -116,7 +116,18 @@ boot_to_log() {
 boot1_ok=0
 for try in $(seq 1 "$MAX_BOOT_TRIES"); do
     echo "==> cross-reboot: re-baking a clean pool, boot1 attempt $try/$MAX_BOOT_TRIES"
-    "$REPO_ROOT/tools/build.sh" pool >/dev/null 2>&1 || fail_infra "build.sh pool failed"
+    # #101: capture rather than discard. `build.sh pool` re-mints pool.img from
+    # the ambient environment and now reports its bake config + verifies the
+    # payloads actually landed; sending that to /dev/null threw away the one
+    # diagnostic that explains WHY a bake failed, leaving only "build.sh pool
+    # failed". The exit status was always honoured -- the reason never was.
+    if ! "$REPO_ROOT/tools/build.sh" pool > "$BUILD_DIR/crossreboot-pool-bake.log" 2>&1; then
+        echo "==> cross-reboot: build.sh pool FAILED -- tail of the bake log:" >&2
+        tail -20 "$BUILD_DIR/crossreboot-pool-bake.log" >&2
+        fail_infra "build.sh pool failed (full log: $BUILD_DIR/crossreboot-pool-bake.log)"
+    fi
+    grep -E '^==> (populate pool: bake config|WARNING: a clade)' \
+        "$BUILD_DIR/crossreboot-pool-bake.log" || true
     if boot_to_log "$BOOT1_LOG"; then boot1_ok=1; break; fi
     check_corruption "$BOOT1_LOG"   # hard-fail on the EBADTAG bug; never retry-mask it
     echo "==> cross-reboot: boot1 did not reach boot-OK (no corruption sig; slow boot); retrying"

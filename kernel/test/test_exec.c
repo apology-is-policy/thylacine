@@ -609,3 +609,64 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
 
     drop_proc(p);
 }
+
+// =============================================================================
+// #107: the bss tail of an executable segment must be instruction-coherent.
+//
+// A PF_X PT_LOAD whose memsz exceeds its filesz maps executable pages whose
+// tail is zeroed by KP_ZERO -- but zeroing is a DATA-side write. It does not
+// evict I-cache lines a prior occupant of those recycled PAs may have left, so
+// a branch into the tail could fetch stale instructions instead of trapping on
+// the zeros. elf_load rejects only filesz > memsz, so this shape loads; no
+// binary the tree's toolchain emits has it (a scan of 794 ELFs found 794 PF_X
+// segments, all memsz == filesz), but a crafted one reaches the eager path.
+//
+// Emulated targets model a coherent I-cache, so the stale fetch is not
+// observable in-guest. What IS checkable -- and what this asserts -- is that
+// the maintenance was ISSUED over the whole executable span rather than only
+// the copied bytes. Same posture as the W1.5 patcher's
+// `g_alt_applied == g_alt_total`: prove the work was done, not that the
+// hardware misbehaved.
+//
+// PRECONDITION on the observable: exec_icache_last_for_test reads a global, so
+// it is only meaningful while no OTHER exec can run concurrently. That holds
+// because the whole kernel suite completes before joey -- the first EL0 Proc
+// that spawns anything -- starts (verified in the boot log: the suite summary
+// precedes joey's first line), and the suite's own spawns are sequential. A
+// future change that runs tests concurrently, or spawns a Proc that itself
+// execs mid-suite, breaks that and would show up here as a mismatched addr
+// (a loud failure, not a silent pass) -- fix the observable, not the test.
+void test_exec_setup_bss_tail_icache_synced(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // One PF_R|PF_X segment: 0x40 file bytes, two pages of memory.
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0x40);
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)
+        (g_elf_blob + sizeof(struct Elf64_Ehdr));
+    ph[0].p_memsz = 0x2000;
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup (PF_X with memsz > filesz)");
+
+    struct Vma *seg = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(seg != NULL,               "text VMA visible");
+    TEST_EXPECT_EQ(seg->prot, VMA_PROT_RX, "text prot RX");
+    TEST_ASSERT(seg->burrow != NULL,       "text burrow present");
+
+    u64 want_addr = (u64)(uintptr_t)pa_to_kva(page_to_pa(seg->burrow->pages));
+    u64 got_addr = 0;
+    size_t got_len = 0;
+    exec_icache_last_for_test(&got_addr, &got_len);
+
+    TEST_EXPECT_EQ(got_addr, want_addr,
+        "I-cache sync issued at the segment's kernel VA");
+    // 0x2000, NOT 0x40. This is the assertion that goes red if the span ever
+    // narrows back to the copied byte count.
+    TEST_EXPECT_EQ((u64)got_len, (u64)0x2000,
+        "I-cache sync covers the whole page-rounded span (bss tail included)");
+
+    drop_proc(p);
+}
