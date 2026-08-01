@@ -106,15 +106,62 @@ thread cap), the exec image / user stack (one-shot at spawn, bounded by the
 binary + `EXEC_USER_STACK_SIZE`, transitively bounded by the child cap across
 children).
 
-Charged as the *logical* page count (the VMA span / ring span). **Physical
-commitment is ≤ 2×** the charged count because `burrow_create_anon` rounds the
-allocation up to a buddy power-of-2 order (audit F2) — so the per-Proc *physical*
-anon ceiling is up to `~2 * PROC_PAGE_MAX` (≈ 512 MiB). The cap bounds *logical*
-attached anon; precise-RAM accounting is the SEAM's job. v1.0 has no mid-life
-`vma_drain` (no in-place re-exec), so attach/detach (and the ring's
-detach / `vma_drain`) balance the counter while the Proc lives; at exit the Proc
-and its counter vanish together (`vma_drain` is the SEAM hook where a future
+**The charge unit is the buddy's occupancy, not the request (#106).** Every eager
+charger bills `burrow_backing_pages(size)` — `1 << order_for_pages(page_count)`,
+the count `alloc_pages` actually takes out of the buddy — rather than
+`size / PAGE_SIZE`. The four eager chargers are `SYS_BURROW_ATTACH`,
+`SYS_JIT_CREATE` (and its destroy-side refund, recomputed from the VMA span), the
+`SYS_LOOM_SETUP` ring (whose `ring_size` is page-rounded but *not* power-of-two
+rounded — it is the sum of four 64-aligned regions), and the detach ANON arm. The
+lazy-anon fault arm is the one charger that must **not** use the helper: it
+allocates order 0, so its per-page charge is already exact.
+
+Until #106 this section documented the gap as an accepted property — "charged as
+the logical page count; physical commitment is ≤ 2×; precise-RAM accounting is
+the SEAM's job". That reading was wrong about what I-32 is for. The invariant
+bounds *physical occupancy* (it is a DoS floor, not a VA accountant), and a Proc
+attaching 2049-page regions occupied 4096 pages each while being billed 2049 —
+so `page_count` could read at most `PROC_PAGE_MAX` while real occupancy
+approached twice that. Bounded at 2× (the next order is never more than double),
+which made it an understated floor rather than an unbounded hole — and which is
+presumably why it read as tolerable. It was not: the number the floor reports has
+to be the number the machine gave away.
+
+The **waste** the rounding causes is still deliberate and stays. A Burrow's
+backing must be one physically contiguous run — exec's direct-map alias,
+`loom_create`'s `ring_kva`, and the weft ring view all index `v->pages` as a
+single chunk — and a buddy allocator buys that contiguity with power-of-two
+rounding. Accounting for the waste is the fix available; eliminating it would
+mean giving up contiguity. `burrow_backing_pages` shares `order_for_pages` with
+`burrow_create_anon` / `burrow_create_code`, so the charge and the allocation
+cannot drift apart, and `burrow.backing_pages_matches_alloc` pins the agreement
+against a real Burrow's recorded `v->order`.
+
+**The refund is a positive allowlist (#122).** `SYS_BURROW_DETACH` refunds
+`page_count` only for the two VMA shapes that ever charged it — a non-`SHARED_IN`
+`BURROW_TYPE_ANON` (the rounded occupancy) or `BURROW_TYPE_ANON_LAZY` (the
+resident count) — and zero for everything else. The previous shape ("everything
+except ANON_LAZY gets `length / PAGE_SIZE`") refunded two classes that were
+charged elsewhere or not at all: a `SHARED_IN` VMA from `SYS_WEFT_MAP`
+(`burrow_share_into` charges the client's `shared_map_pages` and deliberately
+leaves `page_count` alone, yet places the VMA in the burrow-attach window, and a
+shared Burrow's type is ANON), and an MMIO/DMA map (both take a caller-supplied
+`vaddr`, so a `CAP_HW_CREATE` driver can place one in the window).
+`proc_page_uncharge` clamps at 0 so it never wrapped, but a Proc could loop
+map/detach to drive its own `page_count` to zero while its real occupancy was
+unchanged — the same "drift, not wrap" reasoning that made the CODE alias a
+finding. Listing what *did* charge, rather than subtracting what didn't, also
+means a future Burrow type is uncharged by default.
+
+v1.0 has no mid-life `vma_drain` (no in-place re-exec), so attach/detach (and the
+ring's detach / `vma_drain`) balance the counter while the Proc lives; at exit the
+Proc and its counter vanish together (`vma_drain` is the SEAM hook where a future
 aggregate would uncharge).
+
+`shared_map_pages` (the fifth axis) is deliberately **not** rounded: it bounds a
+client's cross-Proc *mapping* and pin, and the pages are the sharer's commit —
+already rounded on the sharer's side. Charging the client the rounding too would
+double-count it against a Proc that did not cause it.
 
 ### Thread cap — `sys_thread_spawn_handler`
 (`kernel/syscall.c`). `proc_thread_cap_ok` is checked after argument validation
@@ -200,6 +247,30 @@ thread-cap and child-cap *reject* paths are predicate-tested only (a real reject
 needs a non-exempt EL0 context — an owed E2E, since the in-kernel harness runs as
 exempt kproc).
 
+Three more landed with #106/#122, all revert-probed:
+
+- `resource.attach_charges_buddy_rounded` — a **3-page** attach must charge 4,
+  and detach must refund exactly 4. Three pages is the smallest request whose
+  buddy order rounds up, and the size choice is the point: every pre-#106 test on
+  this path used `PAGE_SIZE` or `2 * PAGE_SIZE`, both exact powers of two, so the
+  whole suite was structurally blind to the rounding — the charge and the
+  occupancy agree for precisely the sizes it exercised.
+- `resource.detach_shared_in_keeps_page_count` — shares an ANON Burrow into the
+  Proc via `burrow_share_into`, then detaches it, and asserts `page_count` is
+  **unchanged** while `shared_map_pages` returns to 0. The nonzero pre-charge is
+  load-bearing rather than scene-setting: `proc_page_uncharge` clamps at 0, so on
+  a Proc already at 0 the spurious refund is invisible and the test would pass
+  against the broken code.
+- `burrow.backing_pages_matches_alloc` (`test_burrow.c`) — the anti-drift pin.
+  It hard-codes no expected order table; it creates a **real** Burrow per size and
+  compares `burrow_backing_pages(size)` against `1 << v->order`, the value the
+  Burrow itself hands to `free_pages`. So it fails if either side changes without
+  the other, which is the only failure mode that silently re-opens the undercount
+  — a charge computed from a stale rounding rule looks perfectly reasonable at its
+  call site. The size set mixes fixed points (already-power-of-two requests, where
+  the helper must not inflate) with worst cases (2^k + 1 pages, where it must
+  nearly double).
+
 ## Performance
 
 Three counter reads/writes (atomic) plus one short lock-bounded predicate per
@@ -212,8 +283,15 @@ cost (the counters are touched only at attach/detach/spawn/reap).
   caller — they do not take it. (The two syscall call sites already hold it.)
 - The thread/child caps carry a **bounded overshoot** (≤ ncpus−1). A consumer
   that needs an exact limit must not rely on the cap as a hard ceiling.
-- The page cap counts **logical** attached anon pages; physical RAM committed is
-  ≤ 2× (buddy order rounding). Precise-RAM accounting is the SEAM's job.
+- The page cap counts the **buddy occupancy** (#106) — `burrow_backing_pages`,
+  not the requested span. A **new eager charger must use the helper**, and a new
+  order-0 charger (the lazy fault arm's shape) must **not**: mixing them up
+  silently re-opens the undercount in one direction or over-bills in the other.
+- The detach refund is a **positive allowlist** (#122). Adding a Burrow type that
+  charges `page_count` means adding it to that arm; a type that charges a
+  *different* axis (as `SHARED_IN` charges `shared_map_pages`) must stay out of
+  it. Getting this backwards is silent: `proc_page_uncharge` clamps at 0, so a
+  spurious refund never faults — it just lowers the floor.
 - Exempt (`PRINCIPAL_SYSTEM`) Procs are **unbounded** by design — a compromised
   TCB component is not rate-limited here (it is already inside the TCB). Bounding
   even the TCB (with measured stratumd ceilings) is a future hardening.

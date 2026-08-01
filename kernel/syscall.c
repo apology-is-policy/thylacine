@@ -4081,7 +4081,18 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
     // sibling attach (the cap is exact). A non-TCB Proc over PROC_PAGE_MAX is
     // refused with -ENOMEM here -- it never reaches the allocator. Uncharged on
     // every failure path below + on SYS_BURROW_DETACH.
-    u32 npages = (u32)(length / PAGE_SIZE);
+    //
+    // #106: charge what the buddy actually TAKES, not what was asked for. The
+    // comment on burrow_create_anon below has always said "power-of-2 rounded"
+    // -- the charge just never acted on it, so a Proc attaching 2049-page
+    // regions occupied 4096 pages each while being billed 2049. Bounded at 2x,
+    // but a floor a Proc can silently stand twice as high as is not the floor
+    // I-32 claims. burrow_backing_pages IS the allocator's own answer; the
+    // uncharge at detach recomputes it from the same length.
+    //
+    // Fits u32: length is bounded by BURROW_ATTACH_MAX (256 MiB) above, whose
+    // rounded page count is 65536.
+    u32 npages = (u32)burrow_backing_pages(length);
     if (!proc_page_charge(p, npages)) {
         spin_unlock(&p->vma_lock);
         return -T_E_NOMEM;
@@ -4183,10 +4194,48 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
         return -1;
     }
 
-    u32 uncharge = (u32)(length / PAGE_SIZE);    // eager default (the whole span)
+    // #122: a POSITIVE allowlist -- uncharge page_count only for the two VMA
+    // shapes that ever CHARGED it. The previous shape was "everything except
+    // ANON_LAZY gets length / PAGE_SIZE", which refunded page_count for two
+    // reachable classes that were charged somewhere else, or nowhere:
+    //
+    //   - SHARED_IN (SYS_WEFT_MAP). burrow_share_into charges the CLIENT's
+    //     shared_map_pages and deliberately leaves page_count alone -- "the
+    //     pages are the SHARER's commit". It places the VMA with vma_find_gap
+    //     in the burrow-attach window, i.e. inside THIS syscall's range, and a
+    //     shared Burrow's type is ANON (or weave-DMA), so it landed squarely in
+    //     the eager default. burrow_unmap below already refunds shared_map_pages
+    //     off the SHARED_IN flag, so the page_count refund on top was pure drift.
+    //   - MMIO / DMA. Both take a CALLER-SUPPLIED vaddr, so a CAP_HW_CREATE
+    //     driver can place one inside the window and then detach it. Neither
+    //     ever charged page_count.
+    //
+    // proc_page_uncharge clamps at 0, so this never wrapped -- but it is the
+    // same "drift, not wrap" shape as the CODE alias refused above, and the
+    // same conclusion applies: a bound a Proc can drive to zero while its real
+    // occupancy is unchanged is not a bound. Listing what DID charge (rather
+    // than subtracting what didn't) also means a future Burrow type is
+    // uncharged by default -- the fail-safe direction.
+    u32 uncharge = 0;
     if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
-        dvma->burrow->type == BURROW_TYPE_ANON_LAZY)
-        uncharge = burrow_lazy_resident_count(dvma->burrow);   // lazy: only the resident
+        !(dvma->flags & VMA_FLAG_SHARED_IN)) {
+        if (dvma->burrow->type == BURROW_TYPE_ANON_LAZY)
+            uncharge = burrow_lazy_resident_count(dvma->burrow);   // only the resident
+        else if (dvma->burrow->type == BURROW_TYPE_ANON)
+            // #106: mirror the attach charge exactly -- the buddy-rounded
+            // occupancy, from the same `length` the charge was computed from.
+            // burrow_unmap exact-matches the VMA, so a successful detach has
+            // length == the attach length and the two agree by construction.
+            //
+            // The u32 cast: `length` is user-supplied and only bounded here by
+            // the burrow window (~64 TiB), so in isolation it could truncate.
+            // It cannot in practice -- every eager ANON VMA reachable here was
+            // installed by SYS_BURROW_ATTACH (<= BURROW_ATTACH_MAX, 65536
+            // pages) or the Loom ring (< 1 MiB) -- and it could not matter
+            // anyway: the value is used only under `rc == 0`, i.e. only after
+            // burrow_unmap has exact-matched one of those VMAs.
+            uncharge = (u32)burrow_backing_pages(length);
+    }
 
     // burrow_unmap exact-matches [vaddr, vaddr + length) against an
     // installed VMA (no partial detach at v1.0), removes it, and frees
@@ -4405,7 +4454,13 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // JIT_REGION_MAX is page-aligned, so the rounded length cannot exceed it
     // and the addition cannot overflow.
     u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
-    u32 npages = (u32)(length / PAGE_SIZE);
+    // #106: the buddy-rounded occupancy, not the page-rounded request --
+    // burrow_create_code below allocates 1 << order like every eager Burrow.
+    // JIT_REGION_MAX is 2^14 pages, so a MAX-sized region rounds to itself and
+    // the u32 cast is safe; it is the sizes BELOW it that round up (a 33-MiB
+    // region occupies 64 MiB), and a JIT emitting odd-sized regions is exactly
+    // the workload that makes this routine rather than theoretical.
+    u32 npages = (u32)burrow_backing_pages(length);
 
     spin_lock(&p->vma_lock);
 
@@ -4571,7 +4626,10 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
 
     u64 length  = w->vaddr_end - w->vaddr_start;
     u64 exec_va = x->vaddr_start;
-    u32 npages  = (u32)(length / PAGE_SIZE);
+    // #106: recompute the create-time charge. `length` is the VMA span, which
+    // IS the page-rounded length create passed to burrow_backing_pages, so the
+    // refund reproduces the charge exactly.
+    u32 npages  = (u32)burrow_backing_pages(length);
 
     // CL-7k-3 audit F3: validate the exec alias' geometry BEFORE touching
     // either mapping. Both burrow_unmaps below are issued unconditionally, so
@@ -4975,7 +5033,14 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // the ring VA (the ring is a normal VMA in the burrow window, so the existing
     // detach uncharge fires) or vma_drain at exit. The close-without-detach
     // accumulation therefore hits PROC_PAGE_MAX instead of RAM.
-    u32 ring_pages = (u32)(l->ring_size / PAGE_SIZE);
+    // #106: the buddy-rounded occupancy. loom_create's ring Burrow is an
+    // ordinary burrow_create_anon, and ring_size is page-rounded but NOT
+    // power-of-two rounded (it is the sum of four 64-aligned regions), so a
+    // 3-page ring occupies 4. The ring is detached through the ordinary
+    // SYS_BURROW_DETACH path, whose ANON arm recomputes burrow_backing_pages
+    // from the exact-matched VMA length -- the same ring_size -- so charge and
+    // refund agree.
+    u32 ring_pages = (u32)burrow_backing_pages((size_t)l->ring_size);
 
     // Map the ring RW into the burrow-attach window. burrow_map takes its OWN
     // mapping_count ref (vma_alloc -> burrow_acquire_mapping); the Loom keeps
@@ -6461,12 +6526,14 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // NOTE the ordering argument, precisely: exec is NOT the first charger.
     // kernel/exec.c calls proc_page_charge ZERO times -- exec's segments and
     // stack are eager burrow_create_anon, which the #65 posture deliberately
-    // leaves uncharged ("exec-image one-shot bounded"). The only three chargers
-    // are SYS_BURROW_ATTACH, the Loom ring, and the lazy-anon fault arm, all of
-    // which are post-userland_enter. So the stamp is safe with MORE margin than
-    // "before exec" claims -- and stamping before exec anyway means a FUTURE
-    // exec-time charge (the recorded REVENANT per-page I-32 seam) is bounded
-    // automatically rather than needing this ordering revisited.
+    // leaves uncharged ("exec-image one-shot bounded"). The only four chargers
+    // are SYS_BURROW_ATTACH, SYS_JIT_CREATE, the Loom ring, and the lazy-anon
+    // fault arm, all of which are post-userland_enter. So the stamp is safe with
+    // MORE margin than "before exec" claims -- and stamping before exec anyway
+    // means a FUTURE exec-time charge (the recorded REVENANT per-page I-32 seam)
+    // is bounded automatically rather than needing this ordering revisited.
+    // (The count was "three" until CL-7k added the JIT; keep it current -- this
+    // is the census #106 had to redo from scratch to find every charge site.)
     //
     // Corollary worth not misreading: a REDUCED budget does not today bound a
     // child's exec-image anon. That gap is the seam's, not this mechanism's.

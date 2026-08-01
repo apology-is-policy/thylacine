@@ -187,6 +187,9 @@ void test_resource_child_count_tracks_list(void);
 void test_resource_child_count_rfork_reap(void);
 void test_resource_page_cap_attach_enforced(void);
 void test_resource_vma_cap(void);
+void test_resource_attach_charges_buddy_rounded(void);
+void test_resource_detach_shared_in_keeps_page_count(void);
+void test_burrow_backing_pages_matches_alloc(void);
 
 void test_exec_ns_resolve_absolute_ok(void);
 void test_exec_ns_resolve_relative_ok(void);
@@ -1511,6 +1514,12 @@ struct test_case g_tests[] = {
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
     { "resource.vma_cap",              test_resource_vma_cap,              false, NULL },
+    { "resource.attach_charges_buddy_rounded",
+                                       test_resource_attach_charges_buddy_rounded, false, NULL },
+    { "resource.detach_shared_in_keeps_page_count",
+                                       test_resource_detach_shared_in_keeps_page_count, false, NULL },
+    { "burrow.backing_pages_matches_alloc",
+                                       test_burrow_backing_pages_matches_alloc, false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
     { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
     { "proc_identity.apply_sets_fields",
