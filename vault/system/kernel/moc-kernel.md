@@ -4,7 +4,7 @@ type: moc
 title: "Kernel"
 parent: home
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-01
 ---
 The Thylacine kernel tree: boot, memory, execution, entry, namespace, 9P,
 IPC/wake, devices, async (Loom/Weft), console/graphics, security,
@@ -18,6 +18,8 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
   transport; the 9P stack's production carrier).
 - [[moc-kernel-namespace]] — pathname resolution (the stalk resolver, the
   POUNCE fused walk, the Path name-retention substrate).
+- [[moc-kernel-execution]] — Procs, Threads, and the death path (the
+  lifecycle, the cascade, and the tree's most bug-prone lineage).
 
 ## Cross-cutting
 

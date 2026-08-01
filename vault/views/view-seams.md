@@ -29,7 +29,10 @@ Generated from note fields — do not edit between the markers
 | [[seam-90-hung-server]] | open | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
 | [[seam-932-devsrv-readdir]] | open | sub-kernel-devsrv | fnd-957-r1-f2 | task #932 |
 | [[seam-9p-tag-block-on-full]] | open | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
+| [[seam-close-flush-unbounded]] | open | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
+| [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
+| [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-larder-cacheable-proxy]] | open | sub-kernel-larder, sub-kernel-ninep-dev9p | chg-2026-07-09-larder-l1e |  |
@@ -38,10 +41,14 @@ Generated from note fields — do not edit between the markers
 | [[seam-larder-reused-dir-dentries]] | open | sub-kernel-larder | fnd-term2-r1-f1 |  |
 | [[seam-larder-shrinker]] | open | sub-kernel-larder | fnd-29-r1-f1 |  |
 | [[seam-larder-stale-child-attr]] | open | sub-kernel-larder | fnd-l1f-r1-f3 |  |
+| [[seam-legate-member-sweep-race]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-mount-graph-unmodeled]] | open | sub-kernel-territory | fnd-stalk2-r1-f1 | unfiled |
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-posix-pathname-form-gates]] | open | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
+| [[seam-proc-find-no-refcount]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-rfnameg-shared-territory]] | open | sub-kernel-territory | chg-2026-05-13-p5-attach-mount | unfiled |
+| [[seam-rfork-flags-unimplemented]] | open | sub-kernel-proc | chg-2026-05-05-p2d-rfork-exits-wait | unfiled |
+| [[seam-sak-revoke-note]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
 | [[seam-srv-9p-connect-unit]] | open | sub-kernel-devsrv | chg-2026-06-03-stalk3b-open-connect |  |
 | [[seam-srv-registry-lifecycle]] | open | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
 | [[seam-union-mount-walk]] | open | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |

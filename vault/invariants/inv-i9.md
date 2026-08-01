@@ -3,11 +3,11 @@ id: inv-i9
 type: inv
 title: "I-9 — no wakeup lost between cond-check and sleep"
 number: I-9
-guards: [sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server]
-validated-by: [spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
+guards: [sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server]
+validated-by: [spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
 strength: spec
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-01
 ---
 ## Statement
 
@@ -26,14 +26,29 @@ includes:
   register-then-observe.
 
 > Backfill note: the guard and validator sets above are PARTIAL — the full
-> ARCH §28 row also binds the scheduler, poll, pipe, cons, tsleep, torpor,
+> ARCH §28 row also binds the scheduler, poll, pipe, cons, tsleep, torpor
 > and Weft surfaces (specs `scheduler`/`poll`/`cons_poll`/
-> `weft_readiness`/`tsleep`/`death_wake`). Those edges join as their
-> dossiers land in the sweep. (dev9p.poll joined at the 9P-area sweep;
-> srvconn at the srv-area sweep; netd's userspace analog at the netd
-> sweep.)
+> `weft_readiness`/`tsleep`). Those edges join as their dossiers land in the
+> sweep. (dev9p.poll joined at the 9P-area sweep; srvconn at the srv-area
+> sweep; netd's userspace analog at the netd sweep; the **death-wake leg
+> DISCHARGED** at the execution-area sweep — [[sub-kernel-death]] and
+> [[spec-death-wake]] are now above the line.)
 
 ## Enforcement
+
+On the death path ([[sub-kernel-death]]) — the GENERALIZATION, and the one
+the other surfaces specialize: `sleep`/`tsleep` register-then-observe under
+the per-Thread `wait_lock` (the Plan 9 `p->rlock` analog), and
+`proc_group_terminate` publishes `group_exit_msg` BEFORE walking
+`p->threads` and taking each peer's SAME `wait_lock` to read
+`rendez_blocked_on` and `wakeup()` it. The two critical sections are
+mutually exclusive on that lock, so every Thread either observes the flag
+in its own register-then-observe and dies without sleeping, or is found
+SLEEPING by the walk and woken — no third interleaving. `wait_lock` is held
+ACROSS `wakeup` (Option A) because `rendez_blocked_on` can point into a
+sleeping peer's kernel stack frame; the pin is what stops the frame being
+popped under the waker. Acyclicity rests on only the OWNER ever writing
+`rendez_blocked_on`.
 
 On the 9P-client surface: `sleep`/`tsleep` register-then-observe (the #811
 contract) · the send-side park in `client_send_flow` (hook registered +
@@ -72,6 +87,10 @@ readiness edge.
 
 ## Validation
 
+[[spec-death-wake]] pins the generalization itself: `NoLostDeathWake` +
+`NoStuckSleeper`, with `BUGGY_OBSERVE_BEFORE_REGISTER` as the executable
+counterexample — a sleeper that checks the flag before registering and
+OUTSIDE its `wait_lock`, which reproduces the non-reaping hang.
 [[spec-reader-frame]] pins the frame-atomic refinement (NoDesync +
 UnwindAtBoundary + EventuallyUnwinds; the buggy cfg is the pre-#90 mid-frame
 unwind). [[spec-9p-client]] composes beneath it. [[gate-smp]] is the
