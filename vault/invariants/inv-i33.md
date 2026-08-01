@@ -3,7 +3,7 @@ id: inv-i33
 type: inv
 title: "I-33 — namespace name retention is non-load-bearing"
 number: I-33
-guards: [sub-kernel-path, sub-kernel-stalk]
+guards: [sub-kernel-path, sub-kernel-stalk, sub-kernel-territory]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
@@ -31,8 +31,18 @@ component); `kernel/spoor.c` (`spoor_clone` shares via `path_ref`;
 pre-publish only; `spoor_free_internal` drops); the three resolver hook
 sites (stalk per-step + cross/adopt transplants, walk-open, walk-create).
 The write-only property is a grep-complete obligation re-verified at the
-#66a round; the territory-side `PgrpMount.mp_path` mirror (#66b — read
-only by `territory_format_ns`) gains its edge at the territory sweep.
+#66a round.
+
+On the territory side ([[sub-kernel-territory]]), `PgrpMount.mp_path`
+mirrors the same discipline for the mount POINT's name (#66b). Its
+refcount is ledgered at the same four hooks as the entry's `source`
+Spoor — mount's append, MREPL's ref-new-before-unref-old, unmount's
+drop-before-overwrite, clone's share, final release — and it is
+grep-complete NEVER read for a decision: `mount_key_eq`,
+`mount_is_point_id`, `would_create_mount_cycle`, and `mount_lookup` all
+key on `(mp_dc, mp_devno, mp_qid_path)`, leaving `territory_format_ns`
+as the sole reader anywhere. A wrong or NULL `mp_path` misreports
+`/proc/<pid>/ns` and changes no crossing decision.
 
 ## Validation
 

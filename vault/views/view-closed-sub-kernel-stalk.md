@@ -11,7 +11,7 @@ on-demand by `quaestor closed sub-kernel-stalk`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-8 closed findings on [[sub-kernel-stalk]] — do NOT re-report
+10 closed findings on [[sub-kernel-stalk]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -23,4 +23,6 @@ here; see the seam inbox):
 - [[fnd-stalk1-r1-f3]] [P3] The borrowed-start handle_get TOCTOU, amplified to N blocking hops (fixed) — DEFERRED at the round — correctly: a stalk-local `spoor_ref` after an
 - [[fnd-stalk2-r1-f1]] [P2] The mount table admitted cycles — the I-3 'by construction' claim was false (fixed) — Fixed in the close commit: `territory.c::would_create_mount_cycle`
 - [[fnd-stalk2-r1-f3]] [P3] Cross-mount `..` returns to the mount point, not Plan 9's mh parent (documented) — Documented as the deliberate v1.x deferral (STALK-DESIGN §4.3): the
+- [[fnd-stube2-r1-f1]] [P0] Kernel-stack info leak: the max-length walk name was never NUL-terminated (fixed) — Fixed: the scratch widened to `SYS_WALK_OPEN_NAME_MAX + 1` and the NUL
+- [[fnd-stube2-r1-f6]] [P3] The comment that made the NUL terminator look optional (fixed) — Fixed: rewritten to state that the terminator is required and why.
 <!-- generated:end -->

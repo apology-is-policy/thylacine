@@ -7,6 +7,7 @@ design: ["docs/HOLOTYPE.md"]
 chunks:
   - chg-2026-06-10-rw4-fixes
   - chg-2026-06-12-66a-spoor-path
+  - chg-2026-06-12-66b-mp-path
   - chg-2026-06-12-81-cwalkonly
 follow-ons: []
 created: 2026-08-01

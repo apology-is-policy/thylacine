@@ -11,7 +11,7 @@ on-demand by `quaestor closed sub-kernel-ninep-attach`). Paste or
 transclude into a prosecutor prompt as the closed-findings preamble.
 
 <!-- generated:begin -->
-9 closed findings on [[sub-kernel-ninep-attach]] — do NOT re-report
+10 closed findings on [[sub-kernel-ninep-attach]] — do NOT re-report
 these in a future round (open/deferred findings are NOT listed
 here; see the seam inbox):
 
@@ -24,4 +24,5 @@ here; see the seam inbox):
 - [[fnd-16c-r2-f4]] [P3] R1-F5's close justification was inaccurate (fixed) — Fixed: the justification replaced with the real mechanism (offset-0 magic
 - [[fnd-16c-r2-f5]] [P3] Dual-destroy magic distinctness unpinned (fixed) — Fixed: `_Static_assert` pair in 9p_attach.c (magics distinct; magic at
 - [[fnd-stalk3b-r1-f2]] [P3] The SYS_ATTACH_9P_SRV ABI doc still described the retired KObj_Srv / embedded-client path (fixed) — Fixed in the close: the doc rewritten to the as-built — `srv_fd` is a
+- [[fnd-stube2-r1-f2]] [P1] Walked-Spoor UAF at Proc exit — the deferred hazard came due (fixed) — Fixed by refcounting `p9_attached`: a `ref` plus ownership of the
 <!-- generated:end -->

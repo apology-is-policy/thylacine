@@ -22,6 +22,8 @@ Generated from note fields — do not edit between the markers
 | [[seam-350-async-eagain]] | open | sub-kernel-ninep-client | chg-2026-06-24-349-flow-control | task #350 |
 | [[seam-372-latched-double-xcheck]] | open | sub-kernel-stalk | fnd-pounce-p5-f1 | task #372 |
 | [[seam-56-netd-cancelled-tag]] | open | sub-kernel-ninep-client | fnd-5253-r1-f1 | task #56 |
+| [[seam-66c-proc-fd]] | open | sub-kernel-path, sub-kernel-territory | fnd-66b-r1-f1 | task #66c |
+| [[seam-80-pivot-orphan-mounts]] | open | sub-kernel-territory | chg-2026-05-26-16c-attach-srv | task #80 |
 | [[seam-841-mi-harness]] | open | sub-kernel-ninep-client | chg-2026-06-03-841-pipeline | standing (carried across #841/#845/#349/#375/#52-#53/Loom/8c-3/#90) |
 | [[seam-845-untrusted-server]] | open | sub-kernel-ninep-client | fnd-845-r1-f1 | v1.x (the n_uname trust-stamp seam family) |
 | [[seam-90-hung-server]] | open | sub-kernel-ninep-client | chg-2026-07-19-90-death-block-through | v1.x |
@@ -29,15 +31,19 @@ Generated from note fields — do not edit between the markers
 | [[seam-9p-tag-block-on-full]] | open | sub-kernel-ninep-session | adt-rw4-r1 | RW-4 R3-F3 register (scripture-vs-impl; user call) |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
+| [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-larder-cacheable-proxy]] | open | sub-kernel-larder, sub-kernel-ninep-dev9p | chg-2026-07-09-larder-l1e |  |
 | [[seam-larder-lazy-array-robustness]] | open | sub-kernel-larder | fnd-25-r1-f1 |  |
 | [[seam-larder-loom-bypass]] | open | sub-kernel-larder | fnd-l1f-r1-f2 |  |
 | [[seam-larder-reused-dir-dentries]] | open | sub-kernel-larder | fnd-term2-r1-f1 |  |
 | [[seam-larder-shrinker]] | open | sub-kernel-larder | fnd-29-r1-f1 |  |
 | [[seam-larder-stale-child-attr]] | open | sub-kernel-larder | fnd-l1f-r1-f3 |  |
+| [[seam-mount-graph-unmodeled]] | open | sub-kernel-territory | fnd-stalk2-r1-f1 | unfiled |
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |
 | [[seam-posix-pathname-form-gates]] | open | sub-kernel-stalk | chg-2026-07-31-stalk-sweep | tasks #79-#87 (vivarium numbering) |
+| [[seam-rfnameg-shared-territory]] | open | sub-kernel-territory | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-srv-9p-connect-unit]] | open | sub-kernel-devsrv | chg-2026-06-03-stalk3b-open-connect |  |
 | [[seam-srv-registry-lifecycle]] | open | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
+| [[seam-union-mount-walk]] | open | sub-kernel-territory, sub-kernel-stalk | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-wb-close-flush-slot]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-wb-staging |  |
 <!-- generated:end -->

@@ -24,6 +24,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-path]] | kernel/path.c, kernel/include/thylacine/path.h | inv-i33 | - The refcount balances on EVERY create/destroy/replace path (the #66a |
 | [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
+| [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
 | [[sub-netd-nic]] | usr/netd/src/main.rs, usr/netd/Cargo.toml |  | On any change, prosecute: |
 | [[sub-netd-server]] | usr/netd/src/server.rs, usr/netd/src/ndb.rs, usr/netd/ndb/local | inv-i9 | On any change, prosecute (the standing list, accreted across |
 <!-- generated:end -->

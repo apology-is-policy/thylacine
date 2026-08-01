@@ -3,11 +3,11 @@ id: inv-i1
 type: inv
 title: "I-1 — Territory operations in Proc A don't affect Proc B"
 number: I-1
-guards: [sub-kernel-devsrv]
-validated-by: [prose]
-strength: prose
+guards: [sub-kernel-territory, sub-kernel-devsrv]
+validated-by: [spec-territory, gate-smp]
+strength: spec
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-01
 ---
 ## Statement
 
@@ -17,13 +17,18 @@ share its Territory, and a Proc can name only what its own namespace
 reaches. Isolation is the namespace boundary itself — visibility, not
 rwx, is the first wall.
 
-> Backfill note: the guard and validator sets are PARTIAL — the primary
-> enforcement surface is the Territory layer (`kernel/territory.c`,
-> pinned by `specs/territory.tla`), which joins with its own dossier and
-> spec note at the namespace-area sweep. The devsrv edge below is the
-> `/srv` realization recorded at the srv-area sweep.
-
 ## Enforcement
+
+On the Territory ([[sub-kernel-territory]]) — the primary surface. Every
+namespace operation takes ONE `struct Territory *`; no call mutates two.
+`territory_clone` reads the parent and writes only the child, so an
+`rfork` produces an independent function value rather than a shared one:
+the child inherits a deep copy of the mount table (with its own ref per
+entry), of `root_spoor`, and of the cwd string, and diverges from that
+instant. `rfork(RFNAMEG)` — the flag that WOULD share a Territory across
+Procs — extincts at v1.0 ([[seam-rfnameg-shared-territory]]), so the
+only multi-holder case is the peer Threads of one Proc, serialized by
+[[lock-territory-ns-lock]] and [[lock-territory-dot-lock]].
 
 On the `/srv` surface ([[sub-kernel-devsrv]]): the service registry is
 namespace-resident — a heap-refcounted `SrvRegistry` reached ONLY through
@@ -39,10 +44,15 @@ identity behind it cannot cross Procs.
 
 ## Validation
 
-Prose + audit at this sweep's edge: the stalk-3c round prosecuted the
-no-global-bypass property directly (HELD and STRENGTHENED — see
-[[fnd-stalk3c-r1-f3]]'s disposition). `specs/territory.tla` pins the
-Territory half (its spec note is pending that sweep). **blind-to:** the
+[[spec-territory]] pins the Territory half — though as STRUCTURE, not as
+a checked invariant: isolation is encoded by the data model (every
+action touches one Proc's slot), so a buggy variant updating two Procs
+in one step would need a temporal property to catch. RFNAMEG is the
+point at which that must change.
+
+Audit: the stalk-3c round prosecuted the no-global-bypass property
+directly (HELD and STRENGTHENED — see [[fnd-stalk3c-r1-f3]]'s
+disposition). **blind-to:** the
 as-built boot chain mounts ONE shared registry into every session
 (see [[sub-kernel-devsrv]] Caveats — cross-session NAME visibility is
 real and deliberate at v1.0; the isolation this invariant demands is
