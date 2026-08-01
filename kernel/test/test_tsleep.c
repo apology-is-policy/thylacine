@@ -163,7 +163,7 @@ void test_tsleep_woken_before_deadline(void) {
 
     // Yield to consumer: it runs, increments to 1, tsleeps (cond 0,
     // deadline far) → SLEEPING; sched picks boot back.
-    sched();
+    TEST_YIELD_UNTIL(g_tsl_ran >= 1u && consumer->state == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_tsl_ran, 1u,
         "consumer must have run once before sleeping");
@@ -177,8 +177,8 @@ void test_tsleep_woken_before_deadline(void) {
     int n = wakeup(&g_tsl_rendez);
 
     TEST_EXPECT_EQ(n, 1, "wakeup reported exactly one waiter woken");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer must be RUNNABLE after wakeup");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer left the rendez after wakeup");
     TEST_ASSERT(g_tsl_rendez.waiter == NULL,
         "rendez waiter must be cleared after wakeup");
     // #811 (ARCH §8.8.1): the waker no longer clears rendez_blocked_on; the
@@ -189,7 +189,7 @@ void test_tsleep_woken_before_deadline(void) {
 
     // Yield: consumer resumes inside tsleep, re-checks cond (now true),
     // returns TSLEEP_AWOKEN, increments to 2, parks.
-    sched();
+    TEST_YIELD_UNTIL(g_tsl_ran >= 2u);
 
     TEST_EXPECT_EQ(g_tsl_ran, 2u,
         "consumer must have run again post-wake");
@@ -227,7 +227,7 @@ void test_tsleep_timeout_via_tick(void) {
 
     // Yield to consumer: runs, increments to 1, tsleeps (cond 0,
     // deadline +10 ms) → SLEEPING; sched picks boot back.
-    sched();
+    TEST_YIELD_UNTIL(g_tsl_ran >= 1u && consumer->state == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_tsl_ran, 1u,
         "consumer must have run once before sleeping");

@@ -215,26 +215,6 @@ void test_srvconn_ring_capacity(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Cooperative-yield helper for the threaded tests.
-// ---------------------------------------------------------------------------
-//
-// The thread_create / ready / sched pattern these tests use assumes a single
-// sched() runs the peer to its next block. That stops being true under SMP:
-// select_target_cpu can place the woken peer on ANOTHER CPU, so it is RUNNABLE
-// but not yet dispatched when we resume, and an assert on its progress counter
-// reads the pre-wake value. (Observed 2026-07-20 as a 1-in-10 ubsan-smp8 boot
-// failure of teardown_wakes_blocked; the runnable-dump showed the consumer
-// woken and RUNNABLE on cpu=4 — the wake was delivered, just not observed.)
-//
-// Spinning on the OBSERVABLE with a budget fixes the observation without
-// weakening the test: a genuinely LOST wake never satisfies `cond`, the budget
-// expires, and the following assert fails exactly as before.
-#define SC_YIELD_UNTIL(cond) do {                                             \
-    int _spins = 0;                                                           \
-    while (!(cond) && _spins++ < 10000) sched();                              \
-} while (0)
-
-// ---------------------------------------------------------------------------
 // Threaded recv handoff — shared state.
 // ---------------------------------------------------------------------------
 //
@@ -278,7 +258,7 @@ void test_srvconn_recv_blocks_then_wakes(void) {
 
     // Yield: consumer runs, increments to 1, blocks in client_recv on
     // the empty s2c ring (no deadline) → SLEEPING.
-    SC_YIELD_UNTIL(g_sc_ran >= 1u && consumer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_sc_ran >= 1u && consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_sc_ran, 1u, "consumer ran once before blocking");
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer is SLEEPING inside client_recv");
@@ -291,7 +271,7 @@ void test_srvconn_recv_blocks_then_wakes(void) {
     TEST_EXPECT_EQ(srvconn_server_send(cn, out, 16), 16L,
         "server_send accepts the bytes");
 
-    SC_YIELD_UNTIL(g_sc_ran >= 2u);
+    TEST_YIELD_UNTIL(g_sc_ran >= 2u);
     TEST_EXPECT_EQ(g_sc_ran, 2u, "consumer resumed past the recv");
     TEST_EXPECT_EQ(g_sc_ret, 16L, "client_recv returned the 16 bytes");
     TEST_ASSERT(check_pattern(g_sc_buf, 16, 0x55),
@@ -360,7 +340,7 @@ void test_srvconn_server_send_blocks_then_drain_wakes(void) {
     // Yield: producer runs, increments to 1, writes nothing (s2c is full),
     // and PARKS on wrendez -- the load-bearing #348 behavior. Pre-fix it
     // would have returned 0 here and incremented to 2.
-    SC_YIELD_UNTIL(g_ss_ran >= 1u && producer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_ss_ran >= 1u && producer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_ss_ran, 1u, "producer ran once before blocking");
     TEST_EXPECT_EQ(producer->state, THREAD_SLEEPING,
         "producer is SLEEPING inside server_send_blocking");
@@ -378,7 +358,7 @@ void test_srvconn_server_send_blocks_then_drain_wakes(void) {
     TEST_EXPECT_EQ(srvconn_client_recv(cn, in, sizeof in), 256L,
         "client_recv drains a chunk of the prefill");
 
-    SC_YIELD_UNTIL(g_ss_ran >= 2u);
+    TEST_YIELD_UNTIL(g_ss_ran >= 2u);
     TEST_EXPECT_EQ(g_ss_ran, 2u, "producer resumed past the blocking send");
     TEST_EXPECT_EQ(g_ss_ret, (long)sizeof g_ss_payload,
         "server_send_blocking delivered the WHOLE payload");
@@ -506,7 +486,7 @@ void test_srvconn_teardown_wakes_blocked(void) {
     ready(consumer);
 
     // Yield: consumer blocks in client_recv on the empty s2c ring.
-    SC_YIELD_UNTIL(g_sc_ran >= 1u && consumer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_sc_ran >= 1u && consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_sc_ran, 1u, "consumer ran once before blocking");
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer is SLEEPING inside client_recv");
@@ -515,7 +495,7 @@ void test_srvconn_teardown_wakes_blocked(void) {
     // consumer with EOF, never wedge it.
     srvconn_teardown(cn);
 
-    SC_YIELD_UNTIL(g_sc_ran >= 2u);
+    TEST_YIELD_UNTIL(g_sc_ran >= 2u);
     TEST_EXPECT_EQ(g_sc_ran, 2u, "teardown released the blocked consumer");
     TEST_EXPECT_EQ(g_sc_ret, 0L, "the woken consumer read EOF (0)");
 
@@ -683,12 +663,12 @@ void test_srvconn_role_park_second_writer(void) {
     struct Thread *pb = thread_create(kproc(), rp_send_producer_b);
     TEST_ASSERT(pa != NULL && pb != NULL, "thread_create x2");
     ready(pa);
-    SC_YIELD_UNTIL(g_rp_ran_a >= 1u && pa->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_rp_ran_a >= 1u && pa->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_rp_ran_a, 1u, "producer A parked mid-send (ring full)");
     TEST_ASSERT(cn->s2c.writing == true, "A holds the writing role");
 
     ready(pb);
-    SC_YIELD_UNTIL(g_rp_ran_b >= 1u && pb->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_rp_ran_b >= 1u && pb->state == THREAD_SLEEPING);
     // THE #354 ASSERTION: B contended the held role and PARKED -- it did
     // NOT return -1. Pre-fix this reads g_rp_ret_b == -1 with ran_b == 2.
     TEST_EXPECT_EQ(g_rp_ran_b, 1u, "producer B parked on the ROLE");
@@ -713,7 +693,7 @@ void test_srvconn_role_park_second_writer(void) {
         remain -= want;
         sched();   // let A (then B) resume as room frees
     }
-    SC_YIELD_UNTIL(g_rp_ran_a >= 2u && g_rp_ran_b >= 2u);
+    TEST_YIELD_UNTIL(g_rp_ran_a >= 2u && g_rp_ran_b >= 2u);
     TEST_EXPECT_EQ(g_rp_ran_a, 2u, "producer A completed");
     TEST_EXPECT_EQ(g_rp_ran_b, 2u, "producer B completed after the role park");
     TEST_EXPECT_EQ(g_rp_ret_a, (long)sizeof g_rp_payload_a, "A whole payload");
@@ -777,12 +757,12 @@ void test_srvconn_role_park_second_reader(void) {
     struct Thread *cb = thread_create(kproc(), rr_recv_consumer_b);
     TEST_ASSERT(ca != NULL && cb != NULL, "thread_create x2");
     ready(ca);
-    SC_YIELD_UNTIL(g_rr_ran_a >= 1u && ca->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_rr_ran_a >= 1u && ca->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_rr_ran_a, 1u, "consumer A parked on empty s2c");
     TEST_ASSERT(cn->s2c.reading == true, "A holds the reading role");
 
     ready(cb);
-    SC_YIELD_UNTIL(g_rr_ran_b >= 1u && cb->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_rr_ran_b >= 1u && cb->state == THREAD_SLEEPING);
     // THE #354 ASSERTION: B parked on the role instead of returning -1.
     TEST_EXPECT_EQ(g_rr_ran_b, 1u, "consumer B parked on the ROLE");
     TEST_EXPECT_EQ(g_rr_ret_b, -999L,
@@ -792,7 +772,7 @@ void test_srvconn_role_park_second_reader(void) {
     // releases the role; B acquires and parks on data.
     fill_pattern(g_sc_chunk, 64, 0x21);
     TEST_EXPECT_EQ(srvconn_server_send(cn, g_sc_chunk, 64), 64L, "send #1");
-    SC_YIELD_UNTIL(g_rr_ran_a >= 2u);
+    TEST_YIELD_UNTIL(g_rr_ran_a >= 2u);
     TEST_EXPECT_EQ(g_rr_ran_a, 2u, "consumer A completed");
     TEST_EXPECT_EQ(g_rr_ret_a, 64L, "A read the first chunk");
     TEST_ASSERT(check_pattern(g_rr_buf_a, 64, 0x21), "A's bytes intact");
@@ -801,10 +781,10 @@ void test_srvconn_role_park_second_reader(void) {
     // observable: A's release (inside its recv, so already done once ran_a
     // reached 2) clears it, and B's acquire sets it again. B's STATE cannot
     // serve here -- it is SLEEPING both before and after the handoff.
-    SC_YIELD_UNTIL(cn->s2c.reading == true);
+    TEST_YIELD_UNTIL(cn->s2c.reading == true);
     fill_pattern(g_sc_chunk, 64, 0x42);
     TEST_EXPECT_EQ(srvconn_server_send(cn, g_sc_chunk, 64), 64L, "send #2");
-    SC_YIELD_UNTIL(g_rr_ran_b >= 2u);
+    TEST_YIELD_UNTIL(g_rr_ran_b >= 2u);
     TEST_EXPECT_EQ(g_rr_ran_b, 2u, "consumer B completed after the role park");
     TEST_EXPECT_EQ(g_rr_ret_b, 64L, "B read the second chunk");
     TEST_ASSERT(check_pattern(g_rr_buf_b, 64, 0x42), "B's bytes intact");
@@ -867,7 +847,7 @@ void test_srvconn_client_send_blocking_backpressure(void) {
     struct Thread *producer = thread_create(kproc(), cs_send_producer);
     TEST_ASSERT(producer != NULL, "thread_create(producer)");
     ready(producer);
-    SC_YIELD_UNTIL(g_cs_ran >= 1u && producer->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_cs_ran >= 1u && producer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_cs_ran, 1u, "producer parked (c2s full)");
     TEST_EXPECT_EQ(producer->state, THREAD_SLEEPING,
         "producer is SLEEPING inside client_send_blocking");
@@ -880,7 +860,7 @@ void test_srvconn_client_send_blocking_backpressure(void) {
     u8 in[256];
     TEST_EXPECT_EQ(srvconn_server_recv(cn, in, sizeof in), 256L,
         "server_recv drains a chunk of the prefill");
-    SC_YIELD_UNTIL(g_cs_ran >= 2u);
+    TEST_YIELD_UNTIL(g_cs_ran >= 2u);
     TEST_EXPECT_EQ(g_cs_ran, 2u, "producer resumed past the blocking send");
     TEST_EXPECT_EQ(g_cs_ret, (long)sizeof g_cs_payload,
         "client_send_blocking delivered the WHOLE payload");
@@ -992,7 +972,7 @@ void test_srvconn_client_send_blocking_poll_edge(void) {
 
     // The poller registers + parks on the EMPTY c2s first.
     ready(tp);
-    SC_YIELD_UNTIL(g_pe_ran_p >= 1u && tp->state == THREAD_SLEEPING);
+    TEST_YIELD_UNTIL(g_pe_ran_p >= 1u && tp->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_pe_ran_p, 1u, "poller parked on the empty ring");
     TEST_EXPECT_EQ(tp->state, THREAD_SLEEPING, "poller is SLEEPING in poll");
 

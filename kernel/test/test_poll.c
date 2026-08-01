@@ -236,7 +236,7 @@ void test_poll_block_then_wake_pollin(void) {
     ready(consumer);
     // Yield. Consumer enters sys_poll_for_proc, scans (no data), tsleep
     // on its private rendez.
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer SLEEPING in poll");
 
@@ -246,10 +246,10 @@ void test_poll_block_then_wake_pollin(void) {
     static const u8 payload = 0xAB;
     long n = wr->dev->write(wr, &payload, 1, 0);
     TEST_EXPECT_EQ(n, 1L, "boot writes 1 byte");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
-        "consumer wakes to RUNNABLE after poll-list signal");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+        "consumer left the rendez after poll-list signal");
 
-    sched();
+    TEST_YIELD_UNTIL(g_poll_result != -999);
     TEST_EXPECT_EQ(g_poll_result, 1L, "consumer's poll returns 1");
     TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN,
         "consumer's revents = POLLIN");
@@ -279,17 +279,17 @@ void test_poll_pollhup_on_close_write_end(void) {
     struct Thread *consumer = thread_create(kproc(), consumer_poll_forever_entry);
     TEST_ASSERT(consumer != NULL, "thread_create");
     ready(consumer);
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer SLEEPING in poll");
 
     // Boot side: close the write end via the handle table — drops the
     // ring's ref, marks write_eof, walks poll list, wakes consumer.
     TEST_EXPECT_EQ(handle_close(p, hwr), 0, "close write end");
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "consumer wakes after write-end close");
 
-    sched();
+    TEST_YIELD_UNTIL(g_poll_result != -999);
     TEST_EXPECT_EQ(g_poll_result, 1L, "consumer's poll returns 1");
     TEST_ASSERT((g_poll_revents & POLLHUP) != 0,
         "consumer's revents includes POLLHUP (POSIX hang-up)");
@@ -336,16 +336,37 @@ void test_poll_cons_deferred_block_then_wake(void) {
 
     // Consumer enters sys_poll_for_proc on the cons fd: cons_poll registers a
     // waiter on g_cons.poll_list; the empty ring is not POLLIN-ready; tsleep.
-    sched();
+    TEST_YIELD_UNTIL(consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
         "consumer SLEEPING in poll on /dev/cons");
 
     // Producer (the IRQ side): a data byte arms poll_wake_pending + wakes
     // console_mgr -- but does NOT walk the hook list (deferred, not IRQ-safe).
-    // The real blocked poller MUST still be SLEEPING here.
+    //
+    // Both facts below are asserted as IMPLICATIONS with a deliberate read
+    // order, because neither holds on its own under SMP: cons_rx_input wakes
+    // console_mgr, and a peer CPU may dispatch it inside this window, where it
+    // runs the relay for an entirely good reason -- clearing the flag AND waking
+    // the poller. A bare "flag is armed" or "poller is still SLEEPING" read
+    // therefore fails spuriously on a healthy kernel. cons_service_deferred is
+    // the flag's ONLY consumer and always walks the hook list, so "cleared"
+    // implies "relay ran" implies "poller woken", which is what makes the two
+    // one-directional forms exact.
     cons_rx_input((u8)'k', false);
-    TEST_ASSERT(cons_test_pollwake_pending(), "data byte armed poll_wake_pending");
-    TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING,
+
+    // Armed: flag read FIRST. Still set -> armed. Cleared -> the relay already
+    // ran, which itself proves it was armed, and the later state read sees the
+    // wake. Only "never armed" leaves both false.
+    bool pending_first = cons_test_pollwake_pending();
+    TEST_ASSERT(pending_first || consumer->state != THREAD_SLEEPING,
+        "data byte armed poll_wake_pending");
+
+    // Deferred: state read FIRST. If the poller is awake, re-read the flag; a
+    // flag still armed at the LATER read was armed at the earlier one too, so
+    // the wake cannot have come from the relay -- it came from IRQ context,
+    // which is the defect under test.
+    bool woken_first = (consumer->state != THREAD_SLEEPING);
+    TEST_ASSERT(!woken_first || !cons_test_pollwake_pending(),
         "the IRQ producer did NOT wake the real poller (deferred)");
 
     // The deferred relay (what console_mgr runs in process context), driven
@@ -353,14 +374,14 @@ void test_poll_cons_deferred_block_then_wake(void) {
     // #103 crux: the relay must reach the sys_poll_for_proc-blocked thread, not
     // merely flip a synthetic flag.
     cons_test_service_deferred();
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE,
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "the deferred relay woke the real /dev/cons poller (the #103 assertion)");
     TEST_ASSERT(!cons_test_pollwake_pending(), "relay consumed poll_wake_pending");
 
     // Let the consumer resume + record. console_mgr is also RUNNABLE (the
     // cons_rx_input wake) but re-sleeps on the now-drained cond; a bounded yield
     // loop runs both regardless of order.
-    for (int i = 0; i < 4 && g_poll_result == -999; i++) sched();
+    TEST_YIELD_UNTIL(g_poll_result != -999);
     TEST_EXPECT_EQ(g_poll_result, 1L, "consumer's poll returns 1");
     TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN, "consumer's revents = POLLIN");
 
@@ -658,7 +679,7 @@ void test_poll_devsrv_listener_block_then_wake(void) {
     struct Thread *poller = thread_create(kproc(), listener_poll_forever_entry);
     TEST_ASSERT(poller != NULL, "thread_create");
     ready(poller);
-    sched();
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
         "listener-poll is SLEEPING on its private rendez");
 
@@ -670,10 +691,10 @@ void test_poll_devsrv_listener_block_then_wake(void) {
     TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
     int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "client connects → wakes the poll list");
-    TEST_EXPECT_EQ(poller->state, THREAD_RUNNABLE,
+    TEST_EXPECT_NE(poller->state, THREAD_SLEEPING,
         "listener-poll wakes after the connect");
 
-    sched();
+    TEST_YIELD_UNTIL(g_listener_poll_result != -999);
     TEST_EXPECT_EQ(g_listener_poll_result, 1L, "listener-poll returns 1");
     TEST_EXPECT_EQ((s64)g_listener_poll_revents, (s64)POLLIN,
         "wakeup revents = POLLIN");
@@ -700,7 +721,7 @@ void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
     struct Thread *poller = thread_create(kproc(), listener_poll_forever_entry);
     TEST_ASSERT(poller != NULL, "thread_create");
     ready(poller);
-    sched();
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
         "listener-poll is SLEEPING");
 
@@ -709,10 +730,10 @@ void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
     // tombstone-as-readiness-edge — corvus's listener-poll should not
     // hang past its service's death).
     srv_registry_reset();
-    TEST_EXPECT_EQ(poller->state, THREAD_RUNNABLE,
+    TEST_EXPECT_NE(poller->state, THREAD_SLEEPING,
         "listener-poll wakes on the tombstone");
 
-    sched();
+    TEST_YIELD_UNTIL(g_listener_poll_result != -999);
     TEST_EXPECT_EQ(g_listener_poll_result, 1L, "listener-poll returns 1");
     TEST_ASSERT((g_listener_poll_revents & POLLHUP) != 0,
         "tombstone revents includes POLLHUP");
@@ -873,7 +894,7 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
     struct Thread *poller = thread_create(kproc(), conn_poll_forever_entry);
     TEST_ASSERT(poller != NULL, "thread_create");
     ready(poller);
-    sched();
+    TEST_YIELD_UNTIL(poller->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
         "connection-poll is SLEEPING — c2s empty");
 
@@ -882,10 +903,10 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
     static const u8 frame[3] = { 0xDE, 0xAD, 0xBE };
     TEST_EXPECT_EQ(srvconn_client_send(cn, frame, 3), 3L,
         "client-side queues 3 bytes");
-    TEST_EXPECT_EQ(poller->state, THREAD_RUNNABLE,
+    TEST_EXPECT_NE(poller->state, THREAD_SLEEPING,
         "connection-poll wakes on the send");
 
-    sched();
+    TEST_YIELD_UNTIL(g_conn_poll_result != -999);
     TEST_EXPECT_EQ(g_conn_poll_result, 1L, "connection-poll returns 1");
     TEST_EXPECT_EQ((s64)g_conn_poll_revents, (s64)POLLIN,
         "wakeup revents = POLLIN");

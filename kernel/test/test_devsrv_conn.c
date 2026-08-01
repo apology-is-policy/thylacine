@@ -549,7 +549,7 @@ void test_devsrv_accept_blocks_then_wakes(void) {
     ready(worker);
 
     // Yield: the worker runs, then blocks in accept on the empty backlog.
-    sched();
+    TEST_YIELD_UNTIL(g_da_ran >= 1u && worker->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_da_ran, 1u, "the worker ran once before blocking");
     TEST_EXPECT_EQ(worker->state, THREAD_SLEEPING,
         "the worker is SLEEPING inside the accept");
@@ -562,7 +562,7 @@ void test_devsrv_accept_blocks_then_wakes(void) {
     int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
 
-    sched();
+    TEST_YIELD_UNTIL(g_da_ran >= 2u);
     TEST_EXPECT_EQ(g_da_ran, 2u, "the worker resumed past the accept");
     TEST_ASSERT(g_da_ret >= 0, "the accept returned a connection handle");
 

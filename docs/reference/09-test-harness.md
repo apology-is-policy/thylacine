@@ -60,6 +60,118 @@ The TEST_ASSERT macro short-circuits the current test on failure (returns from t
 
 ---
 
+## Peer-thread observation under SMP — `TEST_YIELD_UNTIL` (#77, #92)
+
+A threaded test creates a helper, `ready()`s it, and needs to observe it reach some
+point. The obvious spelling is one `sched()` then an assert on the helper's progress
+counter — which encodes an assumption that stopped being true when SMP landed:
+**`select_target_cpu` can place the woken peer on another CPU, so it is RUNNABLE but
+not yet dispatched when we resume, and the assert reads the pre-wake value.** The
+wake was delivered; only the observation was early. I-9 is not at issue.
+
+Two independent witnesses, both 1-in-10, both with the peer proven woken by the
+harness's own runnable-dump: `srvconn.teardown_wakes_blocked` on ubsan-smp8
+(2026-07-20, RUNNABLE on cpu=4) and `srvconn.role_park_second_reader` on
+default-smp4 (2026-07-28, `state=2` on cpu=1). Each such site is a potential
+spurious gate RED, which is corrosive out of proportion to its rate: it trains
+dismissal of red results.
+
+```c
+#define TEST_YIELD_BUDGET_NS (2ull * 1000 * 1000 * 1000)   // 2 s
+
+TEST_YIELD_UNTIL(cond)        // bounded wait; FAILS loudly on exhaustion
+TEST_YIELD_UNTIL_SOFT(cond)   // bounded wait; falls through (see below)
+
+extern unsigned g_test_yield_calls;   // invocations
+extern unsigned g_test_yield_spun;    // ...that actually had to wait
+extern unsigned g_test_yield_deep;    // ...that needed more than one yield
+```
+
+Three design points, each of which is a way the naive version goes wrong:
+
+1. **The budget is wall-clock, not an iteration count.** When the run tree is empty
+   `sched()` returns immediately, so an N-iteration spin can burn its whole budget in
+   microseconds *while the peer is still legitimately running on another CPU* — the
+   bounded spin then manufactures the very failure it was added to prevent. Time is
+   what is actually being waited on. (The pre-#92 helpers were iteration-bounded at
+   10000 and 4.)
+
+2. **Exhaustion fails, naming the stringified condition.** Falling through to the
+   downstream assert is how a *wrong* observable stays invisible: the wait does
+   nothing, the downstream assert passes on its own, and the site is silently racy
+   again with no signal that the guard never guarded.
+
+3. **`_SOFT` exists for exactly one situation** — the wait sits inside a section
+   owning global state that must be released (a held console TX role, a stalled UART,
+   an armed echo capture). `TEST_ASSERT` *returns from the test function*, so failing
+   there skips the release and strands that state for the rest of the boot: a held
+   role parks every later console writer; a stalled UART silences the console
+   entirely, swallowing the rest of the suite. A rare spurious FAIL is worth catching;
+   a dead console is not. `_SOFT` is **not** the general soft option — everywhere else
+   the loud form is required, for reason (2).
+
+**Choosing the observable is the actual work, and it is not mechanical.** A wait on
+the wrong thing yields a test that spins and asserts nothing. The shapes:
+
+| Shape | Site | Observable |
+|---|---|---|
+| peer blocked | `sched()` → assert `state == SLEEPING` | `counter >= N && state == SLEEPING` — sound because a not-yet-run thread is RUNNABLE, never SLEEPING |
+| peer resumed | `sched()` → assert a result | `counter >= N+1`, or `result != <sentinel>` |
+| system drained | `sched()` → assert `sched_runnable_count() == 0` | the same predicate |
+| flag consumed | `sched()` → assert a flag cleared | the same predicate |
+
+**Two shapes that `TEST_YIELD_UNTIL` cannot fix, and must not be applied to:**
+
+- **Transient-state asserts.** `wake(); TEST_EXPECT_EQ(peer->state, THREAD_RUNNABLE)`
+  races the same dispatch window, but RUNNABLE is *transient* — a spin-until-RUNNABLE
+  can wait forever on a peer that already ran. The fix is to assert the non-transient
+  property instead: `state != THREAD_SLEEPING`. That is deterministic, because
+  `wakeup()` sets RUNNABLE under the rendez lock before the waker returns, and no
+  helper in these tests re-sleeps (each either `sched()`-yields → RUNNABLE, or
+  `test_kthread_park_terminal`s → EXITING). This is not a weakening: `test_cons.c`'s
+  own comment already stated the property as *"a lost wakeup would leave it
+  SLEEPING"* — the assert was stricter than its stated intent, and the extra
+  strictness was the racy part. A *fresh* thread not yet `ready()`d is a different
+  claim and stays `== RUNNABLE`: no CPU can dispatch it, so it is deterministic.
+
+- **Negative asserts** ("the peer has NOT progressed"). `test_poll.c`'s #103 test
+  asserts the IRQ producer did not wake the poller — but `cons_rx_input` wakes
+  `console_mgr`, which a peer CPU may dispatch inside that window, where it runs the
+  deferred relay for an entirely good reason. Waiting is meaningless here; the fix is
+  to assert an **implication** with a deliberate read order. `cons_service_deferred`
+  is the pending flag's only consumer and always walks the hook list, so "cleared"
+  implies "relay ran" implies "poller woken", which makes two one-directional forms
+  exact: read the flag first for *armed* (`pending || woken`), read the state first
+  for *deferred* (`sleeping || !pending`). The biconditional is racy in **both**
+  orders; only the implications hold.
+
+**The waits measure themselves.** Exhaustion is loud, but the opposite failure is
+silent: a condition already true on entry exits at once, so the guard is a no-op and
+the site is racy again with nothing to show for it — indistinguishable from a healthy
+run by any pass/fail signal. `test_run_all` therefore emits
+
+```
+    [test] yield-waits: 65 invoked, 63 actually waited, 0 needed >1 yield
+```
+
+`spun` proves the guards are live rather than short-circuiting. `deep` is the sharp
+one: the loop tests its condition *before* the first `sched()`, so `spun` counts
+anything taking even one yield — exactly what the bare `sched()` it replaced already
+did. Only a wait needing a **second** yield did work the old form structurally could
+not. As measured, `deep` is 0 on an unloaded host at smp4 and smp8; the witnesses
+were 1-in-10 *under gate load*, so absence there is expected and is **not** evidence
+the race is absent — only that this run did not exercise it.
+
+Fail-closed proven by revert-probe: one condition made unsatisfiable →
+`1232/1233 FAIL` in 3 s, message naming the condition, suite completing normally.
+Note a *broader* sabotage (deleting the real `wakeup(&r->read_rendez)` in
+`kernel/pipe.c`) does **not** probe this: it hangs the boot earlier, at
+`userspace.attach_probe_round_trip`, which blocks in a real kernel `sleep()` —
+correctly untimed — before any guarded site is reached. A revert-probe has to be
+confined to the sites under test or it measures something else.
+
+---
+
 ## Implementation
 
 ### Registry (`kernel/test/test.c`)

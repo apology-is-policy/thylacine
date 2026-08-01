@@ -175,17 +175,18 @@ void test_cons_blocking_read_wakeup(void) {
 
     // Yield: consumer runs, sets ran=1, calls devcons.read on the empty ring,
     // parks on g_cons_data_rendez (SLEEPING); sched picks the main thread back.
-    sched();
+    TEST_YIELD_UNTIL(g_cbr_ran >= 1 && consumer->state == THREAD_SLEEPING);
     TEST_EXPECT_EQ(g_cbr_ran, 1, "consumer ran + parked in devcons_read");
     TEST_EXPECT_EQ(consumer->state, THREAD_SLEEPING, "consumer SLEEPING inside devcons_read");
 
     // Producer: feed one byte. cons_rx_input enqueues it + wakeup()s the data
     // Rendez -> the consumer becomes RUNNABLE (a lost wakeup would leave it SLEEPING).
     cons_rx_input((u8)'q', false);
-    TEST_EXPECT_EQ(consumer->state, THREAD_RUNNABLE, "consumer woken by cons_rx_input");
+    TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
+                   "consumer left the rendez after cons_rx_input");
 
     // Yield: consumer resumes inside devcons_read, drains 'q', returns 1, parks.
-    sched();
+    TEST_YIELD_UNTIL(g_cbr_ran >= 2);
     TEST_EXPECT_EQ(g_cbr_ran, 2, "consumer resumed post-wake");
     TEST_EXPECT_EQ(g_cbr_ret, 1L, "devcons_read returned exactly 1 byte");
     TEST_EXPECT_EQ((long)g_cbr_byte, (long)'q', "the woken read returned 'q'");
@@ -275,7 +276,7 @@ void test_cons_break_sets_sak(void) {
     // false cond and return to SLEEPING (rather than leaving it runnable for a
     // later test to trip over -- A-4c-2 audit F2). g_console_owner is NULL here
     // (pre-joey), so even if it ran proc_console_sak it would be a fail-safe no-op.
-    sched();
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr drained back to SLEEPING");
 }
 
@@ -544,7 +545,7 @@ void test_cons_sak_via_console_mgr(void) {
     // by an earlier cons test (cons_test_reset clears the conds; sched() lets it
     // re-observe + re-sleep). A LOST wakeup would hang the boot here.
     cons_test_reset();
-    sched();
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
 
     struct Proc *owner   = proc_alloc();
@@ -564,7 +565,7 @@ void test_cons_sak_via_console_mgr(void) {
 
     // Yield: console_mgr resumes, clears sak-pending, runs proc_console_sak (the
     // transition), then loops back to sleep on a now-false cond (re-SLEEPING).
-    sched();
+    TEST_YIELD_UNTIL(!cons_test_sak_pending());
     TEST_ASSERT(!cons_test_sak_pending(), "console_mgr consumed sak-pending");
     TEST_ASSERT(!proc_is_console_attached(owner), "console_mgr SAK revoked the owner");
     TEST_ASSERT(proc_is_console_attached(trusted), "console_mgr SAK re-granted the trusted Proc");
@@ -1455,7 +1456,7 @@ void test_cons_tx_role_serializes_writers(void) {
     // Let the writer run until it parks on the role. SMP placement means one
     // sched() does not guarantee it ran (the #77 lesson) -- wait on the
     // OBSERVABLE, bounded.
-    for (int spins = 0; g_txr_ran < 1u && spins < 10000; spins++) sched();
+    TEST_YIELD_UNTIL_SOFT(g_txr_ran >= 1u);
     TEST_EXPECT_EQ(g_txr_ran, 1u, "contender entered cons_output_write");
 
     // THE PROPERTY: it must NOT have emitted anything while the role is held.
@@ -1466,7 +1467,7 @@ void test_cons_tx_role_serializes_writers(void) {
 
     // Release: the contender must wake, complete, and emit its bytes CONTIGUOUSLY.
     cons_test_tx_role_drop();
-    for (int spins = 0; g_txr_ran < 2u && spins < 10000; spins++) sched();
+    TEST_YIELD_UNTIL_SOFT(g_txr_ran >= 2u);
     TEST_EXPECT_EQ(g_txr_ran, 2u, "contender resumed after the role freed");
     TEST_EXPECT_EQ(g_txr_ret, 4L, "contender wrote all 4 bytes");
 
@@ -1615,10 +1616,8 @@ void test_cons_tx_room_wait_and_deadline(void) {
         // "it ran and has not finished" would be both timing-dependent and
         // vacuous if we freed a slot before the writer reached the wait. The
         // loop exits the moment it parks, keeping us well inside the deadline.
-        for (int spins = 0;
-             cons_test_tx_room_waits() == waits0 && g_txw_ran < 2u && spins < 10000;
-             spins++)
-            sched();
+        TEST_YIELD_UNTIL_SOFT(cons_test_tx_room_waits() != waits0 ||
+                              g_txw_ran >= 2u);
         b_waits      = cons_test_tx_room_waits();
         b_ran_parked = g_txw_ran;
         b_cnt_parked = cons_test_tx_ring_count();
@@ -1643,7 +1642,7 @@ void test_cons_tx_room_wait_and_deadline(void) {
     long b_ret      = -999;
     if (w != NULL) {
         cons_tx_drain_from_irq();
-        for (int spins = 0; g_txw_ran < 2u && spins < 10000; spins++) sched();
+        TEST_YIELD_UNTIL_SOFT(g_txw_ran >= 2u);
         b_ran_done = g_txw_ran;
         b_ret      = g_txw_ret;
     }

@@ -3039,8 +3039,23 @@ void test_run_all(void) {
         }
     }
 
+    // The waits' positive control (test.h). "spun" counts guards that actually
+    // had to wait; a zero there means every one of them is inert on this
+    // config, which no pass/fail signal would ever reveal.
+    uart_puts("    [test] yield-waits: ");
+    uart_putdec(g_test_yield_calls);
+    uart_puts(" invoked, ");
+    uart_putdec(g_test_yield_spun);
+    uart_puts(" actually waited, ");
+    uart_putdec(g_test_yield_deep);
+    uart_puts(" needed >1 yield\n");
+
     current_test = NULL;
 }
+
+unsigned g_test_yield_calls;
+unsigned g_test_yield_spun;
+unsigned g_test_yield_deep;
 
 bool test_all_passed(void) {
     return failed_count == 0;

@@ -113,4 +113,99 @@ struct Thread;
 void test_kthread_park_terminal(volatile bool *exited);
 void test_kthread_join_free(struct Thread *t, volatile bool *exited);
 
+// TEST_YIELD_UNTIL(cond) — wait for a PEER-THREAD observable, bounded.
+//
+// The thread_create / ready / sched pattern assumes one sched() runs the peer
+// to its next block. That stops being true under SMP: select_target_cpu can
+// place the woken peer on ANOTHER CPU, so it is RUNNABLE but not yet dispatched
+// when we resume, and an assert on its progress counter reads the pre-wake
+// value. Two independent witnesses, both 1-in-10, both with the peer proven
+// woken: srvconn.teardown_wakes_blocked on ubsan-smp8 (2026-07-20, runnable-dump
+// showed it RUNNABLE on cpu=4) and srvconn.role_park_second_reader on
+// default-smp4 (2026-07-28, state=2 == THREAD_RUNNABLE on cpu=1). The wake was
+// delivered in both; only the observation was early. I-9 was never at issue.
+//
+// Spinning on the OBSERVABLE does not weaken the test: a genuinely LOST wake
+// never satisfies `cond`, so the budget expires and the test fails.
+//
+// The budget is WALL-CLOCK, not an iteration count. An iteration count is the
+// wrong unit here — when the run tree is empty sched() returns immediately, so
+// a bounded spin can burn its whole budget in microseconds while the peer is
+// still legitimately running on another CPU, converting a healthy test into a
+// spurious failure. Time is what we are actually waiting on.
+//
+// Exhaustion FAILS, naming the condition, rather than falling through to the
+// downstream assert. Falling through is how a WRONG observable stays invisible:
+// the wait does nothing, the downstream assert passes on its own, and the site
+// is silently racy again with no signal that the guard never guarded.
+//
+// `sched()` is declared by the includer (every user already calls it directly);
+// timer_now_ns is forward-declared here to keep an arch header out of test.h.
+u64 timer_now_ns(void);
+
+#define TEST_YIELD_BUDGET_NS (2ull * 1000ull * 1000ull * 1000ull)
+
+// Positive control for the waits themselves. Exhaustion is loud, but the
+// OPPOSITE failure is silent: a condition already true on entry exits at once,
+// so the guard is a no-op and the site is racy again with nothing to show for
+// it. That is indistinguishable from a healthy run by any pass/fail signal, so
+// the suite reports how many waits ACTUALLY had to wait. A spun count of zero
+// means every guard here is inert -- the conversion measuring itself rather
+// than being taken on faith.
+extern unsigned g_test_yield_calls;   // TEST_YIELD_UNTIL* invocations
+extern unsigned g_test_yield_spun;    // ...of those, ones that actually waited
+extern unsigned g_test_yield_deep;    // ...of those, ones needing >1 yield
+//
+// `deep` is the sharp one. The loop tests the condition BEFORE its first
+// sched(), so `spun` counts anything that took even one yield -- which is
+// exactly what the bare sched() it replaced already did. Only a wait that
+// needed a SECOND yield did work the old single sched() structurally could
+// not, i.e. observed the peer-not-yet-dispatched window this change exists to
+// close. A persistent deep==0 across SMP configs would say the race is not
+// being exercised here, not that it is absent.
+
+#define TEST_YIELD_UNTIL(cond)                                              \
+    do {                                                                    \
+        u64  _yu_deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;          \
+        bool _yu_spun = false, _yu_deep = false;                            \
+        g_test_yield_calls++;                                               \
+        while (!(cond)) {                                                   \
+            if (_yu_spun) _yu_deep = true;                                  \
+            _yu_spun = true;                                                \
+            TEST_ASSERT(timer_now_ns() < _yu_deadline,                      \
+                "TEST_YIELD_UNTIL budget exhausted waiting for: " #cond);   \
+            sched();                                                        \
+        }                                                                   \
+        if (_yu_spun) g_test_yield_spun++;                                  \
+        if (_yu_deep) g_test_yield_deep++;                                  \
+    } while (0)
+
+// TEST_YIELD_UNTIL_SOFT — same bounded wait, but falls through on exhaustion
+// instead of failing, leaving the caller's own assert to report.
+//
+// Use ONLY where the wait sits inside a section that owns GLOBAL state needing
+// cleanup — a held console TX role, a stalled UART, an armed echo capture. The
+// loud form fails via TEST_ASSERT, which RETURNS from the test function, so an
+// early return there skips the release and strands that state for the rest of
+// the boot: a held role parks every later console writer, and a stalled UART
+// silences the console entirely. A rare spurious FAIL is worth catching; a dead
+// console that swallows the rest of the suite is not.
+//
+// This is NOT the soft option for ordinary sites. Everywhere else the loud form
+// is required, because a silent fall-through is precisely how a wrong observable
+// hides: the wait does nothing and the downstream assert passes on its own.
+#define TEST_YIELD_UNTIL_SOFT(cond)                                         \
+    do {                                                                    \
+        u64  _yus_deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;         \
+        bool _yus_spun = false, _yus_deep = false;                          \
+        g_test_yield_calls++;                                               \
+        while (!(cond) && timer_now_ns() < _yus_deadline) {                 \
+            if (_yus_spun) _yus_deep = true;                                 \
+            _yus_spun = true;                                               \
+            sched();                                                        \
+        }                                                                   \
+        if (_yus_spun) g_test_yield_spun++;                                 \
+        if (_yus_deep) g_test_yield_deep++;                                 \
+    } while (0)
+
 #endif // THYLACINE_KERNEL_TEST_H
