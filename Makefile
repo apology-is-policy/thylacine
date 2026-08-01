@@ -83,16 +83,68 @@ gdb:
 # skipped by name. TTrace replay modules (TLC counterexample droppings)
 # are skipped. The buggy-cfg counterexample gate is a separate, manual
 # per-surface discipline today (RW-10 F3; the tiered runner is tracked).
+# Three things this recipe has to do that TLC will not do for us.
+#
+# 0. BE CHUNKABLE (#124). The suite is 1.5-2+ hours, and two modules are almost
+#    all of it -- measured 2026-08-01: corvus 36m48s, handles ~50m, the other 31
+#    a few minutes between them. That overruns an agent's background-task limit,
+#    which killed a full run at ~83 minutes with 22 modules never started. So
+#    `SPECS=` selects a subset, the SMP_GATE_CONFIGS pattern:
+#
+#        make specs                      # everything (budget hours)
+#        make specs SPECS=handles        # just the long pole
+#        make specs SPECS='pipe poll'    # a chunk
+#
+#    Each module's elapsed time is printed so a new long pole is visible in the
+#    log rather than discovered by a kill. Note that TLC writes each module's
+#    output to /tmp/tlc-<module>.tla.log DIRECTLY, so per-module truth survives
+#    a killed run even when this recipe's own stdout does not -- read those logs,
+#    not the exit status, when a run is interrupted.
+#
+# 1. FIND JAVA. The bare `java` on macOS is /usr/bin/java, a stub that errors
+#    "Unable to locate a Java Runtime" unless a JDK is registered -- while the
+#    real one sits in the Homebrew cellar, which is why CLAUDE.md's TLA+ setup
+#    says to prepend it to PATH. Finding it here means the documented one-liner
+#    works without an undocumented export; without it the run fails every module
+#    for the same reason, which is loud but wastes a full pass.
+#
+# 2. CLEAN specs/states (#123). TLC drops a timestamped checkpoint dir there per
+#    invocation and never removes it; fifteen had accumulated to 16 GB, the
+#    largest 2.8 GB, on a host with 19 GiB free while a live run was writing a
+#    sixteenth. Nothing reads them back -- this recipe never passes -recover --
+#    and the tree gitignores them. Cleaning at the START rather than the end
+#    leaves a killed run's checkpoint inspectable until the next run -- which
+#    also means two CONCURRENT `make specs` runs now clobber each other's
+#    checkpoints. They already clobbered each other's /tmp/tlc-*.log, so this
+#    target has never supported concurrent invocation; do not start one while
+#    another is live.
 specs:
-	@cd specs && fail=0; for s in *.tla; do \
+	@cd specs && \
+	rm -rf states; \
+	JAVA=java; \
+	if ! $$JAVA -version >/dev/null 2>&1; then \
+		for c in /opt/homebrew/opt/openjdk/bin/java /usr/local/opt/openjdk/bin/java; do \
+			if [ -x "$$c" ]; then JAVA="$$c"; break; fi; \
+		done; \
+	fi; \
+	if ! $$JAVA -version >/dev/null 2>&1; then \
+		echo "specs: no Java runtime (see CLAUDE.md 'TLA+ setup')" >&2; exit 1; fi; \
+	if [ ! -f /tmp/tla2tools.jar ]; then \
+		echo "specs: /tmp/tla2tools.jar missing (see CLAUDE.md 'TLA+ setup')" >&2; exit 1; fi; \
+	sel=""; for m in $(SPECS); do sel="$$sel $${m%.tla}.tla"; done; \
+	[ -n "$$sel" ] || sel=$$(echo *.tla); \
+	fail=0; for s in $$sel; do \
 		case "$$s" in *_TTrace_*) continue;; esac; \
+		if [ ! -f "$$s" ]; then echo "== $$s == (no such module)" >&2; fail=1; continue; fi; \
 		cfg="$${s%.tla}.cfg"; \
 		if [ ! -f "$$cfg" ]; then echo "== $$s == (no default cfg; skipped)"; continue; fi; \
+		t0=$$(date +%s); \
 		echo "== $$s =="; \
-		if java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
+		if $$JAVA -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
 			-config "$$cfg" "$$s" > "/tmp/tlc-$$s.log" 2>&1; \
 		then tail -3 "/tmp/tlc-$$s.log"; \
 		else tail -5 "/tmp/tlc-$$s.log"; echo "** $$s FAILED **"; fail=1; fi; \
+		echo "   ($$s took $$(( $$(date +%s) - t0 ))s)"; \
 	done; exit $$fail
 
 help:
