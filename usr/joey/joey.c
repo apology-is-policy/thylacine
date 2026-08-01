@@ -2990,6 +2990,20 @@ static int probe100_errno(void) {
     long rc_whence    = t_lseek(fd, 0, 99);
     long rc_negoff    = t_lseek(fd, -1, T_SEEK_SET);
 
+    // #102 F6: whence is 32 bits wide, so junk in the HIGH half of x2 must not
+    // reject a valid seek. Linux's SYSCALL_DEFINE narrows `unsigned int whence`
+    // by construction and VIVARIUM's T1 table renumbers lseek onto this very
+    // handler with the argument words copied verbatim -- so before the fix a
+    // guest whose compiler left rubbish above bit 31 got EINVAL for a seek
+    // Linux performs. libt's t_lseek takes a long, which is what lets a NATIVE
+    // probe pose the question at all.
+    //
+    // The pair is the point. The first leg alone would pass under a handler
+    // that stopped range-checking whence entirely; the second says the low half
+    // is still being read, so together they pin narrowing rather than removal.
+    long rc_hiwhence  = t_lseek(fd, 0, (1L << 32) | T_SEEK_SET);   // valid -> 0
+    long rc_hibad     = t_lseek(fd, 0, (1L << 32) | 99);           // still -22
+
     // Bad-buffer rejects on a GOOD fd -> EFAULT (-14). 0x7000_0000_0000 is
     // 112 TiB: below UACCESS_USER_VA_TOP (2^47 = 128 TiB) so it PASSES the
     // range pre-check, and far above every mapping this Proc has (stack tops
@@ -3032,6 +3046,8 @@ static int probe100_errno(void) {
     if (rc_seek_bad  != -9)  bad = 1;
     if (rc_whence    != -22) bad = 1;
     if (rc_negoff    != -22) bad = 1;
+    if (rc_hiwhence  != 0)   bad = 1;   // #102 F6: high half ignored
+    if (rc_hibad     != -22) bad = 1;   // ...but the low half still checked
     if (rc_wfault    != -14) bad = 1;
     if (rc_rfault    != -14) bad = 1;
     // The read leg's PRECONDITIONS are asserted too: if either the seeding
@@ -3053,6 +3069,10 @@ static int probe100_errno(void) {
     t_putstr(itoa_dec(rc_whence, nb, sizeof(nb)));
     t_putstr(" negoff=");
     t_putstr(itoa_dec(rc_negoff, nb, sizeof(nb)));
+    t_putstr(" hiwhence=");
+    t_putstr(itoa_dec(rc_hiwhence, nb, sizeof(nb)));
+    t_putstr(" hibad=");
+    t_putstr(itoa_dec(rc_hibad, nb, sizeof(nb)));
     t_putstr(" wfault=");
     t_putstr(itoa_dec(rc_wfault, nb, sizeof(nb)));
     t_putstr(" rfault=");
@@ -3061,7 +3081,7 @@ static int probe100_errno(void) {
     t_putstr(itoa_dec(rc_seed, nb, sizeof(nb)));
     t_putstr(" rew=");
     t_putstr(itoa_dec(rc_rew, nb, sizeof(nb)));
-    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22 -14 -14 16 0])\n" : ")\n");
+    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22 0 -22 -14 -14 16 0])\n" : ")\n");
     return bad ? -1 : 0;
 }
 

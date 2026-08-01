@@ -1329,10 +1329,30 @@ bool viv_signote_default_is_ignore(enum viv_signote note) {
     }
 }
 
+// VIV_SIGNOTE_NONE is a SENTINEL -- "no note in this tree carries that signal"
+// -- and it is simultaneously a valid array index, 0. Excluding it in EVERY
+// accessor is what stops those two facts meeting: act[0] is then neither
+// readable nor writable through this API, so a decode miss cannot alias onto a
+// real disposition.
+//
+// It was already unreachable, but only by an argument that spanned two files.
+// vivarium_sigaction_decide refuses a signum whose note is NONE, so nothing
+// could WRITE act[0]; the zeroed slot then read back as SIG_DFL and every
+// caller behaved. True, and fragile in the same breath -- the READ sites in
+// notes.c pass viv_signote_from_note_name(name) straight in, and that decode
+// answers NONE for any name absent from its table. Add a name to g_known_notes
+// (task #95's `terminate` is the one already queued) without adding its decode
+// row, and every disposition lookup for that name silently consults slot 0.
+//
+// The guard makes the answer local and total: an unknown note has no slot.
+static bool viv_signote_indexable(enum viv_signote note) {
+    return (u32)note != (u32)VIV_SIGNOTE_NONE && (u32)note < VIV_SIGNOTE_COUNT;
+}
+
 bool viv_sigtab_note_ignored(const struct viv_sigtab *tab,
                              enum viv_signote note) {
     if (!tab) return false;                       // no table == nothing ignored
-    if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
+    if (!viv_signote_indexable(note)) return false;
     return tab->act[(u32)note].handler == VIV_SIG_IGN;
 }
 
@@ -1340,7 +1360,7 @@ bool viv_sigtab_note_handler(const struct viv_sigtab *tab,
                              enum viv_signote note,
                              struct viv_ksigaction *out) {
     if (!tab || !out) return false;
-    if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
+    if (!viv_signote_indexable(note)) return false;
 
     const struct viv_ksigaction *a = &tab->act[(u32)note];
     // SIG_DFL is 0 and SIG_IGN is 1 -- neither is an address to jump to. A
@@ -1354,7 +1374,7 @@ bool viv_sigtab_note_handler(const struct viv_sigtab *tab,
 bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
                     const struct viv_ksigaction *act) {
     if (!tab || !act) return false;
-    if ((u32)note >= VIV_SIGNOTE_COUNT) return false;
+    if (!viv_signote_indexable(note)) return false;
     tab->act[(u32)note] = *act;
     return true;
 }

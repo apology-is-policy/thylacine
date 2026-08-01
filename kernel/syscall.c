@@ -1621,9 +1621,30 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     // Whence range check before any handle work — cheap reject of
     // structurally invalid calls. #100 (ER-3): EINVAL, POSIX's answer for an
     // unrecognized whence.
-    if (whence_raw != T_SEEK_SET &&
-        whence_raw != T_SEEK_CUR &&
-        whence_raw != T_SEEK_END)                    return -T_E_INVAL;
+    //
+    // #102 F6: whence is a 32-bit selector, so only the low half of x2 is
+    // significant. POSIX declares it `int` — which this comment already appeals
+    // to — and fd, the far more dangerous argument, is ALREADY narrowed the same
+    // way three lines down (`(hidx_t)hraw`, and hidx_t is int). The full-width
+    // compare was an artifact of the raw argument arriving as u64, not a
+    // designed strictness: nothing rests on the high bits of an enum, and
+    // libthyla-rs already declares the parameter u32.
+    //
+    // It matters because of who else reaches here. VIVARIUM's T1 table renumbers
+    // Linux lseek onto this handler and copies the argument words VERBATIM
+    // (vivarium.c, viv_linux_dispatch), and Linux's own SYSCALL_DEFINE narrows
+    // `unsigned int whence` by construction — so a guest that leaves junk in
+    // x2[63:32] gets EINVAL here for a seek Linux would have performed. Every
+    // pure translator in vivarium.c narrows its int arguments for this reason;
+    // this is the one place the T1 row's "identical in width" claim was
+    // enforced by caller convention rather than by code.
+    //
+    // Narrowing costs nothing: a bad low half (3, or -1 == 0xFFFFFFFF) still
+    // fails the range check below, exactly as Linux's does.
+    u32 whence = (u32)whence_raw;
+    if (whence != T_SEEK_SET &&
+        whence != T_SEEK_CUR &&
+        whence != T_SEEK_END)                        return -T_E_INVAL;
 
     // No rights mask: lseek manipulates the per-Spoor cursor, not content.
     // #844: c is REF-HELD (sys_lookup_rw_handle kind-gates to KOBJ_SPOOR +
@@ -1658,7 +1679,7 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     // for the two pure-overflow guards, but T_E_OVERFLOW is not in the registry
     // and the outcome is the same class: no valid offset exists.) The two
     // stat-failure arms are EIO -- the size could not be determined.
-    switch (whence_raw) {
+    switch (whence) {
     case T_SEEK_SET:
         if (offset < 0)                             { spoor_clunk(c); return -T_E_INVAL; }
         new_off = offset;

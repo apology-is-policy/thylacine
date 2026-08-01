@@ -892,11 +892,31 @@ static void notes_deliver_linux_locked(struct exception_context *ctx,
 
     // uaccess faults here route through p->vma_lock (acyclic with q->lock) and
     // the buddy allocator is non-blocking, so holding q->lock across the copy is
-    // safe -- the same argument the note-name push makes. It additionally
-    // depends on the target being ANONYMOUS memory: a REVENANT file-backed page
-    // CAN sleep in its demand-page arm, and sleeping under a spinlock would be
-    // fatal. The target is the guest's own stack, which is anon by construction
-    // (exec_map_user_stack), and no writable mapping is file-backed at v1.0.
+    // safe -- the same argument the note-name push makes.
+    //
+    // It additionally depends on a property of the FAULT ARM the target lands
+    // in, not on the memory being anonymous: the arm must have NO SLOW PATH.
+    // Sleeping under a spinlock is fatal, and REVENANT's BURROW_TYPE_FILE arm
+    // sleeps -- it pins the Burrow and issues a death-interruptible dev->read.
+    // Both arms a guest stack can reach are free of that:
+    //
+    //   BURROW_TYPE_ANON       eager, exec_map_user_stack's initial stack.
+    //   BURROW_TYPE_ANON_LAZY  demand-zero, and the arm a phenotyped guest is
+    //                          MORE likely to be in than the eager one -- V-2d
+    //                          routes mmap(PROT_READ|PROT_WRITE, ANONYMOUS) to
+    //                          sys_burrow_attach_lazy_for_proc, so a guest
+    //                          running on a makecontext/coroutine stack (the
+    //                          obvious use of anonymous mmap) faults HERE.
+    //                          Its fill is alloc_pages + install entirely under
+    //                          the already-held vma_lock: no read, no pin, no
+    //                          slow path (fault.c, the ANON_LAZY case).
+    //
+    // File-backed is excluded separately and for a different reason: no
+    // WRITABLE mapping is file-backed at v1.0 (REVENANT backs text and R-only
+    // rodata), and a copy-out to a read-only page faults without ever entering
+    // a demand-page fill. A future arm that acquires a blocking fill -- anon
+    // COW, pageout -- has to be checked against THIS site, which is why the
+    // property is stated as "which arm" rather than "which memory".
     u64 fr[2] = { ctx->regs[29], ctx->regs[30] };   // fp, lr of the interrupted frame
     if (uaccess_copy_out(sigframe, &frame, sizeof(frame)) != 0 ||
         uaccess_copy_out(next_frame, fr, sizeof(fr)) != 0) {

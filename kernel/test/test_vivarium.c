@@ -987,6 +987,31 @@ void test_vivarium_sigtab(void) {
                 "out-of-range handler read refused");
     TEST_ASSERT(!viv_sigtab_note_handler(&tab, VIV_SIGNOTE_INTERRUPT, NULL),
                 "a NULL out-pointer is refused rather than written through");
+
+    // #102 F4: the SENTINEL is not an index. VIV_SIGNOTE_NONE == 0, so the old
+    // `>= COUNT` gate admitted it and read act[0].
+    //
+    // Poisoning act[0] BY HAND is what makes this non-vacuous. Through the API
+    // the slot is unwritable, and a zeroed slot answers "no handler / not
+    // ignored" either way -- so a test that only called the accessors would
+    // pass identically with the fix reverted. Writing the field directly is the
+    // only way to ask the question the guard actually answers: when slot 0
+    // holds something, does a NONE lookup find it?
+    tab.act[0].handler  = 0x400000;
+    tab.act[0].flags    = VIV_SA_RESTORER;
+    tab.act[0].restorer = 0x400100;
+    TEST_ASSERT(!viv_sigtab_note_handler(&tab, VIV_SIGNOTE_NONE, &got),
+                "the sentinel resolves to no handler even when act[0] is set");
+    tab.act[0].handler = VIV_SIG_IGN;
+    TEST_ASSERT(!viv_sigtab_note_ignored(&tab, VIV_SIGNOTE_NONE),
+                "the sentinel is not 'ignored' even when act[0] says SIG_IGN");
+
+    // ...and it stays unwritable, which is what keeps the read guard's job
+    // small: no API path can put a disposition in slot 0 to be found.
+    TEST_ASSERT(!viv_sigtab_set(&tab, VIV_SIGNOTE_NONE, &hnd),
+                "the sentinel cannot be written");
+    TEST_ASSERT(tab.act[0].handler == VIV_SIG_IGN,
+                "the refused set left act[0] untouched");
 }
 
 // -----------------------------------------------------------------------------

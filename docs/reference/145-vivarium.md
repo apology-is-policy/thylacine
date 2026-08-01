@@ -1118,3 +1118,121 @@ Two reverts, two different failure points, neither visible to the other:
 The first reproduces the original defect exactly. That the unit suite reads a
 full 1272/1272 through it is the same blindness #100 recorded: pure tests prove
 the decision, guest legs prove the plumbing.
+
+## V-8 F4-F7 [P3] -- four small things, two of them only comments
+
+The round's remaining findings. None was a live break; all four were verified
+against the code before being acted on, and two of them turned out to be
+sharper than the report.
+
+### V-8 F4 -- the sentinel is also an index
+
+`VIV_SIGNOTE_NONE` is 0 and means "no note in this tree carries that signal".
+It is also a valid subscript into `viv_sigtab.act[]`. The three accessors gated
+on `(u32)note >= VIV_SIGNOTE_COUNT`, which admits it, so a lookup for an
+unknown note read `act[0]`.
+
+Nothing reached it, but the reason spanned two files:
+`vivarium_sigaction_decide` (vivarium.c) refuses a signum whose note is NONE,
+so nothing could WRITE slot 0, so the READS in notes.c saw a zeroed slot and
+answered SIG_DFL. The reads are the fragile end -- `notes_proc_has_live_handler`,
+`notes_post`'s SIG_IGN hook and the delivery path all pass
+`viv_signote_from_note_name(name)` straight in, and that decode answers NONE for
+any name not in its table. Add a name to `g_known_notes` without adding its
+decode row -- task #95's `terminate` is the one already queued -- and every
+disposition lookup for it silently consults slot 0.
+
+`viv_signote_indexable` now excludes the sentinel in all three, so the answer is
+local: an unknown note has no slot.
+
+The guard is COMPLETE rather than merely applied, and that is worth checking
+rather than assuming -- the recurring failure in this arc is that a fix present
+on site N stops you asking about site N+1. Grepping `act[` across the kernel
+returns exactly the three accessor bodies in production; nothing indexes the
+array directly, so guarding the accessors guards every path.
+
+**The fix is behaviourally inert today**, which is exactly what makes its test
+worth describing. Through the API slot 0 is unwritable, and a zeroed slot reads
+"no handler / not ignored" either way -- so a test that only called the
+accessors would pass identically with the guard reverted. The regression writes
+`tab.act[0]` by hand and then asks the question the guard actually answers:
+when slot 0 holds something, does a NONE lookup find it? Reverting the guard
+fails at that assertion (1271/1272).
+
+One thing the report did not raise and the code turned out to handle: the two
+decode tables are DIFFERENT SIZES. `viv_signal_note` has 13 rows,
+`viv_signote_from_note_name` has 9 -- the `snare:*` family (SEGV/BUS/ILL/FPE) is
+writable but has no name row, so a disposition stored at `act[SNARE_SEGV]` would
+be looked up at `act[0]`. That asymmetry is closed independently: a snare signal
+admits only SIG_DFL (`handler != VIV_SIG_DFL && !viv_signote_is_deliverable(...)`
+forwards), and `proc_fault_terminate` never calls `notes_post` at all, so there
+is no queue entry to look up. Sound, but it is a second cross-file argument, and
+the guard makes it stop mattering.
+
+### V-8 F5 -- the justification named the wrong memory class
+
+`notes_deliver_linux_locked` copies the signal frame out with `q->lock` held,
+and the comment justified it by the target being ANONYMOUS memory: the guest's
+own stack, "anon by construction (`exec_map_user_stack`)".
+
+The conclusion held -- the clause about no writable mapping being file-backed
+does rule out the only blocking arm -- but the named reason is the case a
+phenotyped guest is LEAST likely to be in. V-2d routes
+`mmap(PROT_READ|PROT_WRITE, ANONYMOUS)` to `sys_burrow_attach_lazy_for_proc`, so
+a guest running on a makecontext/coroutine stack (the obvious use of anonymous
+mmap) is on `BURROW_TYPE_ANON_LAZY` and faults in the lazy arm, not the eager
+one the comment cites.
+
+That arm is safe for a different reason, which is now what the comment says: it
+has NO SLOW PATH. Its fill is `alloc_pages` + install entirely under the
+already-held `vma_lock` -- no backing read, no pin, nothing death-interruptible.
+The load-bearing property is which fault ARM runs, not which memory it is, and
+stating it that way is what makes a future arm with a blocking fill (anon COW,
+pageout) get checked against this site.
+
+### V-8 F6 -- whence compared at 64 bits where Linux passes 32
+
+`lseek`'s T1 row renumbers onto `sys_lseek_handler` with the argument words
+copied verbatim, and that handler compared the full 64-bit x2 against
+`T_SEEK_SET/CUR/END`. Linux's own `SYSCALL_DEFINE3(lseek, ..., unsigned int,
+whence)` narrows by construction, so a guest leaving rubbish above bit 31 got
+EINVAL for a seek Linux performs.
+
+Two things settled where the fix belongs. First, the same handler ALREADY
+narrows `fd` -- `(hidx_t)hraw`, and `hidx_t` is `int` -- and fd is the far more
+dangerous argument, so the strict compare on an enum selector was an artifact of
+the raw argument arriving as `u64`, not a designed strictness. Second, the
+comment above the check already appealed to "POSIX's answer for an unrecognized
+whence", and POSIX's whence is an `int`; narrowing makes the code agree with its
+own stated contract rather than weakening an audited surface to serve a compat
+row. `libthyla-rs` had already declared the parameter `u32`.
+
+The probe is a PAIR, in joey's `probe100` block. A single leg would pass under a
+handler that stopped range-checking whence altogether; the second says the low
+half is still read:
+
+| leg | whence | expect |
+|---|---|---|
+| `hiwhence` | `(1L<<32) \| T_SEEK_SET` | `0` -- high half ignored |
+| `hibad` | `(1L<<32) \| 99` | `-22` -- low half still checked |
+
+Reverting the narrowing gives the sharpest split this arc has recorded: the
+unit suite reads a clean **1272/1272 PASS** while the in-guest leg fails at
+exactly `hiwhence=-22`. The kernel tests cannot see it at all -- the handler is
+`static` and takes a user VA, so only a real EL0 caller can pose the question,
+and `libt`'s `t_lseek` taking a `long` is what lets a native probe pose it.
+
+### V-8 F7 -- dispositions do not cross a fork
+
+`rfork_internal` copies `child->phenotype` and reasons at length about a Linux
+process forking, but `child->sigtab` stays NULL -- all-SIG_DFL. A forked Linux
+child would silently lose every handler and every SIG_IGN its parent installed;
+POSIX fork(2) inherits both, and execve(2) is the different rule again (reset
+caught, preserve ignored), so process creation needs two behaviours here rather
+than one.
+
+Unreachable rather than untested: no clone/fork/execve number is a table row, so
+a PHENO_LINUX Proc cannot create another Proc at all. Task #93 is what makes it
+reachable and where the copy belongs. Pinned in a comment beside the line whose
+own reasoning opens the gap -- the same single-threadedness notes.c leans on for
+its sigtab tearing argument.

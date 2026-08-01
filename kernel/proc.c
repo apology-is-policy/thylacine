@@ -1151,6 +1151,23 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
     // vivarium sets it in the first place.
     child->phenotype      = parent->phenotype;
+    // #102 F7, the seam this line's own reasoning opens: the phenotype crosses
+    // the fork but the SIGNAL DISPOSITIONS do not. `child->sigtab` stays NULL,
+    // which reads as all-SIG_DFL, so a forked Linux child would silently lose
+    // every handler and every SIG_IGN its parent installed -- POSIX fork(2)
+    // inherits both. (execve(2) is the different rule, and also unimplemented:
+    // it resets CAUGHT dispositions to SIG_DFL and PRESERVES ignored ones, so
+    // whoever builds process creation needs two behaviours here, not one.)
+    //
+    // UNREACHABLE at v1.0 rather than merely untested: no clone/fork/execve
+    // number is a table row, so a PHENO_LINUX Proc cannot create another Proc
+    // at all -- every rfork in the tree runs under PHENO_NATIVE, where sigtab
+    // is always NULL anyway. Task #93 (process creation) is exactly what makes
+    // it reachable, and is where the copy belongs; pinning it here costs a
+    // sentence now and would cost a debugging session then.
+    //
+    // The single-threadedness that argument also buys is load-bearing
+    // elsewhere: notes.c leans on it for the sigtab tearing argument.
     // VIVARIUM V-4a-0: the executable name is INHERITED (a fork-without-exec
     // keeps running the parent's binary -- POSIX, and the honest answer for
     // /proc/<pid>/exe). Every v1.0 spawn execs immediately afterwards and

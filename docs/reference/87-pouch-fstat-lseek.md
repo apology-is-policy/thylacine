@@ -51,7 +51,7 @@ The kernel calls `dev->stat_native(spoor, &kernel_scratch)`. devramfs implements
 it (filling size + mode + qid from the cpio file table). Other Devs leave the
 slot NULL — SYS_FSTAT on those fds returns -1 (graceful "no native stat").
 
-### struct t_stat (80 bytes; ABI-locked; A-2a grew it from 72 with uid+gid)
+### struct t_stat (88 bytes; ABI-locked; A-2a grew it 72 -> 80 with uid+gid, #100 80 -> 88 with devno)
 
 | Offset | Size | Field          | Purpose |
 |--------|------|----------------|---------|
@@ -70,13 +70,29 @@ slot NULL — SYS_FSTAT on those fds returns -1 (graceful "no native stat").
 | 64     | 8    | `blocks`       | Count of 512-byte blocks |
 | 72     | 4    | `uid`          | Owner principal_id (A-2a) |
 | 76     | 4    | `gid`          | Owner group id (A-2a) |
+| 80     | 4    | `devno`        | Per-instance device number (#100; Plan 9 `Chan.dev` / POSIX `st_dev`) |
+| 84     | 4    | `_pad_dev`     | Explicit padding to 8-byte alignment |
 
-`_Static_assert`s pin `sizeof(struct t_stat) == 80` and every `__builtin_offsetof`.
-The kernel STORES the full 80 bytes unconditionally, so a consumer's buffer
-MUST be at least 80 bytes -- a 72-byte pre-A-2a buffer gets its 8 adjacent
-bytes clobbered. A future kernel field add MUST bump both the size and the
-assertions; an old consumer reading an 80-byte slot from a larger future
-producer would silently see zeros in the new fields. The `_pad_*` slots are
+`devno` is what makes a `qid_path` unambiguous ACROSS mounts: a static
+single-instance Dev reports 0, dev9p mints one per attach session
+(`spoor_next_devno`) and walked/cloned descendants inherit it, so consumers key
+file identity on the PAIR `(devno, qid_path)` -- gopls's robustio `FileID` is
+the live example.
+
+`_Static_assert`s pin `sizeof(struct t_stat) == 88` and every `__builtin_offsetof`.
+The kernel STORES the full 88 bytes unconditionally, so a consumer's buffer
+MUST be at least 88 bytes -- a shorter one gets its adjacent bytes clobbered.
+A future kernel field add MUST bump both the size and the assertions; an old
+consumer reading an 88-byte slot from a larger future producer would silently
+see zeros in the new fields.
+
+**The mirrors are the hazard, not the struct.** A per-mirror
+`_Static_assert(sizeof == N)` verifies only THAT mirror's size, never that it
+AGREES with the kernel -- so a stale mirror at the old size compiles clean and
+overflows at runtime. #100 grew this struct and two pouch patches were caught
+that way: by a boot segv and a `struct t_stat` grep, not by any build. The full
+mirror set is libt, libthyla-rs (`Metadata`), pouch patches 0010/0019/0021, and
+the Go fork's `Stat_t`. The `_pad_*` slots are
 reserved for forward-compat fields (the natural extension is `atime_nsec` /
 `mtime_nsec` / `ctime_nsec` when sub-second timestamps land).
 
@@ -103,6 +119,21 @@ Overflow / underflow:
 - SEEK_CUR: `cur + offset` checked against `INT64_MIN..INT64_MAX`; resulting
   `new_off < 0` rejected.
 - SEEK_END: `size + offset` checked the same way.
+
+`whence` is read as **32 bits** (#102 F6). POSIX declares it `int`, and only the
+low half of x2 is significant: a caller may leave anything above bit 31. The
+handler narrows before comparing, exactly as it already narrows `fd` via
+`(hidx_t)hraw` -- the full-width compare it used to do was an artifact of the
+raw argument arriving as `u64`, not a designed strictness, and it rejected valid
+seeks. A bad LOW half (`3`, or `-1` == `0xFFFFFFFF`) still gives EINVAL.
+
+This is load-bearing for VIVARIUM: `lseek` is a Tier-1 renumber, so a Linux
+guest's arguments reach this handler verbatim, and Linux's own
+`SYSCALL_DEFINE3(lseek, ..., unsigned int, whence)` narrows by construction.
+It was the one place the T1 table's "identical in width" claim rested on caller
+convention rather than on code. joey's `probe100` pins both directions
+(`hiwhence` must succeed, `hibad` must still fail); the kernel unit suite is
+blind to it, since the handler is `static` and takes a user VA.
 
 ## Pouch arm (patch 0010)
 
