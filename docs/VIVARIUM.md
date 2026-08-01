@@ -2362,13 +2362,34 @@ Published honestly, because §2.3.4 says scope discipline is what decides succes
 and network I/O, and exits correctly; an Alpine container runs a shell and a
 non-trivial script.* Concretely `curl`, `wget`, `python3`, `busybox`, `redis-cli`.
 
+**Status at the V-8 close — the target's first clause is MET and its second is
+NOT, and the honest thing is to say which.** A single-process static Linux binary
+runs, opens and reads and writes files through the diorama, completes a TCP
+round-trip in both directions, takes a signal through a handler it installed, and
+exits through Linux `exit_group`. That is the first clause, and it is boot-gated
+on every build. The second clause — *a shell* — is **not met and was never
+chunked**: §10's own note records that no V-chunk builds `clone`/`execve`/
+`wait4`, and a shell forks before it does anything else. So a guest shell reaches
+`ENOSYS` at its first fork.
+
+This is a gap between the arc as chunked and the arc gate, not a defect in
+anything built; it is task **#93**, the named next chunk. It is written here
+rather than only in §10 because §9 is the document a reader consults to learn
+what works, and a scope contract whose headline claim is contradicted three
+sections later is exactly the WSL1 failure this section exists to avoid.
+
 - IN: the §11.5 top-50, BSD sockets via `/net`, static ELF, the diorama, `viv`,
-  signals Tier 0 (+Tier 1 if the arc allows).
-- OUT at v1.0, by decision and stated plainly: `epoll` (v1.1 candidate), `inotify`
-  (degrade), `io_uring`, `bpf`, `perf_event_open`, `ptrace`, glibc-dynamic
-  (best-effort), `AF_INET6`, cgroups/seccomp, full signal fidelity (Tier 2), and
-  in-guest OCI image acquisition (`viv pull` — registry/TLS/layer-unpack; the
-  v1.0 bundle is host-baked, §7.2).
+  signals Tier 0 **and Tier 1** (V-6 landed both — a real handler installs, runs,
+  and returns through `rt_sigreturn`).
+- OUT at v1.0, by decision and stated plainly: **process creation
+  (`clone`/`fork`/`execve`/`wait4` — #93, and therefore any guest shell)**,
+  `epoll` (v1.1 candidate), `inotify` (degrade), `io_uring`, `bpf`,
+  `perf_event_open`, `ptrace`, glibc-dynamic (best-effort), `AF_INET6`,
+  cgroups/seccomp, full signal fidelity (Tier 2), **concurrent containers** (a
+  second simultaneous `viv run` is refused at the diorama attach and says so —
+  V-8 F3, `docs/reference/145-vivarium.md`; sequential runs are fine, and lifting
+  it is the #33 registry work), and in-guest OCI image acquisition (`viv pull` —
+  registry/TLS/layer-unpack; the v1.0 bundle is host-baked, §7.2).
 
 A Linux binary needing anything in the OUT list gets a clean `ENOSYS`, never a silent
 wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
@@ -2385,6 +2406,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 |---|---|
 | **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own |
 | **`exit(N)` is boolean** (task #91) | Any nonzero status reports 1, a Thylacine-wide v1.0 property (`sys_exit_group_handler` collapses to `exits("fail")`). A shell reading `$?` in a container sees 0-or-1 |
+| **`lseek` on a non-seekable fd reports `EPERM`, not `ESPIPE`** (V-8 F1, tasks #100/#106) | The refusal is CORRECT — a pipe, socket or `/proc` file is not seekable and the call must fail — but the code naming it is wrong. `T_E_SPIPE` (29) is not in the errno registry and appending one is signoff-bearing, so `sys_lseek_handler`'s non-seekable arm still returns a bare `-1`, which stock musl's `__syscall_ret` reads as `errno = 1` = `EPERM`. Substituting `EINVAL` would be the "differently wrong" answer #100 explicitly declined: a caller that special-cases `ESPIPE` (the standard "this stream is not seekable, fall back to reading forward" idiom) sees a permission error instead and may report it as one. `pread`/`pwrite` carry the same residual in `spoor_read_common`/`spoor_write_common` but are not table rows yet, so today only `lseek` is reachable from a guest. Every OTHER error on the T1 byte-I/O surface names itself correctly as of #100 |
 | **`/proc/self` names the mounter** (task #90) | The per-container diorama reports `viv` rather than the reading Proc |
 | **A handler's `ucontext` carries no FPSIMD record** (§6.22, task #96) | **NARROWED at V-8 -- the register corruption it used to describe is FIXED.** Note delivery now saves and restores Q0-Q31 + FPSR + FPCR around a handler (`fp_save_area`/`fp_restore_area`, a 520-byte block on `struct Thread`), so a handler may use floating point and autovectorised routines freely and the interrupted computation resumes intact. This was never an authority question -- the registers are the Proc's own -- but it was silent data corruption, PRE-EXISTING on the native note path and made reachable by ordinary compiled C once the phenotype landed. What REMAINS degraded is only the *reporting*: the frame's `_aarch64_ctx` chain is still terminated immediately rather than carrying an `fpsimd_context`, so a guest that walks `__reserved` looking for its FP state is told the record is absent rather than being handed one. Absent-and-honest, not present-and-wrong; and the state itself is now genuinely preserved underneath |
 | **`siginfo` carries the signal number only** (§6.22) | `si_signo`/`si_errno`/`si_code` are filled and the `_sifields` union is zeroed, with `si_code = SI_KERNEL` -- the one value that claims nothing about the union. A note carries a 16-byte name and one u32 arg, so `si_pid`, `si_uid`, `si_status` and `si_addr` have no source. Queued `siginfo` is the Tier-2 item §5.4 already names |
@@ -2415,7 +2437,7 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | V-5 | Sockets | The `/net` translation, **in the kernel phenotype as a T2 family** (§5.5, user-voted 2026-07-31). **V-5a** the substrate + the client path: `handle_replace`, `Proc.socktab`, and `socket`/`connect`/`shutdown`/`getsockname`/`getpeername`/`sendto`/`recvfrom` — `read`/`write`/`close` need no row, which is the design's point. **V-5b** the server path: `bind`/`listen`/`accept`/`accept4` over netd's deferred-accept (LANDED -- section 5.5.3; the in-guest gate drives a full server+client TCP round-trip from ONE single-threaded process). **V-5c** readiness over the `QTPOLL` `ready` file: **V-5c-1 LANDED** -- `ppoll` (which IS the poll family on aarch64) as a T2 row that swaps a socket fd for its `ready` sibling, plus the netd half of #220 (a listener now reports `POLLIN` when a call is pending, via the same `accept_ready` predicate `poll_accepts` uses); the first two rows BELOW the native number ceiling, so §5.5.4 carries the per-number collision re-check the ARCH §25.4 row mandates. **V-5c-2 LANDED** -- `pselect6`'s `fd_set` reshape (three 1024-bit bitmaps in, one pollfd array out, three back), plus the zero-fd sleep that BOTH forms needed: `select(0, NULL, NULL, NULL, &tv)` is the classic portable sleep, so `sys_poll_sleep_for` was added and `ppoll`'s `nfds == 0` decline retired with it. **V-5d** the focused audit + close | **`curl` fetches a URL** (ROADMAP §9.2); V-5a's own gate is an in-guest TCP round-trip over the resident loopback |
 | V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land. **V-6a** landed the decode; **V-6b** landed dispositions (`rt_sigaction` for `SIG_DFL`/`SIG_IGN` + `rt_sigprocmask` + the per-Proc `viv_sigtab` + the post-time discard), and corrected two V-6a facts by measuring musl -- the `k_sigaction` layout is arch-fixed at 32 bytes rather than flag-chosen, and SIGTERM had to be evicted from `interrupt` because a shared note cannot carry two independent dispositions (task #95). **V-6c** landed the Tier-1 frame: a real handler installs and RUNS, `rt_sigreturn` is the phenotyped spelling of `SYS_NOTED(NCONT)`, and the sigtab widened to the whole `k_sigaction`. **V-6 IS COMPLETE** | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
 | V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
-| V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
+| V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published. **LANDED** — the round covered the arc's genuinely unaudited surface (V-1b + V-2d + V-6a/b/c + V-7, chosen by measuring what the two prior rounds left rather than by assuming), returned **0 P0 / 1 P1 / 2 P2 / 4 P3**, and every finding is closed: F1 `285acd2c` (#100), F2 `ff79386b`, F3 `27a11e2c` (#101), F4-F7 `b3648a2b` (#102); the #96 FP fix and #94 landed in `a39d2c53` ahead of it, and a gate failure that surfaced during it was root-caused to a PRE-EXISTING test race and fixed at `8c1c080e` (#103/#104). §9 now carries the ESPIPE residual and the two OUT items the arc actually leaves | **CLOSED, and not dirty** — see §10.1 |
 
 Track note: V-1..V-3 are kernel-track (main); V-4/V-5/V-7 are userspace and
 aux-shaped; V-6 is kernel and audit-bearing.
@@ -2525,10 +2547,61 @@ formality.
 | **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly |
 | **#90** container `/proc/self` names the mounter | The remedies section 6.13 names both need a per-op identity channel, which is a new kernel surface |
 | **#99** pouch `select(2)`'s four defects | Userspace pouch, and the kernel translator already avoids all four (V-5c-2). Tracked, not arc-blocking |
+| **#106** `T_E_SPIPE` (29) is unregistered | Raised BY the round, as F1's deliberate residual. Appending an errno is an `ERRORS.md` change and `ERRORS.md` is ABI-bearing, so it needs signoff -- and the alternative (`EINVAL`) is the "differently wrong" substitution #100 declined. Published in §9's DEGRADED table meanwhile |
+| **#107** the flat `-1` sites ADJACENT to the byte-I/O family | F1's fix was scoped to the family the finding named. The same `-1`-means-EPERM defect exists on neighbouring surfaces; ER-3 already ratifies the mapping, so this is rollout rather than design. Deliberately not widened mid-round -- the scope a finding names is the scope a fix should be reviewable against |
+| **#108** `#NNN` means two different things across tracks | A bookkeeping hazard the arc created, not a code defect: this tree's task numbers collide with the main tree's `bug_NNN` series, so a `#NNN` read out of a commit message resolves differently depending on which tree you are in. `TaskGet` before acting on one |
 
 The through-line: **#96 and #94 were fixed because they are defects; the rest
 are deferred because they are DESIGN, and design that touches an ABI needs a
 vote rather than a commit.**
+
+### The close itself — 0 P0 / 1 P1 / 2 P2 / 4 P3, and NOT dirty
+
+Every finding is closed. The P1 and both P2s were live defects with in-guest
+consequences; all four P3s were verified against the code before being fixed,
+and **two of the four had a stated justification that did not survive that
+check** — F4's safety argument was true but spanned two files, and F5's
+conclusion held for a reason other than the one it gave.
+
+**A round 2 is NOT owed, and the reasoning is worth keeping because this
+document predicted the opposite.** The closed list recorded, at the time F1 was
+raised, that fixing it would restructure the central dispatch and therefore make
+this a dirty close. That prediction was **false three times over**:
+
+| finding | predicted | actual |
+|---|---|---|
+| F1 | restructures the central dispatch | dispatch untouched — every `-1` is a LOCAL gate where the reason is already known exactly, so the fix is ER-3 applied to five call sites |
+| F3 | a per-runner diorama name | a peer check in one userspace `h_attach`; **kernel byte-unchanged** |
+| F4-F7 | (unstated) | two one-line guards and two comments; no mechanism, no wait/wake protocol, no lock order touched |
+
+The dirty-close bar is a P0 return, six or more P1+P2, or a structurally invasive
+fix. None applies. Note the *shape* of the error though: the prediction was made
+from the finding's own description rather than from the code, which is the arc's
+recurring failure mode appearing one more time in the close itself.
+
+### What the round confirmed, so it is not re-derived
+
+The prosecutor independently verified the **I-43 argument-arity property** for
+all five T1 rows (checked against handler signatures, not dispatch sites), that
+`kill`/`tkill`/`tgkill` are in neither table so **I-26's two-axis gate is
+untouched by this arc**, that nothing in `exec.c`/`elf.c` writes the phenotype
+(§12.1 rule 4 holds by construction), that the V-2d prot check is a true
+allow-list rather than a `PROT_EXEC` deny-list, that SIGKILL is uncatchable **by
+construction** rather than by a special case, and that `viv` holds no capability
+beyond its invoker's. It also reproduced the #96 FP fix's whole mechanism
+independently, including the same five-function sweep the self-audit had reached
+by a different method.
+
+### The arc's durable lesson
+
+Across the whole VIVARIUM arc, **six of seven enqueued mechanisms were wrong**
+(#79, #80, #82, #84, #101, and #102's two justifications; #87 is the sole
+exception) — and every one was wrong in the direction of *more machinery than
+the tree needs*. The three sequencing corrections in §10 are the same error at
+chunk scale: V-1b was expected to precede V-7 and could not, V-3 was expected to
+precede V-5 and had an empty servable set, V-5 was expected to need a supervisor
+and does not. **Read the code before implementing from a task's text, and check
+what existing authority already reaches before building a channel.**
 
 ---
 

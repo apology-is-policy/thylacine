@@ -1,16 +1,24 @@
 # 145 — Vivarium: the phenotype and the syscall-entry branch
 
-**Status**: as-built at V-2d. The declaration (`SPAWN_PHENO_LINUX`), the
-syscall-entry branch, and the Tier-1/Tier-2 dispatch shells — including `mmap`
-and `munmap` — are live and boot-gated. Sockets (V-5) and signals (V-6) are not
-built; a call that needs them answers `-ENOSYS`. **V-3's supervisor is deferred,
-and not merely unbuilt**: its sketched destination cannot serve the forwarded set
-at all (§7 below, and `VIVARIUM.md` §4.1). Its shape is decided by V-5.
+**Status**: as-built at **V-8, the arc close**. The declaration
+(`SPAWN_PHENO_LINUX`), the syscall-entry branch, and the Tier-1/Tier-2 dispatch
+shells — including `mmap`/`munmap` (V-2d), the socket family (V-5) and signals
+through a running handler (V-6) — are live and boot-gated. **V-3's supervisor is
+deferred, and not merely unbuilt**: its sketched destination cannot serve the
+forwarded set at all (§7 below, and `VIVARIUM.md` §4.1), and V-5 then measured
+that sockets need no supervisor either, so the fork travels to the next chunk
+that needs a destination it cannot synthesise — process creation, task #93.
+
+What is NOT built is stated in `VIVARIUM.md` §9, which is the scope contract:
+the OUT list (`epoll`, `ptrace`, `io_uring`, process creation, …) answers a
+clean `ENOSYS`, and the DEGRADED table names every place a call is served but
+differs from Linux observably. Read §9 before concluding this chapter's silence
+means a call works.
 
 Design: `docs/VIVARIUM.md` (§4 the hybrid split, §5 the mechanism, §12.1 the
-declaration rules, §8 invariant **I-43**). Invariant: `ARCHITECTURE.md §28
-I-43`. Audit surface: `ARCHITECTURE.md §25.4` (the V-1b row) — the focused
-round is **V-8**.
+declaration rules, §8 invariant **I-43**, §9 the fidelity ladder). Invariant:
+`ARCHITECTURE.md §28 I-43`. Audit surface: `ARCHITECTURE.md §25.4` (the V-1b
+row) — the focused round is **V-8**, closed below.
 
 V-2 built the translation tables and deliberately left them uncalled, because
 `Proc.phenotype` could not yet be set to anything but 0 and a branch on a
@@ -1236,3 +1244,104 @@ a PHENO_LINUX Proc cannot create another Proc at all. Task #93 is what makes it
 reachable and where the copy belongs. Pinned in a comment beside the line whose
 own reasoning opens the gap -- the same single-threadedness notes.c leans on for
 its sigtab tearing argument.
+
+---
+
+## The V-8 close -- what was audited, what it cost, and where the tests are blind
+
+**Scope, chosen by measuring rather than by assuming.** Two rounds already
+existed: V-4c-3 covered the arc through V-4c-2, and V-5d covered the socket
+family. Everything between and after was unaudited -- and V-6 (signals) is
+marked "kernel and audit-bearing" in `VIVARIUM.md`'s own track note and had
+never received a round. So V-8's scope is `3434d6c0` V-1b + `3ab62f07` V-2d +
+`ab70b6c8`/`c514bc5f`/`bee70983` V-6a/b/c + `e7327f51` V-7, plus the #96 FP
+change landed alongside it. A close that had said "the arc has been audited"
+without asking which chunks would have missed all of V-6.
+
+**0 P0 / 1 P1 / 2 P2 / 4 P3, `MODEL(end) == Fable 5`, and NOT a dirty close.**
+
+| # | sev | what | closed |
+|---|---|---|---|
+| F1 | P1 | every T1 byte-I/O target returned a flat `-1`, which stock musl reads as `EPERM` | `285acd2c` (+ `d87c2be2`, #100) |
+| F2 | P2 | a phenotyped handler lives in the sigtab, so the terminate-latch exemption never saw it -- a frame-push failure then spun the guest at 100% forever | `ff79386b` |
+| F3 | P2 | the fixed diorama name was first-come-first-served; a second `viv run` mounted the first's | `27a11e2c` (#101) |
+| F4-F7 | P3 | sentinel-as-index; a fault-arm justification naming the wrong memory class; `whence` compared at 64 bits; sigtab not inherited across a fork | `b3648a2b` (#102) |
+
+Landed ahead of the round from its own disposition pass: **#96** (note delivery
+did not save FP/SIMD -- silent corruption of an interrupted computation,
+PRE-EXISTING on the native path and made reachable by ordinary compiled C once
+the phenotype landed) and **#94**, both `a39d2c53`. A gate failure that surfaced
+during the round -- `EXTINCTION: thread_free of RUNNING thread` -- was
+root-caused to a PRE-EXISTING race in the kernel test suite, not V-8, and fixed
+at `8c1c080e` (#103/#104).
+
+### The headline: a correction on one tier is what stops you asking about the other
+
+F1 is the arc's cleanest instance. The T2 shells map their errors to
+`-(s64)T_E_*` correctly, and the `mmap` shell *names the hazard in a comment* --
+"Thylacine signals failure with a bare -1, and a Linux libc reads -1 as -EPERM."
+The knowledge was present, written down, and applied to Tier 2. **Tier 1 was
+never asked the question.** Same family as V-4c-3's "finding one release site is
+what stops you looking for the other writer" and V-5d's "the guard that exists
+stops you asking whether it is the right guard".
+
+Underneath it was something sharper and not vivarium-specific: `T_E_PIPE` had
+been defined and ABI-pinned since the errno scripture landed and **nothing in
+the tree ever emitted it**. `devpipe_write`'s EOF arm returned `-1` beneath a
+comment asserting a musl wrapper translated it -- no such wrapper exists -- so
+every write to a closed pipe reported `EIO` **tree-wide**, not merely under a
+phenotype. A registered code with zero emitters is a contract stated and not
+kept, and it is worth grepping for elsewhere.
+
+### Where the tests are blind, stated once because the arc measured it four times
+
+Every finding that could be revert-probed was, and the probes divide sharply by
+layer. The pattern is durable enough to design future coverage around:
+
+| layer | proves | blind to |
+|---|---|---|
+| kernel unit tests (`vivarium.*`) | the DECISION -- a pure table or predicate returns the right answer | anything reached only through a user VA or a real fd |
+| in-guest joey/probe legs | the PLUMBING -- the decision is actually wired to the call | a decision that is wrong in a way the probe's inputs never pose |
+| the diorama selftest | userspace predicates, boot-fatally | the server's own dispatch |
+
+F6 is the extreme case and the one to remember: reverting the `whence`
+narrowing leaves the unit suite at a full **1272/1272 PASS** while the in-guest
+leg fails at exactly `hiwhence=-22`. The handler is `static` and takes a user
+VA, so no kernel test can pose the question at all. F3's is the mirror image --
+removing the gate from `h_attach` leaves both the selftest and the unit suite
+green while the joey leg catches it.
+
+Two shapes of test were needed that a green run does not suggest. A
+**behaviourally-inert** fix (F4 -- the sentinel guard changes nothing today,
+because nothing writes `act[0]`) needs a test that MANUFACTURES the state by
+hand, or it passes with the guard reverted. And a leg that can be satisfied by
+OVER-fixing (F6's `hiwhence` alone would pass under a handler that stopped
+checking `whence` entirely) needs its pair.
+
+### What the round confirmed, so it is not re-derived
+
+The **I-43 argument-arity property** holds for all five T1 rows, checked against
+handler signatures rather than dispatch sites. `kill`/`tkill`/`tgkill` are in
+neither table, so **I-26's two-axis gate is untouched by this arc**. The
+phenotype has three writers and three readers and nothing in `exec.c`/`elf.c`
+touches it, so §12.1 rule 4 holds by construction. All 15 T2 rows have live
+shells and the default arm fails closed. `q->lock` is never acquired under
+`p->vma_lock`. The V-6 sigframe is bounds-tight, underflow-free, zeroed before
+fill (no I-13 disclosure), read-only in effect, and **SIGKILL is uncatchable BY
+CONSTRUCTION** rather than by a special case. V-2d's prot check is a true
+allow-list, so `PROT_EXEC`/BTI/MTE/GROWSDOWN all decline and I-12 is not
+weakened. `viv` holds no capability beyond its invoker's.
+
+Carried forward from the round's own honesty: it executed nothing -- every claim
+came from reading -- `usr/viv/src/json.rs` was not read line by line, and F3's
+timing argument was reasoned from relative work rather than measured.
+
+### Gates at the close
+
+Suite **1272/1272**, boot OK, 0 EXTINCTION, with the two-vantage phenotype gate
+and `probe100`'s byte-I/O legs boot-fatal on every build. The FULL SMP gate
+**40/40 PASS, 0 corruption / 0 timing / 0 external-kill** (default+UBSan x
+smp4/smp8, N=10). LS-CI **32/32**, 0 retries, 0 kills, coverage verified by set
+comparison rather than by count. No spec gate: nothing in this arc is modelled
+in `specs/` -- `specs/phenotype.tla` is reserved for whichever chunk builds a
+forward destination, which on present evidence is process creation (#93).
