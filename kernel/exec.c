@@ -73,7 +73,7 @@ static u64 round_up_page(u64 x) {
 //
 // Returns 0 on success, -1 on failure (alignment violation, SLUB OOM,
 // vma_insert overlap).
-static int exec_map_segment(struct Proc *p, const void *blob,
+static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
                             const struct elf_load_segment *seg) {
     // v1.0: require page-aligned vaddr + file_offset. Real toolchains
     // (clang, gcc) page-align by default; the leniency for non-aligned
@@ -124,7 +124,7 @@ static int exec_map_segment(struct Proc *p, const void *blob,
     // [filesz, size) stays zero from KP_ZERO.
 
     u32 prot = vma_prot_for_elf(seg->flags);
-    int rc = burrow_map(p, burrow, seg->vaddr, size, prot);
+    int rc = burrow_map_in(as, exempt, burrow, seg->vaddr, size, prot);
     if (rc != 0) {
         burrow_unref(burrow);
         return -1;
@@ -139,12 +139,12 @@ static int exec_map_segment(struct Proc *p, const void *blob,
 
 // Map the user stack — a 1 MiB anonymous VMA at the fixed top-of-
 // user-VA — plus a one-page guard VMA directly below it.
-static int exec_map_user_stack(struct Proc *p) {
+static int exec_map_user_stack(struct AddrSpace *as, bool exempt) {
     struct Burrow *burrow = burrow_create_anon(EXEC_USER_STACK_SIZE);
     if (!burrow)                               return -1;
 
-    int rc = burrow_map(p, burrow, EXEC_USER_STACK_BASE, EXEC_USER_STACK_SIZE,
-                     VMA_PROT_RW);
+    int rc = burrow_map_in(as, exempt, burrow, EXEC_USER_STACK_BASE,
+                           EXEC_USER_STACK_SIZE, VMA_PROT_RW);
     if (rc != 0) {
         burrow_unref(burrow);
         return -1;
@@ -162,7 +162,7 @@ static int exec_map_user_stack(struct Proc *p) {
     struct Vma *guard = vma_alloc_guard(EXEC_USER_STACK_GUARD_BASE,
                                         EXEC_USER_STACK_BASE);
     if (!guard)                                return -1;
-    if (vma_insert(p, guard) != 0) {
+    if (vma_insert_in(as, exempt, guard) != 0) {
         vma_free(guard);
         return -1;
     }
@@ -178,11 +178,11 @@ static int exec_map_user_stack(struct Proc *p) {
 // Burrows, the vDSO Burrow is kernel-owned + shared + held forever (never
 // unref'd), so burrow_map's mapping_count++ is the Proc's ONLY reference; the
 // VVA's vma_drain drops it at teardown and the shared page never frees.
-static u64 exec_map_vdso(struct Proc *p) {
+static u64 exec_map_vdso(struct AddrSpace *as, bool exempt) {
     struct Burrow *v = vdso_clock_burrow();
     if (!v)                                    return 0;
-    if (burrow_map(p, v, EXEC_USER_VDSO_BASE, EXEC_USER_VDSO_SIZE,
-                   VMA_PROT_READ) != 0)        return 0;
+    if (burrow_map_in(as, exempt, v, EXEC_USER_VDSO_BASE, EXEC_USER_VDSO_SIZE,
+                      VMA_PROT_READ) != 0)     return 0;
     return EXEC_USER_VDSO_BASE;
 }
 
@@ -227,7 +227,7 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
 
 // `vdso_va` is the user VA of the mapped vDSO clock page (from exec_map_vdso),
 // or 0 if it could not be mapped (-> no AT_VDSO_CLOCK; reader falls back).
-static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
+static u64 exec_build_init_stack(struct AddrSpace *as, const struct elf_image *img,
                                  const char *argv_data, u32 argv_data_len,
                                  u32 argc, u64 vdso_va) {
     // Shape selection. argv_data_len > 0 iff argc > 0 (caller's
@@ -248,7 +248,7 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
     }
 
     // exec_map_user_stack returned 0 → the stack VMA + its BURROW exist.
-    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    struct Vma *sv = vma_lookup_in(as, EXEC_USER_STACK_BASE);
     if (!sv || !sv->burrow)
         extinction("exec_build_init_stack: stack VMA missing");
     u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
@@ -374,16 +374,15 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
 // respectively. Sharing the body avoids the divergence the earlier copy-
 // paste pattern would accumulate; argv flows transparently through to
 // exec_build_init_stack.
-static int exec_setup_argv_body(struct Proc *p,
+static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
                                 const void *blob, size_t blob_size,
                                 const char *argv_data, u32 argv_data_len,
                                 u32 argc,
                                 u64 *entry_out, u64 *sp_out) {
-    if (!p || !blob || !entry_out || !sp_out) return -1;
-    if (p->magic != PROC_MAGIC)                return -1;
-    if (!p->as)                                return -1;     // kproc rejected
-    // v1.0: no replace-in-place; p must be clean.
-    if (p->as->vmas != NULL)                   return -1;
+    if (!as || !blob || !entry_out || !sp_out) return -1;
+    // The target must be CLEAN. For the spawn paths that is a freshly rforked
+    // child's address space; for execve it is the detached one being built.
+    if (as->vmas != NULL)                      return -1;
 
     // argv invariants (defense-in-depth — the syscall body has already
     // checked these, but exec_setup_with_argv is exported to other
@@ -401,43 +400,58 @@ static int exec_setup_argv_body(struct Proc *p,
 
     // Map each PT_LOAD segment.
     for (int i = 0; i < img.n_segments; i++) {
-        if (exec_map_segment(p, blob, &img.segments[i]) != 0) {
-            // Partial state: caller disposes the Proc.
+        if (exec_map_segment(as, exempt, blob, &img.segments[i]) != 0) {
+            // Partial state: caller disposes the target address space.
             return -1;
         }
     }
 
     // Allocate user stack.
-    if (exec_map_user_stack(p) != 0) {
+    if (exec_map_user_stack(as, exempt) != 0) {
         return -1;
     }
 
     // Map the shared vDSO clock page RO (best-effort; 0 -> no AT_VDSO_CLOCK).
-    u64 vdso_va = exec_map_vdso(p);
+    u64 vdso_va = exec_map_vdso(as, exempt);
 
     // Build the System V startup frame (argc / argv / envp / auxv +
     // strings region under Shape B) at the top of the user stack;
     // *sp_out points at its `argc` word.
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
+    *sp_out    = exec_build_init_stack(as, &img, argv_data, argv_data_len, argc,
                                        vdso_va);
     return 0;
 }
 
+// The Proc-taking gate the two blob entries share: reject kproc, and resolve the
+// Proc to its own (attached) address space + I-32 exemption. execve does NOT go
+// through here -- it targets a detached address space and supplies its own.
+static int exec_setup_for_proc(struct Proc *p,
+                               const void *blob, size_t blob_size,
+                               const char *argv_data, u32 argv_data_len,
+                               u32 argc, u64 *entry_out, u64 *sp_out) {
+    if (!p)                     return -1;
+    if (p->magic != PROC_MAGIC) return -1;
+    if (!p->as)                 return -1;     // kproc rejected
+    return exec_setup_argv_body(p->as, proc_resource_exempt(p),
+                                blob, blob_size, argv_data, argv_data_len, argc,
+                                entry_out, sp_out);
+}
+
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out) {
-    return exec_setup_argv_body(p, blob, blob_size,
-                                /*argv_data=*/NULL, /*argv_data_len=*/0u,
-                                /*argc=*/0u,
-                                entry_out, sp_out);
+    return exec_setup_for_proc(p, blob, blob_size,
+                               /*argv_data=*/NULL, /*argv_data_len=*/0u,
+                               /*argc=*/0u,
+                               entry_out, sp_out);
 }
 
 int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
                          const char *argv_data, u32 argv_data_len, u32 argc,
                          u64 *entry_out, u64 *sp_out) {
-    return exec_setup_argv_body(p, blob, blob_size,
-                                argv_data, argv_data_len, argc,
-                                entry_out, sp_out);
+    return exec_setup_for_proc(p, blob, blob_size,
+                               argv_data, argv_data_len, argc,
+                               entry_out, sp_out);
 }
 
 // =============================================================================
@@ -458,7 +472,7 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
 // it; the last partial page's tail is the file's zero padding between
 // page-aligned segments, or EOF -> the fault arm's KP_ZERO). BORROWS exe;
 // spoor_refs a fresh ref for the consuming Image lookup.
-static int map_file_backed(struct Proc *p, struct Spoor *exe,
+static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
                            const struct elf_load_segment *seg) {
     u64 vaddr_end = seg->vaddr + seg->memsz;
     if (vaddr_end < seg->vaddr)             return -1;
@@ -480,7 +494,7 @@ static int map_file_backed(struct Proc *p, struct Spoor *exe,
     // segment at ONE prot (the Image keys per-segment), which is what keeps the
     // fault arm's freq->exec-gated I-cache sync sound (REVENANT §4.6).
     u32 prot = vma_prot_for_elf(seg->flags);
-    int rc = burrow_map(p, b, seg->vaddr, size, prot);
+    int rc = burrow_map_in(as, exempt, b, seg->vaddr, size, prot);
     // Drop the caller's handle ref. On success mapping_count + the cache's
     // strong ref keep the image alive; on map failure the image stays validly
     // cached (idle) for a later exec -- never leaked.
@@ -494,7 +508,7 @@ static int map_file_backed(struct Proc *p, struct Spoor *exe,
 // path cannot zero). Since #45 rodata (R-only) rides map_file_backed instead.
 // filesz bytes are dev->read; the [filesz, size) tail stays zero (KP_ZERO) =
 // .bss. No userspace file-backed writable mapping is ever created (I-36-4).
-static int map_eager_from_file(struct Proc *p, struct Spoor *exe,
+static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *exe,
                                const struct elf_load_segment *seg) {
     u64 vaddr_end = seg->vaddr + seg->memsz;
     if (vaddr_end < seg->vaddr)             return -1;
@@ -525,7 +539,7 @@ static int map_eager_from_file(struct Proc *p, struct Spoor *exe,
     // [filesz, size) stays zero (KP_ZERO from alloc_pages) = .bss.
 
     u32 prot = vma_prot_for_elf(seg->flags);
-    int rc = burrow_map(p, b, seg->vaddr, size, prot);
+    int rc = burrow_map_in(as, exempt, b, seg->vaddr, size, prot);
     burrow_unref(b);
     return rc == 0 ? 0 : -1;
 }
@@ -568,34 +582,30 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
     return hdr;
 }
 
-int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
-                          const char *argv_data, u32 argv_data_len, u32 argc,
-                          u64 *entry_out, u64 *sp_out) {
-    if (!p || !exe || !entry_out || !sp_out)   return -1;
-    if (p->magic != PROC_MAGIC)                return -1;
-    if (!p->as)                                return -1;     // kproc rejected
-    if (p->as->vmas != NULL)                   return -1;     // clean address space only
+// LINEAGE L-2: the file-backed load, addressed by AddrSpace. This is the whole
+// of exec_setup_from_spoor's body except the Proc-side name/exe_path stamps,
+// which are deliberately NOT here -- they mutate the Proc, and execve must be
+// able to fail with the caller completely untouched, so its caller applies them
+// only at the commit point. The spawn wrapper below keeps applying them inline
+// (its Proc is a fresh child that is discarded on failure, so the distinction
+// cannot be observed there).
+int exec_load_into(struct AddrSpace *as, bool exempt,
+                   struct Spoor *exe, size_t exe_size,
+                   const char *argv_data, u32 argv_data_len, u32 argc,
+                   u64 *entry_out, u64 *sp_out) {
+    if (!as || !exe || !entry_out || !sp_out)  return -1;
+    if (as->vmas != NULL)                      return -1;     // clean target only
     if (!exe->dev || !exe->dev->read)          return -1;
     if (exe_size == 0 || exe_size > EXEC_FILE_MAX) return -1;
 
     // argv invariants (defense-in-depth; the syscall body already checked them,
-    // but the contract is owned here too -- exec_setup_from_spoor is exported).
+    // but the contract is owned here too -- this entry is exported).
     if (argc > 0) {
         if (argv_data_len == 0 || !argv_data)      return -1;
         if (argv_data[argv_data_len - 1] != '\0')  return -1;
     } else {
         if (argv_data_len != 0)                    return -1;
     }
-
-    // prowl-1 (PROWL-DESIGN.md section 3.2): stamp the process name from the
-    // resolved binary path -- the UNFORGEABLE identity (the basename of what
-    // actually execs, not caller-controlled argv[0]). exe->path is the #66
-    // namespace name of the resolved Spoor ("/bin/corvus" -> "corvus"), fail-soft
-    // NULL on an OOM path-alloc (I-33) -> the name stays "" (the formatters show
-    // "?"). Runs in the CHILD's context (p == the execing Proc), before it reaches
-    // EL0 -- no concurrent reader observes a torn stamp.
-    if (exe->path)
-        proc_set_name(p, exe->path->s, (size_t)exe->path->len);
 
     // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
     //    binary. elf_load validates segment extents against the real file size.
@@ -648,33 +658,59 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
         bool file_shareable = (seg->flags & PF_R) && !(seg->flags & PF_W) &&
                               fend != 0 && fend == mend;
 
-        int rc = file_shareable ? map_file_backed(p, exe, seg)
-                                : map_eager_from_file(p, exe, seg);
-        if (rc != 0)                            return -1;   // partial -> caller disposes Proc
+        int rc = file_shareable ? map_file_backed(as, exempt, exe, seg)
+                                : map_eager_from_file(as, exempt, exe, seg);
+        if (rc != 0)                            return -1;   // partial -> caller disposes target
     }
 
     // 3. User stack + the vDSO clock page + the System V startup frame (reads
     //    img metadata, not the file -- AT_PHDR resolves into the first mapped
     //    segment's VA; AT_VDSO_CLOCK into the RO clock page).
-    if (exec_map_user_stack(p) != 0)           return -1;
-    u64 vdso_va = exec_map_vdso(p);            // best-effort; 0 -> no AT_VDSO_CLOCK
+    if (exec_map_user_stack(as, exempt) != 0)  return -1;
+    u64 vdso_va = exec_map_vdso(as, exempt);   // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc,
+    *sp_out    = exec_build_init_stack(as, &img, argv_data, argv_data_len, argc,
                                        vdso_va);
+    return 0;
+}
 
-    // 4. VIVARIUM V-4a-0: record the executable's namespace name for
-    //    /proc/<pid>/exe. `exe->path` is the #66 Path stalk built while
-    //    exec_resolve_from_namespace resolved this binary -- the only place in
-    //    the system that still knows what the running program is CALLED (the
-    //    Image cache is qid-keyed, the text Burrow anonymous). Set LAST, only
-    //    on the success path, so a Proc never advertises a binary it failed to
-    //    load. NULL-tolerant both ways: the blob init-load path (`/joey`,
-    //    which predates any namespace) and a #66 alloc failure both leave it
-    //    NULL, which renders as an empty file and fails no exec (I-33).
+// The spawn entry: load into the Proc's own (fresh, empty) address space and
+// apply the two Proc-side stamps. Every SYS_SPAWN_* thunk and the boot init-load
+// come through here; execve does not (see exec_load_into's header).
+int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
+                          const char *argv_data, u32 argv_data_len, u32 argc,
+                          u64 *entry_out, u64 *sp_out) {
+    if (!p || !exe)                            return -1;
+    if (p->magic != PROC_MAGIC)                return -1;
+    if (!p->as)                                return -1;     // kproc rejected
+
+    // prowl-1 (PROWL-DESIGN.md section 3.2): stamp the process name from the
+    // resolved binary path -- the UNFORGEABLE identity (the basename of what
+    // actually execs, not caller-controlled argv[0]). exe->path is the #66
+    // namespace name of the resolved Spoor ("/bin/corvus" -> "corvus"), fail-soft
+    // NULL on an OOM path-alloc (I-33) -> the name stays "" (the formatters show
+    // "?"). Runs in the CHILD's context (p == the execing Proc), before it reaches
+    // EL0 -- no concurrent reader observes a torn stamp.
+    if (exe->path)
+        proc_set_name(p, exe->path->s, (size_t)exe->path->len);
+
+    int rc = exec_load_into(p->as, proc_resource_exempt(p), exe, exe_size,
+                            argv_data, argv_data_len, argc, entry_out, sp_out);
+    if (rc != 0) return -1;
+
+    // VIVARIUM V-4a-0: record the executable's namespace name for
+    // /proc/<pid>/exe. `exe->path` is the #66 Path stalk built while
+    // exec_resolve_from_namespace resolved this binary -- the only place in
+    // the system that still knows what the running program is CALLED (the
+    // Image cache is qid-keyed, the text Burrow anonymous). Set LAST, only
+    // on the success path, so a Proc never advertises a binary it failed to
+    // load. NULL-tolerant both ways: the blob init-load path (`/joey`,
+    // which predates any namespace) and a #66 alloc failure both leave it
+    // NULL, which renders as an empty file and fails no exec (I-33).
     //
-    //    Unlocked by construction: this runs in the exec'ing Proc's own
-    //    context, before it has a second thread, and the field's only other
-    //    writers are its own rfork (which precedes this) and its proc_free.
+    // Unlocked by construction: this runs in the exec'ing Proc's own
+    // context, before it has a second thread, and the field's only other
+    // writers are its own rfork (which precedes this) and its proc_free.
     proc_set_exe_path(p, exe->path);
     return 0;
 }

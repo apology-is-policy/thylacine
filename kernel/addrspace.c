@@ -11,6 +11,7 @@
 #include <thylacine/addrspace.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/proc.h>      // PROC_PAGE_MAX / PROC_VMA_MAX / PROC_SHARED_MAP_MAX_PAGES
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -64,13 +65,79 @@ void addrspace_unref(struct AddrSpace *as) {
     // No TLB flush here, and no per-address-space ASID free: the rolling-ASID
     // model simply drops context_id, and its hardware ASID value stays reserved
     // in the current generation's bitmap until the next rollover reclaims the
-    // whole space at once (ARCH section 6.2.1). This is TLB-safe because the
-    // leaf user mappings were already invalidated by vma_drain's all-ASID
-    // `tlbi vaae1is`, no live CPU holds this table in TTBR0 (every thread was
-    // reaped and on_cpu-spun first), and any eventual reuse of the ASID value
-    // is gated by the rollover's per-CPU flush_pending local flush. Matches the
-    // Linux model: no flush at teardown, reclaim at rollover.
+    // whole space at once (ARCH section 6.2.1). What makes that safe is the
+    // ASID TAG -- every user PTE is non-global (PTE_NG), so a stale entry is
+    // reachable only under this address space's own ASID, and the rollover's
+    // per-CPU flush_pending local flush runs before that value can go live
+    // again. Each caller separately owes "no CPU translates under this ASID
+    // now": proc_free by having reaped + on_cpu-spun every thread,
+    // proc_exec_replace by writing the new TTBR0 (a DIFFERENT ASID) and `isb`ing
+    // before it gets here. See the header for the full argument -- in
+    // particular, vma_drain issues NO TLBI (measured at L-2), so an earlier
+    // claim that it did was fiction and is not load-bearing anywhere.
     proc_pgtable_destroy(as->pgtable_root);
     as->pgtable_root = 0;
     kfree(as);
+}
+
+// =============================================================================
+// The I-32 counter mechanics (see the header for the policy/mechanics split).
+// =============================================================================
+//
+// Every one of these runs under as->lock, which is what makes the caps EXACT:
+// the load, the cap decision and the store cannot interleave with a sibling
+// charge on the same address space. The uncharges clamp at 0 rather than
+// wrapping -- every uncharge pairs with a charge, so a wrap would mean the
+// pairing is already broken and silently producing a 4-billion-page counter
+// would hide it.
+
+bool addrspace_charge_pages(struct AddrSpace *as, u32 npages, bool exempt) {
+    if (!as) return false;
+    u32 cur = __atomic_load_n(&as->page_count, __ATOMIC_RELAXED);
+    if (npages > 0xFFFFFFFFu - cur) return false;    // counter overflow (refuse)
+    if (!exempt && cur + npages > PROC_PAGE_MAX)
+        return false;                                 // over cap -> caller -ENOMEM
+    __atomic_store_n(&as->page_count, cur + npages, __ATOMIC_RELEASE);
+    return true;
+}
+
+void addrspace_uncharge_pages(struct AddrSpace *as, u32 npages) {
+    if (!as) return;
+    u32 cur = __atomic_load_n(&as->page_count, __ATOMIC_RELAXED);
+    u32 nv  = (cur >= npages) ? cur - npages : 0;
+    __atomic_store_n(&as->page_count, nv, __ATOMIC_RELEASE);
+}
+
+bool addrspace_charge_vma(struct AddrSpace *as, bool exempt) {
+    if (!as) return false;
+    u32 cur = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
+    if (cur == 0xFFFFFFFFu) return false;             // counter saturation (refuse)
+    if (!exempt && cur >= PROC_VMA_MAX)
+        return false;                                 // over cap -> vma_insert rejects
+    __atomic_store_n(&as->vma_count, cur + 1, __ATOMIC_RELEASE);
+    return true;
+}
+
+void addrspace_uncharge_vma(struct AddrSpace *as) {
+    if (!as) return;
+    u32 cur = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
+    u32 nv  = (cur > 0) ? cur - 1 : 0;
+    __atomic_store_n(&as->vma_count, nv, __ATOMIC_RELEASE);
+}
+
+bool addrspace_charge_shared_map(struct AddrSpace *as, u32 npages, bool exempt) {
+    if (!as) return false;
+    u32 cur = __atomic_load_n(&as->shared_map_pages, __ATOMIC_RELAXED);
+    if (npages > 0xFFFFFFFFu - cur) return false;    // counter overflow (refuse)
+    if (!exempt && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
+        return false;                                 // over cap -> the share fails clean
+    __atomic_store_n(&as->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
+    return true;
+}
+
+void addrspace_uncharge_shared_map(struct AddrSpace *as, u32 npages) {
+    if (!as) return;
+    u32 cur = __atomic_load_n(&as->shared_map_pages, __ATOMIC_RELAXED);
+    u32 nv  = (cur >= npages) ? cur - npages : 0;
+    __atomic_store_n(&as->shared_map_pages, nv, __ATOMIC_RELEASE);
 }

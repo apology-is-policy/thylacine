@@ -991,6 +991,36 @@ void sched_install_asid_ttbr0(struct Thread *next) {
     }
 }
 
+// LINEAGE L-2: install `t`'s CURRENT address space in the hardware, right now.
+//
+// Every other TTBR0 change in the tree happens at a context switch, where
+// cpu_switch_context loads the value from ctx. execve is the sole path that
+// swaps a LIVE thread's address space and then returns straight to EL0 through
+// the exception frame -- no switch happens, so nothing would ever load the new
+// root and the eret would land the new image's entry PC in the OLD translation.
+//
+// IRQs are masked across the pair for two reasons, both load-bearing:
+//   - asid_resolve publishes into THIS CPU's active slot, and its contract
+//     (arch/arm64/asid.c) is that the caller has IRQs masked on the CPU the
+//     address space is about to run on;
+//   - cpu_switch_context SAVES the live TTBR0_EL1 into prev->ctx.ttbr0
+//     (context.S: `mrs x9, ttbr0_el1`). A preemption landing between the ctx
+//     write and the msr would overwrite the freshly-composed value with the
+//     stale hardware one, and the thread would resume translating through an
+//     address space that is being torn down.
+//
+// The `isb` is what makes the switch a barrier for the caller: after it, no
+// instruction fetch or data access on this CPU can still be walking the old
+// root, which is the precondition addrspace_unref's teardown needs.
+void sched_activate_addrspace(struct Thread *t) {
+    if (!t || !t->proc || !t->proc->as) return;
+    irq_state_t s = spin_lock_irqsave(NULL);
+    sched_install_asid_ttbr0(t);
+    __asm__ __volatile__("msr ttbr0_el1, %0\n\tisb"
+                         :: "r"(t->ctx.ttbr0) : "memory");
+    spin_unlock_irqrestore(NULL, s);
+}
+
 void sched_finish_task_switch(void) {
     struct CpuSched *cs = this_cpu_sched();
     // P2-Cf: clear prev's on_cpu (mirror of sched()'s C-side resume

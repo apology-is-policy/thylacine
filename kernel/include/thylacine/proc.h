@@ -1216,6 +1216,32 @@ void thread_exit_self(void);
 // rendez/timerwait locks, all strictly BELOW g_proc_table_lock in the order.
 void proc_group_terminate(struct Proc *p, const char *msg);
 
+// LINEAGE L-2 (docs/LINEAGE.md section 5.2, I-44): execve's address-space swap.
+//
+// proc_exec_alone -- true iff the CALLING thread is the only live thread of `p`
+// (peers already EXITING do not count: such a thread has passed through
+// thread_exit_self, will never be scheduled again and can never touch user
+// memory, so it neither observes the swap nor blocks it). This is execve's
+// admission gate at L-2a; the multi-thread case needs a per-Thread termination
+// primitive that does not exist yet -- see the L-2b note in LINEAGE.md section 7.
+bool proc_exec_alone(struct Proc *p);
+
+// proc_exec_replace -- commit `nas` as `p`'s address space and destroy the
+// outgoing one, then reset the per-image state a new program must not inherit
+// (signal handlers, TLS, FP/SIMD).
+//
+// INFALLIBLE by construction, and that is the point: everything that can fail
+// has already happened (the program was resolved, its ELF parsed, and `nas`
+// fully built) before this is called, so a failed execve returns to a caller
+// whose address space was never touched. There is no rollback here because
+// there is nothing left to roll back.
+//
+// PRECONDITIONS: the caller is the execing thread; it is the only live thread of
+// `p` (proc_exec_alone); `nas` is a completely built address space no other
+// thread can reach. Each is re-checked or extincts -- a violation is structural
+// corruption, not a runtime error.
+void proc_exec_replace(struct Proc *p, struct AddrSpace *nas);
+
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
 // return-to-EL0 (the sync-from-EL0 SVC + fault-handled tails in
 // exception.c, and the IRQ-from-EL0 tail in vectors.S 0x480). If the calling

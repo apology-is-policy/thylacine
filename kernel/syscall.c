@@ -6813,6 +6813,179 @@ static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
 }
 
 // =============================================================================
+// SYS_EXECVE — replace this Proc's program image in place (LINEAGE L-2,
+// docs/LINEAGE.md section 5.2, invariant I-44).
+// =============================================================================
+//
+// THE ORDERING IS THE DESIGN. Everything that can fail happens BEFORE anything
+// the caller can observe changes:
+//
+//   1. copy the arguments in            -- from the OLD address space, which is
+//                                          still the live one
+//   2. resolve the program              -- I-28, in the caller's Territory
+//   3. build a DETACHED address space   -- ELF parse, segment maps, stack, auxv
+//   4. [commit]  swap + activate        -- infallible
+//   5. rewrite the trapframe            -- the syscall's own eret starts it
+//
+// Step 3 is why exec_load_into exists. Building into a detached target rather
+// than into the caller's own address space means a malformed ELF or an OOM
+// leaves NOTHING to undo: the caller returns -errno with its image intact,
+// which is what POSIX requires and what makes a failed exec debuggable. Linux
+// reaches the same place from the other side (bprm->mm), having learned it the
+// hard way -- its point of no return sits mid-exec and a failure past it kills
+// the process.
+//
+// The multi-thread refusal at step 0 is documented at SYS_EXECVE in syscall.h.
+
+static s64 sys_execve_handler(struct exception_context *ctx) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -(s64)T_E_INVAL;
+    struct Proc *p = t->proc;
+    if (!p || !p->as)                                  return -(s64)T_E_INVAL;
+
+    u64 path_va       = ctx->regs[0];
+    u64 path_len      = ctx->regs[1];
+    u64 argv_data_va  = ctx->regs[2];
+    u64 argv_data_len = ctx->regs[3];
+    u64 argc          = ctx->regs[4];
+
+    if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -(s64)T_E_INVAL;
+    if (argv_data_len > SYS_SPAWN_ARGV_DATA_MAX)       return -(s64)T_E_INVAL;
+    if (argc > SYS_SPAWN_ARGV_MAX)                     return -(s64)T_E_INVAL;
+    // argc and argv_data_len are zero together or non-zero together: a count
+    // with no bytes has nothing to point at, and bytes with no count would be
+    // silently dropped rather than rejected.
+    if ((argc == 0) != (argv_data_len == 0))           return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len))     return -(s64)T_E_FAULT;
+    if (argv_data_len &&
+        !sys_validate_user_buf(argv_data_va, argv_data_len))
+        return -(s64)T_E_FAULT;
+
+    // The multi-thread gate, FIRST -- before any allocation or FS work, so the
+    // refusal costs nothing and cannot half-do anything.
+    if (!proc_exec_alone(p))                           return -(s64)T_E_AGAIN;
+
+    // 1. Arguments into kernel memory. Both live in the OLD address space, so
+    //    they must be copied before the swap -- after it the user VAs mean
+    //    something else entirely. The path goes on the stack (bounded by
+    //    SYS_OPEN_PATH_MAX, the same scratch SYS_OPEN uses); argv can be 64 KiB,
+    //    so it is heap.
+    char path[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)     return -(s64)T_E_FAULT;
+        if (b == '\0')                                 return -(s64)T_E_INVAL;
+        path[i] = (char)b;
+    }
+    path[path_len] = '\0';
+
+    char *argv_kbuf = NULL;
+    if (argv_data_len) {
+        argv_kbuf = kmalloc((size_t)argv_data_len, 0);
+        if (!argv_kbuf)                                return -(s64)T_E_NOMEM;
+        for (u64 i = 0; i < argv_data_len; i++) {
+            u8 b;
+            if (uaccess_load_u8(argv_data_va + i, &b) != 0) {
+                kfree(argv_kbuf);
+                return -(s64)T_E_FAULT;
+            }
+            argv_kbuf[i] = (char)b;
+        }
+        // The packing contract exec_build_init_stack relies on: exactly `argc`
+        // NUL-terminated strings, the last byte a NUL. Checked here so a
+        // malformed buffer is a clean -EINVAL rather than a frame the loader
+        // has to defend against.
+        if (argv_kbuf[argv_data_len - 1] != '\0') {
+            kfree(argv_kbuf);
+            return -(s64)T_E_INVAL;
+        }
+        u64 nuls = 0;
+        for (u64 i = 0; i < argv_data_len; i++)
+            if (argv_kbuf[i] == '\0') nuls++;
+        if (nuls != argc) {
+            kfree(argv_kbuf);
+            return -(s64)T_E_INVAL;
+        }
+    }
+
+    // 2. Resolve in the CALLER's namespace (I-28: contained at root_spoor,
+    //    per-component X-search, OEXEC on the leaf) -- the same helper every
+    //    SYS_SPAWN_* uses, so exec and spawn cannot diverge on what is
+    //    executable. Pins the Spoor; we clunk it below on every path.
+    size_t exe_size = 0;
+    struct Spoor *exe = exec_resolve_from_namespace(p, path, (size_t)path_len,
+                                                    &exe_size);
+    if (!exe) {
+        kfree(argv_kbuf);
+        // stalk's failure reason is not plumbed out yet (ER-x); ENOENT is the
+        // honest majority answer and matches what SYS_OPEN reports today.
+        return -(s64)T_E_NOENT;
+    }
+
+    // 3. Build the new image in a DETACHED address space. Nothing below this
+    //    point until the commit touches `p`.
+    struct AddrSpace *nas = addrspace_alloc();
+    if (!nas) {
+        spoor_clunk(exe);
+        kfree(argv_kbuf);
+        return -(s64)T_E_NOMEM;
+    }
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_load_into(nas, proc_resource_exempt(p), exe, exe_size,
+                            argv_kbuf, (u32)argv_data_len, (u32)argc,
+                            &entry, &sp);
+    if (rc != 0) {
+        // The target may be partially populated; we own its teardown. The
+        // caller's own address space was never touched, which is the whole
+        // point of building detached.
+        vma_drain_in(nas);
+        addrspace_unref(nas);
+        spoor_clunk(exe);
+        kfree(argv_kbuf);
+        // DEGRADED, deliberately: POSIX says ENOEXEC here, and the errno
+        // registry has no T_E_NOEXEC. docs/ERRORS.md is ABI-bearing and its
+        // additions need signoff, so this reports EINVAL and the gap is tracked
+        // rather than closed by fiat -- the same disposition T_E_SPIPE (#106)
+        // carries. It matters at L-6: a shell reads ENOEXEC as "run it as a
+        // script", so until the code exists a shell cannot make that
+        // distinction.
+        return -(s64)T_E_INVAL;
+    }
+
+    // 4. COMMIT. Infallible from here -- there is no path back to the caller's
+    //    old image, and none is needed.
+    proc_exec_replace(p, nas);
+
+    // The Proc-side stamps the spawn path applies inside exec_setup_from_spoor.
+    // They land HERE instead, after the commit, for the reason exec_load_into's
+    // header gives: a name or /proc/<pid>/exe stamped before a load that then
+    // failed would leave a live Proc advertising a program it is not running.
+    if (exe->path)
+        proc_set_name(p, exe->path->s, (size_t)exe->path->len);
+    proc_set_exe_path(p, exe->path);
+
+    spoor_clunk(exe);
+    kfree(argv_kbuf);
+
+    // 5. Rewrite the trapframe so this syscall's own eret enters the new image.
+    //    KERNEL_EXIT (vectors.S) restores elr_el1 / sp_el0 / spsr_el1 from these
+    //    fields, so setting them here IS the transition -- no separate
+    //    userland_enter, and no window where the new address space is live but
+    //    the PC still points into the old one.
+    //
+    //    Every GPR is zeroed to match userland_enter's contract (a fresh image
+    //    must not inherit register contents, and x0 in particular would
+    //    otherwise be read as this syscall's return value). SPSR 0 == EL0t with
+    //    DAIF clear, identical to what userland_enter installs.
+    for (int i = 0; i < 31; i++) ctx->regs[i] = 0;
+    ctx->sp   = sp;
+    ctx->elr  = entry;
+    ctx->spsr = 0;
+    return 0;   // ignored -- regs[0] was just zeroed on purpose
+}
+
+// =============================================================================
 // SYS_WAIT_PID — reap one ZOMBIE child (P5-spawn-wait).
 // =============================================================================
 //
@@ -8622,6 +8795,17 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_PUTS:
         ctx->regs[0] = (u64)sys_puts_handler(ctx->regs[0], ctx->regs[1]);
         return;
+
+    case SYS_EXECVE: {
+        // The one handler that must not write its result into regs[0]
+        // unconditionally: on SUCCESS it has already zeroed every GPR and
+        // repointed elr/sp at the new image, and storing a return value would
+        // hand the fresh program a non-zero x0 it never asked for. On FAILURE
+        // nothing was touched, so the -errno goes back the normal way.
+        s64 r = sys_execve_handler(ctx);
+        if (r != 0) ctx->regs[0] = (u64)r;
+        return;
+    }
 
     case SYS_MMIO_CREATE:
         ctx->regs[0] = (u64)sys_mmio_create_handler(ctx->regs[0],

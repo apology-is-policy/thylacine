@@ -41,6 +41,7 @@
 #include <thylacine/dev.h>       // #45: the blob-serving stub Dev
 #include <thylacine/spoor.h>     // #45: spoor_alloc for the from_spoor path
 #include <thylacine/image.h>     // #45: Image-cache counters (dispatch proof)
+#include <thylacine/addrspace.h> // LINEAGE L-2: the detached build target
 
 #include "../../mm/phys.h"
 #include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
@@ -607,5 +608,157 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
     TEST_EXPECT_EQ(w[17], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
+    drop_proc(p);
+}
+
+// =============================================================================
+// LINEAGE L-2: exec_load_into -- the DETACHED build.
+//
+// execve must be able to fail with the caller's image completely intact, which
+// is only true if the load never touches the caller's address space. These pin
+// that property at the mechanism level; the syscall-level proof is /exec-probe's
+// leg A (a failed execve returns and the caller keeps running).
+//
+// The counters are what make this non-vacuous. A "simplification" that built
+// into p->as and swapped afterwards would still load the image correctly and
+// still pass a VMA-shape check -- it would just charge the wrong address space,
+// silently, leaving the surviving one reporting zero RSS for the rest of the
+// Proc's life. So the assertions below are as much about page_count/vma_count
+// as about where the VMAs landed.
+// =============================================================================
+
+void test_execve_load_into_detached(void);
+void test_execve_load_into_rejects_dirty(void);
+void test_execve_failed_load_leaves_target_drainable(void);
+
+void test_execve_load_into_detached(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DE7ull;      // distinct Image key
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc();
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+    TEST_ASSERT(nas != p->as, "the target is a DIFFERENT address space");
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_load_into(nas, /*exempt=*/false, exe, size,
+                            NULL, 0, 0, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_load_into into a detached address space");
+    TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
+
+    // The image landed in the TARGET...
+    TEST_ASSERT(vma_lookup_in(nas, 0x10000ull) != NULL, "text VMA in the target");
+    TEST_ASSERT(vma_lookup_in(nas, 0x20000ull) != NULL, "data VMA in the target");
+    TEST_ASSERT(vma_lookup_in(nas, EXEC_USER_STACK_BASE) != NULL,
+                "stack VMA in the target");
+    TEST_ASSERT(nas->vma_count > 0, "the target was charged its VMAs");
+
+    // ...and the CALLER's address space is untouched. The vma_count pair is
+    // what makes this non-vacuous -- a build that targeted p->as would install
+    // the same VMAs and charge the same count, just on the wrong object.
+    TEST_ASSERT(p->as->vmas == NULL, "the caller's VMA list is still empty");
+    TEST_EXPECT_EQ((u64)p->as->vma_count, 0ull,
+                   "the caller's VMA count was NOT charged");
+
+    // NOT asserted: that either address space was charged PAGES. Measured --
+    // exec charges no page_count at all. The I-32 page axis is charged at
+    // exactly three sites (SYS_BURROW_ATTACH, SYS_LOOM_SETUP's ring, and the
+    // lazy demand-page fault arm), which is the axis's documented scope: it
+    // bounds the REPEATABLE anon vectors, while the exec image is one-shot and
+    // bounded by EXEC_FILE_MAX plus the segment maps themselves. A future
+    // reader who assumes exec charges pages -- as this test's first draft did,
+    // and failed -- should read that scope note in the I-32 row rather than
+    // "fix" the accounting here.
+
+    // The caller owns the target's teardown on every path.
+    vma_drain_in(nas);
+    TEST_ASSERT(nas->vmas == NULL, "drain emptied the target");
+    addrspace_unref(nas);
+
+    spoor_clunk(exe);
+    drop_proc(p);
+}
+
+void test_execve_load_into_rejects_dirty(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0x1000);
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DE8ull;
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc();
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    // Load once -- succeeds and leaves the target populated.
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, &entry, &sp),
+                   0, "first load into a clean target");
+
+    // Loading again into the SAME (now dirty) target must refuse rather than
+    // overlay a second image on top of the first.
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, &entry, &sp),
+                   -1, "a second load into a dirty target is refused");
+
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    drop_proc(p);
+}
+
+void test_execve_failed_load_leaves_target_drainable(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // A well-formed ELF whose SECOND segment is unmappable: an unaligned vaddr,
+    // which exec_load_into's per-segment gate rejects. The first segment maps
+    // before the failure, so the target is left PARTIALLY populated -- exactly
+    // the state the syscall's failure arm has to clean up.
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    {
+        // Nudge the second phdr's p_vaddr off a page boundary.
+        struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+        struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+        ph[1].p_vaddr += 0x10;
+    }
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DE9ull;
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc();
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, &entry, &sp),
+                   -1, "a mid-load failure is reported");
+    TEST_ASSERT(nas->vmas != NULL, "the target really is partially populated");
+
+    // The caller's address space never saw any of it -- which is what lets the
+    // syscall return -errno to a Proc that keeps running.
+    TEST_ASSERT(p->as->vmas == NULL, "the caller's VMA list is still empty");
+    TEST_EXPECT_EQ((u64)p->as->vma_count, 0ull, "the caller was not charged");
+
+    // And the partial target tears down cleanly (addrspace_unref extincts on a
+    // live VMA list, so reaching the end of this test IS the assertion).
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
     drop_proc(p);
 }

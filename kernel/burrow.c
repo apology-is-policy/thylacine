@@ -537,7 +537,18 @@ void burrow_release_mapping(struct Burrow *v) {
 // =============================================================================
 
 int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 prot) {
-    if (!p || !v) return -1;
+    if (!p) return -1;
+    return burrow_map_in(p->as, proc_resource_exempt(p), v, vaddr, length, prot);
+}
+
+// LINEAGE L-2: map into an explicit address space. burrow_map's ONLY use of the
+// Proc was vma_insert's, so this is the whole of it -- the map installs no PTEs
+// (every page is demand-paged) and touches no per-Proc state, which is what
+// makes the exec load path address-space-agnostic once the target is threaded
+// through. See vma.h for why exec needs a detached target.
+int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                  u64 vaddr, size_t length, u32 prot) {
+    if (!as || !v) return -1;
     if (length == 0) return -1;
     if (vaddr & (PAGE_SIZE - 1)) return -1;
     if (length & (PAGE_SIZE - 1)) return -1;
@@ -563,7 +574,7 @@ int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 p
 
     // vma_insert returns -1 on overlap. On overlap, the Vma is still
     // owned by us — vma_free releases the BURROW mapping ref symmetrically.
-    if (vma_insert(p, vma) != 0) {
+    if (vma_insert_in(as, exempt, vma) != 0) {
         vma_free(vma);
         return -1;
     }

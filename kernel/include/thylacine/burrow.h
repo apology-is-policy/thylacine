@@ -379,6 +379,14 @@ void burrow_release_mapping(struct Burrow *v);
 // threaded by construction.)
 int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 prot);
 
+// LINEAGE L-2: map into an explicit address space (see vma.h's *_in block for
+// why exec needs a detached target). burrow_map is the wrapper; this is the
+// body. `exempt` is the I-32 policy verdict for whoever the address space is
+// being built for.
+struct AddrSpace;
+int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                  u64 vaddr, size_t length, u32 prot);
+
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
 // from Proc `p`. Calls vma_remove + vma_free (which calls
 // burrow_release_mapping; mapping_count--).

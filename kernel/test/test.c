@@ -343,6 +343,9 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_execve_load_into_detached(void);
+void test_execve_load_into_rejects_dirty(void);
+void test_execve_failed_load_leaves_target_drainable(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -1721,6 +1724,11 @@ struct test_case g_tests[] = {
                                        test_exec_setup_segment_data_copied,
                                                                            false, NULL },
     { "exec.setup_constraints",        test_exec_setup_constraints,        false, NULL },
+    { "execve.load_into_detached",     test_execve_load_into_detached,     false, NULL },
+    { "execve.load_into_rejects_dirty", test_execve_load_into_rejects_dirty, false, NULL },
+    { "execve.failed_load_leaves_target_drainable",
+                                       test_execve_failed_load_leaves_target_drainable,
+                                                                           false, NULL },
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,

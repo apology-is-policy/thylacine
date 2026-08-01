@@ -268,6 +268,7 @@ pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flo
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
+pub const T_SYS_EXECVE: u64           = 101;    // LINEAGE L-2: replace this Proc's image in place
 // Overcommit memory model (#321): reserve cheaply, commit on first touch,
 // release via decommit. SYS_BURROW_ATTACH (37) stays the eager path for
 // kernel-internal copy-target callers; the native heap reserves lazily.
@@ -2234,6 +2235,42 @@ pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
         "svc #0",
         inlateout("x0") x0,
         in("x8") T_SYS_WEFT_UNSHARE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_execve -- replace THIS Proc's program image in place (LINEAGE L-2, I-44).
+//
+// `path` is the program, resolved through the caller's own namespace exactly as
+// spawn resolves one (I-28: contained at the Territory root, per-component
+// X-search, OEXEC on the leaf). `argv_data` is the packed argv the spawn family
+// already uses: `argc` NUL-terminated strings back to back, the last byte a NUL.
+//
+// ON SUCCESS THIS DOES NOT RETURN -- the kernel repoints this thread's PC and SP
+// at the new image and the syscall's own eret starts it, so there is no caller
+// left to come back to. That is why the signature returns i64 rather than `!`:
+// the only way it returns is by FAILING, and then the caller is completely
+// intact and the value is a real -errno.
+//
+// Notable errors: -T_E_NOENT / -T_E_ACCES (the path did not resolve),
+// -T_E_INVAL (not a loadable static ELF -- POSIX would say ENOEXEC; see the
+// SYS_EXECVE ABI note), -T_E_AGAIN (this Proc has more than one live thread,
+// which v1.0 refuses rather than half-serves).
+//
+// The environment is NOT passed: it is the per-Proc /env device, which survives
+// exec on its own.
+#[inline(always)]
+pub unsafe fn t_execve(path: &[u8], argv_data: &[u8], argc: u64) -> i64 {
+    let mut x0: i64 = path.as_ptr() as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path.len() as u64,
+        in("x2") argv_data.as_ptr() as u64,
+        in("x3") argv_data.len() as u64,
+        in("x4") argc,
+        in("x8") T_SYS_EXECVE,
         options(nostack)
     );
     x0

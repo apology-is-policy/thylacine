@@ -22,6 +22,7 @@
 
 struct Proc;
 struct Burrow;
+struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 
 // VMA permission bits. Map to PTE_KERN_TEXT/RO/RW + user-bit at PTE
 // installation time (P3-Db). At v1.0 P3-Da these are policy markers
@@ -157,6 +158,25 @@ int vma_find_gap(struct Proc *p, u64 length,
 // Caller (proc_free) calls this BEFORE handle_table_free — handle
 // closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
+
+// LINEAGE L-2: the same four operations, addressed by AddrSpace instead of by
+// Proc. The Proc-taking forms above are thin wrappers over these -- they resolve
+// p->as and, where a cap is involved, ask proc_resource_exempt for the policy
+// verdict. Nothing else changes; the ~90 existing call sites keep their
+// signatures, and only the exec load path uses these.
+//
+// The distinction is not cosmetic: exec must build a COMPLETE address space
+// before it commits to it, so the target is DETACHED -- no Proc points at it
+// yet, so there is no p->as to route through, and charging the caller's current
+// (outgoing) address space would inflate a counter that is about to be freed
+// while leaving the new one reading zero for the rest of the Proc's life.
+//
+// `exempt` is the I-32 policy verdict for whoever the address space is being
+// built FOR. Passing it in rather than a Proc keeps this layer free of identity.
+int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
+void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
+struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
+void        vma_drain_in(struct AddrSpace *as);
 
 // Diagnostic accessors.
 u64      vma_total_allocated(void);

@@ -322,6 +322,30 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
                           const char *argv_data, u32 argv_data_len, u32 argc,
                           u64 *entry_out, u64 *sp_out);
 
+// exec_load_into -- the same file-backed load, into an EXPLICIT address space
+// (LINEAGE L-2). exec_setup_from_spoor is the wrapper: it passes p->as, p's I-32
+// exemption, and additionally applies the two Proc-side stamps (process name,
+// exe_path).
+//
+// Those stamps are the reason this split exists rather than a plain parameter
+// add. execve must be able to fail with the caller COMPLETELY untouched, and a
+// name stamped before a load that then fails would leave a live Proc advertising
+// a binary it is not running. The spawn path cannot observe the distinction (its
+// Proc is a fresh child, discarded on failure), so the stamps stay there.
+//
+// `as` must be a clean address space (no VMAs) that no other thread can reach --
+// either a freshly rforked child's, or one addrspace_alloc'd for this load.
+// `exempt` is the I-32 policy verdict for the Proc this is being built for.
+//
+// On failure the target is left PARTIALLY POPULATED and the caller owns the
+// teardown: vma_drain_in + addrspace_unref for a detached target, or the
+// existing dispose-the-Proc rollback for a spawn.
+struct AddrSpace;
+int exec_load_into(struct AddrSpace *as, bool exempt,
+                   struct Spoor *exe, size_t exe_size,
+                   const char *argv_data, u32 argv_data_len, u32 argc,
+                   u64 *entry_out, u64 *sp_out);
+
 // Kernel→EL0 transition (asm in arch/arm64/userland.S). Sets
 // ELR_EL1 = entry_pc, SP_EL0 = user_sp, SPSR_EL1 = 0 (PSTATE = EL0t,
 // all DAIF clear), zeros every GPR, then eret. Never returns —

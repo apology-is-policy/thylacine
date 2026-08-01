@@ -126,13 +126,53 @@ void addrspace_ref(struct AddrSpace *as);
 // Drop a reference; the last one destroys the page table and frees the struct.
 // NULL-safe (a kernel-only Proc, or a rollback before addrspace_alloc ran).
 //
-// PRECONDITION on the last drop: the VMA list is already drained and no CPU
-// holds this table in TTBR0. proc_free establishes both -- vma_drain runs
-// earlier in the teardown, and every thread was reaped and on_cpu-spun before
-// proc_free is reached. No TLB flush is needed here (the Linux model): the leaf
-// mappings were invalidated by vma_drain's all-ASID `tlbi vaae1is`, and any
-// eventual reuse of the ASID value is gated by the rollover's per-CPU
-// flush_pending local flush.
+// PRECONDITION on the last drop: the VMA list is already drained, and no CPU
+// can still translate through this table.
+//
+// No TLB flush happens here (the Linux model: no flush at mm teardown; reclaim
+// at ASID rollover). What makes that sound is the ASID tag, NOT any earlier
+// invalidation -- vma_drain issues NO TLBI at all (measured at L-2; it frees Vma
+// structs and drops Burrow mapping refs, nothing more, because the whole page
+// table is about to be destroyed). The two load-bearing facts are:
+//
+//   - every user PTE is non-global (PTE_NG, arch/arm64/mmu.c), so every stale
+//     entry is tagged with THIS address space's hardware ASID and is
+//     unreachable from any other; and
+//   - the rollover's per-CPU flush_pending local flush runs before that ASID
+//     value can go live again (ARCH section 6.2.1 / asid.tla).
+//
+// So each caller owes only "no CPU is translating under this ASID *now*", by
+// its own argument:
+//   - proc_free: every thread was reaped and on_cpu-spun first, so no CPU holds
+//     this TTBR0 at all.
+//   - proc_exec_replace (L-2): the execing thread IS live and holds it, so the
+//     swap writes TTBR0_EL1 with the NEW address space's (distinct) ASID and
+//     `isb`s BEFORE the drop -- after which no walk on this CPU reaches the old
+//     root and no lookup matches the old tag.
 void addrspace_unref(struct AddrSpace *as);
+
+// =============================================================================
+// The I-32 counter mechanics.
+// =============================================================================
+//
+// The counters live here, so their arithmetic lives here too; the POLICY --
+// which Procs are exempt (PRINCIPAL_SYSTEM, the TCB) -- stays in proc.c, which
+// passes the verdict in as `exempt`. proc_page_charge and friends are the thin
+// wrappers, and are what ordinary code calls.
+//
+// Taking the AddrSpace explicitly is what lets exec charge a DETACHED address
+// space it is building (L-2): the target is not yet any Proc's `as`, so there is
+// no Proc to route the charge through.
+//
+// PRECONDITION: caller holds as->lock, which is what makes each cap EXACT (the
+// load, the decision and the store are atomic against a sibling charge). The
+// stores are __ATOMIC_RELEASE so a lockless cross-Proc /proc reader still gets a
+// coherent snapshot.
+bool addrspace_charge_pages(struct AddrSpace *as, u32 npages, bool exempt);
+void addrspace_uncharge_pages(struct AddrSpace *as, u32 npages);
+bool addrspace_charge_vma(struct AddrSpace *as, bool exempt);
+void addrspace_uncharge_vma(struct AddrSpace *as);
+bool addrspace_charge_shared_map(struct AddrSpace *as, u32 npages, bool exempt);
+void addrspace_uncharge_shared_map(struct AddrSpace *as, u32 npages);
 
 #endif // THYLACINE_ADDRSPACE_H

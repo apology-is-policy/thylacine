@@ -911,6 +911,44 @@ static int do_native_argv_smoke(void) {
     return 0;
 }
 
+// do_exec_probe -- LINEAGE L-2's boot gate for SYS_EXECVE (I-44).
+//
+// /bin/exec-probe runs its failure legs, then execve's ITSELF with
+// argv = ["exec-probe", "stage2"]. The markers below span BOTH incarnations:
+// the leg lines come from the original image, the PASS line from the one that
+// replaced it. Because every marker is written to fd 1 -- the pipe this harness
+// reads -- seeing the last line also proves the inherited handle survived the
+// image swap, which is a second property for the same assertion.
+//
+// Boot-fatal on purpose. A silently-broken execve is exactly the kind of defect
+// that would sit dormant until L-3's vfork child tried to use it, by which point
+// the failure would surface somewhere else entirely.
+static int do_exec_probe(void) {
+    static const char ep_name[] = "exec-probe";
+    static const char ep_argv[] = "exec-probe";
+    static const char ep_m0[]   = "exec-probe: leg A ok";
+    static const char ep_m1[]   = "exec-probe: leg A2 ok";
+    static const char ep_m2[]   = "exec-probe: leg B ok";
+    static const char ep_m3[]   = "exec-probe: leg C ok";
+    static const char ep_m4[]   = "exec-probe: L-2 execve E2E PASS";
+    static const struct argv_marker ep_markers[] = {
+        { ep_m0, sizeof(ep_m0) - 1 },
+        { ep_m1, sizeof(ep_m1) - 1 },
+        { ep_m2, sizeof(ep_m2) - 1 },
+        { ep_m3, sizeof(ep_m3) - 1 },
+        { ep_m4, sizeof(ep_m4) - 1 },
+    };
+    if (pouch_smoke_one_argv(ep_name, sizeof(ep_name) - 1,
+                             ep_argv, sizeof(ep_argv),
+                             /*argc=*/1u,
+                             ep_markers,
+                             sizeof(ep_markers) / sizeof(ep_markers[0]),
+                             /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0)
+        return -1;
+    t_putstr("joey: exec-probe ok (LINEAGE L-2: execve replaced a live image in place)\n");
+    return 0;
+}
+
 // do_native_coreutil_smoke — U-6e-pre-b: the FIRST runtime exercise of the
 // adopted native coreutils (echo/cat/wc/head/tail/seq/sort/uniq/tr/cut/grep/
 // basename/dirname/pwd/true/false). coreutil-smoke is itself a native
@@ -4125,6 +4163,12 @@ int main(void) {
     // First runtime exercise of the native-argv path (env::args, G03) +
     // the std-stream handles (io::stdout, G05). Gates the boot.
     if (do_native_argv_smoke() != 0) return 1;
+
+    // === LINEAGE L-2: execve replaces a live image in place (I-44) ===
+    // Runs right after the argv milestone because it depends on the same
+    // machinery (the Shape-B startup frame) and extends it: exec-probe reads
+    // the argv its PREVIOUS incarnation passed. Gates the boot.
+    if (do_exec_probe() != 0) return 1;
 
     // === native coreutils suite (U-6e-pre-b) ===
     // First runtime exercise of the adopted coreutils, each spawned +

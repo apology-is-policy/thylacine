@@ -337,11 +337,58 @@ failed `execve` must return an error to a caller whose address space is still
 intact, which is POSIX's requirement and also the only way the failure is
 debuggable. The old AS is dropped only once the new one is committed.
 
-Multi-thread interaction: Linux `execve` terminates every thread but the
-caller. Thylacine has the machinery — this is `proc_group_terminate`'s cascade
-(I-24, #809/#811) with the caller excepted, and it must complete (every peer
-off-CPU, #788) **before** the AS swap, since a peer running on the old AS
-during the swap is a use-after-free.
+#### As built at L-2a
+
+The ordering is the design, and it is *stricter* than Linux's:
+
+```
+1. copy path + argv into kernel memory   (from the OLD address space -- after
+                                          the swap those user VAs mean something
+                                          else)
+2. resolve the program                   (I-28, in the caller's Territory)
+3. build a DETACHED AddrSpace            (ELF parse, segments, stack, auxv)
+4. [commit] swap + activate              (infallible)
+5. rewrite the trapframe                 (the syscall's own eret starts it)
+```
+
+Steps 1-3 touch nothing the caller can observe, so a malformed ELF or an OOM
+leaves **nothing to undo**. Linux arrives at the same place from the other side
+(`bprm->mm`) having learned it the hard way: its point of no return sits
+mid-exec and a failure past it kills the process.
+
+Two mechanisms fell out of building detached, both new at L-2a:
+
+- **`exec_load_into(as, exempt, ...)`** plus AddrSpace-taking forms of
+  `vma_insert` / `vma_remove` / `vma_lookup` / `vma_drain` / `burrow_map`. The
+  Proc-taking forms stay as one-line wrappers, so the ~90 existing call sites
+  are untouched. The I-32 counter arithmetic moved to `addrspace.c` with the
+  counters; what stays in `proc.c` is the policy (is there an address space at
+  all, is this Proc exempt).
+- **`sched_activate_addrspace`** — install TTBR0 *now* rather than at the next
+  context switch. execve is the only path that swaps a live thread's address
+  space and then erets straight back to EL0, so nothing else would ever load the
+  new root.
+
+**The activate's failure mode is silent, which is why it is worth naming.**
+Removing it does not fault: the old ASID's TLB entries are still warm at the
+same stack VA, so the successor reads *plausible but wrong* argv out of a
+translation whose page tables have already been freed. Measured at L-2a as a
+revert probe.
+
+#### Multi-thread: refused at L-2a, built at L-2b
+
+Linux `execve` terminates every thread but the caller. Thylacine does not yet
+have the primitive for that, and the reason is worth writing down because it is
+not obvious: `proc_group_terminate` flags the **Proc**, via a `group_exit_msg`
+that is set-once and deliberately never cleared (I-24). Exempting the execer
+from it would therefore break a *later* real kill of the same Proc, permanently.
+So de_thread needs a genuinely new per-Thread die flag on the death lineage —
+its own chunk, with its own audit.
+
+Nothing in this arc is blocked by that: an `rfork(RFPROC|RFMEM)` child (L-3), a
+`fork` child (L-5) and a shell (L-6) are all single-threaded when they exec.
+L-2a therefore **refuses** a multi-threaded caller with `-EAGAIN` — loudly,
+documented, and covered by the prover's leg C — rather than half-serving it.
 
 ### 5.3 Stage 2 — `rfork(RFPROC|RFMEM)` + VFORK
 
@@ -421,15 +468,19 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 |---|---|---|
 | **L-0** | This document + the ARCH §25.4 row + the §28 invariant number + `VIVARIUM.md` §9/§10 updates. **Scripture only, no code.** | user signoff |
 | **L-1** ✅ **LANDED** | `struct AddrSpace` extraction. Pure refactor: `ref` is 1 everywhere, nothing shares yet. **Seven** fields moved; `struct Proc` 408 → 376 B; 239 compiler-enumerated conversion sites across 22 files; 23 offset asserts re-baselined. As-built: `docs/reference/146-addrspace.md`. | **MET** — 1272/1272 → 1276/1276 (the four new `addrspace.*`), boot OK, 0 EXTINCTION, `asid.tla` clean (443457 states, depth 18), SMP gate; the nine Proc-field predicates converted as a set (the four `mmu.c` parameter checks correctly did not) |
-| **L-2** | `execve` (stage 1) + the peer-thread cascade. | a native binary execs another in-place; a **failed** execve returns with the caller intact (revert-probed); a multi-thread Proc's peers are all off-CPU before the swap |
+| **L-2a** ✅ **LANDED** | `execve` (stage 1) for a **single-threaded** Proc: the AddrSpace-targeted load path (`exec_load_into` + the `*_in` VMA/burrow forms), `proc_exec_replace`, `sched_activate_addrspace`, `SYS_EXECVE = 101`. A multi-threaded caller is refused with `-EAGAIN`. | **MET** — `/exec-probe` re-execs itself and the successor prints from an fd inherited across the swap; a **failed** execve returns with the caller's address space intact; all three load-bearing pieces revert-probed to *distinct* failures |
+| **L-2b** | The de_thread primitive: a per-Thread die flag + wait-for-EXITING + reap, removing L-2a's multi-thread refusal. | a multi-thread Proc's peers are all EXITING and off-CPU before the swap; own audit round |
 | **L-3** | `rfork(RFPROC\|RFMEM)` + VFORK suspend (stage 2). | a stock `posix_spawn` binary runs in a vivarium; parent-suspend released on both exec and exit; a killed parent unwinds (#811) |
 | **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | `SYS_RFORK` + child-context restoration (stage 3b). | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
 
-Ordering is forced, not chosen: L-1 blocks L-3 and L-4 (F-B), L-2 blocks L-3
-and L-5 (F-A), and L-4 blocks L-5.
+Ordering is forced, not chosen: L-1 blocks L-3 and L-4 (F-B), L-2a blocks L-3
+and L-5 (F-A), and L-4 blocks L-5. **L-2b blocks nothing in the arc** -- every
+consumer (the RFMEM child, the fork child, a shell) is single-threaded at the
+moment it execs -- which is why it could be split out rather than pulled
+forward.
 
 ---
 

@@ -1798,6 +1798,56 @@ enum {
     //   claimable past RETIRING), netd's GC of a minted-but-never-claimed
     //   flow id (#289 -- a client that died between Tweft and claim).
     SYS_WEFT_UNSHARE = 100,      // arg: share_id (x0)
+
+    // SYS_EXECVE(path_va, path_len, argv_data_va, argv_data_len, argc)
+    //   -> DOES NOT RETURN on success; -errno on failure (LINEAGE L-2,
+    //   docs/LINEAGE.md section 5.2, invariant I-44).
+    //
+    // Replace the calling Proc's program image in place. This is the first
+    // Thylacine syscall that changes a LIVE Proc's address space -- every other
+    // path (the whole SYS_SPAWN_* family) creates a fresh child and loads into
+    // its empty one.
+    //
+    //   x0 = path_va        user-VA of the program path (NOT NUL-terminated;
+    //                       path_len gives the length). Resolved through `stalk`
+    //                       in the CALLER's Territory with OEXEC, exactly as
+    //                       SYS_SPAWN does -- so I-28 containment and the
+    //                       per-component X-search apply unchanged, and a
+    //                       confined Proc can exec only what its namespace names.
+    //   x1 = path_len       1..SYS_OPEN_PATH_MAX
+    //   x2 = argv_data_va   user-VA of `argc` concatenated NUL-terminated
+    //                       strings (the SYS_SPAWN_FULL_ARGV packing). 0 iff
+    //                       argv_data_len == 0.
+    //   x3 = argv_data_len  bytes including the NULs; <= SYS_SPAWN_ARGV_DATA_MAX.
+    //                       The last byte MUST be NUL.
+    //   x4 = argc           number of strings; <= SYS_SPAWN_ARGV_MAX. Must be 0
+    //                       iff argv_data_len is 0.
+    //
+    // On SUCCESS there is no return value, because there is no caller left to
+    // return to: the trapframe's PC and SP are rewritten to the new image's
+    // entry and initial stack and every GPR is zeroed, so the syscall's own eret
+    // starts the new program. envp is NOT passed -- the environment is the per-
+    // Proc /env device (ARCH section 9.7), which survives exec on its own.
+    //
+    // On FAILURE the caller's address space is COMPLETELY untouched and the
+    // error is a real -errno:
+    //   -T_E_NOENT / -T_E_ACCES / -T_E_NOTDIR ...  the path did not resolve
+    //   -T_E_NOEXEC   resolved, but not a loadable static ELF for this machine
+    //   -T_E_NOMEM    out of memory building the new image
+    //   -T_E_FAULT    a user pointer was unreadable
+    //   -T_E_INVAL    an argument was out of bounds
+    //   -T_E_AGAIN    the Proc has more than one live thread (see below)
+    //
+    // v1.0 LIMIT -- multi-threaded callers are REFUSED with -T_E_AGAIN rather
+    // than half-served. POSIX says exec terminates every thread but the caller;
+    // doing that needs a "terminate THESE threads" primitive, and the only one
+    // the tree has (proc_group_terminate) is Proc-wide and set-once-never-cleared
+    // by design (I-24), so exempting the execer from it would permanently
+    // break a LATER kill of the same Proc. The real primitive is its own chunk
+    // on the death lineage (LINEAGE.md section 7, L-2b). Nothing in the arc is
+    // blocked by this: a vfork child, a fork child and a shell are all
+    // single-threaded when they exec.
+    SYS_EXECVE = 101,
 };
 
 // SYS_PTY_REGISTER ops.

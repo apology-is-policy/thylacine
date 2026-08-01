@@ -937,73 +937,45 @@ bool proc_resource_exempt(const struct Proc *p) {
     return p && p->principal_id == PRINCIPAL_SYSTEM;
 }
 
+// LINEAGE L-2: these six are now POLICY ONLY. The counters live in the
+// AddrSpace, so their arithmetic moved to addrspace.c with them; what stays here
+// is the pair of things that are genuinely about the PROCESS -- "does this Proc
+// have an address space at all" (kproc does not) and "is this Proc exempt"
+// (PRINCIPAL_SYSTEM, the TCB). Splitting them is what lets exec charge a
+// DETACHED address space it is still building, where there is no Proc to route
+// the charge through.
+//
+// The as->lock precondition is unchanged and still belongs to the caller: it is
+// what makes each cap EXACT against a sibling charge on the same address space.
+
 bool proc_page_charge(struct Proc *p, u32 npages) {
     if (!p || !p->as) return false;   // no address space: nothing to charge
-    // Caller holds p->vma_lock (the attach/detach serialization domain), so the
-    // load + the cap decision + the store are atomic against sibling attaches
-    // -> the page cap is EXACT. The atomic store keeps a lockless cross-Proc
-    // /proc reader coherent.
-    u32 cur = __atomic_load_n(&p->as->page_count, __ATOMIC_RELAXED);
-    if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
-    if (!proc_resource_exempt(p) && cur + npages > PROC_PAGE_MAX)
-        return false;                                // over cap -> caller -ENOMEM
-    __atomic_store_n(&p->as->page_count, cur + npages, __ATOMIC_RELEASE);
-    return true;
+    return addrspace_charge_pages(p->as, npages, proc_resource_exempt(p));
 }
 
 void proc_page_uncharge(struct Proc *p, u32 npages) {
     if (!p || !p->as) return;         // no address space: nothing to uncharge
-    // Caller holds p->vma_lock. Clamp so an over-uncharge (should never happen --
-    // every uncharge matches a charge) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->as->page_count, __ATOMIC_RELAXED);
-    u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&p->as->page_count, nv, __ATOMIC_RELEASE);
+    addrspace_uncharge_pages(p->as, npages);
 }
 
 bool proc_vma_charge(struct Proc *p) {
     if (!p || !p->as) return false;   // no address space: nothing to charge
-    // Caller holds p->vma_lock (the vma_insert/vma_remove domain), so the load + the
-    // cap decision + the store are atomic against a sibling attach -> the VMA cap is
-    // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent. The
-    // I-32 fourth axis: the bound a free SYS_BURROW_ATTACH_LAZY reservation needs.
-    u32 cur = __atomic_load_n(&p->as->vma_count, __ATOMIC_RELAXED);
-    if (cur == 0xFFFFFFFFu) return false;            // counter saturation (refuse)
-    if (!proc_resource_exempt(p) && cur >= PROC_VMA_MAX)
-        return false;                                // over cap -> vma_insert rejects
-    __atomic_store_n(&p->as->vma_count, cur + 1, __ATOMIC_RELEASE);
-    return true;
+    return addrspace_charge_vma(p->as, proc_resource_exempt(p));
 }
 
 void proc_vma_uncharge(struct Proc *p) {
     if (!p || !p->as) return;         // no address space: nothing to uncharge
-    // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches a
-    // charge) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->as->vma_count, __ATOMIC_RELAXED);
-    u32 nv  = (cur > 0) ? cur - 1 : 0;
-    __atomic_store_n(&p->as->vma_count, nv, __ATOMIC_RELEASE);
+    addrspace_uncharge_vma(p->as);
 }
 
 bool proc_shared_map_charge(struct Proc *p, u32 npages) {
     if (!p || !p->as) return false;   // no address space: nothing to charge
-    // Caller holds p->vma_lock (burrow_share_into's precondition -- the same
-    // domain as the SHARED_IN-flagged VMA teardown), so the load + the cap
-    // decision + the store are atomic against sibling shares -> the cap is
-    // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent.
-    u32 cur = __atomic_load_n(&p->as->shared_map_pages, __ATOMIC_RELAXED);
-    if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
-    if (!proc_resource_exempt(p) && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
-        return false;                                // over cap -> the share fails clean
-    __atomic_store_n(&p->as->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
-    return true;
+    return addrspace_charge_shared_map(p->as, npages, proc_resource_exempt(p));
 }
 
 void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
     if (!p || !p->as) return;         // no address space: nothing to uncharge
-    // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches
-    // a charge -- the SHARED_IN flag pairs them) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->as->shared_map_pages, __ATOMIC_RELAXED);
-    u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&p->as->shared_map_pages, nv, __ATOMIC_RELEASE);
+    addrspace_uncharge_shared_map(p->as, npages);
 }
 
 bool proc_thread_cap_ok(struct Proc *p) {
@@ -2666,6 +2638,111 @@ struct Allowance *proc_allowance_install_locked(struct Proc *p, struct Allowance
     __atomic_store_n(&p->allowance, na, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return old;
+}
+
+// =============================================================================
+// LINEAGE L-2 (docs/LINEAGE.md section 5.2, invariant I-44): execve's address-space
+// swap -- the one place in the tree where a LIVE Proc changes address space.
+// =============================================================================
+
+// A permanently-zero FP/SIMD save area. Restoring from it is how exec clears the
+// live V registers + FPSR + FPCR (see proc_exec_replace). Read-only in practice
+// -- nothing ever writes it -- so one shared BSS block serves every exec, and it
+// costs no stack in a syscall frame.
+static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
+
+bool proc_exec_alone(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return false;
+    struct Thread *self = current_thread();
+    if (!self || self->proc != p)     return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool alone = (proc_count_live_peers_locked(p, self) == 0);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return alone;
+}
+
+void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
+    if (!p || p->magic != PROC_MAGIC) extinction("proc_exec_replace: bad Proc");
+    if (!nas)                         extinction("proc_exec_replace: NULL address space");
+    struct Thread *self = current_thread();
+    if (!self || self->proc != p)
+        extinction("proc_exec_replace: not the execing thread");
+
+    struct AddrSpace *old;
+    {
+        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+        // The single-thread precondition is re-checked HERE, inside the same
+        // critical section as the swap, rather than trusted from the caller's
+        // earlier probe. A peer cannot actually appear in between -- creating one
+        // needs a running thread of this Proc and we are the only one -- but
+        // proving that from the code, at the moment it matters, is cheaper than
+        // asking a future reader to reconstruct it.
+        if (proc_count_live_peers_locked(p, self) != 0) {
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            extinction("proc_exec_replace: a live peer thread appeared");
+        }
+        old   = p->as;
+        p->as = nas;
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+    }
+
+    // Every cross-Proc reader of `->as` -- /proc/<pid>/{maps,mem}, /ctl/procs,
+    // the weft reaper -- resolves its target under g_proc_table_lock, so after
+    // the section above none of them can still be holding `old`. That is what
+    // makes the drop below safe rather than a race.
+
+    // Put the NEW translation in the hardware before touching the old one. After
+    // the isb inside this call, no fetch or access on this CPU walks `old`, and
+    // the ASID is a different one, so no lingering TLB entry of the old address
+    // space can be matched either (every user PTE is nG). Those two facts are the
+    // whole of addrspace_unref's precondition here.
+    sched_activate_addrspace(self);
+
+    // Now the outgoing address space can go. The drain drops each Burrow's
+    // mapping ref -- which is what actually frees the old image's anonymous
+    // pages and releases its Image-cache text -- and addrspace_unref destroys
+    // the page table.
+    vma_drain_in(old);
+    addrspace_unref(old);
+
+    // POSIX: a successful exec resets the caught-signal dispositions to default
+    // (an inherited handler would be an address in an image that no longer
+    // exists). The note QUEUE survives -- pending notes are the process's, not
+    // the image's -- and so does the fd-shaped delivery path; only the
+    // registered handler entry points go.
+    //
+    // Freeing the sigtab here is safe for the same reason proc_free's is: its
+    // only reader is notes_deliver_at_el0_return, which runs on a thread of
+    // THIS Proc, and we are the only live one. That is a precondition rather
+    // than a coincidence -- proc_exec_alone established it and the swap above
+    // re-checked it under the lock, so this line inherits the guarantee rather
+    // than assuming it. (V-6b freed it only at reap precisely because that was
+    // the only other point where the same thing was true.)
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    kfree(p->sigtab);            // VIVARIUM V-6b Linux dispositions; lazily re-made
+    p->sigtab = NULL;
+    self->note_mask = 0u;
+
+    // TLS is per-image: musl's __pthread_self reads TPIDR_EL0, and a value
+    // pointing into the old image's thread-control block would be read as a live
+    // pointer by the new one. Written under the same IRQ mask as the TTBR0 swap
+    // above, for the same reason -- context.S saves the LIVE tpidr_el0 into ctx
+    // at switch-out, so a preemption between the two writes would resurrect it.
+    {
+        irq_state_t s = spin_lock_irqsave(NULL);
+        self->ctx.tpidr_el0 = 0;
+        __asm__ __volatile__("msr tpidr_el0, xzr" ::: "memory");
+        spin_unlock_irqrestore(NULL, s);
+    }
+
+    // FP/SIMD is per-image too, and here the hardware is what matters: we are
+    // returning to EL0 through the exception frame, not through a context
+    // switch, so zeroing ctx.fp_v alone would leave the LIVE V registers (and,
+    // more consequentially, FPCR's rounding mode and trap enables) carrying the
+    // old image's state into the new one. Restoring from a zeroed area sets both
+    // halves at once; the next switch-out then saves the zeroed hardware back
+    // into ctx, so the two cannot disagree.
+    fp_restore_area(g_fp_zero_area);
 }
 
 void proc_group_terminate(struct Proc *p, const char *msg) {

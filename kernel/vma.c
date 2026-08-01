@@ -144,7 +144,12 @@ static inline bool ranges_overlap(u64 a, u64 b, u64 c, u64 d) {
 }
 
 int vma_insert(struct Proc *p, struct Vma *v) {
-    if (!p || !v)                extinction("vma_insert(NULL)");
+    if (!p) extinction("vma_insert(NULL)");
+    return vma_insert_in(p->as, proc_resource_exempt(p), v);
+}
+
+int vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v) {
+    if (!as || !v)               extinction("vma_insert_in(NULL)");
     if (v->magic != VMA_MAGIC)   extinction("vma_insert of corrupted Vma");
     if (v->next || v->prev)      extinction("vma_insert of already-linked Vma");
 
@@ -152,7 +157,7 @@ int vma_insert(struct Proc *p, struct Vma *v) {
     //   - The insertion point (last node with start < v->start).
     //   - Any overlap with existing VMAs.
     struct Vma *prev = NULL;
-    struct Vma *cur  = p->as->vmas;
+    struct Vma *cur  = as->vmas;
     while (cur) {
         if (cur->magic != VMA_MAGIC) extinction("vma_insert: corrupted list entry");
         if (ranges_overlap(v->vaddr_start, v->vaddr_end,
@@ -168,45 +173,56 @@ int vma_insert(struct Proc *p, struct Vma *v) {
     // SYS_BURROW_ATTACH_LAZY reservation (uncharged at attach) would otherwise open.
     // Checked AFTER the overlap walk (so a rejected overlap doesn't consume the
     // budget) and BEFORE the list mutation (so a cap-hit installs nothing). A non-TCB
-    // Proc at PROC_VMA_MAX is rejected here, identically to an overlap (the caller
-    // vma_frees the rejected Vma). proc_vma_charge requires p->vma_lock — every
-    // vma_insert caller holds it (attach / share under vma_lock; exec_setup is
-    // single-threaded). Paired by proc_vma_uncharge in vma_remove. Charges nothing on
-    // failure, so no rollback is needed on the rejected path.
-    if (!proc_vma_charge(p)) return -1;
+    // address space at PROC_VMA_MAX is rejected here, identically to an overlap (the
+    // caller vma_frees the rejected Vma). The charge requires as->lock — every
+    // vma_insert caller holds it (attach / share under vma_lock; the exec load path
+    // builds a detached address space no other thread can reach). Paired by
+    // addrspace_uncharge_vma in vma_remove_in. Charges nothing on failure, so no
+    // rollback is needed on the rejected path.
+    if (!addrspace_charge_vma(as, exempt)) return -1;
 
     // Insert v between prev and cur.
     v->prev = prev;
     v->next = cur;
     if (prev) prev->next = v;
-    else      p->as->vmas    = v;
+    else      as->vmas   = v;
     if (cur)  cur->prev  = v;
 
     return 0;
 }
 
 void vma_remove(struct Proc *p, struct Vma *v) {
-    if (!p || !v)                extinction("vma_remove(NULL)");
+    if (!p) extinction("vma_remove(NULL)");
+    vma_remove_in(p->as, v);
+}
+
+void vma_remove_in(struct AddrSpace *as, struct Vma *v) {
+    if (!as || !v)               extinction("vma_remove_in(NULL)");
     if (v->magic != VMA_MAGIC)   extinction("vma_remove of corrupted Vma");
 
     if (v->prev) v->prev->next = v->next;
-    else         p->as->vmas       = v->next;
+    else         as->vmas      = v->next;
     if (v->next) v->next->prev = v->prev;
 
     v->next = NULL;
     v->prev = NULL;
 
     // I-32: a removed VMA frees its slab slot -> uncharge the live-VMA count (pairs
-    // with proc_vma_charge in vma_insert). Under p->vma_lock (every vma_remove caller
+    // with the charge in vma_insert_in). Under as->lock (every vma_remove caller
     // holds it: detach / share teardown; vma_drain at proc_free is single-threaded).
     // Clamp-safe.
-    proc_vma_uncharge(p);
+    addrspace_uncharge_vma(as);
 }
 
 struct Vma *vma_lookup(struct Proc *p, u64 vaddr) {
     if (!p) return NULL;
+    return vma_lookup_in(p->as, vaddr);
+}
 
-    for (struct Vma *cur = p->as->vmas; cur; cur = cur->next) {
+struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr) {
+    if (!as) return NULL;
+
+    for (struct Vma *cur = as->vmas; cur; cur = cur->next) {
         if (cur->magic != VMA_MAGIC) extinction("vma_lookup: corrupted list entry");
         if (vaddr >= cur->vaddr_start && vaddr < cur->vaddr_end) return cur;
         // Sorted-list optimization: if cur->vaddr_start > vaddr, every
@@ -268,7 +284,18 @@ void vma_drain(struct Proc *p) {
     // LINEAGE L-1: no address space means no VMA list to drain -- a kernel-only
     // Proc, or a proc_alloc rollback that failed before addrspace_alloc ran (the
     // path proc_free reaches with a partially-built Proc).
-    if (!p->as) return;
+    vma_drain_in(p->as);
+}
+
+// LINEAGE L-2: drain by address space. Two callers with genuinely different
+// shapes -- proc_free's (through the wrapper above, on a Proc that is dying) and
+// proc_exec_replace's, which drains the OUTGOING address space of a Proc that
+// stays alive, and the DETACHED half-built one on the exec-failure rollback.
+// Neither needs a Proc: the drain frees Vma structs and drops Burrow mapping
+// refs, and the I-32 uncharge it performs is pure arithmetic on this address
+// space's own counter.
+void vma_drain_in(struct AddrSpace *as) {
+    if (!as) return;
 
     // G-3 (the reaper-audit F1 fix): vma_drain now TAKES p->vma_lock --
     // retiring its lockless exemption. The weft reaper's cross-Proc
@@ -279,20 +306,21 @@ void vma_drain(struct Proc *p) {
     // proc_free's callers are otherwise single-threaded here (the
     // original exemption argument), so the lock is uncontended on every
     // path but the rare reclaim race.
-    spin_lock(&p->as->lock);
-    while (p->as->vmas) {
-        struct Vma *v = p->as->vmas;
+    spin_lock(&as->lock);
+    while (as->vmas) {
+        struct Vma *v = as->vmas;
         // G-2: a SHARED_IN VMA's teardown uncharges the shared-in budget (the
         // burrow_share_into pairing). Moot for a dying Proc's counters but
         // keeps the invariant (shared_map_pages == Σ flagged-VMA pages) exact
-        // on every path, so the accounting is auditable at any point.
+        // on every path, so the accounting is auditable at any point -- and it
+        // is NOT moot for exec, where the Proc survives the drain.
         if (v->flags & VMA_FLAG_SHARED_IN)
-            proc_shared_map_uncharge(p,
+            addrspace_uncharge_shared_map(as,
                 (u32)((v->vaddr_end - v->vaddr_start) / PAGE_SIZE));
-        vma_remove(p, v);
+        vma_remove_in(as, v);
         vma_free(v);
     }
-    spin_unlock(&p->as->lock);
+    spin_unlock(&as->lock);
 }
 
 // =============================================================================
