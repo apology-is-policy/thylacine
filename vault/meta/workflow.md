@@ -138,6 +138,17 @@ code path is edited in a session that never Read its dossier (§6.3).
 - `chg` whose `touched` names an `audit: hard` dossier but whose commit
   carries no dossier diff and no explicit `no-dossier-change: <why>` line →
   warn.
+  - **`no-dossier-change` is WRITE-TIME.** It is not a §5.3 closure field,
+    so Record immutability refuses to let a committed `chg` acquire one
+    afterwards — a follow-up commit CANNOT silence the warn. A RETRO chg
+    (one backfilling history for a surface other than the one being swept)
+    must therefore carry the field FROM BIRTH, in the same commit that
+    creates it. Verified twice the hard way: the stalk sweep tried to add
+    it post-hoc and was correctly refused; the territory sweep knew that
+    and still forgot, because the warn only appears at `git commit` — after
+    the notes are already written. **Write it while drafting the chg, not
+    after staging.** The warn is staged-mode only, so an un-silenced one is
+    one-time noise, not a standing defect.
 - A memory-router escapee heuristic: none — routing is habit; the mitigations
   are the stub convention and review (§6.5 honesty).
 
