@@ -11,6 +11,11 @@ chunks:
   - chg-2026-07-31-quaestor
   - chg-2026-07-31-larder-sweep
   - chg-2026-07-31-srv-sweep
+  - chg-2026-07-31-netd-sweep
+  - chg-2026-07-31-stalk-sweep
+  - chg-2026-08-01-territory-sweep
+  - chg-2026-08-01-proc-thread-sweep
+  - chg-2026-08-01-sched-sweep
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"

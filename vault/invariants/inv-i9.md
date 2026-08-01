@@ -3,8 +3,8 @@ id: inv-i9
 type: inv
 title: "I-9 — no wakeup lost between cond-check and sleep"
 number: I-9
-guards: [sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server]
-validated-by: [spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
+guards: [sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server]
+validated-by: [spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, gate-smp]
 strength: spec
 created: 2026-07-31
 updated: 2026-08-01
@@ -26,13 +26,15 @@ includes:
   register-then-observe.
 
 > Backfill note: the guard and validator sets above are PARTIAL — the full
-> ARCH §28 row also binds the scheduler, poll, pipe, cons, tsleep, torpor
-> and Weft surfaces (specs `scheduler`/`poll`/`cons_poll`/
-> `weft_readiness`/`tsleep`). Those edges join as their dossiers land in the
-> sweep. (dev9p.poll joined at the 9P-area sweep; srvconn at the srv-area
-> sweep; netd's userspace analog at the netd sweep; the **death-wake leg
-> DISCHARGED** at the execution-area sweep — [[sub-kernel-death]] and
-> [[spec-death-wake]] are now above the line.)
+> ARCH §28 row also binds the poll, pipe, cons, torpor and Weft surfaces
+> (specs `poll`/`cons_poll`/`weft_readiness`). Those edges join as their
+> dossiers land in the sweep. (dev9p.poll joined at the 9P-area sweep;
+> srvconn at the srv-area sweep; netd's userspace analog at the netd
+> sweep; the **death-wake leg DISCHARGED** at the execution-area sweep;
+> the **scheduler / tsleep / tickless legs DISCHARGED** at the
+> scheduling-area sweep — [[sub-kernel-rendez]] is the primitive the
+> invariant is stated about, and [[spec-scheduler]] / [[spec-tsleep]] /
+> [[spec-sched-tickless]] are now above the line.)
 
 ## Enforcement
 

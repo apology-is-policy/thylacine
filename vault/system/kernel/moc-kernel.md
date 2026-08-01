@@ -20,6 +20,9 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
   POUNCE fused walk, the Path name-retention substrate).
 - [[moc-kernel-execution]] — Procs, Threads, and the death path (the
   lifecycle, the cascade, and the tree's most bug-prone lineage).
+- [[moc-kernel-scheduling]] — dispatch, the SMP protocol, and the
+  wait/wake primitive (what decides where a Thread runs, and what
+  happens when it stops).
 
 ## Cross-cutting
 

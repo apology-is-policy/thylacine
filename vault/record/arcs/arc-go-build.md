@@ -31,6 +31,8 @@ chunks:
   - chg-2026-07-14-term4-close
   - chg-2026-07-19-99-create-errno
   - chg-2026-07-19-100-devno
+  - chg-2026-07-04-360-preempt-count
+  - chg-2026-07-05-33-sys-yield
 follow-ons: []
 created: 2026-07-31
 ---

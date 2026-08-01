@@ -24,6 +24,9 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-ninep-wire]] | kernel/9p_wire.c, kernel/include/thylacine/9p_wire.h |  | What an auditor attacks here (changes to this surface ride the |
 | [[sub-kernel-path]] | kernel/path.c, kernel/include/thylacine/path.h | inv-i33 | - The refcount balances on EVERY create/destroy/replace path (the #66a |
 | [[sub-kernel-proc]] | kernel/proc.c, kernel/include/thylacine/proc.h | inv-i1, inv-i32, inv-i33 | - The `rfork` ledger: every field is inherited, freshened or stripped |
+| [[sub-kernel-rendez]] | kernel/sched.c, kernel/include/thylacine/rendez.h | inv-i9, inv-i8 | - **The unconditional `r->lock` acquire in `wakeup` is LOAD-BEARING** |
+| [[sub-kernel-sched]] | kernel/sched.c, kernel/include/thylacine/sched.h | inv-i8, inv-i17, inv-i21 | - **The mask-before-read rule holds at every per-CPU read.** Any new site |
+| [[sub-kernel-sched-smp]] | kernel/sched.c, kernel/smp.c, arch/arm64/context.S | inv-i21, inv-i18, inv-i8, inv-i9 | - **The claim happens under the victim's lock.** Moving `on_cpu = true` |
 | [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
 | [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |

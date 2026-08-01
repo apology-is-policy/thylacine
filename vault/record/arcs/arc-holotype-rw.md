@@ -9,6 +9,9 @@ chunks:
   - chg-2026-06-12-66a-spoor-path
   - chg-2026-06-12-66b-mp-path
   - chg-2026-06-12-81-cwalkonly
+  - chg-2026-05-31-801-steal-claim
+  - chg-2026-06-11-rw11-wake-preemption
+  - chg-2026-06-13-107-sched-toctou
 follow-ons: []
 created: 2026-08-01
 ---

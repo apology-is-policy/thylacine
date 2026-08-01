@@ -6,6 +6,8 @@ status: active
 design: ["docs/CORVUS-DESIGN.md"]
 chunks:
   - chg-2026-05-19-srv-birth
+  - chg-2026-05-15-el1h-uniform
+  - chg-2026-05-17-p5-tsleep
 follow-ons: [seam-srv-registry-lifecycle]
 created: 2026-07-31
 ---

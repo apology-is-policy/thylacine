@@ -7,6 +7,8 @@ design: ["docs/ARCHITECTURE.md"]
 chunks:
   - chg-2026-05-05-p2a-process-model
   - chg-2026-05-05-p2d-rfork-exits-wait
+  - chg-2026-05-05-p2b-sched-dispatch
+  - chg-2026-05-05-p2c-smp-dispatch
 follow-ons: []
 created: 2026-08-01
 ---
