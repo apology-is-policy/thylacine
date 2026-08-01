@@ -4647,14 +4647,18 @@ int main(void) {
             // Bounded-drain stratumd's stderr so any final diagnostic
             // msg lands in the boot log. No t_wait_pid here: stratumd
             // is a long-running daemon (16c+) and never zombifies, so
-            // wait_pid would hang forever. The 16c v1.x lift is a
-            // kernel `wait_pid_for(pid)` so kproc.wait_pid skips the
-            // stratumd pid; until then, an unreaped stratumd at
-            // joey-userspace exit reparents to kproc and the
-            // kproc.wait_pid sees stratumd first, extincting on
-            // "wrong pid" -- but here we're exiting non-zero anyway,
-            // which the kernel handles via the joey-exit-non-zero
-            // path (NOT wait_pid).
+            // wait_pid would hang forever.
+            //
+            // #94: this branch runs with stratumd ALREADY dead and
+            // unreaped, so joey's exit re-parents its zombie to kproc --
+            // onto the FRONT of kproc->children, ahead of joey. The
+            // 16c-era text here claimed the kernel took "the
+            // joey-exit-non-zero path (NOT wait_pid)"; it did not. That
+            // path is reached THROUGH kproc's wait, so a reap-any took
+            // stratumd's zombie and extincted on "wrong pid" -- this
+            // being the boot-failure branch whose diagnostic mattered
+            // most. kernel/joey.c now waits by pid, so joey's own status
+            // is what the extinction reports.
             for (int drain_i = 0; drain_i < 200; drain_i++) {
                 struct pollfd pfd = { .fd = (int)sd_rd, .events = POLLIN, .revents = 0 };
                 long pr = t_poll(&pfd, 1, 10);

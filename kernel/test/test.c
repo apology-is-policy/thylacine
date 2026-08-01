@@ -204,6 +204,7 @@ void test_proc_identity_peer_snapshot_by_stripes(void);
 void test_proc_wait_pid_for_no_match(void);
 void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
 void test_proc_wait_pid_for_selects_target(void);
+void test_proc_wait_pid_for_skips_adopted_orphan_zombie(void);
 void test_proc_wait_pid_for_pgrp_selectors(void);
 void test_proc_wait_pid_for_report_not_reap(void);
 void test_proc_wait_pid_syscall_untraced_flag(void);
@@ -1476,6 +1477,8 @@ struct test_case g_tests[] = {
                                        test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
     { "proc.wait_pid_for_selects_target",
                                        test_proc_wait_pid_for_selects_target, false, NULL },
+    { "proc.wait_pid_for_skips_adopted_orphan_zombie",
+                                       test_proc_wait_pid_for_skips_adopted_orphan_zombie, false, NULL },
     { "proc.wait_pid_for_pgrp_selectors",
                                        test_proc_wait_pid_for_pgrp_selectors, false, NULL },
     { "proc.wait_pid_for_report_not_reap",

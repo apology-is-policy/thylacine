@@ -1151,6 +1151,99 @@ void test_proc_wait_pid_for_selects_target(void) {
 }
 
 // =============================================================================
+// #94: the kproc-adopts-an-orphan-ZOMBIE shape, which is the BOOT's shape.
+//
+// proc.wait_pid_for_skips_adopted_orphan_zombie
+//   selects_target above proves the pid filter against two DIRECT children.
+//   This builds the arrangement kernel/joey.c actually faces: a target (T,
+//   standing in for joey) whose own child (G, standing in for a daemon) is
+//   ALREADY a zombie when T exits. G re-parents to kproc -- with no published
+//   init, the boot's fallback adopter -- and proc_reparent_children splices it
+//   onto the FRONT of kproc->children, i.e. AHEAD of T. wait_pid's scan breaks
+//   on the first ZOMBIE it meets, so a reap-any here returns G, not T: the
+//   pre-#94 boot lost joey's exit status to an orphan's.
+//
+//   The two children carry DIFFERENT statuses (T -> 1, G -> 0) so the pid and
+//   the status each discriminate independently. Non-vacuity rests on G really
+//   being a reapable zombie during the wait, which T establishes itself: it
+//   polls G's Proc state and publishes the observation BEFORE exiting, so the
+//   flag asserted below describes the state the wait ran against, not a race
+//   that resolved afterwards. (Revert-probe: swap the wait_pid_for below for
+//   wait_pid and this must FAIL.)
+// =============================================================================
+
+static volatile u32 g_wao_gc_pid;         // grandchild pid, published by T
+static volatile u32 g_wao_gc_was_zombie;  // T observed G as ZOMBIE before exiting
+
+static void wao_orphan_entry(void *arg) {
+    (void)arg;
+    exits("ok");                          // status 0 -- the decoy's signature
+}
+
+static void wao_target_entry(void *arg) {
+    (void)arg;
+    int gc = rfork(RFPROC, wao_orphan_entry, NULL);
+    if (gc <= 0) extinction("test: #94 orphan rfork failed");
+    __atomic_store_n(&g_wao_gc_pid, (u32)gc, __ATOMIC_RELEASE);
+
+    // Wait for the REAL condition (G is a ZOMBIE), never a yield count -- a
+    // yield-and-hope would leave G ALIVE on a slow schedule, which a reap-any
+    // also skips, i.e. the test would pass vacuously. Bounded so a G that
+    // never runs fails the flag assert below instead of hanging the boot.
+    struct Proc *g = proc_find_by_pid(gc);
+    if (g) {
+        for (u32 i = 0; i < 1000000u; i++) {
+            if (__atomic_load_n(&g->state, __ATOMIC_ACQUIRE) == PROC_STATE_ZOMBIE) {
+                __atomic_store_n(&g_wao_gc_was_zombie, 1u, __ATOMIC_RELEASE);
+                break;
+            }
+            sched();
+        }
+    }
+    exits("boom");                        // non-"ok" -> status 1
+}
+
+void test_proc_wait_pid_for_skips_adopted_orphan_zombie(void) {
+    u64 created_before   = proc_total_created();
+    u64 destroyed_before = proc_total_destroyed();
+
+    g_wao_gc_pid        = 0;
+    g_wao_gc_was_zombie = 0;
+
+    int t_pid = rfork(RFPROC, wao_target_entry, NULL);
+    TEST_ASSERT(t_pid > 0, "rfork the wait target failed");
+
+    // THE assertion. Pre-#94 (wait_pid) this returns the orphan's pid + 0.
+    int st = -42;
+    int reaped = wait_pid_for(t_pid, 0, &st);
+    TEST_EXPECT_EQ(reaped, t_pid,
+        "wait_pid_for names the target, not the adopted orphan ahead of it");
+    TEST_EXPECT_EQ(st, 1, "the target's OWN status survived (not the orphan's 0)");
+
+    // The decoy was real, and was real DURING the wait: T published the
+    // observation before it exited, so it precedes the wait's return.
+    TEST_EXPECT_EQ(__atomic_load_n(&g_wao_gc_was_zombie, __ATOMIC_ACQUIRE), 1u,
+        "the orphan was a ZOMBIE before the target exited (else vacuous)");
+
+    u32 gc_pid = __atomic_load_n(&g_wao_gc_pid, __ATOMIC_ACQUIRE);
+    TEST_ASSERT(gc_pid != 0, "orphan pid was not published");
+    struct Proc *gc = proc_find_by_pid((int)gc_pid);
+    TEST_ASSERT(gc != NULL, "orphan not found post-reparent (reaped by the wait?)");
+    TEST_ASSERT(gc->parent == kproc(),
+        "orphan adopted by kproc (the boot's fallback: no published init)");
+
+    int gst = -42;
+    int reaped_gc = wait_pid_for((int)gc_pid, 0, &gst);
+    TEST_EXPECT_EQ(reaped_gc, (int)gc_pid, "reap the adopted orphan by its own pid");
+    TEST_EXPECT_EQ(gst, 0, "the orphan's status, distinct from the target's");
+
+    TEST_ASSERT(proc_total_created()   - created_before   == 2,
+        "#94: proc_total_created mismatch");
+    TEST_ASSERT(proc_total_destroyed() - destroyed_before == 2,
+        "#94: proc_total_destroyed mismatch (LEAK?)");
+}
+
+// =============================================================================
 // PTY-1e: the wait extension — pgrp selectors + WUNTRACED/WCONTINUED reports
 // =============================================================================
 

@@ -26,7 +26,7 @@
 //         child user code runs:
 //           t_putstr(...)                  → SYS_PUTS to UART
 //           main returns 0 → _start        → SVC SYS_EXITS
-//       wait_pid(&status)                  block; reap child
+//       wait_pid_for(pid, 0, &status)      block; reap THAT child (#94)
 //     "Thylacine boot OK"                  TOOLING.md §10 ABI
 //
 // At later chunks /joey becomes the long-running supervisor (per
@@ -94,7 +94,7 @@ static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 // Arguments passed via rfork's `arg` to the child entry. Lives on the
 // caller (boot CPU) stack for the duration of joey_run(); the child
 // reads it once before transitioning to EL0, after which the parent
-// blocks in wait_pid().
+// blocks in wait_pid_for() on that child's pid.
 struct joey_args {
     const void *blob;
     size_t      blob_size;
@@ -407,10 +407,26 @@ void joey_run(void) {
         extinction("joey: rfork_with_caps(RFPROC, joey_thunk) failed");
     }
 
+    // #94: wait for joey BY PID. When joey exits early its daemon children
+    // (stratumd / corvus / ptyfs / diorama / aurora) re-parent to kproc --
+    // proc_reparent_children splices each onto the FRONT of kproc->children,
+    // so they sit AHEAD of joey. A reap-any scan breaks on the first ZOMBIE it
+    // meets, so any orphan that had already exited got reaped INSTEAD of joey
+    // and the mismatch check below fired -- destroying the one thing worth
+    // printing, joey's real exit status, which the next check names.
+    //
+    // Orphan fate is unchanged. kproc has never reaped orphans as a service
+    // (proc_reparent_children's header: a kproc-adopted orphan leaks its Proc;
+    // init is the reaper, and kproc adopts only once init is gone). This site
+    // performed at most ONE incidental reap and then extincted on it, so there
+    // is no ongoing reaping to lose -- and both arms below end the boot.
     int status = -42;
-    int reaped = wait_pid(&status);
+    int reaped = wait_pid_for(pid, 0, &status);
     if (reaped != pid) {
-        extinction_with_addr("joey: wait_pid returned wrong pid", (u64)reaped);
+        // Now reachable only as -1: no child with that pid (structurally
+        // impossible immediately after a successful rfork) or a death-
+        // interrupted sleep (kproc never dies). Neither is a "wrong pid".
+        extinction_with_addr("joey: wait for /joey failed", (u64)reaped);
     }
     if (status != 0) {
         extinction_with_addr("joey: /joey exited non-zero", (u64)status);
