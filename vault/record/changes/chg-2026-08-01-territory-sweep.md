@@ -4,7 +4,7 @@ type: chg
 title: "The territory sweep: the namespace tables, the two locks, and a dead bind graph"
 date: 2026-08-01
 arc: arc-vault
-commits: []
+commits: ["d65f8130"]
 touched:
   - moc-kernel-namespace
   - inv-i1
