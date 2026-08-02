@@ -32,11 +32,12 @@ chunks:
   - chg-2026-08-02-devices-content-sweep
   - chg-2026-08-02-absorption-reconciliation
   - chg-2026-08-02-registry-pass
+  - chg-2026-08-02-spec-notes
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"
   - "[ ] Sweep by subsystem (46/147 documents absorbed -- see view-absorption)"
-  - "[ ] Registry passes -- a PREREQUISITE for absorption, not a successor to it: a table-bearing document cannot be replaced until its tables have a boundary note to live in. THREE kinds, not one: (a) the enumerated-value registries [DONE: errno, caps, handle-rights, note-names]; (b) the STRUCT layouts (t_stat + its six mirrors, the Loom ring structures, the 9P wire structures) -- what actually unblocks 107-loom.md; (c) the six missing spec notes (task #37, see view-spec-coverage) -- what actually unblocks 19-handles.md, whose blocker batch 23 misdiagnosed as a boundary registry"
+  - "[ ] Registry passes -- a PREREQUISITE for absorption, not a successor to it: a table-bearing document cannot be replaced until its tables have a note to live in. THREE kinds, not one: (a) the enumerated-value registries [DONE: errno, caps, handle-rights, note-names]; (b) the STRUCT layouts (t_stat + its six mirrors, the Loom ring structures, the 9P wire structures) -- what unblocks 107-loom.md; (c) the spec notes [4 of 6 DONE: burrow, asid, handles, debug-step -- unblocking 19-handles.md + 134-debug-fs.md; pty + tapestry_present remain, BLOCKED on the two server sweeps below, since a spec note whose action-site map points at unread code is a hollow record]"
   - "[ ] Absorb the twelve documents whose prose is swept and whose tables await a registry"
   - "[ ] Sweep the three orphaned files (task #32) and delete the over-claim notices"
   - "[ ] View cutover (CLAUDE.md shrinks to constitution + pointers)"

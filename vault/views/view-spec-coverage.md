@@ -33,21 +33,21 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**27 dossiered · 6 missing · 33 modules.**
+**31 dossiered · 2 missing · 33 modules.**
 
 | module | spec note | state |
 |---|---|---|
 | 9p_client.tla | [[spec-9p-client]] | dossiered |
 | allowance.tla | [[spec-allowance]] | dossiered |
-| asid.tla | `spec-asid` | **missing** |
-| burrow.tla | `spec-burrow` | **missing** |
+| asid.tla | [[spec-asid]] | dossiered |
+| burrow.tla | [[spec-burrow]] | dossiered |
 | cons_poll.tla | [[spec-cons-poll]] | dossiered |
 | corvus.tla | [[spec-corvus]] | dossiered |
 | death_wake.tla | [[spec-death-wake]] | dossiered |
-| debug_step.tla | `spec-debug-step` | **missing** |
+| debug_step.tla | [[spec-debug-step]] | dossiered |
 | debug_stop.tla | [[spec-debug-stop]] | dossiered |
 | fs_cache.tla | [[spec-fs-cache]] | dossiered |
-| handles.tla | `spec-handles` | **missing** |
+| handles.tla | [[spec-handles]] | dossiered |
 | loom.tla | [[spec-loom]] | dossiered |
 | loom_devgone.tla | [[spec-loom-devgone]] | dossiered |
 | loom_multishot.tla | [[spec-loom-multishot]] | dossiered |

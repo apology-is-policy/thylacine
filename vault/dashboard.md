@@ -31,7 +31,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-pty]] | active | 4 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 27 |
+| [[arc-vault]] | active | 28 |
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 

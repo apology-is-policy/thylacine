@@ -29,6 +29,7 @@ Generated from note fields — do not edit between the markers
 | I-29 | [[inv-i29]] | spec | sub-kernel-loom | spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, gate-smp |
 | I-3 | [[inv-i3]] | spec | sub-kernel-territory | spec-territory, gate-smp |
 | I-30 | [[inv-i30]] | spec | sub-kernel-loom, sub-kernel-weft | spec-loom, spec-weft, gate-smp |
+| I-31 | [[inv-i31]] | spec | sub-kernel-asid | spec-asid, gate-smp |
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content | gate-smp |
 | I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content | gate-smp |
 | I-34 | [[inv-i34]] | spec | sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery | spec-allowance, prose, gate-smp |
@@ -36,6 +37,7 @@ Generated from note fields — do not edit between the markers
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |
 | I-39 | [[inv-i39]] | spec | sub-kernel-devproc, sub-kernel-proc | spec-debug-stop, prose, gate-smp |
 | I-5 | [[inv-i5]] | spec | sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic, sub-kernel-discovery | prose, gate-smp |
+| I-7 | [[inv-i7]] | spec | sub-kernel-burrow | spec-burrow, gate-smp |
 | I-8 | [[inv-i8]] | spec | sub-kernel-sched, sub-kernel-sched-smp, sub-kernel-rendez | spec-scheduler, spec-sched-alpha, spec-sched-rebalance, spec-sched-tickless, gate-smp |
 | I-9 | [[inv-i9]] | spec | sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server, sub-kernel-poll, sub-kernel-pipe, sub-kernel-torpor, sub-pouch-thread, sub-kernel-irqfwd | spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, spec-poll, spec-pipe, gate-smp |
 <!-- generated:end -->

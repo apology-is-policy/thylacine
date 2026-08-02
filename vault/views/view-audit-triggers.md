@@ -14,8 +14,10 @@ Generated from note fields — do not edit between the markers
 |---|---|---|---|
 | [[sub-kernel-allowance]] | kernel/allowance.c, kernel/include/thylacine/allowance.h | inv-i34 | - The gate must remain complete across **all four** create sites. A new |
 | [[sub-kernel-alternatives]] | arch/arm64/alternatives.c, arch/arm64/alternatives.h, arch/arm64/atomic_lse.h |  | - **The write must never go through an executable mapping.** The scratch alias's |
+| [[sub-kernel-asid]] | arch/arm64/asid.c, arch/arm64/asid.h | inv-i31 | - **The rollover-versus-switch race** is the whole surface. Any change to the |
 | [[sub-kernel-boot-entry]] | arch/arm64/start.S, arch/arm64/kernel.ld | inv-i16, inv-i21 | - **The eret window.** Any hand-rolled path that sets `ELR_EL1` and returns to |
 | [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
+| [[sub-kernel-burrow]] | kernel/burrow.c, kernel/include/thylacine/burrow.h | inv-i7, inv-i32 | - **The free decision must stay under the lock and the free must stay outside |
 | [[sub-kernel-caps]] | kernel/include/thylacine/caps.h, kernel/devcap.c, kernel/proc.c |  | - A new capability bit must be added to `CAP_ALL` **or** to |
 | [[sub-kernel-cons]] | kernel/cons.c, kernel/include/thylacine/cons.h | inv-i27, inv-i9 | - **Nothing that needs [[lock-proc-table]] or a hook-list walk may be called |
 | [[sub-kernel-content]] | kernel/devramfs.c, kernel/devenv.c, kernel/env.c, kernel/include/thylacine/env.h, kernel/random.c, kernel/chacha20.c, kernel/include/thylacine/random.h, kernel/include/thylacine/chacha20.h | inv-i1, inv-i16, inv-i28, inv-i32, inv-i33 | - **The random buffer's first fill is not secret, and only boot ordering hides |
