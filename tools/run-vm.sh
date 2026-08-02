@@ -414,9 +414,33 @@ echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2
 # /chosen/bootargs, which the guest reads back through the /hw FDT mount -- no
 # kernel cmdline parser required. Absence of the token means "watchpoints work",
 # so every other substrate keeps the hard assertion.
-append_flags=()
+#
+# #102: `thylacine.nostorm` rides the SAME channel. The CL-5 build storm
+# (usr/joey clade_storm_gate) runs pre-login on any clade-baked pool, which
+# costs 266-301 s per boot under TCG against LS-CI's 300 s login budget -- so
+# a pool minted for the GL/clade gate made every interactive scenario fail by
+# timeout with a perfectly healthy guest. Opting out removes the mismatch
+# rather than merely detecting it: one pool now serves both gates. The storm
+# still runs unconditionally on the normal boot (tools/test.sh), which is
+# where the CL-5 charter proof lives, so the proof is not weakened -- it just
+# stops being repeated 32 times by a harness that is not testing it.
+#
+# TOKENS COMPOSE. This array is built up, never assigned: `append_flags=(...)`
+# would silently DROP nowatchpoint the moment a second token was added, and
+# re-wedge #70 under TCG.
+append_tokens=()
 if [[ "$accel" == "tcg" ]]; then
-    append_flags=(-append "thylacine.nowatchpoint")
+    append_tokens+=("thylacine.nowatchpoint")
+fi
+# Compared to "1", not tested with -n: `-n` is TRUE for the string "0", so
+# THYLACINE_NOSTORM=0 would still emit the token and the documented way to turn
+# this OFF would be dead on arrival. Same convention as THYLACINE_NO_NET.
+if [[ "${THYLACINE_NOSTORM:-0}" == "1" ]]; then
+    append_tokens+=("thylacine.nostorm")
+fi
+append_flags=()
+if (( ${#append_tokens[@]} > 0 )); then
+    append_flags=(-append "${append_tokens[*]}")
 fi
 
 # Canonical QEMU flags per TOOLING.md §3.

@@ -46,6 +46,14 @@ else
     export LS_CI_BOOT_TIMEOUT="${LS_CI_BOOT_TIMEOUT:-180}"
 fi
 export LS_CI_CMD_TIMEOUT="${LS_CI_CMD_TIMEOUT:-30}"
+# #102: decline the CL-5 build storm. It runs pre-login on any clade-baked pool
+# and costs 266-301 s per boot under TCG -- against the 300 s budget above, so
+# a pool minted for the GL/clade gate made EVERY scenario fail by timeout with a
+# perfectly healthy guest (its log ending mid-compile). LS-CI does not test the
+# storm; tools/test.sh runs it unconditionally and that is where the CL-5
+# charter proof lives. Declining here removes the pool mismatch instead of
+# detecting it, so one pool serves both gates. Set THYLACINE_NOSTORM=0 to run it.
+export THYLACINE_NOSTORM="${THYLACINE_NOSTORM:-1}"
 
 # Reap only THIS repo's qemu -- match THIS tree's build dir in the cmdline
 # (-kernel $BUILD_DIR/kernel/thylacine.bin), so a co-resident qemu from a
