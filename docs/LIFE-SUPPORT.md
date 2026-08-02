@@ -125,6 +125,16 @@ future LS-CI scenario):
   buffer is 2000 bytes against ~110 KB of boot output (~55 discard-and-rescan
   cycles); under that churn expect closes its read end and the relay dies as a
   consequence. `match_max 200000` took the residual 2/10 to 0/10.
+- **The console socket is pre-widened by `serial-listen.py`** (#125) -- a relay
+  that stops draining does not merely lose bytes, it SUSPENDS the guest: QEMU's
+  serial write blocks after only ~8 KiB undrained and QEMU stops executing
+  (measured: qemu 100% -> 2.4% within ~2 s of SIGSTOPping the relay). So a
+  silent guest in an LS-CI log is not a guest defect until the consumer is
+  exonerated -- read `stalls=` in the relay record first. The fix cannot live in
+  the relay (capacity is the WRITER's `SO_SNDBUF`, and the relay is the reader);
+  we create the listener instead and `exec` through, which the accepted
+  connection inherits: 8192 B -> 8 MiB. Full rationale + the A/B:
+  `docs/reference/09-test-harness.md` point 7.
 
 The wrapper retries each scenario up to `LS_CI_ATTEMPTS` (default 3). A real
 regression fails every attempt deterministically, so the retry tolerates a

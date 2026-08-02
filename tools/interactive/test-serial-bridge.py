@@ -188,6 +188,59 @@ def run_stall_case(stop_s: float) -> str:
     return err.decode().strip()
 
 
+LISTEN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "serial-listen.py")
+
+# Runs UNDER serial-listen.py, so it inherits the listening socket and stands in
+# for qemu. It writes into the accepted connection until that write would block:
+# the total it reaches IS the capacity a stalled console reader buys the guest
+# before qemu's serial write blocks and the whole VM suspends (#125).
+# {SERIALFD} is substituted by serial-listen.py -- keep this a plain string.
+_WRITER_PROG = (
+    "import socket,sys\n"
+    "s=socket.socket(fileno={SERIALFD})\n"
+    "c,_=s.accept()\n"
+    "c.setblocking(False)\n"
+    "t=0\n"
+    "b=b'x'*65536\n"
+    "while True:\n"
+    "    try: t+=c.send(b)\n"
+    "    except BlockingIOError: break\n"
+    "sys.stdout.write(str(t))\n"
+)
+
+
+def measure_capacity(sndbuf: int) -> int:
+    """Bytes a non-reading peer can absorb, with the listener at `sndbuf`."""
+    # /tmp, not tempfile.gettempdir(): AF_UNIX paths cap at 104 bytes and
+    # macOS's per-user temp dir is long enough to blow that on its own.
+    path = f"/tmp/lsci-cap-{os.getpid()}-{sndbuf}.sock"
+    proc = subprocess.Popen(
+        [sys.executable, LISTEN, "--sock", path, "--sndbuf", str(sndbuf),
+         "--", sys.executable, "-c", _WRITER_PROG],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            if os.path.exists(path):
+                break
+            time.sleep(0.05)
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        peer.connect(path)
+        try:
+            # Deliberately never read: that is the condition being measured.
+            out, _ = proc.communicate(timeout=30)
+        finally:
+            peer.close()
+        return int(out.strip() or 0)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 def _field(record: str, name: str):
     m = re.search(rf"\b{name}=([0-9.]+)", record)
     return float(m.group(1)) if m else None
@@ -225,7 +278,20 @@ def main():
     print(f"[3] never stopped -> stalls={n_quiet}")
     print(f"[3] stall report {'DETECTS + CONTROLS' if stall_ok else 'IS BROKEN'}")
 
-    ok = spool_ok and exit_ok and stall_ok
+    # [4] The capacity serial-listen.py buys. A stalled reader suspends the
+    # guest once qemu's serial write blocks, so this number IS the harness's
+    # tolerance for a host hiccup. The NARROW arm is the control: it proves we
+    # are measuring the setting we set rather than something ambient -- and it
+    # is also the pre-#125 behaviour, so the gap between the two arms is the
+    # whole value of the fix, asserted rather than assumed.
+    cap_wide = measure_capacity(8 << 20)
+    cap_narrow = measure_capacity(8192)
+    cap_ok = cap_wide >= (1 << 20) and cap_narrow <= (128 << 10)
+    print(f"[4] listener sndbuf 8 MiB -> {cap_wide} bytes absorbed")
+    print(f"[4] listener sndbuf 8 KiB -> {cap_narrow} bytes absorbed (control)")
+    print(f"[4] console capacity {'WIDENS + CONTROLS' if cap_ok else 'IS BROKEN'}")
+
+    ok = spool_ok and exit_ok and stall_ok and cap_ok
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
