@@ -47,6 +47,7 @@
 
 #include "../arch/arm64/mmu.h"        // R12-vaddr: USER_VA_TOP for burrow_map upper bound
 #include <thylacine/addrspace.h>     // LINEAGE L-4a: addrspace_charge_pages for the populate charge
+#include <thylacine/cow.h>           // LINEAGE L-4b: the per-page COW share count
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
 #include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
@@ -327,6 +328,13 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
         struct page *pg = alloc_pages(0, KP_ZERO);
         if (!pg) break;                       // OOM -> unwind below
 
+        // LINEAGE L-4b: entry site 1 of 3. ESTABLISH the COW share before the
+        // page becomes reachable through the slot -- a page just out of the
+        // buddy carries its previous owner's count, and inheriting that would
+        // free a page some other address space still maps. Done here, while pg
+        // is still private to this call, so it needs no nesting under v->lock.
+        cow_page_set_sole(pg);
+
         spin_lock(&v->lock);
         bool installed = (v->filepages[first + done] == NULL);
         if (installed) v->filepages[first + done] = pg;   // the Burrow owns pg now
@@ -350,7 +358,15 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
             struct page *pg = v->filepages[first + i];
             v->filepages[first + i] = NULL;
             spin_unlock(&v->lock);
-            if (pg) free_pages(pg, 0);        // outside v->lock (leaf order)
+            // These pages WERE in slots, so they leave through the share count
+            // rather than by a direct free: the rule this file keeps is that a
+            // page in a slot is released with cow_page_put and freed only when
+            // that put reports the last holder. Nothing can have taken a share
+            // of these (the Burrow is private to a caller that is still inside
+            // this call), so the put always reports last -- but routing it here
+            // anyway is what keeps the rule checkable by inspection.
+            if (pg && cow_page_put(pg))
+                free_pages(pg, 0);            // outside v->lock (leaf order)
         }
         spin_lock(&as->lock);
         addrspace_uncharge_pages(as, (u32)n); // the whole charge, matching the grant
@@ -458,7 +474,16 @@ static void burrow_free_internal(struct Burrow *v) {
             extinction("burrow_free_internal(ANON_LAZY) with filepages already NULL (double-free)");
         for (size_t i = 0; i < v->page_count; i++) {
             if (v->filepages[i]) {
-                free_pages(v->filepages[i], 0);
+                // LINEAGE L-4b: a page here may be COW-shared with a Burrow
+                // this fork's sibling holds, so the free is CONDITIONAL -- the
+                // page returns to the buddy only when this was its last holder.
+                // The walk itself still needs no lock (this runs at
+                // handle_count == 0 && mapping_count == 0, so nothing maps this
+                // Burrow), but cow_page_put does take the global COW lock,
+                // because the OTHER holder is reachable from a live address
+                // space and may be putting the same page concurrently.
+                if (cow_page_put(v->filepages[i]))
+                    free_pages(v->filepages[i], 0);
                 v->filepages[i] = NULL;
             }
         }
@@ -774,7 +799,14 @@ int burrow_decommit(struct Proc *p, u64 vaddr, size_t length) {
         }
         spin_unlock(&v->lock);
         if (pg) {
-            free_pages(pg, 0);
+            // LINEAGE L-4b: releasing a SLOT is not the same as freeing a PAGE
+            // once the page can be COW-shared. The page goes back to the buddy
+            // only when this was its last holder; `freed` keeps counting SLOTS,
+            // because that is what the I-32 uncharge below is about -- this
+            // address space stops mapping the page either way, so its RSS drops
+            // whether or not a co-sharer keeps the page alive.
+            if (cow_page_put(pg))
+                free_pages(pg, 0);        // outside v->lock (leaf order)
             freed++;
         }
     }

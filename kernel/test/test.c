@@ -383,6 +383,11 @@ void test_addrspace_charge_helpers_refuse_without_as(void);
 void test_addrspace_share_drains_at_last_ref(void);
 void test_addrspace_proc_alloc_in_shares(void);
 void test_proc_rfork_rfmem_refuses_without_addrspace(void);
+// LINEAGE L-4b: the per-page COW share count.
+void test_cow_set_sole_never_inherits(void);
+void test_cow_get_put_reports_last_holder(void);
+void test_cow_break_decide_is_sole(void);
+void test_burrow_lazy_free_is_conditional_on_share(void);
 void test_fork_frame_init(void);
 void test_fork_rfork_arg_rejection(void);
 void test_fork_table_copy(void);
@@ -1810,6 +1815,12 @@ struct test_case g_tests[] = {
     { "halls.frame_enter_leave_nesting",   test_halls_frame_enter_leave_nesting,   false, NULL },
     { "halls.frame_is_live_gate",          test_halls_frame_is_live_gate,          false, NULL },
     { "halls.symbolize_table",             test_halls_symbolize_table,             false, NULL },
+    { "cow.set_sole_never_inherits",   test_cow_set_sole_never_inherits,   false, NULL },
+    { "cow.get_put_reports_last_holder",
+                                       test_cow_get_put_reports_last_holder, false, NULL },
+    { "cow.break_decide_is_sole",      test_cow_break_decide_is_sole,      false, NULL },
+    { "burrow.lazy_free_is_conditional_on_share",
+                                       test_burrow_lazy_free_is_conditional_on_share, false, NULL },
     { "addrspace.alloc_shape",         test_addrspace_alloc_shape,         false, NULL },
     { "addrspace.refcount",            test_addrspace_refcount,            false, NULL },
     { "addrspace.kproc_has_none",      test_addrspace_kproc_has_none,      false, NULL },

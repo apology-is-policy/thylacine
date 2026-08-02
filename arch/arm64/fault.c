@@ -27,6 +27,7 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/cow.h>          // LINEAGE L-4b: cow_page_set_sole at the demand-zero install
 
 #include "../../mm/phys.h"           // REVENANT R-2: alloc_pages/free_pages for the demand-read page
 
@@ -500,6 +501,12 @@ static enum fault_result demand_page_locked(struct Proc *p,
             proc_page_uncharge(p, 1);
             return FAULT_UNHANDLED_USER;    // OOM -> graceful per-Proc terminate
         }
+        // LINEAGE L-4b: entry site 2 of 3. ESTABLISH the COW share while newpg
+        // is still private to this fault -- a page fresh from the buddy carries
+        // its previous owner's count, and the two paths below that free newpg
+        // do so WITHOUT a cow_page_put precisely because it never reached a
+        // slot. (page.h states the contract; cow.h says why it is not inherited.)
+        cow_page_set_sole(newpg);
 
         // Install-once into the slot. Under vma_lock (held by the caller across the
         // whole demand_page_locked) no sibling faulter of this Proc can touch

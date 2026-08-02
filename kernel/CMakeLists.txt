@@ -24,6 +24,7 @@ set(KERNEL_SRCS
     fault_test.c
     proc.c
     addrspace.c
+    cow.c
     perm.c
     vivarium.c
     allowance.c
@@ -157,6 +158,7 @@ set(KERNEL_TEST_SRCS
     test/test_halls.c
     test/test_vma.c
     test/test_addrspace.c
+    test/test_cow.c
     test/test_burrow_map_proc.c
     test/test_demand_page.c
     test/test_vdso.c
