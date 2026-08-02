@@ -150,6 +150,7 @@ void test_proc_rfork_stress_1000(void);
 void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
+void test_proc_orphan_diag_uses_cons_path(void);
 void test_proc_orphan_reparent_to_init(void);
 void test_proc_orphan_reparent_zombie_to_init(void);
 void test_proc_console_attached_smoke(void);
@@ -1442,6 +1443,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "proc.cascading_rfork_stress",   test_proc_cascading_rfork_stress,   false, NULL },
     { "proc.orphan_reparent_smoke",    test_proc_orphan_reparent_smoke,    false, NULL },
+    { "proc.orphan_diag_uses_cons_path",
+                                       test_proc_orphan_diag_uses_cons_path, false, NULL },
     { "proc.orphan_reparent_to_init",  test_proc_orphan_reparent_to_init,  false, NULL },
     { "proc.orphan_reparent_zombie_to_init",
                                        test_proc_orphan_reparent_zombie_to_init, false, NULL },

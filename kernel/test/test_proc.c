@@ -35,6 +35,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/exception.h"  // PTY-4: struct exception_context + syscall_dispatch
+#include <thylacine/cons.h>       // #126: the drain-tap hooks the orphan-diag routing test uses
 #include <thylacine/extinction.h>
 #include <thylacine/notes.h>      // PTY-1f: the tty:* note names + queue walk
 #include <thylacine/proc.h>
@@ -55,6 +56,7 @@ void test_proc_rfork_stress_1000(void);
 void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
+void test_proc_orphan_diag_uses_cons_path(void);
 void test_proc_orphan_reparent_to_init(void);
 void test_proc_console_attached_smoke(void);
 void test_proc_stripes_smoke(void);
@@ -378,6 +380,118 @@ void test_proc_orphan_reparent_smoke(void) {
         "orphan-reparent: thread_total_created mismatch");
     TEST_ASSERT(thread_total_destroyed() - t_destroyed_before == 2,
         "orphan-reparent: thread_total_destroyed mismatch (Thread leak?)");
+}
+
+// =============================================================================
+// proc.orphan_diag_uses_cons_path (#126)
+//
+// The #80 orphan diagnostic is emitted from proc_reparent_children WHILE
+// HOLDING g_proc_table_lock -- which proc.c takes irqsave 40 times and plain 0
+// times, so it is always IRQ-masked. On the direct uart_* path uart_putc's #67
+// bound is 20 ms PER BYTE against a full TX FIFO, and the line is ~90 bytes: a
+// stalled host consumer therefore held the GLOBAL process-table lock IRQ-masked
+// for ~1.8 s per adoption -- precisely the interrupt-dead stall #67's bound was
+// introduced to prevent, reconstituted by iterating it. A per-item bound is not
+// a per-operation bound.
+//
+// WHY THIS ASSERTS ROUTING AND NOT DURATION. The obvious test -- stall the TX
+// and require the adoption to finish quickly -- would be VACUOUS here.
+// uart_test_tx_stall() gates uart_tx_try_putc ONLY; uart_putc reads the real
+// PL011 FR, which under QEMU is essentially never TXFF. So the pre-fix path
+// does not spin under that hook at all, and an "elapsed < N ms" assertion would
+// pass IDENTICALLY before and after the fix -- an assertion satisfiable by the
+// broken system. The discriminator is WHERE THE BYTES GO, and the drain tap
+// makes that directly observable: cons_drain_tap fires from the cons emitters
+// ONLY, so the pre-fix uart_puts reaches it never. This is the
+// cons.sys_puts_uses_shared_console_path (#76) method applied to the other
+// caller that had been left behind on the direct path.
+//
+// It pins BOTH properties the fix delivers: the emit no longer spins under the
+// global lock, AND the line reaches the G-4 renderer instead of being
+// serial-only (#76). With the drain ARMED it also exercises the emit's wake
+// path UNDER g_proc_table_lock -- cons_drain_tap wakes the drain + mgr rendezes
+// with the lock held, which is the proc_table_lock -> rendez order this very
+// function's child_waiters wake already relies on.
+//
+// NON-VACUOUS: restore the uart_puts/uart_putdec calls in
+// proc_reparent_children and the drain captures nothing -- `have` is 0 and the
+// marker assert fails. It fails equally if the diagnostic is simply DELETED,
+// which is the "fix" a duration assertion would have waved through.
+// =============================================================================
+
+static volatile u32 g_diag_orphan_ran;
+
+static void diag_orphan_grandchild_entry(void *arg) {
+    (void)arg;
+    __atomic_fetch_add(&g_diag_orphan_ran, 1, __ATOMIC_RELAXED);
+    exits("ok");
+}
+
+static void diag_orphan_parent_entry(void *arg) {
+    (void)arg;
+    int gc_pid = rfork(RFPROC, diag_orphan_grandchild_entry, NULL);
+    if (gc_pid <= 0) extinction("test: #126 diag orphan grandchild rfork failed");
+    // Do NOT wait: exits() reparents the grandchild, which is what emits the
+    // #80 line from inside proc_reparent_children, under the lock.
+    exits("ok");
+}
+
+void test_proc_orphan_diag_uses_cons_path(void) {
+    int st = 0;
+    while (wait_pid(&st) > 0) { /* drain stragglers so our reap count is ours */ }
+
+    g_diag_orphan_ran = 0;
+    cons_test_reset();
+    TEST_EXPECT_EQ(cons_drain_open(), 0, "drain arms");
+
+    int child_pid  = rfork(RFPROC, diag_orphan_parent_entry, NULL);
+    int reap_count = 0;
+    if (child_pid > 0) {
+        while (reap_count < 8) {              // bounded safety; expect 2
+            int status = -1;
+            if (wait_pid(&status) <= 0) break;
+            reap_count++;
+        }
+    }
+
+    // Sample + DISARM before asserting. TEST_ASSERT returns on failure, and a
+    // drain left open makes every later drain test fail with a single-open -1
+    // instead of its own verdict (the #76 discipline). The count is sampled
+    // with the NON-BLOCKING cons_test_drain_count() FIRST: cons_drain_read
+    // sleeps on an armed-but-empty drain, so reading first would turn a
+    // pre-fix run into a BOOT HANG instead of a failed test -- and a hang
+    // reports nothing.
+    u32  have = cons_test_drain_count();
+    u8   dbuf[256];
+    long dn   = (have > 0u) ? cons_drain_read(dbuf, (long)sizeof dbuf) : 0;
+    cons_drain_close();
+    cons_test_reset();
+
+    TEST_ASSERT(child_pid > 0, "#126: outer rfork failed");
+    TEST_ASSERT(reap_count == 2,
+                "#126: expected exactly 2 reaps (parent + adopted orphan) -- "
+                "no adoption means nothing emitted the line under test");
+    TEST_EXPECT_EQ(g_diag_orphan_ran, 1u, "#126: grandchild did not run");
+
+    // THE PROPERTY: the orphan diagnostic reached the drain tap, so it went
+    // through cons_diag_* (TX ring, non-spinning, tapped) and not uart_puts.
+    TEST_ASSERT(have > 0u,
+                "#126: the orphan diagnostic never reached the drain tap -- it "
+                "is still on the direct uart_* path (or was deleted)");
+    TEST_ASSERT(dn > 0, "#126: drain read returned the tapped bytes");
+
+    // Search rather than match at offset 0: the property is "the orphan line
+    // reached the tap", NOT "nothing else wrote to the console". Pinning the
+    // offset would couple this test to unrelated console traffic and then
+    // blame proc_reparent_children for it.
+    static const u8 want[] = { 'p','r','o','c',':',' ','o','r','p','h','a','n' };
+    bool found = false;
+    for (long i = 0; !found && i + (long)sizeof(want) <= dn; i++) {
+        u32 k = 0;
+        while (k < sizeof(want) && dbuf[i + (long)k] == want[k]) k++;
+        found = (k == sizeof(want));
+    }
+    TEST_ASSERT(found, "#126: drain holds the orphan diagnostic verbatim");
 }
 
 // =============================================================================

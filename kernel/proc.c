@@ -19,6 +19,7 @@
 #include <thylacine/allowance.h>
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
+#include <thylacine/cons.h>        // #126: cons_diag_* -- the non-spinning diagnostic emit
 #include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/env.h>
@@ -888,20 +889,30 @@ static void proc_reparent_children(struct Proc *p) {
         // Rare + notable by construction: Thylacine has no daemonize idiom (joey
         // spawns its servers directly), so an adoption means some Proc exited
         // with a live child, and a kproc-adopted one never gets reaped at all.
-        // uart_puts/putdec are the direct bounded FIFO path (no TX ring, no
-        // sleep, no lock) -- safe under g_proc_table_lock. name[] is always
-        // NUL-terminated (proc_set_name) and "" on a never-exec'd Proc.
-        uart_puts("proc: orphan pid=");
-        uart_putdec((u64)c->pid);
-        uart_puts(" name=\"");
-        uart_puts(c->name);
-        uart_puts("\" (parent pid=");
-        uart_putdec((u64)p->pid);
-        uart_puts(" name=\"");
-        uart_puts(p->name);
-        uart_puts("\" exiting) -> adopted by pid=");
-        uart_putdec((u64)adopter->pid);
-        uart_puts("\n");
+        // #126: this goes through the TX RING (cons_diag_*), NEVER the direct
+        // uart_* path. uart_putc's #67 bound is 20 ms PER BYTE, and this line is
+        // ~90 bytes emitted back-to-back while holding g_proc_table_lock -- which
+        // proc.c takes irqsave 40 times and plain 0 times. So against a stalled
+        // host consumer the direct path held the GLOBAL process-table lock
+        // IRQ-masked for ~1.8 s per adoption: precisely the interrupt-dead stall
+        // #67's bound was introduced to prevent, reconstituted by iterating it.
+        // A per-item bound is not a per-operation bound. cons_diag_* never spins
+        // and never sleeps (leaf locks only, woken outside), so this emit costs a
+        // bounded handful of MMIO accesses however stalled the console is -- and
+        // it reaches the framebuffer console too (#76), which uart_* does not.
+        // name[] is always NUL-terminated (proc_set_name) and "" on a
+        // never-exec'd Proc.
+        cons_diag_puts("proc: orphan pid=");
+        cons_diag_putdec((u64)c->pid);
+        cons_diag_puts(" name=\"");
+        cons_diag_puts(c->name);
+        cons_diag_puts("\" (parent pid=");
+        cons_diag_putdec((u64)p->pid);
+        cons_diag_puts(" name=\"");
+        cons_diag_puts(p->name);
+        cons_diag_puts("\" exiting) -> adopted by pid=");
+        cons_diag_putdec((u64)adopter->pid);
+        cons_diag_puts("\n");
         // #65 (I-32): reparent splices directly (no proc_link/unlink_child), so
         // rebase both counts to keep child_count == list length. p is dying
         // (its count is about to vanish) but track it symmetrically anyway.
@@ -2298,9 +2309,10 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // says `name` MUST be a NOTE_NAME_SNARE_* string literal; today's
     // only callers in arch/arm64/exception.c pass literals, so the
     // NULL case is latent. But the function downstream passes `name`
-    // straight to uart_puts (which `while(*s)`-derefs) and to exits
-    // (which strcmp's against "ok"). A NULL passed in via a future
-    // caller bug would NULL-deref the kernel from the uart layer.
+    // to the console emit and to exits (which strcmp's against "ok").
+    // A NULL passed in via a future caller bug would NULL-deref the
+    // kernel from the console layer -- cons_diag_puts happens to guard
+    // NULL, but exits' strcmp does not, so the guard stays load-bearing.
     // Cheap to guard here; matches the surrounding extinction-on-
     // contract-violation pattern.
     if (!name)                       extinction_with_addr(
@@ -2335,24 +2347,33 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
     // announces pid + reason + addr on the boot log. Parent wait_pid
     // observes exit_status = 1 at v1.0 (sys_exits_handler collapses non-"ok"
     // to 1); the structured 64-bit status is a v1.x lift per docs/ERRORS.md.
-    uart_puts("user fault: pid=");
-    uart_putdec((u64)p->pid);
-    uart_puts(" reason=\"");
-    uart_puts(name);
-    uart_puts("\" addr=");
-    uart_puthex64((u64)faulting_addr);
+    //
+    // #126 (the sibling of the orphan-diagnostic fix, NOT the same defect):
+    // this site is NOT under g_proc_table_lock -- it runs before exits() takes
+    // it -- so it never held a global lock across a stall. But it is the same
+    // CLASS: a steady-state, EL0-reachable diagnostic on the direct uart_* path,
+    // where the #67 bound is 20 ms PER BYTE, so a stalled host consumer made a
+    // ~100-byte line cost seconds on a fault path reached with IRQs masked. It
+    // was also invisible to the framebuffer console (#76). cons_diag_* fixes
+    // both, and keeps this file's emits on one sanctioned path.
+    cons_diag_puts("user fault: pid=");
+    cons_diag_putdec((u64)p->pid);
+    cons_diag_puts(" reason=\"");
+    cons_diag_puts(name);
+    cons_diag_puts("\" addr=");
+    cons_diag_puthex64((u64)faulting_addr);
     // The faulting EL0 PC (+ lr): debug_trapframe is recorded at the
     // EL0-sync entry choke point (#88), so on this path -- reached only
     // from an EL0 exception -- it names the fault frame. A static
     // non-PIE pouch binary's PC symbolizes directly against its ELF;
     // without this line every userspace segv is a blind addr.
     if (t->debug_trapframe) {
-        uart_puts(" pc=");
-        uart_puthex64(t->debug_trapframe->elr);
-        uart_puts(" lr=");
-        uart_puthex64(t->debug_trapframe->regs[30]);
+        cons_diag_puts(" pc=");
+        cons_diag_puthex64(t->debug_trapframe->elr);
+        cons_diag_puts(" lr=");
+        cons_diag_puthex64(t->debug_trapframe->regs[30]);
     }
-    uart_puts(" -- terminating Proc\n");
+    cons_diag_puts(" -- terminating Proc\n");
 
     exits(name);
     /* UNREACHABLE -- exits is noreturn (single-thread: sched; multi-thread:
