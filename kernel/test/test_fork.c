@@ -262,3 +262,72 @@ void test_fork_table_copy(void) {
     parent->state = PROC_STATE_ZOMBIE;
     proc_free(parent);
 }
+
+// ---------------------------------------------------------------------------
+// fork.vfork_release -- LINEAGE L-3c-2
+//
+// The DECISION half of the VFORK suspend: when may a parent that shares its
+// address space with a child resume? The park loop around this predicate needs
+// a real fork to drive (kproc cannot pass the RFMEM gate, same wall as
+// table_copy and frame_init), so the WIRING is /fork-probe legs I and J; what
+// is reachable here is the rule itself, and all four of its cases.
+//
+// The point of testing all four rather than the interesting one: the two
+// FAILING directions are opposites and a wrong predicate usually gets only one.
+// A predicate that never releases hangs every posix_spawn parent forever; one
+// that always releases lets the parent run on a frame the child is still using,
+// which is the corruption the suspend exists to prevent -- and would leave every
+// existing fork-probe leg passing, because they all reap before observing.
+// ---------------------------------------------------------------------------
+
+void test_fork_vfork_release(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "parent proc");
+    struct Proc *child = proc_alloc();
+    TEST_ASSERT(child != NULL, "child proc");
+    TEST_ASSERT(parent->as != NULL && child->as != NULL,
+                "proc_alloc gives each Proc its own address space");
+
+    // Keep the child's own space to hand back before it is freed. Pointing two
+    // Procs at one AddrSpace without taking a reference is fine for a predicate
+    // that only COMPARES the pointer, but proc_free would unref a space this
+    // Proc never held.
+    struct AddrSpace *child_own = child->as;
+
+    // Case 1 -- the fork's own shape. ALIVE, sharing: the child can still reach
+    // the parent's frame, so the parent must park.
+    child->as = parent->as;
+    TEST_ASSERT(child->state == PROC_STATE_ALIVE, "a fresh Proc is ALIVE");
+    TEST_ASSERT(!vfork_child_released(parent, child),
+                "an ALIVE child sharing the address space has NOT released -- "
+                "it is still on the parent's frame");
+
+    // Case 2 -- the EXEC release, which is the one posix_spawn actually uses.
+    // proc_exec_replace swaps in a freshly allocated space; nothing else about
+    // the child changes, so this pointer is the entire signal.
+    child->as = child_own;
+    TEST_ASSERT(vfork_child_released(parent, child),
+                "a child on a DIFFERENT address space has released -- this is "
+                "what proc_exec_replace's swap looks like from the parent");
+
+    // Case 3 -- the DEATH release. Still sharing, so only the state differs
+    // from case 1: a child that dies without ever execing must not strand its
+    // parent.
+    child->as    = parent->as;
+    child->state = PROC_STATE_ZOMBIE;
+    TEST_ASSERT(vfork_child_released(parent, child),
+                "a ZOMBIE child has released even though it still names the "
+                "shared space -- a child that dies before exec must not strand "
+                "the parent");
+
+    // Case 4 -- gone from the children list entirely. Fails towards resuming,
+    // because the alternative disposition is an unkillable-looking hang.
+    TEST_ASSERT(vfork_child_released(parent, NULL),
+                "a child that is no longer in the parent's list counts as "
+                "released");
+
+    child->as = child_own;
+    proc_free(child);
+    parent->state = PROC_STATE_ZOMBIE;
+    proc_free(parent);
+}

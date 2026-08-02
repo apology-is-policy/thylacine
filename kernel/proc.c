@@ -1054,6 +1054,11 @@ u64 proc_cpu_ns(const struct Proc *p) {
     return total;
 }
 
+// LINEAGE L-3c-2. Defined next to wait_pid_for, whose park loop it mirrors
+// exactly; forward-declared here because rfork_internal's tail is its only
+// caller and sits well above it.
+static void vfork_await_release(struct Proc *p, int child_pid);
+
 // Shared internal worker for rfork + rfork_with_caps. The only difference
 // between them is `caps_mask`: the child's caps are set to
 // `parent->caps & caps_mask` AFTER proc_alloc (which KP_ZEROs caps to
@@ -1339,6 +1344,23 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     proc_link_child(parent, child);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
+    // Capture the pid BEFORE the child can run, and do not dereference `child`
+    // past this point. Once ready() has published the thread, a PEER THREAD of
+    // a multi-threaded parent sitting in wait_pid_for(-1) may reap this child --
+    // wait_pid_for unlinks under g_proc_table_lock, DROPS it, then proc_frees --
+    // so the pointer can be dangling by the time this function returns.
+    //
+    // The window predates L-3c-2 (it was ready() -> return, a handful of
+    // instructions), but the vfork park below does two things to it: widens it
+    // from instructions to the child's whole lifetime, and ALIGNS it, because
+    // the park's release edge is the child's death, which is the very edge that
+    // makes the child reapable -- the peer's wake and ours are the same wake.
+    //
+    // The park loop itself is safe and stays as it is: it only dereferences the
+    // child under g_proc_table_lock, where being in the list implies not yet
+    // freed, and not-found already counts as released.
+    int child_pid = child->pid;
+
     // Insert into the local CPU's run tree. ready() handles the state
     // transition (RUNNABLE → in-runtree). thread_create already set
     // state = THREAD_RUNNABLE. ready() takes its own per-CPU lock; lock
@@ -1346,7 +1368,39 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // g_proc_table_lock.
     ready(ct);
 
-    return child->pid;
+    // LINEAGE L-3c-2: the VFORK suspend. A child that shares its parent's
+    // address space is, in the shape that matters, running on the parent's own
+    // live stack frame -- musl's posix_spawn hands the child
+    // `char stack[1024+PATH_MAX]`, a local in the frame it is about to return
+    // from. If the parent resumed now, the child would be executing on dead
+    // stack. So the parent does not resume: it parks here until the child has
+    // left this address space, by exec or by death.
+    //
+    // Why this is not a flag. Every RF* bit answers "what does the CHILD get?"
+    // and the word's polarity says set == share; suspending the PARENT answers
+    // a different question entirely, so a bit there would be a category error
+    // and would cost the word the one property that makes it readable. Keying
+    // on RFMEM instead is not an arbitrary coupling: RFMEM is EXACTLY the
+    // condition under which the hazard exists, because it is the only way the
+    // child can reach the parent's frame at all. Linux says the same thing with
+    // two flags because its clone word has no polarity to protect.
+    //
+    // The fail-safe direction settles the default. A caller who wanted
+    // concurrency and got a suspend sees its parent block until the child
+    // finishes -- visible, terminating, and diagnosable. A caller who wanted a
+    // suspend and got concurrency sees memory corruption whose cause is three
+    // layers away. Concurrent RFMEM is anyway already served, and better, by
+    // SYS_THREAD_SPAWN; when someone genuinely wants two Procs in one space
+    // running at once they can ask for it explicitly, with their own reasoning,
+    // exactly as every reserved RF* bit will.
+    //
+    // `flags & RFMEM` rather than plain `fc` is what keeps L-5 correct without
+    // a future edit: stock fork() is RFPROC alone, both Procs run, and it must
+    // not park here.
+    if (fc && (flags & RFMEM))
+        vfork_await_release(parent, child_pid);
+
+    return child_pid;
 }
 
 int rfork(unsigned flags, void (*entry)(void *), void *arg) {
@@ -2774,6 +2828,22 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
         }
         old   = p->as;
         p->as = nas;
+
+        // LINEAGE L-3c-2: this swap IS the vfork release. A parent suspended in
+        // vfork_await_release is watching exactly this field -- the moment it
+        // stops matching its own, we are off its frame -- so the wake belongs
+        // here, in the same critical section, rather than anywhere later where
+        // it could be reordered against the thing it reports.
+        //
+        // Under the lock for proc_become_zombie_locked's reason: the parent
+        // cannot exit while we hold it, so it is alive through the wake and no
+        // wake is lost (I-9). Waking unconditionally rather than testing
+        // whether anyone is suspended is deliberate -- a spurious wake costs a
+        // re-scan, whereas a test would be a second place that has to agree
+        // with the park about who is waiting.
+        if (p->parent)
+            poll_waiter_list_wake(&p->parent->child_waiters);
+
         spin_unlock_irqrestore(&g_proc_table_lock, s);
     }
 
@@ -3580,6 +3650,110 @@ void proc_job_cont_proc(struct Proc *m) {
 static int child_wait_ready_cond(void *arg) {
     const struct poll_waiter *pw = (const struct poll_waiter *)arg;
     return pw->ready ? 1 : 0;
+}
+
+// vfork_await_release — LINEAGE L-3c-2. Park the caller until the child it just
+// forked with RFMEM has left the caller's address space. Called from
+// rfork_internal's tail, after the child is runnable and every lock is
+// released.
+//
+// THE RELEASE CONDITION IS NOT A RECORD OF THE RELEASE, IT IS THE RELEASE.
+// "The child is off my frame" means "the child no longer maps my address
+// space", and that is a fact already written down: `child->as`. At an RFMEM
+// fork the two are equal by construction; proc_exec_replace swaps the child's
+// to a freshly-allocated one; death removes the child from ALIVE. Nothing else
+// can change it, because the only other way a Proc acquires a private space is
+// a fork the child cannot perform (RFPROC alone is refused) and an exec the
+// parent cannot perform (it is parked here).
+//
+// A flag would have been the obvious design and is strictly worse: it records
+// the release somewhere other than where the release happens, so a third
+// release path added later would silently strand every vfork parent. This
+// cannot drift from reality because it IS reality.
+//
+// The pointer comparison is sound only because the parent still holds a
+// reference to the shared AddrSpace -- so the outgoing object cannot be freed
+// while we are parked, and its address cannot be recycled underneath the
+// comparison. That is a direct dividend of L-3a having moved the VMA drain into
+// addrspace_unref's last drop; before it, this comparison would have been an
+// ABA waiting to happen.
+//
+// The park is wait_pid_for's, verbatim in discipline: register the stack waiter
+// on `child_waiters` UNDER g_proc_table_lock, atomic with the scan that found
+// the child still here, so a release that happens after our unlock finds the
+// waiter and wakes it (I-9 register-then-observe, specs/poll.tla). Reusing
+// `child_waiters` rather than adding a rendez is what makes the DEATH release
+// free: proc_become_zombie_locked already wakes it. Only the exec release
+// needed a new wake, and it is one line, under the same lock, at the swap.
+//
+// #811: a caller killed while parked returns via SLEEP_INTR and unwinds to its
+// EL0-return die-check. It does NOT loop -- re-sleeping would re-INTR forever --
+// and it leaves nothing behind, because it registered no state anywhere but its
+// own stack.
+// vfork_child_released — LINEAGE L-3c-2's whole decision, extracted so a kernel
+// test can reach it. `child` NULL means "not in the parent's children list".
+//
+// Three ways a vfork child stops being able to touch its parent's frame, and
+// this is all of them: it exec'd (proc_exec_replace gave it a different
+// AddrSpace), it died (no longer ALIVE), or it is gone from the list entirely.
+//
+// That last one counts as RELEASED, deliberately. It would mean some path took
+// the child out of our children list without passing either release site, and
+// the only two dispositions available here are "resume" and "hang forever". A
+// parent that resumes a little early corrupts a frame the child has already
+// stopped using; a parent that hangs looks unkillable and never recovers. Fail
+// towards the one that terminates.
+//
+// Caller holds g_proc_table_lock: `state` and `as` are both written under it,
+// and the list walk that produced `child` needs it anyway.
+bool vfork_child_released(const struct Proc *parent, const struct Proc *child) {
+    if (!parent || parent->magic != PROC_MAGIC)
+        extinction("vfork_child_released: bad parent");
+    if (!child)
+        return true;
+    if (child->magic != PROC_MAGIC)
+        extinction("vfork_child_released: bad child");
+    return (child->state != PROC_STATE_ALIVE) || (child->as != parent->as);
+}
+
+static void vfork_await_release(struct Proc *p, int child_pid) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("vfork_await_release: bad Proc");
+
+    struct Rendez self_rendez;
+    rendez_init(&self_rendez);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &self_rendez);
+
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+
+        struct Proc *child = NULL;
+        for (struct Proc *c = p->children; c; c = c->sibling) {
+            if (c->pid == child_pid) { child = c; break; }
+        }
+        if (vfork_child_released(p, child)) {
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            break;
+        }
+
+        // Re-init per park: poll_waiter_init clears `ready`, so a wake left
+        // over from the previous iteration cannot make this park spin.
+        poll_waiter_init(&pw, &self_rendez);
+        poll_waiter_list_register(&p->child_waiters, &pw);
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+        int sl = sleep(&self_rendez, child_wait_ready_cond, &pw);
+        poll_waiter_list_unregister(&pw);
+        if (sl == SLEEP_INTR)
+            break;
+    }
+
+    // Defensive, exactly as wait_pid_for's out: path is -- every break above
+    // leaves pw->list NULL already, but no stack waiter may outlive this frame
+    // if a future edit adds an exit from inside the registered window
+    // (poll.tla NoStaleHook).
+    poll_waiter_list_unregister(&pw);
 }
 
 int wait_pid_for(int want_pid, int flags, int *status_out) {

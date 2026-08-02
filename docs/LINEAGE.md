@@ -633,6 +633,136 @@ The middle row is the one worth carrying: the kernel test can reach
 `rfork_internal`'s *call* to it, which sits behind an `RFMEM` gate kproc can
 never pass. The rule and the wiring need separate proofs.
 
+#### As built at L-3c-2 — the VFORK suspend
+
+An `RFMEM` fork does not return to the parent until the child has left the
+parent's address space. `rfork_internal`'s tail calls `vfork_await_release`,
+which parks on `child_waiters` until `vfork_child_released(parent, child)`.
+
+##### Where the request goes — the open question, answered
+
+§9's fourth question asked how VFORK is requested. It is **not requested**: it
+follows from `RFMEM`. Three things forced that.
+
+A new bit in the `RF*` word would have been a **category error**. Every flag
+there answers *what does the child get?*, and the word's stated polarity is
+`set == share`. Suspending the **parent** answers a different question, so a bit
+among those would cost the word the one property that makes it readable. Linux
+puts `CLONE_VFORK` beside `CLONE_VM` only because its clone word is a grab-bag
+with no polarity to protect; Plan 9 has no vfork at all, and its nearest flag —
+`RFNOWAIT` — is about the children list, not suspension. Neither heritage
+settles it.
+
+Keying on `RFMEM` is **not** an arbitrary coupling of two orthogonal things.
+`RFMEM` is exactly the precondition of the hazard: sharing the address space is
+the *only* way the child can reach the parent's frame. The condition and the
+danger are the same condition.
+
+And the **fail-safe direction** is one-sided. A caller who wanted concurrency
+and got a suspend sees its parent block until the child finishes — visible,
+terminating, diagnosable. A caller who wanted a suspend and got concurrency sees
+memory corruption three layers from its cause. Concurrent shared-memory
+execution is anyway already served, and better, by `SYS_THREAD_SPAWN`; when
+someone genuinely wants two *Procs* in one space running at once they can ask
+for it explicitly, with their own reasoning, exactly as every reserved `RF*` bit
+will. The gate is `fc && (flags & RFMEM)` rather than plain `fc`, so L-5's
+`RFPROC`-alone `fork()` — where both Procs must run — is correct without a
+future edit.
+
+##### The release condition is not a record of the release, it is the release
+
+The obvious design is a flag: set it at fork, clear it at exec and at exit. It
+is strictly worse, because it records the release somewhere other than where the
+release happens, so a third release path added later silently strands every
+vfork parent.
+
+"The child is off my frame" means "the child no longer maps my address space",
+and that fact is already written down: `child->as`. At an `RFMEM` fork the two
+Procs' pointers are equal by construction; `proc_exec_replace` swaps the child's
+to a freshly allocated one; death takes it out of `ALIVE`. Nothing else can
+change it — the only other route to a private space is a fork the child cannot
+perform (`RFPROC` alone is refused) and an exec the parent cannot perform (it is
+parked). So the condition cannot drift from reality, because it *is* reality.
+
+The pointer comparison is sound **only because the parent still holds a
+reference** to the shared AddrSpace, so the outgoing object cannot be freed
+while the parent is parked and its address cannot be recycled underneath the
+comparison. That is a direct dividend of L-3a having moved the VMA drain into
+`addrspace_unref`'s last drop; before it, this would have been an ABA waiting to
+happen.
+
+##### One new wake, because the other one already existed
+
+Parking on `child_waiters` — the `#344` multi-waiter list `wait_pid_for` uses,
+with its register-then-observe discipline verbatim — makes the **death** release
+free: `proc_become_zombie_locked` already wakes it. Only the **exec** release
+needed a new wake, one line under the same `g_proc_table_lock` section as the
+`p->as` swap it reports. It wakes unconditionally rather than testing whether
+anyone is suspended, because a spurious wake costs a re-scan whereas a test
+would be a second place that has to agree with the park about who is waiting.
+
+A parent killed while parked returns `SLEEP_INTR` and unwinds to its EL0-return
+die-check (#811), leaving nothing behind — it registered no state anywhere but
+its own stack. A child that loops forever parks its parent forever; that is the
+vfork contract, and the parent stays killable.
+
+##### Three coverage layers, each blind to the others
+
+| sabotage | unit suite | `/fork-probe` |
+|---|---|---|
+| remove `rfork_internal`'s park call | **1286/1286 PASS** — fully green through the bug | **FAIL** at leg I's own assertion ("the parent resumed before the child released"), plus an orphan-adoption line showing the child had not run at all |
+| remove `proc_exec_replace`'s wake | **1286/1286 PASS** — green again | **HANG**: the boot stops dead after `exec-probe` and never reaches fork-probe's PASS |
+| — | `fork.vfork_release` covers all four release cases deterministically | — |
+
+The second row is worth stating plainly: **a missing exec release is a hang, not
+an error.** That is not an artifact of the probe's construction — it is the
+bug's real production symptom, since a `posix_spawn` parent whose child execs
+would park forever in exactly the same way. If a future boot stops between
+`exec-probe` and `fork-probe`, this wake is the first thing to check.
+
+Leg I (death arm) is the wiring proof and is **not** race-free in its failing
+direction — on another CPU a no-suspend child could in principle reach `t_exits`
+before the parent's `WNOHANG`. The window is a handful of instructions against a
+whole context-switch-in, so the failing kernel loses it overwhelmingly, which
+the probe above measured rather than assumed. Determinism lives in
+`fork.vfork_release`, which drives the predicate directly.
+
+##### What the self-audit found: a dangling `child` past the park
+
+`rfork_internal` ended `ready(ct); … return child->pid;` — dereferencing the
+child **with no lock held**, after `ready` has made it runnable. A peer thread
+of a multi-threaded parent sitting in `wait_pid_for(-1)` can reap that child:
+`wait_pid_for` unlinks under `g_proc_table_lock`, *drops* the lock, then
+`proc_free`s. The pointer can be dangling by the time the return reads it.
+
+The window predates this chunk — it has been `ready()` → `return`, a handful of
+instructions, since L-3b. What the park does to it is worse than widening:
+
+- it stretches the window from instructions to the child's **entire lifetime**;
+- and it **aligns** the two events. The park's release edge is the child's
+  death, which is the very edge that makes the child reapable, so the peer's
+  wake and ours are the *same* `child_waiters` wake.
+
+Fixed by capturing `child->pid` into a local before `ready(ct)` and never
+dereferencing `child` again. The park loop itself needed nothing: it only
+touches the child under `g_proc_table_lock`, where being in the list implies not
+yet freed, and not-found already counts as released.
+
+Worth recording as a pattern rather than an incident: **a new park inherits
+every unsynchronised access that follows it, and converts "narrow" into
+"aligned with the wake that ends it."** The audit question is not "is this new
+code correct" but "what did putting a sleep here do to the code after it".
+
+##### Leg J
+
+Leg J (exec arm) is the one leg I cannot see, and it covers the only new code:
+a kernel that released solely on death passes every other leg here and then
+hangs the first real `posix_spawn`. Its discriminator is that the child is
+**still alive** when the parent looks — we are executing, so something released
+us; `WNOHANG` says the child has not died; the only other release is the exec.
+"Still alive" is a fact rather than a race because the exec'd successor blocks
+reading a pipe only the parent can write.
+
 ---
 
 ## 6. Invariants
@@ -682,7 +812,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-3a** ✅ **LANDED** | The share substrate: the VMA drain moves into `addrspace_unref`'s last drop (fixing the same latent bug in `proc_free` *and* `proc_exec_replace`), `proc_alloc_in(share)`, `rfork_internal` accepts `RFPROC\|RFMEM`, the device quiesce gates on sole ownership, `RFMEM`-without-a-space refused. No EL0 surface. | **MET** — 1279/1279 → 1282/1282, boot OK, 0 EXTINCTION, `asid.tla` unperturbed (443457, depth 18); all three pieces revert-probed to *distinct* failures |
 | **L-3b** ✅ **LANDED** | Child-context restoration (pulled forward from L-5 per §5.4's correction) **+ the `SYS_RFORK = 102` EL0 surface**, which had to come with it: `fork_frame_init`, `thread_create_forked`, `thread_fork_trampoline`, `rfork_forked`, and `libthyla_rs::rfork_spawn` (the musl-`clone.s` shim the different-stack return demands). The handle-table copy moved OUT to L-3c — it is orthogonal, and #119 is a decision that deserves its own reasoning. | **MET, but not by the gate as written** — that gate said *kernel-driven*, and measuring showed a kernel test cannot observe an eret to EL0 at all (kproc has neither an address space nor a frame). Replaced by `/fork-probe`: six legs, boot-fatal. Revert-probed to the sharpest available pairing — ignoring `child_sp` leaves the **unit suite fully green** while only the in-guest leg fails |
 | **L-3c-1** ✅ **LANDED** | The handle-table copy (§2.4; #119). `handle_table_copy_into`, index-preserving, gated on the fork shape so the spawn family is byte-unchanged by construction. **Skip, not refuse** — the choice is stated at §5.4's as-built section, and the admissibility test is the SAME predicate `handle_dup` uses, extracted so the two cannot drift. | **MET** — 1284 → 1285/1285, boot OK, `/fork-probe` leg H (a child writes to a pipe fd only the parent opened). Three revert probes, each failing at its own assertion; removing the wiring leaves the **unit suite fully green** |
-| **L-3c-2** | The VFORK suspend (#122): park the parent until the child execs or exits, death-interruptible per #811. | a native prover forks-and-execs; parent-suspend released on both exec and exit; a killed parent unwinds |
+| **L-3c-2** ✅ **LANDED** | The VFORK suspend (#122). `vfork_await_release` parks the parent on `child_waiters` until `vfork_child_released` — which reads `child->as`, so the condition IS the release rather than a record of it. Keyed on `RFMEM`, not a new flag: §9's fourth question, answered at §5.3's as-built section. One new wake (exec); death's already existed. | **MET** — 1285 → 1286/1286, boot OK, `/fork-probe` legs I (death arm) + J (exec arm, the successor blocks on a pipe so "still alive" is a fact not a race). Two revert probes: removing the park leaves the **unit suite fully green** while only the in-guest leg fails; removing the exec wake leaves it green *and* hangs the boot — the honest production symptom |
 | **L-3d** | The VIVARIUM `clone` row. | **a stock `posix_spawn` binary runs in a vivarium** |
 | **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
@@ -732,9 +862,17 @@ failure §9 exists to prevent.
    separate COW structure? Promotion touches every buddy free path — a
    correctness-critical, well-audited surface — so this deserves its own
    measurement at L-4 rather than a decision here.
-4. **Is `vfork()` itself in scope**, or only `posix_spawn`'s use of
-   `CLONE_VFORK`? Stock musl has `vfork.c`, but almost nothing calls it
-   directly.
+4. ~~**How is VFORK requested?**~~ — **resolved at L-3c-2: it is not.** The
+   suspend follows from `RFMEM`, because that flag is exactly the precondition
+   of the hazard, and because a bit in the `RF*` word would answer a different
+   question than every other bit there (§5.3's as-built section carries the
+   full reasoning, including why the fail-safe direction is one-sided).
+   Recorded here because a future reader will reasonably expect a flag and
+   should find out at once that its absence is deliberate.
+
+   What remains open is the narrower original question: **is `vfork()` itself
+   in scope**, or only `posix_spawn`'s use of `CLONE_VFORK`? Stock musl has
+   `vfork.c`, but almost nothing calls it directly.
 
 ---
 

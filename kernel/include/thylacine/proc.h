@@ -1072,6 +1072,17 @@ bool proc_child_cap_ok(struct Proc *p);
 // Exposed for the device-death-quiesce regression test.
 int proc_quiesce_owned_devices(struct Proc *p);
 
+// LINEAGE L-3c-2: has a vfork child let go of its parent's address space --
+// and so of the parent's live stack frame, which under RFMEM is the thing the
+// suspend exists to protect? True iff the child exec'd (a different AddrSpace),
+// died, or is no longer in the parent's children list at all (`child` NULL).
+//
+// This is the whole of the suspend's release decision, exposed so a kernel test
+// can drive all four cases without needing a real fork -- the condition is not
+// a RECORD of the release, it is the release, so there is no flag to inspect
+// instead. Caller holds g_proc_table_lock.
+bool vfork_child_released(const struct Proc *parent, const struct Proc *child);
+
 // P2-D: rfork — Plan 9 process/thread creation primitive.
 //
 // `flags` selects which resources are shared vs cloned (per ARCH §7.4).

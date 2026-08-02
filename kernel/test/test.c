@@ -384,6 +384,7 @@ void test_proc_rfork_rfmem_refuses_without_addrspace(void);
 void test_fork_frame_init(void);
 void test_fork_rfork_arg_rejection(void);
 void test_fork_table_copy(void);
+void test_fork_vfork_release(void);
 void test_vma_alloc_free_smoke(void);
 void test_vma_alloc_constraints(void);
 void test_vma_insert_lookup_smoke(void);
@@ -1816,6 +1817,7 @@ struct test_case g_tests[] = {
     { "fork.frame_init",               test_fork_frame_init,               false, NULL },
     { "fork.rfork_arg_rejection",      test_fork_rfork_arg_rejection,      false, NULL },
     { "fork.table_copy",               test_fork_table_copy,               false, NULL },
+    { "fork.vfork_release",            test_fork_vfork_release,            false, NULL },
     { "vma.alloc_free_smoke",          test_vma_alloc_free_smoke,          false, NULL },
     { "vma.alloc_constraints",         test_vma_alloc_constraints,         false, NULL },
     { "vma.insert_lookup_smoke",       test_vma_insert_lookup_smoke,       false, NULL },

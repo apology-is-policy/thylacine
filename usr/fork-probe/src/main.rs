@@ -56,9 +56,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::io::{self, Write};
-use libthyla_rs::{rfork_spawn, t_close, t_exits, t_getpid, t_pipe, t_putstr,
-                  t_read, t_wait_pid_for, t_wait_exitstatus, t_wait_if_exited,
-                  t_write, T_RFMEM, T_RFPROC, T_SYS_RFORK};
+use libthyla_rs::{env, rfork_spawn, t_close, t_execve, t_exits, t_getpid, t_pipe,
+                  t_putstr, t_read, t_wait_pid_for, t_wait_exitstatus,
+                  t_wait_if_exited, t_write, T_RFMEM, T_RFPROC, T_SYS_RFORK,
+                  T_WAIT_WNOHANG};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -133,6 +134,36 @@ extern "C" fn child_inherit_main(_arg: u64) -> ! {
     unsafe { t_exits(if n == INHERIT_TOKEN.len() as i64 { 0 } else { 1 }) }
 }
 
+// Leg J (LINEAGE L-3c-2): the exec release. This child does NOT exit -- it
+// replaces its image, which is the release the actual consumer uses
+// (posix_spawn's child execs; it never dies to let its parent go). The
+// successor blocks reading a pipe the parent still holds the write end of, so
+// it is provably ALIVE when the parent looks.
+//
+// A bare name, not "/bin/fork-probe": this probe runs PRE-PIVOT, where the
+// namespace root is the boot cpio and /bin does not exist yet (the trap that
+// broke exec-probe's leg D on its first run).
+// A static, not a heap Vec, deliberately: the child reads this buffer after the
+// fork, and the parent must not be the thing keeping it alive. Under a working
+// suspend the parent is parked and any storage would do -- which is exactly why
+// it must not be used, since the leg would then depend on the property it is
+// trying to measure.
+static mut EXEC_ARGV_BUF: [u8; 64] = [0; 64];
+static EXEC_ARGV_PTR: AtomicU64 = AtomicU64::new(0);
+static EXEC_ARGV_LEN: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn child_exec_main(_arg: u64) -> ! {
+    let p = EXEC_ARGV_PTR.load(Ordering::Acquire) as *const u8;
+    let n = EXEC_ARGV_LEN.load(Ordering::Acquire) as usize;
+    let argv = unsafe { core::slice::from_raw_parts(p, n) };
+    unsafe { t_execve(b"fork-probe", argv, 3) };
+    // Only reached if the exec FAILED. Exiting here still releases the parent
+    // -- by the death path -- so leg J does not hang; it fails at its "the
+    // child must still be alive" assertion instead, which says exactly what
+    // went wrong.
+    unsafe { t_exits(2) }
+}
+
 extern "C" fn child_main(arg: u64) -> ! {
     // Leg C: prove we are on our own stack by writing through a local, whose
     // address must lie inside CHILD_STACK. Taking the address of a local is
@@ -184,6 +215,21 @@ fn fail(msg: &str) -> ! {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i32 {
+    // ---- Leg J's successor: we got here BY BEING EXEC'D -------------------
+    //
+    // Block on the inherited pipe until the parent releases us. Blocking is the
+    // whole job: it is what makes "the child is still ALIVE" a fact the parent
+    // can check rather than a race it can win.
+    {
+        let args = env::args();
+        if args.len() == 3 && args.get_str(1) == Some("vfork-exec") {
+            let fd = args.get_str(2).and_then(|s| s.parse::<i64>().ok()).unwrap_or(-1);
+            let mut b = [0u8; 4];
+            let n = unsafe { t_read(fd, b.as_mut_ptr(), b.len()) };
+            unsafe { t_exits(if n == 1 && b[0] == b'g' { 0 } else { 1 }) }
+        }
+    }
+
     let parent_pid = unsafe { t_getpid() };
 
     // ---- Leg F: the argument gate is live at EL0 ------------------------
@@ -215,6 +261,41 @@ pub extern "C" fn rs_main() -> i32 {
         fail("rfork_spawn did not return a child pid");
     }
 
+    // ---- Leg I (L-3c-2): the VFORK suspend, death arm --------------------
+    //
+    // FIRST thing after the fork returns, before anything can serialise us with
+    // the child: WNOHANG. If we are executing at all, the suspend has released
+    // us; child_main only ever releases by exiting, so the child must already
+    // be a reapable zombie. Without the suspend we would be here with the child
+    // barely runnable and WNOHANG would say 0.
+    //
+    // This is the WIRING half and it is not race-free in the failing direction:
+    // on another CPU a no-suspend child could conceivably reach t_exits before
+    // this line. That is why the DECISION lives in fork.vfork_release, which is
+    // deterministic. Here the window is a handful of instructions against a
+    // whole context-switch-in, so the failing kernel loses it overwhelmingly --
+    // measured by revert probe, not assumed.
+    // Waiting by pid rather than reap-any means a stray orphan cannot satisfy
+    // this (the U-7-pre selector; the same trap #94 closed in the kernel). It
+    // also carries leg E -- this IS the reap, and it succeeding non-blockingly
+    // is what makes it leg I as well. The two legs became one call rather than
+    // two because a blocking reap after this one would find nothing left.
+    let mut status: i32 = -1;
+    let reaped = unsafe {
+        t_wait_pid_for(pid as i32, T_WAIT_WNOHANG, &mut status as *mut i32)
+    };
+    if reaped == 0 {
+        fail("the parent resumed before the child released -- a child sharing \
+              the address space is on the parent's frame, so rfork must not \
+              return until it execs or exits (L-3c-2)");
+    }
+    if reaped != pid {
+        fail("wait_pid_for did not reap exactly the child we forked");
+    }
+    if !t_wait_if_exited(status) {
+        fail("the child did not exit normally");
+    }
+
     // Leg D: two distinct Procs, and OUR pid did not change -- an execve-like
     // replacement would show one pid, not two.
     if unsafe { t_getpid() } != parent_pid {
@@ -222,19 +303,6 @@ pub extern "C" fn rs_main() -> i32 {
     }
     if pid == parent_pid {
         fail("parent and child report the same pid");
-    }
-
-    // ---- Leg E: reap it, which also serialises the observation ----------
-    //
-    // Waiting by pid rather than reap-any means a stray orphan cannot satisfy
-    // this leg (the U-7-pre selector; the same trap #94 closed in the kernel).
-    let mut status: i32 = -1;
-    let reaped = unsafe { t_wait_pid_for(pid as i32, 0, &mut status as *mut i32) };
-    if reaped != pid {
-        fail("wait_pid_for did not reap exactly the child we forked");
-    }
-    if !t_wait_if_exited(status) {
-        fail("the child did not exit normally");
     }
 
     // ---- Legs A/B/C: read the child's evidence --------------------------
@@ -324,9 +392,101 @@ pub extern "C" fn rs_main() -> i32 {
         t_close(wr);
     }
 
+    // ---- Leg J (L-3c-2): the VFORK suspend, EXEC arm --------------------
+    //
+    // The arm that matters, and the one leg I cannot see. posix_spawn's child
+    // execs; it does not die to let its parent go, so a kernel that released
+    // only on death would pass every other leg here and then hang the first
+    // real posix_spawn -- and the wake at proc_exec_replace is new code that
+    // nothing else exercises.
+    //
+    // The discriminator is that the child is STILL ALIVE when we look. We are
+    // executing, so something released us; WNOHANG says the child has not died,
+    // so it was not the death path; the only other release is the exec. And
+    // "still alive" is a fact rather than a race, because the successor blocks
+    // on a pipe only we can write.
+    let (jrd, jwr) = unsafe { t_pipe() };
+    if jrd < 0 {
+        fail("t_pipe failed, so leg J cannot run");
+    }
+    let n = build_exec_argv(jrd);
+    EXEC_ARGV_PTR.store(unsafe { core::ptr::addr_of!(EXEC_ARGV_BUF) } as u64, Ordering::Release);
+    EXEC_ARGV_LEN.store(n as u64, Ordering::Release);
+
+    let pid4 = unsafe { rfork_spawn(stack_top, 0, child_exec_main, 0) };
+    if pid4 <= 0 {
+        fail("the exec-leg rfork_spawn did not return a child pid");
+    }
+
+    let mut st4: i32 = -1;
+    let seen = unsafe { t_wait_pid_for(pid4 as i32, T_WAIT_WNOHANG, &mut st4 as *mut i32) };
+    if seen != 0 {
+        fail("the exec-leg child was already dead when the parent resumed -- \
+              the parent was released by the child's DEATH, so the exec release \
+              (proc_exec_replace's wake) is missing or the exec itself failed");
+    }
+
+    // Release the successor and collect it. Reaching here at all is the leg's
+    // result; the status just confirms the successor is our own image reading
+    // the descriptor it inherited across the swap.
+    if unsafe { t_write(jwr, b"g".as_ptr(), 1) } != 1 {
+        fail("could not release the exec-leg child");
+    }
+    if unsafe { t_wait_pid_for(pid4 as i32, 0, &mut st4 as *mut i32) } != pid4 {
+        fail("wait_pid_for did not reap the exec-leg child");
+    }
+    if !t_wait_if_exited(st4) || t_wait_exitstatus(st4) != 0 {
+        fail("the exec'd successor did not read the byte from the pipe it \
+              inherited across the swap");
+    }
+    unsafe {
+        t_close(jrd);
+        t_close(jwr);
+    }
+
     mark("fork-probe: PASS (resumed at the parent's PC, x0 = 0, own stack, \
-          shared address space, distinct reapable pid, inherited fds)");
+          shared address space, distinct reapable pid, inherited fds, \
+          parent suspended until the child exited AND until it exec'd)");
     0
+}
+
+// Pack ["fork-probe", "vfork-exec", "<fd>"] into EXEC_ARGV_BUF as three
+// NUL-terminated strings. Returns the byte count.
+fn build_exec_argv(fd: i64) -> usize {
+    let mut n = 0usize;
+    let mut put = |bytes: &[u8]| {
+        for &b in bytes {
+            unsafe {
+                if n < EXEC_ARGV_BUF.len() {
+                    EXEC_ARGV_BUF[n] = b;
+                }
+            }
+            n += 1;
+        }
+    };
+    put(b"fork-probe\0");
+    put(b"vfork-exec\0");
+    // Small non-negative fds only; the caller passes one straight from t_pipe.
+    let mut digits = [0u8; 20];
+    let mut d = 0usize;
+    let mut v = if fd < 0 { 0u64 } else { fd as u64 };
+    loop {
+        digits[d] = b'0' + (v % 10) as u8;
+        d += 1;
+        v /= 10;
+        if v == 0 { break; }
+    }
+    while d > 0 {
+        d -= 1;
+        put(&[digits[d]]);
+    }
+    put(b"\0");
+    // The counter keeps advancing past the buffer so an overflow is visible
+    // rather than silently truncating mid-string; clamp here so the caller can
+    // never hand execve a slice longer than the storage behind it. Unreachable
+    // at these inputs (~24 bytes of 64), which is exactly why it should not rest
+    // on "unreachable at these inputs".
+    if n > unsafe { EXEC_ARGV_BUF.len() } { unsafe { EXEC_ARGV_BUF.len() } } else { n }
 }
 
 // The raw shim, for the legs that must pass deliberately-wrong arguments.
