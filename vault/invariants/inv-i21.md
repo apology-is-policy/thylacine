@@ -3,11 +3,11 @@ id: inv-i21
 type: inv
 title: "I-21 — one CPU per Thread; the kernel is uniformly EL1h"
 number: I-21
-guards: [sub-kernel-sched-smp, sub-kernel-thread]
+guards: [sub-kernel-sched-smp, sub-kernel-thread, sub-kernel-exception]
 validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp]
 strength: spec
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Statement
 
@@ -58,6 +58,14 @@ the CPU in. Under the pre-P5 dual-mode kernel (EL1t normally, EL1h inside
 handlers) a work-stolen thread could resume the exception-exit path in
 the wrong mode, where `msr SP_EL0` writes the wrong stack pointer. Making
 the kernel uniformly EL1h removes the variable rather than tracking it.
+
+The clause is also enforced *structurally*, in [[sub-kernel-exception]]: the two
+vector slots for "current EL with `SP_EL0`" are unreachable under this model, so
+they are wired to the unexpected-vector diagnostic. An exception arriving there
+means the mode bit was somehow cleared — which now extincts loudly, naming the
+slot, instead of silently writing the wrong stack-pointer bank. The fossil is
+load-bearing: under the pre-P5 dual-mode kernel those same two slots were the
+live kernel-exception entries.
 
 ## Validation
 

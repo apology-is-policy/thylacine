@@ -15,9 +15,10 @@ Generated from note fields — do not edit between the markers
 | I-1 | [[inv-i1]] | spec | sub-kernel-territory, sub-kernel-devsrv, sub-pouch-net | spec-territory, gate-smp |
 | I-10 | [[inv-i10]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
 | I-11 | [[inv-i11]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
+| I-13 | [[inv-i13]] | prose | sub-kernel-uaccess, sub-kernel-exception | prose, gate-smp |
 | I-17 | [[inv-i17]] | prose | sub-kernel-sched | spec-scheduler, gate-smp |
 | I-18 | [[inv-i18]] | spec | sub-kernel-sched-smp | spec-scheduler, gate-smp |
-| I-21 | [[inv-i21]] | spec | sub-kernel-sched-smp, sub-kernel-thread | spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp |
+| I-21 | [[inv-i21]] | spec | sub-kernel-sched-smp, sub-kernel-thread, sub-kernel-exception | spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp |
 | I-22 | [[inv-i22]] | prose | sub-kernel-perm, sub-kernel-caps, sub-kernel-devproc | prose, gate-smp |
 | I-24 | [[inv-i24]] | spec | sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signal | spec-death-wake, gate-smp |
 | I-26 | [[inv-i26]] | prose | sub-kernel-devproc | prose, gate-smp |

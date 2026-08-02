@@ -19,6 +19,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
 | [[sub-kernel-devproc]] | kernel/devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
 | [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h | inv-i1 | What an auditor attacks here: |
+| [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
 | [[sub-kernel-handle]] | kernel/handle.c, kernel/include/thylacine/handle.h |  | - A new `kobj_kind` must be classified into exactly one partition; the |
 | [[sub-kernel-larder]] | kernel/larder.c, kernel/include/thylacine/larder.h | inv-i38 | - **The gen-ring event-logging completeness**: every NEW mutation path |
 | [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h |  | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |
@@ -43,6 +44,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
 | [[sub-kernel-thread]] | kernel/thread.c, kernel/include/thylacine/thread.h |  | - **#788 is the shape to keep in mind.** `thread_free` freeing a |
 | [[sub-kernel-torpor]] | kernel/torpor.c, kernel/include/thylacine/torpor.h | inv-i9, inv-i24 | - The lock-free mismatch return must never be extended to the EQUAL |
+| [[sub-kernel-uaccess]] | arch/arm64/uaccess.S, arch/arm64/uaccess.c, arch/arm64/uaccess.h | inv-i13 | - **A new fault point needs a table entry.** The entry is what separates |
 | [[sub-netd-nic]] | usr/netd/src/main.rs, usr/netd/Cargo.toml |  | On any change, prosecute: |
 | [[sub-netd-server]] | usr/netd/src/server.rs, usr/netd/src/ndb.rs, usr/netd/ndb/local | inv-i9 | On any change, prosecute (the standing list, accreted across |
 | [[sub-pouch-fs]] | usr/lib/pouch/patches/0009-pouch-openat.patch, usr/lib/pouch/patches/0010-pouch-fstat-lseek.patch, usr/lib/pouch/patches/0019-pouch-stat.patch, usr/lib/pouch/patches/0023-pouch-fopen.patch, usr/lib/pouch/patches/0024-pouch-fs-process-wires.patch, usr/lib/pouch/patches/0027-pouch-remove.patch, usr/lib/pouch/patches/0030-pouch-fopen-append.patch, usr/lib/pouch/patches/0031-pouch-readlink.patch | inv-i28 | - Every successful-open exit must route through `pouch_open_ret`, or |

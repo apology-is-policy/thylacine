@@ -38,6 +38,9 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
   the transmit ring, the renderer backend, and the trusted path; an
   interrupt handler that may not do the work, and a consumer that is a
   trust boundary).
+- [[moc-kernel-entry]] — the EL0 boundary (the vector table, the return
+  tails where the kernel acts on a thread before letting it run again, and
+  the fixup table that makes a kernel touch of a user address recoverable).
 
 ## Cross-cutting
 

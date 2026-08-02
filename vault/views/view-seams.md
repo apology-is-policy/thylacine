@@ -40,6 +40,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-devcap-plain-caps-read]] | open | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
 | [[seam-devdev-winsize-statless]] | open | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
+| [[seam-el0-irq-tail-no-notes]] | open | sub-kernel-exception | chg-2026-08-02-entry-sweep | task #21 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
