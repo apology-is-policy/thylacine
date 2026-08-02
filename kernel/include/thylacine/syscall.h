@@ -1848,6 +1848,54 @@ enum {
     // blocked by this: a vfork child, a fork child and a shell are all
     // single-threaded when they exec.
     SYS_EXECVE = 101,
+
+    // SYS_RFORK(flags, child_sp, child_tls)
+    //   -> child pid to the PARENT, 0 to the CHILD, -errno on failure
+    //   (LINEAGE L-3b, docs/LINEAGE.md section 5.4, invariant I-44).
+    //
+    // The first Thylacine syscall that RETURNS TWICE. Both Procs resume at the
+    // instruction after this `svc`, on the same saved frame, and x0 is the only
+    // thing that distinguishes them -- which is why the child cannot be handed a
+    // return value the normal way and why the dispatch treats this like
+    // SYS_EXECVE rather than an ordinary handler.
+    //
+    //   x0 = flags      exactly RFPROC|RFMEM at L-3b (see below).
+    //   x1 = child_sp   the child's initial SP_EL0. MANDATORY, nonzero,
+    //                   16-aligned, below UACCESS_USER_VA_TOP. Two Procs in one
+    //                   address space must not share a stack pointer: they would
+    //                   corrupt each other's frames on the first push. Not
+    //                   validated for MAPPEDNESS (the child faults at EL0 if it
+    //                   is wrong -- the SYS_THREAD_SPAWN contract) nor for
+    //                   OVERLAP with the parent's live stack, which is the
+    //                   caller's contract exactly as it is for a pthread stack.
+    //   x2 = child_tls  the child's TPIDR_EL0; 0 means INHERIT the caller's.
+    //                   Inheriting is fork semantics and what a vfork child
+    //                   needs -- it runs the parent's C, thread-locals and all,
+    //                   until it execs.
+    //
+    // The child inherits identity, capabilities (minus CAP_ELEVATION_ONLY),
+    // phenotype, hardware allowance, environment, session + process group and a
+    // CLONE of the Territory -- everything an rfork child has always inherited,
+    // because both shapes run one body.
+    //
+    // The child's HANDLE TABLE is fresh and EMPTY. That is CLONE_VM WITHOUT
+    // CLONE_FILES, which is exactly posix_spawn's shape, and deliberately NOT
+    // POSIX fork's: an fd-inheriting child needs a table copy, and a copy would
+    // duplicate hardware handles that I-5 makes non-transferable -- a decision
+    // that deserves its own reasoning rather than arriving as a side effect.
+    //
+    // v1.0 LIMIT -- RFPROC alone is REFUSED (-T_E_INVAL), not served. Without
+    // RFMEM the child gets a fresh EMPTY address space, so resuming it at its
+    // parent's PC would fault on the first instruction fetch. A private child
+    // address space means copy-on-write, which is its own chunk (LINEAGE L-4).
+    // Every other Plan 9 flag stays reserved: each shares a different per-Proc
+    // structure and each should arrive with its own reasoning.
+    //
+    //   -T_E_INVAL   flags not exactly RFPROC|RFMEM; child_sp zero, misaligned,
+    //                out of the user range, or equal to the caller's own SP
+    //   -T_E_AGAIN   the child could not be created (the I-32 child cap, a
+    //                narrowed hardware allowance, or OOM)
+    SYS_RFORK = 102,
 };
 
 // SYS_PTY_REGISTER ops.

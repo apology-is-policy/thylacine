@@ -1061,7 +1061,7 @@ u64 proc_cpu_ns(const struct Proc *p) {
 // the v1.0 default for any rfork-from-non-kproc-context path that
 // hasn't been explicitly designed to grant caps.
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
-                          caps_t caps_mask) {
+                          caps_t caps_mask, const struct fork_context *fc) {
     // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
     // -- RFNAMEG, RFFDG, RFCRED, RFNOTEG, RFNOWAIT, RFREND, RFENVG -- still
     // extinct: each shares a different per-Proc structure and each arrives with
@@ -1070,7 +1070,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     if (flags != RFPROC && flags != (RFPROC | RFMEM)) {
         extinction("rfork: only RFPROC and RFPROC|RFMEM are supported");
     }
-    if (!entry) extinction("rfork with NULL entry");
+    // LINEAGE L-3b: exactly one of the two child shapes. `entry` runs the child
+    // at a fresh kernel entry point; `fc` resumes it on the parent's saved EL0
+    // frame. Both-or-neither is a programming error, not a reachable state --
+    // and it is worth an extinction rather than a preference, because silently
+    // preferring one would produce a child that runs something other than what
+    // its caller asked for.
+    if (!entry == !fc)
+        extinction("rfork needs exactly one of entry / fork_context");
 
     struct Thread *t = current_thread();
     if (!t)                  extinction("rfork with no current thread");
@@ -1277,7 +1284,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     }
     child->territory = child_pgrp;
 
-    struct Thread *ct = thread_create_with_arg(child, entry, arg);
+    // LINEAGE L-3b: the ONLY step that differs between the two child shapes.
+    // Everything above -- caps, identity, phenotype, allowance, env, territory,
+    // session/pgroup, the legate tag -- is shared deliberately: a forked child
+    // and a kernel-entry child inherit identically, and keeping one body is
+    // what guarantees that rather than two lists that drift.
+    struct Thread *ct = fc
+        ? thread_create_forked(child, fc->frame, fc->child_sp, fc->child_tls)
+        : thread_create_with_arg(child, entry, arg);
     if (!ct) {
         // Roll back proc_alloc + territory_clone. Transition to ZOMBIE so
         // proc_free's lifecycle gate passes; proc_free will territory_unref
@@ -1305,12 +1319,17 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
 }
 
 int rfork(unsigned flags, void (*entry)(void *), void *arg) {
-    return rfork_internal(flags, entry, arg, CAP_NONE);
+    return rfork_internal(flags, entry, arg, CAP_NONE, NULL);
+}
+
+int rfork_forked(unsigned flags, const struct fork_context *fc) {
+    if (!fc) extinction("rfork_forked with NULL fork_context");
+    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc);
 }
 
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
-    return rfork_internal(flags, entry, arg, caps_mask);
+    return rfork_internal(flags, entry, arg, caps_mask, NULL);
 }
 
 // =============================================================================

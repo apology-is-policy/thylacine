@@ -1099,6 +1099,40 @@ int proc_quiesce_owned_devices(struct Proc *p);
 // PID, child gets 0 — a register-set tweak in the syscall-return path).
 int rfork(unsigned flags, void (*entry)(void *), void *arg);
 
+// LINEAGE L-3b: the child's EL0 continuation, for a fork rather than a
+// kernel-entry spawn.
+struct fork_context {
+    // The PARENT's live EL0 trapframe. For a syscall that is exactly the `ctx`
+    // syscall_dispatch is already holding -- no capture mechanism is needed,
+    // because the frame the child must resume IS the frame the parent trapped
+    // on. (thread.h's `debug_trapframe` is the same object published for the
+    // debugger; a handler with `ctx` in hand should use `ctx`.)
+    const struct exception_context *frame;
+    // MANDATORY. Two Procs sharing an address space must not share a stack
+    // pointer; the syscall layer validates it before we get here.
+    u64 child_sp;
+    // Programmed verbatim into the child's TPIDR_EL0 -- the ABI's "0 means
+    // inherit" is resolved by the caller, which has the live value.
+    u64 child_tls;
+};
+
+// LINEAGE L-3b: rfork whose child RESUMES `fc->frame` at EL0 instead of
+// entering a kernel function. `fc->frame->regs[0]` is replaced with 0 in the
+// child's copy -- that single difference is the whole of "fork returns twice".
+//
+// Inherits identically to `rfork` in every other respect: the two shapes run
+// the same body and differ only in how the child's first Thread is built.
+//
+// The child's HANDLE TABLE is fresh and EMPTY (RFFDG is unsupported), so this
+// is CLONE_VM WITHOUT CLONE_FILES -- which is precisely posix_spawn's shape,
+// but NOT POSIX fork's. A child that must inherit its parent's fds needs the
+// table copy, which is a separate decision with its own hazard: a copy would
+// duplicate hardware handles, and I-5 makes those non-transferable.
+//
+// Returns the child pid to the parent, or -1. The CHILD does not return from
+// here at all -- it resumes at EL0 with x0 = 0.
+int rfork_forked(unsigned flags, const struct fork_context *fc);
+
 // P4-Ic3: kernel-internal rfork that grants the child a capability subset.
 //
 // Identical to `rfork` except the child's caps field is set to

@@ -476,6 +476,87 @@ same object `#88` taught `/proc/regs` to read at the EL0-sync choke point.
 > stack and calls it. The kernel never sees a function pointer, so there is no
 > "start the child at an entry point" primitive to build — the `CLONE_VM` shape
 > needs the identical trapframe copy the fork shape does.
+
+#### As built at L-3b — child-context restoration + `SYS_RFORK`
+
+**`SYS_RFORK = 102` is the tree's first syscall that returns twice.** Both Procs
+resume at the instruction after the same `svc`, on the same saved frame; `x0` is
+the only thing that tells them apart. Three pieces:
+
+- **`fork_frame_init(dst, src, child_sp)`** — the decision, and deliberately a
+  pure function so a test can reach it without a Proc: `dst` is `src` with
+  exactly two edits (`regs[0] = 0`, `sp = child_sp`) and everything else copied
+  verbatim. `elr` verbatim is what "resumes at the same instruction" means;
+  `spsr` verbatim carries the parent's NZCV (live if a conditional follows the
+  syscall) and cannot be EL0-forged, because the hardware wrote it on exception
+  entry. Field-by-field, not `*dst = *src`: a 288-byte struct assignment
+  compiles to a `memcpy` the freestanding kernel does not link.
+- **`thread_create_forked`** — the third creation shape, and the only one that
+  RESTORES rather than constructs. It carves the child's frame off the top of
+  the child's own fresh kernel stack, at the exact address `KERNEL_ENTRY` would
+  have chosen, and points `ctx.sp` at it. FP/SIMD is inherited from the **live**
+  registers via `fp_save_area` — not from the caller's saved `Context`, which
+  holds its last switch-OUT values and is stale while the caller is running.
+- **`thread_fork_trampoline`** — release, `el0_return_die_check` (#811 first-
+  entry, exactly as `thread_user_trampoline` does it), mask DAIF, then
+  `b .Lexception_return`. It lives in `vectors.S` rather than `context.S`
+  precisely so it can branch to that **local** label: reusing the one audited
+  `KERNEL_EXIT` beats hand-rolling a second eret on what that macro's own
+  comment calls "the single most load-bearing exit in the kernel". Note the
+  absence of a GPR-zeroing sweep — `thread_user_trampoline` has one because a
+  fresh thread must not inherit kernel residue, but this child is *continuing
+  its parent's userspace frame*, so zeroing x1..x30 would break the fork rather
+  than harden it.
+
+**Two things are deliberately NOT here.** The child's handle table is fresh and
+empty (`RFFDG` unsupported) — `CLONE_VM` *without* `CLONE_FILES`, which is
+exactly posix_spawn's shape and not POSIX fork's; the copy is L-3c, and #119 is
+its hazard (a copy would duplicate hardware handles, which I-5 forbids). And
+`RFPROC` alone is **refused**, not served: without `RFMEM` the child gets a
+fresh empty address space, so resuming it at its parent's PC faults on the first
+instruction fetch. A private child address space means copy-on-write, which is
+L-4.
+
+##### The gate this chunk was given was unprovable, and measuring said so
+
+The L-3a build-arc table set L-3b's gate as *"a **kernel-driven** RFMEM child
+resumes at its parent's PC"*. That cannot be observed. The only Proc a kernel
+test runs on is kproc, which has neither an address space to share
+(`addrspace.kproc_has_none`) nor an EL0 trapframe to fork from — so a
+kernel-driven resume is not merely untested, it is **unobservable**. The gate
+therefore moved to an EL0 caller, which is why `SYS_RFORK` landed here rather
+than at L-3c as originally sequenced.
+
+The coverage splits cleanly, and the split is the point:
+
+| claim | kernel test | `/fork-probe` |
+|---|---|---|
+| the frame's contents (x0 = 0, sp replaced, rest verbatim) | **yes** (`fork.frame_init`) | indirectly |
+| the argument gate rejects malformed requests | **yes** (`fork.rfork_arg_rejection`) | leg F, from a Proc that *has* a space |
+| the child actually erets and resumes | no | **yes** |
+| the two Procs share the address space | no (kproc has none) | **yes** |
+| the child runs on its own stack | no | **yes** |
+
+Revert-probed to demonstrate exactly that: making `thread_create_forked` ignore
+`child_sp` entirely leaves the **unit suite fully green** while only the
+in-guest leg fails (`the child did not exit normally`). A kernel test cannot see
+this bug at all.
+
+##### A userspace consequence worth stating: the child comes back on a different stack
+
+`SYS_RFORK` cannot be wrapped by an ordinary `asm!` the way every other syscall
+can. After the eret the child holds every one of the parent's registers except
+`x0` — including `x29` (frame pointer) and `x30` (link register), both pointing
+into the **parent's** stack — while `SP` points at fresh memory. Frame pointer
+and stack pointer describe two different stacks; any compiler-generated local
+access, any epilogue, any `ret` would touch the wrong one.
+
+musl's `clone.s` solves this the only way it can be solved, and
+`libthyla_rs::rfork_spawn` is a transliteration: the caller's function pointer
+and argument are pushed onto the **child's** stack before the syscall, and the
+child's first act is to pop them and `blr`, establishing a correct frame on its
+own stack before any compiled code runs. It also zeroes `x29`/`x30` first, so a
+backtrace cannot walk into the parent's stack.
 >
 > So the only thing separating stage 2 from stage 3 is whether the AddrSpace is
 > **shared** or **COW-cloned**. Child-context restoration is common to both and
@@ -533,11 +614,11 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-2a** ✅ **LANDED** | `execve` (stage 1) for a **single-threaded** Proc: the AddrSpace-targeted load path (`exec_load_into` + the `*_in` VMA/burrow forms), `proc_exec_replace`, `sched_activate_addrspace`, `SYS_EXECVE = 101`. A multi-threaded caller is refused with `-EAGAIN`. | **MET** — `/exec-probe` re-execs itself and the successor prints from an fd inherited across the swap; a **failed** execve returns with the caller's address space intact; all three load-bearing pieces revert-probed to *distinct* failures |
 | **L-2b** | The de_thread primitive: a per-Thread die flag + wait-for-EXITING + reap, removing L-2a's multi-thread refusal. | a multi-thread Proc's peers are all EXITING and off-CPU before the swap; own audit round |
 | **L-3a** ✅ **LANDED** | The share substrate: the VMA drain moves into `addrspace_unref`'s last drop (fixing the same latent bug in `proc_free` *and* `proc_exec_replace`), `proc_alloc_in(share)`, `rfork_internal` accepts `RFPROC\|RFMEM`, the device quiesce gates on sole ownership, `RFMEM`-without-a-space refused. No EL0 surface. | **MET** — 1279/1279 → 1282/1282, boot OK, 0 EXTINCTION, `asid.tla` unperturbed (443457, depth 18); all three pieces revert-probed to *distinct* failures |
-| **L-3b** | Child-context restoration (pulled forward from L-5 per §5.4's correction) + the handle-table copy (§2.4; and see #119 — a table copy would duplicate hardware handles, which I-5 forbids). | a kernel-driven RFMEM child resumes at its parent's PC with `x0 = 0` on its own stack |
-| **L-3c** | `SYS_RFORK` EL0 surface + the VFORK suspend. | a native prover forks-and-execs; parent-suspend released on both exec and exit; a killed parent unwinds (#811) |
+| **L-3b** ✅ **LANDED** | Child-context restoration (pulled forward from L-5 per §5.4's correction) **+ the `SYS_RFORK = 102` EL0 surface**, which had to come with it: `fork_frame_init`, `thread_create_forked`, `thread_fork_trampoline`, `rfork_forked`, and `libthyla_rs::rfork_spawn` (the musl-`clone.s` shim the different-stack return demands). The handle-table copy moved OUT to L-3c — it is orthogonal, and #119 is a decision that deserves its own reasoning. | **MET, but not by the gate as written** — that gate said *kernel-driven*, and measuring showed a kernel test cannot observe an eret to EL0 at all (kproc has neither an address space nor a frame). Replaced by `/fork-probe`: six legs, boot-fatal. Revert-probed to the sharpest available pairing — ignoring `child_sp` leaves the **unit suite fully green** while only the in-guest leg fails |
+| **L-3c** | The handle-table copy (§2.4; #119 — a copy would duplicate hardware handles, which I-5 forbids, so this is skip-or-refuse and the choice must be stated) + the VFORK suspend. | a native prover forks-and-execs; parent-suspend released on both exec and exit; a killed parent unwinds (#811) |
 | **L-3d** | The VIVARIUM `clone` row. | **a stock `posix_spawn` binary runs in a vivarium** |
 | **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
-| **L-5** | `SYS_RFORK` + child-context restoration (stage 3b). | stock `fork()` returns twice, correctly, in a vivarium |
+| **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
 

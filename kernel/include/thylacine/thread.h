@@ -668,6 +668,74 @@ struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_arg,
                                   u64 user_tls_va);
 
+// LINEAGE L-3b: build the child's EL0 frame for a forked Thread.
+//
+// The DECISION half of thread_create_forked, split out because it is the part
+// worth stating and the part a unit test can reach: `dst` becomes `src` with
+// exactly two edits.
+//
+//   regs[0] = 0    the child's return value from the syscall it never made.
+//                  This is the whole of "fork returns twice": both Threads
+//                  resume at the same ELR, and x0 is the only thing that tells
+//                  them apart.
+//   sp      = child_sp
+//                  MANDATORY, not optional -- a child sharing its parent's
+//                  address space AND its stack pointer would corrupt both
+//                  frames on the first push. The caller validates it.
+//
+// Everything else is copied verbatim, and each omission is deliberate:
+// `elr` (resume at the same instruction), `spsr` (the child inherits the
+// parent's PSTATE -- NZCV matters if a conditional follows the syscall, and
+// the mode bits cannot be EL0-forged because the hardware wrote them), and
+// x1..x30 (the child continues the parent's C frame, so its callee-saved
+// registers and its LR must be the parent's).
+//
+// `esr`/`far` are copied too and are meaningless for the child -- they
+// describe the parent's trap. Nothing reads them on the return path.
+void fork_frame_init(struct exception_context *dst,
+                     const struct exception_context *src,
+                     u64 child_sp);
+
+// LINEAGE L-3b: create a USER-mode Thread that RESUMES a saved EL0 frame
+// rather than entering at a fresh entry point.
+//
+// The third creation shape, and the one a fork needs: thread_create_user
+// enters EL0 at (entry, sp, arg) because SYS_THREAD_SPAWN's caller hands the
+// kernel a continuation, but the raw `clone`/`rfork` contract has no entry
+// point at all -- the child resumes where the parent was, and userspace pops
+// its own function pointer afterwards (musl's aarch64 clone.s is literally
+// `cbz x0,1f` / `ldp x1,x0,[sp],#16` / `blr x1`). So the kernel must restore a
+// frame, not construct one.
+//
+// `frame` is the PARENT's live EL0 trapframe -- for a syscall that is the
+// `ctx` syscall_dispatch already holds. It is copied (via fork_frame_init)
+// onto the top of the child's own fresh kernel stack, exactly where
+// KERNEL_ENTRY would have built it, and ctx.sp points at it; the child's
+// first switch-in lands in thread_fork_trampoline, which runs the same
+// first-entry die-check thread_user_trampoline does and then falls into the
+// SHARED exception-return path rather than a second hand-rolled eret.
+//
+// FP/SIMD is inherited from the LIVE registers (fp_save_area), not from the
+// caller's saved Context -- the caller is running, so its Context holds
+// whatever it had at its last switch-OUT, which is stale. POSIX fork copies
+// FP state; none of L-3's own consumers read it across the call, but leaving
+// it zeroed would be a divergence with no reason behind it.
+//
+// `child_tls` is programmed verbatim, exactly as in thread_create_user. The
+// fork ABI's "0 means inherit the caller's TPIDR_EL0" rule is resolved by the
+// syscall handler before it gets here -- that layer has the caller in scope,
+// and the live TLS base is in a system register, not in the caller's saved
+// Context (which holds its last switch-OUT value).
+//
+// Caller-provided values are NOT validated here (same contract as
+// thread_create_user): the syscall handler owns the bound + alignment checks.
+//
+// Returns the new Thread on success, NULL on OOM.
+struct Thread *thread_create_forked(struct Proc *proc,
+                                    const struct exception_context *frame,
+                                    u64 child_sp,
+                                    u64 child_tls);
+
 // Release a Thread descriptor + its kstack. Caller must ensure the
 // thread is not current (current_thread() != t) and not still on any
 // runqueue. Extincts on violation.

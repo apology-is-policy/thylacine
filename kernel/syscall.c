@@ -6987,6 +6987,80 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
 }
 
 // =============================================================================
+// SYS_RFORK -- LINEAGE L-3b (docs/LINEAGE.md section 5.4, invariant I-44).
+//
+// The EL0 surface for rfork(RFPROC|RFMEM), and the tree's first syscall that
+// returns twice. The ABI is documented at SYS_RFORK in syscall.h; what follows
+// is why this handler is shaped the way it is.
+//
+// It takes `ctx` for the same reason sys_execve_handler does, but inverted:
+// execve REWRITES the frame so its own eret starts a new image; this one COPIES
+// the frame so a second Thread can eret onto it. Either way the frame is the
+// subject of the call, not a means of returning from it -- so the dispatch must
+// not blindly store a result into regs[0] (see syscall_dispatch).
+//
+// All argument validation happens HERE, before rfork_forked, so that a kernel
+// test can reach every rejection with a synthetic ctx and no address space.
+// =============================================================================
+
+// Non-static so the argument gate is reachable from a kernel test with a
+// synthetic frame (the sys_pci_claim_handler pattern -- the test carries its
+// own extern decl). Every rejection below lands ahead of rfork_forked, which is
+// what makes that coverage possible from kproc.
+s64 sys_rfork_handler(struct exception_context *ctx) {
+    if (!ctx) return -(s64)T_E_INVAL;
+
+    struct Thread *t = current_thread();
+    if (!t)      return -(s64)T_E_INVAL;
+
+    unsigned flags     = (unsigned)ctx->regs[0];
+    u64      child_sp  = ctx->regs[1];
+    u64      child_tls = ctx->regs[2];
+
+    // Exactly RFPROC|RFMEM. RFPROC alone would hand the child a fresh EMPTY
+    // address space and then resume it at its parent's PC -- an instruction
+    // fetch fault on the first cycle. Refusing is the honest answer until COW
+    // exists (L-4); serving it would be a fork that cannot work.
+    if (flags != (unsigned)(RFPROC | RFMEM)) return -(s64)T_E_INVAL;
+
+    // A shared address space with a shared SP corrupts both frames on the first
+    // push, so child_sp is mandatory rather than defaulted.
+    if (child_sp == 0)                       return -(s64)T_E_INVAL;
+    if ((child_sp & 15u) != 0)               return -(s64)T_E_INVAL;
+    if (child_sp >= UACCESS_USER_VA_TOP)     return -(s64)T_E_INVAL;
+
+    // The one overlap case worth catching: handing the child the caller's OWN
+    // live SP. This is a footgun-catcher, not a safety property -- an SP that
+    // overlaps the parent's stack WITHOUT being equal to it is equally fatal and
+    // is not detectable here (the parent's stack has no recorded extent). The
+    // caller owns non-overlap, exactly as it does for a pthread stack; this
+    // check just refuses the mistake that is free to see.
+    if (child_sp == ctx->sp)                 return -(s64)T_E_INVAL;
+
+    // "0 means inherit" is resolved here because this is the layer that has the
+    // caller in scope. The LIVE register is the only correct source: the
+    // caller's saved Context holds its last switch-OUT value, which is stale
+    // while it is running.
+    if (child_tls == 0)
+        __asm__ __volatile__("mrs %0, tpidr_el0" : "=r"(child_tls));
+
+    struct fork_context fc = {
+        .frame     = ctx,
+        .child_sp  = child_sp,
+        .child_tls = child_tls,
+    };
+
+    int pid = rfork_forked(flags, &fc);
+    if (pid < 0) return -(s64)T_E_AGAIN;
+
+    // Only the PARENT reaches here. The child never returns from this call at
+    // all: it is a separate Thread whose first switch-in lands in
+    // thread_fork_trampoline and erets onto its own copy of `ctx` with
+    // regs[0] == 0.
+    return (s64)pid;
+}
+
+// =============================================================================
 // SYS_WAIT_PID — reap one ZOMBIE child (P5-spawn-wait).
 // =============================================================================
 //
@@ -8805,6 +8879,17 @@ void syscall_dispatch(struct exception_context *ctx) {
         // nothing was touched, so the -errno goes back the normal way.
         s64 r = sys_execve_handler(ctx);
         if (r != 0) ctx->regs[0] = (u64)r;
+        return;
+    }
+
+    case SYS_RFORK: {
+        // The second ctx-taking handler, for the mirror-image reason: execve
+        // rewrites this frame so its own eret starts a new image; rfork COPIES
+        // it so a second Thread can eret onto it. The child's regs[0] was set
+        // to 0 in ITS copy by fork_frame_init and is untouched by this store,
+        // which only ever runs on the parent -- the child is a different
+        // Thread on a different stack and never returns through here.
+        ctx->regs[0] = (u64)sys_rfork_handler(ctx);
         return;
     }
 

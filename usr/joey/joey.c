@@ -949,6 +949,37 @@ static int do_exec_probe(void) {
     return 0;
 }
 
+// do_fork_probe -- LINEAGE L-3b's boot gate for SYS_RFORK (I-44).
+//
+// /bin/fork-probe forks a child that shares its address space, and the child
+// reports back through that sharing. The single PASS marker stands for six
+// legs (the probe's own header enumerates them); it prints only if the child
+// resumed at the parent's PC with x0 == 0, on its own stack, in the same
+// address space, as a distinct reapable Proc.
+//
+// Boot-fatal for the same reason exec-probe is, and more so: this is the ONLY
+// coverage of the resume at all. The kernel tests reach the frame DECISION and
+// the argument gate; neither can observe an eret to EL0, because kproc has
+// neither an address space to share nor a trapframe to fork from. If this
+// probe is skipped, the mechanism is untested rather than lightly tested.
+static int do_fork_probe(void) {
+    static const char fp_name[] = "fork-probe";
+    static const char fp_m0[]   = "fork-probe: PASS";
+    static const struct argv_marker fp_markers[] = {
+        { fp_m0, sizeof(fp_m0) - 1 },
+    };
+    if (pouch_smoke_one_argv(fp_name, sizeof(fp_name) - 1,
+                             fp_name, sizeof(fp_name),
+                             /*argc=*/1u,
+                             fp_markers,
+                             sizeof(fp_markers) / sizeof(fp_markers[0]),
+                             /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0)
+        return -1;
+    t_putstr("joey: fork-probe ok (LINEAGE L-3b: a forked child resumed its "
+             "parent's frame on its own stack)\n");
+    return 0;
+}
+
 // do_native_coreutil_smoke — U-6e-pre-b: the FIRST runtime exercise of the
 // adopted native coreutils (echo/cat/wc/head/tail/seq/sort/uniq/tr/cut/grep/
 // basename/dirname/pwd/true/false). coreutil-smoke is itself a native
@@ -4169,6 +4200,14 @@ int main(void) {
     // machinery (the Shape-B startup frame) and extends it: exec-probe reads
     // the argv its PREVIOUS incarnation passed. Gates the boot.
     if (do_exec_probe() != 0) return 1;
+
+    // === LINEAGE L-3b: a forked child resumes its parent's frame (I-44) ===
+    // Directly after execve, because the two are the halves of process
+    // creation and the same machinery carries both: exec-probe proves a frame
+    // can be REWRITTEN in place, fork-probe that one can be COPIED to a second
+    // Proc. Gates the boot -- and it is the only coverage of the resume there
+    // is (see do_fork_probe).
+    if (do_fork_probe() != 0) return 1;
 
     // === native coreutils suite (U-6e-pre-b) ===
     // First runtime exercise of the adopted coreutils, each spawned +

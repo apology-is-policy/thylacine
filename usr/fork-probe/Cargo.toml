@@ -1,0 +1,18 @@
+[package]
+name = "fork-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fork-probe"
+path = "src/main.rs"
+
+[dependencies]
+# LINEAGE L-3b's in-guest gate: the ONLY place a forked child can be observed
+# resuming. The kernel unit tests cover the DECISION (fork_frame_init) and the
+# argument gate, but neither can reach the resume -- an eret to EL0 needs a
+# real EL0 caller with a real trapframe, and kproc has neither an address
+# space nor a frame to fork from.
+libthyla-rs = { path = "../lib/libthyla-rs" }

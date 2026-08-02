@@ -269,6 +269,11 @@ pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
 pub const T_SYS_EXECVE: u64           = 101;    // LINEAGE L-2: replace this Proc's image in place
+pub const T_SYS_RFORK: u64            = 102;    // LINEAGE L-3b: fork sharing the address space
+// SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
+// served at L-3b; RFPROC alone needs copy-on-write (L-4) and is refused.
+pub const T_RFPROC: u64               = 0x0001;
+pub const T_RFMEM: u64                = 0x0002;
 // Overcommit memory model (#321): reserve cheaply, commit on first touch,
 // release via decommit. SYS_BURROW_ATTACH (37) stays the eager path for
 // kernel-internal copy-target callers; the native heap reserves lazily.
@@ -2673,6 +2678,90 @@ global_asm!(
     "    b       1b",
     ".size _start, .-_start",
 );
+
+// =============================================================================
+// LINEAGE L-3b: rfork(RFPROC|RFMEM) -- the returns-twice primitive.
+// =============================================================================
+//
+// SYS_RFORK cannot be wrapped by an ordinary `asm!` the way every other
+// syscall here is, and the reason is worth stating rather than discovering:
+// the child comes back on a DIFFERENT STACK.
+//
+// After the eret, the child holds every one of the parent's registers except
+// x0 -- including x29 (frame pointer) and x30 (link register), both of which
+// point into the PARENT's stack -- while SP points at fresh, empty memory.
+// So the child's frame pointer and its stack pointer describe two different
+// stacks. Any compiler-generated access to a local, any epilogue, any `ret`
+// would read or write the wrong one. A Rust wrapper that returned 0 into safe
+// code would be handing the child a frame that does not exist.
+//
+// musl's aarch64 clone.s solves this the only way it can be solved, and this
+// is a transliteration of it: the caller's function pointer and argument are
+// pushed onto the CHILD's stack before the syscall, and the child's very first
+// act is to pop them and `blr` -- which establishes a fresh, correct frame on
+// its own stack before any compiled code runs. The child never returns to this
+// wrapper, so there is no stale frame to return through.
+//
+// # Safety
+//
+// - `stack_top` must be the TOP of a writable region the child owns
+//   exclusively, 16-byte aligned, and must not overlap the caller's stack.
+//   The kernel rejects zero / misaligned / non-user / equal-to-caller's-SP,
+//   but it cannot see an overlap, and an overlapping stack corrupts both
+//   Procs silently.
+// - `entry` must not return. It runs on a stack with no caller beneath it;
+//   this shim exits the child if it does return, but that is a backstop, not
+//   a contract to rely on.
+// - The child shares the address space, so `arg` may point at anything the
+//   parent can see -- that sharing is the whole point -- but the two Procs are
+//   then racing over it, with no synchronisation this primitive provides.
+//
+// Returns the child's pid to the parent, or a negative errno. Never returns
+// in the child.
+global_asm!(
+    ".section .text.__thyla_rfork_spawn, \"ax\"",
+    ".globl __thyla_rfork_spawn",
+    ".type __thyla_rfork_spawn, %function",
+    // x0 = flags, x1 = stack_top, x2 = tls, x3 = entry, x4 = arg
+    "__thyla_rfork_spawn:",
+    "    bti     c",
+    // Seed the CHILD's stack with (entry, arg) and hand the kernel the
+    // adjusted pointer. Pre-index so x1 IS the child's initial SP.
+    "    stp     x3, x4, [x1, #-16]!",
+    "    mov     x8, #102",               // T_SYS_RFORK
+    "    svc     #0",
+    "    cbz     x0, 1f",                 // x0 == 0 -> we are the CHILD
+    "    ret",                            // parent: x0 = child pid, or -errno
+    // Child. SP is its own; x29/x30 still point into the parent's stack, so
+    // nothing may touch a frame until after the blr establishes one.
+    "1:  ldp     x1, x0, [sp], #16",      // x1 := entry, x0 := arg
+    "    mov     x29, #0",                // terminate the frame chain here --
+    "    mov     x30, #0",                // a backtrace must not walk into the
+    "    blr     x1",                     // parent's stack
+    "    mov     x8, #0",                 // T_SYS_EXITS -- backstop if entry returns
+    "    mov     x0, #0",
+    "    svc     #0",
+    "2:  wfe",
+    "    b       2b",
+    ".size __thyla_rfork_spawn, .-__thyla_rfork_spawn",
+);
+
+extern "C" {
+    fn __thyla_rfork_spawn(flags: u64, stack_top: u64, tls: u64,
+                           entry: extern "C" fn(u64) -> !, arg: u64) -> i64;
+}
+
+/// Fork a child that shares this Proc's address space and runs `entry(arg)`
+/// on `stack_top`. Returns the child pid; never returns in the child.
+///
+/// # Safety
+/// See `__thyla_rfork_spawn` above: `stack_top` must be exclusively the
+/// child's, 16-aligned, and non-overlapping with the caller's stack; `entry`
+/// must not return.
+pub unsafe fn rfork_spawn(stack_top: u64, tls: u64,
+                          entry: extern "C" fn(u64) -> !, arg: u64) -> i64 {
+    __thyla_rfork_spawn(T_RFPROC | T_RFMEM, stack_top, tls, entry, arg)
+}
 
 // =============================================================================
 // Native runtime argv capture (DOC-GAP G03).
