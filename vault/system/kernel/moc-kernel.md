@@ -28,6 +28,9 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
 - [[moc-kernel-ipc-wake]] — the wake consumers (poll, pipe, torpor;
   [[inv-i9]] instantiated three ways over the scheduling area's
   primitive).
+- [[moc-kernel-security]] — the authority substrate (handles and their
+  rights, capabilities and the legate, the hardware allowance, the
+  identity-axis rwx check; where every privilege gate resolves).
 
 ## Cross-cutting
 

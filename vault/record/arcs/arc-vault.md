@@ -20,6 +20,7 @@ chunks:
   - chg-2026-08-01-pouch-sweep
   - chg-2026-08-01-substrate-sweep
   - chg-2026-08-02-stratum-sweep
+  - chg-2026-08-02-authority-sweep
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"

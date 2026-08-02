@@ -37,6 +37,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-close-flush-unbounded]] | open | sub-kernel-death | fnd-68-r2-f3 | unfiled |
 | [[seam-co-fidless-wstat]] | open | sub-kernel-ninep-dev9p | chg-2026-07-11-fid-lifecycle |  |
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
+| [[seam-devcap-plain-caps-read]] | open | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |

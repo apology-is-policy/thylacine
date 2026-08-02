@@ -132,8 +132,8 @@ vault/
   home.md                     # the single entry MOC
   dashboard.md                # generated: arc status + open-seam counts
   system/                     # taxonomy spine; dossiers live at their node
-    kernel/{boot,memory,execution,entry,namespace,ninep,ipc-wake,
-            devices,async,console-gfx,security,introspection}/
+    kernel/{boot,memory,execution,scheduling,entry,namespace,ninep,srv,
+            ipc-wake,devices,async,console-gfx,security,introspection}/
     userspace/{runtime,boot-chain,shell-tui,services,ports}/
     boundary/{syscall-abi,ninep-wire,registries,exec-contract,pouch-seam}/
     substrate/                # QEMU TCG/HVF, GIC, bare-metal, builders, harness
