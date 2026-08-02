@@ -2883,9 +2883,48 @@ static int gl_gate(void) {
 // of its own -- says the artifact is a working tool rather than a binary that
 // merely survives --version.
 //
+// #102: an opt-out token on the kernel cmdline, read back through the /hw FDT
+// mount. QEMU turns `-append` into /chosen/bootargs; this is the same channel
+// `thylacine.nowatchpoint` uses (usr/debug-probe/src/main.rs), reused rather
+// than reinvented. Absent, empty, or unreadable -> the token is NOT present,
+// so a boot that does not opt out behaves exactly as it did before.
+//
+// devhw is `.seekable = false`, so this MUST be a sequential read -- a
+// positioned pread is rejected by the #37 ESPIPE gate.
+static int bootarg_has(const char *needle, long nlen) {
+    char buf[256];
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, "/hw/chosen/bootargs", 19, T_OREAD);
+    if (fd < 0) {
+        return 0;  // no bootargs property -> nothing opted out
+    }
+    long n = t_read(fd, buf, (long)sizeof(buf));
+    (void)t_close(fd);
+    if (n <= 0 || nlen <= 0) {
+        return 0;
+    }
+    for (long i = 0; i + nlen <= n; i++) {
+        long j = 0;
+        while (j < nlen && buf[i + j] == needle[j]) {
+            j++;
+        }
+        if (j == nlen) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Gated on /storm/Makefile: a normal (non-clade) boot skips silently.
 static int clade_storm_gate(void) {
     char nb[24];
+    // #102: checked FIRST and reported out loud. The storm is a legitimate
+    // multi-minute boot cost, so a harness with a login budget must be able to
+    // decline it -- and saying so on every boot is what makes the plumbing
+    // visible instead of leaving a silent 300 s timeout to be diagnosed.
+    if (bootarg_has("thylacine.nostorm", 17)) {
+        t_putstr("joey: clade CL-5 storm: thylacine.nostorm -- skipping by request\n");
+        return 0;
+    }
     long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/Makefile", 15, T_OPATH);
     if (probe < 0) {
         t_putstr("joey: clade CL-5 storm: /storm absent -- skipping\n");

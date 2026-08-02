@@ -72,6 +72,27 @@ qemu-system-aarch64 \
 
 **Accel default (since Lazarus W3.5, 2026-06-06):** `run-vm.sh` **auto-detects HVF** on a capable host (Apple Silicon + `kern.hv_support` + a qemu built with hvf) and defaults to `accel=hvf` + `gic-version=2` + `-cpu host` — the fast dev/test loop, the M1 end-state (`PORTABILITY.md §8`). The `-machine virt,gic-version=3 -cpu max` (TCG) flags shown above are now the **occasional full-emulation compat reference** (the unique exerciser of RNDR / GICv3 / full-ISA, and the only host-portable path); force it with `THYLACINE_ACCEL=tcg` (or `make test-tcg` / `make run-tcg`). A non-Apple host auto-falls-back to TCG. `THYLACINE_ACCEL` / `THYLACINE_CPU` / `THYLACINE_GIC` override explicitly.
 
+**`THYLACINE_NOSTORM=1` declines the CL-5 build storm (#102).** The storm
+(`usr/joey` `clade_storm_gate`) runs pre-login on any **clade-baked** pool and
+costs **266-301 s per boot under TCG**, against LS-CI's **300 s** login budget —
+so a pool minted for the GL/clade gate made every interactive scenario fail by
+timeout with a *perfectly healthy* guest, its log ending mid-compile. The two
+gates wanted different pools and nothing said so. `THYLACINE_NOSTORM=1` adds a
+`thylacine.nostorm` token to `-append`, which joey reads back through the `/hw`
+FDT mount (the `thylacine.nowatchpoint` channel, reused) and reports out loud.
+`tools/test-interactive.sh` sets it by default; `tools/test.sh` does not, so the
+**CL-5 charter proof still runs unconditionally on the normal boot** — it simply
+stops being repeated 32 times by a harness that is not testing it. This removes
+the mismatch rather than detecting it: one pool now serves both gates.
+`THYLACINE_NOSTORM=0` (or unset) runs the storm.
+
+The token array **composes** — `append_tokens+=(...)`, never `append_flags=(...)`.
+A plain assignment would silently drop `nowatchpoint` the moment a second token
+was added, re-wedging #70 under TCG. Membership is tested against `"1"`, not with
+`-n`: `-n` is true for the string `"0"`, which would make the documented way to
+turn this *off* dead on arrival — the same defect this arc found in
+`NP3_HOSTPORT`.
+
 **`-cpu max`** is preferred over `-cpu cortex-a76` for the TCG compat reference: it exposes every ARMv8.5+ extension QEMU emulates (PAC, MTE, BTI, LSE, SVE), which the hardening stack relies on per `ARCHITECTURE.md §24`. Under HVF the guest sees the host CPU via `-cpu host` (Apple cores: LSE+PAC+BTI, no RNDR — the kernel CSPRNG seeds from virtio-rng instead, Lazarus W3). For Pi 5 hardware testing, the actual Pi 5 CPU (Cortex-A76, ARMv8.2) provides PAC+LSE but not MTE/BTI; the kernel detects and adapts at boot.
 
 **Flags to add as phases progress:**
