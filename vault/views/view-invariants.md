@@ -24,9 +24,12 @@ Generated from note fields — do not edit between the markers
 | I-26 | [[inv-i26]] | prose | sub-kernel-devproc | prose, gate-smp |
 | I-27 | [[inv-i27]] | prose | sub-kernel-cons, sub-kernel-devdev | prose, gate-interactive, gate-smp |
 | I-28 | [[inv-i28]] | prose | sub-kernel-stalk, sub-pouch-fs, sub-pouch-net | gate-smp |
+| I-29 | [[inv-i29]] | spec | sub-kernel-loom | spec-loom, spec-loom-multishot, spec-loom-order, spec-loom-devgone, gate-smp |
 | I-3 | [[inv-i3]] | spec | sub-kernel-territory | spec-territory, gate-smp |
+| I-30 | [[inv-i30]] | spec | sub-kernel-loom, sub-kernel-weft | spec-loom, spec-weft, gate-smp |
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc | gate-smp |
 | I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-stalk, sub-kernel-territory | gate-smp |
+| I-37 | [[inv-i37]] | spec | sub-kernel-weft | spec-weft, spec-weft-readiness, gate-smp |
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |
 | I-39 | [[inv-i39]] | spec | sub-kernel-devproc, sub-kernel-proc | spec-debug-stop, prose, gate-smp |
 | I-8 | [[inv-i8]] | spec | sub-kernel-sched, sub-kernel-sched-smp, sub-kernel-rendez | spec-scheduler, spec-sched-alpha, spec-sched-rebalance, spec-sched-tickless, gate-smp |

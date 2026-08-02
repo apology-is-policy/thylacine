@@ -43,6 +43,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-el0-irq-tail-no-notes]] | open | sub-kernel-exception | chg-2026-08-02-entry-sweep | task #21 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
+| [[seam-f-notif-unwired]] | open | sub-kernel-weft, sub-kernel-loom | chg-2026-08-02-async-sweep |  |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-hmp-push]] | open | sub-kernel-sched-smp | chg-2026-06-05-864-hmp-foundation | ARCH 8.4.4 -- the verification boundary |
@@ -54,6 +55,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-larder-shrinker]] | open | sub-kernel-larder | fnd-29-r1-f1 |  |
 | [[seam-larder-stale-child-attr]] | open | sub-kernel-larder | fnd-l1f-r1-f3 |  |
 | [[seam-legate-member-sweep-race]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
+| [[seam-loom-rearm-needs-blocking-enter]] | open | sub-kernel-loom | chg-2026-08-02-async-sweep |  |
 | [[seam-mm-directmap-cap-absolute]] | open | sub-kernel-mm-phys | chg-2026-05-31-808-directmap-pagemap | #808 audit F2; Lazarus board bringup |
 | [[seam-mount-graph-unmodeled]] | open | sub-kernel-territory | fnd-stalk2-r1-f1 | unfiled |
 | [[seam-netd-host-tests]] | open | sub-netd-server, sub-netd-nic | adt-net2d-r1 |  |

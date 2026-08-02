@@ -4,7 +4,7 @@ type: moc
 title: "Kernel"
 parent: home
 created: 2026-07-31
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 The Thylacine kernel tree: boot, memory, execution, entry, namespace, 9P,
 IPC/wake, devices, async (Loom/Weft), console/graphics, security,
@@ -41,6 +41,9 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
 - [[moc-kernel-entry]] — the EL0 boundary (the vector table, the return
   tails where the kernel acts on a thread before letting it run again, and
   the fixup table that makes a kernel touch of a user address recoverable).
+- [[moc-kernel-async]] — rings and shared pages (the request that stops being
+  a syscall, the payload that stops being a copy, and the rule that keeps
+  memory the other side can write from ever locating a kernel access).
 
 ## Cross-cutting
 
