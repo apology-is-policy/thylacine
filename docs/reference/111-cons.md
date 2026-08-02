@@ -551,7 +551,56 @@ this output to aurora, whose VT does not synthesize CR on LF (#36), so bare-LF
 writes would staircase the moment they became visible. Routing through
 `cons_output_write` fixes the visibility and the line endings in one stroke.
 
+### Kernel diagnostics join the shared path (#126, as-built)
+
+`cons_diag_puts` / `cons_diag_putdec` / `cons_diag_puthex64` are the
+**non-blocking** kernel emitters: for any steady-state diagnostic issued from a
+context that can neither sleep nor spin — IRQ context, or under a spinlock.
+
+    void cons_diag_puts(const char *s);      // ONLCR-translating, NULL-safe
+    void cons_diag_putdec(u64 v);
+    void cons_diag_puthex64(u64 v);
+
+Each byte goes `cons_drain_tap` → `cons_tx_push_nowait` (drop + count on a full
+ring, the echo disposition), then one `cons_tx_kick` per call rather than per
+byte. They never sleep, never spin, take only leaf locks, and wake outside them
+— the same path `cons_emit` takes for echo from the UART RX IRQ, which is the
+strongest available precedent for "legal in a constrained context". Pre-arm they
+fall through to the direct bounded `uart_putc`, so boot output is byte-identical.
+
+**Why they exist.** `uart_putc`'s #67 bound is 20 ms *per byte*, and it does not
+compose. `proc_reparent_children` emitted the ~90-byte #80 orphan line while
+holding `g_proc_table_lock` (taken irqsave 40 times in `proc.c`, plain 0 times),
+so a stalled host consumer pinned the global process-table lock IRQ-masked for
+~1.8 s per adoption — the interrupt-dead stall #67's bound exists to prevent,
+reconstituted by iterating it. **A per-item bound is not a per-operation bound.**
+
+**Ordering.** `cons_diag_*` is callable under any lock ordered above the cons
+locks. It takes `g_cons_drain.lock` and `g_cons_tx.lock` (both leaves;
+`g_cons_tx.lock` nests only `g_uart_imsc_lock`) and wakes after releasing them.
+It does **not** touch `g_cons.lock`, so the standing "never hold `g_cons.lock`
+across `g_proc_table_lock`" obligation (see `cons_service_deferred` and the #55
+winch post) is untouched — that edge runs the other way.
+
+**Deliberately NOT capture-aware.** Unlike `cons_emit`, these skip
+`g_cons_echo_capture`: that 128-byte buffer exists so a test can assert exactly
+what was *echoed*, and a kernel diagnostic landing in it would corrupt the
+assertions it exists for.
+
+Converted callers: `proc_reparent_children` and `proc_fault_terminate`.
+`kernel/proc.c` now has zero direct `uart_*` calls.
+
 ### Coverage
+
+`proc.orphan_diag_uses_cons_path` pins #126, by the #76 method: arm the drain,
+force a real orphan adoption, require the line verbatim in the tap. The
+assertion is **routing, not duration** — `uart_test_tx_stall()` gates
+`uart_tx_try_putc` only and never `uart_putc`, so an "elapsed < N ms" assertion
+would pass identically pre- and post-fix (satisfiable by the broken system).
+Revert-probed: restoring the `uart_puts` calls yields `1237/1238 FAIL`, with the
+orphan line still *present* in the log via the direct path — the test fails on
+the byte's route, not on its absence, which is exactly the discrimination
+wanted. It fails equally if the diagnostic is simply deleted.
 
 `cons.sys_puts_uses_shared_console_path` pins #76. It has to spawn a **real EL0
 binary** (`/hello`, whose entire output is one `t_putstr`): `sys_puts_handler`

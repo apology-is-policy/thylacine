@@ -640,6 +640,76 @@ static bool cons_emit_wait(u8 b) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #126: the NON-BLOCKING kernel diagnostic emit -- for a context that can
+// neither sleep nor spin (IRQ context, or under a spinlock with IRQs masked).
+//
+// The direct arch emitters (uart_puts / uart_putdec / uart_puthex64) spin on a
+// full TX FIFO for up to UART_TX_SPIN_MAX_NS PER BYTE before dropping it. That
+// bound is per-BYTE and does NOT compose into a per-MESSAGE one, which is the
+// whole bug: the #80 orphan diagnostic emits ~90 bytes back-to-back while
+// holding g_proc_table_lock (which proc.c takes irqsave 40 times and plain 0
+// times), so a stalled host consumer turned one adoption into ~1.8 s
+// IRQ-masked with the global process-table lock held -- precisely the
+// interrupt-dead stall #67's bound was introduced to prevent.
+//
+// These route the same bytes through the #75 TX ring instead: never spinning,
+// dropping on a full ring (the echo disposition), kicking the FIFO once per
+// call. A stalled consumer therefore costs a bounded handful of MMIO accesses,
+// not seconds. They also feed the G-4 drain tap, so a kernel diagnostic reaches
+// the framebuffer console and not only serial -- the #76 class, which every
+// direct-path emit silently exhibits.
+//
+// CONTRACT: never sleeps, never spins, and takes only LEAF locks
+// (g_cons_drain.lock; g_cons_tx.lock, which nests only the g_uart_imsc_lock
+// leaf), waking outside them. So it is legal from IRQ context and from under
+// any lock ordered above those -- the same path cons_emit already takes for
+// echo from the UART RX IRQ, the most constrained context in the kernel.
+//
+// Pre-arm (early boot) cons_tx_push_nowait falls through to the direct bounded
+// path, so output before cons_tx_arm() stays byte-identical.
+// ---------------------------------------------------------------------------
+
+// Deliberately does NOT consult g_cons_echo_capture (unlike cons_emit): that
+// 128-byte buffer exists so a test can assert EXACTLY what was ECHOED, and a
+// kernel diagnostic landing in it would corrupt the assertions it exists for.
+static void cons_diag_byte(u8 b) {
+    cons_drain_tap(b);
+    if (!cons_tx_push_nowait(b)) cons_tx_count_drop();
+}
+
+void cons_diag_puts(const char *s) {
+    if (!s) return;
+    for (; *s; s++) {
+        // ONLCR, matching uart_puts byte-for-byte: QEMU's `-serial mon:stdio`
+        // host tty does no CR translation, and a bare LF staircases on aurora's
+        // VT (#76).
+        if (*s == '\n') cons_diag_byte((u8)'\r');
+        cons_diag_byte((u8)*s);
+    }
+    cons_tx_kick();
+}
+
+void cons_diag_putdec(u64 v) {
+    char buf[21];                       // max u64 is 20 decimal digits
+    int  i = 0;
+    if (v == 0) {
+        cons_diag_byte((u8)'0');
+    } else {
+        while (v) { buf[i++] = (char)('0' + (v % 10)); v /= 10; }
+        while (i > 0) cons_diag_byte((u8)buf[--i]);   // reversed: high digit first
+    }
+    cons_tx_kick();
+}
+
+void cons_diag_puthex64(u64 v) {
+    static const char hexdigits[] = "0123456789abcdef";
+    cons_diag_byte((u8)'0');
+    cons_diag_byte((u8)'x');
+    for (int i = 60; i >= 0; i -= 4) cons_diag_byte((u8)hexdigits[(v >> i) & 0xF]);
+    cons_tx_kick();
+}
+
 // Stage one echoed/output byte into `echo[*necho]`, applying ONLCR (NL -> CR NL).
 // Bounded by CONS_ECHO_MAX at every call site (a NL stages 2, a plain byte 1).
 static void cons_echo_stage(u8 b, u32 tio, u8 *echo, int *necho) {

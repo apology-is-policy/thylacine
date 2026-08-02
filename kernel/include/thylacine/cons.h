@@ -104,6 +104,26 @@ void cons_tx_flush_for_dump(void);
 // tooling-ABI line (TOOLING.md section 10).
 void cons_tx_flush(void);
 
+// #126: the NON-BLOCKING kernel diagnostic emit. Use these -- NOT uart_puts /
+// uart_putdec / uart_puthex64 -- for any steady-state kernel diagnostic issued
+// from a context that can neither sleep nor spin: IRQ context, or under a
+// spinlock (every g_proc_table_lock acquisition in proc.c is irqsave).
+//
+// The direct arch emitters spin on a full TX FIFO for up to 20 ms PER BYTE
+// before dropping it (#67). That bound does NOT compose: ~90 bytes of
+// diagnostic emitted back-to-back under a global irqsave lock is ~1.8 s
+// interrupt-dead with that lock held -- the #126 defect, and exactly the stall
+// #67's per-byte bound exists to prevent. These push into the TX ring instead
+// (never spinning; dropping on a full ring, the echo disposition) and feed the
+// G-4 drain tap, so the line also reaches the framebuffer console (#76).
+//
+// Never sleep; never spin; take only leaf locks and wake outside them. Legal
+// wherever cons_emit is -- which includes the UART RX IRQ handler. Pre-arm they
+// fall through to the direct bounded path, so boot output is byte-identical.
+void cons_diag_puts(const char *s);
+void cons_diag_putdec(u64 v);
+void cons_diag_puthex64(u64 v);
+
 // #75 test hooks (test-only). The RING needs no dedicated test -- every byte of
 // console output on every boot goes through it, so a ring bug means no boot at
 // all. The ROLE does: it is what makes a write call-atomic, and its absence is
