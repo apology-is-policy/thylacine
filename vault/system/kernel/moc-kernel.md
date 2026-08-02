@@ -31,6 +31,9 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
 - [[moc-kernel-security]] — the authority substrate (handles and their
   rights, capabilities and the legate, the hardware allowance, the
   identity-axis rwx check; where every privilege gate resolves).
+- [[moc-kernel-introspection]] — `/proc` and `/ctl` (process state, the
+  debugger's control surface, machine-wide stats; visibility widened
+  without authority, gated at the read site rather than the mode bit).
 
 ## Cross-cutting
 

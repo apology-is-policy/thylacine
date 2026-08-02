@@ -45,7 +45,7 @@ for exactly `{MODE, UID, GID}`.
 emphatic about it.** `perm_check` special-cases **no** `principal_id` — not
 even `PRINCIPAL_SYSTEM`. Either `CAP_HOSTOWNER` (the unified fs-admin
 authority) or `CAP_DAC_OVERRIDE` (the finer clearance-grantable split)
-bypasses the rwx check; nothing else does. This is I-22 rendered
+bypasses the rwx check; nothing else does. This is [[inv-i22]] rendered
 mechanically: there is no ambient root, so a SYSTEM-identity Proc that has
 not been elevated is judged by the same bits as anyone else.
 
@@ -125,7 +125,7 @@ defensive clamp the rfork inherit applies on the way in.
 
 ## Invariants enforced
 
-**I-22** (no identity carries ambient super-authority) — this is its
+[[inv-i22]] (no identity carries ambient super-authority) — this is its
 enforcement site, and the absence of a `PRINCIPAL_SYSTEM` branch is the
 enforcement.
 
@@ -150,7 +150,7 @@ path — which is why it does no allocation and takes no lock.
 
 - No `principal_id` may ever be special-cased here. Adding a
   "`PRINCIPAL_SYSTEM` bypasses" branch would reintroduce ambient root and
-  break I-22 directly.
+  break [[inv-i22]] directly.
 - `want == 0` must keep failing closed.
 - The two omode mappings must stay in step: any new mode must demand at
   least the access its rights envelope confers. The `OEXEC` case is the

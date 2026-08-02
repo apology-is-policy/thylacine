@@ -32,7 +32,7 @@ visible as a set of deliberate *refusals* to conflate:
 
 - `perm_check` special-cases **no** `principal_id` — not even
   `PRINCIPAL_SYSTEM`. The DAC-override is a capability, never an identity
-  (I-22's statement made mechanical).
+  ([[inv-i22]]'s statement made mechanical).
 - `CAP_DAC_OVERRIDE` is deliberately **not** an axis on the kill or debug
   gates: fs-admin stays orthogonal to process control (Linux's
   `CAP_DAC_OVERRIDE` vs `CAP_KILL` split).
@@ -57,17 +57,20 @@ visible as a set of deliberate *refusals* to conflate:
 
 ## Cross-cutting
 
-- Invariants: the family this area enforces — I-2 (capability monotonic
+- Invariants: the family this area enforces is I-2 (capability monotonic
   reduction), I-5 (hardware handles non-transferable), I-6 (rights
-  monotonic), I-22 (no ambient super-authority), I-23 (service FS authority
-  bounded by its endowment), I-25 (legate scope), I-34 (driver allowance)
-  — is **referenced in prose across the corpus but not yet minted**. The
-  registry pass that mints it is blocked on this sweep, because an
-  invariant note's `guards` edge is what makes it more than a restatement
-  of scripture. See [[chg-2026-08-02-authority-sweep]].
+  monotonic), [[inv-i22]] (no ambient super-authority), I-23 (service FS
+  authority bounded by its endowment), I-25 (legate scope) and I-34 (driver
+  allowance). This sweep gave all seven a swept `guards` home — the edge that
+  makes an invariant note more than a restatement of scripture, and whose
+  absence stalled the batch-13 registry pass
+  ([[chg-2026-08-02-authority-sweep]]). [[inv-i22]] is minted; the remaining
+  six are mintable and unblocked.
 - Specs: `specs/handles.tla` (the kind partition + `RightsCeiling`),
   `specs/allowance.tla` (the revoke-vs-create race), `specs/corvus.tla`
   (`HostownerRequiresConsole`). None minted yet — same registry pass.
 - The gates that consume this area but live elsewhere: `/proc/<pid>/ctl`
-  kill (I-26) and the debug surface (I-39) are in `devproc.c`; the trusted
-  path (I-27) is in `cons.c`. Both are unswept.
+  kill ([[inv-i26]]) and the debug surface ([[inv-i39]]) are in
+  [[sub-kernel-devproc]] — swept, and both invariants now minted. The trusted
+  path (I-27) is in `cons.c` and remains unswept, the last of this family's
+  invariants without an enforcement home.

@@ -72,6 +72,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-pouch-sock-single-user]] | open | sub-pouch-net | chg-2026-05-23-p6-sockets | sockets-12 F4 |
 | [[seam-pouch-spawn-envp]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-proc-find-no-refcount]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
+| [[seam-proc-name-torn-read]] | open | sub-kernel-devproc, sub-kernel-devctl, sub-kernel-proc | chg-2026-08-02-introspection-sweep | task #17 |
 | [[seam-proxy-coord-eof]] | open | sub-stratum-session | chg-2026-08-02-stratum-sweep |  |
 | [[seam-rfnameg-shared-territory]] | open | sub-kernel-territory | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-rfork-flags-unimplemented]] | open | sub-kernel-proc | chg-2026-05-05-p2d-rfork-exits-wait | unfiled |

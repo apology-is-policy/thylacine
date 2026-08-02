@@ -155,7 +155,7 @@ F1.
   at every fork) — the `rfork` expression is the whole enforcement.
 - **I-25** (legate authority scope-bounded and fully revoked) — via the
   root-only property above.
-- Feeds **I-22**: capabilities are the *only* growth path, so no identity
+- Feeds [[inv-i22]]: capabilities are the *only* growth path, so no identity
   carries ambient authority.
 
 Not yet minted as registry notes; this sweep is what unblocks them.
