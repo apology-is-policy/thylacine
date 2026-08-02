@@ -53,3 +53,16 @@ whole time. It simply never looked up.
 
 Binding design (unchanged): `docs/TOOLING.md` (the harness contract),
 `docs/LIFE-SUPPORT.md` ("LS-CI").
+
+---
+
+**If you are here to add something, add it to the dossier, not to this file.**
+
+This stub replaces the whole document, so any edit here becomes a merge
+conflict — which is the intended behaviour, and the only reason nothing has
+been lost yet. It has already happened once: #125 added a point 7 to the live
+document on `main` after absorption, and the conflict is what surfaced it. That
+content now lives in `sub-substrate-interactive.md` (the guest-suspension
+mechanism, why `SO_RCVBUF` on the reader is vacuous, the listener-inheritance
+fix and its A/B) and in `gate-interactive.md` (the third thing a silent guest
+can mean). Nothing from it was dropped.

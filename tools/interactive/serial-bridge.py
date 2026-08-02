@@ -2,8 +2,8 @@
 # serial-bridge.py -- the LS-CI serial relay (the #66 fix; the #41 nc-replacement;
 # the #78 spool rework).
 #
-# Shuttles bytes between a QEMU serial UNIX socket (mon:unix:<sock>,server) and
-# this process's stdin/stdout, which `expect` adopts via `spawn -open`:
+# Shuttles bytes between a QEMU serial UNIX socket and this process's
+# stdin/stdout, which `expect` adopts via `spawn -open`:
 #
 #     expect  <--stdout--  bridge  <--socket-->  qemu serial
 #     expect  --stdin-->   bridge  --socket-->   qemu serial
@@ -180,7 +180,18 @@ def main() -> int:
     path = sys.argv[1]
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(path)
+    # #125: the listener is created by serial-listen.py BEFORE qemu is exec'd
+    # (so its SO_SNDBUF can be inherited by the accepted connection), which
+    # means the socket FILE existing no longer implies qemu is alive. A qemu
+    # that died at startup takes the listening fd down with it, so we get
+    # ECONNREFUSED here -- name it, rather than dying with a traceback that
+    # lc_fail would surface as an unreadable `bridge-at-fail`.
+    try:
+        sock.connect(path)
+    except OSError as e:
+        sys.stderr.write(f"bridge: connect({path}) failed: {e}\n")
+        _done("connect-refused")
+        return 1  # NOT _done()'s 0 -- this is a real failure, not a clean end
     sock.setblocking(False)
 
     stdin_fd = sys.stdin.fileno()

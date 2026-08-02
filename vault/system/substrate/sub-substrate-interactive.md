@@ -7,6 +7,7 @@ code:
   - tools/test-interactive.sh
   - tools/interactive/lib.exp
   - tools/interactive/serial-bridge.py
+  - tools/interactive/serial-listen.py
   - tools/interactive/test-serial-bridge.py
 audit: none
 guarded-by: []
@@ -15,7 +16,7 @@ locks: []
 abis: []
 design: ["docs/LIFE-SUPPORT.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Purpose
 
@@ -76,6 +77,36 @@ losing whatever token expect was waiting for. It now drains aggressively
 into an in-process spool and writes out non-blocking. Proven by a host-only
 differential with no QEMU: against a paused reader the blocking relay stalls
 at ~80 KB, the spool relay accepts a full 4 MB burst.
+
+**But non-blocking only protects while the relay is running — and a relay that
+stops draining SUSPENDS the guest** (#125). This narrows the claim above: the
+spool cannot drain a socket while it is off-CPU, and the socket itself holds
+only **8192 bytes** on macOS against ~117–198 KiB of console output per boot,
+so roughly 4% of one boot is the entire slack. Past that QEMU's serial write
+blocks and **QEMU stops executing the guest at all** — measured by SIGSTOPping
+the relay and sampling host CPU from outside QMP (QMP is served by the same
+stalled QEMU, so it cannot be the instrument): 100% → **2.4%** within ~2 s,
+held for the whole freeze, then 167% catching up.
+
+The consequence is epistemic and belongs beside the #72 retraction: **a guest
+that stopped making progress in an LS-CI log is not evidence of a guest defect
+until the consumer has been exonerated.** From inside, a suspended guest and a
+hung guest are indistinguishable. Read the relay's `stalls=` record first.
+
+**And the obvious fix is vacuous, which is the durable lesson.** Capacity is
+governed by the *writer's* send buffer, and the relay is the *reader* — setting
+a receive buffer on the relay measurably changes nothing (8192 either way;
+measured by writing until the writer blocks). What works is owning the
+**listener**, because an accepted connection inherits its options: a small
+wrapper creates the socket, sets the option before listening, and `exec`s
+through to the VM, which takes it as an inherited descriptor. 8192 B → 8 MiB
+(macOS clamps there; asking for 64 MiB still yields 8). It wraps the canonical
+launcher rather than editing it, so the launcher stays byte-identical for the
+other two gates and for manual boots. A/B through a real boot with nobody
+reading for 60 s: **44221 B and no login** — byte-identical to its own 12 s
+figure, so a hard stop rather than slowness — against **128183 B and login
+reached**. The regression measures capacity directly, in about two seconds,
+with no VM.
 
 **That differential runs as a preflight, before anything boots.** The
 relay's two load-bearing properties are provable without a VM, and left
@@ -198,6 +229,13 @@ per full gate ≈ 3 s against a run measured in tens of minutes.
   template, and #87 is the one still open.
 - The preflight must stay ahead of the first boot. A harness that fails open
   is the #74 lesson.
+- The console socket must be created by us, not by QEMU. The widening is
+  inherited from the listener, so anything that goes back to letting QEMU
+  create it silently restores an 8 KiB budget — and the symptom is a guest
+  that looks hung.
+- The shutdown path must be verified **positively** (`EOF clean` in the steps
+  file). A dead monitor still PASSes: expect simply times out and the wrapper
+  reaps QEMU, so absence of a complaint proves nothing here.
 
 ## Seams
 

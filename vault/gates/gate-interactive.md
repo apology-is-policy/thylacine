@@ -6,7 +6,7 @@ proves: "That a real terminal driven into the live console produces the expected
 blind-to: "Anything HVF-specific (it defaults to TCG -- a DIFFERENT CPU from test.sh's `-cpu host`, so LSE-present behavior and HVF timing are invisible); anything requiring an optional host artifact (those SKIP, and a SKIP is not coverage); the legs after a cut (an INFRA or HARNESS failure LOSES coverage -- the gate goes red but the unrun legs proved nothing); anything below the rendered-text layer (it asserts what the screen shows, not why)."
 invocation: "tools/test-interactive.sh [scenario...] (make test-interactive). Optional gate: SKIPs exit-0 without `expect`. Env: THYLACINE_ACCEL, LS_CI_BOOT_TIMEOUT (300 with GOROOT baked, else 180), LS_CI_CMD_TIMEOUT (30), LS_CI_ATTEMPTS (3), LS_CI_POOL_RESTORE."
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Method
 
@@ -33,6 +33,18 @@ the gate RED because coverage was lost:
 - **SKIP (77)** — the scenario declined for a missing optional host
   artifact. Not a guest result, and explicitly **not coverage**.
 
+**A stalled-but-alive relay is a fourth harness cause, and it classifies as
+guest FAIL** (#125). HARNESS-FAIL keys on the relay *dying* — a reader-closed
+record beside a live VM. A relay that merely stops draining never dies, so it
+leaves no fingerprint at all: instead the guest is genuinely **suspended** (a
+blocked QEMU serial write stops the VM executing), expect times out, every
+attempt fails, and the classifier reads that as a real regression. The failure
+direction is toward blaming the guest. The relay's `stalls=` field is what
+splits them, and the discipline is written at the fail path: **on any
+silent-guest failure, read `stalls=` first** — `stalls=0` means the relay was
+running and a silent guest is *not* explained by the console channel;
+`stalls>0` means the VM was frozen from the host side.
+
 ## History
 
 Exists because LS-1 (UART never master-enabled for RX) and LS-2 (external
@@ -46,7 +58,11 @@ SIGPIPE. #78 found the relay's blocking write was *causing* the drops it was
 meant to prevent, by back-pressuring the guest into the kernel's TX
 deadline. #85 found ~74 MB of accumulated pool contamination producing both
 a false RED and a false GREEN. #59 found its own reap pattern shooting a
-sibling worktree's live VM.
+sibling worktree's live VM. #125 narrowed #78's own fix — non-blocking writes
+protect only while the relay is *running* — and found the console socket held
+8 KiB against ~117–198 KiB per boot, so a descheduled relay suspends the VM;
+its first attempted fix was vacuous (capacity belongs to the writer's send
+buffer, and the relay is the reader).
 
 Caught, most recently: the #76 console-write interleave, where a login
 prompt was shredded byte-for-byte by a concurrent writer on the trusted

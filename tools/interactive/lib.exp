@@ -337,9 +337,36 @@ proc lc_boot {} {
         # early boot output is lost. The bg pid is run-vm.sh's, which execs
         # qemu in place -- lc_fail/lc_quit kill exactly this VM, never a
         # parallel job's.
-        set ::lc_vm_pid [exec env THYLACINE_ACCEL=$accel \
-            THYLACINE_SERIAL=mon:unix:$sock,server \
-            $lc_repo/tools/run-vm.sh > $vmlog 2>@1 &]
+        #
+        # #125: WE create the listening socket, not qemu, and hand it the fd.
+        # A host-side stall of the relay blocks qemu's serial write and
+        # SUSPENDS the guest, and the capacity that buys is the WRITER's
+        # SO_SNDBUF -- qemu's socket, which only its listener's setting can
+        # size. serial-listen.py sets it before listen() and execs through, so
+        # the accepted connection inherits 8 MiB instead of 8192 B. MEASURED,
+        # nobody reading for 60 s: 44221 B and no login (qemu's listener, and
+        # byte-identical to the 12 s figure -- a hard stop) vs 128183 B and a
+        # login prompt (ours). Full rationale + the vacuous-fix trap that
+        # precedes it: serial-listen.py's header.
+        #
+        # `env` and run-vm.sh both exec in place, so ::lc_vm_pid still names
+        # exactly one process all the way down to qemu. {SERIALFD} is literal
+        # here -- Tcl only treats braces as quoting at the START of a word.
+        set ::lc_vm_pid [exec python3 $lc_repo/tools/interactive/serial-listen.py \
+            --sock $sock -- \
+            env THYLACINE_ACCEL=$accel THYLACINE_SERIAL=chardev:ser0 \
+            $lc_repo/tools/run-vm.sh \
+            -chardev socket,id=ser0,fd={SERIALFD},server=on,wait=on,mux=on \
+            -mon chardev=ser0,mode=readline \
+            > $vmlog 2>@1 &]
+        # This now proves serial-listen.py BOUND the socket -- it no longer
+        # proves qemu came up, because the listener exists before qemu is
+        # exec'd. A qemu that dies at startup is caught instead at the relay's
+        # connect(): its fds close with it, the listener is destroyed, and the
+        # connect is REFUSED -- which the bridge reports as
+        # `reason=connect-refused` and lc_fail surfaces as bridge-at-fail.
+        # That fires when the bridge actually connects, so unlike a liveness
+        # poll here it cannot race a slow-starting qemu.
         for {set i 0} {$i < 150} {incr i} {
             if {[file exists $sock]} break
             after 200
@@ -382,6 +409,11 @@ proc lc_boot {} {
         #                       end was gone. THIS is the anomaly worth chasing.
         #   socket-eof          QEMU closed the serial -- the guest really ended.
         #   spool-overflow      a genuinely wedged reader (64 MiB undelivered).
+        #   connect-refused     the listener was already gone when the relay
+        #                       connected -- i.e. qemu died at startup. Since
+        #                       #125 WE create the listener, so the socket FILE
+        #                       existing no longer implies a live qemu; this is
+        #                       the signal that replaced it. Read the vm log.
         #
         # READ `stalls=` FIRST ON ANY SILENT-GUEST FAILURE (#125). It counts
         # wake-to-wake gaps > 1 s in the relay's own loop -- i.e. windows where
