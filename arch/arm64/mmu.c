@@ -1406,8 +1406,13 @@ bool mmu_directmap_is_pagemapped(paddr_t pa) {
 //     CPU is mid-walk against this Proc's TTBR0 at proc_free time -- and
 //     no live CPU holds this dead Proc's TTBR0 at all, so no CPU
 //     translates under its ASID or walks its (now-freed) tables.
-//   - the leaf user mappings were invalidated by vma_drain's all-ASID
-//     `tlbi vaae1is` (proc.c::proc_free runs vma_drain before this).
+//   - stale leaf entries are harmless rather than absent. Nothing
+//     invalidates them at teardown -- the drain frees Vma structs and
+//     drops Burrow mapping refs and issues NO TLBI (measured at L-2;
+//     an earlier version of this comment claimed an all-ASID
+//     `tlbi vaae1is` that does not exist). What makes them
+//     unreachable is that every user PTE is non-global (PTE_NG), so
+//     each is tagged with this address space's own ASID.
 //   - the Proc's hardware ASID value stays RESERVED in the current
 //     generation until the next rollover; any eventual reuse is gated by
 //     the rollover's per-CPU flush_pending local flush. So a recycled
@@ -1692,8 +1697,12 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
 // Proc dies via proc_pgtable_destroy, which (per F4 hardening)
 // zeroes each table page before returning it to the buddy; in the
 // rolling-ASID model (RW-1 B-F1) there is no per-Proc asid_free --
-// the leaf flush here + vma_drain's all-ASID `tlbi vaae1is` cover the
-// dead Proc's translations.
+// the leaf flush here covers the live unmap, and a dead Proc's
+// remaining translations need no flush at all: every user PTE is
+// non-global, so they are reachable only under that address space's
+// own ASID, which cannot go live again until the rollover's per-CPU
+// flush_pending has run. (The drain issues no TLBI -- measured at
+// L-2; an earlier version of this comment said otherwise.)
 int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
     (void)asid;   // reserved (tlbi vaae1is is all-ASID broadcast)
 

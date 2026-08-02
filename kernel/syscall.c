@@ -6936,10 +6936,11 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
                             argv_kbuf, (u32)argv_data_len, (u32)argc,
                             &entry, &sp);
     if (rc != 0) {
-        // The target may be partially populated; we own its teardown. The
-        // caller's own address space was never touched, which is the whole
-        // point of building detached.
-        vma_drain_in(nas);
+        // The target may be partially populated; we own its teardown, and are
+        // its only reference (nothing has been published), so this unref is the
+        // last one and drains whatever got mapped. The caller's own address
+        // space was never touched, which is the whole point of building
+        // detached.
         addrspace_unref(nas);
         spoor_clunk(exe);
         kfree(argv_kbuf);

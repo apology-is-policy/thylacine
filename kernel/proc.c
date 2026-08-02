@@ -331,6 +331,10 @@ struct Proc *proc_init_proc(void) {
 }
 
 struct Proc *proc_alloc(void) {
+    return proc_alloc_in(NULL);
+}
+
+struct Proc *proc_alloc_in(struct AddrSpace *share) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!p) return NULL;
@@ -369,7 +373,20 @@ struct Proc *proc_alloc(void) {
     // stamps at the first context switch. On OOM it has already freed whatever
     // it got, so the rollback below is the same ZOMBIE + proc_free as every
     // other alloc step -- proc_free's addrspace_unref(NULL) is a clean no-op.
-    p->as = addrspace_alloc();
+    //
+    // LINEAGE L-3: `share` non-NULL means rfork(RFPROC|RFMEM) -- the child takes
+    // a reference to the caller's space instead of getting its own. Everything
+    // downstream reads p->as without caring which it was, which is the point of
+    // having made the address space an object at L-1: sharing is a refcount, not
+    // a second code path. The ASID follows for free -- asid_resolve keys on
+    // as->context_id, so one space is one ASID however many Procs hold it, and
+    // I-31 needs nothing new.
+    if (share) {
+        addrspace_ref(share);
+        p->as = share;
+    } else {
+        p->as = addrspace_alloc();
+    }
     if (!p->as) {
         p->state = PROC_STATE_ZOMBIE;
         proc_free(p);
@@ -494,7 +511,20 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // not imply no mapped devices.
     // LINEAGE L-1: `as == NULL` (kernel-only Proc, or a proc_alloc rollback that
     // failed before addrspace_alloc) means no VMA list, so no mapped devices.
-    for (struct Vma *v = p->as ? p->as->vmas : NULL; v; v = v->next) {
+    //
+    // L-3: and only the LAST holder of the address space walks it. The mapping
+    // belongs to the space, not to this Proc, so while a sharer survives the
+    // device is still mapped and may still be driven -- resetting it here would
+    // pull the hardware out from under a living driver, the same premature
+    // teardown as draining the VMA list early, one layer down. The count is
+    // stable to read here: this Proc is a ZOMBIE with no threads, and a
+    // reference can only be taken by an rfork from a LIVE parent.
+    //
+    // Walk (a) needs no such gate today: handle tables are per-Proc and hardware
+    // handles are non-transferable (I-5), so no second Proc can hold this
+    // device's fd. A handle-table COPY would break exactly that -- see #119.
+    bool as_sole = (addrspace_ref_count(p->as) == 1);
+    for (struct Vma *v = as_sole ? p->as->vmas : NULL; v; v = v->next) {
         struct Burrow *b = v->burrow;
         if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
         struct KObj_MMIO *k = b->kobj_mmio;
@@ -530,12 +560,21 @@ void proc_free(struct Proc *p) {
     // still intact (round-2 F4).
     proc_quiesce_owned_devices(p);
 
-    // P3-Da: drain VMAs first. Each Vma carries a burrow_unmap; releasing
-    // them BEFORE handle_table_free is the right order — handle closure
-    // independently does burrow_unref (handle_count--) and a BURROW with
-    // mapping_count > 0 must NOT free even if handle_count drops to 0
-    // (per specs/burrow.tla NoUseAfterFree).
-    vma_drain(p);
+    // P3-Da: release the address space here, BEFORE handle_table_free. The
+    // ordering is the original one and the reason is unchanged -- the drain
+    // (now inside addrspace_unref) carries each Vma's burrow_unmap, and doing
+    // that before handle closure is the right order because handle closure
+    // independently does burrow_unref (handle_count--), and a BURROW with
+    // mapping_count > 0 must NOT free even if handle_count drops to 0 (per
+    // specs/burrow.tla NoUseAfterFree).
+    //
+    // L-3: this used to be a bare vma_drain(p), with addrspace_unref following
+    // much later. Both now happen here, because under RFMEM a Proc's death is
+    // no longer the same event as its address space's: if a sharer survives,
+    // this drops `ref` to a nonzero value and the mappings correctly stay.
+    // Nothing below touches p->as.
+    addrspace_unref(p->as);
+    p->as = NULL;
 
     // P2-Eb: release the territory. Most Procs have a private territory
     // (refcount 1; freed here). Phase 5+ shared territories decrement
@@ -611,26 +650,9 @@ void proc_free(struct Proc *p) {
     kfree(p->socktab);
     p->socktab = NULL;
 
-    // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
-    // free in the rolling-ASID model -- the Proc's context_id is simply
-    // dropped; its hardware ASID value stays reserved in the current
-    // generation's bitmap until the next rollover, which reclaims the whole
-    // space at once (ARCH section 6.2.1).
-    //
-    // This is TLB-safe WITHOUT the old asid_free broadcast (the F4
-    // asid_free-before-destroy ordering is moot -- there is no asid_free):
-    //   - the leaf user mappings were already invalidated by vma_drain's
-    //     all-ASID `tlbi vaae1is` (vma_drain runs above, before proc_free);
-    //   - no live CPU holds this dead Proc's TTBR0 (every thread was reaped +
-    //     on_cpu-spun before proc_free), so no CPU translates under its ASID
-    //     and no walk reaches a recently-recycled L1/L2/L3 page;
-    //   - any eventual reuse of the ASID value is gated by the rollover's
-    //     per-CPU flush_pending local flush before the value goes live again.
-    // (Matches the Linux model: no TLB flush at mm teardown; reclaim at
-    // rollover.)
-    addrspace_unref(p->as);
-    p->as = NULL;
-
+    // (The address space was released above, before handle_table_free -- see
+    // the P3-Da comment there for why that ordering, and addrspace.h for why
+    // dropping the page table needs no TLB maintenance.)
     kmem_cache_free(g_proc_cache, p);
     // R5-H F79: atomic counter bump.
     __atomic_fetch_add(&g_proc_destroyed, 1u, __ATOMIC_RELAXED);
@@ -1040,10 +1062,13 @@ u64 proc_cpu_ns(const struct Proc *p) {
 // hasn't been explicitly designed to grant caps.
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
                           caps_t caps_mask) {
-    // P2-D: only RFPROC supported. Other flags reserved for subsequent
-    // sub-chunks (RFNAMEG at P2-E, RFFDG at P2-F, RFMEM at P2-G, etc.).
-    if (flags != RFPROC) {
-        extinction("rfork: only RFPROC supported at P2-D");
+    // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
+    // -- RFNAMEG, RFFDG, RFCRED, RFNOTEG, RFNOWAIT, RFREND, RFENVG -- still
+    // extinct: each shares a different per-Proc structure and each arrives with
+    // its own reasoning rather than inheriting approval from this one. RFPROC is
+    // not optional (there is no rfork that creates nothing).
+    if (flags != RFPROC && flags != (RFPROC | RFMEM)) {
+        extinction("rfork: only RFPROC and RFPROC|RFMEM are supported");
     }
     if (!entry) extinction("rfork with NULL entry");
 
@@ -1055,6 +1080,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     if (!parent)             extinction("rfork from thread with no proc");
     if (parent->magic != PROC_MAGIC)
                              extinction("rfork from thread with corrupted proc");
+
+    // L-3: RFMEM asks to share an address space the caller does not have. Only
+    // kproc is in that position, so this is a programming error rather than a
+    // reachable user path -- but refuse rather than quietly fall back to a
+    // private space, because "the flag was ignored" and "the flag was honoured"
+    // would then be indistinguishable from the outside, and the caller would
+    // learn otherwise only when the child failed to see a write it expected.
+    if ((flags & RFMEM) && !parent->as) return -1;
 
     // #65 (I-32): the per-Proc child cap. Reject a fork bomb EARLY -- before the
     // heavy proc_alloc / territory_clone / thread_create -- so it is cheap. The
@@ -1082,7 +1115,15 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // files; they are leaves. (5e-4 audit F2.)
     if (allowance_is_narrowed(parent)) return -1;
 
-    struct Proc *child = proc_alloc();
+    // L-3: RFMEM hands the child the parent's address space. Note what is NOT
+    // conditional on it -- the Territory, the note queue, the environment and
+    // the handle table are still the child's own, because they are governed by
+    // their own flags (RFNAMEG, RFNOTEG, RFENVG, RFFDG), all still refused. That
+    // separation is the whole reason Plan 9 uses a flag word: "shares memory" and
+    // "shares file descriptors" are independent claims, and the Linux shape this
+    // eventually serves relies on that -- posix_spawn passes CLONE_VM WITHOUT
+    // CLONE_FILES precisely so the child's dup2/close cannot disturb the parent.
+    struct Proc *child = proc_alloc_in((flags & RFMEM) ? parent->as : NULL);
     if (!child) return -1;
 
     // P4-Ic3: capture parent->caps once under acquire fence. R9 F146
@@ -2698,11 +2739,16 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // whole of addrspace_unref's precondition here.
     sched_activate_addrspace(self);
 
-    // Now the outgoing address space can go. The drain drops each Burrow's
-    // mapping ref -- which is what actually frees the old image's anonymous
-    // pages and releases its Image-cache text -- and addrspace_unref destroys
-    // the page table.
-    vma_drain_in(old);
+    // Now this Proc's reference to the outgoing address space can go. If it was
+    // the last, addrspace_unref drains the VMA list -- dropping each Burrow's
+    // mapping ref, which is what actually frees the old image's anonymous pages
+    // and releases its Image-cache text -- and destroys the page table.
+    //
+    // "If it was the last" is load-bearing rather than pedantic, and the case is
+    // the ordinary one rather than an exotic corner: a vfork child execs while
+    // its parent is suspended on exactly this address space, which is what
+    // posix_spawn does every time. Until L-3 this call site drained the list
+    // itself, unconditionally, which would have unmapped the parent.
     addrspace_unref(old);
 
     // POSIX: a successful exec resets the caught-signal dispositions to default

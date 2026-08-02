@@ -968,6 +968,16 @@ struct Proc *proc_init_proc(void);
 // linkage). Returns NULL on OOM.
 struct Proc *proc_alloc(void);
 
+// LINEAGE L-3: the same, but with an explicit address space. `share` NULL gives
+// the Proc a fresh one (identical to proc_alloc, which is now this with NULL);
+// non-NULL takes a reference to an existing one, which is what makes
+// rfork(RFPROC|RFMEM) two Procs in one address space.
+//
+// This is the `_in` shape L-2a used for the VMA primitives, and for the same
+// reason: the ~10 existing proc_alloc callers all want a fresh space and stay
+// untouched, while the one caller that does not says so explicitly.
+struct Proc *proc_alloc_in(struct AddrSpace *share);
+
 // Release a Proc descriptor. Caller must ensure thread_count == 0
 // (no live threads) and state == ZOMBIE (or post-reap path). Extincts
 // on violation.
@@ -1065,9 +1075,10 @@ int proc_quiesce_owned_devices(struct Proc *p);
 // P2-D: rfork — Plan 9 process/thread creation primitive.
 //
 // `flags` selects which resources are shared vs cloned (per ARCH §7.4).
-// At v1.0 P2-D, only RFPROC is supported — all other flags trigger an
-// extinction. Subsequent sub-chunks add RFNAMEG (P2-E territory),
-// RFFDG (P2-F fd table), RFMEM (P2-G address space), etc.
+// Supported: RFPROC, and RFPROC|RFMEM (LINEAGE L-3 — the child references the
+// caller's address space rather than getting its own). Every other flag still
+// extincts; each shares a different per-Proc structure and each should arrive
+// with its own reasoning rather than inheriting approval from RFMEM's.
 //
 // `entry` is the kernel function the new process's initial thread will
 // run. `arg` is passed to entry in x0 via the trampoline. Both must be
@@ -1109,9 +1120,14 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg);
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask);
 
-// rfork flags. Per ARCH §7.4. Only RFPROC implemented at P2-D.
+// rfork flags. Per ARCH §7.4. RFPROC and RFMEM implemented; the rest extinct.
+//
+// Note the POLARITY, which diverges from Plan 9 deliberately: here set == SHARE,
+// uniformly, whereas Plan 9 reads RFFDG/RFNAMEG as "give me a copy". Under this
+// polarity `RFPROC|RFMEM` with RFFDG clear is exactly the posix_spawn child --
+// new pid, shared memory, copied descriptors.
 #define RFPROC      0x0001    // create a new Proc (always required)
-#define RFMEM       0x0002    // share address space (future P2-G)
+#define RFMEM       0x0002    // share address space (LINEAGE L-3)
 #define RFNAMEG     0x0004    // share territory (future P2-E)
 #define RFFDG       0x0008    // share fd table (future P2-F)
 #define RFCRED      0x0010    // share credentials (future P2-G)

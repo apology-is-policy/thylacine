@@ -401,6 +401,53 @@ must unwind, and a child that dies without ever execing must wake the parent
 rather than strand it. That is the `EventuallyResumed` shape from
 `debug_stop.tla` and should be modelled the same way.
 
+#### As built at L-3a — the share substrate
+
+`proc_alloc_in(share)` takes a reference to an existing AddrSpace instead of
+allocating one (`proc_alloc()` is now `proc_alloc_in(NULL)`), and
+`rfork_internal` routes `parent->as` into it when `RFMEM` is set. Note what is
+*not* conditional on the flag: Territory, note queue, environment and handle
+table remain the child's own, because each is governed by its own flag
+(`RFNAMEG`, `RFNOTEG`, `RFENVG`, `RFFDG`), all still refused. That separation is
+why Plan 9 uses a flag word at all, and the Linux shape depends on it —
+posix_spawn passes `CLONE_VM` *without* `CLONE_FILES` precisely so the child's
+`dup2`/`close` cannot disturb the parent (§2.4).
+
+**The load-bearing change is a teardown move, not an allocation one.** The VMA
+list is a property of the address space, so it is now drained by
+`addrspace_unref`'s last drop rather than by each Proc that dies. The two were
+indistinguishable while `ref` could never exceed 1; under `RFMEM` they separate,
+and **both** existing callers had the bug latent:
+
+- `proc_free` drained unconditionally — the first sharer to die would have
+  unmapped the survivor;
+- `proc_exec_replace` (L-2a) drained the outgoing space unconditionally — and
+  the reachable case is the ordinary one, not an exotic corner, since a vfork
+  child execs while its parent is suspended on exactly that space.
+
+Moving the drain fixes both at the layer where the list belongs, rather than
+repeating a gate at each site.
+
+`RFMEM` from a Proc with **no** address space is refused rather than quietly
+downgraded to a private one. Only kproc is in that position, so this is a
+programming error rather than a user path — but "the flag was ignored" and "the
+flag was honoured" would otherwise be indistinguishable from outside, and the
+caller would learn better only when the child failed to see a write.
+
+I-31 needed nothing: `asid_resolve` keys on `as->context_id`, so one space is
+one ASID however many Procs hold it. That is a direct dividend of L-1 having
+moved `context_id` into the object, and `asid.tla` re-ran unperturbed.
+
+**Not proven end to end here.** A *successful* `rfork(RFPROC|RFMEM)` has no
+kernel-test witness: the only Proc a kernel test runs on is kproc, which has no
+address space by construction, and lending it one while a real child thread ran
+against it would make every `as == NULL` kernel-Proc gate answer the wrong
+question. So L-3a pins the mechanism at the two layers a kernel test can reach
+(`addrspace_unref`'s drain point and `proc_alloc_in`'s share) plus the refusal
+through the real `rfork`, and the end-to-end proof lands with the EL0 surface —
+the same split L-2a made, where the detached build was unit-tested and the swap
+needed `/exec-probe`.
+
 ### 5.4 Stage 3 — COW and `SYS_RFORK`
 
 `fork()` = `rfork(RFPROC)` with the AddrSpace **structurally cloned**: same
@@ -420,6 +467,21 @@ with `x0 = 0`. Today every child begins at an ELF entry point via a thunk. The
 fork child instead needs a **copy of the parent's trapframe**, and it must be
 taken at a point where that frame is coherent — the syscall entry frame, the
 same object `#88` taught `/proc/regs` to read at the EL0-sync choke point.
+
+> **Correction (L-3a, #117): this belongs at stage 2, not stage 3.** Re-measured
+> against `third_party/musl/src/thread/aarch64/clone.s`: the raw `clone`
+> syscall **returns twice** (`cbz x0,1f` — pid in the parent, 0 in the child).
+> The child resumes at the same PC with `x0 = 0` and `SP` replaced by the stack
+> argument, and only *then*, in userspace, pops the function pointer off that
+> stack and calls it. The kernel never sees a function pointer, so there is no
+> "start the child at an entry point" primitive to build — the `CLONE_VM` shape
+> needs the identical trapframe copy the fork shape does.
+>
+> So the only thing separating stage 2 from stage 3 is whether the AddrSpace is
+> **shared** or **COW-cloned**. Child-context restoration is common to both and
+> lands at L-3; L-5 keeps `SYS_RFORK`'s remaining surface and the fork mode.
+> This is §2's instruction working as intended — the measurement is the thing to
+> re-run, and this document did not age well on exactly this point.
 
 W^X (I-12) holds throughout: a COW page is R or RW, never X — text is not COW
 at all (F-C), so no page transits a writable state while executable.
@@ -470,7 +532,10 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-1** ✅ **LANDED** | `struct AddrSpace` extraction. Pure refactor: `ref` is 1 everywhere, nothing shares yet. **Seven** fields moved; `struct Proc` 408 → 376 B; 239 compiler-enumerated conversion sites across 22 files; 23 offset asserts re-baselined. As-built: `docs/reference/146-addrspace.md`. | **MET** — 1272/1272 → 1276/1276 (the four new `addrspace.*`), boot OK, 0 EXTINCTION, `asid.tla` clean (443457 states, depth 18), SMP gate; the nine Proc-field predicates converted as a set (the four `mmu.c` parameter checks correctly did not) |
 | **L-2a** ✅ **LANDED** | `execve` (stage 1) for a **single-threaded** Proc: the AddrSpace-targeted load path (`exec_load_into` + the `*_in` VMA/burrow forms), `proc_exec_replace`, `sched_activate_addrspace`, `SYS_EXECVE = 101`. A multi-threaded caller is refused with `-EAGAIN`. | **MET** — `/exec-probe` re-execs itself and the successor prints from an fd inherited across the swap; a **failed** execve returns with the caller's address space intact; all three load-bearing pieces revert-probed to *distinct* failures |
 | **L-2b** | The de_thread primitive: a per-Thread die flag + wait-for-EXITING + reap, removing L-2a's multi-thread refusal. | a multi-thread Proc's peers are all EXITING and off-CPU before the swap; own audit round |
-| **L-3** | `rfork(RFPROC\|RFMEM)` + VFORK suspend (stage 2). | a stock `posix_spawn` binary runs in a vivarium; parent-suspend released on both exec and exit; a killed parent unwinds (#811) |
+| **L-3a** ✅ **LANDED** | The share substrate: the VMA drain moves into `addrspace_unref`'s last drop (fixing the same latent bug in `proc_free` *and* `proc_exec_replace`), `proc_alloc_in(share)`, `rfork_internal` accepts `RFPROC\|RFMEM`, the device quiesce gates on sole ownership, `RFMEM`-without-a-space refused. No EL0 surface. | **MET** — 1279/1279 → 1282/1282, boot OK, 0 EXTINCTION, `asid.tla` unperturbed (443457, depth 18); all three pieces revert-probed to *distinct* failures |
+| **L-3b** | Child-context restoration (pulled forward from L-5 per §5.4's correction) + the handle-table copy (§2.4; and see #119 — a table copy would duplicate hardware handles, which I-5 forbids). | a kernel-driven RFMEM child resumes at its parent's PC with `x0 = 0` on its own stack |
+| **L-3c** | `SYS_RFORK` EL0 surface + the VFORK suspend. | a native prover forks-and-execs; parent-suspend released on both exec and exit; a killed parent unwinds (#811) |
+| **L-3d** | The VIVARIUM `clone` row. | **a stock `posix_spawn` binary runs in a vivarium** |
 | **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | `SYS_RFORK` + child-context restoration (stage 3b). | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
@@ -481,6 +546,11 @@ and L-5 (F-A), and L-4 blocks L-5. **L-2b blocks nothing in the arc** -- every
 consumer (the RFMEM child, the fork child, a shell) is single-threaded at the
 moment it execs -- which is why it could be split out rather than pulled
 forward.
+
+L-3 split into four because its gate ("a stock posix_spawn binary runs")
+turns out to need four independent mechanisms, only the first of which is about
+address-space sharing at all. Each lands with its own gate; the *arc*'s gate is
+unchanged and still sits at the end.
 
 ---
 

@@ -14,6 +14,7 @@
 #include <thylacine/proc.h>      // PROC_PAGE_MAX / PROC_VMA_MAX / PROC_SHARED_MAP_MAX_PAGES
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>       // L-3: the last-reference drain lives here now
 
 #include "../arch/arm64/mmu.h"   // proc_pgtable_create / proc_pgtable_destroy
 #include "../mm/slub.h"          // kzalloc / kfree
@@ -48,6 +49,11 @@ void addrspace_ref(struct AddrSpace *as) {
     if (pre <= 0) extinction("addrspace_ref on a dead AddrSpace");
 }
 
+int addrspace_ref_count(const struct AddrSpace *as) {
+    if (!as) return 0;
+    return __atomic_load_n(&as->ref, __ATOMIC_ACQUIRE);
+}
+
 void addrspace_unref(struct AddrSpace *as) {
     // NULL-safe: a kernel-only Proc has no address space, and a rollback that
     // fired before addrspace_alloc ran has none either.
@@ -57,10 +63,20 @@ void addrspace_unref(struct AddrSpace *as) {
     if (pre <= 0) extinction("addrspace_unref of an already-released AddrSpace");
     if (pre > 1) return;
 
-    // Last reference. The VMA list must already be drained -- proc_free runs
-    // vma_drain well before it reaches here -- so the only thing left to
-    // release is the page table itself.
-    if (as->vmas) extinction("addrspace free with a live VMA list (caller must drain)");
+    // Last reference -- so this is the point at which the mappings genuinely
+    // stop being anyone's, and therefore the point at which they are freed.
+    //
+    // L-3 moved the drain here from the callers. It used to run in proc_free
+    // (and in proc_exec_replace, on the outgoing space), which was correct only
+    // while `ref` could never exceed 1: draining at A DEATH and draining at THE
+    // LAST REFERENCE are the same event exactly when there is one reference.
+    // Under RFMEM they separate, and the old placement would have had the first
+    // sharer to die free a VMA list the survivor was still translating through.
+    //
+    // Nothing between the decrement and here can take a new reference: a ref is
+    // only ever taken from a Proc that already holds one (rfork, from a live
+    // parent), so reaching zero means no holder is left to hand one out.
+    vma_drain_in(as);
 
     // No TLB flush here, and no per-address-space ASID free: the rolling-ASID
     // model simply drops context_id, and its hardware ASID value stays reserved

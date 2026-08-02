@@ -378,6 +378,9 @@ void test_addrspace_alloc_shape(void);
 void test_addrspace_refcount(void);
 void test_addrspace_kproc_has_none(void);
 void test_addrspace_charge_helpers_refuse_without_as(void);
+void test_addrspace_share_drains_at_last_ref(void);
+void test_addrspace_proc_alloc_in_shares(void);
+void test_proc_rfork_rfmem_refuses_without_addrspace(void);
 void test_vma_alloc_free_smoke(void);
 void test_vma_alloc_constraints(void);
 void test_vma_insert_lookup_smoke(void);
@@ -1801,6 +1804,12 @@ struct test_case g_tests[] = {
     { "addrspace.kproc_has_none",      test_addrspace_kproc_has_none,      false, NULL },
     { "addrspace.charge_helpers_refuse_without_as",
                                        test_addrspace_charge_helpers_refuse_without_as, false, NULL },
+    { "addrspace.share_drains_at_last_ref",
+                                       test_addrspace_share_drains_at_last_ref, false, NULL },
+    { "addrspace.proc_alloc_in_shares",
+                                       test_addrspace_proc_alloc_in_shares, false, NULL },
+    { "proc.rfork_rfmem_refuses_without_addrspace",
+                                       test_proc_rfork_rfmem_refuses_without_addrspace, false, NULL },
     { "vma.alloc_free_smoke",          test_vma_alloc_free_smoke,          false, NULL },
     { "vma.alloc_constraints",         test_vma_alloc_constraints,         false, NULL },
     { "vma.insert_lookup_smoke",       test_vma_insert_lookup_smoke,       false, NULL },

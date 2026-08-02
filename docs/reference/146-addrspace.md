@@ -86,18 +86,30 @@ void addrspace_ref(struct AddrSpace *as);  // extinction on a dead object
 void addrspace_unref(struct AddrSpace *as);// NULL-safe; last drop frees
 ```
 
-`addrspace_unref`'s last drop destroys the page table and frees the struct.
+`addrspace_unref`'s last drop **drains the VMA list**, destroys the page table
+and frees the struct.
 
-**Precondition on the last drop**: the VMA list is already drained and no CPU
-holds this table in TTBR0. `proc_free` establishes both — `vma_drain` runs
-earlier in the teardown, and every thread was reaped and `on_cpu`-spun before
-`proc_free` is reached. `addrspace_unref` asserts the first (`extinction` on a
-live VMA list) rather than trusting it.
+**The drain lives here as of L-3, and did not at L-1.** It used to run in the
+callers (`proc_free`, and `proc_exec_replace` on the outgoing space), which was
+correct only while `ref` could never exceed 1: draining *at a Proc's death* and
+draining *at the last reference* are the same event exactly when there is one
+reference. Under `RFMEM` they come apart, and the old placement would have had
+the first sharer to die free a VMA list the survivor was still translating
+through. Both callers had the bug latent; moving the drain fixes them together,
+at the layer where the list actually belongs.
 
-No TLB flush at teardown and no per-AS ASID free — the Linux model. The leaf
-mappings were invalidated by `vma_drain`'s all-ASID `tlbi vaae1is`, and any
-eventual reuse of the ASID value is gated by the rollover's per-CPU
-`flush_pending` local flush (ARCH §6.2.1).
+**Precondition on the last drop**: no CPU can still translate through this
+table. Each caller owes that by its own argument — `proc_free` by having reaped
+and `on_cpu`-spun every thread; `proc_exec_replace` by writing the new TTBR0 (a
+*different* ASID) and `isb`-ing first.
+
+No TLB flush at teardown and no per-AS ASID free — the Linux model. Note what
+carries this, because an earlier version of this section said otherwise: the
+drain issues **no TLB maintenance at all** (measured at L-2 — it frees `Vma`
+structs and drops Burrow mapping refs, nothing more). Stale leaf entries are
+harmless rather than absent, because every user PTE is non-global (`PTE_NG`) and
+so is reachable only under this address space's own ASID, whose reuse is gated
+by the rollover's per-CPU `flush_pending` local flush (ARCH §6.2.1).
 
 ---
 
@@ -106,10 +118,25 @@ eventual reuse of the ASID value is gated by the rollover's per-CPU
 - **Create**: `proc_alloc` calls `addrspace_alloc` where it used to call
   `proc_pgtable_create`. On OOM the rollback is the same `ZOMBIE + proc_free` as
   every other alloc step; `proc_free`'s `addrspace_unref(NULL)` is a clean no-op.
-- **Release**: `proc_free` calls `addrspace_unref` at *exactly* the point the
-  inline page-table destroy used to run — after `vma_drain`, before the Proc
-  struct is freed. Keeping that position is what makes the teardown ordering
-  byte-identical.
+- **Share** (L-3): `proc_alloc_in(as)` takes a reference to an existing space
+  instead of allocating one — `proc_alloc()` is now `proc_alloc_in(NULL)`. This
+  is the whole of what `rfork(RFPROC|RFMEM)` does to the address space, and it
+  is the `_in` shape L-2a used for the VMA primitives, for the same reason: the
+  callers that want a fresh space stay untouched and the one that does not says
+  so explicitly.
+- **Release**: `proc_free` calls `addrspace_unref` where it used to call
+  `vma_drain` — before `handle_table_free`, preserving the ordering that comment
+  reasons about (each `Vma` carries a `burrow_unmap`, and a Burrow with
+  `mapping_count > 0` must not free even when `handle_count` hits 0). The page
+  table destroy therefore now happens earlier than it did; nothing between the
+  two positions touches `p->as`, and the #847 dual refcount makes the Burrow
+  free order-independent either way.
+
+**The ASID needs nothing.** `asid_resolve` keys on `as->context_id`, so one
+address space is one ASID however many Procs hold it — I-31 composes with
+sharing by construction, as a direct consequence of L-1 having moved
+`context_id` into the object. `asid.tla` re-ran unperturbed (443457 distinct,
+depth 18 — identical to L-1 and L-2a).
 
 ---
 

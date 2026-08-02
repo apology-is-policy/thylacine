@@ -119,15 +119,26 @@ _Static_assert(sizeof(struct AddrSpace) == 48,
 // ref starts at 1, held by the allocating Proc.
 struct AddrSpace *addrspace_alloc(void);
 
-// Take a reference. L-3 (RFMEM) is the first caller with a real second sharer;
-// at L-1 this exists so the lifecycle is complete and testable.
+// Take a reference. L-3 (RFMEM) is the first caller with a real second sharer:
+// rfork(RFPROC|RFMEM) hands the child the parent's address space instead of a
+// fresh one, so from here on `ref` is genuinely a count and not a formality.
 void addrspace_ref(struct AddrSpace *as);
 
-// Drop a reference; the last one destroys the page table and frees the struct.
-// NULL-safe (a kernel-only Proc, or a rollback before addrspace_alloc ran).
+// Drop a reference; the last one DRAINS THE VMA LIST, destroys the page table
+// and frees the struct. NULL-safe (a kernel-only Proc, or a rollback before
+// addrspace_alloc ran).
 //
-// PRECONDITION on the last drop: the VMA list is already drained, and no CPU
-// can still translate through this table.
+// The drain lives here rather than in the callers -- L-3 moved it -- because the
+// VMA list is a property of the ADDRESS SPACE, not of any one Proc that happens
+// to reference it. Draining at a Proc's death was indistinguishable from
+// draining at the last reference only while nothing shared; under RFMEM the two
+// come apart, and every caller that drained on its own would have torn down a
+// surviving sharer's mappings. Both such callers existed (proc_free and
+// proc_exec_replace -- the latter reached by a vfork child execing, which is the
+// posix_spawn shape exactly), so this is one fix at the right layer rather than
+// a gate repeated at each site.
+//
+// PRECONDITION on the last drop: no CPU can still translate through this table.
 //
 // No TLB flush happens here (the Linux model: no flush at mm teardown; reclaim
 // at ASID rollover). What makes that sound is the ASID tag, NOT any earlier
@@ -150,6 +161,17 @@ void addrspace_ref(struct AddrSpace *as);
 //     `isb`s BEFORE the drop -- after which no walk on this CPU reaches the old
 //     root and no lookup matches the old tag.
 void addrspace_unref(struct AddrSpace *as);
+
+// How many Procs currently reference this address space. 0 for NULL (a
+// kernel-only Proc shares nothing with anyone).
+//
+// Read for exactly one KIND of question: "am I the last holder, so is this
+// state mine alone to tear down?" -- proc_free's device quiesce asks it, and the
+// tests assert on it. It is NOT a lock and must not be used to decide whether a
+// concurrent sharer may appear: the answer is only stable when the caller can
+// argue no new reference can be taken (a dying Proc can argue that; a live one
+// cannot).
+int addrspace_ref_count(const struct AddrSpace *as);
 
 // =============================================================================
 // The I-32 counter mechanics.
