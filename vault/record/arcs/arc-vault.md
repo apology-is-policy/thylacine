@@ -34,11 +34,12 @@ chunks:
   - chg-2026-08-02-registry-pass
   - chg-2026-08-02-spec-notes
   - chg-2026-08-02-struct-registries
+  - chg-2026-08-02-server-sweeps
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"
-  - "[ ] Sweep by subsystem (46/147 documents absorbed -- see view-absorption)"
-  - "[ ] Registry passes -- a PREREQUISITE for absorption, not a successor to it: a table-bearing document cannot be replaced until its tables have a note to live in. THREE kinds, not one: (a) the enumerated-value registries [DONE: errno, caps, handle-rights, note-names]; (b) the STRUCT + WIRE layouts [DONE: t_stat + its SEVEN mirrors (CLAUDE.md's list named six), the Loom ring, the 9P message-type space -- unblocking 107-loom.md and the t_stat-bearing docs]; (c) the spec notes [4 of 6 DONE: burrow, asid, handles, debug-step -- unblocking 19-handles.md + 134-debug-fs.md; pty + tapestry_present remain, BLOCKED on the two server sweeps below, since a spec note whose action-site map points at unread code is a hollow record]"
+  - "[x] Sweep by subsystem -- COMPLETE at batch 27: every kernel subsystem and every usr/ service now has a dossier (ptyfs + tapestryd were the last two). Absorption of the swept documents is the SEPARATE pass below (46/147 absorbed -- see view-absorption)"
+  - "[ ] Registry passes -- a PREREQUISITE for absorption, not a successor to it: a table-bearing document cannot be replaced until its tables have a note to live in. THREE kinds, not one: (a) the enumerated-value registries [DONE: errno, caps, handle-rights, note-names]; (b) the STRUCT + WIRE layouts [DONE: t_stat + its SEVEN mirrors (CLAUDE.md's list named six), the Loom ring, the 9P message-type space -- unblocking 107-loom.md and the t_stat-bearing docs]; (c) the spec notes [6 of 6 DONE: burrow, asid, handles, debug-step, then pty + tapestry_present at batch 27 once their servers were read -- a spec note whose action-site map points at unread code is a hollow record, and reading them is what surfaced the CookData scope gap]"
   - "[ ] Absorb the twelve documents whose prose is swept and whose tables await a registry"
   - "[ ] Sweep the three orphaned files (task #32) and delete the over-claim notices"
   - "[ ] View cutover (CLAUDE.md shrinks to constitution + pointers)"

@@ -20,6 +20,7 @@ Generated from note fields — do not edit between the markers
 | I-16 | [[inv-i16]] | prose | sub-kernel-kaslr, sub-kernel-boot-entry, sub-kernel-content | prose, gate-smp |
 | I-17 | [[inv-i17]] | prose | sub-kernel-sched, sub-kernel-timer | spec-scheduler, gate-smp |
 | I-18 | [[inv-i18]] | spec | sub-kernel-sched-smp, sub-kernel-gic | spec-scheduler, gate-smp |
+| I-20 | [[inv-i20]] | spec | sub-ptyfs, sub-kernel-proc | spec-pty, spec-pty-stop, prose, gate-smp |
 | I-21 | [[inv-i21]] | spec | sub-kernel-sched-smp, sub-kernel-thread, sub-kernel-exception | spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp |
 | I-22 | [[inv-i22]] | prose | sub-kernel-perm, sub-kernel-caps, sub-kernel-devproc | prose, gate-smp |
 | I-24 | [[inv-i24]] | spec | sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signal | spec-death-wake, gate-smp |
@@ -36,6 +37,7 @@ Generated from note fields — do not edit between the markers
 | I-37 | [[inv-i37]] | spec | sub-kernel-weft | spec-weft, spec-weft-readiness, gate-smp |
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |
 | I-39 | [[inv-i39]] | spec | sub-kernel-devproc, sub-kernel-proc | spec-debug-stop, prose, gate-smp |
+| I-40 | [[inv-i40]] | spec | sub-tapestryd, sub-kernel-weft | spec-tapestry-present, prose, gate-smp |
 | I-5 | [[inv-i5]] | spec | sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic, sub-kernel-discovery | prose, gate-smp |
 | I-7 | [[inv-i7]] | spec | sub-kernel-burrow | spec-burrow, gate-smp |
 | I-8 | [[inv-i8]] | spec | sub-kernel-sched, sub-kernel-sched-smp, sub-kernel-rendez | spec-scheduler, spec-sched-alpha, spec-sched-rebalance, spec-sched-tickless, gate-smp |
