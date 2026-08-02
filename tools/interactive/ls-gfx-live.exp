@@ -6,7 +6,7 @@
 # concurrent with tapestryd's controlq submissions, and the #31 desync (the
 # pre-fix single-shot used.idx read hard-failing behind a mis-timed wake
 # under -display cocoa) could not fire. This leg closes the gap as far as a
-# headless CI can: it boots with THYLACINE_DISPLAY=vnc:47 (a REAL display
+# headless CI can: it boots with THYLACINE_DISPLAY=vnc:N (a REAL display
 # backend; run-vm.sh drops gpu-mmio0 so the gpu0 console binds QemuConsole
 # 0), attaches tools/rfb-refresh.py to keep the display-refresh path live
 # (dirty-rect encoding + graphic_hw_update concurrent with presents), then
@@ -33,7 +33,10 @@ source [file join [file dirname [info script]] lib.exp]
 set repo $lc_repo
 set qmp "$repo/build/qmp.sock"
 set ::env(THYLACINE_ACCEL) hvf
-set ::env(THYLACINE_DISPLAY) vnc:47
+# #127: allocated, never hardcoded -- QEMU and the rfb client below MUST agree
+# on the number, and a fixed one collides with the sibling tree deterministically.
+set vncdisp [lc_pick_vnc_display]
+set ::env(THYLACINE_DISPLAY) vnc:$vncdisp
 
 # Full-session transcript (serial included) for the end-of-window
 # desync-string sweep.
@@ -56,7 +59,7 @@ lc_login michael correct-horse-battery-staple-v1
 # file so the geometry assert below can read it shortly after connect.
 set rfbout /tmp/ls-gfx-live-rfb-[pid].out
 file delete -force $rfbout
-set rfb_pid [exec $repo/tools/rfb-refresh.py 47 45 > $rfbout 2>@1 &]
+set rfb_pid [exec $repo/tools/rfb-refresh.py $vncdisp 45 > $rfbout 2>@1 &]
 set ok 0
 for {set i 0} {$i < 20} {incr i} {
     after 500

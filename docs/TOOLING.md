@@ -101,6 +101,40 @@ launching terminal). `=vnc:N` serves the gpu0 console on
 in this mode the vestigial `gpu-mmio0` device is dropped so the gpu0
 console binds QemuConsole 0, which a VNC client attaches to).
 
+**N is ALLOCATED, never hardcoded (#127).** `lc_pick_vnc_display`
+(`tools/interactive/lib.exp`) derives a per-tree base from the repo's
+absolute path and then bind-probes upward from it (range `:32..:95` =
+TCP 5932..5995). Both defences are load-bearing and close different
+holes: the path-derived base keeps two checkouts of this repo — the main
+tree and the aux worktree — from ever contending, while the probe steps
+over a stale QEMU still holding the base. A fixed display number is a
+*deterministic* collision, which retries cannot help: every attempt
+re-picks the same port, so the budget is spent re-failing (observed 3/3,
+with the VM never starting and the scenario reported as INFRA). QEMU's
+own `to=` range-scan is not usable here because the harness must know the
+number to point `rfb-refresh.py` at the same display. `LS_CI_VNC_DISPLAY`
+pins it manually (honoured verbatim, not probed).
+
+**The rest of the sweep.** Two other fixed host ports exist, both left as-is
+with reasons rather than silently passed over:
+
+- `THYLACINE_GUESTFWD_HOSTPORT` (default 28099, `run-vm.sh`) — off by
+  default, set only by `tools/np3-bench.sh`. Its documented `NP3_HOSTPORT`
+  escape hatch was *dead*: the bench moved its host server but never
+  forwarded the value, so run-vm.sh kept forwarding to 28099 and the guest
+  dialled a closed port — every metric degrading to a benign-looking SKIP.
+  Now forwarded, and the server binds in its main thread so a taken port is
+  a hard exit naming the knob, not a daemon-thread traceback in a redirected
+  log.
+- `26000` in `ls-gfx-mp.exp` — the Quake protocol default, implicit in both
+  the host server and the guest client rather than passed anywhere, so
+  moving it means plumbing `-port` through both. It also SKIPs without the
+  optional host `tyr-quake`, and its connect leg is already declared
+  best-effort (slirp routing is environment-dependent), so a collision
+  degrades to an outcome the scenario already tolerates instead of failing
+  the gate. Same class, materially lower stakes; fix it if it ever runs
+  concurrently for real.
+
 ### 3.1 Agentic eyes — `tools/screendump.sh` (QMP scanout capture)
 
 The graphics arc's capture step (G-0; `TAPESTRY.md` §18.9). Captures the
