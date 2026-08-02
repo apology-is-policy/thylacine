@@ -182,6 +182,21 @@ static void drop_proc(struct Proc *p) {
     proc_free(p);
 }
 
+// LINEAGE L-4a: exec's stack and its writable segments are backed by SPARSE
+// ANON_LAZY Burrows, so a test reading exec's output back cannot walk a single
+// contiguous `->pages` chunk -- it goes slot by slot. Returns the direct-map
+// address of byte `off` within the Burrow, or NULL if that slot is not resident.
+//
+// Every caller below reads a run that lies wholly inside ONE page (the init frame
+// is 176 bytes at the top of the stack; the data-segment checks are the first 256
+// bytes), so one lookup covers each. A run that spanned a page boundary would need
+// to re-look-up at the crossing -- separate pages are not contiguous in the direct
+// map, which is the whole point of the sparse representation.
+static u8 *lazy_byte(struct Burrow *v, u64 off) {
+    u8 *pg = (u8 *)burrow_lazy_slot_kva(v, (size_t)(off / PAGE_SIZE));
+    return pg ? pg + (off % PAGE_SIZE) : NULL;
+}
+
 void test_exec_from_spoor_rodata_dispatch(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -219,15 +234,18 @@ void test_exec_from_spoor_rodata_dispatch(void) {
         "text FILE-backed");
     TEST_EXPECT_EQ((int)ro->burrow->type, (int)BURROW_TYPE_FILE,
         "rodata FILE-backed (the #45 gate)");
-    TEST_EXPECT_EQ((int)rw->burrow->type, (int)BURROW_TYPE_ANON,
-        "data eager ANON (I-36 condition 4: writable never file-backed)");
+    TEST_EXPECT_EQ((int)rw->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "data private ANON_LAZY (I-36 condition 4 unchanged: writable is never "
+        "file-backed -- LINEAGE L-4a made the anon backing sparse, not shared)");
     TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2,
         "two Image entries created (text + rodata)");
 
-    // The eager RW copy carried the file bytes.
-    u8 *rwb = (u8 *)pa_to_kva(page_to_pa(rw->burrow->pages));
-    TEST_EXPECT_EQ((u64)rwb[0],    (u64)0xE0, "data byte 0 eager-copied");
-    TEST_EXPECT_EQ((u64)rwb[0x1f], (u64)0xFF, "data byte 0x1f eager-copied");
+    // The private RW copy carried the file bytes (L-4a: read through the sparse
+    // slot; the BYTES are what this asserts, and they are unchanged).
+    u8 *rwb = lazy_byte(rw->burrow, 0);
+    TEST_ASSERT(rwb != NULL, "data page 0 populated by exec");
+    TEST_EXPECT_EQ((u64)rwb[0],    (u64)0xE0, "data byte 0 copied from the file");
+    TEST_EXPECT_EQ((u64)rwb[0x1f], (u64)0xFF, "data byte 0x1f copied from the file");
 
     // Teardown: unmap (drop_proc) -> both Image entries go idle -> evict frees
     // the FILE Burrows (each clunks its adopted spoor ref) -> our own ref last.
@@ -522,8 +540,10 @@ void test_exec_setup_auxv(void) {
     // Read the frame back from the stack BURROW via the direct map.
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
-    u64 *w = (u64 *)(stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
+    u64 *w = (u64 *)fb;
 
     // argc / argv / envp — all empty at v1.0.
     TEST_EXPECT_EQ(w[0], 0ull, "argc == 0");
@@ -567,7 +587,8 @@ void test_exec_setup_auxv(void) {
 
     // The 16 entropy bytes are CSPRNG-populated — not all zero (a
     // genuine all-zero 16-byte draw is a 2^-128 event).
-    u8 *rand_bytes = stack_kva + EXEC_USER_STACK_SIZE - 16;
+    // The AT_RANDOM block is the frame's last 16 bytes, so it shares `fb`'s page.
+    u8 *rand_bytes = fb + EXEC_INIT_STACK_SIZE - 16;
     u8 rand_or = 0;
     for (int i = 0; i < 16; i++) rand_or |= rand_bytes[i];
     TEST_ASSERT(rand_or != 0, "AT_RANDOM block is CSPRNG-populated (non-zero)");
@@ -592,8 +613,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
 
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
-    u64 *w = (u64 *)(stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
+    u64 *w = (u64 *)fb;
 
     TEST_EXPECT_EQ(w[3], (u64)AT_PHDR,  "auxv still carries an AT_PHDR slot");
     TEST_EXPECT_EQ(w[4], 0ull,          "AT_PHDR == 0 (no segment covers the phdrs)");
@@ -760,5 +783,101 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     vma_drain_in(nas);
     addrspace_unref(nas);
     spoor_clunk(exe);
+    drop_proc(p);
+}
+
+// =============================================================================
+// LINEAGE L-4a: exec's private writable backing is SPARSE
+// =============================================================================
+
+// The regression for #130. corvus's RW PT_LOAD is FileSiz 128 B / MemSiz 24 MiB
+// (essentially all .bss) and map_eager_from_file sized the allocation by MEMSZ,
+// so every corvus exec allocated AND zeroed a 32 MiB order-13 block for 128 bytes
+// of data. The same shape at test scale: assert the Burrow RESERVES the whole
+// memsz but only the file-backed head is RESIDENT.
+//
+// Revert-probe: restoring burrow_create_anon here fails BOTH the type assertion
+// and the resident-count one (burrow_lazy_resident_count answers 0 for a Burrow
+// that is not ANON_LAZY, so the eager path cannot accidentally satisfy it).
+void test_exec_writable_segment_is_sparse(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // One RW segment: 64 bytes of file data behind 4 MiB of memsz.
+    u32 flags[1] = { PF_R | PF_W };
+    size_t size = build_elf(flags, 1, /*filesz=*/64);
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    const u64 memsz = 4ull * 1024 * 1024;
+    ph[0].p_memsz = memsz;
+    for (size_t i = 0; i < 64; i++) g_elf_blob[PAGE_SIZE + i] = (u8)(i ^ 0xA5);
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "exec_setup with a large-bss writable segment");
+
+    struct Vma *vma = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(vma != NULL && vma->burrow != NULL, "data VMA + Burrow");
+    TEST_EXPECT_EQ((int)vma->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "the writable segment is backed by a SPARSE Burrow");
+
+    // It RESERVES every memsz page ...
+    TEST_EXPECT_EQ((u64)vma->burrow->page_count, memsz / PAGE_SIZE,
+        "the Burrow reserves the whole memsz (1024 pages)");
+    // ... but only the file-backed head is RESIDENT. This is the assertion the
+    // eager path structurally cannot satisfy -- it allocated all 1024 up front.
+    TEST_EXPECT_EQ((u64)burrow_lazy_resident_count(vma->burrow), 1ull,
+        "only the file-backed page is resident; the bss tail costs nothing");
+
+    // The bytes still landed, and the resident page's tail past filesz is zero --
+    // so "sparse" changed WHEN a page is allocated, never WHAT it reads as.
+    u8 *b = lazy_byte(vma->burrow, 0);
+    TEST_ASSERT(b != NULL, "the file-backed page is populated");
+    for (size_t i = 0; i < 64; i++)
+        TEST_EXPECT_EQ((u64)b[i], (u64)(u8)(i ^ 0xA5), "file byte preserved");
+    TEST_EXPECT_EQ((u64)b[64], 0ull, "the page's tail past filesz reads zero");
+
+    // I-32: exec-image pages are now on the page axis (they were uncharged while
+    // eager). Exactly two: this segment's file-backed page, and the one page the
+    // argv/auxv frame occupies at the top of the stack. The vDSO is mapped from a
+    // kernel-owned Burrow and charges nothing.
+    TEST_EXPECT_EQ((u64)p->as->page_count, 2ull,
+        "charged exactly the pages exec made resident (data 1 + stack frame 1)");
+
+    drop_proc(p);
+}
+
+// The stack half (#49): 1 MiB reserved, only the frame's page resident. Every exec
+// used to allocate and zero all 256 pages whether or not the program descended
+// that far; now the stack grows downward by demand-zero fault, the Linux model.
+void test_exec_stack_is_sparse(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/16);
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0, "exec_setup");
+
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + Burrow");
+    TEST_EXPECT_EQ((int)sv->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "the user stack is backed by a SPARSE Burrow");
+    TEST_EXPECT_EQ((u64)sv->burrow->page_count,
+                   (u64)(EXEC_USER_STACK_SIZE / PAGE_SIZE),
+        "the stack reserves its full 1 MiB (256 pages)");
+    TEST_EXPECT_EQ((u64)burrow_lazy_resident_count(sv->burrow), 1ull,
+        "only the argv/auxv frame's page is resident; the other 255 demand-zero");
+
+    // A PF_X segment stays EAGER (seg_may_be_sparse: nothing executable may arrive
+    // through the demand-zero arm, which does no I-cache maintenance) -- so the
+    // only page charged besides the frame is none at all.
+    struct Vma *tv = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(tv != NULL && tv->burrow != NULL, "text VMA + Burrow");
+    TEST_EXPECT_EQ((int)tv->burrow->type, (int)BURROW_TYPE_ANON,
+        "an executable segment stays EAGER (the I-cache reason)");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull,
+        "only the stack frame's page is charged (the eager text is not)");
+
     drop_proc(p);
 }

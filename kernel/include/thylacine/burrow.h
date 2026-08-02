@@ -299,6 +299,42 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
 // OOM, or filepages-array OOM.
 struct Burrow *burrow_create_anon_lazy(size_t size);
 
+// LINEAGE L-4a: make slots [first, first+n) of an ANON_LAZY Burrow resident up
+// front, instead of leaving them to the demand-zero fault arm. exec is the only
+// caller: it has bytes to put in these pages (a segment's `filesz`, or the argv/
+// auxv frame), so faulting them in and then writing them would allocate the same
+// pages one syscall later for no gain.
+//
+// Charges the I-32 page axis against `as` -- the SAME per-page charge the fault
+// arm makes, taken here because these pages are resident for the same reason and
+// `page_count == true RSS` (ARCH §6.5) must hold either way. Charged ONCE for the
+// whole run so the cap decision sees the entire request; a run that would straddle
+// PROC_PAGE_MAX is refused whole rather than half-populated. Takes as->lock
+// (addrspace_charge_pages' stated precondition) and v->lock, in that order; the
+// buddy allocator is entered under NEITHER (the leaf-lock discipline burrow.c
+// already keeps for free_pages).
+//
+// ALL-OR-NOTHING: on any failure every page this call installed is freed and the
+// whole charge returned, leaving the Burrow exactly as it was found -- so a caller
+// that gives up can simply burrow_unref. Returns 0, or -1 on: a non-ANON_LAZY
+// Burrow, a range outside page_count, an alloc_pages shortfall, an over-cap charge,
+// or a slot in the run that was ALREADY resident (a caller bug -- exec populates
+// each run exactly once; failing closed beats silently miscounting the charge).
+int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                         size_t first, size_t n);
+
+// LINEAGE L-4a: the kernel direct-map address of one resident ANON_LAZY slot, or
+// NULL if the slot is not resident (or the Burrow is the wrong type / the slot is
+// out of range).
+//
+// PRECONDITION -- the Burrow must be PRIVATE to the caller: not yet mapped into any
+// address space, and not yet reachable from a second thread. That is exec's
+// situation and nothing else's (it creates the Burrow, populates it, fills it, and
+// only then burrow_map_ins it), which is what makes the returned raw pointer safe
+// without a lifetime guard: no concurrent decommit or teardown can free the page
+// under the caller. Do NOT reach for this from a path where the Burrow is live.
+void *burrow_lazy_slot_kva(struct Burrow *v, size_t slot);
+
 // Increment handle_count. Maps to spec's HandleOpen action. Called by
 // handle_dup (and Phase 4's handle_transfer_via_9p) for KOBJ_BURROW
 // handles.

@@ -46,6 +46,7 @@
 //   - Single-CPU lifecycle; Phase 5+ adds atomic ops.
 
 #include "../arch/arm64/mmu.h"        // R12-vaddr: USER_VA_TOP for burrow_map upper bound
+#include <thylacine/addrspace.h>     // LINEAGE L-4a: addrspace_charge_pages for the populate charge
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
 #include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
@@ -290,6 +291,86 @@ struct Burrow *burrow_create_anon_lazy(size_t size) {
     v->filepages     = filepages;
     g_vmo_created++;
     return v;
+}
+
+// LINEAGE L-4a: pre-populate a run of ANON_LAZY slots (see burrow.h for the
+// contract). Structurally the demand-zero fault arm's body, hoisted to exec time
+// and run over a range instead of one slot -- same charge, same alloc, same
+// install-once, same "buddy is never entered under v->lock" discipline.
+int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                         size_t first, size_t n) {
+    if (!as || !v)                            return -1;
+    if (v->magic != VMO_MAGIC)                return -1;
+    if (v->type != BURROW_TYPE_ANON_LAZY)     return -1;
+    if (!v->filepages)                        return -1;
+    if (n == 0)                               return 0;
+    // Range within the Burrow, written so neither term can overflow.
+    if (first >= v->page_count)               return -1;
+    if (n > v->page_count - first)            return -1;
+    if (n > 0xFFFFFFFFull)                    return -1;   // the u32 charge argument
+
+    // Charge the WHOLE run before allocating anything: the cap decision has to see
+    // the entire request, or a run straddling PROC_PAGE_MAX would populate its
+    // first half and only then discover it cannot finish. as->lock is the stated
+    // precondition of addrspace_charge_pages -- it is what makes the cap exact
+    // against a sibling charge on the same address space.
+    spin_lock(&as->lock);
+    bool charged = addrspace_charge_pages(as, (u32)n, exempt);
+    spin_unlock(&as->lock);
+    if (!charged)                             return -1;   // over cap -> caller -ENOMEM
+
+    size_t done = 0;
+    for (; done < n; done++) {
+        // alloc OUTSIDE v->lock: alloc_pages takes the buddy lock, and burrow.c's
+        // leaf-lock discipline keeps the buddy strictly below v->lock (the same
+        // reason burrow_decommit frees after unlocking).
+        struct page *pg = alloc_pages(0, KP_ZERO);
+        if (!pg) break;                       // OOM -> unwind below
+
+        spin_lock(&v->lock);
+        bool installed = (v->filepages[first + done] == NULL);
+        if (installed) v->filepages[first + done] = pg;   // the Burrow owns pg now
+        spin_unlock(&v->lock);
+
+        if (!installed) {
+            // The slot was ALREADY resident. exec populates each run exactly once
+            // and the Burrow is private to it, so this is a caller bug rather than a
+            // race -- fail closed instead of silently leaving the run's charge
+            // describing more pages than this call actually installed.
+            free_pages(pg, 0);                // outside v->lock (leaf order)
+            break;
+        }
+    }
+
+    if (done != n) {
+        // All-or-nothing: undo exactly what this call did, so the Burrow is left as
+        // it was found and a caller that gives up can simply burrow_unref.
+        for (size_t i = 0; i < done; i++) {
+            spin_lock(&v->lock);
+            struct page *pg = v->filepages[first + i];
+            v->filepages[first + i] = NULL;
+            spin_unlock(&v->lock);
+            if (pg) free_pages(pg, 0);        // outside v->lock (leaf order)
+        }
+        spin_lock(&as->lock);
+        addrspace_uncharge_pages(as, (u32)n); // the whole charge, matching the grant
+        spin_unlock(&as->lock);
+        return -1;
+    }
+    return 0;
+}
+
+// LINEAGE L-4a: the direct-map address of one resident ANON_LAZY slot. The
+// caller-privacy precondition is stated in burrow.h and is what makes returning a
+// raw page pointer sound here; no lock is taken because there is, by that
+// precondition, nobody to race with.
+void *burrow_lazy_slot_kva(struct Burrow *v, size_t slot) {
+    if (!v)                                     return NULL;
+    if (v->magic != VMO_MAGIC)                  return NULL;
+    if (v->type != BURROW_TYPE_ANON_LAZY)       return NULL;
+    if (!v->filepages || slot >= v->page_count) return NULL;
+    struct page *pg = v->filepages[slot];
+    return pg ? (void *)pa_to_kva(page_to_pa(pg)) : NULL;
 }
 
 // Internal: release pages + struct when both counts have reached 0.

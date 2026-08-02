@@ -887,6 +887,34 @@ time** exactly as today, just per-page instead of into one contiguous kva. No
 userspace writable mapping becomes file-backed — that would be a private
 file-backed mapping, a different and much larger design.
 
+> **As built (L-4a, landed).** The gate is **not executable**, not *writable* —
+> `seg_may_be_sparse()` admits a segment iff `(flags & PF_X) == 0`. That is
+> broader than this section predicted, and the reason is one the design pass did
+> not have: **the demand-zero fault arm performs no I-cache maintenance.** An
+> executable `.bss` tail arriving through it would map executable with a prior
+> occupant's lines still in the I-cache — #107's hazard, which the eager paths
+> close by syncing the whole span and REVENANT's file-backed arm closes per page.
+> Rather than teach a third arm to sync, every executable page stays on a path
+> that already does.
+>
+> The broadening costs nothing and loses nothing. W^X (I-12) makes `PF_W` imply
+> `!PF_X`, so **all** writable data — the whole of what COW must break, and where
+> #130's 32 MiB lives — is covered either way; the extra reach is the rare
+> read-only segment with a bss tail, which is free to make sparse and which no
+> fork will ever break. State the predicate as the safety property, because that
+> is what it is: nothing executable is ever demand-zeroed.
+>
+> One consequence worth naming, because a test would otherwise have discovered
+> it: **exec-image pages are now on the I-32 page axis.** `burrow_map_in` charges
+> only the VMA axis, so eager exec pages were uncharged (the I-32 row calls the
+> exec image "one-shot bounded"); the lazy path charges per page, and L-4a's
+> pre-populate charges the run it makes resident. So `page_count` now tracks true
+> RSS across exec, which is what ARCH §6.5 claims it does — an improvement — but
+> it also means **stack growth can fail** where before it could not. It fails the
+> way the overcommit model already fails: `proc_fault_terminate`, gracefully, per
+> Proc. A stack is 256 pages against `PROC_PAGE_MAX` = 65536, so the practical
+> cost is ~0.4% of the cap, and the TCB is exempt.
+
 **What stays eager, and why it is not an inconsistency.** `burrow_create_anon`
 remains for DMA buffers and the Weft rings. Those need *physical contiguity* —
 a device DMAs into a PA range, and a Weft ring is registered whole — which is a
@@ -969,7 +997,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-3c-1** ✅ **LANDED** | The handle-table copy (§2.4; #119). `handle_table_copy_into`, index-preserving, gated on the fork shape so the spawn family is byte-unchanged by construction. **Skip, not refuse** — the choice is stated at §5.4's as-built section, and the admissibility test is the SAME predicate `handle_dup` uses, extracted so the two cannot drift. | **MET** — 1284 → 1285/1285, boot OK, `/fork-probe` leg H (a child writes to a pipe fd only the parent opened). Three revert probes, each failing at its own assertion; removing the wiring leaves the **unit suite fully green** |
 | **L-3c-2** ✅ **LANDED** | The VFORK suspend (#122). `vfork_await_release` parks the parent on `child_waiters` until `vfork_child_released` — which reads `child->as`, so the condition IS the release rather than a record of it. Keyed on `RFMEM`, not a new flag: §9's fourth question, answered at §5.3's as-built section. One new wake (exec); death's already existed. | **MET** — 1285 → 1286/1286, boot OK, `/fork-probe` legs I (death arm) + J (exec arm, the successor blocks on a pipe so "still alive" is a fact not a race). Two revert probes: removing the park leaves the **unit suite fully green** while only the in-guest leg fails; removing the exec wake leaves it green *and* hangs the boot — the honest production symptom |
 | **L-3d** ✅ **LANDED** | The VIVARIUM `clone` row. `vivarium_clone_decide` (pure) + one `VIV_TIER2` entry + a shell that calls the SAME `sys_rfork_core` the native handler calls (extracted here, the V-8 `sys_fstat_for_proc` discipline). `CLONE_VM` without `CLONE_VFORK` is **refused**, not served — §8's as-built section carries why L-3c-2's fail-safe reasoning inverts for a stock Linux caller. Also replaced the four stale copies of the "native ceiling" literal with `VIV_NATIVE_CEILING` + a `_Static_assert`. | **MET, but not by the gate as written** — that gate named `posix_spawn`, which needs `execve` (221) and `wait4` (260) as well; both are L-6's, are real translators, and are dependencies of *posix_spawn* rather than of *the clone translation*. Replaced by: a clone whose child runs, writes into the shared address space, and exits, with the parent suspended until it does. 1286 → 1287/1287; `viv-pheno-probe` legs L155–L163, boot-fatal |
-| **L-4a** | **Prerequisite, not COW work**: exec's stack + writable data/bss move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots. Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. DMA + Weft rings stay eager (they need physical contiguity). | a binary with a large `.bss` execs and runs with RSS proportional to what it touched, not to `memsz`; the file-backed leading pages carry the right bytes |
+| **L-4a** ✅ | **Prerequisite, not COW work**: exec's stack + every NON-EXECUTABLE segment move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots (the stack: only the run its argv/auxv frame occupies at the top). Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. Executable segments stay eager — the I-cache reason above. DMA + Weft rings stay eager too (they need physical contiguity). | **LANDED**: `exec.writable_segment_is_sparse` (4 MiB memsz, 64 B filesz -> 1024 slots reserved, 1 resident) + `exec.stack_is_sparse` (1 MiB reserved, 1 resident), both revert-probed; 1289/1289 + boot OK |
 | **L-4b** | Per-page share counts + the COW break arm (stage 3a). The count is a per-slot array beside `filepages[]`, **not** `struct page.refcount` (§2.8). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |

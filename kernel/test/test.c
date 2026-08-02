@@ -343,6 +343,8 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_exec_writable_segment_is_sparse(void);
+void test_exec_stack_is_sparse(void);
 void test_execve_load_into_detached(void);
 void test_execve_load_into_rejects_dirty(void);
 void test_execve_failed_load_leaves_target_drainable(void);
@@ -1748,6 +1750,10 @@ struct test_case g_tests[] = {
     { "exec.setup_auxv_no_phdr_segment",
                                        test_exec_setup_auxv_no_phdr_segment,
                                                                            false, NULL },
+    { "exec.writable_segment_is_sparse",
+                                       test_exec_writable_segment_is_sparse,
+                                                                           false, NULL },
+    { "exec.stack_is_sparse",          test_exec_stack_is_sparse,          false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },

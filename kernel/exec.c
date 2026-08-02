@@ -58,6 +58,50 @@ static u64 round_up_page(u64 x) {
     return (x + PAGE_SIZE - 1) & ~(u64)(PAGE_SIZE - 1);
 }
 
+// LINEAGE L-4a: the number of whole pages spanning `bytes` (0 for 0 bytes).
+static size_t pages_spanning(u64 bytes) {
+    if (bytes == 0) return 0;
+    return (size_t)((bytes + PAGE_SIZE - 1) / PAGE_SIZE);
+}
+
+// LINEAGE L-4a: copy `len` bytes into a POPULATED ANON_LAZY Burrow at byte offset
+// `off`, splitting at page boundaries -- the sparse twin of the single memcpy the
+// eager paths do into one contiguous chunk. Every page the range touches must
+// already be resident (burrow_lazy_populate); a NULL slot means the caller
+// populated the wrong run, so fail loudly rather than silently drop the bytes.
+static int lazy_write(struct Burrow *v, u64 off, const void *src, size_t len) {
+    const u8 *s = (const u8 *)src;
+    while (len > 0) {
+        size_t slot    = (size_t)(off / PAGE_SIZE);
+        size_t in_page = (size_t)(off % PAGE_SIZE);
+        size_t chunk   = (size_t)PAGE_SIZE - in_page;
+        if (chunk > len) chunk = len;
+        u8 *dst = (u8 *)burrow_lazy_slot_kva(v, slot);
+        if (!dst) return -1;
+        for (size_t i = 0; i < chunk; i++) dst[in_page + i] = s[i];
+        off += chunk;
+        s   += chunk;
+        len -= chunk;
+    }
+    return 0;
+}
+
+// LINEAGE L-4a: may this segment's private anonymous backing be SPARSE?
+//
+// Only when it is NOT executable. A demand-zeroed page arrives through the
+// ANON_LAZY fault arm, which performs NO I-cache maintenance -- so an executable
+// bss tail would map executable with a prior occupant's lines still in the I-cache
+// (#107's hazard, which the eager paths close by syncing the whole span and the
+// REVENANT file-backed arm closes per page). Rather than teach a third arm to sync,
+// keep every executable page on a path that already does.
+//
+// This costs nothing: W^X (I-12) makes PF_W imply !PF_X, so all WRITABLE data --
+// which is the whole of what COW must break, and where the eager bss cost lives
+// (#130) -- is covered. A text segment is shared read-only and never breaks.
+static bool seg_may_be_sparse(const struct elf_load_segment *seg) {
+    return (seg->flags & PF_X) == 0;
+}
+
 // Map a single PT_LOAD segment into the Proc's address space.
 //
 // Steps:
@@ -90,13 +134,37 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
     if (vaddr_end_aligned == 0)             return -1;
     size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
 
-    struct Burrow *burrow = burrow_create_anon(size);
+    // LINEAGE L-4a: a non-executable segment's backing is SPARSE -- only the pages
+    // the FILE covers are populated here; [filesz, size) is .bss and demand-zeroes
+    // on first touch. joey's RW PT_LOAD is 8 bytes of data behind 345 KiB of bss,
+    // and corvus's is 128 bytes behind 24 MiB (#130); eagerly allocating AND zeroing
+    // the whole memsz at every exec was the cost. Executable segments stay eager
+    // (seg_may_be_sparse: the I-cache reason).
+    bool sparse = seg_may_be_sparse(seg);
+    struct Burrow *burrow = sparse ? burrow_create_anon_lazy(size)
+                                   : burrow_create_anon(size);
     if (!burrow)                               return -1;
 
+    if (sparse) {
+        size_t nfile = pages_spanning(seg->filesz);
+        if (nfile > 0 &&
+            burrow_lazy_populate(as, exempt, burrow, 0, nfile) != 0) {
+            burrow_unref(burrow);
+            return -1;
+        }
+        if (seg->filesz > 0 &&
+            lazy_write(burrow, 0, (const u8 *)blob + seg->file_offset,
+                       seg->filesz) != 0) {
+            burrow_unref(burrow);
+            return -1;
+        }
+        // No I-cache maintenance: seg_may_be_sparse admitted this segment precisely
+        // because nothing here will ever be fetched as an instruction.
+    }
     // Copy filesz bytes from blob[file_offset..] → burrow's first page (offset 0).
     // The BURROW's pages start at offset 0; vmaddr_start corresponds to
     // BURROW offset 0 (the segment is page-aligned).
-    if (seg->filesz > 0) {
+    else if (seg->filesz > 0) {
         u8 *burrow_kva = (u8 *)pa_to_kva(page_to_pa(burrow->pages));
         const u8 *src = (const u8 *)blob + seg->file_offset;
         for (size_t i = 0; i < seg->filesz; i++) {
@@ -121,7 +189,8 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
         if (seg->flags & PF_X)
             arch_icache_sync_range(burrow_kva, seg->filesz);
     }
-    // [filesz, size) stays zero from KP_ZERO.
+    // Either way [filesz, size) reads as zero: eagerly from KP_ZERO, sparsely from
+    // the demand-zero fault arm's KP_ZERO. Only WHEN the page is allocated differs.
 
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map_in(as, exempt, burrow, seg->vaddr, size, prot);
@@ -140,7 +209,13 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
 // Map the user stack — a 1 MiB anonymous VMA at the fixed top-of-
 // user-VA — plus a one-page guard VMA directly below it.
 static int exec_map_user_stack(struct AddrSpace *as, bool exempt) {
-    struct Burrow *burrow = burrow_create_anon(EXEC_USER_STACK_SIZE);
+    // LINEAGE L-4a: the stack is SPARSE -- it grows downward from the top by
+    // demand-zero fault, the Linux model (#49). Every exec used to allocate and
+    // zero the full 1 MiB (256 pages) whether or not the program ever descended
+    // that far; now only the pages actually touched exist. exec_build_init_stack
+    // populates the run its argv/auxv frame occupies at the top. The stack is RW
+    // (never executable), so seg_may_be_sparse's I-cache reason does not arise.
+    struct Burrow *burrow = burrow_create_anon_lazy(EXEC_USER_STACK_SIZE);
     if (!burrow)                               return -1;
 
     int rc = burrow_map_in(as, exempt, burrow, EXEC_USER_STACK_BASE,
@@ -227,7 +302,12 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
 
 // `vdso_va` is the user VA of the mapped vDSO clock page (from exec_map_vdso),
 // or 0 if it could not be mapped (-> no AT_VDSO_CLOCK; reader falls back).
-static u64 exec_build_init_stack(struct AddrSpace *as, const struct elf_image *img,
+// Returns the initial user sp, or 0 on failure -- LINEAGE L-4a made this failable
+// (the stack Burrow is sparse now, so the frame's pages must be populated and the
+// frame staged, both of which can hit OOM). 0 is unambiguous: a real sp is always
+// just below EXEC_USER_STACK_TOP.
+static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
+                                 const struct elf_image *img,
                                  const char *argv_data, u32 argv_data_len,
                                  u32 argc, u64 vdso_va) {
     // Shape selection. argv_data_len > 0 iff argc > 0 (caller's
@@ -251,7 +331,6 @@ static u64 exec_build_init_stack(struct AddrSpace *as, const struct elf_image *i
     struct Vma *sv = vma_lookup_in(as, EXEC_USER_STACK_BASE);
     if (!sv || !sv->burrow)
         extinction("exec_build_init_stack: stack VMA missing");
-    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
 
     // Compute frame layout.
     //
@@ -277,8 +356,17 @@ static u64 exec_build_init_stack(struct AddrSpace *as, const struct elf_image *i
         frame_size            = (unrounded + 15u) & ~15ull;
     }
 
-    u8 *frame = stack_kva + EXEC_USER_STACK_SIZE - frame_size;
-    u64 sp    = EXEC_USER_STACK_TOP - frame_size;
+    u64 sp        = EXEC_USER_STACK_TOP - frame_size;
+    u64 frame_off = EXEC_USER_STACK_SIZE - frame_size;   // its offset in the Burrow
+
+    // LINEAGE L-4a: the stack Burrow is sparse, so there is no contiguous kva to
+    // lay the frame out in. Build it in a kernel scratch buffer -- leaving every
+    // field write below byte-identical -- and copy it in whole at the end. The
+    // scratch is transient (freed before this returns) and bounded by
+    // EXEC_INIT_STACK_MAX_SIZE (~68 KiB worst case, 176 bytes in the argv-less
+    // shape), against the 1 MiB the eager stack used to cost unconditionally.
+    u8 *frame = kzalloc((size_t)frame_size, 0);
+    if (!frame) return 0;
 
     // AT_PHDR — the user VA of the program-header table. The phdrs sit
     // at file offset img->phoff; find the PT_LOAD segment whose file
@@ -362,6 +450,19 @@ static u64 exec_build_init_stack(struct AddrSpace *as, const struct elf_image *i
     u8 *rand_dst = frame + random_offset_from_sp;
     for (size_t i = 0; i < sizeof(rand); i++) rand_dst[i] = rand[i];
 
+    // LINEAGE L-4a: make the frame's pages resident and copy it in. The run is the
+    // page holding the frame's first byte through the top of the stack -- the frame
+    // is 16-aligned but not page-aligned, so its first byte generally lands
+    // mid-page. Everything BELOW that page stays sparse and demand-zeroes as the
+    // program descends.
+    size_t first = (size_t)(frame_off / PAGE_SIZE);
+    size_t n     = (size_t)(EXEC_USER_STACK_SIZE / PAGE_SIZE) - first;
+    int rc = burrow_lazy_populate(as, exempt, sv->burrow, first, n);
+    if (rc == 0)
+        rc = lazy_write(sv->burrow, frame_off, frame, (size_t)frame_size);
+    kfree(frame);
+    if (rc != 0) return 0;      // caller disposes the partially-built address space
+
     return sp;
 }
 
@@ -418,8 +519,9 @@ static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
     // strings region under Shape B) at the top of the user stack;
     // *sp_out points at its `argc` word.
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(as, &img, argv_data, argv_data_len, argc,
-                                       vdso_va);
+    *sp_out    = exec_build_init_stack(as, exempt, &img, argv_data, argv_data_len,
+                                       argc, vdso_va);
+    if (*sp_out == 0)                          return -1;   // L-4a: frame OOM
     return 0;
 }
 
@@ -516,10 +618,43 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
     if (vaddr_end_aligned == 0)             return -1;
     size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
 
-    struct Burrow *b = burrow_create_anon(size);
+    // LINEAGE L-4a: the same sparse/eager split as exec_map_segment. This is the
+    // production arm, and it is where the measured cost was: corvus's RW PT_LOAD is
+    // FileSiz 128 B / MemSiz 24 MiB, and sizing by MEMSZ made every corvus exec
+    // allocate AND zero a 32 MiB order-13 block for 128 bytes of data (#130).
+    bool sparse = seg_may_be_sparse(seg);
+    struct Burrow *b = sparse ? burrow_create_anon_lazy(size)
+                              : burrow_create_anon(size);
     if (!b)                                  return -1;
 
-    if (seg->filesz > 0) {
+    if (sparse) {
+        // Populate only the file-backed head; read into it a page at a time (the
+        // slots are separate order-0 pages, so there is no contiguous span to read
+        // into). Byte-identical to the eager read: same offsets, same total, and
+        // the [filesz, size) tail is still zero -- it is simply not allocated yet.
+        size_t nfile = pages_spanning(seg->filesz);
+        if (nfile > 0 &&
+            burrow_lazy_populate(as, exempt, b, 0, nfile) != 0) {
+            burrow_unref(b);
+            return -1;
+        }
+        size_t got = 0;
+        while (got < seg->filesz) {
+            u8 *slot_kva = (u8 *)burrow_lazy_slot_kva(b, got / PAGE_SIZE);
+            if (!slot_kva) { burrow_unref(b); return -1; }
+            size_t in_page = got % PAGE_SIZE;
+            size_t want    = (size_t)PAGE_SIZE - in_page;
+            if (want > seg->filesz - got) want = (size_t)(seg->filesz - got);
+            long n = exe->dev->read(exe, slot_kva + in_page, (long)want,
+                                    (s64)(seg->file_offset + got));
+            if (n < 0)  { burrow_unref(b); return -1; }   // #811-interruptible / I/O error
+            if (n == 0) break;                             // short read (caught below)
+            got += (size_t)n;
+        }
+        if (got != seg->filesz) { burrow_unref(b); return -1; }   // truncated -> no partial map
+        // No I-cache maintenance: seg_may_be_sparse admitted this segment precisely
+        // because nothing here will ever be fetched as an instruction.
+    } else if (seg->filesz > 0) {
         u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
         size_t got = 0;
         while (got < seg->filesz) {
@@ -536,7 +671,8 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
         if (seg->flags & PF_X)
             arch_icache_sync_range(kva, seg->filesz);
     }
-    // [filesz, size) stays zero (KP_ZERO from alloc_pages) = .bss.
+    // [filesz, size) reads as zero either way (KP_ZERO eagerly, or from the
+    // demand-zero fault arm) = .bss.
 
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map_in(as, exempt, b, seg->vaddr, size, prot);
@@ -669,8 +805,9 @@ int exec_load_into(struct AddrSpace *as, bool exempt,
     if (exec_map_user_stack(as, exempt) != 0)  return -1;
     u64 vdso_va = exec_map_vdso(as, exempt);   // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(as, &img, argv_data, argv_data_len, argc,
-                                       vdso_va);
+    *sp_out    = exec_build_init_stack(as, exempt, &img, argv_data, argv_data_len,
+                                       argc, vdso_va);
+    if (*sp_out == 0)                          return -1;   // L-4a: frame OOM
     return 0;
 }
 
