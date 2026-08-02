@@ -144,16 +144,107 @@ posix_spawn child: new pid, shared address space, copied fd table.
 ### 2.8 `struct page.refcount` is an allocation marker, not a share count
 
 `kernel/include/thylacine/page.h:43` carries `u32 refcount` commented
-*"BURROW refcount placeholder"*. Measured: it is written **only** by the buddy
-allocator and the magazine layer — `mm/buddy.c:119/145/201/209/252`,
-`mm/magazines.c:120` — always to **0 (free) or 1 (allocated)**. It is never
-incremented above 1 and never read as a sharing count anywhere in the tree.
+*"BURROW refcount placeholder"*. It looks exactly like the field COW wants, and
+it is not. It is the `T_E_PIPE` class from #100 — a field whose name states a
+contract nothing keeps. **Do not assume it is usable as-is.**
 
-This matters because it looks exactly like the field COW wants. It is the
-`T_E_PIPE` class from #100 — a field whose name states a contract nothing
-keeps. COW must either promote it to a real count (and teach every buddy free
-path to respect it) or carry its own structure. **Do not assume it is usable
-as-is.**
+> **Correction (L-4).** The two specific claims this section originally made
+> were both **wrong**, and re-measuring at L-4 — which §2's own preamble
+> instructs — is what caught them. They said the field is written *"**only** by
+> the buddy allocator and the magazine layer"* and *"never incremented above
+> 1"*.
+>
+> **SLUB writes it at seven sites** (`mm/slub.c:173/190/215/221/251/255/264`),
+> where a slab page's `refcount` is the **inuse count** — `slab->refcount++`
+> per allocated object, compared against `c->objects_per_slab`, which for a
+> 48-byte cache in a 4 KiB slab is **85**. So it is both written outside the
+> two named layers and incremented far above 1.
+>
+> The source that proves it is the very line §2.8 quoted. `page.h:48` reads
+> `"BURROW refcount placeholder; slab: inuse count"` — the original text
+> quoted the half before the semicolon and stopped. This is §2's instruction
+> firing on §2 itself.
+
+What is true, measured at L-4:
+
+- **It is written per-BLOCK-HEAD, not per-page.** `alloc_locked` sets
+  `p->refcount = 1` on the head page of the returned block only
+  (`mm/buddy.c:209`); the other 2^order − 1 pages are never written by any
+  allocation or free path. On any order > 0 block the field therefore holds
+  *stale values from previous use* on every tail page. Promotion is not an
+  increment away — it means making the field per-page-maintained across
+  `alloc_locked` / `free_locked` / `zone_free_chunk` / `buddy_zone_init`, i.e.
+  a loop over 2^order pages on both hot allocator paths, for a property only
+  user anon pages ever need.
+- **It is already double-booked**, per the correction above. A third meaning
+  would make "what does this field mean here?" a three-way case keyed on
+  `flags`.
+
+### 2.9 Eager anon has no per-page ownership — and that, not the counter, is what blocks COW
+
+Measured at L-4, and it is the finding that shapes the whole chunk. A COW break
+is **per-page**: one page becomes private while its neighbours stay shared. The
+two anonymous Burrow types have opposite ownership models:
+
+| Type | Backing | Freed as |
+|---|---|---|
+| `BURROW_TYPE_ANON_LAZY` | sparse `filepages[]` of **order-0** pages | each page individually (`burrow.c:380`) |
+| `BURROW_TYPE_ANON` (eager) | **one** `alloc_pages(order)` block | one `free_pages(v->pages, v->order)` (`burrow.c:320`) |
+
+**You cannot free one page of a buddy block**, and buddy has no
+split-an-*allocated*-block operation — splitting happens only on the way out of
+`alloc_locked`. So in the eager model there is no per-page thing for a share
+count to index, no matter where the count lives.
+
+And **every writable anon a fork must break is eager**:
+
+| Site | What | Size |
+|---|---|---|
+| `exec.c:143` | the user stack | `EXEC_USER_STACK_SIZE` = 1 MiB |
+| `exec.c:519` | writable data + bss (`map_eager_from_file`) | per-binary; see below |
+| `exec.c:93` | the blob path's writable segments | per-binary |
+| `syscall.c:4331` | eager `SYS_BURROW_ATTACH` | per-caller |
+
+The lazy path is reached only by `SYS_BURROW_ATTACH_LAZY` (`syscall.c:4457`) —
+the mmap heap. So the per-page ownership COW needs exists precisely where COW
+does *not* need it, and is absent everywhere it does.
+
+**Measured sizes make this concrete**, and they also make the fix free rather
+than costly. `llvm-readelf -l` on the built tree:
+
+| Binary | RW `FileSiz` | RW `MemSiz` |
+|---|---|---|
+| `ut` | 0 | 0x61 (97 B) |
+| `joey` | 8 B | 0x56349 (345 KiB) |
+| `corvus` | **128 B** | **0x1802c91 (24 MiB)** |
+
+The writable segment is ~all `.bss`. `map_eager_from_file` sizes the Burrow by
+**`memsz`**, so corvus's exec calls `burrow_create_anon(0x1803000)` → 6147 pages
+→ `order_for_pages` = **13** → `alloc_pages(13, KP_ZERO)` = **8192 pages = 32
+MiB**, eagerly allocated *and* zero-filled, for 128 bytes of real data — with
+2045 pages (8 MiB) of that being pure power-of-two rounding. Tracked as **#130**;
+the fix is L-4a, because demand-zero bss and per-page ownership are the same
+change.
+
+### 2.10 Prior art converges on per-page ownership inside the memory object
+
+Checked before choosing a mechanism, per CLAUDE.md's "research prior art before
+surfacing a design fork":
+
+- **Plan 9** (the heritage): a `Segment` holds a page-table of per-page `Page *`
+  pointers; `Page.ref` **is** the share count; `fork` → `dupseg` bumps the
+  per-page refs, and `fixfault` on a write to a shared page calls
+  `duppage`/`copypage`.
+- **Linux**: per-page `_refcount` / `_mapcount`; ownership is the page table
+  itself; the break is `do_wp_page`.
+- **Zircon/Fuchsia**: `VmObjectPaged` holds a `VmPageList`; a COW clone
+  references its parent and a write forks that page into the child's own list.
+- **seL4**: no kernel COW at all — userspace builds it.
+
+All three that have COW put **per-page ownership inside the memory object**.
+Thylacine already has exactly that shape — in `BURROW_TYPE_ANON_LAZY`. The
+answer is therefore not to invent a second ownership concept but to *reach the
+one the tree already has*, which is what L-4a does.
 
 ---
 
@@ -462,6 +553,13 @@ execs). Otherwise allocate, copy, drop the share, install private, charge the
 breaker's I-32 budget. This needs a real per-page share count, which §2.8 shows
 does not yet exist.
 
+> **Refinement (L-4).** It needs more than a count. §2.9 measures that eager
+> anon has no **per-page ownership** for a count to index — and that every
+> writable anon a fork must break is eager. "Re-install writable in place" and
+> "install private" are both per-page operations on a Burrow that owns one
+> indivisible block. The count was never the hard part; see "As designed at
+> L-4" below.
+
 **Child-context restoration.** The child must resume at the *parent's* EL0 PC
 with `x0 = 0`. Today every child begins at an ELF entry point via a thunk. The
 fork child instead needs a **copy of the parent's trapframe**, and it must be
@@ -763,9 +861,48 @@ us; `WNOHANG` says the child has not died; the only other release is the exec.
 "Still alive" is a fact rather than a race because the exec'd successor blocks
 reading a pipe only the parent can write.
 
----
+#### As designed at L-4 — reach the per-page model the tree already has
 
-## 6. Invariants
+User-voted 2026-08-02, with §2.8/§2.9/§2.10's measurements attached. L-4 splits
+in two, and **the first half is not COW work at all** — it is the prerequisite
+that COW turns out to need.
+
+**L-4a — exec's stack and writable data become `BURROW_TYPE_ANON_LAZY`.**
+`exec_map_user_stack` and `map_eager_from_file` (plus the blob path's writable
+segments) stop calling `burrow_create_anon` and call `burrow_create_anon_lazy`,
+pre-populating only the leading `ceil(filesz / PAGE_SIZE)` slots — the pages
+that carry real file bytes. Everything past `filesz` is `.bss` and stays
+demand-zero, which is what the lazy arm already does.
+
+Three things fall out, and only the first is what we came for:
+
+1. **Per-page ownership**, so a COW break has something to replace.
+2. **#130 closes.** corvus's exec stops allocating and zeroing a 32 MiB
+   order-13 block for 128 bytes of `.data`; it allocates one page.
+3. **#49 is subsumed.** "Lazy demand-grown EL0 stack (Linux model)" is what a
+   lazy stack Burrow *is*.
+
+I-36-4 is untouched, and deliberately: the file bytes are copied in **at exec
+time** exactly as today, just per-page instead of into one contiguous kva. No
+userspace writable mapping becomes file-backed — that would be a private
+file-backed mapping, a different and much larger design.
+
+**What stays eager, and why it is not an inconsistency.** `burrow_create_anon`
+remains for DMA buffers and the Weft rings. Those need *physical contiguity* —
+a device DMAs into a PA range, and a Weft ring is registered whole — which is a
+property of the backing, not of the ownership model. Exec's segments never
+needed contiguity; they had it only because that was the one anon constructor
+when they were written.
+
+**L-4b — the share count and the break arm.** The count lives beside
+`filepages[]` as a per-slot array on the Burrow, allocated at fork; it does
+**not** go in `struct page.refcount`, for the three reasons §2.8 measures
+(per-block-head, already double-booked, and promotion would still not give
+eager anon per-page ownership). The break then reads exactly as §5.4's prose
+already describes it, because by then the substrate matches the description.
+
+**Ordering inside the chunk is forced**: L-4b cannot be written against a
+substrate L-4a has not yet produced. The model comes before both.
 
 **Composed, not new**: I-1 (isolation — a shared AS is shared only with a
 descendant that asked), I-2 (`rfork` still strips `CAP_ELEVATION_ONLY`), I-7
@@ -814,7 +951,8 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-3c-1** ✅ **LANDED** | The handle-table copy (§2.4; #119). `handle_table_copy_into`, index-preserving, gated on the fork shape so the spawn family is byte-unchanged by construction. **Skip, not refuse** — the choice is stated at §5.4's as-built section, and the admissibility test is the SAME predicate `handle_dup` uses, extracted so the two cannot drift. | **MET** — 1284 → 1285/1285, boot OK, `/fork-probe` leg H (a child writes to a pipe fd only the parent opened). Three revert probes, each failing at its own assertion; removing the wiring leaves the **unit suite fully green** |
 | **L-3c-2** ✅ **LANDED** | The VFORK suspend (#122). `vfork_await_release` parks the parent on `child_waiters` until `vfork_child_released` — which reads `child->as`, so the condition IS the release rather than a record of it. Keyed on `RFMEM`, not a new flag: §9's fourth question, answered at §5.3's as-built section. One new wake (exec); death's already existed. | **MET** — 1285 → 1286/1286, boot OK, `/fork-probe` legs I (death arm) + J (exec arm, the successor blocks on a pipe so "still alive" is a fact not a race). Two revert probes: removing the park leaves the **unit suite fully green** while only the in-guest leg fails; removing the exec wake leaves it green *and* hangs the boot — the honest production symptom |
 | **L-3d** ✅ **LANDED** | The VIVARIUM `clone` row. `vivarium_clone_decide` (pure) + one `VIV_TIER2` entry + a shell that calls the SAME `sys_rfork_core` the native handler calls (extracted here, the V-8 `sys_fstat_for_proc` discipline). `CLONE_VM` without `CLONE_VFORK` is **refused**, not served — §8's as-built section carries why L-3c-2's fail-safe reasoning inverts for a stock Linux caller. Also replaced the four stale copies of the "native ceiling" literal with `VIV_NATIVE_CEILING` + a `_Static_assert`. | **MET, but not by the gate as written** — that gate named `posix_spawn`, which needs `execve` (221) and `wait4` (260) as well; both are L-6's, are real translators, and are dependencies of *posix_spawn* rather than of *the clone translation*. Replaced by: a clone whose child runs, writes into the shared address space, and exits, with the parent suspended until it does. 1286 → 1287/1287; `viv-pheno-probe` legs L155–L163, boot-fatal |
-| **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
+| **L-4a** | **Prerequisite, not COW work**: exec's stack + writable data/bss move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots. Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. DMA + Weft rings stay eager (they need physical contiguity). | a binary with a large `.bss` execs and runs with RSS proportional to what it touched, not to `memsz`; the file-backed leading pages carry the right bytes |
+| **L-4b** | Per-page share counts + the COW break arm (stage 3a). The count is a per-slot array beside `filepages[]`, **not** `struct page.refcount` (§2.8). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
@@ -996,10 +1134,15 @@ precondition for any chunk that adds viv / diorama / alpine-bundle legs
    same claim about when a page may be observed and when it may be freed, and
    splitting them would let a future change satisfy one while breaking the
    other. Recorded here because the alternative was considered, not overlooked.
-3. **`struct page.refcount`**: promote it to a real share count, or carry a
-   separate COW structure? Promotion touches every buddy free path — a
-   correctness-critical, well-audited surface — so this deserves its own
-   measurement at L-4 rather than a decision here.
+3. ~~**`struct page.refcount`**: promote it to a real share count, or carry a
+   separate COW structure?~~ — **resolved at L-4: carry a separate structure,
+   and the question was downstream of a bigger one.** Measuring at L-4 (as this
+   entry asked) falsified both of §2.8's stated facts *and* found that the
+   counter was never the obstacle: eager anon has no per-page ownership for any
+   count to index (§2.9), and every writable anon a fork must break is eager.
+   Recorded here rather than silently superseded, because the entry's own
+   instruction — measure it at L-4 rather than decide it here — is what
+   produced the correction.
 4. ~~**How is VFORK requested?**~~ — **resolved at L-3c-2: it is not.** The
    suspend follows from `RFMEM`, because that flag is exactly the precondition
    of the hazard, and because a bit in the `RF*` word would answer a different
