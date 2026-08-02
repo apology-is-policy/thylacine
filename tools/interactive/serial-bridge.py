@@ -34,6 +34,39 @@
 #   its own pace. No byte is dropped: the spool holds everything until expect
 #   reads it.
 #
+# WHY IT ALSO REPORTS ITS OWN STALLS (#125 -- the measurement that forced it):
+#   The #78 rework made this relay never BLOCK on the reader. It did not, and
+#   could not, make the relay always RUN. A relay that is descheduled, paused,
+#   or otherwise off-CPU is not draining, which is indistinguishable at the
+#   socket from a relay that blocked -- and the consequence is far worse than
+#   the #78 drop it replaced:
+#
+#     MEASURED (tools/stall-amplify.sh): SIGSTOP this relay and QEMU's host CPU
+#     falls 100% -> 2.4% within ~2 s and stays there. QEMU's serial write blocks
+#     and QEMU STOPS EXECUTING THE GUEST ENTIRELY. The guest is SUSPENDED, and
+#     from inside the VM that is indistinguishable from a guest hang.
+#
+#   The budget for this is tiny and is NOT ours to widen. On macOS a UNIX-stream
+#   socket's capacity is governed by the WRITER's SO_SNDBUF -- QEMU's socket,
+#   which QEMU creates and we cannot touch (setting SO_RCVBUF on this end
+#   measurably does NOTHING: 8192 B either way). So:
+#
+#     capacity QEMU can push while we are not draining ... 8192 bytes
+#     output of one LS-CI boot ....................... ~117-198 KiB
+#
+#   i.e. ~4% of a single boot. Any stall of this process long enough for the
+#   guest to emit 8 KiB freezes the whole VM.
+#
+#   We therefore cannot prevent it here -- but we can make it DECIDABLE. The
+#   loop times its own wake-to-wake gap and reports every stall immediately to
+#   stderr (unbuffered, so the evidence survives being killed on a scenario
+#   timeout) plus a summary in the exit record. When a boot goes silent, that
+#   record answers the question that #125 could not: was the relay stalled
+#   (-> the VM was frozen from the host side) or running (-> look elsewhere)?
+#   Absent it, the only available answer is a guess, and the convenient guess
+#   is "host load" -- which CLAUDE.md forbids precisely because it ends hunts
+#   that have not started.
+#
 # Preserved properties:
 #   - #66 lost-wakeup immunity: a bounded select() park re-checks levels every
 #     wake, and the socket is drained on EVERY wake (not only when `readable`),
@@ -74,6 +107,12 @@ DRAIN_MAX = 256   # bound the per-wake socket drain (256 * 64 KiB = 16 MiB/wake)
 SPOOL_CAP = 64 * 1024 * 1024  # a genuinely-wedged-reader backstop; a real guest
                               # burst is bounded (hundreds of KiB) and never hits it
 FLUSH_TRIES = 50  # bounded tail-flush on socket EOF (never hangs on a gone reader)
+STALL_S = 1.0     # #125: a wake-to-wake gap this long means we were NOT RUNNING.
+                  # 5x PARK_S, so ordinary scheduling jitter can never reach it;
+                  # a gap this size has already let the guest overrun QEMU's
+                  # 8 KiB socket budget and freeze the VM.
+STALL_REPORTS = 20  # cap the per-stall stderr lines; past this only new maxima
+                    # are logged, so a pathological host cannot flood the record
 
 
 REASON = "unset"  # the exit-path witness (logged to stderr for the #41 instrument)
@@ -88,6 +127,9 @@ STATS = {
     "t0": 0.0,        # start (monotonic)
     "t_in": 0.0,      # last socket data
     "t_out": 0.0,     # last successful stdout write
+    "stalls": 0,      # #125: wake-to-wake gaps > STALL_S (we were off-CPU)
+    "max_stall": 0.0, # longest such gap, seconds
+    "stall_logged": 0,
 }
 
 
@@ -106,7 +148,29 @@ def _stats_line() -> str:
     idle_out = f"{now - STATS['t_out']:.2f}" if STATS["t_out"] else "never"
     return (f"stdin_eof={STATS['stdin_eof']} in={STATS['in']} out={STATS['out']} "
             f"spool={STATS['spool']} idle_in={idle_in} idle_out={idle_out} "
-            f"up={up:.2f}")
+            f"up={up:.2f} stalls={STATS['stalls']} "
+            f"max_stall={STATS['max_stall']:.2f}")
+
+
+def _note_stall(gap: float) -> None:
+    # #125: we were off-CPU for `gap` seconds, so nothing drained QEMU's serial
+    # socket. Past ~8 KiB of guest output that blocks QEMU's write and SUSPENDS
+    # the guest -- so this is the host-side cause of a "silent guest", and the
+    # record has to survive us being killed on a scenario timeout. Hence an
+    # IMMEDIATE flushed stderr write, not just the exit line.
+    STATS["stalls"] += 1
+    if gap > STATS["max_stall"]:
+        STATS["max_stall"] = gap
+        new_max = True
+    else:
+        new_max = False
+    if STATS["stall_logged"] < STALL_REPORTS or new_max:
+        STATS["stall_logged"] += 1
+        sys.stderr.write(
+            f"bridge STALL gap={gap:.2f}s (relay off-CPU; QEMU serial undrained "
+            f"-> guest may be frozen) at up={time.monotonic() - STATS['t0']:.2f} "
+            f"in={STATS['in']} spool={STATS['spool']}\n")
+        sys.stderr.flush()
 
 
 def main() -> int:
@@ -130,6 +194,8 @@ def main() -> int:
     sock_open = True
     STATS["t0"] = time.monotonic()
 
+    t_prev_wake = STATS["t0"]
+
     while True:
         STATS["spool"] = len(spool)
         watch_out = [stdout_fd] if spool else []
@@ -139,6 +205,16 @@ def main() -> int:
         except InterruptedError:
             continue
         # PARK_S timeout with empty `readable` == a level re-check: fall through.
+
+        # #125: time our OWN loop. select() parks at most PARK_S, so a longer
+        # gap means this process was not scheduled -- and while we are off-CPU
+        # nothing drains QEMU's serial socket. Measured here rather than around
+        # select() alone so a stall ANYWHERE in the loop body counts too: the
+        # hazard is "not draining", whatever the reason.
+        t_wake = time.monotonic()
+        if t_wake - t_prev_wake > STALL_S:
+            _note_stall(t_wake - t_prev_wake)
+        t_prev_wake = t_wake
 
         # 1. Drain the guest serial AGGRESSIVELY every wake (level-triggered for
         #    the #66 macOS edge-loss): empty the socket buffer so the guest is

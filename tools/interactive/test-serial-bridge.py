@@ -41,7 +41,9 @@
 # Exit 0 = PASS (both properties), 1 = FAIL.
 
 import os
+import re
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -145,6 +147,52 @@ def run_exit_case(stdin_open: bool) -> str:
     return err.decode().strip()
 
 
+def run_stall_case(stop_s: float) -> str:
+    # Property 3 (#125): drive the relay OFF-CPU for `stop_s` and read back its
+    # own record. SIGSTOP is the exact condition that freezes the VM in the wild
+    # -- a relay that is not running is not draining QEMU's serial socket, whose
+    # capacity is only 8192 bytes (macOS; governed by QEMU's SO_SNDBUF, which we
+    # cannot raise from this side). stop_s=0 is the CONTROL.
+    d = tempfile.mkdtemp(prefix="sbtest-stall-")
+    sockpath = os.path.join(d, "q.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sockpath)
+    srv.listen(1)
+
+    out_rd, out_wr = os.pipe()
+    proc = subprocess.Popen(
+        [sys.executable, RELAY, sockpath],
+        stdin=subprocess.DEVNULL, stdout=out_wr, stderr=subprocess.PIPE,
+    )
+    os.close(out_wr)
+
+    conn, _ = srv.accept()
+    conn.send(b"boot-line-from-guest\n")
+    time.sleep(0.5)
+    os.read(out_rd, 4096)
+
+    if stop_s > 0:
+        proc.send_signal(signal.SIGSTOP)
+        time.sleep(stop_s)          # nothing drains the socket in this window
+        proc.send_signal(signal.SIGCONT)
+        time.sleep(0.5)             # let the resumed loop notice the gap
+
+    conn.close()                    # socket EOF -> the relay exits with its record
+    srv.close()
+    try:
+        _, err = proc.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        _, err = proc.communicate()
+    os.close(out_rd)
+    return err.decode().strip()
+
+
+def _field(record: str, name: str):
+    m = re.search(rf"\b{name}=([0-9.]+)", record)
+    return float(m.group(1)) if m else None
+
+
 def main():
     pushed = measure_pushed()
     # A spooling relay accepts essentially the whole burst; a blocking one stalls
@@ -162,7 +210,22 @@ def main():
     print(f"[2] expect-teardown -> {tear}")
     print(f"[2] exit record {'DISCRIMINATES' if exit_ok else 'IS VACUOUS'}")
 
-    ok = spool_ok and exit_ok
+    STOP_S = 2.5
+    stalled = run_stall_case(STOP_S)
+    quiet = run_stall_case(0.0)
+    # The CONTROL is what makes this non-vacuous: a detector that always fired
+    # would "pass" the stalled arm while saying nothing. Demand both directions.
+    n_stall, max_stall = _field(stalled, "stalls"), _field(stalled, "max_stall")
+    n_quiet = _field(quiet, "stalls")
+    stall_ok = (n_stall is not None and n_stall >= 1
+                and max_stall is not None and max_stall >= STOP_S * 0.7
+                and "bridge STALL" in stalled      # survives a kill (immediate)
+                and n_quiet == 0)                  # and does not fire spuriously
+    print(f"[3] stopped {STOP_S}s -> stalls={n_stall} max_stall={max_stall}")
+    print(f"[3] never stopped -> stalls={n_quiet}")
+    print(f"[3] stall report {'DETECTS + CONTROLS' if stall_ok else 'IS BROKEN'}")
+
+    ok = spool_ok and exit_ok and stall_ok
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 

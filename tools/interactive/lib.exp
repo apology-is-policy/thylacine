@@ -365,6 +365,22 @@ proc lc_boot {} {
         #                       end was gone. THIS is the anomaly worth chasing.
         #   socket-eof          QEMU closed the serial -- the guest really ended.
         #   spool-overflow      a genuinely wedged reader (64 MiB undelivered).
+        #
+        # READ `stalls=` FIRST ON ANY SILENT-GUEST FAILURE (#125). It counts
+        # wake-to-wake gaps > 1 s in the relay's own loop -- i.e. windows where
+        # the relay was OFF-CPU and therefore not draining QEMU's serial socket.
+        # That socket holds only 8192 bytes (macOS; its capacity is QEMU's
+        # SO_SNDBUF, which nothing on our side can raise), versus ~117-198 KiB
+        # of output per boot -- so a stall past ~8 KiB of guest output BLOCKS
+        # QEMU's write and SUSPENDS the guest. MEASURED: SIGSTOP the relay and
+        # qemu's host CPU goes 100% -> 2.4% in ~2 s (tools/stall-amplify.sh).
+        #   stalls=0   the relay was running -- a silent guest is NOT explained
+        #              by the console channel; look at the guest.
+        #   stalls>0   the VM was frozen from the HOST side for max_stall
+        #              seconds. That is infrastructure, not a guest defect.
+        # Individual stalls are also written to this same stderr log as they
+        # happen (`bridge STALL gap=...`), so the evidence survives the relay
+        # being killed on a scenario timeout -- which is when it matters most.
         # The counters (in/out/spool/idle_in/idle_out/up) size the burst the cut
         # landed in, so the buffer-pressure correlation is checkable from the
         # record rather than re-derived by hand each time.
