@@ -30,11 +30,14 @@ chunks:
   - chg-2026-08-02-devices-hwcap-sweep
   - chg-2026-08-02-devices-discovery-sweep
   - chg-2026-08-02-devices-content-sweep
+  - chg-2026-08-02-absorption-reconciliation
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"
-  - "[ ] Sweep by subsystem (reference docs absorbed, stubs left)"
-  - "[ ] Registry passes (invariants, specs, ABIs, locks, hazards, glossary, gates, seams, measurements)"
+  - "[ ] Sweep by subsystem (46/147 documents absorbed -- see view-absorption)"
+  - "[ ] Registry passes -- a PREREQUISITE for absorption, not a successor to it: a table-bearing document cannot be replaced until its tables have a boundary note to live in"
+  - "[ ] Absorb the twelve documents whose prose is swept and whose tables await a registry"
+  - "[ ] Sweep the three orphaned files (task #32) and delete the over-claim notices"
   - "[ ] View cutover (CLAUDE.md shrinks to constitution + pointers)"
   - "[x] Session hooks wired in .claude/settings.json (tier 3)"
   - "[ ] Stub deletion after the full-corpus verification chg"

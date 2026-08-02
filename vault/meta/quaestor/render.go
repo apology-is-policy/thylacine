@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -213,12 +214,114 @@ func renderClosed(reg *Registry, subID string) string {
 	return strings.Join(out, "\n")
 }
 
+const absorbedMarker = "ABSORBED INTO THE VAULT"
+
+var vaultPathRe = regexp.MustCompile(`vault/(?:[A-Za-z0-9_.-]+/)*([A-Za-z0-9_.-]+)\.md`)
+
+// vaultRoot recovers the repo root from any note: a Note carries both an
+// absolute Path and the repo-relative Rel, so the root is the difference.
+// Renderers take only a Registry, and this is the one that needs to look
+// outside vault/.
+func vaultRoot(reg *Registry) string {
+	for _, n := range reg.Notes() {
+		p := filepath.ToSlash(n.Path)
+		if strings.HasSuffix(p, n.Rel) {
+			return strings.TrimSuffix(p, n.Rel)
+		}
+	}
+	return ""
+}
+
+// renderAbsorption: the absorption ledger — the one view whose subject sits
+// OUTSIDE the vault. It reads docs/reference/ and reports, per document,
+// whether the vault has absorbed it and into which notes.
+//
+// Computed rather than hand-kept, because a hand-kept ledger is exactly what
+// rotted: the sweep ran ahead of the absorption for twenty batches and the
+// drift was found only by accident. Since a stub lives in docs/reference/,
+// editing one without re-rendering now fails the linter, which is the whole
+// point — the count cannot silently disagree with the tree again.
+//
+// What it does NOT check: whether a dossier actually covers everything its
+// stub claims. A reference document routinely spans more code than its title
+// names, and the pre-stub text is only in git history, which a renderer
+// cannot see. That check stays manual.
+func renderAbsorption(reg *Registry) string {
+	root := vaultRoot(reg)
+	if root == "" {
+		return "**(registry empty — cannot locate the repo root.)**"
+	}
+	ents, err := os.ReadDir(filepath.Join(root, "docs", "reference"))
+	if err != nil {
+		return "**(docs/reference is unreadable.)**"
+	}
+	type row struct{ doc, state, into string }
+	var rows []row
+	var absorbed, live int
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		b, rerr := os.ReadFile(filepath.Join(root, "docs", "reference", e.Name()))
+		if rerr != nil {
+			continue
+		}
+		txt := string(b)
+		if !strings.Contains(txt, absorbedMarker) {
+			live++
+			rows = append(rows, row{e.Name(), "live", "—"})
+			continue
+		}
+		absorbed++
+		var into []string
+		seen := map[string]bool{}
+		for _, m := range vaultPathRe.FindAllStringSubmatch(txt, -1) {
+			// vault/meta/ is machinery, deliberately outside the registry
+			// (schema.md, workflow.md, quaestor) — a stub citing it is
+			// citing prose, not a note.
+			if strings.HasPrefix(m[0], "vault/meta/") {
+				continue
+			}
+			if id := m[1]; !seen[id] {
+				seen[id] = true
+				if reg.Has(id) {
+					into = append(into, "[["+id+"]]")
+				} else {
+					into = append(into, "**dangling: "+id+"**")
+				}
+			}
+		}
+		sort.Strings(into)
+		state := "absorbed"
+		if len(into) == 0 {
+			state = "**absorbed, names no note**"
+		}
+		rows = append(rows, row{e.Name(), state, strings.Join(into, ", ")})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].doc < rows[j].doc })
+	out := []string{
+		fmt.Sprintf("**%d absorbed · %d live · %d total.**",
+			absorbed, live, absorbed+live),
+		"",
+		"| document | state | absorbed into |",
+		"|---|---|---|",
+	}
+	for _, r := range rows {
+		out = append(out, fmt.Sprintf("| %s | %s | %s |", r.doc, r.state, r.into))
+	}
+	if len(rows) == 0 {
+		out = append(out, "| (none) | | |")
+	}
+	return strings.Join(out, "\n")
+}
+
 var renderers = map[string]func(*Registry) string{
 	"dashboard":      renderDashboard,
 	"invariants":     renderInvariants,
 	"seams":          renderSeams,
 	"audit-triggers": renderAuditTriggers,
 	"roadmap":        renderRoadmap,
+	"absorption":     renderAbsorption,
 }
 
 func viewNotes(reg *Registry) []*Note { return reg.OfType("view") }
@@ -242,15 +345,37 @@ func renderedBody(note *Note, reg *Registry) (string, string) {
 	return pre + genBegin + "\n" + body + "\n" + genEnd + post, ""
 }
 
+// danglingRe matches the marker renderAbsorption emits for a stub that
+// names a note which does not exist. Rendered as plain text rather than a
+// wikilink deliberately: a wikilink would fail the dangling-link check with
+// a message pointing at the generated view instead of at the stub that is
+// actually wrong.
+var danglingRe = regexp.MustCompile(`\*\*dangling: ([A-Za-z0-9_.-]+)\*\*`)
+
 func checkViews(reg *Registry) []string {
 	var fails []string
 	for _, v := range viewNotes(reg) {
 		nu, errMsg := renderedBody(v, reg)
 		if errMsg != "" {
 			fails = append(fails, errMsg)
-		} else if nu != v.Raw {
+			continue
+		}
+		if nu != v.Raw {
 			fails = append(fails, v.Rel+
 				": stale generated body (run quaestor render)")
+		}
+		// A rendered dangling marker is a real broken reference in a
+		// source document, not a staleness artifact -- it survives a
+		// re-render, so without this it would be reported and never
+		// block. Reported against the view because that is where it is
+		// visible; the fix belongs in the stub the marker names.
+		seen := map[string]bool{}
+		for _, m := range danglingRe.FindAllStringSubmatch(nu, -1) {
+			if !seen[m[1]] {
+				seen[m[1]] = true
+				fails = append(fails, v.Rel+
+					": a stub names a note that does not exist: '"+m[1]+"'")
+			}
 		}
 	}
 	return fails

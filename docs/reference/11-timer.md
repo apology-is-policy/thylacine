@@ -51,7 +51,15 @@ physical one is hypervisor-reserved and a guest write comes back as an
 undefined instruction), and the observation that the physical *counter* remains
 readable for entropy while only the physical *timer control* is reserved.
 
-The invariants live at `vault/invariants/inv-i15.md` and `inv-i17.md`. No open
-debt: the wall clock's settability, once a recorded gap, is closed. Design
+**What was NOT absorbed, and is therefore owed** (found at the ledger
+reconciliation, `chg-2026-08-02-absorption-reconciliation`): this document also
+carried the only account of **the vDSO clock page** — `kernel/vdso.c`, its
+shared-page layout, and the magic-and-version handshake that lets a reader
+detect a mismatch and fall back to the syscall. The dossier covers the timer
+and the real-time clock; the page that publishes their reading to userspace
+without a trap is in neither it nor any other note. Tracked as task #32.
+
+The invariants live at `vault/invariants/inv-i15.md` and `inv-i17.md`. The wall
+clock's settability, once a recorded gap, is closed. Design
 scripture is unchanged: `ARCHITECTURE.md section 22.6`, `PORTABILITY.md section
 5`, ARMv8-A ARM section D11.
