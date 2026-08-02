@@ -49,6 +49,7 @@
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 use libthyla_rs::{env, t_putstr};
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,15 @@ const NR_ACCEPT4: u64 = 242;
 // PHENO_LINUX Proc can never reach a native number (kernel/vivarium.h).
 const NR_PPOLL: u64 = 73;
 const NR_PSELECT6: u64 = 72;
+// Process creation (LINEAGE L-3d). The flag bits are musl's
+// `include/sched.h`, read from the tree; SIGCHLD is the exit signal in the LOW
+// BYTE, from `arch/aarch64/bits/signal.h`.
+const NR_CLONE: u64 = 220;
+const CLONE_VM: u64 = 0x00000100;
+const CLONE_VFORK: u64 = 0x00004000;
+const CLONE_THREAD: u64 = 0x00010000;
+const CLONE_SETTLS: u64 = 0x00080000;
+const SIGCHLD: u64 = 17;
 const AF_INET: u64 = 2;
 const AF_INET6: u64 = 10;
 const SOCK_STREAM: u64 = 1;
@@ -332,6 +342,102 @@ unsafe fn linux_exit(code: i64) -> ! {
         in("x8") NR_EXIT_GROUP,
         options(noreturn, nostack)
     );
+}
+
+// ---------------------------------------------------------------------------
+// LINEAGE L-3d: the Linux `clone` shim, and the poison that makes it a test.
+// ---------------------------------------------------------------------------
+//
+// A transliteration of musl's `src/thread/aarch64/clone.s`, because a clone
+// CANNOT be wrapped in an ordinary `asm!`: the child comes back from the `svc`
+// on a DIFFERENT STACK while still holding the parent's x29/x30, so any
+// compiler-generated local access or epilogue would touch the wrong one. musl
+// solves it by pushing (func, arg) onto the CHILD's stack before the syscall
+// and having the child's first act be a pop-and-`blr`, which establishes a
+// correct frame before any compiled code runs. So does this.
+//
+// WHERE IT DELIBERATELY DIVERGES FROM musl: x2/x3/x4 are loaded with RECOGNISABLE
+// POISON rather than left as whatever the caller happened to have there.
+//
+// musl leaves them uninitialised -- `posix_spawn` calls `__clone` with FOUR
+// arguments and clone.s then moves x4/x5/x6 (never set) into x2/x3/x4. That is
+// the real hazard the kernel translator has to survive, but "uninitialised" is
+// not a value a test can assert against. Poisoning them makes the hazard
+// DETERMINISTIC: if the translator ever reads x3 as the child's TLS, the child's
+// TPIDR_EL0 becomes CLONE_POISON_TLS and the leg below says so exactly, instead
+// of the child faulting somewhere unrelated on a stray thread-local.
+//
+// x0 = entry, x1 = stack_top, x2 = flags, x3 = arg
+core::arch::global_asm!(
+    ".section .text.__viv_clone, \"ax\"",
+    ".globl __viv_clone",
+    ".type   __viv_clone, %function",
+    "__viv_clone:",
+    "    bti     c",
+    // Align down and seed the CHILD's stack with (entry, arg), exactly as
+    // clone.s does -- pre-index so x1 IS the child's initial SP.
+    "    and     x1, x1, #-16",
+    "    stp     x0, x3, [x1, #-16]!",
+    // The Linux argument order: flags, stack, parent_tid, tls, child_tid.
+    // arm64 is CONFIG_CLONE_BACKWARDS, so tls (x3) precedes child_tid (x4).
+    "    uxtw    x0, w2",
+    "    mov     x2, #0xBAD2",              // parent_tid -- must never be read
+    "    mov     x3, #0xBAD3",              // tls        -- must never be read
+    "    mov     x4, #0xBAD4",              // child_tid  -- must never be read
+    "    mov     x8, #220",                 // Linux SYS_clone
+    "    svc     #0",
+    "    cbz     x0, 1f",                   // x0 == 0 -> we are the CHILD
+    "    ret",                              // parent: pid, or -errno
+    // Child. SP is its own; x29/x30 still point into the parent's stack, so
+    // nothing may touch a frame until after the blr establishes one.
+    "1:  ldp     x1, x0, [sp], #16",        // x1 := entry, x0 := arg
+    "    mov     x29, #0",
+    "    mov     x30, #0",
+    "    blr     x1",
+    "    mov     x8, #94",                  // exit_group -- backstop
+    "    mov     x0, #1",
+    "    svc     #0",
+    "2:  wfe",
+    "    b       2b",
+    ".size __viv_clone, .-__viv_clone",
+);
+
+extern "C" {
+    fn __viv_clone(entry: extern "C" fn(u64) -> !, stack_top: u64, flags: u64,
+                   arg: u64) -> i64;
+}
+
+/// The value the shim leaves in x3. If the kernel ever read that register as
+/// the child's TLS, this is what TPIDR_EL0 would hold in the child.
+const CLONE_POISON_TLS: u64 = 0xBAD3;
+
+// The child's stack: 16 KiB, 16-aligned, disjoint from the parent's. The kernel
+// refuses a zero/misaligned/non-user/equal-to-caller SP but cannot see an
+// overlap -- non-overlap is the caller's contract, as for any pthread stack.
+#[repr(align(16))]
+struct CloneStack(#[allow(dead_code)] [u8; 16 * 1024]);
+static mut CLONE_STACK: CloneStack = CloneStack([0; 16 * 1024]);
+
+// The child's witnesses, read by the parent out of the SHARED address space --
+// which is itself part of what CLONE_VM has to have delivered.
+static CLONE_CHILD_RAN: AtomicU64 = AtomicU64::new(0);
+static CLONE_CHILD_TPIDR: AtomicU64 = AtomicU64::new(0);
+const CLONE_RAN_TOKEN: u64 = 0x5643_4C4F_4E45_5F31; // "VCLONE_1"
+
+extern "C" fn clone_child_main(_arg: u64) -> ! {
+    // Read our own thread pointer BEFORE anything else can disturb it. A vfork
+    // child inherits the parent's; a translator that passed the poison would
+    // give us CLONE_POISON_TLS instead.
+    let tp: u64;
+    unsafe {
+        core::arch::asm!("mrs {}, tpidr_el0", out(reg) tp,
+                         options(nomem, nostack, preserves_flags));
+    }
+    CLONE_CHILD_TPIDR.store(tp, Ordering::SeqCst);
+    // Published LAST, so the parent seeing the token implies it can also see
+    // the TPIDR -- the two stores are ordered by SeqCst and by this sequence.
+    CLONE_CHILD_RAN.store(CLONE_RAN_TOKEN, Ordering::SeqCst);
+    unsafe { linux_exit(0) }
 }
 
 // Every leg is `cond or (report, exit)`. The marker goes into the report file
@@ -1627,6 +1733,94 @@ unsafe fn run_linux() -> ! {
     }
     svc3(NR_CLOSE, cli4 as u64, 0, 0);
     svc3(NR_CLOSE, srv4 as u64, 0, 0);
+
+    // --- L155-L162 (LINEAGE L-3d): clone ------------------------------------
+    //
+    // THE DECLINES FIRST, and deliberately: they need no child, so if the
+    // domain check is broken they say so before any second process exists to
+    // confuse the picture. Each is issued with a bare svc6 -- a call that
+    // declines creates nothing, so there is no different-stack return to
+    // arrange for.
+    let clone_sp = core::ptr::addr_of!(CLONE_STACK) as u64 + (16 * 1024);
+
+    // CLONE_VM without CLONE_VFORK. The caller has said "do not suspend me";
+    // serving it anyway would key a suspend off RFMEM and deadlock the guest
+    // the moment its child neither execs nor exits. This is the chunk's central
+    // decision, so it is the first thing asserted.
+    leg!(
+        rep,
+        svc6(NR_CLONE, CLONE_VM | SIGCHLD, clone_sp, 0, 0, 0, 0) == NEG_ENOSYS,
+        b"L155\n"
+    );
+
+    // A plain fork(): the child would need a PRIVATE address space, which is
+    // copy-on-write and does not exist yet (L-4/L-5).
+    leg!(rep, svc6(NR_CLONE, SIGCHLD, clone_sp, 0, 0, 0, 0) == NEG_ENOSYS, b"L156\n");
+
+    // CLONE_THREAD: a genuinely concurrent child has a correct target already,
+    // and it is SYS_THREAD_SPAWN, not this row.
+    leg!(
+        rep,
+        svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | CLONE_THREAD | SIGCHLD,
+             clone_sp, 0, 0, 0, 0) == NEG_ENOSYS,
+        b"L157\n"
+    );
+
+    // CLONE_SETTLS. This one is load-bearing rather than tidy: admitting it
+    // would make x3 MEANINGFUL, and the translator's whole safety argument is
+    // that it never reads x3 (which musl leaves uninitialised).
+    leg!(
+        rep,
+        svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | CLONE_SETTLS | SIGCHLD,
+             clone_sp, 0, 0, 0, 0) == NEG_ENOSYS,
+        b"L158\n"
+    );
+
+    // stack == 0 is Linux's vfork() proper -- "share the parent's stack".
+    // SYS_RFORK refuses a zero child_sp by contract, so the row declines one
+    // layer above rather than weakening a landed kernel gate.
+    leg!(
+        rep,
+        svc6(NR_CLONE, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0, 0)
+            == NEG_ENOSYS,
+        b"L159\n"
+    );
+
+    // NOW THE REAL ONE. Through the musl-shaped shim, because the child returns
+    // on a different stack; the shim also poisons x2/x3/x4, which is what makes
+    // the TPIDR leg below an assertion rather than a hope.
+    let cpid = __viv_clone(
+        clone_child_main,
+        clone_sp,
+        CLONE_VM | CLONE_VFORK | SIGCHLD,
+        0,
+    );
+    leg!(rep, cpid > 0, b"L160\n");
+
+    // THE SUSPEND. We are executing, so something released us -- and the only
+    // release is the child's exit (it does not exec). The child publishes its
+    // token BEFORE exiting, so if the suspend were absent we would be racing a
+    // merely-runnable child and would read 0 here.
+    //
+    // This also proves CLONE_VM delivered: the token lives in OUR .bss, and the
+    // child wrote it.
+    leg!(
+        rep,
+        CLONE_CHILD_RAN.load(Ordering::SeqCst) == CLONE_RAN_TOKEN,
+        b"L161\n"
+    );
+
+    // THE GARBAGE-REGISTER GUARD. A vfork child inherits the parent's thread
+    // pointer -- it runs the parent's C, thread-locals and all, until it execs.
+    // If the translator had reached for x3 as the child's TLS it would have
+    // handed it CLONE_POISON_TLS instead, and this is where that shows up
+    // rather than in some unrelated thread-local access later.
+    let my_tp: u64;
+    asm!("mrs {}, tpidr_el0", out(reg) my_tp,
+         options(nomem, nostack, preserves_flags));
+    let child_tp = CLONE_CHILD_TPIDR.load(Ordering::SeqCst);
+    leg!(rep, child_tp != CLONE_POISON_TLS, b"L162\n");
+    leg!(rep, child_tp == my_tp, b"L163\n");
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

@@ -23,6 +23,7 @@
 //   vivarium.fdset_to_pollfds       3 fd_sets -> pollfds; exceptfds DECLINES
 //   vivarium.pollfds_to_fdset       the asymmetric reverse map; a count of BITS
 //   vivarium.fd_freeing_rows        close is the ONLY served fd-freeing call
+//   vivarium.clone_domain           the exact vfork flags word; every widening
 //
 // The T2 tests (V-2b/V-2c/V-2d) stay just as pure: no decide function reads user
 // memory by construction, and the stat conversion is data-in/data-out.
@@ -46,6 +47,7 @@ void test_vivarium_openat_build(void);
 void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);
 void test_vivarium_mmap_domain(void);
+void test_vivarium_clone_domain(void);
 
 // A recognisable argument vector: every word distinct and non-zero, so a
 // dropped, duplicated, or reordered word is visible rather than accidentally
@@ -611,6 +613,109 @@ void test_vivarium_mmap_domain(void) {
     // No length judgement here: `len` is a SEMANTIC question the shell answers
     // (EINVAL for 0, ENOMEM for too-large), so it is not a decide parameter at
     // all -- this asserts the signature has not grown one by accident.
+}
+
+// The clone argument domain (LINEAGE L-3d). This row hands a guest a second
+// PROCESS, so every decline is asserted by NAME and by REASON -- three distinct
+// classes of widening are being refused here and a mask test would admit all of
+// them at once.
+void test_vivarium_clone_domain(void) {
+    // A plausible stack: nonzero, 16-aligned, in the user half. The decide does
+    // not check alignment or range (SYS_RFORK's own gate does, and re-stating
+    // it here would be a second copy of a rule that must not drift), so this is
+    // just "a stack a caller might pass".
+    const u64 sp = 0x0000004000010000ull;
+
+    // The shape musl actually sends. posix_spawn.c:198 --
+    //   __clone(child, stack+sizeof stack, CLONE_VM|CLONE_VFORK|SIGCHLD, &args)
+    const u64 ok = (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | VIV_CLONE_SIGCHLD);
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, sp),
+                   (int)VIV_TRANSLATED, "CLONE_VM|CLONE_VFORK|SIGCHLD is the admitted shape");
+
+    // THE DECISION THIS CHUNK HAD TO MAKE, and the reason it is not the same as
+    // L-3c-2's. A caller that sets CLONE_VM and CLEARS CLONE_VFORK has said "do
+    // not suspend me" in the only vocabulary Linux gives it. Serving it anyway
+    // -- which the kernel primitive would happily do, since the suspend is keyed
+    // on RFMEM -- turns a working program into a deadlock the moment the child
+    // neither execs nor exits promptly. So it declines, and the guest gets an
+    // answer it can act on instead of a hang with our name on it.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_SIGCHLD), sp),
+                   (int)VIV_FORWARD,
+                   "CLONE_VM without CLONE_VFORK declines -- never a suspend unasked");
+
+    // A plain fork(): clone(SIGCHLD). Declines because the child would need a
+    // PRIVATE address space, which is copy-on-write (L-4/L-5). This is a "not
+    // yet", not a "never" -- which is exactly why the verdict is FORWARD and
+    // not ENOSYS.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide((u64)VIV_CLONE_SIGCHLD, sp),
+                   (int)VIV_FORWARD, "plain fork() declines until COW exists (L-5)");
+
+    // The thread set. A genuinely concurrent child has a correct target
+    // already -- SYS_THREAD_SPAWN -- and it is not this row.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       ok | (u64)VIV_CLONE_THREAD, sp),
+                   (int)VIV_FORWARD, "CLONE_THREAD declines -- that is SYS_THREAD_SPAWN");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       ok | (u64)VIV_CLONE_FILES, sp),
+                   (int)VIV_FORWARD, "CLONE_FILES declines -- the table is COPIED, not shared");
+
+    // THE GARBAGE-REGISTER GUARD, asserted from the domain side. Each of these
+    // three bits makes one of x2/x3/x4 MEANINGFUL, and the shell's safety
+    // argument is that it never reads them: it passes a literal 0 for
+    // child_tls and ignores parent_tid/child_tid entirely. Admitting any of
+    // these would silently make that a lie -- musl's __clone leaves all three
+    // registers holding whatever posix_spawn's caller happened to have there.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_SETTLS, sp),
+                   (int)VIV_FORWARD, "CLONE_SETTLS declines -- x3 is not read");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_PARENT_SETTID, sp),
+                   (int)VIV_FORWARD, "CLONE_PARENT_SETTID declines -- x2 is not read");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_SETTID, sp),
+                   (int)VIV_FORWARD, "CLONE_CHILD_SETTID declines -- x4 is not read");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok | (u64)VIV_CLONE_CHILD_CLEARTID, sp),
+                   (int)VIV_FORWARD, "CLONE_CHILD_CLEARTID declines -- x4 is not read");
+
+    // The exit signal is the LOW BYTE, not a flag, and only SIGCHLD is
+    // admitted: `exits()` posts `child_exit` unconditionally (I-19), so any
+    // other request -- including 0, "no signal", which is what a detached child
+    // asks for -- would get a note it did not ask for.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK), sp),
+                   (int)VIV_FORWARD, "exit signal 0 declines -- child_exit posts regardless");
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(
+                       (u64)(VIV_CLONE_VM | VIV_CLONE_VFORK | 15u), sp),
+                   (int)VIV_FORWARD, "a non-SIGCHLD exit signal declines");
+
+    // A ZERO stack is Linux's `vfork()` proper -- "share the parent's stack",
+    // which is safe there only because CLONE_VFORK suspends the parent.
+    // SYS_RFORK refuses a zero child_sp by contract, so this declines one layer
+    // above rather than weakening a landed kernel gate. LINEAGE.md §9's fourth
+    // question, second half.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(ok, 0),
+                   (int)VIV_FORWARD, "stack==0 declines -- vfork() proper is out of scope");
+
+    // THE HIGH HALF IS READ, unlike every other decide in this file -- and that
+    // asymmetry is the point. mmap/openat narrow to 32 bits because their Linux
+    // parameters ARE `int`; clone's is an `unsigned long`, so narrowing would be
+    // an assumption about Linux's own source rather than about its ABI. Under
+    // that uncertainty the stricter reading wins, and it costs nothing: musl's
+    // clone.s zero-extends (`uxtw x0,w2`), so the high half is always 0 from the
+    // real consumer. Reverting to a `(u32)` cast fails HERE.
+    TEST_EXPECT_EQ((int)vivarium_clone_decide(0xDEADBEEF00000000ull | ok, sp),
+                   (int)VIV_FORWARD,
+                   "a high-half bit declines -- clone's flags word is 64-bit");
+
+    // clone is a TIER-2 row -- it needs the exception frame, so it can never be
+    // a renumber. Pinned here so a future edit cannot demote it to T1, which
+    // would copy all six argument words verbatim into SYS_RFORK and hand the
+    // child musl's garbage x2 as its TPIDR_EL0.
+    {
+        u64 args[VIV_NARGS];
+        struct viv_call out;
+        viv_fill_args(args);
+        TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_CLONE, args, &out),
+                       (int)VIV_TIER2, "clone is TIER2 -- never a renumber");
+    }
 }
 
 // -----------------------------------------------------------------------------

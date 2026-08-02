@@ -813,7 +813,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-3b** ✅ **LANDED** | Child-context restoration (pulled forward from L-5 per §5.4's correction) **+ the `SYS_RFORK = 102` EL0 surface**, which had to come with it: `fork_frame_init`, `thread_create_forked`, `thread_fork_trampoline`, `rfork_forked`, and `libthyla_rs::rfork_spawn` (the musl-`clone.s` shim the different-stack return demands). The handle-table copy moved OUT to L-3c — it is orthogonal, and #119 is a decision that deserves its own reasoning. | **MET, but not by the gate as written** — that gate said *kernel-driven*, and measuring showed a kernel test cannot observe an eret to EL0 at all (kproc has neither an address space nor a frame). Replaced by `/fork-probe`: six legs, boot-fatal. Revert-probed to the sharpest available pairing — ignoring `child_sp` leaves the **unit suite fully green** while only the in-guest leg fails |
 | **L-3c-1** ✅ **LANDED** | The handle-table copy (§2.4; #119). `handle_table_copy_into`, index-preserving, gated on the fork shape so the spawn family is byte-unchanged by construction. **Skip, not refuse** — the choice is stated at §5.4's as-built section, and the admissibility test is the SAME predicate `handle_dup` uses, extracted so the two cannot drift. | **MET** — 1284 → 1285/1285, boot OK, `/fork-probe` leg H (a child writes to a pipe fd only the parent opened). Three revert probes, each failing at its own assertion; removing the wiring leaves the **unit suite fully green** |
 | **L-3c-2** ✅ **LANDED** | The VFORK suspend (#122). `vfork_await_release` parks the parent on `child_waiters` until `vfork_child_released` — which reads `child->as`, so the condition IS the release rather than a record of it. Keyed on `RFMEM`, not a new flag: §9's fourth question, answered at §5.3's as-built section. One new wake (exec); death's already existed. | **MET** — 1285 → 1286/1286, boot OK, `/fork-probe` legs I (death arm) + J (exec arm, the successor blocks on a pipe so "still alive" is a fact not a race). Two revert probes: removing the park leaves the **unit suite fully green** while only the in-guest leg fails; removing the exec wake leaves it green *and* hangs the boot — the honest production symptom |
-| **L-3d** | The VIVARIUM `clone` row. | **a stock `posix_spawn` binary runs in a vivarium** |
+| **L-3d** ✅ **LANDED** | The VIVARIUM `clone` row. `vivarium_clone_decide` (pure) + one `VIV_TIER2` entry + a shell that calls the SAME `sys_rfork_core` the native handler calls (extracted here, the V-8 `sys_fstat_for_proc` discipline). `CLONE_VM` without `CLONE_VFORK` is **refused**, not served — §8's as-built section carries why L-3c-2's fail-safe reasoning inverts for a stock Linux caller. Also replaced the four stale copies of the "native ceiling" literal with `VIV_NATIVE_CEILING` + a `_Static_assert`. | **MET, but not by the gate as written** — that gate named `posix_spawn`, which needs `execve` (221) and `wait4` (260) as well; both are L-6's, are real translators, and are dependencies of *posix_spawn* rather than of *the clone translation*. Replaced by: a clone whose child runs, writes into the shared address space, and exits, with the parent suspended until it does. 1286 → 1287/1287; `viv-pheno-probe` legs L155–L163, boot-fatal |
 | **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
@@ -843,6 +843,144 @@ it: the single-process clause MET and boot-gated, the shell clause explicitly
 not. **A chunk landing is not the trigger — L-6's gate is.** Moving the ladder
 entry before an Alpine shell actually runs would reproduce exactly the WSL1
 failure §9 exists to prevent.
+
+#### As built at L-3d — the `clone` row
+
+The row itself is small: `vivarium_clone_decide` (pure, in `kernel/vivarium.c`),
+one `VIV_TIER2` table entry, and a shell in `viv_tier2` that calls the same
+`sys_rfork_core` the native handler calls. Everything worth recording is in what
+the domain refuses and why.
+
+**The mapping is a constant, so the decide function decides only the domain.**
+
+```
+clone(CLONE_VM|CLONE_VFORK|SIGCHLD, stack, ptid, tls, ctid)
+    ->  SYS_RFORK(RFPROC|RFMEM, stack, 0)
+```
+
+**The garbage-register hazard, which is this row's real content.** arm64 selects
+`CONFIG_CLONE_BACKWARDS`, so the order is `flags, stack, parent_tid, tls,
+child_tid` — `tls` *before* `child_tid`, not the x86-64 order most people
+remember. But the sharper fact is that on the only call that matters, **x2, x3
+and x4 hold garbage**: `posix_spawn` invokes `__clone(child, stack, flags, arg)`
+with four arguments (`posix_spawn.c:198`), and musl's `clone.s` then executes
+`mov x2,x4 / mov x3,x5 / mov x4,x6`, moving three registers the caller never
+set. Linux tolerates it because `CLONE_PARENT_SETTID`, `CLONE_SETTLS` and
+`CLONE_CHILD_SETTID` are all clear, so its kernel never reads them.
+
+A translator that reached for `args[3]` as the child's TLS would therefore hand
+the child an uninitialised register as its `TPIDR_EL0`, and the child would
+fault or corrupt at its first thread-local access — at a site with no visible
+connection to the clone. So the shell reads **only** `args[0]` and `args[1]`,
+passes a literal `0` for `child_tls` (`SYS_RFORK`'s inherit sentinel, which is
+what a vfork child needs), and the domain's exclusion of `CLONE_SETTLS` is what
+makes that correct rather than merely lucky.
+
+This is the *inverse* of the arity property ARCH §25.4 states for T1 rows. There
+the risk is a native target reading more argument words than the Linux call
+supplies; here the words are supplied and meaningless. Both reduce to one rule:
+read a register only when the call's own contract says it holds something.
+
+**The flags comparison is full 64-bit width, and the self-audit is what found
+that.** The first draft narrowed to `(u32)` by copying `vivarium_mmap_decide`'s
+shape — but mmap and openat narrow because *their* Linux parameters are `int`,
+which is the ABI. `clone`'s `flags` is an `unsigned long`, so narrowing there is
+an assumption about Linux's own source rather than about its ABI, and that source
+is not in this tree. Under that uncertainty the stricter reading is correct:
+declining is always safe, admitting an unreasoned bit is exactly the failure this
+tier exists to prevent, and the cost is nil because musl's `clone.s` zero-extends
+(`uxtw x0,w2`, verified in the built object). Worth generalizing: **a shape copied
+from a sibling carries that sibling's justification, which may not survive the
+copy** — re-derive it rather than inherit it.
+
+**`CLONE_VM` without `CLONE_VFORK` is REFUSED, and this is the one place L-3c-2's
+reasoning does not carry over.** L-3c-2 keyed the suspend on `RFMEM` rather than
+on a flag of its own, arguing that an unwanted suspend blocks visibly while an
+unwanted concurrency corrupts silently — a one-sided fail-safe. That holds for a
+*native* caller, who reaches `SYS_RFORK` through a Thylacine ABI whose only
+shape is the vfork one.
+
+It does not hold here. A stock Linux binary that sets `CLONE_VM` and clears
+`CLONE_VFORK` has said, in the only vocabulary it has, **"do not suspend me"** —
+and serving it with a suspend converts a working program into a deadlock the
+moment its child neither execs nor exits promptly. That is not conservative; it
+is a hang with our name on it. So the domain is an exact equality, the caller
+gets an honest decline, and the genuinely concurrent shape keeps the target it
+already has (`CLONE_THREAD` onto `SYS_THREAD_SPAWN`, whenever that row is
+written).
+
+**A zero `stack` declines**, which is what keeps `vfork()` proper out of scope
+(§9's fourth question, second half). Linux reads `stack == 0` under `CLONE_VM`
+as "share the parent's stack", safe there only because `CLONE_VFORK` suspends
+the parent so the two never push concurrently. `SYS_RFORK` refuses a zero
+`child_sp` by contract, and weakening a landed kernel gate to widen a phenotype
+row would be the wrong direction of change.
+
+**What this row makes reachable and does NOT fix (task #127).**
+`rfork_internal` copies `phenotype` to the child but not `sigtab`, and the
+comment there — written at #102 F7 — argued the gap was *unreachable*: "no
+clone/fork/execve number is a table row, so a `PHENO_LINUX` Proc cannot create
+another Proc at all." **L-3d makes clone a table row, so that sentence is now
+false**, and the seam is live: `child->sigtab` stays NULL, which reads as
+all-`SIG_DFL`, while POSIX `fork(2)` inherits both caught handlers and `SIG_IGN`.
+
+It is not fixed here, and the comment itself says why: `execve(2)` needs the
+*opposite* rule (reset caught dispositions to `SIG_DFL`, preserve ignored ones),
+so this is two behaviours and a design decision rather than a copy — and the
+sigtab sits on the V-6 audit surface. The v1.0 exposure is also narrow: the only
+admitted clone shape is vfork-then-exec, and musl's `posix_spawn` child resets
+its own dispositions before exec'ing. It belongs with `execve` and `wait4` at
+L-6. The comment was corrected in this chunk to say *reachable but unfixed*
+rather than *unreachable*, because a stale unreachability claim is exactly what
+stops the next reader from asking.
+
+**The gate is not the one this row was given, and measuring is what showed it.**
+§7 said *a stock `posix_spawn` binary runs in a vivarium*. Reading what
+`posix_spawn` actually drives shows the child needs `execve` (221) and the
+parent usually `wait4` (260) — neither of which is a table row, and neither of
+which is a *dependency of the clone translation*. They are dependencies of
+`posix_spawn`, which is L-6's deliverable; each is a real translator with its own
+reasoning (execve must walk a `char *[]` and repack it into `SYS_EXECVE`'s
+concatenated blob), and pulling both here would make L-3d into L-6 rather than
+complete L-3d. So the gate became: **a clone whose child runs, writes into the
+shared address space, and exits — with the parent suspended until it does.**
+This is the same correction L-3b's gate needed, for the same reason: a gate
+written before the work was measured named a consumer instead of the property.
+
+**What the in-guest legs prove, and what the unit tests cannot.** The eight
+`viv-pheno-probe` legs (L155–L163) go through `__viv_clone`, a transliteration
+of musl's `clone.s` — necessary because the child returns on a *different stack*
+while holding the parent's `x29`/`x30`, so no `asm!` wrapper can be safe. It
+diverges from musl in exactly one way: it loads **recognisable poison** into
+x2/x3/x4 rather than leaving them uninitialised. "Uninitialised" is the real
+hazard but is not a value a test can assert against; poisoning makes it
+deterministic, so a translator that ever read x3 produces a child whose
+`TPIDR_EL0` is `0xBAD3` and L162 says so precisely.
+
+L161 is the suspend: the child publishes its token *before* exiting, and the
+parent reads it with no wait at all. That leg also proves `CLONE_VM` delivered —
+the token lives in the parent's own `.bss`, and the child wrote it.
+
+**L161 is not claimed as independently revert-probed, and the reason is worth
+recording.** A third probe disabling the park does fail — at `/fork-probe` leg I,
+the *native* leg, which runs earlier in the boot, so the container never starts.
+The park is therefore proven load-bearing on exactly the path this row uses (the
+shell reaches `rfork_internal` through the same `sys_rfork_core` the native
+handler does); what L161 adds is that the property survives *the translation*.
+Isolating it would need a probe that disables the park only for a phenotyped
+caller — testing a configuration the system never runs.
+
+**And the first two runs of the L162 probe were a FALSE GREEN, which is the
+durable lesson of this chunk.** `viv-pheno-probe`'s *containered* copy lives in
+the POOL (`/vivarium`, baked by `populate_stratum_pool`), and
+`THYLACINE_MKFS_PRESERVE=1` skips that populate — so the production run and the
+revert probe both executed a binary that predated the new legs entirely, while
+`build/ramfs-src/viv-pheno-probe` disassembled correctly and the boot printed
+`phenotype ... PASS`. The ramfs copy is fresh and only the container's is stale,
+which is exactly what makes it invisible: every artifact you would naturally
+inspect is right. One `PRESERVE=0` build is the discriminator, and it is now a
+precondition for any chunk that adds viv / diorama / alpine-bundle legs
+(task #126).
 
 ---
 

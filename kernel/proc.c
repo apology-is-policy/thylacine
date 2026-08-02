@@ -1192,15 +1192,29 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // it resets CAUGHT dispositions to SIG_DFL and PRESERVES ignored ones, so
     // whoever builds process creation needs two behaviours here, not one.)
     //
-    // UNREACHABLE at v1.0 rather than merely untested: no clone/fork/execve
-    // number is a table row, so a PHENO_LINUX Proc cannot create another Proc
-    // at all -- every rfork in the tree runs under PHENO_NATIVE, where sigtab
-    // is always NULL anyway. Task #93 (process creation) is exactly what makes
-    // it reachable, and is where the copy belongs; pinning it here costs a
-    // sentence now and would cost a debugging session then.
+    // REACHABLE SINCE LINEAGE L-3d, and this paragraph used to claim the
+    // opposite: "UNREACHABLE at v1.0 ... no clone/fork/execve number is a table
+    // row, so a PHENO_LINUX Proc cannot create another Proc at all." True when
+    // written (#102 F7), FALSE the moment clone became a VIV_TIER2 row. A
+    // forked Linux child now really does lose every handler and every SIG_IGN
+    // its parent installed.
     //
-    // The single-threadedness that argument also buys is load-bearing
-    // elsewhere: notes.c leans on it for the sigtab tearing argument.
+    // STILL NOT FIXED HERE, for the reason the original text itself gave:
+    // execve(2) needs the OPPOSITE rule (reset CAUGHT dispositions to SIG_DFL,
+    // PRESERVE ignored ones), so this is two behaviours and a design decision
+    // rather than a copy -- and the sigtab is on the V-6 audit surface.
+    // Exposure is narrow: the only clone shape vivarium_clone_decide admits is
+    // vfork-then-exec, and musl's posix_spawn child resets its own dispositions
+    // before exec'ing. Task #127; it lands with execve and wait4 at L-6.
+    //
+    // THE SINGLE-THREADEDNESS THIS PARAGRAPH USED TO BUY SURVIVES, ON DIFFERENT
+    // GROUNDS -- and notes.c leans on it for the sigtab tearing argument, so
+    // the re-derivation matters rather than being bookkeeping. A PHENO_LINUX
+    // Proc still cannot make a second THREAD: CLONE_THREAD is outside the
+    // admitted domain, and the native SYS_THREAD_SPAWN is unreachable from a
+    // phenotyped Proc. What the clone row grants is a second PROC, which
+    // carries its own sigtab. Widening that domain to admit CLONE_THREAD would
+    // void the argument in notes.c.
     // VIVARIUM V-4a-0: the executable name is INHERITED (a fork-without-exec
     // keeps running the parent's binary -- POSIX, and the honest answer for
     // /proc/<pid>/exe). Every v1.0 spawn execs immediately afterwards and

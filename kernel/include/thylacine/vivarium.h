@@ -142,9 +142,9 @@ enum {
 
     // The socket family (V-5, section 5.5). Contiguous in Linux's aarch64
     // table; aarch64 has no socketcall multiplexer, so each is its own number.
-    // All are above 100, the highest assigned NATIVE syscall number, so the
-    // collision re-check the ARCH section 25.4 row mandates is discharged by
-    // construction for every row here.
+    // All are above THE NATIVE CEILING (see below), so the collision re-check
+    // the ARCH section 25.4 row mandates is discharged by construction for
+    // every row here.
     VIV_LINUX_SOCKET      = 198,
     VIV_LINUX_SOCKETPAIR  = 199,
     VIV_LINUX_BIND        = 200,
@@ -167,10 +167,10 @@ enum {
     // family, and musl's poll()/select() are thin wrappers over them.
     //
     // THE COLLISION RE-CHECK, WHICH FINALLY HAS WORK TO DO. Every row above is
-    // > 100 (the highest assigned native number), so the ARCH section 25.4
-    // mandate was discharged by construction. These two are NOT: 72 is
-    // SYS_GETPID and 73 is SYS_GETUID. So the argument has to be made per
-    // number, and it still holds -- but for a different reason:
+    // over the native ceiling, so the ARCH section 25.4 mandate was discharged
+    // by construction. These two are NOT: 72 is SYS_GETPID and 73 is
+    // SYS_GETUID. So the argument has to be made per number, and it still
+    // holds -- but for a different reason:
     //
     //   * A PHENO_LINUX Proc CANNOT REACH A NATIVE NUMBER AT ALL. Every number
     //     it issues goes through vivarium_translate, and an unclassified one
@@ -191,7 +191,32 @@ enum {
     // ceiling argument again without checking the number.
     VIV_LINUX_PSELECT6    = 72,
     VIV_LINUX_PPOLL       = 73,
+
+    // Process creation (LINEAGE L-3d, docs/LINEAGE.md §7). Above the native
+    // ceiling, so the collision re-check is discharged by construction -- and
+    // this time the ceiling was CHECKED rather than quoted: it had moved from
+    // 100 to 102 when SYS_EXECVE and SYS_RFORK landed at L-2a/L-3b, and four
+    // separate comments still said 100 (one still said the pre-#97 "256,
+    // sparsely"). That is why VIV_NATIVE_CEILING below exists as a symbol
+    // rather than as a number repeated in prose.
+    VIV_LINUX_CLONE       = 220,
 };
+
+// The highest ASSIGNED native Thylacine syscall number. Every vivarium row
+// above this is free of collision by construction; the two rows below it
+// (pselect6 72, ppoll 73) carry their own per-number argument, above.
+//
+// THE OBLIGATION, and the reason this is a symbol: a new native syscall above
+// 102 makes the ceiling argument stop holding for every row at or below the new
+// value, SILENTLY. Bumping this constant is therefore part of adding a syscall,
+// and the `_Static_assert` in vivarium.c pins it to SYS_RFORK's identity so a
+// renumber of the current top cannot drift unnoticed. (It cannot catch a NEW
+// higher number on its own -- C has no max-over-an-enum -- so the rows that
+// depend on the ceiling assert against it individually there.)
+//
+// Stated ONCE, deliberately. It was previously written out as a literal in four
+// places and was stale in all four.
+#define VIV_NATIVE_CEILING 102
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
@@ -1297,5 +1322,121 @@ _Static_assert(sizeof(struct viv_sigframe_head) <= VIV_SIGFRAME_SIZE,
 void vivarium_build_sigframe(struct viv_sigframe_head *out, u64 signum,
                              u64 sigmask, const u64 *regs31,
                              u64 sp, u64 pc, u64 pstate);
+
+// -----------------------------------------------------------------------------
+// TIER 2 — `clone` (LINEAGE L-3d). See docs/LINEAGE.md §5.3 and §8.
+//
+// The row that gives a Linux guest a second process. Its target is SYS_RFORK
+// (LINEAGE L-3b), and the mapping is a CONSTANT rather than a computation:
+//
+//     clone(CLONE_VM|CLONE_VFORK|SIGCHLD, stack, ptid, tls, ctid)
+//         ->  SYS_RFORK(RFPROC|RFMEM, stack, 0)
+//
+// so what this decide function actually decides is the DOMAIN, which is where
+// every interesting question lives.
+//
+// THE ARGUMENT ORDER, and why it is not the one most people remember. arm64
+// selects CONFIG_CLONE_BACKWARDS, so `tls` comes BEFORE `child_tid`:
+//
+//     x0 flags   x1 stack   x2 parent_tid   x3 tls   x4 child_tid
+//
+// musl's own aarch64 clone.s states it in a comment at the top of the file
+// ("syscall(SYS_clone, flags, stack, ptid, tls, ctid)"), which is where this was
+// read from. The x86-64 order (ptid, ctid, tls) would silently swap two words.
+//
+// THE HAZARD THAT MAKES THIS ROW DIFFERENT FROM EVERY OTHER ONE: x2, x3 and x4
+// ARE GARBAGE ON THE ONLY CALL THAT MATTERS. `posix_spawn` invokes
+// `__clone(child, stack, flags, arg)` with FOUR arguments (posix_spawn.c:198),
+// and clone.s then does `mov x2,x4 / mov x3,x5 / mov x4,x6` -- moving three
+// registers the caller never set. On Linux that is harmless, because
+// CLONE_PARENT_SETTID / CLONE_SETTLS / CLONE_CHILD_SETTID are all clear and the
+// kernel therefore never reads them.
+//
+// A translator that reached for `args[3]` as the child's TLS would be reading
+// one of those uninitialised registers and handing it to the child as
+// TPIDR_EL0 -- and the child would then fault or corrupt on its first
+// thread-local access, at a site with no visible connection to the clone. So
+// this decide takes flags and stack ONLY, the shell passes a LITERAL 0 for
+// child_tls (SYS_RFORK's "inherit the caller's" sentinel, which is what a vfork
+// child needs), and the three garbage words are never named at all. The
+// admitted domain's exclusion of CLONE_SETTLS is what makes that correct rather
+// than merely safe.
+//
+// (This is the inverse of the arity property the ARCH §25.4 row states for T1
+// rows. There the risk is a native target reading MORE argument words than the
+// Linux call supplies; here the words are supplied and MEANINGLESS. Both come
+// down to the same rule: read a register only when the call's own contract says
+// it holds something.)
+// -----------------------------------------------------------------------------
+
+// Linux `clone` flag bits (musl `include/sched.h`, read from the tree). Only the
+// ones the domain reasoning below names are listed.
+enum {
+    VIV_CSIGNAL              = 0x000000ff,   // the low byte IS the exit signal
+    VIV_CLONE_VM             = 0x00000100,
+    VIV_CLONE_FILES          = 0x00000400,
+    VIV_CLONE_VFORK          = 0x00004000,
+    VIV_CLONE_THREAD         = 0x00010000,
+    VIV_CLONE_SETTLS         = 0x00080000,
+    VIV_CLONE_PARENT_SETTID  = 0x00100000,
+    VIV_CLONE_CHILD_CLEARTID = 0x00200000,
+    VIV_CLONE_CHILD_SETTID   = 0x01000000,
+};
+
+// SIGCHLD, from `arch/aarch64/bits/signal.h` -- the exit signal posix_spawn asks
+// for, and the only one Thylacine can deliver: `exits()` posts the `child_exit`
+// note unconditionally (I-19), so SIGCHLD is what the target already does.
+#define VIV_CLONE_SIGCHLD 17u
+
+// The only admitted `flags` word -- an EXACT match, exactly as
+// VIV_MMAP_FLAGS_ADMITTED is, and for the same reason: a bit we have not
+// reasoned about must decline rather than ride along.
+//
+// Compared at FULL 64-BIT WIDTH, unlike every other decide in this file. Those
+// narrow to 32 bits because their Linux parameters ARE `int`; clone's `flags`
+// is an `unsigned long`, so narrowing here would be an assumption about Linux's
+// own source rather than about its ABI -- and this tree cannot check that. The
+// stricter reading is therefore the right one under uncertainty, and it costs
+// nothing: musl's clone.s zero-extends (`uxtw x0,w2`), so the high half is
+// always 0 from the real consumer.
+#define VIV_CLONE_FLAGS_ADMITTED \
+    ((u32)(VIV_CLONE_VM | VIV_CLONE_VFORK | VIV_CLONE_SIGCHLD))
+
+// Decide whether a `clone` is inside the translatable domain. PURE -- no user
+// memory, no Proc, no locks.
+//
+// WHY `CLONE_VM` WITHOUT `CLONE_VFORK` IS REFUSED RATHER THAN SERVED. This is
+// the one place where L-3c-2's "the fail-safe direction is one-sided" argument
+// does NOT carry over, and the difference is worth stating because the two
+// chunks reach opposite conclusions from the same shape.
+//
+// At L-3c-2 the suspend was keyed on RFMEM rather than on a flag of its own,
+// and the justification was that an unwanted suspend blocks visibly while an
+// unwanted concurrency corrupts silently. That reasoning holds for a NATIVE
+// caller, who reaches SYS_RFORK through a Thylacine ABI whose only shape is the
+// vfork one. It does not hold here. A stock Linux binary that sets CLONE_VM and
+// clears CLONE_VFORK has said, in the only vocabulary it has, "do not suspend
+// me" -- and serving it with a suspend converts a working program into a
+// DEADLOCK whenever the child neither execs nor exits promptly (a worker thread
+// signalling through shared memory is the ordinary case). That is not
+// conservative; it is a hang with our name on it.
+//
+// So the domain is exact, and the caller gets an honest decline it can act on.
+// The genuinely concurrent shape has a correct target already -- CLONE_THREAD
+// onto SYS_THREAD_SPAWN -- and that row should arrive with its own reasoning.
+//
+// A ZERO `stack` DECLINES, and that is what keeps `vfork()` proper out of scope
+// (LINEAGE.md §9's fourth question, second half). Linux reads stack==0 under
+// CLONE_VM as "share the parent's stack", which is safe there ONLY because
+// CLONE_VFORK suspends the parent so the two never push concurrently. SYS_RFORK
+// refuses a zero child_sp by contract (syscall.h), and weakening a landed
+// kernel gate to widen a phenotype row would be the wrong direction of change.
+// Declining one line above the kernel keeps the reason visible.
+//
+// Returns VIV_TRANSLATED (the shell may call SYS_RFORK with RFPROC|RFMEM,
+// `stack`, and a literal 0 tls) or VIV_FORWARD. Never ENOSYS: `clone` exists,
+// and a `fork()`-shaped call is one L-5 will serve rather than one to deny
+// forever.
+enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack);
 
 #endif // THYLACINE_VIVARIUM_H

@@ -7003,19 +7003,24 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
 // test can reach every rejection with a synthetic ctx and no address space.
 // =============================================================================
 
-// Non-static so the argument gate is reachable from a kernel test with a
-// synthetic frame (the sys_pci_claim_handler pattern -- the test carries its
-// own extern decl). Every rejection below lands ahead of rfork_forked, which is
-// what makes that coverage possible from kproc.
-s64 sys_rfork_handler(struct exception_context *ctx) {
+// The core, taking its three arguments EXPLICITLY rather than reading them out
+// of the frame -- because the frame is not the only place they come from.
+//
+// LINEAGE L-3d: a Linux `clone` arrives with a DIFFERENT register layout (x0
+// flags, x1 stack, x2 parent_tid, x3 tls, x4 child_tid -- CONFIG_CLONE_BACKWARDS)
+// and, on the call that matters, with x2/x3/x4 holding GARBAGE that musl's
+// `__clone` moved there from registers `posix_spawn` never set. So the phenotype
+// shell must supply translated values, not hand this function the raw frame.
+// Splitting the read from the work is what lets both callers share ONE
+// implementation of the gate below -- the V-8 `sys_fstat_for_proc` discipline.
+//
+// `ctx` is still required: it is the frame the CHILD's copy is made from.
+static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
+                          u64 child_sp, u64 child_tls) {
     if (!ctx) return -(s64)T_E_INVAL;
 
     struct Thread *t = current_thread();
     if (!t)      return -(s64)T_E_INVAL;
-
-    unsigned flags     = (unsigned)ctx->regs[0];
-    u64      child_sp  = ctx->regs[1];
-    u64      child_tls = ctx->regs[2];
 
     // Exactly RFPROC|RFMEM. RFPROC alone would hand the child a fresh EMPTY
     // address space and then resume it at its parent's PC -- an instruction
@@ -7058,6 +7063,18 @@ s64 sys_rfork_handler(struct exception_context *ctx) {
     // thread_fork_trampoline and erets onto its own copy of `ctx` with
     // regs[0] == 0.
     return (s64)pid;
+}
+
+// The NATIVE reader: the SYS_RFORK ABI's register layout, and nothing else.
+//
+// Non-static so the argument gate is reachable from a kernel test with a
+// synthetic frame (the sys_pci_claim_handler pattern -- the test carries its
+// own extern decl). Every rejection in the core lands ahead of rfork_forked,
+// which is what makes that coverage possible from kproc.
+s64 sys_rfork_handler(struct exception_context *ctx) {
+    if (!ctx) return -(s64)T_E_INVAL;
+    return sys_rfork_core(ctx, (unsigned)ctx->regs[0], ctx->regs[1],
+                          ctx->regs[2]);
 }
 
 // =============================================================================
@@ -8482,7 +8499,20 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
 
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
-static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
+// `ctx` is used by exactly one case (clone, LINEAGE L-3d) and ignored by the
+// rest. It is a parameter rather than a second dispatcher because clone IS a
+// Tier-2 translation -- a flag map plus an argument reshape -- and splitting it
+// out would make VIV_TIER2 mean two different things depending on the number.
+//
+// Contrast rt_sigreturn, which IS intercepted ahead of the table: that call
+// rewrites the frame INSTEAD of returning a value, so the caller's
+// `regs[0] = viv_tier2(...)` store would destroy the x0 it just restored.
+// Clone is not in that class. It returns a value the normal way, into the
+// PARENT's frame -- the child's regs[0] was set to 0 in its own COPY of the
+// frame by fork_frame_init, before this function returns, and the child is a
+// different Thread on a different stack that never comes back through here.
+static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
+                     u64 linux_nr, const u64 *args) {
     switch (linux_nr) {
     case VIV_LINUX_OPENAT: {
         // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags.
@@ -8756,6 +8786,28 @@ static s64 viv_tier2(struct Proc *p, u64 linux_nr, const u64 *args) {
         return viv_pselect6(p, args[0], args[1], args[2], args[3], args[4],
                             args[5]);
 
+    case VIV_LINUX_CLONE: {
+        // clone(flags, stack, parent_tid, tls, child_tid): x0..x4, in arm64's
+        // CONFIG_CLONE_BACKWARDS order (tls BEFORE child_tid).
+        //
+        // ONLY args[0] AND args[1] ARE READ, and that is a correctness
+        // requirement rather than an economy. posix_spawn calls
+        // `__clone(child, stack, flags, arg)` with four arguments, and musl's
+        // clone.s then moves x4/x5/x6 into x2/x3/x4 -- three registers the
+        // caller never initialised. Linux tolerates that because the
+        // corresponding CLONE_* bits are clear; so does this, by refusing every
+        // one of those bits in the admitted flags word and passing a LITERAL 0
+        // for child_tls. Reaching for args[3] here would hand the child a
+        // garbage TPIDR_EL0 and fault it at its first thread-local access, far
+        // from this line.
+        if (vivarium_clone_decide(args[0], args[1]) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
+
+        // 0 = INHERIT the caller's TPIDR_EL0, which is what a vfork child needs:
+        // it runs the parent's C, thread-locals and all, until it execs.
+        return sys_rfork_core(ctx, (unsigned)(RFPROC | RFMEM), args[1], 0);
+    }
+
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That
         // is a table/shell disagreement -- fail closed, never dispatch.
@@ -8820,7 +8872,7 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
         return true;                            // the NATIVE handler runs
 
     case VIV_TIER2:
-        ctx->regs[0] = (u64)viv_tier2(p, ctx->regs[8], args);
+        ctx->regs[0] = (u64)viv_tier2(ctx, p, ctx->regs[8], args);
         return false;
 
     case VIV_FORWARD:

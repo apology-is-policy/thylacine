@@ -106,7 +106,7 @@ caller happened to leave there.
 
 **The re-check, performed for V-2d's rows.** `mmap` 222, `munmap` 215 and
 `mprotect` 226 collide with *no* native number — all three are currently
-unassigned (the highest assigned native number is 256, sparsely), so natively
+unassigned (above the native ceiling; see below), so natively
 they reach the dispatcher's `default:` and answer `-1`. The argument still holds,
 but by a different clause than the collision table's: a mis-declared Proc issuing
 222 now receives an anonymous mapping where it would have received `-1`, and that
@@ -742,9 +742,23 @@ sitting in the listener's socket until it chooses to accept.
 
 ### The collision re-check, which finally has work to do
 
-Every earlier V-table row is above 100, the highest assigned native syscall
-number, so ARCH section 25.4's mandated collision re-check was discharged by
-construction. These two are not: **72 is `SYS_GETPID` and 73 is `SYS_GETUID`.**
+Every earlier V-table row is above the native ceiling, so ARCH section 25.4's
+mandated collision re-check was discharged by construction. These two are not:
+**72 is `SYS_GETPID` and 73 is `SYS_GETUID`.**
+
+> **The ceiling is a symbol, not a number, and this is why.** It was written out
+> as a literal in four separate places — twice in `vivarium.h`, twice here — and
+> when `SYS_EXECVE` (101) and `SYS_RFORK` (102) landed at LINEAGE L-2a/L-3b, all
+> four went stale together; one of them still carried the pre-#97 "256,
+> sparsely". None of it was load-bearing at the time, because every affected row
+> sits far above either value. But a claim that nothing checks is a claim that
+> will eventually be wrong when it matters. L-3d replaced the literals with
+> `VIV_NATIVE_CEILING`, pinned it to `SYS_RFORK` with a `_Static_assert` in
+> `vivarium.c` (the one file that can see both headers), and made every row that
+> leans on the ceiling assert against the symbol — so a future bump stops the
+> build instead of quietly voiding an argument. It cannot catch a *new* higher
+> number on its own (C has no max-over-an-enum), which is why bumping the
+> constant is stated as part of adding a syscall.
 
 The argument still holds, for a different reason. A `PHENO_LINUX` Proc cannot
 reach a native number *at all* -- every number it issues goes through
@@ -1345,3 +1359,186 @@ smp4/smp8, N=10). LS-CI **32/32**, 0 retries, 0 kills, coverage verified by set
 comparison rather than by count. No spec gate: nothing in this arc is modelled
 in `specs/` -- `specs/phenotype.tla` is reserved for whichever chunk builds a
 forward destination, which on present evidence is process creation (#93).
+
+---
+
+## The `clone` row (LINEAGE L-3d)
+
+The row that gives a Linux guest a second process, landed as part of the LINEAGE
+arc rather than the VIVARIUM one — the address-space machinery is L-1..L-3c's,
+and this is the last piece: the translation.
+
+### The mapping is a constant; the decide function decides the domain
+
+```
+clone(CLONE_VM|CLONE_VFORK|SIGCHLD, stack, ptid, tls, ctid)
+    ->  SYS_RFORK(RFPROC|RFMEM, stack, 0)
+```
+
+`vivarium_clone_decide(flags, stack)` is pure and takes exactly two words. Every
+other question this row could have had — where the child's stack pointer must
+sit, whether it overlaps the caller's, whether the flags word is well-formed —
+is `SYS_RFORK`'s own gate, and the shell reaches it through `sys_rfork_core`,
+extracted here so the native handler and the phenotype share one copy. That is
+the V-8 `sys_fstat_for_proc` discipline applied to a call that returns twice.
+
+### Only two argument words are read, and that is a correctness requirement
+
+arm64 selects `CONFIG_CLONE_BACKWARDS`, so the register order is
+
+```
+x0 flags   x1 stack   x2 parent_tid   x3 tls   x4 child_tid
+```
+
+— `tls` *before* `child_tid`, not the x86-64 order. musl's own
+`src/thread/aarch64/clone.s` states it in a comment at the top of the file,
+which is where it was read from.
+
+But the order is the smaller trap. **On the call that matters, x2/x3/x4 hold
+garbage.** `posix_spawn` invokes `__clone(child, stack, flags, arg)` with four
+arguments (`posix_spawn.c:198`), and `clone.s` then executes
+
+```
+mov x2,x4      mov x3,x5      mov x4,x6
+```
+
+moving three registers the caller never set. Linux tolerates it because
+`CLONE_PARENT_SETTID`, `CLONE_SETTLS` and `CLONE_CHILD_SETTID` are all clear, so
+its kernel never reads them.
+
+A translator that reached for `args[3]` as the child's TLS would therefore hand
+the child an uninitialised register as its `TPIDR_EL0` — and the child would
+fault or corrupt at its first thread-local access, at a site with no visible
+connection to the clone. So the shell reads only `args[0]` and `args[1]` and
+passes a literal `0` for `child_tls`, which is `SYS_RFORK`'s inherit sentinel and
+what a vfork child needs anyway. The domain's exclusion of `CLONE_SETTLS` is what
+makes that correct rather than merely lucky.
+
+This is the *inverse* of the arity property stated above for T1 rows: there the
+risk is a native target reading more argument words than the Linux call supplies;
+here the words are supplied and meaningless. Both reduce to one rule — **read a
+register only when the call's own contract says it holds something.**
+
+### The flags word is compared at 64 bits, unlike every other decide here
+
+`vivarium_mmap_decide` and `vivarium_openat_decide` narrow to `u32`, and that is
+correct for them: their Linux parameters *are* `int`, so the narrowing is the
+ABI. `clone`'s `flags` is an `unsigned long`. Narrowing there would be an
+assumption about Linux's own source rather than about its ABI, and that source is
+not in this tree — so it cannot be checked, and it must not be asserted from
+memory.
+
+Under that uncertainty the stricter reading is the right one, because this
+tier's own rule is that *declining is always safe* while admitting a bit nobody
+has reasoned about is precisely the failure it exists to prevent. It also costs
+nothing: musl's `clone.s` emits `uxtw x0,w2` (confirmed in the built object as
+`ubfx x0, x2, #0, #32`), so the high half is always zero from the real consumer.
+The only caller this turns away is a hand-rolled one setting an unconsidered bit
+— exactly who should be turned away.
+
+The first draft narrowed, by copying the mmap decide's shape without
+re-deriving its justification; the self-audit caught it. **A shape copied from a
+sibling carries that sibling's justification, which may not survive the copy.**
+
+### `CLONE_VM` without `CLONE_VFORK` is refused
+
+This is the one place LINEAGE L-3c-2's reasoning does not carry over, and the
+inversion is worth stating because the two chunks reach opposite conclusions from
+the same shape.
+
+L-3c-2 keyed the vfork suspend on `RFMEM` rather than on a flag of its own,
+arguing that the fail-safe direction is one-sided: an unwanted suspend blocks
+visibly and terminates, while an unwanted concurrency is corruption three layers
+from its cause. That holds for a **native** caller, who reaches `SYS_RFORK`
+through a Thylacine ABI whose only shape is the vfork one.
+
+It does not hold here. A stock Linux binary that sets `CLONE_VM` and clears
+`CLONE_VFORK` has said, in the only vocabulary it has, *do not suspend me* — and
+serving it with a suspend converts a working program into a deadlock the moment
+its child neither execs nor exits promptly. That is not conservative; it is a
+hang with our name on it.
+
+So the domain is an exact equality and the caller gets an honest decline. The
+genuinely concurrent shape keeps the target it already has: `CLONE_THREAD` onto
+`SYS_THREAD_SPAWN`, whenever that row is written.
+
+A zero `stack` declines for the adjacent reason: it is Linux's `vfork()` proper,
+"share the parent's stack", safe there only because `CLONE_VFORK` suspends the
+parent so the two never push concurrently. `SYS_RFORK` refuses a zero `child_sp`
+by contract, and weakening a landed kernel gate to widen a phenotype row is the
+wrong direction of change.
+
+The exit signal is the **low byte**, not a flag, and only `SIGCHLD` is admitted:
+`exits()` posts `child_exit` unconditionally (I-19), so any other request —
+including `0`, "no signal", which is what a detached child asks for — would get a
+note it did not ask for.
+
+### It is a `VIV_TIER2` row, not an interception
+
+`rt_sigreturn` is handled ahead of the table because it *rewrites the frame*
+instead of returning a value, so the dispatcher's `regs[0] = viv_tier2(...)`
+store would destroy the x0 it had just restored. Clone is not in that class: it
+returns its result the normal way, into the **parent's** frame. The child's
+`regs[0]` was set to 0 in its own *copy* of the frame by `fork_frame_init`,
+before the shell returns, and the child is a different Thread on a different
+stack that never comes back through the dispatcher.
+
+So `viv_tier2` gains a `ctx` parameter — used by this one case, ignored by the
+rest — rather than the row gaining a second dispatcher.
+
+### The gate was not the one this chunk was given
+
+`LINEAGE.md` §7 said *a stock `posix_spawn` binary runs in a vivarium*. Reading
+what `posix_spawn` actually drives shows the child needs `execve` (221) and the
+parent usually `wait4` (260), neither of which is a table row — and neither of
+which is a dependency of *the clone translation*. They are dependencies of
+`posix_spawn`, which is L-6's deliverable, and each is a real translator with its
+own reasoning (execve must walk a `char *[]` and repack it into `SYS_EXECVE`'s
+concatenated blob). Pulling both here would have made L-3d into L-6 rather than
+completing L-3d.
+
+So the gate became: **a clone whose child runs, writes into the shared address
+space, and exits, with the parent suspended until it does.** This is the same
+correction L-3b's gate needed, for the same reason — a gate written before the
+work was measured named a consumer instead of the property.
+
+### Coverage, and a false green worth remembering
+
+`vivarium.clone_domain` asserts every decline by name and by reason (three
+independent classes of widening, so a mask test would admit all of them at once),
+plus a `VIV_TIER2` pin so a future edit cannot demote the row to T1 and copy all
+six argument words verbatim into `SYS_RFORK`.
+
+The in-guest legs L155–L163 go through `__viv_clone`, a transliteration of musl's
+`clone.s` — necessary because the child returns on a *different stack* while
+holding the parent's `x29`/`x30`, so no `asm!` wrapper can be safe. It diverges
+from musl in exactly one way: it loads **recognisable poison** into x2/x3/x4
+rather than leaving them uninitialised. "Uninitialised" is the real hazard but is
+not a value a test can assert against; poisoning makes it deterministic, so a
+translator that ever reads x3 produces a child whose `TPIDR_EL0` is `0xBAD3` and
+L162 says so precisely.
+
+Two revert probes, the layers blind in both directions: gutting the pure domain
+check fails the unit suite at exactly its own assertion (1286/1287) and never
+reaches the guest; breaking only the shell leaves the unit suite at a **full
+1287/1287 PASS** while the guest fails at exactly `marker=L162`.
+
+**L161 is deliberately NOT claimed as independently revert-probed.** A third
+probe disabling the vfork park does fail — but at `/fork-probe` leg I, the
+*native* leg, which runs earlier in the boot, so the container never starts and
+L161 is never reached. The park is therefore proven load-bearing on exactly the
+path this row uses (the shell reaches `rfork_internal` through the same
+`sys_rfork_core` the native handler does), and what L161 adds is that the
+property survives *the translation* — not an independent proof of the park
+itself. Isolating it would need a probe that disables the park only for a
+phenotyped caller, which would be testing a configuration the system never runs.
+
+> **The first two runs of that second probe were a FALSE GREEN.**
+> `viv-pheno-probe`'s *containered* copy lives in the **pool** (`/vivarium`,
+> baked by `populate_stratum_pool`), which `THYLACINE_MKFS_PRESERVE=1` skips —
+> so both the production run and the revert probe executed a binary that
+> predated the new legs entirely, while `build/ramfs-src/viv-pheno-probe`
+> disassembled correctly and the boot reported `phenotype ... PASS`. The
+> ramfs copy is fresh; only the container's is stale, which is what makes this
+> hard to see. Any chunk adding viv / diorama / alpine-bundle legs must take one
+> `PRESERVE=0` build before trusting any result (task #126).

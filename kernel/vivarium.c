@@ -11,6 +11,31 @@
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
+// The native ceiling, pinned. vivarium.h cannot see syscall.h (the dependency is
+// deliberately one-way), so the constant is declared there and checked here --
+// the only file that can see both.
+//
+// This catches a RENUMBER of the current top. It cannot catch a NEW higher
+// number by itself, which is why the rows that lean on the ceiling assert
+// against VIV_NATIVE_CEILING individually below.
+_Static_assert(VIV_NATIVE_CEILING == SYS_RFORK,
+               "VIV_NATIVE_CEILING must be the highest ASSIGNED native syscall "
+               "number. Adding one above it silently voids the collision "
+               "argument for every vivarium row at or below the new value -- "
+               "bump the constant and re-run that check.");
+
+// Every row that discharges its collision re-check by the ceiling argument
+// rather than by a per-number one. The lowest such number is restart_syscall
+// (128); clone (220) is the newest. If the ceiling ever rises past one of
+// these, the build stops and the reader is forced back to the argument instead
+// of inheriting a claim that has quietly become false.
+_Static_assert(VIV_LINUX_RESTART_SYSCALL > VIV_NATIVE_CEILING,
+               "the signal family's collision argument is the ceiling one");
+_Static_assert(VIV_LINUX_SOCKET > VIV_NATIVE_CEILING,
+               "the socket family's collision argument is the ceiling one");
+_Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,
+               "clone's collision argument is the ceiling one (LINEAGE L-3d)");
+
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
 // six-word vector is copied verbatim — a Linux caller may leave the unused words
@@ -240,6 +265,20 @@ static const struct viv_reject g_viv_rejects[] = {
     // wrappers over them, and a server that multiplexes reaches them either way.
     { VIV_LINUX_PPOLL,       VIV_TIER2   },  // V-5c: the ready-file translation
     { VIV_LINUX_PSELECT6,    VIV_TIER2   },  // V-5c-2: the fd_set reshape
+
+    // Process creation (LINEAGE L-3d). One row, and it lands WITH its shell in
+    // the same commit under this file's own rule -- a VIV_TIER2 row whose shell
+    // is missing declares a capability the code does not have.
+    //
+    // execve (221) and wait4 (260) are NOT listed, and their absence is a
+    // decision rather than an oversight: each is a real translator (execve must
+    // walk a char*[] and repack it into SYS_EXECVE's concatenated blob; wait4
+    // must reshape a status word and an rusage pointer), and each therefore
+    // arrives with its own reasoning at L-6. Until then they FORWARD like any
+    // unclassified number -- which is why L-3d's own gate is a clone the child
+    // survives WITHOUT execing, not a posix_spawn (see the as-built note in
+    // LINEAGE.md §7).
+    { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d: vivarium_clone_decide
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -600,6 +639,71 @@ enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
     // domain one: Linux answers EINVAL for 0 and ENOMEM for too-large, and the
     // shell reproduces both exactly. Forwarding on length here would answer
     // ENOSYS for a call Linux gives a specific errno.
+    return VIV_TRANSLATED;
+}
+
+// =============================================================================
+// PROCESS CREATION — the pure layer (LINEAGE L-3d). See docs/LINEAGE.md §5.3.
+// =============================================================================
+
+enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack) {
+    // THE COMPARISON IS FULL-WIDTH, and that is a deliberate difference from
+    // vivarium_mmap_decide / vivarium_openat_decide, which narrow to 32 bits.
+    // Those calls take `int` parameters in the Linux ABI, so the narrowing is
+    // the ABI. `clone` takes an `unsigned long`, so it is not -- and whether
+    // Linux's legacy clone entry ignores the high half is a fact about ITS
+    // source, which is not in this tree and therefore not something to assert
+    // from memory.
+    //
+    // Under that uncertainty the stricter reading is the correct one, because
+    // this file's own rule is that DECLINING IS ALWAYS SAFE while admitting a
+    // bit we have not reasoned about is the failure mode the tier exists to
+    // prevent. And it costs nothing measurable: musl's clone.s emits
+    // `uxtw x0,w2` (verified in the built object: `ubfx x0, x2, #0, #32`), so
+    // the high half is ALWAYS ZERO from the real consumer. The only caller this
+    // can turn away is a hand-rolled one setting a bit nobody has considered,
+    // which is exactly who should be turned away.
+    //
+    // Note also that the low BYTE is the exit signal, not a flag, which is why
+    // the admitted word carries SIGCHLD as a VALUE rather than as a mask member.
+
+    // EXACT equality. Three separate things are being refused here and each
+    // matters on its own, so a mask test would quietly admit all of them:
+    //
+    //   * CLONE_VM without CLONE_VFORK -- the caller said "do not suspend me",
+    //     and serving it anyway turns a working program into a deadlock. The
+    //     header carries the full argument for why L-3c-2's fail-safe reasoning
+    //     does not extend here.
+    //   * CLONE_THREAD (and the rest of the thread set) -- a genuinely
+    //     concurrent child has a correct target already, SYS_THREAD_SPAWN, and
+    //     it is not this row.
+    //   * CLONE_SETTLS / CLONE_PARENT_SETTID / CLONE_CHILD_{SET,CLEAR}TID --
+    //     each makes one of x2/x3/x4 MEANINGFUL, and this translator's whole
+    //     safety argument is that it never reads them (the header's garbage-
+    //     register note). Excluding them is what makes "pass a literal 0 for
+    //     child_tls" correct rather than merely convenient.
+    //
+    // An exit signal other than SIGCHLD is refused by the same equality, and
+    // deliberately: `exits()` posts `child_exit` unconditionally (I-19), so a
+    // caller asking for a different signal -- or for none, which is what a
+    // detached child asks for by leaving the low byte 0 -- would get one it did
+    // not request.
+    if (flags != (u64)VIV_CLONE_FLAGS_ADMITTED) return VIV_FORWARD;
+
+    // A ZERO stack is Linux's "share the parent's stack", which is `vfork()`
+    // proper. SYS_RFORK refuses a zero child_sp by contract, so this declines
+    // one layer above the kernel rather than weakening a landed gate. It is a
+    // DOMAIN question, not a semantic one -- Linux serves stack==0 happily, so
+    // there is no errno of its own to reproduce (contrast mmap's `len`, which
+    // IS judged in the shell precisely because Linux gives it EINVAL/ENOMEM).
+    if (stack == 0) return VIV_FORWARD;
+
+    // NOTE what is NOT checked: alignment, range, and overlap with the caller's
+    // own stack. Those are SYS_RFORK's own gate, they are identical for a
+    // native and a translated caller, and re-stating them here would be a
+    // second copy of a rule that must not drift. The shell calls the same core
+    // the native handler does, which is the V-8 `sys_fstat_for_proc` discipline
+    // -- one implementation, reached two ways.
     return VIV_TRANSLATED;
 }
 

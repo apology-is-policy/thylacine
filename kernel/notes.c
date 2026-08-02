@@ -1099,9 +1099,16 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         // The 32-byte entry is read by the OWNING thread only; the sole
         // cross-thread reader is notes_post's SIG_IGN hook, which touches one
         // naturally-aligned u64 (single-copy-atomic on aarch64 -- old or new,
-        // never torn). A guest cannot make a second thread either: clone is in
-        // no table row, so a PHENO_LINUX Proc is single-threaded at v1.0. Both
-        // halves of that argument have to hold when process creation lands.
+        // never torn). A guest cannot make a second thread either -- and that
+        // half was RE-DERIVED when process creation landed, as this comment
+        // asked. It no longer rests on "clone is in no table row" (LINEAGE
+        // L-3d made it one). It rests on CLONE_THREAD being outside
+        // vivarium_clone_decide's admitted domain, plus the native
+        // SYS_THREAD_SPAWN being unreachable from a phenotyped Proc. What the
+        // clone row grants is a second PROC, carrying its OWN sigtab, not a
+        // second thread sharing this one.
+        //
+        // WIDENING THAT DOMAIN TO ADMIT CLONE_THREAD VOIDS THIS ARGUMENT.
         struct viv_sigtab *tab = __atomic_load_n(&p->sigtab, __ATOMIC_ACQUIRE);
         struct viv_ksigaction act;
         bool have_handler = viv_sigtab_note_handler(tab, sn, &act);
