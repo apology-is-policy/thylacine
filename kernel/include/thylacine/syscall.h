@@ -1878,11 +1878,22 @@ enum {
     // CLONE of the Territory -- everything an rfork child has always inherited,
     // because both shapes run one body.
     //
-    // The child's HANDLE TABLE is fresh and EMPTY. That is CLONE_VM WITHOUT
-    // CLONE_FILES, which is exactly posix_spawn's shape, and deliberately NOT
-    // POSIX fork's: an fd-inheriting child needs a table copy, and a copy would
-    // duplicate hardware handles that I-5 makes non-transferable -- a decision
-    // that deserves its own reasoning rather than arriving as a side effect.
+    // The child's HANDLE TABLE is a COPY of the caller's, at the SAME slot
+    // indices -- CLONE_VM without CLONE_FILES, which is both posix_spawn's shape
+    // and POSIX fork's (LINEAGE L-3c-1). Descriptors a child may not alias --
+    // hardware per I-5, a /srv connection Spoor, a Loom ring -- are SKIPPED,
+    // leaving a HOLE at that index rather than refusing the fork;
+    // handle_table_copy_into's header carries that reasoning.
+    //
+    // Note this inheritance is the FORK shape's alone. A kernel-entry rfork
+    // child (every SYS_SPAWN_*) still gets a fresh empty table, because spawn
+    // endows its fds explicitly via fd_list and inheriting on top of that would
+    // hand the child the parent's whole table.
+    //
+    // (Before L-3c-1 this comment called the then-empty table "exactly
+    // posix_spawn's shape". It was not: CLONE_VM without CLONE_FILES gives a
+    // COPIED table, which is why posix_spawn's file_actions do not disturb the
+    // parent. Empty and copied are different shapes.)
     //
     // v1.0 LIMIT -- RFPROC alone is REFUSED (-T_E_INVAL), not served. Without
     // RFMEM the child gets a fresh EMPTY address space, so resuming it at its

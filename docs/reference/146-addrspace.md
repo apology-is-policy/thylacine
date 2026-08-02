@@ -56,7 +56,7 @@ Two consequences were decided rather than emergent (LINEAGE §5.1):
   the I-31 corruption the ASID arc exists to prevent, and holding the field here
   makes it structurally unrepresentable. **I-31 is unaffected in substance**;
   `specs/asid.tla` re-runs unchanged as the gate (verified clean at L-1: 443457
-  distinct states, depth 18).
+  distinct states; see the note on the depth figure at the end of this file).
 - **The I-32 charge follows the AddrSpace.** The per-Proc cap becomes a per-AS
   cap. A fork bomb is still bounded — N children means N address spaces, each
   capped — and a COW break (L-4) will charge *the breaker*, which is where the
@@ -136,7 +136,8 @@ by the rollover's per-CPU `flush_pending` local flush (ARCH §6.2.1).
 address space is one ASID however many Procs hold it — I-31 composes with
 sharing by construction, as a direct consequence of L-1 having moved
 `context_id` into the object. `asid.tla` re-ran unperturbed (443457 distinct,
-depth 18 — identical to L-1 and L-2a).
+identical to L-1 and L-2a; the depth figure is not a fingerprint — see the end
+of this file).
 
 ---
 
@@ -196,3 +197,9 @@ Landed at L-1. `struct Proc` went **408 → 376 bytes**; all 23 surviving offset
 Reserved for later chunks: `execve` (L-2), `rfork(RFPROC|RFMEM)` + VFORK (L-3),
 the COW break arm + a real per-page share count (L-4), `SYS_RFORK` +
 child-context restoration (L-5).
+
+---
+
+## A note on the `asid.tla` figures
+
+**The depth figure is NOT a fingerprint.** Measured 2026-08-02: `-workers auto` reported depth 17 and 18 on back-to-back runs of the identical command, while `-workers 1` reported 17 on three consecutive runs. TLC's reported search depth varies with worker scheduling; the DISTINCT-STATE COUNT (443457) is the stable figure and the one to compare across chunks. Earlier chunks recorded "depth 18" as though it pinned the model -- it does not.

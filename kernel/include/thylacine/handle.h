@@ -308,6 +308,43 @@ void handle_put(struct Handle *h);
 // Maps to specs/handles.tla::HandleDup(p, h, new_rights).
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 
+// LINEAGE L-3c: copy `src`'s handle table into `dst` -- the fd inheritance a
+// forked child gets and a spawned child does not. Called from rfork_internal
+// on the FORK shape only; `dst` must be a freshly-allocated, still-unpublished
+// Proc whose table is empty.
+//
+// SLOT INDICES ARE PRESERVED: the parent's fd N becomes the child's fd N. That
+// is POSIX, and it is why this cannot be a loop over handle_dup -- dup installs
+// into the first free slot, so a single skipped handle would renumber every fd
+// after it and the child's inherited stdout would land somewhere else entirely.
+//
+// A slot is copied only if `handle_slot_may_alias` admits it -- the SAME
+// predicate handle_dup uses, because both create a second handle naming one
+// object and so face the identical hazard. The consequence worth stating: a
+// hardware handle (I-5), a /srv connection Spoor, and a Loom ring are NOT
+// copied, and the child gets a HOLE at that index rather than the fork being
+// refused. That is deliberate. I-5 is a property of the handle -- "pinned to
+// the Proc that created it" -- not a property of forking, so the fork proceeds
+// and the child simply does not hold what it cannot hold. Refusing the whole
+// fork would instead punish a parent for holding a handle it never intended to
+// pass, and would make a driver unable to create a process at all. A child that
+// needs hardware authority gets it the way every other Proc does: the warden's
+// confer path (the I-34 allowance), never fd inheritance.
+//
+// The hole is observable (the child sees EBADF at that index, and its next
+// open lands there where Linux's would not), which is the honest report of an
+// authority the child was never eligible to hold.
+//
+// Rights are carried verbatim (I-6 is satisfied by non-increasing, and POSIX
+// fork gives the child the parent's access). Each copied slot takes its own
+// reference on the underlying object; the child's handle_table_free releases
+// them, so a failed rfork's proc_free rollback is already correct.
+//
+// Cannot fail: no allocation per slot, and the destination is known-empty and
+// the same size. Returns the number of slots copied (a diagnostic, and what
+// the regression tests assert on).
+int handle_table_copy_into(struct Proc *dst, struct Proc *src);
+
 // Type classifiers. Map to specs/handles.tla's TxKObjs / HwKObjs /
 // SrvKObjs partitions. kobj_kind_is_transferable returns true for
 // Process / Thread / BURROW / Spoor; kobj_kind_is_hw for MMIO / IRQ /

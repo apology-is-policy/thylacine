@@ -555,6 +555,97 @@ void handle_put(struct Handle *h) {
     h->obj    = NULL;
 }
 
+// May a SECOND handle be made to name this slot's object? Both callers create
+// exactly that -- `handle_dup` a second slot in the SAME table, the LINEAGE
+// L-3c fork copy a slot in ANOTHER Proc's table -- so both ask the identical
+// question and must not answer it differently. That is why this is one
+// predicate rather than two lists: a kind admitted here is admitted to both,
+// and a kind added to `enum kobj_kind` is refused by both until someone
+// deliberately classifies it.
+//
+// Caller holds the slot's table lock (the fields are read, not copied first).
+static bool handle_slot_may_alias(const struct Handle *s) {
+    // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: forbidden for every
+    // NON-transferable kind. Maps to specs/handles.tla's HandleDup
+    // precondition `h.kobj \in TxKObjs` -- the runtime guard is its exact
+    // negation, `!kobj_kind_is_transferable`.
+    //   - Hardware (MMIO / IRQ / DMA / Interrupt / PCI): drivers hold exactly
+    //     one handle per hw resource -- extends I-5 to "non-duplicable at all",
+    //     and across a fork that is I-5 proper (the handle is pinned to the
+    //     Proc that created it; a child is a different Proc).
+    //   - Srv: exactly one connection Spoor per Proc (CORVUS-DESIGN.md section 6.2).
+    //   - Loom: a ring is pinned to the Proc whose handle table its REGISTERED
+    //     handles index, so a copy would name the wrong table (Loom-2a).
+    if (!kobj_kind_is_transferable(s->kind)) return false;
+
+    // stalk-3b-beta NoSrvSpoorDup: a devsrv Spoor (dc='s' -- a /srv root, a
+    // service-ref, or a CONNECTION endpoint) is pinned to its Proc; a second
+    // handle naming the one connection would blur the SO_PEERCRED origin
+    // (handles.tla SrvHandlesAtOrigin) and double-drive the SrvConn /
+    // registry-ref lifecycle at close. dev9p roots (dc='9') stay dup-able.
+    if (s->kind == KOBJ_SPOOR && s->obj && ((struct Spoor *)s->obj)->dc == 's')
+        return false;
+
+    return true;
+}
+
+// LINEAGE L-3c: copy `src`'s handle table into `dst`, PRESERVING slot indices.
+// The header carries the contract; this body is `handle_dup`'s capture-acquire-
+// install repeated per slot, with two differences that are the whole of it:
+// the install goes to a FIXED index rather than the first free one (POSIX: the
+// child's fd N is the parent's fd N, so a skipped slot must leave a hole, never
+// renumber the ones after it), and the rights are carried VERBATIM rather than
+// narrowed by a caller-supplied ceiling.
+int handle_table_copy_into(struct Proc *dst, struct Proc *src) {
+    struct HandleTable *dt = proc_handles_or_extinct(dst);
+    struct HandleTable *st = proc_handles_or_extinct(src);
+    // Not merely unexpected -- the two-lock hold below would deadlock on
+    // itself, and a table cannot meaningfully be copied onto itself.
+    if (dt == st) extinction("handle_table_copy_into: src and dst share a table");
+
+    int copied = 0;
+
+    // Lock order: SOURCE then DESTINATION. No cycle is possible because this is
+    // the only two-table operation in the tree, and because `dst` is a Proc
+    // rfork_internal has allocated but not yet linked into its parent's
+    // children list -- nothing else can reach it to take its lock at all. The
+    // destination lock is therefore uncontended by construction; it is taken
+    // anyway so this stays correct if publication ever moves earlier.
+    //
+    // Holding the source lock across the WHOLE walk is what makes the child's
+    // table a coherent snapshot: a peer thread of a multi-threaded parent
+    // cannot close fd 3 and open a different object at 3 midway through
+    // (the #844 shared-table hazard).
+    spin_lock(&st->lock);
+    spin_lock(&dt->lock);
+    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+        const struct Handle *s = &st->slots[i];
+        if (s->magic != HANDLE_MAGIC) continue;
+        if (!handle_slot_may_alias(s)) continue;
+        if (dt->slots[i].magic != 0)
+            extinction("handle_table_copy_into: destination slot not free");
+
+        // The copy is a NEW reference; the child's own close (or its
+        // handle_table_free at death) releases it. Non-blocking under the lock,
+        // exactly as handle_dup does it.
+        handle_acquire_obj(s->kind, s->obj);
+        dt->slots[i].magic  = HANDLE_MAGIC;
+        dt->slots[i].kind   = s->kind;
+        // Rights VERBATIM. I-6 requires rights to be non-increasing across a
+        // dup/transfer/endow, and equal satisfies that -- POSIX fork gives the
+        // child the same access the parent had, and narrowing here would make
+        // an inherited fd silently less capable than the one it was forked from.
+        dt->slots[i].rights = s->rights;
+        dt->slots[i].obj    = s->obj;
+        __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
+        copied++;
+    }
+    spin_unlock(&dt->lock);
+    spin_unlock(&st->lock);
+
+    return copied;
+}
+
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     struct HandleTable *t = proc_handles_or_extinct(p);
     if (h < 0 || h >= PROC_HANDLE_MAX) return -1;

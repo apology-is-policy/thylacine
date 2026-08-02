@@ -509,13 +509,22 @@ the only thing that tells them apart. Three pieces:
   than harden it.
 
 **Two things are deliberately NOT here.** The child's handle table is fresh and
-empty (`RFFDG` unsupported) — `CLONE_VM` *without* `CLONE_FILES`, which is
-exactly posix_spawn's shape and not POSIX fork's; the copy is L-3c, and #119 is
-its hazard (a copy would duplicate hardware handles, which I-5 forbids). And
-`RFPROC` alone is **refused**, not served: without `RFMEM` the child gets a
-fresh empty address space, so resuming it at its parent's PC faults on the first
-instruction fetch. A private child address space means copy-on-write, which is
-L-4.
+empty; the copy is L-3c, and #119 is its hazard (a copy would duplicate
+hardware handles, which I-5 forbids). And `RFPROC` alone is **refused**, not
+served: without `RFMEM` the child gets a fresh empty address space, so resuming
+it at its parent's PC faults on the first instruction fetch. A private child
+address space means copy-on-write, which is L-4.
+
+> **Correction (L-3c-1).** This paragraph originally described the empty table
+> as "`CLONE_VM` *without* `CLONE_FILES`, which is exactly posix_spawn's shape".
+> That was wrong, and §2.4 of this document already said so: Linux's
+> `CLONE_VM` without `CLONE_FILES` gives the child a **copied** fd table, which
+> is *why* posix_spawn's `dup2`/`close` file_actions do not disturb the parent.
+> Empty and copied are not the same shape, and the sentence read as though the
+> gap were a deliberate ABI match rather than a deferral. The deferral itself
+> was real and correctly flagged; only the justification was fiction. This is
+> §2's instruction firing on this document's own newest section — the
+> measurement was there, one section away, and the later text drifted off it.
 
 ##### The gate this chunk was given was unprovable, and measuring said so
 
@@ -567,6 +576,63 @@ backtrace cannot walk into the parent's stack.
 W^X (I-12) holds throughout: a COW page is R or RW, never X — text is not COW
 at all (F-C), so no page transits a writable state while executable.
 
+#### As built at L-3c-1 — the handle-table copy
+
+`handle_table_copy_into(dst, src)` copies a Proc's handle table into another
+**preserving slot indices**, and `rfork_internal` calls it on the fork shape
+only. That gate — `if (fc)` — is the chunk's one design decision, and it is
+about contracts rather than convenience:
+
+| primitive | descriptors | why |
+|---|---|---|
+| `SYS_SPAWN_*` | fresh + exactly the `fd_list` endowed | a capability hand-over: the parent states what it means to give |
+| `SYS_RFORK` | inherited | the child *is* the parent, continuing on the same frame, so its very next instruction may name any descriptor the parent held |
+
+These are not two settings of one knob; they are what the two calls **mean**.
+Every existing `rfork`/`rfork_with_caps` call site (joey plus the five spawn
+thunks) passes a kernel `entry` and no `fc`, so gating on the fork shape leaves
+the whole spawn family byte-unchanged **by construction** rather than by a flag
+a future caller could set wrong. `RFFDG` stays unsupported: under this tree's
+polarity it would mean two Procs *sharing* one table, which needs a refcounted
+`HandleTable` — an L-3a-style extraction, not this.
+
+**Index preservation is the reason this is not a loop over `handle_dup`.** Dup
+installs into the first free slot, so one skipped handle would renumber every
+descriptor after it and the child's inherited stdout would land somewhere else
+entirely. A skipped slot leaves a **hole**.
+
+**What is skipped, and why a hole rather than a refusal.** The admissibility
+test is `handle_slot_may_alias` — the *same* predicate `handle_dup` uses,
+extracted rather than rewritten, because both operations create a second handle
+naming one object and so face the identical hazard. Hardware (I-5), a `/srv`
+connection Spoor (the SO_PEERCRED origin), and a Loom ring (pinned to the table
+its registered handles index) do not cross. The fork still succeeds: I-5 is a
+property of the *handle* — "pinned to the Proc that created it" — not a property
+of forking, so the child simply does not hold what it was never eligible to
+hold. Refusing the whole fork would instead punish a parent for holding a
+handle it never intended to pass, and would leave a driver unable to create a
+process at all. A child needing hardware authority gets it the way every other
+Proc does: the warden's confer path (the I-34 allowance).
+
+The hole is observable — the child sees `EBADF` there, and its next `open`
+lands at an index Linux's would not — which is the honest report of an
+authority it could not inherit.
+
+##### The two coverage layers are blind to each other, in both directions
+
+Demonstrated by three revert probes rather than asserted:
+
+| sabotage | unit suite | `/fork-probe` |
+|---|---|---|
+| admit every kind (drop both clauses) | **1283/1285 FAIL** — and at *two* assertions, `fork.table_copy` on the hw skip and `devsrv.open_connect_byte` on the `dc='s'` clause, so a fix to one cannot mask the other | unreachable (a failing suite aborts the boot) |
+| remove `rfork_internal`'s call | **1285/1285 PASS** — fully green through the bug | **FAIL**, at its own assertion |
+| compact instead of preserving the index | **1284/1285 FAIL**, at the *hole* assertion — a different one from the first probe | would pass (no v1.0 parent has a skipped slot below a live one) |
+
+The middle row is the one worth carrying: the kernel test can reach
+`handle_table_copy_into` directly but nothing kernel-side can reach
+`rfork_internal`'s *call* to it, which sits behind an `RFMEM` gate kproc can
+never pass. The rule and the wiring need separate proofs.
+
 ---
 
 ## 6. Invariants
@@ -610,12 +676,13 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | Chunk | Scope | Gate |
 |---|---|---|
 | **L-0** | This document + the ARCH §25.4 row + the §28 invariant number + `VIVARIUM.md` §9/§10 updates. **Scripture only, no code.** | user signoff |
-| **L-1** ✅ **LANDED** | `struct AddrSpace` extraction. Pure refactor: `ref` is 1 everywhere, nothing shares yet. **Seven** fields moved; `struct Proc` 408 → 376 B; 239 compiler-enumerated conversion sites across 22 files; 23 offset asserts re-baselined. As-built: `docs/reference/146-addrspace.md`. | **MET** — 1272/1272 → 1276/1276 (the four new `addrspace.*`), boot OK, 0 EXTINCTION, `asid.tla` clean (443457 states, depth 18), SMP gate; the nine Proc-field predicates converted as a set (the four `mmu.c` parameter checks correctly did not) |
+| **L-1** ✅ **LANDED** | `struct AddrSpace` extraction. Pure refactor: `ref` is 1 everywhere, nothing shares yet. **Seven** fields moved; `struct Proc` 408 → 376 B; 239 compiler-enumerated conversion sites across 22 files; 23 offset asserts re-baselined. As-built: `docs/reference/146-addrspace.md`. | **MET** — 1272/1272 → 1276/1276 (the four new `addrspace.*`), boot OK, 0 EXTINCTION, `asid.tla` clean (443457 states; the depth figure TLC reports varies with worker count and is not a fingerprint), SMP gate; the nine Proc-field predicates converted as a set (the four `mmu.c` parameter checks correctly did not) |
 | **L-2a** ✅ **LANDED** | `execve` (stage 1) for a **single-threaded** Proc: the AddrSpace-targeted load path (`exec_load_into` + the `*_in` VMA/burrow forms), `proc_exec_replace`, `sched_activate_addrspace`, `SYS_EXECVE = 101`. A multi-threaded caller is refused with `-EAGAIN`. | **MET** — `/exec-probe` re-execs itself and the successor prints from an fd inherited across the swap; a **failed** execve returns with the caller's address space intact; all three load-bearing pieces revert-probed to *distinct* failures |
 | **L-2b** | The de_thread primitive: a per-Thread die flag + wait-for-EXITING + reap, removing L-2a's multi-thread refusal. | a multi-thread Proc's peers are all EXITING and off-CPU before the swap; own audit round |
 | **L-3a** ✅ **LANDED** | The share substrate: the VMA drain moves into `addrspace_unref`'s last drop (fixing the same latent bug in `proc_free` *and* `proc_exec_replace`), `proc_alloc_in(share)`, `rfork_internal` accepts `RFPROC\|RFMEM`, the device quiesce gates on sole ownership, `RFMEM`-without-a-space refused. No EL0 surface. | **MET** — 1279/1279 → 1282/1282, boot OK, 0 EXTINCTION, `asid.tla` unperturbed (443457, depth 18); all three pieces revert-probed to *distinct* failures |
 | **L-3b** ✅ **LANDED** | Child-context restoration (pulled forward from L-5 per §5.4's correction) **+ the `SYS_RFORK = 102` EL0 surface**, which had to come with it: `fork_frame_init`, `thread_create_forked`, `thread_fork_trampoline`, `rfork_forked`, and `libthyla_rs::rfork_spawn` (the musl-`clone.s` shim the different-stack return demands). The handle-table copy moved OUT to L-3c — it is orthogonal, and #119 is a decision that deserves its own reasoning. | **MET, but not by the gate as written** — that gate said *kernel-driven*, and measuring showed a kernel test cannot observe an eret to EL0 at all (kproc has neither an address space nor a frame). Replaced by `/fork-probe`: six legs, boot-fatal. Revert-probed to the sharpest available pairing — ignoring `child_sp` leaves the **unit suite fully green** while only the in-guest leg fails |
-| **L-3c** | The handle-table copy (§2.4; #119 — a copy would duplicate hardware handles, which I-5 forbids, so this is skip-or-refuse and the choice must be stated) + the VFORK suspend. | a native prover forks-and-execs; parent-suspend released on both exec and exit; a killed parent unwinds (#811) |
+| **L-3c-1** ✅ **LANDED** | The handle-table copy (§2.4; #119). `handle_table_copy_into`, index-preserving, gated on the fork shape so the spawn family is byte-unchanged by construction. **Skip, not refuse** — the choice is stated at §5.4's as-built section, and the admissibility test is the SAME predicate `handle_dup` uses, extracted so the two cannot drift. | **MET** — 1284 → 1285/1285, boot OK, `/fork-probe` leg H (a child writes to a pipe fd only the parent opened). Three revert probes, each failing at its own assertion; removing the wiring leaves the **unit suite fully green** |
+| **L-3c-2** | The VFORK suspend (#122): park the parent until the child execs or exits, death-interruptible per #811. | a native prover forks-and-execs; parent-suspend released on both exec and exit; a killed parent unwinds |
 | **L-3d** | The VIVARIUM `clone` row. | **a stock `posix_spawn` binary runs in a vivarium** |
 | **L-4** | Per-page share counts + the COW break arm (stage 3a). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |

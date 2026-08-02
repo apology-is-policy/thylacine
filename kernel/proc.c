@@ -520,9 +520,17 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // stable to read here: this Proc is a ZOMBIE with no threads, and a
     // reference can only be taken by an rfork from a LIVE parent.
     //
-    // Walk (a) needs no such gate today: handle tables are per-Proc and hardware
+    // Walk (a) needs no such gate: handle tables are per-Proc and hardware
     // handles are non-transferable (I-5), so no second Proc can hold this
-    // device's fd. A handle-table COPY would break exactly that -- see #119.
+    // device's fd.
+    //
+    // L-3c-1 landed the handle-table copy this comment used to name as the
+    // thing that WOULD break it (#119), and the property survives BECAUSE the
+    // copy SKIPS hardware handles. That is not incidental -- it is the concrete
+    // form of the abstract I-5 argument: had the copy carried them, a forked
+    // child's DEATH would run this walk and reset device registers its parent
+    // is still driving. Any future change that lets a hardware handle reach a
+    // second Proc must add a sole-ownership gate here, exactly like walk (b).
     bool as_sole = (addrspace_ref_count(p->as) == 1);
     for (struct Vma *v = as_sole ? p->as->vmas : NULL; v; v = v->next) {
         struct Burrow *b = v->burrow;
@@ -1284,7 +1292,30 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     }
     child->territory = child_pgrp;
 
-    // LINEAGE L-3b: the ONLY step that differs between the two child shapes.
+    // LINEAGE L-3c: fd inheritance -- the SECOND step that differs between the
+    // two child shapes, and it keys off the same `fc` for a reason that is
+    // about CONTRACTS, not convenience.
+    //
+    // The two primitives that reach this function make opposite promises about
+    // descriptors. SYS_SPAWN_* takes a program plus an explicit `fd_list` and
+    // endows exactly that -- a capability-style hand-over where the parent
+    // states what it means to give. SYS_RFORK takes no such list because there
+    // is nothing to state: the child IS the parent, continuing on the same
+    // frame, so it must see what the parent sees or its very next instruction
+    // writes to a descriptor that is not there.
+    //
+    // So "fresh + endowed" and "inherit" are not two settings of one knob; they
+    // are what the two calls MEAN. Deriving from `fc` -- the fork shape -- says
+    // that directly, and leaves every spawn path byte-unchanged by construction
+    // rather than by a flag a future caller could set wrong. (The both-or-
+    // neither check above already pins `fc` to exactly the fork shape.)
+    //
+    // RFFDG stays unsupported: under this tree's polarity it would mean SHARE
+    // one table between two Procs, which needs a refcounted HandleTable object
+    // -- an L-3a-style extraction, not this.
+    if (fc) handle_table_copy_into(child, parent);
+
+    // LINEAGE L-3b: the other step that differs between the two child shapes.
     // Everything above -- caps, identity, phenotype, allowance, env, territory,
     // session/pgroup, the legate tag -- is shared deliberately: a forked child
     // and a kernel-entry child inherit identically, and keeping one body is

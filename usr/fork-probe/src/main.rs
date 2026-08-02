@@ -14,10 +14,12 @@
 //      the parent's own code path. A kernel that ignored the frame and entered
 //      at some fixed point could not get here at all.
 //   B  the two Procs SHARE the address space: the child writes a marker into
-//      a static the parent then reads. This is what RFMEM means, and it is
-//      also the channel -- the child has no fds (RFFDG is unsupported, so its
-//      handle table is fresh and empty), which is precisely posix_spawn's
-//      shape and precisely why shared memory is the right observation point.
+//      a static the parent then reads. This is what RFMEM means. Shared memory
+//      remains the right observation point for A/B/C even now that the child
+//      inherits fds (leg H), because it is the only channel that works before
+//      anything about the handle table has been established -- a leg that
+//      reported through an fd could not tell "did not resume" from "resumed
+//      but inherited nothing".
 //   C  the child runs on ITS OWN stack: it writes a recognisable pattern deep
 //      into its own stack region and the parent verifies afterwards that the
 //      bytes landed there. If the child had resumed on the parent's SP this
@@ -32,6 +34,12 @@
 //      alone and a zero stack are both refused, from a Proc that genuinely has
 //      an address space to share (the unit test reaches these from kproc,
 //      which would fail them for a different reason anyway).
+//   H  (L-3c) the child INHERITS the parent's descriptors: it writes to a pipe
+//      fd the parent opened, named only by its number, and the parent reads the
+//      bytes back. That the copy happens at all is only provable here -- the
+//      kernel test can call handle_table_copy_into directly, but nothing
+//      kernel-side can reach rfork_internal's call to it, which sits behind an
+//      RFMEM gate kproc cannot pass.
 //
 // Legs A/B/C together are the chunk's whole claim, and no two of them can be
 // satisfied by the same accident: a kernel that entered the child at a fixed
@@ -48,8 +56,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::io::{self, Write};
-use libthyla_rs::{rfork_spawn, t_exits, t_getpid, t_putstr, t_wait_pid_for,
-                  t_wait_if_exited, T_RFMEM, T_RFPROC, T_SYS_RFORK};
+use libthyla_rs::{rfork_spawn, t_close, t_exits, t_getpid, t_pipe, t_putstr,
+                  t_read, t_wait_pid_for, t_wait_exitstatus, t_wait_if_exited,
+                  t_write, T_RFMEM, T_RFPROC, T_SYS_RFORK};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -108,6 +117,21 @@ const STACK_WITNESS: u64 = 0x5741_434B_5741_434B; // "WACKWACK"
 // stack -- distinct from 0 (never ran / cannot see this page) so leg C's
 // failure is told apart from legs A and B's.
 const WRONG_STACK: u64 = 0x0000_BAD5_7ACC_0000;
+
+// Leg H (LINEAGE L-3c): the fd the CHILD writes to, published by the parent
+// before the fork. The child never opens it -- if it can write to it at all,
+// it inherited it, at that exact index.
+static INHERITED_WR_FD: AtomicU64 = AtomicU64::new(0);
+const INHERIT_TOKEN: &[u8] = b"forked-fd-ok";
+
+extern "C" fn child_inherit_main(_arg: u64) -> ! {
+    let fd = INHERITED_WR_FD.load(Ordering::Acquire) as i64;
+    // A raw t_write, not io::stdout: the point is to name a NUMBER the parent
+    // chose and see whether it resolves in this Proc's table. Anything that
+    // re-opened or re-derived the fd would prove nothing.
+    let n = unsafe { t_write(fd, INHERIT_TOKEN.as_ptr(), INHERIT_TOKEN.len()) };
+    unsafe { t_exits(if n == INHERIT_TOKEN.len() as i64 { 0 } else { 1 }) }
+}
 
 extern "C" fn child_main(arg: u64) -> ! {
     // Leg C: prove we are on our own stack by writing through a local, whose
@@ -256,8 +280,52 @@ pub extern "C" fn rs_main() -> i32 {
 
     set_tpidr_el0(0);   // restore; nothing here needs it, but leave no residue
 
+    // ---- Leg H: fd inheritance (LINEAGE L-3c) ---------------------------
+    //
+    // The parent opens a pipe and publishes ONLY the write end's NUMBER. The
+    // child writes to that number and the parent reads the bytes back off the
+    // read end. Nothing else can produce that result: the child never called
+    // pipe/open, so for the write to land the descriptor must already exist in
+    // its table, at the index the parent chose, carrying write rights.
+    //
+    // This is the WIRING half of L-3c. The RULE half -- which slots cross,
+    // that a skipped one leaves a hole rather than renumbering, that the
+    // reference is the child's own -- is `fork.table_copy`, which can reach
+    // handle_table_copy_into directly. Neither half can see the other's bugs:
+    // a copy that dropped every hardware handle AND every pipe would still
+    // pass the kernel test's hole assertion, and a copy that renumbered would
+    // still pass this leg if the parent's fd happened to be the lowest.
+    let (rd, wr) = unsafe { t_pipe() };
+    if rd < 0 {
+        fail("t_pipe failed, so leg H cannot run");
+    }
+    INHERITED_WR_FD.store(wr as u64, Ordering::Release);
+
+    let pid3 = unsafe { rfork_spawn(stack_top, 0, child_inherit_main, 0) };
+    if pid3 <= 0 {
+        fail("the inherit-leg rfork_spawn did not return a child pid");
+    }
+    let mut st3: i32 = -1;
+    if unsafe { t_wait_pid_for(pid3 as i32, 0, &mut st3 as *mut i32) } != pid3 {
+        fail("wait_pid_for did not reap the inherit-leg child");
+    }
+    if !t_wait_if_exited(st3) || t_wait_exitstatus(st3) != 0 {
+        fail("the child could not write to the inherited fd -- a forked child \
+              must inherit its parent's descriptors (L-3c)");
+    }
+
+    let mut got = [0u8; 32];
+    let n = unsafe { t_read(rd, got.as_mut_ptr(), got.len()) };
+    if n != INHERIT_TOKEN.len() as i64 || &got[..INHERIT_TOKEN.len()] != INHERIT_TOKEN {
+        fail("the bytes the child wrote to the inherited fd did not arrive");
+    }
+    unsafe {
+        t_close(rd);
+        t_close(wr);
+    }
+
     mark("fork-probe: PASS (resumed at the parent's PC, x0 = 0, own stack, \
-          shared address space, distinct reapable pid)");
+          shared address space, distinct reapable pid, inherited fds)");
     0
 }
 

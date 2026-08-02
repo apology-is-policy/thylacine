@@ -1123,11 +1123,14 @@ struct fork_context {
 // Inherits identically to `rfork` in every other respect: the two shapes run
 // the same body and differ only in how the child's first Thread is built.
 //
-// The child's HANDLE TABLE is fresh and EMPTY (RFFDG is unsupported), so this
-// is CLONE_VM WITHOUT CLONE_FILES -- which is precisely posix_spawn's shape,
-// but NOT POSIX fork's. A child that must inherit its parent's fds needs the
-// table copy, which is a separate decision with its own hazard: a copy would
-// duplicate hardware handles, and I-5 makes those non-transferable.
+// LINEAGE L-3c: the child's HANDLE TABLE is a COPY of the caller's, at the
+// same slot indices -- CLONE_VM without CLONE_FILES, which is both posix_spawn's
+// shape and POSIX fork's. Descriptors a child may not alias (hardware per I-5,
+// a /srv connection Spoor, a Loom ring) are SKIPPED, leaving a hole rather than
+// refusing the fork; `handle_table_copy_into`'s header carries that reasoning.
+// Note this is the fork shape's inheritance, NOT rfork()'s: a kernel-entry
+// child still gets a fresh empty table, because SYS_SPAWN_* endows its fds
+// explicitly and inheriting on top of that would hand over the whole table.
 //
 // Returns the child pid to the parent, or -1. The CHILD does not return from
 // here at all -- it resumes at EL0 with x0 = 0.

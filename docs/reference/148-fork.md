@@ -204,10 +204,18 @@ branches only at the final `thread_create_*` call; keeping one body is what
 guarantees the two shapes inherit identically rather than via two lists that
 drift.
 
-The **handle table is fresh and empty**. That is `CLONE_VM` *without*
-`CLONE_FILES` — precisely posix_spawn's shape, and deliberately not POSIX
-fork's. The copy is L-3c, and #119 is its hazard: a copy would duplicate
-hardware handles, which I-5 makes non-transferable.
+At L-3b the **handle table is fresh and empty**; the copy is L-3c-1, and #119 is
+its hazard (a copy would duplicate hardware handles, which I-5 makes
+non-transferable). Descriptor inheritance landed at L-3c-1 — see below.
+
+> This paragraph used to call the empty table "`CLONE_VM` *without*
+> `CLONE_FILES` — precisely posix_spawn's shape". **That was wrong.** Linux's
+> `CLONE_VM` without `CLONE_FILES` gives a **copied** fd table, which is exactly
+> why posix_spawn's `dup2`/`close` file_actions do not disturb the parent. Empty
+> and copied are different shapes; the wording made a deferral read as a
+> deliberate ABI match. Corrected at L-3c-1, where the same sentence was found in
+> **five** places — and found by grepping the *claim's distinctive phrase*, not by
+> revisiting the topic file by file, which had already missed two of them.
 
 ---
 
@@ -273,11 +281,70 @@ building; never infer it from the script having run.
 
 ---
 
+## Descriptor inheritance (L-3c-1)
+
+A forked child's handle table is a **copy** of its parent's, at the same slot
+indices — `handle_table_copy_into`, called from `rfork_internal` on the fork
+shape only.
+
+That gate is the design decision. The two primitives reaching `rfork_internal`
+make opposite promises: `SYS_SPAWN_*` takes an explicit `fd_list` and endows
+exactly that (a capability hand-over — the parent states what it means to give),
+while `SYS_RFORK` takes no list because there is nothing to state, the child
+being the parent continuing on the same frame. Those are not two settings of one
+knob. Keying on the fork shape says so directly, and leaves the spawn family
+byte-unchanged by construction rather than by a flag a future caller could set
+wrong.
+
+**Indices are preserved, and a skipped slot leaves a hole.** This is why the
+copy is not a loop over `handle_dup`: dup installs into the first free slot, so
+one skip would renumber every descriptor after it.
+
+### What does not cross, and why the fork still succeeds
+
+Admissibility is `handle_slot_may_alias` — the *same* predicate `handle_dup`
+uses, extracted rather than rewritten, because both operations create a second
+handle naming one object. Two clauses, both load-bearing:
+
+| clause | excludes | why |
+|---|---|---|
+| kind | hardware (I-5), `KObj_Srv`, `KObj_Loom` | a hw handle is pinned to its creating Proc; a Loom ring is pinned to the table its registered handles index |
+| object | a devsrv Spoor (`dc == 's'`) | the only case where the *kind* is admissible and the *object* is not — a copy written against kinds alone would inherit a `/srv` connection and blur its kernel-stamped SO_PEERCRED origin |
+
+The fork **proceeds** and the child gets a hole. I-5 is a property of the
+handle — "pinned to the Proc that created it" — not a property of forking, so
+the child simply does not hold what it was never eligible to hold. Refusing the
+whole fork would punish a parent for holding a handle it never intended to pass,
+and would leave a driver unable to create a process at all. A child needing
+hardware authority gets it the way every other Proc does: the warden's confer
+path (the I-34 allowance).
+
+The hole is observable — `EBADF` at that index, and the child's next `open`
+lands where Linux's would not — which is the honest report of an authority it
+could not inherit.
+
+Rights cross **verbatim**. I-6 is satisfied by non-increasing, and narrowing
+would make an inherited fd less capable than the one it was forked from.
+
+### Both coverage layers are blind to the other's bugs
+
+| sabotage | unit suite | `/fork-probe` |
+|---|---|---|
+| admit every kind | **1283/1285 FAIL**, at *two* assertions in *two* tests (the kind clause and the object clause — so a fix to one cannot mask the other) | unreachable (a failing suite aborts the boot) |
+| remove `rfork_internal`'s call | **1285/1285 PASS** — fully green through the bug | **FAIL**, at its own assertion |
+| compact instead of preserving | **1284/1285 FAIL**, at the *hole* assertion | would pass |
+
+The middle row is the one to carry. The kernel test can call
+`handle_table_copy_into` directly, but nothing kernel-side can reach
+`rfork_internal`'s *call* to it — that sits behind an `RFMEM` gate kproc can
+never pass. The rule and the wiring need separate proofs.
+
+---
+
 ## Status
 
-Landed at L-3b. Suite 1282 → **1284/1284**; boot OK; 0 EXTINCTION; `asid.tla`
-unperturbed.
+L-3b + **L-3c-1** landed. Suite 1282 → **1285/1285**; boot OK; 0 EXTINCTION;
+`asid.tla` unperturbed.
 
-Reserved: the handle-table copy + the VFORK suspend (L-3c), the VIVARIUM
-`clone` row (L-3d), the COW break (L-4), and lifting the `RFPROC`-alone refusal
-once COW exists (L-5).
+Reserved: the VFORK suspend (L-3c-2), the VIVARIUM `clone` row (L-3d), the COW
+break (L-4), and lifting the `RFPROC`-alone refusal once COW exists (L-5).

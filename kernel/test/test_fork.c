@@ -30,6 +30,9 @@
 
 #include "test.h"
 
+#include <thylacine/burrow.h>
+#include <thylacine/handle.h>
+#include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
@@ -165,4 +168,97 @@ void test_fork_rfork_arg_rejection(void) {
                    "a WELL-FORMED request must get past the argument gate and "
                    "fail later (kproc has no address space to share) -- "
                    "otherwise 'validated' and 'refuses everything' look alike");
+}
+
+// ---------------------------------------------------------------------------
+// fork.table_copy -- LINEAGE L-3c
+//
+// The DECISION half of fd inheritance: which slots cross into the child, at
+// which indices, carrying which rights. Reachable from a kernel test because
+// handle_table_copy_into takes two Procs and nothing else -- the same split
+// frame_init uses, and for the same reason: rfork_internal's copy call sits
+// behind an RFMEM gate that kproc (no address space) can never pass, so the
+// WIRING is proven at EL0 by /fork-probe and the RULE is proven here.
+//
+// The layout is chosen so that index preservation and slot compaction are
+// DISTINGUISHABLE. A skipped handle sits BETWEEN two copied ones, so a copy
+// written as a loop over the first free slot -- which is what handle_dup does,
+// and the obvious way to write this -- lands the last handle one index low and
+// fails on exactly that assertion.
+// ---------------------------------------------------------------------------
+
+void test_fork_table_copy(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "parent proc");
+    struct Proc *child = proc_alloc();
+    TEST_ASSERT(child != NULL, "child proc");
+
+    // A real Burrow, so the refcount claim is measurable rather than asserted.
+    // burrow_create_anon's count of 1 is CONSUMED by handle_alloc (the Burrow
+    // convention), so the parent's handle is that one count.
+    struct Burrow *b = burrow_create_anon(PAGE_SIZE);
+    TEST_ASSERT(b != NULL, "burrow_create_anon");
+
+    hidx_t h_burrow = handle_alloc(parent, KOBJ_BURROW, RIGHT_READ | RIGHT_WRITE, b);
+    TEST_ASSERT(h_burrow == 0, "first alloc lands at slot 0");
+    hidx_t h_proc   = handle_alloc(parent, KOBJ_PROCESS, RIGHT_READ, parent);
+    TEST_ASSERT(h_proc == 1, "second alloc lands at slot 1");
+    // The skip. NULL obj is what test_handle.c uses for hw kinds -- and it is
+    // safe HERE for a reason worth stating: the correct code never calls
+    // handle_acquire_obj on a skipped slot, so there is no object to be real.
+    hidx_t h_mmio   = handle_alloc(parent, KOBJ_MMIO, RIGHT_READ, NULL);
+    TEST_ASSERT(h_mmio == 2, "the hw handle lands at slot 2");
+    hidx_t h_thread = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(h_thread == 3, "fourth alloc lands at slot 3");
+
+    TEST_EXPECT_EQ(burrow_handle_count(b), 1, "the parent holds the Burrow once");
+
+    int copied = handle_table_copy_into(child, parent);
+    TEST_EXPECT_EQ(copied, 3, "3 of the parent's 4 handles cross (the hw one does not)");
+    TEST_EXPECT_EQ(handle_table_count(child->handles), 3, "the child's table agrees");
+    TEST_EXPECT_EQ(handle_table_count(parent->handles), 4,
+                   "the parent is UNCHANGED -- a copy, not a move");
+
+    // Index preservation, including the hole. This is the POSIX property: the
+    // parent's fd N is the child's fd N.
+    struct Handle got;
+    TEST_ASSERT(handle_get(child, 0, &got) == 0, "child slot 0 occupied");
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_BURROW, "child slot 0 is the Burrow");
+    TEST_EXPECT_EQ(got.rights, (rights_t)(RIGHT_READ | RIGHT_WRITE),
+                   "rights carried VERBATIM, not narrowed");
+    TEST_ASSERT(got.obj == (void *)b, "the child names the SAME Burrow object");
+    handle_put(&got);
+
+    TEST_ASSERT(handle_get(child, 1, &got) == 0, "child slot 1 occupied");
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_PROCESS, "child slot 1 is the Process handle");
+    handle_put(&got);
+
+    // The hole. I-5: a hardware handle is pinned to the Proc that created it,
+    // so the child gets nothing at that index -- NOT a shifted-down copy of
+    // what came after it.
+    TEST_EXPECT_EQ(handle_get(child, 2, &got), -1,
+                   "the hw slot leaves a HOLE in the child (I-5)");
+
+    TEST_ASSERT(handle_get(child, 3, &got) == 0,
+                "child slot 3 occupied -- the skip left a hole rather than "
+                "compacting slot 3 down into slot 2");
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_THREAD, "child slot 3 is the Thread handle");
+    handle_put(&got);
+
+    // The refcount claim, measured on both edges.
+    TEST_EXPECT_EQ(burrow_handle_count(b), 2, "the copy took its OWN reference");
+
+    child->state = PROC_STATE_ZOMBIE;
+    proc_free(child);
+    TEST_EXPECT_EQ(burrow_handle_count(b), 1,
+                   "the child's death released exactly its own reference -- "
+                   "the parent's Burrow handle is still live");
+
+    struct Handle still;
+    TEST_ASSERT(handle_get(parent, 0, &still) == 0,
+                "the parent's handle survives the child entirely");
+    handle_put(&still);
+
+    parent->state = PROC_STATE_ZOMBIE;
+    proc_free(parent);
 }
