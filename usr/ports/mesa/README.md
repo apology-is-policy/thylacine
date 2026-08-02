@@ -49,14 +49,50 @@ reconstruction and then re-applied *from the emitted file* onto the `0004` tip
 to confirm it lands on `414b19f2…`; a patch that is only known to match the
 working tree it came from has not been checked at all.
 
-`tools/clade-stage1.sh --patches usr/ports/mesa/patches --tag mesa-26.1.6
---src /build/src/mesa` reconciles a builder fork against this series — it is
-generic, nothing in it is LLVM-specific — and since #117 it handles *growth*
+```bash
+tools/clade-stage1.sh --reconcile-only \
+    --patches usr/ports/mesa/patches --tag mesa-26.1.6 --src /build/src/mesa
+```
+
+reconciles a builder fork against this series. Since #117 it handles *growth*
 correctly: it compares `git patch-id --stable` per commit and `git am`s only the
 patches the fork does not already carry. It refuses if the fork holds Thylacine
 changes that are **not** in the series, which is the correct behaviour and
 exactly the state this directory exists to prevent. A drifted fork is not worth
 reconciling by hand: reset to the tag and re-run the recipe above.
+
+**`--reconcile-only` is not optional here, and the flag exists because this
+paragraph was wrong.** It previously claimed the script was "generic, nothing in
+it is LLVM-specific". The reconcile *is* generic; the script around it was not —
+`--src` pointing at a Mesa fork died on an LLVM-tree assert hundreds of lines
+before reaching it, and everything after the reconcile is a cmake+ninja of LLVM.
+Nothing catches that: no build parses this file, so the recipe sat here reading
+as verified for as long as nobody ran it. The flag was added (#120) to make the
+claim true rather than to withdraw it.
+
+### The fork was checked against this series, and the check had to be a different one
+
+#120 asked whether the builder's fork carried anything beyond what the
+CL-7b-2 script applied — reconstruction captures only what it *knows* about, so
+an interactive fix made directly on the builder would be invisible from here.
+The reconcile above could not answer it, for a second reason beyond the flag:
+**the 0005 changes were never committed on the builder.** They sat as
+modifications to two tracked files, so `git log mesa-26.1.6..HEAD` showed four
+commits, and `git am` refuses onto a dirty tree anyway.
+
+What answers it for an uncommitted delta is `patch-id` on the *working-tree
+diff*, which is what a patch file's identity is computed from too:
+
+```bash
+git -C /build/src/mesa diff | git patch-id --stable          # the fork
+git patch-id --stable < usr/ports/mesa/patches/0005-*.patch  # the durable form
+```
+
+Both returned `32e073482afff8c60cc237e15aedbe510fa18ef5`, with `git status
+--porcelain` showing exactly those two files and no untracked ones. So the
+reconstruction is complete: **the fork holds nothing this directory does not.**
+(`clade-stage1.sh` now refuses a dirty tree by name rather than letting `git am`
+fail with a message that mentions neither the series nor the script.)
 
 ## Cross-configure and build
 
@@ -83,6 +119,23 @@ meson setup /build/mesa-x /build/src/mesa --cross-file /build/cl7a-cross.ini \
     -Dopengl=true -Dgles1=disabled -Dgles2=disabled -Dosmesa=true
 ninja -C /build/mesa-x src/gallium/targets/osmesa/osmesa-prove
 ```
+
+That is the recipe for a *fresh* tree. The one that exists on the builder is
+**`/build/mesa-xOS5`** — the survivor of twenty `mesa-*` iteration dirs, and the
+tree that produced every shipped `osmesa-prove`. Rebuild there unless you mean
+to pay a full configure: it is ~900 objects warm, so picking up a new LLVM
+archive is a relink of seconds rather than a build of minutes. `build.ninja`
+does carry `libLLVMOrcJIT.a` as a declared dependency, so an LLVM-only change
+is seen — the relink does not need forcing (checked, #120).
+
+The fetched binary is copied to `build/clade/gl/osmesa-prove` on the dev host.
+**`tools/build.sh stage-clade` must be run before any pool bake that should
+carry it**: the `all` path re-stages `/storm` but *not* `/clade` (its comment
+says so — the multi-hundred-MiB copy is deliberately manual), so a plain
+`THYLACINE_BAKE_CLADE=1 tools/build.sh all` will happily re-mint the pool
+around the *previously* staged binary and report success. The #101 bake-verify
+does not catch it either: it gates on `/clade/bin/clang++`, so it proves the
+tree is present, never that this binary is current.
 
 Three configure requirements are non-obvious and each one *builds cleanly when
 set wrong* (CL-7 entry / CL-7a-1):
