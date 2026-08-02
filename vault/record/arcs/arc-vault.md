@@ -27,6 +27,7 @@ chunks:
   - chg-2026-08-02-async-sweep
   - chg-2026-08-02-boot-sweep
   - chg-2026-08-02-devices-interrupt-time-sweep
+  - chg-2026-08-02-devices-hwcap-sweep
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"

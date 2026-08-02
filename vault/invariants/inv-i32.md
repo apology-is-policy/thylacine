@@ -3,11 +3,11 @@ id: inv-i32
 type: inv
 title: "I-32 — the per-Proc resource floor"
 number: I-32
-guards: [sub-kernel-proc]
+guards: [sub-kernel-proc, sub-kernel-hwcap]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Statement
 
@@ -43,6 +43,16 @@ in the code as acceptable **for a floor**: a bound, not an accountant.
 `bounce_bytes` (the transient byte-I/O staging heap) is an I-32-shaped sixth
 axis with a softer failure mode — over budget *degrades* to the stack tier,
 producing a short op rather than a failed one.
+
+**DMA buffers are on none of these axes.** A driver's DMA pages come from the
+same allocator as anon pages but are charged to no counter, so `page_count` is
+not the true page footprint of any Proc holding hardware. The bound is elsewhere
+and differently shaped: the allowance's **per-buffer** ceiling
+([[sub-kernel-hwcap]]), which caps one buffer rather than their sum. A cumulative
+per-driver budget is a recorded future item. The gap is narrow today because the
+capability to create a DMA buffer is itself tightly held — so the bound is on
+*who may ask*, not on how much they may accumulate, which is a different kind of
+floor from the rest of this invariant and worth stating rather than assuming.
 
 **The exemption is the load-bearing part.** `proc_resource_exempt` is
 `principal_id == PRINCIPAL_SYSTEM` — the TCB, so the floor cannot pinch the

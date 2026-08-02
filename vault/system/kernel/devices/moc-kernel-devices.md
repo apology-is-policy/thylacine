@@ -9,13 +9,14 @@ updated: 2026-08-02
 The hardware the kernel drives itself, rather than handing to a userspace
 driver: the interrupt controller ([[sub-kernel-gic]]), the timebase and the wall
 clock ([[sub-kernel-timer]]), and the one surface that lends an interrupt out to
-a driver process ([[sub-kernel-irqfwd]]).
+a driver process ([[sub-kernel-irqfwd]]) — plus the objects that lend the rest of
+the hardware out ([[sub-kernel-hwcap]]).
 
-> **Partial area.** This is the first of two or three sweeps. Present: the
-> interrupt and time path. Not yet swept: the hardware-capability objects
-> (`mmio_handle`, `pci_handle`), the virtio and PCI transports (`virtio`,
-> `devpci`, `devhw`), and the synthetic device filesystems (`devramfs`,
-> `devenv`, `random`). Statements here are scoped to what has been read.
+> **Partial area.** Two of three sweeps done. Present: the interrupt and time
+> path, and the hardware-capability objects. Not yet swept: the virtio and PCI
+> transports (`virtio`, `virtio_pci`, `devpci`, `devhw`) and the synthetic device
+> filesystems (`devramfs`, `devenv`, `random`). Statements here are scoped to
+> what has been read.
 
 ## The organizing fact
 
@@ -45,6 +46,15 @@ because the event it counts has no other way to be seen: by a test, by
 `/proc/stat`, or by a person reading a diagnostic. In an area where correctness
 cannot be observed directly, counting is how the tests get a foothold.
 
+**The habit reaches its limit one sweep further in.** The hardware-capability
+objects carry six more counters, and *every* consumer of all six is a test —
+across the whole kernel and architecture trees there is not one production
+reader, and three of the six have no caller at all. Where the first sweep's
+counters at least fed a diagnostic someone might read, these exist purely so
+that an assertion has something to assert against. The pattern is the same one
+pushed to its end: when failure has no observer, you manufacture one, and
+sometimes the only observer you manufacture is the test suite.
+
 ## What this area owns, and what it deliberately does not
 
 The interrupt controller and the timebase are the two pieces of hardware the
@@ -57,9 +67,9 @@ kernel fiction with no hardware behind it at all.
 The line is drawn in the reservation table rather than here: the controller's
 registers, the console's, the clock's and the PCI config space are marked
 kernel-owned, so a process holding the hardware-creation capability cannot claim
-them. That gate lives with the hardware-capability objects and is described when
-they are swept — it is the enforcement site for the invariant that a driver's
-authority never reaches the machinery its own interrupts run on.
+them. That gate lives in [[sub-kernel-hwcap]] — it is the enforcement site for
+[[inv-i5]], the invariant that a driver's authority never reaches the machinery
+its own interrupts run on.
 
 Secondary-CPU bring-up (the power-controller trampoline, the online handshake)
 belongs to [[sub-kernel-sched-smp]]; this area only supplies the per-CPU
@@ -88,3 +98,5 @@ test that only ever runs on one of them is only ever evidence about one of them.
   idle, the wall-clock offset, and the boot-time clock read
 - [[sub-kernel-irqfwd]] — lending an interrupt to a driver process: exclusive
   claim, the wait/wake path, and the teardown that races a live interrupt
+- [[sub-kernel-hwcap]] — lending the rest: a register range, a DMA buffer and a
+  bus function, and the three different ways their exclusivity is enforced
