@@ -180,6 +180,19 @@ What is true, measured at L-4:
   would make "what does this field mean here?" a three-way case keyed on
   `flags`.
 
+> **Scope, established at L-4b.** Everything above is an argument about *reusing
+> this field*, and all of it stands. It is **not** an argument against a per-page
+> count as such, and L-4b builds one: a new `struct page.cow_share`, taking the
+> free `_pad` so `sizeof` is unchanged, maintained only by the Burrow layer at the
+> three sites that put a page into an anon slot. Neither of the two live
+> objections reaches it — the allocator never touches it, so per-block-head
+> staleness cannot arise, and it carries one meaning rather than a third. The
+> third objection ("promotion would still not give eager anon per-page ownership")
+> is moot: L-4a delivered exactly that ownership, which is why it was the
+> prerequisite. See §5.4's L-4b correction for why the count must be per-page at
+> all — the short version is that freeing a shared page requires knowing how many
+> holders remain, and that is a fact about the page, not about anyone's slot.
+
 ### 2.9 Eager anon has no per-page ownership — and that, not the counter, is what blocks COW
 
 Measured at L-4, and it is the finding that shapes the whole chunk. A COW break
@@ -929,6 +942,75 @@ when they were written.
 eager anon per-page ownership). The break then reads exactly as §5.4's prose
 already describes it, because by then the substrate matches the description.
 
+> **Correction (L-4b, user-voted 2026-08-02).** The count is **per-page**, and it
+> lives on `struct page` — a new `cow_share` field taking the existing free
+> `_pad`, so `sizeof(struct page)` stays 48 and the per-RAM BSS reservation is
+> unchanged. A per-slot array *shared across the sharing Burrows* — the reading
+> the paragraph above invites — is not implementable, and the reason is worth
+> stating because it is not the obvious one.
+>
+> **First, each address space needs its own Burrow.** The break has to put the
+> private page somewhere. It cannot go in a shared Burrow's slot, because another
+> sharer still needs the pristine page there; and it cannot be owned by the PTE
+> alone, because nothing in this tree frees user pages from a page table —
+> `vma_drain` frees `Vma` structs and drops mapping refs, and
+> `proc_pgtable_destroy` frees *table* pages, never leaves. A PTE-owned page would
+> simply leak at teardown. So a fork clones the Burrow: same size, its own
+> `filepages[]`, the same page pointers. That is Plan 9's `dupseg` exactly.
+>
+> **Then the count cannot be indexed by slot.** After a break, my slot and the
+> page the count describes have diverged, so a later fork bumps an entry that now
+> covers two different pages. The take-in-place decision *survives* this — the
+> recorded value is the sum over the groups sharing the entry, so it can never
+> under-report any one group, and `== 1` still implies a sole holder. The **free**
+> decision does not: one group drives the shared entry to zero and frees its page,
+> leaving the other group's page with a count of zero, to leak or to underflow.
+> Freeing a shared page requires knowing how many holders remain, and that number
+> is a property **of the page**. Any scheme that stores it elsewhere must maintain
+> a bijection between the slot and the page — which is precisely what a break
+> exists to destroy.
+>
+> The alternative that *preserves* the per-slot array is a **Burrow tree**
+> (Zircon's `VmObjectPaged`): the child's Burrow starts empty and inherits from
+> the parent's, so nothing is ever conflated. Weighed, and rejected on blast
+> radius. It makes a Burrow's `filepages[]` **partial**, and completeness is the
+> one assumption all ~20 of its readers in `burrow.c` and `arch/arm64/fault.c`
+> rest on — "not in my array" would stop meaning "not resident" and start meaning
+> "walk the chain", across the REVENANT fault arm, the read-ahead cluster,
+> `decommit`, `resident_count` and the teardown loop, all of them audited on the
+> strength of the assumption it removes. It also imports Zircon's hidden-parent
+> retention (a dead parent pinning pages its children already broke away from) and
+> multi-lock ordering along the chain. Against all that, its only win over the flat
+> count is skipping the pointer-array copy at fork — and both designs are equally
+> lazy about copying page *contents*, which is the expensive half and the entire
+> point of COW.
+>
+> **§2.8's reasoning is untouched, and still forbids what it forbade.** Its three
+> objections are all objections to *reusing* `refcount`: written per-block-head so
+> every tail page is stale, already double-booked as SLUB's inuse count, and
+> promotion would still not give eager anon per-page ownership. A new field
+> maintained only by the Burrow layer has neither of the first two, and the third
+> is moot — L-4a delivered exactly that ownership. What §2.8 ruled out turns out
+> not to be what L-4b needs.
+>
+> The obligation the new field inherits is §2.8's own hazard, *"a field whose name
+> states a contract nothing keeps"*. So the contract is: `cow_share` is meaningful
+> only while the page sits in an anon Burrow's `filepages[]` slot, and it is
+> **established, never inherited**, at every site that puts a page into one.
+> Measured, that is a closed set of three — `burrow_lazy_populate`
+> (`burrow.c:332`), the demand-zero install (`fault.c:523`), and the break itself.
+> Every other `filepages[]` writer is `BURROW_TYPE_FILE`: text, shared read-only
+> through the Image cache, never broken.
+>
+> **The lock is global, not per-Burrow.** Two sharers of a page hold *different*
+> Burrow locks, so no per-Burrow lock can serialise the decide. `cow.tla` says
+> "under the Burrow lock", but its actual requirement is that drop-decide-act be
+> **one atomic step** — that is what `BUGGY_BREAK_UNLOCKED` splits — and a global
+> COW leaf lock provides it. Plan 9 serialises `Page.ref` under `palloc.lock` for
+> the same reason. Held across the decide only, never across the copy or the
+> allocation. Hashing it by page index is a recorded seam, to be taken if it ever
+> measures.
+
 **Ordering inside the chunk is forced**: L-4b cannot be written against a
 substrate L-4a has not yet produced. The model comes before both.
 
@@ -998,7 +1080,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-3c-2** ✅ **LANDED** | The VFORK suspend (#122). `vfork_await_release` parks the parent on `child_waiters` until `vfork_child_released` — which reads `child->as`, so the condition IS the release rather than a record of it. Keyed on `RFMEM`, not a new flag: §9's fourth question, answered at §5.3's as-built section. One new wake (exec); death's already existed. | **MET** — 1285 → 1286/1286, boot OK, `/fork-probe` legs I (death arm) + J (exec arm, the successor blocks on a pipe so "still alive" is a fact not a race). Two revert probes: removing the park leaves the **unit suite fully green** while only the in-guest leg fails; removing the exec wake leaves it green *and* hangs the boot — the honest production symptom |
 | **L-3d** ✅ **LANDED** | The VIVARIUM `clone` row. `vivarium_clone_decide` (pure) + one `VIV_TIER2` entry + a shell that calls the SAME `sys_rfork_core` the native handler calls (extracted here, the V-8 `sys_fstat_for_proc` discipline). `CLONE_VM` without `CLONE_VFORK` is **refused**, not served — §8's as-built section carries why L-3c-2's fail-safe reasoning inverts for a stock Linux caller. Also replaced the four stale copies of the "native ceiling" literal with `VIV_NATIVE_CEILING` + a `_Static_assert`. | **MET, but not by the gate as written** — that gate named `posix_spawn`, which needs `execve` (221) and `wait4` (260) as well; both are L-6's, are real translators, and are dependencies of *posix_spawn* rather than of *the clone translation*. Replaced by: a clone whose child runs, writes into the shared address space, and exits, with the parent suspended until it does. 1286 → 1287/1287; `viv-pheno-probe` legs L155–L163, boot-fatal |
 | **L-4a** ✅ | **Prerequisite, not COW work**: exec's stack + every NON-EXECUTABLE segment move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots (the stack: only the run its argv/auxv frame occupies at the top). Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. Executable segments stay eager — the I-cache reason above. DMA + Weft rings stay eager too (they need physical contiguity). | **LANDED**: `exec.writable_segment_is_sparse` (4 MiB memsz, 64 B filesz -> 1024 slots reserved, 1 resident) + `exec.stack_is_sparse` (1 MiB reserved, 1 resident), both revert-probed; 1289/1289 + boot OK |
-| **L-4b** | Per-page share counts + the COW break arm (stage 3a). The count is a per-slot array beside `filepages[]`, **not** `struct page.refcount` (§2.8). | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
+| **L-4b** | Per-page share counts + the COW break arm (stage 3a). The count is a **new** `struct page.cow_share` (taking the free `_pad`, so `sizeof` stays 48) — **not** the double-booked `refcount` (§2.8), and **not** a per-slot array, which §5.4's L-4b correction measures to be unimplementable: after a break the slot and its counted page diverge, and the free decision corrupts. A fork clones the Burrow per address space (Plan 9 `dupseg`); the break decides under a **global** COW leaf lock, because two sharers hold different Burrow locks. | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
