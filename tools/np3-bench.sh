@@ -69,15 +69,29 @@ def sink(c):
         d = c.recv(65536)
         if not d: break
     c.close()
-def serve(port, fn):
-    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(('127.0.0.1', port)); s.listen(64)
+def serve(s, fn):
     while True:
         c, _ = s.accept()
         threading.Thread(target=fn, args=(c,), daemon=True).start()
-threading.Thread(target=serve, args=(${HOSTPORT},   lambda c: echo(c, 0)),     daemon=True).start()
-threading.Thread(target=serve, args=(${HOSTPORT}+1, lambda c: echo(c, DELAY)), daemon=True).start()
-threading.Thread(target=serve, args=(${HOSTPORT}+2, sink),                     daemon=True).start()
+def bind(port):
+    # Bind in the MAIN thread, loudly. Previously each serve() bound inside its
+    # own daemon thread, so a taken port raised there, the traceback went to a
+    # redirected log, and the bench carried on measuring NOTHING -- the guest's
+    # connects got RST and M6 reported a benign-looking SKIP. A host port this
+    # bench cannot have is a hard stop, not a quiet downgrade (#127 family).
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(('127.0.0.1', port))
+    except OSError as e:
+        raise SystemExit(
+            f"np3-bench: host server cannot bind 127.0.0.1:{port}: {e}\\n"
+            f"  another np3-bench, or a second tree? re-run with NP3_HOSTPORT=<free base>")
+    s.listen(64)
+    return s
+_s0, _s1, _s2 = bind(${HOSTPORT}), bind(${HOSTPORT}+1), bind(${HOSTPORT}+2)
+threading.Thread(target=serve, args=(_s0, lambda c: echo(c, 0)),     daemon=True).start()
+threading.Thread(target=serve, args=(_s1, lambda c: echo(c, DELAY)), daemon=True).start()
+threading.Thread(target=serve, args=(_s2, sink),                     daemon=True).start()
 while True: time.sleep(3600)
 PY
 
@@ -188,12 +202,24 @@ fi
 # --- start the host M6 server ---
 python3 "$SRV_PY" & SRV_PID=$!
 sleep 0.4
+# The server binds in its main thread and exits non-zero if a port is taken;
+# without this check that death is invisible here and every guest metric
+# silently degrades to SKIP against a closed port.
+if ! kill -0 "$SRV_PID" 2>/dev/null; then
+    echo "np3-bench: host M6 server died at startup (see its output above)" >&2
+    exit 1
+fi
 
 # --- guest M6 under each accel ---
 for accel in $ACCELS; do
     echo
     echo "=== GUEST M6 (accel=$accel) ==="
+    # THYLACINE_GUESTFWD_HOSTPORT MUST be forwarded: run-vm.sh defaults it to
+    # 28099 independently, so NP3_HOSTPORT alone moved the host server while
+    # the guestfwd still pointed at 28099 -- the documented escape hatch for a
+    # port collision silently produced a bench that measured nothing (#127).
     THYLACINE_ACCEL="$accel" THYLACINE_GUESTFWD=1 BANNER_GRACE=8 \
+        THYLACINE_GUESTFWD_HOSTPORT="$HOSTPORT" \
         tools/test.sh >/tmp/np3-${accel}.out 2>&1
     rc=$?
     if grep -q "Thylacine boot OK" "$LOG"; then

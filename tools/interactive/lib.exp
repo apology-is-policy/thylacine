@@ -202,6 +202,72 @@ proc lc_vm_infra_check {} {
     }
 }
 
+# --- #127: collision-free VNC display allocation --------------------------
+#
+# The counterpart to the "Address already in use" arm above: that one NAMES
+# the collision after the VM is already dead, this one keeps it from
+# happening.
+#
+# A scenario needing a REAL display backend (ls-gfx-live) boots QEMU with
+# `-display vnc=127.0.0.1:N` and then attaches a client to 127.0.0.1:5900+N,
+# so both ends need the same N AND the harness has to know it -- which is why
+# QEMU's own `to=` range-scan is not usable here: it picks a port and never
+# tells us which.
+#
+# N was the constant 47. This host runs two trees at once (main + the aux
+# worktree, CLAUDE.md "Parallel auxiliary track"); both computed 47, both
+# wanted TCP 5947, and whichever booted second died with "Failed to find an
+# available port". Retrying bought NOTHING -- a deterministic collision
+# re-picks the same port every attempt, so the budget just spent three boots
+# before reporting (observed 3/3, #127).
+#
+# Two defences, closing DIFFERENT holes -- neither alone is enough:
+#   base  -- derived from THIS tree's absolute path (the #89 move), so two
+#            trees begin at different displays and never contend at all.
+#   probe -- bind-test upward from base, so a stale QEMU still holding our
+#            base is stepped over instead of collided with.
+# The probe has a real TOCTOU window (we close the socket; QEMU binds it a
+# second later), which is exactly why the cross-tree case is carried by the
+# base separation and not by the probe.
+#
+# Range 32..95 -> TCP 5932..5995: below 32 is where humans and macOS Screen
+# Sharing live (5900), and 6000+ is X11.
+proc lc_vnc_probe_noop {args} {}
+
+proc lc_port_bindable {port} {
+    if {[catch {set s [socket -server lc_vnc_probe_noop -myaddr 127.0.0.1 $port]}]} {
+        return 0
+    }
+    close $s
+    return 1
+}
+
+proc lc_pick_vnc_display {} {
+    if {[info exists ::env(LS_CI_VNC_DISPLAY)]} {
+        # Manual override: honoured verbatim, NOT probed -- if you pinned it,
+        # you want that exact display and a silent slide elsewhere would be
+        # the opposite of helpful.
+        return $::env(LS_CI_VNC_DISPLAY)
+    }
+    set lo 32
+    set span 64
+    # djb2 over the repo path (Tcl exposes no string hash), so the starting
+    # point is stable for a tree and different between trees.
+    set h 5381
+    foreach ch [split $::lc_repo ""] {
+        set h [expr {(($h * 33) + [scan $ch %c]) % 1000003}]
+    }
+    set base [expr {$h % $span}]
+    for {set i 0} {$i < $span} {incr i} {
+        set d [expr {$lo + (($base + $i) % $span)}]
+        if {[lc_port_bindable [expr {5900 + $d}]]} {
+            lc_step "VNC display :$d (TCP [expr {5900 + $d}]); tree base :[expr {$lo + $base}]"
+            return $d
+        }
+    }
+    lc_fail "no free VNC display in :$lo..:[expr {$lo + $span - 1}] (TCP 5900+N) -- $span consecutive ports taken"
+}
+
 proc lc_raw_send {bytes what} {
     if {[catch {send -- $bytes} err]} {
         lc_step "SEND-ERROR during \[$what\]: $err"
