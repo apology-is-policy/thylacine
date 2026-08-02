@@ -36,6 +36,24 @@ kernel side and mirrored by hand everywhere else.
 - [[abi-note-names]] — the 9 deliverable note names in three classes, the
   reserved `snare:`/`tty:` prefixes, and the 32-byte `note_record`.
 
+## Struct layouts
+
+The records both halves declare independently. Each is mirrored by hand and
+pinned by a per-copy assertion — which is exactly the weakness below.
+
+- [[abi-t-stat]] — the 88-byte file-metadata record and its **seven**
+  mirrors. A kernel growth fires exactly one of eight assertions: the
+  kernel's own. Two mirrors carry no guard at all.
+- [[abi-loom-ring]] — the five shared-memory ring structures, plus the three
+  9P decode structs that Loom promoted into ABI by copying them out. The
+  header both sides write is the least pinned of the five.
+
+## Wire
+
+- [[abi-ninep-wire]] — the 9P message-type space, shared with Stratum. Held
+  by a cross-project allocation document rather than an assertion, because no
+  compiler sees both trees. **The only registry here that verifies clean.**
+
 ## Contracts
 
 - [[abi-boot-banner]] — the two strings that are ABI with the tooling.
@@ -47,7 +65,16 @@ kernel side and mirrored by hand everywhere else.
   and a language fork drifts silently, because a per-mirror
   `_Static_assert(sizeof == N)` verifies only THAT mirror against itself,
   never against the kernel. The `struct t_stat` growth to 88 bytes (#100)
-  is the worked failure; see [[sub-pouch-fs]].
+  is the worked failure; see [[sub-pouch-fs]] and [[abi-t-stat]], whose
+  guard set is unchanged since.
+- **Each copy is pinned to itself; nothing pins the copies to each other.**
+  Which is the same shape as the two bullets around it — a guard whose
+  subject is narrower than its apparent claim. `sizeof(X) == 88` reads as
+  "X matches the ABI" and means "X matches this literal."
+  [[abi-ninep-wire]] is the counter-case: a shared number space that *could
+  not* be held by an assertion, so it is held by a document with rules, an
+  allocation authority, a burn policy, and backlinks from both projects —
+  and it is the one that verifies clean.
 - **Values are pinned; their descriptions are not.** The registries above
   are held by assertions that fire on a wrong number — and are surrounded
   by prose that has drifted from them repeatedly: `caps.h` says "all five"
@@ -55,7 +82,5 @@ kernel side and mirrored by hand everywhere else.
   is twelve, and that particular staleness has already propagated into
   `docs/reference/19-handles.md`. Read the macro, never the sentence
   beside it.
-- The syscall-abi / ninep-wire / exec-contract areas land with their own
-  sweeps, as do the **struct** layouts (`t_stat`, the Loom ring
-  structures, the 9P wire structures) — the registries above are only the
-  enumerated-value half.
+- The syscall-abi and exec-contract areas land with their own sweeps. The
+  enumerated-value, struct, and wire registries are done.
