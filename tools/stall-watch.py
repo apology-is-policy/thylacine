@@ -10,6 +10,16 @@ separate, because in both of them the console is exactly what stops:
        (the login prompt WAS printed and lost) -- a dead delivery channel.
   H-B  the guest stopped making progress.
 
+MEASURED WITH THIS TOOL: there is a THIRD state neither hypothesis names, and
+it looks exactly like H-B from inside. If the host console consumer stops
+draining, QEMU's serial write blocks and QEMU STOPS EXECUTING THE GUEST
+ENTIRELY -- host CPU 100% -> 2.4% within ~2 s of SIGSTOPping the relay, held
+for the whole freeze, snapping back to 167% the instant it resumes. The guest
+is suspended, not wedged, and no guest-side change can affect it. That is also
+why this tool must survive an unresponsive monitor: QMP is served by the same
+stalled QEMU, so a short timeout reports "QEMU gone?" and destroys the one
+observation that distinguishes a host freeze from a guest wedge.
+
 This observer separates them from OUTSIDE the guest, over QMP, touching no
 guest code at all. It samples each vCPU's whole register file while the
 console is quiet:
@@ -97,14 +107,22 @@ class Qmp:
     drain greeting, negotiate capabilities, then skip async events when reading
     a command response."""
 
+    TIMEOUT_S = 30.0   # NOT 5: a frozen console consumer can stall QEMU's own
+                       # main loop, so the monitor goes unresponsive for many
+                       # seconds while QEMU is perfectly alive. A short timeout
+                       # reports that as "QEMU gone?" -- a WRONG conclusion, and
+                       # the observation it destroys ("the HOST side stalled,
+                       # not the guest") is the interesting one.
+
     def __init__(self, sock_path, deadline, log):
         self.s = None
         self.f = None
         self.log = log
+        self.sock_path = sock_path
         while now() < deadline:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
-                s.settimeout(5.0)
+                s.settimeout(self.TIMEOUT_S)
                 s.connect(sock_path)
                 f = s.makefile("rw", buffering=1)
                 f.readline()                      # greeting
@@ -324,8 +342,29 @@ def main():
             st = q.status()
             regs = parse_registers(q.hmp("info registers -a"))
         except OSError as e:
-            log("qmp: sample failed (%s) -- QEMU gone?" % e)
-            return 2
+            # THE THIRD STATE, and the one a short timeout used to mislabel
+            # "QEMU gone?": QEMU alive but its monitor not answering. MEASURED
+            # cause -- when the console consumer stops draining, QEMU's serial
+            # write blocks and QEMU stops executing the guest entirely (host
+            # CPU 100% -> 2.4% within ~2 s, recovering the instant the consumer
+            # resumes). That is a HOST-side freeze, not a guest wedge.
+            #
+            # Do NOT discriminate on the exception type: after a socket
+            # timeout, Python's buffered reader raises a plain OSError
+            # ("cannot read from timed out object") rather than TimeoutError,
+            # so a `except TimeoutError` branch silently never fires. Ask the
+            # question directly instead -- can we reconnect?
+            t0 = now()
+            log("qmp: no answer (%s) -- probing whether QEMU is alive" % e)
+            try:
+                q = Qmp(a.sock, now() + 60.0, log)
+            except SystemExit:
+                log("qmp: unreachable -- QEMU really is gone")
+                return 2
+            log("qmp: UNRESPONSIVE then recovered after %.1fs -- QEMU was ALIVE "
+                "but frozen (HOST-side: the console consumer stopped draining)"
+                % (now() - t0))
+            continue
 
         samples += 1
         # Liveness = the register DIGEST, per CPU. A CPU parked in WFI is
