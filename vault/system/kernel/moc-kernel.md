@@ -44,6 +44,10 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
 - [[moc-kernel-async]] — rings and shared pages (the request that stops being
   a syscall, the payload that stops being a copy, and the rule that keeps
   memory the other side can write from ever locating a kernel access).
+- [[moc-kernel-boot]] — from the bootloader's first instruction to the banner
+  (the image header, the randomized base, the device tree everything is derived
+  from, the boot-time rewrite of the atomic baseline, and the ordering that
+  composes them; the region where the tools' assumptions are not yet true).
 
 ## Cross-cutting
 

@@ -13,14 +13,19 @@ Generated from note fields — do not edit between the markers
 | surface | code | invariants | prosecution |
 |---|---|---|---|
 | [[sub-kernel-allowance]] | kernel/allowance.c, kernel/include/thylacine/allowance.h |  | - The gate must remain complete across **all four** create sites. A new |
+| [[sub-kernel-alternatives]] | arch/arm64/alternatives.c, arch/arm64/alternatives.h, arch/arm64/atomic_lse.h |  | - **The write must never go through an executable mapping.** The scratch alias's |
+| [[sub-kernel-boot-entry]] | arch/arm64/start.S, arch/arm64/kernel.ld | inv-i16, inv-i21 | - **The eret window.** Any hand-rolled path that sets `ELR_EL1` and returns to |
+| [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
 | [[sub-kernel-caps]] | kernel/include/thylacine/caps.h, kernel/devcap.c, kernel/proc.c |  | - A new capability bit must be added to `CAP_ALL` **or** to |
 | [[sub-kernel-cons]] | kernel/cons.c, kernel/include/thylacine/cons.h | inv-i27, inv-i9 | - **Nothing that needs [[lock-proc-table]] or a hook-list walk may be called |
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
 | [[sub-kernel-devproc]] | kernel/devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |
 | [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h | inv-i1 | What an auditor attacks here: |
+| [[sub-kernel-dtb]] | lib/dtb.c, kernel/include/thylacine/dtb.h | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
 | [[sub-kernel-handle]] | kernel/handle.c, kernel/include/thylacine/handle.h |  | - A new `kobj_kind` must be classified into exactly one partition; the |
+| [[sub-kernel-kaslr]] | arch/arm64/kaslr.c, arch/arm64/kaslr.h | inv-i16 | - **The never-zero guarantee** must survive any change to the mask or the mixing. |
 | [[sub-kernel-larder]] | kernel/larder.c, kernel/include/thylacine/larder.h | inv-i38 | - **The gen-ring event-logging completeness**: every NEW mutation path |
 | [[sub-kernel-loom]] | kernel/loom.c, kernel/include/thylacine/loom.h | inv-i29, inv-i30, inv-i32 | - **Never compute an index from a shared word.** The private counter and private |
 | [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h |  | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |

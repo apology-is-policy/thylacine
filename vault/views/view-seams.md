@@ -39,6 +39,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-death-cascade-smp-harness]] | open | sub-kernel-death | chg-2026-06-01-811-death-interruptible | unfiled |
 | [[seam-devcap-plain-caps-read]] | open | sub-kernel-caps | chg-2026-08-02-authority-sweep | task #15 |
 | [[seam-devdev-winsize-statless]] | open | sub-kernel-devdev, sub-kernel-cons | chg-2026-08-02-console-sweep | task #19 |
+| [[seam-dtb-blob-internally-trusted]] | open | sub-kernel-dtb | chg-2026-08-02-boot-sweep |  |
 | [[seam-eevdf-math]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 2A-F6 -> RW-13 |
 | [[seam-el0-irq-tail-no-notes]] | open | sub-kernel-exception | chg-2026-08-02-entry-sweep | task #21 |
 | [[seam-exiting-tails-never-sleep]] | open | sub-kernel-death | chg-2026-07-14-68-last-thread-out-close | unfiled |
@@ -47,6 +48,8 @@ Generated from note fields — do not edit between the markers
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-hmp-push]] | open | sub-kernel-sched-smp | chg-2026-06-05-864-hmp-foundation | ARCH 8.4.4 -- the verification boundary |
+| [[seam-hwcap-boot-cpu-only]] | open | sub-kernel-boot-sequence, sub-kernel-alternatives | chg-2026-08-02-boot-sweep |  |
+| [[seam-kaslr-link-va-unchecked]] | open | sub-kernel-kaslr, sub-kernel-boot-entry | chg-2026-08-02-boot-sweep | task #24 |
 | [[seam-kobj-handle-release]] | open | sub-stratum-bdev | chg-2026-08-02-stratum-sweep |  |
 | [[seam-larder-cacheable-proxy]] | open | sub-kernel-larder, sub-kernel-ninep-dev9p | chg-2026-07-09-larder-l1e |  |
 | [[seam-larder-lazy-array-robustness]] | open | sub-kernel-larder | fnd-25-r1-f1 |  |
