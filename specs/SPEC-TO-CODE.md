@@ -1910,3 +1910,38 @@ sides), `weft.weave_share_and_claim` (mint → admit → kind → budget → the
 validate_rw kind gate → the second-domain teardown),
 `weft.unshare_disarm` (owner gate + removal-before-free + fail-closed late
 claim), `weft.shared_map_budget_cap` (the R2-F3 budget).
+
+## `cow.tla` -- copy-on-write address-space sharing (LINEAGE L-4, I-44)
+
+**Model-first: this module landed BEFORE any L-4 implementation**, per the
+spec-first re-enablement for this surface (LINEAGE section 6). There is
+therefore no action-to-site map yet -- it lands with L-4b, when the break arm
+exists to map onto. What follows is the *obligation* the implementation
+inherits.
+
+- **`DecideLocked`** -> the COW write-fault arm, which must read the share
+  count and act on it in ONE critical section under the Burrow lock. Splitting
+  the read from the act is `cow_buggy_break`: two sharers each drop, both then
+  read zero, and both take the SAME page in place -> `NoAliasedWritable`.
+- **The pin across the copy** (`DecideLocked`'s `pin + 1`, released in
+  `BreakFinish`) -> the breaker must hold the pristine page across the copy and
+  drop its share only AFTER. Dropping first and taking no pin is
+  `cow_buggy_teardown`: a concurrent last exit frees the page mid-copy ->
+  `NoUseAfterFree`.
+- **`FreePristine`** -> the free decision trusts `share` and `pin`, exactly as
+  the implementation will. It carries no extra guard ON PURPOSE: a protocol
+  that lets the count lie must be caught here rather than papered over by a
+  check the kernel would not have.
+- **`VParentCheck` / `VChildRelease`** -> `kernel/proc.c`'s
+  `vfork_await_release` / `vfork_child_released` (ALREADY BUILT at L-3c-2;
+  modeled retroactively, the `death_wake.tla` precedent). The check and the
+  park are one atomic step because they run under one lock; splitting them is
+  `cow_buggy_vfork`, where a release landing in the window is lost and the
+  parent parks forever. Safety still holds there -- it is a HANG -- which is
+  why the witness is the `EventuallyReleased` liveness property and not an
+  invariant.
+
+Gate (2026-08-02): `cow.cfg` clean at **580 distinct states, depth 13** (3
+sharers) with Safety + `EventuallyReleased`; `cow_buggy_break` ->
+`NoAliasedWritable` violated; `cow_buggy_teardown` -> `NoUseAfterFree`
+violated; `cow_buggy_vfork` -> temporal property violated with Safety intact.

@@ -4025,11 +4025,15 @@ table re-reconciled +`allowance`/`net_poll`/`weft` 2026-06-20;
 +`net_poll_teardown` @#294 2026-06-21; +`sched_tickless` @TI-spec 2026-06-21;
 +`sched_rebalance` @TI-4a 2026-06-21; +`fs_cache` @L1b 2026-07-09 +
 `debug_stop` @8a-1a 2026-07-14, both rows reconciled here 2026-07-15)
-the committed inventory is **28 modules**; three of the planned nine
-(`futex.tla`, `notes.tla`, `pty.tla`) were dropped per the 2026-05-23
-spec-to-code suspension — their surfaces are prose-validated (torpor / notes)
-or not yet built (the PTY *master/slave* pair, Phase 8) — and seventeen modules were
-added beyond the plan. LS-8a's pollable-console *deferred* poll-wake DID get a
+the committed inventory is **34 modules** (`ls specs/*.tla | grep -v TTrace`;
+see the count correction under the table — the figure had been stale at 28,
+and the table was stale by the same six rows, so the two agreed with each
+other rather than with the tree). Two of the planned nine (`futex.tla`,
+`notes.tla`) were dropped per the 2026-05-23 spec-to-code suspension and stay
+dropped — torpor and notes are prose-validated. The third, `pty.tla`, was
+dropped for a reason that **expired**: the PTY master/slave pair was unbuilt,
+and PTY-2 built it, so the module was written then (413 lines, four buggy
+cfgs). Twenty-three modules were added beyond the plan. LS-8a's pollable-console *deferred* poll-wake DID get a
 spec (`cons_poll.tla`, spec-first re-enabled for that surface, 2026-06-12),
 filed under I-9 — distinct from the dropped `pty.tla`, which stays reserved for
 the Phase-8 PTY master/slave atomicity (I-20).
@@ -4071,9 +4075,31 @@ before the MA-1 impl (the post-net Imperium/Authority arc).
 | `specs/sched_rebalance.tla` | TI-4a (#304) | Work-conservation under tickless idle — the push-on-overload rebalance leg (ARCH §8.6 / §8.10): a busy CPU pushes surplus queued work to an idle peer (`EventuallyParallelized` liveness) + the kick respects register-then-observe (`NoLostWake`) vs `sched_rebalance_buggy_nokick.cfg` (no kick ⇒ surplus strands = the TI-3 regression in model form) + `sched_rebalance_buggy_nolift.cfg` (kick forgets the park-lift ⇒ lost wake). A sibling — placement itself is already inside `sched_alpha.tla`'s arbitrary-target envelope; this models only the busy-side rebalance the periodic tick used to cover by pull-polling |
 | `specs/fs_cache.tla` | L1b (+ the write-behind `StageWrite`/`FlushClose` legs @F1; + `EnableFlushPopulate` @G1) | Larder close-to-open coherence (I-38) on the content-token abstraction: `Open`-revalidate + `Read`-serve + `OwnWrite`-invalidate never serve a stale token (`NoWrongRead`), incl. the staged-write legs, vs 5 buggy cfgs (`stale_serve` / `no_invalidate` / `skip_staged` = the overlay-miss class / `lost_stage` = the lost-write class / `populate_unflushed` = the G1 install-before-land class) |
 | `specs/debug_stop.tla` | 8a-1a (model-first, spec-first RE-ENABLED for this surface; 8a-2c added `StopImpliesOwned` + the 5th buggy cfg) | Debugger stop/continue on the death lineage (I-39 composition): `NoLostStop` + `DeathWinsOverStop` (a stop is observed ONLY at the EL0-return tail, ordered after `el0_return_die_check`) + `NoEL0AfterStopped` + `ExactlyOnceResume` + `StopImpliesOwned` (the per-Proc stop flag is set only while a debugger owns the slot -- the 8a-2 SA-1 fix: a hardware fire delivers via `proc_debug_fault_stop`, gated on `debug_owner` under `g_proc_table_lock`) + the `EventuallyResumed` NoStrand liveness (a debugger's detach/close/death always resumes the target) + `EventuallyLaunchedDies` (the EXITKILL refinement, designed 2026-07-23: a debugger-LAUNCHED `exitkill`-marked target dies with its debugger — die-with-launcher, `PTRACE_O_EXITKILL` — rather than being NoStrand-resumed and orphaned) vs 6 buggy cfgs (`park_before_die` / `lost_stop` / `double_wake` / `strand_on_debugger_death` / `fault_stop_ungated` / `exitkill_ignored`) |
+| `specs/debug_step.tla` | 8a-2b (model-first) | The hardware single-step machine: a step arms exactly one instruction's execution and re-parks; death still wins. Buggy: `debug_step_buggy_death_lost` / `debug_step_buggy_runs_free` |
+| `specs/pty_stop.tla` | PTY-1 (model-first, spec-first RE-ENABLED) | I-20's **stop leg**: a thread parks iff `debug_stop_req \| job_stop_req` and each resume clears only its OWN owner (`StopCompatI39`), and death wins over a job stop (`DeathWinsOverJobStop`). Buggy: `pty_stop_buggy_double_stop` / `pty_stop_buggy_death_blocked` |
+| `specs/pty.tla` | PTY-2 | I-20's **data path**: byte conservation, `SignalXorByte` (an ISIG char raises and is consumed, never also delivered as a byte), drain-then-EOF, and signal delivery to the right pgrp. Buggy: `pty_buggy_double_stop` / `pty_buggy_lost_teardown_byte` / `pty_buggy_signal_also_byte` / `pty_buggy_signal_wrong_pgrp` |
+| `specs/tapestry_present.tla` | G-2 (model-first) | I-40: the weave share + present/retire ordering — `NoStaleMap` (a claim after retire fails closed), quiesce-before-reweave, and no premature backing reuse. Buggy: `map_after_retire` / `premature_reuse` / `retire_during_transfer` / `reweave_without_quiesce` |
+| `specs/reader_frame.tla` | #90 (model-first) | The elected-9P-reader's FRAME-ATOMIC unwind (ARCH 8.8.1.1): a dying or stopped reader unwinds only at a frame boundary and blocks through mid-frame, so a survivor never reads a partial frame as a header (`NoDesync` + `EventuallyUnwinds`). Buggy: `reader_frame_buggy` (the mid-frame unwind) |
+| `specs/cow.tla` | LINEAGE L-4 (model-first, spec-first RE-ENABLED for this surface) | Copy-on-write address-space sharing (**I-44**): `NoAliasedWritable` (no page writable through two mappings — the last-sharer take-in-place is decided atomically), `NoUseAfterFree` (a breaker pins across the copy, so a concurrent exit cannot free the pristine page under it), `NoDoubleFree`, + the `EventuallyReleased` liveness witness that a vfork parent is never stranded. Buggy: `cow_buggy_break` (break-vs-break -> two sharers both read zero and both take the page in place) / `cow_buggy_teardown` (break-vs-teardown -> share dropped before the copy, no pin) / `cow_buggy_vfork` (the lost VFORK wake -> check-then-park outside the lock; Safety still holds, so the witness has to be liveness) |
 
-Each module carries its clean cfg(s) plus buggy-cfg counterexamples (99
-buggy cfgs total across the inventory).
+Each module carries its clean cfg(s) plus buggy-cfg counterexamples
+(`ls specs/*.cfg | grep -c buggy` = **118** at L-4; the figure here had said 99,
+stale by the same drift as the module count — re-derive it).
+
+> **Count correction (LINEAGE L-4, 2026-08-02).** This section said the
+> inventory was **28 modules** and the table had exactly 28 rows — the number
+> and the table agreed with *each other* while both had stopped tracking the
+> tree, which is why nothing ever flagged the drift (task #123's class, at
+> scale). Measured: `ls specs/*.tla | grep -v TTrace` is **34**. The six rows
+> added above (`debug_step`, `pty_stop`, `pty`, `tapestry_present`,
+> `reader_frame`, `cow`) are the difference. Re-derive the count with that
+> command rather than trusting this sentence.
+>
+> The same drift made the paragraph above claim `pty.tla` was **dropped**. It
+> was dropped *in 2026-05-23's suspension*, and then **written at PTY-2** when
+> the PTY data path was built — 413 lines with four buggy cfgs. The prose
+> below is corrected; the *reason* it was dropped (the master/slave pair was
+> unbuilt) simply stopped being true.
 
 ### 25.3 Spec → code mapping
 

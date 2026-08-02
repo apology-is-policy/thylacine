@@ -81,7 +81,10 @@ Concrete pattern:
 5. Implement against the model. Cross-reference each impl step to the corresponding spec action in comments. Keep `specs/SPEC-TO-CODE.md` current.
 6. When the impl surfaces a new mechanism the spec didn't cover, extend the spec FIRST, then update the impl.
 
-The committed spec inventory is **28 modules** (the authoritative table lives
+The committed spec inventory is **34 modules** (`ls specs/*.tla | grep -v TTrace`
+-- re-derive it rather than trusting this number; it was stale at 28 until
+LINEAGE L-4 measured it, and the ARCH table was stale by the same six rows, so
+the two agreed with each other instead of with the tree). The authoritative table lives
 in `ARCHITECTURE.md §25.2`): `scheduler` / `territory` / `handles` / `burrow`
 / `9p_client` / `poll` / `pipe` / `tsleep` / `corvus` / `sched_ctxsw` /
 `sched_oncpu` / `sched_alpha` / `asid` / `death_wake` / `loom` /

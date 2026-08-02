@@ -932,6 +932,24 @@ implementation, with buggy cfgs for at least: break-vs-break (two CPUs faulting
 the same shared page), break-vs-teardown (a sharer exiting mid-break), and the
 lost-VFORK-wake.
 
+> **LANDED at L-4, model-first, before any implementation**: `specs/cow.tla`
+> with all three buggy cfgs, plus the clean cfg TLC-green at **580 distinct
+> states, depth 13** (3 sharers) on `Safety` + the `EventuallyReleased`
+> liveness witness. Each buggy cfg fails at its OWN named invariant, verified
+> from the traces rather than the labels:
+>
+> | cfg | mechanism | violates |
+> |---|---|---|
+> | `cow_buggy_break` | drop/decide not atomic -> two sharers both read zero, both take the page in place | `NoAliasedWritable` |
+> | `cow_buggy_teardown` | share dropped before the copy, no pin -> a concurrent exit frees it mid-copy | `NoUseAfterFree` |
+> | `cow_buggy_vfork` | check-then-park outside the lock -> the release in the window is lost | `EventuallyReleased` (Safety HOLDS -- it is a hang) |
+>
+> The third is the L-3c-2 suspend modeled **retroactively** (the
+> `death_wake.tla` precedent). That it violates only liveness is the point: a
+> lost vfork wake corrupts nothing, which is exactly why an invariant cannot
+> witness it. The action-to-site obligations are in
+> `specs/SPEC-TO-CODE.md::cow.tla`.
+
 ---
 
 ## 7. The build arc
