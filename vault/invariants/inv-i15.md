@@ -3,7 +3,7 @@ id: inv-i15
 type: inv
 title: "I-15 — the hardware view derives entirely from the device tree"
 number: I-15
-guards: [sub-kernel-dtb, sub-kernel-boot-sequence]
+guards: [sub-kernel-dtb, sub-kernel-boot-sequence, sub-kernel-gic, sub-kernel-timer]
 validated-by: [prose, gate-smp]
 strength: prose
 created: 2026-08-02
@@ -40,6 +40,15 @@ defensible, and no single one is where the property is lost.
 **One file answers.** [[sub-kernel-dtb]] is the only place that reads the blob,
 and every consumer goes through its accessors. There is no second parser and no
 cached copy of a hardware address anywhere else.
+
+**On one device the tree chooses the driver, not just the address.** The
+interrupt controller exists in two hardware generations whose per-CPU interfaces
+are reached differently — memory-mapped registers on one, system registers on
+the other — so [[sub-kernel-gic]] matches the tree's identifier first and reads
+the register ranges out of *that same node*, which is what keeps the version and
+the addresses from ever coming from different devices. No match ends the world:
+this is the one lookup with no fallback and no degraded mode, because a machine
+whose interrupt controller cannot be identified cannot preempt.
 
 **Absence is an ordinary answer.** Every accessor returns a boolean or a sentinel
 for "the tree does not say", and callers degrade rather than fail. This is what

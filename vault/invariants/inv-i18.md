@@ -3,11 +3,11 @@ id: inv-i18
 type: inv
 title: "I-18 — IPIs from CPU A to CPU B are processed in send order"
 number: I-18
-guards: [sub-kernel-sched-smp]
+guards: [sub-kernel-sched-smp, sub-kernel-gic]
 validated-by: [spec-scheduler, gate-smp]
 strength: spec
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Statement
 
@@ -65,3 +65,31 @@ payload — the moment an IPI conveys information beyond "look at your
 flags", the model and the hardware stop agreeing and this invariant needs
 re-deriving from the GIC's actual guarantees rather than from
 `scheduler.tla`.
+
+**The hardware has no queue at all** — confirmed from the driver at the
+[[sub-kernel-gic]] sweep. Pending state lives in set-pending and
+clear-pending *registers*, one bit per interrupt number, addressed as
+`1u << (intid % 32)`. A bitmap cannot hold a second occurrence of one
+number, and it cannot hold the arrival order of two different numbers
+either. Nor is there a tiebreak to appeal to: the driver writes one
+uniform priority to every interrupt, per-CPU and shared alike.
+
+So the condition in the note above is *sufficient* but not *necessary*.
+Payload is one way to break this invariant; **multiplicity alone is the
+other, and it is the nearer one.** With a single IPI number the statement
+holds vacuously — there is no pair of sends to order. Add a second
+number, and send order between the two is not recorded anywhere in the
+machine, whether or not either carries information.
+
+That second number is closer than it reads. Three more are already
+reserved in commented-out lines beside `IPI_RESCHED` — cross-CPU TLB
+invalidation, halt, and a generic callback — and the *first* of them
+names the SGI the test suite is already claiming for its own use through
+the normal capability path. Uncommenting it and adding it to the
+kernel-reserved set would make those tests fail loudly at creation, which
+is the right failure; nothing connects the two today.
+
+A cross-CPU TLB invalidation in particular would not be a doorbell. It is
+the first plausible IPI whose *completion* matters to the sender, and at
+that point neither this invariant's statement nor `scheduler.tla`'s
+queue describes what the hardware provides. Re-derive before building it.

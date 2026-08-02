@@ -3,11 +3,11 @@ id: inv-i9
 type: inv
 title: "I-9 — no wakeup lost between cond-check and sleep"
 number: I-9
-guards: [sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server, sub-kernel-poll, sub-kernel-pipe, sub-kernel-torpor, sub-pouch-thread]
+guards: [sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server, sub-kernel-poll, sub-kernel-pipe, sub-kernel-torpor, sub-pouch-thread, sub-kernel-irqfwd]
 validated-by: [spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, spec-poll, spec-pipe, gate-smp]
 strength: spec
 created: 2026-07-31
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Statement
 

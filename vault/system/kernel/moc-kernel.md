@@ -48,6 +48,12 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
   (the image header, the randomized base, the device tree everything is derived
   from, the boot-time rewrite of the atomic baseline, and the ordering that
   composes them; the region where the tools' assumptions are not yet true).
+- [[moc-kernel-devices]] — the hardware the kernel keeps rather than lends (the
+  interrupt controller, the timebase, and the one surface that lends an
+  interrupt to a driver process; the two devices whose failure has no observer,
+  so the area is built to survive losses it cannot see). *Partial: the
+  capability objects, the transports and the synthetic device filesystems are
+  not yet swept.*
 
 ## Cross-cutting
 

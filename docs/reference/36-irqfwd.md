@@ -1,262 +1,61 @@
-# 36 — IRQ forwarding (KObj_IRQ blocker) (P4-G)
-
-The hardware-IRQ → driver rendezvous. Per ARCH §9.3 + ROADMAP §6.1. v1.0 P4-G lands the kernel-internal `KObj_IRQ` lifecycle + a GIC dispatch hook that wakes a Rendez attached to the KObj_IRQ on every IRQ fire. Userspace driver bindings (handle table → driver process) come at P4-I+.
-
----
-
-## Purpose
-
-Userspace drivers (P4-I/J/K/L: virtio-blk / net / input / gpu) consume hardware completion notifications via Plan 9 `KObj_IRQ` handles. The kernel-side machinery — what P4-G implements — is:
-
-1. Driver creates a KObj_IRQ for a specific GIC INTID via a syscall (Phase 5+ wrapper) or kernel-internal call (v1.0 P4-G).
-2. GIC delivery routes through the kernel's IRQ vector → `gic_dispatch` → the registered KObj_IRQ's `kobj_irq_dispatch`.
-3. Dispatch increments a pending-IRQ counter under the Rendez lock + wakes any blocked waiter.
-4. The driver's wait thread (kernel-internal at v1.0; userspace at P4-I+) returns from `kobj_irq_wait` with the collapsed IRQ count and zeroes the counter.
-
-The IRQ → wake atomicity is the same wait/wake protocol pinned by `scheduler.tla`'s `NoMissedWakeup` invariant (I-9): cond is checked under `r->lock`, and the producer's update + the wakeup straddle the same lock, so a fire that happens between cond check and sleep transition is captured by either the cond check (if cond saw it first) or the wakeup (which transitions the sleeping thread back to RUNNABLE).
-
-VISION §4.5 budget: IRQ → userspace handler latency p99 < 5µs. v1.0 P4-G doesn't yet measure this — the latency benchmark requires userspace drivers (P4-I+); Phase 4 closing audit (P4-Z) verifies the budget.
-
----
-
-## Public API — `<thylacine/irqfwd.h>`
-
-```c
-#define KOBJ_IRQ_MAGIC 0x4952510DBADC0DECULL   // 'IRQ\r' || 0xBADC0DEC
-#define IPI_IRQFWD_TEST 1u                     // SGI 1 reserved for tests
-
-struct KObj_IRQ {
-    u64           magic;
-    u32           intid;
-    int           ref;
-    struct Rendez rendez;       // single-waiter; lock guards pending_count
-    u32           pending_count;
-};
-
-struct KObj_IRQ *kobj_irq_create(u32 intid);
-void             kobj_irq_ref(struct KObj_IRQ *k);
-void             kobj_irq_unref(struct KObj_IRQ *k);
-void             kobj_irq_destroy(struct KObj_IRQ *k);
-u32              kobj_irq_wait(struct KObj_IRQ *k);
-u64              kobj_irq_total_fires(void);
-u64              kobj_irq_live_count(void);
-```
-
-### `kobj_irq_create(intid)` — return semantics
-
-| Return | Meaning |
-|---|---|
-| non-NULL | success: `magic` set, `ref=1`, `intid` recorded, `rendez` initialized, `pending_count=0`. GIC handler registered + IRQ enabled. |
-| NULL | failure: SLUB OOM, gic_attach failed (handler slot already in use), or gic_enable_irq failed. |
-
-### `kobj_irq_wait(k)` — return semantics
-
-Blocks until `pending_count > 0`, then atomically reads + zeroes the counter under `r->lock`. Returns the count of IRQs collapsed into this single wait. Always >= 1 on a successful return. NULL k returns 0.
-
-Spurious wake from a non-IRQ source is impossible — sleep's cond loop guarantees we only return when cond is true, and cond is `pending_count > 0` (only kobj_irq_dispatch increments it).
-
-### `kobj_irq_destroy / unref` — invalidation
-
-After the unref that drops ref to 0:
-1. `gic_disable_irq(intid)` — stop the IRQ from firing.
-2. `gic_attach(intid, NULL, NULL)` — clear the handler slot.
-3. `magic = 0` — explicit clobber so a stale-pointer dispatch sees magic mismatch + bails before touching freed memory.
-4. `kfree(k)` — release the SLUB slot.
-
-The order matters: disable + unregister before free, so a fire-in-flight at destroy time can't dispatch into a freed KObj_IRQ.
-
----
-
-## Implementation
-
-`kernel/include/thylacine/irqfwd.h` (~95 LOC) + `kernel/irqfwd.c` (~140 LOC).
-
-### Dispatch path
-
-```c
-static void kobj_irq_dispatch(u32 intid, void *arg) {
-    struct KObj_IRQ *k = (struct KObj_IRQ *)arg;
-    if (!k || k->magic != KOBJ_IRQ_MAGIC) return;
-
-    irq_state_t s = spin_lock_irqsave(&k->rendez.lock);
-    k->pending_count++;
-    spin_unlock_irqrestore(&k->rendez.lock, s);
-
-    __atomic_fetch_add(&g_irq_total_fires, 1u, __ATOMIC_RELAXED);
-
-    wakeup(&k->rendez);
-}
-```
-
-The lock is dropped BEFORE `wakeup` because `wakeup` re-takes `r->lock` to transition the waiter to RUNNABLE. Holding through wakeup would self-deadlock (same-CPU re-acquire of a non-reentrant lock).
-
-### Wait path
-
-```c
-u32 kobj_irq_wait(struct KObj_IRQ *k) {
-    if (!k) return 0;
-    if (k->magic != KOBJ_IRQ_MAGIC) extinction(...);
-
-    sleep(&k->rendez, kobj_irq_pending_cond, k);
-
-    irq_state_t s = spin_lock_irqsave(&k->rendez.lock);
-    u32 count = k->pending_count;
-    k->pending_count = 0;
-    spin_unlock_irqrestore(&k->rendez.lock, s);
-    return count;
-}
-```
-
-`sleep` calls cond under `r->lock`; if cond is already true (an IRQ fired before sleep entered), sleep returns immediately on the fast path without state transition. The post-sleep re-lock is what makes the read + zero atomic against a concurrent dispatch.
-
-### Race walkthrough
-
-Three orderings of "send IPI" vs "kobj_irq_wait":
-
-**A. IRQ fires BEFORE wait enters sleep.**
-1. dispatch: lock, `pending_count = 1`, unlock, wakeup (no waiter; no-op).
-2. wait: sleep → cond (locked) sees `pending_count == 1`, fast-path returns.
-3. wait: re-lock, read `count = 1`, zero, unlock, return 1.
-
-**B. IRQ fires AFTER wait enters sleep.**
-1. wait: sleep → cond sees 0 → marks self SLEEPING under lock → drops lock → schedules out.
-2. dispatch: lock, `pending_count = 1`, unlock, wakeup → wakeup takes lock, transitions waiter to RUNNABLE, drops lock.
-3. wait resumes: cond re-checks under lock, sees 1, returns.
-4. wait: re-lock, read `count = 1`, zero, unlock, return 1.
-
-**C. IRQ fires DURING wait's sleep transition (concurrent).**
-- wait holds `r->lock` during cond + state transition.
-- dispatch spins on `r->lock`.
-- wait drops lock + schedules out (now SLEEPING, lock free).
-- dispatch acquires lock, increments, drops, calls wakeup.
-- wakeup transitions waiter to RUNNABLE.
-- wait resumes; same as path B from step 3.
-
-In all three cases, `count = 1` returned. NoMissedWakeup proved by the lock interlock.
-
-### IRQ collapsing
-
-If multiple IRQs fire before `wait` consumes the counter, the count is the sum:
-
-```
-dispatch → pending_count = 1
-dispatch → pending_count = 2
-dispatch → pending_count = 3
-wait     → returns 3
-```
-
-Drivers handle this by checking the device's used-ring (virtqueue) state — the used-ring index reflects "how many entries actually completed", which is the authoritative count. The IRQ count is informational; the protocol requires "wait returns ≥ 1 ⇒ check the device for new completions until none remain".
-
-### GIC integration
-
-`kobj_irq_create` calls:
-- `gic_attach(intid, kobj_irq_dispatch, k)` — binds the dispatch handler with `k` as the cookie.
-- `gic_enable_irq(intid)` — unmasks the IRQ on this CPU's redistributor (for SGIs/PPIs) or distributor (for SPIs).
-
-If `gic_attach` fails (handler slot already in use), create returns NULL after kfree. If `gic_enable_irq` fails, create rolls back the attach + frees.
-
-Cleanup on destroy: `gic_disable_irq(intid)` then `gic_attach(intid, NULL, NULL)` then `kfree`.
-
----
-
-## Spec cross-reference
-
-P4-G is impl-only — no new TLA+ module. The wait/wake atomicity is covered by `scheduler.tla::NoMissedWakeup` (I-9). The IRQ-counter pattern is a direct application of the wait-on-cond protocol.
-
-ARCH §28 I-19 (note delivery causal order) is the related-but-distinct invariant for cross-process notes (Phase 5+); the IRQ → wait path is the same wait/wake protocol but at a single-Rendez granularity.
-
----
-
-## Tests
-
-`kernel/test/test_irqfwd.c` — 4 tests:
-
-| Test | Covers |
-|---|---|
-| `irqfwd.create_destroy` | Lifecycle: create → destroy; live count balances; magic/intid/ref correct on fresh KObj_IRQ. |
-| `irqfwd.refcount_lifecycle` | ref/unref balance; live count stable while ref > 0; drops on last unref. |
-| `irqfwd.wait_wakes_on_sgi` | Self-IPI on SGI 1 → kobj_irq_wait returns ≥ 1 + global fire counter increments. |
-| `irqfwd.collapses_concurrent_fires` | 3 self-IPIs sent before wait → wait returns ≥ 1 (GIC SGI coalescing may reduce count, but at least 1 must be observed). |
-
-All kernel-side tests use SGI 1 (`IPI_IRQFWD_TEST`) as the fire source, software-triggered via `gic_send_ipi(self, ...)` so we don't need a real hardware device.
-
-The userspace SVC path is exercised by `kernel/test/test_irq_probe.c::userspace.irq_probe_rfork_with_caps` (P4-Ic5-IRQ-probe). Pattern differs from the SGI tests because EL0 callers cannot send SGIs (R9 F142 / F145 — only SPI INTIDs are claimable from `SYS_IRQ_CREATE`):
-
-| Mechanism | Notes |
-|---|---|
-| Pre-pend via `gic_set_pending_spi(96)` | SPI 96 chosen as a safe unused INTID on QEMU virt. The kernel test pre-marks the IRQ as pending **before** spawning the child. Per ARM IHI 0069 §12.9.6 the pending bit is orthogonal to the enable bit; pending stays set across enable transitions. |
-| Child claims SPI 96 via `t_irq_create(96, T_RIGHT_SIGNAL)` | Inside the kernel: `intid_try_claim(96)` ✓ → `kmalloc` + `gic_attach` + `gic_enable_irq(96)`. The enable transition with pending=1 delivers the IRQ immediately on CPU 0 (Aff0=0 routing from `dist_init`). |
-| GIC dispatch increments `pending_count` | Either during the kernel-context `gic_enable_irq` if CPU 0 was at EL1 with IRQs unmasked, or on `ERET` to EL0 once the child unmasks IRQs. Either way `pending_count = 1` is observable from the child's `t_irq_wait`. |
-| Child waits via `t_irq_wait(handle)` | `sleep` cond returns true (count=1) → no block; re-take lock, count=1, zero, return 1. Race-free pattern (the pre-pend before spawn guarantees `pending_count >= 1` by the time `cond` is evaluated). |
-
-The pre-pend pattern was chosen over alternatives:
-
-- **PL031 alarm** (program RTCMR + RTCIMSC and wait for the alarm interrupt to fire): adds 1-second test latency due to PL031's 1 Hz tick. Also requires PL031 R/W MMIO mapping which adds setup overhead.
-- **Kernel test orchestration after spawn** (rfork → sched_yield N times → gic_set_pending): inherently racy — no clean barrier to detect "child has reached t_irq_wait." Could miss the wait state and either fire too early (before handler attached) or too late (after the test runner timeout).
-- **Multi-process trigger** (one binary creates IRQ + waits; another binary triggers SGI): SGIs are kernel-reserved per R9 F142/F145. Adding a debug syscall to trigger an arbitrary INTID expands the audit surface.
-
-Pre-pend wins because the GIC's pending-bit semantics are stable across enable transitions, making the test race-free with zero synchronization overhead.
-
----
-
-## Status
-
-| Component | State |
-|---|---|
-| `kernel/include/thylacine/irqfwd.h` | Landed (P4-G) |
-| `kernel/irqfwd.c` (lifecycle + dispatch + wait) | Landed (P4-G) |
-| GIC integration (gic_attach + gic_enable_irq + gic_disable_irq) | Landed (P4-G) |
-| In-kernel tests | 4 covering lifecycle, refcount, wait/wake, IRQ collapsing |
-| Userspace SVC-path test | Landed (P4-Ic5-IRQ-probe) — `userspace.irq_probe_rfork_with_caps` exercises `t_irq_create` + `t_irq_wait` end-to-end via pre-pended SPI 96 |
-| Handle-table integration (KOBJ_IRQ release calls kobj_irq_unref) | Landed (P4-Ib) |
-| Userspace syscall wrappers (`SYS_IRQ_CREATE` + `SYS_IRQ_WAIT`) | Landed (P4-Ib) |
-| Multi-waiter wait queues | Held to Phase 5+ (poll/futex) |
-| Multi-subscriber per IRQ (fan-out wakeup) | Held — v1.0 each IRQ has exactly one KObj_IRQ |
-| IRQ → userspace latency benchmark (VISION §4.5 p99 < 5µs) | Held to P4-Z (Phase 4 closing audit; needs userspace drivers to measure) |
-
----
-
-## Known caveats / footguns
-
-### Single-waiter per KObj_IRQ (busy-guard since RW-7 R1-F1)
-
-The Rendez allows at most one sleeping thread. A second concurrent `kobj_irq_wait` on the same KObj_IRQ is **refused with -1** by a busy-guard claimed under the lock (the devcons single-reader pattern; `irqfwd.c:353-358`) — pre-RW-7 it tripped sched.c's "rendez already has a waiter" extinction, an unprivileged kernel kill from any two-threaded driver. v1.0 contract: one IRQ-handling thread per IRQ fd; multi-waiter lands with a future poll-hook integration if a driver demands it.
-
-### Edge-triggered counter, not a queue
-
-The `pending_count` is a count, not a queue of (timestamp, payload) tuples. Drivers can't recover "what time did each IRQ fire" — they get an aggregate count. For VirtIO this is sufficient (the device's used-ring carries per-completion info); for arbitrary IRQ sources it may matter. Phase 5+ might add a per-IRQ ring buffer if a driver demands it.
-
-### Stale-fire safety (gic_disable_irq + gic_attach(NULL, NULL) order at destroy)
-
-*(This is the "stale-fire safety" lifecycle discussion `kernel/irqfwd.c`'s destroy path points at.)*
-
-The destroy path disables BEFORE clearing the handler slot, and `gic_attach(intid, NULL, NULL)` is rejected by the gic API (the slot retains `kobj_irq_dispatch` + `arg=k`). A fire pending in the GIC at the moment of disable can still be delivered mid-teardown — `gic_disable_irq` writes ICENABLER, which suppresses *future* deliveries; in-flight deliveries continue, and a dispatch already acknowledged on another CPU cannot be retracted at all (RW-7 R1-F2). The teardown is safe under that window because of two guards, both RW-7 R1-F2:
-
-1. **The `dying` guard** (`irqfwd.c:156,168,296`): set under the lock BEFORE the free; a dispatch that wins the race observes `dying` and touches `*k` no further.
-2. **The magic clobber** (`magic = 0` at free): a dispatch holding a stale `k` pointer past the free sees the mismatch and bails before any other field read.
-
-A stronger guarantee (synchronous drain-pending in destroy) is held until concurrent destroy-vs-IRQ becomes a real driver pattern; the RW-7 fix makes the existing window touch-nothing rather than UAF.
-
-### `__atomic_fetch_add` on g_irq_total_fires uses RELAXED
-
-Counter is diagnostic; ordering doesn't matter. Tests use this for "did any IRQ fire?" not for synchronization. RELAXED is the cheapest correct choice.
-
-### gic_send_ipi(self, SGI 1) coalescing
-
-ARM GIC SGI delivery may coalesce multiple sends if the IRQ is still pending at the redistributor. The `irqfwd.collapses_concurrent_fires` test checks "at least 1" rather than exactly 3 because the GIC's coalescing behavior is implementation-defined.
-
-### Test reuses IPI_IRQFWD_TEST = SGI 1
-
-Tests that run sequentially each create + destroy a KObj_IRQ on SGI 1. The destroy path clears the handler slot, so subsequent tests can re-attach. If a test fails mid-flight without destroying, SGI 1's handler remains attached + the next test fails on `gic_attach`. Tests are written to balance create/destroy explicitly; future stress tests should use a per-test SGI to avoid the dependency.
-
----
-
-## References
-
-- `docs/ARCHITECTURE.md` §9.3 — driver model + KObj_IRQ semantics.
-- `docs/ROADMAP.md` §6.1 — Phase 4 deliverables (irqfwd among them).
-- `docs/reference/16-rendez.md` — Plan 9 wait/wake (the substrate).
-- `docs/reference/15-scheduler.md` — sched/ready/preempt (the substrate's substrate).
-- `arch/arm64/gic.h::gic_attach + gic_enable_irq` — handler binding.
-- `kernel/sched.c::wakeup` — Rendez wake transition.
-- `specs/scheduler.tla::NoMissedWakeup` (I-9) — wait/wake atomicity invariant.
+# 36 — IRQ forwarding [ABSORBED INTO THE VAULT]
+
+This document was absorbed at the interrupt-and-time sweep
+(`chg-2026-08-02-devices-interrupt-time-sweep`). Its content now lives,
+code-verified and current, in the dossier:
+
+    vault/system/kernel/devices/sub-kernel-irqfwd.md
+
+(the exclusive claim bitmap and why it exists, the kernel's own reserved
+interrupt numbers, the arrival hook's lock-then-wake ordering, the saturating
+count and the sentinel it must not collide with, the single-waiter refusal, the
+interactive promotion, the read-and-zero window, and the three-part teardown
+against a live interrupt.)
+
+**This was the best-preserved of the three documents absorbed in this batch** —
+it has a real caveats section, and the code cites it by name for its
+"stale-fire safety" discussion, which is genuinely there. What follows is
+therefore not a stale-document catalogue so much as two specific defects.
+
+**It contradicts itself about the same line of code, twenty lines apart.** The
+stale-fire section says, correctly, that `gic_attach(intid, NULL, NULL)` "is
+rejected by the gic API (the slot retains `kobj_irq_dispatch` + `arg=k`)". The
+test-reuse section immediately below says "The destroy path clears the handler
+slot, so subsequent tests can re-attach." The slot is never cleared. What
+actually allows the next create to succeed is the **claim bitmap being
+released**, a different mechanism in a different file.
+
+That section's failure prediction is then wrong twice over: it says that if a
+test fails without destroying, "the next test fails on `gic_attach`". Attaching
+over a live slot does not fail — it silently overwrites, which is the exact
+hazard the claim bitmap exists to prevent. The next create would fail at the
+*claim*, before ever reaching attach. A reader debugging a test failure here is
+pointed at the wrong call, expecting the wrong error, for the wrong reason.
+
+**It defers a guarantee the code now has.** The stale-fire section closes with
+"A stronger guarantee (synchronous drain-pending in destroy) is held until
+concurrent destroy-vs-IRQ becomes a real driver pattern", and lists two guards:
+the dying flag and the magic clobber. The synchronous drain exists — teardown
+sets the dying flag and then **spins until an in-flight dispatch clears its
+in-flight marker**, whose final unlock is that dispatch's last touch of the
+object. The identifier appears zero times in this document. So the reference
+records a deliberate decision not to build a thing that was subsequently built,
+which is worse than silence: it tells a reader the window is open when it has
+been closed.
+
+Smaller: the single-waiter refusal is described as returning `-1`; it returns a
+named sentinel, and the pending count saturates just below that value precisely
+so the two can never be confused — the saturation is not mentioned.
+
+What it got right and the vault kept: the collapsed-count contract, the
+single-waiter rationale, the relaxed diagnostic counter, and the observation
+that the tests reuse the second inter-processor interrupt number. That last one
+stops short of the part that matters — the same number is reserved, in a
+commented-out line, for a future cross-CPU cache-invalidation interrupt.
+
+The invariant lives at `vault/invariants/inv-i9.md`. The open debt is
+`seam-gic-handler-slot-never-cleared` (no task) — the controller's attach
+rejects a null handler by design, so the natural unregister cannot be expressed
+and the slot permanently references freed memory, which is what the three
+defences stand in for. Design scripture is unchanged: `ARCHITECTURE.md section
+9.3`.

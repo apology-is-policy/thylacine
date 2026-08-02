@@ -3,11 +3,11 @@ id: inv-i17
 type: inv
 title: "I-17 — the EEVDF quantitative latency bound (a design target)"
 number: I-17
-guards: [sub-kernel-sched]
+guards: [sub-kernel-sched, sub-kernel-timer]
 validated-by: [spec-scheduler, gate-smp]
 strength: prose
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Statement
 

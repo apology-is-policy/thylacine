@@ -31,11 +31,11 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-pty]] | active | 4 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 21 |
+| [[arc-vault]] | active | 22 |
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 83
+## Open seams: 84
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -69,6 +69,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
 - [[seam-f-notif-unwired]] (sub-kernel-weft, sub-kernel-loom)
 - [[seam-fid-monotonic-reclaim]] (sub-kernel-ninep-client)
+- [[seam-gic-handler-slot-never-cleared]] (sub-kernel-gic, sub-kernel-irqfwd)
 - [[seam-handle-based-dot]] (sub-kernel-territory)
 - [[seam-hmp-push]] (sub-kernel-sched-smp)
 - [[seam-hwcap-boot-cpu-only]] (sub-kernel-boot-sequence, sub-kernel-alternatives)
@@ -127,8 +128,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-02 [[chg-2026-08-02-authority-sweep]] — vault sweep: the kernel authority substrate
 - 2026-08-02 [[chg-2026-08-02-boot-sweep]] — vault sweep: the boot path -- where the tools' assumptions are not yet true
 - 2026-08-02 [[chg-2026-08-02-console-sweep]] — vault sweep: the console and its front doors
+- 2026-08-02 [[chg-2026-08-02-devices-interrupt-time-sweep]] — vault sweep: the interrupt and time path -- the devices whose failure has no observer
 - 2026-08-02 [[chg-2026-08-02-entry-sweep]] — vault sweep: the EL0 entry boundary and its return tails
 - 2026-08-02 [[chg-2026-08-02-introspection-sweep]] — vault sweep: the kernel introspection Devs
 - 2026-08-02 [[chg-2026-08-02-stratum-sweep]] — vault sweep: the Stratum integration surface
-- 2026-08-01 [[chg-2026-07-31-stalk-sweep]] — The stalk sweep: the resolver + the Path substrate + the namespace audit backfill
 <!-- generated:end -->

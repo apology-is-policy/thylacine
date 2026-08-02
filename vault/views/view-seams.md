@@ -46,6 +46,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-expect-channel-close]] | open | sub-substrate-interactive | chg-2026-08-01-substrate-sweep | #78 residual |
 | [[seam-f-notif-unwired]] | open | sub-kernel-weft, sub-kernel-loom | chg-2026-08-02-async-sweep |  |
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
+| [[seam-gic-handler-slot-never-cleared]] | open | sub-kernel-gic, sub-kernel-irqfwd | chg-2026-08-02-devices-interrupt-time-sweep |  |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-hmp-push]] | open | sub-kernel-sched-smp | chg-2026-06-05-864-hmp-foundation | ARCH 8.4.4 -- the verification boundary |
 | [[seam-hwcap-boot-cpu-only]] | open | sub-kernel-boot-sequence, sub-kernel-alternatives | chg-2026-08-02-boot-sweep |  |
