@@ -94,6 +94,14 @@ reconstruction is complete: **the fork holds nothing this directory does not.**
 (`clade-stage1.sh` now refuses a dirty tree by name rather than letting `git am`
 fail with a message that mentions neither the series nor the script.)
 
+**The builder's fork is still in that state, deliberately.** A reconcile there
+will refuse until someone commits the 0005 delta or discards it — which is the
+guard working, not a surprise. It was left alone because the durable form is
+already safe: these patches are pushed, and the fork is reconstructable from
+them, so nothing is at risk in the way CL-7b-2's `/private/tmp`-only script was.
+Restarting a builder to tidy a scratch tree buys nothing the repo does not
+already hold.
+
 ## Cross-configure and build
 
 Mesa's build system finds LLVM by *running* `llvm-config`, and a cross build has
