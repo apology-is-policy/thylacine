@@ -44,3 +44,7 @@ Bottom-up through the stack:
 - Lineage: [[lin-9p-client]] — the #841→#90 hardening saga.
 - Hazards: [[haz-shared-stream-desync]] · [[haz-single-waiter-rendez]] ·
   [[haz-death-path-wake]].
+- The far end of the wire: [[moc-stratum]] — what the 9P *server* does that
+  this client's correctness depends on (the four `aname` kinds, the
+  `SO_PEERCRED` identity channel, the `Twalkgetattr` it answers, and the
+  fast path that assumes Thylacine never binds).

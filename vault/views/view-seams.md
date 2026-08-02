@@ -43,6 +43,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-fid-monotonic-reclaim]] | open | sub-kernel-ninep-client | fnd-stalk2-r1-f2 | RW-4 R3-F2 register |
 | [[seam-handle-based-dot]] | open | sub-kernel-territory | chg-2026-06-09-ls4-cwd | unfiled |
 | [[seam-hmp-push]] | open | sub-kernel-sched-smp | chg-2026-06-05-864-hmp-foundation | ARCH 8.4.4 -- the verification boundary |
+| [[seam-kobj-handle-release]] | open | sub-stratum-bdev | chg-2026-08-02-stratum-sweep |  |
 | [[seam-larder-cacheable-proxy]] | open | sub-kernel-larder, sub-kernel-ninep-dev9p | chg-2026-07-09-larder-l1e |  |
 | [[seam-larder-lazy-array-robustness]] | open | sub-kernel-larder | fnd-25-r1-f1 |  |
 | [[seam-larder-loom-bypass]] | open | sub-kernel-larder | fnd-l1f-r1-f2 |  |
@@ -70,6 +71,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-pouch-sock-single-user]] | open | sub-pouch-net | chg-2026-05-23-p6-sockets | sockets-12 F4 |
 | [[seam-pouch-spawn-envp]] | open | sub-pouch-process | chg-2026-07-23-cl1b-process | CL-1b |
 | [[seam-proc-find-no-refcount]] | open | sub-kernel-proc | chg-2026-08-01-proc-thread-sweep | unfiled |
+| [[seam-proxy-coord-eof]] | open | sub-stratum-session | chg-2026-08-02-stratum-sweep |  |
 | [[seam-rfnameg-shared-territory]] | open | sub-kernel-territory | chg-2026-05-13-p5-attach-mount | unfiled |
 | [[seam-rfork-flags-unimplemented]] | open | sub-kernel-proc | chg-2026-05-05-p2d-rfork-exits-wait | unfiled |
 | [[seam-runq-rbtree]] | open | sub-kernel-sched | chg-2026-05-05-p2b-sched-dispatch | ARCH 8.4 design intent; Phase 7 |
@@ -78,6 +80,7 @@ Generated from note fields — do not edit between the markers
 | [[seam-sparse-mpidr]] | open | sub-kernel-sched-smp | chg-2026-06-05-863-smp-soundness-core | the DTB MPIDR -> dense-logical-index map |
 | [[seam-srv-9p-connect-unit]] | open | sub-kernel-devsrv | chg-2026-06-03-stalk3b-open-connect |  |
 | [[seam-srv-registry-lifecycle]] | open | sub-kernel-devsrv | chg-2026-05-19-srv-birth |  |
+| [[seam-stratum-notify-peercred]] | open | sub-stratum-session, sub-stratum-server | chg-2026-08-02-stratum-sweep |  |
 | [[seam-tickless-bare-metal]] | open | sub-kernel-sched-smp | chg-2026-06-22-ti4-work-conservation | owed at Lazarus / RPi |
 | [[seam-timerwait-sharding]] | open | sub-kernel-rendez | chg-2026-05-17-p5-tsleep | documented future optimization |
 | [[seam-torpor-cross-proc]] | open | sub-kernel-torpor | chg-2026-05-23-torpor | POUCH-DESIGN section 7, Tier-2 burrows |

@@ -31,5 +31,6 @@ Schema: `vault/meta/schema.md` (binding). Operating loop:
 [[moc-kernel]] · [[moc-userspace]] · [[moc-boundary]] (ABIs, wire
 protocols, registries — deliberately neither kernel nor userspace) ·
 [[moc-substrate]] (QEMU/HVF/TCG, boards, builders, harness — what the
-system runs on and is judged by) · `system/stratum/` (the sibling-system
-integration surface).
+system runs on and is judged by) · [[moc-stratum]] (the sibling-system
+integration surface: the block backend, bringup, the 9P server side, the
+per-user encrypted home).

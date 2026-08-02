@@ -31,11 +31,11 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-pty]] | active | 4 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 14 |
+| [[arc-vault]] | active | 15 |
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 71
+## Open seams: 74
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -66,6 +66,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-fid-monotonic-reclaim]] (sub-kernel-ninep-client)
 - [[seam-handle-based-dot]] (sub-kernel-territory)
 - [[seam-hmp-push]] (sub-kernel-sched-smp)
+- [[seam-kobj-handle-release]] (sub-stratum-bdev)
 - [[seam-larder-cacheable-proxy]] (sub-kernel-larder, sub-kernel-ninep-dev9p)
 - [[seam-larder-lazy-array-robustness]] (sub-kernel-larder)
 - [[seam-larder-loom-bypass]] (sub-kernel-larder)
@@ -93,6 +94,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-pouch-sock-single-user]] (sub-pouch-net)
 - [[seam-pouch-spawn-envp]] (sub-pouch-process)
 - [[seam-proc-find-no-refcount]] (sub-kernel-proc)
+- [[seam-proxy-coord-eof]] (sub-stratum-session)
 - [[seam-rfnameg-shared-territory]] (sub-kernel-territory)
 - [[seam-rfork-flags-unimplemented]] (sub-kernel-proc)
 - [[seam-runq-rbtree]] (sub-kernel-sched)
@@ -101,6 +103,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-sparse-mpidr]] (sub-kernel-sched-smp)
 - [[seam-srv-9p-connect-unit]] (sub-kernel-devsrv)
 - [[seam-srv-registry-lifecycle]] (sub-kernel-devsrv)
+- [[seam-stratum-notify-peercred]] (sub-stratum-session, sub-stratum-server)
 - [[seam-tickless-bare-metal]] (sub-kernel-sched-smp)
 - [[seam-timerwait-sharding]] (sub-kernel-rendez)
 - [[seam-torpor-cross-proc]] (sub-kernel-torpor)
@@ -111,6 +114,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-08-02 [[chg-2026-08-02-stratum-sweep]] — vault sweep: the Stratum integration surface
 - 2026-08-01 [[chg-2026-07-31-stalk-sweep]] — The stalk sweep: the resolver + the Path substrate + the namespace audit backfill
 - 2026-08-01 [[chg-2026-08-01-94-kproc-wait-by-pid]] — #94: kproc waits for joey by pid
 - 2026-08-01 [[chg-2026-08-01-mm-ipc-sweep]] — Vault sweep batch 9: memory + ipc-wake
@@ -118,5 +122,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-01 [[chg-2026-08-01-proc-thread-sweep]] — The proc/thread sweep: the death lineage, and a doc that contradicts itself four lines apart
 - 2026-08-01 [[chg-2026-08-01-sched-sweep]] — Vault sweep: the scheduler area (dispatch, the SMP protocol, the wait/wake primitive)
 - 2026-08-01 [[chg-2026-08-01-substrate-sweep]] — vault sweep: the substrate
-- 2026-08-01 [[chg-2026-08-01-territory-sweep]] — The territory sweep: the namespace tables, the two locks, and a dead bind graph
 <!-- generated:end -->

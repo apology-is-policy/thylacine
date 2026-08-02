@@ -45,4 +45,8 @@ Generated from note fields — do not edit between the markers
 | [[sub-pouch-signal]] | usr/lib/pouch/patches/0007-pouch-signals.patch | inv-i24 | - The bootstrap must reach a `SYS_NOTED` on EVERY arm (unknown name |
 | [[sub-pouch-thread]] | usr/lib/pouch/patches/0004-pouch-pthread.patch, usr/lib/pouch/patches/0022-pouch-nanosleep.patch | inv-i9 | - The 1-hour clamp must stay ≤ `TORPOR_MAX_TIMEOUT_US`; raising the |
 | [[sub-pouch-tty]] | usr/lib/pouch/patches/0021-pouch-pty.patch, usr/lib/pouch/patches/0029-pouch-cons-winsize.patch |  | - The `S_ISCHR`-then-flag gate order, and the disjointness of bit 40 |
+| [[sub-stratum-bdev]] | stratum: src/block/bdev_thylacine.c |  | - Any new op must take the mutex; B-2 is what makes the single shared |
+| [[sub-stratum-boot]] | usr/joey/joey.c, kernel/syscall.c, kernel/9p_srvconn_transport.c, kernel/territory.c | inv-i28 | - A new readiness signal must be emitted **after** the last fallible step. |
+| [[sub-stratum-server]] | stratum: src/9p/server.c, stratum: src/cmd/stratumd/serve.c, stratum: src/cmd/stratumd/peer_creds.c, stratum: src/cmd/stratumd/run.c | inv-i1, inv-i28 | - `n_uname` must stay ignored while `SO_PEERCRED` is the channel. Honouring |
+| [[sub-stratum-session]] | usr/login/src/main.rs, stratum: src/cmd/stratumd/proxy_9p.c, stratum: src/cmd/stratumd/dataset_pattern.c, stratum: src/cmd/stratumd/corvus_notify.c | inv-i1 | - The `/ctl` attach must outlive the session; the DEK lease is bound to |
 <!-- generated:end -->
