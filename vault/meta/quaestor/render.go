@@ -315,6 +315,65 @@ func renderAbsorption(reg *Registry) string {
 	return strings.Join(out, "\n")
 }
 
+// specNoteID maps a TLA+ module filename to the note id that dossiers it:
+// specs/sched_oncpu.tla -> spec-sched-oncpu. The convention is the whole
+// mapping; there is no registry of exceptions and there should not be one.
+func specNoteID(file string) string {
+	base := strings.TrimSuffix(file, ".tla")
+	return "spec-" + strings.ReplaceAll(base, "_", "-")
+}
+
+// renderSpecCoverage: which TLA+ modules have a spec note, and which do not.
+//
+// The second view reading outside the vault, and for the same reason as
+// renderAbsorption. A spec note is what holds a module's action-to-site map
+// (schema section 4: it "absorbs SPEC-TO-CODE.md for this module"), so a
+// reference document that carries such a map cannot be absorbed until its
+// module has one. The gap was found in prose at the registry pass; stating
+// it in prose is what let the absorption ledger rot, so it is computed here
+// instead and cannot fall behind the tree.
+func renderSpecCoverage(reg *Registry) string {
+	root := vaultRoot(reg)
+	if root == "" {
+		return "**(registry empty — cannot locate the repo root.)**"
+	}
+	ents, err := os.ReadDir(filepath.Join(root, "specs"))
+	if err != nil {
+		return "**(specs/ is unreadable.)**"
+	}
+	type row struct{ module, note, state string }
+	var rows []row
+	var have, missing int
+	for _, e := range ents {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".tla") {
+			continue
+		}
+		id := specNoteID(e.Name())
+		if reg.Has(id) {
+			have++
+			rows = append(rows, row{e.Name(), "[[" + id + "]]", "dossiered"})
+		} else {
+			missing++
+			rows = append(rows, row{e.Name(), "`" + id + "`", "**missing**"})
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].module < rows[j].module })
+	out := []string{
+		fmt.Sprintf("**%d dossiered · %d missing · %d modules.**",
+			have, missing, have+missing),
+		"",
+		"| module | spec note | state |",
+		"|---|---|---|",
+	}
+	for _, r := range rows {
+		out = append(out, fmt.Sprintf("| %s | %s | %s |", r.module, r.note, r.state))
+	}
+	if len(rows) == 0 {
+		out = append(out, "| (none) | | |")
+	}
+	return strings.Join(out, "\n")
+}
+
 var renderers = map[string]func(*Registry) string{
 	"dashboard":      renderDashboard,
 	"invariants":     renderInvariants,
@@ -322,6 +381,7 @@ var renderers = map[string]func(*Registry) string{
 	"audit-triggers": renderAuditTriggers,
 	"roadmap":        renderRoadmap,
 	"absorption":     renderAbsorption,
+	"spec-coverage":  renderSpecCoverage,
 }
 
 func viewNotes(reg *Registry) []*Note { return reg.OfType("view") }
