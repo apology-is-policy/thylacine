@@ -3,7 +3,7 @@ id: inv-i32
 type: inv
 title: "I-32 — the per-Proc resource floor"
 number: I-32
-guards: [sub-kernel-proc, sub-kernel-hwcap]
+guards: [sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
@@ -71,6 +71,17 @@ creation path (`proc_alloc`, `thread_create`, `territory_clone`,
 per-Proc-terminates, never a box extinction. So a bomb that evades a
 per-Proc cap by spreading across Procs still terminates at the physical
 cliff instead of taking the machine.
+
+**Subsystem-local bounds are the same invariant at a smaller scale, and they are
+not on this table.** The per-Proc environment ([[sub-kernel-content]]) caps its
+variable count and each value's length, which bounds a hostile program's kernel
+allocation there to a quarter-megabyte per Proc. These are not counted on
+`struct Proc` and never reach the axes above — they are enforced where the
+allocation happens, by the structure that owns it. That is the general shape:
+this invariant's table lists the axes with a *shared* allocator behind them, and
+each subsystem that allocates on a Proc's behalf carries its own ceiling. A
+reader auditing "is this Proc bounded" must therefore consult both, and the table
+alone will read as more complete than it is.
 
 `page_budget` (CL-5) makes the page axis per-Proc rather than global:
 inherited across `rfork` (load-bearing — `make` and `clang` are Pouch ports

@@ -18,6 +18,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
 | [[sub-kernel-caps]] | kernel/include/thylacine/caps.h, kernel/devcap.c, kernel/proc.c |  | - A new capability bit must be added to `CAP_ALL` **or** to |
 | [[sub-kernel-cons]] | kernel/cons.c, kernel/include/thylacine/cons.h | inv-i27, inv-i9 | - **Nothing that needs [[lock-proc-table]] or a hook-list walk may be called |
+| [[sub-kernel-content]] | kernel/devramfs.c, kernel/devenv.c, kernel/env.c, kernel/include/thylacine/env.h, kernel/random.c, kernel/chacha20.c, kernel/include/thylacine/random.h, kernel/include/thylacine/chacha20.h | inv-i1, inv-i16, inv-i28, inv-i32, inv-i33 | - **The random buffer's first fill is not secret, and only boot ordering hides |
 | [[sub-kernel-death]] | kernel/proc.c | inv-i24, inv-i9 | The #811 audit's **verified-sound set** is the do-not-re-prosecute preamble |
 | [[sub-kernel-devdev]] | kernel/devdev.c | inv-i27 | - **A new console-adjacent leaf must be added to the right gate set.** The sets |
 | [[sub-kernel-devproc]] | kernel/devproc.c | inv-i26, inv-i39 | - **The four gates must not converge.** Each near-miss is a decision: |

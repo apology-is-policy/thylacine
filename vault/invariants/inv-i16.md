@@ -3,7 +3,7 @@ id: inv-i16
 type: inv
 title: "I-16 — the kernel base is randomized at boot, and never zero"
 number: I-16
-guards: [sub-kernel-kaslr, sub-kernel-boot-entry]
+guards: [sub-kernel-kaslr, sub-kernel-boot-entry, sub-kernel-content]
 validated-by: [prose, gate-smp]
 strength: prose
 created: 2026-08-02
@@ -59,6 +59,18 @@ worth knowing, because the next image growth spends another bit.
 **The cookie shares the entropy.** The stack-canary value is seeded from the same
 mixed source at the same moment, which is why the function that chooses the slide
 is the one function in the kernel exempted from stack protection.
+
+**And the sharing goes one step further, which obliges the other consumer.** The
+random source ([[sub-kernel-content]]) draws on the *same* firmware seeds. That
+makes this invariant's success into a liability elsewhere: the slide is
+deliberately published — a banner line on every boot, and a readable value for an
+authorized caller — so anything else derived from the same seed is derived from
+something partially disclosed. Two mechanisms answer it. The random source passes
+the seeds through a **different avalanche function with a per-use domain tag**, so
+the two derivations decorrelate; and it declines to count them toward readiness at
+all, refusing to serve until a source nobody else has observed has contributed.
+The second is the stronger of the two, and it is the reason a machine whose only
+entropy is the firmware seed reports itself *unready* rather than seeded.
 
 ## Validation
 

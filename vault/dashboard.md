@@ -31,7 +31,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-pty]] | active | 4 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 24 |
+| [[arc-vault]] | active | 25 |
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
@@ -128,8 +128,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-02 [[chg-2026-08-02-authority-sweep]] — vault sweep: the kernel authority substrate
 - 2026-08-02 [[chg-2026-08-02-boot-sweep]] — vault sweep: the boot path -- where the tools' assumptions are not yet true
 - 2026-08-02 [[chg-2026-08-02-console-sweep]] — vault sweep: the console and its front doors
+- 2026-08-02 [[chg-2026-08-02-devices-content-sweep]] — vault sweep: the three Devs that own their bytes -- and a public constant behind the fail-closed gate
 - 2026-08-02 [[chg-2026-08-02-devices-discovery-sweep]] — vault sweep: hardware discovery -- I-34 minted, and a document that describes its own audit in the future tense
 - 2026-08-02 [[chg-2026-08-02-devices-hwcap-sweep]] — vault sweep: the hardware-capability objects -- I-5 finds its home, and the ledger finds its gap
 - 2026-08-02 [[chg-2026-08-02-devices-interrupt-time-sweep]] — vault sweep: the interrupt and time path -- the devices whose failure has no observer
-- 2026-08-02 [[chg-2026-08-02-entry-sweep]] — vault sweep: the EL0 entry boundary and its return tails
 <!-- generated:end -->

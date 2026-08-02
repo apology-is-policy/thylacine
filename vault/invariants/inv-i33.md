@@ -3,7 +3,7 @@ id: inv-i33
 type: inv
 title: "I-33 — namespace name retention is non-load-bearing"
 number: I-33
-guards: [sub-kernel-path, sub-kernel-stalk, sub-kernel-territory]
+guards: [sub-kernel-path, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
@@ -32,6 +32,13 @@ pre-publish only; `spoor_free_internal` drops); the three resolver hook
 sites (stalk per-step + cross/adopt transplants, walk-open, walk-create).
 The write-only property is a grep-complete obligation re-verified at the
 #66a round.
+
+The one place a Path is *not* an accumulation is the boot filesystem's attach
+root ([[sub-kernel-content]]), which seeds itself as `/` at birth. That is sound
+for the narrow reason that it happens before publication, so the immutability the
+rest of this invariant relies on is established rather than violated — and it is
+visible only when that filesystem is the namespace root, since crossing a mount
+transplants the mount point's name over it.
 
 On the territory side ([[sub-kernel-territory]]), `PgrpMount.mp_path`
 mirrors the same discipline for the mount POINT's name (#66b). Its

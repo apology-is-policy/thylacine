@@ -3,7 +3,7 @@ id: inv-i1
 type: inv
 title: "I-1 — Territory operations in Proc A don't affect Proc B"
 number: I-1
-guards: [sub-kernel-territory, sub-kernel-devsrv, sub-pouch-net]
+guards: [sub-kernel-territory, sub-kernel-devsrv, sub-pouch-net, sub-kernel-content]
 validated-by: [spec-territory, gate-smp]
 strength: spec
 created: 2026-07-31
@@ -41,6 +41,23 @@ the territory that mounts it. A `/srv` connection endpoint is additionally
 non-transferable (the KObj_Srv listener via `handle_dup`'s NoSrvDup; the
 conn Spoor via the `dc == 's'` dup guard), so the kernel-stamped peer
 identity behind it cannot cross Procs.
+
+On the per-Proc content Devs ([[sub-kernel-content]]) the enforcement is of a
+different kind, and it is the one worth studying. `/env` is per-Proc content
+behind a **global** mount: there is no namespace boundary doing the work, because
+every Proc reaches the same mount point. Isolation comes instead from every
+operation resolving the *calling* Proc — the `/proc/self` shape — so there is
+nothing to deny and no permission check involved.
+
+**What that shape exposes is that isolation can be undone by an identity
+collision rather than a missing check.** Entry ids restart at 1 in every
+environment, so two unrelated Procs' first variables both present as the same
+file. Nothing in the Dev misbehaves; the leak would occur in a *cache in another
+subsystem* that keys on that identity and would happily serve one Proc the
+contents of another's. The fix is to mint a per-environment device number so the
+pair is unique. The general lesson: a correct per-caller resolution is not
+sufficient for isolation if the names it hands out are not unique, because a
+consumer that trusts names as identities is entitled to.
 
 ## Validation
 

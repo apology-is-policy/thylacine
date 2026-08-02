@@ -3,7 +3,7 @@ id: inv-i28
 type: inv
 title: "I-28 — path resolution contained + per-component X-search"
 number: I-28
-guards: [sub-kernel-stalk, sub-pouch-fs, sub-pouch-net]
+guards: [sub-kernel-stalk, sub-pouch-fs, sub-pouch-net, sub-kernel-content]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
@@ -30,6 +30,18 @@ per component:
   requires X-searching the path to it.
 
 ## Enforcement
+
+The boot filesystem ([[sub-kernel-content]]) is where this invariant meets its
+first obstacle, and the answer is worth noting because it shapes the namespace
+every later Proc inherits. Mount crossing needs a path that resolves — a graft
+onto a name that does not is not a mount — but the boot root is a read-only
+archive, so a mount point cannot be created. It therefore **synthesizes** empty
+directories that exist only to be mounted over, and reports them world-searchable
+so the per-component X-gate passes for every principal. That execute bit is
+load-bearing: without it, resolution stops on the mount point and the crossing
+this invariant describes never happens. It is also the only sense in which the
+boot filesystem's permissions say anything — every real file there is
+system-owned and the enforcement is otherwise inert.
 
 `stalk_core` (the `..` pop guard + the per-component and POUNCE X-gates +
 the fail-ordering post-scan); `stalk_cross_mounts` + `mount_lookup` (the

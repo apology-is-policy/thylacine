@@ -10,15 +10,10 @@ The hardware the kernel drives itself, rather than handing to a userspace
 driver: the interrupt controller ([[sub-kernel-gic]]), the timebase and the wall
 clock ([[sub-kernel-timer]]), and the one surface that lends an interrupt out to
 a driver process ([[sub-kernel-irqfwd]]) — plus the objects that lend the rest of
-the hardware out ([[sub-kernel-hwcap]]), and the enumeration that tells a driver
-what there is to ask for ([[sub-kernel-discovery]]).
-
-> **Partial area.** Three of four sweeps done (the area is four, not the three
-> first estimated — the remainder is two unrelated stories, not one). Present:
-> the interrupt and time path, the hardware-capability objects, and hardware
-> discovery. Not yet swept: the synthetic device filesystems (`devramfs`,
-> `devenv`) and the entropy source (`random`, `chacha20`). Statements here are
-> scoped to what has been read.
+the hardware out ([[sub-kernel-hwcap]]), the enumeration that tells a driver what
+there is to ask for ([[sub-kernel-discovery]]), and the three Devs that have no
+hardware behind them at all and simply *are* what they serve
+([[sub-kernel-content]]).
 
 ## The organizing fact
 
@@ -57,6 +52,29 @@ that an assertion has something to assert against. The pattern is the same one
 pushed to its end: when failure has no observer, you manufacture one, and
 sometimes the only observer you manufacture is the test suite.
 
+**The last sweep supplies the third answer, and it is the strongest.** Counting
+manufactures an observer; a test manufactures one for the counter. But some
+failures cannot be observed even in principle — a predictable random number looks
+exactly like an unpredictable one, from inside and from outside, forever. No
+counter helps and no test can be written. So the entropy source
+([[sub-kernel-content]]) does the only remaining thing: **it refuses to produce
+output at all** until a source nobody else has observed has contributed. Where
+the timer survives a loss it cannot see and the capability objects invent a
+witness, the random source declines to emit anything whose wrongness would be
+invisible. Fail-closed is what this area's habit becomes when even manufacturing
+an observer is impossible.
+
+And that sweep found the pattern failing in exactly its own terms. The keystream
+buffer's *first* fill is generated from a cipher state that has not been keyed
+yet — a compile-time constant, identical on every machine — and what keeps it
+from reaching a caller is not the fail-closed gate but the order in which boot
+happens to run. The exposure is inverted: on hardware *without* a CPU random
+generator the gate is still shut, so a read in that window fails safely, while on
+hardware *with* one the gate is open. **No test sees it**, because every test
+runs after boot, by which time the buffer is secret. An invisible failure, in the
+subsystem built around invisible failure, guarded by an ordering rather than by
+the mechanism designed for it.
+
 **And the organizing fact turns out to describe the area's documents, too.**
 Three sweeps in, the absorbed reference material shows the same shape one level
 up: **a document decays exactly where being wrong has no observer.** The
@@ -80,10 +98,29 @@ So: forward-looking prose *cannot become wrong*. "The audit will prosecute X"
 stays grammatically true forever, whatever the audit found. It is rot-proof, and
 therefore worthless as a record — which makes it the most dangerous kind of
 sentence to find in a document you are trusting, because it reads like diligence.
+
+The final sweep adds two more forms, and both are worse than staleness because
+both look like corroboration. The first: **a fact restated in two places is
+corrected in one.** The boot filesystem's table cap was raised four times; the
+comment block explaining the raises is meticulous and a second comment thirty
+lines below still states the previous value, while the reference document states
+the original one and contradicts *itself* on the test count between two of its own
+sections. The edit is always scoped to the thing being changed, never to the fact
+being changed — and this happens identically in code comments and in prose,
+because it is a property of how edits are made rather than of the medium.
+
+The second: **a document derived from a comment inherits the comment's error.**
+The environment Dev's comment claims that adding a metadata handler made seeking
+to end-of-file work; it did not, because seekability is a separate explicit flag
+that was introduced precisely to stop that inference and that nobody set. The
+reference document says the same thing, faithfully, because it was written from
+the comment. Two independent-looking sources now assert it. The guard did its job
+perfectly and the record captured the belief the guard exists to falsify.
+
 The rule for reading this tree's documents: **the parts that look most carefully
 maintained are evidence about where failures happened, not about where the
-document is true**, and the parts written in the future tense are evidence of
-nothing at all.
+document is true**; the parts written in the future tense are evidence of nothing
+at all; and two sources agreeing are one source if one was written from the other.
 
 ## What this area owns, and what it deliberately does not
 
@@ -132,3 +169,5 @@ test that only ever runs on one of them is only ever evidence about one of them.
   bus function, and the three different ways their exclusivity is enforced
 - [[sub-kernel-discovery]] — how a driver finds out what exists: the two bus
   enumerations, and the two read-only trees that republish them
+- [[sub-kernel-content]] — the three Devs that own their bytes: the boot
+  filesystem, the per-process environment, and the random source

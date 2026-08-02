@@ -1,184 +1,29 @@
-# 106 — Kernel CSPRNG (`random.c` + `chacha20.c`)
+# 106 — Kernel CSPRNG (`random.c` + `chacha20.c`) [ABSORBED INTO THE VAULT]
 
-As-built reference for the kernel cryptographically-secure RNG. Landed in
-Lazarus W3 (`PORTABILITY.md §6`); replaces the RNDR-only v1.0 baseline.
+Absorbed at the content-Devs sweep
+(`chg-2026-08-02-devices-content-sweep`). Its content now lives, code-verified
+and current, in:
 
-## Purpose
+    vault/system/kernel/devices/sub-kernel-content.md
+    vault/invariants/inv-i16.md
+    vault/locks/lock-random.md
+    vault/locks/lock-rng-dev.md
 
-Supply the kernel and userspace with cryptographic-quality random bytes on
-*every* ARM64 substrate — TCG, HVF (Apple Silicon, no FEAT_RNG), and bare metal
-— through one code path. Consumers: `SYS_GETRANDOM` (corvus, libsodium via
-musl's `getentropy`), the ELF loader's `AT_RANDOM` (stack-canary / ASLR seed),
-the Plan 9 `/dev/random` Dev surface. Before W3, `random.c` was RNDR-only and
-returned `-1` on RNDR-less targets, breaking userspace crypto under HVF.
+Note on the absorbed text: it was the best-maintained document in the area —
+current on the two-bound device poll, the retry asymmetry, the all-zero
+rejection, and the reasoning behind each, down to the audit findings that
+produced them. It was also the one whose subject had a live debugging episode,
+which is this area's rule for where documents stay true.
 
-## Public API
+The one thing it did not record: the keystream buffer's *first* fill is generated
+from an unkeyed cipher state and is therefore a compile-time constant, and what
+keeps it from being served is boot ordering rather than the fail-closed gate. The
+document states that ordering — for the seeding property, which is a different
+property with the same guard.
 
-```c
-// kernel/include/thylacine/random.h
-long  kern_random_bytes(void *out, long len);  // len on success, 0 if len==0, -1 unseeded/bad-arg
-bool  kern_random_seeded(void);                // true once a strong source has seeded the pool (monotonic)
-size_t random_seed_from_virtio(void);          // strong reseed from the virtio-rng device; returns bytes pulled
-bool  kern_random_virtio_contributed(void);    // true iff a virtio-rng pull has ever contributed
+---
 
-// kernel/include/thylacine/chacha20.h
-void chacha_keysetup(struct chacha_ctx *x, const u8 key[32]);
-void chacha_ivsetup(struct chacha_ctx *x, const u8 iv[8]);
-void chacha_keystream(struct chacha_ctx *x, u8 *out, u32 bytes);
-```
-
-`kern_random_bytes` contract is unchanged from the RNDR baseline: full count on
-success, `-1` while unseeded (fail closed) or on a bad argument. `SYS_GETRANDOM`
-(`kernel/syscall.c::sys_getrandom_handler`) gates on `kern_random_seeded()` and
-treats a short read as failure.
-
-## Implementation
-
-The construction is OpenBSD `arc4random` (`kernel/random.c`):
-
-- **State**: a `struct chacha_ctx` (`g_rng`), a 1024-byte keystream buffer
-  (`g_rng_buf`), `g_rng_have` (bytes left in the buffer tail), `g_rng_count`
-  (bytes until the next strong stir), `g_rng_seeded`, `g_rng_virtio_ok`. All
-  guarded by `g_random_lock`; `g_rng_seeded`/`g_rng_virtio_ok` are also atomic
-  for lock-free readers.
-- **`rng_rekey_locked(dat, len)`**: generate a fresh `g_rng_buf` of keystream;
-  XOR up to 40 bytes of `dat` into its head; re-key the context from the first
-  `KEYSZ+IVSZ` (= 40) bytes (**fast key erasure** — the old key is gone, giving
-  backtracking resistance); zero those 40 bytes; expose the remaining 984 bytes
-  at the tail. The rekey material is never served.
-- **`rng_buf_consume_locked(out, n)`**: serve from `g_rng_buf + (1024 - have)`
-  (i.e. bytes `[40..1024)`), zeroing each served byte; rekey to refill on drain.
-- **`rng_collect_cheap(out, cap, &has_unobserved)`**: non-blocking entropy —
-  DTB `kaslr-seed`/`rng-seed` (domain-separated via `rng_mix64` so the CSPRNG
-  key does not correlate with the disclosed KASLR offset), one RNDR word if
-  present (sets `has_unobserved`), then CNTPCT samples to fill the remainder.
-  The DTB seeds + CNTPCT are key **material** only; they never gate readiness
-  (the DTB seed is also KASLR's and partially disclosed). `has_unobserved` is
-  set only by RNDR — an unobserved strong source.
-- **`rng_stir_locked`**: collect cheap entropy + rekey + reset
-  `g_rng_count = 1 MiB`; flip `g_rng_seeded` only if `has_unobserved` (RNDR).
-- **`random_virtio_pull(out, want)`**: the virtio-rng driver (below).
-- **`random_reseed_strong`**: pull virtio-rng entropy (OUTSIDE `g_random_lock`)
-  + a cheap collection, then take `g_random_lock` and rekey from both. A
-  successful virtio pull marks the pool seeded even with no DTB seed and no RNDR.
-
-`kern_random_bytes`: if unseeded, `-1`. Decide the strong-reseed under the lock
-(`g_rng_count <= n`), run the device pull *outside* the lock, re-check + serve
-under the lock (a cheap stir is the fallback if the device was unavailable, so
-the pool never serves unboundedly without re-keying).
-
-### The virtio-rng driver (`random_virtio_pull`)
-
-A thin consumer of the P4-F substrate (`kernel/virtio.c`); the first kernel
-caller to do a real virtqueue data transfer. Steps (VIRTIO 1.2 §3.1.1):
-
-1. `virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_RNG)`; bail if absent.
-2. `virtio_negotiate_features(dev, 0)` (reset → ACK → DRIVER → FEATURES_OK;
-   virtio-rng needs no features).
-3. `virtio_virtqueue_create(dev, 0)`; then `virtio_add_status(DRIVER_OK)`.
-4. Alloc one `KP_ZERO` page; descriptor 0 = `{addr=pa, len=want,
-   flags=VRING_DESC_F_WRITE}`; publish into the avail ring (`ring[0]=0`, `dsb`,
-   `idx++`, `dsb`); `virtio_vq_notify`.
-5. Wall-clock-bounded poll `used->idx != 0` (a `RNG_VIRTIO_POLL_MS = 250` ms
-   CNTPCT deadline -- `kern_random_virtio_deadline_ticks(read_cntfrq())`; with
-   `spin < RNG_VIRTIO_POLL_MAX = 1<<30` an **unconditional** termination
-   backstop -- audit F1 -- so a frozen/misconfigured counter, where the deadline
-   would never fire, cannot hang the loop; set far above the iters a 250 ms
-   native spin reaches, so the deadline always wins on a healthy counter); on
-   completion `dsb`, copy `min(used.len, want)`
-   bytes out. The budget is REAL TIME, not an iteration count: under HVF the
-   boot vCPU spins **natively** (a normal success polls only ~tens of
-   thousands of iters in sub-ms -- observed 3 to 82k) while QEMU delivers the
-   entropy via a bottom-half on a **separate host thread**, so a
-   CPU-speed-dependent count could expire before the async completion landed
-   under host contention (#188: ~1/N smp8 boots missed the boot pull ->
-   `g_rng_seeded` stayed false -> the whole CSPRNG failed closed -> the 6
-   fail-closed random tests + `EXTINCTION: kernel test suite failed`).
-   `random_reseed_strong` additionally retries the whole pull (a fresh
-   re-arm, each with its own deadline) up to `RNG_VIRTIO_PULL_TRIES = 3`
-   times on a 0 return -- the device is proven functional, so a transient
-   completion miss recovers. The boot reporter (`main.c`) prints the precise
-   outcome (`reseed OK (N bytes mixed, polled S iters)` / `FAILED: <site>
-   (polled S iters)`) via `kern_random_pull_diag` -- the historic
-   "unavailable (no RNG device)" text was misleading (the device is present).
-6. **All-zero guard**: if the copied bytes are all zero, treat as failure
-   (`got = 0`) — a coherency miss or a dead device must not pass as entropy.
-7. Stop the device fully — `virtio_reset(dev)` **then** `virtio_virtqueue_destroy(vq)`
-   (reset before the queue/buffer pages are freed, so a slow device cannot post
-   a late used-ring write into freed memory) — then scrub + free the page.
-
-Serialized by `g_rng_dev_lock` (released before `g_random_lock` is taken in the
-caller — no nesting). Lock order: `g_rng_dev_lock → buddy` (alloc/free);
-`g_random_lock` is leaf.
-
-## Data structures
-
-- `struct chacha_ctx { u32 input[16]; }` — 4 sigma + 8 key + 2 counter + 2 nonce.
-- Split virtqueue rings (`struct vring_desc/avail/used`, `virtio.h`) — borrowed
-  per pull, freed at teardown.
-
-## State machine (seeding)
-
-```
-BSS-zero --devrandom_init--> primed-from-DTB+cntpct; seeded IFF RNDR present
-         --main.c after virtio_init--> strong-reseed-from-virtio -> g_rng_seeded=true
-         --every ~1 MiB served--> strong-reseed (virtio + cheap)
-         --every buffer drain (984 B)--> rekey (fast key erasure)
-```
-
-`g_rng_seeded` flips ONLY on an unobserved strong source — RNDR (at
-`devrandom_init`) or a non-zero virtio-rng pull (the `main.c` reseed). The DTB
-seed + CNTPCT prime the pool as material but never gate readiness, so a
-KASLR-correlated key is never served: `kern_random_bytes` fails closed (-1)
-until a strong source contributes. On QEMU the virtio reseed lands before any
-consumer (joey's first AT_RANDOM is well after `virtio_init`).
-
-## Tests
-
-`kernel/test/test_random.c`:
-- `chacha20.block_vector` — the cipher matches the canonical RFC 8439 / DJB
-  zero-key/nonce/counter keystream (proves the primitive).
-- `chacha20.keystream_continuity` — block 1 differs from block 0 (counter).
-- `kern_random.two_reads_differ` / `.large_read_nonzero` — the stream advances;
-  a 2048-byte read crosses the buffer boundary (rekey-on-drain).
-- `kern_random.virtio_reseed` — a full device bring-up/pull/teardown returns
-  entropy (`> 0` — with the all-zero guard, this also asserts non-zero), marks
-  the pool virtio-seeded, and the CSPRNG still serves.
-- Pre-existing `kern_random.{seeded_returns_true_on_qemu,bytes_produces_nonzero}`
-  stay green; `pouch-hello-sodium` xchacha20-poly1305 still round-trips.
-
-## Error paths
-
-- `kern_random_bytes`: `-1` on NULL/`len<0`/unseeded; `0` on `len==0`.
-- `random_virtio_pull`: `0` on no-device / negotiate-fail / vq-create-fail /
-  alloc-fail / poll-timeout / all-zero — every path resets the device + unlocks
-  + leaks nothing. A `0` return leaves the CSPRNG on its prior seed.
-- `SYS_GETRANDOM`: `-1` if `!kern_random_seeded()`, on a short read, or on a
-  uaccess fault (partial output scrubbed).
-
-## Status
-
-Implemented W3a (`f19e985`, cipher + sources) + W3b (`c76f4ac`, virtio driver +
-cadence). 721/721 kernel tests; 0 EXTINCTION. Audit: see
-`memory/audit_w3_closed_list.md`.
-
-## Known caveats / footguns
-
-- **Non-coherent DMA** (bare-metal W4): the all-zero guard makes a coherency
-  miss fail *safe* (the pool keeps its DTB seed), but a real bare-metal
-  virtio/SD transport should add a cache-invalidate before the buffer read.
-- **Reseed latency**: a single consumer pulling > 1 MiB triggers a virtio device
-  round-trip (a few µs, bounded, non-blocking) from syscall context every 1 MiB.
-  corvus/login draw far less and never hit it.
-- **Wedged-present virtio-rng cost** (#188 audit F4): on the (anomalous) host
-  where the rng device is present but never completes, the threshold reseed
-  (`SYS_GETRANDOM` over the 1 MiB cadence) polls the full `RNG_VIRTIO_POLL_MS`
-  (250 ms) once, then falls through to a cheap stir -- so the worst case is
-  **≤ 250 ms per ~1 MiB** of getrandom output, amortized, while holding
-  `g_rng_dev_lock` (a second over-threshold caller waits on that lock). Bounded
-  and non-compounding; the boot pull may take up to `RNG_VIRTIO_PULL_TRIES ×
-  250 ms` but only on a genuinely-wedged device (the healthy case returns in
-  sub-ms). A wedged-from-boot device fails the boot pull and the system runs
-  fail-closed (`kern_random_bytes -> -1`), which is the intended safe posture.
-- **`g_random_lock` is process-context only** — no IRQ-context caller takes it
-  (it would self-deadlock against a preempted holder; none exists today).
+**If you are here to add something, add it to the dossier, not to this file.**
+This stub replaces the whole document, so any edit here becomes a merge conflict
+— which is the intended behaviour, and the only thing that keeps main-track
+knowledge from being lost silently at the next merge.
