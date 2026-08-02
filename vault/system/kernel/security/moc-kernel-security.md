@@ -69,8 +69,8 @@ visible as a set of deliberate *refusals* to conflate:
 - Specs: `specs/handles.tla` (the kind partition + `RightsCeiling`),
   `specs/allowance.tla` (the revoke-vs-create race), `specs/corvus.tla`
   (`HostownerRequiresConsole`). None minted yet — same registry pass.
-- The gates that consume this area but live elsewhere: `/proc/<pid>/ctl`
-  kill ([[inv-i26]]) and the debug surface ([[inv-i39]]) are in
-  [[sub-kernel-devproc]] — swept, and both invariants now minted. The trusted
-  path (I-27) is in `cons.c` and remains unswept, the last of this family's
-  invariants without an enforcement home.
+- The gates that consume this area but live elsewhere are now all swept:
+  `/proc/<pid>/ctl` kill ([[inv-i26]]) and the debug surface ([[inv-i39]]) in
+  [[sub-kernel-devproc]], and the trusted path ([[inv-i27]]) in
+  [[sub-kernel-cons]] + [[sub-kernel-devdev]]. Every invariant this area's
+  gates enforce has a `guards` home.

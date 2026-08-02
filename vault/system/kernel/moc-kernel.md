@@ -34,6 +34,10 @@ introspection. Orientation only — the facts live in the `sub-*` dossiers.
 - [[moc-kernel-introspection]] — `/proc` and `/ctl` (process state, the
   debugger's control surface, machine-wide stats; visibility widened
   without authority, gated at the read site rather than the mode bit).
+- [[moc-kernel-console-gfx]] — the console and `/dev` (the line discipline,
+  the transmit ring, the renderer backend, and the trusted path; an
+  interrupt handler that may not do the work, and a consumer that is a
+  trust boundary).
 
 ## Cross-cutting
 

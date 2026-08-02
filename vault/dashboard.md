@@ -31,11 +31,11 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-pty]] | active | 4 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
-| [[arc-vault]] | active | 17 |
+| [[arc-vault]] | active | 18 |
 | [[arc-vivarium]] | active | 2 |
 | [[arc-weft]] | active | 4 |
 
-## Open seams: 76
+## Open seams: 77
 
 - [[seam-220-netd-listener-poll]] (sub-netd-server)
 - [[seam-221-idle-pump-wake]] (sub-kernel-ninep-dev9p-poll)
@@ -61,6 +61,7 @@ Generated — do not edit between the markers (`quaestor render`).
 - [[seam-co-fidless-wstat]] (sub-kernel-ninep-dev9p)
 - [[seam-death-cascade-smp-harness]] (sub-kernel-death)
 - [[seam-devcap-plain-caps-read]] (sub-kernel-caps)
+- [[seam-devdev-winsize-statless]] (sub-kernel-devdev, sub-kernel-cons)
 - [[seam-eevdf-math]] (sub-kernel-sched)
 - [[seam-exiting-tails-never-sleep]] (sub-kernel-death)
 - [[seam-expect-channel-close]] (sub-substrate-interactive)
@@ -117,11 +118,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-08-02 [[chg-2026-08-02-authority-sweep]] — vault sweep: the kernel authority substrate
+- 2026-08-02 [[chg-2026-08-02-console-sweep]] — vault sweep: the console and its front doors
 - 2026-08-02 [[chg-2026-08-02-introspection-sweep]] — vault sweep: the kernel introspection Devs
 - 2026-08-02 [[chg-2026-08-02-stratum-sweep]] — vault sweep: the Stratum integration surface
 - 2026-08-01 [[chg-2026-07-31-stalk-sweep]] — The stalk sweep: the resolver + the Path substrate + the namespace audit backfill
 - 2026-08-01 [[chg-2026-08-01-94-kproc-wait-by-pid]] — #94: kproc waits for joey by pid
 - 2026-08-01 [[chg-2026-08-01-mm-ipc-sweep]] — Vault sweep batch 9: memory + ipc-wake
 - 2026-08-01 [[chg-2026-08-01-pouch-sweep]] — vault sweep: the pouch boundary line
-- 2026-08-01 [[chg-2026-08-01-proc-thread-sweep]] — The proc/thread sweep: the death lineage, and a doc that contradicts itself four lines apart
 <!-- generated:end -->

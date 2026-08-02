@@ -21,6 +21,7 @@ Generated from note fields — do not edit between the markers
 | I-22 | [[inv-i22]] | prose | sub-kernel-perm, sub-kernel-caps, sub-kernel-devproc | prose, gate-smp |
 | I-24 | [[inv-i24]] | spec | sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signal | spec-death-wake, gate-smp |
 | I-26 | [[inv-i26]] | prose | sub-kernel-devproc | prose, gate-smp |
+| I-27 | [[inv-i27]] | prose | sub-kernel-cons, sub-kernel-devdev | prose, gate-interactive, gate-smp |
 | I-28 | [[inv-i28]] | prose | sub-kernel-stalk, sub-pouch-fs, sub-pouch-net | gate-smp |
 | I-3 | [[inv-i3]] | spec | sub-kernel-territory | spec-territory, gate-smp |
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc | gate-smp |
