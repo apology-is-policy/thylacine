@@ -29,7 +29,7 @@
 #
 # Usage:
 #   tools/clade-stage1.sh --src DIR [--build DIR] [--jobs N]
-#                         [--patches DIR --tag REF]
+#                         [--patches DIR --tag REF] [--reconcile-only]
 #
 #   --src      the LLVM fork checkout (upstream tag + the Thylacine commits)
 #   --build    where to build (default: $src/build). If it differs from
@@ -40,9 +40,24 @@
 #   --tag      the upstream base the series applies onto; REQUIRED with
 #              --patches, because reconciling means knowing where the series
 #              starts
+#   --reconcile-only
+#              do the reconcile and STOP -- no cmake, no ninja, no LLVM-tree
+#              assumptions. The reconcile below is genuinely generic (it knows
+#              only git and patch-ids); everything after it is LLVM-specific.
+#              usr/ports/mesa/README.md documented the generic use and it did
+#              not work: --src pointing at a Mesa fork died on the LLVM-tree
+#              assert below, several hundred lines before the reconcile it was
+#              asking for. A doc promising a capability the code refuses is the
+#              same failure as a doc describing a capability the code lacks, so
+#              the flag exists to make the promise true rather than to retract
+#              it. Kept as a FLAG on this one file rather than extracted into
+#              its own script on purpose: both builder drivers ship this file in
+#              a hand-listed tar payload, and a new file is a second list to
+#              forget -- a coupling whose failure mode is a stage that cannot
+#              find its own recipe.
 set -euo pipefail
 
-SRC=""; BUILD=""; JOBS=""; PATCHES=""; TAG=""
+SRC=""; BUILD=""; JOBS=""; PATCHES=""; TAG=""; RECONCILE_ONLY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --src)     SRC="$2";     shift 2 ;;
@@ -50,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --jobs)    JOBS="$2";    shift 2 ;;
         --patches) PATCHES="$2"; shift 2 ;;
         --tag)     TAG="$2";     shift 2 ;;
+        --reconcile-only) RECONCILE_ONLY=1; shift ;;
         *) echo "clade-stage1: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
@@ -58,7 +74,12 @@ die() { printf 'clade-stage1: %s\n' "$*" >&2; exit 1; }
 phase() { echo; echo "=== [$(date -u +%H:%M:%S)] stage1: $* ==="; }
 
 [[ -n "$SRC" ]] || die "--src is required"
-[[ -f "$SRC/llvm/CMakeLists.txt" ]] || die "no LLVM tree at $SRC (missing llvm/CMakeLists.txt)"
+if [[ "$RECONCILE_ONLY" == "1" ]]; then
+    [[ -n "$PATCHES" ]] || die "--reconcile-only is meaningless without --patches"
+    [[ -d "$SRC/.git" ]] || die "no git tree at $SRC (--reconcile-only reconciles a fork; it needs git, not LLVM)"
+else
+    [[ -f "$SRC/llvm/CMakeLists.txt" ]] || die "no LLVM tree at $SRC (missing llvm/CMakeLists.txt)"
+fi
 BUILD="${BUILD:-$SRC/build}"
 JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 
@@ -75,7 +96,7 @@ JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}"
 # "fork clang not built -- skipping" and succeeds, so `set -e` cannot catch it.
 # An out-of-tree build directory without this link produces a green run that
 # built nothing (observed: the first permanent-builder stage 2).
-if [[ "$BUILD" != "$SRC/build" ]]; then
+if [[ "$RECONCILE_ONLY" != "1" && "$BUILD" != "$SRC/build" ]]; then
     if [[ -e "$SRC/build" && ! -L "$SRC/build" ]]; then
         die "$SRC/build exists and is not a symlink -- refusing to replace a real build tree"
     fi
@@ -120,6 +141,21 @@ if [[ -n "$PATCHES" ]]; then
     [[ -n "$TAG" ]] || die "--patches requires --tag (the base the series applies onto)"
     git -C "$SRC" rev-parse --verify -q "$TAG^{commit}" >/dev/null \
         || die "base ref '$TAG' does not exist in $SRC"
+
+    # A dirty tree makes `git am` refuse, and its own message ("Your local
+    # changes would be overwritten") names neither this script nor the series --
+    # so say it here, where the fix is knowable. Observed on the Mesa fork,
+    # whose CL-7b-2 edits sat UNCOMMITTED in the working tree while the durable
+    # series carried them as 0005: any reconcile would have died halfway with a
+    # message pointing at neither fact. Only TRACKED modifications are checked,
+    # because those are exactly what `git am` refuses; untracked files (build
+    # output, scratch scripts) are none of this script's business.
+    if ! git -C "$SRC" diff --quiet || ! git -C "$SRC" diff --cached --quiet; then
+        echo "clade-stage1: $SRC has uncommitted changes to tracked files:" >&2
+        git -C "$SRC" diff --stat HEAD | sed 's/^/    /' >&2
+        die "refusing to reconcile a dirty tree -- commit them (if they belong in the series, regenerate the patches from them) or 'git checkout -- .' (if they do not)"
+    fi
+
     git -C "$SRC" config user.email builder@thylacine.local
     git -C "$SRC" config user.name  "Clade Builder"
 
@@ -156,6 +192,12 @@ if [[ -n "$PATCHES" ]]; then
     [[ "$want" == "$have" ]] \
         || die "series reconcile FAILED: $SRC does not match the payload after applying"
     git -C "$SRC" log --oneline -"$local_n" | cat
+fi
+
+# Everything below this line is LLVM-specific. --reconcile-only stops here.
+if [[ "$RECONCILE_ONLY" == "1" ]]; then
+    phase "reconcile-only: COMPLETE (no build attempted)"
+    exit 0
 fi
 
 phase "cmake configure ($BUILD)"
