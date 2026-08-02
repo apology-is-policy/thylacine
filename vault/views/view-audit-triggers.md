@@ -12,7 +12,7 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | surface | code | invariants | prosecution |
 |---|---|---|---|
-| [[sub-kernel-allowance]] | kernel/allowance.c, kernel/include/thylacine/allowance.h |  | - The gate must remain complete across **all four** create sites. A new |
+| [[sub-kernel-allowance]] | kernel/allowance.c, kernel/include/thylacine/allowance.h | inv-i34 | - The gate must remain complete across **all four** create sites. A new |
 | [[sub-kernel-alternatives]] | arch/arm64/alternatives.c, arch/arm64/alternatives.h, arch/arm64/atomic_lse.h |  | - **The write must never go through an executable mapping.** The scratch alias's |
 | [[sub-kernel-boot-entry]] | arch/arm64/start.S, arch/arm64/kernel.ld | inv-i16, inv-i21 | - **The eret window.** Any hand-rolled path that sets `ELR_EL1` and returns to |
 | [[sub-kernel-boot-sequence]] | kernel/main.c, arch/arm64/hwfeat.c, arch/arm64/hwfeat.h | inv-i15 | - **Every reordering is a potential correctness change**, and the dependencies are |
@@ -26,7 +26,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
 | [[sub-kernel-gic]] | arch/arm64/gic.c, arch/arm64/gic.h | inv-i15, inv-i18 | - The two generations are **different code for the same behaviour**, and a run |
 | [[sub-kernel-handle]] | kernel/handle.c, kernel/include/thylacine/handle.h |  | - A new `kobj_kind` must be classified into exactly one partition; the |
-| [[sub-kernel-hwcap]] | kernel/mmio_handle.c, kernel/include/thylacine/mmio_handle.h, kernel/dma_handle.c, kernel/include/thylacine/dma_handle.h, kernel/pci_handle.c, kernel/include/thylacine/pci_handle.h | inv-i5, inv-i32 | - The three exclusivity mechanisms are **different code for the same property**. |
+| [[sub-kernel-hwcap]] | kernel/mmio_handle.c, kernel/include/thylacine/mmio_handle.h, kernel/dma_handle.c, kernel/include/thylacine/dma_handle.h, kernel/pci_handle.c, kernel/include/thylacine/pci_handle.h | inv-i5, inv-i32, inv-i34 | - The three exclusivity mechanisms are **different code for the same property**. |
 | [[sub-kernel-irqfwd]] | kernel/irqfwd.c, kernel/include/thylacine/irqfwd.h | inv-i9 | - The pre-seeded reservations must cover every number the kernel attaches |
 | [[sub-kernel-kaslr]] | arch/arm64/kaslr.c, arch/arm64/kaslr.h | inv-i16 | - **The never-zero guarantee** must survive any change to the mask or the mixing. |
 | [[sub-kernel-larder]] | kernel/larder.c, kernel/include/thylacine/larder.h | inv-i38 | - **The gen-ring event-logging completeness**: every NEW mutation path |

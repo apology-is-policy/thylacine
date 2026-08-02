@@ -14,7 +14,7 @@ locks: []
 abis: []
 design: ["docs/LLVM-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-02
 ---
 ## Purpose
 
@@ -70,6 +70,17 @@ Cost discipline is the standing rule: propose-then-execute for mutating
 `gcloud` operations, batch queued payloads onto one machine, and tear a
 disposable down immediately.
 
+**The remote tree is scratch; the repo is the durable form.** Stage 1
+reconciles a fork against a patch series by patch-id, and it refuses outright
+if the target tree has uncommitted changes to tracked files — not because it
+cannot proceed, but because the failure it would otherwise produce is
+*unreadable*: `git am`'s own refusal names neither this script nor the series,
+so the guard says it where the fix is knowable. It checks only tracked
+modifications, deliberately, because those are exactly what `git am` refuses;
+untracked build output is none of its business. The guard is the same shape as
+the artifact assertions above — both replace a failure that misdirects with one
+that points at the cause.
+
 ## Data structures
 
 Remote: `/build` on the keep machine's persistent disk (the LLVM tree, the
@@ -121,6 +132,14 @@ None open.
   witnesses are the UBSan build and the multi-boot gate.
 - A stage verified only on the machine that generated it is not verified;
   fork patch series are regenerated per arc for that reason.
+- **The keep machine's Mesa fork is left dirty on purpose**, so a reconcile
+  there will refuse until someone commits or discards the delta. That is the
+  guard working, and it is recorded because whoever meets it will otherwise
+  read it as an oversight. It was left alone on the durable-form argument: the
+  patches are pushed and the fork is reconstructable from them, so nothing sits
+  in one fragile place — which is the same reasoning that gave the port
+  directory its existence, after a script once lived only in a scratch
+  temporary directory.
 
 ## Provenance
 

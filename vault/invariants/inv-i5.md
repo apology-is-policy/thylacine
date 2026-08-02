@@ -3,7 +3,7 @@ id: inv-i5
 type: inv
 title: "I-5 — a handle naming hardware never leaves the Proc that made it"
 number: I-5
-guards: [sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic]
+guards: [sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic, sub-kernel-discovery]
 validated-by: [prose, gate-smp]
 strength: spec
 created: 2026-08-02
@@ -72,7 +72,18 @@ the interrupt controller's own registers and write live acknowledgement state.
 **One relaxation is deliberate and argued.** The virtio transport slots are *not*
 pre-claimed, because the kernel only reads them during boot enumeration and they
 exist to be driven by driver processes. Reserving them would have required a
-delegation API to hand each one back. The argument depends on a trust boundary —
+delegation API to hand each one back.
+
+That argument understates the difficulty: the exemption is also **structural**.
+Reservation and claiming both work at page granularity, and the transport slots
+are packed eight to a page ([[sub-kernel-discovery]]) — so a driver claiming its
+own slot *necessarily* claims seven neighbours, and no reservation could take
+one without taking all eight. The live configuration depends on this: the
+kernel's entropy source shares a page with a userspace driver's device, which is
+why the death-time quiesce has to exclude that device **by identity rather than
+by ownership**. A better delegation API alone would not have avoided this.
+
+The argument depends on a trust boundary —
 that only the root of trust grants the hardware capability — and it is recorded
 with its own expiry condition: if that grant ever becomes more permissive, the
 relaxation must be revisited. One slot has since drifted from the argument's

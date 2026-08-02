@@ -11,7 +11,7 @@ code:
   - kernel/pci_handle.c
   - kernel/include/thylacine/pci_handle.h
 audit: hard
-guarded-by: [inv-i5, inv-i32]
+guarded-by: [inv-i5, inv-i32, inv-i34]
 validated-by: [prose, gate-smp]
 locks: []
 abis: []
@@ -152,11 +152,17 @@ is checked at compile time in [[sub-kernel-handle]]; exclusivity comes from the
 three mechanisms above; the kernel's own hardware is protected by the pre-claimed
 reservations.
 
+**[[inv-i34]]** — the allowance is the second axis on every create here: the
+capability says *may you*, the allowance says *over what*. The two-step create
+this file performs (check, then install under the revoke's lock) is that
+invariant's central mechanism.
+
 **[[inv-i32]]** — partially, and with a gap that is deliberate. A buffer's pages
 are **not** charged to the creating Proc's page budget; the bound is the
-allowance's per-buffer ceiling instead. A cumulative per-driver budget is a
-recorded future item, and until it exists the per-Proc page accounting does not
-see DMA at all.
+allowance's per-buffer ceiling instead. That shape is not an oversight here but
+a consequence of [[inv-i34]]'s data model, which carries a single maximum size
+and so has nowhere to express a sum. Until a cumulative budget exists, the
+per-Proc page accounting does not see DMA at all.
 
 Mapping a window into a Proc belongs to the memory-object layer, and inherits its
 rules — read-write only, never executable. That layer is not yet swept.

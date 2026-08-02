@@ -16,7 +16,7 @@ Generated from note fields — do not edit between the markers
 | I-10 | [[inv-i10]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
 | I-11 | [[inv-i11]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
 | I-13 | [[inv-i13]] | prose | sub-kernel-uaccess, sub-kernel-exception | prose, gate-smp |
-| I-15 | [[inv-i15]] | prose | sub-kernel-dtb, sub-kernel-boot-sequence, sub-kernel-gic, sub-kernel-timer | prose, gate-smp |
+| I-15 | [[inv-i15]] | prose | sub-kernel-dtb, sub-kernel-boot-sequence, sub-kernel-gic, sub-kernel-timer, sub-kernel-discovery | prose, gate-smp |
 | I-16 | [[inv-i16]] | prose | sub-kernel-kaslr, sub-kernel-boot-entry | prose, gate-smp |
 | I-17 | [[inv-i17]] | prose | sub-kernel-sched, sub-kernel-timer | spec-scheduler, gate-smp |
 | I-18 | [[inv-i18]] | spec | sub-kernel-sched-smp, sub-kernel-gic | spec-scheduler, gate-smp |
@@ -31,10 +31,11 @@ Generated from note fields — do not edit between the markers
 | I-30 | [[inv-i30]] | spec | sub-kernel-loom, sub-kernel-weft | spec-loom, spec-weft, gate-smp |
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc, sub-kernel-hwcap | gate-smp |
 | I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-stalk, sub-kernel-territory | gate-smp |
+| I-34 | [[inv-i34]] | spec | sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery | spec-allowance, prose, gate-smp |
 | I-37 | [[inv-i37]] | spec | sub-kernel-weft | spec-weft, spec-weft-readiness, gate-smp |
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |
 | I-39 | [[inv-i39]] | spec | sub-kernel-devproc, sub-kernel-proc | spec-debug-stop, prose, gate-smp |
-| I-5 | [[inv-i5]] | spec | sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic | prose, gate-smp |
+| I-5 | [[inv-i5]] | spec | sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic, sub-kernel-discovery | prose, gate-smp |
 | I-8 | [[inv-i8]] | spec | sub-kernel-sched, sub-kernel-sched-smp, sub-kernel-rendez | spec-scheduler, spec-sched-alpha, spec-sched-rebalance, spec-sched-tickless, gate-smp |
 | I-9 | [[inv-i9]] | spec | sub-kernel-rendez, sub-kernel-sched-smp, sub-kernel-death, sub-kernel-ninep-client, sub-kernel-ninep-dev9p-poll, sub-kernel-srvconn, sub-netd-server, sub-kernel-poll, sub-kernel-pipe, sub-kernel-torpor, sub-pouch-thread, sub-kernel-irqfwd | spec-scheduler, spec-tsleep, spec-sched-tickless, spec-sched-rebalance, spec-death-wake, spec-reader-frame, spec-9p-client, spec-net-poll, spec-net-poll-teardown, spec-poll, spec-pipe, gate-smp |
 <!-- generated:end -->

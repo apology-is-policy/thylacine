@@ -3,7 +3,7 @@ id: inv-i15
 type: inv
 title: "I-15 — the hardware view derives entirely from the device tree"
 number: I-15
-guards: [sub-kernel-dtb, sub-kernel-boot-sequence, sub-kernel-gic, sub-kernel-timer]
+guards: [sub-kernel-dtb, sub-kernel-boot-sequence, sub-kernel-gic, sub-kernel-timer, sub-kernel-discovery]
 validated-by: [prose, gate-smp]
 strength: prose
 created: 2026-08-02
@@ -40,6 +40,13 @@ defensible, and no single one is where the property is lost.
 **One file answers.** [[sub-kernel-dtb]] is the only place that reads the blob,
 and every consumer goes through its accessors. There is no second parser and no
 cached copy of a hardware address anywhere else.
+
+**And userspace gets the tree itself, not a summary.** [[sub-kernel-discovery]]
+republishes the parsed tree as a namespace whose files hold the properties' raw
+bytes, unedited. That is this invariant's most literal enforcement: a driver's
+hardware view derives from the device tree because the device tree is what it is
+handed. Nothing in the kernel gets to decide which facts a driver is allowed to
+learn — only, via the allowance, which it may act on.
 
 **On one device the tree chooses the driver, not just the address.** The
 interrupt controller exists in two hardware generations whose per-CPU interfaces

@@ -48,8 +48,11 @@ producing a short op rather than a failed one.
 same allocator as anon pages but are charged to no counter, so `page_count` is
 not the true page footprint of any Proc holding hardware. The bound is elsewhere
 and differently shaped: the allowance's **per-buffer** ceiling
-([[sub-kernel-hwcap]]), which caps one buffer rather than their sum. A cumulative
-per-driver budget is a recorded future item. The gap is narrow today because the
+([[sub-kernel-hwcap]]), which caps one buffer rather than their sum. That shape
+is structural rather than accidental — [[inv-i34]]'s conferred set carries a
+single maximum size, so there is nowhere in its data model for a sum to live,
+and a cumulative budget would have to extend the model rather than add a check.
+It is a recorded future item. The gap is narrow today because the
 capability to create a DMA buffer is itself tightly held — so the bound is on
 *who may ask*, not on how much they may accumulate, which is a different kind of
 floor from the rest of this invariant and worth stating rather than assuming.

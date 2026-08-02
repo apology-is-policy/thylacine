@@ -7,7 +7,7 @@ code:
   - kernel/allowance.c
   - kernel/include/thylacine/allowance.h
 audit: hard
-guarded-by: []
+guarded-by: [inv-i34]
 validated-by: [prose, gate-smp]
 locks: []
 abis: []
