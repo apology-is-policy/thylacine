@@ -261,13 +261,30 @@ proc lc_fail {msg} {
     }
     # A dead bridge leaves its exit record here; a live one leaves the file
     # empty. rc 141 == 128+SIGPIPE.
+    #
+    # #125: this read happens while the relay is still ALIVE (lc_vm_kill is
+    # below), so the EXIT record is normally absent -- but a relay STALL is
+    # written here immediately and flushed the moment it is seen, precisely so
+    # it survives to this point. That makes the empty case load-bearing
+    # evidence, not an absence: it says the console consumer was running, so a
+    # guest that stopped making progress was NOT frozen from the host side
+    # (QEMU's serial write blocks after only ~8 KiB of undrained output and
+    # suspends the whole VM -- tools/stall-amplify.sh). Say that OUT LOUD
+    # rather than leaving it to be inferred from a missing line, which is
+    # indistinguishable from the instrument not having run at all.
     if {[info exists ::lc_ncerr] && [file exists $::lc_ncerr]} {
         catch {
             set f [open $::lc_ncerr r]
             set d [string trim [read $f]]
             close $f
-            if {$d ne ""} { lc_step "bridge-at-fail: $d" }
+            if {$d ne ""} {
+                lc_step "bridge-at-fail: $d"
+            } else {
+                lc_step "bridge-at-fail: (record empty -- relay ALIVE and reported NO stall; the console channel did not freeze the VM)"
+            }
         }
+    } else {
+        lc_step "bridge-at-fail: (no relay record -- transport=pty, or the bridge never started)"
     }
     # A VM that never started is NOT a scenario failure. Say so, loudly, in the
     # steps -- the wrapper keys on the INFRA: marker to stop calling it "a real
