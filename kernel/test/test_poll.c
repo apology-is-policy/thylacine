@@ -312,7 +312,7 @@ void test_poll_pollhup_on_close_write_end(void) {
 // (the #103 symptom) leaves the poller SLEEPING forever.
 void test_poll_cons_deferred_block_then_wake(void) {
     cons_test_reset();
-    sched();                                   // settle console_mgr to SLEEPING
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);   // #92-audit F4: settle console_mgr, verified
 
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "test proc");
@@ -357,7 +357,16 @@ void test_poll_cons_deferred_block_then_wake(void) {
     // Armed: flag read FIRST. Still set -> armed. Cleared -> the relay already
     // ran, which itself proves it was armed, and the later state read sees the
     // wake. Only "never armed" leaves both false.
+    // #92-audit F2: "cleared" does NOT imply "the wake landed". The relay
+    // clears the flag under g_cons.lock, releases it, and only then calls
+    // poll_waiter_list_wake (which takes the poll_list lock + nests a wakeup,
+    // both illegal under g_cons.lock). A concurrent console_mgr on a peer CPU
+    // can therefore be observed post-clear, pre-wake -- both reads false, and
+    // the implication misfires on a healthy kernel. If the flag reads cleared,
+    // the wake is in flight, so waiting for it is sound and bounded.
     bool pending_first = cons_test_pollwake_pending();
+    if (!pending_first)
+        TEST_YIELD_UNTIL(consumer->state != THREAD_SLEEPING);
     TEST_ASSERT(pending_first || consumer->state != THREAD_SLEEPING,
         "data byte armed poll_wake_pending");
 
@@ -373,7 +382,13 @@ void test_poll_cons_deferred_block_then_wake(void) {
     // synchronously so the wake is independent of scheduler order. THIS is the
     // #103 crux: the relay must reach the sys_poll_for_proc-blocked thread, not
     // merely flip a synthetic flag.
+    // #92-audit F2: this call NO-OPS if a concurrent console_mgr already
+    // drained the flags -- and that mgr may still be pre-wake (it acts with
+    // g_cons.lock released). Waiting for the wake is sound either way: the
+    // relay has run, synchronously here or on the peer, so the wake is in
+    // flight and the deadline still fails loudly if the #103 defect returns.
     cons_test_service_deferred();
+    TEST_YIELD_UNTIL(consumer->state != THREAD_SLEEPING);
     TEST_EXPECT_NE(consumer->state, THREAD_SLEEPING,
         "the deferred relay woke the real /dev/cons poller (the #103 assertion)");
     TEST_ASSERT(!cons_test_pollwake_pending(), "relay consumed poll_wake_pending");
@@ -387,7 +402,7 @@ void test_poll_cons_deferred_block_then_wake(void) {
 
     thread_free(consumer);
     cons_test_reset();
-    sched();                                   // re-settle console_mgr
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);   // #92-audit F4: re-settle, verified
     drop_test_proc(p);
 }
 

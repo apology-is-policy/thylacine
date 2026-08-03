@@ -982,21 +982,30 @@ void test_srvconn_client_send_blocking_poll_edge(void) {
     // pre-fix code the poller stays SLEEPING here (ran_p == 1) and the
     // writer stays parked: the circular wait.
     ready(tw);
-    // Spin-until the poller observes the POLLIN edge. Under -smp N the writer
+    // Wait for the poller to observe the POLLIN edge. Under -smp N the writer
     // runs on a SECONDARY CPU concurrently, so ONE sched() is not guaranteed
-    // to let it fill + wake the poller -- the task-#20 SMP-test discipline:
-    // spin-until the condition, never assert an exact sched() outcome (each
-    // sched() is a compiler barrier that reloads the global). Bounded so a
-    // real regression (no wake -> the #349 F1 circular wait) still FAILS.
-    { int spins = 0; while (g_pe_ran_p < 2u && spins++ < 10000) sched(); }
+    // to let it fill + wake the poller.
+    //
+    // #92-audit F1: this was a 10000-ITERATION spin, the shape #92 retired --
+    // and it survived in the same function whose FIRST wait (above) #92 DID
+    // convert, in the file that produced both witnessed failures. The census's
+    // own false-positive filter ("exclude sched() inside existing spin loops")
+    // swallowed it: this is a hand-rolled `while (...) sched()` wait loop, a
+    // true positive wearing the excluded shape. 10000 empty-runqueue sched()
+    // is ~1-2 ms; the stalls that produced the witnesses were tens of ms, so
+    // the bound could burn out while the peer was still legitimately running
+    // -- manufacturing the failure it was added to prevent. The unit must be
+    // WALL CLOCK. A real regression (no wake -> the #349 F1 circular wait)
+    // still fails, now loudly and by deadline.
+    TEST_YIELD_UNTIL(g_pe_ran_p >= 2u);
     TEST_ASSERT(g_pe_ran_p >= 2u,
         "the poller saw the POLLIN edge WHILE the send was in flight "
         "(pre-F1-fix: no wake until end-of-delivery -> circular wait)");
 
-    // Spin-until both threads run to completion (the poller finished its drain
-    // pass; the writer delivered the whole payload past its park).
-    { int spins = 0;
-      while ((g_pe_ran_w < 2u || g_pe_ran_p < 3u) && spins++ < 10000) sched(); }
+    // Wait for both threads to run to completion (the poller finished its
+    // drain pass; the writer delivered the whole payload past its park).
+    // #92-audit F1, the second survivor -- same reasoning as above.
+    TEST_YIELD_UNTIL(g_pe_ran_w >= 2u && g_pe_ran_p >= 3u);
     TEST_EXPECT_EQ(g_pe_ran_w, 2u, "writer completed past the park");
     TEST_EXPECT_EQ(g_pe_ret_w, (long)sizeof g_pe_payload,
         "client_send_blocking delivered the WHOLE >cap payload");
