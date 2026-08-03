@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/PTY-DESIGN.md"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Purpose
 
@@ -238,11 +238,28 @@ The global FRAME coalescing that a compositor needs has no analogue here
   shared kernel mount arrives as SYSTEM.
 - **The cooked arm drops where the raw arm back-pressures.** A byte past
   `LINE_MAX` is consumed and discarded un-echoed; a line flush into a
-  full `m2s` discards the tail (`let _ = ring_push(...)` — the result is
-  deliberately ignored); `echo()` drops on full unconditionally. All
-  three are the classic tty-overrun semantic that the kernel console
+  full `m2s` discards the tail; `echo()` drops on full unconditionally.
+  All three are the classic tty-overrun semantic that the kernel console
   reference also carries. They matter because the model does not cover
   them — see [[spec-pty]] and task #48.
+
+  **Since `#95` (`c0c76977`) each site is counted**: `drop_flush` (the
+  cooked line into `m2s` — the one that carries *command* bytes),
+  `drop_line` (assembly overflow past `LINE_MAX`), `drop_echo` (the
+  deliberate best-effort echo, counted separately so it can never be
+  mistaken for the other two). Previously every site discarded
+  `ring_push`'s return, so a loss left nothing behind — `#95` was found
+  as `sleep 30` arriving as `sleep 3`, which is the failure mode that
+  matters: a truncated command still *runs*. Counting is unconditional;
+  only the one-shot report is gated on `arm_drop_report()`, called after
+  the selftest, because the selftest drops a byte on purpose (battery
+  step 9) and an ungated report would both alarm on every boot and spend
+  the latch — **the instrument disarmed by its own test**, which is the
+  same shape as this arc's probe discipline.
+
+  So the drops are reachable in practice, not merely in the model, and
+  the [[spec-pty]] gap in task #48 is a live divergence rather than a
+  documentation nit.
 - The POSIX `/dev/ptmx` master path is a PTY-3 concern; at v1.0 the
   clone file is reached as `/dev/pts/ptmx`, because a symlink or
   file-mount would need union-mount walking.

@@ -36,6 +36,7 @@ chunks:
   - chg-2026-08-02-struct-registries
   - chg-2026-08-02-server-sweeps
   - chg-2026-08-03-coverage-reconciliation
+  - chg-2026-08-03-mapping-core-sweep
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"

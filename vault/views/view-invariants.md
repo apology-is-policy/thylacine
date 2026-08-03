@@ -15,6 +15,7 @@ Generated from note fields — do not edit between the markers
 | I-1 | [[inv-i1]] | spec | sub-kernel-territory, sub-kernel-devsrv, sub-pouch-net, sub-kernel-content | spec-territory, gate-smp |
 | I-10 | [[inv-i10]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
 | I-11 | [[inv-i11]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
+| I-12 | [[inv-i12]] | prose | sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault | prose, gate-smp |
 | I-13 | [[inv-i13]] | prose | sub-kernel-uaccess, sub-kernel-exception | prose, gate-smp |
 | I-15 | [[inv-i15]] | prose | sub-kernel-dtb, sub-kernel-boot-sequence, sub-kernel-gic, sub-kernel-timer, sub-kernel-discovery | prose, gate-smp |
 | I-16 | [[inv-i16]] | prose | sub-kernel-kaslr, sub-kernel-boot-entry, sub-kernel-content | prose, gate-smp |

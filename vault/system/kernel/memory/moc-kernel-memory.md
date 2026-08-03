@@ -36,12 +36,37 @@ The area's recurring trap is **`struct page.refcount`** — an alloc
 marker (buddy) and an inuse count (SLUB), never the BURROW share
 count it resembles ([[sub-kernel-mm-phys]] carries the full warning).
 
-What is NOT here: the rest of the virtual side. VMAs, the demand-page
-fault arms, the overcommit model's syscall surface, and the MMU live
-with their own areas, still unswept. `mm/vmo_pages.c` — named by
-CLAUDE.md's audit table — **does not exist in the tree** (the
-audit-trigger row carries a phantom file; the Burrow page machinery
-lives in `kernel/burrow.c`).
+The virtual side, swept at batch 29 and living here too:
+
+- **[[sub-kernel-mmu]]** — page tables. The kernel's three views (image,
+  direct map, vmalloc) against the per-Proc user root; the PTE encoders
+  that make [[inv-i12]] representable; and the two deliberate second
+  mappings — the boot patcher's write alias over `.text`, and cross-Proc
+  debug access — that write executable memory while keeping W^X true.
+- **[[sub-kernel-vma]]** — the address-space description. Small, and
+  where [[inv-i12]] is actually **decided**: `vma_alloc`'s `WRITE|EXEC`
+  rejection is the single gate every user mapping in the system passes.
+- **[[sub-kernel-fault]]** — the dispatcher. Classification (six kernel
+  branches, all fatal, each naming its own diagnosis) and demand paging
+  across six backing arms, one of which must sleep and does so under a
+  pin-and-revalidate protocol.
+
+The three are one story told in three places: **the VMA layer decides,
+the fault handler carries the decision unchanged, and the MMU encodes
+it.** That is what lets the gate be a single `if` — nothing downstream
+re-derives a permission.
+
+Still not here: the overcommit model's syscall surface, and exec's half
+of I-36 (task #52), which is why there is no `inv-i36` note yet.
+
+An earlier version of this line said the virtual side was "still
+unswept" — written a day before batch 27 declared the subsystem sweep
+complete over it. **The corpus contained its own counter-evidence and
+nothing compared the two**; see [[chg-2026-08-03-mapping-core-sweep]].
+
+`mm/vmo_pages.c` — named by CLAUDE.md's audit table — **does not exist
+in the tree** (the audit-trigger row carries a phantom file; the Burrow
+page machinery lives in `kernel/burrow.c`).
 
 Locks: [[lock-buddy-zone]] · [[lock-kmem-cache]] ·
 [[lock-cache-list]] · [[lock-burrow]] · [[lock-asid]].

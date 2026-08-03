@@ -53,7 +53,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**133 owned · 288 unowned · 421 files (31% owned) · ~116983 unswept lines.**
+**139 owned · 282 unowned · 421 files (33% owned) · ~113025 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -62,15 +62,15 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia | 0 | 26 | 19864 |
 | usr/lib | 0 | 41 | 18896 |
 | usr/libthyla-rs | 0 | 29 | 13326 |
-| kernel | 88 | 44 | 12385 |
+| kernel | 90 | 42 | 11916 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
-| arch | 23 | 15 | 5622 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
 | usr/ports | 0 | 10 | 2865 |
+| arch | 27 | 11 | 2133 |
 | usr/prowl | 0 | 3 | 1253 |
 | usr/virtio-gpu | 0 | 1 | 955 |
 | usr/virtio-blk-rw | 0 | 1 | 885 |
@@ -111,7 +111,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/parser/expr.rs | 2255 |
 | usr/lib/libt/include/thyla/syscall.h | 2157 |
 | usr/nora/src/view.rs | 2043 |
-| arch/arm64/mmu.c | 1921 |
 | usr/utopia/libutopia/src/parser/lexer.rs | 1846 |
 | usr/lib/kaua/src/widget.rs | 1370 |
 | usr/ports/gnumake/config.h | 1357 |
@@ -126,7 +125,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/libdriver/src/source.rs | 960 |
 | usr/virtio-gpu/src/main.rs | 955 |
 | usr/lib/parley/src/dapc.rs | 949 |
-| arch/arm64/fault.c | 928 |
 | usr/lib/libthyla-rs/src/net.rs | 920 |
 | usr/lib/libdriver/src/manifest.rs | 914 |
 | usr/virtio-blk-rw/src/main.rs | 885 |
@@ -160,7 +158,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | arch/arm64/hwdebug.c | 523 |
 | usr/aurora/src/osd.rs | 522 |
 | usr/utopia/libutopia/src/eval/glob.rs | 504 |
-| arch/arm64/mmu.h | 502 |
 | usr/utopia/libutopia/src/eval/jobs.rs | 502 |
 | usr/aurora/src/render.rs | 500 |
 | kernel/include/thylacine/notes.h | 499 |
@@ -195,7 +192,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/aurora/src/config.rs | 315 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
 | usr/utopia/libutopia/src/parser/token.rs | 306 |
-| kernel/vma.c | 304 |
 | usr/loom-stress/src/main.rs | 303 |
 | kernel/spoor.c | 300 |
 | usr/lib/libthyla-rs/src/weft.rs | 297 |
@@ -272,7 +268,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/ansi.rs | 174 |
 | usr/coreutils/src/bin/chmod.rs | 171 |
 | usr/nora/src/debug.rs | 171 |
-| kernel/include/thylacine/vma.h | 165 |
 | usr/coreutils/src/bin/uniq.rs | 163 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | usr/coreutils/src/bin/wc.rs | 162 |
@@ -294,7 +289,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | arch/arm64/uart.h | 143 |
 | usr/coreutils/src/bin/mkdir.rs | 140 |
 | usr/coreutils/src/meta.rs | 140 |
-| arch/arm64/fault.h | 138 |
 | usr/coreutils/src/bin/tee.rs | 133 |
 | kernel/full.c | 129 |
 | usr/nora/src/wrap.rs | 127 |

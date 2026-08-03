@@ -27,6 +27,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-devsrv]] | kernel/devsrv.c, kernel/include/thylacine/devsrv.h | inv-i1 | What an auditor attacks here: |
 | [[sub-kernel-dtb]] | lib/dtb.c, kernel/include/thylacine/dtb.h | inv-i15 | - **Property order independence.** Any new node-matching lookup must accumulate |
 | [[sub-kernel-exception]] | arch/arm64/vectors.S, arch/arm64/exception.c, arch/arm64/userland.S | inv-i21, inv-i13, inv-i24, inv-i39 | - **Any new hand-rolled `eret` to EL0 must mask across the link-register-set to |
+| [[sub-kernel-fault]] | arch/arm64/fault.c, arch/arm64/fault.h | inv-i12, inv-i32, inv-i7 | On any change here: that the file arm's four-step protocol keeps its pin across |
 | [[sub-kernel-gic]] | arch/arm64/gic.c, arch/arm64/gic.h | inv-i15, inv-i18 | - The two generations are **different code for the same behaviour**, and a run |
 | [[sub-kernel-handle]] | kernel/handle.c, kernel/include/thylacine/handle.h |  | - A new `kobj_kind` must be classified into exactly one partition; the |
 | [[sub-kernel-hwcap]] | kernel/mmio_handle.c, kernel/include/thylacine/mmio_handle.h, kernel/dma_handle.c, kernel/include/thylacine/dma_handle.h, kernel/pci_handle.c, kernel/include/thylacine/pci_handle.h | inv-i5, inv-i32, inv-i34 | - The three exclusivity mechanisms are **different code for the same property**. |
@@ -36,6 +37,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-loom]] | kernel/loom.c, kernel/include/thylacine/loom.h | inv-i29, inv-i30, inv-i32 | - **Never compute an index from a shared word.** The private counter and private |
 | [[sub-kernel-mm-phys]] | mm/phys.c, mm/phys.h, mm/buddy.c, mm/buddy.h, mm/magazines.c, mm/magazines.h, kernel/include/thylacine/page.h |  | - Any new caller of `pa_to_kva` on an allocator-returned PA is bound |
 | [[sub-kernel-mm-slub]] | mm/slub.c, mm/slub.h |  | - The destroy guard must stay `alloc_count - free_count` — reverting |
+| [[sub-kernel-mmu]] | arch/arm64/mmu.c, arch/arm64/mmu.h | inv-i12, inv-i13, inv-i16, inv-i31, inv-i39 | On any change here: that no PTE constructor can produce writable-and-executable |
 | [[sub-kernel-ninep-attach]] | kernel/9p_attach.c, kernel/include/thylacine/9p_attach.h |  | - **The failure-path ledger**: every exit must leave (adapter ref × |
 | [[sub-kernel-ninep-client]] | kernel/9p_client.c, kernel/9p_session.c, kernel/9p_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_mq.c, kernel/9p_attach.c, kernel/include/thylacine/9p_client.h | inv-i9, inv-i10, inv-i11 | What an auditor attacks here (the single home of the trigger-row content for |
 | [[sub-kernel-ninep-dev9p]] | kernel/dev9p.c, kernel/include/thylacine/dev9p.h | inv-i38 | - **The coherence pairing**: every mutation path must carry its exact |
@@ -58,6 +60,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-timer]] | arch/arm64/timer.c, arch/arm64/timer.h, arch/arm64/rtc.c, arch/arm64/rtc.h | inv-i15, inv-i17 | - The periodic path must stay byte-unchanged for a running CPU — the slice model |
 | [[sub-kernel-torpor]] | kernel/torpor.c, kernel/include/thylacine/torpor.h | inv-i9, inv-i24 | - The lock-free mismatch return must never be extended to the EQUAL |
 | [[sub-kernel-uaccess]] | arch/arm64/uaccess.S, arch/arm64/uaccess.c, arch/arm64/uaccess.h | inv-i13 | - **A new fault point needs a table entry.** The entry is what separates |
+| [[sub-kernel-vma]] | kernel/vma.c, kernel/include/thylacine/vma.h | inv-i12, inv-i7, inv-i32 | The things to re-examine when this file changes: that `vma_alloc` remains the |
 | [[sub-kernel-weft]] | kernel/weft.c, kernel/include/thylacine/weft.h | inv-i37, inv-i30, inv-i9, inv-i32 | - **Admission stays kernel-minted.** Anonymous, or the allocation-time |
 | [[sub-netd-nic]] | usr/netd/src/main.rs, usr/netd/Cargo.toml |  | On any change, prosecute: |
 | [[sub-netd-server]] | usr/netd/src/server.rs, usr/netd/src/ndb.rs, usr/netd/ndb/local | inv-i9 | On any change, prosecute (the standing list, accreted across |
