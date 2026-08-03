@@ -15,7 +15,7 @@
 //
 //   cons.blocking_read_wakeup — a parked reader is woken by cons_rx_input (I-9)
 //   cons.ring_fill_drain    — pushed data bytes drain in order
-//   cons.ring_overflow_drop — a full ring drops excess; no corruption/overflow
+//   cons.ring_full_refuses — a full ring REFUSES excess (#129 back-pressure)
 //   cons.ctrlc_consumed     — Ctrl-C (0x03) sets intr-pending, is NOT ring data
 //   cons.break_sets_sak     — a BREAK sets sak-pending (A-4c-2), is NOT ring data
 //   cons.read_busy_guard    — a 2nd reader (busy flag) returns -1, not data
@@ -32,6 +32,7 @@
 #include "test.h"
 
 #include <thylacine/cons.h>
+#include "../../arch/arm64/uart.h"   // #129-audit F2: the RX holdback test hooks
 #include <thylacine/dev.h>
 #include <thylacine/handle.h>   // A-5a: struct Handle / handle_get / KOBJ_SPOOR / RIGHT_*
 #include <thylacine/notes.h>
@@ -48,8 +49,19 @@ void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_tx_room_wait_and_deadline(void);
 void test_cons_ring_fill_drain(void);
-void test_cons_ring_overflow_drop(void);
+void test_cons_ring_full_refuses(void);
 void test_cons_rx_can_accept_boundary(void);
+void test_cons_full_line_fits_ring(void);            // #129 (ring holds a max line)
+void test_cons_full_ring_never_blocks_sak(void);     // #129 (I-27)
+void test_cons_feed_write_short_on_full(void);       // #129 defect (1)
+void test_cons_refused_byte_is_not_echoed(void);     // #129-audit F3
+void test_cons_rx_holdback_reoffer(void);            // #129-audit F2
+
+// Defined with the LS-8b cooking tests further down; forward-declared so the
+// #129 tests above them can use the same two helpers rather than open-coding a
+// second drain/settle pair that could drift from these.
+static long cons_drain(u8 *buf, long n);
+static void cons_settle_mgr(void);
 void test_cons_ctrlc_consumed(void);
 void test_cons_break_sets_sak(void);
 void test_cons_read_busy_guard(void);
@@ -209,95 +221,356 @@ void test_cons_ring_fill_drain(void) {
     cons_test_reset();
 }
 
-void test_cons_ring_overflow_drop(void) {
+// #129: a full ring REFUSES rather than drops. Pre-#129 this test asserted the
+// drop ("drains exactly the ring capacity, excess dropped"); the excess is now
+// handed back to the producer instead, so the assertion inverts -- the overflow
+// bytes must be REPORTED as not-accepted, and the retained prefix must be
+// untouched. Renamed from cons.ring_overflow_drop for the same reason the
+// counters were: the old name asserts the old behavior.
+void test_cons_ring_full_refuses(void) {
     cons_test_reset();
-    // Push past capacity (256 = CONS_RING_SIZE; push 256 + 10). The fill bytes
+    // Push past capacity (CONS_RING_SIZE = 512; push 512 + 10). The fill bytes
     // MUST be non-control (>= 0x80) -- a 0x03 would be cooked-consumed as Ctrl-C,
     // not enqueued, perturbing the fill. The byte value encodes the push index
-    // mod 0x80, so drop-newest + FIFO order are checkable: the first 256 pushed
-    // (i = 0..255) are retained, the last 10 (i = 256..265) are dropped.
-    for (int i = 0; i < 266; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    // mod 0x80, so FIFO order is checkable.
+    int accepted = 0, refused = 0;
+    for (int i = 0; i < 522; i++) {
+        if (cons_rx_input((u8)(0x80u | (i & 0x7fu)), false)) accepted++;
+        else refused++;
+    }
     TEST_ASSERT(!cons_test_intr_pending(), "no Ctrl-C among the >= 0x80 fill bytes");
+    TEST_EXPECT_EQ((long)accepted, 512L, "exactly the ring capacity was accepted");
+    TEST_EXPECT_EQ((long)refused,   10L, "the 10 past capacity were REFUSED, not dropped");
 
-    static u8 buf[512];
+    // The refusal must be inert: the accepted prefix is intact and in order, so a
+    // producer that re-offers the refused bytes loses nothing and duplicates
+    // nothing.
+    static u8 buf[1024];
     long got = devcons.read(NULL, buf, (long)sizeof(buf), 0);
-    TEST_EXPECT_EQ(got, 256L, "drains exactly the ring capacity (excess dropped)");
+    TEST_EXPECT_EQ(got, 512L, "drains exactly the ring capacity");
     TEST_EXPECT_EQ((long)buf[0],   (long)(0x80u | 0u),     "first retained = first pushed");
-    TEST_EXPECT_EQ((long)buf[255], (long)(0x80u | 0x7fu),  "last retained = 256th pushed (drop-newest)");
+    TEST_EXPECT_EQ((long)buf[511], (long)(0x80u | (511 & 0x7f)), "last retained = 512th pushed");
+
+    // And a refused byte is accepted once the reader has drained -- back-pressure
+    // must be transient, not a latch.
+    TEST_ASSERT(cons_rx_input((u8)0xAAu, false), "the drained ring accepts again");
     cons_test_reset();
 }
 
-// #174 backpressure predicate: cons_rx_can_accept() is what the PL011 RX drain
-// checks BEFORE reading a byte out of the FIFO -- on false it leaves the byte in
-// the FIFO and masks RX (no loss) rather than letting cons_ring_push drop it.
-// Must be true up to and including the 255->256 fill, false exactly at capacity.
+// #174/#129 backpressure predicate: cons_rx_can_accept() is what the PL011 RX
+// drain checks BEFORE reading a byte out of the FIFO -- on false it leaves the
+// byte in the FIFO and masks RX rather than pulling in a byte the ring may not
+// be able to take.
+//
+// #129 changed the RESERVATION, and this test pins the change rather than the
+// number. The predicate must go false while the ring STILL HAS ROOM, because the
+// byte it authorizes may be a canonical terminator that flushes CONS_LINE_MAX + 1
+// bytes at once. A test that only checked "false at capacity" would pass on the
+// pre-#129 one-byte gate -- the bug -- so the load-bearing assertion is the one
+// that fails on that gate: refusal while free room is still positive.
 void test_cons_rx_can_accept_boundary(void) {
+    const u32 reserve    = CONS_LINE_MAX + 1u;      // the worst-case cooked flush
+    // The predicate is `count + reserve <= CONS_RING_SIZE`, so the highest count
+    // it still accepts at is CONS_RING_SIZE - reserve; one more push crosses it.
+    const u32 accept_max = 512u - reserve;          // CONS_RING_SIZE - reserve
+
     cons_test_reset();
     TEST_ASSERT(cons_rx_can_accept(), "empty ring accepts");
-    for (int i = 0; i < 255; i++) {
-        TEST_ASSERT(cons_rx_can_accept(), "ring below capacity accepts");
+    for (u32 i = 0; i <= accept_max; i++) {
+        TEST_ASSERT(cons_rx_can_accept(), "at or below the reservation, accepts");
         cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
     }
-    TEST_ASSERT(cons_rx_can_accept(), "255 bytes -> still room for the 256th (the boundary)");
-    cons_rx_input((u8)(0x80u | 0x7fu), false);   // the 256th byte fills the ring
-    TEST_ASSERT(!cons_rx_can_accept(), "full ring (256) refuses -> the drain pauses RX, no drop");
+    // count == accept_max + 1: fewer than `reserve` slots remain, so a maximal
+    // flush no longer provably fits and admitting another byte is unsafe.
+    TEST_ASSERT(!cons_rx_can_accept(),
+                "refuses while the ring still has room -- reserving, not full");
+
+    // The pin: the ring is NOT full here. A one-byte gate would have said yes.
+    TEST_ASSERT(cons_rx_input((u8)0xAAu, false),
+                "the ring itself still accepts -- the gate is reserving, not full");
+
     cons_test_reset();
     TEST_ASSERT(cons_rx_can_accept(), "reset frees the ring");
 }
 
-// #95: the input-drop counters must actually COUNT, per site.
+// #129: the sizing regression. A maximal cooked line (CONS_LINE_MAX chars +
+// Enter = CONS_LINE_MAX + 1 ring bytes) must survive INTACT on an empty ring.
+//
+// This is the test the pre-#129 tree could not pass in EITHER direction. With
+// the old 256-byte ring the flush overran by one and dropped the TAIL --
+// including the newline -- so a 256-char command silently became a different,
+// shorter, unterminated one. And the "obvious" fix (gate on count + line_len + 1)
+// fails the other way: at count == 0 it refuses 257 into 256 forever, so RX
+// pauses permanently and the console wedges. Only sizing the ring to hold one
+// worst-case flush satisfies both, which is why the static_assert in cons.c
+// ties CONS_RING_SIZE to CONS_LINE_MAX.
+void test_cons_full_line_fits_ring(void) {
+    cons_test_reset();
+    cons_test_set_termios(CONS_ICANON);          // cooked, no echo
+
+    for (u32 i = 0; i < CONS_LINE_MAX; i++)
+        TEST_ASSERT(cons_rx_input((u8)'A', false), "line assembly accepts every char");
+    TEST_ASSERT(cons_rx_input((u8)'\n', false), "the terminator is ACCEPTED, not refused");
+
+    static u8 lbuf[1024];
+    long n = cons_drain(lbuf, (long)sizeof(lbuf));
+    TEST_EXPECT_EQ(n, (long)(CONS_LINE_MAX + 1u),
+                   "the whole line AND its newline reached the ring");
+    TEST_EXPECT_EQ((long)lbuf[CONS_LINE_MAX], (long)'\n',
+                   "the terminator survived -- pre-#129 the tail was what got dropped");
+    bool all_a = true;
+    for (u32 i = 0; i < CONS_LINE_MAX; i++) if (lbuf[i] != 'A') all_a = false;
+    TEST_ASSERT(all_a, "every line byte is intact");
+    cons_settle_mgr();
+}
+
+// #129 (I-27): a full ring must NEVER block the SAK or a cooked Ctrl-C. Both are
+// consumed without pushing ring bytes, so both are unconditionally accepted --
+// deliberately, because a wedged reader that filled the ring would otherwise be
+// able to suppress the trusted-path trigger AND the interrupt that would clear
+// the wedge. The refusal path is confined to the arms that actually push.
+void test_cons_full_ring_never_blocks_sak(void) {
+    cons_test_reset();
+    // #129-audit F6: cons_rx_input ends in wakeup(&g_cons_mgr_rendez), so on SMP
+    // the mgr can be dispatched on a PEER CPU and CONSUME sak_pending /
+    // intr_pending between the produce and the assert -- verbatim the #58 hazard
+    // cons_test_mgr_hold exists for, which every sibling deferred-flag test
+    // wraps against and this one did not.
+    //
+    // Sample-then-assert (#133 R2-F2): TEST_ASSERT returns from the test, so an
+    // assert INSIDE the held window would leave the mgr hold armed. Take every
+    // reading first, release, then assert.
+    cons_test_mgr_hold(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+    bool full     = !cons_rx_input((u8)0xAAu, false);
+    bool brk_ok   = cons_rx_input(0x00u, /*is_break=*/true);
+    bool sak      = cons_test_sak_pending();
+    bool intr_ok  = cons_rx_input(0x03u, false);
+    bool intr     = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+
+    TEST_ASSERT(full,    "the ring is genuinely full");
+    TEST_ASSERT(brk_ok,  "BREAK accepted on a full ring");
+    TEST_ASSERT(sak,     "SAK still latched");
+    TEST_ASSERT(intr_ok, "cooked Ctrl-C accepted on a full ring");
+    TEST_ASSERT(intr,    "interrupt still latched");
+    cons_settle_mgr();
+}
+
+// #129-audit F3: "the echo moved INSIDE the accepted branch" is declared
+// load-bearing in cons.c, cons.h AND 111-cons.md -- and was pinned by nothing.
+// No #129 test set CONS_ECHO, so hoisting cons_echo_stage back out of the `else`
+// left the whole suite green.
+//
+// Why it matters: +echo cooked mode is what login/ut set. With the echo hoisted,
+// a refused keystroke is PAINTED but not taken -- the user believes input landed
+// that did not (the #95 belief failure) -- and the producer's re-offer paints it
+// AGAIN, so the screen diverges from the line the shell will actually run.
+void test_cons_refused_byte_is_not_echoed(void) {
+    u8  cap[16];
+    cons_test_reset();
+    cons_test_set_termios(CONS_ECHO);            // raw + echo (no ICANON)
+    cons_test_mgr_hold(true);
+
+    // Capture BEFORE the fill: with ECHO on, 512 filler bytes would otherwise be
+    // emitted to the real console and pollute the boot log the gates grep.
+    cons_test_echo_capture(true);
+    while (cons_rx_input((u8)0xAAu, false)) { }
+
+    cons_test_echo_capture(true);                // re-arm == reset the buffer
+    bool refused = !cons_rx_input((u8)'z', false);
+    u32  on_refuse = cons_test_echo_captured(cap, sizeof(cap));
+
+    // Drain (no echo), then re-offer the SAME byte.
+    static u8 ebuf[1024];
+    (void)cons_drain(ebuf, (long)sizeof(ebuf));
+
+    cons_test_echo_capture(true);                // reset again
+    bool accepted = cons_rx_input((u8)'z', false);
+    u32  on_accept = cons_test_echo_captured(cap, sizeof(cap));
+
+    cons_test_echo_capture(false);
+    cons_test_mgr_hold(false);
+
+    TEST_ASSERT(refused, "the byte is refused");
+    TEST_EXPECT_EQ((long)on_refuse, 0L, "a REFUSED byte is NOT echoed");
+    TEST_ASSERT(accepted, "the re-offer is accepted");
+    TEST_EXPECT_EQ((long)on_accept, 1L, "accepted once -> echoed once (not twice)");
+    cons_settle_mgr();
+}
+
+// #129-audit F2: the 1-byte UART holdback -- the mechanism that makes a refusal
+// LOSSLESS for the serial producer -- had no coverage of any kind. It is entered
+// only when a peer producer takes the room between the lockless pre-check and
+// the under-lock push, an SMP interleaving no deterministic test produces, so it
+// is seeded directly through the test hooks.
+//
+// Pins the four properties whose failures are ALL SILENT (a lost or doubled
+// keystroke, no counter, no log -- the #95 signature): re-offered before the
+// FIFO; cleared only on acceptance; never delivered twice; held implies paused.
+void test_cons_rx_holdback_reoffer(void) {
+    static u8 hbuf[1024];
+    cons_test_reset();
+
+    // Seed a held byte, then fill the ring so the re-offer MUST be refused.
+    uart_test_rx_force_hold((u8)'H', false);
+    bool seeded  = uart_test_rx_held(NULL, NULL);
+    bool paused0 = uart_test_rx_paused();
+    while (cons_rx_input((u8)0xAAu, false)) { }
+
+    // A pump against a full ring keeps holding -- not dropped, not delivered.
+    uart_rx_pump();
+    bool still_held = uart_test_rx_held(NULL, NULL);
+    bool paused1    = uart_test_rx_paused();
+
+    // Drain the filler. Observe depth with cons_test_rx_count, NEVER by draining
+    // an empty ring: cons_drain is devcons.read, which PARKS when there is
+    // nothing to read, so a wrong expectation would hang the boot instead of
+    // failing (#133 -- a test's failure must not destroy the run).
+    u32 before = cons_test_rx_count();
+    long drained = (before > 0u) ? cons_drain(hbuf, (long)sizeof(hbuf)) : 0;
+
+    // Pump: the held byte lands, exactly once.
+    uart_rx_pump();
+    bool cleared = !uart_test_rx_held(NULL, NULL);
+    u32  depth   = cons_test_rx_count();
+    long got     = (depth > 0u) ? cons_drain(hbuf, (long)sizeof(hbuf)) : 0;
+    long first   = (got > 0) ? (long)hbuf[0] : -1;
+
+    // A second pump must not resurrect it -- and a pump that SUCCEEDS must leave
+    // RX unpaused, or the console stays deaf with nothing left to wake it (the
+    // #129-audit F1 terminal state, reached here by the ordinary route).
+    uart_rx_pump();
+    u32  again    = cons_test_rx_count();
+    bool resumed  = !uart_test_rx_paused();
+
+    cons_test_reset();
+    uart_test_rx_release_hold();     // belt-and-braces; the runner also sweeps
+
+    TEST_ASSERT(seeded,  "seeded: a byte is held");
+    TEST_ASSERT(paused0, "seeded: RX is paused (held implies paused)");
+    TEST_ASSERT(still_held, "a REFUSED re-offer KEEPS the byte");
+    TEST_ASSERT(paused1,    "and stays paused");
+    TEST_EXPECT_EQ(drained, 512L, "the filler drained");
+    TEST_ASSERT(cleared, "an ACCEPTED re-offer clears the hold");
+    TEST_EXPECT_EQ((long)depth, 1L, "the held byte reached the ring, exactly ONCE");
+    TEST_EXPECT_EQ(first, (long)'H', "and it is the byte that was held");
+    TEST_EXPECT_EQ((long)again, 0L, "a cleared hold is not re-delivered");
+    TEST_ASSERT(resumed, "a drained pump RESUMES RX -- it does not leave it masked");
+}
+
+// #129 defect (1): cons_feed_write -- the graphical console's keyboard -- must
+// report a SHORT count when the ring fills, not claim it took everything.
+//
+// Pre-#129 the feed was the one UNGATED producer: it called cons_rx_input per
+// byte unconditionally and returned n regardless, so a full ring ate keystrokes
+// while telling the renderer they had landed. The serial console had #174
+// back-pressure; the framebuffer console had a lie. Revert `return i` to
+// `return n` and this test fails on the count.
+void test_cons_feed_write_short_on_full(void) {
+    static u8 feed[64];
+    for (u32 i = 0; i < sizeof(feed); i++) feed[i] = (u8)(0x80u | (i & 0x7fu));
+
+    cons_test_reset();
+    // Leave exactly 10 slots, then offer 64.
+    for (u32 i = 0; i < 512u - 10u; i++) cons_rx_input((u8)0xAAu, false);
+    long got = cons_feed_write(feed, (long)sizeof(feed));
+    TEST_EXPECT_EQ(got, 10L, "the feed reports exactly what the ring took");
+
+    // What it took is a PREFIX -- the caller resumes at `got` losing nothing and
+    // duplicating nothing.
+    static u8 fbuf[1024];
+    long n = cons_drain(fbuf, (long)sizeof(fbuf));
+    TEST_EXPECT_EQ(n, 512L, "ring drained full");
+    bool prefix_ok = true;
+    for (long i = 0; i < 10; i++)
+        if (fbuf[512 - 10 + i] != feed[i]) prefix_ok = false;
+    TEST_ASSERT(prefix_ok, "the accepted bytes are the leading prefix, in order");
+
+    // A wholly-full ring yields 0, which is a legal short write and not an error.
+    for (u32 i = 0; i < 512u; i++) cons_rx_input((u8)0xAAu, false);
+    TEST_EXPECT_EQ(cons_feed_write(feed, 1L), 0L, "full ring -> 0 accepted, not -1");
+    cons_test_reset();
+    cons_settle_mgr();
+}
+
+// #95/#129: the input counters must actually COUNT, per site.
 //
 // A counter that can never fire is worse than no counter: a future zero reading
-// would read as "no byte was dropped" when it only proves the instrument is
-// dead. So this drives each of the three drop sites deliberately and asserts
-// (a) the matching counter moves by the exact expected amount, and (b) the other
-// two do NOT -- attribution is the whole point, since a lumped counter would
-// only move the question from "did we drop?" to "where?".
+// would read as "nothing happened" when it only proves the instrument is dead.
+// So this drives each site deliberately and asserts (a) the matching counter
+// moves by the exact expected amount, and (b) the others do NOT -- attribution
+// is the whole point, since a lumped counter would only move the question from
+// "did we lose input?" to "where?".
+//
+// #129 changed what two of these MEASURE. The ring-full sites now count
+// BACK-PRESSURE (the byte was refused and the producer still holds it), so the
+// old "10 bytes past capacity were dropped" assertions become "10 were refused"
+// -- same arithmetic, opposite meaning, which is exactly why the counters were
+// renamed instead of quietly reinterpreted.
 void test_cons_rx_drop_counters(void) {
-    u32 raw = 1, flush = 1, line = 1;
+    u32 bp_raw = 1, bp_flush = 1, d_line = 1, d_ring = 1;
 
-    // (a) Raw arm, ring full. 266 pushes into a 256-entry ring = 10 drops. Fill
-    //     bytes are >= 0x80 so ISIG (the boot default) cannot eat one as Ctrl-C.
+    // (a) Raw arm, ring full. 522 offers into a 512-entry ring = 10 refusals.
+    //     Fill bytes are >= 0x80 so ISIG (the boot default) cannot eat one as
+    //     Ctrl-C.
     cons_test_reset();
-    cons_rx_drops(&raw, &flush, &line);
-    TEST_EXPECT_EQ((long)(raw + flush + line), 0L, "reset zeroes all three drop counters");
-    for (int i = 0; i < 266; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
-    cons_rx_drops(&raw, &flush, &line);
-    TEST_EXPECT_EQ((long)raw,   10L, "raw arm counts exactly the 10 bytes past capacity");
-    TEST_EXPECT_EQ((long)flush,  0L, "a raw overflow is not attributed to the flush site");
-    TEST_EXPECT_EQ((long)line,   0L, "a raw overflow is not attributed to the line site");
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)(bp_raw + bp_flush + d_line + d_ring), 0L,
+                   "reset zeroes all four counters");
+    for (int i = 0; i < 522; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)bp_raw,  10L, "raw arm counts exactly the 10 refused past capacity");
+    TEST_EXPECT_EQ((long)bp_flush, 0L, "a raw refusal is not attributed to the flush site");
+    TEST_EXPECT_EQ((long)d_line,   0L, "a raw refusal is not attributed to the line site");
+    TEST_EXPECT_EQ((long)d_ring,   0L, "no push failed after the room check authorized it");
 
     // (b) Cooked line-assembly overflow: CONS_LINE_MAX + 4 non-newline bytes
-    //     under ICANON. The 4 past the bound are dropped un-echoed; no Enter has
-    //     been pressed, so nothing has reached the ring and the other two sites
-    //     must stay clean.
+    //     under ICANON. The 4 past the bound are DROPPED un-echoed -- still a
+    //     real drop after #129, deliberately (back-pressure here would wedge on
+    //     a user who never presses Enter). No Enter yet, so nothing has reached
+    //     the ring and the other sites must stay clean.
     cons_test_reset();
     TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "+icanon accepted");
     for (u32 i = 0; i < CONS_LINE_MAX + 4u; i++)
         cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
-    cons_rx_drops(&raw, &flush, &line);
-    TEST_EXPECT_EQ((long)line,  4L, "line assembly counts exactly the bytes past CONS_LINE_MAX");
-    TEST_EXPECT_EQ((long)raw,   0L, "a line overflow is not attributed to the raw site");
-    TEST_EXPECT_EQ((long)flush, 0L, "a line overflow is not attributed to the flush site");
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)d_line,   4L, "line assembly counts exactly the bytes past CONS_LINE_MAX");
+    TEST_EXPECT_EQ((long)bp_raw,   0L, "a line drop is not attributed to the raw site");
+    TEST_EXPECT_EQ((long)bp_flush, 0L, "a line drop is not attributed to the flush site");
+    TEST_EXPECT_EQ((long)d_ring,   0L, "the line site does not touch the ring");
 
-    // (c) Cooked FLUSH overrun -- the site #174's admission gate does not cover.
-    //     Fill the ring to 250 in raw mode, switch to ICANON, assemble 10 bytes,
-    //     press Enter: the flush wants 11 slots and has 6, so 5 are lost.
-    //     Note WHICH 5: the tail, INCLUDING the newline. That is exactly why
-    //     this site cannot by itself explain #95's shape (interior byte lost,
-    //     terminator delivered, command executed) -- here the terminator is the
-    //     first thing to go, and the line would never execute at all.
+    // (c) Cooked FLUSH refusal -- the site the pre-#129 one-byte gate did not
+    //     cover. Fill the ring to within 6 slots in raw mode, switch to ICANON,
+    //     assemble 10 bytes, press Enter: the flush wants 11 and has 6.
+    //
+    //     Pre-#129 this LOST 5 bytes -- the tail, INCLUDING the newline. Now it
+    //     refuses as a unit, so the assertions change shape entirely: ONE
+    //     back-pressure event (not 5 drops), and -- the part that matters -- the
+    //     line is still intact afterwards, so re-offering the terminator once the
+    //     reader drains delivers the whole line.
     cons_test_reset();
-    for (int i = 0; i < 250; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    for (u32 i = 0; i < 512u - 6u; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
     TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "+icanon accepted");
     for (int i = 0; i < 10; i++) cons_rx_input((u8)'a', false);
-    cons_rx_input((u8)'\n', false);
-    cons_rx_drops(&raw, &flush, &line);
-    TEST_EXPECT_EQ((long)flush, 5L, "flush counts the 11 - 6 slots it could not place");
-    TEST_EXPECT_EQ((long)raw,   0L, "a flush overrun is not attributed to the raw site");
-    TEST_EXPECT_EQ((long)line,  0L, "a flush overrun is not attributed to the line site");
+    TEST_ASSERT(!cons_rx_input((u8)'\n', false), "the oversized flush is REFUSED");
+    cons_rx_counters(&bp_raw, &bp_flush, &d_line, &d_ring);
+    TEST_EXPECT_EQ((long)bp_flush, 1L, "one refusal event, not 5 lost bytes");
+    TEST_EXPECT_EQ((long)bp_raw,   0L, "a flush refusal is not attributed to the raw site");
+    TEST_EXPECT_EQ((long)d_line,   0L, "a flush refusal is not attributed to the line site");
+    TEST_EXPECT_EQ((long)d_ring,   0L, "nothing was pushed, so nothing could fail to push");
+
+    // The refusal preserved the line: drain, re-offer the terminator, get all 11.
+    static u8 cbuf[1024];
+    long n = cons_drain(cbuf, (long)sizeof(cbuf));
+    TEST_EXPECT_EQ(n, (long)(512u - 6u), "only the raw filler was in the ring");
+    TEST_ASSERT(cons_rx_input((u8)'\n', false), "the re-offered terminator is accepted");
+    n = cons_drain(cbuf, (long)sizeof(cbuf));
+    TEST_EXPECT_EQ(n, 11L, "the whole 10-char line and its newline survived the refusal");
+    TEST_EXPECT_EQ((long)cbuf[10], (long)'\n', "terminator last -- nothing was truncated");
 
     cons_test_reset();
+    cons_settle_mgr();
 }
 
 void test_cons_ctrlc_consumed(void) {
@@ -1176,24 +1449,32 @@ void test_cons_stat_native_qid_contract(void) {
 }
 
 // LS-8b: the canonical line buffer is BOUNDED -- a pathologically long line
-// (CONS_LINE_MAX + extra) drops the overflow, never corrupting memory. Enter
-// still delivers what fits (the ring then caps it too).
+// (CONS_LINE_MAX + extra) drops the overflow, never corrupting memory.
+//
+// #129 sharpened what "delivers what fits" means. Pre-#129 this asserted only
+// `n <= 256` (the ring capacity), which was true for two DIFFERENT reasons at
+// once -- the line buffer capped at CONS_LINE_MAX, and the ring then truncated
+// the flush on top of that -- so the assertion could not tell a bounded line
+// from a truncated one. Now exactly one bound applies: 300 chars cap at
+// CONS_LINE_MAX, and all 257 flushed bytes reach the ring. Asserting the exact
+// count is what distinguishes "the line buffer bounded it" from "the ring ate
+// the tail".
 void test_cons_cook_line_overflow(void) {
     cons_test_reset();
     sched();
     cons_test_set_termios(CONS_ICANON);               // cooked, no echo
 
     for (int i = 0; i < 300; i++) cons_rx_input((u8)'A', false);   // > CONS_LINE_MAX (256)
-    cons_rx_input((u8)'\n', false);                                // deliver
+    TEST_ASSERT(cons_rx_input((u8)'\n', false), "the capped line's terminator is accepted");
 
-    // The ring caps at its capacity (256); every delivered byte is 'A' (the line
-    // buffer never overflowed past CONS_LINE_MAX, and the ring never overflowed).
-    static u8 buf[512];
+    static u8 buf[1024];
     long n = cons_drain(buf, (long)sizeof(buf));
-    TEST_ASSERT(n > 0 && n <= 256, "bounded delivery (<= ring capacity)");
+    TEST_EXPECT_EQ(n, (long)(CONS_LINE_MAX + 1u),
+                   "delivery is bounded by CONS_LINE_MAX alone -- the ring truncates nothing");
+    TEST_EXPECT_EQ((long)buf[CONS_LINE_MAX], (long)'\n', "the terminator is last");
     bool all_a = true;
-    for (long i = 0; i < n; i++) if (buf[i] != 'A') all_a = false;
-    TEST_ASSERT(all_a, "every delivered byte is 'A' -- no overflow corruption");
+    for (u32 i = 0; i < CONS_LINE_MAX; i++) if (buf[i] != 'A') all_a = false;
+    TEST_ASSERT(all_a, "every delivered line byte is 'A' -- no overflow corruption");
     cons_settle_mgr();
 }
 

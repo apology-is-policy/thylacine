@@ -548,8 +548,13 @@ void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
 void test_cons_tx_room_wait_and_deadline(void);
 void test_cons_ring_fill_drain(void);
-void test_cons_ring_overflow_drop(void);
+void test_cons_ring_full_refuses(void);
 void test_cons_rx_can_accept_boundary(void);
+void test_cons_full_line_fits_ring(void);
+void test_cons_full_ring_never_blocks_sak(void);
+void test_cons_feed_write_short_on_full(void);
+void test_cons_refused_byte_is_not_echoed(void);
+void test_cons_rx_holdback_reoffer(void);
 void test_cons_rx_drop_counters(void);
 void test_cons_ctrlc_consumed(void);
 void test_cons_break_sets_sak(void);
@@ -1960,8 +1965,13 @@ struct test_case g_tests[] = {
     { "cons.tx_role_serializes_writers", test_cons_tx_role_serializes_writers, false, NULL },
     { "cons.tx_room_wait_and_deadline", test_cons_tx_room_wait_and_deadline, false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
-    { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
+    { "cons.ring_full_refuses",        test_cons_ring_full_refuses,        false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
+    { "cons.full_line_fits_ring",      test_cons_full_line_fits_ring,      false, NULL },
+    { "cons.full_ring_never_blocks_sak", test_cons_full_ring_never_blocks_sak, false, NULL },
+    { "cons.feed_write_short_on_full", test_cons_feed_write_short_on_full, false, NULL },
+    { "cons.refused_byte_is_not_echoed", test_cons_refused_byte_is_not_echoed, false, NULL },
+    { "cons.rx_holdback_reoffer",      test_cons_rx_holdback_reoffer,      false, NULL },
     { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
     { "cons.break_sets_sak",           test_cons_break_sets_sak,           false, NULL },
@@ -3077,18 +3087,26 @@ void test_run_all(void) {
         // The UART stall lives in the arch layer, not the cons layer, so it gets
         // a bit here rather than in the CONS_TEST_OWNED_* set.
         #define TEST_OWNED_UART_TX_STALL (1u << 4)
+        // #129-audit F2: the RX holdback + its pause latch is the SIXTH piece of
+        // global console state a failing test can leave armed -- and the worst,
+        // because a stranded pause leaves RX MASKED, so console input is dead for
+        // the rest of the boot and every later console test mis-reports.
+        // Per-site cleanup cannot cover a site that does not exist yet (#133).
+        #define TEST_OWNED_UART_RX_HOLD  (1u << 5)
         u32 owned = cons_test_release_owned_state();
         if (uart_test_tx_stalled()) {
             uart_test_tx_stall(false);
             owned |= TEST_OWNED_UART_TX_STALL;
         }
+        if (uart_test_rx_release_hold()) owned |= TEST_OWNED_UART_RX_HOLD;
         if (owned != 0) {
-            static const char *const names[5] = {
-                "echo-capture", "tx-role", "mgr-hold", "reader-busy", "uart-tx-stall"
+            static const char *const names[6] = {
+                "echo-capture", "tx-role", "mgr-hold", "reader-busy", "uart-tx-stall",
+                "uart-rx-hold"
             };
             uart_puts("LEAKED-STATE(");
             bool first = true;
-            for (int b = 0; b < 5; b++) {
+            for (int b = 0; b < 6; b++) {
                 if (!(owned & (1u << b))) continue;
                 if (!first) uart_puts(",");
                 uart_puts(names[b]);

@@ -75,6 +75,153 @@ fn open_path(path: &str, omode: u32) -> i64 {
     unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), omode) }
 }
 
+/// #129: push held input at `/dev/consfeed`, keeping whatever the console
+/// refuses. `write` is injected so the policy is testable (see
+/// `feed_drain_selftest`) -- aurora is a `no_std` bin crate with no cargo-test
+/// harness, and the back-pressure path is otherwise reachable only by stalling a
+/// real console reader, which no E2E arranges.
+///
+/// `cons_feed_write` returns a SHORT count when the kernel RX ring is full --
+/// back-pressure, not an error: the refused bytes were NOT taken and are still
+/// ours. (Pre-#129 it returned `n` unconditionally and the kernel dropped the
+/// overflow silently, which is the defect #129 closed; ignoring the count here
+/// would just relocate that same loss into the compositor.)
+///
+/// ONE write attempt per call, deliberately. A retry loop would spin against a
+/// console whose reader has legitimately stopped reading -- RX parks paused by
+/// design in that case (#174-audit F3) -- and would wedge aurora for every other
+/// client. The remainder rides the next pass of the event loop instead.
+///
+/// A negative return is a real error (bad fd / revoked gate), not back-pressure:
+/// the buffer is cleared, because retrying forever against a broken fd is the
+/// wedge this function exists to avoid.
+///
+/// Returns true iff this call dropped anything (the caller logs, latched).
+fn feed_drain_with(
+    write: &mut dyn FnMut(&[u8]) -> i64,
+    pending: &mut Vec<u8>,
+    cap: usize,
+    dropped: &mut u64,
+) -> bool {
+    if pending.is_empty() {
+        return false;
+    }
+    let n = write(pending.as_slice());
+    if n < 0 {
+        *dropped += pending.len() as u64;
+        pending.clear();
+        return true;
+    }
+    let took = n as usize;
+    if took >= pending.len() {
+        pending.clear();
+        return false;
+    }
+    if took > 0 {
+        pending.drain(..took);
+    }
+    // #129-audit F4: drop the NEWEST, not the oldest. The drop-oldest discipline
+    // belongs to `cons_drain_tap`, whose rationale is explicitly OUTPUT-specific
+    // ("the newest output -- the prompt the user needs -- survives"); it does not
+    // transfer to INPUT. Dropping a prefix can leave a complete but DIFFERENT
+    // command where dropping a suffix leaves an incomplete one the shell
+    // rejects, and Linux `n_tty` discards the newest on a full input buffer for
+    // the same reason.
+    if pending.len() > cap {
+        let excess = pending.len() - cap;
+        pending.truncate(cap);
+        *dropped += excess as u64;
+        return true;
+    }
+    false
+}
+
+fn feed_drain(fd: i64, pending: &mut Vec<u8>, cap: usize, dropped: &mut u64,
+              logged: &mut bool) {
+    let mut w = |b: &[u8]| unsafe { t_write(fd, b.as_ptr(), b.len()) };
+    if feed_drain_with(&mut w, pending, cap, dropped) {
+        // #129-audit F8: LATCH the report. Once over the bound, every subsequent
+        // keystroke pushes it over again -- and `say!` routes through
+        // SYS_PUTS -> cons_output_write, which takes the console TX writer role
+        // and can eat the #67 room-wait per stalled byte. With autorepeat held
+        // against a stalled reader, aurora would self-stall on its own
+        // diagnostics: the #126 "the diagnostic costs more than the event" shape,
+        // in userspace. Re-armed when the backlog clears.
+        if !*logged {
+            *logged = true;
+            say!("aurora: consfeed backlog over {} bytes; dropping input (total {})",
+                 cap, *dropped);
+        }
+    } else if pending.is_empty() {
+        *logged = false;
+    }
+}
+
+/// #129: prove the held-input queue keeps ORDER and its BOUND under
+/// back-pressure, by scripting the accept counts the console would return.
+fn feed_drain_selftest() -> bool {
+    let cap = 8usize;
+    let mut dropped = 0u64;
+
+    // Scripted returns, consumed in order.
+    let mut script: Vec<i64> = Vec::new();
+    let mut idx = 0usize;
+    let mut seen: Vec<Vec<u8>> = Vec::new();
+
+    // (a) Full accept empties the queue and records no drop.
+    let mut q: Vec<u8> = Vec::new();
+    q.extend_from_slice(b"abcd");
+    script.push(4);
+    {
+        let (sc, ix, sn) = (&script, &mut idx, &mut seen);
+        let mut w = |b: &[u8]| { sn.push(b.to_vec()); let r = sc[*ix]; *ix += 1; r };
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+    }
+    if !q.is_empty() || seen[0].as_slice() != b"abcd" { return false; }
+
+    // (b) ZERO accepted must lose NOTHING -- the case that matters, since a full
+    //     ring is exactly when the console takes 0.
+    q.extend_from_slice(b"abcd");
+    script.push(0);
+    {
+        let (sc, ix) = (&script, &mut idx);
+        let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+    }
+    if q.as_slice() != b"abcd" || dropped != 0 { return false; }
+
+    // (c) A partial accept removes a PREFIX and keeps the remainder IN ORDER.
+    script.push(2);
+    {
+        let (sc, ix) = (&script, &mut idx);
+        let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+    }
+    if q.as_slice() != b"cd" { return false; }
+
+    // (d) Over the bound with nothing accepted: the NEWEST go (F4), the oldest
+    //     survive, and the loss is REPORTED rather than silent.
+    q.clear();
+    q.extend_from_slice(b"0123456789AB"); // 12 > cap 8
+    script.push(0);
+    {
+        let (sc, ix) = (&script, &mut idx);
+        let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
+        if !feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+    }
+    if q.as_slice() != b"01234567" || dropped != 4 { return false; }
+
+    // (e) A negative return is an ERROR, not back-pressure: clear and report.
+    script.push(-1);
+    {
+        let (sc, ix) = (&script, &mut idx);
+        let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
+        if !feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+    }
+    if !q.is_empty() || dropped != 12 { return false; }
+    true
+}
+
 /// Translate one KEY event into the terminal byte sequence a keyboard would
 /// produce. Press + autorepeat feed; release is silent. Runes are fed as
 /// UTF-8 (the tapestryd keymap already resolved shift/ctrl -- Enter is CR,
@@ -121,6 +268,14 @@ pub extern "C" fn rs_main() -> i64 {
     if drain < 0 {
         say!("aurora: FAIL open /dev/consdrain (not the bound renderer?)");
         return 1;
+    }
+    // #129: the held-input queue is the half of the fix that keeps a refused
+    // keystroke from being lost in USERSPACE. ls-gfx proves only the happy path,
+    // so assert the back-pressure policy here (the netd selftest pattern).
+    if feed_drain_selftest() {
+        say!("aurora: #129 feed selftest PASS (order + bound under back-pressure)");
+    } else {
+        say!("aurora: #129 feed selftest FAIL");
     }
     let feed = open_path("/dev/consfeed", T_OWRITE);
     if feed < 0 {
@@ -336,6 +491,28 @@ pub extern "C" fn rs_main() -> i64 {
     let mut blink_on = true;
     let mut prev_cursor: Option<(usize, usize)> = Some((0, 0));
     let mut keybuf: Vec<u8> = Vec::new();
+    // #129: bytes the console REFUSED, held for the next loop pass.
+    //
+    // `cons_feed_write` now returns a SHORT count when the kernel RX ring is
+    // full (back-pressure -- the byte was not taken, and the producer still owns
+    // it). Before #129 it always returned `n` and the kernel silently dropped the
+    // overflow, so discarding the count here was invisible; now discarding it
+    // would simply MOVE the keystroke loss from the kernel into aurora, which is
+    // not a fix. Holding the remainder here is what closes it end-to-end.
+    //
+    // Deliberately NOT a retry loop: the console reader may be stalled
+    // indefinitely (a foreground child that stops reading stdin parks RX paused
+    // by design -- #174-audit F3), and spinning on it would wedge the compositor
+    // for every other client. So the remainder rides one pass of the existing
+    // event loop, which keeps rendering meanwhile.
+    let mut feed_pending: Vec<u8> = Vec::new();
+    // Bound it: a console that never drains must cost bounded memory, and the
+    // honest failure is a reported drop of the OLDEST held input rather than
+    // unbounded growth. 4 KiB is ~8x the kernel ring, i.e. far past any burst a
+    // human or a paste can produce before the reader returns.
+    const FEED_PENDING_MAX: usize = 4096;
+    let mut feed_dropped: u64 = 0;
+    let mut feed_logged = false;      // #129-audit F8: one line per episode
     let mut drainbuf = [0u8; 2048];
     let mut drain_eof = false;
     // Consecutive present failures. A transient failure (#31: a compositor
@@ -353,6 +530,24 @@ pub extern "C" fn rs_main() -> i64 {
     let mut full_fill = false;
 
     loop {
+        // (0) #129: retry any input the console refused last pass. This must run
+        // unconditionally, NOT only when a key arrives: back-pressure clears when
+        // the console's READER drains, which is an event aurora never sees. Held
+        // bytes would otherwise sit until the user happened to type again --
+        // arriving late and out of order, or never, if they had stopped typing
+        // because the terminal appeared stuck.
+        //
+        // SEAM (#129-audit F5, task #135): this pass is NOT bounded when the
+        // surface is HIDDEN. wait_event below is an untimed block, paced only by
+        // tapestryd's frame_tick, which by its own contract reaches
+        // visible_hosted() surfaces only -- so a tab-backgrounded aurora stops
+        // draining entirely, and held keystrokes are injected whenever the user
+        // returns, into whatever the shell is doing THEN. Closing it needs either
+        // a timed wait when feed_pending is non-empty, or a policy of discarding
+        // held input on unfocus; both are judgement calls beyond this fix.
+        feed_drain(feed, &mut feed_pending, FEED_PENDING_MAX, &mut feed_dropped,
+                   &mut feed_logged);
+
         // (1) Block for the next event (<= one FRAME period), then drain the
         // locally-queued backlog non-blockingly.
         let first = match surf.wait_event() {
@@ -460,8 +655,13 @@ pub extern "C" fn rs_main() -> i64 {
                         keybuf.clear();
                         key_bytes(e.code, e.value, e.rune, &mut keybuf);
                         if !keybuf.is_empty() {
-                            let _ =
-                                unsafe { t_write(feed, keybuf.as_ptr(), keybuf.len()) };
+                            // #129: append-then-drain, so held bytes stay AHEAD
+                            // of new ones. Writing the new keystroke first would
+                            // reorder the user's typing the moment the console
+                            // back-pressures.
+                            feed_pending.extend_from_slice(&keybuf);
+                            feed_drain(feed, &mut feed_pending, FEED_PENDING_MAX,
+                                       &mut feed_dropped, &mut feed_logged);
                         }
                     }
                 }
@@ -635,15 +835,19 @@ pub extern "C" fn rs_main() -> i64 {
                     // learn the real grid (128x36, not the 80x24 fallback).
                     // A short/failed write only degrades the querier to its
                     // 80x24 fallback, but silently -- log it (G-5 SA-2).
+                    //
+                    // #129: this rides the SAME held-input queue as keystrokes,
+                    // not a direct write. Two reasons. (a) Ordering: a direct
+                    // write would jump ahead of keystrokes the console has
+                    // already refused, so the querier's reply could overtake the
+                    // typing that preceded it. (b) A short write here is now
+                    // back-pressure rather than a lost reply -- the remainder is
+                    // retried next pass instead of degrading the querier.
                     if !term.reply.is_empty() {
-                        let wr = unsafe {
-                            t_write(feed, term.reply.as_ptr(), term.reply.len())
-                        };
-                        if wr < term.reply.len() as i64 {
-                            say!("aurora: consfeed reply write short/failed ({} of {})",
-                                 wr, term.reply.len());
-                        }
+                        feed_pending.extend_from_slice(&term.reply);
                         term.reply.clear();
+                        feed_drain(feed, &mut feed_pending, FEED_PENDING_MAX,
+                                   &mut feed_dropped, &mut feed_logged);
                     }
                 } else {
                     if n == 0 {

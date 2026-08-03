@@ -67,10 +67,25 @@ struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
 // A-4c-2 SAK: it sets sak-pending + wakes console_mgr (which runs the privileged
 // revoke/re-grant in process context); the accompanying DR byte is NOT enqueued.
 // A data byte equal to 0x03 (Ctrl-C) is cooked-consumed (it generates a deferred
-// `interrupt` note, NOT ring data). Any other byte is enqueued to the ring
-// (dropped if the ring is full -- bounded, never overflows). Wakes a blocked
-// devcons_read and/or the console_mgr kthread as appropriate.
-void cons_rx_input(u8 byte, bool is_break);
+// `interrupt` note, NOT ring data). Any other byte is enqueued to the ring.
+// Wakes a blocked devcons_read and/or the console_mgr kthread as appropriate.
+//
+// #129: RETURNS whether the byte was ACCEPTED. False means the ring could not
+// take what this byte would push -- and, critically, that NOTHING CHANGED: no
+// ring push, no line_len mutation, no echo, no flags. The caller still owns the
+// byte and must re-offer this exact byte later; that is what turns a full ring
+// from a silent drop into back-pressure. (The PL011 drain holds it in the FIFO
+// or its 1-byte holdback; cons_feed_write returns a short count.)
+//
+// Refusal is confined to the two arms that push ring bytes -- the raw/cbreak
+// byte and the canonical terminator's line_len + 1 flush. Everything that
+// pushes nothing is ALWAYS accepted, which is load-bearing for two of them:
+// a BREAK (the A-4c-2 SAK) and a cooked Ctrl-C must never be blocked by a full
+// ring, or a wedged reader could suppress the I-27 trusted-path trigger and the
+// interrupt that would unwedge it. A byte past CONS_LINE_MAX is still a DROP
+// (returns true): the line buffer is a fixed bound, so back-pressuring there
+// would wedge on a user who simply never presses Enter.
+bool cons_rx_input(u8 byte, bool is_break);
 
 // #57b: the shared console-input/output API -- the ONE implementation behind
 // both console front doors. `devcons` (the SYS_CONSOLE_OPEN syscall path) and
@@ -161,21 +176,34 @@ bool cons_test_tx_armed(void);
 u32  cons_test_tx_ring_capacity(void);
 u64  cons_test_tx_room_wait_ns(void);
 
-// #174 backpressure: true iff the RX ring can accept at least one more byte
-// (count < CONS_RING_SIZE). The PL011 RX drain (uart_rx_handler / uart_rx_pump)
-// checks this BEFORE reading a byte out of the FIFO -- when the ring is full it
-// leaves the byte in the FIFO and pauses RX instead of dropping it. Lockless
-// (a RELAXED-atomic count read); a stale "true" at worst pushes one byte that
-// cons_ring_push then drops (the pre-#174 behavior for that one byte), a stale
-// "false" at worst pauses one byte early -- neither corrupts.
+// #174/#129 backpressure PRE-check: true iff the RX ring has room for the
+// worst-case push one more admitted byte could cause. The PL011 RX drain
+// (uart_rx_handler / uart_rx_pump) checks this BEFORE reading a byte out of the
+// FIFO -- on false it leaves the byte in the FIFO and pauses RX.
+//
+// #129 widened the reservation from ONE byte to CONS_LINE_MAX + 1. In canonical
+// mode a single admitted byte can be the terminator that flushes an entire
+// assembled line, so "room for this byte" was never the question the drain
+// needed answered -- the same per-ITEM-vs-per-OPERATION category error #126 hit
+// on the TX side. Lockless and deliberately unconditional (it consults neither
+// termios nor line_len; both can change under it). It is an OPTIMIZATION, not
+// the guarantee: cons_rx_input's under-lock room check is what makes an overrun
+// impossible, so a stale read here costs at most one refuse-and-retry.
 bool cons_rx_can_accept(void);
 
-// #95: the INPUT-path silent-drop counts, per site (raw-arm ring-full /
-// cooked-flush ring-full / cooked line-buffer overflow). NULL args are skipped.
-// Surfaced at /ctl/cons; console_mgr also emits one loud line on the FIRST drop
-// of a boot. A lost input byte is otherwise invisible -- a command loses a
-// character and runs anyway -- which is why #95 could not be decided.
-void cons_rx_drops(u32 *raw, u32 *flush, u32 *line);
+// #95/#129: the INPUT-path counters. NULL args are skipped. Surfaced at
+// /ctl/cons; console_mgr emits one loud line on the first real DROP of a boot.
+//
+// Read the names carefully -- they are not interchangeable:
+//   bp_raw / bp_flush -- BACK-PRESSURE, not loss. The ring was full and the byte
+//                        was refused; the producer holds it and retries. Normal
+//                        operation on a busy console; non-zero is a load signal.
+//   drop_line         -- a real drop: a byte past CONS_LINE_MAX in cooked line
+//                        assembly. Bounded and deliberate (see cons_rx_input).
+//   drop_ring         -- MUST BE ZERO. A push failed after the under-lock room
+//                        check authorized it, i.e. #129's room arithmetic
+//                        disagrees with the ring. Non-zero is a kernel bug.
+void cons_rx_counters(u32 *bp_raw, u32 *bp_flush, u32 *drop_line, u32 *drop_ring);
 
 // #95: the TX-side loss counts (#75/#126), for the same /ctl/cons surface.
 void cons_tx_drops(u32 *dropped, u32 *room_waits);
@@ -287,7 +315,13 @@ long cons_drain_read(void *buf, long n);
 short cons_drain_poll(short events, struct poll_waiter *pw);
 
 // Feed: inject `n` bytes into the console line discipline (never a BREAK).
-// Returns n; -1 on bad args.
+// Returns the number ACCEPTED (a SHORT count, possibly 0, when the RX ring
+// fills -- #129 back-pressure, not an error); -1 on bad args.
+//
+// The short return is the contract, not an edge case: this is the graphical
+// console's entire keyboard, and before #129 it returned n unconditionally
+// while cons_rx_input silently dropped the overflow. A caller that ignores the
+// count is discarding keystrokes exactly as the old code did.
 long cons_feed_write(const void *buf, long n);
 
 // The console_mgr kproc kthread entry. Spawned once at boot (boot_main). Sleeps
@@ -359,6 +393,7 @@ u32  cons_test_echo_captured(u8 *out, u32 max);
 
 // G-4: drain observability for tests. Buffered byte count / cumulative
 // drop-oldest count / the deferred drain POLLIN edge flag.
+u32  cons_test_rx_count(void);      // #129-audit F2: NON-BLOCKING RX depth
 u32  cons_test_drain_count(void);
 u32  cons_test_drain_overflow(void);
 bool cons_test_drain_pollwake_pending(void);

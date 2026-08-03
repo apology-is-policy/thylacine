@@ -45,9 +45,26 @@
 // racing into that extinction (the console is a single-reader resource at v1.0;
 // a multi-reader lift is v1.x).
 
-#define CONS_RING_SIZE  256u   // power of two (mask-indexed); bounded -- full drops
+#define CONS_RING_SIZE  512u   // power of two (mask-indexed)
 _Static_assert((CONS_RING_SIZE & (CONS_RING_SIZE - 1u)) == 0u,
                "CONS_RING_SIZE must be a power of two (the ring is mask-indexed)");
+
+// #129: the ring must be able to hold ONE worst-case cooked line. A canonical
+// Enter flushes line_len + 1 bytes (the line plus its terminating newline) in a
+// SINGLE cons_rx_input call, so the largest atomic push this ring ever sees is
+// CONS_LINE_MAX + 1. Until #129 the ring was 256 and CONS_LINE_MAX was (still
+// is) 256, i.e. a maximal line did not fit even into a COMPLETELY EMPTY ring --
+// which is the deeper half of the bug, and the half that makes the obvious fix
+// wrong. The obvious admission gate ("require count + line_len + 1 <= size")
+// is correct in form, but with those sizes it refuses a full-length line at
+// count == 0 and keeps refusing forever: RX pauses permanently and the console
+// wedges. A bounded drop would have become a deadlock. The gate is only sound
+// once the ring can actually hold what the gate is asked to reserve, so the
+// sizing IS part of the fix, not an optimization alongside it.
+_Static_assert(CONS_LINE_MAX + 1u <= CONS_RING_SIZE,
+               "CONS_RING_SIZE must hold one worst-case cooked flush "
+               "(CONS_LINE_MAX + 1); otherwise the #129 admission gate can "
+               "never admit a full line and RX pauses forever");
 
 // CONS_LINE_MAX (the LS-8b canonical line-assembly bound) lives in cons.h --
 // #95's drop test asserts against it, and a test hardcoding the number would
@@ -95,23 +112,41 @@ struct cons_input {
     // (g_cons_tx.dropped); the RX side had nothing.
     //
     // Split per SITE, deliberately. A lumped counter would only move the
-    // question from "did we drop?" to "where?", and the three sites have
-    // entirely different causes and fixes:
-    //   rx_drop_raw   -- raw/cbreak arm, ring full. #174's UART backpressure is
-    //                    meant to make this unreachable FROM THE UART; note that
-    //                    cons_feed_write (the G-4 renderer feed) is a SECOND
-    //                    producer and is NOT gated by cons_rx_can_accept.
-    //   rx_drop_flush -- cooked arm, the Enter flush overran the ring. Reachable
-    //                    even WITH #174: cons_rx_can_accept() grants admission
-    //                    for ONE byte, but this flush pushes line_len + 1 (up to
-    //                    CONS_LINE_MAX + 1 = 257).
-    //   rx_drop_line  -- cooked arm, a byte past CONS_LINE_MAX. Bounded by
-    //                    design, but the byte is gone and un-echoed.
+    // question from "did we drop?" to "where?", and the sites have entirely
+    // different causes and fixes.
+    //
+    // #129 CHANGED WHAT TWO OF THESE MEAN, so they are renamed rather than left
+    // to accumulate a new meaning under an old name. Both ring-full sites now
+    // REFUSE the byte (back-pressure -- the producer keeps it and retries)
+    // instead of dropping it, so counting them as "drops" would be a counter
+    // that is wrong in the most expensive way: read at 3am, believed, and
+    // pointing at data loss that did not happen.
+    //
+    //   rx_bp_raw    -- raw/cbreak arm, ring full: the byte was REFUSED. The
+    //                   UART holds it in the FIFO (or in the 1-byte holdback)
+    //                   and cons_feed_write returns a short count. Non-zero
+    //                   means back-pressure engaged, NOT that input was lost.
+    //   rx_bp_flush  -- cooked arm, an Enter whose line_len + 1 bytes did not
+    //                   fit: REFUSED with the line intact, retried on the next
+    //                   offer of the same terminator.
+    //   rx_drop_line -- cooked arm, a byte past CONS_LINE_MAX. STILL A REAL
+    //                   DROP, deliberately: the line buffer is a fixed bound, so
+    //                   back-pressuring here would wedge on a user who simply
+    //                   never presses Enter. Bounded, and the byte is un-echoed.
+    //   rx_drop_ring -- MUST STAY ZERO. cons_ring_push failed after the room
+    //                   check under this same lock said it would fit. That is
+    //                   an arithmetic disagreement between cons_ring_room() and
+    //                   the ring, i.e. the #129 fix itself is broken. It is not
+    //                   a diagnostic counter but an invariant WITNESS: it has no
+    //                   reachable driver by construction, and that is the claim
+    //                   it exists to falsify.
+    //
     // Counting is NOT a fix for any of them; it is what makes the next
     // occurrence decidable instead of unexplained.
-    u32         rx_drop_raw;
-    u32         rx_drop_flush;
+    u32         rx_bp_raw;
+    u32         rx_bp_flush;
     u32         rx_drop_line;
+    u32         rx_drop_ring;
 
     // #95: set by any drop site, drained by console_mgr, which emits ONE loud
     // line in process context (the intr/sak/pollwake deferred-relay pattern --
@@ -780,15 +815,44 @@ static bool cons_ring_push(u8 byte, bool *wake_mgr) {
     return true;
 }
 
-// #174: true iff the RX ring can accept at least one more byte. The PL011 drain
-// (uart_rx_handler / uart_rx_pump) checks this BEFORE reading a byte out of the
-// FIFO and pauses RX (leaving the byte in the FIFO -- no loss) instead of letting
-// cons_ring_push drop it. Lockless RELAXED-atomic read (see the cons_count_*
-// rationale): a stale value only shifts the pause boundary by one byte, never
-// corrupts (a stale "true" lets cons_ring_push do its existing one-byte drop; a
-// stale "false" pauses one byte early).
+// Free slots in the RX ring. Caller holds g_cons.lock, which is what makes this
+// EXACT rather than advisory -- #129's whole correctness argument is that the
+// room check and the push it authorizes happen in one lock hold, so no second
+// producer can consume the room in between. cons_rx_can_accept() below is the
+// lockless PRE-check; this is the decision.
+static u32 cons_ring_room(void) {
+    return CONS_RING_SIZE - cons_count_load();
+}
+
+// #174 / #129: the lockless PRE-check the PL011 drain runs BEFORE reading a byte
+// out of the FIFO -- on false it leaves the byte in the FIFO and masks RX rather
+// than pulling in a byte the ring cannot take.
+//
+// #129 makes it reserve the WORST-CASE COOKED FLUSH (CONS_LINE_MAX + 1), not one
+// byte. The one-byte form was the bug: it answered "is there room for this
+// byte?" when the question the drain is really asking is "is there room for
+// everything this byte will cause?", and in canonical mode a single admitted
+// byte can be the terminator that flushes an entire assembled line. That is the
+// same category error as #126 on the TX side -- a per-ITEM bound standing in for
+// a per-OPERATION bound -- and it reads as correct right up until the item and
+// the operation differ by 256x.
+//
+// Deliberately UNCONDITIONAL (it does not consult ICANON or line_len):
+//   - Reading line_len here would be a lockless read of a field another producer
+//     mutates, so a stale-low value would re-open exactly the hole being closed.
+//   - Gating on the CURRENT mode is not sound either: termios can flip between
+//     this check and the push, so a byte admitted under a raw-mode check can
+//     meet a cooked-mode flush. Reserving unconditionally is immune to both.
+// The cost is 257 slots of headroom, which is why CONS_RING_SIZE doubled: usable
+// depth before pausing stays 255 bytes, unchanged from the pre-#129 ring.
+//
+// This is now an OPTIMIZATION, not the correctness mechanism. It keeps the
+// common case off the refusal path; cons_rx_input's under-lock room check is
+// what actually guarantees no overrun, and the drain's 1-byte holdback is what
+// makes a refusal lossless. Being stale is therefore harmless in both
+// directions: stale-true costs one refusal-and-hold, stale-false pauses early.
 bool cons_rx_can_accept(void) {
-    return cons_count_load() < CONS_RING_SIZE;
+    return cons_count_load() + CONS_LINE_MAX + 1u <= CONS_RING_SIZE;
 }
 
 // #95: record ONE dropped input byte at `site` and arm console_mgr's deferred
@@ -815,8 +879,9 @@ static void cons_rx_note_drop(u32 *site, bool *wake_mgr) {
     }
 }
 
-void cons_rx_input(u8 byte, bool is_break) {
+bool cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
+    bool accepted = true;
     u8   echo[CONS_ECHO_MAX];
     int  necho = 0;
 
@@ -860,18 +925,31 @@ void cons_rx_input(u8 byte, bool is_break) {
                 // back over the prompt).
             } else if (byte == (u8)'\n') {            // terminator: deliver line + NL
                 // POSIX canonical: the read returns the line INCLUDING its
-                // terminating newline. Flush line[0..len) then the NL to the ring
-                // (the empty->non-empty poll-edge is handled inside cons_ring_push).
-                // #95: a short flush here is the one drop site #174's admission
-                // gate does NOT cover -- cons_rx_can_accept() cleared ONE byte,
-                // and this pushes line_len + 1.
-                for (u32 i = 0; i < g_cons.line_len; i++)
-                    if (cons_ring_push(g_cons.line[i], &wake_mgr)) wake_data = true;
-                    else cons_rx_note_drop(&g_cons.rx_drop_flush, &wake_mgr);
-                if (cons_ring_push((u8)'\n', &wake_mgr)) wake_data = true;
-                else cons_rx_note_drop(&g_cons.rx_drop_flush, &wake_mgr);
-                g_cons.line_len = 0u;
-                if (tio & CONS_ECHO) cons_echo_stage((u8)'\n', tio, echo, &necho);
+                // terminating newline, so this pushes line_len + 1 bytes in ONE
+                // call -- the largest atomic push the ring ever takes.
+                //
+                // #129: check room for the WHOLE flush before pushing any of it,
+                // under this lock. Pre-#129 this pushed until the ring filled and
+                // counted the remainder as dropped, and it dropped the TAIL --
+                // including the newline -- so the line silently became a
+                // different, shorter line with no terminator.
+                if (cons_ring_room() < g_cons.line_len + 1u) {
+                    // REFUSE, changing nothing: the line stays assembled, the
+                    // terminator is not consumed, nothing is echoed. The producer
+                    // holds this byte and re-offers it once the reader drains.
+                    // Leaving line_len intact is the load-bearing half -- zeroing
+                    // it here would destroy the line the refusal exists to save.
+                    g_cons.rx_bp_flush++;
+                    accepted = false;
+                } else {
+                    for (u32 i = 0; i < g_cons.line_len; i++)
+                        if (cons_ring_push(g_cons.line[i], &wake_mgr)) wake_data = true;
+                        else cons_rx_note_drop(&g_cons.rx_drop_ring, &wake_mgr);
+                    if (cons_ring_push((u8)'\n', &wake_mgr)) wake_data = true;
+                    else cons_rx_note_drop(&g_cons.rx_drop_ring, &wake_mgr);
+                    g_cons.line_len = 0u;
+                    if (tio & CONS_ECHO) cons_echo_stage((u8)'\n', tio, echo, &necho);
+                }
             } else {                                  // ordinary char: buffer it
                 if (g_cons.line_len < CONS_LINE_MAX) {
                     g_cons.line[g_cons.line_len++] = byte;
@@ -886,13 +964,18 @@ void cons_rx_input(u8 byte, bool is_break) {
             }
         } else {
             // Raw / cbreak mode: byte-at-a-time to the ring (the pre-LS-8b path).
-            // #95: one byte in, one byte pushed -- so #174's gate DOES cover the
-            // UART producer here. A count on this site therefore means the byte
-            // came from an UNGATED producer (cons_feed_write) or that the gate
-            // itself is broken; either way it is a finding, not noise.
-            if (cons_ring_push(byte, &wake_mgr)) wake_data = true;
-            else cons_rx_note_drop(&g_cons.rx_drop_raw, &wake_mgr);
-            if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
+            // #129: refuse rather than drop when the ring is full. The echo moves
+            // INSIDE the accepted branch -- echoing a refused byte would show the
+            // user a character the console did not take, and would then show it
+            // twice when the producer re-offers it.
+            if (cons_ring_room() == 0u) {
+                g_cons.rx_bp_raw++;
+                accepted = false;
+            } else {
+                if (cons_ring_push(byte, &wake_mgr)) wake_data = true;
+                else cons_rx_note_drop(&g_cons.rx_drop_ring, &wake_mgr);
+                if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
+            }
         }
     }
     spin_unlock_irqrestore(&g_cons.lock, s);
@@ -907,6 +990,7 @@ void cons_rx_input(u8 byte, bool is_break) {
     for (int i = 0; i < necho; i++) cons_emit(echo[i]);
     if (wake_data) wakeup(&g_cons_data_rendez);
     if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
+    return accepted;
 }
 
 // cond: the ring holds at least one byte. Runs under the Rendez lock (NOT
@@ -964,7 +1048,8 @@ static void cons_service_deferred(void) {
     // the emit below runs exactly once for the life of the boot no matter how
     // many further drops occur.
     bool do_drop_report = cons_dropreport_load();
-    u32  d_raw = g_cons.rx_drop_raw, d_flush = g_cons.rx_drop_flush, d_line = g_cons.rx_drop_line;
+    u32  d_line = g_cons.rx_drop_line, d_ring = g_cons.rx_drop_ring;
+    u32  b_raw = g_cons.rx_bp_raw, b_flush = g_cons.rx_bp_flush;
     cons_dropreport_store(false);
     if (do_drop_report) g_cons.drop_reported = true;
     spin_unlock_irqrestore(&g_cons.lock, s);
@@ -975,14 +1060,24 @@ static void cons_service_deferred(void) {
     // read /ctl/cons. cons_diag_* is the #126 non-blocking emitter (TX ring, no
     // spin, no sleep), and this runs with g_cons.lock RELEASED like every other
     // deferred action.
+    // #129: only a REAL loss arms this latch. The two ring-full sites now
+    // back-pressure, and back-pressure is normal operation on a busy console --
+    // reporting it would be a false alarm AND would spend the one-shot latch, so
+    // a genuine loss later in the same boot would print nothing. (That is the
+    // #95 lesson applied to the fix itself: an instrument disarmed by routine
+    // events is disarmed exactly when it matters.) The bp counts ride along in
+    // the line as context -- they say how hard the console was pushed when the
+    // loss happened -- but they never trigger it.
     if (do_drop_report) {
-        cons_diag_puts("cons: INPUT DROP (#95) raw=");
-        cons_diag_putdec(d_raw);
-        cons_diag_puts(" flush=");
-        cons_diag_putdec(d_flush);
-        cons_diag_puts(" line=");
+        cons_diag_puts("cons: INPUT DROP (#95) line=");
         cons_diag_putdec(d_line);
-        cons_diag_puts(" -- further drops counted silently at /ctl/cons\n");
+        cons_diag_puts(" ring=");
+        cons_diag_putdec(d_ring);
+        cons_diag_puts(" (bp raw=");
+        cons_diag_putdec(b_raw);
+        cons_diag_puts(" flush=");
+        cons_diag_putdec(b_flush);
+        cons_diag_puts(") -- further drops counted silently at /ctl/cons\n");
     }
 
     // RW-7 R2-F2 (round-2 F2): a SAK SUPERSEDES a Ctrl-C coalesced into the
@@ -1044,9 +1139,10 @@ void cons_test_reset(void) {
     g_cons.ws_cols = 0u;                        // #55: winsize back to unset
     g_cons.ws_rows = 0u;
     g_cons.winch_events = 0u;
-    g_cons.rx_drop_raw = 0u;                    // #95: drop counters + report latch
-    g_cons.rx_drop_flush = 0u;
+    g_cons.rx_bp_raw = 0u;                      // #95/#129: RX counters + report latch
+    g_cons.rx_bp_flush = 0u;
     g_cons.rx_drop_line = 0u;
+    g_cons.rx_drop_ring = 0u;
     cons_dropreport_store(false);
     g_cons.drop_reported = false;
     spin_unlock_irqrestore(&g_cons.lock, s);
@@ -1075,14 +1171,20 @@ void cons_tx_drops(u32 *dropped, u32 *room_waits) {
     spin_unlock_irqrestore(&g_cons_tx.lock, s);
 }
 
-// #95: the input-drop counts. Read under the lock -- they are written under it,
-// and a lockless read would be the C11 mixed-access race the F6 fix removed
+// #95/#129: the RX-path counts. Read under the lock -- they are written under
+// it, and a lockless read would be the C11 mixed-access race the F6 fix removed
 // elsewhere in this file. NULL args are skipped so a caller can ask for one.
-void cons_rx_drops(u32 *raw, u32 *flush, u32 *line) {
+//
+// RENAMED at #129 (was cons_rx_drops(raw, flush, line)) because two of the three
+// stopped meaning "dropped": the ring-full sites now back-pressure. Keeping the
+// old name would have left every caller, every doc, and every future reader
+// believing input was lost where it was merely deferred.
+void cons_rx_counters(u32 *bp_raw, u32 *bp_flush, u32 *drop_line, u32 *drop_ring) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    if (raw)   *raw   = g_cons.rx_drop_raw;
-    if (flush) *flush = g_cons.rx_drop_flush;
-    if (line)  *line  = g_cons.rx_drop_line;
+    if (bp_raw)    *bp_raw    = g_cons.rx_bp_raw;
+    if (bp_flush)  *bp_flush  = g_cons.rx_bp_flush;
+    if (drop_line) *drop_line = g_cons.rx_drop_line;
+    if (drop_ring) *drop_ring = g_cons.rx_drop_ring;
     spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
@@ -1481,13 +1583,40 @@ short cons_drain_poll(short events, struct poll_waiter *pw) {
 // elevation) can never fire the SAK. The graphical SAK is a KERNEL-scanned
 // trusted-tier keyboard combo (MENAGERIE section 7), a board-era surface;
 // on QEMU media the trusted path stays serial (TAPESTRY section 18.7).
+// #129: the feed is the SECOND producer into the RX ring, and until now the only
+// UNGATED one. #174 gave the PL011 drain proper back-pressure (check, then leave
+// the byte in the FIFO), but this path -- the graphical console's entire keyboard
+// -- just called cons_rx_input per byte unconditionally and returned n whatever
+// happened, so a full ring silently ate keystrokes and told the renderer they
+// had landed. The serial console had back-pressure; the framebuffer console had
+// a lie.
+//
+// Now it stops at the first refusal and returns a SHORT count. That is the
+// ordinary POSIX answer for a write to a device with a full buffer, so it needs
+// no new ABI and no renderer change beyond honoring the count it is already
+// contractually obliged to honor. Refusal leaves the console byte-for-byte
+// unchanged (see cons_rx_input), so the caller's retry re-offers the identical
+// byte and nothing is lost or duplicated.
+//
+// Returning 0 (the very first byte refused) is a legal short write, NOT an
+// error: a blocking writer loops, and the reader's drain frees room. It is
+// deliberately not -EAGAIN -- this Dev has no non-blocking contract to hang that
+// on, and an errno here would make the renderer treat back-pressure as failure.
 long cons_feed_write(const void *buf, long n) {
     if (!buf || n < 0) return -1;
     const u8 *bytes = (const u8 *)buf;
-    for (long i = 0; i < n; i++)
-        cons_rx_input(bytes[i], /*is_break=*/false);
-    return n;
+    long i = 0;
+    for (; i < n; i++)
+        if (!cons_rx_input(bytes[i], /*is_break=*/false)) break;
+    return i;
 }
+
+// #129-audit F2: the RX ring depth, NON-BLOCKING. A test cannot use cons_drain
+// (= devcons.read) to observe emptiness, because that PARKS on an empty ring --
+// so an assertion that should fail cleanly instead hangs the boot (the #133
+// class: a test's failure must not destroy the run). The TX ring has had
+// cons_test_tx_ring_count since #75; the RX side had nothing.
+u32 cons_test_rx_count(void) { return cons_count_load(); }
 
 u32 cons_test_drain_count(void)    { return drain_count_load(); }
 u32 cons_test_drain_overflow(void) {

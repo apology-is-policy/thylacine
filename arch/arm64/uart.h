@@ -133,6 +133,13 @@ void uart_tx_drain_sync(void);
 // QEMU PL011 int_level re-fire (the #172 wedge trap). Runs in process context.
 void uart_rx_pump(void);
 
+// #129-audit F2 (test-only): seed / inspect the 1-byte RX holdback and its
+// pause latch, so the lossless-refusal path is drivable without an SMP race.
+void uart_test_rx_force_hold(uint8_t b, bool brk);
+bool uart_test_rx_held(uint8_t *b, bool *brk);
+bool uart_test_rx_paused(void);
+bool uart_test_rx_release_hold(void);
+
 // Print an unsigned 64-bit integer in hexadecimal, prefixed with "0x" and
 // zero-padded to 16 hex digits (i.e. "0x0000000040080000"). Used for the
 // boot banner's address fields.

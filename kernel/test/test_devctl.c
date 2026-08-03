@@ -334,9 +334,14 @@ void test_devctl_read_cons_format(void) {
     char buf[512];
     long got = devctl.read(c, buf, sizeof buf, 0);
     TEST_ASSERT(got > 0, "cons read positive");
-    TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_raw:"),   "has rx_drop_raw:");
-    TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_flush:"), "has rx_drop_flush:");
+    // #129 renamed two of these: the ring-full sites now count BACK-PRESSURE,
+    // not loss. Asserting the new labels is what keeps this surface honest --
+    // had the labels been left alone, /ctl/cons would still say "rx_drop_raw"
+    // for an event where nothing was dropped.
+    TEST_ASSERT(contains(buf, (size_t)got, "rx_bp_raw:"),     "has rx_bp_raw:");
+    TEST_ASSERT(contains(buf, (size_t)got, "rx_bp_flush:"),   "has rx_bp_flush:");
     TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_line:"),  "has rx_drop_line:");
+    TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_ring:"),  "has rx_drop_ring:");
     TEST_ASSERT(contains(buf, (size_t)got, "tx_dropped:"),    "has tx_dropped:");
     TEST_ASSERT(contains(buf, (size_t)got, "tx_room_waits:"), "has tx_room_waits:");
 
