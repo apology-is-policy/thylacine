@@ -170,16 +170,74 @@ the site is racy again with nothing to show for it — indistinguishable from a 
 run by any pass/fail signal. `test_run_all` therefore emits
 
 ```
-    [test] yield-waits: 65 invoked, 63 actually waited, 0 needed >1 yield
+    [test] yield-waits: 135 invoked, 92 actually waited, 3 needed >1 yield, 0 child-Proc expiries
 ```
 
 `spun` proves the guards are live rather than short-circuiting. `deep` is the sharp
 one: the loop tests its condition *before* the first `sched()`, so `spun` counts
 anything taking even one yield — exactly what the bare `sched()` it replaced already
 did. Only a wait needing a **second** yield did work the old form structurally could
-not. As measured, `deep` is 0 on an unloaded host at smp4 and smp8; the witnesses
-were 1-in-10 *under gate load*, so absence there is expected and is **not** evidence
-the race is absent — only that this run did not exercise it.
+not. Before `#134`, `deep` was 0 on an unloaded host at smp4 and smp8; the
+witnesses were 1-in-10 *under gate load*, so absence there is expected and is
+**not** evidence the race is absent — only that this run did not exercise it.
+
+Since `#134` it reads ~3, and that number must not be over-read. The sites it
+converted include child-Proc thunks that wait on a release gate the parent test
+holds deliberately for the duration of a handshake — those need many yields *by
+design*, so a non-zero `deep` now means "some bounded wait genuinely waited more
+than once", not "the peer-not-yet-dispatched race was observed". The original
+reading of `deep` still applies only to the test-thread sites it was written for.
+
+**A third shape, which needs a different macro rather than exclusion: a wait
+inside a child-Proc entry thunk (`TEST_YIELD_UNTIL_PROC`, #134).** Roughly a
+third of the suite's hand-rolled waits do not run on the test thread at all —
+they sit in `*_entry` / `*_thunk` functions that `rfork` runs in another Proc.
+`TEST_ASSERT` is wrong there in two independent ways, each worse than the
+unbounded spin:
+
+- It expands to `test_fail(msg); return;`, and returning from a Proc entry lands
+  on `thread_trampoline`'s `1: wfe / b 1b` (`arch/arm64/context.S`) — an entry
+  that returns without `exits()` is a kernel-thread bug and the trampoline halts
+  it permanently. The thunk's Proc then never exits, so the parent's `wait_pid`
+  never returns either: one stuck handshake becomes two parked threads, where the
+  `sched()` spin at least kept yielding.
+- `test_fail` writes `current_test->failed` / `->fail_msg`, which belong to the
+  runner on the boot thread. A child Proc writing them races the runner, and a
+  child that expires after the runner moved on reddens whatever test is running
+  *then*.
+
+So the thunk form terminates its own Proc instead: it records the condition in a
+global and `exits("test-wait-timeout")`. The runner reports it on the right
+thread and fails the **suite** (`test_all_passed`), deliberately *without*
+blaming `current_test`. That last part was measured, not assumed — sabotaging one
+wait failed its test, which returned early and so never released its own spinner
+thunks, which expired 2 s later while the runner was two tests further on. The
+first draft blamed `current_test` and reddened an innocent bystander: the
+`#136`-F2 shape, a diagnostic reaching into state it does not own. A wrong
+accusation is worse than none, because the genuine failure is already red on its
+own; the named condition identifies the owner exactly for a human reader.
+
+A fourth form exists for one local reason: `test_proc.c`'s two orphan-reparent
+tests use `OTI_CHECK` (`test_fail(); goto fail;`) because they own an explicit
+`fail:` block that restores the test-init pointer and releases the gates so
+helper thunks exit rather than spin. A bare `TEST_YIELD_UNTIL` would `return`
+past that cleanup, so those sites use `OTI_YIELD_UNTIL`, which routes an expiry
+through the same cleanup every other failure in those tests uses. The general
+lesson is that the macro has to match the enclosing function's *failure
+convention*, not just its wait shape.
+
+**On censusing this.** The `#134` census found 27 sites where the task that filed
+it had found 13, and three whole files it never named. Three successive censuses
+each missed a different subset, all for the same reason — the filter was built
+from the shape its author already had in mind. `#92`'s caught single-line waits
+and missed multi-line conditions; `#134`'s caught multi-line and missed
+single-line; the replacement then treated `< N` as evidence of a bound, silently
+dropping every `while (g_torpor_done < 2u) sched();` — a *peer progress counter*,
+not an iteration bound. The discriminator that survives: a bound is a deadline
+(`timer_now_ns`) or a counter the loop itself increments (`spins++ <`), never any
+`<`. A census needs a positive control containing one specimen of every shape it
+claims to catch **and** negatives it must not flag, run before the census is
+believed.
 
 Fail-closed proven by revert-probe: one condition made unsatisfiable →
 `1232/1233 FAIL` in 3 s, message naming the condition, suite completing normally.

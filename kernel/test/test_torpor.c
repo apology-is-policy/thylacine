@@ -260,9 +260,9 @@ void test_torpor_wait_value_mismatch_fast_path(void) {
     // reads 0), 0 != 0xDEADBEEF → fast path returns 0 without sleeping.
     // SMP (#20): ready() may place the consumer on a peer CPU's runqueue,
     // so one local sched() does not guarantee it ran — yield until it
-    // completes (the test_thread_spawn.c spin-until idiom; the harness
-    // boot timeout is the backstop).
-    while (g_torpor_done < 2u) sched();
+    // completes. Bounded (#134): an unbounded spin here hangs the boot with
+    // no message if the consumer never completes.
+    TEST_YIELD_UNTIL(g_torpor_done >= 2u);
 
     TEST_EXPECT_EQ(g_torpor_done, 2u,
         "consumer must have completed (no sleep)");
@@ -297,7 +297,7 @@ void test_torpor_wait_timeout_zero_returns_etimedout(void) {
 
     // SMP (#20): yield until the consumer completes — see
     // wait_value_mismatch_fast_path.
-    while (g_torpor_done < 2u) sched();
+    TEST_YIELD_UNTIL(g_torpor_done >= 2u);
 
     TEST_EXPECT_EQ(g_torpor_done, 2u,
         "consumer must have completed (no real sleep)");
@@ -338,9 +338,8 @@ void test_torpor_wait_wake_handoff(void) {
     // SLEEPING. SMP (#20): it may run on a peer CPU — yield until it is
     // observably SLEEPING (registration precedes the SLEEPING
     // transition, so SLEEPING implies registered).
-    while (__atomic_load_n(&consumer->state, __ATOMIC_ACQUIRE)
-               != THREAD_SLEEPING)
-        sched();
+    TEST_YIELD_UNTIL(__atomic_load_n(&consumer->state, __ATOMIC_ACQUIRE)
+                         == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_torpor_done, 1u,
         "consumer must have run once before sleeping");
@@ -357,7 +356,7 @@ void test_torpor_wait_wake_handoff(void) {
     // consumer increments to 2 and parks. SMP (#20): it may resume on a
     // peer CPU, so a RUNNABLE point-check here is unsound (it can
     // already be RUNNING or parked) — completion is the sound witness.
-    while (g_torpor_done < 2u) sched();
+    TEST_YIELD_UNTIL(g_torpor_done >= 2u);
 
     TEST_EXPECT_EQ(g_torpor_done, 2u,
         "consumer must have completed wait and parked");
@@ -438,11 +437,10 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     // until both are observably SLEEPING — registration precedes the
     // SLEEPING transition, so this also guarantees both are in the
     // bucket before the first WAKE (wake1 == 1 stays deterministic).
-    while (__atomic_load_n(&ca->state, __ATOMIC_ACQUIRE)
-               != THREAD_SLEEPING ||
-           __atomic_load_n(&cb->state, __ATOMIC_ACQUIRE)
-               != THREAD_SLEEPING)
-        sched();
+    TEST_YIELD_UNTIL(__atomic_load_n(&ca->state, __ATOMIC_ACQUIRE)
+                         == THREAD_SLEEPING &&
+                     __atomic_load_n(&cb->state, __ATOMIC_ACQUIRE)
+                         == THREAD_SLEEPING);
 
     TEST_EXPECT_EQ(g_torpor_done_a, 1u, "consumer A reached pre-wait");
     TEST_EXPECT_EQ(g_torpor_done_b, 1u, "consumer B reached pre-wait");
@@ -460,7 +458,8 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(wake1, (s64)1,
         "first WAKE(count=1) reports exactly one woken");
 
-    while (g_torpor_done_a < 2u && g_torpor_done_b < 2u) sched();
+    // De Morgan: `while (a < 2 && b < 2)` waits until EITHER completes.
+    TEST_YIELD_UNTIL(g_torpor_done_a >= 2u || g_torpor_done_b >= 2u);
 
     int a_woke_first = (g_torpor_done_a == 2u);
     TEST_ASSERT((g_torpor_done_a == 2u) != (g_torpor_done_b == 2u),
@@ -483,8 +482,9 @@ void test_torpor_wake_two_waiters_count_bound(void) {
     TEST_EXPECT_EQ(wake2, (s64)1,
         "second WAKE(count=1) reports exactly one woken");
 
-    // SMP (#20): yield until both have completed.
-    while (g_torpor_done_a < 2u || g_torpor_done_b < 2u) sched();
+    // SMP (#20): yield until both have completed. De Morgan: `while (a < 2 ||
+    // b < 2)` waits until BOTH are done -- the opposite of the wait above.
+    TEST_YIELD_UNTIL(g_torpor_done_a >= 2u && g_torpor_done_b >= 2u);
 
     TEST_EXPECT_EQ(g_torpor_rc_a, (s64)TORPOR_OK, "A returned OK overall");
     TEST_EXPECT_EQ(g_torpor_rc_b, (s64)TORPOR_OK, "B returned OK overall");
