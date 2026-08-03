@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**248 owned · 173 unowned · 421 files (58% owned) · ~53386 unswept lines.**
+**254 owned · 167 unowned · 421 files (60% owned) · ~50012 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -65,13 +65,13 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 |---|---:|---:|---:|
 | usr/coreutils | 0 | 60 | 8763 |
 | usr/lib | 23 | 18 | 8694 |
-| usr/nora | 4 | 9 | 5660 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
 | usr/ports | 0 | 10 | 2865 |
 | kernel | 110 | 22 | 2863 |
+| usr/nora | 10 | 3 | 2286 |
 | usr/prowl | 0 | 3 | 1253 |
 | usr/virtio-gpu | 0 | 1 | 955 |
 | usr/virtio-blk-rw | 0 | 1 | 885 |
@@ -106,7 +106,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 |---|---:|
 | usr/corvus/src/main.rs | 4245 |
 | usr/diorama/src/server.rs | 2803 |
-| usr/nora/src/view.rs | 2043 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
@@ -133,7 +132,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/prowl/src/main.rs | 490 |
 | arch/arm64/uart.c | 480 |
 | usr/coreutils/src/bin/ls.rs | 473 |
-| usr/nora/src/syntax.rs | 460 |
 | usr/coreutils/src/bin/sort.rs | 453 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/coreutils/src/netpump.rs | 450 |
@@ -160,15 +158,12 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/pelt.rs | 254 |
 | usr/lib/libdriver/src/supervise.rs | 251 |
 | usr/lib/netdev/src/ring.rs | 244 |
-| usr/nora/src/theme.rs | 244 |
 | usr/lib/libdriver/src/driver.rs | 242 |
 | usr/ptyhost/src/main.rs | 236 |
 | usr/lib/libdriver/src/dtb.rs | 234 |
 | kernel/include/thylacine/smp.h | 233 |
 | usr/coreutils/src/bin/ns.rs | 233 |
 | usr/coreutils/src/bin/cp.rs | 230 |
-| usr/nora/src/vartree.rs | 230 |
-| usr/nora/src/diag.rs | 226 |
 | usr/coreutils/src/bin/nc.rs | 224 |
 | usr/coreutils/src/bin/ping.rs | 224 |
 | usr/curl/src/bin/curl.rs | 224 |
@@ -190,7 +185,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/ipconfig.rs | 178 |
 | usr/coreutils/src/bin/dial.rs | 177 |
 | usr/coreutils/src/bin/chmod.rs | 171 |
-| usr/nora/src/debug.rs | 171 |
 | usr/coreutils/src/bin/uniq.rs | 163 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | usr/coreutils/src/bin/wc.rs | 162 |

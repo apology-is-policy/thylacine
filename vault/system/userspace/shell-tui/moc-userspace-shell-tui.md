@@ -62,6 +62,11 @@ visible. In particular, two failure modes are worth not conflating:
   renderer share. The layer that can neither act nor fail — every effect is
   raised as a request for someone else to perform, and every out-of-range input
   clamps rather than erroring.
+- [[sub-nora-view]] — what reaches the screen: the renderer, and the five
+  display models it draws from. Each is defined by what it refuses to know — no
+  terminal, no LSP, no DAP, no grammar — and the one refusal that costs
+  something, the screen's geometry, is paid for by exporting the calculation so
+  the scroller cannot hold a second copy of it.
 
 ## Cross-cutting
 
