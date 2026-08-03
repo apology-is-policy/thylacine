@@ -365,7 +365,20 @@ int weft_share_unregister(struct Proc *owner, u64 share_id) {
     }
     spin_unlock(&g_weft_lock);
     if (!victim) return -1;    // already claimed / GC'd / forged / not yours
-    burrow_unref(victim);      // the registration pin: removal-before-free (R2-F5)
+    // #131: the registration pin is the LAST claim the sharer can hold on a
+    // never-claimed region (it shared, then detached its own mapping, and the
+    // pin is what kept the pages alive). If dropping it frees them, this is
+    // where the sharer's I-32 charge is settled -- nothing downstream can do
+    // it, because there IS no downstream. If it does not free, the sharer still
+    // maps the region and its own detach will settle instead (that detach sees
+    // freed == true once this pin is gone), so put the claim back.
+    // Removal-before-free (R2-F5) is unchanged: the entry is already unlinked.
+    u32 paid = burrow_charge_claim(victim, owner);
+    if (burrow_unref_freed(victim)) {
+        if (paid) proc_page_uncharge(owner, paid);
+    } else if (paid) {
+        burrow_charge_restore(victim, owner, paid);
+    }
     return 0;
 }
 
@@ -401,7 +414,20 @@ void weft_share_release_owner(struct Proc *owner) {
         }
     }
     spin_unlock(&g_weft_lock);
-    for (u32 i = 0; i < n; i++) burrow_unref(orphans[i]);
+    // #131: settle the sharer's charge on the same terms as the explicit
+    // unregister above. Moot for the counter itself -- this Proc is being torn
+    // down -- but it keeps "page_count == the sum of the regions this Proc is
+    // still charged for" true on every path, which is what makes the accounting
+    // auditable at an arbitrary instant rather than only at quiescence (the
+    // same reason vma_drain uncharges the shared-in axis for a dying Proc).
+    for (u32 i = 0; i < n; i++) {
+        u32 paid = burrow_charge_claim(orphans[i], owner);
+        if (burrow_unref_freed(orphans[i])) {
+            if (paid) proc_page_uncharge(owner, paid);
+        } else if (paid) {
+            burrow_charge_restore(orphans[i], owner, paid);
+        }
+    }
 }
 
 struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,

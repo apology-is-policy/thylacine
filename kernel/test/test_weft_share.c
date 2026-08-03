@@ -60,6 +60,9 @@ extern void proc_test_unlink(struct Proc *p);
 // Non-static syscall inner (kernel/syscall.c). ring_va (x0), ring_size (x1).
 s64 sys_weft_share_for_proc(struct Proc *p, u64 ring_va, u64 ring_size_raw);
 s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
+s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
+
+void test_weft_sharer_charge_released_at_detach(void);
 
 #define WEFT_TEST_VA 0x12000000ull
 
@@ -827,4 +830,83 @@ void test_weft_reap_close_unregisters(void) {
     proc_test_unlink(client);
     drop_proc(server);
     drop_proc(client);
+}
+
+// ---------------------------------------------------------------------------
+// weft.sharer_charge_released_at_detach (#131)
+//
+// The sharer's I-32 charge is settled when the SHARER walks away, not when the
+// pages free -- because those are different moments and only the first one is
+// reachable from a Proc that can name the payer.
+//
+// The live shape: netd allocates a flow ring (charged to netd), shares it into
+// the guest, and detaches its own mapping at flow close (slot_unref) while the
+// guest's mapping and the binding pin live on. The LAST drop is then the
+// guest's teardown -- generic vma code, in another Proc, holding that Proc's
+// vma_lock, with no way to name netd. Under the pre-#131 `freed`-only rule
+// nothing settled the charge at all, and netd leaked a ring per closed
+// zero-copy flow.
+//
+// The assertion that discriminates: after the sharer's detach the charge is
+// back to baseline WHILE THE REGION IS STILL ALIVE. A rule that waits for
+// `freed` cannot produce that state.
+// ---------------------------------------------------------------------------
+void test_weft_sharer_charge_released_at_detach(void) {
+    struct Proc *sharer = make_proc();
+    struct Proc *client = make_proc();
+    TEST_ASSERT(sharer != NULL && client != NULL, "proc_alloc failed");
+
+    // Distinct pids: proc_alloc stamps 0 (rfork_internal assigns the real one),
+    // and the charge record is keyed by pid, so leaving both at 0 would let the
+    // client match the sharer's record by coincidence rather than by identity.
+    sharer->pid = 90011;
+    client->pid = 90012;
+
+    u32 base  = __atomic_load_n(&sharer->page_count, __ATOMIC_ACQUIRE);
+    u32 cbase = __atomic_load_n(&client->page_count, __ATOMIC_ACQUIRE);
+
+    s64 va = sys_burrow_attach_for_proc(sharer, PAGE_SIZE);
+    TEST_ASSERT(va > 0, "the sharer attaches a ring page");
+    u32 pages = (u32)burrow_backing_pages(PAGE_SIZE);
+    TEST_ASSERT(pages > 0, "the ring occupies at least one page");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&sharer->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base + pages), "the attach charged the sharer");
+
+    spin_lock(&sharer->vma_lock);
+    struct Vma *sv = vma_lookup(sharer, (u64)va);
+    struct Burrow *v = sv ? sv->burrow : NULL;
+    spin_unlock(&sharer->vma_lock);
+    TEST_ASSERT(v != NULL, "the ring's Burrow");
+
+    // The guest maps it (the SYS_WEFT_MAP half). page_count is deliberately NOT
+    // charged to the client -- its cross-Proc pin rides the shared_map_pages
+    // axis instead -- which is exactly why the client can never settle this.
+    spin_lock(&client->vma_lock);
+    TEST_EXPECT_EQ(burrow_share_into(client, v, WEFT_TEST_VA, VMA_PROT_RW), 0,
+        "share the ring into the client");
+    spin_unlock(&client->vma_lock);
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&client->page_count, __ATOMIC_ACQUIRE),
+                   (u64)cbase, "a share does not charge the client's page_count");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 2, "sharer + client mappings");
+
+    // Flow close: the sharer drops its own mapping. The pages do NOT free here.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(sharer, (u64)va, PAGE_SIZE), 0L,
+        "the sharer detaches its own ring mapping");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 1, "the client still maps the ring");
+    TEST_EXPECT_EQ((u64)burrow_get_size(v), (u64)PAGE_SIZE,
+        "the region is still alive -- so `freed` was false here");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&sharer->page_count, __ATOMIC_ACQUIRE),
+                   (u64)base,
+                   "the sharer's charge is released when the SHARER walks away");
+
+    // The client's teardown frees the pages and refunds nobody: it never paid,
+    // and the sharer's record was already claimed, so there is no second refund.
+    vma_drain(client);
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&sharer->page_count, __ATOMIC_ACQUIRE),
+                   (u64)base, "the client's teardown did not double-refund the sharer");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&client->page_count, __ATOMIC_ACQUIRE),
+                   (u64)cbase, "the client was never charged, so never refunded");
+
+    drop_proc(client);
+    drop_proc(sharer);
 }

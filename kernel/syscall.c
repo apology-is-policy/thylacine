@@ -4119,6 +4119,12 @@ s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
         spin_unlock(&p->vma_lock);
         return -1;
     }
+    // #131/#132: stamp the payer BEFORE dropping the construction handle, so
+    // the record exists for every path that can later settle this region --
+    // including one in another Proc, after this one has walked away. Recorded
+    // only on success: the failure paths above uncharge directly and free the
+    // Burrow, so there is nothing left to attribute.
+    burrow_charge_record(b, p, npages);
     burrow_unref(b);
 
     spin_unlock(&p->vma_lock);
@@ -4242,14 +4248,48 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // Both directions come from treating "the mapping went away" as if it were
     // "the pages went away". They are separate events; only the drop itself
     // knows which one happened.
+    //
+    // #131 amends the eager arm: `freed` is a SUFFICIENT release condition (if
+    // nothing at all still holds the region, this Proc certainly does not), but
+    // it is not a NECESSARY one. When the region survives because it was shared
+    // into another Proc, this Proc has walked away from pages it can no longer
+    // reach -- charging it for them caps it for nothing, and nothing downstream
+    // can settle the charge either, because the last drop is then the CONSUMER's
+    // vma_drain: generic code, in another Proc, holding that Proc's vma_lock,
+    // with no way to name the payer. That is the shape netd hits on every closed
+    // zero-copy flow (it detaches its ring at slot_unref while the guest's
+    // mapping and the binding pin live on), and it leaked 64 pages a flow.
+    //
+    // shared_out is the discriminator, and it must be shared_out rather than
+    // "does anything else still hold this": the Proc's OWN other claim (a Loom
+    // registered-buffer pin on its own buffer) also keeps the region alive, and
+    // there the charge must STAY until that claim drops.
+    // `paid` replaces the old eager_anon boolean outright: a nonzero claim IS
+    // "this Proc is the recorded payer for this eager region", which is strictly
+    // narrower than "this is an eager ANON VMA". An eager ANON region that was
+    // never charged (nothing recorded a payer) now refunds nothing instead of
+    // the recomputed occupancy -- the #122 rule, enforced by attribution rather
+    // than by enumerating shapes.
     u32 lazy_uncharge = 0;
-    bool eager_anon   = false;
+    bool shared_out   = false;
+    u32  paid         = 0;
+    // Snapshot the BURROW pointer, not the VMA: burrow_unmap_reporting frees the
+    // Vma struct, so `dvma` is dangling the moment it returns. The Burrow itself
+    // survives whenever the drop did not free it -- which is exactly the case
+    // where anything below still needs it.
+    struct Burrow *dv = NULL;
     if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
         !(dvma->flags & VMA_FLAG_SHARED_IN)) {
-        if (dvma->burrow->type == BURROW_TYPE_ANON_LAZY)
-            lazy_uncharge = burrow_lazy_resident_count(dvma->burrow);
-        else if (dvma->burrow->type == BURROW_TYPE_ANON)
-            eager_anon = true;
+        dv = dvma->burrow;
+        if (dv->type == BURROW_TYPE_ANON_LAZY)
+            lazy_uncharge = burrow_lazy_resident_count(dv);
+        else if (dv->type == BURROW_TYPE_ANON) {
+            shared_out = burrow_is_shared_out(dv);
+            // Claim BEFORE the drop: a freeing drop takes the record with it.
+            // Returns 0 unless this Proc is the recorded payer -- which is what
+            // keeps a consumer from ever refunding the sharer's charge.
+            paid = burrow_charge_claim(dv, p);
+        }
     }
 
     // burrow_unmap exact-matches [vaddr, vaddr + length) against an
@@ -4260,20 +4300,21 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed);
     if (rc == 0 && lazy_uncharge)
         proc_page_uncharge(p, lazy_uncharge);
-    if (rc == 0 && eager_anon && freed)
-        // #106: mirror the attach charge exactly -- the buddy-rounded
-        // occupancy, from the same `length` the charge was computed from.
-        // burrow_unmap exact-matches the VMA, so a successful detach has
-        // length == the attach length and the two agree by construction.
-        //
-        // The u32 cast: `length` is user-supplied and only bounded here by the
-        // burrow window (~64 TiB), so in isolation it could truncate. It cannot
-        // in practice -- every eager ANON VMA reachable here was installed by
-        // SYS_BURROW_ATTACH (<= BURROW_ATTACH_MAX, 65536 pages) or the Loom
-        // ring (< 1 MiB) -- and it could not matter anyway: the value is used
-        // only under `rc == 0`, i.e. only after burrow_unmap has exact-matched
-        // one of those VMAs.
-        proc_page_uncharge(p, (u32)burrow_backing_pages(length));
+    if (paid) {
+        // The refund is the RECORDED charge, not a recomputation: the record is
+        // what the attach actually billed, so the two cannot drift even if this
+        // path's view of `length` ever did.
+        if (rc == 0 && (freed || shared_out))
+            proc_page_uncharge(p, paid);
+        else
+            // Either the detach failed (nothing dropped) or the region survives
+            // on one of THIS Proc's own remaining claims -- a Loom registered
+            // buffer being the only one that exists. Put the claim back so that
+            // claim's own drop settles it. `dv` is live in both cases:
+            // !freed means something still holds it, and rc != 0 means nothing
+            // was dropped at all.
+            burrow_charge_restore(dv, p, paid);
+    }
     spin_unlock(&p->vma_lock);
 
     return (s64)rc;
@@ -4560,6 +4601,13 @@ s64 sys_jit_create_region(struct Proc *p, u64 length_raw,
     // (handle_count 0, mapping_count 2). The #847 dual count frees the pages
     // only when BOTH aliases are gone -- which is exactly the lifetime a
     // dual-mapped region needs, with no new refcount to get wrong.
+    //
+    // #131/#132: record the payer first. A CODE Burrow can reach neither of the
+    // paths that made attribution load-bearing (burrow_share_into admits only
+    // ANON + the weave DMA subtype; loom_resolve_buf admits only ANON), so this
+    // region is settled by destroy or by exit and by nobody else -- but the
+    // record costs one store and means no settler anywhere has to KNOW that.
+    burrow_charge_record(b, p, npages);
     burrow_unref(b);
     spin_unlock(&p->vma_lock);
 
@@ -4684,10 +4732,29 @@ s64 sys_jit_destroy_for_proc(struct Proc *p, u64 writer_va) {
     // means that at no instant does an executable view of the region outlive
     // its writable partner, which keeps the "code is reachable only as a
     // complete region" reading true even mid-teardown.
+    // #131/#132: claim the charge BEFORE the unmaps -- the record lives on the
+    // Burrow, and a successful pair of unmaps frees it, so there is nothing to
+    // read afterwards. Claiming is what makes the refund exactly-once; `npages`
+    // above is kept only as the cross-check that the recomputation still agrees
+    // with what was actually charged.
+    // Snapshot the Burrow: both burrow_unmaps below free their Vma structs, so
+    // `w` and `x` are dangling the moment the second one returns.
+    struct Burrow *wb = w->burrow;
+    u32 paid = burrow_charge_claim(wb, p);
+    if (paid != 0 && paid != npages)
+        extinction("SYS_JIT_DESTROY: charge record disagrees with the region's page count");
+
     int rc_x = burrow_unmap(p, exec_va, length);
     int rc_w = burrow_unmap(p, writer_va, length);
-    if (rc_x == 0 && rc_w == 0)
-        proc_page_uncharge(p, npages);
+    if (rc_x == 0 && rc_w == 0) {
+        if (paid) proc_page_uncharge(p, paid);
+    } else if (paid) {
+        // Neither alias was fully torn down, so the region -- and the charge
+        // that belongs to it -- survives. Put the claim back for the retry or
+        // for exit to settle. `wb` is still live: a partial teardown by
+        // definition left a mapping holding it.
+        burrow_charge_restore(wb, p, paid);
+    }
     spin_unlock(&p->vma_lock);
 
     return (rc_x == 0 && rc_w == 0) ? 0 : -T_E_INVAL;
@@ -5138,6 +5205,11 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     l->owner      = p;
     l->owner_pid  = p->pid;
     l->ring_pages = ring_pages;
+    // #131/#132: and stamp the payer on the ring itself, so loom_free settles
+    // by CLAIM rather than by trusting ring_pages. That makes the ring's refund
+    // exactly-once against the ring VA's detach (which claims the same record)
+    // instead of resting on the argument that the two can never both free it.
+    burrow_charge_record(l->ring, p, ring_pages);
 
     out->flags         = flags;   // echo the granted setup flags (LOOM_SETUP_SQPOLL)
     out->sq_entries    = l->sq_entries;

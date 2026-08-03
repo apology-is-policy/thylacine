@@ -207,6 +207,34 @@ struct Burrow {
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
     u32               file_qid_vers;// FILE: cache key — backing qid.vers (coherence token)
     struct page     **filepages;    // FILE / ANON_LAZY: sparse [page_count]; slot NULL until faulted in
+
+    // #131/#132: WHO PAID the I-32 page_count for this region, and how much.
+    // A Burrow's `type` tells you the region's SHAPE; it has never told you who
+    // paid, and every refund site before this recorded field had to INFER the
+    // payer from the shape it happened to be looking at. That inference is what
+    // #122 got wrong at the detach path (refunding a SHARED_IN mapping nobody
+    // paid for) and what #132 got wrong again at the two Loom refunds -- where
+    // "p owns the Loom" was silently read as "p paid for the buffer", though a
+    // registered buffer may be a weft ring NETD paid for (the shipped Weft-6c-1
+    // path). Recording the payer makes a refund ATTRIBUTED instead of inferred,
+    // so a new refund site is safe by construction rather than by remembering.
+    //
+    // charge_pid is the payer's pid (never a pointer: the payer can die while
+    // the region lives on in a consumer, and a raw pointer would dangle);
+    // 0 means unpaid or already released. Both are under `lock`, and the
+    // release is a CLAIM (read-and-clear) so exactly one caller ever refunds.
+    int              charge_pid;    // paying Proc's pid; 0 == unpaid / released
+    u32              charge_pages;  // what it paid (buddy-rounded, the alloc's own count)
+
+    // #131: set once by burrow_share_into -- this region has been mapped into
+    // a SECOND Proc. Monotonic (a region is never un-shared in a way that
+    // returns the charge to the sharer). It is the discriminator the sharer's
+    // own detach needs: when the sharer unmaps and the region survives, this
+    // says whether the survivor is somebody ELSE (release the charge -- the
+    // sharer can no longer reach the pages) or the sharer's OWN other claim,
+    // e.g. a Loom registered-buffer pin (keep it -- that claim's own drop
+    // refunds). Read under `lock`.
+    bool             shared_out;
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -404,6 +432,36 @@ void burrow_release_mapping(struct Burrow *v);
 // have no charge to settle.
 bool burrow_unref_freed(struct Burrow *v);
 bool burrow_release_mapping_freed(struct Burrow *v);
+
+// #131/#132: the I-32 charge record -- WHO paid, so a refund is attributed
+// instead of inferred from the region's shape (see struct Burrow above).
+//
+// burrow_charge_record: stamp the payer at the eager charge. Called by each
+// site that succeeds a proc_page_charge for a whole region (SYS_BURROW_ATTACH,
+// SYS_JIT_CREATE, SYS_LOOM_SETUP's ring).
+//
+// burrow_charge_claim: read-and-CLEAR p's charge record, returning the pages it
+// paid (0 if p is not the recorded payer, or the charge was already claimed).
+// The clear is what makes a refund exactly-once: two paths racing to settle the
+// same region cannot both win, so the counter can never be refunded twice --
+// the direction that would inflate a Proc's effective budget.
+//
+// burrow_charge_restore: put back a claim the caller decided NOT to settle.
+// Callers claim BEFORE the drop (the record dies with the Burrow, so it cannot
+// be read after) and restore when the drop turns out not to end the payer's
+// involvement. A concurrent settler that saw the momentarily-cleared record
+// simply skips -- so the failure mode of that window is a charge that outlives
+// its region until the payer's next release point (benign: an over-charge on
+// the payer, never a refund to a Proc that did not pay).
+void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages);
+u32  burrow_charge_claim(struct Burrow *v, const struct Proc *p);
+void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages);
+
+// burrow_is_shared_out: has this region been mapped into a SECOND Proc?
+// The discriminator the sharer's own detach needs -- see the field comment on
+// struct Burrow. Monotonic once set, so a read is never stale in the direction
+// that matters (false -> true only ever ADDS a reason to release).
+bool burrow_is_shared_out(const struct Burrow *v);
 
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
