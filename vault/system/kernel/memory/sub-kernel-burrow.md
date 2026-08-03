@@ -9,7 +9,7 @@ guarded-by: [inv-i7, inv-i32]
 validated-by: [spec-burrow, gate-smp]
 locks: [lock-burrow]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Purpose
 
@@ -45,6 +45,11 @@ the lifecycle can be exercised in isolation against the model.
 
 **Mapping** is `burrow_map(p, v, vaddr, length, prot)` / `burrow_unmap`, which
 install and remove a VMA and take the mapping ref as a side effect.
+`burrow_unmap_reporting` is that same removal with one extra out-parameter:
+whether *this* unmap was the drop that freed the pages. It exists because no
+caller can compute that beforehand — the Burrow's type does not say it, and a
+handle count sampled before the drop answers a different question — so the
+operation has to report its own effect. Resource accounting is its only caller.
 `burrow_share_into(dst, v, vaddr, prot)` is the cross-Proc form.
 `burrow_decommit` releases resident pages of a lazy region without unmapping it.
 

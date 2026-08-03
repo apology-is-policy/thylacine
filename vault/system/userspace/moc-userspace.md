@@ -4,7 +4,7 @@ type: moc
 title: "Userspace"
 parent: home
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-03
 ---
 The native + ported userspace tree: the boot chain (joey, corvus, login,
 warden), the services (netd, stratumd-facing proxies, ptyfs, tapestryd),
@@ -17,6 +17,11 @@ dossiers.
 
 - [[moc-userspace-netd]] — the network daemon (the first userspace area;
   other area MOCs land with the per-subsystem sweep).
+- [[moc-userspace-runtime]] — the libraries a native program links rather
+  than the programs themselves. Not a privilege boundary, which is what
+  makes its notes read differently: they describe discipline a library
+  applied on its own initiative, and the failure mode of a plane where
+  a wrong claim costs nothing until someone reads it.
 
 ## Services
 

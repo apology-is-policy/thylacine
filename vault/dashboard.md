@@ -128,9 +128,9 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-03 [[chg-2026-08-03-coverage-reconciliation]] — the coverage reconciliation -- the sweep is 31%, and the completeness criterion was the defect this arc keeps finding
 - 2026-08-03 [[chg-2026-08-03-crash-debug-sweep]] — the crash + debug tier — the symbolizer was shared and the raw address that made it safe was not
 - 2026-08-03 [[chg-2026-08-03-exec-image-sweep]] — exec and the image cache -- three documents wrong about which code runs, and a checker that could not see the field that was wrong
+- 2026-08-03 [[chg-2026-08-03-libthyla-rs-sweep]] — the native runtime — a plane where being wrong is free, and two claims that took the offer
 - 2026-08-03 [[chg-2026-08-03-mapping-core-sweep]] — the mapping core -- a W^X checker with no callers, named as enforcement by five documents
 - 2026-08-03 [[chg-2026-08-03-notes-sweep]] — note delivery -- a second dormant declaration, and a justification that is right for the wrong reason
 - 2026-08-03 [[chg-2026-08-03-pty-kernel-sweep]] — the PTY kernel seam -- a guard that cannot tell a dead session from a live one, and three claims about what happens when a leader dies
 - 2026-08-03 [[chg-2026-08-03-spoor-dev-sweep]] — the Spoor/Dev substrate -- a clone inherits five flags and the safety of four is accidental
-- 2026-08-03 [[chg-2026-08-03-syscall-abi-sweep]] — the syscall ABI — the rule is stated twice in one file and the exception is the entropy source
 <!-- generated:end -->
