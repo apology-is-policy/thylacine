@@ -47,6 +47,9 @@ visible. In particular, two failure modes are worth not conflating:
   two foreground wait paths (console forwarding vs pts process groups), and the
   single recursion counter that answers the parser's question the other way,
   because a shell's recursion shapes compose rather than stay separate.
+- [[sub-utopia-interactive]] — bytes to a line and back to a screen: the editor
+  state machine, the fd-agnostic REPL, and the startup order in which a shell
+  must become self-managing *before* it becomes a signal target.
 
 ## Cross-cutting
 

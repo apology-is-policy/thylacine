@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**216 owned · 205 unowned · 421 files (51% owned) · ~72185 unswept lines.**
+**224 owned · 197 unowned · 421 files (53% owned) · ~67158 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -66,7 +66,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib | 3 | 38 | 16643 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
-| usr/utopia | 18 | 8 | 5027 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -99,6 +98,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/netd | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/tapestryd | 7 | 0 | 0 |
+| usr/utopia | 26 | 0 | 0 |
 
 ### Unowned, largest first
 
@@ -106,7 +106,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 |---|---:|
 | usr/nora/src/editor.rs | 4635 |
 | usr/corvus/src/main.rs | 4245 |
-| usr/utopia/libutopia/src/line_editor.rs | 2808 |
 | usr/diorama/src/server.rs | 2803 |
 | usr/nora/src/view.rs | 2043 |
 | usr/lib/kaua/src/widget.rs | 1370 |
@@ -116,7 +115,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/parley/src/lsp.rs | 1106 |
 | usr/nora/src/text.rs | 1035 |
 | usr/lib/libdriver/src/resource.rs | 1015 |
-| usr/utopia/libutopia/src/repl.rs | 979 |
 | usr/nora/src/dap_host.rs | 976 |
 | usr/lib/libdriver/src/source.rs | 960 |
 | usr/virtio-gpu/src/main.rs | 955 |
@@ -147,7 +145,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/coreutils/src/netpump.rs | 450 |
 | kernel/joey.c | 438 |
-| usr/utopia/shell/src/main.rs | 431 |
 | usr/coreutils/src/bin/grep.rs | 417 |
 | usr/curl/src/lib.rs | 402 |
 | usr/sntp/src/main.rs | 394 |
@@ -166,7 +163,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel/fault_test.c | 295 |
 | usr/lib/kaua/src/encode.rs | 294 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 290 |
-| usr/utopia/libutopia/src/completion.rs | 290 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/lib/corvus-crypto/src/bip39_wordlist.rs | 271 |
@@ -198,7 +194,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel/include/thylacine/devcap.h | 208 |
 | usr/lib/parley/src/transport.rs | 205 |
 | usr/lib/kaua/src/term.rs | 201 |
-| usr/utopia/libutopia/src/palette.rs | 199 |
 | usr/coreutils/src/bin/head.rs | 198 |
 | usr/virtio-mmio-source/src/main.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
@@ -211,7 +206,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/coreutils/src/bin/ipconfig.rs | 178 |
 | usr/coreutils/src/bin/dial.rs | 177 |
-| usr/utopia/libutopia/src/ansi.rs | 174 |
 | usr/coreutils/src/bin/chmod.rs | 171 |
 | usr/nora/src/debug.rs | 171 |
 | usr/coreutils/src/bin/uniq.rs | 163 |
@@ -260,7 +254,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/kaua/src/rect.rs | 93 |
 | kernel/include/thylacine/9p_transport_loopback.h | 92 |
 | usr/coreutils/src/color.rs | 92 |
-| usr/utopia/libutopia/src/path.rs | 89 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 83 |
@@ -286,7 +279,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel/include/thylacine/joey.h | 59 |
 | usr/coreutils/src/bin/rmdir.rs | 58 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
-| usr/utopia/libutopia/src/lib.rs | 57 |
 | usr/lib/kaua/src/lib.rs | 55 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | kernel/include/thylacine/canary.h | 50 |
