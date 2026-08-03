@@ -555,6 +555,7 @@ void test_cons_full_ring_never_blocks_sak(void);
 void test_cons_feed_write_short_on_full(void);
 void test_cons_refused_byte_is_not_echoed(void);
 void test_cons_rx_holdback_reoffer(void);
+void test_cons_rx_holdback_not_stranded(void);
 void test_cons_rx_drop_counters(void);
 void test_cons_ctrlc_consumed(void);
 void test_cons_break_sets_sak(void);
@@ -1972,6 +1973,7 @@ struct test_case g_tests[] = {
     { "cons.feed_write_short_on_full", test_cons_feed_write_short_on_full, false, NULL },
     { "cons.refused_byte_is_not_echoed", test_cons_refused_byte_is_not_echoed, false, NULL },
     { "cons.rx_holdback_reoffer",      test_cons_rx_holdback_reoffer,      false, NULL },
+    { "cons.rx_holdback_not_stranded", test_cons_rx_holdback_not_stranded, false, NULL },
     { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
     { "cons.break_sets_sak",           test_cons_break_sets_sak,           false, NULL },

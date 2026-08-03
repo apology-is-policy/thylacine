@@ -97,25 +97,39 @@ fn open_path(path: &str, omode: u32) -> i64 {
 /// wedge this function exists to avoid.
 ///
 /// Returns true iff this call dropped anything (the caller logs, latched).
+/// #136-audit F5: WHY the queue lost bytes, not merely THAT it did. The two
+/// events want different words -- one is back-pressure past the bound, the
+/// other is the console rejecting the write outright -- and collapsing them
+/// into `bool` made an I/O failure print "backlog over N bytes", sending a
+/// reader looking for an overflow that never happened. That is #129's own
+/// counter-rename lesson (a name that reports the wrong event is worse than
+/// no name) applied to a log line instead of a counter.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum FeedLoss {
+    None,
+    OverBound,
+    WriteErr,
+}
+
 fn feed_drain_with(
     write: &mut dyn FnMut(&[u8]) -> i64,
     pending: &mut Vec<u8>,
     cap: usize,
     dropped: &mut u64,
-) -> bool {
+) -> FeedLoss {
     if pending.is_empty() {
-        return false;
+        return FeedLoss::None;
     }
     let n = write(pending.as_slice());
     if n < 0 {
         *dropped += pending.len() as u64;
         pending.clear();
-        return true;
+        return FeedLoss::WriteErr;
     }
     let took = n as usize;
     if took >= pending.len() {
         pending.clear();
-        return false;
+        return FeedLoss::None;
     }
     if took > 0 {
         pending.drain(..took);
@@ -131,15 +145,23 @@ fn feed_drain_with(
         let excess = pending.len() - cap;
         pending.truncate(cap);
         *dropped += excess as u64;
-        return true;
+        return FeedLoss::OverBound;
     }
-    false
+    FeedLoss::None
 }
 
 fn feed_drain(fd: i64, pending: &mut Vec<u8>, cap: usize, dropped: &mut u64,
               logged: &mut bool) {
     let mut w = |b: &[u8]| unsafe { t_write(fd, b.as_ptr(), b.len()) };
-    if feed_drain_with(&mut w, pending, cap, dropped) {
+    let loss = feed_drain_with(&mut w, pending, cap, dropped);
+    if loss == FeedLoss::WriteErr {
+        // #136-audit F5: name the console rejecting the write, NOT a backlog.
+        if !*logged {
+            *logged = true;
+            say!("aurora: consfeed WRITE FAILED; discarded the queued input (total {})",
+                 *dropped);
+        }
+    } else if loss == FeedLoss::OverBound {
         // #129-audit F8: LATCH the report. Once over the bound, every subsequent
         // keystroke pushes it over again -- and `say!` routes through
         // SYS_PUTS -> cons_output_write, which takes the console TX writer role
@@ -175,7 +197,7 @@ fn feed_drain_selftest() -> bool {
     {
         let (sc, ix, sn) = (&script, &mut idx, &mut seen);
         let mut w = |b: &[u8]| { sn.push(b.to_vec()); let r = sc[*ix]; *ix += 1; r };
-        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) != FeedLoss::None { return false; }
     }
     if !q.is_empty() || seen[0].as_slice() != b"abcd" { return false; }
 
@@ -186,7 +208,7 @@ fn feed_drain_selftest() -> bool {
     {
         let (sc, ix) = (&script, &mut idx);
         let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
-        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) != FeedLoss::None { return false; }
     }
     if q.as_slice() != b"abcd" || dropped != 0 { return false; }
 
@@ -195,7 +217,7 @@ fn feed_drain_selftest() -> bool {
     {
         let (sc, ix) = (&script, &mut idx);
         let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
-        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) != FeedLoss::None { return false; }
     }
     if q.as_slice() != b"cd" { return false; }
 
@@ -207,7 +229,9 @@ fn feed_drain_selftest() -> bool {
     {
         let (sc, ix) = (&script, &mut idx);
         let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
-        if !feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) != FeedLoss::OverBound {
+            return false;
+        }
     }
     if q.as_slice() != b"01234567" || dropped != 4 { return false; }
 
@@ -216,7 +240,13 @@ fn feed_drain_selftest() -> bool {
     {
         let (sc, ix) = (&script, &mut idx);
         let mut w = |_: &[u8]| { let r = sc[*ix]; *ix += 1; r };
-        if !feed_drain_with(&mut w, &mut q, cap, &mut dropped) { return false; }
+        // #136-audit F5: assert the ERROR is reported AS an error. Before the
+        // FeedLoss split this arm returned the same `true` as an over-bound
+        // truncation, so the comment above was the only thing distinguishing
+        // them and the log line said "backlog" for an I/O failure.
+        if feed_drain_with(&mut w, &mut q, cap, &mut dropped) != FeedLoss::WriteErr {
+            return false;
+        }
     }
     if !q.is_empty() || dropped != 12 { return false; }
     true

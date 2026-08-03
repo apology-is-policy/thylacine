@@ -56,6 +56,7 @@ void test_cons_full_ring_never_blocks_sak(void);     // #129 (I-27)
 void test_cons_feed_write_short_on_full(void);       // #129 defect (1)
 void test_cons_refused_byte_is_not_echoed(void);     // #129-audit F3
 void test_cons_rx_holdback_reoffer(void);            // #129-audit F2
+void test_cons_rx_holdback_not_stranded(void);       // #136-audit F1
 
 // Defined with the LS-8b cooking tests further down; forward-declared so the
 // #129 tests above them can use the same two helpers rather than open-coding a
@@ -457,6 +458,48 @@ void test_cons_rx_holdback_reoffer(void) {
     TEST_EXPECT_EQ(first, (long)'H', "and it is the byte that was held");
     TEST_EXPECT_EQ((long)again, 0L, "a cleared hold is not re-delivered");
     TEST_ASSERT(resumed, "a drained pump RESUMES RX -- it does not leave it masked");
+}
+
+// #136-audit F1: the drain must never fall out of its budget loop with a byte
+// HELD and RX UNPAUSED. ARCH sect 25.4 (the LS-8 #129 addendum) states that
+// state -- `g_rx_held_valid && !g_rx_paused` -- "must stay unreachable", and
+// pre-fix it was reachable: the last budget unit is spent on a refusal whose
+// pause_and_recheck then LIFTS, and the `continue` lands on a failed loop test.
+//
+// The stranded byte is not recovered by anything scheduled: it lives in a
+// software variable, not the FIFO, so it raises neither RXRIS nor the RX
+// timeout (the hardware re-fire that covers the ordinary budget-hit exit), and
+// uart_rx_pump short-circuits on !g_rx_paused. It waits for an unrelated later
+// arrival -- a keystroke that vanishes and reappears when the user types again.
+//
+// Reaching it deterministically needs the PEER-PRODUCER divergence, which is
+// what cons_test_force_full models: cons_ring_room() reports full so the push
+// arms refuse, while cons_rx_can_accept() (which reads the count, not the room)
+// still reports room so the recheck lifts. Every iteration therefore burns one
+// budget unit and lifts, until the loop falls out -- the exact shape.
+//
+// '\n' is the held byte deliberately: with the default CANONICAL termios a
+// plain character is buffered into the line and never consults the room, so it
+// would be ACCEPTED on iteration 1 and never reach the strand. The terminator
+// takes the flush arm (`room < line_len + 1` -> `0 < 1`), which refuses.
+void test_cons_rx_holdback_not_stranded(void) {
+    cons_test_reset();
+
+    uart_test_rx_force_hold((u8)'\n', false);
+    cons_test_force_full(true);
+    uart_rx_pump();                  // burns the budget lifting + re-refusing
+    cons_test_force_full(false);
+
+    bool held   = uart_test_rx_held(NULL, NULL);
+    bool paused = uart_test_rx_paused();
+
+    uart_test_rx_release_hold();
+    cons_test_reset();
+
+    // Sample first, assert after (#133): a TEST_ASSERT is fail-and-return, so
+    // asserting before the release would strand RX masked for the rest of boot.
+    TEST_ASSERT(!(held && !paused),
+                "the drain never exits with a byte HELD and RX UNPAUSED");
 }
 
 // #129 defect (1): cons_feed_write -- the graphical console's keyboard -- must
