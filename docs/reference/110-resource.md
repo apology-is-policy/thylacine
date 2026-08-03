@@ -153,6 +153,75 @@ unchanged — the same "drift, not wrap" reasoning that made the CODE alias a
 finding. Listing what *did* charge, rather than subtracting what didn't, also
 means a future Burrow type is uncharged by default.
 
+**The refund is ATTRIBUTED, not inferred (#131/#132).** The allowlist above
+reasons about a region's *shape* to decide whether it was charged. That works
+only while shape determines payer, and it stopped doing so the moment a region
+could be reached from two Procs. `struct Burrow` therefore records who paid:
+
+```c
+int charge_pid;    // the paying Proc's pid; 0 with charge_pages == 0 == released
+u32 charge_pages;  // what it paid (the buddy-rounded count)
+bool shared_out;   // burrow_share_into has mapped this into a SECOND Proc
+```
+
+`burrow_charge_record` stamps it at each eager charge; `burrow_charge_claim`
+read-and-CLEARS it (so exactly one settler ever refunds — two racing paths cannot
+both win, and a double refund is an under-count, the direction that inflates a
+budget); `burrow_charge_restore` puts a claim back when the caller decides not to
+settle. Callers claim **before** the drop, because a freeing drop takes the record
+with it, and they snapshot the *Burrow* pointer rather than the VMA —
+`burrow_unmap_reporting` frees the `Vma` struct, so `vma->burrow` is dangling the
+moment it returns.
+
+`charge_pages`, not `charge_pid`, is the "held" sentinel: `proc_alloc` stamps pid
+0 and `rfork_internal` assigns the real one later, so pid 0 is a legitimate
+identity and using it as the released marker would conflate identity with state.
+
+Two defects motivated this, and they are the same gap seen from opposite sides:
+
+- **#132** (introduced by #130's own fix): `loom_register_buffers` and
+  `loom_free` refunded a displaced registered-buffer pin to the Loom's owner,
+  justified by "registering requires a loom fd from p's own table, and KObj_Loom
+  is neither transferable nor dup-able". That argument proves p owns the *Loom*
+  and says nothing about who paid for the *buffer* — and `loom_resolve_buf`
+  admits any writable ANON VMA, which a weft ring netd allocated and
+  `burrow_share_into`'d satisfies exactly (Weft-6c-1's shipped path registers the
+  whole ring). So a consumer could be refunded for the sharer's pages: an
+  under-count on a non-exempt Proc, repeatable via the public `WeftFlow`/`Ring`
+  API. The claim returns 0 for a region the caller did not pay for, which closes
+  it at the mechanism rather than at each site.
+- **#131**: nothing settled the sharer's charge at all. netd detaches its ring at
+  flow close while the guest's mapping and the binding pin live on, so the last
+  drop is the *guest's* `vma_drain` — generic vma code, in another Proc, under
+  that Proc's `vma_lock`, with no way to name netd. 64 pages leaked per closed
+  zero-copy flow.
+
+**The release rule (user-voted 2026-08-03): the charge follows the sharer's own
+claim, not the pages.** `SYS_BURROW_DETACH` settles when `freed || shared_out`.
+`freed` is *sufficient* (if nothing holds the region, this Proc certainly does
+not) but not *necessary*: once the region is shared out and this Proc has
+unmapped it, the Proc can no longer reach those pages, and charging it for
+memory it cannot touch caps it for nothing. From that point the region is bounded
+by the consumer's `shared_map_pages` — the fifth axis exists for exactly this.
+
+`shared_out` rather than "does anything still hold it" is load-bearing: the
+Proc's **own** other claim (a Loom registered-buffer pin on its own buffer) also
+keeps the region alive, and there the charge must stay until that claim drops.
+The two cases are indistinguishable by refcount and distinguishable by this flag.
+
+The never-claimed share settles at `weft_share_unregister` /
+`weft_share_release_owner` — the sharer's registration pin is its last claim, and
+both know the owner. `weft_binding_release` settles nothing: that pin belongs to
+the consumer, which never paid. Precedent: Linux memcg keeps the charge with the
+allocator (with reparenting on death); seL4 lets it follow the capability holder;
+Zircon counts shared pages in every mapper. Thylacine's dual axis (`page_count` =
+the allocator's commit, `shared_map_pages` = the mapper's pin) took the seL4
+answer for the sharer half.
+
+Known window: a share landing between the `shared_out` read and the drop leaves
+the sharer charged until its next release point — an over-charge, never a wrong
+refund, so the race degrades safely.
+
 v1.0 has no mid-life `vma_drain` (no in-place re-exec), so attach/detach (and the
 ring's detach / `vma_drain`) balance the counter while the Proc lives; at exit the
 Proc and its counter vanish together (`vma_drain` is the SEAM hook where a future

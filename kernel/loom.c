@@ -272,11 +272,36 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
 // instead of a write through a dangling pointer or a charge stolen from an
 // unrelated Proc that recycled the address. pid is monotonic, so a recycled
 // allocation cannot impersonate the original.
-static void loom_uncharge_owner(struct Loom *l, u32 npages) {
+//
+// #132: this returns the owner rather than performing the uncharge, because
+// "the Proc that owns this Loom" and "the Proc that paid for this region" are
+// DIFFERENT CLAIMS, and #130 asserted the second from a proof of the first. A
+// registered buffer is resolved by loom_resolve_buf out of any writable ANON
+// VMA of the owner -- and a Weft ring that netd allocated and shared into this
+// Proc is exactly that (Weft-6c-1's shipped path registers the whole ring), so
+// the owner can hold a pin on a region netd paid for. Refunding it here paid
+// back pages the owner never bought: an under-count, which INFLATES its
+// effective budget -- the direction that breaks I-32. So the caller must run
+// the charge CLAIM against the Burrow, which answers who actually paid.
+static struct Proc *loom_owner_live(struct Loom *l) {
     struct Proc *o = l->owner;
-    if (!o || npages == 0)                          return;
-    if (o->magic != PROC_MAGIC || o->pid != l->owner_pid) return;
-    proc_page_uncharge(o, npages);
+    if (!o)                                              return NULL;
+    if (o->magic != PROC_MAGIC || o->pid != l->owner_pid) return NULL;
+    return o;
+}
+
+// Settle one of the Loom's Burrow pins: claim whatever charge the owner holds
+// on it, drop the pin, and refund only if this drop ended the occupancy. The
+// claim returns 0 for a region the owner never paid for, which is what keeps
+// a shared-in Weft ring from being refunded to its consumer.
+static void loom_drop_pin_settling(struct Loom *l, struct Burrow *b) {
+    struct Proc *o  = loom_owner_live(l);
+    u32          paid = o ? burrow_charge_claim(b, o) : 0;
+    if (burrow_unref_freed(b)) {
+        if (paid) proc_page_uncharge(o, paid);
+    } else if (paid) {
+        burrow_charge_restore(b, o, paid);   // !freed => b is still live
+    }
 }
 
 static void loom_free(struct Loom *l) {
@@ -379,9 +404,9 @@ static void loom_free(struct Loom *l) {
     // there, so the Proc stayed billed for memory it no longer held.
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
         if (l->reg_buf[i].burrow) {
-            u32 n = (u32)burrow_backing_pages(burrow_get_size(l->reg_buf[i].burrow));
-            if (burrow_unref_freed(l->reg_buf[i].burrow))
-                loom_uncharge_owner(l, n);
+            // #132: settle via the charge record, never via the buffer's size.
+            // The owner may have pinned a region it did not pay for.
+            loom_drop_pin_settling(l, l->reg_buf[i].burrow);
             l->reg_buf[i].burrow = NULL;
         }
     }
@@ -391,9 +416,10 @@ static void loom_free(struct Loom *l) {
         // teardown order (detach the ring VA, then close the fd -- what
         // libthyla_rs' Ring::drop does) the detach does NOT free the pages and
         // THIS unref does. The charge is released exactly once, by whichever of
-        // the two is last.
-        if (burrow_unref_freed(l->ring))
-            loom_uncharge_owner(l, l->ring_pages);
+        // the two is last -- now enforced by the claim rather than argued: the
+        // ring IS the owner's own charge, so the claim always finds it here
+        // unless the detach already settled it.
+        loom_drop_pin_settling(l, l->ring);
         l->ring = NULL;
     }
     l->magic = 0;   // clobber before free (UAF defense, mirrors burrow_free_internal)
@@ -539,14 +565,23 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     // #130: a displaced pin can be the drop that frees the pages -- the user
     // may have detached the old buffer's VA while the table still held it, in
     // which case the detach skipped its refund (correctly: nothing was freed
-    // then) and THIS unref is what ends the occupancy. `p` is the charged Proc
-    // by construction: registering requires a loom fd from p's own table, and
-    // KObj_Loom is neither transferable nor dup-able.
+    // then) and THIS unref is what ends the occupancy.
+    //
+    // #132: settle through the charge record. The comment here used to justify
+    // refunding `p` with "registering requires a loom fd from p's own table,
+    // and KObj_Loom is neither transferable nor dup-able" -- which proves p
+    // owns the LOOM, and says nothing about who paid for the BUFFER. A weft
+    // ring netd allocated and shared in satisfies every loom_resolve_buf gate
+    // (ANON, writable, one VMA), so p could be refunded for netd's pages. The
+    // claim returns 0 for exactly that case.
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
         if (old[i]) {
-            u32 npages = (u32)burrow_backing_pages(burrow_get_size(old[i]));
-            if (burrow_unref_freed(old[i]))
-                proc_page_uncharge(p, npages);
+            u32 paid = burrow_charge_claim(old[i], p);
+            if (burrow_unref_freed(old[i])) {
+                if (paid) proc_page_uncharge(p, paid);
+            } else if (paid) {
+                burrow_charge_restore(old[i], p, paid);   // !freed => still live
+            }
         }
     }
     return 0;

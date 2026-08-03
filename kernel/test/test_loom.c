@@ -54,6 +54,7 @@ void test_loom_register_buffers_rejects(void);
 void test_loom_register_buffers_replace(void);
 void test_loom_ring_charge_balance(void);
 void test_loom_regbuf_charge_balance(void);
+void test_loom_regbuf_foreign_charge_not_refunded(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -1033,4 +1034,103 @@ void test_loom_regbuf_charge_balance(void) {
                    "the teardown settled both the buffer pin and the ring");
 
     test_proc_drop(p);
+}
+
+// ---------------------------------------------------------------------------
+// loom.regbuf_foreign_charge_not_refunded (#132)
+//
+// A registered buffer is resolved out of ANY writable ANON VMA of the Loom's
+// owner -- and a Weft ring that a SHARER allocated and burrow_share_into'd
+// satisfies every loom_resolve_buf gate (ANON, writable, one VMA). Weft-6c-1's
+// shipped path registers exactly that: WeftFlow::open maps the flow's ring and
+// registers the WHOLE of it.
+//
+// So the owner can hold a Loom pin on a region it did not pay for, and when
+// that pin is the drop that frees the pages, refunding the owner pays back
+// somebody else's charge. That is an UNDER-count -- it inflates the owner's
+// effective budget, the direction that breaks I-32 -- and it is what #130's
+// "`p` is the charged Proc by construction" comment let through: that argument
+// proves p owns the LOOM, not that p paid for the BUFFER.
+//
+// The discriminating assertion is that the user's page_count never dips below
+// its own baseline. The baseline is sampled AFTER the loom setup so it carries
+// the ring's charge, which is what makes a spurious one-page refund visible
+// rather than clamped away at zero.
+// ---------------------------------------------------------------------------
+void test_loom_regbuf_foreign_charge_not_refunded(void) {
+    struct Proc *payer = test_proc_make();   // allocates + pays for the region
+    struct Proc *user  = test_proc_make();   // maps it and pins it in its Loom
+    TEST_ASSERT(payer != NULL && user != NULL, "proc_alloc x2");
+
+    // DISTINCT pids, or this test cannot discriminate. proc_alloc stamps pid 0
+    // (rfork_internal assigns the real one), so two bare test Procs are both 0
+    // and the charge record's owner check would match the wrong Proc trivially
+    // -- the test would pass without proving attribution. Production Procs get
+    // distinct monotonic pids; the fixture has to reproduce that, not assume it.
+    payer->pid = 90001;
+    user->pid  = 90002;
+
+    struct loom_params kp;
+    hidx_t loom_fd = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(user, 8, 0, &kp, &loom_fd) == 0, "setup");
+    u32 ubase = __atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE);
+    TEST_ASSERT(ubase > 0, "the baseline carries the ring charge, so a refund is visible");
+
+    u32 pbase = __atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE);
+    s64 va = sys_burrow_attach_for_proc(payer, PAGE_SIZE);
+    TEST_ASSERT(va > 0, "the payer attaches the region");
+    u32 pages = (u32)burrow_backing_pages(PAGE_SIZE);
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(pbase + pages), "the attach charged the PAYER");
+
+    spin_lock(&payer->vma_lock);
+    struct Vma *pv = vma_lookup(payer, (u64)va);
+    struct Burrow *v = pv ? pv->burrow : NULL;
+    spin_unlock(&payer->vma_lock);
+    TEST_ASSERT(v != NULL, "the region's Burrow");
+
+    // Share it into the user (the SYS_WEFT_MAP half) and register the whole of
+    // it as a Loom buffer (the WeftFlow::open half).
+    // Inside [EXEC_USER_BURROW_BASE, TOP): SYS_BURROW_DETACH bounds-checks the
+    // VA against that window before it even looks up the VMA, so a share placed
+    // below 4 GiB is unreachable to the detach half of this test.
+    const u64 uva = 0x140000000ull;
+    spin_lock(&user->vma_lock);
+    TEST_EXPECT_EQ(burrow_share_into(user, v, uva, VMA_PROT_RW), 0, "share into the user");
+    spin_unlock(&user->vma_lock);
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE),
+                   (u64)ubase, "a share does not charge the user's page_count");
+
+    struct loom_buf_reg br = { .va = uva, .len = PAGE_SIZE };
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(user, loom_fd, &br, 1) == 0,
+                "the user registers the shared region as a Loom buffer");
+
+    // The payer walks away (#131): its charge settles here, while the region
+    // lives on under the user's mapping + the Loom pin.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(payer, (u64)va, PAGE_SIZE), 0L, "payer detaches");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE),
+                   (u64)pbase, "the payer's charge settled at its own detach");
+
+    // The user drops its mapping. SHARED_IN, so no page_count movement -- and
+    // the Loom pin is now the ONLY thing holding the region.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(user, uva, PAGE_SIZE), 0L, "user detaches");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE),
+                   (u64)ubase, "detaching a SHARED_IN mapping refunds nothing");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), 0, "no mappings left -- only the Loom pin");
+
+    // THE FIX: clearing the table drops that pin and FREES the pages. Pre-#132
+    // this refunded the user for the payer's region.
+    u64 destroyed_before = burrow_total_destroyed();
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(user, loom_fd, NULL, 0) == 0, "clear the table");
+    TEST_EXPECT_EQ(burrow_total_destroyed(), destroyed_before + 1,
+                   "the displaced pin was the drop that freed the pages");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE),
+                   (u64)ubase,
+                   "freeing a region the user never paid for refunds the user NOTHING");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE),
+                   (u64)pbase, "and does not refund the payer twice either");
+
+    TEST_EXPECT_EQ(handle_close(user, loom_fd), 0, "close the loom fd");
+    test_proc_drop(user);
+    test_proc_drop(payer);
 }

@@ -626,6 +626,85 @@ bool burrow_release_mapping_freed(struct Burrow *v) {
 void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_freed(v); }
 
 // =============================================================================
+// #131/#132: the I-32 charge record. See burrow.h for the contract + the
+// rationale (a Burrow's TYPE tells you the region's shape, never who paid).
+//
+// All three run under v->lock -- a leaf, and the same lock the dual refcount
+// uses, so a claim is serialized against the free decision it precedes. They
+// must NEVER be called from inside burrow_unref_freed / burrow_release_
+// mapping_freed (which hold that lock themselves); every caller claims first,
+// then drops.
+// =============================================================================
+
+void burrow_charge_record(struct Burrow *v, const struct Proc *p, u32 pages) {
+    if (!v || !p || pages == 0) return;
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_charge_record on corrupted BURROW (use-after-free?)");
+    spin_lock(&v->lock);
+    v->charge_pid   = p->pid;
+    v->charge_pages = pages;
+    spin_unlock(&v->lock);
+}
+
+u32 burrow_charge_claim(struct Burrow *v, const struct Proc *p) {
+    if (!v || !p) return 0;
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_charge_claim on corrupted BURROW (use-after-free?)");
+    u32 pages = 0;
+    spin_lock(&v->lock);
+    // charge_pages -- not charge_pid -- is the "held" sentinel. pid 0 is a real
+    // value (proc_alloc stamps 0 and rfork_internal assigns the pid later), so
+    // using it as the released marker would conflate identity with state and
+    // silently refuse to settle a charge recorded before a pid was assigned.
+    // A charge of zero pages is meaningless, so zero pages IS "nothing held".
+    if (v->charge_pages != 0 && v->charge_pid == p->pid) {
+        pages           = v->charge_pages;
+        v->charge_pid   = 0;
+        v->charge_pages = 0;
+    }
+    spin_unlock(&v->lock);
+    return pages;
+}
+
+void burrow_charge_restore(struct Burrow *v, const struct Proc *p, u32 pages) {
+    if (!v || !p || pages == 0) return;
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_charge_restore on corrupted BURROW (use-after-free?)");
+    spin_lock(&v->lock);
+    // The record must still be the one WE cleared. A held record here means
+    // something re-charged the region between the claim and the restore, which
+    // cannot happen: burrow_charge_record runs once, at creation, on a Burrow no
+    // other path has a reference to yet. Extinct rather than pick a loser --
+    // silently refusing would DROP the caller's `pages` on the floor, and a lost
+    // charge is an under-count, the direction that inflates a Proc's budget.
+    if (v->charge_pages != 0) {
+        spin_unlock(&v->lock);
+        extinction("burrow_charge_restore: the region was re-charged mid-settle");
+    }
+    v->charge_pid   = p->pid;
+    v->charge_pages = pages;
+    spin_unlock(&v->lock);
+}
+
+bool burrow_is_shared_out(const struct Burrow *v) {
+    if (!v || v->magic != VMO_MAGIC) return false;
+    // Read under the same leaf lock the setter uses -- the flag is a plain bool
+    // and this costs one uncontended acquire on a path that is already taking
+    // it (the charge claim follows immediately), so there is no reason to reason
+    // about byte-store atomicity instead.
+    //
+    // Monotonic false -> true, so a MISS is the only possible staleness: a share
+    // that lands after this read leaves the sharer charged until its next
+    // release point. That is an over-charge on the sharer -- never a refund to a
+    // Proc that did not pay -- so the race degrades in the safe direction.
+    struct Burrow *m = (struct Burrow *)v;   // the lock is mutable state on a logically-const query
+    spin_lock(&m->lock);
+    bool out = m->shared_out;
+    spin_unlock(&m->lock);
+    return out;
+}
+
+// =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
 // =============================================================================
 
@@ -931,6 +1010,18 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     struct Vma *vma = vma_lookup(dst, vaddr);
     if (!vma) extinction("burrow_share_into: installed VMA vanished under vma_lock");
     vma->flags |= VMA_FLAG_SHARED_IN;
+
+    // #131: mark the region shared-out. This is what lets the SHARER's own
+    // detach tell "the survivor is somebody else, so I can no longer reach
+    // these pages -- release my charge" from "my own other claim survives
+    // (a Loom registered buffer), so keep it until that claim drops". Set
+    // AFTER the map succeeds: a failed share leaves no second Proc, so it
+    // must leave no reason to release either. Monotonic -- never cleared,
+    // because a sharer that walked away does not get the charge back if the
+    // consumer later unmaps.
+    spin_lock(&v->lock);
+    v->shared_out = true;
+    spin_unlock(&v->lock);
     return 0;
 }
 

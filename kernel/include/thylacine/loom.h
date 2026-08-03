@@ -380,13 +380,19 @@ struct Loom {
     struct Burrow       *ring;         // the SQ/CQ ring Burrow (handle_count ref held)
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
     // #130: the I-32 charge ledger. `owner`/`owner_pid` are the Proc
-    // SYS_LOOM_SETUP charged (see loom_uncharge_owner for why the pointer is
-    // safe and why the pid backstops it); `ring_pages` is what it charged, so
-    // the uncharge reproduces the charge rather than recomputing it. All three
-    // are set once at setup and never mutated -- a Loom cannot change hands.
+    // SYS_LOOM_SETUP charged (see loom_owner_live for why the pointer is safe
+    // and why the pid backstops it). All three are set once at setup and never
+    // mutated -- a Loom cannot change hands.
+    //
+    // #132: `ring_pages` is now INFORMATIONAL ONLY. The settle amount comes from
+    // the Burrow's own charge record (burrow_charge_claim), because a pin this
+    // Loom holds is not necessarily a region this owner paid for -- a registered
+    // buffer may be a weft ring the SHARER paid for. Kept because it is the
+    // charge as billed, which is worth having in a dump; do NOT reintroduce it
+    // as a refund amount.
     struct Proc         *owner;
     int                  owner_pid;   // matches struct Proc.pid's type
-    u32                  ring_pages;
+    u32                  ring_pages;  // informational since #132 -- not a refund source
     // Geometry (immutable after loom_create). Mirrors loom_params.
     u32 sq_entries;
     u32 cq_entries;

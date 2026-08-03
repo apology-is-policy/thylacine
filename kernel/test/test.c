@@ -322,6 +322,7 @@ void test_weft_weave_share_and_claim(void);
 void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
+void test_weft_sharer_charge_released_at_detach(void);
 void test_weft_reap_orphan_reclaimed(void);
 void test_weft_reap_live_session_untouched(void);
 void test_weft_reap_close_unregisters(void);
@@ -430,6 +431,7 @@ void test_loom_register_buffers_rejects(void);
 void test_loom_register_buffers_replace(void);
 void test_loom_ring_charge_balance(void);
 void test_loom_regbuf_charge_balance(void);
+void test_loom_regbuf_foreign_charge_not_refunded(void);
 void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
@@ -1667,6 +1669,7 @@ struct test_case g_tests[] = {
     { "weft.unshare_disarm",              test_weft_unshare_disarm,           false, NULL },
     { "weft.shared_map_budget_cap",       test_weft_shared_map_budget_cap,    false, NULL },
     { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },
+    { "weft.sharer_charge_released_at_detach", test_weft_sharer_charge_released_at_detach, false, NULL },
     { "weft.reap_orphan_reclaimed",       test_weft_reap_orphan_reclaimed,    false, NULL },
     { "weft.reap_live_session_untouched", test_weft_reap_live_session_untouched, false, NULL },
     { "weft.reap_close_unregisters",      test_weft_reap_close_unregisters,   false, NULL },
@@ -1828,6 +1831,7 @@ struct test_case g_tests[] = {
     { "loom.register_buffers_replace",   test_loom_register_buffers_replace,   false, NULL },
     { "loom.ring_charge_balance",        test_loom_ring_charge_balance,        false, NULL },
     { "loom.regbuf_charge_balance",      test_loom_regbuf_charge_balance,      false, NULL },
+    { "loom.regbuf_foreign_charge_not_refunded", test_loom_regbuf_foreign_charge_not_refunded, false, NULL },
     { "loom.post_cqe_back_pressure",     test_loom_post_cqe_back_pressure,     false, NULL },
     { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
     { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
