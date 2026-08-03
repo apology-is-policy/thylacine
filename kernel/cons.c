@@ -490,6 +490,7 @@ bool cons_test_tx_role_held(void) {
     return tx_writing_load();
 }
 
+
 static void cons_tx_role_release(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
     tx_writing_store(false);
@@ -497,6 +498,35 @@ static void cons_tx_role_release(void) {
     // Clear-then-wake, outside the lock (the release side of register-then-observe).
     poll_waiter_list_wake(&g_cons_tx.role_waiters);
 }
+
+// #152: let a KERNEL diagnostic emitter take the same writer role EL0 output
+// takes, so its uart_puts bytes cannot be interleaved by a peer's
+// cons_output_write on another CPU.
+//
+// WHY THIS EXISTS RATHER THAN ROUTING THE CALLER THROUGH cons_output_write:
+// the kernel's diagnostics already carry their own CRLF (uart_puts translates
+// NL -> CR NL unconditionally), while cons_output_write applies ONLCR only when
+// the flag is SET -- and `g_cons.termios` is BSS-zero at boot and set later by
+// the session chain, so at the "Thylacine boot OK" instant the flag state is
+// INDETERMINATE. Routing through it would make the wire bytes of a tooling-ABI
+// line depend on how far the boot had got. This pair adds the serialization
+// without touching the bytes.
+//
+// The flush inside begin() is the other half of the same guarantee, and it must
+// happen UNDER the role: cons_tx_flush alone (the #75-audit F3 fix) drains what
+// is ALREADY queued, but a peer that starts a cons_output_write immediately
+// afterwards refills the ring while the caller is mid-uart_puts. Holding the
+// role first is what stops that -- the peer parks.
+//
+// Returns false only when a #811 death interrupted the park, in which case the
+// caller emits unserialized rather than silently dropping the line.
+bool cons_kernel_writer_begin(void) {
+    if (cons_tx_role_acquire() != 0) return false;
+    cons_tx_flush();
+    return true;
+}
+
+void cons_kernel_writer_end(void) { cons_tx_role_release(); }
 
 // #75 test hook -- the release half of cons_test_tx_role_hold.
 void cons_test_tx_role_drop(void) { cons_tx_role_release(); }

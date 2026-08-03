@@ -1797,3 +1797,33 @@ void test_cons_sys_puts_uses_shared_console_path(void) {
     }
     TEST_ASSERT(found, "drain holds /hello's SYS_PUTS bytes verbatim");
 }
+
+// #152: the kernel-diagnostic writer bracket. The banner path used bare
+// uart_puts, which takes NO role, so a peer's cons_output_write on another CPU
+// shredded "Thylacine boot OK" -- caught by the smp8 gate, which then reported a
+// HEALTHY boot as a 300s timeout because it greps that exact string.
+//
+// WHAT THIS CAN AND CANNOT PIN. It pins that the bracket really claims and
+// releases the SAME role cons_output_write takes -- the property that was
+// missing. It CANNOT pin that boot_mark_complete calls it: that runs once, on
+// the real boot, before any test could observe the role. The durable coverage
+// for the call site is the SMP gate itself, which is what surfaced the bug and
+// is the honest thing to say rather than implying this test covers it.
+void test_cons_kernel_writer_bracket(void);
+void test_cons_kernel_writer_bracket(void) {
+    TEST_ASSERT(!cons_test_tx_role_held(), "role starts free");
+
+    TEST_ASSERT(cons_kernel_writer_begin(), "begin claims the role");
+    TEST_ASSERT(cons_test_tx_role_held(),
+                "the kernel-diagnostic bracket HOLDS the role -- the whole point; "
+                "bare uart_puts held nothing and could be interleaved");
+
+    cons_kernel_writer_end();
+    TEST_ASSERT(!cons_test_tx_role_held(), "end releases it");
+
+    // Re-entrant claim after release must work: the banner is not the only
+    // future caller, and a role left set would wedge every later console write.
+    TEST_ASSERT(cons_kernel_writer_begin(), "the role is re-claimable");
+    cons_kernel_writer_end();
+    TEST_ASSERT(!cons_test_tx_role_held(), "and released again");
+}

@@ -1878,17 +1878,21 @@ cmd 0x2   = F_SETFD,          arg 1  = FD_CLOEXEC
 cmd 0x406 = F_DUPFD_CLOEXEC,  arg 10 = ash's savefd(), moving the script fd above 10
 ```
 
-Neither can be served truthfully, because **Thylacine has no close-on-exec at
-all** — verified on both halves: no CLOEXEC bit exists in `handle.h` or
-`handle.c`, and `proc_exec_replace` never touches the handle table, so exec
-preserves every fd. `F_SETFD(FD_CLOEXEC)` could only be answered by silently
+> **SUPERSEDED BY #151** (next section): close-on-exec now exists and both cmds
+> are served. The paragraph below is left as written because it records what
+> #150 MEASURED and why it declined; only its present tense is stale.
+
+Neither could be served truthfully at #150, because **Thylacine had no
+close-on-exec at all** — verified on both halves: no CLOEXEC bit exists in `handle.h` or
+`handle.c`, and `proc_exec_replace` did not touch the handle table, so exec
+preserved every fd. `F_SETFD(FD_CLOEXEC)` could only be answered by silently
 succeeding, after which the guest execs with the fd still open having been told
 otherwise. `F_DUPFD_CLOEXEC` is that lie plus a real dup, and it cannot even be a
 renumber onto `SYS_DUP` — *that* call's second argument is a rights mask, not a
 minimum fd, so the arity rule refuses it for the same reason it refuses `writev`.
 
-That is a **kernel feature, not a translation** (task #151), and it is what now
-blocks the L-6c gate.
+That is a **kernel feature, not a translation** (task #151), and it is what
+blocked the L-6c gate until #151 built it.
 
 The measurement also **voided a stated scripture fact**. VIVARIUM.md's
 ignorable-flags table admits `O_CLOEXEC`, and its justification was never

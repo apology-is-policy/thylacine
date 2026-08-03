@@ -559,6 +559,7 @@ void test_devproc_debug_kstack_settled(void);
 void test_devproc_debug_step_cancel_on_stop(void);
 void test_cons_blocking_read_wakeup(void);
 void test_cons_tx_role_serializes_writers(void);
+void test_cons_kernel_writer_bracket(void);              // #152
 void test_cons_tx_room_wait_and_deadline(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
@@ -2057,6 +2058,7 @@ struct test_case g_tests[] = {
     { "hwdebug.wp_encode",                     test_hwdebug_wp_encode,                     false, NULL },
     { "cons.blocking_read_wakeup",     test_cons_blocking_read_wakeup,     false, NULL },
     { "cons.tx_role_serializes_writers", test_cons_tx_role_serializes_writers, false, NULL },
+    { "cons.kernel_writer_bracket",    test_cons_kernel_writer_bracket,    false, NULL },
     { "cons.tx_room_wait_and_deadline", test_cons_tx_room_wait_and_deadline, false, NULL },
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },

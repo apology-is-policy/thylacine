@@ -158,6 +158,25 @@ bool boot_is_complete(void) {
 bool boot_mark_complete(void) {
     if (__atomic_exchange_n(&g_boot_complete_done, true, __ATOMIC_SEQ_CST))
         return false;
+    // #152: hold the console WRITER ROLE across every line below, so a peer's
+    // cons_output_write on another CPU cannot interleave with these uart_puts
+    // bytes. Without it the smp8 gate caught the ABI line shredded --
+    //
+    //     Thylacine tboapot esOKtr
+    //     yd: scanout pending-direct 0 (1280x800)
+    //
+    // -- which is "Thylacine boot OK" woven through tapestryd's scanout line.
+    // The harness greps the exact string, misses it, and reports a HEALTHY boot
+    // (login reached, both users authed, 0 EXTINCTION) as a 300s timeout.
+    //
+    // The pre-existing cons_tx_flush here (the #75-audit F3 fix) is now INSIDE
+    // begin(), and that move is the fix: flushing alone drains what is already
+    // queued, but a peer starting a write immediately after the flush refills
+    // the ring mid-banner. Taking the role first makes the peer park instead.
+    //
+    // We run in process context (the SYS_BOOT_COMPLETE syscall from joey), so
+    // parking for the role is legal here.
+    bool held = cons_kernel_writer_begin();
     // TI-4b boot-duration gate: timer_now_ns() is CLOCK_MONOTONIC (ns since the
     // CNTVCT reset == since boot), so at this one-shot SYS_BOOT_COMPLETE point it
     // IS the boot duration. A greppable in-guest number (tools/ci-smp-gate.sh
@@ -203,12 +222,8 @@ bool boot_mark_complete(void) {
     uart_puts(" wake-oneshot=");
     uart_putdec(wc.tickless_oneshot_wakes);
     uart_puts("\n");
-    // #75-audit F3: drain any residual EL0 console output out of the TX ring to
-    // the wire BEFORE the direct-path banner, so the "Thylacine boot OK"
-    // tooling-ABI line (TOOLING.md section 10) cannot be torn by a lazy TX-IRQ
-    // ring drain landing between its uart_putc bytes.
-    cons_tx_flush();
     uart_puts("Thylacine boot OK\n");
+    if (held) cons_kernel_writer_end();
     return true;
 }
 
