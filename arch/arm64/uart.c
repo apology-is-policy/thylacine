@@ -206,6 +206,13 @@ void uart_test_tx_stall(bool on) {
     }
 }
 
+// #130-R2 F2: so the harness can tell a leaked stall from a clean exit. A stall
+// left on silences the console AND makes every later writer eat the #67 20 ms
+// deadline per byte -- see cons_test_release_owned_state.
+bool uart_test_tx_stalled(void) {
+    return __atomic_load_n(&g_uart_tx_test_stalled, __ATOMIC_RELAXED);
+}
+
 // True once the TX FIFO has fully drained to the wire.
 bool uart_tx_fifo_empty(void) {
     return (mmio_read32(pl011_base, PL011_FR) & PL011_FR_TXFE) != 0u;

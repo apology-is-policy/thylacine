@@ -75,6 +75,14 @@ void test_sched_dispatch_smoke(void) {
     // boot's). Boot resumes here.
     sched();
 
+    // #92-audit F4: under SMP, ready() may PLACE ta/tb on peer CPUs, so this
+    // sched() can return before either has been dispatched -- the assert then
+    // reads 0 on a healthy kernel. Wait for the observable, then assert the
+    // exact count. The wait is >= 1 and the assert is == 1, so "exactly once"
+    // is still what is being tested: a thread that ran twice fails the assert,
+    // and the wait cannot mask it (it exits at the first increment).
+    TEST_YIELD_UNTIL(g_test_sched_state[0] >= 1u && g_test_sched_state[1] >= 1u);
+
     TEST_EXPECT_EQ(g_test_sched_state[0], 1u,
         "ta did not run exactly once");
     TEST_EXPECT_EQ(g_test_sched_state[1], 1u,

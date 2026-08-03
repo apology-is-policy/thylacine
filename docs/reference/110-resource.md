@@ -442,6 +442,25 @@ actually needs the memory. One raise at the build root covers the whole tree.
   **per-page I-32 charge** seam; the stamp is deliberately placed before exec so
   that seam lands bounded without revisiting this ordering. *(CL-5 audit F1 —
   the pre-fix comments claimed exec was the first charger. It is not.)*
+
+  **#131 narrowed this finding to its accounting half.** The #106 round filed it
+  as "uncharged but *refundable*" — a crafted ELF places an eager ANON segment in
+  the burrow window, the Proc detaches it, and the old shape-based refund paid out
+  for pages nobody had charged (a `page_count` under-count = budget inflation).
+  Since #131 the refund is *attributed*: `SYS_BURROW_DETACH` pays `paid =
+  burrow_charge_claim(dv, p)`, which is 0 unless a payer was recorded, and exec
+  records none. So the refundable half is closed **by construction** — a new
+  uncharged region is uncharged on both sides, which is the fail-safe direction
+  and the #122 rule enforced by attribution rather than by enumerating shapes.
+
+  What remains is purely that `page_count` / `page_peak` under-track true
+  occupancy by exec's segments plus the 1 MiB stack. No bound is breached (they
+  were never counted, so nothing double-counts and nothing over-refunds); the
+  cost is that **`page_peak` is what CL-5 budget-sizing reads**, so a measured
+  peak omits them. Charging them is a deliberate scope change to I-32 — the cap
+  is documented as *"live anon pages via `SYS_BURROW_ATTACH`"*, and widening it
+  to all anon occupancy re-baselines every CL-5 measurement — so it belongs with
+  the per-page seam and a re-measure, not in a cleanup pass.
 - **The TCB never consults a budget.** `PRINCIPAL_SYSTEM` is exempt via
   `proc_resource_exempt`, and `rfork` inherits the principal — so anything joey
   spawns (including the clade gate's `clang++`) is unbounded. That exemption is

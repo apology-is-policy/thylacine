@@ -118,7 +118,23 @@ the wrong thing yields a test that spins and asserts nothing. The shapes:
 | peer blocked | `sched()` → assert `state == SLEEPING` | `counter >= N && state == SLEEPING` — sound because a not-yet-run thread is RUNNABLE, never SLEEPING |
 | peer resumed | `sched()` → assert a result | `counter >= N+1`, or `result != <sentinel>` |
 | system drained | `sched()` → assert `sched_runnable_count() == 0` | the same predicate |
-| flag consumed | `sched()` → assert a flag cleared | the same predicate |
+| flag consumed | `sched()` → assert a flag cleared | the same predicate — **but a cleared flag is not a completed act**; see below |
+
+**A cleared flag means the act STARTED, not that it FINISHED.** This row is the one
+that misleads, so state its precondition rather than the shape: waiting on
+`!pending` is a sound observable only where the code that clears the flag
+provably goes on to complete the act, with no path that clears and bails and no
+window between the clear and the effect the test then reads. That is a property
+of the *specific consumer*, and it must be re-established at every site — never
+inherited from this table. Where it does not hold, the wait exits early and the
+assert reads pre-act state, which is the original race with a guard bolted on
+top: strictly worse than the bare `sched()`, because it now looks handled.
+
+The same distinction is why `burrow_handle_count() == 0` is not "the pages were
+freed" and why `#130`/`#131` both went wrong by predicting an event from state
+sampled beforehand. When the act's completion is what you need, make the
+operation *report* it (`burrow_unref_freed`) rather than inferring it from a
+flag that merely precedes it.
 
 **Two shapes that `TEST_YIELD_UNTIL` cannot fix, and must not be applied to:**
 
@@ -141,9 +157,12 @@ the wrong thing yields a test that spins and asserts nothing. The shapes:
   to assert an **implication** with a deliberate read order. `cons_service_deferred`
   is the pending flag's only consumer and always walks the hook list, so "cleared"
   implies "relay ran" implies "poller woken", which makes two one-directional forms
-  exact: read the flag first for *armed* (`pending || woken`), read the state first
+  hold: read the flag first for *armed* (`pending || woken`), read the state first
   for *deferred* (`sleeping || !pending`). The biconditional is racy in **both**
-  orders; only the implications hold.
+  orders; only the implications hold. Note what that argument rests on — the
+  sole-consumer-always-completes property of `cons_service_deferred`, not on
+  anything general about flags. Copying the *form* to a site without that
+  property gets you the fallacy above; re-derive it, do not port it.
 
 **The waits measure themselves.** Exhaustion is loud, but the opposite failure is
 silent: a condition already true on entry exits at once, so the guard is a no-op and
@@ -233,6 +252,39 @@ void test_run_all(void) {
 ```
 
 Single-threaded by design at v1.0 (NCPUS = 1 still). When SMP arrives at Phase 2, `current_test` becomes per-CPU or the runner serializes — the contract stays: one test runs at a time on one CPU.
+
+### Leaked global state (`cons_test_release_owned_state`, #130-R2 F2)
+
+Between `current_test->fn()` and the verdict, the runner releases console/UART
+state the test left armed, and **fails the test that left it**:
+
+| Bit | State | Cost if leaked |
+|---|---|---|
+| `CONS_TEST_OWNED_ECHO_CAPTURE` | `cons_test_echo_capture(true)` | `cons_emit`/`cons_emit_wait` divert into a 128-byte buffer and return, so every later `/dev/cons` write is swallowed — the login prompt, the shell, the LS-CI transcript. **Silent**: kernel diagnostics take `cons_diag_byte`, which ignores capture, so the suite keeps printing PASS over a dead userspace console. |
+| `CONS_TEST_OWNED_TX_ROLE` | `cons_test_tx_role_hold()` | `cons_tx_role_acquire` parks contenders **untimed** — every later console writer parks forever and the boot hangs. |
+| `CONS_TEST_OWNED_MGR_HOLD` | `cons_test_mgr_hold(true)` | `console_mgr` stops servicing deferred work; poll wakes strand. |
+| `CONS_TEST_OWNED_READER_BUSY` | `cons_test_set_reader_busy(true)` | the single-reader guard refuses every later `devcons_read`. |
+| *(runner-local bit 4)* | `uart_test_tx_stall(true)` | console silent, and every later writer eats the #67 20 ms deadline per byte. |
+
+Each is armed by one call and released by another with the test body in between,
+and `TEST_ASSERT` is `test_fail(); return;` — so **one failing assert inside such
+a window skips the release**, and the leaked state then destroys the diagnosis of
+everything after it. That is the failure this harness exists to prevent, arriving
+by a different door than #74/#85/#87.
+
+`TEST_YIELD_UNTIL_SOFT` was the per-site answer, and it only covers the *wait*;
+an ordinary assert in the window is the far commoner case, and per-site
+discipline cannot cover a site that does not exist yet. Hence the backstop.
+Reporting is the point — a silent auto-repair would hide the leak it repaired —
+so the runner prints `LEAKED-STATE(<names>)` and reddens the test even when its
+own assertions all passed.
+
+Verified by A/B, because a backstop that never fires proves nothing. With a
+deliberate failure inside the held-role window: **without** the backstop the boot
+hangs at the very next test (`cons.tx_room_wait_and_deadline`, which needs the
+role) and the suite never completes; **with** it, the run prints
+`LEAKED-STATE(echo-capture,tx-role)`, finishes 1245/1246, and that next test
+passes.
 
 ### Boot integration
 

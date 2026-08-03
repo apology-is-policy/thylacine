@@ -363,4 +363,16 @@ u32  cons_test_drain_count(void);
 u32  cons_test_drain_overflow(void);
 bool cons_test_drain_pollwake_pending(void);
 
+// #130-R2 F2: the harness backstop. Each bit names a piece of console state a
+// test arms for a window and must release; a failing assert inside the window
+// returns from the test and skips the release, which costs the console (or the
+// boot) for every test after it. test_run_all calls this after EVERY test,
+// releases whatever was left armed, and fails the test that leaked it -- see
+// the full rationale at the definition in cons.c.
+#define CONS_TEST_OWNED_ECHO_CAPTURE  (1u << 0)
+#define CONS_TEST_OWNED_TX_ROLE       (1u << 1)
+#define CONS_TEST_OWNED_MGR_HOLD      (1u << 2)
+#define CONS_TEST_OWNED_READER_BUSY   (1u << 3)
+u32  cons_test_release_owned_state(void);
+
 #endif // THYLACINE_CONS_H
