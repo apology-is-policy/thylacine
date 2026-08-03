@@ -33,6 +33,7 @@
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // #148: struct t_stat + the T_S_IF* type bits
 #include <thylacine/types.h>
 
 // The boot ramfs Dev — the seekable known-content FS the #37 positioned-I/O
@@ -515,5 +516,56 @@ void test_sys_prw_rights_and_walkonly(void) {
     TEST_EXPECT_EQ(sys_pread_for_proc(p, fdo, NULL, 0, 0), (s64)(-T_E_BADF),
         "zero-length pread on O_PATH rejected with -T_E_BADF");
 
+    drop_test_proc(p);
+}
+
+// #148: fstat on a pipe end.
+//
+// POSIX requires fstat to work on ANY valid descriptor. A pipe end is a
+// KOBJ_SPOOR, so it clears sys_fstat's kind gate and then reaches its Dev's
+// .stat_native -- which devpipe simply did not have, so the call returned -1.
+//
+// This test asserts the property a CONSUMER depends on, not that a call
+// returned 0: the mode's file-type field must be S_IFIFO. `viv` probes exactly
+// this to decide whether to endow a container's stdio, and musl's stdio picks
+// its buffering mode from it; both need the TYPE, not merely success.
+//
+// Both ends are checked. They are separate Spoors over one ring, and a fix
+// that reached only one would leave the read half answering -1 -- which is the
+// half a container's fd 0 lands on.
+void test_sys_pipe_fstat_reports_fifo(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe_for_proc");
+
+    struct Handle h_rd, h_wr;
+    TEST_EXPECT_EQ(handle_get(p, fd_rd, &h_rd), 0, "handle_get rd");
+    TEST_EXPECT_EQ(handle_get(p, fd_wr, &h_wr), 0, "handle_get wr");
+
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;
+    TEST_EXPECT_EQ(spoor_stat_native((struct Spoor *)h_rd.obj, &st), 0,
+        "fstat the READ end succeeds (pre-#148 this returned -1)");
+    TEST_EXPECT_EQ(st.mode & T_S_IFMT, T_S_IFIFO,
+        "read end reports S_IFIFO");
+    TEST_EXPECT_EQ(st.size, 0ull, "a FIFO has no length");
+    TEST_EXPECT_EQ(st.nlink, 1u, "a FIFO has one link");
+
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;
+    TEST_EXPECT_EQ(spoor_stat_native((struct Spoor *)h_wr.obj, &st), 0,
+        "fstat the WRITE end succeeds");
+    TEST_EXPECT_EQ(st.mode & T_S_IFMT, T_S_IFIFO,
+        "write end reports S_IFIFO");
+
+    // A pipe is NOT a character device, and not a regular file. Asserting the
+    // type is exactly S_IFIFO would pass if the field were left zero, so pin
+    // the two neighbours a wrong constant would most plausibly land on.
+    TEST_ASSERT((st.mode & T_S_IFMT) != T_S_IFCHR, "not a chardev");
+    TEST_ASSERT((st.mode & T_S_IFMT) != T_S_IFREG, "not a regular file");
+
+    handle_put(&h_rd);
+    handle_put(&h_wr);
     drop_test_proc(p);
 }

@@ -24,6 +24,7 @@
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>               // #148: struct t_stat (devpipe_stat_native)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -432,6 +433,35 @@ static int  devpipe_wstat(struct Spoor *c, u8 *dp, int n)
 static struct Spoor *devpipe_power(struct Spoor *c, int on)
                                             { (void)c; (void)on; return NULL; }
 
+// #148: the is-a-pipe answer. POSIX requires fstat to work on ANY valid
+// descriptor, and a pipe end is a KOBJ_SPOOR, so it reaches sys_fstat's kind
+// gate and then fell off a MISSING vtable slot -- fstat(pipe) returned -1.
+//
+// It is not a cosmetic gap. Consumers ask "what is this fd" about a pipe for
+// real reasons: musl's stdio picks its buffering mode from the answer, and
+// `viv` decides whether to endow a container's stdio by fstat'ing its own
+// 0/1/2 -- which is how this was found (joey hands viv a PIPE to capture the
+// container's output, every fstat failed, and an Alpine shell was spawned
+// fd-less while the gate reported "the shell never ran").
+//
+// size 0 and one link are the honest answers for a FIFO: it has no length to
+// report and no name in any directory. 0600 matches the pair's private
+// ownership -- a pipe is reachable only by inheriting the descriptor.
+static int devpipe_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    out->mode     = T_S_IFIFO | 0600u;
+    out->nlink    = 1;
+    out->qid_path = c->qid.path;
+    out->qid_type = QTFILE;
+    out->blksize  = PIPE_BUF_SIZE;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+    // devno is stamped by spoor_stat_native (#100 -- the Spoor's identity, not
+    // the Dev's); the zero-fill above leaves it 0 here, the devramfs idiom.
+    return 0;
+}
+
 struct Dev devpipe = {
     .dc       = DEVPIPE_DC,
     .name     = "pipe",
@@ -446,6 +476,7 @@ struct Dev devpipe = {
     .close    = devpipe_close,
     .read     = devpipe_read,
     .bread    = devpipe_bread,
+    .stat_native = devpipe_stat_native,   // #148: fstat(pipe) -> S_IFIFO
     .write    = devpipe_write,
     .bwrite   = devpipe_bwrite,
     .poll     = devpipe_poll,

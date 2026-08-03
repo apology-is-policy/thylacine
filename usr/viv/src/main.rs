@@ -607,6 +607,21 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     if status < 0 {
         return Err(String::from("wait for the entrypoint"));
     }
+    // A NON-ZERO container is the case an operator has to diagnose, and until
+    // now `viv` reported it by exiting with the same code and saying nothing --
+    // so "the container failed" and "viv failed" looked identical from outside,
+    // and neither said whether the container even had somewhere to write.
+    //
+    // stdio_born is the specific fact worth naming: it is inherited from how
+    // the CALLER spawned viv (a live 0/1/2 trio or not), it silently decides
+    // whether the container gets any output at all, and when it is false a
+    // perfectly healthy container looks like one that never ran.
+    if status != 0 {
+        say(&format!(
+            "container exited {} (stdio_born={} pheno={} entry={} pid={})",
+            status, stdio_born, pheno, m.args[0], child_pid
+        ));
+    }
     Ok(status)
 }
 

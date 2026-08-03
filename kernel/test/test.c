@@ -1243,6 +1243,7 @@ void test_poll_sleep_for_waits(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
 void test_sys_pipe_handle_close_releases_one_end(void);
+void test_sys_pipe_fstat_reports_fifo(void);
 void test_sys_rw_write_then_read_round_trip(void);
 void test_sys_rw_rights_check(void);
 void test_sys_rw_zero_length_validates_fd(void);
@@ -2874,6 +2875,7 @@ struct test_case g_tests[] = {
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
     { "sys_pipe.handle_close_releases_one_end",        test_sys_pipe_handle_close_releases_one_end,        false, NULL },
+    { "sys_pipe.fstat_reports_fifo",                   test_sys_pipe_fstat_reports_fifo,                   false, NULL },
     { "sys_rw.write_then_read_round_trip",             test_sys_rw_write_then_read_round_trip,             false, NULL },
     { "sys_rw.rights_check",                           test_sys_rw_rights_check,                           false, NULL },
     { "sys_rw.zero_length_validates_fd",               test_sys_rw_zero_length_validates_fd,               false, NULL },

@@ -987,9 +987,35 @@ VIVEOF
         echo "==> viv bundles: viv-pheno-probe not built -- pheno bundle skipped" >&2
     fi
 
+    # The ARC gate bundle (LINEAGE L-6c): a real Alpine rootfs whose /bin/sh is
+    # Alpine's OWN busybox, running a script that exercises fork + execve +
+    # wait4 through the shell.
+    #
+    # TWO external inputs, both optional, both auto-discovered in build/cache/:
+    #
+    #   alpine-minirootfs-*-aarch64.tar.gz   the rootfs
+    #   busybox-static-*.apk                 the SHELL
+    #
+    # The second is not a convenience. MEASURED 2026-08-03: the minirootfs
+    # contains exactly two ELF binaries (bin/busybox, sbin/apk) and BOTH are
+    # ET_DYN PIE linked against /lib/ld-musl-aarch64.so.1 -- there is not one
+    # statically-linked file in the image. `kernel/elf.c` rejects ET_DYN
+    # (:83), PT_INTERP (:180) and PT_DYNAMIC (:185) by deliberate v1.0 policy,
+    # so the stock shell cannot load. Alpine's own busybox-static package is
+    # ET_EXEC with neither dynamic segment -- exactly the shape the loader
+    # accepts. See task #145 (dynamic linking) -- a separate deferred axis,
+    # NOT a LINEAGE gap.
+    #
+    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image, and the
+    # resolver does not follow symlinks (task #146), so the static binary is
+    # installed at BOTH paths as a real file rather than relinked.
     local tarball="${THYLACINE_ALPINE_TARBALL:-}"
     if [[ -z "$tarball" ]]; then
         tarball="$(ls "$REPO_ROOT/build/cache"/alpine-minirootfs-*-aarch64.tar.gz 2>/dev/null | head -1 || true)"
+    fi
+    local bbapk="${THYLACINE_BUSYBOX_STATIC_APK:-}"
+    if [[ -z "$bbapk" ]]; then
+        bbapk="$(ls "$REPO_ROOT/build/cache"/busybox-static-*.apk 2>/dev/null | head -1 || true)"
     fi
     if [[ -n "$tarball" && -f "$tarball" ]]; then
         local ab="$vstage/alpine"
@@ -1001,19 +1027,60 @@ VIVEOF
                 : > "$ab/rootfs/dev/$leaf"
                 chmod 0666 "$ab/rootfs/dev/$leaf"
             done
+            local bb_ok=0
+            if [[ -n "$bbapk" && -f "$bbapk" ]]; then
+                local bbx="$vstage/.bbx"
+                rm -rf "$bbx"; mkdir -p "$bbx"
+                # An .apk is a gzip'd tar; the payload member is bin/busybox.static.
+                if tar -xzf "$bbapk" -C "$bbx" 2>/dev/null && \
+                   [[ -f "$bbx/bin/busybox.static" ]]; then
+                    rm -f "$ab/rootfs/bin/sh" "$ab/rootfs/bin/busybox"
+                    cp "$bbx/bin/busybox.static" "$ab/rootfs/bin/busybox"
+                    cp "$bbx/bin/busybox.static" "$ab/rootfs/bin/sh"
+                    chmod 0755 "$ab/rootfs/bin/busybox" "$ab/rootfs/bin/sh"
+                    bb_ok=1
+                fi
+                rm -rf "$bbx"
+            fi
+            # The gate script. Every leg prints its own marker, so a failure
+            # names the exact mechanism rather than "the shell did not run".
+            # ABSOLUTE paths throughout: envp[0] is always NULL (#140), so the
+            # container has no PATH and a bare command name cannot resolve --
+            # which keeps this a test of fork/exec/wait rather than of $PATH.
+            mkdir -p "$ab/rootfs/gate"
+            cat > "$ab/rootfs/gate/run.sh" <<'GATEEOF'
+echo L6C-A-shell-runs
+/bin/busybox echo L6C-B-external-exec
+/bin/busybox true  && echo L6C-C-status-zero
+/bin/busybox false || echo L6C-D-status-nonzero
+/bin/busybox echo pipe-in | /bin/busybox cat && echo L6C-E-pipeline
+sub=$(/bin/busybox echo captured); [ "$sub" = captured ] && echo L6C-F-substitution
+i=0; for w in a b c; do i=$(/bin/busybox expr $i + 1); done; [ "$i" = 3 ] && echo L6C-G-loop
+/bin/busybox sh -c '/bin/busybox echo nested' && echo L6C-H-nested-shell
+/bin/busybox false; echo L6C-I-exitcode=$?
+echo L6C-DONE
+GATEEOF
+            chmod 0644 "$ab/rootfs/gate/run.sh"
             cat > "$ab/config.json" <<'VIVEOF'
 {
     "ociVersion": "1.0.2",
     "root": { "path": "rootfs", "readonly": true },
     "process": {
-        "args": ["/bin/sh"],
-        "env": ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root"],
+        "args": ["/bin/sh", "/gate/run.sh"],
+        "env": [],
         "cwd": "/"
     },
-    "annotations": {}
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
 }
 VIVEOF
-            echo "==> viv bundles: Alpine bundle staged from $tarball"
+            if [[ "$bb_ok" == 1 ]]; then
+                echo "==> viv bundles: Alpine bundle staged from $tarball (/bin/sh <- $(basename "$bbapk"))"
+            else
+                rm -rf "$ab"
+                echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
+            fi
         else
             rm -rf "$ab"
             echo "==> viv bundles: untar of $tarball FAILED -- Alpine bundle skipped" >&2

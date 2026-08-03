@@ -9109,7 +9109,115 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
 // The branch. Returns true when the caller should CONTINUE into the native
 // switch (a T1 row, ctx rewritten in place); false when the call is already
 // complete and ctx->regs[0] holds its result.
+// ---------------------------------------------------------------------------
+// The "what does this guest actually need" instrument.
+//
+// A phenotyped Proc that issues an untranslated number gets -ENOSYS. That is
+// the honest ANSWER, but on its own it tells the operator nothing: a stock
+// Linux program which dies because it wanted `set_tid_address` and one which
+// dies because it wanted `ioctl` are the same silent exit-1. The LINEAGE L-6c
+// arc gate is a DETECTOR -- its whole job is to say what is missing -- and a
+// detector that reports "the shell exited 1" has not detected anything.
+//
+// So: name each distinct declined number ONCE, and make the VIVARIUM work list
+// mechanical rather than a guessing game (VIVARIUM.md section 4's "the T2
+// entries are exactly the FORWARD rows a translator later promotes").
+//
+// Bounded TWICE, because a diagnostic that a guest can drive is a diagnostic a
+// guest can use to flood the console:
+//   1. a seen-bitmap makes it exactly-once per number PER PROC;
+//   2. a hard report cap covers numbers past the bitmap and any conceivable
+//      pathology in the dedupe.
+//
+// PER PROC, and that word is the whole correctness of this thing. The first
+// version deduped SYSTEM-WIDE, which silently destroyed the instrument for
+// every consumer after the first: on a boot that runs two containers, the
+// second one's declines were all suppressed as "already reported" and its
+// census came out EMPTY -- while the first container's census sat in the log
+// looking exactly like it belonged to the second. That is worse than no
+// diagnostic, because it reads as a measurement. (Found the hard way: an
+// Alpine busybox's census turned out to be the viv-pheno-probe's, and the
+// wrong reading survived into a written conclusion before the line numbers
+// were checked against the surrounding log.)
+//
+// The bitmap is `fetch_or` and the cap `fetch_add`, so it is SMP-safe without
+// a lock; two CPUs racing the same number can at worst both see the pre-set
+// bit and print twice, which is a duplicate LOG LINE and nothing else. Two
+// phenotyped Procs running CONCURRENTLY will thrash the owner and re-report --
+// deliberately the safe direction, since a duplicate line is recoverable and a
+// missing one is not, and the report cap still bounds the total.
+#define VIV_UNSERVED_BITS         512u   // aarch64 Linux numbers live well under this
+#define VIV_UNSERVED_MAX_REPORTS   96u
+static u64 g_viv_unserved_seen[VIV_UNSERVED_BITS / 64];
+static u32 g_viv_unserved_reports;
+static u32 g_viv_unserved_owner;         // whose census the bitmap currently holds
+
+static void viv_report_unserved(u64 nr, const char *why) {
+    struct Thread *t   = current_thread();
+    u32            pid = (u32)((t && t->proc) ? t->proc->pid : 0);
+
+    // A new Proc starts a fresh census. pid 0 is never a real EL0 Proc, so it
+    // cannot collide with a live owner.
+    if (__atomic_load_n(&g_viv_unserved_owner, __ATOMIC_RELAXED) != pid) {
+        __atomic_store_n(&g_viv_unserved_owner, pid, __ATOMIC_RELAXED);
+        for (u32 i = 0; i < VIV_UNSERVED_BITS / 64; i++)
+            __atomic_store_n(&g_viv_unserved_seen[i], 0ull, __ATOMIC_RELAXED);
+    }
+
+    // Dedupe BEFORE charging the cap: a number asked for in a loop must not
+    // burn the budget that a never-yet-seen number needs.
+    if (nr < VIV_UNSERVED_BITS) {
+        u64 bit  = 1ull << (nr & 63u);
+        u64 prev = __atomic_fetch_or(&g_viv_unserved_seen[nr >> 6], bit,
+                                     __ATOMIC_RELAXED);
+        if (prev & bit) return;
+    }
+    if (__atomic_fetch_add(&g_viv_unserved_reports, 1u, __ATOMIC_RELAXED)
+        >= VIV_UNSERVED_MAX_REPORTS)
+        return;
+    uart_puts("vivarium: unserved linux syscall nr=");
+    uart_putdec(nr);
+    uart_puts(" (");
+    uart_puts(why);
+    uart_puts(") pid=");
+    uart_putdec((u64)pid);
+    uart_puts("\n");
+}
+
+// VIV_TRACE: a bounded per-Proc trace of EVERY phenotyped syscall, not just
+// the declined ones. Off by default -- this is a bring-up aid for teaching a
+// new guest to run, where the question is "what did it do before it died"
+// rather than "what did we refuse". The unserved census above is the shipped
+// instrument; this one costs a line per syscall and is meant to be switched on
+// deliberately, measured, and switched off.
+#ifndef VIV_TRACE
+#define VIV_TRACE 0
+#endif
+#if VIV_TRACE
+#define VIV_TRACE_PER_PROC 48u
+static u32 g_viv_trace_owner;
+static u32 g_viv_trace_count;
+static void viv_trace_call(u64 nr, struct Proc *p) {
+    u32 pid = (u32)(p ? p->pid : 0);
+    if (__atomic_load_n(&g_viv_trace_owner, __ATOMIC_RELAXED) != pid) {
+        __atomic_store_n(&g_viv_trace_owner, pid, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_viv_trace_count, 0u, __ATOMIC_RELAXED);
+    }
+    if (__atomic_fetch_add(&g_viv_trace_count, 1u, __ATOMIC_RELAXED)
+        >= VIV_TRACE_PER_PROC)
+        return;
+    uart_puts("viv-trace pid=");
+    uart_putdec((u64)pid);
+    uart_puts(" nr=");
+    uart_putdec(nr);
+    uart_puts("\n");
+}
+#endif
+
 static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
+#if VIV_TRACE
+    viv_trace_call(ctx->regs[8], p);
+#endif
     // rt_sigreturn is the phenotyped spelling of SYS_NOTED(NCONT) (§6.22), and
     // it is handled HERE rather than by a table row or a viv_tier2 case because
     // it is the one signal call that REWRITES THE EXCEPTION FRAME instead of
@@ -9162,19 +9270,39 @@ static bool viv_linux_dispatch(struct exception_context *ctx, struct Proc *p) {
         for (u32 i = 0; i < VIV_NARGS; i++) ctx->regs[i] = call.args[i];
         return true;                            // the NATIVE handler runs
 
-    case VIV_TIER2:
-        ctx->regs[0] = (u64)viv_tier2(ctx, p, ctx->regs[8], args);
+    case VIV_TIER2: {
+        s64 t2 = viv_tier2(ctx, p, ctx->regs[8], args);
+        // A T2 row that declines is a DIFFERENT fact from a missing row: the
+        // translator exists and this ARGUMENT combination fell outside its
+        // domain (VIVARIUM.md section 4). Naming them apart is what turns a
+        // failing guest into a work list -- "widen this domain" and "write
+        // this translator" are different jobs.
+        if (t2 == -(s64)T_E_NOSYS)
+            viv_report_unserved(ctx->regs[8], "T2 row declined these arguments");
+        ctx->regs[0] = (u64)t2;
         return false;
+    }
 
     case VIV_FORWARD:
         // V-3 hands this to the userspace supervisor. Until then the honest
         // answer is the same one ENOSYS gives; this arm exists so that change
         // is one line.
+        viv_report_unserved(ctx->regs[8], "no translator (FORWARD)");
         ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
         return false;
 
     case VIV_ENOSYS:
+        // A DELIBERATE decline -- the number is in the reject table with a
+        // recorded reason (mprotect and I-12, brk and "libc falls to mmap").
+        // Still reported, because "we decided against it" is the answer a
+        // guest-side failure most needs to hear, and hiding it would make the
+        // considered case indistinguishable from the never-considered one.
+        viv_report_unserved(ctx->regs[8], "declined by policy");
+        ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
+        return false;
+
     default:
+        viv_report_unserved(ctx->regs[8], "not in the table at all");
         ctx->regs[0] = (u64)(s64)(-(s64)T_E_NOSYS);
         return false;
     }

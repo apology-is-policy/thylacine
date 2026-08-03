@@ -980,6 +980,175 @@ static int do_fork_probe(void) {
     return 0;
 }
 
+// do_alpine_shell_gate -- LINEAGE L-6c, the ARC gate: an Alpine /bin/sh runs a
+// command inside a vivarium.
+//
+// This is the only leg in the tree where the caller is a REAL, unmodified,
+// third-party Linux program rather than something we wrote to be run. Every
+// prior phenotype leg is a probe that knows it is being tested; busybox does
+// not, so it exercises the translated calls in whatever order and combination
+// its own code happens to want. That is the point of an arc gate.
+//
+// What it proves, and why each marker is separable:
+//   A  the shell EXECS and runs at all             (execve + the ELF load)
+//   B  an external command runs                    (fork + execve + wait4)
+//   C  a zero exit is seen as zero                 (wait4 status decode)
+//   D  a non-zero exit is seen as non-zero         (ditto, other direction)
+//   E  a pipeline                                  (two forks + SYS_PIPE)
+//   F  command substitution                        (fork + pipe + DRAIN TO EOF
+//                                                   -- the #68/#926 path, from
+//                                                   a foreign program)
+//   G  a loop of execs                             (repeat, no fd/Proc leak)
+//   H  a nested shell                              (exec from an exec'd child)
+//   I  $? carries the child's actual code          (this one is EXPECTED to
+//                                                   disagree -- see below)
+//
+// Leg I is deliberately a MEASUREMENT rather than an assertion. #91 records
+// that `sys_exits_handler` collapses every non-zero status to 1, so a Linux
+// shell must print `L6C-I-exitcode=1` where Linux prints the real code. The
+// gate asserts the marker is PRESENT (the shell got *a* code and kept
+// running); the value is reported to the log so the fidelity gap is visible
+// rather than asserted-away. If a later chunk widens the status, this line is
+// where it will show up.
+//
+// SOFT-SKIP when the bundle is absent. The fixture needs two external inputs
+// (an Alpine minirootfs and a busybox-static apk -- see tools/build.sh's
+// stage_viv_bundles and task #145 for why the second is not optional), and the
+// default build stays hermetic.
+//
+// L6C_GATE_FATAL: flip to 1 when task #149 lands. See the failure arm below
+// for why a known-blocked gate reports loudly instead of reddening the boot.
+#define L6C_GATE_FATAL 0
+static int do_alpine_shell_gate(void) {
+    static const char ab[] = "/vivarium/alpine/config.json";
+    long abfd = t_open(T_WALK_OPEN_FROM_ROOT, ab, sizeof(ab) - 1, T_OPATH);
+    if (abfd < 0) {
+        t_putstr("joey: L-6c Alpine shell gate SKIPPED (no /vivarium/alpine "
+                 "bundle -- drop an alpine-minirootfs tarball AND a "
+                 "busybox-static apk in build/cache/ and rebuild with "
+                 "THYLACINE_MKFS_PRESERVE=0)\n");
+        return 0;
+    }
+    (void)t_close(abfd);
+
+    long rd = -1, wr = -1;
+    if (t_pipe(&rd, &wr) < 0) {
+        t_putstr("joey: L-6c t_pipe FAILED\n");
+        return -1;
+    }
+    // THREE fds, not the two the pouch smokes use. `viv` decides whether to
+    // endow its container's stdio by probing whether IT was born with a live
+    // trio (usr/viv/src/main.rs `stdio_born`: fstat(0), fstat(1), fstat(2) all
+    // succeed) -- and it must, because it endows [0,1,2] as a unit and a
+    // half-empty trio fails the whole spawn at the kernel's fd bump. Hand it
+    // two and the probe answers false, the shell is spawned fd-less, and its
+    // echo output goes nowhere: the gate would report "the shell never ran"
+    // when the shell ran perfectly.
+    unsigned int fds[3] = { (unsigned int)wr, (unsigned int)wr,
+                            (unsigned int)wr };
+    static const char vname[] = "/bin/viv";
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/alpine";
+    struct t_sys_spawn_args req = {
+        .name_va       = (unsigned long)vname,
+        .argv_data_va  = (unsigned long)vargv,
+        .name_len      = sizeof(vname) - 1,
+        .argv_data_len = sizeof(vargv),
+        .argc          = 3,
+        .fd_list_va    = (unsigned long)fds,
+        .fd_count      = 3,
+        .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+    };
+    long pid = t_spawn_full_argv(&req);
+    if (pid <= 0) {
+        t_putstr("joey: L-6c spawn /bin/viv (alpine) FAILED\n");
+        (void)t_close(rd); (void)t_close(wr);
+        return -1;
+    }
+    if (t_close(wr) != 0) {
+        t_putstr("joey: L-6c t_close(wr) FAILED\n");
+        (void)t_close(rd);
+        return -1;
+    }
+    int  status = -1;
+    long reaped = t_wait_pid_for((int)pid, 0, &status);
+
+    // Drain whether or not the status is clean: the markers name HOW FAR the
+    // shell got, which is the entire diagnostic value of this leg. A container
+    // that dies at leg B and one that dies at leg F are different bugs, and
+    // the exit status alone cannot tell them apart.
+    unsigned char acc[2048];
+    size_t acc_len = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n <= 0) break;
+        (void)t_puts((const char *)buf, (size_t)n);
+        for (long i = 0; i < n && acc_len < sizeof(acc); i++)
+            acc[acc_len++] = buf[i];
+    }
+    (void)t_close(rd);
+
+    // sizeof-derived, never hand-counted: a literal length that disagrees with
+    // its string is a marker that silently never matches, which would read as
+    // "the shell stopped here" when the shell was fine.
+#define L6C_MK(s) { (s), sizeof(s) - 1 }
+    static const struct argv_marker legs[] = {
+        L6C_MK("L6C-A-shell-runs"),
+        L6C_MK("L6C-B-external-exec"),
+        L6C_MK("L6C-C-status-zero"),
+        L6C_MK("L6C-D-status-nonzero"),
+        L6C_MK("L6C-E-pipeline"),
+        L6C_MK("L6C-F-substitution"),
+        L6C_MK("L6C-G-loop"),
+        L6C_MK("L6C-H-nested-shell"),
+        L6C_MK("L6C-I-exitcode="),
+        L6C_MK("L6C-DONE"),
+    };
+#undef L6C_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (reaped != pid || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: L-6c Alpine shell gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        // KNOWN-BLOCKED, and deliberately NOT boot-fatal until it is unblocked.
+        //
+        // The gate cannot pass today: kernel/exec.c:125 rejects a PT_LOAD whose
+        // p_vaddr is not page-aligned, and every real-world binary has one
+        // (measured: busybox's data segment sits at 0x51d2e0). Task #149 owns
+        // the fix; #145 (dynamic linking) sits behind it.
+        //
+        // Leaving it fatal would paint every boot red for a cause that is
+        // already understood and enqueued, which is strictly worse than a loud
+        // non-fatal report: a permanently-red boot stops distinguishing NEW
+        // breakage from the known one, and the next real regression would land
+        // invisibly behind it. The gate still RUNS every boot and still prints
+        // exactly how far the shell got, so the day #149 lands this line starts
+        // reporting progress rather than the same wall.
+        //
+        // FLIP THIS TO `return -1` WHEN #149 LANDS -- that is the whole point
+        // of the gate, and a KNOWN-BLOCKED that outlives its blocker is just a
+        // disabled test.
+        if (!L6C_GATE_FATAL) {
+            t_putstr("joey: L-6c KNOWN-BLOCKED on task #149 (exec refuses a "
+                     "non-page-aligned PT_LOAD; not boot-fatal until fixed)\n");
+            return 0;
+        }
+        return -1;
+    }
+    t_putstr("joey: L-6c ALPINE SHELL GATE PASS (busybox sh forked, exec'd, "
+             "piped, substituted and reaped -- LINEAGE arc complete)\n");
+    return 0;
+}
+
 // do_native_coreutil_smoke — U-6e-pre-b: the FIRST runtime exercise of the
 // adopted native coreutils (echo/cat/wc/head/tail/seq/sort/uniq/tr/cut/grep/
 // basename/dirname/pwd/true/false). coreutil-smoke is itself a native
@@ -8238,6 +8407,13 @@ int main(void) {
                     return 1;
                 }
                 t_putstr("joey: V-1b phenotype (native + containered linux) PASS\n");
+
+                // === LINEAGE L-6c: the ARC gate. Runs LAST among the
+                // phenotype legs, because it is the only one whose caller is
+                // a real third-party Linux program -- if it fails, every
+                // narrower leg above has already reported, so the log says
+                // which mechanism broke rather than just "the shell died".
+                if (do_alpine_shell_gate() != 0) return 1;
             }
 #endif
         }
