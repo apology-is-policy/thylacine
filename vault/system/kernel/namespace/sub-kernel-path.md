@@ -12,7 +12,7 @@ hazards: []
 abis: []
 design: ["docs/STALK-DESIGN.md"]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-03
 ---
 ## Purpose
 
@@ -57,7 +57,8 @@ u64 path_total_allocated(void); u64 path_total_freed(void);       // diagnostics
 trailing NUL pre-placed), ref 1 via a relaxed store — the Path is
 unpublished until the caller stores it into a Spoor's `->path`.
 `path_parent` scans for the last `/` ("/a/b" → "/a"; "/a" → "/"; "/" →
-"/"). The spoor-side hooks (`kernel/spoor.c`): `spoor_clone` SHARES the
+"/"). The spoor-side hooks (`kernel/spoor.c`, [[sub-kernel-spoor]] —
+which owns the `->path` field): `spoor_clone` SHARES the
 parent's Path (O(1) incref — the hot walk path runs it on every hop,
 including failing ones); `spoor_path_extend` reads the shared Path as the
 base, allocates the extended one, installs it, and unrefs the old (safe

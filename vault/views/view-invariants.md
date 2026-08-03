@@ -34,7 +34,7 @@ Generated from note fields — do not edit between the markers
 | I-30 | [[inv-i30]] | spec | sub-kernel-loom, sub-kernel-weft | spec-loom, spec-weft, gate-smp |
 | I-31 | [[inv-i31]] | spec | sub-kernel-asid | spec-asid, gate-smp |
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content | gate-smp |
-| I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content | gate-smp |
+| I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-spoor, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content | gate-smp |
 | I-34 | [[inv-i34]] | spec | sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery | spec-allowance, prose, gate-smp |
 | I-36 | [[inv-i36]] | prose | sub-kernel-exec, sub-kernel-image, sub-kernel-fault, sub-kernel-burrow | prose, gate-smp |
 | I-37 | [[inv-i37]] | spec | sub-kernel-weft | spec-weft, spec-weft-readiness, gate-smp |

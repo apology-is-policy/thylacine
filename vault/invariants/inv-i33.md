@@ -3,11 +3,11 @@ id: inv-i33
 type: inv
 title: "I-33 — namespace name retention is non-load-bearing"
 number: I-33
-guards: [sub-kernel-path, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content]
+guards: [sub-kernel-path, sub-kernel-spoor, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content]
 validated-by: [gate-smp]
 strength: prose
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-03
 ---
 ## Statement
 
@@ -25,13 +25,21 @@ with the last holder); the string is immutable once built — only
 
 ## Enforcement
 
-`kernel/path.c` (fresh-allocate-never-mutate; NULL on OOM/overflow/empty
-component); `kernel/spoor.c` (`spoor_clone` shares via `path_ref`;
+`kernel/path.c` ([[sub-kernel-path]]: fresh-allocate-never-mutate; NULL
+on OOM/overflow/empty component); `kernel/spoor.c` ([[sub-kernel-spoor]],
+which owns the field: `spoor_clone` shares via `path_ref`;
 `spoor_path_extend`/`spoor_path_transplant` replace thread-local or
 pre-publish only; `spoor_free_internal` drops); the three resolver hook
 sites (stalk per-step + cross/adopt transplants, walk-open, walk-create).
 The write-only property is a grep-complete obligation re-verified at the
 #66a round.
+
+The Spoor side is where the fail-soft is *implemented by omission*:
+`spoor_path_extend` installs whatever `path_addelem` returned without
+checking it, so an allocation failure becomes a NULL name and the walk
+proceeds. That is the invariant working, not a missing check — but it is
+the one place where the correct code and the bug look identical, so it
+carries a comment rather than a guard.
 
 The one place a Path is *not* an accumulation is the boot filesystem's attach
 root ([[sub-kernel-content]]), which seeds itself as `/` at birth. That is sound

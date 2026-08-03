@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**150 owned · 271 unowned · 421 files (35% owned) · ~108337 unswept lines.**
+**158 owned · 263 unowned · 421 files (37% owned) · ~106704 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -68,7 +68,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/libthyla-rs | 0 | 29 | 13326 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
-| kernel | 101 | 31 | 7228 |
+| kernel | 109 | 23 | 5595 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -177,7 +177,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/curl/src/lib.rs | 402 |
 | usr/sntp/src/main.rs | 394 |
 | usr/prowl/src/sample.rs | 393 |
-| kernel/include/thylacine/dev.h | 391 |
 | usr/prowl/src/ui.rs | 370 |
 | usr/lib/kaua/src/query.rs | 366 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
@@ -189,7 +188,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
 | usr/utopia/libutopia/src/parser/token.rs | 306 |
 | usr/loom-stress/src/main.rs | 303 |
-| kernel/spoor.c | 300 |
 | usr/lib/libthyla-rs/src/weft.rs | 297 |
 | usr/pouch-hello/pouch-hello-fs.c | 297 |
 | kernel/fault_test.c | 295 |
@@ -199,7 +197,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/completion.rs | 290 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | usr/lib/libthyla-rs/src/cap.rs | 283 |
-| kernel/include/thylacine/spoor.h | 282 |
 | usr/pouch-hello/pouch-hello.c | 278 |
 | usr/lib/corvus-crypto/src/bip39_wordlist.rs | 271 |
 | usr/coreutils/src/bin/tr.rs | 268 |
@@ -242,7 +239,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/palette.rs | 199 |
 | usr/coreutils/src/bin/head.rs | 198 |
 | usr/virtio-mmio-source/src/main.rs | 198 |
-| kernel/dev.c | 197 |
 | usr/utopia/libutopia/src/eval/value.rs | 197 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/lib/libthyla-rs/src/fs/dir.rs | 193 |
@@ -284,14 +280,12 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/mkdir.rs | 140 |
 | usr/coreutils/src/meta.rs | 140 |
 | usr/coreutils/src/bin/tee.rs | 133 |
-| kernel/full.c | 129 |
 | usr/nora/src/wrap.rs | 127 |
 | usr/coreutils/src/bin/hexdump.rs | 126 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/pouch-hello/pouch-hello-spawn.c | 126 |
 | usr/coreutils/src/bin/mv.rs | 125 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
-| kernel/devnone.c | 121 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
 | usr/ports/sdl2/thylacine/thyla_tap.h | 119 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
@@ -301,8 +295,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/eval/error.rs | 116 |
 | usr/coreutils/src/bin/aurora-push.rs | 113 |
 | kernel/canary.c | 111 |
-| kernel/zero.c | 109 |
-| kernel/null.c | 104 |
 | usr/coreutils/src/bin/realpath.rs | 104 |
 | usr/diorama/src/main.rs | 101 |
 | usr/coreutils/src/bin/which.rs | 98 |
