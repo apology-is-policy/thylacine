@@ -26,7 +26,7 @@ _Static_assert(VIV_NATIVE_CEILING == SYS_RFORK,
 
 // Every row that discharges its collision re-check by the ceiling argument
 // rather than by a per-number one. The lowest such number is restart_syscall
-// (128); clone (220) is the newest. If the ceiling ever rises past one of
+// (128); execve (221) is the newest. If the ceiling ever rises past one of
 // these, the build stops and the reader is forced back to the argument instead
 // of inheriting a claim that has quietly become false.
 _Static_assert(VIV_LINUX_RESTART_SYSCALL > VIV_NATIVE_CEILING,
@@ -35,6 +35,8 @@ _Static_assert(VIV_LINUX_SOCKET > VIV_NATIVE_CEILING,
                "the socket family's collision argument is the ceiling one");
 _Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,
                "clone's collision argument is the ceiling one (LINEAGE L-3d)");
+_Static_assert(VIV_LINUX_EXECVE > VIV_NATIVE_CEILING,
+               "execve's collision argument is the ceiling one (LINEAGE L-6a)");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -270,15 +272,13 @@ static const struct viv_reject g_viv_rejects[] = {
     // the same commit under this file's own rule -- a VIV_TIER2 row whose shell
     // is missing declares a capability the code does not have.
     //
-    // execve (221) and wait4 (260) are NOT listed, and their absence is a
-    // decision rather than an oversight: each is a real translator (execve must
-    // walk a char*[] and repack it into SYS_EXECVE's concatenated blob; wait4
-    // must reshape a status word and an rusage pointer), and each therefore
-    // arrives with its own reasoning at L-6. Until then they FORWARD like any
-    // unclassified number -- which is why L-3d's own gate is a clone the child
-    // survives WITHOUT execing, not a posix_spawn (see the as-built note in
-    // LINEAGE.md §7).
+    // wait4 (260) is NOT listed, and its absence is a decision rather than an
+    // oversight: it is a real translator (an option-word map that is NOT the
+    // identity, plus a status reshape and an rusage pointer), so it arrives
+    // with its own reasoning at L-6b. Until then it FORWARDS like any
+    // unclassified number.
     { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d: vivarium_clone_decide
+    { VIV_LINUX_EXECVE,      VIV_TIER2   },  // L-6a: viv_execve
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -646,7 +646,10 @@ enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
 // PROCESS CREATION — the pure layer (LINEAGE L-3d). See docs/LINEAGE.md §5.3.
 // =============================================================================
 
-enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack) {
+enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
+                                       bool *share_mem_out) {
+    if (!share_mem_out) return VIV_FORWARD;     // fail closed
+    *share_mem_out = false;
     // THE COMPARISON IS FULL-WIDTH, and that is a deliberate difference from
     // vivarium_mmap_decide / vivarium_openat_decide, which narrow to 32 bits.
     // Those calls take `int` parameters in the Linux ABI, so the narrowing is
@@ -688,6 +691,25 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack) {
     // caller asking for a different signal -- or for none, which is what a
     // detached child asks for by leaving the low byte 0 -- would get one it did
     // not request.
+    // THE FORK SHAPE (LINEAGE L-6a): `clone(SIGCHLD, 0)`, what musl's fork()
+    // emits. Admitted here and NOT at L-3d, where the reason for refusing it
+    // was that a private copy-on-write address space did not exist. L-4 and
+    // L-5 built one, so that reason is discharged -- and it is worth naming
+    // that this row's own probe leg carried the stale reason in a comment
+    // while still passing, which is why the expiry had to be looked for rather
+    // than waited for.
+    //
+    // The `stack` rule INVERTS between the two shapes, and that is the kernel's
+    // contract rather than a choice made here: under RFMEM a zero child_sp is
+    // refused (two Procs pushing on one stack corrupt each other), while under
+    // RFPROC alone zero is the NORMAL value and means INHERIT -- each Proc has
+    // its own copy at that address, which is exactly what fork() means. So the
+    // vfork arm rejects zero below and this one does not.
+    if (flags == (u64)VIV_CLONE_FLAGS_FORK) {
+        *share_mem_out = false;
+        return VIV_TRANSLATED;
+    }
+
     if (flags != (u64)VIV_CLONE_FLAGS_ADMITTED) return VIV_FORWARD;
 
     // A ZERO stack is Linux's "share the parent's stack", which is `vfork()`
@@ -697,6 +719,7 @@ enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack) {
     // there is no errno of its own to reproduce (contrast mmap's `len`, which
     // IS judged in the shell precisely because Linux gives it EINVAL/ENOMEM).
     if (stack == 0) return VIV_FORWARD;
+    *share_mem_out = true;
 
     // NOTE what is NOT checked: alignment, range, and overlap with the caller's
     // own stack. Those are SYS_RFORK's own gate, they are identical for a

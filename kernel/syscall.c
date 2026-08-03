@@ -6836,18 +6836,38 @@ static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
 // the process.
 //
 // The multi-thread refusal at step 0 is documented at SYS_EXECVE in syscall.h.
+//
+// SPLIT AT THE ARGUMENT SHAPE (LINEAGE L-6a). Everything from step 2 down is
+// the exec ITSELF and lives in sys_execve_core, which takes its arguments
+// already in KERNEL memory. Two front ends produce that memory from two
+// different user-side shapes:
+//
+//   sys_execve_handler  the native ABI -- (path_va, path_len, blob_va, ...),
+//                       already concatenated, copied out of user memory here.
+//   viv_execve          the Linux ABI -- a `char *const argv[]`, which must be
+//                       WALKED and repacked into the blob. It has no user VA to
+//                       hand over, which is precisely why the core cannot keep
+//                       doing its own uaccess.
+//
+// This is the V-8 `sys_fstat_for_proc` discipline: one implementation of the
+// decision, two front ends for the argument shape. The alternative -- a second
+// execve body in the phenotype -- would be two implementations of the most
+// consequential ordering in the file.
+//
+// The blob's PACKING CONTRACT is validated in the core rather than in the
+// front ends, and that placement is load-bearing: exec_build_init_stack
+// EXTINCTS on a NUL count that disagrees with argc, so a mis-built blob from a
+// front end must be caught as -EINVAL before it reaches the loader. Validating
+// it once, below both builders, means a bug in either is a clean error rather
+// than a dead kernel.
 
-static s64 sys_execve_handler(struct exception_context *ctx) {
+static s64 sys_execve_core(struct exception_context *ctx,
+                           const char *path, u64 path_len,
+                           const char *argv_kbuf, u64 argv_data_len, u64 argc) {
     struct Thread *t = current_thread();
     if (!t)                                            return -(s64)T_E_INVAL;
     struct Proc *p = t->proc;
     if (!p || !p->as)                                  return -(s64)T_E_INVAL;
-
-    u64 path_va       = ctx->regs[0];
-    u64 path_len      = ctx->regs[1];
-    u64 argv_data_va  = ctx->regs[2];
-    u64 argv_data_len = ctx->regs[3];
-    u64 argc          = ctx->regs[4];
 
     if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -(s64)T_E_INVAL;
     if (argv_data_len > SYS_SPAWN_ARGV_DATA_MAX)       return -(s64)T_E_INVAL;
@@ -6856,57 +6876,23 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
     // with no bytes has nothing to point at, and bytes with no count would be
     // silently dropped rather than rejected.
     if ((argc == 0) != (argv_data_len == 0))           return -(s64)T_E_INVAL;
-    if (!sys_validate_user_buf(path_va, path_len))     return -(s64)T_E_FAULT;
-    if (argv_data_len &&
-        !sys_validate_user_buf(argv_data_va, argv_data_len))
-        return -(s64)T_E_FAULT;
 
-    // The multi-thread gate, FIRST -- before any allocation or FS work, so the
-    // refusal costs nothing and cannot half-do anything.
-    if (!proc_exec_alone(p))                           return -(s64)T_E_AGAIN;
-
-    // 1. Arguments into kernel memory. Both live in the OLD address space, so
-    //    they must be copied before the swap -- after it the user VAs mean
-    //    something else entirely. The path goes on the stack (bounded by
-    //    SYS_OPEN_PATH_MAX, the same scratch SYS_OPEN uses); argv can be 64 KiB,
-    //    so it is heap.
-    char path[SYS_OPEN_PATH_MAX + 1];
-    for (u64 i = 0; i < path_len; i++) {
-        u8 b;
-        if (uaccess_load_u8(path_va + i, &b) != 0)     return -(s64)T_E_FAULT;
-        if (b == '\0')                                 return -(s64)T_E_INVAL;
-        path[i] = (char)b;
-    }
-    path[path_len] = '\0';
-
-    char *argv_kbuf = NULL;
+    // The packing contract exec_build_init_stack relies on: exactly `argc`
+    // NUL-terminated strings, the last byte a NUL.
     if (argv_data_len) {
-        argv_kbuf = kmalloc((size_t)argv_data_len, 0);
-        if (!argv_kbuf)                                return -(s64)T_E_NOMEM;
-        for (u64 i = 0; i < argv_data_len; i++) {
-            u8 b;
-            if (uaccess_load_u8(argv_data_va + i, &b) != 0) {
-                kfree(argv_kbuf);
-                return -(s64)T_E_FAULT;
-            }
-            argv_kbuf[i] = (char)b;
-        }
-        // The packing contract exec_build_init_stack relies on: exactly `argc`
-        // NUL-terminated strings, the last byte a NUL. Checked here so a
-        // malformed buffer is a clean -EINVAL rather than a frame the loader
-        // has to defend against.
-        if (argv_kbuf[argv_data_len - 1] != '\0') {
-            kfree(argv_kbuf);
-            return -(s64)T_E_INVAL;
-        }
+        if (!argv_kbuf)                                return -(s64)T_E_INVAL;
+        if (argv_kbuf[argv_data_len - 1] != '\0')      return -(s64)T_E_INVAL;
         u64 nuls = 0;
         for (u64 i = 0; i < argv_data_len; i++)
             if (argv_kbuf[i] == '\0') nuls++;
-        if (nuls != argc) {
-            kfree(argv_kbuf);
-            return -(s64)T_E_INVAL;
-        }
+        if (nuls != argc)                              return -(s64)T_E_INVAL;
     }
+
+    // The multi-thread gate, before any allocation or FS work THIS function
+    // does. A front end may have already copied its arguments in by now -- a
+    // wasted copy on a path that is refusing, and nothing more. The gate lives
+    // here rather than in each front end so it cannot be forgotten by one.
+    if (!proc_exec_alone(p))                           return -(s64)T_E_AGAIN;
 
     // 2. Resolve in the CALLER's namespace (I-28: contained at root_spoor,
     //    per-component X-search, OEXEC on the leaf) -- the same helper every
@@ -6916,7 +6902,11 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
     struct Spoor *exe = exec_resolve_from_namespace(p, path, (size_t)path_len,
                                                     &exe_size);
     if (!exe) {
-        kfree(argv_kbuf);
+        // NOTE: argv_kbuf is the CALLER's -- every front end frees its own blob
+        // on every path. The pre-L-6a body freed it here, when the blob and the
+        // exec were the same function's; carrying those frees across the split
+        // made it a double free, which is not a leak but a heap corruption that
+        // surfaces in an unrelated allocation later. Do not re-add them.
         // stalk's failure reason is not plumbed out yet (ER-x); ENOENT is the
         // honest majority answer and matches what SYS_OPEN reports today.
         return -(s64)T_E_NOENT;
@@ -6927,7 +6917,6 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
     struct AddrSpace *nas = addrspace_alloc();
     if (!nas) {
         spoor_clunk(exe);
-        kfree(argv_kbuf);
         return -(s64)T_E_NOMEM;
     }
 
@@ -6943,7 +6932,6 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
         // detached.
         addrspace_unref(nas);
         spoor_clunk(exe);
-        kfree(argv_kbuf);
         // DEGRADED, deliberately: POSIX says ENOEXEC here, and the errno
         // registry has no T_E_NOEXEC. docs/ERRORS.md is ABI-bearing and its
         // additions need signoff, so this reports EINVAL and the gap is tracked
@@ -6967,7 +6955,6 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
     proc_set_exe_path(p, exe->path);
 
     spoor_clunk(exe);
-    kfree(argv_kbuf);
 
     // 5. Rewrite the trapframe so this syscall's own eret enters the new image.
     //    KERNEL_EXIT (vectors.S) restores elr_el1 / sp_el0 / spsr_el1 from these
@@ -6984,6 +6971,57 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
     ctx->elr  = entry;
     ctx->spsr = 0;
     return 0;   // ignored -- regs[0] was just zeroed on purpose
+}
+
+// The NATIVE front end: (path_va, path_len, argv_data_va, argv_data_len, argc),
+// where the blob is already concatenated in user memory. Its whole job is
+// step 1 of the ordering above -- get both arguments into kernel memory before
+// the swap, because after it those user VAs mean something else entirely.
+static s64 sys_execve_handler(struct exception_context *ctx) {
+    u64 path_va       = ctx->regs[0];
+    u64 path_len      = ctx->regs[1];
+    u64 argv_data_va  = ctx->regs[2];
+    u64 argv_data_len = ctx->regs[3];
+    u64 argc          = ctx->regs[4];
+
+    // Bounds the COPY depends on. The core re-checks these against its own
+    // contract; here they gate how much user memory we are about to touch.
+    if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -(s64)T_E_INVAL;
+    if (argv_data_len > SYS_SPAWN_ARGV_DATA_MAX)       return -(s64)T_E_INVAL;
+    if (!sys_validate_user_buf(path_va, path_len))     return -(s64)T_E_FAULT;
+    if (argv_data_len &&
+        !sys_validate_user_buf(argv_data_va, argv_data_len))
+        return -(s64)T_E_FAULT;
+
+    // The path goes on the stack (bounded by SYS_OPEN_PATH_MAX, the same
+    // scratch SYS_OPEN uses); argv can be 64 KiB, so it is heap.
+    char path[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)     return -(s64)T_E_FAULT;
+        if (b == '\0')                                 return -(s64)T_E_INVAL;
+        path[i] = (char)b;
+    }
+    path[path_len] = '\0';
+
+    char *argv_kbuf = NULL;
+    if (argv_data_len) {
+        argv_kbuf = kmalloc((size_t)argv_data_len, 0);
+        if (!argv_kbuf)                                return -(s64)T_E_NOMEM;
+        for (u64 i = 0; i < argv_data_len; i++) {
+            u8 b;
+            if (uaccess_load_u8(argv_data_va + i, &b) != 0) {
+                kfree(argv_kbuf);
+                return -(s64)T_E_FAULT;
+            }
+            argv_kbuf[i] = (char)b;
+        }
+    }
+
+    s64 r = sys_execve_core(ctx, path, path_len, argv_kbuf, argv_data_len, argc);
+    kfree(argv_kbuf);   // no-op on NULL; on SUCCESS the strings are already
+                        // copied into the new image's stack by exec_load_into
+    return r;
 }
 
 // =============================================================================
@@ -8521,6 +8559,141 @@ static s64 viv_pselect6(struct Proc *p, u64 nfds_arg, u64 rd_va, u64 wr_va,
     return (s64)bits;
 }
 
+// Measure a NUL-terminated user string, bounded by `max` bytes not counting the
+// NUL. Unlike viv_measure_user_path, an EMPTY string is LEGAL here: `argv[i]`
+// may be "" and a shell produces them (`cmd ""`), so a zero length is a value
+// rather than an error.
+static s64 viv_measure_user_str(u64 va, u32 max, u32 *len_out) {
+    if (!len_out) return -(s64)T_E_INVAL;
+    for (u32 i = 0; i <= max; i++) {
+        if (!sys_validate_user_buf(va + i, 1))  return -(s64)T_E_FAULT;
+        u8 b = 0;
+        if (uaccess_load_u8(va + i, &b) != 0)   return -(s64)T_E_FAULT;
+        if (b == '\0') { *len_out = i; return 0; }
+    }
+    // Linux answers E2BIG. Not in the errno registry (docs/ERRORS.md is
+    // ABI-bearing; #142 batches this with ECHILD), so -EINVAL -- the L-2a
+    // NOEXEC precedent: an error, correctly attributed to the argument.
+    return -(s64)T_E_INVAL;
+}
+
+// execve(path, argv, envp) -- LINEAGE L-6a.
+//
+// The translation is the ARGUMENT SHAPE: Linux passes a NULL-terminated array
+// of pointers to NUL-terminated strings; SYS_EXECVE takes one concatenated
+// blob plus a count. So this walks argv and repacks it, which is the whole
+// reason sys_execve_core exists (there is no user VA here to hand over).
+//
+// ENVP DECLINES WHEN NON-EMPTY, and that is the argument-domain rule (V-2b
+// section 4) rather than laziness: a T2 row admits only argument values whose
+// effect the native mechanism reproduces EXACTLY. Linux's envp means "the new
+// image's environment is exactly this", and Thylacine cannot produce that
+// effect at ANY layer -- exec_build_init_stack writes a lone NULL for envp in
+// both frame shapes (exec.c:405, :438), so a new image's `environ` is empty
+// however the kernel was asked. Writing the strings into /env would only MOVE
+// the loss: musl reads `__environ` from the stack, never from /env. So an
+// EMPTY envp is honoured exactly (the guest asked for nothing and gets
+// nothing), and a non-empty one is refused rather than silently dropped.
+//
+// The refusal is therefore also a DETECTOR: if a real guest shell trips it, the
+// answer is the /env -> envp projection in exec_build_init_stack (#140), not a
+// weakening here.
+static s64 viv_execve(struct exception_context *ctx, u64 path_va, u64 argv_va,
+                      u64 envp_va) {
+    // DECIDE BEFORE MEASURE (vivarium.h): the envp verdict settles before any
+    // of the potentially-large argv walk. A NULL envp pointer is the same
+    // request as an empty one -- nothing to reproduce.
+    if (envp_va) {
+        if (!sys_validate_user_buf(envp_va, 8))     return -(s64)T_E_FAULT;
+        u64 e0 = 0;
+        if (viv_load_u64(envp_va, &e0) != 0)        return -(s64)T_E_FAULT;
+        if (e0 != 0)                                return -(s64)T_E_NOSYS;
+    }
+
+    u32 path_len = 0;
+    s64 m = viv_measure_user_path(path_va, &path_len);
+    if (m != 0) return m;
+    char path[SYS_OPEN_PATH_MAX + 1];
+    for (u32 i = 0; i < path_len; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(path_va + i, &b) != 0)  return -(s64)T_E_FAULT;
+        path[i] = (char)b;
+    }
+    path[path_len] = '\0';
+
+    // PASS 1 -- count the elements and total their lengths. Only a total is
+    // kept, not a per-element array: 512 lengths would be 2 KiB of kernel
+    // stack next to the 1 KiB path buffer, and pass 2 does not need them (see
+    // its cap below).
+    u64 argc = 0, total = 0;
+    if (argv_va) {
+        for (;;) {
+            if (argc > SYS_SPAWN_ARGV_MAX)          return -(s64)T_E_INVAL; // E2BIG
+            u64 sv = argv_va + argc * 8u;
+            if (!sys_validate_user_buf(sv, 8))      return -(s64)T_E_FAULT;
+            u64 sp_ptr = 0;
+            if (viv_load_u64(sv, &sp_ptr) != 0)     return -(s64)T_E_FAULT;
+            if (sp_ptr == 0) break;                 // the NULL terminator
+            u32 sl = 0;
+            s64 r = viv_measure_user_str(sp_ptr, SYS_SPAWN_ARGV_DATA_MAX, &sl);
+            if (r != 0) return r;
+            total += sl;
+            if (total + argc + 1u > SYS_SPAWN_ARGV_DATA_MAX)
+                return -(s64)T_E_INVAL;             // E2BIG
+            argc++;
+        }
+    }
+
+    char *blob  = NULL;
+    u64 blob_len = 0;
+    if (argc) {
+        blob_len = total + argc;                    // one NUL per string
+        blob = kmalloc((size_t)blob_len, 0);
+        if (!blob)                                  return -(s64)T_E_NOMEM;
+
+        // PASS 2 -- copy. Every write is bounded by pass 1's measurement, NOT
+        // by re-finding a NUL, because the strings live in the guest's own
+        // memory and nothing here holds it still. A peer that lengthens a
+        // string between the passes must not be able to overrun the buffer
+        // pass 1 sized; the same submit-time-snapshot discipline I-30 applies
+        // to a shared ring. (No such peer exists today -- a vfork parent is
+        // suspended and CLONE_THREAD is not a row -- but the bound costs
+        // nothing and removes the class rather than resting on that.)
+        //
+        // `cap` reserves one byte for each NUL still owed, so the terminator
+        // write below can never be the byte that overflows.
+        u64 w = 0;
+        for (u64 i = 0; i < argc; i++) {
+            u64 sv = argv_va + i * 8u;
+            u64 sp_ptr = 0;
+            if (!sys_validate_user_buf(sv, 8) || viv_load_u64(sv, &sp_ptr) != 0) {
+                kfree(blob);
+                return -(s64)T_E_FAULT;
+            }
+            u64 cap = blob_len - (argc - i);
+            u64 n = 0;
+            while (w < cap) {
+                u8 b = 0;
+                if (!sys_validate_user_buf(sp_ptr + n, 1) ||
+                    uaccess_load_u8(sp_ptr + n, &b) != 0) {
+                    kfree(blob);
+                    return -(s64)T_E_FAULT;
+                }
+                if (b == '\0') break;               // shortened since pass 1
+                blob[w++] = (char)b;
+                n++;
+            }
+            blob[w++] = '\0';                       // exactly argc NULs, always
+        }
+        blob_len = w;                               // == total + argc unless a
+                                                    // string shortened mid-walk
+    }
+
+    s64 r = sys_execve_core(ctx, path, path_len, blob, blob_len, argc);
+    kfree(blob);
+    return r;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 // `ctx` is used by exactly one case (clone, LINEAGE L-3d) and ignored by the
@@ -8824,13 +8997,30 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // for child_tls. Reaching for args[3] here would hand the child a
         // garbage TPIDR_EL0 and fault it at its first thread-local access, far
         // from this line.
-        if (vivarium_clone_decide(args[0], args[1]) != VIV_TRANSLATED)
+        bool share_mem = false;
+        if (vivarium_clone_decide(args[0], args[1], &share_mem) != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
 
-        // 0 = INHERIT the caller's TPIDR_EL0, which is what a vfork child needs:
-        // it runs the parent's C, thread-locals and all, until it execs.
-        return sys_rfork_core(ctx, (unsigned)(RFPROC | RFMEM), args[1], 0);
+        // 0 = INHERIT the caller's TPIDR_EL0. That is what a vfork child needs
+        // (it runs the parent's C, thread-locals and all, until it execs) and
+        // equally what a fork child needs (it continues the parent outright).
+        return sys_rfork_core(ctx,
+                              share_mem ? (unsigned)(RFPROC | RFMEM)
+                                        : (unsigned)RFPROC,
+                              args[1], 0);
     }
+
+    case VIV_LINUX_EXECVE:
+        // execve(path, argv, envp): x0..x2. LINEAGE L-6a.
+        //
+        // Safe as a T2 row, unlike rt_sigreturn, and for a reason worth stating
+        // rather than inheriting: sys_execve_core DOES rewrite the frame on
+        // success -- but it returns exactly 0, and it has already zeroed every
+        // GPR including regs[0]. So the caller's `regs[0] = viv_tier2(...)`
+        // store writes 0 onto the 0 it just wrote, and the new image still
+        // starts with a clean x0. A core that ever returned non-zero on success
+        // would break that, which is why it returns a literal.
+        return viv_execve(ctx, args[0], args[1], args[2]);
 
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That

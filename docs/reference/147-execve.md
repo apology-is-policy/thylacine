@@ -169,6 +169,57 @@ is a script, re-run it under an interpreter", and `EINVAL` as "bad arguments".
 
 ---
 
+## Two front ends, one core (L-6a)
+
+The Linux `execve(path, argv, envp)` hands the kernel an **array of pointers**,
+not a concatenated blob, and the phenotype must repack it — in *kernel* memory,
+since there is no user VA it could hand over. So the exec itself is
+`sys_execve_core`, which takes arguments already copied in:
+
+| front end | argument shape |
+|---|---|
+| `sys_execve_handler` | the native ABI — `(path_va, path_len, blob_va, blob_len, argc)`, already concatenated; copies it out of user memory |
+| `viv_execve` | the Linux ABI — walks `char *const argv[]` and builds the blob |
+
+One implementation of the ordering, two shapes. Two details are load-bearing:
+
+**The packing contract is validated in the core, below both builders.**
+`exec_build_init_stack` *extincts* when the NUL count disagrees with `argc`, so
+a mis-built blob has to become `-EINVAL` before it reaches the loader. Checking
+once, under both front ends, means a bug in either is an error rather than a
+dead kernel.
+
+**The blob belongs to the caller on every path.** The pre-split body freed it
+inside what is now the core. Carrying those `kfree`s across the split made it a
+**double free on every execve** — not a leak but a heap corruption, and it
+surfaced as a mangled argv blob in an *unrelated later spawn*, nowhere near
+execve. The comment stating the ownership rule was written before the body was
+adjusted to match it.
+
+**The argv walk is two passes, and the second is bounded by the first.** Pass 1
+measures; pass 2 copies, capped by that measurement rather than by re-finding a
+NUL, and writes each terminator itself so the blob has exactly `argc` of them
+whatever the strings did in between. This is the I-30 snapshot discipline: no
+concurrent writer exists today — a vfork parent is suspended and `CLONE_THREAD`
+is not a row — but the bound removes the class instead of resting on that.
+
+### envp declines when non-empty
+
+Not laziness, and not a v1.x stub: the effect cannot be produced **at any
+layer**. `exec_build_init_stack` writes a lone NULL for envp in both frame
+shapes (`exec.c:405` Shape A, `:438` Shape B), and musl's `__libc_start_main`
+does `__environ = envp`. So every program — native, pouch, phenotyped — starts
+with an empty environment; `/env` is the only channel and only the Go fork reads
+it. Writing the guest's envp into `/env` would not honour it, it would move the
+loss somewhere harder to see.
+
+An empty envp is therefore served **exactly** (the guest asked for nothing and
+gets nothing), and a non-empty one is refused. That makes the decline a
+*detector*: if a real guest shell trips it, the answer is the `/env` -> envp
+projection in `exec_build_init_stack` (#140), not a weakening here.
+
+---
+
 ## The multi-thread refusal
 
 POSIX says exec terminates every thread but the caller. L-2a **refuses** a

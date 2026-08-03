@@ -479,6 +479,43 @@ same stack VA, so the successor reads *plausible but wrong* argv out of a
 translation whose page tables have already been freed. Measured at L-2a as a
 revert probe.
 
+#### As built at L-6a — the split, and what envp measured
+
+The phenotype cannot hand `SYS_EXECVE` a user VA: Linux passes a
+NULL-terminated array of pointers, and the concatenated blob has to be built in
+kernel memory. So the exec itself becomes **`sys_execve_core`**, taking
+arguments already copied in, with two front ends producing them — the native
+one from its user-VA blob, the phenotype one by walking the `char *const
+argv[]`. One implementation of the ordering above, two argument shapes.
+
+Two placements fell out of that and are worth stating because both are load-
+bearing rather than tidy:
+
+**The packing contract is validated in the core, below both builders.**
+`exec_build_init_stack` EXTINCTS on a NUL count that disagrees with `argc`, so
+a mis-built blob must be caught before it reaches the loader. Validating once,
+under both front ends, turns a bug in either into `-EINVAL`.
+
+**The blob is the caller's on every path.** The pre-split body freed it inside
+what is now the core; carrying those frees across the split made it a **double
+free on every execve** — not a leak but a heap corruption, which surfaced as a
+mangled argv blob in an *unrelated later spawn* rather than anywhere near
+execve. The comment stating the ownership rule was written before the body was
+adjusted to match it.
+
+**envp declines when non-empty, and the measurement is why.** The argument-
+domain rule (VIVARIUM §4) admits only values whose effect the native mechanism
+reproduces exactly. Linux's envp means "the new image's environment is exactly
+this", and Thylacine cannot produce that effect **at any layer**:
+`exec_build_init_stack` writes a lone NULL for envp in both frame shapes
+(`exec.c:405` Shape A, `:438` Shape B), and musl's `__libc_start_main` does
+`__environ = envp`. So every program — native, pouch, and phenotyped — starts
+with an empty environment, `/env` is the only channel, and only the Go fork
+reads it. Writing envp into `/env` would therefore not honour it; it would only
+move the loss. An empty envp is served exactly (the guest asked for nothing);
+a non-empty one is refused, which makes the decline a **detector** for whether
+the L-6c gate needs the `/env` -> envp projection that is the real fix (#140).
+
 #### Multi-thread: refused at L-2a, built at L-2b
 
 Linux `execve` terminates every thread but the caller. Thylacine does not yet
@@ -1153,7 +1190,9 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-4a** ✅ | **Prerequisite, not COW work**: exec's stack + every NON-EXECUTABLE segment move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots (the stack: only the run its argv/auxv frame occupies at the top). Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. Executable segments stay eager — the I-cache reason above. DMA + Weft rings stay eager too (they need physical contiguity). | **LANDED**: `exec.writable_segment_is_sparse` (4 MiB memsz, 64 B filesz -> 1024 slots reserved, 1 resident) + `exec.stack_is_sparse` (1 MiB reserved, 1 resident), both revert-probed; 1289/1289 + boot OK |
 | **L-4b** *(landed: b-1 substrate, b-2 clone + break)* | Per-page share counts + the COW break arm (stage 3a). The count is a **new** `struct page.cow_share` (taking the free `_pad`, so `sizeof` stays 48) — **not** the double-booked `refcount` (§2.8), and **not** a per-slot array, which §5.4's L-4b correction measures to be unimplementable: after a break the slot and its counted page diverge, and the free decision corrupts. A fork clones the Burrow per address space (Plan 9 `dupseg`); the break decides under a **global** COW leaf lock, because two sharers hold different Burrow locks. | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** ✅ **LANDED** | Stock `fork()`. Two mechanical changes — `rfork_internal` clones for the fork shape (`fc && !RFMEM`), and `sys_rfork_core` admits `RFPROC` alone with `child_sp == 0` meaning INHERIT (the SP rules are RFMEM's, not the fork's). **Plus the two defects making it live exposed**, neither of which L-4b's tests could see: **#136** — `addrspace_clone` refused every real address space (the vDSO is read-only eager anon, and the tests build their own spaces); **#137** — `ESR_ISS_WNR_BIT` was 9, not 6, so `fi->is_write` had been ALWAYS FALSE tree-wide, leaving the COW write-break unreachable (an infinite fault loop) and the write-permission gate inert. | **MET, and not by the gate as written** — "in a vivarium" needs L-6's `execve`/`wait4` rows; the fork itself is proven natively instead. `/fork-probe` legs K (three separately-falsifiable COW claims, both Procs running) + L (a store to read-only text is DENIED — the half of #137 leg K does not cover). Five independent revert probes, the sharpest being: **drop the clone wiring and the unit suite stays at a full 1300/1300 while only the in-guest leg fails** |
-| **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
+| **L-6a** ✅ **LANDED** | The VIVARIUM `execve` row + the `clone` **fork** shape. `sys_execve_core` extracted so the native front end keeps its user-VA copy-in while the phenotype walks a `char *const argv[]` into the blob (the V-8 `sys_fstat_for_proc` discipline), and `vivarium_clone_decide` gains `VIV_CLONE_FLAGS_FORK` — the half L-3d refused because copy-on-write did not exist, which L-4/L-5 discharged. **envp declines when non-empty**: §5.2's as-built section measures that `exec_build_init_stack` writes a lone NULL for envp in BOTH frame shapes, so no Thylacine process has ever had a POSIX environment on its stack (#140) and the effect cannot be reproduced at any layer. | **MET** — 1300/1300 (the assertions land inside `vivarium.clone_domain`), boot OK, 0 EXTINCTION; `viv-pheno-probe` L156/L156b (a real fork returning twice, and the fork word still exact) + L164–L169 (the whole argv walk exercised by a *failing* execve, where ENOENT-not-EINVAL is a positive statement that the blob passed the core's self-check). Two revert probes, complementary rather than redundant: dropping the **fork admission** fails the unit test at its own assertion, while disabling the **envp gate** leaves the unit suite at a full **1300/1300** and fails only in-guest at L166 |
+| **L-6b** | The VIVARIUM `wait4` row. A genuine flag map, not a passthrough: Linux `WNOHANG`/`WUNTRACED`/`WCONTINUED` are 1/2/8 against Thylacine's 1/2/4, and Linux's `WEXITED` (4) collides with `WAIT_CONTINUED`. `wait_pid_for` is already a POSIX `waitpid` with the Linux packed status layout (PTY-1e), so the work is the map, the pack-when-the-kernel-did-not rule, and turning the no-matching-child `-1` into `-ECHILD` (#142). | a reaped child, and the L-6a child-ran + COW-privacy legs the probe cannot write without a reap |
+| **L-6c** | The arc gate. | **an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
 
 Ordering is forced, not chosen: L-1 blocks L-3 and L-4 (F-B), L-2a blocks L-3

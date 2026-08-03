@@ -1542,3 +1542,80 @@ phenotyped caller, which would be testing a configuration the system never runs.
 > ramfs copy is fresh; only the container's is stale, which is what makes this
 > hard to see. Any chunk adding viv / diorama / alpine-bundle legs must take one
 > `PRESERVE=0` build before trusting any result (task #126).
+>
+> **L-6a hit this again, and the failure mode was subtler the second time.** The
+> chunk rewrote L156 from a decline into a real fork; with `PRESERVE=1` the
+> guest ran the *old* binary, which still asserted the decline — so the boot
+> reported `marker=L156 status=1`, a plausible-looking failure of the new work
+> rather than an obviously stale artifact. A stale binary does not always read
+> as "nothing changed"; when the *policy* flipped, it reads as "the change is
+> broken".
+
+---
+
+## The `execve` row + the `clone` fork shape (LINEAGE L-6a)
+
+`execve` is `VIV_LINUX_EXECVE = 221` -> `VIV_TIER2`, and it arrives together
+with the *other half* of the clone row, because a shell needs both or neither.
+
+### The clone row's stated reason had expired
+
+L-3d refused `clone(SIGCHLD, 0)` — a plain `fork()` — and said why: the child
+would need a private copy-on-write address space, which did not exist. L-4 and
+L-5 built one. The refusal kept passing anyway, because **a decline is also what
+a domain that simply never widened produces**, so nothing in the tree could tell
+"still correct" from "now stale". The leg's own comment named the chunks that
+would discharge it; it had to be looked for rather than waited for.
+
+So `vivarium_clone_decide` gains a second exact word, `VIV_CLONE_FLAGS_FORK`,
+and a `bool *share_mem_out` telling the shell which of `RFPROC` /
+`RFPROC|RFMEM` to pass. Two exact words rather than a relaxed mask, because the
+shapes differ in more than a bit:
+
+| | vfork shape | fork shape |
+|---|---|---|
+| flags | `CLONE_VM\|CLONE_VFORK\|SIGCHLD` | `SIGCHLD` |
+| `stack == 0` | **refused** — two Procs pushing on one stack | **normal** — means INHERIT |
+| address space | shared, parent suspends | private, copy-on-write |
+
+The `stack` rule *inverts*, and that is the kernel's contract rather than a
+choice made here: `SYS_RFORK` refuses a zero `child_sp` under RFMEM and treats
+it as INHERIT under RFPROC alone. A single shared rule would have to be wrong
+for one of them.
+
+### execve translates the argument shape
+
+Linux passes `char *const argv[]`; `SYS_EXECVE` takes one concatenated blob.
+The walk has to build that blob in *kernel* memory, so there is no user VA to
+hand the native handler — which is why `sys_execve_core` was extracted. See
+`147-execve.md` "Two front ends, one core" for the split, the double free it
+briefly introduced, and the envp measurement.
+
+`envp` declines when non-empty. It is not a stub: `exec_build_init_stack` writes
+a lone NULL for envp in both frame shapes, so **no process on this system has
+ever had a POSIX environment on its stack** — `/env` is the only channel and
+only the Go fork reads it. An empty envp is served exactly; a non-empty one is
+refused, which makes the decline a detector for whether the arc gate needs the
+`/env` -> envp projection (#140).
+
+### Coverage, and the two probes that map the blindness
+
+L156/L156b are the fork (a real one, returning twice, plus the exactness of the
+fork word). L164–L169 are execve, and they are all **failing** shapes on
+purpose: a successful execve replaces the probe, which could then never report.
+That is not a coverage hole — a *failing* execve exercises the entire argv walk,
+and the errno discriminates. Reaching the resolve at all (ENOENT) means the walk
+measured every string, built the blob, and passed the core's NUL-count-vs-argc
+self-check; a builder bug answers EINVAL from that check instead. So ENOENT is a
+positive statement about the blob, not merely "it failed".
+
+Two revert probes, and they are complementary rather than redundant:
+
+- Dropping the **fork admission** fails `vivarium.clone_domain` at its own
+  assertion. The decision is pure, so the unit test sees it.
+- Disabling the **envp gate** leaves the unit suite at a full **1300/1300 PASS**
+  and fails only in-guest, at exactly `marker=L166`. The decision lives in the
+  shell, and no pure test can reach it.
+
+Together they say precisely which layer sees what — the same split the arc has
+now measured five times.

@@ -128,8 +128,10 @@ const NR_PSELECT6: u64 = 72;
 // `include/sched.h`, read from the tree; SIGCHLD is the exit signal in the LOW
 // BYTE, from `arch/aarch64/bits/signal.h`.
 const NR_CLONE: u64 = 220;
+const NR_EXECVE: u64 = 221;
 const CLONE_VM: u64 = 0x00000100;
 const CLONE_VFORK: u64 = 0x00004000;
+const CLONE_FILES: u64 = 0x00000400;
 const CLONE_THREAD: u64 = 0x00010000;
 const CLONE_SETTLS: u64 = 0x00080000;
 const SIGCHLD: u64 = 17;
@@ -293,6 +295,11 @@ const NEG_ENOSYS: i64 = -38;
 // V-2d: the T2 shells reproduce Linux's ARGUMENT errors exactly rather than
 // collapsing them into a decline, so EINVAL is a distinct expected answer.
 const NEG_EINVAL: i64 = -22;
+
+// LINEAGE L-6a: execve's failing shapes. ENOENT is the positive statement that
+// the argv walk got as far as the resolve; EFAULT is the fault-close.
+const NEG_ENOENT: i64 = -2;
+const NEG_EFAULT: i64 = -14;
 
 // The Linux aarch64 `struct stat` (128 bytes; kernel/include/thylacine/
 // vivarium.h `struct viv_linux_stat` is the kernel's copy of this layout).
@@ -1753,9 +1760,44 @@ unsafe fn run_linux() -> ! {
         b"L155\n"
     );
 
-    // A plain fork(): the child would need a PRIVATE address space, which is
-    // copy-on-write and does not exist yet (L-4/L-5).
-    leg!(rep, svc6(NR_CLONE, SIGCHLD, clone_sp, 0, 0, 0, 0) == NEG_ENOSYS, b"L156\n");
+    // A plain fork(): clone(SIGCHLD, 0), exactly what musl's fork() -> _Fork()
+    // emits. Until L-6a this leg asserted a DECLINE, on the stated grounds that
+    // "copy-on-write does not exist yet (L-4/L-5)" -- and it kept passing after
+    // L-4 and L-5 landed, because a decline is also what a domain that simply
+    // never widened produces. The reason expired underneath a leg that could
+    // not tell the difference, which is why it had to be looked for.
+    //
+    // A BARE svc6, not the __viv_clone shim: fork returns twice on the SAME SP
+    // in each Proc's own private copy, so there is no different-stack return to
+    // arrange. This is also what makes it a real test of L-3b's frame copy --
+    // both sides resume at the instruction after this svc.
+    //
+    // THE CHILD MUST NOT FALL THROUGH into the remaining legs. It would report
+    // a second, interleaved verdict into the same file and both would be
+    // garbage, so it exits immediately.
+    let fpid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if fpid == 0 {
+        unsafe { linux_exit(0) }             // the child; never returns
+    }
+    leg!(rep, fpid > 0, b"L156\n");
+
+    // WHAT THIS LEG DOES NOT PROVE, said plainly rather than implied: that the
+    // child RAN. With a private address space the child's writes are invisible
+    // here by construction, so the only channels are a reap (wait4 -- not a row
+    // until L-6b) or a pipe (pipe2 -- not a row at all). The boot log's
+    // "orphan pid=N (parent viv-pheno-probe exiting)" line is the current
+    // evidence that a second Proc existed. The child-ran + COW-privacy legs
+    // belong with wait4 at L-6b, which is the chunk that can reap.
+
+    // The fork word is EXACT, like the vfork one: CLONE_FILES on top of it asks
+    // to SHARE the handle table (Plan 9 RFFDG), which L-3c-1 deliberately does
+    // not do -- it copies. Asserted here as well as in the unit test because
+    // this is the side that proves the shell reaches the domain check at all.
+    leg!(
+        rep,
+        svc6(NR_CLONE, CLONE_FILES | SIGCHLD, 0, 0, 0, 0, 0) == NEG_ENOSYS,
+        b"L156b\n"
+    );
 
     // CLONE_THREAD: a genuinely concurrent child has a correct target already,
     // and it is SYS_THREAD_SPAWN, not this row.
@@ -1821,6 +1863,88 @@ unsafe fn run_linux() -> ! {
     let child_tp = CLONE_CHILD_TPIDR.load(Ordering::SeqCst);
     leg!(rep, child_tp != CLONE_POISON_TLS, b"L162\n");
     leg!(rep, child_tp == my_tp, b"L163\n");
+
+    // --- L164-L169 (LINEAGE L-6a): execve ------------------------------------
+    //
+    // ONLY THE FAILING SHAPES, and that is a coverage decision worth stating: a
+    // SUCCESSFUL execve replaces this image, so the probe would stop being the
+    // probe and could never report. The native /exec-probe already proves the
+    // success path end to end (it is the same sys_execve_core), so what is left
+    // uncovered here is exactly the phenotype's own work -- the `char *const
+    // argv[]` walk -- and a failing execve exercises ALL of it.
+    //
+    // THE ERRNO IS THE DISCRIMINATOR. A resolve that fails answers ENOENT, and
+    // reaching the resolve at all means the walk measured every string, built
+    // the blob, and passed the core's NUL-count-vs-argc self-check. A builder
+    // bug produces EINVAL from that check instead, so ENOENT is a positive
+    // statement about the blob and not merely "it failed".
+    let miss = b"/nonexistent-l6a\0";
+    let a0 = b"argv0\0";
+    let a1 = b"a longer second argument\0";
+    let argv_ok: [u64; 3] = [a0.as_ptr() as u64, a1.as_ptr() as u64, 0];
+
+    leg!(
+        rep,
+        svc3(NR_EXECVE, miss.as_ptr() as u64, argv_ok.as_ptr() as u64, 0)
+            == NEG_ENOENT,
+        b"L164\n"
+    );
+
+    // A NULL argv is argc == 0, the Shape-A frame. Linux itself tolerates it
+    // (with a warning since 5.18), and the blob builder must produce no blob at
+    // all rather than a zero-length one -- the core rejects `argc == 0` paired
+    // with a non-zero length, so a builder that emitted an empty buffer here
+    // would answer EINVAL.
+    leg!(
+        rep,
+        svc3(NR_EXECVE, miss.as_ptr() as u64, 0, 0) == NEG_ENOENT,
+        b"L165\n"
+    );
+
+    // THE ENVP DECLINE -- this chunk's argument-domain decision. Linux's envp
+    // means "the new image's environment is exactly this", and no Thylacine
+    // layer can produce that effect: exec_build_init_stack writes a lone NULL
+    // for envp in both frame shapes, so a new image's `environ` is empty
+    // however the kernel was asked. Refusing beats dropping it silently.
+    //
+    // It is checked BEFORE the path, so this must decline even though the path
+    // is the one that does not exist -- ENOSYS, not ENOENT.
+    let e0 = b"FOO=bar\0";
+    let envp_full: [u64; 2] = [e0.as_ptr() as u64, 0];
+    leg!(
+        rep,
+        svc3(NR_EXECVE, miss.as_ptr() as u64, argv_ok.as_ptr() as u64,
+             envp_full.as_ptr() as u64) == NEG_ENOSYS,
+        b"L166\n"
+    );
+
+    // An EMPTY envp is honoured exactly rather than refused: the guest asked
+    // for nothing and gets nothing. Both spellings -- a NULL pointer (L164/165
+    // above) and a present-but-empty array.
+    let envp_empty: [u64; 1] = [0];
+    leg!(
+        rep,
+        svc3(NR_EXECVE, miss.as_ptr() as u64, argv_ok.as_ptr() as u64,
+             envp_empty.as_ptr() as u64) == NEG_ENOENT,
+        b"L167\n"
+    );
+
+    // A bad path pointer must fault-close rather than reach the walk.
+    leg!(
+        rep,
+        svc3(NR_EXECVE, 0, argv_ok.as_ptr() as u64, 0) == NEG_EFAULT,
+        b"L168\n"
+    );
+
+    // AND WE ARE STILL HERE. The L-2a ordering property -- everything that can
+    // fail happens before anything observable changes -- reached through the
+    // SECOND front end. Six failed execves and the caller still owns its image,
+    // its stack and its report fd.
+    leg!(
+        rep,
+        svc3(NR_WRITE, rep as u64, b"".as_ptr() as u64, 0) == 0,
+        b"L169\n"
+    );
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

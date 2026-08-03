@@ -200,6 +200,7 @@ enum {
     // sparsely"). That is why VIV_NATIVE_CEILING below exists as a symbol
     // rather than as a number repeated in prose.
     VIV_LINUX_CLONE       = 220,
+    VIV_LINUX_EXECVE      = 221,
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
@@ -1402,6 +1403,17 @@ enum {
 #define VIV_CLONE_FLAGS_ADMITTED \
     ((u32)(VIV_CLONE_VM | VIV_CLONE_VFORK | VIV_CLONE_SIGCHLD))
 
+// The SECOND admitted word (LINEAGE L-6a): a plain `fork()`. musl's fork() ->
+// _Fork() emits exactly `clone(SIGCHLD, 0)` -- no CLONE_VM, so the child gets a
+// PRIVATE copy-on-write address space, which is what L-4/L-5 built.
+//
+// It is a separate exact word rather than a mask relaxation for the reason the
+// vfork word is exact: every bit outside these two is one nobody has reasoned
+// about. And the two shapes DIFFER in more than a bit -- they take opposite
+// `stack` rules (below) and map onto different rfork flag words -- so a single
+// mask could not express either correctly.
+#define VIV_CLONE_FLAGS_FORK ((u32)VIV_CLONE_SIGCHLD)
+
 // Decide whether a `clone` is inside the translatable domain. PURE -- no user
 // memory, no Proc, no locks.
 //
@@ -1433,10 +1445,22 @@ enum {
 // kernel gate to widen a phenotype row would be the wrong direction of change.
 // Declining one line above the kernel keeps the reason visible.
 //
-// Returns VIV_TRANSLATED (the shell may call SYS_RFORK with RFPROC|RFMEM,
-// `stack`, and a literal 0 tls) or VIV_FORWARD. Never ENOSYS: `clone` exists,
-// and a `fork()`-shaped call is one L-5 will serve rather than one to deny
-// forever.
-enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack);
+// Returns VIV_TRANSLATED or VIV_FORWARD. Never ENOSYS: `clone` exists, and the
+// shapes outside the domain are ones a later chunk may serve rather than ones
+// to deny forever.
+//
+// On VIV_TRANSLATED, *share_mem_out says WHICH of the two shapes was admitted:
+// true = the vfork shape (the child shares the address space and the parent
+// suspends -> RFMEM), false = the fork shape (the child gets a private
+// copy-on-write copy). The shell turns that into a flag word; the pure layer
+// says share-or-copy without importing proc.h's RFPROC/RFMEM, which do not
+// belong on this side of the boundary.
+//
+// It is an OUT-PARAM rather than something the shell re-derives from `flags`
+// (the vivarium_openat_decide shape) because re-deriving would put the same
+// decision in two places, and the two shapes differ in exactly the way a second
+// reader would get wrong.
+enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
+                                       bool *share_mem_out);
 
 #endif // THYLACINE_VIVARIUM_H
