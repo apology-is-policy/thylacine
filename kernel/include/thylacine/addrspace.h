@@ -162,6 +162,55 @@ void addrspace_ref(struct AddrSpace *as);
 //     root and no lookup matches the old tag.
 void addrspace_unref(struct AddrSpace *as);
 
+// LINEAGE L-4b: build a COPY-ON-WRITE clone of `src` -- the address-space half of
+// fork. Returns a fresh AddrSpace with ref 1 whose VMA list mirrors `src`'s, or
+// NULL (having freed everything it allocated) on OOM, an over-cap child, or a VMA
+// this arc cannot yet copy.
+//
+// WHAT EACH VMA BECOMES
+//
+//   BURROW_TYPE_ANON_LAZY  the Burrow is CLONED (burrow_clone_cow) and BOTH VMAs
+//                          are flagged VMA_FLAG_COW. Read-only lazy VMAs are
+//                          cloned too rather than shared: a write can never reach
+//                          them, so sharing would be safe, but cloning keeps the
+//                          ONE-Burrow-ONE-address-space property uniform, and that
+//                          property is what the break's locking rests on.
+//   BURROW_TYPE_FILE       the Burrow is SHARED (one more mapping reference). Text
+//                          and rodata are read-only by construction (REVENANT's
+//                          dispatch gate admits only non-writable segments), so
+//                          there is nothing to break -- and sharing is the entire
+//                          point of the I-36 Image cache. A writable FILE VMA
+//                          would be a contradiction; it is refused.
+//   guard VMA              reproduced as a guard (no Burrow, prot 0). Dropping it
+//                          would silently delete the child's stack guard page.
+//   anything else          REFUSED, so the fork fails cleanly rather than handing
+//                          the child a mapping with the wrong sharing semantics:
+//                            - eager BURROW_TYPE_ANON has no per-page ownership to
+//                              break (one indivisible buddy block);
+//                            - MMIO / DMA are I-34 hardware the child must not get
+//                              a second mapping of;
+//                            - VMA_FLAG_SHARED_IN is another Proc's memory, whose
+//                              G-2 budget is charged to the mapping address space.
+//
+// THE PARENT IS MODIFIED TOO, and must be: its own already-installed writable PTEs
+// are UNINSTALLED for every COW range, so its next touch re-faults and re-installs
+// read-only. Skipping that would leave the parent writing through a stale writable
+// PTE into a page the child now shares -- silent cross-address-space corruption,
+// the I-44 violation this whole arc exists to prevent.
+//
+// LOCKING: takes src->lock across the entire walk (a peer thread of the forking
+// Proc may be faulting), and the child's lock beneath it via vma_insert_in. That
+// nesting is safe because the child is not yet published -- no other CPU can reach
+// it to take its lock in the opposite order.
+//
+// `exempt` is the CHILD's I-32 exemption (proc_resource_exempt of the forking
+// Proc, which the child inherits). Resident shared pages are charged to the child
+// as well as the parent -- each address space maps them, so each counts them, the
+// Linux RSS reading. That deliberately over-counts physical memory between the
+// fork and the break, in the safe direction: the fork fails up front rather than
+// the break OOMing later, when there is nowhere good to put the failure.
+struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt);
+
 // How many Procs currently reference this address space. 0 for NULL (a
 // kernel-only Proc shares nothing with anyone).
 //

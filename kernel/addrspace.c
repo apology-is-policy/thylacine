@@ -9,6 +9,7 @@
 // the header for why a "1 today" counter is still the wrong place to be lazy.
 
 #include <thylacine/addrspace.h>
+#include <thylacine/burrow.h>    // L-4b: burrow_clone_cow + the type dispatch
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>      // PROC_PAGE_MAX / PROC_VMA_MAX / PROC_SHARED_MAP_MAX_PAGES
@@ -94,6 +95,143 @@ void addrspace_unref(struct AddrSpace *as) {
     proc_pgtable_destroy(as->pgtable_root);
     as->pgtable_root = 0;
     kfree(as);
+}
+
+// =============================================================================
+// LINEAGE L-4b: the copy-on-write clone (see the header for what each VMA kind
+// becomes, and why the parent is modified too).
+// =============================================================================
+
+// Does this VMA participate in COW? The two passes below must agree EXACTLY on
+// this -- pass 1 clones and flags the child, pass 2 flags the parent and drops its
+// writable PTEs -- so the test is written once. A guard VMA has no Burrow and is
+// excluded by the first term.
+static bool vma_is_cow(const struct Vma *v) {
+    return v->burrow && v->burrow->type == BURROW_TYPE_ANON_LAZY;
+}
+
+// Build the child's counterpart of one parent VMA. Returns false on any failure;
+// the caller then discards the whole partially-built child, so nothing here needs
+// to unwind anything except what it allocated and has not yet handed over.
+static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
+                          const struct Vma *src_vma) {
+    // A guard VMA (no Burrow, prot 0) is pure reserved address space. It must be
+    // reproduced or the child silently loses its stack guard page -- an overflow
+    // would then corrupt the VMA below instead of faulting.
+    if (!src_vma->burrow) {
+        struct Vma *g = vma_alloc_guard(src_vma->vaddr_start, src_vma->vaddr_end);
+        if (!g) return false;
+        if (vma_insert_in(dst, exempt, g) != 0) { vma_free(g); return false; }
+        return true;
+    }
+
+    // Another Proc's memory mapped in here (G-2). Its budget is charged to THIS
+    // address space, and a second mapping would need a second charge against a
+    // Proc that never asked for it -- refuse rather than invent a policy.
+    if (src_vma->flags & VMA_FLAG_SHARED_IN) return false;
+
+    struct Burrow *backing = src_vma->burrow;
+    struct Burrow *minted  = NULL;      // a clone we own until the mapping ref lands
+    u32            flags   = 0;
+
+    switch (backing->type) {
+    case BURROW_TYPE_ANON_LAZY:
+        minted = burrow_clone_cow(backing);
+        if (!minted) return false;
+        backing = minted;
+        flags   = VMA_FLAG_COW;
+        break;
+    case BURROW_TYPE_FILE:
+        // Shared, not cloned -- see the header. A writable FILE VMA cannot exist
+        // (REVENANT's dispatch gate admits only non-writable segments), so this is
+        // a fail-closed check on an impossible shape rather than a live path.
+        if (src_vma->prot & VMA_PROT_WRITE) return false;
+        break;
+    default:
+        // Eager ANON (no per-page ownership), MMIO and DMA (I-34 hardware).
+        return false;
+    }
+
+    struct Vma *nv = vma_alloc(src_vma->vaddr_start, src_vma->vaddr_end,
+                               src_vma->prot, backing, src_vma->burrow_offset);
+    if (!nv) {
+        if (minted) burrow_unref(minted);
+        return false;
+    }
+    nv->flags = flags;
+    if (vma_insert_in(dst, exempt, nv) != 0) {
+        vma_free(nv);                   // symmetric: releases the mapping ref
+        if (minted) burrow_unref(minted);
+        return false;
+    }
+
+    if (minted) {
+        // The child maps these pages too, so it counts them too (the Linux RSS
+        // reading -- see the header on why over-counting here is the safe
+        // direction). Read the resident count BEFORE dropping the construction
+        // handle, purely so the two operations cannot be reordered by a later
+        // edit into a read of a Burrow whose only remaining ref is the mapping.
+        u32 resident = burrow_lazy_resident_count(minted);
+        burrow_unref(minted);           // handle_count -> 0; the mapping keeps it
+        if (resident > 0) {
+            spin_lock(&dst->lock);
+            bool charged = addrspace_charge_pages(dst, resident, exempt);
+            spin_unlock(&dst->lock);
+            if (!charged) return false; // over cap -> the fork fails, not the break
+        }
+    }
+    return true;
+}
+
+struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
+    if (!src) return NULL;
+
+    struct AddrSpace *dst = addrspace_alloc();
+    if (!dst) return NULL;
+
+    // src->lock across BOTH passes: a peer thread of the forking Proc can be in
+    // userland_demand_page right now, and it holds exactly this lock. Without the
+    // hold it could fill a slot between the snapshot and the write-protect, and
+    // that page would then be shared with the child while the parent still had a
+    // writable PTE for it.
+    spin_lock(&src->lock);
+
+    bool ok = true;
+    for (struct Vma *v = src->vmas; v && ok; v = v->next)
+        ok = clone_one_vma(dst, exempt, v);
+
+    if (ok) {
+        // Pass 2, on success only, so a FAILED fork leaves the parent exactly as
+        // it was found: no half-flagged VMAs, no gratuitously torn-down PTEs.
+        for (struct Vma *v = src->vmas; v; v = v->next) {
+            if (!vma_is_cow(v)) continue;
+            v->flags |= VMA_FLAG_COW;
+            // Drop the parent's own installed PTEs for the range. They are
+            // WRITABLE (the VMA is), and the pages behind them are now shared, so
+            // leaving them would let the parent write into the child's memory --
+            // the I-44 violation. Uninstalling rather than write-protecting costs
+            // one extra fault per page and needs no new MMU primitive; the fault
+            // arm re-installs read-only because the VMA is now flagged COW.
+            //
+            // mmu_uninstall_user_range issues the TLBI per page, so a peer thread
+            // already running on another CPU cannot keep using a cached writable
+            // translation either.
+            mmu_uninstall_user_range(src->pgtable_root, 0,
+                                     v->vaddr_start, v->vaddr_end);
+        }
+    }
+
+    spin_unlock(&src->lock);
+
+    if (!ok) {
+        // Discard the partial child WHOLESALE: the last unref drains its VMA list,
+        // which drops every mapping ref, which frees every Burrow this call
+        // cloned, which puts back every COW share it took. Nothing needs a
+        // bespoke unwind -- which is why every failure above simply returns false.
+        addrspace_unref(dst);
+        return NULL;
+    }
+    return dst;
 }
 
 // =============================================================================

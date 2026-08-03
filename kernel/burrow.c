@@ -376,6 +376,77 @@ int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
     return 0;
 }
 
+// LINEAGE L-4b: dupseg. See burrow.h for why a fork clones the Burrow instead of
+// sharing a reference to it, and cow.h for why that forces the share count onto
+// the page.
+struct Burrow *burrow_clone_cow(struct Burrow *src) {
+    if (!g_vmo_cache)                       extinction("burrow_clone_cow before burrow_init");
+    if (!src)                               return NULL;
+    if (src->magic != VMO_MAGIC)            return NULL;
+    if (src->type != BURROW_TYPE_ANON_LAZY) return NULL;
+    if (!src->filepages)                    return NULL;
+    if (src->page_count == 0)               return NULL;
+
+    // Allocate BOTH before taking a single share: an OOM after the shares were
+    // taken would have to walk them back, and the whole point of doing the
+    // allocation first is that there is then nothing to unwind.
+    struct Burrow *dst = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
+    if (!dst) return NULL;
+    struct page **slots = kmalloc(src->page_count * sizeof(struct page *), KP_ZERO);
+    if (!slots) {
+        kmem_cache_free(g_vmo_cache, dst);
+        return NULL;
+    }
+
+    dst->magic         = VMO_MAGIC;
+    dst->type          = BURROW_TYPE_ANON_LAZY;
+    dst->size          = src->size;
+    dst->page_count    = src->page_count;
+    dst->handle_count  = 1;              // construction reference, as at create
+    dst->mapping_count = 0;
+    dst->pages         = NULL;
+    dst->order         = 0;
+    dst->filepages     = slots;
+
+    // Snapshot under src->lock so a slot cannot be filled halfway through the
+    // walk (the caller additionally holds the source address space's lock, which
+    // excludes its own faulters; this is the in-file discipline). cow_page_get
+    // nests beneath, which is the stated as->lock -> v->lock -> g_cow_lock order.
+    //
+    // The share is taken for the slot that is about to point at the page, and the
+    // slot is written in the same hold -- so there is no window in which the clone
+    // references a page it has not counted.
+    spin_lock(&src->lock);
+    for (size_t i = 0; i < src->page_count; i++) {
+        struct page *pg = src->filepages[i];
+        if (!pg) continue;               // never touched: stays NULL, reads as zero
+        cow_page_get(pg);
+        slots[i] = pg;
+    }
+    spin_unlock(&src->lock);
+
+    g_vmo_created++;
+    return dst;
+}
+
+// LINEAGE L-4b: the COW break's commit. Kept here so filepages[] and v->lock stay
+// burrow.c's alone; the share-count ordering around it is the caller's, and is
+// spelled out in burrow.h.
+bool burrow_lazy_swap_slot(struct Burrow *v, size_t slot,
+                           struct page *expect, struct page *replacement) {
+    if (!v)                               return false;
+    if (v->magic != VMO_MAGIC)            return false;
+    if (v->type != BURROW_TYPE_ANON_LAZY) return false;
+    if (!expect || !replacement)          return false;
+
+    spin_lock(&v->lock);
+    bool ok = (v->filepages && slot < v->page_count &&
+               v->filepages[slot] == expect);
+    if (ok) v->filepages[slot] = replacement;
+    spin_unlock(&v->lock);
+    return ok;
+}
+
 // LINEAGE L-4a: the direct-map address of one resident ANON_LAZY slot. The
 // caller-privacy precondition is stated in burrow.h and is what makes returning a
 // raw page pointer sound here; no lock is taken because there is, by that

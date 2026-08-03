@@ -388,6 +388,11 @@ void test_cow_set_sole_never_inherits(void);
 void test_cow_get_put_reports_last_holder(void);
 void test_cow_break_decide_is_sole(void);
 void test_burrow_lazy_free_is_conditional_on_share(void);
+void test_cow_burrow_clone_shares_resident_pages(void);
+void test_cow_addrspace_clone_shares_and_writeprotects(void);
+void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
+void test_cow_break_read_then_write_copies(void);
+void test_cow_break_sole_holder_takes_in_place(void);
 void test_fork_frame_init(void);
 void test_fork_rfork_arg_rejection(void);
 void test_fork_table_copy(void);
@@ -1821,6 +1826,17 @@ struct test_case g_tests[] = {
     { "cow.break_decide_is_sole",      test_cow_break_decide_is_sole,      false, NULL },
     { "burrow.lazy_free_is_conditional_on_share",
                                        test_burrow_lazy_free_is_conditional_on_share, false, NULL },
+    // LINEAGE L-4b-2: the clone (the producer of sharing) + the break.
+    { "cow.burrow_clone_shares_resident_pages",
+                                       test_cow_burrow_clone_shares_resident_pages, false, NULL },
+    { "cow.addrspace_clone_shares_and_writeprotects",
+                                       test_cow_addrspace_clone_shares_and_writeprotects, false, NULL },
+    { "cow.addrspace_clone_refuses_and_leaves_parent_intact",
+                                       test_cow_addrspace_clone_refuses_and_leaves_parent_intact, false, NULL },
+    { "cow.break_read_then_write_copies",
+                                       test_cow_break_read_then_write_copies, false, NULL },
+    { "cow.break_sole_holder_takes_in_place",
+                                       test_cow_break_sole_holder_takes_in_place, false, NULL },
     { "addrspace.alloc_shape",         test_addrspace_alloc_shape,         false, NULL },
     { "addrspace.refcount",            test_addrspace_refcount,            false, NULL },
     { "addrspace.kproc_has_none",      test_addrspace_kproc_has_none,      false, NULL },

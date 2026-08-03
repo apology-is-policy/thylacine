@@ -126,6 +126,12 @@ enum burrow_type {
 };
 
 struct page;
+struct AddrSpace;      // <thylacine/addrspace.h> — LINEAGE L-1; burrow_lazy_populate /
+                       //   burrow_map_in take one. Forward-declared so a translation
+                       //   unit that includes only this header does not get the
+                       //   -Wvisibility "will not be visible outside of this function"
+                       //   warning (and, worse, a struct type incompatible with the
+                       //   real one). Pre-existing since L-4a; noticed at L-4b.
 struct KObj_MMIO;
 struct KObj_DMA;
 struct Spoor;          // <thylacine/spoor.h> — REVENANT: the pinned backing Chan
@@ -298,6 +304,52 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
 // Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, SLUB
 // OOM, or filepages-array OOM.
 struct Burrow *burrow_create_anon_lazy(size_t size);
+
+// LINEAGE L-4b: clone an ANON_LAZY Burrow for a forking address space -- Plan 9's
+// dupseg. The result is a SEPARATE Burrow of the same size whose filepages[] holds
+// the SAME page pointers, one extra COW share taken per resident page.
+//
+// WHY A CLONE AND NOT A SHARED REFERENCE. A COW break has to put the private page
+// somewhere, and a shared Burrow's slot is the one place it cannot go -- the other
+// sharer still needs the pristine page there. Cloning gives each address space a
+// slot it may overwrite; cow.h has the rest of the argument, including why that in
+// turn forces the share count onto the PAGE rather than onto a slot.
+//
+// The clone preserves the property every other ANON_LAZY path already relies on:
+// ONE Burrow, ONE mapping, ONE address space (burrow_share_into admits only ANON
+// and the DMA weave, and SYS_BURROW_ATTACH_LAZY drops the construction handle, so
+// no ANON_LAZY Burrow is reachable from two address spaces). That is what lets the
+// break's slot swap be serialized by the faulting address space's OWN lock.
+//
+// NON-resident slots stay NULL in the clone, and that is correct rather than lazy:
+// a slot with no page has never been written, so it reads as zero -- and each side
+// demand-zeroing its own page after the fork is exactly the divergence a fork is
+// supposed to produce.
+//
+// Takes src->lock (to snapshot the slots) and, beneath it, the global COW lock per
+// resident page -- the established as->lock -> v->lock -> g_cow_lock order. The
+// caller is expected to hold the source address space's lock, which is what keeps a
+// peer thread's fault from filling a slot midway through the snapshot.
+//
+// Returns NULL on: a non-ANON_LAZY Burrow, a malformed one, or OOM (the struct or
+// the filepages array), having taken no shares and left `src` untouched.
+struct Burrow *burrow_clone_cow(struct Burrow *src);
+
+// LINEAGE L-4b: swap a private page into one ANON_LAZY slot, replacing `expect`.
+// The COW break's commit step -- separated out so burrow.c keeps its monopoly on
+// filepages[] and on the v->lock discipline.
+//
+// Returns true when the slot still held `expect` and now holds `replacement`.
+// Returns false if the slot has changed (unreachable at v1.0 -- see the ONE
+// Burrow, ONE address space property above -- so the caller may treat it as a
+// bail rather than a retry).
+//
+// Does NOT touch either page's share count: the caller establishes the new page's
+// count BEFORE the swap (it must be set before the page is reachable) and releases
+// the old page's AFTER it (the retained share is the pin that keeps a concurrent
+// exit from freeing the page mid-copy -- cow.tla::BUGGY_TEARDOWN_NO_PIN).
+bool burrow_lazy_swap_slot(struct Burrow *v, size_t slot,
+                           struct page *expect, struct page *replacement);
 
 // LINEAGE L-4a: make slots [first, first+n) of an ANON_LAZY Burrow resident up
 // front, instead of leaving them to the demand-zero fault arm. exec is the only

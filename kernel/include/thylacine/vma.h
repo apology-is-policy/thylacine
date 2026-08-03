@@ -44,6 +44,24 @@ struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 // charge. The budget invariant: shared_map_pages == Σ pages of SHARED_IN VMAs.
 #define VMA_FLAG_SHARED_IN  (1u << 0)
 
+// VMA_FLAG_COW (LINEAGE L-4b; docs/LINEAGE.md section 5.4): this VMA's
+// BURROW_TYPE_ANON_LAZY backing may hold pages that a SECOND address space's
+// clone Burrow also points at, so a write must go through the copy-on-write
+// break rather than straight to the page. Set by addrspace_clone on BOTH the
+// parent's VMA and the child's at fork, never cleared.
+//
+// Never cleared, deliberately. The flag says "this mapping participates in
+// COW", and the per-PAGE cow_share count is what actually decides each break --
+// so a VMA whose pages have all been taken in place costs one extra fault per
+// page and nothing else, while clearing it would need a scan proving no page in
+// the range is still shared. The page count is the truth; this is the routing.
+//
+// It is the PTE, not the VMA, that is made read-only: vma->prot keeps
+// VMA_PROT_WRITE so a write fault passes demand_page_locked's step-2 permission
+// check and reaches the break. A VMA that dropped WRITE would turn every COW
+// write into a segfault.
+#define VMA_FLAG_COW        (1u << 1)
+
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
 // struct Proc / struct Thread / struct Burrow / struct Handle pattern).
 #define VMA_MAGIC 0x564D413043ADEFADULL    // 'VMA0' || 0xCADE'FADE

@@ -1011,6 +1011,57 @@ already describes it, because by then the substrate matches the description.
 > allocation. Hashing it by page index is a recorded seam, to be taken if it ever
 > measures.
 
+> **As built (L-4b-2).** Three pieces, in the order the dependency forces:
+> `burrow_clone_cow` (dupseg — a separate Burrow, the same page pointers, one
+> `cow_page_get` per resident slot), `addrspace_clone` (the address-space half),
+> and the break arm in `demand_page_locked`'s `ANON_LAZY` case.
+>
+> `addrspace_clone` clones every `ANON_LAZY` VMA — **including read-only ones**.
+> Sharing those would be safe (a write can never reach them), but cloning keeps
+> the *one Burrow, one address space* property uniform, and that property is what
+> lets the break's slot swap be serialised by the faulting address space's own
+> lock. `FILE` VMAs are shared, not cloned: REVENANT's dispatch gate admits only
+> non-writable segments, so there is nothing to break, and sharing is the point of
+> the I-36 Image cache. Guard VMAs are reproduced (dropping one silently deletes
+> the child's stack guard page). Everything else — eager `ANON`, `MMIO`, `DMA`,
+> `SHARED_IN` — is refused, and the fork fails whole.
+>
+> **The parent is modified too.** Its already-installed writable PTEs for every
+> COW range are *uninstalled*, so its next touch re-faults and re-installs
+> read-only. Leaving them is the I-44 violation: the parent would write through a
+> stale writable translation into a page the child now shares. Uninstalling rather
+> than write-protecting costs one extra fault per page and needs no new MMU
+> primitive. That pass runs **on success only**, so a refused fork leaves the
+> parent exactly as it was found.
+>
+> **The break must clear the stale PTE before installing.**
+> `mmu_install_user_pte` *refuses* a mismatching install over a valid leaf — it
+> returns -1 rather than overwriting (`mmu.c:1649`) — and both break outcomes
+> mismatch: the copy path changes the PA, the take-in-place path changes the
+> permission bits. Since the read that precedes a write installs read-only, the
+> first COW write after a read would otherwise fail its install and kill the Proc.
+> The `mmu_uninstall_user_pte` at the top of the write branch is what makes the
+> read-then-write sequence work at all, and `cow.break_read_then_write_copies`
+> exists to hold it.
+>
+> **The I-32 charge is taken at the fork, not at the break.** Each address space
+> maps the shared page, so each counts it — the Linux RSS reading. That
+> deliberately over-counts physical memory between the fork and the break, in the
+> safe direction: the fork fails up front, where the failure can be reported,
+> instead of the break OOMing later, where there is nowhere good to put it. The
+> break itself therefore takes no charge — one mapped page becomes one mapped page.
+>
+> **The impl realizes the model's `pin` with the retained share**, rather than a
+> second counter: the breaker holds its own share across the alloc and the copy and
+> calls `cow_page_put` only once the copy is done. That is strictly stronger than
+> the model's separate `pin` (a held share also keeps the count off zero), so the
+> implementation refines `cow.tla` rather than deviating from it.
+>
+> **`VMA_FLAG_COW` is never cleared.** The flag is routing; the per-page count is
+> the truth. A VMA whose pages have all been taken in place costs one extra fault
+> per page, where clearing it would need a scan proving no page in the range is
+> still shared.
+
 **Ordering inside the chunk is forced**: L-4b cannot be written against a
 substrate L-4a has not yet produced. The model comes before both.
 
@@ -1080,7 +1131,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-3c-2** ✅ **LANDED** | The VFORK suspend (#122). `vfork_await_release` parks the parent on `child_waiters` until `vfork_child_released` — which reads `child->as`, so the condition IS the release rather than a record of it. Keyed on `RFMEM`, not a new flag: §9's fourth question, answered at §5.3's as-built section. One new wake (exec); death's already existed. | **MET** — 1285 → 1286/1286, boot OK, `/fork-probe` legs I (death arm) + J (exec arm, the successor blocks on a pipe so "still alive" is a fact not a race). Two revert probes: removing the park leaves the **unit suite fully green** while only the in-guest leg fails; removing the exec wake leaves it green *and* hangs the boot — the honest production symptom |
 | **L-3d** ✅ **LANDED** | The VIVARIUM `clone` row. `vivarium_clone_decide` (pure) + one `VIV_TIER2` entry + a shell that calls the SAME `sys_rfork_core` the native handler calls (extracted here, the V-8 `sys_fstat_for_proc` discipline). `CLONE_VM` without `CLONE_VFORK` is **refused**, not served — §8's as-built section carries why L-3c-2's fail-safe reasoning inverts for a stock Linux caller. Also replaced the four stale copies of the "native ceiling" literal with `VIV_NATIVE_CEILING` + a `_Static_assert`. | **MET, but not by the gate as written** — that gate named `posix_spawn`, which needs `execve` (221) and `wait4` (260) as well; both are L-6's, are real translators, and are dependencies of *posix_spawn* rather than of *the clone translation*. Replaced by: a clone whose child runs, writes into the shared address space, and exits, with the parent suspended until it does. 1286 → 1287/1287; `viv-pheno-probe` legs L155–L163, boot-fatal |
 | **L-4a** ✅ | **Prerequisite, not COW work**: exec's stack + every NON-EXECUTABLE segment move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots (the stack: only the run its argv/auxv frame occupies at the top). Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. Executable segments stay eager — the I-cache reason above. DMA + Weft rings stay eager too (they need physical contiguity). | **LANDED**: `exec.writable_segment_is_sparse` (4 MiB memsz, 64 B filesz -> 1024 slots reserved, 1 resident) + `exec.stack_is_sparse` (1 MiB reserved, 1 resident), both revert-probed; 1289/1289 + boot OK |
-| **L-4b** | Per-page share counts + the COW break arm (stage 3a). The count is a **new** `struct page.cow_share` (taking the free `_pad`, so `sizeof` stays 48) — **not** the double-booked `refcount` (§2.8), and **not** a per-slot array, which §5.4's L-4b correction measures to be unimplementable: after a break the slot and its counted page diverge, and the free decision corrupts. A fork clones the Burrow per address space (Plan 9 `dupseg`); the break decides under a **global** COW leaf lock, because two sharers hold different Burrow locks. | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
+| **L-4b** *(landed: b-1 substrate, b-2 clone + break)* | Per-page share counts + the COW break arm (stage 3a). The count is a **new** `struct page.cow_share` (taking the free `_pad`, so `sizeof` stays 48) — **not** the double-booked `refcount` (§2.8), and **not** a per-slot array, which §5.4's L-4b correction measures to be unimplementable: after a break the slot and its counted page diverge, and the free decision corrupts. A fork clones the Burrow per address space (Plan 9 `dupseg`); the break decides under a **global** COW leaf lock, because two sharers hold different Burrow locks. | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
