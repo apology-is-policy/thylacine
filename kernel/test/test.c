@@ -607,6 +607,10 @@ void test_vivarium_fstatat_domain(void);                 // VIVARIUM V-2c
 void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
+void test_vivarium_startup_batch_rows(void);             // #150 (LINEAGE L-6c)
+void test_vivarium_writev_domain(void);                  // #150
+void test_vivarium_uname_fill(void);                     // #150
+void test_vivarium_identity_map(void);                   // #150
 void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
 void test_vivarium_sigaction_domain(void);               // VIVARIUM V-6a
 void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
@@ -2097,6 +2101,14 @@ struct test_case g_tests[] = {
     { "vivarium.mmap_domain",            test_vivarium_mmap_domain,            false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
     { "vivarium.wait4_domain",           test_vivarium_wait4_domain,           false, NULL },
+    // #150 -- the startup batch. One test per OBLIGATION rather than one per
+    // syscall: the table classification (which rows are T1 vs T2 vs ENOSYS and
+    // WHY), writev's argument domain, uname's fabricated content plus its I-13
+    // zero-fill, and the identity sentinel mapping.
+    { "vivarium.startup_batch_rows",     test_vivarium_startup_batch_rows,     false, NULL },
+    { "vivarium.writev_domain",          test_vivarium_writev_domain,          false, NULL },
+    { "vivarium.uname_fill",             test_vivarium_uname_fill,             false, NULL },
+    { "vivarium.identity_map",           test_vivarium_identity_map,           false, NULL },
     { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },
     { "vivarium.sigaction_domain",       test_vivarium_sigaction_domain,       false, NULL },
     { "vivarium.sigset_to_notemask",     test_vivarium_sigset_to_notemask,     false, NULL },

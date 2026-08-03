@@ -202,6 +202,52 @@ enum {
     VIV_LINUX_CLONE       = 220,
     VIV_LINUX_EXECVE      = 221,
     VIV_LINUX_WAIT4       = 260,
+
+    // The startup batch (#150) -- the set a real Linux binary issues between
+    // _start and its first useful instruction. Measured, not guessed: this is
+    // exactly the census `viv_report_unserved` printed the moment #149's loader
+    // fix let Alpine's busybox execute, minus the two rows that are declined on
+    // purpose (brk 214, mprotect 226).
+    //
+    // FOUR OF THEM ARE BELOW THE NATIVE CEILING, so each owes the per-number
+    // collision paragraph the pselect6/ppoll block above demands -- and this is
+    // the first time that obligation has had to be discharged for more than two
+    // numbers at once. The first half of the argument is shared: a PHENO_LINUX
+    // Proc cannot reach a native number AT ALL (every number it issues goes
+    // through vivarium_translate; an unclassified one lands on FORWARD ->
+    // ENOSYS), so it never had the native call to lose. The second half -- what
+    // a NATIVE program MIS-DECLARED as PHENO_LINUX now reaches -- is per number:
+    //
+    //   17  vs SYS_SET_DUMPABLE(dumpable). getcwd would write the cwd into
+    //       args[0], which is the dumpable flag: a VA of 0 or 1. That fails
+    //       sys_validate_user_buf, so the outcome is ERANGE/EFAULT and no write.
+    //   25  vs SYS_SPAWN_FULL(...). fcntl is ENOSYS below -- there is no shell
+    //       to mis-dispatch INTO, so this row costs a mis-declared Proc exactly
+    //       an ENOSYS.
+    //   66  vs SYS_LOOM_SETUP(entries, params_va). writev would read args[1] as
+    //       an iovec array and write to fd args[0]. Both are the caller's OWN --
+    //       its own memory, bounds-checked, and an fd it already holds -- so the
+    //       worst case is EFAULT/EBADF or a write of the caller's bytes to the
+    //       caller's fd. Never authority.
+    //   96  vs SYS_TTY_SET_FG(fd, pgid). set_tid_address would store args[0] --
+    //       a small fd number -- as clear_child_tid. It is validated (4-byte
+    //       aligned, under UACCESS_USER_VA_TOP), and the exit-time store through
+    //       it is a uaccess_store_u32 with a fixup entry, so an unmapped VA 4
+    //       faults into the fixup and is swallowed. The caller's own address
+    //       space, and nothing else.
+    //
+    // The remaining seven are above the ceiling and discharge by construction.
+    VIV_LINUX_GETCWD          = 17,
+    VIV_LINUX_FCNTL           = 25,
+    VIV_LINUX_WRITEV          = 66,
+    VIV_LINUX_SET_TID_ADDRESS = 96,
+    VIV_LINUX_SETGID          = 144,
+    VIV_LINUX_SETUID          = 146,
+    VIV_LINUX_UNAME           = 160,
+    VIV_LINUX_GETPID          = 172,
+    VIV_LINUX_GETPPID         = 173,
+    VIV_LINUX_GETUID          = 174,
+    VIV_LINUX_GETGID          = 176,
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
@@ -1578,5 +1624,159 @@ struct viv_wait_opts {
 
 enum viv_verdict vivarium_wait4_decide(u64 options, u64 rusage,
                                        struct viv_wait_opts *out);
+
+// -----------------------------------------------------------------------------
+// writev (#150). The row the L-6c gate was actually blocked on: busybox's `echo`
+// writes through writev, so with no translator the shell ran perfectly and
+// printed nothing.
+//
+// IT MUST BE TIER 2, and this is the sharpest case yet of the ARITY RULE
+// (section 4 / the ARCH section 25.4 row). A renumber onto SYS_WRITE lines up
+// register for register -- writev(fd, iov, iovcnt) vs SYS_WRITE(fd, buf, len),
+// three arguments each -- and would be catastrophically wrong: arg 1 is a
+// POINTER TO AN ARRAY OF POINTERS, not a buffer, and arg 2 is an ENTRY COUNT,
+// not a byte length. The kernel would write `iovcnt` bytes of the iovec array
+// itself -- the guest's own pointers -- to the fd. The rule exists for exactly
+// this: registers lining up is not arguments meaning the same thing.
+#define VIV_UIO_MAXIOV 1024
+
+// Linux `struct iovec` on aarch64: two 64-bit words, and the LP64 layout is
+// fixed ABI. Named so the shell reads user memory in the shape it actually has
+// rather than by open-coded offsets.
+struct viv_linux_iovec {
+    u64 base;
+    u64 len;
+};
+
+_Static_assert(sizeof(struct viv_linux_iovec) == 16,
+               "Linux aarch64 struct iovec is two 64-bit words");
+
+// Bound the entry count. Split out as a pure decide because it carries the one
+// real judgement in the row -- everything else writev does is uaccess and a loop
+// over the existing byte-I/O core. Linux answers EINVAL for a count over
+// UIO_MAXIOV and for a negative one (the argument is an `int`, so a huge u64
+// with bit 31 set is negative on the Linux side; comparing as u64 catches both).
+//
+// Returns VIV_TRANSLATED with *out_count set, or VIV_FORWARD for out-of-domain.
+// A count of 0 is IN domain and legal: Linux still validates the fd, so the
+// shell issues a zero-length write rather than short-circuiting to 0.
+enum viv_verdict vivarium_writev_decide(u64 iovcnt, u32 *out_count);
+
+// Accumulate a total byte count with Linux's overflow rule. Linux rejects a
+// writev whose lengths sum past SSIZE_MAX (it would make the return value
+// indistinguishable from an error), and it checks this BEFORE writing anything.
+// Returns false when the addition would break that bound.
+bool vivarium_writev_accumulate(u64 *total, u64 add);
+
+// -----------------------------------------------------------------------------
+// uname (#150). A fabrication -- there is no underlying Thylacine call -- so the
+// question is not HOW to translate but WHAT to claim, and a wrong answer here is
+// the mistranslation the argument-domain rule exists to prevent: a guest that
+// believes it is on a kernel it is not will take a code path we cannot serve.
+//
+// THE DECISION, field by field:
+//
+//   sysname    "Linux". The truthful answer WITHIN the phenotype -- the ABI the
+//              guest sees IS Linux's, which is what a vivarium means. Claiming
+//              "Thylacine" would send every `uname -s` check down an unknown-OS
+//              path with no Thylacine support behind it, which is strictly worse
+//              than the path it has.
+//
+//   release    "4.4.0", and this is the field the task flagged. No number is
+//              honest: there is no Linux whose syscall surface matches ours,
+//              because ours is a small subset of every version's. So the choice
+//              is which direction to be wrong in, and LOW is safer -- a guest
+//              that assumes little uses the oldest code paths, which are exactly
+//              the ones translated here. 4.4 is picked as THE NEWEST KERNEL THAT
+//              PROMISES NOTHING WE LACK: it predates statx (4.11, which we
+//              FORWARD), io_uring (5.1), clone3 (5.3), openat2 (5.6),
+//              faccessat2 (5.8) and close_range (5.9, also FORWARD) -- every
+//              modern number this table declines. It also clears glibc's
+//              minimum (3.2), below which a glibc binary aborts outright with
+//              "FATAL: kernel too old" before main().
+//
+//   version    Carries "Thylacine" ON PURPOSE. Programs essentially never parse
+//              this field -- it is the free-form build banner -- so it is where
+//              `uname -a` can tell the truth without any version check tripping
+//              over it. That split is the section 9 DEGRADED tier applied inside
+//              a single struct: be compatible where a field is load-bearing, be
+//              truthful where it is observable.
+//
+//   machine    "aarch64". Simply true.
+//   nodename   "thylacine". There is no hostname concept to read.
+//   domainname "(none)". Linux's own default.
+//
+// Linux's `struct new_utsname`: six fixed 65-byte NUL-terminated fields
+// (__NEW_UTS_LEN 64, plus the terminator). 390 bytes, no padding, no alignment
+// beyond a byte -- so the guest's `struct utsname` and this one are the same
+// object.
+#define VIV_UTS_FIELD_LEN 65
+
+struct viv_linux_utsname {
+    char sysname[VIV_UTS_FIELD_LEN];
+    char nodename[VIV_UTS_FIELD_LEN];
+    char release[VIV_UTS_FIELD_LEN];
+    char version[VIV_UTS_FIELD_LEN];
+    char machine[VIV_UTS_FIELD_LEN];
+    char domainname[VIV_UTS_FIELD_LEN];
+};
+
+_Static_assert(sizeof(struct viv_linux_utsname) == 390,
+               "Linux struct new_utsname is six 65-byte fields, densely packed");
+
+// Fill a kernel-side utsname. Pure -- the shell copies it out. Zeroes the whole
+// struct first, so every byte past each string is a defined 0 rather than
+// whatever the caller's stack held (I-13: this struct is copied to EL0).
+void vivarium_uname_fill(struct viv_linux_utsname *out);
+
+// -----------------------------------------------------------------------------
+// The identity reads (#150). getpid/getuid/getgid have exact native twins with
+// matching arity and non-negative returns, so they are T1 rows -- with ONE
+// translation that cannot live in a renumber, which is why getuid/getgid are
+// shells instead:
+//
+// THE SENTINEL MAPPING. Thylacine's TCB identity is PRINCIPAL_SYSTEM ==
+// 0xFFFFFFFE, and the container's shell runs as exactly that. Passed through
+// raw, a Linux guest reads `(uid_t)-2` -- which in Linux practice is the
+// historic "nobody"/nfsnobody value, i.e. the number that means the LEAST
+// privileged identity. So the raw pass-through is not neutral: it inverts the
+// fact being asked about, telling a Proc that holds the system identity that it
+// is nobody. Mapping it to 0 (Unix root, the identity PRINCIPAL_SYSTEM
+// corresponds to) is the faithful answer.
+//
+// SAFE BY CONSTRUCTION, not by luck: PRINCIPAL_INVALID and GID_INVALID are both
+// 0, so 0 is not assignable to any real principal or group -- the mapping cannot
+// collide with a genuine identity, and every other value passes through
+// unchanged.
+//
+// CONFERS NOTHING. Every authority decision in Thylacine reads the real
+// `principal_id` through perm_check or a CAP_* gate; the number a guest sees is
+// informational to the guest alone. A container shell that believes it is root
+// will ATTEMPT privileged operations and be refused at the real gates exactly as
+// before -- the mapping changes what it is told, never what it may do (I-22).
+u32 vivarium_map_uid(u32 principal_id);
+u32 vivarium_map_gid(u32 gid);
+
+// -----------------------------------------------------------------------------
+// setuid / setgid (#150). Thylacine identity is set ONCE at spawn (via
+// CAP_SET_IDENTITY) and is immutable on a running Proc, so there is nothing to
+// translate a real change to. The disposition is therefore an errno choice, and
+// the two candidates say different things:
+//
+//   ENOSYS -- "this system has no such concept". FALSE. Thylacine has a full
+//             identity model; it just is not mutable in place.
+//   EPERM  -- "you may not do this". TRUE, and it is also what Linux itself
+//             answers an unprivileged process, so a guest's existing
+//             drop-privilege fallback runs unchanged.
+//
+// With one exception that must not be collapsed into the refusal: setuid(getuid())
+// SUCCEEDS on Linux -- it is the idempotent no-op every "drop to my own uid"
+// path performs -- and refusing it would break callers that are asking for
+// nothing. So the identity-preserving call succeeds and every other one is EPERM.
+// The comparison is made in the GUEST's number space (after vivarium_map_uid),
+// because that is the only value the guest has ever been shown.
+//
+// Returns true when the call is the no-op (the shell answers 0).
+bool vivarium_setid_is_noop(u32 requested, u32 current_mapped);
 
 #endif // THYLACINE_VIVARIUM_H

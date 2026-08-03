@@ -1711,9 +1711,38 @@ unconditionally.** Three qualify, and each rests on a structural fact rather tha
 
 | flag | why ignoring it is *correct*, not merely harmless |
 |---|---|
-| `O_CLOEXEC` | Asks that the fd not survive exec. Thylacine has no close-on-exec concept because there is nothing to opt out of: a spawned child "inherits no Spoor handles" (`syscall.h:327`) and `SYS_SPAWN_WITH_FDS` passes an **explicit** list |
+| `O_CLOEXEC` | ~~Asks that the fd not survive exec. Thylacine has no close-on-exec concept because there is nothing to opt out of: a spawned child "inherits no Spoor handles" (`syscall.h:327`) and `SYS_SPAWN_WITH_FDS` passes an **explicit** list~~ **VOIDED — see below (task #151)** |
 | `O_NOCTTY` | Asks not to acquire a controlling terminal. Thylacine acquires one only via the explicit `SYS_TTY_ACQUIRE` (PTY-1), never implicitly on open — already relied on by the pouch pty patch |
 | `O_LARGEFILE` | Asks that >2 GiB offsets be permitted. Every Thylacine offset is 64-bit, exactly as on 64-bit Linux, whose kernel force-sets the bit internally |
+
+> **`O_CLOEXEC`'s entry above is no longer true, and how it stopped being true is
+> the point.** Its argument was never "the flag is harmless"; it was the stronger
+> and correct claim that *there is nothing to opt out of*, because the only way to
+> start a program was `SYS_SPAWN_*`, which endows an **explicit** fd list. Nothing
+> survived an exec that the parent had not deliberately handed over, so a flag
+> asking "do not let this survive" requested behaviour we already provided
+> unconditionally — which is exactly the bar this table sets.
+>
+> **LINEAGE voided the premise, one commit at a time, and neither commit had any
+> reason to look here.** L-2a (`execve`) replaces the image *in a live Proc* and
+> leaves the handle table untouched. L-3c-1 gave `rfork` a **copy** of the parent's
+> table, so the child sees what the parent sees. Together they are the POSIX
+> fork+exec shape, and under it every fd survives exec — so there is now a great
+> deal to opt out of, and admitting `O_CLOEXEC` silently promises something the
+> kernel does not do.
+>
+> This is the recurring shape rather than a one-off: **a round is scoped to one
+> commit, so a premise that a *later* commit voids is invisible to it.** The
+> defence is not a better review of either commit; it is that a fact stated as
+> load-bearing must be re-checked when the thing it rests on moves. `#150`
+> surfaced it from the other end — measuring which `fcntl` cmds Alpine's busybox
+> issues turned up `F_SETFD(FD_CLOEXEC)` and `F_DUPFD_CLOEXEC`, and asking why
+> those could not be served led back to this row.
+>
+> Until close-on-exec lands (**task #151**), `O_CLOEXEC` sits in the §9 DEGRADED
+> tier — accepted and not honoured — rather than in the table above. It is listed
+> here rather than quietly moved so that the correction stays legible next to the
+> claim it replaces.
 
 Contrast the rejects, where ignoring the bit is a **wrong answer**: `O_CREAT` would
 turn "create if absent" into `ENOENT`; `O_DIRECTORY` would turn `ENOTDIR` into a

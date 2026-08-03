@@ -8767,6 +8767,80 @@ static s64 viv_wait4(u64 pid_u, u64 wstatus_va, u64 options, u64 rusage_va) {
     return (s64)reaped;
 }
 
+// writev (#150). The row the L-6c gate was blocked on -- busybox's `echo` writes
+// through it, so with no translator the shell ran perfectly and printed nothing.
+//
+// LOOPS THE EXISTING BYTE-I/O CORE rather than growing a vectored one. Each
+// entry goes through sys_write_handler, which is the whole audited staging path
+// -- the weft fast-path, the CF-3 two-tier bounce, the SYS_RW_MAX clamp, the #100
+// errno translation -- so this function adds a decode and nothing else. A
+// vectored core would have had to reproduce all of it.
+//
+// TWO PASSES, and the reason is Linux's ERROR semantics rather than memory
+// safety. Linux validates the whole array up front (import_iovec) and answers
+// EINVAL/EFAULT having written NOTHING; a single-pass loop that validated entry
+// k just before writing it would leave entries 0..k-1 already written when it
+// found a bad one. Memory safety does not depend on this -- pass 2 re-validates
+// every buffer through sys_write_handler's own checks -- so the re-read is
+// benign: a peer thread rewriting the array between passes yields values that
+// are themselves validated before use, and the outcome degrades to a short
+// write, which is a legal writev result.
+//
+// The storage cost is O(1) deliberately. UIO_MAXIOV is 1024 and an iovec is 16
+// bytes, so buffering the array would want 16 KiB -- the entire kernel stack.
+static s64 viv_writev(u64 fd, u64 iov_va, u64 iovcnt_raw) {
+    u32 count = 0;
+    if (vivarium_writev_decide(iovcnt_raw, &count) != VIV_TRANSLATED)
+        return -(s64)T_E_INVAL;
+
+    // A zero count still validates the fd -- Linux resolves the descriptor
+    // before it looks at the array, so writev(badfd, x, 0) is EBADF, not 0.
+    // Issuing the zero-length write reproduces that through the same core
+    // rather than by re-deriving the handle check here.
+    if (count == 0) return sys_write_handler(fd, 0, 0);
+
+    // PASS 1 -- read and validate every entry, writing nothing.
+    u64 total = 0;
+    for (u32 i = 0; i < count; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
+        // copy_in rather than paired 32-bit loads: it handles an unaligned
+        // iov_va (a hostile guest is not obliged to pass an 8-aligned array,
+        // and Linux reads one regardless), and a bad VA lands in the fixup.
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0) return -(s64)T_E_FAULT;
+        if (!vivarium_writev_accumulate(&total, kiov.len)) return -(s64)T_E_INVAL;
+        // A zero-length entry names no memory, so it gets no range check --
+        // Linux skips them, and sys_validate_user_buf would reject base==0.
+        if (kiov.len != 0 && !sys_validate_user_buf(kiov.base, kiov.len))
+            return -(s64)T_E_FAULT;
+    }
+
+    // PASS 2 -- write, stopping at the first short or failing entry.
+    u64 written = 0;
+    for (u32 i = 0; i < count; i++) {
+        struct viv_linux_iovec kiov;
+        u64 ent = iov_va + (u64)i * sizeof(struct viv_linux_iovec);
+        if (uaccess_copy_in(&kiov, ent, sizeof(kiov)) != 0)
+            return (written > 0) ? (s64)written : -(s64)T_E_FAULT;
+
+        s64 wr = sys_write_handler(fd, kiov.base, kiov.len);
+
+        // POSIX: bytes already transferred WIN over a later error. Reporting the
+        // errno instead would tell the guest nothing was written when part of
+        // its data is gone -- the write is not undoable, so the count is the
+        // only honest answer once it is non-zero.
+        if (wr < 0) return (written > 0) ? (s64)written : wr;
+
+        written += (u64)wr;
+
+        // A short entry ends the call. This is also what bounds a single entry
+        // larger than SYS_RW_MAX: the core clamps, reports the clamped count,
+        // and the guest's libc reissues from where it stopped.
+        if ((u64)wr < kiov.len) break;
+    }
+    return (s64)written;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 // `ctx` is used by exactly one case (clone, LINEAGE L-3d) and ignored by the
@@ -9098,6 +9172,113 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     case VIV_LINUX_WAIT4:
         // wait4(pid, wstatus, options, rusage): x0..x3. LINEAGE L-6b.
         return viv_wait4(args[0], args[1], args[2], args[3]);
+
+    // ---- the startup batch (#150, LINEAGE L-6c) --------------------------
+
+    case VIV_LINUX_WRITEV:
+        // writev(fd, iov, iovcnt): x0..x2.
+        return viv_writev(args[0], args[1], args[2]);
+
+    case VIV_LINUX_GETCWD: {
+        // getcwd(buf, size): x0 buf, x1 size.
+        //
+        // A shell rather than a renumber for TWO divergences, either of which
+        // alone would disqualify it -- the arguments themselves line up exactly.
+        //
+        //   1. THE RETURN VALUE IS OFF BY ONE. Linux's raw getcwd returns the
+        //      length INCLUDING the terminating NUL (fs/d_path.c); SYS_GETCWD
+        //      returns it EXCLUDING. musl happens to survive the difference (it
+        //      only tests `ret < 0` and `ret == 0`), but glibc uses the value,
+        //      and a length that is quietly one short is precisely the kind of
+        //      near-miss that surfaces somewhere unrelated.
+        //   2. THE ERROR IS THE WRONG ONE. Linux answers ERANGE for a buffer too
+        //      small -- the errno every caller's grow-and-retry loop keys on.
+        //      SYS_GETCWD answers a flat -1, which a Linux guest reads as EPERM
+        //      (the #100 shape) and no retry loop recognises.
+        s64 rc = sys_getcwd_handler(args[0], args[1], 0, 0);
+        if (rc < 0) {
+            // The native handler folds several causes into -1: a zero size, a
+            // buffer too small, an unreadable VA. ERANGE is the one that names
+            // a caller ACTION (pass a bigger buffer) and is by far the most
+            // likely; EINVAL for the size==0 case Linux distinguishes.
+            if (args[1] == 0) return -(s64)T_E_INVAL;
+            return -(s64)T_E_RANGE;
+        }
+        return rc + 1;                      // + the NUL Linux counts
+    }
+
+    case VIV_LINUX_GETPPID: {
+        // getppid(void). A shell because there IS no native twin -- Thylacine
+        // exposes pid/uid/gid (72/73/74) and stops. Adding SYS_GETPPID would be
+        // a syscall-interface change, which is an escalation, and it would buy
+        // nothing a phenotype-local read does not already give.
+        //
+        // proc_parent_pid takes g_proc_table_lock, which is not optional and not
+        // available here: `parent` is rewritten by proc_reparent_children when a
+        // parent exits, so a lockless deref can read a pointer whose Proc is
+        // reaped and freed before the field access. The two existing readers
+        // (devproc.c, devctl.c) get the lock from proc_for_each; this one cannot,
+        // which is why the accessor lives in proc.c beside the tree it walks.
+        return (s64)proc_parent_pid(p);
+    }
+
+    case VIV_LINUX_GETUID:
+        // getuid(void). The native twin is exact, the arity matches, and it is
+        // STILL a shell -- the sentinel mapping (vivarium.h) has to happen
+        // somewhere, and a T1 renumber has no place to put it.
+        return (s64)(u64)vivarium_map_uid(p->principal_id);
+
+    case VIV_LINUX_GETGID:
+        // getgid(void). Same shape, same reason.
+        return (s64)(u64)vivarium_map_gid(p->primary_gid);
+
+    case VIV_LINUX_UNAME: {
+        // uname(buf): x0 buf. A fabrication -- WHAT it claims is the decision,
+        // and that argument lives beside the struct in vivarium.h.
+        struct viv_linux_utsname uts;
+        vivarium_uname_fill(&uts);
+        if (!sys_validate_user_buf(args[0], sizeof(uts))) return -(s64)T_E_FAULT;
+        if (uaccess_copy_out(args[0], &uts, sizeof(uts)) != 0)
+            return -(s64)T_E_FAULT;
+        return 0;
+    }
+
+    case VIV_LINUX_SET_TID_ADDRESS: {
+        // set_tid_address(tidptr): x0. Arity and success semantics match the
+        // native handler exactly -- both store the pointer and return the
+        // caller's tid -- so this shell exists for ONE reason: the error.
+        //
+        // Linux's set_tid_address CANNOT fail; it stores whatever pointer it is
+        // given. Thylacine validates (4-byte aligned, under the user VA top)
+        // because its exit-time clear IS a uaccess_store_u32, which requires the
+        // alignment -- so refusing is right and Linux's silent acceptance of a
+        // pointer it will never successfully write through is the weaker
+        // behaviour. What must not happen is the refusal arriving as a flat -1:
+        // musl's __init_tp stores this return value AS THE THREAD'S TID
+        // (`td->tid = __syscall(SYS_set_tid_address, ...)`) without checking it,
+        // so -1 would silently become the tid. EINVAL is at least an errno the
+        // guest can recognise.
+        s64 rc = sys_set_tid_address_handler(args[0]);
+        return (rc < 0) ? -(s64)T_E_INVAL : rc;
+    }
+
+    case VIV_LINUX_SETUID:
+        // setuid(uid): x0. Identity is set once at spawn and immutable on a
+        // running Proc, so the only call that can be honoured is the no-op --
+        // and it MUST be, because setuid(getuid()) is what every "drop to my own
+        // uid" path issues and it asks for nothing. Everything else is EPERM,
+        // which is both true here and what Linux tells an unprivileged process,
+        // so a guest's existing fallback runs unchanged.
+        if (args[0] > 0xFFFFFFFFull) return -(s64)T_E_INVAL;
+        return vivarium_setid_is_noop((u32)args[0],
+                                      vivarium_map_uid(p->principal_id))
+                   ? 0 : -(s64)T_E_PERM;
+
+    case VIV_LINUX_SETGID:
+        if (args[0] > 0xFFFFFFFFull) return -(s64)T_E_INVAL;
+        return vivarium_setid_is_noop((u32)args[0],
+                                      vivarium_map_gid(p->primary_gid))
+                   ? 0 : -(s64)T_E_PERM;
 
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That

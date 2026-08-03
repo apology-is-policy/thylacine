@@ -718,6 +718,26 @@ int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
     return rv;
 }
 
+// #150 (the VIVARIUM getppid row). `parent` is rewritten by
+// proc_reparent_children when a parent exits, so a lockless read can hand back a
+// pointer whose Proc is reaped and freed before the deref -- which is why the
+// two existing readers (devproc.c:256, devctl.c:169) both run INSIDE
+// proc_for_each and neither takes the lock itself. This exists so a caller
+// outside proc.c can ask the same question without walking the whole tree to
+// find one Proc's parent, and so the locking lives here with the rest of the
+// tree discipline rather than being re-derived per call site.
+//
+// 0 for a parentless Proc. Only kproc is genuinely parentless -- an orphan
+// reparents to init rather than to nothing -- and 0 is also what Linux reports
+// for the same case, so the sentinel needs no translation.
+int proc_parent_pid(struct Proc *p) {
+    if (!p) return 0;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    int ppid = p->parent ? p->parent->pid : 0;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return ppid;
+}
+
 // =============================================================================
 // PTY-1a (PTY-DESIGN.md section 4): POSIX sessions + process groups.
 // =============================================================================

@@ -1642,6 +1642,13 @@ struct Proc *proc_find_by_pid(int pid);
 // the future caller.
 int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg);
 
+// The calling-convention-free parent read (#150, the VIVARIUM getppid row).
+// Takes g_proc_table_lock itself, so unlike the `parent` derefs in devproc.c and
+// devctl.c -- which are correct only because proc_for_each already holds it --
+// this one may be called from anywhere. 0 when the Proc has no parent (only
+// kproc; an orphan reparents to init), which is also Linux's answer.
+int proc_parent_pid(struct Proc *p);
+
 // =============================================================================
 // P5-hostowner-a: console attachment.
 // =============================================================================

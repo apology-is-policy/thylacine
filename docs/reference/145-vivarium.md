@@ -1732,3 +1732,195 @@ alive-and-not-yet-exited at a chosen instant, which needs a synchronisation
 channel this phenotype does not have — `pipe2` is not a row, and a private
 address space rules out shared memory. Timing a loop would be a flake in a
 boot-fatal probe. L-6c's shell exercises it naturally.
+
+## The startup batch (#150, LINEAGE L-6c)
+
+The set a real Linux binary issues between `_start` and its first useful
+instruction. Every row here was **measured, not guessed**: it is exactly the
+census `viv_report_unserved` printed the moment #149's loader fix let Alpine's
+busybox execute, minus the two numbers that are declined on purpose.
+
+| Linux nr | call | tier | why |
+|---|---|---|---|
+| 172 | `getpid` | **T1** | 0 args, pid return, no error path |
+| 66 | `writev` | T2 | the arity rule's sharpest case (below) |
+| 17 | `getcwd` | T2 | the return is off by one, the error is ERANGE |
+| 173 | `getppid` | T2 | no native twin exists |
+| 174 | `getuid` | T2 | the sentinel mapping |
+| 176 | `getgid` | T2 | the sentinel mapping |
+| 160 | `uname` | T2 | a fabrication, not a translation |
+| 96 | `set_tid_address` | T2 | an errno translation, only |
+| 146 | `setuid` | T2 | EPERM, except the no-op |
+| 144 | `setgid` | T2 | EPERM, except the no-op |
+| 25 | `fcntl` | **ENOSYS** | needs close-on-exec (task #151) |
+
+Unserved numbers went **13 -> 3**: `fcntl`, plus `brk` (214) and `mprotect`
+(226), which were already declined by policy and remain so.
+
+### `writev` — why registers lining up is not arguments meaning the same thing
+
+`writev(fd, iov, iovcnt)` and `SYS_WRITE(fd, buf, len)` take three arguments
+each, in the same registers, with the same first one. A renumber compiles, runs,
+and is catastrophically wrong: argument 1 is a **pointer to an array of
+pointers**, not a buffer, and argument 2 is an **entry count**, not a byte
+length. The kernel would write `iovcnt` bytes *of the iovec array itself* — the
+guest's own pointers — to the fd.
+
+This is the clearest instance of the rule §4 states, and the test asserts it by
+name so a future "simplification" into the renumber table fails rather than
+passes.
+
+The shell **loops the existing byte-I/O core** rather than growing a vectored
+one. Each entry goes through `sys_write_handler`, which is the whole audited
+staging path (the weft fast-path, the CF-3 two-tier bounce, the `SYS_RW_MAX`
+clamp, the #100 errno translation), so the translator adds a decode and nothing
+else.
+
+Three properties are worth stating because each was a decision:
+
+- **Two passes, for Linux's *error* semantics rather than for memory safety.**
+  Linux validates the whole array up front (`import_iovec`) and answers
+  EINVAL/EFAULT having written *nothing*. A single-pass loop that validated
+  entry *k* just before writing it would leave entries 0..*k*-1 already written
+  when it found a bad one. Safety does not depend on the up-front pass — pass 2
+  re-validates every buffer through `sys_write_handler`'s own checks — so the
+  re-read between passes is benign: a peer thread rewriting the array yields
+  values that are themselves validated before use, and the outcome degrades to
+  a short write, which is a legal `writev` result.
+- **O(1) storage, deliberately.** `UIO_MAXIOV` is 1024 and an iovec is 16 bytes,
+  so buffering the array would want 16 KiB — the entire kernel stack.
+- **`iovcnt == 0` is in domain.** Linux resolves the descriptor *before* it looks
+  at the array, so `writev(badfd, x, 0)` is EBADF and not 0. The shell issues a
+  zero-length write through the same core rather than short-circuiting.
+
+The SSIZE_MAX accumulator tests **room** (`add > max - total`) rather than the
+sum, because the naive `total + add > max` wraps and passes; the test pins that
+directly.
+
+### The identity mapping is a decision, not a passthrough
+
+Thylacine's TCB identity is `PRINCIPAL_SYSTEM == 0xFFFFFFFE`, and the
+container's shell runs as exactly that. Passed through raw, a Linux guest reads
+`(uid_t)-2` — which in Linux practice is the historic "nobody" value, i.e. the
+number meaning the *least* privileged identity. So the raw pass-through is not
+neutral: it **inverts the fact being asked about**, telling a Proc that holds the
+system identity that it is nobody. It maps to 0.
+
+Two properties make that safe rather than lucky:
+
+- **It cannot collide.** `PRINCIPAL_INVALID` and `GID_INVALID` are both 0, so no
+  real principal or group is ever 0 to begin with; every other value passes
+  through unchanged. `PRINCIPAL_NONE` (the genuinely unauthenticated identity) is
+  deliberately *not* folded — it really is nobody.
+- **It confers nothing.** Every authority decision reads the real `principal_id`
+  through `perm_check` or a `CAP_*` gate. A container shell that believes it is
+  root will *attempt* privileged operations and be refused at the real gates
+  exactly as before. The mapping changes what a guest is **told**, never what it
+  may **do** (I-22).
+
+`setuid(getuid())` — the idempotent call every "drop to my own uid" path issues —
+succeeds; everything else is EPERM, which is both true here and what Linux tells
+an unprivileged process. The comparison is made in the **guest's** number space,
+because that is the only value the guest has ever been shown, and a raw
+comparison would refuse the call for a `PRINCIPAL_SYSTEM` Proc — the case that
+needs it most.
+
+### `uname` — what it claims, and why
+
+A fabrication, so the question is not *how* to translate but *what* to assert. A
+wrong answer here is the mistranslation the argument-domain rule exists to
+prevent: a guest that believes it is on a kernel it is not will take a code path
+we cannot serve.
+
+- `sysname` = **"Linux"**. The truthful answer *within* the phenotype — the ABI
+  the guest sees IS Linux's. "Thylacine" would send every `uname -s` check down
+  an unknown-OS path with no Thylacine support behind it.
+- `release` = **"4.4.0"**. No number is honest, because there is no Linux whose
+  syscall surface matches ours. The choice is which direction to be wrong in, and
+  **low is safer** — a guest that assumes little uses the oldest paths, which are
+  the ones translated here. 4.4 is *the newest kernel that promises nothing we
+  lack*: below `statx` (4.11, which we FORWARD), `io_uring` (5.1), `clone3`
+  (5.3), `openat2` (5.6), `faccessat2` (5.8) and `close_range` (5.9). It also
+  clears glibc's 3.2 floor, under which a glibc binary aborts with "FATAL: kernel
+  too old" before `main()`.
+- `version` = **"#1 Thylacine VIVARIUM"**, on purpose. Programs essentially never
+  parse the build banner, so it is where `uname -a` can tell the truth without
+  any version check tripping over it — §9's DEGRADED tier applied *inside a
+  single struct*: compatible where a field is load-bearing, truthful where it is
+  observable.
+- `machine` = "aarch64" (simply true), `nodename` = "thylacine" (no hostname
+  concept exists), `domainname` = "(none)" (Linux's own default).
+
+The 390-byte struct is zeroed wholesale before filling, which is an **I-13
+obligation** and not tidiness: all 390 bytes are copied to EL0, so every byte
+past each terminator must be a defined 0 rather than whatever the kernel stack
+held. The test pre-poisons the struct with `0xAA` first — over a zeroed stack the
+assertion would pass whether or not the fill zeroed anything.
+
+### The four rows below the native ceiling
+
+`getcwd` (17), `fcntl` (25), `writev` (66) and `set_tid_address` (96) sit below
+`VIV_NATIVE_CEILING`, so each owes the per-number collision paragraph the
+`pselect6`/`ppoll` block mandates. The first half is shared — a PHENO_LINUX Proc
+cannot reach a native number at all, so it never had the native call to lose. The
+second half, what a *mis-declared native* Proc now reaches, is per number and is
+written out at the enum in `vivarium.h`. In every case the worst outcome is
+EFAULT, EBADF, or a write of the caller's own bytes to the caller's own fd. Never
+authority.
+
+### `fcntl` — ENOSYS by measurement, and the scripture fact it voided
+
+Instrumenting the row and running the gate showed Alpine busybox's `/bin/sh`
+issues `fcntl` exactly twice at startup, and both are the same family:
+
+```
+cmd 0x2   = F_SETFD,          arg 1  = FD_CLOEXEC
+cmd 0x406 = F_DUPFD_CLOEXEC,  arg 10 = ash's savefd(), moving the script fd above 10
+```
+
+Neither can be served truthfully, because **Thylacine has no close-on-exec at
+all** — verified on both halves: no CLOEXEC bit exists in `handle.h` or
+`handle.c`, and `proc_exec_replace` never touches the handle table, so exec
+preserves every fd. `F_SETFD(FD_CLOEXEC)` could only be answered by silently
+succeeding, after which the guest execs with the fd still open having been told
+otherwise. `F_DUPFD_CLOEXEC` is that lie plus a real dup, and it cannot even be a
+renumber onto `SYS_DUP` — *that* call's second argument is a rights mask, not a
+minimum fd, so the arity rule refuses it for the same reason it refuses `writev`.
+
+That is a **kernel feature, not a translation** (task #151), and it is what now
+blocks the L-6c gate.
+
+The measurement also **voided a stated scripture fact**. VIVARIUM.md's
+ignorable-flags table admits `O_CLOEXEC`, and its justification was never
+"harmless" — it was the stronger and correct claim that *there is nothing to opt
+out of*, because the only way to start a program was `SYS_SPAWN_*`, which endows
+an **explicit** fd list. LINEAGE voided that one commit at a time: L-2a's
+`execve` replaces the image in a live Proc and leaves the table untouched, and
+L-3c-1 gave `rfork` a **copy** of the parent's table. Together they are POSIX
+fork+exec, under which every fd survives exec. `vivarium.h:878` even says
+"CLOEXEC needs an exec that preserves fds" — and that exec now exists.
+
+Neither commit had any reason to look at an openat flag table. **A round is
+scoped to one commit, so a premise a *later* commit voids is invisible to it**;
+the defence is re-checking a load-bearing fact when the thing it rests on moves,
+not a better review of either commit.
+
+### Coverage
+
+Four tests, one per **obligation** rather than one per syscall:
+`vivarium.startup_batch_rows` (the table classification and *why* each row sits
+where it does), `vivarium.writev_domain` (the argument domain and the overflow
+rule), `vivarium.uname_fill` (the fabricated content plus the I-13 zero-fill) and
+`vivarium.identity_map` (the sentinel mapping and the setid no-op).
+
+Revert-probed **four ways in one build**, and the discrimination is the point:
+writev-as-T1, a naive wrapping overflow test, a dropped uname zero-fill and an
+identity uid map each failed at their **own** named assertion (1306/1310, no
+cross-talk).
+
+One more blindness worth recording, because it cut both ways in the same
+session. The unit suite is boot-fatal, so when the temporary fcntl
+instrumentation contradicted `startup_batch_rows`, the suite failed and **the
+container never ran** — the guest could not have reported anything. Yet the guest
+is the *only* thing that knows which `fcntl` cmds busybox actually issues. Both
+legs, or neither proves anything.

@@ -2278,3 +2278,244 @@ void test_vivarium_fd_freeing_rows_stay_unserved(void) {
                    (int)VIV_TRANSLATED, "close is served (T1) -- the hook's subject");
     TEST_EXPECT_EQ((u64)out.nr, (u64)SYS_CLOSE, "and renumbers to the native close");
 }
+
+// -----------------------------------------------------------------------------
+// The startup batch (#150). The set busybox issues between _start and its first
+// useful instruction -- MEASURED off a running guest, not guessed.
+// -----------------------------------------------------------------------------
+
+// Local, because this file has deliberately never pulled in a string.h.
+static bool viv_str_eq(const char *a, const char *b) {
+    u32 i = 0;
+    while (a[i] != '\0' && b[i] != '\0') {
+        if (a[i] != b[i]) return false;
+        i++;
+    }
+    return a[i] == b[i];
+}
+
+// Each row asserted BY NAME and BY TIER, for the reason the sibling
+// rejects_are_deliberate test states: promoting or demoting one later should
+// fail a test rather than pass silently. The tier split is the interesting part
+// -- getuid and getgid have exact native twins and matching arity and are still
+// T2, so "it renumbers cleanly" is visibly not the criterion.
+void test_vivarium_startup_batch_rows(void);
+void test_vivarium_startup_batch_rows(void) {
+    u64 args[VIV_NARGS];
+    struct viv_call out;
+    viv_fill_args(args);
+
+    // getpid is the ONLY renumber in the batch: no arguments, a pid return that
+    // can never land in the errno band, and no error path.
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETPID, args, &out),
+                   (int)VIV_TRANSLATED, "getpid is T1 (0 args, pid return)");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)SYS_GETPID, "getpid renumbers to SYS_GETPID");
+
+    // getuid/getgid: same shape as getpid, still T2. The sentinel mapping
+    // (PRINCIPAL_SYSTEM -> 0) has to happen somewhere and a renumber has no
+    // place to put it -- this pair is the standing counterexample to "matching
+    // arity means it is a T1 row".
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETUID, args, &out),
+                   (int)VIV_TIER2, "getuid is T2 despite an exact native twin");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETGID, args, &out),
+                   (int)VIV_TIER2, "getgid is T2 for the same reason");
+
+    // writev is the arity rule's sharpest case: three registers that line up
+    // with SYS_WRITE's three and mean something completely different. A T1
+    // verdict here would mean the kernel writes the guest's iovec ARRAY -- its
+    // own pointers -- to the fd.
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_WRITEV, args, &out),
+                   (int)VIV_TIER2,
+                   "writev is T2, never T1 -- arg1 is an array, arg2 a count");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+
+    // getcwd: arguments align exactly with SYS_GETCWD and it is still T2, for
+    // two independent reasons (the return is off by one, the error is ERANGE
+    // not a flat -1). Either alone disqualifies the renumber.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETCWD, args, &out),
+                   (int)VIV_TIER2, "getcwd is T2 (+1 on the length, and ERANGE)");
+
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_GETPPID, args, &out),
+                   (int)VIV_TIER2, "getppid is T2 -- there is no native twin");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_UNAME, args, &out),
+                   (int)VIV_TIER2, "uname is T2 (a fabrication, not a translation)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SET_TID_ADDRESS, args, &out),
+                   (int)VIV_TIER2, "set_tid_address is T2 (an errno translation)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SETUID, args, &out),
+                   (int)VIV_TIER2, "setuid is T2 (EPERM, except the no-op)");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SETGID, args, &out),
+                   (int)VIV_TIER2, "setgid is T2 (EPERM, except the no-op)");
+
+    // fcntl is a LIVE DECISION, not a gap. Every cmd a libc reaches for is about
+    // close-on-exec, and Thylacine has no close-on-exec at all -- so the
+    // tempting rows (F_SETFD, F_DUPFD) could only be served by silently
+    // succeeding, which is the lie this tier exists to prevent. Revisit WITH
+    // close-on-exec; this assert is what makes that a decision.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FCNTL, args, &out),
+                   (int)VIV_ENOSYS,
+                   "fcntl is ENOSYS -- no close-on-exec exists to implement it");
+
+    // The two that stay declined ON PURPOSE, re-asserted here because the
+    // census lists them alongside the batch and a future reader will wonder why
+    // they were skipped.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_BRK, args, &out),
+                   (int)VIV_ENOSYS, "brk stays ENOSYS -- musl falls to mmap");
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_MPROTECT, args, &out),
+                   (int)VIV_ENOSYS, "mprotect stays ENOSYS -- I-12");
+}
+
+void test_vivarium_writev_domain(void);
+void test_vivarium_writev_domain(void) {
+    u32 count = 0xFFFFFFFFu;
+
+    // 0 is IN domain, and that is the load-bearing case: Linux resolves the fd
+    // before it looks at the array, so writev(badfd, x, 0) must reach the
+    // handle check and answer EBADF rather than short-circuit to 0.
+    TEST_EXPECT_EQ((int)vivarium_writev_decide(0, &count),
+                   (int)VIV_TRANSLATED, "iovcnt 0 is in domain (the fd is still checked)");
+    TEST_EXPECT_EQ((u64)count, (u64)0, "iovcnt 0 passes through as 0");
+
+    TEST_EXPECT_EQ((int)vivarium_writev_decide(1, &count),
+                   (int)VIV_TRANSLATED, "iovcnt 1 is in domain");
+    TEST_EXPECT_EQ((u64)count, (u64)1, "iovcnt 1 passes through");
+
+    TEST_EXPECT_EQ((int)vivarium_writev_decide(VIV_UIO_MAXIOV, &count),
+                   (int)VIV_TRANSLATED, "iovcnt == UIO_MAXIOV is in domain");
+    TEST_EXPECT_EQ((u64)count, (u64)VIV_UIO_MAXIOV, "the boundary value passes through");
+
+    TEST_EXPECT_EQ((int)vivarium_writev_decide(VIV_UIO_MAXIOV + 1, &count),
+                   (int)VIV_FORWARD, "one past UIO_MAXIOV declines");
+
+    // Linux's third argument is an `int`, so a value with bit 31 set is NEGATIVE
+    // on the guest's side and Linux answers EINVAL. Read as u64 it is enormous,
+    // so the single unsigned comparison catches it -- this asserts that
+    // equivalence rather than assuming it.
+    TEST_EXPECT_EQ((int)vivarium_writev_decide(0xFFFFFFFFull, &count),
+                   (int)VIV_FORWARD, "a guest-negative count declines");
+    TEST_EXPECT_EQ((int)vivarium_writev_decide(0xFFFFFFFFFFFFFFFFull, &count),
+                   (int)VIV_FORWARD, "a full-width count declines");
+
+    // A NULL out is a caller bug; fail closed rather than write through it.
+    TEST_EXPECT_EQ((int)vivarium_writev_decide(1, NULL),
+                   (int)VIV_FORWARD, "a NULL out declines");
+
+    // The SSIZE_MAX rule. Linux checks it BEFORE writing anything, because a
+    // total above SSIZE_MAX cannot be returned without colliding with the
+    // negative-errno band.
+    const u64 ssize_max = 0x7FFFFFFFFFFFFFFFull;
+    u64 total = 0;
+    TEST_EXPECT_EQ((int)vivarium_writev_accumulate(&total, 100), 1, "a small add succeeds");
+    TEST_EXPECT_EQ(total, (u64)100, "the running total advances");
+    TEST_EXPECT_EQ((int)vivarium_writev_accumulate(&total, 0), 1, "a zero-length entry is fine");
+    TEST_EXPECT_EQ(total, (u64)100, "a zero-length entry does not move the total");
+
+    total = ssize_max - 10;
+    TEST_EXPECT_EQ((int)vivarium_writev_accumulate(&total, 10), 1, "landing exactly on SSIZE_MAX succeeds");
+    TEST_EXPECT_EQ(total, ssize_max, "the total reaches SSIZE_MAX exactly");
+    TEST_EXPECT_EQ((int)vivarium_writev_accumulate(&total, 1), 0, "one byte past SSIZE_MAX fails");
+    TEST_EXPECT_EQ(total, ssize_max, "a failed add leaves the total unchanged");
+
+    // The wrap the ROOM test exists to prevent: a naive `total + add > max`
+    // would overflow to a small number and pass.
+    total = 1;
+    TEST_EXPECT_EQ((int)vivarium_writev_accumulate(&total, 0xFFFFFFFFFFFFFFFFull), 0,
+                   "an add that would wrap u64 fails rather than aliasing small");
+    TEST_EXPECT_EQ(total, (u64)1, "the wrapping add left the total alone");
+
+    TEST_EXPECT_EQ((int)vivarium_writev_accumulate(NULL, 1), 0, "a NULL total fails closed");
+}
+
+void test_vivarium_uname_fill(void);
+void test_vivarium_uname_fill(void) {
+    struct viv_linux_utsname uts;
+
+    // Pre-poison EVERY byte. The zero-fill is an I-13 obligation, not tidiness:
+    // the shell copies all 390 bytes to EL0, so any byte the fill does not
+    // overwrite would leak whatever the kernel stack held. Filling with 0xAA
+    // first is what makes the "and the rest is zero" assertion mean anything --
+    // over a zeroed stack it would pass whether or not the fill zeroed at all.
+    u8 *raw = (u8 *)&uts;
+    for (u32 i = 0; i < (u32)sizeof(uts); i++) raw[i] = 0xAA;
+
+    vivarium_uname_fill(&uts);
+
+    TEST_EXPECT_EQ((int)viv_str_eq(uts.sysname, "Linux"), 1,
+                   "sysname is Linux -- the ABI the guest sees IS Linux's");
+    TEST_EXPECT_EQ((int)viv_str_eq(uts.machine, "aarch64"), 1, "machine is aarch64");
+    TEST_EXPECT_EQ((int)viv_str_eq(uts.nodename, "thylacine"), 1, "nodename is thylacine");
+    TEST_EXPECT_EQ((int)viv_str_eq(uts.domainname, "(none)"), 1, "domainname is Linux's default");
+
+    // The field the decision is about. 4.4 is picked as the newest kernel that
+    // promises nothing this table lacks -- below statx (4.11), io_uring (5.1),
+    // clone3 (5.3), openat2 (5.6), close_range (5.9) -- and above glibc's 3.2
+    // floor, under which a glibc binary aborts before main().
+    TEST_EXPECT_EQ((int)viv_str_eq(uts.release, "4.4.0"), 1,
+                   "release is 4.4.0 -- low enough to promise nothing we lack");
+
+    // And the field that carries the truth, because nothing parses it.
+    TEST_EXPECT_EQ((int)viv_str_eq(uts.version, "#1 Thylacine VIVARIUM"), 1,
+                   "version names Thylacine -- observable, never load-bearing");
+
+    // Every byte past each terminator must be 0, not poison. Walk the whole
+    // struct field by field rather than spot-checking: the leak this guards
+    // against is exactly a byte nobody thought to look at.
+    const char *fields[6];
+    fields[0] = uts.sysname;  fields[1] = uts.nodename;   fields[2] = uts.release;
+    fields[3] = uts.version;  fields[4] = uts.machine;    fields[5] = uts.domainname;
+    for (u32 f = 0; f < 6; f++) {
+        u32 len = 0;
+        while (fields[f][len] != '\0') len++;
+        TEST_ASSERT(len < (u32)VIV_UTS_FIELD_LEN, "each field terminates inside its bound");
+        for (u32 i = len; i < (u32)VIV_UTS_FIELD_LEN; i++)
+            TEST_ASSERT(fields[f][i] == '\0', "every byte past the terminator is zero (I-13)");
+    }
+
+    // A NULL must not fault. The shell never passes one, which is exactly why
+    // the guard needs a test rather than a reader's trust.
+    vivarium_uname_fill(NULL);
+}
+
+void test_vivarium_identity_map(void);
+void test_vivarium_identity_map(void) {
+    // The sentinel. Passed through raw, PRINCIPAL_SYSTEM reads to a Linux guest
+    // as (uid_t)-2 -- historically "nobody", the number meaning LEAST
+    // privileged -- so the raw pass-through inverts the fact being asked about.
+    TEST_EXPECT_EQ((u64)vivarium_map_uid(PRINCIPAL_SYSTEM), (u64)0,
+                   "PRINCIPAL_SYSTEM maps to uid 0 -- the identity it corresponds to");
+    TEST_EXPECT_EQ((u64)vivarium_map_gid(GID_SYSTEM), (u64)0, "GID_SYSTEM maps to gid 0");
+
+    // Everything else passes through, and CANNOT collide, because
+    // PRINCIPAL_INVALID and GID_INVALID are both 0 -- no real principal or group
+    // is ever 0 to begin with. Asserting that sentinel here is what makes the
+    // mapping injective by construction rather than by luck.
+    TEST_EXPECT_EQ((u64)PRINCIPAL_INVALID, (u64)0,
+                   "0 is the INVALID principal, so the mapping cannot collide");
+    TEST_EXPECT_EQ((u64)GID_INVALID, (u64)0, "0 is the INVALID gid, likewise");
+    TEST_EXPECT_EQ((u64)vivarium_map_uid(1000), (u64)1000, "an ordinary principal passes through");
+    TEST_EXPECT_EQ((u64)vivarium_map_uid(1), (u64)1, "principal 1 passes through");
+    TEST_EXPECT_EQ((u64)vivarium_map_gid(50), (u64)50, "an ordinary gid passes through");
+
+    // PRINCIPAL_NONE is a DIFFERENT sentinel (unauthenticated "nobody") and must
+    // NOT be folded into 0 -- it genuinely is the unprivileged identity, so
+    // (uid_t)-1 is the honest thing for a guest to see.
+    TEST_EXPECT_EQ((u64)vivarium_map_uid(PRINCIPAL_NONE), (u64)PRINCIPAL_NONE,
+                   "PRINCIPAL_NONE is not remapped -- it really is nobody");
+
+    // setuid(getuid()) is the call the no-op exists for: every "drop to my own
+    // uid" path issues it and it asks for nothing. Comparing in the GUEST's
+    // number space is what makes it work for a PRINCIPAL_SYSTEM Proc -- the case
+    // that needs it most, and the one a raw comparison would refuse.
+    u32 mapped = vivarium_map_uid(PRINCIPAL_SYSTEM);
+    TEST_EXPECT_EQ((int)vivarium_setid_is_noop(0, mapped), 1,
+                   "setuid(0) from a SYSTEM Proc is the no-op it looks like");
+    TEST_EXPECT_EQ((int)vivarium_setid_is_noop(PRINCIPAL_SYSTEM, mapped), 0,
+                   "the RAW sentinel is not the no-op -- the guest never saw it");
+    TEST_EXPECT_EQ((int)vivarium_setid_is_noop(1000, mapped), 0,
+                   "an actual identity change is refused");
+    TEST_EXPECT_EQ((int)vivarium_setid_is_noop(1000, 1000), 1,
+                   "an ordinary Proc's setuid to itself is the no-op too");
+}

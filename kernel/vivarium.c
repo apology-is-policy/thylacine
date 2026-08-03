@@ -8,6 +8,7 @@
 #include <thylacine/handle.h>           // V-5c-2: PROC_HANDLE_MAX = the fd clamp
 #include <thylacine/notes.h>            // V-6b: the canonical note-name literals
 #include <thylacine/poll.h>             // V-5c: POLL_MAX_NFDS bounds the domain
+#include <thylacine/proc.h>             // #150: PRINCIPAL_SYSTEM / GID_SYSTEM
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
@@ -148,6 +149,20 @@ static const struct viv_row g_viv_t1[] = {
     { VIV_LINUX_CLOSE,      SYS_CLOSE,      1 },
     { VIV_LINUX_LSEEK,      SYS_LSEEK,      3 },
     { VIV_LINUX_EXIT_GROUP, SYS_EXIT_GROUP, 1 },
+
+    // #150. getpid is the ONLY member of the startup batch that is a clean
+    // renumber, and stating why the others are not is the point of listing it
+    // alone: getuid and getgid have equally exact native twins (73, 74) and
+    // equally matching arity, and they are still shells -- because their VALUE
+    // needs the sentinel mapping (vivarium_map_uid), which a renumber has no
+    // place to perform. Same syscall shape, different row tier; the arity rule
+    // is necessary for a T1 row, never sufficient.
+    //
+    // getpid qualifies on all three counts: zero arguments supplied and zero
+    // read, a return that is a plain pid < 2^32 (never in the [-4095,-1] errno
+    // band a Linux caller checks), and no error path at all in the native
+    // handler beyond the current_thread() sanity check.
+    { VIV_LINUX_GETPID,     SYS_GETPID,     0 },
 };
 
 #define VIV_T1_COUNT ((u32)(sizeof(g_viv_t1) / sizeof(g_viv_t1[0])))
@@ -277,6 +292,55 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d: vivarium_clone_decide
     { VIV_LINUX_EXECVE,      VIV_TIER2   },  // L-6a: viv_execve
     { VIV_LINUX_WAIT4,       VIV_TIER2   },  // L-6b: vivarium_wait4_decide
+
+    // The startup batch (#150, LINEAGE L-6c). Every row here was MEASURED --
+    // this is the census a running busybox printed, not a guess at what a libc
+    // might want -- and each is a shell rather than a renumber for a reason
+    // named at its declaration in vivarium.h.
+    { VIV_LINUX_WRITEV,          VIV_TIER2 },  // the arity rule's sharpest case
+    { VIV_LINUX_GETCWD,          VIV_TIER2 },  // +1 on the length, and ERANGE
+    { VIV_LINUX_GETPPID,         VIV_TIER2 },  // no native twin exists
+    { VIV_LINUX_GETUID,          VIV_TIER2 },  // the PRINCIPAL_SYSTEM mapping
+    { VIV_LINUX_GETGID,          VIV_TIER2 },  // the GID_SYSTEM mapping
+    { VIV_LINUX_UNAME,           VIV_TIER2 },  // a fabrication; see the header
+    { VIV_LINUX_SET_TID_ADDRESS, VIV_TIER2 },  // an errno translation, only
+    { VIV_LINUX_SETUID,          VIV_TIER2 },  // EPERM, except the no-op
+    { VIV_LINUX_SETGID,          VIV_TIER2 },
+
+    // fcntl -- ENOSYS, a LIVE DECISION, and the one row in this batch whose
+    // disposition was MEASURED rather than reasoned. THYLACINE HAS NO
+    // CLOSE-ON-EXEC AT ALL (verified: no CLOEXEC bit in handle.h or handle.c,
+    // and proc_exec_replace never touches the handle table -- exec preserves
+    // every fd), which predicted that the tempting rows would be the unsafe
+    // ones. Instrumenting the row and running the gate confirmed it EXACTLY --
+    // Alpine busybox's /bin/sh issues fcntl twice at startup and both are the
+    // close-on-exec family:
+    //
+    //     cmd 0x2   = F_SETFD,          arg 1  = FD_CLOEXEC
+    //     cmd 0x406 = F_DUPFD_CLOEXEC,  arg 10 = ash's savefd(), moving the
+    //                                            script fd above 10
+    //
+    // Neither can be served truthfully. F_SETFD(FD_CLOEXEC) could only be
+    // answered by silently succeeding -- storing nothing and reporting done --
+    // and because exec preserves the table, the guest would then exec with the
+    // fd still open having been told otherwise; the leak surfaces as a
+    // mysterious inherited descriptor far from here. F_DUPFD_CLOEXEC is the
+    // same lie plus a real dup, and it cannot even be a renumber onto SYS_DUP:
+    // that call's second argument is a RIGHTS MASK, not a minimum fd, so the
+    // arity rule refuses it exactly as it refuses writev onto SYS_WRITE.
+    //
+    // ENOSYS rather than EINVAL because the refusal is of the WHOLE call, not
+    // of one cmd: a guest that gets EINVAL for a cmd concludes that cmd is
+    // unsupported and may retry others, while ENOSYS says the surface is absent
+    // and lets the libc take its own fallback.
+    //
+    // THIS IS WHAT NOW BLOCKS THE L-6c GATE, and it is a KERNEL FEATURE rather
+    // than a translation: a per-handle-slot flag, set by F_SETFD and by
+    // O_CLOEXEC, consumed by a sweep in the execve path. Serving the dup while
+    // ignoring the flag would pass the gate and put a known silent lie in the
+    // tree, which is the trade this whole tier exists to refuse. Revisit WITH
+    // close-on-exec, never before -- the two are one piece of work.
+    { VIV_LINUX_FCNTL,           VIV_ENOSYS },
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -1756,4 +1820,94 @@ enum viv_verdict vivarium_wait4_decide(u64 options, u64 rusage,
     // proc.h. A check here would be a second opinion about a correspondence
     // that is already exact.
     return VIV_TRANSLATED;
+}
+
+// -----------------------------------------------------------------------------
+// The startup batch (#150). The pure halves; their uaccess shells are in
+// syscall.c::viv_tier2.
+// -----------------------------------------------------------------------------
+
+enum viv_verdict vivarium_writev_decide(u64 iovcnt, u32 *out_count) {
+    if (!out_count) return VIV_FORWARD;
+
+    // Linux's third argument is an `int`, so the guest's own view of a value
+    // with bit 31 set is NEGATIVE, and Linux answers EINVAL. Comparing the
+    // register as u64 against UIO_MAXIOV rejects both that case and a genuinely
+    // huge count in one test -- no sign-extension reasoning required, because
+    // every value Linux would call negative is far above 1024 when read
+    // unsigned.
+    if (iovcnt > (u64)VIV_UIO_MAXIOV) return VIV_FORWARD;
+
+    // Zero IS in domain. Linux looks the fd up before it looks at the array, so
+    // writev(badfd, whatever, 0) is EBADF rather than 0 -- the shell reproduces
+    // that by issuing a zero-length write instead of returning 0 here.
+    *out_count = (u32)iovcnt;
+    return VIV_TRANSLATED;
+}
+
+bool vivarium_writev_accumulate(u64 *total, u64 add) {
+    if (!total) return false;
+
+    // SSIZE_MAX. Linux rejects a writev whose lengths sum past it BEFORE
+    // writing anything, and the reason is the return value: a total above
+    // SSIZE_MAX cannot be reported without colliding with the negative-errno
+    // band the caller checks. Testing the ROOM rather than the sum keeps the
+    // addition itself from wrapping.
+    const u64 ssize_max = 0x7FFFFFFFFFFFFFFFull;
+    if (add > ssize_max - *total) return false;
+    *total += add;
+    return true;
+}
+
+// A tiny local copy so this file stays free of a string.h dependency it
+// otherwise has no use for. Copies at most `cap - 1` bytes and always
+// terminates; `out` is expected to be pre-zeroed by the caller.
+static void viv_uts_set(char *out, const char *s) {
+    u32 i = 0;
+    while (s[i] != '\0' && i < (u32)(VIV_UTS_FIELD_LEN - 1)) {
+        out[i] = s[i];
+        i++;
+    }
+    out[i] = '\0';
+}
+
+void vivarium_uname_fill(struct viv_linux_utsname *out) {
+    if (!out) return;
+
+    // Zero the WHOLE struct first. This is an I-13 obligation, not tidiness:
+    // the shell copies all 390 bytes to EL0, so every byte past each string's
+    // terminator has to be a defined 0 rather than whatever the caller's kernel
+    // stack happened to hold. Each field is then written over a known-zero
+    // background, and viv_uts_set terminates within the field regardless.
+    u8 *p = (u8 *)out;
+    for (u32 i = 0; i < (u32)sizeof(*out); i++) p[i] = 0;
+
+    // The values, and the argument for each one, are in vivarium.h next to the
+    // struct -- deliberately, because WHAT this claims is the whole decision and
+    // it belongs where a reader meets the type rather than buried in the filler.
+    viv_uts_set(out->sysname,    "Linux");
+    viv_uts_set(out->nodename,   "thylacine");
+    viv_uts_set(out->release,    "4.4.0");
+    viv_uts_set(out->version,    "#1 Thylacine VIVARIUM");
+    viv_uts_set(out->machine,    "aarch64");
+    viv_uts_set(out->domainname, "(none)");
+}
+
+u32 vivarium_map_uid(u32 principal_id) {
+    // PRINCIPAL_SYSTEM is Thylacine's TCB identity; 0 is Unix's. Everything
+    // else passes through, and cannot collide, because PRINCIPAL_INVALID == 0
+    // means no real principal is ever 0 to begin with.
+    return (principal_id == PRINCIPAL_SYSTEM) ? 0u : principal_id;
+}
+
+u32 vivarium_map_gid(u32 gid) {
+    return (gid == GID_SYSTEM) ? 0u : gid;
+}
+
+bool vivarium_setid_is_noop(u32 requested, u32 current_mapped) {
+    // Compared in the GUEST's number space on purpose: `current_mapped` is what
+    // getuid() told it, and setuid(getuid()) is the exact call this exists to
+    // let through. Comparing against the raw principal would refuse that call
+    // for a PRINCIPAL_SYSTEM Proc -- the one case it most needs to serve.
+    return requested == current_mapped;
 }
