@@ -41,6 +41,17 @@ proc gfx_dump {out args_} {
 }
 
 lc_boot
+
+# #136-audit F5: claim aurora's #129 held-input selftest. It is the ONLY
+# coverage of the back-pressure policy -- a stalled console reader is not
+# reachable from any E2E -- and it was printing its verdict into a green boot
+# that nothing read, so a regression in the exact thing it exists to pin would
+# have been invisible (the pre-#74 shape: an assertion no gate consumes is not
+# an assertion). It prints before the interactive prompt (aurora comes up
+# during bringup; verified in the boot log against `Thylacine login: `), so it
+# is claimed HERE, between boot and login, while still in the buffer.
+lc_expect "#129 feed selftest PASS" "aurora held-input back-pressure selftest"
+
 lc_login michael correct-horse-battery-staple-v1
 
 # The rendered-console assert (the session is on screen). Bounded retry:

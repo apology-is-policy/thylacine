@@ -913,6 +913,41 @@ which a drop counter reading zero never could.
     pre-existing in the #174 gate arm — #129 replicated it at the holdback and
     then claimed the loss window was *closed*, which is what made it load-bearing
     to fix rather than inherit.
+  - **…and the pairing needed a StoreLoad barrier to mean it (#136-audit F3).**
+    Publish-then-re-observe is the right *shape*, but a release store followed by
+    a **relaxed** load (`cons_rx_can_accept` reads the count `__ATOMIC_RELAXED`)
+    compiles to `stlrb` + a plain `ldr`, and ARMv8 orders `STLR`→`LDAR` but not
+    `STLR`→`LDR`. Store-buffering is forbidden only when *both* sides are
+    ordered; the reader's side is (count store → `spin_unlock` release → `ldar`),
+    ours was not. `uart_rx_pause_and_recheck` now carries an explicit
+    `__atomic_thread_fence(__ATOMIC_SEQ_CST)` between the publish and the
+    re-check — the same requirement `kernel/weft.c` names for the Weft-4
+    readiness ring ("the StoreLoad barrier before the `wait_active` load",
+    modeled by `weft_readiness.tla`), which is the identical shape.
+
+    **What actually keeps the terminal state unreachable is a different
+    property, and it must not be optimized away**: `cons_input_read` calls
+    `uart_rx_pump()` on *every* loop iteration including the one that parks, and
+    a parking iteration necessarily has `got == 0` (any drained byte breaks
+    first). So the room a pauser could stale-read was freed in a *previous*
+    syscall, by which time the pauser long since released `g_uart_rx_lock`. Do
+    not move that pump under an `if (got == 0)` / `if (drained)` guard: it reads
+    as free and would open the window this fence otherwise only narrows.
+  - **The drain restores "held implies paused" at its budget exit (#136-audit
+    F1).** ARCH §25.4 states the holdback "can never be stranded
+    (`g_rx_held_valid && !g_rx_paused` must stay unreachable)", and falling out
+    of the `while (budget != 0u)` loop reached exactly that state: the last
+    budget unit is spent on a refusal whose `pause_and_recheck` then *lifts*, and
+    the `continue` lands on a failed loop test. The stranded byte does not
+    self-heal — it lives in a software variable, not the FIFO, so it raises
+    neither RXRIS nor the RX timeout (the hardware re-fire that covers the
+    ordinary budget-hit exit), and `uart_rx_pump` short-circuits on
+    `!g_rx_paused`. It would wait for an unrelated later arrival: a keystroke
+    that vanishes and reappears when the user types again. The loop now re-pauses
+    on the way out, so the reader's pump always owns the re-offer. Every other
+    exit was already sound (the three `return false`s ran because the pause
+    *stands*; the `return true` is the RXFE arm, reachable only with nothing
+    held). Regression `cons.rx_holdback_not_stranded`.
   - **Recovery distance grew with the ring (#129-audit F7).** `cons_rx_can_accept`
     trips at the same absolute threshold as before (`count > 255`), so usable
     depth before pausing is unchanged at 255. The *recovery* distance is not:

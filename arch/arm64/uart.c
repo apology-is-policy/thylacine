@@ -122,6 +122,16 @@ static bool        g_rx_held_valid;
 static uint8_t     g_rx_held_byte;
 static bool        g_rx_held_break;
 
+// #136-audit F2: TEST-OWNED, and only ever set by uart_test_rx_force_hold.
+// The #133 leaked-state backstop must key on this and NOT on g_rx_held_valid ||
+// g_rx_paused, because BOTH of those are ordinary PRODUCTION state: g_rx_paused
+// is the #174 back-pressure latch the live IRQ path sets, so a human typing at
+// the serial console during the test phase (RX is enabled from main.c long
+// before test_run_all) would redden an innocent test AND have its real held
+// keystroke discarded by the sweep. Contrast g_uart_tx_test_stalled, which
+// production never sets -- that one is correctly test-owned as-is.
+static bool        g_rx_test_armed;
+
 // Mask or unmask the PL011 RX + RX-timeout interrupts. Caller holds
 // g_uart_rx_lock. Masking (not clearing ICR) is what makes resumption
 // wedge-safe: it gates the GIC line without touching int_level, so nothing is
@@ -330,7 +340,21 @@ bool uart_rx_path_enabled(void) {
 // preempt -> whole-OS freeze; reproduced holding an arrow key in nora AND in
 // the cooked ut shell, both accels -- TCG needs faster input since its vCPU +
 // main loop are serialized). 64 = 4 PL011 FIFO depths: a normal burst drains in
-// one IRQ, the worst-case IRQ-masked window stays well under a 1ms timer tick.
+// one IRQ.
+//
+// #136-audit F4: what one budget unit COSTS changed at #129, so the old
+// "well under a 1ms timer tick" line no longer described this loop. A plain
+// iteration is still ~2 MMIO (FR + DR), but a REFUSAL now also runs
+// uart_rx_pause_and_recheck -> up to two uart_imsc_update calls (mask, then
+// unmask if the recheck lifts), each an IMSC read + write under
+// g_uart_imsc_lock: ~4 extra MMIO and 2 extra lock round-trips. Since all
+// three arms decrement before calling it, the worst case is 64 such
+// iterations -- ~320 MMIO rather than ~128, all IRQ-masked, and under HVF
+// every PL011 MMIO is a vmexit. Still bounded and still sub-tick, but with
+// far less headroom than the original figure implied, and it needs a peer
+// producer repeatedly taking 257 slots inside the window to get there.
+// If this loop grows another MMIO-bearing arm, re-derive the figure rather
+// than inheriting this comment.
 #define UART_RX_DRAIN_MAX  64u
 
 // The shared PL011 RX FIFO drain core. Caller holds g_uart_rx_lock. Clears the
@@ -380,6 +404,20 @@ bool uart_rx_path_enabled(void) {
 static bool uart_rx_pause_and_recheck(void) {
     uart_rx_set_enabled(false);
     __atomic_store_n(&g_rx_paused, true, __ATOMIC_RELEASE);
+    // #136-audit F3: the StoreLoad barrier the publish/re-observe pair needs.
+    // A release store followed by a RELAXED load (cons_rx_can_accept reads
+    // g_cons.count __ATOMIC_RELAXED) compiles to `stlrb` + a plain `ldr`, and
+    // ARMv8 orders STLR->LDAR but NOT STLR->LDR: the load may be satisfied
+    // before the release store is globally observed. Store-buffering is
+    // forbidden only when BOTH sides are ordered -- the reader's side is
+    // (count store -> spin_unlock release -> ldar g_rx_paused), ours was not.
+    // This is the same shape as the Weft-4 readiness ring, whose own comment
+    // (kernel/weft.c "the StoreLoad barrier before the wait_active load") and
+    // spec (weft_readiness.tla + buggy_lost_wake) name the requirement; that
+    // one uses seq-cst on both sides. A fence here rather than promoting
+    // cons_count_load keeps every other reader (poll, cons_data_ready, the
+    // lockless pre-check below) unperturbed.
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (!cons_rx_can_accept()) return false;         // the pause stands
     uart_rx_set_enabled(true);
     __atomic_store_n(&g_rx_paused, false, __ATOMIC_RELEASE);
@@ -402,6 +440,7 @@ void uart_test_rx_force_hold(uint8_t b, bool brk) {
     g_rx_held_byte  = b;
     g_rx_held_break = brk;
     g_rx_held_valid = true;
+    g_rx_test_armed = true;          // #136-audit F2: THIS is what the sweep keys on
     uart_rx_set_enabled(false);
     __atomic_store_n(&g_rx_paused, true, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&g_uart_rx_lock, s);
@@ -425,11 +464,20 @@ bool uart_test_rx_held(uint8_t *b, bool *brk) {
 // Returns true iff anything was actually released (the runner reddens the test).
 bool uart_test_rx_release_hold(void) {
     irq_state_t s = spin_lock_irqsave(&g_uart_rx_lock);
-    bool owned = g_rx_held_valid || g_rx_paused;
-    g_rx_held_valid = false;
-    if (g_rx_paused) {
-        uart_rx_set_enabled(true);
-        __atomic_store_n(&g_rx_paused, false, __ATOMIC_RELEASE);
+    // #136-audit F2: key on the TEST-owned flag, never on g_rx_held_valid ||
+    // g_rx_paused. Those two are production state, so the old predicate both
+    // reddened innocent tests when a human typed into a near-full ring during
+    // the test phase AND discarded the real keystroke the holdback was holding
+    // losslessly -- a backstop causing the exact loss it exists to detect.
+    // When NOT armed we touch nothing: production owns that state.
+    bool owned = g_rx_test_armed;
+    if (owned) {
+        g_rx_test_armed = false;
+        g_rx_held_valid = false;
+        if (g_rx_paused) {
+            uart_rx_set_enabled(true);
+            __atomic_store_n(&g_rx_paused, false, __ATOMIC_RELEASE);
+        }
     }
     spin_unlock_irqrestore(&g_uart_rx_lock, s);
     return owned;
@@ -481,6 +529,29 @@ static bool uart_rx_drain_locked(void) {
             if (uart_rx_pause_and_recheck()) continue;
             return false;
         }
+    }
+
+    // #136-audit F1: restore the holdback invariant at the ONE exit that can
+    // break it. ARCH sect 25.4 (the LS-8 #129 addendum) states the holdback
+    // "can never be stranded (g_rx_held_valid && !g_rx_paused must stay
+    // unreachable)" -- and falling out of the loop reaches exactly that state:
+    // the last budget unit is spent on a refusal whose pause_and_recheck then
+    // LIFTS (unmask + paused=false) and `continue`s into a failed loop test.
+    //
+    // Every other exit is already sound: the three `return false`s ran only
+    // because pause_and_recheck returned false, i.e. the pause STANDS; the
+    // `return true` is the RXFE arm, reachable only with nothing held.
+    //
+    // Why the stranded state does not self-heal, and so must not be left: the
+    // held byte lives in a SOFTWARE variable, not the FIFO, so it raises
+    // neither RXRIS nor the RX timeout -- the hardware re-fire that covers the
+    // ordinary budget-hit exit does not cover it. And uart_rx_pump, the
+    // reader's only route in, short-circuits on !g_rx_paused. The byte would
+    // then wait for an unrelated later arrival: a keystroke that vanishes and
+    // reappears when the user types again, with no counter and no log.
+    if (g_rx_held_valid && !__atomic_load_n(&g_rx_paused, __ATOMIC_RELAXED)) {
+        uart_rx_set_enabled(false);
+        __atomic_store_n(&g_rx_paused, true, __ATOMIC_RELEASE);
     }
     return false;   // budget hit, FIFO non-empty: re-fire (#172) / pump-retry
 }

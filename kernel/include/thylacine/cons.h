@@ -394,6 +394,17 @@ u32  cons_test_echo_captured(u8 *out, u32 max);
 // G-4: drain observability for tests. Buffered byte count / cumulative
 // drop-oldest count / the deferred drain POLLIN edge flag.
 u32  cons_test_rx_count(void);      // #129-audit F2: NON-BLOCKING RX depth
+
+// #136-audit F1 (test-only; production never calls this). Models the PEER
+// PRODUCER that takes the ring room between the lockless pre-check and the
+// under-lock push -- the exact interleaving the holdback exists for, and the
+// only route to the budget-exhaustion strand. While armed, cons_ring_room()
+// reports FULL (so both pushing arms of cons_rx_input refuse through their
+// real paths, bp counters and echo suppression included) while
+// cons_rx_can_accept() -- which reads the count directly, not the room --
+// still reports room, so uart_rx_pause_and_recheck LIFTS. That divergence IS
+// the race; single-threaded, it is otherwise unreachable.
+void cons_test_force_full(bool on);
 u32  cons_test_drain_count(void);
 u32  cons_test_drain_overflow(void);
 bool cons_test_drain_pollwake_pending(void);

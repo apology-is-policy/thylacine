@@ -820,7 +820,12 @@ static bool cons_ring_push(u8 byte, bool *wake_mgr) {
 // room check and the push it authorizes happen in one lock hold, so no second
 // producer can consume the room in between. cons_rx_can_accept() below is the
 // lockless PRE-check; this is the decision.
+// #136-audit F1 (test-only; production never sets this). See cons.h.
+static bool g_cons_test_force_full;
+void cons_test_force_full(bool on) { g_cons_test_force_full = on; }
+
 static u32 cons_ring_room(void) {
+    if (g_cons_test_force_full) return 0u;
     return CONS_RING_SIZE - cons_count_load();
 }
 
