@@ -58,17 +58,45 @@ static u64 round_up_page(u64 x) {
 }
 
 // #107 test observable: the span the eager paths last asked the arch layer to
-// make instruction-coherent. Kept HERE rather than in arch_icache_sync_range so
-// only the exec path can write it -- a concurrent demand-page sync on another
-// CPU cannot pollute what the test reads (and the arch helper, which runs per
-// page-in fault, gains nothing).
+// make instruction-coherent, plus a monotonic count of those requests. Kept
+// HERE rather than in arch_icache_sync_range so only the exec path can write it
+// -- a concurrent demand-page sync on another CPU cannot pollute what the test
+// reads (and the arch helper, which runs per page-in fault, gains nothing).
+//
+// The COUNT is not decoration (#107-audit F3). The invoked precedent --
+// W1.5's `g_alt_applied == g_alt_total` -- is a COMPLETENESS equality, and a
+// last-call snapshot is not: an ELF with two PF_X PT_LOADs calls the recorder
+// twice and the scalars hold only the second, so a sabotage that skips the
+// sync for every segment but the last is invisible to a span-only assertion.
+// N syncs for N PF_X segments is the posture actually realized.
+//
+// KERNEL_TESTS-gated (#107-audit F4): the production shape (KERNEL_TESTS=OFF)
+// carries neither the storage nor the stores, matching burrow.c / image.c.
+// This also retires the concurrency question -- the stores are unsynchronized
+// cross-CPU writes whose safety rested on a property of the SUITE ("no other
+// exec runs concurrently"), never of the code; in the shape where no test can
+// read them, they no longer exist.
+#ifdef KERNEL_TESTS
 static u64    g_exec_icache_last_addr;
 static size_t g_exec_icache_last_len;
+static u64    g_exec_icache_calls;
 
 void exec_icache_last_for_test(u64 *addr_out, size_t *len_out) {
     if (addr_out) *addr_out = g_exec_icache_last_addr;
     if (len_out)  *len_out  = g_exec_icache_last_len;
 }
+
+u64 exec_icache_calls_for_test(void) { return g_exec_icache_calls; }
+
+#define EXEC_ICACHE_RECORD(kva, len)                          \
+    do {                                                      \
+        g_exec_icache_last_addr = (u64)(uintptr_t)(kva);      \
+        g_exec_icache_last_len  = (len);                      \
+        g_exec_icache_calls++;                                \
+    } while (0)
+#else
+#define EXEC_ICACHE_RECORD(kva, len) do { (void)(kva); (void)(len); } while (0)
+#endif
 
 // Make an eagerly-populated executable segment instruction-coherent.
 //
@@ -81,8 +109,7 @@ void exec_icache_last_for_test(u64 *addr_out, size_t *len_out) {
 // fault arm already applies (arch/arm64/fault.c syncs PAGE_SIZE, not the valid
 // byte count) -- the eager paths are the two that had drifted from it.
 static void exec_make_exec_coherent(void *kva, size_t len) {
-    g_exec_icache_last_addr = (u64)(uintptr_t)kva;
-    g_exec_icache_last_len  = len;
+    EXEC_ICACHE_RECORD(kva, len);
     arch_icache_sync_range(kva, len);
 }
 

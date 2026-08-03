@@ -293,9 +293,12 @@ v1.0 model below): a scope-MEMBER teardown E2E is v1.x (see the caveat below).
 - **Member teardown vs the kproc orphan-reaper (v1.x).** When a legate root with
   a LIVE scope member exits, the teardown correctly group-terminates the member;
   the member then zombies and reparents up to the boot init (`kproc`). At v1.0
-  `kproc.wait_pid` is a *strict* "wait for joey" loop (`kernel/joey.c`), not a
-  general orphan-reaper, so an orphaned member reaching it extincts on a wrong-pid
-  (the same limitation documented for an unreaped stratumd, `usr/joey/joey.c`).
+  kproc waits for joey **by pid** (`wait_pid_for`, #94 @`2c0c4ef4`), so an
+  orphaned member reaching it is SKIPPED and then leaks unreaped -- the
+  documented kproc-orphan posture (`kernel/proc.c`: "kproc never calls wait_pid
+  for arbitrary orphans"), bounded by the daemon set. Before #94 the same case
+  reaped the wrong child and extincted on the pid mismatch; the failure mode
+  moved from LOUD to SILENT, which matters if you are designing against it.
   This is orthogonal to the legate mechanism -- a general `kproc` reaper (the
   documented `wait_pid_for(pid)` v1.x lift) closes it for stragglers of every
   kind. It does NOT affect the v1.0 legate model (above): a v1.0 legate HOLDS the

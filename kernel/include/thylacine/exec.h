@@ -334,12 +334,23 @@ __attribute__((noreturn))
 extern void userland_enter(u64 entry_pc, u64 user_sp);
 
 // #107 test observable: the (kernel VA, length) span the eager exec paths last
-// asked the arch layer to make instruction-coherent. Emulated targets model a
-// coherent I-cache, so a stale-instruction fetch is not observable in-guest at
-// all -- what IS checkable is that the maintenance was issued over the whole
-// executable span rather than only the copied bytes. Same posture as the W1.5
-// patcher's `g_alt_applied == g_alt_total` gate: assert the work was done, not
-// that the hardware misbehaved. Nothing in production reads this.
+// asked the arch layer to make instruction-coherent, plus the monotonic COUNT
+// of those requests. Emulated targets model a coherent I-cache, so a stale-
+// instruction fetch is not observable in-guest at all -- what IS checkable is
+// that the maintenance was issued over the whole executable span rather than
+// only the copied bytes, and issued once PER executable segment. Same posture
+// as the W1.5 patcher's `g_alt_applied == g_alt_total` gate: assert the work
+// was done, not that the hardware misbehaved.
+//
+// The count carries the half of that precedent a last-call snapshot cannot
+// (#107-audit F3): with two PF_X PT_LOADs the span scalars hold only the
+// second segment's, so span-only assertions are blind to a sabotage that
+// syncs just the last one. Nothing in production reads either -- both are
+// KERNEL_TESTS-only (F4), so the production shape carries no storage and no
+// stores.
+#ifdef KERNEL_TESTS
 void exec_icache_last_for_test(u64 *addr_out, size_t *len_out);
+u64  exec_icache_calls_for_test(void);
+#endif
 
 #endif // THYLACINE_EXEC_H

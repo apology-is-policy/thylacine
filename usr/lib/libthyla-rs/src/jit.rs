@@ -185,8 +185,15 @@ impl CodeRegion {
     /// with this Proc's own authority. `CAP_JIT` governs who may emit code;
     /// it grants nothing to the code that runs.
     pub unsafe fn entry<F: Copy>(&self, offset: usize) -> F {
+        // CL-7k-audit F3: `transmute_copy::<usize, F>` reads size_of::<F>()
+        // bytes out of a &usize -- UB the moment F is wider than a thin
+        // pointer, and `F: Copy` alone does not prevent that. The size guard
+        // was debug_assert-only, i.e. compiled out in the release build the
+        // device actually runs. A const block makes it a BUILD error instead,
+        // at zero release cost. The `# Safety` block above states the
+        // requirement the body depends on; this enforces it.
+        const { assert!(core::mem::size_of::<F>() == core::mem::size_of::<usize>()) };
         debug_assert!(offset + 4 <= self.len);
-        debug_assert_eq!(core::mem::size_of::<F>(), core::mem::size_of::<usize>());
         let addr = self.exec as usize + offset;
         core::mem::transmute_copy(&addr)
     }

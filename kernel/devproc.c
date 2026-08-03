@@ -506,6 +506,14 @@ static const char *maps_type_name(const struct Vma *v) {
     case BURROW_TYPE_FILE:      return "file";
     case BURROW_TYPE_MMIO:      return "mmio";
     case BURROW_TYPE_DMA:       return "dma";
+    // CL-7k-audit F2: this is the fourth type switch the CODE type has to
+    // reach, and the one place a human is TOLD what a mapping is. A code
+    // region rendering as "?" reads as unknown-or-corrupt rather than as the
+    // newest and most invariant-bearing type -- and /proc/<pid>/maps is
+    // exactly where an operator would confirm "does this Proc hold a W/X
+    // alias pair?". The perms column already distinguishes the two aliases
+    // (rw-p vs r-xp).
+    case BURROW_TYPE_CODE:      return "code";
     default:                    return "?";
     }
 }

@@ -4221,7 +4221,39 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
         !(dvma->flags & VMA_FLAG_SHARED_IN)) {
         if (dvma->burrow->type == BURROW_TYPE_ANON_LAZY)
             uncharge = burrow_lazy_resident_count(dvma->burrow);   // only the resident
-        else if (dvma->burrow->type == BURROW_TYPE_ANON)
+        else if (dvma->burrow->type == BURROW_TYPE_ANON &&
+                 burrow_handle_count(dvma->burrow) == 0)
+            // #106-audit F1 [P1]: refund only when this unmap actually RELEASES
+            // the pages. The type says the VMA's shape; it does not say the
+            // pages went away.
+            //
+            // I-32 charges OCCUPANCY, and occupancy ends when the pages are
+            // freed -- which under the #847 dual refcount happens iff the
+            // mapping was the LAST reference. `handle_count == 0` is exactly
+            // that condition, and it is the attach shape by construction:
+            // sys_burrow_attach_for_proc drops its construction handle right
+            // after burrow_map ("the VMA owns the Burrow"), so an attach VMA
+            // always reads 0 here.
+            //
+            // The Loom ring is the one eager charger whose Burrow has a SECOND
+            // owner that outlives the VMA -- loom_create keeps a handle_count
+            // ref for the Loom's whole life so the ring pages cannot vanish
+            // under the kernel's ring_kva. Pre-fix, EL0 took the ring_va and
+            // ring_size handed back in loom_params, called SYS_BURROW_DETACH on
+            // them, and got the full charge refunded while the pages stayed
+            // allocated on the Loom's ref -- then looped over the 256 handle
+            // slots and re-attached a full PROC_PAGE_MAX. An unprivileged
+            // ~1.5x breach of the per-Proc floor, with no capability required.
+            // The charge comment at SYS_LOOM_SETUP claimed "charge and refund
+            // agree": true of the AMOUNTS, false of the EVENT.
+            //
+            // Racing a concurrent loom close (handle_count 1 -> 0 just after
+            // this read) fails SAFE: we skip a refund whose pages did free, so
+            // the Proc stays charged for memory it no longer holds -- an
+            // over-charge of its own budget, never an under-charge. The
+            // opposite order cannot happen (nothing raises handle_count on a
+            // Burrow reachable only through this VMA).
+            //
             // #106: mirror the attach charge exactly -- the buddy-rounded
             // occupancy, from the same `length` the charge was computed from.
             // burrow_unmap exact-matches the VMA, so a successful detach has

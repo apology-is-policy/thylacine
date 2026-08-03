@@ -238,7 +238,9 @@ Phase 5+ exec(2) syscall semantics — exec replaces the calling Proc's image at
 
 ## Tests
 
-`kernel/test/test_exec.c` — nine tests:
+`kernel/test/test_exec.c` — twelve tests (the registry in `kernel/test/test.c`
+is the authority; this list drifted to nine while #45 added two and #107-audit
+F1/F2 added one):
 
 - `exec.setup_smoke`: minimal valid ELF; verify single segment VMA at vaddr + user stack VMA + entry/sp out params.
 - `exec.setup_segment_data_copied`: ELF with 256 bytes of recognizable data; verify bytes are copied into BURROW backing pages (read via direct map); tail of page is zero.

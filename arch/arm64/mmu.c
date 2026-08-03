@@ -1891,12 +1891,41 @@ long mmu_cross_proc_write(paddr_t pgtable_root, u64 vaddr, const void *src, long
         long chunk = (long)(PAGE_SIZE - pgoff);
         if (chunk > len - done) chunk = len - done;
         for (long i = 0; i < chunk; i++) ((u8 *)dst)[i] = s[done + i];
+        // CL-7k-audit F1: make every written span instruction-coherent.
+        //
+        // This used to be a bare trailing dsb_ishst(), justified by "the
+        // debugger never writes text -- RO leaves are refused above". That was
+        // a STRUCTURAL truth right up until CL-7k: every executable user page
+        // in the tree was reachable only through a non-writable PTE (ELF text
+        // RX, REVENANT FILE R+X), so refusing RO leaves did imply "not text".
+        // I-42 created the first counter-example -- a code Burrow is writable
+        // at VA_w and executable at VA_x over the SAME physical pages -- so the
+        // implication no longer holds and the premise is now false.
+        //
+        // Consequence without this: a debugger patches a JIT region through
+        // the writer alias, the target resumes and branches to the exec alias,
+        // and the CPU is free to fetch pre-patch lines (an eret / context
+        // switch is context-synchronizing but does NOT invalidate an
+        // ASID-tagged I-cache, and the PA is unchanged). The patch silently
+        // half-lands, line-granularly and timing-dependently. Nor could the
+        // debugger repair it: sys_icache_sync_for_proc resolves the CALLER's
+        // Proc, so it can only publish its own regions -- there is no
+        // mechanism by which userspace could sync a target. This is a missing
+        // kernel mechanism, not a caller mistake.
+        //
+        // Over-synchronizing a pure data write is harmless (the cost is a
+        // cache-line walk on a path that is already a stopped-target,
+        // syscall-rate debugger op); under-synchronizing is undetectable by
+        // the thing it breaks. I-41 -- the software-breakpoint COW-break, this
+        // function's next consumer -- makes it load-bearing rather than
+        // defensive.
+        arch_icache_sync_range(dst, (size_t)chunk);
         done += chunk;
     }
-    // The written pages are user RAM (Normal-WB, coherent); no I-cache sync is
-    // needed for a DATA write (the debugger never writes text -- RO leaves are
-    // refused above). A DSB orders the stores before the debugger observes the
-    // return (the target is stopped, so no concurrent reader races them).
+    // A DSB orders the stores before the debugger observes the return (the
+    // target is stopped, so no concurrent reader races them). The per-chunk
+    // sync above already carries its own dsb/isb; this covers the zero-sync
+    // case and costs nothing.
     if (done > 0) dsb_ishst();
     return done;
 }
