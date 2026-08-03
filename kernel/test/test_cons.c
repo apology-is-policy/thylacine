@@ -620,7 +620,18 @@ void test_cons_sak_via_console_mgr(void) {
 
     // Yield: console_mgr resumes, clears sak-pending, runs proc_console_sak (the
     // transition), then loops back to sleep on a now-false cond (re-SLEEPING).
-    TEST_YIELD_UNTIL(!cons_test_sak_pending());
+    //
+    // #92-audit F2: wait on the ACT, not on the FLAG. cons_service_deferred
+    // drains the pending flags UNDER g_cons.lock, RELEASES the lock, and only
+    // THEN acts -- it must, because proc_console_sak takes g_proc_table_lock,
+    // which is illegal under g_cons.lock. So there is a real window in which
+    // sak-pending reads CLEARED and the SAK transition has not happened yet.
+    // Waiting on the flag can exit inside that window and then assert a
+    // transition that is merely in flight: a spurious FAIL on a healthy
+    // kernel. The transition itself is the observable that means what the
+    // test claims.
+    TEST_YIELD_UNTIL(!proc_is_console_attached(owner) &&
+                     proc_is_console_attached(trusted));
     TEST_ASSERT(!cons_test_sak_pending(), "console_mgr consumed sak-pending");
     TEST_ASSERT(!proc_is_console_attached(owner), "console_mgr SAK revoked the owner");
     TEST_ASSERT(proc_is_console_attached(trusted), "console_mgr SAK re-granted the trusted Proc");
@@ -733,7 +744,9 @@ void test_cons_sak_attaches_from_relinquished_state(void) {
 // wait for input, never POLLIN|POLLOUT). pw == NULL == sample-only (no hook).
 void test_cons_poll_readiness(void) {
     cons_test_reset();
-    sched();                                            // drain any stale mgr wake
+    // #92-audit F4: one sched() does not run a peer-placed mgr; the settle
+    // silently fails and the count assert misfires on a healthy kernel.
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);      // drain any stale mgr wake
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
 
     // Empty ring: not POLLIN-ready; always POLLOUT-ready.
@@ -751,7 +764,10 @@ void test_cons_poll_readiness(void) {
                 "buffered data -> POLLIN ready");
 
     cons_test_reset();                                  // clears poll_wake_pending
-    sched();                                            // drain the woken mgr back to SLEEPING
+    // #92-audit F4: same shape as the entry settle -- cons_rx_input above woke
+    // the mgr inside THIS test, so a peer-placed, host-stalled mgr can still be
+    // RUNNABLE at the read. Wait for the settle, do not assume it.
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);      // drain the woken mgr
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr drained to SLEEPING");
 }
 
@@ -1511,29 +1527,53 @@ void test_cons_tx_role_serializes_writers(void) {
     // Let the writer run until it parks on the role. SMP placement means one
     // sched() does not guarantee it ran (the #77 lesson) -- wait on the
     // OBSERVABLE, bounded.
+    // #92-audit F3: RECORD across the role-held window, CLEAN UP, then assert.
+    //
+    // The SOFT macro alone bought nothing here: every assertion below used to
+    // sit INSIDE the held-role window, and TEST_EXPECT_EQ is TEST_ASSERT, which
+    // is `test_fail(); return;`. So the first failure returned with the TX
+    // writer role still HELD (the drop below skipped) -- and
+    // cons_tx_role_acquire parks contenders UNTIMED, so every later console
+    // writer parks forever: the boot hangs and the rest of the suite never
+    // runs. That is precisely the outcome test.h says is unacceptable, and it
+    // is what SOFT exists to prevent -- but SOFT only defers ITS OWN failure;
+    // the very next line re-introduced the early return.
+    //
+    // The room-wait sibling below already does it right (record into locals,
+    // lift the stall, THEN assert). This is that shape.
     TEST_YIELD_UNTIL_SOFT(g_txr_ran >= 1u);
-    TEST_EXPECT_EQ(g_txr_ran, 1u, "contender entered cons_output_write");
+    u32 ran_entered = g_txr_ran;
 
     // THE PROPERTY: it must NOT have emitted anything while the role is held.
     for (int spins = 0; spins < 100; spins++) sched();
-    TEST_EXPECT_EQ(g_txr_ran, 1u, "contender is PARKED on the role, not emitting");
-    n = cons_test_echo_captured(got, sizeof got);
-    TEST_EXPECT_EQ(n, 0u, "no byte of the contender's write reached the console");
+    u32 ran_parked = g_txr_ran;
+    u32 n_while_held = cons_test_echo_captured(got, sizeof got);
 
     // Release: the contender must wake, complete, and emit its bytes CONTIGUOUSLY.
     cons_test_tx_role_drop();
     TEST_YIELD_UNTIL_SOFT(g_txr_ran >= 2u);
-    TEST_EXPECT_EQ(g_txr_ran, 2u, "contender resumed after the role freed");
-    TEST_EXPECT_EQ(g_txr_ret, 4L, "contender wrote all 4 bytes");
+    u32 ran_resumed = g_txr_ran;
+    long ret_bytes  = g_txr_ret;
 
     n = cons_test_echo_captured(got, sizeof got);
-    TEST_EXPECT_EQ(n, 4u, "exactly the contender's 4 bytes were emitted");
-    TEST_ASSERT(got[0] == 'B' && got[1] == 'B' && got[2] == 'B' && got[3] == 'B',
-                "the write landed contiguous and intact");
+    u8  b0 = (n > 0) ? got[0] : 0, b1 = (n > 1) ? got[1] : 0;
+    u8  b2 = (n > 2) ? got[2] : 0, b3 = (n > 3) ? got[3] : 0;
 
+    // Cleanup FIRST -- unconditionally, before any assert can return.
     cons_test_echo_capture(false);
     test_kthread_join_free(w, &g_txr_exited);
     cons_settle_mgr();
+
+    // Now it is safe to fail: the role is dropped, capture is disarmed, and the
+    // contender is joined, so a red assert costs one test rather than the boot.
+    TEST_EXPECT_EQ(ran_entered, 1u, "contender entered cons_output_write");
+    TEST_EXPECT_EQ(ran_parked,  1u, "contender is PARKED on the role, not emitting");
+    TEST_EXPECT_EQ(n_while_held, 0u, "no byte of the contender's write reached the console");
+    TEST_EXPECT_EQ(ran_resumed, 2u, "contender resumed after the role freed");
+    TEST_EXPECT_EQ(ret_bytes,   4L, "contender wrote all 4 bytes");
+    TEST_EXPECT_EQ(n, 4u, "exactly the contender's 4 bytes were emitted");
+    TEST_ASSERT(b0 == 'B' && b1 == 'B' && b2 == 'B' && b3 == 'B',
+                "the write landed contiguous and intact");
 }
 
 // ---------------------------------------------------------------------------
