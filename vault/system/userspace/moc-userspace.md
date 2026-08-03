@@ -22,6 +22,9 @@ dossiers.
   makes its notes read differently: they describe discipline a library
   applied on its own initiative, and the failure mode of a plane where
   a wrong claim costs nothing until someone reads it.
+- [[moc-userspace-shell-tui]] — what a person actually touches. Spans the
+  widest range of risk in the tree, from a parser that touches nothing to
+  a raw-mode handoff the user cannot type their way out of.
 
 ## Services
 
