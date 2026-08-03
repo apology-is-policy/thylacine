@@ -941,32 +941,61 @@ bool proc_resource_exempt(const struct Proc *p) {
 
 bool proc_page_charge(struct Proc *p, u32 npages) {
     if (!p) return false;
-    // Caller holds p->vma_lock (the attach/detach serialization domain), so the
-    // load + the cap decision + the store are atomic against sibling attaches
-    // -> the page cap is EXACT. The atomic store keeps a lockless cross-Proc
-    // /proc reader coherent.
-    u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
-    if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
-    // CL-5: cap against this Proc's own budget, not the global constant. A Proc
-    // that never asked for a raise carries page_budget == PROC_PAGE_MAX, so this
-    // is byte-identical to the pre-CL-5 decision for every existing caller.
-    if (!proc_resource_exempt(p) && cur + npages > p->page_budget)
-        return false;                                // over budget -> caller -ENOMEM
-    __atomic_store_n(&p->page_count, cur + npages, __ATOMIC_RELEASE);
-    // CL-5: the exact high-water mark. Under the same vma_lock, so this is the
-    // true peak -- no sampler can catch the peak of a 200 ms compiler process.
-    if (cur + npages > __atomic_load_n(&p->page_peak, __ATOMIC_RELAXED))
-        __atomic_store_n(&p->page_peak, cur + npages, __ATOMIC_RELEASE);
-    return true;
+    // Charge/uncharge are CAS loops so they are correct with NO lock held.
+    //
+    // They used to be plain load-decide-store pairs, documented as "the caller
+    // holds p->vma_lock". That held while every uncharge sat on an attach or
+    // detach path. It stopped holding when the uncharge moved to where the
+    // pages actually FREE (#130): a Loom's ring pages are released by
+    // loom_free, reached from handle_close/handle_table_free, which hold no
+    // vma_lock -- so a sibling thread's SYS_BURROW_ATTACH could interleave
+    // between this load and this store and lose one of the two updates. A
+    // multi-threaded Proc closing a Loom while another thread attaches is the
+    // ordinary Go shape, not a corner.
+    //
+    // vma_lock still matters here, but only for the CAP DECISION: holding it
+    // across check-then-charge is what makes the bound exact against a sibling
+    // attach. Two concurrent charges from OUTSIDE the lock can both pass the
+    // check and land, overshooting by at most the smaller charge -- the
+    // documented I-32 "floor, not an exact accountant" tolerance. The CAS is
+    // what guarantees no update is ever LOST, which is the property an
+    // accounting bound cannot do without.
+    for (;;) {
+        u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
+        if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
+        // CL-5: cap against this Proc's own budget, not the global constant. A Proc
+        // that never asked for a raise carries page_budget == PROC_PAGE_MAX, so this
+        // is byte-identical to the pre-CL-5 decision for every existing caller.
+        if (!proc_resource_exempt(p) && cur + npages > p->page_budget)
+            return false;                                // over budget -> caller -ENOMEM
+        if (!__atomic_compare_exchange_n(&p->page_count, &cur, cur + npages,
+                                         false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            continue;                                    // raced; re-decide on the new value
+        // CL-5: the exact high-water mark. A CAS loop for the same reason --
+        // a lost peak update would under-report the true peak that CL-5 budget
+        // sizing reads.
+        u32 want = cur + npages;
+        u32 peak = __atomic_load_n(&p->page_peak, __ATOMIC_RELAXED);
+        while (want > peak &&
+               !__atomic_compare_exchange_n(&p->page_peak, &peak, want,
+                                            false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            ;                                            // peak reloaded by the CAS
+        return true;
+    }
 }
 
 void proc_page_uncharge(struct Proc *p, u32 npages) {
     if (!p) return;
-    // Caller holds p->vma_lock. Clamp so an over-uncharge (should never happen --
-    // every uncharge matches a charge) never wraps past 0.
+    // CAS for the same reason as the charge above. Clamp so an over-uncharge
+    // (should never happen -- every uncharge matches a charge) never wraps
+    // past 0.
     u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
-    u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&p->page_count, nv, __ATOMIC_RELEASE);
+    do {
+        u32 nv = (cur >= npages) ? cur - npages : 0;
+        if (__atomic_compare_exchange_n(&p->page_count, &cur, nv,
+                                        false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return;
+    } while (1);                                         // cur reloaded by the CAS
 }
 
 bool proc_vma_charge(struct Proc *p) {

@@ -52,12 +52,15 @@ void test_loom_sqpoll_parks_on_cq_full(void);
 void test_loom_register_buffers(void);
 void test_loom_register_buffers_rejects(void);
 void test_loom_register_buffers_replace(void);
+void test_loom_ring_charge_balance(void);
+void test_loom_regbuf_charge_balance(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
 // forward-declare it like test_sys_burrow.c does for its inner).
 extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
+extern s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw);
 
 static struct Proc *test_proc_make(void) {
     return proc_alloc();
@@ -909,5 +912,125 @@ void test_loom_sqpoll_parks_on_cq_full(void) {
     TEST_ASSERT(resumed, "kthread resumes + drains the extra NOP after reap+ENTER");
 
     handle_put(&h);
+    test_proc_drop(p);
+}
+
+// ---------------------------------------------------------------------------
+// #130: the I-32 charge balances across the WHOLE Loom lifetime, in both
+// directions.
+//
+// The ring is the one eager charger whose Burrow keeps a second owner past the
+// VMA: loom_create holds a handle_count ref for the Loom's whole life so the
+// ring pages cannot vanish under the kernel's ring_kva. That makes "the mapping
+// went away" and "the pages went away" two DIFFERENT events, and #106-F1 got
+// the accounting wrong on each of them in turn:
+//
+//   - refunding on the VMA's TYPE let EL0 detach the ring, take the refund,
+//     keep the pages on the Loom's ref, and re-attach a full PROC_PAGE_MAX --
+//     an unprivileged breach of the per-Proc floor;
+//   - refunding on a handle_count SAMPLED BEFORE the drop then swung it the
+//     other way: on the ordinary teardown order (detach, then close -- what
+//     libthyla_rs' Ring::drop does) the sample reads 1, the refund is skipped,
+//     and loom_free freed the pages with nothing uncharging -- a PERMANENT
+//     over-charge.
+//
+// This test pins both halves, so it fails on EITHER of those states as well as
+// on any future one that gets the pairing wrong: the detach must refund
+// NOTHING, and the close must return the counter exactly to baseline.
+// ---------------------------------------------------------------------------
+void test_loom_ring_charge_balance(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 base = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+
+    struct loom_params kp;
+    hidx_t loom_fd = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd) == 0, "setup");
+
+    u32 ring_pages = (u32)burrow_backing_pages((size_t)kp.ring_size);
+    TEST_ASSERT(ring_pages > 0, "the ring occupies at least one page");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base + ring_pages), "setup charged the ring's occupancy");
+
+    // Detach the ring VA while the Loom still holds its handle_count ref. The
+    // pages do NOT free here, so nothing may be refunded -- this is the leg
+    // that, refunded, hands EL0 free budget.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size), 0L,
+                   "detach the ring VA");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base + ring_pages),
+                   "a detach that frees nothing refunds nothing");
+
+    // Close the Loom: loom_free drops the last ref, the pages free, and the
+    // charge is settled -- exactly once, and only now.
+    TEST_EXPECT_EQ(handle_close(p, loom_fd), 0, "close the loom fd");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), (u64)base,
+                   "the loom close settled the ring charge back to baseline");
+
+    test_proc_drop(p);
+}
+
+// #130, the registered-buffer twin. A registered buffer is the user's OWN
+// attach region -- so it can be the whole page budget, which is what makes the
+// over-charge direction matter here more than on the (small) ring. Same shape:
+// the table's pin outlives the VMA, so the detach must not refund and the pin's
+// release must. Both release sites are covered: the re-register displacement
+// (loom_register_buffers) and the teardown (loom_free).
+void test_loom_regbuf_charge_balance(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct loom_params kp;
+    hidx_t loom_fd = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd) == 0, "setup");
+
+    // Baseline AFTER setup, so the ring's own charge is not in the arithmetic.
+    u32 base = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+
+    // --- leg 1: the pin is displaced by a re-register ---
+    s64 bva = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(bva > 0, "attach a buffer page");
+    u32 bpages = (u32)burrow_backing_pages(PAGE_SIZE);
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base + bpages), "the attach charged the buffer");
+
+    struct loom_buf_reg br = { .va = (u64)bva, .len = PAGE_SIZE };
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, &br, 1) == 0, "register");
+
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, (u64)bva, PAGE_SIZE), 0L, "detach the buffer VA");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base + bpages),
+                   "detach with the table still pinning refunds nothing");
+
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, NULL, 0) == 0, "clear the table");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), (u64)base,
+                   "the displaced pin's release settled the buffer charge");
+
+    // --- leg 2: the pin is released by the teardown ---
+    s64 bva2 = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(bva2 > 0, "attach a second buffer page");
+    struct loom_buf_reg br2 = { .va = (u64)bva2, .len = PAGE_SIZE };
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, &br2, 1) == 0, "register #2");
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, (u64)bva2, PAGE_SIZE), 0L, "detach #2's VA");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base + bpages), "still pinned, still charged");
+
+    // Detach the ring too, so the close faces the FULL production teardown
+    // order: every VA released first (what Ring::drop does), then the fd. Both
+    // objects are then charged-but-unmapped, and the close must settle both.
+    u32 ring_pages = (u32)burrow_backing_pages((size_t)kp.ring_size);
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size), 0L,
+                   "detach the ring VA too");
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base + bpages), "the ring detach refunds nothing either");
+
+    TEST_EXPECT_EQ(handle_close(p, loom_fd), 0, "close the loom fd");
+    // base was sampled AFTER setup, so it still contains the ring's charge;
+    // settling both lands one ring below it.
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+                   (u64)(base - ring_pages),
+                   "the teardown settled both the buffer pin and the ring");
+
     test_proc_drop(p);
 }

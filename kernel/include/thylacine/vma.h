@@ -114,6 +114,11 @@ struct Vma *vma_alloc_guard(u64 vaddr_start, u64 vaddr_end);
 // + next/prev != NULL detection).
 void vma_free(struct Vma *v);
 
+// vma_free, additionally reporting whether releasing this mapping was the drop
+// that freed the Burrow's pages (#130 -- see burrow_unref_freed). False for a
+// VMA with no Burrow.
+bool vma_free_freed(struct Vma *v);
+
 // Insert `v` into Proc `p`'s sorted VMA list. Rejects overlap with
 // any existing VMA in the list. Returns 0 on success, -1 on overlap
 // (caller must vma_free the rejected VMA themselves; this function

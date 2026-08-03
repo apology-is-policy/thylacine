@@ -466,14 +466,23 @@ void test_resource_attach_charges_buddy_rounded(void) {
 // Loom's ref. Loop that over the handle table and the per-Proc floor is
 // ~1.5x breached with no capability at all.
 //
-// This test stands the shape up WITHOUT a Loom (which a kernel test cannot
-// easily mint): an ANON Burrow whose construction handle is deliberately
-// RETAINED across the map, which is exactly the Loom's refcount posture. The
-// pre-charge is load-bearing for the same reason as the #122 test below --
-// proc_page_uncharge clamps at 0, so "unchanged" is only falsifiable above 0.
+// This test stands the shape up WITHOUT a Loom: an ANON Burrow whose
+// construction handle is deliberately RETAINED across the map, which is exactly
+// the Loom's refcount posture. The pre-charge is load-bearing for the same
+// reason as the #122 test below -- proc_page_uncharge clamps at 0, so
+// "unchanged" is only falsifiable above 0.
 //
-// Revert-probe: drop `&& burrow_handle_count(...) == 0` from the ANON arm and
-// the refund assert fails (page_count returns to kPre).
+// It covers ONE half of the pairing: the detach must not refund. The OTHER half
+// -- that the drop which does free the pages settles the charge -- needs a real
+// charger to pair against, so it lives in loom.{ring,regbuf}_charge_balance.
+// #130 is why that split is spelled out rather than assumed: the first version
+// of this test ended by STORING page_count to 0 before res_drop, and that store
+// existed only because the accounting was left unbalanced at that point. A test
+// whose teardown has to correct the state under test is reporting a defect, not
+// cleaning up.
+//
+// Revert-probe: make the ANON arm refund unconditionally (drop the `freed`
+// term) and the refund assert fails (page_count returns to kPre).
 void test_resource_detach_retained_handle_keeps_page_count(void) {
     struct Proc *p = res_make(A_REAL_USER);          // non-exempt
 
@@ -511,8 +520,18 @@ void test_resource_detach_retained_handle_keeps_page_count(void) {
     TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre + vpages,
                    "#106-F1: no refund while another owner still holds the pages");
 
-    burrow_unref(v);                                  // now the pages really free
-    __atomic_store_n(&p->page_count, 0u, __ATOMIC_RELEASE);
+    // Drop the retained handle. THIS is the drop that frees the pages, so this
+    // is where the charge is settled -- and the test settles it exactly the way
+    // a production charger does, pairing the uncharge to the freed report. (In
+    // the tree that pairing lives in loom_free / loom_register_buffers; here
+    // the test IS the charge's owner.) The counter must land back on kPre with
+    // no manual correction.
+    if (burrow_unref_freed(v))
+        proc_page_uncharge(p, vpages);
+    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre,
+                   "the drop that freed the pages settled the charge exactly");
+
+    proc_page_uncharge(p, kPre);                      // undo the scene-setting pre-charge
     res_drop(p);
 }
 

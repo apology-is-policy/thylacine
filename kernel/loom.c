@@ -251,6 +251,34 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
 // we hold none. burrow_unref drops the ring's handle_count; if the user mapping
 // is already gone (mapping_count == 0) the pages free here, else the VMA
 // teardown frees them later (dual-refcount, #847).
+// #130: settle an I-32 page_count charge whose pages this teardown just freed.
+//
+// The uncharge belongs to the drop that ends the occupancy, and for a Loom that
+// drop can be loom_free -- which, unlike every other charge site in the tree,
+// has no Proc argument. `l->owner` supplies it.
+//
+// Why the stored pointer is safe here: KObj_Loom is neither transferable nor
+// dup-able (it is not in TRANSFERABLE_MASK, and handle_dup rejects it), so a
+// Loom is reachable ONLY through the handle table of the Proc that created it.
+// That table is torn down either by an explicit close on one of that Proc's own
+// threads, or by handle_table_free inside that Proc's own teardown -- which
+// proc_free runs while the struct is still allocated (the kmem_cache_free comes
+// later). So the Proc allocation is live whenever this runs.
+//
+// That is an ARGUMENT, not an enforced invariant, so it is backstopped rather
+// than trusted: the magic + pid pair turns any future violation of it (a
+// transferable Loom, a teardown reordered past proc_free's release) into a
+// silently skipped uncharge -- an over-charge of a dying Proc, which is inert --
+// instead of a write through a dangling pointer or a charge stolen from an
+// unrelated Proc that recycled the address. pid is monotonic, so a recycled
+// allocation cannot impersonate the original.
+static void loom_uncharge_owner(struct Loom *l, u32 npages) {
+    struct Proc *o = l->owner;
+    if (!o || npages == 0)                          return;
+    if (o->magic != PROC_MAGIC || o->pid != l->owner_pid) return;
+    proc_page_uncharge(o, npages);
+}
+
 static void loom_free(struct Loom *l) {
     // Loom-4c: JOIN the SQPOLL kthread FIRST -- before the #898 quiesce. The
     // kthread is the only other mutator of inflight_ops (it submits + reaps in
@@ -345,14 +373,27 @@ static void loom_free(struct Loom *l) {
         }
     }
     // Loom-6: release every registered-buffer pin (the table's burrow_refs).
+    // #130: a registered buffer is the user's own SYS_BURROW_ATTACH region, so
+    // it carries an I-32 charge. If the user already detached the VA, THIS unref
+    // is the drop that frees the pages -- and before #130 nothing uncharged
+    // there, so the Proc stayed billed for memory it no longer held.
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
         if (l->reg_buf[i].burrow) {
-            burrow_unref(l->reg_buf[i].burrow);
+            u32 n = (u32)burrow_backing_pages(burrow_get_size(l->reg_buf[i].burrow));
+            if (burrow_unref_freed(l->reg_buf[i].burrow))
+                loom_uncharge_owner(l, n);
             l->reg_buf[i].burrow = NULL;
         }
     }
     if (l->ring) {
-        burrow_unref(l->ring);
+        // #130: same for the ring. SYS_LOOM_SETUP charged ring_pages; the Loom
+        // holds a handle_count ref for its whole life, so on the ordinary
+        // teardown order (detach the ring VA, then close the fd -- what
+        // libthyla_rs' Ring::drop does) the detach does NOT free the pages and
+        // THIS unref does. The charge is released exactly once, by whichever of
+        // the two is last.
+        if (burrow_unref_freed(l->ring))
+            loom_uncharge_owner(l, l->ring_pages);
         l->ring = NULL;
     }
     l->magic = 0;   // clobber before free (UAF defense, mirrors burrow_free_internal)
@@ -495,8 +536,18 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     l->n_reg_buf = n;
     spin_unlock(&l->lock);
 
+    // #130: a displaced pin can be the drop that frees the pages -- the user
+    // may have detached the old buffer's VA while the table still held it, in
+    // which case the detach skipped its refund (correctly: nothing was freed
+    // then) and THIS unref is what ends the occupancy. `p` is the charged Proc
+    // by construction: registering requires a loom fd from p's own table, and
+    // KObj_Loom is neither transferable nor dup-able.
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
-        if (old[i]) burrow_unref(old[i]);
+        if (old[i]) {
+            u32 npages = (u32)burrow_backing_pages(burrow_get_size(old[i]));
+            if (burrow_unref_freed(old[i]))
+                proc_page_uncharge(p, npages);
+        }
     }
     return 0;
 }

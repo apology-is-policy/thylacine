@@ -379,6 +379,14 @@ struct Loom {
     u32                  _pad;
     struct Burrow       *ring;         // the SQ/CQ ring Burrow (handle_count ref held)
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
+    // #130: the I-32 charge ledger. `owner`/`owner_pid` are the Proc
+    // SYS_LOOM_SETUP charged (see loom_uncharge_owner for why the pointer is
+    // safe and why the pid backstops it); `ring_pages` is what it charged, so
+    // the uncharge reproduces the charge rather than recomputing it. All three
+    // are set once at setup and never mutated -- a Loom cannot change hands.
+    struct Proc         *owner;
+    int                  owner_pid;   // matches struct Proc.pid's type
+    u32                  ring_pages;
     // Geometry (immutable after loom_create). Mirrors loom_params.
     u32 sq_entries;
     u32 cq_entries;

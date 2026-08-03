@@ -428,6 +428,8 @@ void test_loom_register_replaces(void);
 void test_loom_register_buffers(void);
 void test_loom_register_buffers_rejects(void);
 void test_loom_register_buffers_replace(void);
+void test_loom_ring_charge_balance(void);
+void test_loom_regbuf_charge_balance(void);
 void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
@@ -1824,6 +1826,8 @@ struct test_case g_tests[] = {
     { "loom.register_buffers",           test_loom_register_buffers,           false, NULL },
     { "loom.register_buffers_rejects",   test_loom_register_buffers_rejects,   false, NULL },
     { "loom.register_buffers_replace",   test_loom_register_buffers_replace,   false, NULL },
+    { "loom.ring_charge_balance",        test_loom_ring_charge_balance,        false, NULL },
+    { "loom.regbuf_charge_balance",      test_loom_regbuf_charge_balance,      false, NULL },
     { "loom.post_cqe_back_pressure",     test_loom_post_cqe_back_pressure,     false, NULL },
     { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
     { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
