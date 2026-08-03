@@ -240,15 +240,22 @@ void test_vivarium_no_wide_alias(void) {
 // x0. The bare-u32 form is exercised separately -- both must be recognised.
 #define VIV_T_ATCWD ((u64)(s64)VIV_AT_FDCWD)
 
-static void viv_expect_open(u64 dirfd, u64 flags, u32 want_omode,
-                            const char *what) {
-    u64 start_fd = 0xBADu;
-    u32 omode    = 0xBADu;
+static void viv_expect_open_cx(u64 dirfd, u64 flags, u32 want_omode,
+                               bool want_cloexec, const char *what) {
+    u64  start_fd = 0xBADu;
+    u32  omode    = 0xBADu;
+    bool cloexec  = true;   // poison: every case below must OVERWRITE this
 
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(dirfd, flags, &start_fd, &omode),
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(dirfd, flags, &start_fd, &omode,
+                                               &cloexec),
                    (int)VIV_TRANSLATED, what);
     TEST_EXPECT_EQ(start_fd, SYS_WALK_OPEN_FROM_ROOT, "AT_FDCWD -> FROM_ROOT");
     TEST_EXPECT_EQ((u64)omode, (u64)want_omode, what);
+
+    // #151: O_CLOEXEC's effect is here, NOT in the omode -- it names a property
+    // of the resulting descriptor. Asserting it on every translated case is what
+    // keeps a future flag admission from quietly turning the bit on or off.
+    TEST_EXPECT_EQ((u64)(cloexec ? 1 : 0), (u64)(want_cloexec ? 1 : 0), what);
 
     // Whatever the map produces must be an omode SYS_OPEN will actually accept.
     // Asserting this for EVERY translated case (rather than eyeballing the
@@ -257,16 +264,25 @@ static void viv_expect_open(u64 dirfd, u64 flags, u32 want_omode,
                    "the emitted omode is inside SYS_WALK_OPEN_OMODE_VALID");
 }
 
-static void viv_expect_open_forwards(u64 flags, const char *what) {
-    u64 start_fd = 0xBADu;
-    u32 omode    = 0xBADu;
+static void viv_expect_open(u64 dirfd, u64 flags, u32 want_omode,
+                            const char *what) {
+    viv_expect_open_cx(dirfd, flags, want_omode, /*want_cloexec=*/false, what);
+}
 
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, flags, &start_fd, &omode),
+static void viv_expect_open_forwards(u64 flags, const char *what) {
+    u64  start_fd = 0xBADu;
+    u32  omode    = 0xBADu;
+    bool cloexec  = true;
+
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, flags, &start_fd,
+                                               &omode, &cloexec),
                    (int)VIV_FORWARD, what);
     // A declined call must leave the outputs alone: a caller that forwards but
     // reads them anyway must not find a plausible-looking omode waiting.
     TEST_EXPECT_EQ(start_fd, (u64)0xBADu, "a forwarded openat leaves start_fd alone");
     TEST_EXPECT_EQ((u64)omode, (u64)0xBADu, "a forwarded openat leaves omode alone");
+    TEST_EXPECT_EQ((u64)(cloexec ? 1 : 0), (u64)1,
+                   "a forwarded openat leaves cloexec alone");
 }
 
 void test_vivarium_openat_domain(void) {
@@ -277,15 +293,22 @@ void test_vivarium_openat_domain(void) {
     viv_expect_open(VIV_T_ATCWD, VIV_O_WRONLY | VIV_O_TRUNC, 1u | 0x10u,
                     "O_WRONLY|O_TRUNC -> OWRITE|OTRUNC");
 
-    // The three no-op admissions. Each is admitted because Thylacine already
-    // provides what the flag asks for unconditionally (see vivarium.c), so the
-    // resulting omode must be IDENTICAL to the flag's absence.
-    viv_expect_open(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_CLOEXEC, 0u,
-                    "O_CLOEXEC is a no-op (no fd crosses spawn implicitly)");
+    // The two remaining no-op admissions. Each is admitted because Thylacine
+    // already provides what the flag asks for unconditionally (see vivarium.c),
+    // so the resulting omode must be IDENTICAL to the flag's absence.
     viv_expect_open(VIV_T_ATCWD, VIV_O_RDWR | VIV_O_NOCTTY, 2u,
                     "O_NOCTTY is a no-op (ct acquisition is explicit)");
     viv_expect_open(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_LARGEFILE, 0u,
                     "O_LARGEFILE is a no-op (all offsets are 64-bit)");
+
+    // #151: O_CLOEXEC is NO LONGER a no-op. It was one, on a rationale LINEAGE
+    // voided (execve now preserves the handle table), so this case moved from
+    // "the omode is unchanged" -- which is still true, and still asserted -- to
+    // "and the descriptor flag comes out set".
+    viv_expect_open_cx(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_CLOEXEC, 0u, true,
+                       "O_CLOEXEC sets the descriptor flag, not the omode");
+    viv_expect_open_cx(VIV_T_ATCWD, VIV_O_RDONLY, 0u, false,
+                       "no O_CLOEXEC leaves the descriptor flag clear");
 
     // O_PATH dominates: the access bits and O_TRUNC are ignored on BOTH sides,
     // so the emitted omode is the bare OPATH rather than OPATH|whatever.
@@ -294,6 +317,12 @@ void test_vivarium_openat_domain(void) {
     viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_RDWR | VIV_O_TRUNC,
                     SYS_WALK_OPEN_OPATH,
                     "O_PATH ignores access bits + O_TRUNC, as Linux does");
+    // O_PATH does NOT swallow O_CLOEXEC: Linux honours it on an O_PATH open (it
+    // is one of the three flags O_PATH does not ignore), and an O_PATH open
+    // produces a descriptor like any other.
+    viv_expect_open_cx(VIV_T_ATCWD, VIV_O_PATH | VIV_O_CLOEXEC,
+                       SYS_WALK_OPEN_OPATH, true,
+                       "O_PATH|O_CLOEXEC keeps the descriptor flag");
 
     // The rejects. Each of these, if silently ignored, is a WRONG ANSWER rather
     // than a harmless no-op -- that asymmetry is the whole admission rule, so
@@ -316,8 +345,18 @@ void test_vivarium_openat_domain(void) {
                              "accmode 3 forwards (Linux EINVAL; not ours to mint)");
 
     // Fail toward the supervisor on a bad call site, never toward a dispatch.
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, NULL),
+    // Each output is nulled in turn, not just all three at once: a guard that
+    // checked only the first two would pass an all-NULL test and then write
+    // through a NULL cloexec_out for a caller that supplied the other two.
+    u64  s = 0; u32 o = 0; bool cx = false;
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, NULL, NULL),
                    (int)VIV_FORWARD, "NULL outputs -> FORWARD, never TRANSLATED");
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, NULL, &o, &cx),
+                   (int)VIV_FORWARD, "NULL start_fd_out alone -> FORWARD");
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, NULL, &cx),
+                   (int)VIV_FORWARD, "NULL omode_out alone -> FORWARD");
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(VIV_T_ATCWD, 0, &s, &o, NULL),
+                   (int)VIV_FORWARD, "NULL cloexec_out alone -> FORWARD");
 }
 
 void test_vivarium_openat_at_fdcwd(void) {
@@ -336,15 +375,17 @@ void test_vivarium_openat_at_fdcwd(void) {
     // apart from an O_PATH one means reading handle state this function may not
     // touch. (V-2b filed this as "revisit once the path is measured"; V-2c found
     // that would not have helped.)
-    u64 start_fd = 0xBADu;
-    u32 omode    = 0xBADu;
-    TEST_EXPECT_EQ((int)vivarium_openat_decide(3, VIV_O_RDONLY, &start_fd, &omode),
+    u64  start_fd = 0xBADu;
+    u32  omode    = 0xBADu;
+    bool cloexec  = false;
+    TEST_EXPECT_EQ((int)vivarium_openat_decide(3, VIV_O_RDONLY, &start_fd, &omode,
+                                               &cloexec),
                    (int)VIV_FORWARD, "a real dirfd forwards (handle state, not a gap)");
 
     // Only the LOW 32 BITS are significant -- `dirfd` is an `int`. A high-half
     // value that is not AT_FDCWD in its low word must not be mistaken for one.
     TEST_EXPECT_EQ((int)vivarium_openat_decide(0x1234567800000003ull, VIV_O_RDONLY,
-                                               &start_fd, &omode),
+                                               &start_fd, &omode, &cloexec),
                    (int)VIV_FORWARD, "the high half of dirfd is not consulted");
 }
 
@@ -2350,14 +2391,15 @@ void test_vivarium_startup_batch_rows(void) {
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_SETGID, args, &out),
                    (int)VIV_TIER2, "setgid is T2 (EPERM, except the no-op)");
 
-    // fcntl is a LIVE DECISION, not a gap. Every cmd a libc reaches for is about
-    // close-on-exec, and Thylacine has no close-on-exec at all -- so the
-    // tempting rows (F_SETFD, F_DUPFD) could only be served by silently
-    // succeeding, which is the lie this tier exists to prevent. Revisit WITH
-    // close-on-exec; this assert is what makes that a decision.
+    // fcntl was ENOSYS through #150 because Thylacine had no close-on-exec at
+    // all, so the cmds a libc actually reaches for could ONLY have been served
+    // by silently succeeding. #151 built the feature first and then served the
+    // row -- which is the order this assert exists to record. It is Tier-2 and
+    // NOT a renumber onto SYS_DUP: that call's second argument is a rights mask
+    // where F_DUPFD's is a minimum fd (the arity rule).
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_FCNTL, args, &out),
-                   (int)VIV_ENOSYS,
-                   "fcntl is ENOSYS -- no close-on-exec exists to implement it");
+                   (int)VIV_TIER2,
+                   "fcntl is T2 (close-on-exec exists; the rest of the cmds decline)");
 
     // The two that stay declined ON PURPOSE, re-asserted here because the
     // census lists them alongside the batch and a future reader will wonder why
@@ -2518,4 +2560,91 @@ void test_vivarium_identity_map(void) {
                    "an actual identity change is refused");
     TEST_EXPECT_EQ((int)vivarium_setid_is_noop(1000, 1000), 1,
                    "an ordinary Proc's setuid to itself is the no-op too");
+}
+
+// #151. The fcntl classifier. The served set is MEASURED (busybox issues exactly
+// F_SETFD(FD_CLOEXEC) and F_DUPFD_CLOEXEC(10) at startup), so both of those get
+// their own case here spelled with the values the guest actually sends.
+void test_vivarium_fcntl_domain(void);
+void test_vivarium_fcntl_domain(void) {
+    enum viv_fcntl_op op;
+    bool cx;
+    u64  minfd;
+
+    // The two MEASURED calls, by their raw values. Writing 0x2 / 0x406 rather
+    // than the names is deliberate: these are the numbers observed on the wire,
+    // and a mistyped constant would otherwise agree with itself.
+    op = VIV_FCNTL_UNSERVED; cx = false; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(0x2, 1, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_SETFD(FD_CLOEXEC) is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_SETFD, "0x2 classifies as SETFD");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)1, "FD_CLOEXEC asks for the flag ON");
+
+    op = VIV_FCNTL_UNSERVED; cx = false; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(0x406, 10, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_DUPFD_CLOEXEC(10) is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_DUPFD, "0x406 classifies as DUPFD");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)1, "the _CLOEXEC form sets the flag");
+    TEST_EXPECT_EQ(minfd, (u64)10, "and carries the MINIMUM fd, not a rights mask");
+
+    // F_DUPFD is the same op with the flag off. Serving one of the pair and not
+    // the other would be an arbitrary edge for a guest to find at runtime.
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_DUPFD, 3, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_DUPFD is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_DUPFD, "classifies as DUPFD");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0, "the plain form leaves the flag off");
+    TEST_EXPECT_EQ(minfd, (u64)3, "and carries its minimum");
+
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_GETFD is served");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_GETFD, "classifies as GETFD");
+
+    // F_SETFD with the bit CLEAR is a real request -- "stop being close-on-exec"
+    // -- not an absence of one.
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_SETFD, 0, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_SETFD(0) is served");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0, "F_SETFD(0) asks for the flag OFF");
+
+    // MASK, do not reject. Linux's F_SETFD ignores every bit but FD_CLOEXEC
+    // rather than refusing the call; being STRICTER than Linux for an input a
+    // guest may legally send is its own mistranslation.
+    op = VIV_FCNTL_UNSERVED; cx = false; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_SETFD, 0xFFFFu, &op, &cx, &minfd),
+                   (int)VIV_TRANSLATED, "F_SETFD with stray bits is still served");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)1, "the stray bits are masked, not rejected");
+
+    // Only the low 32 bits of cmd are significant -- it is an `int`. A high-half
+    // value whose low word is F_GETFD still means F_GETFD.
+    op = VIV_FCNTL_UNSERVED; cx = true; minfd = 0xBADu;
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(0x1234567800000001ull, 0, &op, &cx,
+                                              &minfd),
+                   (int)VIV_TRANSLATED, "the high half of cmd is not consulted");
+    TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_GETFD, "still GETFD");
+
+    // The declines. Each is a cmd that EXISTS on Linux and is simply not here --
+    // F_GETFL/F_SETFL (access + status flags), the locking family. A declined
+    // call must leave the outputs at their unserved values, so a caller that
+    // ignores the verdict cannot act on a plausible-looking op.
+    static const u64 declined[] = { 3, 4, 5, 6, 7, 8, 9, 1024, 1033 };
+    for (u32 i = 0; i < (u32)(sizeof(declined) / sizeof(declined[0])); i++) {
+        op = VIV_FCNTL_DUPFD; cx = true; minfd = 0xBADu;
+        TEST_EXPECT_EQ((int)vivarium_fcntl_decide(declined[i], 0, &op, &cx, &minfd),
+                       (int)VIV_FORWARD, "an unserved cmd declines");
+        TEST_EXPECT_EQ((int)op, (int)VIV_FCNTL_UNSERVED,
+                       "a declined cmd leaves op UNSERVED, never a stale one");
+        TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0, "and clears cloexec");
+        TEST_EXPECT_EQ(minfd, (u64)0, "and clears min_fd");
+    }
+
+    // Fail toward the decline on a bad call site, each output nulled in turn --
+    // a guard that checked only the first would write through the others.
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, NULL, &cx, &minfd),
+                   (int)VIV_FORWARD, "NULL op_out -> FORWARD");
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, &op, NULL, &minfd),
+                   (int)VIV_FORWARD, "NULL cloexec_out -> FORWARD");
+    TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, &op, &cx, NULL),
+                   (int)VIV_FORWARD, "NULL min_fd_out -> FORWARD");
 }

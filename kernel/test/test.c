@@ -243,6 +243,10 @@ void test_handles_full_table_oom(void);
 void test_handles_kind_classifiers(void);
 void test_handles_srv_kind(void);
 void test_handles_replace(void);
+void test_handles_cloexec_lifecycle(void);
+void test_handles_cloexec_exec_sweep(void);
+void test_handles_cloexec_fork_preserves(void);
+void test_handles_dup_posix(void);
 void test_vmo_create_close_round_trip(void);
 void test_vmo_refcount_lifecycle(void);
 void test_vmo_map_unmap_lifecycle(void);
@@ -609,6 +613,7 @@ void test_vivarium_clone_domain(void);                   // LINEAGE L-3d
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
 void test_vivarium_startup_batch_rows(void);             // #150 (LINEAGE L-6c)
 void test_vivarium_writev_domain(void);                  // #150
+void test_vivarium_fcntl_domain(void);                   // #151
 void test_vivarium_uname_fill(void);                     // #150
 void test_vivarium_identity_map(void);                   // #150
 void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
@@ -1640,6 +1645,11 @@ struct test_case g_tests[] = {
     { "handles.kind_classifiers",      test_handles_kind_classifiers,      false, NULL },
     { "handles.srv_kind",              test_handles_srv_kind,              false, NULL },
     { "handles.replace",               test_handles_replace,               false, NULL },
+    { "handles.cloexec_lifecycle",     test_handles_cloexec_lifecycle,     false, NULL },
+    { "handles.cloexec_exec_sweep",    test_handles_cloexec_exec_sweep,    false, NULL },
+    { "handles.cloexec_fork_preserves",
+      test_handles_cloexec_fork_preserves, false, NULL },
+    { "handles.dup_posix",             test_handles_dup_posix,             false, NULL },
     { "burrow.create_close_round_trip",   test_vmo_create_close_round_trip,   false, NULL },
     { "burrow.refcount_lifecycle",        test_vmo_refcount_lifecycle,        false, NULL },
     { "burrow.map_unmap_lifecycle",       test_vmo_map_unmap_lifecycle,       false, NULL },
@@ -2107,6 +2117,7 @@ struct test_case g_tests[] = {
     // zero-fill, and the identity sentinel mapping.
     { "vivarium.startup_batch_rows",     test_vivarium_startup_batch_rows,     false, NULL },
     { "vivarium.writev_domain",          test_vivarium_writev_domain,          false, NULL },
+    { "vivarium.fcntl_domain",           test_vivarium_fcntl_domain,           false, NULL },
     { "vivarium.uname_fill",             test_vivarium_uname_fill,             false, NULL },
     { "vivarium.identity_map",           test_vivarium_identity_map,           false, NULL },
     { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },

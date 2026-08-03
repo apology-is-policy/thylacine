@@ -1924,3 +1924,168 @@ instrumentation contradicted `startup_batch_rows`, the suite failed and **the
 container never ran** — the guest could not have reported anything. Yet the guest
 is the *only* thing that knows which `fcntl` cmds busybox actually issues. Both
 legs, or neither proves anything.
+
+---
+
+## Close-on-exec (#151, LINEAGE L-6c)
+
+The `fcntl` section above closed with "that is a kernel feature, not a
+translation, and it is what now blocks the L-6c gate." #151 built the feature and
+then served the row, in that order. The order is the whole content of the chunk:
+serving `F_SETFD(FD_CLOEXEC)` by storing nothing would have passed the gate and
+left a known lie in the tree.
+
+### Where the flag lives, and why not in `struct Handle`
+
+`struct HandleTable` gained `u64 cloexec[HANDLE_CLOEXEC_WORDS]` — a bitmap
+parallel to the slot array. Both halves of that are deliberate.
+
+**Parallel**, because POSIX close-on-exec is a property of the **descriptor**,
+not of the open file description behind it. `dup(fd)` yields a second descriptor
+onto the same description with the flag *clear*, and `F_SETFD` on either does not
+touch the other. A bit stored in `struct Handle` would be shared by exactly the
+two things POSIX requires to differ. Linux keeps `close_on_exec` as a bitmap
+beside `fd[]` in `struct fdtable` for this reason; the shape is not a
+coincidence.
+
+**Not a field**, also because `struct Handle` has no slack: `8 + 4 + 4 + 8` is
+exactly the 24 its `_Static_assert` pins. A `u32` there grows it to 32, taking the
+table from 6152 to 8200 bytes — across the 2-page boundary into 3, a 50%
+per-Proc increase to carry one bit per slot. The bitmap costs 32 bytes total.
+
+### Established, never inherited
+
+The bit is written in `handle_install_locked`, the single point every fd-creating
+path in the kernel goes through (`handle_alloc` and both dup forms). Writing it
+there is what makes a **reused index** unable to carry the previous occupant's
+flag — the reused-identity class this tree keeps meeting, most recently L1f's F1
+(a reused inode serving a prior occupant's cached page) and net-3d's slot
+re-mint. It is also *mandatory* rather than defensive: it is how
+`handle_dup_posix` delivers `F_DUPFD_CLOEXEC`'s requested value.
+
+`handle_close` clears the bit as well, and **the revert probes measured that the
+two overlap completely**: removing either one alone leaves the whole suite green,
+and only removing *both* trips `handles.cloexec_lifecycle`. So the
+no-inheritance property is doubly held and no test can attribute it to a site.
+
+That is worth stating rather than leaving as an implication that both are
+load-bearing. The close-side clear is **hygiene** — it keeps "bit set ⇒ slot
+live" true, an invariant nothing currently reads — and is the one that could be
+dropped; the install-side write cannot be, for the reason above. A redundancy
+noticed only when a sabotage refuses to fire is a redundancy that would otherwise
+have been re-derived wrongly by whoever touched it next.
+
+Clearing at install also gives POSIX `dup` its required semantics for free — the
+new descriptor is not close-on-exec — without `handle_dup` having to say so.
+
+The four lifecycle sites, stated as a set because a missing one is silent:
+
+| site | behaviour | why |
+|---|---|---|
+| `handle_install_locked` | clears (or sets, per the caller's argument) | establish-never-inherit; the single chokepoint |
+| `handle_close` | clears | the flag dies with the descriptor |
+| `handle_table_copy_into` (fork) | **copies** | POSIX: fork preserves. A shell sets it once and forks per command |
+| `handle_replace` | **leaves alone** | the fd number persists, so the fd's flag persists — a `SOCK_CLOEXEC` socket stays close-on-exec across `connect` |
+
+### The sweep runs after the commit point
+
+`handle_close_on_exec` is called from `sys_execve_core` immediately after
+`proc_exec_replace`, and both halves of that placement are forced:
+
+- The closes may **sleep** (a Spoor's Dev close hook sends a 9P `Tclunk`), so
+  this cannot run under any lock. The `spoor_clunk` directly above it already
+  establishes that sleeping is legal at this point.
+- A **failed exec must leave the process unchanged**, so nothing that closes the
+  caller's fds may run before the last thing that can fail. Linux places
+  `do_close_on_exec()` after its own point of no return for the same reason.
+
+It is before the trapframe rewrite, so no instruction of the new image can
+observe an fd that was supposed to be gone.
+
+The sweep snapshots and clears the bitmap in one lock hold, then closes outside
+it. The snapshot cannot go stale in the only caller that exists — `execve`
+refuses unless this is the Proc's sole live thread — but the clear-first form
+does not *depend* on that, which is why it is written that way.
+
+**Native behaviour is byte-unchanged**, and that falls out rather than being
+arranged: nothing outside the phenotype can set the flag, so a native Proc's
+bitmap is empty and the sweep closes nothing.
+
+### The `fcntl` row, and the served set
+
+`fcntl` is a **multiplexer** — the shape Thylacine's native ABI refuses and a
+Linux phenotype has to speak, which is why it lives in the vivarium and has no
+native counterpart.
+
+| cmd | served | note |
+|---|---|---|
+| `F_GETFD` / `F_SETFD` | yes | `F_SETFD` **masks** `arg & FD_CLOEXEC` rather than validating — Linux ignores every other bit, and being *stricter* than Linux for an input a guest may legally send is its own mistranslation |
+| `F_DUPFD` / `F_DUPFD_CLOEXEC` | yes | `handle_dup_posix` — rights verbatim, lowest free slot ≥ `arg` |
+| everything else | `ENOSYS` | not Linux's `EINVAL`: that claims the cmd is not a valid fcntl operation, which for `F_GETFL` or `F_SETLK` is false. `ENOSYS` says the surface is absent, which is true |
+
+`F_GETFD` and `F_DUPFD` join the two measured cmds because each is the exact
+inverse or sibling of one of them, differing by a line; serving one of a pair and
+declining the other is an arbitrary edge for a guest to discover at runtime.
+
+**The minimum-fd argument is why `handle_dup_posix` exists.** A shell's
+`savefd()` does `F_DUPFD_CLOEXEC(fd, 10)` precisely to move its bookkeeping fd
+out of the low range a user redirection could collide with. Returning the first
+free slot regardless would hand back fd 3 and break the guarantee the call was
+made to obtain — silently, and only under a redirection.
+
+### `O_CLOEXEC` is now honoured for real
+
+`vivarium_openat_decide` gained a third output, `cloexec_out`, and the shell
+applies it after `sys_open_handler` succeeds. It is a separate output rather than
+a bit folded into the omode because it is **not part of the open at all** — it
+names the resulting descriptor.
+
+It is set on every translated path including `O_PATH`: Linux honours `O_CLOEXEC`
+on an `O_PATH` open (one of the three flags `O_PATH` does not ignore), and an
+`O_PATH` open produces a descriptor like any other.
+
+### Coverage
+
+Five kernel tests, one per obligation: `handles.cloexec_lifecycle` (set/get, the
+free-slot refusal, and the reused-index property), `handles.cloexec_exec_sweep`
+(exactly the flagged slots close, the *survivors* are checked by name, and a
+second sweep is a no-op), `handles.cloexec_fork_preserves` (fork carries it, then
+the child's exec consumes it — the pair together), `handles.dup_posix` (the
+minimum, the verbatim rights, and both flag polarities) and
+`vivarium.fcntl_domain` (the classifier, with the two measured cmds written as
+their raw wire values `0x2` and `0x406` so a mistyped constant cannot agree with
+itself).
+
+**Plus one in-guest leg, and it is the one that matters most**: L177–L179 in
+`viv-pheno-probe`, which forks, dups three descriptors to *fixed* numbers (20
+plain, 21 `F_DUPFD_CLOEXEC`, 22 plain), and re-execs the probe in a third mode
+that reports whether 21 died and 22 lived. Fixed numbers because the re-execed
+image has no memory of what the pre-exec one chose — which makes `F_DUPFD`'s
+minimum load-bearing in the leg as well as in the shell it was built for. It
+reports through fd 20, i.e. through the mechanism under test in the direction
+that must *not* fire.
+
+**The kernel tests are blind to the wiring, and the probes measured exactly how
+blind.** Deleting `handle_close_on_exec(p)` from `sys_execve_core` leaves the
+unit suite at a full **1315/1315** while the in-guest leg fails at precisely
+`marker=L180`. The other five sabotages (writev-style: install-does-not-clear,
+sweep-closes-everything, fork-drops-the-flag, dup-ignores-the-minimum,
+`F_SETFD`-rejects-stray-bits) go the other way — four fail at their own named
+assertions in one build, and the fifth is the redundancy finding above.
+
+### What the gate did next, and the blocker it revealed
+
+Serving `fcntl` moved the gate from *"busybox speaks"* to **"busybox runs a
+script"** — `L6C-A-shell-runs` now fires and the shell executes `/gate/run.sh`.
+It then fails at `L6C-B-external-exec`, spawning an external command.
+
+Measured rather than inferred: instrumenting `viv_execve`'s envp arm shows the
+guest passing `envc=2` with `env0='SHLVL=1'`. **Busybox ash synthesizes `SHLVL`
+and `PWD` itself**, so its envp is non-empty even starting from an empty
+environment — there is no container configuration that avoids the arm. The
+blocker is therefore **task #140** (no process has a POSIX environment on its
+stack), and it wants a change to `exec_build_init_stack`, not to the phenotype.
+
+The joey gate message was updated to name it. A `KNOWN-BLOCKED` that outlives its
+blocker is just a disabled test, and one that names the *wrong* blocker is worse
+— it sends the next reader at the thing that was already fixed.

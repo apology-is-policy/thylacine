@@ -359,12 +359,21 @@ enum {
 //   `dirfd` / `flags` are the raw x0 / x2 register values; only their low 32
 //   bits are significant (both are `int` in the Linux ABI).
 //
-// Returns VIV_TRANSLATED with *start_fd_out and *omode_out set, or VIV_FORWARD
-// (outputs untouched) for anything outside the domain. Never ENOSYS: `openat`
-// exists — an out-of-domain call is one the supervisor should serve, not one to
-// deny.
+// Returns VIV_TRANSLATED with *start_fd_out, *omode_out and *cloexec_out set, or
+// VIV_FORWARD (outputs untouched) for anything outside the domain. Never ENOSYS:
+// `openat` exists — an out-of-domain call is one the supervisor should serve,
+// not one to deny.
+//
+// #151: `cloexec_out` reports whether O_CLOEXEC was asked for. It is a THIRD
+// output rather than a bit folded into the omode because it is not part of the
+// SYS_OPEN call at all -- the flag belongs to the resulting DESCRIPTOR, so the
+// shell sets it after the open succeeds. Until #151 this bit was admitted and
+// discarded, on a rationale ("Thylacine has nothing to opt out of") that was
+// true when written and was voided by LINEAGE: execve now preserves the handle
+// table and fork copies it, so an fd without the flag really does cross exec.
 enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
-                                        u64 *start_fd_out, u32 *omode_out);
+                                        u64 *start_fd_out, u32 *omode_out,
+                                        bool *cloexec_out);
 
 // Assemble the SYS_OPEN call from a decision plus a caller-measured path length.
 // Trivial by design — its value is that SYS_OPEN's argument ORDER is stated in
@@ -1667,6 +1676,54 @@ enum viv_verdict vivarium_writev_decide(u64 iovcnt, u32 *out_count);
 // indistinguishable from an error), and it checks this BEFORE writing anything.
 // Returns false when the addition would break that bound.
 bool vivarium_writev_accumulate(u64 *total, u64 add);
+
+// -----------------------------------------------------------------------------
+// fcntl (#151). A MULTIPLEXER, which is exactly the shape Thylacine's native ABI
+// refuses -- and exactly the shape a Linux phenotype has to speak, which is why
+// it lives here and has no native counterpart. Only the close-on-exec family is
+// served; the rest decline.
+//
+// The served set is MEASURED, not guessed. Instrumenting the row and running
+// Alpine busybox's /bin/sh showed it issues fcntl exactly twice at startup:
+//
+//     cmd 0x2   = F_SETFD,          arg 1  = FD_CLOEXEC
+//     cmd 0x406 = F_DUPFD_CLOEXEC,  arg 10 = ash's savefd(), moving the script
+//                                            fd above 10
+//
+// F_GETFD and F_DUPFD join them because each is the exact inverse/sibling of one
+// of those, differing by a line; serving one of a pair and declining the other
+// would be an arbitrary edge for a guest to discover at runtime.
+//
+// EVERY OTHER cmd declines with ENOSYS rather than Linux's EINVAL. EINVAL claims
+// the cmd is not a valid fcntl operation, which for F_GETFL or F_SETLK is simply
+// false; ENOSYS says the surface is absent, which is true and is what the row as
+// a whole returned before any of it was served.
+enum viv_fcntl_op {
+    VIV_FCNTL_UNSERVED = 0,
+    VIV_FCNTL_GETFD,       // read the descriptor's close-on-exec flag
+    VIV_FCNTL_SETFD,       // write it; *cloexec_out carries the new value
+    VIV_FCNTL_DUPFD,       // dup >= *min_fd_out; *cloexec_out is the new fd's flag
+};
+
+enum {
+    VIV_F_DUPFD         = 0,
+    VIV_F_GETFD         = 1,
+    VIV_F_SETFD         = 2,
+    VIV_F_DUPFD_CLOEXEC = 1030,
+    VIV_FD_CLOEXEC      = 1,
+};
+
+// Classify an fcntl and extract its parameters. PURE -- no Proc, no table, no
+// memory. Returns VIV_TRANSLATED with *op_out set (plus whichever of
+// *cloexec_out / *min_fd_out that op uses), or VIV_FORWARD for an unserved cmd.
+//
+// RANGE VALIDATION OF min_fd IS NOT DONE HERE, deliberately: "is this fd index
+// too large" is a question about PROC_HANDLE_MAX, i.e. about the handle table,
+// and this layer does not know about tables. The shell answers it, the same way
+// openat's shell owns the path measurement its decide refuses to do.
+enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
+                                       enum viv_fcntl_op *op_out,
+                                       bool *cloexec_out, u64 *min_fd_out);
 
 // -----------------------------------------------------------------------------
 // uname (#150). A fabrication -- there is no underlying Thylacine call -- so the

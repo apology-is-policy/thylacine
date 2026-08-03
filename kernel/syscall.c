@@ -6956,6 +6956,18 @@ static s64 sys_execve_core(struct exception_context *ctx,
 
     spoor_clunk(exe);
 
+    // #151: consume the close-on-exec flags. AFTER the commit, for two reasons
+    // pulling the same way: a failed exec must leave the process unchanged, so
+    // nothing that closes the caller's fds may run before the last thing that
+    // can fail; and these closes SLEEP (a Spoor's Dev close hook sends a 9P
+    // Tclunk), which the spoor_clunk directly above already establishes as legal
+    // at this point. Linux places do_close_on_exec() after its own point of no
+    // return for the first reason.
+    //
+    // BEFORE the trapframe rewrite below, so no instruction of the new image can
+    // observe an fd that was supposed to be gone.
+    (void)handle_close_on_exec(p);
+
     // 5. Rewrite the trapframe so this syscall's own eret enters the new image.
     //    KERNEL_EXIT (vectors.S) restores elr_el1 / sp_el0 / spsr_el1 from these
     //    fields, so setting them here IS the transition -- no separate
@@ -8618,6 +8630,13 @@ static s64 viv_execve(struct exception_context *ctx, u64 path_va, u64 argv_va,
         if (!sys_validate_user_buf(envp_va, 8))     return -(s64)T_E_FAULT;
         u64 e0 = 0;
         if (viv_load_u64(envp_va, &e0) != 0)        return -(s64)T_E_FAULT;
+        // MEASURED at #151, and this is now what BLOCKS the L-6c gate: a
+        // busybox ash spawning an external command passes envc=2 with
+        // env0='SHLVL=1'. It SYNTHESIZES that (and PWD) itself, so its envp is
+        // non-empty even starting from an empty environment -- there is no
+        // container configuration that avoids this arm. Task #140 owns it; it
+        // wants a real envp on the new image's stack, which is a change to
+        // exec_build_init_stack rather than anything here.
         if (e0 != 0)                                return -(s64)T_E_NOSYS;
     }
 
@@ -8860,9 +8879,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     switch (linux_nr) {
     case VIV_LINUX_OPENAT: {
         // openat(dirfd, path, flags, mode): x0 dirfd, x1 path, x2 flags.
-        u64 start_fd = 0;
-        u32 omode    = 0;
-        if (vivarium_openat_decide(args[0], args[2], &start_fd, &omode)
+        u64  start_fd = 0;
+        u32  omode    = 0;
+        bool cloexec  = false;
+        if (vivarium_openat_decide(args[0], args[2], &start_fd, &omode, &cloexec)
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
         // DECIDE BEFORE MEASURE: the measurement is a faultable user read, and
@@ -8873,7 +8893,58 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         if (m != 0)                                  return m;
         struct viv_call c;
         vivarium_openat_build(start_fd, args[1], path_len, omode, &c);
-        return sys_open_handler(c.args[0], c.args[1], c.args[2], c.args[3]);
+        s64 fd = sys_open_handler(c.args[0], c.args[1], c.args[2], c.args[3]);
+        // #151: O_CLOEXEC is a property of the DESCRIPTOR, so it is applied
+        // after the open rather than carried in the omode. Only on success --
+        // there is no descriptor to flag otherwise. The set cannot fail here
+        // (the fd was just created by this thread and no peer can reach it), so
+        // its return is not checked; if it somehow did, the honest report is
+        // still the fd, since the file IS open.
+        if (fd >= 0 && cloexec)
+            (void)handle_set_cloexec(p, (hidx_t)fd, true);
+        return fd;
+    }
+
+    case VIV_LINUX_FCNTL: {
+        // fcntl(fd, cmd, arg): x0 fd, x1 cmd, x2 arg.
+        enum viv_fcntl_op op = VIV_FCNTL_UNSERVED;
+        bool cloexec = false;
+        u64  min_fd  = 0;
+        if (vivarium_fcntl_decide(args[1], args[2], &op, &cloexec, &min_fd)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;             // an unserved cmd; see vivarium.h
+        // Bound BEFORE narrowing to hidx_t, so a huge or negative-as-int fd
+        // cannot wrap into a valid-looking index. The callees range-check too;
+        // this exists so the conversion itself is well-defined.
+        if (args[0] >= (u64)PROC_HANDLE_MAX)         return -(s64)T_E_BADF;
+        hidx_t fd = (hidx_t)args[0];
+
+        switch (op) {
+        case VIV_FCNTL_GETFD: {
+            int on = handle_get_cloexec(p, fd);
+            if (on < 0)                              return -(s64)T_E_BADF;
+            return on ? (s64)VIV_FD_CLOEXEC : 0;
+        }
+        case VIV_FCNTL_SETFD:
+            if (handle_set_cloexec(p, fd, cloexec) != 0) return -(s64)T_E_BADF;
+            return 0;
+        case VIV_FCNTL_DUPFD: {
+            // Linux answers EINVAL when the minimum exceeds the fd limit -- an
+            // ARGUMENT error, distinct from the EMFILE it gives when the limit
+            // is merely reached. The range lives here rather than in the pure
+            // decide because PROC_HANDLE_MAX is a fact about the handle table.
+            if (min_fd >= (u64)PROC_HANDLE_MAX)      return -(s64)T_E_INVAL;
+            hidx_t nfd = handle_dup_posix(p, fd, (hidx_t)min_fd, cloexec);
+            // handle_dup_posix folds "no such fd" and "table full" into one -1,
+            // and EMFILE is the more useful of the two to a shell: a guest that
+            // just used this fd knows it exists, and EBADF would send it looking
+            // for a bug it does not have.
+            if (nfd < 0)                             return -(s64)T_E_MFILE;
+            return (s64)nfd;
+        }
+        default:
+            return -(s64)T_E_NOSYS;
+        }
     }
 
     case VIV_LINUX_FSTAT: {

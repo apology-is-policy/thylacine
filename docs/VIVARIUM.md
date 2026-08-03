@@ -1711,7 +1711,7 @@ unconditionally.** Three qualify, and each rests on a structural fact rather tha
 
 | flag | why ignoring it is *correct*, not merely harmless |
 |---|---|
-| `O_CLOEXEC` | ~~Asks that the fd not survive exec. Thylacine has no close-on-exec concept because there is nothing to opt out of: a spawned child "inherits no Spoor handles" (`syscall.h:327`) and `SYS_SPAWN_WITH_FDS` passes an **explicit** list~~ **VOIDED — see below (task #151)** |
+| ~~`O_CLOEXEC`~~ | ~~Asks that the fd not survive exec. Thylacine has no close-on-exec concept because there is nothing to opt out of: a spawned child "inherits no Spoor handles" (`syscall.h:327`) and `SYS_SPAWN_WITH_FDS` passes an **explicit** list~~ **VOIDED; the flag is now HONOURED FOR REAL — see below (#151)** |
 | `O_NOCTTY` | Asks not to acquire a controlling terminal. Thylacine acquires one only via the explicit `SYS_TTY_ACQUIRE` (PTY-1), never implicitly on open — already relied on by the pouch pty patch |
 | `O_LARGEFILE` | Asks that >2 GiB offsets be permitted. Every Thylacine offset is 64-bit, exactly as on 64-bit Linux, whose kernel force-sets the bit internally |
 
@@ -1739,10 +1739,21 @@ unconditionally.** Three qualify, and each rests on a structural fact rather tha
 > issues turned up `F_SETFD(FD_CLOEXEC)` and `F_DUPFD_CLOEXEC`, and asking why
 > those could not be served led back to this row.
 >
-> Until close-on-exec lands (**task #151**), `O_CLOEXEC` sits in the §9 DEGRADED
-> tier — accepted and not honoured — rather than in the table above. It is listed
-> here rather than quietly moved so that the correction stays legible next to the
-> claim it replaces.
+> **#151 CLOSED IT, and by building the feature rather than adjusting the claim.**
+> `struct HandleTable` gained a `cloexec` bitmap parallel to its slot array —
+> parallel rather than a field in `struct Handle` because POSIX close-on-exec is a
+> property of the **descriptor**, not of the open file description behind it
+> (`dup(fd)` yields a second descriptor onto the same description with the flag
+> clear). Linux keeps `close_on_exec` beside `fd[]` in `struct fdtable` for the
+> same reason. `execve` consumes the flagged slots after its commit point;
+> `rfork` preserves them; `openat` sets the bit after a successful open, since it
+> names the resulting descriptor and so cannot ride in the omode.
+>
+> So `O_CLOEXEC` returns to the table above as genuinely honoured — but the entry
+> stays struck through and this note stays beneath it, because the *reasoning*
+> that admitted it was wrong even while its conclusion happened to hold. A flag is
+> admitted here only when the behaviour it asks for is what we do unconditionally;
+> `O_CLOEXEC` no longer qualified, and the fix was to do what it asks.
 
 Contrast the rejects, where ignoring the bit is a **wrong answer**: `O_CREAT` would
 turn "create if absent" into `ENOENT`; `O_DIRECTORY` would turn `ENOTDIR` into a

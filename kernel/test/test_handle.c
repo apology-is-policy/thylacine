@@ -464,3 +464,181 @@ void test_handles_replace(void) {
 
     test_proc_drop(p);
 }
+
+// =============================================================================
+// #151 close-on-exec. Four tests, one per obligation the flag carries: it is
+// ESTABLISHED at install and never inherited; exec CONSUMES exactly the flagged
+// slots; fork PRESERVES it; and the dup family sets it per POSIX (clear for
+// dup/F_DUPFD, set for F_DUPFD_CLOEXEC).
+// =============================================================================
+
+void test_handles_cloexec_lifecycle(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    hidx_t h = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, p);
+    TEST_ASSERT(h >= 0, "alloc failed");
+
+    // Born CLEAR. An fd is not close-on-exec unless something asks.
+    TEST_EXPECT_EQ(handle_get_cloexec(p, h), 0, "a fresh handle is not cloexec");
+
+    TEST_ASSERT(handle_set_cloexec(p, h, true) == 0, "set failed");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, h), 1, "set then get reads back 1");
+    TEST_ASSERT(handle_set_cloexec(p, h, false) == 0, "clear failed");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, h), 0, "cleared reads back 0");
+
+    // THE REUSED-INDEX PROPERTY. Flag it, close it, and allocate again: the new
+    // occupant lands on the same index (it is the lowest free one) and must NOT
+    // inherit a close-on-exec it never asked for. This is the class the tree
+    // keeps meeting -- a reused identity serving the previous occupant's state
+    // (L1f F1's reused inode, the net-3d slot re-mint).
+    //
+    // WHAT THIS CANNOT DO, measured rather than assumed: it cannot attribute the
+    // property to a SITE. Two places clear the bit (handle_install_locked and
+    // handle_close) and the #151 revert probes showed they overlap completely --
+    // removing either one alone leaves the whole suite green, and only removing
+    // BOTH trips this assertion. So it pins the property and nothing finer, which
+    // is the honest reading of a redundancy rather than a defect in the test.
+    TEST_ASSERT(handle_set_cloexec(p, h, true) == 0, "set before close");
+    TEST_ASSERT(handle_close(p, h) == 0, "close failed");
+    hidx_t h2 = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(h2 == h, "the reused index is the one just freed");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, h2), 0,
+                   "a REUSED slot does not inherit the previous fd's cloexec");
+
+    // A free or out-of-range slot has no flag to read or write. Refusing rather
+    // than silently succeeding matters: a set on a free index would be a promise
+    // about an fd that does not exist, and the next open would inherit it.
+    TEST_ASSERT(handle_close(p, h2) == 0, "close h2");
+    TEST_ASSERT(handle_get_cloexec(p, h2) < 0, "get on a free slot refuses");
+    TEST_ASSERT(handle_set_cloexec(p, h2, true) < 0, "set on a free slot refuses");
+    TEST_ASSERT(handle_get_cloexec(p, -1) < 0, "get on a negative index refuses");
+    TEST_ASSERT(handle_set_cloexec(p, PROC_HANDLE_MAX, true) < 0,
+                "set past the table refuses");
+
+    test_proc_drop(p);
+}
+
+void test_handles_cloexec_exec_sweep(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    hidx_t keep1 = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ, p);
+    hidx_t go1   = handle_alloc(p, KOBJ_THREAD,  RIGHT_READ, NULL);
+    hidx_t keep2 = handle_alloc(p, KOBJ_THREAD,  RIGHT_READ, NULL);
+    hidx_t go2   = handle_alloc(p, KOBJ_THREAD,  RIGHT_READ, NULL);
+    TEST_ASSERT(keep1 >= 0 && go1 >= 0 && keep2 >= 0 && go2 >= 0, "allocs failed");
+
+    TEST_ASSERT(handle_set_cloexec(p, go1, true) == 0, "flag go1");
+    TEST_ASSERT(handle_set_cloexec(p, go2, true) == 0, "flag go2");
+
+    TEST_EXPECT_EQ(handle_table_count(p->handles), 4, "four open before exec");
+    TEST_EXPECT_EQ(handle_close_on_exec(p), 2, "exec closes exactly the two flagged");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), 2, "two survive");
+
+    // The SURVIVORS are the right ones -- a sweep that closed the complement
+    // would report the same count.
+    struct Handle got;
+    TEST_ASSERT(handle_get(p, keep1, &got) == 0, "keep1 survived");
+    handle_put(&got);
+    TEST_ASSERT(handle_get(p, keep2, &got) == 0, "keep2 survived");
+    handle_put(&got);
+    TEST_ASSERT(handle_get(p, go1, &got) < 0, "go1 is gone");
+    TEST_ASSERT(handle_get(p, go2, &got) < 0, "go2 is gone");
+
+    // Idempotent: a second sweep finds nothing, because the bits went with the
+    // descriptors. A sweep that left them set would close whatever landed on
+    // those indices next.
+    TEST_EXPECT_EQ(handle_close_on_exec(p), 0, "a second sweep closes nothing");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), 2, "and disturbs nothing");
+
+    // A Proc with no flagged fds is untouched -- which is EVERY native Proc,
+    // since nothing outside the phenotype can set the flag. That is what makes
+    // the exec sweep byte-neutral for native programs.
+    hidx_t fresh = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(fresh >= 0, "fresh alloc");
+    TEST_EXPECT_EQ(handle_close_on_exec(p), 0, "an unflagged table loses nothing");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), 3, "all three still open");
+
+    test_proc_drop(p);
+}
+
+void test_handles_cloexec_fork_preserves(void) {
+    struct Proc *parent = test_proc_make();
+    struct Proc *child  = test_proc_make();
+    TEST_ASSERT(parent != NULL && child != NULL, "test_proc_make returned NULL");
+
+    hidx_t plain = handle_alloc(parent, KOBJ_PROCESS, RIGHT_READ, parent);
+    hidx_t flagged = handle_alloc(parent, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(plain >= 0 && flagged >= 0, "parent allocs failed");
+    TEST_ASSERT(handle_set_cloexec(parent, flagged, true) == 0, "flag it");
+
+    TEST_ASSERT(handle_table_copy_into(child, parent) == 2, "both slots copied");
+
+    // POSIX: fork PRESERVES close-on-exec. A shell sets it once on a bookkeeping
+    // fd and then forks per command -- clearing it here would leak that fd into
+    // every child, which is exactly what it was set to prevent.
+    TEST_EXPECT_EQ(handle_get_cloexec(child, flagged), 1,
+                   "the child inherits the flag with the fd");
+    TEST_EXPECT_EQ(handle_get_cloexec(child, plain), 0,
+                   "and inherits its absence too");
+
+    // The parent is unchanged -- the copy reads, it does not move.
+    TEST_EXPECT_EQ(handle_get_cloexec(parent, flagged), 1, "parent keeps its flag");
+
+    // The child's exec then consumes what it inherited, which is the pair of
+    // behaviours together: fork preserves, exec consumes.
+    TEST_EXPECT_EQ(handle_close_on_exec(child), 1, "the child's exec closes it");
+    TEST_EXPECT_EQ(handle_table_count(child->handles), 1, "the plain fd survives");
+
+    test_proc_drop(child);
+    test_proc_drop(parent);
+}
+
+void test_handles_dup_posix(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    hidx_t src = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    TEST_ASSERT(src >= 0, "src alloc failed");
+
+    // THE MINIMUM IS THE POINT. A shell's savefd() does F_DUPFD_CLOEXEC(fd, 10)
+    // precisely to move its bookkeeping fd out of the low range a user
+    // redirection could collide with; returning the first free slot regardless
+    // would hand back a low fd and break the guarantee the call was made to get.
+    hidx_t d = handle_dup_posix(p, src, 10, /*cloexec=*/true);
+    TEST_ASSERT(d >= 10, "F_DUPFD_CLOEXEC(fd, 10) lands at or above 10");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, d), 1, "and comes out close-on-exec");
+
+    // Rights come across VERBATIM -- POSIX dup gives the new descriptor the same
+    // access as the old.
+    struct Handle got;
+    TEST_ASSERT(handle_get(p, d, &got) == 0, "get the dup");
+    TEST_EXPECT_EQ((u64)got.rights, (u64)(RIGHT_READ | RIGHT_TRANSFER),
+                   "the dup carries the parent's rights unchanged");
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_PROCESS, "and its kind");
+    handle_put(&got);
+
+    // The plain form: lowest free slot, flag CLEAR. POSIX dup(2) explicitly
+    // clears close-on-exec on the new descriptor.
+    hidx_t d2 = handle_dup_posix(p, src, 0, /*cloexec=*/false);
+    TEST_ASSERT(d2 >= 0 && d2 < 10, "F_DUPFD(fd, 0) takes a low free slot");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, d2), 0, "dup clears close-on-exec");
+
+    // The rights-REDUCING handle_dup is unchanged by all this, including its
+    // flag: it is the capability-surface form and has no POSIX flag to carry.
+    TEST_ASSERT(handle_set_cloexec(p, src, true) == 0, "flag the source");
+    hidx_t d3 = handle_dup(p, src, RIGHT_READ);
+    TEST_ASSERT(d3 >= 0, "handle_dup failed");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, d3), 0,
+                   "handle_dup's child is not close-on-exec even from a flagged parent");
+
+    // Refusals, fail-closed.
+    TEST_ASSERT(handle_dup_posix(p, src, -1, false) < 0, "a negative minimum refuses");
+    TEST_ASSERT(handle_dup_posix(p, src, PROC_HANDLE_MAX, false) < 0,
+                "a minimum past the table refuses");
+    TEST_ASSERT(handle_dup_posix(p, PROC_HANDLE_MAX, 0, false) < 0,
+                "an out-of-range source refuses");
+
+    test_proc_drop(p);
+}

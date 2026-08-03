@@ -1142,10 +1142,11 @@ static int do_alpine_shell_gate(void) {
         // whole point of the gate, and a KNOWN-BLOCKED that outlives its blocker
         // is just a disabled test.
         if (!L6C_GATE_FATAL) {
-            t_putstr("joey: L-6c KNOWN-BLOCKED on task #151 (close-on-exec: "
-                     "#150 landed the startup batch, so busybox now RUNS and "
-                     "SPEAKS -- it fails on fcntl F_DUPFD_CLOEXEC, which is a "
-                     "kernel feature, not a translation); not boot-fatal yet\n");
+            t_putstr("joey: L-6c KNOWN-BLOCKED on task #140 (the environment: "
+                     "#151 landed close-on-exec, so busybox now RUNS A SCRIPT "
+                     "-- it fails spawning an external command, because ash "
+                     "synthesizes SHLVL/PWD and execve refuses a non-empty "
+                     "envp); not boot-fatal yet\n");
             return 0;
         }
         return -1;

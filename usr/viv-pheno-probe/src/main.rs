@@ -315,6 +315,14 @@ const NEG_ENOENT: i64 = -2;
 const NEG_EFAULT: i64 = -14;
 const NEG_ECHILD: i64 = -10;
 
+// #151: close-on-exec. EBADF is the whole assertion on the far side of an
+// exec -- a descriptor the sweep closed must be GONE, not merely flagged.
+const NEG_EBADF: i64 = -9;
+const NR_FCNTL: u64 = 25;
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+
 // The Linux aarch64 `struct stat` (128 bytes; kernel/include/thylacine/
 // vivarium.h `struct viv_linux_stat` is the kernel's copy of this layout).
 // Only the fields the legs read are named; the rest is padding by offset.
@@ -2069,6 +2077,52 @@ unsafe fn run_linux() -> ! {
         b"L169\n"
     );
 
+    // --- L177-L179 (#151): close-on-exec, ACROSS A REAL execve ---------------
+    //
+    // The kernel unit tests prove `handle_close_on_exec` does what it says.
+    // NOTHING ELSE PROVES IT IS WIRED INTO execve -- delete the call from
+    // `sys_execve_core` and every one of them still passes. This is that leg,
+    // and it needs a real exec, so it needs an image we can afford to lose.
+    //
+    // A fork gives us one. The child re-execs THIS binary in a third mode, so
+    // something survives to report; the parent stays behind to reap.
+    //
+    // FIXED fd numbers, because the re-execed image has no memory of what the
+    // pre-exec one chose -- it must be able to NAME the descriptors by
+    // construction. `F_DUPFD`'s minimum is what makes that possible, so the leg
+    // exercises the very argument the shell's savefd() needs.
+    let kid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if kid == 0 {
+        // 20: the child's report channel -- plain, so the sweep must SPARE it.
+        //     That it survives is not incidental; without it a failing child
+        //     could not say so.
+        // 21: close-on-exec -- must be GONE on the far side.
+        // 22: plain -- must be LIVE, which is what stops "the sweep closed
+        //     everything" from passing as success.
+        svc3(NR_FCNTL, rep as u64, F_DUPFD, 20);
+        svc3(NR_FCNTL, rep as u64, F_DUPFD_CLOEXEC, 21);
+        svc3(NR_FCNTL, rep as u64, F_DUPFD, 22);
+
+        let selfp = b"/bin/viv-pheno-probe\0";
+        let c0 = b"viv-pheno-probe\0";
+        let c1 = b"cloexec-child\0";
+        let cargv: [u64; 3] = [c0.as_ptr() as u64, c1.as_ptr() as u64, 0];
+        svc3(NR_EXECVE, selfp.as_ptr() as u64, cargv.as_ptr() as u64, 0);
+        // Only reachable if the exec FAILED. Distinct from the child's own
+        // verdict exits so the two cannot be confused -- though #91 collapses
+        // every non-zero to 1, so today only zero/non-zero is readable.
+        linux_exit(9)
+    }
+    leg!(rep, kid > 0, b"L177\n");
+    st = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, kid as u64, &mut st as *mut i32 as u64, 0, 0) == kid,
+        b"L178\n"
+    );
+    // Exited cleanly => the re-execed image found 21 closed and 22 open.
+    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0, b"L179\n");
+
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its
     // own territory. If the renumber were wrong the bytes would not be there,
@@ -2105,11 +2159,43 @@ fn run_native() -> i64 {
     0
 }
 
+/// #151: the re-execed image, and its whole job is to answer one question --
+/// did the close-on-exec sweep run when execve replaced the image?
+///
+/// It reports through fd 20, which it can only do BECAUSE that descriptor was
+/// dup'd WITHOUT the flag: the mechanism under test, in the direction that must
+/// not fire, is also the channel the verdict travels on.
+///
+/// `F_GETFD` is the probe rather than a write, and the choice matters: it
+/// distinguishes GONE (EBADF) from PRESENT-BUT-CLEAR (0) exactly, whereas a
+/// zero-length write can short-circuit before the descriptor is even looked at.
+/// Still phenotype code -- exec does not change the phenotype, so this image
+/// speaks raw Linux numbers like the one that exec'd it.
+unsafe fn run_cloexec_child() -> ! {
+    let dead = svc3(NR_FCNTL, 21, F_GETFD, 0);
+    let live = svc3(NR_FCNTL, 22, F_GETFD, 0);
+
+    if dead != NEG_EBADF || live != 0 {
+        // Say WHICH way it went wrong: a sweep that ran on nothing and a sweep
+        // that ran on everything are different bugs.
+        let m: &[u8] = if dead != NEG_EBADF { b"L180\n" } else { b"L181\n" };
+        let _ = svc3(NR_WRITE, 20, m.as_ptr() as u64, m.len() as u64);
+        linux_exit(1)
+    }
+    // Silence on success is deliberate: joey reads the report from offset 0 and
+    // requires "OK" there, so anything written here would displace the parent's
+    // verdict and fail the leg it just passed.
+    linux_exit(0)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mode: &[u8] = env::args().nth(1).unwrap_or(&[]);
     if mode == b"linux".as_slice() {
         unsafe { run_linux() }
+    }
+    if mode == b"cloexec-child".as_slice() {
+        unsafe { run_cloexec_child() }
     }
     if mode == b"native".as_slice() {
         return run_native();

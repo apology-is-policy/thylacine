@@ -307,40 +307,24 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_SETUID,          VIV_TIER2 },  // EPERM, except the no-op
     { VIV_LINUX_SETGID,          VIV_TIER2 },
 
-    // fcntl -- ENOSYS, a LIVE DECISION, and the one row in this batch whose
-    // disposition was MEASURED rather than reasoned. THYLACINE HAS NO
-    // CLOSE-ON-EXEC AT ALL (verified: no CLOEXEC bit in handle.h or handle.c,
-    // and proc_exec_replace never touches the handle table -- exec preserves
-    // every fd), which predicted that the tempting rows would be the unsafe
-    // ones. Instrumenting the row and running the gate confirmed it EXACTLY --
-    // Alpine busybox's /bin/sh issues fcntl twice at startup and both are the
-    // close-on-exec family:
+    // fcntl -- TIER-2 since #151, and the row whose disposition was MEASURED
+    // rather than reasoned twice over. The #150 note here recorded it as ENOSYS
+    // because THYLACINE HAD NO CLOSE-ON-EXEC AT ALL, so both cmds busybox
+    // actually issues (F_SETFD(FD_CLOEXEC) and F_DUPFD_CLOEXEC) could only have
+    // been answered by silently succeeding -- storing nothing, reporting done,
+    // and letting the guest exec with the fd still open having been told
+    // otherwise. That is still true of a translation-only fix, which is why
+    // #151 built the FEATURE (a per-slot flag in struct HandleTable, consumed
+    // by a sweep in execve) before serving the row.
     //
-    //     cmd 0x2   = F_SETFD,          arg 1  = FD_CLOEXEC
-    //     cmd 0x406 = F_DUPFD_CLOEXEC,  arg 10 = ash's savefd(), moving the
-    //                                            script fd above 10
-    //
-    // Neither can be served truthfully. F_SETFD(FD_CLOEXEC) could only be
-    // answered by silently succeeding -- storing nothing and reporting done --
-    // and because exec preserves the table, the guest would then exec with the
-    // fd still open having been told otherwise; the leak surfaces as a
-    // mysterious inherited descriptor far from here. F_DUPFD_CLOEXEC is the
-    // same lie plus a real dup, and it cannot even be a renumber onto SYS_DUP:
-    // that call's second argument is a RIGHTS MASK, not a minimum fd, so the
-    // arity rule refuses it exactly as it refuses writev onto SYS_WRITE.
-    //
-    // ENOSYS rather than EINVAL because the refusal is of the WHOLE call, not
-    // of one cmd: a guest that gets EINVAL for a cmd concludes that cmd is
-    // unsupported and may retry others, while ENOSYS says the surface is absent
-    // and lets the libc take its own fallback.
-    //
-    // THIS IS WHAT NOW BLOCKS THE L-6c GATE, and it is a KERNEL FEATURE rather
-    // than a translation: a per-handle-slot flag, set by F_SETFD and by
-    // O_CLOEXEC, consumed by a sweep in the execve path. Serving the dup while
-    // ignoring the flag would pass the gate and put a known silent lie in the
-    // tree, which is the trade this whole tier exists to refuse. Revisit WITH
-    // close-on-exec, never before -- the two are one piece of work.
-    { VIV_LINUX_FCNTL,           VIV_ENOSYS },
+    // The cmd-level decisions live in vivarium_fcntl_decide; the header carries
+    // why the served set is what it is. What belongs HERE is the reason this is
+    // Tier-2 rather than a renumber, which is the arity rule at its sharpest
+    // after writev: F_DUPFD_CLOEXEC(fd, min) looks like a candidate for SYS_DUP,
+    // and SYS_DUP's second argument is a RIGHTS MASK, not a minimum fd. A
+    // renumber would read `10` as a set of capability bits and hand back a
+    // descriptor with arbitrary authority -- silently, for a legal input.
+    { VIV_LINUX_FCNTL,           VIV_TIER2 },
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -401,16 +385,21 @@ enum {
 //   O_PATH                    maps onto SYS_WALK_OPEN_OPATH -- the same "walk to
 //                             it, do not open it" object on both sides.
 //
-//   O_CLOEXEC   ACCEPTED AS A NO-OP, and this is a claim worth stating. The flag
-//               requests "this fd must not survive exec". Thylacine has no
-//               close-on-exec concept because it has nothing to opt out of: a
-//               spawned child "inherits no Spoor handles" (syscall.h:327) and
-//               SYS_SPAWN_WITH_FDS passes an EXPLICIT list. So the behaviour
-//               O_CLOEXEC asks for is what we do unconditionally, for every fd.
-//               (The converse -- a guest opening WITHOUT O_CLOEXEC and expecting
-//               the fd to cross exec -- is NOT served, but that is a property of
-//               the process model, identical whether or not we admit this bit.
-//               It is a V-7 seam, not a flag-map question.)
+//   O_CLOEXEC   HONOURED FOR REAL since #151, via the `cloexec_out` output --
+//               the flag names a property of the resulting DESCRIPTOR, not of
+//               the open, so it cannot ride in the omode and the shell applies
+//               it after SYS_OPEN returns.
+//
+//               IT WAS ADMITTED AS A NO-OP BEFORE THAT, on this rationale: "a
+//               spawned child inherits no Spoor handles and SYS_SPAWN_WITH_FDS
+//               passes an EXPLICIT list, so the behaviour O_CLOEXEC asks for is
+//               what we do unconditionally". That was TRUE WHEN WRITTEN and the
+//               LINEAGE arc voided it -- L-2a's execve preserves the handle
+//               table across an image replacement, L-3c-1's rfork copies it --
+//               so from those commits onward an fd without the flag really did
+//               cross exec and this admission became a silent wrong answer.
+//               Neither commit had any reason to look at an openat flag table.
+//               A rationale is only as durable as the fact under it.
 //   O_NOCTTY    Same shape. It requests "do not make this my controlling
 //               terminal"; Thylacine acquires a ct only through the explicit
 //               SYS_TTY_ACQUIRE (PTY-1), never implicitly on open. Already
@@ -467,9 +456,10 @@ enum {
 //                each carry semantics with no SYS_OPEN counterpart.
 
 enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
-                                        u64 *start_fd_out, u32 *omode_out) {
+                                        u64 *start_fd_out, u32 *omode_out,
+                                        bool *cloexec_out) {
     // Fail toward the supervisor, never toward a dispatch (cf. vivarium_translate).
-    if (!start_fd_out || !omode_out) return VIV_FORWARD;
+    if (!start_fd_out || !omode_out || !cloexec_out) return VIV_FORWARD;
 
     // Linux passes `dirfd` and `flags` as `int`, so ONLY the low 32 bits are
     // significant. This matters concretely for AT_FDCWD: a caller may leave x0
@@ -539,7 +529,59 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
     // split therefore needs no inspection here; both sides make it identically.
     *start_fd_out = SYS_WALK_OPEN_FROM_ROOT;
     *omode_out    = omode;
+    // #151. Set on EVERY translated path including O_PATH: Linux honours
+    // O_CLOEXEC on an O_PATH open (it is one of the three flags O_PATH does not
+    // ignore, alongside O_DIRECTORY and O_NOFOLLOW), and the flag belongs to the
+    // descriptor, which an O_PATH open produces like any other.
+    *cloexec_out  = (fl & VIV_O_CLOEXEC) != 0;
     return VIV_TRANSLATED;
+}
+
+// #151. The header carries the served set and why. This body is a classifier;
+// the only judgement inside it is the SETFD mask, called out below.
+enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
+                                       enum viv_fcntl_op *op_out,
+                                       bool *cloexec_out, u64 *min_fd_out) {
+    if (!op_out || !cloexec_out || !min_fd_out) return VIV_FORWARD;
+
+    *op_out      = VIV_FCNTL_UNSERVED;
+    *cloexec_out = false;
+    *min_fd_out  = 0;
+
+    // Linux passes `cmd` as an int, so only the low 32 bits are significant --
+    // the same narrowing vivarium_openat_decide does to `dirfd`, for the same
+    // reason (a caller may leave the register sign- or zero-extended).
+    switch ((u32)cmd) {
+    case VIV_F_GETFD:
+        *op_out = VIV_FCNTL_GETFD;
+        return VIV_TRANSLATED;
+
+    case VIV_F_SETFD:
+        // MASK, do not validate. Linux's F_SETFD is `set_close_on_exec(fd, arg &
+        // FD_CLOEXEC)` -- it ignores every other bit rather than rejecting the
+        // call, and FD_CLOEXEC is the only flag the descriptor-flags word has
+        // ever defined. Rejecting a stray bit would be STRICTER than Linux for a
+        // guest that legally passes one, which is its own mistranslation.
+        *op_out      = VIV_FCNTL_SETFD;
+        *cloexec_out = (arg & VIV_FD_CLOEXEC) != 0;
+        return VIV_TRANSLATED;
+
+    case VIV_F_DUPFD:
+        *op_out     = VIV_FCNTL_DUPFD;
+        *min_fd_out = arg;
+        return VIV_TRANSLATED;
+
+    case VIV_F_DUPFD_CLOEXEC:
+        *op_out      = VIV_FCNTL_DUPFD;
+        *cloexec_out = true;
+        *min_fd_out  = arg;
+        return VIV_TRANSLATED;
+
+    default:
+        // F_GETFL / F_SETFL / the locking family / everything else. See the
+        // header on why this is ENOSYS at the shell rather than Linux's EINVAL.
+        return VIV_FORWARD;
+    }
 }
 
 void vivarium_openat_build(u64 start_fd, u64 path_va, u32 path_len, u32 omode,
