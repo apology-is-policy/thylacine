@@ -117,6 +117,7 @@ void uart_tx_irq_clear(void);
 // incidentally covered. RX and the direct uart_putc path are UNAFFECTED, so the
 // console keeps working for kernel prints across the stalled window.
 void uart_test_tx_stall(bool on);
+bool uart_test_tx_stalled(void);
 
 // #75. Bounded wait for the TX FIFO to drain to the wire. The extinction /
 // Halls path calls this before its own direct-DR dump so pre-crash ring output

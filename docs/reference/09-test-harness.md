@@ -56,13 +56,81 @@ Binding design (unchanged): `docs/TOOLING.md` (the harness contract),
 
 ---
 
+## PENDING ABSORPTION — content added on `main` after this file was stubbed
+
+**Do not delete this section without folding it.** It records material that
+landed here post-absorption and has no dossier yet, because the in-kernel
+runner is unowned (see the pointer at the top: `kernel/test/` lands with the
+kernel sweep). Tracked as a vault task so it cannot be lost by silence.
+
+**From `#130` residue (`d669299c`, 2026-08-03)** — three additions, all about
+the in-kernel runner and the console test hooks:
+
+1. **The wait-predicate shapes table gained a precondition, and the reason is
+   a correction.** The table listed "assert a flag cleared" as a sound
+   observable with no qualification. **A cleared flag means the act STARTED,
+   not that it FINISHED** — waiting on `!pending` is sound only where the
+   clearer provably completes the act, with no clear-and-bail path and no
+   window before the effect the test reads. That is a property of the
+   *specific consumer* and must be re-established per site, never inherited
+   from the table. Where it does not hold, the wait exits early and the assert
+   reads pre-act state — the original race with a guard bolted on, which is
+   worse than the bare `sched()` because it now looks handled. Same root as
+   `burrow_handle_count() == 0` not meaning "the pages were freed": when
+   completion is what you need, make the operation *report* it
+   (`burrow_unref_freed`) rather than inferring it from a preceding flag.
+
+2. **Negative asserts need an implication, not a wait.** `test_poll.c`'s #103
+   test asserts the IRQ producer did *not* wake the poller, but a peer CPU may
+   legitimately dispatch `console_mgr` inside that window. Waiting is
+   meaningless; assert an implication with a deliberate read order. Because
+   `cons_service_deferred` is the pending flag's sole consumer and always
+   walks the hook list, two one-directional forms hold — read the flag first
+   for *armed* (`pending || woken`), read the state first for *deferred*
+   (`sleeping || !pending`) — while the biconditional is racy in **both**
+   orders. The argument rests on sole-consumer-always-completes, not on
+   anything general about flags: re-derive it per site, do not port the form.
+
+3. **`cons_test_release_owned_state` — the leaked-global-state backstop
+   (#130-R2 F2).** Between the test body and the verdict, `test_run_all`
+   releases console/UART state the test left armed and **fails the test that
+   left it**. Five states, and the costs are not "one red test":
+   `echo-capture` (every later `/dev/cons` write swallowed — silently, since
+   kernel diagnostics take `cons_diag_byte` and ignore capture, so the suite
+   prints PASS over a dead userspace console), `tx-role` (every later console
+   writer parks untimed — the boot hangs), `mgr-hold` (deferred work stops;
+   poll wakes strand), `reader-busy` (the single-reader guard refuses every
+   later `devcons_read`), and the runner-local `uart-tx-stall`. `TEST_ASSERT`
+   is `test_fail(); return;`, so one failing assert inside such a window skips
+   the release. Reporting is the point — a silent auto-repair would hide the
+   leak it repaired — so the runner prints `LEAKED-STATE(<names>)` and reddens
+   the test even when its own assertions passed. **Verified by A/B, because a
+   backstop that never fires proves nothing**: with a deliberate failure inside
+   the held-role window, *without* the backstop the boot hangs at the very next
+   test (`cons.tx_room_wait_and_deadline`, which needs the role) and the suite
+   never completes; *with* it the run prints
+   `LEAKED-STATE(echo-capture,tx-role)`, finishes 1245/1246, and that next test
+   passes.
+
+Note for whoever folds this: (1) and (2) are cross-cutting test *methodology*
+and want a home that is not a single file's dossier; (3) splits — the armed
+states are `cons.c`'s (already swept, `sub-kernel-cons`) and the backstop is
+`kernel/test/test.c`'s (unowned).
+
+---
+
 **If you are here to add something, add it to the dossier, not to this file.**
 
 This stub replaces the whole document, so any edit here becomes a merge
 conflict — which is the intended behaviour, and the only reason nothing has
-been lost yet. It has already happened once: #125 added a point 7 to the live
-document on `main` after absorption, and the conflict is what surfaced it. That
-content now lives in `sub-substrate-interactive.md` (the guest-suspension
-mechanism, why `SO_RCVBUF` on the reader is vacuous, the listener-inheritance
-fix and its A/B) and in `gate-interactive.md` (the third thing a silent guest
-can mean). Nothing from it was dropped.
+been lost yet. It has now happened TWICE: #125 added a point 7 to the live
+document on `main` after absorption, and #130's residue added the three items
+above. The #125 content lives in `sub-substrate-interactive.md` (the
+guest-suspension mechanism, why `SO_RCVBUF` on the reader is vacuous, the
+listener-inheritance fix and its A/B) and in `gate-interactive.md` (the third
+thing a silent guest can mean). Nothing from either has been dropped.
+
+That it happened twice is the signal, not the accident: this file is still the
+natural place to write about the harness, because the harness has no dossier
+yet. The conflict-as-tripwire works, but it fires *after* the writing, and it
+only fires for someone merging this branch.

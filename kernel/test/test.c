@@ -18,6 +18,7 @@
 
 #include "../../arch/arm64/uart.h"
 
+#include <thylacine/cons.h>         // #130-R2 F2: the leaked-global-state backstop
 #include <thylacine/extinction.h>   // #109: terminal-park safety net
 #include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/spinlock.h>     // #109: preempt-mask across the terminal-park handshake
@@ -3061,6 +3062,42 @@ void test_run_all(void) {
         uart_puts(" ... ");
 
         current_test->fn();
+
+        // #130-R2 F2: release console/UART state the test left armed, and FAIL
+        // the test that left it. Every one of these is armed for a window and
+        // released at the end, with TEST_ASSERT (= `test_fail(); return;`) in
+        // between -- so one failing assert inside a window skips the release and
+        // costs the console, or the boot, for every test after it. The leaked
+        // state destroys the diagnosis of the very failure that caused it.
+        //
+        // Per-site discipline is still right (see test_cons.c) but cannot cover
+        // a site that does not exist yet; this covers the class. Reporting is
+        // the point -- a silent auto-repair would hide the leak, so this names
+        // the state and reddens the test even when its assertions all passed.
+        // The UART stall lives in the arch layer, not the cons layer, so it gets
+        // a bit here rather than in the CONS_TEST_OWNED_* set.
+        #define TEST_OWNED_UART_TX_STALL (1u << 4)
+        u32 owned = cons_test_release_owned_state();
+        if (uart_test_tx_stalled()) {
+            uart_test_tx_stall(false);
+            owned |= TEST_OWNED_UART_TX_STALL;
+        }
+        if (owned != 0) {
+            static const char *const names[5] = {
+                "echo-capture", "tx-role", "mgr-hold", "reader-busy", "uart-tx-stall"
+            };
+            uart_puts("LEAKED-STATE(");
+            bool first = true;
+            for (int b = 0; b < 5; b++) {
+                if (!(owned & (1u << b))) continue;
+                if (!first) uart_puts(",");
+                uart_puts(names[b]);
+                first = false;
+            }
+            uart_puts(") ");
+            if (!current_test->failed)
+                test_fail("test left global console state armed (see LEAKED-STATE)");
+        }
 
         if (current_test->failed) {
             uart_puts("FAIL: ");

@@ -1040,16 +1040,46 @@ size_t burrow_get_size(const struct Burrow *v) {
     return v->size;
 }
 
+// #130-R2 F3/F4: these read counts that EVERY mutator writes under v->lock
+// (burrow_ref / _unref / _acquire_mapping / _release_mapping), and they do NOT
+// take that lock. I asserted in the #130 R2 prompt that they did; they never
+// have. The reviewer corrected the premise it was handed, which is the reason
+// to write the truth down here rather than leave it in a round's transcript.
+//
+// Not taking the lock is deliberate: a caller may already hold it (v->lock is a
+// leaf and these are diagnostics), so acquiring here would be a self-deadlock
+// waiting for a caller to appear. The load is ACQUIRE instead, so the value is
+// at least a coherent snapshot ordered against the releasing spin_unlock rather
+// than a plain read the compiler may cache or sink.
+//
+// What that buys, on its own, is exactly one thing: the returned number was
+// true at some instant. By itself it is NOT a basis for a lifecycle decision --
+// by the time a caller branches, a peer may have dropped the last ref. "Did
+// this drop free the pages?" is answered by burrow_unref_freed /
+// burrow_release_mapping_freed / burrow_unmap_reporting, which decide it under
+// the lock and REPORT it (#130); asking these counts "may I act?" without more
+// is the predicted-event bug that #130 and #131 both were.
+//
+// "Without more" is the load-bearing part, and the first draft of this comment
+// got it wrong by stating a flat prohibition. A caller MAY branch on these when
+// it holds an EXTERNAL lock that makes the value stable, plus a ref-discipline
+// argument for why no untracked party can bump it. image.c is the one
+// production caller and it has both: under g_image_lock, handle_count == 1
+// means the cache's own ref is the only one, because an in-flight mapper would
+// hold >= 2 (it takes its ref before mapping), so {1, 0} really is an idle
+// image and evicting it is safe -- the I-36 eviction-safety proof, audited.
+// State the precondition, not the prohibition: a flat "never" here would send
+// the next reader to "fix" correct code.
 int burrow_handle_count(const struct Burrow *v) {
     if (!v) return 0;
     if (v->magic != VMO_MAGIC) return 0;
-    return v->handle_count;
+    return __atomic_load_n(&v->handle_count, __ATOMIC_ACQUIRE);
 }
 
 int burrow_mapping_count(const struct Burrow *v) {
     if (!v) return 0;
     if (v->magic != VMO_MAGIC) return 0;
-    return v->mapping_count;
+    return __atomic_load_n(&v->mapping_count, __ATOMIC_ACQUIRE);
 }
 
 u64 burrow_total_created(void)    { return g_vmo_created; }

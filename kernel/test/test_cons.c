@@ -1512,16 +1512,28 @@ void test_cons_tx_role_serializes_writers(void) {
     g_txr_ret = -999;
     g_txr_exited = false;
 
+    // Build the contender FIRST, while nothing global is owned yet. thread_create
+    // can fail (OOM), and TEST_ASSERT is `test_fail(); return;` -- so if this sat
+    // below the hold, an allocation failure would return with the TX writer role
+    // HELD and hang the boot exactly as described below. Creating does not run it;
+    // ready() below is what starts it, so the ordering is free.
+    //
+    // #130-R2 F2: this is the same finding as the comment further down, one step
+    // earlier in the function. That fix converted every assert BELOW the hold and
+    // never looked ABOVE it -- the SETUP asserts kept the hazard the rest of the
+    // test had just been rewritten to avoid. A window's discipline starts where
+    // the window opens, not where the interesting code does.
+    struct Thread *w = thread_create(kproc(), txr_writer);
+    TEST_ASSERT(w != NULL, "thread_create");
+
     cons_test_echo_capture(true);
 
     // Hold the role from the test thread, standing in for a first writer that
     // is mid-call (a real one parks in the room-wait; the observable state is
     // identical -- the role is held).
     cons_test_tx_role_hold();
-    TEST_ASSERT(cons_test_tx_role_held(), "role held before the contender runs");
+    bool role_held_before = cons_test_tx_role_held();
 
-    struct Thread *w = thread_create(kproc(), txr_writer);
-    TEST_ASSERT(w != NULL, "thread_create");
     ready(w);
 
     // Let the writer run until it parks on the role. SMP placement means one
@@ -1566,6 +1578,7 @@ void test_cons_tx_role_serializes_writers(void) {
 
     // Now it is safe to fail: the role is dropped, capture is disarmed, and the
     // contender is joined, so a red assert costs one test rather than the boot.
+    TEST_ASSERT(role_held_before, "role held before the contender runs");
     TEST_EXPECT_EQ(ran_entered, 1u, "contender entered cons_output_write");
     TEST_EXPECT_EQ(ran_parked,  1u, "contender is PARKED on the role, not emitting");
     TEST_EXPECT_EQ(n_while_held, 0u, "no byte of the contender's write reached the console");

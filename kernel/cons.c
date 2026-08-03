@@ -1130,6 +1130,57 @@ u32 cons_test_echo_captured(u8 *out, u32 max) {
     return g_cons_echo_cap_len;                  // true count (caller detects overflow)
 }
 
+// #130-R2 F2: the harness backstop for console state a test OWNS for a window.
+//
+// Every one of these is armed by one call and released by another, with the
+// test's body in between -- and TEST_ASSERT is `test_fail(); return;`, so ANY
+// failing assert inside such a window skips the release. The consequences are
+// not "one red test":
+//
+//   ECHO_CAPTURE  cons_emit / cons_emit_wait divert into a 128-byte buffer and
+//                 RETURN, so every later /dev/cons write is swallowed -- the
+//                 login prompt, the shell, the LS-CI transcript. SILENT: kernel
+//                 diagnostics take cons_diag_byte, which ignores capture, so the
+//                 suite keeps reporting PASS over a dead userspace console.
+//   TX_ROLE       cons_tx_role_acquire parks contenders UNTIMED, so every later
+//                 console writer parks forever: the boot hangs.
+//   MGR_HOLD      console_mgr stops servicing deferred work; poll wakes strand.
+//   READER_BUSY   the single-reader guard refuses every later devcons_read.
+//
+// So a test's failure destroys the diagnosis of everything after it -- the exact
+// shape #74/#85/#87 are in other clothes. TEST_YIELD_UNTIL_SOFT was the
+// per-site answer and it only covers the wait; an ordinary assert in the window
+// is the far commoner case, and per-site discipline cannot cover a site that
+// does not exist yet.
+//
+// Releasing here is safe unconditionally (each release is idempotent), but the
+// bitmask is the point: a silent auto-repair would hide the leak it repaired.
+// The caller reports what it had to clean up and FAILS the offending test --
+// make the operation report its effect, never predict it.
+u32 cons_test_release_owned_state(void) {
+    u32 owned = 0;
+
+    if (g_cons_echo_capture) {
+        owned |= CONS_TEST_OWNED_ECHO_CAPTURE;
+        cons_test_echo_capture(false);
+    }
+    if (cons_test_tx_role_held()) {
+        owned |= CONS_TEST_OWNED_TX_ROLE;
+        cons_test_tx_role_drop();
+    }
+    if (__atomic_load_n(&g_cons_mgr_hold, __ATOMIC_ACQUIRE)) {
+        owned |= CONS_TEST_OWNED_MGR_HOLD;
+        cons_test_mgr_hold(false);
+    }
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    bool busy = g_cons.reader_busy;
+    if (busy) g_cons.reader_busy = false;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    if (busy) owned |= CONS_TEST_OWNED_READER_BUSY;
+
+    return owned;
+}
+
 static void devcons_reset(void)    { /* no-op */ }
 static void devcons_init(void)     { /* no-op — UART came up at boot */ }
 static void devcons_shutdown(void) { /* no-op */ }

@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**236 owned · 185 unowned · 421 files (56% owned) · ~63128 unswept lines.**
+**236 owned · 185 unowned · 421 files (56% owned) · ~63136 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -80,7 +80,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/warden | 0 | 1 | 784 |
 | usr/curl | 0 | 3 | 779 |
 | usr/net-echo | 0 | 1 | 774 |
-| arch | 34 | 4 | 762 |
+| arch | 34 | 4 | 770 |
 | usr/virtio-net-arp | 0 | 1 | 710 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/sntp | 0 | 1 | 394 |
@@ -136,7 +136,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/aurora/src/osd.rs | 522 |
 | usr/aurora/src/render.rs | 500 |
 | usr/prowl/src/main.rs | 490 |
-| arch/arm64/uart.c | 473 |
+| arch/arm64/uart.c | 480 |
 | usr/coreutils/src/bin/ls.rs | 473 |
 | usr/nora/src/syntax.rs | 460 |
 | usr/coreutils/src/bin/sort.rs | 453 |
@@ -215,8 +215,8 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/qid.rs | 150 |
 | usr/coreutils/src/bin/con.rs | 148 |
 | usr/pouch-hello/pouch-hello-signals.c | 148 |
+| arch/arm64/uart.h | 144 |
 | usr/coreutils/src/bin/rm.rs | 144 |
-| arch/arm64/uart.h | 143 |
 | usr/coreutils/src/bin/mkdir.rs | 140 |
 | usr/coreutils/src/meta.rs | 140 |
 | usr/coreutils/src/bin/tee.rs | 133 |

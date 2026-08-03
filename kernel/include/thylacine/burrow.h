@@ -612,6 +612,15 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot);
 // Behavior on a freed BURROW is UB (the magic check would catch a
 // straight post-free deref, but a coincidental magic re-use after
 // SLUB recycle is theoretically possible).
+//
+// #130-R2 F3/F4: the two counts are SNAPSHOTS. They do not take v->lock (a
+// caller may hold it), so an ACQUIRE load is all they promise: the value was
+// true at some instant. "Did this drop free the pages?" is answered by
+// burrow_unref_freed / burrow_release_mapping_freed / burrow_unmap_reporting,
+// which decide it under the lock and REPORT it -- never by reading these first.
+// Branching a lifecycle decision on a snapshot is legitimate ONLY with an
+// external lock that makes it stable AND a ref-discipline argument for why no
+// untracked party can bump it; image.c's eviction has both (see burrow.c).
 size_t burrow_get_size(const struct Burrow *v);
 int    burrow_handle_count(const struct Burrow *v);
 int    burrow_mapping_count(const struct Burrow *v);

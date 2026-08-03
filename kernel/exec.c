@@ -72,10 +72,17 @@ static u64 round_up_page(u64 x) {
 //
 // KERNEL_TESTS-gated (#107-audit F4): the production shape (KERNEL_TESTS=OFF)
 // carries neither the storage nor the stores, matching burrow.c / image.c.
-// This also retires the concurrency question -- the stores are unsynchronized
-// cross-CPU writes whose safety rested on a property of the SUITE ("no other
-// exec runs concurrently"), never of the code; in the shape where no test can
-// read them, they no longer exist.
+//
+// #130-R2 F4 corrects what that gating claims. It removes the stores from
+// PRODUCTION, which is worth doing on its own; it does NOT retire the
+// concurrency question, because the shape that reads them is exactly the shape
+// that has them. In a KERNEL_TESTS build these remain unsynchronized cross-CPU
+// writes whose safety rests on a property of the SUITE ("no other exec runs
+// concurrently"), never of the code -- and the COUNT is read as a DELTA across
+// a call, so it is strictly more fragile than the scalars it supplements: a
+// concurrent exec perturbs a difference even where it would leave a last-write
+// snapshot plausible. The suite is UP-driven at this point, so the property
+// holds today; it is an assumption to re-check, not a question that was closed.
 #ifdef KERNEL_TESTS
 static u64    g_exec_icache_last_addr;
 static size_t g_exec_icache_last_len;
