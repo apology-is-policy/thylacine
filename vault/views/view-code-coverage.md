@@ -53,7 +53,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**139 owned · 282 unowned · 421 files (33% owned) · ~113025 unswept lines.**
+**142 owned · 279 unowned · 421 files (33% owned) · ~111116 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -62,8 +62,8 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia | 0 | 26 | 19864 |
 | usr/lib | 0 | 41 | 18896 |
 | usr/libthyla-rs | 0 | 29 | 13326 |
-| kernel | 90 | 42 | 11916 |
 | usr/nora | 0 | 13 | 11491 |
+| kernel | 93 | 39 | 10007 |
 | usr/coreutils | 0 | 60 | 8763 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
@@ -117,7 +117,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
 | usr/lib/parley/src/lsp.rs | 1106 |
-| kernel/notes.c | 1043 |
 | usr/nora/src/text.rs | 1035 |
 | usr/lib/libdriver/src/resource.rs | 1015 |
 | usr/utopia/libutopia/src/repl.rs | 979 |
@@ -160,7 +159,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/eval/glob.rs | 504 |
 | usr/utopia/libutopia/src/eval/jobs.rs | 502 |
 | usr/aurora/src/render.rs | 500 |
-| kernel/include/thylacine/notes.h | 499 |
 | usr/prowl/src/main.rs | 490 |
 | kernel/pts.c | 475 |
 | arch/arm64/uart.c | 473 |
@@ -179,7 +177,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/prowl/src/sample.rs | 393 |
 | kernel/include/thylacine/dev.h | 391 |
 | usr/prowl/src/ui.rs | 370 |
-| kernel/devnotes.c | 367 |
 | usr/lib/kaua/src/query.rs | 366 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | kernel/include/thylacine/elf.h | 355 |

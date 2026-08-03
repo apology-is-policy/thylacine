@@ -19,6 +19,20 @@ userspace can actually block on:
 - **[[sub-kernel-torpor]]** — the futex. A user-VA word as the
   condition, a global-lock register-then-observe as the proof, and
   the death/stop cascades' completing and non-completing walks.
+- **[[sub-kernel-notes]]** — asynchronous events, delivered as a
+  **file** first and as a signal-style callback second. Two consumers
+  of one bounded per-Proc queue, where the queue lock *is* the
+  exactly-once argument. Holds [[inv-i19]].
+
+Notes sit slightly apart from the other three. On the fd-read side they
+are an ordinary wait/wake consumer — the same `poll_waiter` list, the
+same register-then-observe, arrived at the same way (a single-waiter
+rendez replaced after it deadlocked against its own producer). But
+their other side is a **delivery** path with no waiter at all: the
+return-to-userspace tail, which pops a note and rewrites a thread's
+context on the way out. So [[inv-i9]] governs half this file and
+[[inv-i19]]'s exactly-once clause governs the other half — and the
+queue lock is what joins them.
 
 The area's shared grammar is [[inv-i9]] instantiated three ways: the
 window between observing "not ready" and parking must be closed by

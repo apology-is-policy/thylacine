@@ -45,6 +45,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-ninep-session]] | kernel/9p_session.c, kernel/include/thylacine/9p_session.h | inv-i10, inv-i11 | - **The retirement matrix**: any new path that clears an `awaiting_flush` |
 | [[sub-kernel-ninep-transport]] | kernel/9p_transport.c, kernel/9p_spoor_transport.c, kernel/9p_srvconn_transport.c, kernel/9p_transport_loopback.c, kernel/9p_transport_mq.c, kernel/include/thylacine/9p_transport.h |  | - **The EAGAIN classification boundary**: EAGAIN accepted anywhere past |
 | [[sub-kernel-ninep-wire]] | kernel/9p_wire.c, kernel/include/thylacine/9p_wire.h |  | What an auditor attacks here (changes to this surface ride the |
+| [[sub-kernel-notes]] | kernel/notes.c, kernel/include/thylacine/notes.h, kernel/devnotes.c | inv-i19, inv-i9, inv-i39 | On any change: that peek, pop and push stay inside one lock hold, and that every |
 | [[sub-kernel-path]] | kernel/path.c, kernel/include/thylacine/path.h | inv-i33 | - The refcount balances on EVERY create/destroy/replace path (the #66a |
 | [[sub-kernel-perm]] | kernel/perm.c, kernel/include/thylacine/perm.h |  | - No `principal_id` may ever be special-cased here. Adding a |
 | [[sub-kernel-pipe]] | kernel/pipe.c, kernel/include/thylacine/pipe.h | inv-i9 | - Every mutation that can enable a waiter must keep its wake — the |
