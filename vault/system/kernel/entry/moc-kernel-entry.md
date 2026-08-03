@@ -74,6 +74,11 @@ runs only on the return from a syscall or a fault, which is
   never-reused space, thirteen offset-pinned argument records, the bounds
   registry, and the two userspace mirrors that say "MUST mirror" twenty-two
   times between them with no mechanism behind the word.
+- [[sub-kernel-syscall-dispatch]] — the marshalling: the switch, the
+  user-pointer validator, the two staging tiers and their budget, and the
+  handler/inner split that decides where an authority gate is allowed to live.
+  Scoped to the mechanism around the handlers; each handler's own policy stays
+  with its subsystem.
 
 ## Cross-cutting
 

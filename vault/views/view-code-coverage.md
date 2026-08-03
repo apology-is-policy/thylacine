@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**169 owned · 252 unowned · 421 files (40% owned) · ~105542 unswept lines.**
+**170 owned · 251 unowned · 421 files (40% owned) · ~97364 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -66,7 +66,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia | 0 | 26 | 19864 |
 | usr/lib | 3 | 38 | 16643 |
 | usr/nora | 0 | 13 | 11491 |
-| kernel | 109 | 23 | 11041 |
 | usr/libthyla-rs | 1 | 28 | 10342 |
 | usr/coreutils | 0 | 60 | 8763 |
 | usr/corvus | 0 | 1 | 4245 |
@@ -74,6 +73,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
 | usr/ports | 0 | 10 | 2865 |
+| kernel | 110 | 22 | 2863 |
 | usr/prowl | 0 | 3 | 1253 |
 | usr/virtio-gpu | 0 | 1 | 955 |
 | usr/virtio-blk-rw | 0 | 1 | 885 |
@@ -104,7 +104,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 
 | file | lines |
 |---|---:|
-| kernel/syscall.c | 8178 |
 | usr/nora/src/editor.rs | 4635 |
 | usr/corvus/src/main.rs | 4245 |
 | usr/utopia/libutopia/src/eval/stmt.rs | 2979 |
