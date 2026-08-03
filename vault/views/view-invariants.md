@@ -15,7 +15,7 @@ Generated from note fields — do not edit between the markers
 | I-1 | [[inv-i1]] | spec | sub-kernel-territory, sub-kernel-devsrv, sub-pouch-net, sub-kernel-content | spec-territory, gate-smp |
 | I-10 | [[inv-i10]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
 | I-11 | [[inv-i11]] | spec | sub-kernel-ninep-client, sub-kernel-ninep-session | spec-9p-client |
-| I-12 | [[inv-i12]] | prose | sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault | prose, gate-smp |
+| I-12 | [[inv-i12]] | prose | sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault, sub-kernel-elf, sub-kernel-exec | prose, gate-smp |
 | I-13 | [[inv-i13]] | prose | sub-kernel-uaccess, sub-kernel-exception | prose, gate-smp |
 | I-15 | [[inv-i15]] | prose | sub-kernel-dtb, sub-kernel-boot-sequence, sub-kernel-gic, sub-kernel-timer, sub-kernel-discovery | prose, gate-smp |
 | I-16 | [[inv-i16]] | prose | sub-kernel-kaslr, sub-kernel-boot-entry, sub-kernel-content | prose, gate-smp |
@@ -36,6 +36,7 @@ Generated from note fields — do not edit between the markers
 | I-32 | [[inv-i32]] | prose | sub-kernel-proc, sub-kernel-hwcap, sub-kernel-content | gate-smp |
 | I-33 | [[inv-i33]] | prose | sub-kernel-path, sub-kernel-stalk, sub-kernel-territory, sub-kernel-content | gate-smp |
 | I-34 | [[inv-i34]] | spec | sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery | spec-allowance, prose, gate-smp |
+| I-36 | [[inv-i36]] | prose | sub-kernel-exec, sub-kernel-image, sub-kernel-fault, sub-kernel-burrow | prose, gate-smp |
 | I-37 | [[inv-i37]] | spec | sub-kernel-weft | spec-weft, spec-weft-readiness, gate-smp |
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |
 | I-39 | [[inv-i39]] | spec | sub-kernel-devproc, sub-kernel-proc | spec-debug-stop, prose, gate-smp |

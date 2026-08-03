@@ -33,4 +33,5 @@ Generated from note fields — do not edit between the markers
 | [[arc-phase1-foundation]] | complete | 3 | seam-buddy-bulk-op, seam-slub-debug-mode |
 | [[arc-phase5-ipc]] | complete | 3 | seam-poll-heap-waiters, seam-poll-srv-registry-retain |
 | [[arc-phase6-pouch]] | complete | 6 |  |
+| [[arc-revenant]] | complete | 0 |  |
 <!-- generated:end -->

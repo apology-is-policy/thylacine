@@ -273,6 +273,19 @@ func validate(reg *Registry, preErrors []string) (fails, warns []string) {
 // for this project and four dossiers cover it). Those are checked too when the
 // sibling is on disk, and skipped when it is not — the check degrades rather
 // than failing a vault that is merely checked out alone.
+//
+// `design:` gets the same treatment, and it took a live miss to earn it. A
+// dossier cited `docs/REVENANT.md` because the source file it swept cites that
+// path six times over — and no document has ever existed under that name (the
+// content is `docs/EXEC-LOAD-DESIGN.md`). The vault copied a broken pointer out
+// of the tree and could not see it, because the field beside the one it checks
+// was the one that was wrong. A second, worse instance sat next to it: a
+// reference doc scripture names four times, never written, whose number a
+// different document has since taken.
+//
+// The lesson is narrower than "check everything". Both fields hold
+// repo-relative paths, both are resolvable, and only one was checked — the same
+// arbitrary line `models:`-vs-`mirrors:` drew.
 func checkCodePaths(reg *Registry) []string {
 	root := vaultRoot(reg)
 	if root == "" {
@@ -283,31 +296,56 @@ func checkCodePaths(reg *Registry) []string {
 	siblings := map[string]string{
 		"stratum": filepath.Join(parent, "stratum", "v2"),
 	}
+	// resolve returns a complaint for one entry, or "" when it is fine (or
+	// unverifiable because the sibling repo is not checked out).
+	resolve := func(rel, field, note string) string {
+		base := root
+		if i := strings.Index(rel, ":"); i > 0 {
+			repo := strings.TrimSpace(rel[:i])
+			sib, known := siblings[repo]
+			if !known {
+				return fmt.Sprintf("%s: %s -> unknown sibling repo '%s' in '%s'",
+					note, field, repo, rel)
+			}
+			if _, err := os.Stat(sib); err != nil {
+				return "" // sibling not checked out; nothing to verify against
+			}
+			base, rel = sib, strings.TrimSpace(rel[i+1:])
+		}
+		// Only the leading token is a path. `design:` entries are document
+		// REFERENCES, not filenames — "docs/ARCHITECTURE.md section 5" is the
+		// house style and is correct. The first version of this check assumed
+		// the field held a bare path and reported 49 well-formed entries as
+		// broken, which is the same error it was written to catch: a claim
+		// about a field, true of the two entries in front of me and false of
+		// the corpus. Read the field, then check it.
+		if i := strings.IndexAny(rel, " \t"); i > 0 {
+			rel = rel[:i]
+		}
+		if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
+			return fmt.Sprintf("%s: %s -> no such file '%s'", note, field, rel)
+		}
+		return ""
+	}
 	var fails []string
 	for _, n := range reg.OfType("sub") {
 		for _, c := range n.Front.ListOr("code") {
-			c = strings.TrimSpace(c)
-			if c == "" {
+			if c = strings.TrimSpace(c); c == "" {
 				continue
 			}
-			base, rel := root, c
-			if i := strings.Index(c, ":"); i > 0 {
-				repo := strings.TrimSpace(c[:i])
-				sib, known := siblings[repo]
-				if !known {
-					fails = append(fails, fmt.Sprintf(
-						"%s: code -> unknown sibling repo '%s' in '%s'",
-						n.Rel, repo, c))
-					continue
-				}
-				if _, err := os.Stat(sib); err != nil {
-					continue // sibling not checked out; nothing to verify against
-				}
-				base, rel = sib, strings.TrimSpace(c[i+1:])
+			if bad := resolve(c, "code", n.Rel); bad != "" {
+				fails = append(fails, bad)
 			}
-			if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
-				fails = append(fails, fmt.Sprintf(
-					"%s: code -> no such file '%s'", n.Rel, c))
+		}
+	}
+	// `design:` is carried by more note types than just dossiers.
+	for _, n := range reg.Notes() {
+		for _, d := range n.Front.ListOr("design") {
+			if d = strings.TrimSpace(d); d == "" {
+				continue
+			}
+			if bad := resolve(d, "design", n.Rel); bad != "" {
+				fails = append(fails, bad)
 			}
 		}
 	}

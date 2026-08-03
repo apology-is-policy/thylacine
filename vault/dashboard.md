@@ -29,6 +29,7 @@ Generated — do not edit between the markers (`quaestor render`).
 | [[arc-phase6-pouch]] | complete | 6 |
 | [[arc-pouch-boot]] | active | 9 |
 | [[arc-pty]] | active | 4 |
+| [[arc-revenant]] | complete | 0 |
 | [[arc-tapestry]] | active | 3 |
 | [[arc-tickless-idle]] | active | 2 |
 | [[arc-vault]] | active | 33 |
@@ -125,11 +126,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-08-03 [[chg-2026-08-03-coverage-reconciliation]] — the coverage reconciliation -- the sweep is 31%, and the completeness criterion was the defect this arc keeps finding
+- 2026-08-03 [[chg-2026-08-03-exec-image-sweep]] — exec and the image cache -- three documents wrong about which code runs, and a checker that could not see the field that was wrong
 - 2026-08-03 [[chg-2026-08-03-mapping-core-sweep]] — the mapping core -- a W^X checker with no callers, named as enforcement by five documents
 - 2026-08-03 [[chg-2026-08-03-notes-sweep]] — note delivery -- a second dormant declaration, and a justification that is right for the wrong reason
 - 2026-08-02 [[chg-2026-08-02-absorption-reconciliation]] — the absorption ledger, reconciled -- the sweep is a third done, and three stubs claimed more than they absorbed
 - 2026-08-02 [[chg-2026-08-02-async-sweep]] — vault sweep: the async area -- rings, shared pages, and private copies
 - 2026-08-02 [[chg-2026-08-02-authority-sweep]] — vault sweep: the kernel authority substrate
 - 2026-08-02 [[chg-2026-08-02-boot-sweep]] — vault sweep: the boot path -- where the tools' assumptions are not yet true
-- 2026-08-02 [[chg-2026-08-02-console-sweep]] — vault sweep: the console and its front doors
 <!-- generated:end -->

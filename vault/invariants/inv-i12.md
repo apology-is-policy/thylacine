@@ -3,7 +3,7 @@ id: inv-i12
 type: inv
 title: "I-12 — no page is ever writable and executable at once"
 number: I-12
-guards: [sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault]
+guards: [sub-kernel-mmu, sub-kernel-vma, sub-kernel-fault, sub-kernel-elf, sub-kernel-exec]
 validated-by: [prose, gate-smp]
 strength: prose
 created: 2026-08-03
@@ -79,6 +79,21 @@ The invariant holds anyway, on the five mechanisms above. What is wrong is the
 **inventory**: an enforcement list that names a dormant function ahead of the
 `vma_alloc` line that is doing the work. See task #59, and
 [[chg-2026-08-03-mapping-core-sweep]] for the full chain.
+
+**A sixth document names a syscall that does not exist.** `kernel/elf.c`'s file
+header calls the loader "one of three layers (PTE bits + mprotect + ELF
+loader)". There is no `mprotect` in this kernel — searching `kernel/`, `arch/`
+and `mm/` for it returns exactly one hit, that comment. Mechanism 5 above *is*
+about `mprotect`, but as an **absence**: what protects the invariant is that no
+such call exists to get wrong. Listing an absence as a layer alongside two real
+checks turns a strength into a phantom, and the same sentence omits
+`vma_alloc` — making [[sub-kernel-elf]] the sixth document to do so. Folded into
+task #59.
+
+The pattern across all six is worth stating once: **every document that
+enumerates this invariant's enforcement names something that cannot fire, and
+none names the single line that always does.** The enumerations were written
+from the design and never re-derived from the code.
 
 **The encoder translates faithfully; it does not judge.** `make_user_pte_l3`
 given `WRITE|EXEC` emits a writable, user-executable PTE. It is not a gate and

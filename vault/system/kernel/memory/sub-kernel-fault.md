@@ -5,12 +5,12 @@ parent: moc-kernel-memory
 title: "The fault dispatcher — classification, demand paging, and the five backing arms"
 code: [arch/arm64/fault.c, arch/arm64/fault.h]
 audit: hard
-guarded-by: [inv-i12, inv-i32, inv-i7]
+guarded-by: [inv-i12, inv-i32, inv-i7, inv-i36]
 validated-by: [prose, gate-smp]
 locks: []
 hazards: []
 abis: []
-design: ["docs/ARCHITECTURE.md", "docs/REVENANT.md"]
+design: ["docs/ARCHITECTURE.md", "docs/EXEC-LOAD-DESIGN.md"]
 created: 2026-08-03
 updated: 2026-08-03
 ---
@@ -124,12 +124,15 @@ may sleep.
 dispatcher makes no permission decision of its own; that is why the gate can
 live in one place ([[sub-kernel-vma]]).
 
-**I-36** — the file-backed arm's seven conditions: install-once,
-death-interruptible page-in, fail-closed on I/O error, W^X, instruction-cache
-sync, eviction safety, pin-at-exec. This dossier covers the *fault* half only.
-There is deliberately no `inv-i36` note yet: the rest of its enforcement lives
-in exec and the image cache, which are unswept (task #52), and an invariant
-note written from half its enforcement is the error this arc keeps finding.
+[[inv-i36]] — this dossier holds conditions 5 and 6, the two that were
+genuinely new work: the page-in is death-interruptible, and an I/O error
+terminates the Proc rather than installing zeros where instructions should be.
+The other five live in [[sub-kernel-exec]], [[sub-kernel-image]] and Stratum.
+
+The note did not exist when this dossier was written, deliberately: half its
+enforcement was unswept, and an invariant written from half its enforcement is
+the error this arc keeps finding. It was minted once exec and the image cache
+were read.
 
 [[inv-i32]] — the lazy-anonymous arm charges the page budget **before** the
 allocation, so the count equals true resident-set size and a cap hit frees

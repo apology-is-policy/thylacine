@@ -53,7 +53,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**142 owned · 279 unowned · 421 files (33% owned) · ~111116 unswept lines.**
+**148 owned · 273 unowned · 421 files (35% owned) · ~109005 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -63,8 +63,8 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib | 0 | 41 | 18896 |
 | usr/libthyla-rs | 0 | 29 | 13326 |
 | usr/nora | 0 | 13 | 11491 |
-| kernel | 93 | 39 | 10007 |
 | usr/coreutils | 0 | 60 | 8763 |
+| kernel | 99 | 33 | 7896 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -142,7 +142,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/libthyla-rs/src/io.rs | 728 |
 | usr/lib/libthyla-rs/src/fs/path.rs | 718 |
 | usr/virtio-net-arp/src/main.rs | 710 |
-| kernel/exec.c | 704 |
 | usr/lib/parley/src/json.rs | 703 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
 | usr/lib/netdev/src/virtio_pci.rs | 677 |
@@ -179,10 +178,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/prowl/src/ui.rs | 370 |
 | usr/lib/kaua/src/query.rs | 366 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
-| kernel/include/thylacine/elf.h | 355 |
-| kernel/include/thylacine/exec.h | 345 |
 | usr/lib/parley/src/frame.rs | 336 |
-| kernel/elf.c | 335 |
 | usr/httpd/src/main.rs | 335 |
 | usr/lib/parley/src/dap.rs | 331 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
@@ -208,7 +204,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/pelt.rs | 254 |
 | usr/lib/parley/src/jsonrpc.rs | 253 |
 | usr/lib/libthyla-rs/src/fs/metadata.rs | 252 |
-| kernel/image.c | 251 |
 | usr/lib/libdriver/src/supervise.rs | 251 |
 | usr/lib/libthyla-rs/src/handle.rs | 251 |
 | usr/lib/libthyla-rs/src/territory.rs | 245 |
@@ -295,7 +290,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/mv.rs | 125 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
 | kernel/devnone.c | 121 |
-| kernel/include/thylacine/image.h | 121 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
 | usr/ports/sdl2/thylacine/thyla_tap.h | 119 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |

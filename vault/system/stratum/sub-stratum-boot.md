@@ -13,9 +13,9 @@ guarded-by: [inv-i28]
 validated-by: [prose, gate-smp, gate-interactive]
 locks: []
 abis: []
-design: ["docs/reference/86-pouch-stratumd-boot.md", "docs/reference/88-pouch-stratumd-boot-16c.md"]
+design: ["docs/reference/86-pouch-stratumd-boot.md (the 16c design section)"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Purpose
 

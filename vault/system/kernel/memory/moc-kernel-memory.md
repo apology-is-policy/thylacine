@@ -4,7 +4,7 @@ type: moc
 title: "Kernel memory: the physical allocator stack"
 parent: moc-kernel
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-03
 ---
 Where every kernel byte comes from, and what names a region once it
 exists. Four layers:
@@ -56,8 +56,14 @@ the fault handler carries the decision unchanged, and the MMU encodes
 it.** That is what lets the gate be a single `if` — nothing downstream
 re-derives a permission.
 
-Still not here: the overcommit model's syscall surface, and exec's half
-of I-36 (task #52), which is why there is no `inv-i36` note yet.
+Still not here: the overcommit model's syscall surface.
+
+Exec's half of I-36 was swept at batch 31 and lives in
+[[moc-kernel-execution]] — so [[inv-i36]] now exists, and the fault
+handler's FILE arm holds two of its seven conditions rather than the
+whole thing. The other five are exec's dispatch gate, the Image cache's
+version key, the charge in this area, and two that Stratum enforces and
+this repository cannot check.
 
 An earlier version of this line said the virtual side was "still
 unswept" — written a day before batch 27 declared the subsystem sweep
