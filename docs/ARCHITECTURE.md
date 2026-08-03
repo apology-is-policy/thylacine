@@ -1845,6 +1845,23 @@ re-key + crossing) → stalk-3 (devsrv per-territory + `/srv` + retire; split
 
 #### 9.6.8 Exec from the namespace (#58)
 
+> **KNOWN LIMITATION, measured 2026-08-03 at the LINEAGE L-6c gate (task #149).**
+> Resolution works; the LOAD that follows refuses a real-world binary.
+> `kernel/exec.c:125` (and `:778`, the file-backed arm) reject a `PT_LOAD`
+> whose `p_vaddr` is not page-aligned. ELF requires only
+> `p_vaddr == p_offset (mod p_align)`, so ordinary linkers place the data
+> segment mid-page -- Alpine's `busybox-static` has its at `0x51d2e0`. Every
+> binary Thylacine's own toolchain emits happens to be page-aligned, so the
+> precondition was universally true until the first FOREIGN ELF was exec'd.
+> **The failure is silent**: the reject runs in the child thunk after the pid
+> has been returned, so the parent observes a successful spawn and a child
+> that exits non-zero having executed nothing -- no syscall, no fault, no log
+> line naming the pid. An auditor of this surface should treat the missing
+> diagnostic as part of the defect. Fixing it is a REVENANT / I-36 change
+> (partial first page, two PT_LOADs sharing a page with a safe permission
+> union that is never W+X, and the Image cache's `burrow-offset-0 ==
+> seg->vaddr` identity at `exec.c:775-778`), so it carries its own round.
+
 Until #58, the `SYS_SPAWN_*` family resolved the binary through the flat boot-cpio
 table (`devramfs_lookup`), bypassing the caller's Territory entirely. That left two
 holes the container story cannot tolerate: a binary in a mounted FS (a container
