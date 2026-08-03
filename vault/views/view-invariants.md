@@ -22,7 +22,7 @@ Generated from note fields — do not edit between the markers
 | I-17 | [[inv-i17]] | prose | sub-kernel-sched, sub-kernel-timer | spec-scheduler, gate-smp |
 | I-18 | [[inv-i18]] | spec | sub-kernel-sched-smp, sub-kernel-gic | spec-scheduler, gate-smp |
 | I-19 | [[inv-i19]] | prose | sub-kernel-notes | prose, gate-smp |
-| I-20 | [[inv-i20]] | spec | sub-ptyfs, sub-kernel-proc | spec-pty, spec-pty-stop, prose, gate-smp |
+| I-20 | [[inv-i20]] | spec | sub-ptyfs, sub-kernel-pts, sub-kernel-jobctl, sub-kernel-proc | spec-pty, spec-pty-stop, prose, gate-smp |
 | I-21 | [[inv-i21]] | spec | sub-kernel-sched-smp, sub-kernel-thread, sub-kernel-exception | spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp |
 | I-22 | [[inv-i22]] | prose | sub-kernel-perm, sub-kernel-caps, sub-kernel-devproc | prose, gate-smp |
 | I-24 | [[inv-i24]] | spec | sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signal | spec-death-wake, gate-smp |

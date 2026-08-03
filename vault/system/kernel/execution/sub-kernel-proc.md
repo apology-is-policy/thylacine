@@ -35,7 +35,7 @@ keeps the tree rooted and therefore keeps every Proc findable.
 | `rfork` / `rfork_with_caps` | the sole Proc-creation chokepoint; `RFPROC` only, all other flags **extinct** |
 | `proc_find_by_pid` / `proc_for_each` | DFS from `kproc`; the callback runs under [[lock-proc-table]] |
 | `wait_pid_for(want_pid, flags, status_out)` | reap a ZOMBIE child, or (PTY-1e) *report* a stopped/continued one; pid/pgrp selectors + `WNOHANG` |
-| `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores |
+| `proc_setsid` / `setpgid` / `getpgid` / `getsid` | the POSIX session + process-group cores ([[sub-kernel-pts]] and [[sub-kernel-jobctl]] are what read them) |
 | `proc_page_charge` / `vma_charge` / `shared_map_charge` (+ uncharges) | the I-32 counters; the **caller must hold `p->vma_lock`** |
 | `proc_thread_cap_ok` / `proc_child_cap_ok` | the I-32 creation gates (take the table lock themselves) |
 | `proc_apply_identity` | the single audited identity-mutation site |
@@ -254,5 +254,14 @@ not being hot. `proc_alloc`'s fallible-first ordering costs nothing;
   original justification enumerated only *writers* and was silent on the
   cross-Proc `/proc` reader the same commit introduced. A lock the writer
   never takes cannot serialize anything.
+- **`proc_setsid`'s comment describes work it does not do, for a case that
+  cannot occur.** It says that once the pts registry exists the call "also
+  clears any binding owned by the OLD session iff the caller was its leader
+  (wired at PTY-1d)". The registry exists, PTY-1d landed, and `setsid`
+  touches no registry state — nor does it need to, since a session leader's
+  group id is pinned equal to its pid and `setsid` refuses exactly that
+  caller, making the stated condition unreachable. The property the design
+  relies on holds by a different mechanism entirely; see [[sub-kernel-pts]]
+  and task #69.
 
 ## Provenance

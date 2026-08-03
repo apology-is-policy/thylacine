@@ -87,7 +87,9 @@ exit and a kill alike:
 - clearing `g_console_owner`, `g_console_trusted_proc`, `g_console_renderer`
   and `g_init_proc` if this Proc held them, so none ever dangles;
 - the POSIX 2.4.3 orphan rule, **before** the reparent (the children list is
-  consumed there);
+  consumed there) — [[sub-kernel-jobctl]] owns it, and the ordering is the
+  whole trick: it asks "orphaned once I am gone" while the answer is still
+  computable;
 - reparenting orphans to init, else `kproc` — and NAMING each one on the
   uart (#80): `proc: orphan pid=N name="X" (parent pid=M name="Y" exiting)
   -> adopted by pid=A`. This is the one point where the kernel still holds
@@ -137,7 +139,8 @@ dev9p write-behind flush and skipping the close-time Tclunk.
 predicate is the disjunction. Death overrides both: the stop-check runs
 *after* the die-check at the tail, and the park loop re-checks
 `group_exit_msg` on every wake, so a kill racing a stop terminates the
-thread inside the park rather than eret-ing to EL0.
+thread inside the park rather than eret-ing to EL0. The second owner and its
+fans are [[sub-kernel-jobctl]]; [[spec-pty-stop]] is the composition.
 
 ## Data structures
 

@@ -22,8 +22,8 @@ it carries the single most bug-prone lineage in the tree
 wake that did not arrive, a pointer freed while a peer still ran on it, or a
 state observed a moment too early.
 
-Six surfaces, matching the code's own seams — three for the lifecycle, three
-for the loading:
+Eight surfaces, matching the code's own seams — three for the lifecycle, three
+for the loading, two for the terminal:
 
 ## Children
 
@@ -46,6 +46,12 @@ for the loading:
 - [[sub-kernel-image]] — the qid-keyed cache that lets two Procs running one
   binary share one set of text pages, and the eviction argument that makes
   it safe under SMP.
+- [[sub-kernel-pts]] — terminal identity: the registry that names a
+  pseudoterminal without ever handing userspace a handle, and the seam that
+  gives a terminal server signal power without giving it a target.
+- [[sub-kernel-jobctl]] — Ctrl-Z: the second owner of the debugger's stop
+  park, the gate deciding whether a suspend stops or merely notifies, and the
+  POSIX orphan rule.
 
 Creation reads as one step and is two. `rfork` produces a Proc with an
 address space and nothing in it; exec is what puts a program there. The
@@ -57,7 +63,15 @@ that one decision cashed out.
 
 ## Cross-cutting
 
-- Invariants: [[inv-i24]] (group termination atomic + exactly-once) ·
+The terminal pair is here rather than beside the console because what they are
+*about* is the Proc: a session, a group, a controlling terminal, and a park.
+Nothing in either file touches a byte of terminal data — that is
+[[sub-ptyfs]]'s, in userspace. The split is the security posture, not a
+filing convenience.
+
+- Invariants: [[inv-i20]] (a pty loses no byte and turns none into two
+  things — its kernel half is the seam and the stop) · [[inv-i24]] (group
+  termination atomic + exactly-once) ·
   [[inv-i9]] (no lost wake — the death-wake generalization is this area's
   hardest obligation) · [[inv-i32]] (the per-Proc resource floor) ·
   [[inv-i1]] (a Proc's Territory is its own; `rfork` clones it) ·
@@ -67,8 +81,10 @@ that one decision cashed out.
   writable-executable segment, and exec's gate keeps writable data off the
   shared path).
 - Specs: [[spec-death-wake]] (the cascade's register-then-observe, and the
-  hang its buggy cfg reproduces).
-- Locks: [[lock-proc-table]] — the one global lock the whole area turns on.
+  hang its buggy cfg reproduces) · [[spec-pty-stop]] (two owners of one park,
+  and that adding the second did not break the first).
+- Locks: [[lock-proc-table]] — the one global lock the whole area turns on ·
+  [[lock-pts]], a strict leaf that refuses to nest it.
 - Arcs: [[arc-phase2-lifecycle]] (where Proc/Thread came from) ·
   [[arc-pouch-boot]] (multi-thread Procs) · [[arc-holotype-rw]] (#809/#811 —
   the cascade) · [[arc-go-build]] (#344, #68 — what the Go toolchain broke) ·

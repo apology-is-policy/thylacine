@@ -2,7 +2,7 @@
 id: spec-pty-stop
 type: spec
 title: "pty_stop.tla"
-models: [sub-kernel-proc, sub-kernel-devproc]
+models: [sub-kernel-jobctl, sub-kernel-proc, sub-kernel-devproc]
 pins: [inv-i9]
 cfgs:
   - "pty_stop.cfg -- clean: StopCompatI39 under the cook-to-stop trigger composed with death"

@@ -3,11 +3,11 @@ id: inv-i20
 type: inv
 title: "I-20 — a pseudoterminal neither loses a byte nor turns one into two things"
 number: I-20
-guards: [sub-ptyfs, sub-kernel-proc]
+guards: [sub-ptyfs, sub-kernel-pts, sub-kernel-jobctl, sub-kernel-proc]
 validated-by: [spec-pty, spec-pty-stop, prose, gate-smp]
 strength: spec
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Statement
 
@@ -36,8 +36,10 @@ owners of one park, is [[spec-pty-stop]]'s.
 ## Enforcement
 
 Split across the boundary on purpose. The **userspace** [[sub-ptyfs]]
-owns the rings and the discipline; the **kernel** owns sessions, process
-groups, the controlling terminal, and the note routing.
+owns the rings and the discipline; the **kernel** owns terminal identity
+and the controlling-terminal state ([[sub-kernel-pts]]), the stop and its
+composition with the debugger's ([[sub-kernel-jobctl]]), and the session
+and group fields both read ([[sub-kernel-proc]]).
 
 **The third clause is structural, not checked.** ptyfs's only signal
 power is a syscall taking `(pts_id, class)` — there is no process-group
@@ -76,6 +78,15 @@ violates exactly it. [[spec-pty-stop]] for the stop composition. The
 in-server selftest drives the whole discipline truth table before the
 listener posts, and gates the boot on it; the `pty-probe` E2E drives a
 live controlling session end to end.
+
+**scope note.** The fourth clause is about a *master's* departure, and
+that is what is built. POSIX's other carrier-loss trigger — the
+controlling process dying, which hangs up the foreground group and
+disassociates the terminal — has no implementation; the closest thing is
+the orphan rule, which is narrower (it reaches only newly-orphaned groups
+that are *already stopped*). The invariant does not over-claim, but the
+design document's motivation for having sessions does. See
+[[sub-kernel-pts]]'s caveats and task #68.
 
 **blind-to:** the model's conservation clause covers the *raw* arm's
 back-pressure, not the *cooked* arm's deliberate overrun drops — a byte

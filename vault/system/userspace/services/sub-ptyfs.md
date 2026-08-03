@@ -307,5 +307,12 @@ drives a live controlling session.
 
 ## Referenced by
 
+[[sub-kernel-pts]] is the other half of the seam — the registry this server
+mints into, and the resolution that turns a slave fd held by *anyone* into a
+terminal identity without the holder ever learning its id.
+[[sub-kernel-jobctl]] receives the suspend and continue this server reports,
+and decides per member whether a suspend stops or merely notifies — a decision
+the server neither makes nor can observe.
+
 [[spec-pty]] · [[inv-i20]] · [[sub-tapestryd]] · [[sub-pouch-tty]] ·
 [[moc-userspace]].

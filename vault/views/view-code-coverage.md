@@ -19,6 +19,10 @@ were all unswept while the ledger read complete. The claim's subject was
 narrower than the claim, which is the defect this arc keeps finding in code and
 found here in its own bookkeeping.
 
+Those five are now owned — swept across batches 29 through 32, in the order
+this paragraph happens to list them. The worked example that motivated the
+ledger is discharged; the ledger is not.
+
 **What ownership means.** A file is owned when some dossier names it in `code:`,
 and by nothing else. A prose mention does not count — a dossier that discusses a
 neighbour's file has not swept it, and counting mentions is precisely how the
@@ -53,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**148 owned · 273 unowned · 421 files (35% owned) · ~109005 unswept lines.**
+**150 owned · 271 unowned · 421 files (35% owned) · ~108337 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -64,7 +68,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/libthyla-rs | 0 | 29 | 13326 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
-| kernel | 99 | 33 | 7896 |
+| kernel | 101 | 31 | 7228 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -159,7 +163,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/eval/jobs.rs | 502 |
 | usr/aurora/src/render.rs | 500 |
 | usr/prowl/src/main.rs | 490 |
-| kernel/pts.c | 475 |
 | arch/arm64/uart.c | 473 |
 | usr/coreutils/src/bin/ls.rs | 473 |
 | usr/nora/src/syntax.rs | 460 |
@@ -242,7 +245,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel/dev.c | 197 |
 | usr/utopia/libutopia/src/eval/value.rs | 197 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| kernel/include/thylacine/pts.h | 193 |
 | usr/lib/libthyla-rs/src/fs/dir.rs | 193 |
 | usr/lib/libthyla-rs/src/thread.rs | 191 |
 | usr/lib/kaua/src/source.rs | 190 |

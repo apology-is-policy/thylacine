@@ -129,8 +129,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-03 [[chg-2026-08-03-exec-image-sweep]] — exec and the image cache -- three documents wrong about which code runs, and a checker that could not see the field that was wrong
 - 2026-08-03 [[chg-2026-08-03-mapping-core-sweep]] — the mapping core -- a W^X checker with no callers, named as enforcement by five documents
 - 2026-08-03 [[chg-2026-08-03-notes-sweep]] — note delivery -- a second dormant declaration, and a justification that is right for the wrong reason
+- 2026-08-03 [[chg-2026-08-03-pty-kernel-sweep]] — the PTY kernel seam -- a guard that cannot tell a dead session from a live one, and three claims about what happens when a leader dies
 - 2026-08-02 [[chg-2026-08-02-absorption-reconciliation]] — the absorption ledger, reconciled -- the sweep is a third done, and three stubs claimed more than they absorbed
 - 2026-08-02 [[chg-2026-08-02-async-sweep]] — vault sweep: the async area -- rings, shared pages, and private copies
 - 2026-08-02 [[chg-2026-08-02-authority-sweep]] — vault sweep: the kernel authority substrate
-- 2026-08-02 [[chg-2026-08-02-boot-sweep]] — vault sweep: the boot path -- where the tools' assumptions are not yet true
 <!-- generated:end -->
