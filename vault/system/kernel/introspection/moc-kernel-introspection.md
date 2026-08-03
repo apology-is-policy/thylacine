@@ -4,7 +4,7 @@ type: moc
 title: "Kernel introspection Devs"
 parent: moc-kernel
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 The two synthetic Devs that render kernel state as readable text: `/proc`
 (per-process state, plus the debugger's whole run-control surface) and `/ctl`
@@ -58,6 +58,10 @@ They are near-misses of one another on purpose, and the near-misses are load-bea
   job-control verbs, and the entire I-39 debug surface (attach, run control,
   registers, cross-Proc memory, hardware breakpoints).
 - [[sub-kernel-devctl]] — `/ctl`: machine-wide stats, and the one gated leaf.
+- [[sub-kernel-hwdebug]] — the architectural debug registers beneath the debug
+  surface: per-CPU breakpoint isolation, single-step, watchpoints, and the three
+  exception routes that turn a fire into a stop. Not a Dev — it has no namespace
+  presence at all, and `/proc` is its only control surface.
 
 ## Cross-cutting
 

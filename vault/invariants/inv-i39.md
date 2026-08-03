@@ -3,11 +3,11 @@ id: inv-i39
 type: inv
 title: "I-39 — debug authority is bounded, stopped-only, and never strands its quarry"
 number: I-39
-guards: [sub-kernel-devproc, sub-kernel-proc]
-validated-by: [spec-debug-stop, prose, gate-smp]
+guards: [sub-kernel-devproc, sub-kernel-proc, sub-kernel-hwdebug]
+validated-by: [spec-debug-stop, spec-debug-step, prose, gate-smp]
 strength: spec
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Statement
 
@@ -66,6 +66,16 @@ status — an arbitrary one would return the target to kernel privilege. It hold
 at any write offset, because the write path rebuilds the whole frame and overlays
 the caller's slice before applying.
 
+**No-escape is literal, not argued, on the hardware leg** ([[sub-kernel-hwdebug]]).
+A breakpoint is a debug register, so arming one never writes the target's text and
+cannot violate write-xor-execute — there is no patched instruction to get wrong.
+That leg carries its own share of the gate too: a debug exception fires
+asynchronously with respect to a detach, so all three exception arms deliver the
+stop through the attach-gated path under the process table lock rather than
+setting the flag directly. That is a fix, not the original design — the ungated
+version parked targets whose debugger had already left, which is the model's
+`StopImpliesOwned`.
+
 **No strand** is the control-fd close hook, which releases the slot on every path
 including the debugger's death (its handles close at exit). Its soundness rests on
 something external: the Spoor close hook runs exactly once, on the last reference
@@ -80,6 +90,12 @@ cannot. It controls no execution and is bounded to the Thread's own stack. Its
 output then splits on capability, because raw kernel addresses disclose the
 address-space randomization offset: the capability tier sees them, the owner tier
 gets the link-relative symbolic form.
+
+That split closes the disclosure and opens a smaller honesty gap, because the
+symbol lookup it leans on has no upper bound: every address above the last text
+symbol resolves to that symbol. The capability tier can see this — it has the
+raw address beside the name — and the owner tier, which has only the name,
+cannot. See [[sub-kernel-halls]].
 
 ## Validation
 

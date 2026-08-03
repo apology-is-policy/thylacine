@@ -4,12 +4,13 @@ type: moc
 title: "The EL0 boundary — exception entry, return tails, and deliberate crossings"
 parent: moc-kernel
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 Every transition between userspace and the kernel: the vector table and its
 save/restore macros, the three paths that `eret` to EL0, the return tails where
 the kernel acts on a thread before letting it run again, and the fixup table
-that lets kernel code touch a user address without dying.
+that lets kernel code touch a user address without dying — plus the crash dump
+the entry wrappers feed, which is what remains when a crossing goes wrong.
 
 ## The organizing fact
 
@@ -29,6 +30,13 @@ This is the same shape as the console's deferral to its manager kthread
 ([[moc-kernel-console-gfx]]) — work that cannot be done where it is discovered
 gets carried to a place where it can. There the carrier is a kthread; here it
 is the return tail.
+
+Entry does one more thing, for the case where none of this works: it publishes
+the saved frame to a per-CPU slot so that a kernel death still has registers and
+a stack to report ([[sub-kernel-halls]]). That slot is the only piece of entry
+state deliberately allowed to go stale — a handler that never returns, or one
+that resumes on a different CPU, leaves it wrong — and the dump defends itself
+with a plausibility check rather than the wrappers defending the slot.
 
 ## The tails are the substance
 
@@ -50,6 +58,9 @@ runs only on the return from a syscall or a fault, which is
 - [[sub-kernel-uaccess]] — the fixup table: how a kernel-mode fault on a user
   address becomes either a demand-page-and-retry or a clean `-1`, and never an
   extinction.
+- [[sub-kernel-halls]] — the crash dump: what the entry wrappers hand it, how it
+  survives its own faults, and the live-thread backtrace that reuses half of it
+  under an opposite safety argument.
 
 ## Cross-cutting
 

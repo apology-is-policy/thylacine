@@ -6,6 +6,7 @@ title: "Exception entry, the EL0 return tails, and the three ways into userspace
 code:
   - arch/arm64/vectors.S
   - arch/arm64/exception.c
+  - arch/arm64/exception.h
   - arch/arm64/userland.S
 audit: hard
 guarded-by: [inv-i21, inv-i13, inv-i24, inv-i39]
@@ -16,7 +17,7 @@ design:
   - "docs/ARCHITECTURE.md section 12"
   - "docs/reference/08-exception.md"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Purpose
 

@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**158 owned · 263 unowned · 421 files (37% owned) · ~106704 unswept lines.**
+**165 owned · 256 unowned · 421 files (39% owned) · ~105340 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -65,7 +65,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 |---|---:|---:|---:|
 | usr/utopia | 0 | 26 | 19864 |
 | usr/lib | 0 | 41 | 18896 |
-| usr/libthyla-rs | 0 | 29 | 13326 |
+| usr/libthyla-rs | 0 | 29 | 13333 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
 | kernel | 109 | 23 | 5595 |
@@ -74,7 +74,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
 | usr/ports | 0 | 10 | 2865 |
-| arch | 27 | 11 | 2133 |
 | usr/prowl | 0 | 3 | 1253 |
 | usr/virtio-gpu | 0 | 1 | 955 |
 | usr/virtio-blk-rw | 0 | 1 | 885 |
@@ -83,6 +82,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/warden | 0 | 1 | 784 |
 | usr/curl | 0 | 3 | 779 |
 | usr/net-echo | 0 | 1 | 774 |
+| arch | 34 | 4 | 762 |
 | usr/virtio-net-arp | 0 | 1 | 710 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/sntp | 0 | 1 | 394 |
@@ -157,7 +157,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/libthyla-rs/src/loom.rs | 600 |
 | usr/lib/libthyla-rs/src/fs/file.rs | 582 |
 | usr/lib/libthyla-rs/src/notes.rs | 536 |
-| arch/arm64/hwdebug.c | 523 |
 | usr/aurora/src/osd.rs | 522 |
 | usr/utopia/libutopia/src/eval/glob.rs | 504 |
 | usr/utopia/libutopia/src/eval/jobs.rs | 502 |
@@ -169,7 +168,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/sort.rs | 453 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
 | usr/coreutils/src/netpump.rs | 450 |
-| arch/arm64/halls.c | 438 |
 | kernel/joey.c | 438 |
 | usr/utopia/shell/src/main.rs | 431 |
 | usr/coreutils/src/bin/grep.rs | 417 |
@@ -210,13 +208,13 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/netdev/src/ring.rs | 244 |
 | usr/nora/src/theme.rs | 244 |
 | usr/lib/libdriver/src/driver.rs | 242 |
+| usr/lib/libthyla-rs/src/jit.rs | 237 |
 | usr/utopia/libutopia/src/parser/error.rs | 237 |
 | usr/ptyhost/src/main.rs | 236 |
 | usr/lib/libdriver/src/dtb.rs | 234 |
 | kernel/include/thylacine/smp.h | 233 |
 | usr/coreutils/src/bin/ns.rs | 233 |
 | usr/coreutils/src/bin/cp.rs | 230 |
-| usr/lib/libthyla-rs/src/jit.rs | 230 |
 | usr/nora/src/vartree.rs | 230 |
 | usr/nora/src/diag.rs | 226 |
 | usr/utopia/libutopia/src/eval/console.rs | 225 |
@@ -265,7 +263,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/sdl2/SDL_config.h | 162 |
 | usr/coreutils/src/bin/stat.rs | 161 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
-| arch/arm64/hwdebug.h | 159 |
 | kernel/include/thylacine/context.h | 159 |
 | usr/coreutils/src/bin/realm.rs | 156 |
 | usr/coreutils/src/bin/tcpproxy.rs | 154 |
@@ -303,13 +300,11 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/libdriver/src/lib.rs | 96 |
 | usr/coreutils/src/bin/sleep.rs | 95 |
 | usr/lib/libthyla-rs/src/sched.rs | 94 |
-| arch/arm64/halls.h | 93 |
 | usr/coreutils/src/bin/date.rs | 93 |
 | usr/lib/kaua/src/rect.rs | 93 |
 | kernel/include/thylacine/9p_transport_loopback.h | 92 |
 | usr/coreutils/src/color.rs | 92 |
 | usr/utopia/libutopia/src/path.rs | 89 |
-| arch/arm64/exception.h | 86 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | usr/utopia/libutopia/src/eval/mod.rs | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
@@ -342,7 +337,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello/pouch-hello-env.c | 57 |
 | usr/utopia/libutopia/src/lib.rs | 57 |
 | usr/lib/kaua/src/lib.rs | 55 |
-| arch/arm64/halls_symtab.h | 54 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | kernel/include/thylacine/canary.h | 50 |
 | kernel/extinction.c | 48 |
@@ -363,7 +357,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/libt/include/thyla/poll.h | 28 |
 | usr/lib/libthyla-rs/src/identity.rs | 28 |
 | kernel/include/thylacine/devramfs.h | 27 |
-| arch/arm64/halls_symtab.stub.c | 18 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h | 14 |
 | usr/coreutils/src/bin/false.rs | 13 |
 | usr/coreutils/src/bin/true.rs | 13 |
