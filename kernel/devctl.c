@@ -13,6 +13,7 @@
 //   /ctl/devices        — bestiary listing (dc + name per Dev)
 //   /ctl/kernel-base    — KASLR kernel high VA base + offset + seed source
 //   /ctl/sched          — scheduler stats (runnable count)
+//   /ctl/cons           — console byte-loss counters, RX + TX (#95)
 //
 // dc='C' (uppercase to leave 'c' for cons + 'r' for random).
 //
@@ -21,6 +22,7 @@
 // are static per-leaf functions producing into a 512-byte stack buffer.
 
 #include <thylacine/caps.h>
+#include <thylacine/cons.h>      // #95: cons_rx_drops + cons_tx_drops (/ctl/cons)
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
@@ -51,6 +53,7 @@ enum {
     CTL_KIND_KERNEL_BASE = 4,
     CTL_KIND_SCHED      = 5,
     CTL_KIND_CPU        = 6,
+    CTL_KIND_CONS       = 7,   // #95: console byte-loss counters (RX + TX)
 };
 
 #define CTL_QID_ROOT_PATH  0ULL
@@ -451,6 +454,43 @@ static size_t format_cpu(char *buf, size_t cap) {
     return off;
 }
 
+// #95: console byte-loss counters, both directions, in one place.
+//
+// Every line here counts bytes the console DROPPED -- input the user typed that
+// no reader ever saw, or output a writer emitted that no terminal ever showed.
+// All five should read 0 on a healthy boot; a non-zero rx_* is the evidence #95
+// had no way to collect (a dropped input byte truncates a command, which then
+// runs anyway, leaving nothing behind). console_mgr also emits one loud line on
+// the first input drop of a boot -- this file is the running total after that.
+//
+// The rx_* sites differ in what a count MEANS, which is why they are separate:
+//   raw   -- ring full in raw/cbreak mode. #174 backpressures the UART producer
+//            byte-for-byte here, so a count implicates an ungated producer
+//            (cons_feed_write, the G-4 renderer feed) or a broken gate.
+//   flush -- ring full during the cooked Enter-flush. Reachable even with #174:
+//            its gate admits ONE byte, the flush pushes up to CONS_LINE_MAX + 1.
+//   line  -- a byte past CONS_LINE_MAX in cooked line assembly. Bounded by
+//            design; the byte is still gone, and un-echoed.
+static size_t format_cons(char *buf, size_t cap) {
+    u32 rx_raw = 0, rx_flush = 0, rx_line = 0, tx_dropped = 0, tx_room_waits = 0;
+    cons_rx_drops(&rx_raw, &rx_flush, &rx_line);
+    cons_tx_drops(&tx_dropped, &tx_room_waits);
+
+    static const char *const labels[5] = {
+        "rx_drop_raw:   ", "rx_drop_flush: ", "rx_drop_line:  ",
+        "tx_dropped:    ", "tx_room_waits: ",
+    };
+    u32 vals[5] = { rx_raw, rx_flush, rx_line, tx_dropped, tx_room_waits };
+
+    size_t off = 0, n;
+    for (int i = 0; i < 5; i++) {
+        n = fmt_str(buf, cap, off, labels[i]);              if (!n) return off; off += n;
+        n = fmt_udec(buf, cap, off, (unsigned long)vals[i]); if (!n) return off; off += n;
+        n = fmt_str(buf, cap, off, "\n");                   if (!n) return off; off += n;
+    }
+    return off;
+}
+
 // =============================================================================
 // Per-leaf table.
 // =============================================================================
@@ -468,6 +508,7 @@ static const struct ctl_leaf g_ctl_leaves[] = {
     { "kernel-base", CTL_KIND_KERNEL_BASE, format_kernel_base },
     { "sched",       CTL_KIND_SCHED,       format_sched       },
     { "cpu",         CTL_KIND_CPU,         format_cpu         },
+    { "cons",        CTL_KIND_CONS,        format_cons        },
 };
 
 #define CTL_LEAF_COUNT  (sizeof(g_ctl_leaves) / sizeof(g_ctl_leaves[0]))

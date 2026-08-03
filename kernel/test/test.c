@@ -543,6 +543,7 @@ void test_cons_tx_room_wait_and_deadline(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
 void test_cons_rx_can_accept_boundary(void);
+void test_cons_rx_drop_counters(void);
 void test_cons_ctrlc_consumed(void);
 void test_cons_break_sets_sak(void);
 void test_cons_read_busy_guard(void);
@@ -592,6 +593,7 @@ void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
+void test_devctl_read_cons_format(void);
 void test_devctl_read_cpu_format(void);             // prowl-3b: /ctl/cpu read
 void test_devctl_cpu_sources_live(void);            // V-4c-2b: the /proc/stat + cpuinfo sources
 void test_devctl_write_rejected(void);
@@ -1944,6 +1946,7 @@ struct test_case g_tests[] = {
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
     { "cons.rx_can_accept_boundary",   test_cons_rx_can_accept_boundary,   false, NULL },
+    { "cons.rx_drop_counters",         test_cons_rx_drop_counters,         false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
     { "cons.break_sets_sak",           test_cons_break_sets_sak,           false, NULL },
     { "cons.read_busy_guard",          test_cons_read_busy_guard,          false, NULL },
@@ -1997,6 +2000,7 @@ struct test_case g_tests[] = {
                                        test_devctl_read_kernel_base_format, false, NULL },
     { "devctl.kernel_base_gated",      test_devctl_kernel_base_gated,      false, NULL },
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
+    { "devctl.read_cons_format",       test_devctl_read_cons_format,       false, NULL },
     { "devctl.read_cpu_format",        test_devctl_read_cpu_format,        false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },

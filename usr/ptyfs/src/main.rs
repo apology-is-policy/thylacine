@@ -35,6 +35,11 @@ pub extern "C" fn rs_main() -> i64 {
     match server::selftest() {
         Ok(()) => {
             t_putstr("ptyfs: selftest PASS\n");
+            // #95: arm the input-drop report only now. The selftest deliberately
+            // drops a byte (battery step 9, past LINE_MAX), and an armed report
+            // would both cry wolf every boot AND spend the one-shot latch, so a
+            // real drop while serving would say nothing.
+            server::arm_drop_report();
         }
         Err(stage) => {
             t_putstr("ptyfs: selftest FAIL: ");

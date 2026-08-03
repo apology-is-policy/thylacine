@@ -245,6 +245,61 @@ void test_cons_rx_can_accept_boundary(void) {
     TEST_ASSERT(cons_rx_can_accept(), "reset frees the ring");
 }
 
+// #95: the input-drop counters must actually COUNT, per site.
+//
+// A counter that can never fire is worse than no counter: a future zero reading
+// would read as "no byte was dropped" when it only proves the instrument is
+// dead. So this drives each of the three drop sites deliberately and asserts
+// (a) the matching counter moves by the exact expected amount, and (b) the other
+// two do NOT -- attribution is the whole point, since a lumped counter would
+// only move the question from "did we drop?" to "where?".
+void test_cons_rx_drop_counters(void) {
+    u32 raw = 1, flush = 1, line = 1;
+
+    // (a) Raw arm, ring full. 266 pushes into a 256-entry ring = 10 drops. Fill
+    //     bytes are >= 0x80 so ISIG (the boot default) cannot eat one as Ctrl-C.
+    cons_test_reset();
+    cons_rx_drops(&raw, &flush, &line);
+    TEST_EXPECT_EQ((long)(raw + flush + line), 0L, "reset zeroes all three drop counters");
+    for (int i = 0; i < 266; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    cons_rx_drops(&raw, &flush, &line);
+    TEST_EXPECT_EQ((long)raw,   10L, "raw arm counts exactly the 10 bytes past capacity");
+    TEST_EXPECT_EQ((long)flush,  0L, "a raw overflow is not attributed to the flush site");
+    TEST_EXPECT_EQ((long)line,   0L, "a raw overflow is not attributed to the line site");
+
+    // (b) Cooked line-assembly overflow: CONS_LINE_MAX + 4 non-newline bytes
+    //     under ICANON. The 4 past the bound are dropped un-echoed; no Enter has
+    //     been pressed, so nothing has reached the ring and the other two sites
+    //     must stay clean.
+    cons_test_reset();
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "+icanon accepted");
+    for (u32 i = 0; i < CONS_LINE_MAX + 4u; i++)
+        cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    cons_rx_drops(&raw, &flush, &line);
+    TEST_EXPECT_EQ((long)line,  4L, "line assembly counts exactly the bytes past CONS_LINE_MAX");
+    TEST_EXPECT_EQ((long)raw,   0L, "a line overflow is not attributed to the raw site");
+    TEST_EXPECT_EQ((long)flush, 0L, "a line overflow is not attributed to the flush site");
+
+    // (c) Cooked FLUSH overrun -- the site #174's admission gate does not cover.
+    //     Fill the ring to 250 in raw mode, switch to ICANON, assemble 10 bytes,
+    //     press Enter: the flush wants 11 slots and has 6, so 5 are lost.
+    //     Note WHICH 5: the tail, INCLUDING the newline. That is exactly why
+    //     this site cannot by itself explain #95's shape (interior byte lost,
+    //     terminator delivered, command executed) -- here the terminator is the
+    //     first thing to go, and the line would never execute at all.
+    cons_test_reset();
+    for (int i = 0; i < 250; i++) cons_rx_input((u8)(0x80u | (i & 0x7fu)), false);
+    TEST_EXPECT_EQ(cons_set_mode_cmd("+icanon", 7, true), 7L, "+icanon accepted");
+    for (int i = 0; i < 10; i++) cons_rx_input((u8)'a', false);
+    cons_rx_input((u8)'\n', false);
+    cons_rx_drops(&raw, &flush, &line);
+    TEST_EXPECT_EQ((long)flush, 5L, "flush counts the 11 - 6 slots it could not place");
+    TEST_EXPECT_EQ((long)raw,   0L, "a flush overrun is not attributed to the raw site");
+    TEST_EXPECT_EQ((long)line,  0L, "a flush overrun is not attributed to the line site");
+
+    cons_test_reset();
+}
+
 void test_cons_ctrlc_consumed(void) {
     cons_test_reset();
     cons_rx_input(0x03u, false);          // Ctrl-C: cooked-consumed, NOT ring data

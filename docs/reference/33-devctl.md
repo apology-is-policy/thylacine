@@ -163,6 +163,37 @@ Multi-step walk supported via the same `walkqid_alloc / spoor_clone / walk_one` 
 
 ---
 
+## `/ctl/cons` -- console byte loss, both directions (#95)
+
+Every line counts bytes the console **dropped**: input the user typed that no
+reader ever saw, or output a writer emitted that no terminal ever showed. All
+five read 0 on a healthy boot.
+
+```
+rx_drop_raw:   0
+rx_drop_flush: 0
+rx_drop_line:  0
+tx_dropped:    0
+tx_room_waits: 0
+```
+
+The three `rx_*` sites are separate because a count means a different thing at
+each -- a lumped counter would only move the question from "did we drop?" to
+"where?":
+
+| Field | Site | What a non-zero value implicates |
+|---|---|---|
+| `rx_drop_raw` | raw/cbreak arm, RX ring full | #174 backpressures the UART producer byte-for-byte here, so a count implicates an **ungated** producer (`cons_feed_write`, the G-4 renderer feed) or a broken gate |
+| `rx_drop_flush` | cooked Enter-flush, RX ring full | reachable even **with** #174: `cons_rx_can_accept()` admits ONE byte, the flush pushes `line_len + 1` (up to `CONS_LINE_MAX + 1`) |
+| `rx_drop_line` | cooked line assembly past `CONS_LINE_MAX` | bounded by design, but the byte is gone and un-echoed |
+
+`tx_dropped` / `tx_room_waits` are the #75/#126 TX counters, which previously
+had no surface at all -- you had to be writing a kernel unit test to see them.
+
+`console_mgr` additionally emits ONE loud line on the first input drop of a
+boot; this file is the running total afterwards. See
+`docs/reference/111-cons.md` for the mechanism.
+
 ## `stat_native` (VIVARIUM V-4b-5)
 
 `/ctl` had **no `stat_native` slot at all**, so `spoor_stat_native` returned `-1`
