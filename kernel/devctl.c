@@ -456,34 +456,45 @@ static size_t format_cpu(char *buf, size_t cap) {
 
 // #95: console byte-loss counters, both directions, in one place.
 //
-// Every line here counts bytes the console DROPPED -- input the user typed that
-// no reader ever saw, or output a writer emitted that no terminal ever showed.
-// All five should read 0 on a healthy boot; a non-zero rx_* is the evidence #95
-// had no way to collect (a dropped input byte truncates a command, which then
-// runs anyway, leaving nothing behind). console_mgr also emits one loud line on
-// the first input drop of a boot -- this file is the running total after that.
+// The console's loss + back-pressure accounting: input the user typed that no
+// reader ever saw, output a writer emitted that no terminal ever showed, and the
+// two places the console pushes back instead. The *_drop_* / tx_dropped lines
+// are the evidence #95 had no way to collect (a dropped input byte truncates a
+// command, which then runs anyway, leaving nothing behind); console_mgr emits
+// one loud line on the first input DROP of a boot, and this file is the running
+// total after that.
 //
-// The rx_* sites differ in what a count MEANS, which is why they are separate:
-//   raw   -- ring full in raw/cbreak mode. #174 backpressures the UART producer
-//            byte-for-byte here, so a count implicates an ungated producer
-//            (cons_feed_write, the G-4 renderer feed) or a broken gate.
-//   flush -- ring full during the cooked Enter-flush. Reachable even with #174:
-//            its gate admits ONE byte, the flush pushes up to CONS_LINE_MAX + 1.
-//   line  -- a byte past CONS_LINE_MAX in cooked line assembly. Bounded by
-//            design; the byte is still gone, and un-echoed.
+// Do not read these as five of a kind -- #129 split them into two classes:
+//
+//   rx_bp_raw     -- ring full in raw/cbreak mode: the byte was REFUSED, and the
+//   rx_bp_flush      producer (PL011 FIFO / holdback, or cons_feed_write's short
+//                    count) still holds it. NOT loss. Non-zero means the console
+//                    was pushed harder than the reader drained -- a load signal,
+//                    normal on a busy or briefly-stalled console.
+//   rx_drop_line  -- a real drop: a byte past CONS_LINE_MAX in cooked line
+//                    assembly. Bounded and deliberate (back-pressuring here
+//                    would wedge on a user who never presses Enter), but the
+//                    byte is gone and un-echoed.
+//   rx_drop_ring  -- MUST BE ZERO. A ring push failed after the under-lock room
+//                    check authorized it: #129's arithmetic disagrees with the
+//                    ring. This is an invariant witness, not a diagnostic.
+//   tx_*          -- the output side (#75/#126), unchanged.
 static size_t format_cons(char *buf, size_t cap) {
-    u32 rx_raw = 0, rx_flush = 0, rx_line = 0, tx_dropped = 0, tx_room_waits = 0;
-    cons_rx_drops(&rx_raw, &rx_flush, &rx_line);
+    u32 rx_bp_raw = 0, rx_bp_flush = 0, rx_drop_line = 0, rx_drop_ring = 0;
+    u32 tx_dropped = 0, tx_room_waits = 0;
+    cons_rx_counters(&rx_bp_raw, &rx_bp_flush, &rx_drop_line, &rx_drop_ring);
     cons_tx_drops(&tx_dropped, &tx_room_waits);
 
-    static const char *const labels[5] = {
-        "rx_drop_raw:   ", "rx_drop_flush: ", "rx_drop_line:  ",
+    static const char *const labels[6] = {
+        "rx_bp_raw:     ", "rx_bp_flush:   ",
+        "rx_drop_line:  ", "rx_drop_ring:  ",
         "tx_dropped:    ", "tx_room_waits: ",
     };
-    u32 vals[5] = { rx_raw, rx_flush, rx_line, tx_dropped, tx_room_waits };
+    u32 vals[6] = { rx_bp_raw, rx_bp_flush, rx_drop_line, rx_drop_ring,
+                    tx_dropped, tx_room_waits };
 
     size_t off = 0, n;
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         n = fmt_str(buf, cap, off, labels[i]);              if (!n) return off; off += n;
         n = fmt_udec(buf, cap, off, (unsigned long)vals[i]); if (!n) return off; off += n;
         n = fmt_str(buf, cap, off, "\n");                   if (!n) return off; off += n;

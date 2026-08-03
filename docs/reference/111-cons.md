@@ -60,7 +60,7 @@ void console_mgr_main(void);
 ```c
 struct cons_input {
     spin_lock_t lock;                  // ring + head/tail/count + flags; taken irqsave
-    u8          ring[CONS_RING_SIZE];  // 256, power-of-two, mask-indexed
+    u8          ring[CONS_RING_SIZE];  // 512, power-of-two, mask-indexed (#129)
     u32         head, tail, count;     // count: RELAXED-atomic (read in conds)
     bool        reader_busy;           // single-reader guard
     bool        intr_pending;          // Ctrl-C -> deferred `interrupt` note
@@ -676,13 +676,20 @@ since #75/#126; the RX side had nothing.)
 Each site now increments its own counter in `struct cons_input`, under
 `g_cons.lock` -- which all three already hold:
 
+**#129 renamed two of these**, because the fix changed what they measure: the
+ring-full sites now *refuse* a byte (back-pressure -- the producer keeps it and
+retries) rather than dropping it. A counter called `rx_drop_raw` that counts
+non-losses is wrong in the most expensive way: read at 3am, believed, and
+pointing at data loss that did not happen.
+
 | Counter | Site | Notes |
 |---|---|---|
-| `rx_drop_raw` | `cons_rx_input`, raw/cbreak arm | one byte in, one byte pushed, so #174's `cons_rx_can_accept()` gate DOES cover the UART producer. `cons_feed_write` (G-4 renderer feed) is a second producer and is **not** gated. |
-| `rx_drop_flush` | `cons_rx_input`, cooked Enter-flush | the gap in #174: admission is granted for ONE byte, the flush pushes `line_len + 1`. |
-| `rx_drop_line` | `cons_rx_input`, line assembly | a byte past `CONS_LINE_MAX`, dropped un-echoed. |
+| `rx_bp_raw` | `cons_rx_input`, raw/cbreak arm | **back-pressure, not loss.** The ring was full and the byte was REFUSED; the UART holds it in the FIFO or the 1-byte holdback, and `cons_feed_write` returns a short count. Non-zero is a load signal. |
+| `rx_bp_flush` | `cons_rx_input`, cooked Enter-flush | the whole `line_len + 1` flush did not fit, so it was refused **as a unit** with the line left intact. Re-offering the terminator after a drain delivers the whole line. |
+| `rx_drop_line` | `cons_rx_input`, line assembly | **a real drop:** a byte past `CONS_LINE_MAX`, un-echoed. Deliberately still a drop -- back-pressuring a fixed-size line buffer would wedge on a user who never presses Enter. |
+| `rx_drop_ring` | `cons_ring_push` after the room check | **must stay zero.** A push failed after the under-lock room check authorized it, i.e. `cons_ring_room()` disagrees with the ring. An invariant *witness*, not a diagnostic: it has no reachable driver by construction, and that is the claim it exists to falsify. |
 
-Read them at `/ctl/cons` (`cons_rx_drops` / `cons_tx_drops`).
+Read them at `/ctl/cons` (`cons_rx_counters` / `cons_tx_drops`).
 
 ### The one-shot report
 
@@ -693,8 +700,16 @@ relay -- the drop sites run in IRQ context under `g_cons.lock` and must not
 emit themselves):
 
 ```
-cons: INPUT DROP (#95) raw=0 flush=3 line=0 -- further drops counted silently at /ctl/cons
+cons: INPUT DROP (#95) line=3 ring=0 (bp raw=0 flush=12) -- further drops counted silently at /ctl/cons
 ```
+
+**Only a real loss arms the latch (#129).** The two back-pressure counters ride
+along as context -- they say how hard the console was being pushed when the loss
+happened -- but they never trigger the report. Back-pressure is normal operation
+on a busy console, so reporting it would be a false alarm AND would *spend* the
+one-shot latch, leaving a genuine loss later in the same boot silent. That is
+the #95 lesson applied to the fix itself: an instrument disarmed by routine
+events is disarmed exactly when it matters.
 
 `drop_reported` then latches it off for the life of the boot: a pathological
 drop storm must not become a diagnostic storm that costs more than the events
@@ -703,8 +718,8 @@ it reports (the #126 lesson).
 ### Why the report is gated on `boot_is_complete()`
 
 The kernel test suite deliberately overflows this ring --
-`cons.ring_overflow_drop` pushes 266 bytes into 256, and
-`cons.rx_drop_counters` drives all three sites on purpose. Ungated, every boot
+`cons.ring_full_refuses` pushes 522 bytes into 512, and
+`cons.rx_drop_counters` drives every site on purpose. Ungated, every boot
 would print an alarming INPUT DROP line during the test phase and, far worse,
 the test would **spend the one-shot latch**, so a real drop later in the same
 boot would print nothing: the instrument disarmed by its own test. Kernel tests
@@ -714,13 +729,20 @@ that matters. Counting is unconditional.
 
 ### What this does NOT establish
 
-The counters are an instrument, not a fix, and not a diagnosis. Note in
-particular that `rx_drop_flush` loses the **tail** of the line and then the
-newline, so a short flush means the line never executes at all -- which is why
-that site cannot by itself explain #95's shape (interior byte lost, terminator
-delivered, command ran). The raw arm's per-byte push against a concurrently
-draining reader is the only one of the three whose shape matches. The counters
-exist to settle which -- or none -- on the next occurrence.
+The counters are an instrument, not a diagnosis. #95 remains **unexplained**.
+
+What #129 changed is that two of the three candidate sites can no longer lose a
+byte at all, which *narrows* #95 rather than settling it. The flush site never
+matched #95's shape anyway: it lost the **tail** of the line and then the
+newline, so a short flush meant the line never executed -- whereas #95 showed an
+interior byte lost with the terminator delivered and the command running. The
+raw arm's per-byte push against a concurrently draining reader was the only
+shape that matched, and it is now back-pressured on both producers.
+
+So a recurrence of #95 after #129 would be evidence that the cause was never in
+this layer. The `rx_bp_*` counters are what make that reading possible: they
+say the site was *live* (exercised and handled) rather than merely untouched,
+which a drop counter reading zero never could.
 
 ## Error paths
 
@@ -755,10 +777,20 @@ exist to settle which -- or none -- on the next occurrence.
   Enter; without ICRNL a CR is buffered as an ordinary char (it does NOT
   terminate the line). Cooked consumers (login) set `ICANON|ECHO|ISIG|ICRNL`
   (+`ONLCR` for a clean line break on echo) — the Unix cooked-mode convention.
-- **A line filling the entire ring drops its terminating NL.** `CONS_LINE_MAX`
-  == `CONS_RING_SIZE` (256), so a 256-char line + NL = 257 bytes; the 256 chars
-  fill the ring and the NL is dropped (bounded, never corrupting). A real line is
-  far shorter; this is the pathological edge (`cons.cook_line_overflow`).
+- **~~A line filling the entire ring drops its terminating NL.~~ CLOSED by #129.**
+  This was the deeper half of #129 and it is worth keeping visible, because the
+  obvious fix makes it worse. `CONS_LINE_MAX` was == `CONS_RING_SIZE` (both 256),
+  so a maximal line + NL = 257 bytes did not fit the ring **even when empty** --
+  the 256 chars filled it and the NL was dropped, silently turning a command into
+  a different, shorter, unterminated one. The natural admission gate
+  (`count + line_len + 1 <= CONS_RING_SIZE`) is correct in form but with those
+  sizes refuses 257 into 256 *forever*: RX pauses permanently and the console
+  wedges — a bounded drop traded for a deadlock. The gate is only sound once the
+  ring can hold what it is asked to reserve, so `CONS_RING_SIZE` is now 512 with
+  a `_Static_assert(CONS_LINE_MAX + 1 <= CONS_RING_SIZE)` tying the two together.
+  Regression `cons.full_line_fits_ring` (fails on the old size in one direction
+  and on the naive gate in the other); the static assert fails the **build** if
+  either constant moves back.
 - **`/dev/consctl` open is I-27 console-attach-gated; its I/O is NOT (since #94-B).**
   The session-leader that controls termios is the **non-attached** login (it reads
   the console via an inherited `SYS_CONSOLE_OPEN` fd; it cannot open the gated
@@ -828,17 +860,78 @@ exist to settle which -- or none -- on the next occurrence.
   the single-reader guard means at most one pump runs. Predicate verified by
   `cons.rx_can_accept_boundary`; the end-to-end no-loss/no-wedge by an
   instantaneous-flood repro (`tools/interactive/flood-174.exp`).
-  - **Scope of "no loss" (#174-audit F1).** `cons_rx_can_accept()` gates on the
-    **ring**, so the no-loss guarantee covers the raw path. In **canonical**
-    (cooked) mode an ordinary input byte is routed to the line buffer
-    `g_cons.line[]` (`CONS_LINE_MAX`), not the ring — so a single line longer than
-    `CONS_LINE_MAX` still **truncates** (the LS-8b bound; the byte is read from the
-    FIFO and dropped at the line-buffer-full check, not held by backpressure).
-    Extending backpressure to the cooked line buffer is deliberately NOT done: it
-    would strand the line's terminating Enter behind a full buffer (the Enter
-    could never terminate the line). A 256-char single line is pathological for
-    interactive cooked input (login reads short username/passphrase lines); the
-    raw-path flood is the real loss vector and is the one #174 closes.
+  - **Scope of "no loss" (#174-audit F1, WIDENED by #129).** `cons_rx_can_accept()`
+    gates on the **ring**. #174's guarantee covered the raw path only; #129
+    extended it to the cooked Enter-flush and to the second producer, so the
+    remaining loss site is exactly one:
+    - In **canonical** mode an ordinary input byte is routed to the line buffer
+      `g_cons.line[]` (`CONS_LINE_MAX`), not the ring — so a single line longer
+      than `CONS_LINE_MAX` still **truncates** (the LS-8b bound; the byte is read
+      from the FIFO and dropped at the line-buffer-full check, `rx_drop_line`).
+      Extending backpressure here is deliberately NOT done, and the reason is
+      structural rather than a cost tradeoff: it would strand the line's
+      terminating Enter behind a full buffer, so the Enter could never terminate
+      the line and free it. A 256-char single line is pathological for
+      interactive cooked input (login reads short username/passphrase lines).
+    - The **Enter-flush** is no longer a loss site (#129). It is checked as a
+      unit under `g_cons.lock` and refused whole, leaving the assembled line
+      intact for the retry — see `rx_bp_flush`.
+    - **`cons_feed_write` is no longer ungated (#129).** It was the one producer
+      #174 never covered: the G-4 renderer's entire keyboard, returning `n`
+      unconditionally while the ring dropped the overflow. The serial console had
+      back-pressure; the framebuffer console had a lie. It now returns a SHORT
+      count, which is the ordinary POSIX answer and needs no new ABI.
+  - **The refusal is side-effect-free, and that is the load-bearing property
+    (#129).** `cons_rx_input` returns `false` only after changing *nothing* — no
+    ring push, no `line_len` mutation, no echo, no flag — so the producer still
+    owns the byte and re-offers the identical one. Echo moved inside the accepted
+    branch for the same reason: echoing a refused byte would show the user a
+    character the console did not take, then show it twice on the retry.
+  - **The pre-check is an optimization; the guarantee is under the lock (#129).**
+    `cons_rx_can_accept()` is lockless and now reserves `CONS_LINE_MAX + 1`
+    unconditionally — it consults neither `termios` nor `line_len`, both of which
+    another producer can change under it. Reading `line_len` there would re-open
+    the hole (a stale-low value admits a byte whose flush then overruns); gating
+    on the *current* mode is unsound too, since a byte admitted under a raw check
+    can meet a cooked flush. The exact check lives in `cons_rx_input` under
+    `g_cons.lock`, atomically with the push, which is the only construction that
+    is airtight against two independent producers.
+  - **The pause is PUBLISHED then RE-OBSERVED (#129-audit F1).** Masking RX and
+    latching `g_rx_paused` is a check-then-act, and the observer on the other
+    side is lockless: `uart_rx_pump`'s fast path reads the flag *without*
+    `g_uart_rx_lock` and returns on false. So a reader that drained between the
+    room check and the store saw `false`, did nothing, and then parked on an
+    empty ring — while the pauser went on to mask RX. The terminal state is
+    fatal rather than slow: RX masked gates off `uart_irq_handler`'s RX arm,
+    `uart_rx_pump`'s ONLY caller is `cons_input_read` (the thread now parked),
+    and on a serial-only console `cons_feed_write` does not exist — so no
+    producer remains to make `cons_data_ready` true. The console is dead until
+    reboot, and with RX masked the PL011 never raises `DR.BE` again, putting the
+    **I-27 SAK out of reach too**. `uart_rx_pause_and_recheck` re-observes after
+    publishing and lifts the pause if room appeared; the retry is budget-bounded
+    so a flip-flopping peer producer cannot livelock the drain. The shape was
+    pre-existing in the #174 gate arm — #129 replicated it at the holdback and
+    then claimed the loss window was *closed*, which is what made it load-bearing
+    to fix rather than inherit.
+  - **Recovery distance grew with the ring (#129-audit F7).** `cons_rx_can_accept`
+    trips at the same absolute threshold as before (`count > 255`), so usable
+    depth before pausing is unchanged at 255. The *recovery* distance is not:
+    pre-#129 a pause meant `count == 256 == CONS_RING_SIZE` and one byte read
+    re-opened the gate, whereas `count` can now reach 512 (a cooked flush of 257
+    from `count == 255`), and the gate re-opens only at `count <= 255`. A reader
+    draining one byte at a time therefore needs up to 257 reads before RX
+    unmasks — so a BREAK queued behind a pause waits longer. Bounded and
+    reader-driven (not a hang), and every real reader drains in bulk, but it is a
+    quantitative weakening of an already-imperfect I-27 property. A low-water
+    resume mark would close it if it ever matters.
+  - **The 1-byte RX holdback (#129).** Because the pre-check is lockless, a peer
+    producer can take the room between the check and the push, and by then the
+    byte is already out of `PL011 DR` and cannot be put back — the one way #174's
+    "leave it in the FIFO" guarantee can be escaped. `uart_rx_drain_locked` parks
+    such a byte in `g_rx_held_*` (under `g_uart_rx_lock`, like `g_rx_paused`),
+    pauses, and re-offers it **before** touching the FIFO again so ordering is
+    preserved. Without it the fix would merely narrow the loss window instead of
+    closing it — and it would go on being invisible in the way #95 was.
   - **RX resume is gated on the console reader (#174-audit F3).** `uart_rx_pump`
     runs only from `cons_input_read`, so a paused RX resumes only when *some* Proc
     re-enters the console read. A console holder that stops reading (e.g. a
