@@ -558,6 +558,8 @@ A top-level `Makefile` provides `make kernel`, `make all`, `make test`, `make pr
 
 **Gates.** `make smp-gate` (`tools/ci-smp-gate.sh`) multi-boots the SMP soundness matrix (single boots lie). `make idle-gate` (`tools/ci-idle-gate.sh`) boots hvf-headless, settles, and FAILS if the guest spins a core at idle (mean qemu %cpu over a no-core-pegged threshold) — the standing guard against a boot leaving a busy-loop running (e.g. a leaked debug fixture); host-load-robust because host contention can only *deflate* qemu's %cpu, never inflate an idle guest's. `make test-interactive` (`tools/test-interactive.sh`) drives a real PTY console (login + rendered output).
 
+**A background gate that dies with `Terminated: 15` (#128).** A long gate run as an agent background task can be stopped by the AGENT HARNESS itself — not by the guest, not by the sibling tree, not by any timeout. The 2026-08 forensics: kills at 41 s..5141 s elapsed with clean runs at 1905 s, no explicit stop call, the CLI process alive throughout, the machine awake, and five instants where BOTH trees' sessions lost their tasks within ~300 ms — a host-global session-management event, correlated with user-idle windows. Attribute a dead task from its completion NOTIFICATION, not from the log (the bash `Terminated: 15` line is identical either way): `killed` / "was stopped" = the harness stopped it — INFRA, the run says NOTHING about the guest, just re-run it; `failed` / "exit code 143" = a real external SIGTERM reached the process — a killer exists, investigate. Group-sizing does not protect (kills land at arbitrary elapsed); attribution + re-run is the mitigation.
+
 ### The production boot shape (`--production`, #61)
 
 By default every build is the **dev/CI shape**: the in-kernel test suite is
