@@ -57,13 +57,13 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**224 owned · 197 unowned · 421 files (53% owned) · ~67158 unswept lines.**
+**236 owned · 185 unowned · 421 files (56% owned) · ~63128 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/lib | 3 | 38 | 16643 |
+| usr/lib | 15 | 26 | 12613 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
 | usr/corvus | 0 | 1 | 4245 |
@@ -108,7 +108,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/corvus/src/main.rs | 4245 |
 | usr/diorama/src/server.rs | 2803 |
 | usr/nora/src/view.rs | 2043 |
-| usr/lib/kaua/src/widget.rs | 1370 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
@@ -124,7 +123,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/virtio-net-loop/src/main.rs | 874 |
 | usr/virtio-input/src/main.rs | 825 |
 | usr/aurora/src/main.rs | 804 |
-| usr/lib/kaua/src/input.rs | 798 |
 | usr/lib/tls/src/lib.rs | 795 |
 | usr/warden/src/main.rs | 784 |
 | usr/net-echo/src/main.rs | 774 |
@@ -150,7 +148,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/sntp/src/main.rs | 394 |
 | usr/prowl/src/sample.rs | 393 |
 | usr/prowl/src/ui.rs | 370 |
-| usr/lib/kaua/src/query.rs | 366 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/lib/parley/src/frame.rs | 336 |
 | usr/httpd/src/main.rs | 335 |
@@ -161,7 +158,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/loom-stress/src/main.rs | 303 |
 | usr/pouch-hello/pouch-hello-fs.c | 297 |
 | kernel/fault_test.c | 295 |
-| usr/lib/kaua/src/encode.rs | 294 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 290 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | usr/pouch-hello/pouch-hello.c | 278 |
@@ -190,17 +186,13 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/cut.rs | 215 |
 | usr/lib/cornucopia/src/lib.rs | 211 |
 | kernel/include/thylacine/errno.h | 209 |
-| usr/lib/kaua/src/buffer.rs | 209 |
 | kernel/include/thylacine/devcap.h | 208 |
 | usr/lib/parley/src/transport.rs | 205 |
-| usr/lib/kaua/src/term.rs | 201 |
 | usr/coreutils/src/bin/head.rs | 198 |
 | usr/virtio-mmio-source/src/main.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/lib/kaua/src/source.rs | 190 |
 | usr/coreutils/src/bin/netstat.rs | 188 |
 | usr/coreutils/src/bin/tail.rs | 188 |
-| usr/lib/kaua/src/layout.rs | 187 |
 | kernel/include/thylacine/spinlock.h | 185 |
 | usr/lib/libdriver/src/readyline.rs | 185 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
@@ -221,7 +213,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/curl/src/bin/wget.rs | 153 |
 | kernel/cpio.c | 152 |
 | usr/coreutils/src/bin/qid.rs | 150 |
-| usr/lib/kaua/src/event.rs | 150 |
 | usr/coreutils/src/bin/con.rs | 148 |
 | usr/pouch-hello/pouch-hello-signals.c | 148 |
 | usr/coreutils/src/bin/rm.rs | 144 |
@@ -239,7 +230,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/sdl2/thylacine/thyla_tap.h | 119 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
-| usr/lib/kaua/src/style.rs | 117 |
 | usr/coreutils/src/bin/nslookup.rs | 116 |
 | usr/coreutils/src/bin/aurora-push.rs | 113 |
 | kernel/canary.c | 111 |
@@ -251,7 +241,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/libdriver/src/lib.rs | 96 |
 | usr/coreutils/src/bin/sleep.rs | 95 |
 | usr/coreutils/src/bin/date.rs | 93 |
-| usr/lib/kaua/src/rect.rs | 93 |
 | kernel/include/thylacine/9p_transport_loopback.h | 92 |
 | usr/coreutils/src/color.rs | 92 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
@@ -279,7 +268,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel/include/thylacine/joey.h | 59 |
 | usr/coreutils/src/bin/rmdir.rs | 58 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
-| usr/lib/kaua/src/lib.rs | 55 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | kernel/include/thylacine/canary.h | 50 |
 | kernel/extinction.c | 48 |

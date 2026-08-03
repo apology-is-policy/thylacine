@@ -50,6 +50,9 @@ visible. In particular, two failure modes are worth not conflating:
 - [[sub-utopia-interactive]] — bytes to a line and back to a screen: the editor
   state machine, the fd-agnostic REPL, and the startup order in which a shell
   must become self-managing *before* it becomes a signal target.
+- [[sub-kaua]] — the substrate a full-screen app paints on: a cell diff, a total
+  VT parser, and a capability story preserved by omission (fd 0 and fd 1, never
+  the line discipline). The other half of the raw-mode handoff `ut` performs.
 
 ## Cross-cutting
 
