@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -218,6 +219,11 @@ const absorbedMarker = "ABSORBED INTO THE VAULT"
 
 var vaultPathRe = regexp.MustCompile(`vault/(?:[A-Za-z0-9_.-]+/)*([A-Za-z0-9_.-]+)\.md`)
 
+// srcRe: what counts as a source file for the coverage census. Deliberately
+// the implementation languages only — a .py or .sh under tools/ is substrate
+// and is swept as harness prose, not as an owned translation unit.
+var srcRe = regexp.MustCompile(`^(?:kernel|arch|mm|usr)/.*\.(?:c|h|S|rs)$`)
+
 // vaultRoot recovers the repo root from any note: a Note carries both an
 // absolute Path and the repo-relative Rel, so the root is the difference.
 // Renderers take only a Registry, and this is the one that needs to look
@@ -374,6 +380,182 @@ func renderSpecCoverage(reg *Registry) string {
 	return strings.Join(out, "\n")
 }
 
+// isHarness: a program whose purpose is to exercise the system rather than to
+// be part of it. Swept as harness prose (see the substrate dossiers), for the
+// same reason tools/ is — so it is counted and named here, never silently
+// dropped, because a census that quietly narrows its own denominator is the
+// failure this view exists to prevent.
+func isHarness(p string) bool {
+	if !strings.HasPrefix(p, "usr/") {
+		return false
+	}
+	name := p[4:]
+	if i := strings.Index(name, "/"); i >= 0 {
+		name = name[:i]
+	}
+	for _, suf := range []string{"-probe", "-smoke", "-test", "-bench", "-torture"} {
+		if strings.HasSuffix(name, suf) {
+			return true
+		}
+	}
+	switch name {
+	case "hello", "hello-rs", "u-test", "cpubench", "netperf", "fsbench",
+		"tlsperf", "nettest", "pipe-src", "pipe-sink", "debug-child",
+		"stack-child", "parley-echo", "hwbp-verify", "jit-prover",
+		"coreutil-smoke", "tapestry-battery", "tapestry-demo", "legate-prover":
+		return true
+	}
+	return false
+}
+
+// sweepArea buckets a source path into the area whose sweep would own it.
+// Coarse on purpose: the point is to say where the remaining work is, not to
+// mirror the MOC tree, which is the thing this view exists to distrust.
+func sweepArea(p string) string {
+	switch {
+	case strings.HasPrefix(p, "arch/"):
+		return "arch"
+	case strings.HasPrefix(p, "mm/"):
+		return "mm"
+	case strings.HasPrefix(p, "usr/lib/libthyla-rs/"):
+		return "usr/libthyla-rs"
+	case strings.HasPrefix(p, "usr/lib/"):
+		return "usr/lib"
+	case strings.HasPrefix(p, "usr/"):
+		if i := strings.Index(p[4:], "/"); i >= 0 {
+			return "usr/" + p[4:4+i]
+		}
+		return "usr"
+	}
+	return "kernel"
+}
+
+// renderCodeCoverage: which source files an existing dossier claims, and which
+// none does.
+//
+// The third view reading outside the vault, and it exists because the sweep
+// ledger repeated the absorption ledger's failure one level down. Completeness
+// was declared by walking the area MOCs — every area has children, therefore
+// the sweep is done — when the question was whether every FILE has an owner.
+// It did not, by 26 files and ~9.5k lines, including the page tables, the fault
+// dispatcher, note delivery and exec. The claim's subject was narrower than the
+// claim, which is the defect this arc keeps finding in other people's work.
+//
+// Ownership is `code:` on a `sub` note and nothing else. Prose mention does not
+// count: a dossier that discusses a neighbour's file has not swept it, and
+// treating a mention as coverage is how the first ledger rotted.
+//
+// What it does NOT check: whether a dossier that claims a file covers it WELL,
+// or still covers it after the file changes. Staleness is a separate computable
+// property and is not computed yet (task #38).
+func renderCodeCoverage(reg *Registry) string {
+	root := vaultRoot(reg)
+	if root == "" {
+		return "**(registry empty — cannot locate the repo root.)**"
+	}
+	owner := map[string][]string{}
+	for _, n := range reg.OfType("sub") {
+		for _, c := range n.Front.ListOr("code") {
+			c = strings.TrimSpace(c)
+			if c != "" {
+				owner[c] = append(owner[c], n.ID)
+			}
+		}
+	}
+	cmd := exec.Command("git", "-C", root, "ls-files")
+	b, err := cmd.Output()
+	if err != nil {
+		return "**(git ls-files failed — cannot census the tree.)**"
+	}
+	lines := func(p string) int {
+		fb, ferr := os.ReadFile(filepath.Join(root, p))
+		if ferr != nil {
+			return 0
+		}
+		return len(strings.Split(strings.TrimRight(string(fb), "\n"), "\n"))
+	}
+	type area struct{ owned, unowned, unsweptLines int }
+	areas := map[string]*area{}
+	type row struct {
+		path  string
+		lines int
+	}
+	var un []row
+	var harnessFiles, harnessLines int
+	for _, p := range strings.Fields(string(b)) {
+		if !srcRe.MatchString(p) || strings.Contains(p, "/test") ||
+			strings.HasPrefix(p, "usr/apps/") || strings.Contains(p, "/vendor/") {
+			continue
+		}
+		if isHarness(p) {
+			harnessFiles++
+			harnessLines += lines(p)
+			continue
+		}
+		a := sweepArea(p)
+		if areas[a] == nil {
+			areas[a] = &area{}
+		}
+		if len(owner[p]) > 0 {
+			areas[a].owned++
+			continue
+		}
+		areas[a].unowned++
+		nl := lines(p)
+		areas[a].unsweptLines += nl
+		un = append(un, row{p, nl})
+	}
+	var names []string
+	var to, tu, tl int
+	for k, v := range areas {
+		names = append(names, k)
+		to += v.owned
+		tu += v.unowned
+		tl += v.unsweptLines
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if areas[names[i]].unsweptLines != areas[names[j]].unsweptLines {
+			return areas[names[i]].unsweptLines > areas[names[j]].unsweptLines
+		}
+		return names[i] < names[j]
+	})
+	sort.Slice(un, func(i, j int) bool {
+		if un[i].lines != un[j].lines {
+			return un[i].lines > un[j].lines
+		}
+		return un[i].path < un[j].path
+	})
+
+	pct := 0
+	if to+tu > 0 {
+		pct = to * 100 / (to + tu)
+	}
+	out := []string{
+		fmt.Sprintf("**%d owned · %d unowned · %d files (%d%% owned) · ~%d unswept lines.**",
+			to, tu, to+tu, pct, tl),
+		"",
+		fmt.Sprintf("Excluded as harness and counted here rather than dropped: **%d files, ~%d lines** "+
+			"(probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to "+
+			"exercise the system, swept as harness prose like `tools/`).", harnessFiles, harnessLines),
+		"",
+		"| area | owned | unowned | unswept lines |",
+		"|---|---:|---:|---:|",
+	}
+	for _, k := range names {
+		v := areas[k]
+		out = append(out, fmt.Sprintf("| %s | %d | %d | %d |", k, v.owned, v.unowned, v.unsweptLines))
+	}
+	out = append(out, "", "### Unowned, largest first", "",
+		"| file | lines |", "|---|---:|")
+	for _, r := range un {
+		out = append(out, fmt.Sprintf("| %s | %d |", r.path, r.lines))
+	}
+	if len(un) == 0 {
+		out = append(out, "| (none) | |")
+	}
+	return strings.Join(out, "\n")
+}
+
 var renderers = map[string]func(*Registry) string{
 	"dashboard":      renderDashboard,
 	"invariants":     renderInvariants,
@@ -382,6 +564,7 @@ var renderers = map[string]func(*Registry) string{
 	"roadmap":        renderRoadmap,
 	"absorption":     renderAbsorption,
 	"spec-coverage":  renderSpecCoverage,
+	"code-coverage":  renderCodeCoverage,
 }
 
 func viewNotes(reg *Registry) []*Note { return reg.OfType("view") }

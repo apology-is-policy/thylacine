@@ -35,14 +35,15 @@ chunks:
   - chg-2026-08-02-spec-notes
   - chg-2026-08-02-struct-registries
   - chg-2026-08-02-server-sweeps
+  - chg-2026-08-03-coverage-reconciliation
 follow-ons: []
 exit-criteria:
   - "[x] Pilot: the 9P client end-to-end across all planes"
-  - "[x] Sweep by subsystem -- COMPLETE at batch 27: every kernel subsystem and every usr/ service now has a dossier (ptyfs + tapestryd were the last two). Absorption of the swept documents is the SEPARATE pass below (46/147 absorbed -- see view-absorption)"
+  - "[ ] Sweep by subsystem -- 31% of source files owned (see view-code-coverage). Batch 27 declared this COMPLETE and was WRONG: completeness was read off the area MOCs (every area has children) instead of censused over files (every file has an owner), so mmu/fault/vma, notes, exec/elf/image, pts, spoor/dev, halls/hwdebug and nearly all of userspace were counted as swept while having no dossier and, for several, no mention in any note. Corrected at batch 28; the real remaining work is tasks #50-#57. The KERNEL is 67% owned, userspace outside the four services is near zero"
   - "[ ] Registry passes -- a PREREQUISITE for absorption, not a successor to it: a table-bearing document cannot be replaced until its tables have a note to live in. THREE kinds, not one: (a) the enumerated-value registries [DONE: errno, caps, handle-rights, note-names]; (b) the STRUCT + WIRE layouts [DONE: t_stat + its SEVEN mirrors (CLAUDE.md's list named six), the Loom ring, the 9P message-type space -- unblocking 107-loom.md and the t_stat-bearing docs]; (c) the spec notes [6 of 6 DONE: burrow, asid, handles, debug-step, then pty + tapestry_present at batch 27 once their servers were read -- a spec note whose action-site map points at unread code is a hollow record, and reading them is what surfaced the CookData scope gap]"
-  - "[ ] Absorb the twelve documents whose prose is swept and whose tables await a registry"
+  - "[ ] Absorb the documents whose replacement notes exist -- the candidate set is now computable (a document is absorbable when every file it documents is owned; see view-code-coverage x view-absorption), which is what batch 23's manual coverage read was standing in for. Roughly a dozen qualify today"
   - "[ ] Sweep the three orphaned files (task #32) and delete the over-claim notices"
-  - "[ ] View cutover (CLAUDE.md shrinks to constitution + pointers)"
+  - "[ ] View cutover (CLAUDE.md shrinks to constitution + pointers) -- GATED on the sweep, not merely on absorption: pointing the operating loop at the vault while a third of the tree has no dossier would replace a stale reference with an absent one"
   - "[x] Session hooks wired in .claude/settings.json (tier 3)"
   - "[ ] Stub deletion after the full-corpus verification chg"
 created: 2026-07-31

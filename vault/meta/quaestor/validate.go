@@ -6,6 +6,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -252,6 +254,65 @@ func validate(reg *Registry, preErrors []string) (fails, warns []string) {
 		}
 	}
 	return fails, warns
+}
+
+// checkCodePaths: every path a dossier claims in `code:` must exist.
+//
+// A `code:` entry is the ownership assertion the coverage ledger counts, and it
+// is resolvable, so it gets checked — the rule this arc arrived at after
+// finding that `models:` (resolvable, checked) and `mirrors:` (free text, not)
+// diverged for no better reason than what was cheap. It catches a fabricated
+// path and, far more usefully, a path that rots when the file is renamed or
+// deleted, which would otherwise leave a dossier owning nothing while the
+// ledger still counted it.
+//
+// It does NOT catch a dossier claiming a real file it never swept. Nothing
+// mechanical does; that is what reading is for.
+//
+// A `<repo>: path` entry names a file in a sibling tree (Stratum is in scope
+// for this project and four dossiers cover it). Those are checked too when the
+// sibling is on disk, and skipped when it is not — the check degrades rather
+// than failing a vault that is merely checked out alone.
+func checkCodePaths(reg *Registry) []string {
+	root := vaultRoot(reg)
+	if root == "" {
+		return nil
+	}
+	// Siblings of the repo root: .../projects/thylacine-vault -> .../projects
+	parent := filepath.Dir(filepath.Clean(root))
+	siblings := map[string]string{
+		"stratum": filepath.Join(parent, "stratum", "v2"),
+	}
+	var fails []string
+	for _, n := range reg.OfType("sub") {
+		for _, c := range n.Front.ListOr("code") {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			base, rel := root, c
+			if i := strings.Index(c, ":"); i > 0 {
+				repo := strings.TrimSpace(c[:i])
+				sib, known := siblings[repo]
+				if !known {
+					fails = append(fails, fmt.Sprintf(
+						"%s: code -> unknown sibling repo '%s' in '%s'",
+						n.Rel, repo, c))
+					continue
+				}
+				if _, err := os.Stat(sib); err != nil {
+					continue // sibling not checked out; nothing to verify against
+				}
+				base, rel = sib, strings.TrimSpace(c[i+1:])
+			}
+			if _, err := os.Stat(filepath.Join(base, rel)); err != nil {
+				fails = append(fails, fmt.Sprintf(
+					"%s: code -> no such file '%s'", n.Rel, c))
+			}
+		}
+	}
+	sort.Strings(fails)
+	return fails
 }
 
 func validateSub(n *Note, fails, warns *[]string) {
