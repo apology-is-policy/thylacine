@@ -57,23 +57,23 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**261 owned · 160 unowned · 421 files (61% owned) · ~45793 unswept lines.**
+**265 owned · 156 unowned · 421 files (62% owned) · ~44264 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/coreutils | 0 | 60 | 8763 |
-| usr/lib | 27 | 14 | 6427 |
+| usr/lib | 31 | 10 | 4797 |
 | usr/corvus | 0 | 1 | 4245 |
-| usr/aurora | 0 | 5 | 3515 |
+| usr/aurora | 0 | 5 | 3545 |
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
 | usr/ports | 0 | 10 | 2865 |
 | kernel | 110 | 22 | 2863 |
 | usr/prowl | 0 | 3 | 1253 |
+| arch | 34 | 4 | 971 |
 | usr/virtio-gpu | 0 | 1 | 955 |
-| arch | 34 | 4 | 900 |
 | usr/virtio-blk-rw | 0 | 1 | 885 |
 | usr/virtio-net-loop | 0 | 1 | 874 |
 | usr/virtio-input | 0 | 1 | 825 |
@@ -109,8 +109,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
-| usr/aurora/src/main.rs | 1008 |
-| usr/lib/libdriver/src/source.rs | 960 |
+| usr/aurora/src/main.rs | 1038 |
 | usr/virtio-gpu/src/main.rs | 955 |
 | usr/virtio-blk-rw/src/main.rs | 885 |
 | usr/virtio-net-loop/src/main.rs | 874 |
@@ -121,8 +120,8 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/virtio-net-arp/src/main.rs | 710 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
 | usr/lib/netdev/src/virtio_pci.rs | 677 |
+| arch/arm64/uart.c | 674 |
 | usr/lib/netdev/src/virtio.rs | 627 |
-| arch/arm64/uart.c | 603 |
 | usr/aurora/src/osd.rs | 522 |
 | usr/aurora/src/render.rs | 500 |
 | usr/prowl/src/main.rs | 490 |
@@ -151,10 +150,8 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/tr.rs | 268 |
 | usr/coreutils/src/bin/cat.rs | 264 |
 | usr/coreutils/src/bin/pelt.rs | 254 |
-| usr/lib/libdriver/src/supervise.rs | 251 |
 | usr/lib/netdev/src/ring.rs | 244 |
 | usr/ptyhost/src/main.rs | 236 |
-| usr/lib/libdriver/src/dtb.rs | 234 |
 | kernel/include/thylacine/smp.h | 233 |
 | usr/coreutils/src/bin/ns.rs | 233 |
 | usr/coreutils/src/bin/cp.rs | 230 |
@@ -174,7 +171,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/netstat.rs | 188 |
 | usr/coreutils/src/bin/tail.rs | 188 |
 | kernel/include/thylacine/spinlock.h | 185 |
-| usr/lib/libdriver/src/readyline.rs | 185 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/coreutils/src/bin/ipconfig.rs | 178 |
 | usr/coreutils/src/bin/dial.rs | 177 |

@@ -3,7 +3,7 @@ id: inv-i34
 type: inv
 title: "I-34 — a driver's hardware authority is exactly what it was granted, and no more"
 number: I-34
-guards: [sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery, sub-libdriver-grant]
+guards: [sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery, sub-libdriver-grant, sub-libdriver-discovery]
 validated-by: [spec-allowance, prose, gate-smp]
 strength: spec
 created: 2026-08-02
@@ -80,6 +80,18 @@ allowance, for which that check passes unconditionally. So the check is not
 merely silent about the fourth leg; it is **vacuous for exactly the Proc whose
 computation the leg depends on**. One userspace function establishes the whole
 correspondence, and nothing beneath it re-derives the answer.
+
+**The correspondence is created one layer earlier still**, in
+[[sub-libdriver-discovery]]: the grant is only as sound as the device node it
+intersects with, and a node's *identity* can arrive from a sandboxed,
+non-TCB bus source over a pipe. That source is trusted to identify a slot and
+never to describe one — the supervisor rebuilds every resource from its own
+trusted view, so a hostile source can mis-identify a real slot but can never
+fabricate an address, inflate a window or invent an interrupt. The residual
+(the wrong driver bound to a real device) is caught at the far end by the
+driver's own register re-read, which converts an authority failure into an
+availability one. Userspace therefore holds the fourth leg in two places: where
+the correspondence is *established*, and where the grant is *computed* from it.
 
 ## Validation
 

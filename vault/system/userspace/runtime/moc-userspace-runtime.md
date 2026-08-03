@@ -24,20 +24,23 @@ state and nothing else — which is why those dossiers are `audit: light` where
 their kernel counterparts are `audit: hard`, and why their invariant sections
 say *composes with* rather than *enforces*.
 
-### The exception: a library that COMPUTES an authority
+### The exception: the two libraries that COMPUTE an authority
 
-[[sub-libdriver-grant]] is not client code over a validated ABI. It computes
-the hardware allowance the kernel will then enforce, and the kernel **never
-re-derives it**. The I-34 machinery checks a conferred allowance against the
-*conferrer's* own — and the Proc that computes grants, the warden, holds a
-BROAD allowance for which that check passes unconditionally. So the kernel
-faithfully enforces whatever it is handed, and never asks whether that
+The driver framework's two halves are not client code over a validated ABI.
+Between them they decide *which device a driver is* and *what it may touch*, and
+the kernel **never re-derives either**. The I-34 machinery checks a conferred
+allowance against the *conferrer's* own — and the Proc that computes grants, the
+warden, holds a BROAD allowance for which that check passes unconditionally. So
+the kernel faithfully enforces whatever it is handed, and never asks whether that
 allowance describes the driver's own device. It cannot: it does not know which
 node the bind chose.
 
-That leaves one function in this area as the sole establishment of a real
-invariant's correspondence half, where a defect moves a hardware boundary
-rather than corrupting a caller. It files `audit: hard`.
+[[sub-libdriver-grant]] is where the grant is computed; [[sub-libdriver-discovery]]
+is where the correspondence it rests on is *created* — and the latter additionally
+holds a real containment against a non-TCB reporter, since a sandboxed bus source
+pipes device identities in from outside the trust boundary. Both file
+`audit: hard`: a defect in either moves a hardware boundary rather than corrupting
+a caller.
 
 The generalization worth carrying past this area: **the "not a privilege
 boundary" argument holds for a library that only ever asks, and fails for one
@@ -66,6 +69,11 @@ Both are quiet in the same way — but here the thing going wrong quietly is the
 computation of an authority, so the honest reading is "fail-closed in
 direction", not "harmless".
 
+The discovery half's findings are quieter still, and one of them is about the
+*evidence* rather than the code: the bind matcher's whole complexity implements a
+property none of its tests can observe. That is the failure mode this area keeps
+producing, one level up — not a claim that is wrong, but a claim nothing checks.
+
 ## Children
 
 - [[sub-libthyla-rs]] — the runtime proper: the prologue that runs before
@@ -78,6 +86,11 @@ direction", not "harmless".
   grant computed once and consumed twice — the descriptor informs, the
   allowance authorizes — and the two deliberately disagree by exactly one page.
   The area's exception above.
+- [[sub-libdriver-discovery]] — the framework's other half: where a device node
+  comes from, how a driver signals it is up, and what happens when one dies.
+  Identity flows up from a source that may be lying, resources flow down from a
+  view that cannot be, and the driver believes neither until it reads the
+  register. Also the area's exception.
 
 ## Cross-cutting
 
