@@ -75,6 +75,7 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_SRCH`      | 3     | `ESRCH`      | No such process (a pid-addressed op names no live Proc; the PTY-1 `setpgid`/`getsid` contour) |
 | `T_E_IO`        | 5     | `EIO`        | I/O error (storage, device, network) |
 | `T_E_BADF`      | 9     | `EBADF`      | Bad handle / fd |
+| `T_E_CHILD`     | 10    | `ECHILD`     | No child processes — a wait names no matching child. The termination condition of every reap loop, which is why the near-miss answers will not do: a bare `-1` reads to a Linux guest as `EPERM`, the #100 class of wrong answer. Appended for the LINEAGE L-6b `wait4` row. `wait_pid_for`'s two `-1` conditions (no matching child; a #811 death-interrupted sleep) both map here — sound because the death path returns through the sync-from-EL0 tail, where `el0_return_die_check` is noreturn on the die branch, so no observer can tell them apart |
 | `T_E_AGAIN`     | 11    | `EAGAIN`     | Resource temporarily unavailable (queue full; would block) |
 | `T_E_NOMEM`     | 12    | `ENOMEM`     | Out of memory |
 | `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation) |

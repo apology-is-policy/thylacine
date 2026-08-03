@@ -129,6 +129,12 @@ const NR_PSELECT6: u64 = 72;
 // BYTE, from `arch/aarch64/bits/signal.h`.
 const NR_CLONE: u64 = 220;
 const NR_EXECVE: u64 = 221;
+// Reaping (LINEAGE L-6b). The option bits are musl's `include/sys/wait.h`;
+// WEXITED is carried because it is the COLLISION (Linux 4 == Thylacine's
+// WAIT_CONTINUED), not because a correct caller sends it to wait4.
+const NR_WAIT4: u64 = 260;
+const WNOHANG: u64 = 1;
+const WEXITED: u64 = 4;
 const CLONE_VM: u64 = 0x00000100;
 const CLONE_VFORK: u64 = 0x00004000;
 const CLONE_FILES: u64 = 0x00000400;
@@ -199,6 +205,13 @@ static mut SIG_UC_VA: u64 = 0;
 static mut SIG_SI_SIGNO: u32 = 0;
 static mut SIG_UC_PC: u64 = 0;
 static mut SIG_UC_END_MAGIC: u32 = 0xFFFF_FFFF;
+
+/// The COW-privacy witness (LINEAGE L-6b). A forked child writes it; the
+/// parent checks its OWN copy is untouched after reaping. Written and read
+/// VOLATILE so neither store can be elided as dead -- the child never reads it
+/// back and never returns, which is exactly the shape an optimiser is entitled
+/// to delete.
+static mut COW_WITNESS: u64 = 0x1111_1111;
 
 extern "C" fn viv_sig_handler(signo: i32, info: *const u8, uc: *const u8) {
     unsafe {
@@ -300,6 +313,7 @@ const NEG_EINVAL: i64 = -22;
 // the argv walk got as far as the resolve; EFAULT is the fault-close.
 const NEG_ENOENT: i64 = -2;
 const NEG_EFAULT: i64 = -14;
+const NEG_ECHILD: i64 = -10;
 
 // The Linux aarch64 `struct stat` (128 bytes; kernel/include/thylacine/
 // vivarium.h `struct viv_linux_stat` is the kernel's copy of this layout).
@@ -1777,17 +1791,17 @@ unsafe fn run_linux() -> ! {
     // garbage, so it exits immediately.
     let fpid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
     if fpid == 0 {
-        unsafe { linux_exit(0) }             // the child; never returns
+        // The child. It WRITES THE WITNESS before exiting (L-6b): with a
+        // private copy-on-write address space this store must be invisible to
+        // the parent, and the parent checks exactly that at L170c. Volatile so
+        // the store survives -- nothing in this child reads it back and the
+        // child never returns, so a non-volatile write is dead by inspection.
+        unsafe {
+            core::ptr::write_volatile(core::ptr::addr_of_mut!(COW_WITNESS), 0x2222_2222u64);
+            linux_exit(0)                    // never returns
+        }
     }
     leg!(rep, fpid > 0, b"L156\n");
-
-    // WHAT THIS LEG DOES NOT PROVE, said plainly rather than implied: that the
-    // child RAN. With a private address space the child's writes are invisible
-    // here by construction, so the only channels are a reap (wait4 -- not a row
-    // until L-6b) or a pipe (pipe2 -- not a row at all). The boot log's
-    // "orphan pid=N (parent viv-pheno-probe exiting)" line is the current
-    // evidence that a second Proc existed. The child-ran + COW-privacy legs
-    // belong with wait4 at L-6b, which is the chunk that can reap.
 
     // The fork word is EXACT, like the vfork one: CLONE_FILES on top of it asks
     // to SHARE the handle table (Plan 9 RFFDG), which L-3c-1 deliberately does
@@ -1863,6 +1877,115 @@ unsafe fn run_linux() -> ! {
     let child_tp = CLONE_CHILD_TPIDR.load(Ordering::SeqCst);
     leg!(rep, child_tp != CLONE_POISON_TLS, b"L162\n");
     leg!(rep, child_tp == my_tp, b"L163\n");
+
+    // --- L170-L176 (LINEAGE L-6b): wait4 -------------------------------------
+    //
+    // Two zombies are outstanding here by construction -- `fpid` from the L156
+    // fork and `cpid` from the L160 vfork -- so these legs reap what the
+    // preceding ones created rather than manufacturing a subject. That is also
+    // what discharges L156's stated gap: with a PRIVATE address space the fork
+    // child had no channel back, so "the child RAN" could not be asserted until
+    // there was a reap to assert it with.
+    let mut st: i32 = -1;
+
+    // BY-PID, BLOCKING. Returning fpid proves the child reached linux_exit --
+    // it ran the frame L-3b copied for it, on its own address space, to
+    // completion.
+    leg!(
+        rep,
+        svc4(NR_WAIT4, fpid as u64, &mut st as *mut i32 as u64, 0, 0) == fpid,
+        b"L170\n"
+    );
+    // WIFEXITED(st) && WEXITSTATUS(st) == 0. Proves the status was WRITTEN
+    // (it was poisoned to -1 above), not that it was packed -- 0 packs to 0,
+    // so the encoding proof needs a NON-ZERO exit and gets one at L173.
+    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0, b"L170b\n");
+
+    // COW PRIVACY, from the parent's side. The child wrote 0x22222222 into the
+    // witness before exiting; the reap above orders that write strictly before
+    // this read. Our copy must still hold the original -- L-4b's break gave the
+    // child its own page, and if it had not, the parent's .data would now be
+    // carrying the child's store.
+    leg!(
+        rep,
+        unsafe { core::ptr::read_volatile(core::ptr::addr_of!(COW_WITNESS)) } == 0x1111_1111,
+        b"L170c\n"
+    );
+
+    // THE ANY-CHILD SELECTOR (-1), reaping the vfork child. wait_pid_for's
+    // selectors ARE Linux's, so this passes through unjudged -- the leg proves
+    // that correspondence end-to-end rather than only in a comment.
+    st = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, (-1i64) as u64, &mut st as *mut i32 as u64, 0, 0) == cpid,
+        b"L171\n"
+    );
+
+    // THE PACKED-STATUS PROOF, which needs a child that exits NON-ZERO: the
+    // kernel returns the RAW exit status unless a PTY-1e flag was passed, and
+    // this wait passes none, so the translator must pack. Raw 1 would fail
+    // WIFEXITED outright ((1 & 0x7f) != 0 reads as "killed by signal 1"), and
+    // packed 1 is 0x100. The two are distinguishable, which 0 was not.
+    //
+    // WEXITSTATUS is 1 rather than a richer code because Thylacine's exit
+    // status is boolean at v1.0 -- sys_exits_handler collapses every non-zero
+    // to "fail" (task #91). This leg asserts what the system can actually
+    // deliver; when #91 lands it should assert the real code.
+    let xpid = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if xpid == 0 {
+        unsafe { linux_exit(1) }             // the child; never returns
+    }
+    leg!(rep, xpid > 0, b"L172\n");
+    st = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, xpid as u64, &mut st as *mut i32 as u64, 0, 0) == xpid,
+        b"L172b\n"
+    );
+    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 1, b"L173\n");
+
+    // ECHILD. Every child is now reaped, so this is the reap-loop termination
+    // condition -- and the errno is the point: a bare -1 would reach a Linux
+    // libc as EPERM (the #100 class), which is not a refusal a shell can act
+    // on. T_E_CHILD was appended for exactly this line.
+    leg!(
+        rep,
+        svc4(NR_WAIT4, (-1i64) as u64, &mut st as *mut i32 as u64, WNOHANG, 0)
+            == NEG_ECHILD,
+        b"L174\n"
+    );
+
+    // THE COLLISION GUARD, end-to-end. WEXITED is waitid's flag, and its VALUE
+    // is Thylacine's WAIT_CONTINUED -- so a translator that passed the option
+    // word through would silently opt this call into continue-reports and the
+    // packed encoding, and (having no children) it would answer ECHILD like the
+    // line above. ENOSYS vs ECHILD is precisely what tells the allow-list from
+    // a passthrough.
+    leg!(
+        rep,
+        svc4(NR_WAIT4, (-1i64) as u64, &mut st as *mut i32 as u64, WEXITED, 0)
+            == NEG_ENOSYS,
+        b"L175\n"
+    );
+
+    // rusage declines rather than being zeroed. musl's waitpid passes a literal
+    // 0, so this only turns away a deliberate wait4(..., &ru) -- and turning it
+    // away beats reporting a child that used no CPU.
+    let mut ru: [u64; 18] = [0; 18];
+    leg!(
+        rep,
+        svc4(NR_WAIT4, (-1i64) as u64, &mut st as *mut i32 as u64, 0,
+             &mut ru as *mut [u64; 18] as u64) == NEG_ENOSYS,
+        b"L176\n"
+    );
+
+    // NOT PROVEN HERE, and named rather than left as a silence: the WNOHANG
+    // "alive but nothing to report" return of 0. It needs a child that is
+    // reliably alive-and-not-yet-exited at a chosen instant, which needs a
+    // synchronisation channel this phenotype does not have (pipe2 is not a row,
+    // and a private address space rules out shared memory). Timing a loop would
+    // be a flake in a boot-fatal probe. L-6c's shell exercises it naturally.
 
     // --- L164-L169 (LINEAGE L-6a): execve ------------------------------------
     //

@@ -1619,3 +1619,116 @@ Two revert probes, and they are complementary rather than redundant:
 
 Together they say precisely which layer sees what — the same split the arc has
 now measured five times.
+
+---
+
+## The `wait4` row (LINEAGE L-6b)
+
+`wait4` is the row that lets a guest **reap** what L-6a let it create, and it is
+the last one `/bin/sh` needs. It builds no machinery: `wait_pid_for` (PTY-1e) is
+already a POSIX `waitpid`, with Linux's own pid selectors, its non-blocking flag
+and its stop/continue reports. What it builds is a **map**.
+
+### The option words look interchangeable and are not
+
+Measured from `third_party/musl/include/sys/wait.h`:
+
+| flag | Linux | Thylacine |
+|---|---|---|
+| `WNOHANG` | 1 | 1 |
+| `WUNTRACED` / `WSTOPPED` | 2 | 2 |
+| `WCONTINUED` | 8 | 4 |
+| `WEXITED` (waitid's) | 4 | — |
+
+The first two agree **by coincidence**, which is the trap: two thirds of the
+word passing through unchanged is exactly what makes a passthrough look correct.
+The third disagrees, and the value it vacates is **occupied** — Linux's
+`WEXITED` is numerically Thylacine's `WAIT_CONTINUED`.
+
+So a passthrough is wrong in both directions at once. A guest asking for
+`WCONTINUED` sets a bit the native handler rejects as unknown, so its wait fails
+outright. A guest passing `WEXITED` — waitid's flag, but defined in the same
+header a guest includes — is silently opted into continue-reports *and* into the
+packed status encoding, with no error anywhere. Neither outcome is a decline;
+both are answers that look plausible. That is the whole reason this is a
+translator rather than a renumber, and why the admitted set is an allow-list
+rather than a mask-and-proceed.
+
+### The status encoding is already Linux's, but applied conditionally
+
+PTY-1e built `WAIT_STATUS_*` as "the Linux wait(2) layout so the Pouch
+boundary-line maps 1:1", and it checks out against musl's accessors —
+`WEXITSTATUS`, `WIFEXITED`, `WIFCONTINUED` and even the awkward `WIFSTOPPED`
+all read `WAIT_STATUS_STOPPED` (0x147f) correctly, recovering signal 20.
+
+The catch is that `wait_pid_for` applies that encoding **only** when a PTY-1e
+flag was passed, returning the RAW exit status otherwise so every pre-PTY caller
+is unaffected. Linux always wants packed. So the translator packs exactly when
+the kernel did not — and it cannot work that out by looking at the answer,
+because a raw exit status of 5247 and a packed `WAIT_STATUS_STOPPED` are both
+`0x147f`. It has to know what it **asked** for, so `kernel_packs` is derived
+from the native flag word one line after that word is built, and before the call.
+
+### The pure layer hands back a description, not a flag word
+
+The obvious shape would be to return the native `WAIT_*` word directly. That
+would drag `proc.h` into `vivarium.c` — the same import the `clone` row already
+refused for `RFPROC`/`RFMEM`. The pure layer says what was asked in Linux's
+terms; the shell, the one place that sees both ABIs, translates.
+
+The split also puts the risk in the right half. The dangerous direction is Linux
+bit 4 quietly becoming `WAIT_CONTINUED`, and that is decided in the pure layer,
+by an allow-list a unit test pins with no kernel plumbing at all. What remains
+for the shell is `.continued -> WAIT_CONTINUED`: one assignment, sitting directly
+above the `kernel_packs` derivation it has to agree with.
+
+### `-1` becomes `ECHILD`, and it covers two conditions
+
+`wait_pid_for` answers `-1` both for "no matching child" and for a #811
+death-interrupted sleep. Mapping both to `ECHILD` is exact rather than lossy:
+the death path returns through the sync-from-EL0 tail, where
+`el0_return_die_check` is **noreturn** on the die branch, so a group-terminating
+Thread never carries a value back to EL0. There is no observer that could tell
+them apart.
+
+`T_E_CHILD` (10) was appended to the registry under signoff for this line. A
+near-miss will not do — ECHILD is the *termination condition of every reap
+loop*, and a bare `-1` reaches a Linux libc as `EPERM`, which is the #100 class
+of wrong answer: an errno that means something else entirely rather than
+something vaguer.
+
+`rusage` declines when non-NULL. Filling it would mean inventing figures the
+kernel does not collect per child; zeroing it would be a stored lie about a
+child that used no CPU. musl's `waitpid` and `wait` pass a literal 0, so only a
+deliberate `wait4(..., &ru)` is turned away.
+
+### Coverage, and what the reap finally makes assertable
+
+L-6a's fork leg carried a stated gap: with a private address space the child had
+no channel back, so "the child RAN" could not be asserted. L170 asserts it now —
+a by-pid blocking reap returning that pid means the child ran the frame L-3b
+copied for it, to completion. L170c adds **COW privacy**: the child writes a
+witness before exiting, the reap orders that write before the parent's read, and
+the parent's copy must be untouched.
+
+L173 is the packing proof, and it needs a child that exits **non-zero**: 0 packs
+to 0, so a zero-exit leg cannot distinguish packed from raw. Raw 1 fails
+`WIFEXITED` outright — `(1 & 0x7f) != 0` reads as "killed by signal 1" — while
+packed 1 is 0x100. (`WEXITSTATUS` is 1 rather than a richer code because the
+exit status is boolean at v1.0; `sys_exits_handler` collapses every non-zero to
+"fail", task #91.)
+
+Two revert probes, opposite directions:
+
+- Dropping the **allow-list** fails `vivarium.wait4_domain` at its own
+  assertion, and the guest is never reached. The decision is pure.
+- Removing the **conditional pack** leaves the unit suite at a full
+  **1301/1301 PASS** — through a bug every Linux guest would see — and fails
+  only in-guest, at exactly `marker=L173`. The decision lives in the shell.
+
+**Not proven in-guest, and named rather than left silent**: the `WNOHANG`
+"alive but nothing to report" return of 0. It needs a child reliably
+alive-and-not-yet-exited at a chosen instant, which needs a synchronisation
+channel this phenotype does not have — `pipe2` is not a row, and a private
+address space rules out shared memory. Timing a loop would be a flake in a
+boot-fatal probe. L-6c's shell exercises it naturally.

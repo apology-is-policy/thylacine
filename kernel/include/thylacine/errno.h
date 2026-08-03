@@ -111,6 +111,27 @@
 // the operation. POSIX: EBADF.
 #define T_E_BADF       9
 
+// No child processes -- a wait names no matching child. Appended for the
+// LINEAGE L-6b `wait4` row (docs/LINEAGE.md section 5.5, the signed-off
+// ABI; the T_E_SRCH/T_E_NODEV append-under-ratified-scripture precedent).
+//
+// IT IS THE TERMINATION CONDITION OF EVERY REAP LOOP, which is why a
+// near-miss will not do. `while ((p = waitpid(-1, &st, WNOHANG)) > 0)`
+// stops on any non-positive answer, but a shell that waits for a
+// SPECIFIC child distinguishes "gone, stop asking" (ECHILD) from every
+// other failure -- and a bare -1 reads to a Linux guest as EPERM, which
+// is the #100 class of wrong answer (an errno that means something else
+// entirely, not merely something vaguer).
+//
+// wait_pid_for answers -1 for TWO conditions: no matching child, and a
+// #811 death-interrupted sleep. Both map here, and the collapse is
+// sound rather than a compromise: the death path returns through the
+// sync-from-EL0 tail, where el0_return_die_check is NORETURN on the die
+// branch (vectors.S), so a group-terminating Thread never carries any
+// value back to EL0. There is no observer to tell the two apart.
+// POSIX: ECHILD.
+#define T_E_CHILD      10
+
 // Resource temporarily unavailable (would block; queue full). Use
 // when a NoteQueue is at NOTE_QUEUE_DEPTH and the userspace
 // SYS_POSTNOTE caller can't coalesce, or a non-blocking read sees an
@@ -280,6 +301,7 @@ _Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNR
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");
+_Static_assert(T_E_CHILD     == 10,  "T_E_CHILD ABI pin (POSIX ECHILD)");
 _Static_assert(T_E_AGAIN     == 11,  "T_E_AGAIN ABI pin (POSIX EAGAIN)");
 _Static_assert(T_E_NOMEM     == 12,  "T_E_NOMEM ABI pin (POSIX ENOMEM)");
 _Static_assert(T_E_ACCES     == 13,  "T_E_ACCES ABI pin (POSIX EACCES)");

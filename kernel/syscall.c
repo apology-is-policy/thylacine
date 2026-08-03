@@ -7139,6 +7139,30 @@ s64 sys_rfork_handler(struct exception_context *ctx) {
                           ctx->regs[2]);
 }
 
+// Store an `int` to a user VA, per-byte with fault fixup, scrubbing what was
+// already written if a byte faults mid-store. Returns 0, or -1 with the
+// partial range zeroed.
+//
+// THE SCRUB IS THE POINT, and it is why this is a helper rather than two loops.
+// A wait that reaps and THEN faults on the status write has destroyed the only
+// record of the child's exit code -- the caller sees a failure and must not
+// also be able to read a torn half-status and believe it. The zeroing is
+// best-effort (a store of 0 can fault too); the contract is only that the
+// caller was told the write failed, so the buffer is not to be trusted either
+// way. F240 established this; L-6b gave it a second caller, which is when a
+// hand-copied loop would have started to drift.
+static int sys_store_user_int(u64 va, int value) {
+    const u8 *bytes = (const u8 *)&value;       // AArch64 is LE; `int` is 4 B
+    for (u64 i = 0; i < sizeof(int); i++) {
+        if (uaccess_store_u8(va + i, bytes[i]) != 0) {
+            for (u64 j = 0; j < i; j++)
+                (void)uaccess_store_u8(va + j, 0);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 // =============================================================================
 // SYS_WAIT_PID — reap one ZOMBIE child (P5-spawn-wait).
 // =============================================================================
@@ -7183,24 +7207,11 @@ static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) 
     if (reaped < 0)                                    return -1;
     if (reaped == 0)                                   return 0;  // WAIT_WNOHANG: no zombie ready
 
-    if (status_out_va != 0) {
-        // exit_status is int (4 bytes); host endianness on AArch64 is LE.
-        const u8 *bytes = (const u8 *)&status;
-        for (u64 i = 0; i < sizeof(int); i++) {
-            if (uaccess_store_u8(status_out_va + i, bytes[i]) != 0) {
-                // F240: status write failed after reap; the child is
-                // gone but partial bytes may be visible to userspace.
-                // Best-effort scrub the partial range to zero so the
-                // caller doesn't read torn status (uaccess_store_u8 of
-                // zero may itself fail; ignore — the caller saw -1 and
-                // must not trust the status buffer either way).
-                for (u64 j = 0; j < i; j++) {
-                    (void)uaccess_store_u8(status_out_va + j, 0);
-                }
-                return -1;
-            }
-        }
-    }
+    // F240: a status write that faults AFTER the reap leaves the child gone
+    // with no record of its exit code, so the partial range is scrubbed --
+    // see sys_store_user_int.
+    if (status_out_va != 0 && sys_store_user_int(status_out_va, status) != 0)
+        return -1;
 
     return (s64)reaped;
 }
@@ -8694,6 +8705,68 @@ static s64 viv_execve(struct exception_context *ctx, u64 path_va, u64 argv_va,
     return r;
 }
 
+// wait4(pid, wstatus, options, rusage): x0..x3. LINEAGE L-6b.
+//
+// The row that lets a guest REAP what L-6a let it create. `wait_pid_for` is
+// already a POSIX waitpid, so this is a MAP -- and the map is the work, because
+// the option words look interchangeable and are not (vivarium.h has the
+// collision in full).
+static s64 viv_wait4(u64 pid_u, u64 wstatus_va, u64 options, u64 rusage_va) {
+    struct viv_wait_opts o;
+    if (vivarium_wait4_decide(options, rusage_va, &o) != VIV_TRANSLATED)
+        return -(s64)T_E_NOSYS;                 // out of domain -> V-3 forwards
+
+    // THE ONLY PLACE THAT NAMES BOTH VOCABULARIES. The pure layer said what was
+    // asked in Linux's terms; the translation to Thylacine's happens here, and
+    // the third line is the one that matters -- Linux's WCONTINUED is bit 8 and
+    // Thylacine's WAIT_CONTINUED is bit 4.
+    int flags = 0;
+    if (o.nohang)    flags |= WAIT_WNOHANG;
+    if (o.untraced)  flags |= WAIT_UNTRACED;
+    if (o.continued) flags |= WAIT_CONTINUED;
+
+    // wait_pid_for applies the packed encoding IFF a PTY-1e flag was passed
+    // (proc.h) -- a plain wait keeps the RAW exit status for pre-PTY callers.
+    // Linux always wants packed, so we pack exactly when the kernel will not.
+    //
+    // THIS MUST BE DECIDED BEFORE THE CALL, and derived from the word one line
+    // above rather than from `options`: the returned value cannot be classified
+    // after the fact, because a raw exit status of 5247 and a packed
+    // WAIT_STATUS_STOPPED are both 0x147f. Only what we ASKED for tells them
+    // apart.
+    const bool kernel_packs = (flags & (WAIT_UNTRACED | WAIT_CONTINUED)) != 0;
+
+    // Validate up-front, as the native handler does: a wait that reaps and THEN
+    // faults on the status write has destroyed the child's exit code with
+    // nothing left to report it.
+    if (wstatus_va != 0 && !sys_validate_user_buf(wstatus_va, sizeof(int)))
+        return -(s64)T_E_FAULT;
+
+    // `pid` passes straight through: wait_pid_for's selectors ARE Linux's
+    // (-1 any / >0 that child / 0 the caller's group / <-1 the group -pid).
+    // Narrowed through s32 so a caller that left x0 zero-extended rather than
+    // sign-extended is read identically -- the VIV_AT_FDCWD hazard, which is a
+    // property of every `int` parameter in this ABI and not special to dirfd.
+    int status = 0;
+    int reaped = wait_pid_for((int)(s32)(u32)pid_u, flags, &status);
+
+    // -1 covers BOTH of wait_pid_for's failure conditions: no matching child,
+    // and a #811 death-interrupted sleep. ECHILD for both is exact rather than
+    // lossy -- the death path returns through the sync-from-EL0 tail where
+    // el0_return_die_check is NORETURN on the die branch (vectors.S), so a
+    // group-terminating Thread never carries a value back to EL0. There is no
+    // observer that could tell the two apart.
+    if (reaped < 0)  return -(s64)T_E_CHILD;
+    if (reaped == 0) return 0;                  // WNOHANG, nothing ready
+
+    if (wstatus_va != 0) {
+        if (!kernel_packs) status = WAIT_STATUS_EXITED(status);
+        if (sys_store_user_int(wstatus_va, status) != 0)
+            return -(s64)T_E_FAULT;
+    }
+    return (s64)reaped;
+}
+
 // The TIER-2 shells. Each pairs a PURE translator from kernel/vivarium.c with
 // the uaccess + native-core work that translator deliberately refuses to do.
 // `ctx` is used by exactly one case (clone, LINEAGE L-3d) and ignored by the
@@ -9021,6 +9094,10 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // starts with a clean x0. A core that ever returned non-zero on success
         // would break that, which is why it returns a literal.
         return viv_execve(ctx, args[0], args[1], args[2]);
+
+    case VIV_LINUX_WAIT4:
+        // wait4(pid, wstatus, options, rusage): x0..x3. LINEAGE L-6b.
+        return viv_wait4(args[0], args[1], args[2], args[3]);
 
     default:
         // vivarium_translate said TIER2 for a number with no shell here. That

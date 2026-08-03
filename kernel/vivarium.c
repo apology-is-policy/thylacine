@@ -37,6 +37,8 @@ _Static_assert(VIV_LINUX_CLONE > VIV_NATIVE_CEILING,
                "clone's collision argument is the ceiling one (LINEAGE L-3d)");
 _Static_assert(VIV_LINUX_EXECVE > VIV_NATIVE_CEILING,
                "execve's collision argument is the ceiling one (LINEAGE L-6a)");
+_Static_assert(VIV_LINUX_WAIT4 > VIV_NATIVE_CEILING,
+               "wait4's collision argument is the ceiling one (LINEAGE L-6b)");
 
 // A T1 row: a Linux number, the Thylacine number it renumbers to, and the arity
 // that must carry across unchanged. `nargs` is not used to copy (the whole
@@ -272,13 +274,9 @@ static const struct viv_reject g_viv_rejects[] = {
     // the same commit under this file's own rule -- a VIV_TIER2 row whose shell
     // is missing declares a capability the code does not have.
     //
-    // wait4 (260) is NOT listed, and its absence is a decision rather than an
-    // oversight: it is a real translator (an option-word map that is NOT the
-    // identity, plus a status reshape and an rusage pointer), so it arrives
-    // with its own reasoning at L-6b. Until then it FORWARDS like any
-    // unclassified number.
     { VIV_LINUX_CLONE,       VIV_TIER2   },  // L-3d: vivarium_clone_decide
     { VIV_LINUX_EXECVE,      VIV_TIER2   },  // L-6a: viv_execve
+    { VIV_LINUX_WAIT4,       VIV_TIER2   },  // L-6b: vivarium_wait4_decide
 };
 
 #define VIV_REJECT_COUNT ((u32)(sizeof(g_viv_rejects) / sizeof(g_viv_rejects[0])))
@@ -1712,4 +1710,50 @@ u64 viv_notemask_to_sigset(u64 notemask, const struct viv_notebit_map *m) {
         if (notemask & bit) out |= 1ULL << (sig - 1);
     }
     return out;
+}
+
+// =============================================================================
+// REAPING -- the pure layer (LINEAGE L-6b). See docs/LINEAGE.md section 5.5.
+// =============================================================================
+
+enum viv_verdict vivarium_wait4_decide(u64 options, u64 rusage,
+                                       struct viv_wait_opts *out) {
+    if (!out) return VIV_FORWARD;               // fail closed
+    out->nohang = out->untraced = out->continued = false;
+
+    // rusage FIRST, because it is the cheapest refusal and the one least
+    // entangled with the option word. A non-zero pointer means the caller
+    // wants figures this kernel does not keep per-child; see the header for
+    // why zeroing them would be worse than declining.
+    if (rusage != 0) return VIV_FORWARD;
+
+    // NARROWED TO 32 BITS, unlike vivarium_clone_decide. The difference is the
+    // ABI, not a preference: Linux declares wait4's `options` as `int`, so the
+    // high half carries no meaning and a caller that leaves x2 sign- or
+    // zero-extended must be read identically. clone's `flags` is an
+    // `unsigned long`, which is why THAT comparison is full-width.
+    u32 opts = (u32)options;
+
+    // THE ALLOW-LIST. Every bit outside it declines -- and the one that makes
+    // this load-bearing rather than tidy is WEXITED (4), which is numerically
+    // Thylacine's WAIT_CONTINUED. A mask-and-pass would hand a guest that
+    // passed WEXITED an opt-in to continue-reports AND to the packed status
+    // encoding, silently, with no error anywhere. Refusing the whole word is
+    // what keeps that from being expressible.
+    if (opts & ~VIV_WAIT_OPTS_ADMITTED) return VIV_FORWARD;
+
+    // The map, bit by bit. Two of the three happen to be the identity; writing
+    // them out anyway is deliberate, because the interesting property of this
+    // function is that NOTHING here is a passthrough -- a reader checking the
+    // WCONTINUED line should not have to wonder whether the other two were
+    // handled by a different mechanism.
+    out->nohang    = (opts & (u32)VIV_WNOHANG)    != 0;
+    out->untraced  = (opts & (u32)VIV_WUNTRACED)  != 0;
+    out->continued = (opts & (u32)VIV_WCONTINUED) != 0;
+
+    // `pid` is absent from this signature on purpose: wait_pid_for's selectors
+    // ARE Linux's (-1 / >0 / 0 / <-1), so there is one rule and it lives in
+    // proc.h. A check here would be a second opinion about a correspondence
+    // that is already exact.
+    return VIV_TRANSLATED;
 }

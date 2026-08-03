@@ -34,6 +34,8 @@
 #include <thylacine/types.h>
 #include <thylacine/handle.h>       // V-5c-2: PROC_HANDLE_MAX, asserted BY NAME
 #include <thylacine/notes.h>        // V-6b: the canonical note-name literals
+#include <thylacine/proc.h>         // L-6b: WAIT_*, so the collision is asserted
+                                    //       against the REAL constants, not copies
 #include <thylacine/vivarium.h>
 
 void test_vivarium_t1_renumbers(void);
@@ -48,6 +50,7 @@ void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);
 void test_vivarium_mmap_domain(void);
 void test_vivarium_clone_domain(void);
+void test_vivarium_wait4_domain(void);
 
 // A recognisable argument vector: every word distinct and non-zero, so a
 // dropped, duplicated, or reordered word is visible rather than accidentally
@@ -760,6 +763,142 @@ void test_vivarium_clone_domain(void) {
                        (int)VIV_TIER2, "clone is TIER2 -- never a renumber");
         TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_EXECVE, args, &out),
                        (int)VIV_TIER2, "execve is TIER2 -- never a renumber");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.wait4_domain — the option-word map (LINEAGE L-6b, §5.5).
+//
+// The row that lets a guest reap what L-6a let it create. Its risk is entirely
+// NUMERIC: Linux's option bits and Thylacine's WAIT_* bits agree on two values
+// and disagree on the third, with Linux's WEXITED sitting exactly on
+// WAIT_CONTINUED. So the assertions below are about VALUES, not just verdicts.
+// -----------------------------------------------------------------------------
+void test_vivarium_wait4_domain(void) {
+    // POISONED before every admitted call, in the clone_domain discipline: the
+    // fields are only meaningful on VIV_TRANSLATED, so seeding them WRONG is
+    // what makes the reads below real rather than a leftover.
+    struct viv_wait_opts o;
+
+    // THE COLLISION, stated as an executable fact rather than a comment. This
+    // is the whole reason wait4 is a translator: two of the three bits are the
+    // identity by coincidence, and the third is not -- and the value it would
+    // collide with is occupied by a DIFFERENT Linux flag.
+    TEST_ASSERT((u32)VIV_WNOHANG   == (u32)WAIT_WNOHANG,
+                "WNOHANG is the identity (1) -- by coincidence, not by design");
+    TEST_ASSERT((u32)VIV_WUNTRACED == (u32)WAIT_UNTRACED,
+                "WUNTRACED is the identity (2) -- likewise");
+    TEST_ASSERT((u32)VIV_WCONTINUED != (u32)WAIT_CONTINUED,
+                "WCONTINUED is NOT the identity: Linux 8 vs Thylacine 4");
+    TEST_ASSERT((u32)VIV_WEXITED == (u32)WAIT_CONTINUED,
+                "and the gap is OCCUPIED -- Linux WEXITED is numerically "
+                "WAIT_CONTINUED, so a passthrough would silently opt a guest "
+                "into continue-reports AND the packed status encoding");
+
+    // The plain shape: `wait(&st)` -> waitpid(-1, &st, 0) -> wait4(-1, &st, 0, 0).
+    o.nohang = o.untraced = o.continued = true;
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide(0, 0, &o),
+                   (int)VIV_TRANSLATED, "options 0 is the plain blocking wait");
+    TEST_ASSERT(!o.nohang && !o.untraced && !o.continued,
+                "options 0 asks for nothing -- every field clear");
+
+    // Each admitted bit ALONE, so a map that happened to set the right field
+    // for the wrong bit cannot pass by accident.
+    o.nohang = false; o.untraced = true; o.continued = true;
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WNOHANG, 0, &o),
+                   (int)VIV_TRANSLATED, "WNOHANG is admitted");
+    TEST_ASSERT(o.nohang && !o.untraced && !o.continued, "WNOHANG sets ONLY nohang");
+
+    o.nohang = true; o.untraced = false; o.continued = true;
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WUNTRACED, 0, &o),
+                   (int)VIV_TRANSLATED, "WUNTRACED is admitted");
+    TEST_ASSERT(!o.nohang && o.untraced && !o.continued, "WUNTRACED sets ONLY untraced");
+
+    // THE LOAD-BEARING ONE. Linux bit 8 must reach `.continued`; the shell then
+    // turns that into WAIT_CONTINUED (bit 4). A passthrough would instead set a
+    // bit the native handler rejects as unknown, so the guest's WCONTINUED wait
+    // would fail outright.
+    o.nohang = true; o.untraced = true; o.continued = false;
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WCONTINUED, 0, &o),
+                   (int)VIV_TRANSLATED, "WCONTINUED is admitted");
+    TEST_ASSERT(!o.nohang && !o.untraced && o.continued,
+                "Linux bit 8 sets ONLY continued -- the non-identity map");
+
+    // Options COMPOSE, which is why the admitted word is a MASK here and an
+    // EXACT value in the clone/mmap rows: every subset of these three is a
+    // meaningful request, whereas musl emits exactly one mmap flags word.
+    o.nohang = o.untraced = o.continued = false;
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide(
+                       (u64)(VIV_WNOHANG | VIV_WUNTRACED | VIV_WCONTINUED), 0, &o),
+                   (int)VIV_TRANSLATED, "the three admitted bits compose");
+    TEST_ASSERT(o.nohang && o.untraced && o.continued, "all three carry together");
+
+    // THE DANGEROUS INPUT. WEXITED belongs to waitid, not wait4 -- but musl
+    // defines it in the same header a guest includes, so a confused caller
+    // reaches it, and its VALUE is WAIT_CONTINUED. Declining is what keeps the
+    // mistranslation from being expressible at all.
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WEXITED, 0, &o),
+                   (int)VIV_FORWARD,
+                   "WEXITED declines -- it is waitid's, and it sits on WAIT_CONTINUED");
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WNOWAIT, 0, &o),
+                   (int)VIV_FORWARD, "WNOWAIT declines -- also waitid's");
+
+    // The Linux-only trio. Excluded as a DOMAIN matter, not an oversight: all
+    // three discriminate thread-children from process-children, and Thylacine's
+    // process table does not draw that line (a Thread is not a child). There is
+    // nothing to approximate them with.
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WALL, 0, &o),
+                   (int)VIV_FORWARD, "__WALL declines -- no thread/process child split");
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WCLONE, 0, &o),
+                   (int)VIV_FORWARD, "__WCLONE declines -- likewise");
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WNOTHREAD, 0, &o),
+                   (int)VIV_FORWARD, "__WNOTHREAD declines -- likewise");
+
+    // A valid bit alongside an invalid one declines the WHOLE word. Masking the
+    // known bits out and proceeding would serve a request the caller did not
+    // make, which is the failure mode an allow-list exists to prevent.
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide(
+                       (u64)(VIV_WNOHANG | VIV_WEXITED), 0, &o),
+                   (int)VIV_FORWARD, "one bad bit declines the whole word");
+
+    // rusage. musl's waitpid and wait pass a literal 0 (src/process/waitpid.c),
+    // so this only turns away a deliberate wait4(..., &ru) -- and it turns it
+    // away rather than zeroing the struct, which would be a stored lie about a
+    // child that used no CPU.
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide(0, 0x40000000ull, &o),
+                   (int)VIV_FORWARD, "a non-NULL rusage declines");
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide((u64)VIV_WNOHANG, 1, &o),
+                   (int)VIV_FORWARD, "even an unaligned junk rusage declines");
+
+    // NARROWED TO 32 BITS, the OPPOSITE of clone_domain's full-width read -- and
+    // the asymmetry is the ABI, not a preference. Linux declares wait4's
+    // `options` as `int`, so a caller that leaves x2 sign-extended must be read
+    // identically to one that zero-extends. clone's `flags` is an unsigned long,
+    // which is why THAT comparison keeps the high half.
+    o.nohang = o.untraced = o.continued = true;
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide(0xDEADBEEF00000000ull, 0, &o),
+                   (int)VIV_TRANSLATED, "the high half is not part of an `int` options word");
+    TEST_ASSERT(!o.nohang && !o.untraced && !o.continued,
+                "a high-half-only word still asks for nothing");
+
+    // FAIL CLOSED on a NULL out-param, so a shell that ignores the verdict
+    // cannot read an uninitialised struct and compose flags from garbage.
+    TEST_EXPECT_EQ((int)vivarium_wait4_decide(0, 0, NULL),
+                   (int)VIV_FORWARD, "a NULL out declines");
+
+    // wait4 is TIER-2, never a renumber: the option map, the conditional status
+    // pack, and the ECHILD mapping all live in the shell. A demotion to T1 would
+    // copy the option word verbatim into SYS_WAIT_PID, where the unknown-bit
+    // gate would reject WCONTINUED outright and WEXITED would sail through as
+    // WAIT_CONTINUED.
+    {
+        u64 args[VIV_NARGS];
+        struct viv_call out;
+        viv_fill_args(args);
+        out.nr = 0xDEADu;
+        TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_WAIT4, args, &out),
+                       (int)VIV_TIER2, "wait4 is TIER2 -- never a renumber");
+        TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
     }
 }
 

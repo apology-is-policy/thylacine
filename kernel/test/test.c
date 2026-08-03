@@ -602,6 +602,7 @@ void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);                 // VIVARIUM V-2c
 void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d
+void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
 void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
 void test_vivarium_sigaction_domain(void);               // VIVARIUM V-6a
 void test_vivarium_sigset_to_notemask(void);             // VIVARIUM V-6a
@@ -2075,6 +2076,7 @@ struct test_case g_tests[] = {
     { "vivarium.fstatat_domain",         test_vivarium_fstatat_domain,         false, NULL },
     { "vivarium.mmap_domain",            test_vivarium_mmap_domain,            false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
+    { "vivarium.wait4_domain",           test_vivarium_wait4_domain,           false, NULL },
     { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },
     { "vivarium.sigaction_domain",       test_vivarium_sigaction_domain,       false, NULL },
     { "vivarium.sigset_to_notemask",     test_vivarium_sigset_to_notemask,     false, NULL },

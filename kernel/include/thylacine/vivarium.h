@@ -201,6 +201,7 @@ enum {
     // rather than as a number repeated in prose.
     VIV_LINUX_CLONE       = 220,
     VIV_LINUX_EXECVE      = 221,
+    VIV_LINUX_WAIT4       = 260,
 };
 
 // The highest ASSIGNED native Thylacine syscall number. Every vivarium row
@@ -1462,5 +1463,120 @@ enum {
 // reader would get wrong.
 enum viv_verdict vivarium_clone_decide(u64 flags, u64 stack,
                                        bool *share_mem_out);
+
+// -----------------------------------------------------------------------------
+// TIER 2 — `wait4` (LINEAGE L-6b). See docs/LINEAGE.md §5.5.
+//
+// The row that lets a Linux guest REAP what L-6a let it create. Its target is
+// `wait_pid_for` (PTY-1e), which is already a POSIX `waitpid`: it has the pid /
+// pgrp selectors, the non-blocking flag, and the stop/continue reports. So this
+// is a MAP, not machinery — and the map is the whole point, because the option
+// words look interchangeable and are not.
+//
+// THE COLLISION. Measured from `third_party/musl/include/sys/wait.h`:
+//
+//     Linux  WNOHANG 1   WUNTRACED 2   WEXITED 4   WCONTINUED 8
+//     Thyla  WNOHANG 1   UNTRACED  2   CONTINUED 4
+//
+// The first two are the identity BY COINCIDENCE. The third is not, and the gap
+// is occupied: Linux's `WEXITED` is 4, which is Thylacine's `WAIT_CONTINUED`.
+// So a passthrough would be silently wrong in BOTH directions at once — a guest
+// asking for WCONTINUED (8) sets a bit the native handler rejects as unknown,
+// and a guest passing WEXITED (4) silently opts into continue-reports AND into
+// the packed status encoding. Neither is a decline; both are answers that look
+// plausible. That is why this row exists as a translator rather than a T1
+// renumber, and why the map below is written out bit by bit.
+//
+// (WEXITED/WSTOPPED/WNOWAIT belong to `waitid`, not `wait4`. That makes the
+// collision unlikely to fire from a correct program — but "unlikely" is not the
+// standard this tier holds itself to, and the bit is REAL: musl defines it in
+// the same header a guest includes, so a confused caller reaches it.)
+//
+// THE STATUS ENCODING IS ALREADY LINUX'S, which is the happy half. PTY-1e built
+// `WAIT_STATUS_*` as "the Linux wait(2) layout so the Pouch boundary-line maps
+// 1:1" (proc.h), and it checks out against musl's accessors:
+//
+//     WAIT_STATUS_EXITED(c) = (c & 0xff) << 8   <->  WEXITSTATUS(s) = (s & 0xff00) >> 8
+//     WAIT_STATUS_STOPPED   = 0x7f | (20 << 8)  <->  WIFSTOPPED(0x147f) is true,
+//                                                    WSTOPSIG -> 20 (SIGTSTP)
+//     WAIT_STATUS_CONTINUED = 0xffff            <->  WIFCONTINUED(s) = (s == 0xffff)
+//
+// So no reshape is needed — EXCEPT that the kernel applies that encoding
+// CONDITIONALLY. `wait_pid_for` packs only when the caller passed a PTY-1e flag,
+// and returns the RAW exit status otherwise, "full compatibility for every
+// pre-PTY caller" (proc.h). Linux always wants packed. So the translator packs
+// exactly when the kernel did not — and it cannot decide that by inspecting the
+// value, because a raw exit status of 5247 and a packed WAIT_STATUS_STOPPED are
+// both 0x147f. It has to know what it ASKED for.
+//
+// WHY THIS DECIDE HANDS BACK A DESCRIPTION RATHER THAN A FLAG WORD. The obvious
+// shape would be to return the native `WAIT_*` word directly. That would drag
+// proc.h into this file, which the clone row already refused for RFPROC/RFMEM:
+// the pure layer says WHAT WAS ASKED, and the shell — the one place that sees
+// both ABIs — turns it into the native vocabulary.
+//
+// The split lands the risk in the right half. The dangerous direction is Linux
+// bit 4 silently becoming WAIT_CONTINUED, and that is decided HERE, by an
+// allow-list a unit test pins with no kernel plumbing at all. What is left for
+// the shell is `.continued -> WAIT_CONTINUED`, a one-line assignment sitting
+// directly above the `kernel_packs` derivation it must agree with, which is a
+// tighter coupling than an out-param arriving from another file.
+// -----------------------------------------------------------------------------
+
+// Linux `wait4` option bits — musl `include/sys/wait.h`, read from the tree.
+// WEXITED is listed precisely BECAUSE it is the collision; the four Linux-only
+// bits are listed so that "declines" is a statement about named values rather
+// than about whatever fell through.
+enum {
+    VIV_WNOHANG     = 1,
+    VIV_WUNTRACED   = 2,          // == WSTOPPED
+    VIV_WEXITED     = 4,          // waitid's; collides with WAIT_CONTINUED
+    VIV_WCONTINUED  = 8,
+    VIV_WNOWAIT     = 0x1000000,  // waitid's
+    VIV_WNOTHREAD   = 0x20000000, // __WNOTHREAD
+    VIV_WALL        = 0x40000000, // __WALL
+    VIV_WCLONE      = 0x80000000, // __WCLONE
+};
+
+// The admitted option bits — an ALLOW-LIST, as VIV_MMAP_FLAGS_ADMITTED is, and
+// for the same reason. Unlike the mmap and clone words this is a MASK rather
+// than an exact value, because options genuinely compose: WNOHANG|WUNTRACED is
+// an ordinary shell wait, whereas MAP_PRIVATE|MAP_ANON was the only mmap shape
+// musl emits. A mask is the right shape when every subset is meaningful.
+//
+// __WALL / __WCLONE / __WNOTHREAD are excluded as a DOMAIN matter, not an
+// oversight: all three discriminate thread-children from process-children, a
+// distinction Thylacine's process table does not draw (a Thread is not a child).
+// There is nothing to approximate them with.
+#define VIV_WAIT_OPTS_ADMITTED \
+    ((u32)(VIV_WNOHANG | VIV_WUNTRACED | VIV_WCONTINUED))
+
+// Decide whether a `wait4` is inside the translatable domain, and compute the
+// native flag word. PURE — no user memory, no Proc, no locks.
+//
+// `pid` is NOT judged here and is passed straight through, because
+// `wait_pid_for`'s selectors ARE Linux's: -1 any, >0 that child, 0 the caller's
+// group, <-1 the group -pid (proc.h). That correspondence is exact, so
+// inspecting it would add a second opinion where there is only one rule.
+//
+// `rusage` must be 0. Filling it would mean inventing resource figures we do
+// not collect per-child, and zeroing it would be a stored lie (a guest reading
+// ru_utime would see a child that used no CPU). musl's `waitpid` and `wait`
+// pass a literal 0 (`src/process/waitpid.c`), so the shell path and every
+// ordinary reap are unaffected; only a deliberate `wait4(..., &ru)` declines.
+// The prowl arc's per-Proc `run_ns` is the substrate a future row would use.
+//
+// On VIV_TRANSLATED, *out describes the request in Linux's own terms; the shell
+// composes the native flag word from it.
+//
+// Returns VIV_TRANSLATED or VIV_FORWARD. Never ENOSYS: `wait4` exists.
+struct viv_wait_opts {
+    bool nohang;      // WNOHANG
+    bool untraced;    // WUNTRACED / WSTOPPED
+    bool continued;   // WCONTINUED  -- Linux bit 8, NOT Thylacine's bit 4
+};
+
+enum viv_verdict vivarium_wait4_decide(u64 options, u64 rusage,
+                                       struct viv_wait_opts *out);
 
 #endif // THYLACINE_VIVARIUM_H

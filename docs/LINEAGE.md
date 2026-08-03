@@ -1168,6 +1168,89 @@ lost-VFORK-wake.
 > witness it. The action-to-site obligations are in
 > `specs/SPEC-TO-CODE.md::cow.tla`.
 
+### 5.5 Stage 4 — reaping (`wait4`)
+
+Creating a process is only half a process model; a parent that cannot reap
+accumulates zombies and a shell cannot tell a finished job from a running one.
+`wait4` is the other half, and it is the last row `/bin/sh` needs.
+
+#### As built at L-6b — the map is the work
+
+`wait_pid_for` (PTY-1e) is **already a POSIX `waitpid`**: the pid selectors are
+Linux's (`-1` any, `>0` that child, `0` the caller's group, `<-1` the group
+`-pid`), it has the non-blocking flag, and it has the stop/continue reports. So
+this row builds no machinery. What it builds is a **map** — and the map is the
+work, because the option words look interchangeable and are not.
+
+**The collision.** Measured from `third_party/musl/include/sys/wait.h`:
+
+| flag | Linux | Thylacine |
+|---|---|---|
+| `WNOHANG` | 1 | 1 |
+| `WUNTRACED` / `WSTOPPED` | 2 | 2 |
+| `WCONTINUED` | 8 | 4 |
+| `WEXITED` (waitid's) | 4 | — |
+
+The first two agree **by coincidence**. The third does not, and the gap it
+leaves is **occupied**: Linux's `WEXITED` is numerically Thylacine's
+`WAIT_CONTINUED`. So a passthrough is wrong in both directions at once — a
+guest asking for `WCONTINUED` sets a bit the native handler rejects as unknown,
+and a guest passing `WEXITED` silently opts into continue-reports *and* into the
+packed status encoding. Neither is a decline; both are answers that look
+plausible. That is why the row is a translator and why the admitted set is an
+allow-list.
+
+**The status encoding is already Linux's** — PTY-1e built `WAIT_STATUS_*` as
+"the Linux wait(2) layout so the Pouch boundary-line maps 1:1", and it checks
+out against musl's own accessors. But the kernel applies it **conditionally**:
+`wait_pid_for` packs only when a PTY-1e flag was passed and returns the RAW exit
+status otherwise, for pre-PTY callers. Linux always wants packed. So the
+translator packs exactly when the kernel did not — and it cannot decide that by
+inspecting the returned value, because a raw exit status of 5247 and a packed
+`WAIT_STATUS_STOPPED` are both `0x147f`. It has to know what it **asked** for,
+which is why the pack decision is derived from the flag word one line after it
+is built and before the call is made.
+
+**The pure layer hands back a description, not a flag word.** The obvious shape
+would be to return the native `WAIT_*` word directly, which would drag `proc.h`
+into `vivarium.c` — the same import the clone row already refused for
+`RFPROC`/`RFMEM`. The split also lands the risk in the right half: the dangerous
+direction is Linux bit 4 silently becoming `WAIT_CONTINUED`, and that is decided
+in the pure layer, by an allow-list a unit test pins with no kernel plumbing at
+all.
+
+**`-1` becomes `-ECHILD`, and it covers two conditions.** `wait_pid_for` answers
+`-1` both for "no matching child" and for a #811 death-interrupted sleep. Mapping
+both to `ECHILD` is exact rather than lossy: the death path returns through the
+sync-from-EL0 tail, where `el0_return_die_check` is **noreturn** on the die
+branch (`vectors.S`), so a group-terminating Thread never carries a value back
+to EL0. There is no observer that could tell the two apart. `T_E_CHILD` (10) was
+appended under signoff for this line — a bare `-1` would reach a Linux libc as
+`EPERM`, the #100 class of wrong answer, and ECHILD is the *termination
+condition of every reap loop*, so a near-miss is not serviceable.
+
+**`rusage` declines when non-NULL.** Filling it would mean inventing figures the
+kernel does not collect per child; zeroing it would be a stored lie about a child
+that used no CPU. musl's `waitpid` and `wait` pass a literal 0
+(`src/process/waitpid.c`), so the shell path and every ordinary reap are
+unaffected. The prowl arc's per-Proc `run_ns` is the substrate a future row would
+use.
+
+**What the in-guest legs finally discharge.** L-6a's fork leg carried a stated
+gap: with a private address space the child had no channel back, so "the child
+RAN" was unassertable until something could reap. L-6b reaps both children the
+earlier legs created, which turns that into an assertion (L170) and adds the
+**COW-privacy** leg (L170c) — the child writes a witness before exiting, the reap
+orders that write before the parent's read, and the parent's copy must be
+untouched.
+
+**Not proven in-guest, and named rather than left silent**: the `WNOHANG`
+"alive but nothing to report" return of 0. It needs a child reliably
+alive-and-not-yet-exited at a chosen instant, which needs a synchronisation
+channel this phenotype does not have (`pipe2` is not a row, and a private address
+space rules out shared memory). Timing a loop would be a flake in a boot-fatal
+probe. L-6c's shell exercises it naturally.
+
 ---
 
 ## 7. The build arc
@@ -1191,7 +1274,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-4b** *(landed: b-1 substrate, b-2 clone + break)* | Per-page share counts + the COW break arm (stage 3a). The count is a **new** `struct page.cow_share` (taking the free `_pad`, so `sizeof` stays 48) — **not** the double-booked `refcount` (§2.8), and **not** a per-slot array, which §5.4's L-4b correction measures to be unimplementable: after a break the slot and its counted page diverge, and the free decision corrupts. A fork clones the Burrow per address space (Plan 9 `dupseg`); the break decides under a **global** COW leaf lock, because two sharers hold different Burrow locks. | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** ✅ **LANDED** | Stock `fork()`. Two mechanical changes — `rfork_internal` clones for the fork shape (`fc && !RFMEM`), and `sys_rfork_core` admits `RFPROC` alone with `child_sp == 0` meaning INHERIT (the SP rules are RFMEM's, not the fork's). **Plus the two defects making it live exposed**, neither of which L-4b's tests could see: **#136** — `addrspace_clone` refused every real address space (the vDSO is read-only eager anon, and the tests build their own spaces); **#137** — `ESR_ISS_WNR_BIT` was 9, not 6, so `fi->is_write` had been ALWAYS FALSE tree-wide, leaving the COW write-break unreachable (an infinite fault loop) and the write-permission gate inert. | **MET, and not by the gate as written** — "in a vivarium" needs L-6's `execve`/`wait4` rows; the fork itself is proven natively instead. `/fork-probe` legs K (three separately-falsifiable COW claims, both Procs running) + L (a store to read-only text is DENIED — the half of #137 leg K does not cover). Five independent revert probes, the sharpest being: **drop the clone wiring and the unit suite stays at a full 1300/1300 while only the in-guest leg fails** |
 | **L-6a** ✅ **LANDED** | The VIVARIUM `execve` row + the `clone` **fork** shape. `sys_execve_core` extracted so the native front end keeps its user-VA copy-in while the phenotype walks a `char *const argv[]` into the blob (the V-8 `sys_fstat_for_proc` discipline), and `vivarium_clone_decide` gains `VIV_CLONE_FLAGS_FORK` — the half L-3d refused because copy-on-write did not exist, which L-4/L-5 discharged. **envp declines when non-empty**: §5.2's as-built section measures that `exec_build_init_stack` writes a lone NULL for envp in BOTH frame shapes, so no Thylacine process has ever had a POSIX environment on its stack (#140) and the effect cannot be reproduced at any layer. | **MET** — 1300/1300 (the assertions land inside `vivarium.clone_domain`), boot OK, 0 EXTINCTION; `viv-pheno-probe` L156/L156b (a real fork returning twice, and the fork word still exact) + L164–L169 (the whole argv walk exercised by a *failing* execve, where ENOENT-not-EINVAL is a positive statement that the blob passed the core's self-check). Two revert probes, complementary rather than redundant: dropping the **fork admission** fails the unit test at its own assertion, while disabling the **envp gate** leaves the unit suite at a full **1300/1300** and fails only in-guest at L166 |
-| **L-6b** | The VIVARIUM `wait4` row. A genuine flag map, not a passthrough: Linux `WNOHANG`/`WUNTRACED`/`WCONTINUED` are 1/2/8 against Thylacine's 1/2/4, and Linux's `WEXITED` (4) collides with `WAIT_CONTINUED`. `wait_pid_for` is already a POSIX `waitpid` with the Linux packed status layout (PTY-1e), so the work is the map, the pack-when-the-kernel-did-not rule, and turning the no-matching-child `-1` into `-ECHILD` (#142). | a reaped child, and the L-6a child-ran + COW-privacy legs the probe cannot write without a reap |
+| **L-6b** ✅ **LANDED** | The VIVARIUM `wait4` row. A genuine flag map, not a passthrough: Linux `WNOHANG`/`WUNTRACED`/`WCONTINUED` are 1/2/8 against Thylacine's 1/2/4, and Linux's `WEXITED` (4) collides with `WAIT_CONTINUED` — so a passthrough is wrong in BOTH directions at once. `wait_pid_for` is already a POSIX `waitpid` with the Linux packed status layout (PTY-1e), so the work is the map, the pack-when-the-kernel-did-not rule, and `-ECHILD` (`T_E_CHILD` = 10, appended under signoff). The pure decide hands back a DESCRIPTION rather than a native flag word, keeping `proc.h` out of the pure layer exactly as the clone row keeps `RFPROC`/`RFMEM` out. | **MET** — 1301/1301, boot OK, 0 EXTINCTION; `vivarium.wait4_domain` pins the collision against the REAL `WAIT_*` constants, and `viv-pheno-probe` L170–L176 reaps both children the earlier legs created — which is what finally discharges L-6a's stated gap (the fork child RAN) and adds the COW-privacy leg (L170c) the private address space had made unobservable. Two revert probes, opposite directions: dropping the **allow-list** fails the unit test at its own assertion and never reaches the guest, while removing the **conditional pack** leaves the unit suite at a full **1301/1301** and fails only in-guest at L173 |
 | **L-6c** | The arc gate. | **an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
 
