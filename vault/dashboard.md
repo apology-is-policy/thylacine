@@ -129,8 +129,8 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-03 [[chg-2026-08-03-crash-debug-sweep]] — the crash + debug tier — the symbolizer was shared and the raw address that made it safe was not
 - 2026-08-03 [[chg-2026-08-03-exec-image-sweep]] — exec and the image cache -- three documents wrong about which code runs, and a checker that could not see the field that was wrong
 - 2026-08-03 [[chg-2026-08-03-kaua-sweep]] — kaua — and the shape found three times: in the code, in the vault's own record, and in my memory index
+- 2026-08-03 [[chg-2026-08-03-libdriver-grant-sweep]] — libdriver's grant core — and the area claim it does not fit under
 - 2026-08-03 [[chg-2026-08-03-libthyla-rs-sweep]] — the native runtime — a plane where being wrong is free, and two claims that took the offer
 - 2026-08-03 [[chg-2026-08-03-mapping-core-sweep]] — the mapping core -- a W^X checker with no callers, named as enforcement by five documents
 - 2026-08-03 [[chg-2026-08-03-nora-engine-sweep]] — nora's engine — and a census corrected twice, the second time by the batch that praised the first
-- 2026-08-03 [[chg-2026-08-03-nora-host-sweep]] — nora's process half, and two dossiers the merge made wrong
 <!-- generated:end -->

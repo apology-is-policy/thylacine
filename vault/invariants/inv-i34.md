@@ -3,11 +3,11 @@ id: inv-i34
 type: inv
 title: "I-34 — a driver's hardware authority is exactly what it was granted, and no more"
 number: I-34
-guards: [sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery]
+guards: [sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery, sub-libdriver-grant]
 validated-by: [spec-allowance, prose, gate-smp]
 strength: spec
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Statement
 
@@ -71,6 +71,15 @@ bound to — that grant is computed by the supervisor, and the kernel copies
 whatever it is handed. **The invariant is three-quarters a kernel property and
 one-quarter a policy one**, and the code says so in its own header rather than
 implying otherwise.
+
+**The fourth leg lives in [[sub-libdriver-grant]]**, and it is worth knowing
+*why* the kernel's second guarantee does not quietly cover it. The
+conferred-within-conferrer check compares a new allowance against the
+conferrer's own — and the supervisor that computes grants holds a BROAD
+allowance, for which that check passes unconditionally. So the check is not
+merely silent about the fourth leg; it is **vacuous for exactly the Proc whose
+computation the leg depends on**. One userspace function establishes the whole
+correspondence, and nothing beneath it re-derives the answer.
 
 ## Validation
 

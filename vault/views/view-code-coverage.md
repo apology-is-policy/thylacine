@@ -57,14 +57,14 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**257 owned · 164 unowned · 421 files (61% owned) · ~48060 unswept lines.**
+**261 owned · 160 unowned · 421 files (61% owned) · ~45793 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/coreutils | 0 | 60 | 8763 |
-| usr/lib | 23 | 18 | 8694 |
+| usr/lib | 27 | 14 | 6427 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3515 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -109,11 +109,9 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
-| usr/lib/libdriver/src/resource.rs | 1015 |
 | usr/aurora/src/main.rs | 1008 |
 | usr/lib/libdriver/src/source.rs | 960 |
 | usr/virtio-gpu/src/main.rs | 955 |
-| usr/lib/libdriver/src/manifest.rs | 914 |
 | usr/virtio-blk-rw/src/main.rs | 885 |
 | usr/virtio-net-loop/src/main.rs | 874 |
 | usr/virtio-input/src/main.rs | 825 |
@@ -155,7 +153,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/pelt.rs | 254 |
 | usr/lib/libdriver/src/supervise.rs | 251 |
 | usr/lib/netdev/src/ring.rs | 244 |
-| usr/lib/libdriver/src/driver.rs | 242 |
 | usr/ptyhost/src/main.rs | 236 |
 | usr/lib/libdriver/src/dtb.rs | 234 |
 | kernel/include/thylacine/smp.h | 233 |
@@ -219,7 +216,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/which.rs | 98 |
 | usr/coreutils/src/bin/seq.rs | 97 |
 | usr/coreutils/src/bin/uname.rs | 97 |
-| usr/lib/libdriver/src/lib.rs | 96 |
 | usr/coreutils/src/bin/sleep.rs | 95 |
 | usr/coreutils/src/bin/date.rs | 93 |
 | kernel/include/thylacine/9p_transport_loopback.h | 92 |
