@@ -57,15 +57,15 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**244 owned · 177 unowned · 421 files (57% owned) · ~59217 unswept lines.**
+**248 owned · 173 unowned · 421 files (58% owned) · ~53386 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
 | usr/lib | 23 | 18 | 8694 |
+| usr/nora | 4 | 9 | 5660 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -104,14 +104,12 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 
 | file | lines |
 |---|---:|
-| usr/nora/src/editor.rs | 4635 |
 | usr/corvus/src/main.rs | 4245 |
 | usr/diorama/src/server.rs | 2803 |
 | usr/nora/src/view.rs | 2043 |
 | usr/ports/gnumake/config.h | 1357 |
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
-| usr/nora/src/text.rs | 1035 |
 | usr/lib/libdriver/src/resource.rs | 1015 |
 | usr/nora/src/dap_host.rs | 976 |
 | usr/lib/libdriver/src/source.rs | 960 |
@@ -213,7 +211,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/mkdir.rs | 140 |
 | usr/coreutils/src/meta.rs | 140 |
 | usr/coreutils/src/bin/tee.rs | 133 |
-| usr/nora/src/wrap.rs | 127 |
 | usr/coreutils/src/bin/hexdump.rs | 126 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/pouch-hello/pouch-hello-spawn.c | 126 |
@@ -275,7 +272,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel/include/thylacine/extinction.h | 37 |
 | usr/coreutils/src/lib.rs | 37 |
 | usr/coreutils/src/bin/clear.rs | 34 |
-| usr/nora/src/lib.rs | 34 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h | 14 |

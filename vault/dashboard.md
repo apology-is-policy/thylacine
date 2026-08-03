@@ -131,6 +131,6 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-03 [[chg-2026-08-03-kaua-sweep]] — kaua — and the shape found three times: in the code, in the vault's own record, and in my memory index
 - 2026-08-03 [[chg-2026-08-03-libthyla-rs-sweep]] — the native runtime — a plane where being wrong is free, and two claims that took the offer
 - 2026-08-03 [[chg-2026-08-03-mapping-core-sweep]] — the mapping core -- a W^X checker with no callers, named as enforcement by five documents
+- 2026-08-03 [[chg-2026-08-03-nora-engine-sweep]] — nora's engine — and a census corrected twice, the second time by the batch that praised the first
 - 2026-08-03 [[chg-2026-08-03-notes-sweep]] — note delivery -- a second dormant declaration, and a justification that is right for the wrong reason
-- 2026-08-03 [[chg-2026-08-03-parley-sweep]] — parley — a cap set sixteen times above the heap it is meant to protect
 <!-- generated:end -->

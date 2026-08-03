@@ -211,10 +211,13 @@ Nothing here is on a hot path — it runs once per line typed.
   unconditionally `no_std`, so the test module fails to find the test crate
   before a single assertion runs. The escape — building for the host — is
   blocked one level down, in the runtime crate whose inline assembly will not
-  assemble for a host target. This is not local to the parser: about 878 test
-  functions across six native crates are in the same state, and the pattern
-  that fixes it is proven in-tree by a seventh crate, which runs its 7 tests
-  successfully. The parser *is* covered — but by a separate in-guest test
+  assemble for a host target. That diagnosis is exact for *this* crate: it
+  depends on libthyla-rs unconditionally, which is precisely what makes the
+  escape unavailable. The cross-crate figure once claimed here — 878 across six
+  crates — was wrong twice over. Measured, 389 test functions across **two**
+  crates are stranded (this one's 385 and tapestryd's 4), while 489 run today in
+  four others, so the pattern that fixes it is in production rather than merely
+  proven; see [[chg-2026-08-03-nora-engine-sweep]]. The parser *is* covered — but by a separate in-guest test
   binary that drives it through the public entry points on every boot. Two
   independently written bodies of test intent, of which the older and more
   granular one is dead. Task #105.

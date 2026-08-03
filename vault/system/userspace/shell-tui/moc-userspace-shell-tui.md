@@ -57,6 +57,11 @@ visible. In particular, two failure modes are worth not conflating:
   JSON codec, Content-Length framing, two protocol grammars and two pure
   clients, with only the transport touching a process. The one area here whose
   untrusted input arrives from another program rather than from a keyboard.
+- [[sub-nora-engine]] — what a keystroke does: the char-addressed text buffer,
+  the modal state machine, and the soft-wrap arithmetic the scroller and the
+  renderer share. The layer that can neither act nor fail — every effect is
+  raised as a request for someone else to perform, and every out-of-range input
+  clamps rather than erroring.
 
 ## Cross-cutting
 
@@ -65,9 +70,14 @@ visible. In particular, two failure modes are worth not conflating:
 - The shell is also the thing that *starts* other programs, so its evaluator is
   the busiest consumer of the process and namespace surfaces the kernel plane
   describes.
-- **The test story for this whole area is unusual and worth knowing before
-  reading any coverage claim.** The `#[test]` blocks in these crates do not
-  compile — the workspace pins a bare-metal target with no test harness — while
-  a separate in-guest binary re-covers much of the same ground by driving the
-  public entry points on every boot. So a dossier here that says a surface is
-  tested means the second thing, not the first.
+- **The test story here is split down the middle, and knowing which half a
+  dossier is in matters before reading any coverage claim.** The workspace pins
+  a bare-metal target with no test harness, so a crate's `#[test]` blocks run on
+  the host only if the crate gates `no_std` on `cfg(test)` and makes libthyla-rs
+  optional. kaua, parley and nora do — their suites run, and a coverage claim in
+  those dossiers means assertions that execute. The `libutopia` crate does not
+  (it depends on libthyla-rs unconditionally), so the parser and evaluator
+  dossiers describe a *dead* suite, and their real coverage is a separate
+  in-guest binary driving the public entry points on every boot. Two figures
+  have been published for this and both were wrong; the measured split is 489
+  running against 389 stranded.

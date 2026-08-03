@@ -257,9 +257,16 @@ cannot compile, and named kaua specifically as having "unconditional `#![no_std]
 and failing "on both counts". kaua carries `#![cfg_attr(not(test), no_std)]` — from
 its first commit — and an optional libthyla-rs behind a default-on `backend`
 feature, and documents the exact host-test command in its own Cargo.toml.
-Ninety-two tests pass. So do parley's 73 and libdriver's 86. The stranded count is
-627, not 878, and the pattern is in production in four crates rather than proven
-in one.
+Ninety-two tests pass.
+
+**And the correction has since been corrected.** The re-census that established
+the above put the stranded count at 627 — also wrong, because it recorded nora's
+238 as stranded when they run. Measured: **489 run** (kaua 92, parley 73,
+libdriver 86, nora 238) and **389 are stranded** (libutopia 385, tapestryd 4).
+The two that genuinely cannot host-test fail for a real and different reason —
+both depend on libthyla-rs *unconditionally*, so the host build reaches its
+aarch64 `_start` assembly — and the pattern that fixes it is in production in
+four crates. See [[chg-2026-08-03-nora-engine-sweep]].
 
 ## Provenance
 (generated -- incoming `touched` backlinks, newest first; never hand-written)
