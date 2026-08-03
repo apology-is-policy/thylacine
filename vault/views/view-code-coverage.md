@@ -57,16 +57,16 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**206 owned · 215 unowned · 421 files (48% owned) · ~79138 unswept lines.**
+**216 owned · 205 unowned · 421 files (51% owned) · ~72185 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/lib | 3 | 38 | 16643 |
-| usr/utopia | 8 | 18 | 11980 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
+| usr/utopia | 18 | 8 | 5027 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -106,7 +106,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 |---|---:|
 | usr/nora/src/editor.rs | 4635 |
 | usr/corvus/src/main.rs | 4245 |
-| usr/utopia/libutopia/src/eval/stmt.rs | 2979 |
 | usr/utopia/libutopia/src/line_editor.rs | 2808 |
 | usr/diorama/src/server.rs | 2803 |
 | usr/nora/src/view.rs | 2043 |
@@ -127,13 +126,10 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/virtio-net-loop/src/main.rs | 874 |
 | usr/virtio-input/src/main.rs | 825 |
 | usr/aurora/src/main.rs | 804 |
-| usr/utopia/libutopia/src/eval/builtin.rs | 803 |
 | usr/lib/kaua/src/input.rs | 798 |
 | usr/lib/tls/src/lib.rs | 795 |
-| usr/utopia/libutopia/src/eval/expr.rs | 795 |
 | usr/warden/src/main.rs | 784 |
 | usr/net-echo/src/main.rs | 774 |
-| usr/utopia/libutopia/src/eval/env.rs | 747 |
 | usr/virtio-net-arp/src/main.rs | 710 |
 | usr/lib/parley/src/json.rs | 703 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
@@ -142,8 +138,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/nora/src/main.rs | 635 |
 | usr/lib/netdev/src/virtio.rs | 627 |
 | usr/aurora/src/osd.rs | 522 |
-| usr/utopia/libutopia/src/eval/glob.rs | 504 |
-| usr/utopia/libutopia/src/eval/jobs.rs | 502 |
 | usr/aurora/src/render.rs | 500 |
 | usr/prowl/src/main.rs | 490 |
 | arch/arm64/uart.c | 473 |
@@ -191,7 +185,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/cp.rs | 230 |
 | usr/nora/src/vartree.rs | 230 |
 | usr/nora/src/diag.rs | 226 |
-| usr/utopia/libutopia/src/eval/console.rs | 225 |
 | usr/coreutils/src/bin/nc.rs | 224 |
 | usr/coreutils/src/bin/ping.rs | 224 |
 | usr/curl/src/bin/curl.rs | 224 |
@@ -208,7 +201,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/utopia/libutopia/src/palette.rs | 199 |
 | usr/coreutils/src/bin/head.rs | 198 |
 | usr/virtio-mmio-source/src/main.rs | 198 |
-| usr/utopia/libutopia/src/eval/value.rs | 197 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/lib/kaua/src/source.rs | 190 |
 | usr/coreutils/src/bin/netstat.rs | 188 |
@@ -255,7 +247,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/stub-driver/stub-driver.c | 119 |
 | usr/lib/kaua/src/style.rs | 117 |
 | usr/coreutils/src/bin/nslookup.rs | 116 |
-| usr/utopia/libutopia/src/eval/error.rs | 116 |
 | usr/coreutils/src/bin/aurora-push.rs | 113 |
 | kernel/canary.c | 111 |
 | usr/coreutils/src/bin/realpath.rs | 104 |
@@ -271,7 +262,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/color.rs | 92 |
 | usr/utopia/libutopia/src/path.rs | 89 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
-| usr/utopia/libutopia/src/eval/mod.rs | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 83 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |

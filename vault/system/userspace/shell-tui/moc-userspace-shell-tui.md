@@ -43,6 +43,10 @@ visible. In particular, two failure modes are worth not conflating:
 - [[sub-utopia-parser]] — text to AST: the rc-shaped grammar, the eight
   lexical surfaces, and the three separate recursion bounds that exist because
   the recursion has three shapes no single counter sees.
+- [[sub-utopia-eval]] — AST to effects: the three-way command resolution, the
+  two foreground wait paths (console forwarding vs pts process groups), and the
+  single recursion counter that answers the parser's question the other way,
+  because a shell's recursion shapes compose rather than stay separate.
 
 ## Cross-cutting
 
