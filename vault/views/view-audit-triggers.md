@@ -64,6 +64,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-spoor]] | kernel/spoor.c, kernel/include/thylacine/spoor.h | inv-i33 | - **The refcount balances on every path.** `spoor_total_allocated` / |
 | [[sub-kernel-srvconn]] | kernel/srvconn.c, kernel/include/thylacine/srvconn.h | inv-i9 | What an auditor attacks here (the CLAUDE.md CF-3 B row absorbed): |
 | [[sub-kernel-stalk]] | kernel/stalk.c, kernel/include/thylacine/stalk.h | inv-i28, inv-i33 | Standing obligations for any change (the ARCH §25.4 POUNCE row is the |
+| [[sub-kernel-syscall-abi]] | kernel/include/thylacine/syscall.h, usr/lib/libt/include/thyla/syscall.h, usr/lib/libt/include/thyla/poll.h, usr/lib/libt/src/start.S, usr/lib/libthyla-rs/src/lib.rs | inv-i5, inv-i13, inv-i32 | - **A new syscall appends. It never fills a hole.** The three retired numbers |
 | [[sub-kernel-territory]] | kernel/territory.c, kernel/include/thylacine/territory.h | inv-i1, inv-i3, inv-i33 | On any change to this file, prosecute: |
 | [[sub-kernel-thread]] | kernel/thread.c, kernel/include/thylacine/thread.h |  | - **#788 is the shape to keep in mind.** `thread_free` freeing a |
 | [[sub-kernel-timer]] | arch/arm64/timer.c, arch/arm64/timer.h, arch/arm64/rtc.c, arch/arm64/rtc.h | inv-i15, inv-i17 | - The periodic path must stay byte-unchanged for a running CPU — the slice model |
@@ -82,7 +83,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-pouch-tty]] | usr/lib/pouch/patches/0021-pouch-pty.patch, usr/lib/pouch/patches/0029-pouch-cons-winsize.patch |  | - The `S_ISCHR`-then-flag gate order, and the disjointness of bit 40 |
 | [[sub-ptyfs]] | usr/ptyfs/src/server.rs, usr/ptyfs/src/main.rs | inv-i20, inv-i9, inv-i1 | - The **ECHO-off** guarantee is the one to re-derive on any ldisc |
 | [[sub-stratum-bdev]] | stratum: src/block/bdev_thylacine.c |  | - Any new op must take the mutex; B-2 is what makes the single shared |
-| [[sub-stratum-boot]] | usr/joey/joey.c, kernel/syscall.c, kernel/9p_srvconn_transport.c, kernel/territory.c | inv-i28 | - A new readiness signal must be emitted **after** the last fallible step. |
+| [[sub-stratum-boot]] | usr/joey/joey.c | inv-i28 | - A new readiness signal must be emitted **after** the last fallible step. |
 | [[sub-stratum-server]] | stratum: src/9p/server.c, stratum: src/cmd/stratumd/serve.c, stratum: src/cmd/stratumd/peer_creds.c, stratum: src/cmd/stratumd/run.c | inv-i1, inv-i28 | - `n_uname` must stay ignored while `SO_PEERCRED` is the channel. Honouring |
 | [[sub-stratum-session]] | usr/login/src/main.rs, stratum: src/cmd/stratumd/proxy_9p.c, stratum: src/cmd/stratumd/dataset_pattern.c, stratum: src/cmd/stratumd/corvus_notify.c | inv-i1 | - The `/ctl` attach must outlive the session; the DEK lease is bound to |
 | [[sub-tapestryd]] | usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs | inv-i40, inv-i5, inv-i34, inv-i1 | - The **retire order** is the invariant: unshare before any backing |

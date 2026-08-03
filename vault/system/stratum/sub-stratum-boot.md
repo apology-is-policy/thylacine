@@ -5,9 +5,6 @@ parent: moc-stratum
 title: "Bringup — spawn, wait for an event, attach, pivot"
 code:
   - usr/joey/joey.c
-  - kernel/syscall.c
-  - kernel/9p_srvconn_transport.c
-  - kernel/territory.c
 audit: hard
 guarded-by: [inv-i28]
 validated-by: [prose, gate-smp, gate-interactive]
@@ -182,6 +179,15 @@ event-driven; no timing constant appears in this path.
 - The coordinator deliberately does **not** pass `--bake-owner-uid`. The
   runtime must stamp per-user files by the proxy's `SO_PEERCRED`, not force
   them SYSTEM-owned; bake-owner is host-bake-only ([[sub-substrate-build]]).
+- **This dossier's `code:` list was narrowed at batch 35.** It originally
+  claimed the three kernel files this sequence *traverses* — the syscall
+  dispatcher, the territory core, and the 9P-over-connection transport —
+  alongside the init program it actually describes. Traversal is not a sweep:
+  nothing here documents those files' internals, and the syscall dispatcher had
+  no other claimant, so the largest file in the kernel counted as swept on the
+  strength of a boot narrative naming two of its handlers. The two others have
+  real owners ([[sub-kernel-territory]], [[sub-kernel-ninep-client]]) and lost
+  nothing. See [[chg-2026-08-03-syscall-abi-sweep]].
 
 ## Provenance
 

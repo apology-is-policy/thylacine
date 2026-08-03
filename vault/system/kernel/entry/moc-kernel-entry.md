@@ -31,6 +31,15 @@ This is the same shape as the console's deferral to its manager kthread
 gets carried to a place where it can. There the carrier is a kthread; here it
 is the return tail.
 
+**And a boundary has two descriptions, not one.** The moments above say *where*
+a crossing may happen. The syscall ABI ([[sub-kernel-syscall-abi]]) says *what*
+crosses: the number space, the register convention, the argument records, and
+the bounds each is checked against. They are separable — the entry mechanism
+would be unchanged by a completely different set of syscalls — and they fail
+differently. A mechanism defect is a fault; an ABI defect is a mismatch between
+two programs that each believe they are correct, which is why that half is three
+files in three languages with nothing checking that they agree.
+
 Entry does one more thing, for the case where none of this works: it publishes
 the saved frame to a per-CPU slot so that a kernel death still has registers and
 a stack to report ([[sub-kernel-halls]]). That slot is the only piece of entry
@@ -61,6 +70,10 @@ runs only on the return from a syscall or a fault, which is
 - [[sub-kernel-halls]] — the crash dump: what the entry wrappers hand it, how it
   survives its own faults, and the live-thread backtrace that reuses half of it
   under an opposite safety argument.
+- [[sub-kernel-syscall-abi]] — the contract: 100 live numbers in a
+  never-reused space, thirteen offset-pinned argument records, the bounds
+  registry, and the two userspace mirrors that say "MUST mirror" twenty-two
+  times between them with no mechanism behind the word.
 
 ## Cross-cutting
 

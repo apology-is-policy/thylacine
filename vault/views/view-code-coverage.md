@@ -57,18 +57,18 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**165 owned · 256 unowned · 421 files (39% owned) · ~105340 unswept lines.**
+**169 owned · 252 unowned · 421 files (40% owned) · ~105542 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/utopia | 0 | 26 | 19864 |
-| usr/lib | 0 | 41 | 18896 |
-| usr/libthyla-rs | 0 | 29 | 13333 |
+| usr/lib | 3 | 38 | 16643 |
 | usr/nora | 0 | 13 | 11491 |
+| kernel | 109 | 23 | 11041 |
+| usr/libthyla-rs | 1 | 28 | 10342 |
 | usr/coreutils | 0 | 60 | 8763 |
-| kernel | 109 | 23 | 5595 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -104,16 +104,14 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 
 | file | lines |
 |---|---:|
+| kernel/syscall.c | 8178 |
 | usr/nora/src/editor.rs | 4635 |
 | usr/corvus/src/main.rs | 4245 |
-| usr/lib/libthyla-rs/src/lib.rs | 2991 |
 | usr/utopia/libutopia/src/eval/stmt.rs | 2979 |
 | usr/utopia/libutopia/src/line_editor.rs | 2808 |
 | usr/diorama/src/server.rs | 2803 |
-| kernel/include/thylacine/syscall.h | 2732 |
 | usr/utopia/libutopia/src/parser/parse.rs | 2494 |
 | usr/utopia/libutopia/src/parser/expr.rs | 2255 |
-| usr/lib/libt/include/thyla/syscall.h | 2157 |
 | usr/nora/src/view.rs | 2043 |
 | usr/utopia/libutopia/src/parser/lexer.rs | 1846 |
 | usr/lib/kaua/src/widget.rs | 1370 |
@@ -321,7 +319,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/size.rs | 69 |
 | arch/arm64/psci.h | 68 |
 | kernel/vdso.c | 68 |
-| usr/lib/libt/src/start.S | 68 |
 | usr/coreutils/src/bin/touch.rs | 67 |
 | usr/utopia/libutopia/src/parser/span.rs | 67 |
 | usr/coreutils/src/bin/yes.rs | 66 |
@@ -354,7 +351,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/clear.rs | 34 |
 | usr/nora/src/lib.rs | 34 |
 | kernel/include/thylacine/types.h | 30 |
-| usr/lib/libt/include/thyla/poll.h | 28 |
 | usr/lib/libthyla-rs/src/identity.rs | 28 |
 | kernel/include/thylacine/devramfs.h | 27 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h | 14 |
