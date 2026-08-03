@@ -20,7 +20,7 @@ design:
   - "docs/TAPESTRY.md section 18.7 (the renderer drain/feed)"
   - "docs/LIFE-SUPPORT.md LS-8"
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Purpose
 
@@ -80,14 +80,19 @@ total — there is no second reader path that could race the first.
 
 | Ring | Direction | Size | Full behaviour |
 |---|---|---|---|
-| receive | in | 256 | back-pressures the UART FIFO (below) |
-| canonical line | in | 256 | drops the overflow; Enter still delivers what fits |
+| receive | in | 512 | back-pressures **both** producers (below) |
+| canonical line | in | 256 chars | a byte past the line limit drops; a full ring back-pressures |
 | transmit | out | 8192 | writer waits; echo drops |
 | drain | out | 8192 | drops **oldest** |
 
+The receive ring is sized to hold one worst-case cooked flush — the line limit
+plus its terminator — and a static assertion ties the two together, because the
+obvious per-byte admission check would have refused a maximal line forever and
+traded a bounded drop for an unbounded wedge.
+
 The drain's disposition is the interesting one: it drops the *oldest*, not the
-newest, so the prompt the user is waiting on survives a burst. The other rings
-drop newest, because for input the oldest byte is the one already typed.
+newest, so the prompt the user is waiting on survives a burst. Input never drops
+for want of room: it refuses, and tells the producer so.
 
 ### The line discipline
 
@@ -154,10 +159,44 @@ corrupt the assertions it exists for.
 
 ### Receive back-pressure
 
-When the receive ring is full the UART drain **stops reading the FIFO** and
-masks receive, leaving the bytes in hardware rather than dropping them. The
-reader resumes it after freeing space. Masking rather than clearing is what
-makes resumption reader-driven and idempotent.
+**Both** producers are refused rather than silently dropped, and the admission
+answer is returned to them. The serial drain **stops reading the FIFO** and masks
+receive, leaving the bytes in hardware; the graphical renderer's keyboard feed
+returns a **short count**. The reader resumes the drain after freeing space.
+Masking rather than clearing is what makes resumption reader-driven and
+idempotent.
+
+Three properties make the refusal honest rather than a narrower drop:
+
+- **The room check is per-operation, not per-byte.** A canonical Enter pushes the
+  whole assembled line plus its terminator in one call, so the check reserves
+  the whole flush under the console lock before pushing any of it. A per-byte
+  check would push until the ring filled and count the remainder — dropping the
+  *tail*, terminator included, so the line silently became a different, shorter,
+  unterminated line.
+- **A refusal changes nothing.** The line stays assembled, the terminator is not
+  consumed, and nothing is echoed — the echo moved *inside* the accepted branch,
+  because echoing a refused byte shows the user a character the console did not
+  take and then shows it twice when the producer re-offers it.
+- **A one-byte holdback covers the pre-check race.** The serial drain's room
+  check is lockless, so a peer producer can take the room before the under-lock
+  push; by then the byte is out of the data register and cannot be put back,
+  which is the one way the leave-it-in-the-FIFO guarantee could be escaped. The
+  drain parks that byte and re-offers it before touching the FIFO again. Without
+  it the fix would merely narrow the loss window rather than close it — and the
+  four properties of the holdback all fail *silently*, which is why it is seeded
+  and inspected directly by a test rather than left to the counters.
+
+The counters distinguish the two dispositions by name: back-pressure (a raw byte
+or a cooked flush refused for room) is not loss and does not arm the report,
+while a real drop is a byte past the line limit. A third counter exists to stay
+**zero** — a push that fails after the room check succeeded would mean the two
+disagree, so it is an invariant witness rather than a statistic.
+
+**A full ring never suppresses the trusted path.** A serial BREAK is recognized
+before any admission logic and ungated by the mode flags, because it is a line
+condition rather than a data byte; the secure-attention trigger cannot be starved
+by filling the ring.
 
 The acyclicity argument is explicit and fragile enough to be worth restating:
 the UART receive lock orders *before* [[lock-cons]], and the reader **releases

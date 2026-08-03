@@ -12,13 +12,14 @@ locks: [lock-proc-table]
 abis: []
 design: ["docs/ARCHITECTURE.md section 9.4", "docs/PROWL-DESIGN.md section 3.4", "docs/VIVARIUM.md section 6.17"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-03
 ---
 ## Purpose
 
-The `/ctl` Dev (`dc='C'`, uppercase to leave `c` for the console): six flat
+The `/ctl` Dev (`dc='C'`, uppercase to leave `c` for the console): seven flat
 text files rendering machine-wide state — the process list, physical memory,
-the registered Devs, the KASLR base, scheduler stats, and per-CPU meters.
+the registered Devs, the KASLR base, scheduler stats, per-CPU meters, and the
+console's admission counters.
 
 Read-only. Admin *commands* were deferred and never landed; `write` refuses
 unconditionally.

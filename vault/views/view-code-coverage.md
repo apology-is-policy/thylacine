@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**254 owned · 167 unowned · 421 files (60% owned) · ~50012 unswept lines.**
+**257 owned · 164 unowned · 421 files (61% owned) · ~48060 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -66,21 +66,20 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils | 0 | 60 | 8763 |
 | usr/lib | 23 | 18 | 8694 |
 | usr/corvus | 0 | 1 | 4245 |
-| usr/aurora | 0 | 5 | 3311 |
+| usr/aurora | 0 | 5 | 3515 |
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
 | usr/ports | 0 | 10 | 2865 |
 | kernel | 110 | 22 | 2863 |
-| usr/nora | 10 | 3 | 2286 |
 | usr/prowl | 0 | 3 | 1253 |
 | usr/virtio-gpu | 0 | 1 | 955 |
+| arch | 34 | 4 | 900 |
 | usr/virtio-blk-rw | 0 | 1 | 885 |
 | usr/virtio-net-loop | 0 | 1 | 874 |
 | usr/virtio-input | 0 | 1 | 825 |
 | usr/warden | 0 | 1 | 784 |
 | usr/curl | 0 | 3 | 779 |
 | usr/net-echo | 0 | 1 | 774 |
-| arch | 34 | 4 | 770 |
 | usr/virtio-net-arp | 0 | 1 | 710 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/sntp | 0 | 1 | 394 |
@@ -96,6 +95,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/netd | 3 | 0 | 0 |
+| usr/nora | 13 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/tapestryd | 7 | 0 | 0 |
 | usr/utopia | 26 | 0 | 0 |
@@ -110,27 +110,24 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
 | usr/lib/libdriver/src/resource.rs | 1015 |
-| usr/nora/src/dap_host.rs | 976 |
+| usr/aurora/src/main.rs | 1008 |
 | usr/lib/libdriver/src/source.rs | 960 |
 | usr/virtio-gpu/src/main.rs | 955 |
 | usr/lib/libdriver/src/manifest.rs | 914 |
 | usr/virtio-blk-rw/src/main.rs | 885 |
 | usr/virtio-net-loop/src/main.rs | 874 |
 | usr/virtio-input/src/main.rs | 825 |
-| usr/aurora/src/main.rs | 804 |
 | usr/lib/tls/src/lib.rs | 795 |
 | usr/warden/src/main.rs | 784 |
 | usr/net-echo/src/main.rs | 774 |
 | usr/virtio-net-arp/src/main.rs | 710 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
 | usr/lib/netdev/src/virtio_pci.rs | 677 |
-| usr/nora/src/lsp_host.rs | 675 |
-| usr/nora/src/main.rs | 635 |
 | usr/lib/netdev/src/virtio.rs | 627 |
+| arch/arm64/uart.c | 603 |
 | usr/aurora/src/osd.rs | 522 |
 | usr/aurora/src/render.rs | 500 |
 | usr/prowl/src/main.rs | 490 |
-| arch/arm64/uart.c | 480 |
 | usr/coreutils/src/bin/ls.rs | 473 |
 | usr/coreutils/src/bin/sort.rs | 453 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
@@ -197,10 +194,10 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/tcpproxy.rs | 154 |
 | usr/curl/src/bin/wget.rs | 153 |
 | kernel/cpio.c | 152 |
+| arch/arm64/uart.h | 151 |
 | usr/coreutils/src/bin/qid.rs | 150 |
 | usr/coreutils/src/bin/con.rs | 148 |
 | usr/pouch-hello/pouch-hello-signals.c | 148 |
-| arch/arm64/uart.h | 144 |
 | usr/coreutils/src/bin/rm.rs | 144 |
 | usr/coreutils/src/bin/mkdir.rs | 140 |
 | usr/coreutils/src/meta.rs | 140 |

@@ -67,6 +67,11 @@ visible. In particular, two failure modes are worth not conflating:
   terminal, no LSP, no DAP, no grammar — and the one refusal that costs
   something, the screen's geometry, is paid for by exporting the calculation so
   the scroller cannot hold a second copy of it.
+- [[sub-nora-host]] — everything the other two refuse to do: the screen, the
+  keyboard, every file write, and two child processes that must not outlive the
+  editor. The only part of nora with a boundary to guard, and its contribution
+  to the trusted path is an abstention — it never touches the line discipline,
+  which stays the shell's job.
 
 ## Cross-cutting
 
