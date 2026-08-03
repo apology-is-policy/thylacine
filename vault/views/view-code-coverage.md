@@ -57,15 +57,15 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**236 owned · 185 unowned · 421 files (56% owned) · ~63136 unswept lines.**
+**244 owned · 177 unowned · 421 files (57% owned) · ~59217 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/lib | 15 | 26 | 12613 |
 | usr/nora | 0 | 13 | 11491 |
 | usr/coreutils | 0 | 60 | 8763 |
+| usr/lib | 23 | 18 | 8694 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3311 |
 | usr/pouch-hello | 0 | 20 | 2998 |
@@ -111,13 +111,11 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
-| usr/lib/parley/src/lsp.rs | 1106 |
 | usr/nora/src/text.rs | 1035 |
 | usr/lib/libdriver/src/resource.rs | 1015 |
 | usr/nora/src/dap_host.rs | 976 |
 | usr/lib/libdriver/src/source.rs | 960 |
 | usr/virtio-gpu/src/main.rs | 955 |
-| usr/lib/parley/src/dapc.rs | 949 |
 | usr/lib/libdriver/src/manifest.rs | 914 |
 | usr/virtio-blk-rw/src/main.rs | 885 |
 | usr/virtio-net-loop/src/main.rs | 874 |
@@ -127,7 +125,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/warden/src/main.rs | 784 |
 | usr/net-echo/src/main.rs | 774 |
 | usr/virtio-net-arp/src/main.rs | 710 |
-| usr/lib/parley/src/json.rs | 703 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
 | usr/lib/netdev/src/virtio_pci.rs | 677 |
 | usr/nora/src/lsp_host.rs | 675 |
@@ -149,9 +146,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/prowl/src/sample.rs | 393 |
 | usr/prowl/src/ui.rs | 370 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
-| usr/lib/parley/src/frame.rs | 336 |
 | usr/httpd/src/main.rs | 335 |
-| usr/lib/parley/src/dap.rs | 331 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
 | usr/aurora/src/config.rs | 315 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
@@ -165,7 +160,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/tr.rs | 268 |
 | usr/coreutils/src/bin/cat.rs | 264 |
 | usr/coreutils/src/bin/pelt.rs | 254 |
-| usr/lib/parley/src/jsonrpc.rs | 253 |
 | usr/lib/libdriver/src/supervise.rs | 251 |
 | usr/lib/netdev/src/ring.rs | 244 |
 | usr/nora/src/theme.rs | 244 |
@@ -187,7 +181,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/cornucopia/src/lib.rs | 211 |
 | kernel/include/thylacine/errno.h | 209 |
 | kernel/include/thylacine/devcap.h | 208 |
-| usr/lib/parley/src/transport.rs | 205 |
 | usr/coreutils/src/bin/head.rs | 198 |
 | usr/virtio-mmio-source/src/main.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
@@ -281,7 +274,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/lib/netdev/src/lib.rs | 39 |
 | kernel/include/thylacine/extinction.h | 37 |
 | usr/coreutils/src/lib.rs | 37 |
-| usr/lib/parley/src/lib.rs | 36 |
 | usr/coreutils/src/bin/clear.rs | 34 |
 | usr/nora/src/lib.rs | 34 |
 | kernel/include/thylacine/types.h | 30 |

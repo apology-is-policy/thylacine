@@ -53,6 +53,10 @@ visible. In particular, two failure modes are worth not conflating:
 - [[sub-kaua]] — the substrate a full-screen app paints on: a cell diff, a total
   VT parser, and a capability story preserved by omission (fd 0 and fd 1, never
   the line discipline). The other half of the raw-mode handoff `ut` performs.
+- [[sub-parley]] — the editor's dialogue with its language and debug servers: a
+  JSON codec, Content-Length framing, two protocol grammars and two pure
+  clients, with only the transport touching a process. The one area here whose
+  untrusted input arrives from another program rather than from a keyboard.
 
 ## Cross-cutting
 
