@@ -75,6 +75,8 @@ void test_devproc_environ(void);             // VIVARIUM V-4b-6
 void test_devproc_sched_gate_predicate(void);
 void test_devproc_sched_read_gated(void);
 void test_devproc_read_sched_format(void);
+// #133: the settled-park decision (a stale park must not read as stopped).
+void test_devproc_park_state_settled(void);
 
 // A-4b + 8a-1b impl hooks (non-static in kernel/devproc.c) + Proc test helpers
 // (non-static in kernel/proc.c; the test_proc.c / test_devsrv_conn.c pattern).
@@ -86,6 +88,8 @@ size_t devproc_sched_read_gated(const struct Proc *caller, struct Proc *target,
                                 char *buf, size_t cap, bool *denied);
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
+bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state);
+bool devproc_all_threads_parked(struct Proc *target);
 
 // =============================================================================
 // Helpers.
@@ -2218,4 +2222,77 @@ void test_devproc_read_cwd(void) {
                 "V-4b-1: cwd renders \"/\" -- bare, no NUL, no newline");
     // Revert-probe anchor: appending a terminator makes n == 2 and fails above.
     TEST_ASSERT(buf[1] == (char)0xAA, "V-4b-1: nothing written past the path");
+}
+
+
+// =============================================================================
+// #133 -- the settled-park decision.
+// =============================================================================
+//
+// A stale park must not read as stopped. wake_rendez_waiter sets
+// state = THREAD_RUNNABLE and ready()s the thread but deliberately leaves
+// rendez_blocked_on set, so between a resume's wakeup and the thread actually
+// running, "registered" and "!on_cpu" BOTH hold on a thread that is leaving the
+// park. Reading that as stopped is what made a `stop` following a `start` return
+// early; the read that followed then landed after the thread had cleared
+// rendez_blocked_on and before it re-parked, and answered EPERM.
+//
+// The RUNNABLE row is the regression. The rest of the table is here so a future
+// edit cannot quietly drop one of the other two terms either.
+void test_devproc_park_state_settled(void) {
+    // Settled: in the park, not running, not woken.
+    TEST_ASSERT(devproc_park_state_is_settled(true, false, THREAD_SLEEPING),
+                "registered + off-cpu + SLEEPING is the settled park");
+
+    // THE #133 ROW. Registered and off-cpu, but WOKEN -- a resume has already
+    // readied it and it simply has not been dispatched yet. Reporting this as
+    // stopped is the bug.
+    TEST_ASSERT(!devproc_park_state_is_settled(true, false, THREAD_RUNNABLE),
+                "a WOKEN-but-undispatched thread is NOT settled -- rendez_blocked_on "
+                "outlives the wake, so the first two terms lie on their own");
+
+    // The other two terms, unchanged by #133.
+    TEST_ASSERT(!devproc_park_state_is_settled(false, false, THREAD_SLEEPING),
+                "not registered on the debug rendez -> not parked at all");
+    TEST_ASSERT(!devproc_park_state_is_settled(true, true, THREAD_SLEEPING),
+                "on-cpu -> mid-switch; its ctx may be being written");
+
+    // And a running thread is not settled however the other bits fall.
+    TEST_ASSERT(!devproc_park_state_is_settled(true, false, THREAD_RUNNING),
+                "RUNNING is not settled");
+    TEST_ASSERT(!devproc_park_state_is_settled(false, true, THREAD_RUNNING),
+                "nothing about a plainly-running thread is settled");
+
+    // THE WIRING. The pure test above proves the DECISION; it is completely
+    // blind to devproc_all_threads_parked passing the wrong arguments -- a call
+    // site that hardcoded THREAD_SLEEPING would leave every row above green.
+    // So drive the walk itself, over a stack Thread whose state is the only
+    // thing that changes between the two assertions.
+    //
+    // Two zero-init stack Threads are not used here (a struct Thread `= {0}`
+    // would emit a memset the freestanding kernel does not link, per the
+    // focus-select test above); only the fields the predicate reads are set.
+    struct Proc *pt = proc_alloc();
+    TEST_ASSERT(pt != NULL, "alloc park-walk target");
+    pt->state = PROC_STATE_ALIVE;
+    struct Thread pth;
+    pth.proc = pt;
+    pth.next_in_proc = NULL;
+    spin_lock_init(&pth.wait_lock);
+    pth.rendez_blocked_on = &pth.debug_rendez;    // registered in the debug park
+    pth.on_cpu = false;
+    struct Thread *pt_saved = pt->threads;        // NULL for a fresh proc_alloc
+    pt->threads = &pth;
+
+    pth.state = THREAD_SLEEPING;
+    TEST_ASSERT(devproc_all_threads_parked(pt),
+                "the walk reports a SLEEPING registered peer as parked");
+    pth.state = THREAD_RUNNABLE;
+    TEST_ASSERT(!devproc_all_threads_parked(pt),
+                "the walk reports a WOKEN registered peer as NOT parked -- this is "
+                "the wiring, and the pure assertions above cannot see it");
+
+    pt->threads = pt_saved;                       // unlink before free
+    pt->state = PROC_STATE_ZOMBIE;
+    proc_free(pt);
 }

@@ -534,7 +534,8 @@ void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
 void test_devproc_sched_gate_predicate(void);       // prowl-3b: OQ-4 sched-view gate
 void test_devproc_sched_read_gated(void);           // prowl-5 F4: OQ-4 deny-wiring revert-probe
-void test_devproc_read_sched_format(void);          // prowl-3b: /proc/<pid>/sched read
+void test_devproc_read_sched_format(void);           // prowl-3b: /proc/<pid>/sched read
+void test_devproc_park_state_settled(void);          // #133: the settled-park decision
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
 void test_devproc_ctl_suspend_resume_dispatch(void);   // prowl-4: job-control stop/cont verb
@@ -1996,6 +1997,8 @@ struct test_case g_tests[] = {
     { "devproc.sched_gate_predicate",  test_devproc_sched_gate_predicate,  false, NULL },
     { "devproc.sched_read_gated",      test_devproc_sched_read_gated,      false, NULL },
     { "devproc.read_sched_format",     test_devproc_read_sched_format,     false, NULL },
+    // #133: a stale park must not read as stopped.
+    { "devproc.park_state_settled", test_devproc_park_state_settled, false, NULL },
     { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
     { "devproc.ctl_suspend_resume_dispatch", test_devproc_ctl_suspend_resume_dispatch, false, NULL },
