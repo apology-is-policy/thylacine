@@ -335,6 +335,10 @@ void test_vdso_maps_ro_read(void);
 void test_vdso_maps_ro_write_faults(void);
 void test_exec_setup_smoke(void);
 void test_exec_from_spoor_rodata_dispatch(void);
+void test_exec_unaligned_segment_loads(void);
+void test_exec_unaligned_lazy_segment_loads(void);
+void test_exec_shared_page_segments_refused(void);
+void test_exec_unaligned_stays_off_image_cache(void);
 void test_exec_from_spoor_aliased_window_distinct(void);
 void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
@@ -1743,6 +1747,21 @@ struct test_case g_tests[] = {
     { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
     { "exec.from_spoor_rodata_dispatch", test_exec_from_spoor_rodata_dispatch, false, NULL },
+    // #149: a non-page-aligned PT_LOAD vaddr. One test per obligation, so no
+    // single fix satisfies all four: the eager arm's bytes + zero slack, the
+    // sparse arm's (the shape every real binary has), the shared-page refusal,
+    // and the Image-cache identity that keeps unaligned segments off the
+    // file-backed arm.
+    { "exec.unaligned_segment_loads",  test_exec_unaligned_segment_loads,  false, NULL },
+    { "exec.unaligned_lazy_segment_loads",
+                                       test_exec_unaligned_lazy_segment_loads,
+                                                                           false, NULL },
+    { "exec.shared_page_segments_refused",
+                                       test_exec_shared_page_segments_refused,
+                                                                           false, NULL },
+    { "exec.unaligned_stays_off_image_cache",
+                                       test_exec_unaligned_stays_off_image_cache,
+                                                                           false, NULL },
     { "exec.from_spoor_aliased_window_distinct", test_exec_from_spoor_aliased_window_distinct, false, NULL },
     { "exec.setup_segment_data_copied",
                                        test_exec_setup_segment_data_copied,

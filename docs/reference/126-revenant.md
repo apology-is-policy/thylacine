@@ -401,6 +401,52 @@ cache; R-4 `@12454d0` file-backed exec; R-5 `@698a9dd` the focused audit [2 P1 +
 P3, two independent prosecutors] + SMP gate [0 corruption / 40 boots] + this doc).
 Resolves #229. The arc (#231) is complete.
 
+## Unaligned `PT_LOAD` vaddr (#149)
+
+A segment maps from the **page-aligned floor** of `p_vaddr`, with its own bytes
+placed `lead = p_vaddr - floor` bytes into the Burrow. ELF does not require a
+page-aligned `p_vaddr` -- only `p_vaddr == p_offset (mod p_align)` -- and on
+aarch64 `p_align` is 64 KiB, so every real linker emits an unaligned data
+segment. Measured over a stock Alpine rootfs: **20 of 20** ELFs have an
+unaligned `PT_LOAD`; **0 of 20** have an unaligned *non-writable* one; **0 of
+20** have two `PT_LOAD`s sharing a page.
+
+`seg_geometry()` derives `{floor, lead, size}` once and both eager arms
+(`exec_map_segment`, `map_eager_from_file`) use it. Three properties to keep:
+
+1. **The leading slack reads ZERO.** `[floor, p_vaddr)` is outside
+   `[p_vaddr, p_vaddr+p_memsz)`, so no segment claims it. Filling it from the
+   file -- what Linux does, mapping the whole page for mmap fidelity -- would
+   expose bytes the program never asked for: in a gap between segments that is
+   section headers, symtab or debug info. Both arms get zero for free (KP_ZERO
+   eagerly, the demand-zero fault arm sparsely). The regressions POISON the file
+   immediately before the segment so the assertion discriminates instead of
+   passing on an incidentally-zero blob.
+2. **The file-backed arm still requires `lead == 0`.** The R-2 fault arm derives
+   a page's file position as `v->file_offset + (burrow_byte_off & ~(PAGE_SIZE-1))`,
+   which is the segment's own bytes *only* when Burrow offset 0 is the segment
+   start. Rather than teach that arm and the qid-keyed Image cache about an
+   intra-page lead, `exec_load_into`'s `file_shareable` gate keeps unaligned
+   segments off it -- so §4.6's `burrow-offset-0 == seg->vaddr` identity holds by
+   **construction**, not by assumption. `map_file_backed` re-checks and fails
+   closed. An unaligned non-writable segment degrades to the private eager arm:
+   correct, merely unshared, and nothing measured produces the shape.
+3. **Two `PT_LOAD`s sharing a page are refused.** The page would need the earlier
+   segment's permissions *and* this one's; for text-then-data that is the W+X
+   union I-12 forbids. Linux resolves it by letting the later mapping win, so
+   trailing text silently loses X -- the class of silent-wrong this work exists
+   to remove. The explicit check supplies the diagnostic and an early-out;
+   `vma_insert` already refused the overlap (probe-verified).
+
+The eager arms need **no** `file_offset` alignment gate -- they copy from an
+explicit `dev->read`/blob offset -- so do not re-add one.
+
+**The diagnostic is part of the fix.** The reject ran in the child thunk *after*
+the pid was returned, so a refused load looked exactly like a program that ran
+and exited non-zero: no syscall, no fault, no log line naming the pid.
+`exec_report_fail` now names every refusal and `exec_setup_from_spoor` names the
+pid. Any new refusal on this path must report itself.
+
 ## Known caveats / footguns
 
 - **Eager-copy data, not anon-COW** (D4). `.data`/`.bss` is copied per-segment into

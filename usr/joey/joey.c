@@ -1016,8 +1016,9 @@ static int do_fork_probe(void) {
 // stage_viv_bundles and task #145 for why the second is not optional), and the
 // default build stays hermetic.
 //
-// L6C_GATE_FATAL: flip to 1 when task #149 lands. See the failure arm below
-// for why a known-blocked gate reports loudly instead of reddening the boot.
+// L6C_GATE_FATAL: flip to 1 when the gate's remaining blocker lands (#150, the
+// syscall surface -- #149's loader fix is IN). See the failure arm below for
+// why a known-blocked gate reports loudly instead of reddening the boot.
 #define L6C_GATE_FATAL 0
 static int do_alpine_shell_gate(void) {
     static const char ab[] = "/vivarium/alpine/config.json";
@@ -1121,25 +1122,29 @@ static int do_alpine_shell_gate(void) {
         t_putstr("\n");
         // KNOWN-BLOCKED, and deliberately NOT boot-fatal until it is unblocked.
         //
-        // The gate cannot pass today: kernel/exec.c:125 rejects a PT_LOAD whose
-        // p_vaddr is not page-aligned, and every real-world binary has one
-        // (measured: busybox's data segment sits at 0x51d2e0). Task #149 owns
-        // the fix; #145 (dynamic linking) sits behind it.
+        // #149 (the loader's page-alignment reject) is FIXED, and the gate moved
+        // as a result: busybox now loads and RUNS -- it gets through musl startup
+        // into its own logic and issues real syscalls, where before it executed
+        // zero instructions. The remaining blocker is the syscall surface (#150):
+        // busybox writes through `writev` (Linux nr 66), which has no translator,
+        // so `echo` produces no output and every marker goes missing. getcwd /
+        // uname / getpid / getuid / fcntl are in the same batch.
         //
         // Leaving it fatal would paint every boot red for a cause that is
         // already understood and enqueued, which is strictly worse than a loud
         // non-fatal report: a permanently-red boot stops distinguishing NEW
         // breakage from the known one, and the next real regression would land
         // invisibly behind it. The gate still RUNS every boot and still prints
-        // exactly how far the shell got, so the day #149 lands this line starts
-        // reporting progress rather than the same wall.
+        // exactly how far the shell got -- which is how #149's fix was seen to
+        // move it, and how #150's will be.
         //
-        // FLIP THIS TO `return -1` WHEN #149 LANDS -- that is the whole point
-        // of the gate, and a KNOWN-BLOCKED that outlives its blocker is just a
-        // disabled test.
+        // FLIP THIS TO `return -1` WHEN THE LAST BLOCKER LANDS -- that is the
+        // whole point of the gate, and a KNOWN-BLOCKED that outlives its blocker
+        // is just a disabled test.
         if (!L6C_GATE_FATAL) {
-            t_putstr("joey: L-6c KNOWN-BLOCKED on task #149 (exec refuses a "
-                     "non-page-aligned PT_LOAD; not boot-fatal until fixed)\n");
+            t_putstr("joey: L-6c KNOWN-BLOCKED on task #150 (busybox RUNS since "
+                     "#149; writev/getcwd/uname have no translator, so echo "
+                     "prints nothing); not boot-fatal until fixed\n");
             return 0;
         }
         return -1;

@@ -254,6 +254,65 @@ void test_exec_from_spoor_rodata_dispatch(void) {
     spoor_clunk(exe);
 }
 
+// #149: an UNALIGNED non-writable segment must not take the file-backed arm.
+//
+// The R-2 fault arm derives each page's file position as
+// `v->file_offset + (burrow_byte_off & ~(PAGE_SIZE-1))`, which is only the
+// segment's own bytes when Burrow offset 0 IS the segment's start. Rather than
+// teach that audited arm and the qid-keyed Image cache about an intra-page
+// lead, exec_load_into's file_shareable gate keeps unaligned segments off it --
+// so REVENANT section 4.6's burrow-offset-0 == seg->vaddr identity stays true
+// by CONSTRUCTION rather than by assumption. The degradation is private
+// instead of shared: it loads correctly and merely forgoes the Image cache.
+//
+// Nothing measured produces this shape (0 of 20 Alpine ELFs has an unaligned
+// non-writable PT_LOAD -- the unaligned one is always the writable data
+// segment). That is exactly why it is worth pinning: it is the case the fix
+// has to be right about without any real binary to catch it.
+void test_exec_unaligned_stays_off_image_cache(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // text RX @ 0x10000 (aligned -> file-backed), rodata R @ 0x20000 + 0x2e0
+    // (unaligned -> must degrade to the private eager arm).
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x100);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[1].p_vaddr  += 0x2e0;
+    ph[1].p_paddr   = ph[1].p_vaddr;
+    ph[1].p_offset += 0x2e0;
+    ph[1].p_memsz   = 0x100;             // filesz == memsz: file_shareable but
+                                         // for the alignment term
+    g_blob_dev_size = size;
+
+    u64 creates0 = image_cache_creates_for_test();
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x149A11Cull;        // distinct Image key
+    exe->qid.vers = 1;
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp),
+                   0, "the unaligned rodata segment still loads");
+
+    struct Vma *text = vma_lookup(p, 0x10000ull);
+    struct Vma *ro   = vma_lookup(p, 0x20000ull);
+    TEST_ASSERT(text != NULL && ro != NULL, "both VMAs");
+    TEST_EXPECT_EQ((int)text->burrow->type, (int)BURROW_TYPE_FILE,
+        "the ALIGNED text segment is still file-backed");
+    TEST_EXPECT_EQ((int)ro->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "the UNALIGNED rodata segment degraded to the private eager arm");
+    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 1,
+        "exactly ONE Image entry -- the unaligned segment created none");
+
+    drop_proc(p);
+    image_cache_evict_idle_for_test();
+    spoor_clunk(exe);
+}
+
 // #45 audit F1: a crafted ELF whose R+X and R-only PT_LOADs share an IDENTICAL
 // file window (same file_offset + filesz, distinct vaddrs). The prot-less Image
 // key (pre-fix) resolved BOTH to the SAME FILE Burrow -> one physical page
@@ -396,16 +455,144 @@ void test_exec_setup_constraints(void) {
     TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
         "bad ELF magic surfaces as -1");
 
-    // Unaligned segment vaddr — rebuild with a non-aligned vaddr.
+    // #149 REPLACED the unaligned-vaddr reject that used to live here: an
+    // unaligned p_vaddr is legal ELF and now loads (exec.unaligned_segment_*
+    // below assert the positive behaviour). What remains a constraint is a
+    // DEGENERATE segment -- memsz 0 has no pages to map and seg_geometry
+    // refuses it.
     size = build_elf(flags, 1, /*filesz=*/0);
     struct Elf64_Phdr *ph = (struct Elf64_Phdr *)
         (g_elf_blob + sizeof(struct Elf64_Ehdr));
-    ph[0].p_vaddr  = 0x10001ull;          // off by 1
-    ph[0].p_paddr  = 0x10001ull;
-    // e_entry must still be in the segment.
-    ((struct Elf64_Ehdr *)g_elf_blob)->e_entry = 0x10001ull;
+    ph[0].p_memsz = 0;
     TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
-        "unaligned segment vaddr rejected");
+        "degenerate PT_LOAD (memsz 0) rejected");
+
+    drop_proc(p);
+}
+
+// #149: an unaligned PT_LOAD vaddr LOADS. It maps from the page FLOOR with the
+// segment's own bytes `lead` in, and the leading slack reads ZERO.
+//
+// The discrimination that matters is the SLACK. The file bytes immediately
+// BEFORE the segment's file_offset are poisoned with a recognizable non-zero
+// pattern first, so "the slack is zero" proves the loader did NOT read from
+// floor(file_offset) -- Linux's behaviour, and a real (if small) exposure of
+// file content no segment claims. Without the poison the assertion would pass
+// on a loader that read the whole first page from a blob that happens to be
+// zero there: a control has to DISCRIMINATE, not merely detect.
+//
+// This is the EAGER arm (PF_X). exec.unaligned_lazy_segment_loads covers the
+// sparse arm, which is the one every real binary's data segment actually takes.
+void test_exec_unaligned_segment_loads(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    const u64 lead = 0x2e0;              // busybox's real intra-page offset
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/256);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[0].p_vaddr  += lead;              // 0x10000 -> 0x102e0
+    ph[0].p_paddr   = ph[0].p_vaddr;
+    ph[0].p_offset += lead;              // congruent, as ELF requires
+    eh->e_entry     = ph[0].p_vaddr;     // entry must stay inside the segment
+
+    for (size_t i = 0; i < 256; i++)                       // the segment's bytes
+        g_elf_blob[PAGE_SIZE + lead + i] = (u8)(i ^ 0x5A);
+    for (size_t i = 0; i < lead; i++)                      // the poison
+        g_elf_blob[PAGE_SIZE + i] = 0xAB;
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "an unaligned PT_LOAD vaddr loads (#149)");
+    TEST_EXPECT_EQ(entry, ph[0].p_vaddr, "entry is the unaligned vaddr");
+
+    struct Vma *vma = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(vma != NULL && vma->burrow != NULL, "VMA at the page floor");
+    TEST_EXPECT_EQ(vma->vaddr_start, (u64)0x10000,
+        "the VMA starts at the page FLOOR, not at p_vaddr");
+
+    u8 *kva = (u8 *)pa_to_kva(page_to_pa(vma->burrow->pages));
+    for (size_t i = 0; i < lead; i++)
+        TEST_EXPECT_EQ(kva[i], (u8)0,
+            "leading slack is ZERO -- the file's 0xAB was not mapped");
+    for (size_t i = 0; i < 256; i++)
+        TEST_EXPECT_EQ(kva[lead + i], (u8)(i ^ 0x5A), "segment byte at vaddr+i");
+    TEST_EXPECT_EQ(kva[lead + 256], (u8)0, "the bss tail is still zero");
+
+    drop_proc(p);
+}
+
+// #149: the SPARSE arm of the same property -- and the one that matters, since
+// W^X means the unaligned segment in a real binary is always the writable data
+// segment (measured: 20 of 20 ELFs in a stock Alpine rootfs), which
+// seg_may_be_sparse routes to a demand-zero ANON_LAZY Burrow. Here the leading
+// slack is zero because the fault arm zero-fills, not because of KP_ZERO, so it
+// is a genuinely separate path from the eager test above.
+void test_exec_unaligned_lazy_segment_loads(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    const u64 lead = 0x2e0;
+    u32 flags[1] = { PF_R | PF_W };      // writable -> sparse
+    size_t size = build_elf(flags, 1, /*filesz=*/256);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[0].p_vaddr  += lead;
+    ph[0].p_paddr   = ph[0].p_vaddr;
+    ph[0].p_offset += lead;
+    eh->e_entry     = ph[0].p_vaddr;
+
+    for (size_t i = 0; i < 256; i++)
+        g_elf_blob[PAGE_SIZE + lead + i] = (u8)(i ^ 0x33);
+    for (size_t i = 0; i < lead; i++)
+        g_elf_blob[PAGE_SIZE + i] = 0xCD;                  // the poison
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "an unaligned WRITABLE PT_LOAD loads (the busybox shape)");
+
+    struct Vma *vma = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(vma != NULL && vma->burrow != NULL, "VMA at the page floor");
+    TEST_EXPECT_EQ((int)vma->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "writable backing is still sparse (L-4a unchanged)");
+
+    u8 *pg = lazy_byte(vma->burrow, 0);
+    TEST_ASSERT(pg != NULL, "page 0 populated by exec");
+    for (size_t i = 0; i < lead; i++)
+        TEST_EXPECT_EQ(pg[i], (u8)0,
+            "leading slack is ZERO -- the file's 0xCD was not mapped");
+    for (size_t i = 0; i < 256; i++)
+        TEST_EXPECT_EQ(pg[lead + i], (u8)(i ^ 0x33), "segment byte at vaddr+i");
+
+    drop_proc(p);
+}
+
+// #149: two PT_LOADs sharing a page are REFUSED, by name.
+//
+// The page would have to carry the earlier segment's bytes at the earlier
+// segment's permissions AND this one's -- for the common text-then-data pair
+// that is W and X in one PTE, which I-12 forbids outright. Linux lets the later
+// mapping win the page (trailing text silently loses X); refusing is the
+// fail-closed choice. Measured: 0 of 20 ELFs in a stock Alpine rootfs shares a
+// page, because aarch64's 64 KiB p_align leaves segments pages apart.
+void test_exec_shared_page_segments_refused(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x100);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[1].p_vaddr = ph[0].p_vaddr + 0x800;    // same page as segment 0
+    ph[1].p_paddr = ph[1].p_vaddr;
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
+        "two PT_LOADs sharing a page are refused (I-12)");
 
     drop_proc(p);
 }
@@ -746,17 +933,20 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
 
-    // A well-formed ELF whose SECOND segment is unmappable: an unaligned vaddr,
-    // which exec_load_into's per-segment gate rejects. The first segment maps
-    // before the failure, so the target is left PARTIALLY populated -- exactly
-    // the state the syscall's failure arm has to clean up.
+    // A well-formed ELF whose SECOND segment is unmappable. #149 changed the
+    // VEHICLE, not the property: an unaligned vaddr is now legal, so the second
+    // segment instead SHARES the first's page, which exec_load_into refuses
+    // (the shared page would need the W+X union I-12 forbids). The first
+    // segment maps before the failure, so the target is left PARTIALLY
+    // populated -- exactly the state the syscall's failure arm has to clean up.
     u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
     size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
     {
-        // Nudge the second phdr's p_vaddr off a page boundary.
+        // Point the second phdr into the FIRST segment's page (0x10000).
         struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
         struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
-        ph[1].p_vaddr += 0x10;
+        ph[1].p_vaddr = ph[0].p_vaddr + 0x800;
+        ph[1].p_paddr = ph[1].p_vaddr;
     }
     g_blob_dev_size = size;
 

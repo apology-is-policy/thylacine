@@ -102,6 +102,74 @@ static bool seg_may_be_sparse(const struct elf_load_segment *seg) {
     return (seg->flags & PF_X) == 0;
 }
 
+// #149: report a refusal from the exec path.
+//
+// Every failure here returns a bare -1 into a spawn thunk that has ALREADY
+// returned a pid to the parent, so a refused load is indistinguishable from a
+// program that ran and chose to exit 1: no syscall, no fault, nothing in the
+// log naming that pid. That gap is what made this file's own PT_LOAD-alignment
+// reject cost a session to find at the L-6c gate. The loader knows exactly why
+// it refused; this is where it says so. uart_puts (not the console path) to
+// match the brand-mismatch diagnostic below and to stay non-blocking -- exec
+// runs on a fresh preemptible thread and must not acquire the console role.
+static void exec_report_fail(const char *why, u64 detail) {
+    uart_puts("exec: ");
+    uart_puts(why);
+    uart_puts(" ");
+    uart_puthex64(detail);      // emits its own "0x" prefix
+    uart_puts("\n");
+}
+
+// #149: the page-aligned mapping geometry of one PT_LOAD.
+//
+// ELF does NOT require a page-aligned p_vaddr. It requires only
+// `p_vaddr == p_offset (mod p_align)`, and every real linker uses that
+// latitude: on aarch64 p_align is 64 KiB, so the data segment lands at whatever
+// intra-page offset continues the file mapping (busybox's is 0x51d2e0, +0x2e0;
+// 20 of 20 ELFs in a stock Alpine rootfs have one). Everything OUR toolchain
+// emits is page-aligned, which is why the old blanket reject held for years and
+// then met the first foreign ELF -- #136's shape exactly.
+//
+// So a segment maps from the page-aligned FLOOR of its vaddr, with its own
+// bytes placed `lead` bytes into the Burrow. The leading slack reads as ZERO --
+// deliberately, not incidentally:
+//   - those bytes lie outside [p_vaddr, p_vaddr+p_memsz), so no segment claims
+//     them and nothing may rely on their content;
+//   - filling them from the file would map bytes the program never asked for
+//     (in a gap between segments that is section headers / symtab / debug
+//     info), a gratuitous exposure Linux accepts for mmap fidelity and we have
+//     no reason to.
+// Both eager arms get the zero for free: KP_ZERO on the eager Burrow, the
+// demand-zero fault arm on the lazy one.
+struct seg_geom {
+    u64    floor;   // page-aligned VA that Burrow offset 0 corresponds to
+    size_t lead;    // vaddr - floor: leading slack inside the first page
+    size_t size;    // Burrow size: floor .. round_up(vaddr + memsz)
+};
+
+// Returns 0 and fills *g, or -1 if the segment is degenerate (memsz 0) or its
+// end wraps. Does NOT gate alignment -- that is the point.
+static int seg_geometry(const struct elf_load_segment *seg, struct seg_geom *g) {
+    if (seg->memsz == 0)                       return -1;
+    u64 end = seg->vaddr + seg->memsz;
+    if (end < seg->vaddr)                      return -1;   // wrap
+    u64 end_aligned = round_up_page(end);
+    if (end_aligned == 0)                      return -1;   // wrap
+    u64 floor = seg->vaddr & ~(u64)(PAGE_SIZE - 1);
+    g->floor  = floor;
+    g->lead   = (size_t)(seg->vaddr - floor);
+    g->size   = (size_t)(end_aligned - floor);
+    return 0;
+}
+
+// #149: the pages a segment's FILE bytes occupy within its Burrow, counted from
+// Burrow offset 0. The bytes span [lead, lead+filesz), and lead < PAGE_SIZE, so
+// the run always starts at slot 0 and is pages_spanning(lead + filesz) long.
+static size_t seg_file_pages(const struct seg_geom *g, u64 filesz) {
+    if (filesz == 0) return 0;
+    return pages_spanning((u64)g->lead + filesz);
+}
+
 // Map a single PT_LOAD segment into the Proc's address space.
 //
 // Steps:
@@ -119,20 +187,16 @@ static bool seg_may_be_sparse(const struct elf_load_segment *seg) {
 // vma_insert overlap).
 static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
                             const struct elf_load_segment *seg) {
-    // v1.0: require page-aligned vaddr + file_offset. Real toolchains
-    // (clang, gcc) page-align by default; the leniency for non-aligned
-    // segments lands post-v1.0.
-    if (seg->vaddr & (PAGE_SIZE - 1))       return -1;
-    if (seg->file_offset & (PAGE_SIZE - 1)) return -1;
-
-    if (seg->memsz == 0)                    return -1;
-
-    // memsz must fit within BURROW addressable range (overflow guard).
-    u64 vaddr_end = seg->vaddr + seg->memsz;
-    if (vaddr_end < seg->vaddr)             return -1;
-    u64 vaddr_end_aligned = round_up_page(vaddr_end);
-    if (vaddr_end_aligned == 0)             return -1;
-    size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
+    // #149: map from the page-aligned FLOOR of vaddr, carrying the intra-page
+    // offset. No alignment gate -- ELF does not require one (see seg_geometry).
+    // file_offset needs no gate either on this arm: the bytes are COPIED from
+    // an arbitrary blob offset, so nothing here assumes a file-page identity.
+    struct seg_geom g;
+    if (seg_geometry(seg, &g) != 0) {
+        exec_report_fail("degenerate PT_LOAD (memsz 0 or wrapping end) at vaddr",
+                         seg->vaddr);
+        return -1;
+    }
 
     // LINEAGE L-4a: a non-executable segment's backing is SPARSE -- only the pages
     // the FILE covers are populated here; [filesz, size) is .bss and demand-zeroes
@@ -141,19 +205,21 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
     // the whole memsz at every exec was the cost. Executable segments stay eager
     // (seg_may_be_sparse: the I-cache reason).
     bool sparse = seg_may_be_sparse(seg);
-    struct Burrow *burrow = sparse ? burrow_create_anon_lazy(size)
-                                   : burrow_create_anon(size);
+    struct Burrow *burrow = sparse ? burrow_create_anon_lazy(g.size)
+                                   : burrow_create_anon(g.size);
     if (!burrow)                               return -1;
 
     if (sparse) {
-        size_t nfile = pages_spanning(seg->filesz);
+        size_t nfile = seg_file_pages(&g, seg->filesz);
         if (nfile > 0 &&
             burrow_lazy_populate(as, exempt, burrow, 0, nfile) != 0) {
             burrow_unref(burrow);
             return -1;
         }
+        // #149: the segment's bytes start `lead` into the Burrow; [0, lead)
+        // stays demand-zero.
         if (seg->filesz > 0 &&
-            lazy_write(burrow, 0, (const u8 *)blob + seg->file_offset,
+            lazy_write(burrow, (u64)g.lead, (const u8 *)blob + seg->file_offset,
                        seg->filesz) != 0) {
             burrow_unref(burrow);
             return -1;
@@ -165,7 +231,9 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
     // The BURROW's pages start at offset 0; vmaddr_start corresponds to
     // BURROW offset 0 (the segment is page-aligned).
     else if (seg->filesz > 0) {
-        u8 *burrow_kva = (u8 *)pa_to_kva(page_to_pa(burrow->pages));
+        // #149: `+ g.lead` -- the Burrow starts at the page floor, so the
+        // segment's own bytes land `lead` in. [0, lead) keeps its KP_ZERO.
+        u8 *burrow_kva = (u8 *)pa_to_kva(page_to_pa(burrow->pages)) + g.lead;
         const u8 *src = (const u8 *)blob + seg->file_offset;
         for (size_t i = 0; i < seg->filesz; i++) {
             burrow_kva[i] = src[i];
@@ -193,7 +261,7 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
     // the demand-zero fault arm's KP_ZERO. Only WHEN the page is allocated differs.
 
     u32 prot = vma_prot_for_elf(seg->flags);
-    int rc = burrow_map_in(as, exempt, burrow, seg->vaddr, size, prot);
+    int rc = burrow_map_in(as, exempt, burrow, g.floor, g.size, prot);
     if (rc != 0) {
         burrow_unref(burrow);
         return -1;
@@ -576,11 +644,24 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
 // spoor_refs a fresh ref for the consuming Image lookup.
 static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
                            const struct elf_load_segment *seg) {
-    u64 vaddr_end = seg->vaddr + seg->memsz;
-    if (vaddr_end < seg->vaddr)             return -1;
-    u64 vaddr_end_aligned = round_up_page(vaddr_end);
-    if (vaddr_end_aligned == 0)             return -1;
-    size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
+    struct seg_geom g;
+    if (seg_geometry(seg, &g) != 0)         return -1;
+
+    // #149: this arm REQUIRES burrow-offset-0 == seg->vaddr. The R-2 fault arm
+    // derives each page's file position as
+    //     v->file_offset + (burrow_byte_off & ~(PAGE_SIZE-1))     (fault.c)
+    // which is only the segment's own bytes when the Burrow's offset 0 IS the
+    // segment's start -- i.e. when vaddr and file_offset are both page-aligned.
+    // Rather than teach the audited fault arm + the qid-keyed Image cache about
+    // an intra-page lead, exec_load_into's file_shareable gate keeps unaligned
+    // segments off this arm entirely, so the identity REVENANT §4.6 assumes
+    // stays true BY CONSTRUCTION instead of by assumption. This re-check is the
+    // defense-in-depth for a future direct caller; it costs two compares.
+    // Measured: 0 of 20 ELFs in a stock Alpine rootfs has an unaligned
+    // non-writable PT_LOAD, so the eager fallback is never taken in practice.
+    if (g.lead != 0)                        return -1;
+    if (seg->file_offset & (PAGE_SIZE - 1)) return -1;
+    size_t size = g.size;
 
     // image_lookup_or_create CONSUMES one spoor ref (adopts on miss / clunks on
     // hit). The thunk keeps the borrowed `exe`, so hand the lookup a FRESH ref;
@@ -612,11 +693,17 @@ static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
 // .bss. No userspace file-backed writable mapping is ever created (I-36-4).
 static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *exe,
                                const struct elf_load_segment *seg) {
-    u64 vaddr_end = seg->vaddr + seg->memsz;
-    if (vaddr_end < seg->vaddr)             return -1;
-    u64 vaddr_end_aligned = round_up_page(vaddr_end);
-    if (vaddr_end_aligned == 0)             return -1;
-    size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
+    // #149: the arm that carries an unaligned segment. Unlike map_file_backed
+    // this one COPIES bytes at an explicit dev->read offset, so it has no
+    // burrow-offset-0 identity to preserve and needs no alignment gate on
+    // either vaddr or file_offset.
+    struct seg_geom g;
+    if (seg_geometry(seg, &g) != 0) {
+        exec_report_fail("degenerate PT_LOAD (memsz 0 or wrapping end) at vaddr",
+                         seg->vaddr);
+        return -1;
+    }
+    size_t size = g.size;
 
     // LINEAGE L-4a: the same sparse/eager split as exec_map_segment. This is the
     // production arm, and it is where the measured cost was: corvus's RW PT_LOAD is
@@ -632,7 +719,7 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
         // slots are separate order-0 pages, so there is no contiguous span to read
         // into). Byte-identical to the eager read: same offsets, same total, and
         // the [filesz, size) tail is still zero -- it is simply not allocated yet.
-        size_t nfile = pages_spanning(seg->filesz);
+        size_t nfile = seg_file_pages(&g, seg->filesz);
         if (nfile > 0 &&
             burrow_lazy_populate(as, exempt, b, 0, nfile) != 0) {
             burrow_unref(b);
@@ -640,9 +727,13 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
         }
         size_t got = 0;
         while (got < seg->filesz) {
-            u8 *slot_kva = (u8 *)burrow_lazy_slot_kva(b, got / PAGE_SIZE);
+            // #149: the destination walks from Burrow offset `lead`, not 0. The
+            // SOURCE offset (seg->file_offset + got) is unchanged -- the leading
+            // slack is not read from the file, it stays demand-zero.
+            size_t dst_off = g.lead + got;
+            u8 *slot_kva = (u8 *)burrow_lazy_slot_kva(b, dst_off / PAGE_SIZE);
             if (!slot_kva) { burrow_unref(b); return -1; }
-            size_t in_page = got % PAGE_SIZE;
+            size_t in_page = dst_off % PAGE_SIZE;
             size_t want    = (size_t)PAGE_SIZE - in_page;
             if (want > seg->filesz - got) want = (size_t)(seg->filesz - got);
             long n = exe->dev->read(exe, slot_kva + in_page, (long)want,
@@ -655,7 +746,8 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
         // No I-cache maintenance: seg_may_be_sparse admitted this segment precisely
         // because nothing here will ever be fetched as an instruction.
     } else if (seg->filesz > 0) {
-        u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
+        // #149: `+ g.lead` -- the contiguous Burrow starts at the page floor.
+        u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages)) + g.lead;
         size_t got = 0;
         while (got < seg->filesz) {
             long n = exe->dev->read(exe, kva + got, (long)(seg->filesz - got),
@@ -675,7 +767,7 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
     // demand-zero fault arm) = .bss.
 
     u32 prot = vma_prot_for_elf(seg->flags);
-    int rc = burrow_map_in(as, exempt, b, seg->vaddr, size, prot);
+    int rc = burrow_map_in(as, exempt, b, g.floor, size, prot);
     burrow_unref(b);
     return rc == 0 ? 0 : -1;
 }
@@ -765,19 +857,49 @@ int exec_load_into(struct AddrSpace *as, bool exempt,
         }
     }
     kfree(hdr);
-    if (r != ELF_LOAD_OK)                      return -1;
+    if (r != ELF_LOAD_OK) {
+        // #149: name the code. The enum's comments in elf.h are the decode
+        // table (-15 HAS_INTERP, -16 RWX_REJECTED, -23 HAS_DYNAMIC, ...); a
+        // bare -1 out of a thunk that already returned a pid told the operator
+        // nothing at all.
+        exec_report_fail("elf_load refused this binary -- negated ELF_LOAD code",
+                         (u64)(-r));
+        return -1;
+    }
 
     // 2. Map each PT_LOAD. Non-writable segments (R+X text, R-only rodata --
     //    #45) whose memsz fits within file-backed pages are SHARED file-backed
     //    (demand-paged); writable data is a private eager-copied anon segment.
-    //    Page-aligned vaddr + file_offset is required (matches
-    //    exec_map_segment): the fault arm + the eager copy both assume
+    //    #149: a segment maps from its page-aligned FLOOR (seg_geometry), so an
+    //    unaligned vaddr is no longer refused -- but it must not take the
+    //    file-backed arm, whose fault path and Image cache both require
     //    burrow-offset-0 == seg->vaddr.
     for (int i = 0; i < img.n_segments; i++) {
         const struct elf_load_segment *seg = &img.segments[i];
-        if (seg->vaddr & (PAGE_SIZE - 1))       return -1;
-        if (seg->file_offset & (PAGE_SIZE - 1)) return -1;
-        if (seg->memsz == 0)                    return -1;
+        struct seg_geom g;
+        if (seg_geometry(seg, &g) != 0) {
+            exec_report_fail("degenerate PT_LOAD (memsz 0 or wrapping end) "
+                             "at vaddr", seg->vaddr);
+            return -1;
+        }
+
+        // #149: refuse a segment whose first page is ALREADY mapped. Two
+        // PT_LOADs sharing a page is representable in ELF and unsatisfiable
+        // here: the page would have to carry the earlier segment's bytes at the
+        // earlier segment's permissions AND this one's, and for the common
+        // text-then-data pair that is W AND X in one PTE -- exactly what I-12
+        // forbids. Linux resolves it by letting the later mapping win the page
+        // (so trailing text silently loses X); we refuse instead, because a
+        // loader that quietly drops execute permission from a page of code is
+        // the kind of silent-wrong this whole task exists to eliminate.
+        // Measured: 0 of 20 ELFs in a stock Alpine rootfs shares a page --
+        // aarch64's 64 KiB p_align leaves segments pages apart. vma_insert
+        // would reject the overlap anyway; this names it.
+        if (vma_lookup_in(as, g.floor) != NULL) {
+            exec_report_fail("PT_LOAD shares a page with an earlier segment "
+                             "(I-12 forbids the W+X union) at vaddr", seg->vaddr);
+            return -1;
+        }
 
         // file_shareable iff PF_R AND NOT PF_W (R+X text, R-only rodata -- #45 /
         // REVENANT §4.6; text byte-identical since elf_load rejects W|X) AND
@@ -791,12 +913,26 @@ int exec_load_into(struct AddrSpace *as, bool exempt,
         // mapping violates I-36-4 + the §6.5 refusal.
         u64 fend = round_up_page(seg->vaddr + seg->filesz);
         u64 mend = round_up_page(seg->vaddr + seg->memsz);
+        // #149 adds the two alignment terms: the file-backed arm is the one
+        // that needs burrow-offset-0 == seg->vaddr, so gating HERE keeps that
+        // identity true by construction rather than by assumption. An unaligned
+        // non-writable segment degrades to the eager arm -- private instead of
+        // shared, so it loads correctly and merely forgoes the Image cache.
+        // Fail-SAFE by design: the arm that cannot represent it never sees it.
         bool file_shareable = (seg->flags & PF_R) && !(seg->flags & PF_W) &&
+                              g.lead == 0 &&
+                              (seg->file_offset & (PAGE_SIZE - 1)) == 0 &&
                               fend != 0 && fend == mend;
 
         int rc = file_shareable ? map_file_backed(as, exempt, exe, seg)
                                 : map_eager_from_file(as, exempt, exe, seg);
-        if (rc != 0)                            return -1;   // partial -> caller disposes target
+        if (rc != 0) {
+            exec_report_fail(file_shareable
+                                 ? "file-backed PT_LOAD map failed at vaddr"
+                                 : "eager PT_LOAD map failed at vaddr",
+                             seg->vaddr);
+            return -1;   // partial -> caller disposes target
+        }
     }
 
     // 3. User stack + the vDSO clock page + the System V startup frame (reads
@@ -833,7 +969,15 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
 
     int rc = exec_load_into(p->as, proc_resource_exempt(p), exe, exe_size,
                             argv_data, argv_data_len, argc, entry_out, sp_out);
-    if (rc != 0) return -1;
+    if (rc != 0) {
+        // #149: the pid line. Every SYS_SPAWN_* thunk reaches exec through
+        // here, and all three answer a failure with a bare exits("fail-exec")
+        // -- so without this the parent sees a healthy positive pid and a child
+        // that exited 1 having executed nothing, with no log line naming it.
+        // exec_load_into has already said WHY; this says WHO.
+        exec_report_fail("load failed, terminating pid", (u64)p->pid);
+        return -1;
+    }
 
     // VIVARIUM V-4a-0: record the executable's namespace name for
     // /proc/<pid>/exe. `exe->path` is the #66 Path stalk built while
