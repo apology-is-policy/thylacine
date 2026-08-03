@@ -509,8 +509,8 @@ void burrow_ref(struct Burrow *v) {
     spin_unlock(&v->lock);
 }
 
-void burrow_unref(struct Burrow *v) {
-    if (!v) return;                            // NULL-safe
+bool burrow_unref_freed(struct Burrow *v) {
+    if (!v) return false;                      // NULL-safe
     if (v->magic != VMO_MAGIC)
         extinction("burrow_unref of corrupted BURROW (use-after-free?)");
     // #847: decrement + the dual-counter free decision under v->lock; the
@@ -530,7 +530,10 @@ void burrow_unref(struct Burrow *v) {
 
     if (should_free)
         burrow_free_internal(v);
+    return should_free;
 }
+
+void burrow_unref(struct Burrow *v) { (void)burrow_unref_freed(v); }
 
 void burrow_acquire_mapping(struct Burrow *v) {
     if (!v)                       extinction("burrow_acquire_mapping(NULL)");
@@ -600,7 +603,7 @@ void burrow_acquire_mapping(struct Burrow *v) {
     spin_unlock(&v->lock);
 }
 
-void burrow_release_mapping(struct Burrow *v) {
+bool burrow_release_mapping_freed(struct Burrow *v) {
     if (!v)                       extinction("burrow_release_mapping(NULL)");
     if (v->magic != VMO_MAGIC)
         extinction("burrow_release_mapping of corrupted BURROW (use-after-free?)");
@@ -617,7 +620,10 @@ void burrow_release_mapping(struct Burrow *v) {
 
     if (should_free)
         burrow_free_internal(v);
+    return should_free;
 }
+
+void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_freed(v); }
 
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
@@ -657,7 +663,9 @@ int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 p
     return 0;
 }
 
-int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
+int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
+                           bool *out_freed) {
+    if (out_freed) *out_freed = false;
     if (!p) return -1;
     if (length == 0) return -1;
     if (vaddr & (PAGE_SIZE - 1)) return -1;
@@ -713,8 +721,13 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
         proc_shared_map_uncharge(p, (u32)(length / PAGE_SIZE));
 
     vma_remove(p, vma);
-    vma_free(vma);
+    bool freed = vma_free_freed(vma);
+    if (out_freed) *out_freed = freed;
     return 0;
+}
+
+int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
+    return burrow_unmap_reporting(p, vaddr, length, NULL);
 }
 
 // =============================================================================

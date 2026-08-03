@@ -117,7 +117,7 @@ struct Vma *vma_alloc_guard(u64 vaddr_start, u64 vaddr_end) {
     return v;
 }
 
-void vma_free(struct Vma *v) {
+bool vma_free_freed(struct Vma *v) {
     if (!v)                     extinction("vma_free(NULL)");
     if (v->magic != VMA_MAGIC)  extinction("vma_free of corrupted/already-freed Vma");
     if (v->next || v->prev)     extinction("vma_free of Vma still in a list");
@@ -125,14 +125,26 @@ void vma_free(struct Vma *v) {
     // Release the BURROW mapping ref. burrow_release_mapping may free the BURROW
     // if both handle_count and mapping_count reach zero (see
     // specs/burrow.tla).
+    //
+    // #130: report whether THIS release was the one that freed the pages. I-32
+    // charges occupancy, so the uncharge belongs to the drop that ends the
+    // occupancy -- and which drop that is cannot be known before the fact: a
+    // Loom's registered buffer, a Loom's ring, and a Weft share all hold a
+    // handle_count ref that can outlive the VMA, so tearing the VMA down is not
+    // the same event as freeing the pages. The caller (which knows what it
+    // charged) pairs its uncharge to this bool.
+    bool freed = false;
     if (v->burrow) {
-        burrow_release_mapping(v->burrow);
+        freed = burrow_release_mapping_freed(v->burrow);
         v->burrow = NULL;
     }
 
     kmem_cache_free(g_vma_cache, v);
     __atomic_fetch_add(&g_vma_freed, 1u, __ATOMIC_RELAXED);
+    return freed;
 }
+
+void vma_free(struct Vma *v) { (void)vma_free_freed(v); }
 
 // =============================================================================
 // Sorted-list operations

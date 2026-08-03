@@ -389,6 +389,22 @@ void burrow_acquire_mapping(struct Burrow *v);
 // Was named `burrow_unmap` pre-P3-Db.
 void burrow_release_mapping(struct Burrow *v);
 
+// #130: the ref-drop primitives, reporting whether THIS drop freed the pages.
+//
+// I-32 charges OCCUPANCY, so the uncharge belongs to the drop that ENDS the
+// occupancy. Which drop that is cannot be predicted from the VMA or the Burrow
+// type: a Loom ring, a Loom registered buffer, and a Weft share each hold a
+// handle_count ref that can outlive the mapping, so "the VMA went away" and
+// "the pages went away" are different events. Each charger pairs its uncharge
+// to the bool rather than inferring the event from a type or from a
+// handle_count sampled BEFORE the drop (which is both racy and, on the normal
+// Loom teardown order, simply wrong -- the #130 P1).
+//
+// The void-returning names above stay as wrappers for the many callers that
+// have no charge to settle.
+bool burrow_unref_freed(struct Burrow *v);
+bool burrow_release_mapping_freed(struct Burrow *v);
+
 // =============================================================================
 // P3-Db: high-level map / unmap into a Proc's address space.
 // =============================================================================
@@ -448,6 +464,12 @@ int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 p
 // PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->vma_lock` (a
 // `p->vmas` mutator; same discipline as burrow_map).
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
+
+// burrow_unmap, additionally reporting whether removing this mapping was the
+// drop that freed the Burrow's pages (see burrow_unref_freed above). *out_freed
+// is written on every path, including the -1 ones (false).
+int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
+                           bool *out_freed);
 
 // =============================================================================
 // Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).

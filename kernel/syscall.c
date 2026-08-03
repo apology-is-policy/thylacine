@@ -4216,66 +4216,64 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // occupancy is unchanged is not a bound. Listing what DID charge (rather
     // than subtracting what didn't) also means a future Burrow type is
     // uncharged by default -- the fail-safe direction.
-    u32 uncharge = 0;
+    // #130: SPLIT the two shapes, because the event that ends the charge is
+    // different for each.
+    //
+    //   - ANON_LAZY charged per FAULT, so the refund is the resident count --
+    //     read BEFORE the unmap (the pages are gone after) and applied on a
+    //     successful unmap. A lazy Burrow has no second owner (it cannot be
+    //     Loom-registered -- loom_resolve_buf requires BURROW_TYPE_ANON -- and
+    //     cannot be Weft-shared), so unmapping it always frees it.
+    //
+    //   - ANON charged the whole buddy-rounded occupancy ONCE, and its pages
+    //     can outlive the VMA: a Loom ring, a Loom registered buffer, and a
+    //     Weft share each hold a handle_count ref. So the refund is applied iff
+    //     the unmap was the drop that actually FREED the pages -- reported by
+    //     burrow_unmap_reporting rather than predicted from the type.
+    //
+    // The predicted form is what #106-F1 got wrong twice over. Refunding on the
+    // TYPE let EL0 detach a Loom ring, take the refund, keep the pages on the
+    // Loom's ref, and re-attach a full PROC_PAGE_MAX -- an unprivileged ~1.5x
+    // breach of the floor. Then refunding on a handle_count SAMPLED BEFORE THE
+    // DROP swung it the other way: on the ordinary teardown order (detach, then
+    // close -- what Ring::drop does) the sample reads 1, the refund is skipped,
+    // and loom_free went on to free the pages with nothing uncharging -- a
+    // PERMANENT over-charge, and a registered buffer can be the entire budget.
+    // Both directions come from treating "the mapping went away" as if it were
+    // "the pages went away". They are separate events; only the drop itself
+    // knows which one happened.
+    u32 lazy_uncharge = 0;
+    bool eager_anon   = false;
     if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
         !(dvma->flags & VMA_FLAG_SHARED_IN)) {
         if (dvma->burrow->type == BURROW_TYPE_ANON_LAZY)
-            uncharge = burrow_lazy_resident_count(dvma->burrow);   // only the resident
-        else if (dvma->burrow->type == BURROW_TYPE_ANON &&
-                 burrow_handle_count(dvma->burrow) == 0)
-            // #106-audit F1 [P1]: refund only when this unmap actually RELEASES
-            // the pages. The type says the VMA's shape; it does not say the
-            // pages went away.
-            //
-            // I-32 charges OCCUPANCY, and occupancy ends when the pages are
-            // freed -- which under the #847 dual refcount happens iff the
-            // mapping was the LAST reference. `handle_count == 0` is exactly
-            // that condition, and it is the attach shape by construction:
-            // sys_burrow_attach_for_proc drops its construction handle right
-            // after burrow_map ("the VMA owns the Burrow"), so an attach VMA
-            // always reads 0 here.
-            //
-            // The Loom ring is the one eager charger whose Burrow has a SECOND
-            // owner that outlives the VMA -- loom_create keeps a handle_count
-            // ref for the Loom's whole life so the ring pages cannot vanish
-            // under the kernel's ring_kva. Pre-fix, EL0 took the ring_va and
-            // ring_size handed back in loom_params, called SYS_BURROW_DETACH on
-            // them, and got the full charge refunded while the pages stayed
-            // allocated on the Loom's ref -- then looped over the 256 handle
-            // slots and re-attached a full PROC_PAGE_MAX. An unprivileged
-            // ~1.5x breach of the per-Proc floor, with no capability required.
-            // The charge comment at SYS_LOOM_SETUP claimed "charge and refund
-            // agree": true of the AMOUNTS, false of the EVENT.
-            //
-            // Racing a concurrent loom close (handle_count 1 -> 0 just after
-            // this read) fails SAFE: we skip a refund whose pages did free, so
-            // the Proc stays charged for memory it no longer holds -- an
-            // over-charge of its own budget, never an under-charge. The
-            // opposite order cannot happen (nothing raises handle_count on a
-            // Burrow reachable only through this VMA).
-            //
-            // #106: mirror the attach charge exactly -- the buddy-rounded
-            // occupancy, from the same `length` the charge was computed from.
-            // burrow_unmap exact-matches the VMA, so a successful detach has
-            // length == the attach length and the two agree by construction.
-            //
-            // The u32 cast: `length` is user-supplied and only bounded here by
-            // the burrow window (~64 TiB), so in isolation it could truncate.
-            // It cannot in practice -- every eager ANON VMA reachable here was
-            // installed by SYS_BURROW_ATTACH (<= BURROW_ATTACH_MAX, 65536
-            // pages) or the Loom ring (< 1 MiB) -- and it could not matter
-            // anyway: the value is used only under `rc == 0`, i.e. only after
-            // burrow_unmap has exact-matched one of those VMAs.
-            uncharge = (u32)burrow_backing_pages(length);
+            lazy_uncharge = burrow_lazy_resident_count(dvma->burrow);
+        else if (dvma->burrow->type == BURROW_TYPE_ANON)
+            eager_anon = true;
     }
 
     // burrow_unmap exact-matches [vaddr, vaddr + length) against an
     // installed VMA (no partial detach at v1.0), removes it, and frees
     // the Burrow's pages -- for an ANON_LAZY Burrow that is the resident
     // sparse slots (burrow_free_internal's ANON_LAZY arm).
-    int rc = burrow_unmap(p, vaddr_raw, length);
-    if (rc == 0 && uncharge)
-        proc_page_uncharge(p, uncharge);
+    bool freed = false;
+    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed);
+    if (rc == 0 && lazy_uncharge)
+        proc_page_uncharge(p, lazy_uncharge);
+    if (rc == 0 && eager_anon && freed)
+        // #106: mirror the attach charge exactly -- the buddy-rounded
+        // occupancy, from the same `length` the charge was computed from.
+        // burrow_unmap exact-matches the VMA, so a successful detach has
+        // length == the attach length and the two agree by construction.
+        //
+        // The u32 cast: `length` is user-supplied and only bounded here by the
+        // burrow window (~64 TiB), so in isolation it could truncate. It cannot
+        // in practice -- every eager ANON VMA reachable here was installed by
+        // SYS_BURROW_ATTACH (<= BURROW_ATTACH_MAX, 65536 pages) or the Loom
+        // ring (< 1 MiB) -- and it could not matter anyway: the value is used
+        // only under `rc == 0`, i.e. only after burrow_unmap has exact-matched
+        // one of those VMAs.
+        proc_page_uncharge(p, (u32)burrow_backing_pages(length));
     spin_unlock(&p->vma_lock);
 
     return (s64)rc;
@@ -5130,6 +5128,16 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         loom_unref(l);
         return -1;
     }
+
+    // #130: bind the I-32 charge ledger. Deliberately LAST -- after the final
+    // failure path -- so it marks a fully-constructed Loom. Every rollback
+    // above uncharges explicitly and then loom_unref's a Loom whose owner is
+    // still NULL, so loom_free's uncharge cannot double-refund them. From here
+    // on the Loom owns the settlement: whichever of {the ring VA's detach,
+    // loom_free} frees the pages does the single uncharge.
+    l->owner      = p;
+    l->owner_pid  = p->pid;
+    l->ring_pages = ring_pages;
 
     out->flags         = flags;   // echo the granted setup flags (LOOM_SETUP_SQPOLL)
     out->sq_entries    = l->sq_entries;
