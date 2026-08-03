@@ -916,8 +916,8 @@ void boot_main(void) {
     //
     // A-5a: joey is now the long-running session supervisor. On SUCCESS it
     // calls SYS_BOOT_COMPLETE (-> boot_mark_complete prints the banner) and
-    // then NEVER exits (it getty-loops /sbin/login), so joey_run's wait_pid
-    // blocks forever and this call does not return. On FAILURE joey exits
+    // then NEVER exits (it getty-loops /sbin/login), so joey_run's by-pid
+    // wait_pid_for blocks forever and this call does not return. On FAILURE joey exits
     // non-zero before the banner -> joey_run extincts. Either way the banner
     // is no longer printed here -- it rides SYS_BOOT_COMPLETE while joey is
     // alive (IDENTITY-DESIGN.md section 9.9).

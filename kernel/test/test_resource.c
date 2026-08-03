@@ -455,6 +455,67 @@ void test_resource_attach_charges_buddy_rounded(void) {
     res_drop(p);
 }
 
+// #106-audit F1 [P1]: SYS_BURROW_DETACH must not refund page_count when the
+// unmap does not RELEASE the pages.
+//
+// The Loom ring is the one eager charger whose Burrow keeps a second owner
+// past the VMA: loom_create holds a handle_count ref for the Loom's life. Its
+// ring is mapped in the burrow-attach window and its (ring_va, ring_size) are
+// handed to EL0 in loom_params, so an unprivileged Proc can detach it -- and
+// pre-fix collected the full refund while the pages stayed allocated on the
+// Loom's ref. Loop that over the handle table and the per-Proc floor is
+// ~1.5x breached with no capability at all.
+//
+// This test stands the shape up WITHOUT a Loom (which a kernel test cannot
+// easily mint): an ANON Burrow whose construction handle is deliberately
+// RETAINED across the map, which is exactly the Loom's refcount posture. The
+// pre-charge is load-bearing for the same reason as the #122 test below --
+// proc_page_uncharge clamps at 0, so "unchanged" is only falsifiable above 0.
+//
+// Revert-probe: drop `&& burrow_handle_count(...) == 0` from the ANON arm and
+// the refund assert fails (page_count returns to kPre).
+void test_resource_detach_retained_handle_keeps_page_count(void) {
+    struct Proc *p = res_make(A_REAL_USER);          // non-exempt
+
+    const u32 kPre = 100u;
+    TEST_ASSERT(proc_page_charge(p, kPre), "pre-charge the page floor");
+
+    // 3 pages -> the buddy rounds to 4; the charge and any refund are both
+    // burrow_backing_pages(length), so a non-power-of-two also keeps this test
+    // honest about the #106 unit.
+    struct Burrow *v = burrow_create_anon(3u * PAGE_SIZE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon failed");
+    size_t vsize = burrow_get_size(v);
+    u32    vpages = (u32)burrow_backing_pages(vsize);
+
+    spin_lock(&p->vma_lock);
+    u64 va;
+    int gap = vma_find_gap(p, vsize, EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP, &va);
+    int charged = (gap == 0) ? (proc_page_charge(p, vpages) ? 0 : -1) : -1;
+    int mapped  = (charged == 0) ? burrow_map(p, v, va, vsize, VMA_PROT_RW) : -1;
+    spin_unlock(&p->vma_lock);
+    TEST_EXPECT_EQ(gap, 0,     "found a gap for the ring stand-in");
+    TEST_EXPECT_EQ(charged, 0, "charged the ring pages");
+    TEST_EXPECT_EQ(mapped, 0,  "mapped the ring stand-in");
+    // NOTE: no burrow_unref here -- unlike SYS_BURROW_ATTACH, we KEEP the
+    // construction handle. That single difference is the whole finding.
+    TEST_EXPECT_EQ(burrow_handle_count(v), 1,
+                   "the stand-in retains its handle ref (the Loom's posture)");
+    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre + vpages,
+                   "the ring charge landed");
+
+    s64 d = sys_burrow_detach_for_proc(p, va, (u64)vsize);
+    TEST_EXPECT_EQ(d, 0L, "detach of the ring stand-in ok");
+    // The pages did NOT free (our handle still holds them), so the charge must
+    // stand. A refund here is the I-32 bypass.
+    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre + vpages,
+                   "#106-F1: no refund while another owner still holds the pages");
+
+    burrow_unref(v);                                  // now the pages really free
+    __atomic_store_n(&p->page_count, 0u, __ATOMIC_RELEASE);
+    res_drop(p);
+}
+
 // #122: SYS_BURROW_DETACH must not refund page_count for a VMA that charged a
 // DIFFERENT axis. burrow_share_into (the SYS_WEFT_MAP substrate) charges the
 // client's shared_map_pages and deliberately leaves page_count alone, but it

@@ -670,3 +670,83 @@ void test_exec_setup_bss_tail_icache_synced(void) {
 
     drop_proc(p);
 }
+
+// #107-audit F1 + F2: the SECOND half of #107, and the site that actually
+// matters.
+//
+// #107 made two independent changes -- widen the span to the page-rounded
+// segment, AND move the call OUT of the `filesz > 0` guard -- and the test
+// above guards only the first. It builds its ELF with filesz 0x40, so
+// re-nesting the sync under `if (seg->filesz > 0)` leaves both of its
+// assertions true and the suite green, with a pure-bss PF_X segment (which
+// elf_load accepts: it rejects only filesz > memsz) again mapped executable
+// with no maintenance at all.
+//
+// It also drives the WRONG path. exec_setup -> exec_map_segment is the BLOB
+// arm, whose only production caller is joey.c's build-time-baked init; every
+// other caller is a test. The path a crafted ELF reaches from any Proc that
+// can write and exec a file is exec_setup_from_spoor -> map_eager_from_file,
+// and NO test read the observable after a from_spoor exec -- the two
+// from_spoor tests both use filesz == memsz, so their PF_X segments take the
+// file-backed arm and never call exec_make_exec_coherent at all. Reverting
+// that site alone left the suite fully green.
+//
+// One test closes both: filesz 0 (so the sync must be ungated) through
+// from_spoor (so it is map_eager_from_file's sync), with memsz 0x2000 so the
+// dispatch gate routes eager -- round_up(vaddr + 0) != round_up(vaddr + 0x2000),
+// so file_shareable is false. Revert-probe it BOTH ways: narrow the span ->
+// the length assert fails; re-nest under filesz > 0 -> the count assert fails
+// (the call never happens, so the count does not advance).
+void test_exec_from_spoor_bss_only_text_icache_synced(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // One PF_R|PF_X segment: ZERO file bytes, two pages of memory -- a pure-bss
+    // executable segment. Legal per elf_load (filesz <= memsz is the only
+    // relation it checks) and eager-routed by the from_spoor gate.
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0);
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)
+        (g_elf_blob + sizeof(struct Elf64_Ehdr));
+    ph[0].p_memsz = 0x2000;
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x107B55ull;      // distinct Image key vs any other test
+    exe->qid.vers = 1;
+
+    u64 calls0 = exec_icache_calls_for_test();
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup_from_spoor (PF_X, filesz == 0)");
+
+    struct Vma *text = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(text != NULL,              "text VMA visible");
+    TEST_EXPECT_EQ(text->prot, VMA_PROT_RX, "text prot RX");
+    TEST_ASSERT(text->burrow != NULL,      "text burrow present");
+    // The gate must have chosen the EAGER arm -- if this is FILE-backed the
+    // test is exercising the demand-page path and proves nothing about
+    // map_eager_from_file.
+    TEST_EXPECT_EQ((int)text->burrow->type, (int)BURROW_TYPE_ANON,
+        "pure-bss PF_X segment routes EAGER (the map_eager_from_file arm)");
+
+    // The sync HAPPENED -- this is the assertion that goes red if the call is
+    // ever re-nested under `filesz > 0`, which for this segment means never.
+    TEST_EXPECT_EQ(exec_icache_calls_for_test() - calls0, (u64)1,
+        "one I-cache sync issued for the one PF_X segment (not gated on filesz)");
+
+    u64 want_addr = (u64)(uintptr_t)pa_to_kva(page_to_pa(text->burrow->pages));
+    u64 got_addr = 0;
+    size_t got_len = 0;
+    exec_icache_last_for_test(&got_addr, &got_len);
+    TEST_EXPECT_EQ(got_addr, want_addr,
+        "I-cache sync issued at the segment's kernel VA");
+    TEST_EXPECT_EQ((u64)got_len, (u64)0x2000,
+        "and covers the whole page-rounded span, with zero bytes copied");
+
+    drop_proc(p);
+    image_cache_evict_idle_for_test();
+    spoor_clunk(exe);
+}

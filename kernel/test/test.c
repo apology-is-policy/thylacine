@@ -190,6 +190,7 @@ void test_resource_page_cap_attach_enforced(void);
 void test_resource_vma_cap(void);
 void test_resource_attach_charges_buddy_rounded(void);
 void test_resource_detach_shared_in_keeps_page_count(void);
+void test_resource_detach_retained_handle_keeps_page_count(void);
 void test_burrow_backing_pages_matches_alloc(void);
 
 void test_exec_ns_resolve_absolute_ok(void);
@@ -359,6 +360,7 @@ void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
 void test_exec_setup_bss_tail_icache_synced(void);
+void test_exec_from_spoor_bss_only_text_icache_synced(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -1523,6 +1525,8 @@ struct test_case g_tests[] = {
                                        test_resource_attach_charges_buddy_rounded, false, NULL },
     { "resource.detach_shared_in_keeps_page_count",
                                        test_resource_detach_shared_in_keeps_page_count, false, NULL },
+    { "resource.detach_retained_handle_keeps_page_count",
+                                       test_resource_detach_retained_handle_keeps_page_count, false, NULL },
     { "burrow.backing_pages_matches_alloc",
                                        test_burrow_backing_pages_matches_alloc, false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
@@ -1721,6 +1725,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "exec.setup_bss_tail_icache_synced",
                                        test_exec_setup_bss_tail_icache_synced,
+                                                                           false, NULL },
+    { "exec.from_spoor_bss_only_text_icache_synced",
+                                       test_exec_from_spoor_bss_only_text_icache_synced,
                                                                            false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
