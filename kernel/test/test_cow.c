@@ -85,6 +85,7 @@ void test_burrow_lazy_free_is_conditional_on_share(void);
 void test_cow_burrow_clone_shares_resident_pages(void);
 void test_cow_addrspace_clone_shares_and_writeprotects(void);
 void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
+void test_cow_clone_shares_readonly_eager_anon(void);
 void test_cow_break_read_then_write_copies(void);
 void test_cow_break_sole_holder_takes_in_place(void);
 
@@ -357,6 +358,70 @@ void test_cow_addrspace_clone_shares_and_writeprotects(void) {
     drop_proc_for_cow(parent);
 }
 
+// #136: a READ-ONLY eager-ANON VMA is SHARED, not refused and not cloned.
+//
+// This is the vDSO clock page, and it is in EVERY EL0 address space -- so before
+// this arm existed addrspace_clone refused every real fork, and only the synthetic
+// spaces these tests BUILD (which have no vDSO) could be cloned at all. The lesson
+// generalises past this bug: a test that constructs its own subject decides what
+// the subject contains, and can therefore omit the very thing production always
+// has. Hence the pairing below -- read-only shares, writable still refuses -- and
+// hence /fork-probe leg K, which forks a REAL address space nobody assembled.
+void test_cow_clone_shares_readonly_eager_anon(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "proc_alloc");
+
+    // A lazy VMA so the clone has real COW work to do alongside the eager one.
+    struct Burrow *lazy = burrow_create_anon_lazy(COW_ONE_PAGE);
+    TEST_ASSERT(lazy != NULL, "burrow_create_anon_lazy");
+    TEST_EXPECT_EQ(burrow_map(parent, lazy, COW_TEST_VA, COW_ONE_PAGE, VMA_PROT_RW), 0,
+                   "map the lazy VMA");
+    burrow_unref(lazy);
+
+    // The vDSO's shape: eager anon, mapped READ-ONLY.
+    struct Burrow *ro = burrow_create_anon(COW_ONE_PAGE);
+    TEST_ASSERT(ro != NULL, "burrow_create_anon");
+    TEST_EXPECT_EQ(burrow_map(parent, ro, COW_TEST_VA + 0x100000ull, COW_ONE_PAGE,
+                              VMA_PROT_READ), 0, "map the read-only eager VMA");
+
+    struct AddrSpace *child = addrspace_clone(parent->as, /*exempt=*/true);
+    TEST_ASSERT(child != NULL,
+                "a read-only eager-ANON VMA must not refuse the fork -- the vDSO "
+                "is exactly this, so refusing means no real Proc can fork");
+
+    struct Vma *cv = vma_lookup_in(child, COW_TEST_VA + 0x100000ull);
+    TEST_ASSERT(cv != NULL, "child has the read-only VMA");
+    TEST_ASSERT(cv->burrow == ro,
+                "SHARED, not cloned -- there is nothing to break, so both address "
+                "spaces map the one page (the read-only FILE reasoning)");
+    TEST_EXPECT_EQ((u64)(cv->flags & VMA_FLAG_COW), 0ull,
+                   "and not flagged COW: a shared read-only page has no break");
+
+    struct Vma *pv = vma_lookup_in(parent->as, COW_TEST_VA + 0x100000ull);
+    TEST_ASSERT(pv != NULL, "parent still has its read-only VMA");
+    TEST_EXPECT_EQ((u64)(pv->flags & VMA_FLAG_COW), 0ull,
+                   "the parent's copy is not flagged either");
+
+    // The lazy VMA alongside it still did the COW thing, so this is not passing
+    // by the clone having quietly become a no-op.
+    struct Vma *pl = vma_lookup_in(parent->as, COW_TEST_VA);
+    TEST_ASSERT(pl != NULL && (pl->flags & VMA_FLAG_COW) != 0,
+                "the lazy VMA in the same space still went COW");
+
+    addrspace_unref(child);
+
+    // WRITABLE eager anon is still refused -- the pairing that makes the arm a
+    // WRITABILITY test rather than a blanket admission of eager anon.
+    TEST_EXPECT_EQ(burrow_map(parent, ro, COW_TEST_VA + 0x200000ull, COW_ONE_PAGE,
+                              VMA_PROT_RW), 0, "map the SAME Burrow writable");
+    burrow_unref(ro);
+    TEST_ASSERT(addrspace_clone(parent->as, /*exempt=*/true) == NULL,
+                "a WRITABLE eager-ANON VMA must still refuse the fork -- one "
+                "indivisible buddy block has no per-page ownership to break");
+
+    drop_proc_for_cow(parent);
+}
+
 void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void) {
     struct Proc *parent = proc_alloc();
     TEST_ASSERT(parent != NULL, "proc_alloc");
@@ -394,14 +459,39 @@ void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void) {
                 "an eager-ANON mapping cannot be COW-forked -- refuse whole rather "
                 "than hand the child the wrong sharing semantics");
 
-    // The refusal left the parent EXACTLY as it was found. Both assertions are
-    // about the LAZY VMA, the one a half-run pass 2 would have touched.
+    // The failure path is where the three phases are DISTINGUISHABLE, so this is
+    // where they get pinned -- one assertion each, all about the LAZY VMA (the
+    // only one any phase touches).
     struct Vma *pv = vma_lookup_in(parent->as, COW_TEST_VA);
     TEST_ASSERT(pv != NULL, "parent still has its lazy VMA");
+
+    // Phase 1 ran, and ran FIRST (#134). It uninstalls ahead of the allocating
+    // phase precisely so no page is ever shared with the child while the parent
+    // still holds a writable PTE for it -- src->lock cannot establish that on its
+    // own, because a peer with an installed PTE stores in hardware and never
+    // takes the lock at all. With the uninstall left where it was (after the
+    // snapshot) this PTE would still be here.
+    TEST_EXPECT_EQ(cow_test_pte(parent->as->pgtable_root, COW_TEST_VA), 0ull,
+                   "the uninstall runs BEFORE the clone, so it runs even when "
+                   "the clone then fails");
+
+    // Phase 3 did NOT run, which is what "a failed fork leaves the parent intact"
+    // means once phase 1 has moved: unflagged, so the faults phase 1 just cost it
+    // re-install WRITABLE and it never learns a fork was attempted. The flag could
+    // not join phase 1 for exactly this reason -- an uninstall is recoverable by
+    // re-faulting, VMA_FLAG_COW is never cleared.
     TEST_EXPECT_EQ((u64)(pv->flags & VMA_FLAG_COW), 0ull,
                    "a FAILED fork flags nothing -- the flag pass runs on success only");
+
+    // ...and the recovery is real, not merely implied: one write fault and the
+    // parent is back where it started, writable PTE and all.
+    struct fault_info refi;
+    cow_make_fi(&refi, COW_TEST_VA, /*is_write=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(parent, &refi), FAULT_HANDLED,
+                   "the parent re-faults cleanly after a failed fork");
     TEST_EXPECT_EQ(cow_test_pte(parent->as->pgtable_root, COW_TEST_VA), pte_before,
-                   "a FAILED fork drops no PTE either");
+                   "and gets back the SAME writable PTE -- the uninstall cost it "
+                   "a fault, not its mapping");
 
     // And the Burrow the failed attempt DID clone before hitting the eager VMA was
     // released with the discarded child, so the page is solely held again.

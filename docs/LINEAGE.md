@@ -1023,16 +1023,36 @@ already describes it, because by then the substrate matches the description.
 > lock. `FILE` VMAs are shared, not cloned: REVENANT's dispatch gate admits only
 > non-writable segments, so there is nothing to break, and sharing is the point of
 > the I-36 Image cache. Guard VMAs are reproduced (dropping one silently deletes
-> the child's stack guard page). Everything else — eager `ANON`, `MMIO`, `DMA`,
-> `SHARED_IN` — is refused, and the fork fails whole.
+> the child's stack guard page). `MMIO`, `DMA` and `SHARED_IN` are refused, and
+> the fork fails whole.
+>
+> **Corrected at L-5 (#136): eager `ANON` splits on WRITABILITY.** This paragraph
+> said "everything else is refused", and that refused *every real address space* —
+> the vDSO clock page is a single kernel-owned eager-anon page mapped read-only
+> into every EL0 Proc, so the first real fork was refused outright. A **writable**
+> eager-anon VMA still refuses (one indivisible buddy block, no per-page ownership
+> to break); a **read-only** one is shared, on exactly the `FILE` reasoning — no
+> prot-mutation syscall exists (I-12), so read-only is permanent and there is
+> nothing to break. L-4b's tests could not see this: they BUILD their address
+> spaces, so the one VMA every real Proc has was in none of them.
 >
 > **The parent is modified too.** Its already-installed writable PTEs for every
 > COW range are *uninstalled*, so its next touch re-faults and re-installs
 > read-only. Leaving them is the I-44 violation: the parent would write through a
 > stale writable translation into a page the child now shares. Uninstalling rather
 > than write-protecting costs one extra fault per page and needs no new MMU
-> primitive. That pass runs **on success only**, so a refused fork leaves the
-> parent exactly as it was found.
+> primitive.
+>
+> **The uninstall runs FIRST, before anything is shared (#134).** L-4b-2 ran it
+> after the clone, on success only, and justified holding `src->lock` across both
+> as closing the window. It does not: the lock only reaches a peer that *faults*,
+> and a peer holding an already-installed writable PTE stores in hardware — no
+> fault, no kernel entry, no lock. So the child held a share of a page the parent
+> could still write, for the duration of the clone. Uninstalling first closes it by
+> construction (once the PTE is gone the peer MUST fault, and faulting needs the
+> lock), which is also Linux's structure. The **flag** stays in the success-only
+> pass: an uninstall is recoverable by re-faulting, `VMA_FLAG_COW` is not, so a
+> refused fork still leaves the parent semantically as it was found.
 >
 > **The break must clear the stale PTE before installing.**
 > `mmu_install_user_pte` *refuses* a mismatching install over a valid leaf — it
@@ -1132,7 +1152,7 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-3d** ✅ **LANDED** | The VIVARIUM `clone` row. `vivarium_clone_decide` (pure) + one `VIV_TIER2` entry + a shell that calls the SAME `sys_rfork_core` the native handler calls (extracted here, the V-8 `sys_fstat_for_proc` discipline). `CLONE_VM` without `CLONE_VFORK` is **refused**, not served — §8's as-built section carries why L-3c-2's fail-safe reasoning inverts for a stock Linux caller. Also replaced the four stale copies of the "native ceiling" literal with `VIV_NATIVE_CEILING` + a `_Static_assert`. | **MET, but not by the gate as written** — that gate named `posix_spawn`, which needs `execve` (221) and `wait4` (260) as well; both are L-6's, are real translators, and are dependencies of *posix_spawn* rather than of *the clone translation*. Replaced by: a clone whose child runs, writes into the shared address space, and exits, with the parent suspended until it does. 1286 → 1287/1287; `viv-pheno-probe` legs L155–L163, boot-fatal |
 | **L-4a** ✅ | **Prerequisite, not COW work**: exec's stack + every NON-EXECUTABLE segment move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots (the stack: only the run its argv/auxv frame occupies at the top). Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. Executable segments stay eager — the I-cache reason above. DMA + Weft rings stay eager too (they need physical contiguity). | **LANDED**: `exec.writable_segment_is_sparse` (4 MiB memsz, 64 B filesz -> 1024 slots reserved, 1 resident) + `exec.stack_is_sparse` (1 MiB reserved, 1 resident), both revert-probed; 1289/1289 + boot OK |
 | **L-4b** *(landed: b-1 substrate, b-2 clone + break)* | Per-page share counts + the COW break arm (stage 3a). The count is a **new** `struct page.cow_share` (taking the free `_pad`, so `sizeof` stays 48) — **not** the double-booked `refcount` (§2.8), and **not** a per-slot array, which §5.4's L-4b correction measures to be unimplementable: after a break the slot and its counted page diverge, and the free decision corrupts. A fork clones the Burrow per address space (Plan 9 `dupseg`); the break decides under a **global** COW leaf lock, because two sharers hold different Burrow locks. | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
-| **L-5** | Stock `fork()`: `RFPROC` alone, admitted once L-4's COW break can give the child a private-but-populated address space. (`SYS_RFORK` and child-context restoration are **already built** — L-3b — so what remains here is only lifting the `RFPROC`-alone refusal.) | stock `fork()` returns twice, correctly, in a vivarium |
+| **L-5** ✅ **LANDED** | Stock `fork()`. Two mechanical changes — `rfork_internal` clones for the fork shape (`fc && !RFMEM`), and `sys_rfork_core` admits `RFPROC` alone with `child_sp == 0` meaning INHERIT (the SP rules are RFMEM's, not the fork's). **Plus the two defects making it live exposed**, neither of which L-4b's tests could see: **#136** — `addrspace_clone` refused every real address space (the vDSO is read-only eager anon, and the tests build their own spaces); **#137** — `ESR_ISS_WNR_BIT` was 9, not 6, so `fi->is_write` had been ALWAYS FALSE tree-wide, leaving the COW write-break unreachable (an infinite fault loop) and the write-permission gate inert. | **MET, and not by the gate as written** — "in a vivarium" needs L-6's `execve`/`wait4` rows; the fork itself is proven natively instead. `/fork-probe` legs K (three separately-falsifiable COW claims, both Procs running) + L (a store to read-only text is DENIED — the half of #137 leg K does not cover). Five independent revert probes, the sharpest being: **drop the clone wiring and the unit suite stays at a full 1300/1300 while only the in-guest leg fails** |
 | **L-6** | The VIVARIUM phenotype rows: `clone`/`execve`/`wait4`/`vfork`. | **the arc gate — an Alpine `/bin/sh` runs a command** |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
 

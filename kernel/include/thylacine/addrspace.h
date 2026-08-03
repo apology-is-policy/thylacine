@@ -181,14 +181,22 @@ void addrspace_unref(struct AddrSpace *as);
 //                          there is nothing to break -- and sharing is the entire
 //                          point of the I-36 Image cache. A writable FILE VMA
 //                          would be a contradiction; it is refused.
+//   BURROW_TYPE_ANON       depends on WRITABILITY, and this is the one kind where
+//                          it does. Eager anon is one indivisible buddy block, so
+//                          a WRITABLE one has no per-page ownership for a break to
+//                          take and the fork is REFUSED. A READ-ONLY one has
+//                          nothing to break -- no prot-mutation syscall exists
+//                          (I-12), so read-only is permanent -- and is SHARED, on
+//                          exactly the FILE reasoning above. The vDSO clock page is
+//                          this case, and it is in EVERY address space, so without
+//                          the read-only arm no real fork clones at all (#136).
 //   guard VMA              reproduced as a guard (no Burrow, prot 0). Dropping it
 //                          would silently delete the child's stack guard page.
 //   anything else          REFUSED, so the fork fails cleanly rather than handing
 //                          the child a mapping with the wrong sharing semantics:
-//                            - eager BURROW_TYPE_ANON has no per-page ownership to
-//                              break (one indivisible buddy block);
 //                            - MMIO / DMA are I-34 hardware the child must not get
-//                              a second mapping of;
+//                              a second mapping of, at ANY prot: sharing a device
+//                              window is an authority transfer, not a copy;
 //                            - VMA_FLAG_SHARED_IN is another Proc's memory, whose
 //                              G-2 budget is charged to the mapping address space.
 //

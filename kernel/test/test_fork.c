@@ -43,6 +43,8 @@
 
 void test_fork_frame_init(void);
 void test_fork_rfork_arg_rejection(void);
+void test_fork_table_copy(void);        // (these two had no prototype and
+void test_fork_vfork_release(void);     //  warned; not L-5's, fixed in passing)
 
 // The real handler (the sys_pci_claim_handler pattern in test_allowance.c).
 extern s64 sys_rfork_handler(struct exception_context *ctx);
@@ -123,51 +125,87 @@ void test_fork_rfork_arg_rejection(void) {
     const u64 ok_sp   = 0x0000000050000000ull;   // nonzero, 16-aligned, user VA
     const u64 self_sp = 0x0000000060000000ull;
 
-    // RFPROC alone is REFUSED, not served. The child would get a fresh EMPTY
-    // address space and then be resumed at its parent's PC -- an instruction
-    // fetch fault on the first cycle. Serving it would be a fork that cannot
-    // work; refusing says so until COW exists (L-4).
-    TEST_EXPECT_EQ(rfork_call(RFPROC, ok_sp, 0, self_sp), -(s64)T_E_INVAL,
-                   "RFPROC alone must be refused -- a private child address "
-                   "space means copy-on-write, which is not built yet");
-
-    // Every other Plan 9 flag stays reserved rather than ignored.
+    // Every Plan 9 flag other than the two supported shapes stays reserved
+    // rather than ignored.
     TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM | 0x0004u, ok_sp, 0, self_sp),
                    -(s64)T_E_INVAL,
                    "an unsupported flag must be refused, never silently "
                    "dropped -- 'honoured' and 'ignored' must not look alike");
 
-    // child_sp is MANDATORY. A zero SP is the shape a caller lands on if it
-    // thinks fork defaults the stack the way POSIX fork does.
+    // --- The RFMEM-only rules -----------------------------------------------
+    //
+    // These two exist because the two Procs write the SAME physical stack. They
+    // must keep firing under RFMEM and must NOT fire without it, and it takes
+    // both directions to say that: a gate that simply dropped them would satisfy
+    // the RFPROC legs below, and one that applied them to everything would
+    // satisfy these.
+
+    // child_sp is MANDATORY under RFMEM. A zero SP is the shape a caller lands
+    // on if it thinks vfork defaults the stack the way POSIX fork does.
     TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM, 0, 0, self_sp), -(s64)T_E_INVAL,
-                   "child_sp == 0 must be refused -- sharing an address space "
-                   "with no separate stack corrupts both frames at once");
-
-    TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM, ok_sp + 8, 0, self_sp),
-                   -(s64)T_E_INVAL,
-                   "a misaligned child_sp must be refused -- AAPCS64 requires "
-                   "16-byte SP alignment and an unaligned SP_EL0 faults");
-
-    TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM, UACCESS_USER_VA_TOP, 0, self_sp),
-                   -(s64)T_E_INVAL,
-                   "a child_sp outside the user range must be refused");
+                   "child_sp == 0 must be refused under RFMEM -- sharing an "
+                   "address space with no separate stack corrupts both frames "
+                   "at once");
 
     // The one overlap case that is free to see. Not a safety property -- an SP
     // that overlaps the parent's stack without equalling it is just as fatal
     // and is not detectable here -- but refusing the visible mistake is free.
     TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM, self_sp, 0, self_sp),
                    -(s64)T_E_INVAL,
-                   "handing the child the caller's OWN live SP must be refused");
+                   "handing the child the caller's OWN live SP must be refused "
+                   "under RFMEM");
 
-    // And the well-formed request still fails, but for the RIGHT reason and
-    // from a LATER gate: kproc has no address space, so L-3a's RFMEM refusal
-    // fires inside rfork. Without this leg every assertion above would also
-    // pass if the handler simply rejected everything.
+    // --- Well-formedness, which binds under BOTH shapes ----------------------
+    //
+    // An unaligned or kernel-range SP is a bad value however the child got it,
+    // so these are checked once, outside the RFMEM branch -- and pinned under
+    // RFPROC alone precisely because that is the shape that could have lost
+    // them when the checks moved.
+    TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM, ok_sp + 8, 0, self_sp),
+                   -(s64)T_E_INVAL,
+                   "a misaligned child_sp must be refused -- AAPCS64 requires "
+                   "16-byte SP alignment and an unaligned SP_EL0 faults");
+    TEST_EXPECT_EQ(rfork_call(RFPROC, ok_sp + 8, 0, self_sp), -(s64)T_E_INVAL,
+                   "a misaligned child_sp must be refused under RFPROC too");
+
+    TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM, UACCESS_USER_VA_TOP, 0, self_sp),
+                   -(s64)T_E_INVAL,
+                   "a child_sp outside the user range must be refused");
+    TEST_EXPECT_EQ(rfork_call(RFPROC, UACCESS_USER_VA_TOP, 0, self_sp),
+                   -(s64)T_E_INVAL,
+                   "a child_sp outside the user range must be refused under "
+                   "RFPROC too");
+
+    // --- Both shapes reach the fork (LINEAGE L-5) ---------------------------
+    //
+    // A well-formed request still fails, but for the RIGHT reason and from a
+    // LATER gate: kproc has no address space, so rfork_internal's refusal fires.
+    // Without these legs every assertion above would also pass if the handler
+    // simply rejected everything.
     TEST_EXPECT_EQ(rfork_call(RFPROC | RFMEM, ok_sp, 0, self_sp),
                    -(s64)T_E_AGAIN,
-                   "a WELL-FORMED request must get past the argument gate and "
+                   "a WELL-FORMED vfork must get past the argument gate and "
                    "fail later (kproc has no address space to share) -- "
                    "otherwise 'validated' and 'refuses everything' look alike");
+
+    // L-5: RFPROC alone is SERVED now. It used to be refused here because the
+    // child would have got a fresh EMPTY address space and been resumed at its
+    // parent's PC; it gets a COW clone instead.
+    TEST_EXPECT_EQ(rfork_call(RFPROC, ok_sp, 0, self_sp), -(s64)T_E_AGAIN,
+                   "RFPROC alone must reach the fork -- the child gets a COW "
+                   "clone of the parent's address space (L-4b), so the L-3b "
+                   "refusal is retired");
+
+    // The two SP values that are ERRORS under RFMEM and NORMAL under RFPROC --
+    // the same two legs as above, inverted. A plain fork() supplies NEITHER a
+    // stack nor a distinct one: the child runs on its own COW copy at the SAME
+    // VA, so zero (inherit) and the parent's own SP are what it MEANS.
+    TEST_EXPECT_EQ(rfork_call(RFPROC, 0, 0, self_sp), -(s64)T_E_AGAIN,
+                   "child_sp == 0 must be ACCEPTED under RFPROC -- it means "
+                   "inherit, and inheriting is what fork() is");
+    TEST_EXPECT_EQ(rfork_call(RFPROC, self_sp, 0, self_sp), -(s64)T_E_AGAIN,
+                   "the caller's own SP must be ACCEPTED under RFPROC -- the "
+                   "child writes its own COW copy, not the parent's stack");
 }
 
 // ---------------------------------------------------------------------------

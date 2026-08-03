@@ -1107,7 +1107,15 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // private space, because "the flag was ignored" and "the flag was honoured"
     // would then be indistinguishable from the outside, and the caller would
     // learn otherwise only when the child failed to see a write it expected.
-    if ((flags & RFMEM) && !parent->as) return -1;
+    //
+    // L-5 widens it to `fc` on the same reasoning. BOTH shapes that need the
+    // parent's address space are here now: RFMEM shares it, a fork COPIES it, and
+    // neither can be served from nothing. A fork whose parent has no space would
+    // quietly hand the child an empty one, and "the fork copied nothing" and "the
+    // fork copied an empty space" would be exactly as indistinguishable as the
+    // ignored flag above. (The entry shape is the third case and wants precisely
+    // that empty space -- see the alloc below.)
+    if ((fc || (flags & RFMEM)) && !parent->as) return -1;
 
     // #65 (I-32): the per-Proc child cap. Reject a fork bomb EARLY -- before the
     // heavy proc_alloc / territory_clone / thread_create -- so it is cheap. The
@@ -1143,7 +1151,39 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // "shares file descriptors" are independent claims, and the Linux shape this
     // eventually serves relies on that -- posix_spawn passes CLONE_VM WITHOUT
     // CLONE_FILES precisely so the child's dup2/close cannot disturb the parent.
-    struct Proc *child = proc_alloc_in((flags & RFMEM) ? parent->as : NULL);
+    //
+    // LINEAGE L-5: the third case, and the one that makes fork() a fork. There are
+    // exactly three answers to "what address space does the child get", and each
+    // is what its shape MEANS:
+    //
+    //   entry, no RFMEM  -> a fresh EMPTY space. The child starts at a kernel entry
+    //                       point and execs; copying the parent's would be pure
+    //                       waste, thrown away at the exec.
+    //   RFMEM            -> the parent's, shared. The vfork shape.
+    //   fc, no RFMEM     -> a COW CLONE. Stock fork().
+    //
+    // The discriminator is `fc`, exactly as it is for the handle table two hundred
+    // lines below, and for the same reason rather than a coincidence: `fc` means
+    // the child IS the parent, continuing on its frame -- so it must see the
+    // parent's memory AND the parent's descriptors, or its very next instruction
+    // reads something that is not there. One fact, two consequences.
+    //
+    // The clone is born with one reference (ours); proc_alloc_in takes the child's;
+    // we drop ours below, leaving exactly the child's. That is also why the failure
+    // paths need nothing bespoke -- proc_alloc_in's own rollback drops the child's
+    // reference, and our unref then takes the last one.
+    struct AddrSpace *cloned = NULL;
+    if (fc && !(flags & RFMEM)) {
+        // proc_resource_exempt(parent) is the CHILD's verdict: identity is
+        // INHERITED across rfork (see below), so parent and child agree, and the
+        // child does not exist yet to be asked.
+        cloned = addrspace_clone(parent->as, proc_resource_exempt(parent));
+        if (!cloned) return -1;         // OOM, or an unclonable VMA kind
+    }
+
+    struct Proc *child =
+        proc_alloc_in(cloned ? cloned : ((flags & RFMEM) ? parent->as : NULL));
+    if (cloned) addrspace_unref(cloned);   // hand sole ownership to the child
     if (!child) return -1;
 
     // P4-Ic3: capture parent->caps once under acquire fence. R9 F146

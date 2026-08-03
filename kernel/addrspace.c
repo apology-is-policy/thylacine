@@ -147,8 +147,25 @@ static bool clone_one_vma(struct AddrSpace *dst, bool exempt,
         // a fail-closed check on an impossible shape rather than a live path.
         if (src_vma->prot & VMA_PROT_WRITE) return false;
         break;
+    case BURROW_TYPE_ANON:
+        // Eager anon is ONE indivisible buddy block, so there is no per-page
+        // ownership for a break to take and a WRITABLE one cannot be COW-forked:
+        // refuse the fork whole rather than hand the child the wrong sharing
+        // semantics. But a READ-ONLY one has nothing to break -- neither Proc can
+        // ever write it (there is no prot-mutation syscall; I-12) -- so it is
+        // shared outright, exactly as read-only FILE text above is.
+        //
+        // This is not a corner case, it is EVERY PROC (#136). The vDSO clock page
+        // is a single kernel-owned eager-anon page mapped VMA_PROT_READ into every
+        // address space by exec_map_vdso, so without this arm addrspace_clone
+        // refuses every REAL fork and succeeds only on the synthetic spaces the
+        // unit tests build for themselves.
+        if (src_vma->prot & VMA_PROT_WRITE) return false;
+        break;
     default:
-        // Eager ANON (no per-page ownership), MMIO and DMA (I-34 hardware).
+        // MMIO and DMA (I-5 / I-34 hardware). Refused whatever the prot: mapping
+        // a device window into a second Proc is an authority transfer, not a
+        // memory copy, and read-only does not make it one.
         return false;
     }
 
@@ -189,36 +206,52 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
     struct AddrSpace *dst = addrspace_alloc();
     if (!dst) return NULL;
 
-    // src->lock across BOTH passes: a peer thread of the forking Proc can be in
-    // userland_demand_page right now, and it holds exactly this lock. Without the
-    // hold it could fill a slot between the snapshot and the write-protect, and
-    // that page would then be shared with the child while the parent still had a
-    // writable PTE for it.
+    // src->lock across all three phases: a peer thread of the forking Proc can be
+    // in userland_demand_page right now, and it holds exactly this lock.
     spin_lock(&src->lock);
 
+    // PHASE 1 -- drop the parent's own installed PTEs for every COW range, BEFORE
+    // anything is shared. They are WRITABLE (the VMA is), so leaving one in place
+    // while the child holds a share of the page behind it would let the parent
+    // write into the child's memory: the I-44 violation.
+    //
+    // THE ORDER IS THE WHOLE SAFETY ARGUMENT, and holding src->lock is not a
+    // substitute for it (#134). The lock only reaches a peer that FAULTS. A peer
+    // holding an already-installed writable PTE stores in hardware -- no fault, no
+    // kernel entry, no lock -- so with the uninstall AFTER the snapshot there is a
+    // window, lasting the rest of the clone, in which the child already holds a
+    // share of a page the parent can still write, silently. Uninstalling first
+    // closes it by construction: once the PTE is gone the peer MUST fault, and
+    // faulting needs this lock. Zero window, and it is Linux's own structure (it
+    // write-protects each PTE under the PTL it copies it under).
+    //
+    // The flag is deliberately NOT set here -- see phase 3.
+    //
+    // Uninstalling rather than write-protecting costs one extra fault per page and
+    // needs no new MMU primitive. mmu_uninstall_user_range issues the TLBI per
+    // page, so a peer already running on another CPU cannot keep using a cached
+    // writable translation either. It allocates nothing and cannot fail, which is
+    // what lets it run ahead of the decision to commit.
+    for (struct Vma *v = src->vmas; v; v = v->next) {
+        if (!vma_is_cow(v)) continue;
+        mmu_uninstall_user_range(src->pgtable_root, 0,
+                                 v->vaddr_start, v->vaddr_end);
+    }
+
+    // PHASE 2 -- build the child. The only phase that can fail.
     bool ok = true;
     for (struct Vma *v = src->vmas; v && ok; v = v->next)
         ok = clone_one_vma(dst, exempt, v);
 
+    // PHASE 3 -- flag the parent, on success only, so a FAILED fork leaves it
+    // semantically intact: unflagged, so the faults phase 1 just cost it install
+    // WRITABLE exactly as before, and it never learns a fork was attempted. (That
+    // is why the flag could not join phase 1 despite both touching the parent: the
+    // uninstall is recoverable by re-faulting, the flag is not -- VMA_FLAG_COW is
+    // never cleared.)
     if (ok) {
-        // Pass 2, on success only, so a FAILED fork leaves the parent exactly as
-        // it was found: no half-flagged VMAs, no gratuitously torn-down PTEs.
-        for (struct Vma *v = src->vmas; v; v = v->next) {
-            if (!vma_is_cow(v)) continue;
-            v->flags |= VMA_FLAG_COW;
-            // Drop the parent's own installed PTEs for the range. They are
-            // WRITABLE (the VMA is), and the pages behind them are now shared, so
-            // leaving them would let the parent write into the child's memory --
-            // the I-44 violation. Uninstalling rather than write-protecting costs
-            // one extra fault per page and needs no new MMU primitive; the fault
-            // arm re-installs read-only because the VMA is now flagged COW.
-            //
-            // mmu_uninstall_user_range issues the TLBI per page, so a peer thread
-            // already running on another CPU cannot keep using a cached writable
-            // translation either.
-            mmu_uninstall_user_range(src->pgtable_root, 0,
-                                     v->vaddr_start, v->vaddr_end);
-        }
+        for (struct Vma *v = src->vmas; v; v = v->next)
+            if (vma_is_cow(v)) v->flags |= VMA_FLAG_COW;
     }
 
     spin_unlock(&src->lock);

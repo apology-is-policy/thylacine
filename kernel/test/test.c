@@ -391,6 +391,7 @@ void test_burrow_lazy_free_is_conditional_on_share(void);
 void test_cow_burrow_clone_shares_resident_pages(void);
 void test_cow_addrspace_clone_shares_and_writeprotects(void);
 void test_cow_addrspace_clone_refuses_and_leaves_parent_intact(void);
+void test_cow_clone_shares_readonly_eager_anon(void);
 void test_cow_break_read_then_write_copies(void);
 void test_cow_break_sole_holder_takes_in_place(void);
 void test_fork_frame_init(void);
@@ -1834,6 +1835,8 @@ struct test_case g_tests[] = {
                                        test_cow_addrspace_clone_shares_and_writeprotects, false, NULL },
     { "cow.addrspace_clone_refuses_and_leaves_parent_intact",
                                        test_cow_addrspace_clone_refuses_and_leaves_parent_intact, false, NULL },
+    { "cow.clone_shares_readonly_eager_anon",
+                                       test_cow_clone_shares_readonly_eager_anon, false, NULL },
     { "cow.break_read_then_write_copies",
                                        test_cow_break_read_then_write_copies, false, NULL },
     { "cow.break_sole_holder_takes_in_place",

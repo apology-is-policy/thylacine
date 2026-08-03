@@ -125,6 +125,15 @@ const WRONG_STACK: u64 = 0x0000_BAD5_7ACC_0000;
 static INHERITED_WR_FD: AtomicU64 = AtomicU64::new(0);
 const INHERIT_TOKEN: &[u8] = b"forked-fd-ok";
 
+// Leg K's cell (LINEAGE L-5). A plain writable static, so it lives in the data
+// segment -- which since L-4a is an ANON_LAZY Burrow, exactly the kind the COW
+// clone copies and the break splits. The three values are distinct so a failure
+// says WHICH way the page leaked rather than just "not what I expected".
+static COW_CELL: AtomicU64 = AtomicU64::new(0);
+const COW_PRE_FORK: u64 = 0x0000_5052_4546_0000;     // "PREF"
+const COW_CHILD_WROTE: u64 = 0x0000_4348_4C44_0000;  // "CHLD"
+const COW_PARENT_WROTE: u64 = 0x0000_5041_524E_0000; // "PARN"
+
 extern "C" fn child_inherit_main(_arg: u64) -> ! {
     let fd = INHERITED_WR_FD.load(Ordering::Acquire) as i64;
     // A raw t_write, not io::stdout: the point is to name a NUMBER the parent
@@ -239,16 +248,31 @@ pub extern "C" fn rs_main() -> i32 {
     // terms rather than because the caller had nothing to share.
     let stack_top = core::ptr::addr_of!(CHILD_STACK) as u64 + (16 * 1024);
 
-    // RFPROC alone: refused until copy-on-write exists (L-4). Called through
-    // the raw shim so the flags can be wrong on purpose.
-    let r = unsafe { raw_rfork(T_RFPROC, stack_top, 0) };
+    // Called through the raw shim so the arguments can be wrong on purpose.
+    // Every request here must be REFUSED -- since L-5 served RFPROC alone, a leg
+    // that expected a rejection and got a fork would silently spawn a child that
+    // ran the whole rest of this probe.
+    //
+    // A reserved flag stays reserved rather than being ignored.
+    let r = unsafe { raw_rfork(T_RFPROC | 0x0004, stack_top, 0) };
     if r != -22 {
         // -T_E_INVAL
-        fail("RFPROC alone should be -EINVAL (COW is L-4, not built)");
+        fail("an unsupported flag should be -EINVAL, never silently dropped");
     }
+
+    // Well-formedness binds under BOTH shapes -- checked here on the FORK shape
+    // because that is the one that could have lost it when the SP rules split.
+    let r = unsafe { raw_rfork(T_RFPROC, stack_top + 8, 0) };
+    if r != -22 {
+        fail("a misaligned child_sp should be -EINVAL under RFPROC too");
+    }
+
+    // ...while a zero SP is an error only under RFMEM, where the two Procs write
+    // the same stack. Under RFPROC alone it means INHERIT, and leg K forks with
+    // exactly that.
     let r = unsafe { raw_rfork(T_RFPROC | T_RFMEM, 0, 0) };
     if r != -22 {
-        fail("a zero child_sp should be -EINVAL");
+        fail("a zero child_sp should be -EINVAL under RFMEM");
     }
 
     // ---- Legs A/B/C/D/G1: the fork itself ------------------------------
@@ -444,9 +468,167 @@ pub extern "C" fn rs_main() -> i32 {
         t_close(jwr);
     }
 
+    // ---- Leg K (LINEAGE L-5): fork, and the copy-on-write break ----------
+    //
+    // Every leg above is RFMEM: one address space, two Procs. This one is its
+    // opposite and its complement -- RFPROC alone, two address spaces, and the
+    // pages shared read-only between them until somebody writes. Leg B and this
+    // leg cannot both be satisfied by one accident: an implementation that always
+    // shared would fail K2, and one that always copied would fail B.
+    //
+    // Written the way fork() actually is -- one call, two returns, both Procs
+    // continuing in this same function with only x0 to tell them apart. No entry
+    // point, no separate stack: `child_sp = 0` means INHERIT, and the child runs
+    // on its own copy of this very frame.
+    //
+    // Three claims, each separately falsifiable:
+    //   K1  the child SEES the parent's pre-fork write -- the clone copied
+    //       CONTENT, it did not hand the child a fresh empty space.
+    //   K2  the child's write does NOT reach the parent -- the break gave the
+    //       WRITER a private page.
+    //   K3  the parent's later write does not reach the CHILD either -- the
+    //       break works in both directions, not just for whoever wrote first.
+    //
+    // The pipe dance is also what proves both Procs RUN. A fork that wrongly
+    // inherited the vfork suspend would park the parent until the child exits,
+    // while the child parks waiting for the parent -- so that kernel deadlocks
+    // here rather than failing an assertion. Not a graceful report, but an honest
+    // one: there is no way to observe "both are running" except by making both of
+    // them make progress.
+    let (kc_rd, kc_wr) = unsafe { t_pipe() };
+    if kc_rd < 0 || kc_wr < 0 { fail("leg K: pipe (child -> parent)"); }
+    let (kp_rd, kp_wr) = unsafe { t_pipe() };
+    if kp_rd < 0 || kp_wr < 0 { fail("leg K: pipe (parent -> child)"); }
+
+    // Written at RUNTIME, not left to the initialiser: this forces the page
+    // resident with a WRITABLE PTE before the fork, which is exactly the state
+    // the clone has to deal with (and the state #134 is about).
+    COW_CELL.store(COW_PRE_FORK, Ordering::SeqCst);
+
+    let r = unsafe { raw_rfork(T_RFPROC, 0, 0) };
+    if r == 0 {
+        // ---- the child ---------------------------------------------------
+        // Close the ends we do not use, FIRST. Each pipe must have exactly one
+        // writer, or a death is indistinguishable from a silence: if the parent
+        // kept its own copy of the child->parent write end, the parent's read
+        // could never EOF and a child that died before writing would HANG the
+        // probe instead of failing it.
+        unsafe { t_close(kc_rd); t_close(kp_wr); }
+
+        // Reports by EXIT STATUS only from here on. Printing would interleave
+        // with the parent, and the status is a cleaner channel than a shared
+        // cell we are in the middle of proving is NOT shared.
+        if COW_CELL.load(Ordering::SeqCst) != COW_PRE_FORK {
+            unsafe { t_exits(11) }                       // K1
+        }
+        COW_CELL.store(COW_CHILD_WROTE, Ordering::SeqCst);   // breaks COW
+
+        if unsafe { t_write(kc_wr, b"c".as_ptr(), 1) } != 1 {
+            unsafe { t_exits(13) }
+        }
+        let mut b = [0u8; 1];
+        if unsafe { t_read(kp_rd, b.as_mut_ptr(), 1) } != 1 {
+            unsafe { t_exits(14) }
+        }
+        if COW_CELL.load(Ordering::SeqCst) != COW_CHILD_WROTE {
+            unsafe { t_exits(12) }                       // K3
+        }
+        unsafe { t_exits(0) }
+    }
+    if r < 0 {
+        fail("RFPROC alone should FORK since L-5 -- the child gets a COW clone \
+              of this address space, so the L-3b refusal is retired");
+    }
+
+    // ---- the parent ------------------------------------------------------
+    // The mirror of the child's close: one writer per pipe, so a child that dies
+    // early gives this read an EOF (0) rather than blocking forever.
+    unsafe { t_close(kc_wr); t_close(kp_rd); }
+
+    let mut b = [0u8; 1];
+    let kn = unsafe { t_read(kc_rd, b.as_mut_ptr(), 1) };
+    if kn == 0 {
+        fail("leg K: the forked child died before reporting -- it resumed but \
+              faulted, most likely in the copy-on-write break");
+    }
+    if kn != 1 || b[0] != b'c' {
+        fail("leg K: the forked child never reported -- it did not resume, or \
+              it did not inherit the pipe");
+    }
+    if COW_CELL.load(Ordering::SeqCst) != COW_PRE_FORK {
+        fail("leg K2: the child's write reached the PARENT -- the fork shared \
+              the page instead of copying it on write");
+    }
+    COW_CELL.store(COW_PARENT_WROTE, Ordering::SeqCst);
+    if unsafe { t_write(kp_wr, b"p".as_ptr(), 1) } != 1 {
+        fail("leg K: could not release the forked child");
+    }
+
+    let mut stk: i32 = 0;
+    if unsafe { t_wait_pid_for(r as i32, 0, &mut stk as *mut i32) } != r {
+        fail("leg K: wait_pid_for did not reap the forked child");
+    }
+    if !t_wait_if_exited(stk) || t_wait_exitstatus(stk) != 0 {
+        match t_wait_exitstatus(stk) {
+            11 => fail("leg K1: the child did NOT see the parent's pre-fork \
+                        write -- the clone copied no content"),
+            12 => fail("leg K3: the PARENT's write reached the child -- the \
+                        break is one-directional"),
+            _  => fail("leg K: the forked child failed on its pipe"),
+        }
+    }
+    if COW_CELL.load(Ordering::SeqCst) != COW_PARENT_WROTE {
+        fail("leg K: the parent lost its own write");
+    }
+    unsafe {
+        t_close(kc_rd); t_close(kc_wr);
+        t_close(kp_rd); t_close(kp_wr);
+    }
+
+    // ---- Leg L (#137): a write to read-only memory is DENIED ---------------
+    //
+    // The other half of the ESR fix leg K needed. fi->is_write feeds two things:
+    // the copy-on-write break (leg K) and the write-permission gate on the fault
+    // path. With WnR read from the wrong ISS bit, is_write was always false, so
+    // the gate could never deny anything -- a store to a read-only page fell
+    // through the READ check, re-installed read-only, and re-faulted forever.
+    //
+    // This is the seam the unit tests could not cover from either side: the
+    // decode's own test MIRRORED the constant (it set the same wrong bit it
+    // asserted), and every fault-path test -- COW's and the vDSO's alike --
+    // builds a synthetic fault_info with is_write assigned directly, never
+    // executing the decode at all. So the bug lived precisely between two things
+    // that were each "tested".
+    //
+    // The target is this function's OWN address: text is mapped read + execute
+    // and never writable (I-12 W^X), so it is a read-only VMA that needs no
+    // hardcoded constant and cannot drift. The child dies, which is the point --
+    // so it has to BE a child.
+    let lpid = unsafe { raw_rfork(T_RFPROC, 0, 0) };
+    if lpid == 0 {
+        let text = rs_main as *const () as *mut u64;
+        unsafe { core::ptr::write_volatile(text, 0xDEAD) };
+        // Reaching here at all means the write was ALLOWED. Exiting 0 is the
+        // failure signal: the parent asserts this status is NOT 0.
+        unsafe { t_exits(0) }
+    }
+    if lpid < 0 {
+        fail("leg L: could not fork the write-denial prober");
+    }
+    let mut lst: i32 = 0;
+    if unsafe { t_wait_pid_for(lpid as i32, 0, &mut lst as *mut i32) } != lpid {
+        fail("leg L: wait_pid_for did not reap the write-denial prober");
+    }
+    if t_wait_if_exited(lst) && t_wait_exitstatus(lst) == 0 {
+        fail("leg L: a store to READ-ONLY text was ALLOWED -- the fault path's \
+              write-permission gate is inert, which is what a WnR read from the \
+              wrong ESR bit does to it (#137)");
+    }
+
     mark("fork-probe: PASS (resumed at the parent's PC, x0 = 0, own stack, \
           shared address space, distinct reapable pid, inherited fds, \
-          parent suspended until the child exited AND until it exec'd)");
+          parent suspended until the child exited AND until it exec'd, \
+          and RFPROC alone forks with a private copy-on-write image)");
     0
 }
 

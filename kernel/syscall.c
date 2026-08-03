@@ -6989,9 +6989,10 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
 // =============================================================================
 // SYS_RFORK -- LINEAGE L-3b (docs/LINEAGE.md section 5.4, invariant I-44).
 //
-// The EL0 surface for rfork(RFPROC|RFMEM), and the tree's first syscall that
-// returns twice. The ABI is documented at SYS_RFORK in syscall.h; what follows
-// is why this handler is shaped the way it is.
+// The EL0 surface for rfork -- both shapes since L-5 (RFPROC|RFMEM is vfork,
+// RFPROC alone is fork) -- and the tree's first syscall that returns twice. The
+// ABI is documented at SYS_RFORK in syscall.h; what follows is why this handler
+// is shaped the way it is.
 //
 // It takes `ctx` for the same reason sys_execve_handler does, but inverted:
 // execve REWRITES the frame so its own eret starts a new image; this one COPIES
@@ -7022,25 +7023,48 @@ static s64 sys_rfork_core(struct exception_context *ctx, unsigned flags,
     struct Thread *t = current_thread();
     if (!t)      return -(s64)T_E_INVAL;
 
-    // Exactly RFPROC|RFMEM. RFPROC alone would hand the child a fresh EMPTY
-    // address space and then resume it at its parent's PC -- an instruction
-    // fetch fault on the first cycle. Refusing is the honest answer until COW
-    // exists (L-4); serving it would be a fork that cannot work.
-    if (flags != (unsigned)(RFPROC | RFMEM)) return -(s64)T_E_INVAL;
+    // LINEAGE L-5: both shapes now. RFPROC alone used to be refused here because
+    // it would have handed the child a fresh EMPTY address space and then resumed
+    // it at its parent's PC -- an instruction fetch fault on the first cycle. COW
+    // exists (L-4b), rfork_internal clones for this shape, and the refusal has
+    // become the thing standing between the tree and fork().
+    if (flags != (unsigned)RFPROC && flags != (unsigned)(RFPROC | RFMEM))
+        return -(s64)T_E_INVAL;
 
-    // A shared address space with a shared SP corrupts both frames on the first
-    // push, so child_sp is mandatory rather than defaulted.
-    if (child_sp == 0)                       return -(s64)T_E_INVAL;
-    if ((child_sp & 15u) != 0)               return -(s64)T_E_INVAL;
-    if (child_sp >= UACCESS_USER_VA_TOP)     return -(s64)T_E_INVAL;
+    // The SP rules are RFMEM's, not the fork's, and separating them is the whole
+    // of this hunk. Under RFMEM the two Procs write the same physical stack, so a
+    // shared SP corrupts both frames on the first push -- child_sp is mandatory
+    // and may not be the caller's own.
+    if (flags & RFMEM) {
+        if (child_sp == 0)                   return -(s64)T_E_INVAL;
 
-    // The one overlap case worth catching: handing the child the caller's OWN
-    // live SP. This is a footgun-catcher, not a safety property -- an SP that
-    // overlaps the parent's stack WITHOUT being equal to it is equally fatal and
-    // is not detectable here (the parent's stack has no recorded extent). The
-    // caller owns non-overlap, exactly as it does for a pthread stack; this
-    // check just refuses the mistake that is free to see.
-    if (child_sp == ctx->sp)                 return -(s64)T_E_INVAL;
+        // The one overlap case worth catching: handing the child the caller's OWN
+        // live SP. This is a footgun-catcher, not a safety property -- an SP that
+        // overlaps the parent's stack WITHOUT being equal to it is equally fatal
+        // and is not detectable here (the parent's stack has no recorded extent).
+        // The caller owns non-overlap, exactly as it does for a pthread stack;
+        // this check just refuses the mistake that is free to see.
+        if (child_sp == ctx->sp)             return -(s64)T_E_INVAL;
+    }
+
+    // Well-formedness binds any SP actually supplied, under either shape: an
+    // unaligned or kernel-range SP is a bad value however the child got it.
+    if (child_sp != 0) {
+        if ((child_sp & 15u) != 0)           return -(s64)T_E_INVAL;
+        if (child_sp >= UACCESS_USER_VA_TOP) return -(s64)T_E_INVAL;
+    }
+
+    // "0 means inherit", for the SP now as well as the TLS below -- and for a
+    // fork it is not a convenience but the definition. A plain fork() has no
+    // second stack to name: the child runs on its OWN COW copy at the SAME VA,
+    // which is exactly `ctx->sp`. Resolving it HERE, in the layer that has the
+    // caller in scope, is what keeps fork_frame_init at two unconditional edits
+    // instead of teaching that primitive a "0 means keep" case.
+    //
+    // Under RFMEM this line is unreachable (child_sp == 0 was refused above), so
+    // it cannot quietly hand a vfork child its parent's live SP.
+    if (child_sp == 0)
+        child_sp = ctx->sp;
 
     // "0 means inherit" is resolved here because this is the layer that has the
     // caller in scope. The LIVE register is the only correct source: the

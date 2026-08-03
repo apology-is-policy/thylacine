@@ -488,10 +488,96 @@ pipe only the parent can write.
 
 ---
 
+## Stock `fork()` (L-5)
+
+`RFPROC` alone is served. The two changes are small; what they cost was not.
+
+**`rfork_internal` has three answers to "what address space does the child
+get", and each is what its shape MEANS.** `entry` alone → a fresh EMPTY space
+(the child runs a kernel thunk and execs; copying would be thrown away).
+`RFMEM` → the parent's, shared. `fc` without `RFMEM` → an `addrspace_clone`.
+The discriminator is `fc` — the same one descriptor inheritance uses, and for
+the same reason rather than by coincidence: `fc` means the child *is* the
+parent, continuing on its frame, so it must see the parent's memory **and** its
+descriptors or its next instruction reads something that is not there. One
+fact, two consequences.
+
+The clone is taken *after* the cheap rejections (child cap, narrowed
+allowance), so a fork bomb never pays for one. It is born with one reference;
+`proc_alloc_in` takes the child's; the constructor drops its own.
+
+**The SP rules turn out to belong to RFMEM, not to fork.** `child_sp == 0` and
+`child_sp == ctx->sp` are refused only when the two Procs write the *same*
+stack. Under `RFPROC` alone both are normal — in fact `child_sp == 0` is what
+`fork()` MEANS, since the child runs on its own copy-on-write copy at the same
+VA. That zero is resolved to `ctx->sp` in `sys_rfork_core`, the same layer that
+already resolves `child_tls == 0`, which keeps `fork_frame_init` at two
+unconditional edits instead of teaching the primitive a "0 means keep" case.
+Alignment and the VA_TOP bound still bind any non-zero SP under either shape.
+
+The VFORK suspend needed no edit at all: L-3c-2 wrote its gate as
+`fc && (flags & RFMEM)` on purpose, and said so.
+
+### Two defects were found by making the clone live
+
+Neither was visible to the tests that already covered the code they were in.
+
+**#136 — the clone refused every real address space.** `clone_one_vma` refused
+eager `ANON` outright ("no per-page ownership for a break to take"), and the
+vDSO clock page is eager anon mapped read-only into *every* EL0 Proc. So the
+first real fork was refused, while L-4b's tests passed — because those tests
+**build** their address spaces out of exactly the VMAs they want, and the one
+VMA every real Proc has was in none of them. The arm now splits on
+**writability**: a writable eager-anon VMA still refuses; a read-only one is
+shared, on precisely the reasoning read-only `FILE` text already used (no
+prot-mutation syscall exists, so read-only is permanent and there is nothing to
+break). MMIO and DMA refuse at any prot — sharing a device window is an
+authority transfer, not a memory copy.
+
+**#137 — `fi->is_write` had been ALWAYS FALSE, tree-wide, since the fault path
+was written.** `ESR_ISS_WNR_BIT` was 9; WnR is ISS bit 6 (bit 9 is EA, which is
+0 for every normal abort). It survived because nothing before the COW break
+branched on it for *correctness* — the demand-zero and FILE arms install at
+`vma->prot` whichever way it reads, so first touch works either way, and a write
+to genuinely read-only memory is a buggy program nobody ran. With the wrong bit
+the break's write arm is simply unreachable: the store re-installs read-only,
+re-faults, and loops forever, which is why the symptom was a *hang* with no
+fault logged rather than anything that looked like a memory bug.
+
+The seam it lived in is worth stating plainly, because both sides were
+"tested". The decode's own unit test **mirrored the constant** — it set bit 9
+and asserted the decoder had read bit 9, so it agreed with the code instead of
+with the hardware and could not have failed however wrong both were. And every
+test on the *consuming* side — the COW arm's, the vDSO's write-denial one —
+builds a synthetic `struct fault_info` and assigns `is_write` directly, never
+executing the decode at all. Nothing in the tree composed the two. The test's
+bit is now an independent literal with an ARM ARM citation, deliberately *not*
+`#include`d from the kernel header: sharing the constant would restore the
+tautology.
+
+### Coverage
+
+`fork.rfork_arg_rejection` pins the gate in both directions — the RFMEM-only
+refusals must keep firing under RFMEM and must *not* fire under RFPROC alone,
+and it takes both to say that (a gate that dropped them would satisfy one half,
+one that applied them everywhere the other). `cow.clone_shares_readonly_eager_anon`
+pairs read-only-shares with writable-still-refuses.
+`cow.addrspace_clone_refuses_and_leaves_parent_intact` now distinguishes all
+three clone phases on the failure path. `/fork-probe` leg K forks for real and
+checks three separately-falsifiable COW claims (the child sees the parent's
+pre-fork write; the child's write does not reach the parent; the parent's later
+write does not reach the child); leg L proves a store to read-only text is
+DENIED, which is the half of #137 leg K does not cover.
+
+Five independent revert probes. The sharpest: **drop the clone wiring and the
+unit suite stays at a full 1300/1300 while only the in-guest leg fails** — the
+decision and the wiring are blind to each other, again, and in the direction
+where the suite is entirely green through a broken kernel.
+
 ## Status
 
-L-3b + L-3c-1 + **L-3c-2** landed. Suite 1285 → **1286/1286**; boot OK;
-0 EXTINCTION; `asid.tla` unperturbed.
+L-3b + L-3c-1 + L-3c-2 + **L-5** landed. Suite **1300/1300**; boot OK;
+0 EXTINCTION; `asid.tla` + `cow.tla` unperturbed.
 
-Reserved: the VIVARIUM `clone` row (L-3d), the COW break (L-4), and lifting the
-`RFPROC`-alone refusal once COW exists (L-5).
+Reserved: the VIVARIUM `execve`/`wait4` rows (L-6) and the arc's focused audit
+(L-7).

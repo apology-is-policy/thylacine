@@ -1859,15 +1859,19 @@ enum {
     // return value the normal way and why the dispatch treats this like
     // SYS_EXECVE rather than an ordinary handler.
     //
-    //   x0 = flags      exactly RFPROC|RFMEM at L-3b (see below).
-    //   x1 = child_sp   the child's initial SP_EL0. MANDATORY, nonzero,
-    //                   16-aligned, below UACCESS_USER_VA_TOP. Two Procs in one
-    //                   address space must not share a stack pointer: they would
-    //                   corrupt each other's frames on the first push. Not
-    //                   validated for MAPPEDNESS (the child faults at EL0 if it
-    //                   is wrong -- the SYS_THREAD_SPAWN contract) nor for
-    //                   OVERLAP with the parent's live stack, which is the
-    //                   caller's contract exactly as it is for a pthread stack.
+    //   x0 = flags      RFPROC (fork) or RFPROC|RFMEM (vfork). See below.
+    //   x1 = child_sp   the child's initial SP_EL0; 0 means INHERIT the caller's.
+    //                   Under RFMEM it is MANDATORY and may not equal the
+    //                   caller's own: two Procs in one address space sharing a
+    //                   stack pointer corrupt each other's frames on the first
+    //                   push. Under RFPROC alone 0 is the NORMAL value and what
+    //                   fork() means -- the child runs on its own COW copy of the
+    //                   parent's stack, at the same VA. Any nonzero value must be
+    //                   16-aligned and below UACCESS_USER_VA_TOP. Not validated
+    //                   for MAPPEDNESS (the child faults at EL0 if it is wrong --
+    //                   the SYS_THREAD_SPAWN contract) nor for OVERLAP with the
+    //                   parent's live stack, which is the caller's contract
+    //                   exactly as it is for a pthread stack.
     //   x2 = child_tls  the child's TPIDR_EL0; 0 means INHERIT the caller's.
     //                   Inheriting is fork semantics and what a vfork child
     //                   needs -- it runs the parent's C, thread-locals and all,
@@ -1895,15 +1899,26 @@ enum {
     // COPIED table, which is why posix_spawn's file_actions do not disturb the
     // parent. Empty and copied are different shapes.)
     //
-    // v1.0 LIMIT -- RFPROC alone is REFUSED (-T_E_INVAL), not served. Without
-    // RFMEM the child gets a fresh EMPTY address space, so resuming it at its
-    // parent's PC would fault on the first instruction fetch. A private child
-    // address space means copy-on-write, which is its own chunk (LINEAGE L-4).
+    // THE TWO SHAPES (LINEAGE L-5 lifted the RFPROC-alone refusal this paragraph
+    // used to record):
+    //
+    //   RFPROC|RFMEM  vfork. The child SHARES the caller's address space, so the
+    //                 caller SUSPENDS until the child execs or dies -- otherwise
+    //                 the child would be running on stack the parent has since
+    //                 returned from. child_sp is mandatory precisely because the
+    //                 stack is shared.
+    //   RFPROC        fork. The child gets a COPY-ON-WRITE clone of the caller's
+    //                 address space, and both Procs run. Writable anonymous pages
+    //                 are shared read-only until either side writes, at which
+    //                 point the writer takes a private copy; read-only file-backed
+    //                 text is shared outright and never copied at all.
+    //
     // Every other Plan 9 flag stays reserved: each shares a different per-Proc
     // structure and each should arrive with its own reasoning.
     //
-    //   -T_E_INVAL   flags not exactly RFPROC|RFMEM; child_sp zero, misaligned,
-    //                out of the user range, or equal to the caller's own SP
+    //   -T_E_INVAL   flags neither RFPROC nor RFPROC|RFMEM; child_sp misaligned or
+    //                out of the user range; or, under RFMEM only, child_sp zero or
+    //                equal to the caller's own SP
     //   -T_E_AGAIN   the child could not be created (the I-32 child cap, a
     //                narrowed hardware allowance, or OOM)
     SYS_RFORK = 102,

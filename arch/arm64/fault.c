@@ -58,8 +58,18 @@ static volatile bool g_in_kernel_fault[DTB_MAX_CPUS];
 #define EC_DATA_ABORT_LOWER 0x24    /* data abort from lower EL */
 #define EC_DATA_ABORT_SAME  0x25    /* data abort from current EL */
 
-// ISS bit 9 = WnR (write/not-read). Only meaningful for data aborts.
-#define ESR_ISS_WNR_BIT    9
+// ISS bit 6 = WnR (write/not-read). Only meaningful for data aborts.
+//
+// #137: this said 9 from the day it was written, and 9 is EA (External Abort
+// type), which is 0 for every normal abort -- so fi->is_write was ALWAYS FALSE,
+// tree-wide, for the entire history of the fault path. It survived because
+// nothing branched on it for correctness: the demand-zero and FILE arms install
+// at vma->prot whichever way it reads, so first touch works either way, and a
+// write to genuinely read-only memory is a buggy program nobody ran. LINEAGE
+// L-4b's copy-on-write break is the first mechanism whose correctness DEPENDS on
+// it, and with the wrong bit its write arm is simply unreachable: the store
+// re-installs read-only, re-faults, and loops forever.
+#define ESR_ISS_WNR_BIT    6
 
 // FSC = ISS[5:0] for data and instruction aborts.
 #define FSC_MASK           0x3F
@@ -105,7 +115,7 @@ void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out) {
     // Instruction abort vs data abort.
     out->is_instruction = (ec == EC_INST_ABORT_LOWER || ec == EC_INST_ABORT_SAME);
 
-    // WnR is bit 9 of ISS. ISS = ESR[24:0]. Only meaningful for data
+    // WnR is bit 6 of ISS. ISS = ESR[24:0]. Only meaningful for data
     // aborts; for instruction aborts the bit is RES0 in the encoding so
     // the read happens to be 0 (which maps to "read", which is the
     // correct semantic — instruction fetches are reads).
@@ -534,13 +544,13 @@ static enum fault_result demand_page_locked(struct Proc *p,
                 // Idempotent when nothing is mapped (the common first-touch case,
                 // where addrspace_clone's uninstall already cleared it), so it is
                 // unconditional rather than guarded on a re-walk of the tree.
-                mmu_uninstall_user_pte(p->as->pgtable_root, 0, page_va);
+mmu_uninstall_user_pte(p->as->pgtable_root, 0, page_va);
 
                 // cow_page_break_is_sole is the whole decision, taken as one step
                 // under the global COW lock -- splitting it is what
                 // cow.tla::BUGGY_BREAK_UNLOCKED models, where two sharers each
                 // observe themselves alone.
-                if (!cow_page_break_is_sole(resident)) {
+if (!cow_page_break_is_sole(resident)) {
                     // Someone else still holds this page: copy it.
                     //
                     // Our own share stays HELD across the alloc and the copy, and
@@ -548,7 +558,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
                     // concurrent exit in the other address space from driving the
                     // count to zero and freeing the page we are reading from
                     // (cow.tla::BUGGY_TEARDOWN_NO_PIN).
-                    struct page *priv = alloc_pages(0, KP_ZERO);
+struct page *priv = alloc_pages(0, KP_ZERO);
                     if (!priv) return FAULT_UNHANDLED_USER;  // graceful per-Proc OOM
 
                     copy_page_words((void *)pa_to_kva(page_to_pa(priv)),
@@ -559,7 +569,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
                     // last owner's count).
                     cow_page_set_sole(priv);
 
-                    if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
+if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
                         // The slot changed under us. Unreachable at v1.0: an
                         // ANON_LAZY Burrow has exactly one mapping in exactly one
                         // address space (burrow.h), and we hold that address
@@ -575,7 +585,7 @@ static enum fault_result demand_page_locked(struct Proc *p,
                     // served its purpose: release our share of the original. If
                     // that was the last one (the other holder exited mid-break)
                     // the page is ours to free.
-                    if (cow_page_put(resident))
+if (cow_page_put(resident))
                         free_pages(resident, 0);
 
                     // No I-32 charge: one mapped page became one mapped page. The
