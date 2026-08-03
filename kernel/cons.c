@@ -11,6 +11,7 @@
 
 #include <thylacine/cons.h>
 #include <thylacine/dev.h>
+#include <thylacine/joey.h>                  // #95: boot_is_complete (the drop-report gate)
 #include <thylacine/poll.h>                  // LS-8a: pollable cons (deferred poll-wake)
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
@@ -48,10 +49,9 @@
 _Static_assert((CONS_RING_SIZE & (CONS_RING_SIZE - 1u)) == 0u,
                "CONS_RING_SIZE must be a power of two (the ring is mask-indexed)");
 
-// LS-8b: the canonical line-assembly buffer (cooked mode). Bounded -- a line
-// longer than this drops the overflow (like the ring); Enter still delivers
-// what fits. The echo staging per input byte is at most 3 ("\b \b" erase).
-#define CONS_LINE_MAX     256u
+// CONS_LINE_MAX (the LS-8b canonical line-assembly bound) lives in cons.h --
+// #95's drop test asserts against it, and a test hardcoding the number would
+// agree with the code only by coincidence.
 #define CONS_ECHO_MAX     8u    // max echo bytes one cons_rx_input byte produces
 
 struct cons_input {
@@ -85,6 +85,43 @@ struct cons_input {
     u16         ws_cols;
     u16         ws_rows;
     u32         winch_events;
+
+    // #95: the INPUT-path silent-drop counters. Every RX drop site is counted
+    // here, under g_cons.lock (all three sites already run under it). They exist
+    // because a lost input byte previously left NO trace anywhere: #95 observed
+    // `sleep 30` arrive as `sleep 3` -- one byte gone, the terminator delivered
+    // -- and there was nothing in the tree that could say whether the kernel had
+    // dropped it. The TX side has had exactly this since #75/#126
+    // (g_cons_tx.dropped); the RX side had nothing.
+    //
+    // Split per SITE, deliberately. A lumped counter would only move the
+    // question from "did we drop?" to "where?", and the three sites have
+    // entirely different causes and fixes:
+    //   rx_drop_raw   -- raw/cbreak arm, ring full. #174's UART backpressure is
+    //                    meant to make this unreachable FROM THE UART; note that
+    //                    cons_feed_write (the G-4 renderer feed) is a SECOND
+    //                    producer and is NOT gated by cons_rx_can_accept.
+    //   rx_drop_flush -- cooked arm, the Enter flush overran the ring. Reachable
+    //                    even WITH #174: cons_rx_can_accept() grants admission
+    //                    for ONE byte, but this flush pushes line_len + 1 (up to
+    //                    CONS_LINE_MAX + 1 = 257).
+    //   rx_drop_line  -- cooked arm, a byte past CONS_LINE_MAX. Bounded by
+    //                    design, but the byte is gone and un-echoed.
+    // Counting is NOT a fix for any of them; it is what makes the next
+    // occurrence decidable instead of unexplained.
+    u32         rx_drop_raw;
+    u32         rx_drop_flush;
+    u32         rx_drop_line;
+
+    // #95: set by any drop site, drained by console_mgr, which emits ONE loud
+    // line in process context (the intr/sak/pollwake deferred-relay pattern --
+    // the drop sites run in IRQ context under this lock and must not do the
+    // emitting themselves). `drop_reported` then latches it off FOREVER: a
+    // pathological drop storm must not become a diagnostic storm that costs
+    // more than the events it reports (the #126 lesson). The running totals stay
+    // readable at /ctl/cons afterwards.
+    bool        drop_report_pending;
+    bool        drop_reported;
 
     // LS-8a: the poll-hook list for /dev/cons. The SYS_CONSOLE_OPEN fd (devcons)
     // AND the namespace /dev/cons leaf (devdev) share it -- #57b single-impl, so
@@ -225,6 +262,10 @@ static inline bool cons_sak_load(void)     { return __atomic_load_n(&g_cons.sak_
 static inline void cons_sak_store(bool v)  { __atomic_store_n(&g_cons.sak_pending, v, __ATOMIC_RELAXED); }
 static inline bool cons_pollwake_load(void)   { return __atomic_load_n(&g_cons.poll_wake_pending, __ATOMIC_RELAXED); }
 static inline void cons_pollwake_store(bool v) { __atomic_store_n(&g_cons.poll_wake_pending, v, __ATOMIC_RELAXED); }
+// #95: same discipline -- written under g_cons.lock, read locklessly in
+// cons_mgr_pending (which runs under the Rendez lock, not this one).
+static inline bool cons_dropreport_load(void)   { return __atomic_load_n(&g_cons.drop_report_pending, __ATOMIC_RELAXED); }
+static inline void cons_dropreport_store(bool v) { __atomic_store_n(&g_cons.drop_report_pending, v, __ATOMIC_RELAXED); }
 
 // LS-8b: the termios word. Read + written under g_cons.lock (cooking reads it,
 // consctl writes it); RELAXED-atomic for consistency with the sibling flags.
@@ -750,6 +791,30 @@ bool cons_rx_can_accept(void) {
     return cons_count_load() < CONS_RING_SIZE;
 }
 
+// #95: record ONE dropped input byte at `site` and arm console_mgr's deferred
+// one-shot report. Caller holds g_cons.lock (every drop site does). The mgr wake
+// must be armed HERE and not left to cons_ring_push's empty->non-empty edge: a
+// drop means the ring was FULL, so there is no edge, and without this the report
+// would sit pending until some unrelated byte happened to arrive.
+// The REPORT (not the count) is gated on boot-complete, because the kernel test
+// suite deliberately overflows this ring -- cons.ring_overflow_drop pushes 266
+// bytes into 256, and cons.rx_drop_counters drives all three sites on purpose.
+// Ungated, every boot would print an alarming INPUT DROP line during the test
+// phase, and -- far worse -- the test would SPEND the one-shot latch, so a real
+// drop later in the same boot would print nothing. The instrument would be
+// disarmed by its own test. Kernel tests run before boot-complete and every
+// real input workload runs after, so this gate makes the test phase silent and
+// leaves the latch armed for exactly the window that matters. (Counting is
+// unconditional -- that is what the test asserts on, and cons_test_reset zeroes
+// it afterwards.)
+static void cons_rx_note_drop(u32 *site, bool *wake_mgr) {
+    (*site)++;
+    if (!g_cons.drop_reported && boot_is_complete()) {
+        cons_dropreport_store(true);
+        *wake_mgr = true;
+    }
+}
+
 void cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
     u8   echo[CONS_ECHO_MAX];
@@ -797,22 +862,36 @@ void cons_rx_input(u8 byte, bool is_break) {
                 // POSIX canonical: the read returns the line INCLUDING its
                 // terminating newline. Flush line[0..len) then the NL to the ring
                 // (the empty->non-empty poll-edge is handled inside cons_ring_push).
+                // #95: a short flush here is the one drop site #174's admission
+                // gate does NOT cover -- cons_rx_can_accept() cleared ONE byte,
+                // and this pushes line_len + 1.
                 for (u32 i = 0; i < g_cons.line_len; i++)
                     if (cons_ring_push(g_cons.line[i], &wake_mgr)) wake_data = true;
+                    else cons_rx_note_drop(&g_cons.rx_drop_flush, &wake_mgr);
                 if (cons_ring_push((u8)'\n', &wake_mgr)) wake_data = true;
+                else cons_rx_note_drop(&g_cons.rx_drop_flush, &wake_mgr);
                 g_cons.line_len = 0u;
                 if (tio & CONS_ECHO) cons_echo_stage((u8)'\n', tio, echo, &necho);
             } else {                                  // ordinary char: buffer it
                 if (g_cons.line_len < CONS_LINE_MAX) {
                     g_cons.line[g_cons.line_len++] = byte;
                     if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
+                } else {
+                    // Line buffer full -> drop (bounded; Enter still delivers
+                    // what fits). A dropped byte is NOT echoed. #95: counted,
+                    // because "Enter still delivers what fits" is exactly the
+                    // truncated-command shape and was previously silent.
+                    cons_rx_note_drop(&g_cons.rx_drop_line, &wake_mgr);
                 }
-                // else: line buffer full -> drop (bounded; Enter still delivers
-                // what fits). A dropped byte is NOT echoed.
             }
         } else {
             // Raw / cbreak mode: byte-at-a-time to the ring (the pre-LS-8b path).
+            // #95: one byte in, one byte pushed -- so #174's gate DOES cover the
+            // UART producer here. A count on this site therefore means the byte
+            // came from an UNGATED producer (cons_feed_write) or that the gate
+            // itself is broken; either way it is a finding, not noise.
             if (cons_ring_push(byte, &wake_mgr)) wake_data = true;
+            else cons_rx_note_drop(&g_cons.rx_drop_raw, &wake_mgr);
             if (tio & CONS_ECHO) cons_echo_stage(byte, tio, echo, &necho);
         }
     }
@@ -858,7 +937,8 @@ static int cons_mgr_pending(void *arg) {
     (void)arg;
     if (__atomic_load_n(&g_cons_mgr_hold, __ATOMIC_ACQUIRE)) return 0; // #58
     return cons_intr_load() || cons_sak_load() || cons_pollwake_load()
-        || drain_pollwake_load();   // G-4: a drain POLLIN edge awaits the walk
+        || drain_pollwake_load()    // G-4: a drain POLLIN edge awaits the walk
+        || cons_dropreport_load();  // #95: an input byte was dropped, unreported
 }
 
 void cons_test_mgr_hold(bool on) {
@@ -880,7 +960,30 @@ static void cons_service_deferred(void) {
     cons_intr_store(false);
     cons_sak_store(false);
     cons_pollwake_store(false);
+    // #95: snapshot the drop counts under the lock and latch the report off, so
+    // the emit below runs exactly once for the life of the boot no matter how
+    // many further drops occur.
+    bool do_drop_report = cons_dropreport_load();
+    u32  d_raw = g_cons.rx_drop_raw, d_flush = g_cons.rx_drop_flush, d_line = g_cons.rx_drop_line;
+    cons_dropreport_store(false);
+    if (do_drop_report) g_cons.drop_reported = true;
     spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // #95: the loud one-shot. A dropped input byte is a silent correctness event
+    // -- a command loses a character and runs anyway -- so it must announce
+    // itself in the log the moment it happens, not wait for someone to think to
+    // read /ctl/cons. cons_diag_* is the #126 non-blocking emitter (TX ring, no
+    // spin, no sleep), and this runs with g_cons.lock RELEASED like every other
+    // deferred action.
+    if (do_drop_report) {
+        cons_diag_puts("cons: INPUT DROP (#95) raw=");
+        cons_diag_putdec(d_raw);
+        cons_diag_puts(" flush=");
+        cons_diag_putdec(d_flush);
+        cons_diag_puts(" line=");
+        cons_diag_putdec(d_line);
+        cons_diag_puts(" -- further drops counted silently at /ctl/cons\n");
+    }
 
     // RW-7 R2-F2 (round-2 F2): a SAK SUPERSEDES a Ctrl-C coalesced into the
     // same batch -- the two pending flags lose their arrival order, and
@@ -941,6 +1044,11 @@ void cons_test_reset(void) {
     g_cons.ws_cols = 0u;                        // #55: winsize back to unset
     g_cons.ws_rows = 0u;
     g_cons.winch_events = 0u;
+    g_cons.rx_drop_raw = 0u;                    // #95: drop counters + report latch
+    g_cons.rx_drop_flush = 0u;
+    g_cons.rx_drop_line = 0u;
+    cons_dropreport_store(false);
+    g_cons.drop_reported = false;
     spin_unlock_irqrestore(&g_cons.lock, s);
 
     // G-4: the drain back to the boot (disarmed, empty) state.
@@ -953,6 +1061,29 @@ void cons_test_reset(void) {
     g_cons_drain.reader_busy = false;
     drain_pollwake_store(false);
     spin_unlock_irqrestore(&g_cons_drain.lock, s);
+}
+
+// #95: the TX-side counts, for /ctl/cons. Same values the cons_test_tx_*
+// accessors return; a separate production-named entry point so the surface does
+// not call a `_test_` symbol. The TX counters have existed since #75/#126 with
+// no surface at all -- you had to be writing a kernel unit test to see them,
+// which is the same "had to know where to look" problem #95 is about.
+void cons_tx_drops(u32 *dropped, u32 *room_waits) {
+    irq_state_t s = spin_lock_irqsave(&g_cons_tx.lock);
+    if (dropped)    *dropped    = g_cons_tx.dropped;
+    if (room_waits) *room_waits = g_cons_tx.room_waits;
+    spin_unlock_irqrestore(&g_cons_tx.lock, s);
+}
+
+// #95: the input-drop counts. Read under the lock -- they are written under it,
+// and a lockless read would be the C11 mixed-access race the F6 fix removed
+// elsewhere in this file. NULL args are skipped so a caller can ask for one.
+void cons_rx_drops(u32 *raw, u32 *flush, u32 *line) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (raw)   *raw   = g_cons.rx_drop_raw;
+    if (flush) *flush = g_cons.rx_drop_flush;
+    if (line)  *line  = g_cons.rx_drop_line;
+    spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
 bool cons_test_intr_pending(void) {

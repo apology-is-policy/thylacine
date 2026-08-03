@@ -664,6 +664,64 @@ diagnostic: a rising `room_waits` is the console reporting that writers are
 back-pressuring on a slow consumer, the sibling of `dropped` (which counts the
 ones that gave up).
 
+## Input-drop instrumentation -- #95 (as-built)
+
+Three sites on the RX path discard a byte, and until #95 all three did it in
+total silence. That mattered because of the shape the loss takes: a dropped
+input byte truncates a command, which then **runs anyway**. #95 saw `sleep 30`
+arrive as `sleep 3` and there was nothing anywhere in the tree that could say
+whether the kernel had dropped it. (The TX side has had `g_cons_tx.dropped`
+since #75/#126; the RX side had nothing.)
+
+Each site now increments its own counter in `struct cons_input`, under
+`g_cons.lock` -- which all three already hold:
+
+| Counter | Site | Notes |
+|---|---|---|
+| `rx_drop_raw` | `cons_rx_input`, raw/cbreak arm | one byte in, one byte pushed, so #174's `cons_rx_can_accept()` gate DOES cover the UART producer. `cons_feed_write` (G-4 renderer feed) is a second producer and is **not** gated. |
+| `rx_drop_flush` | `cons_rx_input`, cooked Enter-flush | the gap in #174: admission is granted for ONE byte, the flush pushes `line_len + 1`. |
+| `rx_drop_line` | `cons_rx_input`, line assembly | a byte past `CONS_LINE_MAX`, dropped un-echoed. |
+
+Read them at `/ctl/cons` (`cons_rx_drops` / `cons_tx_drops`).
+
+### The one-shot report
+
+Counting alone does not help an unattended gate: nobody reads `/ctl/cons` at
+the moment a scenario fails. So a drop also arms `drop_report_pending`, and
+`console_mgr` emits ONE line in process context (the intr/sak/pollwake deferred
+relay -- the drop sites run in IRQ context under `g_cons.lock` and must not
+emit themselves):
+
+```
+cons: INPUT DROP (#95) raw=0 flush=3 line=0 -- further drops counted silently at /ctl/cons
+```
+
+`drop_reported` then latches it off for the life of the boot: a pathological
+drop storm must not become a diagnostic storm that costs more than the events
+it reports (the #126 lesson).
+
+### Why the report is gated on `boot_is_complete()`
+
+The kernel test suite deliberately overflows this ring --
+`cons.ring_overflow_drop` pushes 266 bytes into 256, and
+`cons.rx_drop_counters` drives all three sites on purpose. Ungated, every boot
+would print an alarming INPUT DROP line during the test phase and, far worse,
+the test would **spend the one-shot latch**, so a real drop later in the same
+boot would print nothing: the instrument disarmed by its own test. Kernel tests
+run before boot-complete and every real input workload runs after, so the gate
+makes the test phase silent and leaves the latch armed for exactly the window
+that matters. Counting is unconditional.
+
+### What this does NOT establish
+
+The counters are an instrument, not a fix, and not a diagnosis. Note in
+particular that `rx_drop_flush` loses the **tail** of the line and then the
+newline, so a short flush means the line never executes at all -- which is why
+that site cannot by itself explain #95's shape (interior byte lost, terminator
+delivered, command ran). The raw arm's per-byte push against a concurrently
+draining reader is the only one of the three whose shape matches. The counters
+exist to settle which -- or none -- on the next occurrence.
+
 ## Error paths
 
 - `cons_output_write`: returns a **short count** (not an error) when the #67

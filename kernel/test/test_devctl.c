@@ -28,6 +28,7 @@ void test_devctl_read_devices_format(void);
 void test_devctl_read_kernel_base_format(void);
 void test_devctl_kernel_base_gated(void);
 void test_devctl_read_sched_format(void);
+void test_devctl_read_cons_format(void);
 void test_devctl_read_cpu_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
@@ -97,8 +98,10 @@ void test_devctl_attach_returns_dir(void) {
 }
 
 void test_devctl_walk_to_each_leaf(void) {
+    // Mirrors g_ctl_leaves in devctl.c. This list is hand-kept, so a new leaf
+    // that is not added here is simply not walk-covered -- add yours.
     static const char *leaf_names[] = {
-        "procs", "memory", "devices", "kernel-base", "sched", "cpu",
+        "procs", "memory", "devices", "kernel-base", "sched", "cpu", "cons",
     };
     for (size_t i = 0; i < sizeof(leaf_names) / sizeof(leaf_names[0]); i++) {
         struct Spoor *root = devctl.attach("");
@@ -316,6 +319,26 @@ void test_devctl_read_sched_format(void) {
     // V-4c-2b: the /proc/stat `processes` source -- the one field in section
     // 6.17's set with no per-CPU form, so it lives in the global block.
     TEST_ASSERT(contains(buf, (size_t)got, "created:"), "V-4c-2b: has created:");
+
+    spoor_clunk(c);
+}
+
+// #95: /ctl/cons is the human-readable surface for console byte loss, both
+// directions. It is only useful if it can actually be walked to and read -- a
+// leaf added to the table but unreachable would look exactly like "no drops"
+// to anyone who went looking, which is the failure mode #95 is about.
+void test_devctl_read_cons_format(void) {
+    struct Spoor *c = open_ctl_leaf("cons");
+    TEST_ASSERT(c != NULL, "open /ctl/cons");
+
+    char buf[512];
+    long got = devctl.read(c, buf, sizeof buf, 0);
+    TEST_ASSERT(got > 0, "cons read positive");
+    TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_raw:"),   "has rx_drop_raw:");
+    TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_flush:"), "has rx_drop_flush:");
+    TEST_ASSERT(contains(buf, (size_t)got, "rx_drop_line:"),  "has rx_drop_line:");
+    TEST_ASSERT(contains(buf, (size_t)got, "tx_dropped:"),    "has tx_dropped:");
+    TEST_ASSERT(contains(buf, (size_t)got, "tx_room_waits:"), "has tx_room_waits:");
 
     spoor_clunk(c);
 }

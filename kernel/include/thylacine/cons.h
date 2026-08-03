@@ -54,6 +54,13 @@ struct poll_waiter;   // <thylacine/poll.h> -- the cons_poll hook parameter
 #define CONS_TERMIOS_ALL      (CONS_ICANON | CONS_ECHO | CONS_ISIG | CONS_ICRNL | CONS_ONLCR)
 #define CONS_TERMIOS_DEFAULT  CONS_ISIG   // boot default == the pre-LS-8b behavior
 
+// LS-8b: the canonical line-assembly bound (cooked mode). A line longer than
+// this drops the overflow (like the ring); Enter still delivers what fits, and
+// the dropped byte is not echoed. Exported because #95's drop-counter test
+// asserts against it -- a test hardcoding 256 would match the code by
+// coincidence, not by construction.
+#define CONS_LINE_MAX     256u
+
 // Feed one received byte to the console input layer. Called from the PL011 RX
 // IRQ handler (arch/arm64/uart.c::uart_rx_handler), IRQ context. `is_break` is
 // true when the PL011 flagged a line BREAK on this entry (DR bit-10 BE) -- the
@@ -162,6 +169,16 @@ u64  cons_test_tx_room_wait_ns(void);
 // cons_ring_push then drops (the pre-#174 behavior for that one byte), a stale
 // "false" at worst pauses one byte early -- neither corrupts.
 bool cons_rx_can_accept(void);
+
+// #95: the INPUT-path silent-drop counts, per site (raw-arm ring-full /
+// cooked-flush ring-full / cooked line-buffer overflow). NULL args are skipped.
+// Surfaced at /ctl/cons; console_mgr also emits one loud line on the FIRST drop
+// of a boot. A lost input byte is otherwise invisible -- a command loses a
+// character and runs anyway -- which is why #95 could not be decided.
+void cons_rx_drops(u32 *raw, u32 *flush, u32 *line);
+
+// #95: the TX-side loss counts (#75/#126), for the same /ctl/cons surface.
+void cons_tx_drops(u32 *dropped, u32 *room_waits);
 
 // LS-8a: the shared console poll. Register-then-observe under the cons lock:
 // POLLIN iff the RX ring is non-empty; POLLOUT always (the UART never blocks);

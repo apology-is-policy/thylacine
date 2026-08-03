@@ -49,9 +49,11 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};   // #95: the drop-report gate + latch
+
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
-    t_close, t_open, t_pty_register, t_tty_signal, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD,
+    t_close, t_open, t_pty_register, t_putstr, t_tty_signal, t_walk_create, T_GID_SYSTEM, T_OPATH, T_OREAD,
     T_PRINCIPAL_SYSTEM, T_PTY_REG_FREE, T_PTY_REG_MINT, T_PTY_REG_SLAVE, T_TTY_SIG_HUP,
     T_TTY_SIG_INT, T_TTY_SIG_QUIT, T_TTY_SIG_TSTP, T_TTY_SIG_WINCH, T_WALK_OPEN_FROM_ROOT,
 };
@@ -303,6 +305,54 @@ struct Pts {
     /// fresh-pts posture; openpty sets it at once in practice).
     winsz_cols: u32,
     winsz_rows: u32,
+    /// #95: bytes this pts DROPPED, per site. A dropped input byte truncates a
+    /// command that then runs anyway -- #95 saw `sleep 30` arrive as `sleep 3`
+    /// -- and until now every one of these sites discarded `ring_push`'s return
+    /// value, so the loss left nothing behind to find. `drop_flush` is the one
+    /// that would carry COMMAND bytes (the cooked line into m2s); `drop_line` is
+    /// assembly overflow past LINE_MAX; `drop_echo` is the deliberate
+    /// best-effort echo drop toward the master (documented at `echo`), counted
+    /// separately precisely so it can never be mistaken for the other two.
+    drop_flush: u32,
+    drop_line: u32,
+    drop_echo: u32,
+}
+
+/// #95: the loud-report gate + one-shot latch.
+///
+/// ARMED is false until `arm_drop_report()` -- called by main AFTER the selftest
+/// passes -- because the selftest DELIBERATELY drops a byte (battery step 9
+/// pushes `B` past LINE_MAX to prove it is not echoed). Ungated, every boot
+/// would print an alarming INPUT DROP line from the selftest and, far worse,
+/// would SPEND the one-shot latch, so a real drop during real serving would
+/// print nothing: the instrument disarmed by its own test. Counting is
+/// unconditional; only the report is gated.
+static DROP_REPORT_ARMED: AtomicBool = AtomicBool::new(false);
+static DROP_REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Arm the #95 drop report. Called once, after the selftest, before serving.
+pub fn arm_drop_report() {
+    DROP_REPORT_ARMED.store(true, Ordering::Relaxed);
+}
+
+/// True iff the #95 report has already fired (the one-shot latch is spent).
+/// Only the selftest reads this -- to prove the gate holds while it is dropping
+/// bytes on purpose.
+fn drop_reported() -> bool {
+    DROP_REPORTED.load(Ordering::Relaxed)
+}
+
+/// Record `n` dropped bytes at `site` and, once per process, say so out loud.
+/// The site NAME is the decisive datum: the three sites have entirely different
+/// causes, and a report that only said "a byte was lost" would leave the next
+/// occurrence as unexplained as #95 itself.
+fn note_drop(site: &mut u32, n: u32, what: &str) {
+    *site = site.saturating_add(n);
+    if DROP_REPORT_ARMED.load(Ordering::Relaxed) && !DROP_REPORTED.swap(true, Ordering::Relaxed) {
+        t_putstr("ptyfs: INPUT DROP (#95) at ");
+        t_putstr(what);
+        t_putstr(" -- a pts lost bytes; further drops counted silently\n");
+    }
 }
 
 pub struct Ptys {
@@ -335,6 +385,9 @@ impl Ptys {
             sig_set: 0,
             winsz_cols: 0,
             winsz_rows: 0,
+            drop_flush: 0,
+            drop_line: 0,
+            drop_echo: 0,
         });
         Some(n)
     }
@@ -437,10 +490,17 @@ impl Ptys {
         if p.tio & TIO_ECHO == 0 {
             return;
         }
-        if b == CH_NL && p.tio & TIO_ONLCR != 0 {
-            let _ = Ptys::ring_push(&mut p.s2m, b"\r\n");
+        // #95: the drop is deliberate here, but it is still a drop -- count it,
+        // under its OWN name, so it can never be confused with the two m2s sites
+        // that carry real input.
+        let want = if b == CH_NL && p.tio & TIO_ONLCR != 0 { 2 } else { 1 };
+        let took = if want == 2 {
+            Ptys::ring_push(&mut p.s2m, b"\r\n")
         } else {
-            let _ = Ptys::ring_push(&mut p.s2m, &[b]);
+            Ptys::ring_push(&mut p.s2m, &[b])
+        };
+        if took < want {
+            note_drop(&mut p.drop_echo, (want - took) as u32, "echo (s2m full)");
         }
     }
 
@@ -498,17 +558,35 @@ impl Ptys {
                 } else if b == CH_NL {
                     // NL: the line INCLUDING its newline flushes to the slave
                     // (drop-on-full -- see above); echo the NL (ONLCR-aware).
+                    // #95: THE site that would carry command bytes. Both pushes
+                    // are genuine SHORT pushes, and both returns used to be
+                    // discarded -- so a truncated command left no trace at all.
+                    // Note what a short push here actually loses: the TAIL of
+                    // the line first and then the newline, so the shell would
+                    // never execute the line. That is why this site alone does
+                    // not explain #95's shape (interior byte lost, terminator
+                    // delivered, command ran) -- the counter is here to say
+                    // whether it is involved at all, not because it is assumed.
                     let len = p.line_len;
-                    let _ = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
-                    let _ = Ptys::ring_push(&mut p.m2s, &[CH_NL]);
+                    let took = Ptys::ring_push(&mut p.m2s, &p.line[..len]);
+                    if took < len {
+                        note_drop(&mut p.drop_flush, (len - took) as u32, "cooked flush (m2s full)");
+                    }
+                    if Ptys::ring_push(&mut p.m2s, &[CH_NL]) == 0 {
+                        note_drop(&mut p.drop_flush, 1, "cooked flush newline (m2s full)");
+                    }
                     p.line_len = 0;
                     Ptys::echo(p, CH_NL);
                 } else if p.line_len < LINE_MAX {
                     p.line[p.line_len] = b;
                     p.line_len += 1;
                     Ptys::echo(p, b);
+                } else {
+                    // Overflow -- dropped, NOT echoed (the cons contract). #95:
+                    // counted, because "Enter still delivers what fits" IS the
+                    // truncated-command shape and was previously silent.
+                    note_drop(&mut p.drop_line, 1, "line assembly (past LINE_MAX)");
                 }
-                // else: overflow -- dropped, NOT echoed (the cons contract).
                 consumed += 1;
             } else {
                 // 4. Raw: straight to the slave; back-pressure on full (the
@@ -552,6 +630,14 @@ impl Ptys {
     /// raises the set members via the pts-scoped SYS_TTY_SIGNAL AFTER the ring
     /// work (the syscall stays out of the pure cook, so the selftest asserts
     /// the set directly -- its local pts has no kernel entry to signal).
+    /// #95: this pts's (flush, line, echo) drop counts. Selftest-only.
+    fn drops(&mut self, n: u32) -> (u32, u32, u32) {
+        match self.slot_mut(n) {
+            Some(p) => (p.drop_flush, p.drop_line, p.drop_echo),
+            None => (0, 0, 0),
+        }
+    }
+
     fn take_sigs(&mut self, n: u32) -> u8 {
         match self.slot_mut(n) {
             Some(p) => {
@@ -1870,6 +1956,23 @@ pub fn selftest() -> Result<(), &'static str> {
         match ptys.master_read(n, &mut sink) {
             RecvOutcome::Data(2) if &sink[..2] == b"\r\n" => {} // the NL echo
             _ => return Err("overflow-nl-echo"),
+        }
+
+        // #95: the drop this battery step just performed on purpose (the `B`
+        // past LINE_MAX) must be COUNTED, and counted at the LINE site -- an
+        // instrument that cannot register a drop it is staring at would make a
+        // future zero reading meaningless. And it must NOT have reported: the
+        // arm gate exists so the selftest's deliberate drop cannot cry wolf, nor
+        // spend the one-shot latch that a real drop needs.
+        let (df, dl, de) = ptys.drops(n);
+        if dl != 1 {
+            return Err("overflow-not-counted");
+        }
+        if df != 0 || de != 0 {
+            return Err("overflow-miscounted");
+        }
+        if drop_reported() {
+            return Err("overflow-reported-too-early");
         }
     }
 

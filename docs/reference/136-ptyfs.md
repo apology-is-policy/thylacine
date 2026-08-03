@@ -197,6 +197,44 @@ seam.
   slave opens and writes).
 - `devdev.walk_pts_dir` (the kernel mount-stub, reference/109).
 
+## Input-drop instrumentation -- #95 (as-built)
+
+The pty ldisc has the same silent-drop problem the kernel console had, one
+layer up: a hosted session's input crosses ptyfs's `m2s` ring and a SECOND line
+discipline before reaching the shell, and every one of those sites discarded
+`ring_push`'s return value. `ring_push` is a genuine SHORT push
+(`room.min(data.len())`), so a partial write silently dropped the remainder and
+reported it in a value nobody read.
+
+Per-pts counters (`drop_flush` / `drop_line` / `drop_echo`) now record them:
+
+| Counter | Site | Notes |
+|---|---|---|
+| `drop_flush` | the cooked Enter-flush into `m2s` | the site that would carry **command** bytes. Both the line push and the newline push are counted. |
+| `drop_line` | line assembly past `LINE_MAX` | dropped un-echoed, the cons contract. |
+| `drop_echo` | `echo()` into `s2m` | the drop is deliberate and documented (echo is best-effort and cannot back-pressure the writer) -- counted under its own name precisely so it can never be mistaken for the two `m2s` sites that carry real input. |
+
+The first drop also emits one line naming the SITE:
+
+```
+ptyfs: INPUT DROP (#95) at cooked flush (m2s full) -- a pts lost bytes; further drops counted silently
+```
+
+The site name is the decisive datum; a report that only said "a byte was lost"
+would leave the next occurrence as unexplained as #95 itself.
+
+`arm_drop_report()` is called by `main` only AFTER the selftest passes, because
+battery step 9 drops a byte on purpose (`B` past `LINE_MAX`). An armed report
+would cry wolf every boot and spend the one-shot latch. The selftest asserts
+all three properties: the deliberate drop IS counted, it is counted at the LINE
+site and not the other two, and it did NOT report.
+
+Note what a short flush actually loses: the tail of the line and then the
+newline -- so the shell would never execute the line at all. That is why this
+site alone does not explain #95's observed shape (interior byte lost,
+terminator delivered, command ran); the counter is here to say whether it is
+involved, not because it is assumed to be.
+
 ## Known caveats / seams
 
 - **PTY-3 (pouch)**: `openpty`/`forkpty`/`ptsname`/`tcsetattr` decompose onto
