@@ -126,11 +126,11 @@ Generated — do not edit between the markers (`quaestor render`).
 ## Recent changes
 
 - 2026-08-04 [[chg-2026-08-04-identity-transport-crypto-sweep]] — Identity and transport crypto — one deleted cap, two dead premises, and a backstop on the wrong loop
+- 2026-08-04 [[chg-2026-08-04-leaf-commands-sweep]] — The leaf commands — one rule enforced by construction, one delegated by convention
 - 2026-08-04 [[chg-2026-08-04-netdev-sweep]] — The NIC transport — a teardown obligation stated on the transport that does not need it
 - 2026-08-04 [[chg-2026-08-04-presentation-stack-sweep]] — The presentation stack — eighteen tests that cannot compile, and a fix that reached one sibling again
 - 2026-08-04 [[chg-2026-08-04-virtio-programs-sweep]] — The virtio programs — a guard defeated by a cast, and a bound outside the call it bounds
 - 2026-08-04 [[chg-2026-08-04-warden-sweep]] — The warden — an unchecked computation whose only audit is a log that under-reports it
 - 2026-08-03 [[chg-2026-08-03-coverage-reconciliation]] — the coverage reconciliation -- the sweep is 31%, and the completeness criterion was the defect this arc keeps finding
 - 2026-08-03 [[chg-2026-08-03-crash-debug-sweep]] — the crash + debug tier — the symbolizer was shared and the raw address that made it safe was not
-- 2026-08-03 [[chg-2026-08-03-exec-image-sweep]] — exec and the image cache -- three documents wrong about which code runs, and a checker that could not see the field that was wrong
 <!-- generated:end -->

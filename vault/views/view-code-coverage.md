@@ -57,39 +57,40 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**290 owned · 132 unowned · 422 files (68% owned) · ~23503 unswept lines.**
+**362 owned · 64 unowned · 426 files (84% owned) · ~11294 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/coreutils | 0 | 60 | 8763 |
+| usr/ports | 0 | 13 | 3341 |
 | usr/pouch-hello | 0 | 20 | 2998 |
-| usr/ports | 0 | 11 | 2970 |
 | kernel | 110 | 22 | 2863 |
-| usr/prowl | 0 | 3 | 1253 |
 | arch | 34 | 4 | 971 |
-| usr/curl | 0 | 3 | 779 |
-| usr/net-echo | 0 | 1 | 774 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/sntp | 0 | 1 | 394 |
-| usr/httpd | 0 | 1 | 335 |
-| usr/loom-stress | 0 | 1 | 303 |
-| usr/ptyhost | 0 | 1 | 236 |
-| usr/https | 0 | 1 | 220 |
+| usr/lib | 40 | 2 | 302 |
+| usr/gl-sdl-prove | 0 | 1 | 247 |
 | usr/stub-driver | 0 | 1 | 119 |
-| usr/lib | 40 | 1 | 72 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
+| usr/coreutils | 60 | 0 | 0 |
 | usr/corvus | 1 | 0 | 0 |
+| usr/curl | 3 | 0 | 0 |
 | usr/diorama | 2 | 0 | 0 |
+| usr/httpd | 1 | 0 | 0 |
+| usr/https | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
 | usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
+| usr/loom-stress | 1 | 0 | 0 |
+| usr/net-echo | 1 | 0 | 0 |
 | usr/netd | 3 | 0 | 0 |
 | usr/netdev-driver | 1 | 0 | 0 |
 | usr/nora | 13 | 0 | 0 |
+| usr/prowl | 3 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
+| usr/ptyhost | 1 | 0 | 0 |
+| usr/sntp | 1 | 0 | 0 |
 | usr/tapestryd | 7 | 0 | 0 |
 | usr/utopia | 26 | 0 | 0 |
 | usr/virtio-blk-rw | 1 | 0 | 0 |
@@ -105,135 +106,67 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | file | lines |
 |---|---:|
 | usr/ports/gnumake/config.h | 1357 |
-| usr/net-echo/src/main.rs | 774 |
 | arch/arm64/uart.c | 674 |
-| usr/prowl/src/main.rs | 490 |
-| usr/coreutils/src/bin/ls.rs | 473 |
-| usr/coreutils/src/bin/sort.rs | 453 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
-| usr/coreutils/src/netpump.rs | 450 |
 | kernel/joey.c | 438 |
-| usr/coreutils/src/bin/grep.rs | 417 |
-| usr/curl/src/lib.rs | 402 |
-| usr/sntp/src/main.rs | 394 |
-| usr/prowl/src/sample.rs | 393 |
-| usr/prowl/src/ui.rs | 370 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
-| usr/httpd/src/main.rs | 335 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
+| usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 323 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
-| usr/loom-stress/src/main.rs | 303 |
 | usr/pouch-hello/pouch-hello-fs.c | 297 |
 | kernel/fault_test.c | 295 |
-| usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 290 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | usr/pouch-hello/pouch-hello.c | 278 |
-| usr/coreutils/src/bin/tr.rs | 268 |
-| usr/coreutils/src/bin/cat.rs | 264 |
-| usr/coreutils/src/bin/pelt.rs | 254 |
-| usr/ptyhost/src/main.rs | 236 |
+| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 273 |
+| usr/gl-sdl-prove/gl-sdl-prove.c | 247 |
 | kernel/include/thylacine/smp.h | 233 |
-| usr/coreutils/src/bin/ns.rs | 233 |
-| usr/coreutils/src/bin/cp.rs | 230 |
-| usr/coreutils/src/bin/nc.rs | 224 |
-| usr/coreutils/src/bin/ping.rs | 224 |
-| usr/curl/src/bin/curl.rs | 224 |
+| usr/lib/thylajit/thyla_capjit.h | 230 |
 | usr/pouch-hello/pouch-hello-pty.c | 221 |
-| usr/https/src/main.rs | 220 |
-| usr/coreutils/src/bin/cut.rs | 215 |
 | kernel/include/thylacine/errno.h | 209 |
 | kernel/include/thylacine/devcap.h | 208 |
-| usr/coreutils/src/bin/head.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
-| usr/coreutils/src/bin/netstat.rs | 188 |
-| usr/coreutils/src/bin/tail.rs | 188 |
 | usr/ports/sdl2/SDL_config.h | 186 |
 | kernel/include/thylacine/spinlock.h | 185 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
-| usr/coreutils/src/bin/ipconfig.rs | 178 |
-| usr/coreutils/src/bin/dial.rs | 177 |
-| usr/coreutils/src/bin/chmod.rs | 171 |
-| usr/coreutils/src/bin/uniq.rs | 163 |
 | usr/ports/gnumake/generated/glob.h | 163 |
-| usr/coreutils/src/bin/wc.rs | 162 |
-| usr/coreutils/src/boxd.rs | 162 |
-| usr/coreutils/src/bin/stat.rs | 161 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/include/thylacine/context.h | 159 |
-| usr/coreutils/src/bin/realm.rs | 156 |
-| usr/coreutils/src/bin/tcpproxy.rs | 154 |
-| usr/curl/src/bin/wget.rs | 153 |
 | kernel/cpio.c | 152 |
 | arch/arm64/uart.h | 151 |
-| usr/coreutils/src/bin/qid.rs | 150 |
-| usr/coreutils/src/bin/con.rs | 148 |
 | usr/pouch-hello/pouch-hello-signals.c | 148 |
-| usr/coreutils/src/bin/rm.rs | 144 |
-| usr/coreutils/src/bin/mkdir.rs | 140 |
-| usr/coreutils/src/meta.rs | 140 |
-| usr/coreutils/src/bin/tee.rs | 133 |
-| usr/coreutils/src/bin/hexdump.rs | 126 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/pouch-hello/pouch-hello-spawn.c | 126 |
-| usr/coreutils/src/bin/mv.rs | 125 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
 | usr/pouch-hello/pouch-hello-fopen.c | 120 |
 | usr/ports/sdl2/thylacine/thyla_tap.h | 119 |
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
-| usr/coreutils/src/bin/nslookup.rs | 116 |
-| usr/coreutils/src/bin/aurora-push.rs | 113 |
 | kernel/canary.c | 111 |
-| usr/coreutils/src/bin/realpath.rs | 104 |
-| usr/coreutils/src/bin/which.rs | 98 |
-| usr/coreutils/src/bin/seq.rs | 97 |
-| usr/coreutils/src/bin/uname.rs | 97 |
-| usr/coreutils/src/bin/sleep.rs | 95 |
-| usr/coreutils/src/bin/date.rs | 93 |
 | kernel/include/thylacine/9p_transport_loopback.h | 92 |
-| usr/coreutils/src/color.rs | 92 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 83 |
 | usr/ports/sdl2/glapi-probe.c | 81 |
+| usr/ports/sdl2/thylacine/SDL_thylacinevideo.h | 79 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
 | arch/arm64/psci.c | 78 |
-| usr/coreutils/src/bin/cmp.rs | 78 |
-| usr/coreutils/src/bin/id.rs | 77 |
 | kernel/include/thylacine/vdso.h | 73 |
-| usr/coreutils/src/bin/basename.rs | 72 |
 | usr/lib/pouch/compiler-rt/aarch64-thylacine.c | 72 |
-| usr/coreutils/src/ui.rs | 71 |
-| usr/coreutils/src/size.rs | 69 |
 | arch/arm64/psci.h | 68 |
 | kernel/vdso.c | 68 |
-| usr/coreutils/src/bin/touch.rs | 67 |
-| usr/coreutils/src/bin/yes.rs | 66 |
-| usr/ports/sdl2/thylacine/SDL_thylacinevideo.h | 66 |
 | usr/ports/gnumake/generated/fnmatch.h | 64 |
 | usr/pouch-hello/pouch-hello-printf.c | 64 |
-| usr/coreutils/src/bin/dirname.rs | 62 |
-| usr/coreutils/src/bin/echo.rs | 62 |
 | kernel/include/thylacine/cpio.h | 61 |
 | kernel/include/thylacine/joey.h | 59 |
-| usr/coreutils/src/bin/rmdir.rs | 58 |
 | usr/pouch-hello/pouch-hello-env.c | 57 |
+| usr/ports/sdl2/thylacine/SDL_thylacineopengl.h | 52 |
 | usr/pouch-hello/pouch-hello-argv.c | 51 |
 | kernel/include/thylacine/canary.h | 50 |
 | kernel/extinction.c | 48 |
-| usr/coreutils/src/bin/env.rs | 45 |
-| usr/coreutils/src/bin/pwd.rs | 43 |
-| usr/coreutils/src/bin/whoami.rs | 42 |
 | usr/pouch-hello/pouch-hello-stdio.c | 42 |
-| usr/coreutils/src/palette.rs | 41 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
-| usr/coreutils/src/usage.rs | 39 |
 | kernel/include/thylacine/extinction.h | 37 |
-| usr/coreutils/src/lib.rs | 37 |
-| usr/coreutils/src/bin/clear.rs | 34 |
 | kernel/include/thylacine/types.h | 30 |
 | kernel/include/thylacine/devramfs.h | 27 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents_c.h | 14 |
-| usr/coreutils/src/bin/false.rs | 13 |
-| usr/coreutils/src/bin/true.rs | 13 |
 <!-- generated:end -->

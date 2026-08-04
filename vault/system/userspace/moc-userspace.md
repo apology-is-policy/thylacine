@@ -31,6 +31,13 @@ dossiers.
   conferred-within-conferrer rule is vacuous by construction, because being
   early means holding everything — so its notes are about arithmetic nobody
   re-derives rather than about gates.
+- [[moc-userspace-tools]] — the programs a person invokes that finish. The
+  tree's least privileged code and the code a person touches most: leaves
+  that hold no session, no console role and no capability, where the
+  interesting question is not soundness but which disciplines propagated
+  across fifty-odd independent implementations of one shape. It answers
+  that both ways — one rule enforced by construction, holding exactly, and
+  one delegated by convention, reproduced wrong fifteen times.
 - [[moc-userspace-hardware]] — the programs that reach a device. None is a
   service and none has a user: each is spawned by something above it, does
   one bounded job, and reports through a channel that party chose. Splits
