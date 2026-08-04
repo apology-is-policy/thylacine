@@ -12,7 +12,7 @@ hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/NET-DESIGN.md", "docs/NET-THROUGHPUT.md"]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-04
 ---
 ## Purpose
 
@@ -31,7 +31,7 @@ passes, and the accept/service/teardown choreography.
   `compatible` must parse to exactly `DeviceId::VirtioPci(1)`; any other
   bind is a manifest error refused BEFORE touching hardware
   (`Error::NoMatch`). Then `VirtioNetPci::open()` (claim + BAR map +
-  VIRTIO init — [the netdev surface, audited at net-1]).
+  VIRTIO init — [[sub-netdev]], audited at net-1).
 - **`NetD::serve(self, res)`** — never returns on success. Ordering
   contract (each step gates the next): DHCP lease (bounded; FAIL exits
   non-zero → the warden's bounded restart, then soft give-up — the box
@@ -268,6 +268,20 @@ On any change, prosecute:
 - `resident_lo_selftest` mutates a THROWAWAY `Net`, never the live
   config (as do all the battery tests) — the live opt-in is the single
   `net.enable_loopback()` call in `serve`.
+- **netd never stops its device, and is right not to — but not for the
+  reason its transport documents.** [[sub-netdev]]'s `quiesce()` is
+  documented on both transports as an obligation on any long-lived
+  driver, since the warden's teardown is a forced group-terminate that
+  skips `Drop` and would otherwise leave a live device writing into
+  pages the reap frees. netd is exactly that driver and never calls it.
+  It is safe because releasing the `KObj_PCI` handle clears the
+  function's bus-master bit before releasing anything else — a kernel
+  fence written to protect the BAR ranges, which stops device transfers
+  as a side effect, and which lands before the ring pages are freed only
+  because handles are released in ascending slot order and `open()`
+  claims the function before allocating its three DMA regions. Nothing
+  states that dependency at either end; see [[sub-netdev]]'s caveats
+  before rearranging `probe`.
 
 ## Provenance
 

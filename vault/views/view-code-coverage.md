@@ -57,16 +57,16 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**266 owned · 155 unowned · 421 files (63% owned) · ~43480 unswept lines.**
+**270 owned · 151 unowned · 421 files (64% owned) · ~41893 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/coreutils | 0 | 60 | 8763 |
-| usr/lib | 31 | 10 | 4797 |
 | usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3545 |
+| usr/lib | 35 | 6 | 3210 |
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
 | usr/ports | 0 | 10 | 2865 |
@@ -118,9 +118,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/net-echo/src/main.rs | 774 |
 | usr/virtio-net-arp/src/main.rs | 710 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
-| usr/lib/netdev/src/virtio_pci.rs | 677 |
 | arch/arm64/uart.c | 674 |
-| usr/lib/netdev/src/virtio.rs | 627 |
 | usr/aurora/src/osd.rs | 522 |
 | usr/aurora/src/render.rs | 500 |
 | usr/prowl/src/main.rs | 490 |
@@ -149,7 +147,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/tr.rs | 268 |
 | usr/coreutils/src/bin/cat.rs | 264 |
 | usr/coreutils/src/bin/pelt.rs | 254 |
-| usr/lib/netdev/src/ring.rs | 244 |
 | usr/ptyhost/src/main.rs | 236 |
 | kernel/include/thylacine/smp.h | 233 |
 | usr/coreutils/src/bin/ns.rs | 233 |
@@ -250,7 +247,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/palette.rs | 41 |
 | usr/pouch-hello/pouch-hello-fault.c | 40 |
 | usr/coreutils/src/usage.rs | 39 |
-| usr/lib/netdev/src/lib.rs | 39 |
 | kernel/include/thylacine/extinction.h | 37 |
 | usr/coreutils/src/lib.rs | 37 |
 | usr/coreutils/src/bin/clear.rs | 34 |

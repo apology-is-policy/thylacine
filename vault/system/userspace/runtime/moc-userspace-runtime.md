@@ -15,8 +15,8 @@ ARCHITECTURE.md section 3.5 split stands on at least the first of these.
 ## The organizing fact
 
 **Almost none of this is a privilege boundary, and that changes what the notes
-here are for — but the exception is real, and which dossier you are in decides
-whether the rest of this section applies.**
+here are for — but the exceptions are real, and which dossier you are in
+decides whether the rest of this section applies.**
 
 Most of these libraries are client code over a frozen ABI. The kernel validates
 every argument it is handed, so a bug in one of them corrupts its own caller's
@@ -24,7 +24,7 @@ state and nothing else — which is why those dossiers are `audit: light` where
 their kernel counterparts are `audit: hard`, and why their invariant sections
 say *composes with* rather than *enforces*.
 
-### The exception: the two libraries that COMPUTE an authority
+### The exceptions: three libraries, three different reasons
 
 The driver framework's two halves are not client code over a validated ABI.
 Between them they decide *which device a driver is* and *what it may touch*, and
@@ -42,9 +42,19 @@ pipes device identities in from outside the trust boundary. Both file
 `audit: hard`: a defect in either moves a hardware boundary rather than corrupting
 a caller.
 
+[[sub-netdev]] is the third exception, and it fails the same argument at a
+different joint. It computes no authority and decides nothing — it is client
+code in the ordinary sense. But the containment argument names *one* party
+across the boundary, the kernel, and assumes it validates what it is handed.
+A NIC driver has a second: once its queues are armed, the device writes
+physical memory on its own schedule and the kernel does not mediate a byte of
+it. So the premise is not weakened there, it is **absent** — which is why the
+descriptor bounds and length clamps in that crate are not defense in depth but
+the only check that will ever run.
+
 The generalization worth carrying past this area: **the "not a privilege
-boundary" argument holds for a library that only ever asks, and fails for one
-that decides.**
+boundary" argument holds for a library that only ever asks, and fails both for
+one that decides and for one whose counterparty is not the kernel.**
 
 What is worth reading them for instead is the **discipline they apply on their
 own initiative**: ownership that closes a descriptor whether or not the caller
@@ -74,6 +84,15 @@ The discovery half's findings are quieter still, and one of them is about the
 property none of its tests can observe. That is the failure mode this area keeps
 producing, one level up — not a claim that is wrong, but a claim nothing checks.
 
+The NIC transport's findings turn the same corner once more. Its bounds and
+clamps are all correct; what is wrong is the *account* of who holds the line.
+Both of its transports instruct a driver to stop the device before teardown,
+but only one of them needs to — and on the other, the thing that actually
+protects the pages is a kernel fence aimed at a different resource entirely,
+landing in the right order for reasons no document states. A library can be
+right everywhere it acts and still leave its reader with the wrong model of
+why nothing has broken.
+
 ## Children
 
 - [[sub-libthyla-rs]] — the runtime proper: the prologue that runs before
@@ -91,6 +110,11 @@ producing, one level up — not a claim that is wrong, but a claim nothing check
   Identity flows up from a source that may be lying, resources flow down from a
   view that cannot be, and the driver believes neither until it reads the
   register. Also the area's exception.
+- [[sub-netdev]] — the NIC frame transport: two virtio transports over one
+  shared piece of ring arithmetic, `send` and `poll_rx` and nothing else. The
+  area's third exception, and the only library here whose teardown obligation
+  the kernel's ordinary reap discipline cannot discharge — a stopped process
+  leaves a running device.
 
 ## Cross-cutting
 
@@ -101,12 +125,9 @@ producing, one level up — not a claim that is wrong, but a claim nothing check
 - The ported half of the same job is [[moc-pouch-seam]]. A program is on one
   side or the other, never both: authored within Thylacine means this area,
   ported from elsewhere means the seam.
-- Still to arrive with the rest of the userspace sweep: the driver framework's
-  *other* half — discovery, supervision and the readiness protocol, which is
-  where a node comes from and what happens when a driver dies — plus the
-  network-device layer, and the transport crypto, which is the one native
-  consumer whose own bound check is load-bearing against the kernel's
-  entropy-read behaviour rather than redundant with it.
+- Still to arrive with the rest of the userspace sweep: the transport crypto,
+  which is the one native consumer whose own bound check is load-bearing
+  against the kernel's entropy-read behaviour rather than redundant with it.
 - The consumer of both halves above is [[sub-warden]], on the boot-chain
   plane — a program, not a library, and the only place the two halves meet.
   Read it for what these libraries are *for*: they exist so that one program

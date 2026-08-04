@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-08-04 [[chg-2026-08-04-netdev-sweep]] — The NIC transport — a teardown obligation stated on the transport that does not need it
 - 2026-08-04 [[chg-2026-08-04-warden-sweep]] — The warden — an unchecked computation whose only audit is a log that under-reports it
 - 2026-08-03 [[chg-2026-08-03-coverage-reconciliation]] — the coverage reconciliation -- the sweep is 31%, and the completeness criterion was the defect this arc keeps finding
 - 2026-08-03 [[chg-2026-08-03-crash-debug-sweep]] — the crash + debug tier — the symbolizer was shared and the raw address that made it safe was not
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-03 [[chg-2026-08-03-kaua-sweep]] — kaua — and the shape found three times: in the code, in the vault's own record, and in my memory index
 - 2026-08-03 [[chg-2026-08-03-libdriver-discovery-sweep]] — libdriver's discovery half — a chain of distrust, and a test that cannot see its own property
 - 2026-08-03 [[chg-2026-08-03-libdriver-grant-sweep]] — libdriver's grant core — and the area claim it does not fit under
-- 2026-08-03 [[chg-2026-08-03-libthyla-rs-sweep]] — the native runtime — a plane where being wrong is free, and two claims that took the offer
 <!-- generated:end -->
