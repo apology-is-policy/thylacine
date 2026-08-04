@@ -4,12 +4,13 @@ type: moc
 title: "The shell and TUI stack — text in, effects out, and a screen in between"
 parent: moc-userspace
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-04
 ---
-What a person actually touches: `ut`, the rc-shaped shell — its parser, its
-evaluator, and the line editor in front of both — plus the console-TUI
-substrate and the editor built on it. Orientation only; the facts live in the
-`sub-*` dossiers.
+What a person actually touches, and what they look at while doing it: `ut`, the
+rc-shaped shell — its parser, its evaluator, and the line editor in front of
+both — the console-TUI substrate and the editor built on it, and the renderer
+that turns the console itself into pixels. Orientation only; the facts live in
+the `sub-*` dossiers.
 
 ## The organizing fact
 
@@ -22,6 +23,15 @@ which the shell puts the console into a state the user cannot type their way
 out of, hands it to a child, and must restore it whatever happens to that
 child. Between them sits an evaluator that turns text into spawns, pipes and
 redirections.
+
+Since [[sub-aurora]] joined, the range extends past the handoff to a *console
+role*: a process that sees every byte the console emits and injects every byte
+the keyboard produces. That is the most privileged-looking position in the
+area and one of the least privileged in fact — the trusted-path invariant
+splits the console three ways, and the renderer holds the one third that
+confers neither elevation nor the interrupt target. Reading it next to the
+shell is the clearest illustration in the tree of a capability being defined by
+what it deliberately excludes.
 
 So the dossiers here carry different `audit` levels for a real reason rather
 than a filing convention, and reading them together is how the range stays
@@ -72,6 +82,11 @@ visible. In particular, two failure modes are worth not conflating:
   editor. The only part of nora with a boundary to guard, and its contribution
   to the trusted path is an abstention — it never touches the line discipline,
   which stays the shell's job.
+- [[sub-aurora]] — the console on a screen: a byte-stream interpreter, a cell
+  grid, an alpha blit through [[sub-libtapestry]], and the third console role.
+  Everything else here paints *into* a terminal; aurora paints the terminal.
+  Also the area's sharpest instance of a test suite that does not run — and one
+  module that says it does.
 
 ## Cross-cutting
 
@@ -91,3 +106,9 @@ visible. In particular, two failure modes are worth not conflating:
   in-guest binary driving the public entry points on every boot. Two figures
   have been published for this and both were wrong; the measured split is 489
   running against 389 stranded.
+  **[[sub-aurora]] is on the stranded side and is the case worth knowing
+  about**, because three of its four modules say so and the fourth — the one
+  with half the tests, over the byte machine every program on the console feeds
+  — says the opposite. Verified by building: nineteen errors, no harness. So in
+  this area a dossier's coverage claim needs the crate checked, and a *source
+  comment's* claim needs it checked twice.

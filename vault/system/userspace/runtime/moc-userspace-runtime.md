@@ -123,6 +123,16 @@ why nothing has broken.
 - [[sub-tls]] — transport security: one record-layer driver shared by both
   roles over a `/net` byte stream, and the area's clearest single instance of a
   bound placed on the wrong loop.
+- [[sub-libtapestry]] — the client half of the graphics protocol: connect,
+  create a surface, map its framebuffer zero-copy, present, receive events.
+  Six file operations and no custom wire. Carries the area's clearest
+  cleanup-helper defect — a construction path that closes its descriptors on
+  every failure but one.
+- [[sub-cornucopia]] — the system typeface, already rasterized: one outline
+  baked at build time into five compiled-in atlases, so the renderer needs no
+  rasterizer and the pre-login screen has a font before any filesystem is
+  mounted. The box-drawing characters are deliberately absent, and the reason
+  is the one thing to read it for.
 
 ## Cross-cutting
 
@@ -146,12 +156,25 @@ why nothing has broken.
   fill, and a short fill is reachable because the kernel's randomness call
   silently caps an oversize request. Everywhere else in this area a library's
   check merely echoes a kernel guard.
-- **The two diverge sharply on proof position, and one line of crate
-  configuration is the cause.** corvus-crypto is no-standard-library *only when
-  not under test*, so it carries thirteen host tests over exactly the hazards
-  it documents. tls is unconditionally no-standard-library and has none — its
-  whole proof is a single in-guest round-trip. The refactor that would close
-  the gap is the one its sibling already made.
+- **The area's crates diverge sharply on proof position, and one line of crate
+  configuration is the cause.** corvus-crypto and [[sub-cornucopia]] are
+  no-standard-library *only when not under test*, so their host suites run —
+  thirteen tests and two respectively, each over exactly the hazards their
+  files document. [[sub-tls]] and [[sub-libtapestry]] are unconditionally
+  no-standard-library and have none between them; their whole proof is one
+  in-guest round-trip each. Same workspace, same target, opposite answers, and
+  the refactor that would close it is one attribute their siblings already
+  carry. cornucopia's header names the pattern explicitly, pointing at
+  [[sub-aurora]] as the counter-example.
+- **Two libraries here exist so that several consumers cannot drift**, and it
+  is worth reading them together because the shape is the same and the stakes
+  differ. corvus-crypto was extracted so a device daemon and a host minter
+  produce byte-identical wraps — drift there means a device that cannot open
+  its own system wrap. [[sub-cornucopia]] bakes at build time so the renderer
+  needs no rasterizer, with a second consumer anticipated in the kernel's
+  crash-time path — drift there means the crash screen and the console
+  disagree about what a letter looks like. One source of truth, several
+  linkers, in both cases enforced by there being only one implementation.
 - The consumer of both halves above is [[sub-warden]], on the boot-chain
   plane — a program, not a library, and the only place the two halves meet.
   Read it for what these libraries are *for*: they exist so that one program

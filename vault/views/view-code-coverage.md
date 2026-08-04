@@ -57,21 +57,18 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**281 owned · 141 unowned · 422 files (66% owned) · ~30902 unswept lines.**
+**290 owned · 132 unowned · 422 files (68% owned) · ~23503 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/coreutils | 0 | 60 | 8763 |
-| usr/aurora | 0 | 5 | 3607 |
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/ports | 0 | 11 | 2970 |
-| usr/diorama | 0 | 2 | 2904 |
 | kernel | 110 | 22 | 2863 |
 | usr/prowl | 0 | 3 | 1253 |
 | arch | 34 | 4 | 971 |
-| usr/lib | 38 | 3 | 960 |
 | usr/curl | 0 | 3 | 779 |
 | usr/net-echo | 0 | 1 | 774 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -81,8 +78,11 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ptyhost | 0 | 1 | 236 |
 | usr/https | 0 | 1 | 220 |
 | usr/stub-driver | 0 | 1 | 119 |
+| usr/lib | 40 | 1 | 72 |
 | mm | 8 | 0 | 0 |
+| usr/aurora | 5 | 0 | 0 |
 | usr/corvus | 1 | 0 | 0 |
+| usr/diorama | 2 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
 | usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
@@ -104,15 +104,9 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 
 | file | lines |
 |---|---:|
-| usr/diorama/src/server.rs | 2803 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/aurora/src/vt.rs | 1170 |
-| usr/aurora/src/main.rs | 1100 |
 | usr/net-echo/src/main.rs | 774 |
-| usr/lib/libtapestry/src/lib.rs | 677 |
 | arch/arm64/uart.c | 674 |
-| usr/aurora/src/osd.rs | 522 |
-| usr/aurora/src/render.rs | 500 |
 | usr/prowl/src/main.rs | 490 |
 | usr/coreutils/src/bin/ls.rs | 473 |
 | usr/coreutils/src/bin/sort.rs | 453 |
@@ -127,7 +121,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/httpd/src/main.rs | 335 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
-| usr/aurora/src/config.rs | 315 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
 | usr/loom-stress/src/main.rs | 303 |
 | usr/pouch-hello/pouch-hello-fs.c | 297 |
@@ -148,7 +141,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello/pouch-hello-pty.c | 221 |
 | usr/https/src/main.rs | 220 |
 | usr/coreutils/src/bin/cut.rs | 215 |
-| usr/lib/cornucopia/src/lib.rs | 211 |
 | kernel/include/thylacine/errno.h | 209 |
 | kernel/include/thylacine/devcap.h | 208 |
 | usr/coreutils/src/bin/head.rs | 198 |
@@ -193,7 +185,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/coreutils/src/bin/aurora-push.rs | 113 |
 | kernel/canary.c | 111 |
 | usr/coreutils/src/bin/realpath.rs | 104 |
-| usr/diorama/src/main.rs | 101 |
 | usr/coreutils/src/bin/which.rs | 98 |
 | usr/coreutils/src/bin/seq.rs | 97 |
 | usr/coreutils/src/bin/uname.rs | 97 |

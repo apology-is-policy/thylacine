@@ -42,6 +42,7 @@ Generated from note fields — do not edit between the markers
 | I-38 | [[inv-i38]] | spec | sub-kernel-ninep-dev9p, sub-kernel-larder | spec-fs-cache |
 | I-39 | [[inv-i39]] | spec | sub-kernel-devproc, sub-kernel-proc, sub-kernel-hwdebug | spec-debug-stop, spec-debug-step, prose, gate-smp |
 | I-40 | [[inv-i40]] | spec | sub-tapestryd, sub-kernel-weft | spec-tapestry-present, prose, gate-smp |
+| I-43 | [[inv-i43]] | prose | sub-diorama | prose |
 | I-5 | [[inv-i5]] | spec | sub-kernel-hwcap, sub-kernel-handle, sub-kernel-gic, sub-kernel-discovery | prose, gate-smp |
 | I-7 | [[inv-i7]] | spec | sub-kernel-burrow | spec-burrow, gate-smp |
 | I-8 | [[inv-i8]] | spec | sub-kernel-sched, sub-kernel-sched-smp, sub-kernel-rendez | spec-scheduler, spec-sched-alpha, spec-sched-rebalance, spec-sched-tickless, gate-smp |

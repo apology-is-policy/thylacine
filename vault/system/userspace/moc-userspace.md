@@ -48,22 +48,36 @@ dossiers.
   [[inv-i40]].
 - [[sub-corvus]] — the key agent: authentication, key custody, elevation
   and recovery in one daemon, bounded by [[inv-i23]] to the storage
-  capability it is handed. The oldest of the four servers and the one the
+  capability it is handed. The oldest of the five servers and the one the
   others' shared codec was lifted out of.
+- [[sub-diorama]] — the synthetic Linux world: a read-only tree presenting
+  native state in the shapes an unmodified Linux binary expects. Holds
+  [[inv-i43]], whose whole content is that it must reformat and never
+  become an authority — the newest server and the only one whose design
+  property is an absence of privilege.
 
 ## Cross-cutting
 
-- **Four native 9P servers share a template, and the template came from
-  the oldest of them.** netd, [[sub-ptyfs]], [[sub-tapestryd]] and
-  [[sub-corvus]] are the same shape — a Conn/fid table, a frame
-  extractor, a qid scheme, and a single-threaded loop whose top-of-loop
-  pass *is* the I-9 argument. The shared 9P codec the first three link
-  was **lifted out of corvus's private module**, which inverts the usual
-  reading of a shared template: a fix that reached the library reached
-  the descendants, and a fix that reached only a descendant never came
-  back to the ancestor. (corvus differs in one respect: it stages a
-  response rather than deferring a reply, so it has no held-tag cancel
-  discipline to get wrong.)
+- **Five native 9P servers share a template, and the template came from
+  the oldest of them.** netd, [[sub-ptyfs]], [[sub-tapestryd]],
+  [[sub-corvus]] and [[sub-diorama]] are the same shape — a Conn/fid
+  table, a frame extractor, a qid scheme, and a single-threaded loop
+  whose top-of-loop pass *is* the I-9 argument. The shared 9P codec the
+  others link was **lifted out of corvus's private module**, which
+  inverts the usual reading of a shared template: a fix that reached the
+  library reached the descendants, and a fix that reached only a
+  descendant never came back to the ancestor. (corvus and diorama both
+  differ in one respect: they answer inside the dispatch rather than
+  deferring a reply, so neither has a held-tag cancel discipline to get
+  wrong.)
+- **A second fix travelled one hop and stopped, and the two ends are now
+  both swept.** A full connection table plus a pending connection keeps
+  the listener perpetually readable, so an accept loop that merely skips
+  the accept spins at full CPU. [[sub-diorama]] drops the listener from
+  its poll set while full and cites the audit finding that taught it;
+  [[sub-corvus]] does not, and its comment calls the situation a benign
+  deferral (task #149). Same defect, same family, one sibling fixed —
+  which is the third instance of this shape in the userspace sweep.
 - **The template's fixes did not all travel.** netd's `net-4d` F2 fix
   (reject `P9_NOFID` as a newfid; reject a newfid already in use)
   reached ptyfs and only half-reached tapestryd — see
