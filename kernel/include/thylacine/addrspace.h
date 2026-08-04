@@ -206,10 +206,25 @@ void addrspace_unref(struct AddrSpace *as);
 // PTE into a page the child now shares -- silent cross-address-space corruption,
 // the I-44 violation this whole arc exists to prevent.
 //
-// LOCKING: takes src->lock across the entire walk (a peer thread of the forking
-// Proc may be faulting), and the child's lock beneath it via vma_insert_in. That
-// nesting is safe because the child is not yet published -- no other CPU can reach
-// it to take its lock in the opposite order.
+// LOCKING: takes src->lock across the entire walk -- a peer thread of the forking
+// Proc may be faulting, and the write-protect pass plus the share must not
+// interleave with it.
+//
+// The CHILD's counters are guarded by UNREACHABILITY, not by its lock (L-7 F3
+// corrected this paragraph, which used to claim vma_insert_in took dst->lock --
+// it does not; it REQUIRES one, and every other caller supplies it). `dst` is
+// unpublished for the whole clone: no Proc points at it, so no other CPU can
+// reach it to charge, fault, or drain. That is what makes the exactness argument
+// for addrspace_charge_vma hold here without a lock.
+//
+// The page charge a few lines further down DOES take dst->lock. It is redundant
+// under the same argument and is kept deliberately: it costs an uncontended
+// acquire on a lock no one else can hold, and it keeps every addrspace_charge_*
+// call site in the tree uniform, so the rule stays "these run under as->lock"
+// with exactly one documented exception rather than two shapes to remember.
+//
+// ANYTHING THAT PUBLISHES `dst` EARLIER INVALIDATES THIS -- the counters would
+// then need the lock for real, and vma_insert_in would need it supplied.
 //
 // `exempt` is the CHILD's I-32 exemption (proc_resource_exempt of the forking
 // Proc, which the child inherits). Resident shared pages are charged to the child

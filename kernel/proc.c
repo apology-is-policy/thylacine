@@ -516,9 +516,18 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // belongs to the space, not to this Proc, so while a sharer survives the
     // device is still mapped and may still be driven -- resetting it here would
     // pull the hardware out from under a living driver, the same premature
-    // teardown as draining the VMA list early, one layer down. The count is
-    // stable to read here: this Proc is a ZOMBIE with no threads, and a
-    // reference can only be taken by an rfork from a LIVE parent.
+    // teardown as draining the VMA list early, one layer down.
+    //
+    // The count is stable to read here, but NOT for the reason this comment used
+    // to give (L-7 F6). It said "this Proc is a ZOMBIE with no threads", which
+    // stopped being true at #68: the primary caller is now
+    // proc_close_handles_at_exit, which runs in a deliberately-opened RUNNING +
+    // ALIVE window with a live thread. The property survives on refcount shape
+    // instead -- a second holder means ref >= 2 for as long as that holder
+    // lives, so only the sole remaining holder can ever observe 1, and once it
+    // does, nothing can raise the count behind it: the only way to take a
+    // reference is an rfork, which needs a running thread of a Proc that already
+    // holds one. Reading 1 therefore means "sole, and staying sole".
     //
     // Walk (a) needs no such gate: handle tables are per-Proc and hardware
     // handles are non-transferable (I-5), so no second Proc can hold this
@@ -2962,6 +2971,23 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     kfree(p->sigtab);            // VIVARIUM V-6b Linux dispositions; lazily re-made
     p->sigtab = NULL;
     self->note_mask = 0u;
+
+    // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD
+    // image, for exactly the reason the handler entry points above are. Nothing
+    // else disarms them -- debug_hw lives until proc_free -- and
+    // hwdebug_switch_in re-arms unconditionally from bp_count/wp_count at every
+    // context switch, so a surviving slot fires on whatever now occupies that VA
+    // and delivers a stop in a program the debugger never set a breakpoint in.
+    // The ATTACHMENT survives (Linux keeps it too: begin_new_exec calls
+    // flush_ptrace_hw_breakpoint, which clears the slots, not the tracer); only
+    // the per-image slots go. Cleared under the same single-thread guarantee as
+    // the sigtab -- the debugger can only have armed these while the target was
+    // fully-stopped, and we are the only live thread.
+    if (p->debug_hw) {
+        hwdebug_bp_clear_all(p->debug_hw);
+        hwdebug_wp_clear_all(p->debug_hw);
+    }
+    __atomic_store_n(&self->debug_ss_armed, false, __ATOMIC_RELEASE);
 
     // TLS is per-image: musl's __pthread_self reads TPIDR_EL0, and a value
     // pointing into the old image's thread-control block would be read as a live

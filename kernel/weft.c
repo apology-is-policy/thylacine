@@ -576,6 +576,15 @@ static int weft_reap_find_cb(struct Proc *q, void *arg) {
     struct weft_reap_find_ctx *c = arg;
     if ((u32)q->pid != c->pid) return 0;
     if (q->state != PROC_STATE_ALIVE) return 1;   // found; teardown owns it
+    // L-7 F5: kproc is in this walk, is ALIVE, and has `as == NULL` (pid 0,
+    // KP_ZERO'd through proc_init_fields). Pre-L-1 this line read an INLINE
+    // `q->vma_lock` and could not fault; L-1 turned it into a pointer deref and
+    // this site did not gain the guard its siblings did (devproc.c, devctl.c).
+    // Reachability is gated only by the bare-u32 pid compare against
+    // wb->map_pid -- the documented G-2 wrap seam -- so it is unreachable in
+    // practice, not by construction. Fail closed like the non-ALIVE arm: a Proc
+    // with no address space has no mapping for the reaper to tear down.
+    if (!q->as) return 1;
     spin_lock(&q->as->lock);
     c->locked = q;
     return 1;   // pid matched -- stop the walk

@@ -1914,24 +1914,46 @@ claim), `weft.shared_map_budget_cap` (the R2-F3 budget).
 ## `cow.tla` -- copy-on-write address-space sharing (LINEAGE L-4, I-44)
 
 **Model-first: this module landed BEFORE any L-4 implementation**, per the
-spec-first re-enablement for this surface (LINEAGE section 6). There is
-therefore no action-to-site map yet -- it lands with L-4b, when the break arm
-exists to map onto. What follows is the *obligation* the implementation
-inherits.
+spec-first re-enablement for this surface (LINEAGE section 6). L-4b then landed
+the break arm (`dd360f46` substrate, `f30ef3a8` clone + break), so the map below
+is the as-built one; it replaces the promissory note this section carried until
+L-7 F1, which still promised a future map and still described a lock the
+implementation deliberately does not use.
 
-- **`DecideLocked`** -> the COW write-fault arm, which must read the share
-  count and act on it in ONE critical section under the Burrow lock. Splitting
-  the read from the act is `cow_buggy_break`: two sharers each drop, both then
-  read zero, and both take the SAME page in place -> `NoAliasedWritable`.
+**ONE REFINEMENT, RECORDED HERE RATHER THAN ONLY IN THE CODE.** The model says
+the decide runs "under the Burrow lock". The implementation uses a GLOBAL leaf
+lock, `kernel/cow.c`'s `g_cow_lock`, because after a fork the two sharers hold
+DIFFERENT Burrows (a fork clones the Burrow per address space -- the Plan 9
+`dupseg` shape), so there is no single Burrow lock that serializes them. A
+global leaf is a strictly STRONGER serialization than the model's, so every
+`cow.tla` property carries over; the direction of the refinement is what makes
+that true, and reversing it (a per-Burrow lock) would NOT be sound. See
+`kernel/include/thylacine/cow.h` for the same argument at the declaration.
+
+- **`DecideLocked`** -> `arch/arm64/fault.c`'s COW write-fault arm, whose decide
+  is `cow_page_break_is_sole` (`kernel/cow.c`) -- ONE critical section under
+  `g_cow_lock` that reads the share count and acts on it. Splitting the read
+  from the act is `cow_buggy_break`: two sharers each drop, both then read zero,
+  and both take the SAME page in place -> `NoAliasedWritable`.
 - **The pin across the copy** (`DecideLocked`'s `pin + 1`, released in
-  `BreakFinish`) -> the breaker must hold the pristine page across the copy and
-  drop its share only AFTER. Dropping first and taking no pin is
-  `cow_buggy_teardown`: a concurrent last exit frees the page mid-copy ->
-  `NoUseAfterFree`.
-- **`FreePristine`** -> the free decision trusts `share` and `pin`, exactly as
-  the implementation will. It carries no extra guard ON PURPOSE: a protocol
-  that lets the count lie must be caught here rather than papered over by a
-  check the kernel would not have.
+  `BreakFinish`) -> `arch/arm64/fault.c`, the copy arm. The implementation
+  refines the model's explicit pin as a RETAINED SHARE: the breaker does not
+  drop its share until after the copy, so the count cannot reach zero while it
+  is reading. Same property, one counter instead of two.
+- **`FreePristine`** -> the three release sites, all routed through
+  `cow_page_put` so the rule stays checkable by inspection:
+  `kernel/burrow.c`'s populate-unwind, `burrow_decommit`, and the ANON_LAZY free
+  arm. The free decision trusts the count and carries no extra guard ON PURPOSE:
+  a protocol that lets the count lie must be caught here rather than papered
+  over by a check the kernel would not have.
+- **Establishment (no model action -- the precondition every other action
+  assumes)** -> the THREE sites that put a page into an anon slot, each calling
+  `cow_page_set_sole` while the page is still private to the call:
+  `kernel/burrow.c`'s `burrow_lazy_populate`, and `arch/arm64/fault.c`'s
+  demand-zero install and break-copy install. `cow_require_established`
+  extincts on a page reaching any count operation at zero, which is what makes a
+  MISSED establish loud instead of a silent mis-count. A fourth site putting a
+  page into an anon slot must call it too.
 - **`VParentCheck` / `VChildRelease`** -> `kernel/proc.c`'s
   `vfork_await_release` / `vfork_child_released` (ALREADY BUILT at L-3c-2;
   modeled retroactively, the `death_wake.tla` precedent). The check and the

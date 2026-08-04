@@ -701,6 +701,57 @@ static void reap_fixture(struct Proc *server,
     *out_b = b;
 }
 
+// L-7 F5: the reaper's find callback walks the LIVE Proc table, and kproc is in
+// it -- ALIVE, pid 0, and (since L-1) `as == NULL`. Before L-1 that callback read
+// an INLINE vma_lock and could not fault; L-1 turned it into a pointer deref and
+// this site did not gain the guard its devproc/devctl siblings did. Drive the
+// walk at kproc's pid and require the sweep to survive it.
+//
+// REVERT PROBE: without the `if (!q->as) return 1;` guard this does not fail --
+// it EXTINCTS the boot on a NULL deref, which is the honest signature for a
+// missing NULL guard and the reason this test exists rather than a comment.
+void test_weft_reap_kproc_pid_survives_walk(void) {
+    struct Proc *server = make_proc();
+    struct Proc *client = make_proc();
+    TEST_ASSERT(server != NULL && client != NULL, "proc_alloc failed");
+    struct Burrow *v = NULL;
+    struct weft_binding *b = NULL;
+    reap_fixture(server, client, &v, &b);
+    TEST_ASSERT(b != NULL, "fixture built");
+
+    proc_test_link(client);
+    reap_fake_session_init(true);
+    weft_reap_register(b, NULL, &g_reap_fake_client);
+
+    // Point the binding at kproc. This is what the G-2 bare-u32 pid wrap would
+    // eventually produce on its own; here it is produced deliberately.
+    b->map_pid = 0u;
+
+    u64 now = 2000ull * 1000 * 1000;
+    vma_drain(server);
+    reap_fake_session_kill();
+    TEST_EXPECT_EQ(weft_reap_sweep(now), 0, "dead sweep 1: stamps, no reclaim");
+
+    // The walk visits kproc, matches pid 0, and must decline it rather than
+    // locking a NULL address space. The entry still reclaims -- there is simply
+    // no client mapping to unmap, which is exactly true of a Proc with no
+    // address space.
+    TEST_EXPECT_EQ(weft_reap_sweep(now + WEFT_REAP_GRACE_NS + 1), 1,
+        "past the grace: reclaimed without dereferencing kproc's NULL as");
+    TEST_EXPECT_EQ(weft_reap_sweep(now + 10 * WEFT_REAP_GRACE_NS), 0,
+        "the reclaimed entry left the registry");
+
+    // The client's own mapping is untouched: the reaper never resolved to it.
+    TEST_ASSERT(vma_lookup(client, WEFT_TEST_VA) != NULL,
+        "the real client mapping was not collaterally unmapped");
+
+    weft_reap_unregister(b);
+    weft_binding_release(b);
+    proc_test_unlink(client);
+    drop_proc(server);
+    drop_proc(client);
+}
+
 void test_weft_reap_orphan_reclaimed(void) {
     struct Proc *server = make_proc();
     struct Proc *client = make_proc();

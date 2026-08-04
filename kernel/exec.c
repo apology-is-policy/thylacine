@@ -66,6 +66,31 @@ static size_t pages_spanning(u64 bytes) {
     return (size_t)((bytes + PAGE_SIZE - 1) / PAGE_SIZE);
 }
 
+// L-7 F4: burrow_lazy_populate charges the whole run to `as` on SUCCESS, so every
+// failure after it owes the charge back. The pages themselves go with the Burrow's
+// last unref; only the counter needs unwinding, and pairing the two here keeps them
+// together rather than asking four call sites to remember -- the #106/#130 lesson
+// on the very axis that arc established. `exempt` is deliberately not a parameter:
+// addrspace_charge_pages COUNTS regardless of exemption (exemption bypasses the
+// CAP, not the accounting), so the uncharge must be unconditional to stay paired.
+// Give the charge back. Call this ONLY where the populate SUCCEEDED: its own
+// failure arm already unwinds, so uncharging there too would under-count.
+static void lazy_populate_uncharge(struct AddrSpace *as, size_t nfile) {
+    if (nfile == 0) return;
+    spin_lock(&as->lock);                // the stated precondition of the counter ops
+    addrspace_uncharge_pages(as, (u32)nfile);
+    spin_unlock(&as->lock);
+}
+
+// The common shape: give the charge back AND drop the Burrow. Returns -1 so the
+// arms can `return lazy_populate_unwind(...)` in one line. The stack-frame site
+// uses the bare uncharge instead -- it does not own its Burrow.
+static int lazy_populate_unwind(struct AddrSpace *as, struct Burrow *v, size_t nfile) {
+    lazy_populate_uncharge(as, nfile);
+    burrow_unref(v);
+    return -1;
+}
+
 // LINEAGE L-4a: copy `len` bytes into a POPULATED ANON_LAZY Burrow at byte offset
 // `off`, splitting at page boundaries -- the sparse twin of the single memcpy the
 // eager paths do into one contiguous chunk. Every page the range touches must
@@ -211,10 +236,18 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
                                    : burrow_create_anon(g.size);
     if (!burrow)                               return -1;
 
+    // L-7 F4: hoisted to function scope so the map-in failure below -- which is
+    // outside the sparse block but still after the populate -- can unwind the
+    // same charge. 0 on the eager path, where nothing was charged.
+    size_t nfile = 0;
+
     if (sparse) {
-        size_t nfile = seg_file_pages(&g, seg->filesz);
+        nfile = seg_file_pages(&g, seg->filesz);
         if (nfile > 0 &&
             burrow_lazy_populate(as, exempt, burrow, 0, nfile) != 0) {
+            // No unwind here: populate is all-or-nothing and gives its OWN charge
+            // back on every internal failure (burrow.c, "the whole charge,
+            // matching the grant"). Only failures AFTER it succeeded owe one.
             burrow_unref(burrow);
             return -1;
         }
@@ -223,8 +256,7 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
         if (seg->filesz > 0 &&
             lazy_write(burrow, (u64)g.lead, (const u8 *)blob + seg->file_offset,
                        seg->filesz) != 0) {
-            burrow_unref(burrow);
-            return -1;
+            return lazy_populate_unwind(as, burrow, nfile);
         }
         // No I-cache maintenance: seg_may_be_sparse admitted this segment precisely
         // because nothing here will ever be fetched as an instruction.
@@ -265,8 +297,7 @@ static int exec_map_segment(struct AddrSpace *as, bool exempt, const void *blob,
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map_in(as, exempt, burrow, g.floor, g.size, prot);
     if (rc != 0) {
-        burrow_unref(burrow);
-        return -1;
+        return lazy_populate_unwind(as, burrow, nfile);   // nfile == 0 on the eager path
     }
 
     // Drop the caller-held handle. mapping_count=1 (from vma_alloc)
@@ -612,8 +643,14 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     size_t first = (size_t)(frame_off / PAGE_SIZE);
     size_t n     = (size_t)(EXEC_USER_STACK_SIZE / PAGE_SIZE) - first;
     int rc = burrow_lazy_populate(as, exempt, sv->burrow, first, n);
-    if (rc == 0)
+    if (rc == 0) {
         rc = lazy_write(sv->burrow, frame_off, frame, (size_t)frame_size);
+        // L-7 F4: the populate succeeded, so its charge for the whole run is
+        // outstanding and a lazy_write failure owes it back. Deliberately inside
+        // this arm: the populate-failure path already gave its own charge back,
+        // and uncharging there as well would UNDER-count.
+        if (rc != 0) lazy_populate_uncharge(as, n);
+    }
     kfree(frame);
     if (rc != 0) return 0;      // caller disposes the partially-built address space
 
@@ -829,15 +866,19 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
                               : burrow_create_anon(size);
     if (!b)                                  return -1;
 
+    // L-7 F4: function-scoped so the map-in failure below can unwind the same
+    // charge; 0 on the eager path, where nothing was charged.
+    size_t nfile = 0;
+
     if (sparse) {
         // Populate only the file-backed head; read into it a page at a time (the
         // slots are separate order-0 pages, so there is no contiguous span to read
         // into). Byte-identical to the eager read: same offsets, same total, and
         // the [filesz, size) tail is still zero -- it is simply not allocated yet.
-        size_t nfile = seg_file_pages(&g, seg->filesz);
+        nfile = seg_file_pages(&g, seg->filesz);
         if (nfile > 0 &&
             burrow_lazy_populate(as, exempt, b, 0, nfile) != 0) {
-            burrow_unref(b);
+            burrow_unref(b);   // populate self-unwinds its charge; nothing owed
             return -1;
         }
         size_t got = 0;
@@ -847,17 +888,20 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
             // slack is not read from the file, it stays demand-zero.
             size_t dst_off = g.lead + got;
             u8 *slot_kva = (u8 *)burrow_lazy_slot_kva(b, dst_off / PAGE_SIZE);
-            if (!slot_kva) { burrow_unref(b); return -1; }
+            // L-7 F4: past the populate, so these three owe the charge back.
+            if (!slot_kva) return lazy_populate_unwind(as, b, nfile);
             size_t in_page = dst_off % PAGE_SIZE;
             size_t want    = (size_t)PAGE_SIZE - in_page;
             if (want > seg->filesz - got) want = (size_t)(seg->filesz - got);
             long n = exe->dev->read(exe, slot_kva + in_page, (long)want,
                                     (s64)(seg->file_offset + got));
-            if (n < 0)  { burrow_unref(b); return -1; }   // #811-interruptible / I/O error
+            // #811-interruptible / I/O error -- the reachable one, on a real 9P read
+            if (n < 0)  return lazy_populate_unwind(as, b, nfile);
             if (n == 0) break;                             // short read (caught below)
             got += (size_t)n;
         }
-        if (got != seg->filesz) { burrow_unref(b); return -1; }   // truncated -> no partial map
+        // truncated -> no partial map
+        if (got != seg->filesz) return lazy_populate_unwind(as, b, nfile);
         // No I-cache maintenance: seg_may_be_sparse admitted this segment precisely
         // because nothing here will ever be fetched as an instruction.
     } else if (seg->filesz > 0) {
@@ -883,8 +927,12 @@ static int map_eager_from_file(struct AddrSpace *as, bool exempt, struct Spoor *
 
     u32 prot = vma_prot_for_elf(seg->flags);
     int rc = burrow_map_in(as, exempt, b, g.floor, size, prot);
+    // L-7 F4: on FAILURE the charge is owed back (nfile == 0 on the eager path,
+    // where none was taken). On SUCCESS the mapping keeps the pages and the
+    // charge correctly describes them, so only the construction handle drops.
+    if (rc != 0) return lazy_populate_unwind(as, b, nfile);
     burrow_unref(b);
-    return rc == 0 ? 0 : -1;
+    return 0;
 }
 
 // Read the ELF header + program-header table from the pinned executable into a
