@@ -135,17 +135,27 @@ The guard owns no physical page (no BURROW) — it costs one `struct Vma` and no
 
 After mapping the segments + the user stack, `exec_setup` calls `exec_build_init_stack` to write a **System V process-startup frame** into the top of the user stack. A C runtime (pouch — the Thylacine POSIX libc; `docs/POUCH-DESIGN.md`) reads `argc`, `argv`, `envp`, and the auxiliary vector from this frame at entry. `*sp_out` points at the frame's `argc` word.
 
-The Shape-A frame is a fixed `EXEC_INIT_STACK_SIZE` (176) bytes — `argc == 0` (the argv-bearing Shape B is documented in `exec.h`) and room for the max eight-entry auxv. Layout, low → high address:
+**ONE SHAPE since #140** (LINEAGE L-6c). There used to be two — a fixed 176-byte "no argv" Shape A and a variable argv-bearing Shape B — and each wrote its own lone NULL for `envp`, which is why no Thylacine process had ever had a POSIX environment: the defect had two homes. The general arithmetic (`EXEC_INIT_STRUCTURED` / `EXEC_INIT_FRAME_SIZE`, both in `exec.h`) reduces to the old fixed frame *exactly* when `argc` and `envc` are both zero, and `exec.h` pins that with a `_Static_assert` rather than asserting it in prose. So the table below is still the frame an argument-less program with an empty environment gets, byte for byte.
+
+General layout, low → high address (`R` = `round_up(structured, 16)`, the `AT_RANDOM` offset):
 
 | Offset from sp | Bytes | Contents |
 |---|---|---|
-| 0   | 8   | `argc` — 0 |
-| 8   | 8   | `argv[]` terminator (one NULL) |
-| 16  | 8   | `envp[]` terminator (one NULL) |
-| 24  | 128 | `auxv[]` — up to eight `Elf64_auxv_t` (16 B each) |
-| 152 | 8   | alignment padding (zero, from `KP_ZERO`) |
-| 160 | 16  | `AT_RANDOM` entropy block |
-| 176 | —   | `EXEC_USER_STACK_TOP` |
+| 0                            | 8            | `argc` |
+| 8 + 8*i                      | 8            | `argv[i]`, i = 0..argc-1 — user VAs into the strings region |
+| 8 + 8*argc                   | 8            | `argv[]` terminator (NULL) |
+| 16 + 8*argc + 8*j            | 8            | `envp[j]`, j = 0..envc-1 |
+| 16 + 8*argc + 8*envc         | 8            | `envp[]` terminator (NULL) |
+| 24 + 8*argc + 8*envc         | 128          | `auxv[]` — up to eight `Elf64_auxv_t` (16 B each) |
+| ...                          | 0–15         | alignment padding (zero, from `KP_ZERO`) |
+| R                            | 16           | `AT_RANDOM` entropy block |
+| R + 16                       | argv_data_len| argv strings — concatenated, NUL-terminated |
+| R + 16 + argv_data_len       | env_data_len | envp strings — same packing, `NAME=VALUE\0` records |
+| frame_size                   | —            | `EXEC_USER_STACK_TOP` |
+
+At `argc == 0, envc == 0` that is: `argc` at 0, the two NULLs at 8 and 16, auxv at 24, pad at 152, `AT_RANDOM` at 160, `EXEC_USER_STACK_TOP` at 176 — `EXEC_INIT_STACK_SIZE`.
+
+**Where the environment comes from.** The builder takes env DATA, not a Proc, and that is forced rather than stylistic: `exec_load_into` builds into a *detached* address space and commits only after everything failable has succeeded (LINEAGE L-2a), so at that moment the Proc still holds the OLD environment. `exec_stage_env` does the projection for the callers whose answer is "whatever this Proc already has" — every `SYS_SPAWN_*` thunk (projecting the child's already-cloned `/env`) and the native `SYS_EXECVE`, whose ABI has no envp argument and therefore means *preserve*. A phenotyped Linux `execve` packs its own block from the guest's `envp`. The block is bounded independently of the `/env` maxima (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, argued in `exec.h`) and an environment that exceeds it is refused with `T_E_2BIG`, never truncated.
 
 The auxv entries (`a_type`, `a_val`), written by `exec_fill_auxv` (both frame shapes route through it):
 

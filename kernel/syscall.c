@@ -6863,7 +6863,8 @@ static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
 
 static s64 sys_execve_core(struct exception_context *ctx,
                            const char *path, u64 path_len,
-                           const char *argv_kbuf, u64 argv_data_len, u64 argc) {
+                           const char *argv_kbuf, u64 argv_data_len, u64 argc,
+                           const char *env_kbuf, u64 env_data_len, u64 envc) {
     struct Thread *t = current_thread();
     if (!t)                                            return -(s64)T_E_INVAL;
     struct Proc *p = t->proc;
@@ -6872,13 +6873,26 @@ static s64 sys_execve_core(struct exception_context *ctx,
     if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -(s64)T_E_INVAL;
     if (argv_data_len > SYS_SPAWN_ARGV_DATA_MAX)       return -(s64)T_E_INVAL;
     if (argc > SYS_SPAWN_ARGV_MAX)                     return -(s64)T_E_INVAL;
+    // The environment's own bounds answer T_E_2BIG, not T_E_INVAL, because a
+    // caller acts on the difference: E2BIG says the request was well-formed and
+    // too large, so splitting it will work. The argv bounds directly above
+    // still answer EINVAL -- that is a LANDED native ABI (L-2a) whose error
+    // code is its own deliberate decision, reserved to the #142 errno rollout
+    // rather than changed as a side effect of adding envp. The asymmetry is
+    // tracked, not accidental (docs/ERRORS.md says so at the T_E_2BIG row).
+    if (env_data_len > EXEC_ENV_DATA_MAX)              return -(s64)T_E_2BIG;
+    if (envc > EXEC_ENV_MAX)                           return -(s64)T_E_2BIG;
     // argc and argv_data_len are zero together or non-zero together: a count
     // with no bytes has nothing to point at, and bytes with no count would be
-    // silently dropped rather than rejected.
+    // silently dropped rather than rejected. Same for the environment.
     if ((argc == 0) != (argv_data_len == 0))           return -(s64)T_E_INVAL;
+    if ((envc == 0) != (env_data_len == 0))            return -(s64)T_E_INVAL;
 
     // The packing contract exec_build_init_stack relies on: exactly `argc`
-    // NUL-terminated strings, the last byte a NUL.
+    // NUL-terminated strings, the last byte a NUL. Validated for BOTH vectors
+    // here, below every front end, because the builder EXTINCTS on a count that
+    // disagrees -- so a mis-packed block from a front end must become a clean
+    // -EINVAL before it reaches the loader, not a dead kernel.
     if (argv_data_len) {
         if (!argv_kbuf)                                return -(s64)T_E_INVAL;
         if (argv_kbuf[argv_data_len - 1] != '\0')      return -(s64)T_E_INVAL;
@@ -6886,6 +6900,14 @@ static s64 sys_execve_core(struct exception_context *ctx,
         for (u64 i = 0; i < argv_data_len; i++)
             if (argv_kbuf[i] == '\0') nuls++;
         if (nuls != argc)                              return -(s64)T_E_INVAL;
+    }
+    if (env_data_len) {
+        if (!env_kbuf)                                 return -(s64)T_E_INVAL;
+        if (env_kbuf[env_data_len - 1] != '\0')        return -(s64)T_E_INVAL;
+        u64 nuls = 0;
+        for (u64 i = 0; i < env_data_len; i++)
+            if (env_kbuf[i] == '\0') nuls++;
+        if (nuls != envc)                              return -(s64)T_E_INVAL;
     }
 
     // The multi-thread gate, before any allocation or FS work THIS function
@@ -6902,11 +6924,12 @@ static s64 sys_execve_core(struct exception_context *ctx,
     struct Spoor *exe = exec_resolve_from_namespace(p, path, (size_t)path_len,
                                                     &exe_size);
     if (!exe) {
-        // NOTE: argv_kbuf is the CALLER's -- every front end frees its own blob
-        // on every path. The pre-L-6a body freed it here, when the blob and the
-        // exec were the same function's; carrying those frees across the split
-        // made it a double free, which is not a leak but a heap corruption that
-        // surfaces in an unrelated allocation later. Do not re-add them.
+        // NOTE: argv_kbuf and env_kbuf are the CALLER's -- every front end frees
+        // its own blobs on every path. The pre-L-6a body freed it here, when the
+        // blob and the exec were the same function's; carrying those frees
+        // across the split made it a double free, which is not a leak but a heap
+        // corruption that surfaces in an unrelated allocation later. Do not
+        // re-add them.
         // stalk's failure reason is not plumbed out yet (ER-x); ENOENT is the
         // honest majority answer and matches what SYS_OPEN reports today.
         return -(s64)T_E_NOENT;
@@ -6923,6 +6946,7 @@ static s64 sys_execve_core(struct exception_context *ctx,
     u64 entry = 0, sp = 0;
     int rc = exec_load_into(nas, proc_resource_exempt(p), exe, exe_size,
                             argv_kbuf, (u32)argv_data_len, (u32)argc,
+                            env_kbuf, (u32)env_data_len, (u32)envc,
                             &entry, &sp);
     if (rc != 0) {
         // The target may be partially populated; we own its teardown, and are
@@ -6989,6 +7013,17 @@ static s64 sys_execve_core(struct exception_context *ctx,
 // where the blob is already concatenated in user memory. Its whole job is
 // step 1 of the ordering above -- get both arguments into kernel memory before
 // the swap, because after it those user VAs mean something else entirely.
+//
+// IT PRESERVES THE ENVIRONMENT (#140), and that is what its ABI means rather
+// than a shortcut: SYS_EXECVE takes no envp argument, so the request is
+// execv/execvp's -- "run this program, keep my environment" -- which POSIX
+// spells as passing the caller's own `environ`. The projection is staged HERE,
+// before the commit, so a failure past this point cannot have disturbed the
+// caller's /env; the frame gets a snapshot and the Env itself is untouched.
+//
+// A caller that wants to REPLACE the environment writes /env first (its own,
+// or the child's after a fork) and then execs. There is no envp argument to
+// add without changing a landed ABI, and none is needed: /env is the channel.
 static s64 sys_execve_handler(struct exception_context *ctx) {
     u64 path_va       = ctx->regs[0];
     u64 path_len      = ctx->regs[1];
@@ -7030,9 +7065,24 @@ static s64 sys_execve_handler(struct exception_context *ctx) {
         }
     }
 
-    s64 r = sys_execve_core(ctx, path, path_len, argv_kbuf, argv_data_len, argc);
+    // Stage the caller's own environment for the new image's frame. `p` is
+    // resolved here rather than trusting the core's, because the staging has to
+    // happen before the core's commit and the core takes its arguments already
+    // in kernel memory.
+    struct Thread *t = current_thread();
+    struct Proc *p   = t ? t->proc : NULL;
+    char *env_kbuf = NULL;
+    u32 env_len = 0, envc = 0;
+    int es = exec_stage_env(p, &env_kbuf, &env_len, &envc);
+    if (es != 0) {
+        kfree(argv_kbuf);
+        return (s64)es;                 // already a negative errno (-E2BIG/-ENOMEM)
+    }
+
+    s64 r = sys_execve_core(ctx, path, path_len, argv_kbuf, argv_data_len, argc,
+                            env_kbuf, env_len, envc);
     kfree(argv_kbuf);   // no-op on NULL; on SUCCESS the strings are already
-                        // copied into the new image's stack by exec_load_into
+    kfree(env_kbuf);    // copied into the new image's stack by exec_load_into
     return r;
 }
 
@@ -8594,10 +8644,100 @@ static s64 viv_measure_user_str(u64 va, u32 max, u32 *len_out) {
         if (uaccess_load_u8(va + i, &b) != 0)   return -(s64)T_E_FAULT;
         if (b == '\0') { *len_out = i; return 0; }
     }
-    // Linux answers E2BIG. Not in the errno registry (docs/ERRORS.md is
-    // ABI-bearing; #142 batches this with ECHILD), so -EINVAL -- the L-2a
-    // NOEXEC precedent: an error, correctly attributed to the argument.
-    return -(s64)T_E_INVAL;
+    // Linux answers E2BIG, and since #140 so do we -- the registry carries the
+    // value now (appended under the #142 signoff by the commit that wired its
+    // first consumer). This helper's only caller is the vivarium execve, so the
+    // change is confined to a Linux-ABI row, where POSIX alignment is the
+    // stated goal; the NATIVE SYS_EXECVE bounds still answer EINVAL, which is
+    // its own deliberate ABI decision reserved to the #142 rollout.
+    return -(s64)T_E_2BIG;
+}
+
+// Walk a Linux NULL-terminated `char *const v[]` in the guest's memory and
+// repack it into ONE kernel blob of concatenated NUL-terminated strings plus a
+// count -- the shape sys_execve_core takes.
+//
+// ONE implementation for argv and envp. They are the same walk with different
+// bounds, and #140 is a standing demonstration of what writing it twice costs:
+// the envp half of the frame builder was a copy of the argv half, so the bug
+// had two homes and fixing either alone would have left the other.
+//
+// On success *blob_out is a kmalloc'd buffer the CALLER frees -- NULL when the
+// vector is absent or empty, which is not an error but the honest answer to
+// `execve(p, argv, NULL)`: Linux gives that image an EMPTY environment, not an
+// inherited one.
+static s64 viv_pack_strv(u64 vec_va, u32 max_count, u32 max_data,
+                         char **blob_out, u64 *len_out, u64 *count_out) {
+    *blob_out  = NULL;
+    *len_out   = 0;
+    *count_out = 0;
+    if (!vec_va) return 0;
+
+    // PASS 1 -- count the elements and total their lengths. Only a total is
+    // kept, not a per-element array: 512 lengths would be 2 KiB of kernel
+    // stack next to the 1 KiB path buffer, and pass 2 does not need them (see
+    // its cap below).
+    u64 count = 0, total = 0;
+    for (;;) {
+        if (count > (u64)max_count)             return -(s64)T_E_2BIG;
+        u64 sv = vec_va + count * 8u;
+        if (!sys_validate_user_buf(sv, 8))      return -(s64)T_E_FAULT;
+        u64 sp_ptr = 0;
+        if (viv_load_u64(sv, &sp_ptr) != 0)     return -(s64)T_E_FAULT;
+        if (sp_ptr == 0) break;                 // the NULL terminator
+        u32 sl = 0;
+        s64 r = viv_measure_user_str(sp_ptr, max_data, &sl);
+        if (r != 0) return r;
+        total += sl;
+        if (total + count + 1u > (u64)max_data) return -(s64)T_E_2BIG;
+        count++;
+    }
+    if (count == 0) return 0;
+
+    u64 blob_len = total + count;               // one NUL per string
+    char *blob = kmalloc((size_t)blob_len, 0);
+    if (!blob)                                  return -(s64)T_E_NOMEM;
+
+    // PASS 2 -- copy. Every write is bounded by pass 1's measurement, NOT by
+    // re-finding a NUL, because the strings live in the guest's own memory and
+    // nothing here holds it still. A peer that lengthens a string between the
+    // passes must not be able to overrun the buffer pass 1 sized; the same
+    // submit-time-snapshot discipline I-30 applies to a shared ring. (No such
+    // peer exists today -- a vfork parent is suspended and CLONE_THREAD is not
+    // a row -- but the bound costs nothing and removes the class rather than
+    // resting on that.)
+    //
+    // `cap` reserves one byte for each NUL still owed, so the terminator write
+    // below can never be the byte that overflows.
+    u64 w = 0;
+    for (u64 i = 0; i < count; i++) {
+        u64 sv = vec_va + i * 8u;
+        u64 sp_ptr = 0;
+        if (!sys_validate_user_buf(sv, 8) || viv_load_u64(sv, &sp_ptr) != 0) {
+            kfree(blob);
+            return -(s64)T_E_FAULT;
+        }
+        u64 cap = blob_len - (count - i);
+        u64 n = 0;
+        while (w < cap) {
+            u8 b = 0;
+            if (!sys_validate_user_buf(sp_ptr + n, 1) ||
+                uaccess_load_u8(sp_ptr + n, &b) != 0) {
+                kfree(blob);
+                return -(s64)T_E_FAULT;
+            }
+            if (b == '\0') break;               // shortened since pass 1
+            blob[w++] = (char)b;
+            n++;
+        }
+        blob[w++] = '\0';                       // exactly `count` NULs, always
+    }
+
+    *blob_out  = blob;
+    *len_out   = w;                             // == total + count unless a
+                                                // string shortened mid-walk
+    *count_out = count;
+    return 0;
 }
 
 // execve(path, argv, envp) -- LINEAGE L-6a.
@@ -8607,39 +8747,22 @@ static s64 viv_measure_user_str(u64 va, u32 max, u32 *len_out) {
 // blob plus a count. So this walks argv and repacks it, which is the whole
 // reason sys_execve_core exists (there is no user VA here to hand over).
 //
-// ENVP DECLINES WHEN NON-EMPTY, and that is the argument-domain rule (V-2b
-// section 4) rather than laziness: a T2 row admits only argument values whose
-// effect the native mechanism reproduces EXACTLY. Linux's envp means "the new
-// image's environment is exactly this", and Thylacine cannot produce that
-// effect at ANY layer -- exec_build_init_stack writes a lone NULL for envp in
-// both frame shapes (exec.c:405, :438), so a new image's `environ` is empty
-// however the kernel was asked. Writing the strings into /env would only MOVE
-// the loss: musl reads `__environ` from the stack, never from /env. So an
-// EMPTY envp is honoured exactly (the guest asked for nothing and gets
-// nothing), and a non-empty one is refused rather than silently dropped.
+// ENVP IS HONOURED SINCE #140. It used to be DECLINED when non-empty, under
+// the argument-domain rule (V-2b section 4): a T2 row admits only argument
+// values whose effect the native mechanism reproduces EXACTLY, and Linux's
+// envp means "the new image's environment is exactly this", which the kernel
+// could not produce at any layer -- the frame builder wrote a lone NULL for
+// envp in both of its shapes, so a new image's `environ` was empty however the
+// kernel was asked.
 //
-// The refusal is therefore also a DETECTOR: if a real guest shell trips it, the
-// answer is the /env -> envp projection in exec_build_init_stack (#140), not a
-// weakening here.
+// The decline was also a DETECTOR, and it detected: at #151 a busybox ash
+// spawning an external command tripped it with envc=2 and env0='SHLVL=1'. ash
+// SYNTHESIZES SHLVL and PWD itself, so its envp is non-empty even starting
+// from an empty environment and no container configuration avoids the arm --
+// which made this the L-6c gate's last blocker and #140 the answer. The fix
+// went where the detector said it would: the frame, not a weakening here.
 static s64 viv_execve(struct exception_context *ctx, u64 path_va, u64 argv_va,
                       u64 envp_va) {
-    // DECIDE BEFORE MEASURE (vivarium.h): the envp verdict settles before any
-    // of the potentially-large argv walk. A NULL envp pointer is the same
-    // request as an empty one -- nothing to reproduce.
-    if (envp_va) {
-        if (!sys_validate_user_buf(envp_va, 8))     return -(s64)T_E_FAULT;
-        u64 e0 = 0;
-        if (viv_load_u64(envp_va, &e0) != 0)        return -(s64)T_E_FAULT;
-        // MEASURED at #151, and this is now what BLOCKS the L-6c gate: a
-        // busybox ash spawning an external command passes envc=2 with
-        // env0='SHLVL=1'. It SYNTHESIZES that (and PWD) itself, so its envp is
-        // non-empty even starting from an empty environment -- there is no
-        // container configuration that avoids this arm. Task #140 owns it; it
-        // wants a real envp on the new image's stack, which is a change to
-        // exec_build_init_stack rather than anything here.
-        if (e0 != 0)                                return -(s64)T_E_NOSYS;
-    }
-
     u32 path_len = 0;
     s64 m = viv_measure_user_path(path_va, &path_len);
     if (m != 0) return m;
@@ -8651,76 +8774,28 @@ static s64 viv_execve(struct exception_context *ctx, u64 path_va, u64 argv_va,
     }
     path[path_len] = '\0';
 
-    // PASS 1 -- count the elements and total their lengths. Only a total is
-    // kept, not a per-element array: 512 lengths would be 2 KiB of kernel
-    // stack next to the 1 KiB path buffer, and pass 2 does not need them (see
-    // its cap below).
-    u64 argc = 0, total = 0;
-    if (argv_va) {
-        for (;;) {
-            if (argc > SYS_SPAWN_ARGV_MAX)          return -(s64)T_E_INVAL; // E2BIG
-            u64 sv = argv_va + argc * 8u;
-            if (!sys_validate_user_buf(sv, 8))      return -(s64)T_E_FAULT;
-            u64 sp_ptr = 0;
-            if (viv_load_u64(sv, &sp_ptr) != 0)     return -(s64)T_E_FAULT;
-            if (sp_ptr == 0) break;                 // the NULL terminator
-            u32 sl = 0;
-            s64 r = viv_measure_user_str(sp_ptr, SYS_SPAWN_ARGV_DATA_MAX, &sl);
-            if (r != 0) return r;
-            total += sl;
-            if (total + argc + 1u > SYS_SPAWN_ARGV_DATA_MAX)
-                return -(s64)T_E_INVAL;             // E2BIG
-            argc++;
-        }
+    // Both vectors through the same packer, with their own bounds. argv is
+    // packed first only because a failure there costs less work; neither order
+    // is required.
+    char *blob = NULL;
+    u64 blob_len = 0, argc = 0;
+    s64 r = viv_pack_strv(argv_va, SYS_SPAWN_ARGV_MAX, SYS_SPAWN_ARGV_DATA_MAX,
+                          &blob, &blob_len, &argc);
+    if (r != 0) return r;
+
+    char *env = NULL;
+    u64 env_len = 0, envc = 0;
+    r = viv_pack_strv(envp_va, EXEC_ENV_MAX, EXEC_ENV_DATA_MAX,
+                      &env, &env_len, &envc);
+    if (r != 0) {
+        kfree(blob);
+        return r;
     }
 
-    char *blob  = NULL;
-    u64 blob_len = 0;
-    if (argc) {
-        blob_len = total + argc;                    // one NUL per string
-        blob = kmalloc((size_t)blob_len, 0);
-        if (!blob)                                  return -(s64)T_E_NOMEM;
-
-        // PASS 2 -- copy. Every write is bounded by pass 1's measurement, NOT
-        // by re-finding a NUL, because the strings live in the guest's own
-        // memory and nothing here holds it still. A peer that lengthens a
-        // string between the passes must not be able to overrun the buffer
-        // pass 1 sized; the same submit-time-snapshot discipline I-30 applies
-        // to a shared ring. (No such peer exists today -- a vfork parent is
-        // suspended and CLONE_THREAD is not a row -- but the bound costs
-        // nothing and removes the class rather than resting on that.)
-        //
-        // `cap` reserves one byte for each NUL still owed, so the terminator
-        // write below can never be the byte that overflows.
-        u64 w = 0;
-        for (u64 i = 0; i < argc; i++) {
-            u64 sv = argv_va + i * 8u;
-            u64 sp_ptr = 0;
-            if (!sys_validate_user_buf(sv, 8) || viv_load_u64(sv, &sp_ptr) != 0) {
-                kfree(blob);
-                return -(s64)T_E_FAULT;
-            }
-            u64 cap = blob_len - (argc - i);
-            u64 n = 0;
-            while (w < cap) {
-                u8 b = 0;
-                if (!sys_validate_user_buf(sp_ptr + n, 1) ||
-                    uaccess_load_u8(sp_ptr + n, &b) != 0) {
-                    kfree(blob);
-                    return -(s64)T_E_FAULT;
-                }
-                if (b == '\0') break;               // shortened since pass 1
-                blob[w++] = (char)b;
-                n++;
-            }
-            blob[w++] = '\0';                       // exactly argc NULs, always
-        }
-        blob_len = w;                               // == total + argc unless a
-                                                    // string shortened mid-walk
-    }
-
-    s64 r = sys_execve_core(ctx, path, path_len, blob, blob_len, argc);
+    r = sys_execve_core(ctx, path, path_len, blob, blob_len, argc,
+                        env, env_len, envc);
     kfree(blob);
+    kfree(env);
     return r;
 }
 

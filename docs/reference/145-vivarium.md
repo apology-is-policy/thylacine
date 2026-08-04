@@ -1591,12 +1591,14 @@ hand the native handler — which is why `sys_execve_core` was extracted. See
 `147-execve.md` "Two front ends, one core" for the split, the double free it
 briefly introduced, and the envp measurement.
 
-`envp` declines when non-empty. It is not a stub: `exec_build_init_stack` writes
-a lone NULL for envp in both frame shapes, so **no process on this system has
-ever had a POSIX environment on its stack** — `/env` is the only channel and
-only the Go fork reads it. An empty envp is served exactly; a non-empty one is
-refused, which makes the decline a detector for whether the arc gate needs the
-`/env` -> envp projection (#140).
+`envp` DECLINED when non-empty at L-6a. It was not a stub: `exec_build_init_stack`
+wrote a lone NULL for envp in both frame shapes, so **no process on this system
+had ever had a POSIX environment on its stack** — `/env` was the only channel and
+only the Go fork read it. An empty envp was served exactly; a non-empty one was
+refused, which made the decline a detector for whether the arc gate needed the
+`/env` -> envp projection. **The detector fired at #151 and #140 built the
+projection**, so the decline is gone: envp rides the same `viv_pack_strv` walk as
+argv, and over-length now answers `T_E_2BIG`.
 
 ### Coverage, and the two probes that map the blindness
 

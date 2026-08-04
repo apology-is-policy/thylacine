@@ -91,6 +91,28 @@
 // failure. POSIX: EIO.
 #define T_E_IO         5
 
+// Argument list too long -- the argv/envp a process-creation call asks to
+// place on the new image's stack does not fit the bound the frame budget
+// allows. Appended for the LINEAGE L-6c envp projection (#140), the commit
+// that wires its first consumer, under the 2026-08-03 signoff (#142).
+//
+// The DISTINCTION from T_E_INVAL is the one a caller acts on: EINVAL says
+// the request was malformed and retrying it verbatim is pointless, while
+// E2BIG says the request was well-formed and TOO LARGE -- so a shell can
+// respond by splitting the command (which is exactly what xargs exists to
+// do). Collapsing them, as this path did before the registry carried the
+// value, told a guest to give up on a request it could have satisfied in
+// two halves.
+//
+// Emitted today by the environment bounds ONLY (EXEC_ENV_MAX /
+// EXEC_ENV_DATA_MAX, in both the /env projection and the vivarium
+// envp walk). The neighbouring ARGV bounds still answer T_E_INVAL: that
+// is a LANDED native ABI (SYS_EXECVE, L-2a) whose error code is its own
+// deliberate decision, reserved to the #142 rollout rather than changed
+// as a side effect of adding envp. The asymmetry is tracked, not
+// accidental. POSIX: E2BIG.
+#define T_E_2BIG       7
+
 // No such device -- the BACKING SERVICE/DEVICE ENDPOINT disappeared. The
 // Loom device-gone terminal CQE (MENAGERIE.md section 10, the
 // "T_E_DEVGONE" class): when an in-flight Loom op's 9P session dies
@@ -299,6 +321,7 @@ _Static_assert(T_E_ISCONN         == 106, "T_E_ISCONN ABI pin (POSIX EISCONN)");
 _Static_assert(T_E_NOTCONN        == 107, "T_E_NOTCONN ABI pin (POSIX ENOTCONN)");
 _Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNREFUSED)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
+_Static_assert(T_E_2BIG      == 7,   "T_E_2BIG ABI pin (POSIX E2BIG)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");
 _Static_assert(T_E_CHILD     == 10,  "T_E_CHILD ABI pin (POSIX ECHILD)");

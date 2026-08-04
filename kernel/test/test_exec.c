@@ -43,7 +43,10 @@
 #include <thylacine/image.h>     // #45: Image-cache counters (dispatch proof)
 #include <thylacine/addrspace.h> // LINEAGE L-2: the detached build target
 
+#include <thylacine/env.h>       // #140: env_create/env_write for the envp frame
+#include <thylacine/errno.h>     // #140: T_E_2BIG
 #include "../../mm/phys.h"
+#include "../../mm/slub.h"       // #140: kmalloc for the oversize-env probe
 #include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
 
 void test_exec_setup_smoke(void);
@@ -55,6 +58,8 @@ void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
 void test_exec_from_spoor_rodata_dispatch(void);
+void test_exec_setup_env_frame(void);            // #140
+void test_exec_stage_env_bounds(void);           // #140
 
 #define ELF_BLOB_SIZE 16384   // 4 pages: headers + 3 one-page segments (#45)
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
@@ -783,6 +788,144 @@ void test_exec_setup_auxv(void) {
     drop_proc(p);
 }
 
+// #140: a Proc with a real /env gets a real envp on its new image's stack.
+//
+// This is the test the bug survived for lack of. Every other frame test above
+// runs on a Proc with an EMPTY environment, where the correct frame and the
+// broken one are byte-identical -- so the whole suite passed through a kernel
+// that wrote a lone NULL for envp no matter what was asked. What distinguishes
+// them is a Proc that HAS variables, which is why this one sets them first.
+void test_exec_setup_env_frame(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // Two variables, in creation order -- the render emits them in monotonic
+    // id order, which is that order. Records: "A=1\0" (4) + "BB=22\0" (6).
+    u64 ia = env_create(p, "A", 1);
+    TEST_ASSERT(ia != 0, "env_create A");
+    TEST_EXPECT_EQ(env_write(p, ia, 0, "1", 1), 1L, "env_write A=1");
+    u64 ib = env_create(p, "BB", 2);
+    TEST_ASSERT(ib != 0, "env_create BB");
+    TEST_EXPECT_EQ(env_write(p, ib, 0, "22", 2), 2L, "env_write BB=22");
+
+    const u32 envc = 2;
+    const u32 env_len = 4 + 6;
+
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "exec_setup with a populated /env");
+
+    // The frame GREW by exactly the envp vector plus its strings: two pointers
+    // where the lone NULL used to sit, then the records, rounded to 16.
+    u64 want = EXEC_INIT_FRAME_SIZE(0, envc, 0, env_len);
+    TEST_EXPECT_EQ(sp, EXEC_USER_STACK_TOP - want,
+        "sp accounts for the envp vector and its strings");
+    TEST_EXPECT_EQ(sp & 15ull, 0ull, "sp is still 16-byte aligned");
+    // ...and it is NOT the empty-frame size, which is what makes every
+    // assertion below capable of failing.
+    TEST_ASSERT(want > EXEC_INIT_STACK_SIZE,
+        "the env-bearing frame is larger than the empty one");
+
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
+    u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - want);
+    TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
+    u64 *w = (u64 *)fb;
+
+    TEST_EXPECT_EQ(w[0], 0ull, "argc == 0 (no argv on this path)");
+    TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
+
+    // envp[0..1] are real user VAs into the strings region, and envp[2] is the
+    // terminator. Pre-#140 w[2] was that terminator; that it is now a POINTER
+    // is the whole finding.
+    u64 r_off  = (EXEC_INIT_STRUCTURED(0, envc) + 15ull) & ~15ull;
+    u64 strings = sp + r_off + 16u;      // argv_data_len == 0, so envp's start here
+    TEST_EXPECT_EQ(w[2], strings,        "envp[0] points at the first record");
+    TEST_EXPECT_EQ(w[3], strings + 4ull, "envp[1] points past the first NUL");
+    TEST_EXPECT_EQ(w[4], 0ull,           "envp[] terminator is NULL");
+
+    // The auxv shifted by the two entries -- read AT_PHDR where it now lives.
+    TEST_EXPECT_EQ(w[5], (u64)AT_PHDR, "auxv follows the envp terminator");
+    TEST_EXPECT_EQ(w[6], 0x10040ull,   "AT_PHDR still resolves correctly");
+
+    // And the bytes themselves. The frame is well under a page, so the strings
+    // share `fb`'s page (lazy_byte's single-page contract).
+    const char *want_bytes = "A=1\0BB=22";     // 10 bytes incl. both NULs
+    u8 *s = fb + r_off + 16u;
+    for (u32 i = 0; i < env_len; i++) {
+        TEST_EXPECT_EQ((u64)s[i], (u64)(u8)want_bytes[i],
+            "envp strings region byte");
+    }
+
+    drop_proc(p);
+}
+
+// #140: an environment too large for the frame budget is REFUSED, not
+// truncated -- and refused with E2BIG, which tells a caller the request was
+// well-formed and splitting it would work.
+//
+// EXEC_ENV_DATA_MAX (32 KiB) is reachable from a /env projection:
+// ENV_MAX_ENTRIES (64) x ENV_VALUE_MAX (4096) is a quarter-megabyte, so nine
+// full-size variables already exceed it. EXEC_ENV_MAX (the 512-entry vector
+// bound) is NOT reachable this way -- 64 entries can never make 512 -- which
+// is exactly why it exists: it bounds the vivarium's user-supplied envp walk,
+// where the count is not capped by the Env table. So this drives the bound
+// that a native Proc can actually hit.
+void test_exec_stage_env_bounds(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // An empty environment stages to nothing, and that is a SUCCESS -- the
+    // case every other exec test in this file exercises.
+    char *d = (char *)0x1;                     // poisoned: must be overwritten
+    u32 len = 99, count = 99;
+    TEST_EXPECT_EQ(exec_stage_env(p, &d, &len, &count), 0, "empty env stages OK");
+    TEST_ASSERT(d == NULL, "empty env yields no block");
+    TEST_EXPECT_EQ((u64)len, 0ull, "empty env has no bytes");
+    TEST_EXPECT_EQ((u64)count, 0ull, "empty env has no records");
+
+    // One variable: a block and a count of exactly one.
+    u64 id = env_create(p, "K", 1);
+    TEST_ASSERT(id != 0, "env_create K");
+    TEST_EXPECT_EQ(env_write(p, id, 0, "v", 1), 1L, "env_write K=v");
+    TEST_EXPECT_EQ(exec_stage_env(p, &d, &len, &count), 0, "one var stages OK");
+    TEST_ASSERT(d != NULL, "one var yields a block");
+    TEST_EXPECT_EQ((u64)len, 4ull, "\"K=v\\0\" is four bytes");
+    TEST_EXPECT_EQ((u64)count, 1ull, "one record");
+    TEST_EXPECT_EQ((u64)d[3], 0ull, "the block ends in a NUL");
+    kfree(d);
+
+    // Now overflow it. Nine values of ENV_VALUE_MAX bytes is ~36 KiB of
+    // records against a 32 KiB bound.
+    char *big = (char *)kmalloc(ENV_VALUE_MAX, 0);
+    TEST_ASSERT(big != NULL, "kmalloc the filler value");
+    for (u32 i = 0; i < ENV_VALUE_MAX; i++) big[i] = 'x';
+    for (u32 v = 0; v < 9; v++) {
+        char nm[3] = { 'V', (char)('0' + v), 0 };
+        u64 vid = env_create(p, nm, 2);
+        TEST_ASSERT(vid != 0, "env_create filler");
+        TEST_EXPECT_EQ(env_write(p, vid, 0, big, (long)ENV_VALUE_MAX),
+                       (long)ENV_VALUE_MAX, "env_write filler value");
+    }
+    kfree(big);
+
+    d = (char *)0x1;
+    len = 99; count = 99;
+    TEST_EXPECT_EQ(exec_stage_env(p, &d, &len, &count), -(int)T_E_2BIG,
+        "an oversize environment is refused with E2BIG");
+    TEST_ASSERT(d == NULL, "a refused projection leaks no block");
+
+    // ...and the refusal reaches exec: the whole load fails rather than
+    // silently handing the new image a truncated environment.
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
+        "exec refuses rather than truncating the environment");
+
+    drop_proc(p);
+}
+
 // P6-pouch-kernel-auxv: when no loaded segment covers the program-header
 // table, exec_build_init_stack reports AT_PHDR == 0 / AT_PHNUM == 0 (a C
 // runtime then skips the phdr walk — safe for a no-TLS program). build_elf
@@ -860,7 +1003,7 @@ void test_execve_load_into_detached(void) {
 
     u64 entry = 0, sp = 0;
     int rc = exec_load_into(nas, /*exempt=*/false, exe, size,
-                            NULL, 0, 0, &entry, &sp);
+                            NULL, 0, 0, NULL, 0, 0, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_load_into into a detached address space");
     TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
 
@@ -915,12 +1058,14 @@ void test_execve_load_into_rejects_dirty(void) {
 
     // Load once -- succeeds and leaves the target populated.
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, &entry, &sp),
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
                    0, "first load into a clean target");
 
     // Loading again into the SAME (now dirty) target must refuse rather than
     // overlay a second image on top of the first.
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, &entry, &sp),
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
                    -1, "a second load into a dirty target is refused");
 
     vma_drain_in(nas);
@@ -959,7 +1104,8 @@ void test_execve_failed_load_leaves_target_drainable(void) {
     TEST_ASSERT(nas != NULL, "addrspace_alloc");
 
     u64 entry = 0, sp = 0;
-    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, &entry, &sp),
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
                    -1, "a mid-load failure is reported");
     TEST_ASSERT(nas->vmas != NULL, "the target really is partially populated");
 

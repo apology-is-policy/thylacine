@@ -503,18 +503,26 @@ mangled argv blob in an *unrelated later spawn* rather than anywhere near
 execve. The comment stating the ownership rule was written before the body was
 adjusted to match it.
 
-**envp declines when non-empty, and the measurement is why.** The argument-
-domain rule (VIVARIUM §4) admits only values whose effect the native mechanism
-reproduces exactly. Linux's envp means "the new image's environment is exactly
-this", and Thylacine cannot produce that effect **at any layer**:
-`exec_build_init_stack` writes a lone NULL for envp in both frame shapes
-(`exec.c:405` Shape A, `:438` Shape B), and musl's `__libc_start_main` does
-`__environ = envp`. So every program — native, pouch, and phenotyped — starts
-with an empty environment, `/env` is the only channel, and only the Go fork
-reads it. Writing envp into `/env` would therefore not honour it; it would only
-move the loss. An empty envp is served exactly (the guest asked for nothing);
-a non-empty one is refused, which makes the decline a **detector** for whether
-the L-6c gate needs the `/env` -> envp projection that is the real fix (#140).
+**envp declined when non-empty, and the decline was a detector that fired.**
+The argument-domain rule (VIVARIUM §4) admits only values whose effect the
+native mechanism reproduces exactly. Linux's envp means "the new image's
+environment is exactly this", and at L-6a Thylacine could not produce that
+effect **at any layer**: `exec_build_init_stack` wrote a lone NULL for envp in
+both frame shapes, and musl's `__libc_start_main` does `__environ = envp`. So
+every program — native, pouch, and phenotyped — started with an empty
+environment, `/env` was the only channel, and only the Go fork read it. Writing
+envp into `/env` would not have honoured it; it would only have moved the loss.
+An empty envp was served exactly (the guest asked for nothing); a non-empty one
+was refused, which made the decline a **detector** for whether the L-6c gate
+needed the `/env` -> envp projection.
+
+**It did, and #140 built it (see §5.4 below).** The detector fired at #151 with
+`envc=2, env0='SHLVL=1'`, and the fix went where the decline said it would —
+the frame builder, not the phenotype. The decline is now GONE: `viv_execve`
+walks envp with the same packer it walks argv with, and a native `SYS_EXECVE`
+(whose ABI has no envp argument) projects the caller's own `/env`. The
+`viv-pheno-probe` L166 leg that asserted `ENOSYS` here now asserts `ENOENT`,
+and the *delivery* proof it can no longer carry lives at L182–L184.
 
 #### Multi-thread: refused at L-2a, built at L-2b
 
@@ -530,6 +538,71 @@ Nothing in this arc is blocked by that: an `rfork(RFPROC|RFMEM)` child (L-3), a
 `fork` child (L-5) and a shell (L-6) are all single-threaded when they exec.
 L-2a therefore **refuses** a multi-threaded caller with `-EAGAIN` — loudly,
 documented, and covered by the prover's leg C — rather than half-serving it.
+
+#### As built at L-6c (#140) — the environment on the exec stack
+
+Until this landed, **no Thylacine process had ever had a POSIX environment**.
+The frame builder wrote a lone NULL for envp, musl's `__libc_start_main` does
+`__environ = envp`, and so every program — native, pouch and phenotyped alike —
+started with an empty one. `/env` was the only channel and only the Go fork
+read it.
+
+**The frame collapses from two shapes to one, and that is the fix rather than a
+tidy-up.** There used to be a fixed 176-byte "no argv" Shape A and a variable
+argv-bearing Shape B. Each wrote its own envp NULL — `w[2] = 0` in one,
+`w[2+argc] = 0` in the other — so the defect had *two homes*, and repairing
+either alone would have left the other. The general arithmetic reduces to the
+old fixed frame exactly when `argc` and `envc` are both zero, which `exec.h`
+pins with a `_Static_assert` rather than asserting in prose, so nothing that
+used to take Shape A can observe the merge. The same reasoning produced one
+`exec_fill_ptr_vector` for both pointer vectors and one `viv_pack_strv` for both
+guest walks: the duplication *was* the bug's habitat.
+
+**The builder takes env DATA, never a Proc**, and that is forced by L-2a's
+ordering: `exec_load_into` builds into a DETACHED address space and commits
+only after everything failable has succeeded, so at that moment the Proc still
+holds the OLD environment and reading `p->env` there would project the wrong
+one. `exec_stage_env` does the projection for the callers whose answer is
+"whatever this Proc already has" — every `SYS_SPAWN_*` thunk (the child's
+already-cloned copy; `env_clone_into` ran before the thunk started) and the
+native `SYS_EXECVE`, whose ABI has no envp argument and therefore means
+*preserve*. A phenotyped `execve` packs its own block instead.
+
+**One `env_render_environ` call, not a size query then a render** — the
+renderer walks under `e->lock` and returns one atomic snapshot, so a two-call
+shape would open a window in which a peer thread's `/env` write changes the
+answer between them (peer threads sharing one `p->env` is the ordinary case,
+not a corner). The buffer is `EXEC_ENV_DATA_MAX + 1` so that "exactly the
+bound" and "longer than the bound" stay distinguishable.
+
+**The bounds are chosen, not inherited.** `ENV_MAX_ENTRIES × ENV_VALUE_MAX` is
+a quarter-megabyte, which beside the 64 KiB argv bound would put ~330 KiB of
+frame under a 1 MiB stack — still passing the `_Static_assert`, which only
+proves the frame *fits*, while leaving ~690 KiB of program stack against a call
+graph G-7b measured overflowing 256 KiB. So the env block is bounded
+independently at 32 KiB on Linux's model (argv+envp as a fraction of the stack),
+and an environment that exceeds it is refused with **`T_E_2BIG`** — appended
+here under the #142 signoff, in the commit that wires its first consumer, per
+that task's own sequencing rule. The neighbouring *argv* bounds still answer
+`EINVAL`: that is a landed native ABI whose error code is its own deliberate
+decision, reserved to the #142 rollout rather than changed as a side effect.
+
+**The gate moved four legs.** `L6C-B-external-exec`, `-C-status-zero` and
+`-D-status-nonzero` all pass now; the shell forks, execs an external command
+and reads back both exit statuses. It fails at `L6C-E-pipeline`, on `pipe2`
+(nr=59, FORWARD — no translator at all), which is #155.
+
+**Two revert probes, and they are blind to each other in opposite directions.**
+Forcing the builder back to a lone NULL fails `exec.setup_env_frame` at its own
+assertion (1317/1318) — and kills the boot at the suite, so the in-guest leg
+never runs. Sabotaging only `viv_execve`'s envp walk leaves the unit suite at a
+**full 1318/1318** while the guest fails at `L185`, the marker that means
+*nothing arrived* rather than *arrived wrong*. The unit test proves the frame;
+only the guest proves the wiring; and the two markers tell the failure modes
+apart. (The first run of the in-guest leg appeared to fail for an unrelated
+reason: the probe is pool-resident, and a `PRESERVE=1` build silently ran the
+STALE binary — #126, diagnosed by measurement rather than by re-reading the
+code that was already correct.)
 
 ### 5.3 Stage 2 — `rfork(RFPROC|RFMEM)` + VFORK
 
@@ -1273,9 +1346,9 @@ arc is audit-bearing, so the trigger table in `ARCHITECTURE.md` §25.4 and
 | **L-4a** ✅ | **Prerequisite, not COW work**: exec's stack + every NON-EXECUTABLE segment move from `burrow_create_anon` to `burrow_create_anon_lazy`, pre-populating only the `ceil(filesz/PAGE_SIZE)` leading slots (the stack: only the run its argv/auxv frame occupies at the top). Gives the per-page ownership §2.9 measures COW needs; closes **#130**; subsumes **#49**. Executable segments stay eager — the I-cache reason above. DMA + Weft rings stay eager too (they need physical contiguity). | **LANDED**: `exec.writable_segment_is_sparse` (4 MiB memsz, 64 B filesz -> 1024 slots reserved, 1 resident) + `exec.stack_is_sparse` (1 MiB reserved, 1 resident), both revert-probed; 1289/1289 + boot OK |
 | **L-4b** *(landed: b-1 substrate, b-2 clone + break)* | Per-page share counts + the COW break arm (stage 3a). The count is a **new** `struct page.cow_share` (taking the free `_pad`, so `sizeof` stays 48) — **not** the double-booked `refcount` (§2.8), and **not** a per-slot array, which §5.4's L-4b correction measures to be unimplementable: after a break the slot and its counted page diverge, and the free decision corrupts. A fork clones the Burrow per address space (Plan 9 `dupseg`); the break decides under a **global** COW leaf lock, because two sharers hold different Burrow locks. | the model (§6) TLC-green **first**; then break-vs-break under `-smp 8` |
 | **L-5** ✅ **LANDED** | Stock `fork()`. Two mechanical changes — `rfork_internal` clones for the fork shape (`fc && !RFMEM`), and `sys_rfork_core` admits `RFPROC` alone with `child_sp == 0` meaning INHERIT (the SP rules are RFMEM's, not the fork's). **Plus the two defects making it live exposed**, neither of which L-4b's tests could see: **#136** — `addrspace_clone` refused every real address space (the vDSO is read-only eager anon, and the tests build their own spaces); **#137** — `ESR_ISS_WNR_BIT` was 9, not 6, so `fi->is_write` had been ALWAYS FALSE tree-wide, leaving the COW write-break unreachable (an infinite fault loop) and the write-permission gate inert. | **MET, and not by the gate as written** — "in a vivarium" needs L-6's `execve`/`wait4` rows; the fork itself is proven natively instead. `/fork-probe` legs K (three separately-falsifiable COW claims, both Procs running) + L (a store to read-only text is DENIED — the half of #137 leg K does not cover). Five independent revert probes, the sharpest being: **drop the clone wiring and the unit suite stays at a full 1300/1300 while only the in-guest leg fails** |
-| **L-6a** ✅ **LANDED** | The VIVARIUM `execve` row + the `clone` **fork** shape. `sys_execve_core` extracted so the native front end keeps its user-VA copy-in while the phenotype walks a `char *const argv[]` into the blob (the V-8 `sys_fstat_for_proc` discipline), and `vivarium_clone_decide` gains `VIV_CLONE_FLAGS_FORK` — the half L-3d refused because copy-on-write did not exist, which L-4/L-5 discharged. **envp declines when non-empty**: §5.2's as-built section measures that `exec_build_init_stack` writes a lone NULL for envp in BOTH frame shapes, so no Thylacine process has ever had a POSIX environment on its stack (#140) and the effect cannot be reproduced at any layer. | **MET** — 1300/1300 (the assertions land inside `vivarium.clone_domain`), boot OK, 0 EXTINCTION; `viv-pheno-probe` L156/L156b (a real fork returning twice, and the fork word still exact) + L164–L169 (the whole argv walk exercised by a *failing* execve, where ENOENT-not-EINVAL is a positive statement that the blob passed the core's self-check). Two revert probes, complementary rather than redundant: dropping the **fork admission** fails the unit test at its own assertion, while disabling the **envp gate** leaves the unit suite at a full **1300/1300** and fails only in-guest at L166 |
+| **L-6a** ✅ **LANDED** | The VIVARIUM `execve` row + the `clone` **fork** shape. `sys_execve_core` extracted so the native front end keeps its user-VA copy-in while the phenotype walks a `char *const argv[]` into the blob (the V-8 `sys_fstat_for_proc` discipline), and `vivarium_clone_decide` gains `VIV_CLONE_FLAGS_FORK` — the half L-3d refused because copy-on-write did not exist, which L-4/L-5 discharged. **envp declined when non-empty**: §5.2's as-built section measured that `exec_build_init_stack` wrote a lone NULL for envp in BOTH frame shapes, so no Thylacine process had ever had a POSIX environment on its stack (#140) and the effect could not be reproduced at any layer. The decline was a DETECTOR and it fired at #151; #140 removed it by building the frame half (§5.2's L-6c as-built section). | **MET** — 1300/1300 (the assertions land inside `vivarium.clone_domain`), boot OK, 0 EXTINCTION; `viv-pheno-probe` L156/L156b (a real fork returning twice, and the fork word still exact) + L164–L169 (the whole argv walk exercised by a *failing* execve, where ENOENT-not-EINVAL is a positive statement that the blob passed the core's self-check). Two revert probes, complementary rather than redundant: dropping the **fork admission** fails the unit test at its own assertion, while disabling the **envp gate** leaves the unit suite at a full **1300/1300** and fails only in-guest at L166 |
 | **L-6b** ✅ **LANDED** | The VIVARIUM `wait4` row. A genuine flag map, not a passthrough: Linux `WNOHANG`/`WUNTRACED`/`WCONTINUED` are 1/2/8 against Thylacine's 1/2/4, and Linux's `WEXITED` (4) collides with `WAIT_CONTINUED` — so a passthrough is wrong in BOTH directions at once. `wait_pid_for` is already a POSIX `waitpid` with the Linux packed status layout (PTY-1e), so the work is the map, the pack-when-the-kernel-did-not rule, and `-ECHILD` (`T_E_CHILD` = 10, appended under signoff). The pure decide hands back a DESCRIPTION rather than a native flag word, keeping `proc.h` out of the pure layer exactly as the clone row keeps `RFPROC`/`RFMEM` out. | **MET** — 1301/1301, boot OK, 0 EXTINCTION; `vivarium.wait4_domain` pins the collision against the REAL `WAIT_*` constants, and `viv-pheno-probe` L170–L176 reaps both children the earlier legs created — which is what finally discharges L-6a's stated gap (the fork child RAN) and adds the COW-privacy leg (L170c) the private address space had made unobservable. Two revert probes, opposite directions: dropping the **allow-list** fails the unit test at its own assertion and never reaches the guest, while removing the **conditional pack** leaves the unit suite at a full **1301/1301** and fails only in-guest at L173 |
-| **L-6c** *(in progress -- gate WIRED, KNOWN-BLOCKED)* | The arc gate, built and running every boot. The fixture is a real Alpine minirootfs whose `/bin/sh` is Alpine's own busybox, run as a declared-`linux` container through a 9-leg script (shell-runs, external exec, both status directions, pipeline, substitution, loop, nested shell, `$?`). It SOFT-SKIPS without the two external fixture inputs, so the default build stays hermetic. Blockers measured rather than assumed, and the gate has already moved once. **#149 (FIXED here)** exec refused a non-page-aligned `PT_LOAD` vaddr and every real-world binary has one (busybox's data segment is at `0x51d2e0`; everything OUR toolchain emits is aligned, which is why the precondition was universally true until the first foreign ELF) -- it failed SILENTLY, because the reject ran in the child thunk after the pid was returned, so three instruments had to come back EMPTY before the shape of the evidence (a process making no syscalls at all cannot have run) pointed at the loader. With it fixed **busybox RUNS**: zero syscalls before, 13 distinct ones after, through musl startup into its own logic. **#150 (FIXED here)** landed the whole startup batch -- the set busybox issues between `_start` and its first useful instruction, MEASURED off the running guest rather than guessed: `writev` was why nothing printed (busybox's `echo` writes through it), and `getcwd`/`uname`/`getpid`/`getppid`/`getuid`/`getgid`/`set_tid_address`/`setuid`/`setgid` came with it. Unserved numbers went **13 -> 3**, and busybox now RUNS *and SPEAKS*: its own error message reaches the console, which is the proof `writev` works. **#151 (FIXED here)** was a different KIND of thing -- instrumenting the last row showed busybox issues `fcntl` exactly twice, `F_SETFD(FD_CLOEXEC)` and `F_DUPFD_CLOEXEC(10)` (ash's `savefd`), and Thylacine had no close-on-exec at all: no bit in the handle table, and `proc_exec_replace` never touched it, so exec preserved EVERY fd. Serving the dup while dropping the flag would have passed the gate and left a known leak in the tree, so the FEATURE was built first and the row served after -- a `cloexec` bitmap parallel to the slot array (POSIX close-on-exec belongs to the DESCRIPTOR, not the description behind it, so `dup` must be able to differ from its source), cleared at the one install chokepoint so a reused index cannot inherit it, COPIED by fork, and consumed by a sweep placed after execve's commit point (the closes sleep, and a failed exec must leave the process unchanged). With it fixed **busybox RUNS A SCRIPT** -- `L6C-A-shell-runs` fires and `/gate/run.sh` executes. The gate now fails one leg later, at `L6C-B-external-exec`, and the blocker is **#140**: measured, not inferred, by instrumenting `viv_execve`'s envp arm, which shows the guest passing `envc=2` with `env0='SHLVL=1'` -- ash SYNTHESIZES `SHLVL` and `PWD` itself, so its envp is non-empty even from an empty environment and no container configuration avoids the arm. That is `exec_build_init_stack`'s to fix, not the phenotype's. That measurement also VOIDED A STATED SCRIPTURE FACT: VIVARIUM.md justified ignoring `O_CLOEXEC` because "there is nothing to opt out of" under spawn's explicit fd list -- true when written, and voided by **this arc**, since L-2a's `execve` preserves the table and L-3c-1's `rfork` copies it. Neither commit had any reason to look at an openat flag table; a premise a later commit voids is invisible to the round that approved it. Still standing: **#145** every stock Alpine ELF is `ET_DYN` PIE with `PT_INTERP` (zero static binaries in the image), worked around with Alpine's own `busybox-static`; **#146** `/bin/sh` is one of 335 symlinks and the resolver has no symlink handling. Also FIXED here: **#148** `fstat` on a pipe returned -1 (devpipe had no `.stat_native`), which made `viv` spawn the container fd-less and report a healthy shell as one that never ran. | **an Alpine `/bin/sh` runs a command** -- not met; the gate reports how far it gets every boot, which is how #149's fix was SEEN to move it, and flips to boot-fatal when the last blocker lands (`L6C_GATE_FATAL`) |
+| **L-6c** *(in progress -- gate WIRED, KNOWN-BLOCKED)* | The arc gate, built and running every boot. The fixture is a real Alpine minirootfs whose `/bin/sh` is Alpine's own busybox, run as a declared-`linux` container through a 9-leg script (shell-runs, external exec, both status directions, pipeline, substitution, loop, nested shell, `$?`). It SOFT-SKIPS without the two external fixture inputs, so the default build stays hermetic. Blockers measured rather than assumed, and the gate has already moved once. **#149 (FIXED here)** exec refused a non-page-aligned `PT_LOAD` vaddr and every real-world binary has one (busybox's data segment is at `0x51d2e0`; everything OUR toolchain emits is aligned, which is why the precondition was universally true until the first foreign ELF) -- it failed SILENTLY, because the reject ran in the child thunk after the pid was returned, so three instruments had to come back EMPTY before the shape of the evidence (a process making no syscalls at all cannot have run) pointed at the loader. With it fixed **busybox RUNS**: zero syscalls before, 13 distinct ones after, through musl startup into its own logic. **#150 (FIXED here)** landed the whole startup batch -- the set busybox issues between `_start` and its first useful instruction, MEASURED off the running guest rather than guessed: `writev` was why nothing printed (busybox's `echo` writes through it), and `getcwd`/`uname`/`getpid`/`getppid`/`getuid`/`getgid`/`set_tid_address`/`setuid`/`setgid` came with it. Unserved numbers went **13 -> 3**, and busybox now RUNS *and SPEAKS*: its own error message reaches the console, which is the proof `writev` works. **#151 (FIXED here)** was a different KIND of thing -- instrumenting the last row showed busybox issues `fcntl` exactly twice, `F_SETFD(FD_CLOEXEC)` and `F_DUPFD_CLOEXEC(10)` (ash's `savefd`), and Thylacine had no close-on-exec at all: no bit in the handle table, and `proc_exec_replace` never touched it, so exec preserved EVERY fd. Serving the dup while dropping the flag would have passed the gate and left a known leak in the tree, so the FEATURE was built first and the row served after -- a `cloexec` bitmap parallel to the slot array (POSIX close-on-exec belongs to the DESCRIPTOR, not the description behind it, so `dup` must be able to differ from its source), cleared at the one install chokepoint so a reused index cannot inherit it, COPIED by fork, and consumed by a sweep placed after execve's commit point (the closes sleep, and a failed exec must leave the process unchanged). With it fixed **busybox RUNS A SCRIPT** -- `L6C-A-shell-runs` fires and `/gate/run.sh` executes, failing one leg later at `L6C-B-external-exec`. That blocker was **#140**, measured rather than inferred by instrumenting `viv_execve`'s envp arm, which showed the guest passing `envc=2` with `env0='SHLVL=1'` -- ash SYNTHESIZES `SHLVL` and `PWD` itself, so its envp is non-empty even from an empty environment and no container configuration avoids the arm. It was `exec_build_init_stack`'s to fix, not the phenotype's. **#140 (FIXED here)** put the environment on the frame -- collapsing the two frame shapes into one, because each had written its own envp NULL and the defect therefore had two homes -- and the gate moved **four legs**: B, C-status-zero and D-status-nonzero all pass, so the shell now forks, execs an external command and reads back both exit statuses. It now fails at `L6C-E-pipeline`, on **#155** (`pipe2`, nr=59, reported FORWARD -- no translator at all rather than a declined argument). That measurement also VOIDED A STATED SCRIPTURE FACT: VIVARIUM.md justified ignoring `O_CLOEXEC` because "there is nothing to opt out of" under spawn's explicit fd list -- true when written, and voided by **this arc**, since L-2a's `execve` preserves the table and L-3c-1's `rfork` copies it. Neither commit had any reason to look at an openat flag table; a premise a later commit voids is invisible to the round that approved it. Still standing: **#145** every stock Alpine ELF is `ET_DYN` PIE with `PT_INTERP` (zero static binaries in the image), worked around with Alpine's own `busybox-static`; **#146** `/bin/sh` is one of 335 symlinks and the resolver has no symlink handling. Also FIXED here: **#148** `fstat` on a pipe returned -1 (devpipe had no `.stat_native`), which made `viv` spawn the container fd-less and report a healthy shell as one that never ran. | **an Alpine `/bin/sh` runs a command** -- not met; the gate reports how far it gets every boot, which is how #149's fix was SEEN to move it, and flips to boot-fatal when the last blocker lands (`L6C_GATE_FATAL`) |
 | **L-7** | Focused audit (Fable, max effort) over L-1..L-6 + the full SMP gate + docs. | close |
 
 Ordering is forced, not chosen: L-1 blocks L-3 and L-4 (F-B), L-2a blocks L-3

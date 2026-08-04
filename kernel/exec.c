@@ -20,6 +20,8 @@
 
 #include <thylacine/exec.h>
 #include <thylacine/elf.h>
+#include <thylacine/env.h>      // #140: env_render_environ (the /env -> envp projection)
+#include <thylacine/errno.h>    // #140: T_E_2BIG / T_E_NOMEM from exec_stage_env
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
@@ -329,15 +331,103 @@ static u64 exec_map_vdso(struct AddrSpace *as, bool exempt) {
     return EXEC_USER_VDSO_BASE;
 }
 
-// Build the System V initial-process stack frame — argc / argv / envp /
-// auxv (+ argv strings region under Shape B) — at the top of the user
-// stack. See exec.h for the byte layout.
+// #140: project a Proc's /env into the packed "NAME=VALUE\0" block the frame
+// builder takes. The contract is in exec.h; what follows is why it is shaped
+// this way.
 //
-// Two shapes (selected by whether argv_data is non-NULL and argc > 0):
-//   Shape A — no argv (legacy: argc == 0; fixed-size frame =
-//             EXEC_INIT_STACK_SIZE = 176 bytes).
-//   Shape B — argv-bearing (P6-pouch-stratumd-boot sub-chunk 16b-alpha;
-//             variable-size frame bounded by EXEC_INIT_STACK_MAX_SIZE).
+// ONE env_render_environ CALL, not a size query followed by a render. The
+// renderer walks the whole Env under e->lock and returns a single atomic
+// snapshot, so one call is coherent by construction. Any two-call
+// shape -- size-then-render, or render-then-probe-whether-there-is-more --
+// opens a window in which a peer thread's /env write changes the answer
+// between them, and the block would then be either silently short or wrongly
+// refused. Peer threads sharing one p->env is the ordinary case, not a corner
+// (Go drives many M-threads through one Proc).
+//
+// So the buffer is EXEC_ENV_DATA_MAX + 1 and a return of MORE than the bound
+// is the unambiguous "did not fit". The extra byte is doing real work: asking
+// for exactly the bound cannot distinguish an environment that is exactly that
+// long from one that is longer, and treating the ambiguous case as too-big
+// would reject a legal environment.
+//
+// The renderer is documented CROSS-PROC with its disclosure gate at the
+// devproc call site ("do not add a second caller without carrying the gate").
+// THIS IS THAT SECOND CALLER, and it does not carry the gate because there is
+// nothing here to disclose: the projection is a Proc's OWN environment onto
+// its OWN new stack, reaching no further than the Proc could reach by reading
+// /env itself. The gate exists for devproc, where the reader and the Env's
+// owner are different Procs; here they are the same one. env.h now says so.
+int exec_stage_env(struct Proc *p, char **data_out, u32 *len_out,
+                   u32 *count_out) {
+    if (!data_out || !len_out || !count_out) return -(int)T_E_INVAL;
+    *data_out = NULL;
+    *len_out = 0;
+    *count_out = 0;
+    if (!p) return 0;                       // no Proc -> empty environment
+
+    char *buf = kmalloc((size_t)EXEC_ENV_DATA_MAX + 1u, 0);
+    if (!buf) return -(int)T_E_NOMEM;
+
+    long got = env_render_environ(p, 0, buf, (long)EXEC_ENV_DATA_MAX + 1);
+    if (got < 0)                       { kfree(buf); return -(int)T_E_INVAL; }
+    if (got == 0)                      { kfree(buf); return 0; }  // empty env
+    if ((u32)got > EXEC_ENV_DATA_MAX)  { kfree(buf); return -(int)T_E_2BIG; }
+
+    // envc is the NUL count, and that is EXACT rather than an estimate: every
+    // record the renderer emits ends in exactly one NUL, and it SKIPS any entry
+    // whose value contains one (env_linux_encodable) -- which is the same
+    // property that makes the block a legal envp at all.
+    u32 count = 0;
+    for (long i = 0; i < got; i++)
+        if (buf[i] == '\0') count++;
+    if (count > EXEC_ENV_MAX)          { kfree(buf); return -(int)T_E_2BIG; }
+    // Every record is terminated, so the last byte is a NUL. The frame
+    // builder's packing contract requires it and extincts otherwise, so it is
+    // checked HERE, where it is still an error rather than a dead kernel.
+    if (buf[got - 1] != '\0')          { kfree(buf); return -(int)T_E_INVAL; }
+
+    *data_out  = buf;
+    *len_out   = (u32)got;
+    *count_out = count;
+    return 0;
+}
+
+// Fill out[0..count-1] with the user VAs of the `count` NUL-terminated strings
+// packed into data[0..data_len), the first beginning at base_va. False if the
+// block does not hold EXACTLY `count` terminated records -- which both call
+// sites treat as a kernel bug, because the syscall bodies validate the packing
+// before a block ever reaches here.
+//
+// ONE implementation for argv and envp, and that is the point rather than a
+// tidy-up: the frame carries two identically-packed vectors, and #140 existed
+// in the shape it did because the surrounding code had been written twice.
+static bool exec_fill_ptr_vector(u64 *out, u64 base_va,
+                                 const char *data, u32 data_len, u32 count) {
+    if (count == 0)             return data_len == 0;
+    if (!data || data_len == 0) return false;
+    u32 found = 0;
+    u32 start = 0;
+    for (u32 i = 0; i < data_len; i++) {
+        if (data[i] != '\0') continue;
+        if (found == count) return false;          // more records than promised
+        out[found++] = base_va + start;
+        start = i + 1;
+    }
+    // start == data_len iff the final byte was a NUL -- i.e. there is no
+    // trailing unterminated tail that no pointer in the vector names.
+    return found == count && start == data_len;
+}
+
+// Build the System V initial-process stack frame — argc / argv / envp / auxv
+// plus the argv and envp strings regions — at the top of the user stack. See
+// exec.h for the byte layout.
+//
+// ONE SHAPE since #140. It used to be two, a fixed 176-byte "no argv" frame
+// and a variable argv-bearing one, and each wrote its own lone NULL for
+// envp -- so the bug this function now fixes had two homes. The general
+// arithmetic reduces to the old fixed frame exactly when argc and envc are
+// both zero (exec.h pins that with a _Static_assert), so no caller that used
+// to take the fixed shape can observe the merge.
 //
 // The stack BURROW (installed by exec_map_user_stack) is located via
 // vma_lookup and written through the kernel direct map; offset 0 of the
@@ -377,12 +467,17 @@ static void exec_fill_auxv(u64 *a, u64 phdr_va, u64 phent, u64 phnum,
 static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
                                  const struct elf_image *img,
                                  const char *argv_data, u32 argv_data_len,
-                                 u32 argc, u64 vdso_va) {
-    // Shape selection. argv_data_len > 0 iff argc > 0 (caller's
-    // invariant enforced at the syscall body); we re-check the
-    // structural invariant here as defense-in-depth.
-    bool has_argv = (argc > 0);
-    if (has_argv) {
+                                 u32 argc,
+                                 const char *env_data, u32 env_data_len,
+                                 u32 envc, u64 vdso_va) {
+    // Structural invariants. The syscall bodies have already checked all of
+    // these -- this entry is reached from several of them and owns the contract
+    // too, so they are re-asserted as defense-in-depth. Reaching one is a
+    // KERNEL bug (a front end that packed a block wrong), which is why they
+    // extinct rather than fail: a frame whose pointer vector disagrees with its
+    // strings region hands EL0 a wild pointer, and failing quietly here would
+    // move the crash into the new image with nothing naming the cause.
+    if (argc > 0) {
         if (argv_data_len == 0 || !argv_data)
             extinction("exec_build_init_stack: argc > 0 with no argv_data");
         if (argc > 512u)                   // mirrors SYS_SPAWN_ARGV_MAX — kept
@@ -393,6 +488,22 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
             extinction("exec_build_init_stack: argv_data_len exceeds bound");
         if (argv_data[argv_data_len - 1] != '\0')
             extinction("exec_build_init_stack: argv_data not NUL-terminated");
+    } else if (argv_data_len != 0) {
+        extinction("exec_build_init_stack: argv_data_len with argc == 0");
+    }
+    // The env bounds live in exec.h beside the frame arithmetic that justifies
+    // them, so unlike argv's they are named rather than mirrored literals.
+    if (envc > 0) {
+        if (env_data_len == 0 || !env_data)
+            extinction("exec_build_init_stack: envc > 0 with no env_data");
+        if (envc > EXEC_ENV_MAX)
+            extinction("exec_build_init_stack: envc exceeds bound");
+        if (env_data_len > EXEC_ENV_DATA_MAX)
+            extinction("exec_build_init_stack: env_data_len exceeds bound");
+        if (env_data[env_data_len - 1] != '\0')
+            extinction("exec_build_init_stack: env_data not NUL-terminated");
+    } else if (env_data_len != 0) {
+        extinction("exec_build_init_stack: env_data_len with envc == 0");
     }
 
     // exec_map_user_stack returned 0 → the stack VMA + its BURROW exist.
@@ -400,29 +511,16 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     if (!sv || !sv->burrow)
         extinction("exec_build_init_stack: stack VMA missing");
 
-    // Compute frame layout.
-    //
-    // Shape A: fixed-size 176-byte frame; same as the legacy layout.
-    // Shape B:
-    //   structured_top_bytes = 8 (argc) + 8*(argc+1) (argv[]+NULL)
-    //                          + 8 (envp NULL) + 128 (auxv) = 152 + 8*argc.
-    //   strings_region_offset = round_up(structured_top_bytes, 16) + 16
-    //                            (the 16-aligned AT_RANDOM block precedes
-    //                            the strings region).
-    //   frame_size            = round_up(strings_region_offset + argv_data_len, 16).
-    u64 frame_size;
-    u64 random_offset_from_sp;  // offset of the 16-byte AT_RANDOM block
-
-    if (!has_argv) {
-        frame_size            = EXEC_INIT_STACK_SIZE;
-        random_offset_from_sp = EXEC_INIT_RANDOM_OFFSET;
-    } else {
-        u64 structured = 8 + (u64)(argc + 1u) * 8u + 8u + (u64)EXEC_INIT_AUXV_COUNT * 16u;
-        random_offset_from_sp = (structured + 15u) & ~15ull;
-        u64 strings_offset    = random_offset_from_sp + 16u;
-        u64 unrounded         = strings_offset + (u64)argv_data_len;
-        frame_size            = (unrounded + 15u) & ~15ull;
-    }
+    // Frame layout -- exec.h carries the picture and owns the arithmetic, so
+    // the two cannot drift:
+    //   structured  = argc + argv[]+NULL + envp[]+NULL + auxv
+    //   R           = round_up(structured, 16)      the AT_RANDOM block
+    //   strings     = R + 16                        argv's, then envp's
+    //   frame_size  = round_up(strings + argv_data_len + env_data_len, 16)
+    u64 structured            = EXEC_INIT_STRUCTURED(argc, envc);
+    u64 random_offset_from_sp = (structured + 15u) & ~15ull;
+    u64 frame_size            = EXEC_INIT_FRAME_SIZE(argc, envc,
+                                                     argv_data_len, env_data_len);
 
     u64 sp        = EXEC_USER_STACK_TOP - frame_size;
     u64 frame_off = EXEC_USER_STACK_SIZE - frame_size;   // its offset in the Burrow
@@ -431,8 +529,9 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
     // lay the frame out in. Build it in a kernel scratch buffer -- leaving every
     // field write below byte-identical -- and copy it in whole at the end. The
     // scratch is transient (freed before this returns) and bounded by
-    // EXEC_INIT_STACK_MAX_SIZE (~68 KiB worst case, 176 bytes in the argv-less
-    // shape), against the 1 MiB the eager stack used to cost unconditionally.
+    // EXEC_INIT_STACK_MAX_SIZE (~104 KiB worst case since #140 added the
+    // environment; 176 bytes with no argv and an empty env), against the 1 MiB
+    // the eager stack used to cost unconditionally.
     u8 *frame = kzalloc((size_t)frame_size, 0);
     if (!frame) return 0;
 
@@ -465,55 +564,42 @@ static u64 exec_build_init_stack(struct AddrSpace *as, bool exempt,
 
     // Lay out the frame. The frame base is 16-byte aligned (exec.h
     // _Static_assert + the round_up above); every u64 below is 8-aligned.
-    u64 *w = (u64 *)frame;
-    if (!has_argv) {
-        // Shape A — argc=0, single NULL terminator for argv[].
-        w[0]  = 0;                           // argc
-        w[1]  = 0;                           // argv[0] — NULL terminator
-        w[2]  = 0;                           // envp[0] — NULL terminator
-        // auxv at w[3..]; up to 8 entries (16 u64s) reserved before the
-        // AT_RANDOM block at EXEC_INIT_RANDOM_OFFSET. The trailing slots beyond
-        // the AT_NULL the helper writes stay zero (the stack BURROW is KP_ZERO).
-        exec_fill_auxv(&w[3], phdr_va, phent, phnum,
-                       sp + EXEC_INIT_RANDOM_OFFSET, vdso_va);
-    } else {
-        // Shape B — argc real, argv[] points into the strings region.
-        // The strings region starts at (sp + random_offset_from_sp + 16);
-        // walk argv_data to compute each argv[i]'s user-VA.
-        u64 strings_user_va = sp + random_offset_from_sp + 16u;
+    //
+    // The two strings regions are ADJACENT and in this order -- argv's, then
+    // envp's -- so each vector's base VA is where the previous region ended.
+    // Nothing in the ABI requires that order; it is simply the one the layout
+    // in exec.h documents, and the pointer vectors are what actually bind a
+    // string to its slot.
+    u64 *w              = (u64 *)frame;
+    u64 argv_strings_va = sp + random_offset_from_sp + 16u;
+    u64 env_strings_va  = argv_strings_va + (u64)argv_data_len;
 
-        w[0] = (u64)argc;                    // argc
+    w[0] = (u64)argc;
+    if (!exec_fill_ptr_vector(&w[1], argv_strings_va,
+                              argv_data, argv_data_len, argc))
+        extinction("exec_build_init_stack: NUL count != argc post-validation");
+    w[1 + argc] = 0;                         // argv[argc] = NULL terminator
 
-        // argv[0..argc-1] point into the strings region. Walk argv_data
-        // NUL-by-NUL to find each string's start offset; argv[0] starts
-        // at offset 0, argv[i] at the byte AFTER the (i-1)-th NUL.
-        u32 cur_arg = 0;
-        u32 next_start = 0;
-        w[1 + 0] = strings_user_va + 0;       // argv[0] starts at offset 0
-        for (u32 i = 0; i < argv_data_len; i++) {
-            if (argv_data[i] == '\0') {
-                cur_arg++;
-                next_start = i + 1;
-                if (cur_arg < argc) {
-                    w[1 + cur_arg] = strings_user_va + next_start;
-                }
-            }
-        }
-        if (cur_arg != argc)
-            extinction("exec_build_init_stack: NUL count != argc post-validation");
+    if (!exec_fill_ptr_vector(&w[2 + argc], env_strings_va,
+                              env_data, env_data_len, envc))
+        extinction("exec_build_init_stack: NUL count != envc post-validation");
+    w[2 + argc + envc] = 0;                  // envp[envc] = NULL terminator
 
-        w[1 + argc]   = 0;                   // argv[argc] = NULL terminator
-        w[2 + argc]   = 0;                   // envp[0]    = NULL terminator
+    // auxv at w[3 + argc + envc ..]; EXEC_INIT_AUXV_COUNT entries (16 u64s)
+    // reserved, which is exactly what EXEC_INIT_STRUCTURED accounts for, so the
+    // block ends precisely where the AT_RANDOM padding begins. The trailing
+    // slots beyond the AT_NULL the helper writes stay zero.
+    exec_fill_auxv(&w[3 + argc + envc], phdr_va, phent, phnum,
+                   sp + random_offset_from_sp, vdso_va);
 
-        // auxv at w[3 + argc ..]; up to 8 entries (16 u64s) reserved (the
-        // EXEC_INIT_AUXV_COUNT the structured-size math at the top accounts for).
-        exec_fill_auxv(&w[3 + argc], phdr_va, phent, phnum,
-                       sp + random_offset_from_sp, vdso_va);
-
-        // Copy argv strings into the strings region.
-        u8 *strings_dst = frame + random_offset_from_sp + 16u;
-        for (u32 i = 0; i < argv_data_len; i++) strings_dst[i] = (u8)argv_data[i];
-    }
+    // Copy both strings regions in. Bounded by the frame_size arithmetic above,
+    // which reserved exactly argv_data_len + env_data_len bytes after the
+    // AT_RANDOM block.
+    u8 *strings_dst = frame + random_offset_from_sp + 16u;
+    for (u32 i = 0; i < argv_data_len; i++)
+        strings_dst[i] = (u8)argv_data[i];
+    for (u32 i = 0; i < env_data_len; i++)
+        strings_dst[(u64)argv_data_len + i] = (u8)env_data[i];
 
     u8 *rand_dst = frame + random_offset_from_sp;
     for (size_t i = 0; i < sizeof(rand); i++) rand_dst[i] = rand[i];
@@ -547,6 +633,8 @@ static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
                                 const void *blob, size_t blob_size,
                                 const char *argv_data, u32 argv_data_len,
                                 u32 argc,
+                                const char *env_data, u32 env_data_len,
+                                u32 envc,
                                 u64 *entry_out, u64 *sp_out) {
     if (!as || !blob || !entry_out || !sp_out) return -1;
     // The target must be CLEAN. For the spawn paths that is a freshly rforked
@@ -561,6 +649,17 @@ static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
         if (argv_data[argv_data_len - 1] != '\0') return -1;
     } else {
         if (argv_data_len != 0)                return -1;
+    }
+    // The same shape for the environment (#140): the builder extincts on a
+    // mismatch, so a badly-packed block must be caught here, where it is still
+    // an error.
+    if (envc > 0) {
+        if (env_data_len == 0 || !env_data)    return -1;
+        if (envc > EXEC_ENV_MAX)               return -1;
+        if (env_data_len > EXEC_ENV_DATA_MAX)  return -1;
+        if (env_data[env_data_len - 1] != '\0') return -1;
+    } else {
+        if (env_data_len != 0)                 return -1;
     }
 
     struct elf_image img;
@@ -588,7 +687,8 @@ static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
     // *sp_out points at its `argc` word.
     *entry_out = img.entry;
     *sp_out    = exec_build_init_stack(as, exempt, &img, argv_data, argv_data_len,
-                                       argc, vdso_va);
+                                       argc, env_data, env_data_len, envc,
+                                       vdso_va);
     if (*sp_out == 0)                          return -1;   // L-4a: frame OOM
     return 0;
 }
@@ -596,6 +696,13 @@ static int exec_setup_argv_body(struct AddrSpace *as, bool exempt,
 // The Proc-taking gate the two blob entries share: reject kproc, and resolve the
 // Proc to its own (attached) address space + I-32 exemption. execve does NOT go
 // through here -- it targets a detached address space and supplies its own.
+//
+// THE ENVIRONMENT COMES FROM THE PROC (#140), and that is the rule for every
+// Proc-taking exec entry without exception -- the blob entries here and
+// exec_setup_from_spoor below. A caller that has an environment of its own to
+// impose does not come through a Proc-taking entry at all; it goes to
+// exec_load_into with an explicit block. One rule, no per-entry exceptions to
+// remember, and the reason envp was empty for years is that there was no rule.
 static int exec_setup_for_proc(struct Proc *p,
                                const void *blob, size_t blob_size,
                                const char *argv_data, u32 argv_data_len,
@@ -603,9 +710,17 @@ static int exec_setup_for_proc(struct Proc *p,
     if (!p)                     return -1;
     if (p->magic != PROC_MAGIC) return -1;
     if (!p->as)                 return -1;     // kproc rejected
-    return exec_setup_argv_body(p->as, proc_resource_exempt(p),
-                                blob, blob_size, argv_data, argv_data_len, argc,
-                                entry_out, sp_out);
+
+    char *env_data = NULL;
+    u32 env_len = 0, envc = 0;
+    if (exec_stage_env(p, &env_data, &env_len, &envc) != 0) return -1;
+
+    int rc = exec_setup_argv_body(p->as, proc_resource_exempt(p),
+                                  blob, blob_size, argv_data, argv_data_len, argc,
+                                  env_data, env_len, envc,
+                                  entry_out, sp_out);
+    kfree(env_data);            // copied into the frame; no-op on NULL
+    return rc;
 }
 
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
@@ -820,6 +935,7 @@ static void *exec_read_header(struct Spoor *exe, size_t *got_out) {
 int exec_load_into(struct AddrSpace *as, bool exempt,
                    struct Spoor *exe, size_t exe_size,
                    const char *argv_data, u32 argv_data_len, u32 argc,
+                   const char *env_data, u32 env_data_len, u32 envc,
                    u64 *entry_out, u64 *sp_out) {
     if (!as || !exe || !entry_out || !sp_out)  return -1;
     if (as->vmas != NULL)                      return -1;     // clean target only
@@ -833,6 +949,16 @@ int exec_load_into(struct AddrSpace *as, bool exempt,
         if (argv_data[argv_data_len - 1] != '\0')  return -1;
     } else {
         if (argv_data_len != 0)                    return -1;
+    }
+    // ...and the same for the environment (#140). The builder extincts on a
+    // mismatch, so the bad block must be refused here, where it is an error.
+    if (envc > 0) {
+        if (env_data_len == 0 || !env_data)        return -1;
+        if (envc > EXEC_ENV_MAX)                   return -1;
+        if (env_data_len > EXEC_ENV_DATA_MAX)      return -1;
+        if (env_data[env_data_len - 1] != '\0')    return -1;
+    } else {
+        if (env_data_len != 0)                     return -1;
     }
 
     // 1. Read + parse ONLY the ELF header + phdrs (a few KB), not the whole
@@ -942,7 +1068,8 @@ int exec_load_into(struct AddrSpace *as, bool exempt,
     u64 vdso_va = exec_map_vdso(as, exempt);   // best-effort; 0 -> no AT_VDSO_CLOCK
     *entry_out = img.entry;
     *sp_out    = exec_build_init_stack(as, exempt, &img, argv_data, argv_data_len,
-                                       argc, vdso_va);
+                                       argc, env_data, env_data_len, envc,
+                                       vdso_va);
     if (*sp_out == 0)                          return -1;   // L-4a: frame OOM
     return 0;
 }
@@ -967,8 +1094,23 @@ int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
     if (exe->path)
         proc_set_name(p, exe->path->s, (size_t)exe->path->len);
 
+    // #140: the spawn paths project the CHILD's own environment, and it is
+    // already the right one -- rfork_internal ran env_clone_into before this
+    // thunk started, so p->env is the inherited copy. No parent access is
+    // needed or wanted; a spawn that wants a DIFFERENT environment sets it
+    // through /env on the child, which is what the namespace is for.
+    char *env_data = NULL;
+    u32 env_len = 0, envc = 0;
+    if (exec_stage_env(p, &env_data, &env_len, &envc) != 0) {
+        exec_report_fail("environment does not fit the exec frame, pid",
+                         (u64)p->pid);
+        return -1;
+    }
+
     int rc = exec_load_into(p->as, proc_resource_exempt(p), exe, exe_size,
-                            argv_data, argv_data_len, argc, entry_out, sp_out);
+                            argv_data, argv_data_len, argc,
+                            env_data, env_len, envc, entry_out, sp_out);
+    kfree(env_data);            // copied into the frame; no-op on NULL
     if (rc != 0) {
         // #149: the pid line. Every SYS_SPAWN_* thunk reaches exec through
         // here, and all three answer a failure with a bare exits("fail-exec")

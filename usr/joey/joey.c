@@ -1142,11 +1142,11 @@ static int do_alpine_shell_gate(void) {
         // whole point of the gate, and a KNOWN-BLOCKED that outlives its blocker
         // is just a disabled test.
         if (!L6C_GATE_FATAL) {
-            t_putstr("joey: L-6c KNOWN-BLOCKED on task #140 (the environment: "
-                     "#151 landed close-on-exec, so busybox now RUNS A SCRIPT "
-                     "-- it fails spawning an external command, because ash "
-                     "synthesizes SHLVL/PWD and execve refuses a non-empty "
-                     "envp); not boot-fatal yet\n");
+            t_putstr("joey: L-6c KNOWN-BLOCKED on task #155 (pipe2: #140 put "
+                     "the environment on the exec stack, so the shell now runs "
+                     "a script, execs an external command and reads back both "
+                     "exit statuses -- it fails building a PIPELINE, because "
+                     "linux nr=59 has no translator); not boot-fatal yet\n");
             return 0;
         }
         return -1;

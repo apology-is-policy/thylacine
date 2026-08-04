@@ -2032,20 +2032,20 @@ unsafe fn run_linux() -> ! {
         b"L165\n"
     );
 
-    // THE ENVP DECLINE -- this chunk's argument-domain decision. Linux's envp
-    // means "the new image's environment is exactly this", and no Thylacine
-    // layer can produce that effect: exec_build_init_stack writes a lone NULL
-    // for envp in both frame shapes, so a new image's `environ` is empty
-    // however the kernel was asked. Refusing beats dropping it silently.
+    // THE ENVP DECLINE IS GONE (#140). It used to answer ENOSYS here -- checked
+    // BEFORE the path, so a non-empty envp declined even when the path was the
+    // thing that did not exist. Now envp is honoured, so this call gets no
+    // further than the missing path and answers ENOENT like every other leg.
     //
-    // It is checked BEFORE the path, so this must decline even though the path
-    // is the one that does not exist -- ENOSYS, not ENOENT.
+    // Asserting ENOENT is a WEAK leg on its own: it is the same answer L167
+    // gives, so it proves the decline was removed but says nothing about
+    // whether the environment arrives. L182-L184 below are the delivery proof.
     let e0 = b"FOO=bar\0";
     let envp_full: [u64; 2] = [e0.as_ptr() as u64, 0];
     leg!(
         rep,
         svc3(NR_EXECVE, miss.as_ptr() as u64, argv_ok.as_ptr() as u64,
-             envp_full.as_ptr() as u64) == NEG_ENOSYS,
+             envp_full.as_ptr() as u64) == NEG_ENOENT,
         b"L166\n"
     );
 
@@ -2123,6 +2123,46 @@ unsafe fn run_linux() -> ! {
     // Exited cleanly => the re-execed image found 21 closed and 22 open.
     leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0, b"L179\n");
 
+    // --- L182-L184 (#140): the environment ARRIVES, across a real execve -----
+    //
+    // L166 above only proves the decline was removed. What nothing else proves
+    // is that the strings reach the new image's stack -- and that is the whole
+    // task: for years the kernel wrote a lone NULL for envp no matter what it
+    // was asked, and every test passed, because a Proc with an empty
+    // environment and one whose environment was DROPPED look identical.
+    //
+    // So this hands a known envp to a real execve and has the far side read its
+    // OWN startup frame back. Same shape as the close-on-exec legs above, and
+    // for the same reason: only a real exec can be wrong here.
+    let kid2 = svc6(NR_CLONE, SIGCHLD, 0, 0, 0, 0, 0);
+    if kid2 == 0 {
+        // 20 again: the child's report channel, so a failing child can say
+        // WHICH way it went wrong rather than just dying.
+        svc3(NR_FCNTL, rep as u64, F_DUPFD, 20);
+
+        let selfp = b"/bin/viv-pheno-probe\0";
+        let c0 = b"viv-pheno-probe\0";
+        let c1 = b"env-child\0";
+        let cargv: [u64; 3] = [c0.as_ptr() as u64, c1.as_ptr() as u64, 0];
+        // TWO records, so the far side can check ORDER and the terminator, not
+        // just presence. Distinctive names -- a single "FOO=bar" could in
+        // principle have come from somewhere else.
+        let v0 = b"VIVENVA=alpha\0";
+        let v1 = b"VIVENVB=beta\0";
+        let cenvp: [u64; 3] = [v0.as_ptr() as u64, v1.as_ptr() as u64, 0];
+        svc3(NR_EXECVE, selfp.as_ptr() as u64, cargv.as_ptr() as u64,
+             cenvp.as_ptr() as u64);
+        linux_exit(9)                      // only reachable if the exec FAILED
+    }
+    leg!(rep, kid2 > 0, b"L182\n");
+    st = -1;
+    leg!(
+        rep,
+        svc4(NR_WAIT4, kid2 as u64, &mut st as *mut i32 as u64, 0, 0) == kid2,
+        b"L183\n"
+    );
+    leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0, b"L184\n");
+
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its
     // own territory. If the renumber were wrong the bytes would not be there,
@@ -2188,6 +2228,42 @@ unsafe fn run_cloexec_child() -> ! {
     linux_exit(0)
 }
 
+/// #140: the re-execed image whose job is to read back the environment its
+/// exec'er handed it -- the one thing no kernel unit test can prove, because
+/// building the frame and RUNNING on it are different questions.
+///
+/// It reads the frame through `env::vars()`, which walks past `argv[argc]` to
+/// `envp[0]` exactly as the ABI says -- the same arithmetic the runtime already
+/// used to find the auxv, so a wrong frame shape would break the vDSO too.
+///
+/// Reports through fd 20 like the cloexec child, and for the same reason: a
+/// silent wrong answer is worse than a loud one.
+unsafe fn run_env_child() -> ! {
+    let mut n = 0usize;
+    let mut ok_a = false;
+    let mut ok_b = false;
+    for (i, v) in env::vars().enumerate() {
+        // ORDER matters: the frame must present them as the exec'er packed
+        // them, not merely contain them somewhere.
+        if i == 0 && v == b"VIVENVA=alpha".as_slice() {
+            ok_a = true;
+        }
+        if i == 1 && v == b"VIVENVB=beta".as_slice() {
+            ok_b = true;
+        }
+        n += 1;
+    }
+    if n != 2 || !ok_a || !ok_b {
+        // Distinguish "nothing arrived" (the pre-#140 behaviour, and the one
+        // this leg exists to catch) from "something arrived, wrong" -- they are
+        // different bugs and a single marker would conflate them.
+        let m: &[u8] = if n == 0 { b"L185\n" } else { b"L186\n" };
+        let _ = svc3(NR_WRITE, 20, m.as_ptr() as u64, m.len() as u64);
+        linux_exit(1)
+    }
+    linux_exit(0)
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mode: &[u8] = env::args().nth(1).unwrap_or(&[]);
@@ -2196,6 +2272,9 @@ pub extern "C" fn rs_main() -> i64 {
     }
     if mode == b"cloexec-child".as_slice() {
         unsafe { run_cloexec_child() }
+    }
+    if mode == b"env-child".as_slice() {
+        unsafe { run_env_child() }
     }
     if mode == b"native".as_slice() {
         return run_native();

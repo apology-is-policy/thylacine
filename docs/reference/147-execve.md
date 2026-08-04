@@ -203,20 +203,35 @@ whatever the strings did in between. This is the I-30 snapshot discipline: no
 concurrent writer exists today — a vfork parent is suspended and `CLONE_THREAD`
 is not a row — but the bound removes the class instead of resting on that.
 
-### envp declines when non-empty
+### envp: the decline, and the detector firing (#140)
 
-Not laziness, and not a v1.x stub: the effect cannot be produced **at any
-layer**. `exec_build_init_stack` writes a lone NULL for envp in both frame
-shapes (`exec.c:405` Shape A, `:438` Shape B), and musl's `__libc_start_main`
-does `__environ = envp`. So every program — native, pouch, phenotyped — starts
-with an empty environment; `/env` is the only channel and only the Go fork reads
-it. Writing the guest's envp into `/env` would not honour it, it would move the
-loss somewhere harder to see.
+It declined when non-empty at L-6a — not laziness and not a v1.x stub, because
+the effect could not be produced **at any layer**. `exec_build_init_stack` wrote
+a lone NULL for envp in both frame shapes, and musl's `__libc_start_main` does
+`__environ = envp`. So every program — native, pouch, phenotyped — started with
+an empty environment; `/env` was the only channel and only the Go fork read it.
+Writing the guest's envp into `/env` would not have honoured it, it would have
+moved the loss somewhere harder to see. An empty envp was served **exactly** and
+a non-empty one refused, which made the decline a *detector*.
 
-An empty envp is therefore served **exactly** (the guest asked for nothing and
-gets nothing), and a non-empty one is refused. That makes the decline a
-*detector*: if a real guest shell trips it, the answer is the `/env` -> envp
-projection in `exec_build_init_stack` (#140), not a weakening here.
+**It fired, at #151**: a busybox `ash` spawning an external command passes
+`envc=2` with `env0='SHLVL=1'` — ash synthesizes `SHLVL` and `PWD` itself, so
+its envp is non-empty even from an empty environment and no container
+configuration avoids the arm.
+
+**#140 built the frame half, which is where the detector said the answer was.**
+The two frame shapes collapse into one (each had written its own envp NULL, so
+the defect had two homes and fixing either alone would have left the other), and
+`viv_execve` now walks envp with the same `viv_pack_strv` it walks argv with.
+The over-length answers moved to `T_E_2BIG` at the same time — this is a Linux
+ABI row where POSIX alignment is the stated goal, and `viv_measure_user_str`'s
+only caller is this walk; the *native* `SYS_EXECVE` bounds still answer `EINVAL`,
+a landed ABI reserved to the #142 rollout.
+
+An empty envp is still served exactly, and now means what Linux means by it: the
+new image gets an **empty** environment, not an inherited one. A native
+`SYS_EXECVE`, whose ABI has no envp argument, instead *preserves* — it projects
+the caller's own `/env`. See `27-exec.md` "Initial process stack" for the frame.
 
 ---
 

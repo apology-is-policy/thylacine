@@ -351,6 +351,8 @@ void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
+void test_exec_setup_env_frame(void);            // #140
+void test_exec_stage_env_bounds(void);           // #140
 void test_exec_writable_segment_is_sparse(void);
 void test_exec_stack_is_sparse(void);
 void test_execve_load_into_detached(void);
@@ -1798,6 +1800,8 @@ struct test_case g_tests[] = {
     { "exec.setup_auxv_no_phdr_segment",
                                        test_exec_setup_auxv_no_phdr_segment,
                                                                            false, NULL },
+    { "exec.setup_env_frame",          test_exec_setup_env_frame,          false, NULL },
+    { "exec.stage_env_bounds",         test_exec_stage_env_bounds,         false, NULL },
     { "exec.writable_segment_is_sparse",
                                        test_exec_writable_segment_is_sparse,
                                                                            false, NULL },
