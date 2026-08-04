@@ -70,6 +70,19 @@ macro_rules! say {
 const CONNECT_TRIES: u32 = 25;
 const CONNECT_DELAY_MS: u64 = 200;
 const BLINK_FRAMES: u64 = 30; // cursor phase flip every half second at 60 Hz
+// #129: bound the held-input queue -- a console that never drains must cost
+// bounded memory, and the honest failure is a reported drop of the NEWEST held
+// input rather than unbounded growth. 4 KiB is ~8x the kernel ring, i.e. far
+// past any burst a human or a paste can produce before the reader returns.
+// (Hoisted out of `main` at #135 so the policy selftest can name it.)
+const FEED_PENDING_MAX: usize = 4096;
+// #135: how long a pass naps when input is HELD and the compositor has no event
+// for us. It bounds only the delivery latency of already-refused keystrokes, so
+// anything imperceptible will do; 50 ms sits just under tapestryd's own IDLE_HZ
+// period (67 ms) and costs 20 wakes/s for exactly as long as the console is
+// back-pressured. Not a retry SPIN: one write attempt per pass is unchanged
+// (see `feed_drain`), this paces the PASS RATE.
+const FEED_RETRY_MS: u64 = 50;
 
 fn open_path(path: &str, omode: u32) -> i64 {
     unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), omode) }
@@ -77,7 +90,7 @@ fn open_path(path: &str, omode: u32) -> i64 {
 
 /// #129: push held input at `/dev/consfeed`, keeping whatever the console
 /// refuses. `write` is injected so the policy is testable (see
-/// `feed_drain_selftest`) -- aurora is a `no_std` bin crate with no cargo-test
+/// `feed_policy_selftest`) -- aurora is a `no_std` bin crate with no cargo-test
 /// harness, and the back-pressure path is otherwise reachable only by stalling a
 /// real console reader, which no E2E arranges.
 ///
@@ -179,9 +192,32 @@ fn feed_drain(fd: i64, pending: &mut Vec<u8>, cap: usize, dropped: &mut u64,
     }
 }
 
+/// #135: must this pass BOUND its wait for the next compositor event?
+///
+/// The retry at the top of the event loop is only as frequent as the loop
+/// turns, and the loop turns on compositor events. `frame_tick` reaches
+/// `visible_hosted()` surfaces ONLY, so once a hidden aurora has consumed the
+/// hide transition's own TEV_FOCUS it receives NOTHING further -- an untimed
+/// block there parks held input until the user happens to come back, and the
+/// bytes then land in whatever the shell is doing THEN.
+///
+/// So: block indefinitely only when there is nothing to retry.
+///
+/// NOT "discard held input on unfocus", the other candidate. Focus-lost also
+/// fires when aurora stays VISIBLE (a `focusdir` to a sibling in a tiled
+/// layout), where frames keep arriving and today's retry already delivers
+/// within a tick -- discarding there would throw away input that was about to
+/// be delivered correctly. Bounding the wait instead removes the STALENESS at
+/// its source (the bytes land as soon as the console can take them, hidden or
+/// not) rather than paying for promptness with the user's keystrokes.
+fn wait_is_bounded(held: usize) -> bool {
+    held != 0
+}
+
 /// #129: prove the held-input queue keeps ORDER and its BOUND under
 /// back-pressure, by scripting the accept counts the console would return.
-fn feed_drain_selftest() -> bool {
+/// #135: and that a non-empty queue is COUPLED to a bounded wait.
+fn feed_policy_selftest() -> bool {
     let cap = 8usize;
     let mut dropped = 0u64;
 
@@ -249,6 +285,16 @@ fn feed_drain_selftest() -> bool {
         }
     }
     if !q.is_empty() || dropped != 12 { return false; }
+
+    // (f) #135: the PACING coupling. Whatever the queue holds, "non-empty" and
+    //     "bounded wait" must move together -- a hidden surface receives no
+    //     frame ticks, so an untimed block with bytes still held parks them
+    //     until the user returns. Both directions, because the empty case must
+    //     keep blocking: waking 20x/s with nothing to retry would spend idle
+    //     CPU for no one (and this is the tickless-idle system, #299).
+    if wait_is_bounded(0) { return false; }
+    if !wait_is_bounded(1) { return false; }
+    if !wait_is_bounded(FEED_PENDING_MAX) { return false; }
     true
 }
 
@@ -302,8 +348,8 @@ pub extern "C" fn rs_main() -> i64 {
     // #129: the held-input queue is the half of the fix that keeps a refused
     // keystroke from being lost in USERSPACE. ls-gfx proves only the happy path,
     // so assert the back-pressure policy here (the netd selftest pattern).
-    if feed_drain_selftest() {
-        say!("aurora: #129 feed selftest PASS (order + bound under back-pressure)");
+    if feed_policy_selftest() {
+        say!("aurora: #129 feed selftest PASS (order + bound + #135 pacing)");
     } else {
         say!("aurora: #129 feed selftest FAIL");
     }
@@ -536,11 +582,6 @@ pub extern "C" fn rs_main() -> i64 {
     // for every other client. So the remainder rides one pass of the existing
     // event loop, which keeps rendering meanwhile.
     let mut feed_pending: Vec<u8> = Vec::new();
-    // Bound it: a console that never drains must cost bounded memory, and the
-    // honest failure is a reported drop of the OLDEST held input rather than
-    // unbounded growth. 4 KiB is ~8x the kernel ring, i.e. far past any burst a
-    // human or a paste can produce before the reader returns.
-    const FEED_PENDING_MAX: usize = 4096;
     let mut feed_dropped: u64 = 0;
     let mut feed_logged = false;      // #129-audit F8: one line per episode
     let mut drainbuf = [0u8; 2048];
@@ -567,27 +608,48 @@ pub extern "C" fn rs_main() -> i64 {
         // arriving late and out of order, or never, if they had stopped typing
         // because the terminal appeared stuck.
         //
-        // SEAM (#129-audit F5, task #135): this pass is NOT bounded when the
-        // surface is HIDDEN. wait_event below is an untimed block, paced only by
-        // tapestryd's frame_tick, which by its own contract reaches
-        // visible_hosted() surfaces only -- so a tab-backgrounded aurora stops
-        // draining entirely, and held keystrokes are injected whenever the user
-        // returns, into whatever the shell is doing THEN. Closing it needs either
-        // a timed wait when feed_pending is non-empty, or a policy of discarding
-        // held input on unfocus; both are judgement calls beyond this fix.
+        // #135 closed the pacing half of that: the wait at (1) is BOUNDED
+        // whenever this queue is non-empty, so a hidden surface -- which
+        // receives no frame ticks at all -- keeps retrying anyway.
         feed_drain(feed, &mut feed_pending, FEED_PENDING_MAX, &mut feed_dropped,
                    &mut feed_logged);
 
-        // (1) Block for the next event (<= one FRAME period), then drain the
-        // locally-queued backlog non-blockingly.
-        let first = match surf.wait_event() {
-            Ok(ev) => ev,
-            Err(_) => {
-                say!("aurora: event stream ended (compositor gone); exiting");
-                return 1;
+        // (1) The next event, then drain the locally-queued backlog
+        // non-blockingly. With nothing held this BLOCKS (the normal path: no
+        // timer, no wakes, the whole point of an event-driven loop). With input
+        // held it polls and naps instead, because tapestryd pages only
+        // visible_hosted() surfaces and a tab-backgrounded aurora would
+        // otherwise block here forever with the user's keystrokes in hand.
+        //
+        // Still not the retry SPIN the note at (0) forbids: one write attempt
+        // per pass is unchanged, and a nap yields the CPU. What is bounded here
+        // is the PASS RATE, not the per-pass effort.
+        //
+        // `None` is a legal outcome -- the drain and render passes below run on
+        // their own terms, so a pass with no event is a normal short pass, not
+        // a reason to `continue` past them.
+        let mut ev = if wait_is_bounded(feed_pending.len()) {
+            match surf.poll_event() {
+                Ok(next) => {
+                    if next.is_none() {
+                        let _ = sleep(Duration::from_millis(FEED_RETRY_MS));
+                    }
+                    next
+                }
+                Err(_) => {
+                    say!("aurora: event stream ended (compositor gone); exiting");
+                    return 1;
+                }
+            }
+        } else {
+            match surf.wait_event() {
+                Ok(e) => Some(e),
+                Err(_) => {
+                    say!("aurora: event stream ended (compositor gone); exiting");
+                    return 1;
+                }
             }
         };
-        let mut ev = Some(first);
         while let Some(e) = ev {
             match e.kind {
                 TEV_KEY => {
