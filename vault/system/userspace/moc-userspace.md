@@ -46,17 +46,27 @@ dossiers.
 - [[sub-tapestryd]] — the compositor: the weave lifecycle, the present
   engine, and the retire ordering. Holds the server half of
   [[inv-i40]].
+- [[sub-corvus]] — the key agent: authentication, key custody, elevation
+  and recovery in one daemon, bounded by [[inv-i23]] to the storage
+  capability it is handed. The oldest of the four servers and the one the
+  others' shared codec was lifted out of.
 
 ## Cross-cutting
 
-- **The three native 9P servers share a template, and the template's
-  fixes did not all travel.** netd, [[sub-ptyfs]] and [[sub-tapestryd]]
-  are the same shape — a Conn/fid table, a frame extractor, a qid scheme
-  keyed on bit 40, deferred replies with a four-site cancel discipline,
-  and a single-threaded loop whose top-of-loop delivery pass *is* the
-  I-9 argument. tapestryd's header says so explicitly. But netd's
-  `net-4d` F2 fix (reject `P9_NOFID` as a newfid; reject a newfid
-  already in use) reached ptyfs and only half-reached tapestryd — see
+- **Four native 9P servers share a template, and the template came from
+  the oldest of them.** netd, [[sub-ptyfs]], [[sub-tapestryd]] and
+  [[sub-corvus]] are the same shape — a Conn/fid table, a frame
+  extractor, a qid scheme, and a single-threaded loop whose top-of-loop
+  pass *is* the I-9 argument. The shared 9P codec the first three link
+  was **lifted out of corvus's private module**, which inverts the usual
+  reading of a shared template: a fix that reached the library reached
+  the descendants, and a fix that reached only a descendant never came
+  back to the ancestor. (corvus differs in one respect: it stages a
+  response rather than deferring a reply, so it has no held-tag cancel
+  discipline to get wrong.)
+- **The template's fixes did not all travel.** netd's `net-4d` F2 fix
+  (reject `P9_NOFID` as a newfid; reject a newfid already in use)
+  reached ptyfs and only half-reached tapestryd — see
   [[chg-2026-08-02-server-sweeps]]. The same two lines are load-bearing
   in ptyfs, where they are link 3 of `HupAtMostOnce`'s structural
   argument, and absent in its descendant.

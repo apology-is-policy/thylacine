@@ -12,6 +12,8 @@ Generated from note fields — do not edit between the markers
 <!-- generated:begin -->
 | surface | code | invariants | prosecution |
 |---|---|---|---|
+| [[sub-corvus]] | usr/corvus/src/main.rs, usr/corvus/Cargo.toml | inv-i22, inv-i23 | - **The authority gates re-query.** Any new gated verb must ask the kernel |
+| [[sub-corvus-crypto]] | usr/lib/corvus-crypto/src/lib.rs, usr/lib/corvus-crypto/src/bip39_wordlist.rs, usr/lib/corvus-crypto/Cargo.toml |  | - **A new wrap kind needs a new associated-data prefix**, built through a |
 | [[sub-kernel-allowance]] | kernel/allowance.c, kernel/include/thylacine/allowance.h | inv-i34 | - The gate must remain complete across **all four** create sites. A new |
 | [[sub-kernel-alternatives]] | arch/arm64/alternatives.c, arch/arm64/alternatives.h, arch/arm64/atomic_lse.h |  | - **The write must never go through an executable mapping.** The scratch alias's |
 | [[sub-kernel-asid]] | arch/arm64/asid.c, arch/arm64/asid.h | inv-i31 | - **The rollover-versus-switch race** is the whole surface. Any change to the |

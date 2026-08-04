@@ -115,6 +115,14 @@ why nothing has broken.
   area's third exception, and the only library here whose teardown obligation
   the kernel's ordinary reap discipline cannot discharge — a stopped process
   leaves a running device.
+- [[sub-corvus-crypto]] — the at-rest wrap core: one key layout, one
+  key-derivation function, one authenticated cipher, one hybrid keypair, and a
+  recovery-phrase codec whose wordlist is proved sorted at compile time because
+  the lookup is a binary search and a wrong word is a wrong key. Extracted so
+  the device daemon and a host-target minter cannot drift.
+- [[sub-tls]] — transport security: one record-layer driver shared by both
+  roles over a `/net` byte stream, and the area's clearest single instance of a
+  bound placed on the wrong loop.
 
 ## Cross-cutting
 
@@ -125,9 +133,25 @@ why nothing has broken.
 - The ported half of the same job is [[moc-pouch-seam]]. A program is on one
   side or the other, never both: authored within Thylacine means this area,
   ported from elsewhere means the seam.
-- Still to arrive with the rest of the userspace sweep: the transport crypto,
-  which is the one native consumer whose own bound check is load-bearing
-  against the kernel's entropy-read behaviour rather than redundant with it.
+- **The two crypto libraries are this area's only consumers of a foreign
+  cryptographic ecosystem, and each solved the same gap in a different shape.**
+  A no-standard-library crypto stack expects entropy and time from a platform
+  that offers neither by default. [[sub-corvus-crypto]] *parameterizes* its
+  randomness — a type parameter, because two different binaries link it and
+  must produce identical bytes. [[sub-tls]] *injects* both randomness and a
+  clock at crate scope — a global registration, because every consumer needs
+  the same one. Same gap; the number of expected linkers picked the shape.
+- **[[sub-tls]] is the one native consumer whose own bound check is
+  load-bearing** rather than redundant: its entropy adapter refuses a short
+  fill, and a short fill is reachable because the kernel's randomness call
+  silently caps an oversize request. Everywhere else in this area a library's
+  check merely echoes a kernel guard.
+- **The two diverge sharply on proof position, and one line of crate
+  configuration is the cause.** corvus-crypto is no-standard-library *only when
+  not under test*, so it carries thirteen host tests over exactly the hazards
+  it documents. tls is unconditionally no-standard-library and has none — its
+  whole proof is a single in-guest round-trip. The refactor that would close
+  the gap is the one its sibling already made.
 - The consumer of both halves above is [[sub-warden]], on the boot-chain
   plane — a program, not a library, and the only place the two halves meet.
   Read it for what these libraries are *for*: they exist so that one program

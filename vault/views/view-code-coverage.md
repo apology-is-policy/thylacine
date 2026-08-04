@@ -57,22 +57,21 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**277 owned · 144 unowned · 421 files (65% owned) · ~37292 unswept lines.**
+**281 owned · 141 unowned · 422 files (66% owned) · ~30902 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
 | usr/coreutils | 0 | 60 | 8763 |
-| usr/corvus | 0 | 1 | 4245 |
 | usr/aurora | 0 | 5 | 3607 |
-| usr/lib | 35 | 6 | 3210 |
 | usr/pouch-hello | 0 | 20 | 2998 |
+| usr/ports | 0 | 11 | 2970 |
 | usr/diorama | 0 | 2 | 2904 |
-| usr/ports | 0 | 10 | 2865 |
 | kernel | 110 | 22 | 2863 |
 | usr/prowl | 0 | 3 | 1253 |
 | arch | 34 | 4 | 971 |
+| usr/lib | 38 | 3 | 960 |
 | usr/curl | 0 | 3 | 779 |
 | usr/net-echo | 0 | 1 | 774 |
 | usr/stratumd-stub | 0 | 1 | 453 |
@@ -83,6 +82,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/https | 0 | 1 | 220 |
 | usr/stub-driver | 0 | 1 | 119 |
 | mm | 8 | 0 | 0 |
+| usr/corvus | 1 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
 | usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
@@ -104,13 +104,10 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 
 | file | lines |
 |---|---:|
-| usr/corvus/src/main.rs | 4245 |
 | usr/diorama/src/server.rs | 2803 |
 | usr/ports/gnumake/config.h | 1357 |
-| usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
 | usr/aurora/src/main.rs | 1100 |
-| usr/lib/tls/src/lib.rs | 795 |
 | usr/net-echo/src/main.rs | 774 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
 | arch/arm64/uart.c | 674 |
@@ -138,7 +135,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 290 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | usr/pouch-hello/pouch-hello.c | 278 |
-| usr/lib/corvus-crypto/src/bip39_wordlist.rs | 271 |
 | usr/coreutils/src/bin/tr.rs | 268 |
 | usr/coreutils/src/bin/cat.rs | 264 |
 | usr/coreutils/src/bin/pelt.rs | 254 |
@@ -159,6 +155,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/coreutils/src/bin/netstat.rs | 188 |
 | usr/coreutils/src/bin/tail.rs | 188 |
+| usr/ports/sdl2/SDL_config.h | 186 |
 | kernel/include/thylacine/spinlock.h | 185 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/coreutils/src/bin/ipconfig.rs | 178 |
@@ -168,7 +165,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/gnumake/generated/glob.h | 163 |
 | usr/coreutils/src/bin/wc.rs | 162 |
 | usr/coreutils/src/boxd.rs | 162 |
-| usr/ports/sdl2/SDL_config.h | 162 |
 | usr/coreutils/src/bin/stat.rs | 161 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
 | kernel/include/thylacine/context.h | 159 |
@@ -208,6 +204,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 83 |
+| usr/ports/sdl2/glapi-probe.c | 81 |
 | usr/pouch-hello/pouch-hello-getrandom.c | 79 |
 | arch/arm64/psci.c | 78 |
 | usr/coreutils/src/bin/cmp.rs | 78 |

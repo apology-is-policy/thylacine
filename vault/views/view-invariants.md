@@ -25,6 +25,7 @@ Generated from note fields — do not edit between the markers
 | I-20 | [[inv-i20]] | spec | sub-ptyfs, sub-kernel-pts, sub-kernel-jobctl, sub-kernel-proc | spec-pty, spec-pty-stop, prose, gate-smp |
 | I-21 | [[inv-i21]] | spec | sub-kernel-sched-smp, sub-kernel-thread, sub-kernel-exception | spec-sched-alpha, spec-sched-oncpu, spec-sched-ctxsw, gate-smp |
 | I-22 | [[inv-i22]] | prose | sub-kernel-perm, sub-kernel-caps, sub-kernel-devproc | prose, gate-smp |
+| I-23 | [[inv-i23]] | prose | sub-corvus | prose |
 | I-24 | [[inv-i24]] | spec | sub-kernel-death, sub-kernel-torpor, sub-pouch-process, sub-pouch-signal | spec-death-wake, gate-smp |
 | I-26 | [[inv-i26]] | prose | sub-kernel-devproc | prose, gate-smp |
 | I-27 | [[inv-i27]] | prose | sub-kernel-cons, sub-kernel-devdev | prose, gate-interactive, gate-smp |
