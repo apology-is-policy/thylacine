@@ -268,8 +268,8 @@ pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flo
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
-pub const T_SYS_EXECVE: u64           = 101;    // LINEAGE L-2: replace this Proc's image in place
-pub const T_SYS_RFORK: u64            = 102;    // LINEAGE L-3b: fork sharing the address space
+pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
+pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
 // SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
 // served at L-3b; RFPROC alone needs copy-on-write (L-4) and is refused.
 pub const T_RFPROC: u64               = 0x0001;
@@ -2728,7 +2728,11 @@ global_asm!(
     // Seed the CHILD's stack with (entry, arg) and hand the kernel the
     // adjusted pointer. Pre-index so x1 IS the child's initial SP.
     "    stp     x3, x4, [x1, #-16]!",
-    "    mov     x8, #102",               // T_SYS_RFORK
+    // NOTE: this literal must track T_SYS_RFORK above -- naked asm cannot see
+    // the const, so this file carries the number TWICE and only this comment
+    // couples them. An edit that moves the const and leaves this behind
+    // compiles, links, boots, and calls the wrong syscall.
+    "    mov     x8, #105",               // T_SYS_RFORK
     "    svc     #0",
     "    cbz     x0, 1f",                 // x0 == 0 -> we are the CHILD
     "    ret",                            // parent: x0 = child pid, or -errno

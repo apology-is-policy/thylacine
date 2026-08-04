@@ -1847,7 +1847,7 @@ enum {
     // on the death lineage (LINEAGE.md section 7, L-2b). Nothing in the arc is
     // blocked by this: a vfork child, a fork child and a shell are all
     // single-threaded when they exec.
-    SYS_EXECVE = 101,
+    SYS_EXECVE = 104,
 
     // SYS_RFORK(flags, child_sp, child_tls)
     //   -> child pid to the PARENT, 0 to the CHILD, -errno on failure
@@ -1921,7 +1921,7 @@ enum {
     //                equal to the caller's own SP
     //   -T_E_AGAIN   the child could not be created (the I-32 child cap, a
     //                narrowed hardware allowance, or OOM)
-    SYS_RFORK = 102,
+    SYS_RFORK = 105,
 };
 
 // SYS_PTY_REGISTER ops.

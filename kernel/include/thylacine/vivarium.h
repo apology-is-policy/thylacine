@@ -306,7 +306,7 @@ enum {
 //
 // Stated ONCE, deliberately. It was previously written out as a literal in four
 // places and was stale in all four.
-#define VIV_NATIVE_CEILING 102
+#define VIV_NATIVE_CEILING 105
 
 // -----------------------------------------------------------------------------
 // TIER 2 — translators (V-2b).
