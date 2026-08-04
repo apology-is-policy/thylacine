@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "yip": { "command": "/Users/northkillpd/projects/.thylacine-relay/yip", "args": ["serve"] }
+  }
+}

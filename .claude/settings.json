@@ -1,0 +1,35 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -x /Users/northkillpd/projects/.thylacine-relay/yip ] || /Users/northkillpd/projects/.thylacine-relay/yip hook posttooluse"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -x /Users/northkillpd/projects/.thylacine-relay/yip ] || /Users/northkillpd/projects/.thylacine-relay/yip hook stop"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -x /Users/northkillpd/projects/.thylacine-relay/yip ] || /Users/northkillpd/projects/.thylacine-relay/yip hook sessionstart"
+          }
+        ]
+      }
+    ]
+  }
+}
