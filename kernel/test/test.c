@@ -617,6 +617,7 @@ void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
 void test_vivarium_startup_batch_rows(void);             // #150 (LINEAGE L-6c)
 void test_vivarium_writev_domain(void);                  // #150
 void test_vivarium_fcntl_domain(void);                   // #151
+void test_vivarium_pipe2_domain(void);                   // #155
 void test_vivarium_uname_fill(void);                     // #150
 void test_vivarium_identity_map(void);                   // #150
 void test_vivarium_signal_map(void);                     // VIVARIUM V-6a
@@ -2124,6 +2125,7 @@ struct test_case g_tests[] = {
     { "vivarium.startup_batch_rows",     test_vivarium_startup_batch_rows,     false, NULL },
     { "vivarium.writev_domain",          test_vivarium_writev_domain,          false, NULL },
     { "vivarium.fcntl_domain",           test_vivarium_fcntl_domain,           false, NULL },
+    { "vivarium.pipe2_domain",           test_vivarium_pipe2_domain,           false, NULL },
     { "vivarium.uname_fill",             test_vivarium_uname_fill,             false, NULL },
     { "vivarium.identity_map",           test_vivarium_identity_map,           false, NULL },
     { "vivarium.signal_map",             test_vivarium_signal_map,             false, NULL },

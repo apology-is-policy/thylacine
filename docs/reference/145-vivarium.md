@@ -2095,3 +2095,122 @@ stack), and it wants a change to `exec_build_init_stack`, not to the phenotype.
 The joey gate message was updated to name it. A `KNOWN-BLOCKED` that outlives its
 blocker is just a disabled test, and one that names the *wrong* blocker is worse
 — it sends the next reader at the thing that was already fixed.
+
+---
+
+## `pipe2` (#155, LINEAGE L-6c)
+
+A shell cannot build a pipeline without it, and on aarch64 there is no second way
+to ask. Linux's generic syscall table carries no legacy `pipe` — the arch header
+defines only `__NR_pipe2 59`, where x86_64 carries both 22 and 293 — so musl's
+`pipe()` compiles to *this* number with flags 0. The architecture had to be
+checked rather than inherited from another arch's table.
+
+### The domain was measured, not derived from what Linux permits
+
+Linux's `pipe2` accepts `O_CLOEXEC`, `O_NONBLOCK` and `O_DIRECT`. The question a
+translator has to answer is narrower: which of those does *this guest* send, and
+which can the native mechanism reproduce **exactly**?
+
+Six call sites in the gate's own busybox reach nr 59, and the binary answers both
+halves at once:
+
+| site | shape | flags |
+|---|---|---|
+| ×4 | musl `pipe()` — `mov x1, #0` | `0` |
+| ×2 | musl `pipe2()` — `mov w1, #0x80000` | `O_CLOEXEC` |
+
+So `{0, O_CLOEXEC}` is not a conservative subset of the domain. It **is** the
+domain, and both members are exactly reproducible: `0` is `SYS_PIPE` unchanged,
+and `O_CLOEXEC` is the descriptor flag #151 built — applied to *both* ends after
+creation, since pipe2's flag is not per-end and flagging only the read end would
+still satisfy any check that looked at one fd.
+
+### An allow-list, for V-2d's reason
+
+The gate is written as *nothing outside the admitted set*, not as a list of
+rejects. `mmap` recorded why at V-2d: aarch64 defines flags a deny-list admits by
+having forgotten them. Here the point is concrete — the unit test's bare `1u` case
+is a bit no pipe2 flag uses, and a deny-list serves it silently.
+
+`O_NONBLOCK` and `O_DIRECT` are excluded because devpipe has no non-blocking read
+and no packet framing — not because they are unusual. Admitting either would hand
+a guest a pipe and tell it something false about it.
+
+### Declining `O_CLOEXEC` would also have worked
+
+Worth recording, because the reasoning inverted once while checking. musl's
+`pipe2` carries its own ENOSYS fallback — `pipe()` then `fcntl(F_SETFD)` — and
+since #151 made `fcntl` a served row, that fallback now runs *correctly* rather
+than silently dropping the flag as it would have one chunk earlier.
+
+So declining is not unsafe. It is merely worse: three syscalls instead of one, and
+it leans on a compat shim belonging to one libc. A statically-linked Go binary
+calling `pipe2` directly has no such fallback. Serving what can be served exactly
+is the answer that does not depend on who is asking.
+
+### The shell's order, and the one step that cannot be skipped
+
+Decide → range-check → create → copy out → *clean up on failure*.
+
+Both refusals precede the allocation deliberately: a call that was never going to
+land its result should not cost a pipe ring and two descriptors first.
+
+The cleanup is the step that looks redundant and is not. `sys_validate_user_buf`
+proves only that the VA lies in the uaccess band; the page can still be absent,
+read-only, or unmapped by a peer thread between the check and the store. Linux has
+the identical window — `do_pipe2` creates, copies, and closes both fds on failure
+— and without it an EFAULT leaves two live descriptors whose numbers the guest was
+never told, which is an unreachable leak for the life of the Proc.
+
+### The collision paragraph
+
+59 is below the native ceiling, so it owes one. The native occupant is
+`SYS_WSTAT(fd, valid, mode, uid, gid, size)`, and a native program mis-declared as
+`PHENO_LINUX` is refused twice over:
+
+- `valid` is a bitmask of `T_WSTAT_{MODE,UID,GID,SIZE}` == `0xF`, so every legal
+  wstat mask lands in `[1,15]`, and the domain admits only `{0, 0x80000}`. No
+  wstat a native caller can legally make gets past the decide.
+- Were a garbage `valid` of 0 to slip through, `args[0]` — the fd index wstat put
+  there — becomes the VA the pair is written to. That is page zero, so the
+  copy-out faults, both fds are closed, and the answer is EFAULT.
+
+Its own address space, its own two descriptors, never authority.
+
+### Coverage, and what each layer cannot see
+
+`vivarium.pipe2_domain` proves the *decision*; in-guest legs L187–L192 prove the
+*shell* — the `int[2]` reaching guest memory, a byte actually round-tripping
+through the pair, `O_CLOEXEC` on both ends read back via `F_GETFD`, the
+`O_NONBLOCK` decline, EFAULT on an unmapped-but-in-band VA, and the leak
+assertion that last one sets up: 200 failing calls burn 400 descriptors against a
+256-slot table, so a shell that does not clean up cannot then make one more pipe.
+
+**Two revert probes, blind to each other in opposite directions.** Removing the
+cleanup leaves the unit suite at a full **1319/1319** and fails only in-guest at
+`L192`. Turning the allow-list into a deny-list fails `vivarium.pipe2_domain` at
+**1318/1319** on the bare `1u` case, and the guest legs do not notice — L190 tests
+`O_NONBLOCK`, which a deny-list still catches.
+
+### What the gate did next, and why the next blocker was already known
+
+The log is unambiguous about how far it moved: **`pipe-in` is printed**. The
+pipeline's left side runs and its bytes reach the pipe. What fails is the right
+side, and busybox names the call itself:
+
+```
+/gate/run.sh: line 6: dup2(4,1): Function not implemented
+```
+
+On aarch64 `dup2` compiles to `dup3`, which is a deliberate `FORWARD`: it *frees*
+the fd it overwrites, and `kernel/vivarium.c`'s fd-freeing block carries a
+standing instruction that the socktab close hook be extended in the same commit
+that serves it. pipe2 needed no such extension because it is fd-**creating** — it
+is in `openat`'s class — and that distinction is what the two adjacent tests now
+state together.
+
+That is task **#157**, and it was measured *before* this row was written: the four
+`dup3` call sites and their flags were read off the same binary in the same pass,
+precisely so that fixing site N could not stop the question being asked about site
+N+1.

@@ -1122,13 +1122,23 @@ static int do_alpine_shell_gate(void) {
         t_putstr("\n");
         // KNOWN-BLOCKED, and deliberately NOT boot-fatal until it is unblocked.
         //
-        // #149 (the loader's page-alignment reject) is FIXED, and the gate moved
-        // as a result: busybox now loads and RUNS -- it gets through musl startup
-        // into its own logic and issues real syscalls, where before it executed
-        // zero instructions. The remaining blocker is the syscall surface (#150):
-        // busybox writes through `writev` (Linux nr 66), which has no translator,
-        // so `echo` produces no output and every marker goes missing. getcwd /
-        // uname / getpid / getuid / fcntl are in the same batch.
+        // THE BLOCKER MOVES, AND THIS COMMENT MOVES WITH IT. Four have now been
+        // cleared in turn -- #149 (the loader's page-alignment reject, which had
+        // busybox executing zero instructions), #150 (the startup syscall batch,
+        // without which `echo` produced no output at all), #151 (close-on-exec)
+        // and #140 (the environment on the exec stack, which is what let the
+        // shell run a script, exec an external command and read back both exit
+        // statuses). Each one moved the gate further down the leg list, which is
+        // the only reason a non-fatal gate is worth having.
+        //
+        // The blocker now is dup3 (#157). pipe2 landed at #155 and WORKS -- the
+        // pipeline's left side runs and its bytes reach the pipe -- but on
+        // aarch64 there is no `dup2` number, so musl compiles dup2 into dup3,
+        // and dup3 is a deliberate FORWARD: it FREES the fd it overwrites, and
+        // vivarium.c's fd-freeing block requires the socktab close hook be
+        // extended in the same commit that serves it. So the child is built, the
+        // pipe exists, and nothing can be wired onto fd 0 or 1. busybox says so
+        // itself: "dup2(4,1): Function not implemented".
         //
         // Leaving it fatal would paint every boot red for a cause that is
         // already understood and enqueued, which is strictly worse than a loud
@@ -1142,11 +1152,11 @@ static int do_alpine_shell_gate(void) {
         // whole point of the gate, and a KNOWN-BLOCKED that outlives its blocker
         // is just a disabled test.
         if (!L6C_GATE_FATAL) {
-            t_putstr("joey: L-6c KNOWN-BLOCKED on task #155 (pipe2: #140 put "
-                     "the environment on the exec stack, so the shell now runs "
-                     "a script, execs an external command and reads back both "
-                     "exit statuses -- it fails building a PIPELINE, because "
-                     "linux nr=59 has no translator); not boot-fatal yet\n");
+            t_putstr("joey: L-6c KNOWN-BLOCKED on task #157 (dup3: #155 landed "
+                     "pipe2 and the pipeline's left side now runs -- 'pipe-in' "
+                     "reaches the pipe -- but linux nr=24 has no translator, so "
+                     "nothing can be wired onto fd 0 or 1 and the reader gets "
+                     "EBADF); not boot-fatal yet\n");
             return 0;
         }
         return -1;

@@ -239,6 +239,18 @@ enum {
     // The remaining seven are above the ceiling and discharge by construction.
     VIV_LINUX_GETCWD          = 17,
     VIV_LINUX_FCNTL           = 25,
+    // pipe2 (#155) owes the same paragraph -- 59 is below the ceiling, and its
+    // native occupant is SYS_WSTAT(fd, valid, mode, uid, gid, size). The mis-
+    // declared native program is refused TWICE OVER, and the outer refusal is
+    // the DOMAIN CHECK rather than a memory guard: `valid` is a bitmask of
+    // T_WSTAT_{MODE,UID,GID,SIZE} == 0xF, so every legal wstat mask lands in
+    // [1,15], and the pipe2 domain admits only {0, O_CLOEXEC == 0x80000}. No
+    // wstat a native caller can legally make is even reachable past the decide.
+    // Should a garbage `valid` of 0 slip through anyway, args[0] -- the fd index
+    // wstat put there -- becomes the VA the fd pair is written to, which is page
+    // zero, so the copy-out faults, both freshly-made fds are closed, and the
+    // answer is EFAULT. The caller's own address space and its own two fds.
+    VIV_LINUX_PIPE2           = 59,
     VIV_LINUX_WRITEV          = 66,
     VIV_LINUX_SET_TID_ADDRESS = 96,
     VIV_LINUX_SETGID          = 144,
@@ -1835,5 +1847,46 @@ u32 vivarium_map_gid(u32 gid);
 //
 // Returns true when the call is the no-op (the shell answers 0).
 bool vivarium_setid_is_noop(u32 requested, u32 current_mapped);
+
+// -----------------------------------------------------------------------------
+// pipe2 (#155, LINEAGE L-6c). A shell cannot build a pipeline without it, and on
+// aarch64 there is no second way to ask: Linux's generic syscall table has no
+// legacy `pipe`, so musl's pipe() IS `syscall(SYS_pipe2, fd, 0)` -- confirmed in
+// the arch table (only __NR_pipe2 59; x86_64 by contrast carries both 22 and
+// 293, which is why the architecture had to be checked rather than inherited).
+//
+// THE ARGUMENT DOMAIN, measured off the gate's own busybox rather than reasoned
+// from what Linux permits. Six call sites reach the number:
+//
+//   four through musl's pipe(), which hardcodes `mov x1, #0`     -> flags 0
+//   two through musl's pipe2(), both `mov w1, #0x80000`          -> O_CLOEXEC
+//
+// So {0, O_CLOEXEC} is not a conservative subset of the domain, it IS the
+// domain, and both members are reproducible EXACTLY: 0 is SYS_PIPE unchanged,
+// and O_CLOEXEC is the descriptor flag #151 built -- the same handle_set_cloexec
+// openat's shell already calls, applied to both new descriptors.
+//
+// AN ALLOW-LIST, not a deny-list, for the reason V-2d recorded when mmap made
+// the same choice: aarch64 defines flags a deny-list silently admits. Linux's
+// pipe2 also takes O_DIRECT (packet mode) and O_NONBLOCK, and NEITHER is
+// representable here -- devpipe has no packet framing and no non-blocking read
+// -- so admitting them by omission would be the mistranslation the rule exists
+// to prevent: a guest told its pipe is non-blocking, whose next read blocks.
+//
+// DECLINING O_CLOEXEC WOULD ALSO HAVE WORKED, and it is worth recording why it
+// is not what happens, because the reasoning inverted once during the work.
+// musl's pipe2 has its own ENOSYS fallback -- pipe() then fcntl(F_SETFD) -- and
+// since #151 made fcntl a served row, that fallback now runs correctly rather
+// than silently dropping the flag as it would have a chunk ago. So declining is
+// not unsafe. It is merely worse: it costs three syscalls instead of one, and it
+// leans on a compat shim that belongs to one libc. A statically-linked Go binary
+// calling pipe2 directly gets no such fallback. Serving what we can exactly
+// serve is the answer that does not depend on who is asking.
+//
+// PURE, like every other decide: no Proc, no table, no memory. The int[2]
+// copy-out is the shell's business. Returns VIV_TRANSLATED with *cloexec_out
+// set, or VIV_FORWARD for any flag outside the domain (leaving *cloexec_out
+// false, so a caller that ignores the verdict cannot act on a stale true).
+enum viv_verdict vivarium_pipe2_decide(u64 flags, bool *cloexec_out);
 
 #endif // THYLACINE_VIVARIUM_H

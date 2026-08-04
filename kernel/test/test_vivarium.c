@@ -126,6 +126,16 @@ void test_vivarium_rejects_are_deliberate(void) {
                    (int)VIV_TIER2, "mmap is T2 (V-2d; the anon-private domain)");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
+    // pipe2 is T2 since #155. Asserted BY NAME next to its siblings for the
+    // reason this whole function exists -- and with one extra job here: pipe2 is
+    // an fd-CREATING row, and the fd-freeing set two tests over is FORWARD under
+    // a standing "extend the socktab hook first" instruction. These two facts
+    // are easy to conflate. This assert and that one, read together, say which
+    // side of the line each number is on.
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_PIPE2, args, &out),
+                   (int)VIV_TIER2, "pipe2 is T2 (#155; flags domain + an int[2] copy-out)");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+
     // statx is the reason newfstatat is not the whole stat story: musl-aarch64
     // defines no __NR_fstatat, so its fstatat.c compiles the 79 path out and
     // issues 291 instead. Go and glibc do use 79. Pinned as a deliberate
@@ -2647,4 +2657,66 @@ void test_vivarium_fcntl_domain(void) {
                    (int)VIV_FORWARD, "NULL cloexec_out -> FORWARD");
     TEST_EXPECT_EQ((int)vivarium_fcntl_decide(VIV_F_GETFD, 0, &op, &cx, NULL),
                    (int)VIV_FORWARD, "NULL min_fd_out -> FORWARD");
+}
+
+// -----------------------------------------------------------------------------
+// vivarium.pipe2_domain (#155). The two admitted values are not a conservative
+// guess -- they are what the gate's own busybox issues, measured off the binary:
+// four call sites through musl's pipe() with a hardcoded `mov x1, #0`, and two
+// through pipe2() with `mov w1, #0x80000`. Everything else declines.
+// -----------------------------------------------------------------------------
+void test_vivarium_pipe2_domain(void);
+void test_vivarium_pipe2_domain(void) {
+    bool cx;
+
+    // flags 0 -- musl's pipe(), and on aarch64 the ONLY way a plain pipe() can
+    // be spelled, since the generic syscall table has no legacy `pipe`.
+    cx = true;
+    TEST_EXPECT_EQ((int)vivarium_pipe2_decide(0, &cx), (int)VIV_TRANSLATED,
+                   "flags 0 is served -- this IS pipe() on aarch64");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0, "and asks for no descriptor flag");
+
+    // O_CLOEXEC -- served rather than declined, and the distinction is real:
+    // musl's pipe2 would have recovered from a decline via its own ENOSYS
+    // fallback (pipe + fcntl, both served since #151), so this row is about
+    // being correct for callers that HAVE no such fallback, not about avoiding
+    // breakage. #151 is what makes it representable at all.
+    cx = false;
+    TEST_EXPECT_EQ((int)vivarium_pipe2_decide(VIV_O_CLOEXEC, &cx),
+                   (int)VIV_TRANSLATED, "O_CLOEXEC is served (#151 built the flag)");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)1, "and is carried to the shell");
+
+    // THE DECLINES, and each is a flag Linux's pipe2 genuinely accepts -- so
+    // this is the allow-list doing its job, not an unreachable branch. Neither
+    // has a devpipe counterpart: there is no packet framing and no non-blocking
+    // read, so admitting either would tell a guest something false about the
+    // pipe it just received. A declined call must also leave cloexec CLEAR, so
+    // a caller that ignores the verdict cannot act on a stale true.
+    static const u64 declined[] = {
+        VIV_O_NONBLOCK,                     // no non-blocking read exists
+        VIV_O_DIRECT,                       // no packet mode exists
+        VIV_O_NONBLOCK | VIV_O_CLOEXEC,     // one admitted bit does not carry the other
+        VIV_O_DIRECT   | VIV_O_CLOEXEC,
+        1u,                                 // a bit no pipe2 flag uses at all
+        0xFFFFFFFFu,
+    };
+    for (u32 i = 0; i < (u32)(sizeof(declined) / sizeof(declined[0])); i++) {
+        cx = true;
+        TEST_EXPECT_EQ((int)vivarium_pipe2_decide(declined[i], &cx),
+                       (int)VIV_FORWARD, "a flag outside the domain declines");
+        TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0,
+                       "and clears cloexec rather than leaving it stale");
+    }
+
+    // Only the low 32 bits are significant -- flags is an `int`, and a caller
+    // may leave the register sign- or zero-extended. A high half must not turn
+    // an admitted value into a declined one.
+    cx = false;
+    TEST_EXPECT_EQ((int)vivarium_pipe2_decide(0x1234567800080000ull, &cx),
+                   (int)VIV_TRANSLATED, "the high half of flags is not consulted");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)1, "and the low half still decides");
+
+    // Fail toward the decline on a bad call site.
+    TEST_EXPECT_EQ((int)vivarium_pipe2_decide(0, NULL), (int)VIV_FORWARD,
+                   "NULL cloexec_out -> FORWARD");
 }

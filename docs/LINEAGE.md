@@ -592,6 +592,55 @@ decision, reserved to the #142 rollout rather than changed as a side effect.
 and reads back both exit statuses. It fails at `L6C-E-pipeline`, on `pipe2`
 (nr=59, FORWARD — no translator at all), which is #155.
 
+#### As built at L-6c (#155) — the pipe2 row
+
+**Measured before written, and the measurement decided the domain.** Linux's
+`pipe2` takes `O_CLOEXEC`, `O_NONBLOCK` and `O_DIRECT`; the gate's own busybox
+issues exactly two values, and the binary says which — six call sites reach nr 59,
+four through musl's `pipe()` (`mov x1, #0`) and two through `pipe2()`
+(`mov w1, #0x80000`). So `{0, O_CLOEXEC}` is not a conservative subset of the
+domain, it IS the domain, and both members are reproducible exactly: 0 is
+`SYS_PIPE` unchanged, `O_CLOEXEC` is the descriptor flag #151 built.
+
+**On aarch64 there is no second way to ask.** The generic syscall table has no
+legacy `pipe` — confirmed in the arch header, which defines only `__NR_pipe2 59`
+while x86_64 carries both 22 and 293 — so musl's `pipe()` *is* this number with
+flags 0, and there was no second row to consider adding.
+
+**An allow-list, for V-2d's reason.** `mmap` recorded that aarch64 defines flags a
+deny-list admits by omission, and the same holds here: the test's `1u` case is a
+bit no pipe2 flag uses, and a deny-list serves it silently. `O_NONBLOCK` and
+`O_DIRECT` are declined because devpipe has no non-blocking read and no packet
+framing — not because they are unusual.
+
+**Declining `O_CLOEXEC` would also have worked, and the reasoning inverted once
+while checking.** musl's `pipe2` carries its own ENOSYS fallback (`pipe()` then
+`fcntl(F_SETFD)`), and since #151 made `fcntl` a served row that fallback now runs
+*correctly* rather than silently dropping the flag as it would have one chunk
+earlier. So declining is not unsafe — it is merely worse: three syscalls instead
+of one, leaning on a shim that belongs to one libc. A statically-linked Go binary
+calling `pipe2` directly has no such fallback.
+
+**Two revert probes, blind to each other in opposite directions.** Removing the
+shell's copy-out cleanup leaves the unit suite at a **full 1319/1319** and fails
+only in-guest, at `L192` — the leak leg, which loops 200 EFAULT calls (400
+descriptors against a 256-slot table) and then asks for one more pipe. Turning
+the allow-list into a deny-list fails `vivarium.pipe2_domain` at **1318/1319**, on
+the bare `1u` case, and the guest legs do not notice because `L190` tests
+`O_NONBLOCK`, which a deny-list still catches. The unit layer cannot see the
+shell; the guest layer cannot see this particular decision.
+
+**The gate moved again, and the log is unambiguous about how far.** `pipe-in` is
+now PRINTED — the pipeline's left side runs and its bytes reach the pipe — and
+what fails is the right side, with busybox naming the call itself:
+`dup2(4,1): Function not implemented`. On aarch64 `dup2` compiles to `dup3`, and
+`dup3` is a deliberate FORWARD: it FREES the fd it overwrites, so `vivarium.c`'s
+fd-freeing block requires the socktab close hook be extended in the same commit
+that serves it. That is **#157**, measured at the same time as this one rather
+than discovered after — the four call sites and their flags were read off the
+binary before the pipe2 row was written, precisely so fixing site N could not
+hide site N+1.
+
 **Two revert probes, and they are blind to each other in opposite directions.**
 Forcing the builder back to a lone NULL fails `exec.setup_env_frame` at its own
 assertion (1317/1318) — and kills the boot at the suite, so the in-guest leg

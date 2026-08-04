@@ -323,6 +323,20 @@ const F_DUPFD: u64 = 0;
 const F_GETFD: u64 = 1;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 
+// #155: pipe2. On aarch64 this is the ONLY pipe number -- the generic syscall
+// table has no legacy `pipe`, which is why musl's pipe() is this call with
+// flags 0.
+const NR_PIPE2: u64 = 59;
+const O_CLOEXEC: u64 = 0o2000000;
+const O_NONBLOCK: u64 = 0o4000;
+
+// A user VA inside the uaccess band (< 2^47) that no Proc maps: the stack tops
+// out at 2 GiB and the vDSO sits at 3 GiB, so 64 TiB is unmapped by a wide
+// margin. It has to be BOTH -- in-band so the range check passes, unmapped so
+// the store is what fails -- because the only path to pipe2's cleanup arm is a
+// copy-out that faults AFTER the descriptors exist.
+const UNMAPPED_USER_VA: u64 = 0x0000_4000_0000_0000;
+
 // The Linux aarch64 `struct stat` (128 bytes; kernel/include/thylacine/
 // vivarium.h `struct viv_linux_stat` is the kernel's copy of this layout).
 // Only the fields the legs read are named; the rest is padding by offset.
@@ -2162,6 +2176,77 @@ unsafe fn run_linux() -> ! {
         b"L183\n"
     );
     leg!(rep, (st & 0x7f) == 0 && ((st >> 8) & 0xff) == 0, b"L184\n");
+
+    // --- L187-L192 (#155): pipe2 --------------------------------------------
+    // The unit test proves the DECISION (which flags are in the domain). These
+    // legs prove the SHELL, which the unit test cannot reach: the int[2] lands
+    // in the guest's memory, the descriptors are real and connected, the flag is
+    // applied to both ends, and a failed copy-out gives the two fds BACK.
+    let mut fds: [i32; 2] = [-1, -1];
+    leg!(rep, svc3(NR_PIPE2, fds.as_mut_ptr() as u64, 0, 0) == 0, b"L187\n");
+
+    // Connected, not merely allocated. A pair of descriptors that read nothing
+    // would satisfy "returned 0 and wrote two numbers" perfectly.
+    let tx: [u8; 1] = [0x5a];
+    let mut rx: [u8; 1] = [0];
+    leg!(
+        rep,
+        fds[0] >= 0
+            && fds[1] >= 0
+            && fds[0] != fds[1]
+            && svc3(NR_WRITE, fds[1] as u64, tx.as_ptr() as u64, 1) == 1
+            && svc3(NR_READ, fds[0] as u64, rx.as_mut_ptr() as u64, 1) == 1
+            && rx[0] == 0x5a,
+        b"L188\n"
+    );
+    let _ = svc3(NR_CLOSE, fds[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, fds[1] as u64, 0, 0);
+
+    // O_CLOEXEC on BOTH ends -- pipe2's flag is not per-end, and applying it to
+    // only the read end would still pass any check that looked at one fd.
+    let mut cfds: [i32; 2] = [-1, -1];
+    leg!(
+        rep,
+        svc3(NR_PIPE2, cfds.as_mut_ptr() as u64, O_CLOEXEC, 0) == 0
+            && svc3(NR_FCNTL, cfds[0] as u64, F_GETFD, 0) == 1
+            && svc3(NR_FCNTL, cfds[1] as u64, F_GETFD, 0) == 1,
+        b"L189\n"
+    );
+    let _ = svc3(NR_CLOSE, cfds[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, cfds[1] as u64, 0, 0);
+
+    // The allow-list, from the guest side. O_NONBLOCK is a flag Linux's pipe2
+    // really does accept, so this leg is the difference between a domain that
+    // was chosen and one that admits whatever it was not told about.
+    leg!(
+        rep,
+        svc3(NR_PIPE2, fds.as_mut_ptr() as u64, O_NONBLOCK, 0) == NEG_ENOSYS,
+        b"L190\n"
+    );
+
+    // The copy-out failure path, which is the ONLY way to reach the cleanup.
+    // A NULL pointer would not do: it is refused by the range check BEFORE the
+    // pipe is made, so it would exercise the cheap rejection and report success
+    // for a shell that leaks. This VA is inside the uaccess band (< 2^47) and
+    // far above anything a Proc maps, so the range check passes and the STORE
+    // is what fails -- with two live descriptors already in hand.
+    leg!(
+        rep,
+        svc3(NR_PIPE2, UNMAPPED_USER_VA, 0, 0) == NEG_EFAULT,
+        b"L191\n"
+    );
+
+    // And the leak assertion the previous leg sets up. 200 failures burn 400
+    // descriptors if the cleanup does not run -- past PROC_HANDLE_MAX (256) --
+    // so a leaking shell cannot get through this and still make one more pipe.
+    let mut i = 0;
+    while i < 200 {
+        let _ = svc3(NR_PIPE2, UNMAPPED_USER_VA, 0, 0);
+        i += 1;
+    }
+    leg!(rep, svc3(NR_PIPE2, fds.as_mut_ptr() as u64, 0, 0) == 0, b"L192\n");
+    let _ = svc3(NR_CLOSE, fds[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, fds[1] as u64, 0, 0);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

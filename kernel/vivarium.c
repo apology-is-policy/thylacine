@@ -194,6 +194,13 @@ static const struct viv_reject g_viv_rejects[] = {
     { VIV_LINUX_DUP3,        VIV_FORWARD },
     { VIV_LINUX_CLOSE_RANGE, VIV_FORWARD },
 
+    // pipe2 is an fd-CREATING row, not an fd-freeing one, so it needs no hook
+    // extension: it puts TWO FRESH indices into the table and frees nothing. It
+    // sits in openat's class, which has been a plain T2 row since V-2b for
+    // exactly the same reason. (The soundness of every fd-creating row still
+    // rests on the block above -- a recycled index must arrive with no stale
+    // socktab entry attached, which holds while close is the only freeing row.)
+    { VIV_LINUX_PIPE2,      VIV_TIER2   },  // #155: vivarium_pipe2_decide
     { VIV_LINUX_OPENAT,     VIV_TIER2   },  // V-2b: vivarium_openat_decide/_build
     { VIV_LINUX_FSTAT,      VIV_TIER2   },  // V-2b: vivarium_stat_to_linux
     { VIV_LINUX_NEWFSTATAT, VIV_TIER2   },  // V-2c: vivarium_fstatat_decide
@@ -539,6 +546,26 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
 
 // #151. The header carries the served set and why. This body is a classifier;
 // the only judgement inside it is the SETFD mask, called out below.
+enum viv_verdict vivarium_pipe2_decide(u64 flags, bool *cloexec_out) {
+    if (!cloexec_out) return VIV_FORWARD;
+    *cloexec_out = false;
+
+    // Linux passes `flags` as an int, so only the low 32 bits are significant --
+    // the narrowing every sibling decide performs, for the same reason (a caller
+    // may leave the register sign- or zero-extended).
+    u32 fl = (u32)flags;
+
+    // THE ALLOW-LIST. Written as "nothing outside the admitted set" rather than
+    // as a list of rejects, so a flag nobody here has heard of cannot be served
+    // by having been forgotten. O_DIRECT and O_NONBLOCK are the two Linux pipe2
+    // flags this deliberately excludes, and each is excluded because devpipe has
+    // no counterpart to it -- not because they are unusual.
+    if ((fl & ~(u32)VIV_O_CLOEXEC) != 0) return VIV_FORWARD;
+
+    *cloexec_out = (fl & (u32)VIV_O_CLOEXEC) != 0;
+    return VIV_TRANSLATED;
+}
+
 enum viv_verdict vivarium_fcntl_decide(u64 cmd, u64 arg,
                                        enum viv_fcntl_op *op_out,
                                        bool *cloexec_out, u64 *min_fd_out) {

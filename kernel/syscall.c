@@ -9022,6 +9022,50 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         }
     }
 
+    case VIV_LINUX_PIPE2: {
+        // pipe2(fds, flags): x0 int[2], x1 flags. (#155 -- a shell cannot build
+        // a pipeline without it, and aarch64 has no legacy `pipe` to fall back
+        // on: musl's pipe() IS this number with flags 0.)
+        bool cloexec = false;
+        if (vivarium_pipe2_decide(args[1], &cloexec) != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;             // out of domain -> V-3 forwards
+
+        // DECIDE, then RANGE-CHECK, then create. Both refusals precede the
+        // allocation on purpose: a call that was never going to land its result
+        // should not cost a pipe ring and two descriptors first.
+        if (!sys_validate_user_buf(args[0], sizeof(s32) * 2))
+            return -(s64)T_E_FAULT;
+
+        hidx_t rd = -1, wr = -1;
+        if (sys_pipe_for_proc(p, &rd, &wr) < 0)      return -(s64)T_E_MFILE;
+
+        // THE COPY-OUT IS STILL FALLIBLE despite the range check above, which
+        // only proves the VA band -- the page can be absent, read-only, or
+        // unmapped by a peer thread between the two. Linux has the identical
+        // window (do_pipe2 creates, copies, and closes both on failure), and the
+        // cleanup is what makes an EFAULT cost the guest nothing: a returned
+        // error with two live descriptors it was never told the numbers of would
+        // be an unreachable leak for the life of the Proc.
+        s32 pair[2] = { (s32)rd, (s32)wr };
+        if (uaccess_copy_out(args[0], pair, sizeof(pair)) != 0) {
+            handle_close(p, rd);
+            handle_close(p, wr);
+            return -(s64)T_E_FAULT;
+        }
+
+        // #151, exactly as openat's row does it: close-on-exec is a property of
+        // the DESCRIPTOR, so it is applied after creation rather than carried in
+        // any flag the pipe itself understands. Both ends, because pipe2's flag
+        // is not per-end. The sets cannot fail here (the fds were just made by
+        // this thread and no peer can name them yet), and if one somehow did the
+        // honest answer is still success -- the pipe IS open.
+        if (cloexec) {
+            (void)handle_set_cloexec(p, rd, true);
+            (void)handle_set_cloexec(p, wr, true);
+        }
+        return 0;
+    }
+
     case VIV_LINUX_FSTAT: {
         // fstat(fd, statbuf): x0 fd, x1 statbuf.
         struct t_stat ks;
