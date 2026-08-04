@@ -271,60 +271,115 @@ struct AddrSpace *addrspace_clone(struct AddrSpace *src, bool exempt) {
 // The I-32 counter mechanics (see the header for the policy/mechanics split).
 // =============================================================================
 //
-// Every one of these runs under as->lock, which is what makes the caps EXACT:
-// the load, the cap decision and the store cannot interleave with a sibling
-// charge on the same address space. The uncharges clamp at 0 rather than
-// wrapping -- every uncharge pairs with a charge, so a wrap would mean the
-// pairing is already broken and silently producing a 4-billion-page counter
-// would hide it.
+// All six are CAS loops, so they are correct with NO lock held.
+//
+// They used to be plain load-decide-store pairs, carrying a comment that said
+// "every one of these runs under as->lock, which is what makes the caps EXACT".
+// That was true of every uncharge site this file inherited, and false of the
+// one that arrived when the uncharge moved to where the pages actually FREE: a
+// Loom's ring pages are released by loom_free, reached from
+// handle_close/handle_table_free, which hold no such lock -- so a sibling
+// thread's SYS_BURROW_ATTACH can interleave between the load and the store and
+// lose one of the two updates. A multi-threaded Proc closing a Loom while
+// another thread attaches is the ordinary Go shape, not a corner.
+//
+// L-1 made it worse rather than better: the counters now live on the SHARED
+// AddrSpace, so under RFMEM the interleaving is between PROCS, not merely
+// between threads of one.
+//
+// A lost update does not announce itself in either direction. A lost charge
+// deflates the counter and the address space escapes its cap; a lost uncharge
+// inflates it and the address space can never allocate again, permanently,
+// with no error anywhere that names the cause.
+//
+// What the CAS does NOT buy, deliberately: the cap decision may still
+// overshoot. Two concurrent charges from outside any lock can both pass the
+// check and both land, bounded by the smaller charge. That is the documented
+// I-32 tolerance -- a floor, not an exact accountant -- and reaching for a lock
+// to make it exact is what produced the stale comment above. No update is ever
+// LOST, which is the property an accounting bound cannot do without;
+// exactness is not.
+//
+// Two properties every loop below must keep:
+//   - RE-DECIDE, don't re-store. A failed CAS writes the observed value back
+//     into `cur`, and the next iteration must re-run the cap decision against
+//     it. A loop that retries only the store lets a raced charge land over cap.
+//   - The uncharge clamp is recomputed INSIDE the loop. Hoisting it would let
+//     the CAS eventually succeed writing a value derived from a stale read --
+//     the same lost update wearing a CAS.
+//
+// The uncharges clamp at 0 rather than wrapping -- every uncharge pairs with a
+// charge, so a wrap would mean the pairing is already broken, and silently
+// producing a 4-billion-page counter would hide it.
 
 bool addrspace_charge_pages(struct AddrSpace *as, u32 npages, bool exempt) {
     if (!as) return false;
     u32 cur = __atomic_load_n(&as->page_count, __ATOMIC_RELAXED);
-    if (npages > 0xFFFFFFFFu - cur) return false;    // counter overflow (refuse)
-    if (!exempt && cur + npages > PROC_PAGE_MAX)
-        return false;                                 // over cap -> caller -ENOMEM
-    __atomic_store_n(&as->page_count, cur + npages, __ATOMIC_RELEASE);
-    return true;
+    for (;;) {
+        if (npages > 0xFFFFFFFFu - cur) return false; // counter overflow (refuse)
+        if (!exempt && cur + npages > PROC_PAGE_MAX)
+            return false;                             // over cap -> caller -ENOMEM
+        if (__atomic_compare_exchange_n(&as->page_count, &cur, cur + npages,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return true;
+    }
 }
 
 void addrspace_uncharge_pages(struct AddrSpace *as, u32 npages) {
     if (!as) return;
     u32 cur = __atomic_load_n(&as->page_count, __ATOMIC_RELAXED);
-    u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&as->page_count, nv, __ATOMIC_RELEASE);
+    for (;;) {
+        u32 nv = (cur >= npages) ? cur - npages : 0;
+        if (__atomic_compare_exchange_n(&as->page_count, &cur, nv,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return;
+    }
 }
 
 bool addrspace_charge_vma(struct AddrSpace *as, bool exempt) {
     if (!as) return false;
     u32 cur = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
-    if (cur == 0xFFFFFFFFu) return false;             // counter saturation (refuse)
-    if (!exempt && cur >= PROC_VMA_MAX)
-        return false;                                 // over cap -> vma_insert rejects
-    __atomic_store_n(&as->vma_count, cur + 1, __ATOMIC_RELEASE);
-    return true;
+    for (;;) {
+        if (cur == 0xFFFFFFFFu) return false;         // counter saturation (refuse)
+        if (!exempt && cur >= PROC_VMA_MAX)
+            return false;                             // over cap -> vma_insert rejects
+        if (__atomic_compare_exchange_n(&as->vma_count, &cur, cur + 1,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return true;
+    }
 }
 
 void addrspace_uncharge_vma(struct AddrSpace *as) {
     if (!as) return;
     u32 cur = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
-    u32 nv  = (cur > 0) ? cur - 1 : 0;
-    __atomic_store_n(&as->vma_count, nv, __ATOMIC_RELEASE);
+    for (;;) {
+        u32 nv = (cur > 0) ? cur - 1 : 0;
+        if (__atomic_compare_exchange_n(&as->vma_count, &cur, nv,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return;
+    }
 }
 
 bool addrspace_charge_shared_map(struct AddrSpace *as, u32 npages, bool exempt) {
     if (!as) return false;
     u32 cur = __atomic_load_n(&as->shared_map_pages, __ATOMIC_RELAXED);
-    if (npages > 0xFFFFFFFFu - cur) return false;    // counter overflow (refuse)
-    if (!exempt && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
-        return false;                                 // over cap -> the share fails clean
-    __atomic_store_n(&as->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
-    return true;
+    for (;;) {
+        if (npages > 0xFFFFFFFFu - cur) return false; // counter overflow (refuse)
+        if (!exempt && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
+            return false;                             // over cap -> the share fails clean
+        if (__atomic_compare_exchange_n(&as->shared_map_pages, &cur, cur + npages,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return true;
+    }
 }
 
 void addrspace_uncharge_shared_map(struct AddrSpace *as, u32 npages) {
     if (!as) return;
     u32 cur = __atomic_load_n(&as->shared_map_pages, __ATOMIC_RELAXED);
-    u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&as->shared_map_pages, nv, __ATOMIC_RELEASE);
+    for (;;) {
+        u32 nv = (cur >= npages) ? cur - npages : 0;
+        if (__atomic_compare_exchange_n(&as->shared_map_pages, &cur, nv,
+                                        true, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+            return;
+    }
 }
