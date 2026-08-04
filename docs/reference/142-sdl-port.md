@@ -188,10 +188,57 @@ pixel-count asserts all four quadrant colors on the scanout.
   faults its own mapping (the standard SDL re-query contract). A compositor
   "floating / fixed-size" surface mode (letterboxed games) is a Halcyon-era
   seam.
-- **Software renderer only**: GL is v1.1+ (a Mesa port), never on Halcyon's
-  path (ARCH §17 two-tier rule). SDL's `SW_RenderPresent` wraps the window
-  framebuffer, so `SDL_Renderer` programs (like TyrQuake) route through the
-  framebuffer path.
+- **`SDL_Renderer` is software-only, deliberately, and stays that way**:
+  SDL's `SW_RenderPresent` wraps the window framebuffer, so `SDL_Renderer`
+  programs (like software TyrQuake) route through the framebuffer path.
+  Enabling `SDL_VIDEO_OPENGL` (below) does **not** change this — that is a
+  different consumer (`src/render/opengl/`, gated by `SDL_VIDEO_RENDER_OGL`,
+  which stays undefined and whose sources stay pruned). Halcyon never needs
+  GL (ARCH §17 two-tier rule); a GL program drives GL directly instead.
+
+## OpenGL: the API surface is on, the context path is not yet (#109)
+
+`SDL_VIDEO_OPENGL` is **defined** as of #109, so `libSDL2.a` carries the
+full `SDL_GL_*` layer (all 20 entry points) and the public
+`SDL_opengl.h` / `SDL_opengl_glext.h` headers ship in the sysroot. That
+is the *API* half of LLVM-DESIGN §9 step 2.
+
+What that switch does and does not buy:
+
+- **Buys**: a stock SDL-GL program compiles and links against this SDL —
+  `SDL_GL_SetAttribute`, `SDL_GL_CreateContext`, `SDL_GL_MakeCurrent`,
+  `SDL_GL_GetProcAddress`, `SDL_GL_SwapWindow` all resolve. TyrQuake's
+  `vid_sgl.c` (the GL video driver, present and unpruned in the vendored
+  tyrquake tree) uses exactly that set.
+- **Does not buy**: an actual context. The `SDL_thylacine` driver
+  implements no `GL_*` hooks yet, so `SDL_GL_LoadLibrary` returns
+  `SDL_DllNotSupported("OpenGL")` — a clean, documented error, not a
+  crash. `SDL_CreateWindow` without `SDL_WINDOW_OPENGL` is untouched, and
+  nothing auto-requests GL here (`SDL_DefaultGraphicsBackends`' GL branch
+  needs `__MACOSX__` / `__IPHONEOS__` / `__ANDROID__` / `__NACL__`).
+
+`libSDL2.a` gains **no undefined `gl*` symbols** from the switch: every
+GL call inside `SDL_video.c` goes through a pointer fetched by
+`SDL_GL_GetProcAddress`, never a direct `gl*` reference. So enabling GL
+does not make SDL itself depend on a GL library — the dependency arrives
+only when a driver supplies the hooks.
+
+The remaining half is the driver's `GL_CreateContext` / `MakeCurrent` /
+`SwapWindow` / `GetProcAddress` over the gallium OSMesa frontend, which
+needs `libOSMesa.a` + `GL/` headers installed into the pouch sysroot —
+a Mesa-port deliverable (§9 step 1), not an SDL one. The intended shape,
+for whoever picks it up: the weave slot is `w*h` little-endian
+`0xAARRGGBB` words, i.e. byte order B,G,R,A, which is exactly OSMesa's
+`OSMESA_BGRA` — so `OSMesaMakeCurrent(ctx, thyla_tap_pixels(tap),
+GL_UNSIGNED_BYTE, w, h)` can render *directly into the weave* with no
+blit at all, `OSMesaPixelStore(OSMESA_Y_UP, 0)` to match the weave's
+top-down raster, and `SwapWindow` = `glFinish()` + the existing
+`thyla_tap_present`. `GL_LoadLibrary` is a no-op returning 0 (static
+link — there is no `dlopen` here, which is the #115 lesson), and
+`GL_GetProcAddress` is `OSMesaGetProcAddress`. A `TEV_CONFIGURE` reweave
+moves `map_va`, so the context must be re-`MakeCurrent`'d onto the new
+slot after every reweave — that is the one lifetime rule this design
+adds, and it has not been exercised.
 - **The present is synchronous** (stage-0 tapestryd): each present blocks on
   the compositor. The pipelined-controlq drain (with a real quiesce before
   retire) is the recorded obligation; timedemo throughput (~600 fps at

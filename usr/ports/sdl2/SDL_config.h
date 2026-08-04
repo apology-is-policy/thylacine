@@ -159,4 +159,28 @@
 #define SDL_VIDEO_DRIVER_THYLACINE 1
 #define SDL_VIDEO_DRIVER_DUMMY 1
 
+/* OpenGL: the desktop-GL entry points (SDL_GL_CreateContext / MakeCurrent /
+ * SwapWindow / GetProcAddress), served by Mesa's llvmpipe through the
+ * gallium OSMesa frontend -- LLVM-DESIGN.md section 9 step 2 (CL-7).
+ *
+ * This is the *API* switch only: it compiles SDL_video.c's SDL_GL_* layer,
+ * which reaches GL exclusively through SDL_GL_GetProcAddress function
+ * pointers, so libSDL2.a carries no undefined gl* symbols. Which context
+ * a window actually gets is entirely the video driver's business -- a
+ * driver with no GL hooks fails SDL_GL_LoadLibrary cleanly.
+ *
+ * Deliberately NOT defined:
+ *   SDL_VIDEO_OPENGL_EGL  -- OSMesa binds a context to a client memory
+ *     buffer; there is no EGLDisplay in the picture (and the DRI loader
+ *     EGL would need dlopens its driver, which a static-only target
+ *     cannot host -- LLVM-DESIGN section 16.19).
+ *   SDL_VIDEO_OPENGL_ES / _ES2 -- desktop GL is the CL-7 target.
+ *   SDL_VIDEO_RENDER_OGL -- that is SDL_Renderer's GL backend, a
+ *     different consumer. The GL programs here (tyr-glquake) issue raw
+ *     GL against a context, never SDL_RenderCopy; the software renderer
+ *     remains the SDL_Renderer backend. Enabling it would pull in
+ *     src/render/opengl/, which is why that dir stays pruned.
+ */
+#define SDL_VIDEO_OPENGL 1
+
 #endif /* SDL_config_h_ */
