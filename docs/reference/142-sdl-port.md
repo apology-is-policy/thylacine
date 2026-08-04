@@ -196,49 +196,101 @@ pixel-count asserts all four quadrant colors on the scanout.
   which stays undefined and whose sources stay pruned). Halcyon never needs
   GL (ARCH §17 two-tier rule); a GL program drives GL directly instead.
 
-## OpenGL: the API surface is on, the context path is not yet (#109)
+## OpenGL: the API surface (#109) and the context path (#138)
 
 `SDL_VIDEO_OPENGL` is **defined** as of #109, so `libSDL2.a` carries the
 full `SDL_GL_*` layer (all 20 entry points) and the public
 `SDL_opengl.h` / `SDL_opengl_glext.h` headers ship in the sysroot. That
-is the *API* half of LLVM-DESIGN §9 step 2.
+is the *API* half of LLVM-DESIGN §9 step 2. #138 supplies the driver
+half: `usr/ports/sdl2/thylacine/SDL_thylacineopengl.c` implements the
+nine `GL_*` hooks over Mesa's gallium OSMesa frontend on llvmpipe, so
+`SDL_GL_CreateContext` returns a real context that JIT-compiles its
+rasteriser through the I-42 dual-mapped code Burrow (CL-7b).
 
-What that switch does and does not buy:
+**The path is zero-copy, and that is not incidental.** A weave slot is
+`w*h` little-endian `0xAARRGGBB` words — byte order B,G,R,A in ascending
+address order, which is exactly what OSMesa calls `OSMESA_BGRA`. So
+`OSMesaMakeCurrent(ctx, thyla_tap_pixels(tap), GL_UNSIGNED_BYTE, w, h)`
+points llvmpipe straight at the pixels the compositor will read: §9's
+"rendered into (or blitted into) the weave" resolves to **into**, with no
+conversion pass. `OSMesaPixelStore(OSMESA_Y_UP, 0)` matches the weave's
+top-down raster (OSMesa defaults to GL's bottom-up, which would present
+every frame mirrored). `SwapWindow` is `glFinish()` then the existing
+`thyla_tap_present` — the `glFinish` is load-bearing, not hygiene:
+llvmpipe rasterises on a thread pool, so without it the compositor reads
+partially-drawn tiles.
 
-- **Buys**: a stock SDL-GL program compiles and links against this SDL —
-  `SDL_GL_SetAttribute`, `SDL_GL_CreateContext`, `SDL_GL_MakeCurrent`,
-  `SDL_GL_GetProcAddress`, `SDL_GL_SwapWindow` all resolve. TyrQuake's
-  `vid_sgl.c` (the GL video driver, present and unpruned in the vendored
-  tyrquake tree) uses exactly that set.
-- **Does not buy**: an actual context. The `SDL_thylacine` driver
-  implements no `GL_*` hooks yet, so `SDL_GL_LoadLibrary` returns
-  `SDL_DllNotSupported("OpenGL")` — a clean, documented error, not a
-  crash. `SDL_CreateWindow` without `SDL_WINDOW_OPENGL` is untouched, and
-  nothing auto-requests GL here (`SDL_DefaultGraphicsBackends`' GL branch
-  needs `__MACOSX__` / `__IPHONEOS__` / `__ANDROID__` / `__NACL__`).
+`GL_LoadLibrary` takes only `NULL` (there is no dynamic loader — the #115
+lesson) and `GL_GetProcAddress` is `OSMesaGetProcAddress`. A
+`TEV_CONFIGURE` reweave moves `map_va`, so the context is re-bound
+whenever the swap path sees the mapping change — keyed on the recorded
+binding rather than on the resize event, so it is correct regardless of
+which layer noticed the resize first.
 
-`libSDL2.a` gains **no undefined `gl*` symbols** from the switch: every
-GL call inside `SDL_video.c` goes through a pointer fetched by
-`SDL_GL_GetProcAddress`, never a direct `gl*` reference. So enabling GL
-does not make SDL itself depend on a GL library — the dependency arrives
-only when a driver supplies the hooks.
+### Why the OSMesa symbols are weak, and what that cost
 
-The remaining half is the driver's `GL_CreateContext` / `MakeCurrent` /
-`SwapWindow` / `GetProcAddress` over the gallium OSMesa frontend, which
-needs `libOSMesa.a` + `GL/` headers installed into the pouch sysroot —
-a Mesa-port deliverable (§9 step 1), not an SDL one. The intended shape,
-for whoever picks it up: the weave slot is `w*h` little-endian
-`0xAARRGGBB` words, i.e. byte order B,G,R,A, which is exactly OSMesa's
-`OSMESA_BGRA` — so `OSMesaMakeCurrent(ctx, thyla_tap_pixels(tap),
-GL_UNSIGNED_BYTE, w, h)` can render *directly into the weave* with no
-blit at all, `OSMesaPixelStore(OSMESA_Y_UP, 0)` to match the weave's
-top-down raster, and `SwapWindow` = `glFinish()` + the existing
-`thyla_tap_present`. `GL_LoadLibrary` is a no-op returning 0 (static
-link — there is no `dlopen` here, which is the #115 lesson), and
-`GL_GetProcAddress` is `OSMesaGetProcAddress`. A `TEV_CONFIGURE` reweave
-moves `map_va`, so the context must be re-`MakeCurrent`'d onto the new
-slot after every reweave — that is the one lifetime rule this design
-adds, and it has not been exercised.
+`libOSMesa.a` plus its 73 LLVM archives are ~365 MB of link input. A hard
+reference from `SDL_thylacineopengl.o` would force **every** SDL program
+to carry the whole rasteriser — `pouch-hello-sdl` would go from ~1 MB to
+~70 MB, and a program with no interest in GL could not link at all. So
+the OSMesa entry points are declared `__attribute__((weak))`: a program
+that links `libOSMesa.a` gets a real context, one that does not gets a
+clean `SDL_SetError` from `GL_LoadLibrary`. Both directions are checked
+by two real links in `build_sdl2` (`sdl-probe` and the #109 API probe
+link without it; `gl-sdl-prove` links with it) rather than by argument.
+
+**The trap that arrangement sets, which it duly sprang:** a weak
+*undefined* reference does not cause the linker to extract an archive
+member. That is standard ELF, not an lld quirk. So the first GL link
+scanned `libOSMesa.a`, pulled nothing, resolved all five OSMesa
+references to 0, and **reported success** — a 138 MB binary whose GL path
+was inert. `-Wl,-u,OSMesaCreateContextExt` adds a strong undefined symbol
+that forces the extraction (one suffices; the member defining it defines
+the rest). Since the whole design is arranged so that a broken GL link
+still succeeds, "the link returned 0" carries no information, so
+`build_sdl2` reads the symbol set back out of the artifact and fails the
+build if any of the six stayed undefined. That check is revert-probed:
+dropping `-u` alone reddens it, naming exactly the five.
+
+`libSDL2.a` itself gains **no undefined `gl*` symbols** from the
+`SDL_VIDEO_OPENGL` switch: every GL call inside `SDL_video.c` goes
+through a pointer fetched by `SDL_GL_GetProcAddress`, never a direct
+`gl*` reference. The GL dependency arrives only with the driver hooks,
+and only weakly.
+
+### Swap interval
+
+`SDL_GL_SetSwapInterval` accepts 0 (present as fast as drawn) and 1 (wait
+for the compositor's frame tick) and refuses anything else honestly
+rather than silently rounding. There is no back buffer to flip and no
+tearing to guard against — a present is a blocking write the compositor
+completes inside one dispatch — so a negative (adaptive) interval has
+nothing to adapt and >1 would mean dropping frames on purpose. The
+default is **1**, which differs from SDL's own default of 0 deliberately:
+on a host GL driver an unthrottled swap costs the app nothing, here it
+overwrites un-composed pixels and spins a vCPU (the #51 measurement).
+Interval 1 routes through the same `THYLACINE_PaceFrame` the framebuffer
+present uses — one pacing policy, not two.
+
+### The prover
+
+`usr/gl-sdl-prove/gl-sdl-prove.c` is the GL twin of `sdl-probe`: it draws
+sdl-probe's exact quadrant pattern (TL red / TR green / BL blue / BR
+white) with the rasteriser instead of `memset`, plus a magenta triangle
+through the full fragment pipeline, swaps 8 frames, then `glReadPixels`
+all five regions back and checks them. Reusing sdl-probe's pattern is
+deliberate — the screendump family already knows how to check it, so the
+rendering path is the only variable between the two provers.
+
+Its **exit code is the verdict**: every station returns a distinct
+non-zero, so a gate can treat `rc == 0` as a strong assertion and parse
+nothing (the CL-7b lesson — a prover that only *printed* its failures let
+a boot with no `CAP_JIT` run on and report a generic NULL-context error
+indistinguishable from three other faults). It asserts `GL_RENDERER`
+contains `llvmpipe`, which is not cosmetic: a context on some stub would
+satisfy every other check while proving nothing about CL-7. Driven by
+`tools/interactive/ls-gfx-gl.exp`; staged to `/clade/bin/` rather than
+the ramfs because it is a 143 MB static binary.
 - **The present is synchronous** (stage-0 tapestryd): each present blocks on
   the compositor. The pipelined-controlq drain (with a real quiesce before
   retire) is the recorded obligation; timedemo throughput (~600 fps at

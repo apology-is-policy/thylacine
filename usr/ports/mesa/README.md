@@ -158,6 +158,55 @@ set wrong* (CL-7 entry / CL-7a-1):
   never notices because distros link a *shared* libLLVM, where every symbol is
   present regardless of the component list.
 
+## Fetching the GL link artifacts (#138)
+
+`osmesa-prove` is a finished executable, so shipping it needs nothing but the
+binary. Linking *another* GL program — `gl-sdl-prove`, and later GLQuake —
+needs the link inputs on the dev host. They are not built here; they come off
+the builder once and stay in `build/`:
+
+| what | from (builder) | to (dev host) | size |
+|---|---|---|---|
+| `libOSMesa.a` + `libz.a` | `/build/mesa-xOS5/…` | `build/clade/gl/lib/` | 205 MB |
+| 73 `libLLVM*.a` | `/build/src/thylacine/build/clade/llvm-build/lib` | `build/clade/llvm-build/lib/` | 160 MB |
+| `GL/` + `KHR/` headers | `/build/src/mesa/include` | `build/sysroot/include/` | 1.4 MB |
+| the archive list | derived (below) | `build/clade/gl/llvm-libs.list` | — |
+
+**Derive the archive list, never type it.** It is exactly what meson computed
+for `osmesa-prove`'s own link, so a list written by hand can only drift from
+the one that is known to close:
+
+```bash
+cd /build/mesa-xOS5
+ninja -t commands src/gallium/targets/osmesa/osmesa-prove > /tmp/cmds.txt
+tail -1 /tmp/cmds.txt > /tmp/link.txt          # the link line
+tr ' ' '\n' < /tmp/link.txt | grep '^-lLLVM' | sort -u > /tmp/llvmlibs.txt
+```
+
+Three things about that set are not guessable and cost a round each:
+
+- **Five of the seven Mesa archives are meson THIN archives** (`!<thin>` —
+  a few KB of pathnames into the builder's object tree). They are meaningless
+  on another machine, and ld.lld says so obliquely: "could not get the buffer
+  for a child of the archive". They are also *redundant* — `libOSMesa.a` is a
+  fat 214 MB archive of 899 members that `link_whole` already merged them
+  into. Fetch `libOSMesa.a` and `libz.a` (a subproject, hence fat) and drop
+  the rest. Verify rather than assume: `llvm-ar t libOSMesa.a | grep lp_bld`.
+- **The GL headers have a dependency closure**, and it is not the directory
+  you copied. `GL/gl.h` includes `GL/glext.h` includes `<KHR/khrplatform.h>`,
+  which lives in `include/KHR/`, not `include/GL/`. Compute it on the builder
+  (`grep -rh '^#include <' GL/ KHR/`) rather than discovering it one failed
+  compile at a time — and take it from *this* tree rather than the Khronos
+  registry, because the types it defines (`khronos_intptr_t` and friends) are
+  what `GLsizeiptr`/`GLint64` are built from, i.e. ABI.
+- **The LLVM archives must NOT go in `build/sysroot/lib/`.** That directory is
+  staged to `/clade/sysroot` and baked into the pool, so 160 MB of link-only
+  archives would ride along into every image. `build/clade/llvm-build/lib` is
+  the right home: `stage_clade` copies `bin/` and `lib/clang/*/include` from
+  that tree and nothing else. The headers are small enough that the sysroot is
+  the right place for them, and putting them there also lets the on-device
+  clang++ compile GL sources.
+
 ## The patches
 
 - `0001` — CL-7: graft the 25.0.7 gallium OSMesa frontend onto 26.1.6. Upstream

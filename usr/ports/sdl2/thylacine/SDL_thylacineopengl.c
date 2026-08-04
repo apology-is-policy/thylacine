@@ -1,0 +1,273 @@
+/* SDL_thylacine — the OpenGL context path (CL-7 step 2 / #138).
+ * Design notes in SDL_thylacineopengl.h.
+ */
+#include "../../SDL_internal.h"
+
+#ifdef SDL_VIDEO_DRIVER_THYLACINE
+
+#include "SDL_video.h"
+#include "../SDL_sysvideo.h"
+
+#include "SDL_thylacinevideo.h"
+#include "SDL_thylacineopengl.h"
+
+/* GL/osmesa.h pulls in GL/gl.h, which shares the __gl_h_ include guard with
+ * SDL_opengl.h — the two are mutually exclusive by construction. This TU
+ * takes the Mesa side and never includes SDL_opengl.h; the SDL core and the
+ * application take the SDL side. That is the same arrangement TyrQuake's
+ * vid_sgl.c uses, and it is why nothing here can also speak SDL's GL enums. */
+#include <GL/osmesa.h>
+
+/* The rasteriser is optional at link time (see the header). A weak undefined
+ * reference resolves to 0 when libOSMesa.a is absent, which is what lets one
+ * libSDL2.a serve both GL and non-GL programs.
+ *
+ * Redeclaring after the header is what applies the attribute — osmesa.h
+ * declares these normally, and a weak redeclaration of an already-declared
+ * function is honoured by clang. */
+extern __attribute__((weak)) OSMesaContext
+OSMesaCreateContextExt(GLenum format, GLint depthBits, GLint stencilBits,
+                       GLint accumBits, OSMesaContext sharelist);
+extern __attribute__((weak)) void OSMesaDestroyContext(OSMesaContext ctx);
+extern __attribute__((weak)) GLboolean
+OSMesaMakeCurrent(OSMesaContext ctx, void *buffer, GLenum type,
+                  GLsizei width, GLsizei height);
+extern __attribute__((weak)) void OSMesaPixelStore(GLint pname, GLint value);
+extern __attribute__((weak)) OSMESAproc OSMesaGetProcAddress(const char *fn);
+extern __attribute__((weak)) void glFinish(void);
+
+typedef struct THYLACINE_GLContext
+{
+    OSMesaContext osmesa;
+    /* What OSMesaMakeCurrent was last handed. A TEV_CONFIGURE reweave swaps
+     * the weave generation and MOVES map_va (TAPESTRY.md §18.3), so a context
+     * bound to the old mapping would render into freed pages. Recording the
+     * binding here — rather than reacting to the resize event — means the
+     * re-bind is driven by the state that actually changed, so it is correct
+     * no matter which layer noticed the resize first. */
+    uint64_t bound_va;
+    uint32_t bound_w, bound_h;
+    SDL_Window *window;
+} THYLACINE_GLContext;
+
+SDL_bool THYLACINE_GL_Available(void)
+{
+    /* Every entry point this backend calls, checked as one: a partial link is
+     * not a configuration anyone should get a half-working context out of. */
+    return (OSMesaCreateContextExt && OSMesaDestroyContext &&
+            OSMesaMakeCurrent && OSMesaPixelStore && OSMesaGetProcAddress &&
+            glFinish)
+               ? SDL_TRUE
+               : SDL_FALSE;
+}
+
+int THYLACINE_GL_LoadLibrary(_THIS, const char *path)
+{
+    (void)_this;
+    /* There is no dynamic loader on Thylacine, so a named library can only
+     * ever be a caller mistake — refuse it rather than silently ignoring it
+     * and handing back a context from some other implementation. */
+    if (path) {
+        return SDL_SetError("thylacine: no dynamic GL loading (OSMesa is "
+                            "statically linked); pass NULL");
+    }
+    if (!THYLACINE_GL_Available()) {
+        return SDL_SetError("thylacine: no OSMesa in this program -- link "
+                            "libOSMesa.a (see usr/ports/mesa/README.md)");
+    }
+    return 0;
+}
+
+void *THYLACINE_GL_GetProcAddress(_THIS, const char *proc)
+{
+    (void)_this;
+    if (!OSMesaGetProcAddress) {
+        SDL_SetError("thylacine: no OSMesa in this program");
+        return NULL;
+    }
+    return (void *)OSMesaGetProcAddress(proc);
+}
+
+void THYLACINE_GL_UnloadLibrary(_THIS)
+{
+    /* Statically linked: nothing to unload. */
+    (void)_this;
+}
+
+/* Bind ctx to the window's CURRENT weave slot. Split out because both
+ * MakeCurrent and the swap path's reweave recovery need exactly this. */
+static int gl_bind(THYLACINE_GLContext *ctx, SDL_WindowData *wd)
+{
+    if (!OSMesaMakeCurrent(ctx->osmesa, thyla_tap_pixels(&wd->tap),
+                           GL_UNSIGNED_BYTE, (GLsizei)wd->tap.w,
+                           (GLsizei)wd->tap.h)) {
+        return SDL_SetError("thylacine: OSMesaMakeCurrent failed");
+    }
+    /* Top-down raster. OSMesa defaults to Y_UP=1 (GL's bottom-left origin);
+     * the weave — like every framebuffer — is top-down, so without this every
+     * frame is presented vertically mirrored. It is context state, so it must
+     * be set AFTER the context is current, and again after any re-bind. */
+    OSMesaPixelStore(OSMESA_Y_UP, 0);
+
+    ctx->bound_va = wd->tap.map_va;
+    ctx->bound_w = wd->tap.w;
+    ctx->bound_h = wd->tap.h;
+    return 0;
+}
+
+SDL_GLContext THYLACINE_GL_CreateContext(_THIS, SDL_Window *window)
+{
+    SDL_WindowData *wd = (SDL_WindowData *)window->driverdata;
+    THYLACINE_GLContext *ctx;
+
+    if (!THYLACINE_GL_Available()) {
+        SDL_SetError("thylacine: no OSMesa in this program");
+        return NULL;
+    }
+    if (!wd) {
+        SDL_SetError("thylacine: no surface for window");
+        return NULL;
+    }
+
+    ctx = (THYLACINE_GLContext *)SDL_calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        SDL_OutOfMemory();
+        return NULL;
+    }
+
+    /* OSMESA_BGRA is the whole reason this backend is zero-copy. A weave slot
+     * is w*h little-endian 0xAARRGGBB words, i.e. the bytes B,G,R,A in
+     * ascending address order — which is precisely what OSMesa calls BGRA. So
+     * llvmpipe rasterises straight into the pixels the compositor will read;
+     * §9's "rendered into (or blitted into) the weave" resolves to "into".
+     * Changing this constant reintroduces a full-frame conversion. */
+    ctx->osmesa = OSMesaCreateContextExt(OSMESA_BGRA,
+                                         (GLint)_this->gl_config.depth_size,
+                                         (GLint)_this->gl_config.stencil_size,
+                                         (GLint)_this->gl_config.accum_red_size,
+                                         NULL);
+    if (!ctx->osmesa) {
+        SDL_free(ctx);
+        SDL_SetError("thylacine: OSMesaCreateContextExt failed");
+        return NULL;
+    }
+    ctx->window = window;
+
+    /* SDL_GL_CreateContext documents that "creating a context is assumed to
+     * make it current in the SDL driver" and updates its own current-context
+     * bookkeeping on that basis without calling MakeCurrent — so binding here
+     * is required, not a convenience. */
+    if (gl_bind(ctx, wd) != 0) {
+        OSMesaDestroyContext(ctx->osmesa);
+        SDL_free(ctx);
+        return NULL;
+    }
+    return (SDL_GLContext)ctx;
+}
+
+int THYLACINE_GL_MakeCurrent(_THIS, SDL_Window *window, SDL_GLContext context)
+{
+    THYLACINE_GLContext *ctx = (THYLACINE_GLContext *)context;
+    SDL_WindowData *wd;
+
+    (void)_this;
+    if (!ctx) {
+        /* SDL uses (NULL, NULL) to mean "unbind". OSMesa has no unbind call;
+         * leaving the context bound is harmless because the next bind
+         * replaces it, and nothing reads GL state without a current context. */
+        return 0;
+    }
+    if (!window) {
+        return SDL_SetError("thylacine: MakeCurrent needs a window");
+    }
+    wd = (SDL_WindowData *)window->driverdata;
+    if (!wd) {
+        return SDL_SetError("thylacine: no surface for window");
+    }
+    ctx->window = window;
+    return gl_bind(ctx, wd);
+}
+
+int THYLACINE_GL_SetSwapInterval(_THIS, int interval)
+{
+    SDL_VideoData *vd = (SDL_VideoData *)_this->driverdata;
+
+    /* No tearing to guard against and no back buffer to flip: a present is a
+     * blocking write the compositor completes inside one dispatch. So a
+     * negative (adaptive) interval has nothing to adapt, and any interval > 1
+     * would mean dropping frames on purpose. Accept 0 (unthrottled) and 1
+     * (wait for the compositor's frame tick) and refuse the rest honestly
+     * rather than silently rounding — SDL_GL_SetSwapInterval's return value is
+     * how an application learns what it actually got. */
+    if (interval != 0 && interval != 1) {
+        return SDL_SetError("thylacine: swap interval %d unsupported (0 or 1)",
+                            interval);
+    }
+    vd->gl_swap_interval = interval;
+    return 0;
+}
+
+int THYLACINE_GL_GetSwapInterval(_THIS)
+{
+    SDL_VideoData *vd = (SDL_VideoData *)_this->driverdata;
+    return vd->gl_swap_interval;
+}
+
+int THYLACINE_GL_SwapWindow(_THIS, SDL_Window *window)
+{
+    SDL_VideoData *vd = (SDL_VideoData *)_this->driverdata;
+    SDL_WindowData *wd = (SDL_WindowData *)window->driverdata;
+    THYLACINE_GLContext *ctx;
+
+    if (!wd) {
+        return SDL_SetError("thylacine: no surface for window");
+    }
+    ctx = (THYLACINE_GLContext *)SDL_GL_GetCurrentContext();
+    if (!ctx) {
+        return SDL_SetError("thylacine: no current GL context");
+    }
+
+    /* A reweave since the last bind moved the pixels out from under the
+     * context. Re-bind BEFORE glFinish, so the rasteriser flushes into the
+     * mapping that is about to be presented rather than the retired one. */
+    if (ctx->bound_va != wd->tap.map_va || ctx->bound_w != wd->tap.w ||
+        ctx->bound_h != wd->tap.h) {
+        if (gl_bind(ctx, wd) != 0) {
+            return -1;
+        }
+    }
+
+    /* llvmpipe rasterises on a thread pool, so the draw calls issued this
+     * frame are not necessarily in the buffer yet. glFinish is what makes the
+     * present a present rather than a race with the rasteriser — without it
+     * the compositor reads partially-drawn tiles. This is the one GL call the
+     * backend itself makes. */
+    glFinish();
+
+    if (vd->gl_swap_interval > 0) {
+        THYLACINE_PaceFrame(wd);
+    }
+
+    /* Full-surface damage: GL gives no damage information, and a GL frame
+     * that only touched part of the surface is not something we can know. */
+    if (thyla_tap_present(&wd->tap, NULL, 0) != 0) {
+        return SDL_SetError("thylacine: present failed");
+    }
+    return 0;
+}
+
+void THYLACINE_GL_DeleteContext(_THIS, SDL_GLContext context)
+{
+    THYLACINE_GLContext *ctx = (THYLACINE_GLContext *)context;
+
+    (void)_this;
+    if (!ctx) {
+        return;
+    }
+    if (ctx->osmesa && OSMesaDestroyContext) {
+        OSMesaDestroyContext(ctx->osmesa);
+    }
+    SDL_free(ctx);
+}
+
+#endif /* SDL_VIDEO_DRIVER_THYLACINE */

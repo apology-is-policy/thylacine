@@ -20,7 +20,7 @@
  * Learned by probing this probe: with SDL_VIDEO_OPENGL turned back OFF, an
  * earlier version of this file still compiled and linked clean, and the
  * build happily printed "a stock SDL-GL program compiles + links". Two
- * things make that possible -- the install step copies include/*.h
+ * things make that possible -- the install step copies every header
  * unconditionally, so the GL headers are in the sysroot either way, and
  * SDL_video.c defines all 20 SDL_GL_* entry points unconditionally (the
  * !SDL_VIDEO_OPENGL bodies just SDL_SetError and return). So neither the

@@ -61,6 +61,19 @@ typedef struct SDL_VideoData
     /* The single window this backend supports at a time (the compositor
      * gives an SDL app one pane; a second SDL_CreateWindow fails). */
     SDL_Window *window;
+    /* GL swap interval (#138): 0 = present as fast as drawn, 1 = wait for
+     * the compositor's frame tick. Defaults to 1 for the same reason the
+     * framebuffer path paces by default (#51) -- a 60 Hz compositor can only
+     * SHOW 60 fps, so an unthrottled presenter overwrites un-composed pixels
+     * and spins a vCPU. SDL's own default is 0, and the difference is
+     * deliberate: on a host GL driver an unthrottled swap costs the app
+     * nothing, here it costs the whole guest. */
+    int gl_swap_interval;
 } SDL_VideoData;
+
+/* Wait for the compositor's next frame tick, bounded (see the #51 block in
+ * SDL_thylacinevideo.c for the full contract). Shared by the framebuffer
+ * present and the GL swap -- one pacing policy, not two. */
+extern void THYLACINE_PaceFrame(SDL_WindowData *wd);
 
 #endif /* SDL_thylacinevideo_h_ */

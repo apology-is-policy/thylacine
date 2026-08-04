@@ -30,6 +30,7 @@
 
 #include "SDL_thylacinevideo.h"
 #include "SDL_thylacineevents_c.h"
+#include "SDL_thylacineopengl.h"
 
 #define THYLACINEVID_DRIVER_NAME "thylacine"
 
@@ -77,6 +78,27 @@ static SDL_VideoDevice *THYLACINE_CreateDevice(void)
     device->CreateWindowFramebuffer = THYLACINE_CreateWindowFramebuffer;
     device->UpdateWindowFramebuffer = THYLACINE_UpdateWindowFramebuffer;
     device->DestroyWindowFramebuffer = THYLACINE_DestroyWindowFramebuffer;
+
+    /* The GL context path (#138), backed by OSMesa/llvmpipe. Wired
+     * UNCONDITIONALLY, even in a program that did not link libOSMesa.a: SDL
+     * checks GL_CreateContext for the "no OpenGL support in current SDL video
+     * driver" error, and leaving it NULL would report a missing DRIVER when
+     * the truth is a missing LIBRARY in this particular program. Wiring it
+     * routes such a program to GL_LoadLibrary's specific message instead --
+     * SDL_CreateWindow(SDL_WINDOW_OPENGL) calls SDL_GL_LoadLibrary itself, so
+     * the failure still arrives at window creation, just accurately named. */
+    device->GL_LoadLibrary = THYLACINE_GL_LoadLibrary;
+    device->GL_GetProcAddress = THYLACINE_GL_GetProcAddress;
+    device->GL_UnloadLibrary = THYLACINE_GL_UnloadLibrary;
+    device->GL_CreateContext = THYLACINE_GL_CreateContext;
+    device->GL_MakeCurrent = THYLACINE_GL_MakeCurrent;
+    device->GL_SetSwapInterval = THYLACINE_GL_SetSwapInterval;
+    device->GL_GetSwapInterval = THYLACINE_GL_GetSwapInterval;
+    device->GL_SwapWindow = THYLACINE_GL_SwapWindow;
+    device->GL_DeleteContext = THYLACINE_GL_DeleteContext;
+    /* No GL_GetDrawableSize: the drawable IS the window (one surface, no
+     * high-DPI scaling), which is exactly SDL's fallback. */
+    data->gl_swap_interval = 1;
 
     device->free = THYLACINE_DeleteDevice;
 
@@ -241,42 +263,53 @@ static int THYLACINE_UpdateWindowFramebuffer(_THIS, SDL_Window *window,
             n++;
         }
     }
-    /* #51 frame pacing (default ON; SDL_THYLACINE_NOPACE=1 opts out --
-     * benchmarks): wait for the compositor's next FRAME tick before the
-     * present. A 60 Hz compositor can only SHOW 60 fps -- presents
-     * beyond that overwrite un-composed pixels and spin a vCPU (the
-     * uncapped timedemo's 600 fps + its 122-600 HVF variance). The pump
-     * thread bumps frame_seq per TEV_FRAME (never the main thread --
-     * this wait would starve PumpEvents and self-deadlock into
-     * timeout-only pacing). ONE timed wait, 50 ms wall-clock bound (the
-     * G-5 F1 lesson: never a wake-count bound): a degraded/frozen frame
-     * clock (clock-rate ctl, test-mode) or a HIDDEN pane (visible-only
-     * FRAME emission) degrades to ~20 fps timeout pacing -- background
-     * throttling for free -- and teardown (the pump exits after the
-     * retire, no further signals) is bounded by the same 50 ms. A
-     * spurious wake presents one tick early: pacing slack, never a
-     * correctness issue. */
-    if (!wd->nopace && wd->pump_started) {
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 50 * 1000000L;
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec += 1;
-            ts.tv_nsec -= 1000000000L;
-        }
-        pthread_mutex_lock(&wd->lock);
-        if (wd->frame_seq == wd->presented_seq) {
-            pthread_cond_timedwait(&wd->frame_cv, &wd->lock, &ts);
-        }
-        wd->presented_seq = wd->frame_seq;
-        pthread_mutex_unlock(&wd->lock);
-    }
+    THYLACINE_PaceFrame(wd);
 
     /* n == 0 (no rects, too many, or all clipped away) = full-surface. */
     if (thyla_tap_present(&wd->tap, tr, n) != 0) {
         return SDL_SetError("thylacine: present failed");
     }
     return 0;
+}
+
+/* #51 frame pacing (default ON; SDL_THYLACINE_NOPACE=1 opts out --
+ * benchmarks): wait for the compositor's next FRAME tick before the
+ * present. A 60 Hz compositor can only SHOW 60 fps -- presents beyond
+ * that overwrite un-composed pixels and spin a vCPU (the uncapped
+ * timedemo's 600 fps + its 122-600 HVF variance). The pump thread bumps
+ * frame_seq per TEV_FRAME (never the main thread -- this wait would
+ * starve PumpEvents and self-deadlock into timeout-only pacing). ONE
+ * timed wait, 50 ms wall-clock bound (the G-5 F1 lesson: never a
+ * wake-count bound): a degraded/frozen frame clock (clock-rate ctl,
+ * test-mode) or a HIDDEN pane (visible-only FRAME emission) degrades to
+ * ~20 fps timeout pacing -- background throttling for free -- and
+ * teardown (the pump exits after the retire, no further signals) is
+ * bounded by the same 50 ms. A spurious wake presents one tick early:
+ * pacing slack, never a correctness issue.
+ *
+ * Shared with the GL swap path since #138. The GL side gates its call on
+ * SDL_GL_SetSwapInterval instead of SDL_THYLACINE_NOPACE -- an app that
+ * asks for interval 0 has said the same thing the env var says, through
+ * the API SDL gives it for exactly this. */
+void THYLACINE_PaceFrame(SDL_WindowData *wd)
+{
+    struct timespec ts;
+
+    if (wd->nopace || !wd->pump_started) {
+        return;
+    }
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 50 * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&wd->lock);
+    if (wd->frame_seq == wd->presented_seq) {
+        pthread_cond_timedwait(&wd->frame_cv, &wd->lock, &ts);
+    }
+    wd->presented_seq = wd->frame_seq;
+    pthread_mutex_unlock(&wd->lock);
 }
 
 static void THYLACINE_DestroyWindowFramebuffer(_THIS, SDL_Window *window)
