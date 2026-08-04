@@ -1887,6 +1887,11 @@ build_stratum_pool_fixture() {
                 echo "    gate will test code you did not build. Run:"
                 echo "        tools/build.sh stage-clade"
                 echo "    then re-bake. (#139; build.sh all never re-stages /clade)"
+                echo "    (This compares MTIME, deliberately: a content check would"
+                echo "     mean stripping a ~145 MB binary on every pool bake. So a"
+                echo "     rebuild from unchanged sources trips it too -- conservative"
+                echo "     and loud is the right posture for a warning, but confirm"
+                echo "     with a strip+shasum before assuming the bytes moved.)"
             fi
         done
     fi
