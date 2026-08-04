@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**270 owned · 151 unowned · 421 files (64% owned) · ~41893 unswept lines.**
+**277 owned · 144 unowned · 421 files (65% owned) · ~37292 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -65,7 +65,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 |---|---:|---:|---:|
 | usr/coreutils | 0 | 60 | 8763 |
 | usr/corvus | 0 | 1 | 4245 |
-| usr/aurora | 0 | 5 | 3545 |
+| usr/aurora | 0 | 5 | 3607 |
 | usr/lib | 35 | 6 | 3210 |
 | usr/pouch-hello | 0 | 20 | 2998 |
 | usr/diorama | 0 | 2 | 2904 |
@@ -73,31 +73,31 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | kernel | 110 | 22 | 2863 |
 | usr/prowl | 0 | 3 | 1253 |
 | arch | 34 | 4 | 971 |
-| usr/virtio-gpu | 0 | 1 | 955 |
-| usr/virtio-blk-rw | 0 | 1 | 885 |
-| usr/virtio-net-loop | 0 | 1 | 874 |
-| usr/virtio-input | 0 | 1 | 825 |
 | usr/curl | 0 | 3 | 779 |
 | usr/net-echo | 0 | 1 | 774 |
-| usr/virtio-net-arp | 0 | 1 | 710 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/sntp | 0 | 1 | 394 |
 | usr/httpd | 0 | 1 | 335 |
 | usr/loom-stress | 0 | 1 | 303 |
 | usr/ptyhost | 0 | 1 | 236 |
 | usr/https | 0 | 1 | 220 |
-| usr/netdev-driver | 0 | 1 | 216 |
-| usr/virtio-mmio-source | 0 | 1 | 198 |
 | usr/stub-driver | 0 | 1 | 119 |
 | mm | 8 | 0 | 0 |
 | usr/joey | 1 | 0 | 0 |
 | usr/libthyla-rs | 29 | 0 | 0 |
 | usr/login | 1 | 0 | 0 |
 | usr/netd | 3 | 0 | 0 |
+| usr/netdev-driver | 1 | 0 | 0 |
 | usr/nora | 13 | 0 | 0 |
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/tapestryd | 7 | 0 | 0 |
 | usr/utopia | 26 | 0 | 0 |
+| usr/virtio-blk-rw | 1 | 0 | 0 |
+| usr/virtio-gpu | 1 | 0 | 0 |
+| usr/virtio-input | 1 | 0 | 0 |
+| usr/virtio-mmio-source | 1 | 0 | 0 |
+| usr/virtio-net-arp | 1 | 0 | 0 |
+| usr/virtio-net-loop | 1 | 0 | 0 |
 | usr/warden | 1 | 0 | 0 |
 
 ### Unowned, largest first
@@ -109,14 +109,9 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ports/gnumake/config.h | 1357 |
 | usr/lib/corvus-crypto/src/lib.rs | 1184 |
 | usr/aurora/src/vt.rs | 1170 |
-| usr/aurora/src/main.rs | 1038 |
-| usr/virtio-gpu/src/main.rs | 955 |
-| usr/virtio-blk-rw/src/main.rs | 885 |
-| usr/virtio-net-loop/src/main.rs | 874 |
-| usr/virtio-input/src/main.rs | 825 |
+| usr/aurora/src/main.rs | 1100 |
 | usr/lib/tls/src/lib.rs | 795 |
 | usr/net-echo/src/main.rs | 774 |
-| usr/virtio-net-arp/src/main.rs | 710 |
 | usr/lib/libtapestry/src/lib.rs | 677 |
 | arch/arm64/uart.c | 674 |
 | usr/aurora/src/osd.rs | 522 |
@@ -156,13 +151,11 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/curl/src/bin/curl.rs | 224 |
 | usr/pouch-hello/pouch-hello-pty.c | 221 |
 | usr/https/src/main.rs | 220 |
-| usr/netdev-driver/src/main.rs | 216 |
 | usr/coreutils/src/bin/cut.rs | 215 |
 | usr/lib/cornucopia/src/lib.rs | 211 |
 | kernel/include/thylacine/errno.h | 209 |
 | kernel/include/thylacine/devcap.h | 208 |
 | usr/coreutils/src/bin/head.rs | 198 |
-| usr/virtio-mmio-source/src/main.rs | 198 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/coreutils/src/bin/netstat.rs | 188 |
 | usr/coreutils/src/bin/tail.rs | 188 |

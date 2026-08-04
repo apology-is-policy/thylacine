@@ -31,6 +31,12 @@ dossiers.
   conferred-within-conferrer rule is vacuous by construction, because being
   early means holding everything — so its notes are about arithmetic nobody
   re-derives rather than about gates.
+- [[moc-userspace-hardware]] — the programs that reach a device. None is a
+  service and none has a user: each is spawned by something above it, does
+  one bounded job, and reports through a channel that party chose. Splits
+  into the drivers that take their own authority and the two that are
+  granted it, which makes it the tree's clearest before-and-after on
+  [[inv-i34]].
 
 ## Services
 

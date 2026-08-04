@@ -12,7 +12,7 @@ locks: []
 abis: []
 design: ["docs/reference/86-pouch-stratumd-boot.md", "docs/POUCH-DESIGN.md section 14"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-04
 ---
 ## Purpose
 
@@ -23,8 +23,11 @@ daemon protocol seam between the FS and its block device; mount and I/O
 proceed entirely through the `stm_bdev` vtable.
 
 The body is a port of Thylacine's one-shot Rust test driver
-(`usr/virtio-blk-rw`) into a long-lived backend: same VIRTIO 1.2 init
-recipe, same three-descriptor chain, same IRQ-driven completion.
+(`usr/virtio-blk-rw`, one of the reference drivers in
+[[sub-virtio-probes]]) into a long-lived backend: same VIRTIO 1.2 init
+recipe, same three-descriptor chain, same IRQ-driven completion. The
+original still runs on every boot as a kernel-suite gate, so the two can
+drift without either side noticing.
 
 ## Contract
 

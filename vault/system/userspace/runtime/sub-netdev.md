@@ -33,6 +33,13 @@ over PCI — presenting one API over one shared piece of index arithmetic. The
 production network daemon drives the PCI one; the Menagerie driver-lifecycle
 proof drives the MMIO one.
 
+The MMIO half is the network pair in [[sub-virtio-probes]] generalized into a
+library, and it did not merely inherit them. The descriptor-id guard here
+bounds the untruncated value and declines to recycle a bogus one, citing an
+audit finding; the standalone driver it came from does neither. Both still run
+— the originals every boot, as kernel-suite gates — so the divergence is
+durable in both directions.
+
 ## Contract
 
 - **`send(frame) -> bool`.** False for an empty frame, one over the maximum,
