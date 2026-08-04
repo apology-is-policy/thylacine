@@ -18,6 +18,11 @@
  * vid_sgl.c uses, and it is why nothing here can also speak SDL's GL enums. */
 #include <GL/osmesa.h>
 
+/* The corvus clearance walk (usr/lib/thylajit). Header-only and self-contained
+ * — it reaches corvus with raw `svc` for the two syscalls musl does not carry,
+ * so it pulls in no library SDL does not already have. */
+#include "thyla_capjit.h"
+
 /* The rasteriser is optional at link time (see the header). A weak undefined
  * reference resolves to 0 when libOSMesa.a is absent, which is what lets one
  * libSDL2.a serve both GL and non-GL programs.
@@ -126,6 +131,38 @@ SDL_GLContext THYLACINE_GL_CreateContext(_THIS, SDL_Window *window)
     }
     if (!wd) {
         SDL_SetError("thylacine: no surface for window");
+        return NULL;
+    }
+
+    /* CAP_JIT, before anything reaches the rasteriser.
+     *
+     * llvmpipe IS a JIT: it compiles rasteriser variants at draw time and
+     * executes them in this process, which on Thylacine requires CAP_JIT
+     * (I-42) — an ELEVATION-ONLY capability, stripped at every fork, so no
+     * parent can hand it down and a program must walk the corvus clearance
+     * path ITSELF.
+     *
+     * It happens HERE, in the platform layer, rather than in each program,
+     * because "stock SDL-GL programs recompile" is the entire delivery shape
+     * of LLVM-DESIGN §9 step 2. TyrQuake's vid_sgl.c is ordinary SDL-GL code
+     * that has never heard of Thylacine; a rule that every GL app must first
+     * speak a capability protocol would make that claim false and put a
+     * Thylacine-shaped patch in every future port. The application already
+     * declared its intent by asking for a GL context — on this platform that
+     * request IS a request to JIT, which is exactly the sort of fact a
+     * platform abstraction layer exists to carry.
+     *
+     * This grants nothing. SDL only ASKS; corvus decides, against the calling
+     * principal's own eligibility, and refuses cleanly if the user has no jit
+     * clearance. A program that acquired the capability itself (gl-sdl-prove
+     * does, to print which form won) finds this a no-op, and vice versa.
+     *
+     * After the Available() check, so a program linking no rasteriser never
+     * opens a corvus connection at all; before the allocation, so a refusal
+     * has nothing to unwind. */
+    if (thyla_acquire_cap_jit("sdl-gl") != 0) {
+        SDL_SetError("thylacine: CAP_JIT refused — llvmpipe cannot JIT in "
+                     "this process, so there is no rasteriser to bind");
         return NULL;
     }
 

@@ -598,6 +598,27 @@ The path of least invention, per the OSMesa verification:
    software Quake proved the 2D present path; GLQuake proves the GL stack,
    through llvmpipe, through the JIT capability, onto the same compositor
    scanout. Plus a gears-class smoke for CI.
+   *(**LANDED**. `build_tyrquake()` builds both renderers from one source
+   copy — upstream's `nqsw-list` and `nqgl-list` differ in exactly the
+   renderer group and the video driver, so the object lists are written that
+   way rather than as two flat lists free to drift. Driven by
+   `tools/interactive/ls-gfx-glquake.exp`; see `docs/reference/143-tyrquake.md`.*
+
+   *What makes it an ACCEPTANCE gate rather than a third prover is what it does
+   NOT contain: **no Thylacine patch for the capability**. `vid_sgl.c` is stock
+   1996-lineage SDL-GL code, and step 2's "stock SDL-GL programs recompile" is
+   only true if that stays so — which meant moving the `CAP_JIT` clearance walk
+   out of the application and into `THYLACINE_GL_CreateContext`. The app already
+   declared its intent by asking for a GL context; on this platform that request
+   IS a request to JIT. SDL grants nothing — corvus still decides against the
+   calling principal's eligibility. The gate asserts the acquisition line's
+   `sdl-gl:` prefix precisely to catch a regression into patching the port.*
+
+   *The one real port fix the GL build needed is unrelated to any of that:
+   `snd_null.c` defines `S_BlockSound` but not its declared `S_UnblockSound`,
+   and `vid_sdl.c` calls neither while `vid_sgl.c` calls both — so tyr-glquake
+   is simply the first configuration in this tree that could see a latent
+   upstream omission.)*
 4. **Stretch, cuttable**: lavapipe (Vulkan-conformant software Vulkan) —
    same libs, new frontend; explicitly NOT a gate.
 

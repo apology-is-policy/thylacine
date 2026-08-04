@@ -179,6 +179,29 @@ static int thyla_capjit_activate(int ctl, const unsigned char *token,
     return 0;
 }
 
+/* Held-once, PROCESS-wide -- and deliberately a weak GLOBAL rather than a
+ * function-static.
+ *
+ * Since GLQuake this header is included by more than one TU of the same
+ * program: libSDL2.a's GL backend acquires the capability so that STOCK
+ * SDL-GL programs need no Thylacine-specific code at all (LLVM-DESIGN section
+ * 9 step 2), while gl-sdl-prove also calls it directly, because its gate
+ * asserts WHICH form won and only the direct call prints that. A
+ * function-static would be per-TU and let the walk run twice in that binary --
+ * a second corvus round-trip whose only two possible outcomes are "the same
+ * answer again" and "a NEW failure on a path that had already succeeded".
+ *
+ * A weak definition merges to ONE object across TUs, including when one of
+ * them arrives from an archive (verified by compiling both topologies and
+ * comparing the address, not assumed -- a weak UNDEFINED reference behaves
+ * nothing like a weak definition, and that distinction already cost #138 a
+ * link that succeeded with an inert GL path). So the two callers compose in
+ * either order: whichever runs first walks, the other sees it done.
+ *
+ * Not thread-safe and does not need to be: both call sites are startup, and
+ * SDL_GL_CreateContext is documented main-thread-only. */
+__attribute__((weak)) int thyla_capjit_held;
+
 /* Acquire CAP_JIT, trying the SELF form before the bearer form.
  *
  * Both are needed, and which one works is a property of HOW THE CALLER WAS
@@ -209,6 +232,10 @@ static int thyla_acquire_cap_jit(const char *who)
     size_t o, rl, pw;
     long root = -1, ctl;
     int i, rc, self_ok;
+
+    if (thyla_capjit_held) {
+        return THYLA_CAPJIT_OK;
+    }
 
     for (i = 0; i < 16 && root < 0; i++) {
         root = thyla_capjit_open(THYLA_FROM_ROOT, "/srv/corvus", 11,
@@ -281,6 +308,7 @@ static int thyla_acquire_cap_jit(const char *who)
      * only sees "CAP_JIT acquired" cannot tell the #139 path from the boot path
      * that always worked, and #95 eats line TAILS -- a discriminator parked at
      * the end is a discriminator that sometimes is not there. */
+    thyla_capjit_held = 1;
     printf("%s: CAP_JIT acquired (%s) via the corvus jit clearance\n", who,
            self_ok ? "SELF" : "bearer");
     fflush(stdout);

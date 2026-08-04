@@ -1873,15 +1873,22 @@ build_stratum_pool_fixture() {
     # like a real defect in the change. Both halves of the trap have now been
     # paid for once (#120 for /clade broadly, #139 for gl-sdl-prove), which is
     # twice too many for something a timestamp comparison can say out loud.
-    if [[ "$bake_clade" == "1" && -f "$BUILD_DIR/clade/gl/gl-sdl-prove" ]]; then
-        if [[ "$BUILD_DIR/clade/gl/gl-sdl-prove" -nt \
-              "$BUILD_DIR/clade/stage/bin/gl-sdl-prove" ]]; then
-            echo "==> WARNING: build/clade/gl/gl-sdl-prove is NEWER than the staged"
-            echo "    copy, so this pool will bake the PREVIOUS binary and the GL"
-            echo "    gate will test code you did not build. Run:"
-            echo "        tools/build.sh stage-clade"
-            echo "    then re-bake. (#139; build.sh all never re-stages /clade)"
-        fi
+    # Checked for EVERY staged GL binary, not just the one that caught it: the
+    # trap is a property of the staging step, so a name-by-name check would go
+    # quiet again the moment a binary is added -- which tyr-glquake then was.
+    if [[ "$bake_clade" == "1" ]]; then
+        local staleb
+        for staleb in gl-sdl-prove osmesa-prove tyr-glquake; do
+            [[ -f "$BUILD_DIR/clade/gl/$staleb" ]] || continue
+            if [[ "$BUILD_DIR/clade/gl/$staleb" -nt \
+                  "$BUILD_DIR/clade/stage/bin/$staleb" ]]; then
+                echo "==> WARNING: build/clade/gl/$staleb is NEWER than the staged"
+                echo "    copy, so this pool will bake the PREVIOUS binary and the GL"
+                echo "    gate will test code you did not build. Run:"
+                echo "        tools/build.sh stage-clade"
+                echo "    then re-bake. (#139; build.sh all never re-stages /clade)"
+            fi
+        done
     fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
@@ -2527,6 +2534,7 @@ build_sdl2() {
                    -nostdlibinc -isystem "$sysroot/include"
                    -I"$sdl_src/include"
                    -I"$REPO_ROOT/usr/lib/libt/include"
+                   -I"$REPO_ROOT/usr/lib/thylajit"
                    -D_GNU_SOURCE=1 -D__thylacine__=1 )
 
     # The compile list: glob the pruned tree (deterministic order).
@@ -2621,7 +2629,6 @@ build_gl_sdl_prove() {
     # this function from anywhere else.
     local clang="$LLVM_PREFIX/bin/clang"
     local gl_lib="$BUILD_DIR/clade/gl/lib"
-    local llvm_lib="$BUILD_DIR/clade/llvm-build/lib"
     local out="$BUILD_DIR/clade/gl/gl-sdl-prove"
     local src="$REPO_ROOT/usr/gl-sdl-prove/gl-sdl-prove.c"
     local libs_list="$BUILD_DIR/clade/gl/llvm-libs.list"
@@ -2646,6 +2653,35 @@ build_gl_sdl_prove() {
                    -D_GNU_SOURCE=1 -D__thylacine__=1 )
     local obj="$sdl_obj/gl-sdl-prove.o"
     "$clang" "${cflags[@]}" -Wall -Wextra -c "$src" -o "$obj"
+
+    if ! gl_link_program "$out" "$obj"; then
+        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
+        echo "    resolve against libOSMesa.a (#138)." >&2
+        rm -f "$obj"
+        exit 1
+    fi
+    rm -f "$obj"
+    gl_assert_resolved "$out" gl-sdl-prove
+    echo "    gl-sdl-prove: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static,"
+    echo "                  OSMesa entry points resolved -- #138)"
+}
+
+# --- the GL link, ONE definition, shared by gl-sdl-prove and tyr-glquake.
+#
+# Extracted when GLQuake became the second consumer rather than transcribed a
+# second time, because every clause below is load-bearing and none of it is
+# guessable from reading the line: a drifted copy would not fail loudly, it
+# would produce a binary whose GL path is silently inert -- which is precisely
+# the failure #138 shipped once already.
+#
+# $1 = output path; $2.. = objects (and any per-program flags) placed before
+# the libraries.
+gl_link_program() {
+    local out="$1"; shift
+    local sysroot="$BUILD_DIR/sysroot"
+    local gl_lib="$BUILD_DIR/clade/gl/lib"
+    local llvm_lib="$BUILD_DIR/clade/llvm-build/lib"
+    local libs_list="$BUILD_DIR/clade/gl/llvm-libs.list"
 
     # The archive set is READ from the file the fetch recorded, never
     # hardcoded here: it is exactly what meson computed for osmesa-prove's
@@ -2684,26 +2720,24 @@ build_gl_sdl_prove() {
     # which forces the extraction; one is enough, because the member that
     # defines it defines the rest.
     mkdir -p "$(dirname "$out")"
-    if ! POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
-            "$REPO_ROOT/tools/pouch-ld" "$obj" \
-            -L"$sysroot/lib" -lSDL2 \
-            -Wl,-u,OSMesaCreateContextExt \
-            -Wl,--start-group \
-            "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
-            -L"$llvm_lib" "${llvm_flags[@]}" \
-            -lc++ -lc++abi -lunwind -lm \
-            -Wl,--end-group \
-            -o "$out"; then
-        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
-        echo "    resolve against libOSMesa.a (#138)." >&2
-        rm -f "$obj"
-        exit 1
-    fi
-    rm -f "$obj"
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$@" \
+        -L"$sysroot/lib" -lSDL2 \
+        -Wl,-u,OSMesaCreateContextExt \
+        -Wl,--start-group \
+        "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
+        -L"$llvm_lib" "${llvm_flags[@]}" \
+        -lc++ -lc++abi -lunwind -lm \
+        -Wl,--end-group \
+        -o "$out"
+}
 
-    # ASSERT THE RESOLUTION, because the link exiting 0 does not.
+# ASSERT THE RESOLUTION, because the link exiting 0 does not.
+# $1 = binary, $2 = program name for the diagnostic.
+gl_assert_resolved() {
+    local out="$1" who="$2"
     #
-    # Everything above is arranged so that a broken GL link still SUCCEEDS
+    # The whole GL link is arranged so that a broken one still SUCCEEDS
     # (that is what the weak declarations buy), which means "the link
     # returned 0" carries no information about whether this binary can do
     # any GL at all. It has to be read out of the artifact. Checking the
@@ -2729,15 +2763,13 @@ build_gl_sdl_prove() {
         fi
     done
     if [[ -n "$missing" ]]; then
-        echo "==> gl-sdl-prove: linked, but these stayed UNDEFINED:$missing" >&2
+        echo "==> $who: linked, but these stayed UNDEFINED:$missing" >&2
         echo "    The GL path in this binary is inert -- weak references" >&2
         echo "    resolved to 0 instead of pulling libOSMesa.a's members." >&2
         echo "    (-Wl,-u,OSMesaCreateContextExt is what forces that.)" >&2
         rm -f "$out"
         exit 1
     fi
-    echo "    gl-sdl-prove: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static,"
-    echo "                  OSMesa entry points resolved -- #138)"
 }
 
 build_tyrquake() {
@@ -2807,12 +2839,25 @@ build_tyrquake() {
         echo "    pak0.pak staged ($(wc -c < "$stage/id1/pak0.pak" | tr -d ' ') bytes, shareware 1.06)"
     fi
 
-    # 2. Staleness: reuse the binary when newer than the tree + port + libSDL2.a.
-    if [[ -f "$progs_out/tyr-quake" ]]; then
+    # 2. Staleness: reuse the binaries when newer than the tree + port +
+    # libSDL2.a.
+    #
+    # BOTH outputs are checked, and that is the #138 lesson applied before it
+    # could bite a second time: tyr-quake is written before tyr-glquake links,
+    # so a glquake failure would leave exactly the one file an output half that
+    # named only tyr-quake looks at -- and the next invocation would report
+    # REUSED for a build whose last step had failed. The glquake half is only
+    # promised when the GL archives are present, because without them the skip
+    # is legitimate and the binary legitimately absent.
+    local glq_out="$BUILD_DIR/clade/gl/tyr-glquake"
+    local glq_needed=""
+    [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && glq_needed=1
+    if [[ -f "$progs_out/tyr-quake" ]] &&
+       [[ -z "$glq_needed" || -f "$glq_out" ]]; then
         local stale
         stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$progs_out/tyr-quake" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
-            ledger "tyr-quake: REUSED (cached + up-to-date)"
+            ledger "tyr-quake + tyr-glquake: REUSED (cached + up-to-date)"
             return 0
         fi
     fi
@@ -2837,9 +2882,16 @@ build_tyrquake() {
     printf 'static const unsigned char MagickImage[] = { 0 };\n' \
         > "$tq_obj/gen/tyrquake_icon_128.h"
 
-    # The curated object list (upstream Makefile groups; SW renderer,
-    # VID/IN=sdl, SND/CD=null; UNIX common; no x86 asm on aarch64).
-    local objs=(
+    # The curated object lists (upstream Makefile groups; VID/IN=sdl,
+    # SND/CD=null; UNIX common; no x86 asm on aarch64).
+    #
+    # Upstream's nqsw-list and nqgl-list are
+    #   COMMON + CL + SV + NQCL + <renderer group> + <video driver>
+    # and differ in EXACTLY those last two. Writing the shared part ONCE and
+    # the two differences separately keeps that true by construction; two flat
+    # lists would be free to drift apart silently, and only one of them has a
+    # gate watching it.
+    local objs_common=(
         # COMMON_OBJS
         buildinfo cmd common crc cvar mathlib model rb_tree shell zone
         # UNIX common
@@ -2849,17 +2901,29 @@ build_tyrquake() {
         console developer keys menu pcx r_lerp r_efrag r_light r_model
         r_part sbar screen snd_dma snd_mem snd_mix snd_music sprite_model
         vid_mode view wad
-        # driver selections
-        cd_null snd_null in_sdl sdl_common vid_sdl
+        # driver selections (IN=sdl, SND/CD=null)
+        cd_null snd_null in_sdl sdl_common
         # SV_OBJS
         pr_cmds pr_edict pr_exec sv_main sv_move sv_phys sv_user
         # NQCL_OBJS (+ net_bsd)
         chase host host_cmd net_common net_dgrm net_loop net_main world
         net_bsd
-        # SW_OBJS
+    )
+    # SW_OBJS + VID=sdl
+    local objs_sw=(
         d_edge d_fill d_init d_modech d_part d_polyse d_scan d_sky
         d_sprite d_surf d_vars draw r_aclip r_alias r_bsp r_draw r_edge
         r_main r_misc r_sky r_sprite r_surf r_vars
+        vid_sdl
+    )
+    # GL_OBJS + VID=sdl (vid_sgl). gl_model.o joins model.o rather than
+    # replacing it -- that is upstream's own list, not an oversight: model.c
+    # keeps the format-independent loader and gl_model.c adds the GL-side
+    # surface/texture build.
+    local objs_gl=(
+        drawhulls gl_draw gl_extensions gl_fog gl_mesh gl_model gl_rmain
+        gl_rmisc gl_rsurf gl_sky gl_textures gl_warp qpic tga
+        vid_sgl
     )
 
     local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
@@ -2874,27 +2938,69 @@ build_tyrquake() {
                    -DTYR_VERSION=0.71 -DTYR_VERSION_TIME=1662459894LL
                    -DQBASEDIR=/quake )
 
-    local n=0 f src
-    for f in "${objs[@]}"; do
-        if [[ -f "$tq_src/NQ/$f.c" ]]; then
-            src="$tq_src/NQ/$f.c"
-        elif [[ -f "$tq_src/common/$f.c" ]]; then
-            src="$tq_src/common/$f.c"
-        else
-            echo "==> tyrquake: source for $f not found" >&2
-            exit 1
-        fi
-        "$clang" "${cflags[@]}" -c "$src" -o "$tq_obj/$f.o"
-        n=$((n + 1))
-    done
-    echo "    compiled $n objects"
+    # Compile one variant into its OWN object dir. Separate dirs are required,
+    # not tidiness: -DGLQUAKE changes the SHARED sources too (screen.c, view.c,
+    # cl_main.c and others carry #ifdef GLQUAKE), so a cl_main.o built for one
+    # renderer is wrong for the other.
+    tq_compile() {
+        local outdir="$1" n=0 f src
+        shift
+        mkdir -p "$outdir"
+        for f in "$@"; do
+            if [[ -f "$tq_src/NQ/$f.c" ]]; then
+                src="$tq_src/NQ/$f.c"
+            elif [[ -f "$tq_src/common/$f.c" ]]; then
+                src="$tq_src/common/$f.c"
+            else
+                echo "==> tyrquake: source for $f not found" >&2
+                exit 1
+            fi
+            "$clang" "${cflags[@]}" ${TQ_EXTRA_CFLAGS:-} -c "$src" \
+                -o "$outdir/$f.o"
+            n=$((n + 1))
+        done
+        echo "    compiled $n objects"
+    }
 
+    TQ_EXTRA_CFLAGS="" tq_compile "$tq_obj/sw" "${objs_common[@]}" "${objs_sw[@]}"
     POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
-        "$REPO_ROOT/tools/pouch-ld" "$tq_obj"/*.o \
+        "$REPO_ROOT/tools/pouch-ld" "$tq_obj/sw"/*.o \
         -L"$sysroot/lib" -lSDL2 \
         -o "$progs_out/tyr-quake"
     echo "    tyr-quake: $(wc -c < "$progs_out/tyr-quake" | tr -d ' ') bytes (ET_EXEC, static)"
     ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
+
+    # --- tyr-glquake: LLVM-DESIGN section 9 step 3, the GL acceptance gate.
+    #
+    # Lands in build/clade/gl/ rather than $progs_out because it links the
+    # ~365 MB of fetched GL archives and comes out ~145 MB -- far too big for
+    # the ramfs, so it rides the /clade pool bake like gl-sdl-prove and
+    # osmesa-prove do. OPTIONAL and ANNOUNCED on the same terms: a checkout
+    # without the archives builds fine and the GL gate skips.
+    #
+    # Note what is NOT here: no tyrquake patch for the capability. vid_sgl.c
+    # is stock SDL-GL code, and CAP_JIT is acquired by the SDL backend on its
+    # behalf (SDL_thylacineopengl.c). That is the point of section 9 step 2's
+    # "stock SDL-GL programs recompile" -- if this build needed a Thylacine
+    # patch to reach a GL context, the claim would be false.
+    if [[ ! -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ||
+          ! -f "$BUILD_DIR/clade/gl/llvm-libs.list" ]]; then
+        echo "    tyr-glquake: no GL archives -- skipping (section 9 step 3;"
+        echo "                 fetch them per usr/ports/mesa/README.md)"
+        return 0
+    fi
+    echo "==> building tyr-glquake 0.71 (NQ GL renderer over llvmpipe)"
+    TQ_EXTRA_CFLAGS="-DGLQUAKE" \
+        tq_compile "$tq_obj/gl" "${objs_common[@]}" "${objs_gl[@]}"
+    local glq="$BUILD_DIR/clade/gl/tyr-glquake"
+    if ! gl_link_program "$glq" "$tq_obj/gl"/*.o; then
+        echo "==> tyr-glquake: LINK FAILED against libOSMesa.a" >&2
+        exit 1
+    fi
+    gl_assert_resolved "$glq" tyr-glquake
+    echo "    tyr-glquake: $(wc -c < "$glq" | tr -d ' ') bytes (ET_EXEC, static,"
+    echo "                 OSMesa entry points resolved)"
+    ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
 }
 
 # --- the GNU make port's source-prep + object census, shared by the host
@@ -3498,6 +3604,17 @@ stage_clade() {
     else
         echo "    clade stage: no gl-sdl-prove at $BUILD_DIR/clade/gl/ -- staging without it (#138 SDL-GL gate will skip)"
     fi
+    # LLVM-DESIGN section 9 step 3: GLQuake, the GL acceptance gate. Same
+    # terms again -- linked against the fetched archives, ~145 MB, optional,
+    # announced when absent. Its data comes from /quake, which the SOFTWARE
+    # tyr-quake already bakes, so nothing extra is staged here.
+    if [[ -f "$BUILD_DIR/clade/gl/tyr-glquake" ]]; then
+        "$strip" -o "$stage/bin/tyr-glquake" "$BUILD_DIR/clade/gl/tyr-glquake" 2>/dev/null \
+            || cp "$BUILD_DIR/clade/gl/tyr-glquake" "$stage/bin/tyr-glquake"
+        chmod +x "$stage/bin/tyr-glquake"
+    else
+        echo "    clade stage: no tyr-glquake at $BUILD_DIR/clade/gl/ -- staging without it (GL Quake gate will skip)"
+    fi
     # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
     mkdir -p "$stage/sysroot"
     cp -R "$sysroot/lib" "$stage/sysroot/lib"
@@ -3713,6 +3830,23 @@ clean() {
     echo "==> Removing $BUILD_DIR"
     rm -rf "$BUILD_DIR"
 }
+
+# The patch series is validated BEFORE any target runs, because `patch` cannot
+# be trusted to complain: a hunk header that promises fewer new lines than the
+# body holds makes it apply the first d and DISCARD the rest -- silently,
+# exit 0, no .rej. A patch that "applied cleanly" and is missing its last line
+# is indistinguishable from a correct one until something downstream notices,
+# and downstream may never notice if the dropped line was a guard rather than a
+# definition.
+#
+# Here rather than beside each `patch` loop because there are several of them
+# (sysroot, sdl2, tyrquake, the llvm/mesa ports) and the #101 lesson is to
+# verify at ONE chokepoint instead of copying a check into every caller.
+# ~50 ms for 281 hunks, so it is unconditional. Found by having the mechanism
+# eat a function definition out of the tyrquake port patch.
+python3 "$REPO_ROOT/tools/check-patch-hunks.py" \
+    || { echo "==> patch-hunk check FAILED -- a hunk would apply INCOMPLETE" >&2
+         exit 1; }
 
 case "$target" in
     kernel)      build_kernel      ;;

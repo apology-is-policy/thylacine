@@ -1,0 +1,196 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-glquake.exp -- the CL-7 step 3 acceptance gate.
+#
+# LLVM-DESIGN section 9 step 3: "GLQuake -- the poetic echo of G-7: software
+# Quake proved the 2D present path; GLQuake proves the GL stack, through
+# llvmpipe, through the JIT capability, onto the same compositor scanout."
+#
+# This is the whole CL-7 arc end to end in one program, and the thing that
+# makes it an ACCEPTANCE gate rather than another prover is that TyrQuake is
+# not ours. gl-sdl-prove was written against this platform; tyr-glquake's
+# vid_sgl.c is stock 1996-lineage SDL-GL code that has never heard of
+# Thylacine, capabilities, or weaves. If it needs a Thylacine-shaped patch to
+# reach a GL context then section 9 step 2's "stock SDL-GL programs recompile"
+# is false. It does not: CAP_JIT is acquired by the SDL backend on the
+# program's behalf, which is why the line below says `sdl-gl:` and not
+# `tyr-glquake:`.
+#
+#   capability leg : llvmpipe JITs inside tyr-glquake's own process, and
+#                    CAP_JIT is elevation-only, so SOMETHING must walk the
+#                    corvus clearance path. Asserted first because without it
+#                    the failure surfaces three layers away as llvmpipe's
+#                    "Failed to materialize symbols" -- a Mesa-shaped message
+#                    for a capability-shaped problem.
+#   engine leg     : the pak loads and Quake initialises, exactly as the
+#                    software gate proves, but through the GL renderer.
+#   renderer leg   : GL_RENDERER is llvmpipe. NOT cosmetic -- a context that
+#                    came up on some stub would satisfy every other check here
+#                    while proving nothing about CL-7.
+#   present leg    : the timedemo completes, and a screendump carries Quake's
+#                    textured-world colour richness. The frame count is the
+#                    deterministic proof (N frames cannot complete without
+#                    every present landing); the dump proves they were
+#                    PRESENTED rather than stopping in the client's buffer.
+#
+# fps is REPORTED, NOT GATED. Section 9 commits no budget beyond "GLQuake is
+# playable, measured honestly at CL-7" -- and a number nobody has measured yet
+# is exactly the kind of thing that becomes a flaky threshold if you assert it
+# on the way past.
+#
+# Runs under HVF, the ls-gfx / ls-gfx-quake / ls-gfx-gl sibling posture: the
+# harness's default TCG accel hangs the boot at the pre-existing 8a-2b hwwatch
+# E2E (task #27). GPU-less boots have no scanout -- THYLACINE_NO_GPU applies.
+#
+# SKIPs when the GL half was not baked, on the same terms as ls-gfx-gl: the
+# binary is built from ~365 MB of cross-built archives fetched from the GCP
+# builder (usr/ports/mesa/README.md), so a tree without them legitimately has
+# no /clade/bin/tyr-glquake. Skipping is stated out loud rather than passing
+# quietly, because "the binary is absent" and "the binary works" must not
+# produce the same green.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+proc gfx_fingerprint {png} {
+    return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]
+}
+
+proc gfx_dump_or_fail {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+# The staged tree is the same one the pool bakes, so its presence here is the
+# same condition -- checked on the HOST before boot so the skip costs no VM
+# time.
+set glq "$repo/build/clade/stage/bin/tyr-glquake"
+if {![file exists $glq]} {
+    puts "LS-CI SKIP: no tyr-glquake staged at build/clade/stage/bin -- the GL\
+          half is not baked into this pool (see usr/ports/mesa/README.md)"
+    exit 77
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+lc_send "/clade/bin/tyr-glquake -window -nosound +timedemo demo1"
+
+set timeout 240
+
+# The capability leg. `sdl-gl:` is the point of this assertion: the acquisition
+# happens inside libSDL2.a's GL backend, on behalf of a program that contains
+# no Thylacine-specific code at all. A tyr-glquake-shaped prefix here would
+# mean somebody patched the port, which is the outcome this gate exists to
+# prevent.
+expect {
+    "sdl-gl: CAP_JIT acquired (SELF)" {
+        lc_pass "CAP_JIT acquired by the SDL GL backend, SELF form -- stock\
+                 SDL-GL code became a capability client without being patched"
+    }
+    "sdl-gl: CAP_JIT acquired (bearer)" {
+        lc_fail "CAP_JIT came from the BEARER form post-login -- the #139 SELF\
+                 path did not carry it, so this proves the old path, not the fix"
+    }
+    -re {sdl-gl: FAIL (corvus|cannot|clearance|redeeming)([^\r\n]*)[\r\n]} {
+        lc_fail "CAP_JIT clearance walk failed: $expect_out(1,string)$expect_out(2,string)"
+    }
+    "CAP_JIT refused" {
+        lc_fail "SDL declined the GL context -- the clearance walk was refused"
+    }
+    "user fault" { lc_fail "tyr-glquake segv before the GL context" }
+    "Sys_Error"  { lc_fail "tyr-glquake Sys_Error before the GL context" }
+    timeout      { lc_fail "no CAP_JIT line within 240s" }
+}
+
+# The renderer leg. Two traps here, and they pull in OPPOSITE directions.
+#
+# GL_RENDERER CONTAINS SPACES ("llvmpipe (LLVM 22.1.8, 128 bits)"), so a
+# `([^ ]+)` capture stops at "llvmpipe" -- that is the #139 bug, where the
+# pattern was too STRICT and never matched anything at all.
+#
+# But `([^\r\n]*)` alone is too PERMISSIVE, and fails the other way: expect
+# matches against whatever has arrived so far, and a trailing `*` happily
+# matches a PREFIX -- or nothing. Without something after the group to force a
+# complete line, this fires the instant "GL_RENDERER: " lands in the buffer.
+# Measured, not theorised: three consecutive attempts captured 'llvm', '' and
+# '' from the same guest printing the same string, because the capture tracked
+# where the socket read happened to split. ls-gfx-gl escapes this only by
+# accident -- its pattern requires a literal " version=" after the group, which
+# cannot be present until the whole line is.
+#
+# The trailing [\r\n] is therefore load-bearing: it makes the match wait for a
+# terminated line. A/B'd in tclsh against the real captured bytes before
+# spending a boot on it.
+expect {
+    -re {GL_RENDERER: ([^\r\n]*)[\r\n]} {
+        set rend $expect_out(1,string)
+        if {![string match "*llvmpipe*" $rend]} {
+            lc_fail "GL renderer is '$rend', not llvmpipe -- the context did\
+                     not come up on Mesa's software rasteriser"
+        }
+        lc_pass "GLQuake's GL context is live on llvmpipe: $rend"
+    }
+    "user fault" { lc_fail "tyr-glquake segv during GL init" }
+    "Sys_Error"  { lc_fail "tyr-glquake Sys_Error during GL init" }
+    timeout      { lc_fail "no GL_RENDERER line within 240s" }
+}
+
+expect {
+    "Quake Initialized" {
+        lc_pass "engine init complete (pak loaded, GL renderer up)"
+    }
+    "user fault" { lc_fail "tyr-glquake segv during engine init" }
+    "Sys_Error"  { lc_fail "tyr-glquake Sys_Error during engine init" }
+    timeout      { lc_fail "no 'Quake Initialized' within 240s" }
+}
+
+# The present leg. Generous, because llvmpipe rasterises 969 frames of textured
+# 3D in software inside a VM and must JIT its rasteriser variants on the way --
+# the first frames pay for the rest. The number is REPORTED; see the header for
+# why it is not a threshold.
+set timeout 600
+expect {
+    -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
+        lc_pass "GL timedemo: $expect_out(1,string) frames in\
+                 $expect_out(2,string)s @ $expect_out(3,string) fps\
+                 (llvmpipe -> weave -> compositor scanout)"
+    }
+    "user fault" { lc_fail "tyr-glquake segv during the timedemo" }
+    "Sys_Error"  { lc_fail "tyr-glquake Sys_Error during the timedemo" }
+    timeout      { lc_fail "no timedemo fps line within 600s" }
+}
+
+# The render leg: GLQuake's world is on the scanout. The colour-richness floor
+# is the HARD gate (a flat or black surface would fail it); a frame-advance
+# delta is LOGGED, since post-timedemo Quake may idle on a static console frame
+# and gating on it would be timing-flaky.
+after 1500
+if {[gfx_dump_or_fail /tmp/lsglq-1.png] ne ""} { lc_fail "screendump 1 failed" }
+after 2000
+if {[gfx_dump_or_fail /tmp/lsglq-2.png] ne ""} { lc_fail "screendump 2 failed" }
+
+set fp1 [gfx_fingerprint /tmp/lsglq-1.png]
+set fp2 [gfx_fingerprint /tmp/lsglq-2.png]
+set h1 [lindex $fp1 0]; set c1 [lindex $fp1 1]
+set h2 [lindex $fp2 0]; set c2 [lindex $fp2 1]
+if {$c1 < 8 || $c2 < 8} {
+    lc_fail "too few colours ($c1/$c2) -- the surface is not rendering\
+             GLQuake's world"
+}
+if {$h1 ne $h2} {
+    lc_step "note: game frame advanced between dumps (live demo loop)"
+} else {
+    lc_step "note: static frame between dumps (post-timedemo console idle) -- expected"
+}
+lc_pass "GLQuake's textured world on the scanout ($c1/$c2 colour buckets)"
+
+lc_quit
+lc_pass "ls-gfx-glquake: the CL-7 step 3 GL acceptance gate verified (section 9)"
+exit 0

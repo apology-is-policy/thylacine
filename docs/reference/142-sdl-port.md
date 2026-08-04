@@ -299,6 +299,40 @@ takes corvus's SELF form (verb 18, #139), authorized on the kernel-stamped
 principal with no bearer token; the gate asserts the form, not merely the
 acquisition. See `docs/reference/102-legate.md`.
 
+## The backend acquires `CAP_JIT` on the program's behalf
+
+`THYLACINE_GL_CreateContext` walks the corvus clearance path itself, before
+it creates the OSMesa context. That is deliberate and it is what makes §9
+step 2's claim — "stock SDL-GL programs recompile" — literally true.
+
+The alternative is every GL program calling `thyla_acquire_cap_jit()` at
+startup, which is what gl-sdl-prove does. That works for a prover written
+against this platform. It does not work for a *port*: TyrQuake's `vid_sgl.c`
+is 1996-lineage SDL-GL code that has never heard of Thylacine, and requiring
+it to speak a capability protocol before `SDL_GL_CreateContext` would mean a
+Thylacine-shaped patch in that port and in every future one — at which point
+the recompile claim is false.
+
+The application has already declared its intent by asking for a GL context;
+on this platform that request *is* a request to JIT, and carrying a fact like
+that is what a platform abstraction layer is for. **SDL grants nothing** — it
+asks, and corvus decides against the calling principal's own eligibility, so
+a user with no `jit` clearance gets a clean `SDL_SetError` and a NULL context
+rather than a `Failed to materialize symbols` three layers down.
+
+The acquisition is guarded by a weak-global once-flag in `thyla_capjit.h`, so
+the two callers compose in either order and neither double-walks: gl-sdl-prove
+links *both* its own copy of the header and libSDL2.a's, and a function-static
+would have been per-TU. (A weak *definition* merges across TUs and out of an
+archive; a weak *undefined reference* does not extract an archive member at
+all, which is the distinction that cost #138 a link that succeeded with an
+inert GL path. Both topologies were compiled and their addresses compared
+rather than assumed.)
+
+Placement inside `CreateContext` is after the `THYLACINE_GL_Available()`
+check, so a program that links no rasteriser never opens a corvus connection,
+and before the allocation, so a refusal has nothing to unwind.
+
 **Everything downstream of that acquisition ran for the first time at #139**,
 because until then the prover always died at the capability gate. Its first
 real execution found two bugs that had shipped with #138 and could not
