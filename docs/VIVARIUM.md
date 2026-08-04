@@ -2435,16 +2435,29 @@ rather than only in §10 because §9 is the document a reader consults to learn
 what works, and a scope contract whose headline claim is contradicted three
 sections later is exactly the WSL1 failure this section exists to avoid.
 
-- IN: the §11.5 top-50, BSD sockets via `/net`, static ELF, the diorama, `viv`,
-  signals Tier 0 **and Tier 1** (V-6 landed both — a real handler installs, runs,
-  and returns through `rt_sigreturn`).
-- OUT **until the LINEAGE arc lands**, and stated plainly: **process creation
-  (`clone`/`fork`/`execve`/`wait4` — #93, and therefore any guest shell)**. The
-  arc is designed and user-voted (2026-08-01, the full path through COW fork —
-  `docs/LINEAGE.md`); this entry moves to IN at **L-6's gate**, which is an
-  Alpine `/bin/sh` actually running a command, **not** at any earlier chunk's
-  landing. Moving it when the mechanism merely exists would reproduce the WSL1
-  failure this section exists to prevent,
+- IN: the §11.5 top-50, BSD sockets via `/net`, **static ELF *and everything a
+  statically-linked guest shell does with it***, the diorama, `viv`, signals
+  Tier 0 **and Tier 1** (V-6 landed both — a real handler installs, runs, and
+  returns through `rt_sigreturn`).
+- **PROCESS CREATION MOVED OUT → IN at the L-6c gate (`1237dc2f`), and this
+  paragraph was flipped at L-7 when the flip was noticed to be owed.** The
+  condition this entry set for itself was "an Alpine `/bin/sh` actually running a
+  command, **not** any earlier chunk's landing" — because moving it when the
+  mechanism merely exists would reproduce the WSL1 failure §9 exists to prevent.
+  That condition is met and stays met on every boot: `L6C-A`..`L6C-I` drive a
+  real Alpine `busybox sh` through running, exec'ing an external program,
+  reporting zero and nonzero status, a pipeline, a command substitution, a loop,
+  a nested shell, and a reap — and the gate is boot-fatal, so a regression stops
+  the boot rather than quietly reverting this line.
+  **Read the qualifier, because it is the whole scope of the claim: the gate's
+  binary is `busybox-static`.** What is IN is a statically-linked Linux guest
+  doing process creation. A STOCK Alpine rootfs is still two mechanisms away and
+  both are OUT below: every stock Alpine binary is `ET_DYN`/PIE with a
+  `PT_INTERP` (task #145), and a stock rootfs carries 335 symlinks including
+  `/bin/sh` itself, which `stalk` does not resolve (task #146).
+- OUT: dynamic linking (`ET_DYN`/PIE + `PT_INTERP` — #145; **the single largest
+  remaining gap between "a Linux binary runs" and "a Linux distro runs"**),
+  symlink resolution in `stalk` (#146),
   `epoll` (v1.1 candidate), `inotify` (degrade), `io_uring`, `bpf`,
   `perf_event_open`, `ptrace`, glibc-dynamic (best-effort), `AF_INET6`,
   cgroups/seccomp, full signal fidelity (Tier 2), **concurrent containers** (a
