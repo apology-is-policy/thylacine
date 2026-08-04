@@ -181,17 +181,24 @@ struct viv_reject {
 static const struct viv_reject g_viv_rejects[] = {
     // THE fd-FREEING SET, and the reason it is listed at all. The V-5 socktab
     // keys on the fd NUMBER, so the entry has to be dropped whenever that
-    // number is freed -- which the close hook in viv_linux_dispatch does, for
-    // close and ONLY for close. That is sufficient today because close is the
-    // only fd-freeing row, and THAT is the fact this block exists to record.
+    // number is freed. Miss it and a freed index whose (proto, N) survives is
+    // handed to the next fd-creating call, so a later connect() writes its dial
+    // verb to a STRANGER'S connection -- the sharpest bug this family can have.
     //
-    // Each of these looks like a trivial renumber (dup3 -> SYS_DUP is nearly
-    // one), and adding one as a plain T1 row would silently reintroduce the
-    // exact bug the hook exists to prevent: a freed fd number whose (proto, N)
-    // entry survives, handed to the next fd-creating call. Promoting any of
-    // them means extending the hook in the same commit.
+    // TWO of them are now rows, and they pay the obligation in DIFFERENT PLACES
+    // (#157). `close` pays it in the ENTRY HOOK in viv_linux_dispatch, which is
+    // correct there because a close whose fd carries an entry always proceeds.
+    // `dup3` pays it INSIDE ITS SHELL, after every refusal and immediately
+    // before the install, because a dup3 can be REFUSED (bad flags, old == new,
+    // bad old) while `new` is a live socket -- an unconditional entry-time drop
+    // would destroy the guest's socket state on a call that failed.
+    //
+    // So the rule for a future promotion is not "extend the hook" but "pay it
+    // in the arm your refusal structure demands". `dup` and `close_range` still
+    // owe it, and each still looks like a trivial renumber that would silently
+    // reintroduce the bug.
     { VIV_LINUX_DUP,         VIV_FORWARD },
-    { VIV_LINUX_DUP3,        VIV_FORWARD },
+    { VIV_LINUX_DUP3,        VIV_TIER2   },  // #157: vivarium_dup3_decide
     { VIV_LINUX_CLOSE_RANGE, VIV_FORWARD },
 
     // pipe2 is an fd-CREATING row, not an fd-freeing one, so it needs no hook
@@ -560,6 +567,30 @@ enum viv_verdict vivarium_pipe2_decide(u64 flags, bool *cloexec_out) {
     // by having been forgotten. O_DIRECT and O_NONBLOCK are the two Linux pipe2
     // flags this deliberately excludes, and each is excluded because devpipe has
     // no counterpart to it -- not because they are unusual.
+    if ((fl & ~(u32)VIV_O_CLOEXEC) != 0) return VIV_FORWARD;
+
+    *cloexec_out = (fl & (u32)VIV_O_CLOEXEC) != 0;
+    return VIV_TRANSLATED;
+}
+
+enum viv_verdict vivarium_dup3_decide(u64 flags, bool *cloexec_out) {
+    if (!cloexec_out) return VIV_FORWARD;
+    *cloexec_out = false;
+
+    // Same narrowing as every sibling, and it MATTERS more here than usual:
+    // musl's __dup3 emits `sxtw x2, w2`, so a negative flags word arrives with
+    // the whole high half set. Linux reads `int flags` -- the low 32 bits -- and
+    // so must this.
+    u32 fl = (u32)flags;
+
+    // THE ALLOW-LIST, which for this row is EQUAL to Linux's accepted set
+    // rather than a subset of it: ksys_dup3 rejects `flags & ~O_CLOEXEC` with
+    // EINVAL and admits nothing else. So an out-of-domain word is not something
+    // we decline to serve -- it is something we serve by refusing, exactly as
+    // Linux refuses it. The SHELL turns this VIV_FORWARD into EINVAL for that
+    // reason; it must not be collapsed into the ENOSYS decline (V-2d's munmap
+    // note: a specific errno the guest can act on must not be replaced by
+    // "this surface is absent", which here would be a lie).
     if ((fl & ~(u32)VIV_O_CLOEXEC) != 0) return VIV_FORWARD;
 
     *cloexec_out = (fl & (u32)VIV_O_CLOEXEC) != 0;

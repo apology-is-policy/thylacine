@@ -279,8 +279,12 @@ fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
     // entrypoint fd 0 as the write end of a pipe with NO READER, so its own
     // `write()` makes the kernel post `pipe` -- a SIGPIPE the guest inflicts on
     // ITSELF, synchronously, with no second Proc timing anything. It is the
-    // only way a v1.0 Linux guest can cause a catchable signal at all: kill and
-    // clone are not table rows, so nothing else can generate one.
+    // only way a v1.0 Linux guest can cause a catchable signal at all: `kill`
+    // and `tkill` are not table rows, and `clone` -- which IS one since LINEAGE
+    // L-3d -- admits only the fork and vfork shapes, never CLONE_THREAD. So a
+    // guest can reach neither another Proc nor a peer thread of its own (#158;
+    // the reason used to be stated as "clone is not a table row", which the
+    // clone row's landing quietly falsified without breaking anything).
     //
     // Scoped to the bundle that asks, rather than an argv flag, so every other
     // container's fd endowment is byte-unchanged. It confers no authority --

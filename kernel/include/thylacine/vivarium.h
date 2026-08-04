@@ -105,10 +105,40 @@ enum viv_verdict vivarium_translate(u64 linux_nr, const u64 *args_in,
 // diff next to its number. (Linux's aarch64 table is stable ABI — these values
 // are fixed for all time by the Linux kernel's own compatibility promise.)
 enum {
-    // THE fd-FREEING SET. `close` is the only one that is a row, and that is a
-    // PRECONDITION of the socktab close hook rather than a coincidence -- see
-    // the hook in viv_linux_dispatch and vivarium.fd_freeing_rows_stay_unserved.
+    // THE fd-FREEING SET -- every row here can destroy a live fd, so every row
+    // here owes the socktab a drop of the entry keyed on the number it frees.
+    // Leaving that out is the sharpest bug this family can have: a freed index
+    // whose (proto, N) survives is handed to the next fd-creating call, and a
+    // later connect() then writes a dial verb to a STRANGER'S connection.
+    //
+    // The obligation is discharged in TWO DIFFERENT PLACES, and the difference
+    // is not stylistic (#157):
+    //   * `close` (57) pays it in the ENTRY HOOK in viv_linux_dispatch, before
+    //     the switch. That is correct there because a close whose fd carries an
+    //     entry ALWAYS proceeds -- an fd with a socktab entry is by construction
+    //     a live fd, so the close cannot then be refused.
+    //   * `dup3` (24) pays it INSIDE ITS SHELL, after every refusal and
+    //     immediately before the install. It cannot use the hook: dup3 can be
+    //     refused (bad flags, old == new, bad old) while `new` is a perfectly
+    //     live socket, and an unconditional entry-time drop would destroy the
+    //     guest's socket state on a call that failed.
+    // A future member must pick the arm its refusal structure demands rather
+    // than copying whichever is nearer; `dup` (23) and `close_range` (436) are
+    // still FORWARD and still owe it.
     VIV_LINUX_DUP         = 23,
+    // dup3 (#157) owes the below-the-ceiling paragraph -- 24's native occupant
+    // is SYS_SPAWN_WITH_CAPS(name_va, name_len, cap_mask), whose arity matches
+    // exactly, so nothing about the shape refuses it and the argument has to be
+    // about what is REACHED. A mis-declared native program spawning a child
+    // instead reaches dup3(old = name_va, new = name_len, flags = cap_mask):
+    // `name_va` is a user VA, which is enormous, so it is out of fd range and
+    // the answer is EBADF before anything is touched. And even had both been
+    // small integers, dup3 acts ONLY on the caller's own handle table and can
+    // at most move a descriptor the Proc already holds -- it mints no object,
+    // crosses no Proc boundary, and consults no capability. Its own fds, never
+    // authority. (Note the direction: cap_mask lands in `flags`, where every
+    // value outside {0, O_CLOEXEC} is EINVAL, so the realistic mis-declaration
+    // is refused on the flags word alone.)
     VIV_LINUX_DUP3        = 24,
     VIV_LINUX_CLOSE_RANGE = 436,
 
@@ -850,11 +880,21 @@ _Static_assert(sizeof(struct viv_sock) == 16, "viv_sock pinned at 16 bytes");
 //
 // LOCK-FREE, AND WHY (the same argument sigtab carries, and the same warning).
 // Entries are read and written with no lock. That is sound because a
-// PHENO_LINUX Proc CANNOT SPAWN A THREAD -- clone/clone3 are not table rows, so
-// they FORWARD to ENOSYS -- and a single-threaded Proc has no peer to race.
-// This is a property of the TRANSLATION TABLE, not of the data, and it
-// EVAPORATES the moment process creation lands (VIVARIUM.md task #93).
-// Re-derive it there; do not assume this comment still holds.
+// PHENO_LINUX Proc CANNOT OBTAIN A PEER THREAD, so there is no peer to race.
+//
+// THE MECHANISM, corrected at #157 because the one this comment used to give
+// had expired without anything failing. It is NOT that clone/clone3 are absent
+// from the table -- `clone` has been a row since LINEAGE L-3d, and L-6a widened
+// it to the fork shape. It is that `vivarium_clone_decide` admits exactly two
+// words by EXACT EQUALITY (SIGCHLD, and CLONE_VM|CLONE_VFORK|SIGCHLD), neither
+// of which carries CLONE_THREAD; refusing the thread set is one of the three
+// things that equality is written to do. A `fork` yields a new PROC with its
+// own table, which races nothing here.
+//
+// So this is a property of the clone row's ARGUMENT DOMAIN, and it evaporates
+// the moment that domain admits the thread set -- a one-line change with no
+// compiler consequence anywhere near this struct. Widening it means re-deriving
+// this; do not assume the comment still holds.
 struct viv_socktab {
     struct viv_sock s[VIV_SOCK_MAX];
 };
@@ -1888,5 +1928,86 @@ bool vivarium_setid_is_noop(u32 requested, u32 current_mapped);
 // set, or VIV_FORWARD for any flag outside the domain (leaving *cloexec_out
 // false, so a caller that ignores the verdict cannot act on a stale true).
 enum viv_verdict vivarium_pipe2_decide(u64 flags, bool *cloexec_out);
+
+// -----------------------------------------------------------------------------
+// dup3 (#157, LINEAGE L-6c). The pipeline's second blocker, and reached the same
+// way pipe2 was: aarch64 HAS NO `dup2` NUMBER (the arch table defines only
+// __NR_dup3 24), so musl's dup2.c compiles `dup2(old, new)` into
+// `__syscall(SYS_dup3, old, new, 0)`. A shell's redirection plumbing is dup2, so
+// there is no route to a pipeline that does not pass through this number.
+//
+// THE ARGUMENT DOMAIN, measured off the gate's own busybox. Four call sites:
+//
+//   0x4d3ca0  musl dup2()       `mov x2, #0`     -> flags 0
+//   0x4d3d0c  musl __dup3()     `sxtw x2, w2`    -> the caller's flags
+//   0x4db7d8  busybox internal  `mov x2, #0`     -> flags 0
+//   0x4db8cc  busybox internal  `mov x2, #0`     -> flags 0
+//
+// AND THIS ROW'S DOMAIN IS COMPLETE, WHICH PIPE2'S WAS NOT. Linux's own dup3
+// rejects everything outside {0, O_CLOEXEC} with EINVAL, so our allow-list is
+// not a subset of what Linux serves -- it is EQUAL to it. pipe2 had to decline
+// O_DIRECT and O_NONBLOCK, which Linux genuinely serves and devpipe cannot
+// represent; here there is nothing of the kind, and the row's degraded tier is
+// entirely about STATE (the socket case below), never about arguments.
+//
+// That equality is why an out-of-domain flags word gets **EINVAL, not ENOSYS**.
+// The distinction is munmap's (V-2d): Linux's own argument errors are
+// reproduced, because a decline would replace a specific errno the guest can
+// act on with "this surface is absent", which here would be false -- we serve
+// this call, and we serve `dup3(a, b, O_NONBLOCK)` exactly as Linux does, by
+// refusing it. So the decide is a predicate over the SERVED PAIR and the shell
+// supplies EINVAL for the rest.
+//
+// TWO THINGS MEASURED IN musl's dup2.c THAT CONSTRAIN THE IMPLEMENTATION:
+//
+//   * `old == new` never reaches the kernel from dup2 -- musl checks it first
+//     and returns via fcntl(old, F_GETFD). (dup3 itself must still answer
+//     EINVAL, which is the documented dup2/dup3 difference, and that path is
+//     reachable from a direct dup3 call.) It is also why #151's fcntl row is
+//     load-bearing for `dup2(x, x)`, which nothing else would have shown.
+//   * musl RETRIES ON -EBUSY, in a bare `while` loop, on BOTH paths. EBUSY is a
+//     Linux-internal race return; this row must never produce it, because a
+//     guest would spin forever rather than see an error. Nothing here does --
+//     but a future refusal must not reach for that errno.
+//
+// THE SOCKET CASE, and why it DECLINES rather than half-serving. On Linux both
+// descriptors name one `struct file`, so both stay fully usable sockets.
+// Thylacine's socktab keys `(proto, N, state)` on the FD NUMBER, one entry per
+// fd, unrefcounted, so there are exactly three things dup3 could do when `old`
+// carries an entry, and two of them are wrong:
+//
+//   COPY the entry     -> two INDEPENDENT state machines over one connection. A
+//                         connect() on fd A advances A to CONNECTED and swaps
+//                         its handle ctl->data, while B still names `ctl` and
+//                         still believes it is FRESH. Not "the same
+//                         description" -- a divergence, actively wrong.
+//   OMIT the entry     -> B is a plain fd on whatever Spoor A held. If A was
+//                         connected this is nearly right (read/write work, since
+//                         B names `data`), but connect/bind/listen/getsockname
+//                         on B fail. "Reads fine, getpeername says EBADF" is the
+//                         silent half-service the argument-domain rule exists to
+//                         forbid.
+//   DECLINE            -> ENOSYS, reported, reversible, and visible to whoever
+//                         next needs it.
+//
+// Declining is what happens. Reproducing Linux exactly needs a REFCOUNTED
+// socktab entry -- a real change to a table V-5 audited -- and that decision
+// belongs in a chunk that is about it. Note the cost is bounded and known: a
+// shell's dup2 is for files and pipes, and the idiom this turns away is the
+// inetd shape (`dup2(connfd, 0); dup2(connfd, 1)`), recorded in VIVARIUM.md
+// section 9's DEGRADED tier.
+//
+// THE DESTINATION IS A DIFFERENT QUESTION AND IS SERVED. dup3 CLOSES `new`, so
+// if `new` carries a socktab entry that entry must be dropped -- the fd-freeing
+// obligation at the top of this header. It is paid inside the shell rather than
+// the dispatch hook, because dup3 can be refused while `new` is a live socket
+// and an entry-time drop would destroy socket state on a call that failed.
+//
+// PURE, like every other decide: no Proc, no table, no memory. Returns
+// VIV_TRANSLATED with *cloexec_out set for {0, O_CLOEXEC}, or VIV_FORWARD for
+// any other flags word (leaving *cloexec_out false, so a caller that ignores
+// the verdict cannot act on a stale true). The fd arguments are STATE, not
+// arguments in this sense, and are the shell's business.
+enum viv_verdict vivarium_dup3_decide(u64 flags, bool *cloexec_out);
 
 #endif // THYLACINE_VIVARIUM_H

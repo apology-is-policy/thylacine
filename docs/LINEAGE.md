@@ -653,6 +653,81 @@ reason: the probe is pool-resident, and a `PRESERVE=1` build silently ran the
 STALE binary — #126, diagnosed by measurement rather than by re-reading the
 code that was already correct.)
 
+#### As built at L-6c (#157) — the dup3 row, and the gate goes green
+
+**The last blocker, and the one the pipe2 chunk had already measured.** aarch64
+has no `dup2` number, so musl's `dup2.c` compiles `dup2(old,new)` into
+`__syscall(SYS_dup3, old, new, 0)`, and a shell's redirection plumbing therefore
+cannot reach a pipeline without it. Four call sites in the gate's own busybox:
+two musl (`dup2` hardcoding `mov x2, #0`; `__dup3` passing `sxtw x2, w2`) and two
+busybox-internal, both zero.
+
+**This row's domain is COMPLETE, where pipe2's was a subset — and that changes
+the errno.** Linux's `ksys_dup3` rejects everything outside `{0, O_CLOEXEC}` with
+`EINVAL`, so our allow-list is not a cautious narrowing of what Linux serves, it
+is *equal* to it. An out-of-domain flags word therefore gets **EINVAL, not the
+ENOSYS decline every other T2 row gives**: we serve `dup3(a,b,O_NONBLOCK)`
+exactly as Linux does — by refusing it — and answering ENOSYS would claim the
+surface is absent, which would be a lie. (V-2d's munmap note drew the same line
+for `len == 0` and a misaligned address.) The row's degraded tier is entirely
+about STATE, never arguments.
+
+**Reading musl's dup2.c constrained the implementation twice.** `old == new`
+never arrives from `dup2` — musl short-circuits it through `fcntl(old, F_GETFD)`
+first, which is also the only thing that shows #151's `fcntl` row is load-bearing
+for `dup2(x,x)`. And musl **retries on `-EBUSY` in a bare `while` loop on both
+paths**, so this row must never produce that errno: a guest would spin forever
+rather than see an error.
+
+**A new primitive, because none of the three neighbours does this.**
+`handle_dup_posix` picks the index; `handle_replace` demands a live one and takes
+an object rather than a source handle; `handle_table_copy_into` demands a free one
+in another table. dup3 needs a *caller-named* index that may be free **or** live,
+so `handle_dup_to` is a genuine fourth combination rather than a convenience. It
+is deliberately not close-then-dup, for the reason `handle_replace`'s header
+already records for `connect`: the freed index is not reserved, so a peer's
+fd-creating syscall can take it in between.
+
+**The socket case declines, and the alternatives are written down rather than
+implied.** The socktab keys `(proto, N, state)` on the fd NUMBER and is not
+refcounted, so there are three things dup3 could do and two are wrong. *Copying*
+the entry gives two independent state machines over one connection — a `connect`
+on A advances A and swaps its handle `ctl`→`data` while B still names `ctl` and
+still believes it is FRESH, which is a divergence, not a shared description.
+*Omitting* it gives an fd that reads and writes correctly but fails
+`connect`/`bind`/`getsockname` — "reads fine, `getpeername` says EBADF" is exactly
+the silent half-service the argument-domain rule exists to forbid. Reproducing
+Linux needs a refcounted entry, a real change to a table V-5 audited, and that
+belongs in a chunk about it; the cost is bounded and named (the inetd
+`dup2(connfd,0); dup2(connfd,1)` idiom), published in VIVARIUM §9's DEGRADED tier.
+
+**The fd-freeing obligation is paid in a different arm from `close`'s, and that
+is the rule a future promotion follows.** `close` pays in the entry hook, which is
+sound *there* only because a close whose fd carries an entry always proceeds.
+dup3 pays inside its shell, after every refusal — because a dup3 can be refused
+(bad flags, `old == new`, bad `old`) while `new` is a perfectly live socket, and
+an entry-time drop would destroy the guest's socket state on a call that failed.
+It also drops *after* the install rather than before, the opposite of
+`viv_sock_accept`'s unwind, and the reason does not transfer: there the number is
+freed and reallocatable, here it is never free.
+
+**Two revert probes, blind to each other in opposite directions.** Removing the
+socktab drop leaves the unit suite at a **full 1321/1321 PASS** and fails only
+in-guest, boot-fatally, at `marker=L199` — its own named leg. Turning the
+allow-list into a deny-list fails `vivarium.dup3_domain` at **1320/1321** on the
+bare `1u` case, which the guest legs cannot see, because L194 tests `O_NONBLOCK`
+and a deny-list still refuses that.
+
+**THE ARC GATE PASSES.** `L6C-A` through `L6C-I`: busybox `sh` forked, exec'd,
+piped, substituted, looped, nested and reaped. `L6C_GATE_FATAL` flips to 1 in the
+same commit, because a gate that cannot redden is a disabled test and six landed
+fixes (#149, #150, #151, #140, #155, #157) would otherwise have nothing watching
+them. Two things the passing run surfaced are enqueued rather than mentioned in
+passing: **#159** (`viv_report_unserved` emits its line as seven unbracketed
+`uart_puts` calls, and the log shows two reporters interleaved mid-word — the
+#75/#76/#152 console-writer-set family, one site further along) and **#160** (the
+next unserved numbers are `ioctl` 29 and `sendfile` 71, neither blocking).
+
 ### 5.3 Stage 2 — `rfork(RFPROC|RFMEM)` + VFORK
 
 A new Proc that takes a **reference** to the parent's AddrSpace instead of a

@@ -593,11 +593,25 @@ falsify — not an invariant of the code.)
 
 **A thread-safety property that is a property of the TABLE, not of the data.**
 `socktab` (like `sigtab`) is read and written without a lock. That is sound today
-only because **a `PHENO_LINUX` Proc cannot spawn a thread** — `clone`/`clone3` are
-not table rows, so they FORWARD to `ENOSYS` — and a single-threaded Proc has no
+only because **a `PHENO_LINUX` Proc cannot obtain a PEER THREAD**, so there is no
 peer to race. This is *not* a property of the entries being small or of any
-atomicity argument, and **it evaporates the moment process creation lands (task
-#93)**. Both tables must be re-derived there, and the field comments say so.
+atomicity argument.
+
+**The MECHANISM, corrected at #157/#158.** This paragraph used to say the reason
+was that `clone`/`clone3` are not table rows — which was true when written and
+was falsified by LINEAGE L-3d landing the clone row (L-6a then widened it to the
+fork shape), *without anything failing*. The reason it still holds is narrower
+and lives one function away: `vivarium_clone_decide` admits exactly two words by
+**exact equality** (`SIGCHLD`, and `CLONE_VM|CLONE_VFORK|SIGCHLD`), and neither
+carries `CLONE_THREAD` — refusing the thread set is one of the three things that
+equality is written to do. A `fork` yields a new *Proc* with its own tables,
+which races nothing here.
+
+So the property now **evaporates the moment the clone domain admits the thread
+set** — a one-line change with no compiler consequence anywhere near either
+table. Both must be re-derived then, and the field comments say so. (The general
+shape: a load-bearing sentence must name the mechanism that is *actually*
+holding, or nobody can re-check it when that mechanism moves.)
 (V-6c left the opposite claim on `sigtab` — that byte-sized entries could not tear
 — which was true at V-6b and false once entries widened to 32 bytes; corrected in
 the same commit as this section, task #97.)
@@ -2193,9 +2207,12 @@ them wrong:
   is the remaining half, and it is now a pure reporting change with the hard
   part (the save) already done.
 
-**A v1.0 Linux guest can only signal ITSELF**, and that shaped the gate. `kill`,
-`tkill` and `clone` are not table rows, so no guest can generate a signal for
-another Proc or spawn a thread to race its own disposition table. The
+**A v1.0 Linux guest can only signal ITSELF**, and that shaped the gate. `kill`
+and `tkill` are not table rows, and `clone` — which *is* one since LINEAGE L-3d —
+admits only the fork and vfork shapes, never `CLONE_THREAD`. So no guest can
+generate a signal for another Proc or spawn a peer thread to race its own
+disposition table. (Corrected at #158: the reason used to be stated as "`clone`
+is not a table row", which the clone row's landing quietly falsified.) The
 `viv-pheno-probe` gate therefore uses the one self-inflicted route that exists:
 the bundle declares `org.thylacine.sigpipe-selftest`, `viv` hands the entrypoint
 fd 0 as the write end of a reader-less pipe, and the guest's own `write()` makes
@@ -2468,6 +2485,8 @@ degradation; anything that changes what the guest can *reach* is not, and is OUT
 | **More than 64 CONTRIBUTING fds is refused** (§5.5.4, V-5c-2) | `POLL_MAX_NFDS` bounds the pollfd ARRAY. Note this is a bound on the *count*, not on fd *values*: a `select` over fds 200 and 201 is two pollfds and is fine. (pouch's `select` caps the wrong axis and returns `EBADF` for any fd ≥ 64 — task #99 F-a) |
 | **An `nfds` above the fd table is CLAMPED, not refused** (§5.5.4, V-5c-2) | Which is Linux's own `if (n > max_fds) n = max_fds`. A bit above the table names an fd that cannot exist, so it is simply not scanned. A bit *below* the clamp naming no open handle still becomes `POLLNVAL` → `EBADF`, which is also Linux |
 | **`pipe2` admits `{0, O_CLOEXEC}` and nothing else** (#155) | `O_NONBLOCK` and `O_DIRECT` are flags Linux's `pipe2` genuinely accepts, and both answer `ENOSYS` here — devpipe has no non-blocking read and no packet framing, so admitting either would tell a guest something false about the pipe it just received. An allow-list rather than a deny-list, for the reason V-2d's `mmap` recorded: aarch64 defines flags a deny-list admits by omission. The two admitted values are not a conservative subset — they are what the gate's own busybox issues, measured off the binary (four sites through musl's `pipe()` with a hardcoded `mov x1, #0`, two through `pipe2()` with `mov w1, #0x80000`), and on aarch64 there is no legacy `pipe` number to reach instead |
+| **`dup3` DECLINES when the SOURCE is a socket** (#157) | `dup2(sockfd, 0)` — the inetd idiom — answers `ENOSYS`. Thylacine's socktab keys `(proto, N, state)` on the fd NUMBER and is not refcounted, so two descriptors cannot share one socket's state, and both alternatives are wrong rather than merely imperfect: *copying* the entry gives two independent state machines over one connection (a `connect` on the first advances it and swaps its handle `ctl`→`data` while the second still names `ctl` and still believes it is FRESH), and *omitting* it gives an fd that reads and writes correctly but fails `connect`/`bind`/`getsockname` — the silent half-service §6.19's argument-domain rule exists to forbid. Reproducing Linux exactly needs a refcounted socktab entry, a real change to a table V-5 audited. A shell's `dup2` is for files and pipes, so the L-6c gate is unaffected; what this turns away is a server doing `dup2(connfd,0); dup2(connfd,1)`. Note the DESTINATION being a socket is a different question and IS served — dup3 closes it, and the entry keyed on that number is dropped |
+| **`dup3` admits `{0, O_CLOEXEC}` and refuses the rest with `EINVAL`, not `ENOSYS`** (#157) | Listed here for contrast rather than as a gap: unlike `pipe2` above, this row's served set is **equal** to Linux's, because `ksys_dup3` refuses everything outside the same pair with `EINVAL`. So a refused flags word is us reproducing Linux exactly, not declining to serve — which is why it must not be collapsed into the ENOSYS decline (V-2d's `munmap` note). The only genuinely degraded thing about this row is the socket case above |
 
 ---
 

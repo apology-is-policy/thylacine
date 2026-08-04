@@ -704,14 +704,25 @@ struct Proc {
     // Installed with a compare-exchange, loser frees -- the alloc happens
     // outside every lock (the 8a-2b debug_hw shape).
     //
-    // LOCK-FREE ENTRY ACCESS, AND WHY (task #97 -- this paragraph replaced a
-    // WRONG one). Entries are read and written with no lock. That is sound
-    // because a PHENO_LINUX Proc **cannot spawn a thread**: `clone`/`clone3`
-    // are not table rows, so they FORWARD -> ENOSYS (VIVARIUM.md task #93).
-    // A single-threaded Proc has no peer to race, so there is nothing to
-    // serialise. This is a property of the TRANSLATION TABLE, not of the data
-    // -- and it EVAPORATES the moment process creation lands. Re-derive it
-    // there; do not assume this comment still holds.
+    // LOCK-FREE ENTRY ACCESS, AND WHY (task #97 replaced a wrong paragraph
+    // here; task #158 replaced its REASON, which had expired the same way).
+    // Entries are read and written with no lock. That is sound because a
+    // PHENO_LINUX Proc **cannot obtain a peer thread**, so there is no peer to
+    // race and nothing to serialise.
+    //
+    // THE MECHANISM, stated precisely because the previous one stopped being
+    // true without anything failing. It is NOT that `clone` is unserved -- it
+    // has been a table row since LINEAGE L-3d, and L-6a widened it to the fork
+    // shape. It is that `vivarium_clone_decide` admits exactly two words by
+    // EXACT EQUALITY (SIGCHLD, and CLONE_VM|CLONE_VFORK|SIGCHLD), and neither
+    // carries CLONE_THREAD; the decide's own comment names the thread set as
+    // one of the three things that equality exists to refuse. A `fork` gives a
+    // new PROC, which has its own table and races nothing here.
+    //
+    // So this is a property of the clone row's ARGUMENT DOMAIN, and it
+    // evaporates the moment that domain admits the thread set -- which is a
+    // one-line change with no compiler consequence anywhere near this field.
+    // Widening it means re-deriving this; do not assume the comment still holds.
     //
     // The claim this replaced ("entry writes are independent single bytes, so
     // concurrent rt_sigaction calls cannot tear") was true at V-6b, when an
@@ -733,9 +744,10 @@ struct Proc {
     // -- docs/VIVARIUM.md section 5.5.2 has the measurement showing why.
     //
     // The SAME lock-free argument applies, with the same warning: it is sound
-    // only because a PHENO_LINUX Proc cannot spawn a thread (clone is not a
-    // table row), a property of the TRANSLATION TABLE that evaporates when
-    // process creation lands (#93).
+    // only because a PHENO_LINUX Proc cannot obtain a PEER THREAD -- and see
+    // the sigtab paragraph above for why that is a fact about the clone row's
+    // argument domain (which exists) rather than about the row's absence
+    // (which was the stated reason, and stopped being true at L-3d; #158).
     struct viv_socktab *socktab;
 };
 

@@ -321,7 +321,13 @@ const NEG_EBADF: i64 = -9;
 const NR_FCNTL: u64 = 25;
 const F_DUPFD: u64 = 0;
 const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const FD_CLOEXEC: u64 = 1;
 const F_DUPFD_CLOEXEC: u64 = 1030;
+
+// #157: dup3. aarch64 has NO dup2 number, so musl's dup2() compiles into this
+// call with flags 0 -- there is no second way for a shell to redirect an fd.
+const NR_DUP3: u64 = 24;
 
 // #155: pipe2. On aarch64 this is the ONLY pipe number -- the generic syscall
 // table has no legacy `pipe`, which is why musl's pipe() is this call with
@@ -1046,7 +1052,10 @@ unsafe fn run_linux() -> ! {
     // --- V-5b: the server path ---------------------------------------------
     // THE WHOLE ROUND-TRIP RUNS IN THIS ONE SINGLE-THREADED PROCESS, which is
     // not a shortcut but the only shape available: a PHENO_LINUX Proc cannot
-    // spawn a thread (clone is not a table row) and cannot fork. It works
+    // spawn a peer THREAD (the clone row admits the fork and vfork shapes only,
+    // never CLONE_THREAD -- #158; and it CAN fork since L-6a, which this comment
+    // used to deny). A forked child would be a separate Proc with its own
+    // socktab, so it could not serve as the peer this leg would need. It works
     // because TCP establishes in netd's STACK, not in accept(): the client's
     // connect() completes the handshake against the announced listener, and
     // the server's accept() then finds the connection already waiting. That is
@@ -2247,6 +2256,107 @@ unsafe fn run_linux() -> ! {
     leg!(rep, svc3(NR_PIPE2, fds.as_mut_ptr() as u64, 0, 0) == 0, b"L192\n");
     let _ = svc3(NR_CLOSE, fds[0] as u64, 0, 0);
     let _ = svc3(NR_CLOSE, fds[1] as u64, 0, 0);
+
+    // --- L193-L199 (#157): dup3 ---------------------------------------------
+    // The unit tests prove the DECISION (the flags domain) and the PRIMITIVE
+    // (handle_dup_to's index, rights, flag and counter behaviour). These legs
+    // prove the SHELL, which neither can reach: Linux's check ORDER, the
+    // EINVAL-not-ENOSYS distinction, and the socktab obligations -- which need
+    // a live /net socket and so exist only in-guest.
+
+    // The redirection itself, which is the whole reason the row exists. Write
+    // through the DUPLICATE and read from the original pipe's read end: a dup3
+    // that returned the right number while wiring nothing would pass a check
+    // that only looked at the return value.
+    let mut pfd: [i32; 2] = [-1, -1];
+    let _ = svc3(NR_PIPE2, pfd.as_mut_ptr() as u64, 0, 0);
+    let dup_at: u64 = 30;
+    let tx2: [u8; 1] = [0x7e];
+    let mut rx2: [u8; 1] = [0];
+    leg!(
+        rep,
+        svc3(NR_DUP3, pfd[1] as u64, dup_at, 0) == dup_at as i64
+            && svc3(NR_WRITE, dup_at, tx2.as_ptr() as u64, 1) == 1
+            && svc3(NR_READ, pfd[0] as u64, rx2.as_mut_ptr() as u64, 1) == 1
+            && rx2[0] == 0x7e,
+        b"L193\n"
+    );
+
+    // THE ARGUMENT ERRORS, in Linux's own order and with Linux's own errnos.
+    // A bad flag is EINVAL, NOT the ENOSYS decline every other T2 row gives --
+    // this row's served set is EQUAL to Linux's, so refusing O_NONBLOCK here is
+    // us reproducing Linux exactly rather than declining to serve. Getting this
+    // wrong is invisible to the unit test, which sees only the verdict.
+    leg!(
+        rep,
+        svc3(NR_DUP3, pfd[0] as u64, dup_at, O_NONBLOCK) == NEG_EINVAL,
+        b"L194\n"
+    );
+    // old == new is EINVAL even though both are perfectly good descriptors --
+    // the documented dup2/dup3 difference. musl's dup2 never sends it (it
+    // short-circuits via fcntl first), so only a direct dup3 reaches this.
+    leg!(
+        rep,
+        svc3(NR_DUP3, pfd[0] as u64, pfd[0] as u64, 0) == NEG_EINVAL,
+        b"L195\n"
+    );
+    // ...and EINVAL WINS OVER EBADF when both apply, because the equality check
+    // precedes the lookup. 250 is inside the table but empty, so `old == new`
+    // is being asserted against a pair that would otherwise be EBADF.
+    leg!(
+        rep,
+        svc3(NR_DUP3, 250, 250, 0) == NEG_EINVAL
+            && svc3(NR_DUP3, 250, dup_at, 0) == NEG_EBADF
+            && svc3(NR_DUP3, pfd[0] as u64, 100000, 0) == NEG_EBADF,
+        b"L196\n"
+    );
+
+    // close-on-exec is taken from the FLAG, not inherited. Flag the source
+    // first so a dup3 that copied the source's bit instead would come out 1.
+    let _ = svc3(NR_FCNTL, pfd[0] as u64, F_SETFD, FD_CLOEXEC);
+    leg!(
+        rep,
+        svc3(NR_DUP3, pfd[0] as u64, 31, 0) == 31
+            && svc3(NR_FCNTL, 31, F_GETFD, 0) == 0
+            && svc3(NR_DUP3, pfd[0] as u64, 32, O_CLOEXEC) == 32
+            && svc3(NR_FCNTL, 32, F_GETFD, 0) == 1,
+        b"L197\n"
+    );
+    let _ = svc3(NR_CLOSE, 31, 0, 0);
+    let _ = svc3(NR_CLOSE, 32, 0, 0);
+    let _ = svc3(NR_CLOSE, dup_at, 0, 0);
+
+    // THE SOCKET DECLINE. Thylacine's socktab keys (proto, N, state) on the fd
+    // NUMBER and is not refcounted, so two descriptors cannot share one socket's
+    // state -- copying the entry gives two diverging state machines, omitting it
+    // gives an fd that reads but cannot connect. Declining is the honest answer
+    // and this leg is what pins it as a DECISION rather than an oversight.
+    let sd = svc3(NR_SOCKET, AF_INET, SOCK_DGRAM, 0);
+    leg!(
+        rep,
+        sd >= 0 && svc3(NR_DUP3, sd as u64, 33, 0) == NEG_ENOSYS,
+        b"L198\n"
+    );
+
+    // THE fd-FREEING OBLIGATION, from the guest side, and the reason it cannot
+    // be a unit test: dup3 CLOSES its target, so a socktab entry keyed on that
+    // number must not outlive it. Overwrite the socket fd with the pipe's read
+    // end, then bind() the number. With the drop, viv_sock_bind finds no entry
+    // and answers ENOTSOCK. WITHOUT it, bind finds the stale FRESH entry and
+    // SUCCEEDS -- stamping an address onto a connection the fd no longer names.
+    let mut sa: [u8; 16] = [0; 16];
+    sa[0] = 2; // AF_INET, little-endian u16
+    sa[2] = 0x1f;
+    sa[3] = 0x90; // port 8080, network order
+    leg!(
+        rep,
+        svc3(NR_DUP3, pfd[0] as u64, sd as u64, 0) == sd
+            && svc3(NR_BIND, sd as u64, sa.as_ptr() as u64, 16) == -ENOTSOCK,
+        b"L199\n"
+    );
+    let _ = svc3(NR_CLOSE, sd as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, pfd[0] as u64, 0, 0);
+    let _ = svc3(NR_CLOSE, pfd[1] as u64, 0, 0);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

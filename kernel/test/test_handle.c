@@ -642,3 +642,89 @@ void test_handles_dup_posix(void) {
 
     test_proc_drop(p);
 }
+
+// #157: dup onto a SPECIFIC index -- what dup2/dup3 needs and what none of the
+// three neighbouring primitives does (dup_posix picks the index, replace demands
+// a live one, the fork copy demands a free one).
+void test_handles_dup_to(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    hidx_t src = handle_alloc(p, KOBJ_PROCESS, RIGHT_READ | RIGHT_TRANSFER, p);
+    TEST_ASSERT(src >= 0, "src alloc failed");
+
+    // (1) INTO A FREE SLOT, at the EXACT index. 40 is far above the lowest free
+    // one, so a handle_dup_posix-style "first free >= min" would also land at 40
+    // and this leg alone cannot tell them apart -- leg (2) is what does.
+    TEST_EXPECT_EQ((int)handle_dup_to(p, src, 40, /*cloexec=*/false), 40,
+                   "dup_to returns the index it was given");
+    struct Handle got;
+    TEST_ASSERT(handle_get(p, 40, &got) == 0, "the target is live");
+    TEST_EXPECT_EQ((u64)got.rights, (u64)(RIGHT_READ | RIGHT_TRANSFER),
+                   "rights carried VERBATIM (POSIX: same access)");
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_PROCESS, "and the kind");
+    handle_put(&got);
+    TEST_EXPECT_EQ(handle_get_cloexec(p, 40), 0, "cloexec=false was honoured");
+
+    // (2) ONTO A LIVE SLOT -- the leg that separates this from every neighbour.
+    // Put a DIFFERENT kind at 41 first so the overwrite is visible in the
+    // result rather than only in a refcount.
+    hidx_t occ = handle_alloc(p, KOBJ_THREAD, RIGHT_READ, NULL);
+    TEST_ASSERT(occ >= 0, "occupant alloc failed");
+    TEST_ASSERT(handle_dup_to(p, src, occ, /*cloexec=*/false) == occ,
+                "dup_to overwrites a LIVE slot rather than refusing it");
+    TEST_ASSERT(handle_get(p, occ, &got) == 0, "the overwritten slot is live");
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_PROCESS,
+                   "it now names the source, not the old occupant");
+    handle_put(&got);
+
+    // (3) THE COUNTER ARITHMETIC, which is the only thing that can catch a
+    // one-sided bump. Over a LIVE slot one descriptor dies and one is born, so
+    // the LIVE count (allocated - freed) must not move; over a FREE slot it
+    // must go up by exactly one.
+    u64 a0 = handle_total_allocated(), f0 = handle_total_freed();
+    TEST_ASSERT(handle_dup_to(p, src, occ, false) == occ, "dup_to over live");
+    TEST_EXPECT_EQ((handle_total_allocated() - a0) - (handle_total_freed() - f0),
+                   (u64)0, "over a LIVE slot the live count is unchanged");
+    u64 a1 = handle_total_allocated(), f1 = handle_total_freed();
+    TEST_ASSERT(handle_dup_to(p, src, 42, false) == 42, "dup_to into free");
+    TEST_EXPECT_EQ((handle_total_allocated() - a1) - (handle_total_freed() - f1),
+                   (u64)1, "into a FREE slot the live count rises by one");
+
+    // (4) close-on-exec is SET FROM THE ARGUMENT -- not inherited from the
+    // source (the classic dup2 mistake; POSIX clears it) and not from the slot's
+    // previous occupant (the reused-identity failure). Flag BOTH so a wrong
+    // answer cannot come out right by accident.
+    TEST_ASSERT(handle_set_cloexec(p, src, true) == 0, "flag the source");
+    TEST_ASSERT(handle_set_cloexec(p, 40, true) == 0, "flag the occupant");
+    TEST_ASSERT(handle_dup_to(p, src, 40, /*cloexec=*/false) == 40, "dup_to");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, 40), 0,
+                   "cloexec=false wins over BOTH a flagged source and a flagged "
+                   "previous occupant");
+    TEST_ASSERT(handle_dup_to(p, src, 43, /*cloexec=*/true) == 43, "dup_to");
+    TEST_EXPECT_EQ(handle_get_cloexec(p, 43), 1, "and cloexec=true is honoured");
+
+    // (5) REFUSALS, fail-closed. old == new is refused rather than made a no-op:
+    // serving it would set cloexec on a descriptor POSIX dup2 returns untouched.
+    TEST_ASSERT(handle_dup_to(p, src, src, false) < 0, "old == new refuses");
+    TEST_ASSERT(handle_dup_to(p, -1, 44, false) < 0, "a negative source refuses");
+    TEST_ASSERT(handle_dup_to(p, src, -1, false) < 0, "a negative target refuses");
+    TEST_ASSERT(handle_dup_to(p, PROC_HANDLE_MAX, 44, false) < 0,
+                "an out-of-range source refuses");
+    TEST_ASSERT(handle_dup_to(p, src, PROC_HANDLE_MAX, false) < 0,
+                "an out-of-range target refuses");
+    TEST_ASSERT(handle_dup_to(p, 45, 44, false) < 0, "an EMPTY source refuses");
+
+    // (6) THE ALIAS GATE, the same predicate handle_dup and the fork copy use:
+    // a KOBJ_SRV connection Spoor is pinned to its Proc, so a second handle
+    // naming it is refused here exactly as it is there. A target left untouched
+    // by the refusal is part of the contract.
+    hidx_t srv = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, NULL);
+    TEST_ASSERT(srv >= 0, "srv alloc failed");
+    TEST_ASSERT(handle_dup_to(p, srv, 44, false) < 0,
+                "a non-aliasable source refuses (NoSrvDup)");
+    TEST_ASSERT(handle_get(p, 44, &got) != 0,
+                "and the refusal left the target slot alone");
+
+    test_proc_drop(p);
+}

@@ -9022,6 +9022,75 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         }
     }
 
+    case VIV_LINUX_DUP3: {
+        // dup3(old, new, flags): x0 old, x1 new, x2 flags. (#157 -- aarch64 has
+        // no dup2 number, so musl compiles dup2() into this; a shell's
+        // redirection plumbing cannot reach a pipeline without it.)
+        bool cloexec = false;
+        if (vivarium_dup3_decide(args[2], &cloexec) != VIV_TRANSLATED)
+            return -(s64)T_E_INVAL;   // Linux's OWN answer -- see below
+
+        // LINUX'S CHECK ORDER, REPRODUCED, because it is observable. ksys_dup3
+        // does flags-EINVAL, then old==new-EINVAL, then newfd-range-EBADF, then
+        // the oldfd lookup. In particular `old == new` is EINVAL *even when old
+        // is closed*, because the equality precedes the lookup -- so the two
+        // cannot be reordered without changing what a conformance test sees.
+        //
+        // The EINVAL above is NOT the ENOSYS decline every other T2 row gives
+        // for an out-of-domain argument, and the difference is the point: this
+        // row's served set is EQUAL to Linux's, not a subset of it, so a flags
+        // word we refuse is one Linux refuses too. Answering ENOSYS would claim
+        // the surface is absent, which would be false. (V-2d's munmap note made
+        // the same distinction for len==0 and a misaligned addr.)
+        //
+        // Both fds narrow to 32 bits BEFORE the comparison: Linux declares them
+        // `unsigned int`, so dup3(1<<32, 0, 0) compares 0 against 0 and is
+        // EINVAL there. Comparing the raw registers would call it a valid dup.
+        u32 oldfd = (u32)args[0];
+        u32 newfd = (u32)args[1];
+        if (oldfd == newfd)                return -(s64)T_E_INVAL;
+        if (newfd >= (u32)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+        if (oldfd >= (u32)PROC_HANDLE_MAX) return -(s64)T_E_BADF;
+
+        // THE SOCKET DECLINE (vivarium.h carries the three options and why the
+        // other two are wrong). It sits HERE -- after every argument error and
+        // before any mutation -- so that a decline can never mask an EINVAL or
+        // EBADF that Linux would have given for the same call.
+        struct viv_socktab *stab =
+            __atomic_load_n(&p->socktab, __ATOMIC_ACQUIRE);
+        if (viv_socktab_find(stab, (s32)oldfd) != NULL)
+            return -(s64)T_E_NOSYS;
+
+        // The install. A -1 here is an empty `old` or a source the alias gate
+        // refuses (hardware / Srv / Loom / a devsrv connection Spoor). EBADF is
+        // the honest answer to both: Linux has no "this descriptor exists but
+        // cannot be duplicated" state, and the second case is unreachable for a
+        // phenotyped Proc anyway -- it cannot create such a handle (the create
+        // syscalls are native numbers it does not decode) and rfork's copy
+        // refuses to inherit one, leaving a hole.
+        if (handle_dup_to(p, (hidx_t)oldfd, (hidx_t)newfd, cloexec) < 0)
+            return -(s64)T_E_BADF;
+
+        // THE fd-FREEING OBLIGATION, paid for `new`. dup3 closed whatever was
+        // there, so a (proto, N) entry keyed on that number must not outlive it.
+        //
+        // AFTER the install, deliberately, and this is the OPPOSITE of the order
+        // viv_sock_accept's unwind uses. That path drops first because it then
+        // CLOSES the fd, leaving the number free for the next fd-creating call
+        // to be handed while a stale entry still points at it. Here the number
+        // is never free -- handle_dup_to overwrites the slot in one lock hold --
+        // so no such window exists, and dropping first would instead mean a
+        // REFUSED dup3 (the -1 above) had already destroyed the guest's live
+        // socket state at `new`. Between the install and this drop nothing of
+        // the guest's runs; handle_dup_to's outgoing release may sleep, but a
+        // PHENO_LINUX Proc has no peer thread to observe the gap (the property
+        // named in struct viv_socktab's header, which must be re-derived if the
+        // clone domain ever admits the thread set).
+        viv_socktab_drop(stab, (s32)newfd);
+
+        return (s64)newfd;
+    }
+
     case VIV_LINUX_PIPE2: {
         // pipe2(fds, flags): x0 int[2], x1 flags. (#155 -- a shell cannot build
         // a pipeline without it, and aarch64 has no legacy `pipe` to fall back

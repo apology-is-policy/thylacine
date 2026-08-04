@@ -390,6 +390,51 @@ int handle_table_copy_into(struct Proc *dst, struct Proc *src);
 // min_idx.
 hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
 
+// #157: dup `old` onto the SPECIFIC index `new_h`, closing whatever was there.
+// This is POSIX dup2 / Linux dup3, and it is a genuinely new combination rather
+// than a convenience over the three neighbours -- each of them fixes a different
+// one of the two axes (where the source comes from, whether the destination may
+// be occupied):
+//
+//   handle_dup_posix       source = a slot; destination = first free >= min;
+//                          destination must be FREE, and which index you get is
+//                          an OUTPUT.
+//   handle_replace         source = a caller-held object; destination = a fixed
+//                          index that must be LIVE; outgoing released.
+//   handle_table_copy_into source = a slot in ANOTHER table; destination = the
+//                          same fixed index, which must be FREE.
+//   handle_dup_to          source = a slot; destination = a fixed index, free
+//                          OR live; outgoing released if live.
+//
+// WHY NOT close-then-handle_dup_posix(min_idx=new_h). handle_replace's header
+// already carries this argument for `connect` and it applies here verbatim: the
+// freed index is not reserved, so a peer thread's fd-creating syscall can take
+// it between the two calls and the dup then lands somewhere else entirely --
+// silently, and only under concurrency. Doing it in one lock hold is also what
+// makes the outgoing release happen AFTER the new object is installed, so the
+// slot is never momentarily empty for anyone to allocate into.
+//
+// Rights are carried VERBATIM (POSIX: the new descriptor has the same access;
+// I-6 is satisfied by non-increasing, exactly as handle_table_copy_into's
+// carry). Close-on-exec is SET FROM `cloexec`, never inherited from `old` --
+// that is POSIX dup2 (the flag belongs to the descriptor, and this is a new
+// descriptor) and it is why dup3 has a flags argument at all.
+//
+// The SOURCE passes the same `handle_slot_may_alias` gate handle_dup uses,
+// because this creates a second handle naming one object and so faces the
+// identical hazard. The DESTINATION is deliberately UNGATED by kind: it is
+// being closed, and handle_close places no kind restriction on closing, so
+// refusing here would invent a rule that dup2-onto-fd-N is less permitted than
+// close(N)-then-dup. (handle_replace refuses a non-Spoor outgoing for a reason
+// that does not transfer: its swap is INTERNAL to connect() and invisible to
+// the guest, whereas a dup3 caller has explicitly named the fd it wants gone.)
+//
+// Returns `new_h` on success, -1 on: either index out of range, old == new_h
+// (refused rather than made a no-op -- the caller's own EINVAL should have
+// caught it, and a primitive that cannot corrupt beats one that happens not
+// to), an empty `old`, or a source the alias gate rejects.
+hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
+
 // #151: read / write a slot's close-on-exec flag. Returns 0 or 1 (get) and 0
 // (set) on success; -1 if h is out of range or names a free slot.
 //

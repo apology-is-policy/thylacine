@@ -801,6 +801,73 @@ hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec) 
                              min_idx, cloexec);
 }
 
+// #157: dup onto a SPECIFIC index. The header carries the contract and why this
+// is not close-then-dup; the body is handle_dup_common's capture-and-acquire
+// followed by handle_replace's install-then-release-outside-the-lock, with the
+// install going to a caller-named slot that may be free.
+hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (old < 0   || old   >= PROC_HANDLE_MAX) return -1;
+    if (new_h < 0 || new_h >= PROC_HANDLE_MAX) return -1;
+    // Defence in depth: the caller returns EINVAL for this. Serving it here
+    // would be nearly harmless (acquire, capture the same slot, install the
+    // same values, release -- net zero) EXCEPT that it would set cloexec on a
+    // descriptor POSIX says dup2 returns untouched. Refusing is one line.
+    if (old == new_h) return -1;
+
+    spin_lock(&t->lock);
+    struct Handle *src = &t->slots[old];
+    if (src->magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    // The SAME predicate handle_dup and the fork copy use -- all three create a
+    // second handle naming one object, so all three must answer identically.
+    if (!handle_slot_may_alias(src)) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+
+    enum kobj_kind kind   = src->kind;
+    rights_t       rights = src->rights;    // VERBATIM (POSIX; I-6 non-increasing)
+    void          *obj    = src->obj;
+
+    // The new descriptor is a NEW reference; its eventual close releases it.
+    // Non-blocking under the lock, exactly as handle_dup does it.
+    handle_acquire_obj(kind, obj);
+
+    // Capture the outgoing occupant BEFORE overwriting. `had` is what decides
+    // both the release below and the counter arithmetic: a dup3 onto a LIVE
+    // slot destroys one descriptor and creates one, so the live count
+    // (allocated - freed) must be unchanged; onto a FREE slot it creates one.
+    struct Handle *dst      = &t->slots[new_h];
+    bool           had      = (dst->magic == HANDLE_MAGIC);
+    enum kobj_kind old_kind = had ? dst->kind : KOBJ_INVALID;
+    void          *old_obj  = had ? dst->obj  : NULL;
+
+    dst->magic  = HANDLE_MAGIC;
+    dst->kind   = kind;
+    dst->rights = rights;
+    dst->obj    = obj;
+    // #151: SET, not inherited. dup2's new descriptor is close-on-exec exactly
+    // when the caller asked (dup3's O_CLOEXEC), regardless of what `old` or the
+    // previous occupant of this index carried. Inheriting from `old` is the
+    // classic dup2 mistake -- POSIX is explicit that the flag is cleared -- and
+    // inheriting from the OCCUPANT would be the reused-identity failure
+    // handle_install_locked's clear exists to prevent.
+    cloexec_set_locked(t, new_h, cloexec);
+    __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
+    if (had) __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
+    spin_unlock(&t->lock);
+
+    // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and AFTER
+    // the new object is installed, so the slot is never momentarily empty for a
+    // peer thread to allocate into. handle_replace does it in this order for
+    // the same reason.
+    if (had) handle_release_obj(old_kind, old_obj);
+    return new_h;
+}
+
 int handle_set_cloexec(struct Proc *p, hidx_t h, bool on) {
     struct HandleTable *t = proc_handles_or_extinct(p);
     if (h < 0 || h >= PROC_HANDLE_MAX) return -1;

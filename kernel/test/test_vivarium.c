@@ -128,12 +128,19 @@ void test_vivarium_rejects_are_deliberate(void) {
 
     // pipe2 is T2 since #155. Asserted BY NAME next to its siblings for the
     // reason this whole function exists -- and with one extra job here: pipe2 is
-    // an fd-CREATING row, and the fd-freeing set two tests over is FORWARD under
-    // a standing "extend the socktab hook first" instruction. These two facts
-    // are easy to conflate. This assert and that one, read together, say which
-    // side of the line each number is on.
+    // an fd-CREATING row, which needs no socktab work at all, whereas the
+    // fd-FREEING set two tests over must pay a drop of the entry keyed on the
+    // number it frees. These two facts are easy to conflate. This assert and
+    // that one, read together, say which side of the line each number is on.
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_PIPE2, args, &out),
                    (int)VIV_TIER2, "pipe2 is T2 (#155; flags domain + an int[2] copy-out)");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
+
+    // dup3 is T2 since #157 -- the first fd-FREEING row to be served, and the
+    // reason the rule two tests over is now "pay the drop in the arm your
+    // refusal structure demands" rather than "extend the close hook".
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_DUP3, args, &out),
+                   (int)VIV_TIER2, "dup3 is T2 (#157; aarch64 has no dup2 number)");
     TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu, "a T2 verdict leaves out untouched");
 
     // statx is the reason newfstatat is not the whole stat story: musl-aarch64
@@ -2304,30 +2311,53 @@ void test_vivarium_fd_freeing_rows_stay_unserved(void) {
     struct viv_call out;
     viv_fill_args(args);
 
+    // STILL UNSERVED, and each still owes the socktab a drop of the entry keyed
+    // on the number it frees before it can be promoted.
     static const struct { u64 nr; const char *what; } frees_an_fd[] = {
         { VIV_LINUX_DUP,         "dup" },
-        { VIV_LINUX_DUP3,        "dup3 (dup2 does not exist on aarch64)" },
         { VIV_LINUX_CLOSE_RANGE, "close_range" },
     };
 
-    for (u32 i = 0; i < 3; i++) {
+    for (u32 i = 0; i < (u32)(sizeof(frees_an_fd) / sizeof(frees_an_fd[0])); i++) {
         out.nr = 0xDEADu;
         enum viv_verdict v = vivarium_translate(frees_an_fd[i].nr, args, &out);
         TEST_ASSERT(v != VIV_TRANSLATED && v != VIV_TIER2,
-                    "an fd-freeing call is not served -- extend the socktab "
-                    "close hook before serving it");
+                    "an unserved fd-freeing call stays unserved -- pay the "
+                    "socktab drop in the same commit that promotes it");
         TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu,
                        "a declined verdict leaves out untouched");
         (void)frees_an_fd[i].what;
     }
 
-    // And the converse, so the test cannot pass by the numbers simply being
-    // absent from the table: close IS served, and it is the one the hook keys
-    // on. A reader arriving here learns the whole rule from one function.
+    // THE TWO THAT ARE SERVED, and their CLASSIFICATION is the assertion --
+    // because it is the classification that decides WHERE each pays the drop,
+    // and the two answers are different (#157):
+    //
+    //   close is T1, so it never runs a shell of its own, and its drop
+    //   therefore lives in the ENTRY HOOK in viv_linux_dispatch. That is sound
+    //   only because a close whose fd carries an entry always proceeds.
+    //
+    //   dup3 is TIER2, so it HAS a shell, and its drop lives there -- it must,
+    //   because dup3 can be refused (bad flags, old == new, bad old) while its
+    //   target is a live socket, and an entry-time drop would destroy the
+    //   guest's socket state on a call that failed.
+    //
+    // Asserting the tiers here is what makes a future re-classification a
+    // deliberate act: turning dup3 into a T1 renumber would strand its drop
+    // (and would be wrong anyway -- see the arity note below).
     out.nr = 0xDEADu;
     TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_CLOSE, args, &out),
                    (int)VIV_TRANSLATED, "close is served (T1) -- the hook's subject");
     TEST_EXPECT_EQ((u64)out.nr, (u64)SYS_CLOSE, "and renumbers to the native close");
+
+    out.nr = 0xDEADu;
+    TEST_EXPECT_EQ((int)vivarium_translate(VIV_LINUX_DUP3, args, &out),
+                   (int)VIV_TIER2, "dup3 is served as TIER2 -- it pays in its shell");
+    TEST_EXPECT_EQ((u64)out.nr, (u64)0xDEADu,
+                   "and a TIER2 verdict still leaves out untouched (no renumber). "
+                   "It could not be one: SYS_DUP's second argument is a RIGHTS "
+                   "MASK where dup3's is a TARGET FD, so a renumber would read "
+                   "an fd number as a set of capability bits");
 }
 
 // -----------------------------------------------------------------------------
@@ -2718,5 +2748,63 @@ void test_vivarium_pipe2_domain(void) {
 
     // Fail toward the decline on a bad call site.
     TEST_EXPECT_EQ((int)vivarium_pipe2_decide(0, NULL), (int)VIV_FORWARD,
+                   "NULL cloexec_out -> FORWARD");
+}
+
+void test_vivarium_dup3_domain(void);
+void test_vivarium_dup3_domain(void) {
+    bool cx;
+
+    // flags 0 -- and on aarch64 this IS dup2(), which has no number of its own,
+    // so it is the spelling every shell redirection reaches. Three of the four
+    // measured call sites in the gate's busybox hardcode it.
+    cx = true;
+    TEST_EXPECT_EQ((int)vivarium_dup3_decide(0, &cx), (int)VIV_TRANSLATED,
+                   "flags 0 is served -- this IS dup2 on aarch64");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0, "and asks for no descriptor flag");
+
+    // O_CLOEXEC -- the fourth site is musl's __dup3, which passes the caller's
+    // flags straight through, so this is reachable from any applet calling
+    // dup3() directly.
+    cx = false;
+    TEST_EXPECT_EQ((int)vivarium_dup3_decide(VIV_O_CLOEXEC, &cx),
+                   (int)VIV_TRANSLATED, "O_CLOEXEC is served (#151 built the flag)");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)1, "and is carried to the shell");
+
+    // THE REFUSALS -- and here is the difference from pipe2 worth pinning in a
+    // test rather than only in a comment. pipe2's excluded flags (O_DIRECT,
+    // O_NONBLOCK) are ones LINUX SERVES and we cannot, so declining them is a
+    // real subset. dup3's accepted set is {0, O_CLOEXEC} and NOTHING ELSE --
+    // ksys_dup3 answers EINVAL for the rest -- so this allow-list is EQUAL to
+    // Linux's, and the shell must answer EINVAL rather than the ENOSYS decline.
+    // The bare `1u` is the load-bearing case: it is what a deny-list built from
+    // "reject O_DIRECT and O_NONBLOCK" would serve silently.
+    static const u64 refused[] = {
+        1u,                                 // a bit no dup3 flag uses at all
+        VIV_O_NONBLOCK,                     // Linux's dup3 rejects it too
+        VIV_O_DIRECT,
+        VIV_O_NONBLOCK | VIV_O_CLOEXEC,     // one admitted bit does not carry the other
+        VIV_O_DIRECT   | VIV_O_CLOEXEC,
+        0xFFFFFFFFu,
+    };
+    for (u32 i = 0; i < (u32)(sizeof(refused) / sizeof(refused[0])); i++) {
+        cx = true;
+        TEST_EXPECT_EQ((int)vivarium_dup3_decide(refused[i], &cx),
+                       (int)VIV_FORWARD, "a flag outside the domain is refused");
+        TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)0,
+                       "and clears cloexec rather than leaving it stale");
+    }
+
+    // Only the low 32 bits are significant, and this matters MORE here than for
+    // pipe2: musl's __dup3 emits `sxtw x2, w2`, so a negative flags word really
+    // does arrive with the whole high half set. A high half must not turn an
+    // admitted value into a refused one.
+    cx = false;
+    TEST_EXPECT_EQ((int)vivarium_dup3_decide(0xFFFFFFFF00080000ull, &cx),
+                   (int)VIV_TRANSLATED, "the high half of flags is not consulted");
+    TEST_EXPECT_EQ((u64)(cx ? 1 : 0), (u64)1, "and the low half still decides");
+
+    // Fail toward the refusal on a bad call site.
+    TEST_EXPECT_EQ((int)vivarium_dup3_decide(0, NULL), (int)VIV_FORWARD,
                    "NULL cloexec_out -> FORWARD");
 }

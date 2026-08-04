@@ -2214,3 +2214,79 @@ That is task **#157**, and it was measured *before* this row was written: the fo
 `dup3` call sites and their flags were read off the same binary in the same pass,
 precisely so that fixing site N could not stop the question being asked about site
 N+1.
+
+## dup3 (#157, LINEAGE L-6c) -- and the arc gate goes green
+
+The last blocker, and the one #155 had already measured. On aarch64 there is no
+`dup2` syscall number at all, so musl's `dup2.c` compiles `dup2(old,new)` into
+`__syscall(SYS_dup3, old, new, 0)`; a shell's redirection plumbing has no other
+route to a pipeline.
+
+**The measured domain.** Four call sites reach nr 24 in the gate's own busybox:
+
+| site | how | flags |
+|---|---|---|
+| `0x4d3ca0` | musl `dup2()` | `mov x2, #0` -> 0 |
+| `0x4d3d0c` | musl `__dup3()` | `sxtw x2, w2` -> the caller's |
+| `0x4db7d8` | busybox-internal | `mov x2, #0` -> 0 |
+| `0x4db8cc` | busybox-internal | `mov x2, #0` -> 0 |
+
+**The domain is COMPLETE, not a subset, and that decides the errno.** Linux's own
+`ksys_dup3` refuses everything outside `{0, O_CLOEXEC}` with `EINVAL`. So unlike
+`pipe2` -- whose excluded flags (`O_DIRECT`, `O_NONBLOCK`) are ones Linux serves
+and devpipe cannot represent -- this allow-list is *equal* to Linux's, and a
+refused flags word is us reproducing Linux rather than declining to serve it.
+The shell therefore answers **EINVAL, not the ENOSYS decline**: claiming the
+surface is absent would be false, and V-2d's `munmap` note drew the same line for
+`len == 0` and a misaligned address.
+
+**Two facts read out of musl's `dup2.c`, both load-bearing.** `old == new` never
+arrives here from `dup2` -- musl short-circuits it through `fcntl(old, F_GETFD)`
+-- which is the only thing that shows #151's `fcntl` row is load-bearing for
+`dup2(x,x)`. And musl retries on `-EBUSY` in a bare `while` loop on both paths,
+so this row must never produce that errno; a guest would spin forever.
+
+**`handle_dup_to`, a genuinely new primitive.** The three neighbours each fix a
+different one of the two axes -- where the source comes from, and whether the
+destination may be occupied:
+
+| primitive | source | destination |
+|---|---|---|
+| `handle_dup_posix` | a slot | first free >= min (an OUTPUT) |
+| `handle_replace` | a caller-held object | a fixed index, must be LIVE |
+| `handle_table_copy_into` | a slot in another table | the same index, must be FREE |
+| **`handle_dup_to`** | a slot | **a fixed index, free OR live** |
+
+It is deliberately not close-then-dup: the freed index is not reserved, so a
+peer's fd-creating syscall can take it in between -- the argument
+`handle_replace`'s header already records for `connect`. Rights carry VERBATIM
+(POSIX; I-6 by non-increasing). Close-on-exec is SET FROM THE FLAG, never
+inherited from the source (POSIX clears it, and inheriting is the classic dup2
+mistake) nor from the slot's previous occupant (the reused-identity failure).
+The SOURCE passes `handle_slot_may_alias`, the same predicate `handle_dup` and
+the fork copy use; the DESTINATION is ungated by kind, because it is being
+CLOSED and `handle_close` places no kind restriction on closing.
+
+**The socket case declines, with the alternatives written down.** See VIVARIUM
+section 9's DEGRADED tier for the full statement; in short, an unrefcounted
+fd-keyed socktab cannot give two descriptors one socket's state, and both
+alternatives are actively wrong rather than merely imperfect.
+
+**The fd-freeing drop is paid in a different arm from `close`'s.** `close` pays
+in the entry hook, sound there only because a close whose fd carries an entry
+always proceeds. `dup3` pays inside its shell, after every refusal -- a dup3 can
+be refused while `new` is a live socket, and an entry-time drop would destroy
+socket state on a failed call. It also drops AFTER the install, the opposite of
+`viv_sock_accept`'s unwind, whose reason does not transfer: there the number is
+freed and reallocatable, here it never is.
+
+**Coverage.** `vivarium.dup3_domain` (the decision) + `handles.dup_to` (the
+primitive) + the re-stated `fd_freeing_rows_stay_unserved`, which now asserts the
+TIERS rather than merely "not served", because the tier is what decides where a
+row pays its drop + in-guest legs L193-L199. Revert-probed in opposite
+directions: removing the socktab drop leaves the unit suite at a full
+**1321/1321** and fails only in-guest at `marker=L199`; a deny-list fails
+`vivarium.dup3_domain` at **1320/1321** on the bare `1u`, invisible to the guest.
+
+**The arc gate passes** -- `L6C-A` through `L6C-I` -- and `L6C_GATE_FATAL` flips
+to 1 in the same commit, because a gate that cannot redden is a disabled test.

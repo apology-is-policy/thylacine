@@ -1016,10 +1016,16 @@ static int do_fork_probe(void) {
 // stage_viv_bundles and task #145 for why the second is not optional), and the
 // default build stays hermetic.
 //
-// L6C_GATE_FATAL: flip to 1 when the gate's remaining blocker lands (#150, the
-// syscall surface -- #149's loader fix is IN). See the failure arm below for
-// why a known-blocked gate reports loudly instead of reddening the boot.
-#define L6C_GATE_FATAL 0
+// L6C_GATE_FATAL: BOOT-FATAL since #157, because the gate PASSES -- every leg
+// A..I, the full LINEAGE arc (fork, exec, pipe, substitute, loop, reap). It was
+// advisory only while a NAMED blocker stood in front of it (#149 the loader,
+// #150 the startup batch, #151 close-on-exec, #140 the environment, #155 pipe2,
+// #157 dup3, each fixed in turn), and the whole reason to flip it now is that a
+// gate which cannot redden is a disabled test: with it at 0 a regression in any
+// of those six would print a failure line into a green boot and nobody would
+// look. The soft-skip above stays -- an ABSENT bundle is a missing input, not a
+// broken kernel, and the default build is deliberately hermetic.
+#define L6C_GATE_FATAL 1
 static int do_alpine_shell_gate(void) {
     static const char ab[] = "/vivarium/alpine/config.json";
     long abfd = t_open(T_WALK_OPEN_FROM_ROOT, ab, sizeof(ab) - 1, T_OPATH);
