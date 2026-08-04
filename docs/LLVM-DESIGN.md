@@ -572,6 +572,22 @@ The path of least invention, per the OSMesa verification:
 2. **SDL-GL glue**: `SDL_thylacine` grows a GL context path — OSMesa
    context rendering into (or blitted into) the surface's **weave**, then
    the existing tear-free `tpresent`. Stock SDL-GL programs recompile.
+   *(#109 splits this in two along the step-1/step-2 line. The **API
+   half is LANDED**: `SDL_VIDEO_OPENGL` is on, `SDL_opengl.h` +
+   `SDL_opengl_glext.h` are un-pruned byte-pristine, and `libSDL2.a`
+   carries all 20 `SDL_GL_*` entry points with no undefined `gl*`
+   symbols — so a stock SDL-GL program compiles and links today. The
+   **context half is BLOCKED** on a Mesa deliverable, not an SDL one:
+   the driver hooks need `libOSMesa.a` + `GL/` headers installed into
+   the pouch sysroot, and step 1 so far produced `osmesa-prove` — a
+   linked executable proving llvmpipe runs on device — not an
+   installable library. #109's own filed scope was wider than the
+   requirement: `src/render/opengl/` and `SDL_egl.h` were named as
+   needing un-pruning and neither does, since TyrQuake's `vid_sgl.c`
+   drives raw GL through `SDL_GL_*` rather than `SDL_Renderer`, and
+   `SDL_egl_c.h` has no includer at all. Rendering "into" the weave —
+   rather than blitted into it — is the reachable branch: the weave is
+   `OSMESA_BGRA` byte-for-byte. See `docs/reference/142-sdl-port.md`.)*
 3. **Acceptance gate: GLQuake** (`tyr-glquake`) — the poetic echo of G-7:
    software Quake proved the 2D present path; GLQuake proves the GL stack,
    through llvmpipe, through the JIT capability, onto the same compositor

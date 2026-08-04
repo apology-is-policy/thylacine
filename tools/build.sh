@@ -2519,6 +2519,36 @@ build_sdl2() {
         -o "$progs_out/sdl-probe"
     rm -f "$progs_out/sdl-probe.o"
     echo "    sdl-probe: $(wc -c < "$progs_out/sdl-probe" | tr -d ' ') bytes (ET_EXEC, static)"
+
+    # #109: the GL API surface, asserted rather than assumed. LLVM-DESIGN
+    # section 9 step 2 promises "stock SDL-GL programs recompile"; this
+    # compiles and links one (usr/ports/sdl2/glapi-probe.c -- the SDL_GL_*
+    # call set taken from TyrQuake's vid_sgl.c) against the archive we just
+    # built. It is NOT baked: there is no GL driver behind it yet, so it
+    # would have nothing to do at runtime. What it guards is the thing that
+    # already went wrong once -- SDL_opengl.h + SDL_opengl_glext.h were
+    # pruned as "unreachable", and a re-vendor or a re-prune could drop them
+    # again while libSDL2.a itself still builds. A consumer is the only
+    # thing that notices.
+    local glapi_o="$sdl_obj/glapi-probe.o"
+    local glapi_bin="$sdl_obj/glapi-probe"
+    if ! "$clang" "${cflags[@]}" -Wall -Wextra -I"$sysroot/include/SDL2" \
+            -c "$REPO_ROOT/usr/ports/sdl2/glapi-probe.c" -o "$glapi_o"; then
+        echo "==> sdl2: the SDL-GL API probe failed to COMPILE -- the public" >&2
+        echo "    GL headers are missing or SDL_VIDEO_OPENGL is off." >&2
+        echo "    See third_party/SDL2/PRUNE-MANIFEST.md (the CL-7 section)." >&2
+        exit 1
+    fi
+    if ! POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+            "$REPO_ROOT/tools/pouch-ld" "$glapi_o" \
+            -L"$sysroot/lib" -lSDL2 -o "$glapi_bin"; then
+        echo "==> sdl2: the SDL-GL API probe failed to LINK -- libSDL2.a is" >&2
+        echo "    missing SDL_GL_* entry points (SDL_VIDEO_OPENGL off?)." >&2
+        exit 1
+    fi
+    rm -f "$glapi_o" "$glapi_bin"
+    echo "    SDL-GL API: a stock SDL-GL program compiles + links (#109)"
+
     ledger "libSDL2.a: BUILT (+ sdl-probe)"
 }
 
