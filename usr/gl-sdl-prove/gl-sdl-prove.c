@@ -215,12 +215,27 @@ int main(int argc, char **argv)
 
     /* Verify what the rasteriser actually produced. glReadPixels goes through
      * the same buffer the compositor read, so agreement here is agreement
-     * about the bytes that were presented -- not about what we asked for. */
+     * about the bytes that were presented -- not about what we asked for.
+     *
+     * The quadrant samples sit at 1/8 and 7/8, NOT at the quadrant centres,
+     * because the triangle is drawn UNSCISSORED and therefore overwrites the
+     * middle of all four. Its NDC span [-0.5,0.5] x [-0.5,0.5] maps to screen
+     * x in [160,480], y in [100,300] at 640x400 -- so the obvious centre
+     * samples (W/4,H/4) and (3W/4,H/4) land EXACTLY on its two bottom
+     * vertices. That is what the first real run of these checks found: BL read
+     * magenta, the triangle's colour, and the readback was right while the
+     * assertion was wrong.
+     *
+     * These lines had never executed before #139: every prior in-guest run
+     * died at the CAP_JIT gate, so this station was unreachable and its bug
+     * could not surface. Keep the samples in the outer corners, clear of the
+     * triangle by ~80px in x and ~50px in y; anything that grows the triangle
+     * must move them again. */
     glDisable(GL_SCISSOR_TEST);
-    if (!pixel_is(PROBE_W / 4, PROBE_H * 3 / 4, 255, 0, 0, "TL") ||
-        !pixel_is(PROBE_W * 3 / 4, PROBE_H * 3 / 4, 0, 255, 0, "TR") ||
-        !pixel_is(PROBE_W / 4, PROBE_H / 4, 0, 0, 255, "BL") ||
-        !pixel_is(PROBE_W * 3 / 4, PROBE_H / 4, 255, 255, 255, "BR") ||
+    if (!pixel_is(PROBE_W / 8, PROBE_H * 7 / 8, 255, 0, 0, "TL") ||
+        !pixel_is(PROBE_W * 7 / 8, PROBE_H * 7 / 8, 0, 255, 0, "TR") ||
+        !pixel_is(PROBE_W / 8, PROBE_H / 8, 0, 0, 255, "BL") ||
+        !pixel_is(PROBE_W * 7 / 8, PROBE_H / 8, 255, 255, 255, "BR") ||
         !pixel_is(PROBE_W / 2, PROBE_H / 2 - 8, 255, 0, 255, "triangle")) {
         SDL_GL_DeleteContext(ctx);
         SDL_DestroyWindow(win);

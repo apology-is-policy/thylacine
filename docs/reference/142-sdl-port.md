@@ -291,6 +291,32 @@ contains `llvmpipe`, which is not cosmetic: a context on some stub would
 satisfy every other check while proving nothing about CL-7. Driven by
 `tools/interactive/ls-gfx-gl.exp`; staged to `/clade/bin/` rather than
 the ramfs because it is a 143 MB static binary.
+
+It also needs `CAP_JIT`, which it acquires **for itself** — llvmpipe JITs
+inside the calling process and `CAP_JIT` is elevation-only, so a GL program
+on Thylacine is a capability client before it is a renderer. Post-login it
+takes corvus's SELF form (verb 18, #139), authorized on the kernel-stamped
+principal with no bearer token; the gate asserts the form, not merely the
+acquisition. See `docs/reference/102-legate.md`.
+
+**Everything downstream of that acquisition ran for the first time at #139**,
+because until then the prover always died at the capability gate. Its first
+real execution found two bugs that had shipped with #138 and could not
+previously surface, and they are worth stating because the shape recurs:
+
+- The quadrant readback sampled at (W/4,H/4) and (3W/4,H/4). The triangle is
+  drawn UNSCISSORED and its NDC span maps to screen x∈[160,480], y∈[100,300]
+  at 640×400 — so those two samples land *exactly* on its bottom vertices. BL
+  read magenta and the assertion, not the readback, was wrong. Samples moved
+  to 1/8 and 7/8; the geometry is written down beside them.
+- Both of `ls-gfx-gl.exp`'s regexes spelled the renderer `[^ ]+`, and
+  `GL_RENDERER` is `llvmpipe (LLVM 22.1.8, 128 bits)` — spaces. Neither had
+  ever matched. The scenario reported "no renderer line within 180s" while
+  the log plainly contained it.
+
+Each fix advanced the prover one station and handed the next its first run.
+An assertion that has never executed is not a passing assertion; it is an
+unknown, and five of these were unknowns until #139 unblocked them.
 - **The present is synchronous** (stage-0 tapestryd): each present blocks on
   the compositor. The pipelined-controlq drain (with a real quiesce before
   retire) is the recorded obligation; timedemo throughput (~600 fps at

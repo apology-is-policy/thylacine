@@ -18,6 +18,13 @@
  * with us. The duplication is deliberate and bounded -- if the corvus wire
  * protocol or the clearance name changes, BOTH copies move. Grep for
  * `CLEARANCE_ACTIVATE` to find them.
+ *
+ * #139 did NOT move the fork's copy, and that is correct rather than an
+ * oversight: verb 18 is an ADDITION, verb 15 is byte-unchanged, and
+ * osmesa-prove runs at boot as PRINCIPAL_SYSTEM where only the bearer form can
+ * work anyway. The fork's copy keeps taking the path it always took. It should
+ * be brought forward when it is next rebuilt for some other reason -- not
+ * sooner, since a builder round costs real money and buys nothing here.
  */
 #ifndef THYLA_CAPJIT_H
 #define THYLA_CAPJIT_H
@@ -131,11 +138,7 @@ static int thyla_capjit_rpc(int fd, unsigned char verb, const unsigned char *pl,
  * end of this very function's AUTH message across three identical runs), so a
  * diagnosis that lives only in printf output is a diagnosis that sometimes
  * does not arrive. The status byte corvus returned is printed too, because
- * "AUTH failed" without it names the step but not the reason.
- *
- * The demo credentials are the same ones osmesa-prove uses; this is a prover
- * path, not a login path. A real GL application would redeem a clearance its
- * own session already holds. */
+ * "AUTH failed" without it names the step but not the reason. */
 #define THYLA_CAPJIT_OK        0
 #define THYLA_CAPJIT_ENOSRV    11 /* /srv/corvus unreachable        */
 #define THYLA_CAPJIT_ENOCTL    12 /* corvus ctl would not open      */
@@ -144,15 +147,68 @@ static int thyla_capjit_rpc(int fd, unsigned char verb, const unsigned char *pl,
 #define THYLA_CAPJIT_EGRANT    15 /* granted mask was not CAP_JIT   */
 #define THYLA_CAPJIT_EREDEEM   16 /* SYS_CAP_USE refused the grant  */
 
+/* One CLEARANCE_ACTIVATE, either form. `token` NULL selects the #139 SELF form
+ * (verb 18, no bearer secret -- corvus authorizes the connection's own
+ * kernel-stamped principal); non-NULL selects the bearer form (verb 15).
+ * Returns 0 and fills *granted on OK. */
+static int thyla_capjit_activate(int ctl, const unsigned char *token,
+                                 unsigned long long *granted, unsigned char *st)
+{
+    unsigned char pl[128], rx[256];
+    size_t o = 0, rl;
+    int i, rc;
+
+    if (token) {
+        memcpy(pl, token, 33);
+        o = 33;
+    }
+    pl[o++] = 3;
+    memcpy(pl + o, "jit", 3);
+    o += 3;
+    memset(pl + o, 0, 16); /* self_restrict, valid_until_req */
+    o += 16;
+
+    rc = thyla_capjit_rpc(ctl, token ? 15 : 18, pl, o, rx, sizeof rx, &rl, st);
+    if (rc != 0 || *st != 0 || rl != 12) {
+        return -1;
+    }
+    *granted = 0;
+    for (i = 0; i < 8; i++) {
+        *granted |= (unsigned long long)rx[4 + i] << (8 * i);
+    }
+    return 0;
+}
+
+/* Acquire CAP_JIT, trying the SELF form before the bearer form.
+ *
+ * Both are needed, and which one works is a property of HOW THE CALLER WAS
+ * SPAWNED, not of the caller's code:
+ *
+ *   - Post-login (a program the user ran): the kernel stamped this Proc with
+ *     the user's principal at spawn (login uses SPAWN_IDENTITY_SET), so the
+ *     SELF form authorizes it directly. No secret is quoted, sent, or held.
+ *   - At boot (jit-prover, osmesa-prove, and anything else joey spawns with a
+ *     plain t_spawn): the Proc runs as PRINCIPAL_SYSTEM, which is not a corvus
+ *     user and has no eligibility. The SELF form correctly refuses it; the
+ *     bearer form is the bootstrap path, and its demo credentials are exactly
+ *     that -- a prover's credentials, not a login.
+ *
+ * The fallback cannot mask a real failure, which is why it is safe to have:
+ * both forms end in the SAME eligibility + auth_required checks against the
+ * same level, so anything that refuses on policy grounds refuses BOTH. The
+ * only failures the fallback converts are the two identity mismatches -- "you
+ * are not the session user" and "no session is bound" -- and in exactly those
+ * cases the bearer form is the correct next question to ask. On a double
+ * failure both statuses are reported; one alone would name the wrong door. */
 static int thyla_acquire_cap_jit(const char *who)
 {
     static const char PASS[] = "correct-horse-battery-staple-v1";
     unsigned char pl[128], rx[256], token[33];
     unsigned long long granted = 0;
+    unsigned char st_self = 0, st = 0;
     size_t o, rl, pw;
-    unsigned char st;
     long root = -1, ctl;
-    int i, rc;
+    int i, rc, self_ok;
 
     for (i = 0; i < 16 && root < 0; i++) {
         root = thyla_capjit_open(THYLA_FROM_ROOT, "/srv/corvus", 11,
@@ -169,45 +225,44 @@ static int thyla_acquire_cap_jit(const char *who)
         return THYLA_CAPJIT_ENOCTL;
     }
 
-    /* AUTH. */
-    o = 0;
-    pl[o++] = 7;
-    memcpy(pl + o, "michael", 7);
-    o += 7;
-    pw = sizeof(PASS) - 1;
-    pl[o++] = (unsigned char)(pw & 0xff);
-    pl[o++] = (unsigned char)((pw >> 8) & 0xff);
-    memcpy(pl + o, PASS, pw);
-    o += pw;
-    rc = thyla_capjit_rpc((int)ctl, 1, pl, o, rx, sizeof rx, &rl, &st);
-    if (rc != 0 || st != 0 || rl != sizeof token) {
-        printf("%s: FAIL corvus AUTH rc=%d st=%u rl=%u\n", who, rc, (unsigned)st,
-               (unsigned)rl);
-        return THYLA_CAPJIT_EAUTH;
-    }
-    memcpy(token, rx, sizeof token);
+    /* The SELF form first -- the one that quotes nothing. */
+    self_ok = (thyla_capjit_activate((int)ctl, NULL, &granted, &st_self) == 0);
 
-    /* CLEARANCE_ACTIVATE("jit"). CLEARANCE_LIST is skipped on purpose --
-     * ACTIVATE fails identically if the principal is not eligible, and
-     * /jit-prover exercises the listing machinery exhaustively in the same
-     * boot. */
-    o = 0;
-    memcpy(pl + o, token, sizeof token);
-    o += sizeof token;
-    pl[o++] = 3;
-    memcpy(pl + o, "jit", 3);
-    o += 3;
-    memset(pl + o, 0, 16); /* self_restrict, valid_until_req */
-    o += 16;
-    rc = thyla_capjit_rpc((int)ctl, 15, pl, o, rx, sizeof rx, &rl, &st);
-    if (rc != 0 || st != 0 || rl != 12) {
-        printf("%s: FAIL corvus CLEARANCE rc=%d st=%u rl=%u\n", who, rc,
-               (unsigned)st, (unsigned)rl);
-        return THYLA_CAPJIT_ECLEAR;
+    if (!self_ok) {
+        /* AUTH, then the bearer form. CLEARANCE_LIST is skipped on purpose --
+         * ACTIVATE fails identically if the principal is not eligible, and
+         * /jit-prover exercises the listing machinery exhaustively in the same
+         * boot. */
+        o = 0;
+        pl[o++] = 7;
+        memcpy(pl + o, "michael", 7);
+        o += 7;
+        pw = sizeof(PASS) - 1;
+        pl[o++] = (unsigned char)(pw & 0xff);
+        pl[o++] = (unsigned char)((pw >> 8) & 0xff);
+        memcpy(pl + o, PASS, pw);
+        o += pw;
+        /* The numbers come FIRST. #95 truncates line TAILS, and on the very
+         * run this was written for it ate the tail of this exact message --
+         * "FAIL corvus AU" -- destroying the only evidence that distinguished
+         * "SELF was refused, here is why" from "the transport broke". A
+         * diagnostic whose discriminator sits after the prose is a diagnostic
+         * that sometimes is not there. */
+        rc = thyla_capjit_rpc((int)ctl, 1, pl, o, rx, sizeof rx, &rl, &st);
+        if (rc != 0 || st != 0 || rl != sizeof token) {
+            printf("%s: FAIL self=%u auth=%u rc=%d rl=%u corvus AUTH\n", who,
+                   (unsigned)st_self, (unsigned)st, rc, (unsigned)rl);
+            return THYLA_CAPJIT_EAUTH;
+        }
+        memcpy(token, rx, sizeof token);
+
+        if (thyla_capjit_activate((int)ctl, token, &granted, &st) != 0) {
+            printf("%s: FAIL self=%u clear=%u corvus CLEARANCE\n", who,
+                   (unsigned)st_self, (unsigned)st);
+            return THYLA_CAPJIT_ECLEAR;
+        }
     }
-    for (i = 0; i < 8; i++) {
-        granted |= (unsigned long long)rx[4 + i] << (8 * i);
-    }
+
     if (granted != THYLA_CAP_JIT) {
         printf("%s: FAIL clearance granted 0x%llx, want CAP_JIT\n", who,
                granted);
@@ -217,12 +272,17 @@ static int thyla_acquire_cap_jit(const char *who)
         printf("%s: FAIL redeeming the CAP_JIT grant\n", who);
         return THYLA_CAPJIT_EREDEEM;
     }
-
     /* ctl is deliberately left open for the life of the process, as
      * /jit-prover does: the capability is already ours (a legate scope is torn
      * down by the holder's own death, not by a session close) and the jit level
-     * carries time_bound_ns 0, so nothing expires underneath us. */
-    printf("%s: CAP_JIT acquired via the corvus jit clearance\n", who);
+     * carries time_bound_ns 0, so nothing expires underneath us.
+     *
+     * WHICH form won is reported, and reported EARLY in the line: a gate that
+     * only sees "CAP_JIT acquired" cannot tell the #139 path from the boot path
+     * that always worked, and #95 eats line TAILS -- a discriminator parked at
+     * the end is a discriminator that sometimes is not there. */
+    printf("%s: CAP_JIT acquired (%s) via the corvus jit clearance\n", who,
+           self_ok ? "SELF" : "bearer");
     fflush(stdout);
     return THYLA_CAPJIT_OK;
 }

@@ -2296,7 +2296,7 @@ In-guest (`/jit-prover`, boot-fatal), one process across the capability
 boundary so `CAP_JIT` is the only variable:
 
     ungated create REFUSED (no CAP_JIT) -- correct
-    CAP_JIT acquired via the jit clearance
+    CAP_JIT acquired (bearer) via the jit clearance
     JITed fn(35,100) = 142 -- emitted, published, EXECUTED
     re-emitted fn returns 99 -- icache invalidate is live
 

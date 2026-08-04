@@ -41,6 +41,30 @@ lc_send "cat /lsci-no-such-file"
 lc_expect "cat:" "stderr"
 lc_pass "LS-2(c): external stderr visible (cat error)"
 
+# (d) #139 -- a POST-LOGIN program can acquire CAP_JIT.
+#
+# This rides here rather than in its own scenario for one reason and one only:
+# the only other place it is proven is ls-gfx-gl, which SKIPs on any tree
+# without the ~365 MB of Mesa/LLVM archives. A fix whose sole coverage can
+# silently skip is a fix with no coverage.
+#
+# `self` selects the SELF form (verb 18): no AUTH, no token -- corvus authorizes
+# the connection's kernel-stamped principal. It is the ONLY form reachable from
+# here; login's session is bound, so handle_auth refuses, which is what made
+# every user-launched GL program unable to JIT. The bearer form is asserted
+# separately at boot, where jit-prover runs as PRINCIPAL_SYSTEM.
+#
+# `(SELF)` cannot appear in the line editor's echo of the typed command (which
+# is lower-case and has no parentheses), so a single match is unambiguous -- and
+# it discriminates: a run that fell back to the bearer form would print
+# `(bearer)` and fail here rather than passing as "acquired".
+lc_send "/bin/jit-prover self"
+lc_expect "CAP_JIT acquired (SELF)" "#139 self-form clearance"
+lc_expect "jit-prover: PASS" "I-42 end-to-end after a self-form acquisition"
+lc_pass "#139: a post-login program acquired CAP_JIT on its own kernel-stamped\
+         principal and JIT-executed (no bearer token anywhere in the path)"
+
 lc_quit
-lc_pass "LS-CI ls-ci: login (LS-1) + stdout/pipeline/stderr (LS-2) all verified"
+lc_pass "LS-CI ls-ci: login (LS-1) + stdout/pipeline/stderr (LS-2) + post-login\
+         CAP_JIT (#139) all verified"
 exit 0

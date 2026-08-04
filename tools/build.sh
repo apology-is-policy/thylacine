@@ -1861,6 +1861,28 @@ build_stratum_pool_fixture() {
         echo "    /clade -- replacing any clade-baked pool.img. Re-bake with"
         echo "    THYLACINE_BAKE_CLADE=1 before any clade/GL gate. (#101)"
     fi
+    # #139: the STALE-STAGE warning -- the #101 check's blind spot. #101 verifies
+    # that /clade LANDED in the pool; it cannot see whether what landed is
+    # CURRENT. `stage_clade` is reachable only as the explicit `stage-clade`
+    # subcommand, never from `build.sh all`, so a rebuilt binary in build/clade/gl
+    # does not reach build/clade/stage on its own -- the pool then re-mints
+    # faithfully around the PREVIOUS binary and every ledger line is green.
+    #
+    # That is not hypothetical: the #139 GL gate failed 3/3 on a gl-sdl-prove
+    # 27 minutes older than the fix under test, and the failure looked exactly
+    # like a real defect in the change. Both halves of the trap have now been
+    # paid for once (#120 for /clade broadly, #139 for gl-sdl-prove), which is
+    # twice too many for something a timestamp comparison can say out loud.
+    if [[ "$bake_clade" == "1" && -f "$BUILD_DIR/clade/gl/gl-sdl-prove" ]]; then
+        if [[ "$BUILD_DIR/clade/gl/gl-sdl-prove" -nt \
+              "$BUILD_DIR/clade/stage/bin/gl-sdl-prove" ]]; then
+            echo "==> WARNING: build/clade/gl/gl-sdl-prove is NEWER than the staged"
+            echo "    copy, so this pool will bake the PREVIOUS binary and the GL"
+            echo "    gate will test code you did not build. Run:"
+            echo "        tools/build.sh stage-clade"
+            echo "    then re-bake. (#139; build.sh all never re-stages /clade)"
+        fi
+    fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
@@ -2449,16 +2471,25 @@ build_sdl2() {
     fi
 
     # Staleness: reuse the archive when it is newer than every input
-    # (the vendored tree + the port dir + usr/gl-sdl-prove + libc.a).
+    # (the vendored tree + the port dir + usr/sdl-probe + usr/gl-sdl-prove +
+    # usr/lib/thylajit + libc.a).
     #
-    # The gl-sdl-prove OUTPUT is part of the precondition, not just its
-    # source. libSDL2.a and sdl-probe are written before that link runs, so a
-    # link failure leaves exactly the two files this guard used to check --
-    # and the next invocation reported REUSED for a build whose last step had
-    # failed. A cache key must name every artifact the target promises, or
-    # the failure of a later step is indistinguishable from a cache hit.
-    # (It is only required when the GL archives are present; without them the
-    # skip is legitimate and the binary is legitimately absent.)
+    # A cache key must name every artifact the target PROMISES *and* every
+    # input it CONSUMES. Both halves have now failed here, once each:
+    #
+    #   outputs (#138) -- libSDL2.a and sdl-probe are written before the
+    #     gl-sdl-prove link runs, so a link failure left exactly the two files
+    #     this guard used to check, and the next invocation reported REUSED for
+    #     a build whose last step had failed.
+    #   inputs (#139) -- gl-sdl-prove.c gained `#include "thyla_capjit.h"` in
+    #     #138 and the guard was widened to watch usr/gl-sdl-prove but NOT the
+    #     header's directory. Editing the header therefore did not invalidate
+    #     the cache: the #139 GL gate ran a 27-minute-old binary that predated
+    #     the fix under test and failed 3/3 for a reason that had nothing to do
+    #     with the change. Adding a dependency means adding it HERE too.
+    #
+    # (The output half is only required when the GL archives are present;
+    # without them the skip is legitimate and the binary legitimately absent.)
     local gl_prove="$BUILD_DIR/clade/gl/gl-sdl-prove"
     local gl_needed=""
     [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && gl_needed=1
@@ -2467,6 +2498,7 @@ build_sdl2() {
         local stale
         stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
                       "$REPO_ROOT/usr/gl-sdl-prove" \
+                      "$REPO_ROOT/usr/lib/thylajit" \
                       -type f -newer "$archive" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
             ledger "libSDL2.a: REUSED (cached + up-to-date)"
