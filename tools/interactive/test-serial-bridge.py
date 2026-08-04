@@ -163,7 +163,13 @@ def main():
     print(f"[2] exit record {'DISCRIMINATES' if exit_ok else 'IS VACUOUS'}")
 
     ok = spool_ok and exit_ok
-    print("PASS" if ok else "FAIL")
+    # Name the subject. A bare "PASS" here is indistinguishable from a SCENARIO
+    # verdict, and it prints immediately above the scenario run -- which is
+    # exactly how a mistyped `test-interactive.sh ls-3` (the real names are
+    # ls-3a/3b/3c) got read as a scenario that passed, when the run had in fact
+    # stopped at "scenario not found" and exited 2. The caller keys on the exit
+    # code, not on this string, so it is safe to change but must stay specific.
+    print("PASS: serial-bridge preflight" if ok else "FAIL: serial-bridge preflight")
     return 0 if ok else 1
 
 
