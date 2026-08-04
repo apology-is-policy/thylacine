@@ -2449,10 +2449,24 @@ build_sdl2() {
     fi
 
     # Staleness: reuse the archive when it is newer than every input
-    # (the vendored tree + the port dir + libc.a).
-    if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]]; then
+    # (the vendored tree + the port dir + usr/gl-sdl-prove + libc.a).
+    #
+    # The gl-sdl-prove OUTPUT is part of the precondition, not just its
+    # source. libSDL2.a and sdl-probe are written before that link runs, so a
+    # link failure leaves exactly the two files this guard used to check --
+    # and the next invocation reported REUSED for a build whose last step had
+    # failed. A cache key must name every artifact the target promises, or
+    # the failure of a later step is indistinguishable from a cache hit.
+    # (It is only required when the GL archives are present; without them the
+    # skip is legitimate and the binary is legitimately absent.)
+    local gl_prove="$BUILD_DIR/clade/gl/gl-sdl-prove"
+    local gl_needed=""
+    [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && gl_needed=1
+    if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]] &&
+       [[ -z "$gl_needed" || -f "$gl_prove" ]]; then
         local stale
         stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
+                      "$REPO_ROOT/usr/gl-sdl-prove" \
                       -type f -newer "$archive" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
             ledger "libSDL2.a: REUSED (cached + up-to-date)"
@@ -2548,8 +2562,150 @@ build_sdl2() {
     fi
     rm -f "$glapi_o" "$glapi_bin"
     echo "    SDL-GL API: a stock SDL-GL program compiles + links (#109)"
+    # Note what that probe just proved on the OTHER axis: it linked WITHOUT
+    # libOSMesa.a, as does sdl-probe above. That is the non-GL direction of
+    # the weak-symbol arrangement in SDL_thylacineopengl.c -- if those weak
+    # declarations were ever made hard, both links here would fail before
+    # anything reached a GL program. The two directions are checked by two
+    # links, not by one link and an argument.
+
+    build_gl_sdl_prove "$sysroot" "$sdl_obj"
 
     ledger "libSDL2.a: BUILT (+ sdl-probe)"
+}
+
+build_gl_sdl_prove() {
+    # #138: the SDL GL context path, proven by a program that RUNS it.
+    #
+    # Separate from the #109 API probe above because it asserts something
+    # else entirely: that probe compiles and links a GL program against a
+    # libSDL2.a with no rasteriser behind it, this one links the rasteriser
+    # in and draws. Neither subsumes the other -- the first would keep
+    # passing if OSMesa vanished, the second would keep passing if the weak
+    # fallback broke.
+    local sysroot="$1" sdl_obj="$2"
+    # Named here rather than inherited from build_sdl2's `local` -- bash's
+    # dynamic scoping would supply it, silently, right up until someone calls
+    # this function from anywhere else.
+    local clang="$LLVM_PREFIX/bin/clang"
+    local gl_lib="$BUILD_DIR/clade/gl/lib"
+    local llvm_lib="$BUILD_DIR/clade/llvm-build/lib"
+    local out="$BUILD_DIR/clade/gl/gl-sdl-prove"
+    local src="$REPO_ROOT/usr/gl-sdl-prove/gl-sdl-prove.c"
+    local libs_list="$BUILD_DIR/clade/gl/llvm-libs.list"
+
+    # OPTIONAL, and announced when skipped rather than silent. The GL link
+    # inputs are ~365 MB of cross-built archives that are fetched from the
+    # GCP builder, not built here (usr/ports/mesa/README.md), so a fresh
+    # checkout legitimately has none -- and a silent skip is exactly the
+    # shape that makes a missing artifact look like a passing build.
+    if [[ ! -f "$gl_lib/libOSMesa.a" || ! -f "$libs_list" ]]; then
+        echo "    gl-sdl-prove: no GL archives at $gl_lib -- skipping (#138;"
+        echo "                  fetch them per usr/ports/mesa/README.md)"
+        return 0
+    fi
+
+    local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
+                   -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
+                   -fno-stack-protector
+                   -nostdlibinc -isystem "$sysroot/include"
+                   -I"$sysroot/include/SDL2"
+                   -I"$REPO_ROOT/usr/lib/thylajit"
+                   -D_GNU_SOURCE=1 -D__thylacine__=1 )
+    local obj="$sdl_obj/gl-sdl-prove.o"
+    "$clang" "${cflags[@]}" -Wall -Wextra -c "$src" -o "$obj"
+
+    # The archive set is READ from the file the fetch recorded, never
+    # hardcoded here: it is exactly what meson computed for osmesa-prove's
+    # own link, so a list typed out in this script could only ever drift
+    # from the one that is known to close.
+    local llvm_flags=()
+    local l
+    while IFS= read -r l; do
+        [[ -n "$l" ]] && llvm_flags+=( "$l" )
+    done < "$libs_list"
+
+    # TWO Mesa archives, not the seven osmesa-prove's own link line names.
+    # The other five (libllvmpipe, libmesa_util{,_simd,_c11}, libblake3) are
+    # meson THIN archives -- a few KB of pathnames into the builder's object
+    # tree, so they are meaningless on this machine and ld.lld says so
+    # ("could not get the buffer for a child of the archive"). They are also
+    # redundant: libOSMesa.a is a fat 214 MB archive of 899 members that
+    # link_whole already merged them into (verified by finding llvmpipe's
+    # objects in its index, not by assuming). libz.a is fat because it comes
+    # from a subproject rather than meson's default.
+    #
+    # --start-group because Mesa's archives and LLVM's are mutually
+    # recursive; libc++ explicitly because pouch-ld drives clang in C mode
+    # while every one of these archives is C++ (osmesa-prove got them from
+    # clang++ instead).
+    # -u OSMesaCreateContextExt is LOAD-BEARING, and its absence produced a
+    # perfectly successful link that shipped a dead GL path.
+    #
+    # SDL_thylacineopengl.c declares the OSMesa entry points WEAK so that
+    # non-GL programs can link the same libSDL2.a. But a weak UNDEFINED
+    # reference does not cause the linker to extract an archive member --
+    # that is standard ELF, not an lld quirk. So libOSMesa.a was scanned,
+    # nothing pulled the OSMesa member, every weak reference resolved to 0,
+    # and the link reported success while THYLACINE_GL_Available() would
+    # have returned false at runtime. -u adds a STRONG undefined symbol,
+    # which forces the extraction; one is enough, because the member that
+    # defines it defines the rest.
+    mkdir -p "$(dirname "$out")"
+    if ! POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+            "$REPO_ROOT/tools/pouch-ld" "$obj" \
+            -L"$sysroot/lib" -lSDL2 \
+            -Wl,-u,OSMesaCreateContextExt \
+            -Wl,--start-group \
+            "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
+            -L"$llvm_lib" "${llvm_flags[@]}" \
+            -lc++ -lc++abi -lunwind -lm \
+            -Wl,--end-group \
+            -o "$out"; then
+        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
+        echo "    resolve against libOSMesa.a (#138)." >&2
+        rm -f "$obj"
+        exit 1
+    fi
+    rm -f "$obj"
+
+    # ASSERT THE RESOLUTION, because the link exiting 0 does not.
+    #
+    # Everything above is arranged so that a broken GL link still SUCCEEDS
+    # (that is what the weak declarations buy), which means "the link
+    # returned 0" carries no information about whether this binary can do
+    # any GL at all. It has to be read out of the artifact. Checking the
+    # exact set the driver calls -- not one representative -- because the
+    # extraction is per-archive-member and a Mesa refactor could split them.
+    # CAPTURE FIRST, then filter -- never `llvm-nm BIG | grep -q`.
+    # That pipeline is a SIGPIPE race under `set -o pipefail`: grep -q exits
+    # at the first match while llvm-nm still has megabytes of a 138 MB
+    # binary's symbol table to write, so llvm-nm dies on SIGPIPE, the
+    # pipeline reports 141, and the check declares a symbol MISSING that is
+    # in fact present. It cost a wrong diagnosis here (it accused glFinish,
+    # which was demonstrably defined) and the identical shape cost a whole
+    # stage in #110. It also loses the race only when stdout is not a tty,
+    # so probing it by hand "disproves" it.
+    local nm="$LLVM_PREFIX/bin/llvm-nm"
+    local defined
+    defined="$("$nm" --defined-only "$out" 2>/dev/null)"
+    local want missing=""
+    for want in OSMesaCreateContextExt OSMesaDestroyContext OSMesaMakeCurrent \
+                OSMesaPixelStore OSMesaGetProcAddress glFinish; do
+        if ! grep -qE "^[0-9a-f]+ [TtWw] $want\$" <<<"$defined"; then
+            missing="$missing $want"
+        fi
+    done
+    if [[ -n "$missing" ]]; then
+        echo "==> gl-sdl-prove: linked, but these stayed UNDEFINED:$missing" >&2
+        echo "    The GL path in this binary is inert -- weak references" >&2
+        echo "    resolved to 0 instead of pulling libOSMesa.a's members." >&2
+        echo "    (-Wl,-u,OSMesaCreateContextExt is what forces that.)" >&2
+        rm -f "$out"
+        exit 1
+    fi
+    echo "    gl-sdl-prove: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static,"
+    echo "                  OSMesa entry points resolved -- #138)"
 }
 
 build_tyrquake() {
@@ -3297,6 +3453,18 @@ stage_clade() {
         chmod +x "$stage/bin/osmesa-prove"
     else
         echo "    clade stage: no osmesa-prove at $BUILD_DIR/clade/gl/ -- staging without it (CL-7b GL gate will skip)"
+    fi
+    # Clade CL-7 step 2 (#138): the SDL GL prover, for the same reasons and on
+    # the same terms as osmesa-prove above -- built by build_sdl2 against the
+    # fetched GL archives, too big for the ramfs, optional, and ANNOUNCED when
+    # absent so a GL half that failed to arrive cannot be mistaken for a boot
+    # that never had one.
+    if [[ -f "$BUILD_DIR/clade/gl/gl-sdl-prove" ]]; then
+        "$strip" -o "$stage/bin/gl-sdl-prove" "$BUILD_DIR/clade/gl/gl-sdl-prove" 2>/dev/null \
+            || cp "$BUILD_DIR/clade/gl/gl-sdl-prove" "$stage/bin/gl-sdl-prove"
+        chmod +x "$stage/bin/gl-sdl-prove"
+    else
+        echo "    clade stage: no gl-sdl-prove at $BUILD_DIR/clade/gl/ -- staging without it (#138 SDL-GL gate will skip)"
     fi
     # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
     mkdir -p "$stage/sysroot"

@@ -1,0 +1,141 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-gfx-gl.exp -- the CL-7 step 2 SDL-GL gate (#138).
+#
+# LLVM-DESIGN section 9 step 2: SDL_GL_CreateContext / MakeCurrent /
+# SwapWindow backed by Mesa's OSMesa on llvmpipe, rendering into weave slot 0
+# and presented by the tapestry compositor. This is that claim, driven by a
+# stock SDL-GL program.
+#
+#   context leg : /clade/bin/gl-sdl-prove creates a GL context through SDL,
+#                 reports GL_RENDERER, draws sdl-probe's quadrant pattern with
+#                 the RASTERISER (scissored clears + a filled triangle), swaps
+#                 8 frames, then glReadPixels the result back and checks all
+#                 five regions. Its EXIT CODE is the verdict -- it returns a
+#                 distinct non-zero at every station -- so this leg does not
+#                 have to trust the text it prints.
+#   render leg  : a screendump carries the pattern's colour richness, i.e.
+#                 the GL frames reached the scanout rather than stopping in
+#                 the client's own buffer. (The readback above is the
+#                 DETERMINISTIC proof that llvmpipe drew the right pixels;
+#                 the dump is what proves they were PRESENTED.)
+#
+# The renderer assertion is not cosmetic: a context that came up on some stub
+# would satisfy every other check here while proving nothing about CL-7.
+#
+# Runs under HVF, the ls-gfx / ls-gfx-quake sibling posture: the interactive
+# harness's default TCG accel hangs the boot at the pre-existing 8a-2b hwwatch
+# E2E (task #27), so a bare TCG run could never pass and would just burn
+# 3x300s. GPU-less boots have no scanout -- THYLACINE_NO_GPU applies.
+#
+# SKIPs when the GL half was not baked: the prover is built from ~365 MB of
+# cross-built archives fetched from the GCP builder (usr/ports/mesa/README.md),
+# so a tree without them legitimately has no /clade/bin/gl-sdl-prove. Skipping
+# is stated out loud rather than passing quietly, because "the binary is
+# absent" and "the binary works" must not produce the same green.
+
+set ::env(THYLACINE_ACCEL) hvf
+
+source [file join [file dirname [info script]] lib.exp]
+
+set repo $lc_repo
+set qmp "$repo/build/qmp.sock"
+
+proc gfx_fingerprint {png} {
+    return [exec python3 [file join [file dirname [info script]] gfx_fp.py] $png]
+}
+
+proc gfx_dump_or_fail {out} {
+    global repo qmp
+    if {[catch {exec $repo/tools/screendump.sh -s $qmp $out} err]} {
+        return $err
+    }
+    return ""
+}
+
+# The staged tree is the same one joey's gl_gate reads, so its presence here
+# is the same condition -- checked on the HOST before boot so the skip costs
+# no VM time.
+set prove "$repo/build/clade/stage/bin/gl-sdl-prove"
+if {![file exists $prove]} {
+    puts "LS-CI SKIP: no gl-sdl-prove staged at build/clade/stage/bin -- the GL\
+          half is not baked into this pool (see usr/ports/mesa/README.md)"
+    exit 77
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# `4` = hold the final frame presented for 4 seconds at 1 Hz, so the
+# screendump below has a window to catch it (the sdl-probe hold contract).
+lc_send "/clade/bin/gl-sdl-prove 4"
+
+set timeout 180
+
+# CAP_JIT first. llvmpipe JITs inside the prover's own process and CAP_JIT is
+# elevation-only, so the program walks the corvus clearance path for itself.
+# Asserted separately because without it the failure surfaces three layers away
+# as llvmpipe's "Failed to materialize symbols" -- a Mesa-shaped message for a
+# capability-shaped problem, which is exactly how this leg was first missed.
+expect {
+    "gl-sdl-prove: CAP_JIT acquired" {
+        lc_pass "CAP_JIT acquired via the corvus jit clearance (a GL program\
+                 here is a capability client, not an ordinary binary)"
+    }
+    -re {gl-sdl-prove: FAIL (corvus|cannot|clearance|redeeming)([^\r\n]*)} {
+        lc_fail "CAP_JIT clearance walk failed: $expect_out(1,string)$expect_out(2,string)"
+    }
+    "permission denied (no CAP_JIT)" {
+        lc_fail "SYS_JIT_CREATE refused -- the clearance walk did not run"
+    }
+    timeout { lc_fail "no CAP_JIT line within 180s" }
+}
+
+expect {
+    -re {gl-sdl-prove: renderer=([^ ]+) version=([^\r\n]*)} {
+        set rend $expect_out(1,string)
+        set vers $expect_out(2,string)
+        if {![string match "*llvmpipe*" $rend]} {
+            lc_fail "GL renderer is '$rend', not llvmpipe -- the context did\
+                     not come up on Mesa's software rasteriser"
+        }
+        lc_pass "GL context live: renderer=$rend version=$vers"
+    }
+    -re {gl-sdl-prove: FAIL ([^\r\n]*)} {
+        lc_fail "gl-sdl-prove failed: $expect_out(1,string)"
+    }
+    "user fault" { lc_fail "gl-sdl-prove segv" }
+    timeout      { lc_fail "no renderer line within 180s" }
+}
+
+expect {
+    -re {gl-sdl-prove: PASS renderer=[^ ]+ ([0-9]+)x([0-9]+) frames=([0-9]+)} {
+        lc_pass "GL draw + readback verified:\
+                 $expect_out(1,string)x$expect_out(2,string),\
+                 $expect_out(3,string) frames swapped, all 5 regions correct"
+    }
+    -re {gl-sdl-prove: pixel ([^\r\n]*)} {
+        lc_fail "GL readback mismatch: $expect_out(1,string)"
+    }
+    -re {gl-sdl-prove: FAIL ([^\r\n]*)} {
+        lc_fail "gl-sdl-prove failed: $expect_out(1,string)"
+    }
+    "user fault" { lc_fail "gl-sdl-prove segv" }
+    timeout      { lc_fail "no PASS line within 180s" }
+}
+
+# The render leg, inside the 4 s hold.
+if {[gfx_dump_or_fail /tmp/lsgl-1.png] ne ""} { lc_fail "screendump failed" }
+set fp [gfx_fingerprint /tmp/lsgl-1.png]
+set buckets [lindex $fp 1]
+# The pattern is four saturated quadrants plus a magenta triangle. A flat or
+# black surface -- the shape a present that never landed would take -- cannot
+# clear this floor.
+if {$buckets < 4} {
+    lc_fail "only $buckets colour buckets on the scanout -- the GL frames did\
+             not reach the compositor"
+}
+lc_pass "GL frames on the scanout ($buckets colour buckets)"
+
+lc_quit
+lc_pass "ls-gfx-gl: the CL-7 step 2 SDL-GL context path verified (#138)"
+exit 0
