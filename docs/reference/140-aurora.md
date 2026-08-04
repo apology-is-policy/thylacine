@@ -158,6 +158,51 @@ private session → fullscreen surface → weave map → Loom presents.
   CONTIGUOUS dirty row span into the CURRENT slot, and presents exactly
   that rect (slots rotate per present — presenting rows a pass did not
   just render would transfer stale slot content).
+- **The held-input queue (#129) + its pacing (#135).** `cons_feed_write`
+  returns a SHORT count when the kernel RX ring is full — back-pressure,
+  not an error: the refused bytes were never taken and are still
+  aurora's. So keystrokes (and `Vt.reply` CPR answers, which ride the
+  same queue so a reply cannot overtake the typing before it) go into
+  `feed_pending`, retried at the top of every pass. ONE write attempt
+  per pass, deliberately: the console's reader may be stalled
+  indefinitely (a foreground child that stopped reading stdin parks RX
+  paused BY DESIGN — #174-audit F3), so a retry loop would wedge the
+  renderer. Bounded at `FEED_PENDING_MAX` = 4 KiB, dropping the NEWEST
+  on overflow (Linux `n_tty`'s rule for a full INPUT buffer: dropping a
+  prefix can leave a complete but DIFFERENT command, where dropping a
+  suffix leaves an incomplete one the shell rejects — the opposite of
+  `cons_drain_tap`'s drop-oldest, whose rationale is explicitly about
+  OUTPUT).
+  **#135 — the retry is only as frequent as the loop turns**, and the
+  loop turns on compositor events. `frame_tick` reaches
+  `visible_hosted()` surfaces ONLY, so a tab-backgrounded aurora
+  receives nothing at all once the hide transition's own `TEV_FOCUS`
+  is consumed; the untimed `wait_event` then parked held input until
+  the user came back, and the bytes landed in whatever the shell was
+  doing THEN. Fixed by BOUNDING the wait — `wait_is_bounded(held)` →
+  `poll_event` + a `FEED_RETRY_MS` = 50 ms nap — whenever the queue is
+  non-empty; the empty case still blocks untimed (zero idle cost, which
+  matters on the tickless-idle system). Not a retry spin: the per-pass
+  effort is unchanged, only the PASS RATE is bounded, and a nap yields.
+  This is a NARROW, BOUNDED exception to `frame_tick`'s own stated
+  expectation that "a paced client naturally suspends while hidden" —
+  aurora suspends exactly as designed the moment its queue drains, and
+  while napping it is not rendering, only retrying a console write.
+  Two compositor properties make it safe, both checked rather than
+  assumed: a present from an invisible surface "completes without
+  pixels ... content heals on later presents once visible" (the D1
+  contract), and `TEV_FRAME` COALESCES to at most one queued per
+  surface and is droppable-at-cap, so a nap cannot fill the event queue
+  — the WEDGE force-retire needs `EVENT_QUEUE_CAP` = 128 *non-droppable*
+  events, which 50 ms cannot produce.
+  **The rejected alternative was "discard held input on unfocus"**: it
+  reads as the prompt-over-complete tradeoff, but focus-lost ALSO fires
+  when aurora stays VISIBLE (a `focusdir` to a sibling in a tiled
+  layout), where frames keep arriving and the retry already delivers
+  within a tick — so it would discard input that was about to be
+  delivered correctly. Bounding the wait removes the STALENESS at its
+  source (held bytes land as soon as the console can take them, hidden
+  or not) instead of paying for promptness with the user's keystrokes.
 - **The blend is lane-safe (#35).** `render.rs::blend`'s packed R|B trick
   originally divided the PACKED word by 255 — integer division does not
   distribute over lanes (65536 ≡ 1 mod 255), so the B output absorbed
@@ -362,7 +407,15 @@ invoke or spoof it.
   gpu0 in run-vm.sh, which is what makes device-targeted
   `input-send-event` legal) and the serial TEE asserts the command's
   OUTPUT — keyboard → tapestryd → aurora → consfeed → line discipline →
-  ut, no pixel OCR.
+  ut, no pixel OCR. It ALSO asserts the startup line
+  `#129 feed selftest PASS` — aurora is a `no_std` bin crate with no
+  cargo-test harness, so `feed_policy_selftest` scripts the accept
+  counts a back-pressured console would return (order, the drop-NEWEST
+  bound, back-pressure vs I/O error) plus the #135 pacing coupling, and
+  a failure prints FAIL and times the gate out. Revert-probed at #135:
+  pinning `wait_is_bounded` to `false` (the pre-fix always-block
+  behaviour) fails all 3 attempts deterministically on exactly that
+  line, with the CL-4 / osmesa / CL-7b GL gates still passing.
 
 ## Known caveats / seams
 
