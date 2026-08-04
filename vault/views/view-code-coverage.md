@@ -57,7 +57,7 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**265 owned · 156 unowned · 421 files (62% owned) · ~44264 unswept lines.**
+**266 owned · 155 unowned · 421 files (63% owned) · ~43480 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
@@ -77,7 +77,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/virtio-blk-rw | 0 | 1 | 885 |
 | usr/virtio-net-loop | 0 | 1 | 874 |
 | usr/virtio-input | 0 | 1 | 825 |
-| usr/warden | 0 | 1 | 784 |
 | usr/curl | 0 | 3 | 779 |
 | usr/net-echo | 0 | 1 | 774 |
 | usr/virtio-net-arp | 0 | 1 | 710 |
@@ -99,6 +98,7 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/ptyfs | 2 | 0 | 0 |
 | usr/tapestryd | 7 | 0 | 0 |
 | usr/utopia | 26 | 0 | 0 |
+| usr/warden | 1 | 0 | 0 |
 
 ### Unowned, largest first
 
@@ -115,7 +115,6 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/virtio-net-loop/src/main.rs | 874 |
 | usr/virtio-input/src/main.rs | 825 |
 | usr/lib/tls/src/lib.rs | 795 |
-| usr/warden/src/main.rs | 784 |
 | usr/net-echo/src/main.rs | 774 |
 | usr/virtio-net-arp/src/main.rs | 710 |
 | usr/lib/libtapestry/src/lib.rs | 677 |

@@ -4,7 +4,7 @@ type: moc
 title: "Userspace"
 parent: home
 created: 2026-07-31
-updated: 2026-08-03
+updated: 2026-08-04
 ---
 The native + ported userspace tree: the boot chain (joey, corvus, login,
 warden), the services (netd, stratumd-facing proxies, ptyfs, tapestryd),
@@ -25,6 +25,12 @@ dossiers.
 - [[moc-userspace-shell-tui]] — what a person actually touches. Spans the
   widest range of risk in the tree, from a parser that touches nothing to
   a raw-mode handoff the user cannot type their way out of.
+- [[moc-userspace-boot-chain]] — the Procs that run before there is a
+  session, whose common shape is that each is spawned holding an authority
+  it exists to give away. The one plane where the kernel's
+  conferred-within-conferrer rule is vacuous by construction, because being
+  early means holding everything — so its notes are about arithmetic nobody
+  re-derives rather than about gates.
 
 ## Services
 

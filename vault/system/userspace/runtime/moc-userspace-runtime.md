@@ -4,7 +4,7 @@ type: moc
 title: "The runtime libraries — what a native program stands on"
 parent: moc-userspace
 created: 2026-08-03
-updated: 2026-08-03
+updated: 2026-08-04
 ---
 The libraries a native Thylacine program links rather than the programs
 themselves: the runtime that turns a syscall into a typed call and a
@@ -106,6 +106,8 @@ producing, one level up — not a claim that is wrong, but a claim nothing check
   where a node comes from and what happens when a driver dies — plus the
   network-device layer, and the transport crypto, which is the one native
   consumer whose own bound check is load-bearing against the kernel's
-  entropy-read behaviour rather than redundant with it. The authority half of
-  [[inv-i34]] has landed above; its grantor, the warden, is a program and
-  sweeps with the boot chain.
+  entropy-read behaviour rather than redundant with it.
+- The consumer of both halves above is [[sub-warden]], on the boot-chain
+  plane — a program, not a library, and the only place the two halves meet.
+  Read it for what these libraries are *for*: they exist so that one program
+  can compute a hardware authority nothing downstream re-derives.

@@ -3,11 +3,11 @@ id: inv-i34
 type: inv
 title: "I-34 — a driver's hardware authority is exactly what it was granted, and no more"
 number: I-34
-guards: [sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery, sub-libdriver-grant, sub-libdriver-discovery]
+guards: [sub-kernel-allowance, sub-kernel-hwcap, sub-kernel-discovery, sub-libdriver-grant, sub-libdriver-discovery, sub-warden]
 validated-by: [spec-allowance, prose, gate-smp]
 strength: spec
 created: 2026-08-02
-updated: 2026-08-03
+updated: 2026-08-04
 ---
 ## Statement
 
@@ -92,6 +92,21 @@ fabricate an address, inflate a window or invent an interrupt. The residual
 driver's own register re-read, which converts an authority failure into an
 availability one. Userspace therefore holds the fourth leg in two places: where
 the correspondence is *established*, and where the grant is *computed* from it.
+
+**Both places are one program, [[sub-warden]]**, and reading it settles what
+"policy" concretely means here. The leg is not held by a check anywhere — it
+is held by a *structure*: one value is computed per bind, and both the kernel
+allowance and the driver's own description of what it was given are derived
+from that one value, so the authority and the account of it cannot drift
+apart. There is no second opinion by design, at any layer.
+
+Which makes the broker's own log the leg's only external evidence, and worth
+knowing that it is incomplete: a grant folded across several devices is
+reported naming one of them, and a device whose grant could not be computed
+at all is absent from the summary entirely. Neither mis-grants anything —
+the kernel and the driver both receive the full, correct set. But an
+invariant whose enforcement is structural rather than checked is audited by
+reading, and the reading material is narrower than the fact.
 
 ## Validation
 
