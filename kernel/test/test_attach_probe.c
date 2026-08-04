@@ -442,7 +442,10 @@ void test_attach_probe_round_trip(void) {
     // waits until the responder is physically off its CPU, #788), then free it.
     // Without this the responder leaked as a runnable thread the scheduler spun
     // on every CPU forever -- the #108 idle-CPU burn.
-    while (!__atomic_load_n(&g_responder_exited, __ATOMIC_ACQUIRE)) sched();
+    // Bounded (#134): on expiry this returns WITHOUT the thread_free below,
+    // which is the safe direction -- the ACQUIRE is what proves the responder
+    // is off its CPU, so freeing it after an expiry is the #788 UAF.
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_responder_exited, __ATOMIC_ACQUIRE));
     thread_free(responder);
 
     // No boot-side spoor_clunks needed — all 4 Spoor refs were

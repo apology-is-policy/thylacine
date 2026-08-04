@@ -117,20 +117,74 @@ and want a home that is not a single file's dossier; (3) splits — the armed
 states are `cons.c`'s (already swept, `sub-kernel-cons`) and the backstop is
 `kernel/test/test.c`'s (unowned).
 
+**From `#134` (`312924d1`, 2026-08-03)** — 62 further lines, again about the
+in-kernel runner, again with no dossier to receive them. Two additions:
+
+4. **A bounded wait must match its enclosing function's FAILURE CONVENTION,
+   not merely its wait shape.** Roughly a third of the suite's hand-rolled
+   waits do not run on the test thread at all — they sit in entry thunks that
+   `rfork` runs in *another Proc*. The ordinary assert macro is wrong there in
+   two independent ways, **each worse than the unbounded spin it would
+   replace**: it expands to `fail; return`, and returning from a Proc entry
+   lands on the trampoline's permanent halt — so the thunk's Proc never exits
+   and the parent's `wait_pid` never returns, turning one stuck handshake into
+   two parked threads, where the spin at least kept yielding; and it writes the
+   runner's own state from a foreign Proc. So the thunk form terminates its own
+   Proc instead, and a fourth form exists for the two tests that own an
+   explicit cleanup label a bare `return` would jump past.
+
+   The expiry deliberately fails the **suite** and accuses no individual test.
+   That was measured, not reasoned: the first draft blamed the running test,
+   and sabotaging one wait showed why — the sabotaged test returned early, so
+   it never released its own spinner thunks, which expired two seconds later
+   while the runner was two tests further on and reddened an innocent
+   bystander. Which is item (3)'s own F2 shape — a diagnostic reaching into
+   state it does not own — **reintroduced one day after being removed from the
+   console backstop**, by the same hand, while writing a comment that called
+   the attribution best-effort.
+
+5. **A census needs a control before its output is believed.** Three
+   successive censuses of these waits each missed a different subset, all for
+   one reason: the filter was built from the shape its author already had in
+   mind. `#92`'s caught single-line waits and missed multi-line conditions;
+   `#134`'s, written to fix exactly that, caught multi-line and missed
+   single-line — the precise inverse; the replacement then read `< N` as
+   evidence of a bound and silently dropped every wait on a *peer progress
+   counter*. The surviving discriminator is narrow and worth stating as such:
+   **a bound is a deadline or a counter the loop itself increments, never any
+   `<`.** The control must hold one specimen of every shape the census claims
+   to catch *and* negatives it must not flag — here, adding one positive is
+   what exposed the author's own false negative, before the census had
+   produced a single site.
+
+Note for whoever folds these: (4) and (5) join (1) and (2) as cross-cutting
+test *methodology*, and the four together are now enough to justify a
+methodology note of their own rather than a section inside whatever dossier
+eventually owns `kernel/test/`. (4) additionally documents a *kernel* fact —
+that returning from a Proc entry halts the thread permanently — which belongs
+with the process model wherever that lands, not only with the harness.
+
 ---
 
 **If you are here to add something, add it to the dossier, not to this file.**
 
 This stub replaces the whole document, so any edit here becomes a merge
 conflict — which is the intended behaviour, and the only reason nothing has
-been lost yet. It has now happened TWICE: #125 added a point 7 to the live
-document on `main` after absorption, and #130's residue added the three items
-above. The #125 content lives in `sub-substrate-interactive.md` (the
-guest-suspension mechanism, why `SO_RCVBUF` on the reader is vacuous, the
-listener-inheritance fix and its A/B) and in `gate-interactive.md` (the third
-thing a silent guest can mean). Nothing from either has been dropped.
+been lost yet. It has now happened **THREE TIMES**: #125 added a point 7 to
+the live document on `main` after absorption, #130's residue added items (1)
+to (3), and #134 added items (4) and (5). The #125 content lives in
+`sub-substrate-interactive.md` (the guest-suspension mechanism, why
+`SO_RCVBUF` on the reader is vacuous, the listener-inheritance fix and its
+A/B) and in `gate-interactive.md` (the third thing a silent guest can mean).
+Nothing from any of the three has been dropped.
 
-That it happened twice is the signal, not the accident: this file is still the
+That it keeps happening is the signal, not the accident: this file is still the
 natural place to write about the harness, because the harness has no dossier
 yet. The conflict-as-tripwire works, but it fires *after* the writing, and it
-only fires for someone merging this branch.
+only fires for someone merging this branch — so each occurrence costs the
+author nothing and this branch a fold. Three occurrences in four days is the
+rate, and it is not slowing: the pending section has now outgrown the
+absorption note above it. Tracked as vault task #119; the honest reading is
+that the tripwire is a stopgap and the fix is to give `kernel/test/` a dossier,
+which means sweeping the in-kernel runner rather than waiting for the kernel
+sweep to reach it.

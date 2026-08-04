@@ -58,7 +58,13 @@ void test_kthread_join_free(struct Thread *t, volatile bool *exited) {
     // ACQUIRE pairs with the park's RELEASE: once observed, t is provably
     // THREAD_EXITING (not RUNNING), so thread_free's not-RUNNING gate holds; its
     // on_cpu spin covers the in-flight switch-away.
-    while (!__atomic_load_n(exited, __ATOMIC_ACQUIRE)) sched();
+    //
+    // Bounded (#134). On expiry TEST_ASSERT returns from here WITHOUT the
+    // thread_free below -- and that is the correct direction to fail: the whole
+    // point of the wait is that *exited is what proves t is not RUNNING, so
+    // freeing it after an expiry would be the UAF this ACQUIRE exists to
+    // prevent. A leaked (leak-checked) Thread slot is the safe residue.
+    TEST_YIELD_UNTIL(__atomic_load_n(exited, __ATOMIC_ACQUIRE));
     thread_free(t);
 }
 
@@ -3038,6 +3044,10 @@ struct test_case g_tests[] = {
 static struct test_case *current_test;
 static unsigned passed_count, failed_count, total_count, soft_warn_count;
 
+// #134: child-Proc wait expiries observed across the whole run. Deliberately
+// NOT attributed to a test (see the runner loop); it fails the suite instead.
+static unsigned proc_wait_timeout_total;
+
 void test_fail(const char *msg) {
     if (current_test) {
         current_test->failed = true;
@@ -3062,6 +3072,8 @@ void test_run_all(void) {
     failed_count = 0;
     total_count  = 0;
     soft_warn_count = 0;
+    proc_wait_timeout_total = 0;
+    __atomic_store_n(&g_test_proc_wait_timeouts, 0u, __ATOMIC_RELEASE);
 
     for (int i = 0; g_tests[i].fn != NULL; i++) {
         current_test = &g_tests[i];
@@ -3119,6 +3131,35 @@ void test_run_all(void) {
                 test_fail("test left global console state armed (see LEAKED-STATE)");
         }
 
+        // #134: a bounded wait inside a CHILD PROC's entry thunk cannot fail the
+        // test directly -- TEST_ASSERT's `return` would park the thunk on the
+        // trampoline's WFE forever, and test_fail from a foreign Proc races the
+        // runner (test.h). So the thunk exits() and leaves the condition here;
+        // the runner is the one that reports it, on the right thread.
+        //
+        // It does NOT fail `current_test`, because the runner cannot know whose
+        // wait expired. Measured: sabotaging one wait made a test fail, which
+        // returned early and so never released ITS OWN spinner thunks, which
+        // then expired 2 s later -- and the runner was by then two tests along,
+        // so blaming current_test reddened an innocent bystander. That is the
+        // #136-F2 shape (a diagnostic reaching into state it does not own), and
+        // guessing wrong is worse than not guessing: the real failure is already
+        // red on its own, so a false red adds noise and no information.
+        //
+        // Instead the condition is named where it is observed, and the count
+        // fails the SUITE (test_all_passed). Nothing silently absorbs it, and no
+        // individual test is accused on the strength of timing.
+        if (__atomic_load_n(&g_test_proc_wait_timeouts, __ATOMIC_ACQUIRE) != 0) {
+            const char *what = __atomic_load_n(&g_test_proc_wait_what,
+                                               __ATOMIC_ACQUIRE);
+            uart_puts("PROC-WAIT-TIMEOUT(");
+            uart_puts(what ? what : "(unrecorded)");
+            uart_puts(") [observed here; the owner is whichever test set that "
+                      "condition] ");
+            __atomic_store_n(&g_test_proc_wait_timeouts, 0u, __ATOMIC_RELEASE);
+            proc_wait_timeout_total++;
+        }
+
         if (current_test->failed) {
             uart_puts("FAIL: ");
             uart_puts(current_test->fail_msg ? current_test->fail_msg : "(no message)");
@@ -3139,7 +3180,9 @@ void test_run_all(void) {
     uart_putdec(g_test_yield_spun);
     uart_puts(" actually waited, ");
     uart_putdec(g_test_yield_deep);
-    uart_puts(" needed >1 yield\n");
+    uart_puts(" needed >1 yield, ");
+    uart_putdec(proc_wait_timeout_total);
+    uart_puts(" child-Proc expiries\n");
 
     current_test = NULL;
 }
@@ -3148,8 +3191,17 @@ unsigned g_test_yield_calls;
 unsigned g_test_yield_spun;
 unsigned g_test_yield_deep;
 
+// #134: written by TEST_YIELD_UNTIL_PROC from a CHILD PROC, read by the runner
+// on the boot thread. See test.h for why a thunk cannot use TEST_ASSERT.
+volatile unsigned    g_test_proc_wait_timeouts;
+const char *volatile g_test_proc_wait_what;
+
 bool test_all_passed(void) {
-    return failed_count == 0;
+    // #134: a child-Proc wait expiry fails the suite even when every individual
+    // test passed. The runner cannot safely attribute it to one test, but it is
+    // never allowed to be silently absorbed -- an unbounded wait that now
+    // expires is exactly the boot-hang this item removed, and it must be loud.
+    return failed_count == 0 && proc_wait_timeout_total == 0;
 }
 
 unsigned test_total(void)  { return total_count; }

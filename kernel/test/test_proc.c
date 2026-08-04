@@ -527,8 +527,8 @@ static volatile u32 g_oti_gc_release;     // boot sets → grandchild exits
 
 static void oti_init_sim_entry(void *arg) {
     (void)arg;
-    while (__atomic_load_n(&g_oti_init_go, __ATOMIC_ACQUIRE) == 0u)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_oti_init_go,
+                                          __ATOMIC_ACQUIRE) != 0u);
     // Sole child by now is the adopted orphan (zombie or about to be:
     // its exits wakes our child_waiters since we became its parent).
     int st = -1;
@@ -540,8 +540,8 @@ static void oti_init_sim_entry(void *arg) {
 
 static void oti_grandchild_entry(void *arg) {
     (void)arg;
-    while (__atomic_load_n(&g_oti_gc_release, __ATOMIC_ACQUIRE) == 0u)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_oti_gc_release,
+                                          __ATOMIC_ACQUIRE) != 0u);
     exits("ok");
 }
 
@@ -565,6 +565,29 @@ static void oti_parent_entry(void *arg) {
 // the remaining tests in that run.)
 #define OTI_CHECK(cond, msg) \
     do { if (!(cond)) { test_fail(msg); goto fail; } } while (0)
+
+// #134: the bounded wait for THESE tests. TEST_YIELD_UNTIL cannot be used here
+// -- it fails via TEST_ASSERT, which RETURNS, and these two tests own an
+// explicit `fail:` block that restores the test-init pointer and releases the
+// gates so the helper thunks exit rather than spin. Returning past it would
+// leave proc_test_set_init pointing at a Proc the test is about to drop. So the
+// expiry routes through OTI_CHECK and lands on the same cleanup every other
+// failure in these tests uses.
+#define OTI_YIELD_UNTIL(cond)                                               \
+    do {                                                                    \
+        u64  _oy_deadline = timer_now_ns() + TEST_YIELD_BUDGET_NS;          \
+        bool _oy_spun = false, _oy_deep = false;                            \
+        TEST_YIELD_BUMP(g_test_yield_calls);                                \
+        while (!(cond)) {                                                   \
+            if (_oy_spun) _oy_deep = true;                                  \
+            _oy_spun = true;                                                \
+            OTI_CHECK(timer_now_ns() < _oy_deadline,                        \
+                "OTI_YIELD_UNTIL budget exhausted waiting for: " #cond);    \
+            sched();                                                        \
+        }                                                                   \
+        if (_oy_spun) TEST_YIELD_BUMP(g_test_yield_spun);                   \
+        if (_oy_deep) TEST_YIELD_BUMP(g_test_yield_deep);                   \
+    } while (0)
 
 void test_proc_orphan_reparent_to_init(void) {
     u64 created_before   = proc_total_created();
@@ -664,8 +687,8 @@ static volatile u32 g_otz_init_reaped; // pid init_sim reaped (0 = none)
 
 static void otz_init_sim_entry(void *arg) {
     (void)arg;
-    while (__atomic_load_n(&g_otz_go, __ATOMIC_ACQUIRE) == 0u)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_otz_go,
+                                          __ATOMIC_ACQUIRE) != 0u);
     int st = -1;
     int r = wait_pid(&st);   // walks children, finds the adopted ZOMBIE, reaps
     __atomic_store_n(&g_otz_init_reaped, (u32)(r > 0 ? r : 0),
@@ -685,8 +708,8 @@ static void otz_parent_entry(void *arg) {
     __atomic_store_n(&g_otz_b_pid, (u32)b, __ATOMIC_RELEASE);
     // Block until boot has confirmed B is ZOMBIE, then exit → A reparents a
     // ZOMBIE child (adopted_zombie == true, deterministically).
-    while (__atomic_load_n(&g_otz_a_go, __ATOMIC_ACQUIRE) == 0u)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_otz_a_go,
+                                          __ATOMIC_ACQUIRE) != 0u);
     exits("ok");
 }
 
@@ -709,12 +732,12 @@ void test_proc_orphan_reparent_zombie_to_init(void) {
     // ZOMBIE (the branch under test). B is a child of A and unreaped here, so
     // the pointer is stable until init_sim reaps it at the very end.
     u32 b_pid = 0;
-    while ((b_pid = __atomic_load_n(&g_otz_b_pid, __ATOMIC_ACQUIRE)) == 0u)
-        sched();
+    OTI_YIELD_UNTIL((b_pid = __atomic_load_n(&g_otz_b_pid,
+                                             __ATOMIC_ACQUIRE)) != 0u);
     struct Proc *b = proc_find_by_pid((int)b_pid);
     OTI_CHECK(b != NULL, "grandchild B not found");
-    while (__atomic_load_n(&b->state, __ATOMIC_ACQUIRE) != PROC_STATE_ZOMBIE)
-        sched();
+    OTI_YIELD_UNTIL(__atomic_load_n(&b->state, __ATOMIC_ACQUIRE)
+                        == PROC_STATE_ZOMBIE);
 
     // B is ZOMBIE; release A. A exits → proc_reparent_children moves the
     // ZOMBIE B to init_sim (the adopted_zombie path).
@@ -1189,8 +1212,8 @@ static void wpf_spinner_thunk(void *arg) {
     // Stay alive until the parent releases us, yielding cooperatively so we
     // never starve a peer on an oversubscribed CPU set. This keeps the child
     // reliably ALIVE (not a zombie) at the parent's WNOHANG poll.
-    while (__atomic_load_n(&g_wpf_release, __ATOMIC_ACQUIRE) == 0u)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_wpf_release,
+                                          __ATOMIC_ACQUIRE) != 0u);
     exits("ok");
 }
 
@@ -1370,8 +1393,8 @@ static void wpf_group_spinner_thunk(void *arg) {
     struct Proc *self = current_thread()->proc;
     if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
     __atomic_store_n(&g_wpf_grouped, 1u, __ATOMIC_RELEASE);
-    while (__atomic_load_n(&g_wpf_release, __ATOMIC_ACQUIRE) == 0u)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_wpf_release,
+                                          __ATOMIC_ACQUIRE) != 0u);
     exits("ok");
 }
 
@@ -1392,8 +1415,8 @@ void test_proc_wait_pid_for_pgrp_selectors(void) {
     TEST_ASSERT(plain_pid > 0, "rfork plain spinner failed");
     int grp_pid = rfork(RFPROC, wpf_group_spinner_thunk, NULL);
     TEST_ASSERT(grp_pid > 0, "rfork group spinner failed");
-    while (__atomic_load_n(&g_wpf_grouped, __ATOMIC_ACQUIRE) == 0u)
-        sched();                     // the child has minted its own group
+    // the child has minted its own group
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_wpf_grouped, __ATOMIC_ACQUIRE) != 0u);
 
     int st = -42;
     // want 0 = the caller's (kproc's) group: the plain spinner inherited
@@ -1653,8 +1676,9 @@ void test_proc_job_stop_park_report_cont_live(void) {
     int pid = rfork(RFPROC, js_sleeper_thunk, NULL);
     TEST_ASSERT(pid > 0, "rfork sleeper failed");
     struct Proc *c;
-    while ((c = __atomic_load_n(&g_js_sleeper_proc, __ATOMIC_ACQUIRE)) == NULL)
-        sched();                          // the child minted its group + published
+    // the child minted its group + published
+    TEST_YIELD_UNTIL((c = __atomic_load_n(&g_js_sleeper_proc,
+                                          __ATOMIC_ACQUIRE)) != NULL);
 
     TEST_EXPECT_EQ(proc_job_stop_pgrp((u32)pid), 1, "job-stop the child's group");
     TEST_EXPECT_EQ((int)c->job_stop_req, 1, "the child is job-stopped");
@@ -1712,8 +1736,8 @@ void test_proc_job_stop_recycle(void) {
     int pid = rfork(RFPROC, js_sleeper_thunk, NULL);
     TEST_ASSERT(pid > 0, "rfork sleeper failed");
     struct Proc *c;
-    while ((c = __atomic_load_n(&g_js_sleeper_proc, __ATOMIC_ACQUIRE)) == NULL)
-        sched();
+    TEST_YIELD_UNTIL((c = __atomic_load_n(&g_js_sleeper_proc,
+                                          __ATOMIC_ACQUIRE)) != NULL);
 
     struct Thread *th = c->threads;
     TEST_ASSERT(th != NULL, "the child has a thread");
@@ -1803,8 +1827,8 @@ void test_proc_job_stop_preserves_torpor_wait(void) {
     int pid = rfork(RFPROC, tsp_sleeper_thunk, NULL);
     TEST_ASSERT(pid > 0, "rfork torpor sleeper failed");
     struct Proc *c;
-    while ((c = __atomic_load_n(&g_tsp_proc, __ATOMIC_ACQUIRE)) == NULL)
-        sched();
+    TEST_YIELD_UNTIL((c = __atomic_load_n(&g_tsp_proc,
+                                          __ATOMIC_ACQUIRE)) != NULL);
     struct Thread *th = c->threads;
     TEST_ASSERT(th != NULL, "the child has a thread");
 
@@ -1843,7 +1867,7 @@ void test_proc_job_stop_preserves_torpor_wait(void) {
     // A REAL wake completes the preserved wait with TORPOR_OK.
     TEST_EXPECT_EQ(sys_torpor_wake_for_proc(c, g_tsp_vaddr, 1), (s64)1,
         "the real wake finds the preserved waiter");
-    while (__atomic_load_n(&g_tsp_done, __ATOMIC_ACQUIRE) < 2u) sched();
+    TEST_YIELD_UNTIL(__atomic_load_n(&g_tsp_done, __ATOMIC_ACQUIRE) >= 2u);
     TEST_EXPECT_EQ(g_tsp_rc, (s64)TORPOR_OK,
         "the preserved wait completed via the real wake");
 
@@ -1869,8 +1893,8 @@ static void js_anchor_thunk(void *arg) {
     struct Proc *self = current_thread()->proc;
     if (proc_setpgid(self, 0, 0) != 0) exits("setpgid failed");
     __atomic_store_n(&g_js_anchor_proc, self, __ATOMIC_RELEASE);
-    while (__atomic_load_n(&g_js_anchor_release, __ATOMIC_ACQUIRE) == 0u)
-        sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_js_anchor_release,
+                                          __ATOMIC_ACQUIRE) != 0u);
     exits("ok");
 }
 
@@ -1917,8 +1941,9 @@ void test_proc_job_stop_orphan_rule(void) {
     int dpid = rfork(RFPROC, js_anchor_thunk, NULL);
     TEST_ASSERT(dpid > 0, "rfork anchor failed");
     struct Proc *d;
-    while ((d = __atomic_load_n(&g_js_anchor_proc, __ATOMIC_ACQUIRE)) == NULL)
-        sched();                          // d minted its own group G = dpid
+    // d minted its own group G = dpid
+    TEST_YIELD_UNTIL((d = __atomic_load_n(&g_js_anchor_proc,
+                                          __ATOMIC_ACQUIRE)) != NULL);
 
     // c: d's child, its own group in d's session (sid 0), job-stopped.
     // d anchors c's group (same session, group G != c's group).

@@ -298,7 +298,7 @@ static void wpcw_child_entry(void *arg) {
     (void)arg;
     // Stay a live (non-zombie) child until BOTH workers have parked, so the
     // concurrent-park path -- the #344 property -- is exercised, not dodged.
-    while (__atomic_load_n(&g_wpcw_go, __ATOMIC_ACQUIRE) == 0u) sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_wpcw_go, __ATOMIC_ACQUIRE) != 0u);
     exits("ok");
 }
 
@@ -336,12 +336,14 @@ static void wpcw_parent_entry(void *arg) {
     // Wait until BOTH workers have ENTERED wait_pid_for, then spin so they both
     // reach the park (the children are still alive -> no zombie -> both MUST
     // sleep concurrently, the #344 property). Only THEN release the children.
-    while (__atomic_load_n(&g_wpcw_entered, __ATOMIC_ACQUIRE) < 2u) sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_wpcw_entered,
+                                          __ATOMIC_ACQUIRE) >= 2u);
     for (int i = 0; i < 1000; i++) sched();
 
     __atomic_store_n(&g_wpcw_go, 1u, __ATOMIC_RELEASE);   // both children exit
 
-    while (__atomic_load_n(&g_wpcw_done, __ATOMIC_ACQUIRE) < 2u) sched();
+    TEST_YIELD_UNTIL_PROC(__atomic_load_n(&g_wpcw_done,
+                                          __ATOMIC_ACQUIRE) >= 2u);
     exits("ok");
 }
 
