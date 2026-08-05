@@ -57,7 +57,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
 --- a/src/internal/_pouch_process.h	1970-01-01 01:00:00
 +++ b/src/internal/_pouch_process.h	2026-07-23 20:05:01
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,108 @@
 +/* pouch boundary-line: process-lifecycle substrate (Clade CL-1b). Shared by
 + * posix_spawn / posix_spawnp / waitpid / wait4 / pipe / pipe2 / dup2 / dup3.
 + *
@@ -100,7 +100,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +#define POUCH_RIGHT_WRITE 2u
 +
 +/* struct sys_spawn_args -- the SYS_SPAWN_FULL_ARGV wire type. Mirrors the
-+ * kernel layout EXACTLY (96 bytes; the _Static_assert below guards drift).
++ * kernel layout EXACTLY (104 bytes; the _Static_asserts below guard drift).
 + * posix_spawn fills name/argv/fd_list, cap_mask = ~0 (inherit all, the kernel
 + * intersects with the parent), and zero-fills the rest (identity/allowance
 + * inherit; perm_flags = 0). */
@@ -133,6 +133,33 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +	"independently claimed offset 92. A mirror left at 96 does NOT fail this "
 +	"assert on the old number -- the kernel simply reads 8 bytes past the "
 +	"caller's struct (#100). The kernel header is the source of truth.");
++/* Every field pinned INDIVIDUALLY, because the size assert alone cannot see a
++ * field-ORDER mismatch: swap page_budget and pheno_flags and the struct is
++ * still 104 bytes, still compiles, and a caller then sets the wrong one. The
++ * merge that grew this struct MOVED a field in it, so the order is exactly
++ * what is newly at risk. The three code mirrors (kernel, libt, libthyla-rs)
++ * all carry per-field asserts; this one carried only the size until aux's
++ * verification pass of that merge caught the asymmetry. */
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, name_va)        ==   0, "name_va@0");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, argv_data_va)   ==   8, "argv_data_va@8");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, fd_list_va)     ==  16, "fd_list_va@16");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, name_len)       ==  24, "name_len@24");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, argv_data_len)  ==  28, "argv_data_len@28");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, argc)           ==  32, "argc@32");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, fd_count)       ==  36, "fd_count@36");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, perm_flags)     ==  40, "perm_flags@40");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, _pad_envp)      ==  44, "_pad_envp@44");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, cap_mask)       ==  48, "cap_mask@48");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, principal_id)   ==  56, "principal_id@56");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, primary_gid)    ==  60, "primary_gid@60");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, supp_gids_va)   ==  64, "supp_gids_va@64");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, supp_gid_count) ==  72, "supp_gid_count@72");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, identity_flags) ==  76, "identity_flags@76");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, allowance_va)   ==  80, "allowance_va@80");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, allowance_flags)==  88, "allowance_flags@88");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, page_budget)    ==  92, "page_budget@92");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, pheno_flags)    ==  96, "pheno_flags@96");
++_Static_assert(__builtin_offsetof(struct pouch_spawn_args, _pad_spawn2)    == 100, "_pad_spawn2@100");
 +
 +/* Shared helpers (_pouch_process.c). */
 +hidden int __pouch_pipe(int fd[2]);
