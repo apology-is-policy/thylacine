@@ -1281,6 +1281,36 @@ build_sysroot() {
     #    so it always runs after them.
     build_libsodium
 
+    # 8. the GL headers (#146, durable). A sysroot rebuild starts from pristine
+    #    musl, which wipes include/GL + include/KHR — but the SDL-GL compiles
+    #    need them and the GL staging gate only ever verified libOSMesa.a, so
+    #    the loss surfaced three steps later as a missing-header build break
+    #    (or, via the #148 blind-overlay workaround, as a silently REVERTED
+    #    libc.a). Install them HERE, at the same chokepoint that wipes them:
+    #    headers only, never lib/ — that directionality is the whole #148
+    #    lesson. Absent gl/ archives = a non-GL tree; skipping is legitimate.
+    if [[ -d "$BUILD_DIR/clade/gl/include/GL" ]]; then
+        cp -R "$BUILD_DIR/clade/gl/include/GL" "$sysroot/include/"
+        # KHR (glext.h includes KHR/khrplatform.h) did not land beside GL in
+        # the gl/ fetch — the staged clade sysroot is where it exists. Both
+        # are headers-only sources; lib/ is never touched (#148).
+        local khr
+        for khr in "$BUILD_DIR/clade/gl/include/KHR" \
+                   "$BUILD_DIR/clade/stage/sysroot/include/KHR"; do
+            if [[ -d "$khr" ]]; then
+                cp -R "$khr" "$sysroot/include/"
+                break
+            fi
+        done
+        if [[ ! -f "$sysroot/include/KHR/khrplatform.h" ]]; then
+            echo "==> sysroot: include/GL installed but KHR/khrplatform.h is" >&2
+            echo "    missing from both known sources -- the SDL-GL compile" >&2
+            echo "    will fail; refusing to continue silently (#146)." >&2
+            exit 1
+        fi
+        echo "    GL        include/GL + include/KHR installed (#146)"
+    fi
+
     echo "==> pouch sysroot ready:"
     echo "    libc.a    $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
     echo "    runtime   libclang_rt.builtins.a $(wc -c < "$sysroot/lib/libclang_rt.builtins.a" | tr -d ' ') bytes"
@@ -2952,6 +2982,7 @@ gl_link_program() {
         -Wl,--start-group \
         "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
         -L"$llvm_lib" "${llvm_flags[@]}" \
+        -L"$BUILD_DIR/clade/stage/sysroot/lib" \
         -lc++ -lc++abi -lunwind -lm \
         -Wl,--end-group \
         -o "$out"

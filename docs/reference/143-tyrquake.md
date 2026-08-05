@@ -208,6 +208,30 @@ while llvmpipe is doing general per-fragment texture filtering through
 JIT-compiled shader variants. No budget is committed here; the number exists so
 a later change has something to be compared against.
 
+### Second measurement (#150): the rasteriser pool engages
+
+The 19.8 was measured with llvmpipe rasterising **inline on one thread** —
+`nr_cpus` was a hardcoded 1 on this platform (doc 142, the `LP_NUM_THREADS`
+default section). The #150 decomposition, boot-per-run on the same demo1
+gate command (HVF, -smp 4; a fresh guest per number):
+
+```
+inline (pre-fix shipped)      969 frames  44.8s  21.6 fps
+wrapper LP_NUM_THREADS=0      969 frames  45.9s  21.1 fps   (control == inline)
+wrapper LP_NUM_THREADS=3      969 frames  37.8s  25.6 fps
+wrapper LP_NUM_THREADS=4      969 frames  33.3s  29.1 fps
+post-fix shipped (no config)  969 frames  33.1s  29.3 fps   (and one 37.4s/25.9 outlier)
+```
+
+The shipped path now self-defaults the pool to the CPU count (pouch 0032
+sysconf + the SDL glue seed), so the plain gate command does **21.6 →
+29.3 fps (+36%) with zero configuration**. Sublinear vs 4 workers'
+theoretical ceiling because ~2/3 of frame time is the single game/setup
+thread of a 1996 immediate-mode engine — the remaining lever is the
+engine, not the rasteriser. Threaded runs show wider single-run spread
+than inline ones (25.9–29.3 across two post-fix boots); quote the pair,
+not one number. fps remains REPORTED, not gated.
+
 ## Known caveats / seams
 
 - Mouse-look (virtio-tablet → `TEV_PTR`) is G-7c — keyboard already plays
