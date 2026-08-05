@@ -786,6 +786,92 @@ check. All 18 Devs were checked when the gate landed: every walkable root
 stamps `QTDIR` (eight via `dev_simple_attach`, dev9p and devsrv at birth), and
 the `QTFILE` roots are exactly the hierarchy-less leaves the gate should reject.
 
+## Symlink expansion (DISTRO D-1)
+
+`docs/DISTRO.md` section 4 is the design; this is the as-built.
+
+### Expansion produces components, not answers
+
+A walked Spoor carrying `QTSYMLINK` is expanded through `Dev.readlink` and the
+target is **spliced into the path buffer**, after which resolution **re-enters
+the same loop**. This is the whole soundness argument: an expanded component is
+not a shortcut past the resolver, it is more input to it. The `#79` ENOTDIR
+gate, the `#81` dot gate, the `#82` trailing-slash gate, the `#84` dot X-search,
+the per-component X-search and mount crossing therefore bind expanded
+components **by construction** — no gate had to be re-implemented on an
+expansion path, because there is no expansion path. The test that shows this is
+`stalk.symlink_*`'s link into an unsearchable directory: it answers `EACCES`,
+not `ENOENT`, because expansion cannot be used to reach past a gate.
+
+`Dev.readlink` is a NULL-permitted slot. A Dev without it makes its symlinks
+opaque leaves — fail-closed, not fail-open. Only dev9p implements it today
+(`Treadlink`); no native Dev mints `QTSYMLINK`.
+
+### Two arms: splice-in-place and restart
+
+`stalk_expand_link` returns `0` (splice) or `1` (restart). The restart arm
+exists for exactly two target shapes:
+
+- **absolute** — the target re-anchors at the caller's own Territory root, read
+  through `territory_root_ref` (the RW-4 SA-F1 atomic read+ref, so a concurrent
+  `pivot_root` cannot free the root mid-expansion) and held for the rest of the
+  resolution.
+- **`..`-bearing** — a `..` pop lands on a trail ENTRY, and a POUNCE-compressed
+  entry is not one component. `pounce_ok` is sticky-AND and never re-enabled
+  mid-resolution, which makes "a compressed entry and a `..` pop never coexist"
+  true by construction rather than by hope.
+
+Both unwind the trail and re-enter at the `restart:` label, where every
+path-derived field recomputes from the new buffer.
+
+The bound is `STALK_MAX_FOLLOWS` (40), answering `T_E_LOOP`.
+
+### The I-28 containment claim, and what proves it
+
+The claim is that an absolute target anchors at **the caller's own root, as of
+this resolution**. That is two properties, and it takes two probe legs:
+
+- **it anchors at the root, not at the resolution base** — invisible to any
+  caller whose base already IS the root, which is every `SYS_OPEN` from
+  `FROM_ROOT` *and* every cwd-relative path (the LS-4 join makes those absolute
+  and resolves them from the root too). Only `SYS_OPEN` with an explicit dirfd
+  has a non-root base. `symlink-probe` leg **L** is that shape.
+- **it is the CURRENT root** — `symlink-probe` leg **K** chroots mid-run and
+  measures two absolute-target links on both sides; the verdicts invert.
+
+Deleting the re-anchor store passes leg K, all 22 other probe legs, and the
+entire unit suite; it fails leg L alone. Recorded because the obvious single
+leg is the one that does not discriminate — the same trap `probe83` names when
+it says it runs from a non-root cwd because "the trivial case would pass either
+way."
+
+### Final-component dispositions
+
+`STALK_NOFOLLOW` is a FLAG on the amode (`0x100`), not a new amode, because what
+"do not follow" yields depends on the rest of the request:
+
+| request | final component is a link | result |
+|---|---|---|
+| `STALK_OPEN` + NOFOLLOW | yes | `T_E_LOOP` (Linux `O_NOFOLLOW`) |
+| `STALK_WALK` (O_PATH) + NOFOLLOW | yes | the LINK itself — the v1.0 `lstat` |
+| either + NOFOLLOW | no | resolves normally; the flag narrows, it does not require |
+| either + NOFOLLOW, trailing `/` | yes | FOLLOWS anyway (POSIX 4.13) |
+| `STALK_MOUNT` | yes | never follows (forced NOFOLLOW) |
+
+Non-final components expand regardless — the flag scopes to the quarry.
+
+### The single-hop twin does NOT expand (task #184)
+
+`sys_walk_open_handler` never enters `stalk_core`; it walks one component
+directly through `src->dev->walk`. D-1 taught the resolver to expand and shipped
+no twin, so `t_walk_open(dirfd, "link", OREAD)` returns **the link** where
+`t_open(FROM_ROOT, "d/link", OREAD)` returns the target. This is a live
+divergence in the #81/#82 twin family, undocumented until now and tracked at
+#184 for a decision: expand in the twin as well, or declare `SYS_WALK_OPEN` a
+deliberately non-expanding component primitive and pin that in its contract. It
+is a correctness gap, not a privilege one — the returned Spoor is a symlink fid,
+which the server will not `Tlopen` for byte I/O.
+
 ## Performance characteristics
 
 One `Dev.walk` per path component on the per-component loop; a run of

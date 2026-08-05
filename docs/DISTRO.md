@@ -137,6 +137,25 @@ the mounter, not the reader), `AT_EXECFN` absent.
 No new invariant number: expansion is contained by the same machinery the
 invariant already names, which is the design's central claim.
 
+**STATUS: AS-BUILT** — kernel `f10b1675`, the live-FS gate + userspace ABI
+mirror `b77581b6`. Six `stalk.symlink_*` kernel tests + the 24-leg boot-fatal
+`/symlink-probe`. Two things the build changed about this design:
+
+- §4.5's battery is one probe, not a joey-side one: it needs to CREATE links,
+  and `SYS_WALK_CREATE` has no symlink mode, so creation goes through
+  `LOOM_OP_SYMLINK` (this is that op's first consumer). Self-minted rather than
+  baked, so #126's `PRESERVE=1` staleness cannot reach it.
+- The containment proof is TWO legs. The chroot inversion alone does not
+  discriminate the re-anchor — every root-based caller already resolves FROM
+  the root, so storing the root over the base is a no-op there, and deleting
+  it is green on every other leg and the whole unit suite. See
+  `docs/reference/104-stalk.md` "The I-28 containment claim, and what proves
+  it."
+
+Open against this surface: **#184** (the `SYS_WALK_OPEN` single-hop twin does
+not expand — the #81/#82 twin family has an unshipped member) and **#181**
+(`pounce_skip_one`'s stated failure mode is undemonstrated).
+
 ### 4.1 Expansion
 
 When a resolved hop's qid carries `QTSYMLINK` and the component is not
