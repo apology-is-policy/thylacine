@@ -955,11 +955,22 @@ restart:
                 // mount-split's sibling, EXCLUSIVE of the link: the prefix
                 // materialized is [0..link_at-1] -- the link's PARENT -- and
                 // the outer loop resumes AT the link component, which the
-                // per-component arm walks, readlinks, and splices;
-                // pounce_skip_one keeps that one component out of the
-                // gather, else it would re-run this very batch forever).
+                // per-component arm walks, readlinks, and splices).
                 // The discarded batch's bound leaf lives past the link --
                 // meaningless until the link expands.
+                //
+                // pounce_skip_one routes that resumed component to the
+                // per-component arm, which is where expansion lives -- ONE
+                // site, rather than a second copy inside the batch. What it
+                // does NOT have is a demonstrated failure mode: an earlier
+                // draft of this comment claimed the batch would otherwise
+                // re-gather forever, and REVERT-PROBING that (forcing the
+                // flag false) did not produce the loop -- the pounce test
+                // passed with its expansion count intact. So the flag stays
+                // (it keeps expansion single-sited) but its justification is
+                // an open question, tracked as task #181 with the exact
+                // evidence; do not restate the loop claim without
+                // instrumenting for it first.
                 walkqid_free(w);
                 if (bound) spoor_clunk(nc);
                 else if (nc) { nc->aux = NULL; spoor_unref(nc); }
