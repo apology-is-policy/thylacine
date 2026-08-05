@@ -38,7 +38,9 @@
 #include <thylacine/proc.h>       // struct Proc -> territory
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>    // SYS_WALK_OPEN_NAME_MAX + struct t_stat
-#include <thylacine/territory.h>  // mount_lookup + PGRP_MAX_MOUNTS
+#include <thylacine/territory.h>  // mount_lookup + PGRP_MAX_MOUNTS + root_ref
+
+#include "../mm/slub.h"           // kmalloc/kfree (the D-1 expansion state)
 
 // Map a spoor_stat_native / Dev return (0 ok, a negative errno, or the generic
 // -1) into a POSITIVE T_E_* code for stalk's *errp. A real -errno in [-4095,-2]
@@ -263,6 +265,154 @@ static bool path_has_trailing_slash(const char *path, u64 pathlen) {
     return t > 0;   // a real component precedes the trailing separator run
 }
 
+// =============================================================================
+// D-1: symlink expansion (docs/DISTRO.md section 4; refines I-28).
+// =============================================================================
+
+// Byte copy (freestanding kernel; spans bounded by SYS_OPEN_PATH_MAX).
+static void sx_copy(char *dst, const char *src, u64 n) {
+    for (u64 b = 0; b < n; b++) dst[b] = src[b];
+}
+
+// Lazily-allocated expansion state: a symlink-free resolution (the entire
+// native boot surface) never allocates it. ~4 KiB, kmalloc'd at the FIRST
+// expansion, freed on every stalk_core exit.
+struct stalk_expand {
+    char buf[2][SYS_OPEN_PATH_MAX + 1];   // spliced component streams (flip:
+                                          // a build reads buf[cur] / the
+                                          // caller's original and writes
+                                          // buf[cur^1] -- never overlapping)
+    char tgt[SYS_OPEN_PATH_MAX + 1];      // readlink scratch
+    // The CONSUMED RECORD: the concatenation, across superseded buffers, of
+    // every component span consumed before its splice point. Each recorded
+    // component was PHYSICALLY WALKED by this resolution when it was
+    // consumed, so re-resolving the record reproduces the walk (a restart
+    // races concurrent renames exactly as two sequential resolutions would).
+    // Appended at each splice; reset on restart (the rebuilt path
+    // re-consumes) and on re-anchor (the position is the root -- nothing
+    // before it survives).
+    char consumed[SYS_OPEN_PATH_MAX + 1];
+    u64  consumed_len;
+    u64  buflen;                 // length of buf[cur]
+    int  cur;                    // which buf[] the resolver's `path` aliases
+    int  follows;                // expansions so far (bound: STALK_MAX_FOLLOWS)
+    struct Spoor *owned_base;    // absolute re-anchor: ref-held Territory root
+};
+
+static void stalk_expand_free(struct stalk_expand *ex) {
+    if (!ex) return;
+    if (ex->owned_base) spoor_clunk(ex->owned_base);
+    kfree(ex);
+}
+
+// stalk_expand_link -- read `link`'s target and splice it into the component
+// stream. Caller: the per-component arm, on a walked QTSYMLINK Spoor whose
+// Dev has a readlink slot and whose disposition says FOLLOW; the caller
+// clunks `link` afterward regardless of outcome. `s` / `i` delimit the link
+// component in the CURRENT buffer (s = its first byte; i = just past it).
+//
+// Returns:
+//    0 : in-place splice. ex->buf[ex->cur] = target ++ remaining; the caller
+//        continues the SAME resolution (trail intact) at i = 0.
+//    1 : RESTART. ex->buf[ex->cur] = the full rebuilt path; the caller
+//        unwinds the trail and re-enters from *basep. Taken for an ABSOLUTE
+//        target (re-anchored at the caller's own Territory root -- I-28:
+//        never a global root, so a confined Proc's /bin/sh -> /bin/busybox
+//        resolves inside its container BY CONSTRUCTION, not by call-site
+//        audit; the restart is FREE of re-walk cost, since the rebuilt path
+//        is exactly target ++ remaining resolved from the anchor) and for a
+//        '..'-BEARING RELATIVE target (the load-bearing case: a '..' pop
+//        must land on a 1:1 trail entry, and only a fresh resolution --
+//        pounce disabled by the '..' now in the path -- guarantees the whole
+//        trail is 1:1; the soundness argument lives at the '..' arm).
+//   -1 : failure; *errp set (T_E_LOOP at the bound, T_E_NOMEM, T_E_INVAL on
+//        overflow / a NUL-bearing target, a propagated readlink errno).
+static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
+                             struct Spoor *link,
+                             const char *path, u64 pathlen, u64 s, u64 i,
+                             struct Spoor **basep, int *errp) {
+    struct stalk_expand *ex = *exp;
+    if (!ex) {
+        ex = kmalloc(sizeof(*ex), 0);
+        if (!ex) { *errp = T_E_NOMEM; return -1; }
+        ex->consumed_len = 0;
+        ex->buflen       = 0;
+        ex->cur          = 0;
+        ex->follows      = 0;
+        ex->owned_base   = NULL;
+        *exp = ex;
+    }
+    if (++ex->follows > STALK_MAX_FOLLOWS) { *errp = T_E_LOOP; return -1; }
+
+    long tlen = link->dev->readlink(link, ex->tgt, SYS_OPEN_PATH_MAX);
+    if (tlen <= 0) {
+        *errp = (tlen < 0) ? err_code((int)tlen) : T_E_NOENT;
+        return -1;
+    }
+    // A hostile server can put arbitrary bytes in the target string. The
+    // resolver is length-delimited, but Dev.walk's namebuf is NUL-terminated
+    // -- an embedded NUL would silently truncate a component into a DIFFERENT
+    // name. Fail closed (the same class as the handlers' NUL-in-path reject).
+    for (long b = 0; b < tlen; b++)
+        if (ex->tgt[b] == '\0') { *errp = T_E_INVAL; return -1; }
+
+    bool  tgt_abs = (ex->tgt[0] == '/');
+    bool  tgt_dd  = path_has_dotdot(ex->tgt, (u64)tlen);
+    char *nb      = ex->buf[ex->cur ^ 1];
+    u64   rem     = pathlen - i;         // unconsumed tail, incl. leading '/'
+
+    if (tgt_abs) {
+        // Absolute: re-anchor at the caller's own Territory root + restart.
+        // No territory (a synthetic test Proc) -> no root to anchor at ->
+        // fail closed.
+        if (!p || !p->territory) { *errp = T_E_IO; return -1; }
+        if (!ex->owned_base) {
+            // The RW-4 SA-F1 accessor: read + ref atomic under ns_lock, so a
+            // concurrent pivot_root cannot free the root mid-expansion. Held
+            // for the rest of the resolution (later absolute targets reuse
+            // it), released at stalk_expand_free.
+            ex->owned_base = territory_root_ref(p->territory);
+            if (!ex->owned_base) { *errp = T_E_IO; return -1; }
+        }
+        *basep = ex->owned_base;
+        ex->consumed_len = 0;
+        if ((u64)tlen + rem > SYS_OPEN_PATH_MAX) { *errp = T_E_INVAL; return -1; }
+        sx_copy(nb, ex->tgt, (u64)tlen);
+        sx_copy(nb + tlen, path + i, rem);
+        ex->cur   ^= 1;
+        ex->buflen = (u64)tlen + rem;
+        return 1;
+    }
+
+    if (tgt_dd) {
+        // Relative with '..': rebuild the FULL path -- the consumed record +
+        // the current buffer's consumed prefix + target + remaining -- and
+        // restart. path[0..s) ends at a component boundary (path[s-1] is '/'
+        // or s == 0), so the chunks self-separate.
+        u64 need = ex->consumed_len + s + (u64)tlen + rem;
+        if (need > SYS_OPEN_PATH_MAX) { *errp = T_E_INVAL; return -1; }
+        sx_copy(nb, ex->consumed, ex->consumed_len);
+        sx_copy(nb + ex->consumed_len, path, s);
+        sx_copy(nb + ex->consumed_len + s, ex->tgt, (u64)tlen);
+        sx_copy(nb + ex->consumed_len + s + (u64)tlen, path + i, rem);
+        ex->consumed_len = 0;
+        ex->cur   ^= 1;
+        ex->buflen = need;
+        return 1;
+    }
+
+    // Relative, '..'-free: record the consumed prefix, splice in place.
+    if (ex->consumed_len + s > SYS_OPEN_PATH_MAX) { *errp = T_E_INVAL; return -1; }
+    sx_copy(ex->consumed + ex->consumed_len, path, s);
+    ex->consumed_len += s;
+    if ((u64)tlen + rem > SYS_OPEN_PATH_MAX) { *errp = T_E_INVAL; return -1; }
+    sx_copy(nb, ex->tgt, (u64)tlen);
+    sx_copy(nb + tlen, path + i, rem);
+    ex->cur   ^= 1;
+    ex->buflen = (u64)tlen + rem;
+    return 0;
+}
+
 // stalk() -- the errp==NULL convenience wrapper (the common, errno-agnostic
 // API the bulk of callers + the test suite use). The errno-rollout consumers
 // (SYS_OPEN) call stalk_err() directly.
@@ -282,13 +432,21 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                                 struct t_stat *stat_out, bool *stat_done) {
     if (!start || !path) { if (errp) *errp = T_E_INVAL; return NULL; }
     // Reject an unknown amode LOUDLY rather than silently degrading to walk-only
-    // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; POUNCE adds STALK_STAT; any
-    // future amode must be added here AND given its final-hop dispatch arm below
-    // -- a missed arm must fail-closed, not skip an open / a cross / a create's
-    // parent check.
+    // (stalk-1 audit F1). stalk-2 adds STALK_MOUNT; POUNCE adds STALK_STAT; D-1
+    // adds the STALK_NOFOLLOW FLAG (the one admitted flag bit); any future
+    // amode/flag must be added here AND given its dispatch arms below -- a
+    // missed arm must fail-closed, not skip an open / a cross / a follow.
+    bool nofollow_req = (amode & STALK_NOFOLLOW) != 0;
+    if ((amode & ~(STALK_AMODE_MASK | STALK_NOFOLLOW)) != 0)
+        { if (errp) *errp = T_E_INVAL; return NULL; }
+    amode &= STALK_AMODE_MASK;
     if (amode != STALK_WALK && amode != STALK_OPEN && amode != STALK_MOUNT &&
         amode != STALK_STAT)
         { if (errp) *errp = T_E_INVAL; return NULL; }
+    // D-1: the mount POINT is never followed (STALK_MOUNT's no-cross-final
+    // precedent extends to no-follow-final -- SYS_MOUNT names the link's own
+    // identity; DISTRO.md section 4.3).
+    if (amode == STALK_MOUNT) nofollow_req = true;
 
     struct Spoor *trail[STALK_MAX_DEPTH];
     int           depth  = 0;
@@ -298,6 +456,13 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // perm denial, T_E_INVAL structural, propagated for a stat/open failure);
     // T_E_IO is the generic default for an OOM / transport / cross failure.
     int           err    = T_E_IO;
+
+    // D-1: the resolution BASE. `start` (borrowed) until an absolute symlink
+    // target re-anchors at the caller's own Territory root (then the expand
+    // state's ref-held owned_base). Everything that used to read `start` as
+    // the depth-0 position reads `base`.
+    struct Spoor        *base = start;
+    struct stalk_expand *ex   = NULL;
 
     // POUNCE state (docs/POUNCE-DESIGN.md §5). `carried` holds the current
     // trail tip's attrs when they arrived fused with the walk that produced it
@@ -309,28 +474,53 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     // consumed -- runs compress the trail array, so `depth` alone would let a
     // pounced path exceed the STALK_MAX_DEPTH surface the per-component loop
     // enforces; monotone because pounce_ok excludes '..' (the only pop).
-    bool          pounce_ok = !path_has_dotdot(path, pathlen);
+    // Declared WITHOUT initializers: the D-1 restart re-enters at the label
+    // below and every path-derived field recomputes there.
+    bool          pounce_ok;
     struct t_stat carried;
-    bool          carried_valid = false;
-    int           logical_depth = 0;
+    bool          carried_valid;
+    int           logical_depth;
+    bool          trailing_slash;
+    bool          nofollow_final;
+    bool          pounce_skip_one;
+    u64           i;
 
+    // D-1 restart: a symlink expansion that re-anchors (absolute target) or
+    // rebuilds the path (a '..'-bearing target) unwinds the trail and
+    // re-enters HERE, with `path`/`pathlen` aliasing the expand state's
+    // rebuilt buffer and `base` possibly re-anchored. All path-derived state
+    // recomputes from the new buffer; trail/depth were reset by the jumper.
+restart:
+    pounce_ok       = !path_has_dotdot(path, pathlen);
+    carried_valid   = false;
+    logical_depth   = 0;
+    // D-1: the pounce resumes ONE component per-component after a symlink
+    // split (the split's resumed component must not re-gather -- it would
+    // re-walk the same run and split again, forever). Set only by the two
+    // split-for-expansion sites; cleared the moment a component reaches the
+    // per-component arm.
+    pounce_skip_one = false;
     // #82: does this path end in a separator, asserting a directory? Computed
-    // once from the RAW path -- the tokenizer below drops the trailing run, so
-    // by the time resolution finishes nothing remembers it was there.
-    bool          trailing_slash = path_has_trailing_slash(path, pathlen);
+    // from the RAW current buffer -- the tokenizer below drops the trailing
+    // run, so by the time resolution finishes nothing remembers it was there.
+    trailing_slash  = path_has_trailing_slash(path, pathlen);
+    // D-1: a trailing slash FORCES following even for a no-follow caller
+    // (POSIX 4.13 -- "link/" names the directory the link resolves to;
+    // measured Linux behavior, O_NOFOLLOW included).
+    nofollow_final  = nofollow_req && !trailing_slash;
+    i               = 0;
 
-    // Cross the BASE: `start` itself may be a mount point. If it crosses, the
+    // Cross the BASE: `base` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
-    // mounted root, X-checked like any parent). If not, the base stays `start`
-    // (borrowed) and depth stays 0. `start` is borrowed -> we cannot cross it in
-    // place; the crossed clone goes on the trail instead.
+    // mounted root, X-checked like any parent). If not, the base stays `base`
+    // (borrowed, or the ref-held re-anchor root) and depth stays 0. Either way
+    // we cannot cross it in place; the crossed clone goes on the trail instead.
     {
         struct Spoor *crossed = NULL;
-        if (stalk_cross_mounts(p, start, &crossed) < 0) goto fail;
+        if (stalk_cross_mounts(p, base, &crossed) < 0) goto fail;
         if (crossed) trail[depth++] = crossed;
     }
 
-    u64 i = 0;
     while (i < pathlen) {
         // Skip the separator run (collapses a leading '/' and any '//').
         while (i < pathlen && path[i] == '/') i++;
@@ -342,20 +532,33 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         // "." -- a no-op (stay at the current directory), but only if there IS
         // a directory to stay in (#81; see stalk_tip_is_dir).
         if (clen == 1 && path[s] == '.') {
-            if (!stalk_tip_is_dir(trail, depth, start))
+            if (!stalk_tip_is_dir(trail, depth, base))
                                                  { err = T_E_NOTDIR; goto fail; }
             // #84: '.' is a lookup performed IN the tip, so it needs X there.
             // Type first (a non-directory is ENOTDIR, never EACCES).
-            int se = stalk_tip_may_search(p, trail, depth, start,
+            int se = stalk_tip_may_search(p, trail, depth, base,
                                           &carried, carried_valid);
             if (se != 0)                         { err = se;         goto fail; }
             continue;
         }
 
-        // ".." -- pop the trail. Contained at `start`: at the bottom (depth 0)
+        // ".." -- pop the trail. Contained at `base`: at the bottom (depth 0)
         // this is a no-op, so resolution can never escape above the base (the
         // chroot/pivot boundary -- I-28). The popped clone is clunk-safe (it
         // owns its fid: a walked child or a crossed clone).
+        //
+        // D-1 SOUNDNESS: a pop is 1:1 -- it lands exactly one component up --
+        // ONLY when no trail entry compresses a pounced run. That holds here
+        // BY CONSTRUCTION: a '..' in the CURRENT buffer implies pounce_ok has
+        // been false since this buffer started resolving (the entry
+        // recompute at `restart`, or the original-path pre-scan; an in-place
+        // symlink splice only ever ADDS a '..'-free target, and its
+        // pounce_ok update is sticky-AND). pounce_ok false means every entry
+        // pushed from this buffer is per-component (1:1), and a restart
+        // unwound whatever compressed entries an earlier buffer pushed. So
+        // compressed entries and '..' pops can NEVER coexist -- which is
+        // exactly why a '..'-bearing symlink TARGET forces the restart
+        // instead of an in-place splice (stalk_expand_link).
         //
         // #81 gates the pop on the tip being a directory. This STRENGTHENS
         // I-28 rather than touching it: the gate can only turn a resolution
@@ -364,13 +567,13 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         // 0 the subject is `start` itself -- an `openat()` on a non-directory
         // fd answers ENOTDIR instead of handing back the file.
         if (clen == 2 && path[s] == '.' && path[s + 1] == '.') {
-            if (!stalk_tip_is_dir(trail, depth, start))
+            if (!stalk_tip_is_dir(trail, depth, base))
                                                  { err = T_E_NOTDIR; goto fail; }
             // #84: the pop is a lookup of ".." performed IN the tip, so it
             // needs X on the directory being popped OUT of -- checked BEFORE
             // the pop, while that directory is still the subject. Containment
             // is untouched: the gate can only turn a success into a failure.
-            int se = stalk_tip_may_search(p, trail, depth, start,
+            int se = stalk_tip_may_search(p, trail, depth, base,
                                           &carried, carried_valid);
             if (se != 0)                         { err = se;         goto fail; }
             if (depth > 0) spoor_clunk(trail[--depth]);
@@ -400,7 +603,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
             }
             parent = trail[depth - 1];
         } else {
-            parent = start;
+            parent = base;
         }
 
         // #79: the thing we are about to search must BE a directory. Without
@@ -441,8 +644,8 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         // Disabled when the path contains '..' (pounce_ok) or the Dev lacks
         // the slot -- those take the per-component loop unchanged.
         // =====================================================================
-        if (pounce_ok && parent->dev && parent->dev->walk_attrs &&
-            logical_depth < STALK_MAX_DEPTH) {
+        if (pounce_ok && !pounce_skip_one && parent->dev &&
+            parent->dev->walk_attrs && logical_depth < STALK_MAX_DEPTH) {
             // -- Gather the run. The already-tokenized component is names[0];
             // keep consuming real components (a '.' / '..' / over-long token
             // ends the run and is LEFT for the outer loop, preserving its
@@ -536,8 +739,21 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                             co_mount = true;
                             break;
                         }
+                        // D-1: any symlink in the run -- the cached open
+                        // resolved through/at a link the resolver must
+                        // expand. Discard + fall back to the normal walk
+                        // (which owns expansion), exactly like the mount
+                        // case. Rarely reachable: a MID-run link makes the
+                        // Dev's internal query walk partial (-> NULL), so
+                        // this catches the full-walk LEAF-link shape.
+                        if (sts[j].qid_type & QTSYMLINK) {
+                            co_mount = true;
+                            break;
+                        }
                     }
                     if (!co_mount) {
+                        // (Exit parity: this return + the query return + the
+                        // two tail exits all release the D-1 expand state.)
                         // #82: this exit never reaches the quarry gate below,
                         // so re-state it here on the leaf's fused record. That
                         // record IS the quarry: the scan above proved no
@@ -558,6 +774,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                             goto fail;
                         }
                         stalk_unwind(trail, depth);
+                        stalk_expand_free(ex);
                         return co;
                     }
                     spoor_clunk(co);   // a mount in the run: the normal path
@@ -632,6 +849,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
             // component's mount test precedes its own X-check; its X-check
             // precedes the next component's consumption).
             int split_at = -1;
+            int link_at  = -1;
             for (int j = 0; j < k; j++) {
                 if (j > 0 && parent->dev->perm_enforced &&
                     perm_check(p, &sts[j - 1], PERM_X) != 0) {
@@ -655,6 +873,24 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                     mount_is_point_id(p->territory, parent->dc, parent->devno,
                                       w->qid[j].path)) {
                     if (!(bound && j == nrun - 1)) { split_at = j; break; }
+                }
+                // D-1: a symlink among the walked components (mount tested
+                // FIRST for the same j -- a mount over the link's identity
+                // shadows it, matching the per-component arm's order). A
+                // FOLLOWED link splits the run at its PARENT and resumes at
+                // the link component per-component (pounce_skip_one) -- the
+                // per-component arm owns expansion, ONE site. A no-followed
+                // FINAL leaf does NOT split: the bound leaf / query record
+                // IS the quarry (the lstat / O_NOFOLLOW shape), handled by
+                // the normal exits below. This test also covers a PARTIAL
+                // walk whose deepest step is a link (the server stops AT a
+                // link -- Stratum walks by dirent lookup, never following):
+                // j == k-1 < nrun-1 there, so it reads as mid-path = follow,
+                // and the miss verdict past the link never masquerades as
+                // ENOTDIR/ENOENT.
+                if (w->qid[j].type & QTSYMLINK) {
+                    bool leaf_final = final_run && (j == nrun - 1);
+                    if (!(leaf_final && nofollow_final)) { link_at = j; break; }
                 }
             }
 
@@ -714,6 +950,65 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                 continue;
             }
 
+            if (link_at >= 0) {
+                // D-1: split-for-expansion at a followed symlink (the
+                // mount-split's sibling, EXCLUSIVE of the link: the prefix
+                // materialized is [0..link_at-1] -- the link's PARENT -- and
+                // the outer loop resumes AT the link component, which the
+                // per-component arm walks, readlinks, and splices;
+                // pounce_skip_one keeps that one component out of the
+                // gather, else it would re-run this very batch forever).
+                // The discarded batch's bound leaf lives past the link --
+                // meaningless until the link expands.
+                walkqid_free(w);
+                if (bound) spoor_clunk(nc);
+                else if (nc) { nc->aux = NULL; spoor_unref(nc); }
+                if (link_at > 0) {
+                    if (depth >= STALK_MAX_DEPTH)    { err = T_E_INVAL; goto fail; }
+                    struct Spoor *lc = spoor_clone(parent);
+                    if (!lc) goto fail;
+                    // Reuse sts -- the consumed prefix's records are spent.
+                    struct Walkqid *rw = parent->dev->walk_attrs(parent, lc,
+                                                                 names, lens,
+                                                                 link_at, sts);
+                    if (rw == DEV_WALK_ATTRS_UNSUPPORTED) {
+                        // Unreachable with the one-way per-session latch
+                        // (the batch above just SUCCEEDED on this session);
+                        // the sentinel is static -- never walkqid_free it.
+                        lc->aux = NULL;
+                        spoor_unref(lc);
+                        goto fail;
+                    }
+                    if (!rw || rw->nqid != link_at || rw->spoor != lc) {
+                        // The tree changed between the two walks (racing
+                        // unlink/rename) -- fail as a sequential resolution
+                        // racing the same mutation would.
+                        if (rw) {
+                            bool rbound = (rw->spoor == lc);
+                            walkqid_free(rw);
+                            if (rbound) spoor_clunk(lc);
+                            else { lc->aux = NULL; spoor_unref(lc); }
+                        } else {
+                            lc->aux = NULL; spoor_unref(lc);
+                        }
+                        err = T_E_NOENT;
+                        goto fail;
+                    }
+                    walkqid_free(rw);
+                    // #66: the prefix components join lc's namespace name
+                    // (non-load-bearing, I-33).
+                    for (int j = 0; j < link_at; j++)
+                        spoor_path_extend(lc, names[j], lens[j]);
+                    trail[depth++] = lc;
+                    logical_depth += link_at;
+                }
+                carried_valid   = false;   // the resumed per-component arm
+                                           // stats its parent fresh
+                pounce_skip_one = true;
+                i = (link_at == 0) ? s : ends[link_at - 1];
+                continue;
+            }
+
             if (!full) {
                 // Partial walk with no mount among the walked prefix: the miss
                 // at component k is a REAL miss in the correct tree. Its
@@ -766,6 +1061,7 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                                                    // spoor_stat_native's stamp.
                 *stat_done = true;
                 stalk_unwind(trail, depth);
+                stalk_expand_free(ex);
                 return NULL;
             }
             walkqid_free(w);
@@ -787,6 +1083,9 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         // into). Fail-closed if the Dev cannot vouch for the metadata.
         // (`per_component` is the pounce's walk_attrs-unsupported fall-through.)
 per_component:
+        pounce_skip_one = false;   // D-1: the protected component reached the
+                                   // per-component arm; pouncing may resume on
+                                   // the components that follow it
         if (parent->dev && parent->dev->perm_enforced) {
             struct t_stat st;
             int sr = spoor_stat_native(parent, &st);
@@ -849,6 +1148,65 @@ per_component:
         }
         walkqid_free(w);
 
+        // ====================================================================
+        // D-1: symlink expansion (docs/DISTRO.md section 4). The just-walked
+        // component is a link iff its qid carries QTSYMLINK (dev9p maps
+        // P9_QTSYMLINK; native Devs never mint it). MOUNT MEMBERSHIP WINS
+        // FIRST: a mount over the link's identity SHADOWS it -- skip
+        // expansion and let the existing lazy cross machinery replace it
+        // (the same mount-before-symlink order the pounce post-scan uses).
+        // Then the final-component disposition: an INTERMEDIATE link always
+        // follows; a FINAL link follows unless nofollow_final. A no-followed
+        // link -- or one on a readlink-less Dev (the opaque-leaf fail-closed
+        // arm) -- falls through and is pushed like any leaf: mid-path it
+        // answers ENOTDIR at the next hop's #79 gate; as the quarry,
+        // STALK_OPEN answers T_E_LOOP below and WALK/STAT/MOUNT return the
+        // link itself (the lstat / mount-point shape).
+        //
+        // Expansion produces COMPONENTS, not answers: the spliced target
+        // re-enters THIS loop, so the whole gate family (#79/#81/#82/#84
+        // + the per-component X-search + mount crossing) binds it BY
+        // CONSTRUCTION -- the design's central soundness claim (I-28).
+        // ====================================================================
+        if ((nc->qid.type & QTSYMLINK) &&
+            !(p && p->territory &&
+              mount_is_point_id(p->territory, nc->dc, nc->devno,
+                                nc->qid.path))) {
+            bool is_final;
+            {
+                u64 peek = i;
+                while (peek < pathlen && path[peek] == '/') peek++;
+                is_final = (peek >= pathlen);
+            }
+            if ((!is_final || !nofollow_final) &&
+                nc->dev && nc->dev->readlink) {
+                int xrc = stalk_expand_link(p, &ex, nc, path, pathlen, s, i,
+                                            &base, &err);
+                spoor_clunk(nc);   // the link fid is spent either way
+                if (xrc < 0) goto fail;
+                path    = ex->buf[ex->cur];
+                pathlen = ex->buflen;
+                if (xrc == 1) {
+                    // Restart: absolute re-anchor, or a '..'-bearing target
+                    // (the 1:1-pop requirement -- see the '..' arm).
+                    stalk_unwind(trail, depth);
+                    depth = 0;
+                    goto restart;
+                }
+                // In-place splice: the trail stands; recompute the
+                // path-derived state from the new buffer. pounce_ok is
+                // STICKY-AND, never re-enabled mid-resolution: the '..'
+                // soundness argument requires that a compressed trail entry
+                // and a '..' pop never coexist, and only a buffer that was
+                // '..'-free END TO END may have compressed entries behind it.
+                pounce_ok      = pounce_ok && !path_has_dotdot(path, pathlen);
+                trailing_slash = path_has_trailing_slash(path, pathlen);
+                nofollow_final = nofollow_req && !trailing_slash;
+                i = 0;
+                continue;
+            }
+        }
+
         // #66: append the walked component to nc's namespace name. nc SHARES
         // parent's Path (from spoor_clone); spoor_path_extend reads that shared
         // Path as the base and replaces it with the extended one. Non-load-bearing
@@ -873,10 +1231,11 @@ per_component:
         quarry = trail[--depth];
     } else {
         // Zero real components ("/", ".", or a ".." run netted back to the
-        // base): the quarry is `start` itself, clone-walked to an owned,
-        // openable Spoor (start is borrowed). start is not a mount point (the
-        // base cross verified), so no cross is owed before this clone.
-        quarry = clone_walk_zero(start);
+        // base): the quarry is `base` itself, clone-walked to an owned,
+        // openable Spoor (base is borrowed / the ref-held re-anchor root).
+        // base is not a mount point (the base cross verified), so no cross is
+        // owed before this clone.
+        quarry = clone_walk_zero(base);
         if (!quarry) goto fail;
     }
 
@@ -919,6 +1278,19 @@ per_component:
     // not EACCES -- the answer must not turn on a mode bit that has no bearing
     // on whether the path is even well-formed.
     if (trailing_slash && !(quarry->qid.type & QTDIR)) { err = T_E_NOTDIR; goto fail; }
+
+    // D-1: an un-followed symlink quarry under STALK_OPEN answers T_E_LOOP --
+    // Linux O_NOFOLLOW semantics (the caller asked for not-a-symlink and the
+    // final component is one; a symlink cannot be opened), and the same
+    // answer covers the readlink-less-Dev fail-closed leftover (a followable
+    // link the resolver could not expand). WALK / STAT / MOUNT return the
+    // link itself (the lstat / mount-point shape). Type-class before
+    // permission (#79's ordering), hence before the R/W gate below. A
+    // FOLLOWED open never reaches here as a link: expansion consumed it.
+    if (amode == STALK_OPEN && (quarry->qid.type & QTSYMLINK)) {
+        err = T_E_LOOP;
+        goto fail;
+    }
 
     // Final hop. STALK_WALK (O_PATH) + STALK_MOUNT + STALK_STAT return the
     // resolved quarry unopened (a navigation / create / chroot / mount /
@@ -969,12 +1341,14 @@ per_component:
     }
 
     stalk_unwind(trail, depth);   // release the ancestors; quarry survives
+    stalk_expand_free(ex);        // D-1: owned_base ref + the state buffers
     return quarry;
 
 fail:
     if (errp) *errp = err;             // the cause, for the caller's -*errp
     if (quarry) spoor_clunk(quarry);   // quarry was popped off the trail
     stalk_unwind(trail, depth);        // release any remaining ancestors
+    stalk_expand_free(ex);             // D-1
     return NULL;
 }
 
@@ -985,11 +1359,15 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
 }
 
 int stalk_stat(struct Proc *p, struct Spoor *start,
-               const char *path, u64 pathlen,
+               const char *path, u64 pathlen, u32 flags,
                struct t_stat *out, int *errp) {
     if (!out) { if (errp) *errp = T_E_INVAL; return -1; }
+    // D-1: STALK_NOFOLLOW is the one admitted flag (the lstat shape); reject
+    // anything else loudly (the stalk-1 F1 amode-guard discipline).
+    if (flags & ~(u32)STALK_NOFOLLOW) { if (errp) *errp = T_E_INVAL; return -1; }
     bool done = false;
-    struct Spoor *q = stalk_core(p, start, path, pathlen, STALK_STAT, 0,
+    struct Spoor *q = stalk_core(p, start, path, pathlen,
+                                 STALK_STAT | (int)flags, 0,
                                  errp, out, &done);
     if (done) return 0;   // the walk-query fast path filled *out; no Spoor existed
     if (!q)   return -1;  // *errp carries the cause

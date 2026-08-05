@@ -277,6 +277,21 @@ struct Dev {
                              struct Spoor *newdir, const char *newname);
     int            (*unlink)(struct Spoor *parent, const char *name, u32 flags);
 
+    // readlink(c, buf, n) -- read the symlink target of c (a WALKED, unopened
+    // Spoor whose qid carries QTSYMLINK) into buf (DISTRO D-1; docs/DISTRO.md
+    // section 4.1). Returns the target length (> 0) on success, or a specific
+    // -T_E_* on failure: -T_E_INVAL (the target exceeds n, or the node is not
+    // a symlink server-side), -T_E_NOENT (degenerate empty target), a bounded
+    // server errno otherwise (the dev9p_wire_errno discipline -- never a flat
+    // -1, per the #80 contract note above).
+    //
+    // NULL-permitted (like .fsync / .rename): a NULL slot means symlinks on
+    // this Dev are OPAQUE LEAVES -- the resolver does not expand them, so a
+    // mid-path link answers ENOTDIR (the #79 gate) and a final link is the
+    // quarry itself (T_E_LOOP under STALK_OPEN). Fail-closed by construction;
+    // only dev9p mints QTSYMLINK at v1.0, and it implements the slot.
+    long           (*readlink)(struct Spoor *c, char *buf, long n);
+
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)
     //     Returns the subset of `events` currently ready on c. If `pw`

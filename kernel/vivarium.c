@@ -425,8 +425,17 @@ enum {
 // The three admissions above share one structure: the flag requests behaviour we
 // ALREADY provide unconditionally, so honouring it is a no-op AND correct. That
 // is the only reason a flag may be ignored. Contrast the rejects below.
+//
+//   O_NOFOLLOW  ADMITTED AND TRANSLATED since DISTRO D-1 -- the resolver now
+//               follows symlinks, so the flag maps 1:1 onto
+//               SYS_WALK_OPEN_NOFOLLOW (real semantics, not a no-op: a final
+//               symlink answers ELOOP, and with O_PATH the returned handle IS
+//               the link -- both the Linux contours). This closes the very trap
+//               the V-2b reject named ("would become wrong the moment symlinks
+//               land, with nothing to catch it"): the moment arrived, and the
+//               flag rode the same chunk that landed the feature.
 #define VIV_OPENAT_ADMITTED                                                  \
-    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_PATH |                        \
+    ((u32)(VIV_O_ACCMODE | VIV_O_TRUNC | VIV_O_PATH | VIV_O_NOFOLLOW |       \
            VIV_O_CLOEXEC | VIV_O_NOCTTY | VIV_O_LARGEFILE))
 
 // Why each notable rejected flag is rejected -- i.e. why ignoring it would be a
@@ -462,12 +471,10 @@ enum {
 //                a successful open of a regular file. The worst kind of wrong.
 //   O_APPEND     Every write must seek to end. SYS_OPEN's omode mask has no
 //                append bit; ignoring it silently corrupts a log writer.
-//   O_NOFOLLOW   Thylacine's resolver has no symlinks at v1.0, so ignoring it is
-//                harmless TODAY -- and would become wrong the moment symlinks
-//                land, with nothing to catch it. Rejected on that basis: a flag
-//                whose correctness depends on a feature being absent is a trap.
 //   O_EXCL, O_NONBLOCK, O_SYNC/O_DSYNC, O_DIRECT, O_NOATIME, O_TMPFILE, O_ASYNC
 //                each carry semantics with no SYS_OPEN counterpart.
+//                (O_NOFOLLOW moved to the ADMITTED list at DISTRO D-1 -- the
+//                resolver grew symlinks, and the flag translates for real.)
 
 enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
                                         u64 *start_fd_out, u32 *omode_out,
@@ -530,6 +537,13 @@ enum viv_verdict vivarium_openat_decide(u64 dirfd, u64 flags,
         }
         if (fl & VIV_O_TRUNC) omode |= VIV_OMODE_TRUNC;
     }
+    // D-1: O_NOFOLLOW rides BOTH arms -- it is one of the three flags Linux's
+    // O_PATH does NOT ignore (the #151 comment below lists them), and
+    // O_PATH|O_NOFOLLOW is the open-the-link-itself idiom (the returned handle
+    // IS the symlink; fstat on it reports the link's own metadata). Without
+    // O_PATH it is the ELOOP-on-a-final-link contour. Both are exactly what
+    // SYS_WALK_OPEN_NOFOLLOW means, so the map is 1:1.
+    if (fl & VIV_O_NOFOLLOW) omode |= SYS_WALK_OPEN_NOFOLLOW;
 
     // Belt-and-braces: never emit an omode SYS_OPEN would reject. A future
     // admission that forgets to add its bit to the kernel's mask fails HERE, as
@@ -706,21 +720,21 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 //                    correctness, not reach. The V-2b precedent is O_LARGEFILE,
 //                    equally unset by musl-aarch64 and equally correct.)
 //
+//   AT_SYMLINK_NOFOLLOW  ADMITTED AND TRANSLATED since DISTRO D-1. The V-2c
+//                    reject that stood here said it plainly: "the day symlinks
+//                    land there is nothing in this file, or in a build, that
+//                    would fail" -- so it forwarded every lstat() rather than
+//                    silently reporting the TARGET instead of the link. The day
+//                    arrived, and the flag rode the same chunk that landed the
+//                    feature: it now maps onto the resolver's STALK_NOFOLLOW
+//                    (via sys_stat_for_proc's stalk_flags), so lstat() reports
+//                    the LINK's own record -- S_IFLNK mode, target-length size
+//                    -- exactly the Linux answer. The reject's reasoning is
+//                    preserved above as the model for every flag whose
+//                    correctness depends on a feature being absent.
+//
 // And the rejects, each because ignoring it would be a silent wrong answer:
 //
-//   AT_SYMLINK_NOFOLLOW  REJECTED -- and this is the one that costs reach, so
-//                    the reasoning matters. It is what musl/glibc/Go compile
-//                    `lstat()` into, so rejecting it forwards every lstat.
-//                    SYS_STAT's own contract says "Symlinks do not exist at
-//                    v1.0 (G11), so stat == lstat" (syscall.h:1615), which looks
-//                    like a licence to admit it. It is not. That equivalence is
-//                    scoped to v1.0 and holds only because the feature is
-//                    ABSENT -- exactly the O_NOFOLLOW trap V-2b named, and the
-//                    day symlinks land there is nothing in this file, or in a
-//                    build, that would fail. Admitting it would mean every
-//                    lstat() in every Linux guest silently reporting the TARGET
-//                    instead of the link, with no tripwire. Forwarding costs a
-//                    supervisor round trip; admitting costs correctness later.
 //   AT_EMPTY_PATH    An empty path means "operate on dirfd itself" (with
 //                    AT_FDCWD: the cwd). SYS_STAT requires path_len >= 1, and
 //                    serving it would mean SYNTHESISING a "." argument the
@@ -732,9 +746,15 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 //                    rejected here, on the same ground as openat's
 //                    (flags & O_ACCMODE) == 3: minting errors is not this
 //                    table's job.
-#define VIV_FSTATAT_ADMITTED ((u32)VIV_AT_NO_AUTOMOUNT)
+#define VIV_FSTATAT_ADMITTED \
+    ((u32)(VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW))
 
-enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags) {
+enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
+                                         u32 *stalk_flags_out) {
+    // Fail toward the decline, never toward a dispatch (the openat shape).
+    if (!stalk_flags_out) return VIV_FORWARD;
+    *stalk_flags_out = 0;
+
     // Both are `int` in the Linux ABI, so only the low 32 bits are significant;
     // `dirfd` is compared signed for the AT_FDCWD sign-extension reason spelled
     // out in vivarium_openat_decide.
@@ -746,6 +766,11 @@ enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags) {
     // header comment.
     if (dfd != VIV_AT_FDCWD)        return VIV_FORWARD;
     if (fl & ~VIV_FSTATAT_ADMITTED) return VIV_FORWARD;
+
+    // D-1: lstat. STALK_NOFOLLOW's value is deliberately not leaked into this
+    // pure table -- the shell passes the out-param to sys_stat_for_proc, which
+    // owns the resolver vocabulary.
+    if (fl & VIV_AT_SYMLINK_NOFOLLOW) *stalk_flags_out = 1;
 
     return VIV_TRANSLATED;
 }

@@ -57,6 +57,30 @@ struct t_stat;   // <thylacine/syscall.h>; the stalk_stat metadata sink
                         // STALK_STAT to stalk()/stalk_err() (no stat sink)
                         // degrades to STALK_WALK behavior.
 
+// amode FLAG (OR'd into one of the four base amodes above; DISTRO D-1):
+// do NOT follow a symlink at the FINAL component. Intermediate symlinks are
+// ALWAYS followed (they are directory positions). The POSIX no-follow ops:
+// lstat (the phenotype AT_SYMLINK_NOFOLLOW), open(O_NOFOLLOW), and the mount
+// POINT (STALK_MOUNT implies this flag internally -- the no-cross-final
+// precedent extends to no-follow-final). A TRAILING SLASH on the path
+// OVERRIDES the flag (POSIX 4.13: "link/" names the directory the link
+// resolves to, so following is forced -- measured Linux behavior, including
+// under O_NOFOLLOW). Disposition of an un-followed final link by base amode:
+//   STALK_OPEN  -> T_E_LOOP (Linux O_NOFOLLOW: cannot open a symlink).
+//   STALK_WALK  -> the link ITSELF is the quarry (qid carries QTSYMLINK).
+//   STALK_STAT  -> the link's own record (the lstat shape).
+//   STALK_MOUNT -> the link's own identity is the mount point.
+// Any OTHER bit outside (STALK_AMODE_MASK | STALK_NOFOLLOW) is rejected
+// LOUDLY (the stalk-1 F1 amode-guard discipline).
+#define STALK_NOFOLLOW   0x100
+#define STALK_AMODE_MASK 0xFF
+
+// Total symlink expansions permitted per resolution (Linux SYMLOOP parity;
+// the POSIX floor is 8). Exceeded -> T_E_LOOP. Cycles terminate here: the
+// resolver never marks visited nodes, exactly like Linux -- a loop simply
+// burns the budget.
+#define STALK_MAX_FOLLOWS 40
+
 // Trail depth cap: the maximum number of path components stalk resolves. An
 // over-deep path (including a '..'-heavy path that pushes past the cap before
 // popping) fails cleanly rather than overflowing the fixed trail array.
@@ -104,10 +128,15 @@ struct Spoor *stalk_err(struct Proc *p, struct Spoor *start,
 // fid is ever created -- the attrs arrive fused with the walk. Fallback paths
 // (Dev without walk_attrs / leaf mount point / zero-component path) resolve a
 // quarry, stat_native it, and clunk it -- today's exact O_PATH+fstat shape.
+//
+// `flags` (D-1): 0 = follow a final symlink (POSIX stat); STALK_NOFOLLOW =
+// the lstat shape (the final link's OWN record -- on the fused fast path the
+// leaf record IS it, zero extra cost). Any other bit -> T_E_INVAL.
+//
 // Returns 0 (out filled) or -1 with the cause in *errp (OPTIONAL; same codes
 // as stalk_err).
 int stalk_stat(struct Proc *p, struct Spoor *start,
-               const char *path, u64 pathlen,
+               const char *path, u64 pathlen, u32 flags,
                struct t_stat *out, int *errp);
 
 // stalk_cross_mounts -- Plan 9 `domount`, exposed for the single-hop walk

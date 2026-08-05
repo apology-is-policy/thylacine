@@ -577,12 +577,19 @@ unsafe fn run_linux() -> ! {
     leg!(rep, st2.st_ino == st.st_ino, b"L11\n");
     leg!(rep, st2.st_dev == st.st_dev, b"L12\n");
 
-    // --- L13: the documented reject stays rejected --------------------------
-    // AT_SYMLINK_NOFOLLOW is what lstat() compiles to. It is refused ON
-    // PURPOSE: stat == lstat holds at v1.0 only because symlinks are ABSENT,
-    // and admitting it would silently start reporting targets instead of links
-    // the day they land. Asserting the refusal keeps a future "optimisation"
-    // from quietly deleting the safeguard.
+    // --- L13: lstat, TRANSLATED since DISTRO D-1 ----------------------------
+    // This leg used to assert the OPPOSITE -- that AT_SYMLINK_NOFOLLOW was
+    // refused -- and its reasoning named its own expiry: "stat == lstat holds
+    // at v1.0 only because symlinks are ABSENT, and admitting it would
+    // silently start reporting targets instead of links the day they land."
+    // D-1 landed them, and the flag came with the feature rather than after
+    // it, so the safeguard was spent as designed rather than deleted.
+    //
+    // The subject here is a REGULAR file (the probe's own binary), where stat
+    // and lstat must agree exactly -- so this asserts BOTH that the call is
+    // served and that no-follow did not perturb the answer. The divergence
+    // (a real symlink) is proven kernel-side by stalk.symlink_stat_vs_lstat;
+    // the container's rootfs has no link to point at.
     leg!(
         rep,
         svc4(
@@ -591,9 +598,11 @@ unsafe fn run_linux() -> ! {
             SELF_PATH.as_ptr() as u64,
             &mut st2 as *mut LinuxStat as u64,
             AT_SYMLINK_NOFOLLOW
-        ) == NEG_ENOSYS,
+        ) == 0,
         b"L13\n"
     );
+    leg!(rep, st2.st_ino == st.st_ino, b"L13a\n");
+    leg!(rep, (st2.st_mode & S_IFMT) == S_IFREG, b"L13b\n");
 
     leg!(rep, svc3(NR_CLOSE, fd as u64, 0, 0) == 0, b"L14\n");
 

@@ -2547,6 +2547,13 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // boundary-line passes t_stat.mode straight through to st_mode, so this value
 // must stay POSIX S_IFIFO (0010000) for S_ISFIFO to work.
 #define T_S_IFIFO   0010000u
+// DISTRO D-1: symlinks. Reported by a lstat-shaped stat (the resolver's
+// STALK_NOFOLLOW path) on a link's own record, so `S_ISLNK(st.st_mode)` works
+// across the pouch boundary-line -- which is what `ls -l` and every
+// tree-walker branch on. The dev9p mapper derives it from the 9P qid's
+// P9_QTSYMLINK bit when the server's Tgetattr mode does not already carry it;
+// the value must stay POSIX S_IFLNK (0120000).
+#define T_S_IFLNK   0120000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
 // (mode, uid, gid, size) register arguments the kernel applies. Chosen to
@@ -2681,7 +2688,19 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // O_PATH handle IS (and is a valid SYS_CHROOT target). When set, the
 // access bits are ignored (the handle carries no byte-I/O open).
 #define SYS_WALK_OPEN_OPATH        0x80u
-#define SYS_WALK_OPEN_OMODE_VALID  0x93u
+// D-1 (DISTRO.md section 4.3): do NOT follow a symlink at the path's FINAL
+// component -- the Linux O_NOFOLLOW / lstat-shape resolution flag. Consumed by
+// SYS_OPEN (threaded into the resolver as STALK_NOFOLLOW; the bit is STRIPPED
+// before the omode reaches Dev.open, so no server sees it). Composable with
+// OPATH (the Linux O_PATH|O_NOFOLLOW open-the-link-itself idiom: the returned
+// navigation handle IS the link; SYS_FSTAT on it reports the link's own
+// metadata -- the native lstat emulation). Without OPATH, a final symlink
+// answers -T_E_LOOP (a symlink cannot be byte-opened). A trailing slash on the
+// path overrides the flag (POSIX 4.13). SYS_WALK_OPEN + SYS_WALK_CREATE admit
+// the bit and ignore it -- honestly: the single-hop walk never follows (it is
+// a walk primitive, not a resolution), and a created child is never a symlink.
+#define SYS_WALK_OPEN_NOFOLLOW     0x20u
+#define SYS_WALK_OPEN_OMODE_VALID  0xB3u
 
 // SYS_WALK_CREATE perm: the Plan 9 perm word. Low 9 bits are the POSIX
 // rwxrwxrwx mode; the DMDIR bit selects directory creation. All other Plan 9

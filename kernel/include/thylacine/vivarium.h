@@ -505,7 +505,12 @@ void vivarium_stat_to_linux(const struct t_stat *in, struct viv_linux_stat *out)
 // `vivarium_stat_to_linux`, and copy out 128 bytes — exactly `fstat`'s shape.
 // So `newfstatat` is `openat`'s front half joined to `fstat`'s back half, and
 // the missing build function is what that join looks like.
-enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags);
+//
+// D-1: `*stalk_flags_out` is 0 (follow -- POSIX stat) or nonzero (the lstat
+// shape -- AT_SYMLINK_NOFOLLOW admitted since symlinks landed); the shell
+// forwards it to sys_stat_for_proc, which owns the resolver vocabulary.
+enum viv_verdict vivarium_fstatat_decide(u64 dirfd, u64 flags,
+                                         u32 *stalk_flags_out);
 
 // -----------------------------------------------------------------------------
 // TIER 2 — `mmap` (V-2d). See VIVARIUM.md §6.21.

@@ -862,6 +862,12 @@ void test_stalk_pounce_unsupported_fallback(void);
 void test_stalk_cached_open_arm(void);
 void test_stalk_cached_open_denials(void);
 void test_stalk_cached_open_mount_fallback(void);
+void test_stalk_symlink_follow(void);
+void test_stalk_symlink_bounds(void);
+void test_stalk_symlink_nofollow(void);
+void test_stalk_symlink_stat_vs_lstat(void);
+void test_stalk_symlink_pounce_split(void);
+void test_stalk_symlink_lifetime(void);
 void test_devsrv_registered(void);
 void test_devsrv_open_root_dir(void);
 void test_devsrv_stat_native_root(void);
@@ -3277,6 +3283,12 @@ struct test_case g_tests[] = {
     { "stalk.cached_open_arm",           test_stalk_cached_open_arm,             false, NULL },
     { "stalk.cached_open_denials",       test_stalk_cached_open_denials,         false, NULL },
     { "stalk.cached_open_mount_fallback", test_stalk_cached_open_mount_fallback, false, NULL },
+    { "stalk.symlink_follow",          test_stalk_symlink_follow,          false, NULL },
+    { "stalk.symlink_bounds",          test_stalk_symlink_bounds,          false, NULL },
+    { "stalk.symlink_nofollow",        test_stalk_symlink_nofollow,        false, NULL },
+    { "stalk.symlink_stat_vs_lstat",   test_stalk_symlink_stat_vs_lstat,   false, NULL },
+    { "stalk.symlink_pounce_split",    test_stalk_symlink_pounce_split,    false, NULL },
+    { "stalk.symlink_lifetime",        test_stalk_symlink_lifetime,        false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

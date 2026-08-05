@@ -220,6 +220,19 @@
 // or a code path is reachable but stubbed at v1.0. POSIX: ENOSYS.
 #define T_E_NOSYS      38
 
+// Too many levels of symbolic links. Two emitters, both in the resolver
+// (DISTRO D-1, docs/DISTRO.md section 4): a resolution that exceeds
+// STALK_MAX_FOLLOWS (40, Linux parity) symlink expansions -- a cycle, or
+// a chain past the bound -- and an open carrying the no-follow flag whose
+// FINAL component is a symlink (the Linux O_NOFOLLOW contour: the caller
+// asked for not-a-symlink and got one; ELOOP is the errno Linux fixed for
+// that answer, so a guest's symlink-attack defenses read correctly).
+//
+// Registered under the 2026-08-05 DISTRO design signoff + the per-value
+// D-1 approval (the append-under-ratified-scripture precedent: T_E_SRCH /
+// T_E_NODEV / T_E_CHILD / the V-5 socket family). POSIX: ELOOP.
+#define T_E_LOOP       40
+
 // Operation not supported. Appended under the PTY-1 ABI signoff (PTY-1d, the
 // T_E_SRCH precedent -- it originally gated SYS_TTY_SIGNAL's TTY_SIG_TSTP
 // class until PTY-1f made the job-stop disposition live). RESERVED /
@@ -336,6 +349,7 @@ _Static_assert(T_E_INVAL     == 22,  "T_E_INVAL ABI pin (POSIX EINVAL)");
 _Static_assert(T_E_PIPE      == 32,  "T_E_PIPE ABI pin (POSIX EPIPE)");
 _Static_assert(T_E_RANGE     == 34,  "T_E_RANGE ABI pin (POSIX ERANGE)");
 _Static_assert(T_E_NOSYS     == 38,  "T_E_NOSYS ABI pin (POSIX ENOSYS)");
+_Static_assert(T_E_LOOP      == 40,  "T_E_LOOP ABI pin (POSIX ELOOP)");
 _Static_assert(T_E_TIMEDOUT  == 110, "T_E_TIMEDOUT ABI pin (POSIX ETIMEDOUT)");
 _Static_assert(T_E_CANCELED  == 125, "T_E_CANCELED ABI pin (POSIX ECANCELED)");
 

@@ -350,8 +350,17 @@ void test_vivarium_openat_domain(void) {
                              "O_DIRECTORY forwards (no is-a-dir check to honour)");
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_APPEND,
                              "O_APPEND forwards (no append mode in omode)");
-    viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_NOFOLLOW,
-                             "O_NOFOLLOW forwards (correct only while symlinks are absent)");
+    // D-1: the V-2b reject INVERTED on the day its own rationale predicted --
+    // symlinks landed, so O_NOFOLLOW now TRANSLATES to the resolver's
+    // no-follow omode bit (real semantics: ELOOP on a final link; with O_PATH
+    // the handle IS the link).
+    viv_expect_open(VIV_T_ATCWD, VIV_O_RDONLY | VIV_O_NOFOLLOW,
+                    0u | SYS_WALK_OPEN_NOFOLLOW,
+                    "O_NOFOLLOW translates to the no-follow omode bit (D-1)");
+    viv_expect_open(VIV_T_ATCWD, VIV_O_PATH | VIV_O_NOFOLLOW,
+                    SYS_WALK_OPEN_OPATH | SYS_WALK_OPEN_NOFOLLOW,
+                    "O_PATH|O_NOFOLLOW keeps the flag (the lstat-fd idiom; "
+                    "one of the three flags O_PATH does not ignore)");
     viv_expect_open_forwards(VIV_O_RDONLY | VIV_O_NONBLOCK,
                              "O_NONBLOCK forwards");
     viv_expect_open_forwards(VIV_O_WRONLY | VIV_O_EXCL, "O_EXCL forwards");
@@ -507,12 +516,14 @@ void test_vivarium_stat_to_linux(void) {
 // -----------------------------------------------------------------------------
 
 static void viv_expect_statat(u64 dirfd, u64 flags, const char *what) {
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(dirfd, flags),
+    u32 sf = 0xFFu;   // poison: a translate must WRITE it (0 or the lstat mark)
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(dirfd, flags, &sf),
                    (int)VIV_TRANSLATED, what);
 }
 
 static void viv_expect_statat_forwards(u64 flags, const char *what) {
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, flags),
+    u32 sf = 0;
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, flags, &sf),
                    (int)VIV_FORWARD, what);
 }
 
@@ -520,6 +531,12 @@ void test_vivarium_fstatat_domain(void) {
     // Plain stat() -- flags 0. This is the row that carries the value: on
     // aarch64, stat() compiles to newfstatat, not to a stat(2) of its own.
     viv_expect_statat(VIV_T_ATCWD, 0, "flags 0 (plain stat) translates");
+    {
+        u32 sf = 0xFFu;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, 0, &sf),
+                       (int)VIV_TRANSLATED, "plain stat translates (sf probe)");
+        TEST_EXPECT_EQ((u64)sf, (u64)0, "plain stat follows (sf == 0)");
+    }
 
     // The one no-op admission. A Thylacine namespace is composed explicitly, so
     // nothing mounts as a side effect of traversal -- the flag asks for what we
@@ -528,13 +545,33 @@ void test_vivarium_fstatat_domain(void) {
     viv_expect_statat(VIV_T_ATCWD, VIV_AT_NO_AUTOMOUNT,
                       "AT_NO_AUTOMOUNT is a no-op (nothing mounts on traversal)");
 
-    // The costly reject, pinned by name because it is the one a future reader
-    // will be tempted to admit: SYS_STAT's contract literally says "stat ==
-    // lstat" at v1.0. That equivalence holds only because SYMLINKS ARE ABSENT,
-    // so admitting it would silently return the target's metadata the day they
-    // land -- the O_NOFOLLOW trap, on the stat surface.
-    viv_expect_statat_forwards(VIV_AT_SYMLINK_NOFOLLOW,
-                               "AT_SYMLINK_NOFOLLOW forwards (lstat; correct only while symlinks are absent)");
+    // D-1: the V-2c reject INVERTED, on the day its own comment predicted
+    // ("the day symlinks land there is nothing ... that would fail" -- this
+    // leg is the something). lstat now TRANSLATES, with the out-param marking
+    // the no-follow shape for sys_stat_for_proc.
+    {
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD,
+                                                    VIV_AT_SYMLINK_NOFOLLOW, &sf),
+                       (int)VIV_TRANSLATED,
+                       "AT_SYMLINK_NOFOLLOW translates (lstat; D-1)");
+        TEST_EXPECT_EQ((u64)(sf != 0), (u64)1, "lstat marks the no-follow shape");
+    }
+    {
+        // Both admitted bits together translate (the pre-D-1 leg asserted the
+        // combination FORWARDED; the mask grew, the whole-word check stands).
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(
+                           VIV_T_ATCWD,
+                           VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW, &sf),
+                       (int)VIV_TRANSLATED,
+                       "NO_AUTOMOUNT + SYMLINK_NOFOLLOW both admitted");
+        TEST_EXPECT_EQ((u64)(sf != 0), (u64)1, "the combination keeps the lstat mark");
+    }
+
+    // Fail toward the decline on a bad call site (the openat shape).
+    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(VIV_T_ATCWD, 0, NULL),
+                   (int)VIV_FORWARD, "NULL out-param forwards, never dispatches");
 
     // Serving this would mean synthesising a "." the caller never passed.
     viv_expect_statat_forwards(VIV_AT_EMPTY_PATH,
@@ -550,7 +587,7 @@ void test_vivarium_fstatat_domain(void) {
 
     // An unadmitted bit forwards even in combination with an admitted one --
     // the check is a whole-word mask, not a scan for known flags.
-    viv_expect_statat_forwards(VIV_AT_NO_AUTOMOUNT | VIV_AT_SYMLINK_NOFOLLOW,
+    viv_expect_statat_forwards(VIV_AT_EMPTY_PATH | VIV_AT_SYMLINK_NOFOLLOW,
                                "a rejected bit forwards even beside an admitted one");
     viv_expect_statat_forwards(0x80000000u, "an unknown high bit forwards");
 
@@ -562,12 +599,15 @@ void test_vivarium_fstatat_domain(void) {
     // SYS_STAT takes (path, len, out) and has no base argument at all, so there
     // is nowhere for a dirfd to go. Contrast openat, which at least HAS a
     // start_fd it could carry.
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(3, 0), (int)VIV_FORWARD,
-                   "a real dirfd forwards (SYS_STAT has no base argument)");
+    {
+        u32 sf = 0;
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(3, 0, &sf), (int)VIV_FORWARD,
+                       "a real dirfd forwards (SYS_STAT has no base argument)");
 
-    // Only the low 32 bits of dirfd are significant.
-    TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0),
-                   (int)VIV_FORWARD, "the high half of dirfd is not consulted");
+        // Only the low 32 bits of dirfd are significant.
+        TEST_EXPECT_EQ((int)vivarium_fstatat_decide(0x1234567800000003ull, 0, &sf),
+                       (int)VIV_FORWARD, "the high half of dirfd is not consulted");
+    }
 }
 
 // The mmap argument domain (V-2d). Each admitted argument and each decline is

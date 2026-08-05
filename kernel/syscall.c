@@ -1731,8 +1731,12 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
 // Inner — kernel-side core (the #37 *_for_proc testable shape): `path` is
 // kernel memory, NUL-terminated at path[path_len], already NUL-free within;
 // *out_k is kernel scratch. Returns 0 / -1 (structural) / -errno (resolution).
+// D-1: `stalk_flags` is 0 (follow a final symlink -- POSIX stat) or
+// STALK_NOFOLLOW (the lstat shape -- the final link's OWN record); the
+// vivarium newfstatat shell passes it for AT_SYMLINK_NOFOLLOW. Native SYS_STAT
+// always passes 0 (no native lstat surface at D-1 -- a recorded seam).
 s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
-                      struct t_stat *out_k) {
+                      u32 stalk_flags, struct t_stat *out_k) {
     if (!p || !path || !out_k)                       return -1;
     if (path_len == 0 || path_len > SYS_OPEN_PATH_MAX) return -1;
     if (!p->territory)                               return -1;
@@ -1758,7 +1762,7 @@ s64 sys_stat_for_proc(struct Proc *p, const char *path, u64 path_len,
     }
 
     int serr = T_E_NOENT;
-    int rc = stalk_stat(p, start, rpath, rlen, out_k, &serr);
+    int rc = stalk_stat(p, start, rpath, rlen, stalk_flags, out_k, &serr);
     spoor_clunk(start);
     if (rc != 0)                                     return -(s64)serr;
     return 0;
@@ -1787,7 +1791,7 @@ static s64 sys_stat_handler(u64 path_va, u64 path_len_raw, u64 stat_va) {
     path_scratch[path_len_raw] = '\0';
 
     struct t_stat ks;
-    s64 rc = sys_stat_for_proc(p, path_scratch, path_len_raw, &ks);
+    s64 rc = sys_stat_for_proc(p, path_scratch, path_len_raw, 0, &ks);
     if (rc != 0)                                     return rc;
 
     // Copy out to user-VA (per-byte, the SYS_FSTAT shape; a fault may leave
@@ -3053,6 +3057,14 @@ static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
     }
 
     int amode = (omode_raw & SYS_WALK_OPEN_OPATH) ? STALK_WALK : STALK_OPEN;
+    // D-1: thread the no-follow-final flag into the resolver, and STRIP it
+    // from the omode passed onward -- Dev.open / the Tlopen mode must never
+    // see it (a resolution directive, not an open mode). Composes with OPATH:
+    // STALK_WALK|STALK_NOFOLLOW returns the LINK itself as the navigation
+    // handle (the Linux O_PATH|O_NOFOLLOW lstat-fd idiom -- SYS_FSTAT on it
+    // reports the link's own metadata).
+    if (omode_raw & SYS_WALK_OPEN_NOFOLLOW) amode |= STALK_NOFOLLOW;
+    u32 omode_eff = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
     // errno-rollout (ER-1): stalk writes the cause (T_E_NOENT walk-miss,
     // T_E_ACCES perm denial, ...) so SYS_OPEN returns the real -errno. This is
     // the Go-build keystone: a missing path -> -T_E_NOENT (Go os.IsNotExist
@@ -3060,7 +3072,7 @@ static s64 sys_open_kpath_for_proc(struct Proc *p, u64 start_fd_raw,
     // checks work) instead of the bare -1 (Go renders that EPERM).
     int serr = T_E_NOENT;
     struct Spoor *quarry = stalk_err(p, start, rpath, rlen,
-                                     amode, (u32)omode_raw, &serr);
+                                     amode, omode_eff, &serr);
     // #844: start (BORROWED by stalk -- it never refs/clunks it) is done now;
     // release the borrow. quarry owns its own ref from stalk.
     spoor_clunk(start);
@@ -9837,8 +9849,12 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         // newfstatat(dirfd, path, statbuf, flags): x0 dirfd, x1 path,
         // x2 statbuf, x3 flags. openat's front half joined to fstat's back
         // half -- which is exactly why vivarium.c has no _fstatat_build.
-        if (vivarium_fstatat_decide(args[0], args[3]) != VIV_TRANSLATED)
-            return -(s64)T_E_NOSYS;             // notably: every lstat()
+        // D-1: lstat (AT_SYMLINK_NOFOLLOW) is TRANSLATED now -- the decide's
+        // out-param becomes the resolver's no-follow flag.
+        u32 viv_sflags = 0;
+        if (vivarium_fstatat_decide(args[0], args[3], &viv_sflags)
+                != VIV_TRANSLATED)
+            return -(s64)T_E_NOSYS;
         u32 path_len = 0;
         s64 m = viv_measure_user_path(args[1], &path_len);
         if (m != 0)                                  return m;
@@ -9859,7 +9875,8 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
         }
         path_scratch[path_len] = '\0';
         struct t_stat ks;
-        s64 rc = sys_stat_for_proc(p, path_scratch, path_len, &ks);
+        s64 rc = sys_stat_for_proc(p, path_scratch, path_len,
+                                   viv_sflags ? (u32)STALK_NOFOLLOW : 0u, &ks);
         if (rc != 0)                                 return rc;
         return viv_stat_copy_out(args[2], &ks);
     }
