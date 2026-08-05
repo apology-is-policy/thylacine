@@ -149,6 +149,15 @@ pub enum Error {
     /// POSIX `ENOTEMPTY` = 39. Server-originated, like `IsADirectory` (#80).
     DirectoryNotEmpty,
 
+    /// Symlink resolution did not terminate, or terminated on a link the caller
+    /// refused to follow. Two distinct emitters share the code, as on Linux
+    /// (DISTRO D-1): the resolver exceeded `STALK_MAX_FOLLOWS` (a cycle, or a
+    /// chain too deep), OR the final component is a symlink and the open passed
+    /// `T_ONOFOLLOW` without `T_OPATH` -- the caller asked for not-a-symlink and
+    /// got one.
+    /// Maps `T_E_LOOP` = 40 (POSIX `ELOOP`).
+    SymlinkLoop,
+
     /// Pass-through for errno values not enumerated above. The carried
     /// integer is the positive errno reported by the kernel (i.e.,
     /// `-rc` where `rc` was the syscall return). Lets unknown errors
@@ -196,6 +205,7 @@ impl Error {
             Error::OutOfRange       => 34,
             Error::NotImplemented   => 38,
             Error::DirectoryNotEmpty => 39,
+            Error::SymlinkLoop      => 40,
             Error::TimedOut         => 110,
             Error::Other(e)         => e,
             // Library-only variants have no POSIX errno mapping.
@@ -277,6 +287,7 @@ impl From<i32> for Error {
             34  => Error::OutOfRange,
             38  => Error::NotImplemented,
             39  => Error::DirectoryNotEmpty,
+            40  => Error::SymlinkLoop,
             110 => Error::TimedOut,
             n   => Error::Other(n),
         }
@@ -303,6 +314,7 @@ impl fmt::Display for Error {
             Error::OutOfRange       => "result out of range",
             Error::NotImplemented   => "function not implemented",
             Error::DirectoryNotEmpty => "directory not empty",
+            Error::SymlinkLoop      => "too many levels of symbolic links",
             Error::TimedOut         => "operation timed out",
             Error::Other(_)         => "kernel error",
             Error::UnexpectedEof    => "unexpected end of file",

@@ -235,6 +235,14 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_ORDWR    2u
 #define T_OEXEC    3u
 #define T_OTRUNC   0x10u
+// DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
+// on the rest of the omode, which is why it is a flag and not an access mode:
+// with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --
+// t_fstat it for the link's own record); without it the open answers -T_E_LOOP,
+// Linux O_NOFOLLOW. Non-final components expand regardless -- the flag scopes to
+// the quarry. A trailing '/' OVERRIDES it (POSIX 4.13: the path asserts a
+// directory, so the link must be followed to check).
+#define T_ONOFOLLOW 0x20u
 // FS-delta (IDENTITY-DESIGN.md §9.4): walk-without-open (Linux O_PATH /
 // Plan 9 walk). SYS_WALK_OPEN with this flag returns a NON-OPENED, walkable
 // KObj_Spoor -- the valid base for creating/walking/renaming/unlinking

@@ -8410,6 +8410,32 @@ int main(void) {
                 t_putstr("joey: /fs-mut-smoke reaped status=0; LS-3b fs-mutation API verified\n");
             }
 
+            // === DISTRO D-1: symlink resolution on the REAL FS (/symlink-probe) ===
+            // The kernel's stalk.symlink_* tests drive a fixture Dev with a
+            // static qid table; only this proves a link created by the live 9P
+            // server, with QTSYMLINK arriving off dev9p's wire decode, actually
+            // resolves. Post-pivot because it needs a WRITABLE FS: it mints its
+            // own links (LOOM_OP_SYMLINK -- SYS_WALK_CREATE has no symlink mode)
+            // rather than reading a baked fixture, so no bake-layout change and
+            // no THYLACINE_MKFS_PRESERVE=1 skip can make a leg go stale (#126).
+            // Boot-fatal: the whole DISTRO ladder is built on this resolving,
+            // and a stock rootfs is mostly symlinks.
+            {
+                const char slp_name[] = "/bin/symlink-probe";  // #58: post-pivot /bin bind
+                long slp_pid = t_spawn(slp_name, sizeof(slp_name) - 1);
+                if (slp_pid <= 0) {
+                    t_putstr("joey: t_spawn(\"symlink-probe\") FAILED\n");
+                    return 1;
+                }
+                int slp_status = -1;
+                long slp_reaped = t_wait_pid_for((int)slp_pid, 0, &slp_status);
+                if (slp_reaped != slp_pid || slp_status != 0) {
+                    t_putstr("joey: /symlink-probe FAILED (DISTRO D-1 gate)\n");
+                    return 1;
+                }
+                t_putstr("joey: /symlink-probe reaped status=0; D-1 symlink resolution verified\n");
+            }
+
             // === CL-1a: pouch FS/process wire prover (/bin/pouch-hello-fs) ===
             // The Clade arc (docs/LLVM-DESIGN.md) sub-chunk CL-1a proof: a POSIX
             // C program driving every FS/process boundary line 0024 added --

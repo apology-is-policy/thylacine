@@ -301,12 +301,20 @@ pub const T_WSTAT_MODE_MASK: u32      = 0o777;
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
 // in the low two bits; OTRUNC (truncate-on-open for write-shaped opens)
-// in bit 4. Bits outside 0x13 are rejected by the kernel.
+// in bit 4. Bits outside SYS_WALK_OPEN_OMODE_VALID are rejected by the kernel.
 pub const T_OREAD: u32                = 0;
 pub const T_OWRITE: u32               = 1;
 pub const T_ORDWR: u32                = 2;
 pub const T_OEXEC: u32                = 3;
 pub const T_OTRUNC: u32               = 0x10;
+// DISTRO D-1: do not expand a symlink FINAL component. What that yields depends
+// on the rest of the omode, which is why it is a flag and not an access mode:
+// with T_OPATH the returned handle IS the link (the v1.0 lstat spelling --
+// fstat it for the link's own record); without it the open answers T_E_LOOP,
+// Linux O_NOFOLLOW. Non-final components expand regardless -- the flag scopes to
+// the quarry. A trailing '/' OVERRIDES it (POSIX 4.13: the path asserts a
+// directory, so the link must be followed to check).
+pub const T_ONOFOLLOW: u32            = 0x20;
 // FS-delta (IDENTITY-DESIGN.md §9.4): walk-without-open (Linux O_PATH / Plan 9
 // walk). SYS_WALK_OPEN with T_OPATH returns a NON-OPENED, walkable KObj_Spoor --
 // the valid base for creating/walking/renaming/unlinking children + a valid
@@ -346,12 +354,16 @@ pub const T_SEEK_END: u32             = 2;
 
 // POSIX-shaped mode bits returned in struct t_stat.mode — must mirror
 // kernel/include/thylacine/syscall.h. Subset that v1.0 Devs populate
-// (regular file / directory / character device). T_S_IFMT is the mask
-// for extracting the type.
+// (regular file / directory / character device / symlink). T_S_IFMT is
+// the mask for extracting the type.
 pub const T_S_IFMT:  u32              = 0o170000;
 pub const T_S_IFREG: u32              = 0o100000;
 pub const T_S_IFDIR: u32              = 0o040000;
 pub const T_S_IFCHR: u32              = 0o020000;
+// DISTRO D-1. Only ever observed through a NON-EXPANDING stat -- an ordinary
+// stat of a link reports the TARGET's type, so a caller that sees this asked
+// not to follow (T_ONOFOLLOW + T_OPATH, then fstat).
+pub const T_S_IFLNK: u32              = 0o120000;
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.

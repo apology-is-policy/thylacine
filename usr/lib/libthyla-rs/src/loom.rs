@@ -319,6 +319,38 @@ impl Sqe {
         s
     }
 
+    /// `symlink` -- create `name` under the registered O_PATH directory handle
+    /// `dir_idx` (requires `RIGHT_WRITE`), pointing at `target`.
+    ///
+    /// Both strings live in ONE registered-buffer span: `name` occupies
+    /// `[buf_off, buf_off + name_len)` and `target` the rest, up to
+    /// `buf_off + total_len`. The kernel splits at `name_len` and validates
+    /// `0 < name_len < total_len` at submit, so both halves must be non-empty.
+    ///
+    /// The only in-guest way to make a symlink at v1.0: `SYS_WALK_CREATE` has no
+    /// symlink mode, so this op IS the creation surface.
+    #[inline]
+    pub const fn symlink(
+        dir_idx: u32,
+        buf_idx: u32,
+        buf_off: u64,
+        name_len: u32,
+        total_len: u32,
+        gid: u32,
+        user_data: u64,
+    ) -> Sqe {
+        let mut s = Sqe::zeroed();
+        s.opcode = op::SYMLINK;
+        s.handle_idx = dir_idx;
+        s.len = total_len;
+        s.buf_idx_or_off = buf_idx;
+        s._resv1[0] = buf_off; // LOOM_SQE_BUF_OFF
+        s._resv1[1] = name_len as u64; // the split
+        s._resv1[2] = gid as u64;
+        s.user_data = user_data;
+        s
+    }
+
     /// Set per-SQE [`sqe_flag`] bits (LINK / DRAIN / CQE_SKIP / MULTISHOT).
     #[inline]
     pub const fn with_flags(mut self, flags: u8) -> Sqe {
