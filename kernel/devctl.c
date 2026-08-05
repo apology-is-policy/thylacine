@@ -207,7 +207,7 @@ static int format_procs_cb(struct Proc *p, void *arg) {
     if (!n) { s->overflow = true; return 1; }
     s->off += n;
     {
-        u32 pages = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+        u32 pages = p->as ? __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) : 0u;
         n = fmt_sdec(s->buf, s->cap, s->off, (int)pages);
         if (!n && pages != 0) { s->overflow = true; return 1; }
         s->off += n;

@@ -1580,6 +1580,13 @@ const VERB_CLEARANCE_LIST: u8 = 14;
 const VERB_CLEARANCE_ACTIVATE: u8 = 15;
 const VERB_CLEARANCE_GRANT: u8 = 16;
 const VERB_CLEARANCE_REVOKE: u8 = 17;
+// #139: the SELF form of CLEARANCE_ACTIVATE -- same policy, identity from the
+// connection's kernel-stamped principal instead of a bearer token. A DISTINCT
+// verb rather than a magic-value branch inside 15: the two forms differ in
+// their authorization gate, and a second authorization path should be nameable
+// on the wire and separately auditable, not discriminated by payload length
+// (the /cap/grant 16-vs-32 shape, which works but hides what it is doing).
+const VERB_CLEARANCE_ACTIVATE_SELF: u8 = 18;
 
 // The system passphrase is no longer a corvus-side constant (A-5c-b): ADMIN_ELEVATE
 // verifies a supplied passphrase by unwrapping the host-baked system-wrap (the admin
@@ -1868,9 +1875,30 @@ unsafe fn handle_auth(owner_conn_id: u64, payload: &[u8], response: &mut Vec<u8>
     }
     let passphrase = &payload[1 + user_len + 2..1 + user_len + 2 + pass_len];
 
-    // Spec's one-session-per-Proc precondition: refuse AUTH while a
-    // session is bound (corvus.tla AuthSuccess `~(\E s : s.owner_proc =
-    // p)`).
+    // Refuse AUTH while a session is bound.
+    //
+    // Read this as an IMPLEMENTATION narrowing, not a spec requirement -- the
+    // distinction was lost here and #139 was the bill. corvus.tla AuthSuccess
+    // says `~(\E s \in sessions : s.owner_proc = p)`: no session owned by THIS
+    // Proc. The model permits concurrent sessions from different Procs. What
+    // runs below is the single global SESSION slot (see the struct's note), so
+    // it refuses AUTH from ANY Proc while ANY session exists -- strictly
+    // stricter than the model, and the elided `s.owner_proc = p` is exactly
+    // where the strictness hides.
+    //
+    // The narrowing was sound for the world it was written in (joey the only
+    // console-attached Proc, one connection per peer). Login and user programs
+    // arrived later and the bound stayed; a correct bound whose reason had
+    // expired. The consequence was not a refused login but a structural one: no
+    // post-login program could ever obtain a session token, so the token-gated
+    // CLEARANCE_ACTIVATE (verb 15) became unreachable for every user-launched
+    // program -- CAP_JIT included, i.e. all of GL.
+    //
+    // Verb 18 (CLEARANCE_ACTIVATE_SELF) routes around it without touching this
+    // gate, because widening it is the larger change: per-connection sessions
+    // re-open the A-5b cross-session-wipe question that owner_conn_id closed.
+    // That lift stays available (it is what the model already describes) and is
+    // the right move if a second verb ever needs the same escape.
     if session_active() {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
@@ -2745,58 +2773,57 @@ unsafe fn handle_clearance_list(payload: &[u8], response: &mut Vec<u8>) {
     stage_response(response, STATUS_OK, &out);
 }
 
-// handle_clearance_activate — CLEARANCE_ACTIVATE verb (verb_id=15; the legate
-// path). Verifies the session user is eligible + the level's auth_required is
-// satisfiable in-band (v1.0: RE_AUTH only -- a valid session token is the proof;
-// high-stakes levels need the A-4c trusted path and are refused), reads the
-// peer's stripes (SYS_SRV_PEER), and registers the kernel cap-device clearance
-// grant against those stripes. The peer redeems via the cap device `use`
-// (t_cap_use) -> it becomes a legate root.
-//
-// Request:  token (33) + level_len u8 + level + self_restrict u64 LE
-//           + valid_until_req u64 LE (0 = level default)
-// OK reply: legate_session_id u32 LE + granted_caps u64 LE
-unsafe fn handle_clearance_activate(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
-    if payload.len() < TOKEN_LEN + 1 {
-        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+// The activation tail shared by both CLEARANCE_ACTIVATE forms (verbs 15 + 18):
+// `level_len u8 + level + self_restrict u64 LE + valid_until_req u64 LE`. Verb
+// 15 passes the payload PAST its 33-byte token; verb 18 passes the whole
+// payload. One parser so the two wire forms cannot drift in their bounds.
+fn parse_activate_tail(p: &[u8]) -> Option<(&[u8], u64, u64)> {
+    if p.is_empty() {
+        return None;
     }
-    let token = &payload[0..TOKEN_LEN];
-    let level_len = payload[TOKEN_LEN] as usize;
+    let level_len = p[0] as usize;
     if level_len == 0 || level_len > MAX_LEVEL_LEN {
-        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+        return None;
     }
-    if payload.len() != TOKEN_LEN + 1 + level_len + 8 + 8 {
-        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    if p.len() != 1 + level_len + 8 + 8 {
+        return None;
     }
-    let level = &payload[TOKEN_LEN + 1..TOKEN_LEN + 1 + level_len];
-    let sr_off = TOKEN_LEN + 1 + level_len;
+    let level = &p[1..1 + level_len];
+    let sr_off = 1 + level_len;
     let mut self_restrict: u64 = 0;
     for i in 0..8 {
-        self_restrict |= (payload[sr_off + i] as u64) << (8 * i);
+        self_restrict |= (p[sr_off + i] as u64) << (8 * i);
     }
     let vu_off = sr_off + 8;
     let mut valid_until_req: u64 = 0;
     for i in 0..8 {
-        valid_until_req |= (payload[vu_off + i] as u64) << (8 * i);
+        valid_until_req |= (p[vu_off + i] as u64) << (8 * i);
     }
+    Some((level, self_restrict, valid_until_req))
+}
 
-    if !session_token_matches(token) {
-        return stage_response(response, STATUS_BAD_AUTH, &[]);
-    }
-    let user = match session_user_copy() {
-        Some(u) => u,
-        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
-    };
+// The POLICY half of clearance activation, shared verbatim by verbs 15 and 18:
+// eligibility -> auth_required -> self_restrict -> the kernel grant. The two
+// verbs differ ONLY in how they establish `user`; everything downstream of the
+// identity is identical, so it lives here rather than in two bodies that would
+// have to be kept in step. Keeping the fork at the identity and nowhere else is
+// deliberate: a reader auditing "who may activate" reads the two short handlers,
+// not a diff of two long ones.
+unsafe fn clearance_activate_grant(handle: i64, user: &[u8], level: &[u8], self_restrict: u64,
+                                   valid_until_req: u64, response: &mut Vec<u8>) {
     let lvl = match level_by_name(level) {
         Some(l) => l,
         None => return stage_response(response, STATUS_NOT_FOUND, &[]),
     };
-    if !user_eligible_for(&user, level) {
+    if !user_eligible_for(user, level) {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
-    // auth_required: v1.0 enforces RE_AUTH in-band (the live session token is the
-    // proof). High-stakes levels require the kernel SAK trusted path (A-4c), not
-    // yet built -> refuse (documented A-4c dependency, not a silent gap).
+    // auth_required: v1.0 enforces RE_AUTH in-band. Each verb supplies its own
+    // proof before calling here -- verb 15 a live session token, verb 18 a live
+    // session for the caller's OWN kernel-stamped principal -- so by this point
+    // "the user authenticated" is established either way. High-stakes levels
+    // require the kernel SAK trusted path (A-4c), not yet built -> refuse
+    // (documented A-4c dependency, not a silent gap).
     match lvl.auth_required {
         AUTH_REQ_RE_AUTH => {}
         AUTH_REQ_DISTINCT_SECRET | AUTH_REQ_SYSTEM_KEY | AUTH_REQ_HOSTOWNER_COSIGN => {
@@ -2847,6 +2874,122 @@ unsafe fn handle_clearance_activate(handle: i64, payload: &[u8], response: &mut 
     out[0..4].copy_from_slice(&session_id.to_le_bytes());
     out[4..12].copy_from_slice(&effective_caps.to_le_bytes());
     stage_response(response, STATUS_OK, &out);
+}
+
+// handle_clearance_activate — CLEARANCE_ACTIVATE verb (verb_id=15; the legate
+// path, BEARER form). Identity comes from the presented session token: the
+// caller proves it holds a live session and is authorized AS THAT SESSION'S
+// USER, whatever the caller's own principal is.
+//
+// That decoupling is the form's whole purpose and its whole cost. It is what
+// the BOOT provers need -- jit-prover / legate-prover / osmesa-prove run as
+// PRINCIPAL_SYSTEM (joey spawns them with a plain t_spawn, no identity stamp)
+// and AUTH as michael to obtain the token, so their principal is not, and
+// cannot be, the user being authorized. It is also why a stolen token is worth
+// something here: the grant lands on the CALLER's stripes, not the session
+// owner's. Verb 18 is the form without that gap; prefer it wherever the caller
+// genuinely runs as the user.
+//
+// Request:  token (33) + level_len u8 + level + self_restrict u64 LE
+//           + valid_until_req u64 LE (0 = level default)
+// OK reply: legate_session_id u32 LE + granted_caps u64 LE
+unsafe fn handle_clearance_activate(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    if payload.len() < TOKEN_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let token = &payload[0..TOKEN_LEN];
+    let (level, self_restrict, valid_until_req) = match parse_activate_tail(&payload[TOKEN_LEN..]) {
+        Some(t) => t,
+        None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
+    };
+
+    if !session_token_matches(token) {
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    }
+    let user = match session_user_copy() {
+        Some(u) => u,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+    clearance_activate_grant(handle, &user, level, self_restrict, valid_until_req, response);
+}
+
+// handle_clearance_activate_self — CLEARANCE_ACTIVATE_SELF verb (verb_id=18;
+// the legate path, SELF form). Identity is the connection's KERNEL-STAMPED
+// principal (SYS_SRV_PEER) -- the caller quotes nothing and is authorized as
+// who it demonstrably is.
+//
+// This is the flow section 5.7 has always described ("[user shell]
+// CLEARANCE_ACTIVATE ... [corvus] resolve the session's principal
+// (SYS_SRV_PEER)"): the implementation resolved the principal from the token
+// and used SYS_SRV_PEER only for the grant target, which left the documented
+// actor -- an ordinary program a logged-in user runs -- with no way through at
+// all. It could not AUTH (handle_auth refuses while any session is bound, see
+// the note there) and so could never obtain a token to present. #139: every
+// user-launched GL program was structurally unable to acquire CAP_JIT.
+//
+// The Plan 9 factotum shape: the agent holds the secret; the client is
+// identified by WHO IT IS, not by what it can quote. Two properties follow that
+// verb 15 cannot offer:
+//
+//   - There is no bearer secret to steal, delegate, or leak. (This is what
+//     makes option (c) -- passing login's token down to children -- the wrong
+//     answer: it would make a bearer credential ambient, which is precisely
+//     what the capability model exists to prevent.)
+//   - The identity axis and the grant target are the SAME Proc. Verb 15 grants
+//     to whoever presents the token, whatever their principal; here the Proc
+//     being authorized is the Proc being stamped. Strictly tighter.
+//
+// RE_AUTH is satisfied WITHOUT a token by requiring a live authenticated
+// session for that same principal: corvus knows this user authenticated, and
+// the kernel vouches that this Proc is that user. Both facts, no secret. With
+// nobody logged in it fails closed -- an unattended daemon running as michael
+// cannot elevate, which is the conservative reading of "re-auth required" and a
+// one-line relaxation if a real workload ever needs it.
+//
+// Request:  level_len u8 + level + self_restrict u64 LE + valid_until_req u64 LE
+// OK reply: legate_session_id u32 LE + granted_caps u64 LE (identical to 15)
+unsafe fn handle_clearance_activate_self(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    let (level, self_restrict, valid_until_req) = match parse_activate_tail(payload) {
+        Some(t) => t,
+        None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
+    };
+
+    // Identity: the kernel's stamp on THIS connection. The connection Spoor is
+    // KObj_Srv (non-transferable), so the peer is pinned to the Proc that
+    // opened it and cannot change under us. Read LIVE -- a dead peer fails
+    // closed (C-22).
+    let peer = match peer_live_info(handle) {
+        Some(p) => p,
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+    };
+    if peer.principal_id == PRINCIPAL_INVALID {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    // A principal with no corvus user record has no eligibility and cannot be
+    // one. This is also what keeps PRINCIPAL_SYSTEM out: the boot chain's
+    // principal was never minted by USER_CREATE, so it resolves to nothing.
+    let urec = match user_states_find_by_id(peer.principal_id) {
+        Some(u) => u,
+        None => return stage_response(response, STATUS_PERMISSION_DENIED, &[]),
+    };
+
+    // The RE_AUTH proof: a live session belonging to this SAME principal.
+    // Compared by id, not by name -- ids come from the monotonic allocator with
+    // burned entries, so they cannot be recycled onto a different human the way
+    // a re-created name could.
+    let sess_user = match session_user_copy() {
+        Some(u) => u,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+    let sess_principal = match user_states_find(&sess_user) {
+        Some(s) => s.principal_id,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+    if sess_principal != peer.principal_id {
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    }
+
+    clearance_activate_grant(handle, &urec.user, level, self_restrict, valid_until_req, response);
 }
 
 // Parse the CLEARANCE_GRANT / CLEARANCE_REVOKE payload (identical shape). On
@@ -3502,6 +3645,8 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
                                                      &mut conn.pending_response),
             VERB_CLEARANCE_LIST => handle_clearance_list(&payload_owned,
                                                          &mut conn.pending_response),
+            VERB_CLEARANCE_ACTIVATE_SELF => handle_clearance_activate_self(conn_handle,
+                                                &payload_owned, &mut conn.pending_response),
             VERB_CLEARANCE_ACTIVATE => handle_clearance_activate(conn_handle, &payload_owned,
                                                                  &mut conn.pending_response),
             VERB_CLEARANCE_GRANT => handle_clearance_grant(conn_handle, &payload_owned,

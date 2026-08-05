@@ -202,7 +202,7 @@ void test_vma_insert_sorted_invariant(void) {
     // Walk the list; verify ascending order.
     u64 prev_start = 0;
     unsigned count = 0;
-    for (struct Vma *cur = p->vmas; cur; cur = cur->next) {
+    for (struct Vma *cur = p->as->vmas; cur; cur = cur->next) {
         TEST_ASSERT(cur->vaddr_start > prev_start, "list not sorted ascending");
         prev_start = cur->vaddr_start;
         count++;
@@ -239,7 +239,7 @@ void test_vma_drain_releases_all(void) {
 
     vma_drain(p);
 
-    TEST_ASSERT(p->vmas == NULL, "vmas list emptied");
+    TEST_ASSERT(p->as->vmas == NULL, "vmas list emptied");
     TEST_EXPECT_EQ(vma_total_allocated() - alloc_before, (u64)N, "alloc counter");
     TEST_EXPECT_EQ(vma_total_freed()     - free_before,  (u64)N, "free counter");
     TEST_EXPECT_EQ(burrow_mapping_count(burrow), mapping_before,

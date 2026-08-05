@@ -338,6 +338,10 @@ struct Proc *proc_init_proc(void) {
 }
 
 struct Proc *proc_alloc(void) {
+    return proc_alloc_in(NULL, PROC_PAGE_MAX);
+}
+
+struct Proc *proc_alloc_in(struct AddrSpace *share, u32 page_budget) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!p) return NULL;
@@ -369,15 +373,48 @@ struct Proc *proc_alloc(void) {
         return NULL;
     }
 
-    // P3-Bcb / RW-1 B-F1: per-Proc page-table root. A fresh L0 (KP_ZERO; all
-    // 512 entries invalid), installed in TTBR0_EL1 at context switch so each
-    // Proc's user-half is independent. The ASID is NOT assigned here:
-    // context_id stays 0 ("never assigned", KP_ZERO) and the rolling allocator
-    // stamps it at the first context switch (asid_resolve, the context-switch
-    // pre-hook; ARCH section 6.2.1). There is no ASID-space exhaustion to roll
-    // back from -- rollover recycles the space.
-    p->pgtable_root = proc_pgtable_create();
-    if (p->pgtable_root == 0) {
+    // P3-Bcb / RW-1 B-F1 / LINEAGE L-1: the address space -- a fresh L0 plus the
+    // VMA list, the VMA lock and the I-32 memory axes, in one refcounted object
+    // (see <thylacine/addrspace.h>). addrspace_alloc creates the page table and
+    // leaves context_id at 0 ("never assigned"), which the rolling allocator
+    // stamps at the first context switch. On OOM it has already freed whatever
+    // it got, so the rollback below is the same ZOMBIE + proc_free as every
+    // other alloc step -- proc_free's addrspace_unref(NULL) is a clean no-op.
+    //
+    // LINEAGE L-3: `share` non-NULL means rfork(RFPROC|RFMEM) -- the child takes
+    // a reference to the caller's space instead of getting its own. Everything
+    // downstream reads p->as without caring which it was, which is the point of
+    // having made the address space an object at L-1: sharing is a refcount, not
+    // a second code path. The ASID follows for free -- asid_resolve keys on
+    // as->context_id, so one space is one ASID however many Procs hold it, and
+    // I-31 needs nothing new.
+    if (share) {
+        addrspace_ref(share);
+        p->as = share;
+    } else {
+        // I-32 (A): seed the new space's enforced cap from the CALLER's
+        // authorization, passed in rather than read off the half-built Proc.
+        //
+        // It has to be a parameter, and that is the whole point of this line:
+        // proc_init_fields set p->page_budget to the PROC_PAGE_MAX default a
+        // moment ago, and rfork_internal does not copy the parent's over it
+        // until ~85 lines after this call returns -- by which time the space
+        // exists and carries the default. Seeding from p->page_budget here
+        // would therefore give EVERY spawned child the full default: a
+        // narrowed parent's child would silently get more than the parent
+        // (an I-32 hole), and CL-5's inheritance -- the one mechanism that
+        // carries a raise from a build root down to a posix_spawn'd cc1 that
+        // knows nothing about budgets -- would never reach the cap that is
+        // actually enforced. Both were live between the L-1 extraction and
+        // this fix.
+        //
+        // Set the Proc's own field from the same value so the authorization
+        // and the enforced cap agree from birth; rfork_internal's later copy
+        // then re-asserts the identical value.
+        p->page_budget = page_budget;
+        p->as = addrspace_alloc(p->page_budget);
+    }
+    if (!p->as) {
         p->state = PROC_STATE_ZOMBIE;
         proc_free(p);
         return NULL;
@@ -499,7 +536,39 @@ int proc_quiesce_owned_devices(struct Proc *p) {
     // (b) device-register claims held ONLY by a BURROW_TYPE_MMIO mapping (fd
     // closed after SYS_MMIO_MAP). Independent of (a): a NULL handle table does
     // not imply no mapped devices.
-    for (struct Vma *v = p->vmas; v; v = v->next) {
+    // LINEAGE L-1: `as == NULL` (kernel-only Proc, or a proc_alloc rollback that
+    // failed before addrspace_alloc) means no VMA list, so no mapped devices.
+    //
+    // L-3: and only the LAST holder of the address space walks it. The mapping
+    // belongs to the space, not to this Proc, so while a sharer survives the
+    // device is still mapped and may still be driven -- resetting it here would
+    // pull the hardware out from under a living driver, the same premature
+    // teardown as draining the VMA list early, one layer down.
+    //
+    // The count is stable to read here, but NOT for the reason this comment used
+    // to give (L-7 F6). It said "this Proc is a ZOMBIE with no threads", which
+    // stopped being true at #68: the primary caller is now
+    // proc_close_handles_at_exit, which runs in a deliberately-opened RUNNING +
+    // ALIVE window with a live thread. The property survives on refcount shape
+    // instead -- a second holder means ref >= 2 for as long as that holder
+    // lives, so only the sole remaining holder can ever observe 1, and once it
+    // does, nothing can raise the count behind it: the only way to take a
+    // reference is an rfork, which needs a running thread of a Proc that already
+    // holds one. Reading 1 therefore means "sole, and staying sole".
+    //
+    // Walk (a) needs no such gate: handle tables are per-Proc and hardware
+    // handles are non-transferable (I-5), so no second Proc can hold this
+    // device's fd.
+    //
+    // L-3c-1 landed the handle-table copy this comment used to name as the
+    // thing that WOULD break it (#119), and the property survives BECAUSE the
+    // copy SKIPS hardware handles. That is not incidental -- it is the concrete
+    // form of the abstract I-5 argument: had the copy carried them, a forked
+    // child's DEATH would run this walk and reset device registers its parent
+    // is still driving. Any future change that lets a hardware handle reach a
+    // second Proc must add a sole-ownership gate here, exactly like walk (b).
+    bool as_sole = (addrspace_ref_count(p->as) == 1);
+    for (struct Vma *v = as_sole ? p->as->vmas : NULL; v; v = v->next) {
         struct Burrow *b = v->burrow;
         if (!b || b->type != BURROW_TYPE_MMIO || !b->kobj_mmio) continue;
         struct KObj_MMIO *k = b->kobj_mmio;
@@ -535,12 +604,21 @@ void proc_free(struct Proc *p) {
     // still intact (round-2 F4).
     proc_quiesce_owned_devices(p);
 
-    // P3-Da: drain VMAs first. Each Vma carries a burrow_unmap; releasing
-    // them BEFORE handle_table_free is the right order — handle closure
-    // independently does burrow_unref (handle_count--) and a BURROW with
-    // mapping_count > 0 must NOT free even if handle_count drops to 0
-    // (per specs/burrow.tla NoUseAfterFree).
-    vma_drain(p);
+    // P3-Da: release the address space here, BEFORE handle_table_free. The
+    // ordering is the original one and the reason is unchanged -- the drain
+    // (now inside addrspace_unref) carries each Vma's burrow_unmap, and doing
+    // that before handle closure is the right order because handle closure
+    // independently does burrow_unref (handle_count--), and a BURROW with
+    // mapping_count > 0 must NOT free even if handle_count drops to 0 (per
+    // specs/burrow.tla NoUseAfterFree).
+    //
+    // L-3: this used to be a bare vma_drain(p), with addrspace_unref following
+    // much later. Both now happen here, because under RFMEM a Proc's death is
+    // no longer the same event as its address space's: if a sharer survives,
+    // this drops `ref` to a nonzero value and the mappings correctly stay.
+    // Nothing below touches p->as.
+    addrspace_unref(p->as);
+    p->as = NULL;
 
     // P2-Eb: release the territory. Most Procs have a private territory
     // (refcount 1; freed here). Phase 5+ shared territories decrement
@@ -601,28 +679,24 @@ void proc_free(struct Proc *p) {
     hwdebug_free(p->debug_hw);
     p->debug_hw = NULL;
 
-    // RW-1 B-F1: release the per-Proc page table. There is NO per-Proc ASID
-    // free in the rolling-ASID model -- the Proc's context_id is simply
-    // dropped; its hardware ASID value stays reserved in the current
-    // generation's bitmap until the next rollover, which reclaims the whole
-    // space at once (ARCH section 6.2.1).
-    //
-    // This is TLB-safe WITHOUT the old asid_free broadcast (the F4
-    // asid_free-before-destroy ordering is moot -- there is no asid_free):
-    //   - the leaf user mappings were already invalidated by vma_drain's
-    //     all-ASID `tlbi vaae1is` (vma_drain runs above, before proc_free);
-    //   - no live CPU holds this dead Proc's TTBR0 (every thread was reaped +
-    //     on_cpu-spun before proc_free), so no CPU translates under its ASID
-    //     and no walk reaches a recently-recycled L1/L2/L3 page;
-    //   - any eventual reuse of the ASID value is gated by the rollover's
-    //     per-CPU flush_pending local flush before the value goes live again.
-    // (Matches the Linux model: no TLB flush at mm teardown; reclaim at
-    // rollover.)
-    if (p->pgtable_root != 0) {
-        proc_pgtable_destroy(p->pgtable_root);
-        p->pgtable_root = 0;
-    }
+    // VIVARIUM V-6b: release the per-Proc Linux signal dispositions. Same
+    // discipline as debug_hw -- freed ONLY here at reap, so the EL0-return-tail
+    // reader (notes_deliver_at_el0_return) can never see it disappear under a
+    // live thread: every thread of `p` was reaped and on_cpu-spun before
+    // proc_free runs, so no CPU is inside a delivery for this Proc.
+    kfree(p->sigtab);
+    p->sigtab = NULL;
 
+    // VIVARIUM V-5: release the per-Proc Linux socket table, same discipline.
+    // The entries hold no references -- a socket's ctl/data Spoors live in the
+    // handle table and were released by the handle-table teardown above, so
+    // this frees the (proto, N) bookkeeping only and can never orphan a fid.
+    kfree(p->socktab);
+    p->socktab = NULL;
+
+    // (The address space was released above, before handle_table_free -- see
+    // the P3-Da comment there for why that ordering, and addrspace.h for why
+    // dropping the page table needs no TLB maintenance.)
     kmem_cache_free(g_proc_cache, p);
     // R5-H F79: atomic counter bump.
     __atomic_fetch_add(&g_proc_destroyed, 1u, __ATOMIC_RELAXED);
@@ -678,6 +752,26 @@ int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
     int rv = proc_for_each_walk(kproc(), callback, arg);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return rv;
+}
+
+// #150 (the VIVARIUM getppid row). `parent` is rewritten by
+// proc_reparent_children when a parent exits, so a lockless read can hand back a
+// pointer whose Proc is reaped and freed before the deref -- which is why the
+// two existing readers (devproc.c:256, devctl.c:169) both run INSIDE
+// proc_for_each and neither takes the lock itself. This exists so a caller
+// outside proc.c can ask the same question without walking the whole tree to
+// find one Proc's parent, and so the locking lives here with the rest of the
+// tree discipline rather than being re-derived per call site.
+//
+// 0 for a parentless Proc. Only kproc is genuinely parentless -- an orphan
+// reparents to init rather than to nothing -- and 0 is also what Linux reports
+// for the same case, so the sentinel needs no translation.
+int proc_parent_pid(struct Proc *p) {
+    if (!p) return 0;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    int ppid = p->parent ? p->parent->pid : 0;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return ppid;
 }
 
 // =============================================================================
@@ -939,109 +1033,60 @@ bool proc_resource_exempt(const struct Proc *p) {
     return p && p->principal_id == PRINCIPAL_SYSTEM;
 }
 
+// LINEAGE L-2: these six are now POLICY ONLY. The counters live in the
+// AddrSpace, so their arithmetic moved to addrspace.c with them; what stays here
+// is the pair of things that are genuinely about the PROCESS -- "does this Proc
+// have an address space at all" (kproc does not) and "is this Proc exempt"
+// (PRINCIPAL_SYSTEM, the TCB). Splitting them is what lets exec charge a
+// DETACHED address space it is still building, where there is no Proc to route
+// the charge through.
+//
+// The as->lock precondition is unchanged and still belongs to the caller: it is
+// what makes each cap EXACT against a sibling charge on the same address space.
+
 bool proc_page_charge(struct Proc *p, u32 npages) {
-    if (!p) return false;
-    // Charge/uncharge are CAS loops so they are correct with NO lock held.
+    // The CAS discipline that used to live here moved WITH the counter to
+    // addrspace.c (#130's argument, which must not be lost in the move):
+    // charge/uncharge cannot assume a lock, because the uncharge sits where the
+    // pages actually FREE -- a Loom's ring pages are released by loom_free,
+    // reached from handle_close/handle_table_free, which hold no address-space
+    // lock. A sibling thread's SYS_BURROW_ATTACH can interleave, so a plain
+    // load-decide-store loses an update. addrspace_charge_pages therefore
+    // re-decides inside a CAS loop rather than merely re-storing.
     //
-    // They used to be plain load-decide-store pairs, documented as "the caller
-    // holds p->vma_lock". That held while every uncharge sat on an attach or
-    // detach path. It stopped holding when the uncharge moved to where the
-    // pages actually FREE (#130): a Loom's ring pages are released by
-    // loom_free, reached from handle_close/handle_table_free, which hold no
-    // vma_lock -- so a sibling thread's SYS_BURROW_ATTACH could interleave
-    // between this load and this store and lose one of the two updates. A
-    // multi-threaded Proc closing a Loom while another thread attaches is the
-    // ordinary Go shape, not a corner.
-    //
-    // vma_lock still matters here, but only for the CAP DECISION: holding it
-    // across check-then-charge is what makes the bound exact against a sibling
-    // attach. Two concurrent charges from OUTSIDE the lock can both pass the
-    // check and land, overshooting by at most the smaller charge -- the
-    // documented I-32 "floor, not an exact accountant" tolerance. The CAS is
-    // what guarantees no update is ever LOST, which is the property an
-    // accounting bound cannot do without.
-    for (;;) {
-        u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
-        if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
-        // CL-5: cap against this Proc's own budget, not the global constant. A Proc
-        // that never asked for a raise carries page_budget == PROC_PAGE_MAX, so this
-        // is byte-identical to the pre-CL-5 decision for every existing caller.
-        if (!proc_resource_exempt(p) && cur + npages > p->page_budget)
-            return false;                                // over budget -> caller -ENOMEM
-        if (!__atomic_compare_exchange_n(&p->page_count, &cur, cur + npages,
-                                         false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-            continue;                                    // raced; re-decide on the new value
-        // CL-5: the exact high-water mark. A CAS loop for the same reason --
-        // a lost peak update would under-report the true peak that CL-5 budget
-        // sizing reads.
-        u32 want = cur + npages;
-        u32 peak = __atomic_load_n(&p->page_peak, __ATOMIC_RELAXED);
-        while (want > peak &&
-               !__atomic_compare_exchange_n(&p->page_peak, &peak, want,
-                                            false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-            ;                                            // peak reloaded by the CAS
-        return true;
-    }
+    // The as->lock still matters, but only for the CAP DECISION: holding it
+    // across check-then-charge is what makes the bound exact against a sibling.
+    // Two concurrent charges from outside it can both pass and land,
+    // overshooting by at most the smaller -- the documented I-32 "floor, not an
+    // exact accountant" tolerance. The CAS guarantees no update is ever LOST,
+    // which is the property an accounting bound cannot do without.
+    if (!p || !p->as) return false;   // no address space: nothing to charge
+    return addrspace_charge_pages(p->as, npages, proc_resource_exempt(p));
 }
 
 void proc_page_uncharge(struct Proc *p, u32 npages) {
-    if (!p) return;
-    // CAS for the same reason as the charge above. Clamp so an over-uncharge
-    // (should never happen -- every uncharge matches a charge) never wraps
-    // past 0.
-    u32 cur = __atomic_load_n(&p->page_count, __ATOMIC_RELAXED);
-    do {
-        u32 nv = (cur >= npages) ? cur - npages : 0;
-        if (__atomic_compare_exchange_n(&p->page_count, &cur, nv,
-                                        false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-            return;
-    } while (1);                                         // cur reloaded by the CAS
+    if (!p || !p->as) return;         // no address space: nothing to uncharge
+    addrspace_uncharge_pages(p->as, npages);
 }
 
 bool proc_vma_charge(struct Proc *p) {
-    if (!p) return false;
-    // Caller holds p->vma_lock (the vma_insert/vma_remove domain), so the load + the
-    // cap decision + the store are atomic against a sibling attach -> the VMA cap is
-    // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent. The
-    // I-32 fourth axis: the bound a free SYS_BURROW_ATTACH_LAZY reservation needs.
-    u32 cur = __atomic_load_n(&p->vma_count, __ATOMIC_RELAXED);
-    if (cur == 0xFFFFFFFFu) return false;            // counter saturation (refuse)
-    if (!proc_resource_exempt(p) && cur >= PROC_VMA_MAX)
-        return false;                                // over cap -> vma_insert rejects
-    __atomic_store_n(&p->vma_count, cur + 1, __ATOMIC_RELEASE);
-    return true;
+    if (!p || !p->as) return false;   // no address space: nothing to charge
+    return addrspace_charge_vma(p->as, proc_resource_exempt(p));
 }
 
 void proc_vma_uncharge(struct Proc *p) {
-    if (!p) return;
-    // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches a
-    // charge) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->vma_count, __ATOMIC_RELAXED);
-    u32 nv  = (cur > 0) ? cur - 1 : 0;
-    __atomic_store_n(&p->vma_count, nv, __ATOMIC_RELEASE);
+    if (!p || !p->as) return;         // no address space: nothing to uncharge
+    addrspace_uncharge_vma(p->as);
 }
 
 bool proc_shared_map_charge(struct Proc *p, u32 npages) {
-    if (!p) return false;
-    // Caller holds p->vma_lock (burrow_share_into's precondition -- the same
-    // domain as the SHARED_IN-flagged VMA teardown), so the load + the cap
-    // decision + the store are atomic against sibling shares -> the cap is
-    // EXACT. The atomic store keeps a lockless cross-Proc /proc reader coherent.
-    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
-    if (npages > 0xFFFFFFFFu - cur) return false;   // counter overflow (refuse)
-    if (!proc_resource_exempt(p) && cur + npages > PROC_SHARED_MAP_MAX_PAGES)
-        return false;                                // over cap -> the share fails clean
-    __atomic_store_n(&p->shared_map_pages, cur + npages, __ATOMIC_RELEASE);
-    return true;
+    if (!p || !p->as) return false;   // no address space: nothing to charge
+    return addrspace_charge_shared_map(p->as, npages, proc_resource_exempt(p));
 }
 
 void proc_shared_map_uncharge(struct Proc *p, u32 npages) {
-    if (!p) return;
-    // Caller holds p->vma_lock. Clamp so an over-uncharge (every uncharge matches
-    // a charge -- the SHARED_IN flag pairs them) never wraps past 0.
-    u32 cur = __atomic_load_n(&p->shared_map_pages, __ATOMIC_RELAXED);
-    u32 nv  = (cur >= npages) ? cur - npages : 0;
-    __atomic_store_n(&p->shared_map_pages, nv, __ATOMIC_RELEASE);
+    if (!p || !p->as) return;         // no address space: nothing to uncharge
+    addrspace_uncharge_shared_map(p->as, npages);
 }
 
 bool proc_thread_cap_ok(struct Proc *p) {
@@ -1090,6 +1135,11 @@ u64 proc_cpu_ns(const struct Proc *p) {
     return total;
 }
 
+// LINEAGE L-3c-2. Defined next to wait_pid_for, whose park loop it mirrors
+// exactly; forward-declared here because rfork_internal's tail is its only
+// caller and sits well above it.
+static void vfork_await_release(struct Proc *p, int child_pid);
+
 // Shared internal worker for rfork + rfork_with_caps. The only difference
 // between them is `caps_mask`: the child's caps are set to
 // `parent->caps & caps_mask` AFTER proc_alloc (which KP_ZEROs caps to
@@ -1105,13 +1155,23 @@ u64 proc_cpu_ns(const struct Proc *p) {
 // the v1.0 default for any rfork-from-non-kproc-context path that
 // hasn't been explicitly designed to grant caps.
 static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
-                          caps_t caps_mask) {
-    // P2-D: only RFPROC supported. Other flags reserved for subsequent
-    // sub-chunks (RFNAMEG at P2-E, RFFDG at P2-F, RFMEM at P2-G, etc.).
-    if (flags != RFPROC) {
-        extinction("rfork: only RFPROC supported at P2-D");
+                          caps_t caps_mask, const struct fork_context *fc) {
+    // RFPROC alone, or RFPROC|RFMEM (LINEAGE L-3). The remaining reserved flags
+    // -- RFNAMEG, RFFDG, RFCRED, RFNOTEG, RFNOWAIT, RFREND, RFENVG -- still
+    // extinct: each shares a different per-Proc structure and each arrives with
+    // its own reasoning rather than inheriting approval from this one. RFPROC is
+    // not optional (there is no rfork that creates nothing).
+    if (flags != RFPROC && flags != (RFPROC | RFMEM)) {
+        extinction("rfork: only RFPROC and RFPROC|RFMEM are supported");
     }
-    if (!entry) extinction("rfork with NULL entry");
+    // LINEAGE L-3b: exactly one of the two child shapes. `entry` runs the child
+    // at a fresh kernel entry point; `fc` resumes it on the parent's saved EL0
+    // frame. Both-or-neither is a programming error, not a reachable state --
+    // and it is worth an extinction rather than a preference, because silently
+    // preferring one would produce a child that runs something other than what
+    // its caller asked for.
+    if (!entry == !fc)
+        extinction("rfork needs exactly one of entry / fork_context");
 
     struct Thread *t = current_thread();
     if (!t)                  extinction("rfork with no current thread");
@@ -1121,6 +1181,22 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     if (!parent)             extinction("rfork from thread with no proc");
     if (parent->magic != PROC_MAGIC)
                              extinction("rfork from thread with corrupted proc");
+
+    // L-3: RFMEM asks to share an address space the caller does not have. Only
+    // kproc is in that position, so this is a programming error rather than a
+    // reachable user path -- but refuse rather than quietly fall back to a
+    // private space, because "the flag was ignored" and "the flag was honoured"
+    // would then be indistinguishable from the outside, and the caller would
+    // learn otherwise only when the child failed to see a write it expected.
+    //
+    // L-5 widens it to `fc` on the same reasoning. BOTH shapes that need the
+    // parent's address space are here now: RFMEM shares it, a fork COPIES it, and
+    // neither can be served from nothing. A fork whose parent has no space would
+    // quietly hand the child an empty one, and "the fork copied nothing" and "the
+    // fork copied an empty space" would be exactly as indistinguishable as the
+    // ignored flag above. (The entry shape is the third case and wants precisely
+    // that empty space -- see the alloc below.)
+    if ((fc || (flags & RFMEM)) && !parent->as) return -1;
 
     // #65 (I-32): the per-Proc child cap. Reject a fork bomb EARLY -- before the
     // heavy proc_alloc / territory_clone / thread_create -- so it is cheap. The
@@ -1148,7 +1224,53 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // files; they are leaves. (5e-4 audit F2.)
     if (allowance_is_narrowed(parent)) return -1;
 
-    struct Proc *child = proc_alloc();
+    // L-3: RFMEM hands the child the parent's address space. Note what is NOT
+    // conditional on it -- the Territory, the note queue, the environment and
+    // the handle table are still the child's own, because they are governed by
+    // their own flags (RFNAMEG, RFNOTEG, RFENVG, RFFDG), all still refused. That
+    // separation is the whole reason Plan 9 uses a flag word: "shares memory" and
+    // "shares file descriptors" are independent claims, and the Linux shape this
+    // eventually serves relies on that -- posix_spawn passes CLONE_VM WITHOUT
+    // CLONE_FILES precisely so the child's dup2/close cannot disturb the parent.
+    //
+    // LINEAGE L-5: the third case, and the one that makes fork() a fork. There are
+    // exactly three answers to "what address space does the child get", and each
+    // is what its shape MEANS:
+    //
+    //   entry, no RFMEM  -> a fresh EMPTY space. The child starts at a kernel entry
+    //                       point and execs; copying the parent's would be pure
+    //                       waste, thrown away at the exec.
+    //   RFMEM            -> the parent's, shared. The vfork shape.
+    //   fc, no RFMEM     -> a COW CLONE. Stock fork().
+    //
+    // The discriminator is `fc`, exactly as it is for the handle table two hundred
+    // lines below, and for the same reason rather than a coincidence: `fc` means
+    // the child IS the parent, continuing on its frame -- so it must see the
+    // parent's memory AND the parent's descriptors, or its very next instruction
+    // reads something that is not there. One fact, two consequences.
+    //
+    // The clone is born with one reference (ours); proc_alloc_in takes the child's;
+    // we drop ours below, leaving exactly the child's. That is also why the failure
+    // paths need nothing bespoke -- proc_alloc_in's own rollback drops the child's
+    // reference, and our unref then takes the last one.
+    struct AddrSpace *cloned = NULL;
+    if (fc && !(flags & RFMEM)) {
+        // proc_resource_exempt(parent) is the CHILD's verdict: identity is
+        // INHERITED across rfork (see below), so parent and child agree, and the
+        // child does not exist yet to be asked.
+        cloned = addrspace_clone(parent->as, proc_resource_exempt(parent));
+        if (!cloned) return -1;         // OOM, or an unclonable VMA kind
+    }
+
+    // I-32 (A): hand the parent's authorization in, so a FRESH space (the
+    // spawn shape: no clone, no RFMEM) is born with the inherited cap rather
+    // than the default. A cloned space carries the source's cap already
+    // (addrspace_clone) and a shared one keeps its own (the RFMEM argument),
+    // so the parameter only governs the case that would otherwise be wrong.
+    struct Proc *child =
+        proc_alloc_in(cloned ? cloned : ((flags & RFMEM) ? parent->as : NULL),
+                      parent->page_budget);
+    if (cloned) addrspace_unref(cloned);   // hand sole ownership to the child
     if (!child) return -1;
 
     // P4-Ic3: capture parent->caps once under acquire fence. R9 F146
@@ -1189,6 +1311,37 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // no fork can walk a Proc INTO a non-default ABI -- only exec-under-a-
     // vivarium sets it in the first place.
     child->phenotype      = parent->phenotype;
+    // #102 F7, the seam this line's own reasoning opens: the phenotype crosses
+    // the fork but the SIGNAL DISPOSITIONS do not. `child->sigtab` stays NULL,
+    // which reads as all-SIG_DFL, so a forked Linux child would silently lose
+    // every handler and every SIG_IGN its parent installed -- POSIX fork(2)
+    // inherits both. (execve(2) is the different rule, and also unimplemented:
+    // it resets CAUGHT dispositions to SIG_DFL and PRESERVES ignored ones, so
+    // whoever builds process creation needs two behaviours here, not one.)
+    //
+    // REACHABLE SINCE LINEAGE L-3d, and this paragraph used to claim the
+    // opposite: "UNREACHABLE at v1.0 ... no clone/fork/execve number is a table
+    // row, so a PHENO_LINUX Proc cannot create another Proc at all." True when
+    // written (#102 F7), FALSE the moment clone became a VIV_TIER2 row. A
+    // forked Linux child now really does lose every handler and every SIG_IGN
+    // its parent installed.
+    //
+    // STILL NOT FIXED HERE, for the reason the original text itself gave:
+    // execve(2) needs the OPPOSITE rule (reset CAUGHT dispositions to SIG_DFL,
+    // PRESERVE ignored ones), so this is two behaviours and a design decision
+    // rather than a copy -- and the sigtab is on the V-6 audit surface.
+    // Exposure is narrow: the only clone shape vivarium_clone_decide admits is
+    // vfork-then-exec, and musl's posix_spawn child resets its own dispositions
+    // before exec'ing. Task #127; it lands with execve and wait4 at L-6.
+    //
+    // THE SINGLE-THREADEDNESS THIS PARAGRAPH USED TO BUY SURVIVES, ON DIFFERENT
+    // GROUNDS -- and notes.c leans on it for the sigtab tearing argument, so
+    // the re-derivation matters rather than being bookkeeping. A PHENO_LINUX
+    // Proc still cannot make a second THREAD: CLONE_THREAD is outside the
+    // admitted domain, and the native SYS_THREAD_SPAWN is unreachable from a
+    // phenotyped Proc. What the clone row grants is a second PROC, which
+    // carries its own sigtab. Widening that domain to admit CLONE_THREAD would
+    // void the argument in notes.c.
     // VIVARIUM V-4a-0: the executable name is INHERITED (a fork-without-exec
     // keeps running the parent's binary -- POSIX, and the honest answer for
     // /proc/<pid>/exe). Every v1.0 spawn execs immediately afterwards and
@@ -1291,7 +1444,37 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     }
     child->territory = child_pgrp;
 
-    struct Thread *ct = thread_create_with_arg(child, entry, arg);
+    // LINEAGE L-3c: fd inheritance -- the SECOND step that differs between the
+    // two child shapes, and it keys off the same `fc` for a reason that is
+    // about CONTRACTS, not convenience.
+    //
+    // The two primitives that reach this function make opposite promises about
+    // descriptors. SYS_SPAWN_* takes a program plus an explicit `fd_list` and
+    // endows exactly that -- a capability-style hand-over where the parent
+    // states what it means to give. SYS_RFORK takes no such list because there
+    // is nothing to state: the child IS the parent, continuing on the same
+    // frame, so it must see what the parent sees or its very next instruction
+    // writes to a descriptor that is not there.
+    //
+    // So "fresh + endowed" and "inherit" are not two settings of one knob; they
+    // are what the two calls MEAN. Deriving from `fc` -- the fork shape -- says
+    // that directly, and leaves every spawn path byte-unchanged by construction
+    // rather than by a flag a future caller could set wrong. (The both-or-
+    // neither check above already pins `fc` to exactly the fork shape.)
+    //
+    // RFFDG stays unsupported: under this tree's polarity it would mean SHARE
+    // one table between two Procs, which needs a refcounted HandleTable object
+    // -- an L-3a-style extraction, not this.
+    if (fc) handle_table_copy_into(child, parent);
+
+    // LINEAGE L-3b: the other step that differs between the two child shapes.
+    // Everything above -- caps, identity, phenotype, allowance, env, territory,
+    // session/pgroup, the legate tag -- is shared deliberately: a forked child
+    // and a kernel-entry child inherit identically, and keeping one body is
+    // what guarantees that rather than two lists that drift.
+    struct Thread *ct = fc
+        ? thread_create_forked(child, fc->frame, fc->child_sp, fc->child_tls)
+        : thread_create_with_arg(child, entry, arg);
     if (!ct) {
         // Roll back proc_alloc + territory_clone. Transition to ZOMBIE so
         // proc_free's lifecycle gate passes; proc_free will territory_unref
@@ -1308,6 +1491,23 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     proc_link_child(parent, child);
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 
+    // Capture the pid BEFORE the child can run, and do not dereference `child`
+    // past this point. Once ready() has published the thread, a PEER THREAD of
+    // a multi-threaded parent sitting in wait_pid_for(-1) may reap this child --
+    // wait_pid_for unlinks under g_proc_table_lock, DROPS it, then proc_frees --
+    // so the pointer can be dangling by the time this function returns.
+    //
+    // The window predates L-3c-2 (it was ready() -> return, a handful of
+    // instructions), but the vfork park below does two things to it: widens it
+    // from instructions to the child's whole lifetime, and ALIGNS it, because
+    // the park's release edge is the child's death, which is the very edge that
+    // makes the child reapable -- the peer's wake and ours are the same wake.
+    //
+    // The park loop itself is safe and stays as it is: it only dereferences the
+    // child under g_proc_table_lock, where being in the list implies not yet
+    // freed, and not-found already counts as released.
+    int child_pid = child->pid;
+
     // Insert into the local CPU's run tree. ready() handles the state
     // transition (RUNNABLE → in-runtree). thread_create already set
     // state = THREAD_RUNNABLE. ready() takes its own per-CPU lock; lock
@@ -1315,16 +1515,53 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // g_proc_table_lock.
     ready(ct);
 
-    return child->pid;
+    // LINEAGE L-3c-2: the VFORK suspend. A child that shares its parent's
+    // address space is, in the shape that matters, running on the parent's own
+    // live stack frame -- musl's posix_spawn hands the child
+    // `char stack[1024+PATH_MAX]`, a local in the frame it is about to return
+    // from. If the parent resumed now, the child would be executing on dead
+    // stack. So the parent does not resume: it parks here until the child has
+    // left this address space, by exec or by death.
+    //
+    // Why this is not a flag. Every RF* bit answers "what does the CHILD get?"
+    // and the word's polarity says set == share; suspending the PARENT answers
+    // a different question entirely, so a bit there would be a category error
+    // and would cost the word the one property that makes it readable. Keying
+    // on RFMEM instead is not an arbitrary coupling: RFMEM is EXACTLY the
+    // condition under which the hazard exists, because it is the only way the
+    // child can reach the parent's frame at all. Linux says the same thing with
+    // two flags because its clone word has no polarity to protect.
+    //
+    // The fail-safe direction settles the default. A caller who wanted
+    // concurrency and got a suspend sees its parent block until the child
+    // finishes -- visible, terminating, and diagnosable. A caller who wanted a
+    // suspend and got concurrency sees memory corruption whose cause is three
+    // layers away. Concurrent RFMEM is anyway already served, and better, by
+    // SYS_THREAD_SPAWN; when someone genuinely wants two Procs in one space
+    // running at once they can ask for it explicitly, with their own reasoning,
+    // exactly as every reserved RF* bit will.
+    //
+    // `flags & RFMEM` rather than plain `fc` is what keeps L-5 correct without
+    // a future edit: stock fork() is RFPROC alone, both Procs run, and it must
+    // not park here.
+    if (fc && (flags & RFMEM))
+        vfork_await_release(parent, child_pid);
+
+    return child_pid;
 }
 
 int rfork(unsigned flags, void (*entry)(void *), void *arg) {
-    return rfork_internal(flags, entry, arg, CAP_NONE);
+    return rfork_internal(flags, entry, arg, CAP_NONE, NULL);
+}
+
+int rfork_forked(unsigned flags, const struct fork_context *fc) {
+    if (!fc) extinction("rfork_forked with NULL fork_context");
+    return rfork_internal(flags, NULL, NULL, CAP_NONE, fc);
 }
 
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
-    return rfork_internal(flags, entry, arg, caps_mask);
+    return rfork_internal(flags, entry, arg, caps_mask, NULL);
 }
 
 // =============================================================================
@@ -2745,6 +2982,149 @@ struct Allowance *proc_allowance_install_locked(struct Proc *p, struct Allowance
     return old;
 }
 
+// =============================================================================
+// LINEAGE L-2 (docs/LINEAGE.md section 5.2, invariant I-44): execve's address-space
+// swap -- the one place in the tree where a LIVE Proc changes address space.
+// =============================================================================
+
+// A permanently-zero FP/SIMD save area. Restoring from it is how exec clears the
+// live V registers + FPSR + FPCR (see proc_exec_replace). Read-only in practice
+// -- nothing ever writes it -- so one shared BSS block serves every exec, and it
+// costs no stack in a syscall frame.
+static _Alignas(16) const u8 g_fp_zero_area[FP_AREA_SIZE];
+
+bool proc_exec_alone(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return false;
+    struct Thread *self = current_thread();
+    if (!self || self->proc != p)     return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    bool alone = (proc_count_live_peers_locked(p, self) == 0);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return alone;
+}
+
+void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
+    if (!p || p->magic != PROC_MAGIC) extinction("proc_exec_replace: bad Proc");
+    if (!nas)                         extinction("proc_exec_replace: NULL address space");
+    struct Thread *self = current_thread();
+    if (!self || self->proc != p)
+        extinction("proc_exec_replace: not the execing thread");
+
+    struct AddrSpace *old;
+    {
+        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+        // The single-thread precondition is re-checked HERE, inside the same
+        // critical section as the swap, rather than trusted from the caller's
+        // earlier probe. A peer cannot actually appear in between -- creating one
+        // needs a running thread of this Proc and we are the only one -- but
+        // proving that from the code, at the moment it matters, is cheaper than
+        // asking a future reader to reconstruct it.
+        if (proc_count_live_peers_locked(p, self) != 0) {
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            extinction("proc_exec_replace: a live peer thread appeared");
+        }
+        old   = p->as;
+        p->as = nas;
+
+        // LINEAGE L-3c-2: this swap IS the vfork release. A parent suspended in
+        // vfork_await_release is watching exactly this field -- the moment it
+        // stops matching its own, we are off its frame -- so the wake belongs
+        // here, in the same critical section, rather than anywhere later where
+        // it could be reordered against the thing it reports.
+        //
+        // Under the lock for proc_become_zombie_locked's reason: the parent
+        // cannot exit while we hold it, so it is alive through the wake and no
+        // wake is lost (I-9). Waking unconditionally rather than testing
+        // whether anyone is suspended is deliberate -- a spurious wake costs a
+        // re-scan, whereas a test would be a second place that has to agree
+        // with the park about who is waiting.
+        if (p->parent)
+            poll_waiter_list_wake(&p->parent->child_waiters);
+
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+    }
+
+    // Every cross-Proc reader of `->as` -- /proc/<pid>/{maps,mem}, /ctl/procs,
+    // the weft reaper -- resolves its target under g_proc_table_lock, so after
+    // the section above none of them can still be holding `old`. That is what
+    // makes the drop below safe rather than a race.
+
+    // Put the NEW translation in the hardware before touching the old one. After
+    // the isb inside this call, no fetch or access on this CPU walks `old`, and
+    // the ASID is a different one, so no lingering TLB entry of the old address
+    // space can be matched either (every user PTE is nG). Those two facts are the
+    // whole of addrspace_unref's precondition here.
+    sched_activate_addrspace(self);
+
+    // Now this Proc's reference to the outgoing address space can go. If it was
+    // the last, addrspace_unref drains the VMA list -- dropping each Burrow's
+    // mapping ref, which is what actually frees the old image's anonymous pages
+    // and releases its Image-cache text -- and destroys the page table.
+    //
+    // "If it was the last" is load-bearing rather than pedantic, and the case is
+    // the ordinary one rather than an exotic corner: a vfork child execs while
+    // its parent is suspended on exactly this address space, which is what
+    // posix_spawn does every time. Until L-3 this call site drained the list
+    // itself, unconditionally, which would have unmapped the parent.
+    addrspace_unref(old);
+
+    // POSIX: a successful exec resets the caught-signal dispositions to default
+    // (an inherited handler would be an address in an image that no longer
+    // exists). The note QUEUE survives -- pending notes are the process's, not
+    // the image's -- and so does the fd-shaped delivery path; only the
+    // registered handler entry points go.
+    //
+    // Freeing the sigtab here is safe for the same reason proc_free's is: its
+    // only reader is notes_deliver_at_el0_return, which runs on a thread of
+    // THIS Proc, and we are the only live one. That is a precondition rather
+    // than a coincidence -- proc_exec_alone established it and the swap above
+    // re-checked it under the lock, so this line inherits the guarantee rather
+    // than assuming it. (V-6b freed it only at reap precisely because that was
+    // the only other point where the same thing was true.)
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    kfree(p->sigtab);            // VIVARIUM V-6b Linux dispositions; lazily re-made
+    p->sigtab = NULL;
+    self->note_mask = 0u;
+
+    // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD
+    // image, for exactly the reason the handler entry points above are. Nothing
+    // else disarms them -- debug_hw lives until proc_free -- and
+    // hwdebug_switch_in re-arms unconditionally from bp_count/wp_count at every
+    // context switch, so a surviving slot fires on whatever now occupies that VA
+    // and delivers a stop in a program the debugger never set a breakpoint in.
+    // The ATTACHMENT survives (Linux keeps it too: begin_new_exec calls
+    // flush_ptrace_hw_breakpoint, which clears the slots, not the tracer); only
+    // the per-image slots go. Cleared under the same single-thread guarantee as
+    // the sigtab -- the debugger can only have armed these while the target was
+    // fully-stopped, and we are the only live thread.
+    if (p->debug_hw) {
+        hwdebug_bp_clear_all(p->debug_hw);
+        hwdebug_wp_clear_all(p->debug_hw);
+    }
+    __atomic_store_n(&self->debug_ss_armed, false, __ATOMIC_RELEASE);
+
+    // TLS is per-image: musl's __pthread_self reads TPIDR_EL0, and a value
+    // pointing into the old image's thread-control block would be read as a live
+    // pointer by the new one. Written under the same IRQ mask as the TTBR0 swap
+    // above, for the same reason -- context.S saves the LIVE tpidr_el0 into ctx
+    // at switch-out, so a preemption between the two writes would resurrect it.
+    {
+        irq_state_t s = spin_lock_irqsave(NULL);
+        self->ctx.tpidr_el0 = 0;
+        __asm__ __volatile__("msr tpidr_el0, xzr" ::: "memory");
+        spin_unlock_irqrestore(NULL, s);
+    }
+
+    // FP/SIMD is per-image too, and here the hardware is what matters: we are
+    // returning to EL0 through the exception frame, not through a context
+    // switch, so zeroing ctx.fp_v alone would leave the LIVE V registers (and,
+    // more consequentially, FPCR's rounding mode and trap enables) carrying the
+    // old image's state into the new one. Restoring from a zeroed area sets both
+    // halves at once; the next switch-out then saves the zeroed hardware back
+    // into ctx, so the two cannot disagree.
+    fp_restore_area(g_fp_zero_area);
+}
+
 void proc_group_terminate(struct Proc *p, const char *msg) {
     if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
     if (p == g_kproc) return;   // #809 P3a: kproc runs at EL1 + never group-exits
@@ -3484,6 +3864,110 @@ void proc_job_cont_proc(struct Proc *m) {
 static int child_wait_ready_cond(void *arg) {
     const struct poll_waiter *pw = (const struct poll_waiter *)arg;
     return pw->ready ? 1 : 0;
+}
+
+// vfork_await_release — LINEAGE L-3c-2. Park the caller until the child it just
+// forked with RFMEM has left the caller's address space. Called from
+// rfork_internal's tail, after the child is runnable and every lock is
+// released.
+//
+// THE RELEASE CONDITION IS NOT A RECORD OF THE RELEASE, IT IS THE RELEASE.
+// "The child is off my frame" means "the child no longer maps my address
+// space", and that is a fact already written down: `child->as`. At an RFMEM
+// fork the two are equal by construction; proc_exec_replace swaps the child's
+// to a freshly-allocated one; death removes the child from ALIVE. Nothing else
+// can change it, because the only other way a Proc acquires a private space is
+// a fork the child cannot perform (RFPROC alone is refused) and an exec the
+// parent cannot perform (it is parked here).
+//
+// A flag would have been the obvious design and is strictly worse: it records
+// the release somewhere other than where the release happens, so a third
+// release path added later would silently strand every vfork parent. This
+// cannot drift from reality because it IS reality.
+//
+// The pointer comparison is sound only because the parent still holds a
+// reference to the shared AddrSpace -- so the outgoing object cannot be freed
+// while we are parked, and its address cannot be recycled underneath the
+// comparison. That is a direct dividend of L-3a having moved the VMA drain into
+// addrspace_unref's last drop; before it, this comparison would have been an
+// ABA waiting to happen.
+//
+// The park is wait_pid_for's, verbatim in discipline: register the stack waiter
+// on `child_waiters` UNDER g_proc_table_lock, atomic with the scan that found
+// the child still here, so a release that happens after our unlock finds the
+// waiter and wakes it (I-9 register-then-observe, specs/poll.tla). Reusing
+// `child_waiters` rather than adding a rendez is what makes the DEATH release
+// free: proc_become_zombie_locked already wakes it. Only the exec release
+// needed a new wake, and it is one line, under the same lock, at the swap.
+//
+// #811: a caller killed while parked returns via SLEEP_INTR and unwinds to its
+// EL0-return die-check. It does NOT loop -- re-sleeping would re-INTR forever --
+// and it leaves nothing behind, because it registered no state anywhere but its
+// own stack.
+// vfork_child_released — LINEAGE L-3c-2's whole decision, extracted so a kernel
+// test can reach it. `child` NULL means "not in the parent's children list".
+//
+// Three ways a vfork child stops being able to touch its parent's frame, and
+// this is all of them: it exec'd (proc_exec_replace gave it a different
+// AddrSpace), it died (no longer ALIVE), or it is gone from the list entirely.
+//
+// That last one counts as RELEASED, deliberately. It would mean some path took
+// the child out of our children list without passing either release site, and
+// the only two dispositions available here are "resume" and "hang forever". A
+// parent that resumes a little early corrupts a frame the child has already
+// stopped using; a parent that hangs looks unkillable and never recovers. Fail
+// towards the one that terminates.
+//
+// Caller holds g_proc_table_lock: `state` and `as` are both written under it,
+// and the list walk that produced `child` needs it anyway.
+bool vfork_child_released(const struct Proc *parent, const struct Proc *child) {
+    if (!parent || parent->magic != PROC_MAGIC)
+        extinction("vfork_child_released: bad parent");
+    if (!child)
+        return true;
+    if (child->magic != PROC_MAGIC)
+        extinction("vfork_child_released: bad child");
+    return (child->state != PROC_STATE_ALIVE) || (child->as != parent->as);
+}
+
+static void vfork_await_release(struct Proc *p, int child_pid) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("vfork_await_release: bad Proc");
+
+    struct Rendez self_rendez;
+    rendez_init(&self_rendez);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &self_rendez);
+
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+
+        struct Proc *child = NULL;
+        for (struct Proc *c = p->children; c; c = c->sibling) {
+            if (c->pid == child_pid) { child = c; break; }
+        }
+        if (vfork_child_released(p, child)) {
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            break;
+        }
+
+        // Re-init per park: poll_waiter_init clears `ready`, so a wake left
+        // over from the previous iteration cannot make this park spin.
+        poll_waiter_init(&pw, &self_rendez);
+        poll_waiter_list_register(&p->child_waiters, &pw);
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+        int sl = sleep(&self_rendez, child_wait_ready_cond, &pw);
+        poll_waiter_list_unregister(&pw);
+        if (sl == SLEEP_INTR)
+            break;
+    }
+
+    // Defensive, exactly as wait_pid_for's out: path is -- every break above
+    // leaves pw->list NULL already, but no stack waiter may outlive this frame
+    // if a future edit adds an exit from inside the registered window
+    // (poll.tla NoStaleHook).
+    poll_waiter_list_unregister(&pw);
 }
 
 int wait_pid_for(int want_pid, int flags, int *status_out) {

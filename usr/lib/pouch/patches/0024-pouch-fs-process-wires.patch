@@ -135,8 +135,8 @@ diff --color -ruN musl-base/src/dirent/readdir.c b/src/dirent/readdir.c
  	de = (void *)(dir->buf + dir->buf_pos);
 diff --color -ruN musl-base/src/fcntl/_pouch_fs.c b/src/fcntl/_pouch_fs.c
 --- a/src/fcntl/_pouch_fs.c	1970-01-01 01:00:00
-+++ b/src/fcntl/_pouch_fs.c	2026-07-23 16:50:40
-@@ -0,0 +1,50 @@
++++ b/src/fcntl/_pouch_fs.c	2026-07-30 09:00:00
+@@ -0,0 +1,98 @@
 +/* pouch boundary-line shared FS substrate (CL-1a). See _pouch_fs.h. */
 +#include <fcntl.h>
 +#include <errno.h>
@@ -144,19 +144,41 @@ diff --color -ruN musl-base/src/fcntl/_pouch_fs.c b/src/fcntl/_pouch_fs.c
 +#include "syscall.h"
 +#include "_pouch_fs.h"
 +
-+int __pouch_open_parent(int atfd, const char *path, const char **leaf)
++int __pouch_open_parent(int atfd, const char *path, const char **leaf,
++                        size_t *leaf_len, int *dir_required)
 +{
-+	if (!path || !leaf) return -EFAULT;
++	if (!path || !leaf || !leaf_len || !dir_required) return -EFAULT;
 +	if (atfd != AT_FDCWD) return -ENOTSUP;   /* AT_FDCWD only at v1.0 (P-3) */
 +
 +	size_t len = strnlen(path, POUCH_PATH_MAX + 1);
 +	if (len == 0) return -ENOENT;
 +	if (len > POUCH_PATH_MAX) return -ENAMETOOLONG;
 +
-+	/* Find the last '/'. Its right side is the leaf; its left side (or "."
-+	 * when there is none) is the parent directory to open. */
++	/* #86: strip the trailing '/' run and REPORT it instead of rejecting.
++	 * POSIX 4.13: a trailing slash asserts the leaf names a directory.
++	 * The pre-#86 blanket -EINVAL was wrong in BOTH directions --
++	 * unlink("f/") wants ENOTDIR and rmdir("d/") must SUCCEED -- so each
++	 * caller applies its own POSIX row via *dir_required; the shared
++	 * existence/dir-ness discriminator is __pouch_leaf_is_dir_errno
++	 * below (the kernel's #82 gate), never re-derived here. */
++	size_t elen = len;
++	while (elen > 0 && path[elen - 1] == '/') elen--;
++	*dir_required = (elen != len);
++	if (elen == 0) {
++		/* All slashes: the path names the root, and no leaf-name op
++		 * applies to it. Linux answers EISDIR for unlink/open-O_CREAT
++		 * (rmdir("/") is EBUSY and mkdir("/") EEXIST there; collapsed
++		 * to EISDIR at v1.0 -- the pre-#86 answer was EINVAL for all
++		 * four, so this is strictly closer for two and no worse). */
++		return -EISDIR;
++	}
++
++	/* Find the last '/' before the stripped end. Its right side is the
++	 * leaf; its left side (or "." when there is none) is the parent
++	 * directory to open. The leaf can never be empty here: elen > 0 and
++	 * path[elen-1] != '/', so any slash found sits at index <= elen-2. */
 +	const char *slash = 0;
-+	for (size_t i = 0; i < len; i++)
++	for (size_t i = 0; i < elen; i++)
 +		if (path[i] == '/') slash = path + i;
 +
 +	char dir[POUCH_PATH_MAX + 1];
@@ -166,9 +188,10 @@ diff --color -ruN musl-base/src/fcntl/_pouch_fs.c b/src/fcntl/_pouch_fs.c
 +		dir[0] = '.';
 +		dlen = 1;
 +		*leaf = path;
++		*leaf_len = elen;
 +	} else {
 +		*leaf = slash + 1;
-+		if (**leaf == '\0') return -EINVAL;   /* trailing slash: no leaf */
++		*leaf_len = (size_t)((path + elen) - (slash + 1));
 +		if (slash == path) {
 +			/* Leaf directly under root ("/foo"). */
 +			dir[0] = '/';
@@ -187,9 +210,34 @@ diff --color -ruN musl-base/src/fcntl/_pouch_fs.c b/src/fcntl/_pouch_fs.c
 +	if (fd < 0) return (int)fd;
 +	return (int)fd;
 +}
++
++int __pouch_leaf_is_dir_errno(const char *path)
++{
++	/* #86: 0 iff `path` (slash-terminated; one is appended when absent)
++	 * names an existing directory, else the kernel's own -errno. SYS_STAT
++	 * of a slash-terminated path runs the kernel's audited trailing-slash
++	 * gate (#82): 0 only for a directory, ENOTDIR for a non-directory,
++	 * ENOENT for a miss, EACCES for a denied search -- exactly the POSIX
++	 * discrimination, enforced where it is audited rather than re-derived
++	 * in userspace. Callers: unlinkat (the unlink("x/") row) + renameat
++	 * (the Linux "unless the source is a directory, trailing slashes give
++	 * -ENOTDIR" rule from fs/namei.c do_renameat2). */
++	size_t len = strnlen(path, POUCH_PATH_MAX + 1);
++	if (len == 0) return -ENOENT;
++	if (len > POUCH_PATH_MAX) return -ENAMETOOLONG;
++
++	char buf[POUCH_PATH_MAX + 2];
++	memcpy(buf, path, len);
++	if (buf[len - 1] != '/') buf[len++] = '/';
++
++	unsigned char t[88];   /* struct t_stat (88 B, patch 0019); scratch */
++	for (unsigned i = 0; i < sizeof t; i++) t[i] = 0;
++	long rc = __syscall(SYS_thyla_stat, buf, len, t);
++	return rc < 0 ? (int)rc : 0;
++}
 diff --color -ruN musl-base/src/fcntl/openat.c b/src/fcntl/openat.c
---- a/src/fcntl/openat.c	2026-07-23 16:38:09
-+++ b/src/fcntl/openat.c	2026-07-23 17:01:16
+--- a/src/fcntl/openat.c	2026-07-30 09:00:00
++++ b/src/fcntl/openat.c	2026-07-30 09:00:00
 @@ -1,37 +1,32 @@
 -/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16b-beta cont;
 - * resolution moved onto the stalk resolver at PTY-3, patch 0021).
@@ -288,7 +336,7 @@ diff --color -ruN musl-base/src/fcntl/openat.c b/src/fcntl/openat.c
  	unsigned long omode;
  	switch (flags & O_ACCMODE) {
  	case O_RDONLY: omode = POUCH_OREAD;  break;
-@@ -79,14 +53,34 @@
+@@ -79,14 +53,47 @@
  	default:       errno = EINVAL; return -1;
  	}
  
@@ -302,10 +350,23 @@ diff --color -ruN musl-base/src/fcntl/openat.c b/src/fcntl/openat.c
 +
 +	if (flags & O_CREAT) {
 +		const char *leaf;
-+		int p = __pouch_open_parent(AT_FDCWD, filename, &leaf);
++		size_t llen;
++		int dirreq;
++		int p = __pouch_open_parent(AT_FDCWD, filename, &leaf, &llen, &dirreq);
 +		if (p < 0) return __syscall_ret(p);
 +
-+		long r = __syscall(SYS_thyla_walk_create, p, leaf, strlen(leaf),
++		if (dirreq) {
++			/* #86: Linux answers EISDIR for O_CREAT on ANY
++			 * slash-terminated name, existing or not -- a regular
++			 * file cannot be created at a directory-asserting name,
++			 * and an existing directory cannot be opened O_CREAT.
++			 * (The non-create arm below is untouched: the kernel's
++			 * #82 gate already handles a plain open of "x/".) */
++			__syscall(SYS_close, p);
++			return __syscall_ret(-EISDIR);
++		}
++
++		long r = __syscall(SYS_thyla_walk_create, p, leaf, llen,
 +		                   omode, (unsigned)mode & 0777u);
 +		if (r >= 0) { __syscall(SYS_close, p); return __syscall_ret(r); }
 +
@@ -313,7 +374,7 @@ diff --color -ruN musl-base/src/fcntl/openat.c b/src/fcntl/openat.c
 +		 * Any other create error propagates. */
 +		if (r == -EEXIST && !(flags & O_EXCL)) {
 +			unsigned long om = omode | ((flags & O_TRUNC) ? POUCH_OTRUNC : 0u);
-+			long o = __syscall(SYS_thyla_open, (long)p, leaf, strlen(leaf), om);
++			long o = __syscall(SYS_thyla_open, (long)p, leaf, llen, om);
 +			__syscall(SYS_close, p);
 +			return __syscall_ret(o);
 +		}
@@ -333,10 +394,12 @@ diff --color -ruN musl-base/src/fcntl/openat.c b/src/fcntl/openat.c
  }
 diff --color -ruN musl-base/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
 --- a/src/internal/_pouch_fs.h	1970-01-01 01:00:00
-+++ b/src/internal/_pouch_fs.h	2026-07-23 16:50:26
-@@ -0,0 +1,54 @@
++++ b/src/internal/_pouch_fs.h	2026-07-30 09:00:00
+@@ -0,0 +1,75 @@
 +#ifndef _POUCH_FS_H
 +#define _POUCH_FS_H
++
++#include <stddef.h>   /* size_t for the prototypes; safe in every includer */
 +
 +/* pouch boundary-line shared FS substrate (CL-1a; docs/LLVM-DESIGN.md §12).
 + *
@@ -382,11 +445,30 @@ diff --color -ruN musl-base/src/internal/_pouch_fs.h b/src/internal/_pouch_fs.h
 +
 +#define POUCH_PATH_MAX    1024u        /* SYS_OPEN_PATH_MAX */
 +
-+/* Open the PARENT directory of `path` (O_PATH, born R|W) and set *leaf to
-+ * the final component within `path`. Returns the parent fd (>= 0) or a
-+ * negative -errno. AT_FDCWD only (a real dirfd -> -ENOTSUP); a relative
-+ * path resolves against the Territory cwd via SYS_open's FROM_ROOT arm. */
-+hidden int __pouch_open_parent(int atfd, const char *path, const char **leaf);
++/* Open the PARENT directory of `path` (O_PATH, born R|W) and set *leaf /
++ * *leaf_len to the final component within `path`. Returns the parent fd
++ * (>= 0) or a negative -errno. AT_FDCWD only (a real dirfd -> -ENOTSUP);
++ * a relative path resolves against the Territory cwd via SYS_open's
++ * FROM_ROOT arm.
++ *
++ * #86: a trailing '/' run is STRIPPED (the leaf is always slash-free --
++ * pass *leaf_len to the kernel, NOT strlen(*leaf), which would run into
++ * the stripped separators) and *dir_required reports it. POSIX 4.13 makes
++ * a trailing slash assert "the leaf names a directory"; each caller
++ * applies its own row (unlink: EISDIR/ENOTDIR/ENOENT via the probe below;
++ * rmdir: nothing -- REMOVEDIR already enforces; mkdir: nothing -- it
++ * CREATES the directory; open(O_CREAT): EISDIR; rename: the do_renameat2
++ * source-must-be-a-directory rule). A path that is ALL slashes (the root)
++ * returns -EISDIR. */
++hidden int __pouch_open_parent(int atfd, const char *path, const char **leaf,
++                               size_t *leaf_len, int *dir_required);
++
++/* #86: 0 iff `path` (a '/' is appended when it lacks one) names an
++ * existing DIRECTORY; else the kernel's own -errno (ENOTDIR for a file,
++ * ENOENT for a miss, EACCES for a denied search). Rides SYS_STAT of the
++ * slash-terminated path -- the kernel's audited #82 trailing-slash gate
++ * is the discriminator. */
++hidden int __pouch_leaf_is_dir_errno(const char *path);
 +
 +#endif
 diff --color -ruN musl-base/src/stat/chmod.c b/src/stat/chmod.c
@@ -532,9 +614,9 @@ diff --color -ruN musl-base/src/stat/mkdir.c b/src/stat/mkdir.c
 +	return mkdirat(AT_FDCWD, path, mode);
  }
 diff --color -ruN musl-base/src/stat/mkdirat.c b/src/stat/mkdirat.c
---- a/src/stat/mkdirat.c	2026-07-23 16:38:09
-+++ b/src/stat/mkdirat.c	2026-07-23 16:52:31
-@@ -1,7 +1,28 @@
+--- a/src/stat/mkdirat.c	2026-07-30 09:00:00
++++ b/src/stat/mkdirat.c	2026-07-30 09:00:00
+@@ -1,7 +1,35 @@
 +/* pouch boundary-line (CL-1a): mkdirat -> Thylacine SYS_WALK_CREATE (54)
 + * with the DMDIR bit -- (parent_fd, leaf, len, omode, perm). make creates
 + * output directories, so mkdir is build-load-bearing. The parent is opened
@@ -552,13 +634,20 @@ diff --color -ruN musl-base/src/stat/mkdirat.c b/src/stat/mkdirat.c
  {
 -	return syscall(SYS_mkdirat, fd, path, mode);
 +	const char *leaf;
-+	int p = __pouch_open_parent(fd, path, &leaf);
++	size_t llen;
++	int dirreq;
++	int p = __pouch_open_parent(fd, path, &leaf, &llen, &dirreq);
 +	if (p < 0) return __syscall_ret(p);
++	/* #86: mkdir("d/") CREATES d -- stripping the trailing slash IS the
++	 * POSIX row (the to-be-created leaf is a directory by definition), so
++	 * dirreq needs no action here. mkdir("existing-file/") still answers
++	 * EEXIST from the kernel create, matching Linux. */
++	(void)dirreq;
 +
 +	/* perm: the 9 rwx bits (DMDIR selects directory creation; a new dir is
 +	 * opened OREAD kernel-side). omode is ignored for a DMDIR create. */
 +	unsigned perm = ((unsigned)mode & 0777u) | POUCH_DMDIR;
-+	long r = __syscall(SYS_thyla_walk_create, p, leaf, strlen(leaf),
++	long r = __syscall(SYS_thyla_walk_create, p, leaf, llen,
 +	                   POUCH_OREAD, perm);
 +	if (r >= 0) __syscall(SYS_close, (int)r);   /* mkdir keeps no fd */
 +	__syscall(SYS_close, p);
@@ -781,9 +870,9 @@ diff --color -ruN musl-base/src/unistd/getpid.c b/src/unistd/getpid.c
 +	return __syscall(SYS_thyla_getpid);
  }
 diff --color -ruN musl-base/src/unistd/renameat.c b/src/unistd/renameat.c
---- a/src/unistd/renameat.c	2026-07-23 16:38:09
-+++ b/src/unistd/renameat.c	2026-07-23 16:52:02
-@@ -1,11 +1,27 @@
+--- a/src/unistd/renameat.c	2026-07-30 09:00:00
++++ b/src/unistd/renameat.c	2026-07-30 09:00:00
+@@ -1,11 +1,45 @@
 +/* pouch boundary-line (CL-1a): renameat -> Thylacine SYS_RENAME (57), a
 + * (olddir_fd, old_leaf, newdir_fd, new_leaf) primitive. clang writes every
 + * .o via temp + atomic rename, so rename is PER-COMPILE load-bearing
@@ -805,13 +894,31 @@ diff --color -ruN musl-base/src/unistd/renameat.c b/src/unistd/renameat.c
 -	return syscall(SYS_renameat2, oldfd, old, newfd, new, 0);
 -#endif
 +	const char *oleaf, *nleaf;
-+	int op = __pouch_open_parent(oldfd, old, &oleaf);
++	size_t olen, nlen;
++	int odir, ndir;
++	int op = __pouch_open_parent(oldfd, old, &oleaf, &olen, &odir);
 +	if (op < 0) return __syscall_ret(op);
-+	int np = __pouch_open_parent(newfd, new, &nleaf);
++	int np = __pouch_open_parent(newfd, new, &nleaf, &nlen, &ndir);
 +	if (np < 0) { __syscall(SYS_close, op); return __syscall_ret(np); }
 +
-+	long r = __syscall(SYS_thyla_rename, op, oleaf, strlen(oleaf),
-+	                   np, nleaf, strlen(nleaf));
++	if (odir || ndir) {
++		/* #86: the Linux rule, verbatim from fs/namei.c do_renameat2 --
++		 * "unless the source is a directory, trailing slashes give
++		 * -ENOTDIR" -- on EITHER name, with a missing source ENOENT
++		 * first. One probe answers all of it: the kernel #82 gate on
++		 * the slash-terminated SOURCE (0 iff old names an existing
++		 * directory). The new side's own existence is NOT pre-judged;
++		 * the kernel rename keeps its normal semantics for it. */
++		int e = __pouch_leaf_is_dir_errno(old);
++		if (e != 0) {
++			__syscall(SYS_close, np);
++			__syscall(SYS_close, op);
++			return __syscall_ret(e);
++		}
++	}
++
++	long r = __syscall(SYS_thyla_rename, op, oleaf, olen,
++	                   np, nleaf, nlen);
 +	__syscall(SYS_close, np);
 +	__syscall(SYS_close, op);
 +	return __syscall_ret(r);
@@ -869,9 +976,9 @@ diff --color -ruN musl-base/src/unistd/unlink.c b/src/unistd/unlink.c
 +	return unlinkat(AT_FDCWD, path, 0);
  }
 diff --color -ruN musl-base/src/unistd/unlinkat.c b/src/unistd/unlinkat.c
---- a/src/unistd/unlinkat.c	2026-07-23 16:38:09
-+++ b/src/unistd/unlinkat.c	2026-07-23 16:52:02
-@@ -1,7 +1,22 @@
+--- a/src/unistd/unlinkat.c	2026-07-30 09:00:00
++++ b/src/unistd/unlinkat.c	2026-07-30 09:00:00
+@@ -1,7 +1,36 @@
 +/* pouch boundary-line (CL-1a): unlinkat -> Thylacine SYS_UNLINK (58), a
 + * (parent_fd, leaf, len, flags) primitive. AT_REMOVEDIR maps to the kernel
 + * REMOVEDIR flag. AT_FDCWD only. */
@@ -887,11 +994,25 @@ diff --color -ruN musl-base/src/unistd/unlinkat.c b/src/unistd/unlinkat.c
 -	return syscall(SYS_unlinkat, fd, path, flag);
 +	if (flag & ~AT_REMOVEDIR) return __syscall_ret(-EINVAL);
 +	const char *leaf;
-+	int p = __pouch_open_parent(fd, path, &leaf);
++	size_t llen;
++	int dirreq;
++	int p = __pouch_open_parent(fd, path, &leaf, &llen, &dirreq);
 +	if (p < 0) return __syscall_ret(p);
 +
++	if (dirreq && !(flag & AT_REMOVEDIR)) {
++		/* #86 unlink("x/"): Linux do_unlinkat's `slashes:` label -- x
++		 * missing -> ENOENT, x a directory -> EISDIR, else -> ENOTDIR.
++		 * Must NEVER reach SYS_UNLINK: stripped, a plain unlink would
++		 * DELETE the very file the trailing slash says must not be
++		 * touched. rmdir("x/") (AT_REMOVEDIR) needs nothing extra --
++		 * REMOVEDIR itself enforces directory-ness (ENOTDIR on a file). */
++		__syscall(SYS_close, p);
++		int e = __pouch_leaf_is_dir_errno(path);
++		return __syscall_ret(e == 0 ? -EISDIR : e);
++	}
++
 +	unsigned kflag = (flag & AT_REMOVEDIR) ? POUCH_REMOVEDIR : 0u;
-+	long r = __syscall(SYS_thyla_unlink, p, leaf, strlen(leaf), kflag);
++	long r = __syscall(SYS_thyla_unlink, p, leaf, llen, kflag);
 +	__syscall(SYS_close, p);
 +	return __syscall_ret(r);
  }

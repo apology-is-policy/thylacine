@@ -125,59 +125,51 @@ _Static_assert(EXEC_USER_VDSO_BASE + EXEC_USER_VDSO_SIZE <= EXEC_USER_BURROW_BAS
 _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
                "vDSO page VA must be page-aligned");
 
-// Initial process stack — the System V process-startup frame exec_setup
-// (and exec_setup_with_argv) builds at the very top of the user stack
-// (POUCH-DESIGN.md §12.1). A C runtime (pouch — the Thylacine POSIX libc)
-// reads argc/argv/envp and the auxiliary vector from here.
+// Initial process stack — the System V process-startup frame every exec
+// entry builds at the very top of the user stack (POUCH-DESIGN.md §12.1).
+// A C runtime (pouch, musl, the Go runtime) reads argc / argv / envp and
+// the auxiliary vector from here.
 //
-// Two shapes:
-//
-// Shape A — "no argv" (legacy exec_setup; backward-compat for v1.0
-// callers that have not yet adopted the argv-bearing entry):
-//   sp + 0      argc                  u64 — 0
-//   sp + 8      argv[] terminator     one NULL pointer
-//   sp + 16     envp[] terminator     one NULL pointer
-//   sp + 24     auxv[]                EXEC_INIT_AUXV_COUNT × Elf64_auxv_t
-//                                      (AT_PHDR, AT_PHENT, AT_PHNUM,
-//                                       AT_PAGESZ, AT_HWCAP, AT_RANDOM,
-//                                       [AT_VDSO_CLOCK], AT_NULL)
-//   sp + ...    (8 bytes padding)
-//   sp + ...    AT_RANDOM entropy     16 kernel-CSPRNG bytes
-//   sp + 176    EXEC_USER_STACK_TOP
-// Frame size is the fixed EXEC_INIT_STACK_SIZE = 176 bytes (room for the max 8
-// auxv entries reserved; AT_VDSO_CLOCK is present only when the vDSO page
-// mapped, else its slot stays unused before the AT_NULL terminator).
-//
-// Shape B — "argv-bearing" (exec_setup_with_argv, P6-pouch-stratumd-boot
-// sub-chunk 16b-alpha):
-//   sp + 0                        argc                  u64 = argc
-//   sp + 8                        argv[0]               u64 = user-VA pointing
+//   sp + 0                        argc                  u64
+//   sp + 8 + 8*i                  argv[i]               i = 0..argc-1; user VAs
 //                                                        into the strings region
-//   sp + 8 + 8*i                  argv[i]               (i = 1..argc-1)
 //   sp + 8 + 8*argc               argv[argc]            u64 = 0 (terminator)
-//   sp + 16 + 8*argc              envp[0]               u64 = 0 (no envp at v1.0)
-//   sp + 24 + 8*argc              auxv[]                up to 8 × 16 bytes (same
-//                                                        entries as Shape A;
-//                                                        AT_RANDOM points to the
-//                                                        AT_RANDOM block below)
-//   sp + 152 + 8*argc             (pad to next 16-align)
+//   sp + 16 + 8*argc + 8*j        envp[j]               j = 0..envc-1
+//   sp + 16 + 8*argc + 8*envc     envp[envc]            u64 = 0 (terminator)
+//   sp + 24 + 8*argc + 8*envc     auxv[]                EXEC_INIT_AUXV_COUNT
+//                                                        × Elf64_auxv_t (AT_PHDR,
+//                                                        AT_PHENT, AT_PHNUM,
+//                                                        AT_PAGESZ, AT_HWCAP,
+//                                                        AT_RANDOM,
+//                                                        [AT_VDSO_CLOCK], AT_NULL)
+//   sp + ...                      (pad to the next 16-align)
 //   sp + R                        AT_RANDOM entropy     16 kernel-CSPRNG bytes
-//                                                        (R is the 16-aligned
+//                                                        (R is that 16-aligned
 //                                                        offset; the AT_RANDOM
-//                                                        auxv entry's value is
-//                                                        sp + R)
-//   sp + R + 16                   argv strings region   argv_data_len bytes,
+//                                                        auxv value is sp + R)
+//   sp + R + 16                   argv strings          argv_data_len bytes,
 //                                                        concatenated NUL-
-//                                                        terminated; argv[i]
-//                                                        pointers above point
-//                                                        into here
+//                                                        terminated
+//   sp + R + 16 + argv_data_len   envp strings          env_data_len bytes, same
+//                                                        packing ("NAME=VALUE\0"
+//                                                        records)
 //   sp + frame_size               EXEC_USER_STACK_TOP   (frame_size rounded up
 //                                                        to 16-byte alignment)
-// Frame size is variable, bounded above by EXEC_INIT_STACK_MAX_SIZE.
 //
-// In both shapes, initial sp = EXEC_USER_STACK_TOP - frame_size; sp is
-// 16-byte aligned because the frame size is rounded up to a 16-byte
-// multiple and EXEC_USER_STACK_TOP is aligned.
+// Initial sp = EXEC_USER_STACK_TOP - frame_size, 16-byte aligned because the
+// frame size is rounded up to a 16-byte multiple and the TOP is aligned.
+// Frame size is variable, bounded above by EXEC_INIT_STACK_MAX_SIZE, and
+// exactly EXEC_INIT_STACK_SIZE when argc and envc are both zero.
+//
+// ONE SHAPE, WHICH IS A #140 CORRECTION AND NOT A TIDY-UP. Until L-6c this
+// was two: a fixed 176-byte "no argv" Shape A and a variable "argv-bearing"
+// Shape B. Each wrote a lone NULL for envp — `w[2] = 0` in one, `w[2+argc] =
+// 0` in the other — so the bug this layout exists to fix had TWO homes and
+// fixing one would have left the other. The unified builder produces a
+// byte-identical frame for the old Shape A case (the assertion below pins
+// that arithmetic), so nothing that used to take Shape A can observe the
+// change; what it buys is that envp now has exactly one place to be wrong.
+//
 // 8 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
 // AT_VDSO_CLOCK, AT_NULL. The frame ALWAYS reserves room for all 8 (so the
 // AT_RANDOM block + strings region offsets are stable); when the vDSO page
@@ -185,26 +177,84 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // the AT_VDSO_CLOCK slot stays unused (zeroed) padding before the random
 // block. AT_HWCAP is unconditional (the hwcap word exists on every boot).
 #define EXEC_INIT_AUXV_COUNT   8
+
+// Environment bounds (#140). The env block is packed exactly like argv: a
+// run of NUL-terminated strings, here "NAME=VALUE" records, with envc equal
+// to the NUL count.
+//
+// THESE ARE A DELIBERATE CHOICE, NOT THE PRODUCT OF THE TWO /env MAXIMA.
+// ENV_MAX_ENTRIES (64) × (ENV_NAME_MAX + ENV_VALUE_MAX) is 260 KiB, which
+// beside the 64 KiB argv bound would put ~330 KiB of FRAME under a 1 MiB
+// stack. That still passes the _Static_assert below — the assert only proves
+// the frame FITS — while leaving ~690 KiB of actual program stack against a
+// call graph G-7b measured overflowing 256 KiB (TyrQuake's model loader).
+// The failure it would buy is a squeezed stack, which the build cannot see.
+//
+// So the env block is bounded independently, on Linux's model (argv+envp
+// bounded as a fraction of the stack: 1/4 of RLIMIT_STACK, floor 32 pages).
+// A quarter of our 1 MiB is 256 KiB; 64 KiB argv + 32 KiB env is 96 KiB,
+// comfortably inside it, and leaves ~920 KiB of program stack. Against
+// ENV_MAX_ENTRIES that is 512 bytes per variable on average — far above a
+// realistic NAME=VALUE, so no plausible environment reaches it, and one that
+// does is refused with T_E_2BIG rather than silently truncated.
+//
+// EXEC_ENV_MAX bounds the POINTER VECTOR independently, because the data
+// bound alone does not: 32 KiB of minimal "A=\0" records would be ~10900
+// entries and 87 KiB of envp[] pointers. 512 mirrors SYS_SPAWN_ARGV_MAX. The
+// /env projection can never approach it (ENV_MAX_ENTRIES is 64); it is the
+// vivarium's user-supplied envp walk that needs the ceiling.
+#define EXEC_ENV_MAX        512u
+#define EXEC_ENV_DATA_MAX   32768u
+
+// The frame size when argc == 0 AND envc == 0 — one word of argc, one NULL
+// each for argv[] and envp[], the auxv block, and the 16-byte AT_RANDOM
+// block, rounded to 16. This is the frame a Proc with no arguments and an
+// empty environment gets, and the value the builder's general arithmetic
+// must reduce to (see the assertion below).
 #define EXEC_INIT_STACK_SIZE \
     (((8 + 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16) + 15) & ~15ull)
-// Offset (from the frame base / from sp) of the 16-byte AT_RANDOM block
-// under Shape A (no argv). Shape B computes the offset dynamically.
+// Offset (from the frame base / from sp) of the 16-byte AT_RANDOM block in
+// that same empty-frame case. The builder computes the offset dynamically;
+// this is what it arrives at when both counts are zero.
 #define EXEC_INIT_RANDOM_OFFSET   (EXEC_INIT_STACK_SIZE - 16)
-// Maximum frame size under Shape B (argv-bearing). Bounds the kernel
-// validation + the EXEC_USER_STACK_SIZE budget: with argc = 512 (=
-// SYS_SPAWN_ARGV_MAX) and argv_data_len = 64 KiB (= SYS_SPAWN_ARGV_DATA_MAX,
-// both raised for the on-device Go toolchain's compile/link command lines),
-// the structured top is (8 + 8*513 + 8 + AUXV*16 + 16-align-pad + 16) bytes,
-// followed by 64 KiB strings bytes, rounded up to 16. ~68 KiB — still well
-// under the 1 MiB user-stack budget; the _Static_assert below proves it.
+
+// The general structured-region size (everything above the AT_RANDOM block):
+// argc, argv[] + its terminator, envp[] + its terminator, and the auxv block.
+#define EXEC_INIT_STRUCTURED(argc, envc) \
+    (8ull + ((u64)(argc) + 1ull) * 8ull + ((u64)(envc) + 1ull) * 8ull \
+     + (u64)EXEC_INIT_AUXV_COUNT * 16ull)
+// The whole frame: structured region rounded to 16, the AT_RANDOM block,
+// then both strings regions, rounded to 16.
+#define EXEC_INIT_FRAME_SIZE(argc, envc, argv_len, env_len) \
+    (((((EXEC_INIT_STRUCTURED(argc, envc) + 15ull) & ~15ull) + 16ull \
+       + (u64)(argv_len) + (u64)(env_len)) + 15ull) & ~15ull)
+
+// Maximum frame size. Bounds the kernel's transient staging buffer + the
+// EXEC_USER_STACK_SIZE budget at the corner of every bound at once: argc =
+// SYS_SPAWN_ARGV_MAX (512) with argv_data_len = SYS_SPAWN_ARGV_DATA_MAX
+// (64 KiB, both raised for the on-device Go toolchain's command lines), and
+// envc = EXEC_ENV_MAX with env_data_len = EXEC_ENV_DATA_MAX. ~104 KiB (was
+// ~68 KiB before the environment) — still far under the 1 MiB user-stack
+// budget; the _Static_assert below proves it.
 #define EXEC_INIT_STACK_MAX_SIZE \
-    (((8 + (512u + 1u) * 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16 + 16 + 65536) + 15) & ~15ull)
+    EXEC_INIT_FRAME_SIZE(512u, EXEC_ENV_MAX, 65536u, EXEC_ENV_DATA_MAX)
 _Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,
                "initial sp must be 16-byte aligned (AArch64 SysV ABI)");
 _Static_assert(EXEC_INIT_STACK_MAX_SIZE % 16 == 0,
-               "Shape-B frame max-size must be 16-byte aligned");
+               "max frame size must be 16-byte aligned");
 _Static_assert(EXEC_INIT_STACK_MAX_SIZE < EXEC_USER_STACK_SIZE,
-               "Shape-B max frame must fit under the user stack budget");
+               "max frame must fit under the user stack budget");
+// The unification claim, pinned rather than asserted in prose: the general
+// arithmetic at argc == 0, envc == 0 must reproduce the empty-frame constants
+// EXACTLY, or a caller that passes no argv and has no environment would
+// silently get a different frame than the one documented above (and than the
+// one exec.h has promised since 16b-alpha). A future edit to the auxv count
+// or the padding rule cannot drift the two apart without failing here.
+_Static_assert(EXEC_INIT_FRAME_SIZE(0, 0, 0, 0) == EXEC_INIT_STACK_SIZE,
+               "the general frame arithmetic must reduce to the empty frame");
+_Static_assert(((EXEC_INIT_STRUCTURED(0, 0) + 15ull) & ~15ull)
+                   == EXEC_INIT_RANDOM_OFFSET,
+               "the general AT_RANDOM offset must reduce to the empty one");
 
 // exec_setup — parse the ELF blob, populate `p`'s VMA tree, set up the
 // user stack mapping.
@@ -321,6 +371,57 @@ int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
 int exec_setup_from_spoor(struct Proc *p, struct Spoor *exe, size_t exe_size,
                           const char *argv_data, u32 argv_data_len, u32 argc,
                           u64 *entry_out, u64 *sp_out);
+
+// exec_load_into -- the same file-backed load, into an EXPLICIT address space
+// (LINEAGE L-2). exec_setup_from_spoor is the wrapper: it passes p->as, p's I-32
+// exemption, and additionally applies the two Proc-side stamps (process name,
+// exe_path).
+//
+// Those stamps are the reason this split exists rather than a plain parameter
+// add. execve must be able to fail with the caller COMPLETELY untouched, and a
+// name stamped before a load that then fails would leave a live Proc advertising
+// a binary it is not running. The spawn path cannot observe the distinction (its
+// Proc is a fresh child, discarded on failure), so the stamps stay there.
+//
+// `as` must be a clean address space (no VMAs) that no other thread can reach --
+// either a freshly rforked child's, or one addrspace_alloc'd for this load.
+// `exempt` is the I-32 policy verdict for the Proc this is being built for.
+//
+// On failure the target is left PARTIALLY POPULATED and the caller owns the
+// teardown: vma_drain_in + addrspace_unref for a detached target, or the
+// existing dispose-the-Proc rollback for a spawn.
+//
+// The environment arrives as DATA (#140), packed exactly like argv, and NOT as
+// a Proc to read it from -- which is forced by the same thing that forced this
+// entry to exist. Reading p->env here would read the OLD environment, because
+// at this moment the Proc still has it: L-2a builds the new image detached and
+// commits only after everything failable has succeeded. `exec_stage_env`
+// projects a Proc's own /env into this shape for the callers that want it.
+struct AddrSpace;
+int exec_load_into(struct AddrSpace *as, bool exempt,
+                   struct Spoor *exe, size_t exe_size,
+                   const char *argv_data, u32 argv_data_len, u32 argc,
+                   const char *env_data, u32 env_data_len, u32 envc,
+                   u64 *entry_out, u64 *sp_out);
+
+// exec_stage_env -- project `p`'s /env into the packed "NAME=VALUE\0" block
+// exec_load_into takes (#140). The one place a Proc's environment becomes an
+// exec argument, so the bound and the encoding live in one place rather than
+// at each caller.
+//
+// On success returns 0 and sets *data_out / *len_out / *count_out; the CALLER
+// owns *data_out and must kfree it (NULL/0/0 for a Proc with no environment,
+// which is not an error). On failure returns a NEGATIVE errno and leaves the
+// outputs zeroed: -T_E_NOMEM for the staging allocation, -T_E_2BIG when the
+// environment exceeds EXEC_ENV_DATA_MAX or EXEC_ENV_MAX.
+//
+// Callers that HAVE an environment of their own to impose (a Linux execve's
+// envp) do not come through here -- they pack their own block. This is for the
+// callers whose answer is "whatever this Proc already has": every SYS_SPAWN_*
+// thunk (projecting the child's already-cloned copy) and the native SYS_EXECVE,
+// whose ABI has no envp argument and therefore means "preserve".
+int exec_stage_env(struct Proc *p, char **data_out, u32 *len_out,
+                   u32 *count_out);
 
 // Kernel→EL0 transition (asm in arch/arm64/userland.S). Sets
 // ELR_EL1 = entry_pc, SP_EL0 = user_sp, SPSR_EL1 = 0 (PSTATE = EL0t,

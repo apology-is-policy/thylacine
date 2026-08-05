@@ -279,12 +279,37 @@ bool poll_waiter_list_empty(struct poll_waiter_list *l);
 //         readiness probe). No tsleep.
 //   > 0 — block for at most `timeout_ms` milliseconds.
 //
-// `nfds` MUST be 1..PROC_HANDLE_MAX = 64. The `struct poll_waiter
-// waiters[64]` array lives on this routine's kernel stack. specs/
+// `nfds` MUST be 1..POLL_MAX_NFDS = 64 — the bound is on the ARRAY LENGTH, not
+// on the fd VALUES in it, which may be anything up to PROC_HANDLE_MAX (256).
+// (This comment said "PROC_HANDLE_MAX = 64" until V-5c-2. The two constants were
+// equal and were split by ffcc64b7; the same stale conflation copied into
+// pouch's select() became a real EBADF bug there — task #99 F-a.) The `struct
+// poll_waiter waiters[64]` array lives on this routine's kernel stack. specs/
 // poll.tla `Register` ↔ the first scan; `CommitOrSleep` ↔ the flag-
 // check + tsleep; `MakeReady` ↔ a producer's `poll_waiter_list_wake`.
 s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
                       s32 timeout_ms);
+
+// Park the caller for `timeout_ms` (negative ⇒ indefinitely), then return 0.
+//
+// This is poll's slow path with the fd array removed: a private Rendez nothing
+// can signal, a cond that is never true, and the same deadline arithmetic — so
+// it always ends on the deadline (or on death), never on a wake.
+//
+// IT EXISTS BECAUSE ZERO-FD WAITS ARE A REAL POSIX IDIOM. `select(0, NULL, NULL,
+// NULL, &tv)` is the classic portable sleep and `poll(NULL, 0, ms)` is its twin;
+// both are legal, and both are what a Linux guest reaches for when it wants to
+// wait without watching anything (VIVARIUM.md §5.5.4). `sys_poll_for_proc`
+// rejects nfds == 0 and that rejection is DELIBERATELY LEFT ALONE — it is a
+// native ABI a native caller may rely on. This is a separate entry point rather
+// than a relaxation of that one.
+//
+// Death-interruptible by construction: the wait is a plain `tsleep`, so a
+// group-terminate returns TSLEEP_INTR (#811) and the caller unwinds at the EL0
+// tail like any other blocked syscall. Nothing is held across the sleep — no
+// lock, no handle, no ref — and the Rendez is stack-local, so nothing can
+// reference it after the return.
+s64 sys_poll_sleep_for(s32 timeout_ms);
 
 // =============================================================================
 // Diagnostics.

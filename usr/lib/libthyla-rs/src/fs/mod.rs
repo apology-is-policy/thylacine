@@ -85,14 +85,21 @@ pub fn is_dir<P: AsRef<Path>>(path: P) -> bool {
 }
 
 // =============================================================================
-// Mutation free functions (mirror std::fs). Each resolves `path`'s parent
-// directory via `file::with_parent_dir` (intermediate dirs walked T_OPATH so
-// the parent carries the RIGHT_WRITE the SYS_WALK_CREATE / SYS_UNLINK /
-// SYS_RENAME handlers gate on) and drives the corresponding raw syscall on
-// the (parent_fd, basename) pair. NB: devramfs (the read-only boot FS) leaves
-// the .create / .unlink / .rename Dev slots NULL, so these succeed only on the
+// Mutation free functions (mirror std::fs). Each splits `path` lexically at
+// its LAST component (`file::split_parent_leaf` -- nothing else is resolved
+// in userspace, #87), opens the parent prefix through the kernel stalk
+// resolver (`file::with_parent_fd`, T_OPATH, so the parent carries the
+// RIGHT_WRITE the SYS_WALK_CREATE / SYS_UNLINK / SYS_RENAME handlers gate
+// on and every `.` / `..` / non-directory prefix is gated kernel-side),
+// applies its POSIX leaf row (trailing slash / `.` / `..` -- Linux-shaped,
+// the #86 per-caller table one layer up), and drives the raw syscall on the
+// (parent_fd, leaf) pair. NB: devramfs (the read-only boot FS) leaves the
+// .create / .unlink / .rename Dev slots NULL, so these succeed only on the
 // Stratum-backed (dev9p) FS reachable after the pivot.
 // =============================================================================
+
+use self::file::Leaf;
+use alloc_crate::string::String;
 
 /// Default POSIX mode for a directory created via `create_dir`: `rwxr-xr-x`.
 const CREATE_DIR_MODE: u32 = 0o755;
@@ -101,12 +108,24 @@ const CREATE_DIR_MODE: u32 = 0o755;
 /// exist -- there is no `create_dir_all` at v1.0; the `mkdir -p` behavior is a
 /// caller-side prefix loop. Mirrors `std::fs::create_dir`.
 ///
+/// Leaf rows (#87, Linux-shaped): a trailing slash is legal and strips (the
+/// created leaf IS a directory -- `mkdir("d/")` creates `d`); `mkdir("/")`
+/// and a `.` / `..` leaf answer `Exists` (Linux `filename_create` rejects a
+/// non-NORM last component with EEXIST).
+///
 /// Errors: `Exists` if `path` is already present (the kernel create is
-/// exclusive); `NotFound` if a parent component is missing; `PermissionDenied`
-/// (or another kernel error) when the parent denies creation or the FS is
-/// read-only.
+/// exclusive); `NotFound` if a parent component is missing; `NotADirectory`
+/// if a parent component is not a directory; `PermissionDenied` (or another
+/// kernel error) when the parent denies creation or the FS is read-only.
 pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    file::with_parent_dir(path.as_ref(), |parent, name| {
+    let sp = file::split_parent_leaf(path.as_ref())?;
+    file::with_parent_fd(sp.parent, |parent| {
+        let name = match sp.leaf {
+            Leaf::Root | Leaf::Dot | Leaf::DotDot => return Err(Error::Exists),
+            Leaf::Name(n) => n,
+        };
+        // A trailing slash needs no probe: the leaf being created IS a
+        // directory (sp.dir_required strips silently).
         // SAFETY: name is a valid &str (ptr+len); parent is FROM_ROOT or an
         // owned dir handle carrying RIGHT_WRITE (T_OPATH). DMDIR selects a
         // directory; OREAD is the create-time omode for a directory (the
@@ -133,8 +152,30 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<()> {
 /// Remove the file `path` (a non-directory). Mirrors `std::fs::remove_file`.
 /// `NotFound` if absent; the kernel rejects a directory target here (use
 /// `remove_dir`).
+///
+/// Leaf rows (#87, Linux `do_unlinkat`): a `.` / `..` leaf (and `/` itself)
+/// answers `IsADirectory` -- the parent open has already answered
+/// `NotADirectory` when the prefix walks through a non-directory, matching
+/// Linux's parent-walk-first ordering. A trailing slash must NEVER reach
+/// SYS_UNLINK (stripped, it would delete the very file the slash asserts is
+/// a directory): one stat of the slash-terminated path -- the kernel's
+/// audited #82 gate -- discriminates. `Ok` means it IS a directory
+/// (`IsADirectory`, the unlink-of-a-directory answer); an error is the real
+/// `NotADirectory` / `NotFound` / `PermissionDenied`.
 pub fn remove_file<P: AsRef<Path>>(path: P) -> Result<()> {
-    file::with_parent_dir(path.as_ref(), |parent, name| {
+    let path = path.as_ref();
+    let sp = file::split_parent_leaf(path)?;
+    file::with_parent_fd(sp.parent, |parent| {
+        let name = match sp.leaf {
+            Leaf::Root | Leaf::Dot | Leaf::DotDot => return Err(Error::IsADirectory),
+            Leaf::Name(n) => n,
+        };
+        if sp.dir_required {
+            return match metadata(path) {
+                Ok(_) => Err(Error::IsADirectory),
+                Err(e) => Err(e),
+            };
+        }
         // SAFETY: name is a valid &str (ptr+len); parent is FROM_ROOT or an
         // owned dir handle carrying RIGHT_WRITE.
         let rc = unsafe { crate::t_unlink(parent, name.as_ptr(), name.len(), 0) };
@@ -145,8 +186,21 @@ pub fn remove_file<P: AsRef<Path>>(path: P) -> Result<()> {
 /// Remove the empty directory `path`. Mirrors `std::fs::remove_dir`. The
 /// directory must be empty (the kernel/9P rmdir rejects a non-empty dir);
 /// recursive removal is the caller's walk (e.g. a coreutil `rm -r`).
+///
+/// Leaf rows (#87): `rmdir("/")` -> `Busy` (Linux EBUSY); a `.` leaf ->
+/// `InvalidArgument` (POSIX-mandated EINVAL); a `..` leaf ->
+/// `DirectoryNotEmpty` (Linux ENOTEMPTY). A trailing slash strips silently:
+/// REMOVEDIR itself enforces dir-ness (the server answers `NotADirectory`
+/// for a file; #80 carries the real errno across).
 pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<()> {
-    file::with_parent_dir(path.as_ref(), |parent, name| {
+    let sp = file::split_parent_leaf(path.as_ref())?;
+    file::with_parent_fd(sp.parent, |parent| {
+        let name = match sp.leaf {
+            Leaf::Root => return Err(Error::Busy),
+            Leaf::Dot => return Err(Error::InvalidArgument),
+            Leaf::DotDot => return Err(Error::DirectoryNotEmpty),
+            Leaf::Name(n) => n,
+        };
         // SAFETY: name is a valid &str (ptr+len); parent is FROM_ROOT or an
         // owned dir handle carrying RIGHT_WRITE.
         let rc = unsafe {
@@ -164,12 +218,39 @@ pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<()> {
 /// v1.0 the whole pivoted FS is one Stratum Dev, so any in-tree rename
 /// qualifies; a cross-Dev `mv` is the caller's copy+remove fallback. `from`'s
 /// and `to`'s parent directories are held open simultaneously for the rename.
+///
+/// Leaf rows (#87, Linux `do_renameat2`): renaming `/` or a `.` / `..` leaf
+/// (either side) answers `Busy` (the LAST_NORM rule). A trailing slash on
+/// EITHER name rides the verbatim rule -- "unless the source is a directory,
+/// trailing slashes give -ENOTDIR" -- via ONE stat of the slash-terminated
+/// SOURCE (the kernel's audited #82 gate): `Ok` means the source is a
+/// directory, so the stripped names proceed; an error is the real
+/// `NotADirectory` (a file) / `NotFound` (absent, which precedes the
+/// slash verdict, as in Linux) / `PermissionDenied`.
 pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<()> {
-    file::with_parent_dir(from.as_ref(), |old_parent, old_name| {
-        file::with_parent_dir(to.as_ref(), |new_parent, new_name| {
+    let from = from.as_ref();
+    let f_sp = file::split_parent_leaf(from)?;
+    let t_sp = file::split_parent_leaf(to.as_ref())?;
+    file::with_parent_fd(f_sp.parent, |old_parent| {
+        let old_name = match f_sp.leaf {
+            Leaf::Root | Leaf::Dot | Leaf::DotDot => return Err(Error::Busy),
+            Leaf::Name(n) => n,
+        };
+        file::with_parent_fd(t_sp.parent, |new_parent| {
+            let new_name = match t_sp.leaf {
+                Leaf::Root | Leaf::Dot | Leaf::DotDot => return Err(Error::Busy),
+                Leaf::Name(n) => n,
+            };
+            if f_sp.dir_required || t_sp.dir_required {
+                let mut probe = String::from(from.as_str());
+                if !probe.ends_with(SEPARATOR) {
+                    probe.push(SEPARATOR);
+                }
+                metadata(&probe)?;
+            }
             // SAFETY: both names are valid &str (ptr+len); both parents are
             // FROM_ROOT or owned dir handles carrying RIGHT_WRITE, held open
-            // across the rename (the inner with_parent_dir nests inside the
+            // across the rename (the inner with_parent_fd nests inside the
             // outer's still-open parent).
             let rc = unsafe {
                 crate::t_rename(

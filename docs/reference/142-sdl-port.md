@@ -291,6 +291,66 @@ contains `llvmpipe`, which is not cosmetic: a context on some stub would
 satisfy every other check while proving nothing about CL-7. Driven by
 `tools/interactive/ls-gfx-gl.exp`; staged to `/clade/bin/` rather than
 the ramfs because it is a 143 MB static binary.
+
+It also needs `CAP_JIT`, which it acquires **for itself** — llvmpipe JITs
+inside the calling process and `CAP_JIT` is elevation-only, so a GL program
+on Thylacine is a capability client before it is a renderer. Post-login it
+takes corvus's SELF form (verb 18, #139), authorized on the kernel-stamped
+principal with no bearer token; the gate asserts the form, not merely the
+acquisition. See `docs/reference/102-legate.md`.
+
+## The backend acquires `CAP_JIT` on the program's behalf
+
+`THYLACINE_GL_CreateContext` walks the corvus clearance path itself, before
+it creates the OSMesa context. That is deliberate and it is what makes §9
+step 2's claim — "stock SDL-GL programs recompile" — literally true.
+
+The alternative is every GL program calling `thyla_acquire_cap_jit()` at
+startup, which is what gl-sdl-prove does. That works for a prover written
+against this platform. It does not work for a *port*: TyrQuake's `vid_sgl.c`
+is 1996-lineage SDL-GL code that has never heard of Thylacine, and requiring
+it to speak a capability protocol before `SDL_GL_CreateContext` would mean a
+Thylacine-shaped patch in that port and in every future one — at which point
+the recompile claim is false.
+
+The application has already declared its intent by asking for a GL context;
+on this platform that request *is* a request to JIT, and carrying a fact like
+that is what a platform abstraction layer is for. **SDL grants nothing** — it
+asks, and corvus decides against the calling principal's own eligibility, so
+a user with no `jit` clearance gets a clean `SDL_SetError` and a NULL context
+rather than a `Failed to materialize symbols` three layers down.
+
+The acquisition is guarded by a weak-global once-flag in `thyla_capjit.h`, so
+the two callers compose in either order and neither double-walks: gl-sdl-prove
+links *both* its own copy of the header and libSDL2.a's, and a function-static
+would have been per-TU. (A weak *definition* merges across TUs and out of an
+archive; a weak *undefined reference* does not extract an archive member at
+all, which is the distinction that cost #138 a link that succeeded with an
+inert GL path. Both topologies were compiled and their addresses compared
+rather than assumed.)
+
+Placement inside `CreateContext` is after the `THYLACINE_GL_Available()`
+check, so a program that links no rasteriser never opens a corvus connection,
+and before the allocation, so a refusal has nothing to unwind.
+
+**Everything downstream of that acquisition ran for the first time at #139**,
+because until then the prover always died at the capability gate. Its first
+real execution found two bugs that had shipped with #138 and could not
+previously surface, and they are worth stating because the shape recurs:
+
+- The quadrant readback sampled at (W/4,H/4) and (3W/4,H/4). The triangle is
+  drawn UNSCISSORED and its NDC span maps to screen x∈[160,480], y∈[100,300]
+  at 640×400 — so those two samples land *exactly* on its bottom vertices. BL
+  read magenta and the assertion, not the readback, was wrong. Samples moved
+  to 1/8 and 7/8; the geometry is written down beside them.
+- Both of `ls-gfx-gl.exp`'s regexes spelled the renderer `[^ ]+`, and
+  `GL_RENDERER` is `llvmpipe (LLVM 22.1.8, 128 bits)` — spaces. Neither had
+  ever matched. The scenario reported "no renderer line within 180s" while
+  the log plainly contained it.
+
+Each fix advanced the prover one station and handed the next its first run.
+An assertion that has never executed is not a passing assertion; it is an
+unknown, and five of these were unknowns until #139 unblocked them.
 - **The present is synchronous** (stage-0 tapestryd): each present blocks on
   the compositor. The pipelined-controlq drain (with a real quiesce before
   retire) is the recorded obligation; timedemo throughput (~600 fps at

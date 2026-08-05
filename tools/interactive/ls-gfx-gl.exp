@@ -76,12 +76,22 @@ set timeout 180
 # Asserted separately because without it the failure surfaces three layers away
 # as llvmpipe's "Failed to materialize symbols" -- a Mesa-shaped message for a
 # capability-shaped problem, which is exactly how this leg was first missed.
+# The form is asserted, not just the acquisition. A post-login program CANNOT
+# reach the bearer form (handle_auth refuses while login's session is bound), so
+# "acquired" alone could only ever mean SELF here -- but pinning it is what makes
+# this leg a regression test for #139 rather than a liveness check that would go
+# on passing if the SELF path were removed and something else quietly stood in.
 expect {
-    "gl-sdl-prove: CAP_JIT acquired" {
-        lc_pass "CAP_JIT acquired via the corvus jit clearance (a GL program\
-                 here is a capability client, not an ordinary binary)"
+    "gl-sdl-prove: CAP_JIT acquired (SELF)" {
+        lc_pass "CAP_JIT acquired via the corvus jit clearance, SELF form (#139:\
+                 authorized on this Proc's kernel-stamped principal, no bearer\
+                 token -- a GL program here is a capability client)"
     }
-    -re {gl-sdl-prove: FAIL (corvus|cannot|clearance|redeeming)([^\r\n]*)} {
+    "gl-sdl-prove: CAP_JIT acquired (bearer)" {
+        lc_fail "CAP_JIT came from the BEARER form post-login -- the #139 SELF\
+                 path did not carry it, so this proves the old path, not the fix"
+    }
+    -re {gl-sdl-prove: FAIL (corvus|cannot|clearance|redeeming)([^\r\n]*)[\r\n]} {
         lc_fail "CAP_JIT clearance walk failed: $expect_out(1,string)$expect_out(2,string)"
     }
     "permission denied (no CAP_JIT)" {
@@ -90,8 +100,15 @@ expect {
     timeout { lc_fail "no CAP_JIT line within 180s" }
 }
 
+# GL_RENDERER CONTAINS SPACES -- Mesa reports "llvmpipe (LLVM 22.1.8, 128 bits)".
+# The original `([^ ]+)` here stopped at "llvmpipe" and then required a literal
+# " version=", which the real string does not supply, so this block never
+# matched. It had never run to completion: earlier attempts died at the CAP_JIT
+# gate, and the one run that got past it fell through to the FAIL arm below and
+# reported a truncated message instead. Match to end-of-line and let the engine
+# backtrack to the single " version=".
 expect {
-    -re {gl-sdl-prove: renderer=([^ ]+) version=([^\r\n]*)} {
+    -re {gl-sdl-prove: renderer=([^\r\n]*) version=([^\r\n]*)[\r\n]} {
         set rend $expect_out(1,string)
         set vers $expect_out(2,string)
         if {![string match "*llvmpipe*" $rend]} {
@@ -100,7 +117,7 @@ expect {
         }
         lc_pass "GL context live: renderer=$rend version=$vers"
     }
-    -re {gl-sdl-prove: FAIL ([^\r\n]*)} {
+    -re {gl-sdl-prove: FAIL ([^\r\n]*)[\r\n]} {
         lc_fail "gl-sdl-prove failed: $expect_out(1,string)"
     }
     "user fault" { lc_fail "gl-sdl-prove segv" }
@@ -108,15 +125,15 @@ expect {
 }
 
 expect {
-    -re {gl-sdl-prove: PASS renderer=[^ ]+ ([0-9]+)x([0-9]+) frames=([0-9]+)} {
+    -re {gl-sdl-prove: PASS renderer=[^\r\n]* ([0-9]+)x([0-9]+) frames=([0-9]+)} {
         lc_pass "GL draw + readback verified:\
                  $expect_out(1,string)x$expect_out(2,string),\
                  $expect_out(3,string) frames swapped, all 5 regions correct"
     }
-    -re {gl-sdl-prove: pixel ([^\r\n]*)} {
+    -re {gl-sdl-prove: pixel ([^\r\n]*)[\r\n]} {
         lc_fail "GL readback mismatch: $expect_out(1,string)"
     }
-    -re {gl-sdl-prove: FAIL ([^\r\n]*)} {
+    -re {gl-sdl-prove: FAIL ([^\r\n]*)[\r\n]} {
         lc_fail "gl-sdl-prove failed: $expect_out(1,string)"
     }
     "user fault" { lc_fail "gl-sdl-prove segv" }

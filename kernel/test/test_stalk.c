@@ -58,6 +58,12 @@ void test_stalk_dotdot_pop(void);
 void test_stalk_dotdot_containment(void);
 void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
+void test_stalk_notdir(void);                  // #79
+void test_stalk_dot_notdir(void);              // #81
+void test_stalk_dot_notdir_mount(void);        // #81 (uncrossed-tip choice)
+void test_stalk_dot_xsearch(void);             // #84
+void test_stalk_trailing_slash(void);          // #82
+void test_stalk_trailing_slash_mount(void);    // #82 (crossed-quarry choice)
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_open_replace(void);
@@ -113,6 +119,14 @@ static const struct fixnode g_fix[] = {
     { 6, 5, "sekret", QTFILE, 0600u },
     { 7, 0, "loop",   QTDIR,  0755u },
     { 8, 1, "nor",    QTFILE, 0200u },   // owner write-only: the leaf-R deny
+    { 9, 0, "xfile",  QTFILE, 0755u },   // #79: an EXECUTABLE file. The only
+                                         // node whose x bit is set while it is
+                                         // not a directory -- without it the
+                                         // ENOTDIR gate could not be shown to
+                                         // be mode-INDEPENDENT (every other
+                                         // file here lacks x, so an x-first
+                                         // ordering would answer EACCES and
+                                         // look equally correct).
 };
 #define FIX_LOOP_PATH 7u
 
@@ -192,8 +206,14 @@ static int fix_stat_qid(u64 qid_path, struct t_stat *out) {
     return 0;
 }
 
+// #84: counted, so the dot-arm X-check can PROVE it consumed the pounce's
+// carried leaf record instead of issuing a fresh stat (the cost claim in
+// stalk_tip_may_search is measured here, not asserted).
+static int g_fix_stat_calls;
+
 static int fix_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out) return -1;
+    g_fix_stat_calls++;
     return fix_stat_qid(c->qid.path, out);
 }
 
@@ -539,6 +559,277 @@ void test_stalk_err_codes(void) {
     spoor_unref(root);
 }
 
+// #79: resolution THROUGH a non-directory answers T_E_NOTDIR, not T_E_NOENT.
+//
+// The pre-fix behaviour was worse than imprecise -- it was mode-dependent: a
+// 0644 file denied the X-search and reported ACCES, while a 0755 file passed it
+// and reported NOENT, so the errno turned on a bit that has nothing to do with
+// whether the thing can be searched. Both legs below are asserted for exactly
+// that reason; `xfile` (0755) exists in the fixture only to make the second one
+// expressible.
+//
+// Non-vacuity: reverting either gate flips a specific leg -- the base gate
+// changes `a/b/./x` and the nowa leg, the POUNCE partial arm changes `a/b/x`.
+void test_stalk_notdir(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    int e;
+
+    // The POUNCE partial-walk arm: the batch gathers [a, b, x] and the server
+    // walks 2 of 3, so the miss's parent is the fused record sts[1] (`b`, a
+    // file) rather than the run base.
+    e = -12345;
+    struct Spoor *q = stalk_err(&p, root, "a/b/x", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/x -> NULL (b is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "through a 0644 file -> NOTDIR (was ACCES)");
+
+    // Since #81 this leg is caught one step EARLIER -- the '.' token now gates
+    // the tip itself, so `b` is rejected before `x` is ever considered. Same
+    // verdict, different gate; the base gate's own witness is the nowa leg
+    // below (reverting line "parent->qid.type & QTDIR" flips it to ACCES).
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/./x", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/./x -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "'.' after a file -> NOTDIR (#81 gate)");
+
+    // Mode-independence: 0755 sets the x bit, so the X-search would have PASSED
+    // and the old answer was NOENT -- a different errno for the same situation.
+    e = -12345;
+    q = stalk_err(&p, root, "xfile/y", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "xfile/y -> NULL (xfile is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "through a 0755 file -> NOTDIR (was NOENT)");
+
+    // The per-component loop reaches the same verdict (pounce/loop parity).
+    struct Spoor *root_nowa = fix_root_nowa();
+    TEST_ASSERT(root_nowa != NULL, "fix_root_nowa");
+    e = -12345;
+    q = stalk_err(&p, root_nowa, "a/b/x", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/x (no walk_attrs) -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "per-component loop agrees: NOTDIR");
+    spoor_unref(root_nowa);
+
+    // The gate must not fire on a file as the FINAL component -- it guards
+    // searching THROUGH a node, never naming one. This is the regression that
+    // a too-eager gate would trip.
+    struct Spoor *ok = stalk_err(&p, root, "a/b", 3, STALK_OPEN, 0, &e);
+    TEST_ASSERT(ok != NULL, "a/b still resolves (a file as the leaf is not gated)");
+    spoor_clunk(ok);
+
+    // A real X-search denial is still ACCES: `nox` IS a directory (0644), so
+    // the type gate passes and the permission check remains the authority.
+    // Ordering type-before-permission must not have swallowed this.
+    e = -12345;
+    struct Spoor *deny = stalk_err(&p, root, "nox/sekret", 10, STALK_OPEN, 0, &e);
+    TEST_ASSERT(deny == NULL, "nox/sekret -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "a directory without x is still ACCES, not NOTDIR");
+
+    spoor_unref(root);
+}
+
+// #81: "." and ".." are PATH COMPONENTS, so the position they resolve in must
+// be a directory. stalk handles both tokens lexically -- they never reach
+// Dev.walk -- so #79's gate (which sits on the real-component path) never saw
+// them and a file tip silently accepted both: `a/b/..` popped back to `a` and
+// `a/b/.` handed back `b`.
+//
+// Non-vacuity: every ENOTDIR leg below RESOLVED before the fix (returning a
+// Spoor, not an error), so reverting either gate turns the assertion from
+// "NULL + NOTDIR" into a successful walk.
+void test_stalk_dot_notdir(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    int e;
+    struct Spoor *q;
+
+    // '..' out of a file. Pre-fix this popped `b` and returned `a` (qid 1) --
+    // a successful resolution of a path POSIX rejects.
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/..", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/.. -> NULL (b is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "'..' out of a file -> NOTDIR");
+
+    // '.' at a file. Pre-fix this returned `b` itself (qid 2).
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/.", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/. -> NULL (b is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "'.' at a file -> NOTDIR");
+
+    // Mode-independence, the #79 property carried forward: `xfile` is 0755, so
+    // an x-bit-first ordering would look equally correct here. The gate reads
+    // qid.type, so both files answer the same.
+    e = -12345;
+    q = stalk_err(&p, root, "xfile/..", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "xfile/.. -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "'..' out of a 0755 file -> NOTDIR");
+    e = -12345;
+    q = stalk_err(&p, root, "xfile/.", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "xfile/. -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "'.' at a 0755 file -> NOTDIR");
+
+    // The gate must not fire on a DIRECTORY -- these are the regressions a
+    // too-eager gate would trip, and they are the overwhelmingly common case.
+    q = stalk_err(&p, root, "a/deep/.", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/. still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "a/deep/. -> qid 3 (deep)");
+    spoor_clunk(q);
+
+    q = stalk_err(&p, root, "a/deep/../b", 11, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/../b still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "a/deep/../b -> qid 2 (b)");
+    spoor_clunk(q);
+
+    // I-28 containment is UNCHANGED: the gate can only fail a resolution, never
+    // move a pop further up. `start` is a directory, so a leading '..' run is
+    // still the no-op that clamps at the base.
+    q = stalk_err(&p, root, "../../a", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "../../a still contained + resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)1, "../../a -> qid 1 (a), never escaped");
+    spoor_clunk(q);
+
+    // depth 0 with a NON-directory base -- the openat(file_fd, ...) shape, and
+    // the case the '..' clamp made invisible (at depth 0 the pop is a no-op, so
+    // pre-fix BOTH tokens simply handed the file straight back).
+    struct Spoor *bfile = stalk(&p, root, "a/b", 3, STALK_WALK, 0);
+    TEST_ASSERT(bfile != NULL, "resolve a/b as a base");
+    TEST_EXPECT_EQ((u64)(bfile->qid.type & QTDIR), (u64)0, "a/b is not a directory");
+    e = -12345;
+    q = stalk_err(&p, bfile, ".", 1, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL, "'.' from a file base -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "'.' at depth 0 on a file -> NOTDIR");
+    e = -12345;
+    q = stalk_err(&p, bfile, "..", 2, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL, "'..' from a file base -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "'..' at depth 0 on a file -> NOTDIR");
+    spoor_clunk(bfile);
+
+    // The per-component loop (no walk_attrs) reaches the same verdict.
+    struct Spoor *root_nowa = fix_root_nowa();
+    TEST_ASSERT(root_nowa != NULL, "fix_root_nowa");
+    e = -12345;
+    q = stalk_err(&p, root_nowa, "a/b/..", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/.. (no walk_attrs) -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "per-component loop agrees: NOTDIR");
+    spoor_unref(root_nowa);
+
+    spoor_unref(root);
+}
+
+// #82: a trailing '/' asserts the path names a DIRECTORY (POSIX 4.13). The
+// tokenizer collapses separator runs, so pre-fix the trailing '/' was simply
+// dropped and `a/b/` resolved the file. THREE gate sites, because two success
+// exits never reach the quarry -- each leg below drives exactly one of them, so
+// removing any single gate fails a distinct assertion.
+void test_stalk_trailing_slash(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+
+    int e;
+    struct Spoor *q;
+    struct t_stat st;
+    g_fix_co_enable = false;   // site A/C legs take the normal path
+
+    // -- Site A: the quarry gate (the ordinary resolution path).
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ -> NULL (b is a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "trailing slash on a file -> NOTDIR");
+    TEST_EXPECT_EQ(spoor_total_allocated() - spoor_total_freed(), live_before,
+                   "the quarry gate's failure path leaks no Spoor");
+
+    // A run of trailing separators is the same assertion.
+    e = -12345;
+    q = stalk_err(&p, root, "a/b///", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/// -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "a run of trailing slashes -> NOTDIR");
+
+    // Mode-independence (#79's property): xfile is 0755, so an x-bit-first
+    // ordering would look correct on 0644 `b` alone. Both files answer NOTDIR.
+    e = -12345;
+    q = stalk_err(&p, root, "xfile/", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "xfile/ -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "trailing slash on a 0755 file -> NOTDIR");
+
+    // O_PATH (STALK_WALK) is gated too -- Linux answers ENOTDIR there as well.
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/", 4, STALK_WALK, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ (O_PATH) -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "O_PATH is gated as well");
+
+    // The DIRECTORY case must keep working -- the regression a too-eager gate
+    // trips, and overwhelmingly the common shape (`ls /usr/`, `$(DIR)/`).
+    q = stalk_err(&p, root, "a/deep/", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/ still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "a/deep/ -> qid 3 (deep)");
+    spoor_clunk(q);
+    q = stalk_err(&p, root, "a/", 2, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/ still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)1, "a/ -> qid 1");
+    spoor_clunk(q);
+
+    // "/" and "//" are EXEMPT: POSIX scopes the rule to a pathname with at
+    // least one non-'/' character, and they have no component before the
+    // trailing run. (This is why the discriminator scans back instead of
+    // testing the last byte.)
+    q = stalk_err(&p, root, "/", 1, STALK_WALK, 0, &e);
+    TEST_ASSERT(q != NULL, "\"/\" resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)0, "\"/\" -> the root");
+    spoor_clunk(q);
+    q = stalk_err(&p, root, "//", 2, STALK_WALK, 0, &e);
+    TEST_ASSERT(q != NULL, "\"//\" resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)0, "\"//\" -> the root");
+    spoor_clunk(q);
+
+    // A trailing slash on a MISSING path is still ENOENT -- the gate must not
+    // pre-empt a real walk miss.
+    e = -12345;
+    q = stalk_err(&p, root, "a/nope/", 7, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/nope/ -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOENT, "a missing component still reports NOENT");
+
+    // -- Site C: the STALK_STAT walk-query fast path, which returns from the
+    // fused leaf record WITHOUT ever materializing a quarry.
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/b/", 4, &st, &e), (u64)-1,
+                   "stat a/b/ fails");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "the stat query path gates too");
+    e = -12345;
+    TEST_EXPECT_EQ((u64)stalk_stat(&p, root, "a/deep/", 7, &st, &e), (u64)0,
+                   "stat a/deep/ still succeeds");
+    TEST_EXPECT_EQ((u64)st.qid_path, (u64)3, "and reports the directory");
+
+    // -- Site B: the FID-LIFECYCLE cached-open arm, the other quarry-skipping
+    // exit. Assert the arm actually RAN, else this leg silently re-tests site A.
+    g_fix_co_enable = true;
+    g_fix_co_calls = 0;
+    live_before = spoor_total_allocated() - spoor_total_freed();
+    e = -12345;
+    q = stalk_err(&p, root, "a/b/", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ via the cached-open arm -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "the cached-open arm gates too");
+    TEST_EXPECT_EQ((u64)g_fix_co_calls, 1ull,
+                   "the cached-open arm ran (this leg is not site A in disguise)");
+    TEST_EXPECT_EQ(spoor_total_allocated() - spoor_total_freed(), live_before,
+                   "the cached-open gate clunks its minted Spoor");
+    g_fix_co_enable = false;
+
+    // The per-component loop (no walk_attrs) reaches the same verdict.
+    struct Spoor *root_nowa = fix_root_nowa();
+    TEST_ASSERT(root_nowa != NULL, "fix_root_nowa");
+    e = -12345;
+    q = stalk_err(&p, root_nowa, "a/b/", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/ (no walk_attrs) -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "per-component loop agrees: NOTDIR");
+    spoor_unref(root_nowa);
+
+    spoor_unref(root);
+}
+
 void test_stalk_opath_no_open(void) {
     struct Proc p; mkproc_system(&p);
     struct Spoor *root = fix_root();
@@ -651,6 +942,225 @@ static struct Spoor *cross_setup(struct Proc *p) {
     p->territory = territory_alloc();
     if (!p->territory) return NULL;
     return fix_root();
+}
+
+// #81: the gate reads the tip's UNCROSSED qid.type. The discriminating case is
+// a '.' on a mount point under STALK_MOUNT, where the mount point and the
+// mounted root are DIFFERENT nodes and the amode deliberately suppresses the
+// quarry cross: crossing to read the type would leak the mounted root out as
+// the result and break MREPL re-keying. `/mnt/.` must mean `/mnt`, exactly.
+void test_stalk_dot_notdir_mount(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *src = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mount point");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount a onto loop");
+
+    // STALK_MOUNT: "loop" yields the mount POINT (qid 7, no cross). "loop/."
+    // must yield the same -- a crossing gate would answer qid 1 (a-root).
+    struct Spoor *bare = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    struct Spoor *dot  = stalk(&p, root, "loop/.", 6, STALK_MOUNT, 0);
+    TEST_ASSERT(bare != NULL && dot != NULL, "resolve loop and loop/. (MOUNT)");
+    TEST_EXPECT_EQ((u64)bare->qid.path, (u64)7, "STALK_MOUNT loop -> mount point");
+    TEST_EXPECT_EQ((u64)dot->qid.path, (u64)bare->qid.path,
+                   "loop/. == loop under STALK_MOUNT (tip read UNCROSSED)");
+    spoor_clunk(bare);
+    spoor_clunk(dot);
+
+    // STALK_OPEN still crosses the quarry, so "loop/." tracks "loop" there too.
+    struct Spoor *q = stalk(&p, root, "loop/.", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop/. (OPEN)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)1, "loop/. crosses to a-root (qid 1)");
+    spoor_clunk(q);
+
+    // '..' off a mount point pops the trail entry, landing above it in the
+    // ORIGINAL tree (Plan 9): the fixture root, not anything inside `a`.
+    q = stalk(&p, root, "loop/..", 7, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop/..");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)0, "loop/.. -> the original root (qid 0)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+// #84: '.' and '..' are lookups performed IN the tip, so they need X there --
+// the check the real-component arm has always made and the dot arms skipped.
+//
+// Measured on a POSIX host (non-root, owner of a `chmod 000` directory d):
+// stat("d") SUCCEEDS (that lookup happens in d's PARENT) while stat("d/."),
+// stat("d/..") and stat("d/x") are ALL EACCES, and fstatat(dirfd_of_d, ".")
+// is EACCES too -- so depth 0 counts, with `start` as the subject. `nox`
+// (QTDIR, 0644 -- owner rw-, no x) is the fixture's twin of that directory.
+void test_stalk_dot_xsearch(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root();
+    TEST_ASSERT(root != NULL, "fix_root");
+    int e;
+
+    // Pre-#84 these two RESOLVED: '..' popped back to the root (qid 0) and '.'
+    // stayed on nox (qid 5) -- while the sibling `nox/sekret` was denied. That
+    // asymmetry is the bug.
+    struct Spoor *q = stalk_err(&p, root, "nox/..", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/.. -> NULL (no x on nox)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "'..' out of a no-x dir -> ACCES");
+
+    q = stalk_err(&p, root, "nox/.", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/. -> NULL (no x on nox)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "'.' in a no-x dir -> ACCES");
+
+    // A trailing dot is not special: the component still resolves IN nox.
+    q = stalk_err(&p, root, "nox/../a", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "nox/../a -> NULL (denied before the pop)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "denied mid-path, never NOENT");
+
+    // DEPTH 0: the subject is `start`. Reaching nox as a base needs x on the
+    // ROOT only (0755), which is exactly why stat("d000") succeeds on POSIX --
+    // so this base is obtainable, and then '.' / '..' in it must deny.
+    struct Spoor *noxdir = stalk(&p, root, "nox", 3, STALK_WALK, 0);
+    TEST_ASSERT(noxdir != NULL, "nox itself resolves (x on root suffices)");
+
+    q = stalk_err(&p, noxdir, ".", 1, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "openat(nox, \".\") -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "depth-0 '.' -> ACCES");
+
+    q = stalk_err(&p, noxdir, "..", 2, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "openat(nox, \"..\") -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_ACCES, "depth-0 '..' -> ACCES");
+    spoor_clunk(noxdir);
+
+    // ORDER: type BEFORE permission. `b` is a 0644 FILE, so BOTH gates would
+    // fire -- POSIX answers ENOTDIR (measured: a 0000 regular file gives
+    // ENOTDIR for both tokens, never EACCES). Putting the X-check first would
+    // flip this to ACCES.
+    q = stalk_err(&p, root, "a/b/..", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/.. -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "type wins over permission ('..')");
+    q = stalk_err(&p, root, "a/b/.", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "a/b/. -> NULL");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR, "type wins over permission ('.')");
+
+    // CONTROL: a searchable (0755) directory is unaffected in both arms.
+    q = stalk_err(&p, root, "a/deep/.", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/. still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "a/deep/. -> qid 3");
+    spoor_clunk(q);
+    q = stalk_err(&p, root, "a/deep/../b", 11, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/../b still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "a/deep/../b -> qid 2");
+    spoor_clunk(q);
+
+    // COST -- two A/Bs, MEASURED. Each compares the same resolution with and
+    // without a trailing '.', so the delta is attributable to this gate alone
+    // (an absolute count would pin unrelated resolver internals: the STALK_OPEN
+    // final-hop R/W check stats too).
+    //
+    // (1) POUNCE path: a '.' breaks a run but does not disable pouncing, so the
+    // run that produced the tip fused its attrs into the walk and `carried`
+    // describes exactly the object this gate judges -> the check is FREE.
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, root, "a/deep", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep resolves (cost baseline)");
+    int plain = g_fix_stat_calls;
+    spoor_clunk(q);
+
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, root, "a/deep/.", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "a/deep/. resolves (cost probe)");
+    TEST_EXPECT_EQ((u64)g_fix_stat_calls, (u64)plain,
+                   "'.' adds NO stat -- the gate consumed the carried record");
+    spoor_clunk(q);
+
+    // (2) PER-COMPONENT path (the nowa twin: no walk_attrs -- the shape EVERY
+    // '..' path takes, since path_has_dotdot disables pouncing). No carried
+    // record here, so the gate costs exactly ONE stat: the same call the
+    // real-component arm makes at this same position. Not a new cost class --
+    // and on dev9p that call is a Larder attr-cache hit (that cache exists for
+    // precisely this traffic; see dev9p_stat_native).
+    struct Spoor *rn = fix_root_nowa();
+    TEST_ASSERT(rn != NULL, "fix_root_nowa");
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, rn, "a/deep", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "nowa a/deep resolves");
+    int plain_nowa = g_fix_stat_calls;
+    spoor_clunk(q);
+
+    g_fix_stat_calls = 0;
+    q = stalk_err(&p, rn, "a/deep/.", 8, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "nowa a/deep/. resolves");
+    TEST_EXPECT_EQ((u64)g_fix_stat_calls, (u64)(plain_nowa + 1),
+                   "no carried record -> exactly one stat, an ordinary hop's cost");
+    spoor_clunk(q);
+    spoor_unref(rn);
+
+    spoor_unref(root);
+}
+
+// #82: the trailing-slash gate reads the CROSSED quarry -- the OPPOSITE of
+// #81's dot gate one test up, and deliberately so. The two ask different
+// questions of the same field: `.`/`..` are about WHERE RESOLUTION STANDS
+// (so `/mnt/.` must equal `/mnt`, uncrossed), a trailing slash about WHAT THE
+// PATH NAMES (which is the crossed result). The distinction is observable, not
+// academic: territory.c's mount() has no type check, so a mount point and its
+// mounted root need not agree -- and then gating the uncrossed point is wrong
+// in BOTH directions. Both are built here.
+void test_stalk_trailing_slash_mount(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+    g_fix_co_enable = false;
+
+    int e;
+    struct Spoor *q;
+
+    // (1) A FILE mounted over a DIRECTORY mount point. `loop` now RESOLVES to
+    //     a file, so `loop/` names a file -> ENOTDIR. A gate on the uncrossed
+    //     point would read QTDIR and wrongly ACCEPT.
+    struct Spoor *bfile = stalk(&p, root, "a/b", 3, STALK_WALK, 0);
+    struct Spoor *mpdir = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(bfile != NULL && mpdir != NULL, "resolve a/b + loop");
+    TEST_EXPECT_EQ((u64)(bfile->qid.type & QTDIR), 0ull, "a/b is a file");
+    TEST_EXPECT_EQ((u64)(mpdir->qid.type & QTDIR), (u64)QTDIR, "loop is a directory");
+    TEST_EXPECT_EQ(mount(p.territory, bfile, mpdir, 0), 0, "mount the file onto loop");
+
+    e = -12345;
+    q = stalk_err(&p, root, "loop/", 5, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q == NULL, "loop/ -> NULL (the mount crosses to a file)");
+    TEST_EXPECT_EQ((u64)e, (u64)T_E_NOTDIR,
+                   "file-over-dir: loop/ is NOTDIR (the CROSSED type decides)");
+
+    // Without the slash it still resolves -- to the mounted file.
+    q = stalk_err(&p, root, "loop", 4, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "loop still resolves");
+    TEST_EXPECT_EQ((u64)q->qid.path, 2ull, "loop -> the mounted file (qid 2)");
+    spoor_clunk(q);
+
+    // (2) The converse: a DIRECTORY mounted over a FILE mount point. `xfile`
+    //     now RESOLVES to a directory, so `xfile/` is LEGAL. A gate on the
+    //     uncrossed point would read QTFILE and wrongly REJECT.
+    struct Spoor *adir  = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mpfil = stalk(&p, root, "xfile", 5, STALK_MOUNT, 0);
+    TEST_ASSERT(adir != NULL && mpfil != NULL, "resolve a + xfile");
+    TEST_EXPECT_EQ((u64)(mpfil->qid.type & QTDIR), 0ull, "xfile is a file");
+    TEST_EXPECT_EQ(mount(p.territory, adir, mpfil, 0), 0, "mount a onto xfile");
+
+    q = stalk_err(&p, root, "xfile/", 6, STALK_OPEN, 0, &e);
+    TEST_ASSERT(q != NULL, "xfile/ resolves (the mount crosses to a directory)");
+    TEST_EXPECT_EQ((u64)q->qid.path, 1ull,
+                   "dir-over-file: xfile/ -> the mounted dir (qid 1)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(bfile);
+    spoor_clunk(mpdir);
+    spoor_clunk(adir);
+    spoor_clunk(mpfil);
+    spoor_unref(root);
 }
 
 void test_stalk_cross_mount(void) {

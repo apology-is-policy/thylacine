@@ -619,9 +619,29 @@ fully torn down on the legate root's exit or `valid_until` expiry (kernel-side, 
 corvus re-queries the peer's live caps before any irreversible admin effect (the C-22 TOCTOU
 discipline) -- unchanged.
 
+**Two forms of activation** (#139). The flow above says "resolve the session's principal
+(`SYS_SRV_PEER`)", and that is `CLEARANCE_ACTIVATE_SELF` (verb 18): the caller quotes
+nothing and corvus authorizes the principal the kernel stamped on the connection. It is the
+form the diagram's actor -- `[user shell]`, i.e. any ordinary program a logged-in user runs
+-- must use, because such a program cannot obtain a token at all (`handle_auth` refuses
+while a session is bound, §4.4).
+
+`CLEARANCE_ACTIVATE` (verb 15) is the **bearer** form, and it exists for callers whose own
+principal is *not* the user being authorized: the boot provers run as `PRINCIPAL_SYSTEM` and
+AUTH as a user to borrow an identity. Its cost is inherent -- the grant lands on the
+*caller's* stripes while the authorization comes from the *token*, so the two axes can
+differ. Verb 18 closes that gap by construction (identity and grant target are the same
+Proc), which makes it strictly the tighter form; prefer it wherever the caller genuinely
+runs as the user.
+
+This is the Plan 9 factotum shape: the agent holds the secret, and the client is identified
+by *who it is* rather than by what it can quote. Passing a token down to child processes --
+the obvious alternative -- was rejected on sight: it makes a bearer credential ambient,
+which is precisely what the capability model exists to prevent.
+
 **Verbs** (§6.4 wire): `CLEARANCE_LIST` (eligible levels + their caps) + `CLEARANCE_ACTIVATE`
-are user-facing; `CLEARANCE_GRANT` / `CLEARANCE_REVOKE` are `CAP_HOSTOWNER`-gated eligibility
-admin (the hostowner decides who may become which legate).
++ `CLEARANCE_ACTIVATE_SELF` are user-facing; `CLEARANCE_GRANT` / `CLEARANCE_REVOKE` are
+`CAP_HOSTOWNER`-gated eligibility admin (the hostowner decides who may become which legate).
 
 ---
 
@@ -731,6 +751,7 @@ Verb table:
 | 15 | CLEARANCE_ACTIVATE | `token` (33) + `level_len u8` + `level` + `self_restrict u64 LE` + `valid_until_req u64 LE` (0 = level default) |
 | 16 | CLEARANCE_GRANT | `token` (33) + `subject_kind u8` (0=user,1=group) + `subject_len u8` + `subject` + `level_len u8` + `level` |
 | 17 | CLEARANCE_REVOKE | `token` (33) + `subject_kind u8` + `subject_len u8` + `subject` + `level_len u8` + `level` |
+| 18 | CLEARANCE_ACTIVATE_SELF | `level_len u8` + `level` + `self_restrict u64 LE` + `valid_until_req u64 LE`. *(#139)* Verb 15 with the token removed: identity comes from the connection's kernel-stamped principal (`SYS_SRV_PEER`) instead of a bearer secret. Same OK reply, same policy. Gate: the caller's principal must resolve to a corvus user, be eligible for the level, and have a **live session of its own** -- that last is what satisfies `auth_required = RE_AUTH` without anything being quoted |
 
 Verbs 11-13 + the USER_CREATE extension are the A-1b identity surface; full semantics + OK-response payloads + the byte format + persistence are in §16.
 

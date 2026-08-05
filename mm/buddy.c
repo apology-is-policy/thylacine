@@ -117,7 +117,12 @@ void buddy_zone_init(struct buddy_zone *zone, paddr_t base_pa, paddr_t end_pa,
         struct_pages[i].order    = 0;
         struct_pages[i].flags    = PG_RESERVED;
         struct_pages[i].refcount = 0;
-        struct_pages[i]._pad     = 0;
+        // LINEAGE L-4b: the COW share count. Zeroed here for a clean initial
+        // state ONLY -- the allocator does not maintain it, and nothing may
+        // read it on a page that is not in an anon Burrow slot. Its value is
+        // ESTABLISHED at each of the three sites that put a page into one
+        // (page.h states the contract), never inherited from a prior owner.
+        struct_pages[i].cow_share = 0;
     }
 
     // Initialize per-order free lists empty. Sentinel heads point at

@@ -51,14 +51,14 @@ void test_proc_pgtable_alloc_smoke(void) {
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc returned NULL");
 
-    TEST_ASSERT(p->pgtable_root != 0,
+    TEST_ASSERT(p->as && p->as->pgtable_root != 0,
         "proc_alloc did not install a pgtable_root");
-    TEST_ASSERT((p->pgtable_root & (PAGE_SIZE - 1)) == 0,
+    TEST_ASSERT((p->as->pgtable_root & (PAGE_SIZE - 1)) == 0,
         "pgtable_root is not page-aligned");
 
     // RW-1 B-F1: no ASID at proc_alloc -- context_id stays 0 ("never assigned")
     // until the rolling allocator stamps it at the first context switch.
-    TEST_EXPECT_EQ(p->context_id, 0ull,
+    TEST_EXPECT_EQ(p->as->context_id, 0ull,
         "proc_alloc should leave context_id 0 (rolling ASID assigned at switch)");
 
     // Drive Proc to ZOMBIE so proc_free's lifecycle gate passes.
@@ -75,7 +75,7 @@ void test_proc_pgtable_lifecycle_stress(void) {
     for (int i = 0; i < ITERS; i++) {
         struct Proc *p = proc_alloc();
         TEST_ASSERT(p != NULL, "proc_alloc failed mid-stress");
-        TEST_ASSERT(p->pgtable_root != 0,
+        TEST_ASSERT(p->as && p->as->pgtable_root != 0,
             "proc_alloc didn't install pgtable_root mid-stress");
 
         p->state = 2;     // PROC_STATE_ZOMBIE
@@ -109,7 +109,7 @@ static void ttbr0_swap_child(void *arg) {
 
     struct Thread *t = current_thread();
     g_ttbr0_test_ttbr0[idx]   = ttbr0;
-    g_ttbr0_test_pgtable[idx] = t->proc->pgtable_root;
+    g_ttbr0_test_pgtable[idx] = t->proc->as->pgtable_root;
 
     exits("ok");
 }
@@ -186,7 +186,7 @@ void test_proc_pgtable_destroy_walk_releases_subtables(void) {
 
     struct Proc *p = proc_alloc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    TEST_ASSERT(p->pgtable_root != 0, "pgtable_root is 0");
+    TEST_ASSERT(p->as && p->as->pgtable_root != 0, "pgtable_root is 0");
 
     // Allocate three sub-tables (L1, L2, L3). Each is one 4 KiB page.
     struct page *l1_pg = alloc_pages(0, KP_ZERO);
@@ -201,7 +201,7 @@ void test_proc_pgtable_destroy_walk_releases_subtables(void) {
     // Install the chain. L0[0] → L1; L1[0] → L2; L2[0] → L3; L3[0]
     // unset (we don't install a leaf — leaf pages are owned by the VMA
     // layer; the destroy walker correctly DOES NOT free them).
-    u64 *l0 = (u64 *)pa_to_kva(p->pgtable_root);
+    u64 *l0 = (u64 *)pa_to_kva(p->as->pgtable_root);
     u64 *l1 = (u64 *)pa_to_kva(l1_pa);
     u64 *l2 = (u64 *)pa_to_kva(l2_pa);
     l0[0] = mk_table_pte(l1_pa);

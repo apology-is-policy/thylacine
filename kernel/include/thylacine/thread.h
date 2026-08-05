@@ -462,9 +462,43 @@ struct Thread {
     u64                nmigrations;
     u16                last_cpu;
     u16                _pad_prowl3[3];
+
+    // Task #96: the FP/SIMD half of the note-delivery context save.
+    //
+    // `note_saved_regs` above preserves x0-x30/sp/elr/spsr across a handler;
+    // this preserves V0-V31 + FPSR + FPCR. Both are needed for the same
+    // reason and neither is optional: a handler runs on THIS thread with no
+    // context switch, so cpu_switch_context's eager FP save (which covers a
+    // thread switched OUT) never fires, and the handler's first autovectorised
+    // memcpy or float operation silently corrupts the interrupted
+    // computation's registers.
+    //
+    // ctx.fp_v cannot serve here. It is the switch-out slot: if the handler
+    // is preempted, cpu_switch_context stores the HANDLER's FP state into it
+    // and the interrupted snapshot is gone.
+    //
+    // Inline rather than heap for the same reason the GP block is (see
+    // note_saved_* above): delivery must be alloc-free, because a kmalloc
+    // failure mid-delivery would silently drop the handler invocation.
+    // Costs 520 B/Thread; the dedicated "thread" kmem_cache goes from 3 to 2
+    // objects per 4 KiB slab, ~100 KiB total at v1.0 thread counts.
+    //
+    // _Alignas(16) is REQUIRED, not decorative: fp_save_area/fp_restore_area
+    // reach it with STP/LDP (SIMD&FP) pair instructions.
+    _Alignas(16) u8    note_saved_fp[FP_AREA_SIZE];
 };
 
-_Static_assert(sizeof(struct Thread) == 1232,
+_Static_assert(sizeof(struct Thread) == 1760,
+               "task #96 appended note_saved_fp[520] (_Alignas(16)) -- the "
+               "FP/SIMD half of the note-delivery context save: 1232 -> 1760 "
+               "(520 payload + 8 trailing pad to the struct's 16-byte "
+               "alignment). DELIBERATE and load-bearing: without it a note "
+               "handler's first autovectorised memcpy or float operation "
+               "silently corrupts the interrupted computation's V registers. "
+               "The dedicated `thread` kmem_cache drops from 3 to 2 objects "
+               "per 4 KiB slab (~100 KiB total at v1.0 thread counts) -- the "
+               "cost was weighed against a lazy/heap area and rejected "
+               "because delivery must stay alloc-free. "
                "prowl-3a appended the scheduler-introspection counters "
                "nsched + nsleeps + nmigrations (3 x u64) + last_cpu (u16) + "
                "pad at the tail: 1200 -> 1232 (READ-ONLY telemetry, the "
@@ -633,6 +667,74 @@ struct Thread *thread_create_user(struct Proc *proc,
                                   u64 user_sp_va,
                                   u64 user_arg,
                                   u64 user_tls_va);
+
+// LINEAGE L-3b: build the child's EL0 frame for a forked Thread.
+//
+// The DECISION half of thread_create_forked, split out because it is the part
+// worth stating and the part a unit test can reach: `dst` becomes `src` with
+// exactly two edits.
+//
+//   regs[0] = 0    the child's return value from the syscall it never made.
+//                  This is the whole of "fork returns twice": both Threads
+//                  resume at the same ELR, and x0 is the only thing that tells
+//                  them apart.
+//   sp      = child_sp
+//                  MANDATORY, not optional -- a child sharing its parent's
+//                  address space AND its stack pointer would corrupt both
+//                  frames on the first push. The caller validates it.
+//
+// Everything else is copied verbatim, and each omission is deliberate:
+// `elr` (resume at the same instruction), `spsr` (the child inherits the
+// parent's PSTATE -- NZCV matters if a conditional follows the syscall, and
+// the mode bits cannot be EL0-forged because the hardware wrote them), and
+// x1..x30 (the child continues the parent's C frame, so its callee-saved
+// registers and its LR must be the parent's).
+//
+// `esr`/`far` are copied too and are meaningless for the child -- they
+// describe the parent's trap. Nothing reads them on the return path.
+void fork_frame_init(struct exception_context *dst,
+                     const struct exception_context *src,
+                     u64 child_sp);
+
+// LINEAGE L-3b: create a USER-mode Thread that RESUMES a saved EL0 frame
+// rather than entering at a fresh entry point.
+//
+// The third creation shape, and the one a fork needs: thread_create_user
+// enters EL0 at (entry, sp, arg) because SYS_THREAD_SPAWN's caller hands the
+// kernel a continuation, but the raw `clone`/`rfork` contract has no entry
+// point at all -- the child resumes where the parent was, and userspace pops
+// its own function pointer afterwards (musl's aarch64 clone.s is literally
+// `cbz x0,1f` / `ldp x1,x0,[sp],#16` / `blr x1`). So the kernel must restore a
+// frame, not construct one.
+//
+// `frame` is the PARENT's live EL0 trapframe -- for a syscall that is the
+// `ctx` syscall_dispatch already holds. It is copied (via fork_frame_init)
+// onto the top of the child's own fresh kernel stack, exactly where
+// KERNEL_ENTRY would have built it, and ctx.sp points at it; the child's
+// first switch-in lands in thread_fork_trampoline, which runs the same
+// first-entry die-check thread_user_trampoline does and then falls into the
+// SHARED exception-return path rather than a second hand-rolled eret.
+//
+// FP/SIMD is inherited from the LIVE registers (fp_save_area), not from the
+// caller's saved Context -- the caller is running, so its Context holds
+// whatever it had at its last switch-OUT, which is stale. POSIX fork copies
+// FP state; none of L-3's own consumers read it across the call, but leaving
+// it zeroed would be a divergence with no reason behind it.
+//
+// `child_tls` is programmed verbatim, exactly as in thread_create_user. The
+// fork ABI's "0 means inherit the caller's TPIDR_EL0" rule is resolved by the
+// syscall handler before it gets here -- that layer has the caller in scope,
+// and the live TLS base is in a system register, not in the caller's saved
+// Context (which holds its last switch-OUT value).
+//
+// Caller-provided values are NOT validated here (same contract as
+// thread_create_user): the syscall handler owns the bound + alignment checks.
+//
+// Returns the new Thread on success, NULL on OOM.
+struct Thread *thread_create_forked(struct Proc *proc,
+                                    const struct exception_context *frame,
+                                    u64 child_sp,
+                                    u64 child_tls);
 
 // Release a Thread descriptor + its kstack. Caller must ensure the
 // thread is not current (current_thread() != t) and not still on any

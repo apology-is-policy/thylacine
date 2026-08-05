@@ -516,7 +516,7 @@ int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer) {
     if (!wb || !closer) return -1;
     if (wb->kind != WEFT_BIND_WEAVE) return -1;       // RING keeps its lifetime
     if (closer->pid != wb->map_pid)  return -1;       // not the mapping Proc
-    spin_lock(&closer->vma_lock);
+    spin_lock(&closer->as->lock);
     // The G-2 audit F1 guard: the binding's guest_va is a RECORD, not a live
     // claim -- the client may have SYS_BURROW_DETACHed the weave and a fresh
     // unrelated mapping may have landed at the same VA (vma_find_gap reuses
@@ -528,7 +528,7 @@ int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer) {
     int rc = -1;
     if (v && v->burrow == wb->burrow && v->vaddr_start == wb->guest_va)
         rc = burrow_unmap(closer, wb->guest_va, (size_t)wb->ring_size);
-    spin_unlock(&closer->vma_lock);
+    spin_unlock(&closer->as->lock);
     return rc;
 }
 
@@ -602,7 +602,16 @@ static int weft_reap_find_cb(struct Proc *q, void *arg) {
     struct weft_reap_find_ctx *c = arg;
     if ((u32)q->pid != c->pid) return 0;
     if (q->state != PROC_STATE_ALIVE) return 1;   // found; teardown owns it
-    spin_lock(&q->vma_lock);
+    // L-7 F5: kproc is in this walk, is ALIVE, and has `as == NULL` (pid 0,
+    // KP_ZERO'd through proc_init_fields). Pre-L-1 this line read an INLINE
+    // `q->vma_lock` and could not fault; L-1 turned it into a pointer deref and
+    // this site did not gain the guard its siblings did (devproc.c, devctl.c).
+    // Reachability is gated only by the bare-u32 pid compare against
+    // wb->map_pid -- the documented G-2 wrap seam -- so it is unreachable in
+    // practice, not by construction. Fail closed like the non-ALIVE arm: a Proc
+    // with no address space has no mapping for the reaper to tear down.
+    if (!q->as) return 1;
+    spin_lock(&q->as->lock);
     c->locked = q;
     return 1;   // pid matched -- stop the walk
 }
@@ -656,7 +665,7 @@ int weft_reap_sweep(u64 now_ns) {
             struct Vma *v = vma_lookup(q, wb->guest_va);
             if (v && v->burrow == wb->burrow && v->vaddr_start == wb->guest_va)
                 (void)burrow_unmap(q, wb->guest_va, (size_t)wb->ring_size);
-            spin_unlock(&q->vma_lock);
+            spin_unlock(&q->as->lock);
         }
         drop[ndrop++] = wb->burrow;
         wb->burrow = NULL;

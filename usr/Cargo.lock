@@ -492,6 +492,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "exec-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -512,6 +519,13 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "fork-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
 
 [[package]]
 name = "fs-mut-smoke"
@@ -1790,6 +1804,27 @@ dependencies = [
 
 [[package]]
 name = "virtio-net-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "viv"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "viv-pheno-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "viv-probe"
 version = "0.1.0"
 dependencies = [
  "libthyla-rs",

@@ -22,6 +22,7 @@
 
 struct Proc;
 struct Burrow;
+struct AddrSpace;   // LINEAGE L-1/L-2: the *_in forms address by address space
 
 // VMA permission bits. Map to PTE_KERN_TEXT/RO/RW + user-bit at PTE
 // installation time (P3-Db). At v1.0 P3-Da these are policy markers
@@ -42,6 +43,24 @@ struct Burrow;
 // per-client shared-mapping budget (Proc.shared_map_pages) exactly once per
 // charge. The budget invariant: shared_map_pages == Σ pages of SHARED_IN VMAs.
 #define VMA_FLAG_SHARED_IN  (1u << 0)
+
+// VMA_FLAG_COW (LINEAGE L-4b; docs/LINEAGE.md section 5.4): this VMA's
+// BURROW_TYPE_ANON_LAZY backing may hold pages that a SECOND address space's
+// clone Burrow also points at, so a write must go through the copy-on-write
+// break rather than straight to the page. Set by addrspace_clone on BOTH the
+// parent's VMA and the child's at fork, never cleared.
+//
+// Never cleared, deliberately. The flag says "this mapping participates in
+// COW", and the per-PAGE cow_share count is what actually decides each break --
+// so a VMA whose pages have all been taken in place costs one extra fault per
+// page and nothing else, while clearing it would need a scan proving no page in
+// the range is still shared. The page count is the truth; this is the routing.
+//
+// It is the PTE, not the VMA, that is made read-only: vma->prot keeps
+// VMA_PROT_WRITE so a write fault passes demand_page_locked's step-2 permission
+// check and reaches the break. A VMA that dropped WRITE would turn every COW
+// write into a segfault.
+#define VMA_FLAG_COW        (1u << 1)
 
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
 // struct Proc / struct Thread / struct Burrow / struct Handle pattern).
@@ -162,6 +181,25 @@ int vma_find_gap(struct Proc *p, u64 length,
 // Caller (proc_free) calls this BEFORE handle_table_free — handle
 // closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
+
+// LINEAGE L-2: the same four operations, addressed by AddrSpace instead of by
+// Proc. The Proc-taking forms above are thin wrappers over these -- they resolve
+// p->as and, where a cap is involved, ask proc_resource_exempt for the policy
+// verdict. Nothing else changes; the ~90 existing call sites keep their
+// signatures, and only the exec load path uses these.
+//
+// The distinction is not cosmetic: exec must build a COMPLETE address space
+// before it commits to it, so the target is DETACHED -- no Proc points at it
+// yet, so there is no p->as to route through, and charging the caller's current
+// (outgoing) address space would inflate a counter that is about to be freed
+// while leaving the new one reading zero for the rest of the Proc's life.
+//
+// `exempt` is the I-32 policy verdict for whoever the address space is being
+// built FOR. Passing it in rather than a Proc keeps this layer free of identity.
+int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
+void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
+struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
+void        vma_drain_in(struct AddrSpace *as);
 
 // Diagnostic accessors.
 u64      vma_total_allocated(void);

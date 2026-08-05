@@ -30,6 +30,7 @@
 
 #include "test.h"
 
+#include <thylacine/context.h>      // #96: FP_AREA_SIZE, fp_save_area/restore
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/thread.h>
@@ -277,4 +278,121 @@ void test_fp_round_trip_v_regs_fpsr_fpcr(void) {
     // Helper is suspended in its thread_switch call; we don't resume it
     // (mirrors test_context_round_trip's pattern). Free it cleanly.
     thread_free(t);
+}
+
+// ---------------------------------------------------------------------------
+// Task #96: the note-delivery FP save/restore area.
+//
+// cpu_switch_context's eager save (exercised by fp.round_trip above) covers a
+// thread switched OUT. A NOTE HANDLER runs on the SAME thread with no switch,
+// so kernel/notes.c must save and restore the interrupted EL0 code's V
+// registers explicitly around delivery. This exercises the two helpers that
+// do it.
+//
+// Scope: this proves the MECHANISM (the STP/LDP-Q sequence and the FPSR/FPCR
+// tail round-trip correctly). It does NOT prove the PLUMBING -- that notes.c
+// actually calls them at both delivery sites and at the restore. The in-guest
+// handler legs are what prove that, because a save site can be missing while
+// every kernel test still passes.
+static _Alignas(16) u8 g_fp_note_area[FP_AREA_SIZE];
+static _Alignas(16) u8 g_fp_note_verify[32 * 16];
+
+__attribute__((target("+fp+simd")))
+void test_fp_note_area_round_trip(void);
+__attribute__((target("+fp+simd")))
+void test_fp_note_area_round_trip(void) {
+    // A sentinel distinguishable per-register: V<n> gets the byte 0x40 + n,
+    // so a swapped pair or an off-by-one offset lands at a diagnosable byte.
+    for (int k = 0; k < 32; k++) {
+        for (int j = 0; j < 16; j++) g_fp_sentinel[k * 16 + j] = (u8)(0x40 + k);
+    }
+    u8 *src = g_fp_sentinel;
+    __asm__ __volatile__(
+        ".arch_extension fp\n\t"
+        "ldp q0,  q1,  [%0, #0]\n"   "ldp q2,  q3,  [%0, #32]\n"
+        "ldp q4,  q5,  [%0, #64]\n"  "ldp q6,  q7,  [%0, #96]\n"
+        "ldp q8,  q9,  [%0, #128]\n" "ldp q10, q11, [%0, #160]\n"
+        "ldp q12, q13, [%0, #192]\n" "ldp q14, q15, [%0, #224]\n"
+        "ldp q16, q17, [%0, #256]\n" "ldp q18, q19, [%0, #288]\n"
+        "ldp q20, q21, [%0, #320]\n" "ldp q22, q23, [%0, #352]\n"
+        "ldp q24, q25, [%0, #384]\n" "ldp q26, q27, [%0, #416]\n"
+        "ldp q28, q29, [%0, #448]\n" "ldp q30, q31, [%0, #480]\n"
+        : : "r"(src)
+        : "v0","v1","v2","v3","v4","v5","v6","v7",
+          "v8","v9","v10","v11","v12","v13","v14","v15",
+          "v16","v17","v18","v19","v20","v21","v22","v23",
+          "v24","v25","v26","v27","v28","v29","v30","v31");
+
+    // The state a note handler would be interrupting.
+    fp_save_area(g_fp_note_area);
+
+    // Now be the handler: clobber every V register, the way an autovectorised
+    // memcpy or a float operation would.
+    __asm__ __volatile__(
+        ".arch_extension fp\n\t"
+        "movi v0.16b,  #0xEE\n"  "movi v1.16b,  #0xEE\n"
+        "movi v2.16b,  #0xEE\n"  "movi v3.16b,  #0xEE\n"
+        "movi v4.16b,  #0xEE\n"  "movi v5.16b,  #0xEE\n"
+        "movi v6.16b,  #0xEE\n"  "movi v7.16b,  #0xEE\n"
+        "movi v8.16b,  #0xEE\n"  "movi v9.16b,  #0xEE\n"
+        "movi v10.16b, #0xEE\n"  "movi v11.16b, #0xEE\n"
+        "movi v12.16b, #0xEE\n"  "movi v13.16b, #0xEE\n"
+        "movi v14.16b, #0xEE\n"  "movi v15.16b, #0xEE\n"
+        "movi v16.16b, #0xEE\n"  "movi v17.16b, #0xEE\n"
+        "movi v18.16b, #0xEE\n"  "movi v19.16b, #0xEE\n"
+        "movi v20.16b, #0xEE\n"  "movi v21.16b, #0xEE\n"
+        "movi v22.16b, #0xEE\n"  "movi v23.16b, #0xEE\n"
+        "movi v24.16b, #0xEE\n"  "movi v25.16b, #0xEE\n"
+        "movi v26.16b, #0xEE\n"  "movi v27.16b, #0xEE\n"
+        "movi v28.16b, #0xEE\n"  "movi v29.16b, #0xEE\n"
+        "movi v30.16b, #0xEE\n"  "movi v31.16b, #0xEE\n"
+        : :
+        : "v0","v1","v2","v3","v4","v5","v6","v7",
+          "v8","v9","v10","v11","v12","v13","v14","v15",
+          "v16","v17","v18","v19","v20","v21","v22","v23",
+          "v24","v25","v26","v27","v28","v29","v30","v31");
+
+    // Name what must be ABSENT and check it FIRST. If the clobber above were
+    // optimised away, a pair of no-op helpers would still "pass" the compare
+    // below -- the test would be satisfiable by a completely broken system.
+    // Verify the handler really did destroy the state before trusting the
+    // restore to have brought it back.
+    u8 *cdst = g_fp_note_verify;
+    __asm__ __volatile__(
+        ".arch_extension fp\n\t"
+        "stp q0,  q1,  [%0, #0]\n"   "stp q2,  q3,  [%0, #32]\n"
+        "stp q4,  q5,  [%0, #64]\n"  "stp q6,  q7,  [%0, #96]\n"
+        "stp q8,  q9,  [%0, #128]\n" "stp q10, q11, [%0, #160]\n"
+        "stp q12, q13, [%0, #192]\n" "stp q14, q15, [%0, #224]\n"
+        "stp q16, q17, [%0, #256]\n" "stp q18, q19, [%0, #288]\n"
+        "stp q20, q21, [%0, #320]\n" "stp q22, q23, [%0, #352]\n"
+        "stp q24, q25, [%0, #384]\n" "stp q26, q27, [%0, #416]\n"
+        "stp q28, q29, [%0, #448]\n" "stp q30, q31, [%0, #480]\n"
+        : : "r"(cdst) : "memory");
+    TEST_EXPECT_EQ((u32)g_fp_note_verify[0],   0xEEu, "clobber did not take (V0)");
+    TEST_EXPECT_EQ((u32)g_fp_note_verify[511], 0xEEu, "clobber did not take (V31)");
+
+    // Return from the handler.
+    fp_restore_area(g_fp_note_area);
+
+    u8 *dst = g_fp_note_verify;
+    __asm__ __volatile__(
+        ".arch_extension fp\n\t"
+        "stp q0,  q1,  [%0, #0]\n"   "stp q2,  q3,  [%0, #32]\n"
+        "stp q4,  q5,  [%0, #64]\n"  "stp q6,  q7,  [%0, #96]\n"
+        "stp q8,  q9,  [%0, #128]\n" "stp q10, q11, [%0, #160]\n"
+        "stp q12, q13, [%0, #192]\n" "stp q14, q15, [%0, #224]\n"
+        "stp q16, q17, [%0, #256]\n" "stp q18, q19, [%0, #288]\n"
+        "stp q20, q21, [%0, #320]\n" "stp q22, q23, [%0, #352]\n"
+        "stp q24, q25, [%0, #384]\n" "stp q26, q27, [%0, #416]\n"
+        "stp q28, q29, [%0, #448]\n" "stp q30, q31, [%0, #480]\n"
+        : : "r"(dst) : "memory");
+
+    for (int i = 0; i < 32 * 16; i++) {
+        if (g_fp_note_verify[i] != g_fp_sentinel[i]) {
+            TEST_EXPECT_EQ((u32)g_fp_note_verify[i], (u32)g_fp_sentinel[i],
+                "fp_restore_area did not restore V regs (byte index = i/16 -> V reg)");
+            return;
+        }
+    }
 }

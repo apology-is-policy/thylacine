@@ -408,6 +408,48 @@ void test_smp_work_stealing_smoke(void) {
     // freed slot+kstack while the secondary's late register-save corrupted
     // it). thread_free now gates on on_cpu (kernel/thread.c) and waits out the
     // in-flight switch, so this free is safe without an explicit spin here.
+    //
+    // That covers SLEEPING-but-still-on_cpu. It does NOT cover a worker that
+    // never reached SLEEPING at all -- and the scenario named just above is
+    // exactly when that happens: the drain is a FIXED, CPU0-measured window, so
+    // a secondary host-descheduled on an E-core (#789) can still be inside the
+    // busy loop, not yet having observed g_steal_test_run == false. Such a
+    // worker is THREAD_RUNNING, which thread_free rejects at its ENTRY gate --
+    // before the on_cpu spin is ever reached, so that spin cannot help.
+    //
+    // Wait on the real precondition rather than hoping 20 ticks was enough.
+    // This is the #103 defect (scheduler.notify_idle_peer_smoke freed on a
+    // proxy event instead of a terminal) one test over, found by sweeping the
+    // suite's thread_free sites after fixing it there.
+    //
+    // Honest scope: instrumenting this loop measured ZERO busy-waits on a
+    // normal boot -- every worker had already left dispatch, so the existing
+    // 20-tick drain is sufficient in the common case and this is
+    // defense-in-depth, not a fix for something observed firing. It is kept
+    // because the hazard above is documented rather than hypothetical, the
+    // mechanism is identical to the #103 one (which reproduces deterministically
+    // once the RUNNING window is widened), and the cost is one state read on a
+    // path that executes once per boot.
+    const int DRAIN_BUDGET_TICKS = 200;
+    bool all_left_dispatch = false;
+    for (int spin = 0; spin < DRAIN_BUDGET_TICKS && !all_left_dispatch; spin++) {
+        all_left_dispatch = true;
+        for (unsigned i = 0; i < cpus; i++) {
+            struct Thread *w = g_steal_test_threads[i];
+            if (w && __atomic_load_n(&w->state, __ATOMIC_RELAXED) == THREAD_RUNNING) {
+                all_left_dispatch = false;
+                break;
+            }
+        }
+        if (!all_left_dispatch) timer_busy_wait_ticks(1);
+    }
+    // Its own message: a drain failure must never be read as a steal failure.
+    // On expiry the workers are deliberately NOT freed -- one is still RUNNING,
+    // which is the very condition thread_free extincts on.
+    TEST_ASSERT(all_left_dispatch,
+        "a worker never left dispatch after the exit signal "
+        "(the free precondition, not the steal itself)");
+
     for (unsigned i = 0; i < cpus; i++) {
         thread_free(g_steal_test_threads[i]);
         g_steal_test_threads[i] = NULL;

@@ -49,6 +49,91 @@ static int err_code(int ret) {
     return T_E_IO;
 }
 
+// stalk_tip_is_dir -- is the current resolution position a directory? The
+// subject is the trail tip, or `start` at depth 0.
+//
+// #81: POSIX resolves "." and ".." as PATH COMPONENTS, so the thing they are
+// resolved *in* must be a directory -- `/etc/passwd/..` is ENOTDIR, not a
+// lexical pop back to /etc. stalk handles both tokens itself (they never reach
+// Dev.walk), so the #79 gate -- which sits on the real-component path -- never
+// saw them, and a file tip silently accepted both.
+//
+// The type read is deliberately UNCROSSED, unlike the #79 gate (which runs
+// after cross-on-descent). Not an oversight -- crossing would be wrong here:
+//   - '..' pops a TRAIL ENTRY, and the pop lands on trail[depth-2] whichever
+//     Spoor occupies the tip. Crossing would spend a clone_walk_zero to read a
+//     type and change nothing about where we land.
+//   - '.' must leave the resolution EXACTLY where it was: `/mnt/.` has to mean
+//     `/mnt`, and under STALK_MOUNT `/mnt` deliberately does NOT cross (MREPL
+//     re-keys the mount point's own identity). Crossing on '.' would make
+//     `/mnt/.` return the mounted root while `/mnt` returns the mount point --
+//     a divergence this gate would be INTRODUCING, not fixing.
+// The two types can disagree only for a mount whose point and root differ in
+// kind (a directory grafted onto a file -- mount() does not gate on type).
+// Nothing in-tree builds one; if one existed, `/f/..` would answer ENOTDIR
+// while `/f/x` crossed and resolved.
+//
+// qid.type is the same TOTAL, fetch-free signal #79 established: every Spoor
+// carries one, so this gate takes no lock, issues no RPC, and cannot itself
+// fail -- there is no "type fetch failed" case to disposition.
+static bool stalk_tip_is_dir(struct Spoor **trail, int depth,
+                             struct Spoor *start) {
+    struct Spoor *tip = (depth > 0) ? trail[depth - 1] : start;
+    return (tip->qid.type & QTDIR) != 0;
+}
+
+// stalk_tip_may_search -- may the caller SEARCH the current resolution
+// position? Same subject as stalk_tip_is_dir: the trail tip, or `start` at
+// depth 0. Returns 0, or the errno to fail with.
+//
+// #84: POSIX resolves "." and ".." INSIDE the current directory, so they are
+// lookups like any other and require X (search) on the directory performing
+// them. Measured on a POSIX host, non-root: with `chmod 000 d`, `stat("d")`
+// SUCCEEDS (the lookup happens in d's parent) while `stat("d/.")`,
+// `stat("d/..")` and `stat("d/x")` are all EACCES. The real-component arm has
+// always X-checked its parent; the dot arms never reach that arm, so `d000/..`
+// resolved where the sibling `d000/x` was denied. Both tokens need it -- the
+// task named only '..', but the two measure identically in every row, exactly
+// as #81 found for the type gate.
+//
+// ORDER: the caller runs stalk_tip_is_dir FIRST. That is #79's rule (the x bit
+// on a non-directory is meaningless) and it is what POSIX does: a 0000 REGULAR
+// FILE answers ENOTDIR for `f/..`, not EACCES -- measured, both tokens. Type
+// before permission also keeps this gate free in the common failure.
+//
+// COST: `carried` when the pounce fused the tip's attrs into the walk that
+// produced it (the '.' case -- a '.' breaks a pounce RUN but does not disable
+// pouncing, so the previous run's leaf record describes exactly this tip),
+// else one spoor_stat_native. That stat is NOT a new cost class: it is the
+// same call the real-component arm makes at this same position, and on dev9p
+// it is served from the Larder attr cache -- which exists for precisely this
+// traffic ("the base X-check (stalk.c) re-stat storm", dev9p_stat_native).
+// A '..' path never pounces at all (path_has_dotdot), so nothing is slowed
+// that was fast.
+//
+// The subject is UNCROSSED, matching stalk_tip_is_dir -- required, not merely
+// consistent: crossing on '.' would move resolution (`/mnt/.` must still mean
+// `/mnt`, the divergence that comment refuses to introduce), so the two halves
+// of one gate must read one object. A mount whose point and root differ in X
+// is therefore judged by the point. That grants nothing: '.' stays put and
+// '..' pops to a Spoor the caller already holds, and reaching any real
+// component crosses and X-checks the mounted root as always.
+static int stalk_tip_may_search(struct Proc *p, struct Spoor **trail, int depth,
+                                struct Spoor *start, const struct t_stat *carried,
+                                bool carried_valid) {
+    struct Spoor *tip = (depth > 0) ? trail[depth - 1] : start;
+    if (!tip->dev || !tip->dev->perm_enforced) return 0;
+
+    struct t_stat st;
+    if (carried_valid) {
+        st = *carried;
+    } else {
+        int sr = spoor_stat_native(tip, &st);
+        if (sr != 0) return err_code(sr);
+    }
+    return (perm_check(p, &st, PERM_X) != 0) ? T_E_ACCES : 0;
+}
+
 // Clunk every owned trail entry trail[0..depth). Used both on the success path
 // (after the quarry is popped, this releases the ancestors) and on every
 // failure path.
@@ -142,9 +227,15 @@ int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
 // Spoors), which is incompatible with `..`'s pop-one-component semantics --
 // a pop into the middle of a pounced run has no Spoor to land on. Any ".."
 // in the path therefore disables the pounce wholesale and the resolver runs
-// today's per-component loop (the design's stated worst case). Resolved
-// paths in the motivating workloads are lexically cleaned ('..'-free): the
-// cwd join cleans (LS-4), and toolchain paths are absolute.
+// today's per-component loop (the design's stated worst case). Toolchain paths
+// in the motivating workloads are absolute and '..'-free, so the pounce
+// applies to them.
+//
+// #83 note: the cwd join no longer collapses '..' (collapsing it popped
+// components that were never walked -- see cwd_join), so a cwd-relative path
+// SPELLED with '..' now takes this per-component path. That is the same cost
+// an absolute path spelled with '..' has always paid, on exactly the paths
+// that were previously resolving incorrectly.
 static bool path_has_dotdot(const char *path, u64 pathlen) {
     u64 i = 0;
     while (i < pathlen) {
@@ -154,6 +245,22 @@ static bool path_has_dotdot(const char *path, u64 pathlen) {
         if (i - s == 2 && path[s] == '.' && path[s + 1] == '.') return true;
     }
     return false;
+}
+
+// path_has_trailing_slash -- POSIX 4.13: a pathname holding at least one
+// non-'/' character and ending in one or more '/' characters names a
+// DIRECTORY. The tokenizer collapses separator runs, so without this the
+// trailing '/' is simply dropped and `/etc/passwd/` resolves the file (#82).
+//
+// The "at least one non-'/'" clause is why this scans back rather than testing
+// the last byte: "/" and "//" have NO component before the trailing run, so
+// the rule does not apply to them at all (they name the base, which the caller
+// already vouched for). "" is likewise exempt.
+static bool path_has_trailing_slash(const char *path, u64 pathlen) {
+    if (pathlen == 0 || path[pathlen - 1] != '/') return false;
+    u64 t = pathlen;
+    while (t > 0 && path[t - 1] == '/') t--;
+    return t > 0;   // a real component precedes the trailing separator run
 }
 
 // stalk() -- the errp==NULL convenience wrapper (the common, errno-agnostic
@@ -207,6 +314,11 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
     bool          carried_valid = false;
     int           logical_depth = 0;
 
+    // #82: does this path end in a separator, asserting a directory? Computed
+    // once from the RAW path -- the tokenizer below drops the trailing run, so
+    // by the time resolution finishes nothing remembers it was there.
+    bool          trailing_slash = path_has_trailing_slash(path, pathlen);
+
     // Cross the BASE: `start` itself may be a mount point. If it crosses, the
     // owned crossed clone becomes trail[0] (so the first component searches the
     // mounted root, X-checked like any parent). If not, the base stays `start`
@@ -227,14 +339,40 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         while (i < pathlen && path[i] != '/') i++;
         u64 clen = i - s;   // component is path[s .. i)
 
-        // "." -- a no-op (stay at the current directory).
-        if (clen == 1 && path[s] == '.') continue;
+        // "." -- a no-op (stay at the current directory), but only if there IS
+        // a directory to stay in (#81; see stalk_tip_is_dir).
+        if (clen == 1 && path[s] == '.') {
+            if (!stalk_tip_is_dir(trail, depth, start))
+                                                 { err = T_E_NOTDIR; goto fail; }
+            // #84: '.' is a lookup performed IN the tip, so it needs X there.
+            // Type first (a non-directory is ENOTDIR, never EACCES).
+            int se = stalk_tip_may_search(p, trail, depth, start,
+                                          &carried, carried_valid);
+            if (se != 0)                         { err = se;         goto fail; }
+            continue;
+        }
 
         // ".." -- pop the trail. Contained at `start`: at the bottom (depth 0)
         // this is a no-op, so resolution can never escape above the base (the
         // chroot/pivot boundary -- I-28). The popped clone is clunk-safe (it
         // owns its fid: a walked child or a crossed clone).
+        //
+        // #81 gates the pop on the tip being a directory. This STRENGTHENS
+        // I-28 rather than touching it: the gate can only turn a resolution
+        // that used to succeed into a failure, never move a pop further up, so
+        // no path that previously stopped at `start` can now pass it. At depth
+        // 0 the subject is `start` itself -- an `openat()` on a non-directory
+        // fd answers ENOTDIR instead of handing back the file.
         if (clen == 2 && path[s] == '.' && path[s + 1] == '.') {
+            if (!stalk_tip_is_dir(trail, depth, start))
+                                                 { err = T_E_NOTDIR; goto fail; }
+            // #84: the pop is a lookup of ".." performed IN the tip, so it
+            // needs X on the directory being popped OUT of -- checked BEFORE
+            // the pop, while that directory is still the subject. Containment
+            // is untouched: the gate can only turn a success into a failure.
+            int se = stalk_tip_may_search(p, trail, depth, start,
+                                          &carried, carried_valid);
+            if (se != 0)                         { err = se;         goto fail; }
             if (depth > 0) spoor_clunk(trail[--depth]);
             carried_valid = false;   // hygiene; unreachable while pounce_ok
             continue;
@@ -264,6 +402,35 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
         } else {
             parent = start;
         }
+
+        // #79: the thing we are about to search must BE a directory. Without
+        // this, resolution walked a real component out of a file and reported
+        // the Dev's miss as T_E_NOENT -- so `/bin/ls/foo` answered "no such
+        // file" instead of ENOTDIR, and `os.IsNotExist` (the errno a build
+        // tool branches on to decide "safe to create") read TRUE for a path
+        // that can never exist. Note this is the resolver computing the answer
+        // itself, NOT transporting one: a Dev.walk returns `struct Walkqid *`
+        // with no errno channel, so a Dev's own ENOTDIR could not have reached
+        // EL0 even if it sent one.
+        //
+        // BEFORE the X-search check below, deliberately: the x bit on a
+        // non-directory is meaningless for traversal, so gating on it first
+        // would answer EACCES for a 0644 file and ENOTDIR for a 0755 one --
+        // the errno would turn on a bit that has no bearing on the question.
+        // This ordering discloses nothing new: reaching the gate already
+        // required X on every ancestor, and a plain stat() of `parent` (which
+        // needs only that same ancestor X) already reveals its type.
+        //
+        // qid.type is the signal because it is TOTAL -- every Spoor carries
+        // one, with no fetch and no RPC -- and because it is what dev9p.c
+        // already says it is for ("the kernel-side QT* superset only
+        // distinguishes DIR vs FILE for walk-time directory checks"). QTFILE
+        // is 0x00, so a Dev that never sets the field reads as "file", which
+        // is correct for the leaf Devs (null/zero/full/random/devnotes/pipe)
+        // that have no hierarchy to walk. Every Dev that DOES mint directory
+        // Spoors sets QTDIR, and spoor_clone copies qid -- so a mount cross
+        // and a 0-element clone-walk both preserve directory-ness.
+        if (!(parent->qid.type & QTDIR))  { err = T_E_NOTDIR; goto fail; }
 
         // =====================================================================
         // POUNCE (docs/POUNCE-DESIGN.md §5) -- batch the maximal run of
@@ -371,6 +538,18 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                         }
                     }
                     if (!co_mount) {
+                        // #82: this exit never reaches the quarry gate below,
+                        // so re-state it here on the leaf's fused record. That
+                        // record IS the quarry: the scan above proved no
+                        // component -- the leaf included -- is a mount point,
+                        // so no cross is owed and crossed == uncrossed. Before
+                        // the R/W check, the same type-before-permission order
+                        // the quarry gate uses.
+                        if (trailing_slash && !(sts[nrun - 1].qid_type & QTDIR)) {
+                            spoor_clunk(co);
+                            err = T_E_NOTDIR;
+                            goto fail;
+                        }
                         if (parent->dev->perm_enforced &&
                             perm_check(p, &sts[nrun - 1],
                                        perm_want_for_omode(omode)) != 0) {
@@ -543,6 +722,17 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
                 // an X-denial on the miss's parent masks the miss.
                 walkqid_free(w);
                 if (nc) { nc->aux = NULL; spoor_unref(nc); }   // never bound on partial
+                // #79: the batch's own not-a-directory case. The miss's parent
+                // is component k-1, whose fused record vouches for its type --
+                // so a run over `/a/file/c` stops at k=2 with sts[1] naming a
+                // non-directory, and the answer is ENOTDIR, not "no such c".
+                // Same ordering as the base gate above (type before X, for the
+                // same reason). k == 0 means the miss's parent is the run BASE,
+                // already gated before the batch was issued.
+                if (k > 0 && !(sts[k - 1].qid_type & QTDIR)) {
+                    err = T_E_NOTDIR;
+                    goto fail;
+                }
                 if (k > 0 && parent->dev->perm_enforced &&
                     perm_check(p, &sts[k - 1], PERM_X) != 0) {
                     err = T_E_ACCES;
@@ -554,6 +744,17 @@ static struct Spoor *stalk_core(struct Proc *p, struct Spoor *start,
 
             // Full walk, no split.
             if (query) {
+                // #82: the third gate site -- this exit skips the quarry too.
+                // The leaf record IS the would-be quarry: the split post-scan
+                // above tests EVERY component for mount membership in the
+                // query form (`bound` is false when nc == NULL, so the
+                // leaf-of-a-bind-walk carve-out cannot apply), so reaching
+                // here proves nothing in the run is a mount point.
+                if (trailing_slash && !(sts[nrun - 1].qid_type & QTDIR)) {
+                    walkqid_free(w);
+                    err = T_E_NOTDIR;
+                    goto fail;
+                }
                 // The 1-RPC stat: the leaf's fused record is the answer; no
                 // quarry Spoor / fid ever existed -- nothing to clunk, on
                 // either end. Success exit WITHOUT touching *errp.
@@ -693,6 +894,31 @@ per_component:
             carried_valid = false;   // the record described the mount point
         }
     }
+
+    // #82: a trailing '/' asserts the path names a DIRECTORY. Gate the QUARRY,
+    // and deliberately AFTER the cross above -- unlike #81's dot gate, which
+    // reads the tip UNCROSSED. The two ask different questions of the same
+    // field:
+    //   - `.`/`..` are about WHERE RESOLUTION STANDS. Under STALK_MOUNT a mount
+    //     point deliberately does not cross, so `/mnt/.` must equal `/mnt`;
+    //     crossing there would INTRODUCE a divergence.
+    //   - a trailing slash is about WHAT THE PATH NAMES, which is the crossed
+    //     result: `/mnt/` names the MOUNTED ROOT, not the shadowed point.
+    // The distinction is observable, not academic: nothing requires a mount
+    // point and its mounted root to agree on type (territory.c's mount() has no
+    // QTDIR check), so a directory mounted over a file makes `/mnt/` legal and
+    // a file mounted over a directory makes it ENOTDIR -- gating the uncrossed
+    // point would be wrong in BOTH directions. Placing it on the quarry gets
+    // every amode right for free, because the quarry is by construction the
+    // thing the resolution names (STALK_MOUNT's uncrossed quarry included: a
+    // trailing slash there asserts the MOUNT POINT is a directory, which is
+    // exactly what SYS_MOUNT names).
+    //
+    // BEFORE the final-hop R/W gate, matching #79's type-before-permission
+    // ordering: `open("/a/file/", O_RDONLY)` on an unreadable file is ENOTDIR,
+    // not EACCES -- the answer must not turn on a mode bit that has no bearing
+    // on whether the path is even well-formed.
+    if (trailing_slash && !(quarry->qid.type & QTDIR)) { err = T_E_NOTDIR; goto fail; }
 
     // Final hop. STALK_WALK (O_PATH) + STALK_MOUNT + STALK_STAT return the
     // resolved quarry unopened (a navigation / create / chroot / mount /

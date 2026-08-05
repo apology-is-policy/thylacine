@@ -1,5 +1,7 @@
 G-7b (the Quake gate, TAPESTRY.md section 9/18.9) -- guard
-S_ClearOverflow against an un-allocated known_sfx.
+S_ClearOverflow against an un-allocated known_sfx; and (CL-7 section 9
+step 3) give the null sound driver the S_UnblockSound its header
+declares.
 
 With -nosound (no virtio-sound driver exists at v1.0, TAPESTRY.md
 section 10 item 4), S_Init returns at its first line BEFORE allocating
@@ -12,8 +14,27 @@ result is a NULL deref (snare:segv addr=0xb008, the ->overflow field
 offset) the instant the demo loads its first map. Upstream simply
 omits the guard its neighbours carry; the fix mirrors them.
 
+The second hunk is the same shape of upstream omission, found by the GL
+build: snd_null.c defines S_BlockSound but NOT S_UnblockSound, though
+sound.h declares both and every other stub driver (snd_oss, snd_sndio)
+defines the pair. vid_sdl.c calls neither, so the SOFTWARE build links
+happily; vid_sgl.c calls both around its mode set, so tyr-glquake is
+the first configuration in this tree that can see it -- an undefined
+symbol at link, not a runtime fault.
+
 Applied to a build-dir COPY of the vendored tree (the SDL2/musl idiom;
 third_party/tyrquake stays byte-pristine).
+--- a/common/snd_null.c
++++ b/common/snd_null.c
+@@ -26,3 +26,8 @@
+ int SNDDMA_LockBuffer(void) { return 0; }
+ void SNDDMA_UnlockBuffer(void) { }
+ void S_BlockSound() {}
++/* pouch (CL-7 section 9 step 3): sound.h declares S_UnblockSound and
++ * vid_sgl.c calls it around VID_SetMode, but this driver defines only
++ * its S_BlockSound half -- unlike snd_oss / snd_sndio, which define
++ * both stubs. */
++void S_UnblockSound() {}
 --- a/common/snd_dma.c
 +++ b/common/snd_dma.c
 @@ -279,6 +279,14 @@

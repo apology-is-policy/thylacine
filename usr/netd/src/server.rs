@@ -2334,6 +2334,28 @@ impl Net {
             Some(PROTO_ICMP) => set.get::<icmp::Socket>(h).can_recv(),
             _ => {
                 let s = set.get::<tcp::Socket>(h);
+                // An ANNOUNCED slot is a LISTENER, and POSIX defines POLLIN on a
+                // listener as "a connection is pending -- accept will not
+                // block", not as "bytes are buffered". Without this a
+                // select()-style server never wakes on an inbound call: the
+                // listening socket's can_recv() is false, and its state
+                // (Listen, then Established once the handshake lands) is in
+                // neither branch below -- so check_ready returned 0 and the
+                // readiness Tread deferred forever while a real client sat
+                // waiting (#220, a documented seam since net-6b-4 and live the
+                // moment a Linux guest could poll at all).
+                //
+                // accept_ready is the SAME predicate poll_accepts uses to
+                // decide a deferred accept may complete, so a poller and an
+                // accepter cannot disagree about whether a call has arrived.
+                // The window is not narrow: poll_accepts only swaps when some
+                // fid is already blocked in open(listen), so a server that
+                // polls FIRST leaves the established call sitting in the
+                // listener's socket until it chooses to accept -- which is
+                // exactly the pattern this fixes.
+                if self.slot_listen_ep(n).is_some() {
+                    return accept_ready(s);
+                }
                 if s.can_recv() {
                     return true; // buffered data -> a read returns it (Data)
                 }

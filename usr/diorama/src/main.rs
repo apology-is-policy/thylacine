@@ -22,10 +22,37 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 
 mod server;
 
-use libthyla_rs::{t_close, t_poll, t_putstr, t_srv_accept, TPollFd, T_POLLHUP, T_POLLIN};
+use libthyla_rs::{
+    t_close, t_getpid, t_poll, t_putstr, t_srv_accept, TPollFd, T_POLLHUP, T_POLLIN,
+};
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // V-7: `--vivarium <runner-pid>` selects the per-container mode -- post
+    // /srv/viv-dio and answer pid enumeration/existence only for the
+    // container's process tree (docs/VIVARIUM.md section 7.2; the mode
+    // rationale is the server.rs header note). A malformed pid is a hard
+    // failure, not a silent fall-back to the unfiltered boot mode: falling
+    // back would serve the HOST view to a container.
+    {
+        let mut it = libthyla_rs::env::args();
+        let _ = it.next(); // argv[0]
+        while let Some(a) = it.next() {
+            if a == b"--vivarium" {
+                let runner = it
+                    .next()
+                    .and_then(|v| core::str::from_utf8(v).ok())
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(0);
+                if runner == 0 {
+                    t_putstr("diorama: bad --vivarium pid\n");
+                    return 1;
+                }
+                server::set_vivarium(runner, unsafe { t_getpid() } as u32);
+            }
+        }
+    }
+
     // Prove the tree walk + the bounded renderer + the parser before serving --
     // deterministic and mount-independent (the ptyfs selftest-before-post
     // pattern). A failure gates the boot rather than surfacing later as a
@@ -45,7 +72,9 @@ pub extern "C" fn rs_main() -> i64 {
     let listener = match server::post_srv_diorama() {
         Ok(l) => l,
         Err(()) => {
-            t_putstr("diorama: post /srv/diorama FAILED\n");
+            t_putstr("diorama: post /srv/");
+            t_putstr(server::srv_name());
+            t_putstr(" FAILED (already posted?)\n");
             return 1;
         }
     };

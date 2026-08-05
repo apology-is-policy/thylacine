@@ -198,6 +198,12 @@ struct NoteQueue {
 // re-typing the literal.
 #define NOTE_NAME_KILL "kill"
 
+// The two remaining v1.0 supported names, given macros so a second reader
+// (VIVARIUM's signal decode) matches `g_known_notes` by symbol rather than by
+// a re-typed literal. Same role as NOTE_NAME_KILL above.
+#define NOTE_NAME_PIPE       "pipe"
+#define NOTE_NAME_CHILD_EXIT "child_exit"
+
 // LS-5 (P2 default disposition): the cooked-Ctrl-C note. A .rodata string
 // literal -- safe to pass to exits() (whose by-reference exit_msg capture
 // requires program-lifetime storage; F10 audit close). Used by the EL0-

@@ -154,12 +154,12 @@ void test_pgtable_install_user_pte_smoke(void) {
     paddr_t backing_pa = page_to_pa(backing_pg);
 
     // Install RW + R (no exec).
-    int rc = mmu_install_user_pte(p->pgtable_root, 0,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
                                   USER_VA, backing_pa, VMA_PROT_RW,
                                   /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RW PTE should succeed");
 
-    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "walk to L3 entry returned 0 (sub-tables not installed)");
     TEST_ASSERT((pte & BIT_VALID) != 0,    "L3 entry valid");
     TEST_ASSERT((pte & BIT_TYPE_PAGE) != 0, "L3 entry is page descriptor");
@@ -177,12 +177,12 @@ void test_pgtable_install_user_pte_smoke(void) {
     // Install RX (read-only + exec) at a different vaddr.
     paddr_t code_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(code_pa != 0, "alloc_pages code backing failed");
-    rc = mmu_install_user_pte(p->pgtable_root, 0,
+    rc = mmu_install_user_pte(p->as->pgtable_root, 0,
                               USER_VA + ONE_PAGE, code_pa, VMA_PROT_RX,
                               /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RX PTE should succeed");
 
-    u64 pte_rx = walk_to_l3_entry(p->pgtable_root, USER_VA + ONE_PAGE);
+    u64 pte_rx = walk_to_l3_entry(p->as->pgtable_root, USER_VA + ONE_PAGE);
     TEST_ASSERT(pte_rx != 0, "walk to L3 for RX returned 0");
     TEST_ASSERT((pte_rx & BIT_PXN) != 0,    "RX still PXN (kernel never execs)");
     TEST_ASSERT((pte_rx & BIT_UXN) == 0,    "RX clears UXN (user can exec)");
@@ -203,22 +203,22 @@ void test_pgtable_install_user_pte_constraints(void) {
         "pgtable_root=0 rejected");
 
     // Unaligned vaddr.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
                                         USER_VA + 1, backing_pa, VMA_PROT_RW, false), -1,
         "unaligned vaddr rejected");
 
     // Unaligned pa.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
                                         USER_VA, backing_pa + 1, VMA_PROT_RW, false), -1,
         "unaligned pa rejected");
 
     // vaddr in TTBR1 high half — installer rejects (top bits set).
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
                                         0xFFFF000000000000ull, backing_pa, VMA_PROT_RW, false), -1,
         "high-VA vaddr rejected");
 
     // W+X prot.
-    TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, 0,
+    TEST_EXPECT_EQ(mmu_install_user_pte(p->as->pgtable_root, 0,
                                         USER_VA, backing_pa,
                                         VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC, false), -1,
         "W+X rejected at PTE installer (defense-in-depth)");
@@ -233,7 +233,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     TEST_ASSERT(backing_pa != 0, "backing alloc");
 
     // First install.
-    int rc = mmu_install_user_pte(p->pgtable_root, 0,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
                                   USER_VA, backing_pa, VMA_PROT_RW,
                                   /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "first install ok");
@@ -242,7 +242,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     // new sub-tables.
     u64 free_before_second = phys_free_pages();
 
-    rc = mmu_install_user_pte(p->pgtable_root, 0,
+    rc = mmu_install_user_pte(p->as->pgtable_root, 0,
                               USER_VA, backing_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, 0, "idempotent second install returns 0");
     TEST_EXPECT_EQ(phys_free_pages(), free_before_second,
@@ -251,7 +251,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     // Mismatching install (different PA) returns -1.
     paddr_t other_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(other_pa != 0, "other backing alloc");
-    rc = mmu_install_user_pte(p->pgtable_root, 0,
+    rc = mmu_install_user_pte(p->as->pgtable_root, 0,
                               USER_VA, other_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, -1, "mismatching install rejected");
 
@@ -294,7 +294,7 @@ void test_demand_page_smoke(void) {
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "demand_page should resolve a mapped VA");
 
     // Verify the L3 entry is now installed at USER_VA pointing at burrow->pages.
-    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "L3 entry not installed after demand_page");
     paddr_t expected_pa = page_to_pa(v->pages);
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, expected_pa,
@@ -380,7 +380,7 @@ void test_demand_page_lifecycle_round_trip(void) {
     // Verify the leaf PTEs are installed.
     for (int i = 0; i < 4; i++) {
         u64 va = USER_VA + (u64)i * ONE_PAGE;
-        u64 pte = walk_to_l3_entry(p->pgtable_root, va);
+        u64 pte = walk_to_l3_entry(p->as->pgtable_root, va);
         TEST_ASSERT(pte != 0, "L3 entry not installed for page i");
     }
 
@@ -470,7 +470,7 @@ void test_demand_page_file_smoke(void) {
     // The slot is now resident; the PTE points at it; the PTE is R+X (W^X).
     struct page *slotpg = burrow_file_slot_for_test(v, 0);
     TEST_ASSERT(slotpg != NULL, "slot 0 resident after fault");
-    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "L3 PTE installed after FILE demand-page");
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slotpg),
         "PTE PA equals the resident FILE slot page");
@@ -528,7 +528,7 @@ void test_demand_page_file_rodata_prot(void) {
 
     struct page *slotpg = burrow_file_slot_for_test(v, 0);
     TEST_ASSERT(slotpg != NULL, "slot 0 resident after fault");
-    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "L3 PTE installed after FILE demand-page");
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slotpg),
         "PTE PA equals the resident FILE slot page");
@@ -585,7 +585,7 @@ void test_demand_page_file_read_error_snare_bus(void) {
     // No page installed (no silent zero-fill) and no PTE.
     TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL,
         "no page installed on a read error (no silent zero-fill of text)");
-    TEST_ASSERT(walk_to_l3_entry(p->pgtable_root, USER_VA) == 0,
+    TEST_ASSERT(walk_to_l3_entry(p->as->pgtable_root, USER_VA) == 0,
         "no PTE installed on a read error");
 
     g_rev_read_fail = false;     // reset for other tests
@@ -894,7 +894,7 @@ void test_demand_page_lazy_zero_fill(void) {
 
     // No page committed yet: slot empty + page_count 0 (the free reservation).
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 0) == NULL, "slot 0 starts empty (lazy)");
-    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "lazy attach charges no pages");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 0ull, "lazy attach charges no pages");
 
     // Write-fault page 0 -> demand-zero install + charge-on-fault.
     struct fault_info fi;
@@ -904,14 +904,14 @@ void test_demand_page_lazy_zero_fill(void) {
 
     struct page *slot = burrow_lazy_slot_for_test(v, 0);
     TEST_ASSERT(slot != NULL, "slot 0 resident after fault");
-    TEST_EXPECT_EQ((u64)p->page_count, 1ull, "charge-on-fault: page_count == 1");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull, "charge-on-fault: page_count == 1");
     u8 *bytes = (u8 *)pa_to_kva(page_to_pa(slot));
     TEST_EXPECT_EQ((u64)bytes[0], 0ull,             "demand-zero: byte 0 is zero");
     TEST_EXPECT_EQ((u64)bytes[0x800], 0ull,         "demand-zero: mid byte is zero");
     TEST_EXPECT_EQ((u64)bytes[PAGE_SIZE - 1], 0ull, "demand-zero: last byte is zero");
 
     // PTE is RW/XN (W^X-clean: writable, never executable).
-    u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
+    u64 pte = walk_to_l3_entry(p->as->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "L3 PTE installed after lazy demand-page");
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, page_to_pa(slot), "PTE PA = the resident slot page");
     TEST_ASSERT((pte & BIT_PXN) != 0, "lazy page PXN (kernel never execs user)");
@@ -922,7 +922,7 @@ void test_demand_page_lazy_zero_fill(void) {
     make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
     r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident lazy page resolves");
-    TEST_EXPECT_EQ((u64)p->page_count, 1ull, "re-fault does NOT double-charge (still 1)");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull, "re-fault does NOT double-charge (still 1)");
 
     // Other slots stay sparse (only the faulted page committed).
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 1) == NULL, "slot 1 sparse");
@@ -947,25 +947,25 @@ void test_demand_page_lazy_decommit_refault(void) {
         make_fi(&fi, USER_VA + (u64)i * ONE_PAGE + 0x10, /*is_write=*/true, /*is_instr=*/false);
         TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "fault page i");
     }
-    TEST_EXPECT_EQ((u64)p->page_count, 3ull, "3 faulted pages charged");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 3ull, "3 faulted pages charged");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 2) != NULL, "slot 2 resident");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 3) == NULL, "slot 3 sparse");
 
     // Decommit the whole 4-page range (under vma_lock, like the syscall path).
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     int drc = burrow_decommit(p, USER_VA, FOUR_PAGES);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     TEST_EXPECT_EQ(drc, 0, "decommit succeeds");
-    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "decommit uncharges the 3 resident pages");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 0ull, "decommit uncharges the 3 resident pages");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 0) == NULL, "slot 0 released");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 2) == NULL, "slot 2 released");
-    TEST_ASSERT(walk_to_l3_entry(p->pgtable_root, USER_VA) == 0, "PTE cleared after decommit");
+    TEST_ASSERT(walk_to_l3_entry(p->as->pgtable_root, USER_VA) == 0, "PTE cleared after decommit");
 
     // Re-fault page 0 -> a FRESH zero page, re-charged.
     struct fault_info fi;
     make_fi(&fi, USER_VA + 0x20, /*is_write=*/false, /*is_instr=*/false);
     TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "re-fault after decommit");
-    TEST_EXPECT_EQ((u64)p->page_count, 1ull, "re-fault re-charges (1)");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull, "re-fault re-charges (1)");
     struct page *slot = burrow_lazy_slot_for_test(v, 0);
     TEST_ASSERT(slot != NULL, "slot 0 re-resident");
     TEST_EXPECT_EQ((u64)((u8 *)pa_to_kva(page_to_pa(slot)))[0], 0ull, "re-faulted page is fresh-zero");
@@ -982,7 +982,7 @@ void test_demand_page_lazy_charge_on_fault_oom(void) {
     TEST_ASSERT(p != NULL, "proc_alloc failed");
     // A proc_alloc'd Proc is principal_id 0 (PRINCIPAL_INVALID) -> NOT exempt, so the
     // I-32 page cap applies. Park page_count AT the cap so the next commit fails.
-    p->page_count = PROC_PAGE_MAX;
+    p->as->page_count = PROC_PAGE_MAX;
 
     struct Burrow *v = burrow_create_anon_lazy(ONE_PAGE);
     TEST_ASSERT(v != NULL, "burrow_create_anon_lazy");
@@ -996,10 +996,10 @@ void test_demand_page_lazy_charge_on_fault_oom(void) {
     enum fault_result r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER, "over-cap commit fails the fault (graceful OOM)");
     TEST_ASSERT(burrow_lazy_slot_for_test(v, 0) == NULL, "no page committed on a cap-hit");
-    TEST_ASSERT(walk_to_l3_entry(p->pgtable_root, USER_VA) == 0, "no PTE on a cap-hit");
-    TEST_EXPECT_EQ((u64)p->page_count, (u64)PROC_PAGE_MAX, "page_count unchanged (charge rolled back)");
+    TEST_ASSERT(walk_to_l3_entry(p->as->pgtable_root, USER_VA) == 0, "no PTE on a cap-hit");
+    TEST_EXPECT_EQ((u64)p->as->page_count, (u64)PROC_PAGE_MAX, "page_count unchanged (charge rolled back)");
 
-    p->page_count = 0;     // reset (hygiene; drop_proc doesn't touch page_count)
+    p->as->page_count = 0;     // reset (hygiene; drop_proc doesn't touch page_count)
     drop_proc(p);
     burrow_unref(v);
 }
@@ -1012,7 +1012,7 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
     s64 r = sys_burrow_attach_lazy_for_proc(p, FOUR_PAGES);
     TEST_ASSERT(r > 0, "lazy attach failed");
     u64 va = (u64)r;
-    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "lazy attach commits nothing");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 0ull, "lazy attach commits nothing");
 
     // Fault 2 of the 4 pages resident -> page_count 2.
     for (int i = 0; i < 2; i++) {
@@ -1020,13 +1020,13 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
         make_fi(&fi, va + (u64)i * ONE_PAGE + 0x8, /*is_write=*/true, /*is_instr=*/false);
         TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED, "fault lazy page i");
     }
-    TEST_EXPECT_EQ((u64)p->page_count, 2ull, "2 resident pages charged");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 2ull, "2 resident pages charged");
 
     // Detach the whole region. The uncharge must be ONLY the 2 RESIDENT pages -- the
     // lazy region charged per-fault, NOT the whole 4-page span (the eager detach
     // would over-uncharge by 2 if it used length/PAGE_SIZE here).
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, FOUR_PAGES), 0, "detach lazy region");
-    TEST_EXPECT_EQ((u64)p->page_count, 0ull,
+    TEST_EXPECT_EQ((u64)p->as->page_count, 0ull,
         "detach uncharges exactly the 2 resident pages (NOT the whole 4-page span)");
     TEST_ASSERT(vma_lookup(p, va) == NULL, "VMA gone after detach");
 

@@ -29,6 +29,10 @@
 //   stat            -> SYS_STAT on the synthetic Devs: /ctl + /env stat as the
 //                      directories they are, and a /proc entry's S_IFMT lets
 //                      S_ISDIR/S_ISREG classify it (V-4b-5)
+//   trailing slash  -> the #86 rows (POSIX 4.13, Linux-shaped): a trailing
+//                      '/' asserts the leaf names a directory; the splitter
+//                      strips + reports it and each caller applies its row
+//                      (pre-#86 the whole class was a blanket EINVAL)
 //
 // On success: "pouch-hello-fs: ALL WIRES PASS" + exit 0. Any wire failing
 // prints "pouch-hello-fs: <wire> FAIL ..." and exits non-zero so joey's
@@ -189,8 +193,19 @@ int main(void) {
 	if (stat(padded, &sb) == 0) return fail("stat(padded pid)", "a zero-padded pid resolved");
 
 	// --- mkdir a working dir at root (absolute) ---
+	// Stale-run self-heal: the pool PERSISTS across boots, so a mid-leg FAIL
+	// leaves residue that would fail the NEXT boot's mkdir even after the
+	// bug is fixed (the shared-fixture lesson: a fixture that is not reset
+	// generates its own failures). Best-effort remove every name any leg
+	// can leave behind, then the empty dir.
 	const char *wdir = "/pouch-fs-probe";
-	(void)rmdir(wdir);                 // clean a stale run (best-effort)
+	(void)unlink("/pouch-fs-probe/a.txt");
+	(void)unlink("/pouch-fs-probe/b.txt");
+	(void)unlink("/pouch-fs-probe/ext.txt");
+	(void)rmdir("/pouch-fs-probe/d86/sub");
+	(void)rmdir("/pouch-fs-probe/d86");
+	(void)rmdir("/pouch-fs-probe/m86");
+	(void)rmdir(wdir);
 	if (mkdir(wdir, 0755) != 0) return fail("mkdir", "create working dir");
 
 	// --- chdir + getcwd round-trip ---
@@ -282,6 +297,44 @@ int main(void) {
 	if (!saw_b) return fail("readdir", "b.txt not enumerated");
 	if (saw_a)  return fail("readdir", "renamed-away a.txt still enumerated");
 	if (others) return fail("readdir", "unexpected extra entry");
+
+	// --- #86: the trailing-slash rows (POSIX 4.13, LINUX-shaped -- musl's
+	// target ABI; where macOS diverges the Linux answer wins: open(O_CREAT)
+	// on an absent "x/" is EISDIR not ENOENT, and rename(file, "absent/")
+	// is ENOTDIR not ENOENT, per fs/namei.c do_renameat2's "unless the
+	// source is a directory, trailing slashes give -ENOTDIR"). Pre-#86 the
+	// splitter answered EINVAL for the WHOLE class -- wrong in both
+	// directions -- so every leg here fails on the pre-fix libc. ---
+	if (mkdir("d86/", 0755) != 0) return fail("mkdir(dir/)", "trailing slash must create");
+	if (unlink("b.txt/") == 0) return fail("unlink(file/)", "resolved a file through a trailing slash");
+	if (errno != ENOTDIR) return fail("unlink(file/)", "errno not ENOTDIR");
+	if (access("b.txt", F_OK) != 0)
+		return fail("unlink(file/)", "the file was DELETED (a strip-only fix does this)");
+	if (unlink("d86/") == 0) return fail("unlink(dir/)", "unlinked a directory");
+	if (errno != EISDIR) return fail("unlink(dir/)", "errno not EISDIR");
+	if (unlink("nope86/") == 0) return fail("unlink(absent/)", "resolved an absent path");
+	if (errno != ENOENT) return fail("unlink(absent/)", "errno not ENOENT");
+	if (rmdir("b.txt/") == 0) return fail("rmdir(file/)", "removed a file");
+	if (errno != ENOTDIR) return fail("rmdir(file/)", "errno not ENOTDIR");
+	if (mkdir("b.txt/", 0755) == 0) return fail("mkdir(file/)", "created over a file");
+	if (errno != EEXIST) return fail("mkdir(file/)", "errno not EEXIST");
+	int f86 = open("c86/", O_WRONLY | O_CREAT, 0644);
+	if (f86 >= 0) { close(f86); return fail("open(absent/ O_CREAT)", "created at a slash-terminated name"); }
+	if (errno != EISDIR) return fail("open(absent/ O_CREAT)", "errno not EISDIR");
+	f86 = open("d86/", O_WRONLY | O_CREAT, 0644);
+	if (f86 >= 0) { close(f86); return fail("open(dir/ O_CREAT)", "opened a directory O_CREAT"); }
+	if (errno != EISDIR) return fail("open(dir/ O_CREAT)", "errno not EISDIR");
+	if (rename("b.txt/", "x86") == 0) return fail("rename(file/, x)", "renamed a file through a trailing slash");
+	if (errno != ENOTDIR) return fail("rename(file/, x)", "errno not ENOTDIR");
+	if (rename("b.txt", "gone86/") == 0) return fail("rename(f, absent/)", "renamed onto an absent slash name");
+	if (errno != ENOTDIR) return fail("rename(f, absent/)", "errno not ENOTDIR (the do_renameat2 source rule)");
+	if (rename("d86/", "m86") != 0) return fail("rename(dir/, m)", "a slashed directory source must rename");
+	if (rename("m86", "d86") != 0) return fail("rename", "restore m86 -> d86");
+	// The other splitter branch (a parent component before the leaf):
+	if (mkdir("d86/sub/", 0755) != 0) return fail("mkdir(d/sub/)", "nested trailing slash must create");
+	if (rmdir("d86/sub/") != 0) return fail("rmdir(d/sub/)", "nested trailing slash must remove");
+	if (rmdir("d86/") != 0) return fail("rmdir(dir/)", "trailing slash must remove");
+	if (access("d86", F_OK) == 0) return fail("rmdir(dir/)", "d86 still present");
 
 	// --- unlink ---
 	if (unlink("b.txt") != 0) return fail("unlink", "b.txt");

@@ -81,6 +81,14 @@ void sched_arm_clear_on_cpu(struct Thread *prev);
 // arch/arm64/asid.{c,h}.
 void sched_install_asid_ttbr0(struct Thread *next);
 
+// LINEAGE L-2: install `t`'s current address space in the hardware immediately,
+// rather than at the next context switch. Only execve needs this -- it is the
+// one path that swaps a live thread's address space and then erets straight
+// back to EL0, so no switch would ever load the new root. See sched.c for the
+// IRQ-mask and `isb` reasoning; the barrier is also what lets the caller then
+// tear the OUTGOING address space down.
+void sched_activate_addrspace(struct Thread *t);
+
 // Diagnostic accessor: per-CPU idle thread pointer. Returns the Thread
 // installed at sched_init time (CPU 0 = kthread; CPU N = the per_cpu_main
 // idle). NULL if sched_init has not yet been called for cpu_idx, or

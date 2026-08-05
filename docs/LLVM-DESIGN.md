@@ -598,6 +598,27 @@ The path of least invention, per the OSMesa verification:
    software Quake proved the 2D present path; GLQuake proves the GL stack,
    through llvmpipe, through the JIT capability, onto the same compositor
    scanout. Plus a gears-class smoke for CI.
+   *(**LANDED**. `build_tyrquake()` builds both renderers from one source
+   copy — upstream's `nqsw-list` and `nqgl-list` differ in exactly the
+   renderer group and the video driver, so the object lists are written that
+   way rather than as two flat lists free to drift. Driven by
+   `tools/interactive/ls-gfx-glquake.exp`; see `docs/reference/143-tyrquake.md`.*
+
+   *What makes it an ACCEPTANCE gate rather than a third prover is what it does
+   NOT contain: **no Thylacine patch for the capability**. `vid_sgl.c` is stock
+   1996-lineage SDL-GL code, and step 2's "stock SDL-GL programs recompile" is
+   only true if that stays so — which meant moving the `CAP_JIT` clearance walk
+   out of the application and into `THYLACINE_GL_CreateContext`. The app already
+   declared its intent by asking for a GL context; on this platform that request
+   IS a request to JIT. SDL grants nothing — corvus still decides against the
+   calling principal's eligibility. The gate asserts the acquisition line's
+   `sdl-gl:` prefix precisely to catch a regression into patching the port.*
+
+   *The one real port fix the GL build needed is unrelated to any of that:
+   `snd_null.c` defines `S_BlockSound` but not its declared `S_UnblockSound`,
+   and `vid_sdl.c` calls neither while `vid_sgl.c` calls both — so tyr-glquake
+   is simply the first configuration in this tree that could see a latent
+   upstream omission.)*
 4. **Stretch, cuttable**: lavapipe (Vulkan-conformant software Vulkan) —
    same libs, new frontend; explicitly NOT a gate.
 
@@ -765,8 +786,10 @@ New load-bearing findings the §2 owes-list did NOT have:
 ### 16.2 The environ ground truth (§2's open question — CLOSED)
 
 `kernel/include/thylacine/exec.h:158`: the exec frame always writes
-`envp[0] = NULL` (*"no envp at v1.0"*) — the kernel never populates
-envp, for any program; `environ` is empty in every pouch program today
+`envp[0] = NULL` (*"no envp at v1.0"*) — the kernel never populated
+envp, for any program; `environ` was empty in every pouch program
+**until #140** (LINEAGE L-6c), which projects a Proc's `/env` onto the
+exec frame, so musl's own `__environ = envp` now yields the real set
 and `/env` (kernel-cloned per-Proc) is the sole environment channel.
 The `pouch-env` crt boundary line (populate `environ` from `/env` at
 startup; `/env` stays the source of truth) is **confirmed required** at
@@ -1581,7 +1604,7 @@ wires -> deferred to CL-1b (their real home is the spawn fd-list).
 
 `0025-pouch-env.patch`: a crt boundary line (`src/env/_pouch_env.c` +
 `__libc_start_main` hook) that populates `__environ` from the `/env` device
-at startup, closing the 16.2 finding (envp is always empty; `/env` is the
+at startup, closing the 16.2 finding (envp was always empty pre-#140; `/env` is the
 sole environment channel). It `readdir`s `/env`, opens+reads each value, and
 builds a malloc'd `"NAME=value"` vector so `getenv()` + `environ` iteration
 both work; fail-soft (a missing `/env` leaves the empty envp). Proven
@@ -2296,7 +2319,7 @@ In-guest (`/jit-prover`, boot-fatal), one process across the capability
 boundary so `CAP_JIT` is the only variable:
 
     ungated create REFUSED (no CAP_JIT) -- correct
-    CAP_JIT acquired via the jit clearance
+    CAP_JIT acquired (bearer) via the jit clearance
     JITed fn(35,100) = 142 -- emitted, published, EXECUTED
     re-emitted fn returns 99 -- icache invalidate is live
 

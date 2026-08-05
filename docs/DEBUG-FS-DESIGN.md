@@ -1088,3 +1088,50 @@ debugger lands (8c). The 8a *kernel surface* keeps the lineage-correct Plan 9
 verb names (`stop`/`start`/`step`/`waitstop`/`attach`/`detach`) and descriptive
 file names (`mem`/`regs`/`wait`) — the names readers expect from devproc; no
 thematic rename is forced onto the kernel primitives.
+
+
+## 5e. The settled-park predicate (#133)
+
+`devproc_all_threads_parked` is the "is the target stopped" predicate every
+stopped-only reader and the blocking `stop` wait share. Until #133 it tested two
+things: the thread is registered on its `debug_rendez`, and it is not on-cpu.
+
+**Both of those hold on a thread that is leaving the park.** `wake_rendez_waiter`
+sets `state = THREAD_RUNNABLE` and `ready()`s the thread, but deliberately does
+*not* clear `rendez_blocked_on` -- only the owning thread may clear it, so that
+the #811 group-terminate cascade can read it under `wait_lock`. Between a
+resume's `wakeup` and the thread actually being dispatched, the registration is
+stale and the predicate lies.
+
+The failure that surfaced it: a debugger that issues `start`, then `stop` again
+before the resumed thread has been dispatched. The `stop` sets `debug_stop_req`,
+`devproc_debug_wait_stopped` scans, finds the stale park, and returns at once --
+so `stop`'s documented "blocks until stopped" is not true. The read that follows
+lands after the thread has been dispatched and cleared `rendez_blocked_on`, but
+before it has re-parked, and answers a bare EPERM. A caller cannot tell that from
+a real authorization denial, which is why `debug-probe` treated it as fatal.
+
+The fix is one more term -- `state == THREAD_SLEEPING` -- factored out as the
+pure `devproc_park_state_is_settled(registered, on_cpu, state)`.
+
+Three properties make it the right shape:
+
+- **It only narrows.** The term can turn a TRUE into a FALSE and never the
+  reverse, so nothing becomes newly readable. On a privilege surface that is the
+  direction a change has to move in to be safe by construction.
+- **It converges.** A RUNNABLE peer is dispatched, re-checks its cond, and (if
+  the stop still holds) re-registers as SLEEPING. The caller's poll terminates.
+- **It composes with the job-stop case.** A job-parked thread is SLEEPING, so a
+  debugger stopping an already-job-parked target still reads fully-stopped
+  immediately -- the property section 3 relies on.
+
+The `step` path needed no change. It polls `devproc_target_fully_stopped`, whose
+`debug_stop_req == 0` gate already rejects the stale window -- `proc_debug_resume`
+clears the flag and the EC 0x32 handler re-sets it. A `stop` caller has no such
+discriminator, because it *sets* `debug_stop_req` before it waits; the state term
+is the one that serves both.
+
+**No model change.** `debug_stop.tla` models an abstract parked state. The defect
+was in the implementation's two-field *encoding* of that state, which admitted a
+configuration the model does not have -- so the fix moves the implementation
+toward the model rather than changing it, and the model stays the gate.

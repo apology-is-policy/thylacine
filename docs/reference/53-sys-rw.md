@@ -18,7 +18,8 @@ Args (both):
     x2 = len    (bytes)
 
 Return:
-    x0 = bytes transferred (>=0); 0 on EOF (read only); -1 on error.
+    x0 = bytes transferred (>=0); 0 on EOF (read only); a negative errno on
+    error (#100 -- see "Error returns" below). Test with `< 0`, never `== -1`.
 ```
 
 Per-call cap: `SYS_RW_MAX = 128 KiB` (CF-3 A; was 4096). Userspace still loops for larger transfers — short reads/writes remain normal, and a single 9P RPC's payload is additionally clamped by the negotiated msize. The staging is two-tier: ops ≤ `SYS_RW_STACK` (4096, matches `PIPE_BUF_SIZE`) use the kernel-stack scratch exactly as before; larger ops take a transient `kmalloc` bounce (freed before return), degrading to the stack tier on allocation failure so memory pressure shortens an op rather than failing it.
@@ -34,7 +35,7 @@ SYS_PIPE (P5-fd-pipe) grants `RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER` on both
 
 `buf_va` and `buf_va + len` must both lie strictly within `[0, UACCESS_USER_VA_TOP)`. The bound (`1ull << 47`) is the same as SYS_PUTS uses (R12-uaccess F210). Overflow on `buf_va + len` is rejected.
 
-`len == 0` is a no-op success (returns 0) — but the handle is still validated to match POSIX-style discipline (bad fd returns -1 regardless of length).
+`len == 0` is a no-op success (returns 0) — but the handle is still validated to match POSIX-style discipline (bad fd returns `-T_E_BADF` regardless of length; the comment at that site said "should return -EBADF" for years above code returning `-1`, which #100 finally made true).
 
 ---
 
@@ -61,7 +62,7 @@ SYS_PIPE (P5-fd-pipe) grants `RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER` on both
 
 ### `sys_read_handler`
 
-Mirror image: validate, look up handle (RIGHT_READ), call `dev->read` into a stack scratch, copy scratch back to user-VA via `uaccess_store_u8`. Returns bytes read, 0 on EOF, -1 on error.
+Mirror image: validate, look up handle (RIGHT_READ), call `dev->read` into a stack scratch, copy scratch back to user-VA via `uaccess_store_u8`. Returns bytes read, 0 on EOF, a negative errno on error.
 
 Partial-fault behavior on the user-VA store loop: returns -1. Bytes already written into user-VA up to the fault remain; bytes drained from `dev->read` beyond the fault are LOST (data-loss caveat — Phase 5+ can pre-touch pages to mitigate).
 
@@ -99,7 +100,8 @@ Returns 0 on success / -1 on fault. Identical contract to `uaccess_load_u8`.
 | Test | Covers |
 |---|---|
 | `sys_rw.write_then_read_round_trip` | Write 7 bytes through `sys_write_for_proc(fd_wr, ...)`; read them back through `sys_read_for_proc(fd_rd, ...)`. FIFO order preserved. **The canonical end-to-end test of the byte I/O path.** |
-| `sys_rw.rights_check` | Out-of-range fd (9999) returns -1 from both handlers. (Rights-reduction can't be tested without a `sys_handle_reduce` syscall, deferred.) |
+| `sys_rw.rights_check` | Out-of-range fd (9999) returns `-T_E_BADF` from both handlers. (Rights-reduction can't be tested without a `sys_handle_reduce` syscall, deferred.) |
+| `sys_rw.write_after_read_close_returns_epipe` | #100: write to a closed-read-end pipe returns exactly `-T_E_PIPE`. Asserts the VALUE — `!= -1` and `< 0` both pass on the pre-#100 code, so only the exact value discriminates. |
 | `sys_rw.zero_length_validates_fd` | Zero-length read/write on a valid fd → 0; on a bad fd → -1. POSIX-discipline behavior. |
 | `sys_rw.read_after_close_returns_eof` | Close the write end; subsequent read on the empty pipe with `write_eof` set returns 0 (EOF) immediately without blocking. **Composes SYS_READ + the blocking-pipe EOF protocol (`specs/pipe.tla::ReadEof`).** |
 
@@ -200,3 +202,41 @@ SYS_READ / SYS_WRITE return either the byte count or -1; there's no way to commu
 - `arch/arm64/uaccess.h` (kernel-side uaccess primitives).
 - `specs/pipe.tla` (the wait/wake protocol composed with SYS_READ's EOF path).
 - ROADMAP §7.3 (Phase 5 deliverables; P5-fd-rw section).
+
+
+## Error returns (#100, ER-3)
+
+Until #100 every failure on this surface was a flat `-1`. That is the value
+pouch's `__syscall_ret` treats as the generic flat-error sentinel (so a pouch
+program saw `EIO` for everything) and the value stock musl reads as `errno = 1`
+(so a VIVARIUM guest, which is stock musl and cannot carry pouch's boundary-line
+patch, saw `EPERM` for everything). The Go fork's ABI header meanwhile documents
+errno as "a negative value in `[-4095, -2]`" — a range `-1` is not in.
+
+The rejects now name their reason. This was never a guess: each is a LOCAL gate
+where the cause is known exactly at the point of rejection, which is why it
+needed no new mechanism and no change to the dispatch.
+
+| Condition | Returns |
+|---|---|
+| bad / wrong-kind handle, or missing RIGHT_READ / RIGHT_WRITE | `-T_E_BADF` |
+| `T_OPATH` (`CWALKONLY`) handle — no byte I/O, len 0 included | `-T_E_BADF` |
+| bad user buffer (`sys_validate_user_buf`) | `-T_E_FAULT` |
+| Dev has no `.read` / `.write` slot | `-T_E_INVAL` |
+| positioned op with a negative offset, or `off + len` past `INT64_MAX` | `-T_E_INVAL` |
+| a Dev error | the Dev's own code, clamped to the `[-4095, -2]` window |
+
+Three things deliberately did NOT change:
+
+- The `!t` / `!p` preamble guards stay `-1` per the ERRORS.md rule — internal
+  invariant violations, structurally unreachable from EL0.
+- The positioned-op **non-seekable** arms stay `-1`. They mean POSIX `ESPIPE`,
+  `T_E_SPIPE` (29) is not in the registry, and appending an errno is
+  signoff-bearing. `EINVAL` there would be a substitution of a different error
+  *class* — the "differently wrong" trap. Tracked as task #106. Note the
+  contrast with the offset arms above, which DID take `EINVAL`: "resulting
+  offset negative or unrepresentable" is literally what POSIX names `EINVAL`
+  for, so no substitution was involved.
+- `handle_close`'s internal contract. `SYS_CLOSE` maps its `-1` to `-T_E_BADF`
+  at the syscall boundary, so the ~20 in-kernel callers that test `== 0` or
+  ignore the result are untouched.

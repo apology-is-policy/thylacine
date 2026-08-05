@@ -260,11 +260,19 @@ struct Dev {
     //     to `newname` under newdir; an existing destination is atomically
     //     replaced (POSIX rename / 9P Trenameat). olddir + newdir must share the
     //     dev (the SYS_RENAME handler checks) AND, for dev9p, the same session
-    //     (dev9p_rename checks). Returns 0 on success, -1 on failure. NULL slot
-    //     => SYS_RENAME returns -1.
+    //     (dev9p_rename checks).
     //   unlink(parent, name, flags) — remove `name` under parent; flags 0 = a
     //     non-directory, SYS_UNLINK_REMOVEDIR = an empty directory (9P
-    //     Tunlinkat). Returns 0 / -1. NULL slot => SYS_UNLINK returns -1.
+    //     Tunlinkat).
+    //
+    // #80 CONTRACT CHANGE: both return 0 on success and a SPECIFIC `-T_E_*` on
+    // failure — no longer a flat -1. The handlers propagate the value verbatim,
+    // so an impl returning -1 would surface as the generic sentinel (rendered
+    // EIO across the pouch boundary-line, per the T_E_PERM warning in
+    // <thylacine/errno.h>) and re-open the errno-loss this closed. An impl that
+    // forwards a SERVER errno must bound it first (dev9p_wire_errno). A NULL
+    // slot => the syscall answers -T_E_OPNOTSUPP (this Dev has no such
+    // operation), distinct from any verdict an impl can return.
     int            (*rename)(struct Spoor *olddir, const char *oldname,
                              struct Spoor *newdir, const char *newname);
     int            (*unlink)(struct Spoor *parent, const char *name, u32 flags);

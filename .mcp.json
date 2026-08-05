@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "quaestor": {
-      "command": "go",
-      "args": ["-C", "vault/meta/quaestor", "run", ".", "serve"]
-    }
-  }
-}

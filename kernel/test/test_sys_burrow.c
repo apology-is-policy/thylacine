@@ -173,7 +173,7 @@ void test_sys_burrow_attach_rejects_bad_length(void) {
         "attach with a NULL Proc rejected");
 
     // No rejected call installed a VMA.
-    TEST_ASSERT(p->vmas == NULL, "rejected attach must not install a VMA");
+    TEST_ASSERT(p->as->vmas == NULL, "rejected attach must not install a VMA");
 
     drop_proc(p);
 }
@@ -262,8 +262,8 @@ void test_sys_burrow_attach_lazy_window_va(void) {
     TEST_EXPECT_EQ(burrow_handle_count(b),  0, "lazy Burrow handle_count == 0");
 
     // A lazy reservation commits no pages (page_count 0) but charges the VMA axis.
-    TEST_EXPECT_EQ((u64)p->page_count, 0ull, "lazy attach charges no pages (free reservation)");
-    TEST_EXPECT_EQ((u64)p->vma_count,  1ull, "lazy attach charges one VMA (I-32 4th axis)");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 0ull, "lazy attach charges no pages (free reservation)");
+    TEST_EXPECT_EQ((u64)p->as->vma_count,  1ull, "lazy attach charges one VMA (I-32 4th axis)");
 
     drop_proc(p);
 }
@@ -288,7 +288,7 @@ void test_sys_burrow_attach_lazy_large(void) {
     struct Vma *vma = vma_lookup(p, va);
     TEST_ASSERT(vma != NULL && vma->vaddr_end - vma->vaddr_start == BIG,
         "the 512-MiB VMA spans the whole reservation");
-    TEST_EXPECT_EQ((u64)p->page_count, 0ull,
+    TEST_EXPECT_EQ((u64)p->as->page_count, 0ull,
         "a 512-MiB lazy reservation commits NO pages (page_count 0)");
 
     // Above BURROW_RESERVE_MAX (1 GiB) is still rejected (the lazy reservation cap).

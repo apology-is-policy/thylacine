@@ -51,6 +51,9 @@ const PASS_MICHAEL: &[u8] = b"correct-horse-battery-staple-v1";
 const VERB_AUTH: u8 = 1;
 const VERB_CLEARANCE_LIST: u8 = 14;
 const VERB_CLEARANCE_ACTIVATE: u8 = 15;
+// #139: the SELF form -- corvus authorizes the connection's kernel-stamped
+// principal, no bearer token. Reached by `jit-prover self`.
+const VERB_CLEARANCE_ACTIVATE_SELF: u8 = 18;
 const CORVUS_PROTOCOL_VERSION: u8 = 1;
 const TOKEN_LEN: usize = 33;
 const LEVEL_JIT: &[u8] = b"jit";
@@ -251,54 +254,108 @@ pub extern "C" fn rs_main() -> i64 {
         fail("jit-prover: FAIL connect /srv/corvus\n");
     }
 
-    let mut auth_pl: Vec<u8> = Vec::new();
-    auth_pl.push(7);
-    auth_pl.extend_from_slice(b"michael");
-    auth_pl.push((PASS_MICHAEL.len() & 0xff) as u8);
-    auth_pl.push(((PASS_MICHAEL.len() >> 8) & 0xff) as u8);
-    auth_pl.extend_from_slice(PASS_MICHAEL);
-    let (st, resp) = match unsafe { exchange(conn, VERB_AUTH, &auth_pl) } {
-        Some(x) => x,
-        None => fail("jit-prover: FAIL AUTH transport\n"),
-    };
-    if st != 0 || resp.len() != TOKEN_LEN {
-        fail("jit-prover: FAIL AUTH (bad status/token)\n");
-    }
-    let mut token = [0u8; TOKEN_LEN];
-    token.copy_from_slice(&resp);
+    // `jit-prover self` takes the #139 SELF form; bare `jit-prover` takes the
+    // bearer form. The mode is an ARGUMENT rather than a probe-and-fall-back
+    // because this is a PROVER: each invocation must assert one specific path
+    // works, and a prover that silently accepts either would still pass with the
+    // path under test removed.
+    //
+    // The two are not interchangeable, and which one applies is decided by how
+    // the process was spawned, not by what it wants:
+    //   - bare: at boot, joey spawns this with a plain t_spawn, so it runs as
+    //     PRINCIPAL_SYSTEM -- not a corvus user, with no eligibility of its own.
+    //     It must AUTH as michael to borrow an identity. SELF would correctly
+    //     refuse it.
+    //   - self: post-login from a user shell, running as michael by the kernel's
+    //     own stamp (login spawns with SPAWN_IDENTITY_SET). It cannot AUTH at
+    //     all -- login's session is bound and handle_auth refuses -- so the
+    //     bearer form is unreachable, which is exactly the #139 defect.
+    let want_self =
+        libthyla_rs::env::args().nth(1).map(|a| a == b"self").unwrap_or(false);
 
-    let (st, list) = match unsafe { exchange(conn, VERB_CLEARANCE_LIST, &token) } {
-        Some(x) => x,
-        None => fail("jit-prover: FAIL CLEARANCE_LIST transport\n"),
-    };
-    if st != 0 {
-        fail("jit-prover: FAIL CLEARANCE_LIST (status)\n");
-    }
-    if !list_has_level(&list, LEVEL_JIT) {
-        fail("jit-prover: FAIL not eligible for jit\n");
+    let granted;
+    if want_self {
+        // No AUTH, no token, no CLEARANCE_LIST (which is itself token-gated).
+        // The whole request is "activate jit"; corvus supplies the identity from
+        // the kernel's stamp on this connection.
+        let mut act_pl: Vec<u8> = Vec::new();
+        act_pl.push(LEVEL_JIT.len() as u8);
+        act_pl.extend_from_slice(LEVEL_JIT);
+        act_pl.extend_from_slice(&0u64.to_le_bytes()); // self_restrict
+        act_pl.extend_from_slice(&0u64.to_le_bytes()); // valid_until_req
+        let (st, ar) = match unsafe { exchange(conn, VERB_CLEARANCE_ACTIVATE_SELF, &act_pl) } {
+            Some(x) => x,
+            None => fail("jit-prover: FAIL CLEARANCE_ACTIVATE_SELF transport\n"),
+        };
+        if st != 0 || ar.len() != 12 {
+            // The status byte is printed, not just the step: "SELF refused"
+            // names the door but not the reason, and the two reasons that
+            // matter here (BAD_AUTH = no live session for this principal,
+            // PERMISSION_DENIED = not eligible / not a corvus user) call for
+            // completely different next moves.
+            let mut b = [0u8; 24];
+            t_putstr("jit-prover: FAIL CLEARANCE_ACTIVATE_SELF status=");
+            t_putstr(dec(st as i64, &mut b));
+            t_putstr("\n");
+            unsafe { libthyla_rs::t_exits(1) }
+        }
+        granted = u64::from_le_bytes([ar[4], ar[5], ar[6], ar[7], ar[8], ar[9], ar[10], ar[11]]);
+    } else {
+        let mut auth_pl: Vec<u8> = Vec::new();
+        auth_pl.push(7);
+        auth_pl.extend_from_slice(b"michael");
+        auth_pl.push((PASS_MICHAEL.len() & 0xff) as u8);
+        auth_pl.push(((PASS_MICHAEL.len() >> 8) & 0xff) as u8);
+        auth_pl.extend_from_slice(PASS_MICHAEL);
+        let (st, resp) = match unsafe { exchange(conn, VERB_AUTH, &auth_pl) } {
+            Some(x) => x,
+            None => fail("jit-prover: FAIL AUTH transport\n"),
+        };
+        if st != 0 || resp.len() != TOKEN_LEN {
+            fail("jit-prover: FAIL AUTH (bad status/token)\n");
+        }
+        let mut token = [0u8; TOKEN_LEN];
+        token.copy_from_slice(&resp);
+
+        let (st, list) = match unsafe { exchange(conn, VERB_CLEARANCE_LIST, &token) } {
+            Some(x) => x,
+            None => fail("jit-prover: FAIL CLEARANCE_LIST transport\n"),
+        };
+        if st != 0 {
+            fail("jit-prover: FAIL CLEARANCE_LIST (status)\n");
+        }
+        if !list_has_level(&list, LEVEL_JIT) {
+            fail("jit-prover: FAIL not eligible for jit\n");
+        }
+
+        let mut act_pl: Vec<u8> = Vec::new();
+        act_pl.extend_from_slice(&token);
+        act_pl.push(LEVEL_JIT.len() as u8);
+        act_pl.extend_from_slice(LEVEL_JIT);
+        act_pl.extend_from_slice(&0u64.to_le_bytes()); // self_restrict
+        act_pl.extend_from_slice(&0u64.to_le_bytes()); // valid_until_req
+        let (st, ar) = match unsafe { exchange(conn, VERB_CLEARANCE_ACTIVATE, &act_pl) } {
+            Some(x) => x,
+            None => fail("jit-prover: FAIL CLEARANCE_ACTIVATE transport\n"),
+        };
+        if st != 0 || ar.len() != 12 {
+            fail("jit-prover: FAIL CLEARANCE_ACTIVATE (status/len)\n");
+        }
+        granted = u64::from_le_bytes([ar[4], ar[5], ar[6], ar[7], ar[8], ar[9], ar[10], ar[11]]);
     }
 
-    let mut act_pl: Vec<u8> = Vec::new();
-    act_pl.extend_from_slice(&token);
-    act_pl.push(LEVEL_JIT.len() as u8);
-    act_pl.extend_from_slice(LEVEL_JIT);
-    act_pl.extend_from_slice(&0u64.to_le_bytes()); // self_restrict
-    act_pl.extend_from_slice(&0u64.to_le_bytes()); // valid_until_req
-    let (st, ar) = match unsafe { exchange(conn, VERB_CLEARANCE_ACTIVATE, &act_pl) } {
-        Some(x) => x,
-        None => fail("jit-prover: FAIL CLEARANCE_ACTIVATE transport\n"),
-    };
-    if st != 0 || ar.len() != 12 {
-        fail("jit-prover: FAIL CLEARANCE_ACTIVATE (status/len)\n");
-    }
-    let granted = u64::from_le_bytes([ar[4], ar[5], ar[6], ar[7], ar[8], ar[9], ar[10], ar[11]]);
     if granted != T_CAP_JIT {
         fail("jit-prover: FAIL granted caps != CAP_JIT\n");
     }
     if cap::use_grant(Caps::from_bits(granted)).is_err() {
         fail("jit-prover: FAIL cap use_grant (redeem)\n");
     }
-    t_putstr("jit-prover: CAP_JIT acquired via the jit clearance\n");
+    // The form is named so a gate can assert WHICH path carried it.
+    if want_self {
+        t_putstr("jit-prover: CAP_JIT acquired (SELF) via the jit clearance\n");
+    } else {
+        t_putstr("jit-prover: CAP_JIT acquired (bearer) via the jit clearance\n");
+    }
 
     // --- Step 5: emit, publish, EXECUTE. -------------------------------------
     let mut region = match CodeRegion::new(4096) {

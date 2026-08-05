@@ -98,33 +98,33 @@ void test_resource_page_charge_caps(void) {
     // Charge exactly to the cap, then one more must be refused (charging
     // nothing). proc_page_charge only moves the COUNTER -- no real allocation.
     TEST_ASSERT(proc_page_charge(p, PROC_PAGE_MAX), "charge to the cap must succeed");
-    TEST_EXPECT_EQ(p->page_count, PROC_PAGE_MAX, "page_count == cap after full charge");
+    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX, "page_count == cap after full charge");
     TEST_ASSERT(!proc_page_charge(p, 1u), "charge past the cap must be refused");
-    TEST_EXPECT_EQ(p->page_count, PROC_PAGE_MAX, "a refused charge charges nothing");
+    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX, "a refused charge charges nothing");
 
     // Uncharge, then re-charge the freed pages.
     proc_page_uncharge(p, 100u);
-    TEST_EXPECT_EQ(p->page_count, PROC_PAGE_MAX - 100u, "uncharge 100");
+    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX - 100u, "uncharge 100");
     TEST_ASSERT(proc_page_charge(p, 100u), "re-charge the freed 100 pages");
-    TEST_EXPECT_EQ(p->page_count, PROC_PAGE_MAX, "back at the cap");
+    TEST_EXPECT_EQ(p->as->page_count, PROC_PAGE_MAX, "back at the cap");
 
     // Uncharge everything, then an over-uncharge clamps at 0 (no underflow).
     proc_page_uncharge(p, PROC_PAGE_MAX);
-    TEST_EXPECT_EQ(p->page_count, 0u, "full uncharge -> 0");
+    TEST_EXPECT_EQ(p->as->page_count, 0u, "full uncharge -> 0");
     proc_page_uncharge(p, 50u);
-    TEST_EXPECT_EQ(p->page_count, 0u, "over-uncharge clamps at 0 (no underflow)");
+    TEST_EXPECT_EQ(p->as->page_count, 0u, "over-uncharge clamps at 0 (no underflow)");
 
     // Overflow guard: a charge whose sum would wrap u32 is refused even though
     // it is "under the cap" arithmetic-wise after wrap.
     TEST_ASSERT(proc_page_charge(p, 1u), "charge 1");
     TEST_ASSERT(!proc_page_charge(p, 0xFFFFFFFFu), "overflowing charge refused");
-    TEST_EXPECT_EQ(p->page_count, 1u, "the overflowing charge charged nothing");
+    TEST_EXPECT_EQ(p->as->page_count, 1u, "the overflowing charge charged nothing");
 
     // Exempt Procs bypass the cap entirely.
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
     TEST_ASSERT(proc_page_charge(sys, PROC_PAGE_MAX), "exempt charge to cap");
     TEST_ASSERT(proc_page_charge(sys, PROC_PAGE_MAX), "exempt charge PAST the cap");
-    TEST_EXPECT_EQ(sys->page_count, 2u * PROC_PAGE_MAX, "exempt is unbounded by the cap");
+    TEST_EXPECT_EQ(sys->as->page_count, 2u * PROC_PAGE_MAX, "exempt is unbounded by the cap");
 
     res_drop(p); res_drop(sys);
 }
@@ -136,35 +136,35 @@ void test_resource_page_charge_caps(void) {
 // REFUSED charge must not move it (it charged nothing).
 void test_resource_page_peak_high_water(void) {
     struct Proc *p = res_make(A_REAL_USER);
-    TEST_EXPECT_EQ(p->page_peak, 0u, "a fresh Proc has no peak");
+    TEST_EXPECT_EQ(p->as->page_peak, 0u, "a fresh Proc has no peak");
 
     TEST_ASSERT(proc_page_charge(p, 100u), "charge 100");
-    TEST_EXPECT_EQ(p->page_peak, 100u, "peak tracks the first charge");
+    TEST_EXPECT_EQ(p->as->page_peak, 100u, "peak tracks the first charge");
 
     TEST_ASSERT(proc_page_charge(p, 50u), "charge 50 more");
-    TEST_EXPECT_EQ(p->page_peak, 150u, "peak follows page_count up");
+    TEST_EXPECT_EQ(p->as->page_peak, 150u, "peak follows page_count up");
 
     // The load-bearing property: releasing memory does NOT lower the peak.
     proc_page_uncharge(p, 140u);
-    TEST_EXPECT_EQ(p->page_count, 10u, "uncharge lowered the live count");
-    TEST_EXPECT_EQ(p->page_peak, 150u, "peak does NOT follow page_count down");
+    TEST_EXPECT_EQ(p->as->page_count, 10u, "uncharge lowered the live count");
+    TEST_EXPECT_EQ(p->as->page_peak, 150u, "peak does NOT follow page_count down");
 
     // A re-charge below the previous peak leaves the peak alone.
     TEST_ASSERT(proc_page_charge(p, 20u), "charge back up to 30");
-    TEST_EXPECT_EQ(p->page_count, 30u, "live count 30");
-    TEST_EXPECT_EQ(p->page_peak, 150u, "peak unchanged below the high-water");
+    TEST_EXPECT_EQ(p->as->page_count, 30u, "live count 30");
+    TEST_EXPECT_EQ(p->as->page_peak, 150u, "peak unchanged below the high-water");
 
     // ...and one that exceeds it raises it.
     TEST_ASSERT(proc_page_charge(p, 200u), "charge past the old peak");
-    TEST_EXPECT_EQ(p->page_peak, 230u, "peak rises past the old high-water");
+    TEST_EXPECT_EQ(p->as->page_peak, 230u, "peak rises past the old high-water");
 
     // A REFUSED charge charges nothing, so it must not move the peak either --
     // otherwise a Proc that merely ASKED for the cap would report having used it.
-    u32 before = p->page_peak;
+    u32 before = p->as->page_peak;
     TEST_ASSERT(!proc_page_charge(p, PROC_PAGE_MAX), "over-cap charge refused");
-    TEST_EXPECT_EQ(p->page_peak, before, "a refused charge does not move the peak");
+    TEST_EXPECT_EQ(p->as->page_peak, before, "a refused charge does not move the peak");
     TEST_ASSERT(!proc_page_charge(p, 0xFFFFFFFFu), "overflowing charge refused");
-    TEST_EXPECT_EQ(p->page_peak, before, "a refused overflow does not move the peak");
+    TEST_EXPECT_EQ(p->as->page_peak, before, "a refused overflow does not move the peak");
 
     res_drop(p);
 }
@@ -238,7 +238,7 @@ void test_resource_measured_compile_needs_raise(void) {
                    "the measured stressor is expected to fit the default budget");
     TEST_ASSERT(proc_page_charge(p, CL5_MEASURED_CC1_PEAK_PAGES),
                 "the measured cc1 peak fits the default budget (97.8% of it)");
-    TEST_EXPECT_EQ(p->page_peak, CL5_MEASURED_CC1_PEAK_PAGES,
+    TEST_EXPECT_EQ(p->as->page_peak, CL5_MEASURED_CC1_PEAK_PAGES,
                    "the high-water recorded the measured peak");
     proc_page_uncharge(p, CL5_MEASURED_CC1_PEAK_PAGES);
 
@@ -252,13 +252,42 @@ void test_resource_measured_compile_needs_raise(void) {
     TEST_ASSERT(real_tu > PROC_PAGE_MAX, "a real TU exceeds the default budget");
     TEST_ASSERT(!proc_page_charge(p, real_tu),
                 "a real project TU does NOT fit the default 256 MiB budget");
-    TEST_EXPECT_EQ(p->page_count, 0u, "the refused charge committed nothing");
+    TEST_EXPECT_EQ(p->as->page_count, 0u, "the refused charge committed nothing");
 
-    // ...and DOES fit once the budget is raised. That is the whole mechanism.
-    p->page_budget = real_tu + 32768u;               // +128 MiB of headroom
-    TEST_ASSERT(proc_page_charge(p, real_tu),
+    // ...and DOES fit for a Proc CREATED with a raised budget. That is the
+    // whole mechanism -- and it is driven through the real seeding path
+    // (proc_alloc_in's page_budget parameter, which is what rfork hands the
+    // parent's authorization to) rather than by writing p->page_budget.
+    //
+    // I-32 (A) makes that distinction load-bearing: Proc.page_budget is the
+    // AUTHORIZATION, AddrSpace.page_budget is the cap addrspace_charge_pages
+    // actually reads, and the space is seeded from the authorization AT
+    // CREATION. So a mid-life write to the Proc field models no reachable
+    // state and charges against the stale default. Writing BOTH fields would
+    // make this test pass while leaving the production path broken -- which is
+    // precisely the state this test caught after the L-1 extraction.
+    u32 raised = real_tu + 32768u;                   // +128 MiB of headroom
+    struct Proc *big = proc_alloc_in(NULL, raised);
+    if (!big) extinction("test_resource: proc_alloc_in(raised) failed");
+    big->principal_id = A_REAL_USER;                 // NOT exempt
+    TEST_EXPECT_EQ(big->as->page_budget, raised,
+                   "creation seeds the ENFORCED cap, not just the authorization");
+    TEST_ASSERT(proc_page_charge(big, real_tu),
                 "a real project TU fits a raised budget");
-    TEST_EXPECT_EQ(p->page_count, real_tu, "the raised charge committed in full");
+    TEST_EXPECT_EQ(big->as->page_count, real_tu, "the raised charge committed in full");
+    res_drop(big);
+
+    // The converse, and the half with teeth: a NARROWED authorization must
+    // reach the space too, or a restricted parent's child silently runs with
+    // the full default. Same seeding path, opposite direction.
+    struct Proc *small = proc_alloc_in(NULL, 64u);
+    if (!small) extinction("test_resource: proc_alloc_in(narrow) failed");
+    small->principal_id = A_REAL_USER;
+    TEST_EXPECT_EQ(small->as->page_budget, 64u, "a narrowed cap reaches the space");
+    TEST_ASSERT(!proc_page_charge(small, 65u),
+                "a charge above the narrowed cap is refused");
+    TEST_ASSERT(proc_page_charge(small, 64u), "a charge at the narrowed cap fits");
+    res_drop(small);
 
     // The TCB is exempt regardless of budget -- which is exactly why the clade
     // gate's own clang++ (spawned by joey, PRINCIPAL_SYSTEM) does not hit this.
@@ -351,32 +380,32 @@ void test_resource_page_cap_attach_enforced(void) {
     // Pre-charge one below the cap so the boundary is exercised WITHOUT a
     // 256-MiB allocation. The 2-page attach would push to cap+1 -> refused at
     // the cap check, which precedes burrow_create_anon (nothing allocated).
-    __atomic_store_n(&p->page_count, PROC_PAGE_MAX - 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->page_count, PROC_PAGE_MAX - 1u, __ATOMIC_RELEASE);
     s64 over = sys_burrow_attach_for_proc(p, 2u * PAGE_SIZE);
     TEST_EXPECT_EQ(over, (s64)(-T_E_NOMEM), "over-cap attach -> -ENOMEM");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX - 1u,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX - 1u,
                    "an over-cap attach charges/allocates nothing");
 
     // A 1-page attach fits exactly (page_count + 1 == cap) -> succeeds + charges.
     s64 fit = sys_burrow_attach_for_proc(p, PAGE_SIZE);
     TEST_ASSERT(fit >= 0, "the boundary-fitting attach succeeds");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX,
                    "the fitting attach charged 1 page");
 
     // Detach uncharges exactly.
     s64 d = sys_burrow_detach_for_proc(p, (u64)fit, PAGE_SIZE);
     TEST_EXPECT_EQ(d, 0L, "detach ok");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX - 1u,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX - 1u,
                    "detach uncharged 1 page");
 
     res_drop(p);
 
     // An exempt Proc's attach bypasses the cap in the real syscall path.
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
-    __atomic_store_n(&sys->page_count, PROC_PAGE_MAX - 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sys->as->page_count, PROC_PAGE_MAX - 1u, __ATOMIC_RELEASE);
     s64 ex = sys_burrow_attach_for_proc(sys, 2u * PAGE_SIZE);
     TEST_ASSERT(ex >= 0, "exempt attach past the cap succeeds");
-    TEST_EXPECT_EQ(__atomic_load_n(&sys->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX + 1u,
+    TEST_EXPECT_EQ(__atomic_load_n(&sys->as->page_count, __ATOMIC_ACQUIRE), PROC_PAGE_MAX + 1u,
                    "exempt charged past the cap");
     (void)sys_burrow_detach_for_proc(sys, (u64)ex, 2u * PAGE_SIZE);
     res_drop(sys);
@@ -385,40 +414,40 @@ void test_resource_page_cap_attach_enforced(void) {
 // I-32 FOURTH axis (overcommit, ARCH section 6.5): proc_vma_charge bounds live VMAs
 // at PROC_VMA_MAX -- the DoS a free SYS_BURROW_ATTACH_LAZY reservation would open.
 // Mirrors the page-charge cap test (no 65536 real VMAs; pre-set vma_count near the
-// boundary). proc_vma_charge requires p->vma_lock in production for EXACTNESS under
+// boundary). proc_vma_charge requires p->as->vma_lock in production for EXACTNESS under
 // contention; this single-threaded test calls it directly (the __atomic ops are
 // coherent without the lock when no peer races).
 void test_resource_vma_cap(void) {
     struct Proc *p = res_make(A_REAL_USER);   // non-exempt
 
     // Boundary: charge at MAX-1 succeeds (-> MAX), the next is refused (no over-cap).
-    __atomic_store_n(&p->vma_count, PROC_VMA_MAX - 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->vma_count, PROC_VMA_MAX - 1u, __ATOMIC_RELEASE);
     TEST_ASSERT(proc_vma_charge(p),  "charge at MAX-1 succeeds (-> MAX)");
-    TEST_EXPECT_EQ(p->vma_count, PROC_VMA_MAX, "vma_count == cap after the boundary charge");
+    TEST_EXPECT_EQ(p->as->vma_count, PROC_VMA_MAX, "vma_count == cap after the boundary charge");
     TEST_ASSERT(!proc_vma_charge(p), "charge at the cap is refused");
-    TEST_EXPECT_EQ(p->vma_count, PROC_VMA_MAX, "a refused charge charges nothing");
+    TEST_EXPECT_EQ(p->as->vma_count, PROC_VMA_MAX, "a refused charge charges nothing");
 
     // Uncharge re-opens a slot; charge then succeeds again.
     proc_vma_uncharge(p);
-    TEST_EXPECT_EQ(p->vma_count, PROC_VMA_MAX - 1u, "uncharge re-opens a slot");
+    TEST_EXPECT_EQ(p->as->vma_count, PROC_VMA_MAX - 1u, "uncharge re-opens a slot");
     TEST_ASSERT(proc_vma_charge(p), "charge succeeds again after uncharge");
 
     // Over-uncharge clamps at 0 (no underflow).
-    __atomic_store_n(&p->vma_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->vma_count, 0u, __ATOMIC_RELEASE);
     proc_vma_uncharge(p);
-    TEST_EXPECT_EQ(p->vma_count, 0u, "over-uncharge clamps at 0 (no underflow)");
+    TEST_EXPECT_EQ(p->as->vma_count, 0u, "over-uncharge clamps at 0 (no underflow)");
 
     // Saturation guard: a charge on a maxed counter is refused (no wrap).
-    __atomic_store_n(&p->vma_count, 0xFFFFFFFFu, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->vma_count, 0xFFFFFFFFu, __ATOMIC_RELEASE);
     TEST_ASSERT(!proc_vma_charge(p), "saturated counter refuses a charge");
-    __atomic_store_n(&p->vma_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->vma_count, 0u, __ATOMIC_RELEASE);
 
     // Exempt Procs (PRINCIPAL_SYSTEM) bypass the cap; the count is still maintained.
     struct Proc *sys = res_make((u32)PRINCIPAL_SYSTEM);
-    __atomic_store_n(&sys->vma_count, PROC_VMA_MAX, __ATOMIC_RELEASE);
+    __atomic_store_n(&sys->as->vma_count, PROC_VMA_MAX, __ATOMIC_RELEASE);
     TEST_ASSERT(proc_vma_charge(sys), "exempt charges past the cap");
-    TEST_EXPECT_EQ(sys->vma_count, PROC_VMA_MAX + 1u, "exempt is unbounded by the cap");
-    __atomic_store_n(&sys->vma_count, 0u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(sys->as->vma_count, PROC_VMA_MAX + 1u, "exempt is unbounded by the cap");
+    __atomic_store_n(&sys->as->vma_count, 0u, __ATOMIC_RELEASE);
 
     res_drop(p); res_drop(sys);
 }
@@ -441,7 +470,7 @@ void test_resource_attach_charges_buddy_rounded(void) {
 
     s64 va = sys_burrow_attach_for_proc(p, kLen);
     TEST_ASSERT(va >= 0, "the 3-page attach succeeds");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kWant,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), kWant,
                    "#106: attach charges the buddy-rounded occupancy, not length/PAGE_SIZE");
 
     // And the refund must MATCH -- an uncharge computed the old way would leave
@@ -449,7 +478,7 @@ void test_resource_attach_charges_buddy_rounded(void) {
     // corruption in the opposite direction.
     s64 d = sys_burrow_detach_for_proc(p, (u64)va, kLen);
     TEST_EXPECT_EQ(d, 0L, "detach ok");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), 0u,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), 0u,
                    "#106: detach refunds exactly the rounded charge (no residue)");
 
     res_drop(p);
@@ -497,12 +526,12 @@ void test_resource_detach_retained_handle_keeps_page_count(void) {
     size_t vsize = burrow_get_size(v);
     u32    vpages = (u32)burrow_backing_pages(vsize);
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     u64 va;
     int gap = vma_find_gap(p, vsize, EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP, &va);
     int charged = (gap == 0) ? (proc_page_charge(p, vpages) ? 0 : -1) : -1;
     int mapped  = (charged == 0) ? burrow_map(p, v, va, vsize, VMA_PROT_RW) : -1;
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     TEST_EXPECT_EQ(gap, 0,     "found a gap for the ring stand-in");
     TEST_EXPECT_EQ(charged, 0, "charged the ring pages");
     TEST_EXPECT_EQ(mapped, 0,  "mapped the ring stand-in");
@@ -510,14 +539,14 @@ void test_resource_detach_retained_handle_keeps_page_count(void) {
     // construction handle. That single difference is the whole finding.
     TEST_EXPECT_EQ(burrow_handle_count(v), 1,
                    "the stand-in retains its handle ref (the Loom's posture)");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre + vpages,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), kPre + vpages,
                    "the ring charge landed");
 
     s64 d = sys_burrow_detach_for_proc(p, va, (u64)vsize);
     TEST_EXPECT_EQ(d, 0L, "detach of the ring stand-in ok");
     // The pages did NOT free (our handle still holds them), so the charge must
     // stand. A refund here is the I-32 bypass.
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre + vpages,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), kPre + vpages,
                    "#106-F1: no refund while another owner still holds the pages");
 
     // Drop the retained handle. THIS is the drop that frees the pages, so this
@@ -528,7 +557,7 @@ void test_resource_detach_retained_handle_keeps_page_count(void) {
     // no manual correction.
     if (burrow_unref_freed(v))
         proc_page_uncharge(p, vpages);
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), kPre,
                    "the drop that freed the pages settled the charge exactly");
 
     proc_page_uncharge(p, kPre);                      // undo the scene-setting pre-charge
@@ -556,11 +585,11 @@ void test_resource_detach_shared_in_keeps_page_count(void) {
     TEST_ASSERT(v != NULL, "burrow_create_anon failed");
     size_t vsize = burrow_get_size(v);
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     u64 va;
     int gap = vma_find_gap(p, vsize, EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP, &va);
     int shared = (gap == 0) ? burrow_share_into(p, v, va, VMA_PROT_RW) : -1;
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     TEST_EXPECT_EQ(gap, 0, "found a gap for the share");
     TEST_EXPECT_EQ(shared, 0, "burrow_share_into succeeded");
 
@@ -568,20 +597,20 @@ void test_resource_detach_shared_in_keeps_page_count(void) {
     // must respect, asserted here so a change to burrow_share_into that started
     // charging page_count would land as a failure here rather than silently
     // making the detach refund correct again.
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), kPre,
                    "the share does not touch page_count");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->shared_map_pages, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->shared_map_pages, __ATOMIC_ACQUIRE),
                    (u32)(vsize / PAGE_SIZE),
                    "the share charges shared_map_pages (the mapping extent)");
 
     s64 d = sys_burrow_detach_for_proc(p, va, (u64)vsize);
     TEST_EXPECT_EQ(d, 0L, "detach of the shared-in region ok");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), kPre,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), kPre,
                    "#122: detaching a SHARED_IN VMA must not refund page_count");
-    TEST_EXPECT_EQ(__atomic_load_n(&p->shared_map_pages, __ATOMIC_ACQUIRE), 0u,
+    TEST_EXPECT_EQ(__atomic_load_n(&p->as->shared_map_pages, __ATOMIC_ACQUIRE), 0u,
                    "the shared-in charge IS refunded (by burrow_unmap, off the flag)");
 
     burrow_unref(v);                                  // drop our construction ref
-    __atomic_store_n(&p->page_count, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&p->as->page_count, 0u, __ATOMIC_RELEASE);
     res_drop(p);
 }

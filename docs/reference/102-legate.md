@@ -213,6 +213,26 @@ cap-stamp + scope). `usr/corvus/src/main.rs`:
     `GROUP_CREATE`): the hostowner manages eligibility; grant is idempotent,
     revoke blocks FUTURE activation (an active legate keeps its caps until scope
     exit).
+  - `CLEARANCE_ACTIVATE_SELF = 18` (#139): verb 15 with the token removed.
+    Identity comes from the connection's kernel-stamped principal
+    (`SYS_SRV_PEER`) -- the caller quotes nothing and is authorized as who it
+    demonstrably is (the Plan 9 factotum shape). Everything downstream of the
+    identity is the SAME code as verb 15 (`clearance_activate_grant`): same
+    eligibility check, same `auth_required` gate, same `self_restrict` narrowing,
+    same kernel grant, same reply. The fork is the identity and nothing else.
+
+    `auth_required = RE_AUTH` is satisfied without a token by requiring a **live
+    session for that same principal**: corvus knows the user authenticated and
+    the kernel vouches this Proc is that user, so both facts are established with
+    no secret in flight. With nobody logged in it fails closed.
+
+    This is the form the §5.7 flow diagram's actor (`[user shell]`) must use: a
+    program a logged-in user runs cannot obtain a token at all, because
+    `handle_auth` refuses while a session is bound. Before #139 that made CAP_JIT
+    -- and therefore all of GL -- unreachable for every user-launched program.
+    Verb 15 remains for callers whose own principal is *not* the user being
+    authorized (the boot provers, which run as `PRINCIPAL_SYSTEM`); see task #140
+    on retiring it.
 
 ## Tests
 
@@ -245,6 +265,19 @@ cap-stamp + scope). `usr/corvus/src/main.rs`:
   `legate E2E OK`, exits 0. Proves the corvus orchestration + the grant syscall +
   the real redeem + legate creation; a healthy boot through the exits()
   legate-root path is the integration signal.
+
+- `usr/jit-prover/` + `tools/interactive/ls-ci.exp` (#139, the SELF-form E2E) --
+  the same prover, both forms, distinguished by argv. Bare `jit-prover` at boot
+  runs as `PRINCIPAL_SYSTEM` and takes the bearer form; `jit-prover self`,
+  driven post-login by the `ls-ci` scenario over a real PTY, takes verb 18 and
+  is the only form reachable from there.
+
+  It rides `ls-ci` rather than a scenario of its own because the only other
+  place the SELF form is proven is `ls-gfx-gl`, which SKIPs on any tree without
+  the ~365 MB of Mesa/LLVM archives -- coverage that can silently skip is not
+  coverage. Both gates assert the FORM (`CAP_JIT acquired (SELF)`), not merely
+  the acquisition: a run that fell back to the bearer path prints `(bearer)` and
+  fails, so neither gate can pass with the path under test removed.
 
 The actual member *death* (flag -> `thread_exit_self`) is the already-tested
 #809/#811 EL0-die-check path. The A-4a-3 prover is a **no-member** legate (the

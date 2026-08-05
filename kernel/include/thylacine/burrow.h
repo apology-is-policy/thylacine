@@ -151,6 +151,12 @@ enum burrow_type {
 };
 
 struct page;
+struct AddrSpace;      // <thylacine/addrspace.h> — LINEAGE L-1; burrow_lazy_populate /
+                       //   burrow_map_in take one. Forward-declared so a translation
+                       //   unit that includes only this header does not get the
+                       //   -Wvisibility "will not be visible outside of this function"
+                       //   warning (and, worse, a struct type incompatible with the
+                       //   real one). Pre-existing since L-4a; noticed at L-4b.
 struct KObj_MMIO;
 struct KObj_DMA;
 struct Spoor;          // <thylacine/spoor.h> — REVENANT: the pinned backing Chan
@@ -372,6 +378,87 @@ struct Burrow *burrow_create_anon_lazy(size_t size);
 // Returns NULL on: burrow_init not run (extincts), size == 0, size overflow, or
 // allocator OOM.
 struct Burrow *burrow_create_code(size_t size);
+// LINEAGE L-4b: clone an ANON_LAZY Burrow for a forking address space -- Plan 9's
+// dupseg. The result is a SEPARATE Burrow of the same size whose filepages[] holds
+// the SAME page pointers, one extra COW share taken per resident page.
+//
+// WHY A CLONE AND NOT A SHARED REFERENCE. A COW break has to put the private page
+// somewhere, and a shared Burrow's slot is the one place it cannot go -- the other
+// sharer still needs the pristine page there. Cloning gives each address space a
+// slot it may overwrite; cow.h has the rest of the argument, including why that in
+// turn forces the share count onto the PAGE rather than onto a slot.
+//
+// The clone preserves the property every other ANON_LAZY path already relies on:
+// ONE Burrow, ONE mapping, ONE address space (burrow_share_into admits only ANON
+// and the DMA weave, and SYS_BURROW_ATTACH_LAZY drops the construction handle, so
+// no ANON_LAZY Burrow is reachable from two address spaces). That is what lets the
+// break's slot swap be serialized by the faulting address space's OWN lock.
+//
+// NON-resident slots stay NULL in the clone, and that is correct rather than lazy:
+// a slot with no page has never been written, so it reads as zero -- and each side
+// demand-zeroing its own page after the fork is exactly the divergence a fork is
+// supposed to produce.
+//
+// Takes src->lock (to snapshot the slots) and, beneath it, the global COW lock per
+// resident page -- the established as->lock -> v->lock -> g_cow_lock order. The
+// caller is expected to hold the source address space's lock, which is what keeps a
+// peer thread's fault from filling a slot midway through the snapshot.
+//
+// Returns NULL on: a non-ANON_LAZY Burrow, a malformed one, or OOM (the struct or
+// the filepages array), having taken no shares and left `src` untouched.
+struct Burrow *burrow_clone_cow(struct Burrow *src);
+
+// LINEAGE L-4b: swap a private page into one ANON_LAZY slot, replacing `expect`.
+// The COW break's commit step -- separated out so burrow.c keeps its monopoly on
+// filepages[] and on the v->lock discipline.
+//
+// Returns true when the slot still held `expect` and now holds `replacement`.
+// Returns false if the slot has changed (unreachable at v1.0 -- see the ONE
+// Burrow, ONE address space property above -- so the caller may treat it as a
+// bail rather than a retry).
+//
+// Does NOT touch either page's share count: the caller establishes the new page's
+// count BEFORE the swap (it must be set before the page is reachable) and releases
+// the old page's AFTER it (the retained share is the pin that keeps a concurrent
+// exit from freeing the page mid-copy -- cow.tla::BUGGY_TEARDOWN_NO_PIN).
+bool burrow_lazy_swap_slot(struct Burrow *v, size_t slot,
+                           struct page *expect, struct page *replacement);
+
+// LINEAGE L-4a: make slots [first, first+n) of an ANON_LAZY Burrow resident up
+// front, instead of leaving them to the demand-zero fault arm. exec is the only
+// caller: it has bytes to put in these pages (a segment's `filesz`, or the argv/
+// auxv frame), so faulting them in and then writing them would allocate the same
+// pages one syscall later for no gain.
+//
+// Charges the I-32 page axis against `as` -- the SAME per-page charge the fault
+// arm makes, taken here because these pages are resident for the same reason and
+// `page_count == true RSS` (ARCH §6.5) must hold either way. Charged ONCE for the
+// whole run so the cap decision sees the entire request; a run that would straddle
+// PROC_PAGE_MAX is refused whole rather than half-populated. Takes as->lock
+// (addrspace_charge_pages' stated precondition) and v->lock, in that order; the
+// buddy allocator is entered under NEITHER (the leaf-lock discipline burrow.c
+// already keeps for free_pages).
+//
+// ALL-OR-NOTHING: on any failure every page this call installed is freed and the
+// whole charge returned, leaving the Burrow exactly as it was found -- so a caller
+// that gives up can simply burrow_unref. Returns 0, or -1 on: a non-ANON_LAZY
+// Burrow, a range outside page_count, an alloc_pages shortfall, an over-cap charge,
+// or a slot in the run that was ALREADY resident (a caller bug -- exec populates
+// each run exactly once; failing closed beats silently miscounting the charge).
+int burrow_lazy_populate(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                         size_t first, size_t n);
+
+// LINEAGE L-4a: the kernel direct-map address of one resident ANON_LAZY slot, or
+// NULL if the slot is not resident (or the Burrow is the wrong type / the slot is
+// out of range).
+//
+// PRECONDITION -- the Burrow must be PRIVATE to the caller: not yet mapped into any
+// address space, and not yet reachable from a second thread. That is exec's
+// situation and nothing else's (it creates the Burrow, populates it, fills it, and
+// only then burrow_map_ins it), which is what makes the returned raw pointer safe
+// without a lifetime guard: no concurrent decommit or teardown can free the page
+// under the caller. Do NOT reach for this from a path where the Burrow is live.
+void *burrow_lazy_slot_kva(struct Burrow *v, size_t slot);
 
 // Increment handle_count. Maps to spec's HandleOpen action. Called by
 // handle_dup (and Phase 4's handle_transfer_via_9p) for KOBJ_BURROW
@@ -498,6 +585,14 @@ bool burrow_is_shared_out(const struct Burrow *v);
 // Lock order: vma_lock -> buddy zone->lock. (exec_setup is exempt -- single-
 // threaded by construction.)
 int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 prot);
+
+// LINEAGE L-2: map into an explicit address space (see vma.h's *_in block for
+// why exec needs a detached target). burrow_map is the wrapper; this is the
+// body. `exempt` is the I-32 policy verdict for whoever the address space is
+// being built for.
+struct AddrSpace;
+int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                  u64 vaddr, size_t length, u32 prot);
 
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
 // from Proc `p`. Calls vma_remove + vma_free (which calls

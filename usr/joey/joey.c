@@ -911,6 +911,267 @@ static int do_native_argv_smoke(void) {
     return 0;
 }
 
+// do_exec_probe -- LINEAGE L-2's boot gate for SYS_EXECVE (I-44).
+//
+// /bin/exec-probe runs its failure legs, then execve's ITSELF with
+// argv = ["exec-probe", "stage2"]. The markers below span BOTH incarnations:
+// the leg lines come from the original image, the PASS line from the one that
+// replaced it. Because every marker is written to fd 1 -- the pipe this harness
+// reads -- seeing the last line also proves the inherited handle survived the
+// image swap, which is a second property for the same assertion.
+//
+// Boot-fatal on purpose. A silently-broken execve is exactly the kind of defect
+// that would sit dormant until L-3's vfork child tried to use it, by which point
+// the failure would surface somewhere else entirely.
+static int do_exec_probe(void) {
+    static const char ep_name[] = "exec-probe";
+    static const char ep_argv[] = "exec-probe";
+    static const char ep_m0[]   = "exec-probe: leg A ok";
+    static const char ep_m1[]   = "exec-probe: leg A2 ok";
+    static const char ep_m2[]   = "exec-probe: leg B ok";
+    static const char ep_m3[]   = "exec-probe: leg C ok";
+    static const char ep_m4[]   = "exec-probe: L-2 execve E2E PASS";
+    static const struct argv_marker ep_markers[] = {
+        { ep_m0, sizeof(ep_m0) - 1 },
+        { ep_m1, sizeof(ep_m1) - 1 },
+        { ep_m2, sizeof(ep_m2) - 1 },
+        { ep_m3, sizeof(ep_m3) - 1 },
+        { ep_m4, sizeof(ep_m4) - 1 },
+    };
+    if (pouch_smoke_one_argv(ep_name, sizeof(ep_name) - 1,
+                             ep_argv, sizeof(ep_argv),
+                             /*argc=*/1u,
+                             ep_markers,
+                             sizeof(ep_markers) / sizeof(ep_markers[0]),
+                             /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0)
+        return -1;
+    t_putstr("joey: exec-probe ok (LINEAGE L-2: execve replaced a live image in place)\n");
+    return 0;
+}
+
+// do_fork_probe -- LINEAGE L-3b's boot gate for SYS_RFORK (I-44).
+//
+// /bin/fork-probe forks a child that shares its address space, and the child
+// reports back through that sharing. The single PASS marker stands for six
+// legs (the probe's own header enumerates them); it prints only if the child
+// resumed at the parent's PC with x0 == 0, on its own stack, in the same
+// address space, as a distinct reapable Proc.
+//
+// Boot-fatal for the same reason exec-probe is, and more so: this is the ONLY
+// coverage of the resume at all. The kernel tests reach the frame DECISION and
+// the argument gate; neither can observe an eret to EL0, because kproc has
+// neither an address space to share nor a trapframe to fork from. If this
+// probe is skipped, the mechanism is untested rather than lightly tested.
+static int do_fork_probe(void) {
+    static const char fp_name[] = "fork-probe";
+    static const char fp_m0[]   = "fork-probe: PASS";
+    static const struct argv_marker fp_markers[] = {
+        { fp_m0, sizeof(fp_m0) - 1 },
+    };
+    if (pouch_smoke_one_argv(fp_name, sizeof(fp_name) - 1,
+                             fp_name, sizeof(fp_name),
+                             /*argc=*/1u,
+                             fp_markers,
+                             sizeof(fp_markers) / sizeof(fp_markers[0]),
+                             /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0)
+        return -1;
+    t_putstr("joey: fork-probe ok (LINEAGE L-3b: a forked child resumed its "
+             "parent's frame on its own stack)\n");
+    return 0;
+}
+
+// do_alpine_shell_gate -- LINEAGE L-6c, the ARC gate: an Alpine /bin/sh runs a
+// command inside a vivarium.
+//
+// This is the only leg in the tree where the caller is a REAL, unmodified,
+// third-party Linux program rather than something we wrote to be run. Every
+// prior phenotype leg is a probe that knows it is being tested; busybox does
+// not, so it exercises the translated calls in whatever order and combination
+// its own code happens to want. That is the point of an arc gate.
+//
+// What it proves, and why each marker is separable:
+//   A  the shell EXECS and runs at all             (execve + the ELF load)
+//   B  an external command runs                    (fork + execve + wait4)
+//   C  a zero exit is seen as zero                 (wait4 status decode)
+//   D  a non-zero exit is seen as non-zero         (ditto, other direction)
+//   E  a pipeline                                  (two forks + SYS_PIPE)
+//   F  command substitution                        (fork + pipe + DRAIN TO EOF
+//                                                   -- the #68/#926 path, from
+//                                                   a foreign program)
+//   G  a loop of execs                             (repeat, no fd/Proc leak)
+//   H  a nested shell                              (exec from an exec'd child)
+//   I  $? carries the child's actual code          (this one is EXPECTED to
+//                                                   disagree -- see below)
+//
+// Leg I is deliberately a MEASUREMENT rather than an assertion. #91 records
+// that `sys_exits_handler` collapses every non-zero status to 1, so a Linux
+// shell must print `L6C-I-exitcode=1` where Linux prints the real code. The
+// gate asserts the marker is PRESENT (the shell got *a* code and kept
+// running); the value is reported to the log so the fidelity gap is visible
+// rather than asserted-away. If a later chunk widens the status, this line is
+// where it will show up.
+//
+// SOFT-SKIP when the bundle is absent. The fixture needs two external inputs
+// (an Alpine minirootfs and a busybox-static apk -- see tools/build.sh's
+// stage_viv_bundles and task #145 for why the second is not optional), and the
+// default build stays hermetic.
+//
+// L6C_GATE_FATAL: BOOT-FATAL since #157, because the gate PASSES -- every leg
+// A..I, the full LINEAGE arc (fork, exec, pipe, substitute, loop, reap). It was
+// advisory only while a NAMED blocker stood in front of it (#149 the loader,
+// #150 the startup batch, #151 close-on-exec, #140 the environment, #155 pipe2,
+// #157 dup3, each fixed in turn), and the whole reason to flip it now is that a
+// gate which cannot redden is a disabled test: with it at 0 a regression in any
+// of those six would print a failure line into a green boot and nobody would
+// look. The soft-skip above stays -- an ABSENT bundle is a missing input, not a
+// broken kernel, and the default build is deliberately hermetic.
+#define L6C_GATE_FATAL 1
+static int do_alpine_shell_gate(void) {
+    static const char ab[] = "/vivarium/alpine/config.json";
+    long abfd = t_open(T_WALK_OPEN_FROM_ROOT, ab, sizeof(ab) - 1, T_OPATH);
+    if (abfd < 0) {
+        t_putstr("joey: L-6c Alpine shell gate SKIPPED (no /vivarium/alpine "
+                 "bundle -- drop an alpine-minirootfs tarball AND a "
+                 "busybox-static apk in build/cache/ and rebuild with "
+                 "THYLACINE_MKFS_PRESERVE=0)\n");
+        return 0;
+    }
+    (void)t_close(abfd);
+
+    long rd = -1, wr = -1;
+    if (t_pipe(&rd, &wr) < 0) {
+        t_putstr("joey: L-6c t_pipe FAILED\n");
+        return -1;
+    }
+    // THREE fds, not the two the pouch smokes use. `viv` decides whether to
+    // endow its container's stdio by probing whether IT was born with a live
+    // trio (usr/viv/src/main.rs `stdio_born`: fstat(0), fstat(1), fstat(2) all
+    // succeed) -- and it must, because it endows [0,1,2] as a unit and a
+    // half-empty trio fails the whole spawn at the kernel's fd bump. Hand it
+    // two and the probe answers false, the shell is spawned fd-less, and its
+    // echo output goes nowhere: the gate would report "the shell never ran"
+    // when the shell ran perfectly.
+    unsigned int fds[3] = { (unsigned int)wr, (unsigned int)wr,
+                            (unsigned int)wr };
+    static const char vname[] = "/bin/viv";
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/alpine";
+    struct t_sys_spawn_args req = {
+        .name_va       = (unsigned long)vname,
+        .argv_data_va  = (unsigned long)vargv,
+        .name_len      = sizeof(vname) - 1,
+        .argv_data_len = sizeof(vargv),
+        .argc          = 3,
+        .fd_list_va    = (unsigned long)fds,
+        .fd_count      = 3,
+        .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+    };
+    long pid = t_spawn_full_argv(&req);
+    if (pid <= 0) {
+        t_putstr("joey: L-6c spawn /bin/viv (alpine) FAILED\n");
+        (void)t_close(rd); (void)t_close(wr);
+        return -1;
+    }
+    if (t_close(wr) != 0) {
+        t_putstr("joey: L-6c t_close(wr) FAILED\n");
+        (void)t_close(rd);
+        return -1;
+    }
+    int  status = -1;
+    long reaped = t_wait_pid_for((int)pid, 0, &status);
+
+    // Drain whether or not the status is clean: the markers name HOW FAR the
+    // shell got, which is the entire diagnostic value of this leg. A container
+    // that dies at leg B and one that dies at leg F are different bugs, and
+    // the exit status alone cannot tell them apart.
+    unsigned char acc[2048];
+    size_t acc_len = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n <= 0) break;
+        (void)t_puts((const char *)buf, (size_t)n);
+        for (long i = 0; i < n && acc_len < sizeof(acc); i++)
+            acc[acc_len++] = buf[i];
+    }
+    (void)t_close(rd);
+
+    // sizeof-derived, never hand-counted: a literal length that disagrees with
+    // its string is a marker that silently never matches, which would read as
+    // "the shell stopped here" when the shell was fine.
+#define L6C_MK(s) { (s), sizeof(s) - 1 }
+    static const struct argv_marker legs[] = {
+        L6C_MK("L6C-A-shell-runs"),
+        L6C_MK("L6C-B-external-exec"),
+        L6C_MK("L6C-C-status-zero"),
+        L6C_MK("L6C-D-status-nonzero"),
+        L6C_MK("L6C-E-pipeline"),
+        L6C_MK("L6C-F-substitution"),
+        L6C_MK("L6C-G-loop"),
+        L6C_MK("L6C-H-nested-shell"),
+        L6C_MK("L6C-I-exitcode="),
+        L6C_MK("L6C-DONE"),
+    };
+#undef L6C_MK
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (reaped != pid || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: L-6c Alpine shell gate FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        // KNOWN-BLOCKED, and deliberately NOT boot-fatal until it is unblocked.
+        //
+        // THE BLOCKER MOVES, AND THIS COMMENT MOVES WITH IT. Four have now been
+        // cleared in turn -- #149 (the loader's page-alignment reject, which had
+        // busybox executing zero instructions), #150 (the startup syscall batch,
+        // without which `echo` produced no output at all), #151 (close-on-exec)
+        // and #140 (the environment on the exec stack, which is what let the
+        // shell run a script, exec an external command and read back both exit
+        // statuses). Each one moved the gate further down the leg list, which is
+        // the only reason a non-fatal gate is worth having.
+        //
+        // The blocker now is dup3 (#157). pipe2 landed at #155 and WORKS -- the
+        // pipeline's left side runs and its bytes reach the pipe -- but on
+        // aarch64 there is no `dup2` number, so musl compiles dup2 into dup3,
+        // and dup3 is a deliberate FORWARD: it FREES the fd it overwrites, and
+        // vivarium.c's fd-freeing block requires the socktab close hook be
+        // extended in the same commit that serves it. So the child is built, the
+        // pipe exists, and nothing can be wired onto fd 0 or 1. busybox says so
+        // itself: "dup2(4,1): Function not implemented".
+        //
+        // Leaving it fatal would paint every boot red for a cause that is
+        // already understood and enqueued, which is strictly worse than a loud
+        // non-fatal report: a permanently-red boot stops distinguishing NEW
+        // breakage from the known one, and the next real regression would land
+        // invisibly behind it. The gate still RUNS every boot and still prints
+        // exactly how far the shell got -- which is how #149's fix was seen to
+        // move it, and how #150's will be.
+        //
+        // FLIP THIS TO `return -1` WHEN THE LAST BLOCKER LANDS -- that is the
+        // whole point of the gate, and a KNOWN-BLOCKED that outlives its blocker
+        // is just a disabled test.
+        if (!L6C_GATE_FATAL) {
+            t_putstr("joey: L-6c KNOWN-BLOCKED on task #157 (dup3: #155 landed "
+                     "pipe2 and the pipeline's left side now runs -- 'pipe-in' "
+                     "reaches the pipe -- but linux nr=24 has no translator, so "
+                     "nothing can be wired onto fd 0 or 1 and the reader gets "
+                     "EBADF); not boot-fatal yet\n");
+            return 0;
+        }
+        return -1;
+    }
+    t_putstr("joey: L-6c ALPINE SHELL GATE PASS (busybox sh forked, exec'd, "
+             "piped, substituted and reaped -- LINEAGE arc complete)\n");
+    return 0;
+}
+
 // do_native_coreutil_smoke — U-6e-pre-b: the FIRST runtime exercise of the
 // adopted native coreutils (echo/cat/wc/head/tail/seq/sort/uniq/tr/cut/grep/
 // basename/dirname/pwd/true/false). coreutil-smoke is itself a native
@@ -2528,6 +2789,798 @@ static int probe46_fstat_wronly(const char *tag, const char *dirpath,
     return 0;
 }
 
+// #79 always-run regression: resolving THROUGH a file answers ENOTDIR.
+//
+// The kernel test proves the resolver arms; this proves the errno survives the
+// whole EL0 return path (stalk -> sys_open's clamp -> the syscall ABI) against
+// the REAL disk filesystem, where the parent is a dev9p Spoor whose QTDIR bit
+// came off the 9P wire rather than from an in-kernel fixture table.
+//
+// Self-contained: it creates its own file rather than naming a pool path, so
+// it cannot go vacuous if the bake layout changes (the shared-fixture lesson --
+// a probe that silently stops testing is worse than one that fails).
+// Boot-fatal.
+static int probe79_notdir(void) {
+    char nb[24];
+    static const char nm[] = "p79-notdir-probe";
+    static const char through[] = "/p79-notdir-probe/x";
+    static const char missing[] = "/p79-absent-dir/x";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe79 open root FAILED\n"); return -1; }
+
+    long fd = t_walk_create(pd, nm, sizeof(nm) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+        fd = t_walk_create(pd, nm, sizeof(nm) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe79 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(fd);
+
+    // A real directory to miss UNDER, so the POUNCE partial-walk arm resolves
+    // its verdict from a fused record with k > 0. Self-made rather than a pool
+    // path, so the leg cannot go vacuous if the bake layout changes.
+    static const char dn[] = "p79-notdir-dir";
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        // Boot-fatal rather than skipped: if the directory is absent, the
+        // `under` leg below misses at its FIRST component (k == 0), which
+        // returns ENOENT for the wrong reason and passes without ever
+        // reaching the POUNCE arm it exists to test. A leg that can pass
+        // vacuously is worse than no leg.
+        t_putstr("joey: probe79 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(dd);
+
+    // Through a regular file -> -T_E_NOTDIR (20). Before #79 this was -2
+    // (ENOENT), which os.IsNotExist reads as "absent, safe to create".
+    long rc_through = t_open(T_WALK_OPEN_FROM_ROOT, through,
+                             sizeof(through) - 1, T_OREAD);
+    // A genuinely absent FIRST component must STILL be -T_E_NOENT (2) -- the
+    // gate must not have blanket-converted every resolution failure.
+    long rc_missing = t_open(T_WALK_OPEN_FROM_ROOT, missing,
+                             sizeof(missing) - 1, T_OREAD);
+    // A miss UNDER a real directory (k > 0) must also still be ENOENT. This is
+    // the leg the kernel fixture cannot vouch for: the POUNCE arm reads the
+    // miss-parent's type out of `sts[k-1].qid_type`, which on dev9p is filled
+    // from the per-component ATTR qid -- a different wire array than the walk
+    // qids the base gate reads. If a server left attr qids zero, the parent
+    // would read as a file and this would come back -20 instead of -2.
+    static const char under[] = "/p79-notdir-dir/absent";
+    long rc_under = t_open(T_WALK_OPEN_FROM_ROOT, under,
+                           sizeof(under) - 1, T_OREAD);
+
+    if (rc_through >= 0) (void)t_close(rc_through);
+    if (rc_missing >= 0) (void)t_close(rc_missing);
+    if (rc_under   >= 0) (void)t_close(rc_under);
+    (void)t_unlink(pd, nm, sizeof(nm) - 1, 0);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_through != -20 || rc_missing != -2 || rc_under != -2) {
+        t_putstr("joey: probe79 FAILED through=");
+        t_putstr(itoa_dec(rc_through, nb, sizeof(nb)));
+        t_putstr(" (want -20) missing=");
+        t_putstr(itoa_dec(rc_missing, nb, sizeof(nb)));
+        t_putstr(" under=");
+        t_putstr(itoa_dec(rc_under, nb, sizeof(nb)));
+        t_putstr(" (want -2 -2)\n");
+        return -1;
+    }
+    t_putstr("joey: probe79 OK (through a file -> ENOTDIR; absent + "
+             "miss-under-a-dir -> ENOENT)\n");
+    return 0;
+}
+
+// #81 always-run regression: "." and ".." out of a non-directory are ENOTDIR.
+//
+// The kernel test drives an in-file fixture whose qid.type comes from a static
+// table. Only this probe exercises a dev9p tip, whose QTDIR bit came off the 9P
+// wire -- and that is exactly where the RISK of this gate lives: the two
+// directory legs below prove the gate does NOT break real directories on the
+// real filesystem. If dev9p ever stopped stamping QTDIR on a walked directory
+// Spoor, they would fail here while the fixture test stayed green.
+//
+// Self-contained (creates its own file + directory) so it cannot go vacuous if
+// the bake layout changes. Boot-fatal.
+// #82: a trailing '/' asserts the path names a DIRECTORY (POSIX 4.13). This
+// proves the gate over the REAL FS (dev9p/Stratum Spoors, not the synthetic
+// fixture ones) on every boot -- and, measured rather than assumed, it reaches
+// all THREE gate sites: the O_PATH legs take the quarry gate, the stat leg
+// takes the SYS_STAT walk-query, and the OREAD leg takes the FID-LIFECYCLE
+// cached-open arm (a freshly-created file is fully page-cached, so the arm
+// engages; with only that gate reverted this leg is the ONE that flips to
+// resolving, which is how the routing was established). The OREAD leg is
+// fail-safe either way: should the arm ever decline, the resolution falls
+// through to the quarry gate, which answers the same -T_E_NOTDIR.
+// probe83 -- a CWD-RELATIVE path must resolve with the SAME semantics as the
+// absolute spelling of the same path. Pre-#83 it did not: the LS-4 cwd join
+// resolved "." / ".." lexically and dropped a trailing separator, so a
+// cwd-relative path never reached stalk's #79/#81/#82 gates and `f/..`,
+// `f/.`, `f/` and even `nonexistent/..` all quietly succeeded.
+//
+// Deliberately run from a NON-root cwd, so the ".." legs pop something real
+// rather than clamping at the floor -- the trivial case would pass either way.
+static int probe83_cwd_relative(void) {
+    char nb[24];
+    static const char dn[] = "p83-cwd-dir";
+    static const char fn[] = "f";
+    static const char sn[] = "d";
+    static const char cwd[] = "/p83-cwd-dir";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe83 open root FAILED\n"); return -1; }
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        t_putstr("joey: probe83 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+
+    long fd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(dd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (fd >= 0) (void)t_close(fd);
+    long sd = mkdir_or_open(dd, sn, sizeof(sn) - 1);
+    if (fd < 0 || sd < 0) {
+        // Boot-fatal, not skipped: without both children the legs below would
+        // fail for the wrong reason and the probe would look like it caught a
+        // resolver bug when it only caught its own setup.
+        t_putstr("joey: probe83 setup FAILED f=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr(" d=");
+        t_putstr(itoa_dec(sd, nb, sizeof(nb)));
+        t_putstr("\n");
+        if (sd >= 0) (void)t_close(sd);
+        (void)t_close(dd);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(sd);
+    (void)t_close(dd);
+
+    if (t_chdir(cwd, sizeof(cwd) - 1) < 0) {
+        t_putstr("joey: probe83 chdir FAILED\n");
+        (void)t_close(pd);
+        return -1;
+    }
+
+    // The divergence legs. Each is the cwd-relative spelling of a path whose
+    // ABSOLUTE spelling probe81/probe82 already pin at -20 / -2.
+    long rc_fdd  = t_open(T_WALK_OPEN_FROM_ROOT, "f/..",    4, T_OPATH);
+    long rc_fd   = t_open(T_WALK_OPEN_FROM_ROOT, "f/.",     3, T_OPATH);
+    long rc_fsl  = t_open(T_WALK_OPEN_FROM_ROOT, "f/",      2, T_OPATH);
+    // The sharpest leg: lexical ".." popped a component that was never walked,
+    // so a path THROUGH A MISSING DIRECTORY succeeded.
+    long rc_mdd  = t_open(T_WALK_OPEN_FROM_ROOT, "nope/..", 7, T_OPATH);
+    // Site C (the SYS_STAT walk-query) needs the join to be honest too.
+    struct t_stat st;
+    long rc_sfsl = t_stat_path("f/", 2, &st);
+    long rc_sfdd = t_stat_path("f/..", 4, &st);
+
+    // Regressions: the ordinary relative shapes must keep working. `..` from a
+    // non-root cwd is the one `cd ..` depends on, and `.` / a trailing slash on
+    // a real directory are by far the common spellings.
+    long rc_ddd  = t_open(T_WALK_OPEN_FROM_ROOT, "d/..",    4, T_OPATH);
+    long rc_dd   = t_open(T_WALK_OPEN_FROM_ROOT, "d/.",     3, T_OPATH);
+    long rc_dsl  = t_open(T_WALK_OPEN_FROM_ROOT, "d/",      2, T_OPATH);
+    long rc_dot  = t_open(T_WALK_OPEN_FROM_ROOT, ".",       1, T_OPATH);
+    long rc_up   = t_open(T_WALK_OPEN_FROM_ROOT, "..",      2, T_OPATH);
+    long rc_plain= t_open(T_WALK_OPEN_FROM_ROOT, "f",       1, T_OPATH);
+
+    // SYS_CHDIR is the one caller that needs BOTH cwd jobs, so it gets its own
+    // legs. The join half: `cd f/..` must fail because f is a FILE -- pre-#83
+    // the lexical collapse turned it into the parent, which IS a directory, so
+    // the chdir succeeded and the QTDIR check it passed was checking the wrong
+    // object entirely.
+    long rc_cdf  = t_chdir("f/..",    4);
+    long rc_cdm  = t_chdir("nope/..", 7);
+
+    // The canonicalize half: after `cd d` + `cd ..` the STORED cwd must be
+    // exactly "/p83-cwd-dir" again. If step 3 were dropped, dot_path would
+    // accumulate ("/p83-cwd-dir/d/..") and grow without bound across repeated
+    // `cd ..` -- resolution would still work, so only getcwd catches it.
+    long rc_cdd  = t_chdir("d", 1);
+    long rc_cdup = t_chdir("..", 2);
+    char cwdbuf[64];
+    long cwdlen  = t_getcwd(cwdbuf, sizeof(cwdbuf));
+    int  cwd_ok  = (cwdlen == (long)(sizeof(cwd) - 1));
+    for (long i = 0; cwd_ok && i < cwdlen; i++)
+        if (cwdbuf[i] != cwd[i]) cwd_ok = 0;
+
+    (void)t_chdir("/", 1);
+
+    if (rc_fdd   >= 0) (void)t_close(rc_fdd);
+    if (rc_fd    >= 0) (void)t_close(rc_fd);
+    if (rc_fsl   >= 0) (void)t_close(rc_fsl);
+    if (rc_mdd   >= 0) (void)t_close(rc_mdd);
+    if (rc_ddd   >= 0) (void)t_close(rc_ddd);
+    if (rc_dd    >= 0) (void)t_close(rc_dd);
+    if (rc_dsl   >= 0) (void)t_close(rc_dsl);
+    if (rc_dot   >= 0) (void)t_close(rc_dot);
+    if (rc_up    >= 0) (void)t_close(rc_up);
+    if (rc_plain >= 0) (void)t_close(rc_plain);
+
+    long cd2 = t_open(T_WALK_OPEN_FROM_ROOT, cwd, sizeof(cwd) - 1, T_OPATH);
+    if (cd2 >= 0) {
+        (void)t_unlink(cd2, fn, sizeof(fn) - 1, 0);
+        (void)t_unlink(cd2, sn, sizeof(sn) - 1, T_UNLINK_REMOVEDIR);
+        (void)t_close(cd2);
+    }
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_fdd != -20 || rc_fd != -20 || rc_fsl != -20 ||
+        rc_sfsl != -20 || rc_sfdd != -20 || rc_mdd != -2 ||
+        rc_ddd < 0 || rc_dd < 0 || rc_dsl < 0 ||
+        rc_dot < 0 || rc_up < 0 || rc_plain < 0 ||
+        rc_cdf >= 0 || rc_cdm >= 0 ||
+        rc_cdd != 0 || rc_cdup != 0 || !cwd_ok) {
+        t_putstr("joey: probe83 FAILED f/..=");
+        t_putstr(itoa_dec(rc_fdd, nb, sizeof(nb)));
+        t_putstr(" f/.=");
+        t_putstr(itoa_dec(rc_fd, nb, sizeof(nb)));
+        t_putstr(" f/=");
+        t_putstr(itoa_dec(rc_fsl, nb, sizeof(nb)));
+        t_putstr(" stat(f/)=");
+        t_putstr(itoa_dec(rc_sfsl, nb, sizeof(nb)));
+        t_putstr(" stat(f/..)=");
+        t_putstr(itoa_dec(rc_sfdd, nb, sizeof(nb)));
+        t_putstr(" (want -20 x5) nope/..=");
+        t_putstr(itoa_dec(rc_mdd, nb, sizeof(nb)));
+        t_putstr(" (want -2) d/..=");
+        t_putstr(itoa_dec(rc_ddd, nb, sizeof(nb)));
+        t_putstr(" d/.=");
+        t_putstr(itoa_dec(rc_dd, nb, sizeof(nb)));
+        t_putstr(" d/=");
+        t_putstr(itoa_dec(rc_dsl, nb, sizeof(nb)));
+        t_putstr(" .=");
+        t_putstr(itoa_dec(rc_dot, nb, sizeof(nb)));
+        t_putstr(" ..=");
+        t_putstr(itoa_dec(rc_up, nb, sizeof(nb)));
+        t_putstr(" f=");
+        t_putstr(itoa_dec(rc_plain, nb, sizeof(nb)));
+        t_putstr(" cd(f/..)=");
+        t_putstr(itoa_dec(rc_cdf, nb, sizeof(nb)));
+        t_putstr(" cd(nope/..)=");
+        t_putstr(itoa_dec(rc_cdm, nb, sizeof(nb)));
+        t_putstr(" (want <0) cd(d)=");
+        t_putstr(itoa_dec(rc_cdd, nb, sizeof(nb)));
+        t_putstr(" cd(..)=");
+        t_putstr(itoa_dec(rc_cdup, nb, sizeof(nb)));
+        t_putstr(" cwd='");
+        if (cwdlen > 0) { cwdbuf[sizeof(cwdbuf) - 1] = '\0'; t_putstr(cwdbuf); }
+        t_putstr("' (want '");
+        t_putstr(cwd);
+        t_putstr("')\n");
+        return -1;
+    }
+    t_putstr("joey: probe83 OK (a cwd-relative path resolves like its absolute "
+             "spelling: f/.. f/. f/ -> ENOTDIR, nope/.. -> ENOENT; chdir gated "
+             "+ cwd stays canonical)\n");
+    return 0;
+}
+
+static int probe82_trailing_slash(void) {
+    char nb[24];
+    static const char fn[] = "p82-slash-probe";
+    static const char dn[] = "p82-slash-dir";
+    static const char xn[] = "p82-slash-exec";
+    static const char f_sl[]  = "/p82-slash-probe/";
+    static const char f_sl3[] = "/p82-slash-probe///";
+    static const char d_sl[]  = "/p82-slash-dir/";
+    static const char x_sl[]  = "/p82-slash-exec/";
+    static const char miss[]  = "/p82-slash-nope/";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe82 open root FAILED\n"); return -1; }
+
+    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe82 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(fd);
+
+    long xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    if (xfd < 0) {
+        (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+        xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    }
+    if (xfd >= 0) (void)t_close(xfd);
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        // Boot-fatal, not skipped: without the directory the regression legs
+        // below would fail for the wrong reason, and the probe would look like
+        // it caught a gate bug when it only caught its own setup.
+        t_putstr("joey: probe82 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(dd);
+
+    // A trailing slash on a regular FILE -> -T_E_NOTDIR (20). Pre-#82 the
+    // tokenizer dropped the separator and every one of these RESOLVED.
+    long rc_f   = t_open(T_WALK_OPEN_FROM_ROOT, f_sl,  sizeof(f_sl)  - 1, T_OPATH);
+    long rc_f3  = t_open(T_WALK_OPEN_FROM_ROOT, f_sl3, sizeof(f_sl3) - 1, T_OPATH);
+    // Mode-independence (#79's property): 0755 answers the same as 0644, so a
+    // gate re-ordered behind the X-search fails here.
+    long rc_x   = t_open(T_WALK_OPEN_FROM_ROOT, x_sl,  sizeof(x_sl)  - 1, T_OPATH);
+    // The STALK_OPEN quarry path (not just O_PATH's STALK_WALK).
+    long rc_fo  = t_open(T_WALK_OPEN_FROM_ROOT, f_sl,  sizeof(f_sl)  - 1, T_OREAD);
+
+    // A real DIRECTORY must still resolve -- the regression a too-eager gate
+    // trips, and by far the common shape (`ls /usr/`, a `$(DIR)/` expansion).
+    long rc_d   = t_open(T_WALK_OPEN_FROM_ROOT, d_sl, sizeof(d_sl) - 1, T_OPATH);
+    // "/" is EXEMPT: no component precedes the trailing run (POSIX scopes the
+    // rule to pathnames holding at least one non-'/' character).
+    long rc_root = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+
+    // The gate must not pre-empt a genuine walk miss: still ENOENT (-2), which
+    // is what os.IsNotExist branches on.
+    long rc_miss = t_open(T_WALK_OPEN_FROM_ROOT, miss, sizeof(miss) - 1, T_OPATH);
+
+    // Site C: the SYS_STAT walk-query fast path returns from the fused leaf
+    // record without ever materializing a quarry, so it needs its own gate.
+    struct t_stat st;
+    long rc_sf = t_stat_path(f_sl, sizeof(f_sl) - 1, &st);
+    long rc_sd = t_stat_path(d_sl, sizeof(d_sl) - 1, &st);
+
+    if (rc_f    >= 0) (void)t_close(rc_f);
+    if (rc_f3   >= 0) (void)t_close(rc_f3);
+    if (rc_x    >= 0) (void)t_close(rc_x);
+    if (rc_fo   >= 0) (void)t_close(rc_fo);
+    if (rc_d    >= 0) (void)t_close(rc_d);
+    if (rc_root >= 0) (void)t_close(rc_root);
+    if (rc_miss >= 0) (void)t_close(rc_miss);
+    (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+    (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_f != -20 || rc_f3 != -20 || rc_x != -20 || rc_fo != -20 ||
+        rc_sf != -20 || rc_miss != -2 || rc_d < 0 || rc_root < 0 || rc_sd != 0) {
+        t_putstr("joey: probe82 FAILED file/=");
+        t_putstr(itoa_dec(rc_f, nb, sizeof(nb)));
+        t_putstr(" file///=");
+        t_putstr(itoa_dec(rc_f3, nb, sizeof(nb)));
+        t_putstr(" exec0755/=");
+        t_putstr(itoa_dec(rc_x, nb, sizeof(nb)));
+        t_putstr(" fileOREAD/=");
+        t_putstr(itoa_dec(rc_fo, nb, sizeof(nb)));
+        t_putstr(" stat(file/)=");
+        t_putstr(itoa_dec(rc_sf, nb, sizeof(nb)));
+        t_putstr(" (want -20 x5) miss/=");
+        t_putstr(itoa_dec(rc_miss, nb, sizeof(nb)));
+        t_putstr(" (want -2) dir/=");
+        t_putstr(itoa_dec(rc_d, nb, sizeof(nb)));
+        t_putstr(" root=");
+        t_putstr(itoa_dec(rc_root, nb, sizeof(nb)));
+        t_putstr(" stat(dir/)=");
+        t_putstr(itoa_dec(rc_sd, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: probe82 OK (a trailing '/' on a file -> ENOTDIR, open + "
+             "stat; a real dir, \"/\", and a genuine miss are unaffected)\n");
+    return 0;
+}
+
+static int probe81_dot_notdir(void) {
+    char nb[24];
+    static const char fn[] = "p81-dot-probe";
+    static const char dn[] = "p81-dot-dir";
+    static const char f_dotdot[] = "/p81-dot-probe/..";
+    static const char f_dot[]    = "/p81-dot-probe/.";
+    static const char d_dotdot[] = "/p81-dot-dir/..";
+    static const char d_dot[]    = "/p81-dot-dir/.";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe81 open root FAILED\n"); return -1; }
+
+    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe81 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(fd);
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        // Boot-fatal, not skipped: without the directory the two regression
+        // legs below would fail for the wrong reason, and the probe would look
+        // like it caught a gate bug when it only caught its own setup.
+        t_putstr("joey: probe81 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(dd);
+
+    // Out of / at a regular FILE -> -T_E_NOTDIR (20). Pre-#81 the first
+    // RESOLVED (popping back to "/") and the second handed the file back.
+    long rc_fdd = t_open(T_WALK_OPEN_FROM_ROOT, f_dotdot, sizeof(f_dotdot) - 1,
+                         T_OPATH);
+    long rc_fd  = t_open(T_WALK_OPEN_FROM_ROOT, f_dot, sizeof(f_dot) - 1,
+                         T_OPATH);
+
+    // The same tokens on a real DIRECTORY must still resolve -- the regression
+    // a too-eager gate would trip, on a dev9p Spoor rather than a fixture one.
+    long rc_ddd = t_open(T_WALK_OPEN_FROM_ROOT, d_dotdot, sizeof(d_dotdot) - 1,
+                         T_OPATH);
+    long rc_dd  = t_open(T_WALK_OPEN_FROM_ROOT, d_dot, sizeof(d_dot) - 1,
+                         T_OPATH);
+    // ".." at the containment floor is still the no-op clamp (I-28): the base
+    // is a directory, so the gate passes and root resolves to itself.
+    long rc_root = t_open(T_WALK_OPEN_FROM_ROOT, "/..", 3, T_OPATH);
+
+    // depth 0 with a FILE as the base -- openat(file_fd, ".."). The '..' clamp
+    // made this invisible before: at depth 0 the pop is a no-op, so both tokens
+    // simply handed the file straight back.
+    long base = t_open(T_WALK_OPEN_FROM_ROOT, fn, sizeof(fn) - 1, T_OPATH);
+    long rc_basedd = (base < 0) ? 1 : t_open(base, "..", 2, T_OPATH);
+    long rc_based  = (base < 0) ? 1 : t_open(base, ".", 1, T_OPATH);
+
+    // The SINGLE-HOP siblings (the gate #80 recorded as owed to #81): walking
+    // or creating a name out of a file fd. These do NOT go through stalk --
+    // sys_walk_open_handler / sys_walk_create_handler resolve one component
+    // directly -- so the resolver gate above cannot cover them.
+    long rc_wo = (base < 0) ? 1 : t_walk_open(base, "x", 1, T_OREAD);
+    long rc_wc = (base < 0) ? 1
+                            : t_walk_create(base, "x", 1, T_OWRITE, 0644u);
+    // Mode-independence, measured rather than assumed: pre-gate the two calls
+    // above answered EACCES because the X-search saw a 0644 file's missing x
+    // bit. On a 0755 file they would have sailed past it and answered ENOENT
+    // instead -- the same situation, two errnos. This leg pins the 0755 half,
+    // so a gate re-ordered behind the permission check fails here.
+    static const char xn[] = "p81-dot-exec";
+    long xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    if (xfd < 0) {
+        (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+        xfd = t_walk_create(pd, xn, sizeof(xn) - 1, T_OWRITE, 0755u);
+    }
+    if (xfd >= 0) (void)t_close(xfd);
+    long xbase = t_open(T_WALK_OPEN_FROM_ROOT, xn, sizeof(xn) - 1, T_OPATH);
+    long rc_xwo = (xbase < 0) ? 1 : t_walk_open(xbase, "x", 1, T_OREAD);
+    if (rc_xwo >= 0) (void)t_close(rc_xwo);
+    if (xbase  >= 0) (void)t_close(xbase);
+    (void)t_unlink(pd, xn, sizeof(xn) - 1, 0);
+    if (rc_wo >= 0) (void)t_close(rc_wo);
+    if (rc_wc >= 0) (void)t_close(rc_wc);
+
+    if (rc_fdd  >= 0) (void)t_close(rc_fdd);
+    if (rc_fd   >= 0) (void)t_close(rc_fd);
+    if (rc_ddd  >= 0) (void)t_close(rc_ddd);
+    if (rc_dd   >= 0) (void)t_close(rc_dd);
+    if (rc_root >= 0) (void)t_close(rc_root);
+    if (rc_basedd >= 0) (void)t_close(rc_basedd);
+    if (rc_based  >= 0) (void)t_close(rc_based);
+    if (base    >= 0) (void)t_close(base);
+    (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    if (rc_fdd != -20 || rc_fd != -20 || rc_basedd != -20 || rc_based != -20 ||
+        rc_wo != -20 || rc_wc != -20 || rc_xwo != -20 ||
+        rc_ddd < 0 || rc_dd < 0 || rc_root < 0) {
+        t_putstr("joey: probe81 FAILED walkopen=");
+        t_putstr(itoa_dec(rc_wo, nb, sizeof(nb)));
+        t_putstr(" walkcreate=");
+        t_putstr(itoa_dec(rc_wc, nb, sizeof(nb)));
+        t_putstr(" walkopen0755=");
+        t_putstr(itoa_dec(rc_xwo, nb, sizeof(nb)));
+        t_putstr(" file..=");
+        t_putstr(itoa_dec(rc_fdd, nb, sizeof(nb)));
+        t_putstr(" file.=");
+        t_putstr(itoa_dec(rc_fd, nb, sizeof(nb)));
+        t_putstr(" basefd..=");
+        t_putstr(itoa_dec(rc_basedd, nb, sizeof(nb)));
+        t_putstr(" basefd.=");
+        t_putstr(itoa_dec(rc_based, nb, sizeof(nb)));
+        t_putstr(" (want -20 x4) dir..=");
+        t_putstr(itoa_dec(rc_ddd, nb, sizeof(nb)));
+        t_putstr(" dir.=");
+        t_putstr(itoa_dec(rc_dd, nb, sizeof(nb)));
+        t_putstr(" root..=");
+        t_putstr(itoa_dec(rc_root, nb, sizeof(nb)));
+        t_putstr(" (want >=0 x3)\n");
+        return -1;
+    }
+    t_putstr("joey: probe81 OK ('.'/'..' out of a file -> ENOTDIR, incl. a "
+             "file dirfd + the single-hop walk/create; a real dir + the root "
+             "clamp still resolve)\n");
+    return 0;
+}
+
+// #80 always-run regression: a failed FS name-op reports WHY.
+//
+// The kernel test (dev9p.unlink_rename_errno) drives a synthetic responder, so
+// it proves the plumbing carries whatever the server said. Only this probe can
+// say what STRATUM actually says -- and the two failure legs deliberately assert
+// the STRUCTURAL property (a specific errno, never the flat -1) rather than a
+// guessed number, because the exact verdict is the server's to choose and
+// pinning an unmeasured constant here would be writing fiction. The values are
+// printed so the real ones are on the record every boot.
+//
+// The three kernel-ORIGINATED legs are exact: those numbers are ours.
+//
+// Self-contained (creates its own directory + file) so it cannot go vacuous if
+// the bake layout changes. Boot-fatal.
+static int probe80_errno(void) {
+    char nb[24];
+    static const char dn[] = "p80-errno-dir";
+    static const char fn[] = "inner";
+    static const char absent[] = "p80-errno-absent";
+
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe80 open root FAILED\n"); return -1; }
+
+    long dd = mkdir_or_open(pd, dn, sizeof(dn) - 1);
+    if (dd < 0) {
+        t_putstr("joey: probe80 mkdir FAILED rc=");
+        t_putstr(itoa_dec(dd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+    // A child inside it -- what makes the rmdir leg a NON-EMPTY rmdir rather
+    // than a successful one. Without this the leg passes vacuously (rc == 0
+    // trips the assertion, so it fails loudly rather than silently, but the
+    // create is still the thing that makes the leg mean what it claims).
+    long ifd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    if (ifd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(dd, fn, sizeof(fn) - 1, 0);
+        ifd = t_walk_create(dd, fn, sizeof(fn) - 1, T_OWRITE, 0644u);
+    }
+    if (ifd < 0) {
+        t_putstr("joey: probe80 inner create FAILED rc=");
+        t_putstr(itoa_dec(ifd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(dd); (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+        (void)t_close(pd);
+        return -1;
+    }
+    (void)t_close(ifd);
+
+    // (a) unlink a DIRECTORY without REMOVEDIR -- POSIX EISDIR or EPERM.
+    long rc_isdir = t_unlink(pd, dn, sizeof(dn) - 1, 0);
+    // (b) rmdir a NON-EMPTY directory -- POSIX ENOTEMPTY (or EEXIST).
+    long rc_notempty = t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    // (c) unlink something absent -- ENOENT, ours to guarantee.
+    long rc_absent = t_unlink(pd, absent, sizeof(absent) - 1, 0);
+    // (d) SYS_WALK_OPEN on a handle that is not a live fd -- EBADF. 4096 is
+    // chosen to sit well past PROC_HANDLE_MAX (256), so the lookup misses on
+    // the range check rather than on an empty-but-in-range slot; both are EBADF
+    // but the out-of-range form cannot be accidentally satisfied by a slot this
+    // Proc happens to hold.
+    long rc_badfd = t_walk_open(4096, fn, sizeof(fn) - 1, T_OREAD);
+    // (e) SYS_WALK_OPEN with ".." -- the component grammar rejects it: EINVAL.
+    long rc_dotdot = t_walk_open(pd, "..", 2, T_OREAD);
+
+    if (rc_badfd  >= 0) (void)t_close(rc_badfd);
+    if (rc_dotdot >= 0) (void)t_close(rc_dotdot);
+    (void)t_unlink(dd, fn, sizeof(fn) - 1, 0);
+    (void)t_close(dd);
+    (void)t_unlink(pd, dn, sizeof(dn) - 1, T_UNLINK_REMOVEDIR);
+    (void)t_close(pd);
+
+    // A specific errno, never 0 (the op must fail) and never the flat -1 (the
+    // generic sentinel this closed). -1 is what BOTH legs returned pre-fix.
+    int bad = 0;
+    if (rc_isdir    == 0 || rc_isdir    == -1) bad = 1;
+    if (rc_notempty == 0 || rc_notempty == -1) bad = 1;
+    if (rc_absent != -2 || rc_badfd != -9 || rc_dotdot != -22) bad = 1;
+
+    t_putstr(bad ? "joey: probe80 FAILED" : "joey: probe80 OK");
+    t_putstr(" (unlink-a-dir=");
+    t_putstr(itoa_dec(rc_isdir, nb, sizeof(nb)));
+    t_putstr(" rmdir-non-empty=");
+    t_putstr(itoa_dec(rc_notempty, nb, sizeof(nb)));
+    t_putstr(" [both: specific, not -1] absent=");
+    t_putstr(itoa_dec(rc_absent, nb, sizeof(nb)));
+    t_putstr(" badfd=");
+    t_putstr(itoa_dec(rc_badfd, nb, sizeof(nb)));
+    t_putstr(" dotdot=");
+    t_putstr(itoa_dec(rc_dotdot, nb, sizeof(nb)));
+    t_putstr(bad ? " [want -2 -9 -22])\n" : ")\n");
+    return bad ? -1 : 0;
+}
+
+// #100 (ER-3) always-run regression: the T1 byte-I/O syscalls report WHY.
+//
+// This probe exists because the kernel unit suite STRUCTURALLY CANNOT cover
+// these paths. sys_close_handler and sys_lseek_handler are static, take raw
+// user-register arguments, and are reachable only through the SVC dispatch --
+// so before #100 their error paths had NO test at all, and the kernel tests
+// that do exist call the *_for_proc inners, one layer below the handler. Only
+// an EL0 caller drives the real thing.
+//
+// Every value asserted here is kernel-ORIGINATED, so it is ours to pin exactly
+// (the probe80_errno convention). The flat -1 is what every one of these
+// returned pre-#100: EIO through pouch's __syscall_ret, and errno=1 = EPERM to
+// a stock-musl vivarium guest, which is the whole defect.
+//
+// Unlike the #84 family, no leg here is a permission denial, so joey holding
+// CAP_HOSTOWNER does not make the probe structurally incapable -- these are
+// fd-validity and argument-validity rejects, which no capability bypasses.
+// Boot-fatal.
+static int probe100_errno(void) {
+    char nb[24];
+    unsigned char b[8];
+    const long BADFD = 999999;   // far outside PROC_HANDLE_MAX
+
+    // A real, SEEKABLE fd for the argument legs. Self-contained -- it creates
+    // its own file rather than naming a baked path, for probe80's reason (it
+    // cannot go vacuous if the bake layout changes) and for one more: an
+    // earlier draft opened a path that exists later in the boot, and failed at
+    // its own setup. Seekability is load-bearing here: on a non-seekable Dev
+    // the offset leg would exit at the (still flat -1) ESPIPE arm without ever
+    // reaching the gate this probe is about.
+    static const char fn[] = "p100-errno-file";
+    long pd = t_open(T_WALK_OPEN_FROM_ROOT, "/", 1, T_OPATH);
+    if (pd < 0) { t_putstr("joey: probe100 open root FAILED\n"); return -1; }
+    // T_ORDWR, not T_OWRITE: the read-side EFAULT leg needs a fd open for
+    // READING, or it stops at the RIGHT_READ gate with EBADF and never
+    // reaches the copy-out arm it exists to exercise. That is exactly what
+    // the first draft did -- caught only because these legs assert the EXACT
+    // code (`rfault=-9`); a `< 0` check would have gone green on the wrong gate.
+    long fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_ORDWR, 0644u);
+    if (fd < 0) {   // leftover from a crashed prior boot on a preserved pool
+        (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+        fd = t_walk_create(pd, fn, sizeof(fn) - 1, T_ORDWR, 0644u);
+    }
+    if (fd < 0) {
+        t_putstr("joey: probe100 create FAILED rc=");
+        t_putstr(itoa_dec(fd, nb, sizeof(nb)));
+        t_putstr("\n");
+        (void)t_close(pd);
+        return -1;
+    }
+
+    // Handle-validity rejects -> EBADF (-9).
+    long rc_close_bad = t_close(BADFD);
+    long rc_read_bad  = t_read(BADFD, b, sizeof(b));
+    long rc_write_bad = t_write(BADFD, b, sizeof(b));
+    long rc_seek_bad  = t_lseek(BADFD, 0, T_SEEK_SET);
+
+    // Argument-validity rejects on a GOOD fd -> EINVAL (-22). Using a live fd
+    // is what separates these from the EBADF legs: a bad-fd reject here would
+    // mean the whence/offset gate never ran.
+    long rc_whence    = t_lseek(fd, 0, 99);
+    long rc_negoff    = t_lseek(fd, -1, T_SEEK_SET);
+
+    // #102 F6: whence is 32 bits wide, so junk in the HIGH half of x2 must not
+    // reject a valid seek. Linux's SYSCALL_DEFINE narrows `unsigned int whence`
+    // by construction and VIVARIUM's T1 table renumbers lseek onto this very
+    // handler with the argument words copied verbatim -- so before the fix a
+    // guest whose compiler left rubbish above bit 31 got EINVAL for a seek
+    // Linux performs. libt's t_lseek takes a long, which is what lets a NATIVE
+    // probe pose the question at all.
+    //
+    // The pair is the point. The first leg alone would pass under a handler
+    // that stopped range-checking whence entirely; the second says the low half
+    // is still being read, so together they pin narrowing rather than removal.
+    long rc_hiwhence  = t_lseek(fd, 0, (1L << 32) | T_SEEK_SET);   // valid -> 0
+    long rc_hibad     = t_lseek(fd, 0, (1L << 32) | 99);           // still -22
+
+    // Bad-buffer rejects on a GOOD fd -> EFAULT (-14). 0x7000_0000_0000 is
+    // 112 TiB: below UACCESS_USER_VA_TOP (2^47 = 128 TiB) so it PASSES the
+    // range pre-check, and far above every mapping this Proc has (stack tops
+    // at 2 GiB, vDSO at 3 GiB, burrows above 4 GiB) so the uaccess copy then
+    // faults. That is the point -- it reaches the COPY arm, which is the one
+    // that fires on a genuinely unmapped page, rather than stopping at the
+    // cheap range check.
+    //
+    // HONEST LIMIT: both arms now answer -14, so these two legs alone cannot
+    // say WHICH one fired. Only a revert probe distinguishes them, and that is
+    // how the copy arm was established -- do not read a green here as proof
+    // the copy arm specifically is right.
+    //
+    // The write leg reads FROM the bad VA; the read leg writes TO it. Both are
+    // harmless while the VA is unmapped, and both fail loudly (wrong value) if
+    // a future layout ever maps it -- they do not corrupt silently.
+    unsigned char *badp = (unsigned char *)0x700000000000ull;
+    long rc_wfault    = t_write(fd, badp, 16);
+
+    // The read leg needs the file to HAVE bytes and the cursor at 0. The
+    // copy-out arm is guarded `got > 0 && uaccess_copy_out(...)`, so on an
+    // empty file the Dev returns 0, the copy never runs, and the leg reports a
+    // clean 0 -- which is the second way this probe caught its own setup
+    // (rfault=0 before this write existed). Establish the precondition
+    // explicitly rather than inheriting whatever the earlier legs left.
+    unsigned char seed[16];
+    for (int i = 0; i < 16; i++) seed[i] = (unsigned char)('a' + (i & 15));
+    long rc_seed = t_write(fd, seed, sizeof(seed));
+    long rc_rew  = t_lseek(fd, 0, T_SEEK_SET);
+    long rc_rfault    = t_read(fd, badp, 16);
+
+    (void)t_close(fd);
+    (void)t_unlink(pd, fn, sizeof(fn) - 1, 0);
+    (void)t_close(pd);
+
+    int bad = 0;
+    if (rc_close_bad != -9)  bad = 1;
+    if (rc_read_bad  != -9)  bad = 1;
+    if (rc_write_bad != -9)  bad = 1;
+    if (rc_seek_bad  != -9)  bad = 1;
+    if (rc_whence    != -22) bad = 1;
+    if (rc_negoff    != -22) bad = 1;
+    if (rc_hiwhence  != 0)   bad = 1;   // #102 F6: high half ignored
+    if (rc_hibad     != -22) bad = 1;   // ...but the low half still checked
+    if (rc_wfault    != -14) bad = 1;
+    if (rc_rfault    != -14) bad = 1;
+    // The read leg's PRECONDITIONS are asserted too: if either the seeding
+    // write or the rewind silently failed, rfault would be measuring an empty
+    // file rather than the copy-out arm.
+    if (rc_seed      != 16)  bad = 1;
+    if (rc_rew       != 0)   bad = 1;
+
+    t_putstr(bad ? "joey: probe100 FAILED" : "joey: probe100 OK");
+    t_putstr(" (close=");
+    t_putstr(itoa_dec(rc_close_bad, nb, sizeof(nb)));
+    t_putstr(" read=");
+    t_putstr(itoa_dec(rc_read_bad, nb, sizeof(nb)));
+    t_putstr(" write=");
+    t_putstr(itoa_dec(rc_write_bad, nb, sizeof(nb)));
+    t_putstr(" lseek-badfd=");
+    t_putstr(itoa_dec(rc_seek_bad, nb, sizeof(nb)));
+    t_putstr(" whence=");
+    t_putstr(itoa_dec(rc_whence, nb, sizeof(nb)));
+    t_putstr(" negoff=");
+    t_putstr(itoa_dec(rc_negoff, nb, sizeof(nb)));
+    t_putstr(" hiwhence=");
+    t_putstr(itoa_dec(rc_hiwhence, nb, sizeof(nb)));
+    t_putstr(" hibad=");
+    t_putstr(itoa_dec(rc_hibad, nb, sizeof(nb)));
+    t_putstr(" wfault=");
+    t_putstr(itoa_dec(rc_wfault, nb, sizeof(nb)));
+    t_putstr(" rfault=");
+    t_putstr(itoa_dec(rc_rfault, nb, sizeof(nb)));
+    t_putstr(" seed=");
+    t_putstr(itoa_dec(rc_seed, nb, sizeof(nb)));
+    t_putstr(" rew=");
+    t_putstr(itoa_dec(rc_rew, nb, sizeof(nb)));
+    t_putstr(bad ? " [want -9 -9 -9 -9 -22 -22 0 -22 -14 -14 16 0])\n" : ")\n");
+    return bad ? -1 : 0;
+}
+
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
 // /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
@@ -4029,6 +5082,20 @@ int main(void) {
     // the std-stream handles (io::stdout, G05). Gates the boot.
     if (do_native_argv_smoke() != 0) return 1;
 
+    // === LINEAGE L-2: execve replaces a live image in place (I-44) ===
+    // Runs right after the argv milestone because it depends on the same
+    // machinery (the Shape-B startup frame) and extends it: exec-probe reads
+    // the argv its PREVIOUS incarnation passed. Gates the boot.
+    if (do_exec_probe() != 0) return 1;
+
+    // === LINEAGE L-3b: a forked child resumes its parent's frame (I-44) ===
+    // Directly after execve, because the two are the halves of process
+    // creation and the same machinery carries both: exec-probe proves a frame
+    // can be REWRITTEN in place, fork-probe that one can be COPIED to a second
+    // Proc. Gates the boot -- and it is the only coverage of the resume there
+    // is (see do_fork_probe).
+    if (do_fork_probe() != 0) return 1;
+
     // === native coreutils suite (U-6e-pre-b) ===
     // First runtime exercise of the adopted coreutils, each spawned +
     // I/O-verified by coreutil-smoke. Gates the boot.
@@ -4326,20 +5393,29 @@ int main(void) {
                 t_putstr("joey: probe #81 /system.key T_OPATH open FAILED\n");
                 return 1;
             }
+            // #100 (ER-3): these two legs used to assert `!= -1`. They now pin
+            // the exact code, -T_E_BADF (-9), which is kernel-ORIGINATED and so
+            // ours to state (the probe80_errno convention). That is strictly
+            // stronger: `!= -1` accepted ANY error, so it could not tell the
+            // #81 denial apart from an unrelated failure, and it would have gone
+            // green on a gate that denied for the wrong reason.
             unsigned char op_buf[16];
             long op_rd = t_read(op_fd, op_buf, sizeof(op_buf));
-            if (op_rd != -1) {
-                t_putstr("joey: #81 LEAK -- T_OPATH read of /system.key NOT denied (got ");
+            if (op_rd != -9) {
+                t_putstr("joey: #81 LEAK -- T_OPATH read of /system.key not denied with EBADF (got ");
                 t_putstr(itoa_dec(op_rd, buf, sizeof(buf)));
                 t_putstr(")\n");
                 (void)t_close(op_fd);
                 return 1;
             }
             // #81 F1 (the syscall-entry len==0 fast-path): a 0-length SYS_READ on
-            // an O_PATH handle must ALSO return -1 (the handler short-circuits
+            // an O_PATH handle must ALSO be denied (the handler short-circuits
             // before the gated inner sys_read_for_proc). Drives the real syscall.
-            if (t_read(op_fd, op_buf, 0) != -1) {
-                t_putstr("joey: #81 F1 -- zero-length T_OPATH read NOT denied at the syscall\n");
+            long op_rd0 = t_read(op_fd, op_buf, 0);
+            if (op_rd0 != -9) {
+                t_putstr("joey: #81 F1 -- zero-length T_OPATH read not denied with EBADF (got ");
+                t_putstr(itoa_dec(op_rd0, buf, sizeof(buf)));
+                t_putstr(")\n");
                 (void)t_close(op_fd);
                 return 1;
             }
@@ -4347,7 +5423,7 @@ int main(void) {
         }
         t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");
         t_putstr("joey: probe A-2a owner=system + SYS_WSTAT reject paths OK\n");
-        t_putstr("joey: probe #81 T_OPATH-read of /system.key DENIED (-1) OK\n");
+        t_putstr("joey: probe #81 T_OPATH-read of /system.key DENIED (EBADF) OK\n");
     }
     // #66: fd2path -- the namespace name a fd was reached by (Plan 9 fd2path).
     // Proves SYS_FD2PATH end-to-end on the REAL boot namespace: the "/" attach
@@ -6920,6 +7996,42 @@ int main(void) {
                     return 1;
             }
 
+            // #79 always-run regression: ENOTDIR through a file, on the real
+            // disk FS (the dev9p parent's QTDIR comes off the wire). Boot-fatal.
+            if (probe79_notdir() != 0)
+                return 1;
+
+            // #80 always-run regression: a failed FS name-op reports WHY --
+            // the unlink/rename verdict survives, and the kernel-originated
+            // rejects are specific. Boot-fatal.
+            if (probe80_errno() != 0)
+                return 1;
+
+            // #100 always-run regression: the T1 byte-I/O syscalls report WHY.
+            // The only coverage of sys_close_handler / sys_lseek_handler error
+            // paths anywhere -- they are unreachable from the kernel suite.
+            // Boot-fatal.
+            if (probe100_errno() != 0)
+                return 1;
+
+            // #81 always-run regression: '.'/'..' out of a non-directory are
+            // ENOTDIR -- and, the risk side of that gate, the same tokens on a
+            // real dev9p directory still resolve. Boot-fatal.
+            if (probe81_dot_notdir() != 0)
+                return 1;
+
+            // #82 always-run regression: a trailing '/' asserts a directory --
+            // and, the risk side of that gate, a real dev9p directory + "/" +
+            // a genuine walk miss are unaffected. Boot-fatal.
+            if (probe82_trailing_slash() != 0)
+                return 1;
+
+            // #83 always-run regression: a cwd-relative path resolves with the
+            // SAME semantics as its absolute spelling -- the #79/#81/#82 gates
+            // are not bypassed by the LS-4 join. Boot-fatal.
+            if (probe83_cwd_relative() != 0)
+                return 1;
+
             // CF-3 A always-run regression: bulk byte-I/O (the two-tier
             // syscall bounce + uaccess_copy_in/out). Boot-fatal.
             if (probe_cf3_bulk_io() != 0)
@@ -7775,6 +8887,295 @@ int main(void) {
                     t_putstr("joey: V-4a diorama-probe FAILED\n");
                     return 1;
                 }
+            }
+
+            // === VIVARIUM V-7 gate: a viv-assembled container, proven from
+            // the inside. Boot-fatal. joey spawns `viv run /vivarium/probe`
+            // with MAY_POST_SERVICE (viv confers it on its per-container
+            // diorama; joey is the grant root). viv assembles the section-7.2
+            // territory -- bundle rootfs as /, the per-container diorama's
+            // /proc + /sys, the /dev leaf binds, the manifest env -- and
+            // spawns /bin/viv-probe inside it; the probe's legs (host absent,
+            // pid view == {self}, principal == invoker's, live /dev binds)
+            // are the gate. viv exits with the probe's status.
+            {
+                const char vb[] = "/vivarium/probe/config.json";
+                long bfd = t_open(T_WALK_OPEN_FROM_ROOT, vb, sizeof(vb) - 1,
+                                  T_OPATH);
+                if (bfd < 0) {
+                    t_putstr("joey: V-7 /vivarium/probe bundle MISSING -- "
+                             "stale pool? re-run tools/build.sh with "
+                             "THYLACINE_MKFS_PRESERVE=0\n");
+                    return 1;
+                }
+                (void)t_close(bfd);
+
+                const char vname[]  = "/bin/viv";
+                const char vargv[]  = "/bin/viv\0run\0/vivarium/probe";
+                struct t_sys_spawn_args vreq = {
+                    .name_va       = (unsigned long)vname,
+                    .argv_data_va  = (unsigned long)vargv,
+                    .name_len      = sizeof(vname) - 1,
+                    .argv_data_len = sizeof(vargv),
+                    .argc          = 3,
+                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+                };
+                long vpid = t_spawn_full_argv(&vreq);
+                if (vpid <= 0) {
+                    t_putstr("joey: V-7 spawn /bin/viv FAILED\n");
+                    return 1;
+                }
+                int  vst  = 0;
+                long vgot = t_wait_pid_for((int)vpid, 0, &vst);
+                if (vgot != vpid || vst != 0) {
+                    t_putstr("joey: V-7 viv-probe (containered) FAILED rc=");
+                    t_putstr(itoa_dec(vst, pbuf, sizeof(pbuf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                t_putstr("joey: V-7 viv-probe (containered) PASS\n");
+            }
+
+            // === V-8 F3 (#101): the vivarium diorama refuses a foreign runner.
+            //
+            // The leg above proves the ALLOW branch (a real `viv run` still
+            // mounts its own diorama). It does NOT prove the gate is wired at
+            // all -- an `if (false)` gate would pass it identically -- so the
+            // DENY branch needs its own proof, and this is the only place a
+            // non-runner can reach a vivarium-mode diorama: inside the
+            // container /srv is not bound, so viv-probe cannot attempt it.
+            //
+            // Spawn one whose declared runner is a pid joey cannot be, then
+            // attempt the open joey has no right to. Runs AFTER the container
+            // leg so it cannot collide with the real /srv/viv-dio.
+            {
+                const char dname[] = "/bin/diorama";
+                const char dargv[] = "/bin/diorama\0--vivarium\0" "4294967295";
+                struct t_sys_spawn_args dreq = {
+                    .name_va       = (unsigned long)dname,
+                    .argv_data_va  = (unsigned long)dargv,
+                    .name_len      = sizeof(dname) - 1,
+                    .argv_data_len = sizeof(dargv),
+                    .argc          = 3,
+                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+                };
+                long fpid = t_spawn_full_argv(&dreq);
+                if (fpid <= 0) {
+                    t_putstr("joey: #101 spawn diorama(foreign) FAILED\n");
+                    return 1;
+                }
+
+                // PRECONDITION, and the whole leg rests on it: prove the
+                // service is POSTED before concluding anything from a refused
+                // open. Without this the assertion below is satisfied just as
+                // well by a diorama that never came up. O_PATH walks to the
+                // service without opening it, so it is not itself gated --
+                // devsrv's open IS the connect, and only the connect attaches.
+                const char vd[] = "/srv/viv-dio";
+                long posted = -1;
+                long fr = -1, fw = -1;
+                if (t_pipe(&fr, &fw) == 0) {
+                    for (int i = 0; i < 30; i++) {
+                        posted = t_open(T_WALK_OPEN_FROM_ROOT, vd,
+                                        sizeof(vd) - 1, T_OPATH);
+                        if (posted >= 0) break;
+                        int fst = 0;
+                        if (t_wait_pid_for((int)fpid, WAIT_WNOHANG, &fst)
+                            == fpid) {
+                            t_putstr("joey: #101 diorama(foreign) died before "
+                                     "posting -- leg would be vacuous\n");
+                            t_close(fr);
+                            t_close(fw);
+                            return 1;
+                        }
+                        struct pollfd fpf = { .fd      = (int)fr,
+                                              .events  = POLLIN,
+                                              .revents = 0 };
+                        (void)t_poll(&fpf, 1, 500);
+                    }
+                    t_close(fr);
+                    t_close(fw);
+                }
+
+                // Teardown, built once: the diorama serves forever, and it
+                // holds /srv/viv-dio, so it MUST be gone before boot moves on.
+                char fctl[64];
+                unsigned fctl_len = 0;
+                {
+                    char nb[24];
+                    const char *ns = itoa_dec(fpid, nb, sizeof(nb));
+                    const char pfx[] = "/proc/";
+                    for (unsigned k = 0; k < sizeof(pfx) - 1; k++)
+                        fctl[fctl_len++] = pfx[k];
+                    for (unsigned k = 0; ns[k]; k++) fctl[fctl_len++] = ns[k];
+                    const char sfx[] = "/ctl";
+                    for (unsigned k = 0; k < sizeof(sfx) - 1; k++)
+                        fctl[fctl_len++] = sfx[k];
+                    fctl[fctl_len] = '\0';
+                }
+
+                if (posted < 0) {
+                    t_putstr("joey: #101 /srv/viv-dio never posted -- leg "
+                             "would be vacuous\n");
+                    return 1;
+                }
+                (void)t_close(posted);
+
+                // THE ASSERTION: joey is not pid 4294967295, so the attach
+                // must be refused and the open must fail.
+                long stolen = t_open(T_WALK_OPEN_FROM_ROOT, vd,
+                                     sizeof(vd) - 1, T_OREAD);
+
+                long kfd = t_open(T_WALK_OPEN_FROM_ROOT, fctl, fctl_len,
+                                  T_OWRITE);
+                if (kfd >= 0) {
+                    (void)t_write(kfd, "kill", 4);
+                    (void)t_close(kfd);
+                }
+                int fst2 = 0;
+                (void)t_wait_pid_for((int)fpid, 0, &fst2);
+
+                if (stolen >= 0) {
+                    (void)t_close(stolen);
+                    t_putstr("joey: #101 FAILED -- a foreign runner mounted "
+                             "the container diorama\n");
+                    return 1;
+                }
+                t_putstr("joey: #101 foreign-runner attach REFUSED\n");
+            }
+
+            // === VIVARIUM V-1b gate: the phenotype, from both vantages.
+            // Boot-fatal, and deliberately TWO legs, because either alone
+            // could pass for the wrong reason.
+            //
+            // Leg A -- the DISCRIMINATOR. The same binary, spawned with NO
+            // declaration, asserts that a Linux syscall number is NOT
+            // translated (brk 214 falls to the native dispatcher's default and
+            // answers -1, not -ENOSYS). Without this leg, leg B's success
+            // would not prove the phenotype caused it.
+            //
+            // Leg B -- the CHAIN. A container whose manifest declares
+            // `org.thylacine.phenotype: linux`, whose entrypoint then speaks
+            // ONLY raw Linux numbers: openat/read/lseek/fstat/newfstatat/
+            // write/close all move real bytes, the two stat paths cross-check
+            // each other's file identity, the documented AT_SYMLINK_NOFOLLOW
+            // reject stays rejected, and the process terminates through Linux
+            // exit_group -- so a clean reap is itself the last assertion. A
+            // nonzero status names the failing leg.
+            {
+                const char pnative[] = "/bin/viv-pheno-probe";
+                const char pargv[]   = "/bin/viv-pheno-probe\0native";
+                struct t_sys_spawn_args preq = {
+                    .name_va       = (unsigned long)pnative,
+                    .argv_data_va  = (unsigned long)pargv,
+                    .name_len      = sizeof(pnative) - 1,
+                    .argv_data_len = sizeof(pargv),
+                    .argc          = 2,
+                };
+                long ppid = t_spawn_full_argv(&preq);
+                if (ppid <= 0) {
+                    t_putstr("joey: V-1b spawn viv-pheno-probe(native) FAILED\n");
+                    return 1;
+                }
+                int  pst  = 0;
+                long pgot = t_wait_pid_for((int)ppid, 0, &pst);
+                if (pgot != ppid || pst != 0) {
+                    t_putstr("joey: V-1b native-mode leg FAILED rc=");
+                    t_putstr(itoa_dec(pst, pbuf, sizeof(pbuf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+
+                const char hb[] = "/vivarium/pheno/config.json";
+                long hfd = t_open(T_WALK_OPEN_FROM_ROOT, hb, sizeof(hb) - 1,
+                                  T_OPATH);
+                if (hfd < 0) {
+                    t_putstr("joey: V-1b /vivarium/pheno bundle MISSING -- "
+                             "stale pool? re-run tools/build.sh with "
+                             "THYLACINE_MKFS_PRESERVE=0\n");
+                    return 1;
+                }
+                (void)t_close(hfd);
+
+                // STAMP THE MARKER FILE WITH A SENTINEL FIRST. The container
+                // reports its verdict by writing into this file (its exit
+                // status cannot carry a leg number -- Thylacine's status is
+                // boolean at v1.0, task #91), and joey reads it back from
+                // OUTSIDE the container -- which is also what proves Linux
+                // write(64) moved real bytes. The pool is PRESERVEd across
+                // boots, so without this stamp a stale "OK" from a previous
+                // boot would pass a broken run. Same fixture-freshness rule
+                // the LS-CI reset exists for.
+                const char hm[] = "/vivarium/pheno/rootfs/pheno-scratch";
+                long mfd = t_open(T_WALK_OPEN_FROM_ROOT, hm, sizeof(hm) - 1,
+                                  T_OWRITE | T_OTRUNC);
+                if (mfd < 0) {
+                    t_putstr("joey: V-1b marker file unopenable\n");
+                    return 1;
+                }
+                if (t_write(mfd, "??\n", 3) != 3) {
+                    t_putstr("joey: V-1b marker stamp FAILED\n");
+                    (void)t_close(mfd);
+                    return 1;
+                }
+                (void)t_close(mfd);
+
+                const char hname[] = "/bin/viv";
+                const char hargv[] = "/bin/viv\0run\0/vivarium/pheno";
+                struct t_sys_spawn_args hreq = {
+                    .name_va       = (unsigned long)hname,
+                    .argv_data_va  = (unsigned long)hargv,
+                    .name_len      = sizeof(hname) - 1,
+                    .argv_data_len = sizeof(hargv),
+                    .argc          = 3,
+                    .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+                };
+                long hpid = t_spawn_full_argv(&hreq);
+                if (hpid <= 0) {
+                    t_putstr("joey: V-1b spawn /bin/viv (pheno) FAILED\n");
+                    return 1;
+                }
+                int  hst  = 0;
+                long hgot = t_wait_pid_for((int)hpid, 0, &hst);
+
+                // Read the container's verdict from joey's OWN territory. Do
+                // this whether or not the status is clean: the marker is what
+                // names the failing property, and a wedged/killed container
+                // still leaves whatever it managed to write.
+                char hmark[8];
+                for (unsigned i = 0; i < sizeof(hmark); i++) hmark[i] = 0;
+                long rfd = t_open(T_WALK_OPEN_FROM_ROOT, hm, sizeof(hm) - 1,
+                                  T_OREAD);
+                long hn = (rfd < 0) ? -1 : t_read(rfd, hmark, sizeof(hmark) - 1);
+                if (rfd >= 0) (void)t_close(rfd);
+
+                int marked_ok = (hn >= 3 && hmark[0] == 'O' && hmark[1] == 'K');
+                if (hgot != hpid || hst != 0 || !marked_ok) {
+                    t_putstr("joey: V-1b linux-phenotype leg FAILED marker=");
+                    // The marker is the diagnostic: "L07" names the leg, "??"
+                    // means the container never spoke, "OK" with a nonzero
+                    // status means the exit path itself misbehaved.
+                    if (hn > 0) {
+                        for (long i = 0; i < hn; i++) {
+                            if (hmark[i] == '\n') hmark[i] = 0;
+                        }
+                        t_putstr(hmark);
+                    } else {
+                        t_putstr("<unreadable>");
+                    }
+                    t_putstr(" status=");
+                    t_putstr(itoa_dec(hst, pbuf, sizeof(pbuf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                t_putstr("joey: V-1b phenotype (native + containered linux) PASS\n");
+
+                // === LINEAGE L-6c: the ARC gate. Runs LAST among the
+                // phenotype legs, because it is the only one whose caller is
+                // a real third-party Linux program -- if it fails, every
+                // narrower leg above has already reported, so the log says
+                // which mechanism broke rather than just "the shell died".
+                if (do_alpine_shell_gate() != 0) return 1;
             }
 #endif
         }

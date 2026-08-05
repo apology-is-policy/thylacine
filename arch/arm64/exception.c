@@ -193,7 +193,7 @@ static void exception_sync_curr_el_impl(struct exception_context *ctx) {
                 struct Thread *t = current_thread();
                 if (t && t->magic == THREAD_MAGIC &&
                     t->proc && t->proc->magic == PROC_MAGIC &&
-                    t->proc->pgtable_root != 0) {
+                    t->proc->as != NULL) {
                     // R12-uaccess F211 close: pass `fi` (kernel-mode
                     // fault) through unchanged rather than
                     // synthesizing from_user=true. userland_demand_page

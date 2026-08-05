@@ -539,13 +539,13 @@ int loom_register_buffers(struct Loom *l, struct Proc *p,
     for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
         fresh[i].burrow = NULL; fresh[i].kva = NULL; fresh[i].len = 0; fresh[i]._pad = 0;
     }
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     u32 done = 0;
     int rc = 0;
     for (; done < n; done++) {
         if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -1; break; }
     }
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     if (rc != 0) {
         for (u32 i = 0; i < done; i++) burrow_unref(fresh[i].burrow);   // roll back
         return -1;

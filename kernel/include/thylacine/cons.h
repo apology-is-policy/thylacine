@@ -126,6 +126,21 @@ void cons_tx_flush_for_dump(void);
 // tooling-ABI line (TOOLING.md section 10).
 void cons_tx_flush(void);
 
+// The two kernel-side emit mechanisms below arrived on different branches and
+// serve DISJOINT contexts; read them as a pair.
+//
+//   cons_diag_*                 never sleeps, never spins -> legal in IRQ
+//                               context and under a spinlock (main#126)
+//   cons_kernel_writer_begin    PARKS for the writer role -> process context
+//                               only (aux#152)
+//
+// They are complementary, not alternatives: the role works by making other
+// writers park, and cons_diag_* exists precisely because some callers cannot.
+// That is also their composition GAP -- the role does not exclude a cons_diag_*
+// refill, and cons_tx_drain_from_irq does not consult the role, so a diagnostic
+// from a peer CPU can still drain INTO a bracketed run. Tracked as main#144;
+// the fix gates the DRAIN, never the pusher.
+
 // #126: the NON-BLOCKING kernel diagnostic emit. Use these -- NOT uart_puts /
 // uart_putdec / uart_puthex64 -- for any steady-state kernel diagnostic issued
 // from a context that can neither sleep nor spin: IRQ context, or under a
@@ -145,6 +160,24 @@ void cons_tx_flush(void);
 void cons_diag_puts(const char *s);
 void cons_diag_putdec(u64 v);
 void cons_diag_puthex64(u64 v);
+
+// #152: bracket a KERNEL diagnostic emission (a run of uart_puts/uart_putdec)
+// so a peer's cons_output_write on another CPU cannot interleave with it. The
+// writer role is the SAME one cons_output_write takes, so the two serialize.
+//
+// This closes the other half of the #75 writer set: P1-F gave cons_output_write
+// the role and #76 routed SYS_PUTS through it, but the kernel's own uart_puts
+// callers were never in the set -- and one of them prints "Thylacine boot OK",
+// the tooling-ABI line every gate greps (TOOLING.md section 10). A torn banner
+// reports a healthy boot as a failure, which is exactly what it did.
+//
+// begin() returns false iff a #811 death interrupted the park; the caller then
+// emits WITHOUT serialization rather than dropping the line, and must not call
+// end(). NOT for the extinction / Halls path -- that runs on a dying machine and
+// must stay lock-free and bounded (HX-I1/HX-I2); it keeps the direct uart_putc
+// and cons_tx_flush_for_dump's trylock.
+bool cons_kernel_writer_begin(void);
+void cons_kernel_writer_end(void);
 
 // #75 test hooks (test-only). The RING needs no dedicated test -- every byte of
 // console output on every boot goes through it, so a ring bug means no boot at

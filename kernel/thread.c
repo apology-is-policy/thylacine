@@ -26,6 +26,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/exception.h" // LINEAGE L-3b: struct exception_context -- the forked child's EL0 frame
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/timer.h"   // #101: timer_now_ns for the test-window spin hook
 #include "../mm/phys.h"
@@ -493,6 +494,114 @@ struct Thread *thread_create_user(struct Proc *proc,
     // RW-1 B-F1: kernel TTBR0 (ASID 0); the pre-hook installs the rolling-ASID
     // user value before the first switch. See thread_create_internal.
     t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
+
+    thread_link_into_proc(t, proc);
+    __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
+    return t;
+}
+
+// LINEAGE L-3b. Contract + rationale in thread.h; this is deliberately the
+// whole of the decision, so a test can reach it without a Proc.
+void fork_frame_init(struct exception_context *dst,
+                     const struct exception_context *src,
+                     u64 child_sp) {
+    if (!dst || !src) extinction("fork_frame_init with a NULL frame");
+
+    // Field-by-field, not `*dst = *src`. A 288-byte struct assignment compiles
+    // to a memcpy call the freestanding kernel does not link (context.h says the
+    // same about the FP block), and writing the copy out makes the "everything
+    // else verbatim" claim visible where a `=` would hide it.
+    for (int i = 0; i < 31; i++) dst->regs[i] = src->regs[i];
+    dst->elr  = src->elr;
+    dst->spsr = src->spsr;
+    dst->esr  = src->esr;
+    dst->far  = src->far;
+
+    // The two edits.
+    dst->regs[0] = 0;
+    dst->sp      = child_sp;
+}
+
+struct Thread *thread_create_forked(struct Proc *proc,
+                                    const struct exception_context *frame,
+                                    u64 child_sp,
+                                    u64 child_tls) {
+    if (!g_thread_cache) extinction("thread_create_forked before thread_init");
+    if (!proc)           extinction("thread_create_forked with NULL proc");
+    if (proc->magic != PROC_MAGIC)
+        extinction("thread_create_forked with corrupted proc");
+    if (!frame)          extinction("thread_create_forked with NULL frame");
+
+    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    if (!t) return NULL;
+
+    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    if (!stack_pg) {
+        kmem_cache_free(g_thread_cache, t);
+        return NULL;
+    }
+    paddr_t guard_pa = page_to_pa(stack_pg);
+    void *kalloc_base = pa_to_kva(guard_pa);
+
+    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
+        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+        kmem_cache_free(g_thread_cache, t);
+        return NULL;
+    }
+
+    t->magic       = THREAD_MAGIC;
+    t->tid         = alloc_next_tid();
+    t->state       = THREAD_RUNNABLE;
+    t->proc        = proc;
+    t->kstack_base = kalloc_base;
+    t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
+    t->weight      = 1;
+    t->band        = SCHED_BAND_NORMAL;
+    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+
+    // Carve the child's EL0 frame off the TOP of its own fresh kernel stack --
+    // the exact address KERNEL_ENTRY would have put it at had the child taken a
+    // real exception (SP_EL1 at entry, minus EXCEPTION_CTX_SIZE). That is what
+    // lets thread_fork_trampoline hand the child to the SHARED exception-return
+    // path instead of open-coding a second eret: KERNEL_EXIT's loads are
+    // sp-relative and its `add sp, sp, #EXCEPTION_CTX_SIZE` lands exactly on
+    // the stack top, as from any other return.
+    //
+    // sizeof(struct exception_context) is EXCEPTION_CTX_SIZE (288), a multiple
+    // of 16, and THREAD_KSTACK_TOTAL_SIZE is page-aligned, so the frame is
+    // 16-aligned without rounding -- asserted rather than assumed, because a
+    // misaligned SP at the eret is an alignment fault at EL1 with the frame
+    // half-restored.
+    u64 ktop = (u64)(uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE;
+    struct exception_context *cf =
+        (struct exception_context *)(uintptr_t)(ktop - sizeof(*cf));
+    if (((u64)(uintptr_t)cf & 15u) != 0)
+        extinction("thread_create_forked: misaligned child exception frame");
+    fork_frame_init(cf, frame, child_sp);
+
+    // The trampoline runs on this same stack BELOW the frame, so its own C
+    // calls cannot disturb it.
+    t->ctx.sp  = (u64)(uintptr_t)cf;
+    t->ctx.lr  = (u64)(uintptr_t)thread_fork_trampoline;
+    // Programmed VERBATIM, exactly as thread_create_user does. The "0 means
+    // inherit the caller's TLS" ABI decision belongs to the syscall handler,
+    // which has the caller in scope; resolving it here would need this layer to
+    // read a live system register on the caller's behalf.
+    t->ctx.tpidr_el0 = child_tls;
+    // RW-1 B-F1: kernel TTBR0 (ASID 0); the sched pre-switch hook installs the
+    // rolling-ASID user value before the first switch. Same as
+    // thread_create_user -- and note the child's AS is the PARENT's under
+    // RFMEM, so the hook resolves the SAME context_id, which is exactly right:
+    // one address space is one ASID however many Threads reach it (I-31).
+    t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
+
+    // POSIX fork copies FP/SIMD state. Take it from the LIVE registers, not
+    // from the caller's saved Context -- the caller is running, so its Context
+    // holds its last switch-OUT values, which are stale. struct Context's FP
+    // block (fp_v @128 / fpsr @640 / fpcr @644) is byte-identical to the
+    // 520-byte area fp_save_area writes, and _Alignas(16) on fp_v satisfies its
+    // alignment requirement.
+    fp_save_area(&t->ctx.fp_v[0]);
 
     thread_link_into_proc(t, proc);
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);

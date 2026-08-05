@@ -71,8 +71,14 @@ struct Path;   // <thylacine/path.h> -- #66 namespace name retention (I-33)
 // masse; each clone deep-copies mounts[] + bumps a spoor_ref per entry, so the cap
 // stays modest to hold the per-clone cost in check. G15 (Go Stage 4a) adds /env
 // (devenv) as a boot mount + a post-pivot re-graft (pre+post like the others),
-// so the cap grows 16 -> 20 to keep headroom under the #80 orphan accumulation.
-#define PGRP_MAX_MOUNTS  20
+// so the cap grew 16 -> 20 to keep headroom under the #80 orphan accumulation.
+// V-7 (the vivarium) grows it 20 -> 32: a container runner INHERITS the session
+// territory (~15-16 entries incl. the #80 orphaned pre-pivot generation) and
+// adds its diorama mount plus up to ~10 recipe mounts (proc/sys/env + the /dev
+// leaves + net/tty) on top -- at 20 the recipe overflowed the table and the
+// first over-cap mount failed the container. 32 covers the recipe with
+// headroom; the per-clone deep-copy cost stays ~1.3 KiB per spawn.
+#define PGRP_MAX_MOUNTS  32
 
 // Path identifier. At v1.0 abstract `u32` — bind/mount take whatever
 // numeric ID the caller decides on (tests pick small integers). The
@@ -244,24 +250,49 @@ void territory_unref(struct Territory *p);
 // NUL), or -1 on bad args / buffer too small.
 int territory_getdot(struct Territory *p, char *buf, u64 cap);
 
-// Resolve `input` (len `inlen`, NOT NUL-terminated) against `p`'s cwd into a
-// cleaned absolute path written to `out` (NUL-terminated, capacity `outcap`).
-// An absolute `input` ignores the cwd; a relative one is joined to it. Reads
-// dot_path UNDER dot_lock (the lexical resolve is bounded CPU -- no alloc, no
-// block -- so it is safe under the leaf lock). Returns the output length
-// (excluding NUL) or -1 if it would not fit. This is the SYS_CHDIR + the
-// SYS_OPEN-relative-join entry point.
-int territory_resolve_cwd(struct Territory *p, const char *input, u64 inlen,
-                          char *out, u64 outcap);
+// Join `input` (len `inlen`, NOT NUL-terminated) onto `p`'s cwd, producing an
+// absolute path in `out` (NUL-terminated, capacity `outcap`). An absolute
+// `input` ignores the cwd; a relative one is appended to it. Reads dot_path
+// UNDER dot_lock (the join is bounded CPU -- no alloc, no block -- so it is
+// safe under the leaf lock). Returns the output length (excluding NUL) or -1
+// if it would not fit. The SYS_OPEN / SYS_STAT / exec relative-path entry
+// point, and the first half of SYS_CHDIR.
+//
+// #83: the join is VERBATIM -- it does NOT resolve "." / ".." and does NOT
+// drop a trailing separator. Those are stalk's to interpret, so that a
+// cwd-relative path reaches the SAME #79/#81/#82 gates as the absolute
+// spelling of the same path. Resolving them here made `f/..`, `f/.`, `f/` and
+// even `nonexistent/..` succeed on a cwd-relative path while the absolute
+// spelling correctly answered ENOTDIR/ENOENT.
+//
+// I-28 is unaffected: containment has never rested on this function. stalk
+// clamps ".." at its trail floor (`start` == root_spoor) exactly as it does
+// for an absolute path containing "..", which is the case ARCH's LS-4 row
+// already reasons about ("a hostile un-cleaned join cannot escape").
+int territory_join_cwd(struct Territory *p, const char *input, u64 inlen,
+                       char *out, u64 outcap);
 
 // Replace dot_path with a kmalloc'd copy of `cleaned` (which MUST be a cleaned
 // absolute path) under dot_lock, freeing the old. "/" is stored as the NULL
 // sentinel (no allocation). Returns 0, or -1 on OOM (dot_path unchanged).
 int territory_setdot(struct Territory *p, const char *cleaned);
 
-// Pure lexical resolver (no locks, no allocation) -- the testable core of
-// territory_resolve_cwd. `dot` is the cwd string (NULL or "/" == root). Exposed
-// for unit tests; production callers use territory_resolve_cwd.
+// Pure verbatim join (no locks, no allocation) -- the testable core of
+// territory_join_cwd. `dot` is the cwd string (NULL or "/" == root).
+int cwd_join(const char *dot, const char *input, u64 inlen,
+             char *out, u64 outcap);
+
+// Pure lexical resolver (no locks, no allocation): join + collapse "." / ".."
+// + drop a trailing separator, yielding a CANONICAL absolute path.
+//
+// #83 narrowed this to ONE production role -- computing the string SYS_CHDIR
+// stores in dot_path (getcwd's answer, and the seed for the next join). It is
+// NOT a resolution primitive: it pops components lexically, without proving
+// they exist or are directories. SYS_CHDIR calls it on the ALREADY-STALKED
+// absolute join (dot == NULL), so every component it pops was physically
+// walked first; with no symlinks (G11) the lexical pop and stalk's trail pop
+// consume the same component sequence, so the canonical string names exactly
+// what stalk landed on.
 int cwd_lexical_resolve(const char *dot, const char *input, u64 inlen,
                         char *out, u64 outcap);
 

@@ -374,7 +374,7 @@ interactive `ls-5.exp` (LS-5-audit #963) follow.**
 2026-06-09; scripture `43ce24e`).** Split LS-4a (kernel, audit-bearing) +
 LS-4b (userspace). LS-4a `@c6b0ff2`: `Territory.dot_path` (a cleaned absolute
 cwd string, name-based; NULL=="/") + a leaf `dot_lock`, `cwd_lexical_resolve` /
-`territory_resolve_cwd` / `getdot` / `setdot`, `SYS_CHDIR`=69 / `SYS_GETCWD`=70,
+`territory_join_cwd` [named `territory_resolve_cwd` when LS-4 landed; renamed at #83] / `getdot` / `setdot`, `SYS_CHDIR`=69 / `SYS_GETCWD`=70,
 and the `sys_open_handler` relative->cwd join (POSIX `openat(AT_FDCWD)`). I-28
 PRESERVED with NO new mechanism (the join always hands stalk an
 absolute-from-root path; stalk re-clamps `..`). Focused Opus audit **CLEAN 0 P0

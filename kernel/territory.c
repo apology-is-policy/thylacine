@@ -263,10 +263,74 @@ void territory_unref(struct Territory *p) {
 // =============================================================================
 // Per-Proc cwd ("dot") -- LS-4. See <thylacine/territory.h> + LIFE-SUPPORT.md
 // LS-4 + STALK-DESIGN.md 4.3. Name-based: dot_path is a cleaned absolute path
-// string, NULL == "/". The lexical resolver keeps stalk's I-28 containment
-// untouched -- it always hands stalk an absolute-from-root path; ".." is
-// resolved here lexically and re-clamped at root_spoor by stalk regardless.
+// string, NULL == "/". Two distinct jobs, deliberately separated at #83:
+//
+//   cwd_join            RESOLUTION. Verbatim -- "."/".."/a trailing separator
+//                       reach stalk, which interprets them with the SAME gates
+//                       an absolute path gets. I-28 containment is stalk's
+//                       ".."-clamp at root_spoor, never this function's.
+//   cwd_lexical_resolve CANONICALIZATION. Collapses the dots. Its ONLY
+//                       production role is computing the string SYS_CHDIR
+//                       stores in dot_path, and it runs there on an
+//                       already-stalked path (see sys_chdir_handler).
+//
+// Collapsing dots on the resolution path was #83: it popped components that
+// were never walked, so a cwd-relative `nonexistent/..` opened successfully.
 // =============================================================================
+
+// cwd_join -- the RESOLUTION join (#83). Emits `dot` + '/' + `input` with the
+// input copied VERBATIM: "." / ".." and any trailing separator survive into the
+// path handed to stalk, which is the whole point. Resolving them here made a
+// cwd-relative path bypass stalk's #79/#81/#82 gates, so `f/..`, `f/.`, `f/`
+// and even `nonexistent/..` succeeded where the absolute spelling of the same
+// path correctly answered ENOTDIR / ENOENT.
+//
+// I-28 is untouched: containment has never rested on this function. The joined
+// path is resolved from root_spoor, and stalk clamps ".." at its trail floor
+// (`start`) exactly as it already does for an absolute path containing ".." --
+// the case ARCH's LS-4 row explicitly reasons about ("a hostile un-cleaned
+// join cannot escape"). This makes cwd-relative resolution run the SAME code
+// as absolute resolution rather than a parallel lexical one.
+int cwd_join(const char *dot, const char *input, u64 inlen,
+             char *out, u64 outcap) {
+    if (!input || !out || outcap < 2) return -1;
+
+    u64 olen = 0;
+    out[0] = '\0';
+
+    int absolute = (inlen > 0 && input[0] == '/');
+    if (!absolute && dot && dot[0] == '/') {
+        // The cwd is a cleaned absolute path by construction: territory_setdot
+        // is only ever handed a cwd_lexical_resolve output (SYS_CHDIR is its
+        // sole production caller), and territory_clone copies that string.
+        while (dot[olen] != '\0') {
+            if (olen + 1 >= outcap) return -1;
+            out[olen] = dot[olen];
+            olen++;
+        }
+        // Root stores as "/", so drop the lone separator -- the one below is
+        // the join's. (A "//" prefix would resolve identically, but the joined
+        // string is also what a downstream reader sees.)
+        if (olen == 1 && out[0] == '/') olen = 0;
+    }
+
+    if (!absolute && inlen > 0) {
+        if (olen + 1 >= outcap) return -1;
+        out[olen++] = '/';
+    }
+
+    for (u64 i = 0; i < inlen; i++) {
+        if (olen + 1 >= outcap) return -1;
+        out[olen++] = input[i];
+    }
+
+    // An empty input against the root cwd -- no production caller reaches this
+    // (every syscall rejects path_len == 0 first), but the result must still be
+    // a well-formed absolute path rather than "".
+    if (olen == 0) out[olen++] = '/';
+    out[olen] = '\0';
+    return (int)olen;
+}
 
 int cwd_lexical_resolve(const char *dot, const char *input, u64 inlen,
                         char *out, u64 outcap) {
@@ -321,14 +385,14 @@ int cwd_lexical_resolve(const char *dot, const char *input, u64 inlen,
     return (int)olen;
 }
 
-int territory_resolve_cwd(struct Territory *p, const char *input, u64 inlen,
-                          char *out, u64 outcap) {
+int territory_join_cwd(struct Territory *p, const char *input, u64 inlen,
+                       char *out, u64 outcap) {
     if (!p)                       return -1;
-    if (p->magic != PGRP_MAGIC)   extinction("territory_resolve_cwd of corrupted Territory");
-    // Read dot_path UNDER the leaf lock; the lexical resolve is bounded CPU
-    // (no alloc, no block), so holding dot_lock across it is safe.
+    if (p->magic != PGRP_MAGIC)   extinction("territory_join_cwd of corrupted Territory");
+    // Read dot_path UNDER the leaf lock; the join is bounded CPU (no alloc, no
+    // block), so holding dot_lock across it is safe.
     spin_lock(&p->dot_lock);
-    int r = cwd_lexical_resolve(p->dot_path, input, inlen, out, outcap);
+    int r = cwd_join(p->dot_path, input, inlen, out, outcap);
     spin_unlock(&p->dot_lock);
     return r;
 }

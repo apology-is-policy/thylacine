@@ -308,6 +308,10 @@ build_kernel() {
     if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
         stage_storm
     fi
+
+    # VIVARIUM V-7: stage the container bundles BEFORE the pool fixture so
+    # populate_stratum_pool can `stratum-fs put` them at /vivarium.
+    stage_viv_bundles
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
     # gets copied into the cpio at /etc/stratum/system.key.
@@ -437,7 +441,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -871,7 +875,11 @@ emit_corvus_recovery_header() {
     local cm_manifest="$REPO_ROOT/tools/corvus-mint/Cargo.toml"
     local cm_bin="$REPO_ROOT/tools/corvus-mint/target/release/corvus-mint"
     echo "==> Generating system recovery phrase header (corvus-mint emit-phrase)"
-    cargo build --manifest-path "$cm_manifest" --release $verbose \
+    # Subshell-cd to the repo root: cargo discovers .cargo/config from the CWD,
+    # not the manifest path, so a build.sh invoked from usr/ would silently pin
+    # usr/.cargo/config.toml's bare-metal target onto this HOST tool (getrandom
+    # then fails E0463 "can't find crate for std").
+    ( cd "$REPO_ROOT" && cargo build --manifest-path "$cm_manifest" --release $verbose ) \
         || { echo "==> corvus-mint BUILD FAILED (recovery header)" >&2; exit 1; }
     mkdir -p "$GEN_DIR"
     "$cm_bin" emit-phrase "$CORVUS_RECOVERY_HEADER" \
@@ -908,6 +916,203 @@ build_userspace() {
         echo "==> Skipping userspace Rust: rustup target $USR_RS_TARGET not installed."
         echo "    Install via: rustup target add $USR_RS_TARGET"
     fi
+}
+
+# VIVARIUM V-7: stage the container bundles (docs/VIVARIUM.md section 7.2) for
+# populate_stratum_pool to `put` at /vivarium. The PROBE bundle (the V-7 boot
+# gate's fixture: rootfs = the native viv-probe + a marker + the recipe's
+# mount anchors, manifest = run it) is synthetic and always staged when
+# viv-probe built -- no network, no external input, so the default build stays
+# hermetic. The ALPINE bundle stages only when a minirootfs tarball is
+# available (THYLACINE_ALPINE_TARBALL=<path>, or dropped into build/cache/);
+# its consumer is the ARC gate ("an Alpine shell runs" -- needs V-1b + V-2),
+# so absence is a loud skip, never a build failure.
+stage_viv_bundles() {
+    local probe_bin="$USR_RS_BUILD/$USR_RS_TARGET/release/viv-probe"
+    local vstage="$BUILD_DIR/vivarium"
+    rm -rf "$vstage"
+    if [[ ! -f "$probe_bin" ]]; then
+        echo "==> viv bundles: viv-probe not built -- skipping the stage" >&2
+        return 0
+    fi
+    local pb="$vstage/probe" leaf
+    mkdir -p "$pb/rootfs/bin" "$pb/rootfs/etc" "$pb/rootfs/proc" "$pb/rootfs/sys" \
+             "$pb/rootfs/dev" "$pb/rootfs/net" "$pb/rootfs/env"
+    cp "$probe_bin" "$pb/rootfs/bin/viv-probe"
+    chmod 0755 "$pb/rootfs/bin/viv-probe"
+    echo "thylacine-vivarium-probe-bundle" > "$pb/rootfs/etc/viv-marker"
+    # Mount ANCHORS for the /dev leaves + /dev/tty: plain empty files the
+    # recipe binds the devdev leaves over (a mount needs an existing mount
+    # point to key on; the proc/sys/net/env anchor DIRS above likewise).
+    for leaf in null zero full random urandom tty; do
+        : > "$pb/rootfs/dev/$leaf"
+        chmod 0666 "$pb/rootfs/dev/$leaf"
+    done
+    # The gate manifest. VIV_EXPECT_UID = PRINCIPAL_SYSTEM (0xFFFFFFFE): the
+    # boot gate's invoker is joey, and the probe compares getuid() against the
+    # value -- the expectation travels with the bundle (the gate's fixture),
+    # so viv itself adds no state to the container.
+    cat > "$pb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/viv-probe"],
+        "env": ["VIV_EXPECT_UID=4294967294"],
+        "cwd": "/"
+    },
+    "annotations": {}
+}
+VIVEOF
+    echo "==> viv bundles: probe bundle staged at $pb"
+
+    # The V-1b phenotype bundle. Same recipe shape as the probe bundle, but its
+    # manifest DECLARES `org.thylacine.phenotype: linux` -- the only thing in
+    # the system that can set PHENO_LINUX (VIVARIUM section 12.1 rule 1). Its
+    # entrypoint then speaks raw Linux syscall numbers and nothing else, so a
+    # clean exit proves the whole chain: manifest -> viv -> the spawn
+    # declaration -> the kernel's syscall-entry branch -> the translated call.
+    local pheno_bin="$USR_RS_BUILD/$USR_RS_TARGET/release/viv-pheno-probe"
+    if [[ -f "$pheno_bin" ]]; then
+        local hb="$vstage/pheno"
+        mkdir -p "$hb/rootfs/bin" "$hb/rootfs/proc" "$hb/rootfs/sys" \
+                 "$hb/rootfs/dev" "$hb/rootfs/net" "$hb/rootfs/env"
+        cp "$pheno_bin" "$hb/rootfs/bin/viv-pheno-probe"
+        chmod 0755 "$hb/rootfs/bin/viv-pheno-probe"
+        # An empty writable file the probe fills through Linux write(64) and
+        # then reads back: a write proven by its return value proves only the
+        # renumber; proven by the bytes coming back it proves the data path.
+        # (It cannot CREATE one -- O_CREAT is deliberately not translatable,
+        # VIVARIUM section 6.20 correction 1 -- so the bundle supplies it.)
+        : > "$hb/rootfs/pheno-scratch"
+        chmod 0666 "$hb/rootfs/pheno-scratch"
+        for leaf in null zero full random urandom tty; do
+            : > "$hb/rootfs/dev/$leaf"
+            chmod 0666 "$hb/rootfs/dev/$leaf"
+        done
+        cat > "$hb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": false },
+    "process": {
+        "args": ["/bin/viv-pheno-probe", "linux"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.sigpipe-selftest": "yes",
+        "org.thylacine.net": "granted"
+    }
+}
+VIVEOF
+        echo "==> viv bundles: pheno bundle staged at $hb"
+    else
+        echo "==> viv bundles: viv-pheno-probe not built -- pheno bundle skipped" >&2
+    fi
+
+    # The ARC gate bundle (LINEAGE L-6c): a real Alpine rootfs whose /bin/sh is
+    # Alpine's OWN busybox, running a script that exercises fork + execve +
+    # wait4 through the shell.
+    #
+    # TWO external inputs, both optional, both auto-discovered in build/cache/:
+    #
+    #   alpine-minirootfs-*-aarch64.tar.gz   the rootfs
+    #   busybox-static-*.apk                 the SHELL
+    #
+    # The second is not a convenience. MEASURED 2026-08-03: the minirootfs
+    # contains exactly two ELF binaries (bin/busybox, sbin/apk) and BOTH are
+    # ET_DYN PIE linked against /lib/ld-musl-aarch64.so.1 -- there is not one
+    # statically-linked file in the image. `kernel/elf.c` rejects ET_DYN
+    # (:83), PT_INTERP (:180) and PT_DYNAMIC (:185) by deliberate v1.0 policy,
+    # so the stock shell cannot load. Alpine's own busybox-static package is
+    # ET_EXEC with neither dynamic segment -- exactly the shape the loader
+    # accepts. See task #145 (dynamic linking) -- a separate deferred axis,
+    # NOT a LINEAGE gap.
+    #
+    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image, and the
+    # resolver does not follow symlinks (task #146), so the static binary is
+    # installed at BOTH paths as a real file rather than relinked.
+    local tarball="${THYLACINE_ALPINE_TARBALL:-}"
+    if [[ -z "$tarball" ]]; then
+        tarball="$(ls "$REPO_ROOT/build/cache"/alpine-minirootfs-*-aarch64.tar.gz 2>/dev/null | head -1 || true)"
+    fi
+    local bbapk="${THYLACINE_BUSYBOX_STATIC_APK:-}"
+    if [[ -z "$bbapk" ]]; then
+        bbapk="$(ls "$REPO_ROOT/build/cache"/busybox-static-*.apk 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        local ab="$vstage/alpine"
+        mkdir -p "$ab/rootfs"
+        if tar -xzf "$tarball" -C "$ab/rootfs" 2>/dev/null; then
+            mkdir -p "$ab/rootfs/proc" "$ab/rootfs/sys" "$ab/rootfs/dev" \
+                     "$ab/rootfs/net" "$ab/rootfs/env"
+            for leaf in null zero full random urandom tty; do
+                : > "$ab/rootfs/dev/$leaf"
+                chmod 0666 "$ab/rootfs/dev/$leaf"
+            done
+            local bb_ok=0
+            if [[ -n "$bbapk" && -f "$bbapk" ]]; then
+                local bbx="$vstage/.bbx"
+                rm -rf "$bbx"; mkdir -p "$bbx"
+                # An .apk is a gzip'd tar; the payload member is bin/busybox.static.
+                if tar -xzf "$bbapk" -C "$bbx" 2>/dev/null && \
+                   [[ -f "$bbx/bin/busybox.static" ]]; then
+                    rm -f "$ab/rootfs/bin/sh" "$ab/rootfs/bin/busybox"
+                    cp "$bbx/bin/busybox.static" "$ab/rootfs/bin/busybox"
+                    cp "$bbx/bin/busybox.static" "$ab/rootfs/bin/sh"
+                    chmod 0755 "$ab/rootfs/bin/busybox" "$ab/rootfs/bin/sh"
+                    bb_ok=1
+                fi
+                rm -rf "$bbx"
+            fi
+            # The gate script. Every leg prints its own marker, so a failure
+            # names the exact mechanism rather than "the shell did not run".
+            # ABSOLUTE paths throughout: envp[0] is always NULL (#140), so the
+            # container has no PATH and a bare command name cannot resolve --
+            # which keeps this a test of fork/exec/wait rather than of $PATH.
+            mkdir -p "$ab/rootfs/gate"
+            cat > "$ab/rootfs/gate/run.sh" <<'GATEEOF'
+echo L6C-A-shell-runs
+/bin/busybox echo L6C-B-external-exec
+/bin/busybox true  && echo L6C-C-status-zero
+/bin/busybox false || echo L6C-D-status-nonzero
+/bin/busybox echo pipe-in | /bin/busybox cat && echo L6C-E-pipeline
+sub=$(/bin/busybox echo captured); [ "$sub" = captured ] && echo L6C-F-substitution
+i=0; for w in a b c; do i=$(/bin/busybox expr $i + 1); done; [ "$i" = 3 ] && echo L6C-G-loop
+/bin/busybox sh -c '/bin/busybox echo nested' && echo L6C-H-nested-shell
+/bin/busybox false; echo L6C-I-exitcode=$?
+echo L6C-DONE
+GATEEOF
+            chmod 0644 "$ab/rootfs/gate/run.sh"
+            cat > "$ab/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/gate/run.sh"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+            if [[ "$bb_ok" == 1 ]]; then
+                echo "==> viv bundles: Alpine bundle staged from $tarball (/bin/sh <- $(basename "$bbapk"))"
+            else
+                rm -rf "$ab"
+                echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
+            fi
+        else
+            rm -rf "$ab"
+            echo "==> viv bundles: untar of $tarball FAILED -- Alpine bundle skipped" >&2
+        fi
+    else
+        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine bundle skipped (the ARC gate's fixture, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+    fi
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" ))"
 }
 
 build_sysroot() {
@@ -1861,6 +2066,40 @@ build_stratum_pool_fixture() {
         echo "    /clade -- replacing any clade-baked pool.img. Re-bake with"
         echo "    THYLACINE_BAKE_CLADE=1 before any clade/GL gate. (#101)"
     fi
+    # #139: the STALE-STAGE warning -- the #101 check's blind spot. #101 verifies
+    # that /clade LANDED in the pool; it cannot see whether what landed is
+    # CURRENT. `stage_clade` is reachable only as the explicit `stage-clade`
+    # subcommand, never from `build.sh all`, so a rebuilt binary in build/clade/gl
+    # does not reach build/clade/stage on its own -- the pool then re-mints
+    # faithfully around the PREVIOUS binary and every ledger line is green.
+    #
+    # That is not hypothetical: the #139 GL gate failed 3/3 on a gl-sdl-prove
+    # 27 minutes older than the fix under test, and the failure looked exactly
+    # like a real defect in the change. Both halves of the trap have now been
+    # paid for once (#120 for /clade broadly, #139 for gl-sdl-prove), which is
+    # twice too many for something a timestamp comparison can say out loud.
+    # Checked for EVERY staged GL binary, not just the one that caught it: the
+    # trap is a property of the staging step, so a name-by-name check would go
+    # quiet again the moment a binary is added -- which tyr-glquake then was.
+    if [[ "$bake_clade" == "1" ]]; then
+        local staleb
+        for staleb in gl-sdl-prove osmesa-prove tyr-glquake; do
+            [[ -f "$BUILD_DIR/clade/gl/$staleb" ]] || continue
+            if [[ "$BUILD_DIR/clade/gl/$staleb" -nt \
+                  "$BUILD_DIR/clade/stage/bin/$staleb" ]]; then
+                echo "==> WARNING: build/clade/gl/$staleb is NEWER than the staged"
+                echo "    copy, so this pool will bake the PREVIOUS binary and the GL"
+                echo "    gate will test code you did not build. Run:"
+                echo "        tools/build.sh stage-clade"
+                echo "    then re-bake. (#139; build.sh all never re-stages /clade)"
+                echo "    (This compares MTIME, deliberately: a content check would"
+                echo "     mean stripping a ~145 MB binary on every pool bake. So a"
+                echo "     rebuild from unchanged sources trips it too -- conservative"
+                echo "     and loud is the right posture for a warning, but confirm"
+                echo "     with a strip+shasum before assuming the bytes moved.)"
+            fi
+        done
+    fi
     echo "==> generating stratum pool fixture ($pool_img, system.key, size=$pool_size)"
     "$mkfs_bin" "$pool_img" --size "$pool_size" --keyfile "$keyfile" \
             --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
@@ -2089,6 +2328,21 @@ populate_stratum_pool() {
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: Quake shareware baked at /quake"
+    fi
+
+    # --- VIVARIUM V-7: the container bundles (-> /vivarium; staged by
+    # stage_viv_bundles per docs/VIVARIUM.md section 7.2). The probe bundle is
+    # the V-7 boot gate's fixture -- joey spawns `viv run /vivarium/probe`
+    # boot-fatally -- so a preserved pool missing it is STALE: re-run once
+    # with THYLACINE_MKFS_PRESERVE=0. ---
+    local viv_stage="$BUILD_DIR/vivarium"
+    if [[ -d "$viv_stage/probe/rootfs" ]]; then
+        echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
+            || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: viv bundles baked at /vivarium"
     fi
 
     # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---
@@ -2449,16 +2703,25 @@ build_sdl2() {
     fi
 
     # Staleness: reuse the archive when it is newer than every input
-    # (the vendored tree + the port dir + usr/gl-sdl-prove + libc.a).
+    # (the vendored tree + the port dir + usr/sdl-probe + usr/gl-sdl-prove +
+    # usr/lib/thylajit + libc.a).
     #
-    # The gl-sdl-prove OUTPUT is part of the precondition, not just its
-    # source. libSDL2.a and sdl-probe are written before that link runs, so a
-    # link failure leaves exactly the two files this guard used to check --
-    # and the next invocation reported REUSED for a build whose last step had
-    # failed. A cache key must name every artifact the target promises, or
-    # the failure of a later step is indistinguishable from a cache hit.
-    # (It is only required when the GL archives are present; without them the
-    # skip is legitimate and the binary is legitimately absent.)
+    # A cache key must name every artifact the target PROMISES *and* every
+    # input it CONSUMES. Both halves have now failed here, once each:
+    #
+    #   outputs (#138) -- libSDL2.a and sdl-probe are written before the
+    #     gl-sdl-prove link runs, so a link failure left exactly the two files
+    #     this guard used to check, and the next invocation reported REUSED for
+    #     a build whose last step had failed.
+    #   inputs (#139) -- gl-sdl-prove.c gained `#include "thyla_capjit.h"` in
+    #     #138 and the guard was widened to watch usr/gl-sdl-prove but NOT the
+    #     header's directory. Editing the header therefore did not invalidate
+    #     the cache: the #139 GL gate ran a 27-minute-old binary that predated
+    #     the fix under test and failed 3/3 for a reason that had nothing to do
+    #     with the change. Adding a dependency means adding it HERE too.
+    #
+    # (The output half is only required when the GL archives are present;
+    # without them the skip is legitimate and the binary legitimately absent.)
     local gl_prove="$BUILD_DIR/clade/gl/gl-sdl-prove"
     local gl_needed=""
     [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && gl_needed=1
@@ -2467,6 +2730,7 @@ build_sdl2() {
         local stale
         stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
                       "$REPO_ROOT/usr/gl-sdl-prove" \
+                      "$REPO_ROOT/usr/lib/thylajit" \
                       -type f -newer "$archive" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
             ledger "libSDL2.a: REUSED (cached + up-to-date)"
@@ -2495,6 +2759,7 @@ build_sdl2() {
                    -nostdlibinc -isystem "$sysroot/include"
                    -I"$sdl_src/include"
                    -I"$REPO_ROOT/usr/lib/libt/include"
+                   -I"$REPO_ROOT/usr/lib/thylajit"
                    -D_GNU_SOURCE=1 -D__thylacine__=1 )
 
     # The compile list: glob the pruned tree (deterministic order).
@@ -2589,7 +2854,6 @@ build_gl_sdl_prove() {
     # this function from anywhere else.
     local clang="$LLVM_PREFIX/bin/clang"
     local gl_lib="$BUILD_DIR/clade/gl/lib"
-    local llvm_lib="$BUILD_DIR/clade/llvm-build/lib"
     local out="$BUILD_DIR/clade/gl/gl-sdl-prove"
     local src="$REPO_ROOT/usr/gl-sdl-prove/gl-sdl-prove.c"
     local libs_list="$BUILD_DIR/clade/gl/llvm-libs.list"
@@ -2614,6 +2878,35 @@ build_gl_sdl_prove() {
                    -D_GNU_SOURCE=1 -D__thylacine__=1 )
     local obj="$sdl_obj/gl-sdl-prove.o"
     "$clang" "${cflags[@]}" -Wall -Wextra -c "$src" -o "$obj"
+
+    if ! gl_link_program "$out" "$obj"; then
+        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
+        echo "    resolve against libOSMesa.a (#138)." >&2
+        rm -f "$obj"
+        exit 1
+    fi
+    rm -f "$obj"
+    gl_assert_resolved "$out" gl-sdl-prove
+    echo "    gl-sdl-prove: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static,"
+    echo "                  OSMesa entry points resolved -- #138)"
+}
+
+# --- the GL link, ONE definition, shared by gl-sdl-prove and tyr-glquake.
+#
+# Extracted when GLQuake became the second consumer rather than transcribed a
+# second time, because every clause below is load-bearing and none of it is
+# guessable from reading the line: a drifted copy would not fail loudly, it
+# would produce a binary whose GL path is silently inert -- which is precisely
+# the failure #138 shipped once already.
+#
+# $1 = output path; $2.. = objects (and any per-program flags) placed before
+# the libraries.
+gl_link_program() {
+    local out="$1"; shift
+    local sysroot="$BUILD_DIR/sysroot"
+    local gl_lib="$BUILD_DIR/clade/gl/lib"
+    local llvm_lib="$BUILD_DIR/clade/llvm-build/lib"
+    local libs_list="$BUILD_DIR/clade/gl/llvm-libs.list"
 
     # The archive set is READ from the file the fetch recorded, never
     # hardcoded here: it is exactly what meson computed for osmesa-prove's
@@ -2652,26 +2945,24 @@ build_gl_sdl_prove() {
     # which forces the extraction; one is enough, because the member that
     # defines it defines the rest.
     mkdir -p "$(dirname "$out")"
-    if ! POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
-            "$REPO_ROOT/tools/pouch-ld" "$obj" \
-            -L"$sysroot/lib" -lSDL2 \
-            -Wl,-u,OSMesaCreateContextExt \
-            -Wl,--start-group \
-            "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
-            -L"$llvm_lib" "${llvm_flags[@]}" \
-            -lc++ -lc++abi -lunwind -lm \
-            -Wl,--end-group \
-            -o "$out"; then
-        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
-        echo "    resolve against libOSMesa.a (#138)." >&2
-        rm -f "$obj"
-        exit 1
-    fi
-    rm -f "$obj"
+    POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+        "$REPO_ROOT/tools/pouch-ld" "$@" \
+        -L"$sysroot/lib" -lSDL2 \
+        -Wl,-u,OSMesaCreateContextExt \
+        -Wl,--start-group \
+        "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
+        -L"$llvm_lib" "${llvm_flags[@]}" \
+        -lc++ -lc++abi -lunwind -lm \
+        -Wl,--end-group \
+        -o "$out"
+}
 
-    # ASSERT THE RESOLUTION, because the link exiting 0 does not.
+# ASSERT THE RESOLUTION, because the link exiting 0 does not.
+# $1 = binary, $2 = program name for the diagnostic.
+gl_assert_resolved() {
+    local out="$1" who="$2"
     #
-    # Everything above is arranged so that a broken GL link still SUCCEEDS
+    # The whole GL link is arranged so that a broken one still SUCCEEDS
     # (that is what the weak declarations buy), which means "the link
     # returned 0" carries no information about whether this binary can do
     # any GL at all. It has to be read out of the artifact. Checking the
@@ -2697,15 +2988,13 @@ build_gl_sdl_prove() {
         fi
     done
     if [[ -n "$missing" ]]; then
-        echo "==> gl-sdl-prove: linked, but these stayed UNDEFINED:$missing" >&2
+        echo "==> $who: linked, but these stayed UNDEFINED:$missing" >&2
         echo "    The GL path in this binary is inert -- weak references" >&2
         echo "    resolved to 0 instead of pulling libOSMesa.a's members." >&2
         echo "    (-Wl,-u,OSMesaCreateContextExt is what forces that.)" >&2
         rm -f "$out"
         exit 1
     fi
-    echo "    gl-sdl-prove: $(wc -c < "$out" | tr -d ' ') bytes (ET_EXEC, static,"
-    echo "                  OSMesa entry points resolved -- #138)"
 }
 
 build_tyrquake() {
@@ -2775,12 +3064,25 @@ build_tyrquake() {
         echo "    pak0.pak staged ($(wc -c < "$stage/id1/pak0.pak" | tr -d ' ') bytes, shareware 1.06)"
     fi
 
-    # 2. Staleness: reuse the binary when newer than the tree + port + libSDL2.a.
-    if [[ -f "$progs_out/tyr-quake" ]]; then
+    # 2. Staleness: reuse the binaries when newer than the tree + port +
+    # libSDL2.a.
+    #
+    # BOTH outputs are checked, and that is the #138 lesson applied before it
+    # could bite a second time: tyr-quake is written before tyr-glquake links,
+    # so a glquake failure would leave exactly the one file an output half that
+    # named only tyr-quake looks at -- and the next invocation would report
+    # REUSED for a build whose last step had failed. The glquake half is only
+    # promised when the GL archives are present, because without them the skip
+    # is legitimate and the binary legitimately absent.
+    local glq_out="$BUILD_DIR/clade/gl/tyr-glquake"
+    local glq_needed=""
+    [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && glq_needed=1
+    if [[ -f "$progs_out/tyr-quake" ]] &&
+       [[ -z "$glq_needed" || -f "$glq_out" ]]; then
         local stale
         stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$progs_out/tyr-quake" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
-            ledger "tyr-quake: REUSED (cached + up-to-date)"
+            ledger "tyr-quake + tyr-glquake: REUSED (cached + up-to-date)"
             return 0
         fi
     fi
@@ -2805,9 +3107,16 @@ build_tyrquake() {
     printf 'static const unsigned char MagickImage[] = { 0 };\n' \
         > "$tq_obj/gen/tyrquake_icon_128.h"
 
-    # The curated object list (upstream Makefile groups; SW renderer,
-    # VID/IN=sdl, SND/CD=null; UNIX common; no x86 asm on aarch64).
-    local objs=(
+    # The curated object lists (upstream Makefile groups; VID/IN=sdl,
+    # SND/CD=null; UNIX common; no x86 asm on aarch64).
+    #
+    # Upstream's nqsw-list and nqgl-list are
+    #   COMMON + CL + SV + NQCL + <renderer group> + <video driver>
+    # and differ in EXACTLY those last two. Writing the shared part ONCE and
+    # the two differences separately keeps that true by construction; two flat
+    # lists would be free to drift apart silently, and only one of them has a
+    # gate watching it.
+    local objs_common=(
         # COMMON_OBJS
         buildinfo cmd common crc cvar mathlib model rb_tree shell zone
         # UNIX common
@@ -2817,17 +3126,29 @@ build_tyrquake() {
         console developer keys menu pcx r_lerp r_efrag r_light r_model
         r_part sbar screen snd_dma snd_mem snd_mix snd_music sprite_model
         vid_mode view wad
-        # driver selections
-        cd_null snd_null in_sdl sdl_common vid_sdl
+        # driver selections (IN=sdl, SND/CD=null)
+        cd_null snd_null in_sdl sdl_common
         # SV_OBJS
         pr_cmds pr_edict pr_exec sv_main sv_move sv_phys sv_user
         # NQCL_OBJS (+ net_bsd)
         chase host host_cmd net_common net_dgrm net_loop net_main world
         net_bsd
-        # SW_OBJS
+    )
+    # SW_OBJS + VID=sdl
+    local objs_sw=(
         d_edge d_fill d_init d_modech d_part d_polyse d_scan d_sky
         d_sprite d_surf d_vars draw r_aclip r_alias r_bsp r_draw r_edge
         r_main r_misc r_sky r_sprite r_surf r_vars
+        vid_sdl
+    )
+    # GL_OBJS + VID=sdl (vid_sgl). gl_model.o joins model.o rather than
+    # replacing it -- that is upstream's own list, not an oversight: model.c
+    # keeps the format-independent loader and gl_model.c adds the GL-side
+    # surface/texture build.
+    local objs_gl=(
+        drawhulls gl_draw gl_extensions gl_fog gl_mesh gl_model gl_rmain
+        gl_rmisc gl_rsurf gl_sky gl_textures gl_warp qpic tga
+        vid_sgl
     )
 
     local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
@@ -2842,27 +3163,69 @@ build_tyrquake() {
                    -DTYR_VERSION=0.71 -DTYR_VERSION_TIME=1662459894LL
                    -DQBASEDIR=/quake )
 
-    local n=0 f src
-    for f in "${objs[@]}"; do
-        if [[ -f "$tq_src/NQ/$f.c" ]]; then
-            src="$tq_src/NQ/$f.c"
-        elif [[ -f "$tq_src/common/$f.c" ]]; then
-            src="$tq_src/common/$f.c"
-        else
-            echo "==> tyrquake: source for $f not found" >&2
-            exit 1
-        fi
-        "$clang" "${cflags[@]}" -c "$src" -o "$tq_obj/$f.o"
-        n=$((n + 1))
-    done
-    echo "    compiled $n objects"
+    # Compile one variant into its OWN object dir. Separate dirs are required,
+    # not tidiness: -DGLQUAKE changes the SHARED sources too (screen.c, view.c,
+    # cl_main.c and others carry #ifdef GLQUAKE), so a cl_main.o built for one
+    # renderer is wrong for the other.
+    tq_compile() {
+        local outdir="$1" n=0 f src
+        shift
+        mkdir -p "$outdir"
+        for f in "$@"; do
+            if [[ -f "$tq_src/NQ/$f.c" ]]; then
+                src="$tq_src/NQ/$f.c"
+            elif [[ -f "$tq_src/common/$f.c" ]]; then
+                src="$tq_src/common/$f.c"
+            else
+                echo "==> tyrquake: source for $f not found" >&2
+                exit 1
+            fi
+            "$clang" "${cflags[@]}" ${TQ_EXTRA_CFLAGS:-} -c "$src" \
+                -o "$outdir/$f.o"
+            n=$((n + 1))
+        done
+        echo "    compiled $n objects"
+    }
 
+    TQ_EXTRA_CFLAGS="" tq_compile "$tq_obj/sw" "${objs_common[@]}" "${objs_sw[@]}"
     POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
-        "$REPO_ROOT/tools/pouch-ld" "$tq_obj"/*.o \
+        "$REPO_ROOT/tools/pouch-ld" "$tq_obj/sw"/*.o \
         -L"$sysroot/lib" -lSDL2 \
         -o "$progs_out/tyr-quake"
     echo "    tyr-quake: $(wc -c < "$progs_out/tyr-quake" | tr -d ' ') bytes (ET_EXEC, static)"
     ledger "tyr-quake: BUILT (+ shareware pak staged for the pool)"
+
+    # --- tyr-glquake: LLVM-DESIGN section 9 step 3, the GL acceptance gate.
+    #
+    # Lands in build/clade/gl/ rather than $progs_out because it links the
+    # ~365 MB of fetched GL archives and comes out ~145 MB -- far too big for
+    # the ramfs, so it rides the /clade pool bake like gl-sdl-prove and
+    # osmesa-prove do. OPTIONAL and ANNOUNCED on the same terms: a checkout
+    # without the archives builds fine and the GL gate skips.
+    #
+    # Note what is NOT here: no tyrquake patch for the capability. vid_sgl.c
+    # is stock SDL-GL code, and CAP_JIT is acquired by the SDL backend on its
+    # behalf (SDL_thylacineopengl.c). That is the point of section 9 step 2's
+    # "stock SDL-GL programs recompile" -- if this build needed a Thylacine
+    # patch to reach a GL context, the claim would be false.
+    if [[ ! -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ||
+          ! -f "$BUILD_DIR/clade/gl/llvm-libs.list" ]]; then
+        echo "    tyr-glquake: no GL archives -- skipping (section 9 step 3;"
+        echo "                 fetch them per usr/ports/mesa/README.md)"
+        return 0
+    fi
+    echo "==> building tyr-glquake 0.71 (NQ GL renderer over llvmpipe)"
+    TQ_EXTRA_CFLAGS="-DGLQUAKE" \
+        tq_compile "$tq_obj/gl" "${objs_common[@]}" "${objs_gl[@]}"
+    local glq="$BUILD_DIR/clade/gl/tyr-glquake"
+    if ! gl_link_program "$glq" "$tq_obj/gl"/*.o; then
+        echo "==> tyr-glquake: LINK FAILED against libOSMesa.a" >&2
+        exit 1
+    fi
+    gl_assert_resolved "$glq" tyr-glquake
+    echo "    tyr-glquake: $(wc -c < "$glq" | tr -d ' ') bytes (ET_EXEC, static,"
+    echo "                 OSMesa entry points resolved)"
+    ledger "tyr-glquake: BUILT (GL acceptance gate, section 9 step 3)"
 }
 
 # --- the GNU make port's source-prep + object census, shared by the host
@@ -3466,6 +3829,17 @@ stage_clade() {
     else
         echo "    clade stage: no gl-sdl-prove at $BUILD_DIR/clade/gl/ -- staging without it (#138 SDL-GL gate will skip)"
     fi
+    # LLVM-DESIGN section 9 step 3: GLQuake, the GL acceptance gate. Same
+    # terms again -- linked against the fetched archives, ~145 MB, optional,
+    # announced when absent. Its data comes from /quake, which the SOFTWARE
+    # tyr-quake already bakes, so nothing extra is staged here.
+    if [[ -f "$BUILD_DIR/clade/gl/tyr-glquake" ]]; then
+        "$strip" -o "$stage/bin/tyr-glquake" "$BUILD_DIR/clade/gl/tyr-glquake" 2>/dev/null \
+            || cp "$BUILD_DIR/clade/gl/tyr-glquake" "$stage/bin/tyr-glquake"
+        chmod +x "$stage/bin/tyr-glquake"
+    else
+        echo "    clade stage: no tyr-glquake at $BUILD_DIR/clade/gl/ -- staging without it (GL Quake gate will skip)"
+    fi
     # The pouch sysroot -- clang++'s --sysroot=/clade/sysroot on-device.
     mkdir -p "$stage/sysroot"
     cp -R "$sysroot/lib" "$stage/sysroot/lib"
@@ -3681,6 +4055,23 @@ clean() {
     echo "==> Removing $BUILD_DIR"
     rm -rf "$BUILD_DIR"
 }
+
+# The patch series is validated BEFORE any target runs, because `patch` cannot
+# be trusted to complain: a hunk header that promises fewer new lines than the
+# body holds makes it apply the first d and DISCARD the rest -- silently,
+# exit 0, no .rej. A patch that "applied cleanly" and is missing its last line
+# is indistinguishable from a correct one until something downstream notices,
+# and downstream may never notice if the dropped line was a guard rather than a
+# definition.
+#
+# Here rather than beside each `patch` loop because there are several of them
+# (sysroot, sdl2, tyrquake, the llvm/mesa ports) and the #101 lesson is to
+# verify at ONE chokepoint instead of copying a check into every caller.
+# ~50 ms for 281 hunks, so it is unconditional. Found by having the mechanism
+# eat a function definition out of the tyrquake port patch.
+python3 "$REPO_ROOT/tools/check-patch-hunks.py" \
+    || { echo "==> patch-hunk check FAILED -- a hunk would apply INCOMPLETE" >&2
+         exit 1; }
 
 case "$target" in
     kernel)      build_kernel      ;;

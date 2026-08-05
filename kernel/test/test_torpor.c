@@ -5,7 +5,7 @@
 //   - kproc-side (single-threaded) tests for paths that don't reach a
 //     successful uaccess_load_u32: argument validation, EFAULT on an
 //     unmapped user VA, WAKE on an empty bucket. The fault path refuses
-//     to demand-page into kproc's TTBR0 (`p->pgtable_root == 0` short-
+//     to demand-page into kproc's TTBR0 (`p->as->pgtable_root == 0` short-
 //     circuits userland_demand_page), so these tests cover the negative
 //     paths only.
 //

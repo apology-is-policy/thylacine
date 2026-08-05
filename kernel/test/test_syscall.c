@@ -29,6 +29,7 @@
 #include "../../arch/arm64/exception.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
@@ -275,11 +276,13 @@ void test_syscall_opath_walkonly_no_byte_io(void) {
     zw->flag |= CWALKONLY;
     hidx_t wfd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, zw);
     TEST_ASSERT(wfd >= 0, "alloc walkonly handle");
-    TEST_EXPECT_EQ(sys_read_for_proc(p, wfd, buf, 4), (s64)-1,
-                   "#81: O_PATH (CWALKONLY) read DENIED");
-    TEST_EXPECT_EQ(sys_write_for_proc(p, wfd, buf, 4), (s64)-1,
-                   "#81: O_PATH (CWALKONLY) write DENIED");
-    TEST_EXPECT_EQ(sys_read_for_proc(p, wfd, buf, 0), (s64)-1,
+    // #100 (ER-3): EBADF -- Linux answers EBADF for read/write on an O_PATH
+    // descriptor, and the #81 gate is exactly that condition.
+    TEST_EXPECT_EQ(sys_read_for_proc(p, wfd, buf, 4), (s64)(-T_E_BADF),
+                   "#81: O_PATH (CWALKONLY) read DENIED with -T_E_BADF");
+    TEST_EXPECT_EQ(sys_write_for_proc(p, wfd, buf, 4), (s64)(-T_E_BADF),
+                   "#81: O_PATH (CWALKONLY) write DENIED with -T_E_BADF");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, wfd, buf, 0), (s64)(-T_E_BADF),
                    "#81: O_PATH zero-length read DENIED in the inner helper "
                    "(the syscall-entry len==0 fast-path is covered by the joey E2E -- #81 F1)");
     handle_close(p, wfd);

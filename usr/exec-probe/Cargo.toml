@@ -1,0 +1,17 @@
+[package]
+name = "exec-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "exec-probe"
+path = "src/main.rs"
+
+[dependencies]
+# LINEAGE L-2's in-guest gate: the only place SYS_EXECVE is exercised end to
+# end. The kernel unit tests cover the DETACHED BUILD (exec_load_into) but
+# cannot reach the swap -- proc_exec_replace needs a live EL0 thread with a
+# real trapframe, which only an actual syscall from a real Proc produces.
+libthyla-rs = { path = "../lib/libthyla-rs" }

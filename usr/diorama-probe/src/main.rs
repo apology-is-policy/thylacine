@@ -333,6 +333,67 @@ pub extern "C" fn rs_main() -> i64 {
         t_putstr("\n");
     }
 
+    // 6b3. environ PAST RENDER_MAX (V-4c-3 SA-3, #72). The leg above cannot see
+    //      the bug it closes: our inherited environment is well under 4 KiB, and
+    //      at that size a whole-file render and a windowed one are the same
+    //      bytes. So build an environment that is deliberately BIGGER than the
+    //      server's render buffer and check the last record survives.
+    //
+    //      Pre-fix the diorama rendered the whole file into a 4096-byte Render
+    //      and sliced it, so the read stopped dead at 4096 and everything past
+    //      it was gone -- and gone in the worst way, since a dropped variable
+    //      does not look like a truncated file to a consumer, it looks like the
+    //      variable was never set. That is precisely the failure the kernel's
+    //      offset-aware env_render_environ exists to avoid, re-imposed one layer
+    //      up. Only a >4 KiB environment reaches it, which is why the fix needs
+    //      its own leg rather than riding the one above.
+    {
+        static BIGVAL: [u8; 2500] = [b'x'; 2500];
+        let edir = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/env".as_ptr(), 4, T_OPATH) };
+        if edir < 0 {
+            fail("open /env for the big-environ leg");
+        }
+        for name in [&b"DIOBIG0"[..], &b"DIOBIG1"[..]] {
+            let v = unsafe { t_walk_create(edir, name.as_ptr(), name.len(), T_OWRITE, 0o644) };
+            if v < 0 {
+                fail("create /env/DIOBIGn");
+            }
+            if unsafe { t_write(v, BIGVAL.as_ptr(), BIGVAL.len()) } != BIGVAL.len() as i64 {
+                fail("write /env/DIOBIGn");
+            }
+            let _ = unsafe { t_close(v) };
+        }
+        // Written LAST, so it carries the highest Env id and renders as the final
+        // record -- past 5 KiB of BIGVAL, well beyond where the old cap fell.
+        let v = unsafe { t_walk_create(edir, b"DIOBIGEND".as_ptr(), 9, T_OWRITE, 0o644) };
+        if v < 0 {
+            fail("create /env/DIOBIGEND");
+        }
+        if unsafe { t_write(v, b"tail-ok".as_ptr(), 7) } != 7 {
+            fail("write /env/DIOBIGEND");
+        }
+        let _ = unsafe { t_close(v) };
+        let _ = unsafe { t_close(edir) };
+
+        let mut big = [0u8; 8192];
+        let bn = match read_all(b"/dio/proc/self/environ", &mut big) {
+            Some(n) => n,
+            None => fail("open /dio/self/environ (big)"),
+        };
+        // read_all loops until EOF, so reaching past 4096 at all proves the
+        // second Tread returned a WINDOW rather than the empty EOF the old
+        // whole-file slice produced for any offset past the render.
+        if bn <= 4096 {
+            fail("environ stopped at the render cap -- the >4 KiB tail was dropped");
+        }
+        if !contains(&big[..bn], b"DIOBIGEND=tail-ok\0") {
+            fail("environ lost its last record past 4 KiB");
+        }
+        t_putstr("diorama-probe: environ>cap bytes=");
+        put_dec(bn as u64);
+        t_putstr("\n");
+    }
+
     // 6c. per-pid (V-4b-3): the same files under our OWN numeric dir. This is
     //     the leg the selftest cannot reach -- it proves the numeric walk, the
     //     native existence check behind it, and that a per-pid render reaches
