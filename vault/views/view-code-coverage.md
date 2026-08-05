@@ -47,9 +47,17 @@ upstream of it.** It beats the area-MOC criterion it replaces only because a
 `code:` entry is a deliberate statement about a named file, where "the area has
 children" was an accident of structure — a smaller gap, not a closed one.
 
-Also unchecked: whether a dossier that genuinely covers a file *still* covers it
-after the file changes. That one is computable from git and is not computed yet
-(task #38).
+Whether a dossier that genuinely covers a file *still* covers it after the file
+changes is a different question, and it is now computed: `quaestor stale`
+compares each dossier's `updated:` against the date every file it claims last
+changed *on this branch*. The two ledgers answer different halves — this one
+says every file has an owner, that one says whether the owner still tells the
+truth — and the day it was first run, 84% coverage came with 45 of 112 dossiers
+describing code that had moved underneath them. A high number here is not
+evidence of currency, and was quietly being read as if it were.
+
+Still unchecked by either: whether a dossier that covers a current file covers
+it *well*.
 
 **What it deliberately excludes.** Tests (`*/test*`), `usr/apps/**` (the aux
 track's, per the branch boundary), and vendored trees. `tools/` is excluded
@@ -57,19 +65,20 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**362 owned · 64 unowned · 426 files (84% owned) · ~11294 unswept lines.**
+**362 owned · 72 unowned · 434 files (83% owned) · ~17804 unswept lines.**
 
-Excluded as harness and counted here rather than dropped: **59 files, ~22507 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
+Excluded as harness and counted here rather than dropped: **63 files, ~26448 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| usr/ports | 0 | 13 | 3341 |
-| usr/pouch-hello | 0 | 20 | 2998 |
-| kernel | 110 | 22 | 2863 |
+| kernel | 110 | 28 | 8009 |
+| usr/ports | 0 | 13 | 3378 |
+| usr/pouch-hello | 0 | 20 | 3161 |
+| usr/viv | 0 | 2 | 1061 |
 | arch | 34 | 4 | 971 |
 | usr/stratumd-stub | 0 | 1 | 453 |
-| usr/lib | 40 | 2 | 302 |
-| usr/gl-sdl-prove | 0 | 1 | 247 |
+| usr/lib | 40 | 2 | 390 |
+| usr/gl-sdl-prove | 0 | 1 | 262 |
 | usr/stub-driver | 0 | 1 | 119 |
 | mm | 8 | 0 | 0 |
 | usr/aurora | 5 | 0 | 0 |
@@ -105,35 +114,41 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 
 | file | lines |
 |---|---:|
+| kernel/include/thylacine/vivarium.h | 2013 |
+| kernel/vivarium.c | 2013 |
 | usr/ports/gnumake/config.h | 1357 |
 | arch/arm64/uart.c | 674 |
+| usr/viv/src/main.rs | 670 |
+| kernel/joey.c | 478 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
-| kernel/joey.c | 438 |
+| kernel/addrspace.c | 414 |
+| usr/viv/src/json.rs | 391 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
+| usr/pouch-hello/pouch-hello-fs.c | 350 |
+| kernel/include/thylacine/errno.h | 342 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 323 |
+| usr/lib/thylajit/thyla_capjit.h | 318 |
+| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 310 |
+| kernel/include/thylacine/addrspace.h | 306 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
-| usr/pouch-hello/pouch-hello-fs.c | 297 |
 | kernel/fault_test.c | 295 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
 | usr/pouch-hello/pouch-hello.c | 278 |
-| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 273 |
-| usr/gl-sdl-prove/gl-sdl-prove.c | 247 |
+| usr/gl-sdl-prove/gl-sdl-prove.c | 262 |
+| usr/pouch-hello/pouch-hello-signals.c | 258 |
 | kernel/include/thylacine/smp.h | 233 |
-| usr/lib/thylajit/thyla_capjit.h | 230 |
 | usr/pouch-hello/pouch-hello-pty.c | 221 |
-| kernel/include/thylacine/errno.h | 209 |
 | kernel/include/thylacine/devcap.h | 208 |
+| kernel/include/thylacine/context.h | 201 |
 | usr/pouch-hello/pouch-hello-sodium.c | 196 |
 | usr/ports/sdl2/SDL_config.h | 186 |
 | kernel/include/thylacine/spinlock.h | 185 |
 | usr/pouch-hello/pouch-hello-poll.c | 179 |
 | usr/ports/gnumake/generated/glob.h | 163 |
 | kernel/include/thylacine/9p_srvconn_transport.h | 160 |
-| kernel/include/thylacine/context.h | 159 |
 | kernel/cpio.c | 152 |
 | arch/arm64/uart.h | 151 |
-| usr/pouch-hello/pouch-hello-signals.c | 148 |
 | usr/pouch-hello/pouch-hello-mallocng-torture.c | 126 |
 | usr/pouch-hello/pouch-hello-spawn.c | 126 |
 | usr/pouch-hello/pouch-hello-malloc.c | 122 |
@@ -142,8 +157,10 @@ Excluded as harness and counted here rather than dropped: **59 files, ~22507 lin
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | kernel/canary.c | 111 |
+| kernel/include/thylacine/cow.h | 101 |
 | kernel/include/thylacine/9p_transport_loopback.h | 92 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
+| kernel/cow.c | 84 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 83 |
 | usr/ports/sdl2/glapi-probe.c | 81 |

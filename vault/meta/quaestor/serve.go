@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -98,6 +99,8 @@ var toolDefs = []toolDef{
 		}, "id")},
 	{"vault_render", "Re-render every generated view body. Mutating: rewrites stale views in place.",
 		obj(map[string]any{})},
+	{"vault_stale", "Dossiers whose `code:` files changed after their `updated:` date, churn-ordered. Dates a change by when it arrived on this branch, not when it was authored.",
+		obj(map[string]any{})},
 }
 
 func textResult(text string, isErr bool) map[string]any {
@@ -119,6 +122,11 @@ func callTool(root, name string, args map[string]any) (string, bool) {
 		reg, pre := loadRegistry(root)
 		fails, warns := validate(reg, pre)
 		fails = append(fails, checkViews(reg)...)
+		// checkCodePaths and the staleness summary belong here because the
+		// CLI gate runs them: an MCP lint that is quieter than the hook
+		// teaches that the vault is clean when the gate would refuse it.
+		fails = append(fails, checkCodePaths(reg)...)
+		warns = append(warns, staleSummary(root, reg)...)
 		var b strings.Builder
 		for _, w := range warns {
 			b.WriteString("WARN " + w + "\n")
@@ -129,6 +137,46 @@ func callTool(root, name string, args map[string]any) (string, bool) {
 		fmt.Fprintf(&b, "vault-lint: %d notes, %d fail(s), %d warn(s) [mcp]",
 			reg.Len(), len(fails), len(warns))
 		return b.String(), len(fails) > 0
+	case "vault_stale":
+		reg, _ := loadRegistry(root)
+		if reg.Len() == 0 {
+			return "no notes found -- wrong root?", true
+		}
+		stale, unknown, checked, dossiers := staleScan(root, reg)
+		byNote := map[string][]staleHit{}
+		var order []string
+		sort.Slice(stale, func(i, j int) bool {
+			if stale[i].churn != stale[j].churn {
+				return stale[i].churn > stale[j].churn
+			}
+			return stale[i].note < stale[j].note
+		})
+		for _, h := range stale {
+			if _, seen := byNote[h.note]; !seen {
+				order = append(order, h.note)
+			}
+			byNote[h.note] = append(byNote[h.note], h)
+		}
+		var b strings.Builder
+		for _, id := range order {
+			hits := byNote[id]
+			tot := 0
+			for _, h := range hits {
+				tot += h.churn
+			}
+			fmt.Fprintf(&b, "%s  updated=%s  %d file(s)  ~%d lines moved since\n",
+				id, hits[0].updated, len(hits), tot)
+			for _, h := range hits {
+				fmt.Fprintf(&b, "    %s  changed %s  (+/-%d)\n", h.file, h.changed, h.churn)
+			}
+		}
+		if len(order) == 0 {
+			b.WriteString("(none)\n")
+		}
+		fmt.Fprintf(&b, "\nquaestor-stale: %d dossier(s) stale, %d same-day, "+
+			"%d code file(s) checked across %d dossier(s)",
+			len(order), len(unknown), checked, dossiers)
+		return b.String(), false
 	case "vault_note":
 		reg, _ := loadRegistry(root)
 		n, ok := reg.Get(str("id"))

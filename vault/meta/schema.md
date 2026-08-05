@@ -393,8 +393,34 @@ do-not-re-report preamble), `new` (typed note factory from
 `vault/meta/templates/`), `query` (fnd/seam by surface + status),
 `backlinks` (incoming edges + wikilinks), `close` (closure-field flip on a
 Record note, refusing everything else by construction), `id` (shape +
-collision check), `serve` (the MCP layer: newline-delimited JSON-RPC over
-stdio exposing the same operations as tools; wired via `.mcp.json`).
+collision check), `stale` (below), `serve` (the MCP layer:
+newline-delimited JSON-RPC over stdio exposing the same operations as
+tools; wired via `.mcp.json`).
+
+`quaestor stale` answers the question the coverage ledger says it cannot:
+not "does every file have an owner" but "does a dossier that owned a file
+still describe it". A dossier states both halves itself — `code:` names
+the files, `updated:` dates the reading — so the check is a comparison,
+churn-ordered because a list of forty-five without magnitude is an alarm
+rather than a work order.
+
+Two properties are load-bearing, and both were learned by getting them
+wrong:
+
+- **A change is dated by when it ARRIVED on this branch, not by when it
+  was authored** (`git log --first-parent`). The two differ exactly when a
+  long-lived branch merges, which is when staleness happens in bulk: the
+  resolver gates authored 2026-07-30 arrived 2026-08-05, and the dossier
+  written 2026-08-01 sat inside the gap, looking newer than a change it
+  could not have seen.
+- **Same-day is its own verdict**, neither current nor stale. `updated:`
+  is a date and a commit is a timestamp, so the question is genuinely
+  unanswerable there; forcing it either way would hide real staleness or
+  cry wolf on every sweep.
+
+It is a WARN in `lint`, never a FAIL — staleness is a property of the
+world moving rather than of the commit in hand, and a gate that refused
+the merge commit *recording* the fact would be switched off.
 
 `quaestor lint` checks:
 

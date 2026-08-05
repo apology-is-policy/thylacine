@@ -39,6 +39,11 @@ func subBody() string {
 func fixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	// sub-t-x claims kernel/t.c, so the file has to exist -- checkCodePaths
+	// fails a `code:` entry naming nothing. It was absent for as long as
+	// only the CLI ran that check and the MCP did not: the fixture passed
+	// because one of the two gates was quieter than the other.
+	writeNote(t, root, "kernel/t.c", "int t;\n")
 	writeNote(t, root, "vault/home.md",
 		"---\nid: home\ntype: moc\ntitle: \"Home\"\n---\nRoot.\n")
 	writeNote(t, root, "vault/system/t/moc-t.md",
@@ -497,6 +502,14 @@ func TestMCPToolLayer(t *testing.T) {
 	}
 	if _, isErr = callTool(root, "no_such_tool", nil); !isErr {
 		t.Fatal("unknown tool did not error")
+	}
+	// The fixture has no git history, so the census can compare against
+	// nothing. It must say so and stay quiet rather than erroring: a
+	// staleness check that fails hard outside a repo would make every
+	// caller wrap it in a conditional.
+	out, isErr = callTool(root, "vault_stale", nil)
+	if isErr || !strings.Contains(out, "(none)") {
+		t.Fatalf("vault_stale on a git-less fixture: isErr=%v out=%q", isErr, out)
 	}
 	out, isErr = callTool(root, "vault_query_findings",
 		map[string]any{"status": "fixed"})

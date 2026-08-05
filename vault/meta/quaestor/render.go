@@ -445,9 +445,10 @@ func sweepArea(p string) string {
 // count: a dossier that discusses a neighbour's file has not swept it, and
 // treating a mention as coverage is how the first ledger rotted.
 //
-// What it does NOT check: whether a dossier that claims a file covers it WELL,
-// or still covers it after the file changes. Staleness is a separate computable
-// property and is not computed yet (task #38).
+// What it does NOT check: whether a dossier that claims a file covers it WELL.
+// Whether it STILL covers it after the file changes is a separate property, and
+// is now computed -- `quaestor stale` compares each dossier's `updated:` against
+// the arrival date of every file it claims.
 func renderCodeCoverage(reg *Registry) string {
 	root := vaultRoot(reg)
 	if root == "" {

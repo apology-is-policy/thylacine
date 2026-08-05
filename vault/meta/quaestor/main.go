@@ -21,6 +21,8 @@ const usage = `quaestor -- the vault registrar (vault/meta/schema.md section 8)
   quaestor backlinks <id> [--json]
   quaestor close <id> --status S [--fixed-by C] [--regression R] [--seam S]
   quaestor id <candidate>       check an id for shape + collisions
+  quaestor stale [--all] [--json]
+                                dossiers whose code changed after 'updated:'
   quaestor serve                MCP server on stdio (newline-delimited JSON-RPC)
 
   --root DIR (any command)      explicit repo root -- hooks pass it (relative
@@ -51,6 +53,12 @@ func lintRun(root, mode string) int {
 		fails = append(fails, sf...)
 		warns = append(warns, sw...)
 	}
+	// A WARN, never a FAIL. Staleness is a property of the world moving,
+	// not of the commit in hand: a merge that brings in 88 upstream commits
+	// makes dozens of dossiers stale at once, and a gate that refuses the
+	// merge commit recording that fact would be unusable and would be
+	// switched off. One line, so it stays legible next to real failures.
+	warns = append(warns, staleSummary(root, reg)...)
 	for _, w := range warns {
 		fmt.Println("WARN " + w)
 	}
@@ -114,6 +122,8 @@ func main() {
 		code = cmdClose(root, rest)
 	case "id":
 		code = cmdID(root, rest)
+	case "stale":
+		code = cmdStale(root, rest)
 	case "serve":
 		code = cmdServe(root)
 	default:
