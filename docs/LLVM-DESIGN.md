@@ -786,8 +786,10 @@ New load-bearing findings the §2 owes-list did NOT have:
 ### 16.2 The environ ground truth (§2's open question — CLOSED)
 
 `kernel/include/thylacine/exec.h:158`: the exec frame always writes
-`envp[0] = NULL` (*"no envp at v1.0"*) — the kernel never populates
-envp, for any program; `environ` is empty in every pouch program today
+`envp[0] = NULL` (*"no envp at v1.0"*) — the kernel never populated
+envp, for any program; `environ` was empty in every pouch program
+**until #140** (LINEAGE L-6c), which projects a Proc's `/env` onto the
+exec frame, so musl's own `__environ = envp` now yields the real set
 and `/env` (kernel-cloned per-Proc) is the sole environment channel.
 The `pouch-env` crt boundary line (populate `environ` from `/env` at
 startup; `/env` stays the source of truth) is **confirmed required** at
@@ -1602,7 +1604,7 @@ wires -> deferred to CL-1b (their real home is the spawn fd-list).
 
 `0025-pouch-env.patch`: a crt boundary line (`src/env/_pouch_env.c` +
 `__libc_start_main` hook) that populates `__environ` from the `/env` device
-at startup, closing the 16.2 finding (envp is always empty; `/env` is the
+at startup, closing the 16.2 finding (envp was always empty pre-#140; `/env` is the
 sole environment channel). It `readdir`s `/env`, opens+reads each value, and
 builds a malloc'd `"NAME=value"` vector so `getenv()` + `environ` iteration
 both work; fail-soft (a missing `/env` leaves the empty envp). Proven

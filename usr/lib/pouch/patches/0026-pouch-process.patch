@@ -57,7 +57,7 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.h
 --- a/src/internal/_pouch_process.h	1970-01-01 01:00:00
 +++ b/src/internal/_pouch_process.h	2026-07-23 20:05:01
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,81 @@
 +/* pouch boundary-line: process-lifecycle substrate (Clade CL-1b). Shared by
 + * posix_spawn / posix_spawnp / waitpid / wait4 / pipe / pipe2 / dup2 / dup3.
 + *
@@ -123,9 +123,16 @@ diff --color -ruN a/src/internal/_pouch_process.h b/src/internal/_pouch_process.
 +	unsigned long long allowance_va;   /* 80 */
 +	unsigned int allowance_flags;      /* 88 */
 +	unsigned int page_budget;          /* 92 -- CL-5 anon budget; 0 == inherit */
++	unsigned int pheno_flags;          /* 96 -- V-1b phenotype; 0 == inherit */
++	unsigned int _pad_spawn2;          /* 100 -- must be 0 (forward-compat) */
 +};
-+_Static_assert(sizeof(struct pouch_spawn_args) == 96,
-+	"struct pouch_spawn_args must match the kernel sys_spawn_args ABI");
++_Static_assert(sizeof(struct pouch_spawn_args) == 104,
++	"struct pouch_spawn_args must match the kernel sys_spawn_args ABI. "
++	"Grew 96 -> 104 at the aux-2 merge, which had to give CL-5's page_budget "
++	"and VIVARIUM V-1b's pheno_flags separate slots after both branches "
++	"independently claimed offset 92. A mirror left at 96 does NOT fail this "
++	"assert on the old number -- the kernel simply reads 8 bytes past the "
++	"caller's struct (#100). The kernel header is the source of truth.");
 +
 +/* Shared helpers (_pouch_process.c). */
 +hidden int __pouch_pipe(int fd[2]);

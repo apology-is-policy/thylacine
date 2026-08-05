@@ -53,6 +53,22 @@ void hw_cpu_ident_detect(unsigned cpu) {
     g_cpu_ident[cpu].midr        = midr;
     g_cpu_ident[cpu].dcache_line = 4u << ((u32)((ctr >> 16) & 0xFu));
 
+    // CTR_EL0.CWG (bits 27:24) is the Cache Writeback Granule -- log2, in words,
+    // of the largest span that one cache-entry eviction may write back. It is
+    // the granule that governs FALSE SHARING, and it is NOT DminLine: a part may
+    // allocate 64-byte lines while its coherency protocol moves 128 (Apple
+    // silicon does exactly that). Padding per-CPU hot data by DminLine would
+    // therefore not separate anything on such a part.
+    //
+    // CWG == 0 is architecturally "this register provides no writeback-granule
+    // information" (ARM ARM DDI 0487, CTR_EL0), NOT "the granule is 4 bytes". We
+    // record the 0 verbatim rather than decoding it into a fabricated size or
+    // silently substituting the 2 KB architectural maximum: a part that declines
+    // to answer is a different fact from one that answers small, and only the
+    // raw distinction lets a reader apply its own policy. QEMU TCG reports 0.
+    u32 cwg_field = (u32)((ctr >> 24) & 0xFu);
+    g_cpu_ident[cpu].cwg = cwg_field ? (4u << cwg_field) : 0u;
+
     // Publish LAST: a cross-CPU reader that sees valid must see both fields.
     __atomic_store_n(&g_cpu_ident[cpu].valid, true, __ATOMIC_RELEASE);
 }

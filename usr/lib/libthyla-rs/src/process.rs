@@ -449,6 +449,8 @@ impl Command {
             allowance_va: allow_va,
             allowance_flags: allow_flags,
             page_budget: 0,   // CL-5: inherit the spawner's budget
+            pheno_flags: 0,   // V-1b: inherit the spawner's phenotype
+            _pad_spawn2: 0,
         };
 
         // SAFETY: every pointer in args_record points into a buffer

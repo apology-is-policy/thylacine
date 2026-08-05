@@ -51,7 +51,7 @@ The kernel-side orchestration. Three changes from the predecessor (P3-F embedded
 
 1. `build_init_elf()` and the embedded `g_joey_program[]` instruction stream are removed.
 2. `joey_run()` now calls `devramfs_lookup(JOEY_RAMFS_NAME, &cpio_blob, &blob_size)`. The cpio blob lives in initrd memory for the kernel's lifetime; the pointer is valid past joey's exit.
-3. The cpio's 4-byte-aligned bytes are copied into `g_joey_elf_blob` (still in BSS but now `_Alignas(struct Elf64_Ehdr)`, sized 32 KiB) before being handed to `exec_setup`. The ELF loader requires 8-byte alignment for the Ehdr cast (`kernel/elf.c::elf_load` R5-G F61); cpio newc data is only 4-byte aligned, so the static-buffer copy is mandatory. The same pattern is used in `kernel/test/test_userspace_ramfs.c`.
+3. The cpio's 4-byte-aligned bytes are copied into an 8-aligned working buffer before being handed to `exec_setup`. The ELF loader requires 8-byte alignment for the Ehdr cast (`kernel/elf.c::elf_load` R5-G F61); cpio newc data is only 4-byte aligned, so the copy is mandatory. **As-built since #85 the buffer is a transient exact-size `kmalloc(blob_size, KP_ZERO)`, not a static array**: the child (`joey_thunk`) `kfree`s it the moment `exec_setup` returns — on both the success and failure arms — because `exec_setup` fully consumes the blob (`elf_load` fills a scalars-only `elf_image`; `exec_map_segment` copies segment bytes into Burrows; no pointer into the blob survives the call). The predecessor was a `JOEY_BLOB_MAX`-sized BSS array bumped six times (36K → 65K → 128K → 256K → 384K → 512K → 640K) as boot probes accumulated — 640 KiB of permanently-resident kernel memory holding a stale copy of an already-mapped ELF (measured: kernel BSS 2,371,584 → 1,716,224 B across the change). Alignment is inherent to the heap buffer (kmalloc's >2 KiB path returns a page-aligned direct-map KVA; slab objects sit at power-of-two boundaries ≥ 8); `KP_ZERO` keeps the bytes beyond `blob_size` in the rounded-up allocation deterministically zero, exact parity with the BSS predecessor. Ownership transfers to the child because the parent cannot be the freer: in production it parks in `wait_pid` for the machine's lifetime (joey is the long-running init). The static-buffer pattern survives only in `kernel/test/test_userspace_ramfs.c` (a 16 KiB test fixture).
 
 ---
 
@@ -67,8 +67,8 @@ if (((uintptr_t)blob) % _Alignof(struct Elf64_Ehdr) != 0)
 Three observation-based facts that motivated the static buffer:
 
 1. The 9-instruction predecessor blob was 8-aligned by construction (`_Alignas(struct Elf64_Ehdr)` on the embedded BSS), so this hazard was invisible until the cpio path started feeding `exec_setup`.
-2. `/hello`'s ramfs-lookup path in `kernel/test/test_userspace_ramfs.c` already uses an 8-aligned copy buffer; `kernel/joey.c` mirrors that.
-3. The static buffer is sized for the userspace binary budget (16 KiB headroom up to 32 KiB; see P4-image-shrink).
+2. `/hello`'s ramfs-lookup path in `kernel/test/test_userspace_ramfs.c` already uses an 8-aligned copy buffer; `kernel/joey.c` mirrored that.
+3. The static buffer was sized for the userspace binary budget (16 KiB headroom up to 32 KiB at this chunk; grown to 640 KiB by 2026-07 — the trend that motivated #85's replacement of the static array with the transient exact-size heap buffer described above).
 
 ---
 
@@ -78,12 +78,13 @@ Three observation-based facts that motivated the static buffer:
 
 ```
   joey: rforking child for /joey (12744 byte ELF from initrd)
+  joey: init blob released (12744 bytes, exec-window transient)
 joey: hello from /joey (real userspace binary, loaded from ramfs)
   joey: /joey pid=N exited cleanly (status=0)
 Thylacine boot OK
 ```
 
-The middle line is `t_putstr` output from `/joey`'s `main`. The flanking lines are `uart_puts` from `kernel/joey.c`.
+The `hello` line is `t_putstr` output from `/joey`'s `main`. The flanking lines are `uart_puts` from `kernel/joey.c`; the `released` line (#85) makes the init blob's non-residency visible in every boot log — the working copy is freed by the child the moment `exec_setup` returns.
 
 The "byte ELF from initrd" suffix is the disambiguator: prior boots printed `9-instr hello blob`. If a future regression accidentally fell back to an embedded blob, the byte count would mismatch the cpio entry's size.
 
@@ -95,7 +96,8 @@ The "byte ELF from initrd" suffix is the disambiguator: prior boots printed `9-i
 |---|---|---|
 | `/joey` missing from cpio | `EXTINCTION: joey: /joey not found in initrd (devramfs_lookup failed)` | Rebuild with `tools/build.sh all`; check `usr_bins` array in `tools/build.sh`. |
 | `/joey` cpio entry has zero size | `EXTINCTION: joey: /joey in initrd has zero size` | `tools/mkcpio.py` regression; rerun ramfs build. |
-| `/joey` ELF exceeds 32 KiB | `EXTINCTION: joey: /joey ELF exceeds JOEY_BLOB_MAX <size>` | Bump `JOEY_BLOB_MAX` (cheap; BSS is sparse-mapped). |
+| `/joey` ELF exceeds `EXEC_FILE_MAX` (256 MiB) | `EXTINCTION: joey: /joey ELF exceeds EXEC_FILE_MAX <size>` | Definitionally corrupt — the cpio parser bounds every entry within the initrd extent, so a size this large means a devramfs/cpio regression, not a big joey. (Pre-#85 this row was a 32 KiB→640 KiB `JOEY_BLOB_MAX` tunable that boot probes tripped six times; the "cheap; BSS is sparse-mapped" advice it carried was wrong — kernel BSS is real reserved frames, which is precisely why #85 retired the static buffer.) |
+| init blob `kmalloc` fails | `EXTINCTION: joey: init blob kmalloc failed <size>` | Unrecoverable at this boot point (buddy has ~2 GiB here); indicates allocator corruption or a wildly wrong size. |
 | `exec_setup` rejects blob | `joey: exec_setup failed rc=<N>; exits(fail-exec)` — and joey reaps with status=1 | Diagnose against `kernel/elf.c::elf_load_status` codes. |
 | `/joey` faults in EL0 | `EXTINCTION: EL0 unhandled sync exception (EC in ESR_EL1) <esr>` | Userspace bug in `usr/joey/joey.c` or `libt`'s `_start`. |
 

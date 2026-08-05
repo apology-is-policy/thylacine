@@ -162,6 +162,12 @@ void gic_dispatch(u32 intid);
 // 0 for an out-of-range CPU.
 u64 gic_cpu_irq_count(unsigned cpu);
 
+// Address of `cpu`'s counter slot; NULL if out of range. Exists solely so
+// gic.cpu_irq_counter_geometry can check the V-4c-3 F5 padding against the
+// coherency granule the hardware actually reports -- the pad is a compile-time
+// constant and this is the only way to hold it to account at runtime.
+const void *gic_cpu_irq_count_slot_addr(unsigned cpu);
+
 // P2-Cdc: per-CPU GIC bring-up for secondaries. On v3: wakes this CPU's
 // redistributor (clear ProcessorSleep, wait ChildrenAsleep), configures
 // the SGI/PPI bank (group 1 NS, default priority, all disabled), and

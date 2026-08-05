@@ -1631,12 +1631,44 @@ relative dir per LS-4) and hand `(parent_fd, leaf)` to the kernel. The
 `/srv/` short-circuits in `unlink()` / `chmod()` (0014) are preserved by
 delegating their real path to the CL-1a `*at` variant.
 
+**Trailing slashes (#86).** POSIX 4.13 makes a trailing `/` assert "the
+leaf names a directory"; the splitter originally rejected the whole class
+with `EINVAL` — wrong in both directions (`unlink("f/")` wants `ENOTDIR`;
+`rmdir("d/")` must *succeed*). Since #86 the splitter **strips** the
+trailing `/` run (the leaf is length-bounded via the new `*leaf_len`
+out-param — callers must pass that to the kernel, never `strlen(*leaf)`,
+which would run into the stripped separators) and reports it via
+`*dir_required`; each caller applies its own Linux-shaped row:
+
+| call | trailing-slash row | mechanism |
+|---|---|---|
+| `mkdir("d/")` | creates `d` | strip alone — the created leaf *is* a directory; `mkdir("file/")` stays `EEXIST` via the kernel create |
+| `rmdir("d/")` | removes `d`; `rmdir("f/")` → `ENOTDIR` | strip alone — `REMOVEDIR` itself enforces directory-ness (Stratum's shared removal core answers `ENOTDIR` for a file) |
+| `unlink("x/")` | missing → `ENOENT`, dir → `EISDIR`, else `ENOTDIR` (Linux `do_unlinkat`'s `slashes:` label) | must **never** reach `SYS_UNLINK` (stripped, it would *delete* the file the slash says not to touch): `__pouch_leaf_is_dir_errno` probes and the op is refused |
+| `open("x/", O_CREAT)` | `EISDIR`, existing or not (Linux) | refused before the create |
+| `rename` (either name slashed) | source must name an existing directory, else `ENOTDIR`/`ENOENT` — Linux `do_renameat2`: *"unless the source is a directory, trailing slashes give -ENOTDIR"*, on **either** name | one `__pouch_leaf_is_dir_errno(old)` probe; the new side's own existence is not pre-judged |
+| all-slashes (`"/"`) | `-EISDIR` from the splitter | no leaf-name op applies to the root (Linux: `EISDIR` for unlink/open-create; `rmdir`'s `EBUSY` and `mkdir`'s `EEXIST` are collapsed — strictly closer than the old blanket `EINVAL`) |
+
+`__pouch_leaf_is_dir_errno` (same file) is the shared discriminator: a
+`SYS_STAT` of the slash-terminated path, which runs the **kernel's**
+audited #82 trailing-slash gate — 0 only for an existing directory,
+`ENOTDIR`/`ENOENT`/`EACCES` otherwise — so the POSIX rule is enforced
+where it is audited, never re-derived in userspace. Where macOS and Linux
+diverge the Linux answer wins (musl's target ABI): `open("absent/",
+O_CREAT)` is `EISDIR` not `ENOENT`, and `rename(file, "absent/")` is
+`ENOTDIR` not `ENOENT`. The prover carries twenty #86 legs (every row
+above, both splitter branches, plus the file-survival assertion a
+strip-only fix would fail); revert-probed — the pre-#86 libc fails at the
+first leg, `mkdir(dir/) errno=22`.
+
 **`remove(3)` (`0027-pouch-remove.patch`, Clade CL-2).** 0024 wired the
 `unlink()` / `rmdir()` / `unlinkat()` *functions*, but musl's stdio `remove(3)`
 issues a RAW `__syscall(SYS_unlinkat)` — the `0xFFFF`/ENOSYS sentinel — and
 relies on the kernel returning `-EISDIR` to fall through from unlink to rmdir.
-Thylacine's `SYS_UNLINK` collapses every failure to a generic `-1` (no distinct
-`EISDIR`), so 0027 replaces `remove(3)` with an **lstat-dispatch** form (a
+At the time Thylacine's `SYS_UNLINK` collapsed every failure to a generic `-1`
+(#80 has since made it propagate real errnos — the #86 prover proves `ENOTDIR`
+crosses the wire — but the dispatch form below stands), so 0027 replaces
+`remove(3)` with an **lstat-dispatch** form (a
 directory → `rmdir()`, anything else → `unlink()`, both the pouch-wired
 functions). `std::filesystem::remove` → `::remove` rides this (CL-2 surfaced it).
 

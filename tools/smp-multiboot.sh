@@ -11,6 +11,21 @@
 #                  extinction message matches a ctx/stack-corruption signature
 #                  (invalid prev state, stack canary, kernel stack overflow,
 #                  wild PC, #860, double-run). These FAIL the gate.
+#   EXTERNAL-KILL -- something OUTSIDE the harness signalled QEMU: the boot
+#                  log carries QEMU's own 'terminating on signal N from pid
+#                  M' report (#88). Unambiguous: the harness's only kill is
+#                  `kill -KILL` (test.sh's reap + timeout path both), and
+#                  SIGKILL is uncatchable -- QEMU prints NOTHING for it --
+#                  while a guest cannot signal its own hypervisor. Reported
+#                  with the signal, the sender pid (ps'd at classify time,
+#                  seconds after the kill, while the sender may still be
+#                  alive), and the guest's health at the kill. Ladder
+#                  position: after CORRUPTION (a real corruption signature
+#                  is never masked by a subsequent kill), before INJECT-MISS
+#                  (a killed-but-green boot must not be absorbed into the
+#                  non-failing class). Still FAILS the gate: not a guest
+#                  defect, but silently passing would let real external
+#                  interference hide.
 #   INJECT-MISS -- the harness's QMP key-injector failed to deliver the
 #                  virtio-input event (#362): the guest reached AWAITING_QMP_
 #                  KEY, SKIPped cleanly, and the boot is PROVEN green (banner
@@ -35,7 +50,7 @@
 #   e.g.  tools/smp-multiboot.sh ubsan-smp4 4 15 undefined
 #         tools/smp-multiboot.sh default-smp8 8 15
 #
-# Exit 0 iff 0 CORRUPTION failures across all N boots.
+# Exit 0 iff 0 CORRUPTION, 0 EXTERNAL-KILL, and 0 OTHER across all N boots.
 set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -64,6 +79,12 @@ CORRUPT_RE='invalid prev state|stack canary mismatch|kernel stack overflow|alrea
 # ('[SOFT-WARN] IRQ-to-userspace p99 exceeds CI sanity budget'), which alone
 # cannot fail a boot, so this class should stay near-empty.
 TIMING_RE='\[SOFT-WARN\]|exceeds CI sanity budget'
+# External kill (#88): QEMU's own report when SIGTERM/SIGINT/SIGHUP'd. QEMU
+# stderr is merged into $LOG (test.sh routes run-vm.sh '2>&1' into it; run-vm
+# execs qemu). The pattern deliberately does not anchor the line end -- newer
+# QEMUs append the sender name ' (comm)' / ' (<unknown process>)' after the
+# pid, older captures stop at the pid; both forms match.
+EXTKILL_RE='terminating on signal [0-9]+ from pid [0-9]+'
 # The #362 inject-miss green-guest proof (ALL must hold to classify INJECT).
 INJ_SENTINEL='virtio-input: AWAITING_QMP_KEY'
 INJ_SKIP='virtio-input: SKIP'
@@ -102,7 +123,7 @@ pool_restore() {
     cp -c "$POOL_SNAP" "$POOL_IMG" 2>/dev/null || cp "$POOL_SNAP" "$POOL_IMG"
 }
 
-pass=0; corrupt=0; inject=0; timing=0; other=0
+pass=0; corrupt=0; extkill=0; inject=0; timing=0; other=0
 # The harness-side (test.sh stdout/stderr) capture. $LOG is the GUEST serial
 # only; a post-banner verdict step (the -c console gate, the liveness
 # compare) that fails leaves NO trace there -- the ubsan-smp8 OTHER of
@@ -125,6 +146,28 @@ for i in $(seq 1 "$N"); do
             corrupt=$((corrupt+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-CORRUPT.log"
             cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-CORRUPT-harness.log" 2>/dev/null || true
             echo "  [$LABEL $i/$N] CORRUPTION: ${msg:-<no extinction line>}"
+        elif grep -aqE "$EXTKILL_RE" "$LOG"; then
+            extkill=$((extkill+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-EXTKILL.log"
+            cp "$HARNESS_LOG" "$FAILDIR/$LABEL-$i-EXTKILL-harness.log" 2>/dev/null || true
+            kline="$(grep -aE "$EXTKILL_RE" "$LOG" | head -1)"
+            kline="${kline#*terminating on }"
+            kpid="$(printf '%s\n' "$kline" | grep -aoE 'pid [0-9]+' | head -1)"
+            kpid="${kpid#pid }"
+            tline="$(grep -aoE 'tests: [0-9]+/[0-9]+ PASS' "$LOG" | head -1)"
+            if grep -aq '^EXTINCTION:' "$LOG" || grep -aqE "$SUITE_FAIL_RE" "$LOG"; then
+                health="guest had failed before the kill: ${msg:-?}"
+            elif [[ -n "$tline" ]]; then
+                health="guest was healthy: $tline, 0 EXTINCTION"
+            else
+                health="guest healthy so far, 0 EXTINCTION (suite not yet reached)"
+            fi
+            echo "  [$LABEL $i/$N] EXTERNAL-KILL: $kline ($health)"
+            # The sender may still be alive seconds after the kill; by the time
+            # an operator investigates, the pid is long gone -- capture it NOW.
+            sender="$(ps -o pid=,ppid=,comm=,args= -p "$kpid" 2>/dev/null | head -1)"
+            [[ -z "$sender" ]] && sender="pid $kpid already exited at classify time"
+            echo "      sender| $sender"
+            echo "sender at classify time: $sender" >> "$FAILDIR/$LABEL-$i-EXTKILL-harness.log" || true
         elif inject_miss_green; then
             inject=$((inject+1)); cp "$LOG" "$FAILDIR/$LABEL-$i-INJECT.log"
             cp "$INJECT_LOG" "$FAILDIR/$LABEL-$i-INJECT-injector.log" 2>/dev/null || true
@@ -145,5 +188,5 @@ for i in $(seq 1 "$N"); do
     fi
 done
 
-echo "== $LABEL: $pass PASS / $corrupt CORRUPTION / $inject inject-miss / $timing timing / $other other  (N=$N) =="
-[[ $corrupt -eq 0 && $other -eq 0 ]]
+echo "== $LABEL: $pass PASS / $corrupt CORRUPTION / $extkill external-kill / $inject inject-miss / $timing timing / $other other  (N=$N) =="
+[[ $corrupt -eq 0 && $extkill -eq 0 && $other -eq 0 ]]

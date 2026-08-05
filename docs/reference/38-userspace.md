@@ -231,12 +231,12 @@ control via `eret` with:
 
 `_start`'s contract: call `main()`, exit with `main()`'s return value.
 The kernel ALREADY populates the System-V startup frame on the user stack
-(`kernel/include/thylacine/exec.h` "Shape A / Shape B"; argc + argv + a
-NULL envp + the auxv), but the C-side `_start` above does not yet consume
-it — there is no C-side `argv` accessor at v1.0. (The Rust runtime DOES
-capture it since U-6e-pre-a; see the Rust `_start` + `env::args()` above.
-A C-side `main(argc, argv)` loader is a future libt addition; envp is
-still a single NULL — no environment at v1.0.)
+(`kernel/include/thylacine/exec.h`; one shape since #140 — argc + argv +
+**a real envp** + the auxv), but the C-side `_start` above does not yet
+consume it — there is no C-side `argv` accessor at v1.0. (The Rust runtime
+DOES capture it since U-6e-pre-a; see the Rust `_start` + `env::args()`
+above, and `env::vars()` for the frame's environment since #140. A C-side
+`main(argc, argv)` loader is a future libt addition.)
 
 ### Stack-canary stubs
 

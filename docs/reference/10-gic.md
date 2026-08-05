@@ -297,7 +297,44 @@ P1-I will add a sanitizer matrix run that exercises the IRQ path under ASan / UB
 | `gic_dispatch` cost (excluding handler) | ~5 cycles | array index + indirect call |
 | Total IRQ service overhead (excluding handler) | ~50 cycles | ack + dispatch + EOI + KERNEL_ENTRY + KERNEL_EXIT |
 | BSS footprint (handler table) | 16 320 bytes | 1020 × 16 |
+| BSS footprint (per-CPU IRQ counter) | 1 024 bytes | 8 × 128 (granule-padded; see below) |
 | Code size (gic.c) | ~3 KB stripped | reasonable for a driver |
+
+### The per-CPU IRQ counter is cache-granule padded (V-4c-3 F5, task #73)
+
+`gic_dispatch` stores to its CPU's slot of `g_cpu_irq_count` on **every**
+interrupt on **every** CPU — the timer PPI at tick rate, plus IPIs and every
+device IRQ. As first written (V-4c-2b) the counter was a plain
+`u64 g_cpu_irq_count[DTB_MAX_CPUS]`, which at `DTB_MAX_CPUS == 8` is exactly 64
+bytes: one cache coherency granule, write-contended by every core on the
+kernel's hottest path.
+
+Correctness was never at issue — the store is single-writer per CPU, and that
+reasoning was and remains right. It was simply *silent about sharing*. The tell
+is the sibling counter added in the same commit: `CpuSched.nctxt` lives inside a
+large per-CPU struct, so its slots were line-separated for free.
+
+Each slot is now padded and the array aligned to `CACHE_LINE_MAX_BYTES`
+(`arch/arm64/hwfeat.h`). The counter deliberately stays in `gic.c` rather than
+folding into `CpuSched`: gic owns interrupt dispatch the way sched owns context
+switches, and `CpuSched` is file-private to `sched.c`, so folding would add a
+cross-TU call on the hottest path and point `arch/arm64` at scheduler internals
+to save 1 KiB of BSS.
+
+**On the constant.** `CACHE_LINE_MAX_BYTES` is 128, which is 2× the granule any
+target actually reports: measured CWG == DminLine == 64 under both HVF
+`-cpu host` (real Apple M2) and TCG `-cpu max`. The margin is deliberate —
+over-padding costs 512 bytes of BSS once, while under-padding silently restores
+the contention with no symptom any test would catch. It is also the only defence
+available, since `CTR_EL0` exposes DminLine and CWG but not outer-level line
+sizes, so a hardware-queried pad is always a lower bound.
+
+**What is and is not proven.** `gic.cpu_irq_counter_geometry` verifies the
+geometry (slot alignment, one-granule stride, and that the reported CWG fits the
+pad) and is revert-probed against the pre-fix layout. It does **not** measure a
+speedup, and none is claimed: QEMU does not model coherence traffic, so
+quantifying this needs real multi-core hardware and a targeted microbenchmark.
+The fix is justified as geometry, not as a measured win.
 
 VISION §4.5's IRQ-to-userspace handler p99 budget is < 5 µs. Kernel-internal IRQ overhead (P1-G's measure) is comfortably under that — the userspace path adds context switches at Phase 5.
 

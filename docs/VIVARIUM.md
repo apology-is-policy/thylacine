@@ -310,6 +310,134 @@ objective. Option B alone is the purist answer and would be defensible if per-sy
 latency proves acceptable; Option A alone should be rejected on trust-surface grounds
 regardless of convenience.
 
+### 4.1 The forward *destination* — an unresolved premise (V-3 entry, 2026-07-30)
+
+Option C's split rule is sound and stands. Its other half — "everything else
+**forwards to the userspace supervisor**" — names a destination that, measured
+against the tree, cannot serve what it is supposed to serve. This was found on
+entry to V-3, before any of it was built.
+
+**The verified fact.** No syscall lets one Proc mutate another Proc's address
+space, handle table, or process tree. `burrow_share_into` (`kernel/burrow.c:790`)
+and `handle_alloc(struct Proc *p, ...)` both *take* a target Proc, but neither is
+reachable from EL0 for a Proc other than the caller; `I-4` records the 9P
+handle-transfer path as still future. So a separate supervisor Proc cannot serve
+`mmap`, `munmap`, `mprotect`, `brk`, `openat`, `close`, `pipe2`, `dup3`, `clone`,
+`execve`, `socket`, `futex`, `chdir`, or an `ioctl`/`read`/`write` on a guest fd.
+That is substantially all of `ARCH §11.5`'s top-50: the forwarded set a
+supervisor Proc could actually serve is **empty**.
+
+It is not a corner case. `third_party/musl/src/env/__init_tls.c:137` mmaps for
+TLS whenever it exceeds the builtin block, and mallocng needs
+`mmap`/`madvise`/`mremap` — a Linux guest cannot reach `main` without `mmap`.
+
+**Why the peers do not have this problem.** The research that should have
+accompanied §4 originally:
+
+- **Heritage — Plan 9 `linuxemu`.** A *userspace* program that intercepts
+  syscalls through the **`/proc` debug interface**: the traced process halts in
+  the kernel at each syscall and the tracer drives it. It works because the
+  tracer never acts *for* the guest — it makes the **guest** act, by rewriting
+  the guest's own registers. Thylacine has this mechanism already: the I-39
+  debug-fs, modeled in `specs/debug_stop.tla` and audited at 8a/8b/8c.
+- **SOTA — Fuchsia Starnix.** Restricted mode (`zx_restricted_enter`): the
+  Starnix kernel runs in the *normal mode of the same thread* that runs the Linux
+  code. No IPC, no context switch. Fuchsia built it (RFC-0261, *"Fast and
+  efficient user space kernel emulation"*) precisely because the
+  separate-process approach was too slow. It needs a hardware/kernel mode
+  Thylacine does not have.
+- **gVisor** reaches the same place by a third road: the Sentry *owns* the
+  guest's address space (via ptrace, or as a VM), which is exactly the authority
+  a Thylacine supervisor Proc lacks.
+
+The common shape: a compat supervisor works only when it either **is** the guest
+(same thread), or **owns** the guest (debug/VM authority). "A peer Proc on the
+other end of a ring" is neither, and that is the premise §4 assumed without
+checking.
+
+**Decision (user-voted 2026-07-30): V-3 is DEFERRED, and its destination is
+decided by V-5.** Building the channel now would repeat the arc's own corrected
+error — V-2's tables deliberately had no caller until V-7 made one possible
+(§6.18 "why the table came first"), and a forward channel with an empty servable
+set is the same mistake one layer up. Sockets (V-5) are the first chunk that
+genuinely needs a destination, and its requirement — multi-step orchestration
+(`open /net/tcp/clone`, read the number, open `ctl`) that no single
+call-and-reply can express — is what will decide the shape. The live candidates,
+recorded so V-5 does not re-derive them:
+
+1. **Debug-injection** (the heritage answer): the supervisor stops the guest at a
+   forwarded call, rewrites its registers so the **guest** performs the work with
+   its own authority, and resumes. I-43 holds trivially. Near-zero new kernel
+   surface — `proc_debug_fault_stop` is already the template. Costs a stop +
+   several `/proc` ops + a resume per forward, and occupies the guest's debug
+   slot.
+2. **A native helper thread inside the guest Proc** (Starnix-by-threads): threads
+   of one Proc share address space, handle table, Territory *and* authority, so a
+   helper can serve everything with exactly the guest's rights. Needs the
+   phenotype to become per-Thread and a new intra-Proc park/wake.
+3. **As sketched** (a ring to a peer Proc) — only viable with new cross-Proc
+   mmap/handle-install/spawn authority, each a new privilege relationship needing
+   its own invariant. That is the trust surface choosing C over A was meant to
+   avoid.
+
+**The consequence that binds code today: with no supervisor, `FORWARD` means
+`ENOSYS`, which inverts the argument-domain calculus.** §6.19 argues "declining
+is always safe (the supervisor is strictly more capable)". That was true with a
+live supervisor and is **false now** — a declined call is a guest-visible
+failure, not a slow path. So a T2 translator must admit everything it can prove
+*exactly equivalent*, not merely the minimum that is easy to defend. Narrowness
+is no longer free. (This is what promotes `mmap`/`munmap` from §6.18's FORWARD
+rows to T2 rows under the rule V-2b already established — see §6.21.)
+
+### 4.1.1 V-5's answer, measured — sockets need no supervisor at all
+
+**Resolved 2026-07-31 (user-voted), at V-5's entry, by measuring `/net` rather
+than reasoning from the paragraph above.** The three candidates are all
+*supervisor* shapes, and the requirement §4.1 predicted would choose between them
+turns out not to be a requirement for a supervisor at all. The sentence "sockets
+need multi-step orchestration that no single call-and-reply can express" is an
+argument against a **ring**. It is not an argument against the **kernel** doing
+the orchestration, and the kernel does exactly this kind of orchestration already:
+`exec_resolve_from_namespace` resolves a path in the caller's Territory, with the
+caller's authority, and hands back a Spoor.
+
+What the measurement found (`usr/netd/src/server.rs`, not scripture):
+
+- Opening `clone` **mints** a connection and rebinds that fid onto its `ctl`;
+  that fid holds the connection's only reference (`slot_ref`, 0→1). Drop it before
+  another fid binds and the connection is freed.
+- Opening a TCP `data` file **defers** the `Rlopen` until ESTABLISHED (#257). So
+  `data` cannot be pre-opened at `socket()` — it is openable only after the
+  `connect` verb is written.
+- **Any** fid bound to a connection holds a reference (`fid_set`/`fid_clunk`, via
+  `path_conn_n`), so once `data` is open the `ctl` fid is disposable.
+- Reading a `ctl` fid yields the connection number in decimal
+  (`file_content`: `FK_CTL => c.push_dec(n)`) — the Plan 9 idiom, live.
+- `read`/`write`/`close` are **T1 renumber rows** that fall through to the native
+  switch. So if the socket fd *is* the `data` fd, the entire data path needs no
+  translation whatsoever.
+
+Those five facts compose into the design: **the socket fd changes identity at
+`connect`** (`ctl` → `data`), which is what makes the hot path free, and the only
+thing that must survive the `socket()`→`connect()` gap is the tuple
+`(proto, N, state)`. `N` is re-readable from `ctl` by the documented protocol;
+`proto` is knowable only at `socket()` and cannot be recovered later without
+decoding netd's private qid layout — which the kernel must not do, because `/net`
+is a mount point and need not be netd. So the state is small, real, and
+unavoidable: a per-Proc table, exactly the shape `Proc.sigtab` took at V-6.
+
+**Therefore V-3 stays deferred and V-5 does not build it.** Its fork moves to the
+next chunk that genuinely needs a destination, which on present evidence is
+**process creation (task #93)** — `clone`/`execve`/`wait4`, where the guest's
+request really is "make a *new* process exist", something no in-kernel
+translation of the caller's own authority can synthesise from `SYS_SPAWN_*`'s
+program-not-continuation shape. The three candidates above stand recorded for it.
+
+The rule this establishes, and which the next chunk should apply before reaching
+for a supervisor: **ask first whether the kernel can perform the call with the
+caller's own authority.** A supervisor is needed only when the work is something
+the caller could not do for itself — not merely when it takes several steps.
+
 ---
 
 ## 5. Mechanism (settled, given any of A/B/C)
@@ -363,14 +491,279 @@ this exact translation in userspace); errno is already POSIX-aligned by `ERRORS.
 - **Tier 2 (v1.x)**: full `sigprocmask`/`sigaltstack`/`SA_RESTART`/queued
   `siginfo`/`tgkill` fidelity.
 
+**CORRECTION to Tier 1, 2026-07-30 (V-6 entry; user-voted).** The clause *"restores
+`pstate`/`pc` from user memory at `rt_sigreturn`"* described Linux's mechanism, not
+the one Thylacine should build — and measuring the kernel found a strictly safer
+shape that this section did not know existed. Thylacine's note delivery already
+saves the interrupted user context into **kernel-side per-Thread fields**
+(`Thread.note_saved_regs[31]`/`note_saved_sp_el0`/`note_saved_elr`/
+`note_saved_spsr`), a deliberate divergence from Plan 9 (whose `notify` pushes a
+`Ureg` the handler's `noted` reads back). Those four fields are a field-for-field
+match for the register half of Linux's `mcontext_t`. So Tier 1 pushes a frame the
+handler can **read**, and restores from the **kernel** copy — which makes the
+escalation hazard this section flagged impossible by construction rather than
+merely guarded. §6.22 is the design; the audit-trigger row in §8 is restated to
+match.
+
 ### 5.5 Sockets (R-2)
 
 The Linux socket family is **translated to `/net` file operations** — the same
-mapping the pouch boundary-line (`0016`) already implements and proved, relocated to
-whichever side §4 chooses. Under Option C it forwards to the supervisor, which is
-also where `/net` already naturally lives. `AF_UNIX` maps to the existing `/srv`
-byte-mode services (the `0006` patch's proven mapping). `AF_INET6` → `EAFNOSUPPORT`
-at v1.0, honestly.
+mapping the pouch boundary-line (`0016`) already implements and proved, relocated
+into the kernel phenotype as a T2 family (§4.1.1, user-voted 2026-07-31; the
+earlier "forwards to the supervisor under Option C" reading is superseded — there
+is no supervisor, and sockets do not need one). `AF_UNIX` maps to the existing
+`/srv` byte-mode services (the `0006` patch's proven mapping). `AF_INET6` →
+`EAFNOSUPPORT` at v1.0, honestly.
+
+**Why the kernel and not a server.** Every step is something the calling Proc
+could already do for itself: `stalk` into its own Territory, read, write, install
+an fd in its own handle table. So I-43 holds *by construction* rather than by
+review — a translated socket call reaches exactly what the guest could have
+reached by opening `/net` by hand, and a container whose territory has no `/net`
+gets `ENETDOWN` from the walk, not a privileged bypass. This is the same argument
+the diorama rests on (§6.2): a reformatter, never a new authority.
+
+#### 5.5.1 The fd identity change (the load-bearing mechanism)
+
+`/net` splits across three files what Linux fuses into one fd. The resolution:
+
+| Linux | `/net` |
+|---|---|
+| `socket(AF_INET, SOCK_STREAM)` | open `/net/tcp/clone` → the fid *becomes* `ctl`; read it for `N` |
+| `connect(fd, addr)` | write `connect a.b.c.d!port` → `ctl`; open `/net/tcp/N/data` |
+| `read`/`write`/`close` | **untranslated** — T1 rows on the `data` fd |
+| `shutdown` | write `hangup` → a freshly re-walked `ctl` |
+| `getsockname`/`getpeername` | read `/net/tcp/N/local` / `remote` |
+
+The socket fd is the `ctl` fd from `socket()` until `connect()`, and the `data` fd
+afterwards. `connect` performs that swap **in place**, via a new
+`handle_replace(p, fd, kind, rights, obj)` primitive — `handle_dup` cannot serve,
+because it allocates a *new* slot and the guest is holding a specific number.
+
+Three properties make the swap correct, each measured in §4.1.1:
+
+1. The `ctl` fid must be held until `data` binds, or netd frees the connection
+   (`slot_ref` 0→1 at the clone-mint). The swap opens `data` **before** releasing
+   `ctl`, so the reference count never transits zero.
+2. `data` cannot be opened earlier, because netd defers its `Rlopen` to
+   ESTABLISHED (#257). So the swap is at `connect` and nowhere else.
+3. After the swap the fd needs no further translation forever — which is the
+   entire point, and why `read`/`write` must **not** grow a socket check. Putting
+   one on the hottest path in the system to serve a phenotype would be the wrong
+   trade even if it were correct.
+
+#### 5.5.2 `Proc.socktab` — the state, and why it is unavoidable
+
+`(proto, N, state)` per socket, in a lazily-allocated per-Proc table: the
+`Proc.sigtab` shape (V-6), CAS-installed outside every lock, freed at `proc_free`,
+not `rfork`-inherited, bounded (`VIV_SOCK_MAX`) so a guest cannot grow kernel
+memory without bound — the I-32 posture, with the socket count charged to the
+guest's own handle table besides.
+
+It is unavoidable, and the alternatives were measured rather than assumed:
+
+- **`N`** is re-readable from `ctl`, but only while the fd still *is* `ctl`.
+- **`proto`** is knowable only at `socket()` (the guest passes `SOCK_STREAM` /
+  `SOCK_DGRAM` there and never again). Recovering it later would mean decoding
+  netd's qid layout (`CONN_FLAG | proto<<32 | N<<8 | filekind`) — **rejected**:
+  `/net` is a mount point, need not be netd, and a foreign server's qid decoded as
+  netd's is a silent mistranslation, the one failure mode §6.19's argument-domain
+  rule exists to prevent.
+- **`Spoor.path`** would carry the name — **forbidden by I-33**, which makes path
+  retention explicitly non-load-bearing. Reading it here would convert a cosmetic
+  field into a correctness dependency.
+
+So the table is the honest answer, and it is small.
+
+**A SECOND property of the table rather than of the data (V-5d SA-1).** The
+socktab keys on the fd NUMBER, so an entry must be dropped whenever that number
+is freed — and exactly one place does it, the `close` hook in
+`viv_linux_dispatch`. That hook is COMPLETE only because `close` is the ONLY
+fd-freeing row. `dup` (23), `dup3` (24) and `close_range` (436) all free an fd
+and all decline, which is what makes the single hook sufficient; each is also a
+near-trivial renumber, so serving one as an ordinary T1 row is an easy and
+invisible mistake that would reintroduce the exact bug the hook prevents — a
+freed fd number whose `(proto, N)` entry survives to be handed to the next
+fd-creating call, so a later `connect()` writes a dial verb to a stranger's
+connection. The three are therefore NAMED and declined explicitly rather than
+merely absent, and `vivarium.fd_freeing_rows` asserts it: **an fd-freeing row
+lands with its socktab drop, in the same commit.** (Like the threading property
+below, this is a fact about the translation table that a future row can
+falsify — not an invariant of the code.)
+
+**A thread-safety property that is a property of the TABLE, not of the data.**
+`socktab` (like `sigtab`) is read and written without a lock. That is sound today
+only because **a `PHENO_LINUX` Proc cannot obtain a PEER THREAD**, so there is no
+peer to race. This is *not* a property of the entries being small or of any
+atomicity argument.
+
+**The MECHANISM, corrected at #157/#158.** This paragraph used to say the reason
+was that `clone`/`clone3` are not table rows — which was true when written and
+was falsified by LINEAGE L-3d landing the clone row (L-6a then widened it to the
+fork shape), *without anything failing*. The reason it still holds is narrower
+and lives one function away: `vivarium_clone_decide` admits exactly two words by
+**exact equality** (`SIGCHLD`, and `CLONE_VM|CLONE_VFORK|SIGCHLD`), and neither
+carries `CLONE_THREAD` — refusing the thread set is one of the three things that
+equality is written to do. A `fork` yields a new *Proc* with its own tables,
+which races nothing here.
+
+So the property now **evaporates the moment the clone domain admits the thread
+set** — a one-line change with no compiler consequence anywhere near either
+table. Both must be re-derived then, and the field comments say so. (The general
+shape: a load-bearing sentence must name the mechanism that is *actually*
+holding, or nobody can re-check it when that mechanism moves.)
+(V-6c left the opposite claim on `sigtab` — that byte-sized entries could not tear
+— which was true at V-6b and false once entries widened to 32 bytes; corrected in
+the same commit as this section, task #97.)
+
+#### 5.5.3 The server path — `bind` remembered, `listen` spent, `accept` walked
+
+The client path swaps an fd; the server path does three different things, and
+each is shaped by something netd does rather than by a choice made here.
+
+**`bind` is remembered, not written.** netd has no `bind` ctl verb at all. A
+local endpoint reaches it only as the argument of `announce` — and is simply
+unavailable to a client. So `bind()` records the request in the socktab and
+`listen()` spends it. The pouch boundary-line arrived at the same shape
+independently, which is some evidence it is the shape the server offers rather
+than a preference.
+
+Two consequences are listed in §9: a port collision surfaces at `listen` instead
+of `bind`, and a *constrained* bind before `connect` is refused outright, because
+netd's dial verb carries only the remote endpoint and pretending otherwise would
+hand the client an ephemeral source port while telling it it had the one it
+asked for. An *unconstrained* bind (`0.0.0.0:0`) asks for nothing netd is not
+already doing and proceeds — which is also why the table needs no `bound` flag:
+"bound to anything" and "not bound" are the same request everywhere it is read.
+
+**`listen` writes `announce`, and performs no swap.** The fd stays `ctl`. That is
+not an omission: `ctl` is the file `accept` re-walks from, and the reference that
+keeps the listener alive. So the ctl/data split is `FRESH|LISTENING` vs
+`CONNECTED`, not `FRESH` vs everything else.
+
+The wildcard is load-bearing. `0.0.0.0` renders as Plan 9's `announce *!port`, a
+concrete address as `announce a.b.c.d!port` — and netd treats them differently:
+an explicitly-announced `127.x` listener is migrated onto its loopback stack,
+while a `*` listener stays on the NIC and does not span loopback. Rendering one
+as the other would silently move the server to a different interface.
+
+**`accept` walks, and swaps nothing.** netd holds the `Rlopen` for
+`/net/tcp/N/listen` until a call lands, then rebinds that fid onto the accepted
+connection's `ctl` and replies. So:
+
+```
+open(/net/tcp/N/listen)  -> BLOCKS; returns a fid that is now M's ctl
+read(it)                 -> M
+open(/net/tcp/M/data)    -> the fd accept() returns
+close(the listen fid)       data holds M's reference now
+```
+
+The fd `accept` returns is the one `sys_open_kpath_for_proc` already produced for
+`data`, so unlike `connect` there is nothing to move. The listener N is untouched
+— netd re-arms it with a fresh socket during the swap — which is what lets a
+server accept more than one connection.
+
+**The whole round-trip is provable in ONE single-threaded process**, which is not
+a testing shortcut but the only shape available: a `PHENO_LINUX` Proc can neither
+`clone` nor `fork`. It works because TCP establishes in netd's *stack*, not in
+`accept()`: the client's `connect()` completes the handshake against the
+announced listener, and the server's `accept()` then finds the connection already
+waiting. That is precisely what a listen backlog is, and it is why the in-guest
+gate can drive server and client from the same thread.
+
+#### 5.5.4 Readiness — the fd that gets polled is not the fd that gets read
+
+`ppoll` is the whole poll family on aarch64: the generic ABI dropped plain
+`poll(2)` and `select(2)`, so musl's `poll()` and `select()` both arrive here.
+
+**The pollfd array needs no conversion.** `<thylacine/poll.h>` is deliberately
+Linux-shaped — 8 bytes, `fd` at 0, `events` at 4, `revents` at 6, and the same
+`POLLIN`/`POLLOUT`/`POLLERR`/`POLLHUP` values. So the only translation is the
+**fd**, and only for a socket.
+
+**A socket cannot be polled on its own fd.** A `/net` socket's fd names
+`/net/<proto>/N/data` — an ordinary dev9p file, and dev9p reports an ordinary
+file as POSIX always-ready. That is right for a file and useless for a socket.
+netd publishes readiness on a *sibling*, `/net/<proto>/N/ready`, whose qid
+carries the reserved `QTPOLL` bit; `dev9p.poll` probes exactly that bit. So
+`ppoll` opens the `ready` sibling, polls *that*, and puts the caller's own fd
+number back before returning. Polling the socket's own fd would return "ready"
+instantly and defeat every wait — the identical bug the pouch boundary-line hit
+at net-6b-3, for the identical reason.
+
+**The `ready` fd is opened per call, not cached, and that is a deliberate
+trade.** Caching it (what pouch does) would put a handle the guest never asked
+for into the guest's *own* fd-number space — where the guest can close it,
+leaving a cached number that names whatever was allocated next, and where it
+breaks POSIX's lowest-available-fd guarantee. In pouch that hazard does not
+exist, because there the ready fd *is* a guest fd its own libc opened and
+tracks. Here the guest cannot see it, so it must not outlive the call. The
+transient fd is unobservable for exactly the reason the socktab needs no lock —
+a `PHENO_LINUX` Proc is single-threaded — and both properties evaporate together
+when process creation lands (task #93).
+
+**Readiness is not knowable synchronously, and the fix for that is latency, not
+a guess.** netd's probe is asynchronous: `dev9p.poll` *submits* it and answers
+from a cache the freshly-opened fd does not yet have. A strict zero-timeout scan
+would therefore report "nothing ready" for a socket that is plainly writable —
+and a caller polling with timeout 0 in a loop would never make progress at all.
+So a caller-supplied timeout of **0** gets a small budget (10 ms) when a socket
+is actually in the array. That changes the *latency*, never the *answer*: what
+comes back is netd's real verdict. A probe that misses even that budget yields
+not-ready and the caller retries — the safe direction. It is a mitigation rather
+than a closure; task #98 holds the two real fixes, both of which sit on the
+audited net-6b surface.
+
+**One netd change was owed and is paid here (#220).** POSIX defines `POLLIN` on
+a *listener* as "a connection is pending — `accept` will not block". netd
+computed readiness from `can_recv()`, which is false for a listening socket in
+every state, so a `poll(listener, POLLIN)` deferred forever while a real client
+sat connected. A server that polls before accepting — the entire point of poll —
+could never learn it had a caller. `slot_poll_readable` now reports an announced
+slot's readiness with `accept_ready`, the *same* predicate `poll_accepts` uses to
+decide a deferred accept may complete, so a poller and an accepter cannot
+disagree about whether a call has arrived. The window is not narrow: netd only
+swaps a listener when some fid is already blocked in `open(listen)`, so a server
+that polls first leaves the established call sitting in the listener's socket
+until it chooses to accept.
+
+**`pselect6` is the same readiness, wearing a different shape** (V-5c-2). Three
+1024-bit bitmaps in, one pollfd array out, three bitmaps back — the one T2 row
+whose translation is a genuine change of *representation* rather than a renumber
+or a field copy. The conversion is pure and unit-driven; the shell is uaccess and
+the same `viv_poll_translated` core `ppoll` uses, so the socket→`ready` fd swap
+above is shared rather than reimplemented.
+
+The prior art is in this tree and it is wrong in four ways. pouch's userspace
+`select()` performs this identical translation over native `SYS_POLL`
+(`0005-pouch-poll.patch`), and reading it before writing this was worth more than
+the writing — each of its defects is a decision point here (task #99):
+
+* **It caps the wrong axis.** It rejects any fd ≥ 64 with `EBADF`, justified as
+  "the handle would be unreachable through any Thylacine syscall". That was true
+  when `PROC_HANDLE_MAX` was 64; commit `ffcc64b7` split `PROC_HANDLE_MAX` (256,
+  the fd *value* ceiling) from `POLL_MAX_NFDS` (64, the pollfd *array* ceiling)
+  and made it false. The bound belongs on the count of contributing fds.
+* **It maps `exceptfds` to `POLLPRI`**, which native poll cannot report, so the
+  request is silently dropped and a pure-`exceptfds` wait blocks forever.
+* **It forwards `POLLHUP` into the write set**, commented "(Linux semantics)".
+  Linux's `POLLOUT_SET` is `POLLOUT|POLLERR`; `POLLHUP` is in `POLLIN_SET` only.
+  The asymmetry is not an oversight — a peer that hung up leaves data readable,
+  while writing to it is an error rather than a completion.
+* **It counts fds, not bits.** Linux increments `retval` once per *set bit*, so
+  an fd ready both ways counts twice and the return can exceed the number of fds
+  passed in. A caller looping `while (n-- > 0) find the next set bit` stops one
+  short against a per-fd count.
+
+**Both zero-fd forms now sleep.** `select(0, NULL, NULL, NULL, &tv)` is the
+classic portable sleep and `poll(NULL, 0, ms)` is its twin. V-5c-1 declined
+`ppoll`'s on the grounds that "there is no native sleep syscall to route it to" —
+which was true and one layer too high: there is no sleep *syscall*, but there has
+always been a sleep *primitive*, `tsleep` with a deadline and a cond that is never
+true, which is what poll's own slow path parks on. `sys_poll_sleep_for` makes it
+reachable, `sys_poll_for_proc`'s `nfds == 0` rejection is deliberately left alone
+(it is a native ABI a native caller may rely on), and the `ppoll` decline is
+retired.
 
 ---
 
@@ -1230,16 +1623,624 @@ The comment naming `proc_total_created` was sitting nine lines above the
 
 ---
 
+### 6.18 The translation table, tier by tier (V-2a, as-built)
+
+`kernel/vivarium.c` + `<thylacine/vivarium.h>` land the in-kernel half of Option
+C. `vivarium_translate(linux_nr, args, out)` is **pure** — no Proc, no uaccess,
+no locks, no allocation — and returns `VIV_TRANSLATED` / `VIV_FORWARD` /
+`VIV_ENOSYS`. Nothing is wired into `syscall_dispatch`; see "why the table came
+first" below.
+
+**Applying §4's rule to the calls a static `hello` makes produced a smaller table
+than expected, and that is the result, not a shortfall.** Of nine candidates,
+five qualify:
+
+| Linux | tier | why |
+|---|---|---|
+| `read` 63 → `SYS_READ` 9 | **T1** | args identical in order, width, meaning |
+| `write` 64 → `SYS_WRITE` 10 | **T1** | ditto |
+| `close` 57 → `SYS_CLOSE` 11 | **T1** | ditto |
+| `lseek` 62 → `SYS_LSEEK` 51 | **T1** | `T_SEEK_*` are 0/1/2, so are Linux's `SEEK_*` — the enumerations coincide, so there is nothing to map |
+| `exit_group` 94 → `SYS_EXIT_GROUP` 60 | **T1** | args identical |
+| `openat` 56 | **T2** (built, §6.19) | Linux passes a NUL-terminated path; `SYS_OPEN` wants an explicit `path_len`, so translating means scanning user memory. Plus `AT_FDCWD` → `SYS_WALK_OPEN_FROM_ROOT` and `O_*` → `omode`. *(V-2a said "still total + stateless"; V-2b found that wrong — see §6.19.)* |
+| `fstat` 80 | **T2** (built, §6.19) | `t_stat` is 88 B, Linux aarch64 `struct stat` is 128 B with a different field order: a struct conversion. This one **is** total |
+| `newfstatat` 79 | **T2** (built, §6.20) | `stat()`/`lstat()` compile to *this* on aarch64, so it is the row that matters for real binaries. `SYS_STAT` 88 is its exact counterpart |
+| `mmap` 222 | FORWARD | addr hints, `PROT_*`, `MAP_FIXED`/`ANONYMOUS`/`PRIVATE`, fd-backing are **policy** |
+| `munmap` 215 | FORWARD | **the instructive one — see below** |
+| `statx` 291 | FORWARD | musl-aarch64 issues *this* instead of 79 (§6.20). A request mask + a 256 B struct with per-field validity bits — a bigger translator, not this shape |
+| `brk` 214 | ENOSYS | no counterpart at all; the heap is Burrow-based. Both musl and glibc fall back to `mmap`, so an honest ENOSYS is serviceable where faking success would strand the allocator |
+
+**`munmap` is why "total" is the word that does the work.** `munmap(addr, len)`
+and `SYS_BURROW_DETACH(vaddr, length)` take the same two words in the same order
+and read as a free row. They are not equivalent: `burrow_detach` requires an exact
+VMA match and explicitly refuses a partial detach (`syscall.h:611-620`), while
+Linux permits partial and multi-mapping unmaps. The renumber would be silently
+wrong for a legal class of inputs. **Arguments aligning is not semantics
+aligning** — every row's equivalence must be checked against the Thylacine side's
+documented contract, not its signature. The rejections are therefore stored as an
+explicit list with per-entry reasons, not left to fall through a default: a number
+we have rejected and one we have never considered are different facts.
+
+**Why the table came before the branch (V-1b).** V-1a landed `Proc.phenotype` but
+**nothing can set it to `PHENO_LINUX`** — verified, not assumed: `exec.c` never
+touches the field, the only assignment in the tree is the rfork inherit, and
+`PHENO_LINUX` appears nowhere outside its own enum. A dispatch branch would today
+be branching on a field that is provably always 0 — dead code, and unprovable
+end-to-end. Two further reasons make table-first the *proper* order rather than
+merely the available one:
+
+- **The declaration's correct shape is not yet knowable.** Every peer system
+  except FreeBSD has the **container** declare (illumos LX zones, Starnix,
+  gVisor); FreeBSD is the lone inference-based design and also the one whose CVE
+  history §4 cites when rejecting Option A. §5.2 already concludes the fused
+  container+phenotype object is the right granularity — and that object is V-7.
+  Designing a per-spawn declaration ABI now means guessing a granularity the
+  research says is probably wrong.
+- **Reversibility is asymmetric.** A syscall signature is append-only ABI and
+  every caller churns; a table is data and can be rewritten freely. Under genuine
+  uncertainty the reversible half goes first.
+
+V-2b (§6.19) promotes `openat` + `fstat` to T2 translators. V-1b remains the
+declaration + the branch, and stays gated on V-7's object being decided.
+
+### 6.19 Tier 2 — the translators (V-2b, as-built)
+
+A T1 row is a renumber, so one table and one loop serve every row. A T2 call is a
+real translation, so each gets its own named function. They stay **pure**, which is
+a constraint rather than a convenience:
+
+- **`vivarium_openat_decide(dirfd, flags, &start_fd, &omode)`** makes the entire
+  decision without touching user memory. **`vivarium_openat_build(...)`** assembles
+  the call from a `path_len` the *caller* measured. The measurement is hoisted out
+  deliberately — see "why decide before measure" below.
+- **`vivarium_stat_to_linux(const struct t_stat *, struct viv_linux_stat *)`** is
+  data-in/data-out. Its shell (`spoor_stat_native` into a kernel `t_stat`, then one
+  128-byte copy-out) touches no translation logic at all.
+
+`struct viv_linux_stat` is the Linux aarch64 `struct stat`, pinned at 128 bytes with
+per-field offset asserts exactly as `struct t_stat` is — it is an ABI type the
+kernel writes into a guest buffer. The layout was taken from
+`third_party/musl/arch/aarch64/bits/stat.h` in-tree, not from memory.
+
+#### The argument domain — a refinement of §4, and the real finding
+
+§4 admits "a pure renumber plus an argument-order/**flag-bit mapping**". A flag map
+is inherently **partial**: `openat` accepts flags (`O_CREAT`, `O_DIRECTORY`,
+`O_APPEND`) that `SYS_OPEN` has no way to honour. So a T2 row is admitted over a
+**stated argument domain**, and a call outside it forwards.
+
+This is not a loosening of "total" — it is *stricter* in practice, because it
+replaces "openat is a table row" (which §4's illustrative list implies, and which
+V-2a's own note repeated) with a per-call check. The property that matters:
+
+> the translator never silently mistranslates; it either produces an
+> exactly-equivalent call or declines.
+
+Declining is always safe — the supervisor is strictly more capable. Accepting a flag
+we cannot honour is the failure mode the whole tier exists to prevent.
+
+**A flag may be ignored only when it requests behaviour we already provide
+unconditionally.** Three qualify, and each rests on a structural fact rather than on
+"nothing seems to break":
+
+| flag | why ignoring it is *correct*, not merely harmless |
+|---|---|
+| ~~`O_CLOEXEC`~~ | ~~Asks that the fd not survive exec. Thylacine has no close-on-exec concept because there is nothing to opt out of: a spawned child "inherits no Spoor handles" (`syscall.h:327`) and `SYS_SPAWN_WITH_FDS` passes an **explicit** list~~ **VOIDED; the flag is now HONOURED FOR REAL — see below (#151)** |
+| `O_NOCTTY` | Asks not to acquire a controlling terminal. Thylacine acquires one only via the explicit `SYS_TTY_ACQUIRE` (PTY-1), never implicitly on open — already relied on by the pouch pty patch |
+| `O_LARGEFILE` | Asks that >2 GiB offsets be permitted. Every Thylacine offset is 64-bit, exactly as on 64-bit Linux, whose kernel force-sets the bit internally |
+
+> **`O_CLOEXEC`'s entry above is no longer true, and how it stopped being true is
+> the point.** Its argument was never "the flag is harmless"; it was the stronger
+> and correct claim that *there is nothing to opt out of*, because the only way to
+> start a program was `SYS_SPAWN_*`, which endows an **explicit** fd list. Nothing
+> survived an exec that the parent had not deliberately handed over, so a flag
+> asking "do not let this survive" requested behaviour we already provided
+> unconditionally — which is exactly the bar this table sets.
+>
+> **LINEAGE voided the premise, one commit at a time, and neither commit had any
+> reason to look here.** L-2a (`execve`) replaces the image *in a live Proc* and
+> leaves the handle table untouched. L-3c-1 gave `rfork` a **copy** of the parent's
+> table, so the child sees what the parent sees. Together they are the POSIX
+> fork+exec shape, and under it every fd survives exec — so there is now a great
+> deal to opt out of, and admitting `O_CLOEXEC` silently promises something the
+> kernel does not do.
+>
+> This is the recurring shape rather than a one-off: **a round is scoped to one
+> commit, so a premise that a *later* commit voids is invisible to it.** The
+> defence is not a better review of either commit; it is that a fact stated as
+> load-bearing must be re-checked when the thing it rests on moves. `#150`
+> surfaced it from the other end — measuring which `fcntl` cmds Alpine's busybox
+> issues turned up `F_SETFD(FD_CLOEXEC)` and `F_DUPFD_CLOEXEC`, and asking why
+> those could not be served led back to this row.
+>
+> **#151 CLOSED IT, and by building the feature rather than adjusting the claim.**
+> `struct HandleTable` gained a `cloexec` bitmap parallel to its slot array —
+> parallel rather than a field in `struct Handle` because POSIX close-on-exec is a
+> property of the **descriptor**, not of the open file description behind it
+> (`dup(fd)` yields a second descriptor onto the same description with the flag
+> clear). Linux keeps `close_on_exec` beside `fd[]` in `struct fdtable` for the
+> same reason. `execve` consumes the flagged slots after its commit point;
+> `rfork` preserves them; `openat` sets the bit after a successful open, since it
+> names the resulting descriptor and so cannot ride in the omode.
+>
+> So `O_CLOEXEC` returns to the table above as genuinely honoured — but the entry
+> stays struck through and this note stays beneath it, because the *reasoning*
+> that admitted it was wrong even while its conclusion happened to hold. A flag is
+> admitted here only when the behaviour it asks for is what we do unconditionally;
+> `O_CLOEXEC` no longer qualified, and the fix was to do what it asks.
+
+Contrast the rejects, where ignoring the bit is a **wrong answer**: `O_CREAT` would
+turn "create if absent" into `ENOENT`; `O_DIRECTORY` would turn `ENOTDIR` into a
+successful open of a regular file; `O_APPEND` would silently corrupt a log writer.
+`O_NOFOLLOW` is rejected on a different basis worth naming — ignoring it is harmless
+*today* only because the resolver has no symlinks, and would become wrong the moment
+they land with nothing to catch it. **A flag whose correctness depends on a feature
+being absent is a trap, not an admission.**
+
+Two further domain notes:
+
+- **`AT_FDCWD` ↔ `SYS_WALK_OPEN_FROM_ROOT` is exact, not approximate.** `SYS_OPEN`
+  with the sentinel joins a *relative* path against the per-Proc cwd (LS-4) and
+  resolves an *absolute* one from the Territory root — precisely `AT_FDCWD`. Both
+  sides make the absolute/relative split identically, so nothing needs inspecting.
+  It is compared as a **signed 32-bit** value: `dirfd` is an `int`, so x0 may arrive
+  sign-extended *or* merely zero-extended, and both mean −100. Recognising only one
+  would work on some toolchains and silently forward every `open()` on others.
+- **A real dirfd forwards at V-2b.** Not because the fd would not carry (a
+  phenotyped Proc's fds *are* Thylacine handles) but because Linux ignores the
+  dirfd for an absolute path, and deciding that needs the path's first byte out of
+  user memory. `open()` never generates it — musl compiles every `open()` to
+  `AT_FDCWD`; only the `*at()` family passes a real fd. V-2c can revisit it with the
+  path already measured.
+
+#### Why decide before measure
+
+Measuring the path is a user-memory read that can fault. Doing it before knowing
+whether the call is translatable would waste the read on every forwarded call *and*
+let a call we are going to hand to the supervisor anyway take a fault inside the
+kernel fast path, on a buffer the supervisor would have validated itself. The API is
+shaped so the wrong order is awkward.
+
+#### Notes on the stat conversion
+
+`st_dev ← t_stat.devno` and `st_ino ← t_stat.qid_path`: the `(devno, qid.path)` pair
+*is* Thylacine's file identity (#100), and is already the pair userspace maps onto
+`(st_dev, st_ino)` — pouch patch `0010` does exactly this and gopls's robustio keys
+`FileID` on it. The correspondence is inherited, not invented here.
+
+The output is **zeroed wholesale before filling**, by byte loop (the kernel links no
+`memset` — `dev9p.c:701` does the same for the same reason). That is an **I-13**
+obligation: the buffer is copied to a guest, so any word left unwritten — a reserved
+field today, a field added tomorrow — would ship a slice of the kernel stack. The
+test poisons the destination with `0xA5` and asserts **not one of the 128 bytes
+survives**, which catches a future field addition that the per-field asserts would
+not. The nsec words stay 0: `t_stat` carries whole seconds only, and 0 is the honest
+"unknown sub-second" the native surface already gives.
+
+Coverage: `vivarium.openat_domain` (every admission and every reject, by name),
+`openat_at_fdcwd` (both encodings; a real dirfd forwards; the high half of `dirfd`
+is not consulted), `openat_build` (argument order; unused words zeroed),
+`stat_to_linux` (field carry + the no-leak sweep). Revert-probed: comparing the raw
+`u64` for `AT_FDCWD` fails `openat_at_fdcwd`, and dropping the zero loop fails
+`stat_to_linux` — 1225/1227, exactly two tests, no collateral.
+
+#### Still deliberately absent
+
+The **impure shells** — the uaccess path scan for `openat`, and
+`spoor_stat_native` + the 128-byte copy-out for `fstat` — are *not* built here.
+They have no caller until V-1b's dispatch branch exists, and writing an
+unreachable uaccess helper would repeat exactly the mistake V-2a declined to make.
+There is likewise **no `docs/reference/NN-vivarium.md` yet**: a reference doc
+describes as-built runtime behaviour, and this surface has none until it is
+reachable. It lands with the dispatcher.
+
+> **Both landed at V-1b, as promised.** The shells are `viv_tier2` /
+> `viv_measure_user_path` / `viv_stat_copy_out` in `kernel/syscall.c` — kept
+> there, not in `vivarium.c`, so the pure halves stay unit-testable with no
+> kernel plumbing. The reference doc is `docs/reference/145-vivarium.md`.
+
+Named V-2c candidates, in rough order of value: `O_CREAT` routed to
+`SYS_WALK_CREATE` (a second target, not a flag map — task #50 tracks the userspace
+half); a real dirfd, decidable once the path is measured; and `newfstatat` 79,
+which is `fstat`'s path-taking sibling and reuses both translators as-is.
+
+> **V-2c checked all three, and two of these three sentences were wrong.**
+> `newfstatat` was the good call and is built (§6.20). `O_CREAT` is **not
+> admissible at all**, and the real-dirfd blocker is not the path measurement.
+> The corrected analysis is §6.20; this paragraph is left standing because the
+> arc's pattern — each chunk's candidate list corrected by the next chunk's
+> ground truth — is itself the record worth keeping.
+
+### 6.20 Tier 2 — `newfstatat`, and two corrections (V-2c, as-built)
+
+**`newfstatat` 79 is the stat row that matters.** There is no `stat(2)` on
+aarch64: `stat()` and `lstat()` both compile to `newfstatat`. `SYS_STAT`
+(`syscall.h:1603`) is its counterpart, and the correspondence is unusually clean —
+`SYS_STAT` takes `(path_va, path_len, stat_va)` and **no base argument at all**,
+because it is hardcoded to "absolute from the Territory root, relative joined with
+the LS-4 cwd". That is precisely the `AT_FDCWD` rule, and it is not two
+implementations that happen to agree: `sys_stat_for_proc` and `sys_open_handler`
+call the same `territory_join_cwd` (renamed from `territory_resolve_cwd` at #83,
+when the join stopped resolving dots -- see docs/reference/104-stalk.md).
+
+**`vivarium_fstatat_decide(dirfd, flags)` returns a verdict and nothing else**, and
+that emptiness is the finding. `openat` had to compute a rewritten `start_fd`
+because `SYS_OPEN` *takes* one; here there is nothing to rewrite. The consequence
+cuts both ways: `AT_FDCWD` is free, and a real dirfd is not merely unimplemented
+but **inexpressible** — there is no argument to put it in.
+
+**There is no `vivarium_fstatat_build`,** and its absence is structural rather than
+an omission. `openat` gets a build function because its translation ends in a
+native `SYS_OPEN` the dispatcher can run. This one cannot: `SYS_STAT` copies out an
+88-byte `t_stat`, and the guest's buffer wants the 128-byte Linux layout, so
+dispatching `SYS_STAT` at the guest's pointer would write the wrong struct into it.
+The shell must call `sys_stat_for_proc` into a *kernel* `t_stat`, run it through
+`vivarium_stat_to_linux`, and copy out 128 bytes. **`newfstatat` is `openat`'s
+front half joined to `fstat`'s back half, and the missing build function is what
+that join looks like.**
+
+The flag domain is one admission and four rejects:
+
+| flag | verdict | why |
+|---|---|---|
+| `0` | admit | plain `stat()` |
+| `AT_NO_AUTOMOUNT` | admit as a **no-op** | a Thylacine namespace is composed *explicitly*; nothing mounts as a side effect of traversal. That is a property of the Plan 9 model, not a v1.0 gap — there is no automount to defer, ever |
+| `AT_SYMLINK_NOFOLLOW` | **reject** | the costly one — see below |
+| `AT_EMPTY_PATH` | reject | means "operate on `dirfd` itself"; serving it would mean **synthesising** a `"."` the caller never passed. Translating maps what you were given, not what you were not |
+| `AT_REMOVEDIR`, `AT_SYMLINK_FOLLOW` | reject | not valid on `fstatat` (they belong to `unlinkat`/`linkat`); Linux answers `EINVAL`. Forwarded rather than errored — minting errors is not the table's job, the same call `openat` makes for `(flags & O_ACCMODE) == 3` |
+
+**Why `AT_SYMLINK_NOFOLLOW` is rejected even though the kernel says it is safe.**
+This is what `lstat()` compiles to, so rejecting it forwards every `lstat` — real
+lost reach, so the reasoning has to hold. `SYS_STAT`'s own contract says *"Symlinks
+do not exist at v1.0 (G11), so stat == lstat"* (`syscall.h:1615`), which reads like
+a licence to admit it. It is not. That equivalence is scoped to v1.0 and holds
+**only because the feature is absent** — the O_NOFOLLOW trap V-2b named, on the
+stat surface. Admitting it would mean that the day symlinks land, every `lstat()`
+in every Linux guest silently reports the *target* instead of the link, with
+nothing in this file or in any build that would fail. Forwarding costs a supervisor
+round trip; admitting costs correctness later, silently. **A flag whose correctness
+depends on a feature being absent is a trap, not an admission** — and the rule is
+worth more than the reach it costs here.
+
+#### `statx` is why 79 is not the whole stat story
+
+musl on aarch64 defines no `__NR_fstatat` (only `__NR_newfstatat`), so `SYS_fstatat`
+is undefined, so its `fstatat.c` compiles the 79 path **out** and issues `statx`
+(291) instead — verified in `third_party/musl`, not assumed. Go and glibc *do* use
+79. Those are the binaries VIVARIUM exists to run: a musl target is one we could
+rebuild through pouch, so 79 is still the right row to build first, and `statx` is
+recorded as a deliberate FORWARD rather than an oversight.
+
+#### Correction 1 — `O_CREAT` cannot be routed to `SYS_WALK_CREATE`
+
+V-2b filed this as V-2c's top candidate ("a second target, not a flag map"). It is
+not admissible at all. **Three independent blockers, any one fatal:**
+
+1. **Shape.** `SYS_WALK_CREATE` takes a **single component** name and rejects `/`
+   (`syscall.h:1105`); `openat` takes a path. Routing means splitting the path,
+   resolving the parent as a separate `O_PATH` open, and closing that handle on
+   every exit — two syscalls and an intermediate handle, i.e. exactly the state and
+   logic §4 excludes.
+2. **Semantics.** Plain `O_CREAT` (no `O_EXCL`) means "create if absent, **open** if
+   present". `SYS_WALK_CREATE` always creates, returning `-EEXIST` otherwise. A
+   try-create-then-open retry is control flow, not a mapping.
+3. **The sharpest, because it is silent.** `SYS_WALK_CREATE`'s `FROM_ROOT` sentinel
+   resolves at the caller's Territory **root** (`syscall.c:2968`, no cwd join),
+   while `SYS_OPEN`'s identical-looking sentinel joins a relative path against the
+   LS-4 **cwd** first (`syscall.c:2870`). The "obvious" `AT_FDCWD` mapping would
+   therefore create the file in the **wrong directory** whenever `cwd != "/"` —
+   wrong for a legal class of inputs, with no error. That is the `munmap` failure
+   mode precisely: *two sentinels that look identical and are not.*
+
+There is no create-by-path syscall in the tree (the only other cwd-joining site,
+`exec_resolve_from_namespace`, resolves a binary to exec). Task #50 tracks the
+userspace half; the kernel half wants a syscall that does not exist.
+
+#### Correction 2 — a real dirfd is blocked by handle *state*, not by the path
+
+V-2b said the blocker was that Linux ignores `dirfd` for an absolute path, so
+deciding needs the path's first byte, and "V-2c can revisit it with the path
+already measured". Measuring would not have helped: it leaves the **relative** case
+untouched, and there the blocker is handle state, which §4 excludes outright.
+
+A Linux dirfd comes from `open(dir, O_RDONLY|O_DIRECTORY)` — a **normally-opened**
+handle. *"9P forbids Twalk from an OPENED fid, so a normally-opened handle is NOT a
+valid base for … walking … CHILDREN; an O_PATH handle IS"* (`syscall.h:2370`). So
+the dirfd Linux programs actually produce is not a usable `SYS_OPEN` `start_fd`;
+only an `O_PATH` one is. The failure is loud (a walk error, not corruption) but
+still wrong for the common legal input — and telling the two handles apart means
+reading the handle table. Left as a FORWARD: the supervisor holds the process's fd
+view anyway and is the right place to resolve one.
+
+Coverage: `vivarium.fstatat_domain` (the admission, all four rejects by name, an
+unadmitted bit forwarding *beside* an admitted one, both `AT_FDCWD` encodings, a
+real dirfd, the high half of `dirfd` unread), plus the `newfstatat`-is-T2 and
+`statx`-forwards rows in `rejects_are_deliberate`. Revert-probed with two probes in
+one build: admitting `AT_SYMLINK_NOFOLLOW` fails `fstatat_domain`, and flipping the
+79 row to FORWARD fails `rejects_are_deliberate` — **1226/1228, exactly two tests,
+no collateral.**
+
+### 6.21 Tier 2 — `mmap`, `munmap`, and the protection question (V-2d, design)
+
+§4.1 defers V-3 and thereby makes `FORWARD` mean `ENOSYS`, so `mmap` — which
+V-2a classified FORWARD as "the 'needs judgement' case the rule exists to
+exclude" — stops being a slow path and becomes a wall. It is on musl's critical
+path twice over (`__init_tls.c:137` for TLS, mallocng for every heap area), so a
+Linux guest cannot reach `main` without it. V-2b's argument-domain rule is
+exactly the tool: `openat` was promoted the same way, and `vivarium.c` already
+carries that correction of a V-2a FORWARD.
+
+**`mmap` (222) → `SYS_BURROW_ATTACH_LAZY` (83).** The target takes a length and
+returns a kernel-chosen vaddr. The admitted domain:
+
+| argument | admitted | why |
+|---|---|---|
+| `addr` | **any** | Without `MAP_FIXED`, Linux states `addr` is *a hint* the kernel may ignore; the caller learns the real address from the return value. Ignoring it is conforming, not a compromise |
+| `len` | not judged in `_decide` at all | it is a *semantic* question, not a domain one. The shell answers `EINVAL` for 0 (Linux's own answer) and lets the target refuse the rest, which becomes `ENOMEM` — so both of Linux's errors survive instead of collapsing into the decline. The lazy bound is `BURROW_RESERVE_MAX` (1 GiB), not `BURROW_ATTACH_MAX` |
+| `prot` | any subset of `PROT_READ\|PROT_WRITE` (so `PROT_NONE` too) | see below. Measured: aarch64 musl also defines `PROT_BTI`/`PROT_MTE`, and generic musl `PROT_GROWSDOWN`/`GROWSUP` — none honourable, so the admission is an allow-list of the two bits, not "everything but `PROT_EXEC`" |
+| `flags` | exactly `MAP_PRIVATE\|MAP_ANONYMOUS` | measured: both musl `pthread_create` sites and all four mallocng sites pass exactly this. `MAP_STACK`/`MAP_NORESERVE` are *not* passed by musl, so admitting them would be speculation |
+| `fd` | `-1` | Linux ignores `fd` under `MAP_ANONYMOUS`; requiring `-1` is conforming and is what musl and glibc emit |
+| `offset` | `0` | anonymous |
+
+`MAP_FIXED` and `MAP_FIXED_NOREPLACE` decline: there they are a requirement, not
+a hint, and the target chooses the address. `MAP_SHARED` declines — no shared
+anonymous memory exists to map.
+
+**The protection question, decided explicitly.** Thylacine anonymous memory is
+always RW/XN, and **there is no prot-mutation syscall at all** — that is an I-12
+design choice, not a gap. So a phenotyped `mmap` cannot honour `PROT_NONE` or
+`PROT_READ` exactly; it grants read+write regardless. Two options, and the strict
+one loses:
+
+- Declining every prot but `PROT_READ|PROT_WRITE` is the letter of §6.19's "never
+  silently mistranslate". But `PROT_NONE` is the *dominant* anonymous shape in
+  musl — the guard page (`pthread_create.c:295`) and mallocng's meta areas
+  (`malloc.c:82`) — so declining it means malloc never initialises and nothing
+  runs at all.
+- Admitting it is a **stated fidelity degradation**, and musl itself is the
+  evidence that it is the sanctioned one: `mallocng/malloc.c:92` reads
+  `if (mprotect(p, pagesize, PROT_READ|PROT_WRITE) && errno != ENOSYS) return 0;`
+  — the libc *anticipates* a system without `mprotect` and proceeds on the
+  assumption that the `PROT_NONE` mapping is already usable, which is precisely
+  what Thylacine produces.
+
+So: **any subset of `PROT_READ|PROT_WRITE` is admitted and yields RW.** The consequence
+is named rather than buried — *guard pages are not protective under the Linux
+phenotype, and a `PROT_READ` anonymous mapping is writable* — and it belongs in
+§9's ladder. It is a fidelity loss, never an authority grant: the pages are the
+guest's own, every gate is unchanged, and nothing crosses a Proc boundary, so
+I-43 is untouched.
+
+`PROT_EXEC` is the hard line and declines. An executable anonymous mapping is
+what `CAP_JIT`/I-42 governs (`JIT-ON-WX-DESIGN.md`); a phenotype must never hand
+one out, and W^X (I-12) forbids the RW-and-X mapping the naive translation would
+produce.
+
+**`mprotect` (226) becomes an explicit `ENOSYS` row.** It is currently unclassified,
+so it reaches `ENOSYS` through `vivarium_translate`'s default — the right answer
+by accident. The file's own standard is that "a number we have never considered
+and one we have considered and rejected are different facts", so it is recorded
+with its reason: musl tolerates `ENOSYS` here by construction, and Thylacine has
+no prot-mutation syscall to translate to.
+
+**`munmap` (215) → `SYS_BURROW_DETACH` (38), over a domain the arguments cannot
+express.** V-2a's rejection stands on its facts: detach demands an exact VMA
+match while Linux permits partial and multi-mapping unmaps, and — the part that
+makes a bare renumber worse than merely incomplete — *Linux `munmap` of an
+unmapped range succeeds*, while detach returns `-1`. So the translation is wrong
+in both directions.
+
+This is the first T2 row whose domain is a question about **state**, not about
+arguments, so it has no pure `_decide` at all — no pure function can know whether
+a VMA matches. The resolution is that it needs none: **`sys_burrow_detach_for_proc`
+already enforces the exact match**, so the shell simply attempts it and reads the
+answer. Success means the semantics were exactly Linux's; refusal means the call
+was outside the domain, and declines. Nothing re-derives the matching logic,
+there is no second lookup and therefore no window to race, and the row stays a
+decode rather than a second implementation.
+
+The one divergence is named rather than papered over: Linux `munmap` of an
+**unmapped** range *succeeds*, and this declines it. Distinguishing "nothing
+there" from "a partial overlap" needs a range scan the VMA API does not expose
+(`vma_lookup` is a point probe, so it cannot see a VMA lying strictly inside the
+range), and the two must not be conflated — claiming success on a partial
+overlap would leave a mapping the guest believes is gone, which is exactly the
+silent wrong answer the rule forbids. Declining is honest; faking success is not.
+
+The exact-match subset is the one that matters: a program unmaps what it mapped,
+and mallocng frees whole groups it allocated whole. It is also not load-bearing
+for liveness — measured, mallocng **ignores `munmap`'s return** at both of its
+call sites (`free.c:148`, `malloc.c:318`), so a declined unmap costs memory, not
+correctness.
+
+Coverage: `vivarium.mmap_domain` (each admitted argument and each decline by
+name, `PROT_EXEC` especially, both `MAP_FIXED` spellings), the `mprotect`-ENOSYS
+and `mmap`/`munmap`-are-T2 rows in `rejects_are_deliberate`, and `viv-pheno-probe`
+legs **L16–L23**: mmap 8 KiB, write a pattern through both ends of the mapping,
+read it back, unmap it exactly, then assert in-guest that `PROT_EXEC` and
+`MAP_FIXED` are refused, that `mprotect` answers `ENOSYS` *specifically* (musl
+depends on that errno, not merely on failure), and — deliberately — that a
+`PROT_NONE` mapping is writable, so the degradation cannot go stale unnoticed.
+
+The two layers are not redundant, which V-2d's revert probes demonstrate rather
+than assert. Reverting the `mmap` table row, or widening the prot allow-list to
+admit `PROT_EXEC`, fails **exactly two** unit tests and nothing else. But
+breaking only the *shell* — leaving the table intact — keeps the unit suite at a
+full **1239/1239 PASS** while the in-guest leg fails at `L16`. The pure tests
+prove the decision; the guest legs prove the plumbing.
+
+### 6.22 Signals — the frame shape (V-6, design)
+
+R-3 (§1.4) called signals "the genuine hard part", and §5.4 sized Tier 1 as
+"kernel-built `ucontext` frame on the user stack + `rt_sigreturn`" — the shape
+every peer builds. Measuring the kernel at V-6's entry found that Thylacine
+already owns most of the mechanism, and owns it in a **safer** shape than the one
+scripture specified.
+
+**The substrate.** `SYS_NOTIFY`/`SYS_NOTED` already deliver an asynchronous note
+to a user handler and return from it: the EL0-return tail saves the interrupted
+context, rewrites the exception frame to land at the handler, and `SYS_NOTED`
+restores. That machinery is audited across four rounds. Crucially, the save is
+**kernel-side** — into per-`Thread` fields — and those fields are a field-for-field
+match for the register half of Linux's `mcontext_t`:
+
+| `Thread` (`thread.h:247`) | Linux `mcontext_t` (aarch64) |
+|---|---|
+| `note_saved_regs[31]` | `regs[31]` (x0–x30) |
+| `note_saved_sp_el0` | `sp` |
+| `note_saved_elr` | `pc` |
+| `note_saved_spsr` | `pstate` |
+
+Only `fault_address` has no counterpart, and it is derivable (`FAR_EL1` for the
+`snare:*` faults, 0 otherwise).
+
+**This is a Plan 9 divergence Thylacine already made, in the safe direction.**
+Plan 9's `notify` pushes a `Ureg` onto the user stack and `noted` reads it back;
+Thylacine saves in the kernel instead. The capability-microkernel SOTA agrees —
+seL4 manipulates a faulting thread's state through its TCB capability, Genode
+notifies a handler thread; neither reconstructs registers from a user stack. Only
+the Linux *emulators* (gVisor's Sentry, Starnix) rebuild the real frame, because
+bug-compatibility is their product.
+
+**DECISION (user-voted 2026-07-30): the frame is pushed for reading; the restore
+is from the kernel.** Delivery writes a real `siginfo_t` + `ucontext_t` to the
+user stack, so a handler that *reads* them — a crash reporter printing
+`uc_mcontext.pc`, anything consulting `si_addr` — works. `rt_sigreturn` then
+restores from the `Thread` snapshot and **ignores whatever the handler wrote to
+the frame**.
+
+The gain is not a smaller diff, it is a deleted hazard. §8's audit-trigger row
+warned that Tier 1 "restores `pstate`/`pc` from user memory at `rt_sigreturn` — a
+classic privilege-escalation shape. Must reject any frame that would elevate."
+Under this design **no field of the user frame ever reaches `pstate`, `pc`, or
+`sp`**, so there is no frame to reject and no validator to get wrong. The row is
+restated accordingly: the obligation becomes proving the restore reads only
+kernel state, which is a structural property rather than a sanitising pass.
+
+The cost is a fidelity limit, named rather than buried: **writing to
+`uc_mcontext` does not change where execution resumes.** That breaks
+signal-driven control transfer — Go's `sigpanic` injection and JIT
+deoptimisation both rewrite the saved `pc`. Neither reaches this path at v1.0
+(the Go fork is native, and an executable anonymous mapping is `CAP_JIT`/I-42
+territory that §6.21 already refuses), and the limit belongs in §9's DEGRADED
+tier. It costs fidelity, never authority: the frame is the guest's own stack,
+every gate is unchanged, and I-43 is untouched.
+
+**The disposition table is new per-Proc state, and it has to be.** Pouch keeps
+its sigtab in *userspace* (`__pouch_sigtab`, patch `0007`) because the pouch libc
+is ours to patch; a Vivarium guest's libc is not, so the kernel must hold it.
+Lazily allocated and freed at `proc_free`, the `p->env`/`debug_hw` pattern.
+
+**The signal↔note map.** Every row is an existing note, so Tier 0 is a decode
+rather than new machinery:
+
+| Linux | note | disposition |
+|---|---|---|
+| `SIGINT`, `SIGTERM` | `interrupt` | catchable; default terminate (LS-5) |
+| `SIGKILL` | `kill` | non-catchable both sides (I-19 N-4) |
+| `SIGPIPE` | `pipe` | catchable; maskable |
+| `SIGCHLD` | `child_exit` | catchable; default ignore |
+| `SIGSEGV`/`SIGBUS`/`SIGILL`/`SIGFPE` | `snare:*` | catchable; default terminate |
+| `SIGHUP`/`SIGQUIT`/`SIGWINCH`/`SIGTSTP`/`SIGCONT` | `tty:*` | PTY-1 semantics |
+| `SIGALRM`, `SIGUSR1/2`, `SIGABRT` | — | no note exists; see below |
+
+`SIGTERM` sharing `interrupt` with `SIGINT` is inherited from the pouch mapping
+and is a stated v1.0 imprecision, not an oversight.
+
+**The argument domains** (V-2b's rule, unchanged):
+
+- **`rt_sigaction` (134)** requires `SA_RESTORER` set when installing a real
+  handler. Measured: musl compiles with `-D_XOPEN_SOURCE=700`, which exposes
+  `SA_RESTORER` in `arch/aarch64/bits/signal.h`, so `struct k_sigaction` carries
+  a `restorer` and `sigaction.c` always fills it with `__restore_rt`
+  (`mov x8,#139; svc 0`). **The guest therefore supplies its own return
+  trampoline** and Thylacine needs none. The flag is self-describing, so the
+  struct's two shapes are distinguishable rather than guessed. A guest that omits
+  it (glibc on aarch64 relies on a vDSO trampoline instead) declines — supplying
+  one would mean making Thylacine's vDSO page executable, and it is deliberately
+  RO+XN.
+- **`rt_sigprocmask` (135)** maps onto the existing per-`Thread` `note_mask`,
+  which already exists for exactly this reason ("so multi-thread Procs can have
+  different threads accept different signals — POSIX `pthread_sigmask`
+  semantics", `notes.h:107`). Bits outside the mapped set decline.
+- **`kill` (129) / `tkill` (130) / `tgkill` (131)** map to `notes_post_pid`,
+  under the *existing* I-26 two-axis gate. A phenotype must not become a way to
+  signal a Proc the caller could not otherwise reach.
+- **`rt_sigreturn` (139)** is the phenotyped spelling of `SYS_NOTED(NCONT)`.
+
+`sigaltstack` (132), `rt_sigsuspend` (133), `rt_sigpending` (136),
+`rt_sigtimedwait` (137), `rt_sigqueueinfo` (138) and `restart_syscall` (128) are
+explicit `ENOSYS` rows — Tier 2, and recorded rather than defaulted, per the
+file's standard that a number never considered and one considered-and-rejected
+are different facts. `SIGALRM`/`SIGUSR1`/`SIGUSR2` have no note to carry them;
+`SIGABRT` is reachable only via `raise`, which is `tkill` to self, so it
+terminates rather than running a handler.
+
+**AS BUILT (V-6c).** The frame is `siginfo_t` (128) + `ucontext_t` (4560) =
+4688 bytes, plus a 16-byte `{fp, lr}` frame record above it so a backtrace from
+inside a handler still walks into the interrupted code. Delivery sets the
+aarch64 contract -- `x0` signum, `x1` &siginfo, `x2` &ucontext, `x29`
+&frame_record, `x30` the guest's own restorer, `sp` the frame, `pc` the handler
+-- and `rt_sigreturn` (139) is intercepted in `viv_linux_dispatch` and routed to
+`SYS_NOTED(NCONT)`, which restores from the `Thread` snapshot.
+
+Two layout facts that cost a measurement each, recorded so nobody re-derives
+them wrong:
+
+- `sizeof(struct sigcontext)` is **4384**, and `__reserved` begins at **288**,
+  not 280. musl declares it `long double __reserved[256]`, which is 16 bytes
+  per element and 16-ALIGNED on aarch64. Compiling the same declaration with the
+  host `cc` on an arm64 Mac gives 2328 -- macOS `long double` is 8 bytes. The
+  numbers here were confirmed under `--target=aarch64-linux-gnu` before being
+  written down.
+- The kernel writes only the first **600** bytes of the frame (siginfo +
+  ucontext through the mcontext head) plus an 8-byte `_aarch64_ctx` terminator.
+  The remaining ~4 KiB of `__reserved` is left untouched: it is the guest's own
+  stack below its own sp, so nothing crosses a boundary, and an empty record
+  chain remains the honest report. **CORRECTED at V-8**: the original reason
+  was that note delivery did not save Q0-Q31 at all (task #96), so an FPSIMD
+  record would have been a lie. Delivery now DOES save and restore them, so the
+  guest's FP state is genuinely preserved -- but the kernel still does not
+  serialise it into the frame, so the record is absent rather than wrong. A
+  guest that only wants its registers back gets them; a guest that wants to
+  READ them out of `uc_mcontext` still cannot. Emitting a real `fpsimd_context`
+  is the remaining half, and it is now a pure reporting change with the hard
+  part (the save) already done.
+
+**A v1.0 Linux guest can only signal ITSELF**, and that shaped the gate. `kill`
+and `tkill` are not table rows, and `clone` — which *is* one since LINEAGE L-3d —
+admits only the fork and vfork shapes, never `CLONE_THREAD`. So no guest can
+generate a signal for another Proc or spawn a peer thread to race its own
+disposition table. (Corrected at #158: the reason used to be stated as "`clone`
+is not a table row", which the clone row's landing quietly falsified.) The
+`viv-pheno-probe` gate therefore uses the one self-inflicted route that exists:
+the bundle declares `org.thylacine.sigpipe-selftest`, `viv` hands the entrypoint
+fd 0 as the write end of a reader-less pipe, and the guest's own `write()` makes
+the kernel post `pipe`. No second Proc times anything. The gate additionally
+pins that a BLOCKED signal is *deferred* rather than lost: the handler must not
+run while SIGPIPE is masked, and must run at the `rt_sigprocmask` that unblocks
+it.
+
+**What Tier 2 still owes**, unchanged from §5.4: queued `siginfo`, `SA_RESTART`
+(a restartable syscall needs the EINTR plumbing LS-8 defers), `SA_NODEFER` and
+`SA_ONSTACK`. Thylacine's `in_handler` blocks *all* delivery for the duration
+where Linux blocks only the delivered signal plus `sa_mask` — a stated
+imprecision in the conservative direction.
+
+---
+
 ## 7. The vivarium — the container runner
 
 `thylacine-run` from `ROADMAP §9.1`, named `viv` (§11). Userspace; no new kernel
 surface beyond §4's.
 
 1. Fetch/unpack an OCI image (layers → a Stratum dataset; the reflink/snapshot
-   machinery makes layering natural).
+   machinery makes layering natural). *v1.0 realization: §7.2 — `viv` consumes a
+   pre-assembled bundle; image acquisition is the v1.x sibling tool.*
 2. Build the territory: the image root as `/`, the diorama mounts, `/net` if the
    manifest grants it, the resource floor (I-32) and hardware allowance (I-34).
-3. Set the phenotype (§5.2).
+3. Set the phenotype (§5.2). *Lands at V-1b per §10's corrected sequencing; a
+   V-7 container spawns `PHENO_NATIVE`.*
 4. Spawn the entrypoint via the #58 namespace-exec path.
 
 "No cgroups, no seccomp at v1.0; territory isolation is the boundary" (ROADMAP
@@ -1295,6 +2296,91 @@ the level of the whole tree rather than one file: **a deputy's territory is part
 its authority, and confining the client without confining the deputy confines
 nothing.**
 
+**RESOLVED (2026-07-30): the per-container diorama — see §7.2.** MANDATE stays the
+general deputy answer and stays RESERVED at Phase 8; V-7 does not pull it forward.
+
+### 7.2 The v1.0 realization — bundle-consumer `viv` (user-voted 2026-07-30)
+
+**`viv` is the runtime half of the OCI split, and only that.** The OCI ecosystem
+itself factors "run a container" into two tools: the *runtime* (runc) consumes a
+pre-assembled **bundle** — a directory holding `rootfs/` plus `config.json` — and
+the *image* tooling (umoci, skopeo) turns registry images into bundles. Adopting
+the same seam means step 1's fetch/unpack half is not a silently dropped
+obligation but a separately-owned sibling: at v1.0 the bundle is **host-baked**
+(the 16c host-bake precedent — `tools/build.sh` unpacks an Alpine ARM64 rootfs
+into a pool dataset at build time, using host-side tar+gzip), and the in-guest
+image tool (`viv pull`: registry, TLS, JSON manifests, layer tar.gz →
+per-layer datasets with the reflink layering) is a **named v1.x seam**. The tree
+has no native tar reader and no inflate today (verified 2026-07-30), and
+building them buys no v1.0 fidelity the baked bundle does not already deliver;
+§9's OUT list carries the entry.
+
+**The manifest is a `config.json` subset** (OCI runtime-spec shaped, so a future
+`viv pull`'s output composes without translation): v1.0 reads `root.path`,
+`process.args`, `process.env`, `process.cwd`, and the annotation
+`org.thylacine.net` (`"granted"` mounts `/net`). Unknown fields are ignored;
+missing required fields fail closed. The phenotype declaration (§12.1 rule 1)
+rides this same manifest once V-1b lands the kernel side.
+
+**The territory recipe** — assembled by `viv`; the container inherits nothing
+the manifest does not name:
+
+| Mount | Source | Why |
+|---|---|---|
+| `/` | the bundle's rootfs dataset | the image root IS the world (step 2) |
+| `/proc`, `/sys` | binds of the **per-container diorama**'s world (the §6.16 one-server-two-trees-by-bind composition, proven at V-4c-1) | §7.1's resolution, below |
+| `/dev` | assembled **by bind** per §6's finding (the trivial devdev leaves; `/dev/tty` = a bind of the pts slave `viv`'s session controls, per its §6 row; omitted when `viv` has none) | binding is the answer for `/dev`; no server interposed |
+| `/env` | a bind of the kernel env device (as-built completion, V-7) | zero-authority substrate: devenv resolves the **calling** Proc's own `Env` at op time, so one bind serves every container Proc its own environment (native binaries read env through `/env`); carries nothing across the boundary |
+| `/net` | only if the manifest grants it | I-1: the namespace firewall is the grant |
+
+Native `/proc` and `/ctl` are **not mounted** into the container — a
+per-territory pid *view* would be a new kernel surface §7 forbids, and
+not-mounting is the sound native half of §7.1 once the deputy is confined too.
+The container is I-32 resource-floored and I-34-narrowed (no hardware allowance
+conferred).
+
+**§7.1's resolution, precisely.** Each `viv run` spawns its own diorama
+instance, and two distinct properties do two distinct jobs — stated separately
+because `devproc.perm_enforced == false` means principal alignment alone scopes
+*nothing* about pid reads:
+
+- **Pid scoping is a container-tree filter on the diorama's export.** The
+  per-container diorama holds its native sources (`/proc`, `/ctl`) in its own
+  territory, *unreachable by the container* (the container speaks only 9P to
+  it); both enumeration and per-pid existence answer only for pids in the
+  container's process tree — membership by ppid-descent from the entrypoint
+  (the `/ctl/procs` PPID column). A pid outside the tree does not resolve, so
+  the diorama cannot be a read oracle for the surface the native mounts
+  withheld (the F6 close). Pids are **host-numbered** — consistent with what
+  `getpid()` returns inside the container, which is what `busybox ps`
+  correlates; a virtualized pid-1 namespace is a named v1.x seam.
+- **The principal is aligned** — the diorama runs as the container's principal,
+  which keeps the `/self/*` files sound by the `/self/environ`
+  authority-coincidence argument, and is defense-in-depth for everything else.
+  *As-built precision (V-7 self-audit):* soundness here is an **authority**
+  claim and holds; the `self` **content** answers the connection's peer, and
+  the container's one connection was opened by `viv` — so `/proc/self/*` read
+  by a container Proc reports the *runner*, not the reader (9P carries no
+  per-op caller identity; the kernel client multiplexes every territory member
+  over the one session). Same-principal data, never a cross-boundary leak, but
+  wrong content for a multi-Proc container's self-readers — task #90; weighed
+  at V-2/V-8 (a per-op identity channel would be a new kernel surface).
+
+**The container principal is the invoker's** at v1.0. A container is a
+namespace-confined process tree of the user who ran `viv`, not a new identity —
+no new principal machinery, and the per-container diorama inherits the right
+principal by plain spawn (no `CAP_SET_IDENTITY` anywhere in the path). A
+fresh-principal-per-container (stronger user↔container isolation) is a v1.x
+upgrade riding A-5's identity machinery.
+
+**The V-7 gate is a native prover** (`usr/viv-probe`, spawned inside a
+viv-assembled container): the bundle rootfs is `/` (its tree resolves; host
+paths do not); `/proc` and `/sys` serve from the per-container diorama; host
+pids outside the container tree neither enumerate nor resolve; host `/srv`
+names are unreachable; `/net` is absent unless granted; the I-32 floor holds.
+"An Alpine shell runs" (§10's V-7 row) is the **arc** gate — it additionally
+needs V-1b's declaration + dispatch and V-2's tables, and lands with them.
+
 ---
 
 ## 8. Invariants and audit surface
@@ -1319,7 +2405,7 @@ caller reaches. (`I-42` is Clade's; `I-43` is the next free number.)
 | The syscall entry phenotype branch | The privilege boundary: a mis-branded Proc decodes numbers wrong. Prosecute I-43 completeness — *no* translated path may bypass a gate. |
 | Brand detection at exec | Mis-branding is the attack: a native binary branded Linux (or vice versa) decodes every syscall wrong. Fail-closed. |
 | The supervisor forward channel (B/C) | **New wait/wake on the death lineage** — I-9 register-then-observe, death-interruptibility (#811), no lost/double reply, supervisor death unwinds every parked guest. Spec-first. |
-| Signal frame construction (§5.4 Tier 1) | Writes a frame to a user stack and restores `pstate`/`pc` from user memory at `rt_sigreturn` — a classic privilege-escalation shape. Must reject any frame that would elevate. |
+| Signal delivery + `rt_sigreturn` (§6.22) | **RESTATED at V-6.** The original hazard — "restores `pstate`/`pc` from user memory, a classic privilege-escalation shape; must reject any frame that would elevate" — describes Linux's mechanism, and §6.22 does not build it: the restore reads the kernel-side `Thread` snapshot, so no user-frame field reaches `pstate`/`pc`/`sp` and there is no validator to get wrong. The obligation becomes proving that structural property holds on every path, plus: delivery is on the **death/notes lineage** (I-9/I-19, #809/#811/LS-5), so prosecute no-lost/no-double delivery, `kill` staying non-catchable through the phenotype, and the frame push failing *closed* (an unwritable user stack must re-enqueue, never half-deliver). `kill`/`tkill`/`tgkill` must not widen I-26's two-axis gate. |
 | Socket translation | Every `/net` op must run with the *guest's* authority, never the supervisor's (I-43 + I-1). |
 | The diorama servers | `/proc/<pid>` cross-Proc reads are the #57a-F2 class (UAF/lifetime under `g_proc_table_lock`) and an info-leak surface (KASLR, other principals' data). |
 
@@ -1333,14 +2419,87 @@ Published honestly, because §2.3.4 says scope discipline is what decides succes
 and network I/O, and exits correctly; an Alpine container runs a shell and a
 non-trivial script.* Concretely `curl`, `wget`, `python3`, `busybox`, `redis-cli`.
 
-- IN: the §11.5 top-50, BSD sockets via `/net`, static ELF, the diorama, `viv`,
-  signals Tier 0 (+Tier 1 if the arc allows).
-- OUT at v1.0, by decision and stated plainly: `epoll` (v1.1 candidate), `inotify`
-  (degrade), `io_uring`, `bpf`, `perf_event_open`, `ptrace`, glibc-dynamic
-  (best-effort), `AF_INET6`, cgroups/seccomp, and full signal fidelity (Tier 2).
+**Status at the V-8 close — the target's first clause is MET and its second is
+NOT, and the honest thing is to say which.** A single-process static Linux binary
+runs, opens and reads and writes files through the diorama, completes a TCP
+round-trip in both directions, takes a signal through a handler it installed, and
+exits through Linux `exit_group`. That is the first clause, and it is boot-gated
+on every build. The second clause — *a shell* — is **not met and was never
+chunked**: §10's own note records that no V-chunk builds `clone`/`execve`/
+`wait4`, and a shell forks before it does anything else. So a guest shell reaches
+`ENOSYS` at its first fork.
+
+This is a gap between the arc as chunked and the arc gate, not a defect in
+anything built; it is task **#93**, the named next chunk. It is written here
+rather than only in §10 because §9 is the document a reader consults to learn
+what works, and a scope contract whose headline claim is contradicted three
+sections later is exactly the WSL1 failure this section exists to avoid.
+
+- IN: the §11.5 top-50, BSD sockets via `/net`, **static ELF *and everything a
+  statically-linked guest shell does with it***, the diorama, `viv`, signals
+  Tier 0 **and Tier 1** (V-6 landed both — a real handler installs, runs, and
+  returns through `rt_sigreturn`).
+- **PROCESS CREATION MOVED OUT → IN at the L-6c gate (`1237dc2f`), and this
+  paragraph was flipped at L-7 when the flip was noticed to be owed.** The
+  condition this entry set for itself was "an Alpine `/bin/sh` actually running a
+  command, **not** any earlier chunk's landing" — because moving it when the
+  mechanism merely exists would reproduce the WSL1 failure §9 exists to prevent.
+  That condition is met and stays met on every boot: `L6C-A`..`L6C-I` drive a
+  real Alpine `busybox sh` through running, exec'ing an external program,
+  reporting zero and nonzero status, a pipeline, a command substitution, a loop,
+  a nested shell, and a reap — and the gate is boot-fatal, so a regression stops
+  the boot rather than quietly reverting this line.
+  **Read the qualifier, because it is the whole scope of the claim: the gate's
+  binary is `busybox-static`.** What is IN is a statically-linked Linux guest
+  doing process creation. A STOCK Alpine rootfs is still two mechanisms away and
+  both are OUT below: every stock Alpine binary is `ET_DYN`/PIE with a
+  `PT_INTERP` (task #145), and a stock rootfs carries 335 symlinks including
+  `/bin/sh` itself, which `stalk` does not resolve (task #146).
+- OUT: dynamic linking (`ET_DYN`/PIE + `PT_INTERP` — #145; **the single largest
+  remaining gap between "a Linux binary runs" and "a Linux distro runs"**),
+  symlink resolution in `stalk` (#146),
+  `epoll` (v1.1 candidate), `inotify` (degrade), `io_uring`, `bpf`,
+  `perf_event_open`, `ptrace`, glibc-dynamic (best-effort), `AF_INET6`,
+  cgroups/seccomp, full signal fidelity (Tier 2), **concurrent containers** (a
+  second simultaneous `viv run` is refused at the diorama attach and says so —
+  V-8 F3, `docs/reference/145-vivarium.md`; sequential runs are fine, and lifting
+  it is the #33 registry work), and in-guest OCI image acquisition (`viv pull` —
+  registry/TLS/layer-unpack; the v1.0 bundle is host-baked, §7.2).
 
 A Linux binary needing anything in the OUT list gets a clean `ENOSYS`, never a silent
 wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
+
+**DEGRADED — the third tier (added at V-2d).** IN and OUT are not exhaustive: a
+call can be served, and correct enough to run real programs, while differing from
+Linux in a way a program could in principle observe. Those belong neither in the
+silence of IN nor the honesty of OUT, so they are listed here explicitly. The
+standing rule is that a degradation may cost **fidelity**, never **authority** or
+**containment** — a difference confined to the guest's own state is a listable
+degradation; anything that changes what the guest can *reach* is not, and is OUT.
+
+| Degradation | Detail |
+|---|---|
+| **Memory protection is advisory below `PROT_EXEC`** (§6.21) | Thylacine anonymous memory is always RW/XN and there is no prot-mutation syscall (an I-12 design choice), so a phenotyped `mmap` grants read+write whatever `prot` asks. Guard pages are therefore **not protective**, and a `PROT_READ` mapping is writable. `mprotect` answers `ENOSYS`, which musl anticipates (`mallocng/malloc.c:92`). `PROT_EXEC` is refused outright rather than degraded — that is I-42/`CAP_JIT` territory. Self-harm only: the pages are the guest's own |
+| **`exit(N)` is boolean** (task #91) | Any nonzero status reports 1, a Thylacine-wide v1.0 property (`sys_exit_group_handler` collapses to `exits("fail")`). A shell reading `$?` in a container sees 0-or-1 |
+| **`lseek` on a non-seekable fd reports `EPERM`, not `ESPIPE`** (V-8 F1, tasks #100/#106) | The refusal is CORRECT — a pipe, socket or `/proc` file is not seekable and the call must fail — but the code naming it is wrong. `T_E_SPIPE` (29) is not in the errno registry and appending one is signoff-bearing, so `sys_lseek_handler`'s non-seekable arm still returns a bare `-1`, which stock musl's `__syscall_ret` reads as `errno = 1` = `EPERM`. Substituting `EINVAL` would be the "differently wrong" answer #100 explicitly declined: a caller that special-cases `ESPIPE` (the standard "this stream is not seekable, fall back to reading forward" idiom) sees a permission error instead and may report it as one. `pread`/`pwrite` carry the same residual in `spoor_read_common`/`spoor_write_common` but are not table rows yet, so today only `lseek` is reachable from a guest. Every OTHER error on the T1 byte-I/O surface names itself correctly as of #100 |
+| **`/proc/self` names the mounter** (task #90) | The per-container diorama reports `viv` rather than the reading Proc |
+| **A handler's `ucontext` carries no FPSIMD record** (§6.22, task #96) | **NARROWED at V-8 -- the register corruption it used to describe is FIXED.** Note delivery now saves and restores Q0-Q31 + FPSR + FPCR around a handler (`fp_save_area`/`fp_restore_area`, a 520-byte block on `struct Thread`), so a handler may use floating point and autovectorised routines freely and the interrupted computation resumes intact. This was never an authority question -- the registers are the Proc's own -- but it was silent data corruption, PRE-EXISTING on the native note path and made reachable by ordinary compiled C once the phenotype landed. What REMAINS degraded is only the *reporting*: the frame's `_aarch64_ctx` chain is still terminated immediately rather than carrying an `fpsimd_context`, so a guest that walks `__reserved` looking for its FP state is told the record is absent rather than being handed one. Absent-and-honest, not present-and-wrong; and the state itself is now genuinely preserved underneath |
+| **`siginfo` carries the signal number only** (§6.22) | `si_signo`/`si_errno`/`si_code` are filled and the `_sifields` union is zeroed, with `si_code = SI_KERNEL` -- the one value that claims nothing about the union. A note carries a 16-byte name and one u32 arg, so `si_pid`, `si_uid`, `si_status` and `si_addr` have no source. Queued `siginfo` is the Tier-2 item §5.4 already names |
+| **A signal handler's `ucontext` is read-only** (§6.22) | The frame is written to the user stack and is accurate to read, but `rt_sigreturn` restores from the kernel-side `Thread` snapshot, so *writing* `uc_mcontext` does not change where execution resumes. Breaks signal-driven control transfer (Go's `sigpanic`, JIT deoptimisation); neither reaches this path at v1.0. Bought deliberately: it is what makes the `rt_sigreturn` escalation surface structurally absent rather than merely guarded |
+| **`bind` reports address collisions late** (§5.5.3, V-5b) | netd has no `bind` ctl verb — a local endpoint reaches it only as the argument of `announce` — so `bind()` is *remembered* and `listen()` spends it. A port already in use therefore succeeds at `bind` and fails at `listen` with `EADDRINUSE`. The error moves; it does not vanish. A server that reports "cannot bind" one line later is the whole visible effect |
+| **`listen` will not auto-bind** (§5.5.3, V-5b) | Linux binds an ephemeral port when `listen()` is called on an unbound socket; netd's announce parser rejects port 0, and inventing a port would be a translation the guest did not ask for, so this answers `EOPNOTSUPP`. Harmless in practice because discovering an auto-bound port needs `getsockname`, which is not a row yet — a server that cannot learn its own port cannot use one |
+| **`connect` after a *constrained* `bind` is refused** (§5.5.3, V-5b) | netd's dial verb carries the REMOTE endpoint only (its `!local` suffix is parsed and ignored), so a client that bound a specific source port cannot be honoured and gets `EOPNOTSUPP` rather than a silent ephemeral port. An *unconstrained* bind (`0.0.0.0:0`) asks for nothing netd is not already doing and proceeds normally |
+| **`listen`'s backlog is netd's** (§5.5.3, V-5b) | The `backlog` argument is dropped: netd owns its accept queue (depth 1 today) and exposes no way to request another. Linux also treats the value as a hint and clamps it to a system maximum, so a caller cannot distinguish this from an ordinary clamp — but a second connection arriving before the first is accepted is refused rather than queued |
+| **`accept`'s peer address degrades to `0.0.0.0:0`** (§5.5.3, V-5b) | The address comes from a second read of the connection's `remote` file. If that read fails the accept still succeeds — the peer genuinely is connected, and failing would be worse — and the `sockaddr_in` is written all-zero rather than left holding the caller's stale bytes. Not reachable in normal operation; listed because a caller cannot tell it apart from a genuine `0.0.0.0` peer |
+| **A zero-timeout `ppoll` over a socket takes up to 10 ms** (§5.5.4, V-5c, task #98) | Readiness lives in netd, one RPC away, and the probe is asynchronous — so a literal zero-timeout scan would answer "nothing ready" for a plainly writable socket, and a caller looping on timeout 0 would never progress. A requested 0 therefore gets a 10 ms budget when a socket is in the array. The *answer* is netd's real verdict; only the latency differs, and a caller-supplied timeout is never touched. A probe that misses the budget yields not-ready and the caller retries |
+| **`ppoll` with a `sigmask` is refused** (§5.5.4, V-5c) | The atomic mask swap is ppoll's entire reason to exist over `poll()`, and doing it non-atomically would re-open the exact race the caller chose ppoll to close. `ENOSYS` rather than an approximation. musl's `poll()` passes NULL, so the common path is unaffected; only a program using ppoll *for its signal semantics* is |
+| **`pselect6` with a `sigmask` is refused** (§5.5.4, V-5c-2) | Same reason as `ppoll`'s, and note the sixth argument is a POINTER to `{ss, ss_len}` — aarch64 caps a syscall at six registers — so a non-NULL pair is declined without being dereferenced. A NULL sixth argument is unambiguously "no mask", which is the common path |
+| **A set `exceptfds` bit is refused** (§5.5.4, V-5c-2) | Native poll has no `POLLPRI`: the requestable set is `(POLLIN\|POLLOUT)`, full stop. Dropping the bit silently — what pouch's userspace `select` does (task #99 F-b) — turns a *pure* `exceptfds` wait into an infinite block rather than an error, and mapping it to `POLLIN` would report ordinary data as an exception. A NULL or all-zero `exceptfds` is not a request and passes through |
+| **More than 64 CONTRIBUTING fds is refused** (§5.5.4, V-5c-2) | `POLL_MAX_NFDS` bounds the pollfd ARRAY. Note this is a bound on the *count*, not on fd *values*: a `select` over fds 200 and 201 is two pollfds and is fine. (pouch's `select` caps the wrong axis and returns `EBADF` for any fd ≥ 64 — task #99 F-a) |
+| **An `nfds` above the fd table is CLAMPED, not refused** (§5.5.4, V-5c-2) | Which is Linux's own `if (n > max_fds) n = max_fds`. A bit above the table names an fd that cannot exist, so it is simply not scanned. A bit *below* the clamp naming no open handle still becomes `POLLNVAL` → `EBADF`, which is also Linux |
+| **`pipe2` admits `{0, O_CLOEXEC}` and nothing else** (#155) | `O_NONBLOCK` and `O_DIRECT` are flags Linux's `pipe2` genuinely accepts, and both answer `ENOSYS` here — devpipe has no non-blocking read and no packet framing, so admitting either would tell a guest something false about the pipe it just received. An allow-list rather than a deny-list, for the reason V-2d's `mmap` recorded: aarch64 defines flags a deny-list admits by omission. The two admitted values are not a conservative subset — they are what the gate's own busybox issues, measured off the binary (four sites through musl's `pipe()` with a hardcoded `mov x1, #0`, two through `pipe2()` with `mov w1, #0x80000`), and on aarch64 there is no legacy `pipe` number to reach instead |
+| **`dup3` DECLINES when the SOURCE is a socket** (#157) | `dup2(sockfd, 0)` — the inetd idiom — answers `ENOSYS`. Thylacine's socktab keys `(proto, N, state)` on the fd NUMBER and is not refcounted, so two descriptors cannot share one socket's state, and both alternatives are wrong rather than merely imperfect: *copying* the entry gives two independent state machines over one connection (a `connect` on the first advances it and swaps its handle `ctl`→`data` while the second still names `ctl` and still believes it is FRESH), and *omitting* it gives an fd that reads and writes correctly but fails `connect`/`bind`/`getsockname` — the silent half-service §6.19's argument-domain rule exists to forbid. Reproducing Linux exactly needs a refcounted socktab entry, a real change to a table V-5 audited. A shell's `dup2` is for files and pipes, so the L-6c gate is unaffected; what this turns away is a server doing `dup2(connfd,0); dup2(connfd,1)`. Note the DESTINATION being a socket is a different question and IS served — dup3 closes it, and the entry keyed on that number is dropped |
+| **`dup3` admits `{0, O_CLOEXEC}` and refuses the rest with `EINVAL`, not `ENOSYS`** (#157) | Listed here for contrast rather than as a gap: unlike `pipe2` above, this row's served set is **equal** to Linux's, because `ksys_dup3` refuses everything outside the same pair with `EINVAL`. So a refused flags word is us reproducing Linux exactly, not declining to serve — which is why it must not be collapsed into the ENOSYS decline (V-2d's `munmap` note). The only genuinely degraded thing about this row is the socket case above |
 
 ---
 
@@ -1349,18 +2508,178 @@ wrong answer. **`ENOSYS` is a supported outcome; a lie is not.**
 | # | Chunk | Contents | Gate |
 |---|---|---|---|
 | V-0 | Scripture | This document; the §4 fork resolved; `ARCH §11.5/§11.6` corrected (R-1, R-2); I-43 minted; NOVEL entry | user signoff |
-| V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof | native suite byte-unchanged; a branded no-op binary reaches the Linux path |
+| V-1 | Phenotype + brand | `Proc.phenotype`, brand detection at exec, the dispatch branch, a native-unchanged proof. **V-1a LANDED** (the field + the advisory `elf_brand_hint`). **V-1b LANDED**: the declaration (`SPAWN_PHENO_LINUX` in `sys_spawn_args.pheno_flags`, consuming the must-be-0 `_pad_allow` slot at offset 92 -> a zero-filled pre-V-1b request still means inherit) + the syscall-entry branch (T1 renumber-in-place then FALL THROUGH to the native switch; the three T2 shells over the V-2 pure translators; FORWARD and ENOSYS kept as separate arms so V-3 is a one-line change) + `sys_fstat_for_proc` extracted so the phenotyped path shares the native core + rule 4's advisory diagnostic (the hint's first caller, on an already-failed load) + `viv`'s `org.thylacine.phenotype` manifest annotation | native suite byte-unchanged (1237/1237); **PASS in-boot on two vantages** -- leg A `viv-pheno-probe native` proves a Linux number is NOT translated without a declaration (`brk` -> -1, not -ENOSYS), leg B `viv run /vivarium/pheno` proves the whole chain with a container entrypoint that speaks only raw Linux numbers and moves real bytes (openat/read/lseek/fstat/newfstatat/write/close, the two stat paths cross-checked on `(st_dev, st_ino)`, the `AT_SYMLINK_NOFOLLOW` reject still rejecting) and dies through Linux `exit_group`; revert-probed |
 | V-2 | The translation table | The §4-C stateless 1:1 set; the split rule enforced | a static `hello` (built by *Linux* toolchain) runs and exits 0 |
-| V-3 | Supervisor channel | The forward mechanism + `specs/phenotype.tla` model-first (if B/C) | spec TLC-green + park/wake audit |
+| V-3 | Supervisor channel | **DEFERRED (user-voted 2026-07-30) — §4.1; and V-5 did NOT claim it (user-voted 2026-07-31) — §4.1.1.** The sketched destination (a ring to a peer Proc) is verified unable to serve the forwarded set: no Proc can mutate another's address space, handle table or process tree, so the servable set is empty. Not "hard"; *empty*. V-5 was expected to decide the shape, and instead **measured that sockets need no supervisor**: every step is work the calling Proc could do for itself, so the kernel performs it with the caller's own authority (§5.5). The fork therefore moves to the next chunk that needs a destination it cannot synthesise — on present evidence **process creation (#93)**. The three candidates + the peer evidence stand recorded in §4.1 for it. `specs/phenotype.tla` lands with whatever that chunk chooses. **RESOLVED 2026-08-01 — the fork does not travel; it dissolves.** #93 was designed (`docs/LINEAGE.md`, user-voted: the full arc through COW fork) and it needs **no supervisor either**, for V-5's reason restated: `execve` mutates the caller's *own* address space, and `rfork`/`fork` create the caller's *own* child — both are work the calling Proc could already authorize, so the kernel performs them with the caller's authority. Two independent chunks have now been expected to claim the supervisor and both measured it unnecessary, which is evidence about the *shape of the phenotype* and not a coincidence: a phenotype confers ABI shape, never authority (I-43), so a translated call never needs a destination with more authority than its caller. `specs/phenotype.tla` accordingly has no owner and is not owed by any planned chunk | (dissolved; no chunk builds it) |
 | V-4 | The diorama | `/proc`, `/sys`, `/dev` servers + per-container mounts | `busybox ps`, `ldd`, `/proc/self/exe` |
-| V-5 | Sockets | The `/net` translation | **`curl` fetches a URL** (ROADMAP §9.2) |
-| V-6 | Signals | Tier 0, then Tier 1 (audit-bearing) | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
-| V-7 | `viv` | OCI unpack → territory + diorama + phenotype → spawn | **an Alpine shell runs** (ROADMAP §9.2) |
-| V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published | clean close |
+| V-5 | Sockets | The `/net` translation, **in the kernel phenotype as a T2 family** (§5.5, user-voted 2026-07-31). **V-5a** the substrate + the client path: `handle_replace`, `Proc.socktab`, and `socket`/`connect`/`shutdown`/`getsockname`/`getpeername`/`sendto`/`recvfrom` — `read`/`write`/`close` need no row, which is the design's point. **V-5b** the server path: `bind`/`listen`/`accept`/`accept4` over netd's deferred-accept (LANDED -- section 5.5.3; the in-guest gate drives a full server+client TCP round-trip from ONE single-threaded process). **V-5c** readiness over the `QTPOLL` `ready` file: **V-5c-1 LANDED** -- `ppoll` (which IS the poll family on aarch64) as a T2 row that swaps a socket fd for its `ready` sibling, plus the netd half of #220 (a listener now reports `POLLIN` when a call is pending, via the same `accept_ready` predicate `poll_accepts` uses); the first two rows BELOW the native number ceiling, so §5.5.4 carries the per-number collision re-check the ARCH §25.4 row mandates. **V-5c-2 LANDED** -- `pselect6`'s `fd_set` reshape (three 1024-bit bitmaps in, one pollfd array out, three back), plus the zero-fd sleep that BOTH forms needed: `select(0, NULL, NULL, NULL, &tv)` is the classic portable sleep, so `sys_poll_sleep_for` was added and `ppoll`'s `nfds == 0` decline retired with it. **V-5d** the focused audit + close | **`curl` fetches a URL** (ROADMAP §9.2); V-5a's own gate is an in-guest TCP round-trip over the resident loopback |
+| V-6 | Signals | Tier 0, then Tier 1 (audit-bearing). **Frame shape decided 2026-07-30 (§6.22, user-voted)**: the kernel already owns the delivery machinery (`SYS_NOTIFY`/`SYS_NOTED`) and saves the interrupted context *kernel-side*, in fields that field-for-field match Linux's `mcontext_t`. So the frame is pushed for **reading** and `rt_sigreturn` restores from the `Thread` snapshot — which makes §8's escalation hazard structurally absent rather than guarded, at the stated cost that `uc_mcontext` writes are inert. Tier 0 + Tier 1 both land. **V-6a** landed the decode; **V-6b** landed dispositions (`rt_sigaction` for `SIG_DFL`/`SIG_IGN` + `rt_sigprocmask` + the per-Proc `viv_sigtab` + the post-time discard), and corrected two V-6a facts by measuring musl -- the `k_sigaction` layout is arch-fixed at 32 bytes rather than flag-chosen, and SIGTERM had to be evicted from `interrupt` because a shared note cannot carry two independent dispositions (task #95). **V-6c** landed the Tier-1 frame: a real handler installs and RUNS, `rt_sigreturn` is the phenotyped spelling of `SYS_NOTED(NCONT)`, and the sigtab widened to the whole `k_sigaction`. **V-6 IS COMPLETE** | Ctrl-C kills a guest; `SIGPIPE`; handler round-trip |
+| V-7 | `viv` | bundle-consumer runtime (§7.2): host-baked bundle → territory + per-container diorama + `/dev` binds → #58 spawn. **LANDED**: `usr/viv` + `usr/viv-probe` + the `/vivarium` pool bake (the synthetic probe bundle always; the Alpine bundle stages when a minirootfs tarball is provided) + the boot-fatal joey leg; PGRP_MAX_MOUNTS 20→32 (the container recipe overflowed the territory table) | the native `viv-probe` gate (§7.2) — **PASS in-boot**, revert-probed (an unfiltered diorama fails the pid-enumeration leg); **an Alpine shell runs** is the ARC gate (needs V-1b + V-2 too; ROADMAP §9.2) |
+| V-8 | Close | Focused audit (I-43), SMP gate, `docs/reference/NN-vivarium.md`, the fidelity ladder published. **LANDED** — the round covered the arc's genuinely unaudited surface (V-1b + V-2d + V-6a/b/c + V-7, chosen by measuring what the two prior rounds left rather than by assuming), returned **0 P0 / 1 P1 / 2 P2 / 4 P3**, and every finding is closed: F1 `285acd2c` (#100), F2 `ff79386b`, F3 `27a11e2c` (#101), F4-F7 `b3648a2b` (#102); the #96 FP fix and #94 landed in `a39d2c53` ahead of it, and a gate failure that surfaced during it was root-caused to a PRE-EXISTING test race and fixed at `8c1c080e` (#103/#104). §9 now carries the ESPIPE residual and the two OUT items the arc actually leaves | **CLOSED, and not dirty** — see §10.1 |
 
-Sequencing note: V-1..V-3 are kernel-track (main); V-4/V-5/V-7 are userspace and
-aux-shaped; V-6 is kernel and audit-bearing. The arc can therefore run split across
-both tracks after V-3.
+Track note: V-1..V-3 are kernel-track (main); V-4/V-5/V-7 are userspace and
+aux-shaped; V-6 is kernel and audit-bearing.
+
+**Sequencing — CORRECTED 2026-07-29. The numeric order is not the dependency
+order, and this row previously said the arc could split "after V-3".** V-2c
+falsified that: **V-1b cannot precede V-7.** `Proc.phenotype` exists but nothing
+can set it to `PHENO_LINUX` (verified — `exec.c` never touches the field, the only
+assignment is the rfork inherit, and `PHENO_LINUX` appears nowhere outside its own
+enum), because per the Q3 resolution + §12.1 the **container** is what declares a
+phenotype. So a dispatch branch written before V-7 would branch on a provably-zero
+field: dead code, unprovable end-to-end. The landed V-2 translation tables
+correspondingly have **no caller** yet, by design (§6.19/§6.20).
+
+The real order, and the standing plan (user-directed 2026-07-29):
+
+1. **The queued bugs first** — #80 (`SYS_WALK_OPEN` bare `-1`), #81 (`/file/..`
+   lexical dots), and **#66c/#926** (the handle-table lifetime restructure, which
+   is what unblocks `self/fd`). #80 shares a fix shape with the tracked
+   unlink-path errno-loss; they are efficiently done together.
+2. **V-7** — the container object, which is what makes a phenotype declarable. Its
+   §7.1 obligation (pid visibility) must be decided on the **native** surface.
+3. **V-1b** — the declaration + the syscall-entry dispatch branch; this is what
+   gives V-2's tables their first caller, and `docs/reference/NN-vivarium.md`
+   lands with it.
+4. **V-3 / V-5 / V-6**, then **V-8** (the I-43 focused audit + close).
+
+**CORRECTED AGAIN 2026-07-30, at V-3's entry, and for the same reason as the
+first correction.** V-3 cannot precede V-5: §4.1 shows the forward channel's
+sketched destination has an empty servable set, so building it now would be a
+mechanism without a consumer — precisely the error the paragraph above corrects
+for V-1b/V-7. The order from here:
+
+1. **V-2d** — `mmap` + `munmap` as argument-domain T2 rows (§6.21). This is the
+   unblocking work: `mmap` is on musl's critical path (TLS + malloc), and §4.1's
+   inverted calculus makes it a compatibility requirement rather than an
+   optimisation. It applies a rule that is *already binding* (V-2b), so it needs
+   no new decision.
+2. **V-6** — signals. Kernel-side either way, so it is independent of §4.1.
+   Its own premise was re-checked at entry the way §4.1 re-checked V-3's, and
+   unlike V-3's it **holds**: the notes substrate exists, every row of the
+   signal↔note map lands on a live note, and a consumer is available
+   (`viv-pheno-probe` issues raw Linux numbers). §6.22 is the design.
+3. **V-5** — sockets, which **decides V-3's shape** and then builds it.
+4. **V-8** — the I-43 focused audit + close.
+
+**CORRECTED A THIRD TIME 2026-07-31, at V-5's entry — and this time the
+correction is that the expected decision did not need making.** Step 3 above
+assumed V-5 would pick a supervisor shape and build it. Measuring `/net` first
+(§4.1.1) found that sockets are translatable in the kernel with the caller's own
+authority, so **V-5 builds no supervisor and V-3 stays deferred**. The order from
+here:
+
+1. **V-5a..V-5d** — sockets as a T2 family (§5.5): substrate + client, then
+   server, then readiness, then the focused audit.
+2. **V-8** — the I-43 focused audit + close, where #93 (process creation) is
+   weighed and, if built, inherits V-3's fork.
+
+The generalisable lesson, and the reason this correction reads like the previous
+two: **each was a mechanism assumed rather than measured, and each was wrong in
+the direction of "more machinery than the tree needs".** V-1b was expected to
+precede V-7 and could not; V-3 was expected to precede V-5 and had an empty
+servable set; V-5 was expected to need a supervisor and does not. Before building
+a channel, check what the existing authority already reaches.
+
+**A gap this arc does not chunk, recorded at V-6's entry (task #93).** The ARC
+gate is "an Alpine shell runs", but a shell forks before it does anything else,
+and **no V-chunk builds `clone`/`execve`/`wait4`**. §2's table correctly says the
+*native* counterparts exist (`rfork`, the `SYS_SPAWN_*` family, `SYS_WAIT_PID`),
+but the translation is not a renumber — `SYS_SPAWN_*` takes a program where
+`clone` takes a continuation, and `fork()` has no native counterpart at all. So
+they are unclassified → `FORWARD` → `ENOSYS`, and a guest shell cannot fork. This
+does not block V-6 (signals are needed either way), but it is a hole between the
+arc as chunked and the arc gate; it wants its own scripture pass, weighed at V-8
+or promoted sooner if the ARC gate is attempted.
+
+---
+
+## 10.1 V-8 — the arc close, and what is deliberately NOT built
+
+V-8 is the close: the focused audit over the arc's unaudited surface, the SMP
+gate, the reference doc, the fidelity ladder (section 9), and -- the part that
+takes judgement -- a **disposition for every tracked task the arc raised**. A
+close that leaves those as an undifferentiated backlog has not closed anything.
+
+**The audit scope was chosen by measuring, not by assuming.** Two prior rounds
+exist: V-4c-3 covered the arc through V-4c-2, and V-5d covered the socket
+family. Everything between and after was unaudited -- and V-6 (signals) is
+marked "kernel and audit-bearing" in this document's own track note and had
+never received a round. So V-8's audit is V-1b + V-2d + V-6a/b/c + V-7, not a
+formality.
+
+### FIXED in V-8
+
+| Task | Why it was fixed here rather than deferred |
+|---|---|
+| **#96** FP/SIMD not saved across note delivery | A real correctness defect -- silent corruption of an interrupted computation, PRE-EXISTING on the native path and made reachable by ordinary compiled C once the phenotype landed. Small, well-understood fix; benefits native pouch and the phenotype identically; and it sits squarely on V-8's own audit surface, so fixing it first meant the round prosecuted the final state. `docs/reference/83-pouch-signals.md` |
+| **#94** a failing pheno gate extincts naming the wrong thing | Cheap, and it costs a reader the exact wrong minutes when a gate breaks. **The enqueued diagnosis was wrong**: it named the `usr/joey.c` reap-any sites, but measuring found those already converted by the U-7-pre lift and the two that remain are the init orphan-reaper loops, where reap-any is correct. The actual site was `kernel/joey.c` -- the kproc reaping userspace-init, which is also the Proc the orphan rule reparents to, so it could legitimately reap an adopted orphan first and then extinct naming *that* |
+
+### DEFERRED, with the reason
+
+| Task | Disposition |
+|---|---|
+| **#93** process creation (clone/execve/wait4) | **The named next chunk, and the arc gate's blocker** -- "an Alpine shell runs" needs `fork`. Not a renumber: Linux `clone(flags, stack, ptid, tls, ctid)` versus a `SYS_SPAWN_*` family that takes a *program* rather than a continuation, and `fork()` has no native counterpart at all. Wants its own scripture pass. It also **falsifies two premises the socket family rests on** -- both the socktab's lock-freedom and the transient-fd invisibility assume a `PHENO_LINUX` Proc cannot spawn a thread -- so `viv_sock_connect`'s re-read of `e->proto`/`e->n` after a blocking write is the first line to revisit when it lands |
+| **#91** exit status is boolean | Thylacine-wide, not vivarium-specific, and `docs/ERRORS.md` is ABI-bearing -- the exit-status **encoding** needs user signoff before any impl. Touches the death path (#809/#811), so it wants its own chunk with the usual death-lineage care |
+| **#95** SIGTERM needs its own note | An I-19 supported-set addition = an ABI change to the notes surface. Signoff |
+| **#98** `/net` readiness cannot be answered synchronously | Needs a netd-side or kernel-side readiness change; V-5c mitigates with a 10 ms probe budget and section 9 publishes the residual honestly |
+| **#90** container `/proc/self` names the mounter | The remedies section 6.13 names both need a per-op identity channel, which is a new kernel surface |
+| **#99** pouch `select(2)`'s four defects | Userspace pouch, and the kernel translator already avoids all four (V-5c-2). Tracked, not arc-blocking |
+| **#106** `T_E_SPIPE` (29) is unregistered | Raised BY the round, as F1's deliberate residual. Appending an errno is an `ERRORS.md` change and `ERRORS.md` is ABI-bearing, so it needs signoff -- and the alternative (`EINVAL`) is the "differently wrong" substitution #100 declined. Published in §9's DEGRADED table meanwhile |
+| **#107** the flat `-1` sites ADJACENT to the byte-I/O family | F1's fix was scoped to the family the finding named. The same `-1`-means-EPERM defect exists on neighbouring surfaces; ER-3 already ratifies the mapping, so this is rollout rather than design. Deliberately not widened mid-round -- the scope a finding names is the scope a fix should be reviewable against |
+| **#108** `#NNN` means two different things across tracks | A bookkeeping hazard the arc created, not a code defect: this tree's task numbers collide with the main tree's `bug_NNN` series, so a `#NNN` read out of a commit message resolves differently depending on which tree you are in. `TaskGet` before acting on one |
+
+The through-line: **#96 and #94 were fixed because they are defects; the rest
+are deferred because they are DESIGN, and design that touches an ABI needs a
+vote rather than a commit.**
+
+### The close itself — 0 P0 / 1 P1 / 2 P2 / 4 P3, and NOT dirty
+
+Every finding is closed. The P1 and both P2s were live defects with in-guest
+consequences; all four P3s were verified against the code before being fixed,
+and **two of the four had a stated justification that did not survive that
+check** — F4's safety argument was true but spanned two files, and F5's
+conclusion held for a reason other than the one it gave.
+
+**A round 2 is NOT owed, and the reasoning is worth keeping because this
+document predicted the opposite.** The closed list recorded, at the time F1 was
+raised, that fixing it would restructure the central dispatch and therefore make
+this a dirty close. That prediction was **false three times over**:
+
+| finding | predicted | actual |
+|---|---|---|
+| F1 | restructures the central dispatch | dispatch untouched — every `-1` is a LOCAL gate where the reason is already known exactly, so the fix is ER-3 applied to five call sites |
+| F3 | a per-runner diorama name | a peer check in one userspace `h_attach`; **kernel byte-unchanged** |
+| F4-F7 | (unstated) | two one-line guards and two comments; no mechanism, no wait/wake protocol, no lock order touched |
+
+The dirty-close bar is a P0 return, six or more P1+P2, or a structurally invasive
+fix. None applies. Note the *shape* of the error though: the prediction was made
+from the finding's own description rather than from the code, which is the arc's
+recurring failure mode appearing one more time in the close itself.
+
+### What the round confirmed, so it is not re-derived
+
+The prosecutor independently verified the **I-43 argument-arity property** for
+all five T1 rows (checked against handler signatures, not dispatch sites), that
+`kill`/`tkill`/`tgkill` are in neither table so **I-26's two-axis gate is
+untouched by this arc**, that nothing in `exec.c`/`elf.c` writes the phenotype
+(§12.1 rule 4 holds by construction), that the V-2d prot check is a true
+allow-list rather than a `PROT_EXEC` deny-list, that SIGKILL is uncatchable **by
+construction** rather than by a special case, and that `viv` holds no capability
+beyond its invoker's. It also reproduced the #96 FP fix's whole mechanism
+independently, including the same five-function sweep the self-audit had reached
+by a different method.
+
+### The arc's durable lesson
+
+Across the whole VIVARIUM arc, **six of seven enqueued mechanisms were wrong**
+(#79, #80, #82, #84, #101, and #102's two justifications; #87 is the sole
+exception) — and every one was wrong in the direction of *more machinery than
+the tree needs*. The three sequencing corrections in §10 are the same error at
+chunk scale: V-1b was expected to precede V-7 and could not, V-3 was expected to
+precede V-5 and had an empty servable set, V-5 was expected to need a supervisor
+and does not. **Read the code before implementing from a task's text, and check
+what existing authority already reaches before building a channel.**
 
 ---
 
@@ -1429,6 +2748,22 @@ Brand detection is **advisory input to a declaration**, never an inference:
 4. `PT_INTERP` / `EI_OSABI` / `NT_GNU_ABI_TAG` are used only to *warn* on an obvious
    mismatch (a Linux-interp binary exec'd outside a vivarium gets a diagnostic and a
    clean failure, not a silent mis-decode).
+
+**As-built (V-1b).** Rule 1 is `sys_spawn_args.pheno_flags & SPAWN_PHENO_LINUX`,
+set by `viv` from the manifest's `annotations["org.thylacine.phenotype"]` on the
+container's **entrypoint** spawn only (the per-container diorama stays native —
+it is a Thylacine server that happens to serve a Linux-shaped world). Rule 2 is
+the ordinary `rfork` inherit in `rfork_internal`. Rule 3 is realised in the
+ABI's *shape* rather than in a check: only `SYS_SPAWN_FULL_ARGV` carries the
+field, so the register-argument spawn variants cannot declare at all. Rule 4 is
+`elf_brand_hint`'s single caller in `exec_setup_from_spoor`, consulted **only
+after** `elf_load` has already failed with `HAS_INTERP`/`HAS_DYNAMIC` — so it
+can explain an outcome but never change one, which is the fail-safe direction
+Q3 forced. The declaration is deliberately **ungated**; `ARCHITECTURE.md §28
+I-43` and `docs/reference/145-vivarium.md` §3 carry the argument for why that is
+sound (every translated Linux number collides with a live native one, so a
+mis-declared Proc mis-decodes its own calls behind its own gates and reaches
+nothing new).
 
 ### 12.2 Owed: a native brand (v1.x seam)
 

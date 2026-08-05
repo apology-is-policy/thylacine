@@ -303,10 +303,11 @@ own (host-baked).
 
 `stalk()` is not the only path resolver: the single-hop `SYS_WALK_OPEN`
 (`sys_walk_open_handler`, "walk ONE component from a parent fd") and its
-create/rename/unlink siblings are the lower-level primitive that libthyla-rs
-`fs::` navigates with (`file::with_parent_dir` walks the parent chain
-component-by-component via `t_walk_open`; `File::open` / `create_dir` / `rename`
-build paths this way). Plan 9 has no non-crossing walk -- ALL walking crosses
+create/rename/unlink siblings are the lower-level primitive libthyla-rs `fs::`
+drives its FINAL component with (since #87 the parent PREFIX resolves through
+stalk itself -- `file::with_parent_fd` is one `SYS_OPEN(prefix, T_OPATH)` --
+and only the leaf rides `t_walk_open` / `t_walk_create` / `t_unlink` /
+`t_rename`). Plan 9 has no non-crossing walk -- ALL walking crosses
 mounts -- so `sys_walk_open_handler` calls `stalk_cross_mounts` at BOTH the
 **source** (before the X-search + walk: walk INTO the mounted root if the parent
 fd is a mount point -- mirrors stalk's base cross) and the **result** (after the
@@ -329,29 +330,57 @@ one-component-stalk symmetry + correctness if a mount-point fd ever exists.
 directory ("dot", the Plan 9 concept) lives a layer ABOVE it as a **name-based**
 cleaned path string on the Territory (`Territory.dot_path`; `NULL` == `"/"`,
 heap-allocated lazily, freed at `territory_unref`). A relative path is joined to
-`dot_path` and lexically cleaned into an absolute path BEFORE `stalk` runs --
-exactly POSIX `openat(AT_FDCWD, ...)`. So **I-28 containment is unchanged and
-gains no new mechanism**: `stalk` is still handed an absolute-from-root path and
-re-clamps `..` at `root_spoor`, so even a hostile un-cleaned join cannot escape.
+`dot_path` into an absolute path BEFORE `stalk` runs -- exactly POSIX
+`openat(AT_FDCWD, ...)`. So **I-28 containment is unchanged and gains no new
+mechanism**: `stalk` is still handed an absolute-from-root path and re-clamps
+`..` at `root_spoor`, so even a hostile un-cleaned join cannot escape.
 
+**#83 separated the two jobs.** Joining and canonicalizing had been one
+function, and doing both on the resolution path was a real resolution bug: the
+lexical pop removed a component *without proving it existed or was a
+directory*, so a cwd-relative `f/..` (f a FILE) or even `nonexistent/..` opened
+successfully while the absolute spelling of the same path correctly answered
+ENOTDIR / ENOENT. The two are now distinct, with exactly one production caller
+of the canonicalizer:
+
+- **`territory.c::cwd_join(dot, input, inlen, out, outcap)`** -- the RESOLUTION
+  join. Pure (no-lock, no-alloc). An absolute `input` ignores `dot`; a relative
+  one is appended to it with a single `/`. **VERBATIM**: `.`, `..` and a
+  trailing separator all survive into the joined path, so `stalk` interprets
+  them with the same #79/#81/#82 gates the absolute spelling gets. Returns the
+  output length or -1 if it would not fit `outcap`. Unit-tested in isolation
+  (`territory.cwd_join`).
+- **`territory_join_cwd(p, ...)`** -- the locked wrapper: reads `dot_path` under
+  the per-Territory leaf `dot_lock` (the join is bounded CPU, so holding the
+  lock across it is safe) and calls `cwd_join`. The SYS_OPEN / SYS_STAT / exec
+  relative-path entry point, and the first half of SYS_CHDIR.
 - **`territory.c::cwd_lexical_resolve(dot, input, inlen, out, outcap)`** -- the
-  pure (no-lock, no-alloc) join + clean: an absolute `input` ignores `dot`; a
-  relative one is seeded with `dot`'s components; `.` is dropped, `//` collapsed,
-  `..` pops the last component (clamped at `/`); an empty result -> `"/"`.
-  Returns the output length or -1 if it would not fit `outcap`. Unit-tested in
-  isolation (`territory.cwd_lexical`).
-- **`territory_resolve_cwd(p, ...)`** -- the locked wrapper: reads `dot_path`
-  under the per-Territory leaf `dot_lock` (the lexical resolve is bounded CPU, so
-  holding the lock across it is safe) and calls `cwd_lexical_resolve`. The
-  SYS_CHDIR + SYS_OPEN-relative-join entry point.
+  CANONICALIZER: join + drop `.` + collapse `//` + pop `..` (clamped at `/`) +
+  drop a trailing separator; an empty result -> `"/"`. Since #83 its ONLY
+  production role is computing the string SYS_CHDIR stores in `dot_path`. It is
+  **not** a resolution primitive -- it pops components lexically, without
+  proving they exist. Unit-tested in isolation (`territory.cwd_lexical`).
 - **`territory_getdot` / `territory_setdot`** -- read / replace `dot_path` under
   `dot_lock`. `setdot` kmalloc's the new copy BEFORE taking the lock, swaps, then
   frees the old OUTSIDE the lock (readers copy under the lock and never retain
   the pointer -> no UAF). `"/"` is stored as the `NULL` sentinel.
 
-`SYS_CHDIR = 69`(path, len) resolves the cleaned target from `root_spoor`,
-requires it to be a directory (`QTDIR`) the caller can SEARCH (the open-path
-`perm_check(PERM_X)`, gated on `Dev.perm_enforced`), then swaps `dot_path`.
+`SYS_CHDIR = 69`(path, len) is the one caller that needs BOTH jobs, in three
+ordered steps: (1) `territory_join_cwd` -- join VERBATIM; (2) `stalk` the join
+from `root_spoor`, requiring a directory (`QTDIR`) the caller can SEARCH (the
+open-path `perm_check(PERM_X)`, gated on `Dev.perm_enforced`); (3)
+`cwd_lexical_resolve` the *already-stalked* join -- with `dot == NULL`, since
+the join is already absolute, so `dot_path` is NOT re-read and a peer thread's
+concurrent chdir cannot make the stored string disagree with what stalk
+validated -- then swap `dot_path`.
+
+Step (1) is what makes `cd f/..` (f a FILE) and `cd nonexistent/..` fail: before
+#83 the collapse handed stalk the parent, which IS a directory, so the QTDIR
+check passed while checking the wrong object entirely. Step (3) is what keeps
+`dot_path` canonical -- without it `cd d; cd ..` would store
+`/dir/d/..` and grow without bound across repeated `cd ..`. Resolution would
+still work in that state, so only `getcwd` observes the difference; the
+`probe83` cwd leg is the regression that pins it.
 `SYS_GETCWD = 70`(buf, len) copies `dot_path` out NUL-terminated (`-1` if the
 path + NUL does not fit). `sys_open_handler` applies the join ONLY for the
 FROM_ROOT sentinel + a relative path; an absolute path or an explicit dirfd is
@@ -398,7 +427,7 @@ clarity bar there, and the discipline is not to force it.
 
 ## Tests
 
-- `kernel/test/test_stalk.c` -- 12 unit tests against an in-file fixture Dev
+- `kernel/test/test_stalk.c` -- unit tests against an in-file fixture Dev
   (`stalkfix`, a nested qid-based tree, since devramfs is flat): `resolve_multi`,
   `resolve_deep`, `leading_and_double_slash`, `dot_noop`, `dotdot_pop`,
   `dotdot_containment` (cannot escape the base), `xsearch_deny` (a 0644 dir with
@@ -443,19 +472,327 @@ clarity bar there, and the discipline is not to force it.
 
 ## Error paths
 
-`stalk` returns `NULL` (mapped to `-1` by `sys_open_handler`) on: a missing
-component (`Dev.walk` miss), a per-component X-search denial, the final R/W
-denial, `Dev.open` failure, a component longer than `SYS_WALK_OPEN_NAME_MAX`,
-trail-depth overflow, or `spoor_clone` / `walkqid` OOM. `sys_open_handler`
+`stalk` returns `NULL` on: a missing component (`Dev.walk` miss →
+`T_E_NOENT`), resolution through a non-directory (`T_E_NOTDIR`), a
+per-component X-search denial or the final R/W denial (`T_E_ACCES`),
+`Dev.open` failure, a component longer than `SYS_WALK_OPEN_NAME_MAX` or
+trail-depth overflow (`T_E_INVAL`), or `spoor_clone` / `walkqid` OOM
+(`T_E_IO`). `stalk_err` writes the cause to `*errp` so `sys_open_handler`
+returns the real `-errno`; the bare `stalk()` wrapper passes `NULL`.
+
+### `T_E_NOTDIR` — searching through a file (#79)
+
+Before a component is walked, the directory being searched must actually be
+one: `stalk` tests `parent->qid.type & QTDIR` and fails `T_E_NOTDIR`
+otherwise. The POUNCE partial-walk arm makes the same test against the fused
+record of the miss's parent (`sts[k-1].qid_type`), since a batch can walk
+*into* a file before stopping.
+
+Two properties are deliberate and load-bearing:
+
+- **It precedes the X-search.** The x bit on a non-directory says nothing
+  about whether it can be traversed, so gating on permission first would
+  answer `EACCES` for a 0644 file and `ENOTDIR` for a 0755 one — the errno
+  would turn on an irrelevant bit. Ordering type first makes the answer
+  mode-independent. It discloses nothing new: reaching the gate already
+  required X on every ancestor, and a plain `stat` of the same node (which
+  needs only that same ancestor X) already reveals its type.
+- **The resolver computes it; it does not transport it.** `Dev.walk` returns
+  `struct Walkqid *` with no errno channel, so a Dev's own ENOTDIR could not
+  reach EL0 even if it sent one. `qid.type` is used because it is total (every
+  Spoor carries one, no fetch, no RPC) and because it is what the bit is
+  *for* — `dev9p.c` describes the kernel-side `QT*` superset as
+  distinguishing "DIR vs FILE for walk-time directory checks". `QTFILE` is
+  `0x00`, so a Dev that never sets the field reads as "file", which is correct
+  for the leaf Devs that have no hierarchy; every Dev that mints directory
+  Spoors sets `QTDIR`, and `spoor_clone` copies `qid`, so mount crossings and
+  0-element clone-walks preserve directory-ness.
+
+### `.` and `..` out of a non-directory (#81, the dot gate)
+
+> Task numbers are recycled across eras: the "(#81)" at *O_PATH is a navigation
+> base* above is a different, older bug (the `CWALKONLY` byte-I/O block). This
+> section and *The single-hop `qid.type` gate* below are the dot-gate #81.
+
+`.` and `..` are path *components*, so the position they resolve in must be a
+directory too — `/etc/passwd/..` is ENOTDIR, not a lexical pop back to `/etc`.
+`stalk` handles both tokens itself (they never reach `Dev.walk`), so the #79
+gate above — which sits on the real-component path — never saw them, and a
+file tip silently accepted both: `a/b/..` popped back to `a`, `a/b/.` handed
+back `b`. Both now fail `T_E_NOTDIR` via `stalk_tip_is_dir`.
+
+Three properties are deliberate:
+
+- **The type is read UNCROSSED**, unlike the #79 gate (which runs after
+  cross-on-descent). `..` pops a *trail entry*, and the pop lands on
+  `trail[depth-2]` whichever Spoor occupies the tip, so crossing would spend a
+  `clone_walk_zero` to read a type and change nothing. And `.` must leave the
+  resolution exactly where it was: `/mnt/.` has to mean `/mnt`, and under
+  `STALK_MOUNT` `/mnt` deliberately does *not* cross (MREPL re-keys the mount
+  point's own identity) — so crossing on `.` would make `/mnt/.` return the
+  mounted root while `/mnt` returned the mount point, a divergence the gate
+  would be *introducing*. `stalk.dot_notdir_mount` pins exactly that equality.
+  The two types can disagree only for a mount whose point and root differ in
+  kind (a directory grafted onto a file — `mount()` does not gate on type);
+  nothing on the boot path builds one, though `stalk.trailing_slash_mount`
+  builds both directions deliberately, to pin #82's *opposite* choice below.
+- **I-28 is strengthened, not touched.** The gate can only turn a resolution
+  that used to succeed into a failure — it never moves a pop further up — so
+  no path that previously stopped at `start` can now pass it. At depth 0 the
+  subject is `start` itself, so `openat()` on a non-directory fd answers
+  ENOTDIR instead of handing the file back.
+- **There is no "type fetch failed" case.** `qid.type` is a field on every
+  Spoor, so the gate takes no lock, issues no RPC, and cannot itself fail.
+
+Scope — all three path forms are gated (the cwd-relative leg was the #83 gap,
+now closed):
+
+| path form | example | gated? |
+|---|---|---|
+| absolute | `open("/a/b/..")` | yes |
+| dirfd-relative | `openat(dirfd, "b/..")` | yes |
+| cwd-relative | `open("b/..")` | yes, **since #83** — the cwd join is verbatim, so the dots reach this gate. Before #83 the join collapsed them and a cwd-relative `f/..` on a FILE resolved. |
+
+### `.` and `..` need X where they are resolved (#84, the dot X-search)
+
+POSIX resolves `.` and `..` **inside** the current directory, so they are
+lookups like any other and require search permission on the directory
+performing them. Measured on a POSIX host (non-root, owner of a `chmod 000`
+directory `d`):
+
+| call | result | why |
+|---|---|---|
+| `stat("d")` | **ok** | the lookup of `d` happens in d's PARENT |
+| `stat("d/.")` | **EACCES** | `.` is resolved IN d |
+| `stat("d/..")` | **EACCES** | so is `..` |
+| `stat("d/x")` | **EACCES** | the ordinary component — the rule stalk already enforced |
+| `fstatat(dirfd_of_d, ".")` | **EACCES** | depth 0 counts; the subject is `start` |
+
+The real-component arm has always X-checked its parent; the dot arms never
+reach that arm, so pre-#84 `d000/..` resolved while the sibling `d000/x` was
+denied. That asymmetry was the bug. `stalk_tip_may_search` closes it in both
+arms — the task named only `..`, but the two measure identically in every row,
+exactly as #81 found for the type gate.
+
+- **Order: type BEFORE permission.** A 0000 *regular file* answers ENOTDIR for
+  both tokens, never EACCES (measured). That is also #79's rule — the x bit on
+  a non-directory is meaningless. `stalk.dot_notdir` guards the ordering
+  independently of the #84 test: swapping the two gates fails both.
+- **Same UNCROSSED subject as the type gate**, and required rather than merely
+  consistent: crossing on `.` would move resolution (`/mnt/.` must still mean
+  `/mnt`), so the two halves of one gate must read one object. A mount whose
+  point and root differ in X is judged by the point — which grants nothing,
+  since `.` stays put, `..` pops to a Spoor the caller already holds, and any
+  real component crosses and X-checks the mounted root as always.
+- **I-28 is strengthened, not touched** — same argument as the type gate: this
+  can only turn a success into a failure.
+- **No single-hop twin** (unlike #81): `SYS_WALK_OPEN` and the name-op
+  validator reject `.` / `..` outright with `-T_E_INVAL`, so no dot ever
+  reaches a permission decision outside these two arms.
+
+Cost — two A/Bs, **measured** in `stalk.dot_xsearch` (the same resolution with
+and without a trailing `.`, so the delta is attributable to the gate alone):
+
+| path shape | without `.` | with `.` | delta |
+|---|---|---|---|
+| pounce (a run fused the tip's attrs into the walk) | 1 | 1 | **0 — free** |
+| per-component (`nowa`; the shape every `..` path takes) | 3 | 4 | **+1** |
+
+So the gate is free wherever a `carried` record exists, and otherwise costs
+exactly the one `stat_native` an ordinary component pays at the same position —
+not a new cost class. On dev9p that call is a Larder attr-cache hit; that cache
+exists for precisely this traffic (see `dev9p_stat_native`).
+
+Coverage note: an in-guest **denial** probe is not possible from the boot
+chain — joey holds `CAP_ALL`, and `CAP_HOSTOWNER` short-circuits `perm_check`,
+so a 000 directory stays searchable for it and such a probe would pass on the
+unfixed kernel too. The denial is proven by `stalk.dot_xsearch`, whose Proc has
+`caps = CAP_NONE` (real `stalk`, real `perm_check`, real perm-enforcing Dev).
+What the guest proves is the positive direction: probe81/82/83 for the boot
+chain, and `ergo-1(e)` (`cd ../..`) for a real non-SYSTEM session user.
+
+### A trailing slash asserts a directory (#82)
+
+POSIX 4.13: a pathname holding at least one non-`/` character and ending in one
+or more `/` characters names a **directory**. The tokenizer collapses separator
+runs, so pre-#82 the trailing `/` was simply dropped and `/etc/passwd/`
+resolved the file. `path_has_trailing_slash` records the fact once from the raw
+path — nothing downstream remembers the separator was there — and three gates
+consume it.
+
+**Three sites, because two success exits never reach the quarry.** `stalk_core`
+has exactly three success returns, and the gate has to sit on each:
+
+| site | exit | subject |
+|---|---|---|
+| A | the ordinary `return quarry` | `quarry->qid.type`, **after** the cross |
+| B | the FID-LIFECYCLE cached-open `return co` | `sts[nrun-1].qid_type` |
+| C | the POUNCE `STALK_STAT` walk-query `return NULL` (with `stat_done`) | `sts[nrun-1].qid_type` |
+
+B and C read the leaf's fused record rather than a Spoor, and that is exactly
+the quarry: both exits are reachable only after a scan has proved no component
+in the run — the leaf included — is a mount point, so no cross is owed and
+crossed and uncrossed coincide. All three sit **before** the final permission
+check, matching #79's type-before-permission ordering: `open("/a/file/",
+O_RDONLY)` on an unreadable file is ENOTDIR, not EACCES.
+
+**The subject is the CROSSED quarry — the opposite of the dot gate**, and for a
+principled reason. The two gates ask different questions of the same field:
+
+- `.`/`..` are about **where resolution stands**, so they read the tip
+  *uncrossed* (`/mnt/.` must equal `/mnt`).
+- a trailing slash is about **what the path names**, which is the crossed
+  result: `/mnt/` names the mounted root, not the shadowed point.
+
+This is observable, not academic. `territory.c`'s `mount()` has no type check,
+so a mount point and its root need not agree — and then gating the uncrossed
+point is wrong in *both* directions: a file mounted over a directory would make
+`/mnt/` wrongly legal, and a directory mounted over a file would make it
+wrongly ENOTDIR. `stalk.trailing_slash_mount` builds both and fails if the gate
+moves above the cross. Placing it on the quarry also gets every amode right for
+free, because the quarry is by construction the thing the resolution names —
+including `STALK_MOUNT`, whose deliberately-uncrossed quarry *is* what
+`SYS_MOUNT` names.
+
+`"/"` and `"//"` are **exempt**: POSIX scopes the rule to pathnames with at
+least one non-`/` character, and they have no component before the trailing
+run. That is why the discriminator scans back from the end instead of testing
+the last byte. A trailing slash on a *missing* path is still ENOENT — the gate
+never pre-empts a real walk miss.
+
+Scope is the same shape as the dot gate, and closed the same way: absolute,
+dirfd-relative **and (since #83) cwd-relative** paths are all gated. Before #83
+the join rebuilt the path component-by-component and never emitted a trailing
+separator, so `open("f/")` from the cwd resolved the file. `SYS_CHDIR` still
+canonicalizes for storage, but it has carried its own explicit `QTDIR` check
+since LS-4, so `chdir("file/")` was never wrong.
+
+**Not covered — the userspace splitter.** `unlink("f/")` does not reach this
+gate at all: pouch's `__pouch_open_parent` splits a path into (parent, leaf) and
+rejects a trailing slash with `EINVAL` before any syscall. That is its own
+defect in both directions — `EINVAL` where POSIX says ENOTDIR for a file, and a
+rejection where `rmdir("dir/")` should simply work — and it is tracked
+separately (task #86); it is a boundary-line bug, not a resolver one.
+
+### A cwd-relative path resolves like its absolute spelling (#83)
+
+The #79/#81/#82 gates all live in `stalk`, so they only bind what `stalk`
+actually sees. The LS-4 cwd join used to resolve `.`/`..` and drop a trailing
+separator *before* calling `stalk`, so every one of those gates was bypassed for
+the most common path form in a shell. Measured on the pre-fix tree, from a cwd
+of `/p83-cwd-dir` holding a file `f`:
+
+| expression | pre-#83 | correct |
+|---|---|---|
+| `open("f/..")` | fd 2 | ENOTDIR |
+| `open("f/.")` | fd 3 | ENOTDIR |
+| `open("f/")` | fd 4 | ENOTDIR |
+| `stat("f/")`, `stat("f/..")` | 0 | ENOTDIR |
+| `open("nope/..")` | **fd 5** | ENOENT |
+| `chdir("f/..")`, `chdir("nope/..")` | 0 | fail |
+
+The last two rows are the ones that make this a resolution bug rather than a
+conformance nit: a lexical `..` pops a component **without proving it exists**,
+so a path traversing a directory that is not there opened successfully, and
+`chdir` passed a `QTDIR` check against the parent it had already massaged the
+path into — checking the wrong object entirely.
+
+The fix is a unification rather than a fourth gate: `cwd_join` hands `stalk` the
+path verbatim, so cwd-relative resolution runs *the same code* as absolute
+resolution instead of a parallel lexical one. Canonicalization survives only
+where it is actually needed — the string `SYS_CHDIR` stores.
+
+Consequences worth knowing:
+
+- **I-28 is unaffected.** Containment never rested on the join. `stalk` clamps
+  `..` at its trail floor exactly as it already did for an absolute path
+  containing `..`, which is the case the LS-4 design explicitly reasoned about
+  ("a hostile un-cleaned join cannot escape"). Strictly less code participates
+  in containment now, not more.
+- **A cwd-relative path spelled with `..` no longer pounces.** `path_has_dotdot`
+  disables the POUNCE wholesale, and `..` now survives the join. That is the
+  same cost an absolute `..` path has always paid, on exactly the paths that
+  were previously resolving incorrectly.
+- **The joined path is longer**, since `..` no longer cancels a component. It is
+  still bounded by `SYS_OPEN_PATH_MAX` (1024) and a deep cwd plus many `..`
+  could now hit that bound where it previously collapsed away — an honest
+  rejection, though it currently surfaces as a bare `-1` rather than
+  ENAMETOOLONG (which is not yet in the errno registry; ER-x territory).
+- **A deleted cwd now fails relative resolution**, because the join's leading
+  components get walked. That matches POSIX and Linux.
+
+Regressions: `territory.cwd_join` (dots and the trailing separator survive;
+`"/"` does not double; overflow rejected) and joey's always-run boot-fatal
+`probe83` (every row of the table above, plus the regressions `d/..`, `d/.`,
+`d/`, `.`, `..`, `f`, and the `cd d; cd ..` → `getcwd() == "/p83-cwd-dir"`
+canonicality leg). Each layer was revert-probed independently and fails at its
+own assertion: collapsing inside `cwd_join` fails the unit test; reverting only
+the production call site fails `probe83`'s divergence and chdir-gate legs while
+the unit test still passes; skipping the canonicalize step fails only the
+`getcwd` leg, with `cwd='/p83-cwd-dir/d/..'`.
+
+`sys_open_handler`
 returns `-1` on `path_len == 0` or `> SYS_OPEN_PATH_MAX`, an invalid user buffer,
 an unknown omode bit, a missing `root_spoor` (FROM_ROOT with no chroot), a
 missing/RIGHT_READ-failing `start_fd` handle, an embedded NUL in the path, or a
-full handle table (the quarry is clunked).
+full handle table (the quarry is clunked). Those local rejects are the residual
+ER-3 sweep for this handler; the *resolution* verdict already carries its real
+errno via `stalk_err`.
+
+### The single-hop siblings (`SYS_WALK_OPEN` / `SYS_WALK_CREATE`, #80)
+
+`SYS_WALK_OPEN` used to answer a bare `-1` for every failure except the
+walk-miss, so a permission denial, a bad fd, and a malformed name were one
+indistinguishable "I/O error" to the caller. Since **#80** each local reject
+answers a specific code — `EBADF` (no such handle / no `RIGHT_READ`), `EINVAL`
+(bad length, forbidden component byte, `.`/`..`, no pivoted root), `EFAULT` (a
+bad user buffer or a faulting name load), `ENOTDIR` (a source Dev with no
+`.walk` — not a searchable directory), `EOPNOTSUPP` (walkable but no `.open` /
+`.create`), `EACCES` (X-search or access-mode denial), `ENOMEM` (clone OOM or a
+full fd table), `EIO` (a Dev contract breach or a `Dev.open` failure).
+`SYS_WALK_CREATE` got the same sweep. Both keep the structurally-unreachable
+`!t`/`!p` preamble guards at `-1`.
+
+Two seams recorded rather than papered over:
+
+- **`Dev.open` has no errno channel** (it returns `Spoor *`), so a failed open
+  is `EIO`. This is the same shape that forced #99's `create_errno`
+  side-channel; it would want the same treatment or a widened slot signature.
+- **The clone-walk failure in `SYS_WALK_CREATE` is genuinely ambiguous** — a
+  leaf Dev answers NULL because it is not a directory, while dev9p can answer
+  NULL on fid-pool exhaustion. It reports `EIO`, because `ENOTDIR` would be a
+  lie in the second case. #80 recorded a `qid.type` gate on the parent as the
+  fix and deferred it to #81, which **landed it** — see below.
+
+### The single-hop `qid.type` gate (#81)
+
+Both handlers now gate the source on `src->qid.type & QTDIR` before the
+permission check, the single-hop twin of #79's resolver gate. The `!dev->walk`
+check above only proves the *Dev* has a walk slot; a walkable Dev's **file**
+Spoor sails past it.
+
+#80 justified this gate as disambiguating the clone-walk NULL. Measuring it
+showed that is not the reachable case: walking or creating a name out of a
+**0644** file answered `EACCES`, because the X-search reached the file first
+and denied on its missing x bit — while a **0755** file would have sailed past
+and reported `ENOENT`. Same situation, two errnos, chosen by a bit with no
+bearing on the question. So the gate's real job is #79's: make the answer
+mode-independent by testing type first. (Disambiguating the clone-walk NULL is
+still true, and now largely moot — a non-directory no longer reaches it.)
+
+`joey`'s `probe81` pins both halves on the real disk FS, including the 0755 leg
+that would go quiet if the gate were ever re-ordered behind the permission
+check. All 18 Devs were checked when the gate landed: every walkable root
+stamps `QTDIR` (eight via `dev_simple_attach`, dev9p and devsrv at birth), and
+the `QTFILE` roots are exactly the hierarchy-less leaves the gate should reject.
 
 ## Performance characteristics
 
-One `Dev.walk` per path component; for dev9p each hop is a `Tgetattr` (the
-X-search) + a `Twalk` round-trip (no batching at v1.0). devramfs / the fixture
+One `Dev.walk` per path component on the per-component loop; a run of
+components collapses into one `Dev.walk_attrs` where the Dev has the slot (the
+POUNCE — see above; this line previously said "no batching at v1.0", which
+P-3 retired). For dev9p a per-component hop is a `Tgetattr` (the X-search) + a
+`Twalk` round-trip. devramfs / the fixture
 resolve locally (no RPC). The trail + scratch are stack-allocated (no heap
 allocation in the resolver beyond the Spoor clones, which are SLUB).
 
@@ -473,7 +810,7 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
 - **stalk-3 (pending)**: devsrv per-territory + namespace-resident `/srv` +
   retire `SYS_SRV_CONNECT` / `SYS_POST_SERVICE`.
 - **LS-4a (landed)**: the per-Proc cwd substrate -- `Territory.dot_path` +
-  `dot_lock`, `cwd_lexical_resolve` / `territory_resolve_cwd` / `getdot` /
+  `dot_lock`, `cwd_lexical_resolve` / `territory_join_cwd` / `getdot` /
   `setdot`, `SYS_CHDIR = 69` / `SYS_GETCWD = 70`, and the `sys_open_handler`
   relative->cwd join. Name-based (a cleaned path string); I-28 preserved (no new
   mechanism). Kernel tests `territory.cwd_lexical` + `territory.cwd_dot`. The
@@ -496,10 +833,13 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
   cannot escape) and is the v1.0 containment choice; full cross-mount `..`
   fidelity (Plan 9 `Chan->mh` back-pointers) is a v1.x refinement.
 - **The per-Proc cwd is name-based + combined-length-bounded (LS-4; audit F1).**
-  `cwd_lexical_resolve` joins `dot_path` (<= `SYS_OPEN_PATH_MAX`) with the
-  relative input into one buffer; a deep cwd + a long relative path whose
-  *joined* length exceeds `SYS_OPEN_PATH_MAX` is rejected (`-1`) even though it
-  would resolve from root. This is the same combined-length bound the
+  `cwd_join` joins `dot_path` (<= `SYS_OPEN_PATH_MAX`) with the relative input
+  into one buffer; a deep cwd + a long relative path whose *joined* length
+  exceeds `SYS_OPEN_PATH_MAX` is rejected (`-1`) even though it would resolve
+  from root. Since **#83** the join no longer collapses `..`, so a path spelled
+  with many `..` is longer than it used to be and reaches that bound sooner —
+  an honest rejection, but it surfaces as a bare `-1` rather than
+  ENAMETOOLONG (not yet in the errno registry). This is the same combined-length bound the
   single-component surfaces carry; there is no overflow (every write is
   capacity-guarded). Separately, renaming an ancestor of a live cwd makes
   `dot_path` stale (the Proc re-`cd`s) -- the name-based v1.0 limitation; the

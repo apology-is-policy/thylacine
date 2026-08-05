@@ -158,6 +158,7 @@ static void wb_wire_reset(void) {
 static u32  g_wga_seen, g_lopen_seen, g_clunk_seen;
 static u64  g_wga_path_base = 0x20;  // Rwalkgetattr qid.path = base + component
 static u32  g_unlinkat_fail_ecode;   // != 0: the NEXT Tunlinkat answers Rlerror, then clears
+static u32  g_renameat_fail_ecode;   // #80: != 0: the NEXT Trenameat answers Rlerror, then clears
 static bool g_wga_size_ov_on;
 static u64  g_wga_size_ov;
 static u32  g_wga_vers_ov;    // 0 = the canonical body (version 0)
@@ -415,6 +416,18 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)total;
     }
     if (type == P9_TRENAMEAT) {
+        if (g_renameat_fail_ecode) {          // #80: inject an Rlerror (e.g. ENOTEMPTY)
+            u32 ec = g_renameat_fail_ecode;
+            g_renameat_fail_ecode = 0;
+            size_t etotal = P9_HDR_LEN + 4;
+            if (resp_cap < etotal) return -1;
+            resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+            resp[4] = P9_RLERROR;
+            resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+            resp[7] = (u8)(ec & 0xff);         resp[8] = (u8)((ec >> 8) & 0xff);
+            resp[9] = (u8)((ec >> 16) & 0xff); resp[10] = (u8)((ec >> 24) & 0xff);
+            return (int)etotal;
+        }
         // Rrenameat = header only (empty body), like Rfsync.
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -1340,6 +1353,63 @@ void test_dev9p_unlink(void) {
                     "unlink(file) -> 0");
     TEST_EXPECT_EQ((u64)dev9p.unlink(root, "emptydir", P9_UNLINK_AT_REMOVEDIR),
                     (u64)0, "unlink(REMOVEDIR) -> 0");
+    teardown(root);
+}
+
+// #80 regression (the unlink/rename errno-loss): a Tunlinkat / Trenameat the
+// server rejects must surface the REAL errno, not a flat -1. Pre-fix BOTH slots
+// did `if (rc != 0) return -1`, and both handlers did `return rc == 0 ? 0 : -1`
+// -- so EISDIR (unlink a directory), ENOTEMPTY (rmdir a populated one), and a
+// genuine EACCES all arrived as the same indistinguishable value, which the
+// pouch boundary-line renders EIO and libthyla-rs maps to Error::Io. That is
+// what forced musl's remove() onto the lstat-dispatch workaround (patch 0027):
+// its classic form branches on the unlink-a-directory errno, which never
+// arrived.
+//
+// Unlike the create path (#99), no side-channel was needed -- these slots
+// already return `int`. The bug was purely that the value was thrown away.
+//
+// Non-vacuous: restore either `return -1` and the corresponding assertion fails.
+void test_dev9p_unlink_rename_errno_propagates(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+
+    // ENOTEMPTY (39) -- rmdir on a populated directory. No T_E_* name exists for
+    // it, and none is needed: a server errno crosses the syscall boundary BY
+    // VALUE. This is exactly the case that must reach userspace intact.
+    g_unlinkat_fail_ecode = 39;
+    TEST_EXPECT_EQ((u64)(s64)dev9p.unlink(root, "populated", P9_UNLINK_AT_REMOVEDIR),
+                   (u64)(s64)(-39),
+                   "rmdir(non-empty) surfaces the server's -ENOTEMPTY, not -1");
+
+    // EISDIR (21) -- unlink without REMOVEDIR on a directory. The errno musl's
+    // classic remove() switches on.
+    g_unlinkat_fail_ecode = 21;
+    TEST_EXPECT_EQ((u64)(s64)dev9p.unlink(root, "adir", 0u), (u64)(s64)(-21),
+                   "unlink(directory) surfaces the server's -EISDIR, not -1");
+
+    // EPERM (1) is the ONE value that cannot cross intact: -1 collides with the
+    // flat generic-failure sentinel (errno.h's T_E_PERM warning), so
+    // dev9p_wire_errno folds it onto EACCES -- the registry's sanctioned
+    // permission-denied code. Losing EPERM-vs-EACCES is a far smaller lie than
+    // reporting a permission problem as an I/O error.
+    g_unlinkat_fail_ecode = 1;
+    TEST_EXPECT_EQ((u64)(s64)dev9p.unlink(root, "denied", 0u), (u64)(s64)(-T_E_ACCES),
+                   "a server EPERM folds onto EACCES (never the flat -1)");
+
+    // The rename slot carries the identical contract.
+    g_renameat_fail_ecode = 39;
+    TEST_EXPECT_EQ((u64)(s64)dev9p.rename(root, "old", root, "populated"),
+                   (u64)(s64)(-39),
+                   "rename onto a non-empty dir surfaces -ENOTEMPTY, not -1");
+
+    // A local argument reject is EINVAL, distinguishable from every wire
+    // verdict above (an empty name never reaches the server at all).
+    TEST_EXPECT_EQ((u64)(s64)dev9p.unlink(root, "", 0u), (u64)(s64)(-T_E_INVAL),
+                   "an empty name is rejected locally as EINVAL");
+
+    g_unlinkat_fail_ecode = 0;
+    g_renameat_fail_ecode = 0;
     teardown(root);
 }
 

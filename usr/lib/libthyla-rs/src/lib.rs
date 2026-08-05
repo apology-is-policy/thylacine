@@ -273,6 +273,12 @@ pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flo
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
+pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
+pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
+// SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
+// served at L-3b; RFPROC alone needs copy-on-write (L-4) and is refused.
+pub const T_RFPROC: u64               = 0x0001;
+pub const T_RFMEM: u64                = 0x0002;
 // Overcommit memory model (#321): reserve cheaply, commit on first touch,
 // release via decommit. SYS_BURROW_ATTACH (37) stays the eager path for
 // kernel-internal copy-target callers; the native heap reserves lazily.
@@ -388,11 +394,35 @@ pub struct TSpawnArgs {
     pub allowance_va:    u64, // 80 — user-VA of a TAllowanceDesc
     pub allowance_flags: u32, // 88 — T_SPAWN_ALLOWANCE_SET
     pub page_budget:     u32, // 92 — CL-5: anon page budget; 0 == inherit
+    // VIVARIUM V-1b: the phenotype declaration (docs/VIVARIUM.md section 12.1
+    // rule 1). 0 — what every existing caller writes — means "inherit". Set
+    // T_SPAWN_PHENO_LINUX to spawn a child whose syscall numbers are decoded
+    // as Linux aarch64. Ungated (I-43: a phenotype confers ABI shape, never
+    // authority). Authored at offset 92 (the same `_pad_allow` slot CL-5 took)
+    // and moved to 96 by the aux-2 merge, which grew the struct 96 -> 104
+    // rather than drop either feature.
+    pub pheno_flags:     u32, // 96 — T_SPAWN_PHENO_*
+    pub _pad_spawn2:     u32, // 100 — must be 0 (forward-compat slot)
 }
-// Compile-time pin matching kernel's _Static_assert(sizeof(...) == 96).
-const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 96);
+// Compile-time pin matching kernel's _Static_assert(sizeof(...) == 104).
+// It pins this mirror to a LITERAL, not to the kernel -- if the kernel grows
+// again and this number is not updated, this assert still passes and the
+// struct underruns at runtime (#100). The kernel header is the source of truth.
+const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 104);
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_va) == 80);
 const _: () = assert!(core::mem::offset_of!(TSpawnArgs, allowance_flags) == 88);
+// The three tail fields are pinned INDIVIDUALLY because the aux-2 merge is
+// exactly the event they exist to catch: CL-5 and V-1b each authored a field
+// into the same slot at 92 on separate branches, so the size assert alone
+// (which both sides would have satisfied at 96) could not tell them apart.
+// Adding a field here without moving these numbers is what the merge proved is
+// a live mistake, not a theoretical one -- this pin caught it once already.
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, page_budget) == 92);
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, pheno_flags) == 96);
+const _: () = assert!(core::mem::offset_of!(TSpawnArgs, _pad_spawn2) == 100);
+
+// VIVARIUM V-1b: pheno_flags bits (mirror SPAWN_PHENO_* in the kernel header).
+pub const T_SPAWN_PHENO_LINUX: u32 = 1 << 0;
 
 // A-1a: identity_flags bits (mirror SPAWN_IDENTITY_* in the kernel header).
 pub const T_SPAWN_IDENTITY_SET: u32 = 1 << 0;
@@ -2236,6 +2266,42 @@ pub unsafe fn t_weft_unshare(share_id: u64) -> i64 {
     x0
 }
 
+// t_execve -- replace THIS Proc's program image in place (LINEAGE L-2, I-44).
+//
+// `path` is the program, resolved through the caller's own namespace exactly as
+// spawn resolves one (I-28: contained at the Territory root, per-component
+// X-search, OEXEC on the leaf). `argv_data` is the packed argv the spawn family
+// already uses: `argc` NUL-terminated strings back to back, the last byte a NUL.
+//
+// ON SUCCESS THIS DOES NOT RETURN -- the kernel repoints this thread's PC and SP
+// at the new image and the syscall's own eret starts it, so there is no caller
+// left to come back to. That is why the signature returns i64 rather than `!`:
+// the only way it returns is by FAILING, and then the caller is completely
+// intact and the value is a real -errno.
+//
+// Notable errors: -T_E_NOENT / -T_E_ACCES (the path did not resolve),
+// -T_E_INVAL (not a loadable static ELF -- POSIX would say ENOEXEC; see the
+// SYS_EXECVE ABI note), -T_E_AGAIN (this Proc has more than one live thread,
+// which v1.0 refuses rather than half-serves).
+//
+// The environment is NOT passed: it is the per-Proc /env device, which survives
+// exec on its own.
+#[inline(always)]
+pub unsafe fn t_execve(path: &[u8], argv_data: &[u8], argc: u64) -> i64 {
+    let mut x0: i64 = path.as_ptr() as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path.len() as u64,
+        in("x2") argv_data.as_ptr() as u64,
+        in("x3") argv_data.len() as u64,
+        in("x4") argc,
+        in("x8") T_SYS_EXECVE,
+        options(nostack)
+    );
+    x0
+}
+
 // t_weft_map -- lazily map a /net data fd's per-flow ring into this Proc; returns
 // the guest ring VA, or -1. Idempotent (a second call returns the cached VA).
 // `hint_va` is reserved (v1.0 ignores it). The guest side of the Weft dataplane
@@ -2694,6 +2760,94 @@ global_asm!(
 );
 
 // =============================================================================
+// LINEAGE L-3b: rfork(RFPROC|RFMEM) -- the returns-twice primitive.
+// =============================================================================
+//
+// SYS_RFORK cannot be wrapped by an ordinary `asm!` the way every other
+// syscall here is, and the reason is worth stating rather than discovering:
+// the child comes back on a DIFFERENT STACK.
+//
+// After the eret, the child holds every one of the parent's registers except
+// x0 -- including x29 (frame pointer) and x30 (link register), both of which
+// point into the PARENT's stack -- while SP points at fresh, empty memory.
+// So the child's frame pointer and its stack pointer describe two different
+// stacks. Any compiler-generated access to a local, any epilogue, any `ret`
+// would read or write the wrong one. A Rust wrapper that returned 0 into safe
+// code would be handing the child a frame that does not exist.
+//
+// musl's aarch64 clone.s solves this the only way it can be solved, and this
+// is a transliteration of it: the caller's function pointer and argument are
+// pushed onto the CHILD's stack before the syscall, and the child's very first
+// act is to pop them and `blr` -- which establishes a fresh, correct frame on
+// its own stack before any compiled code runs. The child never returns to this
+// wrapper, so there is no stale frame to return through.
+//
+// # Safety
+//
+// - `stack_top` must be the TOP of a writable region the child owns
+//   exclusively, 16-byte aligned, and must not overlap the caller's stack.
+//   The kernel rejects zero / misaligned / non-user / equal-to-caller's-SP,
+//   but it cannot see an overlap, and an overlapping stack corrupts both
+//   Procs silently.
+// - `entry` must not return. It runs on a stack with no caller beneath it;
+//   this shim exits the child if it does return, but that is a backstop, not
+//   a contract to rely on.
+// - The child shares the address space, so `arg` may point at anything the
+//   parent can see -- that sharing is the whole point -- but the two Procs are
+//   then racing over it, with no synchronisation this primitive provides.
+//
+// Returns the child's pid to the parent, or a negative errno. Never returns
+// in the child.
+global_asm!(
+    ".section .text.__thyla_rfork_spawn, \"ax\"",
+    ".globl __thyla_rfork_spawn",
+    ".type __thyla_rfork_spawn, %function",
+    // x0 = flags, x1 = stack_top, x2 = tls, x3 = entry, x4 = arg
+    "__thyla_rfork_spawn:",
+    "    bti     c",
+    // Seed the CHILD's stack with (entry, arg) and hand the kernel the
+    // adjusted pointer. Pre-index so x1 IS the child's initial SP.
+    "    stp     x3, x4, [x1, #-16]!",
+    // NOTE: this literal must track T_SYS_RFORK above -- naked asm cannot see
+    // the const, so this file carries the number TWICE and only this comment
+    // couples them. An edit that moves the const and leaves this behind
+    // compiles, links, boots, and calls the wrong syscall.
+    "    mov     x8, #105",               // T_SYS_RFORK
+    "    svc     #0",
+    "    cbz     x0, 1f",                 // x0 == 0 -> we are the CHILD
+    "    ret",                            // parent: x0 = child pid, or -errno
+    // Child. SP is its own; x29/x30 still point into the parent's stack, so
+    // nothing may touch a frame until after the blr establishes one.
+    "1:  ldp     x1, x0, [sp], #16",      // x1 := entry, x0 := arg
+    "    mov     x29, #0",                // terminate the frame chain here --
+    "    mov     x30, #0",                // a backtrace must not walk into the
+    "    blr     x1",                     // parent's stack
+    "    mov     x8, #0",                 // T_SYS_EXITS -- backstop if entry returns
+    "    mov     x0, #0",
+    "    svc     #0",
+    "2:  wfe",
+    "    b       2b",
+    ".size __thyla_rfork_spawn, .-__thyla_rfork_spawn",
+);
+
+extern "C" {
+    fn __thyla_rfork_spawn(flags: u64, stack_top: u64, tls: u64,
+                           entry: extern "C" fn(u64) -> !, arg: u64) -> i64;
+}
+
+/// Fork a child that shares this Proc's address space and runs `entry(arg)`
+/// on `stack_top`. Returns the child pid; never returns in the child.
+///
+/// # Safety
+/// See `__thyla_rfork_spawn` above: `stack_top` must be exclusively the
+/// child's, 16-aligned, and non-overlapping with the caller's stack; `entry`
+/// must not return.
+pub unsafe fn rfork_spawn(stack_top: u64, tls: u64,
+                          entry: extern "C" fn(u64) -> !, arg: u64) -> i64 {
+    __thyla_rfork_spawn(T_RFPROC | T_RFMEM, stack_top, tls, entry, arg)
+}
+
+// =============================================================================
 // Native runtime argv capture (DOC-GAP G03).
 // =============================================================================
 //
@@ -2915,6 +3069,33 @@ pub(crate) fn vdso_now_ns(clk_id: u64) -> Option<u64> {
         } else {
             Some(mono)
         }
+    }
+}
+
+/// `(CLOCK_MONOTONIC, CLOCK_REALTIME)` in ns from ONE counter sample, or None if
+/// the vDSO page is absent.
+///
+/// Not merely two `vdso_now_ns` calls spliced together: both values derive from
+/// a single `CNTVCT_EL0` read, so `realtime - monotonic` is exactly the wall
+/// offset with no interval between the samples. That difference IS boot wall
+/// time (`/proc/stat`'s `btime`), and computing it from two separately-sampled
+/// clocks lets any delay between them -- a preemption, an interrupt -- leak in
+/// as error.
+#[inline]
+pub(crate) fn vdso_now_pair_ns() -> Option<(u64, u64)> {
+    let pg = RT_VDSO_CLOCK.load(Ordering::Acquire);
+    if pg.is_null() {
+        return None;
+    }
+    // SAFETY: as vdso_now_ns -- a validated kernel-mapped RO page, write-once
+    // non-zero freq, and a single aligned u64 read volatile so a concurrent
+    // settime update is observed rather than cached.
+    unsafe {
+        let freq = (*pg).freq;
+        let cnt = read_cntvct();
+        let mono = (cnt / freq) * 1_000_000_000 + (cnt % freq) * 1_000_000_000 / freq;
+        let real = mono.wrapping_add(core::ptr::read_volatile(&(*pg).wall_offset_ns));
+        Some((mono, real))
     }
 }
 

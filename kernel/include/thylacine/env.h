@@ -94,14 +94,22 @@ bool env_iter(struct Proc *p, u64 after_id, u64 *out_id, char *name_out,
 bool env_size(struct Proc *p, u64 id, u64 *out_len);
 u32  env_devno(struct Proc *p);   // 0 if the Proc has no env yet (nothing under it)
 
-// --- the flat block (devproc) -----------------------------------------------
+// --- the flat block (devproc, exec) ------------------------------------------
 // env_render_environ renders the whole environment as Linux's NUL-separated
 // "NAME=VALUE\0" block for /proc/<pid>/environ (VIVARIUM V-4b-6), copying only
-// [off, off+n). Unlike the per-name ops this is CROSS-PROC -- the caller is
-// devproc, resolving `p` under g_proc_table_lock, not necessarily the Proc that
+// [off, off+n). Unlike the per-name ops this CAN be cross-Proc -- devproc
+// resolves `p` under g_proc_table_lock and is not necessarily the Proc that
 // owns the Env -- so its DISCLOSURE gate lives at that call site (owner or
-// CAP_HOSTOWNER, devproc_owner_or_hostowner). Nothing here checks identity; do
-// not add a second caller without carrying the gate.
+// CAP_HOSTOWNER, devproc_owner_or_hostowner). Nothing here checks identity.
+//
+// THE SECOND CALLER IS exec_stage_env (#140), the /env -> envp projection that
+// puts a real environment on a new image's stack, and it deliberately carries
+// NO gate -- because it is not a disclosure. It projects a Proc's OWN Env onto
+// its OWN new stack, reaching nothing the Proc could not reach by reading /env
+// itself; the gate exists for the case where reader and owner DIFFER, which is
+// devproc's and not exec's. A third caller must make that argument explicitly:
+// either it is same-Proc (no gate needed, say why) or cross-Proc (carry the
+// gate). What is forbidden is adding one that does neither.
 //
 // Offset-aware because an Env can hold a quarter-megabyte, far past devproc's
 // 2 KiB format buffer; entries the Linux shape cannot encode ('=' in a name, NUL

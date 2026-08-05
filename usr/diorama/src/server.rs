@@ -92,11 +92,47 @@
 //               MPIDR alone on a board whose DTB we do not re-read here.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 use libthyla_rs::ninep as p9;
 use libthyla_rs::{
     t_close, t_open, t_srv_peer, t_walk_create, TSrvPeerInfo, T_OPATH, T_OREAD,
     T_WALK_OPEN_FROM_ROOT,
 };
+
+// --- V-7: the vivarium (per-container) mode --------------------------------
+//
+// `--vivarium <runner-pid>` puts the server in per-container mode
+// (docs/VIVARIUM.md section 7.2): it posts /srv/viv-dio instead of
+// /srv/diorama, and both pid ENUMERATION and per-pid EXISTENCE answer only
+// for pids in the container's process tree -- so the diorama cannot be a read
+// oracle for the surface the container's territory withheld (the section 7.1
+// F6 close). Membership is ppid-descent from the container ENTRYPOINT, and
+// the entrypoint is located rather than passed: it is the runner's child that
+// is not this server (the runner spawns exactly two children -- this diorama,
+// then the entrypoint -- and the entrypoint's pid does not exist yet when the
+// diorama must already be up to serve the pre-spawn territory mounts). Before
+// the entrypoint exists the set is EMPTY -- fail-closed, never a host view.
+//
+// Known shape (not a defect): membership is by LIVE ppid chains, so a
+// container proc orphaned by its parent's death is reparented to init and
+// falls OUT of the view (it disappears from the container's /proc; it gains
+// nothing). Linux virtualizes this with a pid namespace; the v1.x pid-1
+// virtualization seam owns it.
+//
+// /proc/self stays PEER-based and unfiltered: `self` answers about the
+// CONNECTION'S OWN Proc, so a non-member reader reads only itself -- the
+// /self/environ authority-coincidence argument, never a cross-boundary leak.
+static VIV_RUNNER: AtomicU32 = AtomicU32::new(0);
+static VIV_SELF: AtomicU32 = AtomicU32::new(0);
+
+pub fn set_vivarium(runner_pid: u32, self_pid: u32) {
+    VIV_RUNNER.store(runner_pid, Ordering::Relaxed);
+    VIV_SELF.store(self_pid, Ordering::Relaxed);
+}
+
+fn viv_runner() -> u32 {
+    VIV_RUNNER.load(Ordering::Relaxed)
+}
 
 pub const MAX_CONNS: usize = 8;
 const MAX_FIDS: usize = 32;
@@ -370,6 +406,23 @@ fn parse_cpu_name(name: &[u8]) -> Option<u64> {
     Some(v)
 }
 
+/// The parent of a cpu-range node, total over every kind INCLUDING the leaf.
+///
+/// Its own function rather than a match inside `walk_child` so the chain's parent
+/// relation stays right whether or not the is-a-directory gate lets the leaf
+/// reach it. V-4c-2c's warning was that a catch-all `..` here would answer
+/// .../system/cpu from the leaf and skip TWO levels -- a wrong answer rather than
+/// an error. The gate now makes that unreachable, but a gate and a wrong answer
+/// behind it is one edit away from being a wrong answer again.
+fn cpu_parent(n: u64, kind: u64) -> u64 {
+    match kind {
+        CK_CACHE => cpu_qid(n),
+        CK_INDEX0 => cpu_qid_kind(n, CK_CACHE),
+        CK_LINESZ => cpu_qid_kind(n, CK_INDEX0),
+        _ => N_SYSFS_CPU, // CK_DIR: cpuN sits directly under .../system/cpu
+    }
+}
+
 fn node_is_dir(path: u64) -> bool {
     if is_pid_node(path) {
         return qid_kind(path) == PK_DIR;
@@ -391,10 +444,19 @@ fn node_is_dir(path: u64) -> bool {
 /// never-existent pid an honest ENOENT rather than a directory of empty files,
 /// which is how every Linux consumer detects that a process is gone.
 fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
+    // V-4c-3 SA-2 (#71): nothing is a child of a FILE -- `.` and `..` included.
+    // Linux answers ENOTDIR for `<regular file>/anything`, and h_walk turns this
+    // None into exactly that errno when the source fid is the one at fault.
+    //
+    // ONE gate here rather than one per arm, because per-arm was not uniform: the
+    // pid and static arms each carried their own, the cpu arm did not, and so the
+    // cache leaf was the single node in the whole tree from which `..` resolved.
+    // It also makes `dir < N_COUNT` a precondition of the static arm below, which
+    // is what keeps its NODES index in bounds.
+    if !node_is_dir(dir) {
+        return None;
+    }
     if is_pid_node(dir) {
-        if qid_kind(dir) != PK_DIR {
-            return None; // walking from a file has no meaning
-        }
         if name == b"." {
             return Some(dir);
         }
@@ -417,17 +479,8 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
         // V-4c-2c: `..` climbs the cache chain rather than always landing on
         // .../system/cpu -- the V-4c-1 shortcut was correct only while cpuN was
         // a leaf dir. A wrong parent here would let `cd cache/..` skip a level.
-        // h_walk does NOT require the source to be a directory (9P lets a client
-        // walk from any unopened fid), so the LEAF's `..` is reachable too and
-        // must name index0 -- a catch-all landing on .../system/cpu here would
-        // skip two levels and be a wrong answer rather than an error.
         if name == b".." {
-            return Some(match kind {
-                CK_CACHE => cpu_qid(n),
-                CK_INDEX0 => cpu_qid_kind(n, CK_CACHE),
-                CK_LINESZ => cpu_qid_kind(n, CK_INDEX0),
-                _ => N_SYSFS_CPU,
-            });
+            return Some(cpu_parent(n, kind));
         }
         // The cache subtree: single-child chains, so each level is a literal
         // name match and there is no enumeration to get wrong. Sourced from
@@ -441,9 +494,9 @@ fn walk_child(dir: u64, name: &[u8]) -> Option<u64> {
             _ => None,
         };
     }
-    if dir >= N_COUNT || !NODES[dir as usize].is_dir {
-        return None;
-    }
+    // The is-a-dir gate at the top already proved `dir < N_COUNT` for anything
+    // reaching here (node_is_dir bounds its own NODES index), so this arm indexes
+    // in range by construction.
     if name == b"." {
         return Some(dir);
     }
@@ -554,6 +607,26 @@ impl Render {
             self.len = mark;
         }
     }
+    /// Discard the first `n` bytes, so what remains begins at file offset `n`.
+    ///
+    /// This is how `render` honors a Tread offset for the files that build
+    /// themselves whole (V-4c-3 SA-3, #72). It lives here rather than as a slice
+    /// in `h_read` so that `render`'s contract can be the SAME sentence for every
+    /// node -- "the bytes at [off, ...)" -- whether the renderer produced the
+    /// whole file or, as environ does, only that window. A caller that had to
+    /// know which is a caller that can get it wrong.
+    fn drop_prefix(&mut self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        if n >= self.len as u64 {
+            self.len = 0;
+            return;
+        }
+        let n = n as usize;
+        self.buf.copy_within(n..self.len, 0);
+        self.len -= n;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +658,45 @@ fn read_native(path: &[u8], out: &mut [u8]) -> Option<usize> {
     Some(total)
 }
 
+/// Read a native file into `out` starting at byte `off`. Same degrade-to-None
+/// contract as `read_native`.
+///
+/// POSITIONED, so it is NOT a drop-in for `read_native`: `t_pread` fails ESPIPE
+/// on a Dev that is not `.seekable` (#37), and devctl is not -- so every `/ctl`
+/// source in this file (meminfo, stat, cpuinfo, the cpu lists, the cache line
+/// size) must keep using the cursor reader. devproc IS seekable, which is what
+/// makes the one caller here, `render_environ`, legal.
+fn read_native_at(path: &[u8], off: u64, out: &mut [u8]) -> Option<usize> {
+    if off > i64::MAX as u64 {
+        return Some(0); // past any possible file: EOF, not an error
+    }
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        return None;
+    }
+    let mut total = 0usize;
+    loop {
+        if total >= out.len() {
+            break;
+        }
+        // Saturating and re-bounded per iteration: `off` is a client-supplied
+        // Tread offset, so nothing upstream constrains it.
+        let at = off.saturating_add(total as u64);
+        if at > i64::MAX as u64 {
+            break;
+        }
+        let n = unsafe {
+            libthyla_rs::t_pread(fd, out.as_mut_ptr().add(total), out.len() - total, at as i64)
+        };
+        if n <= 0 {
+            break;
+        }
+        total += n as usize;
+    }
+    let _ = unsafe { t_close(fd) };
+    Some(total)
+}
+
 /// Build "/proc/<pid>/<leaf>" into `out`, returning the used length.
 fn native_proc_path(pid: u32, leaf: &[u8], out: &mut [u8; 64]) -> usize {
     let mut r = Render::new();
@@ -603,6 +715,13 @@ fn native_proc_path(pid: u32, leaf: &[u8], out: &mut [u8; 64]) -> usize {
 /// proc_find_by_pid and misses on a dead pid). O_PATH because this asks only
 /// "does the name resolve" -- it opens nothing for reading.
 fn native_pid_exists(pid: u32) -> bool {
+    // V-7: in vivarium mode a pid outside the container tree does not RESOLVE
+    // (scripture: "a pid outside the tree does not resolve"). Membership first,
+    // then the liveness probe -- membership is read from the live /ctl/procs,
+    // so a member is live modulo the same re-read window enumeration has.
+    if viv_runner() != 0 && !viv_is_member(pid) {
+        return false;
+    }
     let mut r = Render::new();
     r.push(b"/proc/");
     r.push_dec(pid as u64);
@@ -615,6 +734,124 @@ fn native_pid_exists(pid: u32) -> bool {
     true
 }
 
+// V-7 membership. VIV_PROCS_MAX bounds both the (pid, ppid) table and the
+// member set; /ctl/procs is read into the same 2048-byte window as
+// native_pid_list (the kernel render is itself bounded at DEVCTL_READ_BUF and
+// stops at buffer-full, so a truncated tail loses rows fail-closed -- a member
+// past the cut disappears from the view, never the reverse).
+const VIV_PROCS_MAX: usize = 64;
+
+fn viv_read_pairs(pairs: &mut [(u32, u32)]) -> usize {
+    let mut buf = [0u8; 2048];
+    let got = match read_native(b"/ctl/procs", &mut buf) {
+        Some(n) => n,
+        None => return 0, // unreadable source -> empty set, fail-closed
+    };
+    parse_pid_ppid_list(&buf[..got], pairs)
+}
+
+fn viv_members(out: &mut [u32]) -> usize {
+    let runner = viv_runner();
+    if runner == 0 {
+        return 0;
+    }
+    let mut pairs = [(0u32, 0u32); VIV_PROCS_MAX];
+    let np = viv_read_pairs(&mut pairs);
+    compute_members(&pairs[..np], runner, VIV_SELF.load(Ordering::Relaxed), out)
+}
+
+/// The #101 attach gate, as a pure decision so its truth table is testable
+/// without a live connection. `runner == 0` is the shared boot diorama --
+/// unfiltered by design, so there is no gate at all there.
+pub fn viv_attach_allowed(runner: u32, peer_alive: u32, peer_pid: u32) -> bool {
+    runner == 0 || (peer_alive != 0 && peer_pid == runner)
+}
+
+fn viv_is_member(pid: u32) -> bool {
+    let mut members = [0u32; VIV_PROCS_MAX];
+    let n = viv_members(&mut members);
+    members[..n].contains(&pid)
+}
+
+/// The (pid, ppid) pairs from /ctl/procs -- columns 1 and 2 of every row that
+/// parses (the header's "PID" fails the decimal parse and is skipped by the
+/// same rule as any junk, the parse_pid_list discipline). NOT split_fields:
+/// that splits on SINGLE spaces (the /ctl/cpu shape) and would read the
+/// 4-space-run /ctl/procs rows as pid + an empty column, skipping every row.
+pub fn parse_pid_ppid_list(text: &[u8], out: &mut [(u32, u32)]) -> usize {
+    fn token(line: &[u8], from: usize) -> (&[u8], usize) {
+        let mut s = from;
+        while s < line.len() && line[s] == b' ' {
+            s += 1;
+        }
+        let mut e = s;
+        while e < line.len() && line[e] != b' ' {
+            e += 1;
+        }
+        (&line[s..e], e)
+    }
+    // The PPID column accepts "0" -- a legitimate VALUE there (kproc-parented
+    // and reparented-orphan roots render ppid 0, joey's own row included) --
+    // where parse_pid rightly rejects it as a /proc NAME. Without this the
+    // whole ppid-0 tier of the table silently vanished from the snapshot
+    // (caught by the selftest vector at boot).
+    fn parse_ppid(tok: &[u8]) -> Option<u32> {
+        if tok == b"0" {
+            return Some(0);
+        }
+        parse_pid(tok)
+    }
+    let mut n = 0usize;
+    for line in text.split(|&c| c == b'\n') {
+        if n >= out.len() {
+            break;
+        }
+        let (c1, rest) = token(line, 0);
+        let (c2, _) = token(line, rest);
+        if let (Some(pid), Some(ppid)) = (parse_pid(c1), parse_ppid(c2)) {
+            out[n] = (pid, ppid);
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The pure half of viv_members: the container's process tree from a (pid,
+/// ppid) snapshot. Roots = the runner's children minus this server; members =
+/// the roots plus their ppid-descendants, to a fixpoint. With the runner
+/// spawning exactly {diorama, entrypoint}, this IS ppid-descent from the
+/// entrypoint (docs/VIVARIUM.md section 7.2); stated over a root SET so a
+/// hypothetical extra runner child widens the view to its own tree only,
+/// never to the host's.
+pub fn compute_members(pairs: &[(u32, u32)], runner: u32, me: u32, out: &mut [u32]) -> usize {
+    let mut n = 0usize;
+    for &(pid, ppid) in pairs {
+        if ppid == runner && pid != me && pid != runner && n < out.len() {
+            out[n] = pid;
+            n += 1;
+        }
+    }
+    // Descend to a fixpoint. Each pass adds only pids whose parent is already a
+    // member; bounded by the member capacity, so this terminates even on a
+    // (corrupt) cyclic snapshot.
+    loop {
+        let before = n;
+        for &(pid, ppid) in pairs {
+            if n >= out.len() {
+                break;
+            }
+            if pid != runner && !out[..n].contains(&pid) && out[..n].contains(&ppid) {
+                out[n] = pid;
+                n += 1;
+            }
+        }
+        if n == before {
+            break;
+        }
+    }
+    n
+}
+
 /// The live pid list, from `/ctl/procs`' first column. Used only to ENUMERATE
 /// the root (Linux's /proc lists its processes); resolution never consults it,
 /// so a stale entry costs a readdir row, never a wrong answer.
@@ -625,6 +862,11 @@ fn native_pid_exists(pid: u32) -> bool {
 /// this property (its cookie is a position in the tgid list), and no consumer
 /// treats a single enumeration as a consistent snapshot.
 fn native_pid_list(out: &mut [u32]) -> usize {
+    // V-7: in vivarium mode the enumeration IS the member set (same source,
+    // same snapshot semantics); pre-entrypoint it is empty, fail-closed.
+    if viv_runner() != 0 {
+        return viv_members(out);
+    }
     let mut buf = [0u8; 2048]; // matches the kernel's DEVCTL_READ_BUF
     let got = match read_native(b"/ctl/procs", &mut buf) {
         Some(n) => n,
@@ -880,27 +1122,18 @@ fn push_hwcap_names(r: &mut Render, hwcap: u64) {
 }
 
 /// (CLOCK_MONOTONIC, CLOCK_REALTIME) in ns. Read as a pair so /proc/stat's
-/// btime (realtime - uptime) uses two samples taken back to back rather than
-/// two independent reads a scheduling gap apart.
+/// btime (realtime - uptime) comes from ONE clock sample rather than two
+/// independent reads a scheduling gap apart. (The "two samples taken back to
+/// back" this comment used to claim was the best the old raw-syscall form could
+/// do; the vDSO path now makes it literally one -- V-4c-3 SA-4.)
 fn clock_pair_ns() -> (u64, u64) {
-    #[repr(C)]
-    struct Ts {
-        tv_sec: i64,
-        tv_nsec: i64,
-    }
-    let read = |clk: u64| -> u64 {
-        let mut ts = Ts { tv_sec: 0, tv_nsec: 0 };
-        let rc = unsafe { libthyla_rs::t_clock_gettime(clk, &mut ts as *mut Ts as u64) };
-        if rc != 0 {
-            return 0;
-        }
-        (ts.tv_sec.max(0) as u64)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(ts.tv_nsec.clamp(0, 999_999_999) as u64)
-    };
-    let mono = read(libthyla_rs::T_CLOCK_MONOTONIC);
-    let real = read(libthyla_rs::T_CLOCK_REALTIME);
-    (mono, real)
+    // V-4c-3 SA-4: was a local t_timespec mirror plus two raw t_clock_gettime
+    // calls, which silently opted out of the #343 vDSO on a file a monitoring
+    // tool reads in a loop. The shared reader takes the vDSO page (no syscall)
+    // AND derives both values from one counter sample, so btime's
+    // realtime - monotonic is exactly the wall offset rather than two samples
+    // with a schedulable gap between them.
+    libthyla_rs::time::monotonic_realtime_ns()
 }
 
 /// Procs created since boot, from /ctl/sched's `created:` -- the kernel's
@@ -973,10 +1206,16 @@ pub fn parse_kv_dec(text: &[u8], key: &[u8]) -> Option<u64> {
             while j < text.len() && (text[j] == b' ' || text[j] == b'\t') {
                 j += 1;
             }
+            // V-4c-3 F7: checked, matching parse_u64. The wrapping form this
+            // replaced turned an over-long digit run into an arbitrary u64 with
+            // no signal -- and the callers multiply the result by 4 under
+            // overflow-checks, so a fabricated value became a panic in a
+            // panic=abort server. An unrepresentable number is not a value:
+            // None (the same answer as "absent") is the honest reading.
             let mut v: u64 = 0;
             let mut any = false;
             while j < text.len() && text[j].is_ascii_digit() {
-                v = v.wrapping_mul(10).wrapping_add((text[j] - b'0') as u64);
+                v = v.checked_mul(10)?.checked_add((text[j] - b'0') as u64)?;
                 any = true;
                 j += 1;
             }
@@ -1008,10 +1247,11 @@ pub fn parse_dec_after(text: &[u8], marker: &[u8]) -> Option<u64> {
         while j < text.len() && (text[j] == b' ' || text[j] == b'\t') {
             j += 1;
         }
+        // V-4c-3 F7: checked, as in parse_kv_dec above.
         let mut v: u64 = 0;
         let mut any = false;
         while j < text.len() && text[j].is_ascii_digit() {
-            v = v.wrapping_mul(10).wrapping_add((text[j] - b'0') as u64);
+            v = v.checked_mul(10)?.checked_add((text[j] - b'0') as u64)?;
             any = true;
             j += 1;
         }
@@ -1140,7 +1380,10 @@ fn render_status(pid: u32, ids: Option<(u32, u32)>, r: &mut Render) {
         }
         if let Some(pages) = parse_kv_dec(text, b"pages") {
             r.push(b"VmRSS:\t");
-            r.push_dec(pages * 4); // 4 KiB pages -> kB, the Linux unit
+            // V-4c-3 F7: saturating, like every other arithmetic site in this
+            // file. Under overflow-checks an unchecked `* 4` panics, and
+            // panic = "abort" makes a panic the death of the whole server.
+            r.push_dec(pages.saturating_mul(4)); // 4 KiB pages -> kB, the Linux unit
             r.push(b" kB\n");
         }
     }
@@ -1339,11 +1582,11 @@ fn maps_row(fields: &[&[u8]], exe: &[u8], r: &mut Render) -> bool {
 /// would work, but it makes a component whose entire design property is having
 /// no policy into a policy point, to serve a file no v1.0 consumer reads.
 ///
-/// Truncation is to a WHOLE RECORD. RENDER_MAX bounds what this server serves,
-/// and a block cut mid-record would hand the consumer a truncated value that
-/// parses as a complete one -- so trim back to the last terminator. Unconditional
-/// because it is a no-op on an untruncated block (which already ends in a NUL).
-fn render_environ(pid: u32, r: &mut Render) {
+/// There is no truncation to describe. Since V-4c-3 SA-3 (#72) this serves the
+/// WINDOW at `off`, so what does not fit in one read continues at the next
+/// offset. The whole-record trim it used to carry belonged to a cap that dropped
+/// the tail outright, and it retired with that cap.
+fn render_environ(pid: u32, off: u64, r: &mut Render) {
     let mut pbuf = [0u8; 64];
     let n = native_proc_path(pid, b"environ", &mut pbuf);
     let mut ebuf = [0u8; RENDER_MAX];
@@ -1352,28 +1595,22 @@ fn render_environ(pid: u32, r: &mut Render) {
     // as zero bytes. None means the open itself failed -- a gone pid. Both render
     // empty, which is what makes the deny path indistinguishable from an empty
     // environment, exactly as it should be.
-    let got = match read_native(&pbuf[..n], &mut ebuf) {
+    let got = match read_native_at(&pbuf[..n], off, &mut ebuf) {
         Some(g) => g,
         None => return,
     };
-    r.push(&ebuf[..trim_to_last_record(&ebuf[..got])]);
-}
-
-/// Length of the longest prefix of `block` that ends on a record boundary -- i.e.
-/// everything up to and including the last NUL. 0 when there is none, which means
-/// a single record longer than the whole buffer: serve nothing rather than a
-/// headless fragment that would parse as a complete NAME=VALUE.
-///
-/// Its own function so the selftest can drive it with a synthetic block; the live
-/// path cannot produce a truncated one on demand (it would need a >4 KiB
-/// environment on the reading Proc). The maps_row precedent.
-pub fn trim_to_last_record(block: &[u8]) -> usize {
-    for i in (0..block.len()).rev() {
-        if block[i] == 0 {
-            return i + 1;
-        }
-    }
-    0
+    // Pushed VERBATIM -- no record trim. Until V-4c-3 SA-3 (#72) this read the
+    // file's first 4 KiB and dropped back to the last NUL, so a record straddling
+    // the boundary was discarded and every record after it was LOST: an Env holds
+    // up to ENV_MAX_ENTRIES x ENV_VALUE_MAX, and past 4 KiB the tail simply
+    // vanished. That is the failure the kernel side built an offset-aware
+    // env_render_environ to avoid, re-imposed one layer up, and it does not look
+    // like an error to a consumer -- it looks like the variable was never set.
+    //
+    // A window has no tail to discard: the straddling record continues at the
+    // next offset, exactly as it does through the native file. So the trim is not
+    // merely unnecessary here, it would be the bug.
+    r.push(&ebuf[..got]);
 }
 
 /// maps -- the Proc's address space in Linux's /proc/*/maps shape.
@@ -1432,17 +1669,17 @@ fn render_meminfo(r: &mut Render) {
     let text = &buf[..got];
     if let Some(total) = parse_kv_dec(text, b"total") {
         r.push(b"MemTotal:       ");
-        r.push_dec(total * 4);
+        r.push_dec(total.saturating_mul(4));
         r.push(b" kB\n");
     }
     if let Some(free) = parse_kv_dec(text, b"free") {
         r.push(b"MemFree:        ");
-        r.push_dec(free * 4);
+        r.push_dec(free.saturating_mul(4));
         r.push(b" kB\n");
         // Linux consumers overwhelmingly read MemAvailable; without a reclaim
         // model the honest value is MemFree, not a fabricated estimate.
         r.push(b"MemAvailable:   ");
-        r.push_dec(free * 4);
+        r.push_dec(free.saturating_mul(4));
         r.push(b" kB\n");
     }
 }
@@ -1480,26 +1717,14 @@ fn render_cpu_list(node: u64, r: &mut Render) {
 /// track per-CPU here; 0 is the honest placeholder (Linux itself reports 0 on
 /// some virtualized configurations, and no consumer treats it as an error).
 fn render_uptime(r: &mut Render) {
-    // libthyla_rs::time keeps its TimeSpec private and Instant exposes no
-    // "since boot" accessor, so read the clock directly. The layout is the
-    // kernel-pinned struct t_timespec (two i64, 16 bytes).
-    #[repr(C)]
-    struct Ts {
-        tv_sec: i64,
-        tv_nsec: i64,
-    }
-    let mut ts = Ts { tv_sec: 0, tv_nsec: 0 };
-    let rc = unsafe {
-        libthyla_rs::t_clock_gettime(
-            libthyla_rs::T_CLOCK_MONOTONIC,
-            &mut ts as *mut Ts as u64,
-        )
-    };
-    if rc != 0 {
-        return;
-    }
-    let secs = ts.tv_sec.max(0) as u64;
-    let hund = (ts.tv_nsec.clamp(0, 999_999_999) as u64) / 10_000_000;
+    // V-4c-3 SA-4: the comment that used to sit here explained that
+    // libthyla_rs::time kept its TimeSpec private and Instant exposed no
+    // "since boot" accessor, so this read the clock directly. That was a real
+    // API gap, and going around it silently cost the #343 vDSO fast path.
+    // Instant::since_boot closes it.
+    let up = libthyla_rs::time::Instant::now().since_boot();
+    let secs = up.as_secs();
+    let hund = (up.subsec_nanos() as u64) / 10_000_000;
     r.push_dec(secs);
     r.push(b".");
     if hund < 10 {
@@ -1575,10 +1800,19 @@ fn render_stat(r: &mut Render) {
     i = 0;
     while i < ncpus && i <= CPU_INDEX_MAX {
         if let Some(idle) = parse_cpu_idle_ns(text, i) {
+            // Whole LINES here (V-4c-3 SA-3, #72) -- the same commit discipline
+            // as cpuinfo's blocks, at this file's unit. A truncated `cpuN` row
+            // would hand a jiffies parser a short column count, and the lines
+            // after it are what carry intr/ctxt/btime.
+            let mark = r.len();
             let mut label = Render::new();
             label.push(b"cpu");
             label.push_dec(i);
             push_stat_cpu_line(r, label.bytes(), up_ns.saturating_sub(idle), idle);
+            if r.len() == RENDER_MAX {
+                r.truncate_to(mark);
+                break;
+            }
         }
         i += 1;
     }
@@ -1619,6 +1853,13 @@ fn render_cpuinfo(r: &mut Render) {
         let cols = parse_cpu_cols(text, i);
         // An offline CPU carries no MIDR, and Linux lists only online CPUs.
         if let Some(midr) = cols.midr {
+            // V-4c-3 SA-3 (#72): commit whole BLOCKS, the render_maps row idiom
+            // at the unit a cpuinfo consumer actually parses. A block is ~150 B,
+            // so RENDER_MAX holds about 27 -- unreachable at DTB_MAX_CPUS = 8,
+            // but the failure if it were reached is a half block with a
+            // `processor` line and no `CPU part`, which reads as a malformed
+            // entry rather than a short file. Whole lines would not be enough.
+            let mark = r.len();
             r.push(b"processor\t: ");
             r.push_dec(i);
             r.push(b"\nFeatures\t:");
@@ -1635,6 +1876,10 @@ fn render_cpuinfo(r: &mut Render) {
             r.push(b"\nCPU revision\t: ");
             r.push_dec(midr & 0xF);
             r.push(b"\n\n");
+            if r.len() == RENDER_MAX {
+                r.truncate_to(mark);
+                break;
+            }
         }
         i += 1;
     }
@@ -1694,9 +1939,19 @@ const KVERSION: &[u8] = b"#1 SMP Thylacine\n";
 // the justification. If a hostname surface ever lands, this reads from it.
 const HOSTNAME: &[u8] = b"(none)\n";
 
-/// Render `node` for `peer`. Directories render empty (they are read via
-/// Treaddir, not Tread).
-pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
+/// Render `node` for `peer`: the bytes at `[off, ...)`, bounded by RENDER_MAX.
+/// Directories render empty (they are read via Treaddir, not Tread).
+///
+/// Almost every renderer here builds its WHOLE file and `render` drops the first
+/// `off` bytes at the end, because every one of their sources is bounded far
+/// under RENDER_MAX -- /ctl/cpu at DTB_MAX_CPUS, a fixed-shape status block, a
+/// single path. `environ` is the exception and the reason `off` exists at all:
+/// its source is an Env of up to ENV_MAX_ENTRIES x ENV_VALUE_MAX bytes, so it
+/// renders the window directly and returns early (V-4c-3 SA-3, #72).
+///
+/// The contract is the same sentence either way, which is the point -- `h_read`
+/// takes what it is given and does no offset arithmetic of its own.
+pub fn render(node: u64, peer: &TSrvPeerInfo, off: u64) -> Render {
     let mut r = Render::new();
     if is_pid_node(node) {
         // A per-pid read. walk_child proved the Proc live when the path was
@@ -1712,12 +1967,24 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
             PK_MAPS => render_maps(pid, &mut r),
             _ => {}
         }
+        // No environ in PID_FILES -- the kernel serves a Proc's environment to
+        // its owner only, and the diorama answers for its connection's own peer
+        // and never for an arbitrary pid. So every per-pid file is whole-render.
+        r.drop_prefix(off);
         return r;
     }
     // /self/*. The peer's liveness is checked HERE rather than inside each
     // renderer: a dead peer must render empty rather than read /proc/<pid>/*
     // for a pid that may since have been reused.
     let alive = peer.alive != 0;
+    // The one windowed renderer, so it returns before the drop_prefix below --
+    // its Render already BEGINS at `off`. A dead peer still renders empty.
+    if node == N_SELF_ENVIRON {
+        if alive {
+            render_environ(peer.pid, off, &mut r);
+        }
+        return r;
+    }
     match node {
         N_SELF_EXE if alive => render_exe(peer.pid, &mut r),
         N_SELF_CMDLINE if alive => render_cmdline(peer.pid, &mut r),
@@ -1728,7 +1995,6 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         ),
         N_SELF_CWD if alive => render_cwd(peer.pid, &mut r),
         N_SELF_MAPS if alive => render_maps(peer.pid, &mut r),
-        N_SELF_ENVIRON if alive => render_environ(peer.pid, &mut r),
         N_MEMINFO => render_meminfo(&mut r),
         N_UPTIME => render_uptime(&mut r),
         N_STAT => render_stat(&mut r),
@@ -1746,6 +2012,7 @@ pub fn render(node: u64, peer: &TSrvPeerInfo) -> Render {
         }
         _ => {}
     }
+    r.drop_prefix(off);
     r
 }
 
@@ -1929,6 +2196,33 @@ impl Conn {
         if !self.version_done {
             return self.err(tag, p9::E_PROTO);
         }
+        // V-8 F3 (#101): /srv/viv-dio is a FIXED name (post_srv_diorama, and
+        // fixed on purpose -- task #33), so it is first-come-first-served. A
+        // SECOND concurrent `viv run` opening it lands HERE, on the FIRST
+        // container's server; ungated it would mount container A's /proc into
+        // container B, so B enumerates A's processes. That fails OPEN.
+        //
+        // The check has to be here and not in the runner, because at the point
+        // the runner holds the connection it has nothing to compare: SYS_SRV_
+        // PEER is server-side only (the client endpoint is refused outright --
+        // kernel/syscall.c sys_srv_peer_for_proc), the registry's poster_pid
+        // is never exposed to EL0, and membership is ppid-descent from an
+        // ENTRYPOINT THAT DOES NOT EXIST YET, so every diorama's member set is
+        // equally empty. Here the peer pid is kernel-stamped and unforgeable.
+        //
+        // Gating ATTACH (not each op) makes the cross-mount impossible rather
+        // than merely detectable: every fid descends from the attach root, so
+        // the refusal fails the opener's SYS_OPEN outright -- which is the
+        // "the runner fails closed" this mode's header note already promised.
+        let runner = viv_runner();
+        if runner != 0 {
+            // self.peer() is a syscall, so only the vivarium mode pays for it;
+            // the shared boot diorama's attach path is untouched.
+            let peer = self.peer();
+            if !viv_attach_allowed(runner, peer.alive, peer.pid) {
+                return self.err(tag, p9::E_PERM);
+            }
+        }
         let a = match p9::parse_tattach(tmsg) {
             Ok(a) => a,
             Err(_) => return self.err(tag, p9::E_PROTO),
@@ -1964,6 +2258,19 @@ impl Conn {
         }
         if a.newfid != a.fid && self.fid_find(a.newfid).is_some() {
             return self.err(tag, p9::E_INVAL);
+        }
+        // V-4c-3 SA-2 (#71): walking a NAME from a file is ENOTDIR, Linux's own
+        // answer, rather than the ENOENT an empty partial walk would produce.
+        // Scoped to nwname > 0 because a ZERO-length walk is how a client clones
+        // a fid, and cloning a fid that names a file is legal 9P.
+        //
+        // Only the SOURCE gets a real errno. A walk that dies at element k > 0
+        // returns k qids and no error at all -- 9P2000.L's partial-walk rule
+        // leaves no room to say why -- so `dir/file/x` reports "file" resolved
+        // and nothing after it. That is what v9fs does on Linux too: the client
+        // re-walks from the file it did reach and collects the ENOTDIR then.
+        if a.nwname > 0 && !node_is_dir(src_fid.node) {
+            return self.err(tag, p9::E_NOTDIR);
         }
 
         let mut cur = src_fid.node;
@@ -2027,13 +2334,12 @@ impl Conn {
             return self.err(tag, p9::E_ISDIR);
         }
         let peer = self.peer();
-        let r = render(f.node, &peer);
+        // V-4c-3 SA-3 (#72): render is given the offset and hands back the bytes
+        // AT it, so there is no slice to get wrong here. An offset past the end
+        // yields an empty Render, which is the EOF the old `off >= body.len()`
+        // early return produced.
+        let r = render(f.node, &peer, a.offset);
         let body = r.bytes();
-        let off = a.offset as usize;
-        if off >= body.len() {
-            return p9::build_rread(&mut self.out_buf, tag, &[]);
-        }
-        let avail = body.len() - off;
         // V-4c-3 F2: saturating, because Tversion accepts any u32 msize
         // (including 0) and negotiates min(client, SRV_MSIZE) with no floor, so
         // a raw `msize - 11` UNDERFLOWS for any negotiated msize < 11. This
@@ -2043,8 +2349,8 @@ impl Conn {
         // /srv/diorama reach it. netd, ptyfs and corvus all spell this exact
         // expression saturating; the diorama was the outlier.
         let cap = (a.count as usize).min((self.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4));
-        let n = avail.min(cap);
-        p9::build_rread(&mut self.out_buf, tag, &body[off..off + n])
+        let n = body.len().min(cap);
+        p9::build_rread(&mut self.out_buf, tag, &body[..n])
     }
 
     fn h_readdir(&mut self, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -2219,11 +2525,29 @@ impl Conn {
         };
         let f = self.fids[i].unwrap();
         let is_dir = node_is_dir(f.node);
-        let size = if is_dir {
+        // V-4c-3 SA-3 (#72): environ reports 0, not a rendered length.
+        //
+        // The self-sufficient reason: its content is a WINDOW now, so there is no
+        // total to report without reading the whole file on every stat -- and the
+        // pre-#72 answer, the TRUNCATED length, was a lie the moment an
+        // environment passed 4 KiB. 0 is the only number here that is not a
+        // guess, and it says the true thing: read to EOF.
+        //
+        // It also matches the source. devproc_stat_native (kernel/devproc.c)
+        // zeroes the whole t_stat and never sets size for ANY /proc file --
+        // verified, not assumed -- so this reports what the surface it
+        // re-presents reports. Linux is understood to do the same for
+        // /proc/*/environ, generated rather than stored; that corroborates the
+        // choice but is not what it rests on.
+        //
+        // Deliberately NOT extended to the rest: their sources are bounded, one
+        // render measures them exactly, and a stat that agrees with its read is
+        // worth more than symmetry with a zero.
+        let size = if is_dir || f.node == N_SELF_ENVIRON {
             0u64
         } else {
             let peer = self.peer();
-            render(f.node, &peer).bytes().len() as u64
+            render(f.node, &peer, 0).bytes().len() as u64
         };
         let q = self.qid_of(f.node);
         let mode = if is_dir { DIR_MODE } else { FILE_MODE };
@@ -2272,12 +2596,32 @@ impl Conn {
 
 /// Post /srv/diorama (9P-mode). Requires PROC_FLAG_MAY_POST_SERVICE (joey spawns
 /// the diorama with T_SPAWN_PERM_MAY_POST_SERVICE, the ptyfs/corvus precedent).
+///
+/// V-7: vivarium mode posts the FIXED name /srv/viv-dio instead. Fixed on
+/// purpose: the boot SrvRegistry never frees a dead entry (task #33), so a
+/// per-container unique name would burn a registry slot per `viv run` forever;
+/// a fixed name rebinds one tombstone across sequential runs. A CONCURRENT
+/// second container collides here and the runner fails closed -- concurrent
+/// containers are a v1.x seam riding the #33 registry-lifecycle fix.
+/// The service name this server posts, mode-dependent. Exposed so the startup
+/// failure message can name the ACTUAL name: a vivarium diorama posts viv-dio
+/// but used to report "/srv/diorama FAILED" -- precisely the wrong name on the
+/// collision path (#101), which is the one path where that message matters.
+pub fn srv_name() -> &'static str {
+    if viv_runner() != 0 {
+        "viv-dio"
+    } else {
+        "diorama"
+    }
+}
+
 pub fn post_srv_diorama() -> Result<i64, ()> {
     let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
     if srv < 0 {
         return Err(());
     }
-    let listener = unsafe { t_walk_create(srv, b"diorama".as_ptr(), 7, T_OREAD, 0) };
+    let name: &[u8] = srv_name().as_bytes();
+    let listener = unsafe { t_walk_create(srv, name.as_ptr(), name.len(), T_OREAD, 0) };
     let _ = unsafe { t_close(srv) };
     if listener < 0 {
         return Err(());
@@ -2332,8 +2676,14 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(N_PROC, b"meminfo") != Some(N_MEMINFO) {
         return Err("walk /proc/meminfo");
     }
-    // A file has no children, and a miss is a miss.
-    if walk_child(N_SELF_EXE, b"anything").is_some() {
+    // A file has no children, and a miss is a miss. V-4c-3 SA-2 (#71) extends
+    // that to the two names every path normalizer tries: `<file>/..` and
+    // `<file>/.` must MISS, or a walker probing a component to classify it reads
+    // a file as a directory.
+    if walk_child(N_SELF_EXE, b"anything").is_some()
+        || walk_child(N_SELF_EXE, b"..").is_some()
+        || walk_child(N_SELF_EXE, b".").is_some()
+    {
         return Err("walked into a file");
     }
     if walk_child(N_ROOT, b"nope").is_some() {
@@ -2372,16 +2722,16 @@ pub fn selftest() -> Result<(), &'static str> {
     // These render the SAME for any peer, dead or alive -- they describe the
     // phenotype, not the Proc, so a peer-dependent answer would be a bug.
     let dead = TSrvPeerInfo::default(); // alive == 0
-    if render(N_OSTYPE, &dead).bytes() != b"Linux\n" {
+    if render(N_OSTYPE, &dead, 0).bytes() != b"Linux\n" {
         return Err("ostype");
     }
-    if render(N_HOSTNAME, &dead).bytes() != b"(none)\n" {
+    if render(N_HOSTNAME, &dead, 0).bytes() != b"(none)\n" {
         return Err("hostname");
     }
     // osrelease must parse as Linux <major>.<minor>.<patch> with a major high
     // enough to clear glibc's minimum-kernel refusal.
     {
-        let rel = render(N_OSRELEASE, &dead);
+        let rel = render(N_OSRELEASE, &dead, 0);
         let b = rel.bytes();
         if b.len() < 6 || !b[0].is_ascii_digit() || b[1] != b'.' {
             return Err("osrelease shape");
@@ -2424,7 +2774,10 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(pid_qid(7, PK_DIR), b"nope").is_some() {
         return Err("resolved a nonexistent per-pid file");
     }
-    if walk_child(pid_qid(7, PK_MAPS), b"anything").is_some() {
+    if walk_child(pid_qid(7, PK_MAPS), b"anything").is_some()
+        || walk_child(pid_qid(7, PK_MAPS), b"..").is_some()
+        || walk_child(pid_qid(7, PK_MAPS), b".").is_some()
+    {
         return Err("walked into a per-pid file");
     }
 
@@ -2480,6 +2833,83 @@ pub fn selftest() -> Result<(), &'static str> {
         }
     }
 
+    // --- V-7: the vivarium membership computation, pure vectors.
+    {
+        let procs = b"PID    PPID    NAME    STATE    THREADS\n\
+                      1    0    joey    ALIVE    1\n\
+                      10    1    viv    ALIVE    1\n\
+                      11    10    diorama    ALIVE    1\n\
+                      20    10    probe    ALIVE    1\n\
+                      21    20    child    ALIVE    1\n\
+                      22    21    grandchild    ALIVE    1\n\
+                      30    1    login    ALIVE    1\n";
+        let mut pairs = [(0u32, 0u32); 8];
+        let np = parse_pid_ppid_list(procs, &mut pairs);
+        if np != 7 || pairs[1] != (10, 1) || pairs[3] != (20, 10) {
+            return Err("pid/ppid list parse");
+        }
+        // runner=10, me=11: the container tree is exactly {20, 21, 22} --
+        // the diorama self-excludes, the runner and the host procs are out.
+        let mut m = [0u32; 8];
+        let n = compute_members(&pairs[..np], 10, 11, &mut m);
+        if n != 3 || !m[..n].contains(&20) || !m[..n].contains(&21) || !m[..n].contains(&22) {
+            return Err("vivarium members");
+        }
+        if m[..n].contains(&10) || m[..n].contains(&11) || m[..n].contains(&1) || m[..n].contains(&30)
+        {
+            return Err("vivarium member leak");
+        }
+        // Pre-entrypoint (only the diorama exists yet): EMPTY, fail-closed.
+        let early = [(1u32, 0u32), (10u32, 1u32), (11u32, 10u32)];
+        if compute_members(&early, 10, 11, &mut m) != 0 {
+            return Err("vivarium pre-entrypoint not empty");
+        }
+        // A reparented orphan (ppid fell back to init) leaves the view --
+        // the documented fail-closed shape, never a host leak.
+        let orphaned = [(1u32, 0u32), (10u32, 1u32), (11u32, 10u32), (21u32, 1u32)];
+        if compute_members(&orphaned, 10, 11, &mut m) != 0 {
+            return Err("vivarium orphan leaked in");
+        }
+        // A corrupt CYCLIC snapshot terminates and admits nothing rooted
+        // outside the runner.
+        let cyclic = [(40u32, 41u32), (41u32, 40u32), (10u32, 1u32), (11u32, 10u32)];
+        if compute_members(&cyclic, 10, 11, &mut m) != 0 {
+            return Err("vivarium cycle handled wrong");
+        }
+    }
+
+    // --- V-8 F3 (#101): the attach gate's truth table.
+    //
+    // Note the vector directly above: pre-entrypoint membership is EMPTY, so
+    // at the moment a runner holds a fresh connection there is nothing in the
+    // TREE to tell two dioramas apart. The peer pid is the only discriminator
+    // that exists that early, which is why the gate is peer-based.
+    {
+        // Our own runner attaches.
+        if !viv_attach_allowed(10, 1, 10) {
+            return Err("attach gate refused our own runner");
+        }
+        // A SECOND concurrent `viv run` attaches: the whole point.
+        if viv_attach_allowed(10, 1, 11) {
+            return Err("attach gate admitted a foreign runner");
+        }
+        // An unreadable peer is an unknown peer -- fail closed, matching
+        // Conn::peer()'s own default-on-error contract (a zeroed info would
+        // otherwise read as pid 0, which must never match a live runner).
+        if viv_attach_allowed(10, 0, 10) {
+            return Err("attach gate admitted a dead peer");
+        }
+        if viv_attach_allowed(10, 0, 0) {
+            return Err("attach gate admitted an unreadable peer");
+        }
+        // The shared boot diorama is deliberately unfiltered: runner == 0
+        // means no gate, so every peer -- including an unreadable one --
+        // attaches exactly as it did before this check existed.
+        if !viv_attach_allowed(0, 1, 99) || !viv_attach_allowed(0, 0, 0) {
+            return Err("attach gate filtered the shared diorama");
+        }
+    }
+
     // --- V-4b-3: the mid-line decimal parse (native status packs
     //     "principal:<N> gid:<M>" on one line, which parse_kv_dec cannot reach).
     {
@@ -2492,6 +2922,36 @@ pub fn selftest() -> Result<(), &'static str> {
         }
         if parse_dec_after(st, b" absent:").is_some() {
             return Err("parse_dec_after invented a value");
+        }
+    }
+
+    // --- V-4c-3 F7: an over-long digit run must not become an arbitrary value.
+    //     Both parsers used to accumulate with wrapping_mul/wrapping_add and no
+    //     length bound, so 30 digits silently produced some u64 -- which the
+    //     meminfo and status renderers then multiply by 4. Under
+    //     overflow-checks that multiply panics, and with panic = "abort" the
+    //     panic is the whole server dying. The sources are kernel-generated and
+    //     bounded, so this was never reachable; it is the inconsistency with the
+    //     checked/saturating discipline used everywhere else in the file that
+    //     makes it worth closing. None is the honest answer for a number that
+    //     does not fit.
+    {
+        let huge = b"total: 99999999999999999999999999 pages\nfree: 12 pages\n";
+        if parse_kv_dec(huge, b"total").is_some() {
+            return Err("parse_kv_dec wrapped an over-long digit run into a value");
+        }
+        // The overflowing key must not poison a later well-formed one.
+        if parse_kv_dec(huge, b"free") != Some(12) {
+            return Err("parse_kv_dec lost a good key after an over-long one");
+        }
+        let huge2 = b"x pid: 99999999999999999999999999\n";
+        if parse_dec_after(huge2, b"pid:").is_some() {
+            return Err("parse_dec_after wrapped an over-long digit run into a value");
+        }
+        // u64::MAX itself is representable and must still parse.
+        let max = b"total: 18446744073709551615 pages\n";
+        if parse_kv_dec(max, b"total") != Some(u64::MAX) {
+            return Err("parse_kv_dec rejected u64::MAX");
         }
     }
 
@@ -2534,40 +2994,62 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // --- a dead peer renders EMPTY rather than a stale or fabricated answer
-    if !render(N_SELF_EXE, &dead).bytes().is_empty() {
+    if !render(N_SELF_EXE, &dead, 0).bytes().is_empty() {
         return Err("dead peer served an exe");
     }
-    if !render(N_SELF_STATUS, &dead).bytes().is_empty() {
+    if !render(N_SELF_STATUS, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a status");
     }
-    if !render(N_SELF_CMDLINE, &dead).bytes().is_empty() {
+    if !render(N_SELF_CMDLINE, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a cmdline");
     }
-    if !render(N_SELF_CWD, &dead).bytes().is_empty() {
+    if !render(N_SELF_CWD, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a cwd");
     }
-    if !render(N_SELF_MAPS, &dead).bytes().is_empty() {
+    if !render(N_SELF_MAPS, &dead, 0).bytes().is_empty() {
         return Err("dead peer served a maps");
     }
-    if !render(N_SELF_ENVIRON, &dead).bytes().is_empty() {
+    if !render(N_SELF_ENVIRON, &dead, 0).bytes().is_empty() {
         return Err("dead peer served an environ");
     }
 
-    // --- V-4b-6: the environ whole-record trim, driven directly. The live path
-    // cannot produce a truncated block on demand (it would want a >4 KiB
-    // environment on this very Proc), and the property is the one that keeps a
-    // truncated read from parsing as a complete variable.
-    if trim_to_last_record(b"A=1\0BB=22\0") != 10 {
-        return Err("trim shortened a whole block");
+    // --- V-4c-3 SA-3 (#72): the offset contract. This REPLACES the environ
+    // whole-record trim legs, because the trim is gone: environ is a real window
+    // now, so a record straddling the boundary continues at the next offset
+    // instead of being dropped along with everything after it.
+    //
+    // drop_prefix is what carries the offset for every whole-render file, so its
+    // three boundaries are pinned directly -- shortening by too much or too
+    // little would serve the wrong bytes silently, at an offset the client never
+    // sees questioned.
+    {
+        let mut r = Render::new();
+        r.push(b"0123456789");
+        r.drop_prefix(0);
+        if r.bytes() != b"0123456789" {
+            return Err("drop_prefix(0) moved bytes");
+        }
+        r.drop_prefix(4);
+        if r.bytes() != b"456789" {
+            return Err("drop_prefix mid-buffer");
+        }
+        r.drop_prefix(6);
+        if !r.bytes().is_empty() {
+            return Err("drop_prefix of the whole buffer");
+        }
+        let mut r2 = Render::new();
+        r2.push(b"abc");
+        r2.drop_prefix(9999); // past the end: EOF, never an underflow
+        if !r2.bytes().is_empty() {
+            return Err("drop_prefix past the end");
+        }
     }
-    if trim_to_last_record(b"A=1\0BB=2") != 4 {
-        return Err("trim kept a partial trailing record");
+    // End to end through render, on a node whose content is a constant.
+    if render(N_OSTYPE, &dead, 2).bytes() != b"nux\n" {
+        return Err("render ignored the offset");
     }
-    if trim_to_last_record(b"LONGVAR=abc") != 0 {
-        return Err("trim served a headless fragment");
-    }
-    if trim_to_last_record(b"") != 0 {
-        return Err("trim of an empty block");
+    if !render(N_OSTYPE, &dead, 6).bytes().is_empty() {
+        return Err("render past the end was not EOF");
     }
 
     // --- V-4b-2: the native-maps -> Linux-maps translation, driven directly so
@@ -2634,7 +3116,7 @@ pub fn selftest() -> Result<(), &'static str> {
     }
 
     // --- uptime is always renderable and monotonic-shaped
-    let up = render(N_UPTIME, &dead);
+    let up = render(N_UPTIME, &dead, 0);
     if up.bytes().is_empty() {
         return Err("uptime empty");
     }
@@ -2717,11 +3199,23 @@ pub fn selftest() -> Result<(), &'static str> {
     if walk_child(cache, b"..") != Some(cpu_qid(0)) || walk_child(index0, b"..") != Some(cache) {
         return Err("cache chain .. skipped a level");
     }
-    // The LEAF's `..` is reachable too: h_walk does not require the source fid
-    // to be a directory, so a catch-all here would answer .../system/cpu and
-    // skip two levels -- a wrong answer rather than an error.
-    if walk_child(linesz, b"..") != Some(index0) {
-        return Err("leaf .. skipped two levels");
+    // V-4c-3 SA-2 (#71): the LEAF is a file, so NOTHING resolves from it -- `..`
+    // and `.` included. This is the leg that changed: the cache leaf used to be
+    // the one node in the tree from which `..` walked, because the cpu arm had no
+    // is-a-dir gate while the pid and static arms did.
+    if walk_child(linesz, b"..").is_some() || walk_child(linesz, b".").is_some() {
+        return Err("a file served .. or .");
+    }
+    // The parent relation itself still holds for every kind including the leaf.
+    // It is checked HERE rather than through walk_child precisely because the
+    // gate now hides it: a `_ =>` catch-all would answer .../system/cpu from the
+    // leaf and skip two levels, and nothing else would notice.
+    if cpu_parent(0, CK_CACHE) != cpu_qid(0)
+        || cpu_parent(0, CK_INDEX0) != cache
+        || cpu_parent(0, CK_LINESZ) != index0
+        || cpu_parent(0, CK_DIR) != N_SYSFS_CPU
+    {
+        return Err("cpu_parent skipped a level");
     }
 
     // --- V-4c-1: parse_cpu_name is the resolution gate, like parse_pid. Unlike

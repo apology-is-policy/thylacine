@@ -27,6 +27,7 @@
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
+#include <thylacine/cow.h>          // LINEAGE L-4b: cow_page_set_sole at the demand-zero install
 
 #include "../../mm/phys.h"           // REVENANT R-2: alloc_pages/free_pages for the demand-read page
 
@@ -57,8 +58,18 @@ static volatile bool g_in_kernel_fault[DTB_MAX_CPUS];
 #define EC_DATA_ABORT_LOWER 0x24    /* data abort from lower EL */
 #define EC_DATA_ABORT_SAME  0x25    /* data abort from current EL */
 
-// ISS bit 9 = WnR (write/not-read). Only meaningful for data aborts.
-#define ESR_ISS_WNR_BIT    9
+// ISS bit 6 = WnR (write/not-read). Only meaningful for data aborts.
+//
+// #137: this said 9 from the day it was written, and 9 is EA (External Abort
+// type), which is 0 for every normal abort -- so fi->is_write was ALWAYS FALSE,
+// tree-wide, for the entire history of the fault path. It survived because
+// nothing branched on it for correctness: the demand-zero and FILE arms install
+// at vma->prot whichever way it reads, so first touch works either way, and a
+// write to genuinely read-only memory is a buggy program nobody ran. LINEAGE
+// L-4b's copy-on-write break is the first mechanism whose correctness DEPENDS on
+// it, and with the wrong bit its write arm is simply unreachable: the store
+// re-installs read-only, re-faults, and loops forever.
+#define ESR_ISS_WNR_BIT    6
 
 // FSC = ISS[5:0] for data and instruction aborts.
 #define FSC_MASK           0x3F
@@ -104,7 +115,7 @@ void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out) {
     // Instruction abort vs data abort.
     out->is_instruction = (ec == EC_INST_ABORT_LOWER || ec == EC_INST_ABORT_SAME);
 
-    // WnR is bit 9 of ISS. ISS = ESR[24:0]. Only meaningful for data
+    // WnR is bit 6 of ISS. ISS = ESR[24:0]. Only meaningful for data
     // aborts; for instruction aborts the bit is RES0 in the encoding so
     // the read happens to be 0 (which maps to "read", which is the
     // correct semantic — instruction fetches are reads).
@@ -365,6 +376,21 @@ struct file_fault_req {
 // FILE-miss (run the slow path; the returned value is ignored) from a genuine
 // failure (FAULT_UNHANDLED_USER) or a non-FILE / FILE-resident-hit fast install
 // (FAULT_HANDLED).
+// Copy one whole page between two PAGE-ALIGNED kernel addresses, as u64 words --
+// the freestanding kernel links no memcpy symbol, and page-base alignment makes
+// the word copy safe. PAGE_SIZE (4 KiB) / 8 = 512 stores.
+//
+// Hoisted above demand_page_locked (and renamed off its original `revenant_`
+// prefix) at LINEAGE L-4b, when the copy-on-write break became its second caller:
+// it is a plain page copy, not REVENANT's, and a name claiming otherwise would
+// read as COW reaching into the file-paging arc for something.
+static inline void copy_page_words(void *dst, const void *src) {
+    u64 *d = (u64 *)dst;
+    const u64 *s = (const u64 *)src;
+    for (size_t w = 0; w < PAGE_SIZE / sizeof(u64); w++)
+        d[w] = s[w];
+}
+
 static enum fault_result demand_page_locked(struct Proc *p,
                                             const struct fault_info *fi,
                                             struct file_fault_req *freq) {
@@ -414,6 +440,12 @@ static enum fault_result demand_page_locked(struct Proc *p,
     //      time to select Device attrs.
     paddr_t page_pa;
     bool    device_memory;
+    // LINEAGE L-4b: what step 5 actually installs. Defaults to the VMA's own prot
+    // and is narrowed by exactly one arm -- a read fault on a COW-shared page,
+    // which must land READ-ONLY so the next write comes back here to break. The
+    // VMA keeps VMA_PROT_WRITE throughout (see vma.h), so it is the PTE alone that
+    // carries the copy-on-write restriction.
+    u32     install_prot = vma->prot;
     switch (vma->burrow->type) {
     case BURROW_TYPE_ANON:
     case BURROW_TYPE_CODE:
@@ -492,8 +524,96 @@ static enum fault_result demand_page_locked(struct Proc *p,
         if (resident) {
             // Resident hit (a re-fault, or a sibling faulter filled it): the page was
             // charged when it was allocated -- do NOT charge again.
-            page_pa = page_to_pa(resident);
             device_memory = false;
+
+            // LINEAGE L-4b: the copy-on-write break. Reached only through a VMA
+            // addrspace_clone flagged, so a mapping that never forked runs the
+            // original path below byte-for-byte.
+            if (vma->flags & VMA_FLAG_COW) {
+                if (!fi->is_write) {
+                    // A READ of a possibly-shared page. Map it, but READ-ONLY, so
+                    // the write that follows faults back here instead of landing
+                    // in a page the other address space can see. (Mapping it
+                    // writable "because the VMA says writable" is precisely the
+                    // I-44 violation.)
+                    page_pa      = page_to_pa(resident);
+                    install_prot = vma->prot & ~VMA_PROT_WRITE;
+                    break;              // -> step-5 PTE install, read-only
+                }
+
+                // A WRITE. Clear the stale read-only PTE FIRST: this VA is very
+                // likely already mapped (the read that preceded this write
+                // installed it read-only, just above), and mmu_install_user_pte
+                // REFUSES a mismatching install over a valid leaf -- it returns -1
+                // rather than overwriting. Both break outcomes mismatch: the copy
+                // path changes the PA, and the take-in-place path changes the
+                // permission bits. Without this the first write after a read would
+                // fail the install and kill the Proc.
+                //
+                // Idempotent when nothing is mapped (the common first-touch case,
+                // where addrspace_clone's uninstall already cleared it), so it is
+                // unconditional rather than guarded on a re-walk of the tree.
+mmu_uninstall_user_pte(p->as->pgtable_root, 0, page_va);
+
+                // cow_page_break_is_sole is the whole decision, taken as one step
+                // under the global COW lock -- splitting it is what
+                // cow.tla::BUGGY_BREAK_UNLOCKED models, where two sharers each
+                // observe themselves alone.
+if (!cow_page_break_is_sole(resident)) {
+                    // Someone else still holds this page: copy it.
+                    //
+                    // Our own share stays HELD across the alloc and the copy, and
+                    // that retained share IS the pin -- it is what stops a
+                    // concurrent exit in the other address space from driving the
+                    // count to zero and freeing the page we are reading from
+                    // (cow.tla::BUGGY_TEARDOWN_NO_PIN).
+struct page *priv = alloc_pages(0, KP_ZERO);
+                    if (!priv) return FAULT_UNHANDLED_USER;  // graceful per-Proc OOM
+
+                    copy_page_words((void *)pa_to_kva(page_to_pa(priv)),
+                                       (void *)pa_to_kva(page_to_pa(resident)));
+
+                    // ESTABLISH before the page is reachable (entry site 3 of 3 --
+                    // page.h's contract; a page fresh from the buddy carries its
+                    // last owner's count).
+                    cow_page_set_sole(priv);
+
+if (!burrow_lazy_swap_slot(v, slot, resident, priv)) {
+                        // The slot changed under us. Unreachable at v1.0: an
+                        // ANON_LAZY Burrow has exactly one mapping in exactly one
+                        // address space (burrow.h), and we hold that address
+                        // space's lock. Bail the same way the arm's other
+                        // impossible-shape-change does -- a per-Proc terminate,
+                        // never a box extinction. `priv` never reached a slot, so
+                        // it is freed directly rather than through a put.
+                        free_pages(priv, 0);
+                        return FAULT_UNHANDLED_USER;
+                    }
+
+                    // The copy is done and `priv` is installed, so the pin has
+                    // served its purpose: release our share of the original. If
+                    // that was the last one (the other holder exited mid-break)
+                    // the page is ours to free.
+if (cow_page_put(resident))
+                        free_pages(resident, 0);
+
+                    // No I-32 charge: one mapped page became one mapped page. The
+                    // child was charged for this page at fork (addrspace_clone),
+                    // which is what makes the break itself unable to fail on the
+                    // cap -- the accounting was done where it could still be
+                    // reported.
+                    page_pa = page_to_pa(priv);
+                    break;              // -> step-5 install, writable (vma->prot)
+                }
+                // Sole holder: take the page in place. No copy, no count change --
+                // the count already says exactly one holder, and taking it leaves
+                // exactly one holder. Safe against a concurrent fork because only
+                // a HOLDER can fork this mapping, we are the only holder, and we
+                // are here. Falls through to a writable install, so the repeated
+                // write does not fault again.
+            }
+
+            page_pa = page_to_pa(resident);
             break;                      // -> step-5 PTE install
         }
 
@@ -509,6 +629,12 @@ static enum fault_result demand_page_locked(struct Proc *p,
             proc_page_uncharge(p, 1);
             return FAULT_UNHANDLED_USER;    // OOM -> graceful per-Proc terminate
         }
+        // LINEAGE L-4b: entry site 2 of 3. ESTABLISH the COW share while newpg
+        // is still private to this fault -- a page fresh from the buddy carries
+        // its previous owner's count, and the two paths below that free newpg
+        // do so WITHOUT a cow_page_put precisely because it never reached a
+        // slot. (page.h states the contract; cow.h says why it is not inherited.)
+        cow_page_set_sole(newpg);
 
         // Install-once into the slot. Under vma_lock (held by the caller across the
         // whole demand_page_locked) no sibling faulter of this Proc can touch
@@ -549,8 +675,8 @@ static enum fault_result demand_page_locked(struct Proc *p,
     // 5. Install the leaf PTE in the per-Proc TTBR0 tree. The asid arg is
     // vestigial (the install does an all-ASID `tlbi vaae1is`); pass 0 -- the
     // Proc's rolling ASID is resolved at context switch, not here (RW-1 B-F1).
-    int rc = mmu_install_user_pte(p->pgtable_root, 0,
-                                  page_va, page_pa, vma->prot,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0,
+                                  page_va, page_pa, install_prot,
                                   device_memory);
     if (rc != 0)                         return FAULT_UNHANDLED_USER;
 
@@ -630,7 +756,7 @@ static enum fault_result file_install_locked(struct Proc *p,
     // I-12 holds by construction). Each FILE slot is its own order-0 page, so
     // the PA is the slot page's PA (no contiguous-chunk offset). The asid arg
     // is vestigial (all-ASID tlbi); pass 0 (RW-1 B-F1).
-    int rc = mmu_install_user_pte(p->pgtable_root, 0, freq->page_va,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0, freq->page_va,
                                   page_to_pa(resident), vma->prot, /*device=*/false);
     if (rc != 0) return FAULT_UNHANDLED_USER;
     return FAULT_HANDLED;
@@ -704,9 +830,9 @@ static enum fault_result file_demand_page_single(struct Proc *p,
     if (freq->exec)
         arch_icache_sync_range(kva, PAGE_SIZE);
 
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     r = file_install_locked(p, fi, freq, newpg);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
 out:
     return r;
@@ -734,17 +860,6 @@ out:
 // fault. The Burrow pin is held across the whole batched read (freq->burrow), and
 // dropped once by the file_demand_page_slow entry.
 #define REVENANT_READAHEAD_PAGES 64u    // 256 KiB cluster (vs a 4 KiB single page)
-
-// Copy one page from the (page-aligned) staging buffer into a (page-aligned)
-// destination page as u64 words -- the freestanding kernel has no memcpy symbol,
-// and both operands are page-base-aligned (8-byte aligned), so the word copy is
-// safe. PAGE_SIZE (4 KiB) / 8 = 512 stores.
-static inline void revenant_copy_page(void *dst, const void *src) {
-    u64 *d = (u64 *)dst;
-    const u64 *s = (const u64 *)src;
-    for (size_t w = 0; w < PAGE_SIZE / sizeof(u64); w++)
-        d[w] = s[w];
-}
 
 // Install a filled cluster under the RE-ACQUIRED vma_lock: re-validate the VMA
 // still maps the SAME pinned FILE Burrow, install-once each cluster slot into
@@ -804,7 +919,7 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
 
     // Install the leaf PTE at vma->prot (R+X for text, never writable -- W^X /
     // I-12). The asid arg is vestigial (all-ASID tlbi); pass 0.
-    int rc = mmu_install_user_pte(p->pgtable_root, 0, freq->page_va,
+    int rc = mmu_install_user_pte(p->as->pgtable_root, 0, freq->page_va,
                                   page_to_pa(fault_pg), vma->prot, /*device=*/false);
     if (rc != 0) return FAULT_UNHANDLED_USER;
     return FAULT_HANDLED;
@@ -871,7 +986,7 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
         struct page *pg = alloc_pages(0, 0);    // fully memcpy'd below; no KP_ZERO
         if (!pg) { alloc_ok = false; break; }
         void *pkva = pa_to_kva(page_to_pa(pg));
-        revenant_copy_page(pkva, sbuf + i * PAGE_SIZE);
+        copy_page_words(pkva, sbuf + i * PAGE_SIZE);
         if (freq->exec)
             arch_icache_sync_range(pkva, PAGE_SIZE);
         clpages[i] = pg;
@@ -885,10 +1000,10 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
 
     // Install under the re-acquired vma_lock; free any un-adopted (loser/bail)
     // pages OUTSIDE v->lock (file_install_cluster_locked NULL'd the adopted ones).
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     enum fault_result r =
         file_install_cluster_locked(p, fi, freq, cstart, ncluster, clpages);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
     for (size_t i = 0; i < ncluster; i++)
         if (clpages[i]) free_pages(clpages[i], 0);
     return r;
@@ -910,7 +1025,7 @@ enum fault_result userland_demand_page(struct Proc *p,
                                        const struct fault_info *fi) {
     if (!p || !fi)                       return FAULT_UNHANDLED_USER;
     if (p->magic != PROC_MAGIC)          return FAULT_UNHANDLED_USER;
-    if (p->pgtable_root == 0)            return FAULT_UNHANDLED_USER;
+    if (!p->as)                          return FAULT_UNHANDLED_USER;
 
     // Fast path under vma_lock: resolve + install (ANON/MMIO/DMA + a FILE
     // resident-hit). On a BURROW_TYPE_FILE miss, demand_page_locked sets
@@ -918,9 +1033,9 @@ enum fault_result userland_demand_page(struct Proc *p,
     // (the blocking dev->read cannot run under a spinlock -- the I-36 condition-5
     // death-interruptible page-in).
     struct file_fault_req freq = {0};
-    spin_lock(&p->vma_lock);
+    spin_lock(&p->as->lock);
     enum fault_result r = demand_page_locked(p, fi, &freq);
-    spin_unlock(&p->vma_lock);
+    spin_unlock(&p->as->lock);
 
     if (freq.needed)
         return file_demand_page_slow(p, fi, &freq);

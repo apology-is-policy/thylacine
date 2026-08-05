@@ -160,8 +160,86 @@ static int cwd_streq(const char *a, const char *b) {
 
 void test_territory_cwd_lexical(void);
 void test_territory_cwd_dot(void);
+void test_territory_cwd_join(void);
 
-// territory.cwd_lexical -- the pure join/clean resolver (cwd_lexical_resolve).
+// territory.cwd_join -- the RESOLUTION join (#83). The property under test is
+// what it does NOT do: it must not resolve "." / ".." and must not drop a
+// trailing separator, so that a cwd-relative path reaches stalk's #79/#81/#82
+// gates carrying the same tokens the absolute spelling would.
+void test_territory_cwd_join(void) {
+    char out[256];
+    int r;
+
+    r = cwd_join("/home/michael", "foo.txt", 7, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/home/michael/foo.txt"),
+        "relative join against cwd");
+
+    r = cwd_join("/home/michael", "/etc/passwd", 11, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/etc/passwd"),
+        "absolute path ignores cwd");
+
+    // The #83 core: dots survive the join. Pre-fix these collapsed here and
+    // stalk never saw them, so `f/..` on a FILE -- and worse, `nope/..` on a
+    // path that does not exist -- resolved successfully.
+    r = cwd_join("/a/b/c", "../x", 4, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/b/c/../x"),
+        "'..' is PRESERVED for stalk (not collapsed to /a/b/x)");
+
+    r = cwd_join("/a", "f/.", 3, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/f/."),
+        "'.' is PRESERVED for stalk");
+
+    r = cwd_join("/a", "f/", 2, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/f/"),
+        "a trailing separator is PRESERVED for stalk");
+
+    r = cwd_join("/a", "nope/..", 7, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/nope/.."),
+        "a '..' through a missing component is PRESERVED (stalk must walk it)");
+
+    // Root is stored as "/", so the join must not emit "//".
+    r = cwd_join("/", "foo", 3, out, sizeof(out));
+    TEST_ASSERT(r == 4 && cwd_streq(out, "/foo"),
+        "root cwd does not double the separator");
+
+    r = cwd_join((const char *)0, "foo", 3, out, sizeof(out));
+    TEST_ASSERT(r == 4 && cwd_streq(out, "/foo"),
+        "NULL cwd treated as root");
+
+    r = cwd_join("/home", "/", 1, out, sizeof(out));
+    TEST_ASSERT(r == 1 && cwd_streq(out, "/"),
+        "absolute / yields /");
+
+    // No production caller passes an empty input (every syscall rejects
+    // path_len == 0 first), but the result must not gain a trailing separator
+    // that would newly assert a directory.
+    r = cwd_join("/a/b", "", 0, out, sizeof(out));
+    TEST_ASSERT(r == 4 && cwd_streq(out, "/a/b"),
+        "empty input names the cwd, without gaining a trailing slash");
+
+    // Overflow is rejected, never truncated. The join is longer than the old
+    // lexical resolve for '..'-bearing paths, so this bound matters more now.
+    char tiny[4];
+    r = cwd_join("/aaaa", "bbbb", 4, tiny, sizeof(tiny));
+    TEST_ASSERT(r == -1, "over-capacity result rejected");
+
+    // The SYS_CHDIR step-3 contract: canonicalization runs on the ALREADY
+    // absolute join with dot == NULL, so dot_path is not re-read and cannot
+    // race a peer thread's chdir.
+    r = cwd_lexical_resolve((const char *)0, "/a/b/..", 7, out, sizeof(out));
+    TEST_ASSERT(r == 2 && cwd_streq(out, "/a"),
+        "canonicalizing an absolute join collapses '..'");
+    r = cwd_lexical_resolve((const char *)0, "/etc/", 5, out, sizeof(out));
+    TEST_ASSERT(r == 4 && cwd_streq(out, "/etc"),
+        "canonicalizing drops a trailing separator (dot_path stays canonical)");
+    r = cwd_lexical_resolve((const char *)0, "/..", 3, out, sizeof(out));
+    TEST_ASSERT(r == 1 && cwd_streq(out, "/"),
+        "canonicalizing clamps '..' at root (cd .. from / stores /)");
+}
+
+// territory.cwd_lexical -- the pure canonicalizer (cwd_lexical_resolve). Since
+// #83 its ONLY production role is computing the string SYS_CHDIR stores in
+// dot_path; it is NOT the resolution path (see test_territory_cwd_join).
 void test_territory_cwd_lexical(void) {
     char out[256];
     int r;
@@ -219,9 +297,9 @@ void test_territory_cwd_dot(void) {
     len = territory_getdot(p, buf, sizeof(buf));
     TEST_ASSERT(len == 13 && cwd_streq(buf, "/home/michael"), "cwd round-trips");
 
-    int r = territory_resolve_cwd(p, "x", 1, buf, sizeof(buf));
+    int r = territory_join_cwd(p, "x", 1, buf, sizeof(buf));
     TEST_ASSERT(r > 0 && cwd_streq(buf, "/home/michael/x"),
-        "resolve_cwd joins relative against the stored dot");
+        "join_cwd joins relative against the stored dot");
 
     // The "/" sentinel resets dot_path to NULL; getdot reads "/" again.
     TEST_EXPECT_EQ(territory_setdot(p, "/"), 0, "setdot / ok");

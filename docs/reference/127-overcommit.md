@@ -150,7 +150,7 @@ I-32 gains a fourth axis — a per-Proc cap on **live VMAs**:
 - `PROC_VMA_MAX = 65536` (the Linux `vm.max_map_count` analog; 65536 × 64 B =
   4 MiB of Vma slab is the per-Proc ceiling).
 - `proc_vma_charge(p)` / `proc_vma_uncharge(p)` (kernel/proc.c) — charged at
-  **`vma_insert`** / uncharged at **`vma_remove`**, both under `p->vma_lock`,
+  **`vma_insert`** / uncharged at **`vma_remove`**, both under `p->as->lock`,
   so the cap is exact. A non-TCB Proc at the cap fails `vma_insert` with -1
   (identically to an overlap; the caller `vma_free`s the rejected Vma). Charges
   nothing on the refused return, so no rollback is needed.

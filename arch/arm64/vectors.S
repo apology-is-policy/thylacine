@@ -338,3 +338,71 @@ _exception_vectors:
 
 .Lexception_return:
     KERNEL_EXIT
+
+// ---------------------------------------------------------------------------
+// thread_fork_trampoline — LINEAGE L-3b. Initial ctx.lr for a Thread created
+// by thread_create_forked; the child half of rfork(RFPROC|RFMEM).
+//
+// The third first-switch-in shape, and the only one that RESTORES rather than
+// constructs. thread_trampoline blr's a kernel entry; thread_user_trampoline
+// erets to a fresh (entry, sp, arg); this one has no entry point at all,
+// because the raw fork contract has none — the child resumes exactly where its
+// parent was, distinguished only by x0. So the whole body is "release, check
+// for death, take the normal exception return".
+//
+// **Why it lives HERE and not in context.S**: it branches to
+// .Lexception_return, which is deliberately a LOCAL label so no kernel caller
+// can invoke KERNEL_EXIT on whatever happens to sit on the current SP and eret
+// to an attacker-shaped ELR/SPSR. Branching from INSIDE vectors.S is exactly
+// the use that label's own comment sanctions ("Phase 2's recoverable
+// sync-fault paths will branch here from within vectors.S the same way the IRQ
+// slot does"), and reusing the one audited exit is worth more on this surface
+// than keeping the trampolines in one file: KERNEL_EXIT is, in its own words,
+// "the single most load-bearing exit in the kernel".
+//
+// On entry, sp IS the child's frame — thread_create_forked placed it at the
+// top of the child's fresh kstack, the same address KERNEL_ENTRY would have
+// chosen. So KERNEL_EXIT's sp-relative loads and its closing
+// `add sp, sp, #EXCEPTION_CTX_SIZE` behave precisely as on a real return, and
+// the two C calls below run on the same stack BELOW the frame, unable to
+// disturb it.
+//
+// DAIF: reached IRQ-masked (sched() switches under irqsave, and
+// cpu_switch_context preserves DAIF), which is the state KERNEL_EXIT documents
+// as its precondition. The mask is re-asserted explicitly after the C calls
+// anyway — it costs one instruction and makes the #713 property local rather
+// than inherited: there must be NO interruptible window between installing
+// ELR_EL1 and the eret, and here that window is entirely inside KERNEL_EXIT.
+//
+// No GPR-zeroing sweep, unlike thread_user_trampoline — and that is the point,
+// not an omission. A fresh thread must not inherit kernel register residue
+// across EL1→EL0, but this child is CONTINUING its parent's userspace frame:
+// every GPR it loads came from the parent's own EL0 state, so x1..x30 are
+// values userspace already had. Zeroing them would break the fork, not
+// harden it.
+// ---------------------------------------------------------------------------
+.globl thread_fork_trampoline
+.type thread_fork_trampoline, %function
+thread_fork_trampoline:
+    bti     c
+
+    /* Release the run-tree lock prev held when switching to us — the same
+     * discipline every trampoline and the sched() resume path share. */
+    bl      sched_finish_task_switch
+
+    /* #811 (#809-audit F3): first-entry group-termination die-check, exactly
+     * as thread_user_trampoline does it. A child forked while its parent's
+     * group is already terminating would otherwise run EL0 code until its next
+     * trap; el0_return_die_check is noreturn on the die path, so the eret
+     * window below is never entered on it (I-24: no Thread runs at EL0 after
+     * its Proc is ZOMBIE). Runs BEFORE the daifset window, as a C call must. */
+    bl      el0_return_die_check
+
+    /* #713: mask everything through the eret. KERNEL_EXIT installs elr/spsr
+     * and erets in one masked instant, so no IRQ can overwrite ELR_EL1 between
+     * them. Belt-and-braces — we arrive masked — but stated locally so the
+     * property does not depend on a caller's discipline. */
+    msr     daifset,   #0xf
+
+    b       .Lexception_return
+.size thread_fork_trampoline, . - thread_fork_trampoline

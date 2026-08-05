@@ -77,6 +77,7 @@ void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void);
 void test_sys_spawn_full_argv_validate_req_golden(void);
 void test_sys_spawn_full_argv_validate_req_rejects_pad_envp(void);
 void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void);
+void test_sys_spawn_full_argv_validate_req_pheno_flags(void);
 void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void);
 void test_sys_spawn_full_argv_rejects_non_console_attached_perm_flags(void);
 
@@ -270,6 +271,28 @@ void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void) {
     };
     TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), -1,
         "perm_flags with bits outside SPAWN_PERM_ALL rejected");
+}
+
+// VIVARIUM V-1b: pheno_flags occupies the slot the old must-be-0 `_pad_allow`
+// held, so the two halves of that slot's contract both need pinning -- a zeroed
+// struct (every pre-V-1b caller) must still pass, and an unknown bit must still
+// be refused so a future flag cannot silently land on this kernel.
+void test_sys_spawn_full_argv_validate_req_pheno_flags(void) {
+    struct sys_spawn_args req = {
+        .name_va       = 0x1000,
+        .name_len      = 5,
+        .pheno_flags   = SPAWN_PHENO_LINUX,
+    };
+    TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), 0,
+        "pheno_flags = SPAWN_PHENO_LINUX accepted (the declaration is ungated)");
+
+    req.pheno_flags = 0;
+    TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), 0,
+        "pheno_flags = 0 accepted -- a zero-filled pre-V-1b req still means inherit");
+
+    req.pheno_flags = SPAWN_PHENO_FLAGS_ALL | (1u << 9);   // unknown bit
+    TEST_EXPECT_EQ(sys_spawn_full_argv_validate_req(&req), -1,
+        "pheno_flags with bits outside SPAWN_PHENO_FLAGS_ALL rejected");
 }
 
 void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void) {

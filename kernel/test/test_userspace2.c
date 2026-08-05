@@ -107,9 +107,9 @@ static void exec_thunk(void *arg) {
         uart_puts("] exec_thunk: pid=");
         uart_putdec((u64)p->pid);
         uart_puts(" context_id=");
-        uart_puthex64((u64)p->context_id);
+        uart_puthex64((u64)p->as->context_id);
         uart_puts(" pgtable_root=");
-        uart_puthex64((u64)p->pgtable_root);
+        uart_puthex64((u64)p->as->pgtable_root);
         uart_puts(" cpu=");
         uart_puthex64(mpidr & 0xFFFF);
         uart_puts("\n");
@@ -138,7 +138,7 @@ static void exec_thunk(void *arg) {
 
     // Read L0[0] via the direct map (pgtable_root PA → KVA).
     extern void *pa_to_kva(u64);
-    u64 *l0 = (u64 *)pa_to_kva(p->pgtable_root);
+    u64 *l0 = (u64 *)pa_to_kva(p->as->pgtable_root);
     uart_puts("    [iteration ");
     uart_putdec((u64)ea->iteration);
     uart_puts("] L0[0]=");

@@ -1336,6 +1336,11 @@ enum {
     // single-component fast path until its callers migrate).
     //   x0 = start_fd : a KOBJ_SPOOR handle (RIGHT_READ) OR
     //                   SYS_WALK_OPEN_FROM_ROOT ((u64)-1) for the Territory root.
+    //                   With the sentinel, a RELATIVE path is first joined
+    //                   against the LS-4 cwd (`territory_join_cwd`) -- i.e.
+    //                   the sentinel is POSIX AT_FDCWD, not "root" alone. NOTE
+    //                   the asymmetry with SYS_WALK_CREATE, whose identically-
+    //                   named sentinel does NOT join and always means the root.
     //   x1 = path_va  : user-VA of the path bytes (NUL-free; '/'-separated).
     //   x2 = path_len : 1 .. SYS_OPEN_PATH_MAX.
     //   x3 = omode    : OREAD/OWRITE/ORDWR/OEXEC (+ OTRUNC); SYS_WALK_OPEN_OPATH
@@ -1604,7 +1609,7 @@ enum {
     // docs/POUNCE-DESIGN.md section 7)
     //   Path-stat in ONE syscall: resolve `path` through the caller's
     //   Territory (absolute from root_spoor; relative joined with the LS-4
-    //   cwd, exactly like SYS_OPEN's FROM_ROOT arm) and fill the 80-byte
+    //   cwd, exactly like SYS_OPEN's FROM_ROOT arm) and fill the 88-byte
     //   struct t_stat at stat_va with the LEAF's metadata. The X-search is
     //   identical to the O_PATH walk-open + SYS_FSTAT + close emulation it
     //   replaces (POSIX stat authority = the path X-search only; the leaf's
@@ -1900,6 +1905,130 @@ enum {
     //   Errors: -EINVAL (range empty, wraps, or is not contained in a single
     //   live code-region alias of this Proc).
     SYS_ICACHE_SYNC = 103,  // arg: vaddr (x0), length (x1)
+
+    // SYS_EXECVE(path_va, path_len, argv_data_va, argv_data_len, argc)
+    //   -> DOES NOT RETURN on success; -errno on failure (LINEAGE L-2,
+    //   docs/LINEAGE.md section 5.2, invariant I-44).
+    //
+    // Replace the calling Proc's program image in place. This is the first
+    // Thylacine syscall that changes a LIVE Proc's address space -- every other
+    // path (the whole SYS_SPAWN_* family) creates a fresh child and loads into
+    // its empty one.
+    //
+    //   x0 = path_va        user-VA of the program path (NOT NUL-terminated;
+    //                       path_len gives the length). Resolved through `stalk`
+    //                       in the CALLER's Territory with OEXEC, exactly as
+    //                       SYS_SPAWN does -- so I-28 containment and the
+    //                       per-component X-search apply unchanged, and a
+    //                       confined Proc can exec only what its namespace names.
+    //   x1 = path_len       1..SYS_OPEN_PATH_MAX
+    //   x2 = argv_data_va   user-VA of `argc` concatenated NUL-terminated
+    //                       strings (the SYS_SPAWN_FULL_ARGV packing). 0 iff
+    //                       argv_data_len == 0.
+    //   x3 = argv_data_len  bytes including the NULs; <= SYS_SPAWN_ARGV_DATA_MAX.
+    //                       The last byte MUST be NUL.
+    //   x4 = argc           number of strings; <= SYS_SPAWN_ARGV_MAX. Must be 0
+    //                       iff argv_data_len is 0.
+    //
+    // On SUCCESS there is no return value, because there is no caller left to
+    // return to: the trapframe's PC and SP are rewritten to the new image's
+    // entry and initial stack and every GPR is zeroed, so the syscall's own eret
+    // starts the new program. envp is NOT passed -- the environment is the per-
+    // Proc /env device (ARCH section 9.7), which survives exec on its own.
+    //
+    // On FAILURE the caller's address space is COMPLETELY untouched and the
+    // error is a real -errno:
+    //   -T_E_NOENT / -T_E_ACCES / -T_E_NOTDIR ...  the path did not resolve
+    //   -T_E_NOEXEC   resolved, but not a loadable static ELF for this machine
+    //   -T_E_NOMEM    out of memory building the new image
+    //   -T_E_FAULT    a user pointer was unreadable
+    //   -T_E_INVAL    an argument was out of bounds
+    //   -T_E_AGAIN    the Proc has more than one live thread (see below)
+    //
+    // v1.0 LIMIT -- multi-threaded callers are REFUSED with -T_E_AGAIN rather
+    // than half-served. POSIX says exec terminates every thread but the caller;
+    // doing that needs a "terminate THESE threads" primitive, and the only one
+    // the tree has (proc_group_terminate) is Proc-wide and set-once-never-cleared
+    // by design (I-24), so exempting the execer from it would permanently
+    // break a LATER kill of the same Proc. The real primitive is its own chunk
+    // on the death lineage (LINEAGE.md section 7, L-2b). Nothing in the arc is
+    // blocked by this: a vfork child, a fork child and a shell are all
+    // single-threaded when they exec.
+    SYS_EXECVE = 104,
+
+    // SYS_RFORK(flags, child_sp, child_tls)
+    //   -> child pid to the PARENT, 0 to the CHILD, -errno on failure
+    //   (LINEAGE L-3b, docs/LINEAGE.md section 5.4, invariant I-44).
+    //
+    // The first Thylacine syscall that RETURNS TWICE. Both Procs resume at the
+    // instruction after this `svc`, on the same saved frame, and x0 is the only
+    // thing that distinguishes them -- which is why the child cannot be handed a
+    // return value the normal way and why the dispatch treats this like
+    // SYS_EXECVE rather than an ordinary handler.
+    //
+    //   x0 = flags      RFPROC (fork) or RFPROC|RFMEM (vfork). See below.
+    //   x1 = child_sp   the child's initial SP_EL0; 0 means INHERIT the caller's.
+    //                   Under RFMEM it is MANDATORY and may not equal the
+    //                   caller's own: two Procs in one address space sharing a
+    //                   stack pointer corrupt each other's frames on the first
+    //                   push. Under RFPROC alone 0 is the NORMAL value and what
+    //                   fork() means -- the child runs on its own COW copy of the
+    //                   parent's stack, at the same VA. Any nonzero value must be
+    //                   16-aligned and below UACCESS_USER_VA_TOP. Not validated
+    //                   for MAPPEDNESS (the child faults at EL0 if it is wrong --
+    //                   the SYS_THREAD_SPAWN contract) nor for OVERLAP with the
+    //                   parent's live stack, which is the caller's contract
+    //                   exactly as it is for a pthread stack.
+    //   x2 = child_tls  the child's TPIDR_EL0; 0 means INHERIT the caller's.
+    //                   Inheriting is fork semantics and what a vfork child
+    //                   needs -- it runs the parent's C, thread-locals and all,
+    //                   until it execs.
+    //
+    // The child inherits identity, capabilities (minus CAP_ELEVATION_ONLY),
+    // phenotype, hardware allowance, environment, session + process group and a
+    // CLONE of the Territory -- everything an rfork child has always inherited,
+    // because both shapes run one body.
+    //
+    // The child's HANDLE TABLE is a COPY of the caller's, at the SAME slot
+    // indices -- CLONE_VM without CLONE_FILES, which is both posix_spawn's shape
+    // and POSIX fork's (LINEAGE L-3c-1). Descriptors a child may not alias --
+    // hardware per I-5, a /srv connection Spoor, a Loom ring -- are SKIPPED,
+    // leaving a HOLE at that index rather than refusing the fork;
+    // handle_table_copy_into's header carries that reasoning.
+    //
+    // Note this inheritance is the FORK shape's alone. A kernel-entry rfork
+    // child (every SYS_SPAWN_*) still gets a fresh empty table, because spawn
+    // endows its fds explicitly via fd_list and inheriting on top of that would
+    // hand the child the parent's whole table.
+    //
+    // (Before L-3c-1 this comment called the then-empty table "exactly
+    // posix_spawn's shape". It was not: CLONE_VM without CLONE_FILES gives a
+    // COPIED table, which is why posix_spawn's file_actions do not disturb the
+    // parent. Empty and copied are different shapes.)
+    //
+    // THE TWO SHAPES (LINEAGE L-5 lifted the RFPROC-alone refusal this paragraph
+    // used to record):
+    //
+    //   RFPROC|RFMEM  vfork. The child SHARES the caller's address space, so the
+    //                 caller SUSPENDS until the child execs or dies -- otherwise
+    //                 the child would be running on stack the parent has since
+    //                 returned from. child_sp is mandatory precisely because the
+    //                 stack is shared.
+    //   RFPROC        fork. The child gets a COPY-ON-WRITE clone of the caller's
+    //                 address space, and both Procs run. Writable anonymous pages
+    //                 are shared read-only until either side writes, at which
+    //                 point the writer takes a private copy; read-only file-backed
+    //                 text is shared outright and never copied at all.
+    //
+    // Every other Plan 9 flag stays reserved: each shares a different per-Proc
+    // structure and each should arrive with its own reasoning.
+    //
+    //   -T_E_INVAL   flags neither RFPROC nor RFPROC|RFMEM; child_sp misaligned or
+    //                out of the user range; or, under RFMEM only, child_sp zero or
+    //                equal to the caller's own SP
+    //   -T_E_AGAIN   the child could not be created (the I-32 child cap, a
+    //                narrowed hardware allowance, or OOM)
+    SYS_RFORK = 105,
 };
 
 // SYS_JIT_CREATE out-parameter: the two aliases of one code region.
@@ -2111,6 +2240,30 @@ _Static_assert(__builtin_offsetof(struct t_pci_info, virtio_device_id) == 204,
 // perm/identity-shaped spawn-time grant, never an rfork-propagated cap bit.
 #define SPAWN_ALLOWANCE_SET          (1u << 0)
 #define SPAWN_ALLOWANCE_FLAGS_ALL    (SPAWN_ALLOWANCE_SET)
+
+// VIVARIUM V-1b (docs/VIVARIUM.md section 12.1): sys_spawn_args.pheno_flags
+// bits. SPAWN_PHENO_LINUX stamps the child Proc PHENO_LINUX in the spawn thunk
+// (before exec / before EL0), so every syscall the child ever issues is decoded
+// through the Linux translation table (kernel/vivarium.c). Descendants inherit
+// the phenotype via rfork (proc.c), which is section 12.1 rule 2: within a
+// declared-Linux vivarium every exec is PHENO_LINUX.
+//
+// DELIBERATELY UNGATED -- and that is I-43 doing the work, not an oversight:
+// a phenotype confers ABI SHAPE, NEVER AUTHORITY. Every translated call lands
+// on the same sys_*_for_proc body, behind the same capability / namespace /
+// permission / resource gates, that a native caller reaches. A parent that
+// mis-declares its child gains nothing it could not get by spawning a binary
+// of its own authorship natively -- the mis-branded child merely decodes its
+// own numbers wrong and breaks itself. Contrast every SPAWN_PERM_* bit, which
+// DOES confer a role and is therefore gate-checked.
+//
+// Only SYS_SPAWN_FULL_ARGV carries the declaration (the struct has the field;
+// the register-argument spawn variants cannot declare and always spawn native
+// -- section 12.1 rule 3). The v1.0 producer is `viv`, which sets the bit on a
+// container's ENTRYPOINT spawn when the bundle manifest's annotation
+// `org.thylacine.phenotype` says "linux".
+#define SPAWN_PHENO_LINUX            (1u << 0)
+#define SPAWN_PHENO_FLAGS_ALL        (SPAWN_PHENO_LINUX)
 
 // SYS_SPAWN_FULL_ARGV hardware-allowance descriptor (Menagerie build-arc step
 // 5). The warden fills this in user memory and points sys_spawn_args.
@@ -2385,11 +2538,14 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 #define T_S_IFREG   0100000u
 #define T_S_IFDIR   0040000u
 #define T_S_IFCHR   0020000u
-// #96: pipes. POSIX requires fstat(2) on a pipe fd to succeed and report
-// S_IFIFO; before CL-5 devpipe had no .stat_native at all, so fstat on a
-// pipe returned -1 and any program that treats that as fatal died. The
-// pouch boundary-line passes t_stat.mode straight through to st_mode, so
-// this value must stay POSIX S_IFIFO (0010000) for S_ISFIFO to work.
+// main#96 / aux#148: pipes. POSIX requires fstat(2) on a pipe fd to succeed
+// and report S_IFIFO; before this, devpipe had no .stat_native at all, so
+// fstat on a pipe returned -1 and any program that treats that as fatal died.
+// Both branches hit it independently, through different consumers -- clang's
+// FixupStandardFileDescriptors, musl's stdio (which chooses its buffering mode
+// from exactly this), and viv's endow-my-container's-stdio check. The pouch
+// boundary-line passes t_stat.mode straight through to st_mode, so this value
+// must stay POSIX S_IFIFO (0010000) for S_ISFIFO to work.
 #define T_S_IFIFO   0010000u
 
 // SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
@@ -2659,9 +2815,9 @@ struct sys_spawn_args {
     u64 allowance_va;    // user-VA of a struct t_allowance_desc (0 unless SET)
     u32 allowance_flags; // SPAWN_ALLOWANCE_* bits; outside SPAWN_ALLOWANCE_FLAGS_ALL → -1
     // CL-5 (Clade F4): the child's anon page budget, in 4-KiB pages. Claims the
-    // former _pad_allow forward-compat slot, so the struct does NOT grow and
-    // every existing caller -- all of which zero-fill -- keeps the historical
-    // behaviour by construction: 0 means INHERIT the spawner's budget.
+    // former _pad_allow forward-compat slot; 0 means INHERIT the spawner's
+    // budget, which is what every pre-CL-5 caller zero-fills, so the historical
+    // behaviour is preserved by construction.
     //
     // Non-zero requests a specific budget. <= the spawner's own is always
     // allowed (monotonic reduction, no authority). ABOVE it requires
@@ -2670,14 +2826,43 @@ struct sys_spawn_args {
     // budget the caller did not ask for and hide the misconfiguration).
     // Resolved by proc_spawn_budget_resolve; a refusal fails the spawn with -1.
     u32 page_budget;
+
+    // VIVARIUM V-1b: the phenotype declaration (section 12.1 rule 1). 0 --
+    // what every pre-V-1b caller zero-fills -- means "inherit", byte-identical
+    // to the old must-be-0 behavior. SPAWN_PHENO_LINUX stamps the child
+    // PHENO_LINUX before EL0; ungated (I-43: shape, never authority). Unknown
+    // bits are rejected (-1), the _pad_envp rationale.
+    //
+    // THE MERGE GREW THE STRUCT FOR THIS FIELD (96 -> 104), because CL-5 and
+    // V-1b independently claimed the SAME `_pad_allow` slot at offset 92 --
+    // one scarce forward-compat slot, two branches, neither census caught it.
+    // page_budget keeps 92 (it is the merge target's); pheno_flags took the
+    // fresh 96. Growth is the struct's documented idiom (56 -> 80 -> 96 -> 104),
+    // NOT an exception to it. Every mirror must grow in lockstep -- see the
+    // size assert below for why a per-mirror size assert cannot catch a miss.
+    u32 pheno_flags;     // SPAWN_PHENO_* bits; outside SPAWN_PHENO_FLAGS_ALL -> -1
+
+    // The next forward-compat slot, replacing the one the merge consumed. Same
+    // contract as _pad_envp and the former _pad_allow: MUST be 0 at v1.0, and
+    // the handler poison-checks it, so a future kernel can tell an old caller
+    // from a new one. Also restores 8-alignment of the struct.
+    u32 _pad_spawn2;     // must be 0 at v1.0 (forward-compat slot)
 };
 
-_Static_assert(sizeof(struct sys_spawn_args) == 96,
+_Static_assert(sizeof(struct sys_spawn_args) == 104,
                "struct sys_spawn_args is a SYS_SPAWN_FULL_ARGV ABI type "
-               "— pinned at 96 bytes (A-1a appended the identity block at "
+               "— pinned at 104 bytes (A-1a appended the identity block at "
                "56..80; the Menagerie step-5 allowance block appended at "
-               "80..96: allowance_va 8 + allowance_flags 4 + _pad_allow 4); "
-               "no implicit padding");
+               "80..96: allowance_va 8 + allowance_flags 4 + page_budget 4; "
+               "the aux-2 merge appended 96..104: pheno_flags 4 + _pad_spawn2 "
+               "4, because CL-5 and VIVARIUM V-1b had independently claimed "
+               "the SAME _pad_allow slot at 92); no implicit padding.\n"
+               "THIS ASSERT CANNOT CATCH A STALE MIRROR. It verifies the "
+               "KERNEL's own layout only; libt / libthyla-rs / the pouch "
+               "0026 patch / the go fork each carry their own copy and their "
+               "own size assert, and a mirror left at 96 passes ITS assert "
+               "while overflowing at runtime (the #100 lesson, paid for once "
+               "already). Growing this struct means grepping every mirror.");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, name_va) == 0,
                "sys_spawn_args.name_va at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, argv_data_va) == 8,
@@ -2714,8 +2899,17 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, allowance_flags) == 88,
                "sys_spawn_args.allowance_flags at ABI offset 88");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, page_budget) == 92,
                "CL-5 sys_spawn_args.page_budget REUSES the former _pad_allow "
-               "slot at ABI offset 92 -- the struct stays 96 bytes and every "
-               "zero-filling caller keeps the pre-CL-5 behaviour (0 == inherit).");
+               "slot at ABI offset 92; every zero-filling caller keeps the "
+               "pre-CL-5 behaviour (0 == inherit).");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, pheno_flags) == 96,
+               "VIVARIUM V-1b sys_spawn_args.pheno_flags at ABI offset 96. It "
+               "was authored at 92 -- the same _pad_allow slot CL-5 took -- and "
+               "the aux-2 merge moved it here, growing the struct to 104. 0 == "
+               "inherit == the pre-V-1b must-be-0 behavior, so zero-filling "
+               "callers are unaffected by the move.");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_spawn2) == 100,
+               "sys_spawn_args._pad_spawn2 at ABI offset 100 -- the forward-"
+               "compat slot replacing the one the merge consumed; must be 0.");
 
 struct exception_context;
 

@@ -23,7 +23,10 @@ set(KERNEL_SRCS
     canary.c
     fault_test.c
     proc.c
+    addrspace.c
+    cow.c
     perm.c
+    vivarium.c
     allowance.c
     thread.c
     sched.c
@@ -147,16 +150,20 @@ set(KERNEL_TEST_SRCS
     test/test_burrow.c
     test/test_image.c
     test/test_elf.c
+    test/test_vivarium.c
     test/test_asid.c
     test/test_directmap.c
     test/test_proc_pgtable.c
     test/test_fault_decode.c
     test/test_halls.c
     test/test_vma.c
+    test/test_addrspace.c
+    test/test_cow.c
     test/test_burrow_map_proc.c
     test/test_demand_page.c
     test/test_vdso.c
     test/test_exec.c
+    test/test_fork.c
     test/test_syscall.c
     test/test_dev.c
     test/test_trivial_devs.c

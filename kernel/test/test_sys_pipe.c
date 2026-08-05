@@ -28,10 +28,12 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>   // #148: struct t_stat + the T_S_IF* type bits
 #include <thylacine/types.h>
 
 // The boot ramfs Dev — the seekable known-content FS the #37 positioned-I/O
@@ -54,6 +56,7 @@ void test_sys_rw_write_then_read_round_trip(void);
 void test_sys_rw_rights_check(void);
 void test_sys_rw_zero_length_validates_fd(void);
 void test_sys_rw_read_after_close_returns_eof(void);
+void test_sys_rw_write_after_read_close_returns_epipe(void);
 void test_sys_prw_pipe_not_seekable(void);
 void test_sys_pread_devramfs_offset_and_cursor(void);
 void test_sys_prw_rights_and_walkonly(void);
@@ -159,15 +162,16 @@ void test_sys_rw_rights_check(void) {
     // check we'd need to construct a handle with reduced rights —
     // not possible at v1.0 from kernel test (no sys_handle_reduce
     // syscall). Instead: pass an INVALID fd (out-of-range) and
-    // verify both handlers return -1.
+    // verify both handlers reject it. #100 (ER-3): the code is now EBADF,
+    // which is the whole point -- an out-of-range fd is the canonical EBADF.
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
 
     u8 buf[4] = { 0 };
-    TEST_EXPECT_EQ(sys_write_for_proc(p, 9999, buf, 4), -1L,
-        "write on out-of-range fd returns -1");
-    TEST_EXPECT_EQ(sys_read_for_proc(p, 9999, buf, 4), -1L,
-        "read on out-of-range fd returns -1");
+    TEST_EXPECT_EQ(sys_write_for_proc(p, 9999, buf, 4), (s64)(-T_E_BADF),
+        "write on out-of-range fd returns -T_E_BADF");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, 9999, buf, 4), (s64)(-T_E_BADF),
+        "read on out-of-range fd returns -T_E_BADF");
 
     drop_test_proc(p);
 }
@@ -204,6 +208,44 @@ void test_sys_rw_read_after_close_returns_eof(void) {
     u8 got[8];
     s64 nread = sys_read_for_proc(p, fd_rd, got, sizeof(got));
     TEST_EXPECT_EQ(nread, 0L, "read returns 0 (EOF) after write end closed");
+
+    drop_test_proc(p);
+}
+
+// #100 (ER-3) -- the mirror of read_after_close_returns_eof, and the reason
+// this file needs <thylacine/errno.h>.
+//
+// It asserts the VALUE, not merely "an error": the whole defect was that the
+// value was -1. T_E_PIPE (32) has been defined and ABI-pinned since the errno
+// scripture landed, but until #100 NOTHING IN THE TREE EMITTED IT -- devpipe_write
+// returned a flat -1 beneath a comment claiming "musl's write wrapper translates
+// to errno", which no such wrapper does. -1 is what pouch's __syscall_ret treats
+// as the generic flat-error sentinel (-> EIO), and what a stock-musl vivarium
+// guest reads as errno=1 (-> EPERM). So `!= -1` here would have passed on the
+// broken code, and `< 0` would too: only the exact value discriminates.
+void test_sys_rw_write_after_read_close_returns_epipe(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
+
+    // Close the READ end -- devpipe_close sets read_eof. The write end stays
+    // open and valid, so the write reaches devpipe_write's read_eof arm rather
+    // than failing at any handle gate (which would answer EBADF and pass a
+    // weaker assertion for the wrong reason).
+    TEST_EXPECT_EQ(handle_close(p, fd_rd), 0, "close rd");
+
+    const u8 msg[4] = { 'a', 'b', 'c', 'd' };
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd_wr, msg, sizeof(msg)),
+        (s64)(-T_E_PIPE),
+        "write to a closed-read-end pipe returns -T_E_PIPE, not the flat -1");
+
+    // The value has to survive spoor_write_common's negative-return clamp
+    // intact -- that clamp maps anything below -4095 to -T_E_IO, so a Dev
+    // errno only reaches EL0 unchanged while it stays inside the window.
+    TEST_ASSERT(-T_E_PIPE > -4095,
+        "T_E_PIPE is inside the [-4095,-2] errno window the boundary decodes");
 
     drop_test_proc(p);
 }
@@ -409,14 +451,16 @@ void test_sys_pread_devramfs_offset_and_cursor(void) {
     TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 4, 2), 4L, "pread @2");
     TEST_ASSERT(buf[0] == 'l' && buf[1] == 'c' && buf[2] == 'o' && buf[3] == 'm',
         "pread @2 = 'lcom'");
-    // Past-EOF -> 0; negative offset -> -1; off+len past INT64_MAX -> -1.
+    // Past-EOF -> 0. #100 (ER-3): a negative offset and an off+len past
+    // INT64_MAX are both EINVAL -- a structurally invalid argument, which is
+    // exactly what POSIX names EINVAL for.
     TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 8, 4096), 0L,
         "pread past EOF returns 0");
-    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 8, -1), -1L,
-        "negative offset rejected");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 8, -1), (s64)(-T_E_INVAL),
+        "negative offset rejected with -T_E_INVAL");
     TEST_EXPECT_EQ(sys_pread_for_proc(p, fd, buf, 8,
-                                      (s64)0x7FFFFFFFFFFFFFFCLL), -1L,
-        "off+len past INT64_MAX rejected");
+                                      (s64)0x7FFFFFFFFFFFFFFCLL), (s64)(-T_E_INVAL),
+        "off+len past INT64_MAX rejected with -T_E_INVAL");
 
     // The cursor is untouched by everything above: a cursor read still
     // starts at byte 0, and a pread BETWEEN cursor reads does not move it.
@@ -442,16 +486,18 @@ void test_sys_prw_rights_and_walkonly(void) {
     hidx_t fdw = handle_alloc(p, KOBJ_SPOOR, RIGHT_WRITE, fw);
     TEST_ASSERT(fdw >= 0, "handle_alloc W-only");
     u8 buf[8];
-    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdw, buf, 8, 0), -1L,
-        "pread on a WRITE-only handle rejected");
+    // #100 (ER-3): EBADF -- POSIX answers EBADF (not EACCES) when a fd is not
+    // open for the requested direction.
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdw, buf, 8, 0), (s64)(-T_E_BADF),
+        "pread on a WRITE-only handle rejected with -T_E_BADF");
 
     // A READ-only handle cannot pwrite.
     struct Spoor *fr = prw_open_ramfs("welcome");
     TEST_ASSERT(fr != NULL, "open welcome (r)");
     hidx_t fdr = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, fr);
     TEST_ASSERT(fdr >= 0, "handle_alloc R-only");
-    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fdr, buf, 8, 0), -1L,
-        "pwrite on a READ-only handle rejected");
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fdr, buf, 8, 0), (s64)(-T_E_BADF),
+        "pwrite on a READ-only handle rejected with -T_E_BADF");
 
     // #81: a CWALKONLY (O_PATH) handle does no byte I/O -- positioned
     // included, len 0 included.
@@ -460,12 +506,66 @@ void test_sys_prw_rights_and_walkonly(void) {
     fo->flag |= CWALKONLY;
     hidx_t fdo = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, fo);
     TEST_ASSERT(fdo >= 0, "handle_alloc walkonly");
-    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdo, buf, 8, 0), -1L,
-        "pread on O_PATH rejected");
-    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fdo, buf, 8, 0), -1L,
-        "pwrite on O_PATH rejected");
-    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdo, NULL, 0, 0), -1L,
-        "zero-length pread on O_PATH rejected");
+    // #100 (ER-3): the CWALKONLY gate answers EBADF on the positioned arms too
+    // -- "welcome" is a devramfs file and so IS seekable, meaning these reach
+    // the O_PATH gate rather than the (still flat -1) non-seekable arm.
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdo, buf, 8, 0), (s64)(-T_E_BADF),
+        "pread on O_PATH rejected with -T_E_BADF");
+    TEST_EXPECT_EQ(sys_pwrite_for_proc(p, fdo, buf, 8, 0), (s64)(-T_E_BADF),
+        "pwrite on O_PATH rejected with -T_E_BADF");
+    TEST_EXPECT_EQ(sys_pread_for_proc(p, fdo, NULL, 0, 0), (s64)(-T_E_BADF),
+        "zero-length pread on O_PATH rejected with -T_E_BADF");
 
+    drop_test_proc(p);
+}
+
+// #148: fstat on a pipe end.
+//
+// POSIX requires fstat to work on ANY valid descriptor. A pipe end is a
+// KOBJ_SPOOR, so it clears sys_fstat's kind gate and then reaches its Dev's
+// .stat_native -- which devpipe simply did not have, so the call returned -1.
+//
+// This test asserts the property a CONSUMER depends on, not that a call
+// returned 0: the mode's file-type field must be S_IFIFO. `viv` probes exactly
+// this to decide whether to endow a container's stdio, and musl's stdio picks
+// its buffering mode from it; both need the TYPE, not merely success.
+//
+// Both ends are checked. They are separate Spoors over one ring, and a fix
+// that reached only one would leave the read half answering -1 -- which is the
+// half a container's fd 0 lands on.
+void test_sys_pipe_fstat_reports_fifo(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe_for_proc");
+
+    struct Handle h_rd, h_wr;
+    TEST_EXPECT_EQ(handle_get(p, fd_rd, &h_rd), 0, "handle_get rd");
+    TEST_EXPECT_EQ(handle_get(p, fd_wr, &h_wr), 0, "handle_get wr");
+
+    struct t_stat st;
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;
+    TEST_EXPECT_EQ(spoor_stat_native((struct Spoor *)h_rd.obj, &st), 0,
+        "fstat the READ end succeeds (pre-#148 this returned -1)");
+    TEST_EXPECT_EQ(st.mode & T_S_IFMT, T_S_IFIFO,
+        "read end reports S_IFIFO");
+    TEST_EXPECT_EQ(st.size, 0ull, "a FIFO has no length");
+    TEST_EXPECT_EQ(st.nlink, 1u, "a FIFO has one link");
+
+    for (size_t i = 0; i < sizeof(st); i++) ((u8 *)&st)[i] = 0xAA;
+    TEST_EXPECT_EQ(spoor_stat_native((struct Spoor *)h_wr.obj, &st), 0,
+        "fstat the WRITE end succeeds");
+    TEST_EXPECT_EQ(st.mode & T_S_IFMT, T_S_IFIFO,
+        "write end reports S_IFIFO");
+
+    // A pipe is NOT a character device, and not a regular file. Asserting the
+    // type is exactly S_IFIFO would pass if the field were left zero, so pin
+    // the two neighbours a wrong constant would most plausibly land on.
+    TEST_ASSERT((st.mode & T_S_IFMT) != T_S_IFCHR, "not a chardev");
+    TEST_ASSERT((st.mode & T_S_IFMT) != T_S_IFREG, "not a regular file");
+
+    handle_put(&h_rd);
+    handle_put(&h_wr);
     drop_test_proc(p);
 }

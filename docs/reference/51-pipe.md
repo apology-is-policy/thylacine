@@ -17,7 +17,7 @@ A pipe is the simplest IPC primitive: one process writes bytes, another reads th
 ## Semantics (blocking; P5-pipe-blocking)
 
 - **read** drains bytes from the buffer (1..n returned) when data is available; **blocks** (sleeps on `read_rendez`) when empty AND write end open; **returns 0 (EOF)** when empty AND write end closed.
-- **write** appends bytes (1..n returned, may be < n if buffer fills mid-write) when space is available; **blocks** (sleeps on `write_rendez`) when full AND read end open; **returns -1 (EPIPE)** when read end closed.
+- **write** appends bytes (1..n returned, may be < n if buffer fills mid-write) when space is available; **blocks** (sleeps on `write_rendez`) when full AND read end open; **returns `-T_E_PIPE`** when read end closed (#100 -- it returned a flat `-1` until then, which made EPIPE unobtainable through both boundaries; see below).
 - read on the **write** end → `-1` (wrong end).
 - write on the **read** end → `-1` (wrong end).
 
@@ -83,7 +83,7 @@ Standard mod-arithmetic two-segment copy. `ring_write` copies up to `PIPE_BUF_SI
 `devpipe` is registered in the bestiary by `pipe_init` (called from `kernel/main.c` after `dev9p_init`).
 
 - `read` is a blocking loop: take `r->lock`; if `count > 0` → drain (via `ring_read`) → drop lock → `wakeup(write_rendez)` → return bytes drained. If `write_eof` + empty → drop lock → return 0 (EOF). Else → drop lock → `sleep(read_rendez, cond_can_read, r)`; on wake, loop.
-- `write` is symmetric: take lock; if `read_eof` → return -1 (EPIPE). If space → append (via `ring_write`) → drop lock → `wakeup(read_rendez)` → return bytes written. Else → sleep on `write_rendez`.
+- `write` is symmetric: take lock; if `read_eof` → return `-T_E_PIPE`. If space → append (via `ring_write`) → drop lock → `wakeup(read_rendez)` → return bytes written. Else → sleep on `write_rendez`.
 - `close` sets the appropriate EOF flag (`read_eof` or `write_eof`) under `r->lock`, drops the lock, **calls `wakeup` on the OTHER side's rendez** (the buggy variant skips this — caught by `BUGGY_CLOSE_*_NO_WAKE_*` spec configs). Then drops the ring's per-endpoint refcount; ring freed at 0; endpoint struct always freed.
 - Other slots: stubs (attach returns NULL — Plan 9's `/srv` posting model isn't wired at v1.0; the Phase 5+ syscall surface lands it).
 
@@ -151,7 +151,7 @@ The clean cfg models the impl discipline; each buggy cfg captures the bug class 
 |---|---|
 | `pipe.smoke` | Create pair; write payload; read it back; FIFO order. |
 | `pipe.read_on_empty_returns_zero` | (Repurposed for blocking semantics:) close write end FIRST, then read on empty → 0 (EOF). |
-| `pipe.write_to_full_returns_zero` | (Repurposed for blocking semantics:) close read end FIRST, then write → -1 (EPIPE). |
+| `pipe.write_to_full_returns_zero` | (Repurposed for blocking semantics:) close read end FIRST, then write → `-T_E_PIPE`. |
 | `pipe.write_short_when_partially_full` | Buffer has K free; write N>K → returns K. |
 | `pipe.wraparound` | Write 3000 / read 2500 / write 3000 / read 3500 → all bytes in order across the wrap. |
 | `pipe.read_on_write_end_rejected` | Write end's `dev->read` → -1. |
@@ -169,7 +169,7 @@ Each test spawns a consumer thread that performs a blocking op; the boot thread 
 | `pipe_blocking.write_wakes_sleeping_reader` | Consumer reads on empty → sleeps. Boot writes → reader wakes + drains. |
 | `pipe_blocking.read_wakes_sleeping_writer` | Boot fills buffer. Consumer writes 1 more → sleeps. Boot drains → writer wakes + appends. |
 | `pipe_blocking.close_write_end_wakes_reader_with_eof` | Consumer reads on empty → sleeps. Boot closes write end → reader wakes + returns 0 (EOF). |
-| `pipe_blocking.close_read_end_wakes_writer_with_epipe` | Boot fills buffer. Consumer writes → sleeps. Boot closes read end → writer wakes + returns -1 (EPIPE). |
+| `pipe_blocking.close_read_end_wakes_writer_with_epipe` | Boot fills buffer. Consumer writes → sleeps. Boot closes read end → writer wakes + returns `-T_E_PIPE` (the blocked-writer arm, so it proves the code survives the wake path). |
 
 ---
 
@@ -247,7 +247,24 @@ storm's parallel jobs died silently. See `docs/LLVM-DESIGN.md` §7.2.
 
 ### Blocking semantics — read returning 0 means EOF
 
-`read` returning 0 unambiguously means "write end closed AND buffer drained" (EOF). Empty buffer with write end still open → reader sleeps. Symmetric for write: -1 means EPIPE (read end closed). Both signals are POSIX-shaped.
+`read` returning 0 unambiguously means "write end closed AND buffer drained" (EOF). Empty buffer with write end still open → reader sleeps. Symmetric for write: `-T_E_PIPE` means the read end closed. Both signals are
+POSIX-shaped.
+
+**#100 (ER-3).** Until #100 that write returned a flat `-1`, and `T_E_PIPE` --
+defined and ABI-pinned in `errno.h` since the errno scripture landed -- had **no
+emitter anywhere in the tree**. `-1` is what pouch's `__syscall_ret` treats as
+the generic flat-error sentinel (so a pouch program saw `EIO`) and what stock
+musl reads as `errno = 1` (so a VIVARIUM guest saw `EPERM`). A comment here
+asserted "the -1 return is the load-bearing EPIPE signal that musl's write
+wrapper translates to errno"; no such wrapper exists -- pouch's
+`src/unistd/write.c` is a plain tag-dispatch shim to `syscall_cp`. So the one
+errno POSIX makes load-bearing for a closed pipe was unobtainable through both
+boundaries, tree-wide, while four separate comments said otherwise.
+
+The wrong-end and torn-endpoint rejects in the same two functions likewise
+became `-T_E_BADF` / `-T_E_INVAL`. `!p` (a Spoor with a NULL aux) stays a flat
+`-1` per the ERRORS.md preamble-guard rule: an internal invariant violation, not
+a caller error, unreachable from EL0.
 
 ### Single-waiter discipline
 

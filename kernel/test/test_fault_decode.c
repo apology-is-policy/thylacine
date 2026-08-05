@@ -9,7 +9,7 @@
 //   ESR[31:26] = EC (exception class).
 //   ESR[24:0]  = ISS (instruction-specific syndrome).
 //   ISS[5:0]   = DFSC/IFSC for data/instruction aborts.
-//   ISS[9]     = WnR (data aborts only).
+//   ISS[6]     = WnR (data aborts only).
 
 #include "test.h"
 
@@ -36,12 +36,22 @@ static inline u64 mk_esr(u32 ec, u32 iss) {
 #define EC_DATA_ABORT_SAME  0x25u
 
 // ISS bit positions.
-#define ISS_WNR_BIT   9
+// WnR is ISS bit 6 for a Data Abort (ARM ARM D17.2.37, ESR_EL1; bit 9 is EA).
+//
+// #137: this said 9, matching the kernel's own ESR_ISS_WNR_BIT, which also said
+// 9 -- so the test SET bit 9 and then asserted the decoder had READ bit 9. It
+// agreed with the code instead of with the hardware, and could not have failed
+// however wrong both were. That is the whole hazard of a mirrored constant: the
+// number here has to be an INDEPENDENT statement of the architecture, or the
+// test proves only self-consistency. Deliberately NOT #included from the kernel
+// header for exactly that reason -- sharing the constant would restore the
+// tautology.
+#define ISS_WNR_BIT   6
 
 // Test 1: kernel-mode data abort, translation fault at level 2, read.
 void test_fault_decode_kernel_data_translation_l2(void) {
     // ISS[5:0] = 0x06 (translation fault L2).
-    // ISS[9]   = 0 (read).
+    // ISS[6]   = 0 (read).
     u64 esr = mk_esr(EC_DATA_ABORT_SAME, 0x06);
     struct fault_info fi;
     fault_info_decode(esr, 0xDEADBEEFul, 0xCAFEBABEul, &fi);
@@ -63,7 +73,7 @@ void test_fault_decode_kernel_data_translation_l2(void) {
 // Test 2: kernel-mode data abort, permission fault at level 3, write.
 void test_fault_decode_kernel_data_permission_write(void) {
     // ISS[5:0] = 0x0F (permission fault L3).
-    // ISS[9]   = 1 (write).
+    // ISS[6]   = 1 (write).
     u64 esr = mk_esr(EC_DATA_ABORT_SAME, (1u << ISS_WNR_BIT) | 0x0F);
     struct fault_info fi;
     fault_info_decode(esr, 0x40080000ul, 0xFFFF000040080000ul, &fi);
@@ -94,7 +104,7 @@ void test_fault_decode_user_data_translation(void) {
 
 // Test 4: user-mode instruction abort (lower EL).
 void test_fault_decode_user_instruction_fetch(void) {
-    // Instruction aborts have no WnR; ISS[9] is RES0.
+    // Instruction aborts have no WnR; ISS[6] is RES0.
     u64 esr = mk_esr(EC_INST_ABORT_LOWER, 0x07);   // translation fault L3
     struct fault_info fi;
     fault_info_decode(esr, 0x300000ul, 0x300000ul, &fi);

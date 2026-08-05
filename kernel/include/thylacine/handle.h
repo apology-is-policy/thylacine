@@ -168,6 +168,22 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 // discipline (peer threads snapshot slots by-value). Tracked as #355.
 #define PROC_HANDLE_MAX 256
 
+// #151: close-on-exec lives in a BITMAP PARALLEL TO THE SLOT ARRAY, not in
+// struct Handle. Both halves of that are deliberate.
+//
+// PARALLEL, because POSIX close-on-exec is a property of the DESCRIPTOR, not of
+// the open file description behind it. `dup(fd)` yields a second descriptor onto
+// the same description with the flag CLEAR, and F_SETFD on either does not touch
+// the other. A bit stored in struct Handle would be shared by exactly the things
+// POSIX says must differ. Linux keeps `close_on_exec` as a bitmap beside `fd[]`
+// in struct fdtable for this reason, and the shape is not a coincidence.
+//
+// NOT IN struct Handle, also because that struct has no slack: 8 + 4 + 4 + 8 is
+// exactly the 24 its _Static_assert pins. A u32 there grows it to 32, taking the
+// table from 6152 to 8200 bytes -- across the 2-page boundary into 3, a 50%
+// per-Proc increase to carry one bit per slot. The bitmap costs 32 bytes total.
+#define HANDLE_CLOEXEC_WORDS ((PROC_HANDLE_MAX + 63) / 64)
+
 struct HandleTable {
     // #844: serializes all slot ops (alloc / close / get / dup) -- the Plan 9
     // Fgrp lock. Peer threads of a multi-threaded Proc share one HandleTable,
@@ -177,14 +193,22 @@ struct HandleTable {
     // handle_table_alloc inits it unlocked. The obj refcount (bumped under
     // this lock in handle_get/dup, dropped OUTSIDE it in handle_put/close)
     // carries the obj's lifetime past the lock release.
+    //
+    // The lock covers `cloexec` too: the flag is read and written by the same
+    // peer threads that race over the slots, so it takes the same protection.
     spin_lock_t   lock;
     u32           _pad_lock;
+    u64           cloexec[HANDLE_CLOEXEC_WORDS];
     struct Handle slots[PROC_HANDLE_MAX];
 };
 
-_Static_assert(sizeof(struct HandleTable) == 8 + 24 * PROC_HANDLE_MAX,
-               "HandleTable size pinned at 8 (lock + pad) + "
-               "PROC_HANDLE_MAX * sizeof(Handle)");
+_Static_assert(sizeof(struct HandleTable) ==
+                   8 + 8 * HANDLE_CLOEXEC_WORDS + 24 * PROC_HANDLE_MAX,
+               "HandleTable size pinned at 8 (lock + pad) + the cloexec bitmap "
+               "+ PROC_HANDLE_MAX * sizeof(Handle)");
+_Static_assert(HANDLE_CLOEXEC_WORDS * 64 >= PROC_HANDLE_MAX,
+               "the cloexec bitmap must cover every slot -- a short bitmap "
+               "would silently drop the flag on the high slots");
 
 // Handle index — signed; -1 indicates invalid / not-found / table-full.
 typedef int hidx_t;
@@ -229,6 +253,44 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
 
+// Swap what a LIVE handle denotes, in place, keeping the same slot index.
+// Returns 0 on success, -1 on any refusal (out-of-range h, empty slot, bad
+// args, or a kind outside the permitted pair). On success the outgoing object
+// is released exactly once; on any refusal nothing is touched and the caller
+// still owns the reference it passed in.
+//
+// WHY THIS EXISTS, AND WHY IT IS THIS NARROW (VIVARIUM V-5, docs/VIVARIUM.md
+// section 5.5.1). A Linux `connect()` must turn the guest's socket fd from the
+// /net connection's `ctl` file into its `data` file, and the guest is holding a
+// SPECIFIC fd number it will then read()/write(). handle_dup cannot serve --
+// it allocates a NEW slot. close-then-alloc cannot serve either: the freed
+// index is not reserved, so a peer thread's fd-creating syscall can take it.
+//
+// KOBJ_SPOOR -> KOBJ_SPOOR ONLY. This is deliberately narrower than "not a
+// hardware kind", because the primitive has exactly one caller and a narrow
+// gate is a cheap audit. Widening it means re-deriving these, none of which
+// the current restriction has to argue:
+//
+//   * I-5 (hardware handles are non-transferable): with hw kinds excluded on
+//     BOTH sides, no path here can make a KObj_MMIO/IRQ/DMA/PCI handle appear
+//     at, or vanish from, an arbitrary fd. A widened version would have to.
+//   * I-6 (rights reduce monotonically): rights come from the CALLER, which
+//     derives them from the incoming object's open mode exactly as
+//     sys_open_handler does. They are NEVER inherited from the outgoing slot
+//     -- inheriting would let a READ-only ctl fd become a WRITE-capable data
+//     fd for free, which is a monotonicity break dressed as a convenience.
+//   * The #844 lock discipline: the slot swap happens under t->lock so a peer
+//     thread sees either the old object or the new one, never a torn slot;
+//     the outgoing release runs OUTSIDE the lock because it may sleep
+//     (spoor_clunk's Dev close hook).
+//
+// There is NO EL0 caller and there must not be one: this is reached only from
+// the phenotype's socket translators, which have already validated the guest's
+// arguments. Exposing it as a syscall would be a new ABI with none of the
+// above applied by whoever called it.
+int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                   rights_t rights, void *obj);
+
 // Look up a handle into a caller-owned snapshot, with a reference HELD on
 // the underlying kobj. Returns 0 on success (*out filled: kind / rights /
 // obj, magic == HANDLE_MAGIC, and the obj's refcount bumped so it stays alive
@@ -269,6 +331,130 @@ void handle_put(struct Handle *h);
 //
 // Maps to specs/handles.tla::HandleDup(p, h, new_rights).
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
+
+// LINEAGE L-3c: copy `src`'s handle table into `dst` -- the fd inheritance a
+// forked child gets and a spawned child does not. Called from rfork_internal
+// on the FORK shape only; `dst` must be a freshly-allocated, still-unpublished
+// Proc whose table is empty.
+//
+// SLOT INDICES ARE PRESERVED: the parent's fd N becomes the child's fd N. That
+// is POSIX, and it is why this cannot be a loop over handle_dup -- dup installs
+// into the first free slot, so a single skipped handle would renumber every fd
+// after it and the child's inherited stdout would land somewhere else entirely.
+//
+// A slot is copied only if `handle_slot_may_alias` admits it -- the SAME
+// predicate handle_dup uses, because both create a second handle naming one
+// object and so face the identical hazard. The consequence worth stating: a
+// hardware handle (I-5), a /srv connection Spoor, and a Loom ring are NOT
+// copied, and the child gets a HOLE at that index rather than the fork being
+// refused. That is deliberate. I-5 is a property of the handle -- "pinned to
+// the Proc that created it" -- not a property of forking, so the fork proceeds
+// and the child simply does not hold what it cannot hold. Refusing the whole
+// fork would instead punish a parent for holding a handle it never intended to
+// pass, and would make a driver unable to create a process at all. A child that
+// needs hardware authority gets it the way every other Proc does: the warden's
+// confer path (the I-34 allowance), never fd inheritance.
+//
+// The hole is observable (the child sees EBADF at that index, and its next
+// open lands there where Linux's would not), which is the honest report of an
+// authority the child was never eligible to hold.
+//
+// Rights are carried verbatim (I-6 is satisfied by non-increasing, and POSIX
+// fork gives the child the parent's access). Each copied slot takes its own
+// reference on the underlying object; the child's handle_table_free releases
+// them, so a failed rfork's proc_free rollback is already correct.
+//
+// Cannot fail: no allocation per slot, and the destination is known-empty and
+// the same size. Returns the number of slots copied (a diagnostic, and what
+// the regression tests assert on).
+int handle_table_copy_into(struct Proc *dst, struct Proc *src);
+
+// #151: dup with the parent's rights carried VERBATIM, installing at the lowest
+// free index >= min_idx, and with the new descriptor's close-on-exec flag set to
+// `cloexec`. This is POSIX dup / F_DUPFD / F_DUPFD_CLOEXEC; handle_dup above is
+// the rights-REDUCING form the capability surface uses, and the two are kept
+// separate rather than folded behind a sentinel because "0 rights" already means
+// RIGHT_NONE and would have to mean its opposite here.
+//
+// `min_idx` is why this exists at all and is not a convenience. A shell's
+// savefd() does F_DUPFD_CLOEXEC(fd, 10) precisely to move its bookkeeping fd out
+// of the low range where a user redirection could collide with it. Returning the
+// first free slot regardless would hand back fd 3 and break the guarantee the
+// call was made to obtain -- silently, and only under a redirection.
+//
+// Rights are read under the same lock hold as the install, so a peer thread's
+// close cannot land between reading the parent's rights and copying them.
+//
+// Returns the new index, or -1 on the same refusals handle_dup makes (empty
+// slot, non-transferable kind, devsrv Spoor, table full) plus an out-of-range
+// min_idx.
+hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec);
+
+// #157: dup `old` onto the SPECIFIC index `new_h`, closing whatever was there.
+// This is POSIX dup2 / Linux dup3, and it is a genuinely new combination rather
+// than a convenience over the three neighbours -- each of them fixes a different
+// one of the two axes (where the source comes from, whether the destination may
+// be occupied):
+//
+//   handle_dup_posix       source = a slot; destination = first free >= min;
+//                          destination must be FREE, and which index you get is
+//                          an OUTPUT.
+//   handle_replace         source = a caller-held object; destination = a fixed
+//                          index that must be LIVE; outgoing released.
+//   handle_table_copy_into source = a slot in ANOTHER table; destination = the
+//                          same fixed index, which must be FREE.
+//   handle_dup_to          source = a slot; destination = a fixed index, free
+//                          OR live; outgoing released if live.
+//
+// WHY NOT close-then-handle_dup_posix(min_idx=new_h). handle_replace's header
+// already carries this argument for `connect` and it applies here verbatim: the
+// freed index is not reserved, so a peer thread's fd-creating syscall can take
+// it between the two calls and the dup then lands somewhere else entirely --
+// silently, and only under concurrency. Doing it in one lock hold is also what
+// makes the outgoing release happen AFTER the new object is installed, so the
+// slot is never momentarily empty for anyone to allocate into.
+//
+// Rights are carried VERBATIM (POSIX: the new descriptor has the same access;
+// I-6 is satisfied by non-increasing, exactly as handle_table_copy_into's
+// carry). Close-on-exec is SET FROM `cloexec`, never inherited from `old` --
+// that is POSIX dup2 (the flag belongs to the descriptor, and this is a new
+// descriptor) and it is why dup3 has a flags argument at all.
+//
+// The SOURCE passes the same `handle_slot_may_alias` gate handle_dup uses,
+// because this creates a second handle naming one object and so faces the
+// identical hazard. The DESTINATION is deliberately UNGATED by kind: it is
+// being closed, and handle_close places no kind restriction on closing, so
+// refusing here would invent a rule that dup2-onto-fd-N is less permitted than
+// close(N)-then-dup. (handle_replace refuses a non-Spoor outgoing for a reason
+// that does not transfer: its swap is INTERNAL to connect() and invisible to
+// the guest, whereas a dup3 caller has explicitly named the fd it wants gone.)
+//
+// Returns `new_h` on success, -1 on: either index out of range, old == new_h
+// (refused rather than made a no-op -- the caller's own EINVAL should have
+// caught it, and a primitive that cannot corrupt beats one that happens not
+// to), an empty `old`, or a source the alias gate rejects.
+hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec);
+
+// #151: read / write a slot's close-on-exec flag. Returns 0 or 1 (get) and 0
+// (set) on success; -1 if h is out of range or names a free slot.
+//
+// A caller that wants an fd born with the flag set does alloc-then-set rather
+// than passing it through handle_alloc, which would mean touching ~100 call
+// sites for one bit. The window between the two is provably empty: only exec
+// consumes the flag, execve refuses unless it is the Proc's only live thread
+// (proc_exec_alone), and the caller IS a live thread mid-syscall -- so no exec
+// can run between the alloc and the set.
+int handle_set_cloexec(struct Proc *p, hidx_t h, bool on);
+int handle_get_cloexec(struct Proc *p, hidx_t h);
+
+// #151: close every handle whose close-on-exec flag is set. Returns the number
+// closed. Called from execve AFTER the commit point, for two reasons that pull
+// in the same direction: the closes may SLEEP (a Spoor's Dev close hook sends a
+// 9P Tclunk), so this cannot run under any lock; and a failed exec must leave
+// the process unchanged, so it must not run before the last thing that can fail.
+// Linux places do_close_on_exec() after its own point of no return for the
+// second reason.
+int handle_close_on_exec(struct Proc *p);
 
 // Type classifiers. Map to specs/handles.tla's TxKObjs / HwKObjs /
 // SrvKObjs partitions. kobj_kind_is_transferable returns true for

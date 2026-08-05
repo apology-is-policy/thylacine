@@ -470,6 +470,40 @@ Audit-trigger surface (`CLAUDE.md` + ARCH §25.4); binding design
 `mono_matches_timer` / `maps_ro_read` (the PTE points at the shared page) /
 `maps_ro_write_faults` (a write is rejected).
 
+### Reaching it from native userspace (V-4c-3 SA-4)
+
+The fast path is only taken by code that goes through `libthyla_rs::time`. A
+consumer that declares its own `t_timespec` mirror and calls
+`t_clock_gettime` directly gets a correct answer and **silently opts out of the
+vDSO** — and nothing at the call site shows it. The diorama did exactly that on
+`/proc/stat` and `/proc/uptime`, two files a monitoring tool reads in a loop,
+costing two syscalls and one syscall per render where the shared path costs
+zero. The cause was a real API gap (the crate's `TimeSpec` was private and
+`Instant` had no absolute accessor), so the author solved the visible problem
+and could not see the invisible one: the fast path lived behind the API they
+bypassed.
+
+The surface that closes it, all vDSO-first with the `SYS_CLOCK_GETTIME`
+fallback intact:
+
+| Accessor | Returns |
+|---|---|
+| `time::monotonic_ns()` | ns since boot |
+| `time::realtime_ns()` | ns since the Unix epoch |
+| `time::monotonic_realtime_ns()` | both, from **one** counter sample |
+| `Instant::since_boot()` | this Instant's absolute `Duration` |
+
+`monotonic_realtime_ns` exists because `realtime - monotonic` is wall time at
+boot (`/proc/stat`'s `btime`), and deriving it from two separately-taken samples
+lets a preemption between them leak in as error. On the vDSO path both values
+come from one `CNTVCT_EL0` read, so the difference is exactly the kernel's wall
+offset — strictly better than the two-syscall form it replaced. The syscall
+fallback cannot offer that (two calls are two samples) and is documented as
+such rather than papered over.
+
+There is one `t_timespec` mirror in the Rust tree again, `time.rs`'s private
+one. The bypass had made three.
+
 ---
 
 ## See also

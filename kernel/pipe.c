@@ -15,6 +15,7 @@
 // MakeReady ↔ poll_waiter_list_wake calls below.
 
 #include <thylacine/dev.h>
+#include <thylacine/errno.h>
 #include <thylacine/extinction.h>
 #include <thylacine/notes.h>
 #include <thylacine/pipe.h>
@@ -23,7 +24,7 @@
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
-#include <thylacine/syscall.h>   // #96: struct t_stat + T_S_IFIFO
+#include <thylacine/syscall.h>   // main#96 / aux#148: struct t_stat + T_S_IFIFO
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -39,7 +40,7 @@ struct pipe_ring {
     size_t                    count;          // bytes in buffer; 0..PIPE_BUF_SIZE
     size_t                    head;           // next write position; mod PIPE_BUF_SIZE
     size_t                    tail;           // next read position; mod PIPE_BUF_SIZE
-    bool                      read_eof;       // read end closed → writes return -1 (EPIPE)
+    bool                      read_eof;       // read end closed → writes return -T_E_PIPE
     bool                      write_eof;      // write end closed → reads return 0 (EOF)
     spin_lock_t               lock;           // protects count/head/tail/{read,write}_eof
     struct Rendez             read_rendez;    // single reader sleeps here on empty
@@ -191,6 +192,14 @@ static int devpipe_stat(struct Spoor *c, u8 *dp, int n) {
 // one pipe, one inode), so fstat can tell two distinct pipes apart -- a
 // same-inode-for-every-pipe report is the kind of latent wrong answer that
 // surfaces much later inside someone's file-identity comparison.
+//
+// The LINEAGE branch hit the same missing slot independently (aux#148) through
+// a different door, which is worth recording because it says the gap was not
+// clang-specific: `viv` decides whether to endow a container's stdio by
+// fstat'ing its own 0/1/2, and joey hands viv a PIPE to capture the container's
+// output -- so every fstat failed and an Alpine shell was spawned fd-less while
+// the gate reported "the shell never ran". Two unrelated consumers, one absent
+// vtable slot; assume a third exists.
 static int devpipe_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || c->dc != DEVPIPE_DC || !out) return -1;
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
@@ -306,10 +315,11 @@ static void devpipe_close(struct Spoor *c) {
 static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)off;
     struct pipe_endpoint *p = priv_of(c);
+    // #100 (ER-3): see the devpipe_write twin for why `!p` stays a flat -1.
     if (!p)                      return -1;
-    if (!p->is_read_end)         return -1;     // wrong end
-    if (n < 0 || !buf)           return -1;
-    if (!p->ring)                return -1;
+    if (!p->is_read_end)         return -T_E_BADF;   // wrong end
+    if (n < 0 || !buf)           return -T_E_INVAL;
+    if (!p->ring)                return -T_E_BADF;   // torn-down endpoint
     struct pipe_ring *r = p->ring;
 
     // Blocking read. Loop:
@@ -351,14 +361,18 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
 static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     (void)off;
     struct pipe_endpoint *p = priv_of(c);
+    // #100 (ER-3): the local rejects name their reason. `!p` stays a flat -1
+    // for the reason ERRORS.md gives the !t/!p preamble guards -- it is an
+    // internal invariant violation (a Spoor with a NULL aux), not a caller
+    // error, and is unreachable from EL0.
     if (!p)                      return -1;
-    if (p->is_read_end)          return -1;     // wrong end
-    if (n < 0 || !buf)           return -1;
-    if (!p->ring)                return -1;
+    if (p->is_read_end)          return -T_E_BADF;   // wrong end
+    if (n < 0 || !buf)           return -T_E_INVAL;
+    if (!p->ring)                return -T_E_BADF;   // torn-down endpoint
     struct pipe_ring *r = p->ring;
 
     // Blocking write. Loop:
-    //   - take lock; if readEof → drop lock + return -1 (EPIPE).
+    //   - take lock; if readEof → drop lock + return -T_E_PIPE.
     //   - if space → append + drop lock + wake reader + return.
     //   - else → drop lock + sleep on write_rendez until cond_can_write.
     //
@@ -373,16 +387,26 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
             // (defense-in-depth — write should only run on a userspace
             // path that always has a current Thread/Proc). notes_post_pipe
             // is synthetic=true so a queue-full Proc still observes "pipe
-            // happened" via coalesce. The note is informational; the -1
-            // return is the load-bearing EPIPE signal that musl's write
-            // wrapper translates to errno.
+            // happened" via coalesce.
+            //
+            // The note is informational; the RETURN is the load-bearing
+            // EPIPE signal. #100 (ER-3): it used to be a flat -1, under a
+            // comment asserting "musl's write wrapper translates to errno".
+            // No such wrapper exists -- pouch's src/unistd/write.c is a
+            // plain tag-dispatch shim to syscall_cp, so -1 reached
+            // __syscall_ret's flat-error sentinel and every write to a
+            // closed pipe reported EIO. A stock-musl vivarium guest, which
+            // has no -1 special case, read it as errno=1 = EPERM. So the
+            // one errno POSIX makes load-bearing here was unobtainable
+            // through BOTH boundaries, while T_E_PIPE sat defined and
+            // ABI-pinned in errno.h with no emitter anywhere in the tree.
             {
                 struct Thread *t = current_thread();
                 if (t && t->proc) {
                     notes_post_pipe(t->proc);
                 }
             }
-            return -1;      // EPIPE
+            return -T_E_PIPE;
         }
         if (r->count < PIPE_BUF_SIZE) {
             long put = ring_write(r, (const u8 *)buf, n);

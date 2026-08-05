@@ -310,6 +310,23 @@ void test_devsrv_open_connect_byte(void) {
     TEST_ASSERT(ch >= 0, "install the conn Spoor as a KOBJ_SPOOR handle");
     TEST_EXPECT_EQ(handle_dup(client, ch, RIGHT_READ), -1,
         "dup of a devsrv conn Spoor (dc='s') -> -1 (NoSrvSpoorDup)");
+
+    // LINEAGE L-3c: the SAME guard on the fork copy, because both create a
+    // second handle naming this one connection. This leg is why the guard is
+    // one shared predicate: a devsrv Spoor is the only case where the kind
+    // (KOBJ_SPOOR) is admissible and the OBJECT is not, so a copy written
+    // against kinds alone would pass every other test in the tree and inherit
+    // a /srv connection into a child -- blurring the kernel-stamped
+    // SO_PEERCRED origin the whole handles.tla SrvHandlesAtOrigin rests on.
+    struct Proc *forked = make_test_proc();
+    TEST_ASSERT(forked != NULL, "a stand-in forked child");
+    TEST_EXPECT_EQ(handle_table_copy_into(forked, client), 0,
+        "a devsrv conn Spoor does NOT cross a fork (dc='s'), even though "
+        "KOBJ_SPOOR is a transferable kind");
+    TEST_EXPECT_EQ(handle_table_count(forked->handles), 0,
+        "the child's table is empty -- the skip left no handle behind");
+    drop_test_proc(forked);
+
     handle_close(client, ch);          // releases cs (devsrv_close: not kernel-attached -> teardown + unref)
 
     // A connect against a TOMBSTONED service mints no service-ref (walk fails),

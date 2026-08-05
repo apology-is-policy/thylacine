@@ -347,6 +347,20 @@ static struct HandleTable *proc_handles_or_extinct(struct Proc *p) {
     return p->handles;
 }
 
+// #151: the close-on-exec bitmap accessors. Every one of them requires t->lock,
+// which is why they take the table rather than the Proc -- the callers below all
+// already hold it, and a variant that locked internally would invite a caller to
+// read the bit outside the same critical section as the slot it describes.
+static bool cloexec_get_locked(const struct HandleTable *t, hidx_t h) {
+    return (t->cloexec[(u32)h / 64] >> ((u32)h % 64)) & 1u;
+}
+
+static void cloexec_set_locked(struct HandleTable *t, hidx_t h, bool on) {
+    u64 bit = 1ull << ((u32)h % 64);
+    if (on) t->cloexec[(u32)h / 64] |=  bit;
+    else    t->cloexec[(u32)h / 64] &= ~bit;
+}
+
 // Validate kind + rights for an alloc/dup. Returns true if all checks
 // pass; false if the caller should reject with -1.
 static bool valid_alloc_args(enum kobj_kind kind, rights_t rights) {
@@ -361,14 +375,33 @@ static bool valid_alloc_args(enum kobj_kind kind, rights_t rights) {
 // touch the underlying-kobj refcount -- the caller accounts for it (the
 // burrow_create_anon-consumed-ref convention for alloc; the
 // handle_acquire_obj bump for dup).
+//
+// #151: `from` is the lowest index the scan may take (0 for every caller but
+// F_DUPFD). The close-on-exec bit of the chosen slot is ESTABLISHED here, never
+// inherited -- this is the single point every fd-creating path goes through, so
+// writing it here is what makes a REUSED index unable to carry the previous
+// occupant's flag. Writing it is also MANDATORY rather than defensive: it is how
+// handle_dup_posix delivers F_DUPFD_CLOEXEC's requested value.
+//
+// handle_close clears the bit too, and MEASUREMENT (the #151 revert probes)
+// showed the two OVERLAP COMPLETELY: removing either one alone leaves the whole
+// suite green, and only removing BOTH trips `handles.cloexec_lifecycle`. So the
+// no-inheritance property is doubly held, and no test can attribute it to one
+// site. That is worth stating plainly rather than implying both are load-bearing
+// -- the close-side clear is hygiene (it keeps "bit set => slot live" true, an
+// invariant nothing currently reads) and is the one that could be dropped; this
+// one cannot, because of the paragraph above.
 static hidx_t handle_install_locked(struct HandleTable *t, enum kobj_kind kind,
-                                    rights_t rights, void *obj) {
-    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+                                    rights_t rights, void *obj, hidx_t from,
+                                    bool cloexec) {
+    if (from < 0) from = 0;
+    for (int i = (int)from; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == 0) {
             t->slots[i].magic  = HANDLE_MAGIC;
             t->slots[i].kind   = kind;
             t->slots[i].rights = rights;
             t->slots[i].obj    = obj;
+            cloexec_set_locked(t, (hidx_t)i, cloexec);
             __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
             return (hidx_t)i;
         }
@@ -427,7 +460,7 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
     // get/close/dup. The g_handle_allocated bump inside handle_install_locked
     // is atomic (closes the F4 diagnostics race too).
     spin_lock(&t->lock);
-    hidx_t h = handle_install_locked(t, kind, rights, obj);
+    hidx_t h = handle_install_locked(t, kind, rights, obj, 0, /*cloexec=*/false);
     spin_unlock(&t->lock);
     return h;   // -1 if the table is full
 }
@@ -454,10 +487,74 @@ int handle_close(struct Proc *p, hidx_t h) {
     slot->kind   = KOBJ_INVALID;
     slot->rights = RIGHT_NONE;
     slot->obj    = NULL;
+    // #151: the flag dies with the descriptor. Leaving it set would make the
+    // NEXT fd to land on this index inherit a close-on-exec it never asked for
+    // -- the reused-identity class this tree keeps meeting (a reused inode
+    // serving a prior occupant's cached page, L1f F1). handle_install_locked
+    // clears it as well; see its note on why both.
+    cloexec_set_locked(t, h, false);
     __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
     spin_unlock(&t->lock);
 
     handle_release_obj(kind, obj);
+    return 0;
+}
+
+// VIVARIUM V-5 (docs/VIVARIUM.md section 5.5.1): swap a live slot's object in
+// place. The header carries the rationale + the invariant argument; this body
+// is close's capture-under-lock followed by an install into the SAME slot,
+// with the outgoing release outside the lock exactly as close does it.
+int handle_replace(struct Proc *p, hidx_t h, enum kobj_kind kind,
+                   rights_t rights, void *obj) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+
+    if (h < 0 || h >= PROC_HANDLE_MAX)      return -1;
+    if (!valid_alloc_args(kind, rights))    return -1;
+
+    // The narrow gate (I-5 / I-6, header). Checked BEFORE the lock and before
+    // anything is disturbed, so a refusal leaves the caller's reference intact
+    // and the table untouched. The outgoing kind is checked under the lock,
+    // where it can be read without racing a peer's close.
+    if (kind != KOBJ_SPOOR)                 return -1;
+
+    spin_lock(&t->lock);
+    struct Handle *slot = &t->slots[h];
+    if (slot->magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    if (slot->kind != KOBJ_SPOOR) {
+        // Refuse to replace anything but a Spoor. A hardware slot in
+        // particular must not be reachable here: quietly dropping a
+        // KObj_MMIO/IRQ/DMA/PCI handle out of a live fd is a lifetime event
+        // I-5 gives no path for, and this primitive is not the place to
+        // invent one.
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    enum kobj_kind old_kind = slot->kind;
+    void          *old_obj  = slot->obj;
+
+    // Overwrite in place. The index does not change, which is the entire
+    // point -- the guest is holding this number. Rights come from the caller
+    // (derived from the incoming object's open mode); the outgoing slot's
+    // rights are DISCARDED, never OR'd or inherited.
+    //
+    // #151: close-on-exec is deliberately NOT touched, and the reason is the
+    // same fact that motivates the whole flag living in a per-slot bitmap: it
+    // belongs to the DESCRIPTOR, and the descriptor is precisely what survives
+    // here. A socket opened SOCK_CLOEXEC and then connect()ed must still be
+    // close-on-exec afterwards; clearing it would silently revoke a guarantee
+    // the guest obtained before the swap it never asked to observe.
+    slot->kind   = kind;
+    slot->rights = rights;
+    slot->obj    = obj;
+    spin_unlock(&t->lock);
+
+    // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and after
+    // the new object is already installed, so the slot is never momentarily
+    // empty for a peer thread to allocate into.
+    handle_release_obj(old_kind, old_obj);
     return 0;
 }
 
@@ -504,9 +601,117 @@ void handle_put(struct Handle *h) {
     h->obj    = NULL;
 }
 
-hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
+// May a SECOND handle be made to name this slot's object? Both callers create
+// exactly that -- `handle_dup` a second slot in the SAME table, the LINEAGE
+// L-3c fork copy a slot in ANOTHER Proc's table -- so both ask the identical
+// question and must not answer it differently. That is why this is one
+// predicate rather than two lists: a kind admitted here is admitted to both,
+// and a kind added to `enum kobj_kind` is refused by both until someone
+// deliberately classifies it.
+//
+// Caller holds the slot's table lock (the fields are read, not copied first).
+static bool handle_slot_may_alias(const struct Handle *s) {
+    // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: forbidden for every
+    // NON-transferable kind. Maps to specs/handles.tla's HandleDup
+    // precondition `h.kobj \in TxKObjs` -- the runtime guard is its exact
+    // negation, `!kobj_kind_is_transferable`.
+    //   - Hardware (MMIO / IRQ / DMA / Interrupt / PCI): drivers hold exactly
+    //     one handle per hw resource -- extends I-5 to "non-duplicable at all",
+    //     and across a fork that is I-5 proper (the handle is pinned to the
+    //     Proc that created it; a child is a different Proc).
+    //   - Srv: exactly one connection Spoor per Proc (CORVUS-DESIGN.md section 6.2).
+    //   - Loom: a ring is pinned to the Proc whose handle table its REGISTERED
+    //     handles index, so a copy would name the wrong table (Loom-2a).
+    if (!kobj_kind_is_transferable(s->kind)) return false;
+
+    // stalk-3b-beta NoSrvSpoorDup: a devsrv Spoor (dc='s' -- a /srv root, a
+    // service-ref, or a CONNECTION endpoint) is pinned to its Proc; a second
+    // handle naming the one connection would blur the SO_PEERCRED origin
+    // (handles.tla SrvHandlesAtOrigin) and double-drive the SrvConn /
+    // registry-ref lifecycle at close. dev9p roots (dc='9') stay dup-able.
+    if (s->kind == KOBJ_SPOOR && s->obj && ((struct Spoor *)s->obj)->dc == 's')
+        return false;
+
+    return true;
+}
+
+// LINEAGE L-3c: copy `src`'s handle table into `dst`, PRESERVING slot indices.
+// The header carries the contract; this body is `handle_dup`'s capture-acquire-
+// install repeated per slot, with two differences that are the whole of it:
+// the install goes to a FIXED index rather than the first free one (POSIX: the
+// child's fd N is the parent's fd N, so a skipped slot must leave a hole, never
+// renumber the ones after it), and the rights are carried VERBATIM rather than
+// narrowed by a caller-supplied ceiling.
+int handle_table_copy_into(struct Proc *dst, struct Proc *src) {
+    struct HandleTable *dt = proc_handles_or_extinct(dst);
+    struct HandleTable *st = proc_handles_or_extinct(src);
+    // Not merely unexpected -- the two-lock hold below would deadlock on
+    // itself, and a table cannot meaningfully be copied onto itself.
+    if (dt == st) extinction("handle_table_copy_into: src and dst share a table");
+
+    int copied = 0;
+
+    // Lock order: SOURCE then DESTINATION. No cycle is possible because this is
+    // the only two-table operation in the tree, and because `dst` is a Proc
+    // rfork_internal has allocated but not yet linked into its parent's
+    // children list -- nothing else can reach it to take its lock at all. The
+    // destination lock is therefore uncontended by construction; it is taken
+    // anyway so this stays correct if publication ever moves earlier.
+    //
+    // Holding the source lock across the WHOLE walk is what makes the child's
+    // table a coherent snapshot: a peer thread of a multi-threaded parent
+    // cannot close fd 3 and open a different object at 3 midway through
+    // (the #844 shared-table hazard).
+    spin_lock(&st->lock);
+    spin_lock(&dt->lock);
+    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+        const struct Handle *s = &st->slots[i];
+        if (s->magic != HANDLE_MAGIC) continue;
+        if (!handle_slot_may_alias(s)) continue;
+        if (dt->slots[i].magic != 0)
+            extinction("handle_table_copy_into: destination slot not free");
+
+        // The copy is a NEW reference; the child's own close (or its
+        // handle_table_free at death) releases it. Non-blocking under the lock,
+        // exactly as handle_dup does it.
+        handle_acquire_obj(s->kind, s->obj);
+        dt->slots[i].magic  = HANDLE_MAGIC;
+        dt->slots[i].kind   = s->kind;
+        // Rights VERBATIM. I-6 requires rights to be non-increasing across a
+        // dup/transfer/endow, and equal satisfies that -- POSIX fork gives the
+        // child the same access the parent had, and narrowing here would make
+        // an inherited fd silently less capable than the one it was forked from.
+        dt->slots[i].rights = s->rights;
+        dt->slots[i].obj    = s->obj;
+        // #151: fork PRESERVES close-on-exec -- POSIX, and the only reading that
+        // makes the flag usable. A shell sets it on a bookkeeping fd once and
+        // then forks per command; clearing it here would leak that fd into every
+        // child, which is the exact thing it was set to prevent. (Linux keeps it
+        // for the same reason: dup_fd copies the close_on_exec bitmap.) The
+        // SKIPPED slots need nothing -- the destination table is freshly
+        // KP_ZERO'd, so a hole's bit is already clear.
+        cloexec_set_locked(dt, (hidx_t)i, cloexec_get_locked(st, (hidx_t)i));
+        __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
+        copied++;
+    }
+    spin_unlock(&dt->lock);
+    spin_unlock(&st->lock);
+
+    return copied;
+}
+
+// #151: the shared body of handle_dup (rights-reducing, first free slot, flag
+// clear) and handle_dup_posix (rights verbatim, lowest slot >= min_idx, flag as
+// asked). The three differences are parameters; everything else -- the
+// non-transferable refusal, the devsrv-Spoor refusal, the one-lock-hold TOCTOU
+// discipline, the rollback -- is identical and must stay that way, because both
+// create a second handle naming one object and so face the same hazards.
+static hidx_t handle_dup_common(struct Proc *p, hidx_t h, rights_t new_rights,
+                                bool inherit_rights, hidx_t min_idx,
+                                bool cloexec) {
     struct HandleTable *t = proc_handles_or_extinct(p);
     if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+    if (min_idx < 0 || min_idx >= PROC_HANDLE_MAX) return -1;
 
     // #844: validate the parent + acquire the child's ref + install the child
     // slot under ONE table-lock hold, so a concurrent handle_close of the
@@ -544,9 +749,19 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
         return -1;
     }
 
+    // #151: POSIX dup gives the new descriptor the SAME access as the old, so
+    // the inherit form reads the rights here, under the one lock hold, rather
+    // than making the caller do a handle_get first -- which would be the TOCTOU
+    // this whole function is shaped to avoid. Equal rights satisfy I-6's
+    // non-increasing requirement, exactly as handle_table_copy_into's verbatim
+    // carry does.
+    if (inherit_rights) new_rights = parent->rights;
+
     // Rights monotonic reduction: new_rights MUST be a subset of
     // parent->rights (specs/handles.tla RightsCeiling; rejects the
-    // BuggyDupElevate counterexample).
+    // BuggyDupElevate counterexample). The inherit form passes it trivially,
+    // and is deliberately NOT routed around the check -- a future change to
+    // where `new_rights` comes from should still have to clear this bar.
     if ((new_rights & parent->rights) != new_rights) {
         spin_unlock(&t->lock);
         return -1;
@@ -564,7 +779,8 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     // The dup'd handle is a NEW reference; its eventual handle_close releases
     // it. Acquire under the lock (non-blocking).
     handle_acquire_obj(kind, obj);
-    hidx_t child = handle_install_locked(t, kind, new_rights, obj);
+    hidx_t child = handle_install_locked(t, kind, new_rights, obj, min_idx,
+                                         cloexec);
     spin_unlock(&t->lock);
 
     if (child < 0) {
@@ -573,6 +789,157 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
         handle_release_obj(kind, obj);
     }
     return child;
+}
+
+hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
+    return handle_dup_common(p, h, new_rights, /*inherit_rights=*/false,
+                             /*min_idx=*/0, /*cloexec=*/false);
+}
+
+hidx_t handle_dup_posix(struct Proc *p, hidx_t h, hidx_t min_idx, bool cloexec) {
+    return handle_dup_common(p, h, RIGHT_NONE, /*inherit_rights=*/true,
+                             min_idx, cloexec);
+}
+
+// #157: dup onto a SPECIFIC index. The header carries the contract and why this
+// is not close-then-dup; the body is handle_dup_common's capture-and-acquire
+// followed by handle_replace's install-then-release-outside-the-lock, with the
+// install going to a caller-named slot that may be free.
+hidx_t handle_dup_to(struct Proc *p, hidx_t old, hidx_t new_h, bool cloexec) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (old < 0   || old   >= PROC_HANDLE_MAX) return -1;
+    if (new_h < 0 || new_h >= PROC_HANDLE_MAX) return -1;
+    // Defence in depth: the caller returns EINVAL for this. Serving it here
+    // would be nearly harmless (acquire, capture the same slot, install the
+    // same values, release -- net zero) EXCEPT that it would set cloexec on a
+    // descriptor POSIX says dup2 returns untouched. Refusing is one line.
+    if (old == new_h) return -1;
+
+    spin_lock(&t->lock);
+    struct Handle *src = &t->slots[old];
+    if (src->magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    // The SAME predicate handle_dup and the fork copy use -- all three create a
+    // second handle naming one object, so all three must answer identically.
+    if (!handle_slot_may_alias(src)) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+
+    enum kobj_kind kind   = src->kind;
+    rights_t       rights = src->rights;    // VERBATIM (POSIX; I-6 non-increasing)
+    void          *obj    = src->obj;
+
+    // The new descriptor is a NEW reference; its eventual close releases it.
+    // Non-blocking under the lock, exactly as handle_dup does it.
+    handle_acquire_obj(kind, obj);
+
+    // Capture the outgoing occupant BEFORE overwriting. `had` is what decides
+    // both the release below and the counter arithmetic: a dup3 onto a LIVE
+    // slot destroys one descriptor and creates one, so the live count
+    // (allocated - freed) must be unchanged; onto a FREE slot it creates one.
+    struct Handle *dst      = &t->slots[new_h];
+    bool           had      = (dst->magic == HANDLE_MAGIC);
+    enum kobj_kind old_kind = had ? dst->kind : KOBJ_INVALID;
+    void          *old_obj  = had ? dst->obj  : NULL;
+
+    dst->magic  = HANDLE_MAGIC;
+    dst->kind   = kind;
+    dst->rights = rights;
+    dst->obj    = obj;
+    // #151: SET, not inherited. dup2's new descriptor is close-on-exec exactly
+    // when the caller asked (dup3's O_CLOEXEC), regardless of what `old` or the
+    // previous occupant of this index carried. Inheriting from `old` is the
+    // classic dup2 mistake -- POSIX is explicit that the flag is cleared -- and
+    // inheriting from the OCCUPANT would be the reused-identity failure
+    // handle_install_locked's clear exists to prevent.
+    cloexec_set_locked(t, new_h, cloexec);
+    __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
+    if (had) __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
+    spin_unlock(&t->lock);
+
+    // May sleep (spoor_clunk's Dev close hook) -- outside the lock, and AFTER
+    // the new object is installed, so the slot is never momentarily empty for a
+    // peer thread to allocate into. handle_replace does it in this order for
+    // the same reason.
+    if (had) handle_release_obj(old_kind, old_obj);
+    return new_h;
+}
+
+int handle_set_cloexec(struct Proc *p, hidx_t h, bool on) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+
+    spin_lock(&t->lock);
+    // The slot must be LIVE. Setting the flag on a free index would be a
+    // promise about an fd that does not exist, and would then be inherited by
+    // whatever opens next -- which is exactly the stale-flag failure
+    // handle_install_locked's clear exists to prevent.
+    if (t->slots[h].magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    cloexec_set_locked(t, h, on);
+    spin_unlock(&t->lock);
+    return 0;
+}
+
+int handle_get_cloexec(struct Proc *p, hidx_t h) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+
+    spin_lock(&t->lock);
+    if (t->slots[h].magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    int on = cloexec_get_locked(t, h) ? 1 : 0;
+    spin_unlock(&t->lock);
+    return on;
+}
+
+int handle_close_on_exec(struct Proc *p) {
+    struct HandleTable *t = proc_handles_or_extinct(p);
+
+    // Snapshot the bitmap AND clear it in one lock hold, then close outside.
+    // Two properties come from doing it in that order rather than testing and
+    // closing slot by slot:
+    //
+    //   - the closes may SLEEP (a Spoor's Dev close hook sends a 9P Tclunk), so
+    //     they cannot happen under the lock at all;
+    //   - having cleared the bits first, nothing can read them again and try to
+    //     close the same slot twice, whatever a future caller does.
+    //
+    // The snapshot cannot go stale in the only caller that exists: execve
+    // refuses unless this is the Proc's sole live thread (proc_exec_alone,
+    // re-checked inside proc_exec_replace), so no peer is running to open or
+    // close anything while this walks. The clear-first form does not DEPEND on
+    // that, which is the point of writing it this way.
+    u64 pending[HANDLE_CLOEXEC_WORDS];
+    spin_lock(&t->lock);
+    for (u32 w = 0; w < HANDLE_CLOEXEC_WORDS; w++) {
+        pending[w]    = t->cloexec[w];
+        t->cloexec[w] = 0;
+    }
+    spin_unlock(&t->lock);
+
+    int closed = 0;
+    for (u32 w = 0; w < HANDLE_CLOEXEC_WORDS; w++) {
+        while (pending[w]) {
+            u32 b = (u32)__builtin_ctzll(pending[w]);
+            pending[w] &= pending[w] - 1;
+            hidx_t h = (hidx_t)(w * 64 + b);
+            if (h >= PROC_HANDLE_MAX) break;   // a partial trailing word
+            // A -1 here means the slot was already free. That is not reachable
+            // today (the bit is cleared whenever a slot is freed), so it is
+            // ignored rather than counted: this returns how many fds the exec
+            // actually closed, which is what a test can assert on.
+            if (handle_close(p, h) == 0) closed++;
+        }
+    }
+    return closed;
 }
 
 u64 handle_total_allocated(void) { return __atomic_load_n(&g_handle_allocated, __ATOMIC_RELAXED); }

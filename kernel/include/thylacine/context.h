@@ -123,6 +123,30 @@ extern void thread_trampoline(void);
 // zeroing sweep.
 extern void thread_user_trampoline(void);
 
+// LINEAGE L-3b: initial ctx.lr for a Thread created by
+// thread_create_forked. The third entry shape, and the shortest, because it
+// RESTORES a frame instead of constructing one:
+//
+//   1. bti c
+//   2. bl sched_finish_task_switch — release the run-tree lock prev held
+//   3. bl el0_return_die_check — I-24 first-entry check, same as
+//      thread_user_trampoline (a child forked while its parent's group is
+//      already terminating must never reach EL0)
+//   4. b .Lexception_return — the SHARED KERNEL_EXIT
+//
+// Step 4 is why this lives in vectors.S and not context.S: .Lexception_return
+// is deliberately a LOCAL label, so that no kernel caller can eret on whatever
+// happens to sit on the current SP. Branching to it from inside vectors.S is
+// exactly the use its own comment sanctions, and reusing the single audited
+// exit beats hand-rolling a second one on the tree's most load-bearing path.
+//
+// ctx.sp is the child's frame (thread_create_forked put it at the top of the
+// child's kstack, where KERNEL_ENTRY would have), so KERNEL_EXIT's sp-relative
+// loads and its closing `add sp, sp, #EXCEPTION_CTX_SIZE` behave exactly as on
+// a return from a real exception. The trampoline's own C calls run BELOW the
+// frame and cannot disturb it.
+extern void thread_fork_trampoline(void);
+
 // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 (no FP/SIMD trap at any EL)
 // on the calling CPU. Called from boot_main (primary) + per_cpu_main
 // (secondaries) so all CPUs uniformly admit FP/SIMD at both EL1 and
@@ -155,5 +179,23 @@ static inline void fp_enable_this_cpu(void) {
     cpacr |= (3ull << 20);  // FPEN = 0b11
     __asm__ __volatile__("msr CPACR_EL1, %0\nisb\n" :: "r"(cpacr));
 }
+
+// Size of a standalone FP/SIMD save area: V0..V31 (32 x 16 B) + FPSR + FPCR.
+// The offsets are baked into fp_save_area / fp_restore_area in context.S,
+// so a change here is a change there.
+#define FP_AREA_SIZE   520
+#define FP_AREA_FPSR   512
+#define FP_AREA_FPCR   516
+
+// FP/SIMD save + restore to a caller-supplied 520-byte, 16-byte-aligned
+// area (arch/arm64/context.S; task #96). Layout: V0..V31 @ [0,512),
+// FPSR @ 512, FPCR @ 516 — see FP_AREA_SIZE / struct Thread's
+// note_saved_fp.
+//
+// For the note-handler path ONLY. A handler runs on the SAME thread with
+// no context switch, so cpu_switch_context's eager save does not apply
+// and the interrupted EL0 code's V registers would otherwise be clobbered.
+void fp_save_area(void *area);
+void fp_restore_area(const void *area);
 
 #endif // THYLACINE_CONTEXT_H

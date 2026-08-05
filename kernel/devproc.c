@@ -269,7 +269,7 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
     // no per-Proc lock. page_count == live SYS_BURROW_ATTACH anon pages;
     // child_count == live direct children.
     {
-        u32 pages = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+        u32 pages = p->as ? __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE) : 0u;
         u32 kids  = __atomic_load_n(&p->child_count, __ATOMIC_ACQUIRE);
         n = fmt_str(buf, cap, off, "pages:   ");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, (int)pages);   if (!n && pages != 0) return 0; off += n;
@@ -281,7 +281,7 @@ static size_t format_status(struct Proc *p, char *buf, size_t cap) {
         // any time after the peak reports it -- and a read of a ZOMBIE (which
         // can no longer charge) reports the FINAL peak with no sampling race.
         // That is how a short-lived compiler's true footprint is measured.
-        u32 peak  = __atomic_load_n(&p->page_peak, __ATOMIC_ACQUIRE);
+        u32 peak  = p->as ? __atomic_load_n(&p->as->page_peak, __ATOMIC_ACQUIRE) : 0u;
         n = fmt_str(buf, cap, off, "peak:    ");   if (!n) return 0; off += n;
         n = fmt_sdec(buf, cap, off, (int)peak);    if (!n && peak != 0) return 0; off += n;
         n = fmt_str(buf, cap, off, "\n");          if (!n) return 0; off += n;
@@ -531,8 +531,13 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
     if (!n) return 0;
     off += n;
 
-    irq_state_t vs = spin_lock_irqsave(&p->vma_lock);
-    for (struct Vma *v = p->vmas; v; v = v->next) {
+    // LINEAGE L-1: a kernel-only Proc (kproc, which the /proc walk reaches) has
+    // no address space and so no mappings -- the header alone, which is exactly
+    // what an empty VMA list produced before the extraction.
+    if (!p->as) return off;
+
+    irq_state_t vs = spin_lock_irqsave(&p->as->lock);
+    for (struct Vma *v = p->as->vmas; v; v = v->next) {
         // The house SLUB-clobber defense every vma.c list walker runs
         // (vma_lookup / vma_insert / vma_remove / vma_find_gap). Not optional
         // here just because this is a diagnostic read: a freed entry's
@@ -571,7 +576,7 @@ static size_t format_maps(struct Proc *p, char *buf, size_t cap) {
         n = fmt_str(buf, cap, row, "\n");                if (!n) break; row += n;
         off = row;                           // commit the complete row
     }
-    spin_unlock_irqrestore(&p->vma_lock, vs);
+    spin_unlock_irqrestore(&p->as->lock, vs);
     return off;
 }
 
@@ -1276,14 +1281,55 @@ bool devproc_debug_authorized(const struct Proc *caller, const struct Proc *targ
 // same lock the park's register-then-observe takes, so it never sees a thread
 // about to proceed to EL0), then the #788 spin-until-off_cpu read (a thread
 // mid-cpu_switch_context still reads on_cpu==true until it fully deschedules).
-static bool devproc_all_threads_parked(struct Proc *target) {
+// #133: is ONE peer SETTLED in its debug park? The decision, extracted pure so
+// it is assertable without building a Thread -- the walk below is plumbing.
+//
+// All three terms are load-bearing, and the third was missing until #133:
+//
+//   registered  rendez_blocked_on == &debug_rendez -- it is in the park at all.
+//   !on_cpu     not mid-switch / not executing; its ctx is not being written.
+//   SLEEPING    it has not been WOKEN. This is the one that distinguishes a
+//               thread parked RIGHT NOW from one whose park is STALE.
+//
+// The stale case, which is the whole bug: wake_rendez_waiter sets
+// state = THREAD_RUNNABLE and ready()s the thread but DELIBERATELY leaves
+// rendez_blocked_on set (sched.c -- only the OWNING thread may clear it, so the
+// group-terminate cascade can read it under wait_lock). So between a resume's
+// wakeup and the thread actually being dispatched, `registered` is TRUE and
+// `on_cpu` is FALSE -- the first two terms both hold on a thread that is on its
+// way OUT of the park. Without the state term the caller reads "fully stopped"
+// there, and the read that follows lands after the thread has been dispatched
+// and cleared rendez_blocked_on but before it re-parks: EPERM out of nowhere.
+//
+// That is exactly what the step path warns about at its own call site ("would
+// return prematurely on the STALE parked state"); it escapes by polling
+// debug_stop_req, which a stop caller cannot use because it SETS that flag
+// before waiting. The state term works for both.
+//
+// This can only turn a TRUE into a FALSE, so it is safe on a privilege surface
+// by construction: nothing becomes newly readable. And it converges -- a
+// RUNNABLE peer gets dispatched, re-checks its cond, and (if the stop still
+// holds) re-registers as SLEEPING, so the caller's poll terminates.
+bool devproc_park_state_is_settled(bool registered, bool on_cpu, int state) {
+    return registered && !on_cpu && state == THREAD_SLEEPING;
+}
+
+bool devproc_all_threads_parked(struct Proc *target) {
     for (struct Thread *peer = target->threads; peer; peer = peer->next_in_proc) {
         if (peer->state == THREAD_EXITING) continue;   // dying -- need not park
         irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
-        bool parked = (peer->rendez_blocked_on == &peer->debug_rendez);
+        bool registered = (peer->rendez_blocked_on == &peer->debug_rendez);
         spin_unlock_irqrestore(&peer->wait_lock, ws);
-        if (!parked) return false;
-        if (__atomic_load_n(&peer->on_cpu, __ATOMIC_ACQUIRE)) return false;   // still on-cpu
+        // on_cpu and state are both written outside wait_lock (state under
+        // r->lock by wake_rendez_waiter, on_cpu by the switch path), so both are
+        // atomic loads rather than lock-protected reads -- a racy sample either
+        // way, and safe in the same direction: a sample that catches a peer
+        // mid-transition reports NOT settled, and the caller polls again.
+        if (!devproc_park_state_is_settled(
+                registered,
+                __atomic_load_n(&peer->on_cpu, __ATOMIC_ACQUIRE),
+                (int)__atomic_load_n(&peer->state, __ATOMIC_ACQUIRE)))
+            return false;
     }
     return true;
 }
@@ -1347,11 +1393,11 @@ static int devproc_mem_walk_cb(struct Proc *target, void *arg) {
     if (!devproc_debug_authorized(m->caller, target))   { m->result = -1; return 1; }  // I-39
     if (!devproc_target_fully_stopped(target))          { m->result = -1; return 1; }  // stopped-only
 
-    irq_state_t vs = spin_lock_irqsave(&target->vma_lock);
+    irq_state_t vs = spin_lock_irqsave(&target->as->lock);
     m->result = m->is_write
-        ? mmu_cross_proc_write(target->pgtable_root, m->vaddr, m->kbuf, m->len)
-        : mmu_cross_proc_read(target->pgtable_root,  m->vaddr, m->kbuf, m->len);
-    spin_unlock_irqrestore(&target->vma_lock, vs);
+        ? mmu_cross_proc_write(target->as->pgtable_root, m->vaddr, m->kbuf, m->len)
+        : mmu_cross_proc_read(target->as->pgtable_root,  m->vaddr, m->kbuf, m->len);
+    spin_unlock_irqrestore(&target->as->lock, vs);
     return 1;
 }
 

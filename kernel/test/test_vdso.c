@@ -133,7 +133,7 @@ void test_vdso_maps_ro_read(void) {
 
     // The installed leaf PTE must point at the ONE shared physical page (the
     // vvar model: every Proc's mapping resolves to page_to_pa(v->pages)).
-    u64 *l0 = (u64 *)pa_to_kva(p->pgtable_root);
+    u64 *l0 = (u64 *)pa_to_kva(p->as->pgtable_root);
     u64 i0 = (TEST_VA >> 39) & 0x1FF, i1 = (TEST_VA >> 30) & 0x1FF;
     u64 i2 = (TEST_VA >> 21) & 0x1FF, i3 = (TEST_VA >> 12) & 0x1FF;
     TEST_ASSERT(l0[i0] & 1, "L0 valid");

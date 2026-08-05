@@ -91,6 +91,28 @@
 // failure. POSIX: EIO.
 #define T_E_IO         5
 
+// Argument list too long -- the argv/envp a process-creation call asks to
+// place on the new image's stack does not fit the bound the frame budget
+// allows. Appended for the LINEAGE L-6c envp projection (#140), the commit
+// that wires its first consumer, under the 2026-08-03 signoff (#142).
+//
+// The DISTINCTION from T_E_INVAL is the one a caller acts on: EINVAL says
+// the request was malformed and retrying it verbatim is pointless, while
+// E2BIG says the request was well-formed and TOO LARGE -- so a shell can
+// respond by splitting the command (which is exactly what xargs exists to
+// do). Collapsing them, as this path did before the registry carried the
+// value, told a guest to give up on a request it could have satisfied in
+// two halves.
+//
+// Emitted today by the environment bounds ONLY (EXEC_ENV_MAX /
+// EXEC_ENV_DATA_MAX, in both the /env projection and the vivarium
+// envp walk). The neighbouring ARGV bounds still answer T_E_INVAL: that
+// is a LANDED native ABI (SYS_EXECVE, L-2a) whose error code is its own
+// deliberate decision, reserved to the #142 rollout rather than changed
+// as a side effect of adding envp. The asymmetry is tracked, not
+// accidental. POSIX: E2BIG.
+#define T_E_2BIG       7
+
 // No such device -- the BACKING SERVICE/DEVICE ENDPOINT disappeared. The
 // Loom device-gone terminal CQE (MENAGERIE.md section 10, the
 // "T_E_DEVGONE" class): when an in-flight Loom op's 9P session dies
@@ -110,6 +132,27 @@
 // that is empty, magic-corrupted, or holds the wrong KOBJ type for
 // the operation. POSIX: EBADF.
 #define T_E_BADF       9
+
+// No child processes -- a wait names no matching child. Appended for the
+// LINEAGE L-6b `wait4` row (docs/LINEAGE.md section 5.5, the signed-off
+// ABI; the T_E_SRCH/T_E_NODEV append-under-ratified-scripture precedent).
+//
+// IT IS THE TERMINATION CONDITION OF EVERY REAP LOOP, which is why a
+// near-miss will not do. `while ((p = waitpid(-1, &st, WNOHANG)) > 0)`
+// stops on any non-positive answer, but a shell that waits for a
+// SPECIFIC child distinguishes "gone, stop asking" (ECHILD) from every
+// other failure -- and a bare -1 reads to a Linux guest as EPERM, which
+// is the #100 class of wrong answer (an errno that means something else
+// entirely, not merely something vaguer).
+//
+// wait_pid_for answers -1 for TWO conditions: no matching child, and a
+// #811 death-interrupted sleep. Both map here, and the collapse is
+// sound rather than a compromise: the death path returns through the
+// sync-from-EL0 tail, where el0_return_die_check is NORETURN on the die
+// branch (vectors.S), so a group-terminating Thread never carries any
+// value back to EL0. There is no observer to tell the two apart.
+// POSIX: ECHILD.
+#define T_E_CHILD      10
 
 // Resource temporarily unavailable (would block; queue full). Use
 // when a NoteQueue is at NOTE_QUEUE_DEPTH and the userspace
@@ -143,6 +186,20 @@
 // already has a mount, or SYS_NAMESPACE_CREATE collides. POSIX:
 // EEXIST.
 #define T_E_EXIST      17
+
+// Not a directory -- a path prefix component names something that is not
+// a directory, so resolution cannot continue THROUGH it (#79). The
+// resolver's answer for `/bin/ls/foo`: `ls` exists and was reached, but
+// it cannot be searched. Distinct from T_E_NOENT ("no such component"),
+// which is what stalk reported for this case before the gate existed --
+// and the distinction is load-bearing, because ENOENT is what
+// os.IsNotExist / errno == ENOENT branch on to mean "safe to create".
+//
+// Deliberately NOT a permission failure: the x bit on a non-directory is
+// meaningless for traversal, so a 0755 file and a 0644 file are equally
+// un-traversable and must answer identically. The gate therefore precedes
+// the X-search check (see kernel/stalk.c). POSIX: ENOTDIR.
+#define T_E_NOTDIR     20
 
 // Invalid argument. Use when a syscall argument is structurally
 // malformed (NULL where non-NULL required; out-of-range integer;
@@ -182,6 +239,68 @@
 // ECANCELED.
 #define T_E_CANCELED   125
 
+// ---------------------------------------------------------------------------
+// The socket family (VIVARIUM V-5, docs/VIVARIUM.md section 5.5).
+//
+// Appended under the precedent this file already records twice -- T_E_NODEV
+// (Menagerie build-arc 4) and T_E_CANCELED (Loom-5): a sub-chunk appends a
+// POSIX-FIXED errno when it is executing already-ratified scripture. The
+// socket family was user-voted 2026-07-31, and section 5.5 has carried
+// "AF_INET6 -> EAFNOSUPPORT at v1.0, honestly" since V-0's signoff, so the
+// name was ratified before the number was needed.
+//
+// The VALUES are not a choice: every one is read from
+// third_party/musl/arch/generic/bits/errno.h, which is what a Linux guest's
+// libc will compare against. They are pinned below like every other entry.
+//
+// Why the phenotype needs its own errnos at all: a Linux program distinguishes
+// these, and collapsing them (to EINVAL, say) would make a guest retry a
+// connection that can never succeed, or treat a full table as a bad argument.
+// The whole point of the boundary-line is that the guest's own error handling
+// keeps working.
+// ---------------------------------------------------------------------------
+
+// Too many open files -- the per-Proc socket table (VIV_SOCK_MAX) is full.
+// POSIX: EMFILE.
+#define T_E_MFILE      24
+
+// The fd is not a socket. Returned when a socket call names an fd with no
+// socktab entry -- a plain file, or a socket whose entry was dropped.
+// POSIX: ENOTSOCK.
+#define T_E_NOTSOCK    88
+
+// Protocol not supported: a SOCK_* type or IPPROTO_* the /net tree has no
+// directory for (SOCK_SEQPACKET, SOCK_RAW, a mismatched protocol number).
+// POSIX: EPROTONOSUPPORT.
+#define T_E_PROTONOSUPPORT 93
+
+// Address family not supported -- AF_INET6 and everything that is not
+// AF_INET. POSIX: EAFNOSUPPORT.
+#define T_E_AFNOSUPPORT 97
+
+// Address already in use -- netd refused an `announce` for this port. The
+// V-5b listen() reports it, not bind(): bind is remembered rather than
+// written, so the collision surfaces where the announce actually happens.
+// POSIX: EADDRINUSE.
+#define T_E_ADDRINUSE  98
+
+// The connection was aborted before it could be handed back -- an accept()
+// whose listen fid produced a connection number the data open then refused.
+// POSIX: ECONNABORTED.
+#define T_E_CONNABORTED 103
+
+// The socket is already connected: a second connect() on a CONNECTED entry.
+// POSIX: EISCONN.
+#define T_E_ISCONN     106
+
+// The socket is not connected -- a getpeername()/shutdown() on an entry still
+// in FRESH. POSIX: ENOTCONN.
+#define T_E_NOTCONN    107
+
+// Connection refused. netd rejected the dial, or the data open failed after
+// the connect verb was accepted. POSIX: ECONNREFUSED.
+#define T_E_CONNREFUSED 111
+
 // ABI pins: changing a value here is an ABI break. The boundary-line
 // patch (and any future POSIX-aware userspace) depends on these
 // matching the AArch64 POSIX errno numbers.
@@ -190,15 +309,29 @@ _Static_assert(T_E_PERM      == 1,   "T_E_PERM ABI pin (POSIX EPERM)");
 _Static_assert(T_E_NOENT     == 2,   "T_E_NOENT ABI pin (POSIX ENOENT)");
 _Static_assert(T_E_SRCH      == 3,   "T_E_SRCH ABI pin (POSIX ESRCH)");
 _Static_assert(T_E_OPNOTSUPP == 95,  "T_E_OPNOTSUPP ABI pin (POSIX EOPNOTSUPP)");
+// The V-5 socket family. Values read from musl's generic bits/errno.h, which
+// is what a Linux guest's libc compares against.
+_Static_assert(T_E_MFILE          == 24,  "T_E_MFILE ABI pin (POSIX EMFILE)");
+_Static_assert(T_E_NOTSOCK        == 88,  "T_E_NOTSOCK ABI pin (POSIX ENOTSOCK)");
+_Static_assert(T_E_PROTONOSUPPORT == 93,  "T_E_PROTONOSUPPORT ABI pin (POSIX EPROTONOSUPPORT)");
+_Static_assert(T_E_AFNOSUPPORT    == 97,  "T_E_AFNOSUPPORT ABI pin (POSIX EAFNOSUPPORT)");
+_Static_assert(T_E_ADDRINUSE      == 98,  "T_E_ADDRINUSE ABI pin (POSIX EADDRINUSE)");
+_Static_assert(T_E_CONNABORTED    == 103, "T_E_CONNABORTED ABI pin (POSIX ECONNABORTED)");
+_Static_assert(T_E_ISCONN         == 106, "T_E_ISCONN ABI pin (POSIX EISCONN)");
+_Static_assert(T_E_NOTCONN        == 107, "T_E_NOTCONN ABI pin (POSIX ENOTCONN)");
+_Static_assert(T_E_CONNREFUSED    == 111, "T_E_CONNREFUSED ABI pin (POSIX ECONNREFUSED)");
 _Static_assert(T_E_IO        == 5,   "T_E_IO ABI pin (POSIX EIO)");
+_Static_assert(T_E_2BIG      == 7,   "T_E_2BIG ABI pin (POSIX E2BIG)");
 _Static_assert(T_E_NODEV     == 19,  "T_E_NODEV ABI pin (POSIX ENODEV)");
 _Static_assert(T_E_BADF      == 9,   "T_E_BADF ABI pin (POSIX EBADF)");
+_Static_assert(T_E_CHILD     == 10,  "T_E_CHILD ABI pin (POSIX ECHILD)");
 _Static_assert(T_E_AGAIN     == 11,  "T_E_AGAIN ABI pin (POSIX EAGAIN)");
 _Static_assert(T_E_NOMEM     == 12,  "T_E_NOMEM ABI pin (POSIX ENOMEM)");
 _Static_assert(T_E_ACCES     == 13,  "T_E_ACCES ABI pin (POSIX EACCES)");
 _Static_assert(T_E_FAULT     == 14,  "T_E_FAULT ABI pin (POSIX EFAULT)");
 _Static_assert(T_E_BUSY      == 16,  "T_E_BUSY ABI pin (POSIX EBUSY)");
 _Static_assert(T_E_EXIST     == 17,  "T_E_EXIST ABI pin (POSIX EEXIST)");
+_Static_assert(T_E_NOTDIR    == 20,  "T_E_NOTDIR ABI pin (POSIX ENOTDIR)");
 _Static_assert(T_E_INVAL     == 22,  "T_E_INVAL ABI pin (POSIX EINVAL)");
 _Static_assert(T_E_PIPE      == 32,  "T_E_PIPE ABI pin (POSIX EPIPE)");
 _Static_assert(T_E_RANGE     == 34,  "T_E_RANGE ABI pin (POSIX ERANGE)");

@@ -943,7 +943,7 @@ void test_loom_ring_charge_balance(void) {
     struct Proc *p = test_proc_make();
     TEST_ASSERT(p != NULL, "proc_alloc");
 
-    u32 base = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+    u32 base = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
 
     struct loom_params kp;
     hidx_t loom_fd = -1;
@@ -951,7 +951,7 @@ void test_loom_ring_charge_balance(void) {
 
     u32 ring_pages = (u32)burrow_backing_pages((size_t)kp.ring_size);
     TEST_ASSERT(ring_pages > 0, "the ring occupies at least one page");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(base + ring_pages), "setup charged the ring's occupancy");
 
     // Detach the ring VA while the Loom still holds its handle_count ref. The
@@ -959,14 +959,14 @@ void test_loom_ring_charge_balance(void) {
     // that, refunded, hands EL0 free budget.
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size), 0L,
                    "detach the ring VA");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(base + ring_pages),
                    "a detach that frees nothing refunds nothing");
 
     // Close the Loom: loom_free drops the last ref, the pages free, and the
     // charge is settled -- exactly once, and only now.
     TEST_EXPECT_EQ(handle_close(p, loom_fd), 0, "close the loom fd");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), (u64)base,
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), (u64)base,
                    "the loom close settled the ring charge back to baseline");
 
     test_proc_drop(p);
@@ -987,25 +987,25 @@ void test_loom_regbuf_charge_balance(void) {
     TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd) == 0, "setup");
 
     // Baseline AFTER setup, so the ring's own charge is not in the arithmetic.
-    u32 base = __atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE);
+    u32 base = __atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE);
 
     // --- leg 1: the pin is displaced by a re-register ---
     s64 bva = sys_burrow_attach_for_proc(p, PAGE_SIZE);
     TEST_ASSERT(bva > 0, "attach a buffer page");
     u32 bpages = (u32)burrow_backing_pages(PAGE_SIZE);
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(base + bpages), "the attach charged the buffer");
 
     struct loom_buf_reg br = { .va = (u64)bva, .len = PAGE_SIZE };
     TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, &br, 1) == 0, "register");
 
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, (u64)bva, PAGE_SIZE), 0L, "detach the buffer VA");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(base + bpages),
                    "detach with the table still pinning refunds nothing");
 
     TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, NULL, 0) == 0, "clear the table");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE), (u64)base,
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE), (u64)base,
                    "the displaced pin's release settled the buffer charge");
 
     // --- leg 2: the pin is released by the teardown ---
@@ -1014,7 +1014,7 @@ void test_loom_regbuf_charge_balance(void) {
     struct loom_buf_reg br2 = { .va = (u64)bva2, .len = PAGE_SIZE };
     TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, &br2, 1) == 0, "register #2");
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, (u64)bva2, PAGE_SIZE), 0L, "detach #2's VA");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(base + bpages), "still pinned, still charged");
 
     // Detach the ring too, so the close faces the FULL production teardown
@@ -1023,13 +1023,13 @@ void test_loom_regbuf_charge_balance(void) {
     u32 ring_pages = (u32)burrow_backing_pages((size_t)kp.ring_size);
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, kp.ring_va, kp.ring_size), 0L,
                    "detach the ring VA too");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(base + bpages), "the ring detach refunds nothing either");
 
     TEST_EXPECT_EQ(handle_close(p, loom_fd), 0, "close the loom fd");
     // base was sampled AFTER setup, so it still contains the ring's charge;
     // settling both lands one ring below it.
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&p->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(base - ring_pages),
                    "the teardown settled both the buffer pin and the ring");
 
@@ -1073,20 +1073,20 @@ void test_loom_regbuf_foreign_charge_not_refunded(void) {
     struct loom_params kp;
     hidx_t loom_fd = -1;
     TEST_ASSERT(sys_loom_setup_for_proc(user, 8, 0, &kp, &loom_fd) == 0, "setup");
-    u32 ubase = __atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE);
+    u32 ubase = __atomic_load_n(&user->as->page_count, __ATOMIC_ACQUIRE);
     TEST_ASSERT(ubase > 0, "the baseline carries the ring charge, so a refund is visible");
 
-    u32 pbase = __atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE);
+    u32 pbase = __atomic_load_n(&payer->as->page_count, __ATOMIC_ACQUIRE);
     s64 va = sys_burrow_attach_for_proc(payer, PAGE_SIZE);
     TEST_ASSERT(va > 0, "the payer attaches the region");
     u32 pages = (u32)burrow_backing_pages(PAGE_SIZE);
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)(pbase + pages), "the attach charged the PAYER");
 
-    spin_lock(&payer->vma_lock);
+    spin_lock(&payer->as->lock);
     struct Vma *pv = vma_lookup(payer, (u64)va);
     struct Burrow *v = pv ? pv->burrow : NULL;
-    spin_unlock(&payer->vma_lock);
+    spin_unlock(&payer->as->lock);
     TEST_ASSERT(v != NULL, "the region's Burrow");
 
     // Share it into the user (the SYS_WEFT_MAP half) and register the whole of
@@ -1095,10 +1095,10 @@ void test_loom_regbuf_foreign_charge_not_refunded(void) {
     // VA against that window before it even looks up the VMA, so a share placed
     // below 4 GiB is unreachable to the detach half of this test.
     const u64 uva = 0x140000000ull;
-    spin_lock(&user->vma_lock);
+    spin_lock(&user->as->lock);
     TEST_EXPECT_EQ(burrow_share_into(user, v, uva, VMA_PROT_RW), 0, "share into the user");
-    spin_unlock(&user->vma_lock);
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE),
+    spin_unlock(&user->as->lock);
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)ubase, "a share does not charge the user's page_count");
 
     struct loom_buf_reg br = { .va = uva, .len = PAGE_SIZE };
@@ -1108,13 +1108,13 @@ void test_loom_regbuf_foreign_charge_not_refunded(void) {
     // The payer walks away (#131): its charge settles here, while the region
     // lives on under the user's mapping + the Loom pin.
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(payer, (u64)va, PAGE_SIZE), 0L, "payer detaches");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)pbase, "the payer's charge settled at its own detach");
 
     // The user drops its mapping. SHARED_IN, so no page_count movement -- and
     // the Loom pin is now the ONLY thing holding the region.
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(user, uva, PAGE_SIZE), 0L, "user detaches");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)ubase, "detaching a SHARED_IN mapping refunds nothing");
     TEST_EXPECT_EQ(burrow_mapping_count(v), 0, "no mappings left -- only the Loom pin");
 
@@ -1124,10 +1124,10 @@ void test_loom_regbuf_foreign_charge_not_refunded(void) {
     TEST_ASSERT(sys_loom_register_buffers_for_proc(user, loom_fd, NULL, 0) == 0, "clear the table");
     TEST_EXPECT_EQ(burrow_total_destroyed(), destroyed_before + 1,
                    "the displaced pin was the drop that freed the pages");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&user->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)ubase,
                    "freeing a region the user never paid for refunds the user NOTHING");
-    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->page_count, __ATOMIC_ACQUIRE),
+    TEST_EXPECT_EQ((u64)__atomic_load_n(&payer->as->page_count, __ATOMIC_ACQUIRE),
                    (u64)pbase, "and does not refund the payer twice either");
 
     TEST_EXPECT_EQ(handle_close(user, loom_fd), 0, "close the loom fd");

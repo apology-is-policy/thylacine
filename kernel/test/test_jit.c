@@ -118,7 +118,7 @@ static void jit_fault_in(struct Proc *p, u64 vaddr, bool is_write) {
 // Count this Proc's VMAs backed by `b`. The dual-map property in one number.
 static int jit_alias_count(struct Proc *p, const struct Burrow *b) {
     int n = 0;
-    for (struct Vma *v = p->vmas; v; v = v->next)
+    for (struct Vma *v = p->as->vmas; v; v = v->next)
         if (v->burrow == b) n++;
     return n;
 }
@@ -147,7 +147,7 @@ void test_jit_create_requires_cap(void) {
         "capless + oversize -> EACCES (cap checked before args)");
 
     // No region was created, so nothing was charged.
-    TEST_EXPECT_EQ(p->page_count, 0u,
+    TEST_EXPECT_EQ(p->as->page_count, 0u,
         "a refused create must charge nothing");
 
     jit_drop_proc(p);
@@ -163,7 +163,7 @@ void test_jit_create_rejects_bad_args(void) {
         "zero length rejected");
     TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_REGION_MAX + 1, &w, &x), -T_E_INVAL,
         "length above JIT_REGION_MAX rejected");
-    TEST_EXPECT_EQ(p->page_count, 0u, "no charge on a rejected create");
+    TEST_EXPECT_EQ(p->as->page_count, 0u, "no charge on a rejected create");
 
     jit_drop_proc(p);
 }
@@ -207,8 +207,8 @@ void test_jit_dual_alias_pte_wx_clean(void) {
     jit_fault_in(p, reg.writer_va, /*is_write=*/true);
     jit_fault_in(p, reg.exec_va,   /*is_write=*/false);
 
-    u64 pte_w = jit_walk_l3(p->pgtable_root, reg.writer_va);
-    u64 pte_x = jit_walk_l3(p->pgtable_root, reg.exec_va);
+    u64 pte_w = jit_walk_l3(p->as->pgtable_root, reg.writer_va);
+    u64 pte_x = jit_walk_l3(p->as->pgtable_root, reg.exec_va);
     TEST_ASSERT(pte_w != 0, "writer L3 PTE installed");
     TEST_ASSERT(pte_x != 0, "exec L3 PTE installed");
 
@@ -247,8 +247,8 @@ void test_jit_dual_alias_pte_wx_clean(void) {
     // Page 2 as well, so the property is not an artifact of the first page.
     jit_fault_in(p, reg.writer_va + ONE_PAGE, /*is_write=*/true);
     jit_fault_in(p, reg.exec_va + ONE_PAGE,   /*is_write=*/false);
-    u64 pte_w2 = jit_walk_l3(p->pgtable_root, reg.writer_va + ONE_PAGE);
-    u64 pte_x2 = jit_walk_l3(p->pgtable_root, reg.exec_va + ONE_PAGE);
+    u64 pte_w2 = jit_walk_l3(p->as->pgtable_root, reg.writer_va + ONE_PAGE);
+    u64 pte_x2 = jit_walk_l3(p->as->pgtable_root, reg.exec_va + ONE_PAGE);
     TEST_EXPECT_EQ(pte_w2 & PTE_PA_MASK, pte_x2 & PTE_PA_MASK,
         "page 2: aliases still map one physical page");
     TEST_ASSERT((pte_w2 & BIT_UXN) != 0, "page 2: writer still non-executable");
@@ -263,7 +263,7 @@ void test_jit_dual_alias_pte_wx_clean(void) {
 void test_jit_charges_once_per_region(void) {
     struct Proc *p = jit_make_proc(/*with_cap=*/true);
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    TEST_EXPECT_EQ(p->page_count, 0u, "fresh Proc charged nothing");
+    TEST_EXPECT_EQ(p->as->page_count, 0u, "fresh Proc charged nothing");
 
     struct t_jit_region reg = { 0, 0 };
     TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
@@ -272,11 +272,11 @@ void test_jit_charges_once_per_region(void) {
     // Two aliases, ONE set of physical pages -> JIT_LEN/PAGE_SIZE charged, not
     // twice that. A double charge would bill a JIT for memory it holds once and
     // would leave the destroy-side refund wrong in the other direction.
-    TEST_EXPECT_EQ(p->page_count, (u32)(JIT_LEN / 4096u),
+    TEST_EXPECT_EQ(p->as->page_count, (u32)(JIT_LEN / 4096u),
         "one region charges its page count ONCE, not once per alias");
 
     TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0, "destroy succeeds");
-    TEST_EXPECT_EQ(p->page_count, 0u,
+    TEST_EXPECT_EQ(p->as->page_count, 0u,
         "destroy refunds exactly what create charged");
 
     jit_drop_proc(p);
@@ -369,7 +369,7 @@ void test_jit_alias_not_detachable(void) {
     struct t_jit_region reg = { 0, 0 };
     TEST_EXPECT_EQ(sys_jit_create_region(p, JIT_LEN, &reg.writer_va, &reg.exec_va), 0,
         "create succeeds");
-    u32 charged = p->page_count;
+    u32 charged = p->as->page_count;
     TEST_EXPECT_EQ(charged, (u32)(JIT_LEN / 4096u), "one charge for the region");
 
     // BOTH aliases must be refused -- either one alone breaks the pair.
@@ -383,20 +383,20 @@ void test_jit_alias_not_detachable(void) {
     // and page_count would read 0 here.
     TEST_ASSERT(vma_lookup(p, reg.writer_va) != NULL, "writer alias survives");
     TEST_ASSERT(vma_lookup(p, reg.exec_va) != NULL,   "exec alias survives");
-    TEST_EXPECT_EQ(p->page_count, charged,
+    TEST_EXPECT_EQ(p->as->page_count, charged,
         "a refused detach must not refund the region's charge");
 
     // And the region is still destroyable the ONLY correct way.
     TEST_EXPECT_EQ(sys_jit_destroy_for_proc(p, reg.writer_va), 0,
         "SYS_JIT_DESTROY still works after the refused detaches");
-    TEST_EXPECT_EQ(p->page_count, 0u, "destroy refunds exactly once");
+    TEST_EXPECT_EQ(p->as->page_count, 0u, "destroy refunds exactly once");
 
     // A plain anon mapping is of course still detachable -- the gate is narrow.
     s64 anon = sys_burrow_attach_for_proc(p, 4096);
     TEST_ASSERT(anon > 0, "burrow_attach");
     TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, (u64)anon, 4096), 0,
         "an ordinary anon mapping is still detachable");
-    TEST_EXPECT_EQ(p->page_count, 0u, "anon detach refunds");
+    TEST_EXPECT_EQ(p->as->page_count, 0u, "anon detach refunds");
 
     jit_drop_proc(p);
 }

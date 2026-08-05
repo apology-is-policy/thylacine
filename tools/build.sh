@@ -308,6 +308,10 @@ build_kernel() {
     if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
         stage_storm
     fi
+
+    # VIVARIUM V-7: stage the container bundles BEFORE the pool fixture so
+    # populate_stratum_pool can `stratum-fs put` them at /vivarium.
+    stage_viv_bundles
     # P6-pouch-stratumd-boot sub-chunk 16b-beta: produce the boot pool
     # fixture (pool.img + system.key) before build_ramfs so the keyfile
     # gets copied into the cpio at /etc/stratum/system.key.
@@ -437,7 +441,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "netdev-driver" "netd" "tapestryd" "tapestry-demo" "tapestry-battery" "aurora" "warden" "menagerie-probe" "crash-probe" "virtio-mmio-source" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "ptyfs" "pty-probe" "diorama" "diorama-probe" "viv" "viv-probe" "viv-pheno-probe" "ptyhost" "jc-probe" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "u-readdir-test" "u-glob-test" "u-subst-test" "u-repl-test" "u-6-test" "u-job-test" "u-7-test" "argv-smoke" "exec-probe" "fork-probe" "coreutil-smoke" "fs-mut-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "ls" "stat" "chmod" "clear" "mkdir" "rmdir" "rm" "touch" "cp" "mv" "tee" "basename" "dirname" "pwd" "sleep" "hexdump" "cmp" "yes" "realpath" "which" "env" "uname" "ns" "pelt" "qid" "realm" "ipconfig" "netstat" "nslookup" "ping" "nc" "dial" "con" "tcpproxy" "id" "whoami" "date" "aurora-push" "pipe-src" "pipe-sink" "legate-prover" "jit-prover" "login" "ut" "nora" "prowl" "loom-smoke" "loom-stress" "loom-bench" "debug-child" "debug-probe" "stack-child" "stack-probe" "hwbp-verify" "parley-echo" "parley-probe" "lsp-probe" "ambush-probe" "dap-probe" "cpubench" "fsbench" "net-echo" "netperf" "tlsperf" "sntp" "tls-smoke" "https" "curl" "wget" "httpd" "nettest" "weft-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -871,7 +875,11 @@ emit_corvus_recovery_header() {
     local cm_manifest="$REPO_ROOT/tools/corvus-mint/Cargo.toml"
     local cm_bin="$REPO_ROOT/tools/corvus-mint/target/release/corvus-mint"
     echo "==> Generating system recovery phrase header (corvus-mint emit-phrase)"
-    cargo build --manifest-path "$cm_manifest" --release $verbose \
+    # Subshell-cd to the repo root: cargo discovers .cargo/config from the CWD,
+    # not the manifest path, so a build.sh invoked from usr/ would silently pin
+    # usr/.cargo/config.toml's bare-metal target onto this HOST tool (getrandom
+    # then fails E0463 "can't find crate for std").
+    ( cd "$REPO_ROOT" && cargo build --manifest-path "$cm_manifest" --release $verbose ) \
         || { echo "==> corvus-mint BUILD FAILED (recovery header)" >&2; exit 1; }
     mkdir -p "$GEN_DIR"
     "$cm_bin" emit-phrase "$CORVUS_RECOVERY_HEADER" \
@@ -908,6 +916,203 @@ build_userspace() {
         echo "==> Skipping userspace Rust: rustup target $USR_RS_TARGET not installed."
         echo "    Install via: rustup target add $USR_RS_TARGET"
     fi
+}
+
+# VIVARIUM V-7: stage the container bundles (docs/VIVARIUM.md section 7.2) for
+# populate_stratum_pool to `put` at /vivarium. The PROBE bundle (the V-7 boot
+# gate's fixture: rootfs = the native viv-probe + a marker + the recipe's
+# mount anchors, manifest = run it) is synthetic and always staged when
+# viv-probe built -- no network, no external input, so the default build stays
+# hermetic. The ALPINE bundle stages only when a minirootfs tarball is
+# available (THYLACINE_ALPINE_TARBALL=<path>, or dropped into build/cache/);
+# its consumer is the ARC gate ("an Alpine shell runs" -- needs V-1b + V-2),
+# so absence is a loud skip, never a build failure.
+stage_viv_bundles() {
+    local probe_bin="$USR_RS_BUILD/$USR_RS_TARGET/release/viv-probe"
+    local vstage="$BUILD_DIR/vivarium"
+    rm -rf "$vstage"
+    if [[ ! -f "$probe_bin" ]]; then
+        echo "==> viv bundles: viv-probe not built -- skipping the stage" >&2
+        return 0
+    fi
+    local pb="$vstage/probe" leaf
+    mkdir -p "$pb/rootfs/bin" "$pb/rootfs/etc" "$pb/rootfs/proc" "$pb/rootfs/sys" \
+             "$pb/rootfs/dev" "$pb/rootfs/net" "$pb/rootfs/env"
+    cp "$probe_bin" "$pb/rootfs/bin/viv-probe"
+    chmod 0755 "$pb/rootfs/bin/viv-probe"
+    echo "thylacine-vivarium-probe-bundle" > "$pb/rootfs/etc/viv-marker"
+    # Mount ANCHORS for the /dev leaves + /dev/tty: plain empty files the
+    # recipe binds the devdev leaves over (a mount needs an existing mount
+    # point to key on; the proc/sys/net/env anchor DIRS above likewise).
+    for leaf in null zero full random urandom tty; do
+        : > "$pb/rootfs/dev/$leaf"
+        chmod 0666 "$pb/rootfs/dev/$leaf"
+    done
+    # The gate manifest. VIV_EXPECT_UID = PRINCIPAL_SYSTEM (0xFFFFFFFE): the
+    # boot gate's invoker is joey, and the probe compares getuid() against the
+    # value -- the expectation travels with the bundle (the gate's fixture),
+    # so viv itself adds no state to the container.
+    cat > "$pb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/viv-probe"],
+        "env": ["VIV_EXPECT_UID=4294967294"],
+        "cwd": "/"
+    },
+    "annotations": {}
+}
+VIVEOF
+    echo "==> viv bundles: probe bundle staged at $pb"
+
+    # The V-1b phenotype bundle. Same recipe shape as the probe bundle, but its
+    # manifest DECLARES `org.thylacine.phenotype: linux` -- the only thing in
+    # the system that can set PHENO_LINUX (VIVARIUM section 12.1 rule 1). Its
+    # entrypoint then speaks raw Linux syscall numbers and nothing else, so a
+    # clean exit proves the whole chain: manifest -> viv -> the spawn
+    # declaration -> the kernel's syscall-entry branch -> the translated call.
+    local pheno_bin="$USR_RS_BUILD/$USR_RS_TARGET/release/viv-pheno-probe"
+    if [[ -f "$pheno_bin" ]]; then
+        local hb="$vstage/pheno"
+        mkdir -p "$hb/rootfs/bin" "$hb/rootfs/proc" "$hb/rootfs/sys" \
+                 "$hb/rootfs/dev" "$hb/rootfs/net" "$hb/rootfs/env"
+        cp "$pheno_bin" "$hb/rootfs/bin/viv-pheno-probe"
+        chmod 0755 "$hb/rootfs/bin/viv-pheno-probe"
+        # An empty writable file the probe fills through Linux write(64) and
+        # then reads back: a write proven by its return value proves only the
+        # renumber; proven by the bytes coming back it proves the data path.
+        # (It cannot CREATE one -- O_CREAT is deliberately not translatable,
+        # VIVARIUM section 6.20 correction 1 -- so the bundle supplies it.)
+        : > "$hb/rootfs/pheno-scratch"
+        chmod 0666 "$hb/rootfs/pheno-scratch"
+        for leaf in null zero full random urandom tty; do
+            : > "$hb/rootfs/dev/$leaf"
+            chmod 0666 "$hb/rootfs/dev/$leaf"
+        done
+        cat > "$hb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": false },
+    "process": {
+        "args": ["/bin/viv-pheno-probe", "linux"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux",
+        "org.thylacine.sigpipe-selftest": "yes",
+        "org.thylacine.net": "granted"
+    }
+}
+VIVEOF
+        echo "==> viv bundles: pheno bundle staged at $hb"
+    else
+        echo "==> viv bundles: viv-pheno-probe not built -- pheno bundle skipped" >&2
+    fi
+
+    # The ARC gate bundle (LINEAGE L-6c): a real Alpine rootfs whose /bin/sh is
+    # Alpine's OWN busybox, running a script that exercises fork + execve +
+    # wait4 through the shell.
+    #
+    # TWO external inputs, both optional, both auto-discovered in build/cache/:
+    #
+    #   alpine-minirootfs-*-aarch64.tar.gz   the rootfs
+    #   busybox-static-*.apk                 the SHELL
+    #
+    # The second is not a convenience. MEASURED 2026-08-03: the minirootfs
+    # contains exactly two ELF binaries (bin/busybox, sbin/apk) and BOTH are
+    # ET_DYN PIE linked against /lib/ld-musl-aarch64.so.1 -- there is not one
+    # statically-linked file in the image. `kernel/elf.c` rejects ET_DYN
+    # (:83), PT_INTERP (:180) and PT_DYNAMIC (:185) by deliberate v1.0 policy,
+    # so the stock shell cannot load. Alpine's own busybox-static package is
+    # ET_EXEC with neither dynamic segment -- exactly the shape the loader
+    # accepts. See task #145 (dynamic linking) -- a separate deferred axis,
+    # NOT a LINEAGE gap.
+    #
+    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image, and the
+    # resolver does not follow symlinks (task #146), so the static binary is
+    # installed at BOTH paths as a real file rather than relinked.
+    local tarball="${THYLACINE_ALPINE_TARBALL:-}"
+    if [[ -z "$tarball" ]]; then
+        tarball="$(ls "$REPO_ROOT/build/cache"/alpine-minirootfs-*-aarch64.tar.gz 2>/dev/null | head -1 || true)"
+    fi
+    local bbapk="${THYLACINE_BUSYBOX_STATIC_APK:-}"
+    if [[ -z "$bbapk" ]]; then
+        bbapk="$(ls "$REPO_ROOT/build/cache"/busybox-static-*.apk 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        local ab="$vstage/alpine"
+        mkdir -p "$ab/rootfs"
+        if tar -xzf "$tarball" -C "$ab/rootfs" 2>/dev/null; then
+            mkdir -p "$ab/rootfs/proc" "$ab/rootfs/sys" "$ab/rootfs/dev" \
+                     "$ab/rootfs/net" "$ab/rootfs/env"
+            for leaf in null zero full random urandom tty; do
+                : > "$ab/rootfs/dev/$leaf"
+                chmod 0666 "$ab/rootfs/dev/$leaf"
+            done
+            local bb_ok=0
+            if [[ -n "$bbapk" && -f "$bbapk" ]]; then
+                local bbx="$vstage/.bbx"
+                rm -rf "$bbx"; mkdir -p "$bbx"
+                # An .apk is a gzip'd tar; the payload member is bin/busybox.static.
+                if tar -xzf "$bbapk" -C "$bbx" 2>/dev/null && \
+                   [[ -f "$bbx/bin/busybox.static" ]]; then
+                    rm -f "$ab/rootfs/bin/sh" "$ab/rootfs/bin/busybox"
+                    cp "$bbx/bin/busybox.static" "$ab/rootfs/bin/busybox"
+                    cp "$bbx/bin/busybox.static" "$ab/rootfs/bin/sh"
+                    chmod 0755 "$ab/rootfs/bin/busybox" "$ab/rootfs/bin/sh"
+                    bb_ok=1
+                fi
+                rm -rf "$bbx"
+            fi
+            # The gate script. Every leg prints its own marker, so a failure
+            # names the exact mechanism rather than "the shell did not run".
+            # ABSOLUTE paths throughout: envp[0] is always NULL (#140), so the
+            # container has no PATH and a bare command name cannot resolve --
+            # which keeps this a test of fork/exec/wait rather than of $PATH.
+            mkdir -p "$ab/rootfs/gate"
+            cat > "$ab/rootfs/gate/run.sh" <<'GATEEOF'
+echo L6C-A-shell-runs
+/bin/busybox echo L6C-B-external-exec
+/bin/busybox true  && echo L6C-C-status-zero
+/bin/busybox false || echo L6C-D-status-nonzero
+/bin/busybox echo pipe-in | /bin/busybox cat && echo L6C-E-pipeline
+sub=$(/bin/busybox echo captured); [ "$sub" = captured ] && echo L6C-F-substitution
+i=0; for w in a b c; do i=$(/bin/busybox expr $i + 1); done; [ "$i" = 3 ] && echo L6C-G-loop
+/bin/busybox sh -c '/bin/busybox echo nested' && echo L6C-H-nested-shell
+/bin/busybox false; echo L6C-I-exitcode=$?
+echo L6C-DONE
+GATEEOF
+            chmod 0644 "$ab/rootfs/gate/run.sh"
+            cat > "$ab/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "/gate/run.sh"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+            if [[ "$bb_ok" == 1 ]]; then
+                echo "==> viv bundles: Alpine bundle staged from $tarball (/bin/sh <- $(basename "$bbapk"))"
+            else
+                rm -rf "$ab"
+                echo "==> viv bundles: Alpine bundle SKIPPED -- the minirootfs is present but no busybox-static apk is (every stock Alpine ELF is dynamic PIE, which the loader rejects; task #145). Drop busybox-static-*.apk in build/cache/ or set THYLACINE_BUSYBOX_STATIC_APK." >&2
+            fi
+        else
+            rm -rf "$ab"
+            echo "==> viv bundles: untar of $tarball FAILED -- Alpine bundle skipped" >&2
+        fi
+    else
+        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine bundle skipped (the ARC gate's fixture, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+    fi
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" ))"
 }
 
 build_sysroot() {
@@ -2123,6 +2328,21 @@ populate_stratum_pool() {
         "$stratum_fs_bin" -s "$sock_path" sync \
             || { echo "==> populate pool: sync after /quake FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
         echo "==> populate pool: Quake shareware baked at /quake"
+    fi
+
+    # --- VIVARIUM V-7: the container bundles (-> /vivarium; staged by
+    # stage_viv_bundles per docs/VIVARIUM.md section 7.2). The probe bundle is
+    # the V-7 boot gate's fixture -- joey spawns `viv run /vivarium/probe`
+    # boot-fatally -- so a preserved pool missing it is STALE: re-run once
+    # with THYLACINE_MKFS_PRESERVE=0. ---
+    local viv_stage="$BUILD_DIR/vivarium"
+    if [[ -d "$viv_stage/probe/rootfs" ]]; then
+        echo "==> populate pool: baking viv bundles ($viv_stage -> /vivarium, $(du -sh "$viv_stage" | cut -f1))"
+        "$stratum_fs_bin" -s "$sock_path" put "$viv_stage" /vivarium \
+            || { echo "==> populate pool: put /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        "$stratum_fs_bin" -s "$sock_path" sync \
+            || { echo "==> populate pool: sync after /vivarium FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+        echo "==> populate pool: viv bundles baked at /vivarium"
     fi
 
     # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---

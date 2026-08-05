@@ -72,14 +72,19 @@ below are the v1.0 set; additions append (no renumbering).
 | `T_E_OK`        | 0     | (success)    | Operation succeeded |
 | `T_E_PERM`      | 1     | `EPERM`      | Operation not permitted (capability check failed). **DO NOT RETURN FROM A SYSCALL HANDLER** — `-1` collides with pouch's flat-error sentinel; use `T_E_ACCES` instead. The name remains for translation-from-userspace code. See errno.h for the full rationale. |
 | `T_E_NOENT`     | 2     | `ENOENT`     | No such file or namespace entry |
+| `T_E_SRCH`      | 3     | `ESRCH`      | No such process (a pid-addressed op names no live Proc; the PTY-1 `setpgid`/`getsid` contour) |
 | `T_E_IO`        | 5     | `EIO`        | I/O error (storage, device, network) |
+| `T_E_2BIG`      | 7     | `E2BIG`      | Argument list too long — the argv/envp asked for does not fit the new image's frame budget. Distinct from `EINVAL` in the way a caller acts on: `EINVAL` says the request was malformed and retrying it verbatim is pointless, `E2BIG` says it was well-formed and too large, so splitting it will work (which is what `xargs` exists to do). Appended for the LINEAGE L-6c envp projection (#140), the commit wiring its first consumer, under the 2026-08-03 signoff (#142). Emitted by the ENVIRONMENT bounds only (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, in both the `/env` projection and the vivarium `envp` walk); the neighbouring **argv** bounds still answer `T_E_INVAL`, because that is a landed native ABI (`SYS_EXECVE`, L-2a) whose error code is its own deliberate decision, reserved to the #142 rollout rather than changed as a side effect of adding envp |
 | `T_E_BADF`      | 9     | `EBADF`      | Bad handle / fd |
+| `T_E_CHILD`     | 10    | `ECHILD`     | No child processes — a wait names no matching child. The termination condition of every reap loop, which is why the near-miss answers will not do: a bare `-1` reads to a Linux guest as `EPERM`, the #100 class of wrong answer. Appended for the LINEAGE L-6b `wait4` row. `wait_pid_for`'s two `-1` conditions (no matching child; a #811 death-interrupted sleep) both map here — sound because the death path returns through the sync-from-EL0 tail, where `el0_return_die_check` is noreturn on the die branch, so no observer can tell them apart |
 | `T_E_AGAIN`     | 11    | `EAGAIN`     | Resource temporarily unavailable (queue full; would block) |
 | `T_E_NOMEM`     | 12    | `ENOMEM`     | Out of memory |
 | `T_E_ACCES`     | 13    | `EACCES`     | Permission denied (rights check failed; W^X violation) |
 | `T_E_FAULT`     | 14    | `EFAULT`     | Bad address (uaccess fault on user VA) |
 | `T_E_BUSY`      | 16    | `EBUSY`      | Resource busy (lock contention; mount-busy) |
 | `T_E_EXIST`     | 17    | `EEXIST`     | Already exists (mount over existing point; create-excl) |
+| `T_E_NODEV`     | 19    | `ENODEV`     | The backing endpoint disappeared (the Loom device-gone terminal CQE; MENAGERIE §10) |
+| `T_E_NOTDIR`    | 20    | `ENOTDIR`    | A path prefix component is not a directory, so resolution cannot continue through it (`/bin/ls/foo`). Computed from the `QTDIR` bit BEFORE the X-search, so the answer does not turn on the meaningless x bit of a non-directory. Four producers, all the same rule: `stalk`'s real-component gate (#79); `stalk`'s `.`/`..` gate, since both are path components and the position they resolve in must be a directory too (#81); `stalk`'s trailing-slash gate, where the separator asserts the whole path names a directory (#82, POSIX 4.13 — three sites, since two success exits skip the quarry); and the single-hop `SYS_WALK_OPEN` / `SYS_WALK_CREATE` handlers, on both the source's type and a source Dev with no `.walk` slot (#80, #81). The `.`/`..` gate reads the tip UNCROSSED and the trailing-slash gate the quarry CROSSED — they ask different questions (where resolution stands vs what the path names), see `docs/reference/104-stalk.md` |
 | `T_E_INVAL`     | 22    | `EINVAL`     | Invalid argument |
 | `T_E_NOSYS`     | 38    | `ENOSYS`     | Function not implemented (placeholder syscall slot or unimpl path) |
 | `T_E_PIPE`      | 32    | `EPIPE`      | Broken pipe (write to closed pipe/socket) |
@@ -281,11 +286,46 @@ trigger surfaces; self + Fable audit before the arc closes):
 - **ER-2** — FS mutation: `SYS_WALK_CREATE` → `EEXIST`/`NOENT`/`NOTDIR`,
   `SYS_UNLINK`/`SYS_RENAME` → `NOENT`/`NOTEMPTY`/..., `SYS_FSTAT`/`LSEEK`/
   `READDIR`/`FSYNC`/`WSTAT`/`CHDIR` → their specific errnos.
+  **The name-op half LANDED at #80**: `Dev.rename`/`Dev.unlink` no longer
+  flatten the server's verdict (no side-channel was needed — unlike
+  `Dev.create`, those slots already return `int`; the value was simply being
+  discarded), and `SYS_UNLINK`/`SYS_RENAME` forward it. **Measured on the live
+  Stratum FS**: unlink-a-directory → `EISDIR` (21), rmdir-a-non-empty-directory
+  → `ENOTEMPTY` (39). A server errno with no `T_E_*` name crosses BY VALUE, so
+  neither needed a registry append — only kernel-ORIGINATED errnos must be
+  named here. The `SYS_FSTAT`/`LSEEK`/`READDIR`/`FSYNC`/`WSTAT`/`CHDIR` half
+  is still owed.
 - **ER-3** — the rest of the surface: the local-validation `-1` sites
   (`EBADF`/`EINVAL`/`ACCES`/`FAULT`/...) across the syscall families.
+  **The four FS name-op handlers LANDED at #80** (`SYS_WALK_OPEN`,
+  `SYS_WALK_CREATE`, `SYS_RENAME`, `SYS_UNLINK` — every local reject now
+  answers a specific code). The `!t`/`!p` preamble guards deliberately stay
+  `-1`: they are structurally unreachable from EL0.
+  **The byte-I/O family LANDED at #100** (`SYS_READ`, `SYS_WRITE`,
+  `SYS_PREAD`, `SYS_PWRITE`, `SYS_CLOSE`, `SYS_LSEEK` — the handle, O_PATH,
+  missing-vtable, user-buffer, whence and offset gates), together with the
+  pipe Dev, where `T_E_PIPE` had been defined and ABI-pinned since this
+  scripture landed **with no emitter anywhere in the tree**: a write to a
+  closed pipe returned the flat `-1`, so EPIPE was unobtainable through
+  *both* boundaries. That is the shape to watch for elsewhere in the
+  rollout — a registered code with zero emitters is a contract stated and
+  not kept, and four separate comments (in `pipe.c`, `sys_write_handler`,
+  `0007-pouch-signals.patch`, and the Go fork's ABI header) asserted the
+  behaviour the code did not implement.
+  **RESIDUAL**: three sites mean POSIX `ESPIPE` and still return `-1`
+  (`SYS_LSEEK` and the positioned `SYS_PREAD`/`SYS_PWRITE` arms on a
+  non-seekable Dev). `T_E_SPIPE` (29) is not registered and appending it is
+  signoff-bearing per CLAUDE.md, so they were left honest rather than given
+  a plausible-but-wrong `EINVAL`. Tracked as task #106.
+  The remaining syscall families are still owed.
 - **ER-4** — pouch `__syscall_ret` rework (the `-1 -> EIO` special case is
   now reachable only by the residual truly-generic returns; verify pouch
-  programs observe the correct errnos).
+  programs observe the correct errnos). Note #100 already moved the pouch
+  boundary for the byte-I/O family without touching the patch: a specific
+  `-T_E_*` lands in the `[-4095,-2]` window `__syscall_ret` already decodes,
+  so pouch sees the real errno and the `-1` case is simply no longer taken.
+  The rework is what finally REMOVES that case, and cannot land until the
+  ER-3 sweep leaves no `-1`-returning handler behind it.
 - **ER-5** — focused Fable + self audit over the swept surface, SMP gate,
   in-VM Go-build proof, close.
 

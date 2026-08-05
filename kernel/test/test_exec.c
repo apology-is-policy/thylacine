@@ -41,8 +41,12 @@
 #include <thylacine/dev.h>       // #45: the blob-serving stub Dev
 #include <thylacine/spoor.h>     // #45: spoor_alloc for the from_spoor path
 #include <thylacine/image.h>     // #45: Image-cache counters (dispatch proof)
+#include <thylacine/addrspace.h> // LINEAGE L-2: the detached build target
 
+#include <thylacine/env.h>       // #140: env_create/env_write for the envp frame
+#include <thylacine/errno.h>     // #140: T_E_2BIG
 #include "../../mm/phys.h"
+#include "../../mm/slub.h"       // #140: kmalloc for the oversize-env probe
 #include "../../arch/arm64/hwfeat.h"   // g_hw_features.linux_hwcap (AT_HWCAP)
 
 void test_exec_setup_smoke(void);
@@ -54,6 +58,8 @@ void test_exec_user_stack_guard(void);
 void test_exec_setup_auxv(void);
 void test_exec_setup_auxv_no_phdr_segment(void);
 void test_exec_from_spoor_rodata_dispatch(void);
+void test_exec_setup_env_frame(void);            // #140
+void test_exec_stage_env_bounds(void);           // #140
 
 #define ELF_BLOB_SIZE 16384   // 4 pages: headers + 3 one-page segments (#45)
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
@@ -181,6 +187,21 @@ static void drop_proc(struct Proc *p) {
     proc_free(p);
 }
 
+// LINEAGE L-4a: exec's stack and its writable segments are backed by SPARSE
+// ANON_LAZY Burrows, so a test reading exec's output back cannot walk a single
+// contiguous `->pages` chunk -- it goes slot by slot. Returns the direct-map
+// address of byte `off` within the Burrow, or NULL if that slot is not resident.
+//
+// Every caller below reads a run that lies wholly inside ONE page (the init frame
+// is 176 bytes at the top of the stack; the data-segment checks are the first 256
+// bytes), so one lookup covers each. A run that spanned a page boundary would need
+// to re-look-up at the crossing -- separate pages are not contiguous in the direct
+// map, which is the whole point of the sparse representation.
+static u8 *lazy_byte(struct Burrow *v, u64 off) {
+    u8 *pg = (u8 *)burrow_lazy_slot_kva(v, (size_t)(off / PAGE_SIZE));
+    return pg ? pg + (off % PAGE_SIZE) : NULL;
+}
+
 void test_exec_from_spoor_rodata_dispatch(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");
@@ -218,18 +239,80 @@ void test_exec_from_spoor_rodata_dispatch(void) {
         "text FILE-backed");
     TEST_EXPECT_EQ((int)ro->burrow->type, (int)BURROW_TYPE_FILE,
         "rodata FILE-backed (the #45 gate)");
-    TEST_EXPECT_EQ((int)rw->burrow->type, (int)BURROW_TYPE_ANON,
-        "data eager ANON (I-36 condition 4: writable never file-backed)");
+    TEST_EXPECT_EQ((int)rw->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "data private ANON_LAZY (I-36 condition 4 unchanged: writable is never "
+        "file-backed -- LINEAGE L-4a made the anon backing sparse, not shared)");
     TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 2,
         "two Image entries created (text + rodata)");
 
-    // The eager RW copy carried the file bytes.
-    u8 *rwb = (u8 *)pa_to_kva(page_to_pa(rw->burrow->pages));
-    TEST_EXPECT_EQ((u64)rwb[0],    (u64)0xE0, "data byte 0 eager-copied");
-    TEST_EXPECT_EQ((u64)rwb[0x1f], (u64)0xFF, "data byte 0x1f eager-copied");
+    // The private RW copy carried the file bytes (L-4a: read through the sparse
+    // slot; the BYTES are what this asserts, and they are unchanged).
+    u8 *rwb = lazy_byte(rw->burrow, 0);
+    TEST_ASSERT(rwb != NULL, "data page 0 populated by exec");
+    TEST_EXPECT_EQ((u64)rwb[0],    (u64)0xE0, "data byte 0 copied from the file");
+    TEST_EXPECT_EQ((u64)rwb[0x1f], (u64)0xFF, "data byte 0x1f copied from the file");
 
     // Teardown: unmap (drop_proc) -> both Image entries go idle -> evict frees
     // the FILE Burrows (each clunks its adopted spoor ref) -> our own ref last.
+    drop_proc(p);
+    image_cache_evict_idle_for_test();
+    spoor_clunk(exe);
+}
+
+// #149: an UNALIGNED non-writable segment must not take the file-backed arm.
+//
+// The R-2 fault arm derives each page's file position as
+// `v->file_offset + (burrow_byte_off & ~(PAGE_SIZE-1))`, which is only the
+// segment's own bytes when Burrow offset 0 IS the segment's start. Rather than
+// teach that audited arm and the qid-keyed Image cache about an intra-page
+// lead, exec_load_into's file_shareable gate keeps unaligned segments off it --
+// so REVENANT section 4.6's burrow-offset-0 == seg->vaddr identity stays true
+// by CONSTRUCTION rather than by assumption. The degradation is private
+// instead of shared: it loads correctly and merely forgoes the Image cache.
+//
+// Nothing measured produces this shape (0 of 20 Alpine ELFs has an unaligned
+// non-writable PT_LOAD -- the unaligned one is always the writable data
+// segment). That is exactly why it is worth pinning: it is the case the fix
+// has to be right about without any real binary to catch it.
+void test_exec_unaligned_stays_off_image_cache(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // text RX @ 0x10000 (aligned -> file-backed), rodata R @ 0x20000 + 0x2e0
+    // (unaligned -> must degrade to the private eager arm).
+    u32 flags[2] = { PF_R | PF_X, PF_R };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x100);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[1].p_vaddr  += 0x2e0;
+    ph[1].p_paddr   = ph[1].p_vaddr;
+    ph[1].p_offset += 0x2e0;
+    ph[1].p_memsz   = 0x100;             // filesz == memsz: file_shareable but
+                                         // for the alignment term
+    g_blob_dev_size = size;
+
+    u64 creates0 = image_cache_creates_for_test();
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x149A11Cull;        // distinct Image key
+    exe->qid.vers = 1;
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup_from_spoor(p, exe, size, NULL, 0, 0, &entry, &sp),
+                   0, "the unaligned rodata segment still loads");
+
+    struct Vma *text = vma_lookup(p, 0x10000ull);
+    struct Vma *ro   = vma_lookup(p, 0x20000ull);
+    TEST_ASSERT(text != NULL && ro != NULL, "both VMAs");
+    TEST_EXPECT_EQ((int)text->burrow->type, (int)BURROW_TYPE_FILE,
+        "the ALIGNED text segment is still file-backed");
+    TEST_EXPECT_EQ((int)ro->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "the UNALIGNED rodata segment degraded to the private eager arm");
+    TEST_EXPECT_EQ(image_cache_creates_for_test() - creates0, 1,
+        "exactly ONE Image entry -- the unaligned segment created none");
+
     drop_proc(p);
     image_cache_evict_idle_for_test();
     spoor_clunk(exe);
@@ -377,16 +460,144 @@ void test_exec_setup_constraints(void) {
     TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
         "bad ELF magic surfaces as -1");
 
-    // Unaligned segment vaddr — rebuild with a non-aligned vaddr.
+    // #149 REPLACED the unaligned-vaddr reject that used to live here: an
+    // unaligned p_vaddr is legal ELF and now loads (exec.unaligned_segment_*
+    // below assert the positive behaviour). What remains a constraint is a
+    // DEGENERATE segment -- memsz 0 has no pages to map and seg_geometry
+    // refuses it.
     size = build_elf(flags, 1, /*filesz=*/0);
     struct Elf64_Phdr *ph = (struct Elf64_Phdr *)
         (g_elf_blob + sizeof(struct Elf64_Ehdr));
-    ph[0].p_vaddr  = 0x10001ull;          // off by 1
-    ph[0].p_paddr  = 0x10001ull;
-    // e_entry must still be in the segment.
-    ((struct Elf64_Ehdr *)g_elf_blob)->e_entry = 0x10001ull;
+    ph[0].p_memsz = 0;
     TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
-        "unaligned segment vaddr rejected");
+        "degenerate PT_LOAD (memsz 0) rejected");
+
+    drop_proc(p);
+}
+
+// #149: an unaligned PT_LOAD vaddr LOADS. It maps from the page FLOOR with the
+// segment's own bytes `lead` in, and the leading slack reads ZERO.
+//
+// The discrimination that matters is the SLACK. The file bytes immediately
+// BEFORE the segment's file_offset are poisoned with a recognizable non-zero
+// pattern first, so "the slack is zero" proves the loader did NOT read from
+// floor(file_offset) -- Linux's behaviour, and a real (if small) exposure of
+// file content no segment claims. Without the poison the assertion would pass
+// on a loader that read the whole first page from a blob that happens to be
+// zero there: a control has to DISCRIMINATE, not merely detect.
+//
+// This is the EAGER arm (PF_X). exec.unaligned_lazy_segment_loads covers the
+// sparse arm, which is the one every real binary's data segment actually takes.
+void test_exec_unaligned_segment_loads(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    const u64 lead = 0x2e0;              // busybox's real intra-page offset
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/256);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[0].p_vaddr  += lead;              // 0x10000 -> 0x102e0
+    ph[0].p_paddr   = ph[0].p_vaddr;
+    ph[0].p_offset += lead;              // congruent, as ELF requires
+    eh->e_entry     = ph[0].p_vaddr;     // entry must stay inside the segment
+
+    for (size_t i = 0; i < 256; i++)                       // the segment's bytes
+        g_elf_blob[PAGE_SIZE + lead + i] = (u8)(i ^ 0x5A);
+    for (size_t i = 0; i < lead; i++)                      // the poison
+        g_elf_blob[PAGE_SIZE + i] = 0xAB;
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "an unaligned PT_LOAD vaddr loads (#149)");
+    TEST_EXPECT_EQ(entry, ph[0].p_vaddr, "entry is the unaligned vaddr");
+
+    struct Vma *vma = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(vma != NULL && vma->burrow != NULL, "VMA at the page floor");
+    TEST_EXPECT_EQ(vma->vaddr_start, (u64)0x10000,
+        "the VMA starts at the page FLOOR, not at p_vaddr");
+
+    u8 *kva = (u8 *)pa_to_kva(page_to_pa(vma->burrow->pages));
+    for (size_t i = 0; i < lead; i++)
+        TEST_EXPECT_EQ(kva[i], (u8)0,
+            "leading slack is ZERO -- the file's 0xAB was not mapped");
+    for (size_t i = 0; i < 256; i++)
+        TEST_EXPECT_EQ(kva[lead + i], (u8)(i ^ 0x5A), "segment byte at vaddr+i");
+    TEST_EXPECT_EQ(kva[lead + 256], (u8)0, "the bss tail is still zero");
+
+    drop_proc(p);
+}
+
+// #149: the SPARSE arm of the same property -- and the one that matters, since
+// W^X means the unaligned segment in a real binary is always the writable data
+// segment (measured: 20 of 20 ELFs in a stock Alpine rootfs), which
+// seg_may_be_sparse routes to a demand-zero ANON_LAZY Burrow. Here the leading
+// slack is zero because the fault arm zero-fills, not because of KP_ZERO, so it
+// is a genuinely separate path from the eager test above.
+void test_exec_unaligned_lazy_segment_loads(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    const u64 lead = 0x2e0;
+    u32 flags[1] = { PF_R | PF_W };      // writable -> sparse
+    size_t size = build_elf(flags, 1, /*filesz=*/256);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[0].p_vaddr  += lead;
+    ph[0].p_paddr   = ph[0].p_vaddr;
+    ph[0].p_offset += lead;
+    eh->e_entry     = ph[0].p_vaddr;
+
+    for (size_t i = 0; i < 256; i++)
+        g_elf_blob[PAGE_SIZE + lead + i] = (u8)(i ^ 0x33);
+    for (size_t i = 0; i < lead; i++)
+        g_elf_blob[PAGE_SIZE + i] = 0xCD;                  // the poison
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "an unaligned WRITABLE PT_LOAD loads (the busybox shape)");
+
+    struct Vma *vma = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(vma != NULL && vma->burrow != NULL, "VMA at the page floor");
+    TEST_EXPECT_EQ((int)vma->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "writable backing is still sparse (L-4a unchanged)");
+
+    u8 *pg = lazy_byte(vma->burrow, 0);
+    TEST_ASSERT(pg != NULL, "page 0 populated by exec");
+    for (size_t i = 0; i < lead; i++)
+        TEST_EXPECT_EQ(pg[i], (u8)0,
+            "leading slack is ZERO -- the file's 0xCD was not mapped");
+    for (size_t i = 0; i < 256; i++)
+        TEST_EXPECT_EQ(pg[lead + i], (u8)(i ^ 0x33), "segment byte at vaddr+i");
+
+    drop_proc(p);
+}
+
+// #149: two PT_LOADs sharing a page are REFUSED, by name.
+//
+// The page would have to carry the earlier segment's bytes at the earlier
+// segment's permissions AND this one's -- for the common text-then-data pair
+// that is W and X in one PTE, which I-12 forbids outright. Linux lets the later
+// mapping win the page (trailing text silently loses X); refusing is the
+// fail-closed choice. Measured: 0 of 20 ELFs in a stock Alpine rootfs shares a
+// page, because aarch64's 64 KiB p_align leaves segments pages apart.
+void test_exec_shared_page_segments_refused(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x100);
+
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    ph[1].p_vaddr = ph[0].p_vaddr + 0x800;    // same page as segment 0
+    ph[1].p_paddr = ph[1].p_vaddr;
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
+        "two PT_LOADs sharing a page are refused (I-12)");
 
     drop_proc(p);
 }
@@ -521,8 +732,10 @@ void test_exec_setup_auxv(void) {
     // Read the frame back from the stack BURROW via the direct map.
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
-    u64 *w = (u64 *)(stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
+    u64 *w = (u64 *)fb;
 
     // argc / argv / envp — all empty at v1.0.
     TEST_EXPECT_EQ(w[0], 0ull, "argc == 0");
@@ -566,10 +779,149 @@ void test_exec_setup_auxv(void) {
 
     // The 16 entropy bytes are CSPRNG-populated — not all zero (a
     // genuine all-zero 16-byte draw is a 2^-128 event).
-    u8 *rand_bytes = stack_kva + EXEC_USER_STACK_SIZE - 16;
+    // The AT_RANDOM block is the frame's last 16 bytes, so it shares `fb`'s page.
+    u8 *rand_bytes = fb + EXEC_INIT_STACK_SIZE - 16;
     u8 rand_or = 0;
     for (int i = 0; i < 16; i++) rand_or |= rand_bytes[i];
     TEST_ASSERT(rand_or != 0, "AT_RANDOM block is CSPRNG-populated (non-zero)");
+
+    drop_proc(p);
+}
+
+// #140: a Proc with a real /env gets a real envp on its new image's stack.
+//
+// This is the test the bug survived for lack of. Every other frame test above
+// runs on a Proc with an EMPTY environment, where the correct frame and the
+// broken one are byte-identical -- so the whole suite passed through a kernel
+// that wrote a lone NULL for envp no matter what was asked. What distinguishes
+// them is a Proc that HAS variables, which is why this one sets them first.
+void test_exec_setup_env_frame(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // Two variables, in creation order -- the render emits them in monotonic
+    // id order, which is that order. Records: "A=1\0" (4) + "BB=22\0" (6).
+    u64 ia = env_create(p, "A", 1);
+    TEST_ASSERT(ia != 0, "env_create A");
+    TEST_EXPECT_EQ(env_write(p, ia, 0, "1", 1), 1L, "env_write A=1");
+    u64 ib = env_create(p, "BB", 2);
+    TEST_ASSERT(ib != 0, "env_create BB");
+    TEST_EXPECT_EQ(env_write(p, ib, 0, "22", 2), 2L, "env_write BB=22");
+
+    const u32 envc = 2;
+    const u32 env_len = 4 + 6;
+
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "exec_setup with a populated /env");
+
+    // The frame GREW by exactly the envp vector plus its strings: two pointers
+    // where the lone NULL used to sit, then the records, rounded to 16.
+    u64 want = EXEC_INIT_FRAME_SIZE(0, envc, 0, env_len);
+    TEST_EXPECT_EQ(sp, EXEC_USER_STACK_TOP - want,
+        "sp accounts for the envp vector and its strings");
+    TEST_EXPECT_EQ(sp & 15ull, 0ull, "sp is still 16-byte aligned");
+    // ...and it is NOT the empty-frame size, which is what makes every
+    // assertion below capable of failing.
+    TEST_ASSERT(want > EXEC_INIT_STACK_SIZE,
+        "the env-bearing frame is larger than the empty one");
+
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
+    u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - want);
+    TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
+    u64 *w = (u64 *)fb;
+
+    TEST_EXPECT_EQ(w[0], 0ull, "argc == 0 (no argv on this path)");
+    TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
+
+    // envp[0..1] are real user VAs into the strings region, and envp[2] is the
+    // terminator. Pre-#140 w[2] was that terminator; that it is now a POINTER
+    // is the whole finding.
+    u64 r_off  = (EXEC_INIT_STRUCTURED(0, envc) + 15ull) & ~15ull;
+    u64 strings = sp + r_off + 16u;      // argv_data_len == 0, so envp's start here
+    TEST_EXPECT_EQ(w[2], strings,        "envp[0] points at the first record");
+    TEST_EXPECT_EQ(w[3], strings + 4ull, "envp[1] points past the first NUL");
+    TEST_EXPECT_EQ(w[4], 0ull,           "envp[] terminator is NULL");
+
+    // The auxv shifted by the two entries -- read AT_PHDR where it now lives.
+    TEST_EXPECT_EQ(w[5], (u64)AT_PHDR, "auxv follows the envp terminator");
+    TEST_EXPECT_EQ(w[6], 0x10040ull,   "AT_PHDR still resolves correctly");
+
+    // And the bytes themselves. The frame is well under a page, so the strings
+    // share `fb`'s page (lazy_byte's single-page contract).
+    const char *want_bytes = "A=1\0BB=22";     // 10 bytes incl. both NULs
+    u8 *s = fb + r_off + 16u;
+    for (u32 i = 0; i < env_len; i++) {
+        TEST_EXPECT_EQ((u64)s[i], (u64)(u8)want_bytes[i],
+            "envp strings region byte");
+    }
+
+    drop_proc(p);
+}
+
+// #140: an environment too large for the frame budget is REFUSED, not
+// truncated -- and refused with E2BIG, which tells a caller the request was
+// well-formed and splitting it would work.
+//
+// EXEC_ENV_DATA_MAX (32 KiB) is reachable from a /env projection:
+// ENV_MAX_ENTRIES (64) x ENV_VALUE_MAX (4096) is a quarter-megabyte, so nine
+// full-size variables already exceed it. EXEC_ENV_MAX (the 512-entry vector
+// bound) is NOT reachable this way -- 64 entries can never make 512 -- which
+// is exactly why it exists: it bounds the vivarium's user-supplied envp walk,
+// where the count is not capped by the Env table. So this drives the bound
+// that a native Proc can actually hit.
+void test_exec_stage_env_bounds(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // An empty environment stages to nothing, and that is a SUCCESS -- the
+    // case every other exec test in this file exercises.
+    char *d = (char *)0x1;                     // poisoned: must be overwritten
+    u32 len = 99, count = 99;
+    TEST_EXPECT_EQ(exec_stage_env(p, &d, &len, &count), 0, "empty env stages OK");
+    TEST_ASSERT(d == NULL, "empty env yields no block");
+    TEST_EXPECT_EQ((u64)len, 0ull, "empty env has no bytes");
+    TEST_EXPECT_EQ((u64)count, 0ull, "empty env has no records");
+
+    // One variable: a block and a count of exactly one.
+    u64 id = env_create(p, "K", 1);
+    TEST_ASSERT(id != 0, "env_create K");
+    TEST_EXPECT_EQ(env_write(p, id, 0, "v", 1), 1L, "env_write K=v");
+    TEST_EXPECT_EQ(exec_stage_env(p, &d, &len, &count), 0, "one var stages OK");
+    TEST_ASSERT(d != NULL, "one var yields a block");
+    TEST_EXPECT_EQ((u64)len, 4ull, "\"K=v\\0\" is four bytes");
+    TEST_EXPECT_EQ((u64)count, 1ull, "one record");
+    TEST_EXPECT_EQ((u64)d[3], 0ull, "the block ends in a NUL");
+    kfree(d);
+
+    // Now overflow it. Nine values of ENV_VALUE_MAX bytes is ~36 KiB of
+    // records against a 32 KiB bound.
+    char *big = (char *)kmalloc(ENV_VALUE_MAX, 0);
+    TEST_ASSERT(big != NULL, "kmalloc the filler value");
+    for (u32 i = 0; i < ENV_VALUE_MAX; i++) big[i] = 'x';
+    for (u32 v = 0; v < 9; v++) {
+        char nm[3] = { 'V', (char)('0' + v), 0 };
+        u64 vid = env_create(p, nm, 2);
+        TEST_ASSERT(vid != 0, "env_create filler");
+        TEST_EXPECT_EQ(env_write(p, vid, 0, big, (long)ENV_VALUE_MAX),
+                       (long)ENV_VALUE_MAX, "env_write filler value");
+    }
+    kfree(big);
+
+    d = (char *)0x1;
+    len = 99; count = 99;
+    TEST_EXPECT_EQ(exec_stage_env(p, &d, &len, &count), -(int)T_E_2BIG,
+        "an oversize environment is refused with E2BIG");
+    TEST_ASSERT(d == NULL, "a refused projection leaks no block");
+
+    // ...and the refusal reaches exec: the whole load fails rather than
+    // silently handing the new image a truncated environment.
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), -1,
+        "exec refuses rather than truncating the environment");
 
     drop_proc(p);
 }
@@ -591,8 +943,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
 
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
-    u64 *w = (u64 *)(stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+    TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
+    u64 *w = (u64 *)fb;
 
     TEST_EXPECT_EQ(w[3], (u64)AT_PHDR,  "auxv still carries an AT_PHDR slot");
     TEST_EXPECT_EQ(w[4], 0ull,          "AT_PHDR == 0 (no segment covers the phdrs)");
@@ -749,4 +1103,257 @@ void test_exec_from_spoor_bss_only_text_icache_synced(void) {
     drop_proc(p);
     image_cache_evict_idle_for_test();
     spoor_clunk(exe);
+}
+
+// LINEAGE L-2: exec_load_into -- the DETACHED build.
+//
+// execve must be able to fail with the caller's image completely intact, which
+// is only true if the load never touches the caller's address space. These pin
+// that property at the mechanism level; the syscall-level proof is /exec-probe's
+// leg A (a failed execve returns and the caller keeps running).
+//
+// The counters are what make this non-vacuous. A "simplification" that built
+// into p->as and swapped afterwards would still load the image correctly and
+// still pass a VMA-shape check -- it would just charge the wrong address space,
+// silently, leaving the surviving one reporting zero RSS for the rest of the
+// Proc's life. So the assertions below are as much about page_count/vma_count
+// as about where the VMAs landed.
+// =============================================================================
+
+void test_execve_load_into_detached(void);
+void test_execve_load_into_rejects_dirty(void);
+void test_execve_failed_load_leaves_target_drainable(void);
+
+void test_execve_load_into_detached(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DE7ull;      // distinct Image key
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+    TEST_ASSERT(nas != p->as, "the target is a DIFFERENT address space");
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_load_into(nas, /*exempt=*/false, exe, size,
+                            NULL, 0, 0, NULL, 0, 0, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_load_into into a detached address space");
+    TEST_EXPECT_EQ(entry, (u64)0x10000, "entry == e_entry");
+
+    // The image landed in the TARGET...
+    TEST_ASSERT(vma_lookup_in(nas, 0x10000ull) != NULL, "text VMA in the target");
+    TEST_ASSERT(vma_lookup_in(nas, 0x20000ull) != NULL, "data VMA in the target");
+    TEST_ASSERT(vma_lookup_in(nas, EXEC_USER_STACK_BASE) != NULL,
+                "stack VMA in the target");
+    TEST_ASSERT(nas->vma_count > 0, "the target was charged its VMAs");
+
+    // ...and the CALLER's address space is untouched. The vma_count pair is
+    // what makes this non-vacuous -- a build that targeted p->as would install
+    // the same VMAs and charge the same count, just on the wrong object.
+    TEST_ASSERT(p->as->vmas == NULL, "the caller's VMA list is still empty");
+    TEST_EXPECT_EQ((u64)p->as->vma_count, 0ull,
+                   "the caller's VMA count was NOT charged");
+
+    // NOT asserted: that either address space was charged PAGES. Measured --
+    // exec charges no page_count at all. The I-32 page axis is charged at
+    // exactly three sites (SYS_BURROW_ATTACH, SYS_LOOM_SETUP's ring, and the
+    // lazy demand-page fault arm), which is the axis's documented scope: it
+    // bounds the REPEATABLE anon vectors, while the exec image is one-shot and
+    // bounded by EXEC_FILE_MAX plus the segment maps themselves. A future
+    // reader who assumes exec charges pages -- as this test's first draft did,
+    // and failed -- should read that scope note in the I-32 row rather than
+    // "fix" the accounting here.
+
+    // The caller owns the target's teardown on every path.
+    vma_drain_in(nas);
+    TEST_ASSERT(nas->vmas == NULL, "drain emptied the target");
+    addrspace_unref(nas);
+
+    spoor_clunk(exe);
+    drop_proc(p);
+}
+
+void test_execve_load_into_rejects_dirty(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0x1000);
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DE8ull;
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    // Load once -- succeeds and leaves the target populated.
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
+                   0, "first load into a clean target");
+
+    // Loading again into the SAME (now dirty) target must refuse rather than
+    // overlay a second image on top of the first.
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
+                   -1, "a second load into a dirty target is refused");
+
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    drop_proc(p);
+}
+
+void test_execve_failed_load_leaves_target_drainable(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // A well-formed ELF whose SECOND segment is unmappable. #149 changed the
+    // VEHICLE, not the property: an unaligned vaddr is now legal, so the second
+    // segment instead SHARES the first's page, which exec_load_into refuses
+    // (the shared page would need the W+X union I-12 forbids). The first
+    // segment maps before the failure, so the target is left PARTIALLY
+    // populated -- exactly the state the syscall's failure arm has to clean up.
+    u32 flags[2] = { PF_R | PF_X, PF_R | PF_W };
+    size_t size = build_elf(flags, 2, /*filesz=*/0x1000);
+    {
+        // Point the second phdr into the FIRST segment's page (0x10000).
+        struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+        struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+        ph[1].p_vaddr = ph[0].p_vaddr + 0x800;
+        ph[1].p_paddr = ph[1].p_vaddr;
+    }
+    g_blob_dev_size = size;
+
+    struct Spoor *exe = spoor_alloc(&g_blob_dev);
+    TEST_ASSERT(exe != NULL, "spoor_alloc");
+    exe->qid.path = 0x1E2DE9ull;
+    exe->qid.vers = 3;
+
+    struct AddrSpace *nas = addrspace_alloc(PROC_PAGE_MAX);
+    TEST_ASSERT(nas != NULL, "addrspace_alloc");
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_load_into(nas, false, exe, size, NULL, 0, 0, NULL, 0, 0,
+                                  &entry, &sp),
+                   -1, "a mid-load failure is reported");
+    TEST_ASSERT(nas->vmas != NULL, "the target really is partially populated");
+
+    // The caller's address space never saw any of it -- which is what lets the
+    // syscall return -errno to a Proc that keeps running.
+    TEST_ASSERT(p->as->vmas == NULL, "the caller's VMA list is still empty");
+    TEST_EXPECT_EQ((u64)p->as->vma_count, 0ull, "the caller was not charged");
+
+    // And the partial target tears down cleanly (addrspace_unref extincts on a
+    // live VMA list, so reaching the end of this test IS the assertion).
+    vma_drain_in(nas);
+    addrspace_unref(nas);
+    spoor_clunk(exe);
+    drop_proc(p);
+}
+
+// =============================================================================
+// LINEAGE L-4a: exec's private writable backing is SPARSE
+// =============================================================================
+
+// The regression for #130. corvus's RW PT_LOAD is FileSiz 128 B / MemSiz 24 MiB
+// (essentially all .bss) and map_eager_from_file sized the allocation by MEMSZ,
+// so every corvus exec allocated AND zeroed a 32 MiB order-13 block for 128 bytes
+// of data. The same shape at test scale: assert the Burrow RESERVES the whole
+// memsz but only the file-backed head is RESIDENT.
+//
+// Revert-probe: restoring burrow_create_anon here fails BOTH the type assertion
+// and the resident-count one (burrow_lazy_resident_count answers 0 for a Burrow
+// that is not ANON_LAZY, so the eager path cannot accidentally satisfy it).
+void test_exec_writable_segment_is_sparse(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    // One RW segment: 64 bytes of file data behind 4 MiB of memsz.
+    u32 flags[1] = { PF_R | PF_W };
+    size_t size = build_elf(flags, 1, /*filesz=*/64);
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_elf_blob;
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_elf_blob + eh->e_phoff);
+    const u64 memsz = 4ull * 1024 * 1024;
+    ph[0].p_memsz = memsz;
+    for (size_t i = 0; i < 64; i++) g_elf_blob[PAGE_SIZE + i] = (u8)(i ^ 0xA5);
+
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0,
+        "exec_setup with a large-bss writable segment");
+
+    struct Vma *vma = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(vma != NULL && vma->burrow != NULL, "data VMA + Burrow");
+    TEST_EXPECT_EQ((int)vma->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "the writable segment is backed by a SPARSE Burrow");
+
+    // It RESERVES every memsz page ...
+    TEST_EXPECT_EQ((u64)vma->burrow->page_count, memsz / PAGE_SIZE,
+        "the Burrow reserves the whole memsz (1024 pages)");
+    // ... but only the file-backed head is RESIDENT. This is the assertion the
+    // eager path structurally cannot satisfy -- it allocated all 1024 up front.
+    TEST_EXPECT_EQ((u64)burrow_lazy_resident_count(vma->burrow), 1ull,
+        "only the file-backed page is resident; the bss tail costs nothing");
+
+    // The bytes still landed, and the resident page's tail past filesz is zero --
+    // so "sparse" changed WHEN a page is allocated, never WHAT it reads as.
+    u8 *b = lazy_byte(vma->burrow, 0);
+    TEST_ASSERT(b != NULL, "the file-backed page is populated");
+    for (size_t i = 0; i < 64; i++)
+        TEST_EXPECT_EQ((u64)b[i], (u64)(u8)(i ^ 0xA5), "file byte preserved");
+    TEST_EXPECT_EQ((u64)b[64], 0ull, "the page's tail past filesz reads zero");
+
+    // I-32: exec-image pages are now on the page axis (they were uncharged while
+    // eager). Exactly two: this segment's file-backed page, and the one page the
+    // argv/auxv frame occupies at the top of the stack. The vDSO is mapped from a
+    // kernel-owned Burrow and charges nothing.
+    TEST_EXPECT_EQ((u64)p->as->page_count, 2ull,
+        "charged exactly the pages exec made resident (data 1 + stack frame 1)");
+
+    drop_proc(p);
+}
+
+// The stack half (#49): 1 MiB reserved, only the frame's page resident. Every exec
+// used to allocate and zero all 256 pages whether or not the program descended
+// that far; now the stack grows downward by demand-zero fault, the Linux model.
+void test_exec_stack_is_sparse(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/16);
+    u64 entry = 0, sp = 0;
+    TEST_EXPECT_EQ(exec_setup(p, g_elf_blob, size, &entry, &sp), 0, "exec_setup");
+
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + Burrow");
+    TEST_EXPECT_EQ((int)sv->burrow->type, (int)BURROW_TYPE_ANON_LAZY,
+        "the user stack is backed by a SPARSE Burrow");
+    TEST_EXPECT_EQ((u64)sv->burrow->page_count,
+                   (u64)(EXEC_USER_STACK_SIZE / PAGE_SIZE),
+        "the stack reserves its full 1 MiB (256 pages)");
+    TEST_EXPECT_EQ((u64)burrow_lazy_resident_count(sv->burrow), 1ull,
+        "only the argv/auxv frame's page is resident; the other 255 demand-zero");
+
+    // A PF_X segment stays EAGER (seg_may_be_sparse: nothing executable may arrive
+    // through the demand-zero arm, which does no I-cache maintenance) -- so the
+    // only page charged besides the frame is none at all.
+    struct Vma *tv = vma_lookup(p, 0x10000ull);
+    TEST_ASSERT(tv != NULL && tv->burrow != NULL, "text VMA + Burrow");
+    TEST_EXPECT_EQ((int)tv->burrow->type, (int)BURROW_TYPE_ANON,
+        "an executable segment stays EAGER (the I-cache reason)");
+    TEST_EXPECT_EQ((u64)p->as->page_count, 1ull,
+        "only the stack frame's page is charged (the eager text is not)");
+
+    drop_proc(p);
 }

@@ -8,10 +8,12 @@
 // what /joey can do: an arbitrary userspace binary instead of a
 // hand-encoded SVC SYS_PUTS+SYS_EXITS sequence.
 //
-// The blob is owned by the devramfs file table for the kernel's
-// lifetime; exec_setup copies what it needs into the child's address
-// space, so the pointer's lifetime is comfortably longer than the
-// child Proc's reference to it.
+// The cpio bytes are owned by the devramfs file table for the kernel's
+// lifetime; the 8-aligned working copy handed to exec_setup is a
+// transient exact-size heap buffer the child frees the moment
+// exec_setup returns (#85) -- exec_setup fully consumes the blob
+// (elf_load fills a scalars-only elf_image; exec_map_segment copies
+// segment bytes into Burrows), so nothing references it afterwards.
 //
 // Boot flow:
 //   boot_main() ... all bring-up ...
@@ -44,7 +46,6 @@
 #include <thylacine/dev.h>
 #include <thylacine/devramfs.h>
 #include <thylacine/devsrv.h>
-#include <thylacine/elf.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
@@ -55,6 +56,7 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/uart.h"
+#include "../mm/slub.h"          // #85: kmalloc/kfree for the transient init blob
 
 // File name in the initrd cpio. Built by usr/joey/CMakeLists.txt and
 // copied into the cpio root by tools/build.sh::build_ramfs.
@@ -62,42 +64,45 @@
 
 // Cpio newc data is only 4-byte-aligned, but the ELF Ehdr cast in
 // elf_load (kernel/elf.c::elf_load — R5-G F61) requires 8-byte
-// alignment. Copy into an 8-aligned static buffer before handing the
-// blob to exec_setup. Sized to comfortably cover joey's growing
-// orchestration surface: at P5-corvus-bringup-c joey embedded inline
-// USER_CREATE + AUTH(bad) + AUTH(good) + SESSION_CLOSE wire codec
-// (~36 KiB total); at P5-stratumd-stub-bringup-e2 the stub-bringup
-// adds an SYS_CHROOT + SYS_WALK_OPEN(FROM_ROOT) sequence, pushing the
-// blob over 65 KiB. The A-1b corvus identity-DB harness (RESOLVE/
-// GROUP_CREATE round-trips) pushes it past 128 KiB. The accumulating
-// net boot probes (net-2c/3a/3b/3c each add a /net fid-machine harness)
-// pushed it past 256 KiB at net-3c; 384 KiB restores headroom for the
-// remaining net arc (net-3d..net-8) and later orchestration.
+// alignment, so joey_run copies the bytes into an aligned working
+// buffer before handing them to exec_setup.
 //
-// CL-7k-2 -> 768 KiB, and the MEASUREMENT is the reason rather than the
-// symptom: at the 512 KiB bound joey had reached 523,656 bytes -- 99.88% full,
-// 632 bytes of headroom. The ~50 lines this chunk added (a CLEARANCE_GRANT
-// block + a prover spawn, 7.3 KiB compiled) tipped it, but ANY next addition
-// would have, so bumping to "just past what tipped it" would buy one more
-// chunk at most. That is what the 36 -> 65 -> 128 -> 256 -> 384 -> 512 history
-// above is a record of. 768 KiB is a deliberate step out of that cycle.
+// #85: that buffer is a TRANSIENT exact-size kmalloc, not a static
+// array. The predecessor — a JOEY_BLOB_MAX-sized BSS array — was bumped
+// six times (36K → 65K → 128K → 256K → 384K → 512K → 640K, and on the
+// other branch → 768K) as boot
+// probes accumulated, and every KiB of it was permanently-resident
+// kernel memory holding a stale copy of an ELF already mapped into
+// joey's address space. The heap copy costs the same bytes only for the
+// exec window: the child kfrees it the moment exec_setup returns
+// (success or failure), because exec_setup fully consumes the blob —
+// elf_load fills a scalars-only elf_image and exec_map_segment copies
+// segment bytes into Burrows, so no pointer into the blob survives the
+// call. Alignment is inherent: kmalloc's large path (> 2 KiB) returns a
+// page-aligned direct-map KVA, and slab objects sit at power-of-two
+// boundaries ≥ 8; a regression here is caught loudly by elf_load's
+// up-front alignment reject (R5-G F61).
 //
-// This buffer is static kernel BSS, so the headroom is not free -- and the
-// growth curve says the static-blob approach has a visible end. The real fix
-// when this next binds is to stop slurping init whole: joey is an ordinary ELF
-// on the ramfs, and REVENANT (I-36) already demand-pages file-backed text for
-// every OTHER binary. Init is the one exec that predates a namespace to
-// resolve through, which is why it is special-cased here.
-#define JOEY_BLOB_MAX (768u * 1024u)
-static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
+// The size gate is EXEC_FILE_MAX — the same sanity ceiling every
+// namespace-exec'd binary gets (exec.h). joey no longer needs a tighter
+// bound of its own: the ceiling stopped costing resident memory, and
+// devramfs_lookup can only return a size the cpio parser has already
+// bounds-checked against the initrd extent (kernel/cpio.c: truncated
+// data ⇒ parse error), so the value is always backed by real bytes.
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the
 // caller (boot CPU) stack for the duration of joey_run(); the child
 // reads it once before transitioning to EL0, after which the parent
 // blocks in wait_pid_for() on that child's pid.
+//
+// `blob` is heap-owned and ownership transfers to the child: joey_thunk
+// kfrees it right after exec_setup. The parent cannot be the freer — in
+// production it parks in wait_pid for the machine's lifetime (joey is
+// the long-running init and never exits), so a parent-side free would
+// never run.
 struct joey_args {
-    const void *blob;
-    size_t      blob_size;
+    void  *blob;
+    size_t blob_size;
 };
 
 // Child entry. Runs in EL1 on the rfork'd kthread's kstack, in the
@@ -162,6 +167,17 @@ static void joey_thunk(void *arg) {
 
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
+
+    // #85: the blob is dead the moment exec_setup returns — on BOTH arms
+    // (success maps the segments; failure leaves only Proc-side partial
+    // state, never blob references). Free before either exit so the
+    // exec-window transient is exactly that. The log line makes the
+    // non-residency visible in every boot log.
+    kfree(ia->blob);
+    uart_puts("  joey: init blob released (");
+    uart_putdec((u64)ia->blob_size);
+    uart_puts(" bytes, exec-window transient)\n");
+
     if (rc != 0) {
         uart_puts("  joey: exec_setup failed rc=");
         uart_putdec((u64)rc);
@@ -251,14 +267,24 @@ void joey_run(void) {
     if (blob_size == 0) {
         extinction("joey: /joey in initrd has zero size");
     }
-    if (blob_size > JOEY_BLOB_MAX) {
-        extinction_with_addr("joey: /joey ELF exceeds JOEY_BLOB_MAX", (u64)blob_size);
+    if ((u64)blob_size > EXEC_FILE_MAX) {
+        extinction_with_addr("joey: /joey ELF exceeds EXEC_FILE_MAX", (u64)blob_size);
     }
 
-    // Copy cpio's 4-aligned bytes into the 8-aligned static buffer the
-    // ELF loader requires.
+    // #85: copy cpio's 4-aligned bytes into an exact-size 8-aligned heap
+    // buffer (see the block comment above struct joey_args). Allocation
+    // failure at this boot point is unrecoverable — extinct with the
+    // measured size so the diagnosis stays a one-liner. KP_ZERO keeps the
+    // bytes beyond blob_size in the rounded-up allocation deterministically
+    // zero — exact parity with the BSS predecessor; elf_load bounds every
+    // read within blob_size, this just keeps any future bounds regression
+    // content-independent instead of buddy-garbage-sensitive.
+    u8 *elf_blob = kmalloc(blob_size, KP_ZERO);
+    if (!elf_blob) {
+        extinction_with_addr("joey: init blob kmalloc failed", (u64)blob_size);
+    }
     const u8 *src = (const u8 *)cpio_blob;
-    for (size_t i = 0; i < blob_size; i++) g_joey_elf_blob[i] = src[i];
+    for (size_t i = 0; i < blob_size; i++) elf_blob[i] = src[i];
 
     // P6-pouch-stratumd-boot 16b-gamma: stamp kproc's Territory with a
     // root_spoor pointing at devramfs root, BEFORE rforking joey. The
@@ -390,7 +416,7 @@ void joey_run(void) {
     uart_puts(" byte ELF from initrd)\n");
 
     struct joey_args args = {
-        .blob      = g_joey_elf_blob,
+        .blob      = elf_blob,
         .blob_size = blob_size,
     };
 
@@ -421,6 +447,20 @@ void joey_run(void) {
     // performed at most ONE incidental reap and then extincted on it, so there
     // is no ongoing reaping to lose -- and both arms below end the boot.
     int status = -42;
+    // Task #94: BY PID, not reap-any. kproc is the Proc the orphan rule
+    // reparents to, so a reap-any here races adoption: when /joey fails and
+    // bringup unwinds, an adopted orphan can be handed over first, `reaped !=
+    // pid` fires, and the LAST line of a failed boot names a wrong-pid reap
+    // instead of the real cause -- pointing a reader at the wrong subsystem
+    // exactly when a gate breaks. (#94 diagnosed this as the usr/joey.c
+    // reap-any sites; measuring found those already converted by the U-7-pre
+    // lift, and the two that remain are the init orphan-reaper loops, where
+    // reap-any is correct. This kproc-side site was the actual one.)
+    //
+    // /joey is init and does not exit in normal operation, so this returns
+    // only on a failure -- which is precisely when the diagnostic has to be
+    // right. An orphan left unreaped here is not a leak: the next line
+    // extincts.
     int reaped = wait_pid_for(pid, 0, &status);
     if (reaped != pid) {
         // Now reachable only as -1: no child with that pid (structurally

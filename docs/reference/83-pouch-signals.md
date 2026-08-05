@@ -327,3 +327,92 @@ The boundary-line file convention (`_pouch_signal.h`, `_pouch_signal.c`) mirrors
 - `docs/reference/78-pouch.md` — pouch overview (the broader pouch architecture).
 - `docs/reference/82-pouch-pthread.md` — sub-chunk 9b parallel (pthread layer).
 - `memory/audit_p6_pouch_signals_13a_closed_list.md` — the kernel substrate's 4-round audit closed list (42 findings).
+
+---
+
+## FP/SIMD preservation across a handler (task #96, V-8)
+
+A note handler runs on the **same Thread** as the code it interrupts, with no
+context switch. `cpu_switch_context`'s eager FP save (P4-Ic5) covers a thread
+switched *out*, so it never fires here -- and before V-8 nothing else did.
+`notes_deliver_at_el0_return` saved x0-x30 / sp_el0 / elr / spsr and nothing
+more, so the first thing a handler did that touched a V register silently
+corrupted the interrupted computation. That is not exotic: any float
+arithmetic, any autovectorised `memcpy`, any `printf("%f")` does it.
+
+This was never an authority question -- the registers are the Proc's own, and
+no gate is involved. It was silent data corruption, and it was **pre-existing
+on the native path**: pouch signal handlers have gone through
+`SYS_NOTIFY` -> `notes_deliver_at_el0_return` since P6-pouch-signals. The
+VIVARIUM phenotype made it far more reachable, because a Linux guest's handler
+is ordinary compiled C.
+
+### The fix
+
+`fp_save_area` / `fp_restore_area` (`arch/arm64/context.S`) save and restore
+V0-V31 + FPSR + FPCR to a caller-supplied 520-byte 16-aligned area, using the
+same STP/LDP-Q sequence and the same trailing `isb`-after-FPCR as
+`cpu_switch_context`. `struct Thread` carries one such area inline
+(`note_saved_fp`, 1232 -> 1760 bytes), for the same reason the GP block is
+inline: delivery must be **alloc-free**, since a `kmalloc` failure mid-delivery
+would silently drop the handler invocation.
+
+`t->ctx.fp_v` cannot serve. It is the switch-*out* slot: if the handler is
+preempted, `cpu_switch_context` stores the **handler's** FP state into it and
+the interrupted snapshot is gone.
+
+### Two save sites, one restore -- and why completeness is mandatory
+
+- `notes_deliver_linux_locked` -- the phenotype path.
+- `notes_deliver_at_el0_return` -- the native Plan 9 path.
+- `notes_noted_restore` -- shared by both (`rt_sigreturn` is the phenotyped
+  spelling of `SYS_NOTED(NCONT)`).
+
+A *missed* save is worse than no fix at all, and this is observed rather than
+argued: with one save disabled, the still-live shared restore writes the
+**zeroed** area into V0-V31, and the in-guest leg reports `V0 = 0x00` -- not
+the handler's pattern. Both sites were revert-probed independently and each
+fails at its own assertion.
+
+The pairing is exhaustive by construction: `in_handler` is written in exactly
+three places (`true` at the two save sites, in straight-line code immediately
+after each save; `false` at the restore), `notes_noted_restore` returns early
+unless `in_handler`, and it has exactly one caller.
+
+### Why reading live registers is sound
+
+Unlike the GP save -- which copies the `ctx` snapshot the vector code took at
+EL0 entry -- the FP save reads the **live hardware** registers. That is correct
+only if no kernel code clobbers V registers between EL0 entry and delivery.
+Measured over the whole built kernel, every SIMD instruction lives in five
+functions: `cpu_switch_context` (which round-trips them), the two helpers
+above, and two test functions. No production path outside the context switch
+touches them. This is the same invariant `cpu_switch_context` has itself
+depended on since P4-Ic5 -- reused, not newly assumed.
+
+### Coverage
+
+- `fp.note_area_round_trip` -- the mechanism (sentinel -> save -> clobber ->
+  restore -> compare). Verifies the **clobber took** before trusting the
+  restore, so a pair of no-op helpers cannot pass it.
+- `/pouch-hello-signals` `#96` leg -- the native path, in-guest.
+- `viv-pheno-probe` L155-L157 -- the phenotype path, in-guest.
+
+Both in-guest legs do the load / syscall / store in **one asm block**. This is
+not stylistic: a C-level `raise()` is an ordinary call, and AAPCS64 lets a call
+clobber V0-V7 and V16-V31 -- so a check written *around* the call could not
+distinguish the bug from the ABI. Inside one block the `svc` is the only thing
+that runs, and the handler is dispatched at its EL0-return tail: a genuine
+asynchronous interruption.
+
+The kernel suite stays **fully green** with either save site disabled. Only the
+guest legs see it -- the two-layer split in its purest form.
+
+### What remains degraded
+
+The frame's `_aarch64_ctx` chain is still terminated immediately rather than
+carrying an `fpsimd_context`, so a guest that walks `uc_mcontext.__reserved`
+looking for its FP state is told the record is **absent** rather than being
+handed a wrong one. The state itself is now genuinely preserved underneath;
+serialising it into the frame is a pure reporting change with the hard part
+done. See VIVARIUM.md section 9.

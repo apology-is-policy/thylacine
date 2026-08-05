@@ -46,7 +46,36 @@ struct page {
     u32 order;                  // current order if PG_FREE; slab order if PG_SLAB
     u32 flags;                  // PG_*
     u32 refcount;               // BURROW refcount placeholder; slab: inuse count
-    u32 _pad;                   // 4-byte alignment slack
+    // LINEAGE L-4b (I-44): the copy-on-write SHARE count -- how many anon
+    // Burrow slots point at this page. Took the former `_pad`, so the struct
+    // is the same 48 bytes and the per-RAM BSS reservation is unchanged.
+    //
+    // DELIBERATELY NOT `refcount` above, which LINEAGE section 2.8 measures to
+    // be unusable for this: the buddy writes it per-BLOCK-HEAD (mm/buddy.c),
+    // so every tail page of an order>0 block holds a stale value, and SLUB
+    // already double-books it as a slab inuse count reaching 85. Neither
+    // reaches THIS field, because no allocator path touches it.
+    //
+    // THE CONTRACT, which is the whole of its correctness:
+    //
+    //   cow_share is meaningful ONLY while the page sits in an anon Burrow's
+    //   filepages[] slot, and it is ESTABLISHED, NEVER INHERITED -- every site
+    //   that puts a page into such a slot sets it to 1 (cow_page_set_sole)
+    //   rather than assuming what a previous user left behind.
+    //
+    // That is what keeps it from becoming the very hazard section 2.8 names --
+    // "a field whose name states a contract nothing keeps" -- because a page
+    // recycled through the buddy carries whatever its last owner left, and a
+    // stale count means a premature free or a leak. The sites are a closed,
+    // enumerated set of three: burrow_lazy_populate, the demand-zero fault
+    // install (arch/arm64/fault.c), and the COW break. Every OTHER filepages[]
+    // writer is BURROW_TYPE_FILE -- text, shared read-only through the Image
+    // cache, never broken -- and deliberately does not participate.
+    //
+    // Serialized by the GLOBAL g_cow_lock (kernel/cow.c), not by the Burrow
+    // lock: two sharers of one page hold DIFFERENT Burrow locks, so no
+    // per-Burrow lock could serialise the break's decide. See cow.h.
+    u32 cow_share;
     void *slab_freelist;        // SLUB: head of free objects in this slab
     struct kmem_cache *slab_cache; // SLUB: cache backref (NULL when not a slab)
 };

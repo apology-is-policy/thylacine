@@ -115,15 +115,60 @@ struct TimeSpec {
 // stack slot), so a non-zero return is unreachable here -- map it to ZERO
 // defensively. tv_sec >= 0 (epoch or uptime); tv_nsec is clamped to [0, 1e9).
 fn read_clock(clk_id: u64) -> Duration {
+    let ns = read_clock_ns(clk_id);
+    Duration::new(ns / 1_000_000_000, (ns % 1_000_000_000) as u32)
+}
+
+// The primitive both the Duration and the raw-ns surfaces are built on. Keeping
+// ONE vDSO-first reader is the point of V-4c-3 SA-4: a consumer that wants
+// nanoseconds and reaches past this for `t_clock_gettime` silently opts out of
+// the #343 fast path, and nothing about the call site makes that visible.
+fn read_clock_ns(clk_id: u64) -> u64 {
     if let Some(ns) = crate::vdso_now_ns(clk_id) {
-        return Duration::new(ns / 1_000_000_000, (ns % 1_000_000_000) as u32);
+        return ns;
     }
     let mut ts = TimeSpec { tv_sec: 0, tv_nsec: 0 };
     let rc = unsafe { t_clock_gettime(clk_id, &mut ts as *mut TimeSpec as u64) };
     if rc != 0 {
-        return Duration::ZERO;
+        return 0;
     }
-    Duration::new(ts.tv_sec.max(0) as u64, ts.tv_nsec.clamp(0, 999_999_999) as u32)
+    (ts.tv_sec.max(0) as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec.clamp(0, 999_999_999) as u64)
+}
+
+/// Nanoseconds since boot (`CLOCK_MONOTONIC`).
+///
+/// Takes the #343 vDSO page when present (a `CNTVCT_EL0` read, no syscall) and
+/// falls back to `SYS_CLOCK_GETTIME` on an older kernel. 0 if the clock is
+/// unreadable, matching `Instant`'s fail-soft posture.
+pub fn monotonic_ns() -> u64 {
+    read_clock_ns(T_CLOCK_MONOTONIC)
+}
+
+/// Nanoseconds since the Unix epoch (`CLOCK_REALTIME`). Same fast path and same
+/// fail-soft 0 as [`monotonic_ns`].
+pub fn realtime_ns() -> u64 {
+    read_clock_ns(T_CLOCK_REALTIME)
+}
+
+/// `(monotonic_ns, realtime_ns)` from a SINGLE clock sample.
+///
+/// Use this instead of calling the two readers when the DIFFERENCE matters --
+/// `realtime - monotonic` is the wall time at boot (`/proc/stat`'s `btime`),
+/// and two independently-taken samples let whatever happens between them, a
+/// preemption or an interrupt, leak into that difference as error. On the vDSO
+/// path both values derive from one `CNTVCT_EL0` read, so the difference is
+/// exactly the kernel's wall offset.
+///
+/// The syscall fallback cannot offer that guarantee -- two `SYS_CLOCK_GETTIME`
+/// calls are two samples -- so it is back-to-back reads and no better than the
+/// caller could do itself. That is the pre-vDSO behaviour, not a regression.
+pub fn monotonic_realtime_ns() -> (u64, u64) {
+    if let Some(pair) = crate::vdso_now_pair_ns() {
+        return pair;
+    }
+    (read_clock_ns(T_CLOCK_MONOTONIC), read_clock_ns(T_CLOCK_REALTIME))
 }
 
 /// A monotonic timestamp (`CLOCK_MONOTONIC` -- nanoseconds since boot). Never
@@ -145,6 +190,16 @@ impl Instant {
     /// The Duration from `earlier` to `self` (saturating at zero).
     pub fn duration_since(&self, earlier: Instant) -> Duration {
         self.0.saturating_sub(earlier.0)
+    }
+
+    /// Time since boot, this Instant's absolute value.
+    ///
+    /// `CLOCK_MONOTONIC` on Thylacine counts from boot (ARCH section 22.6), so
+    /// an Instant is meaningful on its own and not only as one end of an
+    /// interval -- which is what `/proc/uptime` needs. Its absence is what sent
+    /// the diorama around this API to the raw syscall (V-4c-3 SA-4).
+    pub fn since_boot(&self) -> Duration {
+        self.0
     }
 }
 

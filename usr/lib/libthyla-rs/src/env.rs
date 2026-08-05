@@ -1,4 +1,4 @@
-// libthyla-rs::env — process environment (argv today; envp is a v1.x seam).
+// libthyla-rs::env — process environment (argv, envp, and the /env device).
 //
 // Closes DOC-GAP-REPORT G03 [P1]: a native program could not read its own
 // argv/argc. The kernel populates a System-V startup frame on the user
@@ -19,13 +19,28 @@
 // program never overwrites them -- they are valid for the whole process
 // lifetime, hence `&'static [u8]`.
 //
-// ENVIRONMENT (G15, closed by the /env device): the kernel reserves the
-// `_pad_envp` spawn-ABI slot but does not pass an envp at v1.0 (the startup
-// frame's envp slot is a single NULL). Thylacine's environment is instead the
-// per-Proc `/env` Dev (the Plan 9 Egrp idiom; Go Stage 4a): a variable is the
-// file `/env/NAME`, inherited by children via the kernel clone
-// (env_clone_into). `var()` below reads that surface; a `vars()` enumeration
-// (readdir over /env) is an add-when-needed nicety.
+// ENVIRONMENT -- TWO SURFACES, AND THEY ARE NOT THE SAME OBJECT.
+//
+// The AUTHORITATIVE, MUTABLE one is the per-Proc `/env` Dev (G15; the Plan 9
+// Egrp idiom): a variable is the file `/env/NAME`, inherited by children via
+// the kernel clone (env_clone_into). `var()` reads it, and writing `/env/NAME`
+// is how a program CHANGES its environment. It is the surface a Thylacine
+// program should reach for.
+//
+// The other is the startup frame's `envp` (#140), which `vars()` enumerates. It
+// is a SNAPSHOT the kernel projected out of /env when this image was exec'd --
+// so it is a picture of the environment AT EXEC, and a later `/env` write does
+// not appear in it. It exists because POSIX and every C runtime want `environ`
+// on the stack, and because a Linux guest under a vivarium passes its
+// environment through `execve`'s envp argument, which has nowhere else to land.
+//
+// WHERE THEY DIVERGE: an `execve(path, argv, envp)` from a phenotyped guest
+// puts `envp` on the new image's frame WITHOUT rewriting /env, so `vars()`
+// reports what the caller asked for while `var()` reports what the Proc
+// inherited. Prefer `var()` unless you specifically want the frame.
+//
+// (Until #140 this said "the startup frame's envp slot is a single NULL", which
+// was true and is the bug that task fixed.)
 
 use crate::err::{Error, Result};
 use crate::io::Read;
@@ -197,6 +212,58 @@ impl Iterator for Operands {
             self.i += 1;
         }
         item
+    }
+}
+
+/// Iterator over the startup frame's `envp` -- the environment SNAPSHOT the
+/// kernel projected when this image was exec'd (#140). Each item is one
+/// `NAME=VALUE` record as a borrowed byte slice, in the frame's order.
+///
+/// Read the module header before reaching for this: [`var`] is the surface a
+/// Thylacine program usually wants, because it reads the LIVE `/env` rather
+/// than a picture taken at exec. `vars()` is for the cases where the frame is
+/// specifically what matters -- proving what an `execve` delivered, or
+/// reproducing C's `environ` for a port.
+pub struct Vars {
+    envp: *const *const u8,
+    i: usize,
+}
+
+/// The startup frame's environment. Empty when the image was exec'd with none.
+#[inline]
+pub fn vars() -> Vars {
+    let (argc, argv) = rt_raw_args();
+    if argv.is_null() {
+        // Before `_start` (unreachable from app code); yield nothing rather
+        // than walking from a null base.
+        return Vars { envp: core::ptr::null(), i: 0 };
+    }
+    // The frame's layout is fixed by the ABI (kernel/include/thylacine/exec.h):
+    // argv[argc] is the NULL terminator, so envp[0] is one word past it. This
+    // is the same arithmetic `capture_auxv` uses to reach the auxv, and it is
+    // correct for an empty environment too -- there envp[0] IS the terminator
+    // and the iterator stops immediately.
+    // SAFETY: rt_raw_args returns the frame `_start` captured; the frame is
+    // 'static (see the module header's LIFETIME note).
+    Vars { envp: unsafe { argv.add(argc + 1) }, i: 0 }
+}
+
+impl Iterator for Vars {
+    type Item = &'static [u8];
+    fn next(&mut self) -> Option<&'static [u8]> {
+        if self.envp.is_null() {
+            return None;
+        }
+        // SAFETY: the envp array is NULL-terminated by the ABI, so advancing
+        // while the current slot is non-null stays in bounds.
+        unsafe {
+            let p = *self.envp.add(self.i);
+            if p.is_null() {
+                return None;
+            }
+            self.i += 1;
+            Some(cstr_bytes(p))
+        }
     }
 }
 
