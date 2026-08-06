@@ -227,6 +227,19 @@ whenever the swap path sees the mapping change — keyed on the recorded
 binding rather than on the resize event, so it is correct regardless of
 which layer noticed the resize first.
 
+### Header provenance: `third_party/mesa-gl-headers` (#153)
+
+The GL/OSMesa/KHR headers the GL TU compiles against are **vendored** at
+`third_party/mesa-gl-headers/{GL,KHR}` (MIT, byte-pristine from the
+mesa-thylacine fork's install tree; see its README for the refresh
+protocol). `build.sh` installs them into the pouch sysroot at the
+sysroot-rebuild chokepoint from the repo copy — never from `build/` — so a
+clean worktree with no pulled clade artifacts compiles this backend; only
+the *link* of GL apps degrades (announced) when the pulled `libOSMesa.a`
+archives are absent. A drift warning fires when the pulled headers and the
+vendored copy diverge; the fix is a vendor-refresh commit, never a silent
+preference.
+
 ### The rasteriser thread pool: the `LP_NUM_THREADS` default (#150)
 
 The `glFinish` note above assumes llvmpipe rasterises on a thread pool.

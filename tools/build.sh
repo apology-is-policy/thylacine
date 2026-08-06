@@ -305,7 +305,11 @@ build_kernel() {
     # fixture. Cheap (source copies + a generated Makefile) and derived from
     # the tree, so it must be re-staged on every clade-gate build rather than
     # left to a manual step like stage_clade's multi-hundred-MiB copy.
-    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
+    # Gated on the SAME clade-stage-exists condition as the /clade pool put:
+    # /storm without /clade is boot-fatal (joey's storm gate finds no
+    # compiler), so a toolchain-less tree must bake neither half (#154, the
+    # unannounced mirror of #101's staged-but-flag-unset case).
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
         stage_storm
     fi
 
@@ -1289,26 +1293,26 @@ build_sysroot() {
     #    libc.a). Install them HERE, at the same chokepoint that wipes them:
     #    headers only, never lib/ — that directionality is the whole #148
     #    lesson. Absent gl/ archives = a non-GL tree; skipping is legitimate.
-    if [[ -d "$BUILD_DIR/clade/gl/include/GL" ]]; then
-        cp -R "$BUILD_DIR/clade/gl/include/GL" "$sysroot/include/"
-        # KHR (glext.h includes KHR/khrplatform.h) did not land beside GL in
-        # the gl/ fetch — the staged clade sysroot is where it exists. Both
-        # are headers-only sources; lib/ is never touched (#148).
-        local khr
-        for khr in "$BUILD_DIR/clade/gl/include/KHR" \
-                   "$BUILD_DIR/clade/stage/sysroot/include/KHR"; do
-            if [[ -d "$khr" ]]; then
-                cp -R "$khr" "$sysroot/include/"
-                break
-            fi
-        done
-        if [[ ! -f "$sysroot/include/KHR/khrplatform.h" ]]; then
-            echo "==> sysroot: include/GL installed but KHR/khrplatform.h is" >&2
-            echo "    missing from both known sources -- the SDL-GL compile" >&2
-            echo "    will fail; refusing to continue silently (#146)." >&2
-            exit 1
-        fi
-        echo "    GL        include/GL + include/KHR installed (#146)"
+    #    Source of truth is the VENDORED copy (third_party/mesa-gl-headers),
+    #    present in every checkout — a clean worktree with no pulled clade
+    #    artifacts must still compile the SDL GL TU (#153); only the LINK
+    #    degrades without the pulled libOSMesa.a archives.
+    local glvendor="$REPO_ROOT/third_party/mesa-gl-headers"
+    if [[ ! -f "$glvendor/GL/osmesa.h" || ! -f "$glvendor/KHR/khrplatform.h" ]]; then
+        echo "==> sysroot: $glvendor is missing or incomplete -- broken" >&2
+        echo "    checkout; the SDL-GL compile will fail (#146/#153)." >&2
+        exit 1
+    fi
+    cp -R "$glvendor/GL" "$glvendor/KHR" "$sysroot/include/"
+    echo "    GL        include/GL + include/KHR installed from third_party (#146/#153)"
+    # Drift check: if a pulled clade gl/ tree exists and its headers differ,
+    # the vendored copy needs a refresh commit (the builder cycle bumped
+    # Mesa). Warn — never silently prefer either copy.
+    if [[ -d "$BUILD_DIR/clade/gl/include/GL" ]] && \
+       ! diff -rq "$glvendor/GL" "$BUILD_DIR/clade/gl/include/GL" >/dev/null 2>&1; then
+        echo "==> sysroot: WARNING: third_party/mesa-gl-headers/GL differs from" >&2
+        echo "    the pulled build/clade/gl/include/GL -- refresh the vendored" >&2
+        echo "    copy in a commit when the builder's Mesa moves (#153)." >&2
     fi
 
     echo "==> pouch sysroot ready:"

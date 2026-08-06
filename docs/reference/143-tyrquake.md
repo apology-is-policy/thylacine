@@ -226,11 +226,68 @@ post-fix shipped (no config)  969 frames  33.1s  29.3 fps   (and one 37.4s/25.9 
 The shipped path now self-defaults the pool to the CPU count (pouch 0032
 sysconf + the SDL glue seed), so the plain gate command does **21.6 →
 29.3 fps (+36%) with zero configuration**. Sublinear vs 4 workers'
-theoretical ceiling because ~2/3 of frame time is the single game/setup
-thread of a 1996 immediate-mode engine — the remaining lever is the
-engine, not the rasteriser. Threaded runs show wider single-run spread
+theoretical ceiling because ~2/3 of frame time is serial on the calling
+thread. Threaded runs show wider single-run spread
 than inline ones (25.9–29.3 across two post-fix boots); quote the pair,
 not one number. fps remains REPORTED, not gated.
+
+### The host reference (2026-08-05): uncapped M2, same demo, same 640×400
+
+Host tyr-glquake (macOS arm64, same vendored tree, brew SDL2, Apple's GL
+2.1-on-Metal — i.e. the **M2 GPU**, not a software rasteriser):
+
+```
+host, vsync ON (default)      969 frames  16.3s    59.6 fps   (display cadence, NOT a perf number)
+host, swap interval forced 0  969 frames   0.5s  2061.8 fps
+```
+
+Two conclusions this pins:
+
+- **The vsync trap**: tyrquake applies `vid_vsync` only at video-mode set,
+  which happens before `+cvar` commands execute — so `+vid_vsync 0` on the
+  command line silently does nothing and the "benchmark" reports the
+  display's refresh rate. The uncapped number required forcing
+  `SDL_GL_SetSwapInterval(0)` at the call site (scratch build). Any host
+  number that sits at ~59.6 or ~120 is the compositor talking, not the GPU.
+- **The serial share is Mesa-side, not game logic**: the host does engine +
+  GL dispatch + GPU in ~0.5 ms/frame, and HVF guest CPU is near-native — so
+  the guest's ~31 ms/frame serial floor is ≥98% software-GL caller-side work
+  (immediate-mode dispatch through the state tracker + llvmpipe's
+  caller-thread vertex/setup/binning; `LP_NUM_THREADS` parallelises only the
+  fragment side). The earlier "the engine is the lever" reading is
+  **refuted**. #155 owns the decomposition (`LP_PERF=no_rast` partition);
+  the ~70× host-GPU gap is the price of software rasterisation itself,
+  closable only by a GPU-in-guest arc, not by tuning this stack.
+
+### Third measurement (#155): the serial share partitioned, flag-free
+
+Same demo1 gate command, all four boots same-day (2026-08-06, HVF -smp 4;
+threaded spread is wide, so comparisons are within-day only):
+
+```
+base            640x400  4t   969 frames  37.5s  25.8 fps   (38.8 ms/frame)
+LP_PERF=no_rast 640x400  4t   969 frames  36.9s  26.3 fps   (38.1)
+LP_PERF=no_rast 640x400  0t   969 frames  57.0s  17.0 fps   (58.8)
+base            320x200  4t   969 frames  32.6s  29.7 fps   (33.6)
+```
+
+- **`LP_PERF=no_rast` does NOT engage in this build.** The parse table is in
+  the binary (`strings` shows it) but the pool moved a no_rast run 26.3 →
+  17.0 fps — impossible if rasterisation were actually skipped, since
+  nothing else is pool-parallel. The env delivery itself was proven per-run
+  (`setrun ok`). Enable/verify LP_PERF at the next builder cycle (batched
+  with the owed `DETECT_OS_THYLACINE` sysconf arm).
+- **The resolution probe partitions without any flag**: removing 75% of the
+  pixels saved 5.2 ms/frame → pixel-proportional cost visible past the
+  4-worker overlap ≈ **7 ms (18%)**; the remaining ≈ **32 ms is
+  pixel-independent** — matching the host-GPU-derived ~31 ms caller-side
+  floor. Two independent instruments agree: the wall is per-draw/per-vertex
+  caller-side work (immediate-mode dispatch + llvmpipe caller-thread
+  vertex/setup/binning), not fragment rasterisation and not game logic.
+- Implied asymptote at 640×400 with pixels free: ~31 fps — more threads and
+  lower resolution are exhausted levers. The remaining lever with real
+  headroom is cutting per-call caller-side cost (vertex arrays in the port
+  — engine surgery, deliberately not done in #141; a scope decision).
 
 ## Known caveats / seams
 
