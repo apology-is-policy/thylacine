@@ -1905,6 +1905,45 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
     t_putstr("joey: CLEARANCE_GRANT michael jit ok (eligibility recorded)\n");
 
+    // === #163: the user-default jit seed, probed via susan ===
+    // susan is created above with NO explicit grant, so her jit eligibility can
+    // only come from one of the two #163 mechanisms: corvus's USER_CREATE seed
+    // (boot 1, fresh pool) or clearance_backfill_jit (every later boot). REVOKE
+    // returns NotFound(3) for an absent record, so a green result proves one of
+    // them ran.
+    //
+    // THE PROBE DELIBERATELY DOES NOT RE-GRANT (audit F2). An earlier draft did,
+    // and that made it self-perpetuating: the re-grant persisted the very record
+    // the NEXT boot then "verified", so on a persistent pool it passed green
+    // even with BOTH mechanisms deleted -- it certified its own leftovers.
+    // Consuming the record instead makes each boot's assertion rest on THIS
+    // boot's mechanism, and the backfill is the designed healer that restores it
+    // for the next one (it also covers the crash-between-verbs window). Delete
+    // the backfill and boot 2 goes red, which is exactly the coverage wanted.
+    {
+        size_t o = 0;
+        for (int i = 0; i < 33; i++) tx[o++] = token[i];
+        tx[o++] = 0;   // subject_kind = user
+        tx[o++] = 5;   // subject_len
+        const char s1[] = "susan";
+        for (int i = 0; i < 5; i++) tx[o++] = (unsigned char)s1[i];
+        tx[o++] = 3;   // level_len
+        const char lv3[] = "jit";
+        for (int i = 0; i < 3; i++) tx[o++] = (unsigned char)lv3[i];
+        pl = o;
+    }
+    if (corvus_exchange(conn_fd, 17, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: #163 REVOKE susan jit transport FAILED\n");
+        return 1;
+    }
+    if (st != 0) {
+        t_putstr("joey: #163 susan jit seed MISSING (revoke status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr(") -- USER_CREATE seed or clearance backfill regressed\n");
+        return 1;
+    }
+    t_putstr("joey: #163 susan jit seed verified + consumed (backfill restores it next boot)\n");
+
     // === SESSION_CLOSE ===
     if (corvus_exchange(conn_fd, 3, token, 33, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: SESSION_CLOSE transport FAILED\n");

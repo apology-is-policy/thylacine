@@ -1311,7 +1311,12 @@ const CLEARANCE_DB_HEADER_LEN: usize = 12;
 // assert: magic(4) + version(4) + count(4). A future field add on one side without
 // the other would drift the parse offset silently; catch it at build time.
 const _: () = assert!(CLEARANCE_DB_HEADER_LEN == 12, "clearance.db header layout drift");
-const MAX_ELIGIBILITY: usize = 2 * MAX_USERS; // same bound class as GROUPS
+// Same bound class as GROUPS. Since #163 one slot per user is auto-consumed by
+// the default jit seed, so a 256-user deployment starts at half capacity and
+// the admin-grantable remainder is ~256, not 512 (audit F4). Both push sites
+// gate on `< MAX_ELIGIBILITY` and clearance_db_parse rejects only `>`, so a
+// full table is a loud refusal, never a next-boot parse brick.
+const MAX_ELIGIBILITY: usize = 2 * MAX_USERS;
 const CLEARANCE_DB_MAX: usize = 256 * 1024;
 
 #[derive(Clone)]
@@ -1322,6 +1327,25 @@ struct EligibilityRecord {
 }
 
 static mut ELIGIBILITY: Option<Vec<EligibilityRecord>> = None;
+
+// #163: the level every human user is eligible for by default. CAP_JIT's only
+// power is emitting code into the caller's OWN process under the I-42 W^X
+// dual-map (BURROW_TYPE_CODE is refused by burrow_share_into, and the
+// construction handle is dropped at creation, so no handle exists to transfer
+// -- the authority cannot reach a peer Proc), so eligibility is user-default at
+// v1.0; activation stays an explicit RE_AUTH-gated act and the table stays
+// authoritative for every other level. Seeded at USER_CREATE; backfilled at
+// clearance_load for users minted before this existed.
+//
+// THE COST, stated (audit F1): this is not fully policy-neutral. Verb 15
+// (CLEARANCE_ACTIVATE) grants to the CALLER's stripes on presentation of a
+// session token -- its own header concedes a stolen token is worth something --
+// so widening eligibility from one user to all users multiplies the population
+// of tokens that yield CAP_JIT by the number of users. What bounds the damage
+// is I-42's self-process containment above, NOT the eligibility table. Verb 18
+// (SELF) has no such gap: identity is the kernel stamp, never a quoted secret.
+// Retiring verb 15 (task #140) removes the amplified surface outright.
+const SEED_LEVEL_JIT: &[u8] = b"jit";
 
 unsafe fn clearance_init() {
     core::ptr::write(core::ptr::addr_of_mut!(ELIGIBILITY), Some(Vec::new()));
@@ -1523,7 +1547,14 @@ unsafe fn clearance_load() -> bool {
     let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB_TMP.as_ptr(), CLEARANCE_DB_TMP.len(), 0);
     let dbf = t_walk_open(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB.as_ptr(), CLEARANCE_DB.len(), T_OREAD);
     if dbf < 0 {
-        return true; // absent -> fresh install
+        // Absent -> fresh install: the table is already the empty Vec from
+        // clearance_init. The backfill MUST still run here (audit F3): an
+        // absent clearance.db is EXACTLY the state a failed first seed leaves
+        // (every clearance_persist failure arm unlinks the tmp), so returning
+        // early would make handle_user_create's "heals next boot" contract
+        // false on the one path that cites it -- and would also strand a pool
+        // restored from an identity.db with no clearance.db.
+        return clearance_backfill_jit();
     }
     let mut blob: Vec<u8> = Vec::new();
     let read_ok = read_to_end_fd(dbf, &mut blob, CLEARANCE_DB_MAX);
@@ -1535,6 +1566,51 @@ unsafe fn clearance_load() -> bool {
     let mut nbuf = [0u8; 12];
     t_putstr(usize_dec(eligibility_count(), &mut nbuf));
     t_putstr(" eligibility records)\n");
+    clearance_backfill_jit()
+}
+
+// #163: give every user in USER_STATES the default jit eligibility it lacks.
+// Runs on BOTH clearance_load arms (present and absent db). Additive and
+// presence-checked, so it is idempotent across boots; persisted once iff
+// anything was added. Always returns true -- a backfill failure degrades
+// (fail-closed: no eligibility) and retries next boot, it never refuses the
+// boot the way a corrupt clearance.db does.
+unsafe fn clearance_backfill_jit() -> bool {
+    // Clone the names first: this ends the USER_STATES shared borrow before
+    // the loop mutates ELIGIBILITY (disjoint statics, no aliasing).
+    let names: Vec<Vec<u8>> = match (*core::ptr::addr_of!(USER_STATES)).as_ref() {
+        Some(users) => users.iter().map(|u| u.user.clone()).collect(),
+        None => Vec::new(),
+    };
+    let mut nbuf = [0u8; 12];
+    let mut seeded = 0usize;
+    let mut at_bound = 0usize;
+    for name in &names {
+        if eligibility_has(SUBJECT_KIND_USER, name, SEED_LEVEL_JIT) {
+            continue;
+        }
+        if eligibility_count() >= MAX_ELIGIBILITY {
+            at_bound += 1;   // audit F4: never skip silently
+            continue;
+        }
+        if eligibility_push(SUBJECT_KIND_USER, name, SEED_LEVEL_JIT) {
+            seeded += 1;
+        }
+    }
+    if at_bound > 0 {
+        t_putstr("corvus: WARN eligibility table FULL -- jit seed skipped for ");
+        t_putstr(usize_dec(at_bound, &mut nbuf));
+        t_putstr(" user(s)\n");
+    }
+    if seeded > 0 {
+        if clearance_persist() {
+            t_putstr("corvus: jit eligibility backfilled for ");
+            t_putstr(usize_dec(seeded, &mut nbuf));
+            t_putstr(" user(s)\n");
+        } else {
+            t_putstr("corvus: WARN jit backfill not persisted (in-memory this boot; retried next boot)\n");
+        }
+    }
     true
 }
 
@@ -2215,7 +2291,28 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
-    // Committed. Register the dataset-owner mapping (users/<name> -> <name>) so
+    // Committed. Seed the user-default jit eligibility (#163). Best-effort by
+    // design: the user is already durably created, and clearance_backfill_jit
+    // (run on BOTH clearance_load arms) heals any miss on the next boot -- so a
+    // failure here degrades, never rolls back the create.
+    //
+    // The no-rollback-on-persist-failure is licensed SPECIFICALLY by that
+    // backfill re-creating THIS level (audit F5) and does not generalize: every
+    // other mutation here rolls back (handle_clearance_grant pops, revoke
+    // re-pushes), because a memory-grants/disk-lacks record with no healer
+    // would survive until the next mutation and then vanish at reboot.
+    if eligibility_has(SUBJECT_KIND_USER, &user_vec, SEED_LEVEL_JIT) {
+        // already seeded (re-created name reusing a live record) -- nothing to do
+    } else if eligibility_count() >= MAX_ELIGIBILITY {
+        // audit F4: a full table must not silently mint jit-less users.
+        t_putstr("corvus: WARN eligibility table FULL -- new user has no jit seed\n");
+    } else if eligibility_push(SUBJECT_KIND_USER, &user_vec, SEED_LEVEL_JIT)
+        && !clearance_persist()
+    {
+        t_putstr("corvus: WARN jit seed not persisted (backfill heals next boot)\n");
+    }
+
+    // Register the dataset-owner mapping (users/<name> -> <name>) so
     // WRAP/UNWRAP gate correctly; done after the commit so a rolled-back create
     // leaves no stale owner.
     let mut dataset = Vec::new();
