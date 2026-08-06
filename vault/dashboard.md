@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-08-06 [[chg-2026-08-06-ledger-correction]] — Correction: batch 55's pre-sweep baseline was 17829, and proximity beat provenance
 - 2026-08-06 [[chg-2026-08-06-process-creation-arc]] — The process-creation arc, and three comments that outlived their code
 - 2026-08-05 [[chg-2026-08-05-staleness-is-computable]] — Coverage was never currency — 45 of 112 dossiers describe code that moved
 - 2026-08-04 [[chg-2026-08-04-identity-transport-crypto-sweep]] — Identity and transport crypto — one deleted cap, two dead premises, and a backstop on the wrong loop
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-04 [[chg-2026-08-04-netdev-sweep]] — The NIC transport — a teardown obligation stated on the transport that does not need it
 - 2026-08-04 [[chg-2026-08-04-presentation-stack-sweep]] — The presentation stack — eighteen tests that cannot compile, and a fix that reached one sibling again
 - 2026-08-04 [[chg-2026-08-04-virtio-programs-sweep]] — The virtio programs — a guard defeated by a cast, and a bound outside the call it bounds
-- 2026-08-04 [[chg-2026-08-04-warden-sweep]] — The warden — an unchecked computation whose only audit is a log that under-reports it
 <!-- generated:end -->
