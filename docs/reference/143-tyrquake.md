@@ -289,6 +289,38 @@ base            320x200  4t   969 frames  32.6s  29.7 fps   (33.6)
   headroom is cutting per-call caller-side cost (vertex arrays in the port
   — engine surgery, deliberately not done in #141; a scope decision).
 
+### The full renderer table (2026-08-06) + the #159 scan facts
+
+All cells 640×400, timedemo demo1, uncapped unless noted:
+
+```
+guest  llvmpipe GL, 4 workers (shipped)   25.8-29.3 fps   (day spread; the #150 fix)
+guest  llvmpipe GL, inline 1 thread       21.1-21.6 fps
+host   M2 GPU (GL 2.1 Metal)            2061.8   fps     (59.6 vsync-capped)
+host   software tyr-quake (1996 span
+       rasteriser, SINGLE thread)          96.9   fps     (93.2 first run w/ PRESENTVSYNC
+                                                           flag -- barely differs)
+```
+
+Scan facts feeding the #156 builder-cycle batch:
+
+- **The Mesa fork ships with ASSERTIONS ON**: 763 `src/gallium` file-path
+  strings (each an `assert(__FILE__)`) in the shipped binary. Disassembly of
+  `cso_data_rehash` shows -O2-class codegen (register-allocated, csel, NEON
+  popcount) — so the buildtype is debugoptimized, NOT -O0. Realistic win
+  from `-Db_ndebug=true` at the next builder rebuild: 5–20%, not multiples.
+- `getauxval` is linked and functional (musl weak over the real auxv;
+  AT_HWCAP exists since CF-4) and `util_cpu_detect_once` is present; whether
+  the JIT target-machine features flow from real detection or a baseline is
+  a fork-source question — resolved at the builder cycle, not by binary
+  archaeology.
+- **The host-llvmpipe cell is DEFERRED with reasons**: upstream 26.1.6
+  deleted OSMesa (the fork's patches resurrect it), macOS has no GLX-style
+  override to slide llvmpipe under SDL's native GL, so the host reference
+  needs custom vid glue + a host Mesa build — and to be apples-to-apples it
+  must match the guest's assert configuration. One clean release-vs-release
+  comparison rides the #156 builder cycle instead.
+
 ## Known caveats / seams
 
 - Mouse-look (virtio-tablet → `TEV_PTR`) is G-7c — keyboard already plays
