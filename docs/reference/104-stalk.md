@@ -856,21 +856,41 @@ way."
 | `STALK_WALK` (O_PATH) + NOFOLLOW | yes | the LINK itself — the v1.0 `lstat` |
 | either + NOFOLLOW | no | resolves normally; the flag narrows, it does not require |
 | either + NOFOLLOW, trailing `/` | yes | FOLLOWS anyway (POSIX 4.13) |
-| `STALK_MOUNT` | yes | never follows (forced NOFOLLOW) |
+| `STALK_MOUNT`, no trailing `/` | yes | never follows (forced NOFOLLOW) |
+| `STALK_MOUNT` + trailing `/` | yes | FOLLOWS — the slash overrides for every caller, so the mount keys on the target. Matches Linux `mount()`; per-Proc, so contained (I-1) |
 
 Non-final components expand regardless — the flag scopes to the quarry.
 
-### The single-hop twin does NOT expand (task #184)
+### The single-hop twin does not EXPAND, but it does REFUSE (#184, `6ad9bbc3`)
 
 `sys_walk_open_handler` never enters `stalk_core`; it walks one component
-directly through `src->dev->walk`. D-1 taught the resolver to expand and shipped
-no twin, so `t_walk_open(dirfd, "link", OREAD)` returns **the link** where
-`t_open(FROM_ROOT, "d/link", OREAD)` returns the target. This is a live
-divergence in the #81/#82 twin family, undocumented until now and tracked at
-#184 for a decision: expand in the twin as well, or declare `SYS_WALK_OPEN` a
-deliberately non-expanding component primitive and pin that in its contract. It
-is a correctness gap, not a privilege one — the returned Spoor is a symlink fid,
-which the server will not `Tlopen` for byte I/O.
+directly through `src->dev->walk`. It therefore cannot expand — one hop cannot
+follow a multi-component target — and that is deliberate: `SYS_WALK_OPEN` is the
+component primitive libthyla-rs builds paths out of, not a resolution.
+
+What it must NOT do is hand a symlink to `Dev.open`, and until `6ad9bbc3` it
+did. The gate is now the same shape as stalk's quarry gate: with `T_OPATH` the
+handle IS the link (the lstat spelling, and the base a caller needs in order to
+unlink or rename it); without it, `T_E_LOOP`.
+
+The deferral that let this sit was a false safety argument, worth recording
+because it reads plausible: *"the returned Spoor is a symlink fid, which the
+server will not `Tlopen` for byte I/O."* Stratum's `h_lopen` refuses a symlink
+**only under `O_TRUNC`** — a plain OREAD/OWRITE `Tlopen` on a link fid succeeds.
+Two consequences followed:
+
+- The DAC check in the twin reads the **link's** mode. A symlink is minted 0777
+  by POSIX convention, so `other` is rwx and the check passed for every
+  principal regardless of who owned the link or its directory. The gate was
+  vacuous on exactly this shape.
+- On Stratum the writes then land in the link's own inode — silent data loss,
+  not a redirect. Against a **path-based** 9P server (QEMU 9pfs, `diod`) that
+  implements `Tlopen` as `open(path, flags)`, the same call opens the TARGET
+  with only that vacuous check: a complete DAC bypass. **I-14 exists to forbid
+  resting a kernel gate on server behaviour**, which is what the deferral did.
+
+`/symlink-probe` leg M pins both directions on the live FS and is
+revert-probed: disabling the gate fails M alone, boot-fatally.
 
 ## Performance characteristics
 
