@@ -65,16 +65,15 @@ because the substrate is swept as harness prose rather than as owned translation
 units — see [[sub-substrate-gates]] and its siblings.
 
 <!-- generated:begin -->
-**362 owned · 72 unowned · 434 files (83% owned) · ~17804 unswept lines.**
+**370 owned · 64 unowned · 434 files (85% owned) · ~11837 unswept lines.**
 
 Excluded as harness and counted here rather than dropped: **63 files, ~26448 lines** (probes, smokes, benches, torture and the `u-test` family — programs whose purpose is to exercise the system, swept as harness prose like `tools/`).
 
 | area | owned | unowned | unswept lines |
 |---|---:|---:|---:|
-| kernel | 110 | 28 | 8009 |
-| usr/ports | 0 | 13 | 3378 |
+| usr/ports | 0 | 13 | 3403 |
 | usr/pouch-hello | 0 | 20 | 3161 |
-| usr/viv | 0 | 2 | 1061 |
+| kernel | 116 | 22 | 3078 |
 | arch | 34 | 4 | 971 |
 | usr/stratumd-stub | 0 | 1 | 453 |
 | usr/lib | 40 | 2 | 390 |
@@ -108,29 +107,24 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26448 lin
 | usr/virtio-mmio-source | 1 | 0 | 0 |
 | usr/virtio-net-arp | 1 | 0 | 0 |
 | usr/virtio-net-loop | 1 | 0 | 0 |
+| usr/viv | 2 | 0 | 0 |
 | usr/warden | 1 | 0 | 0 |
 
 ### Unowned, largest first
 
 | file | lines |
 |---|---:|
-| kernel/include/thylacine/vivarium.h | 2013 |
-| kernel/vivarium.c | 2013 |
 | usr/ports/gnumake/config.h | 1357 |
 | arch/arm64/uart.c | 674 |
-| usr/viv/src/main.rs | 670 |
 | kernel/joey.c | 478 |
 | usr/stratumd-stub/stratumd-stub.c | 453 |
-| kernel/addrspace.c | 414 |
-| usr/viv/src/json.rs | 391 |
 | usr/pouch-hello/pouch-hello-sockets.c | 366 |
 | usr/pouch-hello/pouch-hello-fs.c | 350 |
 | kernel/include/thylacine/errno.h | 342 |
+| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 335 |
 | usr/ports/sdl2/thylacine/SDL_thylacineevents.c | 324 |
 | usr/ports/sdl2/thylacine/SDL_thylacinevideo.c | 323 |
 | usr/lib/thylajit/thyla_capjit.h | 318 |
-| usr/ports/sdl2/thylacine/SDL_thylacineopengl.c | 310 |
-| kernel/include/thylacine/addrspace.h | 306 |
 | usr/ports/sdl2/thylacine/thyla_tap.c | 306 |
 | kernel/fault_test.c | 295 |
 | usr/pouch-hello/pouch-hello-net.c | 284 |
@@ -157,10 +151,8 @@ Excluded as harness and counted here rather than dropped: **63 files, ~26448 lin
 | usr/pouch-hello/pouch-hello-threads.c | 119 |
 | usr/stub-driver/stub-driver.c | 119 |
 | kernel/canary.c | 111 |
-| kernel/include/thylacine/cow.h | 101 |
 | kernel/include/thylacine/9p_transport_loopback.h | 92 |
 | kernel/include/thylacine/9p_spoor_transport.h | 85 |
-| kernel/cow.c | 84 |
 | kernel/include/thylacine/9p_transport_mq.h | 83 |
 | usr/pouch-hello/pouch-hello-exitgroup.c | 83 |
 | usr/ports/sdl2/glapi-probe.c | 81 |

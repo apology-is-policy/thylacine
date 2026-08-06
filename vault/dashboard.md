@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-08-06 [[chg-2026-08-06-process-creation-arc]] — The process-creation arc, and three comments that outlived their code
 - 2026-08-05 [[chg-2026-08-05-staleness-is-computable]] — Coverage was never currency — 45 of 112 dossiers describe code that moved
 - 2026-08-04 [[chg-2026-08-04-identity-transport-crypto-sweep]] — Identity and transport crypto — one deleted cap, two dead premises, and a backstop on the wrong loop
 - 2026-08-04 [[chg-2026-08-04-leaf-commands-sweep]] — The leaf commands — one rule enforced by construction, one delegated by convention
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-04 [[chg-2026-08-04-presentation-stack-sweep]] — The presentation stack — eighteen tests that cannot compile, and a fix that reached one sibling again
 - 2026-08-04 [[chg-2026-08-04-virtio-programs-sweep]] — The virtio programs — a guard defeated by a cast, and a bound outside the call it bounds
 - 2026-08-04 [[chg-2026-08-04-warden-sweep]] — The warden — an unchecked computation whose only audit is a log that under-reports it
-- 2026-08-03 [[chg-2026-08-03-coverage-reconciliation]] — the coverage reconciliation -- the sweep is 31%, and the completeness criterion was the defect this arc keeps finding
 <!-- generated:end -->

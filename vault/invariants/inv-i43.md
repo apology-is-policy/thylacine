@@ -3,11 +3,11 @@ id: inv-i43
 type: inv
 title: "I-43 — a phenotype confers ABI shape, never authority"
 number: I-43
-guards: [sub-diorama]
+guards: [sub-diorama, sub-kernel-vivarium, sub-viv]
 validated-by: [prose]
 strength: prose
 created: 2026-08-04
-updated: 2026-08-04
+updated: 2026-08-06
 ---
 ## Statement
 
@@ -34,7 +34,21 @@ process gets to name one.
 ## Enforcement
 
 Structural rather than checked, which is the point of stating it this way.
-[[sub-diorama]] is the only enforcer and the whole of its design:
+**Three surfaces enforce it, one per layer of the phenotype**, and the
+statement above was written when only the first existed:
+
+- [[sub-viv]] **declares** it. A phenotype is a manifest annotation and
+  never an inference — absent, or anything but `"linux"`, yields native —
+  and the declaration lands on the container's entrypoint alone. viv holds
+  no capability beyond the invoker's, so declaring a phenotype grants
+  nothing.
+- [[sub-kernel-vivarium]] **decodes** it. Every row's collision argument
+  ends at the same place: what a mis-declared Proc reaches is its own
+  memory and its own descriptors, bounds-checked, never authority. The
+  `PRINCIPAL_SYSTEM` → 0 uid mapping is the sharpest instance — it changes
+  what a guest is *told*, never what it may do, because every gate reads
+  the real principal.
+- [[sub-diorama]] **renders** it, and is the whole of its own design:
 
 - **Every rendered byte derives from a native read.** The renderers open
   `/proc/<pid>/*` and `/ctl/*` through the ordinary namespace, so the

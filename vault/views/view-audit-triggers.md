@@ -16,6 +16,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-corvus]] | usr/corvus/src/main.rs, usr/corvus/Cargo.toml | inv-i22, inv-i23 | - **The authority gates re-query.** Any new gated verb must ask the kernel |
 | [[sub-corvus-crypto]] | usr/lib/corvus-crypto/src/lib.rs, usr/lib/corvus-crypto/src/bip39_wordlist.rs, usr/lib/corvus-crypto/Cargo.toml |  | - **A new wrap kind needs a new associated-data prefix**, built through a |
 | [[sub-diorama]] | usr/diorama/src/server.rs, usr/diorama/src/main.rs, usr/diorama/Cargo.toml | inv-i43 | - **Every new file needs a native source.** The rule is at the top of the |
+| [[sub-kernel-addrspace]] | kernel/addrspace.c, kernel/include/thylacine/addrspace.h, kernel/cow.c, kernel/include/thylacine/cow.h | inv-i44, inv-i32 | What a change must re-establish: |
 | [[sub-kernel-allowance]] | kernel/allowance.c, kernel/include/thylacine/allowance.h | inv-i34 | - The gate must remain complete across **all four** create sites. A new |
 | [[sub-kernel-alternatives]] | arch/arm64/alternatives.c, arch/arm64/alternatives.h, arch/arm64/atomic_lse.h |  | - **The write must never go through an executable mapping.** The scratch alias's |
 | [[sub-kernel-asid]] | arch/arm64/asid.c, arch/arm64/asid.h | inv-i31 | - **The rollover-versus-switch race** is the whole surface. Any change to the |
@@ -75,6 +76,7 @@ Generated from note fields — do not edit between the markers
 | [[sub-kernel-timer]] | arch/arm64/timer.c, arch/arm64/timer.h, arch/arm64/rtc.c, arch/arm64/rtc.h | inv-i15, inv-i17 | - The periodic path must stay byte-unchanged for a running CPU — the slice model |
 | [[sub-kernel-torpor]] | kernel/torpor.c, kernel/include/thylacine/torpor.h | inv-i9, inv-i24 | - The lock-free mismatch return must never be extended to the EQUAL |
 | [[sub-kernel-uaccess]] | arch/arm64/uaccess.S, arch/arm64/uaccess.c, arch/arm64/uaccess.h | inv-i13 | - **A new fault point needs a table entry.** The entry is what separates |
+| [[sub-kernel-vivarium]] | kernel/vivarium.c, kernel/include/thylacine/vivarium.h | inv-i43 | What a change must re-establish: |
 | [[sub-kernel-vma]] | kernel/vma.c, kernel/include/thylacine/vma.h | inv-i12, inv-i7, inv-i32 | The things to re-examine when this file changes: that `vma_alloc` remains the |
 | [[sub-kernel-weft]] | kernel/weft.c, kernel/include/thylacine/weft.h | inv-i37, inv-i30, inv-i9, inv-i32 | - **Admission stays kernel-minted.** Anonymous, or the allocation-time |
 | [[sub-libdriver-discovery]] | usr/lib/libdriver/src/source.rs, usr/lib/libdriver/src/dtb.rs, usr/lib/libdriver/src/supervise.rs, usr/lib/libdriver/src/readyline.rs | inv-i34 | - **The warden must never read a device register.** The moment it does, the |

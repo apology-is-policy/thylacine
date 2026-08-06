@@ -33,7 +33,7 @@ convention is the whole mapping; a module whose note is named otherwise
 reads as missing, which is the intended pressure.
 
 <!-- generated:begin -->
-**33 dossiered · 1 missing · 34 modules.**
+**34 dossiered · 0 missing · 34 modules.**
 
 | module | spec note | state |
 |---|---|---|
@@ -43,7 +43,7 @@ reads as missing, which is the intended pressure.
 | burrow.tla | [[spec-burrow]] | dossiered |
 | cons_poll.tla | [[spec-cons-poll]] | dossiered |
 | corvus.tla | [[spec-corvus]] | dossiered |
-| cow.tla | `spec-cow` | **missing** |
+| cow.tla | [[spec-cow]] | dossiered |
 | death_wake.tla | [[spec-death-wake]] | dossiered |
 | debug_step.tla | [[spec-debug-step]] | dossiered |
 | debug_stop.tla | [[spec-debug-stop]] | dossiered |
