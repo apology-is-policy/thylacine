@@ -1023,16 +1023,23 @@ VIVEOF
     # The second is not a convenience. MEASURED 2026-08-03: the minirootfs
     # contains exactly two ELF binaries (bin/busybox, sbin/apk) and BOTH are
     # ET_DYN PIE linked against /lib/ld-musl-aarch64.so.1 -- there is not one
-    # statically-linked file in the image. `kernel/elf.c` rejects ET_DYN
-    # (:83), PT_INTERP (:180) and PT_DYNAMIC (:185) by deliberate v1.0 policy,
-    # so the stock shell cannot load. Alpine's own busybox-static package is
-    # ET_EXEC with neither dynamic segment -- exactly the shape the loader
-    # accepts. See task #145 (dynamic linking) -- a separate deferred axis,
-    # NOT a LINEAGE gap.
+    # statically-linked file in the image.
     #
-    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image, and the
-    # resolver does not follow symlinks (task #146), so the static binary is
-    # installed at BOTH paths as a real file rather than relinked.
+    # HALF-CLEARED at DISTRO D-2 (2026-08-06). elf.c accepted neither ET_DYN
+    # nor PT_DYNAMIC when this was written; it now accepts BOTH (a PIE is
+    # placed at ELF_PIE_LOAD_BIAS and inherently carries a PT_DYNAMIC). What
+    # still blocks the stock shell is PT_INTERP alone -- the kernel loads one
+    # image per exec and runs no interpreter, which is D-4's rewrite-to-ldso
+    # route. So busybox-static stays the /bin/sh here until D-4, but the
+    # reason narrowed from three rejects to one. The D-2 legs in the gate
+    # script below exec the rootfs's OWN ld-musl-aarch64.so.1 -- a real stock
+    # ET_DYN, and the only one in the image with no PT_INTERP of its own.
+    # See task #145.
+    #
+    # /bin/sh is also a SYMLINK to /bin/busybox in the stock image. D-1 made
+    # the resolver follow symlinks (task #146), but the static binary is still
+    # installed at BOTH paths as a real file: what /bin/sh must point AT here
+    # is the substitute, not the stock PIE the link names.
     local tarball="${THYLACINE_ALPINE_TARBALL:-}"
     if [[ -z "$tarball" ]]; then
         tarball="$(ls "$REPO_ROOT/build/cache"/alpine-minirootfs-*-aarch64.tar.gz 2>/dev/null | head -1 || true)"
@@ -1082,6 +1089,12 @@ sub=$(/bin/busybox echo captured); [ "$sub" = captured ] && echo L6C-F-substitut
 i=0; for w in a b c; do i=$(/bin/busybox expr $i + 1); done; [ "$i" = 3 ] && echo L6C-G-loop
 /bin/busybox sh -c '/bin/busybox echo nested' && echo L6C-H-nested-shell
 /bin/busybox false; echo L6C-I-exitcode=$?
+echo D2-LDSO-BEGIN
+/lib/ld-musl-aarch64.so.1 2>&1
+echo D2-LDSO-END-rc=$?
+ldso_out=$(/lib/ld-musl-aarch64.so.1 2>&1)
+case "$ldso_out" in *"Dynamic Program Loader"*) echo D2-A-stock-ldso-usage ;; esac
+case "$ldso_out" in *"musl libc (aarch64)"*) echo D2-B-stock-ldso-arch ;; esac
 echo L6C-DONE
 GATEEOF
             chmod 0644 "$ab/rootfs/gate/run.sh"

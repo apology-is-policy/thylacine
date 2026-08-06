@@ -193,7 +193,7 @@ static void drop_proc(struct Proc *p) {
 // address of byte `off` within the Burrow, or NULL if that slot is not resident.
 //
 // Every caller below reads a run that lies wholly inside ONE page (the init frame
-// is 176 bytes at the top of the stack; the data-segment checks are the first 256
+// is EXEC_INIT_STACK_SIZE bytes at the top of the stack; the data-segment checks are the first 256
 // bytes), so one lookup covers each. A run that spanned a page boundary would need
 // to re-look-up at the crossing -- separate pages are not contiguous in the direct
 // map, which is the whole point of the sparse representation.
@@ -732,7 +732,7 @@ void test_exec_setup_auxv(void) {
     // Read the frame back from the stack BURROW via the direct map.
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    // L-4a: the stack is sparse; the frame lives in the last page.
     u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
     TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
     u64 *w = (u64 *)fb;
@@ -742,9 +742,9 @@ void test_exec_setup_auxv(void) {
     TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
     TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
 
-    // auxv — eight (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
-    // AT_HWCAP, AT_RANDOM, AT_VDSO_CLOCK (the vDSO page maps at boot --
-    // vdso_init ran), AT_NULL last.
+    // auxv — nine (a_type, a_val) pairs: AT_PHDR/PHENT/PHNUM/PAGESZ,
+    // AT_HWCAP, AT_RANDOM, AT_ENTRY (D-2), AT_VDSO_CLOCK (the vDSO page maps
+    // at boot -- vdso_init ran), AT_NULL last.
     TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
     TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
     TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
@@ -763,10 +763,15 @@ void test_exec_setup_auxv(void) {
     TEST_ASSERT((w[12] & 0x3ull) == 0x3ull,
         "AT_HWCAP carries FP|ASIMD (the PFR0 decode)");
     TEST_EXPECT_EQ(w[13], (u64)AT_RANDOM, "auxv[5].a_type == AT_RANDOM");
-    TEST_EXPECT_EQ(w[15], (u64)AT_VDSO_CLOCK, "auxv[6].a_type == AT_VDSO_CLOCK");
-    TEST_EXPECT_EQ(w[16], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
-    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,   "auxv[7].a_type == AT_NULL");
-    TEST_EXPECT_EQ(w[18], 0ull,           "AT_NULL.a_val == 0");
+    // D-2: AT_ENTRY carries the image's FINAL entry. This blob is ET_EXEC,
+    // so the final entry IS e_entry -- the bias is 0 and the tag must not
+    // have acquired one. The ET_DYN twin is elf.pie_load_bias.
+    TEST_EXPECT_EQ(w[15], (u64)AT_ENTRY,  "auxv[6].a_type == AT_ENTRY");
+    TEST_EXPECT_EQ(w[16], 0x10000ull,     "AT_ENTRY == e_entry (ET_EXEC: unbiased)");
+    TEST_EXPECT_EQ(w[17], (u64)AT_VDSO_CLOCK, "auxv[7].a_type == AT_VDSO_CLOCK");
+    TEST_EXPECT_EQ(w[18], EXEC_USER_VDSO_BASE, "AT_VDSO_CLOCK == EXEC_USER_VDSO_BASE");
+    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,   "auxv[8].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[20], 0ull,           "AT_NULL.a_val == 0");
 
     // AT_RANDOM points at the 16-byte entropy block, which must lie
     // within the user stack region.
@@ -943,7 +948,7 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
 
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
-    // L-4a: the stack is sparse; the frame lives in the last page (176 bytes).
+    // L-4a: the stack is sparse; the frame lives in the last page.
     u8 *fb = lazy_byte(sv->burrow, EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
     TEST_ASSERT(fb != NULL, "init-frame page populated by exec");
     u64 *w = (u64 *)fb;
@@ -956,10 +961,10 @@ void test_exec_setup_auxv_no_phdr_segment(void) {
     // a coherent "no phdrs" auxv (audit F1).
     TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
     // The startup frame is otherwise well-formed. With the vDSO page mapped,
-    // AT_VDSO_CLOCK occupies the slot at w[15] and AT_NULL terminates at
-    // w[17] (AT_HWCAP shifted the tail by one entry).
+    // AT_ENTRY occupies w[15] and AT_VDSO_CLOCK w[17], so AT_NULL terminates
+    // at w[19] (AT_HWCAP and then D-2's AT_ENTRY each shifted the tail by one).
     TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
-    TEST_EXPECT_EQ(w[17], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+    TEST_EXPECT_EQ(w[19], (u64)AT_NULL,  "auxv terminated by AT_NULL");
 
     drop_proc(p);
 }

@@ -20,23 +20,22 @@
 //   - ELFDATA2LSB (little-endian; ARM64 native).
 //   - EV_CURRENT version.
 //   - EM_AARCH64 machine.
-//   - ET_EXEC at v1.0 (PIE/ET_DYN deferred to dynamic-linker support).
+//   - ET_EXEC, or ET_DYN placed at ELF_PIE_LOAD_BIAS (DISTRO D-2).
 //
-// At v1.0 P2-Ga:
-//   - Static binaries only. PT_INTERP rejected.
-//   - PT_DYNAMIC + PT_GNU_RELRO + relocations deferred to PIE / dynamic
-//     linking support.
+// As built:
+//   - PT_INTERP rejected. The DISTRO D-4 rewrite-to-ldso route reads it
+//     at the vivarium exec chokepoint, not here.
+//   - PT_DYNAMIC accepted for ET_DYN (a PIE inherently carries one) and
+//     rejected for ET_EXEC. The loader never PROCESSES it: a static-PIE
+//     self-relocates from its own entry, and stock ldso self-relocates in
+//     _dlstart before it reads anything. Thylacine has no relocator and
+//     needs none on either route.
 //   - Symbol table parsing not performed.
 //
-// Phase 3+ refinement:
-//   - BURROW-backed segment mapping via burrow_map.
-//   - Demand paging from the segment's BURROW.
-//   - exec() syscall surface in Phase 5+.
-//
-// Phase 5+ refinement:
-//   - PIE / ET_DYN support with dynamic relocator.
-//   - musl-style dynamic linker integration.
-//   - Symbol resolution for ld.so / loader-callbacks.
+// Later refinement:
+//   - Per-exec PIE base randomization (an I-16-adjacent seam; today the
+//     bias is one constant, see ELF_PIE_LOAD_BIAS).
+//   - Symbol resolution for loader-callbacks.
 
 #ifndef THYLACINE_ELF_H
 #define THYLACINE_ELF_H
@@ -105,9 +104,50 @@
 // e_type — object file type.
 #define ET_NONE       0
 #define ET_REL        1
-#define ET_EXEC       2   // executable file (the v1.0 acceptable type)
-#define ET_DYN        3   // shared / PIE (deferred)
+#define ET_EXEC       2   // executable file, absolute p_vaddr
+#define ET_DYN        3   // shared / PIE, p_vaddr relative to the load base
 #define ET_CORE       4
+
+// DISTRO D-2 -- where an ET_DYN image lands.
+//
+// A PIE's p_vaddr values are offsets from a load base the loader chooses.
+// elf_load adds this bias to e_entry and to every PT_LOAD's vaddr, so
+// everything downstream (the segment mapper, the file-backed/eager arm
+// split, the AT_PHDR translation) reads FINAL addresses and needed no
+// change: the W^X gate, the page-sharing refusal and the alignment terms
+// are byte-identical, only the numbers moved.
+//
+// Chosen against the exec VA plan in <thylacine/exec.h>, with the images
+// that actually load measured (2026-08-06):
+//   native ET_EXEC (joey)        0x400000 .. 0x47e349
+//   pouch  ET_EXEC (pouch-hello) 0x200000 .. 0x208770
+//   stock  ET_DYN  (Alpine ldso)      0x0 ..  0xc2f10   (~780 KiB span)
+//   stock  ET_DYN  (Alpine busybox)   0x0 ..  0xf0b10   (~963 KiB span)
+//
+// 512 MiB sits ~100x above the highest ET_EXEC extent, so a PIE and a
+// fixed-address executable can never be confused for one another in a
+// fault report, and no ET_EXEC we ship can collide with the PIE window.
+// The 1.5 GiB limit gives a PIE a 1 GiB span and still leaves ~511 MiB
+// clear below the stack guard (exec.h pins that inequality).
+//
+// 64 KiB-aligned on purpose: stock aarch64 ELFs carry p_align 0x10000, so
+// a bias that is a multiple of it preserves the gABI's
+// `p_vaddr == p_offset (mod p_align)` congruence exactly -- which is what
+// keeps a segment's file-offset alignment (and therefore its eligibility
+// for the shared file-backed arm) the same biased as unbiased.
+//
+// ONE CONSTANT, DELIBERATELY. Per-exec randomization is a recorded
+// I-16-adjacent seam (docs/DISTRO.md section 1 non-goals); when it lands,
+// this becomes a per-exec value and the natural shape is a parameter on
+// elf_load rather than a constant here.
+#define ELF_PIE_LOAD_BIAS    0x0000000020000000ull   // 512 MiB
+#define ELF_PIE_LOAD_LIMIT   0x0000000060000000ull   // 1.5 GiB (exclusive)
+_Static_assert(ET_DYN == 3,        "ELF ABI pin: e_type shared/PIE");
+_Static_assert((ELF_PIE_LOAD_BIAS & 0xFFFFull) == 0,
+               "PIE bias must be 64 KiB-aligned so a stock aarch64 ELF's "
+               "p_vaddr == p_offset (mod p_align) congruence survives it");
+_Static_assert(ELF_PIE_LOAD_BIAS < ELF_PIE_LOAD_LIMIT,
+               "the PIE window must be non-empty");
 
 // e_machine — architecture.
 #define EM_AARCH64    183
@@ -194,6 +234,19 @@ _Static_assert(sizeof(struct Elf64_Phdr) == 56,
 #define AT_PHENT      4    // a_val = size of one program-header entry
 #define AT_PHNUM      5    // a_val = number of program headers
 #define AT_PAGESZ     6    // a_val = system page size in bytes
+// a_val = the entry point of the image the kernel loaded (e_entry +
+// load_bias). DISTRO D-2. Standard SysV/Linux tag; getauxval(AT_ENTRY)
+// answers it, and the v1.x in-kernel dual-image PT_INTERP lift (DISTRO
+// section 3.2's recorded alternative) would need it to name the PROGRAM's
+// entry while AT_PHDR named the program's phdrs.
+//
+// It is NOT what makes stock ldso work, despite what the D-2 design text
+// said before this was measured (task #186). musl discriminates direct
+// invocation on `aux[AT_PHDR] != ldso.phdr` (ldso/dynlink.c:1834) -- the
+// AT_PHDR we emit for a directly-exec'd ldso equals its own base+e_phoff,
+// so it takes the direct-invocation branch and WRITES this tag itself
+// (dynlink.c:1914) before jumping through it (dynlink.c:2075).
+#define AT_ENTRY      9
 // a_val = the Linux-compatible arm64 hwcap word (g_hw_features.linux_hwcap:
 // FP/ASIMD/AES/PMULL/SHA1/SHA2/CRC32/ATOMICS/SHA3/ASIMDDP/SHA512 at the
 // Linux uapi bit numbers). The STANDARD SysV/Linux tag — musl's
@@ -242,7 +295,11 @@ struct elf_load_segment {
 };
 
 struct elf_image {
-    u64                       entry;        // start address (e_entry)
+    // FINAL addresses: for ET_DYN both `entry` and every segments[].vaddr
+    // already carry `load_bias`. Consumers never add it themselves.
+    u64                       entry;        // e_entry + load_bias
+    u64                       load_bias;    // 0 for ET_EXEC; ELF_PIE_LOAD_BIAS for ET_DYN
+    u16                       type;         // e_type (ET_EXEC | ET_DYN) — diagnostics
     u64                       phoff;        // e_phoff — file offset of the phdr table
     u16                       phnum;        // e_phnum — count of program headers
     u16                       phentsize;    // e_phentsize (== sizeof(struct Elf64_Phdr))
@@ -263,7 +320,7 @@ enum elf_load_result {
     ELF_LOAD_BAD_DATA       =  -5,    // e_ident[EI_DATA] != ELFDATA2LSB
     ELF_LOAD_BAD_VERSION    =  -6,    // e_ident[EI_VERSION] != EV_CURRENT
     ELF_LOAD_BAD_OSABI      =  -7,    // e_ident[EI_OSABI] != ELFOSABI_NONE
-    ELF_LOAD_BAD_TYPE       =  -8,    // e_type != ET_EXEC at v1.0
+    ELF_LOAD_BAD_TYPE       =  -8,    // e_type is neither ET_EXEC nor ET_DYN
     ELF_LOAD_BAD_MACHINE    =  -9,    // e_machine != EM_AARCH64
     ELF_LOAD_BAD_FILE_VER   = -10,    // e_version != EV_CURRENT
     ELF_LOAD_BAD_PHENTSIZE  = -11,    // e_phentsize != sizeof(Elf64_Phdr)
@@ -278,7 +335,8 @@ enum elf_load_result {
     ELF_LOAD_BAD_ENTRY      = -20,    // e_entry == 0 OR not in any LOAD segment
     ELF_LOAD_EXEC_STACK     = -21,    // PT_GNU_STACK with PF_X — NX-stack violation
     ELF_LOAD_BAD_ALIGN      = -22,    // R5-G F61: blob is not 8-byte aligned
-    ELF_LOAD_HAS_DYNAMIC    = -23,    // R5-G F63: PT_DYNAMIC present (dynamic; v1.0 static only)
+    ELF_LOAD_HAS_DYNAMIC    = -23,    // PT_DYNAMIC on an ET_EXEC (D-2: legal on ET_DYN)
+    ELF_LOAD_PIE_OOB        = -24,    // D-2: biased ET_DYN segment leaves the PIE window
 };
 
 // elf_load — parse + validate an ELF64 ARM64 blob.

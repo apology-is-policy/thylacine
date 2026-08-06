@@ -252,19 +252,56 @@ Image cache is content-keyed on `(qid, page index)`, so text pages are
 base-independent and a PIE's text is shared across differently-based
 instances for free.
 
-Auxv grows **AT_ENTRY** (base + `e_entry`): musl's direct-invocation
-discrimination reads the entry (exact discriminator verified against
-`dynlink.c` at impl); `EXEC_INIT_AUXV_COUNT` bumps with the CF-4 frame-
-reservation precedent. **AT_BASE stays absent** — it is the dual-image
-protocol's tag, and emitting it without the dual load would lie to ldso.
+Auxv grows **AT_ENTRY** (base + `e_entry`); `EXEC_INIT_AUXV_COUNT` bumps
+with the CF-4 frame-reservation precedent. **AT_BASE stays absent** — it is
+the dual-image protocol's tag, and emitting it without the dual load would
+lie to ldso.
 
-Gate: a static-PIE hello (our toolchain, `-static-pie`) execs; Alpine's
-stock ldso, exec'd directly with no arguments, prints its usage line — the
-cheapest possible proof that a REAL foreign ET_DYN image loads, before any
-mmap work exists.
+**CORRECTION (measured at impl 2026-08-06, task #186).** This section used
+to say "musl's direct-invocation discrimination reads the entry," flagged
+for verification against `dynlink.c`. Verified: it is **false**. The
+discriminator is `aux[AT_PHDR] != (size_t)ldso.phdr` (`ldso/dynlink.c:1834`),
+where `ldso.phdr` comes from ldso's own SELF-RELOCATED base (`:1733`), not
+from auxv. AT_ENTRY is *written* by ldso inside that branch (`:1914`) and
+read only at the final `CRTJMP` (`:2075`), so on the direct-invocation path
+it never reads ours. Both directions were then confirmed by sabotage, not
+just by citation:
+
+| PIE-path-only sabotage | stock-ldso gate | unit suite |
+|---|---|---|
+| AT_ENTRY forced to 0 | **still PASSES** | 1363/1363 |
+| AT_PHDR forced to 0 | **FAILS at D2-A** | 1363/1363 |
+
+So what the gate actually rests on is that a directly-exec'd ldso's AT_PHDR
+equals its own `base + e_phoff` — which the existing AT_PHDR computation
+yields for free once vaddrs are biased. AT_ENTRY is still emitted: it is the
+standard SysV tag, `getauxval(AT_ENTRY)` answers it, and the v1.x dual-image
+lift (§3.2's recorded alternative) would need it to name the PROGRAM's entry
+while AT_PHDR named the program's phdrs.
+
+Gate: Alpine's stock `ld-musl-aarch64.so.1`, exec'd directly with no
+arguments inside the Alpine vivarium, prints its usage line — a REAL foreign
+ET_DYN image loading, before any mmap work exists. Boot-fatal via two joey
+markers (the usage-arm string AND the `musl libc (aarch64)` identity, so a
+garbled load that still produced output cannot satisfy both).
+
+**SEAM (user-dispositioned 2026-08-06, task #188): no static-PIE hello.**
+This section also asked for one from our toolchain. Measured: `-static-pie`
+is silently DROPPED by the fork's `aarch64-thylacine` driver (it hard-codes
+`-static` + `crt1.o`; the flag is reported "unused during compilation" and
+an ET_EXEC comes out at rc=0), and driving `ld.lld` directly with `-pie` +
+`rcrt1.o` fails on `R_AARCH64_ABS64 cannot be used against local symbol` —
+the pouch `libc.a` is built non-PIC. Unblocking it needs a PIC rebuild of
+the pouch musl (re-codegens every pouch binary, its own audit surface) plus
+a Clade-track driver change. It is also strictly WEAKER evidence than the
+ldso gate, which exercises an AT_PHDR path a static-PIE never touches, and
+nothing in D-3/D-4/D-5 needs our toolchain to emit PIE.
 
 Audit posture: audit-noted (the loader row extends; no new invariant — the
-W^X/segment gates are byte-identical, only the base moves).
+W^X/segment gates are byte-identical, only the base moves). AS-BUILT: the
+bias enters at exactly one place, `elf_load`'s segment loop, so every
+downstream consumer reads FINAL addresses; `elf.pie_load_bias` pins both
+halves of that claim, the ET_DYN one and the ET_EXEC control.
 
 ---
 
@@ -379,7 +416,7 @@ chunks).
 | Chunk | Delivers | Gate | Audit |
 |---|---|---|---|
 | D-1 | symlinks in stalk + phenotype NOFOLLOW rows + T_E_LOOP (signoff) | joey symlink battery, revert-probed | FOCUSED ROUND (I-28) |
-| D-2 | ET_DYN load + AT_ENTRY | static-PIE hello + stock-ldso usage smoke | audit-noted |
+| D-2 | ET_DYN load + AT_ENTRY (**AS-BUILT**) | stock-ldso usage line, boot-fatal + revert-probed (static-PIE hello = seam, #188) | audit-noted |
 | D-3 | file-backed EL0 mmap + MAP_FIXED subset | runner-spawned `ld-musl /bin/echo hi` | FOCUSED ROUND (I-36/I-12/I-32) |
 | D-4 | PT_INTERP -> ldso rewrite | busybox execs dynamic `/bin/ls` | audit-noted (exec row) |
 | D-5 | stock rootfs pipeline + put-symlinks (Stratum) | THE ARC GATE: `/bin/sh -c` boot-fatal | build-infra + Stratum |

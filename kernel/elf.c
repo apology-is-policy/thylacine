@@ -80,9 +80,17 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     // -----------------------------------------------------------------
     // Stage 2: e_type / e_machine / e_version.
     // -----------------------------------------------------------------
-    if (eh->e_type    != ET_EXEC)     return ELF_LOAD_BAD_TYPE;
+    // D-2: ET_DYN joins ET_EXEC. The difference is entirely positional --
+    // a PIE's p_vaddr are offsets from a base the loader picks -- so it is
+    // captured by one bias applied below and nothing else in this function
+    // branches on the type again.
+    if (eh->e_type != ET_EXEC && eh->e_type != ET_DYN)
+        return ELF_LOAD_BAD_TYPE;
     if (eh->e_machine != EM_AARCH64)  return ELF_LOAD_BAD_MACHINE;
     if (eh->e_version != EV_CURRENT)  return ELF_LOAD_BAD_FILE_VER;
+
+    const bool is_pie = (eh->e_type == ET_DYN);
+    const u64  bias   = is_pie ? ELF_PIE_LOAD_BIAS : 0;
 
     // -----------------------------------------------------------------
     // Stage 3: program-header table validation.
@@ -115,7 +123,11 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     // collect PT_LOAD entries, enforce W^X + bounds + interp/stack
     // policy.
     // -----------------------------------------------------------------
+    // Biased below, once the segments are collected -- keep the raw value
+    // here so the in-segment search compares like with like.
     out->entry      = eh->e_entry;
+    out->load_bias  = bias;
+    out->type       = eh->e_type;
     // Program-header table location — consumed by exec_setup to build the
     // AT_PHDR / AT_PHENT / AT_PHNUM auxv entries. All three are already
     // validated above (phentsize == sizeof(Elf64_Phdr); phoff + phnum *
@@ -165,7 +177,28 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
 
             {
                 struct elf_load_segment *seg = &out->segments[out->n_segments];
-                seg->vaddr       = p->p_vaddr;
+                // D-2: the ONE place the PIE bias enters. Everything that
+                // reads seg->vaddr afterwards -- here, in exec.c's mapper, in
+                // the AT_PHDR translation -- sees a final address and needed
+                // no change. `bias` is 0 for ET_EXEC, so that path is byte-
+                // identical to before.
+                //
+                // Bound the biased span inside the PIE window. Without this a
+                // hostile p_vaddr could place a segment past the window and
+                // into (or beyond) the burrow-attach range; vma_insert and
+                // burrow_map would still refuse to break isolation, but the
+                // refusal would come from a general allocator rule rather than
+                // from the loader saying what it will and will not place.
+                if (bias != 0) {
+                    u64 seg_top;
+                    if (u64_add_overflow(p->p_vaddr, p->p_memsz, &seg_top))
+                        return ELF_LOAD_PIE_OOB;
+                    if (u64_add_overflow(seg_top, bias, &seg_top))
+                        return ELF_LOAD_PIE_OOB;
+                    if (seg_top > ELF_PIE_LOAD_LIMIT)
+                        return ELF_LOAD_PIE_OOB;
+                }
+                seg->vaddr       = p->p_vaddr + bias;
                 seg->file_offset = p->p_offset;
                 seg->filesz      = p->p_filesz;
                 seg->memsz       = p->p_memsz;
@@ -178,17 +211,29 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
             break;
 
         case PT_INTERP:
-            // Dynamic binaries / PIE deferred to Phase 5+. v1.0 only
-            // accepts statically-linked ET_EXEC.
+            // The kernel loads exactly ONE image per exec and runs no
+            // interpreter. DISTRO D-4's rewrite-to-ldso route reads this
+            // segment at the vivarium exec chokepoint and restarts
+            // resolution on the interpreter, so what reaches elf_load is
+            // the interpreter itself -- which has no PT_INTERP of its own
+            // (measured: stock ld-musl-aarch64.so.1 carries none). This
+            // reject therefore stays correct on both sides of D-4.
             return ELF_LOAD_HAS_INTERP;
 
         case PT_DYNAMIC:
-            // R5-G F63 close: PT_DYNAMIC is the dynamic-link table —
-            // a stronger indicator of a dynamic binary than PT_INTERP
-            // (which is just the loader path). Static-only policy at
-            // v1.0 rejects PT_DYNAMIC explicitly. Phase 5+ dynamic-
-            // linker support flips this to "process the dynamic table."
-            return ELF_LOAD_HAS_DYNAMIC;
+            // R5-G F63 rejected this outright as the stronger dynamic-binary
+            // indicator (PT_INTERP is only the loader path). D-2 narrows the
+            // rejection to ET_EXEC, because every PIE carries a PT_DYNAMIC --
+            // a static-PIE for its self-applied RELA table, stock ldso for its
+            // own. The table is still never PROCESSED here: both self-relocate
+            // from their entry point before executing anything that depends on
+            // it, so accepting the segment costs the loader nothing.
+            //
+            // An ET_EXEC with a PT_DYNAMIC is still refused, unchanged: it
+            // wants an interpreter this loader does not run, and its
+            // relocations have no self-applying startup path.
+            if (!is_pie) return ELF_LOAD_HAS_DYNAMIC;
+            break;
 
         case PT_GNU_STACK:
             // The stack permissions segment. Linkers emit this with
@@ -204,8 +249,13 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
         case PT_PHDR:
         case PT_TLS:
         case PT_GNU_RELRO:
-            // Skipped at v1.0. PT_TLS + PT_GNU_RELRO need dynamic-linker
-            // support. PT_PHDR is auxv-relevant only.
+            // Skipped -- all three describe memory some PT_LOAD already
+            // covers. PT_GNU_RELRO asks for a post-relocation re-protect
+            // the phenotype answers with ENOSYS (musl tolerates that
+            // specifically, dynlink.c:855,1428 -- RELRO degrades, which is
+            // no loss against a status quo that had none). PT_PHDR is
+            // auxv-relevant only; AT_PHDR is derived from e_phoff instead,
+            // so a PIE without one (stock ldso) still resolves.
             break;
 
         default:
@@ -223,7 +273,14 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     // -----------------------------------------------------------------
     // Stage 5: e_entry within some PT_LOAD segment's vaddr range.
     // -----------------------------------------------------------------
-    if (eh->e_entry == 0)
+    // D-2: bias the entry here so the comparison below is against the
+    // already-biased segment vaddrs, and so the zero-check tests the
+    // address control actually transfers to. For ET_EXEC bias is 0, so
+    // this is the old `eh->e_entry == 0` unchanged; for a PIE, e_entry 0
+    // is a legitimate "entry at the load base" and the biased value is
+    // never 0, which is the correct reading of the same rule.
+    out->entry = eh->e_entry + bias;
+    if (out->entry == 0)
         return ELF_LOAD_BAD_ENTRY;
     {
         bool entry_in_segment = false;
@@ -237,7 +294,7 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
             u64 seg_end;
             if (u64_add_overflow(s->vaddr, s->memsz, &seg_end))
                 continue;
-            if (eh->e_entry >= s->vaddr && eh->e_entry < seg_end) {
+            if (out->entry >= s->vaddr && out->entry < seg_end) {
                 entry_in_segment = true;
                 break;
             }

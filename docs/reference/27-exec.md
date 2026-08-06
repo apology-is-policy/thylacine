@@ -21,11 +21,11 @@ ARCH §16: "exec is the boundary between the kernel-internal Proc/Thread model a
 
 // System V process-startup frame (P6-pouch-kernel-auxv) — see
 // "Initial process stack" below. EXEC_INIT_STACK_SIZE is a 16-aligned
-// computed macro; it resolves to 176 (8 auxv entries since AT_HWCAP;
-// AT_VDSO_CLOCK landed at #343).
-#define EXEC_INIT_AUXV_COUNT     8
-#define EXEC_INIT_STACK_SIZE     176   // argc+argv+envp + 8 auxv + 16 random
-#define EXEC_INIT_RANDOM_OFFSET  160   // EXEC_INIT_STACK_SIZE - 16
+// computed macro; it resolves to 192 (9 auxv entries: AT_HWCAP, then
+// AT_VDSO_CLOCK at #343, then AT_ENTRY at DISTRO D-2).
+#define EXEC_INIT_AUXV_COUNT     9
+#define EXEC_INIT_STACK_SIZE     192   // argc+argv+envp + 9 auxv + 16 random
+#define EXEC_INIT_RANDOM_OFFSET  176   // EXEC_INIT_STACK_SIZE - 16
 
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
@@ -146,14 +146,14 @@ General layout, low → high address (`R` = `round_up(structured, 16)`, the `AT_
 | 8 + 8*argc                   | 8            | `argv[]` terminator (NULL) |
 | 16 + 8*argc + 8*j            | 8            | `envp[j]`, j = 0..envc-1 |
 | 16 + 8*argc + 8*envc         | 8            | `envp[]` terminator (NULL) |
-| 24 + 8*argc + 8*envc         | 128          | `auxv[]` — up to eight `Elf64_auxv_t` (16 B each) |
+| 24 + 8*argc + 8*envc         | 144          | `auxv[]` — up to nine `Elf64_auxv_t` (16 B each) |
 | ...                          | 0–15         | alignment padding (zero, from `KP_ZERO`) |
 | R                            | 16           | `AT_RANDOM` entropy block |
 | R + 16                       | argv_data_len| argv strings — concatenated, NUL-terminated |
 | R + 16 + argv_data_len       | env_data_len | envp strings — same packing, `NAME=VALUE\0` records |
 | frame_size                   | —            | `EXEC_USER_STACK_TOP` |
 
-At `argc == 0, envc == 0` that is: `argc` at 0, the two NULLs at 8 and 16, auxv at 24, pad at 152, `AT_RANDOM` at 160, `EXEC_USER_STACK_TOP` at 176 — `EXEC_INIT_STACK_SIZE`.
+At `argc == 0, envc == 0` that is: `argc` at 0, the two NULLs at 8 and 16, auxv at 24, pad at 168, `AT_RANDOM` at 176, `EXEC_USER_STACK_TOP` at 192 — `EXEC_INIT_STACK_SIZE`.
 
 **Where the environment comes from.** The builder takes env DATA, not a Proc, and that is forced rather than stylistic: `exec_load_into` builds into a *detached* address space and commits only after everything failable has succeeded (LINEAGE L-2a), so at that moment the Proc still holds the OLD environment. `exec_stage_env` does the projection for the callers whose answer is "whatever this Proc already has" — every `SYS_SPAWN_*` thunk (projecting the child's already-cloned `/env`) and the native `SYS_EXECVE`, whose ABI has no envp argument and therefore means *preserve*. A phenotyped Linux `execve` packs its own block from the guest's `envp`. The block is bounded independently of the `/env` maxima (`EXEC_ENV_MAX` / `EXEC_ENV_DATA_MAX`, argued in `exec.h`) and an environment that exceeds it is refused with `T_E_2BIG`, never truncated.
 
@@ -161,16 +161,19 @@ The auxv entries (`a_type`, `a_val`), written by `exec_fill_auxv` (both frame sh
 
 | a_type | a_val |
 |---|---|
-| `AT_PHDR` (3)    | user VA of the ELF program-header table, or 0 |
+| `AT_PHDR` (3)    | user VA of the ELF program-header table, or 0. **Load-bearing for dynamic loading**: a directly-exec'd stock ldso decides it was invoked as a program by testing this against its own self-relocated `base + e_phoff` (`musl ldso/dynlink.c:1834`), so the biased value D-2 produces is what makes that branch correct — see the D-2 note below |
 | `AT_PHENT` (4)   | `e_phentsize` (56 — `sizeof(Elf64_Phdr)`) |
 | `AT_PHNUM` (5)   | `e_phnum`, or 0 when `AT_PHDR` is unresolved |
 | `AT_PAGESZ` (6)  | `PAGE_SIZE` (4096) |
 | `AT_HWCAP` (16)  | the Linux-compatible arm64 CPU-feature word (`g_hw_features.linux_hwcap` — FP/ASIMD/AES/PMULL/SHA1/SHA2/SHA512/SHA3/CRC32/ATOMICS/ASIMDDP at the Linux uapi bit numbers, derived from ID_AA64ISAR0/PFR0 at boot; `hwcap_CPUID` is never set — see `12-hardening.md`) |
-| `AT_RANDOM` (25) | user VA of the 16-byte entropy block (`sp + 160` in Shape A) |
+| `AT_RANDOM` (25) | user VA of the 16-byte entropy block (`sp + 176` with no argv and an empty env) |
+| `AT_ENTRY` (9)   | the loaded image's FINAL entry — `img->entry`, which already carries the PIE bias for an ET_DYN and equals `e_entry` for an ET_EXEC (DISTRO D-2). Unconditional |
 | `AT_VDSO_CLOCK` (0x5654) | user VA of the RO clock page — OPTIONAL, present only when the vDSO page mapped (see `11-timer.md`); when absent the AT_NULL terminator moves up and the slot stays zeroed padding |
 | `AT_NULL` (0)    | 0 — vector terminator |
 
-The minimum a static musl process needs (per POUCH-DESIGN.md §12.1) plus the two informational entries. `AT_HWCAP` is the STANDARD SysV tag — musl's `getauxval`, libsodium's armcrypto runtime gate, and the Go runtime's `internal/cpu` init read it directly; consumers treat a clear bit as feature-absent (fail-safe on crypto-less cores). Other optional entries (`AT_SECURE`, `AT_CLKTCK`, ...) remain deliberately omitted — a C runtime supplies its own defaults for absent entries. All known consumers scan the vector by tag to `AT_NULL`; nothing parses by fixed offset.
+**What AT_ENTRY is and is not for (DISTRO D-2).** It is the standard SysV tag — `getauxval(AT_ENTRY)` answers it, and the v1.x in-kernel dual-image `PT_INTERP` lift would need it to name the PROGRAM's entry while `AT_PHDR` named the program's phdrs. It is **not** what makes stock ldso work, despite what the D-2 design text said before this was measured. musl discriminates direct invocation on `AT_PHDR` (above); inside that branch it *writes* `aux[AT_ENTRY]` itself from the app it just mapped (`dynlink.c:1914`) and only reads it at the final `CRTJMP` (`:2075`). Confirmed by sabotage, not just by reading: with AT_ENTRY forced to 0 on the PIE path the stock-ldso boot gate still PASSES, and with AT_PHDR forced to 0 it FAILS — while the unit suite stays 1363/1363 in both cases, so the gate is what caught it. See `docs/DISTRO.md` §5 and task #186.
+
+The minimum a static musl process needs (per POUCH-DESIGN.md §12.1) plus the informational entries. `AT_HWCAP` is the STANDARD SysV tag — musl's `getauxval`, libsodium's armcrypto runtime gate, and the Go runtime's `internal/cpu` init read it directly; consumers treat a clear bit as feature-absent (fail-safe on crypto-less cores). Other optional entries (`AT_SECURE`, `AT_CLKTCK`, ...) remain deliberately omitted — a C runtime supplies its own defaults for absent entries. All known consumers scan the vector by tag to `AT_NULL`; nothing parses by fixed offset.
 
 **The initial sp** = `EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE`. It is 16-byte aligned — the AArch64 SysV ABI requirement — because `EXEC_INIT_STACK_SIZE` is rounded up to a 16-byte multiple and `EXEC_USER_STACK_TOP` is itself aligned. The header pins this with `_Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0)`.
 

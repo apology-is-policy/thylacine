@@ -29,6 +29,7 @@
 #ifndef THYLACINE_EXEC_H
 #define THYLACINE_EXEC_H
 
+#include <thylacine/elf.h>
 #include <thylacine/types.h>
 
 struct Proc;
@@ -81,6 +82,15 @@ struct Spoor;   // REVENANT R-4: exec_setup_from_spoor's pinned executable
 #define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
 #define EXEC_USER_STACK_GUARD_BASE   (EXEC_USER_STACK_BASE - EXEC_USER_STACK_GUARD_SIZE)
+
+// DISTRO D-2: the PIE window (elf.h) is part of THIS plan, so the two
+// constants are pinned against each other here rather than trusted to stay
+// consistent. elf_load refuses any ET_DYN segment whose biased top passes
+// ELF_PIE_LOAD_LIMIT, so this inequality is what makes "a PIE can never be
+// placed into the stack guard, the stack, or anything above it" a build-time
+// fact instead of an arithmetic argument about particular binaries.
+_Static_assert(ELF_PIE_LOAD_LIMIT <= EXEC_USER_STACK_GUARD_BASE,
+               "the PIE window must end below the user stack guard");
 
 // P6-pouch-mem: the burrow-attach window — the user-VA range SYS_BURROW_
 // ATTACH places anonymous Burrows into (ARCHITECTURE.md §6.5, Tier 1).
@@ -140,7 +150,7 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 //                                                        × Elf64_auxv_t (AT_PHDR,
 //                                                        AT_PHENT, AT_PHNUM,
 //                                                        AT_PAGESZ, AT_HWCAP,
-//                                                        AT_RANDOM,
+//                                                        AT_RANDOM, AT_ENTRY,
 //                                                        [AT_VDSO_CLOCK], AT_NULL)
 //   sp + ...                      (pad to the next 16-align)
 //   sp + R                        AT_RANDOM entropy     16 kernel-CSPRNG bytes
@@ -170,13 +180,18 @@ _Static_assert((EXEC_USER_VDSO_BASE & 0xFFFull) == 0,
 // that arithmetic), so nothing that used to take Shape A can observe the
 // change; what it buys is that envp now has exactly one place to be wrong.
 //
-// 8 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
-// AT_VDSO_CLOCK, AT_NULL. The frame ALWAYS reserves room for all 8 (so the
-// AT_RANDOM block + strings region offsets are stable); when the vDSO page
-// is absent the builder writes the AT_NULL terminator after 6 entries and
+// 9 = AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_HWCAP, AT_RANDOM,
+// AT_ENTRY, AT_VDSO_CLOCK, AT_NULL. The frame ALWAYS reserves room for all 9
+// (so the AT_RANDOM block + strings region offsets are stable); when the vDSO
+// page is absent the builder writes the AT_NULL terminator after 7 entries and
 // the AT_VDSO_CLOCK slot stays unused (zeroed) padding before the random
 // block. AT_HWCAP is unconditional (the hwcap word exists on every boot).
-#define EXEC_INIT_AUXV_COUNT   8
+//
+// AT_ENTRY joined at DISTRO D-2, placed after AT_RANDOM and BEFORE the
+// optional AT_VDSO_CLOCK. Every reader scans for its tag, so position is free;
+// what the placement buys is that the seven MANDATORY entries keep the frame
+// indices they had, and only the optional tail shifts by one 16-byte slot.
+#define EXEC_INIT_AUXV_COUNT   9
 
 // Environment bounds (#140). The env block is packed exactly like argv: a
 // run of NUL-terminated strings, here "NAME=VALUE" records, with envc equal

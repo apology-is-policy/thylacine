@@ -39,6 +39,7 @@ void test_elf_header_rejection(void);
 void test_elf_rwx_rejected(void);
 void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
+void test_elf_pie_load_bias(void);
 
 #define TEST_ELF_BLOB_SIZE 4096
 // R5-G F71 close: explicit alignment so the cast `(struct Elf64_Ehdr *)
@@ -197,11 +198,18 @@ void test_elf_header_rejection(void) {
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_BAD_TYPE, "ET_REL rejected");
 
-    // ET_DYN (PIE) rejected at v1.0.
+    // D-2: ET_DYN is now ACCEPTED (it was ELF_LOAD_BAD_TYPE until then).
+    // ET_CORE is the remaining third type and stays refused, so this pair
+    // shows the gate narrowed rather than opened.
     size = build_elf(flags, 1);
     blob_ehdr()->e_type = ET_DYN;
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
-        ELF_LOAD_BAD_TYPE, "ET_DYN rejected at v1.0 (PIE deferred)");
+        ELF_LOAD_OK, "ET_DYN accepted (D-2)");
+
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_type = ET_CORE;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_BAD_TYPE, "ET_CORE still rejected");
 
     // Bad machine.
     size = build_elf(flags, 1);
@@ -431,6 +439,116 @@ void test_elf_policy_rejection(void) {
     size = build_elf(flags, 1);
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_OK, "valid blob still parses after the rejection matrix");
+}
+
+// DISTRO D-2: ET_DYN placement.
+//
+// The design's claim is that a PIE differs from an executable in exactly one
+// way -- position -- so the whole change is one bias applied at one place.
+// That claim is only worth anything if BOTH halves are checked: the PIE moves,
+// and the ET_EXEC does NOT. The ET_EXEC leg here is the control; without it a
+// bias accidentally applied to every image would still pass the PIE leg.
+void test_elf_pie_load_bias(void) {
+    const u32 flags[3] = { PF_R | PF_X, PF_R, PF_R | PF_W };
+    size_t size;
+    struct elf_image img;
+
+    // build_elf lays segments at 0x10000 + i * 0x10000 with entry 0x10000.
+    // As ET_DYN every one of those is an OFFSET from the load base.
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type = ET_DYN;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "PIE parses");
+    TEST_EXPECT_EQ(img.load_bias, ELF_PIE_LOAD_BIAS, "load_bias recorded");
+    TEST_EXPECT_EQ((u64)img.type, (u64)ET_DYN, "e_type recorded");
+    TEST_EXPECT_EQ(img.entry, ELF_PIE_LOAD_BIAS + 0x10000ull,
+        "entry biased");
+    TEST_EXPECT_EQ(img.segments[0].vaddr, ELF_PIE_LOAD_BIAS + 0x10000ull,
+        "segment 0 biased");
+    TEST_EXPECT_EQ(img.segments[1].vaddr, ELF_PIE_LOAD_BIAS + 0x20000ull,
+        "segment 1 biased");
+    TEST_EXPECT_EQ(img.segments[2].vaddr, ELF_PIE_LOAD_BIAS + 0x30000ull,
+        "segment 2 biased");
+    // The bias is POSITIONAL only: file offsets, sizes and permission bits
+    // are untouched, which is why every downstream gate keeps working.
+    TEST_EXPECT_EQ(img.segments[0].file_offset, 0ull, "file_offset unbiased");
+    TEST_EXPECT_EQ(img.segments[2].flags, (u32)(PF_R | PF_W), "flags intact");
+
+    // THE CONTROL: the identical blob as ET_EXEC is unbiased.
+    size = build_elf(flags, 3);
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "ET_EXEC parses");
+    TEST_EXPECT_EQ(img.load_bias, 0ull, "ET_EXEC load_bias is 0");
+    TEST_EXPECT_EQ(img.entry, 0x10000ull, "ET_EXEC entry unbiased");
+    TEST_EXPECT_EQ(img.segments[0].vaddr, 0x10000ull, "ET_EXEC vaddr unbiased");
+
+    // PT_DYNAMIC: legal on a PIE (every one carries it), still refused on an
+    // ET_EXEC. Both directions, because accepting it everywhere would pass
+    // the first assertion alone.
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[2].p_type  = PT_DYNAMIC;
+    blob_phdrs()[2].p_flags = PF_R | PF_W;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "PT_DYNAMIC accepted on ET_DYN");
+
+    size = build_elf(flags, 3);
+    blob_phdrs()[2].p_type  = PT_DYNAMIC;
+    blob_phdrs()[2].p_flags = PF_R | PF_W;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_HAS_DYNAMIC, "PT_DYNAMIC still rejected on ET_EXEC");
+
+    // PT_INTERP stays rejected on a PIE too -- D-2 does not run interpreters.
+    // (Stock ld-musl-aarch64.so.1 has no PT_INTERP, which is why the D-2 gate
+    // binary loads through this unchanged.)
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[1].p_type = PT_INTERP;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_HAS_INTERP, "PT_INTERP rejected on ET_DYN too");
+
+    // e_entry == 0 means two different things by type. On an ET_EXEC it is a
+    // null entry (refused, unchanged). On a PIE it means "entry at the load
+    // base", a real address once biased -- so it must be ACCEPTED, and the
+    // zero-check has to run on the biased value to tell them apart.
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_type  = ET_DYN;
+    blob_ehdr()->e_entry = 0;
+    blob_phdrs()[0].p_vaddr = 0;         // make segment 0 cover offset 0
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "PIE with e_entry 0 loads (entry at the load base)");
+    TEST_EXPECT_EQ(img.entry, ELF_PIE_LOAD_BIAS, "its entry IS the load base");
+
+    size = build_elf(flags, 3);
+    blob_ehdr()->e_entry = 0;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_BAD_ENTRY, "ET_EXEC with e_entry 0 still refused");
+
+    // The window bound. A p_vaddr that would carry the biased segment past
+    // ELF_PIE_LOAD_LIMIT is refused BY THE LOADER, not left to the mapper.
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[0].p_vaddr = ELF_PIE_LOAD_LIMIT;   // biased: way past the top
+    blob_ehdr()->e_entry    = ELF_PIE_LOAD_LIMIT;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_PIE_OOB, "PIE segment past the window refused");
+
+    // ...and the same vaddr is fine as an ET_EXEC, since the window is a
+    // property of the PIE placement and not a new rule for fixed images.
+    size = build_elf(flags, 1);
+    blob_phdrs()[0].p_vaddr = ELF_PIE_LOAD_LIMIT;
+    blob_ehdr()->e_entry    = ELF_PIE_LOAD_LIMIT;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "the window binds PIEs only");
+
+    // A p_vaddr near the top of the VA space must not wrap into a small
+    // (apparently in-window) address once biased.
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_type = ET_DYN;
+    blob_phdrs()[0].p_vaddr = (u64)-1 - 0x800ull;
+    blob_ehdr()->e_entry    = blob_phdrs()[0].p_vaddr;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_PIE_OOB, "a biased vaddr that would wrap is refused");
 }
 
 // VIVARIUM V-1: the ADVISORY brand hint (docs/VIVARIUM.md §12.1).

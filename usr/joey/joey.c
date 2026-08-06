@@ -1109,6 +1109,23 @@ static int do_alpine_shell_gate(void) {
         L6C_MK("L6C-G-loop"),
         L6C_MK("L6C-H-nested-shell"),
         L6C_MK("L6C-I-exitcode="),
+        // DISTRO D-2. The rootfs's OWN /lib/ld-musl-aarch64.so.1 -- a stock,
+        // unmodified, foreign ET_DYN PIE -- exec'd with no arguments. Reaching
+        // its usage banner means the whole D-2 chain held: the loader accepted
+        // ET_DYN and its PT_DYNAMIC, placed every segment at ELF_PIE_LOAD_BIAS,
+        // ldso self-relocated against that base from its own entry, and the
+        // AT_PHDR we wrote matched its own phdrs closely enough that musl took
+        // the direct-invocation branch (dynlink.c:1834) instead of trying to
+        // run a program that is not there.
+        //
+        // TWO markers, not one, and they are not redundant: A is the branch
+        // (the string lives only in the usage arm), B is the identity (arch +
+        // "musl libc"), so a garbled load that still reached SOME output cannot
+        // satisfy both. Measured 2026-08-06: "musl libc (aarch64) / Version
+        // 1.2.5 / Dynamic Program Loader / Usage: /lib/ld-musl-aarch64.so.1
+        // [options] [--] pathname [args]", rc 1.
+        L6C_MK("D2-A-stock-ldso-usage"),
+        L6C_MK("D2-B-stock-ldso-arch"),
         L6C_MK("L6C-DONE"),
     };
 #undef L6C_MK
