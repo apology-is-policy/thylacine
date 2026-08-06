@@ -6,6 +6,7 @@
 #ifdef SDL_VIDEO_DRIVER_THYLACINE
 
 #include "SDL_video.h"
+#include "SDL_cpuinfo.h"   /* SDL_GetCPUCount, for the LP_NUM_THREADS default */
 #include "../SDL_sysvideo.h"
 
 #include "SDL_thylacinevideo.h"
@@ -164,6 +165,30 @@ SDL_GLContext THYLACINE_GL_CreateContext(_THIS, SDL_Window *window)
         SDL_SetError("thylacine: CAP_JIT refused — llvmpipe cannot JIT in "
                      "this process, so there is no rasteriser to bind");
         return NULL;
+    }
+
+    /* llvmpipe sizes its rasteriser worker pool from Mesa's
+     * util_get_cpu_caps()->nr_cpus, and on this platform that is a hardcoded
+     * 1: the POSIX_LITE tier of u_cpu_detect.c carries no sysconf arm (the
+     * shipped u_cpu_detect.c.o has no sysconf reference at all — #150), so
+     * the pool never spawned and an -smp 4 guest rasterised on one core.
+     * Until the Mesa port grows that arm, seed Mesa's own documented
+     * override with the real count — the same platform-fact-carrying this
+     * function already does for CAP_JIT, two paragraphs up. The user's own
+     * LP_NUM_THREADS always wins (overwrite=0), and a 1-CPU guest is left
+     * untouched (unset == llvmpipe's inline rasterisation, the same path).
+     * SDL_GetCPUCount is sysconf(_SC_NPROCESSORS_ONLN) on this port
+     * (HAVE_SYSCONF; honest since pouch 0032 reads /ctl/sched "cpus: N").
+     * Before the context create, because llvmpipe reads the variable once
+     * at screen creation inside OSMesaCreateContextExt. Measured on the
+     * GLQuake demo1 gate (640x400, -smp 4, HVF): 21.6 -> 29.1 fps. */
+    if (!SDL_getenv("LP_NUM_THREADS")) {
+        int ncpu = SDL_GetCPUCount();
+        if (ncpu > 1) {
+            char nbuf[16];
+            SDL_snprintf(nbuf, sizeof nbuf, "%d", ncpu);
+            SDL_setenv("LP_NUM_THREADS", nbuf, 0);
+        }
     }
 
     ctx = (THYLACINE_GLContext *)SDL_calloc(1, sizeof(*ctx));

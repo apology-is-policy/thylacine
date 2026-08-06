@@ -305,7 +305,11 @@ build_kernel() {
     # fixture. Cheap (source copies + a generated Makefile) and derived from
     # the tree, so it must be re-staged on every clade-gate build rather than
     # left to a manual step like stage_clade's multi-hundred-MiB copy.
-    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" ]]; then
+    # Gated on the SAME clade-stage-exists condition as the /clade pool put:
+    # /storm without /clade is boot-fatal (joey's storm gate finds no
+    # compiler), so a toolchain-less tree must bake neither half (#154, the
+    # unannounced mirror of #101's staged-but-flag-unset case).
+    if [[ "${THYLACINE_BAKE_CLADE:-0}" == "1" && -d "$BUILD_DIR/clade/stage/bin" ]]; then
         stage_storm
     fi
 
@@ -1280,6 +1284,36 @@ build_sysroot() {
     #    libsodium build needs the libc + CRT + runtime that steps 1-6 install,
     #    so it always runs after them.
     build_libsodium
+
+    # 8. the GL headers (#146, durable). A sysroot rebuild starts from pristine
+    #    musl, which wipes include/GL + include/KHR — but the SDL-GL compiles
+    #    need them and the GL staging gate only ever verified libOSMesa.a, so
+    #    the loss surfaced three steps later as a missing-header build break
+    #    (or, via the #148 blind-overlay workaround, as a silently REVERTED
+    #    libc.a). Install them HERE, at the same chokepoint that wipes them:
+    #    headers only, never lib/ — that directionality is the whole #148
+    #    lesson. Absent gl/ archives = a non-GL tree; skipping is legitimate.
+    #    Source of truth is the VENDORED copy (third_party/mesa-gl-headers),
+    #    present in every checkout — a clean worktree with no pulled clade
+    #    artifacts must still compile the SDL GL TU (#153); only the LINK
+    #    degrades without the pulled libOSMesa.a archives.
+    local glvendor="$REPO_ROOT/third_party/mesa-gl-headers"
+    if [[ ! -f "$glvendor/GL/osmesa.h" || ! -f "$glvendor/KHR/khrplatform.h" ]]; then
+        echo "==> sysroot: $glvendor is missing or incomplete -- broken" >&2
+        echo "    checkout; the SDL-GL compile will fail (#146/#153)." >&2
+        exit 1
+    fi
+    cp -R "$glvendor/GL" "$glvendor/KHR" "$sysroot/include/"
+    echo "    GL        include/GL + include/KHR installed from third_party (#146/#153)"
+    # Drift check: if a pulled clade gl/ tree exists and its headers differ,
+    # the vendored copy needs a refresh commit (the builder cycle bumped
+    # Mesa). Warn — never silently prefer either copy.
+    if [[ -d "$BUILD_DIR/clade/gl/include/GL" ]] && \
+       ! diff -rq "$glvendor/GL" "$BUILD_DIR/clade/gl/include/GL" >/dev/null 2>&1; then
+        echo "==> sysroot: WARNING: third_party/mesa-gl-headers/GL differs from" >&2
+        echo "    the pulled build/clade/gl/include/GL -- refresh the vendored" >&2
+        echo "    copy in a commit when the builder's Mesa moves (#153)." >&2
+    fi
 
     echo "==> pouch sysroot ready:"
     echo "    libc.a    $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
@@ -2880,8 +2914,9 @@ build_gl_sdl_prove() {
     "$clang" "${cflags[@]}" -Wall -Wextra -c "$src" -o "$obj"
 
     if ! gl_link_program "$out" "$obj"; then
-        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
-        echo "    resolve against libOSMesa.a (#138)." >&2
+        echo "==> gl-sdl-prove: LINK FAILED -- read the ld.lld errors above:" >&2
+        echo "    unresolved GL symbols = the OSMesa archives (#138); an" >&2
+        echo "    unfound -lc++abi/-lunwind = the staged c++ runtime trio (#156)." >&2
         rm -f "$obj"
         exit 1
     fi
@@ -2952,6 +2987,7 @@ gl_link_program() {
         -Wl,--start-group \
         "$gl_lib/libOSMesa.a" "$gl_lib/libz.a" \
         -L"$llvm_lib" "${llvm_flags[@]}" \
+        -L"$BUILD_DIR/clade/stage/sysroot/lib" \
         -lc++ -lc++abi -lunwind -lm \
         -Wl,--end-group \
         -o "$out"
@@ -3844,6 +3880,25 @@ stage_clade() {
     mkdir -p "$stage/sysroot"
     cp -R "$sysroot/lib" "$stage/sysroot/lib"
     cp -R "$sysroot/include" "$stage/sysroot/include"
+    # The C++ runtime trio is a BUILDER artifact riding with the toolchain,
+    # NOT pouch-sysroot content -- the pouch sysroot never builds it, so the
+    # cp -R above cannot supply it. Before #156 it survived only as overlay
+    # residue in $sysroot/lib, and a sysroot regeneration followed by a
+    # restage laundered the last local copies out of both trees (the GL/C++
+    # link then fails on -lc++abi). Canonical local home: the pulled
+    # llvm-build tree, which restaging never regenerates from local content.
+    local cxxrt="$BUILD_DIR/clade/llvm-build/cxx-rt"
+    local cxxa
+    for cxxa in libc++.a libc++abi.a libunwind.a; do
+        if [[ ! -f "$cxxrt/$cxxa" ]]; then
+            echo "==> stage_clade: $cxxrt/$cxxa is MISSING -- the GL/C++ link" >&2
+            echo "    will fail on -l${cxxa#lib}. Pull it from the builder's" >&2
+            echo "    stage2 sysroot (fetch-set gap, #156); refusing to stage" >&2
+            echo "    a toolchain that cannot link its own language." >&2
+            exit 1
+        fi
+        cp "$cxxrt/$cxxa" "$stage/sysroot/lib/$cxxa"
+    done
     echo "    clade stage: $(du -sh "$stage" | cut -f1) -- bin: $(ls "$stage/bin" | tr '\n' ' ')"
 }
 

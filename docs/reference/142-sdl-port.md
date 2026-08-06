@@ -227,6 +227,50 @@ whenever the swap path sees the mapping change — keyed on the recorded
 binding rather than on the resize event, so it is correct regardless of
 which layer noticed the resize first.
 
+### Header provenance: `third_party/mesa-gl-headers` (#153)
+
+The GL/OSMesa/KHR headers the GL TU compiles against are **vendored** at
+`third_party/mesa-gl-headers/{GL,KHR}` (MIT, byte-pristine from the
+mesa-thylacine fork's install tree; see its README for the refresh
+protocol). `build.sh` installs them into the pouch sysroot at the
+sysroot-rebuild chokepoint from the repo copy — never from `build/` — so a
+clean worktree with no pulled clade artifacts compiles this backend; only
+the *link* of GL apps degrades (announced) when the pulled `libOSMesa.a`
+archives are absent. A drift warning fires when the pulled headers and the
+vendored copy diverge; the fix is a vendor-refresh commit, never a silent
+preference.
+
+### The rasteriser thread pool: the `LP_NUM_THREADS` default (#150)
+
+The `glFinish` note above assumes llvmpipe rasterises on a thread pool.
+Until #150 it never did on this platform: llvmpipe sizes the pool from
+Mesa's `util_get_cpu_caps()->nr_cpus`, and the POSIX_LITE tier of
+`u_cpu_detect.c` carries no `sysconf` arm at all (the shipped
+`u_cpu_detect.c.o` has no `sysconf` reference), so `nr_cpus` was a
+hardcoded 1 and every frame rasterised inline on the calling thread —
+21.6 fps on the GLQuake demo1 gate while three of the guest's four vCPUs
+idled.
+
+`THYLACINE_GL_CreateContext` therefore seeds Mesa's own documented
+override before creating the context: if `LP_NUM_THREADS` is unset and
+`SDL_GetCPUCount() > 1`, it is set to the CPU count (`SDL_setenv`
+overwrite=0 — a user's value always wins; a 1-CPU guest is left on the
+identical inline path). This is the same platform-fact-carrying the
+CAP_JIT walk in the same function embodies. `SDL_GetCPUCount` is
+`sysconf(_SC_NPROCESSORS_ONLN)` on this port (`HAVE_SYSCONF`), which is
+honest since pouch patch `0032-pouch-sysconf-nprocs` reads the
+`cpus: N` line of `/ctl/sched` — the musl twin of the Go runtime's
+`getCPUCount()`.
+
+Measured (969-frame demo1, 640x400, -smp 4, HVF): inline 21.6 fps; 3
+workers 25.6; 4 workers **29.1 fps (+35%)**; the wrapper-control at 0
+matched inline (21.1). Sublinear because ~2/3 of frame time is the
+single-threaded game/setup path of a 1996 immediate-mode engine, not the
+rasteriser. The upstream-clean follow-up — a `DETECT_OS_THYLACINE`
+`sysconf` arm in the Mesa port's `u_cpu_detect.c` — is owed at the next
+builder cycle; the env default then becomes redundant-but-harmless
+(`LP_NUM_THREADS` outranks `nr_cpus` in llvmpipe regardless).
+
 ### Why the OSMesa symbols are weak, and what that cost
 
 `libOSMesa.a` plus its 73 LLVM archives are ~365 MB of link input. A hard

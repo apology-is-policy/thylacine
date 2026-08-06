@@ -56,3 +56,8 @@
 0029-pouch-cons-winsize.patch
 0030-pouch-fopen-append.patch
 0031-pouch-readlink.patch
+# 0032: #150 -- honest _SC_NPROCESSORS via /ctl/sched "cpus: N" (the Go
+# runtime getCPUCount precedent). The seam ENOSYSes sched_getaffinity, so
+# upstream popcounted its {1} seed to 1 forever; llvmpipe/LLVM/nproc all
+# saw one CPU. Fail-soft 1.
+0032-pouch-sysconf-nprocs.patch

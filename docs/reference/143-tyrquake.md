@@ -208,6 +208,119 @@ while llvmpipe is doing general per-fragment texture filtering through
 JIT-compiled shader variants. No budget is committed here; the number exists so
 a later change has something to be compared against.
 
+### Second measurement (#150): the rasteriser pool engages
+
+The 19.8 was measured with llvmpipe rasterising **inline on one thread** —
+`nr_cpus` was a hardcoded 1 on this platform (doc 142, the `LP_NUM_THREADS`
+default section). The #150 decomposition, boot-per-run on the same demo1
+gate command (HVF, -smp 4; a fresh guest per number):
+
+```
+inline (pre-fix shipped)      969 frames  44.8s  21.6 fps
+wrapper LP_NUM_THREADS=0      969 frames  45.9s  21.1 fps   (control == inline)
+wrapper LP_NUM_THREADS=3      969 frames  37.8s  25.6 fps
+wrapper LP_NUM_THREADS=4      969 frames  33.3s  29.1 fps
+post-fix shipped (no config)  969 frames  33.1s  29.3 fps   (and one 37.4s/25.9 outlier)
+```
+
+The shipped path now self-defaults the pool to the CPU count (pouch 0032
+sysconf + the SDL glue seed), so the plain gate command does **21.6 →
+29.3 fps (+36%) with zero configuration**. Sublinear vs 4 workers'
+theoretical ceiling because ~2/3 of frame time is serial on the calling
+thread. Threaded runs show wider single-run spread
+than inline ones (25.9–29.3 across two post-fix boots); quote the pair,
+not one number. fps remains REPORTED, not gated.
+
+### The host reference (2026-08-05): uncapped M2, same demo, same 640×400
+
+Host tyr-glquake (macOS arm64, same vendored tree, brew SDL2, Apple's GL
+2.1-on-Metal — i.e. the **M2 GPU**, not a software rasteriser):
+
+```
+host, vsync ON (default)      969 frames  16.3s    59.6 fps   (display cadence, NOT a perf number)
+host, swap interval forced 0  969 frames   0.5s  2061.8 fps
+```
+
+Two conclusions this pins:
+
+- **The vsync trap**: tyrquake applies `vid_vsync` only at video-mode set,
+  which happens before `+cvar` commands execute — so `+vid_vsync 0` on the
+  command line silently does nothing and the "benchmark" reports the
+  display's refresh rate. The uncapped number required forcing
+  `SDL_GL_SetSwapInterval(0)` at the call site (scratch build). Any host
+  number that sits at ~59.6 or ~120 is the compositor talking, not the GPU.
+- **The serial share is Mesa-side, not game logic**: the host does engine +
+  GL dispatch + GPU in ~0.5 ms/frame, and HVF guest CPU is near-native — so
+  the guest's ~31 ms/frame serial floor is ≥98% software-GL caller-side work
+  (immediate-mode dispatch through the state tracker + llvmpipe's
+  caller-thread vertex/setup/binning; `LP_NUM_THREADS` parallelises only the
+  fragment side). The earlier "the engine is the lever" reading is
+  **refuted**. #155 owns the decomposition (`LP_PERF=no_rast` partition);
+  the ~70× host-GPU gap is the price of software rasterisation itself,
+  closable only by a GPU-in-guest arc, not by tuning this stack.
+
+### Third measurement (#155): the serial share partitioned, flag-free
+
+Same demo1 gate command, all four boots same-day (2026-08-06, HVF -smp 4;
+threaded spread is wide, so comparisons are within-day only):
+
+```
+base            640x400  4t   969 frames  37.5s  25.8 fps   (38.8 ms/frame)
+LP_PERF=no_rast 640x400  4t   969 frames  36.9s  26.3 fps   (38.1)
+LP_PERF=no_rast 640x400  0t   969 frames  57.0s  17.0 fps   (58.8)
+base            320x200  4t   969 frames  32.6s  29.7 fps   (33.6)
+```
+
+- **`LP_PERF=no_rast` does NOT engage in this build.** The parse table is in
+  the binary (`strings` shows it) but the pool moved a no_rast run 26.3 →
+  17.0 fps — impossible if rasterisation were actually skipped, since
+  nothing else is pool-parallel. The env delivery itself was proven per-run
+  (`setrun ok`). Enable/verify LP_PERF at the next builder cycle (batched
+  with the owed `DETECT_OS_THYLACINE` sysconf arm).
+- **The resolution probe partitions without any flag**: removing 75% of the
+  pixels saved 5.2 ms/frame → pixel-proportional cost visible past the
+  4-worker overlap ≈ **7 ms (18%)**; the remaining ≈ **32 ms is
+  pixel-independent** — matching the host-GPU-derived ~31 ms caller-side
+  floor. Two independent instruments agree: the wall is per-draw/per-vertex
+  caller-side work (immediate-mode dispatch + llvmpipe caller-thread
+  vertex/setup/binning), not fragment rasterisation and not game logic.
+- Implied asymptote at 640×400 with pixels free: ~31 fps — more threads and
+  lower resolution are exhausted levers. The remaining lever with real
+  headroom is cutting per-call caller-side cost (vertex arrays in the port
+  — engine surgery, deliberately not done in #141; a scope decision).
+
+### The full renderer table (2026-08-06) + the #159 scan facts
+
+All cells 640×400, timedemo demo1, uncapped unless noted:
+
+```
+guest  llvmpipe GL, 4 workers (shipped)   25.8-29.3 fps   (day spread; the #150 fix)
+guest  llvmpipe GL, inline 1 thread       21.1-21.6 fps
+host   M2 GPU (GL 2.1 Metal)            2061.8   fps     (59.6 vsync-capped)
+host   software tyr-quake (1996 span
+       rasteriser, SINGLE thread)          96.9   fps     (93.2 first run w/ PRESENTVSYNC
+                                                           flag -- barely differs)
+```
+
+Scan facts feeding the #156 builder-cycle batch:
+
+- **The Mesa fork ships with ASSERTIONS ON**: 763 `src/gallium` file-path
+  strings (each an `assert(__FILE__)`) in the shipped binary. Disassembly of
+  `cso_data_rehash` shows -O2-class codegen (register-allocated, csel, NEON
+  popcount) — so the buildtype is debugoptimized, NOT -O0. Realistic win
+  from `-Db_ndebug=true` at the next builder rebuild: 5–20%, not multiples.
+- `getauxval` is linked and functional (musl weak over the real auxv;
+  AT_HWCAP exists since CF-4) and `util_cpu_detect_once` is present; whether
+  the JIT target-machine features flow from real detection or a baseline is
+  a fork-source question — resolved at the builder cycle, not by binary
+  archaeology.
+- **The host-llvmpipe cell is DEFERRED with reasons**: upstream 26.1.6
+  deleted OSMesa (the fork's patches resurrect it), macOS has no GLX-style
+  override to slide llvmpipe under SDL's native GL, so the host reference
+  needs custom vid glue + a host Mesa build — and to be apples-to-apples it
+  must match the guest's assert configuration. One clean release-vs-release
+  comparison rides the #156 builder cycle instead.
+
 ## Known caveats / seams
 
 - Mouse-look (virtio-tablet → `TEV_PTR`) is G-7c — keyboard already plays

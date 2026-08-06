@@ -1,0 +1,84 @@
+#150 -- sysconf(_SC_NPROCESSORS_*) tells the truth.
+
+The 0001 seam parks __NR_sched_getaffinity at the 0xFFFF ENOSYS sentinel,
+and upstream musl's NPROCESSORS arm popcounts an affinity buffer it seeds
+with {1} -- so when the syscall fails the popcount is exactly 1, and every
+pouch program has believed the machine has one CPU since the seam landed.
+
+Measured blast radius (#150): Mesa/llvmpipe sized its rasteriser worker
+pool from this (through util_get_cpu_caps / SDL_GetCPUCount) and rasterised
+GLQuake on ONE core of an -smp 4 guest -- 21.6 fps where 4 workers measure
+29.1 fps (+35%, 969-frame demo1, 640x400, HVF). The same 1 reaches LLVM's
+hardware_concurrency (clangd's pool, effective at the next clade rebuild),
+make's load heuristics, and any nproc consumer.
+
+The truthful source is the "cpus: N" line of /ctl/sched (kernel/devctl.c;
+mounted at boot, world-readable) -- the SAME line the Go fork's runtime
+getCPUCount() parses (go-thylacine os_thylacine.go), so this patch is the
+musl twin of an established in-tree precedent, not a new contract.
+Fail-soft to 1 on every miss: no /ctl in the namespace (pre-pivot or
+confined Proc), short read, absent key. _SC_NPROCESSORS_CONF and _ONLN
+stay one value, as upstream had them.
+
+Plain open()/read()/close() rather than raw __syscall: sysconf is not a
+cancellation point we need to protect, and the libc-level calls route
+through the boundary-line like every other pouch file access.
+
+--- a/src/conf/sysconf.c	2026-08-05 15:12:52
++++ b/src/conf/sysconf.c	2026-08-05 15:13:12
+@@ -1,6 +1,7 @@
+ #include <unistd.h>
+ #include <limits.h>
+ #include <errno.h>
++#include <fcntl.h>
+ #include <sys/resource.h>
+ #include <signal.h>
+ #include <sys/sysinfo.h>
+@@ -201,12 +202,41 @@
+ 		return DELAYTIMER_MAX;
+ 	case JT_NPROCESSORS_CONF & 255:
+ 	case JT_NPROCESSORS_ONLN & 255: ;
+-		unsigned char set[128] = {1};
+-		int i, cnt;
+-		__syscall(SYS_sched_getaffinity, 0, sizeof set, set);
+-		for (i=cnt=0; i<sizeof set; i++)
+-			for (; set[i]; set[i]&=set[i]-1, cnt++);
+-		return cnt;
++		/* Thylacine: SYS_sched_getaffinity is the 0xFFFF ENOSYS
++		 * sentinel, so upstream's {1}-seeded popcount reported 1 CPU
++		 * forever -- llvmpipe's rasteriser pool, LLVM thread pools and
++		 * every nproc consumer ran single-threaded on an -smp 4 guest
++		 * (#150). The truthful source is the "cpus: N" line of
++		 * /ctl/sched (kernel/devctl.c), the same line the Go fork's
++		 * runtime getCPUCount() parses. Fail-soft to 1: no /ctl in
++		 * this namespace (pre-pivot or confined), short read, absent
++		 * key. Plain open(): no O_CLOEXEC dependency, transient fd. */
++		{
++			char cbuf[512];
++			int cfd = open("/ctl/sched", O_RDONLY);
++			if (cfd >= 0) {
++				ssize_t got = 0, r;
++				long n = 0;
++				ssize_t j, k;
++				while (got < (ssize_t)sizeof cbuf &&
++				       (r = read(cfd, cbuf+got, sizeof cbuf - got)) > 0)
++					got += r;
++				close(cfd);
++				for (j = 0; j + 5 < got; j++) {
++					if (cbuf[j] != 'c' || cbuf[j+1] != 'p' ||
++					    cbuf[j+2] != 'u' || cbuf[j+3] != 's' ||
++					    cbuf[j+4] != ':')
++						continue;
++					k = j + 5;
++					while (k < got && cbuf[k] == ' ') k++;
++					while (k < got && cbuf[k] >= '0' && cbuf[k] <= '9')
++						n = n*10 + (cbuf[k++] - '0');
++					break;
++				}
++				if (n >= 1) return n;
++			}
++		}
++		return 1;
+ 	case JT_PHYS_PAGES & 255:
+ 	case JT_AVPHYS_PAGES & 255: ;
+ 		unsigned long long mem;
