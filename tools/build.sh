@@ -2914,8 +2914,9 @@ build_gl_sdl_prove() {
     "$clang" "${cflags[@]}" -Wall -Wextra -c "$src" -o "$obj"
 
     if ! gl_link_program "$out" "$obj"; then
-        echo "==> gl-sdl-prove: LINK FAILED -- the SDL GL driver does not" >&2
-        echo "    resolve against libOSMesa.a (#138)." >&2
+        echo "==> gl-sdl-prove: LINK FAILED -- read the ld.lld errors above:" >&2
+        echo "    unresolved GL symbols = the OSMesa archives (#138); an" >&2
+        echo "    unfound -lc++abi/-lunwind = the staged c++ runtime trio (#156)." >&2
         rm -f "$obj"
         exit 1
     fi
@@ -3879,6 +3880,25 @@ stage_clade() {
     mkdir -p "$stage/sysroot"
     cp -R "$sysroot/lib" "$stage/sysroot/lib"
     cp -R "$sysroot/include" "$stage/sysroot/include"
+    # The C++ runtime trio is a BUILDER artifact riding with the toolchain,
+    # NOT pouch-sysroot content -- the pouch sysroot never builds it, so the
+    # cp -R above cannot supply it. Before #156 it survived only as overlay
+    # residue in $sysroot/lib, and a sysroot regeneration followed by a
+    # restage laundered the last local copies out of both trees (the GL/C++
+    # link then fails on -lc++abi). Canonical local home: the pulled
+    # llvm-build tree, which restaging never regenerates from local content.
+    local cxxrt="$BUILD_DIR/clade/llvm-build/cxx-rt"
+    local cxxa
+    for cxxa in libc++.a libc++abi.a libunwind.a; do
+        if [[ ! -f "$cxxrt/$cxxa" ]]; then
+            echo "==> stage_clade: $cxxrt/$cxxa is MISSING -- the GL/C++ link" >&2
+            echo "    will fail on -l${cxxa#lib}. Pull it from the builder's" >&2
+            echo "    stage2 sysroot (fetch-set gap, #156); refusing to stage" >&2
+            echo "    a toolchain that cannot link its own language." >&2
+            exit 1
+        fi
+        cp "$cxxrt/$cxxa" "$stage/sysroot/lib/$cxxa"
+    done
     echo "    clade stage: $(du -sh "$stage" | cut -f1) -- bin: $(ls "$stage/bin" | tr '\n' ' ')"
 }
 
