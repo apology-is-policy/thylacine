@@ -716,6 +716,141 @@ void test_vivarium_mmap_domain(void) {
     // all -- this asserts the signature has not grown one by accident.
 }
 
+// The FILE mmap argument domain (DISTRO D-3). Measured off musl's map_library,
+// so the admitted case is asserted as THE CALL STOCK LDSO MAKES rather than as a
+// shape we thought reasonable -- and each decline is named, because this arm
+// hands a guest a mapping of a FILE and a widening here is an I-36 question, not
+// a fidelity one.
+void test_vivarium_mmap_file_domain(void) {
+    const u64 priv = (u64)VIV_MAP_PRIVATE;
+    const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
+    const u64 fd   = 3;
+
+    // THE MEASURED CALL. dynlink.c:809 `mmap(addr_min, map_len, prot,
+    // MAP_PRIVATE, fd, off_start)`, read against the shipped Alpine libc whose
+    // lowest PT_LOAD is R+X at file offset 0: this exact tuple is what opening
+    // /lib/ld-musl-aarch64.so.1 produces.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0),
+                   (int)VIV_TRANSLATED, "R+X private fd-backed is the measured shape");
+
+    // R-only: the same call against a library whose lowest PT_LOAD is R-only
+    // (a -z separate-code layout). Not hypothetical -- it is the OTHER shape the
+    // same line emits, decided by the linker rather than by the caller.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_READ, priv, fd, 0),
+                   (int)VIV_TRANSLATED, "R-only private fd-backed admitted too");
+
+    // PROT_WRITE is THE refusal that keeps I-36 intact: this arm's Burrow is
+    // shared and has no write-back path, so a writable file mapping would either
+    // lose the writes or leak them into every other Proc sharing the Image.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       (u64)(VIV_PROT_READ | VIV_PROT_WRITE), priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_WRITE declines -- I-36 has no write-back");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       (u64)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC),
+                       priv, fd, 0),
+                   (int)VIV_FORWARD, "W+X declines (I-12 too, two independent gates)");
+
+    // PROT_NONE declines HERE while the anon arm admits it -- the asymmetry is
+    // deliberate and is asserted so a future "make the arms consistent" tidy-up
+    // has to argue with a test. There is no degradation available: serving a
+    // PROT_NONE file map readably would hand over bytes the caller declined.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_NONE, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_NONE declines on the FILE arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide((u64)VIV_PROT_EXEC, priv, fd, 0),
+                   (int)VIV_FORWARD, "X-without-R declines (no readable page to exec)");
+
+    // An allow-list, so the aarch64 extras fall out without being enumerated.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx | (u64)VIV_PROT_BTI, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_BTI declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx | (u64)VIV_PROT_MTE, priv, fd, 0),
+                   (int)VIV_FORWARD, "PROT_MTE declines");
+
+    // MAP_SHARED is the write-back semantics arriving by a second door, and
+    // MAP_FIXED is the caller-chosen address D-3a does not serve (D-3b does,
+    // through its own arm). Exact equality refuses both without naming them.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, (u64)VIV_MAP_SHARED, fd, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED declines -- write-back by another name");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_FIXED, fd, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED declines on this arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_FIXED_NOREPLACE, fd, 0),
+                   (int)VIV_FORWARD, "MAP_FIXED_NOREPLACE declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(
+                       rx, priv | (u64)VIV_MAP_ANONYMOUS, fd, 0),
+                   (int)VIV_FORWARD, "MAP_ANONYMOUS declines -- that is the other arm");
+
+    // BOTH spellings of -1, the AT_FDCWD trap again: a caller may leave x4
+    // sign-extended or merely zero-extended, and neither is a real descriptor.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, (u64)-1, 0),
+                   (int)VIV_FORWARD, "sign-extended -1 fd declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, 0xFFFFFFFFull, 0),
+                   (int)VIV_FORWARD, "zero-extended -1 fd declines");
+
+    // A page-aligned offset is STRUCTURE, not fidelity: the FILE fault arm reads
+    // each page at file_offset + page-floored burrow offset, an identity that
+    // only holds when the Burrow's offset 0 is the mapping's start.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0x1000),
+                   (int)VIV_TRANSLATED, "a page-aligned non-zero offset is admitted");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 1),
+                   (int)VIV_FORWARD, "a misaligned offset declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(rx, priv, fd, 0xFFF),
+                   (int)VIV_FORWARD, "one byte short of a page declines");
+
+    // prot/flags/fd are `int` in the Linux ABI, so their high halves are noise.
+    TEST_EXPECT_EQ((int)vivarium_mmap_file_decide(0xDEADBEEF00000000ull | rx,
+                                                  0xCAFE000000000000ull | priv,
+                                                  0x1234567800000003ull, 0),
+                   (int)VIV_TRANSLATED, "the high half of prot/flags/fd is unread");
+}
+
+// The two mmap arms are DISJOINT. Both deciders' comments claim it; without this
+// they would only agree with each other. The dispatch site relies on it to make
+// its try-order free rather than load-bearing -- if some tuple were admitted by
+// both, the order would silently decide which semantics a guest receives.
+void test_vivarium_mmap_arms_disjoint(void) {
+    // Sweep the cross product of every prot/flag/fd/offset value either arm
+    // reasons about. Cheap and exhaustive over the interesting space -- far more
+    // convincing than a handful of hand-picked tuples, and it is the shape that
+    // would catch a FUTURE widening of either arm colliding with the other.
+    const u64 prots[] = {
+        0, VIV_PROT_READ, VIV_PROT_WRITE, VIV_PROT_EXEC,
+        VIV_PROT_READ | VIV_PROT_WRITE, VIV_PROT_READ | VIV_PROT_EXEC,
+        VIV_PROT_WRITE | VIV_PROT_EXEC,
+        VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC,
+        VIV_PROT_BTI, VIV_PROT_MTE,
+    };
+    const u64 flags[] = {
+        0, VIV_MAP_SHARED, VIV_MAP_PRIVATE, VIV_MAP_FIXED, VIV_MAP_ANONYMOUS,
+        VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS,
+        VIV_MAP_PRIVATE | VIV_MAP_FIXED,
+        VIV_MAP_PRIVATE | VIV_MAP_ANONYMOUS | VIV_MAP_FIXED,
+        VIV_MAP_PRIVATE | VIV_MAP_FIXED_NOREPLACE,
+    };
+    const u64 fds[]  = { 0, 3, (u64)-1, 0xFFFFFFFFull };
+    const u64 offs[] = { 0, 1, 0x1000 };
+
+    int admitted_by_file = 0, admitted_by_anon = 0;
+    for (unsigned pi = 0; pi < sizeof(prots) / sizeof(prots[0]); pi++)
+    for (unsigned fi = 0; fi < sizeof(flags) / sizeof(flags[0]); fi++)
+    for (unsigned di = 0; di < sizeof(fds)   / sizeof(fds[0]);   di++)
+    for (unsigned oi = 0; oi < sizeof(offs)  / sizeof(offs[0]);  oi++) {
+        TEST_ASSERT(vivarium_mmap_arms_disjoint(prots[pi], flags[fi],
+                                                fds[di], offs[oi]),
+                    "no tuple may be admitted by BOTH mmap arms");
+        if (vivarium_mmap_file_decide(prots[pi], flags[fi], fds[di], offs[oi])
+                == VIV_TRANSLATED) admitted_by_file++;
+        if (vivarium_mmap_decide(0, prots[pi], flags[fi], fds[di], offs[oi])
+                == VIV_TRANSLATED) admitted_by_anon++;
+    }
+
+    // Disjointness is satisfiable by admitting NOTHING, so the sweep proves
+    // nothing until both arms are shown to admit something inside it. This is
+    // the check that keeps the loop above from passing vacuously.
+    TEST_ASSERT(admitted_by_file > 0, "the sweep must reach the FILE arm's domain");
+    TEST_ASSERT(admitted_by_anon > 0, "the sweep must reach the anon arm's domain");
+}
+
 // The clone argument domain (LINEAGE L-3d). This row hands a guest a second
 // PROCESS, so every decline is asserted by NAME and by REASON -- three distinct
 // classes of widening are being refused here and a mask test would admit all of

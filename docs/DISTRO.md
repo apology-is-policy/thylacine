@@ -311,6 +311,49 @@ halves of that claim, the ET_DYN one and the ET_EXEC control.
 not designed — it is MEASURED off stock ldso's `map_library` (§2), the V-2d
 measured-off-the-binary discipline applied to the loader:
 
+**Split into sub-chunks at implementation:**
+
+| Sub-chunk | Delivers | State |
+|---|---|---|
+| D-3a | arm 1 (the whole-span fd-backed R / R+X map) + the #190 fix | **AS-BUILT** |
+| D-3b | arms 2+3 (MAP_FIXED split/replace: fd-backed RW eager copy, anon tail) | next |
+| D-3c | the gate + reference docs + the FOCUSED audit round | owed |
+
+**Three corrections the build forced, recorded before the code:**
+
+- **The gate below was impossible as written (#189).** `ld-musl /bin/echo hi`
+  cannot work: measured against the staged rootfs, `/bin/echo -> /bin/busybox`,
+  and Alpine's busybox is **ET_EXEC with no PT_INTERP and no PT_DYNAMIC**.
+  `map_library` refuses it twice (`if (!dyn) goto noexec`, and the ET_EXEC arm
+  at `dynlink.c:816` demands the map land exactly at `addr_min`). Only SIX
+  dynamic interp-carrying binaries exist in the whole rootfs — `getconf`,
+  `getent`, `iconv`, `scanelf` (libc only), plus `ssl_client` and `apk`.
+  **The gate is now `ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` -> `4096`**,
+  whose output is a real end-to-end assertion (musl's `sysconf(_SC_PAGESIZE)`
+  reads the `AT_PAGESZ` our exec builds), and which re-crosses D-1's symlink on
+  the way (`libc.musl-aarch64.so.1 -> ld-musl-aarch64.so.1`).
+- **arm 2 also carries R and R+X segments, not only RW.** `dynlink.c:842`
+  MAP_FIXEDs *every* PT_LOAD whose page-floored vaddr differs from `addr_min`,
+  at that segment's own prot. The shipped Alpine libc happens to have only two
+  PT_LOADs (R+X, then RW) so its arm-2 call is RW — but a 4-PT_LOAD library
+  sends R and R+X through the same door, and D-3b must serve them.
+- **The whole-span map deliberately overshoots EOF.** For the shipped libc,
+  `map_len` is 0xc3000 against a 0xb0a58-byte file (musl's own comment: "we map
+  too much, possibly even more than the length of the file"). The fault arm's
+  EOF-tail-stays-zero behaviour is therefore load-bearing here, not an edge.
+
+**One invariant retired (#190), pulled forward into D-3a as a dependency.**
+The R-5 audit filed the FILE fault arm's cached `freq->slot` as F2
+[P3, *unreachable at v1.0*] on the premise that a FILE Burrow "is created only
+by exec, mapped exactly once at burrow_offset 0". D-3 is that path on every
+count, so the premise is retired rather than re-argued. Note F2's prescribed
+remedy — "recompute slot from `vma->burrow_offset`" — is **wrong**:
+`freq->file_offset` came from the same pre-sleep geometry and the page already
+holds those bytes, so recomputing only the index files stale bytes under a fresh
+slot. Both install paths now **verify** the geometry and bail; a re-fault
+re-resolves. Regression: `demand_page.file_geometry_shift_bails{,_single}`,
+one per install path, each revert-probed against its own check.
+
 1. **fd-backed `MAP_PRIVATE`, `PROT_READ|PROT_EXEC` (or PROT_READ alone),
    no MAP_FIXED** — the whole-span initial map. Rides a `BURROW_TYPE_FILE`
    Burrow demand-paged through the Image cache: library text is deduped
@@ -352,9 +395,11 @@ half-built multi-segment library map unwinds fully); I-32 accounting
 v1.0 posture, documented). Native scope: NONE — this is a phenotype row
 over shared kernel core; no native mmap API is added.
 
-Gate: the runner spawns `ld-musl-aarch64.so.1 /bin/echo hi` explicitly (no
-D-4 needed) — stock ldso maps stock libc.so and runs a stock dynamic binary
-end to end.
+Gate (CORRECTED, see #189 above): the runner spawns
+`ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` explicitly (no D-4 needed)
+— stock ldso maps stock libc.so and runs a stock dynamic binary end to end,
+printing `4096`. The ORIGINAL line named `/bin/echo`, which is a symlink to a
+STATIC busybox and can never load through ldso.
 
 ---
 
@@ -417,7 +462,7 @@ chunks).
 |---|---|---|---|
 | D-1 | symlinks in stalk + phenotype NOFOLLOW rows + T_E_LOOP (signoff) | joey symlink battery, revert-probed | FOCUSED ROUND (I-28) |
 | D-2 | ET_DYN load + AT_ENTRY (**AS-BUILT**) | stock-ldso usage line, boot-fatal + revert-probed (static-PIE hello = seam, #188) | audit-noted |
-| D-3 | file-backed EL0 mmap + MAP_FIXED subset | runner-spawned `ld-musl /bin/echo hi` | FOCUSED ROUND (I-36/I-12/I-32) |
+| D-3 | file-backed EL0 mmap + MAP_FIXED subset (a: **AS-BUILT**; b, c owed) | runner-spawned `ld-musl /usr/bin/getconf PAGESIZE` (#189: `/bin/echo` is STATIC) | FOCUSED ROUND (I-36/I-12/I-32) |
 | D-4 | PT_INTERP -> ldso rewrite | busybox execs dynamic `/bin/ls` | audit-noted (exec row) |
 | D-5 | stock rootfs pipeline + put-symlinks (Stratum) | THE ARC GATE: `/bin/sh -c` boot-fatal | build-infra + Stratum |
 | D-close | arc holotype + SMP gate + docs | clean close | ARC ROUND |

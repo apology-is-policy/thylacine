@@ -7,6 +7,7 @@
 
 #include <thylacine/handle.h>           // V-5c-2: PROC_HANDLE_MAX = the fd clamp
 #include <thylacine/notes.h>            // V-6b: the canonical note-name literals
+#include <thylacine/page.h>             // D-3: PAGE_SIZE bounds the FILE arm's offset
 #include <thylacine/poll.h>             // V-5c: POLL_MAX_NFDS bounds the domain
 #include <thylacine/proc.h>             // #150: PRINCIPAL_SYSTEM / GID_SYSTEM
 #include <thylacine/syscall.h>
@@ -827,6 +828,64 @@ enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
     // shell reproduces both exactly. Forwarding on length here would answer
     // ENOSYS for a call Linux gives a specific errno.
     return VIV_TRANSLATED;
+}
+
+// -----------------------------------------------------------------------------
+// TIER 2 — the FILE mmap arm (DISTRO D-3). Domain measured off musl's
+// map_library (dynlink.c:809), not derived from Linux. See the header.
+// -----------------------------------------------------------------------------
+
+enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
+                                           u64 fd, u64 offset) {
+    // Same 32-bit narrowing as the anon arm, and for the same reason: Linux
+    // declares prot/flags/fd as `int`, so the narrowing IS the ABI.
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+
+    // PROT_WRITE is the one refusal worth naming, because it is the refusal
+    // that keeps I-36 intact. Everything this arm maps rides a shared
+    // BURROW_TYPE_FILE Burrow demand-paged from the file, and that Burrow has
+    // no write-back path -- so a writable file mapping here would either lose
+    // the guest's writes or leak them into a file (and into every OTHER Proc
+    // sharing the Image). Refusing keeps "no userspace writable file mapping
+    // exists" true on this path by construction rather than by care.
+    //
+    // An ALLOW-LIST for the same reason the anon arm uses one: PROT_BTI /
+    // PROT_MTE / PROT_GROWSDOWN are all outside it without being enumerated.
+    if (pr & ~VIV_MMAP_FILE_PROT_ADMITTED) return VIV_FORWARD;
+
+    // PROT_NONE (== 0) DECLINES here, and that is a real difference from the
+    // anon arm, which admits it as a documented degradation to writable. There
+    // is no analogous degradation available: a PROT_NONE file map is a pure
+    // address-space RESERVATION whose bytes must fault, and serving it as a
+    // readable file map would hand the guest bytes it asked not to be given.
+    // Declining costs nothing measured -- map_library's whole-span call always
+    // carries the lowest PT_LOAD's prot, which always includes PF_R.
+    if ((pr & VIV_PROT_READ) == 0)         return VIV_FORWARD;
+
+    // EXACT equality: MAP_PRIVATE alone. This is what excludes MAP_FIXED,
+    // MAP_FIXED_NOREPLACE and MAP_SHARED without naming them -- and excluding
+    // MAP_SHARED matters most, since a shared file mapping is the write-back
+    // semantics the prot gate above just refused, arriving by another door.
+    if (fl != VIV_MMAP_FILE_FLAGS_ADMITTED) return VIV_FORWARD;
+
+    // A real descriptor. The (s32) cast is what makes -1 (the anon sentinel)
+    // land below zero rather than at 4294967295.
+    if ((s32)(u32)fd < 0)                   return VIV_FORWARD;
+
+    // Page-aligned offset. Not fidelity (Linux says EINVAL) but STRUCTURE: the
+    // FILE fault arm reads each page at `burrow->file_offset + page-floored
+    // burrow offset`, which is the mapping's own bytes only when the Burrow's
+    // offset 0 is the mapping's start. See the header.
+    if (offset & (u64)(PAGE_SIZE - 1))      return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
+}
+
+bool vivarium_mmap_arms_disjoint(u64 prot, u64 flags, u64 fd, u64 offset) {
+    bool anon = vivarium_mmap_decide(0, prot, flags, fd, offset) == VIV_TRANSLATED;
+    bool file = vivarium_mmap_file_decide(prot, flags, fd, offset) == VIV_TRANSLATED;
+    return !(anon && file);
 }
 
 // =============================================================================

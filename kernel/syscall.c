@@ -26,6 +26,7 @@
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/image.h>           // D-3: the FILE mmap arm shares exec's Image cache
 #include <thylacine/irqfwd.h>
 #include <thylacine/loom.h>
 #include <thylacine/mmio_handle.h>
@@ -4679,6 +4680,127 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     burrow_unref(b);
 
     spin_unlock(&p->as->lock);
+    return (s64)vaddr;
+}
+
+// DISTRO D-3: the FILE mmap arm. A read-only / executable file-backed
+// MAP_PRIVATE mapping, demand-paged through the SAME BURROW_TYPE_FILE machinery
+// exec has used since REVENANT -- and through the same qid-keyed Image cache, so
+// one copy of a library's text serves every container that maps it. This is the
+// arc's headline composition: nothing new pages the file in, only a new door to
+// the machinery that already did.
+//
+// The I-36 conditions are re-satisfied here rather than inherited, because this
+// is a NEW entry to the fault arm and I-36's premise ("kernel-internal") is what
+// D-3 relaxes. Taking them in order: (1) install-once is filepages[]'s, unchanged;
+// (2) the page-in is death-interruptible by inheritance from dev9p's read, and
+// reachable from mmap now rather than only from exec -- the same unwind either
+// way, since the fault arm does not know which entry created the Burrow;
+// (3) fail-close on I/O error is file_demand_page_single's FAULT_USER_BUS;
+// (4) W^X holds because PROT_WRITE cannot reach here (vivarium_mmap_file_decide
+// refuses it) and vma_alloc rejects W+X independently; (5) I-cache sync is the
+// fault arm's, keyed on the VMA's own X bit; (6) Image-cache eviction safety is
+// unchanged; (7) pin-at-map replaces pin-at-exec -- the Burrow adopts a Spoor ref
+// for its whole life, so the guest closing the fd cannot pull the backing file
+// out from under a resident mapping.
+//
+// I-32: the demand-paged FILE pages keep the R-5 uncharged-at-v1.0 posture (they
+// are shared, so charging them per-mapper would count one physical page N times);
+// the VMA-count axis IS charged inside vma_insert. The `filepages` array is an
+// uncharged kernel allocation proportional to `length` -- task #191, which is the
+// PRE-EXISTING lazy-anon hazard this arm sits beside rather than widens: the cap
+// below is BURROW_ATTACH_MAX (256 MiB), 4x TIGHTER than the lazy path's
+// BURROW_RESERVE_MAX. Measured, the largest library in a stock Alpine rootfs is
+// libcrypto.so.3 at ~4.2 MiB of map span, so the cap is ~60x real need.
+//
+// Returns the mapped VA, or a negated T_E_* the caller passes straight out.
+s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
+                           bool exec, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    if (length_raw > BURROW_ATTACH_MAX)              return -(s64)T_E_NOMEM;
+    if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    // A mapping whose file window would wrap past the end of the address space
+    // cannot be described; refuse before it reaches the Burrow's own guards.
+    if (offset + length < offset)                    return -(s64)T_E_INVAL;
+
+    // T_RIGHT_READ, not T_RIGHT_EXEC, and deliberately: the authority a file
+    // mapping consumes is the authority to READ those bytes. Thylacine has no
+    // per-handle execute right on a Spoor -- execute authority lives in the
+    // namespace's X bit, which exec's own resolution path checks. Demanding a
+    // right that does not exist would make every mapping fail; demanding READ is
+    // exactly the authority whose result the guest can already obtain with
+    // pread(2), so the mapping grants nothing new. #844: the ref is TRANSFERRED
+    // to us -- spoor_clunk on every path below.
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!sp)                                         return -(s64)T_E_BADF;
+
+    // A PLAIN FILE only. A directory has no byte stream to page from; a symlink
+    // must be followed, not mapped (the #184 discipline, where the twin's
+    // "a symlink fid is not byte-I/O-able" safety argument turned out FALSE
+    // against Stratum's h_lopen -- so this gate is explicit rather than assumed);
+    // an append-only file's byte positions are not stable under a concurrent
+    // writer, which is precisely what a demand-paged mapping assumes.
+    if (sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+    // #81: an O_PATH handle is a NAVIGATION capability that deliberately carries
+    // no byte-I/O authority. Mapping through one would be byte I/O by another
+    // name -- the exact bypass CWALKONLY exists to prevent.
+    if (sp->flag & CWALKONLY) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+    // Positional reads are the whole mechanism: every page-in is a read at an
+    // explicit offset. A Dev with no read slot cannot serve one, and the fault
+    // arm's answer would be a snare:bus at first touch -- report it now, where
+    // the guest gets an errno instead of a fault.
+    if (!sp->dev || !sp->dev->read) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+
+    // image_lookup_or_create CONSUMES one Spoor ref on every success path
+    // (adopted into the new Burrow on a miss, clunk'd as redundant on a hit) and
+    // consumes NOTHING on a NULL return. Hand it a FRESH ref so our own stays
+    // ours to drop, exactly as map_file_backed does.
+    spoor_ref(sp);
+    struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec);
+    if (!b) {
+        spoor_clunk(sp);                 // the fresh ref it did not consume
+        spoor_clunk(sp);                 // ours
+        return -(s64)T_E_NOMEM;
+    }
+    spoor_clunk(sp);                     // ours; the Burrow holds the pin now
+
+    // R for rodata, R+X for text. Never writable -- the decide arm refused
+    // PROT_WRITE, and vma_alloc would reject W+X anyway (I-12, two independent
+    // gates).
+    u32 prot = exec ? (u32)(VMA_PROT_READ | VMA_PROT_EXEC) : (u32)VMA_PROT_READ;
+
+    spin_lock(&p->as->lock);
+    u64 vaddr;
+    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);                 // the cache's ref keeps it cached
+        return -(s64)T_E_NOMEM;
+    }
+    if (burrow_map(p, b, vaddr, length, prot) != 0) {
+        spin_unlock(&p->as->lock);
+        burrow_unref(b);
+        return -(s64)T_E_NOMEM;
+    }
+    // Drop the construction handle: mapping_count + the cache's own ref keep the
+    // image alive (I-7 dual count).
+    burrow_unref(b);
+    spin_unlock(&p->as->lock);
+
+    // A user VA is below 2^47, so this can never be mistaken for the [-4095,-1]
+    // errno band a Linux caller checks.
     return (s64)vaddr;
 }
 
@@ -9928,6 +10050,21 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
 
     case VIV_LINUX_MMAP: {
         // mmap(addr, len, prot, flags, fd, offset): x0..x5.
+        //
+        // DISTRO D-3: the FILE arm is tried FIRST, and the order is free rather
+        // than load-bearing -- vivarium_mmap_arms_disjoint pins that no tuple is
+        // admitted by both, so neither order can shadow the other. Tried first
+        // only because it is the narrower domain, which reads better.
+        if (vivarium_mmap_file_decide(args[2], args[3], args[4], args[5])
+                == VIV_TRANSLATED) {
+            // `len` is judged in the shell, not the decide, for the same reason
+            // the anon arm judges it here: Linux answers EINVAL for 0 and ENOMEM
+            // for too-large, and sys_mmap_file_for_proc reproduces both.
+            return sys_mmap_file_for_proc(p, args[4], args[1],
+                                          ((u32)args[2] & VIV_PROT_EXEC) != 0,
+                                          args[5]);
+        }
+
         if (vivarium_mmap_decide(args[0], args[2], args[3], args[4], args[5])
                 != VIV_TRANSLATED)
             return -(s64)T_E_NOSYS;             // out of domain

@@ -725,15 +725,39 @@ static enum fault_result file_install_locked(struct Proc *p,
         return FAULT_UNHANDLED_USER;
     }
     struct Burrow *v = vma->burrow;
-    // freq->slot was computed pre-sleep from the original VMA's geometry; it stays
-    // valid against this re-looked-up VMA because a BURROW_TYPE_FILE Burrow is
-    // created only by exec, mapped exactly once at burrow_offset 0 (burrow_map's
-    // fixed offset arg), and never handed to userspace to re-map -- so a FILE
-    // Burrow has ONE fixed VMA over its life and freq->page_va -> freq->slot is
-    // stable. (R-5 audit F2 [P3, unreachable at v1.0]: if a future path ever maps a
-    // FILE Burrow at a chosen offset/VA, recompute slot here from
-    // vma->burrow_offset + (freq->page_va - vma->vaddr_start) rather than trusting
-    // the cached freq->slot.)
+    // VERIFY the pre-sleep geometry still holds. The R-5 audit F2 filed this
+    // cached-slot re-use as unreachable "unless a future path maps a FILE Burrow
+    // at a chosen offset/VA" -- and DISTRO D-3's userspace file mmap IS that
+    // path, on every count: it creates FILE Burrows from EL0, its MAP_FIXED
+    // replacement SPLITS a FILE VMA (so a tail piece carries a non-zero
+    // burrow_offset), and one Image-cached Burrow is reachable from several
+    // address spaces at once. So the premise is retired, not merely re-argued.
+    //
+    // The re-validation above cannot substitute: it asks whether this VA still
+    // maps the SAME Burrow, and a split VMA over that same Burrow answers yes.
+    //
+    // NOTE F2 prescribed "recompute slot from vma->burrow_offset ...", and that
+    // remedy is WRONG -- it fixes the half of the problem that is visible from
+    // here and silently worsens the other half. freq->file_offset was ALSO
+    // derived from the pre-sleep geometry, and `newpg` already holds the bytes
+    // read at it; recomputing only the index would file those stale bytes under
+    // a FRESH slot number -- a correctly-indexed slot holding the wrong page,
+    // which is the same corruption wearing a tidier address.
+    //
+    // The bytes and the index have to agree, and the only thing that guarantees
+    // that is the mapping which produced them still being in place. So verify
+    // and BAIL: a re-fault re-resolves everything against the new geometry,
+    // which is exactly what the raced-teardown arm above already does.
+    if (freq->page_va < vma->vaddr_start || freq->page_va >= vma->vaddr_end) {
+        free_pages(newpg, 0);
+        return FAULT_UNHANDLED_USER;     // the VA left this VMA while we slept
+    }
+    size_t slot_now = (size_t)((vma->burrow_offset +
+                                (freq->page_va - vma->vaddr_start)) / PAGE_SIZE);
+    if (slot_now != freq->slot) {
+        free_pages(newpg, 0);
+        return FAULT_UNHANDLED_USER;     // geometry moved -> our bytes are stale
+    }
 
     struct page *resident;
     spin_lock(&v->lock);                 // vma_lock -> v->lock (established order)
@@ -871,15 +895,16 @@ out:
 // single-page loser-free discipline). Consumes every clpages[] entry on every
 // path (adopted into a slot, or freed by the caller).
 //
-// The pre-sleep [cstart, cstart+ncluster) slot RANGE (and the file bytes read
-// for it) stays valid against the re-looked-up VMA for the same reason the
-// single path's cached freq->slot does (the R-5 F2 justification at
-// file_install_locked): a FILE Burrow is created only by exec and mapped
-// exactly once at burrow_offset 0, never handed to userspace to re-map, and
-// its geometry scalars (page_count / file_offset / size) are immutable
-// post-create. The range install leans HARDER on that invariant than the
-// single slot did -- a future chosen-offset FILE map must recompute cstart
-// from vma->burrow_offset here, not just freq->slot.
+// The pre-sleep [cstart, cstart+ncluster) slot RANGE, and the file bytes read
+// for it, are verified against the re-looked-up VMA by the SAME check the single
+// path uses (see file_install_locked for why the premise that once made this
+// free -- "a FILE Burrow has ONE fixed VMA at burrow_offset 0" -- is retired by
+// DISTRO D-3, and why VERIFYING beats the recompute F2 prescribed).
+//
+// This path leans HARDER on the check than the single one: cstart determined
+// which FILE BYTES were read as well as which slots receive them, so a moved
+// geometry invalidates the cluster's whole contents at once. Since cstart is
+// derived from freq->slot, re-proving freq->slot re-proves the range.
 static enum fault_result file_install_cluster_locked(struct Proc *p,
                                                      const struct fault_info *fi,
                                                      struct file_fault_req *freq,
@@ -891,6 +916,11 @@ static enum fault_result file_install_cluster_locked(struct Proc *p,
         vma->burrow->type != BURROW_TYPE_FILE) {
         return FAULT_UNHANDLED_USER;     // raced teardown/remap; caller frees clpages
     }
+    if (freq->page_va < vma->vaddr_start || freq->page_va >= vma->vaddr_end)
+        return FAULT_UNHANDLED_USER;     // the VA left this VMA while we slept
+    if ((size_t)((vma->burrow_offset +
+                  (freq->page_va - vma->vaddr_start)) / PAGE_SIZE) != freq->slot)
+        return FAULT_UNHANDLED_USER;     // geometry moved -> the cluster is stale
     struct Burrow *v = vma->burrow;
 
     struct page *fault_pg = NULL;

@@ -417,9 +417,21 @@ static s64  g_rev_read_eof   = -1;   // <0 = no EOF; >=0 = absolute file offset 
                                      // which the backing "file" ends (a read at or
                                      // past it returns 0; a straddling read clamps)
 
+// DISTRO D-3 / #190: the mid-fault geometry shift. The FILE slow path drops
+// vma_lock across dev->read precisely so the read can block -- which makes the
+// stub read the one deterministic place a test can stand in for "a sibling
+// thread re-shaped the mapping while we slept". Set g_rev_shift_vma to a live
+// VMA and its burrow_offset moves by one page on the next read, exactly as a
+// MAP_FIXED split would move it.
+static struct Vma *g_rev_shift_vma = NULL;
+
 static long rev_test_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c;
     g_rev_read_calls++;
+    if (g_rev_shift_vma) {
+        g_rev_shift_vma->burrow_offset += PAGE_SIZE;
+        g_rev_shift_vma = NULL;          // shift ONCE, so a re-fault can settle
+    }
     if (g_rev_read_fail) return -1;
     long m = n;
     if (g_rev_read_eof >= 0) {
@@ -490,6 +502,152 @@ void test_demand_page_file_smoke(void) {
     r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "second fault to resident page resolves");
     TEST_EXPECT_EQ(g_rev_read_calls, 1, "fast-hit must NOT re-read (still 1)");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// DISTRO D-3 / #190: a FILE fault whose VMA GEOMETRY MOVES while the page-in
+// sleeps must BAIL, not install.
+//
+// The R-5 audit filed this as F2 [P3, unreachable at v1.0] on the premise that a
+// FILE Burrow "is created only by exec and mapped exactly once at burrow_offset
+// 0". D-3 retires that premise -- userspace mmap creates FILE Burrows, and its
+// MAP_FIXED replacement splits a FILE VMA so a tail piece carries a non-zero
+// burrow_offset. This is the regression test for the retirement.
+//
+// It fails on the pre-fix code and passes on the post-fix code. Pre-fix, the
+// install trusted freq->slot: with the geometry shifted one page, the bytes read
+// for slot 0 were filed under slot 0 while the faulting VA now names slot 1 --
+// so the fault "succeeded" and EL0 got the WRONG FILE PAGE at that address. The
+// only re-validation was `vma->burrow == freq->burrow`, which a shifted VMA over
+// the same Burrow satisfies, so nothing caught it.
+//
+// Note what is asserted: NOT that the fault fails forever, but that it refuses
+// to install STALE bytes. The re-fault below is the other half -- a bail must
+// leave the mapping usable, since a real racing split ends with a valid
+// geometry that the next fault resolves against.
+//
+// THIS TEST COVERS THE CLUSTER INSTALL ONLY, and the split is not cosmetic. The
+// two install paths carry SEPARATE copies of the check, so one test cannot
+// cover both -- and which path a fault takes is not a knob but a consequence of
+// page_count: file_demand_page_cluster degrades to the single path only when
+// ncluster <= 1, which needs a ONE-page Burrow. Hence the sibling test
+// file_geometry_shift_bails_single, whose Burrow is one page for exactly that
+// reason. Sabotaging one check must redden one test and not the other; if a
+// single sabotage reddens both, they are not covering what they claim.
+void test_demand_page_file_geometry_shift_bails(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+    g_rev_shift_vma  = NULL;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    // TWO pages: enough for a slot 1 to exist, and enough that ncluster == 2 so
+    // the fault takes the CLUSTER path.
+    struct Burrow *v = burrow_create_file(s, 0, 2 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+
+    int rc = burrow_map(p, v, USER_VA, 2 * ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 2 pages");
+
+    struct Vma *vma = vma_lookup(p, USER_VA);
+    TEST_ASSERT(vma != NULL, "the VMA is findable");
+    TEST_EXPECT_EQ((u64)vma->burrow_offset, 0ull, "starts at burrow_offset 0");
+
+    // Arm the shift, then fault. The read runs with vma_lock DROPPED, moves the
+    // VMA's burrow_offset by a page, and returns its bytes; the install then
+    // finds the faulting VA naming a different slot than the one those bytes
+    // belong to.
+    g_rev_shift_vma = vma;
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER,
+        "a mid-fault geometry shift must BAIL, not install stale bytes");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "the read did happen (the bail is post-read)");
+
+    // Nothing was filed. This is the assertion that separates the fix from the
+    // bug: pre-fix, slot 0 held the read page and the PTE was live.
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL, "slot 0 still empty");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 1) == NULL, "slot 1 still empty");
+    TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
+        "no PTE installed on the bail");
+
+    // The shift already fired and disarmed. A re-fault now sees a SETTLED
+    // geometry (burrow_offset one page in) and must resolve normally -- proving
+    // the bail is a retry, not a wedge, and that the check is not simply
+    // rejecting every non-zero burrow_offset.
+    r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_HANDLED, "the re-fault resolves against the new geometry");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 1) != NULL,
+        "the settled geometry files the faulting VA under slot 1");
+
+    // Slot 0 is ALSO filled here, and that is read-ahead doing its job rather
+    // than the stale page reappearing: the faulting slot is 1, so the cluster is
+    // [0, 2) and one batched read fills both. (An earlier draft asserted slot 0
+    // stayed empty and FAILED for exactly this reason -- the test was asserting
+    // a property the design never promised.) Content cannot discriminate the two
+    // stories, since both would put file-offset-0 bytes here; what discriminates
+    // is the BAIL assertions above, which are the ones that redden pre-fix.
+
+    // The faulting slot holds the RIGHT file window -- the stub's pattern is
+    // offset-keyed, so this proves the shifted burrow_offset was honoured rather
+    // than merely that SOME page arrived.
+    u8 *bytes = (u8 *)pa_to_kva(page_to_pa(burrow_file_slot_for_test(v, 1)));
+    TEST_EXPECT_EQ((u64)bytes[0], (u64)(u8)(ONE_PAGE & 0xff),
+        "slot 1 holds file offset ONE_PAGE's bytes, not slot 0's");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// DISTRO D-3 / #190, the SINGLE-page install path. Same defect, different copy
+// of the check (file_install_locked vs file_install_cluster_locked), so it needs
+// its own test -- see the sibling above for why one cannot reach both.
+//
+// A ONE-page Burrow is what forces the single path: ncluster == 1 makes
+// file_demand_page_cluster degrade immediately. And a one-page Burrow is what
+// makes this leg sharpest, because the pre-existing `freq->slot >= page_count`
+// guard reads the CACHED slot (0, in range) and therefore does NOT catch the
+// shift -- it is the geometry check or nothing.
+void test_demand_page_file_geometry_shift_bails_single(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = -1;
+    g_rev_shift_vma  = NULL;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file");
+
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map R-only 1 page");
+
+    struct Vma *vma = vma_lookup(p, USER_VA);
+    TEST_ASSERT(vma != NULL, "the VMA is findable");
+
+    g_rev_shift_vma = vma;
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/false);
+    enum fault_result r = userland_demand_page(p, &fi);
+    TEST_EXPECT_EQ(r, FAULT_UNHANDLED_USER,
+        "single-path: a mid-fault geometry shift must BAIL");
+    TEST_EXPECT_EQ(g_rev_read_calls, 1, "exactly one read (the single path)");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) == NULL,
+        "single-path: slot 0 not filled with the stale page");
+    TEST_EXPECT_EQ(walk_to_l3_entry(p->as->pgtable_root, USER_VA), 0ull,
+        "single-path: no PTE installed on the bail");
 
     drop_proc(p);
     burrow_unref(v);

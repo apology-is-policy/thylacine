@@ -352,6 +352,8 @@ void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
 void test_demand_page_file_smoke(void);
 void test_demand_page_file_rodata_prot(void);
+void test_demand_page_file_geometry_shift_bails(void);   // DISTRO D-3 / #190
+void test_demand_page_file_geometry_shift_bails_single(void);
 void test_demand_page_file_read_error_snare_bus(void);
 void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
@@ -656,6 +658,8 @@ void test_vivarium_openat_build(void);
 void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);                 // VIVARIUM V-2c
 void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
+void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
+void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
 void test_vivarium_startup_batch_rows(void);             // #150 (LINEAGE L-6c)
@@ -1826,6 +1830,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "demand_page.file_smoke",        test_demand_page_file_smoke,        false, NULL },
     { "demand_page.file_rodata_prot",  test_demand_page_file_rodata_prot,  false, NULL },
+    { "demand_page.file_geometry_shift_bails", test_demand_page_file_geometry_shift_bails, false, NULL },
+    { "demand_page.file_geometry_shift_bails_single", test_demand_page_file_geometry_shift_bails_single, false, NULL },
     { "demand_page.file_read_error_snare_bus",
                                        test_demand_page_file_read_error_snare_bus, false, NULL },
     { "demand_page.file_multi_page",   test_demand_page_file_multi_page,   false, NULL },
@@ -2217,6 +2223,8 @@ struct test_case g_tests[] = {
     { "vivarium.stat_to_linux",          test_vivarium_stat_to_linux,          false, NULL },
     { "vivarium.fstatat_domain",         test_vivarium_fstatat_domain,         false, NULL },
     { "vivarium.mmap_domain",            test_vivarium_mmap_domain,            false, NULL },
+    { "vivarium.mmap_file_domain",       test_vivarium_mmap_file_domain,       false, NULL },
+    { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
     { "vivarium.wait4_domain",           test_vivarium_wait4_domain,           false, NULL },
     // #150 -- the startup batch. One test per OBLIGATION rather than one per

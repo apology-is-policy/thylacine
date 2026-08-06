@@ -611,6 +611,53 @@ enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
                                       u64 fd, u64 offset);
 
 // -----------------------------------------------------------------------------
+// TIER 2 — the FILE mmap arm (DISTRO D-3). See docs/DISTRO.md §6.
+//
+// A SECOND decider rather than a widened first one, and the split is deliberate.
+// The two domains are disjoint by construction (the anon arm demands
+// MAP_ANONYMOUS and fd == -1; this one demands its absence and fd >= 0), so
+// nothing needs to arbitrate between them -- but keeping them apart means the
+// anon arm's 18 domain tests still exercise BYTE-IDENTICAL code after D-3, which
+// is what makes them a regression net for this change rather than a casualty of
+// it. `vivarium_mmap_arms_disjoint` pins the disjointness itself.
+//
+// The domain is MEASURED off stock ldso, not derived from Linux. musl's
+// map_library (third_party/musl/ldso/dynlink.c:809) opens a library with exactly
+// one call of this shape -- the whole-span reservation:
+//
+//     mmap(addr_min, map_len, prot, MAP_PRIVATE, fd, off_start)
+//
+// where `prot` is the LOWEST PT_LOAD's prot and `addr_min` is a bare hint (no
+// MAP_FIXED). Read against the shipped Alpine libc that is
+// `mmap(0, 0xc3000, PROT_READ|PROT_EXEC, MAP_PRIVATE, fd, 0)`.
+//
+// THE ADMITTED prot IS R, OR R|X -- NEVER WRITABLE, and that is the I-36 line
+// rather than a convenience. A writable file mapping would have to write back,
+// which is the one thing REVENANT's file-backed Burrow does not do; D-3's answer
+// to a writable request is a private eager COPY (a separate arm), so no
+// userspace writable file mapping exists on any path. PROT_WRITE therefore
+// declines HERE and is served elsewhere -- it does not ride this arm.
+//
+// `offset` MUST be page-aligned. Linux gives EINVAL for a misaligned offset, but
+// this is stricter than fidelity: map_file_backed's #149 note records that the
+// FILE fault arm derives each page's file position as
+// `v->file_offset + (page-floored burrow offset)`, which is only the mapping's
+// own bytes when the Burrow's offset 0 IS the mapping's start. The alignment
+// requirement is what keeps that identity true by construction.
+//
+// `len` is NOT judged here, for the same reason the anon arm does not judge it.
+#define VIV_MMAP_FILE_FLAGS_ADMITTED ((u32)VIV_MAP_PRIVATE)
+#define VIV_MMAP_FILE_PROT_ADMITTED  ((u32)(VIV_PROT_READ | VIV_PROT_EXEC))
+
+enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
+                                           u64 fd, u64 offset);
+
+// True iff no argument tuple is admitted by BOTH mmap arms. Pure; exists so the
+// disjointness the two deciders' comments CLAIM is a checked fact rather than a
+// pair of assertions that agree with each other.
+bool vivarium_mmap_arms_disjoint(u64 prot, u64 flags, u64 fd, u64 offset);
+
+// -----------------------------------------------------------------------------
 // TIER 0/2 — signals (V-6). See VIVARIUM.md §6.22.
 //
 // Thylacine has no POSIX signals; it has Plan 9 NOTES (I-19). Every row below is
