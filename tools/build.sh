@@ -500,7 +500,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "make" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-mallocng-torture" "pouch-hello-threads" "pouch-hello-exitgroup" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-net" "pouch-hello-signals" "pouch-hello-sodium" "pouch-hello-argv" "pouch-hello-fault" "pouch-hello-pty" "pouch-hello-fopen" "pouch-hello-fs" "pouch-hello-env" "pouch-hello-spawn" "pouch-hello-cxx" "sdl-probe" "tyr-quake" "tyr-glquake" "make" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -3098,6 +3098,24 @@ build_tyrquake() {
             exit 1
         fi
         echo "    pak0.pak staged ($(wc -c < "$stage/id1/pak0.pak" | tr -d ' ') bytes, shareware 1.06)"
+    fi
+
+    # 1b. The ramfs launcher: the bare-name face of the pool GL binary
+    # (tyr-glquake-launcher.c -> $progs_out/tyr-glquake; staged into the
+    # ramfs by pouch_bins). Ahead of the staleness check so a cached
+    # tyr-quake still ships it; its own mtime skip keeps it near-free.
+    local launcher_src="$port_dir/tyr-glquake-launcher.c"
+    if [[ -f "$launcher_src" ]]; then
+        if [[ ! -f "$progs_out/tyr-glquake" || "$launcher_src" -nt "$progs_out/tyr-glquake" ]]; then
+            mkdir -p "$progs_out"
+            "$REPO_ROOT/tools/pouch-clang" -std=gnu11 -O2 -Wall -Wextra \
+                -nostdinc -isystem "$sysroot/include" -fno-pie \
+                -c "$launcher_src" -o "$progs_out/tyr-glquake.o"
+            POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+                "$REPO_ROOT/tools/pouch-ld" "$progs_out/tyr-glquake.o" \
+                -o "$progs_out/tyr-glquake"
+            echo "    tyr-glquake launcher: $(wc -c < "$progs_out/tyr-glquake" | tr -d ' ') bytes (ramfs bare-name face)"
+        fi
     fi
 
     # 2. Staleness: reuse the binaries when newer than the tree + port +

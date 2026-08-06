@@ -388,6 +388,43 @@ hand-written software renderer.** Consequences:
   5 ms scale) — the next real levers live there and in the #156 builder
   batch (`-Db_ndebug`, NEON'd rast helpers), not in the engine.
 
+### The unpaced resolution ladder (2026-08-06) + the #158 close
+
+All shipped 4-worker config, `SDL_THYLACINE_NOPACE=1`, timedemo demo1:
+
+```
+ 640x400   157.6-181.7 fps
+ 800x600        151.4 fps    (2.3x the pixels, -6%)
+1024x768        113.9 fps    (3.1x the pixels, -35% -- still above the
+                              host's own software renderer at 640x400)
+```
+
+Pixel cost stays largely absorbed by the worker overlap up through XGA.
+
+**#158 (vertex-arrays surgery) closed as ALREADY-UPSTREAM.** The census
+that closed it: tyrquake 0.71's renderer draws via client vertex arrays
+everywhere that matters — `gl_rsurf.c` (world; interleaved `final_verts` +
+material chains, zero `glBegin`), `gl_warp.c` (water/sky), `r_part.c`
+(particles), and the alias-model path in `gl_rmain.c` (the profile showed
+Mesa's `vsplit` indexed-draw machinery engaged). Remaining immediate mode:
+9 `glBegin` sites in `gl_draw.c` (the 2D HUD/console layer, small quads)
+and two 4-vertex one-shots in `gl_rmain.c` (a sprite quad + the
+full-screen blend flash) — none performance-relevant. The GLQuake
+immediate-mode folklore is about the 1997 original, not this vendor
+generation.
+
+### Running it from the shell
+
+`tyr-glquake` typed bare at the `ut` prompt works exactly like
+`tyr-quake`: the ramfs carries a 47 KB launcher
+(`usr/ports/tyrquake/tyr-glquake-launcher.c`, built by `build_tyrquake`,
+staged via `pouch_bins`) that execs the pool binary at
+`/clade/bin/tyr-glquake` (spawn fallback; a clean 127 + message when the
+pool is absent). Superseded by a union bind of `/clade/bin` onto `/bin`
+when MAFTER walking lands (reserved v1.x, territory.h). Interactive play
+is frame-paced by design (the display clock); benchmarks opt out via
+`SDL_THYLACINE_NOPACE=1`.
+
 ## Known caveats / seams
 
 - Mouse-look (virtio-tablet → `TEV_PTR`) is G-7c — keyboard already plays
