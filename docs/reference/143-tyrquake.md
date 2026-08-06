@@ -289,6 +289,13 @@ base            320x200  4t   969 frames  32.6s  29.7 fps   (33.6)
   headroom is cutting per-call caller-side cost (vertex arrays in the port
   — engine surgery, deliberately not done in #141; a scope decision).
 
+**CORRECTED one day later (#159, next section): the ~32 ms was a WAIT, not
+work** — the #51 frame-paced present blocking on the compositor's ~30 Hz
+frame clock. Both instruments above measure pixel-independence and cannot
+distinguish constant work from a constant wait; the "caller-side work"
+attribution was the error. The measurements stand; the conclusion inverts:
+threads/resolution were never exhausted — they were capped.
+
 ### The full renderer table (2026-08-06) + the #159 scan facts
 
 All cells 640×400, timedemo demo1, uncapped unless noted:
@@ -320,6 +327,66 @@ Scan facts feeding the #156 builder-cycle batch:
   needs custom vid glue + a host Mesa build — and to be apples-to-apples it
   must match the guest's assert configuration. One clean release-vs-release
   comparison rides the #156 builder cycle instead.
+
+### Fourth measurement (#159, 2026-08-06): the 32 ms was the FRAME PACER — unpaced 157.6–181.7 fps
+
+The #155 attribution fell to a profiler. The chain, in order (each step's
+instrument validated before its verdict was believed):
+
+1. **A QMP PC-sampling profiler** (host-side, zero guest code; stop→`info
+   registers -a`→cont per tick — live reads LIE under HVF: the visible PC
+   is the last *vmexit* boundary, dominated by the idle-park WFI, so a busy
+   guest samples as 92% idle; the TCG TB-boundary lesson generalized). The
+   stop/cont variant was **proven by a positive control** (a pure userspace
+   spin sampled as exactly one vCPU pinned on the loop PC) and then showed
+   the truth: during the 29.x fps timedemo the guest is **~88–90% idle on
+   all four vCPUs** — ~13 ms/frame of total compute, ~20 ms/frame with
+   every vCPU parked. The wall was a wait.
+2. **`/proc/<pid>/kstack` of the main thread** (after fixing the #160
+   head-selection trap: the stock "head" is the *newest* thread — the
+   samples first returned the SDL pump thread's eternal event read, a
+   healthy by-design block that cost half a day as a phantom FS-stall
+   theory; the pool was exonerated by measurement — small pool preads cost
+   30–80 µs, the larder serves them). The true main thread: **11/12 samples
+   in `sys_torpor_wait_for_proc` via a timed cond wait — `PaceFrame`'s
+   `pthread_cond_timedwait(frame_cv, 50 ms)`**, in the 4-worker AND the
+   inline configs alike.
+3. **`SDL_THYLACINE_NOPACE=1`** (the unconditional short-circuit; written
+   via `/env` before spawn): **29.3 → 157.6 fps** (969 frames / 6.2 s),
+   181.7 on a second run — honest range **~160–180 fps** at 640×400,
+   shipped 4-worker config. `+set vid_vsync 0 +vid_restart` had provably
+   run and provably NOT released the pacer (fps and the wait unchanged) —
+   the cvar→swap-interval route is dead end-to-end, filed as **#161** (the
+   in-game vsync toggle rides the same route). The earlier "unpaced"
+   discriminator verified the gate *code*, not the *effect* — the #91
+   vacuous-control lesson.
+
+```
+guest  llvmpipe GL, 4 workers, UNPACED    157.6-181.7 fps  (5.3-6.2 s; 5.5-6.3 ms/frame)
+guest  llvmpipe GL, 4 workers, paced       25.8-29.3 fps   (the ~30 Hz headless frame clock)
+guest  llvmpipe GL, inline, paced          17.1-21.6 fps   (misses ticks)
+host   M2 GPU (GL 2.1 Metal)             2061.8   fps
+host   software tyr-quake (1996 span,
+       single thread)                       96.9   fps
+```
+
+**The guest's software GL path is ~1.6–1.9× faster than the host's own
+hand-written software renderer.** Consequences:
+
+- **Pacing is correct product behavior** (never render frames nobody can
+  see; on real hardware the frame clock is the display's vsync). The
+  headless ~30 Hz clock is an artifact of `-nographic` boots. **Benchmarks
+  MUST set `SDL_THYLACINE_NOPACE=1`** — every prior fps figure in this doc
+  is a paced (display-clock) number, not a capability number.
+- The #158 vertex-arrays premise ("kill the dispatch share of the 32 ms
+  wall") dissolves: the whole unpaced frame costs ~5.5–6.3 ms and the
+  profile shows raster/JIT dominating what compute there is. Vertex arrays
+  remain future-proofing (~1.2–1.4× here; more at higher resolutions and on
+  slower bare-metal CPUs), no longer the primary lever.
+- The unpaced profile's kernel+idle share says the pipeline still waits
+  ~half the frame at 180 fps (present round-trips + fence hand-offs at
+  5 ms scale) — the next real levers live there and in the #156 builder
+  batch (`-Db_ndebug`, NEON'd rast helpers), not in the engine.
 
 ## Known caveats / seams
 
