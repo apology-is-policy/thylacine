@@ -753,6 +753,20 @@ static void t_stat_from_p9_attr(struct t_stat *out, const struct p9_attr *attr) 
     if (attr->valid & P9_GETATTR_MODE) out->mode = attr->mode;
     if (attr->valid & P9_GETATTR_UID)  out->uid  = attr->uid;
     if (attr->valid & P9_GETATTR_GID)  out->gid  = attr->gid;
+
+    // D-1: the qid is the authority on symlink-ness -- it is what the RESOLVER
+    // reads, so a server whose qid says QTSYMLINK gets its links expanded no
+    // matter what its Tgetattr.mode says. Carry that same answer into the mode's
+    // type field when the server left one out, so lstat cannot report a link as
+    // a regular file whose size happens to be the target string's length. The
+    // syscall.h registry claimed this derivation existed; it did not, and only a
+    // server that sets the qid bit but omits S_IFLNK could tell -- which is the
+    // I-14 case the claim was there to cover. Guarded on a ZERO type field: a
+    // server that reported a real type keeps it (we do not overrule a server
+    // that disagrees with itself -- that is its bug to surface, not ours to
+    // paper over).
+    if ((out->mode & T_S_IFMT) == 0 && (out->qid_type & QTSYMLINK))
+        out->mode |= T_S_IFLNK;
 }
 
 // Native fstat surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum Tgetattr.

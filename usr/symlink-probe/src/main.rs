@@ -355,6 +355,41 @@ pub extern "C" fn rs_main() -> i64 {
     );
     c.errs("J link is gone", open_err(&simple), Error::NotFound);
 
+    // --- M: the SINGLE-HOP TWIN refuses a symlink (audit F2, the P1).
+    //     `t_walk_open` does not enter stalk and cannot expand -- but it must
+    //     not hand the link to Dev.open either. Two reasons the audit made
+    //     concrete: the DAC check there reads the LINK's mode, which is 0777
+    //     by POSIX convention and so passes for everyone; and what the server
+    //     does with a Tlopen on a symlink fid is a SERVER property (Stratum
+    //     accepts it unless O_TRUNC, so the writes land in the link's inode --
+    //     silent loss; a path-based server would open the TARGET).
+    //
+    //     So: without O_PATH it is ELOOP, with O_PATH it is the link itself.
+    //     Before the fix the first of these returned a usable write handle.
+    {
+        let name = b"l_dir"; // a link, and to a DIRECTORY -- the shape most
+                             // likely to be mistaken for a walkable base
+        let dfd = dir.as_raw_fd() as i64;
+        let bare = unsafe {
+            libthyla_rs::t_walk_open(dfd, name.as_ptr(), name.len(), libthyla_rs::T_OREAD)
+        };
+        if bare >= 0 {
+            unsafe { libthyla_rs::t_close(bare) };
+        }
+        c.ok(
+            "M twin refuses a link",
+            bare == -(Error::SymlinkLoop.as_errno() as i64),
+        );
+
+        let opath = unsafe {
+            libthyla_rs::t_walk_open(dfd, name.as_ptr(), name.len(), libthyla_rs::T_OPATH)
+        };
+        c.ok("M twin O_PATH returns the link", opath >= 0);
+        if opath >= 0 {
+            unsafe { libthyla_rs::t_close(opath) };
+        }
+    }
+
     // --- L: the RE-ANCHOR, walked from a DIRFD. This leg exists because a
     //     revert probe proved leg K below does not discriminate it.
     //

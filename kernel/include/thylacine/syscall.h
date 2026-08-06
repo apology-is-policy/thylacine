@@ -2677,8 +2677,9 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 
 // Permitted omode bits for SYS_WALK_OPEN. Plan 9 modes: OREAD=0,
 // OWRITE=1, ORDWR=2, OEXEC=3 (low 2 bits) plus the OTRUNC modifier
-// (0x10). Phase 5+ may extend (OCEXEC=0x20, ORCLOSE=0x40, OEXCL=0x1000)
-// as callers materialize. Any bit outside this mask → -1.
+// (0x10). Phase 5+ may extend (ORCLOSE=0x40, OEXCL=0x1000) as callers
+// materialize -- NOT 0x20, which D-1 took for SYS_WALK_OPEN_NOFOLLOW below.
+// Any bit outside this mask → -1.
 //
 // FS-delta (IDENTITY-DESIGN.md §9.4): SYS_WALK_OPEN_OPATH = 0x80 is the
 // Linux-O_PATH / Plan-9-walk equivalent -- walk to the component but do
@@ -2696,9 +2697,21 @@ _Static_assert(__builtin_offsetof(struct t_kernel_regs, tpidr_el0) == 104, "t_ke
 // navigation handle IS the link; SYS_FSTAT on it reports the link's own
 // metadata -- the native lstat emulation). Without OPATH, a final symlink
 // answers -T_E_LOOP (a symlink cannot be byte-opened). A trailing slash on the
-// path overrides the flag (POSIX 4.13). SYS_WALK_OPEN + SYS_WALK_CREATE admit
-// the bit and ignore it -- honestly: the single-hop walk never follows (it is
-// a walk primitive, not a resolution), and a created child is never a symlink.
+// path overrides the flag (POSIX 4.13).
+//
+// SYS_WALK_OPEN admits the bit and its ANSWER is the same as SYS_OPEN's, for
+// the same reason -- the single-hop twin does not EXPAND (one hop cannot follow
+// a multi-component target), but it does REFUSE: a walked symlink without OPATH
+// is -T_E_LOOP there too. The earlier "admit and ignore, honestly" reading was
+// wrong and the audit caught it: ignoring the flag meant opening the link and
+// returning success to a caller who had just said "not a symlink", and the DAC
+// check on that open reads the LINK's mode -- 0777 by POSIX convention, so it
+// passes for everyone. SYS_WALK_CREATE does still ignore it: a created child is
+// never a symlink (there is no create-a-link mode), so the flag is vacuous
+// there by construction rather than by omission.
+//
+// The bit is STRIPPED before the omode reaches Dev.open / Dev.create on every
+// path, so no server and no Spoor.mode ever sees it.
 #define SYS_WALK_OPEN_NOFOLLOW     0x20u
 #define SYS_WALK_OPEN_OMODE_VALID  0xB3u
 

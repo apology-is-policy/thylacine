@@ -2455,6 +2455,32 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // creating/walking children + a valid chroot target. 9P forbids Twalk
     // from an opened fid, so a normally-opened handle cannot serve that
     // role. The access bits are irrelevant for an O_PATH handle.
+    // DISTRO D-1: the single-hop twin does not EXPAND a symlink (it is a walk
+    // primitive, not a resolution -- one hop cannot follow a multi-component
+    // target), but it must not hand one to Dev.open either. Two reasons, and
+    // the second is why this is a gate and not a nicety:
+    //
+    //   1. The DAC check below would read the LINK's mode, and a symlink is
+    //      minted 0777 by POSIX convention -- so `other` is rwx and the check
+    //      passes for every principal regardless of who owns the link or its
+    //      directory. The gate is vacuous on exactly this shape.
+    //   2. What Dev.open then does is a SERVER property. Stratum's h_lopen
+    //      rejects a symlink only under O_TRUNC, so a plain OREAD/OWRITE Tlopen
+    //      on a link fid SUCCEEDS; the resulting writes land in the link's own
+    //      inode (silent data loss, not a redirect). Against a path-based 9P
+    //      server that implements Tlopen as open(path, flags), the same call
+    //      opens the TARGET with only the link's 0777 checked -- a complete DAC
+    //      bypass. I-14 forbids resting a kernel gate on server behaviour.
+    //
+    // So: with O_PATH the handle IS the link (the v1.0 lstat spelling, and the
+    // base a caller needs to unlink or rename it); without it, T_E_LOOP --
+    // matching stalk's quarry gate exactly, and giving SYS_WALK_OPEN_NOFOLLOW
+    // its meaning here instead of admitting it as a silent no-op.
+    if ((nc->qid.type & QTSYMLINK) && !(omode_raw & SYS_WALK_OPEN_OPATH)) {
+        spoor_clunk(nc);
+        return -T_E_LOOP;
+    }
+
     if (!(omode_raw & SYS_WALK_OPEN_OPATH)) {
         // A-2d: R and/or W permission on the walked target per the open mode
         // (OREAD->R, OWRITE->W, ORDWR->R|W, OEXEC->X; OTRUNC adds W). O_PATH is
@@ -2483,7 +2509,12 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // the connection endpoint + its SrvConn + a poster backlog slot. On
         // failure nc still has its own walk-allocated fid; spoor_clunk runs
         // dev->close -> p9_client_clunk on that fid + frees the priv.
-        struct Spoor *opened = nc->dev->open(nc, (int)omode_raw);
+        // D-1: strip the resolution flag -- it is consumed by the gate above
+        // and means nothing to a Dev (dev9p masks it off the wire anyway, but
+        // it would still be STORED in Spoor.mode). SYS_OPEN strips it at its
+        // own call site; the twins must not be the asymmetric ones.
+        u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
+        struct Spoor *opened = nc->dev->open(nc, (int)omode_dev);
         if (!opened) {
             spoor_clunk(nc);
             // #80 seam: Dev.open returns Spoor* with no errno channel -- the
@@ -3321,7 +3352,10 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // Create + open the new object. dev->create returns nc (opened) on
     // success or NULL on failure; on NULL nc still owns its walked fid, so
     // spoor_clunk runs dev->close -> clunks it.
-    struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_raw,
+    // D-1: strip the resolution flag (vacuous for create -- a created child is
+    // never a symlink -- but it must not reach a Dev or be stored in Spoor.mode).
+    u32 omode_dev = (u32)(omode_raw & ~(u64)SYS_WALK_OPEN_NOFOLLOW);
+    struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_dev,
                                             perm, p->primary_gid);
     if (!opened) {
         // #99 (#102 errno-loss): propagate the real create errno the Dev
@@ -3784,6 +3818,17 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     // Mirrors SYS_MOUNT's source-rights gate exactly.
     struct Spoor *source = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
     if (!source)                                     return -1;
+
+    // The root must be a DIRECTORY -- the #81 single-hop gate, applied to the
+    // one other place a Spoor becomes a resolution base. Installing a non-dir
+    // wedges the Territory: every later resolution answers T_E_NOTDIR at its
+    // first component, exec-from-namespace fails, and territory_root_ref hands
+    // the same node to D-1's absolute-target re-anchor. Contained (the Proc only
+    // wedges itself, I-1) but it is an unprivileged self-wedge with no use.
+    // Pre-existing -- t_chroot of an O_PATH handle on a FILE did this before
+    // D-1 too -- but D-1 shipped File::open_link, a documented API whose whole
+    // job is to hand back a non-directory, so the shape is now easy to reach.
+    if (!(source->qid.type & QTDIR))                 { spoor_clunk(source); return -1; }
 
     // territory_chroot handles: idempotent same-pointer (returns 0 without ref
     // bump), prior-root displacement (spoor_clunk the old), spoor_ref of the

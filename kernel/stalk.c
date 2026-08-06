@@ -344,9 +344,18 @@ static int stalk_expand_link(struct Proc *p, struct stalk_expand **exp,
     }
     if (++ex->follows > STALK_MAX_FOLLOWS) { *errp = T_E_LOOP; return -1; }
 
+    // Bound the return BEFORE it is used as one. `tlen` indexes ex->tgt in the
+    // NUL scan and path_has_dotdot below, and both run before the splice-time
+    // length checks -- so a Dev returning more than it was given would read
+    // past the buffer (and past the kmalloc'd struct) at those two sites, not
+    // at the splice. Every other vtable contract in this file is defended the
+    // same way (the reuse-nc rule, the walk shape check, the ATTRS_UNSUPPORTED
+    // sentinel re-check), all of them "unreachable" for the in-tree Devs;
+    // .readlink is a public NULL-permitted slot and gets the same treatment.
     long tlen = link->dev->readlink(link, ex->tgt, SYS_OPEN_PATH_MAX);
-    if (tlen <= 0) {
-        *errp = (tlen < 0) ? err_code((int)tlen) : T_E_NOENT;
+    if (tlen <= 0 || tlen > SYS_OPEN_PATH_MAX) {
+        *errp = (tlen < 0) ? err_code((int)tlen)
+                           : ((tlen == 0) ? T_E_NOENT : T_E_INVAL);
         return -1;
     }
     // A hostile server can put arbitrary bytes in the target string. The
@@ -961,16 +970,27 @@ restart:
                 //
                 // pounce_skip_one routes that resumed component to the
                 // per-component arm, which is where expansion lives -- ONE
-                // site, rather than a second copy inside the batch. What it
-                // does NOT have is a demonstrated failure mode: an earlier
-                // draft of this comment claimed the batch would otherwise
-                // re-gather forever, and REVERT-PROBING that (forcing the
-                // flag false) did not produce the loop -- the pounce test
-                // passed with its expansion count intact. So the flag stays
-                // (it keeps expansion single-sited) but its justification is
-                // an open question, tracked as task #181 with the exact
-                // evidence; do not restate the loop claim without
-                // instrumenting for it first.
+                // site, rather than a second copy inside the batch.
+                //
+                // IT IS ALSO THE TERMINATION GUARD, and the `link_at == 0`
+                // case is the proof. That case pushes nothing, charges no
+                // depth, no logical_depth, no follows, and resumes at i = s --
+                // the run's own start. Without the flag every input to the
+                // gather is then byte-identical to the previous turn, so the
+                // resolver spins forever issuing one walk_attrs per turn. It
+                // is not an exotic shape: `link_at == 0` is EVERY final-
+                // component symlink follow on a walk_attrs-bearing Dev (a
+                // 1-component run whose only component is the link) -- the
+                // first leg of stalk.symlink_follow reaches it.
+                //
+                // MEASURED, after an earlier draft of this comment claimed
+                // the loop, a revert probe reported no loop, and this comment
+                // was narrowed to say the failure mode was undemonstrated.
+                // That narrowing was wrong: re-running the probe against the
+                // BUILT ARTIFACT (object timestamp checked against the source
+                // edit) hangs at `stalk.symlink_follow`, the first symlink
+                // test, exactly as the trace above predicts. The earlier probe
+                // never reached the kernel it claimed to test.
                 walkqid_free(w);
                 if (bound) spoor_clunk(nc);
                 else if (nc) { nc->aux = NULL; spoor_unref(nc); }
