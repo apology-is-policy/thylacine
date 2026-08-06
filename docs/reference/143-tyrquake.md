@@ -433,6 +433,17 @@ Paced GLQuake now runs at the display rate with zero configuration and no
 input dependence. `SDL_THYLACINE_NOPACE=1` remains the benchmark rule —
 pacing still (correctly) caps at the 60 Hz clock.
 
+**CPU cost (#165, same build, measured host- and guest-side)**: while paced
+at 61.4 fps the whole VM costs ~110–122% of one host core — four vCPU
+threads at ~29% each + display/main ≤1.2%, **no pinned thread**; the guest
+stop/cont sampler agrees (per-vCPU busy 26/23/24/21% = **0.95 vCPUs
+summed**). Unpaced, the same demo reaches **192.8 fps** (a new best; prior
+157.6–181.7) at ~279% with vCPUs 65–74% each. Roughly proportional (0.42×
+CPU at 0.32× fps; the excess is per-frame park/wake + 60 Hz compositor
+service that back-to-back unpaced frames amortize). An Activity-Monitor
+"one core at 100%" during play is the process TOTAL — the sum of four
+~25%-busy vCPUs (llvmpipe's #150 four workers visibly sharing), not a spin.
+
 ### The unpaced resolution ladder (2026-08-06) + the #158 close
 
 All shipped 4-worker config, `SDL_THYLACINE_NOPACE=1`, timedemo demo1:
