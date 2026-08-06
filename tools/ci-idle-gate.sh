@@ -26,6 +26,10 @@
 #   THYLACINE_IDLE_THRESHOLD  fail above this mean %cpu (default 80 -- above the
 #                             ~28% resident-compositor cost, below any 1-pegged-
 #                             core spin at ~100%+)
+#   THYLACINE_IDLE_STRICT     optional SECOND threshold (e.g. 20): fail above it
+#                             too. Discriminates idle-THROTTLE regressions
+#                             (~27% unthrottled vs ~7-15% throttled), which the
+#                             default spin threshold structurally cannot see.
 #   THYLACINE_IDLE_SETTLE     seconds to settle before sampling (default 12)
 #   THYLACINE_IDLE_SAMPLES    number of 2s %cpu samples to mean (default 5)
 #   THYLACINE_IDLE_BOOT_TO    seconds to reach boot OK (default 150)
@@ -99,6 +103,20 @@ over=$(echo "$mean > $THRESHOLD" | bc)
 if [ "$over" = 1 ]; then
     echo "ci-idle-gate: FAIL -- idle mean ${mean}% > ${THRESHOLD}% (a core is spinning at idle; hunt the mechanism, see $LOG + docs/DEBUGGING-PLAYBOOK.md)"
     exit 1
+fi
+# #164 audit F4: the default threshold (80) catches SPINS, not idle-throttle
+# regressions -- an unthrottled-but-healthy compositor reads ~27-28% and
+# passes identically to the throttled ~7-15%. THYLACINE_IDLE_STRICT=<pct>
+# adds the discriminating assertion (the throttled floor at a settled
+# prompt); opt-in so the default CI contract is unchanged. The tapestryd
+# AUDIT-TRIGGERS row requires this leg on any idle-throttle change.
+if [ -n "${THYLACINE_IDLE_STRICT:-}" ]; then
+    sover=$(echo "$mean > $THYLACINE_IDLE_STRICT" | bc)
+    if [ "$sover" = 1 ]; then
+        echo "ci-idle-gate: FAIL (strict) -- idle mean ${mean}% > ${THYLACINE_IDLE_STRICT}% (the idle THROTTLE is not engaging: ~27% = the unthrottled compositor signature; see docs/reference/139-tapestryd.md Idle throttle)"
+        exit 1
+    fi
+    echo "ci-idle-gate: strict PASS -- idle mean ${mean}% <= ${THYLACINE_IDLE_STRICT}%"
 fi
 echo "ci-idle-gate: PASS -- idle mean ${mean}% <= ${THRESHOLD}%"
 rm -f "$LOG"

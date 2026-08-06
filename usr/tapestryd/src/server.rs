@@ -81,11 +81,24 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use libthyla_rs::ninep as p9;
+use libthyla_rs::time::Instant;
 use libthyla_rs::{
     t_burrow_detach, t_close, t_dma_create_weave, t_dma_map, t_srv_peer, t_weft_share,
     t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
     T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
+
+/// Present-pressure window for the idle throttle (#164): two adjacent
+/// buckets of this width approximate a sliding window, so `animating()`
+/// is "at least PRESENT_BURST_MIN well-formed presents in the last
+/// ~2x250 ms" -- sustained >= ~8 Hz. Aurora's ~2 Hz cursor blink puts at
+/// most 1 present per bucket (sum <= 2, margin 2 under the threshold),
+/// so a quiet console still throttles (the residual-2 idle win holds);
+/// an animating client (a game at 60 fps, scrolling output, >= 8 fps
+/// video) holds the clock at the ctl rate. Content below ~8 fps stays
+/// throttled -- the 15 Hz idle tick displays it losslessly.
+const PRESENT_BURST_WINDOW_MS: u64 = 250;
+const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
 use crate::gpu::Gpu;
@@ -457,6 +470,12 @@ pub struct Comp {
     /// The FRAME clock (section 18.4): a synthesized fixed-rate tick.
     pub tick: u64,
     pub clock_hz: u32,
+    /// Present-pressure buckets (#164; see PRESENT_BURST_WINDOW_MS).
+    /// Single-threaded like all of Comp -- written by `present()`, read
+    /// by the main loop's tick-rate decision, same loop pass.
+    present_bucket_start: Option<Instant>,
+    present_bucket_count: u32,
+    present_prev_count: u32,
     weave_va_next: u64,
     /// The surface TEV_FOCUS was last emitted for (G-6c): reconcile
     /// compares against the layout's focused surface and emits the
@@ -510,6 +529,9 @@ impl Comp {
             geom_sig: 0,
             tick: 0,
             clock_hz: 60,
+            present_bucket_start: None,
+            present_bucket_count: 0,
+            present_prev_count: 0,
             weave_va_next: WEAVE_VA_BASE,
             last_focus: None,
             chord_down: [0; 4],
@@ -1736,6 +1758,74 @@ impl Comp {
         }
         s.events.push_back(ev);
         true
+    }
+
+    /// Roll the #164 present-pressure buckets forward to now. Lazy: both
+    /// readers/writers (`note_present`, `animating`) call it first. The
+    /// staleness guard is the `>= 2 windows` arm itself -- it clears
+    /// both buckets at the FIRST later call, however long the gap
+    /// (audit F3: `animating` runs only in the frozen==false,
+    /// input-quiet regime, so "called every pass" holds only where its
+    /// value is read; do not remove the clear as redundant). The
+    /// promote arm carries exactly one window forward.
+    fn roll_present_buckets(&mut self) {
+        match self.present_bucket_start {
+            None => self.present_bucket_start = Some(Instant::now()),
+            Some(t0) => {
+                let age = t0.elapsed().as_millis() as u64;
+                if age >= 2 * PRESENT_BURST_WINDOW_MS {
+                    self.present_prev_count = 0;
+                    self.present_bucket_count = 0;
+                    self.present_bucket_start = Some(Instant::now());
+                } else if age >= PRESENT_BURST_WINDOW_MS {
+                    self.present_prev_count = self.present_bucket_count;
+                    self.present_bucket_count = 0;
+                    self.present_bucket_start = Some(Instant::now());
+                }
+            }
+        }
+    }
+
+    /// A well-formed present landed on surface `n`. It counts toward the
+    /// #164 pressure ONLY if it can change the screen (audit F1): a
+    /// HIDDEN pane's paced client still presents ~20/s via the SDL
+    /// pacer's 50 ms timeout ("timeout pacing"), does zero visible work
+    /// (blit_composed_pixels returns None for it), and must not hold the
+    /// clock -- else a game tabbed to the background pins 60 Hz on an
+    /// idle console and "a paced client naturally suspends while hidden"
+    /// inverts. Screen-changing = completing a direct-scanout switch,
+    /// being the scanned-out surface, or layout-visible (the same
+    /// predicate the compositor's own blit uses).
+    pub fn note_present(&mut self, n: usize) {
+        let visible = self.pending_direct == Some(n)
+            || self.scanout == Scanout::Direct(n)
+            || self
+                .layout
+                .find_hosting(n)
+                .and_then(|leaf| self.layout.get(leaf))
+                .map_or(false, |p| p.visible);
+        if !visible {
+            return;
+        }
+        self.roll_present_buckets();
+        self.present_bucket_count = self.present_bucket_count.saturating_add(1);
+    }
+
+    /// Is enough SCREEN-CHANGING present pressure arriving to count as
+    /// animation? (The #164 activity axis: ORed with input recency by
+    /// the main loop's tick-rate decision.) The count is a GLOBAL sum
+    /// across all visible surfaces (audit F2), not per-client: N
+    /// sub-threshold visible presenters compose, so e.g. the blink plus
+    /// a visible ~5 fps client in a split hold the clock together --
+    /// acceptable, since jointly they ARE visible animation; the blink
+    /// margin claim assumes aurora is the only idle-state presenter,
+    /// which holds at a settled prompt. A present-spamming visible
+    /// client pins the clock at the ctl rate -- exactly the
+    /// pre-throttle baseline, bounded, and fast visible presents ARE
+    /// activity by definition.
+    pub fn animating(&mut self) -> bool {
+        self.roll_present_buckets();
+        self.present_bucket_count + self.present_prev_count >= PRESENT_BURST_MIN
     }
 
     /// Emit the FRAME tick to every VISIBLE hosted surface (G-6: hidden
@@ -3207,6 +3297,12 @@ impl Conn {
                 return Err(p9::E_INVAL);
             }
         }
+
+        // #164: past every validation gate = a well-formed present, on
+        // any routing arm below. Malformed spam never reaches this line,
+        // so it cannot hold the clock awake; hidden-surface presents are
+        // filtered inside (audit F1).
+        comp.note_present(n);
 
         // The #56 present-style latch: a present whose damage does not
         // cover the full surface marks the client an ACCUMULATOR --

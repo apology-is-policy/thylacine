@@ -363,7 +363,9 @@ instrument validated before its verdict was believed):
 
 ```
 guest  llvmpipe GL, 4 workers, UNPACED    157.6-181.7 fps  (5.3-6.2 s; 5.5-6.3 ms/frame)
-guest  llvmpipe GL, 4 workers, paced       25.8-29.3 fps   (the ~30 Hz headless frame clock)
+guest  llvmpipe GL, 4 workers, paced       25.8-29.3 fps   (attributed to a "~30 Hz headless
+                                                            frame clock" -- CORRECTED by #164,
+                                                            fifth measurement below)
 guest  llvmpipe GL, inline, paced          17.1-21.6 fps   (misses ticks)
 host   M2 GPU (GL 2.1 Metal)             2061.8   fps
 host   software tyr-quake (1996 span,
@@ -374,10 +376,13 @@ host   software tyr-quake (1996 span,
 hand-written software renderer.** Consequences:
 
 - **Pacing is correct product behavior** (never render frames nobody can
-  see; on real hardware the frame clock is the display's vsync). The
-  headless ~30 Hz clock is an artifact of `-nographic` boots. **Benchmarks
-  MUST set `SDL_THYLACINE_NOPACE=1`** — every prior fps figure in this doc
-  is a paced (display-clock) number, not a capability number.
+  see; on real hardware the frame clock is the display's vsync). ~~The
+  headless ~30 Hz clock is an artifact of `-nographic` boots~~ — WRONG,
+  corrected by #164 (fifth measurement): there never was a 30 Hz clock;
+  the base clock is 60 and the ~30 was the input-quiet idle throttle
+  beating against the pacer's 50 ms bound. **Benchmarks MUST set
+  `SDL_THYLACINE_NOPACE=1`** — every prior fps figure in this doc is a
+  paced (display-clock) number, not a capability number.
 - The #158 vertex-arrays premise ("kill the dispatch share of the 32 ms
   wall") dissolves: the whole unpaced frame costs ~5.5–6.3 ms and the
   profile shows raster/JIT dominating what compute there is. Vertex arrays
@@ -387,6 +392,46 @@ hand-written software renderer.** Consequences:
   ~half the frame at 180 fps (present round-trips + fence hand-offs at
   5 ms scale) — the next real levers live there and in the #156 builder
   batch (`-Db_ndebug`, NEON'd rast helpers), not in the engine.
+
+### Fifth measurement (#164, 2026-08-06): the "~30 Hz clock" was the idle throttle — paced now 61.4 fps
+
+The user's first live play session reported a soft-envelope ~4 Hz stutter
+(fluent segments sagging and recovering, "60, 60, 30, 10, 30, 60"). The
+mechanism, code-first then A/B-proven:
+
+1. tapestryd's idle throttle (residual-2) dropped the FRAME clock from the
+   60 Hz base (`server.rs::clock_hz`) to `IDLE_HZ` 15 after 250 ms with **no
+   input events** — and activity was input ONLY. A game player *holding* a
+   key emits no further input events, so a walking player reads as
+   input-quiet; every twitch of the mouse snapped the clock back. The felt
+   oscillation was the player's own intermittent input flapping the clock.
+2. At 15 Hz the tick period (66.7 ms) exceeds `THYLACINE_PaceFrame`'s 50 ms
+   wait bound, so a throttled paced client settles into an alternating
+   ~56/~11 ms stride — **~30 fps average**. That, not a "30 Hz headless
+   clock", is what every input-quiet paced measurement in this doc had been
+   reading (serial/expect harness typing generates no virtio-input events,
+   so every prior paced run was in the throttled condition; the E2E gates
+   run test-mode's frozen clock and could never see it).
+3. **A/B on one live boot** (`glq-throttle-ab.exp`, scratch): identical
+   paced timedemos, the only variable being one QMP-injected rel-mouse
+   event per 100 ms — **28.7 fps quiet vs 61.3 fps with input**.
+
+**The fix (#164, tapestryd)**: activity is now input OR sustained present
+pressure — `Comp::animating()`, ≥4 well-formed **screen-changing** presents
+across two 250 ms buckets (≥ ~8 Hz; hidden-surface presents are filtered, so
+a game tabbed to the background cannot pin the clock — audit F1). Aurora's
+~2 Hz cursor blink sums to ≤2 per pair (margin 2), preserving the residual-2
+idle win. Verified both ways on the fixed build:
+
+```
+paced timedemo, input-quiet   969 frames  15.8s  61.4 fps   (was 28.7)
+paced timedemo, input-spam    969 frames  15.8s  61.4 fps   (was 61.3)
+ci-idle-gate                  idle mean 7.2%                 (throttled band held)
+```
+
+Paced GLQuake now runs at the display rate with zero configuration and no
+input dependence. `SDL_THYLACINE_NOPACE=1` remains the benchmark rule —
+pacing still (correctly) caps at the 60 Hz clock.
 
 ### The unpaced resolution ladder (2026-08-06) + the #158 close
 

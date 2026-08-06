@@ -96,17 +96,28 @@ const MOUSE_BAR_WINDOW_VA: u64 = 0x01C0_0000;
 // Idle throttle (residual-2: the ~16% compositor idle cost). The FRAME clock
 // is a fixed-rate tick that wakes every visible surface -- at 60 Hz a wholly
 // idle console still wakes tapestryd AND aurora 60x/sec (each wake pays an HVF
-// deep-park vCPU resume). When no INPUT has arrived for IDLE_AFTER_MS, drop the
-// effective tick to IDLE_HZ; the next keyboard/tablet/mouse event snaps it back
-// to the ctl rate. Activity is INPUT ONLY, never client presents: aurora
-// presents its cursor blink ~2x/sec, so counting presents would let the blink
-// pin the clock active forever. The floor is bounded by two poll-mode costs --
-// the keyboard is drained once per pass (so first-key-after-idle latency is one
-// idle period) and aurora polls /dev/consdrain once per FRAME (so console-output
-// latency during idle is one idle period); IDLE_HZ = 15 keeps both <= ~67 ms
-// (imperceptible-to-mild for the FIRST event after true idle, then 60 Hz) while
-// cutting the steady idle wakes 4x. Disabled under test-mode (the frozen clock
-// is ctl-driven). See docs/reference/139-tapestryd.md "Idle throttle".
+// deep-park vCPU resume). When neither INPUT nor sustained PRESENT pressure has
+// been seen for IDLE_AFTER_MS, drop the effective tick to IDLE_HZ; the next
+// keyboard/tablet/mouse event snaps it back to the ctl rate. Activity is input
+// OR Comp::animating() -- >= ~8 Hz of well-formed presents over a two-bucket
+// sliding window (#164): a game holding a key emits no further input events,
+// so input-only throttling flapped a paced GLQuake between 60 and the 15 Hz
+// tick x the SDL pacer's 50 ms bound (~30 fps, A/B-measured 28.7 quiet vs 61.3
+// with one injected input per 100 ms). Bare presents still don't count -- only
+// SUSTAINED, SCREEN-CHANGING pressure (hidden-surface presents are filtered in
+// note_present -- audit F1): aurora's ~2 Hz cursor blink sums to <= 2 per
+// window pair, margin 2 under the threshold, so a quiet console throttles
+// exactly as before (re-measured on this build: idle mean 7.2%; the
+// DISCRIMINATING witness is `THYLACINE_IDLE_STRICT=20 tools/ci-idle-gate.sh` --
+// the gate's default 80% threshold catches spins, not throttle regressions,
+// audit F4). The floor
+// is bounded by two poll-mode costs -- the keyboard is drained once per pass
+// (so first-key-after-idle latency is one idle period) and aurora polls
+// /dev/consdrain once per FRAME (so console-output latency during idle is one
+// idle period); IDLE_HZ = 15 keeps both <= ~67 ms (imperceptible-to-mild for
+// the FIRST event after true idle, then 60 Hz) while cutting the steady idle
+// wakes 4x. Disabled under test-mode (the frozen clock is ctl-driven). See
+// docs/reference/139-tapestryd.md "Idle throttle".
 const IDLE_HZ: u32 = 15;
 const IDLE_AFTER_MS: u64 = 250;
 
@@ -402,7 +413,10 @@ impl Driver for Tapestryd {
                 last_input = Instant::now();
             }
             let base_hz = self.comp.clock_hz;
-            let eff_hz = if frozen || (last_input.elapsed().as_millis() as u64) < IDLE_AFTER_MS {
+            let eff_hz = if frozen
+                || (last_input.elapsed().as_millis() as u64) < IDLE_AFTER_MS
+                || self.comp.animating()
+            {
                 base_hz
             } else {
                 IDLE_HZ.min(base_hz)
