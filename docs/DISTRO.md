@@ -152,9 +152,24 @@ mirror `b77581b6`. Six `stalk.symlink_*` kernel tests + the 24-leg boot-fatal
   `docs/reference/104-stalk.md` "The I-28 containment claim, and what proves
   it."
 
-Open against this surface: **#184** (the `SYS_WALK_OPEN` single-hop twin does
-not expand — the #81/#82 twin family has an unshipped member) and **#181**
-(`pounce_skip_one`'s stated failure mode is undemonstrated).
+Audited independently (Fable 5) at `6ad9bbc3`: 0 P0 / 1 P1 / 3 P2 / 3 P3, all
+fixed. Two corrected the RECORD rather than the code:
+
+- **#181 is CLOSED, demonstrated by construction.** This section previously
+  said `pounce_skip_one`'s failure mode was undemonstrated. It is not:
+  removing the flag HANGS `stalk.symlink_follow`, because the `link_at == 0`
+  arm pushes nothing, charges nothing, and resumes at the run's own start —
+  and that arm is every final-component symlink follow on a `walk_attrs` Dev.
+  The earlier revert probe reporting no loop never reached the built kernel.
+- **#184 was a P1, not the P2 it was filed as**, and is fixed. Its safety
+  argument — "a symlink fid is not `Tlopen`-able for byte I/O" — is false
+  against the server we ship: Stratum's `h_lopen` refuses a link only under
+  `O_TRUNC`. `sys_walk_open_handler` now gates on `QTSYMLINK`.
+
+One behaviour §4.3 still states too strongly: `STALK_MOUNT` "never follows" is
+true only WITHOUT a trailing slash — `SYS_MOUNT("/mnt/")` on a link follows it
+and keys the mount on the target, matching Linux `mount()`. Per-Proc, so
+contained (I-1); recorded rather than changed.
 
 ### 4.1 Expansion
 
