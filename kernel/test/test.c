@@ -471,6 +471,7 @@ void test_burrow_map_fixed_carries_offset(void);
 void test_burrow_map_fixed_refusals(void);
 void test_burrow_map_fixed_successive(void);
 void test_burrow_map_fixed_into_free_space(void);
+void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
 void test_torpor_wake_rejects_bad_args(void);
@@ -2030,6 +2031,7 @@ struct test_case g_tests[] = {
     { "burrow.map_fixed_refusals",            test_burrow_map_fixed_refusals,            false, NULL },
     { "burrow.map_fixed_successive",          test_burrow_map_fixed_successive,          false, NULL },
     { "burrow.map_fixed_into_free_space",     test_burrow_map_fixed_into_free_space,     false, NULL },
+    { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
     { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },

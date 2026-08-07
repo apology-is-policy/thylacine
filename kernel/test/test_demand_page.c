@@ -1190,3 +1190,66 @@ void test_demand_page_lazy_detach_uncharges_resident(void) {
 
     drop_proc(p);
 }
+
+// #197: mmap_eager_copy must return its I-32 page charge on EVERY failure past
+// the populate. burrow_lazy_populate charges the whole run on SUCCESS and the
+// caller owns it from then on -- nothing in the Burrow free path gives it back
+// (grep addrspace_uncharge_pages: only populate's own failure arm and
+// burrow_decommit). Without the unwind, as->page_count inflates permanently
+// while the pages themselves are freed, so it stops meaning true RSS
+// (ARCH section 6.5) and a guest that can drive a read error walks its own
+// counter to PROC_PAGE_MAX.
+//
+// The POSITIVE control comes first and is what stops this passing vacuously: a
+// test that only watched the failure path would pass identically against a
+// mmap_eager_copy that charged nothing at all.
+extern struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                               struct Spoor *sp, u64 offset,
+                                               u64 length);
+
+void test_mmap_eager_copy_charge_pairing(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    const u64 LEN    = 4 * PAGE_SIZE;
+    const u32 NPAGES = 4;
+
+    g_rev_read_fail  = false;
+    g_rev_read_eof   = -1;
+    g_rev_read_chunk = 0;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+
+    u32 before = p->as->page_count;
+
+    // CONTROL: a SUCCEEDING copy charges, and HOLDS the charge -- the caller
+    // (or the mapping that adopts the Burrow) owns it now.
+    struct Burrow *ok = mmap_eager_copy_for_test(p->as, false, s, 0, LEN);
+    TEST_ASSERT(ok != NULL, "a clean eager copy must succeed");
+    TEST_EXPECT_EQ(p->as->page_count, before + NPAGES,
+                   "a successful copy CHARGES every page it populated");
+    // Dropping the Burrow frees the pages but NOT the counter -- that asymmetry
+    // is the whole reason the unwind has to be explicit, so assert it rather
+    // than leave it as an assumption.
+    burrow_unref(ok);
+    TEST_EXPECT_EQ(p->as->page_count, before + NPAGES,
+                   "burrow_unref frees pages but does NOT uncharge");
+    // Hand the control's charge back so the failure case starts from `before`.
+    spin_lock(&p->as->lock);
+    addrspace_uncharge_pages(p->as, NPAGES);
+    spin_unlock(&p->as->lock);
+    TEST_EXPECT_EQ(p->as->page_count, before, "control unwound");
+
+    // THE REGRESSION: a read error partway through must leave the counter
+    // exactly where it started.
+    g_rev_read_fail = true;
+    struct Burrow *bad = mmap_eager_copy_for_test(p->as, false, s, 0, LEN);
+    g_rev_read_fail = false;
+    TEST_ASSERT(bad == NULL, "a failing read must fail the copy");
+    TEST_EXPECT_EQ(p->as->page_count, before,
+                   "a FAILED eager copy returns its whole page charge (#197)");
+
+    spoor_clunk(s);
+    drop_proc(p);
+}

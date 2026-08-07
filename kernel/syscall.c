@@ -4844,8 +4844,41 @@ static s64 mmap_fixed_window(u64 addr, u64 length_raw, u32 pr,
 // read as zero, which is exactly what the untouched KP_ZERO slots already are.
 // Only a NEGATIVE read (I/O error, or a death-interruptible unwind) fails.
 //
+// Give back a populate's I-32 page charge and drop the Burrow. The exec twin is
+// lazy_populate_unwind (kernel/exec.c); the pairing lives beside the populate
+// rather than in each caller for the same #106/#130 reason it does there.
+// `exempt` is deliberately absent: addrspace_charge_pages COUNTS regardless of
+// exemption (exemption bypasses the CAP, not the accounting), so the uncharge
+// must be unconditional to stay paired.
+static void mmap_eager_unwind(struct AddrSpace *as, struct Burrow *b,
+                              size_t npages) {
+    if (npages > 0) {
+        spin_lock(&as->lock);            // the stated precondition of the counter ops
+        addrspace_uncharge_pages(as, (u32)npages);
+        spin_unlock(&as->lock);
+    }
+    burrow_unref(b);
+}
+
+// THE CHARGE IS THE CALLER'S THE MOMENT POPULATE SUCCEEDS (#197, the L-7 F4
+// contract at a new call site). burrow_lazy_populate charges the whole run
+// against `as` on success and NOTHING gives it back later: the pages go with the
+// Burrow's last unref, but the counter does not -- there is no uncharge anywhere
+// in the Burrow free path (grep addrspace_uncharge_pages: only populate's own
+// failure arm and burrow_decommit). So every failure PAST the populate has to
+// unwind the counter by hand, exactly as exec's lazy_populate_unwind does, or
+// `as->page_count` stops meaning true RSS (ARCH section 6.5).
+//
 // Returns the Burrow with ONE handle ref for the caller, or NULL. Does not
-// consume `sp`.
+// consume `sp`. On NULL, the charge has been fully returned.
+#ifdef KERNEL_TESTS
+// #197's regression drives this directly: the leak lives entirely inside it,
+// and reaching it through the syscall shell would need a handle-table fixture
+// that tests the lookup rather than the charge pairing.
+struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                        struct Spoor *sp, u64 offset, u64 length);
+#endif
+
 static struct Burrow *mmap_eager_copy(struct AddrSpace *as, bool exempt,
                                       struct Spoor *sp, u64 offset, u64 length) {
     struct Burrow *b = burrow_create_anon_lazy((size_t)length);
@@ -4853,7 +4886,7 @@ static struct Burrow *mmap_eager_copy(struct AddrSpace *as, bool exempt,
 
     size_t npages = (size_t)(length / PAGE_SIZE);
     if (burrow_lazy_populate(as, exempt, b, 0, npages) != 0) {
-        burrow_unref(b);                 // populate self-unwinds its charge
+        burrow_unref(b);                 // populate self-unwinds its own charge
         return NULL;
     }
 
@@ -4862,12 +4895,14 @@ static struct Burrow *mmap_eager_copy(struct AddrSpace *as, bool exempt,
     // maps it, so the raw slot pointer cannot be freed under us.
     for (size_t slot = 0; slot < npages; slot++) {
         u8 *kva = (u8 *)burrow_lazy_slot_kva(b, slot);
-        if (!kva) { burrow_unref(b); return NULL; }
+        if (!kva) { mmap_eager_unwind(as, b, npages); return NULL; }
         size_t got = 0;
         while (got < (size_t)PAGE_SIZE) {
             long n = sp->dev->read(sp, kva + got, (long)(PAGE_SIZE - got),
                                    (s64)(offset + slot * PAGE_SIZE + got));
-            if (n < 0) { burrow_unref(b); return NULL; }   // I/O error / unwind
+            // The reachable failure: a 9P I/O error, or a death-interruptible
+            // unwind partway through a multi-page copy.
+            if (n < 0) { mmap_eager_unwind(as, b, npages); return NULL; }
             if (n == 0) goto eof;                          // past the data
             got += (size_t)n;
         }
@@ -4875,6 +4910,13 @@ static struct Burrow *mmap_eager_copy(struct AddrSpace *as, bool exempt,
 eof:
     return b;
 }
+
+#ifdef KERNEL_TESTS
+struct Burrow *mmap_eager_copy_for_test(struct AddrSpace *as, bool exempt,
+                                        struct Spoor *sp, u64 offset, u64 length) {
+    return mmap_eager_copy(as, exempt, sp, offset, length);
+}
+#endif
 
 // DISTRO D-3b arm 2 (dynlink.c:842): a fd-backed MAP_FIXED overlay. Non-writable
 // windows ride the shared Image cache exactly as D-3a does; a writable one gets
@@ -4929,6 +4971,15 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
     // OUTSIDE the lock, unlike the D-3a arm (task #193): the mapping holds the
     // Burrow alive on success, and on failure this is the last ref and dropping
     // it can reach the allocator.
+    //
+    // #197: the eager arm's populate charge is OURS until the mapping takes it
+    // over. On a map failure the pages go with the unref but the counter would
+    // not, so the writable arm unwinds it here; the Image-cache arm populated
+    // nothing and owes nothing.
+    if (rc != 0 && writable) {
+        mmap_eager_unwind(p->as, b, (size_t)(length / PAGE_SIZE));
+        return -(s64)T_E_NOMEM;
+    }
     burrow_unref(b);
     if (rc != 0)                                     return -(s64)T_E_NOMEM;
     return (s64)addr;
