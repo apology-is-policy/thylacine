@@ -369,6 +369,14 @@ fn init_device(
     }
 }
 
+/// The owning ctx of an abandoned slot, kept so a LATE retire can tell the
+/// seam its context is healthy again (round-3 F2: un-poisoning only the
+/// descriptor pair left the ctx -- and its slot -- condemned forever).
+#[derive(Clone, Copy)]
+pub struct FenceVindication {
+    pub ctx_pub: u32,
+}
+
 /// A retired fenced chain: the fence id + the owning seam context (pub id),
 /// delivered to the server's fence pump. Attribution came from the used
 /// ENTRY (the head descriptor names the slot), so no cross-context
@@ -429,6 +437,12 @@ struct Controlq {
     /// An abandoned slot's descriptors may still be written by the device,
     /// so the pair is never re-used -- retired from the pool, not freed.
     fslot_poisoned: [bool; FENCED_SLOTS],
+    /// Which ctx each poisoned slot belonged to, so its late retire can
+    /// vindicate that ctx (round-3 F2).
+    fslot_poison_ctx: [u32; FENCED_SLOTS],
+    /// Contexts whose abandoned chain the device later retired: proof the
+    /// host is finished with them, so the seam may un-poison.
+    vindicated: alloc::vec::Vec<FenceVindication>,
     /// A slot-0 (sync) chain is published and unretired. Only
     /// submit_and_wait sets it, and it never returns success with it set
     /// -- drain() treats an id-0 entry outside that window as corruption.
@@ -469,6 +483,7 @@ impl Controlq {
             let mut tag = self.fslots[i].take().unwrap();
             self.fslot_since[i] = None;
             self.fslot_poisoned[i] = true;
+            self.fslot_poison_ctx[i] = tag.ctx_pub;
             tag.abandoned = true;
             say!(
                 "tapestryd: gpu fence {} never retired in {} ms -- slot {} retired, ctx {} poisoned",
@@ -562,6 +577,13 @@ impl Controlq {
                         // slow fences permanently killed the lane for
                         // every client, reported as a retryable E_AGAIN).
                         self.fslot_poisoned[slot] = false;
+                        // Tell the seam too (round-3 F2): the device has
+                        // proved it is done with this chain, so the ctx's
+                        // backings are no longer at risk and its slot need
+                        // not stay condemned.
+                        self.vindicated.push(FenceVindication {
+                            ctx_pub: self.fslot_poison_ctx[slot],
+                        });
                         continue;
                     }
                     say!(
@@ -594,7 +616,14 @@ impl Controlq {
     /// dispatch). The ISR read is level hygiene: nobody irq.waits between
     /// dispatches, so the assert would otherwise sit latched.
     fn poll_completions(&mut self) {
-        if self.fenced_in_flight() == 0 {
+        // Poisoned-but-idle still needs draining (round-3 F3): abandonment
+        // TAKES the tag, so `fenced_in_flight()` is 0 the moment the last
+        // slot is abandoned -- and the un-poison lives in drain()'s
+        // late-retire arm, which this early return then made unreachable.
+        // Poison is state that OUTLIVES in-flight-ness, so it cannot be
+        // the guard's only question.
+        let poisoned_any = self.fslot_poisoned.iter().any(|&p| p);
+        if self.fenced_in_flight() == 0 && !poisoned_any {
             return;
         }
         if self.dead {
@@ -623,6 +652,7 @@ impl Controlq {
             };
             self.fslot_since[i] = None;
             self.fslot_poisoned[i] = true;
+            self.fslot_poison_ctx[i] = tag.ctx_pub;
             tag.abandoned = true;
             say!(
                 "tapestryd: gpu fence {} released ({}) -- slot {} retired, ctx {} poisoned",
@@ -937,6 +967,8 @@ impl Gpu {
                 fslots: [None; FENCED_SLOTS],
                 fslot_since: [None; FENCED_SLOTS],
                 fslot_poisoned: [false; FENCED_SLOTS],
+                fslot_poison_ctx: [0; FENCED_SLOTS],
+                vindicated: alloc::vec::Vec::new(),
                 sync_pending: false,
                 completed: alloc::vec::Vec::new(),
             },
@@ -1493,6 +1525,11 @@ impl Gpu {
     /// owning seam ctx).
     pub fn take_completions(&mut self) -> alloc::vec::Vec<FenceTag> {
         core::mem::take(&mut self.ctrl.completed)
+    }
+
+    /// Take the contexts a late retire vindicated (round-3 F2).
+    pub fn take_vindications(&mut self) -> alloc::vec::Vec<FenceVindication> {
+        core::mem::take(&mut self.ctrl.vindicated)
     }
 
     pub fn fenced_in_flight(&self) -> u32 {

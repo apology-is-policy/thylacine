@@ -415,8 +415,8 @@ impl Driver for Tapestryd {
                 };
                 for ev in &raw_events {
                     match ev.etype {
-                        EV_REL if ev.code == REL_X => dx += ev.value as i32,
-                        EV_REL if ev.code == REL_Y => dy += ev.value as i32,
+                        EV_REL if ev.code == REL_X => dx = dx.saturating_add(ev.value as i32),
+                        EV_REL if ev.code == REL_Y => dy = dy.saturating_add(ev.value as i32),
                         EV_SYN => commit(&mut self.comp, &mut dx, &mut dy),
                         EV_KEY if ev.code >= BTN_LEFT => {
                             commit(&mut self.comp, &mut dx, &mut dy);

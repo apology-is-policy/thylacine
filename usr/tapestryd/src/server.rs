@@ -613,6 +613,9 @@ pub struct Comp {
     /// (round-2 F8): never re-minted, because dev_ctx is derived from the
     /// slot index and reuse would alias a stale stream onto a new client.
     warp_ctx_slot_poisoned: [bool; MAX_WARP_CTXS],
+    /// The pub id whose poison condemned each slot, so a later
+    /// vindication can release it (round-3 F2). 0 = none.
+    warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
 }
@@ -705,6 +708,7 @@ impl Comp {
             test_mode: false,
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
+            warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
         }
@@ -734,7 +738,7 @@ impl Comp {
     }
 
     pub fn next_conn_id(&mut self) -> u64 {
-        self.conn_seq += 1;
+        self.conn_seq = self.conn_seq.wrapping_add(1);
         self.conn_seq
     }
 
@@ -788,7 +792,7 @@ impl Comp {
     }
 
     fn next_res_id(&mut self) -> u32 {
-        self.res_seq += 1;
+        self.res_seq = self.res_seq.wrapping_add(1);
         self.res_seq
     }
 
@@ -2487,12 +2491,11 @@ impl Comp {
     /// bound): allocate the slot, CTX_CREATE on the device (virgl-gated by
     /// the caller), roll the slot back if the device refuses.
     fn wctx_mint(&mut self, conn: u64) -> Option<u32> {
-        if self
-            .warp_ctxs
-            .iter()
-            .flatten()
-            .any(|c| c.owner_conn == conn && !c.retiring)
-        {
+        // Count RETIRING contexts too (round-3 F2): they are still this
+        // conn's resources until they finish, and excluding them let one
+        // connection mint-poison-destroy in a loop, burning a ctx slot
+        // per abandoned fence.
+        if self.warp_ctxs.iter().flatten().any(|c| c.owner_conn == conn) {
             return None; // one ctx per client
         }
         let slot = (0..MAX_WARP_CTXS)
@@ -2662,7 +2665,7 @@ impl Comp {
             unsafe { t_close(fd) };
         };
 
-        self.res_seq += 1;
+        self.res_seq = self.res_seq.wrapping_add(1);
         let res_id = self.res_seq;
         if self
             .gpu
@@ -2747,6 +2750,15 @@ impl Comp {
             let _ = gpu.detach_backing(b.res_id);
             let _ = gpu.ctx_detach_resource(dev_ctx, b.res_id);
             let _ = gpu.resource_unref(b.res_id);
+            // Capture BEFORE invalidating (round-3 F1 [P0]): round 2 moved
+            // the `= -1` above the branch so the early return could observe
+            // it, and left the close below reading the field -- t_close(-1)
+            // on EVERY normal retire, so the kernel handle ref never
+            // dropped and the whole 64 MiB backing stayed pinned for the
+            // life of a persistent driver. The happy path leaked, unbounded
+            // and uncharged, which is worse than the wedge leak the move
+            // was made for.
+            let fd = b.dma_fd;
             b.dma_fd = -1;
             if leak {
                 say!(
@@ -2756,7 +2768,7 @@ impl Comp {
                 return b.size;
             }
             unsafe { t_burrow_detach(b.va, b.size) };
-            unsafe { t_close(b.dma_fd) };
+            unsafe { t_close(fd) };
         }
         0
     }
@@ -2782,6 +2794,7 @@ impl Comp {
                 // with live work (that is what makes the host's
                 // behaviour undefined in the first place).
                 self.warp_ctx_slot_poisoned[slot] = true;
+                self.warp_ctx_vindicate[slot] = c.pub_id;
                 say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
                 return;
             }
@@ -2893,6 +2906,13 @@ impl Comp {
         }
     }
 
+    /// Ctx slots condemned by a fence wedge (round-3 F7): a pool fully
+    /// poisoned is a TERMINAL state, not a transient one, so it must be
+    /// visible rather than inferable from a retryable-looking E_NOMEM.
+    fn warp_poisoned_slots(&self) -> usize {
+        self.warp_ctx_slot_poisoned.iter().filter(|&&p| p).count()
+    }
+
     /// RESOLVABLE contexts -- retiring ones are excluded (round-2 F10).
     /// The `ctl` line and the arc's own gate assert on this, and a
     /// retiring ctx is addressable by nobody, so counting it made a
@@ -2925,6 +2945,23 @@ impl Comp {
                     c.fence_signaled = tag.fence_id;
                 }
                 break;
+            }
+        }
+        // A late retire proves the host finished an abandoned chain, so
+        // its ctx (and the slot it may have condemned) recover -- without
+        // this, one client could burn all 8 ctx slots in ~62 s and kill
+        // the seam for the whole box permanently (round-3 F2).
+        for v in self.gpu.take_vindications() {
+            for c in self.warp_ctxs.iter_mut().flatten() {
+                if c.pub_id == v.ctx_pub {
+                    c.fence_poisoned = false;
+                    break;
+                }
+            }
+            if let Some(slot) = self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
+                self.warp_ctx_slot_poisoned[slot] = false;
+                self.warp_ctx_vindicate[slot] = 0;
+                say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);
             }
         }
         self.warp_pump_retires();
@@ -3643,13 +3680,14 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\n",
+                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\n",
                     comp.gpu.virgl as u32,
                     comp.gpu.num_capsets,
                     comp.gpu.capset_id,
                     comp.gpu.capset_ver,
                     comp.gpu.capset_blob.len(),
-                    comp.warp_live_ctxs()
+                    comp.warp_live_ctxs(),
+                    comp.warp_poisoned_slots()
                 ),
             );
             return self.read_str(tag, &s, a.offset, cap);
@@ -4678,7 +4716,10 @@ impl Conn {
             W_CTX_DIR => {
                 names.push((b"new".to_vec(), W_CTX_NEW));
                 for c in comp.warp_ctxs.iter().flatten() {
-                    if c.owner_conn == self.conn_id {
+                    // `!retiring` matches walk_child (round-3 F4): a name
+                    // listed here but rejected there is the inverse of the
+                    // walkable-but-invisible trap, and just as wrong.
+                    if c.owner_conn == self.conn_id && !c.retiring {
                         let mut nm = String::new();
                         let _ = core::fmt::write(&mut nm, format_args!("{}", c.pub_id));
                         names.push((nm.into_bytes(), make_wctx(c.pub_id, WFK_DIR)));
@@ -4702,7 +4743,7 @@ impl Conn {
                 let cid = warp_id(d);
                 if let Some(c) = comp.wctx(cid, self.conn_id) {
                     names.push((b"new".to_vec(), make_wctx(cid, WFK_BO_NEW)));
-                    for b in c.bos.iter().flatten() {
+                    for b in c.bos.iter().flatten().filter(|b| !b.retiring) {
                         let mut nm = String::new();
                         let _ = core::fmt::write(&mut nm, format_args!("{}", b.pub_id));
                         names.push((nm.into_bytes(), make_wbo(b.pub_id, WFK_DIR)));

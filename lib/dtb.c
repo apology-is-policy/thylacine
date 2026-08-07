@@ -747,8 +747,9 @@ static bool dtb_pci_window_of(uint32_t want_space, u64 *out_base, u64 *out_size)
     // Each PCI `ranges` entry is 7 cells (28 bytes): child phys.hi/mid/lo
     // (3) + parent address (root #address-cells = 2) + size (2). phys.hi
     // bits [25:24] encode the space: 0b01 = I/O, 0b10 = 32-bit MMIO, 0b11
-    // = 64-bit MMIO. Return the 32-bit MMIO window (where virtio-pci BARs
-    // land on QEMU virt).
+    // = 64-bit MMIO. Returns the window matching `want_space` (32-bit is
+    // where virtio-pci BARs normally land on QEMU virt; the 64-bit one is
+    // the only arena that can hold a multi-GiB BAR).
     const uint32_t ENTRY_CELLS = 7u;
     if (len == 0 || (len % 4) != 0) return false;
     uint32_t cells = len / 4;
