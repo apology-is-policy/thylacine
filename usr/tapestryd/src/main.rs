@@ -71,7 +71,7 @@ use crate::input::{
     REL_X, REL_Y,
 };
 use crate::keymap::Mods;
-use crate::server::{Comp, Conn, MAX_CONNS};
+use crate::server::{Comp, Conn, MAX_CONNS, ROOT_TAPESTRY, ROOT_WARP};
 
 // =============================================================================
 // User-VA layout (driver-private): the BAR windows + the device rings; the
@@ -140,6 +140,24 @@ fn post_srv_tapestry() -> Result<i64, ()> {
         return Err(());
     }
     let listener = unsafe { t_walk_create(srv, b"tapestry".as_ptr(), 8, T_OREAD, 0) };
+    unsafe { t_close(srv) };
+    if listener < 0 {
+        return Err(());
+    }
+    Ok(listener)
+}
+
+/// Post /srv/warp -- the GPU seam's own tree (Warp-2c; GPU-DESIGN section
+/// 5: tapestryd hosts the GPU service because warden binding is one
+/// exclusive claimant per virtio function). Two posts from one Proc are
+/// kernel-supported (no per-Proc service cap; both tombstone together at
+/// this Proc's death).
+fn post_srv_warp() -> Result<i64, ()> {
+    let srv = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH) };
+    if srv < 0 {
+        return Err(());
+    }
+    let listener = unsafe { t_walk_create(srv, b"warp".as_ptr(), 4, T_OREAD, 0) };
     unsafe { t_close(srv) };
     if listener < 0 {
         return Err(());
@@ -250,12 +268,23 @@ impl Driver for Tapestryd {
                 return Err(Error::Hardware);
             }
         };
+        let warp_listener = match post_srv_warp() {
+            Ok(l) => l,
+            Err(()) => {
+                say!("tapestryd: /srv/warp post failed");
+                return Err(Error::Hardware);
+            }
+        };
 
         // READY last: all bring-up console output precedes it; the warden's
         // readiness pipe waits on exactly this line.
         let mut out = libthyla_rs::io::stdout();
         let _ = out.write_all(b"READY\n");
-        say!("tapestryd: serving /srv/tapestry ({}x{})", self.comp.gpu.width, self.comp.gpu.height);
+        say!(
+            "tapestryd: serving /srv/tapestry + /srv/warp ({}x{})",
+            self.comp.gpu.width,
+            self.comp.gpu.height
+        );
 
         let mut conns: Vec<Conn> = Vec::new();
         let mut raw_events: Vec<RawInputEvent> = Vec::new();
@@ -448,13 +477,20 @@ impl Driver for Tapestryd {
                 }
             }
 
-            // (4) Poll: the listener (while room) + every conn, bounded by
-            // the time to the next FRAME tick.
+            // (4) Poll: both listeners (while room; tapestry then warp,
+            // Warp-2c) + every conn, bounded by the time to the next FRAME
+            // tick. The conns Vec mixes both trees -- Conn.root disjoins
+            // their qid spaces, everything else is shared machinery.
             let has_room = conns.len() < MAX_CONNS;
             let mut pollfds: Vec<TPollFd> = Vec::new();
             if has_room {
                 pollfds.push(TPollFd {
                     fd: listener as i32,
+                    events: T_POLLIN,
+                    revents: 0,
+                });
+                pollfds.push(TPollFd {
+                    fd: warp_listener as i32,
                     events: T_POLLIN,
                     revents: 0,
                 });
@@ -477,13 +513,20 @@ impl Driver for Tapestryd {
                 continue;
             }
 
-            // (5) Accept (one per pass).
-            let conn_base = if has_room { 1 } else { 0 };
+            // (5) Accept (one per listener per pass).
+            let conn_base = if has_room { 2 } else { 0 };
             if has_room && pollfds[0].revents & T_POLLIN != 0 {
                 let h = unsafe { t_srv_accept(listener) };
                 if h >= 0 {
                     let id = self.comp.next_conn_id();
-                    conns.push(Conn::new(h, id));
+                    conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                }
+            }
+            if has_room && pollfds[1].revents & T_POLLIN != 0 {
+                let h = unsafe { t_srv_accept(warp_listener) };
+                if h >= 0 {
+                    let id = self.comp.next_conn_id();
+                    conns.push(Conn::new(h, id, ROOT_WARP));
                 }
             }
 

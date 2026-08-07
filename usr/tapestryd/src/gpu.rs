@@ -84,6 +84,15 @@ const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
 const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
 const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 
+// 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
+// context lifecycle + resource plumbing (Warp-2c); SUBMIT_3D + the transfers
+// arrive with the fenced lane (Warp-2d).
+const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200;
+const VIRTIO_GPU_CMD_CTX_DESTROY: u32 = 0x0201;
+const VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE: u32 = 0x0202;
+const VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE: u32 = 0x0203;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
+
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
@@ -471,6 +480,13 @@ unsafe fn write_ctrl_hdr(req_va: u64, cmd_type: u32) {
     w8(req_va + 23, 0);
 }
 
+// The ctx-scoped header (ctx_id at offset 16): CTX_* + SUBMIT_3D address a
+// specific rendering context; everything else leaves it 0.
+unsafe fn write_ctrl_hdr_ctx(req_va: u64, cmd_type: u32, ctx_id: u32) {
+    write_ctrl_hdr(req_va, cmd_type);
+    w32(req_va + 16, ctx_id);
+}
+
 unsafe fn write_rect(va: u64, x: u32, y: u32, w: u32, h: u32) {
     w32(va + 0, x);
     w32(va + 4, y);
@@ -490,6 +506,12 @@ pub struct Gpu {
     /// the capset probe on it; Warp-2 keys the 3D context path.
     pub virgl: bool,
     pub num_capsets: u32,
+    /// The fetched preferred capset (Warp-2c: served verbatim by the
+    /// /dev/warp caps file; empty when no capset was fetchable). The id +
+    /// version ride the warp ctl line so a client can decode the blob.
+    pub capset_blob: alloc::vec::Vec<u8>,
+    pub capset_id: u32,
+    pub capset_ver: u32,
     pci: PciDev,
     _ring: Dma,
 }
@@ -560,6 +582,9 @@ impl Gpu {
             height: DEFAULT_DISPLAY_H,
             virgl,
             num_capsets: 0,
+            capset_blob: alloc::vec::Vec::new(),
+            capset_id: 0,
+            capset_ver: 0,
             pci,
             _ring: ring,
         };
@@ -735,6 +760,15 @@ impl Gpu {
             unsafe { r32(blob + 8) },
             unsafe { r32(blob + 12) }
         );
+        // Warp-2c: retain the blob for the /dev/warp caps file. Byte copy
+        // out of the RESP region NOW -- the next command overwrites it.
+        let mut kept = alloc::vec![0u8; take as usize];
+        for (i, b) in kept.iter_mut().enumerate() {
+            *b = unsafe { r8(blob + i as u64) };
+        }
+        self.capset_blob = kept;
+        self.capset_id = id;
+        self.capset_ver = version;
         Ok(())
     }
 
@@ -831,6 +865,102 @@ impl Gpu {
         };
         self.ctrl
             .step("RESOURCE_UNREF", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// CTX_CREATE: mint rendering context `ctx_id` host-side. context_init
+    /// stays 0 (VIRTIO_GPU_F_CONTEXT_INIT is not negotiated), so the host
+    /// creates the default virgl context -- which serves both VIRGL and
+    /// VIRGL2 capset consumers; the seam records the client's declared
+    /// capset for the day the feature is negotiated. Virgl-gated by the
+    /// caller (the warp tree answers E_OPNOTSUPP on a 2D device).
+    pub fn ctx_create(&mut self, ctx_id: u32, debug_name: &[u8]) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        let nlen = debug_name.len().min(63);
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_CREATE, ctx_id);
+            w32(req_va + 24, nlen as u32);
+            w32(req_va + 28, 0); // context_init (F_CONTEXT_INIT not negotiated)
+            for i in 0..64u64 {
+                w8(req_va + 32 + i, 0);
+            }
+            for (i, b) in debug_name.iter().take(nlen).enumerate() {
+                w8(req_va + 32 + i as u64, *b);
+            }
+        };
+        self.ctrl
+            .step("CTX_CREATE", GPU_CTRL_HDR_LEN + 72, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    pub fn ctx_destroy(&mut self, ctx_id: u32) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe { write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_DESTROY, ctx_id) };
+        self.ctrl
+            .step("CTX_DESTROY", GPU_CTRL_HDR_LEN, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// Attach a device-global resource to a context: virgl scopes command
+    /// streams to the resources attached to the submitting ctx -- the
+    /// host-side half of the I-45 exposure bound.
+    pub fn ctx_attach_resource(&mut self, ctx_id: u32, resource_id: u32) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, 0);
+        };
+        self.ctrl
+            .step("CTX_ATTACH_RESOURCE", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    pub fn ctx_detach_resource(&mut self, ctx_id: u32, resource_id: u32) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, ctx_id);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, 0);
+        };
+        self.ctrl
+            .step("CTX_DETACH_RESOURCE", GPU_CTRL_HDR_LEN + 8, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    /// RESOURCE_CREATE_3D: mint a device-global 3D resource. The parameter
+    /// tuple is the client's (the Mesa winsys drives these directly); the
+    /// server validates only what IT must stay sound against (the backing
+    /// size at ATTACH time) -- the host renderer owns 3D-parameter validity,
+    /// per the no-command-validation posture (GPU-DESIGN section 2.1).
+    #[allow(clippy::too_many_arguments)]
+    pub fn resource_create_3d(
+        &mut self,
+        resource_id: u32,
+        target: u32,
+        format: u32,
+        bind: u32,
+        width: u32,
+        height: u32,
+        depth: u32,
+        array_size: u32,
+        last_level: u32,
+        nr_samples: u32,
+        flags: u32,
+    ) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D);
+            w32(req_va + 24, resource_id);
+            w32(req_va + 28, target);
+            w32(req_va + 32, format);
+            w32(req_va + 36, bind);
+            w32(req_va + 40, width);
+            w32(req_va + 44, height);
+            w32(req_va + 48, depth);
+            w32(req_va + 52, array_size);
+            w32(req_va + 56, last_level);
+            w32(req_va + 60, nr_samples);
+            w32(req_va + 64, flags);
+            w32(req_va + 68, 0); // padding
+        };
+        self.ctrl
+            .step("RESOURCE_CREATE_3D", GPU_CTRL_HDR_LEN + 48, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
     }
 
     /// Bind scanout 0 to a resource (resource_id 0 = disable the scanout).

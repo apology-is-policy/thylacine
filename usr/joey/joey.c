@@ -9558,6 +9558,58 @@ int main(void) {
         }
     }
 
+    // === Warp-2: mount /dev/warp (the GPU seam; GPU-DESIGN.md sec 4.1) ===
+    // tapestryd posts /srv/warp alongside /srv/tapestry (one Proc, two
+    // services; both tombstone together at its death). Same mount contract
+    // as tapestry: absent is SOFT (no-GPU boots), present-but-unmountable is
+    // boot-fatal. A separate block rather than nesting under the tapestry
+    // arm so a partial state (one service posted, not the other) reads
+    // honestly in the log.
+    {
+        long warp_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/warp", 9, T_OREAD);
+        if (warp_root >= 0) {
+            if (t_mount("/dev/warp", 9, warp_root, T_MREPL) != 0) {
+                t_putstr("joey: t_mount(/dev/warp) FAILED\n");
+                return 1;
+            }
+            (void)t_close(warp_root);
+            t_putstr("joey: /dev/warp mounted (the GPU seam)\n");
+
+#if THYLA_BOOT_PROBES
+            // Warp-2 PROBE: the seam's global ctl must yield the virgl
+            // status line. Boot-fatal once the mount is up.
+            {
+                long wctl = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/warp/ctl",
+                                   13, T_OREAD);
+                if (wctl < 0) {
+                    t_putstr("joey: Warp PROBE open(/dev/warp/ctl) FAILED\n");
+                    return 1;
+                }
+                char wbuf[128];
+                long wn = t_read(wctl, wbuf, sizeof(wbuf) - 1);
+                (void)t_close(wctl);
+                static const char virgl_pfx[] = "virgl ";
+                int wpfx_ok = (wn >= 7);
+                for (int i = 0; wpfx_ok && virgl_pfx[i] != '\0'; i++)
+                    if (wbuf[i] != virgl_pfx[i])
+                        wpfx_ok = 0;
+                if (!wpfx_ok) {
+                    t_putstr("joey: Warp PROBE /dev/warp/ctl malformed\n");
+                    return 1;
+                }
+                wbuf[wn] = '\0';
+                for (long i = 0; i < wn; i++)
+                    if (wbuf[i] == '\n') { wbuf[i] = '\0'; break; }
+                t_putstr("joey: Warp PROBE OK (/dev/warp/ctl: ");
+                t_putstr(wbuf);
+                t_putstr(")\n");
+            }
+#endif
+        } else {
+            t_putstr("joey: /srv/warp absent (no GPU environment); skipping\n");
+        }
+    }
+
     // CL-4: F2's in-guest proof. fstat on a /dev fd must SUCCEED and report a
     // character device. The #57b namespace door mints devdev Spoors (not
     // devcons), so before devdev_stat_native every /dev/* fd failed fstat --

@@ -83,9 +83,9 @@ use alloc::vec::Vec;
 use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
-    t_burrow_detach, t_close, t_dma_create_weave, t_dma_map, t_srv_peer, t_weft_share,
-    t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ, T_PROT_WRITE,
-    T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_srv_peer,
+    t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ,
+    T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
@@ -112,6 +112,14 @@ const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 /// F9: the per-client surface-count cap + the global slot pool.
 const MAX_SURFACES: usize = 8;
 const MAX_SURFACES_PER_CONN: usize = 4;
+
+/// Warp-2c: the GPU-seam slot pools. ONE context per client (the I-45
+/// exposure bound, GPU-DESIGN section 8: no cross-context resource naming,
+/// one ctx per conn); BOs bounded per ctx (each is a kernel GPU-BO mint the
+/// client's shared-map budget also bounds -- this cap is the server's own
+/// bookkeeping bound, not the resource authority).
+const MAX_WARP_CTXS: usize = 8;
+const MAX_WARP_BOS_PER_CTX: usize = 16;
 
 /// Triple buffering (D1): one weave carries three page-aligned slots.
 const WEAVE_SLOTS: u32 = 3;
@@ -197,12 +205,76 @@ fn is_pane(path: u64) -> bool {
     path & PANE_FLAG != 0
 }
 
+// --- The /dev/warp tree (Warp-2c; GPU-DESIGN.md section 4.1) ----------------
+//
+// A SECOND service tree served by the same process (the section 5 placement:
+// tapestryd hosts the GPU service on QEMU because warden binding is one
+// exclusive claimant per function). Warp conns attach at W_ROOT instead of
+// P_ROOT (Conn.root); the two trees share the conn/fid machinery and the
+// qid space is disjoint by WARP_FLAG. Contexts and BOs carry MONOTONIC
+// public ids (the pane discipline: never reused, so a stale fid resolves to
+// nothing and no generation machinery is needed); the DEVICE ctx id is the
+// slot index + 1 (small + reused only after a synchronous CTX_DESTROY --
+// virglrenderer's context-id space is bounded, a monotonic id is not).
+
+const WARP_FLAG: u64 = 1 << 42;
+const WARP_CTX: u64 = 1 << 39; // a ctx/<id> node (below the tag bits)
+const WARP_BO: u64 = 1 << 38; // a ctx bo/<id> node
+
+const W_ROOT: u64 = WARP_FLAG;
+/// The attach roots by listener (main.rs hands the accepting listener's
+/// root to Conn::new).
+pub const ROOT_TAPESTRY: u64 = P_ROOT;
+pub const ROOT_WARP: u64 = W_ROOT;
+const W_CTL: u64 = WARP_FLAG | 1;
+const W_CAPS: u64 = WARP_FLAG | 2;
+const W_CTX_DIR: u64 = WARP_FLAG | 3;
+const W_CTX_NEW: u64 = WARP_FLAG | 4;
+
+// Ctx-level file kinds (ctx/<id>/*).
+const WFK_DIR: u64 = 0;
+const WFK_CTL: u64 = 1;
+const WFK_SUBMIT: u64 = 2;
+const WFK_FENCE: u64 = 3;
+const WFK_BO_DIR: u64 = 4;
+const WFK_BO_NEW: u64 = 5;
+// BO-level file kinds (ctx/<id>/bo/<id>/*), under WARP_BO.
+const WFK_BO_CTL: u64 = 1;
+const WFK_BO_MAP: u64 = 2;
+const WFK_BO_INFO: u64 = 3;
+
+fn make_wctx(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_CTX | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
+}
+fn make_wbo(id: u32, fk: u64) -> u64 {
+    WARP_FLAG | WARP_BO | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
+}
+fn warp_id(path: u64) -> u32 {
+    ((path >> 8) & N_MASK) as u32
+}
+fn warp_fk(path: u64) -> u64 {
+    path & FK_MASK
+}
+fn is_warp(path: u64) -> bool {
+    path & WARP_FLAG != 0
+}
+fn is_wctx(path: u64) -> bool {
+    is_warp(path) && path & WARP_CTX != 0 && path & WARP_BO == 0
+}
+fn is_wbo(path: u64) -> bool {
+    is_warp(path) && path & WARP_BO != 0
+}
+
 fn is_dir(path: u64) -> bool {
     path == P_ROOT
         || path == P_SURF_DIR
         || path == P_PANE_DIR
         || (is_surf(path) && surf_fk(path) == FK_DIR)
         || (is_pane(path) && pane_fk(path) == PFK_DIR)
+        || path == W_ROOT
+        || path == W_CTX_DIR
+        || (is_wctx(path) && (warp_fk(path) == WFK_DIR || warp_fk(path) == WFK_BO_DIR))
+        || (is_wbo(path) && warp_fk(path) == WFK_DIR)
 }
 
 // Mode constants (the ptyfs set).
@@ -509,6 +581,41 @@ pub struct Comp {
     /// `tick` ctl writes) and TPRESENT_HOLD is accepted.
     #[cfg(feature = "test-mode")]
     test_mode: bool,
+    /// Warp-2c: the GPU-seam context slots + the monotonic public-id
+    /// sequences (the pane discipline -- tree names are never reused).
+    warp_ctxs: [Option<WarpCtx>; MAX_WARP_CTXS],
+    warp_ctx_seq: u32,
+    warp_bo_seq: u32,
+}
+
+/// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
+/// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
+struct WarpCtx {
+    owner_conn: u64,
+    pub_id: u32,
+    dev_ctx: u32,
+    /// The client's declared capset + ring count (`ctl` writes). Recorded
+    /// at the seam from day one; the device sees them when
+    /// F_CONTEXT_INIT / per-ring fencing are negotiated (Venus).
+    capset: u32,
+    rings: u32,
+    bos: [Option<WarpBo>; MAX_WARP_BOS_PER_CTX],
+}
+
+/// A GPU buffer object: a kernel-minted GPU-BO DMA chunk attached as the
+/// backing of a device-global 3D resource, shared to the client by Tweft.
+struct WarpBo {
+    pub_id: u32,
+    res_id: u32,
+    dma_fd: i64,
+    va: u64,
+    pa: u64,
+    size: u64,
+    /// The lazy Tweft mint (the weft_ensure precedent); disarmed at retire
+    /// BEFORE any backing free (the R2-F5 ordering).
+    share_id: Option<u64>,
+    w: u32,
+    h: u32,
 }
 
 const NO_SURFACE: Option<Surface> = None;
@@ -541,6 +648,9 @@ impl Comp {
             ptr_y: 0,
             #[cfg(feature = "test-mode")]
             test_mode: false,
+            warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
+            warp_ctx_seq: 0,
+            warp_bo_seq: 0,
         }
     }
 
@@ -2259,9 +2369,301 @@ struct PendingRead {
     cap: usize,
 }
 
+const WARP_NO_CTX: Option<WarpCtx> = None;
+const WARP_NO_BO: Option<WarpBo> = None;
+
+// --- Warp-2c: the GPU-seam object lifecycle -------------------------------
+impl Comp {
+    fn wctx_slot(&self, pub_id: u32) -> Option<usize> {
+        self.warp_ctxs
+            .iter()
+            .position(|c| c.as_ref().map_or(false, |c| c.pub_id == pub_id))
+    }
+
+    /// Resolve a live ctx the CALLER owns (the F2 gate, warp edition).
+    fn wctx(&self, pub_id: u32, conn: u64) -> Option<&WarpCtx> {
+        let c = self.warp_ctxs[self.wctx_slot(pub_id)?].as_ref().unwrap();
+        if c.owner_conn != conn {
+            return None;
+        }
+        Some(c)
+    }
+
+    fn wctx_mut(&mut self, pub_id: u32, conn: u64) -> Option<&mut WarpCtx> {
+        let i = self.wctx_slot(pub_id)?;
+        let c = self.warp_ctxs[i].as_mut().unwrap();
+        if c.owner_conn != conn {
+            return None;
+        }
+        Some(c)
+    }
+
+    /// Resolve a live BO (and its ctx pub id) the caller owns.
+    fn wbo(&self, bo_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpBo)> {
+        for c in self.warp_ctxs.iter().flatten() {
+            if c.owner_conn != conn {
+                continue;
+            }
+            for b in c.bos.iter().flatten() {
+                if b.pub_id == bo_pub {
+                    return Some((c, b));
+                }
+            }
+        }
+        None
+    }
+
+    /// Mint a context for `conn` (one per client -- the I-45 exposure
+    /// bound): allocate the slot, CTX_CREATE on the device (virgl-gated by
+    /// the caller), roll the slot back if the device refuses.
+    fn wctx_mint(&mut self, conn: u64) -> Option<u32> {
+        if self.warp_ctxs.iter().flatten().any(|c| c.owner_conn == conn) {
+            return None; // one ctx per client
+        }
+        let slot = self.warp_ctxs.iter().position(|c| c.is_none())?;
+        let dev_ctx = (slot as u32) + 1;
+        if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
+            return None;
+        }
+        self.warp_ctx_seq = self.warp_ctx_seq.wrapping_add(1);
+        let pub_id = self.warp_ctx_seq;
+        self.warp_ctxs[slot] = Some(WarpCtx {
+            owner_conn: conn,
+            pub_id,
+            dev_ctx,
+            capset: 0,
+            rings: 1,
+            bos: [WARP_NO_BO; MAX_WARP_BOS_PER_CTX],
+        });
+        Some(pub_id)
+    }
+
+    /// Mint a BO record under a ctx (no device state yet -- the ctl
+    /// `create3d` write allocates the backing + resource).
+    fn wbo_mint(&mut self, ctx_pub: u32, conn: u64) -> Option<u32> {
+        self.warp_bo_seq = self.warp_bo_seq.wrapping_add(1);
+        let pub_id = self.warp_bo_seq;
+        let c = self.wctx_mut(ctx_pub, conn)?;
+        let slot = c.bos.iter().position(|b| b.is_none())?;
+        c.bos[slot] = Some(WarpBo {
+            pub_id,
+            res_id: 0,
+            dma_fd: -1,
+            va: 0,
+            pa: 0,
+            size: 0,
+            share_id: None,
+            w: 0,
+            h: 0,
+        });
+        Some(pub_id)
+    }
+
+    /// The BO backing build (the ctl `create3d` verb): kernel GPU-BO mint
+    /// -> map -> RESOURCE_CREATE_3D -> CTX_ATTACH -> ATTACH_BACKING, with
+    /// reverse unwind on any failure. Size is the client's declared backing
+    /// length; the kernel envelope + the client's own shared-map budget
+    /// bound it -- the server checks only page alignment and non-zero.
+    #[allow(clippy::too_many_arguments)]
+    fn wbo_create(
+        &mut self,
+        ctx_pub: u32,
+        bo_pub: u32,
+        conn: u64,
+        target: u32,
+        format: u32,
+        bind: u32,
+        w: u32,
+        h: u32,
+        d: u32,
+        array: u32,
+        last_level: u32,
+        samples: u32,
+        flags: u32,
+        size: u64,
+    ) -> bool {
+        if size == 0 || size % PAGE != 0 {
+            return false;
+        }
+        let c = match self.wctx(ctx_pub, conn) {
+            Some(c) => c,
+            None => return false,
+        };
+        let dev_ctx = c.dev_ctx;
+        if !c.bos.iter().flatten().any(|b| b.pub_id == bo_pub) {
+            return false;
+        }
+        // Already built? create3d is once per BO.
+        if c
+            .bos
+            .iter()
+            .flatten()
+            .any(|b| b.pub_id == bo_pub && b.dma_fd >= 0)
+        {
+            return false;
+        }
+
+        let fd =
+            unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            return false;
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(fd) };
+            return false;
+        }
+
+        self.res_seq += 1;
+        let res_id = self.res_seq;
+        if self
+            .gpu
+            .resource_create_3d(res_id, target, format, bind, w, h, d, array, last_level, samples, flags)
+            .is_err()
+        {
+            unsafe { t_close(fd) };
+            return false;
+        }
+        if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
+            let _ = self.gpu.resource_unref(res_id);
+            unsafe { t_close(fd) };
+            return false;
+        }
+        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+            let _ = self.gpu.ctx_detach_resource(dev_ctx, res_id);
+            let _ = self.gpu.resource_unref(res_id);
+            unsafe { t_close(fd) };
+            return false;
+        }
+
+        let c = self.wctx_mut(ctx_pub, conn).unwrap();
+        for b in c.bos.iter_mut().flatten() {
+            if b.pub_id == bo_pub {
+                b.res_id = res_id;
+                b.dma_fd = fd;
+                b.va = va;
+                b.pa = pa as u64;
+                b.size = size;
+                b.w = w;
+                b.h = h;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The BO Tweft mint (the weft_ensure precedent): share once, echo the
+    /// stored id thereafter.
+    fn wbo_weft_ensure(&mut self, bo_pub: u32, conn: u64) -> Option<(u64, u32)> {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn {
+                continue;
+            }
+            for b in c.bos.iter_mut().flatten() {
+                if b.pub_id != bo_pub {
+                    continue;
+                }
+                if b.dma_fd < 0 {
+                    return None; // not built yet
+                }
+                if let Some(id) = b.share_id {
+                    return Some((id, b.size as u32));
+                }
+                let id = unsafe { t_weft_share(b.va, b.size) };
+                if id <= 0 {
+                    say!("tapestryd: warp t_weft_share failed {}", id);
+                    return None;
+                }
+                b.share_id = Some(id as u64);
+                return Some((id as u64, b.size as u32));
+            }
+        }
+        None
+    }
+
+    /// Retire one BO: the I-40/R2-F5 order -- (1) disarm the un-claimed
+    /// share BEFORE any backing free (a Tweft claim racing the retire fails
+    /// closed; an already-claimed share is a harmless miss and the CLIENT's
+    /// mapping stays alive via the #847 dual count until its own teardown /
+    /// the reaper); (2) device detach (all commands synchronous at Warp-2c,
+    /// so the in-flight set is empty by construction); (3) release the
+    /// server's own refs (the pages free when the client's mapping ref also
+    /// drops).
+    fn wbo_retire(gpu: &mut Gpu, dev_ctx: u32, b: &mut WarpBo) {
+        if let Some(id) = b.share_id.take() {
+            let _ = unsafe { t_weft_unshare(id) };
+        }
+        if b.dma_fd >= 0 {
+            let _ = gpu.detach_backing(b.res_id);
+            let _ = gpu.ctx_detach_resource(dev_ctx, b.res_id);
+            let _ = gpu.resource_unref(b.res_id);
+            unsafe { t_burrow_detach(b.va, b.size) };
+            unsafe { t_close(b.dma_fd) };
+            b.dma_fd = -1;
+        }
+    }
+
+    /// Retire one ctx: every BO first, then CTX_DESTROY (synchronous, so
+    /// the device-side ctx is quiesced when the slot -- and with it the
+    /// dev_ctx id -- becomes reusable).
+    fn wctx_retire(&mut self, slot: usize) {
+        if let Some(mut c) = self.warp_ctxs[slot].take() {
+            for b in c.bos.iter_mut().flatten() {
+                Self::wbo_retire(&mut self.gpu, c.dev_ctx, b);
+            }
+            let _ = self.gpu.ctx_destroy(c.dev_ctx);
+        }
+    }
+
+    /// Retire a specific owned BO (the bo ctl `destroy` verb).
+    fn wbo_destroy(&mut self, bo_pub: u32, conn: u64) -> bool {
+        for i in 0..MAX_WARP_CTXS {
+            let (dev_ctx, owner) = match &self.warp_ctxs[i] {
+                Some(c) => (c.dev_ctx, c.owner_conn),
+                None => continue,
+            };
+            if owner != conn {
+                continue;
+            }
+            let c = self.warp_ctxs[i].as_mut().unwrap();
+            for j in 0..MAX_WARP_BOS_PER_CTX {
+                if c.bos[j].as_ref().map_or(false, |b| b.pub_id == bo_pub) {
+                    let mut b = c.bos[j].take().unwrap();
+                    Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Conn teardown, warp half: retire every ctx this conn owns.
+    fn warp_retire_conn(&mut self, conn: u64) {
+        for i in 0..MAX_WARP_CTXS {
+            if self.warp_ctxs[i]
+                .as_ref()
+                .map_or(false, |c| c.owner_conn == conn)
+            {
+                self.wctx_retire(i);
+            }
+        }
+    }
+
+    fn warp_live_ctxs(&self) -> usize {
+        self.warp_ctxs.iter().flatten().count()
+    }
+}
+
 pub struct Conn {
     handle: i64,
     pub conn_id: u64,
+    /// Which tree this conn serves: P_ROOT (/srv/tapestry) or W_ROOT
+    /// (/srv/warp) -- set by which listener accepted it (Warp-2c). One Conn
+    /// type for both; the qid spaces are disjoint, so a warp conn simply
+    /// never resolves a tapestry path and vice versa.
+    root: u64,
     version_done: bool,
     msize: u32,
     fids: [Option<Fid>; MAX_FIDS],
@@ -2322,10 +2724,11 @@ fn rects_cover_full(rects: &[(u32, u32, u32, u32)], w: u32, h: u32) -> bool {
 }
 
 impl Conn {
-    pub fn new(handle: i64, conn_id: u64) -> Conn {
+    pub fn new(handle: i64, conn_id: u64, root: u64) -> Conn {
         Conn {
             handle,
             conn_id,
+            root,
             version_done: false,
             msize: SRV_MSIZE,
             fids: [NO_FID; MAX_FIDS],
@@ -2378,16 +2781,19 @@ impl Conn {
 
     fn drop_all_fids(&mut self, comp: &mut Comp) {
         // Cancel site 3 (Tversion, session reset): surfaces this conn owns
-        // retire; every fid + held reply drops.
+        // retire; every fid + held reply drops. Warp objects too.
         comp.retire_conn(self.conn_id);
+        comp.warp_retire_conn(self.conn_id);
         self.fids = [NO_FID; MAX_FIDS];
         self.pending_reads.clear();
     }
 
     pub fn teardown(&mut self, comp: &mut Comp) {
         // Cancel site 1 (conn death): the owning conn's surfaces retire
-        // (spec Destroy via client death); held replies die.
+        // (spec Destroy via client death); held replies die. The warp half
+        // retires the conn's GPU contexts + BOs identically (Warp-2c).
         comp.retire_conn(self.conn_id);
+        comp.warp_retire_conn(self.conn_id);
         self.pending_reads.clear();
     }
 
@@ -2530,10 +2936,11 @@ impl Conn {
         if a.afid != p9::P9_NOFID || a.fid == p9::P9_NOFID {
             return self.err(tag, p9::E_OPNOTSUPP);
         }
-        if !self.fid_set(a.fid, P_ROOT, 0) {
+        let root = self.root;
+        if !self.fid_set(a.fid, root, 0) {
             return self.err(tag, p9::E_NOMEM);
         }
-        let q = self.qid_of(P_ROOT);
+        let q = self.qid_of(root);
         p9::build_rattach(&mut self.out_buf, tag, &q)
     }
 
@@ -2612,6 +3019,67 @@ impl Conn {
                     _ => return None,
                 };
                 Some((make_surf(n, fk), s.gen))
+            }
+            // --- The /dev/warp tree (Warp-2c) --------------------------------
+            W_ROOT => match name {
+                b".." => Some((W_ROOT, 0)),
+                b"ctl" => Some((W_CTL, 0)),
+                b"caps" => Some((W_CAPS, 0)),
+                b"ctx" => Some((W_CTX_DIR, 0)),
+                _ => None,
+            },
+            W_CTX_DIR => {
+                if name == b".." {
+                    return Some((W_ROOT, 0));
+                }
+                if name == b"new" {
+                    return Some((W_CTX_NEW, 0));
+                }
+                let id = parse_u32(name)?;
+                comp.wctx(id, self.conn_id)?; // F2: only the owner resolves
+                Some((make_wctx(id, WFK_DIR), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_DIR => {
+                let id = warp_id(d);
+                comp.wctx(id, self.conn_id)?;
+                let fk = match name {
+                    b".." => return Some((W_CTX_DIR, 0)),
+                    b"ctl" => WFK_CTL,
+                    b"submit" => WFK_SUBMIT,
+                    b"fence" => WFK_FENCE,
+                    b"bo" => WFK_BO_DIR,
+                    _ => return None,
+                };
+                Some((make_wctx(id, fk), 0))
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_BO_DIR => {
+                let cid = warp_id(d);
+                comp.wctx(cid, self.conn_id)?;
+                if name == b".." {
+                    return Some((make_wctx(cid, WFK_DIR), 0));
+                }
+                if name == b"new" {
+                    return Some((make_wctx(cid, WFK_BO_NEW), 0));
+                }
+                let bid = parse_u32(name)?;
+                let (c, _) = comp.wbo(bid, self.conn_id)?;
+                if c.pub_id != cid {
+                    return None;
+                }
+                Some((make_wbo(bid, WFK_DIR), 0))
+            }
+            d if is_wbo(d) && warp_fk(d) == WFK_DIR => {
+                let bid = warp_id(d);
+                let (c, _) = comp.wbo(bid, self.conn_id)?;
+                let parent = make_wctx(c.pub_id, WFK_BO_DIR);
+                let fk = match name {
+                    b".." => return Some((parent, 0)),
+                    b"ctl" => WFK_BO_CTL,
+                    b"map" => WFK_BO_MAP,
+                    b"info" => WFK_BO_INFO,
+                    _ => return None,
+                };
+                Some((make_wbo(bid, fk), 0))
             }
             _ => None,
         }
@@ -2700,6 +3168,51 @@ impl Conn {
             return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
         }
 
+        // Warp mints (Warp-2c). ctx/new: allocate a context in THIS conn
+        // (CTX_CREATE on the device -- virgl-gated) + rebind the fid onto
+        // its ctl; the ctl read yields the public id. bo/new: the same
+        // idiom one level down (no device state until the ctl create3d).
+        if f.path == W_CTX_NEW {
+            if !comp.gpu.virgl {
+                return self.err(tag, p9::E_OPNOTSUPP);
+            }
+            let conn_id = self.conn_id;
+            let id = match comp.wctx_mint(conn_id) {
+                Some(id) => id,
+                None => return self.err(tag, p9::E_NOMEM),
+            };
+            let path = make_wctx(id, WFK_CTL);
+            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            let q = self.qid_of(path);
+            return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
+        }
+        if is_wctx(f.path) && warp_fk(f.path) == WFK_BO_NEW {
+            let cid = warp_id(f.path);
+            let conn_id = self.conn_id;
+            if comp.wctx(cid, conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            let id = match comp.wbo_mint(cid, conn_id) {
+                Some(id) => id,
+                None => return self.err(tag, p9::E_NOMEM),
+            };
+            let path = make_wbo(id, WFK_BO_CTL);
+            self.fids[i] = Some(Fid { fid: a.fid, path, gen: 0, opened: true });
+            let q = self.qid_of(path);
+            return p9::build_rlopen(&mut self.out_buf, tag, &q, 0);
+        }
+        // Warp files: re-validate liveness + ownership (monotonic ids -- a
+        // stale fid resolves to nothing, the pane discipline).
+        if is_wctx(f.path)
+            && warp_fk(f.path) != WFK_DIR
+            && comp.wctx(warp_id(f.path), self.conn_id).is_none()
+        {
+            return self.err(tag, p9::E_NOENT);
+        }
+        if is_wbo(f.path) && comp.wbo(warp_id(f.path), self.conn_id).is_none() {
+            return self.err(tag, p9::E_NOENT);
+        }
+
         // Surface files: re-validate liveness + ownership + generation (a
         // walk could have raced a retire).
         if is_surf(f.path) && !comp.surf_owned(surf_n(f.path), self.conn_id, f.gen) {
@@ -2767,6 +3280,82 @@ impl Conn {
         }
         if is_pane(f.path) {
             return self.pane_read(comp, f.path, tag, a.offset, cap);
+        }
+
+        // --- The /dev/warp files (Warp-2c) -----------------------------------
+        if f.path == W_CTL {
+            // `virgl <0|1>` first: the line joey's boot probe + a client's
+            // capability check parse. capset names the RETAINED blob (the
+            // caps file's content); ctxs is live-count introspection.
+            let mut s = String::new();
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\n",
+                    comp.gpu.virgl as u32,
+                    comp.gpu.num_capsets,
+                    comp.gpu.capset_id,
+                    comp.gpu.capset_ver,
+                    comp.gpu.capset_blob.len(),
+                    comp.warp_live_ctxs()
+                ),
+            );
+            return self.read_str(tag, &s, a.offset, cap);
+        }
+        if f.path == W_CAPS {
+            // The raw capset blob (decode with the ctl `capset` line).
+            let b = &comp.gpu.capset_blob;
+            let off = (a.offset as usize).min(b.len());
+            let take = (b.len() - off).min(cap);
+            let slice = b[off..off + take].to_vec();
+            return p9::build_rread(&mut self.out_buf, tag, &slice);
+        }
+        if is_wctx(f.path) {
+            let id = warp_id(f.path);
+            if comp.wctx(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_CTL => {
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                // The fence completion stream arrives with the fenced lane
+                // (Warp-2d); until then the file exists but cannot be read.
+                WFK_FENCE => self.err(tag, p9::E_OPNOTSUPP),
+                _ => self.err(tag, p9::E_INVAL),
+            };
+        }
+        if is_wbo(f.path) {
+            let id = warp_id(f.path);
+            let bo = match comp.wbo(id, self.conn_id) {
+                Some((_, b)) => b,
+                None => return self.err(tag, p9::E_NOENT),
+            };
+            return match warp_fk(f.path) {
+                WFK_BO_CTL => {
+                    let mut s = String::new();
+                    let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                WFK_BO_INFO => {
+                    // `res` is the device-global resource id -- the name a
+                    // virgl command stream uses (the gpu_va slot of the
+                    // section 4.1 tree is v3d's; virgl addresses by id).
+                    // stride 0 = tight (the client picks per-transfer).
+                    let mut s = String::new();
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "res {} size {} stride 0 offset 0 w {} h {}\n",
+                            bo.res_id, bo.size, bo.w, bo.h
+                        ),
+                    );
+                    self.read_str(tag, &s, a.offset, cap)
+                }
+                _ => self.err(tag, p9::E_INVAL),
+            };
         }
 
         if !is_surf(f.path) {
@@ -3015,6 +3604,35 @@ impl Conn {
                 Err(e) => self.err(tag, e),
             };
         }
+        // --- The /dev/warp writes (Warp-2c) ----------------------------------
+        if is_wctx(f.path) {
+            let id = warp_id(f.path);
+            if comp.wctx(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_CTL => match self.wctx_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                // The opaque command-stream path is the fenced lane (Warp-2d).
+                WFK_SUBMIT => self.err(tag, p9::E_OPNOTSUPP),
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
+        if is_wbo(f.path) {
+            let id = warp_id(f.path);
+            if comp.wbo(id, self.conn_id).is_none() {
+                return self.err(tag, p9::E_NOENT);
+            }
+            return match warp_fk(f.path) {
+                WFK_BO_CTL => match self.wbo_ctl(comp, id, a.data) {
+                    Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                    Err(e) => self.err(tag, e),
+                },
+                _ => self.err(tag, p9::E_PERM),
+            };
+        }
         if !is_surf(f.path) {
             return self.err(tag, p9::E_INVAL);
         }
@@ -3032,6 +3650,91 @@ impl Conn {
                 Err(e) => self.err(tag, e),
             },
             _ => self.err(tag, p9::E_PERM),
+        }
+    }
+
+    /// ctx ctl verbs (Warp-2c): `capset <id>` + `rings <n>` record the
+    /// client's declaration at the seam (GPU-DESIGN section 4.3 -- the ABI
+    /// carries them from day one; the device sees them when F_CONTEXT_INIT /
+    /// per-ring fencing are negotiated); `destroy` retires the ctx.
+    fn wctx_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        match it.next() {
+            Some("capset") => {
+                let v: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?.capset = v;
+                Ok(())
+            }
+            Some("rings") => {
+                let v: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                if !(1..=64).contains(&v) {
+                    return Err(p9::E_INVAL);
+                }
+                comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?.rings = v;
+                Ok(())
+            }
+            Some("destroy") => {
+                let slot = comp.wctx_slot(id).ok_or(p9::E_NOENT)?;
+                if comp.wctx(id, self.conn_id).is_none() {
+                    return Err(p9::E_NOENT);
+                }
+                comp.wctx_retire(slot);
+                Ok(())
+            }
+            _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// bo ctl verbs (Warp-2c): `create3d <target> <format> <bind> <w> <h>
+    /// <d> <array> <last_level> <samples> <flags> <size>` builds the backing
+    /// (kernel GPU-BO mint + 3D resource + ctx attach + backing attach);
+    /// `destroy` retires the BO. The parameter tuple is the client's -- the
+    /// host renderer owns 3D validity (section 2.1); the server owns only
+    /// the backing-size sanity its own soundness needs.
+    fn wbo_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
+        let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
+        let mut it = s.split_ascii_whitespace();
+        match it.next() {
+            Some("create3d") => {
+                if !comp.gpu.virgl {
+                    return Err(p9::E_OPNOTSUPP);
+                }
+                let mut arg = |_name: &str| -> Result<u64, u32> {
+                    it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)
+                };
+                let target = arg("target")? as u32;
+                let format = arg("format")? as u32;
+                let bind = arg("bind")? as u32;
+                let w = arg("w")? as u32;
+                let h = arg("h")? as u32;
+                let d = arg("d")? as u32;
+                let array = arg("array")? as u32;
+                let last_level = arg("last_level")? as u32;
+                let samples = arg("samples")? as u32;
+                let flags = arg("flags")? as u32;
+                let size = arg("size")?;
+                let ctx_pub = comp
+                    .wbo(id, self.conn_id)
+                    .map(|(c, _)| c.pub_id)
+                    .ok_or(p9::E_NOENT)?;
+                if comp.wbo_create(
+                    ctx_pub, id, self.conn_id, target, format, bind, w, h, d, array,
+                    last_level, samples, flags, size,
+                ) {
+                    Ok(())
+                } else {
+                    Err(E_IO)
+                }
+            }
+            Some("destroy") => {
+                if comp.wbo_destroy(id, self.conn_id) {
+                    Ok(())
+                } else {
+                    Err(p9::E_NOENT)
+                }
+            }
+            _ => Err(p9::E_INVAL),
         }
     }
 
@@ -3532,6 +4235,59 @@ impl Conn {
                     }
                 }
             }
+            // --- The /dev/warp tree (Warp-2c; mirrors walk_child -- a name
+            // in one ladder and not the other is walkable-but-invisible). ---
+            W_ROOT => {
+                names.push((b"ctl".to_vec(), W_CTL));
+                names.push((b"caps".to_vec(), W_CAPS));
+                names.push((b"ctx".to_vec(), W_CTX_DIR));
+            }
+            W_CTX_DIR => {
+                names.push((b"new".to_vec(), W_CTX_NEW));
+                for c in comp.warp_ctxs.iter().flatten() {
+                    if c.owner_conn == self.conn_id {
+                        let mut nm = String::new();
+                        let _ = core::fmt::write(&mut nm, format_args!("{}", c.pub_id));
+                        names.push((nm.into_bytes(), make_wctx(c.pub_id, WFK_DIR)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_DIR => {
+                let id = warp_id(d);
+                if comp.wctx(id, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"ctl"[..], WFK_CTL),
+                        (&b"submit"[..], WFK_SUBMIT),
+                        (&b"fence"[..], WFK_FENCE),
+                        (&b"bo"[..], WFK_BO_DIR),
+                    ] {
+                        names.push((nm.to_vec(), make_wctx(id, fk)));
+                    }
+                }
+            }
+            d if is_wctx(d) && warp_fk(d) == WFK_BO_DIR => {
+                let cid = warp_id(d);
+                if let Some(c) = comp.wctx(cid, self.conn_id) {
+                    names.push((b"new".to_vec(), make_wctx(cid, WFK_BO_NEW)));
+                    for b in c.bos.iter().flatten() {
+                        let mut nm = String::new();
+                        let _ = core::fmt::write(&mut nm, format_args!("{}", b.pub_id));
+                        names.push((nm.into_bytes(), make_wbo(b.pub_id, WFK_DIR)));
+                    }
+                }
+            }
+            d if is_wbo(d) && warp_fk(d) == WFK_DIR => {
+                let bid = warp_id(d);
+                if comp.wbo(bid, self.conn_id).is_some() {
+                    for (nm, fk) in [
+                        (&b"ctl"[..], WFK_BO_CTL),
+                        (&b"map"[..], WFK_BO_MAP),
+                        (&b"info"[..], WFK_BO_INFO),
+                    ] {
+                        names.push((nm.to_vec(), make_wbo(bid, fk)));
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -3633,6 +4389,18 @@ impl Conn {
             None => return self.err(tag, p9::E_BADF),
         };
         let f = self.fids[i].unwrap();
+        // Warp-2c: the BO map fid is the second Tweft anchor (the weave
+        // shape verbatim: lazy share, ring_entries 0 = the map-only kind
+        // the kernel cross-checks).
+        if f.opened && is_wbo(f.path) && warp_fk(f.path) == WFK_BO_MAP {
+            let id = warp_id(f.path);
+            return match comp.wbo_weft_ensure(id, self.conn_id) {
+                Some((share_id, size)) => {
+                    p9::build_rweft(&mut self.out_buf, tag, share_id, size, 0)
+                }
+                None => self.err(tag, p9::E_NOMEM),
+            };
+        }
         if !f.opened || !is_surf(f.path) || surf_fk(f.path) != FK_WEAVE {
             return self.err(tag, p9::E_INVAL);
         }

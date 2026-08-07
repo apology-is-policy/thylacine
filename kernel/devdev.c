@@ -56,6 +56,7 @@ enum {
     DEV_KIND_CONSDRAIN = 10, // G-4: the renderer's console-output drain (RO)
     DEV_KIND_CONSFEED  = 11, // G-4: the renderer's input feed (WO)
     DEV_KIND_WINSIZE   = 12, // #55: the UNGATED read-only console-geometry leaf
+    DEV_KIND_WARP      = 13, // the /dev/warp mount-stub DIRECTORY (Warp-2)
 };
 
 #define DEV_QID_ROOT_PATH  0ULL
@@ -197,6 +198,14 @@ static bool walk_one(u64 cur_path, const char *name, struct Qid *out_qid) {
             out_qid->type = QTDIR;
             return true;
         }
+        // /dev/warp: the GPU-seam mount stub (Warp-2; GPU-DESIGN.md §4.1) --
+        // same shape again: EMPTY pre-mount, joey MREPL-mounts tapestryd's
+        // second service tree (/srv/warp) over it.
+        if (name_eq("warp", name)) {
+            out_qid->path = (u64)DEV_KIND_WARP;
+            out_qid->type = QTDIR;
+            return true;
+        }
         for (size_t i = 0; i < DEV_LEAF_COUNT; i++) {
             if (name_eq(g_dev_leaves[i].name, name)) {
                 out_qid->path = (u64)g_dev_leaves[i].kind;
@@ -297,6 +306,7 @@ static int devdev_stat_native(struct Spoor *c, struct t_stat *out) {
     case DEV_KIND_ROOT:
     case DEV_KIND_PTS:
     case DEV_KIND_TAPESTRY:
+    case DEV_KIND_WARP:
         // /dev itself + the mount-point stub dirs. World-searchable, matching
         // the devramfs synth dirs -- the X bit is what lets the resolver
         // traverse onto the mount point and cross.
