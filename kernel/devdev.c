@@ -199,9 +199,12 @@ static bool walk_one(u64 cur_path, const char *name, struct Qid *out_qid) {
             out_qid->type = QTDIR;
             return true;
         }
-        // /dev/warp: the GPU-seam mount stub (Warp-2; GPU-DESIGN.md §4.1) --
-        // same shape again: EMPTY pre-mount, joey MREPL-mounts tapestryd's
-        // second service tree (/srv/warp) over it.
+        // /dev/warp: the GPU-seam mount POINT (Warp-2; GPU-DESIGN.md §4.1).
+        // EMPTY, and joey deliberately never mounts over it (audit F1): a
+        // SHARED mount is one server-side connection, and the warp tree's
+        // authority is per-connection, so a global mount would let any
+        // Proc drive any other's rendering context. A client that wants
+        // the tree here mounts /srv/warp itself, in its own namespace.
         if (name_eq("warp", name)) {
             out_qid->path = (u64)DEV_KIND_WARP;
             out_qid->type = QTDIR;

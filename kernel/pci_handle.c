@@ -124,7 +124,12 @@ static int find_pci_slot_by_owner(struct KObj_PCI *k) {
 // BAR claim size) and `align` are powers of two; on QEMU virt they are equal
 // (natural BAR alignment). Returns false if the arena is absent (no DTB window)
 // or exhausted. Caller MUST NOT hold g_pci_lock — this takes it.
-static bool pci_bar_alloc(u64 size, u64 *out_pa) {
+// `is64` is load-bearing (round-2 F4): a 32-bit BAR can only be programmed
+// with a 32-bit address, so it must NEVER be placed in the high arena --
+// pci_assign_one_bar writes only the low dword for it, silently truncating
+// a high PA to something the device would decode inside RAM while the
+// kernel's claim sat on the untruncated address.
+static bool pci_bar_alloc(u64 size, bool is64, u64 *out_pa) {
     irq_state_t s = spin_lock_irqsave(&g_pci_lock);
 
     if (!g_pci_bar_inited) {
@@ -152,14 +157,26 @@ static bool pci_bar_alloc(u64 size, u64 *out_pa) {
     // 64-bit BAR still places fine below 4 GiB, so every existing driver
     // keeps its current addresses. Only a BAR that cannot fit the 32-bit
     // window at all is routed high.
-    bool fits32 = g_pci_bar_inited && size <= (g_pci_bar_end - g_pci_bar_base);
+    // Prefer the 32-bit arena while it can still SERVE the request (round-2
+    // F11: the old test compared against the window's total span, so once
+    // the arena was exhausted every later BAR failed there instead of
+    // falling through to the 512 GiB one). A 64-bit-capable BAR may then
+    // fall high; a 32-bit BAR may not, and fails honestly as it did before
+    // the arena existed.
+    u64 avail32 = 0;
+    if (g_pci_bar_inited) {
+        u64 a32 = (g_pci_bar_next + (size - 1)) & ~(size - 1);
+        if (a32 >= g_pci_bar_base && a32 + size >= a32 && a32 + size <= g_pci_bar_end)
+            avail32 = 1;
+    }
+    bool fits32 = avail32 != 0;
+    if (!fits32 && (!is64 || !g_pci_bar64_inited)) {
+        spin_unlock_irqrestore(&g_pci_lock, s);   // no arena may hold it
+        return false;
+    }
     u64 *next   = fits32 ? &g_pci_bar_next : &g_pci_bar64_next;
     u64 lo      = fits32 ? g_pci_bar_base  : g_pci_bar64_base;
     u64 hi      = fits32 ? g_pci_bar_end   : g_pci_bar64_end;
-    if (!fits32 && !g_pci_bar64_inited) {
-        spin_unlock_irqrestore(&g_pci_lock, s);   // no arena can hold it
-        return false;
-    }
 
     // Align up to `size` (a power of two >= PAGE_SIZE); bounds + overflow.
     u64 a = (*next + (size - 1)) & ~(size - 1);
@@ -248,7 +265,7 @@ static int pci_assign_one_bar(struct KObj_PCI *k, struct virtio_pci_dev *d,
     u64 claim_size = bar_claim_size(size);
 
     u64 pa = 0;
-    if (!pci_bar_alloc(claim_size, &pa)) return -1;   // window exhausted / no DTB
+    if (!pci_bar_alloc(claim_size, is64, &pa)) return -1;  // exhausted / unplaceable
 
     // Program the BAR with the assigned PA. The PA is claim_size-aligned (>=
     // page), so its low attribute bits are 0; the device's read-only attribute
@@ -380,7 +397,7 @@ int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
 // cannot reach them, and a still-mastering device would DMA into pages the
 // exit path has already returned to the buddy.
 bool kobj_pci_quiesce(struct KObj_PCI *k) {
-    if (!k || !k->vpd) return false;
+    if (!k || k->magic != KOBJ_PCI_MAGIC || !k->vpd) return false;
     u16 cmd = virtio_pci_cfg_read16(k->vpd, PCI_CFG_COMMAND);
     if (!(cmd & (PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER))) return false;
     cmd &= ~(u16)(PCI_CMD_MEM_SPACE | PCI_CMD_BUS_MASTER);

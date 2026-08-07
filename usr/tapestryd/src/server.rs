@@ -609,6 +609,10 @@ pub struct Comp {
     /// Warp-2c: the GPU-seam context slots + the monotonic public-id
     /// sequences (the pane discipline -- tree names are never reused).
     warp_ctxs: [Option<WarpCtx>; MAX_WARP_CTXS],
+    /// A slot retired while its device context may still hold live work
+    /// (round-2 F8): never re-minted, because dev_ctx is derived from the
+    /// slot index and reuse would alias a stale stream onto a new client.
+    warp_ctx_slot_poisoned: [bool; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
 }
@@ -634,6 +638,12 @@ struct WarpCtx {
     /// driver's bound): the device may still be writing its backings, so
     /// every later retire under this ctx LEAKS rather than frees.
     fence_poisoned: bool,
+    /// Bytes of backing this ctx LEAKED (retired under a poisoned fence,
+    /// so the device may still DMA them). Round-2 F3: the leak used to
+    /// free the `bos[]` slot, which re-armed WARP_CTX_BACKING_MAX every
+    /// iteration -- a client could leak 64 MiB per cycle without bound.
+    /// Leaked bytes keep counting against the cap for the ctx's life.
+    leaked_bytes: u64,
     /// Destroy was requested while fences were still in flight (audit
     /// F5): the ctx is hidden from every client resolve immediately and
     /// the serve-loop pump finishes the retire once quiesced. The old
@@ -694,6 +704,7 @@ impl Comp {
             #[cfg(feature = "test-mode")]
             test_mode: false,
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
+            warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
         }
@@ -2484,7 +2495,8 @@ impl Comp {
         {
             return None; // one ctx per client
         }
-        let slot = self.warp_ctxs.iter().position(|c| c.is_none())?;
+        let slot = (0..MAX_WARP_CTXS)
+            .find(|&i| self.warp_ctxs[i].is_none() && !self.warp_ctx_slot_poisoned[i])?;
         let dev_ctx = (slot as u32) + 1;
         if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
             return None;
@@ -2501,6 +2513,7 @@ impl Comp {
             fence_signaled: 0,
             fence_reported: 0,
             fence_poisoned: false,
+            leaked_bytes: 0,
             retiring: false,
             bos: [WARP_NO_BO; MAX_WARP_BOS_PER_CTX],
         });
@@ -2563,15 +2576,30 @@ impl Comp {
         // Two gates: the declared geometry must plausibly need this many
         // bytes (a 1x1 texture cannot ask for 64 MiB), and the ctx's
         // total live backing is capped.
+        // Clamp against the ctx cap FIRST (round-2 F1 [P0]): every value
+        // below is client-chosen, the release profile sets
+        // overflow-checks = true + panic = "abort", and this Proc IS the
+        // console -- so an unchecked add here is a remote kill, not a
+        // wrong answer. Bounding `size` before the arithmetic means the
+        // geometry math can never see a hostile magnitude, and every
+        // step is checked anyway (belt AND braces: the round-1 version
+        // checked only the multiplications and panicked on `v + v/2`).
+        if size > WARP_CTX_BACKING_MAX {
+            return false;
+        }
         let px = (w as u64)
             .checked_mul(h.max(1) as u64)
             .and_then(|v| v.checked_mul(d.max(1) as u64))
             .and_then(|v| v.checked_mul(array.max(1) as u64));
-        let geom_max = match px.and_then(|v| v.checked_mul(WARP_BO_MAX_BPP)) {
-            // Mip chains + alignment ride above the base level, so the
-            // slack is generous; the point is only to refuse the absurd.
-            Some(v) => (v + v / 2 + PAGE).max(PAGE),
-            None => return false,
+        // Mip chains + alignment ride above the base level, so the slack
+        // is generous; the point is only to refuse the absurd.
+        let geom_max = match px
+            .and_then(|v| v.checked_mul(WARP_BO_MAX_BPP))
+            .and_then(|v| v.checked_add(v / 2))
+            .and_then(|v| v.checked_add(PAGE))
+        {
+            Some(v) => v.max(PAGE),
+            None => WARP_CTX_BACKING_MAX, // geometry alone is unbounded; the cap rules
         };
         if size > geom_max {
             return false;
@@ -2580,8 +2608,11 @@ impl Comp {
             Some(c) => c,
             None => return false,
         };
-        let live: u64 = c.bos.iter().flatten().map(|b| b.size).sum();
-        if live + size > WARP_CTX_BACKING_MAX {
+        // Saturating, not `+` (round-2 F1's second witness): `live` sums
+        // client-chosen sizes and the sum itself must never panic.
+        let live: u64 = c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+        let leaked = c.leaked_bytes;
+        if live.saturating_add(leaked).saturating_add(size) > WARP_CTX_BACKING_MAX {
             return false;
         }
         let dev_ctx = c.dev_ctx;
@@ -2706,7 +2737,9 @@ impl Comp {
     /// own refs -- UNLESS `leak`: a deadlined drain means an undrained
     /// fence may still DMA these pages, so the wedge posture pins them for
     /// the Proc's life (handle + mapping kept: leak-on-wedge, never UAF).
-    fn wbo_retire(gpu: &mut Gpu, dev_ctx: u32, b: &mut WarpBo, leak: bool) {
+    /// Returns the byte count LEAKED (0 when the backing was freed) so the
+    /// caller can keep charging it against the ctx cap (round-2 F3).
+    fn wbo_retire(gpu: &mut Gpu, dev_ctx: u32, b: &mut WarpBo, leak: bool) -> u64 {
         if let Some(id) = b.share_id.take() {
             let _ = unsafe { t_weft_unshare(id) };
         }
@@ -2714,14 +2747,18 @@ impl Comp {
             let _ = gpu.detach_backing(b.res_id);
             let _ = gpu.ctx_detach_resource(dev_ctx, b.res_id);
             let _ = gpu.resource_unref(b.res_id);
-            if leak {
-                say!("tapestryd: warp bo res {} LEAKED (fence wedge)", b.res_id);
-            } else {
-                unsafe { t_burrow_detach(b.va, b.size) };
-                unsafe { t_close(b.dma_fd) };
-            }
             b.dma_fd = -1;
+            if leak {
+                say!(
+                    "tapestryd: warp bo res {} LEAKED {} bytes (fence wedge)",
+                    b.res_id, b.size
+                );
+                return b.size;
+            }
+            unsafe { t_burrow_detach(b.va, b.size) };
+            unsafe { t_close(b.dma_fd) };
         }
+        0
     }
 
     /// Finish a ctx retire that is (or must be treated as) quiesced:
@@ -2732,6 +2769,21 @@ impl Comp {
         if let Some(mut c) = self.warp_ctxs[slot].take() {
             for b in c.bos.iter_mut().flatten() {
                 Self::wbo_retire(&mut self.gpu, c.dev_ctx, b, leak);
+            }
+            if leak {
+                // Round-2 F8: `leak` means "the device may still be
+                // executing this ctx's stream". Freeing the slot would
+                // hand its dev_ctx id to the NEXT client (dev_ctx =
+                // slot+1), so a stale stream could execute against a
+                // different client's context -- the I-45 breach F6
+                // already closed one level down for fenced SLOTS and
+                // that reasoning was not carried up to ctx slots.
+                // Retire the slot instead, and do NOT destroy a context
+                // with live work (that is what makes the host's
+                // behaviour undefined in the first place).
+                self.warp_ctx_slot_poisoned[slot] = true;
+                say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
+                return;
             }
             let _ = self.gpu.ctx_destroy(c.dev_ctx);
         }
@@ -2783,7 +2835,10 @@ impl Comp {
                     continue;
                 }
                 let mut b = self.warp_ctxs[i].as_mut().unwrap().bos[j].take().unwrap();
-                Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                if let Some(c) = self.warp_ctxs[i].as_mut() {
+                    c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
+                }
             }
         }
     }
@@ -2811,7 +2866,10 @@ impl Comp {
             }
             if quiesced {
                 let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j].take().unwrap();
-                Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                if let Some(c) = self.warp_ctxs[slot].as_mut() {
+                    c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
+                }
             } else {
                 self.warp_ctxs[slot].as_mut().unwrap().bos[j]
                     .as_mut()
@@ -2835,8 +2893,12 @@ impl Comp {
         }
     }
 
+    /// RESOLVABLE contexts -- retiring ones are excluded (round-2 F10).
+    /// The `ctl` line and the arc's own gate assert on this, and a
+    /// retiring ctx is addressable by nobody, so counting it made a
+    /// correct system report a stale number (and the gate FAIL).
     fn warp_live_ctxs(&self) -> usize {
-        self.warp_ctxs.iter().flatten().count()
+        self.warp_ctxs.iter().flatten().filter(|c| !c.retiring).count()
     }
 
     // --- Warp-2d: the fenced lane at the seam -----------------------------
@@ -3623,6 +3685,11 @@ impl Conn {
                         return p9::build_rread(&mut self.out_buf, tag, &[]);
                     }
                     let c = comp.wctx(id, self.conn_id).unwrap();
+                    if c.fence_poisoned && c.fence_signaled <= c.fence_reported {
+                        // Stream over: a fence of this ctx was abandoned
+                        // and can never signal (round-2 F7).
+                        return p9::build_rread(&mut self.out_buf, tag, &[]);
+                    }
                     if c.fence_signaled > c.fence_reported {
                         let v = c.fence_signaled;
                         comp.wctx_mut(id, self.conn_id).unwrap().fence_reported = v;
@@ -4822,6 +4889,11 @@ impl Conn {
             let pf = self.pending_fences[i];
             let rec = match comp.wctx(pf.ctx_pub, self.conn_id) {
                 None => None, // the ctx died with this read parked: EOF
+                // A poisoned ctx has a fence that will NEVER signal
+                // (abandoned, not completed). Reporting nothing forever
+                // stranded the reader with neither record nor EOF
+                // (round-2 F7) -- end the stream so the client learns.
+                Some(c) if c.fence_poisoned && c.fence_signaled <= c.fence_reported => None,
                 Some(c) if c.fence_signaled > c.fence_reported => Some(c.fence_signaled),
                 Some(_) => {
                     i += 1;

@@ -23,11 +23,15 @@ Two doors, one tree:
   → a fresh `Conn` in tapestryd → its own identity. Conn death retires
   everything the conn minted. Clients (the prover, the Warp-3 winsys) use
   this.
-- **`/dev/warp`** — the namespace mount (joey mounts `/srv/warp` at boot;
-  soft-missing on GPU-less environments). It rides the kernel's single
-  shared srvconn, so every Proc using the mount aliases to ONE conn —
-  fine for introspection (`cat /dev/warp/ctl`, the joey boot probe), wrong
-  for clients. Do not build clients on the mount.
+- **`/dev/warp`** — a per-client mount POINT only. joey deliberately does
+  NOT mount it (round-1 audit F1): a shared mount is ONE server-side
+  connection, and since `owner_conn` gates every resolve, a global mount
+  would have let any Proc drive any other's rendering context, read its
+  buffers back, or destroy them — and left every later Proc unable to get
+  a context at all. A client that wants the tree in its namespace mounts
+  `/srv/warp` there itself, which is what makes "per-Proc by
+  construction" true. joey's boot probe reads `ctl` over its own
+  short-lived connection and closes it, holding no standing warp conn.
 
 ## The tree
 
@@ -139,16 +143,38 @@ reset, conn teardown, Tflush. A dead ctx EOFs the stream. The serve loop
 timeout to 1 ms while fenced chains are in flight (the GPU IRQ is not
 pollable; `irq.wait` exists only inside a sync submit).
 
-**Teardown drains first**: every retire path (`wctx_retire`, `wbo_destroy`,
-via `warp_retire_conn`) runs `warp_drain_ctx_fences` (2 s bound,
-`t_yield`-paced). A deadlined drain **LEAKS the BO backing** — handle +
-mapping pinned for the Proc's life — rather than freeing pages an undrained
-fence may still DMA: leak-on-wedge, never UAF. The drain never latches
-`dead` (the #31 false-latch lesson; the sync path carries its own honest
-deadline). The retire order inside `wbo_retire` is R2-F5: weft_unshare
-FIRST (a racing Tweft claim fails closed), then device detach
-(DETACH_BACKING + CTX_DETACH + RESOURCE_UNREF), then — unless leaking —
-unmap + close (the client's own mapping survives via the #847 dual count).
+**Teardown is DEFERRED, never blocking.** (Round-1 F5 replaced a 2 s
+in-dispatch drain a client could multiply into minutes of frozen console.)
+A retire of a quiesced ctx/BO completes immediately; otherwise the object
+is marked `retiring` — instantly unresolvable to every client, and
+excluded from `ctl`'s `ctxs` count and both readdir ladders — and
+`warp_pump_retires` (run per serve-loop pass from `warp_service_fences`)
+finishes it when the last fence lands.
+
+Termination is the driver's. A fenced slot unretired for
+`FENCE_ABANDON_MS` (30 s) is **abandoned**: released from the pool, its
+descriptor pair poisoned (re-usable only once the device proves it is
+done by retiring the chain late), and its owning ctx marked
+`fence_poisoned`. A dead engine abandons every occupied slot at once.
+Either way `fences_in_flight` always reaches 0, so no object can be
+stranded in `retiring` (round-2 F5 — the first version of this argument
+was false, because the abandonment sat behind the engine-dead
+early-return).
+
+A poisoned ctx **leaks** rather than frees: handle + mapping stay pinned
+for the Proc's life, because an abandoned chain may still DMA the
+backing. Leak-on-wedge, never UAF. Three consequences the code enforces:
+leaked bytes keep counting against `WARP_CTX_BACKING_MAX` (round-2 F3 —
+releasing the accounting let a client leak without bound, one cap's
+worth per cycle); a ctx **slot** retired while poisoned is itself
+poisoned, so its `dev_ctx` id is never re-minted for a different client
+(round-2 F8); and a parked fence read on that ctx gets EOF, since the
+fence it waits on can never signal (round-2 F7).
+
+The retire order inside `wbo_retire` is R2-F5: weft_unshare FIRST (a
+racing Tweft claim fails closed), then device detach (DETACH_BACKING +
+CTX_DETACH + RESOURCE_UNREF), then — unless leaking — unmap + close (the
+client's own mapping survives via the #847 dual count).
 
 ## The gate prover (Warp-2e)
 
@@ -169,8 +195,10 @@ the GL host by `tools/warp-host.sh prove` → `tools/warp/warp-prove.exp`.
 |---|---|
 | any warp file on a 2D device (`virgl 0`) needing the device | `E_OPNOTSUPP` |
 | ctx/BO resolve not owned by this conn, or dead | `E_NOENT` |
-| second ctx mint on one conn; slot/BO exhaustion | `E_IO` (mint returns none) |
-| submit/transfer with the fenced lane full | `E_AGAIN` (retry) |
+| second ctx mint on one conn; ctx-slot/BO exhaustion | `E_NOMEM` |
+| `create3d` refused (size, implausible geometry, ctx backing cap) | `E_IO` |
+| submit/transfer, fenced lane momentarily full | `E_AGAIN` (retry) |
+| fenced lane permanently exhausted (every slot poisoned) | `E_IO` (do NOT retry) |
 | submit stream larger than a slot | `E_INVAL` |
 | engine dead (latched) | `E_IO` |
 | fence read with `count` < one record (21 bytes) | empty read (never parks unfillable) |
@@ -178,9 +206,16 @@ the GL host by `tools/warp-host.sh prove` → `tools/warp/warp-prove.exp`.
 
 ## Known caveats / footguns
 
-- **#170 (tracked)**: death-with-in-flight-fences — proc-exit frees DMA
-  pages a wedged fence may still write; the sync-only world never had the
-  window. Kernel-side PCI quiesce-at-release is the queued fix.
+- **#170**: the graceful half is closed — `kobj_pci_quiesce` runs from
+  `proc_quiesce_owned_devices`, so a PCI-transport driver stops decoding
+  and mastering before the exit path frees its DMA pages (round-1 F8: the
+  sweep knew only virtio-MMIO, and a BAR-decoded device is invisible to
+  it). The task stays open for the residual ordering in the fallback
+  `proc_free` path.
+- **Client-visible limits**: 8 contexts total, one per connection, 16 BOs
+  each, 64 MiB live+leaked backing per context, 4 concurrent `/srv/warp`
+  connections (a 5th blocks until one frees), 4 fenced chains in flight
+  process-wide.
 - One Twrite = one submission: the effective stream bound is the 9P iounit
   (msize 32 KiB − overhead), not the 64 KiB slot. The Loom-carried bulk
   path (§4.1) lifts this at Warp-3 if the winsys needs it.

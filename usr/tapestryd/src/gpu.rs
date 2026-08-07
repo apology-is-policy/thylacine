@@ -446,6 +446,12 @@ impl Controlq {
         (0..FENCED_SLOTS).find(|&i| self.fslots[i].is_none() && !self.fslot_poisoned[i])
     }
 
+    /// Every slot poisoned and none in flight: nothing will ever free one,
+    /// so a client must be told to STOP retrying (round-2 F6).
+    fn lane_exhausted(&self) -> bool {
+        (0..FENCED_SLOTS).all(|i| self.fslot_poisoned[i] && self.fslots[i].is_none())
+    }
+
     /// Reclaim slots whose chains never retired (audit F6). Bounds the
     /// spin + the slot pool WITHOUT latching `dead` (a slow device is not
     /// a dead one -- the #31 rule) and WITHOUT freeing anything the device
@@ -549,6 +555,13 @@ impl Controlq {
                     // stays out of the pool (its response buffer is no
                     // longer trusted to belong to any live chain).
                     if slot < FENCED_SLOTS && self.fslot_poisoned[slot] {
+                        // The device just PROVED it is finished with this
+                        // descriptor pair and response buffer, so the slot
+                        // is safe to reuse -- return it to the pool
+                        // (round-2 F6: leaving it poisoned meant four
+                        // slow fences permanently killed the lane for
+                        // every client, reported as a retryable E_AGAIN).
+                        self.fslot_poisoned[slot] = false;
                         continue;
                     }
                     say!(
@@ -581,12 +594,42 @@ impl Controlq {
     /// dispatch). The ISR read is level hygiene: nobody irq.waits between
     /// dispatches, so the assert would otherwise sit latched.
     fn poll_completions(&mut self) {
-        if self.dead || self.fenced_in_flight() == 0 {
+        if self.fenced_in_flight() == 0 {
+            return;
+        }
+        if self.dead {
+            // A dead engine will never retire anything, so the slots it
+            // still holds must be released as ABANDONED right now
+            // (round-2 F5): otherwise every ctx that owned one keeps a
+            // nonzero fence count forever and the deferred-retire pump
+            // strands its handles, mappings and pages for the process
+            // lifetime. Abandoned (not completed) is the honest tag --
+            // the device may still be mid-DMA, so the backings leak.
+            self.abandon_all("engine dead");
             return;
         }
         let _ = unsafe { r8(self.isr_va) };
         let _ = self.drain();
         self.reap_abandoned();
+    }
+
+    /// Release every occupied fenced slot as abandoned (poisoning both the
+    /// slot and, via the tag, its owning ctx).
+    fn abandon_all(&mut self, why: &str) {
+        for i in 0..FENCED_SLOTS {
+            let mut tag = match self.fslots[i].take() {
+                Some(t) => t,
+                None => continue,
+            };
+            self.fslot_since[i] = None;
+            self.fslot_poisoned[i] = true;
+            tag.abandoned = true;
+            say!(
+                "tapestryd: gpu fence {} released ({}) -- slot {} retired, ctx {} poisoned",
+                tag.fence_id, why, i, tag.ctx_pub
+            );
+            self.completed.push(tag);
+        }
     }
 
     /// Publish a fenced chain on slot `slot` (request already staged in
@@ -1338,7 +1381,15 @@ impl Gpu {
         if (GPU_CTRL_HDR_LEN as u64) + extra > FREQ_LEN {
             return Err(FencedErr::TooBig);
         }
-        self.ctrl.alloc_fenced_slot().ok_or(FencedErr::Again)
+        if let Some(s) = self.ctrl.alloc_fenced_slot() {
+            return Ok(s);
+        }
+        // Full-but-recoverable retries; permanently exhausted does not.
+        if self.ctrl.lane_exhausted() {
+            Err(FencedErr::Dead)
+        } else {
+            Err(FencedErr::Again)
+        }
     }
 
     fn fenced_commit(

@@ -495,21 +495,32 @@ impl Driver for Tapestryd {
             // the compositor's own door. Both listeners are still polled
             // together so `conn_base` stays 2 whenever either is armed;
             // each accept re-tests its own budget below.
+            // ARM ONLY WHAT WE WILL ACCEPT FROM (round-2 F2 [P1]): a
+            // pending connection keeps its listener permanently readable
+            // (devsrv's backlog -> POLLIN), and t_poll returns instantly
+            // when any fd is ready. Polling a listener whose accept the
+            // budget will decline therefore spins the serve loop at 100%
+            // -- in the console renderer, bypassing the whole idle
+            // throttle. Each listener is armed iff its own accept can run.
             let warp_conns = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
-            let has_room = conns.len() < MAX_CONNS;
+            let arm_tapestry = conns.len() < MAX_CONNS;
+            let arm_warp = arm_tapestry && warp_conns < MAX_WARP_CONNS;
             let mut pollfds: Vec<TPollFd> = Vec::new();
-            if has_room {
+            if arm_tapestry {
                 pollfds.push(TPollFd {
                     fd: listener as i32,
                     events: T_POLLIN,
                     revents: 0,
                 });
+            }
+            if arm_warp {
                 pollfds.push(TPollFd {
                     fd: warp_listener as i32,
                     events: T_POLLIN,
                     revents: 0,
                 });
             }
+            let conn_base = pollfds.len();
             for c in &conns {
                 pollfds.push(TPollFd {
                     fd: c.raw_fd() as i32,
@@ -538,22 +549,23 @@ impl Driver for Tapestryd {
             }
 
             // (5) Accept (one per listener per pass).
-            // The cap is re-tested per accept (audit F9): one `has_room`
-            // computed before both arms let a pass at len == MAX-1 push
-            // two and overshoot.
-            let conn_base = if has_room { 2 } else { 0 };
-            if has_room && pollfds[0].revents & T_POLLIN != 0 && conns.len() < MAX_CONNS {
-                let h = unsafe { t_srv_accept(listener) };
-                if h >= 0 {
-                    let id = self.comp.next_conn_id();
-                    conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+            // Accept from each ARMED listener. The arming above already
+            // encodes both budgets, and `conn_base` is derived from how
+            // many were pushed -- never a hardcoded 2 (round-2 F2). The
+            // tapestry accept runs first and may fill the last slot, so
+            // the warp arm re-tests (round-1 F9's overshoot guard, kept).
+            let mut idx = 0usize;
+            if arm_tapestry {
+                if pollfds[idx].revents & T_POLLIN != 0 {
+                    let h = unsafe { t_srv_accept(listener) };
+                    if h >= 0 {
+                        let id = self.comp.next_conn_id();
+                        conns.push(Conn::new(h, id, ROOT_TAPESTRY));
+                    }
                 }
+                idx += 1;
             }
-            if has_room
-                && pollfds[1].revents & T_POLLIN != 0
-                && conns.len() < MAX_CONNS
-                && warp_conns < MAX_WARP_CONNS
-            {
+            if arm_warp && pollfds[idx].revents & T_POLLIN != 0 && conns.len() < MAX_CONNS {
                 let h = unsafe { t_srv_accept(warp_listener) };
                 if h >= 0 {
                     let id = self.comp.next_conn_id();
