@@ -1532,6 +1532,14 @@ impl Gpu {
         core::mem::take(&mut self.ctrl.vindicated)
     }
 
+    /// Does this ctx still own a POISONED slot? A vindication is only
+    /// honest once the answer is no (round-4 F1: one ctx may abandon
+    /// several chains, and one late retire proves nothing about the rest).
+    pub fn ctx_has_poisoned_slot(&self, ctx_pub: u32) -> bool {
+        (0..FENCED_SLOTS)
+            .any(|i| self.ctrl.fslot_poisoned[i] && self.ctrl.fslot_poison_ctx[i] == ctx_pub)
+    }
+
     pub fn fenced_in_flight(&self) -> u32 {
         self.ctrl.fenced_in_flight()
     }

@@ -2178,8 +2178,13 @@ impl Comp {
     pub fn ptr_move_rel(&mut self, dx: i32, dy: i32, mods: u16) {
         self.ptr_rel_emit(dx, dy, mods);
         let (dw, dh) = (self.gpu.width as i32, self.gpu.height as i32);
-        let px = (self.ptr_x as i32 + dx).clamp(0, dw.max(1) - 1) as u32;
-        let py = (self.ptr_y as i32 + dy).clamp(0, dh.max(1) - 1) as u32;
+        // Saturating (round-4 F2): `dx`/`dy` arrive from the device via a
+        // saturating accumulator, so their ceiling IS i32::MAX -- a plain
+        // `+` here overflows for any ptr_x >= 1 and, under
+        // overflow-checks + panic=abort, kills the console. Round 3's
+        // commit message claimed this line was fixed; it was not.
+        let px = (self.ptr_x as i32).saturating_add(dx).clamp(0, dw.max(1) - 1) as u32;
+        let py = (self.ptr_y as i32).saturating_add(dy).clamp(0, dh.max(1) - 1) as u32;
         self.ptr_commit(px, py, mods);
     }
 
@@ -2952,6 +2957,16 @@ impl Comp {
         // this, one client could burn all 8 ctx slots in ~62 s and kill
         // the seam for the whole box permanently (round-3 F2).
         for v in self.gpu.take_vindications() {
+            // ONE retired chain is not proof for a ctx that abandoned
+            // SEVERAL (round-4 F1): a ctx can hold every fenced slot, and
+            // clearing its poison while siblings still execute would let
+            // the next destroy FREE pages the device is still writing
+            // (the UAF this posture exists to prevent) and recycle a
+            // dev_ctx whose stream is live (the I-45 breach). Wait until
+            // the driver holds no poisoned slot for this ctx at all.
+            if self.gpu.ctx_has_poisoned_slot(v.ctx_pub) {
+                continue;
+            }
             for c in self.warp_ctxs.iter_mut().flatten() {
                 if c.pub_id == v.ctx_pub {
                     c.fence_poisoned = false;
@@ -2959,6 +2974,13 @@ impl Comp {
                 }
             }
             if let Some(slot) = self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
+                // The leak arm skipped CTX_DESTROY (a context with live
+                // work must not be destroyed). Now that the device is
+                // provably finished, destroy it BEFORE the slot -- and
+                // with it dev_ctx = slot+1 -- returns to the pool, or the
+                // next client's CTX_CREATE would collide with a host
+                // context that still exists (round-4 F3).
+                let _ = self.gpu.ctx_destroy((slot as u32) + 1);
                 self.warp_ctx_slot_poisoned[slot] = false;
                 self.warp_ctx_vindicate[slot] = 0;
                 say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);

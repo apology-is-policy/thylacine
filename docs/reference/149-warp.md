@@ -36,7 +36,7 @@ Two doors, one tree:
 ## The tree
 
 ```
-ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\nctxs <live>\n"
+ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\nctxs <live>\npoisoned <n>\n"
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
   new                        # open+read mints a ctx -> "<pub_id>\n" (ONE per conn; I-45)
@@ -167,7 +167,11 @@ backing. Leak-on-wedge, never UAF. Three consequences the code enforces:
 leaked bytes keep counting against `WARP_CTX_BACKING_MAX` (round-2 F3 —
 releasing the accounting let a client leak without bound, one cap's
 worth per cycle); a ctx **slot** retired while poisoned is itself
-poisoned, so its `dev_ctx` id is never re-minted for a different client
+poisoned, so its `dev_ctx` id is not re-minted while the device may
+still execute that context's stream -- the slot returns to the pool only
+once the driver holds NO poisoned slot for that ctx and the quiesced
+device context has been destroyed (round-4 F1/F3); `ctl`'s `poisoned`
+count reports how many slots are held back
 (round-2 F8); and a parked fence read on that ctx gets EOF, since the
 fence it waits on can never signal (round-2 F7).
 
