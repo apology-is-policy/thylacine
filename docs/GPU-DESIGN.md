@@ -649,7 +649,7 @@ scope shifts with them.
 | Chunk | Scope | Gate |
 |---|---|---|
 | **Warp-0** | this document + signoff | scripture commit |
-| **Warp-1** | the host substrate (F1): CI leg, QEMU/crosvm plumbing, `virtio-gpu-gl` reachable, capset probe from tapestryd | `GET_CAPSET_INFO`/`GET_CAPSET` returns a `virgl_caps` blob in-guest |
+| **Warp-1** | the host substrate (F1): CI leg, QEMU/crosvm plumbing, `virtio-gpu-gl` reachable, capset probe from tapestryd — **LANDED @`db050b21`** (gate met on thyla-gl: the 1384-byte VIRGL2 blob in-guest, `docs/phase7-status.md` row; llvmpipe baseline = the honest 2.4–5.9 fps band, #168 open) | `GET_CAPSET_INFO`/`GET_CAPSET` returns a `virgl_caps` blob in-guest |
 | **Warp-2** | the seam: the `/dev/warp` tree, contexts, the GPU-BO subtype (§6.1) + its kernel gate, `SUBMIT_3D` routing, fence CQEs; **fix `BarTooLarge`** | contexts create/destroy; a hand-built command stream round-trips |
 | **Warp-3** | `virgl_thylacine_winsys` (18 slots) + the client library; unmodified Mesa virgl driver | a triangle, in-guest, on the GPU |
 | **Warp-4** | present integration: `SET_SCANOUT` of a 3D resource (Direct), readback fallback (Composed) | **GLQuake on virgl**, measured against the 192.8 fps llvmpipe anchor |
