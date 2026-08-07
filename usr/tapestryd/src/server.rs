@@ -84,8 +84,9 @@ use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
     t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_srv_peer,
-    t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM, T_PROT_READ,
-    T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE, T_SRV_PEER_FLAG_CONSOLE_RENDERER,
+    t_weft_share, t_weft_unshare, t_yield, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM,
+    T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
+    T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
 
 /// Present-pressure window for the idle throttle (#164): two adjacent
@@ -101,7 +102,7 @@ const PRESENT_BURST_WINDOW_MS: u64 = 250;
 const PRESENT_BURST_MIN: u32 = 4;
 
 use crate::chords::{ChordAction, Chords};
-use crate::gpu::Gpu;
+use crate::gpu::{FencedErr, Gpu};
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
 pub const MAX_CONNS: usize = 8;
@@ -599,6 +600,12 @@ struct WarpCtx {
     /// F_CONTEXT_INIT / per-ring fencing are negotiated (Venus).
     capset: u32,
     rings: u32,
+    /// Fenced-lane bookkeeping (W2d): chains submitted-not-retired for
+    /// this ctx; the newest retired fence id; the newest id the fence
+    /// file has reported. signaled > reported = one unread record.
+    fences_in_flight: u32,
+    fence_signaled: u64,
+    fence_reported: u64,
     bos: [Option<WarpBo>; MAX_WARP_BOS_PER_CTX],
 }
 
@@ -2369,6 +2376,20 @@ struct PendingRead {
     cap: usize,
 }
 
+/// A parked fence-file read (W2d): delivered by poll_fences when its ctx
+/// posts a newer signaled id (or EOFs when the ctx dies). No cap field --
+/// the park guard already required room for a whole record.
+#[derive(Clone, Copy)]
+struct PendingFence {
+    fid: u32,
+    ctx_pub: u32,
+    tag: u16,
+}
+
+/// The largest fence record ("<u64 max>\n" = 21 bytes): the park guard's
+/// floor, like FK_EVENT's TEVENT_LEN.
+const FENCE_REC_MAX: usize = 21;
+
 const WARP_NO_CTX: Option<WarpCtx> = None;
 const WARP_NO_BO: Option<WarpBo> = None;
 
@@ -2433,6 +2454,9 @@ impl Comp {
             dev_ctx,
             capset: 0,
             rings: 1,
+            fences_in_flight: 0,
+            fence_signaled: 0,
+            fence_reported: 0,
             bos: [WARP_NO_BO; MAX_WARP_BOS_PER_CTX],
         });
         Some(pub_id)
@@ -2587,11 +2611,14 @@ impl Comp {
     /// share BEFORE any backing free (a Tweft claim racing the retire fails
     /// closed; an already-claimed share is a harmless miss and the CLIENT's
     /// mapping stays alive via the #847 dual count until its own teardown /
-    /// the reaper); (2) device detach (all commands synchronous at Warp-2c,
-    /// so the in-flight set is empty by construction); (3) release the
-    /// server's own refs (the pages free when the client's mapping ref also
-    /// drops).
-    fn wbo_retire(gpu: &mut Gpu, dev_ctx: u32, b: &mut WarpBo) {
+    /// the reaper); (2) device detach, under the drained-or-leaking
+    /// precondition every caller establishes (W2d: each retire path drains
+    /// the ctx's fences first, restoring the empty-in-flight state the
+    /// Warp-2c synchrony gave by construction); (3) release the server's
+    /// own refs -- UNLESS `leak`: a deadlined drain means an undrained
+    /// fence may still DMA these pages, so the wedge posture pins them for
+    /// the Proc's life (handle + mapping kept: leak-on-wedge, never UAF).
+    fn wbo_retire(gpu: &mut Gpu, dev_ctx: u32, b: &mut WarpBo, leak: bool) {
         if let Some(id) = b.share_id.take() {
             let _ = unsafe { t_weft_unshare(id) };
         }
@@ -2599,26 +2626,44 @@ impl Comp {
             let _ = gpu.detach_backing(b.res_id);
             let _ = gpu.ctx_detach_resource(dev_ctx, b.res_id);
             let _ = gpu.resource_unref(b.res_id);
-            unsafe { t_burrow_detach(b.va, b.size) };
-            unsafe { t_close(b.dma_fd) };
+            if leak {
+                say!("tapestryd: warp bo res {} LEAKED (fence wedge)", b.res_id);
+            } else {
+                unsafe { t_burrow_detach(b.va, b.size) };
+                unsafe { t_close(b.dma_fd) };
+            }
             b.dma_fd = -1;
         }
     }
 
-    /// Retire one ctx: every BO first, then CTX_DESTROY (synchronous, so
-    /// the device-side ctx is quiesced when the slot -- and with it the
-    /// dev_ctx id -- becomes reusable).
+    /// Retire one ctx: drain its fences (W2d), every BO, then CTX_DESTROY
+    /// (synchronous, so the device-side ctx is quiesced when the slot --
+    /// and with it the dev_ctx id -- becomes reusable; on the wedge/leak
+    /// path the destroy is attempted anyway and fails fast if the engine
+    /// latched dead).
     fn wctx_retire(&mut self, slot: usize) {
+        let ctx_pub = match &self.warp_ctxs[slot] {
+            Some(c) => c.pub_id,
+            None => return,
+        };
+        let drained = self.warp_drain_ctx_fences(ctx_pub);
         if let Some(mut c) = self.warp_ctxs[slot].take() {
             for b in c.bos.iter_mut().flatten() {
-                Self::wbo_retire(&mut self.gpu, c.dev_ctx, b);
+                Self::wbo_retire(&mut self.gpu, c.dev_ctx, b, !drained);
             }
             let _ = self.gpu.ctx_destroy(c.dev_ctx);
         }
     }
 
-    /// Retire a specific owned BO (the bo ctl `destroy` verb).
+    /// Retire a specific owned BO (the bo ctl `destroy` verb). W2d: an
+    /// in-flight fenced chain may reference THIS BO (streams are scoped to
+    /// ctx-attached resources), so the owning ctx drains first.
     fn wbo_destroy(&mut self, bo_pub: u32, conn: u64) -> bool {
+        let ctx_pub = match self.wbo(bo_pub, conn) {
+            Some((c, _)) => c.pub_id,
+            None => return false,
+        };
+        let drained = self.warp_drain_ctx_fences(ctx_pub);
         for i in 0..MAX_WARP_CTXS {
             let (dev_ctx, owner) = match &self.warp_ctxs[i] {
                 Some(c) => (c.dev_ctx, c.owner_conn),
@@ -2631,7 +2676,7 @@ impl Comp {
             for j in 0..MAX_WARP_BOS_PER_CTX {
                 if c.bos[j].as_ref().map_or(false, |b| b.pub_id == bo_pub) {
                     let mut b = c.bos[j].take().unwrap();
-                    Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b);
+                    Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, !drained);
                     return true;
                 }
             }
@@ -2654,6 +2699,127 @@ impl Comp {
     fn warp_live_ctxs(&self) -> usize {
         self.warp_ctxs.iter().flatten().count()
     }
+
+    // --- Warp-2d: the fenced lane at the seam -----------------------------
+
+    /// The per-pass fence pump: drain retired fenced chains off the device
+    /// and post each on its owning ctx (poll_fences delivers them). A tag
+    /// whose ctx is gone is dropped -- every retire path drains first, so
+    /// only the wedge-leak path can orphan one.
+    pub fn warp_service_fences(&mut self) {
+        self.gpu.poll_completions();
+        for tag in self.gpu.take_completions() {
+            for c in self.warp_ctxs.iter_mut().flatten() {
+                if c.pub_id == tag.ctx_pub {
+                    c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
+                    if tag.fence_id > c.fence_signaled {
+                        c.fence_signaled = tag.fence_id;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn warp_fences_pending(&self) -> bool {
+        self.gpu.fenced_in_flight() > 0
+    }
+
+    /// Bounded pre-retire fence drain: an in-flight fenced chain DMAs
+    /// guest pages, so a BO retired under one would free memory the host
+    /// still writes. False = the drain deadlined or the engine is dead --
+    /// the caller LEAKS the backing instead (never UAF). No deadline
+    /// latches `dead` here: a slow fence is not a dead engine (the #31
+    /// false-latch lesson); the sync path carries its own honest deadline.
+    fn warp_drain_ctx_fences(&mut self, ctx_pub: u32) -> bool {
+        const DRAIN_DEADLINE_MS: u64 = 2000;
+        let mut t0: Option<Instant> = None;
+        loop {
+            self.warp_service_fences();
+            let busy = self
+                .warp_ctxs
+                .iter()
+                .flatten()
+                .any(|c| c.pub_id == ctx_pub && c.fences_in_flight > 0);
+            if !busy {
+                return true;
+            }
+            if self.gpu.engine_dead() {
+                return false;
+            }
+            let t = *t0.get_or_insert_with(Instant::now);
+            if t.elapsed().as_millis() as u64 >= DRAIN_DEADLINE_MS {
+                say!(
+                    "tapestryd: warp ctx {} fence drain deadlined; leaking its backings",
+                    ctx_pub
+                );
+                return false;
+            }
+            // The GPU IRQ is waitable only inside a sync submit (the G-5
+            // engine owns it); pace the re-poll cooperatively.
+            let _ = t_yield();
+        }
+    }
+
+    /// SUBMIT_3D from the ctx submit file: one Twrite = one atomic opaque
+    /// submission on the fenced lane. Returns the fence id (the fence
+    /// file's completion record).
+    fn warp_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
+        let dev_ctx = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?.dev_ctx;
+        match self.gpu.submit_3d(dev_ctx, ctx_pub, stream) {
+            Ok(f) => {
+                self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                Ok(f)
+            }
+            Err(e) => Err(map_fenced_err(e)),
+        }
+    }
+
+    /// TRANSFER_TO/FROM_HOST_3D from the bo ctl file (fence-bearing; the
+    /// completion rides the owning ctx's fence file like a submit's).
+    #[allow(clippy::too_many_arguments)]
+    fn warp_transfer(
+        &mut self,
+        bo_pub: u32,
+        conn: u64,
+        to_host: bool,
+        level: u32,
+        x: u32,
+        y: u32,
+        z: u32,
+        w: u32,
+        h: u32,
+        d: u32,
+        offset: u64,
+        stride: u32,
+        layer_stride: u32,
+    ) -> Result<u64, u32> {
+        let (ctx_pub, dev_ctx, res_id, built) = match self.wbo(bo_pub, conn) {
+            Some((c, b)) => (c.pub_id, c.dev_ctx, b.res_id, b.dma_fd >= 0),
+            None => return Err(p9::E_NOENT),
+        };
+        if !built {
+            return Err(p9::E_INVAL);
+        }
+        match self.gpu.transfer_3d(
+            to_host, dev_ctx, ctx_pub, res_id, level, x, y, z, w, h, d, offset, stride,
+            layer_stride,
+        ) {
+            Ok(f) => {
+                self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                Ok(f)
+            }
+            Err(e) => Err(map_fenced_err(e)),
+        }
+    }
+}
+
+fn map_fenced_err(e: FencedErr) -> u32 {
+    match e {
+        FencedErr::Again => E_AGAIN,
+        FencedErr::TooBig => p9::E_INVAL,
+        FencedErr::Dead => E_IO,
+    }
 }
 
 pub struct Conn {
@@ -2671,6 +2837,7 @@ pub struct Conn {
     out_buf: Vec<u8>,
     defer: bool,
     pending_reads: Vec<PendingRead>,
+    pending_fences: Vec<PendingFence>,
 }
 
 const NO_FID: Option<Fid> = None;
@@ -2736,6 +2903,7 @@ impl Conn {
             out_buf: Vec::new(),
             defer: false,
             pending_reads: Vec::new(),
+            pending_fences: Vec::new(),
         }
     }
 
@@ -2777,6 +2945,7 @@ impl Conn {
         }
         // Cancel site 2 (clunk): this fid's held replies die with it.
         self.pending_reads.retain(|pr| pr.fid != fid);
+        self.pending_fences.retain(|pf| pf.fid != fid);
     }
 
     fn drop_all_fids(&mut self, comp: &mut Comp) {
@@ -2786,6 +2955,7 @@ impl Conn {
         comp.warp_retire_conn(self.conn_id);
         self.fids = [NO_FID; MAX_FIDS];
         self.pending_reads.clear();
+        self.pending_fences.clear();
     }
 
     pub fn teardown(&mut self, comp: &mut Comp) {
@@ -2795,6 +2965,7 @@ impl Conn {
         comp.retire_conn(self.conn_id);
         comp.warp_retire_conn(self.conn_id);
         self.pending_reads.clear();
+        self.pending_fences.clear();
     }
 
     pub fn raw_fd(&self) -> i64 {
@@ -3321,9 +3492,36 @@ impl Conn {
                     let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
                     self.read_str(tag, &s, a.offset, cap)
                 }
-                // The fence completion stream arrives with the fenced lane
-                // (Warp-2d); until then the file exists but cannot be read.
-                WFK_FENCE => self.err(tag, p9::E_OPNOTSUPP),
+                // The fence completion stream (W2d): one record per read
+                // -- the newest retired fence id, coalescing (FIFO within
+                // our single ring, so id N retires everything <= N); parks
+                // when nothing is unreported (the FK_EVENT netd leg).
+                // Offset is ignored: a stream, not a file image.
+                WFK_FENCE => {
+                    if cap < FENCE_REC_MAX {
+                        // Too small for a whole record: answer empty rather
+                        // than park a read that could never complete.
+                        return p9::build_rread(&mut self.out_buf, tag, &[]);
+                    }
+                    let c = comp.wctx(id, self.conn_id).unwrap();
+                    if c.fence_signaled > c.fence_reported {
+                        let v = c.fence_signaled;
+                        comp.wctx_mut(id, self.conn_id).unwrap().fence_reported = v;
+                        let mut s = String::new();
+                        let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
+                        return p9::build_rread(&mut self.out_buf, tag, s.as_bytes());
+                    }
+                    if self.pending_fences.len() >= MAX_FIDS {
+                        return self.err(tag, p9::E_PROTO);
+                    }
+                    self.pending_fences.push(PendingFence {
+                        fid: a.fid,
+                        ctx_pub: id,
+                        tag,
+                    });
+                    self.defer = true;
+                    Ok(0)
+                }
                 _ => self.err(tag, p9::E_INVAL),
             };
         }
@@ -3615,8 +3813,20 @@ impl Conn {
                     Ok(()) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
                     Err(e) => self.err(tag, e),
                 },
-                // The opaque command-stream path is the fenced lane (Warp-2d).
-                WFK_SUBMIT => self.err(tag, p9::E_OPNOTSUPP),
+                // One Twrite = one atomic submission (W2d): the opaque
+                // stream (section 2.1 -- unparsed) rides the fenced lane;
+                // the reply means QUEUED, the ctx fence file carries the
+                // completion. Bounded by iounit; the Loom-carried bulk
+                // path is the section 4.1 follow-on.
+                WFK_SUBMIT => {
+                    if !comp.gpu.virgl {
+                        return self.err(tag, p9::E_OPNOTSUPP);
+                    }
+                    match comp.warp_submit(id, self.conn_id, a.data) {
+                        Ok(_fence) => p9::build_rwrite(&mut self.out_buf, tag, a.count),
+                        Err(e) => self.err(tag, e),
+                    }
+                }
                 _ => self.err(tag, p9::E_PERM),
             };
         }
@@ -3689,9 +3899,13 @@ impl Conn {
     /// bo ctl verbs (Warp-2c): `create3d <target> <format> <bind> <w> <h>
     /// <d> <array> <last_level> <samples> <flags> <size>` builds the backing
     /// (kernel GPU-BO mint + 3D resource + ctx attach + backing attach);
-    /// `destroy` retires the BO. The parameter tuple is the client's -- the
-    /// host renderer owns 3D validity (section 2.1); the server owns only
-    /// the backing-size sanity its own soundness needs.
+    /// `destroy` retires the BO. W2d adds the fenced transfers:
+    /// `transfer_to <level> <x> <y> <z> <w> <h> <d> <offset> <stride>
+    /// <layer_stride>` and `transfer_from ...` (device <-> backing; the
+    /// completion rides the owning ctx's fence file). The parameter tuple
+    /// is the client's -- the host renderer owns 3D validity (section
+    /// 2.1); the server owns only the backing-size sanity its own
+    /// soundness needs.
     fn wbo_ctl(&mut self, comp: &mut Comp, id: u32, data: &[u8]) -> Result<(), u32> {
         let s = core::str::from_utf8(data).map_err(|_| p9::E_INVAL)?;
         let mut it = s.split_ascii_whitespace();
@@ -3727,6 +3941,8 @@ impl Conn {
                     Err(E_IO)
                 }
             }
+            Some("transfer_to") => self.wbo_transfer(comp, id, true, it),
+            Some("transfer_from") => self.wbo_transfer(comp, id, false, it),
             Some("destroy") => {
                 if comp.wbo_destroy(id, self.conn_id) {
                     Ok(())
@@ -3736,6 +3952,37 @@ impl Conn {
             }
             _ => Err(p9::E_INVAL),
         }
+    }
+
+    /// The W2d transfer verb tail: `<level> <x> <y> <z> <w> <h> <d>
+    /// <offset> <stride> <layer_stride>` -> the fenced TRANSFER chain.
+    fn wbo_transfer(
+        &mut self,
+        comp: &mut Comp,
+        id: u32,
+        to_host: bool,
+        mut it: core::str::SplitAsciiWhitespace<'_>,
+    ) -> Result<(), u32> {
+        if !comp.gpu.virgl {
+            return Err(p9::E_OPNOTSUPP);
+        }
+        let mut arg = |_name: &str| -> Result<u64, u32> {
+            it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)
+        };
+        let level = arg("level")? as u32;
+        let x = arg("x")? as u32;
+        let y = arg("y")? as u32;
+        let z = arg("z")? as u32;
+        let w = arg("w")? as u32;
+        let h = arg("h")? as u32;
+        let d = arg("d")? as u32;
+        let offset = arg("offset")?;
+        let stride = arg("stride")? as u32;
+        let layer_stride = arg("layer_stride")? as u32;
+        comp.warp_transfer(
+            id, self.conn_id, to_host, level, x, y, z, w, h, d, offset, stride, layer_stride,
+        )
+        .map(|_| ())
     }
 
     /// cfg-3 (AURORA-CONFIG.md section 3.3): does this conn's LIVE peer
@@ -4373,6 +4620,7 @@ impl Conn {
         // Cancel site 4 (Tflush): the held reply under oldtag dies; per 9P
         // the client reuses oldtag only after this Rflush.
         self.pending_reads.retain(|pr| pr.tag != a.oldtag);
+        self.pending_fences.retain(|pf| pf.tag != a.oldtag);
         p9::build_rflush(&mut self.out_buf, tag)
     }
 
@@ -4443,6 +4691,33 @@ impl Conn {
                 }
                 None => i += 1,
             }
+        }
+        true
+    }
+
+    /// Deliver held fence reads whose ctxs have unreported completions
+    /// (or died: EOF the stream). False = the conn's transport failed.
+    pub fn poll_fences(&mut self, comp: &mut Comp) -> bool {
+        let mut i = 0;
+        while i < self.pending_fences.len() {
+            let pf = self.pending_fences[i];
+            let rec = match comp.wctx(pf.ctx_pub, self.conn_id) {
+                None => None, // the ctx died with this read parked: EOF
+                Some(c) if c.fence_signaled > c.fence_reported => Some(c.fence_signaled),
+                Some(_) => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let mut s = String::new();
+            if let Some(v) = rec {
+                comp.wctx_mut(pf.ctx_pub, self.conn_id).unwrap().fence_reported = v;
+                let _ = core::fmt::write(&mut s, format_args!("{}\n", v));
+            }
+            if !self.deliver_read(pf.tag, s.as_bytes()) {
+                return false;
+            }
+            self.pending_fences.remove(i);
         }
         true
     }

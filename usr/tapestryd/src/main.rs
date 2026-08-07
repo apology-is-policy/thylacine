@@ -92,6 +92,10 @@ const TAB_BAR_WINDOW_VA: u64 = 0x0160_0000;
 // the weave bump-allocator base to 0x0240_0000 (server.rs).
 const MOUSE_DMA_VA: u64 = 0x0154_0000;
 const MOUSE_BAR_WINDOW_VA: u64 = 0x01C0_0000;
+// The GPU fenced lane (Warp-2d): 4x64 KiB submit slots + a response page,
+// in the gap between the mouse BAR window's end and the weave base. Mapped
+// only on virgl devices (Gpu::probe).
+const GPU_FLANE_VA: u64 = 0x0220_0000;
 
 // Idle throttle (residual-2: the ~16% compositor idle cost). The FRAME clock
 // is a fixed-rate tick that wakes every visible surface -- at 60 Hz a wholly
@@ -129,7 +133,8 @@ const _: () = {
     assert!(TAB_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= MOUSE_DMA_VA);
     assert!(MOUSE_DMA_VA + (input::INPUT_DMA_SIZE as u64) <= TAB_BAR_WINDOW_VA);
     assert!(TAB_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= MOUSE_BAR_WINDOW_VA);
-    assert!(MOUSE_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= 0x0240_0000);
+    assert!(MOUSE_BAR_WINDOW_VA + 6 * PCI_BAR_VA_STRIDE <= GPU_FLANE_VA);
+    assert!(GPU_FLANE_VA + (gpu::FLANE_DMA_SIZE as u64) <= 0x0240_0000);
 };
 
 /// Post /srv/tapestry (9P-mode; the ptyfs/netd post idiom). Requires the
@@ -193,7 +198,7 @@ impl Driver for Tapestryd {
         );
 
         // The GPU function is mandatory.
-        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA)?;
+        let g = gpu::Gpu::probe(GPU_BAR_WINDOW_VA, GPU_RING_VA, GPU_FLANE_VA)?;
 
         // The input functions are best-effort: an environment without them
         // (or without their functions in the gathered allowance) yields an
@@ -466,11 +471,16 @@ impl Driver for Tapestryd {
                 }
             }
 
-            // (3) Deferred event-read deliveries (backward, remove-safe).
+            // (3) The fence pump (W2d): drain retired fenced chains off the
+            // device and post each on its owning ctx -- then the deferred
+            // event-read + fence-read deliveries (backward, remove-safe).
+            self.comp.warp_service_fences();
             let mut i = conns.len();
             while i > 0 {
                 i -= 1;
-                if !conns[i].poll_events(&mut self.comp) {
+                let ok =
+                    conns[i].poll_events(&mut self.comp) && conns[i].poll_fences(&mut self.comp);
+                if !ok {
                     let mut c = conns.remove(i);
                     c.teardown(&mut self.comp);
                     unsafe { t_close(c.raw_fd()) };
@@ -507,6 +517,15 @@ impl Driver for Tapestryd {
                 30 // no tick scheduled; a short pace keeps input drained
             } else {
                 remain.clamp(1, period_ms.max(1)) as i32
+            };
+            // W2d: the GPU IRQ is not pollable (the G-5 engine owns it;
+            // irq.wait only inside a sync submit), so while fenced chains
+            // are in flight the pass pace IS the fence-completion latency
+            // -- clamp to 1 ms (the input-drain precedent).
+            let timeout = if self.comp.warp_fences_pending() {
+                timeout.min(1)
+            } else {
+                timeout
             };
             let rc = unsafe { t_poll(pollfds.as_mut_ptr(), pollfds.len(), timeout) };
             if rc < 0 {

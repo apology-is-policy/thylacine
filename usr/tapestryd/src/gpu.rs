@@ -6,13 +6,20 @@
 // offset TRANSFER_TO_HOST_2D, and the retire pair
 // (DETACH_BACKING + RESOURCE_UNREF) the one-shot lineage never needed.
 //
-// Every command is synchronous: submit the 2-descriptor chain, kick the
-// doorbell, wait the INTx IRQ, verify used.idx + the response type. That
-// synchrony is load-bearing for the stage-0 I-40 present half: a present's
-// TRANSFER window opens and closes INSIDE one server dispatch, so the
-// in-flight set is empty at every retire decision point (the
-// tapestry_present.tla quiesce obligation holds by construction; the
-// pipelined controlq is the G-6+ lift and must implement the real drain).
+// Every 2D/ctx command is synchronous: submit the 2-descriptor chain, kick
+// the doorbell, wait the INTx IRQ, drain the used ring until OUR entry
+// retires, verify the response type. That synchrony is load-bearing for the
+// stage-0 I-40 present half: a present's TRANSFER window opens and closes
+// INSIDE one server dispatch, so the 2D in-flight set is empty at every
+// retire decision point (the tapestry_present.tla quiesce obligation holds
+// by construction).
+//
+// Warp-2d adds the FENCED lane beside that synchrony: fence-bearing 3D
+// chains (SUBMIT_3D, TRANSFER_*_3D) publish without waiting and retire by
+// used-ENTRY attribution -- the response, withheld by the device until the
+// fence signals, IS the fence completion. Presents remain wait-for-mine, so
+// the I-40 argument above is untouched; the pipelined PRESENT path stays
+// the G-6+ lift.
 
 use libdriver::Error;
 use libthyla_rs::handle::Rights;
@@ -86,12 +93,21 @@ const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 
 // 3D commands (VIRTIO 1.2 section 5.7.6.9; virgl-negotiated only). The seam's
 // context lifecycle + resource plumbing (Warp-2c); SUBMIT_3D + the transfers
-// arrive with the fenced lane (Warp-2d).
+// ride the fenced lane (Warp-2d).
 const VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200;
 const VIRTIO_GPU_CMD_CTX_DESTROY: u32 = 0x0201;
 const VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE: u32 = 0x0202;
 const VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE: u32 = 0x0203;
 const VIRTIO_GPU_CMD_RESOURCE_CREATE_3D: u32 = 0x0204;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D: u32 = 0x0205;
+const VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D: u32 = 0x0206;
+const VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0207;
+
+// hdr.flags bit 0 (section 5.7.6.7): the device withholds this command's
+// response until its fence signals, echoing flags + fence_id back -- so the
+// virtqueue used-buffer notification IS the fence completion (GPU-DESIGN
+// section 4.3: "we are labelling what we have", not building fence machinery).
+const VIRTIO_GPU_FLAG_FENCE: u32 = 1 << 0;
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
@@ -175,6 +191,27 @@ const _: () = {
     assert!(REQ_OFF + (REQ_REGION_LEN as u64) <= RESP_OFF);
     assert!(RESP_OFF + (RESP_REGION_LEN as u64) <= RING_DMA_SIZE as u64);
     assert!(GPU_RESP_DISPLAY_INFO_LEN <= RESP_REGION_LEN);
+};
+
+// The fenced lane (Warp-2d): a SECOND DMA region for fence-bearing 3D chains
+// (SUBMIT_3D + TRANSFER_*_3D), so the audited two-page sync ring above stays
+// byte-identical. Slot i owns the fixed descriptor pair (2+2i, 3+2i), a
+// FREQ_LEN request buffer (SUBMIT_3D carries its command stream inline;
+// 64 KiB covers Mesa's VIRGL_MAX_CMDBUF, though the per-Twrite bound --
+// msize, ~32 KiB -- is the effective ceiling until the Loom-carried path),
+// and a GPU_CTRL_HDR_LEN response header in the tail page. A full lane
+// refuses with Again (the client retries); it never blocks the serve loop
+// (#31/#125: the compositor IS the console).
+pub const FENCED_SLOTS: usize = 4;
+const FREQ_LEN: u64 = 0x10000;
+const FRESP_STRIDE: u64 = 0x100;
+const FRESP_OFF: u64 = (FENCED_SLOTS as u64) * FREQ_LEN;
+pub const FLANE_DMA_SIZE: usize = (FRESP_OFF + PAGE_SIZE) as usize;
+
+const _: () = {
+    assert!(2 + 2 * FENCED_SLOTS <= QUEUE_SIZE as usize);
+    assert!((FENCED_SLOTS as u64) * FRESP_STRIDE <= PAGE_SIZE);
+    assert!(FRESP_STRIDE >= GPU_CTRL_HDR_LEN as u64);
 };
 
 #[inline(always)]
@@ -324,27 +361,220 @@ fn init_device(
     }
 }
 
+/// A retired fenced chain: the fence id + the owning seam context (pub id),
+/// delivered to the server's fence pump. Attribution came from the used
+/// ENTRY (the head descriptor names the slot), so no cross-context
+/// signal-order assumption is load-bearing driver-side.
+#[derive(Clone, Copy)]
+pub struct FenceTag {
+    pub fence_id: u64,
+    pub ctx_pub: u32,
+}
+
+/// Why a fenced submission was refused (mapped to a 9P errno at the seam).
+pub enum FencedErr {
+    /// Every fenced slot is in flight -- the client retries (E_AGAIN).
+    /// Refuse-not-block: the serve loop must stay live (#31/#125).
+    Again,
+    /// The request exceeds the slot buffer (E_INVAL).
+    TooBig,
+    /// The engine is dead (latched) or the lane absent (E_IO).
+    Dead,
+}
+
 struct Controlq {
     ring_va: u64,
     ring_pa: u64,
     notify_va: u64,
     isr_va: u64,
     irq: Irq,
-    seq: u16,
-    /// Latched on any submit failure: the engine's seq tracker can no
-    /// longer be trusted against the device's avail consumption, so every
-    /// later submit would read a freshly-zeroed response buffer as
-    /// resp_type=0x0 (the #31 cascade). Fail fast + honestly instead.
+    /// Count of avail entries published. Up to 1 + FENCED_SLOTS chains can
+    /// be outstanding (Warp-2d), so completion is attributed by used-ENTRY
+    /// id -- never inferred from this cursor (the single-in-flight `seq`
+    /// check died with the fenced lane).
+    avail_idx: u16,
+    /// Count of used entries consumed.
+    used_seen: u16,
+    /// Latched on any submit/ring failure: after one, no ring cursor can
+    /// be trusted against the device's consumption, so every later submit
+    /// would read a freshly-zeroed response buffer as resp_type=0x0 (the
+    /// #31 cascade). Fail fast + honestly instead.
     dead: bool,
+    /// The fenced lane (virgl only; 0 = absent): slot i owns descriptor
+    /// pair (2+2i, 3+2i), its request buffer at flane_va + i*FREQ_LEN and
+    /// its response header at flane_va + FRESP_OFF + i*FRESP_STRIDE.
+    flane_va: u64,
+    flane_pa: u64,
+    fslots: [Option<FenceTag>; FENCED_SLOTS],
+    /// A slot-0 (sync) chain is published and unretired. Only
+    /// submit_and_wait sets it, and it never returns success with it set
+    /// -- drain() treats an id-0 entry outside that window as corruption.
+    sync_pending: bool,
+    /// Fence completions drained but not yet taken by the server pump.
+    completed: alloc::vec::Vec<FenceTag>,
 }
 
 impl Controlq {
+    fn fenced_in_flight(&self) -> u32 {
+        self.fslots.iter().flatten().count() as u32
+    }
+
+    fn alloc_fenced_slot(&self) -> Option<usize> {
+        self.fslots.iter().position(|s| s.is_none())
+    }
+
+    /// Publish one descriptor chain: avail entry + idx bump + doorbell
+    /// (VIRTIO 1.2 2.7.13.1: descriptor + ring writes visible before the
+    /// idx bump).
+    fn publish(&mut self, head: u16) {
+        let avail_va = self.ring_va + CTRL_AVAIL_OFF;
+        let slot = (self.avail_idx % QUEUE_SIZE) as u64;
+        unsafe {
+            w16(avail_va + 0, 0);
+            w16(avail_va + 4 + slot * 2, head);
+        };
+        dsb_sy();
+        let next = self.avail_idx.wrapping_add(1);
+        unsafe { w16(avail_va + 2, next) };
+        dsb_sy();
+        self.avail_idx = next;
+        unsafe { w16(self.notify_va, GPU_QUEUE_CONTROL) };
+    }
+
+    /// Consume every used entry the device has published, attributing each
+    /// by its ENTRY id -- the head descriptor of the retired chain (the
+    /// Warp-2d replacement for the single-in-flight used.idx==seq
+    /// inference). Fence completions accumulate on `completed` (the server
+    /// pump takes them); returns true if the pending slot-0 sync chain
+    /// retired. An entry naming nothing in flight latches `dead`: the
+    /// device retired a chain we never published, so no cursor is
+    /// trustworthy.
+    fn drain(&mut self) -> bool {
+        let used_va = self.ring_va + CTRL_USED_OFF;
+        let mut sync_retired = false;
+        loop {
+            virtio_rmb();
+            let used_idx = unsafe { r16(used_va + 2) };
+            if used_idx == self.used_seen {
+                return sync_retired;
+            }
+            let outstanding = self.avail_idx.wrapping_sub(self.used_seen);
+            if used_idx.wrapping_sub(self.used_seen) > outstanding {
+                say!(
+                    "tapestryd: gpu used.idx {} past published {} (ring corrupt)",
+                    used_idx, self.avail_idx
+                );
+                self.dead = true;
+                return sync_retired;
+            }
+            // VIRTIO 1.2 2.7.13.2: order the used.idx observation before
+            // the entry read.
+            virtio_rmb();
+            let entry_va = used_va + 4 + ((self.used_seen % QUEUE_SIZE) as u64) * 8;
+            let id = unsafe { r32(entry_va) };
+            self.used_seen = self.used_seen.wrapping_add(1);
+            if id == 0 {
+                if !self.sync_pending {
+                    say!("tapestryd: gpu used entry id 0 with no sync chain (ring corrupt)");
+                    self.dead = true;
+                    return sync_retired;
+                }
+                self.sync_pending = false;
+                sync_retired = true;
+                continue;
+            }
+            let slot = if id >= 2 && id % 2 == 0 {
+                ((id - 2) / 2) as usize
+            } else {
+                FENCED_SLOTS // odd / resp-desc id: never a chain head
+            };
+            let tag = match self.fslots.get_mut(slot).and_then(|s| s.take()) {
+                Some(t) => t,
+                None => {
+                    say!(
+                        "tapestryd: gpu used entry id {} names no in-flight chain (ring corrupt)",
+                        id
+                    );
+                    self.dead = true;
+                    return sync_retired;
+                }
+            };
+            // A FENCE-flagged response is withheld until the fence
+            // signals, so retirement IS the completion. An ERROR response
+            // still retires the fence -- nothing further will run, and a
+            // client waiting on a fence that can never signal is the
+            // wedge this avoids. Logged, not withheld.
+            let resp_va = self.flane_va + FRESP_OFF + (slot as u64) * FRESP_STRIDE;
+            let rt = unsafe { r32(resp_va) };
+            if rt != VIRTIO_GPU_RESP_OK_NODATA {
+                say!(
+                    "tapestryd: gpu fenced cmd (fence {}) resp_type={:#x}",
+                    tag.fence_id, rt
+                );
+            }
+            self.completed.push(tag);
+        }
+    }
+
+    /// The serve loop's non-blocking completion pump. Nothing to do unless
+    /// fenced work is in flight (a sync chain never outlives its own
+    /// dispatch). The ISR read is level hygiene: nobody irq.waits between
+    /// dispatches, so the assert would otherwise sit latched.
+    fn poll_completions(&mut self) {
+        if self.dead || self.fenced_in_flight() == 0 {
+            return;
+        }
+        let _ = unsafe { r8(self.isr_va) };
+        let _ = self.drain();
+    }
+
+    /// Publish a fenced chain on slot `slot` (request already staged in
+    /// the slot's flane buffer) and return WITHOUT waiting: its retirement
+    /// arrives via drain()'s entry attribution.
+    fn submit_fenced(&mut self, slot: usize, req_len: u32, tag: FenceTag) -> Result<(), ()> {
+        if self.dead || self.flane_va == 0 || self.fslots[slot].is_some() {
+            return Err(());
+        }
+        let resp_off = FRESP_OFF + (slot as u64) * FRESP_STRIDE;
+        for i in 0..(GPU_CTRL_HDR_LEN as u64) {
+            unsafe { w8(self.flane_va + resp_off + i, 0) };
+        }
+        let d = (2 + 2 * slot) as u64;
+        let desc_va = self.ring_va + CTRL_DESC_OFF + d * 16;
+        unsafe {
+            w64(desc_va + 0, self.flane_pa + (slot as u64) * FREQ_LEN);
+            w32(desc_va + 8, req_len);
+            w16(desc_va + 12, VIRTQ_DESC_F_NEXT);
+            w16(desc_va + 14, (d + 1) as u16);
+
+            w64(desc_va + 16, self.flane_pa + resp_off);
+            w32(desc_va + 24, GPU_CTRL_HDR_LEN);
+            w16(desc_va + 28, VIRTQ_DESC_F_WRITE);
+            w16(desc_va + 30, 0);
+        };
+        self.fslots[slot] = Some(tag);
+        self.publish(d as u16);
+        Ok(())
+    }
+
+    /// Submit the slot-0 (sync) chain and wait for ITS retirement, draining
+    /// any fenced completions that arrive first. The G-5 wait discipline is
+    /// unchanged -- the used ring is the only completion authority (a wake
+    /// proves only that SOME notification-ish event reached us: irqfwd
+    /// collapses INTx edges, a level re-fire or a config event can latch a
+    /// stale pending event, and under a live display backend (#31) such a
+    /// mis-timed wake is routine), the ISR read is level hygiene per wake,
+    /// the spin-poll nets the used.idx store-propagation window, and the
+    /// wall-clock deadline bounds EVENT-ful non-progress. The deadline
+    /// applies to THIS chain only -- fenced chains have none (a fence
+    /// legitimately takes as long as its GL work) -- and stays honest under
+    /// a fence backlog: the device writes a non-fenced response at
+    /// PROCESSING time, and controlq processing is in-order, so pending
+    /// fences ahead of this chain cannot delay its retirement.
     fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
         if self.dead {
             return Err(());
         }
-        let next_seq = self.seq.wrapping_add(1);
-
         for i in 0..(GPU_CTRL_HDR_LEN as u64) {
             unsafe { w8(self.ring_va + RESP_OFF + i, 0) };
         }
@@ -361,34 +591,9 @@ impl Controlq {
             w16(desc_va + 28, VIRTQ_DESC_F_WRITE);
             w16(desc_va + 30, 0);
         };
+        self.sync_pending = true;
+        self.publish(0);
 
-        let avail_va = self.ring_va + CTRL_AVAIL_OFF;
-        let ring_slot = (self.seq % QUEUE_SIZE) as u64;
-        unsafe {
-            w16(avail_va + 0, 0);
-            w16(avail_va + 4 + ring_slot * 2, 0);
-        };
-
-        // VIRTIO 1.2 2.7.13.1: descriptor + ring writes visible before the
-        // idx bump.
-        dsb_sy();
-        unsafe { w16(avail_va + 2, next_seq) };
-        dsb_sy();
-
-        unsafe { w16(self.notify_va, GPU_QUEUE_CONTROL) };
-
-        // The completion authority is the USED RING, never the ISR bit.
-        // VIRTIO 1.2 2.7.13.2 orders the device's used.idx write before its
-        // notification, but a wake proves only that SOME notification-ish
-        // event reached us: irqfwd collapses INTx edges, a level re-fire or
-        // a config event can latch a stale pending event, and under a live
-        // display backend (#31, -display cocoa) such a mis-timed wake is
-        // routine. The pre-fix shape -- break on the first ISR_QUEUE wake,
-        // read used.idx ONCE, hard-fail if behind -- turned that benign
-        // timing into a permanent engine desync (seq diverges from the
-        // device's avail consumption; every later command re-publishes a
-        // consumed avail idx and reads its own zeroed response buffer as
-        // resp_type=0x0). Wait until used.idx retires OUR command, bounded.
         let used_va = self.ring_va + CTRL_USED_OFF;
         let mut wakes = 0u32;
         let mut stale_since: Option<Instant> = None;
@@ -401,29 +606,30 @@ impl Controlq {
             // Read-to-clear on every wake: consumes + deasserts the INTx
             // source (level hygiene). Deliberately NOT the break condition.
             let _ = unsafe { r8(self.isr_va) };
-            virtio_rmb();
-            let used_idx = unsafe { r16(used_va + 2) };
-            if used_idx == next_seq {
+            if self.drain() {
                 break 'wait;
             }
-            if used_idx != self.seq {
-                // Neither not-yet (seq) nor done (next_seq): single-in-flight
-                // submission makes any other value ring corruption, not timing.
-                say!(
-                    "tapestryd: gpu used.idx {} outside {}..{} (ring corrupt)",
-                    used_idx, self.seq, next_seq
-                );
-                self.dead = true;
+            if self.dead {
                 return Err(());
             }
             // Not ours yet. If this wake WAS our completion's notification
             // with the used.idx store still propagating, no further
             // interrupt is coming -- spin-poll briefly before re-waiting.
-            for _ in 0..USED_SPIN_PER_WAKE {
+            // A fence retiring during the spin is progress but not ours:
+            // drain it (bounded by the slot count) and keep spinning.
+            let mut spins = 0u32;
+            while spins < USED_SPIN_PER_WAKE {
                 virtio_rmb();
-                if unsafe { r16(used_va + 2) } == next_seq {
-                    break 'wait;
+                if unsafe { r16(used_va + 2) } != self.used_seen {
+                    if self.drain() {
+                        break 'wait;
+                    }
+                    if self.dead {
+                        return Err(());
+                    }
+                    continue;
                 }
+                spins += 1;
             }
             wakes += 1;
             let t0 = *stale_since.get_or_insert_with(Instant::now);
@@ -444,11 +650,10 @@ impl Controlq {
         // assertion cannot surface as the next submit's stale wake (G-5 F2).
         let _ = unsafe { r8(self.isr_va) };
 
-        // VIRTIO 1.2 2.7.13.2: order the used.idx observation before the
+        // VIRTIO 1.2 2.7.13.2: order the used-entry consumption before the
         // response-buffer read.
         virtio_rmb();
         let resp_type = unsafe { r32(self.ring_va + RESP_OFF) };
-        self.seq = next_seq;
         Ok(resp_type)
     }
 
@@ -487,6 +692,30 @@ unsafe fn write_ctrl_hdr_ctx(req_va: u64, cmd_type: u32, ctx_id: u32) {
     w32(req_va + 16, ctx_id);
 }
 
+// The fenced ctx header (Warp-2d): FLAG_FENCE + the fence id the device
+// echoes in the withheld response.
+unsafe fn write_ctrl_hdr_fenced(req_va: u64, cmd_type: u32, ctx_id: u32, fence_id: u64) {
+    write_ctrl_hdr_ctx(req_va, cmd_type, ctx_id);
+    w32(req_va + 4, VIRTIO_GPU_FLAG_FENCE);
+    w64(req_va + 8, fence_id);
+}
+
+/// Byte-copy a client stream into a flane request buffer (volatile stores;
+/// 8-byte bulk + byte tail; both sides little-endian, so the unaligned
+/// native read preserves byte order).
+fn copy_stream(dst_va: u64, src: &[u8]) {
+    let mut i = 0usize;
+    while i + 8 <= src.len() {
+        let v = unsafe { core::ptr::read_unaligned(src.as_ptr().add(i) as *const u64) };
+        unsafe { w64(dst_va + i as u64, v) };
+        i += 8;
+    }
+    while i < src.len() {
+        unsafe { w8(dst_va + i as u64, src[i]) };
+        i += 1;
+    }
+}
+
 unsafe fn write_rect(va: u64, x: u32, y: u32, w: u32, h: u32) {
     w32(va + 0, x);
     w32(va + 4, y);
@@ -512,14 +741,23 @@ pub struct Gpu {
     pub capset_blob: alloc::vec::Vec<u8>,
     pub capset_id: u32,
     pub capset_ver: u32,
+    /// Global monotone fence ids (Warp-2d). Global, not per-ctx: QEMU's
+    /// virgl fence walk retires every queued fence with id <= the signaled
+    /// value, so independent per-ctx sequences would cross-release each
+    /// other's fences.
+    fence_next: u64,
     pci: PciDev,
     _ring: Dma,
+    _flane: Option<Dma>,
 }
 
 impl Gpu {
     /// Claim + bring up the virtio-gpu PCI function: transport handshake,
     /// both queues, then GET_DISPLAY_INFO for the scanout geometry.
-    pub fn probe(bar_window_va: u64, ring_va: u64) -> Result<Gpu, Error> {
+    /// `flane_va` is the fenced lane's mapping slot -- allocated only when
+    /// VIRGL negotiates (a 2D device never sees a fence-bearing command;
+    /// the seam answers E_OPNOTSUPP), so plain boots pay nothing (Warp-2d).
+    pub fn probe(bar_window_va: u64, ring_va: u64, flane_va: u64) -> Result<Gpu, Error> {
         let pci = unsafe { PciDev::claim(VIRTIO_DEVICE_ID_GPU, bar_window_va) }.map_err(|e| {
             say!("tapestryd: gpu PCI claim/map failed {:?}", e);
             Error::Hardware
@@ -567,6 +805,18 @@ impl Gpu {
         let (notify_va, virgl) =
             init_device(common_va, notify_base, notify_mul, u64::from(notify_len), ring_pa)?;
 
+        let flane = if virgl {
+            let f = unsafe { Dma::new(FLANE_DMA_SIZE, rw_map, flane_va, prot) }.map_err(|_| {
+                say!("tapestryd: SYS_DMA_CREATE(gpu fenced lane) failed");
+                Error::Hardware
+            })?;
+            prewarm(f.base_va() as u64, FLANE_DMA_SIZE);
+            Some(f)
+        } else {
+            None
+        };
+        let flane_pa = flane.as_ref().map_or(0, |f| f.paddr());
+
         let mut gpu = Gpu {
             ctrl: Controlq {
                 ring_va,
@@ -574,8 +824,14 @@ impl Gpu {
                 notify_va,
                 isr_va,
                 irq,
-                seq: 0,
+                avail_idx: 0,
+                used_seen: 0,
                 dead: false,
+                flane_va: if flane.is_some() { flane_va } else { 0 },
+                flane_pa,
+                fslots: [None; FENCED_SLOTS],
+                sync_pending: false,
+                completed: alloc::vec::Vec::new(),
             },
             ring_va,
             width: DEFAULT_DISPLAY_W,
@@ -585,8 +841,10 @@ impl Gpu {
             capset_blob: alloc::vec::Vec::new(),
             capset_id: 0,
             capset_ver: 0,
+            fence_next: 0,
             pci,
             _ring: ring,
+            _flane: flane,
         };
 
         gpu.read_display_info()?;
@@ -1003,5 +1261,126 @@ impl Gpu {
         };
         self.ctrl
             .step("FLUSH", GPU_CTRL_HDR_LEN + 24, GPU_CTRL_HDR_LEN, VIRTIO_GPU_RESP_OK_NODATA)
+    }
+
+    // --- the fenced lane (Warp-2d) ---------------------------------------
+
+    /// Common fenced-lane admission: lane present + engine alive, the
+    /// request (header + `extra` payload bytes) fits a slot, a slot free.
+    fn fenced_begin(&mut self, extra: u64) -> Result<usize, FencedErr> {
+        if self.ctrl.flane_va == 0 || self.ctrl.dead {
+            return Err(FencedErr::Dead);
+        }
+        if (GPU_CTRL_HDR_LEN as u64) + extra > FREQ_LEN {
+            return Err(FencedErr::TooBig);
+        }
+        self.ctrl.alloc_fenced_slot().ok_or(FencedErr::Again)
+    }
+
+    fn fenced_commit(
+        &mut self,
+        slot: usize,
+        req_len: u32,
+        fence_id: u64,
+        ctx_pub: u32,
+    ) -> Result<u64, FencedErr> {
+        self.ctrl
+            .submit_fenced(slot, req_len, FenceTag { fence_id, ctx_pub })
+            .map_err(|_| FencedErr::Dead)?;
+        self.fence_next = fence_id;
+        Ok(fence_id)
+    }
+
+    /// SUBMIT_3D: queue `stream` (an opaque VIRGL_CCMD buffer -- the server
+    /// does not parse it, GPU-DESIGN section 2.1) on the fenced lane for
+    /// `ctx_id`, returning the fence id its completion will carry on the
+    /// owning seam ctx (`ctx_pub`).
+    pub fn submit_3d(
+        &mut self,
+        ctx_id: u32,
+        ctx_pub: u32,
+        stream: &[u8],
+    ) -> Result<u64, FencedErr> {
+        let slot = self.fenced_begin(8 + stream.len() as u64)?;
+        let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
+        let fence_id = self.fence_next + 1;
+        unsafe {
+            write_ctrl_hdr_fenced(req, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id, fence_id);
+            w32(req + 24, stream.len() as u32);
+            w32(req + 28, 0); // padding
+        };
+        copy_stream(req + 32, stream);
+        self.fenced_commit(
+            slot,
+            GPU_CTRL_HDR_LEN + 8 + stream.len() as u32,
+            fence_id,
+            ctx_pub,
+        )
+    }
+
+    /// TRANSFER_TO/FROM_HOST_3D: fence-bearing by design -- a readback's
+    /// completion (the data landed in the BO backing) is exactly what the
+    /// client waits the fence for. Box + level + strides are the client's
+    /// (section 2.1); `offset` is into the attached backing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn transfer_3d(
+        &mut self,
+        to_host: bool,
+        ctx_id: u32,
+        ctx_pub: u32,
+        res_id: u32,
+        level: u32,
+        x: u32,
+        y: u32,
+        z: u32,
+        w: u32,
+        h: u32,
+        d: u32,
+        offset: u64,
+        stride: u32,
+        layer_stride: u32,
+    ) -> Result<u64, FencedErr> {
+        let slot = self.fenced_begin(48)?;
+        let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
+        let fence_id = self.fence_next + 1;
+        let cmd = if to_host {
+            VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D
+        } else {
+            VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D
+        };
+        unsafe {
+            write_ctrl_hdr_fenced(req, cmd, ctx_id, fence_id);
+            w32(req + 24, x);
+            w32(req + 28, y);
+            w32(req + 32, z);
+            w32(req + 36, w);
+            w32(req + 40, h);
+            w32(req + 44, d);
+            w64(req + 48, offset);
+            w32(req + 56, res_id);
+            w32(req + 60, level);
+            w32(req + 64, stride);
+            w32(req + 68, layer_stride);
+        };
+        self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub)
+    }
+
+    /// The serve loop's non-blocking completion pump (Warp-2d).
+    pub fn poll_completions(&mut self) {
+        self.ctrl.poll_completions();
+    }
+
+    /// Take the drained fence completions (the server posts each on its
+    /// owning seam ctx).
+    pub fn take_completions(&mut self) -> alloc::vec::Vec<FenceTag> {
+        core::mem::take(&mut self.ctrl.completed)
+    }
+
+    pub fn fenced_in_flight(&self) -> u32 {
+        self.ctrl.fenced_in_flight()
+    }
+
+    pub fn engine_dead(&self) -> bool {
+        self.ctrl.dead
     }
 }
