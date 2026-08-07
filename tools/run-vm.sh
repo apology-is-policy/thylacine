@@ -304,18 +304,25 @@ fi
 # disables both.
 gpu_flags=()
 if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
+    # THYLACINE_GPU_DEV overrides gpu0's device MODEL (default virtio-gpu-pci).
+    # The Warp arc boots virtio-gpu-gl-pci on a Linux GL host (paired with
+    # THYLACINE_DISPLAY=egl-headless -- the -gl models refuse to realise
+    # without a GL-capable display backend). Same virtio device id (16), same
+    # PCI function shape, so the guest driver claims it identically;
+    # disable-legacy=on is valid on both (the -gl models are modern-only).
+    gpu_dev="${THYLACINE_GPU_DEV:-virtio-gpu-pci}"
     gpu_flags=(
         -device "virtio-gpu-device,id=gpu-mmio0"
-        -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
+        -device "$gpu_dev,id=gpu0,disable-legacy=on"
     )
-    # vnc display mode drops the vestigial MMIO gpu: a display backend
-    # binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in the
-    # resident boot) would squat it -- the VNC client must land on gpu0's
+    # vnc/egl-headless display modes drop the vestigial MMIO gpu: a display
+    # backend binds QemuConsole 0, and gpu-mmio0 (probe-only, driverless in
+    # the resident boot) would squat it -- the client must land on gpu0's
     # head (the ls-gfx-live #31 leg). cocoa keeps the canonical device set
     # (its View menu switches consoles interactively).
-    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* ]]; then
+    if [[ "${THYLACINE_DISPLAY:-none}" == vnc:* || "${THYLACINE_DISPLAY:-none}" == "egl-headless" ]]; then
         gpu_flags=(
-            -device "virtio-gpu-pci,id=gpu0,disable-legacy=on"
+            -device "$gpu_dev,id=gpu0,disable-legacy=on"
         )
     fi
 fi
@@ -389,7 +396,12 @@ case "${THYLACINE_DISPLAY:-none}" in
     none)  display_flags=(-nographic) ;;
     cocoa) display_flags=(-display cocoa) ;;
     vnc:*) display_flags=(-display "vnc=127.0.0.1:${THYLACINE_DISPLAY#vnc:}") ;;
-    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N)" >&2
+    # Headless GL for the Warp arc: needs a Linux host with an openable DRM
+    # render node (docs/GPU-HOST-SETUP.md; tools/gl-host-probe.sh rung 6 is
+    # the substrate witness). Serial stays on -serial below -- only
+    # `none` implies -nographic.
+    egl-headless) display_flags=(-display egl-headless) ;;
+    *)     echo "run-vm.sh: unknown THYLACINE_DISPLAY='${THYLACINE_DISPLAY}' (none|cocoa|vnc:N|egl-headless)" >&2
            exit 2 ;;
 esac
 

@@ -119,6 +119,40 @@ v1.x) — the display stays blank until reboot.
   Residual: the `set_scanout(0)` disable arms have no resource to
   flush, so an Off transition keeps the stale frame under cocoa —
   edge-path cosmetic (the boot session never goes Off).
+
+  **Warp-1 — VIRGL negotiation + the capset probe (`GPU-DESIGN.md` §12).**
+  `init_device` now captures the LOW feature dword and acks
+  `VIRTIO_GPU_F_VIRGL` (bit 0) when offered — only the `-gl` device models
+  offer it, so a plain `virtio-gpu-pci` boot negotiates byte-identically to
+  before. Every 2D command this driver issues remains valid under virgl
+  (VIRTIO 1.2 §5.7.6.8); the compositor path is unchanged either way, which
+  the normal suite's pattern-persists gate re-proves per boot. When VIRGL
+  was negotiated, `probe_capsets()` runs once at `Gpu::probe`: it reads
+  `num_scanouts`/`num_capsets` from the Device region
+  (`virtio_gpu_config`, absent/short region degrades to "capsets unknown"
+  — not an engine fault), issues `GET_CAPSET_INFO` per index (enumeration
+  bounded by `GPU_CAPSET_ENUM_MAX` = 8 against a hostile count), and
+  fetches ONE blob via `GET_CAPSET` — ranked VIRGL2 (2) > VIRGL (1) >
+  others, matching Mesa's own preference — logging its size + first four
+  words as the in-guest gate evidence. A blob shorter than 16 bytes is not
+  quoted, and the info words are pre-zeroed for the same reason
+  (`submit_and_wait` zeroes only the response header, so short reads
+  would quote a prior response's residue — audit W1 F2). Failure
+  disposition (audit W1 F1): a capset command the device merely REFUSES
+  (resp-type mismatch — the engine is healthy, `Controlq.dead` UNSET)
+  degrades to 2D with a log line, because a probe-fatal tapestryd would
+  warden-restart-loop with no renderer on a device whose 2D path works;
+  only a real engine death (`dead` latched) propagates `Err` — there
+  every later 2D command would fail anyway. Size-0 capset entries are
+  logged but never ranked (a VMM may enumerate an id its renderer
+  lacks). The ring
+  grew to TWO pages (`RING_DMA_SIZE` 0x2000): page 1 keeps the audited
+  queue/request layout verbatim; the response region moved to its own page
+  (`RESP_OFF` 0x1000, 4 KiB) because virgl_caps_v2 (~1.2 KiB, growing
+  upstream) outgrew the old 0x300 slice — the Warp-3 winsys `get_caps`
+  slot reads the same blob, so the headroom has a named next consumer.
+  Only `virgl: bool` + `num_capsets: u32` persist on `Gpu`; the 3D object
+  model is Warp-2's.
 - `input.rs` — the virtio-input-PCI eventq (`InputDev`, generalized from
   the G-3 keyboard-only claim at G-7c): the P4-K probe's audited
   populate/drain/recycle discipline over the same PCI transport,

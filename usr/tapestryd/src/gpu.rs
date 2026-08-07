@@ -39,6 +39,12 @@ const STATUS_FAILED: u8 = 128;
 // VIRTIO_F_VERSION_1 is feature bit 32 -- bit 0 of the HIGH feature dword.
 const VIRTIO_F_VERSION_1_BIT_HI: u32 = 1 << 0;
 
+// VIRTIO_GPU_F_VIRGL is feature bit 0 -- bit 0 of the LOW feature dword.
+// Offered only by the -gl device models. Acking it selects the host's virgl
+// command path; every 2D command this driver issues remains valid under it
+// (VIRTIO 1.2 section 5.7.6.8), so the compositor path is unchanged either way.
+const VIRTIO_GPU_F_VIRGL_BIT_LO: u32 = 1 << 0;
+
 // ISR status (section 4.1.4.5): bit 0 = a virtqueue raised the IRQ; reading
 // the byte clears it.
 const ISR_QUEUE: u8 = 1 << 0;
@@ -75,9 +81,24 @@ const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 const VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING: u32 = 0x0107;
+const VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108;
+const VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109;
 
 const VIRTIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+const VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
+const VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
+
+// struct virtio_gpu_config field offsets in the Device region (section 5.7.4):
+// events_read @0x00, events_clear @0x04, num_scanouts @0x08, num_capsets @0x0C.
+const GPUCFG_NUM_SCANOUTS: u64 = 0x08;
+const GPUCFG_NUM_CAPSETS: u64 = 0x0C;
+const GPUCFG_MIN_LEN: u32 = 0x10;
+
+// Capset ids (section 5.7.6.8 + virglrenderer): 1 = VIRGL, 2 = VIRGL2 (what
+// Mesa's virgl driver prefers when offered); higher ids (venus, cross-domain,
+// drm) are future consumers. Enumeration is bounded, not trusted.
+const GPU_CAPSET_ENUM_MAX: u32 = 8;
 
 pub const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 
@@ -117,9 +138,14 @@ const DEFAULT_DISPLAY_H: u32 = 768;
 /// size every fullscreen weave allocation).
 const MAX_DISPLAY_DIM: u32 = 8192;
 
-// Single-page DMA ring layout (the gpud/probe audited layout, verbatim).
+// Two-page DMA ring (the gpud/probe audited single-page layout, plus a
+// dedicated RESP page): page 1 holds both queues + the request region
+// unchanged; the response region moved to its own page because the
+// GET_CAPSET blob (virgl_caps_v2, ~1.2 KiB and growing upstream) outgrew
+// the 0x300-byte slice page 1 had left. The Warp-2/3 winsys get_caps slot
+// reads the same blob, so the headroom is a direct next consumer, not slack.
 const QUEUE_SIZE: u16 = 16;
-pub const RING_DMA_SIZE: usize = PAGE_SIZE as usize;
+pub const RING_DMA_SIZE: usize = 2 * PAGE_SIZE as usize;
 
 const CTRL_DESC_OFF: u64 = 0x000;
 const CTRL_AVAIL_OFF: u64 = 0x100;
@@ -128,10 +154,10 @@ const CURSOR_DESC_OFF: u64 = 0x300;
 const CURSOR_AVAIL_OFF: u64 = 0x400;
 const CURSOR_USED_OFF: u64 = 0x500;
 const REQ_OFF: u64 = 0x600;
-const RESP_OFF: u64 = 0x700;
+const RESP_OFF: u64 = 0x1000;
 
 const REQ_REGION_LEN: u32 = 0x100;
-const RESP_REGION_LEN: u32 = 0x300;
+const RESP_REGION_LEN: u32 = 0x1000;
 
 const _: () = {
     assert!(CTRL_DESC_OFF + (QUEUE_SIZE as u64) * 16 <= CTRL_AVAIL_OFF);
@@ -206,7 +232,7 @@ fn init_device(
     notify_mul: u64,
     notify_len: u64,
     ring_pa: u64,
-) -> Result<u64, Error> {
+) -> Result<(u64, bool), Error> {
     unsafe {
         w8(common + CCFG_DEVICE_STATUS, 0);
         w8(common + CCFG_DEVICE_STATUS, STATUS_ACKNOWLEDGE);
@@ -214,7 +240,7 @@ fn init_device(
         w16(common + CCFG_CONFIG_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR);
 
         w32(common + CCFG_DEVICE_FEATURE_SELECT, 0);
-        let _dev_feat_lo = r32(common + CCFG_DEVICE_FEATURE);
+        let dev_feat_lo = r32(common + CCFG_DEVICE_FEATURE);
         w32(common + CCFG_DEVICE_FEATURE_SELECT, 1);
         let dev_feat_hi = r32(common + CCFG_DEVICE_FEATURE);
         if dev_feat_hi & VIRTIO_F_VERSION_1_BIT_HI == 0 {
@@ -223,8 +249,12 @@ fn init_device(
             return Err(Error::Hardware);
         }
 
+        let virgl = dev_feat_lo & VIRTIO_GPU_F_VIRGL_BIT_LO != 0;
         w32(common + CCFG_DRIVER_FEATURE_SELECT, 0);
-        w32(common + CCFG_DRIVER_FEATURE, 0);
+        w32(
+            common + CCFG_DRIVER_FEATURE,
+            if virgl { VIRTIO_GPU_F_VIRGL_BIT_LO } else { 0 },
+        );
         w32(common + CCFG_DRIVER_FEATURE_SELECT, 1);
         w32(common + CCFG_DRIVER_FEATURE, VIRTIO_F_VERSION_1_BIT_HI);
 
@@ -281,7 +311,7 @@ fn init_device(
             common + CCFG_DEVICE_STATUS,
             STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK,
         );
-        Ok(notify_base + u64::from(ctrl_off) * notify_mul)
+        Ok((notify_base + u64::from(ctrl_off) * notify_mul, virgl))
     }
 }
 
@@ -456,7 +486,11 @@ pub struct Gpu {
     ring_va: u64,
     pub width: u32,
     pub height: u32,
-    _pci: PciDev,
+    /// VIRTIO_GPU_F_VIRGL negotiated (the -gl device models). Warp-1 keys
+    /// the capset probe on it; Warp-2 keys the 3D context path.
+    pub virgl: bool,
+    pub num_capsets: u32,
+    pci: PciDev,
     _ring: Dma,
 }
 
@@ -508,7 +542,8 @@ impl Gpu {
         prewarm(ring.base_va() as u64, RING_DMA_SIZE);
         let ring_pa = ring.paddr();
 
-        let notify_va = init_device(common_va, notify_base, notify_mul, u64::from(notify_len), ring_pa)?;
+        let (notify_va, virgl) =
+            init_device(common_va, notify_base, notify_mul, u64::from(notify_len), ring_pa)?;
 
         let mut gpu = Gpu {
             ctrl: Controlq {
@@ -523,13 +558,184 @@ impl Gpu {
             ring_va,
             width: DEFAULT_DISPLAY_W,
             height: DEFAULT_DISPLAY_H,
-            _pci: pci,
+            virgl,
+            num_capsets: 0,
+            pci,
             _ring: ring,
         };
 
         gpu.read_display_info()?;
-        say!("tapestryd: gpu up -- {}x{}, pci intid={}", gpu.width, gpu.height, intid);
+        if gpu.virgl {
+            gpu.probe_capsets()?;
+        }
+        say!(
+            "tapestryd: gpu up -- {}x{}, pci intid={}, virgl={} capsets={}",
+            gpu.width,
+            gpu.height,
+            intid,
+            gpu.virgl as u32,
+            gpu.num_capsets
+        );
         Ok(gpu)
+    }
+
+    /// The Warp-1 capset probe (GPU-DESIGN.md section 12): enumerate the
+    /// virgl capability sets and fetch the preferred blob, as boot-log
+    /// evidence that the 3D command path round-trips. Only `num_capsets`
+    /// is kept -- the object model lands at Warp-2. Runs only when VIRGL
+    /// was negotiated, so a 2D-device boot never executes it (its two
+    /// residual deltas -- the RESP page PA and this log line's format --
+    /// are behavior-equivalent, not byte-identical).
+    ///
+    /// Failure disposition (audit W1 F1): a missing/short device-cfg
+    /// region OR a capset command the device merely REFUSES (resp-type
+    /// mismatch -- `submit_and_wait` returned Ok, so the engine is
+    /// healthy and `Controlq.dead` is UNSET) degrades to 2D with a log
+    /// line: the probe is evidence, and evidence must never cost the
+    /// console (a probe-fatal tapestryd would warden-restart-loop with
+    /// no renderer on a device whose 2D path works). Only a real engine
+    /// death (`dead` latched: wait error / deadline / ring corruption)
+    /// propagates -- there every later 2D command would fail anyway, and
+    /// honest-fast beats a doomed limp.
+    fn probe_capsets(&mut self) -> Result<(), Error> {
+        let (dev_va, dev_len) = match self.pci.region(PciRegion::Device) {
+            Some(r) => r,
+            None => {
+                say!("tapestryd: gpu virgl but no device-cfg region; capsets unknown");
+                return Ok(());
+            }
+        };
+        if dev_len < GPUCFG_MIN_LEN {
+            say!("tapestryd: gpu device-cfg region too small ({}); capsets unknown", dev_len);
+            return Ok(());
+        }
+        let scanouts = unsafe { r32(dev_va + GPUCFG_NUM_SCANOUTS) };
+        self.num_capsets = unsafe { r32(dev_va + GPUCFG_NUM_CAPSETS) };
+        say!(
+            "tapestryd: gpu virgl -- num_scanouts={} num_capsets={}",
+            scanouts,
+            self.num_capsets
+        );
+
+        // Rank: VIRGL2 (2) > VIRGL (1) > anything else; fetch one blob.
+        let rank = |i: u32| -> u32 {
+            match i {
+                2 => 3,
+                1 => 2,
+                _ => 1,
+            }
+        };
+        let mut best: Option<(u32, u32, u32)> = None;
+        for idx in 0..self.num_capsets.min(GPU_CAPSET_ENUM_MAX) {
+            let (id, ver, size) = match self.get_capset_info(idx) {
+                Ok(t) => t,
+                Err(e) => {
+                    if self.ctrl.dead {
+                        return Err(e);
+                    }
+                    say!("tapestryd: gpu capset[{}] refused (engine healthy); 2D only", idx);
+                    return Ok(());
+                }
+            };
+            say!(
+                "tapestryd: gpu capset[{}] id={} max_version={} max_size={}",
+                idx,
+                id,
+                ver,
+                size
+            );
+            // An enumerated-but-empty capset is not fetchable (audit W1
+            // F1: a VMM may list an id its renderer lacks with size 0;
+            // rank-by-id alone would prefer it over a populated one).
+            if size == 0 {
+                continue;
+            }
+            if best.map_or(true, |(bid, _, _)| rank(id) > rank(bid)) {
+                best = Some((id, ver, size));
+            }
+        }
+        if let Some((id, ver, size)) = best {
+            if let Err(e) = self.get_capset(id, ver, size) {
+                if self.ctrl.dead {
+                    return Err(e);
+                }
+                say!("tapestryd: gpu GET_CAPSET id={} refused (engine healthy); 2D only", id);
+            }
+        }
+        Ok(())
+    }
+
+    /// GET_CAPSET_INFO for one index -> (capset_id, max_version, max_size).
+    fn get_capset_info(&mut self, index: u32) -> Result<(u32, u32, u32), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_CAPSET_INFO);
+            w32(req_va + 24, index);
+            w32(req_va + 28, 0);
+            // Residue guard (audit W1 F2 -- the get_capset <16-byte rule,
+            // applied here): the engine zeroes only the response HEADER,
+            // and these three words are read with no used-len check, so a
+            // short-writing device would hand back the PRIOR response's
+            // bytes. Zeroed, a short write reads as size=0 -> skipped.
+            let resp = self.ring_va + RESP_OFF;
+            w32(resp + 24, 0);
+            w32(resp + 28, 0);
+            w32(resp + 32, 0);
+        };
+        self.ctrl.step(
+            "GET_CAPSET_INFO",
+            GPU_CTRL_HDR_LEN + 8,
+            GPU_CTRL_HDR_LEN + 16,
+            VIRTIO_GPU_RESP_OK_CAPSET_INFO,
+        )?;
+        let r = self.ring_va + RESP_OFF + GPU_CTRL_HDR_LEN as u64;
+        Ok((unsafe { r32(r) }, unsafe { r32(r + 4) }, unsafe { r32(r + 8) }))
+    }
+
+    /// GET_CAPSET: fetch the capset blob into the RESP region and log its
+    /// head -- the Warp-1 in-guest gate evidence. `size` (the device's own
+    /// max_size) is clamped to the RESP region; the virgl v1/v2 blobs
+    /// (308 / ~1.2K) fit whole, and a clamped fetch says so in the log.
+    fn get_capset(&mut self, id: u32, version: u32, size: u32) -> Result<(), Error> {
+        let take = size.min(RESP_REGION_LEN - GPU_CTRL_HDR_LEN);
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_CAPSET);
+            w32(req_va + 24, id);
+            w32(req_va + 28, version);
+        };
+        self.ctrl.step(
+            "GET_CAPSET",
+            GPU_CTRL_HDR_LEN + 8,
+            GPU_CTRL_HDR_LEN + take,
+            VIRTIO_GPU_RESP_OK_CAPSET,
+        )?;
+        // The log is the Warp-1 gate evidence, so it must only quote bytes
+        // the device wrote THIS round: submit_and_wait zeroes just the
+        // response header, and a blob shorter than 16 bytes would leave the
+        // word reads on a prior response's residue.
+        if take < 16 {
+            say!(
+                "tapestryd: gpu GET_CAPSET id={} ver={} -> {} bytes (short; head not quoted)",
+                id,
+                version,
+                take
+            );
+            return Ok(());
+        }
+        let blob = self.ring_va + RESP_OFF + GPU_CTRL_HDR_LEN as u64;
+        say!(
+            "tapestryd: gpu GET_CAPSET id={} ver={} -> {} bytes{}; caps[0..16] = {:#010x} {:#010x} {:#010x} {:#010x}",
+            id,
+            version,
+            take,
+            if take < size { " (clamped)" } else { "" },
+            unsafe { r32(blob) },
+            unsafe { r32(blob + 4) },
+            unsafe { r32(blob + 8) },
+            unsafe { r32(blob + 12) }
+        );
+        Ok(())
     }
 
     /// GET_DISPLAY_INFO: adopt scanout 0's enabled rect as the display

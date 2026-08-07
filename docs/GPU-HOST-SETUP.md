@@ -108,6 +108,18 @@ This is the proximity-beats-provenance trap in its natural habitat: the old
 number is right there in a document that looks exactly like the one being
 written, and it is not a reading of this machine.
 
+**AS-MEASURED at Warp-1 (three runs; `build/warp1-bench-run{1,2,3}.log`)**:
+llvmpipe GLQuake on this host is the band **2.4–5.9 fps** — single-digit,
+with real run-to-run drift and a 3/3-reproducing within-boot degradation
+(the third demo of a boot collapses to ~2.4–2.9 fps) that per-demo swap
+counters PROVED is not swapping → **#168, UNEXPLAINED** (macOS/HVF
+multi-demo boots show no such decay). Two guard rules came out of it:
+sample the swap counters **around each timed figure, not each run** (a
+guard must certify at the granularity of the figures it stamps — runs 1–2
+discarded healthy demos alongside the poisoned one), and treat any Warp-4
+virgl comparison as valid only if it beats single digits decisively or
+#168 is resolved first.
+
 ---
 
 ## 1. Distro: Debian 13 (ARM64) + XFCE — and why not Alpine
@@ -184,7 +196,7 @@ own disk; see §6.
 
 ```bash
 sudo apt update && sudo apt install -y \
-    qemu-system-arm qemu-utils \
+    qemu-system-arm qemu-utils ipxe-qemu \
     mesa-utils mesa-utils-bin libgl1-mesa-dri libglx-mesa0 \
     libegl-mesa0 libgbm1 \
     mesa-vulkan-drivers vulkan-tools \
@@ -192,6 +204,14 @@ sudo apt update && sudo apt install -y \
     expect python3 rsync git openssh-server \
     build-essential pkg-config
 ```
+
+**`ipxe-qemu` is load-bearing and the probe cannot see its absence** (found
+at Warp-1 first boot): Debian splits QEMU's PCI option ROMs into that
+package, and without it any `-device virtio-net-pci` fails at startup with
+`failed to find romfile "efi-virtio.rom"`. The probe's rung 6 runs
+`-nodefaults` with no NIC, so it passes on a host where the real
+`tools/run-vm.sh` invocation (which carries the canonical net devices)
+cannot start at all.
 
 What each group is for: `qemu-system-arm` is the host QEMU (aarch64 target);
 the `mesa-*`/`libegl`/`libgbm` set provides the host GL and the EGL/GBM layer
@@ -381,23 +401,45 @@ change rates.
 ssh thyla-gl 'git clone <origin-url> ~/projects/thylacine'
 ```
 
-**Artifacts: rsync, sparsely.** Build on the Mac as usual
+**Artifacts: `tools/warp-host.sh sync` (AS-EXECUTED at Warp-1 — supersedes
+the rsync recipe below).** Build on the Mac as usual
 (`THYLACINE_BAKE_CLADE=1 THYLACINE_MKFS_PRESERVE=1 tools/build.sh all`), then:
 
 ```bash
+tools/warp-host.sh sync     # repo (git archive HEAD) + all four boot artifacts
+```
+
+Three as-executed corrections to the original plan:
+
+- **macOS ships openrsync**, whose `--sparse` support is not dependable, so
+  the pool travels as `gzip -1 | ssh | dd conv=sparse` — zeros compress to
+  nothing on the wire and re-punch as holes on the VM disk (906 MB physical
+  lands as 906 MB).
+- **The artifact set is four files, not two**: `kernel/thylacine.bin` (what
+  `run-vm.sh -kernel` actually loads — the ELF alone stops the launcher
+  cold), `kernel/thylacine.elf` (gdb), `ramfs.cpio`, `disk.img`, plus
+  `fixtures/pool.img`.
+- **Working copies on the VM live in `~/warp/`, never `/tmp`** — Debian 13
+  mounts `/tmp` as tmpfs, so a ~1 GB pool copy there would eat guest RAM
+  out of the 3.9 GB that QEMU needs. `tools/warp/boot-probe.sh` does the
+  per-attempt fixture isolation (#78/#85) on disk.
+
+The original rsync form, kept for a host with real rsync:
+
+```bash
 rsync -av --sparse --inplace --info=progress2 \
-    build/disk.img build/kernel.elf \
-    thyla-gl:~/projects/thylacine/build/
+    build/disk.img build/kernel/thylacine.bin \
+    thyla-gl:~/projects/thylacine/build/kernel/
 
 rsync -av --sparse --inplace --info=progress2 \
     build/fixtures/pool.img \
     thyla-gl:~/projects/thylacine/build/fixtures/
 ```
 
-`--sparse` keeps the pool image at its real 906 MB rather than inflating it to
-5 GB; `--inplace` lets rsync's delta algorithm rewrite only changed blocks on
-subsequent syncs, which is what makes iteration bearable. First sync ~1 GB;
-later ones typically far less.
+Measured at Warp-1: first full sync ~4 min over shared networking; boot to
+`Thylacine boot OK` **~230 s** (TCG, `-smp 4 -m 2048`, NOSTORM), against the
+~180 s LS-CI budget calibrated for native-M2 TCG — set `LS_CI_BOOT_TIMEOUT=900`
+for anything harness-driven on this host.
 
 **Keep the Mac as the build host.** The VM has no KVM (Apple only added nested
 virtualisation on M3; this is an M2), so QEMU there runs TCG. Our
