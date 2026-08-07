@@ -3,6 +3,12 @@
 **Status**: as-built at Warp-2 (sub-chunks 2a–2e; the seam kernel arc of
 `docs/GPU-DESIGN.md` §12 row 2). Landing commits: `ce70a3a9` (2a, #166),
 `e2accc2e` (2b), `2a3ab4f3` (2c), `16d425cb` (2d), `0a5a7f6c` (2e prover).
+**Five audit rounds rewrote most of the mechanism this file documents, so
+they are landing commits too**: `1451c3aa` (r1), `d3ce5f3e` (r2),
+`ccc9bae2` (r3), `86cbf393` (r4), and the r5 close. Every round but the
+last found a defect *in the previous round's fix*, and every finding was a
+bound or a reclamation whose composition went unchecked — read that as the
+standing hazard of this file's subject matter, not as history.
 Consumers today: the `/warp-prove` gate binary; next: the Mesa virgl winsys
 (Warp-3).
 
@@ -128,6 +134,16 @@ the audited two-page sync ring is byte-identical.
   can never signal is a client wedge — the completion is the retirement.
 - **A full lane refuses** (`Again` → E_AGAIN), never blocks: the serve loop
   is the console (#31/#125).
+- **One ctx may hold at most half the lane** (`WARP_CTX_FENCE_MAX =
+  FENCED_SLOTS / 2`, round-5 F4). `alloc_fenced_slot` is first-fit over a
+  PROCESS-WIDE pool and nothing capped a single ctx, so one unprivileged
+  client could take all four slots — starving every other client for as
+  long as its chains ran, then, at the abandonment deadline, poisoning all
+  four at once and killing 3D for the whole box (`lane_exhausted` → the
+  do-not-retry `E_IO`). Half leaves room for a second client always, and
+  still admits the submit+transfer pair one client needs in flight
+  together — which is exactly what `/warp-prove` does, so the number is
+  load-bearing for the gate.
 - Commands: `SUBMIT_3D` 0x0207 (header + size + inline stream; one Twrite =
   one atomic submission, iounit-bounded until the Loom-carried §4.1 path),
   `TRANSFER_TO/FROM_HOST_3D` 0x0205/0x0206 (fence-bearing by design — a
@@ -138,7 +154,15 @@ the audited two-page sync ring is byte-identical.
 the newest signaled id once (records coalesce — FIFO within the single
 ring, so id N retires everything <= N) and PARKS otherwise (`PendingFence`,
 the FK_EVENT netd leg) with all four cancel sites mirrored: clunk, Tversion
-reset, conn teardown, Tflush. A dead ctx EOFs the stream. The serve loop
+reset, conn teardown, Tflush. A dead ctx EOFs the stream — and so does a
+**poisoned** one, unconditionally (round-5 F2). That EOF used to be
+conditional on `fence_signaled <= fence_reported`, which the client could
+suppress itself: fence ids are globally monotone, so any later submission
+that completed left `signaled > reported` and the read returned that higher
+id — which, under the coalescing rule above, *asserts the abandoned fence
+completed*. A poisoned ctx also refuses new submissions and transfers with
+`E_IO`: the poison is the ctx's terminal state, and the client must destroy
+and re-mint (a vindication clears it and the stream resumes). The serve loop
 (`main.rs`) pumps `warp_service_fences()` per pass and clamps the poll
 timeout to 1 ms while fenced chains are in flight (the GPU IRQ is not
 pollable; `irq.wait` exists only inside a sync submit).
@@ -163,17 +187,32 @@ early-return).
 
 A poisoned ctx **leaks** rather than frees: handle + mapping stay pinned
 for the Proc's life, because an abandoned chain may still DMA the
-backing. Leak-on-wedge, never UAF. Three consequences the code enforces:
-leaked bytes keep counting against `WARP_CTX_BACKING_MAX` (round-2 F3 —
-releasing the accounting let a client leak without bound, one cap's
-worth per cycle); a ctx **slot** retired while poisoned is itself
-poisoned, so its `dev_ctx` id is not re-minted while the device may
-still execute that context's stream -- the slot returns to the pool only
-once the driver holds NO poisoned slot for that ctx and the quiesced
-device context has been destroyed (round-4 F1/F3); `ctl`'s `poisoned`
-count reports how many slots are held back
-(round-2 F8); and a parked fence read on that ctx gets EOF, since the
-fence it waits on can never signal (round-2 F7).
+backing. Leak-on-wedge, never UAF. Four consequences the code enforces:
+
+- **A leaked backing is PARKED, not dropped** (round-5 F1). Its `WarpBo` —
+  `dma_fd` deliberately still valid — moves into a per-ctx-slot graveyard,
+  and the vindication that recovers the slot frees it from there, because
+  the same device proof licenses both. Before this, vindication recovered
+  the slot but never the pages: `wctx_finish` was the one `wbo_retire`
+  caller of three that discarded the returned byte count, and it also
+  `take()`s the ctx that `leaked_bytes` lives in — so each recovered slot
+  handed the client a fresh `WARP_CTX_BACKING_MAX` while 64 MiB stayed
+  gone. Per-ctx `leaked_bytes` still bounds a *live* ctx; the graveyard is
+  what makes the bound survive the ctx. If a slot's graveyard overflows,
+  the slot is condemned **permanently** rather than vindicated — the
+  ceiling stays `MAX_WARP_CTXS x WARP_CTX_BACKING_MAX`.
+- A ctx **slot** retired while poisoned is itself poisoned, so its
+  `dev_ctx` id is not re-minted while the device may still execute that
+  context's stream. The slot returns to the pool only once the driver holds
+  NO poisoned slot for that ctx (round-4 F1) **and `ctx_destroy` actually
+  returned `Ok`** (round-4 F3, made a check rather than an assertion by
+  round-5 F3 — `ctx_destroy` is fallible on a *healthy* engine, and the
+  un-poison used to run regardless). The clean-retire path condemns its
+  slot on the same refusal.
+- `ctl`'s `poisoned` count reports how many slots are held back
+  (round-2 F8), including the permanently condemned ones.
+- A parked fence read on that ctx gets EOF, since the fence it waits on can
+  never signal (round-2 F7, made unconditional by round-5 F2).
 
 The retire order inside `wbo_retire` is R2-F5: weft_unshare FIRST (a
 racing Tweft claim fails closed), then device detach (DETACH_BACKING +

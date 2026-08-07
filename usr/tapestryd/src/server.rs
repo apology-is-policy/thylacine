@@ -128,6 +128,10 @@ const MAX_SURFACES_PER_CONN: usize = 4;
 /// bookkeeping bound, not the resource authority).
 const MAX_WARP_CTXS: usize = 8;
 const MAX_WARP_BOS_PER_CTX: usize = 16;
+/// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
+/// a second client can always make progress and no single client can drive
+/// every slot into the abandonment poison.
+const WARP_CTX_FENCE_MAX: usize = crate::gpu::FENCED_SLOTS / 2;
 /// Total live BO backing per context (audit F2). The per-BO kernel
 /// envelope is 64 MiB, and 16 BOs x 8 ctxs would let clients pin 8 GiB of
 /// contiguous kernel memory that NOTHING charges -- graceful-OOM, but I-32
@@ -613,6 +617,21 @@ pub struct Comp {
     /// (round-2 F8): never re-minted, because dev_ctx is derived from the
     /// slot index and reuse would alias a stale stream onto a new client.
     warp_ctx_slot_poisoned: [bool; MAX_WARP_CTXS],
+    /// Backings the wedge posture refused to free, parked per ctx SLOT so
+    /// the vindication that proves the device finished can free them
+    /// (round-5 F1). Without this the vindication recovered the SLOT but
+    /// never the PAGES, and since the ctx -- and with it `leaked_bytes` --
+    /// dies at `wctx_finish`, each recovered slot handed the client a
+    /// fresh cap: 64 MiB leaked per cycle, unbounded. Bounded here by
+    /// construction: a ctx holds at most MAX_WARP_BOS_PER_CTX backings at
+    /// a time, and a slot whose graveyard overflowed is never vindicated.
+    warp_ctx_leaked: [[Option<WarpBo>; MAX_WARP_BOS_PER_CTX]; MAX_WARP_CTXS],
+    /// A leaked backing that did not fit its slot's graveyard. The slot is
+    /// then condemned PERMANENTLY -- recycling it would re-arm the per-ctx
+    /// cap with those pages still lost, which is exactly the unbounded
+    /// cycle the graveyard closes. Keeps the ceiling at
+    /// MAX_WARP_CTXS x WARP_CTX_BACKING_MAX.
+    warp_ctx_leak_overflow: [bool; MAX_WARP_CTXS],
     /// The pub id whose poison condemned each slot, so a later
     /// vindication can release it (round-3 F2). 0 = none.
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
@@ -708,6 +727,8 @@ impl Comp {
             test_mode: false,
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
+            warp_ctx_leaked: [WARP_NO_BO_ROW; MAX_WARP_CTXS],
+            warp_ctx_leak_overflow: [false; MAX_WARP_CTXS],
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
@@ -2450,6 +2471,8 @@ const FENCE_REC_MAX: usize = 21;
 
 const WARP_NO_CTX: Option<WarpCtx> = None;
 const WARP_NO_BO: Option<WarpBo> = None;
+/// `WarpBo` is not Copy, so the outer array-repeat needs a const item.
+const WARP_NO_BO_ROW: [Option<WarpBo>; MAX_WARP_BOS_PER_CTX] = [WARP_NO_BO; MAX_WARP_BOS_PER_CTX];
 
 // --- Warp-2c: the GPU-seam object lifecycle -------------------------------
 impl Comp {
@@ -2509,7 +2532,17 @@ impl Comp {
         if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
             return None;
         }
+        // Never mint 0: it is `warp_ctx_vindicate`'s "no condemned slot"
+        // sentinel, so a wrapped pub_id would make the vindication's
+        // `position(|&p| p == 0)` match an arbitrary unrelated slot,
+        // ctx_destroy a live host context and un-poison a legitimately
+        // condemned one. Same 2^32 family as the deferred res_seq wrap, but
+        // that one was dispositioned "verified to fail closed" -- this
+        // sibling fails OPEN, and skipping the value costs nothing.
         self.warp_ctx_seq = self.warp_ctx_seq.wrapping_add(1);
+        if self.warp_ctx_seq == 0 {
+            self.warp_ctx_seq = 1;
+        }
         let pub_id = self.warp_ctx_seq;
         self.warp_ctxs[slot] = Some(WarpCtx {
             owner_conn: conn,
@@ -2764,14 +2797,22 @@ impl Comp {
             // and uncharged, which is worse than the wedge leak the move
             // was made for.
             let fd = b.dma_fd;
-            b.dma_fd = -1;
             if leak {
+                // `dma_fd` is deliberately LEFT VALID (round-5 F1): the
+                // caller parks this record in its slot's graveyard, and a
+                // later vindication -- the device proving it finished --
+                // frees it from there. Zeroing it here would hand the
+                // graveyard a record it could never free, which is the
+                // round-3 F1 shape with the ownership reversed: there a
+                // moved statement orphaned a use below it, here it would
+                // orphan a use in another function.
                 say!(
-                    "tapestryd: warp bo res {} LEAKED {} bytes (fence wedge)",
+                    "tapestryd: warp bo res {} leak-parked {} bytes (fence wedge)",
                     b.res_id, b.size
                 );
                 return b.size;
             }
+            b.dma_fd = -1;
             unsafe { t_burrow_detach(b.va, b.size) };
             unsafe { t_close(fd) };
         }
@@ -2782,10 +2823,53 @@ impl Comp {
     /// every BO, then CTX_DESTROY (synchronous, so the device-side ctx is
     /// quiesced when the slot -- and with it the dev_ctx id -- becomes
     /// reusable). `leak` propagates the wedge posture to every backing.
+    /// Park a backing the wedge posture refused to free, so the vindication
+    /// can free it once the device proves it is finished (round-5 F1).
+    /// Returns false when this slot's graveyard is full; the slot is then
+    /// condemned permanently, because recycling it would re-arm the per-ctx
+    /// cap with those pages still lost -- the unbounded cycle itself.
+    fn warp_park_leaked(&mut self, slot: usize, b: WarpBo) -> bool {
+        if let Some(g) = self.warp_ctx_leaked[slot].iter_mut().find(|g| g.is_none()) {
+            *g = Some(b);
+            return true;
+        }
+        self.warp_ctx_leak_overflow[slot] = true;
+        say!("tapestryd: warp ctx slot {} leak graveyard full -- slot condemned", slot);
+        false
+    }
+
+    /// Free every backing parked for this slot. Sound ONLY at vindication:
+    /// the device has just retired the chain that condemned them, which is
+    /// the same proof that lets the slot itself be recycled.
+    fn warp_free_leaked(&mut self, slot: usize) {
+        for j in 0..MAX_WARP_BOS_PER_CTX {
+            let b = match self.warp_ctx_leaked[slot][j].take() {
+                Some(b) => b,
+                None => continue,
+            };
+            if b.dma_fd >= 0 {
+                unsafe { t_burrow_detach(b.va, b.size) };
+                unsafe { t_close(b.dma_fd) };
+            }
+        }
+    }
+
     fn wctx_finish(&mut self, slot: usize, leak: bool) {
         if let Some(mut c) = self.warp_ctxs[slot].take() {
-            for b in c.bos.iter_mut().flatten() {
-                Self::wbo_retire(&mut self.gpu, c.dev_ctx, b, leak);
+            // Take each backing by VALUE: a leak-parked record must outlive
+            // this ctx (round-5 F1). Borrowing them, as this loop did, meant
+            // the leaked bytes AND the records were dropped at the `return`
+            // below -- and this was the one wbo_retire caller of three that
+            // discarded the returned count, so the round-2 F3 accounting
+            // died here with the only object holding it.
+            for j in 0..MAX_WARP_BOS_PER_CTX {
+                let mut b = match c.bos[j].take() {
+                    Some(b) => b,
+                    None => continue,
+                };
+                if Self::wbo_retire(&mut self.gpu, c.dev_ctx, &mut b, leak) > 0 {
+                    self.warp_park_leaked(slot, b);
+                }
             }
             if leak {
                 // Round-2 F8: `leak` means "the device may still be
@@ -2803,7 +2887,31 @@ impl Comp {
                 say!("tapestryd: warp ctx slot {} POISONED (fence wedge)", slot);
                 return;
             }
-            let _ = self.gpu.ctx_destroy(c.dev_ctx);
+            // A CLEAN finish is a stronger proof than a vindication: it
+            // requires `fences_in_flight == 0` AND `!fence_poisoned`, and
+            // the poison only clears via a vindication, which itself
+            // requires the device to have retired every abandoned chain
+            // this ctx owned. So anything parked earlier in this ctx's life
+            // is provably free of the device now -- free it, and clear the
+            // overflow condemnation with it. Without this the flag outlived
+            // the ctx that set it and condemned an unrelated LATER ctx that
+            // happened to land on the same slot.
+            self.warp_free_leaked(slot);
+            self.warp_ctx_leak_overflow[slot] = false;
+            // Round-5 F3, the same shape at the clean-retire site: the ctx
+            // was already taken above, so the slot -- and with it dev_ctx =
+            // slot+1 -- is free the moment this returns. A refused destroy
+            // means the host may still hold that context, so condemn the
+            // slot rather than mint into a live id. No `warp_ctx_vindicate`
+            // stamp: nothing can prove this one safe later, and a permanent
+            // condemnation that `warp_poisoned_slots` reports is honest.
+            if self.gpu.ctx_destroy(c.dev_ctx).is_err() {
+                self.warp_ctx_slot_poisoned[slot] = true;
+                say!(
+                    "tapestryd: warp ctx slot {} destroy REFUSED on clean retire -- condemned",
+                    slot
+                );
+            }
         }
     }
 
@@ -2854,6 +2962,14 @@ impl Comp {
                 }
                 let mut b = self.warp_ctxs[i].as_mut().unwrap().bos[j].take().unwrap();
                 let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                if leaked > 0 {
+                    // Park it too (round-5 F1): `leaked_bytes` bounds this
+                    // ctx's remaining life, but the ctx dies at wctx_finish
+                    // and a client can cycle mint->leak->destroy, so the
+                    // charge alone re-arms. The graveyard is what actually
+                    // gets the pages back at vindication.
+                    self.warp_park_leaked(i, b);
+                }
                 if let Some(c) = self.warp_ctxs[i].as_mut() {
                     c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
                 }
@@ -2885,6 +3001,9 @@ impl Comp {
             if quiesced {
                 let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j].take().unwrap();
                 let leaked = Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+                if leaked > 0 {
+                    self.warp_park_leaked(slot, b);
+                }
                 if let Some(c) = self.warp_ctxs[slot].as_mut() {
                     c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
                 }
@@ -2973,18 +3092,39 @@ impl Comp {
                     break;
                 }
             }
-            if let Some(slot) = self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
-                // The leak arm skipped CTX_DESTROY (a context with live
-                // work must not be destroyed). Now that the device is
-                // provably finished, destroy it BEFORE the slot -- and
-                // with it dev_ctx = slot+1 -- returns to the pool, or the
-                // next client's CTX_CREATE would collide with a host
-                // context that still exists (round-4 F3).
-                let _ = self.gpu.ctx_destroy((slot as u32) + 1);
-                self.warp_ctx_slot_poisoned[slot] = false;
-                self.warp_ctx_vindicate[slot] = 0;
-                say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);
+            let slot = match self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
+                Some(s) => s,
+                None => continue,
+            };
+            // A slot that lost a backing it could not park can never be
+            // recycled (round-5 F1): handing it back would give the next
+            // client a fresh WARP_CTX_BACKING_MAX while those pages stay
+            // gone, which is the unbounded cycle rather than a bound.
+            if self.warp_ctx_leak_overflow[slot] {
+                continue;
             }
+            // The leak arm skipped CTX_DESTROY (a context with live work
+            // must not be destroyed). Now that the device is provably
+            // finished, destroy it BEFORE the slot -- and with it dev_ctx =
+            // slot+1 -- returns to the pool, or the next client's
+            // CTX_CREATE would collide with a host context that still
+            // exists (round-4 F3). Round-5 F3: that was written as an
+            // assertion, not a check -- `ctx_destroy` is fallible on a
+            // HEALTHY engine (a resp-type mismatch does not latch `dead`),
+            // and the un-poison ran regardless. A refused destroy leaves
+            // the slot condemned instead.
+            if self.gpu.ctx_destroy((slot as u32) + 1).is_err() {
+                say!(
+                    "tapestryd: warp ctx slot {} destroy REFUSED -- slot stays condemned",
+                    slot
+                );
+                continue;
+            }
+            // Only now are the parked backings provably free of the device.
+            self.warp_free_leaked(slot);
+            self.warp_ctx_slot_poisoned[slot] = false;
+            self.warp_ctx_vindicate[slot] = 0;
+            say!("tapestryd: warp ctx slot {} recovered (device finished)", slot);
         }
         self.warp_pump_retires();
     }
@@ -2999,8 +3139,32 @@ impl Comp {
     /// SUBMIT_3D from the ctx submit file: one Twrite = one atomic opaque
     /// submission on the fenced lane. Returns the fence id (the fence
     /// file's completion record).
+    /// Admission for every fenced submission, returning the device ctx id.
+    ///
+    /// Two bounds the lane itself cannot express. **Round-5 F2**: a poisoned
+    /// ctx is TERMINAL -- the rest of the mechanism already treats its
+    /// backings as possibly-live-DMA, so letting it submit again is what let
+    /// a client re-arm its own fence stream and hide the wedge. **Round-5
+    /// F4**: `alloc_fenced_slot` is first-fit over a process-wide pool of
+    /// FENCED_SLOTS, and nothing capped a single ctx, so one client could
+    /// take all four -- starving every other client, then poisoning all four
+    /// at the abandonment deadline and killing 3D for the whole box. Half
+    /// the lane is the share: it leaves room for a second client always, and
+    /// still admits the submit+transfer pair a single client needs in
+    /// flight together.
+    fn warp_fenced_admit(&mut self, ctx_pub: u32, conn: u64) -> Result<u32, u32> {
+        let c = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?;
+        if c.fence_poisoned {
+            return Err(E_IO);
+        }
+        if c.fences_in_flight as usize >= WARP_CTX_FENCE_MAX {
+            return Err(E_AGAIN);
+        }
+        Ok(c.dev_ctx)
+    }
+
     fn warp_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
-        let dev_ctx = self.wctx(ctx_pub, conn).ok_or(p9::E_NOENT)?.dev_ctx;
+        let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
         match self.gpu.submit_3d(dev_ctx, ctx_pub, stream) {
             Ok(f) => {
                 self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
@@ -3029,13 +3193,14 @@ impl Comp {
         stride: u32,
         layer_stride: u32,
     ) -> Result<u64, u32> {
-        let (ctx_pub, dev_ctx, res_id, built) = match self.wbo(bo_pub, conn) {
-            Some((c, b)) => (c.pub_id, c.dev_ctx, b.res_id, b.dma_fd >= 0),
+        let (ctx_pub, res_id, built) = match self.wbo(bo_pub, conn) {
+            Some((c, b)) => (c.pub_id, b.res_id, b.dma_fd >= 0),
             None => return Err(p9::E_NOENT),
         };
         if !built {
             return Err(p9::E_INVAL);
         }
+        let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
         match self.gpu.transfer_3d(
             to_host, dev_ctx, ctx_pub, res_id, level, x, y, z, w, h, d, offset, stride,
             layer_stride,
@@ -3745,9 +3910,21 @@ impl Conn {
                         return p9::build_rread(&mut self.out_buf, tag, &[]);
                     }
                     let c = comp.wctx(id, self.conn_id).unwrap();
-                    if c.fence_poisoned && c.fence_signaled <= c.fence_reported {
+                    if c.fence_poisoned {
                         // Stream over: a fence of this ctx was abandoned
-                        // and can never signal (round-2 F7).
+                        // and can never signal (round-2 F7). UNCONDITIONAL
+                        // since round-5 F2 -- the old `&& fence_signaled <=
+                        // fence_reported` conjunct let the client suppress
+                        // its own EOF: fence ids are globally monotone, so
+                        // ANY later submission that completes leaves
+                        // signaled > reported, and the read then returned
+                        // that higher id. Under the documented "id N
+                        // retires everything <= N" coalescing rule that
+                        // record ASSERTS the abandoned fence completed --
+                        // so the client would reuse a backing this very
+                        // seam believes the device may still be writing.
+                        // A vindication clears the poison and the stream
+                        // legitimately resumes.
                         return p9::build_rread(&mut self.out_buf, tag, &[]);
                     }
                     if c.fence_signaled > c.fence_reported {
@@ -4956,7 +5133,8 @@ impl Conn {
                 // (abandoned, not completed). Reporting nothing forever
                 // stranded the reader with neither record nor EOF
                 // (round-2 F7) -- end the stream so the client learns.
-                Some(c) if c.fence_poisoned && c.fence_signaled <= c.fence_reported => None,
+                // Unconditional since round-5 F2 -- see the h_read twin.
+                Some(c) if c.fence_poisoned => None,
                 Some(c) if c.fence_signaled > c.fence_reported => Some(c.fence_signaled),
                 Some(_) => {
                     i += 1;

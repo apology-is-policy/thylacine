@@ -265,11 +265,29 @@ pub extern "C" fn rs_main() -> i64 {
     if !write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy") {
         fail("ctx destroy");
     }
+    // `ctxs` alone is satisfiable by a DEFERRED destroy (round-5 F5):
+    // warp_live_ctxs excludes `retiring` contexts by design, so a ctx that
+    // could not quiesce -- and may still go on to leak every backing --
+    // reads 0 immediately. Assert the thing deferral cannot fake first: the
+    // ctx must be genuinely unresolvable.
+    let gone = format!("ctx/{}/ctl", ctx);
+    let re = unsafe { t_open(root, gone.as_ptr(), gone.len(), T_OREAD) };
+    if re >= 0 {
+        unsafe { t_close(re) };
+        fail("ctx still resolvable after destroy");
+    }
     let ctl2 = open_read_string(root, "ctl");
     match parse_field(&ctl2, "ctxs") {
         Some(0) => {}
         Some(v) => fail(&format!("ctxs {} after destroy (want 0)", v)),
         None => fail("ctl reread"),
+    }
+    // A condemned slot means a fence was abandoned somewhere in this run --
+    // the gate must not pass with the seam in its wedge state.
+    match parse_field(&ctl2, "poisoned") {
+        Some(0) => {}
+        Some(v) => fail(&format!("poisoned {} after a clean run (want 0)", v)),
+        None => fail("ctl poisoned field missing"),
     }
 
     unsafe { t_close(map_fd) };
