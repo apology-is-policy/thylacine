@@ -53,6 +53,17 @@ struct KObj_MMIO;               // <thylacine/mmio_handle.h>
 #define VIRTIO_PCI_CAP_DEVICE_CFG   4u
 #define VIRTIO_PCI_CAP_REGION_COUNT 4u
 
+// Shared-memory capability (VIRTIO 1.2 §4.1.4.7): a virtio_pci_cap64 whose
+// offset/length carry 64-bit halves (offset_hi @+16, length_hi @+20) and whose
+// cap.id byte (@+5) is the shmid. Carried by virtio-gpu (shmid 1 = hostmem
+// blobs, the Venus HOST_VISIBLE heap) and virtio-fs (shmid 0 = DAX).
+#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG 8u
+
+// Discovered shared-memory regions retained per function. Real devices carry
+// one (gpu hostmem / fs DAX); 2 leaves headroom without inviting a hostile
+// cap list to grow kernel state (further caps are ignored, bounded).
+#define PCI_SHM_COUNT 2u
+
 // PCI BAR low-bit decode (PCI Local Bus 6.2.5.1). Bit 0: 0 = memory BAR, 1 =
 // I/O BAR. For memory BARs, bits[2:1] = type (00 = 32-bit, 10 = 64-bit), bit 3 =
 // prefetchable. The low 4 bits are read-only attribute bits; the size mask
@@ -95,6 +106,18 @@ struct pci_region {
     u32  length;     // byte length (offset + length <= bars[bar].size)
 };
 
+// A discovered VIRTIO shared-memory region (cfg_type 8). 64-bit offset/length
+// (the hostmem BAR is the one BAR class that outgrows u32). Discovery only:
+// the kernel validates it against the backing BAR and reports it via
+// SYS_PCI_INFO; mapping a subrange is the owner's later, explicit act.
+struct pci_shm {
+    bool present;
+    u8   shmid;      // the cap's id byte — the region's identity per spec
+    u8   bar;        // which BAR holds it (< PCI_BAR_COUNT, present)
+    u64  offset;     // byte offset within the BAR (offset_hi:offset)
+    u64  length;     // byte length (offset + length <= bars[bar].size)
+};
+
 struct KObj_PCI {
     u64 magic;       // KOBJ_PCI_MAGIC
     int ref;         // refcount; starts at 1 from kobj_pci_claim
@@ -111,6 +134,7 @@ struct KObj_PCI {
 
     struct pci_bar    bars[PCI_BAR_COUNT];
     struct pci_region regions[VIRTIO_PCI_CAP_REGION_COUNT];   // (cfg_type - 1)
+    struct pci_shm    shm[PCI_SHM_COUNT];   // cfg_type 8, discovery order
     u32 notify_off_multiplier;   // from the NOTIFY_CFG cap
 
     u32  intid;        // GIC INTID from dtb_pci_intx_route(dev, INTA)

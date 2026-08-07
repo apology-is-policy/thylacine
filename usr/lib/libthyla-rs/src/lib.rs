@@ -804,6 +804,16 @@ pub struct TPciRegion {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct TPciShm {
+    pub offset: u64,    // 0
+    pub length: u64,    // 8
+    pub bar: u8,        // 16
+    pub present: u8,    // 17
+    pub shmid: u8,      // 18 (gpu hostmem = 1, fs DAX = 0)
+    pub _pad: [u8; 5],  // 19
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct TPciInfo {
     pub bars: [TPciBar; 6],         // 0
     pub regions: [TPciRegion; 4],   // 144
@@ -815,6 +825,7 @@ pub struct TPciInfo {
     pub fn_: u8,                    // 203 ('fn' is a Rust keyword)
     pub virtio_device_id: u16,      // 204
     pub _pad: [u8; 2],              // 206
+    pub shm: [TPciShm; 2],          // 208 (cfg_type 8, discovery order)
 }
 // Pin EVERY field offset against the kernel header (syscall.h:1466-1509), not
 // just size + a sample -- a future kernel field reorder must fail this compile,
@@ -830,7 +841,13 @@ const _: () = assert!(core::mem::offset_of!(TPciRegion, offset) == 0);
 const _: () = assert!(core::mem::offset_of!(TPciRegion, length) == 4);
 const _: () = assert!(core::mem::offset_of!(TPciRegion, bar) == 8);
 const _: () = assert!(core::mem::offset_of!(TPciRegion, present) == 9);
-const _: () = assert!(core::mem::size_of::<TPciInfo>() == 208);
+const _: () = assert!(core::mem::size_of::<TPciShm>() == 24);
+const _: () = assert!(core::mem::offset_of!(TPciShm, offset) == 0);
+const _: () = assert!(core::mem::offset_of!(TPciShm, length) == 8);
+const _: () = assert!(core::mem::offset_of!(TPciShm, bar) == 16);
+const _: () = assert!(core::mem::offset_of!(TPciShm, present) == 17);
+const _: () = assert!(core::mem::offset_of!(TPciShm, shmid) == 18);
+const _: () = assert!(core::mem::size_of::<TPciInfo>() == 256);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, bars) == 0);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, regions) == 144);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, notify_off_multiplier) == 192);
@@ -840,6 +857,7 @@ const _: () = assert!(core::mem::offset_of!(TPciInfo, bus) == 201);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, dev) == 202);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, fn_) == 203);
 const _: () = assert!(core::mem::offset_of!(TPciInfo, virtio_device_id) == 204);
+const _: () = assert!(core::mem::offset_of!(TPciInfo, shm) == 208);
 
 impl TPciInfo {
     /// An all-zero `TPciInfo` to hand to `t_pci_info` for fill. All fields are
@@ -857,6 +875,7 @@ impl TPciInfo {
             fn_: 0,
             virtio_device_id: 0,
             _pad: [0; 2],
+            shm: [TPciShm { offset: 0, length: 0, bar: 0, present: 0, shmid: 0, _pad: [0; 5] }; 2],
         }
     }
 }

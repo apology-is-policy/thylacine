@@ -239,16 +239,17 @@ Every claim below was checked against the tree this session.
 
 **What does not fit, found by fit-check:**
 
-- **`PciDev::claim` fails outright on a hostmem-enabled GPU.**
-  `hardware.rs:730` returns `PciError::BarTooLarge` for *any* present BAR larger
-  than `PCI_BAR_VA_STRIDE` (1 MiB), and it maps every present BAR eagerly. A
-  virtio-gpu with `hostmem=4G` presents a 4 GiB BAR 4 → the claim fails, and the
-  error names "misconfigured device" rather than "this device has a shared-memory
-  window." This is a real, blocking, already-written bug for the Venus path and a
-  latent one for blob-enabled virgl. It needs: a lazy/partial mapping policy for
-  oversized BARs, and shared-memory-capability (`cfg_type = 8`,
-  `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG`, `id = 1`) discovery in `SYS_PCI_INFO` — our
-  `PciRegion` enum stops at the four `cfg_type` 1–4 kinds.
+- **`PciDev::claim` fails outright on a hostmem-enabled GPU.** **[FIXED at
+  Warp-2a (#166)]** `hardware.rs` returned `PciError::BarTooLarge` for *any*
+  present BAR larger than `PCI_BAR_VA_STRIDE` (1 MiB), and it mapped every
+  present BAR eagerly. A virtio-gpu with `hostmem=4G` presents a 4 GiB BAR 4 →
+  the claim failed, and the error named "misconfigured device" rather than
+  "this device has a shared-memory window." As-built fix: an oversized BAR is
+  claimed but left unmapped (`region()` fails closed on it), and the kernel
+  cap walk now discovers shared-memory capabilities (`cfg_type = 8`,
+  `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG`, 64-bit halves, `id` = shmid) into
+  `t_pci_info.shm[2]`, surfaced as `PciDev::shm_region(shmid)`. Mapping a
+  subrange of the shm window remains the §6.2 Venus-chunk delta.
 - **virgl is PCI-only in QEMU.** There is no `virtio-gpu-gl-device` (MMIO)
   variant. Our GPU is already on PCI, so this costs nothing — but it forecloses
   the MMIO fallback.

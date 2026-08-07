@@ -892,6 +892,13 @@ s64 sys_pci_info_handler(u64 hraw, u64 info_va) {
         info.regions[i].bar     = k->regions[i].bar;
         info.regions[i].present = k->regions[i].present ? 1u : 0u;
     }
+    for (u32 i = 0; i < PCI_SHM_COUNT; i++) {
+        info.shm[i].offset  = k->shm[i].offset;
+        info.shm[i].length  = k->shm[i].length;
+        info.shm[i].bar     = k->shm[i].bar;
+        info.shm[i].present = k->shm[i].present ? 1u : 0u;
+        info.shm[i].shmid   = k->shm[i].shmid;
+    }
     info.notify_off_multiplier = k->notify_off_multiplier;
     info.intid                 = k->intid;
     info.intid_valid           = k->intid_valid ? 1u : 0u;

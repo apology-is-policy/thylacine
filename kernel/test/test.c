@@ -955,6 +955,7 @@ void test_virtio_pci_cfg_read_bounds(void);
 void test_virtio_pci_cfg_write_bounds(void);
 void test_pci_bar_decode_size(void);
 void test_pci_walk_caps_hostile(void);
+void test_pci_walk_caps_shm(void);
 void test_pci_claim_rng(void);
 void test_pci_claim_unknown(void);
 void test_pci_claim_exclusive(void);
@@ -2497,6 +2498,7 @@ struct test_case g_tests[] = {
     { "virtio_pci.cfg_write_bounds",   test_virtio_pci_cfg_write_bounds,   false, NULL },
     { "pci.bar_decode_size",           test_pci_bar_decode_size,           false, NULL },
     { "pci.walk_caps_hostile",         test_pci_walk_caps_hostile,         false, NULL },
+    { "pci.walk_caps_shm",             test_pci_walk_caps_shm,             false, NULL },
     { "pci.claim_rng",                 test_pci_claim_rng,                 false, NULL },
     { "pci.claim_unknown",             test_pci_claim_unknown,             false, NULL },
     { "pci.claim_exclusive",           test_pci_claim_exclusive,           false, NULL },

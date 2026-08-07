@@ -297,8 +297,37 @@ int pci_walk_caps(struct KObj_PCI *k, struct virtio_pci_dev *d) {
                             virtio_pci_cfg_read32(d, ptr + 16u);
                     }
                 }
+            } else if (cfg_type == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) {
+                // §4.1.4.7: a virtio_pci_cap64 — the base cap's offset/length
+                // are the LOW halves; the hi dwords follow the 16-byte cap.
+                // cap.id (@+5) is the shmid. Same hostile-layout posture as
+                // the regions above: a bad BAR reference or an extent past
+                // the decoded BAR size rejects the claim. The extent check is
+                // the non-wrapping form — offset + length on u64 halves can
+                // overflow, and a wrapped sum would pass a naive compare.
+                u8  bar  = virtio_pci_cfg_read8(d, ptr + 4u);
+                u8  shmid = virtio_pci_cfg_read8(d, ptr + 5u);
+                u64 off  = (u64)virtio_pci_cfg_read32(d, ptr + 8u)
+                         | ((u64)virtio_pci_cfg_read32(d, ptr + 16u) << 32);
+                u64 len  = (u64)virtio_pci_cfg_read32(d, ptr + 12u)
+                         | ((u64)virtio_pci_cfg_read32(d, ptr + 20u) << 32);
+
+                if (bar >= PCI_BAR_COUNT) return -1;           // hostile BAR index
+                if (!k->bars[bar].present) return -1;          // unassigned BAR
+                if (off > k->bars[bar].size) return -1;        // OOB start
+                if (len > k->bars[bar].size - off) return -1;  // OOB extent (no wrap)
+
+                for (u32 s = 0; s < PCI_SHM_COUNT; s++) {
+                    if (k->shm[s].present) continue;
+                    k->shm[s].present = true;
+                    k->shm[s].shmid   = shmid;
+                    k->shm[s].bar     = bar;
+                    k->shm[s].offset  = off;
+                    k->shm[s].length  = len;
+                    break;             // further caps beyond the slots: ignored
+                }
             }
-            // cfg_type 5 (PCI_CFG) / 8 (SHARED_MEMORY) are not mapped here.
+            // cfg_type 5 (PCI_CFG) is not mapped here.
         }
         ptr = cap_next;
     }
