@@ -8,6 +8,7 @@
 #   tools/warp-host.sh smoke     # boot to 'Thylacine boot OK' (2D device)
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
+#   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #
 # Verification is fail-closed: each leg greps for its own positive evidence
 # and exits non-zero without it. `bench` runs FOREGROUND (~20-45 min under
@@ -31,7 +32,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -81,6 +82,20 @@ capset)
         echo "CAPSET GATE: VERIFIED"
     else
         echo "CAPSET GATE: UNVERIFIED (need BOOT-capset PASS + a GET_CAPSET line)"
+        exit 1
+    fi
+    ;;
+prove)
+    out="$REPO_ROOT/build/warp-prove.log"
+    ssh "$HOST" "cd $RREPO && expect tools/warp/warp-prove.exp" | tee "$out" || true
+    echo "== prove verdict =="
+    # The Warp-2 gate: the prover's OWN pass line (sentinel readback + the
+    # post-destroy ctx count are asserted in-guest) AND the scenario pass
+    # (the boot + login around it held). Either alone is not the gate.
+    if grep -q "WARP-PROVE PASS" "$out" && grep -q "PASS: warp-prove" "$out"; then
+        echo "WARP-2 GATE: VERIFIED"
+    else
+        echo "WARP-2 GATE: UNVERIFIED (need WARP-PROVE PASS + the scenario pass line)"
         exit 1
     fi
     ;;
