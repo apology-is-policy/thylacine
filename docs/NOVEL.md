@@ -76,6 +76,25 @@ If any angle blows past its estimate by 2×, it's a warning sign worth redesigni
 
 These are not v1.0 angles — they're recorded so a future direction isn't lost.
 
+- **Warp — a capability GPU seam that is ring-native and file-server-shaped**
+  (`docs/GPU-DESIGN.md`; captured 2026-08-07 at the #157 design signoff). Three
+  claims, none of which any shipping system makes together. (1) **Ring-native
+  submission from day one**: Fuchsia's Magma is the reference capability GPU
+  seam, and RFC-0198 names io_uring-style submission as *future work* — we
+  already have Loom, so submit/fence is a CQE rather than a channel round-trip.
+  (2) **The GPU service is a file server**: `/dev/warp` in the Plan 9 idiom, so
+  per-Proc namespace *is* the access control — a Proc that cannot see the tree
+  has no GPU authority, with no new capability bit. Magma routes a `/dev/class/
+  gpu` node plus a loader service; Genode opens a `Gpu::Session`. Ours needs
+  neither. (3) **Per-client GMP enforcement on Broadcom v3d**: upstream Linux has
+  carried *"To protect clients from each other, we should use the GMP … This is
+  not yet implemented"* since 2018, and ships one 4 GB GPU address space shared
+  by every client. Mesa's own simulator implements the per-client GMP table it
+  describes; nobody has put it in a kernel. Doing so makes I-45 a real claim on
+  hardware rather than a documented gap. (Name ratified 2026-08-07 — the
+  tensioned lengthwise threads the [[Weft]] is drawn through, and, independently,
+  the SIMT execution group every GPU programmer already knows by that word.)
+
 - **Loom — a shared-memory ring transport for 9P** (`docs/LOOM.md`). The
   inversion of Linux's io_uring: rather than import io_uring's opcode zoo, expose
   the existing pipelined 9P client (Angle #3) to userspace via a Burrow-backed
