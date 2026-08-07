@@ -182,6 +182,63 @@ int vma_find_gap(struct Proc *p, u64 length,
 // closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
 
+// DISTRO D-3b: place a mapping at a CHOSEN address, splitting whatever is
+// already there around it. The MAP_FIXED primitive: musl's map_library reserves
+// a whole-span mapping and then overlays each PT_LOAD onto it (dynlink.c:842 /
+// :851), which is precisely "swap the backing of a sub-range and keep the rest".
+//
+// THE DOMAIN IS TWO SHAPES, and the second one is not optional:
+//   (a) [vaddr, vaddr+length) lies WHOLLY INSIDE one existing VMA -> split it.
+//   (b) the range is entirely FREE -> plain insert, nothing to split.
+// Anything else -- spanning two VMAs, or partially overlapping one -- is
+// refused. Linux serves that third shape by unmapping the overlapped part;
+// partial unmap is post-v1.0, so the divergence is stated rather than faked.
+//
+// Shape (b) exists because Linux MAP_FIXED does NOT require the target to be
+// mapped already. Omitting it made an unmapped-address request answer ENOMEM,
+// which is a worse reply than the ENOSYS it replaced -- ENOMEM cannot be told
+// apart from real memory pressure, so an allocator reads it as OOM. (#196.)
+//
+// Neither existing primitive can express it: burrow_map_in has no burrow_offset
+// parameter (it hardcodes 0), and burrow_unmap demands an EXACT (vaddr, length)
+// match because partial unmap is post-v1.0. So this is new surgery, and it is
+// the audit-bearing half of D-3b.
+//
+// NO HOLE CAN EXIST, on any path. The old Vma struct is REUSED as the surviving
+// remainder -- shrunk in place, never removed -- so an insert failure restores a
+// bound and frees an un-inserted piece rather than having to put back a mapping
+// it already tore out. Only the exact-cover case (no remainder at all) removes
+// the old VMA, and there the restoring re-insert is provably infallible: it runs
+// under the same as->lock hold, into the range it just vacated (so no overlap),
+// with the VMA count strictly below its value at entry (so no cap refusal).
+//
+// The survivor keeps its (burrow, offset) relationship EXACTLY: for any VA it
+// still covers, `burrow_offset + (va - vaddr_start)` is unchanged by the split.
+// That is what lets the caller uninstall only the REPLACED window's PTEs and
+// leave the remainder's resident pages installed -- and it is also what makes
+// the file-fault arm's post-sleep geometry check (arch/arm64/fault.c, the #190
+// verify-and-bail) come out right against a concurrent split: the check passes
+// exactly when the bytes read before the sleep still belong at that slot.
+//
+// Constraints (all rejected with -1, nothing mutated):
+//   - vaddr/length page-aligned, length > 0, vaddr+length does not wrap.
+//   - either no VMA covers vaddr and the range is free (shape b), or one VMA
+//     covers vaddr and the range lies wholly within it (shape a).
+//   - that VMA has flags == 0 and a non-NULL Burrow. A SHARED_IN VMA is another
+//     Proc's memory carrying a per-span budget charge, and a COW VMA's per-page
+//     share counts would have to be reasoned about across the cut; both are
+//     refused rather than handled, since neither is reachable from the ldso
+//     overlay this exists to serve.
+//   - `nb` non-NULL; `prot` whatever vma_alloc accepts (W+X and W-without-R are
+//     rejected there, so I-12 needs no separate gate here).
+//
+// CALLER MUST HOLD as->lock across the call, and MUST have already uninstalled
+// the leaf PTEs for [vaddr, vaddr+length) -- see burrow_map_fixed_in, which is
+// the wrapper that does both and is what callers outside vma.c should use.
+int vma_replace_range_in(struct AddrSpace *as, bool exempt,
+                         u64 vaddr, u64 length,
+                         struct Burrow *nb, u32 prot, u64 nb_offset);
+
 // LINEAGE L-2: the same four operations, addressed by AddrSpace instead of by
 // Proc. The Proc-taking forms above are thin wrappers over these -- they resolve
 // p->as and, where a cap is involved, ask proc_resource_exempt for the policy

@@ -804,10 +804,99 @@ void test_vivarium_mmap_file_domain(void) {
                    (int)VIV_TRANSLATED, "the high half of prot/flags/fd is unread");
 }
 
-// The two mmap arms are DISJOINT. Both deciders' comments claim it; without this
-// they would only agree with each other. The dispatch site relies on it to make
-// its try-order free rather than load-bearing -- if some tuple were admitted by
-// both, the order would silently decide which semantics a guest receives.
+// The two MAP_FIXED argument domains (DISTRO D-3b). Measured off map_library's
+// overlay calls, so each admitted case is asserted as THE CALL STOCK LDSO MAKES.
+void test_vivarium_mmap_fixed_domain(void) {
+    const u64 pf   = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED);
+    const u64 pfa  = (u64)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS);
+    const u64 rw   = (u64)(VIV_PROT_READ | VIV_PROT_WRITE);
+    const u64 rx   = (u64)(VIV_PROT_READ | VIV_PROT_EXEC);
+    const u64 addr = 0x40001000ull;                  // a real page
+    const u64 fd   = 3;
+
+    // ---- arm 2 (dynlink.c:842) -----------------------------------------------
+
+    // THE MEASURED CALL. All 18 ELFs in the stock Alpine rootfs are `R-X` then
+    // `RW-`, so the ONE arm-2 request any of them makes is this: the writable
+    // data segment, page-aligned file offset, MAP_PRIVATE|MAP_FIXED.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, fd, 0x1000),
+                   (int)VIV_TRANSLATED, "RW private fixed fd-backed is the measured shape");
+
+    // R+X and R-only arm-2 requests. NO PRODUCER on this rootfs -- they need a
+    // `-z separate-code` four-segment layout. Admitted because the ELF format
+    // permits them and a Debian/Fedora toolchain emits them; asserted HERE
+    // because the in-guest gate cannot reach them, so this is their only cover.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rx, pf, fd, 0),
+                   (int)VIV_TRANSLATED, "R+X fixed fd-backed admitted (separate-code layout)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, (u64)VIV_PROT_READ,
+                                                        pf, fd, 0),
+                   (int)VIV_TRANSLATED, "R-only fixed fd-backed admitted");
+
+    // W+X declines at the domain edge. vma_alloc would reject it too, but I-12
+    // is worth failing closed on before anything has to argue about it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, (u64)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC),
+                       pf, fd, 0),
+                   (int)VIV_FORWARD, "W+X declines -- I-12 fails closed here too");
+
+    // PROT_NONE is a pure reservation; there is no honourable service for it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, 0, pf, fd, 0),
+                   (int)VIV_FORWARD, "PROT_NONE declines");
+
+    // addr is a REQUIREMENT under MAP_FIXED, not the hint it is on the non-fixed
+    // arms. Zero and misaligned are separate mistakes and both must decline.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(0, rw, pf, fd, 0),
+                   (int)VIV_FORWARD, "a fixed map at NULL declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr + 1, rw, pf, fd, 0),
+                   (int)VIV_FORWARD, "a misaligned fixed addr declines");
+
+    // MAP_SHARED is the write-back semantics this whole arc refuses, arriving by
+    // another door. Exact flag equality is what excludes it.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, rw, (u64)(VIV_MAP_SHARED | VIV_MAP_FIXED), fd, 0),
+                   (int)VIV_FORWARD, "MAP_SHARED declines");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(
+                       addr, rw, pf | (u64)VIV_MAP_ANONYMOUS, fd, 0),
+                   (int)VIV_FORWARD, "MAP_ANONYMOUS is the OTHER arm, not this one");
+
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, (u64)-1, 0),
+                   (int)VIV_FORWARD, "fd == -1 declines on the fd-backed arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_file_decide(addr, rw, pf, fd, 1),
+                   (int)VIV_FORWARD, "a misaligned offset declines");
+
+    // ---- arm 3 (dynlink.c:851) -----------------------------------------------
+
+    // THE MEASURED CALL: the bss tail, gated in musl on memsz > filesz && PF_W,
+    // so its prot always carries R|W and its offset is always 0.
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "RW private fixed anon is the measured shape");
+
+    // PROT_NONE declines HERE, and that DIVERGES from the non-fixed anon arm,
+    // which degrades it to writable. A fixed PROT_NONE over an existing mapping
+    // is a guard; answering it with a writable page is a hole, not a degradation.
+    TEST_EXPECT_EQ((int)vivarium_mmap_decide(addr, 0, (u64)(VIV_MAP_PRIVATE |
+                                                            VIV_MAP_ANONYMOUS),
+                                             (u64)-1, 0),
+                   (int)VIV_TRANSLATED, "the NON-fixed anon arm does admit PROT_NONE");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, 0, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "but the FIXED anon arm refuses it -- a guard");
+
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rx, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "PROT_EXEC declines on the anon arm (I-42/CAP_JIT)");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, 3, 0),
+                   (int)VIV_FORWARD, "a real fd declines on the anonymous arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(addr, rw, pfa, (u64)-1, 0x1000),
+                   (int)VIV_FORWARD, "a nonzero offset declines on the anonymous arm");
+    TEST_EXPECT_EQ((int)vivarium_mmap_fixed_anon_decide(0, rw, pfa, (u64)-1, 0),
+                   (int)VIV_FORWARD, "a fixed anon map at NULL declines");
+}
+
+// The FOUR mmap arms are pairwise DISJOINT. Every decider's comment claims it;
+// without this they would only agree with each other. The dispatch site relies
+// on it to make its try-order free rather than load-bearing -- if some tuple
+// were admitted by two arms, the order would silently decide which semantics a
+// guest receives, and D-3b's arms differ in whether the guest gets shared
+// demand-paged file bytes or a private eager copy.
 void test_vivarium_mmap_arms_disjoint(void) {
     // Sweep the cross product of every prot/flag/fd/offset value either arm
     // reasons about. Cheap and exhaustive over the interesting space -- far more
@@ -829,26 +918,39 @@ void test_vivarium_mmap_arms_disjoint(void) {
     };
     const u64 fds[]  = { 0, 3, (u64)-1, 0xFFFFFFFFull };
     const u64 offs[] = { 0, 1, 0x1000 };
+    // The FIXED arms judge `addr`, so it joins the sweep: 0 and a misaligned
+    // value must reach the two decliners, and a real page must reach admission.
+    const u64 addrs[] = { 0, 0x1000, 0x1001, 0x40000000ull };
 
-    int admitted_by_file = 0, admitted_by_anon = 0;
+    int adm_file = 0, adm_anon = 0, adm_fixed_file = 0, adm_fixed_anon = 0;
+    for (unsigned ai = 0; ai < sizeof(addrs) / sizeof(addrs[0]); ai++)
     for (unsigned pi = 0; pi < sizeof(prots) / sizeof(prots[0]); pi++)
     for (unsigned fi = 0; fi < sizeof(flags) / sizeof(flags[0]); fi++)
     for (unsigned di = 0; di < sizeof(fds)   / sizeof(fds[0]);   di++)
     for (unsigned oi = 0; oi < sizeof(offs)  / sizeof(offs[0]);  oi++) {
-        TEST_ASSERT(vivarium_mmap_arms_disjoint(prots[pi], flags[fi],
-                                                fds[di], offs[oi]),
-                    "no tuple may be admitted by BOTH mmap arms");
-        if (vivarium_mmap_file_decide(prots[pi], flags[fi], fds[di], offs[oi])
-                == VIV_TRANSLATED) admitted_by_file++;
-        if (vivarium_mmap_decide(0, prots[pi], flags[fi], fds[di], offs[oi])
-                == VIV_TRANSLATED) admitted_by_anon++;
+        u64 a = addrs[ai], pr = prots[pi], fl = flags[fi];
+        u64 fd = fds[di],  off = offs[oi];
+        TEST_ASSERT(vivarium_mmap_arms_disjoint(a, pr, fl, fd, off),
+                    "no tuple may be admitted by more than ONE mmap arm");
+        if (vivarium_mmap_file_decide(pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_file++;
+        if (vivarium_mmap_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_anon++;
+        if (vivarium_mmap_fixed_file_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_fixed_file++;
+        if (vivarium_mmap_fixed_anon_decide(a, pr, fl, fd, off) == VIV_TRANSLATED)
+            adm_fixed_anon++;
     }
 
     // Disjointness is satisfiable by admitting NOTHING, so the sweep proves
-    // nothing until both arms are shown to admit something inside it. This is
-    // the check that keeps the loop above from passing vacuously.
-    TEST_ASSERT(admitted_by_file > 0, "the sweep must reach the FILE arm's domain");
-    TEST_ASSERT(admitted_by_anon > 0, "the sweep must reach the anon arm's domain");
+    // nothing until EVERY arm is shown to admit something inside it. These are
+    // the checks that keep the loop above from passing vacuously -- and they are
+    // per-arm rather than a total, because a total is satisfied by one arm
+    // admitting everything while another admits nothing at all.
+    TEST_ASSERT(adm_file       > 0, "the sweep must reach the FILE arm's domain");
+    TEST_ASSERT(adm_anon       > 0, "the sweep must reach the anon arm's domain");
+    TEST_ASSERT(adm_fixed_file > 0, "the sweep must reach the FIXED FILE domain");
+    TEST_ASSERT(adm_fixed_anon > 0, "the sweep must reach the FIXED anon domain");
 }
 
 // The clone argument domain (LINEAGE L-3d). This row hands a guest a second

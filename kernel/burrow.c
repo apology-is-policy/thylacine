@@ -930,6 +930,48 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
     return 0;
 }
 
+// DISTRO D-3b: burrow_map_fixed -- install `v` over [vaddr, vaddr+length),
+// which must lie wholly inside one existing VMA, splitting that VMA around the
+// window. The MAP_FIXED half of the phenotype mmap; see vma.h's
+// vma_replace_range_in for the surgery's contract and its hole-free argument.
+//
+// This wrapper owns exactly two things the surgery does not: the address
+// arithmetic (the same bounds burrow_map_in enforces) and the PTE teardown.
+//
+// The teardown comes FIRST, and the order is load-bearing. Hardware resolves a
+// leaf PTE without taking as->lock, so a thread already in EL0 could read the
+// window through a stale PTE at any instant -- the only thing that stops it is
+// the PTE being gone and the TLB invalidated, after which the access faults and
+// blocks on the lock we hold. Mutating first and clearing second would leave a
+// window in which the new mapping is live but old bytes are still reachable.
+//
+// A REFUSED surgery therefore costs one wasted teardown of a window we did not
+// modify. That is benign -- every page refaults from backing that never changed
+// -- and it is the deliberate price of keeping the VMA-shape rules in ONE place
+// (the surgery) instead of mirroring them here to predict the refusal.
+int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset) {
+    if (!as || !v) return -1;
+    if (length == 0) return -1;
+    if (vaddr  & (PAGE_SIZE - 1)) return -1;
+    if (length & (PAGE_SIZE - 1)) return -1;
+    if (vaddr + length < vaddr) return -1;
+    if (vaddr + length > USER_VA_TOP) return -1;
+
+    // RW-1 B-F1: the asid arg is vestigial (all-ASID `tlbi vaae1is`); pass 0.
+    (void)mmu_uninstall_user_range(as->pgtable_root, 0, vaddr, vaddr + length);
+
+    return vma_replace_range_in(as, exempt, vaddr, (u64)length,
+                                v, prot, burrow_offset);
+}
+
+int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
+                     u32 prot, u64 burrow_offset) {
+    if (!p) return -1;
+    return burrow_map_fixed_in(p->as, proc_resource_exempt(p), v, vaddr, length,
+                               prot, burrow_offset);
+}
+
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
                            bool *out_freed) {
     if (out_freed) *out_freed = false;

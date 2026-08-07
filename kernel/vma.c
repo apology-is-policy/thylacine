@@ -231,6 +231,123 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr) {
     return vma_lookup_in(p->as, vaddr);
 }
 
+// DISTRO D-3b: the MAP_FIXED split/replace. See vma.h for the full contract --
+// in particular why the old Vma is reused as the survivor rather than removed,
+// and why that is what makes every failure path hole-free.
+int vma_replace_range_in(struct AddrSpace *as, bool exempt,
+                         u64 vaddr, u64 length,
+                         struct Burrow *nb, u32 prot, u64 nb_offset) {
+    if (!as || !nb)                       return -1;
+    if (length == 0)                      return -1;
+    if (vaddr  & (PAGE_SIZE - 1))         return -1;
+    if (length & (PAGE_SIZE - 1))         return -1;
+    u64 end = vaddr + length;
+    if (end < vaddr)                      return -1;          // wrap
+
+    struct Vma *old = vma_lookup_in(as, vaddr);
+    if (!old) {
+        // FREE SPACE -- nothing to split, so this is a plain fixed-address map.
+        // Linux MAP_FIXED does not require the range to be already mapped; at an
+        // unmapped address it simply places the mapping there. Refusing here is
+        // what made the shell answer ENOMEM, which is a WORSE reply than the
+        // ENOSYS it replaced: ENOMEM is indistinguishable from real memory
+        // pressure, and an allocator reads it as OOM.
+        //
+        // vma_insert_in rejects any overlap, so this arm also catches the range
+        // that starts free and runs INTO a later VMA -- the partial-overlap
+        // case, which Linux would serve by unmapping the overlapped part and
+        // which we refuse because partial unmap is post-v1.0.
+        struct Vma *v = vma_alloc(vaddr, end, prot, nb, nb_offset);
+        if (!v) return -1;
+        if (vma_insert_in(as, exempt, v) != 0) { vma_free(v); return -1; }
+        return 0;
+    }
+    // WHOLLY inside one VMA. A request spanning two VMAs is refused rather than
+    // handled: musl's overlay always lands inside the whole-span reservation it
+    // just made, so the multi-VMA shape has no producer -- and inventing one
+    // here would mean inventing its failure semantics too.
+    if (vaddr < old->vaddr_start || end > old->vaddr_end)     return -1;
+    if (old->flags != 0 || !old->burrow)  return -1;
+
+    bool want_left  = (vaddr > old->vaddr_start);
+    bool want_right = (end   < old->vaddr_end);
+
+    // Allocate every new piece BEFORE touching the list, so an allocation
+    // shortfall costs nothing but the frees below.
+    struct Vma *mid = vma_alloc(vaddr, end, prot, nb, nb_offset);
+    if (!mid)                             return -1;
+
+    // The right remainder re-derives its offset from the SAME (burrow, offset)
+    // relation the old VMA had, which is what keeps every surviving VA's byte
+    // identity unchanged across the cut.
+    struct Vma *right = NULL;
+    if (want_left && want_right) {
+        right = vma_alloc(end, old->vaddr_end, old->prot, old->burrow,
+                          old->burrow_offset + (end - old->vaddr_start));
+        if (!right) { vma_free(mid); return -1; }
+    }
+
+    // I-32 headroom, checked BEFORE the mutation so a cap-hit changes nothing.
+    // Under as->lock the count is stable (every mutator holds it), so the
+    // charges taken below cannot then fail. `right` is the only case that adds
+    // two VMAs; the others add one, and the exact-cover case adds none net.
+    u32 adding = 1u + (right ? 1u : 0u);
+    if (!exempt) {
+        u32 cur = __atomic_load_n(&as->vma_count, __ATOMIC_RELAXED);
+        u32 net = adding - ((want_left || want_right) ? 0u : 1u);
+        if (cur > PROC_VMA_MAX - net) {
+            vma_free(mid);
+            if (right) vma_free(right);
+            return -1;
+        }
+    }
+
+    // Save what a rollback has to put back.
+    u64 old_start  = old->vaddr_start;
+    u64 old_end    = old->vaddr_end;
+    u64 old_offset = old->burrow_offset;
+
+    if (want_left) {
+        // The survivor becomes the LEFT remainder: same start, same offset, so
+        // its resident PTEs stay correct untouched. Shrinking only the end
+        // cannot disturb the sort order.
+        old->vaddr_end = vaddr;
+    } else if (want_right) {
+        // The survivor becomes the RIGHT remainder. start and offset move by
+        // the SAME delta, so `burrow_offset + (va - vaddr_start)` is invariant
+        // for every VA it still covers. Still sorted: its predecessor ends at
+        // or below old_start < end, and its successor starts at or above
+        // old_end.
+        old->vaddr_start   = end;
+        old->burrow_offset = old_offset + (end - old_start);
+    } else {
+        // Exact cover -- no remainder. This is the one case that removes.
+        vma_remove_in(as, old);
+    }
+
+    if (vma_insert_in(as, exempt, mid) != 0) goto rollback_mid;
+    if (right && vma_insert_in(as, exempt, right) != 0) {
+        vma_remove_in(as, mid);
+        goto rollback_mid;
+    }
+
+    if (!want_left && !want_right) vma_free(old);   // fully replaced
+    return 0;
+
+rollback_mid:
+    // Nothing of the new mapping survives, and the survivor goes back to
+    // exactly the range it had. The exact-cover re-insert cannot fail: same
+    // lock hold, into the range just vacated (no overlap), with the count
+    // strictly below its entry value (no cap refusal).
+    vma_free(mid);
+    if (right) vma_free(right);
+    old->vaddr_start   = old_start;
+    old->vaddr_end     = old_end;
+    old->burrow_offset = old_offset;
+    if (!want_left && !want_right) (void)vma_insert_in(as, exempt, old);
+    return -1;
+}
+
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr) {
     if (!as) return NULL;
 

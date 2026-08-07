@@ -462,6 +462,15 @@ void test_sys_burrow_detach_window_confined(void);
 void test_sys_burrow_attach_lazy_window_va(void);
 void test_sys_burrow_attach_lazy_large(void);
 void test_sys_burrow_lazy_len_from_args(void);
+// DISTRO D-3b -- the MAP_FIXED split/replace surgery.
+void test_burrow_map_fixed_split_left(void);
+void test_burrow_map_fixed_split_right(void);
+void test_burrow_map_fixed_split_three_way(void);
+void test_burrow_map_fixed_exact_cover(void);
+void test_burrow_map_fixed_carries_offset(void);
+void test_burrow_map_fixed_refusals(void);
+void test_burrow_map_fixed_successive(void);
+void test_burrow_map_fixed_into_free_space(void);
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
 void test_torpor_wake_rejects_bad_args(void);
@@ -659,6 +668,7 @@ void test_vivarium_stat_to_linux(void);
 void test_vivarium_fstatat_domain(void);                 // VIVARIUM V-2c
 void test_vivarium_mmap_domain(void);                    // VIVARIUM V-2d
 void test_vivarium_mmap_file_domain(void);               // DISTRO D-3
+void test_vivarium_mmap_fixed_domain(void);              // DISTRO D-3b
 void test_vivarium_mmap_arms_disjoint(void);             // DISTRO D-3
 void test_vivarium_clone_domain(void);                   // LINEAGE L-3d
 void test_vivarium_wait4_domain(void);                   // LINEAGE L-6b
@@ -2012,6 +2022,14 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_lazy_window_va",     test_sys_burrow_attach_lazy_window_va,     false, NULL },
     { "sys_burrow.attach_lazy_large",         test_sys_burrow_attach_lazy_large,         false, NULL },
     { "sys_burrow.lazy_len_from_args",        test_sys_burrow_lazy_len_from_args,        false, NULL },
+    { "burrow.map_fixed_split_left",          test_burrow_map_fixed_split_left,          false, NULL },
+    { "burrow.map_fixed_split_right",         test_burrow_map_fixed_split_right,         false, NULL },
+    { "burrow.map_fixed_split_three_way",     test_burrow_map_fixed_split_three_way,     false, NULL },
+    { "burrow.map_fixed_exact_cover",         test_burrow_map_fixed_exact_cover,         false, NULL },
+    { "burrow.map_fixed_carries_offset",      test_burrow_map_fixed_carries_offset,      false, NULL },
+    { "burrow.map_fixed_refusals",            test_burrow_map_fixed_refusals,            false, NULL },
+    { "burrow.map_fixed_successive",          test_burrow_map_fixed_successive,          false, NULL },
+    { "burrow.map_fixed_into_free_space",     test_burrow_map_fixed_into_free_space,     false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
     { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },
@@ -2224,6 +2242,7 @@ struct test_case g_tests[] = {
     { "vivarium.fstatat_domain",         test_vivarium_fstatat_domain,         false, NULL },
     { "vivarium.mmap_domain",            test_vivarium_mmap_domain,            false, NULL },
     { "vivarium.mmap_file_domain",       test_vivarium_mmap_file_domain,       false, NULL },
+    { "vivarium.mmap_fixed_domain",      test_vivarium_mmap_fixed_domain,      false, NULL },
     { "vivarium.mmap_arms_disjoint",     test_vivarium_mmap_arms_disjoint,     false, NULL },
     { "vivarium.clone_domain",           test_vivarium_clone_domain,           false, NULL },
     { "vivarium.wait4_domain",           test_vivarium_wait4_domain,           false, NULL },

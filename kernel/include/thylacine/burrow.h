@@ -594,6 +594,31 @@ struct AddrSpace;
 int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
                   u64 vaddr, size_t length, u32 prot);
 
+// DISTRO D-3b: burrow_map_fixed -- the MAP_FIXED analog. Install `v` at the
+// CALLER'S address rather than wherever a gap search lands it. Two shapes: a
+// window wholly inside one existing VMA (split that VMA around it, the survivor
+// keeping its backing, its prot, and -- exactly -- its byte identity for every
+// VA it still covers), or an entirely free range (plain insert).
+//
+// Two things burrow_map cannot express, both needed by musl's map_library
+// overlay: a caller-CHOSEN address that replaces existing mapping, and a
+// non-zero burrow_offset for the piece left over on the right of the cut.
+//
+// Refuses (returning -1, having mutated no VMA) when: the window neither fits
+// inside one VMA nor lies free (it spans two, or partially overlaps one), the
+// covering VMA carries any flag (SHARED_IN is another Proc's memory; COW would
+// need its per-page share counts reasoned across the cut), or the I-32
+// VMA-count headroom for the split is absent. See vma.h's vma_replace_range_in
+// for the full contract and the hole-free argument.
+//
+// Clears the leaf PTEs for the replaced window before the surgery -- necessarily
+// so, since hardware resolves a PTE without taking as->lock. Caller holds
+// as->lock, exactly as for burrow_map.
+int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
+                     u32 prot, u64 burrow_offset);
+int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
+                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset);
+
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
 // from Proc `p`. Calls vma_remove + vma_free (which calls
 // burrow_release_mapping; mapping_count--).

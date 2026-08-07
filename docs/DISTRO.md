@@ -316,7 +316,7 @@ measured-off-the-binary discipline applied to the loader:
 | Sub-chunk | Delivers | State |
 |---|---|---|
 | D-3a | arm 1 (the whole-span fd-backed R / R+X map) + the #190 fix | **AS-BUILT** |
-| D-3b | arms 2+3 (MAP_FIXED split/replace: fd-backed RW eager copy, anon tail) | next |
+| D-3b | arms 2+3 (MAP_FIXED split/replace: fd-backed RW eager copy, anon tail) | **AS-BUILT** |
 | D-3c | the gate + reference docs + the FOCUSED audit round | owed |
 
 **Three corrections the build forced, recorded before the code:**
@@ -332,11 +332,18 @@ measured-off-the-binary discipline applied to the loader:
   whose output is a real end-to-end assertion (musl's `sysconf(_SC_PAGESIZE)`
   reads the `AT_PAGESZ` our exec builds), and which re-crosses D-1's symlink on
   the way (`libc.musl-aarch64.so.1 -> ld-musl-aarch64.so.1`).
-- **arm 2 also carries R and R+X segments, not only RW.** `dynlink.c:842`
-  MAP_FIXEDs *every* PT_LOAD whose page-floored vaddr differs from `addr_min`,
-  at that segment's own prot. The shipped Alpine libc happens to have only two
-  PT_LOADs (R+X, then RW) so its arm-2 call is RW — but a 4-PT_LOAD library
-  sends R and R+X through the same door, and D-3b must serve them.
+- **arm 2 also carries R and R+X segments, not only RW — but NOT on this
+  rootfs.** `dynlink.c:842` MAP_FIXEDs *every* PT_LOAD whose page-floored vaddr
+  differs from `addr_min`, at that segment's own prot. At D-3b this was measured
+  across **every ELF in the staged rootfs, not just the libc: all 18 are exactly
+  `R-X` then `RW-`**, so every arm-2 request there is RW and the R / R+X paths
+  have NO producer. They need a `-z separate-code` four-segment layout (binutils
+  >= 2.31, so Debian/Fedora); Alpine's toolchain does not emit one. D-3b builds
+  and unit-tests them, and does NOT claim gate coverage for them.
+  The same census measured **zero page-rounded PT_LOAD overlaps** (so the
+  wholly-inside-one-VMA rule holds) and the arm-2 eager-copy cost: **888 KiB**
+  summed over every library at once, **372 KiB** for the largest single one
+  (libcrypto.so.3), **16 KiB** for the ld-musl a typical dynamic process maps.
 - **The whole-span map deliberately overshoots EOF.** For the shipped libc,
   `map_len` is 0xc3000 against a 0xb0a58-byte file (musl's own comment: "we map
   too much, possibly even more than the length of the file"). The fault arm's
@@ -370,10 +377,19 @@ one per install path, each revert-probed against its own check.
 3. **anon `MAP_FIXED` wholly inside a caller-owned mapping** — the bss tail.
    The lazy-anon arm at a fixed VA.
 
-MAP_FIXED admission rule: `[addr, addr+len)` must lie WHOLLY inside ONE
-existing VMA owned by the caller, replaced atomically under `vma_lock`
-(split + replace). Everything else about MAP_FIXED stays refused —
-MAP_FIXED_NOREPLACE included. `addr` without MAP_FIXED stays ignored.
+MAP_FIXED admission rule (**CORRECTED at D-3b, #196 — the design's rule was
+one shape short**): the target is either (a) `[addr, addr+len)` lying WHOLLY
+inside ONE existing VMA owned by the caller, replaced atomically under
+`vma_lock` (split + replace), or (b) an entirely FREE range, plain-mapped.
+Shape (b) is not a convenience: Linux MAP_FIXED does not require the target to
+be mapped already, and omitting it made an unmapped-address request answer
+**ENOMEM** — a WORSE reply than the ENOSYS it replaced, because ENOMEM cannot
+be told apart from real memory pressure and an allocator reads it as OOM. The
+residual divergence is the third shape (spanning two VMAs, or partially
+overlapping one), which Linux serves by unmapping the overlapped part and which
+we refuse because partial unmap is post-v1.0. Everything else about MAP_FIXED
+stays refused — MAP_FIXED_NOREPLACE included. `addr` without MAP_FIXED stays
+ignored.
 `PROT_WRITE|PROT_EXEC` stays refused unconditionally; anonymous PROT_EXEC
 stays refused (I-42/CAP_JIT untouched). **mprotect stays ENOSYS** — the
 measured musl tolerance (§2) is what makes that survivable, and it is
@@ -394,6 +410,38 @@ half-built multi-segment library map unwinds fully); I-32 accounting
 (private copies charged; demand-paged FILE pages keep the R-5 uncharged-at-
 v1.0 posture, documented). Native scope: NONE — this is a phenotype row
 over shared kernel core; no native mmap API is added.
+
+**D-3b as-built notes.**
+- The writable arm-2 request is served by an eager private copy because musl
+  **writes into that mapping** before arm 3 runs: `dynlink.c:849` memsets the
+  partial tail page. A writable private FILE mapping would need copy-on-write
+  over shared Image-cache pages, where a bug leaks one container's writes into
+  another's view of the same library. The eager copy is a conforming
+  MAP_PRIVATE (POSIX and Linux both leave post-mmap file changes unspecified
+  for private mappings) and is the FULLY CHARGED path — `burrow_lazy_populate`
+  takes the I-32 page charge for the whole run up front, unlike the read-only
+  arm (task #194).
+- Note arm 2's length comes from `p_memsz`, not `p_filesz`, so it maps past the
+  file's data and arm 3 then overlays the whole bss pages. The double-charge is
+  the bss tail only — 12 KiB of libcrypto's 372 KiB.
+- PROT_NONE declines on BOTH fixed arms, and on the anon one that deliberately
+  diverges from the non-fixed anon arm's documented degrade-to-writable: a
+  FIXED PROT_NONE over an existing mapping is a GUARD, and answering it with a
+  writable page is a hole rather than a degradation. Measured, it costs nothing
+  (arm 3 fires only under PF_W, so its prot always carries R|W).
+- The split primitive is NEW code — `burrow_map` has no `burrow_offset`
+  parameter and `burrow_unmap` demands an exact `(vaddr, length)` match. It
+  REUSES the old `Vma` as the surviving remainder (shrunk in place, never
+  removed) so no address-space hole can exist on any failure path; only the
+  exact-cover case removes, and there the restoring re-insert is provably
+  infallible (same lock hold, into the range just vacated, count strictly below
+  its entry value).
+- **D-3b is the first producer of a non-zero `vma->burrow_offset` in the tree.**
+  Every other `vma_alloc` call passes a literal 0 or copies one that can only be
+  0. The survivors' byte identity (`burrow_offset + (va - vaddr_start)`) is
+  invariant across the cut, which is also what makes D-3a's #190 post-sleep
+  geometry check come out right against a concurrent split: it passes exactly
+  when the bytes read before the sleep still belong at that slot.
 
 Gate (CORRECTED, see #189 above): the runner spawns
 `ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` explicitly (no D-4 needed)

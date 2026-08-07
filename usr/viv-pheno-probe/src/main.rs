@@ -649,13 +649,33 @@ unsafe fn run_linux() -> ! {
         b"L20\n"
     );
 
-    // MAP_FIXED is where `addr` stops being a hint and becomes a requirement.
+    // MAP_FIXED is where `addr` stops being a hint and becomes a requirement --
+    // and since DISTRO D-3b the kernel MEETS that requirement instead of
+    // declining it (musl's map_library overlays each PT_LOAD onto its whole-span
+    // reservation this way, so a dynamic guest cannot load a library without it).
+    //
+    // The leg therefore asserts the requirement itself: the mapping must land at
+    // EXACTLY the requested address, not merely succeed. Asserting "not an errno"
+    // would pass on any address the kernel felt like picking, which is the one
+    // thing MAP_FIXED forbids.
+    //
+    // 0x40000000 is unmapped here, so this is the FREE-space shape. It is served
+    // (Linux places a fixed mapping at an unmapped address rather than failing);
+    // answering ENOMEM instead was #196, and ENOMEM is the worse reply because an
+    // allocator cannot tell it from real memory pressure.
+    let f = svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0);
+    leg!(rep, f == 0x40000000, b"L21\n");
+    // It is real memory, not just a bookkeeping entry: write and read back
+    // through the LAST page, which also proves the whole span got mapped.
+    (f as *mut u64).add((MAP_LEN / 8 - 1) as usize).write_volatile(0x5A5A_A5A5);
     leg!(
         rep,
-        svc6(NR_MMAP, 0x40000000, MAP_LEN, PROT_READ | PROT_WRITE,
-             MAP_PRIVATE | MAP_ANON | MAP_FIXED, (-1i64) as u64, 0) == NEG_ENOSYS,
-        b"L21\n"
+        (f as *mut u64).add((MAP_LEN / 8 - 1) as usize).read_volatile()
+            == 0x5A5A_A5A5,
+        b"L21b\n"
     );
+    let _ = svc3(NR_MUNMAP, f as u64, MAP_LEN, 0);
 
     // mprotect is the explicit ENOSYS row. musl DEPENDS on this answer being
     // ENOSYS specifically: mallocng/malloc.c:92 proceeds when mprotect fails

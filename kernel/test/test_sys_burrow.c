@@ -54,6 +54,28 @@ static void drop_proc(struct Proc *p) {
     proc_free(p);
 }
 
+// DISTRO D-3b: burrow_map_fixed under the lock its contract requires.
+static int map_fixed_locked(struct Proc *p, struct Burrow *b, u64 va,
+                            size_t len, u32 prot, u64 off) {
+    spin_lock(&p->as->lock);
+    int rc = burrow_map_fixed(p, b, va, len, prot, off);
+    spin_unlock(&p->as->lock);
+    return rc;
+}
+
+// A fresh lazy-anon Burrow with ONE ref for the caller.
+static struct Burrow *fresh_anon(size_t len) {
+    return burrow_create_anon_lazy(len);
+}
+
+// The property the whole split rests on: for every VA a surviving VMA still
+// covers, the byte it names is unchanged. `burrow_offset + (va - vaddr_start)`
+// IS that byte's identity -- it is exactly the expression the demand-page arms
+// (arch/arm64/fault.c) and the #190 post-sleep geometry check compute.
+static u64 byte_identity(struct Vma *v, u64 va) {
+    return v->burrow_offset + (va - v->vaddr_start);
+}
+
 // True iff `va` is inside the burrow-attach window.
 static bool in_window(u64 va) {
     return va >= EXEC_USER_BURROW_BASE && va < EXEC_USER_BURROW_TOP;
@@ -334,4 +356,354 @@ void test_sys_burrow_lazy_len_from_args(void) {
     // reject instead of depending on whatever the compiler left in x1.
     TEST_EXPECT_EQ(burrow_lazy_len_from_args(0, 0, 0, NOFD),
                    0ull, "length 0 with x1 pinned 0 stays a reject");
+}
+
+// =============================================================================
+// DISTRO D-3b -- the MAP_FIXED split/replace surgery.
+//
+// This is the audit-bearing half of D-3b: it is the FIRST producer of a
+// non-zero vma->burrow_offset in the tree (grep says every other vma_alloc call
+// passes a literal 0, or copies one that can only be 0), so the arithmetic these
+// cases exercise has never run in production before.
+//
+// Every case asserts BYTE IDENTITY on the survivors, not merely their bounds. A
+// split that gets the bounds right and the offset wrong yields a VMA that looks
+// perfect and serves the wrong page -- which is precisely the corruption the
+// #190 fix exists to refuse, arriving from the other direction.
+// =============================================================================
+
+#define D3B_PAGES 8
+#define D3B_LEN   ((u64)D3B_PAGES * PAGE_SIZE)
+
+// Attach an 8-page lazy anon mapping and return its base, or 0 on failure --
+// TEST_ASSERT returns void, so the assertion belongs at each call site. The VMA
+// this produces has burrow_offset 0, which is what every real mapping in the
+// tree looked like before D-3b.
+static u64 d3b_base(struct Proc *p) {
+    s64 r = sys_burrow_attach_lazy_for_proc(p, D3B_LEN);
+    return r > 0 ? (u64)r : 0;
+}
+
+// Replace the TAIL of a VMA: survivor on the left, no right remainder. This is
+// the shape EVERY real split takes on the stock Alpine rootfs -- map_library's
+// span ends exactly at the last PT_LOAD's page-rounded end, so the overlay
+// always reaches the end of the reservation.
+void test_burrow_map_fixed_split_left(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    // Replace the last 3 pages.
+    u64 cut = base + 5 * PAGE_SIZE;
+    struct Burrow *nb = fresh_anon(3 * PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, cut, 3 * PAGE_SIZE, VMA_PROT_RW, 0),
+                   0, "tail replace must succeed");
+    burrow_unref(nb);
+
+    struct Vma *left = vma_lookup(p, base);
+    struct Vma *mid  = vma_lookup(p, cut);
+    TEST_ASSERT(left && mid, "both pieces must exist");
+    TEST_ASSERT(left != mid, "the pieces must be distinct VMAs");
+    TEST_EXPECT_EQ(left->vaddr_start, base, "left keeps the original start");
+    TEST_EXPECT_EQ(left->vaddr_end,   cut,  "left ends at the cut");
+    TEST_EXPECT_EQ(mid->vaddr_start,  cut,  "mid starts at the cut");
+    TEST_EXPECT_EQ(mid->vaddr_end, base + D3B_LEN, "mid runs to the old end");
+    TEST_ASSERT(mid->burrow == nb, "mid carries the NEW backing");
+
+    // The left survivor's bytes are untouched: same Burrow, same identity.
+    TEST_EXPECT_EQ(left->burrow_offset, 0ull, "left keeps offset 0");
+    TEST_EXPECT_EQ(byte_identity(left, base + 4 * PAGE_SIZE),
+                   4ull * PAGE_SIZE, "left byte identity unchanged");
+
+    drop_proc(p);
+}
+
+// Replace the HEAD: survivor on the right. THE CASE THAT MOVES burrow_offset --
+// the right remainder must advance its offset by exactly the same delta as its
+// start, or every byte it serves is shifted.
+void test_burrow_map_fixed_split_right(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    u64 cut = base + 3 * PAGE_SIZE;             // replace the first 3 pages
+    struct Burrow *nb = fresh_anon(3 * PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, base, 3 * PAGE_SIZE, VMA_PROT_RW, 0),
+                   0, "head replace must succeed");
+    burrow_unref(nb);
+
+    struct Vma *mid   = vma_lookup(p, base);
+    struct Vma *right = vma_lookup(p, cut);
+    TEST_ASSERT(mid && right, "both pieces must exist");
+    TEST_ASSERT(mid != right, "the pieces must be distinct VMAs");
+    TEST_EXPECT_EQ(mid->vaddr_start,   base, "mid starts at the base");
+    TEST_EXPECT_EQ(mid->vaddr_end,     cut,  "mid ends at the cut");
+    TEST_EXPECT_EQ(right->vaddr_start, cut,  "right starts at the cut");
+    TEST_EXPECT_EQ(right->vaddr_end, base + D3B_LEN, "right runs to the old end");
+
+    // THE LOAD-BEARING ASSERTION. Before the split, base+5*PAGE named byte
+    // 5*PAGE of the Burrow. It must still.
+    TEST_EXPECT_EQ(right->burrow_offset, 3ull * PAGE_SIZE,
+                   "right advances its offset by the cut delta");
+    TEST_EXPECT_EQ(byte_identity(right, base + 5 * PAGE_SIZE),
+                   5ull * PAGE_SIZE, "right byte identity unchanged by the split");
+    TEST_EXPECT_EQ(byte_identity(right, cut), 3ull * PAGE_SIZE,
+                   "the first surviving page still names its own byte");
+
+    drop_proc(p);
+}
+
+// Replace the MIDDLE: survivors on BOTH sides. Unreachable from the stock
+// rootfs (see the left-split note), so this is its only coverage.
+void test_burrow_map_fixed_split_three_way(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    u64 lo = base + 2 * PAGE_SIZE, hi = base + 5 * PAGE_SIZE;
+    struct Burrow *nb = fresh_anon(hi - lo);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, lo, (size_t)(hi - lo), VMA_PROT_RW, 0),
+                   0, "interior replace must succeed");
+    burrow_unref(nb);
+
+    struct Vma *left  = vma_lookup(p, base);
+    struct Vma *mid   = vma_lookup(p, lo);
+    struct Vma *right = vma_lookup(p, hi);
+    TEST_ASSERT(left && mid && right, "all three pieces must exist");
+    TEST_ASSERT(left != mid && mid != right && left != right,
+                "the three pieces must be distinct VMAs");
+    TEST_EXPECT_EQ(left->vaddr_end,     lo, "left ends at the low cut");
+    TEST_EXPECT_EQ(mid->vaddr_start,    lo, "mid starts at the low cut");
+    TEST_EXPECT_EQ(mid->vaddr_end,      hi, "mid ends at the high cut");
+    TEST_EXPECT_EQ(right->vaddr_start,  hi, "right starts at the high cut");
+    TEST_EXPECT_EQ(right->vaddr_end, base + D3B_LEN, "right runs to the old end");
+
+    // Both survivors keep byte identity, and they are backed by the SAME
+    // Burrow -- the split did not duplicate it.
+    TEST_ASSERT(left->burrow == right->burrow, "survivors share the old Burrow");
+    TEST_EXPECT_EQ(byte_identity(left,  base + PAGE_SIZE),     1ull * PAGE_SIZE,
+                   "left byte identity unchanged");
+    TEST_EXPECT_EQ(byte_identity(right, base + 6 * PAGE_SIZE), 6ull * PAGE_SIZE,
+                   "right byte identity unchanged");
+
+    drop_proc(p);
+}
+
+// Replace the WHOLE VMA: no remainder. The one case that removes the old VMA,
+// and therefore the one whose rollback has to put a mapping back.
+void test_burrow_map_fixed_exact_cover(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    struct Burrow *nb = fresh_anon(D3B_LEN);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, base, (size_t)D3B_LEN, VMA_PROT_RW, 0),
+                   0, "exact-cover replace must succeed");
+
+    struct Vma *only = vma_lookup(p, base);
+    TEST_ASSERT(only != NULL, "the replacement must exist");
+    TEST_EXPECT_EQ(only->vaddr_start, base,            "start preserved");
+    TEST_EXPECT_EQ(only->vaddr_end,   base + D3B_LEN,  "end preserved");
+    TEST_ASSERT(only->burrow == nb, "the new backing replaced the old");
+    // The mapping now owns the Burrow (mapping_count 1); our construction ref
+    // is still outstanding, so drop it and confirm the mapping keeps it alive.
+    TEST_EXPECT_EQ(burrow_mapping_count(nb), 1, "exactly one mapping");
+    burrow_unref(nb);
+    TEST_ASSERT(vma_lookup(p, base) != NULL, "the mapping survives the unref");
+
+    drop_proc(p);
+}
+
+// A non-zero burrow_offset on the REPLACEMENT is carried through verbatim --
+// this is what lets a caller name a window into the middle of a backing object.
+void test_burrow_map_fixed_carries_offset(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    struct Burrow *nb = fresh_anon(4 * PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    u64 cut = base + 2 * PAGE_SIZE;
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, cut, 2 * PAGE_SIZE, VMA_PROT_RW,
+                                    2 * PAGE_SIZE),
+                   0, "offset replace must succeed");
+    burrow_unref(nb);
+
+    struct Vma *mid = vma_lookup(p, cut);
+    TEST_ASSERT(mid != NULL, "the replacement must exist");
+    TEST_EXPECT_EQ(mid->burrow_offset, 2ull * PAGE_SIZE, "offset carried verbatim");
+    TEST_EXPECT_EQ(byte_identity(mid, cut), 2ull * PAGE_SIZE,
+                   "the window names the requested byte, not byte 0");
+
+    drop_proc(p);
+}
+
+// Every refusal, and each one asserted to have changed NOTHING. A surgery that
+// refuses but has already cut is worse than one that never ran.
+void test_burrow_map_fixed_refusals(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    struct Burrow *nb = fresh_anon(D3B_LEN);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+
+    // NOTE an unmapped target is NOT here, and that is the #196 correction: a
+    // fixed map into free space SUCCEEDS (Linux places it there rather than
+    // failing). burrow.map_fixed_into_free_space covers it positively, together
+    // with the partial-overlap range that IS still refused.
+
+    // Runs off the END of the covering VMA -- the window must be WHOLLY inside.
+    TEST_ASSERT(map_fixed_locked(p, nb, base + 6 * PAGE_SIZE, 4 * PAGE_SIZE,
+                                 VMA_PROT_RW, 0) != 0,
+                "a window overrunning the VMA is refused");
+
+    // Misaligned address and length.
+    TEST_ASSERT(map_fixed_locked(p, nb, base + 1, PAGE_SIZE, VMA_PROT_RW, 0) != 0,
+                "a misaligned address is refused");
+    TEST_ASSERT(map_fixed_locked(p, nb, base, PAGE_SIZE + 1, VMA_PROT_RW, 0) != 0,
+                "a misaligned length is refused");
+    TEST_ASSERT(map_fixed_locked(p, nb, base, 0, VMA_PROT_RW, 0) != 0,
+                "a zero length is refused");
+
+    // W+X: vma_alloc rejects it, and the surgery must surface that as a clean
+    // refusal rather than a half-applied split (I-12).
+    TEST_ASSERT(map_fixed_locked(p, nb, base + PAGE_SIZE, PAGE_SIZE,
+                                 VMA_PROT_WRITE | VMA_PROT_EXEC | VMA_PROT_READ,
+                                 0) != 0,
+                "a W+X replacement is refused");
+
+    // A FLAGGED survivor is refused: SHARED_IN is another Proc's memory carrying
+    // a per-span budget charge, and COW would need per-page share counts
+    // reasoned across the cut. Set the flag directly -- building a real shared
+    // mapping here would test burrow_share_into, not this.
+    struct Vma *v = vma_lookup(p, base);
+    TEST_ASSERT(v != NULL, "the base VMA must exist");
+    u32 saved = v->flags;
+    v->flags = VMA_FLAG_COW;
+    TEST_ASSERT(map_fixed_locked(p, nb, base + PAGE_SIZE, PAGE_SIZE,
+                                 VMA_PROT_RW, 0) != 0,
+                "a flagged (COW) survivor is refused");
+    v->flags = VMA_FLAG_SHARED_IN;
+    TEST_ASSERT(map_fixed_locked(p, nb, base + PAGE_SIZE, PAGE_SIZE,
+                                 VMA_PROT_RW, 0) != 0,
+                "a flagged (SHARED_IN) survivor is refused");
+    v->flags = saved;
+
+    // NOTHING above may have cut. One VMA, original bounds, original identity.
+    struct Vma *still = vma_lookup(p, base);
+    TEST_ASSERT(still != NULL, "the original mapping must survive every refusal");
+    TEST_EXPECT_EQ(still->vaddr_start, base,           "start untouched");
+    TEST_EXPECT_EQ(still->vaddr_end,   base + D3B_LEN, "end untouched");
+    TEST_EXPECT_EQ(still->burrow_offset, 0ull,         "offset untouched");
+    TEST_ASSERT(vma_lookup(p, base + 7 * PAGE_SIZE) == still,
+                "the whole span is still ONE VMA -- no refusal left a seam");
+
+    burrow_unref(nb);
+    drop_proc(p);
+}
+
+// Successive overlays compose, which is what map_library actually does: the
+// span is cut once per PT_LOAD past the lowest, each cut landing inside the
+// remainder the previous one left.
+void test_burrow_map_fixed_successive(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    struct Burrow *a = fresh_anon(2 * PAGE_SIZE);
+    struct Burrow *b = fresh_anon(2 * PAGE_SIZE);
+    TEST_ASSERT(a && b, "anon create failed");
+
+    // First overlay: pages 2-3. Second: pages 6-7, inside the right remainder.
+    TEST_EXPECT_EQ(map_fixed_locked(p, a, base + 2 * PAGE_SIZE, 2 * PAGE_SIZE,
+                                    VMA_PROT_RW, 0), 0, "first overlay");
+    TEST_EXPECT_EQ(map_fixed_locked(p, b, base + 6 * PAGE_SIZE, 2 * PAGE_SIZE,
+                                    VMA_PROT_RW, 0), 0, "second overlay");
+    burrow_unref(a);
+    burrow_unref(b);
+
+    // Four pieces: [0,2) old, [2,4) a, [4,6) old, [6,8) b.
+    struct Vma *p0 = vma_lookup(p, base);
+    struct Vma *p1 = vma_lookup(p, base + 2 * PAGE_SIZE);
+    struct Vma *p2 = vma_lookup(p, base + 4 * PAGE_SIZE);
+    struct Vma *p3 = vma_lookup(p, base + 6 * PAGE_SIZE);
+    TEST_ASSERT(p0 && p1 && p2 && p3, "all four pieces must exist");
+    TEST_ASSERT(p0 != p1 && p1 != p2 && p2 != p3, "pieces must be distinct");
+    TEST_EXPECT_EQ(p0->vaddr_end,   base + 2 * PAGE_SIZE, "piece 0 bounds");
+    TEST_EXPECT_EQ(p1->vaddr_end,   base + 4 * PAGE_SIZE, "piece 1 bounds");
+    TEST_EXPECT_EQ(p2->vaddr_start, base + 4 * PAGE_SIZE, "piece 2 bounds");
+    TEST_EXPECT_EQ(p2->vaddr_end,   base + 6 * PAGE_SIZE, "piece 2 end");
+    TEST_EXPECT_EQ(p3->vaddr_start, base + 6 * PAGE_SIZE, "piece 3 bounds");
+
+    // The two OLD survivors both still name their own bytes, though only one of
+    // them ever had its offset moved.
+    TEST_ASSERT(p0->burrow == p2->burrow, "both survivors share the old Burrow");
+    TEST_EXPECT_EQ(byte_identity(p0, base + PAGE_SIZE),     1ull * PAGE_SIZE,
+                   "survivor 0 byte identity");
+    TEST_EXPECT_EQ(byte_identity(p2, base + 5 * PAGE_SIZE), 5ull * PAGE_SIZE,
+                   "survivor 2 byte identity after TWO overlays");
+
+    drop_proc(p);
+}
+
+// A MAP_FIXED into FREE space -- no VMA to split. THE CASE THE SPLIT TESTS
+// ABOVE ARE STRUCTURALLY BLIND TO: each of them attaches a mapping first, so
+// none could ever reach the no-covering-VMA arm. That blindness is exactly how
+// #196 shipped past a green suite and was caught only by the in-guest probe.
+//
+// Linux MAP_FIXED does not require the range to be mapped already; refusing
+// here made the shell answer ENOMEM, which an allocator reads as OOM.
+void test_burrow_map_fixed_into_free_space(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // Anchor inside the burrow window, then map at a DISTANT free address so
+    // nothing covers it. The anchor exists only to prove the address space is
+    // otherwise live -- the target itself must be unmapped.
+    u64 anchor = d3b_base(p);
+    TEST_ASSERT(anchor != 0, "lazy attach failed");
+    u64 target = anchor + 256 * PAGE_SIZE;
+    TEST_ASSERT(vma_lookup(p, target) == NULL, "the target must be unmapped");
+
+    struct Burrow *nb = fresh_anon(2 * PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, target, 2 * PAGE_SIZE, VMA_PROT_RW, 0),
+                   0, "a fixed map into free space must SUCCEED, not ENOMEM");
+    burrow_unref(nb);
+
+    struct Vma *v = vma_lookup(p, target);
+    TEST_ASSERT(v != NULL, "the mapping must exist at the requested address");
+    TEST_EXPECT_EQ(v->vaddr_start, target, "it lands EXACTLY where asked");
+    TEST_EXPECT_EQ(v->vaddr_end, target + 2 * PAGE_SIZE, "with the asked span");
+    TEST_ASSERT(v->burrow == nb, "backed by the requested Burrow");
+
+    // The anchor is untouched -- a free-space map splits nothing.
+    struct Vma *a = vma_lookup(p, anchor);
+    TEST_ASSERT(a != NULL, "the anchor survives");
+    TEST_EXPECT_EQ(a->vaddr_end, anchor + D3B_LEN, "the anchor was not cut");
+
+    // PARTIAL OVERLAP still refuses: a range that starts free and runs INTO an
+    // existing VMA is neither shape. Straddle the anchor's start.
+    struct Burrow *ob = fresh_anon(4 * PAGE_SIZE);
+    TEST_ASSERT(ob != NULL, "anon create failed");
+    TEST_ASSERT(map_fixed_locked(p, ob, anchor - 2 * PAGE_SIZE, 4 * PAGE_SIZE,
+                                 VMA_PROT_RW, 0) != 0,
+                "a range straddling a VMA boundary is refused");
+    TEST_ASSERT(vma_lookup(p, anchor) == a, "the straddled VMA is unchanged");
+    TEST_EXPECT_EQ(a->vaddr_start, anchor, "its start is unchanged");
+    burrow_unref(ob);
+
+    drop_proc(p);
 }

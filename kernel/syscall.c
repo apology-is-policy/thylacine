@@ -4804,6 +4804,158 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     return (s64)vaddr;
 }
 
+// DISTRO D-3b: the shared front half of both MAP_FIXED arms -- validate the
+// window and convert the Linux prot word to VMA_PROT_*. Split out because the
+// two arms differ only in where the backing comes from, and duplicating the
+// bounds would be exactly the "the fix that exists on site N stops you asking
+// about site N+1" trap. `*prot_out` is written only on success.
+static s64 mmap_fixed_window(u64 addr, u64 length_raw, u32 pr,
+                             u64 *length_out, u32 *prot_out) {
+    if (length_raw == 0)                             return -(s64)T_E_INVAL;
+    if (length_raw > BURROW_ATTACH_MAX)              return -(s64)T_E_NOMEM;
+    if (addr == 0 || (addr & (u64)(PAGE_SIZE - 1)))  return -(s64)T_E_INVAL;
+
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+    if (addr + length < addr)                        return -(s64)T_E_INVAL;
+
+    u32 prot = 0;
+    if (pr & VIV_PROT_READ)  prot |= (u32)VMA_PROT_READ;
+    if (pr & VIV_PROT_WRITE) prot |= (u32)VMA_PROT_WRITE;
+    if (pr & VIV_PROT_EXEC)  prot |= (u32)VMA_PROT_EXEC;
+
+    *length_out = length;
+    *prot_out   = prot;
+    return 0;
+}
+
+// DISTRO D-3b: the EAGER PRIVATE COPY -- a writable MAP_FIXED file window served
+// as anonymous memory pre-filled from the file. The alternative (copy-on-write
+// over the shared Image-cache pages) is rejected in the header: it would make
+// one container's writes a correctness question about another container's view
+// of the same library.
+//
+// Charged, unlike the demand-paged read-only arm (task #194): burrow_lazy_populate
+// takes the I-32 page charge for the whole run up front, so an over-cap request
+// is refused whole rather than half-populated, and a guest cannot mint free
+// pages here by naming a huge length.
+//
+// A SHORT READ IS NOT AN ERROR. The window legitimately extends past the file's
+// data -- arm 2's length comes from p_memsz, not p_filesz -- and those pages must
+// read as zero, which is exactly what the untouched KP_ZERO slots already are.
+// Only a NEGATIVE read (I/O error, or a death-interruptible unwind) fails.
+//
+// Returns the Burrow with ONE handle ref for the caller, or NULL. Does not
+// consume `sp`.
+static struct Burrow *mmap_eager_copy(struct AddrSpace *as, bool exempt,
+                                      struct Spoor *sp, u64 offset, u64 length) {
+    struct Burrow *b = burrow_create_anon_lazy((size_t)length);
+    if (!b) return NULL;
+
+    size_t npages = (size_t)(length / PAGE_SIZE);
+    if (burrow_lazy_populate(as, exempt, b, 0, npages) != 0) {
+        burrow_unref(b);                 // populate self-unwinds its charge
+        return NULL;
+    }
+
+    // burrow_lazy_slot_kva's precondition holds: this Burrow is not mapped into
+    // any address space and is unreachable from a second thread until the caller
+    // maps it, so the raw slot pointer cannot be freed under us.
+    for (size_t slot = 0; slot < npages; slot++) {
+        u8 *kva = (u8 *)burrow_lazy_slot_kva(b, slot);
+        if (!kva) { burrow_unref(b); return NULL; }
+        size_t got = 0;
+        while (got < (size_t)PAGE_SIZE) {
+            long n = sp->dev->read(sp, kva + got, (long)(PAGE_SIZE - got),
+                                   (s64)(offset + slot * PAGE_SIZE + got));
+            if (n < 0) { burrow_unref(b); return NULL; }   // I/O error / unwind
+            if (n == 0) goto eof;                          // past the data
+            got += (size_t)n;
+        }
+    }
+eof:
+    return b;
+}
+
+// DISTRO D-3b arm 2 (dynlink.c:842): a fd-backed MAP_FIXED overlay. Non-writable
+// windows ride the shared Image cache exactly as D-3a does; a writable one gets
+// the eager private copy above. Returns `addr` on success (MAP_FIXED's contract:
+// the requested address or nothing).
+s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
+                                 u64 length_raw, u32 pr, u64 offset) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+    if (offset & (u64)(PAGE_SIZE - 1))               return -(s64)T_E_INVAL;
+
+    u64 length; u32 prot;
+    s64 werr = mmap_fixed_window(addr, length_raw, pr, &length, &prot);
+    if (werr != 0)                                   return werr;
+    if (offset + length < offset)                    return -(s64)T_E_INVAL;
+
+    // The same gates as the D-3a arm, and for the same reasons: READ is the
+    // authority a mapping consumes; a directory has no byte stream; a symlink
+    // must be followed (#184); an append-only file has no stable byte positions;
+    // an O_PATH handle carries no byte-I/O authority (#81); a Dev with no read
+    // slot cannot serve a page-in.
+    struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!sp)                                         return -(s64)T_E_BADF;
+    if ((sp->qid.type & (QTDIR | QTSYMLINK | QTAPPEND)) ||
+        (sp->flag & CWALKONLY) || !sp->dev || !sp->dev->read) {
+        spoor_clunk(sp);
+        return -(s64)T_E_INVAL;
+    }
+
+    bool writable = (prot & (u32)VMA_PROT_WRITE) != 0;
+    struct Burrow *b;
+    if (writable) {
+        b = mmap_eager_copy(p->as, proc_resource_exempt(p), sp, offset, length);
+        spoor_clunk(sp);                 // the copy is done; nothing pins the file
+        if (!b)                                      return -(s64)T_E_NOMEM;
+    } else {
+        // image_lookup_or_create CONSUMES a Spoor ref on success and none on
+        // NULL, so hand it a fresh one and keep ours to drop.
+        spoor_ref(sp);
+        b = image_lookup_or_create(sp, offset, (size_t)length,
+                                   (prot & (u32)VMA_PROT_EXEC) != 0);
+        if (!b) {
+            spoor_clunk(sp);             // the fresh ref it did not consume
+            spoor_clunk(sp);             // ours
+            return -(s64)T_E_NOMEM;
+        }
+        spoor_clunk(sp);                 // ours; the Burrow holds the pin now
+    }
+
+    spin_lock(&p->as->lock);
+    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0);
+    spin_unlock(&p->as->lock);
+    // OUTSIDE the lock, unlike the D-3a arm (task #193): the mapping holds the
+    // Burrow alive on success, and on failure this is the last ref and dropping
+    // it can reach the allocator.
+    burrow_unref(b);
+    if (rc != 0)                                     return -(s64)T_E_NOMEM;
+    return (s64)addr;
+}
+
+// DISTRO D-3b arm 3 (dynlink.c:851): the anonymous MAP_FIXED bss tail. Demand-
+// zero, so it charges per page at fault time exactly like every other lazy anon
+// mapping.
+s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
+                                 u32 pr) {
+    if (!p)                                          return -(s64)T_E_INVAL;
+
+    u64 length; u32 prot;
+    s64 werr = mmap_fixed_window(addr, length_raw, pr, &length, &prot);
+    if (werr != 0)                                   return werr;
+
+    struct Burrow *b = burrow_create_anon_lazy((size_t)length);
+    if (!b)                                          return -(s64)T_E_NOMEM;
+
+    spin_lock(&p->as->lock);
+    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0);
+    spin_unlock(&p->as->lock);
+    burrow_unref(b);
+    if (rc != 0)                                     return -(s64)T_E_NOMEM;
+    return (s64)addr;
+}
+
 // CL-4: pick the length out of SYS_BURROW_ATTACH_LAZY's two accepted calling
 // conventions. Pure + exported so the shape gate is unit-testable without a
 // live Proc; the full rationale lives at the dispatch site. Returns 0 -- which
@@ -10063,6 +10215,20 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
             return sys_mmap_file_for_proc(p, args[4], args[1],
                                           ((u32)args[2] & VIV_PROT_EXEC) != 0,
                                           args[5]);
+        }
+
+        // DISTRO D-3b: the two MAP_FIXED overlays. Same disjointness argument --
+        // all four arms demand EXACT equality against distinct flags words, so
+        // the ordering here cannot shadow anything.
+        if (vivarium_mmap_fixed_file_decide(args[0], args[2], args[3],
+                                            args[4], args[5]) == VIV_TRANSLATED) {
+            return sys_mmap_fixed_file_for_proc(p, args[0], args[4], args[1],
+                                                (u32)args[2], args[5]);
+        }
+        if (vivarium_mmap_fixed_anon_decide(args[0], args[2], args[3],
+                                            args[4], args[5]) == VIV_TRANSLATED) {
+            return sys_mmap_fixed_anon_for_proc(p, args[0], args[1],
+                                                (u32)args[2]);
         }
 
         if (vivarium_mmap_decide(args[0], args[2], args[3], args[4], args[5])

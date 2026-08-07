@@ -882,10 +882,84 @@ enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
     return VIV_TRANSLATED;
 }
 
-bool vivarium_mmap_arms_disjoint(u64 prot, u64 flags, u64 fd, u64 offset) {
-    bool anon = vivarium_mmap_decide(0, prot, flags, fd, offset) == VIV_TRANSLATED;
-    bool file = vivarium_mmap_file_decide(prot, flags, fd, offset) == VIV_TRANSLATED;
-    return !(anon && file);
+// -----------------------------------------------------------------------------
+// TIER 2 — the two MAP_FIXED arms (DISTRO D-3b). Domains measured off
+// map_library's overlay calls (dynlink.c:842 and :851). See the header.
+// -----------------------------------------------------------------------------
+
+// Shared by both fixed arms: with MAP_FIXED the address is a REQUIREMENT, not
+// the hint it is on the non-fixed arms, so it has to be a real page. Zero is
+// refused separately from misalignment because a fixed map at NULL is a distinct
+// mistake -- it would put a mapping where a null-pointer dereference must fault.
+static bool fixed_addr_ok(u64 addr) {
+    if (addr == 0)                    return false;
+    if (addr & (u64)(PAGE_SIZE - 1))  return false;
+    return true;
+}
+
+enum viv_verdict vivarium_mmap_fixed_file_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset) {
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+
+    if (!fixed_addr_ok(addr))                    return VIV_FORWARD;
+
+    // Unlike the D-3a arm, PROT_WRITE IS admitted here -- served by an eager
+    // private copy, never by a writable file mapping (see the header). What is
+    // NOT admitted is W together with X: vma_alloc would reject it anyway, but
+    // I-12 is worth failing closed on at the domain edge too, so a W+X request
+    // is declined before it can reach anything that has to argue about it.
+    if (pr & ~VIV_MMAP_FIXED_FILE_PROT_ADMITTED) return VIV_FORWARD;
+    if ((pr & VIV_PROT_WRITE) && (pr & VIV_PROT_EXEC)) return VIV_FORWARD;
+    if ((pr & VIV_PROT_READ) == 0)               return VIV_FORWARD;
+
+    if (fl != VIV_MMAP_FIXED_FILE_FLAGS_ADMITTED) return VIV_FORWARD;
+    if ((s32)(u32)fd < 0)                         return VIV_FORWARD;
+
+    // Page-aligned offset, for the same STRUCTURAL reason as the D-3a arm: the
+    // FILE fault arm derives each page's file position from the Burrow's own
+    // offset 0, which is the mapping's start only when the offset is aligned.
+    // The eager-copy path does not need it (it reads at an explicit offset), but
+    // requiring it uniformly keeps ONE domain for the arm rather than a domain
+    // that silently depends on which backing the prot happens to select.
+    if (offset & (u64)(PAGE_SIZE - 1))            return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
+}
+
+enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset) {
+    u32 pr = (u32)prot;
+    u32 fl = (u32)flags;
+
+    if (!fixed_addr_ok(addr))                    return VIV_FORWARD;
+
+    if (pr & ~VIV_MMAP_FIXED_ANON_PROT_ADMITTED) return VIV_FORWARD;
+    // PROT_NONE declines rather than degrading to writable, which is the
+    // non-fixed anon arm's documented behaviour. A FIXED PROT_NONE over an
+    // existing mapping is a GUARD; handing back a writable page instead would
+    // not be a degradation but a hole. See the header.
+    if ((pr & VIV_PROT_READ) == 0)               return VIV_FORWARD;
+
+    if (fl != VIV_MMAP_FIXED_ANON_FLAGS_ADMITTED) return VIV_FORWARD;
+    if ((s32)(u32)fd != -1)                       return VIV_FORWARD;
+    if (offset != 0)                              return VIV_FORWARD;
+
+    return VIV_TRANSLATED;
+}
+
+bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
+                                 u64 fd, u64 offset) {
+    int admitted = 0;
+    if (vivarium_mmap_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_file_decide(prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_fixed_file_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    if (vivarium_mmap_fixed_anon_decide(addr, prot, flags, fd, offset) == VIV_TRANSLATED)
+        admitted++;
+    return admitted <= 1;
 }
 
 // =============================================================================

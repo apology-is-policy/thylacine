@@ -652,10 +652,80 @@ enum viv_verdict vivarium_mmap_decide(u64 addr, u64 prot, u64 flags,
 enum viv_verdict vivarium_mmap_file_decide(u64 prot, u64 flags,
                                            u64 fd, u64 offset);
 
-// True iff no argument tuple is admitted by BOTH mmap arms. Pure; exists so the
-// disjointness the two deciders' comments CLAIM is a checked fact rather than a
-// pair of assertions that agree with each other.
-bool vivarium_mmap_arms_disjoint(u64 prot, u64 flags, u64 fd, u64 offset);
+// -----------------------------------------------------------------------------
+// TIER 2 — the two MAP_FIXED arms (DISTRO D-3b). See docs/DISTRO.md §6.
+//
+// map_library reserves a whole span (the D-3a arm above) and then OVERLAYS each
+// remaining PT_LOAD onto it. Two more shapes, both MEASURED off dynlink.c:
+//
+//   arm 2, :842 -- every PT_LOAD past the lowest, at its OWN prot:
+//     mmap_fixed(base+this_min, this_max-this_min, prot,
+//                MAP_PRIVATE|MAP_FIXED, fd, off_start)
+//
+//   arm 3, :851 -- the whole-page bss tail, gated on
+//   `p_memsz > p_filesz && (p_flags & PF_W)`:
+//     mmap_fixed(pgbrk, base+this_max-pgbrk, prot,
+//                MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0)
+//
+// NOTE that arm 2's `this_max` derives from p_memsz, NOT p_filesz -- so arm 2
+// maps file-backed PAST the file's data and arm 3 then overlays the whole bss
+// pages. Between them musl memsets the partial tail page (:849), which is a
+// WRITE into arm 2's mapping.
+//
+// THAT WRITE IS WHY A WRITABLE arm 2 IS NOT A FILE MAPPING. A writable private
+// file mapping would need copy-on-write over the shared Image-cache pages, and a
+// bug there would leak one container's writes into another's view of the same
+// library. So a PROT_WRITE arm-2 request is served by an EAGER PRIVATE COPY into
+// an anonymous Burrow -- which is a conforming MAP_PRIVATE (POSIX and Linux both
+// leave post-mmap file changes unspecified for private mappings), is the
+// CONSERVATIVE reading, and keeps "no userspace writable file mapping exists"
+// true by construction rather than by care. I-36 is untouched.
+//
+// MEASURED cost of that copy, over every ELF in the stock Alpine rootfs: 888 KiB
+// if every library were mapped at once; 372 KiB for the largest single one
+// (libcrypto.so.3); 16 KiB for the ld-musl a typical dynamic process maps.
+//
+// ALSO MEASURED, and it bounds what the in-guest gate can prove: all 18 ELFs in
+// that rootfs carry exactly two PT_LOADs, `R-X` then `RW-`. So arm 2 is ALWAYS
+// writable there -- the non-writable arm-2 path (which rides the shared Image
+// cache exactly as D-3a does) has NO producer on this rootfs and is exercised
+// only by the unit suite. It is built because the ELF format permits it and a
+// `-z separate-code` toolchain (binutils >= 2.31, so Debian/Fedora) emits the
+// four-segment `R / R-X / R / RW-` layout that produces it; it is NOT claimed as
+// gate-covered.
+//
+// PROT_NONE DECLINES on both arms, and on arm 3 that deliberately diverges from
+// the non-fixed anon arm, which degrades PROT_NONE to writable. The difference
+// is that a FIXED PROT_NONE request over an existing mapping is a GUARD -- and
+// silently handing back a writable page where a guard was asked for is not a
+// degradation anyone would sanction. Measured, it costs nothing: arm 3 fires
+// only under PF_W, so its prot always carries R|W.
+//
+// `addr` is a REQUIREMENT here, not the hint it is on the non-fixed arms, so it
+// must be page-aligned and non-zero (a fixed map at NULL is refused).
+#define VIV_MMAP_FIXED_FILE_FLAGS_ADMITTED \
+    ((u32)(VIV_MAP_PRIVATE | VIV_MAP_FIXED))
+#define VIV_MMAP_FIXED_FILE_PROT_ADMITTED \
+    ((u32)(VIV_PROT_READ | VIV_PROT_WRITE | VIV_PROT_EXEC))
+
+#define VIV_MMAP_FIXED_ANON_FLAGS_ADMITTED \
+    ((u32)(VIV_MAP_PRIVATE | VIV_MAP_FIXED | VIV_MAP_ANONYMOUS))
+#define VIV_MMAP_FIXED_ANON_PROT_ADMITTED \
+    ((u32)(VIV_PROT_READ | VIV_PROT_WRITE))
+
+enum viv_verdict vivarium_mmap_fixed_file_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset);
+enum viv_verdict vivarium_mmap_fixed_anon_decide(u64 addr, u64 prot, u64 flags,
+                                                 u64 fd, u64 offset);
+
+// True iff no argument tuple is admitted by more than ONE mmap arm. Pure; exists
+// so the disjointness the arms' comments CLAIM is a checked fact rather than a
+// set of assertions that agree with each other. Covers all four arms pairwise --
+// they separate on the flags word alone (each arm demands EXACT equality against
+// a distinct value), so this also fails loudly if a future edit relaxes any of
+// those equalities into a mask test.
+bool vivarium_mmap_arms_disjoint(u64 addr, u64 prot, u64 flags,
+                                 u64 fd, u64 offset);
 
 // -----------------------------------------------------------------------------
 // TIER 0/2 — signals (V-6). See VIVARIUM.md §6.22.
