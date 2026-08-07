@@ -1105,18 +1105,23 @@ u32 burrow_lazy_resident_count(struct Burrow *v) {
 // v->size via burrow_get_size (magic-checked: 0 on a NULL/corrupted v ->
 // reject).
 //
-// Admission (G-2 -- the owed I-5 analysis, TAPESTRY.md §18.1 + §18.12 R2-F1):
-// ANON (a dataplane ring), or a KERNEL-MINTED device-passive DMA WEAVE (a
-// framebuffer-class region whose KObj_DMA carries the create-immutable `weave`
-// bit, set only by SYS_DMA_CREATE_WEAVE / kobj_dma_create_weave). A plain DMA
+// Admission (G-2 -- the owed I-5 analysis, TAPESTRY.md §18.1 + §18.12 R2-F1;
+// widened at Warp-2 per GPU-DESIGN.md §6.1): ANON (a dataplane ring), or a
+// KERNEL-MINTED share-admissible DMA subtype -- the device-passive WEAVE (the
+// create-immutable `weave` bit, set only by SYS_DMA_CREATE_WEAVE) or the GPU
+// BO (the `gpu_bo` bit, set only by SYS_DMA_CREATE_GPU_BO). A plain DMA
 // region -- virtqueue, descriptor table, bounce buffer: the device-COMMAND
 // class -- and MMIO stay structurally unshareable: no creator-asserted flag
 // admits them, only the allocation-time kernel mint, so sharing a region the
-// device INTERPRETS is impossible by construction (MMIO parity). The weave bit
-// conveys no hardware authority of its own: the region is pinned Normal-WB RAM
-// the device only DMA-reads (pixels); the client's PTEs are the same cacheable
-// attrs an ANON share installs (the fault arm's BURROW_TYPE_DMA case -- never
-// Device-nGnRnE), and W^X holds (the share prot is RW; vma_alloc rejects X).
+// device INTERPRETS is impossible by construction (MMIO parity). Neither bit
+// conveys hardware authority of its own, but their safety arguments DIFFER
+// and each lives on its KObj_DMA field: a weave is pinned Normal-WB RAM the
+// device only DMA-READS (pixels); a GPU BO is device-WRITTEN (render target /
+// readback), and its argument is that what the GPU may reach is bounded by
+// the GPU-side translation only the trusted device owner programs. Either
+// way the client's PTEs are the same cacheable attrs an ANON share installs
+// (the fault arm's BURROW_TYPE_DMA case -- never Device-nGnRnE), and W^X
+// holds (the share prot is RW; vma_alloc rejects X).
 // The #847 dual-refcount proof below is TYPE-INDEPENDENT with one addition for
 // DMA: the freed Burrow's kobj_dma_unref is the SECOND refcount domain -- the
 // weave's page chunk lives on the KObj_DMA, which the Burrow's own ref keeps
@@ -1171,12 +1176,17 @@ int burrow_share_into(struct Proc *dst, struct Burrow *v, u64 vaddr, u32 prot) {
     size_t length = burrow_get_size(v);
     if (length == 0) return -1;
 
-    // The G-2 admission gate (see the header comment): ANON, or the
-    // kernel-minted device-passive DMA weave. Types + the weave bit are
-    // create-immutable; lock-free reads are coherent.
-    bool weave = (v->type == BURROW_TYPE_DMA &&
-                  v->kobj_dma != NULL && v->kobj_dma->weave);
-    if (v->type != BURROW_TYPE_ANON && !weave) return -1;
+    // The G-2 (+Warp-2) admission gate (see the header comment): ANON, or a
+    // kernel-minted share-admissible DMA subtype -- the device-passive weave,
+    // or the GPU BO (whose distinct device-WRITTEN argument lives on
+    // KObj_DMA.gpu_bo: what the GPU may write is bounded by translation the
+    // trusted owner programs, so the client's RW mapping still conveys zero
+    // hardware authority). Types + the subtype bits are create-immutable;
+    // lock-free reads are coherent. Plain DMA (device-COMMAND class) and MMIO
+    // remain structurally unshareable.
+    bool admissible_dma = (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL &&
+                           (v->kobj_dma->weave || v->kobj_dma->gpu_bo));
+    if (v->type != BURROW_TYPE_ANON && !admissible_dma) return -1;
 
     // R2-F3: charge the CLIENT's shared-in budget (the I-32 fifth axis) BEFORE
     // mapping. The pages are the SHARER's commit (netd's page_count /

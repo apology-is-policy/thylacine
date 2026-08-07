@@ -273,6 +273,7 @@ pub const T_SYS_WEFT_SHARE: u64       = 81;     // Weft-6a-2: register a per-flo
 pub const T_SYS_WEFT_MAP: u64         = 82;     // Weft-6a-2: map a /net data fd's ring -> ring_va
 pub const T_SYS_DMA_CREATE_WEAVE: u64 = 99;     // G-2: mint a share-admissible DMA weave
 pub const T_SYS_WEFT_UNSHARE: u64     = 100;    // G-2: disarm an un-claimed share (retire/GC)
+pub const T_SYS_DMA_CREATE_GPU_BO: u64 = 106;   // Warp-2: mint a share-admissible GPU BO
 pub const T_SYS_EXECVE: u64           = 104;    // LINEAGE L-2: replace this Proc's image in place
 pub const T_SYS_RFORK: u64            = 105;    // LINEAGE L-3b: fork sharing the address space
 // SYS_RFORK flags (kernel/include/thylacine/proc.h). Only RFPROC|RFMEM is
@@ -1020,6 +1021,28 @@ pub unsafe fn t_dma_create_weave(size: u64, rights: u32) -> i64 {
         inlateout("x0") x0,
         in("x1") rights as u64,
         in("x8") T_SYS_DMA_CREATE_WEAVE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_dma_create_gpu_bo — mint a SHARE-ADMISSIBLE GPU buffer (Warp-2;
+// GPU-DESIGN.md section 6.1). Byte-for-byte the t_dma_create_weave contract
+// (CAP_HW_CREATE + the I-34 allowance gate; kernel-chosen PA; 64 MiB
+// envelope) with the kernel-minted immutable `gpu_bo` bit instead — the
+// SECOND admissible kind, whose safety argument is device-WRITTEN (a render
+// target / readback destination bounded by owner-programmed GPU translation),
+// not the weave's device-read passivity. The GPU service mints these per
+// client BO request, ATTACH_BACKINGs the PA, and shares the mapping to the
+// client via the bo map fid (the Tweft path).
+#[inline(always)]
+pub unsafe fn t_dma_create_gpu_bo(size: u64, rights: u32) -> i64 {
+    let mut x0: i64 = size as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") rights as u64,
+        in("x8") T_SYS_DMA_CREATE_GPU_BO,
         options(nostack)
     );
     x0

@@ -335,6 +335,7 @@ void test_weft_map_binding_lifetime(void);
 void test_weft_share_cap_gate(void);
 void test_weft_share_rejects_plain_dma(void);
 void test_weft_weave_share_and_claim(void);
+void test_weft_gpu_bo_share_and_claim(void);
 void test_weft_unshare_disarm(void);
 void test_weft_shared_map_budget_cap(void);
 void test_weft_weave_clunk_unmap_guard(void);
@@ -1795,6 +1796,7 @@ struct test_case g_tests[] = {
     { "weft.share_cap_gate",              test_weft_share_cap_gate,           false, NULL },
     { "weft.share_rejects_plain_dma",     test_weft_share_rejects_plain_dma,  false, NULL },
     { "weft.weave_share_and_claim",       test_weft_weave_share_and_claim,    false, NULL },
+    { "weft.gpu_bo_share_and_claim",      test_weft_gpu_bo_share_and_claim,   false, NULL },
     { "weft.unshare_disarm",              test_weft_unshare_disarm,           false, NULL },
     { "weft.shared_map_budget_cap",       test_weft_shared_map_budget_cap,    false, NULL },
     { "weft.weave_clunk_unmap_guard",     test_weft_weave_clunk_unmap_guard,  false, NULL },

@@ -386,11 +386,15 @@ int weft_claimed_kind(const struct Burrow *v, u32 ring_entries) {
     if (!v) return -1;
     // The kernel-minted Burrow type is the single source of truth; the
     // server's declared geometry must AGREE with it, else fail closed. Types +
-    // the weave bit are create-immutable -- lock-free reads are coherent.
+    // the subtype bits are create-immutable -- lock-free reads are coherent.
+    // Both map-only kinds (weave / gpu_bo) demand entries == 0: neither has a
+    // descriptor ring, and a declared geometry over one is a contradiction.
     if (v->type == BURROW_TYPE_ANON)
         return (ring_entries != 0u) ? WEFT_BIND_RING : -1;
     if (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL && v->kobj_dma->weave)
         return (ring_entries == 0u) ? WEFT_BIND_WEAVE : -1;
+    if (v->type == BURROW_TYPE_DMA && v->kobj_dma != NULL && v->kobj_dma->gpu_bo)
+        return (ring_entries == 0u) ? WEFT_BIND_GPU_BO : -1;
     // Anything else in the registry would be a register-gate breach; the
     // claim-side re-check keeps it unmappable regardless (defense-in-depth).
     return -1;
@@ -453,25 +457,29 @@ struct weft_binding *weft_binding_alloc(struct Burrow *burrow, u64 guest_va,
     return b;
 }
 
-struct weft_binding *weft_binding_alloc_weave(struct Burrow *burrow,
-                                              u64 guest_va, u32 size,
-                                              u32 map_pid) {
-    // Defense-in-depth: only the kernel-minted weave subtype reaches here (the
-    // caller derived WEAVE via weft_claimed_kind); re-check anyway so a future
-    // caller cannot mint a weave binding over an inadmissible region.
-    if (!burrow || burrow->type != BURROW_TYPE_DMA ||
-        burrow->kobj_dma == NULL || !burrow->kobj_dma->weave)
+struct weft_binding *weft_binding_alloc_maponly(struct Burrow *burrow,
+                                                u64 guest_va, u32 size,
+                                                u32 map_pid) {
+    // Defense-in-depth: only a kernel-minted map-only subtype (weave / gpu_bo)
+    // reaches here (the caller derived the kind via weft_claimed_kind);
+    // re-check anyway so a future caller cannot mint a map-only binding over
+    // an inadmissible region. The recorded kind names the actual subtype.
+    if (!burrow || burrow->type != BURROW_TYPE_DMA || burrow->kobj_dma == NULL)
         return NULL;
+    u32 kind;
+    if (burrow->kobj_dma->weave)       kind = WEFT_BIND_WEAVE;
+    else if (burrow->kobj_dma->gpu_bo) kind = WEFT_BIND_GPU_BO;
+    else                               return NULL;
 
     struct weft_binding *b = kmalloc(sizeof(*b), KP_ZERO);
     if (!b) return NULL;
     b->burrow    = burrow;
     b->guest_va  = guest_va;
     b->ring_size = size;
-    b->kind      = WEFT_BIND_WEAVE;
+    b->kind      = kind;
     b->map_pid   = map_pid;
-    // b->view stays zeroed -- a weave has no descriptor ring; the kind gate in
-    // weft_binding_validate_rw keeps every Tweftio consumer off it.
+    // b->view stays zeroed -- a map-only binding has no descriptor ring; the
+    // kind gate in weft_binding_validate_rw keeps every Tweftio consumer off it.
     return b;
 }
 
@@ -514,7 +522,7 @@ void weft_binding_release(struct weft_binding *b) {
 
 int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer) {
     if (!wb || !closer) return -1;
-    if (wb->kind != WEFT_BIND_WEAVE) return -1;       // RING keeps its lifetime
+    if (!weft_kind_maponly((int)wb->kind)) return -1; // RING keeps its lifetime
     if (closer->pid != wb->map_pid)  return -1;       // not the mapping Proc
     spin_lock(&closer->as->lock);
     // The G-2 audit F1 guard: the binding's guest_va is a RECORD, not a live
@@ -538,25 +546,25 @@ int weft_binding_clunk_unmap(struct weft_binding *wb, struct Proc *closer) {
 // =============================================================================
 
 static spin_lock_t g_weft_reap_lock;
-static struct weft_binding *g_weave_bindings;   // singly-linked, reap_next
+static struct weft_binding *g_maponly_bindings; // weave + gpu_bo; singly-linked
 static struct Rendez g_weft_reap_rendez;
 
 void weft_reap_init(void) {
     spin_lock_init(&g_weft_reap_lock);
     rendez_init(&g_weft_reap_rendez);
-    g_weave_bindings = NULL;
+    g_maponly_bindings = NULL;
 }
 
 void weft_reap_register(struct weft_binding *wb,
                         const struct p9_attached *att,
                         const struct p9_client *cl) {
-    if (!wb || wb->kind != WEFT_BIND_WEAVE) return;
+    if (!wb || !weft_kind_maponly((int)wb->kind)) return;
     wb->sess_att = att;
     wb->sess_cl = cl;
     wb->orphan_since_ns = 0;
     spin_lock(&g_weft_reap_lock);
-    wb->reap_next = g_weave_bindings;
-    g_weave_bindings = wb;
+    wb->reap_next = g_maponly_bindings;
+    g_maponly_bindings = wb;
     spin_unlock(&g_weft_reap_lock);
     // First-registration wake: the reaper parks indefinitely on an empty
     // registry (tickless-idle-friendly -- no 1 Hz kthread tick on an idle
@@ -567,7 +575,7 @@ void weft_reap_register(struct weft_binding *wb,
 void weft_reap_unregister(struct weft_binding *wb) {
     if (!wb) return;
     spin_lock(&g_weft_reap_lock);
-    struct weft_binding **pp = &g_weave_bindings;
+    struct weft_binding **pp = &g_maponly_bindings;
     while (*pp) {
         if (*pp == wb) {
             *pp = wb->reap_next;
@@ -626,7 +634,7 @@ int weft_reap_sweep(u64 now_ns) {
     int reclaimed = 0;
 
     spin_lock(&g_weft_reap_lock);
-    struct weft_binding **pp = &g_weave_bindings;
+    struct weft_binding **pp = &g_maponly_bindings;
     while (*pp && ndrop < WEFT_REAP_MAX_DROP) {
         struct weft_binding *wb = *pp;
         bool dead = wb->sess_att ? !p9_attached_is_open(wb->sess_att)
@@ -685,7 +693,7 @@ static int weft_reap_have_work(void *arg) {
     // A lockless head read: the register-then-observe pairing with
     // weft_reap_register's wakeup makes a set-in-the-window visible either
     // via this re-check (under the rendez lock) or via the wakeup itself.
-    return g_weave_bindings != NULL;
+    return g_maponly_bindings != NULL;
 }
 
 static int weft_reap_never(void *arg) {

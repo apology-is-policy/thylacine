@@ -2029,6 +2029,21 @@ enum {
     //   -T_E_AGAIN   the child could not be created (the I-32 child cap, a
     //                narrowed hardware allowance, or OOM)
     SYS_RFORK = 105,
+
+    // SYS_DMA_CREATE_GPU_BO(size, rights) -> hidx / -1  (Warp-2; GPU-DESIGN.md
+    //   §6.1; the ABI addition signed off via the Warp-0 scripture commit
+    //   e29cd096). Byte-for-byte the SYS_DMA_CREATE_WEAVE contract -- the SAME
+    //   CAP_HW_CREATE gate + I-34 allowance HW_RES_DMA CreateBegin/CreateCommit
+    //   pair -- differing only in the envelope (KOBJ_DMA_GPU_BO_MAX_SIZE) and
+    //   the kernel-minted create-immutable `gpu_bo` subtype bit, the SECOND
+    //   share-admissible DMA kind (burrow_share_into + SYS_WEFT_SHARE). A
+    //   separate number for the same reason the weave got one (the #112
+    //   garbage-x2 missed-caller class): existing two-arg mint callers leave
+    //   x2 as garbage, and a flags word read from garbage could accidentally
+    //   select a share-admissible kind. The GPU BO's safety argument is
+    //   DISTINCT from the weave's -- device-WRITTEN, bounded by owner-programmed
+    //   GPU translation -- and is recorded on KObj_DMA.gpu_bo.
+    SYS_DMA_CREATE_GPU_BO = 106,   // arg: size (x0), rights (x1)
 };
 
 // SYS_JIT_CREATE out-parameter: the two aliases of one code region.
