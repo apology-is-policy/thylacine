@@ -29,6 +29,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
+#include <thylacine/pci_handle.h>  // audit F8: quiesce a PCI-transport driver at death
 #include <thylacine/path.h>        // VIVARIUM V-4a-0: Proc.exe_path (#66 Path)
 #include <thylacine/poll.h>        // child_waiters multi-waiter reap (#344)
 #include <thylacine/territory.h>
@@ -527,6 +528,20 @@ int proc_quiesce_owned_devices(struct Proc *p) {
         for (int i = 0; i < PROC_HANDLE_MAX; i++) {
             struct Handle *h = &t->slots[i];
             if (h->magic != HANDLE_MAGIC) continue;
+            if (h->kind == KOBJ_PCI && h->obj) {
+                // Warp-2 audit F8 (the #170 family): a PCI-transport
+                // driver's device is NOT reachable through the MMIO arm
+                // below -- its registers live in BARs the host bridge
+                // decodes, which `virtio_mmio_reset_in_range` does not
+                // cover. Without this every PCI driver (tapestryd's GPU +
+                // 3 input functions, netd's NIC) stayed BUS-MASTER-ENABLED
+                // across the fallback `state=ZOMBIE; proc_free()` path,
+                // whose addrspace_unref frees the KObj_DMA pages BEFORE
+                // handle_table_free reaches the KObj_PCI release quiesce.
+                // Idempotent with `pci_release_bars_and_claim`.
+                reset += kobj_pci_quiesce((struct KObj_PCI *)h->obj) ? 1 : 0;
+                continue;
+            }
             if (h->kind != KOBJ_MMIO || !h->obj) continue;
             struct KObj_MMIO *k = (struct KObj_MMIO *)h->obj;
             reset += virtio_mmio_reset_in_range(k->pa, k->size);

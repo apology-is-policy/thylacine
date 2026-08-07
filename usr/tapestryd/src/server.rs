@@ -84,7 +84,7 @@ use libthyla_rs::ninep as p9;
 use libthyla_rs::time::Instant;
 use libthyla_rs::{
     t_burrow_detach, t_close, t_dma_create_gpu_bo, t_dma_create_weave, t_dma_map, t_srv_peer,
-    t_weft_share, t_weft_unshare, t_yield, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM,
+    t_weft_share, t_weft_unshare, TSrvPeerInfo, T_GID_SYSTEM, T_PRINCIPAL_SYSTEM,
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
     T_SRV_PEER_FLAG_CONSOLE_RENDERER,
 };
@@ -106,6 +106,13 @@ use crate::gpu::{FencedErr, Gpu};
 use crate::pane::{self, Dir, Layout, Mode, Rect, Role};
 
 pub const MAX_CONNS: usize = 8;
+/// Of those, at most this many may be WARP conns (audit F7). Warp-2c fed
+/// a second listener into the same pool, so a GPU client opening
+/// `/srv/warp` eight times filled it and BOTH listeners stopped being
+/// polled -- the compositor's own listener starved, and aurora (the
+/// console renderer) could not reconnect. The renderer's door is never
+/// closed by GPU clients now.
+pub const MAX_WARP_CONNS: usize = 4;
 const MAX_FIDS: usize = 32;
 pub const SRV_MSIZE: u32 = 32768;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
@@ -121,6 +128,16 @@ const MAX_SURFACES_PER_CONN: usize = 4;
 /// bookkeeping bound, not the resource authority).
 const MAX_WARP_CTXS: usize = 8;
 const MAX_WARP_BOS_PER_CTX: usize = 16;
+/// Total live BO backing per context (audit F2). The per-BO kernel
+/// envelope is 64 MiB, and 16 BOs x 8 ctxs would let clients pin 8 GiB of
+/// contiguous kernel memory that NOTHING charges -- graceful-OOM, but I-32
+/// exists so a non-TCB Proc cannot get there, and here the allocation is
+/// laundered through the TCB driver. 64 MiB/ctx (512 MiB total worst case)
+/// covers a 4K RGBA render target with room over.
+const WARP_CTX_BACKING_MAX: u64 = 64 * 1024 * 1024;
+/// The widest plausible bytes-per-pixel for the geometry sanity check
+/// (RGBA32F is 16); the host owns real format validity per section 2.1.
+const WARP_BO_MAX_BPP: u64 = 16;
 
 /// Triple buffering (D1): one weave carries three page-aligned slots.
 const WEAVE_SLOTS: u32 = 3;
@@ -153,6 +170,13 @@ const SURF_FLAG: u64 = 1 << 40;
 const PANE_FLAG: u64 = 1 << 41; // pane qids (G-6): PANE_FLAG | id<<8 | fk
 const FK_MASK: u64 = 0xff;
 const N_MASK: u64 = 0x00ff_ffff;
+/// The warp id field is wider than the surface/pane one (audit F11): warp
+/// qids reserve bits 38+ for their level flags, so bits 8..38 are free.
+/// A 30-bit field makes the monotonic-id-never-aliases property real
+/// rather than "true for the first 2^24 mints" -- ctx/BO resolvers compare
+/// the FULL u32 pub_id, so a truncating qid would resolve to an earlier
+/// live object of the same conn once the counter passed the mask.
+const WARP_N_MASK: u64 = 0x3fff_ffff;
 
 const FK_DIR: u64 = 0;
 const FK_CTL: u64 = 1;
@@ -245,13 +269,13 @@ const WFK_BO_MAP: u64 = 2;
 const WFK_BO_INFO: u64 = 3;
 
 fn make_wctx(id: u32, fk: u64) -> u64 {
-    WARP_FLAG | WARP_CTX | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
+    WARP_FLAG | WARP_CTX | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
 }
 fn make_wbo(id: u32, fk: u64) -> u64 {
-    WARP_FLAG | WARP_BO | ((id as u64 & N_MASK) << 8) | (fk & FK_MASK)
+    WARP_FLAG | WARP_BO | ((id as u64 & WARP_N_MASK) << 8) | (fk & FK_MASK)
 }
 fn warp_id(path: u64) -> u32 {
-    ((path >> 8) & N_MASK) as u32
+    ((path >> 8) & WARP_N_MASK) as u32
 }
 fn warp_fk(path: u64) -> u64 {
     path & FK_MASK
@@ -606,6 +630,16 @@ struct WarpCtx {
     fences_in_flight: u32,
     fence_signaled: u64,
     fence_reported: u64,
+    /// A fence of this ctx was ABANDONED (never retired within the
+    /// driver's bound): the device may still be writing its backings, so
+    /// every later retire under this ctx LEAKS rather than frees.
+    fence_poisoned: bool,
+    /// Destroy was requested while fences were still in flight (audit
+    /// F5): the ctx is hidden from every client resolve immediately and
+    /// the serve-loop pump finishes the retire once quiesced. The old
+    /// shape blocked the dispatch for up to 2 s per object -- client-
+    /// multipliable into minutes of frozen console (#31/#125).
+    retiring: bool,
     bos: [Option<WarpBo>; MAX_WARP_BOS_PER_CTX],
 }
 
@@ -623,6 +657,10 @@ struct WarpBo {
     share_id: Option<u64>,
     w: u32,
     h: u32,
+    /// Destroy requested under in-flight fences (audit F5): already
+    /// unresolvable to the client; the pump frees it when the ctx
+    /// quiesces (or leaks it if a fence was abandoned).
+    retiring: bool,
 }
 
 const NO_SURFACE: Option<Surface> = None;
@@ -2404,7 +2442,7 @@ impl Comp {
     /// Resolve a live ctx the CALLER owns (the F2 gate, warp edition).
     fn wctx(&self, pub_id: u32, conn: u64) -> Option<&WarpCtx> {
         let c = self.warp_ctxs[self.wctx_slot(pub_id)?].as_ref().unwrap();
-        if c.owner_conn != conn {
+        if c.owner_conn != conn || c.retiring {
             return None;
         }
         Some(c)
@@ -2413,7 +2451,7 @@ impl Comp {
     fn wctx_mut(&mut self, pub_id: u32, conn: u64) -> Option<&mut WarpCtx> {
         let i = self.wctx_slot(pub_id)?;
         let c = self.warp_ctxs[i].as_mut().unwrap();
-        if c.owner_conn != conn {
+        if c.owner_conn != conn || c.retiring {
             return None;
         }
         Some(c)
@@ -2422,11 +2460,11 @@ impl Comp {
     /// Resolve a live BO (and its ctx pub id) the caller owns.
     fn wbo(&self, bo_pub: u32, conn: u64) -> Option<(&WarpCtx, &WarpBo)> {
         for c in self.warp_ctxs.iter().flatten() {
-            if c.owner_conn != conn {
+            if c.owner_conn != conn || c.retiring {
                 continue;
             }
             for b in c.bos.iter().flatten() {
-                if b.pub_id == bo_pub {
+                if b.pub_id == bo_pub && !b.retiring {
                     return Some((c, b));
                 }
             }
@@ -2438,7 +2476,12 @@ impl Comp {
     /// bound): allocate the slot, CTX_CREATE on the device (virgl-gated by
     /// the caller), roll the slot back if the device refuses.
     fn wctx_mint(&mut self, conn: u64) -> Option<u32> {
-        if self.warp_ctxs.iter().flatten().any(|c| c.owner_conn == conn) {
+        if self
+            .warp_ctxs
+            .iter()
+            .flatten()
+            .any(|c| c.owner_conn == conn && !c.retiring)
+        {
             return None; // one ctx per client
         }
         let slot = self.warp_ctxs.iter().position(|c| c.is_none())?;
@@ -2457,6 +2500,8 @@ impl Comp {
             fences_in_flight: 0,
             fence_signaled: 0,
             fence_reported: 0,
+            fence_poisoned: false,
+            retiring: false,
             bos: [WARP_NO_BO; MAX_WARP_BOS_PER_CTX],
         });
         Some(pub_id)
@@ -2479,6 +2524,7 @@ impl Comp {
             share_id: None,
             w: 0,
             h: 0,
+            retiring: false,
         });
         Some(pub_id)
     }
@@ -2509,10 +2555,35 @@ impl Comp {
         if size == 0 || size % PAGE != 0 {
             return false;
         }
+        // The backing is CLIENT-DECLARED, and nothing downstream charges
+        // it: the kernel mint is tapestryd's (TCB, I-32-exempt) and the
+        // per-Proc shared-map budget is charged only if the client ever
+        // MAPS it. So the seam owns the bound (audit F2 -- the old
+        // comment claimed the client's budget bounded this; it does not).
+        // Two gates: the declared geometry must plausibly need this many
+        // bytes (a 1x1 texture cannot ask for 64 MiB), and the ctx's
+        // total live backing is capped.
+        let px = (w as u64)
+            .checked_mul(h.max(1) as u64)
+            .and_then(|v| v.checked_mul(d.max(1) as u64))
+            .and_then(|v| v.checked_mul(array.max(1) as u64));
+        let geom_max = match px.and_then(|v| v.checked_mul(WARP_BO_MAX_BPP)) {
+            // Mip chains + alignment ride above the base level, so the
+            // slack is generous; the point is only to refuse the absurd.
+            Some(v) => (v + v / 2 + PAGE).max(PAGE),
+            None => return false,
+        };
+        if size > geom_max {
+            return false;
+        }
         let c = match self.wctx(ctx_pub, conn) {
             Some(c) => c,
             None => return false,
         };
+        let live: u64 = c.bos.iter().flatten().map(|b| b.size).sum();
+        if live + size > WARP_CTX_BACKING_MAX {
+            return false;
+        }
         let dev_ctx = c.dev_ctx;
         if !c.bos.iter().flatten().any(|b| b.pub_id == bo_pub) {
             return false;
@@ -2540,6 +2611,26 @@ impl Comp {
             return false;
         }
 
+        // Every failure arm from here unwinds the DEVICE state in reverse
+        // AND both halves of the guest backing: `t_burrow_detach` before
+        // `t_close`, because I-7's dual count frees nothing while a
+        // mapping ref survives (audit F4 -- dropping only the handle
+        // leaked up to 64 MiB of pinned contiguous pages for the life of
+        // a PERSISTENT driver).
+        let unwind = |gpu: &mut Gpu, stage: u32, res_id: u32| {
+            if stage >= 3 {
+                let _ = gpu.detach_backing(res_id);
+            }
+            if stage >= 2 {
+                let _ = gpu.ctx_detach_resource(dev_ctx, res_id);
+            }
+            if stage >= 1 {
+                let _ = gpu.resource_unref(res_id);
+            }
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+        };
+
         self.res_seq += 1;
         let res_id = self.res_seq;
         if self
@@ -2547,18 +2638,15 @@ impl Comp {
             .resource_create_3d(res_id, target, format, bind, w, h, d, array, last_level, samples, flags)
             .is_err()
         {
-            unsafe { t_close(fd) };
+            unwind(&mut self.gpu, 0, res_id);
             return false;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
-            let _ = self.gpu.resource_unref(res_id);
-            unsafe { t_close(fd) };
+            unwind(&mut self.gpu, 1, res_id);
             return false;
         }
         if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
-            let _ = self.gpu.ctx_detach_resource(dev_ctx, res_id);
-            let _ = self.gpu.resource_unref(res_id);
-            unsafe { t_close(fd) };
+            unwind(&mut self.gpu, 2, res_id);
             return false;
         }
 
@@ -2582,11 +2670,11 @@ impl Comp {
     /// stored id thereafter.
     fn wbo_weft_ensure(&mut self, bo_pub: u32, conn: u64) -> Option<(u64, u32)> {
         for c in self.warp_ctxs.iter_mut().flatten() {
-            if c.owner_conn != conn {
+            if c.owner_conn != conn || c.retiring {
                 continue;
             }
             for b in c.bos.iter_mut().flatten() {
-                if b.pub_id != bo_pub {
+                if b.pub_id != bo_pub || b.retiring {
                     continue;
                 }
                 if b.dma_fd < 0 {
@@ -2636,50 +2724,101 @@ impl Comp {
         }
     }
 
-    /// Retire one ctx: drain its fences (W2d), every BO, then CTX_DESTROY
-    /// (synchronous, so the device-side ctx is quiesced when the slot --
-    /// and with it the dev_ctx id -- becomes reusable; on the wedge/leak
-    /// path the destroy is attempted anyway and fails fast if the engine
-    /// latched dead).
-    fn wctx_retire(&mut self, slot: usize) {
-        let ctx_pub = match &self.warp_ctxs[slot] {
-            Some(c) => c.pub_id,
-            None => return,
-        };
-        let drained = self.warp_drain_ctx_fences(ctx_pub);
+    /// Finish a ctx retire that is (or must be treated as) quiesced:
+    /// every BO, then CTX_DESTROY (synchronous, so the device-side ctx is
+    /// quiesced when the slot -- and with it the dev_ctx id -- becomes
+    /// reusable). `leak` propagates the wedge posture to every backing.
+    fn wctx_finish(&mut self, slot: usize, leak: bool) {
         if let Some(mut c) = self.warp_ctxs[slot].take() {
             for b in c.bos.iter_mut().flatten() {
-                Self::wbo_retire(&mut self.gpu, c.dev_ctx, b, !drained);
+                Self::wbo_retire(&mut self.gpu, c.dev_ctx, b, leak);
             }
             let _ = self.gpu.ctx_destroy(c.dev_ctx);
         }
     }
 
-    /// Retire a specific owned BO (the bo ctl `destroy` verb). W2d: an
-    /// in-flight fenced chain may reference THIS BO (streams are scoped to
-    /// ctx-attached resources), so the owning ctx drains first.
-    fn wbo_destroy(&mut self, bo_pub: u32, conn: u64) -> bool {
-        let ctx_pub = match self.wbo(bo_pub, conn) {
-            Some((c, _)) => c.pub_id,
-            None => return false,
+    /// Retire one ctx. Quiesced (no fences in flight) -> finish NOW, the
+    /// common case. Otherwise mark it `retiring` -- instantly unresolvable
+    /// to every client -- and let `warp_pump_retires` finish it when the
+    /// last fence lands (audit F5: the old shape blocked the serve loop up
+    /// to 2 s per object, and a client could multiply that into minutes of
+    /// frozen console). Termination is the driver's: an unretired fence is
+    /// abandoned within FENCE_ABANDON_MS, which decrements the counter and
+    /// poisons the ctx, so `fences_in_flight` always reaches 0.
+    fn wctx_retire(&mut self, slot: usize) {
+        let (quiesced, poisoned) = match &self.warp_ctxs[slot] {
+            Some(c) => (c.fences_in_flight == 0, c.fence_poisoned),
+            None => return,
         };
-        let drained = self.warp_drain_ctx_fences(ctx_pub);
+        if quiesced {
+            self.wctx_finish(slot, poisoned);
+            return;
+        }
+        if let Some(c) = self.warp_ctxs[slot].as_mut() {
+            c.retiring = true;
+        }
+    }
+
+    /// The deferred-retire pump (audit F5), run per serve-loop pass after
+    /// the fence drain: finish every ctx/BO whose fences have landed.
+    fn warp_pump_retires(&mut self) {
         for i in 0..MAX_WARP_CTXS {
-            let (dev_ctx, owner) = match &self.warp_ctxs[i] {
-                Some(c) => (c.dev_ctx, c.owner_conn),
+            let (quiesced, poisoned, ctx_retiring) = match &self.warp_ctxs[i] {
+                Some(c) => (c.fences_in_flight == 0, c.fence_poisoned, c.retiring),
                 None => continue,
             };
-            if owner != conn {
+            if !quiesced {
                 continue;
             }
-            let c = self.warp_ctxs[i].as_mut().unwrap();
-            for j in 0..MAX_WARP_BOS_PER_CTX {
-                if c.bos[j].as_ref().map_or(false, |b| b.pub_id == bo_pub) {
-                    let mut b = c.bos[j].take().unwrap();
-                    Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, !drained);
-                    return true;
-                }
+            if ctx_retiring {
+                self.wctx_finish(i, poisoned);
+                continue;
             }
+            let dev_ctx = self.warp_ctxs[i].as_ref().unwrap().dev_ctx;
+            for j in 0..MAX_WARP_BOS_PER_CTX {
+                let is_retiring = self.warp_ctxs[i].as_ref().unwrap().bos[j]
+                    .as_ref()
+                    .map_or(false, |b| b.retiring);
+                if !is_retiring {
+                    continue;
+                }
+                let mut b = self.warp_ctxs[i].as_mut().unwrap().bos[j].take().unwrap();
+                Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+            }
+        }
+    }
+
+    /// Retire a specific owned BO (the bo ctl `destroy` verb). An in-flight
+    /// fenced chain may reference THIS BO (streams are scoped to
+    /// ctx-attached resources), so a non-quiesced ctx defers: the BO
+    /// becomes unresolvable immediately and the pump frees it.
+    fn wbo_destroy(&mut self, bo_pub: u32, conn: u64) -> bool {
+        let (ctx_pub, quiesced, poisoned) = match self.wbo(bo_pub, conn) {
+            Some((c, _)) => (c.pub_id, c.fences_in_flight == 0, c.fence_poisoned),
+            None => return false,
+        };
+        let slot = match self.wctx_slot(ctx_pub) {
+            Some(s) => s,
+            None => return false,
+        };
+        let dev_ctx = self.warp_ctxs[slot].as_ref().unwrap().dev_ctx;
+        for j in 0..MAX_WARP_BOS_PER_CTX {
+            let matches = self.warp_ctxs[slot].as_ref().unwrap().bos[j]
+                .as_ref()
+                .map_or(false, |b| b.pub_id == bo_pub);
+            if !matches {
+                continue;
+            }
+            if quiesced {
+                let mut b = self.warp_ctxs[slot].as_mut().unwrap().bos[j].take().unwrap();
+                Self::wbo_retire(&mut self.gpu, dev_ctx, &mut b, poisoned);
+            } else {
+                self.warp_ctxs[slot].as_mut().unwrap().bos[j]
+                    .as_mut()
+                    .unwrap()
+                    .retiring = true;
+            }
+            return true;
         }
         false
     }
@@ -2710,55 +2849,30 @@ impl Comp {
         self.gpu.poll_completions();
         for tag in self.gpu.take_completions() {
             for c in self.warp_ctxs.iter_mut().flatten() {
-                if c.pub_id == tag.ctx_pub {
-                    c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
-                    if tag.fence_id > c.fence_signaled {
-                        c.fence_signaled = tag.fence_id;
-                    }
-                    break;
+                if c.pub_id != tag.ctx_pub {
+                    continue;
                 }
+                c.fences_in_flight = c.fences_in_flight.saturating_sub(1);
+                if tag.abandoned {
+                    // NOT a completion: the chain may still be live
+                    // device-side, so the ctx's backings can never be
+                    // freed again (leak-on-wedge), and the fence must
+                    // NOT be reported as signaled.
+                    c.fence_poisoned = true;
+                } else if tag.fence_id > c.fence_signaled {
+                    c.fence_signaled = tag.fence_id;
+                }
+                break;
             }
         }
+        self.warp_pump_retires();
     }
 
+    /// Does the serve loop need its 1 ms fence pace? A DEAD engine never
+    /// retires anything, so counting its stuck slots would pin the clamp
+    /// forever (self-found SF-1, same family as audit F6).
     pub fn warp_fences_pending(&self) -> bool {
-        self.gpu.fenced_in_flight() > 0
-    }
-
-    /// Bounded pre-retire fence drain: an in-flight fenced chain DMAs
-    /// guest pages, so a BO retired under one would free memory the host
-    /// still writes. False = the drain deadlined or the engine is dead --
-    /// the caller LEAKS the backing instead (never UAF). No deadline
-    /// latches `dead` here: a slow fence is not a dead engine (the #31
-    /// false-latch lesson); the sync path carries its own honest deadline.
-    fn warp_drain_ctx_fences(&mut self, ctx_pub: u32) -> bool {
-        const DRAIN_DEADLINE_MS: u64 = 2000;
-        let mut t0: Option<Instant> = None;
-        loop {
-            self.warp_service_fences();
-            let busy = self
-                .warp_ctxs
-                .iter()
-                .flatten()
-                .any(|c| c.pub_id == ctx_pub && c.fences_in_flight > 0);
-            if !busy {
-                return true;
-            }
-            if self.gpu.engine_dead() {
-                return false;
-            }
-            let t = *t0.get_or_insert_with(Instant::now);
-            if t.elapsed().as_millis() as u64 >= DRAIN_DEADLINE_MS {
-                say!(
-                    "tapestryd: warp ctx {} fence drain deadlined; leaking its backings",
-                    ctx_pub
-                );
-                return false;
-            }
-            // The GPU IRQ is waitable only inside a sync submit (the G-5
-            // engine owns it); pace the re-poll cooperatively.
-            let _ = t_yield();
-        }
+        !self.gpu.engine_dead() && self.gpu.fenced_in_flight() > 0
     }
 
     /// SUBMIT_3D from the ctx submit file: one Twrite = one atomic opaque
@@ -2970,6 +3084,11 @@ impl Conn {
 
     pub fn raw_fd(&self) -> i64 {
         self.handle
+    }
+
+    /// Which tree this conn serves (the F7 per-root budget).
+    pub fn root(&self) -> u64 {
+        self.root
     }
 
     // --- frame pump (the ptyfs bodies, verbatim shape) -----------------------

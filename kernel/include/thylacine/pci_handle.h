@@ -171,6 +171,12 @@ struct KObj_PCI *kobj_pci_claim(u32 virtio_device_id, u32 nth);
 int kobj_pci_resolve_bdf(u32 virtio_device_id, u32 nth, u8 *bus, u8 *dev, u8 *fn);
 
 // Refcount ops. Mirror kobj_mmio_ref / kobj_mmio_unref.
+// Clear MEM_SPACE|BUS_MASTER on the claimed function -- stop it decoding
+// and mastering. Idempotent; true iff it was actually enabled. Used by the
+// Proc-death quiesce (a PCI driver's registers are BAR-decoded, so the
+// virtio-MMIO reset sweep cannot reach them) and implied by release.
+bool kobj_pci_quiesce(struct KObj_PCI *k);
+
 void kobj_pci_ref(struct KObj_PCI *k);
 
 // Decrement ref. The last unref QUIESCES the device (clears MEM-decode +

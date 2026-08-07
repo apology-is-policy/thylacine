@@ -76,6 +76,7 @@ void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_dtb_pci_intx_route(void);
 void test_dtb_pci_mem_window(void);
+void test_dtb_pci_mem_window64(void);
 void test_phys_alloc_smoke(void);
 void test_phys_leak_10k(void);
 void test_slub_kmem_smoke(void);
@@ -1452,6 +1453,7 @@ struct test_case g_tests[] = {
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
     { "dtb.pci_intx_route",            test_dtb_pci_intx_route,            false, NULL },
     { "dtb.pci_mem_window",            test_dtb_pci_mem_window,            false, NULL },
+    { "dtb.pci_mem_window64",          test_dtb_pci_mem_window64,          false, NULL },
     { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
     { "phys.leak_10k",                 test_phys_leak_10k,                 false, NULL },
     { "slub.kmem_smoke",               test_slub_kmem_smoke,               false, NULL },

@@ -71,7 +71,7 @@ use crate::input::{
     REL_X, REL_Y,
 };
 use crate::keymap::Mods;
-use crate::server::{Comp, Conn, MAX_CONNS, ROOT_TAPESTRY, ROOT_WARP};
+use crate::server::{Comp, Conn, MAX_CONNS, MAX_WARP_CONNS, ROOT_TAPESTRY, ROOT_WARP};
 
 // =============================================================================
 // User-VA layout (driver-private): the BAR windows + the device rings; the
@@ -491,6 +491,11 @@ impl Driver for Tapestryd {
             // Warp-2c) + every conn, bounded by the time to the next FRAME
             // tick. The conns Vec mixes both trees -- Conn.root disjoins
             // their qid spaces, everything else is shared machinery.
+            // Per-root budgets (audit F7): a warp client can never close
+            // the compositor's own door. Both listeners are still polled
+            // together so `conn_base` stays 2 whenever either is armed;
+            // each accept re-tests its own budget below.
+            let warp_conns = conns.iter().filter(|c| c.root() == ROOT_WARP).count();
             let has_room = conns.len() < MAX_CONNS;
             let mut pollfds: Vec<TPollFd> = Vec::new();
             if has_room {
@@ -533,15 +538,22 @@ impl Driver for Tapestryd {
             }
 
             // (5) Accept (one per listener per pass).
+            // The cap is re-tested per accept (audit F9): one `has_room`
+            // computed before both arms let a pass at len == MAX-1 push
+            // two and overshoot.
             let conn_base = if has_room { 2 } else { 0 };
-            if has_room && pollfds[0].revents & T_POLLIN != 0 {
+            if has_room && pollfds[0].revents & T_POLLIN != 0 && conns.len() < MAX_CONNS {
                 let h = unsafe { t_srv_accept(listener) };
                 if h >= 0 {
                     let id = self.comp.next_conn_id();
                     conns.push(Conn::new(h, id, ROOT_TAPESTRY));
                 }
             }
-            if has_room && pollfds[1].revents & T_POLLIN != 0 {
+            if has_room
+                && pollfds[1].revents & T_POLLIN != 0
+                && conns.len() < MAX_CONNS
+                && warp_conns < MAX_WARP_CONNS
+            {
                 let h = unsafe { t_srv_accept(warp_listener) };
                 if h >= 0 {
                     let id = self.comp.next_conn_id();

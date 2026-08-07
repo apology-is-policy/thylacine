@@ -56,7 +56,8 @@ enum {
     DEV_KIND_CONSDRAIN = 10, // G-4: the renderer's console-output drain (RO)
     DEV_KIND_CONSFEED  = 11, // G-4: the renderer's input feed (WO)
     DEV_KIND_WINSIZE   = 12, // #55: the UNGATED read-only console-geometry leaf
-    DEV_KIND_WARP      = 13, // the /dev/warp mount-stub DIRECTORY (Warp-2)
+    DEV_KIND_WARP      = 13, // the /dev/warp mount POINT (Warp-2; PER-CLIENT --
+                             // joey never mounts it globally, audit F1)
 };
 
 #define DEV_QID_ROOT_PATH  0ULL

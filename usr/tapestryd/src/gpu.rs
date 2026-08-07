@@ -153,6 +153,14 @@ const SUBMIT_DEADLINE_MS: u64 = 500;
 // stale-latched-edge world. ~tens of us of (barrier + load).
 const USED_SPIN_PER_WAKE: u32 = 65536;
 
+// Wall-clock bound on a FENCED chain before its slot is abandoned (audit
+// F6). Not a deadline in the submit_and_wait sense -- it never declares
+// the engine dead (a fence legitimately takes as long as its GL work, and
+// a false dead-latch costs the console: #31). It bounds only OUR
+// bookkeeping: 30 s is orders above any real GL job, so reaching it means
+// the host renderer hung (the GPU-DESIGN section 9.2 accepted risk).
+const FENCE_ABANDON_MS: u64 = 30_000;
+
 /// The QEMU-virt virtio-gpu default scanout geometry, used when
 /// GET_DISPLAY_INFO reports no enabled scanout (never observed on QEMU;
 /// fail-soft rather than fail-closed -- the display size is policy, not
@@ -369,6 +377,12 @@ fn init_device(
 pub struct FenceTag {
     pub fence_id: u64,
     pub ctx_pub: u32,
+    /// The device never retired this chain within FENCE_ABANDON_MS: the
+    /// slot's bookkeeping was reclaimed so the engine stops counting it,
+    /// but the chain may still be live device-side. NOT a completion --
+    /// the owning ctx is poisoned (every later BO retire leaks rather
+    /// than frees, since the device may still DMA the backing).
+    pub abandoned: bool,
 }
 
 /// Why a fenced submission was refused (mapped to a 9P errno at the seam).
@@ -406,6 +420,15 @@ struct Controlq {
     flane_va: u64,
     flane_pa: u64,
     fslots: [Option<FenceTag>; FENCED_SLOTS],
+    /// When each occupied slot was published -- the abandonment clock
+    /// (audit F6). Without it a fence that never signals (a hung host GL
+    /// job, the GPU-DESIGN section 9.2 accepted risk) pins the slot
+    /// forever, and with it the serve loop's 1 ms poll clamp: an
+    /// unbounded ~1 kHz spin in the console renderer.
+    fslot_since: [Option<Instant>; FENCED_SLOTS],
+    /// An abandoned slot's descriptors may still be written by the device,
+    /// so the pair is never re-used -- retired from the pool, not freed.
+    fslot_poisoned: [bool; FENCED_SLOTS],
     /// A slot-0 (sync) chain is published and unretired. Only
     /// submit_and_wait sets it, and it never returns success with it set
     /// -- drain() treats an id-0 entry outside that window as corruption.
@@ -420,7 +443,33 @@ impl Controlq {
     }
 
     fn alloc_fenced_slot(&self) -> Option<usize> {
-        self.fslots.iter().position(|s| s.is_none())
+        (0..FENCED_SLOTS).find(|&i| self.fslots[i].is_none() && !self.fslot_poisoned[i])
+    }
+
+    /// Reclaim slots whose chains never retired (audit F6). Bounds the
+    /// spin + the slot pool WITHOUT latching `dead` (a slow device is not
+    /// a dead one -- the #31 rule) and WITHOUT freeing anything the device
+    /// may still touch: the descriptor pair is poisoned, and the owning
+    /// ctx is told, so its backings leak rather than free.
+    fn reap_abandoned(&mut self) {
+        for i in 0..FENCED_SLOTS {
+            let stale = match (self.fslots[i], self.fslot_since[i]) {
+                (Some(_), Some(t0)) => t0.elapsed().as_millis() as u64 >= FENCE_ABANDON_MS,
+                _ => false,
+            };
+            if !stale {
+                continue;
+            }
+            let mut tag = self.fslots[i].take().unwrap();
+            self.fslot_since[i] = None;
+            self.fslot_poisoned[i] = true;
+            tag.abandoned = true;
+            say!(
+                "tapestryd: gpu fence {} never retired in {} ms -- slot {} retired, ctx {} poisoned",
+                tag.fence_id, FENCE_ABANDON_MS, i, tag.ctx_pub
+            );
+            self.completed.push(tag);
+        }
     }
 
     /// Publish one descriptor chain: avail entry + idx bump + doorbell
@@ -488,9 +537,20 @@ impl Controlq {
             } else {
                 FENCED_SLOTS // odd / resp-desc id: never a chain head
             };
+            if slot < FENCED_SLOTS {
+                self.fslot_since[slot] = None;
+            }
             let tag = match self.fslots.get_mut(slot).and_then(|s| s.take()) {
                 Some(t) => t,
                 None => {
+                    // A poisoned slot retiring LATE is expected, not
+                    // corruption: we abandoned its bookkeeping, the device
+                    // finished anyway. Consume it silently -- the slot
+                    // stays out of the pool (its response buffer is no
+                    // longer trusted to belong to any live chain).
+                    if slot < FENCED_SLOTS && self.fslot_poisoned[slot] {
+                        continue;
+                    }
                     say!(
                         "tapestryd: gpu used entry id {} names no in-flight chain (ring corrupt)",
                         id
@@ -526,6 +586,7 @@ impl Controlq {
         }
         let _ = unsafe { r8(self.isr_va) };
         let _ = self.drain();
+        self.reap_abandoned();
     }
 
     /// Publish a fenced chain on slot `slot` (request already staged in
@@ -553,6 +614,7 @@ impl Controlq {
             w16(desc_va + 30, 0);
         };
         self.fslots[slot] = Some(tag);
+        self.fslot_since[slot] = Some(Instant::now());
         self.publish(d as u16);
         Ok(())
     }
@@ -830,6 +892,8 @@ impl Gpu {
                 flane_va: if flane.is_some() { flane_va } else { 0 },
                 flane_pa,
                 fslots: [None; FENCED_SLOTS],
+                fslot_since: [None; FENCED_SLOTS],
+                fslot_poisoned: [false; FENCED_SLOTS],
                 sync_pending: false,
                 completed: alloc::vec::Vec::new(),
             },
@@ -1285,7 +1349,11 @@ impl Gpu {
         ctx_pub: u32,
     ) -> Result<u64, FencedErr> {
         self.ctrl
-            .submit_fenced(slot, req_len, FenceTag { fence_id, ctx_pub })
+            .submit_fenced(
+                slot,
+                req_len,
+                FenceTag { fence_id, ctx_pub, abandoned: false },
+            )
             .map_err(|_| FencedErr::Dead)?;
         self.fence_next = fence_id;
         Ok(fence_id)
@@ -1303,7 +1371,7 @@ impl Gpu {
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin(8 + stream.len() as u64)?;
         let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
-        let fence_id = self.fence_next + 1;
+        let fence_id = self.fence_next.wrapping_add(1);
         unsafe {
             write_ctrl_hdr_fenced(req, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id, fence_id);
             w32(req + 24, stream.len() as u32);
@@ -1342,7 +1410,7 @@ impl Gpu {
     ) -> Result<u64, FencedErr> {
         let slot = self.fenced_begin(48)?;
         let req = self.ctrl.flane_va + (slot as u64) * FREQ_LEN;
-        let fence_id = self.fence_next + 1;
+        let fence_id = self.fence_next.wrapping_add(1);
         let cmd = if to_host {
             VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D
         } else {

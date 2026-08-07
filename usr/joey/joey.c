@@ -9558,31 +9558,39 @@ int main(void) {
         }
     }
 
-    // === Warp-2: mount /dev/warp (the GPU seam; GPU-DESIGN.md sec 4.1) ===
-    // tapestryd posts /srv/warp alongside /srv/tapestry (one Proc, two
-    // services; both tombstone together at its death). Same mount contract
-    // as tapestry: absent is SOFT (no-GPU boots), present-but-unmountable is
-    // boot-fatal. A separate block rather than nesting under the tapestry
-    // arm so a partial state (one service posted, not the other) reads
-    // honestly in the log.
+    // === Warp-2: the GPU seam (/srv/warp; GPU-DESIGN.md sec 4.1) ===
+    // joey deliberately does NOT mount it globally (Warp-2 audit F1).
+    // A shared mount is ONE server-side connection, and the warp tree's
+    // whole authority model is per-connection: `owner_conn` gates every
+    // ctx/BO resolve, and one ctx per conn is the I-45 exposure bound.
+    // Mounted here, every Proc on the box would alias to joey's single
+    // conn -- Proc B could submit an arbitrary command stream into Proc
+    // A's rendering context, read A's buffers back, or destroy them, and
+    // no second Proc could ever get a context of its own. The diorama
+    // precedent (docs/reference/141-diorama.md) is the same lesson.
+    //
+    // Clients therefore open /srv/warp directly (as /warp-prove does) or
+    // mount it into their OWN namespace, which is what makes
+    // GPU-DESIGN's "per-Proc by construction" actually true. Absent is
+    // SOFT (no-GPU boots); a present-but-broken seam is boot-fatal.
     {
         long warp_root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/warp", 9, T_OREAD);
         if (warp_root >= 0) {
-            if (t_mount("/dev/warp", 9, warp_root, T_MREPL) != 0) {
-                t_putstr("joey: t_mount(/dev/warp) FAILED\n");
-                return 1;
-            }
-            (void)t_close(warp_root);
-            t_putstr("joey: /dev/warp mounted (the GPU seam)\n");
+            t_putstr("joey: /srv/warp posted (the GPU seam; per-client mount)\n");
 
 #if THYLA_BOOT_PROBES
             // Warp-2 PROBE: the seam's global ctl must yield the virgl
             // status line. Boot-fatal once the mount is up.
             {
-                long wctl = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/warp/ctl",
-                                   13, T_OREAD);
+                // Read the seam's ctl over the connection just opened --
+                // /srv/warp is a service POST, so its tree is reachable
+                // only by walking the fd that dialing it returned, never
+                // by a namespace path. Introspection only, no ctx minted,
+                // so the F1 aliasing hazard never arises.
+                long wctl = t_open(warp_root, "ctl", 3, T_OREAD);
                 if (wctl < 0) {
-                    t_putstr("joey: Warp PROBE open(/dev/warp/ctl) FAILED\n");
+                    t_putstr("joey: Warp PROBE open(warp ctl) FAILED\n");
+                    (void)t_close(warp_root);
                     return 1;
                 }
                 char wbuf[128];
@@ -9594,17 +9602,21 @@ int main(void) {
                     if (wbuf[i] != virgl_pfx[i])
                         wpfx_ok = 0;
                 if (!wpfx_ok) {
-                    t_putstr("joey: Warp PROBE /dev/warp/ctl malformed\n");
+                    t_putstr("joey: Warp PROBE warp ctl malformed\n");
+                    (void)t_close(warp_root);
                     return 1;
                 }
                 wbuf[wn] = '\0';
                 for (long i = 0; i < wn; i++)
                     if (wbuf[i] == '\n') { wbuf[i] = '\0'; break; }
-                t_putstr("joey: Warp PROBE OK (/dev/warp/ctl: ");
+                t_putstr("joey: Warp PROBE OK (warp ctl: ");
                 t_putstr(wbuf);
                 t_putstr(")\n");
             }
 #endif
+            // The probe's connection dies here: joey holds NO standing warp
+            // conn, so nothing it did can alias a real client's ctx.
+            (void)t_close(warp_root);
         } else {
             t_putstr("joey: /srv/warp absent (no GPU environment); skipping\n");
         }

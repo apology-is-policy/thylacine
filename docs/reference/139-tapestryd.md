@@ -90,7 +90,13 @@ v1.x) — the display stays blank until reboot.
   is the standing G-6 obligation. The retire ordering is UNAFFECTED:
   `t_weft_unshare` and the backing free are kernel syscalls, not
   controlq commands, so a dead controlq can never cause a
-  free-without-unshare (R2-F5 holds unconditionally). The trigger
+  free-without-unshare (R2-F5 holds unconditionally). **Warp-2d
+  rebuilt this engine around used-ENTRY attribution** (fixed
+  descriptor pairs; a fenced 3D lane beside the sync chain; presents
+  stay wait-for-mine so everything above still holds; the deadline is
+  sync-only) — the as-built fenced-lane reference, including the
+  fence-id model, the drain-first retire order, and the leak-on-wedge
+  posture, is `docs/reference/149-warp.md`. The trigger
   needs a real display backend's thread topology:
   three escalating headless repro attempts (a 66/s screendump hammer at
   2x cocoa's refresh; a live VNC backend on the gpu0 console at real
