@@ -456,8 +456,22 @@ struct Controlq {
     /// runs against a HEALTHY ctx while the harness reports PASS. Held
     /// completions are not dropped: clearing the hold drains them and the
     /// real vindication follows, which is what makes that leg testable.
+    ///
+    /// #177: gating `poll_completions` alone was NOT enough, and the first
+    /// red run proved it. `submit_and_wait` calls `drain()` directly, so
+    /// every synchronous controlq command (and `create3d` issues four) is
+    /// its own un-gated drain. The abandoned chain's late retire therefore
+    /// landed on the churn loop's FIRST command, vindicated the ctx, and
+    /// the assertions ran against a healed ctx -- a lever that held the
+    /// window before the trigger and none of the window after it.
     #[cfg(feature = "test-mode")]
     hold_completions: bool,
+    /// #177: late retires observed while the hold was up. DEFERRED, never
+    /// dropped: the healing leg asserts that releasing the hold delivers
+    /// the vindication, so discarding the entry here would trade a
+    /// vacuous wedge for a vindication that could never arrive.
+    #[cfg(feature = "test-mode")]
+    held_vindications: alloc::vec::Vec<usize>,
     /// #175: slots actually abandoned, so the prover can assert its
     /// trigger BIT before trusting anything downstream of it.
     #[cfg(feature = "test-mode")]
@@ -583,6 +597,17 @@ impl Controlq {
                     // stays out of the pool (its response buffer is no
                     // longer trusted to belong to any live chain).
                     if slot < FENCED_SLOTS && self.fslot_poisoned[slot] {
+                        // #177: under the harness hold this retire is the
+                        // one event the wedge assertions must NOT see --
+                        // it is precisely what models "the device has not
+                        // proved it finished". Defer it (the used entry is
+                        // still consumed, so the sync chain behind it
+                        // retires normally) and replay on release.
+                        #[cfg(feature = "test-mode")]
+                        if self.hold_completions {
+                            self.held_vindications.push(slot);
+                            continue;
+                        }
                         // The device just PROVED it is finished with this
                         // descriptor pair and response buffer, so the slot
                         // is safe to reuse -- return it to the pool
@@ -994,6 +1019,8 @@ impl Gpu {
                 completed: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
                 hold_completions: false,
+                #[cfg(feature = "test-mode")]
+                held_vindications: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
                 abandoned_total: 0,
             },
@@ -1567,6 +1594,18 @@ impl Gpu {
     #[cfg(feature = "test-mode")]
     pub fn test_hold_completions(&mut self, hold: bool) {
         self.ctrl.hold_completions = hold;
+        if hold {
+            return;
+        }
+        // Release replays every deferred late retire through the SAME two
+        // steps the production arm takes, so the healing leg exercises the
+        // real recovery rather than a test-only shortcut.
+        for slot in core::mem::take(&mut self.ctrl.held_vindications) {
+            self.ctrl.fslot_poisoned[slot] = false;
+            self.ctrl.vindicated.push(FenceVindication {
+                ctx_pub: self.ctrl.fslot_poison_ctx[slot],
+            });
+        }
     }
 
     #[cfg(feature = "test-mode")]

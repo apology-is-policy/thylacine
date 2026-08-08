@@ -221,6 +221,22 @@ backing. Leak-on-wedge, never UAF. Four consequences the code enforces:
   counters reset. The uncharge is paired with the drop that actually frees.
   Without it a vindicated-but-healthy ctx stayed charged for memory it no
   longer held, and could be bricked at the count cap.
+- **How reachable the wedge actually is** (#177, measured — this corrects a
+  premise five audit rounds reasoned from). The rounds treated "a poisoned
+  ctx churning backings" as freely client-reachable. It is not, on a
+  *healthy* device: `submit_and_wait` calls `drain()` directly, so every
+  synchronous controlq command is its own drain, and `create3d` issues
+  four. The abandoned chain's late retire therefore lands on the very next
+  command, vindicates the ctx, and the wedge evaporates before a second
+  cycle can run — first observed when the #175 harness churned 17 rounds
+  against a ctx it had correctly poisoned and watched heal instantly.
+  Durably wedged therefore requires a device whose *fenced chain never
+  retires* while the controlq still serves synchronous commands (a hung
+  GL chain, not a dead engine — a dead engine fails `create3d`, so there
+  is nothing to churn). That narrows the round-6 F1 exposure; it does not
+  remove it, and the cap is what makes the narrow case bounded rather than
+  unbounded. The harness models the stuck chain explicitly by deferring
+  the late retire, which is why it can reach the cap at all.
 - `WARP_CTX_FENCE_MAX = FENCED_SLOTS / 2` carries a build-time floor
   (`assert!(WARP_CTX_FENCE_MAX >= 2)`, round-6 F2). The share is a division,
   so it degenerates silently: at `FENCED_SLOTS = 1` the cap is 0 and every

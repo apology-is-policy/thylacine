@@ -386,7 +386,30 @@ fn prove_poisoned_path(root: i64) {
     // gate that cannot fail.
     const CAP: u32 = 16; // MAX_WARP_BOS_PER_CTX
     let mut refused_at = 0u32;
+    // The failure message carries the per-round (poisoned, leaked-count)
+    // trace, so ONE red run says WHICH way it broke rather than only that
+    // it broke: a climbing count with no refusal indicts the gate, a count
+    // stuck at 0 indicts the leak accounting, and poisoned flipping to 0
+    // mid-loop indicts an unexpected vindication. A bare "was never
+    // refused" sends you back for a second run to learn that.
+    let mut trace = String::new();
     for i in 1..=(CAP + 1) {
+        // THE PRECONDITION, RE-ASSERTED PER ROUND (#177). The pre-loop
+        // anti-vacuous gate proves the trigger FIRED; it says nothing
+        // about whether the state it created SURVIVES the assertions. It
+        // did not: `submit_and_wait` drains un-gated, so the first
+        // create3d vindicated the ctx and every round below ran against a
+        // healthy one -- correctly never refusing, and reported as the
+        // cap being broken. A precondition checked once is a precondition
+        // checked before the code that voids it.
+        let pre = open_read_string(root, &format!("ctx/{}/ctl", ctx));
+        if parse_field(&pre, "poisoned") != Some(1) {
+            fail(&format!(
+                "ctx un-poisoned before churn round {} -- the wedge did not persist, so a \
+                 refusal (or its absence) proves NOTHING about the round-6 cap; trace:{}",
+                i, trace
+            ));
+        }
         let b = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
             Some(v) => v,
             None => {
@@ -401,10 +424,20 @@ fn prove_poisoned_path(root: i64) {
         if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, b), "destroy") {
             fail("poisoned-path bo destroy");
         }
+        let c = open_read_string(root, &format!("ctx/{}/ctl", ctx));
+        trace.push_str(&format!(
+            " {}:p{}l{}",
+            i,
+            parse_field(&c, "poisoned").unwrap_or(9),
+            parse_field(&c, "leaked-count").unwrap_or(999)
+        ));
     }
     if refused_at == 0 {
-        fail("BO creation was never refused in CAP+1 poisoned-churn rounds -- \
-              the leak count is unbounded (round-6 F1)");
+        fail(&format!(
+            "BO creation was never refused in CAP+1 poisoned-churn rounds -- \
+             the leak count is unbounded (round-6 F1); trace(round:poisoned,leaked-count):{}",
+            trace
+        ));
     }
     t_putstr(&format!(
         "warp-prove: poisoned churn refused at attempt {} (cap {})\n",
