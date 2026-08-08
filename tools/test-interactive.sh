@@ -269,7 +269,53 @@ elif [[ -f "$POOL_SNAP" ]]; then
 else
     pool_iso="pool=SHARED (no snapshot, #85)"
 fi
-JOBS="${LS_CI_JOBS:-1}"
+# --- G-3: the TCG anchor set -------------------------------------------------
+# Accel is not only a speed knob. tools/run-vm.sh derives the CPU model AND the
+# GIC version from it -- hvf gives `-cpu host` + GICv2, tcg gives `-cpu max` +
+# GICv3 (HVF cannot do v3 here at all: its emulated GICv3 distributor trips an
+# `isv` data-abort assert). So every scenario moved to HVF stops covering
+# GICv3 and `-cpu max`, and #166 is the standing proof that a scenario can go
+# INERT under HVF while still reporting PASS -- the worst outcome available, a
+# green test that quietly stopped testing.
+#
+# These scenarios therefore stay on TCG, and the list is MECHANICAL rather than
+# "whatever nobody got round to flipping":
+#   freeze-172 / flood-174  TCG's serialized vCPU + main loop IS their trigger
+#                           ("HVF wedges on a mere held key"); they also spawn
+#                           run-vm.sh themselves with accel pinned.
+#   split173                pins tcg for a deterministic split.
+#   nora-demo               breaks under HVF (bug_nora_hvf_cpr_handshake).
+#   idle-probe              the tickless-idle guard is timer/interrupt-shaped;
+#                           `make idle-gate` covers the HVF side separately.
+#   ls-7                    #70 was a TCG-ONLY watchpoint livelock -- moving it
+#                           would retire that regression's only coverage.
+#   pty-4                   #162 reproduces only under TCG gate load; this is
+#                           the sole place that open bug can still be seen.
+# Together they keep GICv3 and `-cpu max` live in every run.
+#
+# Enforced, not documented: a directive on an anchor is REFUSED, never silently
+# honoured. A coverage rule that depends on nobody editing the wrong file is not
+# a rule.
+LS_CI_TCG_ANCHORS="freeze-172 flood-174 split173 nora-demo idle-probe ls-7 pty-4"
+for a in $LS_CI_TCG_ANCHORS; do
+    f="$SCEN_DIR/$a.exp"
+    [[ -f "$f" ]] || continue
+    if grep -q 'set ::env(THYLACINE_ACCEL) hvf' "$f"; then
+        echo "==> REFUSING TO RUN: $a is a TCG anchor but its .exp forces hvf." >&2
+        echo "    Anchors keep GICv3 + '-cpu max' covered, and each has a reason" >&2
+        echo "    recorded in tools/test-interactive.sh. Remove the directive, or" >&2
+        echo "    remove $a from LS_CI_TCG_ANCHORS *and say why in the same commit*." >&2
+        exit 2
+    fi
+done
+
+# Default 3, tuned to this 8-core / 8 GB host and proven by a full green 34/34
+# run (4908s serial -> 2925s wall). Concurrency is RAM-bound, not core-bound --
+# each VM takes THYLACINE_MEM_MIB -- so lower it on a smaller machine. The
+# budgets scale with the job count, so an over-subscribed host degrades into
+# slowness rather than into false failures; it will still swap if you ask for
+# more VMs than the RAM holds.
+JOBS="${LS_CI_JOBS:-3}"
 case "$JOBS" in ''|*[!0-9]*) echo "==> LS_CI_JOBS must be a positive integer (got '$JOBS')" >&2; exit 2 ;; esac
 [[ "$JOBS" -lt 1 ]] && JOBS=1
 

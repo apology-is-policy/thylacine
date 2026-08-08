@@ -584,6 +584,38 @@ state across boots by design). Concurrency is RAM-bound, not core-bound -- each
 VM takes `THYLACINE_MEM_MIB` -- so size N to memory, not to cores; overcommitting
 swaps, and a swapping host makes every timeout in the suite marginal.
 
+**Per-scenario accel and the TCG anchor set (G-3).** A scenario picks its accel
+in its own `.exp` (`set ::env(THYLACINE_ACCEL) hvf`) — a mechanism 14 gfx
+scenarios already used, and the reason LS-CI's cost distribution was bimodal
+before anyone measured it: HVF scenarios cost 31–77 s, TCG ones 185–270 s, a
+~5x ratio, because per-scenario cost is boot-dominated. 26 of 34 now run HVF.
+
+**Accel is not only a speed knob**, which is what makes this a coverage
+decision rather than a tuning one: `run-vm.sh` derives the CPU model *and* the
+GIC version from it — `hvf` gives `-cpu host` + GICv2, `tcg` gives `-cpu max` +
+GICv3 (HVF cannot do v3 here at all; its emulated GICv3 distributor trips an
+`isv` data-abort assert). Every flip therefore moves a scenario off those axes,
+and #166 is the standing proof that a scenario can go **inert** under HVF while
+still reporting PASS — a green test that quietly stopped testing.
+
+So eight scenarios stay on TCG, and the list is enforced rather than
+documented — `LS_CI_TCG_ANCHORS` in the wrapper, which **refuses to run** if an
+anchor's `.exp` carries an hvf directive. A coverage rule that depends on
+nobody editing the wrong file is not a rule. Four are pinned by necessity
+(`freeze-172`/`flood-174` need TCG's serialized vCPU as their *trigger* —
+"HVF wedges on a mere held key"; `split173` for a deterministic split;
+`nora-demo` breaks under HVF outright), and three by coverage: `idle-probe`
+(the tickless-idle guard is timer/interrupt-shaped, and `make idle-gate`
+covers the HVF side), `ls-7` (#70 was a TCG-only watchpoint livelock — moving
+it retires that regression's only coverage), and `pty-4` (#162 reproduces only
+under TCG gate load, so it is the sole place that open bug can still be seen).
+Together they keep GICv3 and `-cpu max` live in every run.
+
+Note that "passes under HVF" was necessary but not sufficient evidence: all 15
+steerable TCG scenarios passed a forced-HVF trial, and three of them were kept
+on TCG anyway, because the question is what a scenario *covers*, not whether
+it goes green.
+
 Two traps this cost, both worth knowing before touching it. **A forked scenario
 inherits the EXIT trap**: bash resets *signal* traps in a subshell but still runs
 an inherited EXIT trap when that subshell exits, so without re-arming, the first
