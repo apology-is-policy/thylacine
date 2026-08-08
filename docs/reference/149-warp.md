@@ -298,8 +298,18 @@ allows one ctx per conn. The legs: B cannot arm the hold while A holds it, and
 cannot release A's (round-8 F1 — `hold_ctx` was scoped in effect but *global
 in storage*, so B's arm silently displaced A's); a held lane still retires a
 second client's fence (the property all of the #178 scoping exists to
-provide); a holder that *disconnects* returns its fenced slots; and
+provide); a holder that *disconnects* returns its fenced slots; a holder that
+*destroys its ctx with the conn still open* also returns them; and
 `warp-abandon` poisons only the abandoning client's ctx.
+
+The last two legs look like one leg and are not (#185). Conn departure was
+already handled by the round-7 placement of the hold release, on
+`warp_retire_conn`. The round-8 F1 fix moved it to `wctx_retire` for the case
+its own comment names — a client that holds, submits, then `destroy`s its ctx
+*without* closing the conn, where the swallowed retire kept
+`fences_in_flight` nonzero so the pump could never finish the ctx it had just
+been told to retire. Reverting that move passes the disconnect leg and fails
+only the destroy leg, which is what makes the pair worth keeping separate.
 
 Three read-only `test-mode` ctl fields exist purely so those legs have a
 bounded, discriminating observable:

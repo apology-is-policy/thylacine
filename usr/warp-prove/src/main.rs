@@ -473,6 +473,53 @@ fn prove_two_clients() {
     }
     t_putstr("warp-prove: a departing holder's fenced slots returned to the pool\n");
 
+    // --- L6: a holder that DESTROYS its ctx, conn still open ---------------
+    // L2 above exercises conn departure -- which the round-7 placement of the
+    // hold release (on `warp_retire_conn`) already handled. The round-8 F1
+    // fix moved it to `wctx_retire` for a different case its own comment
+    // names: a client that holds, submits, then destroys its ctx WITHOUT
+    // closing the conn. There the swallowed retire kept `fences_in_flight`
+    // nonzero, so the pump could never finish the ctx it had just been told
+    // to retire. Nothing pinned that half until this leg (#185).
+    let c = warp_connect("client C");
+    let ctx_c = mint_ctx(c, "client C");
+    if !write_ctl(c, "ctl", "warp-hold on") {
+        fail("two-client: C warp-hold on");
+    }
+    let bo_c = mint_backed_bo(c, ctx_c, "client C");
+    let free_before_c = fenced_free(b);
+    if !write_ctl(
+        c,
+        &format!("ctx/{}/bo/{}/ctl", ctx_c, bo_c),
+        "transfer_from 0 0 0 0 1 1 1 0 0 0",
+    ) {
+        fail("two-client: C transfer_from queue");
+    }
+    // Anti-vacuous, and sound here for the same reason it is in L2: C HOLDS,
+    // so its retire is swallowed and the slot stays occupied deterministically.
+    if fenced_free(b) >= free_before_c {
+        fail("two-client: C's held chain did not occupy a fenced slot, so the \
+              destroy-under-hold leg would test nothing");
+    }
+    // Destroy WITHOUT releasing -- the whole point of the leg.
+    if !write_ctl(c, &format!("ctx/{}/ctl", ctx_c), "destroy") {
+        fail("two-client: C ctx destroy");
+    }
+    let mut c_returned = false;
+    for _ in 0..400 {
+        if fenced_free(b) >= free_before_c {
+            c_returned = true;
+            break;
+        }
+    }
+    if !c_returned {
+        fail("two-client: C destroyed its ctx while holding and the fenced slot never \
+              came back -- the hold release is not on the chokepoint every ctx death \
+              passes through, so a client can strand a lane slot without disconnecting");
+    }
+    unsafe { t_close(c) };
+    t_putstr("warp-prove: a holder that destroyed its ctx released the lane\n");
+
     // --- L5: abandon is scoped to the abandoning client --------------------
     // A fresh conn, because A is gone. If `warp-abandon` were global (the
     // shape the pre-#178 P_CTL twins had) it would poison B along with A2.
