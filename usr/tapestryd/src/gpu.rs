@@ -1719,8 +1719,9 @@ impl Gpu {
     /// PARKS -- so a regression in the per-ctx scoping would hang the prover
     /// and time the boot out, rather than failing with a message. A bounded
     /// poll over this is the same shape as the existing vindication wait.
-    #[cfg(feature = "test-mode")]
-    pub fn test_ctx_fences_in_flight(&self, ctx_pub: u32) -> u32 {
+    /// Un-gated at Warp-3 alongside the ctl promotion: the winsys throttles
+    /// on it, so it is production surface now.
+    pub fn ctx_fences_in_flight(&self, ctx_pub: u32) -> u32 {
         self.ctrl
             .fslots
             .iter()

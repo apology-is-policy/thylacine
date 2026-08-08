@@ -766,13 +766,21 @@ fn prove_poisoned_path(root: i64) {
     // THE R6-F1 REGRESSION ASSERTION. Churn mint -> create3d -> destroy.
     // Each destroy on a poisoned ctx leak-parks a backing. Post-fix the
     // creation-time cap (leaked_count + live_backed >= MAX_WARP_BOS_PER_CTX)
-    // refuses by attempt 17. PRE-fix nothing capped the count, so this loop
-    // ran to the BYTE cap -- 64 MiB / 4 KiB = 16384 attempts -- silently
-    // dropping every WarpBo past the 16-wide graveyard and leaking a kernel
-    // handle plus a mapping with each one. So "refused by 17" is the
+    // refuses by attempt cap+1. PRE-fix nothing capped the count, so this
+    // loop ran to the BYTE cap -- 64 MiB / 4 KiB = 16384 attempts -- silently
+    // dropping every WarpBo past the cap-wide graveyard and leaking a kernel
+    // handle plus a mapping with each one. So "refused by cap+1" is the
     // discriminator; "eventually refused" is true BOTH ways and would be a
-    // gate that cannot fail.
-    const CAP: u32 = 16; // MAX_WARP_BOS_PER_CTX
+    // gate that cannot fail. The cap is READ from ctl `bo-cap` (Warp-3),
+    // not hardcoded: a mirrored constant is a claimed sync with no check
+    // (#187), and the server lifting the width must move this bound with it
+    // or the discriminator quietly widens toward "eventually".
+    let cap_line = open_read_string(root, "ctl");
+    let cap: u32 = match parse_field(&cap_line, "bo-cap") {
+        Some(v) if v >= 1 && v <= 4096 => v as u32,
+        Some(v) => fail(&format!("ctl bo-cap {} implausible", v)),
+        None => fail("ctl `bo-cap` field missing (pre-Warp-3 tapestryd?)"),
+    };
     let mut refused_at = 0u32;
     // The failure message carries the per-round (poisoned, leaked-count)
     // trace, so ONE red run says WHICH way it broke rather than only that
@@ -781,7 +789,7 @@ fn prove_poisoned_path(root: i64) {
     // mid-loop indicts an unexpected vindication. A bare "was never
     // refused" sends you back for a second run to learn that.
     let mut trace = String::new();
-    for i in 1..=(CAP + 1) {
+    for i in 1..=(cap + 1) {
         // THE PRECONDITION, RE-ASSERTED PER ROUND (#177). The pre-loop
         // anti-vacuous gate proves the trigger FIRED; it says nothing
         // about whether the state it created SURVIVES the assertions. It
@@ -822,14 +830,14 @@ fn prove_poisoned_path(root: i64) {
     }
     if refused_at == 0 {
         fail(&format!(
-            "BO creation was never refused in CAP+1 poisoned-churn rounds -- \
+            "BO creation was never refused in cap+1 poisoned-churn rounds -- \
              the leak count is unbounded (round-6 F1); trace(round:poisoned,leaked-count):{}",
             trace
         ));
     }
     t_putstr(&format!(
         "warp-prove: poisoned churn refused at attempt {} (cap {})\n",
-        refused_at, CAP
+        refused_at, cap
     ));
 
     // Release the hold: the held completion now drains, the late retire

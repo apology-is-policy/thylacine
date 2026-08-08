@@ -127,7 +127,18 @@ const MAX_SURFACES_PER_CONN: usize = 4;
 /// client's shared-map budget also bounds -- this cap is the server's own
 /// bookkeeping bound, not the resource authority).
 const MAX_WARP_CTXS: usize = 8;
-const MAX_WARP_BOS_PER_CTX: usize = 16;
+/// Lifted 16 -> 128 at Warp-3: the Mesa winsys is the first REAL consumer,
+/// and st/mesa alone mints ~8 hw_res (color + depth + upload/staging
+/// buffers) before the first draw -- 16 was prover-scale, and a GL app's
+/// textures are one hw_res each. The round-6 F1 cap argument is unchanged
+/// by the value: the creation-time `leaked_count + live_backed` cap admits
+/// at most one graveyard park per entry, and the graveyard is sized by
+/// this same constant, so "no record is ever dropped" holds by
+/// construction at any width. Static cost: ~170 KiB across both arrays.
+/// The BYTE bound (WARP_CTX_BACKING_MAX) is the real resource authority
+/// and does not move. Exposed to clients as ctl `bo-cap` (the prover's
+/// churn discriminator derives from it rather than hardcoding).
+const MAX_WARP_BOS_PER_CTX: usize = 128;
 /// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
 /// a second client can always make progress and no single client can drive
 /// every slot into the abandonment poison.
@@ -3967,14 +3978,19 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\n",
+                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\n",
                     comp.gpu.virgl as u32,
                     comp.gpu.num_capsets,
                     comp.gpu.capset_id,
                     comp.gpu.capset_ver,
                     comp.gpu.capset_blob.len(),
                     comp.warp_live_ctxs(),
-                    comp.warp_poisoned_slots()
+                    comp.warp_poisoned_slots(),
+                    // Warp-3: client discovery of the per-ctx BO capacity, so
+                    // neither the winsys nor the prover's churn bound bakes
+                    // the constant in (#187: a claimed cross-file sync needs
+                    // a CHECK; reading it here IS the check).
+                    MAX_WARP_BOS_PER_CTX
                 ),
             );
             // #175: the anti-vacuous counter. A prover that submits and
@@ -4041,7 +4057,14 @@ impl Conn {
                     // fence retired". `fence_signaled` is monotonic, and a
                     // SWALLOWED retire never reaches the pump that raises it,
                     // so an increase is positive evidence a fence really landed.
-                    #[cfg(feature = "test-mode")]
+                    //
+                    // PROMOTED out of test-mode at Warp-3: the Mesa winsys's
+                    // whole fence model rides `fence-signaled` (the client
+                    // counts fenced ops it ISSUED; the fence file coalesces,
+                    // so this monotonic counter is the only raceless way to
+                    // learn how many RETIRED -- the same #184 reasoning that
+                    // put it here). A production client cannot depend on a
+                    // test-mode field.
                     {
                         let signaled =
                             comp.wctx(id, self.conn_id).map_or(0, |c| c.fence_signaled);
@@ -4049,7 +4072,7 @@ impl Conn {
                             &mut s,
                             format_args!(
                                 "fences-in-flight {}\nfence-signaled {}\n",
-                                comp.gpu.test_ctx_fences_in_flight(id),
+                                comp.gpu.ctx_fences_in_flight(id),
                                 signaled
                             ),
                         );
