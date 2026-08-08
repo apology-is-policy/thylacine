@@ -520,9 +520,11 @@ fn prove_two_clients() {
     unsafe { t_close(c) };
     t_putstr("warp-prove: a holder that destroyed its ctx released the lane\n");
 
-    // --- L5: abandon is scoped to the abandoning client --------------------
-    // A fresh conn, because A is gone. If `warp-abandon` were global (the
-    // shape the pre-#178 P_CTL twins had) it would poison B along with A2.
+    // --- L5a: abandon FIRES, and takes the abandoning client's own slot ----
+    // A fresh conn, because A is gone. This leg's job is the positive half:
+    // the lever really abandons something, and what it abandons is its own.
+    // The scoping half is L5b below -- see the note there for why the
+    // "B is not poisoned" assertion in THIS leg cannot carry that claim.
     let a2 = warp_connect("client A2");
     let ctx_a2 = mint_ctx(a2, "client A2");
     if !write_ctl(a2, "ctl", "warp-hold on") {
@@ -587,6 +589,95 @@ fn prove_two_clients() {
     let _ = write_ctl(b, &format!("ctx/{}/ctl", ctx_b), "destroy");
     unsafe { t_close(a2) };
     unsafe { t_close(b) };
+
+    // --- L5b: abandon does not reach ACROSS clients ------------------------
+    // #188. L5a's bystander (B) was unheld, so by the time the abandon ran
+    // B's fence had long since retired and B owned no in-flight slot at all.
+    // `abandon_matching` walks in-flight fence SLOTS -- so with none of B's to
+    // walk, a GLOBAL abandon and a scoped one do exactly the same thing to B,
+    // and the global shape (the pre-#178 box-wide DoS) passes L5a unchanged.
+    // Proved, not supposed: sabotage S5a reverted the scoping to global and
+    // the harness printed "abandon stayed inside the abandoning client".
+    //
+    // The fix is to put the victim's fence genuinely at risk. Only the HOLDER
+    // can pin one -- the hold is what defers a chain's completion -- and
+    // round-8 F1 makes the hold exclusive (L1 asserts the displacement is
+    // refused), so the two roles cannot both hold. Hence: the VICTIM holds
+    // (pinning its fence in flight for the whole leg) and the ABANDONER runs
+    // unheld. That inverts L5a's arrangement, which is the point.
+    let d = warp_connect("client D");        // victim: holds, so its fence pins
+    let e = warp_connect("client E");        // abandoner: unheld
+    let ctx_d = mint_ctx(d, "client D");
+    let ctx_e = mint_ctx(e, "client E");
+
+    if !write_ctl(d, "ctl", "warp-hold on") {
+        fail("two-client: D warp-hold on");
+    }
+    let bo_d = mint_backed_bo(d, ctx_d, "client D");
+    let free_before_d = fenced_free(d);
+    if !write_ctl(
+        d,
+        &format!("ctx/{}/bo/{}/ctl", ctx_d, bo_d),
+        "transfer_from 0 0 0 0 1 1 1 0 0 0",
+    ) {
+        fail("two-client: D transfer_from queue");
+    }
+    // The pin is this leg's entire premise -- assert it rather than assume it.
+    // Without it there is nothing for a global abandon to steal and L5b would
+    // be as blind as L5a was.
+    if fenced_free(d) >= free_before_d {
+        fail("two-client: D's held fence never occupied a fenced slot, so a global \
+              abandon would have nothing of D's to take -- L5b would test nothing");
+    }
+
+    let ab2_before = parse_field(&open_read_string(e, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("two-client: ctl `abandoned` missing (L5b)"));
+    if !write_ctl(e, "ctl", "warp-abandon") {
+        fail("two-client: E warp-abandon");
+    }
+    let ab2_after = parse_field(&open_read_string(e, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("two-client: ctl `abandoned` missing after E's abandon"));
+
+    // Three independent readings, each of which a global abandon breaks. The
+    // counter is the sharpest: E holds nothing in flight, so a correctly-scoped
+    // abandon can only be a no-op, while a global one must consume D's slot.
+    if ab2_after != ab2_before {
+        fail("two-client: E abandoned a slot it does not own -- E has NOTHING in flight, \
+              so the only slot available to take was D's; abandon is GLOBAL and any client \
+              can wedge every other client's in-flight work");
+    }
+    if ctx_field(d, ctx_d, "poisoned") != 0 {
+        fail("two-client: D's ctx was poisoned by E's abandon -- abandon reaches across \
+              clients, so an unprivileged peer can poison a context it does not own");
+    }
+    // Positive survival evidence, not merely absence of poison. A gauge is the
+    // right instrument HERE precisely because D holds: the hold pins the chain,
+    // so "in flight" is a stable state rather than a coin flip against a fast
+    // completion (#184 -- do NOT copy this reading into an unheld context).
+    if ctx_field(d, ctx_d, "fences-in-flight") == 0 {
+        fail("two-client: D's pinned fence left flight across E's abandon -- D still holds, \
+              so nothing of D's should have moved");
+    }
+    t_putstr("warp-prove: abandon did not reach a peer's PINNED in-flight fence\n");
+
+    // Leave the lane clean: release D's hold and let its chain retire.
+    if !write_ctl(d, "ctl", "warp-hold off") {
+        fail("two-client: D warp-hold off");
+    }
+    let mut d_returned = false;
+    for _ in 0..400 {
+        if fenced_free(d) >= free_before_d {
+            d_returned = true;
+            break;
+        }
+    }
+    if !d_returned {
+        fail("two-client: D's fenced slot never came back after its hold released");
+    }
+    let _ = write_ctl(d, &format!("ctx/{}/ctl", ctx_d), "destroy");
+    let _ = write_ctl(e, &format!("ctx/{}/ctl", ctx_e), "destroy");
+    unsafe { t_close(d) };
+    unsafe { t_close(e) };
 }
 
 /// Drive a ctx into the wedge state and assert the bounds that hold there.

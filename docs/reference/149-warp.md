@@ -302,6 +302,30 @@ provide); a holder that *disconnects* returns its fenced slots; a holder that
 *destroys its ctx with the conn still open* also returns them; and
 `warp-abandon` poisons only the abandoning client's ctx.
 
+**The abandon-scoping leg is a PAIR, and the first half alone proves nothing
+about scoping (#188).** L5a arranges the abandoner as the holder and asserts
+the `abandoned` delta rose and its own ctx went poisoned — that is the
+positive claim: *the lever fires, and takes its own*. Its bystander, though,
+is unheld, so by the time the abandon runs the bystander's fence has long
+since retired and it owns no in-flight slot at all. `abandon_matching` walks
+in-flight fence SLOTS; with none of the bystander's to walk, a **global**
+abandon and a scoped one do the identical thing to it. Reverting the scoping
+to global therefore passed L5a unchanged — proved by sabotage, not supposed.
+
+L5b closes it by putting the victim's fence genuinely at risk. Only the
+holder can pin a fence in flight (the hold is what defers the chain's
+completion), and round-8 F1 makes the hold exclusive — L1 asserts a second
+client's arm is refused — so the two roles cannot both hold. The roles are
+therefore *inverted* relative to L5a: the **victim** holds, and the
+**abandoner** runs unheld. That makes the `abandoned` counter itself the
+sharpest discriminator, because an unheld abandoner owns nothing in flight:
+a correctly-scoped abandon can only be a no-op, while a global one must
+consume the victim's slot. L5b asserts the delta is **zero**, the victim's
+ctx is unpoisoned, and the victim's `fences-in-flight` is still nonzero —
+positive survival evidence rather than mere absence of poison, and sound as
+a gauge reading *here* only because the hold pins the chain (contrast #184,
+where the same gauge on an unheld client would have raced).
+
 The last two legs look like one leg and are not (#185). Conn departure was
 already handled by the round-7 placement of the hold release, on
 `warp_retire_conn`. The round-8 F1 fix moved it to `wctx_retire` for the case
