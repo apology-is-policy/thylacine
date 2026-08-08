@@ -291,7 +291,157 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     unsafe { t_close(map_fd) };
+
+    // 7. The POISONED path (#175). Everything above is the clean path --
+    // which is all this prover ever drove, and is why six consecutive audit
+    // rounds each found another defect in the poison/graveyard/vindication
+    // machine with nothing able to regress-test it.
+    prove_poisoned_path(root);
+
     unsafe { t_close(root) };
-    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip)\n");
+    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path)\n");
     unsafe { t_exits(0) }
+}
+
+/// Drive a ctx into the wedge state and assert the bounds that hold there.
+///
+/// The whole leg is deterministic by construction: `warp-hold on` stops the
+/// completion drain so the submitted fence STAYS in flight, and
+/// `warp-abandon` forces the transition the 30 s clock would otherwise
+/// make. Shortening the clock instead would have made this a race against
+/// wall time -- the flake shape the harness exists to remove.
+fn prove_poisoned_path(root: i64) {
+    // The levers live on the WARP ctl, not the tapestry one -- a warp
+    // client has no path to the tapestry tree.
+    if !write_ctl(root, "ctl", "warp-hold on") {
+        fail("warp-hold on (is tapestryd built with the test-mode feature?)");
+    }
+    let ctx = match parse_u32_prefix(&open_read_string(root, "ctx/new")) {
+        Some(v) => v,
+        None => fail("poisoned-path ctx/new"),
+    };
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail("poisoned-path bo/new"),
+    };
+    // One page is the minimum the seam accepts, and it is what makes the
+    // COUNT cap (not the byte cap) the binding one below.
+    let small = format!(
+        "create3d {} {} {} 1 1 1 1 0 0 0 {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, 4096
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &small) {
+        fail("poisoned-path create3d");
+    }
+    let submit_path = format!("ctx/{}/submit", ctx);
+    let fd = unsafe { t_open(root, submit_path.as_ptr(), submit_path.len(), T_OWRITE) };
+    if fd < 0 {
+        fail("poisoned-path submit open");
+    }
+    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
+    let _ = unsafe { t_write(fd, nop.as_ptr(), nop.len()) };
+    unsafe { t_close(fd) };
+
+    // THE ANTI-VACUOUS GATE. If the drain beat us the fence is already
+    // retired, the abandon is a silent no-op, and every assertion below
+    // would run against a perfectly healthy ctx and PASS -- a harness
+    // reporting success for a state it never reached. Assert the trigger
+    // actually bit before believing anything downstream of it.
+    if !write_ctl(root, "ctl", "warp-abandon") {
+        fail("warp-abandon");
+    }
+    let ctl = open_read_string(root, "ctl");
+    match parse_field(&ctl, "abandoned") {
+        Some(n) if n >= 1 => {}
+        Some(_) => fail("warp-abandon abandoned 0 slots -- the hold did not hold, \
+                         so the poisoned-path legs would have tested a healthy ctx"),
+        None => fail("ctl `abandoned` field missing (test-mode build?)"),
+    }
+    let cctl = open_read_string(root, &format!("ctx/{}/ctl", ctx));
+    match parse_field(&cctl, "poisoned") {
+        Some(1) => {}
+        _ => fail("ctx not poisoned after abandon"),
+    }
+
+    // R5-F2: poison is TERMINAL to the client. Submit must refuse rather
+    // than let the stream be re-armed over backings the device may still
+    // be writing.
+    let fd2 = unsafe { t_open(root, submit_path.as_ptr(), submit_path.len(), T_OWRITE) };
+    if fd2 >= 0 {
+        let n = unsafe { t_write(fd2, nop.as_ptr(), nop.len()) };
+        unsafe { t_close(fd2) };
+        if n >= 0 {
+            fail("submit SUCCEEDED on a poisoned ctx (R5-F2 terminal poison)");
+        }
+    }
+
+    // THE R6-F1 REGRESSION ASSERTION. Churn mint -> create3d -> destroy.
+    // Each destroy on a poisoned ctx leak-parks a backing. Post-fix the
+    // creation-time cap (leaked_count + live_backed >= MAX_WARP_BOS_PER_CTX)
+    // refuses by attempt 17. PRE-fix nothing capped the count, so this loop
+    // ran to the BYTE cap -- 64 MiB / 4 KiB = 16384 attempts -- silently
+    // dropping every WarpBo past the 16-wide graveyard and leaking a kernel
+    // handle plus a mapping with each one. So "refused by 17" is the
+    // discriminator; "eventually refused" is true BOTH ways and would be a
+    // gate that cannot fail.
+    const CAP: u32 = 16; // MAX_WARP_BOS_PER_CTX
+    let mut refused_at = 0u32;
+    for i in 1..=(CAP + 1) {
+        let b = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+            Some(v) => v,
+            None => {
+                refused_at = i;
+                break;
+            }
+        };
+        if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, b), &small) {
+            refused_at = i;
+            break;
+        }
+        if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, b), "destroy") {
+            fail("poisoned-path bo destroy");
+        }
+    }
+    if refused_at == 0 {
+        fail("BO creation was never refused in CAP+1 poisoned-churn rounds -- \
+              the leak count is unbounded (round-6 F1)");
+    }
+    t_putstr(&format!(
+        "warp-prove: poisoned churn refused at attempt {} (cap {})\n",
+        refused_at, CAP
+    ));
+
+    // Release the hold: the held completion now drains, the late retire
+    // proves the device finished, and the vindication must walk the ctx
+    // back out of the wedge -- freeing the graveyard and resetting the
+    // counters (round-6, the live-vindication reclamation point).
+    if !write_ctl(root, "ctl", "warp-hold off") {
+        fail("warp-hold off");
+    }
+    // Bounded, and self-pacing: each ctl read is a 9P round trip, so the
+    // loop body itself forces a serve-loop pass -- no sleep primitive
+    // needed, and no unbounded waiter.
+    let mut healed = false;
+    for _ in 0..400 {
+        let c = open_read_string(root, &format!("ctx/{}/ctl", ctx));
+        if parse_field(&c, "poisoned") == Some(0) && parse_field(&c, "leaked-count") == Some(0) {
+            healed = true;
+            break;
+        }
+    }
+    if !healed {
+        fail("vindication never cleared the poison / leak counters after the hold released");
+    }
+    t_putstr("warp-prove: vindication reclaimed the wedged ctx\n");
+
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy") {
+        fail("poisoned-path ctx destroy");
+    }
+    let ctl3 = open_read_string(root, "ctl");
+    match parse_field(&ctl3, "poisoned") {
+        Some(0) => {}
+        Some(v) => fail(&format!("poisoned {} after vindication+destroy (want 0)", v)),
+        None => fail("ctl poisoned field missing"),
+    }
+    let _ = write_ctl(root, "ctl", "warp-hold off");
 }

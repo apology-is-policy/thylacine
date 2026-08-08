@@ -3949,6 +3949,19 @@ impl Conn {
                     comp.warp_poisoned_slots()
                 ),
             );
+            // #175: the anti-vacuous counter. A prover that submits and
+            // then abandons is racing the drain; if the completion won,
+            // nothing was in flight, the abandon was a no-op, and every
+            // later assertion runs against a HEALTHY ctx while reporting
+            // PASS. Asserting `abandoned >= 1` first is what makes the
+            // poisoned-path legs mean anything.
+            #[cfg(feature = "test-mode")]
+            {
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("abandoned {}\n", comp.gpu.test_abandoned_total()),
+                );
+            }
             return self.read_str(tag, &s, a.offset, cap);
         }
         if f.path == W_CAPS {
@@ -3968,6 +3981,18 @@ impl Conn {
                 WFK_CTL => {
                     let mut s = String::new();
                     let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
+                    // #175: expose the per-ctx leak accounting so the
+                    // prover can watch the round-6 F1 cap directly rather
+                    // than inferring it from a refusal alone.
+                    if let Some(c) = comp.wctx(id, self.conn_id) {
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!(
+                                "poisoned {}\nleaked-count {}\nleaked-bytes {}\n",
+                                c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes
+                            ),
+                        );
+                    }
                     self.read_str(tag, &s, a.offset, cap)
                 }
                 // The fence completion stream (W2d): one record per read
@@ -4298,6 +4323,26 @@ impl Conn {
             };
         }
         // --- The /dev/warp writes (Warp-2c) ----------------------------------
+        // #175: the warp-tree test levers must live HERE, not on the
+        // tapestry P_CTL where the other test-mode verbs are. A warp client
+        // is connected to /srv/warp and has no path to the tapestry tree at
+        // all, so verbs parked there were simply unreachable -- the gate
+        // caught that on its first real run, which is the harness earning
+        // its keep before it ever tested the seam. The cargo feature IS the
+        // production strip (#880).
+        #[cfg(feature = "test-mode")]
+        if f.path == W_CTL {
+            let s = core::str::from_utf8(a.data).unwrap_or("").trim();
+            if s == "warp-hold on" || s == "warp-hold off" {
+                comp.gpu.test_hold_completions(s.ends_with("on"));
+                return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+            }
+            if s == "warp-abandon" {
+                comp.gpu.test_abandon_all();
+                return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+            }
+            return self.err(tag, p9::E_INVAL);
+        }
         if is_wctx(f.path) {
             let id = warp_id(f.path);
             if comp.wctx(id, self.conn_id).is_none() {
@@ -4502,7 +4547,13 @@ impl Conn {
     /// to GATED" (an allowlist would silently ungate a verb added without
     /// touching the gate line).
     fn is_ungated_ctl(s: &str) -> bool {
-        s == "test-mode on" || s == "test-mode off" || s == "tick" || s.starts_with("release")
+        s == "test-mode on"
+            || s == "test-mode off"
+            || s == "tick"
+            || s.starts_with("release")
+            || s == "warp-hold on"
+            || s == "warp-hold off"
+            || s == "warp-abandon"
     }
 
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
@@ -4602,6 +4653,28 @@ impl Conn {
                 comp.frame_tick();
                 return Ok(());
             }
+            // #175: the poisoned-path levers. `warp-hold on` keeps
+            // submitted fences in flight, so `warp-abandon` has something
+            // to bite -- without the hold the serve loop drains the
+            // completion first and the abandon is a silent no-op, which
+            // would leave a prover asserting against a HEALTHY ctx and
+            // reporting PASS. Both are gated on test_mode as well as the
+            // cargo feature: two switches, because this one can poison a
+            // live client's fence stream.
+            if s == "warp-hold on" || s == "warp-hold off" {
+                if !comp.test_mode {
+                    return Err(p9::E_INVAL);
+                }
+                comp.gpu.test_hold_completions(s.ends_with("on"));
+                return Ok(());
+            }
+            if s == "warp-abandon" {
+                if !comp.test_mode {
+                    return Err(p9::E_INVAL);
+                }
+                comp.gpu.test_abandon_all();
+                return Ok(());
+            }
             if let Some(rest) = s.strip_prefix("release") {
                 let rest = rest.trim();
                 if rest.is_empty() {
@@ -4621,7 +4694,12 @@ impl Conn {
             }
         }
         #[cfg(not(feature = "test-mode"))]
-        if s.starts_with("test-mode") || s == "tick" || s.starts_with("release") {
+        if s.starts_with("test-mode")
+            || s == "tick"
+            || s.starts_with("release")
+            || s.starts_with("warp-hold")
+            || s == "warp-abandon"
+        {
             return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
         }
         Err(p9::E_INVAL)
