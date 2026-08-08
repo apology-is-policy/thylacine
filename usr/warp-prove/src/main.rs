@@ -312,14 +312,17 @@ pub extern "C" fn rs_main() -> i64 {
 /// wall time -- the flake shape the harness exists to remove.
 fn prove_poisoned_path(root: i64) {
     // The levers live on the WARP ctl, not the tapestry one -- a warp
-    // client has no path to the tapestry tree.
-    if !write_ctl(root, "ctl", "warp-hold on") {
-        fail("warp-hold on (is tapestryd built with the test-mode feature?)");
-    }
+    // client has no path to the tapestry tree. #178: they act only on the
+    // CALLER'S ctx, so the ctx must exist first; a lever write with no ctx
+    // is E_INVAL by design, which makes a mis-sequenced test fail loudly
+    // instead of silently holding nothing.
     let ctx = match parse_u32_prefix(&open_read_string(root, "ctx/new")) {
         Some(v) => v,
         None => fail("poisoned-path ctx/new"),
     };
+    if !write_ctl(root, "ctl", "warp-hold on") {
+        fail("warp-hold on (is tapestryd built with the test-mode feature?)");
+    }
     let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
         Some(v) => v,
         None => fail("poisoned-path bo/new"),
@@ -347,15 +350,23 @@ fn prove_poisoned_path(root: i64) {
     // would run against a perfectly healthy ctx and PASS -- a harness
     // reporting success for a state it never reached. Assert the trigger
     // actually bit before believing anything downstream of it.
+    // Round-7 F2: assert the DELTA, not the total. `abandoned` is a
+    // process-lifetime counter, so `>= 1` is satisfied by any earlier
+    // abandon -- a second invocation of this leg, or a clean path that
+    // ever abandons, would let the gate pass on a STALE trigger while
+    // this run's abandon did nothing. The whole sub-arc has twice turned
+    // on a gate that quietly stopped discriminating; read it before and
+    // after and require THIS write to have moved it.
+    let before = parse_field(&open_read_string(root, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("ctl `abandoned` field missing (test-mode build?)"));
     if !write_ctl(root, "ctl", "warp-abandon") {
         fail("warp-abandon");
     }
-    let ctl = open_read_string(root, "ctl");
-    match parse_field(&ctl, "abandoned") {
-        Some(n) if n >= 1 => {}
-        Some(_) => fail("warp-abandon abandoned 0 slots -- the hold did not hold, \
-                         so the poisoned-path legs would have tested a healthy ctx"),
-        None => fail("ctl `abandoned` field missing (test-mode build?)"),
+    let after = parse_field(&open_read_string(root, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("ctl `abandoned` field missing after abandon"));
+    if after <= before {
+        fail("warp-abandon abandoned 0 NEW slots -- the hold did not hold, \
+              so the poisoned-path legs would have tested a healthy ctx");
     }
     let cctl = open_read_string(root, &format!("ctx/{}/ctl", ctx));
     match parse_field(&cctl, "poisoned") {

@@ -464,14 +464,29 @@ struct Controlq {
     /// landed on the churn loop's FIRST command, vindicated the ctx, and
     /// the assertions ran against a healed ctx -- a lever that held the
     /// window before the trigger and none of the window after it.
+    ///
+    /// #178: and it is scoped to ONE ctx, not global. `default =
+    /// ["test-mode"]` with no build passing --no-default-features means
+    /// this ships, and `/srv/warp` `ctl` is mode 0666 -- so a global hold
+    /// let any client stop every other client's fences forever. Identity
+    /// cannot separate the prover from an attacker (the in-guest battery
+    /// is an ordinary uid-1000 client BY DESIGN -- the same reason SA-1
+    /// leaves the determinism surface ungated), so the fix is to make the
+    /// POWER proportionate rather than to gate the caller: a client may
+    /// hold only its own ctx's fences, which it could already stall by
+    /// simply not reading them.
     #[cfg(feature = "test-mode")]
-    hold_completions: bool,
-    /// #177: late retires observed while the hold was up. DEFERRED, never
-    /// dropped: the healing leg asserts that releasing the hold delivers
-    /// the vindication, so discarding the entry here would trade a
-    /// vacuous wedge for a vindication that could never arrive.
+    hold_ctx: Option<u32>,
+    /// #177/#178: slots whose used-ring retire was swallowed while their
+    /// ctx was held. DEFERRED, never dropped -- the healing leg asserts
+    /// the vindication ARRIVES on release, so discarding here would trade
+    /// a vacuous wedge for a vindication that could never come. One list
+    /// covers both orders: at release the slot either still holds a live
+    /// tag (retire seen before the abandon) or is poisoned with the tag
+    /// taken (retire seen after it), which is the same two-way branch
+    /// `drain` itself makes.
     #[cfg(feature = "test-mode")]
-    held_vindications: alloc::vec::Vec<usize>,
+    held_retires: alloc::vec::Vec<usize>,
     /// #175: slots actually abandoned, so the prover can assert its
     /// trigger BIT before trusting anything downstream of it.
     #[cfg(feature = "test-mode")]
@@ -588,6 +603,23 @@ impl Controlq {
             if slot < FENCED_SLOTS {
                 self.fslot_since[slot] = None;
             }
+            // #177/#178: while THIS slot's ctx is held, swallow the retire
+            // -- that is exactly what models "the device has not proved it
+            // finished". The used entry is still consumed above, so the
+            // sync chain behind it retires normally and other clients are
+            // untouched; the tag is deliberately NOT taken, so the fence
+            // stays in flight and `abandon` can still find it.
+            #[cfg(feature = "test-mode")]
+            if slot < FENCED_SLOTS && self.hold_ctx.is_some() {
+                let held = self.fslots[slot]
+                    .as_ref()
+                    .map(|t| t.ctx_pub)
+                    .unwrap_or(self.fslot_poison_ctx[slot]);
+                if self.hold_ctx == Some(held) {
+                    self.held_retires.push(slot);
+                    continue;
+                }
+            }
             let tag = match self.fslots.get_mut(slot).and_then(|s| s.take()) {
                 Some(t) => t,
                 None => {
@@ -597,17 +629,6 @@ impl Controlq {
                     // stays out of the pool (its response buffer is no
                     // longer trusted to belong to any live chain).
                     if slot < FENCED_SLOTS && self.fslot_poisoned[slot] {
-                        // #177: under the harness hold this retire is the
-                        // one event the wedge assertions must NOT see --
-                        // it is precisely what models "the device has not
-                        // proved it finished". Defer it (the used entry is
-                        // still consumed, so the sync chain behind it
-                        // retires normally) and replay on release.
-                        #[cfg(feature = "test-mode")]
-                        if self.hold_completions {
-                            self.held_vindications.push(slot);
-                            continue;
-                        }
                         // The device just PROVED it is finished with this
                         // descriptor pair and response buffer, so the slot
                         // is safe to reuse -- return it to the pool
@@ -654,10 +675,12 @@ impl Controlq {
     /// dispatch). The ISR read is level hygiene: nobody irq.waits between
     /// dispatches, so the assert would otherwise sit latched.
     fn poll_completions(&mut self) {
-        #[cfg(feature = "test-mode")]
-        if self.hold_completions {
-            return;
-        }
+        // #178: NO global early return for the harness hold. It used to
+        // bail here, which stopped EVERY client's drain -- an unprivileged
+        // box-wide DoS on a mode-0666 ctl. The hold is enforced per-slot
+        // in `drain` instead, so a held ctx's fences stay in flight while
+        // everyone else's retire normally.
+        //
         // Poisoned-but-idle still needs draining (round-3 F3): abandonment
         // TAKES the tag, so `fenced_in_flight()` is 0 the moment the last
         // slot is abandoned -- and the un-poison lives in drain()'s
@@ -687,7 +710,20 @@ impl Controlq {
     /// Release every occupied fenced slot as abandoned (poisoning both the
     /// slot and, via the tag, its owning ctx).
     fn abandon_all(&mut self, why: &str) {
+        self.abandon_matching(why, None)
+    }
+
+    /// The same release, optionally restricted to ONE ctx (#178). The
+    /// deadline and dead-engine callers pass `None` -- a wedge that real
+    /// is genuinely global. The harness verb passes its own ctx, so a
+    /// client can only abandon chains it owns.
+    fn abandon_matching(&mut self, why: &str, only_ctx: Option<u32>) {
         for i in 0..FENCED_SLOTS {
+            if let Some(want) = only_ctx {
+                if self.fslots[i].as_ref().map(|t| t.ctx_pub) != Some(want) {
+                    continue;
+                }
+            }
             let mut tag = match self.fslots[i].take() {
                 Some(t) => t,
                 None => continue,
@@ -1018,9 +1054,9 @@ impl Gpu {
                 sync_pending: false,
                 completed: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
-                hold_completions: false,
+                hold_ctx: None,
                 #[cfg(feature = "test-mode")]
-                held_vindications: alloc::vec::Vec::new(),
+                held_retires: alloc::vec::Vec::new(),
                 #[cfg(feature = "test-mode")]
                 abandoned_total: 0,
             },
@@ -1584,33 +1620,70 @@ impl Gpu {
         core::mem::take(&mut self.ctrl.vindicated)
     }
 
-    /// #175, the harness levers. `hold` keeps submitted fences in flight so
-    /// abandonment is reachable WITHOUT racing the drain; `abandon` drives
-    /// the production `abandon_all` -- the same poison path the 30 s
-    /// deadline drives, with the deadline forced rather than shortened, so
-    /// the test never races a real clock. `abandoned_total` is what lets a
-    /// prover prove its own trigger fired instead of asserting against an
-    /// untouched, healthy ctx.
+    /// #175, the harness levers -- both scoped to ONE ctx (#178), because
+    /// they ship (`default = ["test-mode"]`) on a mode-0666 ctl and
+    /// identity cannot separate the prover from an attacker: the in-guest
+    /// battery is an ordinary uid-1000 client by design. Scoped, the worst
+    /// a client can do is wedge its own ctx, which it could already do.
+    ///
+    /// `hold` keeps THIS ctx's submitted fences in flight so abandonment is
+    /// reachable without racing the drain; `abandon` drives the production
+    /// `abandon_matching` -- the same poison path the 30 s deadline drives,
+    /// forced rather than shortened, so the test never races a real clock.
+    /// `abandoned_total` lets a prover prove its own trigger fired instead
+    /// of asserting against an untouched, healthy ctx.
     #[cfg(feature = "test-mode")]
-    pub fn test_hold_completions(&mut self, hold: bool) {
-        self.ctrl.hold_completions = hold;
-        if hold {
+    pub fn test_hold_ctx(&mut self, ctx_pub: Option<u32>) {
+        self.ctrl.hold_ctx = ctx_pub;
+        if ctx_pub.is_some() {
             return;
         }
-        // Release replays every deferred late retire through the SAME two
-        // steps the production arm takes, so the healing leg exercises the
-        // real recovery rather than a test-only shortcut.
-        for slot in core::mem::take(&mut self.ctrl.held_vindications) {
-            self.ctrl.fslot_poisoned[slot] = false;
-            self.ctrl.vindicated.push(FenceVindication {
-                ctx_pub: self.ctrl.fslot_poison_ctx[slot],
-            });
+        // Release replays every swallowed retire through the SAME branch
+        // `drain` would have taken, so the healing leg exercises the real
+        // recovery rather than a test-only shortcut. Which branch depends
+        // on whether an abandon intervened: a live tag completes normally,
+        // a taken one leaves the slot poisoned and owes a vindication.
+        for slot in core::mem::take(&mut self.ctrl.held_retires) {
+            match self.ctrl.fslots[slot].take() {
+                Some(tag) => {
+                    let resp_va =
+                        self.ctrl.flane_va + FRESP_OFF + (slot as u64) * FRESP_STRIDE;
+                    let rt = unsafe { r32(resp_va) };
+                    if rt != VIRTIO_GPU_RESP_OK_NODATA {
+                        say!(
+                            "tapestryd: gpu fenced cmd (fence {}) resp_type={:#x}",
+                            tag.fence_id, rt
+                        );
+                    }
+                    self.ctrl.completed.push(tag);
+                }
+                None if self.ctrl.fslot_poisoned[slot] => {
+                    self.ctrl.fslot_poisoned[slot] = false;
+                    self.ctrl.vindicated.push(FenceVindication {
+                        ctx_pub: self.ctrl.fslot_poison_ctx[slot],
+                    });
+                }
+                None => {}
+            }
         }
     }
 
     #[cfg(feature = "test-mode")]
-    pub fn test_abandon_all(&mut self) {
-        self.ctrl.abandon_all("test-mode abandon");
+    pub fn test_abandon_ctx(&mut self, ctx_pub: u32) {
+        self.ctrl
+            .abandon_matching("test-mode abandon", Some(ctx_pub));
+    }
+
+    /// Drop a hold whose ctx just died (#178). Without this the scope
+    /// survives its subject: `hold_ctx` would keep naming a dead pub_id
+    /// and, after a 2^32 `warp_ctx_seq` wrap, could re-attach to an
+    /// unrelated ctx. Releasing here also replays whatever that ctx had
+    /// deferred, so nothing is stranded.
+    #[cfg(feature = "test-mode")]
+    pub fn test_hold_ctx_died(&mut self, ctx_pub: u32) {
+        if self.ctrl.hold_ctx == Some(ctx_pub) {
+            self.test_hold_ctx(None);
+        }
     }
 
     #[cfg(feature = "test-mode")]

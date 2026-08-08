@@ -2537,6 +2537,18 @@ impl Comp {
         None
     }
 
+    /// This conn's ctx pub_id, if it has one (#178: the harness levers are
+    /// scoped through it). `wctx_mint` enforces one ctx per client, so the
+    /// first match IS the answer.
+    #[cfg(feature = "test-mode")]
+    fn wctx_of_conn(&self, conn: u64) -> Option<u32> {
+        self.warp_ctxs
+            .iter()
+            .flatten()
+            .find(|c| c.owner_conn == conn)
+            .map(|c| c.pub_id)
+    }
+
     /// Mint a context for `conn` (one per client -- the I-45 exposure
     /// bound): allocate the slot, CTX_CREATE on the device (virgl-gated by
     /// the caller), roll the slot back if the device refuses.
@@ -2907,6 +2919,9 @@ impl Comp {
 
     fn wctx_finish(&mut self, slot: usize, leak: bool) {
         if let Some(mut c) = self.warp_ctxs[slot].take() {
+            // #178: a hold must not outlive the ctx it is scoped to.
+            #[cfg(feature = "test-mode")]
+            self.gpu.test_hold_ctx_died(c.pub_id);
             // Take each backing by VALUE: a leak-parked record must outlive
             // this ctx (round-5 F1). Borrowing them, as this loop did, meant
             // the leaked bytes AND the records were dropped at the `return`
@@ -3082,6 +3097,23 @@ impl Comp {
 
     /// Conn teardown, warp half: retire every ctx this conn owns.
     fn warp_retire_conn(&mut self, conn: u64) {
+        // Round-7 F3: release the hold FIRST, and here rather than in
+        // wctx_finish. A held ctx never quiesces -- the hold is precisely
+        // what keeps its fences in flight -- so the pump's
+        // `fences_in_flight == 0` precondition is never met and the finish
+        // (where the #178 hold-clear first lived) is unreachable. A prover
+        // that dies mid-hold therefore stranded its ctx and its fenced
+        // slots for the rest of the boot. Releasing at conn teardown
+        // replays the deferred retires, so the fences drain and the retire
+        // below can actually complete.
+        #[cfg(feature = "test-mode")]
+        for i in 0..MAX_WARP_CTXS {
+            if let Some(c) = self.warp_ctxs[i].as_ref() {
+                if c.owner_conn == conn {
+                    self.gpu.test_hold_ctx_died(c.pub_id);
+                }
+            }
+        }
         for i in 0..MAX_WARP_CTXS {
             if self.warp_ctxs[i]
                 .as_ref()
@@ -4333,12 +4365,28 @@ impl Conn {
         #[cfg(feature = "test-mode")]
         if f.path == W_CTL {
             let s = core::str::from_utf8(a.data).unwrap_or("").trim();
-            if s == "warp-hold on" || s == "warp-hold off" {
-                comp.gpu.test_hold_completions(s.ends_with("on"));
-                return p9::build_rwrite(&mut self.out_buf, tag, a.count);
-            }
-            if s == "warp-abandon" {
-                comp.gpu.test_abandon_all();
+            if s == "warp-hold on" || s == "warp-hold off" || s == "warp-abandon" {
+                // #178: both levers act ONLY on the caller's own ctx. They
+                // ship (`default = ["test-mode"]`) and this ctl is mode
+                // 0666, so global versions were an unprivileged, permanent,
+                // box-wide DoS on the fenced lane -- handing any client the
+                // very wedge 149-warp.md documents as needing a hung GL
+                // chain. Authorizing the CALLER cannot work here: the
+                // in-guest battery is an ordinary uid-1000 client by design
+                // (the same reason SA-1 leaves the determinism surface
+                // ungated), so the power is bounded instead of the peer.
+                // Requiring a ctx also makes a mis-sequenced test fail loud
+                // rather than silently no-op.
+                let ctx_pub = match comp.wctx_of_conn(self.conn_id) {
+                    Some(v) => v,
+                    None => return self.err(tag, p9::E_INVAL),
+                };
+                if s == "warp-abandon" {
+                    comp.gpu.test_abandon_ctx(ctx_pub);
+                } else {
+                    comp.gpu
+                        .test_hold_ctx(if s.ends_with("on") { Some(ctx_pub) } else { None });
+                }
                 return p9::build_rwrite(&mut self.out_buf, tag, a.count);
             }
             return self.err(tag, p9::E_INVAL);
@@ -4551,9 +4599,6 @@ impl Conn {
             || s == "test-mode off"
             || s == "tick"
             || s.starts_with("release")
-            || s == "warp-hold on"
-            || s == "warp-hold off"
-            || s == "warp-abandon"
     }
 
     fn global_ctl(&mut self, comp: &mut Comp, data: &[u8]) -> Result<(), u32> {
@@ -4653,28 +4698,15 @@ impl Conn {
                 comp.frame_tick();
                 return Ok(());
             }
-            // #175: the poisoned-path levers. `warp-hold on` keeps
-            // submitted fences in flight, so `warp-abandon` has something
-            // to bite -- without the hold the serve loop drains the
-            // completion first and the abandon is a silent no-op, which
-            // would leave a prover asserting against a HEALTHY ctx and
-            // reporting PASS. Both are gated on test_mode as well as the
-            // cargo feature: two switches, because this one can poison a
-            // live client's fence stream.
-            if s == "warp-hold on" || s == "warp-hold off" {
-                if !comp.test_mode {
-                    return Err(p9::E_INVAL);
-                }
-                comp.gpu.test_hold_completions(s.ends_with("on"));
-                return Ok(());
-            }
-            if s == "warp-abandon" {
-                if !comp.test_mode {
-                    return Err(p9::E_INVAL);
-                }
-                comp.gpu.test_abandon_all();
-                return Ok(());
-            }
+            // #178: the warp poisoned-path levers used to ALSO live here,
+            // and #175 called them "unreachable" once they moved to the
+            // warp W_CTL. That was true only from the PROVER's vantage
+            // point -- a warp client has no path to this tree, but every
+            // TAPESTRY client does, and these arms drove the GLOBAL
+            // abandon/hold. A second door to the same box-wide wedge,
+            // opened by the commit that claimed to close it. They exist
+            // in exactly one place now: the W_CTL arm, scoped to the
+            // caller's own ctx -- which a tapestry client does not have.
             if let Some(rest) = s.strip_prefix("release") {
                 let rest = rest.trim();
                 if rest.is_empty() {
@@ -4697,8 +4729,6 @@ impl Conn {
         if s.starts_with("test-mode")
             || s == "tick"
             || s.starts_with("release")
-            || s.starts_with("warp-hold")
-            || s == "warp-abandon"
         {
             return Err(p9::E_OPNOTSUPP); // stripped for production (#880)
         }
