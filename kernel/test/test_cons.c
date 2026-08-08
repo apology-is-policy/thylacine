@@ -264,12 +264,22 @@ void test_cons_ring_full_refuses(void) {
     // MUST be non-control (>= 0x80) -- a 0x03 would be cooked-consumed as Ctrl-C,
     // not enqueued, perturbing the fill. The byte value encodes the push index
     // mod 0x80, so FIFO order is checkable.
+    // #187: held for the NEGATIVE read's sake. An unwrapped `!intr_pending` is
+    // the false-PASS half of the same hazard: if a fill byte wrongly cooked to
+    // an interrupt, the mgr this loop keeps waking could consume the flag before
+    // the assert -- so the assertion would be satisfied by the bug it exists to
+    // catch. The positive reads fail spuriously; the negative reads pass
+    // spuriously. Both need the window.
+    cons_test_mgr_hold(true);
     int accepted = 0, refused = 0;
     for (int i = 0; i < 522; i++) {
         if (cons_rx_input((u8)(0x80u | (i & 0x7fu)), false)) accepted++;
         else refused++;
     }
-    TEST_ASSERT(!cons_test_intr_pending(), "no Ctrl-C among the >= 0x80 fill bytes");
+    bool no_intr = !cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+
+    TEST_ASSERT(no_intr, "no Ctrl-C among the >= 0x80 fill bytes");
     TEST_EXPECT_EQ((long)accepted, 512L, "exactly the ring capacity was accepted");
     TEST_EXPECT_EQ((long)refused,   10L, "the 10 past capacity were REFUSED, not dropped");
 
@@ -365,8 +375,14 @@ void test_cons_full_ring_never_blocks_sak(void) {
     // #129-audit F6: cons_rx_input ends in wakeup(&g_cons_mgr_rendez), so on SMP
     // the mgr can be dispatched on a PEER CPU and CONSUME sak_pending /
     // intr_pending between the produce and the assert -- verbatim the #58 hazard
-    // cons_test_mgr_hold exists for, which every sibling deferred-flag test
-    // wraps against and this one did not.
+    // cons_test_mgr_hold exists for.
+    //
+    // #187: the F6 fix's own comment claimed "every sibling deferred-flag test
+    // wraps against [this] and this one did not". That was false AND inverted --
+    // the hold was armed at two sites in the whole file, and SEVEN sibling reads
+    // ran unwrapped. One of them (drain_feed_runs_discipline) then extincted a
+    // boot 1-in-8. A claim about sites you did not enumerate is not a finding,
+    // it is a guess wearing one; the sweep is now done and the sites are marked.
     //
     // Sample-then-assert (#133 R2-F2): TEST_ASSERT returns from the test, so an
     // assert INSIDE the held window would leave the mgr hold armed. Take every
@@ -385,6 +401,37 @@ void test_cons_full_ring_never_blocks_sak(void) {
     TEST_ASSERT(sak,     "SAK still latched");
     TEST_ASSERT(intr_ok, "cooked Ctrl-C accepted on a full ring");
     TEST_ASSERT(intr,    "interrupt still latched");
+    cons_settle_mgr();
+}
+
+// #187: the hold's own load-bearing property, asserted directly. Every
+// deferred-flag reading in this file now rests on "while the hold is armed, a
+// woken console_mgr re-parks WITHOUT consuming" -- and nothing tested it. Their
+// aggregate greenness is not evidence: the whole failure mode is a race that
+// simply does not fire most boots, so twenty green boots and a broken hold look
+// identical. Pin the mechanism instead of inferring it from the statistics.
+void test_cons_mgr_hold_defers_consumption(void) {
+    cons_test_reset();
+    cons_test_mgr_hold(true);
+    cons_rx_input(0x03u, false);          // sets intr-pending AND wakes the mgr
+
+    // Hand the mgr every chance to run: yield repeatedly. This IS the window in
+    // which it consumed, unheld. Note the loop also fails if the flag was never
+    // set at all (first read is false -> break), so a dead producer cannot make
+    // this pass vacuously.
+    bool held_through = true;
+    for (int i = 0; i < 200; i++) {
+        sched();
+        if (!cons_test_intr_pending()) { held_through = false; break; }
+    }
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(held_through, "the mgr consumed a deferred flag while the hold was armed");
+
+    // The other half, and the reason the hold is safe to use at all: releasing
+    // must not LOSE the wake (I-9). cons_test_mgr_hold(false) wakes the rendez
+    // explicitly, so the mgr re-observes a now-true cond and drains. Bounded --
+    // a lost wake FAILS here rather than hanging the boot.
+    TEST_YIELD_UNTIL(!cons_test_intr_pending());
     cons_settle_mgr();
 }
 
@@ -648,9 +695,12 @@ void test_cons_rx_drop_counters(void) {
 
 void test_cons_ctrlc_consumed(void) {
     cons_test_reset();
+    cons_test_mgr_hold(true);             // #187: sample before the mgr can consume
     cons_rx_input(0x03u, false);          // Ctrl-C: cooked-consumed, NOT ring data
     cons_rx_input((u8)'x', false);        // a following data byte
-    TEST_ASSERT(cons_test_intr_pending(), "Ctrl-C set intr-pending");
+    bool intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(intr, "Ctrl-C set intr-pending");
 
     u8 buf[8];
     long got = devcons.read(NULL, buf, (long)sizeof(buf), 0);
@@ -661,10 +711,14 @@ void test_cons_ctrlc_consumed(void) {
 
 void test_cons_break_sets_sak(void) {
     cons_test_reset();
+    cons_test_mgr_hold(true);             // #187
     cons_rx_input(0x00u, true);           // BREAK: A-4c-2 SAK -> sak-pending (NOT ring data)
     cons_rx_input((u8)'y', false);
-    TEST_ASSERT(cons_test_sak_pending(), "a BREAK set sak-pending (A-4c-2 SAK)");
-    TEST_ASSERT(!cons_test_intr_pending(), "a BREAK is not a Ctrl-C (no intr-pending)");
+    bool sak  = cons_test_sak_pending();
+    bool intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(sak, "a BREAK set sak-pending (A-4c-2 SAK)");
+    TEST_ASSERT(!intr, "a BREAK is not a Ctrl-C (no intr-pending)");
 
     u8 buf[8];
     long got = devcons.read(NULL, buf, (long)sizeof(buf), 0);
@@ -960,9 +1014,22 @@ void test_cons_sak_via_console_mgr(void) {
     proc_set_console_trusted(trusted);
 
     // Drive the IRQ-side half: a BREAK sets sak-pending + wakes console_mgr.
+    // #187: held, because the wakeup below is what makes the flag racy -- a peer
+    // CPU can dispatch the mgr and consume sak-pending before the next statement.
+    // Releasing re-wakes the mgr (cons_test_mgr_hold(false) -> wakeup), so the
+    // SAK still runs and no wake is lost (I-9).
+    cons_test_mgr_hold(true);
     cons_rx_input(0x00u, true);
-    TEST_ASSERT(cons_test_sak_pending(), "BREAK set sak-pending + woke console_mgr");
-    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr is RUNNABLE post-BREAK");
+    bool sak = cons_test_sak_pending();
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(sak, "BREAK set sak-pending + woke console_mgr");
+
+    // The old `sched_runnable_count() == 1` assert is GONE, not relocated: it
+    // sampled a transient (the mgr may already have run and re-parked) and it is
+    // strictly weaker than what follows. "The BREAK woke the mgr" is proved by
+    // the SAK transition landing at all -- the mgr is the only thing that
+    // performs it -- and TEST_YIELD_UNTIL is deadline-bounded, so a lost wake
+    // FAILS the test rather than hanging the boot.
 
     // Yield: console_mgr resumes, clears sak-pending, runs proc_console_sak (the
     // transition), then loops back to sleep on a now-false cond (re-SLEEPING).
@@ -984,6 +1051,14 @@ void test_cons_sak_via_console_mgr(void) {
     TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
                    "RW-7 R2-F1: SAK leaves the owner NULL (trusted is attach-only)");
     TEST_EXPECT_EQ(owner->notes->count, 0u, "RW-7 R2-F2: SAK posts no note");
+    // #189: yield on the quantity being asserted. The YIELD_UNTIL above waits
+    // on the SAK TRANSITION, which console_mgr sets BEFORE it loops back to
+    // sleep() -- so an immediate run-tree sample can catch it after the act and
+    // before the park. Narrow (a mgr still RUNNING on a peer CPU is not in a run
+    // tree, so it needs the mgr preempted inside that window) but real, and the
+    // four sibling sites in this file all yield on the same quantity they then
+    // assert. Bounded, so a genuinely stranded mgr still FAILS rather than hangs.
+    TEST_YIELD_UNTIL(sched_runnable_count() == 0u);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the SAK");
 
     proc_set_console_owner(NULL);
@@ -1219,8 +1294,11 @@ void test_cons_termios_default(void) {
     TEST_EXPECT_EQ((long)buf[0], (long)'q', "the data byte is 'q'");
 
     // ISIG default: Ctrl-C is the interrupt note, not ring data.
+    cons_test_mgr_hold(true);             // #187
     cons_rx_input(0x03u, false);
-    TEST_ASSERT(cons_test_intr_pending(), "default ISIG: Ctrl-C -> interrupt note");
+    bool intr = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(intr, "default ISIG: Ctrl-C -> interrupt note");
     cons_settle_mgr();
 }
 
@@ -1293,19 +1371,28 @@ void test_cons_cook_isig_toggle(void) {
 
     // ISIG set (raw + ISIG): 0x03 cooked to the note, not enqueued.
     cons_test_set_termios(CONS_ISIG);
+    cons_test_mgr_hold(true);             // #187
     cons_rx_input(0x03u, false);
     cons_rx_input((u8)'x', false);
-    TEST_ASSERT(cons_test_intr_pending(), "ISIG set: Ctrl-C -> interrupt note");
+    bool intr_set = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(intr_set, "ISIG set: Ctrl-C -> interrupt note");
     u8 buf[8];
     long n = cons_drain(buf, sizeof(buf));
     TEST_EXPECT_EQ(n, 1L, "ISIG set: only the data byte 'x' in the ring");
     TEST_EXPECT_EQ((long)buf[0], (long)'x', "ring byte is 'x', not 0x03");
     cons_settle_mgr();
 
-    // ISIG clear (fully raw): 0x03 is a data byte, no note.
+    // ISIG clear (fully raw): 0x03 is a data byte, no note. Held for the
+    // false-PASS reason (#187): if ISIG-clear wrongly cooked, the mgr could
+    // consume the flag before the read and the assertion would be satisfied by
+    // the very bug it names.
     cons_test_set_termios(0u);
+    cons_test_mgr_hold(true);
     cons_rx_input(0x03u, false);
-    TEST_ASSERT(!cons_test_intr_pending(), "ISIG clear: Ctrl-C is NOT a note");
+    bool intr_clear = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(!intr_clear, "ISIG clear: Ctrl-C is NOT a note");
     n = cons_drain(buf, sizeof(buf));
     TEST_EXPECT_EQ(n, 1L, "ISIG clear: 0x03 is enqueued as data");
     TEST_EXPECT_EQ((long)buf[0], 3L, "the ring byte is the literal 0x03");
@@ -1706,9 +1793,19 @@ void test_cons_drain_feed_runs_discipline(void) {
     TEST_ASSERT(dbuf[0]=='a' && dbuf[1]=='b' && dbuf[2]=='\n', "drain echo == ab\\n");
 
     // The graphical Ctrl-C: ISIG cooks a fed 0x03 into the deferred interrupt.
-    TEST_ASSERT(!cons_test_intr_pending(), "no interrupt pending before");
-    TEST_EXPECT_EQ(cons_feed_write("\x03", 1), 1L, "Ctrl-C fed");
-    TEST_ASSERT(cons_test_intr_pending(), "fed Ctrl-C cooked to the interrupt (ISIG)");
+    // #187: this is the site that actually fired -- EXTINCTION 1358/1359 on
+    // 1-in-8 boots of a byte-identical kernel. cons_feed_write reaches the same
+    // cooking path as cons_rx_input and ends in the same mgr wakeup, so the
+    // read one statement later raced the mgr on a peer CPU. The flag reading
+    // false meant the interrupt was DELIVERED, not lost.
+    cons_test_mgr_hold(true);
+    bool intr_before = cons_test_intr_pending();
+    long fed         = cons_feed_write("\x03", 1);
+    bool intr_after  = cons_test_intr_pending();
+    cons_test_mgr_hold(false);
+    TEST_ASSERT(!intr_before, "no interrupt pending before");
+    TEST_EXPECT_EQ(fed, 1L, "Ctrl-C fed");
+    TEST_ASSERT(intr_after, "fed Ctrl-C cooked to the interrupt (ISIG)");
 
     cons_drain_close();
     cons_test_echo_capture(false);
