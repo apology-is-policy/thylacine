@@ -232,6 +232,20 @@ proc lc_vm_infra_check {} {
 #
 # Range 32..95 -> TCP 5932..5995: below 32 is where humans and macOS Screen
 # Sharing live (5900), and 6000+ is X11.
+# The QMP control socket 14 gfx scenarios drive. It was `$repo/build/qmp.sock`
+# hardcoded in all 14, which is one fixed host resource shared by every
+# scenario -- a deterministic collision the moment two run at once (#127's
+# lesson, applied before it can bite rather than after). The wrapper points
+# THYLACINE_QMP_SOCK at the scenario's own slot; run-vm.sh reads the same
+# variable, so both ends agree by construction. Unset, this is exactly the old
+# path, so a hand-run scenario behaves as it always did.
+proc lc_qmp_sock {} {
+    if {[info exists ::env(THYLACINE_QMP_SOCK)] && $::env(THYLACINE_QMP_SOCK) ne ""} {
+        return $::env(THYLACINE_QMP_SOCK)
+    }
+    return "$::lc_repo/build/qmp.sock"
+}
+
 proc lc_vnc_probe_noop {args} {}
 
 proc lc_port_bindable {port} {
@@ -258,6 +272,17 @@ proc lc_pick_vnc_display {} {
         set h [expr {(($h * 33) + [scan $ch %c]) % 1000003}]
     }
     set base [expr {$h % $span}]
+    # G-2: a third separation, for scenarios of the SAME tree running at once.
+    # The tree hash separates trees and the probe steps over stragglers, but
+    # concurrent scenarios here all hash to one base and would then race each
+    # other through the probe's TOCTOU window -- the one gap the comment above
+    # says the base, not the probe, is supposed to cover. The wrapper hands each
+    # slot its index, so concurrent scenarios start at different displays and
+    # the probe goes back to being the backstop it was designed as.
+    if {[info exists ::env(LS_CI_VNC_BASE)]
+        && [string is integer -strict $::env(LS_CI_VNC_BASE)]} {
+        set base [expr {($base + $::env(LS_CI_VNC_BASE)) % $span}]
+    }
     for {set i 0} {$i < $span} {incr i} {
         set d [expr {$lo + (($base + $i) % $span)}]
         if {[lc_port_bindable [expr {5900 + $d}]]} {

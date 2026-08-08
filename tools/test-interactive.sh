@@ -18,9 +18,19 @@
 #   tools/test-interactive.sh path/to/x.exp   # run one scenario by path
 #
 # Env:
-#   THYLACINE_ACCEL=hvf|tcg     accel (default tcg -- deterministic compat run)
-#   LS_CI_BOOT_TIMEOUT=N        seconds to reach the shell (default 180)
+#   THYLACINE_ACCEL=hvf|tcg     default accel (tcg -- the deterministic compat
+#                               run). 14 gfx scenarios override this to hvf in
+#                               the .exp itself; the timings table reports what
+#                               actually BOOTED, not this.
+#   LS_CI_JOBS=N                scenarios to run at once (default 1). RAM-bound,
+#                               not core-bound -- each VM takes
+#                               THYLACINE_MEM_MIB. Boot/cmd budgets scale by N.
+#   LS_CI_BOOT_TIMEOUT=N        seconds to reach the shell (300 with a staged
+#                               goroot, else 180). Pinning it disables scaling.
 #   LS_CI_CMD_TIMEOUT=N         seconds per command's output (default 30)
+#   LS_CI_ATTEMPTS=N            attempts per scenario (default 3)
+#
+# Timings land in build/ls-ci-timings.tsv and in a sorted summary (G-1).
 
 set -uo pipefail
 
@@ -36,6 +46,11 @@ if ! command -v expect >/dev/null 2>&1; then
 fi
 
 export THYLACINE_ACCEL="${THYLACINE_ACCEL:-tcg}"
+# Record whether the CALLER pinned the budgets, before the defaults below make
+# that unknowable. The JOBS scaling further down must not silently override an
+# explicit value -- if you pinned it, you meant it.
+BOOT_TIMEOUT_PINNED="${LS_CI_BOOT_TIMEOUT:+1}"
+CMD_TIMEOUT_PINNED="${LS_CI_CMD_TIMEOUT:+1}"
 # Stage 6: with the Go GOROOT baked by default, joey's go4c on-device
 # compile+link probe rides every boot -- a TCG slow-mode boot + the probe can
 # exceed 180 s. Same goroot-staged auto-bump as tools/test.sh; an explicit
@@ -63,6 +78,21 @@ export THYLACINE_NOSTORM="${THYLACINE_NOSTORM:-1}"
 # healthy" mid-scenario failures on both sides (task #59).
 reap_qemu() { pkill -9 -f "qemu-system-aarch64.*$BUILD_DIR/" 2>/dev/null || true; }
 trap reap_qemu EXIT
+
+# G-2: the SLOT-scoped reaper. reap_qemu above kills every VM in this tree,
+# which is correct for a serial run and catastrophic for a parallel one -- a
+# scenario finishing its first boot would shoot down all its neighbours. Each
+# slot's qemu carries its own fixture + QMP paths on the cmdline, so the slot
+# directory is a sufficient discriminator.
+#
+# MEASURED, not assumed: bash resets *signal* traps in a subshell but the EXIT
+# trap still fires when that subshell exits, so a forked scenario inherits
+# `trap reap_qemu EXIT` and runs the TREE-WIDE reaper on the way out. That is
+# #59's cross-tree shootout reproduced inside one tree, and it would present as
+# "qemu GONE, guest healthy" mid-scenario -- indistinguishable from a guest
+# fault and exactly the shape this project keeps mistaking for load. Every
+# forked scenario therefore re-traps to its own slot before doing anything.
+reap_slot() { pkill -9 -f "qemu-system-aarch64.*$1/" 2>/dev/null || true; }
 
 # --- ensure boot artifacts exist (match test.sh: build-if-missing) ---
 KERNEL_BIN="$BUILD_DIR/kernel/thylacine.bin"
@@ -117,8 +147,17 @@ fi
 POOL_SNAP="$POOL.baked-snapshot"
 KEYFILE="$BUILD_DIR/fixtures/system.key"
 KEY_SNAP="$KEYFILE.baked-snapshot"
+#
+# G-2 made the destination a PARAMETER. Restoring the pristine twin into a
+# per-scenario slot instead of over the one shared path is the whole of what
+# unblocks concurrency: the isolation was always per-attempt, but every attempt
+# restored into the SAME `$POOL`, so two scenarios could never be in flight at
+# once. Semantics are unchanged -- each scenario still begins from the same
+# pristine snapshot, and a scenario's own multiple boots still share its pool
+# (ls-gfx-mode/-font/-osd-persist persist state across boots by design).
 pool_restored=0
 pool_restore() {
+    local dest="${1:-$POOL}"
     [[ "${LS_CI_POOL_RESTORE:-1}" == "0" ]] && return 0
     [[ -f "$POOL_SNAP" && -f "$POOL" ]] || return 0
     if ! cmp -s "$KEYFILE" "$KEY_SNAP" 2>/dev/null; then
@@ -130,8 +169,8 @@ pool_restore() {
     # would surface as guest corruption -- the #74/#60 fail-open shape, where
     # the harness's own fault gets read as a Thylacine defect. Refuse to boot on
     # a fixture whose state we do not know.
-    if ! { cp -c "$POOL_SNAP" "$POOL" 2>/dev/null || cp "$POOL_SNAP" "$POOL"; }; then
-        echo "==> FATAL: pool restore failed -- $POOL may be partial/truncated." >&2
+    if ! { cp -c "$POOL_SNAP" "$dest" 2>/dev/null || cp "$POOL_SNAP" "$dest"; }; then
+        echo "==> FATAL: pool restore failed -- $dest may be partial/truncated." >&2
         echo "    Refusing to boot on an unknown fixture (it would read as guest corruption)." >&2
         echo "    Check free space, or re-run 'tools/build.sh pool'." >&2
         exit 1
@@ -160,6 +199,7 @@ fi
 DISK="$BUILD_DIR/disk.img"
 DISK_SNAP="$DISK.pristine"
 disk_restore() {
+    local dest="${1:-$DISK}"
     [[ "${LS_CI_POOL_RESTORE:-1}" == "0" ]] && return 0
     [[ -f "$DISK" ]] || return 0
     local want have
@@ -176,8 +216,8 @@ disk_restore() {
     # boot's pattern-A verify and read as a guest defect. A MISSING python3 is
     # different -- that degrades silently to the shared fixture above, which is
     # merely the old behaviour, not an unknown one.
-    if ! { cp -c "$DISK_SNAP" "$DISK" 2>/dev/null || cp "$DISK_SNAP" "$DISK"; }; then
-        echo "==> FATAL: disk restore failed -- $DISK may be partial/truncated." >&2
+    if ! { cp -c "$DISK_SNAP" "$dest" 2>/dev/null || cp "$DISK_SNAP" "$dest"; }; then
+        echo "==> FATAL: disk restore failed -- $dest may be partial/truncated." >&2
         echo "    Refusing to boot on an unknown fixture (it would read as guest corruption)." >&2
         exit 1
     fi
@@ -229,6 +269,38 @@ elif [[ -f "$POOL_SNAP" ]]; then
 else
     pool_iso="pool=SHARED (no snapshot, #85)"
 fi
+JOBS="${LS_CI_JOBS:-1}"
+case "$JOBS" in ''|*[!0-9]*) echo "==> LS_CI_JOBS must be a positive integer (got '$JOBS')" >&2; exit 2 ;; esac
+[[ "$JOBS" -lt 1 ]] && JOBS=1
+
+# Fail CLOSED on the one incoherent combination. With restores disabled the slot
+# never receives a pool, and run-vm.sh silently boots without one -- every
+# scenario would then fail on a missing /srv/stratum-fs and the gate would
+# report 34 guest regressions that are really one bad flag. Refusing is the #74
+# lesson: a harness must not manufacture failures it then attributes to Thylacine.
+# #137: scale the budgets with the job count, or concurrency manufactures guest
+# regressions. The boot timeout exists to catch a WEDGED guest, not to enforce a
+# performance SLA -- and under LS_CI_JOBS>1 the same healthy guest is
+# legitimately slower: run-vm.sh gives each VM 4 vCPUs, so N VMs oversubscribe
+# this 8-core host and TCG emulation is CPU-bound. MEASURED at JOBS=3: three TCG
+# scenarios that take ~190s serially take ~400s each, blowing the fixed 300s
+# budget while their logs show the guest still counting up through the boot
+# ladder. That is a harness fault reported as a guest regression -- the #74
+# fail-open lesson pointed the other way.
+#
+# Erring generous is the safe direction: an over-large budget only delays
+# declaring a genuinely wedged guest dead (it is still declared), whereas an
+# under-sized one reports failures that do not exist. An explicit
+# LS_CI_BOOT_TIMEOUT in the environment still wins outright -- this only scales
+# the default.
+if [[ "$JOBS" -gt 1 ]]; then
+    [[ -z "$BOOT_TIMEOUT_PINNED" ]] && export LS_CI_BOOT_TIMEOUT=$((LS_CI_BOOT_TIMEOUT * JOBS))
+    [[ -z "$CMD_TIMEOUT_PINNED" ]]  && export LS_CI_CMD_TIMEOUT=$((LS_CI_CMD_TIMEOUT * JOBS))
+    echo "==> LS_CI_JOBS=$JOBS: budgets boot<=${LS_CI_BOOT_TIMEOUT}s cmd<=${LS_CI_CMD_TIMEOUT}s" \
+         "(scaled by job count unless pinned; a healthy guest is slower under contention," \
+         "and the budget catches a WEDGE, not slowness)"
+fi
+
 echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS_CI_BOOT_TIMEOUT}s cmd<=${LS_CI_CMD_TIMEOUT}s $pool_iso"
 
 # Bounded retry per scenario. It does NOT mask a real regression: a genuine
@@ -269,14 +341,57 @@ TIMINGS="$BUILD_DIR/ls-ci-timings.tsv"
 printf 'scenario\tattempt\trc\tverdict\tseconds\taccel\n' > "$TIMINGS"
 gate_t0=$SECONDS
 
-fails=0
-infra_fails=0
-harness_fails=0
-skips=0
 attempts="${LS_CI_ATTEMPTS:-3}"
-for scen in "${scenarios[@]}"; do
+
+# G-2: one scenario, start to verdict, in its own slot.
+#
+# Always invoked inside a SUBSHELL -- in serial mode too, so the two modes run
+# identical code and the trap re-arming below cannot be a parallel-only path
+# that rots untested. Nothing is returned in variables: the verdict is a file,
+# because in parallel mode there is no shared memory to increment a counter in,
+# and having one accounting path rather than two is what keeps the serial and
+# parallel tallies from drifting apart.
+run_one_scenario() {
+    local scen="$1" slot="$2"
+    local name transcript steps passed skipped attempt rc att_t0 att_dur scen_t0
+    local reason n_att n_cut s
     name="$(basename "$scen" .exp)"
     scen_t0=$SECONDS
+
+    # Re-arm the EXIT trap to THIS slot before anything can boot. The inherited
+    # trap is the tree-wide reaper, and bash runs an inherited EXIT trap when a
+    # subshell exits (measured -- signal traps are reset in a subshell, EXIT is
+    # not), so without this line the first scenario to finish would kill every
+    # other scenario's live VM. That is #59's cross-tree shootout reproduced
+    # inside one tree, and it would surface as "qemu GONE, guest healthy"
+    # mid-scenario -- indistinguishable at the expect layer from a guest fault.
+    # Release rides the trap rather than the return paths: there are five ways
+    # out of this function and a crash is a sixth, and a fixture clone leaked on
+    # the one uncovered path is how disks fill.
+    trap "reap_slot '$slot'; slot_release '$slot'" EXIT
+
+    # Every one of these was a FIXED path shared by all 34 scenarios, and #127's
+    # lesson is that a fixed host resource is a DETERMINISTIC collision at N>1 --
+    # not a flake, and not something a retry budget can help with. The pool and
+    # disk are the fixtures; qmp.sock is the control socket 14 gfx scenarios
+    # drive. (The serial socket and vm log are already per-pid in lib.exp, and
+    # the VNC display is already probe-allocated -- see LS_CI_VNC_BASE below for
+    # why the probe alone is not enough once we are the ones racing.)
+    mkdir -p "$slot"
+    export THYLACINE_POOL_IMG="$slot/pool.img"
+    export THYLACINE_DISK_IMG="$slot/disk.img"
+    export THYLACINE_QMP_SOCK="$slot/qmp.sock"
+    # Spread the VNC probe's starting point per slot. lc_pick_vnc_display derives
+    # its base from the REPO PATH, which separates trees but gives every scenario
+    # in THIS tree the same base -- fine when one runs at a time, a race between
+    # the bind-test and qemu's own bind when several do. The probe stays as the
+    # backstop; this makes it stop being the primary mechanism.
+    export LS_CI_VNC_BASE="${3:-0}"
+
+    # Per-slot timings, merged by the parent after the run. Appending to one
+    # shared TSV from N concurrent writers would interleave partial lines.
+    local TIMINGS="$slot/timings.tsv"
+    : > "$TIMINGS"
     transcript="$BUILD_DIR/ls-ci-$name.log"
     steps="$BUILD_DIR/ls-ci-$name.steps"
     # #72: failed-attempt evidence must survive the retry. The per-attempt
@@ -294,13 +409,13 @@ for scen in "${scenarios[@]}"; do
     for attempt in $(seq 1 "$attempts"); do
         : > "$transcript"
         : > "$steps"
-        reap_qemu
+        reap_slot "$slot"
         sleep 0.5
-        # #85: pristine fixtures for this attempt. STRICTLY after reap_qemu +
+        # #85: pristine fixtures for this attempt. STRICTLY after the reap +
         # the settle -- overwriting an image out from under a live VM is how you
         # manufacture the corruption this gate exists to detect.
-        pool_restore
-        disk_restore   # the virtio-blk scratch device (#87 masking)
+        pool_restore "$slot/pool.img"
+        disk_restore "$slot/disk.img"   # the virtio-blk scratch device (#87 masking)
         # Run expect UNDER `script` so its stdio is a real PTY. macOS expect 5.45
         # corrupts its own std channels inside `spawn` when its stdout is NOT a tty
         # (a `>file` redirect OR a pipe) -- it aborts with "Tcl_RegisterChannel:
@@ -313,7 +428,16 @@ for scen in "${scenarios[@]}"; do
         LS_CI_STEPS="$steps" script -q "$transcript" expect -f "$scen" < /dev/null >/dev/null 2>&1
         rc=$?
         att_dur=$((SECONDS - att_t0))
-        reap_qemu
+        # The accel that ACTUALLY booted, read out of the artifact rather than
+        # taken from our own environment. 14 scenarios set THYLACINE_ACCEL=hvf
+        # inside the .exp itself, so the wrapper's value is simply wrong for
+        # them -- and a timings table whose accel column is wrong is worse than
+        # one with no accel column, because it invites exactly the tcg-vs-hvf
+        # comparison the column exists to prevent. lib.exp records the resolved
+        # value in the steps file at boot ("BOOT vm accel=<x> ...").
+        att_accel="$(grep -ha -o 'accel=[a-z]*' "$steps" 2>/dev/null | head -1 | cut -d= -f2)"
+        [[ -z "$att_accel" ]] && att_accel="$THYLACINE_ACCEL"
+        reap_slot "$slot"
         # 77 is the conventional SKIP code: the SCENARIO decided it cannot run
         # (a missing optional host artifact, e.g. ls-gfx-mp without
         # build/quake/host/tyr-quake). That is not a guest result. Retrying
@@ -323,13 +447,13 @@ for scen in "${scenarios[@]}"; do
         # because of this.
         if [[ $rc -eq 77 ]]; then
             reason="$(grep -ha 'LS-CI SKIP:' "$transcript" 2>/dev/null | head -1 | sed 's/.*LS-CI SKIP: //' | tr -d '\r')"
-            printf '%s\t%s\t%s\tSKIP\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$THYLACINE_ACCEL" >> "$TIMINGS"
+            printf '%s\t%s\t%s\tSKIP\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$att_accel" >> "$TIMINGS"
             echo "    SKIP: $name [${att_dur}s]${reason:+ -- $reason}"
             skipped=1
             break
         fi
         if [[ $rc -eq 0 ]]; then
-            printf '%s\t%s\t%s\tPASS\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$THYLACINE_ACCEL" >> "$TIMINGS"
+            printf '%s\t%s\t%s\tPASS\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$att_accel" >> "$TIMINGS"
             if [[ $attempt -gt 1 ]]; then
                 echo "    PASS: $name [${att_dur}s] (attempt $attempt/$attempts; earlier failed attempt(s) preserved: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps})"
             else
@@ -338,7 +462,7 @@ for scen in "${scenarios[@]}"; do
             passed=1
             break
         fi
-        printf '%s\t%s\t%s\tFAIL\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$THYLACINE_ACCEL" >> "$TIMINGS"
+        printf '%s\t%s\t%s\tFAIL\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$att_accel" >> "$TIMINGS"
         # Preserve this attempt's evidence BEFORE the next attempt truncates.
         cp "$transcript" "$BUILD_DIR/ls-ci-$name.attempt$attempt.log" 2>/dev/null || true
         cp "$steps" "$BUILD_DIR/ls-ci-$name.attempt$attempt.steps" 2>/dev/null || true
@@ -352,11 +476,13 @@ for scen in "${scenarios[@]}"; do
     # here or the parallel projection is built on the wrong per-scenario cost.
     printf '%s\tTOTAL\t-\t%s\t%s\t%s\n' \
         "$name" "$([[ $skipped -eq 1 ]] && echo SKIP || { [[ $passed -eq 1 ]] && echo PASS || echo FAIL; })" \
-        "$((SECONDS - scen_t0))" "$THYLACINE_ACCEL" >> "$TIMINGS"
-    if [[ $skipped -eq 1 ]]; then
-        skips=$((skips + 1))
-        continue
-    fi
+        "$((SECONDS - scen_t0))" "${att_accel:-$THYLACINE_ACCEL}" >> "$TIMINGS"
+    # The verdict is a FILE, not a counter -- see run_one_scenario's header.
+    # Written coarse here and refined to INFRA/HARNESS below, so there is
+    # exactly one place that can decide a scenario passed.
+    if [[ $skipped -eq 1 ]]; then echo SKIP > "$slot/verdict"; return 0; fi
+    if [[ $passed -eq 1 ]]; then echo PASS > "$slot/verdict"; return 0; fi
+    echo FAIL > "$slot/verdict"
     if [[ $passed -ne 1 ]]; then
         # An attempt whose VM never STARTED says nothing about the guest, and
         # calling it "a real regression" is failing open (#74). lib.exp records
@@ -365,9 +491,8 @@ for scen in "${scenarios[@]}"; do
         if grep -qa "^INFRA:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps "$steps" 2>/dev/null; then
             echo "    INFRA-FAIL: $name -- the VM never started; this is a HARNESS/environment fault, NOT a guest regression:" >&2
             grep -ha "^INFRA:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps "$steps" 2>/dev/null | sort -u | sed 's/^/        /' >&2
-            infra_fails=$((infra_fails + 1))
-            fails=$((fails + 1))
-            continue
+            echo INFRA > "$slot/verdict"
+            return 0
         fi
         # A cut where the bridge reports the READER went away while the VM was
         # still ALIVE is #60: the harness's own expect side closed the pipe.
@@ -397,9 +522,8 @@ for scen in "${scenarios[@]}"; do
             echo "    HARNESS-FAIL: $name -- all $n_att attempt(s) cut by the serial relay losing its READER while the VM was ALIVE (#60). Coverage LOST; this says NOTHING about the guest:" >&2
             grep -ha "bridge-at-fail:" "$BUILD_DIR/ls-ci-$name.attempt"*.steps 2>/dev/null | sed 's/^/        /' >&2
             echo "        evidence: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps}" >&2
-            harness_fails=$((harness_fails + 1))
-            fails=$((fails + 1))
-            continue
+            echo HARNESS > "$slot/verdict"
+            return 0
         fi
         echo "    FAIL: $name -- all $attempts attempts failed (deterministic = a real regression, not a flake)" >&2
         echo "    --- steps ($steps; last attempt) ---" >&2
@@ -408,9 +532,137 @@ for scen in "${scenarios[@]}"; do
         tr -d '\r' < "$transcript" 2>/dev/null | tail -40 >&2 || true
         echo "    every attempt's evidence: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps}" >&2
         echo "    --------------------------------------" >&2
-        fails=$((fails + 1))
     fi
+    return 0
+}
+
+# Drop this slot's heavy fixtures the moment its verdict is in. Each is a CoW
+# clone of a 2.5 GB pool that diverges by tens of MiB as it runs; holding 34 of
+# them to the end of the gate would be gigabytes of divergence for nothing, and
+# this project has already had a disk fill up under it. The small metadata
+# (verdict, timings) stays until the parent has merged it, and every artifact a
+# failure needs -- transcripts, steps, per-attempt archives -- lives in build/
+# and is not touched here.
+slot_release() { rm -f "$1/pool.img" "$1/disk.img" "$1/qmp.sock" 2>/dev/null || true; }
+
+# --- G-2: run the scenarios, up to $JOBS at a time ----------------------------
+#
+# The serial gate took 75 minutes because it could not do otherwise: isolation
+# was already per-attempt, but every attempt restored the pristine pool into the
+# SAME path, so two scenarios could never be in flight at once. The fixtures and
+# the QMP socket are now per-slot, which is the whole of what was blocking this.
+#
+# Concurrency here is RAM-bound, not core-bound: this host has 8 cores but 8 GB,
+# and each VM takes THYLACINE_MEM_MIB (2048 default), so ~3 is the honest
+# ceiling. Overcommitting would swap, and a swapping host makes every timeout in
+# the suite marginal -- which would then get read as guest flakiness. The
+# default stays 1 until a parallel run has been proven green; LS_CI_JOBS is how
+# you ask for more.
+if [[ "$JOBS" -gt 1 && "${LS_CI_POOL_RESTORE:-1}" == "0" ]]; then
+    echo "==> LS_CI_JOBS>1 requires the fixture restore (LS_CI_POOL_RESTORE=0 given)." >&2
+    echo "    Parallel slots ARE the restore -- without it a slot has no pool to boot." >&2
+    exit 2
+fi
+
+SLOTS="$BUILD_DIR/ls-ci-slots"
+rm -rf "$SLOTS" 2>/dev/null || true
+mkdir -p "$SLOTS"
+
+# Mint the disk twin ONCE, here, before anything forks. disk_restore creates
+# $DISK_SNAP on demand when it is missing or the size changed, and that path
+# writes a SHARED file -- three workers entering it at once would tear the very
+# twin they then clone from, which would surface as guest corruption in
+# whichever scenario lost. The pool twin has no such hazard (build.sh mints it),
+# but the disk twin is minted lazily by this script, so it is ours to serialize.
+# Restoring the canonical disk here is harmless: no VM is running yet.
+disk_restore "$DISK"
+
+# Slot dirs hold CoW clones of a 2.5 GB pool. Cheap to make, but each one
+# diverges by tens of MiB as its scenario runs, so they are dropped as soon as
+# the verdict is in -- 34 retained slots would be gigabytes of divergence for
+# nothing. The evidence a failure needs (transcripts, steps, per-attempt
+# archives) lives in build/ and is untouched by this.
+slot_dir_for() { echo "$SLOTS/$1"; }
+
+pids=""
+launched=0
+for scen in "${scenarios[@]}"; do
+    sname="$(basename "$scen" .exp)"
+    slot="$(slot_dir_for "$sname")"
+    if [[ "$JOBS" -le 1 ]]; then
+        # Still a subshell: identical code path to the parallel case, so the
+        # trap re-arming above cannot become a parallel-only branch that rots.
+        # No VNC offset -- serial mode keeps byte-identical display selection to
+        # the pre-G-2 gate, so a serial run stays a valid baseline to compare a
+        # parallel one against.
+        ( run_one_scenario "$scen" "$slot" )
+    else
+        # bash 3.2 (what macOS ships, and what this script runs under) has no
+        # `wait -n`, so the slot limiter polls liveness instead of waiting on
+        # the first completion. A 1 s poll against scenarios measured in
+        # minutes costs nothing.
+        while :; do
+            live=""
+            n=0
+            for p in $pids; do
+                if kill -0 "$p" 2>/dev/null; then live="$live $p"; n=$((n + 1)); fi
+            done
+            pids="$live"
+            [[ $n -lt "$JOBS" ]] && break
+            sleep 1
+        done
+        echo "==> start: $sname"
+        ( run_one_scenario "$scen" "$slot" "$launched" ) > "$slot.console" 2>&1 &
+        pids="$pids $!"
+    fi
+    launched=$((launched + 1))
 done
+wait
+
+# In parallel mode each scenario's output was captured to keep the streams from
+# interleaving into an unreadable mess. Replay it in ROSTER order (not completion
+# order) so two runs of the same suite produce comparable logs.
+if [[ "$JOBS" -gt 1 ]]; then
+    for scen in "${scenarios[@]}"; do
+        sname="$(basename "$scen" .exp)"
+        [[ -f "$SLOTS/$sname.console" ]] && cat "$SLOTS/$sname.console"
+    done
+fi
+
+# Merge the per-slot timings into the one TSV the summary reads.
+for scen in "${scenarios[@]}"; do
+    sname="$(basename "$scen" .exp)"
+    [[ -f "$SLOTS/$sname/timings.tsv" ]] && cat "$SLOTS/$sname/timings.tsv" >> "$TIMINGS"
+done
+
+# Tally from the verdict files -- the single accounting path for both modes.
+fails=0
+infra_fails=0
+harness_fails=0
+skips=0
+missing=""
+for scen in "${scenarios[@]}"; do
+    sname="$(basename "$scen" .exp)"
+    v="$(cat "$SLOTS/$sname/verdict" 2>/dev/null || true)"
+    case "$v" in
+        PASS)    ;;
+        SKIP)    skips=$((skips + 1)) ;;
+        INFRA)   infra_fails=$((infra_fails + 1)); fails=$((fails + 1)) ;;
+        HARNESS) harness_fails=$((harness_fails + 1)); fails=$((fails + 1)) ;;
+        FAIL)    fails=$((fails + 1)) ;;
+        # A scenario whose subshell died before writing a verdict (OOM-killed,
+        # crashed, killed by hand) has NO result -- and counting "no result" as
+        # anything but a failure is the fail-open shape this gate has been bitten
+        # by twice (#74, #78). Name it, and fail.
+        *)       missing="$missing $sname"; fails=$((fails + 1)) ;;
+    esac
+done
+if [[ -n "$missing" ]]; then
+    echo "==> NO VERDICT from:$missing" >&2
+    echo "    Their runner exited without recording a result (crash / OOM / external kill)." >&2
+    echo "    Counted as failures: an absent result is not a pass." >&2
+fi
+rm -rf "$SLOTS" 2>/dev/null || true
 
 # --- G-1 summary: where the time actually went --------------------------------
 # Printed for every run, pass or fail. A failing run's timings are MORE useful
@@ -418,7 +670,7 @@ done
 # success would hide the expensive cases.
 gate_dur=$((SECONDS - gate_t0))
 if [[ -s "$TIMINGS" ]]; then
-    echo "==> LS-CI timings (accel=$THYLACINE_ACCEL; full data: $TIMINGS)"
+    echo "==> LS-CI timings (default accel=$THYLACINE_ACCEL; per-row accel is what BOOTED; full data: $TIMINGS)"
     # Sort key is emitted as a leading field and cut off after sorting -- BSD awk
     # has no asort(), and sorting the rendered lines directly would drag the
     # trailer rows in among the scenarios.
@@ -448,8 +700,17 @@ if [[ -s "$TIMINGS" ]]; then
             # wall falls, and that ratio IS the speedup. So the line stays honest
             # in both modes, and in parallel mode it becomes the measurement.
             d = gate - sum
+            # OVERLAP, not speedup, and the distinction is load-bearing. Under
+            # concurrency each scenario gets SLOWER (measured: 3 TCG scenarios
+            # at JOBS=3 went ~190s -> ~400s, since 4 vCPUs x 3 VMs oversubscribe
+            # an 8-core host and TCG is CPU-bound), so `sum` here is inflated by
+            # exactly the contention the parallelism caused. Dividing it by the
+            # wall credits that slowdown as if it were work done, and reports a
+            # flattering number: the same run that "overlapped 2.95x" saved only
+            # 1.40x against its own serial baseline. Real speedup needs a SERIAL
+            # reference this run does not have, so it is not claimed here.
             printf "    %5ds  unaccounted (%s)\n", d, \
-                   (d < 0 ? "wall < sum: scenarios OVERLAPPED -- this run was parallel, speedup " sprintf("%.2fx", sum / (gate ? gate : 1)) : \
+                   (d < 0 ? "wall < sum: scenarios OVERLAPPED " sprintf("%.2fx", sum / (gate ? gate : 1)) " -- this is OVERLAP, not speedup; per-scenario times are inflated by contention, so compare the WALL against a serial run" : \
                    (d > 60 ? "WARNING: >60s outside the timed spans -- the instrument is missing work" : \
                              "setup/bookkeeping outside the timed spans; expected small"))
         }

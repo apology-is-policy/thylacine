@@ -558,6 +558,42 @@ A top-level `Makefile` provides `make kernel`, `make all`, `make test`, `make pr
 
 **Gates.** `make smp-gate` (`tools/ci-smp-gate.sh`) multi-boots the SMP soundness matrix (single boots lie). `make idle-gate` (`tools/ci-idle-gate.sh`) boots hvf-headless, settles, and FAILS if the guest spins a core at idle (mean qemu %cpu over a no-core-pegged threshold) — the standing guard against a boot leaving a busy-loop running (e.g. a leaked debug fixture); host-load-robust because host contention can only *deflate* qemu's %cpu, never inflate an idle guest's. `make test-interactive` (`tools/test-interactive.sh`) drives a real PTY console (login + rendered output).
 
+**LS-CI cost and concurrency (the G arc).** `tools/test-interactive.sh` records
+per-scenario AND per-attempt wall time, prints a summary sorted by cost, and
+writes `build/ls-ci-timings.tsv` (`scenario / attempt / rc / verdict / seconds /
+accel`). Two spans are timed: the attempt (just the expect run) and the scenario
+TOTAL, which also carries the reap, the settle, and both fixture restores --
+overhead a parallel run pays per slot rather than once, so the two numbers are
+not interchangeable. The summary closes with a reconciliation line: serially the
+sum of scenario totals and the gate wall must be close, and a gap over 60 s is
+reported as the instrument missing work rather than left as a silent
+discrepancy. Every row carries its accel, because a tcg figure and an hvf figure
+are not comparable and calling their difference a regression is the obvious trap.
+
+`LS_CI_JOBS=N` runs N scenarios at once (default 1). What blocked this was not
+the scenarios but the FIXTURES: isolation was already per-attempt, yet every
+attempt restored the pristine pool into the same `$POOL` path, so two scenarios
+could never be in flight. Each scenario now gets a slot under
+`build/ls-ci-slots/<name>/` holding its own pool, disk, and QMP socket
+(`THYLACINE_POOL_IMG` / `THYLACINE_DISK_IMG` / `THYLACINE_QMP_SOCK`), and
+`LS_CI_VNC_BASE` spreads the VNC probe's starting point so concurrent scenarios
+do not race each other through its TOCTOU window. Semantics are unchanged: every
+scenario still starts from the same pristine snapshot, and a scenario's own
+multiple boots still share its pool (`ls-gfx-mode`/`-font`/`-osd-persist` persist
+state across boots by design). Concurrency is RAM-bound, not core-bound -- each
+VM takes `THYLACINE_MEM_MIB` -- so size N to memory, not to cores; overcommitting
+swaps, and a swapping host makes every timeout in the suite marginal.
+
+Two traps this cost, both worth knowing before touching it. **A forked scenario
+inherits the EXIT trap**: bash resets *signal* traps in a subshell but still runs
+an inherited EXIT trap when that subshell exits, so without re-arming, the first
+scenario to finish would run the tree-wide `reap_qemu` and kill every other
+scenario's live VM -- #59's cross-tree shootout reproduced inside one tree, and
+it would present as "qemu GONE, guest healthy" mid-scenario. Each slot re-arms to
+a slot-scoped reaper. **And `disk_restore` MINTS the shared `disk.img.pristine`
+when it is missing**, so the parent mints it once before forking; three workers
+entering that path together would tear the very twin they then clone from.
+
 **A background gate that dies with `Terminated: 15` (#128).** A long gate run as an agent background task can be stopped by the AGENT HARNESS itself — not by the guest, not by the sibling tree, not by any timeout. The 2026-08 forensics: kills at 41 s..5141 s elapsed with clean runs at 1905 s, no explicit stop call, the CLI process alive throughout, the machine awake, and five instants where BOTH trees' sessions lost their tasks within ~300 ms — a host-global session-management event, correlated with user-idle windows. Attribute a dead task from its completion NOTIFICATION, not from the log (the bash `Terminated: 15` line is identical either way): `killed` / "was stopped" = the harness stopped it — INFRA, the run says NOTHING about the guest, just re-run it; `failed` / "exit code 143" = a real external SIGTERM reached the process — a killer exists, investigate. Group-sizing does not protect (kills land at arbitrary elapsed); attribution + re-run is the mitigation.
 
 ### The production boot shape (`--production`, #61)
