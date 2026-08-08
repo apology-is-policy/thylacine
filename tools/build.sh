@@ -2117,7 +2117,7 @@ build_stratum_pool_fixture() {
     # quiet again the moment a binary is added -- which tyr-glquake then was.
     if [[ "$bake_clade" == "1" ]]; then
         local staleb
-        for staleb in gl-sdl-prove osmesa-prove tyr-glquake; do
+        for staleb in gl-sdl-prove osmesa-prove virgl-prove tyr-glquake; do
             [[ -f "$BUILD_DIR/clade/gl/$staleb" ]] || continue
             if [[ "$BUILD_DIR/clade/gl/$staleb" -nt \
                   "$BUILD_DIR/clade/stage/bin/$staleb" ]]; then
@@ -3870,6 +3870,17 @@ stage_clade() {
         chmod +x "$stage/bin/osmesa-prove"
     else
         echo "    clade stage: no osmesa-prove at $BUILD_DIR/clade/gl/ -- staging without it (CL-7b GL gate will skip)"
+    fi
+    # Warp-3: the triangle-on-the-GPU gate binary, on the same optional +
+    # announced terms. It only ever PASSES on a virgl host (thyla-gl); on
+    # a 2D box it SKIPs itself, so staging it everywhere costs nothing
+    # but the bytes.
+    if [[ -f "$BUILD_DIR/clade/gl/virgl-prove" ]]; then
+        "$strip" -o "$stage/bin/virgl-prove" "$BUILD_DIR/clade/gl/virgl-prove" 2>/dev/null \
+            || cp "$BUILD_DIR/clade/gl/virgl-prove" "$stage/bin/virgl-prove"
+        chmod +x "$stage/bin/virgl-prove"
+    else
+        echo "    clade stage: no virgl-prove at $BUILD_DIR/clade/gl/ -- staging without it (the Warp-3 gate will skip)"
     fi
     # Clade CL-7 step 2 (#138): the SDL GL prover, for the same reasons and on
     # the same terms as osmesa-prove above -- built by build_sdl2 against the

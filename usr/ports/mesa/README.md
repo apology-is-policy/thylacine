@@ -33,7 +33,8 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
+(`e2c39274a85ba70889679f051cf5a42ffb85a249` at 0006; the 0005 tip was
+`414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
@@ -329,6 +330,30 @@ Three things about that set are not guessable and cost a round each:
   an unrelated gallivm fault, which is precisely the ambiguity `0004` had already
   been bitten by. It now returns non-zero at every station, and that is what lets
   joey's `gl_gate` treat `rc=0` as a strong assertion and parse no output at all.
+
+- `0006` — Warp-3: the virgl winsys over the /srv/warp GPU seam. The
+  unmodified virgl gallium driver plus a new winsys
+  (`src/gallium/winsys/virgl/thylacine/`) whose transport is
+  `warp_client.c` — blocking file ops on tapestryd's warp tree via raw
+  Thylacine syscalls (`<thyla/syscall.h>`, carried into the build by the
+  generated cross file's c_args). vtest's 18 load-bearing slots minus
+  the displaytarget arms; fences counted client-side against the seam's
+  monotonic per-ctx `fence-signaled`; submits split at CCMD boundaries
+  under the 32 KiB msize. Meson gating keys on
+  `with_thylacine = cc.get_define('__thylacine__')` because the cross
+  file deliberately claims `system = 'linux'`. Configure adds virgl:
+
+  ```
+  -Dgallium-drivers=llvmpipe,virgl
+  ```
+
+  (a meson reconfigure on the existing tree, not a fresh setup). The
+  osmesa target then carries both drivers; `GALLIUM_DRIVER=virpipe`
+  (or `virgl`) selects the warp screen at runtime, with a loud fallback
+  to llvmpipe. `virgl-prove` is the new gate binary beside
+  `osmesa-prove`: it never walks the CAP_JIT clearance (so a silent
+  llvmpipe fallback cannot pass it) and asserts GL_RENDERER names
+  virgl.
 
 ## Refresh — per arc, not "when the fork stops changing"
 
