@@ -198,9 +198,34 @@ backing. Leak-on-wedge, never UAF. Four consequences the code enforces:
   `take()`s the ctx that `leaked_bytes` lives in — so each recovered slot
   handed the client a fresh `WARP_CTX_BACKING_MAX` while 64 MiB stayed
   gone. Per-ctx `leaked_bytes` still bounds a *live* ctx; the graveyard is
-  what makes the bound survive the ctx. If a slot's graveyard overflows,
-  the slot is condemned **permanently** rather than vindicated — the
-  ceiling stays `MAX_WARP_CTXS x WARP_CTX_BACKING_MAX`.
+  what makes the bound survive the ctx.
+- The graveyard **cannot overflow** (round-6 F1). Round 5 sized it by the
+  16-wide `bos[]` and condemned a slot whose graveyard overflowed, calling
+  the condemnation permanent — but `bos[]` slots are *reused*, so a
+  poisoned-yet-live ctx (nothing gates BO mint or build on `fence_poisoned`)
+  could mint/build/destroy in a loop and park far more than 16 over its
+  life, bounded only by bytes: at the minimum accepted size of `PAGE` that
+  is 16384 backings inside the 64 MiB budget. Each surplus record was
+  dropped by value, and `WarpBo` has no `Drop`, so every drop leaked a
+  kernel handle *and* a mapping. Worse, the condemnation was not permanent:
+  the clean-retire path cleared the flag, so the slot recycled and the whole
+  cycle re-armed for one abandoned fence per turn. The bound is now a
+  creation-time cap on `leaked_count + live_backed` at
+  `MAX_WARP_BOS_PER_CTX`, which admits at most one park per graveyard
+  entry — so no record is ever dropped, the overflow flag is gone, and the
+  ceiling `MAX_WARP_CTXS x WARP_CTX_BACKING_MAX` is true rather than
+  asserted.
+- A vindication that finds its ctx still **live** is a full reclamation
+  point: `ctx_has_poisoned_slot` is the same device-done proof the slot
+  recovery uses, so the parked backings are freed there and both leak
+  counters reset. The uncharge is paired with the drop that actually frees.
+  Without it a vindicated-but-healthy ctx stayed charged for memory it no
+  longer held, and could be bricked at the count cap.
+- `WARP_CTX_FENCE_MAX = FENCED_SLOTS / 2` carries a build-time floor
+  (`assert!(WARP_CTX_FENCE_MAX >= 2)`, round-6 F2). The share is a division,
+  so it degenerates silently: at `FENCED_SLOTS = 1` the cap is 0 and every
+  submit and transfer returns `E_AGAIN` forever — a dead 3D seam with no
+  signal. `gpu.rs` pinned only the ceiling.
 - A ctx **slot** retired while poisoned is itself poisoned, so its
   `dev_ctx` id is not re-minted while the device may still execute that
   context's stream. The slot returns to the pool only once the driver holds

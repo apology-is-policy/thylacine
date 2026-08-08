@@ -132,6 +132,17 @@ const MAX_WARP_BOS_PER_CTX: usize = 16;
 /// a second client can always make progress and no single client can drive
 /// every slot into the abandonment poison.
 const WARP_CTX_FENCE_MAX: usize = crate::gpu::FENCED_SLOTS / 2;
+const _: () = {
+    // Round-6 F2: the share is a DIVISION, so it silently degenerates.
+    // At FENCED_SLOTS = 1 the cap is 0 and `fences_in_flight >= 0` is
+    // always true -- every submit and transfer returns E_AGAIN forever
+    // and the 3D seam is dead with no build-time signal. At 3 the cap is
+    // 1, which is sound but strands the prover, whose submit+transfer
+    // pair must be in flight together. Only the upper bound was pinned
+    // (gpu.rs asserts 2 + 2*FENCED_SLOTS <= QUEUE_SIZE); this is the
+    // floor, and it names the prover as the reason.
+    assert!(WARP_CTX_FENCE_MAX >= 2);
+};
 /// Total live BO backing per context (audit F2). The per-BO kernel
 /// envelope is 64 MiB, and 16 BOs x 8 ctxs would let clients pin 8 GiB of
 /// contiguous kernel memory that NOTHING charges -- graceful-OOM, but I-32
@@ -622,16 +633,19 @@ pub struct Comp {
     /// (round-5 F1). Without this the vindication recovered the SLOT but
     /// never the PAGES, and since the ctx -- and with it `leaked_bytes` --
     /// dies at `wctx_finish`, each recovered slot handed the client a
-    /// fresh cap: 64 MiB leaked per cycle, unbounded. Bounded here by
-    /// construction: a ctx holds at most MAX_WARP_BOS_PER_CTX backings at
-    /// a time, and a slot whose graveyard overflowed is never vindicated.
+    /// fresh cap: 64 MiB leaked per cycle, unbounded.
+    ///
+    /// **This array can never overflow (round-6 F1).** Round 5 bounded it
+    /// "by construction: a ctx holds at most MAX_WARP_BOS_PER_CTX backings
+    /// at a time" -- but `bos[]` slots are REUSED, so a poisoned-yet-live
+    /// ctx could mint/build/destroy in a loop and park far more than 16
+    /// over its life, bounded only by bytes. The surplus was dropped by
+    /// value, and `WarpBo` has no `Drop`, so each drop leaked a kernel
+    /// handle AND a mapping. The real bound is the per-ctx `leaked_count`
+    /// cap enforced at BO creation, which admits at most one park per
+    /// graveyard entry -- so the fixed width is sufficient, no record is
+    /// ever dropped, and the overflow flag this used to need is gone.
     warp_ctx_leaked: [[Option<WarpBo>; MAX_WARP_BOS_PER_CTX]; MAX_WARP_CTXS],
-    /// A leaked backing that did not fit its slot's graveyard. The slot is
-    /// then condemned PERMANENTLY -- recycling it would re-arm the per-ctx
-    /// cap with those pages still lost, which is exactly the unbounded
-    /// cycle the graveyard closes. Keeps the ceiling at
-    /// MAX_WARP_CTXS x WARP_CTX_BACKING_MAX.
-    warp_ctx_leak_overflow: [bool; MAX_WARP_CTXS],
     /// The pub id whose poison condemned each slot, so a later
     /// vindication can release it (round-3 F2). 0 = none.
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
@@ -666,6 +680,15 @@ struct WarpCtx {
     /// iteration -- a client could leak 64 MiB per cycle without bound.
     /// Leaked bytes keep counting against the cap for the ctx's life.
     leaked_bytes: u64,
+    /// Backings this ctx leaked, COUNTED (round-6 F1). The byte cap alone
+    /// does not bound the count -- at the minimum accepted size (PAGE) a
+    /// ctx can leak 16384 backings inside its 64 MiB budget, which is what
+    /// overran the 16-wide graveyard. Capped at MAX_WARP_BOS_PER_CTX at BO
+    /// creation so the graveyard is always wide enough to take every one.
+    /// Both counters reset together at the live un-poison, where the pages
+    /// are genuinely freed -- an uncharge is only honest when paired with
+    /// the drop that FREES.
+    leaked_count: u32,
     /// Destroy was requested while fences were still in flight (audit
     /// F5): the ctx is hidden from every client resolve immediately and
     /// the serve-loop pump finishes the retire once quiesced. The old
@@ -728,7 +751,6 @@ impl Comp {
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
             warp_ctx_leaked: [WARP_NO_BO_ROW; MAX_WARP_CTXS],
-            warp_ctx_leak_overflow: [false; MAX_WARP_CTXS],
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
@@ -2555,6 +2577,7 @@ impl Comp {
             fence_reported: 0,
             fence_poisoned: false,
             leaked_bytes: 0,
+            leaked_count: 0,
             retiring: false,
             bos: [WARP_NO_BO; MAX_WARP_BOS_PER_CTX],
         });
@@ -2654,6 +2677,26 @@ impl Comp {
         let live: u64 = c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
         let leaked = c.leaked_bytes;
         if live.saturating_add(leaked).saturating_add(size) > WARP_CTX_BACKING_MAX {
+            return false;
+        }
+        // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
+        // minimum accepted size is PAGE, so 16384 backings fit inside the
+        // 64 MiB budget -- and since `bos[]` slots are reused across
+        // mint/build/destroy, a poisoned-yet-live ctx could park all of
+        // them into a 16-wide graveyard. The overflow then dropped each
+        // surplus `WarpBo` by value, leaking a handle AND a mapping
+        // (`WarpBo` has no `Drop`).
+        //
+        // The quantity that must be bounded is every backing this ctx will
+        // EVER have to park, which is the ones already parked plus the ones
+        // still live -- a live backing is parked wholesale by the leak arm
+        // of `wctx_finish`. Bounding `leaked_count` alone would still admit
+        // 15 parked + 16 live = 31 parks into a 16-wide graveyard. Only
+        // BACKED BOs can be parked (`wbo_retire` returns 0, and so parks
+        // nothing, when `dma_fd < 0`), so an unbacked mint is correctly not
+        // counted here.
+        let live_backed = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count();
+        if c.leaked_count as usize + live_backed >= MAX_WARP_BOS_PER_CTX {
             return false;
         }
         let dev_ctx = c.dev_ctx;
@@ -2825,17 +2868,25 @@ impl Comp {
     /// reusable). `leak` propagates the wedge posture to every backing.
     /// Park a backing the wedge posture refused to free, so the vindication
     /// can free it once the device proves it is finished (round-5 F1).
-    /// Returns false when this slot's graveyard is full; the slot is then
-    /// condemned permanently, because recycling it would re-arm the per-ctx
-    /// cap with those pages still lost -- the unbounded cycle itself.
-    fn warp_park_leaked(&mut self, slot: usize, b: WarpBo) -> bool {
-        if let Some(g) = self.warp_ctx_leaked[slot].iter_mut().find(|g| g.is_none()) {
-            *g = Some(b);
-            return true;
+    ///
+    /// INFALLIBLE by construction (round-6 F1), and that is load-bearing:
+    /// the caller has already run `wbo_retire`, so there is no unwind left
+    /// -- a failure here could only drop the record, and a dropped `WarpBo`
+    /// leaks its still-valid `dma_fd` and its mapping with no `Drop` to
+    /// catch it. The creation-time `leaked_count` cap admits at most one
+    /// park per graveyard entry, so the `find` always succeeds; the debug
+    /// assert names that coupling rather than trusting it silently.
+    fn warp_park_leaked(&mut self, slot: usize, b: WarpBo) {
+        match self.warp_ctx_leaked[slot].iter_mut().find(|g| g.is_none()) {
+            Some(g) => *g = Some(b),
+            None => {
+                debug_assert!(false, "leak graveyard full: leaked_count cap breached");
+                say!(
+                    "tapestryd: warp ctx slot {} leak graveyard full -- BUG, cap breached",
+                    slot
+                );
+            }
         }
-        self.warp_ctx_leak_overflow[slot] = true;
-        say!("tapestryd: warp ctx slot {} leak graveyard full -- slot condemned", slot);
-        false
     }
 
     /// Free every backing parked for this slot. Sound ONLY at vindication:
@@ -2892,12 +2943,17 @@ impl Comp {
             // the poison only clears via a vindication, which itself
             // requires the device to have retired every abandoned chain
             // this ctx owned. So anything parked earlier in this ctx's life
-            // is provably free of the device now -- free it, and clear the
-            // overflow condemnation with it. Without this the flag outlived
-            // the ctx that set it and condemned an unrelated LATER ctx that
-            // happened to land on the same slot.
+            // is provably free of the device now -- free it.
+            //
+            // Round 5 ALSO cleared an overflow-condemnation flag here, and
+            // that was round-6 F1: it un-condemned a slot whose surplus
+            // backings had been dropped and lost, handing the next ctx a
+            // fresh 64 MiB budget with those pages gone -- the unbounded
+            // cycle again, one abandoned fence per turn. The flag is gone
+            // entirely now; the creation-time count cap means nothing is
+            // ever dropped, so there is no condemnation left to clear and
+            // no way for the ceiling to be re-armed.
             self.warp_free_leaked(slot);
-            self.warp_ctx_leak_overflow[slot] = false;
             // Round-5 F3, the same shape at the clean-retire site: the ctx
             // was already taken above, so the slot -- and with it dev_ctx =
             // slot+1 -- is free the moment this returns. A refused destroy
@@ -2972,6 +3028,9 @@ impl Comp {
                 }
                 if let Some(c) = self.warp_ctxs[i].as_mut() {
                     c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
+                    if leaked > 0 {
+                        c.leaked_count = c.leaked_count.saturating_add(1);
+                    }
                 }
             }
         }
@@ -3006,6 +3065,9 @@ impl Comp {
                 }
                 if let Some(c) = self.warp_ctxs[slot].as_mut() {
                     c.leaked_bytes = c.leaked_bytes.saturating_add(leaked);
+                    if leaked > 0 {
+                        c.leaked_count = c.leaked_count.saturating_add(1);
+                    }
                 }
             } else {
                 self.warp_ctxs[slot].as_mut().unwrap().bos[j]
@@ -3086,23 +3148,33 @@ impl Comp {
             if self.gpu.ctx_has_poisoned_slot(v.ctx_pub) {
                 continue;
             }
-            for c in self.warp_ctxs.iter_mut().flatten() {
-                if c.pub_id == v.ctx_pub {
+            // Un-poison a LIVE ctx, and make that a full reclamation point
+            // (round-6 F1). The `ctx_has_poisoned_slot` test above is the
+            // same device-done proof the slot recovery below relies on, so
+            // this ctx's parked backings are provably free of the device
+            // and can be freed HERE rather than waiting for it to die.
+            // Both counters reset with them: an uncharge is honest exactly
+            // when it is paired with the drop that FREES (the #130/#131
+            // rule), and these pages are genuinely returned. Without this
+            // a vindicated-but-still-live ctx stayed charged for memory it
+            // no longer held, and once `leaked_count` hit the cap it could
+            // never build another backing -- bricked while healthy.
+            let live_slot = self
+                .warp_ctxs
+                .iter()
+                .position(|c| c.as_ref().map_or(false, |c| c.pub_id == v.ctx_pub));
+            if let Some(s) = live_slot {
+                self.warp_free_leaked(s);
+                if let Some(c) = self.warp_ctxs[s].as_mut() {
                     c.fence_poisoned = false;
-                    break;
+                    c.leaked_bytes = 0;
+                    c.leaked_count = 0;
                 }
             }
             let slot = match self.warp_ctx_vindicate.iter().position(|&p| p == v.ctx_pub) {
                 Some(s) => s,
                 None => continue,
             };
-            // A slot that lost a backing it could not park can never be
-            // recycled (round-5 F1): handing it back would give the next
-            // client a fresh WARP_CTX_BACKING_MAX while those pages stay
-            // gone, which is the unbounded cycle rather than a bound.
-            if self.warp_ctx_leak_overflow[slot] {
-                continue;
-            }
             // The leak arm skipped CTX_DESTROY (a context with live work
             // must not be destroyed). Now that the device is provably
             // finished, destroy it BEFORE the slot -- and with it dev_ctx =
