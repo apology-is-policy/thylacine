@@ -246,6 +246,29 @@ echo "==> LS-CI: ${#scenarios[@]} scenario(s); accel=$THYLACINE_ACCEL boot<=${LS
 # serial-bridge.py (SIGPIPE-immune); the retry stays as belt-and-braces, but a
 # retry is a TOLERANCE, never a diagnosis. If attempts start failing again,
 # read the preserved evidence -- do not reach for "host timing".
+#
+# --- G-1: per-scenario / per-attempt timings ----------------------------------
+# Until this landed, NOTHING in the gate recorded how long anything took, so
+# every statement about which scenarios are expensive was arithmetic over a
+# single wall-clock total, not a measurement. That is the wrong footing for the
+# two changes queued behind it: G-2 (parallelism) needs a per-scenario cost to
+# pack slots sensibly and a before/after to prove it gained anything, and G-3
+# (per-scenario accel) allocates a scarce, riskier resource BY cost -- deciding
+# that from a guess is how you spend the risk budget on a cheap scenario.
+#
+# Each attempt is timed separately, not just each scenario: a scenario that
+# passes on attempt 3 costs three boots, and folding that into one number hides
+# both the retry and the true per-boot cost. `SECONDS` is a bash builtin (no
+# subprocess, no locale, works on the stock macOS bash 3.2 this runs under).
+#
+# The TSV is the artifact G-2/G-3 are measured against; the on-screen summary is
+# for the human reading the run. Both carry the accel, because a timing without
+# its accel is unusable for G-3 -- comparing a tcg number against an hvf one and
+# calling the difference a regression is exactly the trap.
+TIMINGS="$BUILD_DIR/ls-ci-timings.tsv"
+printf 'scenario\tattempt\trc\tverdict\tseconds\taccel\n' > "$TIMINGS"
+gate_t0=$SECONDS
+
 fails=0
 infra_fails=0
 harness_fails=0
@@ -253,6 +276,7 @@ skips=0
 attempts="${LS_CI_ATTEMPTS:-3}"
 for scen in "${scenarios[@]}"; do
     name="$(basename "$scen" .exp)"
+    scen_t0=$SECONDS
     transcript="$BUILD_DIR/ls-ci-$name.log"
     steps="$BUILD_DIR/ls-ci-$name.steps"
     # #72: failed-attempt evidence must survive the retry. The per-attempt
@@ -285,8 +309,10 @@ for scen in "${scenarios[@]}"; do
         # session to <file> (our transcript), AND propagates <cmd>'s exit code. The
         # steps file is the flush-immune live view. `< /dev/null` is a clean stdin;
         # `script` still waits for the wrapped command to exit (verified).
+        att_t0=$SECONDS
         LS_CI_STEPS="$steps" script -q "$transcript" expect -f "$scen" < /dev/null >/dev/null 2>&1
         rc=$?
+        att_dur=$((SECONDS - att_t0))
         reap_qemu
         # 77 is the conventional SKIP code: the SCENARIO decided it cannot run
         # (a missing optional host artifact, e.g. ls-gfx-mp without
@@ -297,25 +323,36 @@ for scen in "${scenarios[@]}"; do
         # because of this.
         if [[ $rc -eq 77 ]]; then
             reason="$(grep -ha 'LS-CI SKIP:' "$transcript" 2>/dev/null | head -1 | sed 's/.*LS-CI SKIP: //' | tr -d '\r')"
-            echo "    SKIP: $name${reason:+ -- $reason}"
+            printf '%s\t%s\t%s\tSKIP\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$THYLACINE_ACCEL" >> "$TIMINGS"
+            echo "    SKIP: $name [${att_dur}s]${reason:+ -- $reason}"
             skipped=1
             break
         fi
         if [[ $rc -eq 0 ]]; then
+            printf '%s\t%s\t%s\tPASS\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$THYLACINE_ACCEL" >> "$TIMINGS"
             if [[ $attempt -gt 1 ]]; then
-                echo "    PASS: $name (attempt $attempt/$attempts; earlier failed attempt(s) preserved: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps})"
+                echo "    PASS: $name [${att_dur}s] (attempt $attempt/$attempts; earlier failed attempt(s) preserved: $BUILD_DIR/ls-ci-$name.attempt*.{log,steps})"
             else
-                echo "    PASS: $name"
+                echo "    PASS: $name [${att_dur}s]"
             fi
             passed=1
             break
         fi
+        printf '%s\t%s\t%s\tFAIL\t%s\t%s\n' "$name" "$attempt" "$rc" "$att_dur" "$THYLACINE_ACCEL" >> "$TIMINGS"
         # Preserve this attempt's evidence BEFORE the next attempt truncates.
         cp "$transcript" "$BUILD_DIR/ls-ci-$name.attempt$attempt.log" 2>/dev/null || true
         cp "$steps" "$BUILD_DIR/ls-ci-$name.attempt$attempt.steps" 2>/dev/null || true
-        echo "    attempt $attempt/$attempts FAILED (rc=$rc; evidence: ls-ci-$name.attempt$attempt.{log,steps})" >&2
+        echo "    attempt $attempt/$attempts FAILED [${att_dur}s] (rc=$rc; evidence: ls-ci-$name.attempt$attempt.{log,steps})" >&2
         [[ $attempt -lt $attempts ]] && echo "    retrying (an unexplained early exit -- see the preserved evidence; a retry is NOT a diagnosis)..." >&2
     done
+    # The TOTAL row is not the sum of this scenario's attempt rows: it also
+    # carries the per-scenario overhead the attempt timer cannot see (the reap,
+    # the 0.5 s settle, and both fixture restores). That overhead is precisely
+    # what G-2 has to pay PER SLOT rather than once, so it has to be visible
+    # here or the parallel projection is built on the wrong per-scenario cost.
+    printf '%s\tTOTAL\t-\t%s\t%s\t%s\n' \
+        "$name" "$([[ $skipped -eq 1 ]] && echo SKIP || { [[ $passed -eq 1 ]] && echo PASS || echo FAIL; })" \
+        "$((SECONDS - scen_t0))" "$THYLACINE_ACCEL" >> "$TIMINGS"
     if [[ $skipped -eq 1 ]]; then
         skips=$((skips + 1))
         continue
@@ -374,6 +411,50 @@ for scen in "${scenarios[@]}"; do
         fails=$((fails + 1))
     fi
 done
+
+# --- G-1 summary: where the time actually went --------------------------------
+# Printed for every run, pass or fail. A failing run's timings are MORE useful
+# than a passing one's (a timeout costs the full budget), so gating this on
+# success would hide the expensive cases.
+gate_dur=$((SECONDS - gate_t0))
+if [[ -s "$TIMINGS" ]]; then
+    echo "==> LS-CI timings (accel=$THYLACINE_ACCEL; full data: $TIMINGS)"
+    # Sort key is emitted as a leading field and cut off after sorting -- BSD awk
+    # has no asort(), and sorting the rendered lines directly would drag the
+    # trailer rows in among the scenarios.
+    awk -F'\t' '
+        NR == 1 { next }
+        $2 == "TOTAL" { tot[$1] = $5; verdict[$1] = $4; next }
+        { att[$1]++; attsec[$1] += $5 }
+        END {
+            for (s in tot)
+                printf "%d\t    %5ds  %-4s  %-24s%s\n", tot[s], tot[s], verdict[s], s,
+                       (att[s] > 1 ? "(" att[s] " attempts, " attsec[s] "s in boots)" : "")
+        }
+    ' "$TIMINGS" | sort -rn -k1,1 | cut -f2-
+    awk -F'\t' -v gate="$gate_dur" '
+        NR == 1 { next }
+        $2 == "TOTAL" { sum += $5; n++ }
+        END {
+            printf "    %5ds  scenario total (%d scenario(s), mean %ds)\n", sum, n, (n ? sum / n : 0)
+            printf "    %5ds  gate wall (scenario loop only)\n", gate
+            # Reconciliation, and the reason this line exists: serially these two
+            # must be close, because the only work between them is loop
+            # bookkeeping. A large positive delta means the timer is missing a
+            # span it should be charging -- say that out loud rather than leave a
+            # silent discrepancy to be rationalized later.
+            #
+            # Under G-2 they diverge BY DESIGN: the sum stays ~constant while the
+            # wall falls, and that ratio IS the speedup. So the line stays honest
+            # in both modes, and in parallel mode it becomes the measurement.
+            d = gate - sum
+            printf "    %5ds  unaccounted (%s)\n", d, \
+                   (d < 0 ? "wall < sum: scenarios OVERLAPPED -- this run was parallel, speedup " sprintf("%.2fx", sum / (gate ? gate : 1)) : \
+                   (d > 60 ? "WARNING: >60s outside the timed spans -- the instrument is missing work" : \
+                             "setup/bookkeeping outside the timed spans; expected small"))
+        }
+    ' "$TIMINGS"
+fi
 
 if [[ $fails -gt 0 ]]; then
     guest_fails=$((fails - infra_fails - harness_fails))
