@@ -354,6 +354,11 @@ fn fenced_free(root: i64) -> u64 {
         .unwrap_or_else(|| fail("ctl `fenced-free` field missing (test-mode build?)"))
 }
 
+fn ctx_field(root: i64, ctx: u32, key: &str) -> u64 {
+    parse_field(&open_read_string(root, &format!("ctx/{}/ctl", ctx)), key)
+        .unwrap_or_else(|| fail(&format!("two-client: ctx ctl `{}` missing (test-mode build?)", key)))
+}
+
 /// The cross-client properties. Sequential by construction: every step is a
 /// synchronous 9P round trip, so "while A holds" is a real program state and
 /// not a window we are hoping to hit.
@@ -394,6 +399,14 @@ fn prove_two_clients() {
     // than the fence fd: that read parks, so a regression would hang the
     // prover and surface as a boot timeout instead of a message.
     let bo_b = mint_backed_bo(b, ctx_b, "client B");
+    // Watch the MONOTONIC retire counter, not the in-flight gauge (#184).
+    // `fences-in-flight == 0` is satisfied just as well by "B never queued
+    // anything" as by "B's fence landed", so a no-op regression in the
+    // submit path would have kept this leg green while the lane was dead.
+    // `fence-signaled` only advances in the pump a swallowed retire never
+    // reaches -- and unlike the L2 slot-count guard below, it cannot race
+    // the retire, because B is deliberately unheld and so completes fast.
+    let sig_before = ctx_field(b, ctx_b, "fence-signaled");
     if !write_ctl(
         b,
         &format!("ctx/{}/bo/{}/ctl", ctx_b, bo_b),
@@ -402,16 +415,15 @@ fn prove_two_clients() {
         fail("two-client: B transfer_from refused while A held the lane (the hold is \
               GLOBAL, not per-ctx -- one client can stall every other client's 3D)");
     }
-    let mut drained = false;
+    let mut retired = false;
     for _ in 0..400 {
-        let c = open_read_string(b, &format!("ctx/{}/ctl", ctx_b));
-        if parse_field(&c, "fences-in-flight") == Some(0) {
-            drained = true;
+        if ctx_field(b, ctx_b, "fence-signaled") > sig_before {
+            retired = true;
             break;
         }
     }
-    if !drained {
-        fail("two-client: B's fence never retired while A held the lane -- A's hold is \
+    if !retired {
+        fail("two-client: B's fence never RETIRED while A held the lane -- A's hold is \
               deferring B's completions, so any client can freeze the 3D lane box-wide");
     }
     t_putstr("warp-prove: held lane still retired a second client's fence\n");

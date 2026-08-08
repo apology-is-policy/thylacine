@@ -4035,13 +4035,22 @@ impl Conn {
                     // broken per-ctx hold scope would hang a prover instead of
                     // failing it -- and a hang reads as a boot timeout, which
                     // is the least diagnosable failure this harness can emit.
+                    // `fence-signaled` rides alongside because the gauge alone
+                    // cannot carry the held-lane claim (#184): it is satisfied
+                    // by "no fence was ever queued" just as well as by "the
+                    // fence retired". `fence_signaled` is monotonic, and a
+                    // SWALLOWED retire never reaches the pump that raises it,
+                    // so an increase is positive evidence a fence really landed.
                     #[cfg(feature = "test-mode")]
                     {
+                        let signaled =
+                            comp.wctx(id, self.conn_id).map_or(0, |c| c.fence_signaled);
                         let _ = core::fmt::write(
                             &mut s,
                             format_args!(
-                                "fences-in-flight {}\n",
-                                comp.gpu.test_ctx_fences_in_flight(id)
+                                "fences-in-flight {}\nfence-signaled {}\n",
+                                comp.gpu.test_ctx_fences_in_flight(id),
+                                signaled
                             ),
                         );
                     }

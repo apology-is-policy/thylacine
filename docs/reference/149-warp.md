@@ -50,7 +50,7 @@ ctx/
   <id>/
     ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy"
                              # read: "<id>\npoisoned <0|1>\nleaked-count <n>\nleaked-bytes <n>\n"
-                             # test-mode ONLY adds: "fences-in-flight <n>\n"
+                             # test-mode ONLY adds: "fences-in-flight <n>\nfence-signaled <n>\n"
     submit                   # write: one Twrite = one atomic opaque CCMD submission (fenced)
     fence                    # read: the completion stream -- newest signaled fence id,
                              #       one record per read, PARKS when nothing unreported
@@ -301,8 +301,8 @@ second client's fence (the property all of the #178 scoping exists to
 provide); a holder that *disconnects* returns its fenced slots; and
 `warp-abandon` poisons only the abandoning client's ctx.
 
-Two read-only `test-mode` ctl fields exist purely so those last two legs have
-a bounded, discriminating observable:
+Three read-only `test-mode` ctl fields exist purely so those legs have a
+bounded, discriminating observable:
 
 - **`fenced-free`** (global ctl) — `ctxs` cannot witness a stranded slot,
   because `warp_live_ctxs` excludes `retiring` contexts by design, so a ctx
@@ -312,6 +312,17 @@ a bounded, discriminating observable:
   land is to read the fence fd, and that read *parks*. A regression in the
   per-ctx hold scope would then hang the prover and surface as a boot timeout,
   which is the least diagnosable failure this harness can produce.
+- **`fence-signaled`** (per-ctx ctl) — the monotonic retire counter, and the
+  one the held-lane leg actually asserts on. `fences-in-flight` is a *gauge*,
+  and a gauge reading 0 is satisfied by "B's fence retired" and by "B never
+  queued anything" alike, so a no-op regression in the submit path would have
+  kept that leg green while the lane was dead (#184). `fence_signaled` only
+  advances in `warp_service_fences`, which a *swallowed* retire never reaches
+  — so an increase is positive evidence that a fence belonging to a second,
+  unheld client really completed while the first client held. It is also the
+  only form of the assertion that does not race: the L2 slot-count guard is
+  sound there because the holder pins the slot, but B is deliberately unheld
+  and retires promptly, so any in-flight snapshot of B would be a coin flip.
 
 ## Error paths
 
