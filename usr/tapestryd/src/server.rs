@@ -2919,9 +2919,6 @@ impl Comp {
 
     fn wctx_finish(&mut self, slot: usize, leak: bool) {
         if let Some(mut c) = self.warp_ctxs[slot].take() {
-            // #178: a hold must not outlive the ctx it is scoped to.
-            #[cfg(feature = "test-mode")]
-            self.gpu.test_hold_ctx_died(c.pub_id);
             // Take each backing by VALUE: a leak-parked record must outlive
             // this ctx (round-5 F1). Borrowing them, as this loop did, meant
             // the leaked bytes AND the records were dropped at the `return`
@@ -2995,6 +2992,20 @@ impl Comp {
     /// abandoned within FENCE_ABANDON_MS, which decrements the counter and
     /// poisons the ctx, so `fences_in_flight` always reaches 0.
     fn wctx_retire(&mut self, slot: usize) {
+        // Round-8 F1: release the hold HERE -- the one chokepoint every ctx
+        // death passes through (the ctl `destroy` verb and conn teardown
+        // both land here, and every `wctx_finish` is preceded by it). Round
+        // 7 put it on `warp_retire_conn` only, which missed a client that
+        // holds, submits, then `destroy`s its ctx while keeping the conn
+        // open: the swallowed retire kept `fences_in_flight` nonzero, so the
+        // pump could never finish the ctx it had just been told to retire.
+        // Releasing before the quiesce test is what lets the deferred
+        // retires replay in time for that test to succeed.
+        #[cfg(feature = "test-mode")]
+        if let Some(c) = self.warp_ctxs[slot].as_ref() {
+            let pub_id = c.pub_id;
+            self.gpu.test_hold_ctx_died(pub_id);
+        }
         let (quiesced, poisoned) = match &self.warp_ctxs[slot] {
             Some(c) => (c.fences_in_flight == 0, c.fence_poisoned),
             None => return,
@@ -3097,23 +3108,8 @@ impl Comp {
 
     /// Conn teardown, warp half: retire every ctx this conn owns.
     fn warp_retire_conn(&mut self, conn: u64) {
-        // Round-7 F3: release the hold FIRST, and here rather than in
-        // wctx_finish. A held ctx never quiesces -- the hold is precisely
-        // what keeps its fences in flight -- so the pump's
-        // `fences_in_flight == 0` precondition is never met and the finish
-        // (where the #178 hold-clear first lived) is unreachable. A prover
-        // that dies mid-hold therefore stranded its ctx and its fenced
-        // slots for the rest of the boot. Releasing at conn teardown
-        // replays the deferred retires, so the fences drain and the retire
-        // below can actually complete.
-        #[cfg(feature = "test-mode")]
-        for i in 0..MAX_WARP_CTXS {
-            if let Some(c) = self.warp_ctxs[i].as_ref() {
-                if c.owner_conn == conn {
-                    self.gpu.test_hold_ctx_died(c.pub_id);
-                }
-            }
-        }
+        // The hold release lives in `wctx_retire` (round-8 F1), which this
+        // calls -- one chokepoint rather than three that must agree.
         for i in 0..MAX_WARP_CTXS {
             if self.warp_ctxs[i]
                 .as_ref()
@@ -4383,9 +4379,28 @@ impl Conn {
                 };
                 if s == "warp-abandon" {
                     comp.gpu.test_abandon_ctx(ctx_pub);
+                    return p9::build_rwrite(&mut self.out_buf, tag, a.count);
+                }
+                // Round-8 F1: at most ONE ctx may hold. Arming used to
+                // overwrite `hold_ctx` outright, so a second client
+                // displaced the first WITHOUT replaying its swallowed
+                // retires -- and the displaced ctx then never quiesced,
+                // stranding its fenced slot; four of those exhaust the
+                // shared lane for every client. Refusing the displacement
+                // keeps the departing-holder release sufficient by
+                // construction. A non-holder's "off" is likewise refused
+                // rather than silently releasing someone else's hold.
+                let held = comp.gpu.test_hold_ctx_current();
+                if s.ends_with("on") {
+                    if held.map_or(false, |h| h != ctx_pub) {
+                        return self.err(tag, p9::E_AGAIN);
+                    }
+                    comp.gpu.test_hold_ctx(Some(ctx_pub));
                 } else {
-                    comp.gpu
-                        .test_hold_ctx(if s.ends_with("on") { Some(ctx_pub) } else { None });
+                    if held.map_or(false, |h| h != ctx_pub) {
+                        return self.err(tag, p9::E_AGAIN);
+                    }
+                    comp.gpu.test_hold_ctx(None);
                 }
                 return p9::build_rwrite(&mut self.out_buf, tag, a.count);
             }

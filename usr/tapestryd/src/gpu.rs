@@ -1668,6 +1668,17 @@ impl Gpu {
         }
     }
 
+    /// Which ctx currently holds, if any (round-8 F1). `hold_ctx` is ONE
+    /// slot, so "scoped to the caller" bounded the hold's EFFECT without
+    /// bounding its STORAGE: a second client's arm silently displaced the
+    /// first's and orphaned its deferred retires. The caller uses this to
+    /// refuse a displacing arm outright, which keeps at most one ctx held
+    /// and makes the departing-holder release always sufficient.
+    #[cfg(feature = "test-mode")]
+    pub fn test_hold_ctx_current(&self) -> Option<u32> {
+        self.ctrl.hold_ctx
+    }
+
     #[cfg(feature = "test-mode")]
     pub fn test_abandon_ctx(&mut self, ctx_pub: u32) {
         self.ctrl
