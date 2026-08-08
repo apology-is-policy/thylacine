@@ -3989,6 +3989,15 @@ impl Conn {
                     &mut s,
                     format_args!("abandoned {}\n", comp.gpu.test_abandoned_total()),
                 );
+                // #180: the departed-holder discriminator. `ctxs` cannot serve
+                // here -- warp_live_ctxs excludes `retiring` contexts, so a ctx
+                // whose deferred retires were never replayed (round-8 F1) reads
+                // exactly like one that finished. This counts the slots
+                // themselves, which is the resource that actually leaks.
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!("fenced-free {}\n", comp.gpu.test_fenced_free()),
+                );
             }
             return self.read_str(tag, &s, a.offset, cap);
         }
@@ -4018,6 +4027,21 @@ impl Conn {
                             format_args!(
                                 "poisoned {}\nleaked-count {}\nleaked-bytes {}\n",
                                 c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes
+                            ),
+                        );
+                    }
+                    // #180: a BOUNDED way to watch this ctx's fences land. The
+                    // fence fd is the only alternative and it parks, so a
+                    // broken per-ctx hold scope would hang a prover instead of
+                    // failing it -- and a hang reads as a boot timeout, which
+                    // is the least diagnosable failure this harness can emit.
+                    #[cfg(feature = "test-mode")]
+                    {
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!(
+                                "fences-in-flight {}\n",
+                                comp.gpu.test_ctx_fences_in_flight(id)
                             ),
                         );
                     }

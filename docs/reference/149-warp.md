@@ -43,11 +43,14 @@ Two doors, one tree:
 
 ```
 ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\nctxs <live>\npoisoned <n>\n"
+                             # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
   new                        # open+read mints a ctx -> "<pub_id>\n" (ONE per conn; I-45)
   <id>/
-    ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy"; read: id
+    ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy"
+                             # read: "<id>\npoisoned <0|1>\nleaked-count <n>\nleaked-bytes <n>\n"
+                             # test-mode ONLY adds: "fences-in-flight <n>\n"
     submit                   # write: one Twrite = one atomic opaque CCMD submission (fenced)
     fence                    # read: the completion stream -- newest signaled fence id,
                              #       one record per read, PARKS when nothing unreported
@@ -272,6 +275,43 @@ virgl_protocol.h encodings pinned as constants), queues
 five samples read `0xffff0000`, destroys the ctx, and asserts the live
 count returns to 0. Exit 0 PASS / 2 SKIP (2D device) / 1 FAIL. Driven on
 the GL host by `tools/warp-host.sh prove` → `tools/warp/warp-prove.exp`.
+
+Two further legs run after the clean path:
+
+**The poisoned path (#175)** — drives a ctx into the wedge state, which the
+clean path never reaches and which six consecutive audit rounds each found a
+defect in. `warp-hold on` stops the drain so a submitted fence stays in
+flight; `warp-abandon` forces the transition the 30 s clock would otherwise
+make; the churn loop asserts BO creation is refused *by attempt 17* (the
+discriminator — "eventually refused" is true pre-fix too, at the 16384-attempt
+byte cap); the release then asserts vindication walks the ctx back out.
+
+**The two-client path (#180)** — the CROSS-client properties, which through
+round 8 had only ever been validated by reading. Both clients live in ONE
+process: `SYS_OPEN` on a `/srv/<name>` leaf is a *connect*
+(`devsrv_open_connect` → `srvconn_create`, kernel/devsrv.c), so each
+`t_open("/srv/warp")` is its own connection, and tapestryd keys ownership on
+`owner_conn`. Two roots are therefore two clients with none of the
+nondeterminism a second process would introduce — and B being able to mint a
+ctx at all is itself the proof the conns are distinct, since `wctx_mint`
+allows one ctx per conn. The legs: B cannot arm the hold while A holds it, and
+cannot release A's (round-8 F1 — `hold_ctx` was scoped in effect but *global
+in storage*, so B's arm silently displaced A's); a held lane still retires a
+second client's fence (the property all of the #178 scoping exists to
+provide); a holder that *disconnects* returns its fenced slots; and
+`warp-abandon` poisons only the abandoning client's ctx.
+
+Two read-only `test-mode` ctl fields exist purely so those last two legs have
+a bounded, discriminating observable:
+
+- **`fenced-free`** (global ctl) — `ctxs` cannot witness a stranded slot,
+  because `warp_live_ctxs` excludes `retiring` contexts by design, so a ctx
+  wedged forever reads exactly like one that finished (round-5 F5, one level
+  down). The slot count is the resource that actually leaks.
+- **`fences-in-flight`** (per-ctx ctl) — the only other way to watch a fence
+  land is to read the fence fd, and that read *parks*. A regression in the
+  per-ctx hold scope would then hang the prover and surface as a boot timeout,
+  which is the least diagnosable failure this harness can produce.
 
 ## Error paths
 

@@ -1702,6 +1702,33 @@ impl Gpu {
         self.ctrl.abandoned_total
     }
 
+    /// Fenced slots currently allocatable. Read-only, and the ONLY thing that
+    /// can tell a departed client's slots came back from a client that
+    /// silently stranded them: `ctxs` deliberately excludes `retiring`
+    /// contexts, so a ctx wedged forever and a ctx that finished cleanly read
+    /// identically there -- round-5 F5's trap, one level down.
+    #[cfg(feature = "test-mode")]
+    pub fn test_fenced_free(&self) -> u32 {
+        (0..FENCED_SLOTS)
+            .filter(|&i| self.ctrl.fslots[i].is_none() && !self.ctrl.fslot_poisoned[i])
+            .count() as u32
+    }
+
+    /// Fenced chains this ctx still has in flight. Exposed because the only
+    /// other way to watch a fence land is to READ the fence fd, and that read
+    /// PARKS -- so a regression in the per-ctx scoping would hang the prover
+    /// and time the boot out, rather than failing with a message. A bounded
+    /// poll over this is the same shape as the existing vindication wait.
+    #[cfg(feature = "test-mode")]
+    pub fn test_ctx_fences_in_flight(&self, ctx_pub: u32) -> u32 {
+        self.ctrl
+            .fslots
+            .iter()
+            .flatten()
+            .filter(|t| t.ctx_pub == ctx_pub)
+            .count() as u32
+    }
+
     /// Does this ctx still own a POISONED slot? A vindication is only
     /// honest once the answer is no (round-4 F1: one ctx may abandon
     /// several chains, and one late retire proves nothing about the rest).

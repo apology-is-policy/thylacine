@@ -298,9 +298,236 @@ pub extern "C" fn rs_main() -> i64 {
     // machine with nothing able to regress-test it.
     prove_poisoned_path(root);
 
+    // 8. The TWO-CLIENT path (#180). Everything above -- including the
+    // poisoned path -- drives ONE connection, so every CROSS-client property
+    // of the seam was validated by reading alone. Round-8 F1 lived exactly
+    // there: a hold that was scoped in effect but global in storage.
+    prove_two_clients();
+
     unsafe { t_close(root) };
-    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path)\n");
+    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path + two-client)\n");
     unsafe { t_exits(0) }
+}
+
+/// Open a fresh /srv/warp CONNECTION.
+///
+/// Each open is its own connect, not a second handle on a shared session:
+/// `SYS_OPEN` on a `/srv/<name>` leaf lands in `devsrv_open_connect`
+/// (kernel/devsrv.c), which calls `srvconn_create` per open. tapestryd keys
+/// context ownership on `owner_conn`, so two roots in ONE process are two
+/// clients -- which is what makes this harness sequential and deterministic
+/// instead of a race between two spawned processes.
+fn warp_connect(what: &str) -> i64 {
+    let fd = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+    if fd < 0 {
+        fail(&format!("two-client: open /srv/warp for {}", what));
+    }
+    fd
+}
+
+fn mint_ctx(root: i64, what: &str) -> u32 {
+    match parse_u32_prefix(&open_read_string(root, "ctx/new")) {
+        Some(v) => v,
+        None => fail(&format!("two-client: ctx/new for {}", what)),
+    }
+}
+
+/// A 1x1 render target -- the minimum the seam accepts, and enough to own a
+/// real backing so `transfer_from` is a genuine fenced chain.
+fn mint_backed_bo(root: i64, ctx: u32, what: &str) -> u32 {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("two-client: bo/new for {}", what)),
+    };
+    let small = format!(
+        "create3d {} {} {} 1 1 1 1 0 0 0 {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, 4096
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &small) {
+        fail(&format!("two-client: create3d for {}", what));
+    }
+    bo
+}
+
+fn fenced_free(root: i64) -> u64 {
+    parse_field(&open_read_string(root, "ctl"), "fenced-free")
+        .unwrap_or_else(|| fail("ctl `fenced-free` field missing (test-mode build?)"))
+}
+
+/// The cross-client properties. Sequential by construction: every step is a
+/// synchronous 9P round trip, so "while A holds" is a real program state and
+/// not a window we are hoping to hit.
+fn prove_two_clients() {
+    let a = warp_connect("client A");
+    let b = warp_connect("client B");
+
+    let ctx_a = mint_ctx(a, "client A");
+    let ctx_b = mint_ctx(b, "client B");
+    // B minting AT ALL is the proof the two roots are distinct connections:
+    // `wctx_mint` refuses a second ctx on a conn that already owns one ("one
+    // ctx per client"), so a shared session would have failed above. Assert
+    // the ids differ too -- a same-id pair would mean B was handed A's ctx,
+    // which would make every leg below vacuous.
+    if ctx_a == ctx_b {
+        fail("two-client: A and B got the SAME ctx -- one connection, not two; every leg below would be vacuous");
+    }
+
+    // --- L1 + L3: the hold is exclusive, and only its owner may drop it ----
+    // Round-8 F1: `hold_ctx` was a single global slot, so B's arm silently
+    // DISPLACED A's -- stranding whatever A had already deferred. The fix
+    // refuses instead; these two writes must fail.
+    if !write_ctl(a, "ctl", "warp-hold on") {
+        fail("two-client: A warp-hold on (is tapestryd built with test-mode?)");
+    }
+    if write_ctl(b, "ctl", "warp-hold on") {
+        fail("two-client: B ARMED the hold while A held it (round-8 F1: displacement, \
+              which strands A's deferred retires)");
+    }
+    if write_ctl(b, "ctl", "warp-hold off") {
+        fail("two-client: B RELEASED a hold it does not own (a foreign client can end \
+              another's hold -- the same displacement hole from the other side)");
+    }
+
+    // --- L4: a held lane still serves everyone else ------------------------
+    // This is the property the whole #178 scoping exists to provide, and
+    // nothing has ever proven it. Watched through a BOUNDED ctl poll rather
+    // than the fence fd: that read parks, so a regression would hang the
+    // prover and surface as a boot timeout instead of a message.
+    let bo_b = mint_backed_bo(b, ctx_b, "client B");
+    if !write_ctl(
+        b,
+        &format!("ctx/{}/bo/{}/ctl", ctx_b, bo_b),
+        "transfer_from 0 0 0 0 1 1 1 0 0 0",
+    ) {
+        fail("two-client: B transfer_from refused while A held the lane (the hold is \
+              GLOBAL, not per-ctx -- one client can stall every other client's 3D)");
+    }
+    let mut drained = false;
+    for _ in 0..400 {
+        let c = open_read_string(b, &format!("ctx/{}/ctl", ctx_b));
+        if parse_field(&c, "fences-in-flight") == Some(0) {
+            drained = true;
+            break;
+        }
+    }
+    if !drained {
+        fail("two-client: B's fence never retired while A held the lane -- A's hold is \
+              deferring B's completions, so any client can freeze the 3D lane box-wide");
+    }
+    t_putstr("warp-prove: held lane still retired a second client's fence\n");
+
+    // --- L2: a holder that DEPARTS must not strand its slots ---------------
+    // The round-8 F1 fix rests on `warp_retire_conn` releasing the hold and
+    // replaying that ctx's deferred retires. `ctxs` cannot witness it --
+    // warp_live_ctxs excludes `retiring` contexts, so a ctx stranded forever
+    // reads exactly like one that finished (round-5 F5, one level down). The
+    // slot count is the resource that actually leaks, so count that.
+    let free_before = fenced_free(b);
+    let bo_a = mint_backed_bo(a, ctx_a, "client A");
+    if !write_ctl(
+        a,
+        &format!("ctx/{}/bo/{}/ctl", ctx_a, bo_a),
+        "transfer_from 0 0 0 0 1 1 1 0 0 0",
+    ) {
+        fail("two-client: A transfer_from queue");
+    }
+    let free_held = fenced_free(b);
+    // ANTI-VACUOUS. If A's chain already retired, the close below proves
+    // nothing about replaying deferred work -- the same trap #177 caught in
+    // the poisoned path, where the drain beat the abandon and 17 rounds ran
+    // against a healthy ctx while reporting PASS.
+    if free_held >= free_before {
+        fail(&format!(
+            "two-client: A's held chain did not occupy a fenced slot (free {} -> {}), so the \
+             departing-holder leg would test nothing",
+            free_before, free_held
+        ));
+    }
+    unsafe { t_close(a) };
+    let mut returned = false;
+    for _ in 0..400 {
+        if fenced_free(b) >= free_before {
+            returned = true;
+            break;
+        }
+    }
+    if !returned {
+        fail(&format!(
+            "two-client: A's fenced slot never came back after A disconnected (free {} vs {} \
+             before) -- the departing holder's deferred retires were never replayed (round-8 F1)",
+            fenced_free(b),
+            free_before
+        ));
+    }
+    t_putstr("warp-prove: a departing holder's fenced slots returned to the pool\n");
+
+    // --- L5: abandon is scoped to the abandoning client --------------------
+    // A fresh conn, because A is gone. If `warp-abandon` were global (the
+    // shape the pre-#178 P_CTL twins had) it would poison B along with A2.
+    let a2 = warp_connect("client A2");
+    let ctx_a2 = mint_ctx(a2, "client A2");
+    if !write_ctl(a2, "ctl", "warp-hold on") {
+        fail("two-client: A2 warp-hold on");
+    }
+    let bo_a2 = mint_backed_bo(a2, ctx_a2, "client A2");
+    if !write_ctl(
+        a2,
+        &format!("ctx/{}/bo/{}/ctl", ctx_a2, bo_a2),
+        "transfer_from 0 0 0 0 1 1 1 0 0 0",
+    ) {
+        fail("two-client: A2 transfer_from queue");
+    }
+    let ab_before = parse_field(&open_read_string(a2, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("two-client: ctl `abandoned` missing"));
+    if !write_ctl(a2, "ctl", "warp-abandon") {
+        fail("two-client: A2 warp-abandon");
+    }
+    let ab_after = parse_field(&open_read_string(a2, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("two-client: ctl `abandoned` missing after abandon"));
+    if ab_after <= ab_before {
+        fail("two-client: warp-abandon abandoned 0 NEW slots -- the scoping assertions below \
+              would run against an unpoisoned seam");
+    }
+    match parse_field(&open_read_string(a2, &format!("ctx/{}/ctl", ctx_a2)), "poisoned") {
+        Some(1) => {}
+        _ => fail("two-client: A2's own ctx is not poisoned after its abandon"),
+    }
+    match parse_field(&open_read_string(b, &format!("ctx/{}/ctl", ctx_b)), "poisoned") {
+        Some(0) => {}
+        _ => fail("two-client: B's ctx was poisoned by A2's abandon -- abandon is GLOBAL, so \
+                   any client can wedge every other client's context"),
+    }
+    // Ownership opacity, while we have two live conns to test it with: B must
+    // not be able to resolve A2's ctx at all (`wctx` is conn-scoped).
+    let foreign = format!("ctx/{}/ctl", ctx_a2);
+    let fr = unsafe { t_open(b, foreign.as_ptr(), foreign.len(), T_OREAD) };
+    if fr >= 0 {
+        unsafe { t_close(fr) };
+        fail("two-client: B resolved A2's ctx -- contexts are not conn-scoped");
+    }
+    t_putstr("warp-prove: abandon stayed inside the abandoning client\n");
+
+    // Leave the seam clean: release, let the late retire vindicate A2, and
+    // destroy both contexts. A gate that ends with the lane wedged would make
+    // every later boot's clean-path assertion a lie.
+    if !write_ctl(a2, "ctl", "warp-hold off") {
+        fail("two-client: A2 warp-hold off");
+    }
+    let mut healed = false;
+    for _ in 0..400 {
+        let c = open_read_string(a2, &format!("ctx/{}/ctl", ctx_a2));
+        if parse_field(&c, "poisoned") == Some(0) {
+            healed = true;
+            break;
+        }
+    }
+    if !healed {
+        fail("two-client: A2 never vindicated after the hold released");
+    }
+    let _ = write_ctl(a2, &format!("ctx/{}/ctl", ctx_a2), "destroy");
+    let _ = write_ctl(b, &format!("ctx/{}/ctl", ctx_b), "destroy");
+    unsafe { t_close(a2) };
+    unsafe { t_close(b) };
 }
 
 /// Drive a ctx into the wedge state and assert the bounds that hold there.
