@@ -111,7 +111,13 @@ tri)
     # and only the success path can (#186: the expect script's own failure
     # text quotes the pattern it waited for, which is why the SCENARIO line
     # is required alongside).
-    if grep -q "VIRGL-PROVE PASS" "$out" && grep -q "PASS: /clade/bin/virgl-prove" "$out"; then
+    # The scenario anchor is lc_pass's OWN prefix ("LS-CI PASS: virgl-prove:"),
+    # NOT the command path: lc_run_expect's TIMEOUT text is the only place the
+    # path appears next to PASS ("waiting for [...] during 'output-of:
+    # /clade/bin/virgl-prove'"), so the original path-shaped anchor matched no
+    # passing run and could never fire (first contact: triangle rendered,
+    # verdict UNVERIFIED).
+    if grep -q "VIRGL-PROVE PASS" "$out" && grep -q "LS-CI PASS: virgl-prove:" "$out"; then
         echo "WARP-3 GATE: VERIFIED"
     else
         echo "WARP-3 GATE: UNVERIFIED (need VIRGL-PROVE PASS + the scenario pass line)"

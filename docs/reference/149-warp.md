@@ -335,8 +335,12 @@ its own comment names — a client that holds, submits, then `destroy`s its ctx
 been told to retire. Reverting that move passes the disconnect leg and fails
 only the destroy leg, which is what makes the pair worth keeping separate.
 
-Three read-only `test-mode` ctl fields exist purely so those legs have a
-bounded, discriminating observable:
+Three read-only ctl fields exist so those legs have a bounded,
+discriminating observable. Two of them stopped being `test-mode` at
+Warp-3 — the winsys throttles and asserts on them, and a production
+client cannot depend on a test-mode field — so `fences-in-flight` and
+`fence-signaled` are unconditional per-ctx ctl surface now; only
+`fenced-free` remains gated:
 
 - **`fenced-free`** (global ctl) — `ctxs` cannot witness a stranded slot,
   because `warp_live_ctxs` excludes `retiring` contexts by design, so a ctx
@@ -357,6 +361,69 @@ bounded, discriminating observable:
   only form of the assertion that does not race: the L2 slot-count guard is
   sound there because the holder pins the slot, but B is deliberately unheld
   and retires promptly, so any in-flight snapshot of B would be a coin flip.
+
+## The Mesa winsys + the warp client (Warp-3)
+
+The unmodified virgl gallium driver reaches the seam through a new winsys
+in the Mesa fork (`usr/ports/mesa/patches/0006-*`, round-trip-pinned by
+tree hash in `usr/ports/mesa/README.md`):
+`src/gallium/winsys/virgl/thylacine/` = `virgl_thylacine_winsys.c` (the
+vtable) over `warp_client.{c,h}` (the transport). Build wiring keys on
+`cc.get_define('__thylacine__')` — the cross file deliberately claims
+`system='linux'`, so the compiler define is the only honest meson-level
+signal. The osmesa target carries llvmpipe *and* virgl and forks at
+runtime on `GALLIUM_DRIVER=virpipe|virgl`, falling back loudly to the
+software screen.
+
+**The client** is blocking file I/O on the `/srv/warp` tree via raw
+`<thyla/syscall.h>` wrappers — no libc dependency beyond what the OSMesa
+target already carries. One `warp_conn` per screen: the tree root, the
+per-ctx ctl/submit/fence fds, the fence counters, and a `wedged` latch.
+Open is deliberately paranoid: it requires `virgl 1` from the global ctl,
+requires the `bo-cap` field (absent means a pre-Warp-3 tapestryd — fail
+clean, don't guess), and completes one fence-counter read before
+reporting the connection usable.
+
+**Fences are counted, not parsed.** The client counts fenced ops it
+ISSUED (submits + transfers, FIFO per ring) against the seam's monotonic
+per-ctx `fence-signaled` ctl counter; the fence FILE is only the blocking
+primitive — its coalesced record content is ignored, and it is never read
+with nothing in flight, so no park is unfillable. The in-flight throttle
+mirrors the seam's own bound (2 per ctx); `E_AGAIN` parks on the fence
+and retries bounded. Any hard failure LATCHES the connection — the virgl
+driver ignores `submit_cmd`'s return, so a dropped command buffer must
+never be silent — and every subsequent entry point fails fast with a
+`warp:` line on stderr.
+
+**The vtable** is vtest's 18 load-bearing slots minus every displaytarget
+arm (the OSMesa frontend reads back through pipe transfers, verified in
+`osmesa.c`'s flush path, so `flush_frontbuffer` stays NULL — guarded
+upstream). `transfer_get` is synchronous (queue + fence-wait) because the
+driver maps and reads on return — the same choice vtest's protocol-v2 arm
+makes. Submits split at CCMD boundaries (dword0 = len<<16) into ≤ 24 KiB
+writes so one Twrite stays one atomic submission under msize 32 KiB; a
+single command wider than the bound latches loudly (the Loom bulk path,
+GPU-DESIGN §4.1, is the successor). `get_caps` strips
+`COPY_TRANSFER_BOTH_DIRECTIONS` (vtest mirror — keeps textures on real
+host backings); `supports_fences=0` (no fence fds), `encoded_transfers=1`,
+`coherent=0` (no blob mappings — the F2 fork). A `virgl_resource_cache`
+rides `last_use_seq` vs the signaled counter for `is_busy`; one mutex
+guards the vtable entry points with unlocked internals (the cache
+callbacks run under it).
+
+**The gate binary** is `virgl_prove.c` beside `osmesa_prove.c` in the
+osmesa target: link proof on the builder, triangle prover in-guest
+(`/clade/bin/virgl-prove`). Discrimination is structural twice over: it
+never walks the CAP_JIT clearance (llvmpipe cannot rasterise without it,
+so a silent fallback cannot paint), and GL_RENDERER must name virgl and
+not bare llvmpipe. It sets `GALLIUM_DRIVER=virpipe` itself (#151: `ut`
+cannot export). Exit 0/2/1 = PASS/SKIP/FAIL; blue clear + red triangle +
+interior/exterior sample asserts. Driven by `tools/warp-host.sh tri` →
+`tools/warp/virgl-prove.exp` (per-attempt fixture isolation; the verdict
+requires BOTH the prover's own PASS line and the scenario pass line —
+#186). First contact found #191: virgl's disk-cache keying `assert`ed a
+build-id note the static link never carries; the fork now runs cacheless
+when the note is absent (port finding 4 in the README).
 
 ## Error paths
 
@@ -381,13 +448,19 @@ bounded, discriminating observable:
   sweep knew only virtio-MMIO, and a BAR-decoded device is invisible to
   it). The task stays open for the residual ordering in the fallback
   `proc_free` path.
-- **Client-visible limits**: 8 contexts total, one per connection, 16 BOs
-  each, 64 MiB live+leaked backing per context, 4 concurrent `/srv/warp`
-  connections (a 5th blocks until one frees), 4 fenced chains in flight
-  process-wide.
+- **Client-visible limits**: 8 contexts total, one per connection, 128 BOs
+  each (16 → 128 at Warp-3: st/mesa mints ~8 `hw_res` before the first
+  draw, and the round-6 F1 graveyard cap is width-independent by
+  construction — the discriminating churn probe now reads the width from
+  the global ctl `bo-cap` field instead of hardcoding it, so a future cap
+  change cannot silently un-discriminate it), 64 MiB live+leaked backing
+  per context, 4 concurrent `/srv/warp` connections (a 5th blocks until
+  one frees), 4 fenced chains in flight process-wide.
 - One Twrite = one submission: the effective stream bound is the 9P iounit
-  (msize 32 KiB − overhead), not the 64 KiB slot. The Loom-carried bulk
-  path (§4.1) lifts this at Warp-3 if the winsys needs it.
+  (msize 32 KiB − overhead), not the 64 KiB slot. The Warp-3 winsys splits
+  its command streams at CCMD boundaries to fit; the Loom-carried bulk
+  path (§4.1) remains the successor for a single command wider than the
+  bound, which today latches loudly.
 - The fence file reports coalesced ids; a client that needs per-submission
   granularity tracks its own issue order (FIFO within the ring).
 - Multiple fids parked on one ctx's fence file race for records
@@ -405,4 +478,7 @@ kind decision, budget charge/uncharge, reaper registration) — both in the
 2D boots prove the degradation path (`Warp PROBE OK ... virgl 0`, submit
 E_OPNOTSUPP, no flane allocation) and `ls-gfx`/`ls-gfx-play` exercise the
 rewritten controlq under real present pressure; `/warp-prove` on the GL
-host is the PASS-path gate.
+host is the seam's PASS-path gate (`tools/warp-host.sh prove`), and
+`/clade/bin/virgl-prove` is the Warp-3 stack gate — the full Mesa virgl
+driver through the winsys to a rendered triangle (`tools/warp-host.sh
+tri`, both #186-anchored verdict lines required).
