@@ -1,0 +1,50 @@
+#!/usr/bin/expect -f
+# Warp-3 gate run on the GL host (GPU-DESIGN.md section 12 row 3): boot the
+# virtio-gpu-gl device, log in, run /clade/bin/virgl-prove -- "a triangle,
+# in-guest, on the GPU". The prover's own asserts carry the verdict (the
+# GL_RENDERER discriminator, the clear + triangle pixel checks through the
+# fenced readback); this script only delivers it a virgl console and
+# requires its PASS line. Structural discrimination is the prover's:
+# it never walks the CAP_JIT clearance, so a silent llvmpipe fallback
+# CANNOT paint the triangle -- it fails, loudly, instead.
+#
+# Runs ON the GL host (Linux; lib.exp takes the direct-pty transport there).
+# env: WARP_REPO (default ~/projects/thylacine), WARP_WORK (default ~/warp).
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+set ::env(THYLACINE_ACCEL) tcg
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+set ::env(THYLACINE_DISPLAY) egl-headless
+# TCG-on-a-VM boot is minutes; the LS-CI default (180 s) is for the native
+# M2. Raise anything below 900 (the glq-bench floor rule, audit W1 F3).
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+# Per-attempt fixture isolation (#78/#85): the synced images are never
+# booted directly.
+file delete -force $work/pool-tri.img $work/disk-tri.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-tri.img
+exec cp $repo/build/disk.img $work/disk-tri.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-tri.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-tri.img
+
+source $repo/tools/interactive/lib.exp
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# The prover demand-pages a ~100+ MB static binary out of the pool
+# (REVENANT), builds a virgl screen (capset + context negotiation on the
+# host renderer), draws, then rides the fenced TRANSFER_FROM readback.
+# Under TCG-with-host-GL each leg is seconds; the page-in dominates.
+set timeout 300
+lc_run_expect "/clade/bin/virgl-prove" "VIRGL-PROVE PASS"
+
+lc_pass "virgl-prove: a triangle rendered on the HOST GPU via the warp seam (the Warp-3 gate)"

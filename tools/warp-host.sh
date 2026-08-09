@@ -32,7 +32,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -96,6 +96,25 @@ prove)
         echo "WARP-2 GATE: VERIFIED"
     else
         echo "WARP-2 GATE: UNVERIFIED (need WARP-PROVE PASS + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+tri)
+    out="$REPO_ROOT/build/warp-tri.log"
+    ssh "$HOST" "cd $RREPO && expect tools/warp/virgl-prove.exp" | tee "$out" || true
+    echo "== tri verdict =="
+    # The Warp-3 gate, same two-line shape as prove: the prover's own pass
+    # (GL_RENDERER discriminator + clear/triangle pixels through the fenced
+    # readback, asserted in-guest) AND the scenario pass around it. The
+    # prover cannot pass on a llvmpipe fallback by construction (no CAP_JIT
+    # walk), so the anchor's job is only "the success path printed it" --
+    # and only the success path can (#186: the expect script's own failure
+    # text quotes the pattern it waited for, which is why the SCENARIO line
+    # is required alongside).
+    if grep -q "VIRGL-PROVE PASS" "$out" && grep -q "PASS: /clade/bin/virgl-prove" "$out"; then
+        echo "WARP-3 GATE: VERIFIED"
+    else
+        echo "WARP-3 GATE: UNVERIFIED (need VIRGL-PROVE PASS + the scenario pass line)"
         exit 1
     fi
     ;;

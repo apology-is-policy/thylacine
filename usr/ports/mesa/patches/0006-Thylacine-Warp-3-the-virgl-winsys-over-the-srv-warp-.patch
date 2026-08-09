@@ -1,4 +1,4 @@
-From 4d9d1be337f2c801ba265c9cf14c3e46366fdf7b Mon Sep 17 00:00:00 2001
+From 8f3ef3d60d81d29f575d8a41ecf748fd01a882a6 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Sat, 8 Aug 2026 22:39:39 +0200
 Subject: [PATCH] Thylacine Warp-3: the virgl winsys over the /srv/warp GPU
@@ -43,9 +43,10 @@ without it, so a fallback cannot paint the triangle) and GL_RENDERER
 must name virgl and not be bare llvmpipe. Exit 0/2/1 = PASS/SKIP/FAIL.
 ---
  meson.build                                   |  10 +
- src/gallium/drivers/virgl/meson.build         |  15 +-
+ .../target-helpers/inline_sw_helper.h         |   7 +-
+ src/gallium/drivers/virgl/meson.build         |  28 +-
  src/gallium/meson.build                       |   8 +-
- src/gallium/targets/osmesa/meson.build        |  43 +-
+ src/gallium/targets/osmesa/meson.build        |  49 +-
  src/gallium/targets/osmesa/osmesa_target.c    |  40 +-
  src/gallium/targets/osmesa/virgl_prove.c      | 203 ++++++
  .../winsys/virgl/thylacine/meson.build        |  16 +
@@ -53,7 +54,7 @@ must name virgl and not be bare llvmpipe. Exit 0/2/1 = PASS/SKIP/FAIL.
  .../virgl/thylacine/virgl_thylacine_winsys.c  | 631 ++++++++++++++++++
  .../winsys/virgl/thylacine/warp_client.c      | 417 ++++++++++++
  .../winsys/virgl/thylacine/warp_client.h      | 116 ++++
- 11 files changed, 1506 insertions(+), 8 deletions(-)
+ 12 files changed, 1529 insertions(+), 11 deletions(-)
  create mode 100644 src/gallium/targets/osmesa/virgl_prove.c
  create mode 100644 src/gallium/winsys/virgl/thylacine/meson.build
  create mode 100644 src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
@@ -82,11 +83,29 @@ index fa82575..7c84bdd 100644
  gallium_drivers = get_option('gallium-drivers')
  if gallium_drivers.contains('auto')
    if system_has_kms_drm
+diff --git a/src/gallium/auxiliary/target-helpers/inline_sw_helper.h b/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
+index ddb67b3..e48c589 100644
+--- a/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
++++ b/src/gallium/auxiliary/target-helpers/inline_sw_helper.h
+@@ -39,7 +39,12 @@ sw_screen_create_named(struct sw_winsys *winsys, const char *driver)
+       screen = llvmpipe_create_screen(winsys);
+ #endif
+ 
+-#if defined(GALLIUM_VIRGL)
++/* Thylacine: the vtest winsys does not exist there (no Unix-socket test
++ * server); GALLIUM_DRIVER=virpipe is handled one level up, in the osmesa
++ * target's screen fork, over the /srv/warp winsys -- so this arm is dead
++ * code that would only drag an undefined virgl_vtest_winsys_wrap into
++ * the link. */
++#if defined(GALLIUM_VIRGL) && !defined(__thylacine__)
+    if (screen == NULL && strcmp(driver, "virpipe") == 0) {
+       struct virgl_winsys *vws;
+       vws = virgl_vtest_winsys_wrap(winsys);
 diff --git a/src/gallium/drivers/virgl/meson.build b/src/gallium/drivers/virgl/meson.build
-index 7ddcc90..cd08f1e 100644
+index 7ddcc90..a984ae0 100644
 --- a/src/gallium/drivers/virgl/meson.build
 +++ b/src/gallium/drivers/virgl/meson.build
-@@ -16,16 +16,27 @@ files_libvirgl = files(
+@@ -16,16 +16,38 @@ files_libvirgl = files(
    'virgl_video.c',
  )
  
@@ -99,12 +118,24 @@ index 7ddcc90..cd08f1e 100644
 +  virgl_core_deps += dep_libdrm
 +endif
 +
++# <libsync.h> resolves from LIBDRM's installed copy upstream; without
++# dep_libdrm the include has no home. Mesa vendors an API-identical,
++# self-contained copy at src/util/libsync.h (inline ioctl wrappers over
++# headers pouch carries; virgl_context.c makes no sync_* calls -- the
++# include just has to parse). Thylacine-only, so the upstream resolution
++# is untouched.
++virgl_core_incs = [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_virtio]
++if with_thylacine
++  virgl_core_incs += include_directories('../../../util')
++endif
++
  libvirgl = static_library(
    'virgl',
    [ files_libvirgl ],
    gnu_symbol_visibility : 'hidden',
-   include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_virtio],
+-  include_directories : [inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_virtio],
 -  dependencies : [dep_libdrm, idep_mesautil, idep_xmlconfig, idep_nir],
++  include_directories : virgl_core_incs,
 +  dependencies : virgl_core_deps,
  )
  
@@ -136,10 +167,10 @@ index d95ecb5..114154e 100644
      subdir('winsys/virgl/vtest')
    endif
 diff --git a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
-index e7b11cb..5ca1fc0 100644
+index e7b11cb..4ebd944 100644
 --- a/src/gallium/targets/osmesa/meson.build
 +++ b/src/gallium/targets/osmesa/meson.build
-@@ -25,6 +25,24 @@
+@@ -25,12 +25,34 @@
  # trying to RUN it on the builder; linking it is the proof, running it on-device
  # is the next one.
  
@@ -155,7 +186,11 @@ index e7b11cb..5ca1fc0 100644
 +  libosmesa_st, libgallium, libmesa, libws_null, libglapi, libglapi_bridge,
 +]
 +if with_gallium_virgl
-+  osmesa_link_whole += [libvirgl, libvirglcommon]
++  # virgl_screen references the gallium VIDEO layer (vl_video_buffer_*);
++  # non-video targets satisfy it with the stub, exactly as the dri targets
++  # do when video is off. llvmpipe never referenced vl, which is why this
++  # target lived without it until virgl arrived.
++  osmesa_link_whole += [libvirgl, libvirglcommon, libgalliumvl_stub]
 +  if with_thylacine
 +    osmesa_link_whole += libvirglthylacine
 +  endif
@@ -164,7 +199,14 @@ index e7b11cb..5ca1fc0 100644
  libosmesa = static_library(
    'OSMesa',
    'osmesa_target.c',
-@@ -42,11 +60,10 @@ libosmesa = static_library(
+   include_directories : [
+     inc_include, inc_src, inc_gallium, inc_gallium_aux, inc_gallium_winsys,
+-    inc_gallium_drivers,
++    inc_gallium_drivers, inc_virtio,
+   ],
+   # glapi is a PAIR at 26.1.6, and neither half is inside libmesa -- which is
+   # what the first cut of this file assumed. libglapi (shared-glapi/core.c) has
+@@ -42,11 +64,10 @@ libosmesa = static_library(
    #
    # The archive built perfectly well with neither, and again with only one. Only
    # linking the executable below ever said so.
@@ -179,7 +221,7 @@ index e7b11cb..5ca1fc0 100644
    ],
    install : true,
  )
-@@ -65,3 +82,21 @@ osmesa_prove = executable(
+@@ -65,3 +86,21 @@ osmesa_prove = executable(
    ],
    install : true,
  )

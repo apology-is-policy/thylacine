@@ -1305,6 +1305,16 @@ build_sysroot() {
     fi
     cp -R "$glvendor/GL" "$glvendor/KHR" "$sysroot/include/"
     echo "    GL        include/GL + include/KHR installed from third_party (#146/#153)"
+    # Warp-3: the thyla syscall headers ride the same chokepoint, for the
+    # same reason. The Mesa warp winsys compiles <thyla/syscall.h> from
+    # INSIDE the pouch sysroot's -isystem (the exelist path meson cannot
+    # filter); the cross file's c_args -I is the belt, this is the braces --
+    # meson re-reads cross files only at setup, so a reconfigured builder
+    # tree would quietly keep the OLD c_args while the sysroot copy is
+    # refreshed by every sysroot rebuild. Source of truth is the in-repo
+    # libt include; headers only, never lib/ (#148).
+    cp -R "$REPO_ROOT/usr/lib/libt/include/thyla" "$sysroot/include/"
+    echo "    thyla     include/thyla installed from usr/lib/libt (Warp-3)"
     # Drift check: if a pulled clade gl/ tree exists and its headers differ,
     # the vendored copy needs a refresh commit (the builder cycle bumped
     # Mesa). Warn — never silently prefer either copy.

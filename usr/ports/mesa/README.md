@@ -33,9 +33,13 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`e2c39274a85ba70889679f051cf5a42ffb85a249` at 0006; the 0005 tip was
+(`3b7b48881ad568f5891f2f358d901ab1ed30def8` at 0006; the 0005 tip was
 `414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
+(The builder's fork currently sits at the pre-amend 0006 commit with the
+three Warp-3c fix files DIRTY on top — content-identical to the durable
+0006, so a reconcile there will refuse until the next cycle commits or
+resets it; that refusal is the guard, not a surprise.)
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
 
@@ -347,13 +351,35 @@ Three things about that set are not guessable and cost a round each:
   -Dgallium-drivers=llvmpipe,virgl
   ```
 
-  (a meson reconfigure on the existing tree, not a fresh setup). The
-  osmesa target then carries both drivers; `GALLIUM_DRIVER=virpipe`
-  (or `virgl`) selects the warp screen at runtime, with a loud fallback
-  to llvmpipe. `virgl-prove` is the new gate binary beside
-  `osmesa-prove`: it never walks the CAP_JIT clearance (so a silent
-  llvmpipe fallback cannot pass it) and asserts GL_RENDERER names
-  virgl.
+  (a meson reconfigure on the existing tree, not a fresh setup; with
+  the 26.1.6 meson floor that is `/build/venv-meson/bin/meson setup
+  --reconfigure`, and it must run AGAIN after any missing-LLVM-archive
+  repair -- meson caches a failed `--libs` answer and reports "LLVM
+  found: YES" over empty link args). The osmesa target then carries
+  both drivers; `GALLIUM_DRIVER=virpipe` (or `virgl`) selects the warp
+  screen at runtime, with a loud fallback to llvmpipe. `virgl-prove`
+  is the new gate binary beside `osmesa-prove`: it never walks the
+  CAP_JIT clearance (so a silent llvmpipe fallback cannot pass it) and
+  asserts GL_RENDERER names virgl.
+
+  Three port findings from the first builder cycle, all folded into the
+  patch, all of the builds-clean-when-wrong class:
+
+  - the osmesa target needed `inc_virtio` (`virgl_winsys.h` includes
+    `virtio-gpu/virgl_hw.h`);
+  - `<libsync.h>` resolves upstream from LIBDRM's installed copy, which
+    dropping `dep_libdrm` orphaned -- Thylacine points the include path
+    at Mesa's own vendored, self-contained `src/util/libsync.h`
+    instead. NOTE: this slipped GPU-DESIGN 2.3's portability census
+    because `libsync` matches none of the grepped patterns
+    (`__linux__` / `<sys/*>` / `DETECT_OS`) -- that census was
+    pattern-bounded, not complete;
+  - `inline_sw_helper.h`'s own `virpipe` arm hardwires
+    `virgl_vtest_winsys_wrap` under `GALLIUM_VIRGL`; on Thylacine the
+    arm is dead (the osmesa target forks to the warp winsys first) and
+    is guarded out so it cannot drag the vtest symbol into the link.
+    The target also links `libgalliumvl_stub` -- virgl's screen
+    references the gallium video layer, which llvmpipe never did.
 
 ## Refresh — per arc, not "when the fork stops changing"
 
