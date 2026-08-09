@@ -33,13 +33,14 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`3b7b48881ad568f5891f2f358d901ab1ed30def8` at 0006; the 0005 tip was
+(`d302f50eb931bef25c8deab034093292adcc39ae` at 0006; the 0005 tip was
 `414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
-(The builder's fork currently sits at the pre-amend 0006 commit with the
-three Warp-3c fix files DIRTY on top — content-identical to the durable
-0006, so a reconcile there will refuse until the next cycle commits or
-resets it; that refusal is the guard, not a surprise.)
+(The builder's fork sits one amend behind the durable 0006 — the pre-amend
+commit plus the three Warp-3c fix files dirty on top, and without the #191
+disk-cache fallback. A reconcile there will refuse — that refusal is the
+guard — so the round-trip resets it to the 0005 tip and `git am`s the
+durable 0006, then verifies `d302f50e…`.)
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
 
@@ -362,8 +363,8 @@ Three things about that set are not guessable and cost a round each:
   CAP_JIT clearance (so a silent llvmpipe fallback cannot pass it) and
   asserts GL_RENDERER names virgl.
 
-  Three port findings from the first builder cycle, all folded into the
-  patch, all of the builds-clean-when-wrong class:
+  Four port findings from the first two builder cycles, all folded into
+  the patch, all of the builds-clean-when-wrong class:
 
   - the osmesa target needed `inc_virtio` (`virgl_winsys.h` includes
     `virtio-gpu/virgl_hw.h`);
@@ -379,7 +380,16 @@ Three things about that set are not guessable and cost a round each:
     arm is dead (the osmesa target forks to the warp winsys first) and
     is guarded out so it cannot drag the vtest symbol into the link.
     The target also links `libgalliumvl_stub` -- virgl's screen
-    references the gallium video layer, which llvmpipe never did.
+    references the gallium video layer, which llvmpipe never did;
+  - (#191, found by the tri gate, not the builder) virgl's disk-cache
+    keying `assert(note)`s a build-id note into existence, but the
+    static `ld.lld` ET_EXEC never passes `--build-id` and carries none,
+    so screen creation aborted in-guest before any triangle. The fork
+    makes the keying contribution conditional: no note -> return with
+    `disk_cache` NULL (the configuration `MESA_SHADER_CACHE_DISABLE`
+    ships, NULL-handled by every consumer) rather than link-flagging
+    `--build-id`, which would have *activated* the cache onto the 9P
+    home and its untested flock/mmap surface.
 
 ## Refresh — per arc, not "when the fork stops changing"
 

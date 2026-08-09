@@ -1,4 +1,4 @@
-From 8f3ef3d60d81d29f575d8a41ecf748fd01a882a6 Mon Sep 17 00:00:00 2001
+From 1f6f36f0c85117299dd833cd44aa46bc1cc76745 Mon Sep 17 00:00:00 2001
 From: Michal Frdlik <michaelf.ms@gmail.com>
 Date: Sat, 8 Aug 2026 22:39:39 +0200
 Subject: [PATCH] Thylacine Warp-3: the virgl winsys over the /srv/warp GPU
@@ -41,10 +41,20 @@ triangle-on-the-GPU prover in-guest. Discrimination is structural
 twice over: it never walks the CAP_JIT clearance (llvmpipe cannot run
 without it, so a fallback cannot paint the triangle) and GL_RENDERER
 must name virgl and not be bare llvmpipe. Exit 0/2/1 = PASS/SKIP/FAIL.
+
+The virgl disk-cache keying asserted a build-id note into existence; a
+static link that never passed --build-id has none, so the assert
+aborted screen creation in-guest at first tri-gate contact. The keying
+contribution is now conditional: no note -> return with disk_cache
+NULL, the exact configuration MESA_SHADER_CACHE_DISABLE ships, which
+every consumer already handles (the getter returns NULL and
+disk_cache_destroy is NULL-guarded). llvmpipe's util-path identifier
+fallback degrades the same way.
 ---
  meson.build                                   |  10 +
  .../target-helpers/inline_sw_helper.h         |   7 +-
  src/gallium/drivers/virgl/meson.build         |  28 +-
+ src/gallium/drivers/virgl/virgl_screen.c      |   6 +-
  src/gallium/meson.build                       |   8 +-
  src/gallium/targets/osmesa/meson.build        |  49 +-
  src/gallium/targets/osmesa/osmesa_target.c    |  40 +-
@@ -54,7 +64,7 @@ must name virgl and not be bare llvmpipe. Exit 0/2/1 = PASS/SKIP/FAIL.
  .../virgl/thylacine/virgl_thylacine_winsys.c  | 631 ++++++++++++++++++
  .../winsys/virgl/thylacine/warp_client.c      | 417 ++++++++++++
  .../winsys/virgl/thylacine/warp_client.h      | 116 ++++
- 12 files changed, 1529 insertions(+), 11 deletions(-)
+ 13 files changed, 1534 insertions(+), 12 deletions(-)
  create mode 100644 src/gallium/targets/osmesa/virgl_prove.c
  create mode 100644 src/gallium/winsys/virgl/thylacine/meson.build
  create mode 100644 src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
@@ -147,6 +157,25 @@ index 7ddcc90..a984ae0 100644
    virgl_deps += libvirgldrm
    virgl_deps += libvirglvtest
  endif
+diff --git a/src/gallium/drivers/virgl/virgl_screen.c b/src/gallium/drivers/virgl/virgl_screen.c
+index 1e0b7cb..aabac4d 100644
+--- a/src/gallium/drivers/virgl/virgl_screen.c
++++ b/src/gallium/drivers/virgl/virgl_screen.c
+@@ -905,9 +905,13 @@ static void virgl_disk_cache_create(struct virgl_screen *screen)
+    _mesa_blake3_init(&blake3_ctx);
+ 
+ #if HAVE_BUILD_ID
++   /* A static link that never passed --build-id carries no note; without a
++    * build key the cache cannot be versioned, so run cacheless rather than
++    * abort. */
+    const struct build_id_note *note =
+       build_id_find_nhdr_for_addr(virgl_disk_cache_create);
+-   assert(note);
++   if (!note)
++      return;
+ 
+    unsigned build_id_len = build_id_length(note);
+    assert(build_id_len == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
 diff --git a/src/gallium/meson.build b/src/gallium/meson.build
 index d95ecb5..114154e 100644
 --- a/src/gallium/meson.build
