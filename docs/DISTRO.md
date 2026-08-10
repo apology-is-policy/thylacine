@@ -678,26 +678,93 @@ for both reasons distinguishably.
 
 ### 7.2 D-5: the stock rootfs pipeline + THE ARC GATE
 
-- Fetch/pin the Alpine aarch64 minirootfs (version-pinned + checksummed at
-  build time; vendoring vs fetch decided by size at impl). The tarball is
-  staged UNMODIFIED.
-- ~~**`stratum-fs put` learns symlinks**~~ — **ALREADY BUILT** (verified
-  2026-08-10 at D-4, §2): the recursive put lstat/readlink/`stm_9p_symlink`s
-  every `S_IFLNK` and REFUSES rather than skipping when it cannot. What
-  remains of this item is a runtime assertion that a pool symlink is
-  traversable by the guest resolver, which no leg has exercised yet — the
-  Alpine `/bin/sh` symlink is overwritten by a real file at stage time, so
-  D-1's symlink battery has only ever run against the ramfs. Device nodes in
-  the tarball are skipped, documented.
-- The bundle: `/vivarium/alpine/rootfs` in the existing bundle shape;
-  `viv run` entrypoint `/bin/sh`.
-- **THE ARC GATE, boot-fatal in joey**: `viv run /vivarium/alpine
-  /bin/sh -c 'echo DISTRO-GATE-OK'` — through the symlink, through ldso,
-  through stock libc. The L-6c gate-fatality discipline (a gate that cannot
-  redden is a disabled test).
+**The fixture, measured 2026-08-10** (`alpine-minirootfs-3.21.0-aarch64.tar.gz`,
+sha256 `f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1`,
+3.85 MiB compressed / 8.1 MiB extracted). The composition is the reason this
+chunk is shaped the way it is:
+
+| Entry kind | Count | Consequence for D-5 |
+|---|---|---|
+| symlinks | **335** (64%) | The image is mostly links. Pool-symlink fidelity is the load-bearing property, not an incidental one. |
+| regular files | 88 | Of which exactly two matter to the gate: `bin/busybox` (919 KB) and `lib/ld-musl-aarch64.so.1` (723 KB). |
+| directories | 97 | Includes `/proc`, `/sys`, `/dev`; `/net` + `/env` are Thylacine-shaped and must be added as anchors. |
+| device nodes | **0** | The planned "device nodes are skipped, documented" item is **VACUOUS for this image** — there are none to skip. Recorded as a measurement rather than performed as a step. `tar -xzf` exits 0 with no privileged operation. |
+
+Two symlink shapes are present and they behave differently:
+`/bin/sh -> /bin/busybox` is **absolute** (I-28 re-anchors it at the container's
+own `root_spoor`, which is exactly the containment D-1 built), and
+`/etc/os-release -> ../usr/lib/os-release` is **relative**, crossing `..` and
+back down.
+
+**Correction to the planned gate line.** `viv run` takes exactly three
+arguments — `usr/viv/src/main.rs:653` rejects anything else (`args.len() != 3`)
+— so `viv run /vivarium/alpine /bin/sh -c '…'` names a CLI form that does not
+exist. The entrypoint comes from the bundle's `config.json`, as it does for
+every other bundle. No CLI change is made for this: an argv override would put
+the runner in a position to contradict the manifest, and the manifest is the
+only thing that can declare a phenotype (VIVARIUM §12.1 rule 1). The gate's
+command therefore lives in `process.args` as `["/bin/sh", "-c", "…"]`.
+
+**Two bundles, not a flip.** The gate gets a NEW `/vivarium/alpine-stock`;
+the existing `/vivarium/alpine` is left exactly as it is.
+
+- `/vivarium/alpine` substitutes busybox-**static** at `/bin/sh`, and all nine
+  `L6C-*` legs plus `D2-*`/`D3-*`/`D4-*` run through it. Flipping it to the
+  stock dynamic shell would make that entire leg list depend on D-4, so any
+  D-4 regression would present as "the shell did not run" with no first-missing
+  signal — `tools/build.sh` already carries this reasoning at the substitution
+  site.
+- Two bundles also *are* the discrimination: stock gate red while `L6C-A..I`
+  stay green isolates the fault to the stock-dynamic path specifically.
+- It costs a second 8.1 MiB copy in the pool. That is the price of the signal.
+
+**"UNMODIFIED" means: no stock file is replaced, removed, or edited.** The only
+additions are the mount anchors the recipe structurally requires (a bind needs
+an existing mount point): the `/net` and `/env` directories, and the six
+`/dev` leaf files. Nothing is written into the rootfs to carry the gate — the
+script rides in `process.args`, so the staged tree is the tarball plus anchors.
+
+**THE ARC GATE, boot-fatal in joey.** Four legs, ordered so that each one adds
+**exactly one** new mechanism to the one before it; that is what makes a
+first-missing marker name a cause rather than a symptom.
+
+| Leg | Marker | The one new mechanism | Red alone means |
+|---|---|---|---|
+| A | `DISTRO-A-stock-sh` | The whole D-1..D-4 chain at once: `/bin/sh` (an absolute POOL symlink) -> stock ET_DYN PIE busybox -> `PT_INTERP` -> stock ldso -> applet dispatch on `basename(argv[0]) == "sh"`. Emitted by a shell BUILTIN, so no second exec is involved. | The stock shell cannot start at all. |
+| B | `DISTRO-B-stock-exec` | fork + exec of a stock dynamic binary FROM a stock dynamic parent, in busybox's **multiplexer** form (`/bin/busybox echo` — a real file, argv[0]-independent). | Exec-from-a-dynamic-parent is broken, independent of symlinks and of argv[0]. |
+| C | `DISTRO-C-applet-by-symlink` | A second absolute pool symlink resolved for **exec**, plus argv[0] applet dispatch (`/bin/ls`). | The kernel leaked the symlink-RESOLVED path into `argv[0]`: busybox would then see `basename == "busybox"`, run as the multiplexer, print usage, and emit nothing. |
+| D | `DISTRO-D-relative-symlink` | A **relative** pool symlink crossing `..` (`/etc/os-release`), read through the already-proven multiplexer form so the link is the only new variable. Its content also re-asserts the version pin (`VERSION_ID=3.21.0`) *inside the guest*. | Relative pool symlinks are not traversable by the guest resolver. |
+| — | `DISTRO-DONE` | The script reached its end. | The shell died mid-script rather than a leg merely failing. |
+
+Leg C is worth stating precisely, because it is easy to overclaim: it does
+**not** discriminate `--argv0` from passing the path alone (§7.1's property —
+`joey.c` records that nothing on this rootfs can produce a vector where those
+two differ, and the claim is carried at the unit level by
+`exec.interp_argv_shape`). What C discriminates is a different and previously
+untested claim: **symlink resolution must not become visible in `argv[0]`.**
+Every busybox-based distro depends on it.
+
+Equally: the gate does **not** exercise a relative symlink on the *loader* path.
+`libc.musl-aarch64.so.1` matches the `"c."` entry of musl's reserved list
+(`third_party/musl/ldso/dynlink.c:1074-1082`), so `load_library` short-circuits
+it to `&ldso` and never opens the file — the `/lib/libc.musl-aarch64.so.1 ->
+ld-musl-aarch64.so.1` link is present but never traversed. Leg D covers the
+relative class through an ordinary `open`, which is why it exists.
+
+**No `>` redirection anywhere in the gate script.** #201: the vivarium's
+`openat` refuses `O_CREAT` unconditionally, and a plain `>` passes
+`O_WRONLY|O_CREAT|O_TRUNC` even onto a file that already exists. Every
+assertion is therefore a `$( )` capture (a pipe) or a `2>&1` dup — the same
+constraint D-3c's gate line already works under. This is a real fidelity gap
+being routed around, not a stylistic choice; #201 remains the blocker and its
+full fix must re-open #192.
+
 - Bake note: the bundle is pool-resident — the #126 stale-binary trap
   applies to it VERBATIM (a PRESERVE=1 build runs the OLD rootfs); the gate
   leg's comment carries the pointer.
+- Soft-skip when the tarball is absent, so the default build stays hermetic
+  (the L-6c precedent: an absent fixture is a missing input, not a broken
+  kernel). The fatality applies to a gate that RAN.
 
 ### 7.3 D-close
 
