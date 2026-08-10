@@ -1100,6 +1100,14 @@ echo D3-GETCONF-BEGIN
 echo D3-GETCONF-END-rc=$?
 d3_out=$(/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE 2>&1); d3_rc=$?
 [ "$d3_rc" = 0 ] && [ "$d3_out" = 4096 ] && echo D3-A-getconf-pagesize-4096
+echo D4-BYNAME-BEGIN
+/usr/bin/getconf PAGESIZE 2>&1
+echo D4-BYNAME-END-rc=$?
+d4_out=$(/usr/bin/getconf PAGESIZE 2>&1); d4_rc=$?
+[ "$d4_rc" = 0 ] && [ "$d4_out" = 4096 ] && echo D4-A-byname-getconf-4096
+d4b=$(/usr/bin/getconf 2>&1)
+echo D4-USAGE-RAW:$d4b
+case "$d4b" in "Usage: /usr/bin/getconf system_var"*) echo D4-B-argv0-is-the-program ;; esac
 echo L6C-DONE
 GATEEOF
             chmod 0644 "$ab/rootfs/gate/run.sh"

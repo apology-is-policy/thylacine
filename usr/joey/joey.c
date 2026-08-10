@@ -1143,6 +1143,39 @@ static int do_alpine_shell_gate(void) {
         // can produce; the raw BEGIN/END block above it in the script is
         // diagnostics, not the assertion.
         L6C_MK("D3-A-getconf-pagesize-4096"),
+        // DISTRO D-4. The SAME program, the SAME expected bytes -- and that
+        // sameness is the point. D3-A above runs getconf by handing it to the
+        // interpreter explicitly; this one names ONLY the program, so the
+        // kernel has to find PT_INTERP itself, resolve /lib/ld-musl-aarch64.so.1
+        // through the container's namespace, load THAT, and hand the program
+        // back on its command line. A gate that merely proved "a dynamic binary
+        // ran" would already have been green before D-4 was written; the
+        // difference between the two lines is the whole feature.
+        //
+        // TWO legs, and they fail for different reasons. A is the mechanism:
+        // rc 0 AND stdout exactly `4096`, which also pins argc == 2 and
+        // argv[1] == "PAGESIZE", since getconf answers any other vector with
+        // its usage text instead of a number.
+        //
+        // B is the ARGV[0] claim, and it is a separate leg because the rewrite
+        // inserts four slots ahead of the program and every one of them is a
+        // string the program must never see. musl-utils' getconf prints
+        // `Usage: %s system_var` with %s = argv[0] (it is the only staged
+        // dynamic binary that reports its own name), so a leaked interpreter
+        // path, a leaked "--argv0", or a leaked "--" shows up here as literal
+        // rendered text rather than as a silent fidelity drift.
+        //
+        // What NEITHER leg can discriminate: --argv0 versus passing the path
+        // alone. Both put the same string in argv[0] whenever the caller's
+        // argv[0] equals the path it resolved, and nothing on this rootfs can
+        // produce a vector where they differ -- that needs a program calling
+        // execve with a chosen argv[0], and the only shells here pass the word
+        // they typed. That claim is asserted at the unit level instead
+        // (`exec.interp_argv_shape`), the same disposition D-3b recorded for
+        // its arm-2 R/R+X cases: no in-guest producer, so no gate coverage is
+        // claimed for it.
+        L6C_MK("D4-A-byname-getconf-4096"),
+        L6C_MK("D4-B-argv0-is-the-program"),
         L6C_MK("L6C-DONE"),
     };
 #undef L6C_MK

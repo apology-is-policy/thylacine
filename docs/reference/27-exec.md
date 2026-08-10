@@ -417,3 +417,120 @@ gate and the frame-run computation — are separately load-bearing.
 ## Naming rationale
 
 `exec_setup` (not `exec` proper) — emphasizes that this is the load-and-map step, NOT the transition-to-EL0 step. The full exec syscall (Phase 5+) is `exec()` + the asm trampoline; `exec_setup` is the address-space-population half.
+
+## DISTRO D-4 — the PT_INTERP rewrite to the interpreter
+
+`elf_load` has always reported `PT_INTERP` as `ELF_LOAD_HAS_INTERP`, and until D-4 that
+was only ever a refusal. D-4 upgrades it from diagnosis to **dispatch** for a
+`PHENO_LINUX` image, and leaves it a refusal for every native one. The kernel still loads
+exactly ONE image per exec, before and after — what changes is WHICH image.
+
+### Where it lives, and why that placement is load-bearing
+
+Inside `exec_load_into` (`kernel/exec.c`), immediately after the first `elf_load`. Two
+consequences fall out of that choice rather than being arranged:
+
+- **ONE mechanism, both entries.** The in-container `execve` (`viv_execve` ->
+  `sys_execve_core`) and the runner's ENTRY spawn (`sys_spawn_full_argv_thunk` ->
+  `exec_setup_from_spoor`) both funnel here, so there is no second copy of the decision.
+- **`/proc/<pid>/exe` stays faithful.** The Proc-side stamps (`proc_set_name`,
+  `proc_set_exe_path`) run in the two CALLERS, which still hold the ORIGINAL `exe`. The
+  2026-08-05 vote listed "`/proc/self/exe` reports ldso" as an accepted gap; it does not,
+  and the reason is purely that the rewrite is below the stamps.
+
+`exec_load_into` gained `struct Proc *nsp` for this. It is read-only in the strict sense
+— no field of it is written — and supplies exactly two things: the phenotype that gates
+the rewrite, and the namespace the interpreter resolves through. `NULL` disables the
+rewrite entirely and restores the pre-D-4 behaviour byte for byte.
+
+### The steps
+
+1. `elf_read_interp` (`kernel/elf.c`) extracts the path from the already-read header
+   prefix — bounded, NUL-checked, `ELF_INTERP_MAX` = 255. Anything unreadable,
+   unterminated, empty, or over-long is reported ABSENT, never truncated: a truncated
+   `/lib/ld-musl-aarch64.so.1` is `/lib/ld`, which names a different file.
+2. `exec_resolve_from_namespace(nsp, ...)` — the SAME `OEXEC`-gated helper the program
+   itself came through, so "what is executable from this namespace" has one answer and
+   not two. The interp path is container-relative and crosses its own symlink, which is
+   why D-1 precedes D-4.
+3. `exec_interp_argv` builds the rebuilt vector (below).
+4. `exec_read_header` + `elf_load` again, now on the interpreter.
+
+**One level, structurally.** The block is straight-line, not a loop, so the second
+`elf_load` sees the interpreter's phdrs and an interpreter carrying its own `PT_INTERP`
+falls through to the unchanged refusal.
+
+### The argv shape
+
+```
+[interp_path, "--argv0", orig_argv0, "--", orig_path, orig argv[1..]]
+```
+
+`argc + 4` slots. musl's direct mode uses ONE slot for both "which file to load" and
+"what argv[0] becomes" (`dynlink.c:1901` then `:1913`), so passing the path alone would
+hand the program the name it RESOLVED from rather than the name its caller INVOKED it by
+— and `argv[0]` is a dispatch input for both programs this arc runs (busybox picks its
+applet from `basename(argv[0])`; a login shell is identified by a leading `-`).
+`--argv0` separates them; musl applies it at `dynlink.c:2071`. `--` is unconditional so a
+program path beginning with `--` is not eaten by the option parser. musl consumes exactly
+the four inserted slots and rewrites argc in `argv[-1]` (`dynlink.c:1891`), so the
+program observes its original `argc` and vector.
+
+`orig_path` comes from a NEW `prog_name` parameter threaded from the callers, **not** from
+`exe->path`. That is I-33: the Spoor's `Path` is cosmetic and no syscall result may turn
+on it, so an exec that failed because a path-alloc OOM'd would be the invariant's own
+counterexample. The argv spawn carries the name inline in `struct spawn_full_argv_args`
+(the resolution that consumed it happened in the parent); the two native-only spawn
+thunks pass `NULL`, which is the honest answer — a `PHENO_LINUX` Proc cannot reach a
+native syscall number at all, so neither can produce a dynamic image.
+
+### Disposal
+
+The rewrite allocates two things — the interpreter's pinned Spoor and the rebuilt argv
+block — and `exec_load_into` was split into a thin wrapper plus `exec_load_body` so both
+have exactly ONE disposal site. The body reports what it took through out-params, so all
+dozen of its early returns are covered by construction. This is the D-3c F1/F5 lesson
+applied ahead of time: a cleanup that was right at three sites and missing at the fourth.
+
+### What this does NOT do
+
+No auxv change. Direct mode is selected by `aux[AT_PHDR] == ldso.phdr`
+(`dynlink.c:1834`), which is automatically true once the ldso IS the loaded image — our
+`AT_PHDR` (`exec.c:655`) and musl's `laddr(&ldso, e_phoff)` are the same value for a
+segment-0-at-file-offset-0 PIE. `AT_BASE` and `AT_ENTRY` are for the in-kernel dual-image
+model the 2026-08-05 vote REJECTED.
+
+### Known gaps (the DISTRO.md section 3.2 ledger)
+
+| Surface | Behaviour | Why |
+|---|---|---|
+| `argc == 0` | becomes `argc == 1`, `argv[0] == ""` | the loader's command line must name a pathname |
+| mode `0111` (X, not R) | refused at load | the ldso re-opens the program `O_RDONLY`; the kernel's `OEXEC` gate still runs first, so this only SUBTRACTS reachability |
+| the program path | resolved twice (kernel peek, then ldso `open`) | benign — the kernel's resolution only decides "this needs an interpreter"; a file swapped between them is caught by `map_library`, never by the kernel mapping wrong bytes |
+| non-musl interpreters | `--argv0`/`--` are a musl CLI dependency | glibc distros are already a recorded seam; failure is LOUD (usage text, exit 1) |
+
+### Tests, and what each can and cannot see
+
+`exec.interp_argv_shape` asserts the block BYTE FOR BYTE. Not optional coverage:
+`exec_build_init_stack` EXTINCTS when the NUL count disagrees with argc, so an off-by-one
+in the slot arithmetic is a dead kernel rather than a failed exec. It is also the ONLY
+place the `--argv0` claim is discriminable — in a container a caller's `argv[0]` always
+equals the path it resolved.
+
+`elf.read_interp` covers the shared bounded walk from the side that ACTS on its answer
+(`elf_brand_hint` is now a caller of it), including the absent-not-truncated cases.
+
+In-guest: `D4-A-byname-getconf-4096` and `D4-B-argv0-is-the-program`, boot-fatal in the
+L-6c leg list.
+
+**Three-way discrimination, measured 2026-08-10 — the two layers are complementary, and
+neither alone is sufficient:**
+
+| Sabotage | Gate | Unit suite |
+|---|---|---|
+| control (none) | PASS (D4-A + D4-B) | 1389/1389 |
+| S1 — rewrite disabled | REDDENS at exactly `D4-A`; `D3-A` stays green | **fully blind** (1389/1389 through it) |
+| S2 — `argv[0] := path` (the vote's literal shape) | **fully green through it** (GATE PASS) | reddens on exactly its own leg |
+
+S1 is why the gate exists: it names by-NAME execution, which no unit test reaches. S2 is
+why the unit test exists: the claim it carries has no in-guest producer.

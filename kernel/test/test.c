@@ -373,6 +373,7 @@ void test_vdso_mono_matches_timer(void);
 void test_vdso_maps_ro_read(void);
 void test_vdso_maps_ro_write_faults(void);
 void test_exec_setup_smoke(void);
+void test_exec_interp_argv_shape(void);
 void test_exec_from_spoor_rodata_dispatch(void);
 void test_exec_unaligned_segment_loads(void);
 void test_exec_unaligned_lazy_segment_loads(void);
@@ -558,6 +559,7 @@ void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
 void test_elf_brand_hint(void);
 void test_elf_pie_load_bias(void);
+void test_elf_read_interp(void);
 void test_dev_boot_registration_smoke(void);
 void test_dev_lookup_unknown(void);
 void test_dev_devnone_ops_smoke(void);
@@ -1877,6 +1879,7 @@ struct test_case g_tests[] = {
     { "vdso.maps_ro_read",             test_vdso_maps_ro_read,             false, NULL },
     { "vdso.maps_ro_write_faults",     test_vdso_maps_ro_write_faults,     false, NULL },
     { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
+    { "exec.interp_argv_shape",        test_exec_interp_argv_shape,        false, NULL },
     { "exec.from_spoor_rodata_dispatch", test_exec_from_spoor_rodata_dispatch, false, NULL },
     // #149: a non-page-aligned PT_LOAD vaddr. One test per obligation, so no
     // single fix satisfies all four: the eager arm's bytes + zero slack, the
@@ -2129,6 +2132,7 @@ struct test_case g_tests[] = {
     { "elf.bounds_rejection",          test_elf_bounds_rejection,          false, NULL },
     { "elf.policy_rejection",          test_elf_policy_rejection,          false, NULL },
     { "elf.brand_hint",                test_elf_brand_hint,                false, NULL },
+    { "elf.read_interp",               test_elf_read_interp,               false, NULL },
     { "elf.pie_load_bias",             test_elf_pie_load_bias,             false, NULL },
     { "dev.boot_registration_smoke",   test_dev_boot_registration_smoke,   false, NULL },
     { "dev.lookup_unknown",            test_dev_lookup_unknown,            false, NULL },

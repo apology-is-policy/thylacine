@@ -639,3 +639,118 @@ void test_elf_brand_hint(void) {
     TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, size), ELF_BRAND_UNKNOWN,
         "a non-ELF blob hints UNKNOWN");
 }
+
+// elf.read_interp -- DISTRO D-4. The brand hint above is now a CALLER of this
+// walk, so these cases cover the shared bounds logic from the side that ACTS on
+// its answer: D-4 resolves the returned path and execs it, which makes every
+// "absent" case a refusal-to-run rather than a missing diagnostic. The bar is
+// therefore stricter than the hint's -- a partial or truncated path must be
+// reported as ABSENT and never as a shorter path, because a shorter path names
+// a DIFFERENT file that the kernel would then load.
+// Plant `s` as this blob's PT_INTERP just past the headers. `extent` overrides
+// p_filesz when non-zero (the unterminated case). Returns the size a caller
+// must hand elf_read_interp for the whole string to be present.
+static size_t plant_interp(const char *s, size_t extent) {
+    const u32 flags[1] = { PF_R | PF_X };
+    size_t at = build_elf(flags, 1);
+    size_t n = 0;
+    while (s[n] != '\0') n++;
+    for (size_t i = 0; i <= n; i++) g_test_elf_blob[at + i] = (u8)s[i];
+    struct Elf64_Phdr *ph = blob_phdrs();
+    ph[0].p_type   = PT_INTERP;
+    ph[0].p_offset = at;
+    ph[0].p_filesz = extent ? (u64)extent : (u64)(n + 1);
+    return at + n + 1;
+}
+
+void test_elf_read_interp(void) {
+    const u32 flags[1] = { PF_R | PF_X };
+    char out[ELF_INTERP_MAX + 1];
+    size_t size;
+
+    // (1) The real thing, byte for byte.
+    {
+        static const char ld[] = "/lib/ld-musl-aarch64.so.1";
+        size_t whole = plant_interp(ld, 0);
+        size_t got = elf_read_interp(g_test_elf_blob, whole, out, sizeof(out));
+        TEST_EXPECT_EQ((u64)got, (u64)(sizeof(ld) - 1),
+            "read_interp returns the interpreter path's length");
+        int same = 1;
+        for (size_t i = 0; i < sizeof(ld); i++) if (out[i] != ld[i]) same = 0;
+        TEST_ASSERT(same, "read_interp copies the path NUL-terminated + verbatim");
+
+        // The hint still agrees -- it is a caller of this now, so a refactor
+        // that broke one silently would have to break both.
+        TEST_EXPECT_EQ(elf_brand_hint(g_test_elf_blob, whole),
+            ELF_BRAND_LINUX_LIKELY, "the brand hint reads through read_interp");
+
+        // (2) A bounded PREFIX that stops before the string: ABSENT. `out` must
+        // be left EMPTY, not holding the previous call's answer -- a caller
+        // that checked only the return value and reused the buffer would
+        // otherwise resolve a stale path.
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole - 1,
+                                            out, sizeof(out)), 0ull,
+            "an interp not wholly inside the handed prefix is ABSENT");
+        TEST_EXPECT_EQ((u64)out[0], 0ull, "the absent case clears the buffer");
+    }
+
+    // (3) Unterminated within its own extent: ABSENT, never scanned past.
+    {
+        static const char part[] = "/lib/ld-musl";
+        size_t whole = plant_interp(part, sizeof(part) - 1);  // extent drops the NUL
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)), 0ull,
+            "an unterminated interp extent is ABSENT");
+    }
+
+    // (4) An EMPTY but terminated interp names nothing -- it must not resolve
+    // as the empty path (which a namespace walk would answer for the root).
+    {
+        static const char empty[] = "";
+        size_t whole = plant_interp(empty, 0);
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)), 0ull,
+            "an empty interp string is ABSENT, not the empty path");
+    }
+
+    // (5) Longer than the bound: ABSENT, and specifically NOT truncated. This
+    // is the case that would be a live defect rather than a missed feature --
+    // a truncated "/lib/ld-musl-aarch64.so.1" is "/lib/ld" or "/lib", both of
+    // which could exist and neither of which is the interpreter.
+    {
+        char longp[ELF_INTERP_MAX + 8];
+        longp[0] = '/';
+        for (size_t i = 1; i < sizeof(longp) - 1; i++) longp[i] = 'a';
+        longp[sizeof(longp) - 1] = '\0';
+        size_t whole = plant_interp(longp, 0);
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)), 0ull,
+            "an over-long interp is ABSENT, never truncated");
+        TEST_EXPECT_EQ((u64)out[0], 0ull, "and leaves no partial path behind");
+    }
+
+    // (6) A caller's buffer smaller than the path is the same answer: absent,
+    // empty. The bound that rejects is whichever is tighter.
+    {
+        static const char ld[] = "/lib/ld-musl-aarch64.so.1";
+        size_t whole = plant_interp(ld, 0);
+        char small[8];
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            small, sizeof(small)), 0ull,
+            "a too-small caller buffer is ABSENT, never a partial copy");
+        TEST_EXPECT_EQ((u64)small[0], 0ull, "and is left empty");
+    }
+
+    // (7) No PT_INTERP at all -- the static binary, the v1.0 native shape.
+    size = build_elf(flags, 1);
+    TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, size,
+                                        out, sizeof(out)), 0ull,
+        "a static ELF has no interpreter");
+
+    // (8) Degenerate inputs never produce a path.
+    TEST_EXPECT_EQ((u64)elf_read_interp(NULL, 4096, out, sizeof(out)), 0ull,
+        "NULL blob is ABSENT");
+    size = build_elf(flags, 1);
+    TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, size, out, 0), 0ull,
+        "a zero-capacity buffer is ABSENT");
+}

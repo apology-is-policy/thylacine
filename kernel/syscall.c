@@ -6554,6 +6554,15 @@ static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
 // boundary, so it can't be on the caller's kernel stack — the caller may return
 // to userspace before the child's thunk runs).
 
+// The one place both spellings of the argv bounds are visible at once. exec.c
+// cannot include syscall.h (the include cycle), so it carries its own names;
+// this is where they are PROVEN equal rather than asserted to be by a comment.
+// #178's whole complaint is mirrors nothing checks -- these two now are.
+_Static_assert(EXEC_ARGV_MAX == SYS_SPAWN_ARGV_MAX,
+               "exec.h argv-count mirror drifted from the syscall ABI");
+_Static_assert(EXEC_ARGV_DATA_MAX == SYS_SPAWN_ARGV_DATA_MAX,
+               "exec.h argv-bytes mirror drifted from the syscall ABI");
+
 struct spawn_args {
     struct Spoor *exe;      // REVENANT R-4: the pinned executable; thunk clunks it
     size_t        exe_size; // stat'd file size (bounds the ELF segment-extent check)
@@ -6577,7 +6586,9 @@ static void sys_spawn_thunk(void *arg) {
     // spoor_clunk on the dev9p pool client's c->lock) are safe because a plain
     // spin_lock hold now disables preemption per-THREAD (spinlock.h #360) --
     // the general rule that replaced the interim whole-thunk IRQ mask.
-    int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, exe_size,
+                                   /*prog_name=*/NULL, 0,   // D-4: native-only entry
+                                   NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {
         // Surfaces as exit_status=1 in the parent's SYS_WAIT_PID.
@@ -6836,7 +6847,9 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     u64 entry = 0, sp = 0;
     // #359/#360: preemptible fresh-thread exec; the c->lock holds are covered
     // by the spinlock preempt count (spinlock.h). See sys_spawn_thunk.
-    int rc = exec_setup_from_spoor(p, exe, exe_size, NULL, 0, 0, &entry, &sp);
+    int rc = exec_setup_from_spoor(p, exe, exe_size,
+                                   /*prog_name=*/NULL, 0,   // D-4: native-only entry
+                                   NULL, 0, 0, &entry, &sp);
     spoor_clunk(exe);
     if (rc != 0) {
         // Installed handles cleaned by proc_free.
@@ -7400,6 +7413,18 @@ struct spawn_full_argv_args {
     // rule 1 -- the vivarium's declaration). false -> the child keeps the
     // phenotype rfork inherited (a native parent's child stays native).
     bool pheno_linux;
+    // DISTRO D-4: the name the caller spawned, carried into the child because
+    // the PT_INTERP rewrite has to put it on the interpreter's command line and
+    // the resolution that consumed it happened in the PARENT. Inline rather
+    // than a second heap block: it is bounded by SYS_SPAWN_NAME_MAX, and a
+    // pointer here would add a free path to five error interleavings that
+    // currently have exactly one heap object to worry about.
+    //
+    // NOT reconstructed from exe->path on the child side: I-33 makes the
+    // Spoor's Path cosmetic, so an exec whose success turned on it would be the
+    // invariant's own counterexample.
+    u32            name_len;
+    char           name[SYS_SPAWN_NAME_MAX + 1];
 };
 
 __attribute__((noreturn))
@@ -7417,6 +7442,11 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     struct spawn_allowance allowance;                // step 5: copy before kfree
     spawn_allowance_copy(&allowance, &sa->allowance);
     bool    pheno_linux   = sa->pheno_linux;         // V-1b: copy before kfree
+    u32     name_len      = sa->name_len;            // D-4: copy before kfree
+    if (name_len > SYS_SPAWN_NAME_MAX) name_len = SYS_SPAWN_NAME_MAX;
+    char    name[SYS_SPAWN_NAME_MAX + 1];
+    for (u32 i = 0; i < name_len; i++) name[i] = sa->name[i];
+    name[name_len] = '\0';
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -7540,6 +7570,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // #359/#360: preemptible fresh-thread exec; the c->lock holds are covered
     // by the spinlock preempt count (spinlock.h). See sys_spawn_thunk.
     int rc = exec_setup_from_spoor(p, exe, exe_size,
+                                   name, name_len,
                                    argv_data, argv_data_len, argc,
                                    &entry, &sp);
     spoor_clunk(exe);
@@ -7648,6 +7679,11 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     // V-1b: carry the phenotype declaration (0 -> KP_ZERO left it false ->
     // the child inherits via rfork).
     sa->pheno_linux = (pheno_flags & SPAWN_PHENO_LINUX) != 0;
+    // D-4: carry the caller's own name for the program. Bounded + NUL-checked
+    // by this function's entry gate above, so the copy is a straight one.
+    sa->name_len = (u32)name_len;
+    for (size_t i = 0; i < name_len; i++) sa->name[i] = name[i];
+    sa->name[name_len] = '\0';
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -8195,7 +8231,8 @@ static s64 sys_execve_core(struct exception_context *ctx,
     }
 
     u64 entry = 0, sp = 0;
-    int rc = exec_load_into(nas, proc_resource_exempt(p), exe, exe_size,
+    int rc = exec_load_into(nas, proc_resource_exempt(p), p, exe, exe_size,
+                            path, (u32)path_len,
                             argv_kbuf, (u32)argv_data_len, (u32)argc,
                             env_kbuf, (u32)env_data_len, (u32)envc,
                             &entry, &sp);

@@ -342,29 +342,38 @@ static bool brand_contains(const char *hay, size_t hay_len, const char *needle) 
     return false;
 }
 
-enum elf_brand elf_brand_hint(const void *blob, size_t size) {
-    if (!blob || size < sizeof(struct Elf64_Ehdr)) return ELF_BRAND_UNKNOWN;
+// DISTRO D-4: the bounded PT_INTERP walk, now the SHARED one -- elf_brand_hint
+// below reads its answer out of this rather than repeating the bounds logic.
+// Splitting it was not a tidiness move: the D-4 rewrite ACTS on the extracted
+// path (it resolves and execs it), so a second copy of "is this offset inside
+// the prefix, is this string terminated" would be a second place for that
+// judgement to be subtly weaker. #140 is the standing demonstration of what
+// two copies of one walk cost.
+size_t elf_read_interp(const void *blob, size_t size, char *out, size_t out_cap) {
+    if (!out || out_cap == 0) return 0;
+    out[0] = '\0';
+    if (!blob || size < sizeof(struct Elf64_Ehdr)) return 0;
 
     const u8 *bytes = (const u8 *)blob;
     const struct Elf64_Ehdr *eh = (const struct Elf64_Ehdr *)blob;
 
     // Only inspect something that is plausibly an aarch64 ELF64 at all; a
-    // non-ELF blob has no brand to report (never a verdict from garbage).
+    // non-ELF blob has no interpreter to report (never a verdict from garbage).
     if (eh->e_ident[EI_MAG0] != ELFMAG0 || eh->e_ident[EI_MAG1] != ELFMAG1 ||
         eh->e_ident[EI_MAG2] != ELFMAG2 || eh->e_ident[EI_MAG3] != ELFMAG3)
-        return ELF_BRAND_UNKNOWN;
-    if (eh->e_ident[EI_CLASS] != ELFCLASS64) return ELF_BRAND_UNKNOWN;
-    if (eh->e_ident[EI_DATA]  != ELFDATA2LSB) return ELF_BRAND_UNKNOWN;
+        return 0;
+    if (eh->e_ident[EI_CLASS] != ELFCLASS64) return 0;
+    if (eh->e_ident[EI_DATA]  != ELFDATA2LSB) return 0;
 
-    if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) return ELF_BRAND_UNKNOWN;
-    if (eh->e_phnum == 0 || eh->e_phnum > ELF_MAX_PHNUM) return ELF_BRAND_UNKNOWN;
+    if (eh->e_phentsize != sizeof(struct Elf64_Phdr)) return 0;
+    if (eh->e_phnum == 0 || eh->e_phnum > ELF_MAX_PHNUM) return 0;
 
     // The phdr table must lie wholly inside the buffer we were handed. The
     // buffer may be a bounded PREFIX of the file (REVENANT's header read), so
     // "not present" is a legitimate, common answer -- never an error.
     u64 ph_off   = eh->e_phoff;
     u64 ph_bytes = (u64)eh->e_phnum * (u64)sizeof(struct Elf64_Phdr);
-    if (ph_off > size || ph_bytes > (u64)size - ph_off) return ELF_BRAND_UNKNOWN;
+    if (ph_off > size || ph_bytes > (u64)size - ph_off) return 0;
 
     const struct Elf64_Phdr *ph = (const struct Elf64_Phdr *)(bytes + ph_off);
     for (u16 i = 0; i < eh->e_phnum; i++) {
@@ -373,20 +382,38 @@ enum elf_brand elf_brand_hint(const void *blob, size_t size) {
         u64 off = ph[i].p_offset;
         u64 fsz = ph[i].p_filesz;
         if (fsz == 0 || off > size || fsz > (u64)size - off)
-            return ELF_BRAND_UNKNOWN;   // interp not in our prefix
+            return 0;                   // interp not in our prefix
 
         const char *interp = (const char *)(bytes + off);
         size_t n = 0;
         while (n < (size_t)fsz && interp[n] != '\0') n++;
-        if (n == (size_t)fsz) return ELF_BRAND_UNKNOWN; // unterminated: untrusted
+        if (n == (size_t)fsz) return 0; // unterminated: untrusted
 
-        // Both the glibc and musl aarch64 loaders, by substring so a distro's
-        // /lib64 or multiarch path still matches.
-        if (brand_contains(interp, n, "ld-linux") ||
-            brand_contains(interp, n, "ld-musl"))
-            return ELF_BRAND_LINUX_LIKELY;
-        return ELF_BRAND_UNKNOWN;       // some other interpreter: no verdict
+        // An EMPTY interp ("" -- a zero-length but terminated string) names
+        // nothing; treat it as absent rather than resolving the empty path.
+        if (n == 0) return 0;
+        // Longer than we will carry: absent, not truncated. A truncated
+        // interpreter path resolves to a DIFFERENT file, which is the one
+        // outcome worse than refusing.
+        if (n > ELF_INTERP_MAX || n + 1 > out_cap) return 0;
+
+        for (size_t j = 0; j < n; j++) out[j] = interp[j];
+        out[n] = '\0';
+        return n;
     }
 
-    return ELF_BRAND_UNKNOWN;           // static: the v1.0 target, by design
+    return 0;                           // static: the v1.0 target, by design
+}
+
+enum elf_brand elf_brand_hint(const void *blob, size_t size) {
+    char interp[ELF_INTERP_MAX + 1];
+    size_t n = elf_read_interp(blob, size, interp, sizeof(interp));
+    if (n == 0) return ELF_BRAND_UNKNOWN;
+
+    // Both the glibc and musl aarch64 loaders, by substring so a distro's
+    // /lib64 or multiarch path still matches.
+    if (brand_contains(interp, n, "ld-linux") ||
+        brand_contains(interp, n, "ld-musl"))
+        return ELF_BRAND_LINUX_LIKELY;
+    return ELF_BRAND_UNKNOWN;           // some other interpreter: no verdict
 }

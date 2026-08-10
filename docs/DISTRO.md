@@ -53,8 +53,13 @@ The symlink WIRE is fully built; only FOLLOWING is missing:
   T2 shell consumes it since #66).
 - Loom carries SYMLINK/READLINK payload opcodes (Loom-6b).
 - Stratum stores + serves symlinks (the v2.x POSIX surface); `stratum-fs`
-  has `symlink`/`readlink` CLI verbs (`run.c:1235,1312`). Whether the
-  recursive `put` RECREATES symlinks is UNVERIFIED — a D-5 obligation.
+  has `symlink`/`readlink` CLI verbs. **The recursive `put` DOES recreate
+  them** — read 2026-08-10 at D-4, closing what this line called an
+  UNVERIFIED D-5 obligation: `src/cmd/stratum-fs/run.c:750,784-806` `lstat`s
+  each child, `readlink`s an `S_IFLNK`, and calls `stm_9p_symlink`, with an
+  explicit refusal (`:810-816`) rather than a skip when it cannot. Its own
+  comment names the reason — "Alpine's `/bin/sh` IS one". So D-5's
+  verify-then-extend reduces to VERIFY; the extend half is already built.
 - `kernel/stalk.c`, `spoor.h`: zero symlink handling. No native
   SYS_READLINK/SYS_SYMLINK numbers exist.
 
@@ -675,11 +680,14 @@ for both reasons distinguishably.
 - Fetch/pin the Alpine aarch64 minirootfs (version-pinned + checksummed at
   build time; vendoring vs fetch decided by size at impl). The tarball is
   staged UNMODIFIED.
-- **`stratum-fs put` learns symlinks** (Stratum-side, in-scope): the CLI
-  symlink verb exists (`run.c:1235`); the recursive put's walker must
-  recreate `S_IFLNK` entries via it. Verify-then-extend — this is the
-  unverified link in the chain (§2). Device nodes in the tarball are
-  skipped, documented.
+- ~~**`stratum-fs put` learns symlinks**~~ — **ALREADY BUILT** (verified
+  2026-08-10 at D-4, §2): the recursive put lstat/readlink/`stm_9p_symlink`s
+  every `S_IFLNK` and REFUSES rather than skipping when it cannot. What
+  remains of this item is a runtime assertion that a pool symlink is
+  traversable by the guest resolver, which no leg has exercised yet — the
+  Alpine `/bin/sh` symlink is overwritten by a real file at stage time, so
+  D-1's symlink battery has only ever run against the ramfs. Device nodes in
+  the tarball are skipped, documented.
 - The bundle: `/vivarium/alpine/rootfs` in the existing bundle shape;
   `viv run` entrypoint `/bin/sh`.
 - **THE ARC GATE, boot-fatal in joey**: `viv run /vivarium/alpine

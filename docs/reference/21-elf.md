@@ -256,6 +256,32 @@ R5-G rejected `PT_INTERP` and `PT_DYNAMIC` together, as complementary evidence t
 
 `elf.pie_load_bias` asserts both directions, because accepting `PT_DYNAMIC` everywhere would satisfy a one-sided test.
 
+**AS-BUILT at DISTRO D-4 (2026-08-10).** The reject is unchanged and still correct, but
+it is no longer the whole story: `exec_load_into` now READS `ELF_LOAD_HAS_INTERP` as a
+dispatch signal for a `PHENO_LINUX` image and restarts the load on the interpreter
+(`docs/reference/27-exec.md`, "the PT_INTERP rewrite"). `elf_load` itself did not change
+-- it is still handed exactly one image and still refuses one that names an interpreter,
+which is what makes the one-level rule structural rather than enforced.
+
+### `elf_read_interp` (DISTRO D-4)
+
+```c
+#define ELF_INTERP_MAX 255
+size_t elf_read_interp(const void *blob, size_t size, char *out, size_t out_cap);
+```
+
+The bounded `PT_INTERP` walk, extracted so `elf_brand_hint` and the D-4 rewrite share ONE
+copy of "is this offset inside the prefix, is this string terminated". PURE; safe on the
+bounded header PREFIX `exec_read_header` produces. Returns the path's length, or **0 for
+every absent case** -- unreadable, outside the prefix, unterminated, empty, longer than
+`ELF_INTERP_MAX`, or larger than the caller's buffer -- and clears `out` when it does.
+
+The bar here is stricter than the hint's, because D-4 ACTS on the answer: it resolves the
+returned path and execs it. A truncated `/lib/ld-musl-aarch64.so.1` is `/lib/ld`, which
+names a DIFFERENT file, so "absent" is the only safe report for a path that did not
+survive whole. `elf.read_interp` asserts each case, including that the buffer is left
+empty rather than holding the previous call's answer.
+
 ### Output zeroed on entry (R5-G F70)
 
 `elf_load` now zeros `*out` at function entry (after NULL check). The contract still says "ignore on non-OK return," but partial-population on early-exit failure now leaves a defined-zero state rather than attacker-controlled data. Defensive against buggy callers that read `out->entry` regardless of return code.
@@ -295,7 +321,8 @@ The loader accepts `memsz > filesz` (the standard BSS pattern: filesz=0, memsz>0
 | Mapping (segment → VMA) | Phase 3 (with demand-paging fault handler) |
 | `exec()` syscall surface | Phase 5+ |
 | ET_DYN / PIE support | LANDED (DISTRO D-2) |
-| PT_INTERP / dynamic linking | Post-v1.0 |
+| PT_INTERP extraction (`elf_read_interp`) | LANDED (DISTRO D-4) |
+| PT_INTERP dispatch (rewrite-to-ldso) | LANDED in `exec.c` (DISTRO D-4); `elf_load` still refuses |
 | PT_DYNAMIC | Accepted on ET_DYN (D-2); refused on ET_EXEC |
 | PT_TLS / PT_GNU_RELRO | Skipped -- a PT_LOAD already covers them |
 | Symbol table parsing | Userspace dynamic linker scope |

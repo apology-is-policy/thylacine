@@ -410,4 +410,22 @@ enum elf_brand {
 
 enum elf_brand elf_brand_hint(const void *blob, size_t size);
 
+// DISTRO D-4: the interpreter path, extracted for the rewrite-to-ldso route
+// (docs/DISTRO.md section 7.1). Same bounded PT_INTERP walk elf_brand_hint
+// runs -- it is now the CALLER of this, so the bounds logic has one home.
+//
+// PURE, like the hint: no allocation, no locks, safe on the bounded header
+// PREFIX exec_read_header produces. Everything unreadable, unterminated, or
+// oversized is "absent" (0), never a partial answer -- a truncated interpreter
+// path resolved as if whole is exactly the silent-wrong this loader refuses.
+//
+// Writes a NUL-terminated path to `out` (capacity `out_cap`, which must be at
+// least ELF_INTERP_MAX + 1) and returns its LENGTH, or 0 for "no PT_INTERP /
+// not usable". Never negative: a caller acts identically on every absent case.
+#define ELF_INTERP_MAX 255      // bounds the on-stack copy; every real
+                                // interpreter path is under 32 bytes
+                                // ("/lib/ld-musl-aarch64.so.1" is 25)
+
+size_t elf_read_interp(const void *blob, size_t size, char *out, size_t out_cap);
+
 #endif // THYLACINE_ELF_H
