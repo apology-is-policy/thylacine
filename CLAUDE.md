@@ -201,8 +201,19 @@ scripture; moved there verbatim 2026-08-05 so this always-loaded file stays
 small -- the per-row prosecution detail is ALSO expanded in
 `ARCHITECTURE.md §25.4`, which many rows declare authoritative; unifying
 the two is task #152). **Before modifying any file on the index below, read
-that surface's full row.** The index (one line per row; refresh with the
-table):
+that surface's full row.**
+
+**Context economy on `docs/AUDIT-TRIGGERS.md` (binding).** The file is
+~440 KB (~110K tokens); a whole-file `Read` is never justified and the
+default Read cap would silently truncate it anyway. Locate the row first
+(grep the index below, or grep the file by surface keyword), then `Read`
+ONLY that row's line window. To append a chunk's new row: `Edit` after
+that windowed read -- `Edit` requires *a* prior read of the file, not the
+whole file. Never `Write` (whole-file replace) it. The same discipline
+applies to every large scripture file: grep to locate, window to read,
+`Edit` to change.
+
+The index (one line per row; refresh with the table):
 
 - **Exception entry + EL0-entry trampolines** -- `arch/arm64/start.S`, `arch/arm64/exception.c`, `arch/arm64/vectors.S`, `arch/arm64/userla ...
 - **Halls of Extinction crash dump** -- `arch/arm64/halls.c`, `arch/arm64/halls.h`, `arch/arm64/exception.c` (the four entry wrapp ...
@@ -584,6 +595,33 @@ Maintain these files:
 - `audit_rN_closed_list.md` — cumulative do-not-report preamble for audit rounds. Append after every round.
 - `user_profile.md` — user's role, preferences, preferred style.
 - `feedback_*.md` — durable feedback that should survive context compaction.
+- `TASK-ARCHIVE.md` — completed tasks booted from the live task list (see
+  "Task-list hygiene" below). Subject lines verbatim; the lookup for past
+  closes.
+
+### Task-list hygiene (binding; the 65% lesson)
+
+The harness re-injects the ENTIRE live task list — every task's subject
+AND description — into the conversation after tool batches. Measured
+2026-08-10: ~345 KB per injection, 23 injections in one working day =
+65% of that day's context volume; over the session's life, half the
+transcript. The injection cost scales with the LIVE list only, so the
+rule is:
+
+- **The live list carries OPEN work only.** Tasks may be as long,
+  descriptive, and detailed as the work deserves — verbosity is fine
+  precisely BECAUSE the list stays small.
+- **The moment a task completes, boot it**: finalize its subject as the
+  close record (hash, verdict, counts — the existing style), append that
+  subject line to `memory/TASK-ARCHIVE.md`, then delete the task
+  (`TaskUpdate` status `deleted`). Archive-then-delete, never the
+  reverse.
+- **Sweep at every checkpoint.** A completed task may linger at most
+  until the current chunk's close. If the live list exceeds ~40 entries,
+  something is being hoarded — prune before starting the next chunk.
+- The deeper records remain git log (close-commit bodies),
+  `docs/phaseN-status.md` rows, and `memory/MEMORY-ARCHIVE.md`; the task
+  archive is the fast index into them.
 
 ### Handoff protocol
 
