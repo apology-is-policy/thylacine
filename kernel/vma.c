@@ -146,6 +146,32 @@ bool vma_free_freed(struct Vma *v) {
 
 void vma_free(struct Vma *v) { (void)vma_free_freed(v); }
 
+// D-3c F1: the deferred twin of vma_free_freed. Drops the mapping ref via
+// burrow_release_mapping_deferred (which does NOT free), frees the Vma struct,
+// and returns the Burrow that still owes a free (or NULL). The caller pushes it
+// onto a local stack and frees it with burrow_free_deferred AFTER dropping
+// as->lock -- the FILE arm's spoor_clunk may sleep, and a sleeping free under a
+// spinlock is the lock-across-sleep extinction. *out_freed reports the same
+// event vma_free_freed's bool does, for the I-32 uncharge (which stays under
+// the lock -- only the physical free moves out).
+struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed) {
+    if (out_freed) *out_freed = false;
+    if (!v)                     extinction("vma_free(NULL)");
+    if (v->magic != VMA_MAGIC)  extinction("vma_free of corrupted/already-freed Vma");
+    if (v->next || v->prev)     extinction("vma_free of Vma still in a list");
+
+    struct Burrow *to_free = NULL;
+    if (v->burrow) {
+        to_free = burrow_release_mapping_deferred(v->burrow);
+        if (out_freed) *out_freed = (to_free != NULL);
+        v->burrow = NULL;
+    }
+
+    kmem_cache_free(g_vma_cache, v);
+    __atomic_fetch_add(&g_vma_freed, 1u, __ATOMIC_RELAXED);
+    return to_free;
+}
+
 // =============================================================================
 // Sorted-list operations
 // =============================================================================
@@ -450,6 +476,14 @@ void vma_drain_in(struct AddrSpace *as) {
     // proc_free's callers are otherwise single-threaded here (the
     // original exemption argument), so the lock is uncontended on every
     // path but the rare reclaim race.
+    // D-3c F1: DEFER the sleeping Burrow frees past the unlock (the same twin
+    // #193/the detach paths use). vma_free of a 9P-backed FILE Burrow reaches
+    // spoor_clunk, which may sleep -- and this whole drain runs under as->lock,
+    // so an inline free would be the lock-across-sleep extinction. Reachable at
+    // proc-exit for an exec text Burrow paged from a 9P FS (D-4/D-5); latent
+    // today only because /bin execs come from the non-sleeping devramfs. Collect
+    // the dead Burrows on a deferred_free_next stack; free after the unlock.
+    struct Burrow *dead = NULL;
     spin_lock(&as->lock);
     while (as->vmas) {
         struct Vma *v = as->vmas;
@@ -462,9 +496,13 @@ void vma_drain_in(struct AddrSpace *as) {
             addrspace_uncharge_shared_map(as,
                 (u32)((v->vaddr_end - v->vaddr_start) / PAGE_SIZE));
         vma_remove_in(as, v);
-        vma_free(v);
+        struct Burrow *tf = vma_free_deferred(v, NULL);
+        if (tf) { tf->deferred_free_next = dead; dead = tf; }
     }
     spin_unlock(&as->lock);
+    while (dead) { struct Burrow *n = dead->deferred_free_next;
+                   dead->deferred_free_next = NULL;
+                   burrow_free_deferred(dead); dead = n; }
 }
 
 // =============================================================================

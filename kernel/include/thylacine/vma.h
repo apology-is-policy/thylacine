@@ -138,6 +138,13 @@ void vma_free(struct Vma *v);
 // VMA with no Burrow.
 bool vma_free_freed(struct Vma *v);
 
+// D-3c F1: vma_free that DEFERS the Burrow free. Frees the Vma struct and drops
+// the mapping ref, but returns the Burrow still owing a free (or NULL) instead
+// of freeing it inline -- so a caller holding as->lock can free it AFTER the
+// unlock (the FILE arm's spoor_clunk may sleep). *out_freed reports the same
+// event vma_free_freed's bool does. See burrow_free_deferred + deferred_free_next.
+struct Burrow *vma_free_deferred(struct Vma *v, bool *out_freed);
+
 // Insert `v` into Proc `p`'s sorted VMA list. Rejects overlap with
 // any existing VMA in the list. Returns 0 on success, -1 on overlap
 // (caller must vma_free the rejected VMA themselves; this function

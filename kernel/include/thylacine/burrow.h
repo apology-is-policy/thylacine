@@ -251,6 +251,22 @@ struct Burrow {
     // e.g. a Loom registered-buffer pin (keep it -- that claim's own drop
     // refunds). Read under `lock`.
     bool             shared_out;
+
+    // D-3c F1: a single-linked stack for DEFERRED free. A teardown that runs
+    // under as->lock cannot free a Burrow inline -- the FILE arm's spoor_clunk
+    // may sleep (a 9P Tclunk), and sleeping under a plain spinlock is the
+    // lock-across-sleep extinction. So the locked teardown decrements the
+    // mapping ref (burrow_release_mapping_deferred), and if that was the last
+    // ref it pushes the dead Burrow onto a caller-local stack via this link and
+    // frees the whole chain (burrow_free_deferred) AFTER dropping as->lock.
+    // Meaningful ONLY while a Burrow sits on such a stack -- {handle:0,map:0},
+    // unreachable by any other path, so the write needs no lock; NULL always
+    // otherwise. This is the teardown twin of #193 (which hoisted the mmap
+    // success-path construction-handle unref outside the lock for the same
+    // reason). Freeing inline was the pre-D-3 norm because every detachable
+    // Burrow's free was non-sleeping (ANON free_pages); D-3 put a 9P-backed
+    // FILE Burrow at a guest-detachable address, which is what made it live.
+    struct Burrow   *deferred_free_next;
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -539,6 +555,14 @@ void burrow_release_mapping(struct Burrow *v);
 bool burrow_unref_freed(struct Burrow *v);
 bool burrow_release_mapping_freed(struct Burrow *v);
 
+// D-3c F1: the DEFERRED teardown pair. `_deferred` drops the mapping ref under
+// v->lock and returns the dead Burrow (or NULL) WITHOUT freeing; the caller,
+// once it has dropped as->lock, frees it with burrow_free_deferred. Together
+// they keep the FILE arm's sleeping spoor_clunk off the locked teardown path
+// (the twin of #193). See the deferred_free_next field + the burrow.c bodies.
+struct Burrow *burrow_release_mapping_deferred(struct Burrow *v);
+void           burrow_free_deferred(struct Burrow *v);
+
 // #131/#132: the I-32 charge record -- WHO paid, so a refund is attributed
 // instead of inferred from the region's shape (see struct Burrow above).
 //
@@ -665,8 +689,15 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 // burrow_unmap, additionally reporting whether removing this mapping was the
 // drop that freed the Burrow's pages (see burrow_unref_freed above). *out_freed
 // is written on every path, including the -1 ones (false).
+// D-3c F1: `out_free`, when non-NULL, DEFERS the Burrow free: the function
+// removes the VMA + drops the mapping ref under the caller's as->lock but
+// returns the dead Burrow (or NULL) via *out_free instead of freeing it inline;
+// the caller frees it with burrow_free_deferred after the unlock (the FILE arm's
+// spoor_clunk may sleep). NULL keeps the inline free (non-sleeping ANON/CODE/DMA
+// callers via burrow_unmap). *out_free is written whenever it is non-NULL,
+// including the -1 paths (NULL).
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
-                           bool *out_freed);
+                           bool *out_freed, struct Burrow **out_free);
 
 // =============================================================================
 // Overcommit / I-32: lazy-anon decommit + resident-page accounting (ARCH §6.5).

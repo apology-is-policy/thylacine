@@ -4483,7 +4483,16 @@ static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
 // byte-identical semantics): exact-match [vaddr_raw, vaddr_raw+length) against
 // ONE installed VMA, remove it, settle the I-32 accounting. Caller holds
 // as->lock and has already run detach_args_check.
-static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length) {
+//
+// D-3c F1: `*out_free` receives the Burrow whose mapping-drop was the last ref
+// (or NULL) -- the caller pushes it onto a local stack and frees it with
+// burrow_free_deferred AFTER dropping as->lock, because a FILE Burrow's free
+// reaches a possibly-sleeping spoor_clunk and a sleeping free under a spinlock
+// is the lock-across-sleep extinction. The I-32 uncharge stays here (under the
+// lock); only the physical free is deferred.
+static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
+                             struct Burrow **out_free) {
+    if (out_free) *out_free = NULL;
     // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
     // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
     // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
@@ -4619,7 +4628,14 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length) {
     // the Burrow's pages -- for an ANON_LAZY Burrow that is the resident
     // sparse slots (burrow_free_internal's ANON_LAZY arm).
     bool freed = false;
-    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed);
+    // D-3c F1: hand `out_free` down so the FREE is deferred past as->lock. The
+    // dead Burrow (if any) rides back to the caller, which frees it after the
+    // unlock. `dv` here (the pre-drop snapshot) is only touched below for the
+    // charge-restore path, which by construction runs when the Burrow SURVIVED.
+    struct Burrow *tf = NULL;
+    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed,
+                                    out_free ? &tf : NULL);
+    if (out_free) *out_free = tf;
     if (rc == 0 && lazy_uncharge)
         proc_page_uncharge(p, lazy_uncharge);
     if (paid) {
@@ -4645,9 +4661,14 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     u64 length;
     if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
         return -1;
+    struct Burrow *to_free = NULL;
     spin_lock(&p->as->lock);
-    s64 rc = detach_one_locked(p, vaddr_raw, length);
+    s64 rc = detach_one_locked(p, vaddr_raw, length, &to_free);
     spin_unlock(&p->as->lock);
+    // D-3c F1: free OUTSIDE as->lock -- a FILE Burrow's free reaches a
+    // possibly-sleeping spoor_clunk (a 9P Tclunk), and sleeping under a plain
+    // spinlock is the lock-across-sleep extinction.
+    if (to_free) burrow_free_deferred(to_free);
     return rc;
 }
 
@@ -4692,15 +4713,34 @@ s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // exists ONCE). Validation makes a failure unreachable; if one happens
     // anyway, stop rather than spin -- the guard is against an infinite loop,
     // not a real path.
+    //
+    // D-3c F1: the sleeping burrow frees are DEFERRED so the whole range removes
+    // under ONE continuous as->lock hold (the atomicity the straddle-refusal
+    // validation depends on), while the possibly-sleeping spoor_clunk frees run
+    // AFTER the unlock. Each detach hands back its dead Burrow (if any); they
+    // stack via deferred_free_next -- an uncapped chain that needs no allocation
+    // and no lock (each Burrow is at {0,0}, unreachable by any other path).
+    struct Burrow *dead = NULL;
     struct Vma *v;
     while ((v = vma_next_overlap_in(p->as, vaddr_raw, end)) != NULL) {
+        struct Burrow *tf = NULL;
         if (detach_one_locked(p, v->vaddr_start,
-                              v->vaddr_end - v->vaddr_start) != 0) {
+                              v->vaddr_end - v->vaddr_start, &tf) != 0) {
             spin_unlock(&p->as->lock);
+            // Free what we already collected before returning the error --
+            // those VMAs are gone; leaking their Burrows would be worse.
+            while (dead) { struct Burrow *n = dead->deferred_free_next;
+                           dead->deferred_free_next = NULL;
+                           burrow_free_deferred(dead); dead = n; }
             return -1;
         }
+        if (tf) { tf->deferred_free_next = dead; dead = tf; }
     }
     spin_unlock(&p->as->lock);
+    // The sleeping frees, now with no lock held.
+    while (dead) { struct Burrow *n = dead->deferred_free_next;
+                   dead->deferred_free_next = NULL;
+                   burrow_free_deferred(dead); dead = n; }
     return 0;                            // incl. the nothing-mapped no-op (Linux)
 }
 

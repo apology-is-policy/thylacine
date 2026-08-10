@@ -805,6 +805,39 @@ bool burrow_release_mapping_freed(struct Burrow *v) {
 
 void burrow_release_mapping(struct Burrow *v) { (void)burrow_release_mapping_freed(v); }
 
+// D-3c F1: the deferred twin of burrow_release_mapping_freed. Drops the mapping
+// ref under v->lock and, if that was the last ref, returns the now-dead Burrow
+// WITHOUT freeing it -- the caller (holding as->lock) pushes it onto a local
+// stack and calls burrow_free_deferred after the unlock, so the FILE arm's
+// possibly-sleeping spoor_clunk never runs under a spinlock. Returns NULL when
+// the Burrow survives (a handle or another mapping still holds it).
+struct Burrow *burrow_release_mapping_deferred(struct Burrow *v) {
+    if (!v)                       extinction("burrow_release_mapping(NULL)");
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_release_mapping of corrupted BURROW (use-after-free?)");
+    spin_lock(&v->lock);
+    if (v->mapping_count <= 0) {
+        spin_unlock(&v->lock);
+        extinction("burrow_release_mapping of zero-mapping BURROW");
+    }
+    v->mapping_count--;
+    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
+    spin_unlock(&v->lock);
+    return should_free ? v : NULL;
+}
+
+// D-3c F1: free a Burrow the caller took off a deferred-free stack. Runs the
+// same burrow_free_internal every unref/release-mapping funnels into -- but at
+// a point where NO lock is held, so a sleeping teardown is legal. The {0,0}
+// state was established under v->lock by burrow_release_mapping_deferred and
+// nothing else can reach the Burrow, so no re-check is needed.
+void burrow_free_deferred(struct Burrow *v) {
+    if (!v) return;
+    if (v->magic != VMO_MAGIC)
+        extinction("burrow_free_deferred of corrupted BURROW (double free?)");
+    burrow_free_internal(v);
+}
+
 // =============================================================================
 // #131/#132: the I-32 charge record. See burrow.h for the contract + the
 // rationale (a Burrow's TYPE tells you the region's shape, never who paid).
@@ -976,8 +1009,9 @@ int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
 }
 
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
-                           bool *out_freed) {
+                           bool *out_freed, struct Burrow **out_free) {
     if (out_freed) *out_freed = false;
+    if (out_free)  *out_free  = NULL;
     if (!p) return -1;
     if (length == 0) return -1;
     if (vaddr & (PAGE_SIZE - 1)) return -1;
@@ -1033,13 +1067,24 @@ int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,
         proc_shared_map_uncharge(p, (u32)(length / PAGE_SIZE));
 
     vma_remove(p, vma);
-    bool freed = vma_free_freed(vma);
+    // D-3c F1: DEFER the Burrow free when the caller asked for it (out_free
+    // non-NULL) -- the caller holds as->lock, and a FILE Burrow's free reaches
+    // a possibly-sleeping spoor_clunk. `vma_free_deferred` hands back the
+    // dead Burrow; the caller frees it after the unlock. When out_free is NULL
+    // (the burrow_unmap wrapper: JIT / Loom / weft / cons -- all ANON/CODE/DMA,
+    // whose free never sleeps) the inline free is kept.
+    bool freed;
+    if (out_free) {
+        *out_free = vma_free_deferred(vma, &freed);
+    } else {
+        freed = vma_free_freed(vma);
+    }
     if (out_freed) *out_freed = freed;
     return 0;
 }
 
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
-    return burrow_unmap_reporting(p, vaddr, length, NULL);
+    return burrow_unmap_reporting(p, vaddr, length, NULL, NULL);
 }
 
 // =============================================================================

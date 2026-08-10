@@ -22,10 +22,13 @@
 #include "test.h"
 
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>          // D-3c F1: a stub Dev with a close hook
 #include <thylacine/exec.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>        // D-3c F1: spoor_alloc for a FILE burrow
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>       // D-3c F1: current_thread()->preempt_count
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -809,6 +812,101 @@ void test_burrow_munmap_range_empty_ok(void) {
 
     TEST_EXPECT_EQ(sys_munmap_range_for_proc(p, base, D3B_LEN), 0,
                    "munmap of an empty range is the Linux no-op success");
+
+    drop_proc(p);
+}
+
+// =============================================================================
+// #F1 (D-3c FOCUSED round): the teardown twin of #193. A FILE Burrow's free
+// reaches spoor_clunk -> dev->close, which may sleep (a 9P Tclunk); the detach
+// / munmap / drain paths run under as->lock, so an INLINE free is the
+// lock-across-sleep extinction. The fix defers the free past the unlock.
+//
+// This does not need a REAL sleep to discriminate: a stub Dev's .close records
+// current_thread()->preempt_count at free time. Pre-fix the free runs under
+// as->lock (spin_lock bumped preempt_count -> the hook sees >= 1); post-fix it
+// runs after the unlock (0). The assertion is on the RECORDED value, so it is
+// deterministic rather than relying on an actual sleep to trip the extinction.
+// =============================================================================
+
+static int g_f1_close_calls   = 0;
+static u32 g_f1_close_preempt = 0xffffffffu;   // sentinel: "close never ran"
+
+static void f1_stub_close(struct Spoor *c) {
+    (void)c;
+    g_f1_close_calls++;
+    struct Thread *t = current_thread();
+    g_f1_close_preempt = t ? t->preempt_count : 0xdeadu;
+}
+
+// A minimal read so the FILE Burrow's backing Dev is byte-I/O-able (never
+// actually read here -- the mapping is torn down before any fault).
+static long f1_stub_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c; (void)off;
+    for (long i = 0; i < n; i++) ((u8 *)buf)[i] = 0;
+    return n;
+}
+
+static struct Dev g_f1_dev = {
+    .dc    = 'F',
+    .name  = "f1test",
+    .read  = f1_stub_read,
+    .close = f1_stub_close,
+};
+
+// Build a mapped, in-window FILE Burrow whose ONLY ref is the mapping (handle
+// dropped) -- so detach's mapping-drop is the last ref and MUST free. Returns
+// the VA, or 0 on setup failure.
+static u64 f1_map_file(struct Proc *p, u64 va) {
+    struct Spoor *s = spoor_alloc(&g_f1_dev);
+    if (!s) return 0;
+    s->qid.type = QTFILE;
+    struct Burrow *v = burrow_create_file(s, 0, PAGE_SIZE);   // adopts s
+    if (!v) { spoor_clunk(s); return 0; }
+    spin_lock(&p->as->lock);
+    int rc = burrow_map(p, v, va, PAGE_SIZE, VMA_PROT_READ);
+    spin_unlock(&p->as->lock);
+    if (rc != 0) { burrow_unref(v); return 0; }
+    burrow_unref(v);          // drop the construction handle: mapping is the last ref
+    return va;
+}
+
+void test_burrow_detach_file_frees_outside_lock(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_f1_close_calls = 0; g_f1_close_preempt = 0xffffffffu;
+    u64 va = f1_map_file(p, EXEC_USER_BURROW_BASE);
+    TEST_ASSERT(va != 0, "FILE burrow map setup failed");
+
+    // The exact detach: the mapping-drop is the last ref -> the Burrow frees ->
+    // spoor_clunk (last spoor ref) -> f1_stub_close.
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, va, PAGE_SIZE), (s64)0,
+                   "detach of a mapped FILE burrow succeeds");
+    TEST_EXPECT_EQ(g_f1_close_calls, 1, "the backing Dev's close ran (Burrow freed)");
+    TEST_EXPECT_EQ((u64)g_f1_close_preempt, 0ull,
+                   "the free ran with as->lock DROPPED (preempt_count 0) -- #F1");
+
+    drop_proc(p);
+}
+
+void test_burrow_munmap_range_file_frees_outside_lock(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_f1_close_calls = 0; g_f1_close_preempt = 0xffffffffu;
+    // Two adjacent FILE burrows, torn down by ONE range munmap -- the multi-free
+    // path (the deferred_free_next chain), which is exactly the amplified shape
+    // (musl's whole-span unmap_library over several segment Images).
+    u64 a = f1_map_file(p, EXEC_USER_BURROW_BASE);
+    u64 b = f1_map_file(p, EXEC_USER_BURROW_BASE + PAGE_SIZE);
+    TEST_ASSERT(a != 0 && b != 0, "two-FILE-burrow setup failed");
+
+    TEST_EXPECT_EQ(sys_munmap_range_for_proc(p, a, 2 * PAGE_SIZE), (s64)0,
+                   "range munmap over two FILE burrows succeeds");
+    TEST_EXPECT_EQ(g_f1_close_calls, 2, "both backing Devs closed (both freed)");
+    TEST_EXPECT_EQ((u64)g_f1_close_preempt, 0ull,
+                   "the deferred frees ran with as->lock DROPPED -- #F1");
 
     drop_proc(p);
 }
