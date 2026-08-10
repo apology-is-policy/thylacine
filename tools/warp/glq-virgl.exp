@@ -1,8 +1,10 @@
 #!/usr/bin/expect -f
 # Warp-4c: GLQuake on virgl -- the GPU-DESIGN.md section 12 ladder row 4
 # acceptance ("present integration: SET_SCANOUT of a 3D resource (Direct),
-# readback fallback (Composed)"), measured against the 192.8 fps unpaced
-# llvmpipe anchor (#165, same host, same TCG).
+# readback fallback (Composed)"). The fps figure is REPORTED against the
+# SAME-HOST llvmpipe band (2.4-5.9 fps at 640x480, the Warp-1 row) -- the
+# 192.8 anchor is macOS/HVF and does not transfer (#196 premise
+# correction, 2026-08-10).
 #
 # One boot on the GL device, one timedemo through the BARE ramfs name --
 # the launcher's production path: its /srv/warp ctl probe (the two-step
@@ -33,7 +35,7 @@
 #   GLQ-VIRGL DIRECT: surface N res R the direct-switch say line fired
 #   GLQ-VIRGL FPS: N S F              timedemo figures (REPORTED, not
 #                                     gated -- the ls-gfx-glquake rule;
-#                                     quote against the 192.8 anchor)
+#                                     quote against the same-host band)
 #   GLQ-VIRGL STRIPS-k: ...           top/bottom strip means per dump
 #                                     (orientation evidence; calibrated
 #                                     look-first before any gating)
@@ -201,7 +203,7 @@ if {$c2 >= 8} { lc_step "direct-arm frames on the scanout ($c2 buckets)" }
 set timeout 1800
 expect {
     -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
-        puts "\nGLQ-VIRGL FPS: $expect_out(1,string) frames $expect_out(2,string)s $expect_out(3,string) fps (llvmpipe unpaced anchor: 192.8)\n"
+        puts "\nGLQ-VIRGL FPS: $expect_out(1,string) frames $expect_out(2,string)s $expect_out(3,string) fps (same-host llvmpipe band: 2.4-5.9 at 640x480)\n"
         lc_step "timedemo complete"
     }
     "user fault" { lc_fail "segv during the timedemo" }

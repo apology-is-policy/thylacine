@@ -488,6 +488,41 @@ framebuffer, and the consent names one BO. Both halves failing restores
 the readback path explicitly: a half-negotiated state (readback
 suppressed, no display source) would be a frozen pane.
 
+## Performance characteristics
+
+The #196 decomposition (2026-08-10, `tools/warp-host.sh decomp gl|2d` →
+`tools/warp/glq-decomp.exp`): GLQuake timedemo1, 1280×800 windowed,
+unpaced (the rp6 `/env` wrapper), one boot per device, two launches per
+boot (Composed-only, then early-zoom Direct-only), each demo window
+sampled for whole-guest qemu CPU as `/proc/<pid>/stat` utime+stime
+interval deltas (Linux `ps %cpu` is a lifetime average and cannot
+attribute a demo window). Host: thyla-gl, TCG `-smp 4` (400% available).
+Raw sampler files: `build/cpu-{gl,2d}-{composed,direct}.txt`.
+
+| leg | fps | guest CPU mean | swap |
+|---|---|---|---|
+| virgl Composed | 2.4 (969 frames, 397.7 s) | 170% | clean |
+| virgl Direct | **wedged — #210** | 26% (idle floor) | — |
+| llvmpipe Composed 1280×800 | 2.2 | 354% | pswpin +280, discarded |
+| llvmpipe Direct 1280×800 | 2.4 | 359% | clean |
+
+Reading: the Composed-GL arm has **no per-frame stall** — it reaches the
+4-thread llvmpipe control's exact fps using 2.1× less CPU with ~2.3
+vCPUs idle. The bound is *serialized single-threaded guest work* (the
+game thread's virgl protocol encode + the per-present synchronous
+server-side `transfer_from_3d_sync` + blit), all TCG-amplified; on
+native silicon both serial phases shrink by the TCG factor and the GPU
+path wins outright. Per-frame op structure (the leg-(d) census): the
+frame's cmdstream submits as fenced `Twrite` chunks ≤ 24 KiB split at
+CCMD boundaries; the 2-in-flight throttle parks via one blocking
+fence-file read + one ctx-ctl snapshot re-read per wait; a present is
+one tapestry RPC (Direct: server-side `RESOURCE_FLUSH` only; Composed
+adds the client `glFinish` fence round-trip and the server's 4 MB sync
+transfer + blit); fence-signal latency floors at the serve loop's 1 ms
+fenced-chains poll clamp. The Direct arm's throughput is unmeasurable
+while #210 stands; the Warp-4c aggregate (3.0 fps, paced, direct-
+majority) bounds it ~25–40% above Composed.
+
 ## Error paths
 
 | Path | Verdict |
@@ -541,10 +576,25 @@ suppressed, no display source) would be a frozen pane.
   cannot substitute — it reads the resource, not the display. The local
   HVF 2D box keeps full pixel coverage (the ls-gfx family).
 - **#196**: first-contact GLQuake throughput on virgl is ~3 fps aggregate
-  vs the 192.8 fps llvmpipe anchor (~20–25x under after correcting the
-  anchor's 640x480 vs the run's 1280x800) — a per-frame stall somewhere in
-  the encode/transport/fence path; the mid-run QMP TimeoutError (starved
-  QEMU main loop) corroborates. Decomposition plan lives in the task.
+  at 1280×800. The original "~20–25x under the 192.8 anchor" framing was
+  a misquote — 192.8 is macOS/HVF and does not transfer (the Warp-1
+  status row's own warning); the same-host llvmpipe band is 2.4–5.9 fps
+  at 640×480, so the virgl figure sits INSIDE the software band at 3.3×
+  the pixels. The open question is stall-vs-compute: pegged guest CPU
+  during the demo = TCG-amplified encode (no stall); idle = a real
+  per-frame wait (fence pump / sync round-trips). `tools/warp-host.sh
+  decomp gl|2d` measures both arms unpaced with per-demo qemu CPU
+  attribution; the mid-run QMP TimeoutError (starved QEMU main loop)
+  remains an unattributed corroborating observation. Answered — see
+  Performance characteristics; the residue is #210.
+- **#210**: unpaced early-zoom Direct-GL wedges silently during the map
+  load — 0 progress at the ~26% resident-idle CPU floor, no client
+  latch, no error output. GL-lane-specific (the identical leg on the 2D
+  device runs clean); the paced mid-demo-zoom 4c run also ran. The
+  autopsy probe (`tools/warp-host.sh wedge` →
+  `tools/warp/glq-wedge-probe.exp`) isolates the pacing variable and
+  captures the parked chain's kstacks via the I-39 debug surface from a
+  background-job prompt.
 - **#198**: at the post-timedemo transition the game's GL context breaks
   and Mesa spams `GL_INVALID_OPERATION (invalid call)` per frame —
   virgl-specific (the llvmpipe sibling idles clean); instrument-first plan
@@ -585,8 +635,9 @@ default Super+F zoom chord typed over QMP (the game's pane holds focus
 from `host()`) makes the display-sized surface the sole visible leaf, and
 the `scanout direct N GL res R` switch line is the SET_SCANOUT(bo)
 evidence; the demo's remainder runs on the Direct flush-only arm; the
-timedemo figure is REPORTED against the 192.8 fps llvmpipe anchor (#165;
-not gated — the ls-gfx-glquake rule); and the ^C teardown leg drives the
+timedemo figure is REPORTED, not gated (the ls-gfx-glquake rule; the
+honest same-host reference is the Warp-1 llvmpipe band, 2.4–5.9 fps at
+640×480 — the macOS/HVF 192.8 does not transfer); and the ^C teardown leg drives the
 launcher's interrupt forward → SDL_QUIT → surface retire → the
 BO-eviction + console-restore chain (tick-driven — the restore is a
 multi-present chain, each hop needing console output). Verdict = the

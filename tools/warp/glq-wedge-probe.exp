@@ -1,0 +1,277 @@
+#!/usr/bin/expect -f
+# #210: the direct-arm wedge autopsy. Boot A of the #196 decomposition
+# found unpaced early-zoom GLQuake-on-virgl parking silently during the
+# map load (0 progress in 1800s, guest CPU at the ~26% resident-idle
+# floor, no client latch). This probe (a) isolates the PACING variable --
+# the 4c run that worked was paced AND zoomed mid-demo; the wedge run was
+# unpaced AND zoomed early -- and (b) captures the parked state via the
+# I-39 debug surface while the wedge is LIVE.
+#
+# Both legs run as ut BACKGROUND jobs (U-7), so the prompt stays usable
+# for the autopsy: a foreground wedge would leave typed commands sitting
+# unread in the cons ring. The progress witness is the demo1 map banner
+# ("Necropolis") -- the wedged run never printed it; a healthy run prints
+# it within seconds of "3 demo(s) in loop".
+#
+# Autopsy (owner-axis authorized -- michael owns the whole game chain):
+# ps, then /proc/<pid>/fd + /proc/<pid>/kstack for every tyr-glquake pid
+# (rp6 + launcher + game). #160 caveat: kstack shows the NEWEST thread
+# (the SDL pump thread on the game), so the main thread's park may need a
+# follow-up stop-tier probe -- capture what this tier gives first.
+# tapestryd is system-owned (owner axis fails); the server side is
+# inferred from the client's parked fd.
+#
+# Verdict lines (#186):
+#   WEDGE-PROBE PACED: PROGRESSES|WEDGED
+#   WEDGE-PROBE UNPACED: PROGRESSES|WEDGED
+#   WEDGE-PROBE AUTOPSY-BEGIN / -END      (bracket the captured state)
+#   WEDGE-PROBE PASS                      (both verdicts + autopsy-if-wedged)
+#
+# env: WARP_REPO, WARP_WORK as the sibling scenarios.
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+set ::env(THYLACINE_ACCEL) tcg
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+set ::env(THYLACINE_DISPLAY) egl-headless
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+set DW 1280
+set DH 800
+
+file mkdir $work
+file delete -force $work/pool-wedge.img $work/disk-wedge.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-wedge.img
+exec cp $repo/build/disk.img $work/disk-wedge.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-wedge.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-wedge.img
+
+source $repo/tools/interactive/lib.exp
+
+set qmp [lc_qmp_sock]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# rp6 (the forwarding unpace wrapper -- glq-decomp.exp's, verbatim).
+lc_send "echo 'int open(const char*,int,int);long write(int,const void*,long);int close(int);long strlen(const char*);' > rp6.c"
+sleep 1
+lc_send "echo 'int posix_spawn(int*,const char*,void*,void*,char*const*,char*const*);int waitpid(int,int*,int);' >> rp6.c"
+sleep 1
+lc_send "echo 'int kill(int,int);int usleep(unsigned);typedef void(*sh)(int);sh signal(int,sh);' >> rp6.c"
+sleep 1
+lc_send "echo 'int gp=0;void fwd(int s){if(gp>0)kill(gp,s);}' >> rp6.c"
+sleep 1
+lc_send "echo 'int wf(const char*p,const char*s){int f=open(p,65,438);if(f<0)return 1;write(f,s,strlen(s));close(f);return 0;}' >> rp6.c"
+sleep 1
+lc_send "echo 'int main(int c,char**v){if(wf(\"/env/SDL_THYLACINE_NOPACE\",\"1\"))return 8;write(1,\"nopace set\\n\",11);' >> rp6.c"
+sleep 1
+lc_send "echo 'signal(2,fwd);signal(15,fwd);int p=0;if(posix_spawn(&p,v\[1\],0,0,v+1,0))return 9;gp=p;' >> rp6.c"
+sleep 1
+lc_send "echo 'for(;;){int st=0;int r=waitpid(p,&st,1);if(r==p)break;if(r<0)return 1;usleep(50000);}return 0;}' >> rp6.c"
+sleep 1
+lc_send "/clade/bin/clang -w -O1 --sysroot /clade/sysroot -o rp6 rp6.c"
+set timeout 600
+lc_send "echo rp6-ready"
+expect {
+    "rp6-ready" { lc_step "rp6 built" }
+    timeout     { lc_fail "clang on rp6.c never returned (600s)" }
+}
+
+# Run one console command, then a sentinel echo; return everything the
+# buffer accumulated up to the sentinel (which includes the command's
+# real output -- matching the sentinel's own command echo is sufficient
+# and earlier is fine). BEST-EFFORT: a timeout returns what arrived; the
+# session log carries the full transcript regardless.
+proc capture {cmd sentinel} {
+    lc_send $cmd
+    sleep 1
+    lc_send "echo $sentinel"
+    set timeout 25
+    expect {
+        "$sentinel" { }
+        timeout     { }
+    }
+    return $expect_out(buffer)
+}
+
+# There is no in-guest ps, and run 1 proved `ls /proc` cannot be relied
+# on mid-wedge (it returned "I/O error" there -- itself a datum, so the
+# autopsy still runs it for the record, against the healthy CONTROL
+# below). Pid discovery is a BRUTE cmdline sweep over small pids: pids
+# are small sequential ints, a hidden/absent pid answers ENOENT
+# harmlessly, and no readdir is involved. The v1 parse also taught: a
+# regexp over prompt-echo residue invents pids (partial ANSI sequences
+# carry digits) -- the sweep never parses free text, only per-pid
+# cmdline content.
+set SWEEP_MAX 48
+
+proc game_chain {} {
+    global SWEEP_MAX
+    set chain {}
+    for {set p 1} {$p <= $SWEEP_MAX} {incr p} {
+        set c [capture "cat /proc/$p/cmdline" "cmd-$p-done"]
+        if {[string match "*tyr-glquake*" $c] || [string match "*rp6*" $c]} {
+            lappend chain $p
+        }
+    }
+    return $chain
+}
+
+# The pre-launch control: records what `ls /proc` does on a HEALTHY boot
+# (run 1 saw "I/O error" mid-wedge -- unattributable without this) and
+# proves the sweep produces no false positives with nothing launched.
+# The sweep's DETECTION proof runs later, on the paced leg's live chain.
+proc enumeration_control {} {
+    puts "\nWEDGE-PROBE CONTROL-BEGIN\n"
+    capture "ls /proc" "ctl-lsproc-done"
+    set found [game_chain]
+    puts "\nWEDGE-PROBE CONTROL sweep-found: '$found' (expected empty -- nothing launched yet)\n"
+    puts "\nWEDGE-PROBE CONTROL-END\n"
+}
+
+proc autopsy {tag} {
+    puts "\nWEDGE-PROBE AUTOPSY-BEGIN $tag\n"
+    capture "ls /proc" "aut-lsproc-done"
+    set chain [game_chain]
+    puts "\nWEDGE-PROBE AUTOPSY pids: $chain\n"
+    foreach p $chain {
+        capture "cat /proc/$p/status" "st-$p-done"
+        capture "cat /proc/$p/kstack" "ks-$p-done"
+    }
+    puts "\nWEDGE-PROBE AUTOPSY-END $tag\n"
+}
+
+# One leg: launch (bg), zoom after init, then the progress witness.
+# paced=1 launches the bare launcher; paced=0 rides rp6. Returns 1 if the
+# demo progressed (map banner), 0 if it wedged.
+proc run_probe_leg {tag paced} {
+    global qmp repo DW DH
+    if {$paced} {
+        lc_send "/bin/tyr-glquake -window -width $DW -height $DH -nosound +timedemo demo1 &"
+    } else {
+        lc_send "./rp6 /bin/tyr-glquake -window -width $DW -height $DH -nosound +timedemo demo1 &"
+        set timeout 60
+        expect {
+            "nopace set" { lc_step "$tag: rp6 env write confirmed" }
+            timeout      { lc_fail "$tag: rp6 never confirmed the /env write" }
+        }
+    }
+    set timeout 900
+    expect {
+        -re {scanout composed \((\d+)x(\d+)\)} { lc_step "$tag: window open (split)" }
+        "user fault" { lc_fail "$tag: segv before the window opened" }
+        timeout      { lc_fail "$tag: no composed-entry line within 900s" }
+    }
+    expect {
+        "Quake Initialized" { lc_step "$tag: engine init complete" }
+        "user fault" { lc_fail "$tag: segv during init" }
+        "Sys_Error"  { lc_fail "$tag: Sys_Error during init" }
+        timeout      { lc_fail "$tag: no init line within 900s" }
+    }
+    if {[catch {exec $repo/tools/qmp-sendtext.sh -s $qmp -k meta_l+f} err]} {
+        lc_fail "$tag: qmp zoom chord failed: $err"
+    }
+    set timeout 120
+    expect {
+        -re {scanout direct (\d+) GL res (\d+) \((\d+)x(\d+)\)} {
+            lc_step "$tag: direct switch fired"
+        }
+        "user fault" { lc_fail "$tag: segv around the zoom" }
+        timeout      { lc_fail "$tag: no direct-switch line within 120s" }
+    }
+    # The progress witness: demo1's map banner. The wedged run parked
+    # before it; a healthy run prints it within seconds of demo start.
+    set timeout 240
+    expect {
+        "Necropolis" { return 1 }
+        "user fault" { lc_fail "$tag: segv during the map load" }
+        "Sys_Error"  { lc_fail "$tag: Sys_Error during the map load" }
+        timeout      { return 0 }
+    }
+}
+
+# Kill a PROGRESSING bg leg cleanly: foreground it, ^C through the
+# forward chain, then drive the console-restore ticks.
+proc reap_progressing_leg {tag} {
+    lc_send "fg"
+    sleep 1
+    send -- "\003"
+    set restored 0
+    for {set i 0} {$i < 6 && !$restored} {incr i} {
+        lc_send "echo probe-tick-$tag-$i"
+        set timeout 20
+        expect {
+            -re {scanout direct (\d+) \((\d+)x(\d+)\)} { set restored 1 }
+            "probe-tick-$tag-$i" { }
+            timeout { }
+        }
+    }
+    if {!$restored} {
+        lc_fail "$tag: console not restored within 6 ticks of ^C"
+    }
+    lc_send "echo probe-$tag-ok"
+    set timeout 30
+    expect {
+        "probe-$tag-ok" { lc_step "$tag: reaped, prompt back" }
+        timeout         { lc_fail "$tag: prompt never returned" }
+    }
+}
+
+set wedged_captured 0
+
+enumeration_control
+
+# Leg 1: PACED early-zoom (the 4c pacing, the decomp zoom timing).
+if {[run_probe_leg paced 1]} {
+    puts "\nWEDGE-PROBE PACED: PROGRESSES\n"
+    # Detection control + healthy baseline on the LIVE chain: the sweep
+    # must find it (else the wedge autopsy's empty result is meaningless),
+    # and its kstacks are the healthy-vs-wedged diff base.
+    set healthy [game_chain]
+    puts "\nWEDGE-PROBE CONTROL-DETECT pids: '$healthy'\n"
+    if {[llength $healthy] == 0} {
+        lc_fail "sweep detection control found nothing on a live chain"
+    }
+    foreach p $healthy {
+        capture "cat /proc/$p/status" "hst-$p-done"
+        capture "cat /proc/$p/kstack" "hks-$p-done"
+    }
+    reap_progressing_leg paced
+} else {
+    puts "\nWEDGE-PROBE PACED: WEDGED\n"
+    autopsy paced
+    set wedged_captured 1
+    # The wedge is captured; the variable is the ZOOM TIMING alone. Skip
+    # the unpaced leg (its result adds nothing once paced wedges too) --
+    # the VM dies with the scenario.
+    puts "\nWEDGE-PROBE UNPACED: SKIPPED (paced already wedged -- zoom timing is the variable)\n"
+    puts "\nWEDGE-PROBE PASS\n"
+    lc_quit
+    lc_pass "glq-wedge-probe: paced early-zoom wedged; autopsy captured"
+    exit 0
+}
+
+# Leg 2: UNPACED early-zoom (the Boot A wedge shape).
+if {[run_probe_leg unpaced 0]} {
+    puts "\nWEDGE-PROBE UNPACED: PROGRESSES (the Boot A wedge did NOT reproduce)\n"
+    reap_progressing_leg unpaced
+} else {
+    puts "\nWEDGE-PROBE UNPACED: WEDGED\n"
+    autopsy unpaced
+    set wedged_captured 1
+}
+
+puts "\nWEDGE-PROBE PASS\n"
+lc_quit
+if {$wedged_captured} {
+    lc_pass "glq-wedge-probe: pacing isolated; wedge autopsy captured"
+} else {
+    lc_pass "glq-wedge-probe: pacing isolated; wedge did not reproduce this boot"
+}
+exit 0

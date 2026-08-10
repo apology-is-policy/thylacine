@@ -10,6 +10,8 @@
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
+#   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
+#   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
 #
 # Verification is fail-closed: each leg greps for its own positive evidence
 # and exits non-zero without it. `bench` runs FOREGROUND (~20-45 min under
@@ -23,7 +25,7 @@ HOST="${WARP_HOST:-thyla-gl}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RREPO='~/projects/thylacine'
 
-usage() { sed -n '2,16p' "$0"; exit 2; }
+usage() { sed -n '2,18p' "$0"; exit 2; }
 [[ $# -ge 1 ]] || usage
 cmd="$1"
 
@@ -33,7 +35,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -150,6 +152,46 @@ quake)
     # against the real frames before any threshold gates on them.
     scp -q "$HOST:warp/glq-virgl-1.png" "$HOST:warp/glq-virgl-2.png" \
         "$REPO_ROOT/build/" 2>/dev/null || echo "(dump fetch failed -- non-fatal)"
+    ;;
+decomp)
+    # #196: the throughput decomposition -- `decomp gl` (virgl, both
+    # present arms) then `decomp 2d` (llvmpipe, the resolution-matched
+    # software control + the pegged-CPU calibration). Figures REPORTED;
+    # the verdict conjunction gates only the structural legs.
+    sub="${2:-}"
+    if [[ "$sub" != gl && "$sub" != 2d ]]; then
+        echo "usage: tools/warp-host.sh decomp gl|2d"
+        exit 2
+    fi
+    out="$REPO_ROOT/build/warp-decomp-$sub.log"
+    ssh "$HOST" "cd $RREPO && WARP_DECOMP_DEV=$sub expect tools/warp/glq-decomp.exp" | tee "$out" || true
+    echo "== decomp $sub verdict =="
+    if grep -q "GLQ-DECOMP SWAPPED" "$out"; then
+        echo "DECOMP $sub: SWAPPED -- discard the flagged figure(s), rerun"
+        exit 1
+    fi
+    if grep -q "GLQ-DECOMP PASS $sub" "$out" && grep -q "LS-CI PASS: glq-decomp-$sub:" "$out"; then
+        grep "GLQ-DECOMP" "$out"
+        echo "DECOMP $sub: MEASURED"
+    else
+        echo "DECOMP $sub: UNVERIFIED (need GLQ-DECOMP PASS $sub + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+wedge)
+    # #210: the direct-arm wedge autopsy. The verdicts are evidence either
+    # way (PROGRESSES isolates pacing; WEDGED captures kstacks), so the
+    # gate is only that the probe ran to completion.
+    out="$REPO_ROOT/build/warp-wedge.log"
+    ssh "$HOST" "cd $RREPO && expect tools/warp/glq-wedge-probe.exp" | tee "$out" || true
+    echo "== wedge verdict =="
+    if grep -q "WEDGE-PROBE PASS" "$out" && grep -q "LS-CI PASS: glq-wedge-probe:" "$out"; then
+        grep "WEDGE-PROBE" "$out" | grep -v AUTOPSY- | head -8
+        echo "WEDGE PROBE: CAPTURED"
+    else
+        echo "WEDGE PROBE: UNVERIFIED (need WEDGE-PROBE PASS + the scenario pass line)"
+        exit 1
+    fi
     ;;
 *)
     usage

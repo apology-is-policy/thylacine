@@ -438,7 +438,9 @@ at 61.4 fps the whole VM costs ~110–122% of one host core — four vCPU
 threads at ~29% each + display/main ≤1.2%, **no pinned thread**; the guest
 stop/cont sampler agrees (per-vCPU busy 26/23/24/21% = **0.95 vCPUs
 summed**). Unpaced, the same demo reaches **192.8 fps** (a new best; prior
-157.6–181.7) at ~279% with vCPUs 65–74% each. Roughly proportional (0.42×
+157.6–181.7; **macOS/HVF — this number does not transfer to TCG hosts**:
+thyla-gl's own llvmpipe band is 2.4–5.9 fps, the Warp-1 row) at ~279%
+with vCPUs 65–74% each. Roughly proportional (0.42×
 CPU at 0.32× fps; the excess is per-frame park/wake + 60 Hz compositor
 service that back-to-back unpaced frames amortize). An Activity-Monitor
 "one core at 100%" during play is the process TOTAL — the sum of four
