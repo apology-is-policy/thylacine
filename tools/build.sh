@@ -1036,8 +1036,14 @@ VIVEOF
     # reason is now blast radius rather than capability: /bin/sh is what every
     # L6C-* leg runs through, so flipping it to the dynamic binary would make
     # the entire leg list depend on D-4 and turn any D-4 hiccup into "the shell
-    # did not run" with no first-missing signal. That flip is D-5's, alongside
-    # the stock-rootfs pipeline it belongs to. Task #145 is closed by D-4.
+    # did not run" with no first-missing signal. Task #145 is closed by D-4.
+    #
+    # AND D-5 DID NOT FLIP IT. The flip was this comment's plan; D-5 measured the
+    # trade and rejected it, staging a SECOND bundle (/vivarium/alpine-stock,
+    # below) from the same tarball instead. Keeping the two apart is what buys
+    # the discrimination: a red stock gate beside a green L6C-A..I isolates the
+    # fault to the stock-dynamic path, where one flipped bundle would only have
+    # said "the shell did not run". The cost is a second 8.1 MiB pool copy.
     #
     # /bin/sh is also a SYMLINK to /bin/busybox in the stock image. D-1 made
     # the resolver follow symlinks (task #146), but the static binary is still
@@ -1050,6 +1056,46 @@ VIVEOF
     local bbapk="${THYLACINE_BUSYBOX_STATIC_APK:-}"
     if [[ -z "$bbapk" ]]; then
         bbapk="$(ls "$REPO_ROOT/build/cache"/busybox-static-*.apk 2>/dev/null | head -1 || true)"
+    fi
+
+    # DISTRO D-5: both external inputs are sha256-PINNED.
+    #
+    # Discovery stays a GLOB on purpose. Pinning the filename instead would turn
+    # a wrong-version drop into "no tarball found" -- a silent hermetic skip of
+    # the arc gate, which is the failure mode this project keeps re-learning. A
+    # glob plus a hash check gives the three outcomes we actually want: absent is
+    # a skip (the default build stays hermetic), present-and-matching proceeds,
+    # and present-but-different is a LOUD build failure.
+    #
+    # A mismatch has to be fatal because every expected value downstream was
+    # derived from these exact bytes -- the D2/D3/D4 legs' output strings, and
+    # D-5's in-guest VERSION_ID assertion. A different image would quietly move
+    # what "PASS" means. To adopt one, change the pin here AND the stock bundle's
+    # VERSION_ID leg below, together, in one reviewable edit.
+    local alpine_sha="f31202c4070c4ef7de9e157e1bd01cb4da3a2150035d74ea5372c5e86f1efac1"
+    local bbapk_sha="6fd7ea97062beb51fa785ba858f823e1dfe4daf6bfa91ff4d5359b1061988c69"
+    local got_sha
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        got_sha="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+        if [[ "$got_sha" != "$alpine_sha" ]]; then
+            echo "==> viv bundles: Alpine minirootfs sha256 MISMATCH -- refusing to stage" >&2
+            echo "      file     $tarball" >&2
+            echo "      got      $got_sha" >&2
+            echo "      expected $alpine_sha (alpine-minirootfs-3.21.0-aarch64)" >&2
+            echo "    The gate legs' expected output was measured against the pinned image;" >&2
+            echo "    update the pin in tools/build.sh AND the stock bundle's VERSION_ID leg." >&2
+            exit 1
+        fi
+    fi
+    if [[ -n "$bbapk" && -f "$bbapk" ]]; then
+        got_sha="$(shasum -a 256 "$bbapk" | awk '{print $1}')"
+        if [[ "$got_sha" != "$bbapk_sha" ]]; then
+            echo "==> viv bundles: busybox-static apk sha256 MISMATCH -- refusing to stage" >&2
+            echo "      file     $bbapk" >&2
+            echo "      got      $got_sha" >&2
+            echo "      expected $bbapk_sha (busybox-static-1.37.0-r14)" >&2
+            exit 1
+        fi
     fi
     if [[ -n "$tarball" && -f "$tarball" ]]; then
         local ab="$vstage/alpine"
@@ -1139,9 +1185,102 @@ VIVEOF
             echo "==> viv bundles: untar of $tarball FAILED -- Alpine bundle skipped" >&2
         fi
     else
-        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine bundle skipped (the ARC gate's fixture, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
+        echo "==> viv bundles: no Alpine minirootfs tarball -- Alpine + stock bundles skipped (the L-6c and DISTRO ARC gate fixtures, not the V-7 probe gate's; set THYLACINE_ALPINE_TARBALL or drop one in build/cache/)"
     fi
-    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" ))"
+
+    # DISTRO D-5, THE ARC GATE fixture: the SAME tarball, staged UNMODIFIED.
+    #
+    # "Unmodified" is the whole point and it is meant literally: no stock file is
+    # replaced, removed or edited. The bundle above substitutes busybox-static
+    # over /bin/sh and /bin/busybox, so whatever else it proves, it does not
+    # prove that a stock distro runs. This one changes nothing, which is why
+    # /bin/sh is still the image's own SYMLINK to a stock ET_DYN PIE busybox --
+    # and following it is the D-1..D-4 chain end to end, on a rootfs nobody
+    # prepared for us.
+    #
+    # The only additions are the mount ANCHORS the recipe structurally requires
+    # (a bind needs an existing mount point). /proc, /sys and /dev are already
+    # in the image; /net and /env are Thylacine-shaped and are not. Nothing is
+    # written into the rootfs to carry the gate itself: the script rides in
+    # process.args, so the staged tree is the tarball plus anchors and nothing
+    # else. Measured: 520 entries, 335 of them symlinks, ZERO device nodes -- so
+    # there is no privileged tar operation here and no node-skipping to do.
+    #
+    # It stages WITHOUT the busybox-static apk, unlike the bundle above. That is
+    # the D-5 dependency inversion: needing a substitute shell was exactly the
+    # condition D-4 removed.
+    #
+    # #126 applies VERBATIM: this bundle is pool-resident, so a PRESERVE=1 build
+    # runs the OLD rootfs. The in-guest VERSION_ID leg is the detector -- it is
+    # the one assertion here that a stale bake cannot satisfy.
+    if [[ -n "$tarball" && -f "$tarball" ]]; then
+        local sb="$vstage/alpine-stock"
+        mkdir -p "$sb/rootfs"
+        if tar -xzf "$tarball" -C "$sb/rootfs" 2>/dev/null; then
+            mkdir -p "$sb/rootfs/proc" "$sb/rootfs/sys" "$sb/rootfs/dev" \
+                     "$sb/rootfs/net" "$sb/rootfs/env"
+            for leaf in null zero full random urandom tty; do
+                : > "$sb/rootfs/dev/$leaf"
+                chmod 0666 "$sb/rootfs/dev/$leaf"
+            done
+            # The gate script, inline in the manifest. Four legs, each adding
+            # EXACTLY ONE mechanism to the one before it, so a first-missing
+            # marker names a cause instead of a symptom:
+            #
+            #   A  the stock shell starts AT ALL -- /bin/sh (absolute pool
+            #      symlink) -> stock ET_DYN PIE busybox -> PT_INTERP -> stock
+            #      ldso -> applet dispatch on basename(argv[0]). Printed by a
+            #      BUILTIN echo, so no second exec is in the way of the signal.
+            #   B  fork+exec of a stock dynamic binary FROM a stock dynamic
+            #      parent, in busybox's multiplexer form: a real file, and
+            #      argv[0]-independent, so B isolates exec from both symlinks
+            #      and argv[0].
+            #   C  a second absolute pool symlink resolved for EXEC, plus argv[0]
+            #      applet dispatch. C is the leg that reddens if the kernel ever
+            #      leaks the symlink-RESOLVED path into argv[0]: busybox would
+            #      then see basename == "busybox", run as the multiplexer, print
+            #      usage and emit nothing. (It does NOT discriminate --argv0 from
+            #      passing the path alone -- nothing on this rootfs can produce a
+            #      vector where those differ; that claim stays at the unit level
+            #      in exec.interp_argv_shape.)
+            #   D  a RELATIVE pool symlink crossing `..` (/etc/os-release ->
+            #      ../usr/lib/os-release), read through B's already-proven
+            #      multiplexer form so the link is the only new variable. The
+            #      loader path cannot cover this: libc.musl-aarch64.so.1 matches
+            #      the "c." entry of musl's reserved list (dynlink.c:1074-1082),
+            #      so load_library short-circuits it to &ldso and never opens the
+            #      file.
+            #   E  the pool holds the PINNED image, asserted from inside the
+            #      guest. This is the #126 stale-bake detector.
+            #
+            # NO `>` REDIRECTION ANYWHERE, and it is not a style choice: #201,
+            # the vivarium's openat refuses O_CREAT unconditionally, and a plain
+            # `>` passes O_CREAT even onto a file that already exists. Every
+            # assertion is a $( ) capture (a pipe) or a 2>&1 dup.
+            #
+            # The RAW line is diagnostics, never the assertion, and it cannot
+            # forge one (#186): os-release contains no "DISTRO-" string.
+            cat > "$sb/config.json" <<'VIVEOF'
+{
+    "ociVersion": "1.0.2",
+    "root": { "path": "rootfs", "readonly": true },
+    "process": {
+        "args": ["/bin/sh", "-c", "echo DISTRO-A-stock-sh\nb=$(/bin/busybox echo bb-ok); [ \"$b\" = bb-ok ] && echo DISTRO-B-stock-exec\nl=$(/bin/ls /); case \"$l\" in *usr*) echo DISTRO-C-applet-by-symlink ;; esac\no=$(/bin/busybox cat /etc/os-release); echo DISTRO-RAW-OSREL:$o\ncase \"$o\" in *\"Alpine Linux\"*) echo DISTRO-D-relative-symlink ;; esac\ncase \"$o\" in *VERSION_ID=3.21.0*) echo DISTRO-E-pinned-image ;; esac\necho DISTRO-DONE"],
+        "env": [],
+        "cwd": "/"
+    },
+    "annotations": {
+        "org.thylacine.phenotype": "linux"
+    }
+}
+VIVEOF
+            echo "==> viv bundles: STOCK Alpine bundle staged at $sb (3.21.0 UNMODIFIED -- /bin/sh is the image's own symlink to its own dynamic busybox)"
+        else
+            rm -rf "$sb"
+            echo "==> viv bundles: untar of $tarball into the stock bundle FAILED -- DISTRO ARC gate bundle skipped" >&2
+        fi
+    fi
+    ledger "viv bundles: /vivarium staged (probe$( [[ -d "$vstage/alpine" ]] && echo " + alpine" )$( [[ -d "$vstage/alpine-stock" ]] && echo " + alpine-stock" ))"
 }
 
 build_sysroot() {

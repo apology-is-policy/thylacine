@@ -980,6 +980,78 @@ static int do_fork_probe(void) {
     return 0;
 }
 
+// run_viv_bundle -- the mechanical half that every `viv run` gate shares:
+// spawn the runner on a pipe, reap it, drain what the container wrote.
+//
+// Returns 0 iff the runner was spawned AND reaped (its exit status lands in
+// *status_out), -1 if the run could not be performed at all. `*acc_len` is set
+// either way, so a caller can still read whatever was emitted before a failure.
+//
+// It drains whether or not the status is clean, deliberately: the markers name
+// HOW FAR the guest got, which is the entire diagnostic value of these legs. A
+// container that dies at leg B and one that dies at leg F are different bugs,
+// and the exit status alone cannot tell them apart.
+static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
+                          unsigned int argc, const char *what, int *status_out,
+                          unsigned char *acc, size_t acc_cap, size_t *acc_len) {
+    *acc_len = 0;
+    *status_out = -1;
+
+    long rd = -1, wr = -1;
+    if (t_pipe(&rd, &wr) < 0) {
+        t_putstr("joey: "); t_putstr(what); t_putstr(" t_pipe FAILED\n");
+        return -1;
+    }
+    // THREE fds, not the two the pouch smokes use. `viv` decides whether to
+    // endow its container's stdio by probing whether IT was born with a live
+    // trio (usr/viv/src/main.rs `stdio_born`: fstat(0), fstat(1), fstat(2) all
+    // succeed) -- and it must, because it endows [0,1,2] as a unit and a
+    // half-empty trio fails the whole spawn at the kernel's fd bump. Hand it
+    // two and the probe answers false, the guest is spawned fd-less, and its
+    // output goes nowhere: the gate would report "it never ran" when it ran
+    // perfectly.
+    unsigned int fds[3] = { (unsigned int)wr, (unsigned int)wr,
+                            (unsigned int)wr };
+    static const char vname[] = "/bin/viv";
+    struct t_sys_spawn_args req = {
+        .name_va       = (unsigned long)vname,
+        .argv_data_va  = (unsigned long)vargv,
+        .name_len      = sizeof(vname) - 1,
+        .argv_data_len = vargv_len,
+        .argc          = argc,
+        .fd_list_va    = (unsigned long)fds,
+        .fd_count      = 3,
+        .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+    };
+    long pid = t_spawn_full_argv(&req);
+    if (pid <= 0) {
+        t_putstr("joey: "); t_putstr(what);
+        t_putstr(" spawn /bin/viv FAILED\n");
+        (void)t_close(rd); (void)t_close(wr);
+        return -1;
+    }
+    if (t_close(wr) != 0) {
+        t_putstr("joey: "); t_putstr(what); t_putstr(" t_close(wr) FAILED\n");
+        (void)t_close(rd);
+        return -1;
+    }
+    long reaped = t_wait_pid_for((int)pid, 0, status_out);
+
+    size_t got = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n <= 0) break;
+        (void)t_puts((const char *)buf, (size_t)n);
+        for (long i = 0; i < n && got < acc_cap; i++)
+            acc[got++] = buf[i];
+    }
+    (void)t_close(rd);
+    *acc_len = got;
+
+    return reaped == pid ? 0 : -1;
+}
+
 // do_alpine_shell_gate -- LINEAGE L-6c, the ARC gate: an Alpine /bin/sh runs a
 // command inside a vivarium.
 //
@@ -1038,62 +1110,12 @@ static int do_alpine_shell_gate(void) {
     }
     (void)t_close(abfd);
 
-    long rd = -1, wr = -1;
-    if (t_pipe(&rd, &wr) < 0) {
-        t_putstr("joey: L-6c t_pipe FAILED\n");
-        return -1;
-    }
-    // THREE fds, not the two the pouch smokes use. `viv` decides whether to
-    // endow its container's stdio by probing whether IT was born with a live
-    // trio (usr/viv/src/main.rs `stdio_born`: fstat(0), fstat(1), fstat(2) all
-    // succeed) -- and it must, because it endows [0,1,2] as a unit and a
-    // half-empty trio fails the whole spawn at the kernel's fd bump. Hand it
-    // two and the probe answers false, the shell is spawned fd-less, and its
-    // echo output goes nowhere: the gate would report "the shell never ran"
-    // when the shell ran perfectly.
-    unsigned int fds[3] = { (unsigned int)wr, (unsigned int)wr,
-                            (unsigned int)wr };
-    static const char vname[] = "/bin/viv";
     static const char vargv[] = "/bin/viv\0run\0/vivarium/alpine";
-    struct t_sys_spawn_args req = {
-        .name_va       = (unsigned long)vname,
-        .argv_data_va  = (unsigned long)vargv,
-        .name_len      = sizeof(vname) - 1,
-        .argv_data_len = sizeof(vargv),
-        .argc          = 3,
-        .fd_list_va    = (unsigned long)fds,
-        .fd_count      = 3,
-        .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
-    };
-    long pid = t_spawn_full_argv(&req);
-    if (pid <= 0) {
-        t_putstr("joey: L-6c spawn /bin/viv (alpine) FAILED\n");
-        (void)t_close(rd); (void)t_close(wr);
-        return -1;
-    }
-    if (t_close(wr) != 0) {
-        t_putstr("joey: L-6c t_close(wr) FAILED\n");
-        (void)t_close(rd);
-        return -1;
-    }
-    int  status = -1;
-    long reaped = t_wait_pid_for((int)pid, 0, &status);
-
-    // Drain whether or not the status is clean: the markers name HOW FAR the
-    // shell got, which is the entire diagnostic value of this leg. A container
-    // that dies at leg B and one that dies at leg F are different bugs, and
-    // the exit status alone cannot tell them apart.
     unsigned char acc[2048];
     size_t acc_len = 0;
-    for (;;) {
-        unsigned char buf[256];
-        long n = t_read(rd, buf, sizeof(buf));
-        if (n <= 0) break;
-        (void)t_puts((const char *)buf, (size_t)n);
-        for (long i = 0; i < n && acc_len < sizeof(acc); i++)
-            acc[acc_len++] = buf[i];
-    }
-    (void)t_close(rd);
+    int    status  = -1;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "L-6c", &status,
+                                    acc, sizeof(acc), &acc_len);
 
     // sizeof-derived, never hand-counted: a literal length that disagrees with
     // its string is a marker that silently never matches, which would read as
@@ -1186,7 +1208,7 @@ static int do_alpine_shell_gate(void) {
             break;
         }
     }
-    if (reaped != pid || status != 0 || missing >= 0) {
+    if (ran != 0 || status != 0 || missing >= 0) {
         char nb[24];
         t_putstr("joey: L-6c Alpine shell gate FAILED first-missing=");
         t_putstr(missing >= 0 ? legs[missing].str : "<none>");
@@ -1236,6 +1258,124 @@ static int do_alpine_shell_gate(void) {
     }
     t_putstr("joey: L-6c ALPINE SHELL GATE PASS (busybox sh forked, exec'd, "
              "piped, substituted and reaped -- LINEAGE arc complete)\n");
+    return 0;
+}
+
+// do_stock_distro_gate -- DISTRO D-5, THE ARC GATE: an UNMODIFIED Alpine
+// rootfs runs its own shell.
+//
+// The difference from L-6c above is one substitution, and it is the whole
+// point. That bundle overwrites /bin/sh with a busybox-STATIC binary we supply,
+// so however much it proves about fork/exec/pipe/reap, it cannot prove that a
+// stock distro runs -- the one file every leg goes through is ours. This bundle
+// changes nothing: /bin/sh is still the image's own symlink to the image's own
+// dynamic busybox, and following it is the whole D-1..D-4 chain on a rootfs
+// nobody prepared for us.
+//
+// Why a SECOND bundle instead of flipping the first (docs/DISTRO.md 7.2): the
+// split IS the discrimination. A red gate here beside a green L6C-A..I isolates
+// the fault to the stock-dynamic path; one flipped bundle would have put all
+// nine L6C legs behind D-4 and reported any regression as "the shell did not
+// run", with no first-missing signal.
+//
+// Each leg adds EXACTLY ONE mechanism to the one before it, so first-missing
+// names a cause and not a symptom -- and each was shown to redden ALONE for its
+// own reason before this landed (the host dry run, DISTRO.md 7.2):
+//
+//   A  the stock shell starts AT ALL: /bin/sh (an absolute POOL symlink, which
+//      I-28 re-anchors at the container root) -> stock ET_DYN PIE busybox ->
+//      PT_INTERP -> stock ldso -> applet dispatch on basename(argv[0]) == "sh".
+//      Emitted by a BUILTIN echo, so no second exec stands between the chain
+//      and the signal.
+//   B  fork + exec of a stock dynamic binary FROM a stock dynamic parent, in
+//      busybox's multiplexer form: a real file, argv[0]-independent, so B is
+//      clear of both symlinks and argv[0].
+//   C  a second absolute pool symlink resolved for EXEC, plus argv[0] applet
+//      dispatch. C is the leg that reddens if the kernel ever leaks the
+//      symlink-RESOLVED path into argv[0] -- busybox would see basename ==
+//      "busybox", run as the multiplexer, print usage, and emit nothing. Every
+//      busybox-based distro depends on this and nothing tested it before.
+//      C does NOT discriminate --argv0 from passing the path alone; that claim
+//      stays at the unit level (exec.interp_argv_shape), for the reason the
+//      L-6c D4-B comment above gives.
+//   D  a RELATIVE pool symlink crossing `..` (/etc/os-release ->
+//      ../usr/lib/os-release), read through B's already-proven multiplexer form
+//      so the link is the only new variable. The loader path cannot cover this
+//      class: libc.musl-aarch64.so.1 matches the "c." entry of musl's reserved
+//      list (third_party/musl/ldso/dynlink.c:1074-1082), so load_library
+//      short-circuits it to &ldso and never opens the file.
+//   E  the pool holds the PINNED image, asserted from INSIDE the guest. This is
+//      the #126 stale-bake detector: a PRESERVE=1 build silently serves the old
+//      rootfs, and this is the one assertion here that a stale bake cannot
+//      satisfy. E reads D's capture, so a broken D darkens E too -- that
+//      nesting is by design, and D is the leg to read first.
+//
+// SOFT-SKIP when the bundle is absent: the fixture is an external tarball and
+// the default build stays hermetic. Unlike L-6c this needs no busybox-static
+// apk -- needing a substitute shell was exactly the condition D-4 removed.
+//
+// DISTRO_GATE_FATAL: boot-fatal from the start, with no KNOWN-BLOCKED arm. L-6c
+// earned its non-fatal period by having a NAMED blocker standing in front of it
+// (#149 -> #150 -> #151 -> #140 -> #155 -> #157, each cleared in turn); this
+// gate has none. If it reddens, that is a real defect on the D-1..D-4 chain and
+// it should stop the boot.
+#define DISTRO_GATE_FATAL 1
+static int do_stock_distro_gate(void) {
+    static const char sb[] = "/vivarium/alpine-stock/config.json";
+    long sbfd = t_open(T_WALK_OPEN_FROM_ROOT, sb, sizeof(sb) - 1, T_OPATH);
+    if (sbfd < 0) {
+        t_putstr("joey: D-5 stock distro gate SKIPPED (no "
+                 "/vivarium/alpine-stock bundle -- drop an alpine-minirootfs "
+                 "tarball in build/cache/ and rebuild with "
+                 "THYLACINE_MKFS_PRESERVE=0)\n");
+        return 0;
+    }
+    (void)t_close(sbfd);
+
+    static const char vargv[] = "/bin/viv\0run\0/vivarium/alpine-stock";
+    unsigned char acc[2048];
+    size_t acc_len = 0;
+    int    status  = -1;
+    int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "D-5", &status,
+                                    acc, sizeof(acc), &acc_len);
+
+    // sizeof-derived, never hand-counted: a literal length that disagrees with
+    // its string is a marker that silently never matches, which would read as
+    // "the guest stopped here" when the guest was fine.
+#define D5_MK(s) { (s), sizeof(s) - 1 }
+    static const struct argv_marker legs[] = {
+        D5_MK("DISTRO-A-stock-sh"),
+        D5_MK("DISTRO-B-stock-exec"),
+        D5_MK("DISTRO-C-applet-by-symlink"),
+        D5_MK("DISTRO-D-relative-symlink"),
+        D5_MK("DISTRO-E-pinned-image"),
+        D5_MK("DISTRO-DONE"),
+    };
+#undef D5_MK
+    // #186: no marker above can be forged by a diagnostic line. The script's
+    // only raw output is `DISTRO-RAW-OSREL:` followed by os-release, measured
+    // to contain zero "DISTRO-" occurrences -- and joey's own failure text goes
+    // to the console, never into `acc`, which holds container bytes only.
+    int missing = -1;
+    for (unsigned i = 0; i < sizeof(legs) / sizeof(legs[0]); i++) {
+        if (!mem_contains(acc, acc_len, legs[i].str, legs[i].len)) {
+            missing = (int)i;
+            break;
+        }
+    }
+    if (ran != 0 || status != 0 || missing >= 0) {
+        char nb[24];
+        t_putstr("joey: D-5 STOCK DISTRO GATE FAILED first-missing=");
+        t_putstr(missing >= 0 ? legs[missing].str : "<none>");
+        t_putstr(" status=");
+        t_putstr(itoa_dec(status, nb, sizeof(nb)));
+        t_putstr("\n");
+        if (!DISTRO_GATE_FATAL) return 0;
+        return -1;
+    }
+    t_putstr("joey: D-5 STOCK DISTRO GATE PASS (an unmodified Alpine 3.21.0 "
+             "ran its own shell through its own symlink, loader and libc -- "
+             "the DISTRO arc chain is live end to end)\n");
     return 0;
 }
 
@@ -9269,6 +9409,15 @@ int main(void) {
                 // narrower leg above has already reported, so the log says
                 // which mechanism broke rather than just "the shell died".
                 if (do_alpine_shell_gate() != 0) return 1;
+
+                // === DISTRO D-5: THE ARC GATE. Runs after L-6c for the same
+                // reason L-6c runs last among the phenotype legs, one level
+                // further out: L-6c is the same shell workload with OUR static
+                // busybox substituted in, so if both fail, the pair says
+                // whether the break is in the shell workload or specifically in
+                // the stock-dynamic path. Ordering them the other way would
+                // lose that.
+                if (do_stock_distro_gate() != 0) return 1;
             }
 #endif
         }

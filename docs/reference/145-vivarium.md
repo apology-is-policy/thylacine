@@ -2299,3 +2299,141 @@ directions: removing the socktab drop leaves the unit suite at a full
 
 **The arc gate passes** -- `L6C-A` through `L6C-I` -- and `L6C_GATE_FATAL` flips
 to 1 in the same commit, because a gate that cannot redden is a disabled test.
+
+---
+
+## DISTRO D-5 -- the stock rootfs bundle and THE ARC GATE
+
+### What the L-6c gate could not prove
+
+The L-6c bundle at `/vivarium/alpine` substitutes a busybox-**static** binary we
+supply over `/bin/sh` and `/bin/busybox`. That substitution was correct when it
+was written -- every ELF in the stock minirootfs is an `ET_DYN` PIE linked
+against `/lib/ld-musl-aarch64.so.1`, and the loader accepted neither `ET_DYN`
+(until D-2) nor `PT_INTERP` (until D-4) -- but it means the one file every
+`L6C-*` leg runs through is ours. Whatever those nine legs prove about
+fork/exec/pipe/substitute/reap, they cannot prove that a stock distro runs.
+
+D-5 closes that with a SECOND bundle, `/vivarium/alpine-stock`, staged from the
+same tarball with nothing replaced.
+
+### Why a second bundle rather than flipping the first
+
+Flipping `/vivarium/alpine` to the stock dynamic shell would put all nine `L6C-*`
+legs plus `D2-*`/`D3-*`/`D4-*` behind D-4, so any regression in the interpreter
+dispatch would present as "the shell did not run" with no first-missing signal.
+The split is not caution, it is the discrimination: a red stock gate beside a
+green `L6C-A..I` isolates the fault to the stock-dynamic path specifically. It
+costs a second 8.1 MiB copy in the pool, and `tools/build.sh` carries the
+reasoning at both staging sites.
+
+### "Unmodified", stated precisely
+
+No stock file is replaced, removed, or edited. The only additions are the mount
+anchors the recipe structurally requires -- a bind needs an existing mount point
+-- which are the `/net` and `/env` directories (`/proc`, `/sys` and `/dev` are
+already in the image) and the six `/dev` leaf files. Nothing is written into the
+rootfs to carry the gate itself: the script rides in the manifest's
+`process.args`, so the staged tree is the tarball plus anchors and nothing else.
+
+Measured composition of `alpine-minirootfs-3.21.0-aarch64.tar.gz` (sha256
+`f31202c4…efac1`): 520 entries = 335 symlinks, 88 regular files, 97 directories,
+and **zero device nodes**. The arc plan had carried an item to skip device nodes
+and document the skip; there are none to skip, so it is recorded as a
+measurement instead of performed as a step. `tar -xzf` exits 0 with no
+privileged operation.
+
+### The fixture is sha256-pinned, and a mismatch is fatal
+
+Both external inputs are pinned. Discovery deliberately stays a glob: pinning the
+filename would turn a wrong-version drop into "no tarball found", a silent
+hermetic skip of the arc gate. Glob-plus-hash gives the three outcomes that are
+actually wanted -- absent is a skip (the default build stays hermetic),
+matching proceeds, and present-but-different is a loud build failure. Fatal is
+right because every expected value downstream was derived from those exact
+bytes, including the `D2`/`D3`/`D4` output strings and D-5's in-guest
+`VERSION_ID` assertion; a different image would quietly move what PASS means.
+
+### The gate: four legs, one new mechanism each
+
+`do_stock_distro_gate` (`usr/joey/joey.c`) spawns `viv run
+/vivarium/alpine-stock` and matches markers against the drained container
+output. Each leg adds exactly one mechanism to the one before it, so a
+first-missing marker names a cause rather than a symptom.
+
+| Leg | Marker | The one new mechanism |
+|---|---|---|
+| A | `DISTRO-A-stock-sh` | The stock shell starts at all: `/bin/sh` (an absolute POOL symlink, re-anchored at the container root by I-28) -> stock `ET_DYN` PIE busybox -> `PT_INTERP` -> stock ldso -> applet dispatch on `basename(argv[0]) == "sh"`. Printed by a shell BUILTIN, so no second exec stands between the chain and the signal. |
+| B | `DISTRO-B-stock-exec` | fork + exec of a stock dynamic binary FROM a stock dynamic parent, in busybox's multiplexer form (`/bin/busybox echo`): a real file, argv[0]-independent, so B is clear of both symlinks and argv[0]. |
+| C | `DISTRO-C-applet-by-symlink` | A second absolute pool symlink resolved for EXEC, plus argv[0] applet dispatch (`/bin/ls`). |
+| D | `DISTRO-D-relative-symlink` | A RELATIVE pool symlink crossing `..` (`/etc/os-release -> ../usr/lib/os-release`), read through B's already-proven multiplexer form so the link is the only new variable. |
+| E | `DISTRO-E-pinned-image` | The pool holds the PINNED image, asserted from inside the guest. |
+| — | `DISTRO-DONE` | The script reached its end, distinguishing a failed leg from a shell that died mid-script. |
+
+Leg C is the one worth stating carefully, because it is easy to overclaim. It
+does **not** discriminate `--argv0` from passing the path alone -- nothing on
+this rootfs can produce a vector where those differ, for the reason the `D4-B`
+comment gives, and that claim stays at the unit level in
+`exec.interp_argv_shape`. What C discriminates is a separate property that
+nothing tested before: **symlink resolution must not become visible in
+`argv[0]`.** If the kernel ever passed the resolved path, busybox would see
+`basename == "busybox"`, run as the multiplexer, print usage, and emit nothing.
+Every busybox-based distro depends on this.
+
+Leg D exists because the loader path cannot cover the relative class at all:
+`libc.musl-aarch64.so.1` matches the `"c."` entry of musl's reserved list
+(`third_party/musl/ldso/dynlink.c:1074-1082`), so `load_library` short-circuits
+it to `&ldso` and never opens the file. The
+`/lib/libc.musl-aarch64.so.1 -> ld-musl-aarch64.so.1` link is present in the
+image and never followed.
+
+Leg E is the **#126 stale-bake detector**. The bundle is pool-resident, so a
+`PRESERVE=1` build silently serves the old rootfs; E is the one assertion here
+that a stale bake cannot satisfy. It reads D's capture, so a broken D darkens E
+too -- that nesting is by design, and D is the leg to read first.
+
+### No `>` redirection anywhere in the script
+
+Not a style rule. #201: the vivarium's `openat` refuses `O_CREAT`
+unconditionally, and a plain `>` passes `O_WRONLY|O_CREAT|O_TRUNC` even onto a
+file that already exists. Every assertion is therefore a `$( )` capture (a pipe)
+or a `2>&1` dup, the same constraint D-3c's gate line already works under. This
+is a real fidelity gap being routed around; #201 remains open and its full fix
+must re-open #192.
+
+### Marker honesty (#186)
+
+No marker can be forged by a diagnostic line. The script's only raw output is
+`DISTRO-RAW-OSREL:` followed by the os-release contents, measured to contain
+zero `DISTRO-` occurrences; and joey's own failure text -- which does print the
+first-missing marker name -- goes to the console, never into the accumulator,
+which holds container bytes only.
+
+### Fatality
+
+`DISTRO_GATE_FATAL` is 1 from the start, with no KNOWN-BLOCKED arm. L-6c earned
+its non-fatal period by having a NAMED blocker in front of it at every moment
+(#149 -> #150 -> #151 -> #140 -> #155 -> #157, each cleared in turn); this gate
+has none. A soft-skip still applies when the bundle is absent, because an
+external tarball is a missing input rather than a broken kernel -- the fatality
+applies to a gate that RAN.
+
+### Coverage, and what the layers cannot see
+
+`run_viv_bundle` was factored out of `do_alpine_shell_gate` in the same commit
+so both gates share one spawn/drain/reap path; the refactor's blast radius is
+loud rather than silent, since L-6c is itself boot-fatal.
+
+The leg logic was discriminated on the host before it ever booted, against a
+stub busybox reproducing applet dispatch: the control lights all six markers,
+an argv[0]-is-the-resolved-path sabotage darkens **C alone**, a broken relative
+symlink darkens **D and E**, and a stale image darkens **E alone**. The first
+run of that harness darkened C in the CONTROL -- an absolute symlink dangles on
+a host with no container root -- which is the reason the harness rewrites the
+link and the reason a sabotage matrix is only readable once its control is
+fully green.
+
+What the host run cannot see: anything about the guest. No pool, no stalk, no
+I-28 re-anchoring, no ldso, no `PT_INTERP`. It proves the script's patterns CAN
+match and that each leg reddens for its own reason -- nothing more. Legs A and B
+have no host sabotage because on the host they are the harness itself.
