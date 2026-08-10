@@ -1025,16 +1025,19 @@ VIVEOF
     # ET_DYN PIE linked against /lib/ld-musl-aarch64.so.1 -- there is not one
     # statically-linked file in the image.
     #
-    # HALF-CLEARED at DISTRO D-2 (2026-08-06). elf.c accepted neither ET_DYN
-    # nor PT_DYNAMIC when this was written; it now accepts BOTH (a PIE is
-    # placed at ELF_PIE_LOAD_BIAS and inherently carries a PT_DYNAMIC). What
-    # still blocks the stock shell is PT_INTERP alone -- the kernel loads one
-    # image per exec and runs no interpreter, which is D-4's rewrite-to-ldso
-    # route. So busybox-static stays the /bin/sh here until D-4, but the
-    # reason narrowed from three rejects to one. The D-2 legs in the gate
-    # script below exec the rootfs's OWN ld-musl-aarch64.so.1 -- a real stock
-    # ET_DYN, and the only one in the image with no PT_INTERP of its own.
-    # See task #145.
+    # FULLY CLEARED as of DISTRO D-4 (2026-08-10). elf.c accepted neither
+    # ET_DYN nor PT_DYNAMIC when this was written; D-2 accepted both, and D-4
+    # made PT_INTERP dispatch to the interpreter instead of refusing -- so the
+    # stock dynamic busybox in this tarball IS runnable now, and the D4 legs in
+    # the gate script below prove it on a stock dynamic getconf named without
+    # its interpreter.
+    #
+    # busybox-static NEVERTHELESS STAYS the /bin/sh here, deliberately, and the
+    # reason is now blast radius rather than capability: /bin/sh is what every
+    # L6C-* leg runs through, so flipping it to the dynamic binary would make
+    # the entire leg list depend on D-4 and turn any D-4 hiccup into "the shell
+    # did not run" with no first-missing signal. That flip is D-5's, alongside
+    # the stock-rootfs pipeline it belongs to. Task #145 is closed by D-4.
     #
     # /bin/sh is also a SYMLINK to /bin/busybox in the stock image. D-1 made
     # the resolver follow symlinks (task #146), but the static binary is still

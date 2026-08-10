@@ -276,6 +276,14 @@ bounded header PREFIX `exec_read_header` produces. Returns the path's length, or
 every absent case** -- unreadable, outside the prefix, unterminated, empty, longer than
 `ELF_INTERP_MAX`, or larger than the caller's buffer -- and clears `out` when it does.
 
+**The hint inherited the stricter bar, and that is recorded rather than
+reverted** (D-4 round F3): an ELF whose interp string is over-long or
+unterminated but which CONTAINS `ld-musl` would have been branded
+`LINUX_LIKELY` by a raw byte scan and is now `UNKNOWN`. No soundness impact --
+the hint is consulted only on an already-FAILED load and never changes an
+outcome, so the load still fails identically; only the explanatory line is
+withheld from a header too malformed to explain.
+
 The bar here is stricter than the hint's, because D-4 ACTS on the answer: it resolves the
 returned path and execs it. A truncated `/lib/ld-musl-aarch64.so.1` is `/lib/ld`, which
 names a DIFFERENT file, so "absent" is the only safe report for a path that did not

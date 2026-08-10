@@ -157,6 +157,7 @@ shape that produces it.
 | `AT_EXECFN` | absent (accepted gap) | absent (unchanged) | We emit no `AT_EXECFN` in either route; musl's consumer is the kernel-loaded branch only. |
 | `argc == 0` | not considered | becomes `argc == 1`, `argv[0] == ""` | Inherent: the ldso's own command line must name a pathname, so a zero-length vector cannot be expressed. Linux itself treats `argc == 0` as a hazard (the CVE-2021-4034 class). |
 | mode `0111` (X, not R) | not considered | REFUSED at load | Inherent to a userspace loader: the ldso re-opens the program `O_RDONLY`. The kernel's own `OEXEC` gate still runs first, so this only ever SUBTRACTS reachability. Fuchsia and Genode have the identical property. |
+| `argc >= 509` | not considered | REFUSED (a clean refusal, never truncation) | The rewrite spends 4 of the 512 argv slots, so a dynamic exec's ceiling is 508 where a static one's is 512. Same for an argv within ~40 bytes of the 64 KiB byte ceiling. Fail-safe by construction: the bound is checked before the frame builder, which would otherwise EXTINCT. |
 | the program path | not considered | resolved TWICE (kernel peek, then ldso `open`) | Benign: the kernel's resolution only decides "this needs an interpreter"; the ldso's is what loads. A file swapped between them is caught by the ldso's own `map_library` validation, never by the kernel mapping the wrong bytes. |
 
 `--argv0` and `--` bind D-4 to a musl ldso carrying both. Read out of the

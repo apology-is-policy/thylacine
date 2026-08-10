@@ -476,6 +476,34 @@ program path beginning with `--` is not eaten by the option parser. musl consume
 the four inserted slots and rewrites argc in `argv[-1]` (`dynlink.c:1891`), so the
 program observes its original `argc` and vector.
 
+### The interpreter's parse, replayed
+
+Not read off the source -- musl 1.2.5's `dynlink.c:1862-1924` + `:2071` were
+replayed verbatim against the exact vector `exec_interp_argv` emits, and this is
+what the APP was measured to see:
+
+| Emitted vector | ldso opens | app `argc` | app `argv` |
+|---|---|---|---|
+| `[LD, --argv0, ls, --, /bin/busybox, -l]` | `/bin/busybox` | 2 | `["ls", "-l"]` |
+| `[LD, --argv0, "", --, /bin/true]` | `/bin/true` | 1 | `[""]` |
+| `[LD, --argv0, -sh, --, /bin/sh]` | `/bin/sh` | 1 | `["-sh"]` |
+| `[LD, --argv0, --argv0, --, --weird]` | `--weird` | 1 | `["--argv0"]` |
+| `[LD, --argv0, getconf, --, /usr/bin/getconf, PAGESIZE]` | `/usr/bin/getconf` | 2 | `["getconf", "PAGESIZE"]` |
+| the 08-05 vote's shape: `[LD, /bin/busybox, -l]` | `/bin/busybox` | 2 | `["/bin/busybox", "-l"]` |
+
+Row 1 is the claim: the app's vector is byte-identical to the caller's. Row 3 is
+the login-shell convention. Row 4 is why `--` is unconditional -- an `argv0` that
+is literally `--argv0` and a path that is literally `--weird` both survive
+intact. The last row is the correction's whole reason, measured rather than
+argued: the voted shape hands the program its PATH.
+
+**Why envp and auxv still land correctly**, which is the non-obvious half (D-4
+round, independently derived): musl shifts the argv base UP by 4 and shrinks
+argc BY 4, so `argv_base + argc` is conserved. The app's argv NULL terminator
+therefore falls exactly on the terminator the kernel wrote, and envp/auxv are
+exactly where the kernel put them. The four inserted slots cost nothing
+downstream.
+
 `orig_path` comes from a NEW `prog_name` parameter threaded from the callers, **not** from
 `exe->path`. That is I-33: the Spoor's `Path` is cosmetic and no syscall result may turn
 on it, so an exec that failed because a path-alloc OOM'd would be the invariant's own
@@ -499,6 +527,17 @@ No auxv change. Direct mode is selected by `aux[AT_PHDR] == ldso.phdr`
 `AT_PHDR` (`exec.c:655`) and musl's `laddr(&ldso, e_phoff)` are the same value for a
 segment-0-at-file-offset-0 PIE. `AT_BASE` and `AT_ENTRY` are for the in-kernel dual-image
 model the 2026-08-05 vote REJECTED.
+
+**The consequence, named because it is a real fidelity delta (D-4 round F2):**
+`AT_PHDR` therefore describes the INTERPRETER, and musl reads it only to select
+direct mode -- it never rewrites the slot. So a program calling
+`getauxval(AT_PHDR)` sees ldso's phdrs, not its own. That differs from Linux's
+NORMAL dynamic exec (which maps both images and points `AT_PHDR` at the
+program) while matching Linux's own `ld.so ./prog` direct-invocation semantics
+exactly, so it is a consequence of the model the vote chose rather than a defect
+in the implementation of it. `dl_iterate_phdr` is UNAFFECTED -- musl builds it
+from `map_library`'s result, not from the auxv -- which is why the programs this
+arc runs are indifferent to it.
 
 ### Known gaps (the DISTRO.md section 3.2 ledger)
 
