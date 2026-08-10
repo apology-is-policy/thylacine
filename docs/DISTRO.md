@@ -557,6 +557,61 @@ over shared kernel core; no native mmap API is added.
   (open-if-exists) preserves the "phenotype cannot create files" premise this
   verdict leans on; the FULL create fix must revisit #192. The FOCUSED round is
   instructed to attack this verdict rather than inherit it.
+
+  **CORRECTED AT D-CLOSE (the ARC ROUND attacked it, as instructed, and one
+  third of it fell).** (a) and (b) STAND -- the Linux semantic and Debian
+  Policy 8.1's 0644 shared libraries are both real, and (b) is why D-close does
+  NOT bolt an X-bit check onto this arm. **(c) IS FALSE, and it is false in
+  exactly the case that matters.** "The caller could already run them
+  (exec-from-namespace)" holds only for a file the caller has X on:
+  `exec_resolve_from_namespace` walks with `STALK_OPEN`/OEXEC, so exec REFUSES a
+  non-executable file. This arm refuses nothing -- `sys_mmap_file_for_proc`
+  looks the fd up with `RIGHT_READ` alone and contains **zero** `perm_check`
+  calls (measured across `syscall.c:4854-4960`), then installs
+  `VMA_PROT_READ|VMA_PROT_EXEC`. So R+X mmap runs bytes that exec would decline.
+  That is not "the same authority in this address space"; it is authority exec
+  does not grant, and it is precisely what I-42 exists to gate.
+
+  The reachability half is worse than the verdict assumed. This entry's own
+  premise is narrowly TRUE -- the phenotype cannot CREATE files (#201 refuses
+  `O_CREAT`) -- but it does not protect, because the phenotype can WRITE an
+  existing one: `VIV_LINUX_WRITE -> SYS_WRITE` is a **tier-1 direct row**
+  (`vivarium.c:149`) and `openat O_RDWR -> VIV_OMODE_RDWR` is translated
+  (`vivarium.c:532`). So `openat(F, O_RDWR)` + `write(shellcode)` +
+  `mmap(F, PROT_READ|PROT_EXEC)` + jump is native code execution with no
+  `CAP_JIT`, using only DAC authority over F. **The closed-list record widened
+  the premise to "phenotype cannot create/WRITE files"** (`audit_d3_closed_list`
+  F4), and the D-4 round then re-affirmed #192 on that widened form -- so the
+  false clause lived in the audit memory, not here, and two successive focused
+  rounds inherited it because each was scoped to a commit that did not contain
+  the `SYS_WRITE` row that falsifies it.
+
+  **What actually stands between this and exploitation is one bundle's DAC.**
+  `root.readonly: true` in the shipped manifest is parsed and DISCARDED
+  (`usr/viv/src/main.rs:210-213`: "not acted on at v1.0: there is no read-only
+  bind flag, so the FS permission model (a SYSTEM-owned bake vs a non-SYSTEM
+  invoker) is the enforcement"). That is real for OUR bake and does not survive
+  a user-supplied bundle -- the entire point of a container runtime -- where the
+  attacker authors the image and ships a 0666 file, nor a writable mount.
+
+  **DISPOSITION (user-voted 2026-08-10): correct the record now, enforce via
+  per-mount `noexec` later.** Not an X-bit check, because (b) still stands and
+  it would break every Debian-shaped rootfs. `noexec` is what Linux itself
+  gates `PROT_EXEC` on (`path_noexec`), it survives 0644 libraries, and it
+  re-couples #192 to a kernel mechanism instead of a bundle's file modes -- the
+  capability-microkernel SOTA agrees on the principle if not the shape (Zircon
+  requires the vmex resource to mark a VMO executable; seL4 and Genode make
+  execute a mapping right granted by capability). Owed as its own named chunk.
+  **Until it lands, this hole is OPEN for any bundle we do not bake ourselves,
+  and that is stated here rather than papered over.**
+
+  **The tripwire is rewritten because the old one could never fire.** It read
+  "the instant D-4/D-5 grants file writes, revisit #192" -- but the writes were
+  granted before the arc began, so it watched a door that was already open. It
+  now reads: **#192 is re-opened by the `noexec` chunk, or by any change that
+  admits a new `PROT_EXEC` file-mapping shape, whichever comes first.** A
+  tripwire keyed to an event that already happened is not a guard; it is a
+  comment that looks like one.
 - **#198 DISPOSITION: documented, not fixed.** The eager arm's up-to-65536
   serialized 9P reads in one syscall are bounded (BURROW_ATTACH_MAX), fully
   charged, and death-interruptible by inheritance from the dev9p read — so a
@@ -765,8 +820,14 @@ relative class through an ordinary `open`, which is why it exists.
 `O_WRONLY|O_CREAT|O_TRUNC` even onto a file that already exists. Every
 assertion is therefore a `$( )` capture (a pipe) or a `2>&1` dup — the same
 constraint D-3c's gate line already works under. This is a real fidelity gap
-being routed around, not a stylistic choice; #201 remains the blocker and its
-full fix must re-open #192.
+being routed around, not a stylistic choice; #201 remains the blocker.
+
+**The "and its full fix must re-open #192" clause is RETIRED at D-close** —
+see the #192 verdict's correction in section 6. #192 was never actually gated
+on `O_CREAT`: the phenotype can already WRITE any existing file it has DAC
+write on (`VIV_LINUX_WRITE -> SYS_WRITE` is a tier-1 direct row), so the
+write→mmap-R+X→jump chain is reachable with or without the create fix. #192 is
+now tied to per-mount `noexec` (task #217) instead.
 
 - Bake note: the bundle is pool-resident — the #126 stale-binary trap
   applies to it VERBATIM (a PRESERVE=1 build runs the OLD rootfs); the gate

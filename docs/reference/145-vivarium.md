@@ -2438,8 +2438,19 @@ Not a style rule. #201: the vivarium's `openat` refuses `O_CREAT`
 unconditionally, and a plain `>` passes `O_WRONLY|O_CREAT|O_TRUNC` even onto a
 file that already exists. Every assertion is therefore a `$( )` capture (a pipe)
 or a `2>&1` dup, the same constraint D-3c's gate line already works under. This
-is a real fidelity gap being routed around; #201 remains open and its full fix
-must re-open #192.
+is a real fidelity gap being routed around; #201 remains open.
+
+**The "#201's full fix must re-open #192" clause is RETIRED at D-close
+(2026-08-10, the arc round's F1 [P1]).** It rested on #192 being coupled to
+"the phenotype cannot create/write files", and the write half was never true:
+`VIV_LINUX_WRITE -> SYS_WRITE` is a tier-1 direct row (`vivarium.c:149`) and
+`openat O_RDWR` is translated (`vivarium.c:532`). A container can already write
+any existing file it has DAC write on, so `write(shellcode)` + `mmap(R+X)` +
+jump is a `CAP_JIT`/I-42 bypass **today**, with or without `O_CREAT` — the
+create fix was never what would open it. #192 is now tied to per-mount `noexec`
+(task #217, user-voted 2026-08-10) rather than to #201, and re-opens at that
+chunk or at any change admitting a new `PROT_EXEC` file-mapping shape.
+Full analysis: `docs/DISTRO.md` section 6.
 
 ### Marker honesty (#186)
 
