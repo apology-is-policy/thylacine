@@ -43,7 +43,7 @@ the content-keyed RAM-dedup "substitute" is KSM, declined as ASLR-defeating).
 | 4 | Private COW (eager-copy v1.0) for writable data | `map_eager_from_file` copies `filesz` bytes into a **private anonymous** Burrow per segment; the `[filesz, size)` tail is KP_ZERO (`.bss`). Never written back to the snapshot; shared text is never copied. |
 | 5 | Death-interruptible page faults | The page-in `dev->read` blocks; it is `#811`-death-interruptible **by inheritance** (the dev9p read registers on the per-Thread `wait_lock`; a dying Proc unwinds at `el0_return_die_check` and the read returns `< 0`). No new wait/wake code. |
 | 6 | Bounded, fail-closed fault errors | A page-in I/O error (`got < 0`) → `FAULT_USER_BUS` → `proc_fault_terminate(NOTE_NAME_SNARE_BUS, vaddr)` — attributable per-Proc terminate, **never** a silent zero-fill of executable text, **never** a box extinction. |
-| 7 | Resource-accounted pages | Bounded **structurally** at v1.0 (one-shot exec, like the #65 exec-image posture; shared text bounded by `IMAGE_CACHE_MAX`). Per-page I-32 charge is a v1.x refinement (charging a *shared* text page per-Proc is unsound — see Known caveats). |
+| 7 | Resource-accounted pages | Bounded at v1.0 by **real file bytes** (#194, D-3c): every Image Burrow carries `file_limit` (backing size sampled at create; `spoor_file_size`), and the fault arm refuses a page wholly past `round_up(file_limit)` with `FAULT_USER_BUS` (Linux SIGBUS past EOF) — so uncharged FILE residency is bounded by the actual file sizes reachable in the namespace, never by a guest-named span. The pre-#194 "structural" one-shot-exec bound broke when DISTRO D-3 made mmap a second producer. Per-page I-32 charge for shared text stays a v1.x refinement (charging a *shared* page per-Proc is unsound — see Known caveats). `BURROW_FILE_LIMIT_UNKNOWN` (no `stat_native`: the baked, immutable ramfs only) keeps the unbounded posture; the guest-facing mmap arms REFUSE unknown (`-EIO`), only exec admits it. |
 
 Conditions 1–2 are free from Stratum's content-addressed Merkle FS; 3–4–7 are
 existing mechanisms; 5–6 are the genuinely-new bits, and the hard primitive (5)
@@ -144,6 +144,31 @@ which cannot run under the `vma_lock` spinlock. So the path splits:
    ABA-safe; a torn-down/remapped VMA bails and frees the page). Then under
    `v->lock`, install-once: if a sibling faulter already filled the slot, use the
    resident page + free our freshly-read one; else store ours. Install the PTE.
+
+#### The `file_limit` bound (#194, D-3c) — SIGBUS past the last file page
+
+`file_demand_page_slow` refuses, BEFORE any allocation or read, a faulting page
+whose file offset is `>= round_up(v->file_limit)`: `FAULT_USER_BUS` →
+`snare:bus`. This is the Linux semantic (touching a file mapping wholly past
+EOF is SIGBUS there), and it is what keeps the uncharged-FILE posture sound —
+without it, a fault past EOF demand-zeroed a page that no file byte backs
+(anonymous in effect, accounted as FILE, i.e. not at all), and D-3's
+guest-chosen map lengths made that an I-32 bypass bounded only by
+`BURROW_ATTACH_MAX × PROC_VMA_MAX`. The file's final PARTIAL page still
+zero-fills past EOF (the read-short `n == 0` path — unchanged, and genuinely
+load-bearing for the eager arm's `p_memsz > p_filesz` windows). The cluster
+fill clamps `cend` at the limit slot for the same reason stated in the code: a
+past-limit slot pre-filled by read-ahead would become RESIDENT, and the fast
+path installs resident slots with no check — the mint returning through the
+side door. Sentinel: `BURROW_FILE_LIMIT_UNKNOWN` (and the whole top page-band,
+so a hostile near-2^64 size cannot wrap the round-up into a false-BUS window)
+disables the bound. `file_limit` is creation-time (close-to-open posture); a
+file that SHRINKS under a live map serves zero tails rather than Linux's
+truncate-SIGBUS — documented divergence, consistent with the #45 immutability
+assumption. Tests: `demand_page.file_past_limit_bus` /
+`file_partial_page_zero_with_limit` / `file_cluster_clamps_at_limit`, each
+revert-probed (S1: entry check; S2: cluster clamp — distinct failure
+signatures, incl. the S2 fast-path side-door reproducing exactly as predicted).
 
 #### The read-ahead cluster fill (`file_demand_page_cluster` + `file_install_cluster_locked`)
 

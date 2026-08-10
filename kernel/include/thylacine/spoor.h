@@ -262,6 +262,11 @@ void            walkqid_free(struct Walkqid *w);
 struct t_stat;
 int spoor_stat_native(struct Spoor *c, struct t_stat *out);
 
+// #194: the backing file's size in bytes, or BURROW_FILE_LIMIT_UNKNOWN when
+// the Dev cannot answer (no stat_native / stat error). The caller owns the
+// failure policy -- see image.h's file_limit contract.
+u64 spoor_file_size(struct Spoor *c);
+
 // =============================================================================
 // Namespace name retention (#66 -- the Plan 9 Chan.path; I-33). The bridge
 // between the resolver (which knows the walked component) and the per-Spoor

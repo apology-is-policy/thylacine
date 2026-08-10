@@ -890,9 +890,16 @@ static int map_file_backed(struct AddrSpace *as, bool exempt, struct Spoor *exe,
     // image_lookup_or_create CONSUMES one spoor ref (adopts on miss / clunks on
     // hit). The thunk keeps the borrowed `exe`, so hand the lookup a FRESH ref;
     // on a NULL return it consumed nothing -> drop the fresh ref.
+    //
+    // #194: the sampled size lets the fault arm refuse pages wholly past EOF,
+    // which closes the lying-ELF mint (a phdr claiming filesz beyond the real
+    // file end used to demand-zero the difference, uncharged). exec ADMITS
+    // UNKNOWN -- the only size-less backing Dev is the baked ramfs, which no
+    // guest can write, so a lying ELF cannot exist there.
     spoor_ref(exe);
     struct Burrow *b = image_lookup_or_create(exe, seg->file_offset, seg->filesz,
-                                              (seg->flags & PF_X) != 0);
+                                              (seg->flags & PF_X) != 0,
+                                              spoor_file_size(exe));
     if (!b) { spoor_clunk(exe); return -1; }
 
     // The segment's own ELF prot: R+X for text, R-only (XN) for rodata. W^X

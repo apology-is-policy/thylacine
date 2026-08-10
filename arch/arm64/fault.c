@@ -969,6 +969,20 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
     size_t cstart = freq->slot & ~(size_t)(REVENANT_READAHEAD_PAGES - 1u);
     size_t cend   = cstart + REVENANT_READAHEAD_PAGES;
     if (cend > v->page_count) cend = v->page_count;
+    // #194: never PRE-READ a slot wholly past the file's last data page. The
+    // faulting slot itself was admitted by the entry check, but a past-limit
+    // NEIGHBOR filled here would become a resident zero page that the fast
+    // path (demand_page_locked's FILE resident-hit) later installs with no
+    // check -- the uncharged mint sneaking back in through read-ahead. slot s
+    // holds file bytes iff file_offset + s*PAGE < file_limit, so the first
+    // inadmissible slot is ceil((file_limit - file_offset) / PAGE).
+    if (burrow_file_limit_known(v->file_limit)) {
+        u64 slot_lim = (v->file_limit > v->file_offset)
+            ? (v->file_limit - v->file_offset + (PAGE_SIZE - 1)) / PAGE_SIZE
+            : 0;
+        if (slot_lim < (u64)cend) cend = (size_t)slot_lim;
+        if (cend <= cstart) cend = cstart + 1;   // entry-admitted slot always served
+    }
     size_t ncluster = cend - cstart;
     if (ncluster <= 1)
         return file_demand_page_single(p, fi, freq);
@@ -1046,7 +1060,24 @@ static enum fault_result file_demand_page_cluster(struct Proc *p,
 static enum fault_result file_demand_page_slow(struct Proc *p,
                                                const struct fault_info *fi,
                                                struct file_fault_req *freq) {
-    enum fault_result r = file_demand_page_cluster(p, fi, freq);
+    enum fault_result r;
+    // #194 / Linux fidelity: a page WHOLLY past the backing file's last page is
+    // SIGBUS on Linux, and demand-zeroing it here would mint real memory the
+    // I-32 page axis never sees (anonymous in effect, accounted as FILE, i.e.
+    // not at all -- the R-5 uncharged posture is justified by SHARED FILE BYTES,
+    // which these pages are not). Refuse BEFORE any allocation: nothing is
+    // minted, so nothing needs charging. The file's final PARTIAL page still
+    // zero-fills past EOF (the read-short path), matching Linux. file_limit is
+    // creation-time (close-to-open posture); UNKNOWN -- only the immutable
+    // baked ramfs, argued at the image.c stamp -- keeps the pre-#194 behavior.
+    // The faulting offset is page-floored at the fill site, so >= round_up(lim)
+    // is exactly "no byte of this page is a file byte".
+    if (burrow_file_limit_known(freq->burrow->file_limit) &&
+        freq->file_offset >=
+            ((freq->burrow->file_limit + (u64)(PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1)))
+        r = FAULT_USER_BUS;
+    else
+        r = file_demand_page_cluster(p, fi, freq);
     burrow_unref(freq->burrow);
     return r;
 }

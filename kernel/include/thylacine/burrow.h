@@ -56,6 +56,7 @@
 #ifndef THYLACINE_VMO_H
 #define THYLACINE_VMO_H
 
+#include <thylacine/page.h>         // #194: PAGE_SIZE (burrow_file_limit_known)
 #include <thylacine/spinlock.h>     // #847: per-Burrow lock (spin_lock_t)
 #include <thylacine/types.h>
 
@@ -208,6 +209,15 @@ struct Burrow {
     // it, so no concurrent faulter touches filepages).
     struct Spoor     *spoor;        // NULL except FILE: the adopted+pinned backing Chan
     u64               file_offset;  // FILE: segment base byte offset in the backing file
+    // #194 (I-32): bytes in the backing file, sampled ONCE when the Burrow is
+    // created (image_lookup_or_create stamps it from the caller's stat; the
+    // close-to-open posture makes creation-time the honest sample point). The
+    // fault arm refuses to demand-page a page WHOLLY past round_up(file_limit)
+    // -- Linux's SIGBUS-past-EOF -- so no anonymous-in-effect page is ever
+    // minted against the uncharged FILE posture. BURROW_FILE_LIMIT_UNKNOWN
+    // disables the bound (a backing Dev with no stat_native: the baked,
+    // immutable ramfs -- argued at the image.c stamp site).
+    u64               file_limit;   // FILE: backing file size in bytes at create
     int               file_dc;      // FILE: cache key — backing dc       (sampled at create)
     u32               file_devno;   // FILE: cache key — backing devno    (sampled at create)
     u64               file_qid_path;// FILE: cache key — backing qid.path (sampled at create)
@@ -343,6 +353,15 @@ struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma);
 //   - NULL spoor / corrupted spoor magic, burrow_init not run, length == 0,
 //     length overflow, SLUB OOM, or filepages-array OOM.
 struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t length);
+
+// #194: `file_limit` sentinel + validity predicate. A limit in the top page's
+// worth of u64 values would wrap the fault arm's round-up, so the predicate
+// excludes the whole band -- a hostile server reporting a near-2^64 size gets
+// the UNBOUNDED (pre-#194) behavior, never a wrapped false-BUS window.
+#define BURROW_FILE_LIMIT_UNKNOWN ((u64)-1)
+static inline bool burrow_file_limit_known(u64 lim) {
+    return lim < (u64)-1 - (u64)(PAGE_SIZE - 1);
+}
 
 // Overcommit / I-32: burrow_create_anon_lazy — the demand-ZERO anonymous Burrow
 // (ARCH §6.5 "The overcommit model"; SYS_BURROW_ATTACH_LAZY). Reserves a `size`-byte

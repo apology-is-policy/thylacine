@@ -1253,3 +1253,147 @@ void test_mmap_eager_copy_charge_pairing(void) {
     spoor_clunk(s);
     drop_proc(p);
 }
+
+// =============================================================================
+// #194 (D-3c): the file_limit bound -- Linux SIGBUS past the last file page.
+//
+// A FILE Burrow stamped with a KNOWN backing size must REFUSE to demand-page a
+// page wholly past round_up(file_limit): no page allocated, no read issued, the
+// fault answers FAULT_USER_BUS (snare:bus). Without the bound (the pre-#194
+// state, preserved under BURROW_FILE_LIMIT_UNKNOWN -- see file_eof_tail_zero
+// above, which pins THAT posture), every such fault minted an uncharged
+// demand-zero page: anonymous in effect, accounted as FILE, i.e. not at all --
+// an I-32 bypass bounded only by BURROW_ATTACH_MAX x PROC_VMA_MAX.
+// =============================================================================
+
+void test_demand_page_file_past_limit_bus(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    g_rev_read_eof   = (s64)ONE_PAGE;        // the "file" is exactly one page
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
+    v->file_limit = ONE_PAGE;                // the image.c stamp, done by hand
+
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 4 * ONE_PAGE, VMA_PROT_RX), 0,
+                   "burrow_map 4-page FILE RX");
+
+    // Slot 0 holds file bytes: serves normally. (The cluster clamp bounds the
+    // fill to slot_lim=1, so this also proves a clamped 1-slot cluster
+    // degrades to the single path and still makes progress.)
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+                   "in-file slot 0 serves under a known limit");
+    struct page *pg0 = burrow_file_slot_for_test(v, 0);
+    TEST_ASSERT(pg0 != NULL, "slot 0 resident");
+    u8 *b0 = (u8 *)pa_to_kva(page_to_pa(pg0));
+    TEST_EXPECT_EQ((u64)b0[5], 5ull, "slot 0 carries file bytes (pattern)");
+
+    // Slot 2 is WHOLLY past the file: refused before any allocation or read.
+    int calls_before = g_rev_read_calls;
+    make_fi(&fi, USER_VA + 2 * ONE_PAGE + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS,
+                   "wholly-past-limit page answers BUS (Linux SIGBUS past EOF)");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 2) == NULL,
+                "no page minted for the refused slot");
+    TEST_EXPECT_EQ(g_rev_read_calls, calls_before,
+                   "refused BEFORE any read was issued");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_file_partial_page_zero_with_limit(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    const u64 LIMIT  = ONE_PAGE + 0x10;      // 16 bytes into page 1
+    g_rev_read_eof   = (s64)LIMIT;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 4 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file 4-page");
+    v->file_limit = LIMIT;
+
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 4 * ONE_PAGE, VMA_PROT_RX), 0,
+                   "burrow_map 4-page FILE RX");
+
+    // Slot 1 STRADDLES the limit (holds 16 file bytes): admitted, data then
+    // zero -- the read-short path, byte-identical to Linux's partial last page.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + ONE_PAGE + 0x8, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+                   "the partial final page is admitted under the limit");
+    struct page *pg1 = burrow_file_slot_for_test(v, 1);
+    TEST_ASSERT(pg1 != NULL, "slot 1 resident");
+    u8 *b1 = (u8 *)pa_to_kva(page_to_pa(pg1));
+    TEST_EXPECT_EQ((u64)b1[0xf], (u64)(u8)((ONE_PAGE + 0xf) & 0xff),
+                   "pre-EOF byte 15 is file data");
+    TEST_EXPECT_EQ((u64)b1[0x10], 0ull, "byte 16 (EOF) is ZERO");
+    TEST_EXPECT_EQ((u64)b1[PAGE_SIZE - 1], 0ull, "page tail stays ZERO");
+
+    // Slot 2 (the first page with NO file byte) refuses.
+    make_fi(&fi, USER_VA + 2 * ONE_PAGE, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS,
+                   "first wholly-past page refuses");
+
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+void test_demand_page_file_cluster_clamps_at_limit(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_rev_read_fail  = false;
+    g_rev_read_calls = 0;
+    g_rev_read_chunk = 0;
+    const u64 LIMIT  = 3 * ONE_PAGE;         // exactly three pages of data
+    g_rev_read_eof   = (s64)LIMIT;
+
+    struct Spoor *s = spoor_alloc(&g_rev_test_dev);
+    TEST_ASSERT(s != NULL, "spoor_alloc");
+    struct Burrow *v = burrow_create_file(s, 0, 8 * ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_file 8-page");
+    v->file_limit = LIMIT;
+
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA, 8 * ONE_PAGE, VMA_PROT_RX), 0,
+                   "burrow_map 8-page FILE RX");
+
+    // Fault slot 0: read-ahead runs, CLAMPED to the 3 in-file slots. Without
+    // the clamp, slots 3..7 would be pre-filled as resident ZERO pages -- and
+    // the resident fast path installs those with NO limit check, so the mint
+    // would return through the side door. The two assertions below redden in
+    // exactly that revert.
+    struct fault_info fi;
+    make_fi(&fi, USER_VA + 0x40, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_HANDLED,
+                   "clamped cluster fault serves the in-file slots");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 0) != NULL, "slot 0 resident");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 2) != NULL,
+                "read-ahead reached the last in-file slot");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 3) == NULL,
+                "read-ahead did NOT pre-fill past the limit");
+    TEST_ASSERT(burrow_file_slot_for_test(v, 7) == NULL,
+                "the cluster tail stays empty past the limit");
+
+    // The past-limit slot then refuses on its own fault (it cannot ride the
+    // fast path, because nothing resident exists for it).
+    make_fi(&fi, USER_VA + 3 * ONE_PAGE, /*is_write=*/false, /*is_instr=*/true);
+    TEST_EXPECT_EQ(userland_demand_page(p, &fi), FAULT_USER_BUS,
+                   "past-limit slot refuses after the clamped cluster");
+
+    drop_proc(p);
+    burrow_unref(v);
+}

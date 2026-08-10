@@ -124,7 +124,7 @@ static int find_install_slot(void) {
 }
 
 struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
-                                      size_t length, bool exec) {
+                                      size_t length, bool exec, u64 file_limit) {
     if (!spoor)
         return NULL;
     if (spoor->magic != SPOOR_MAGIC)
@@ -159,6 +159,12 @@ struct Burrow *image_lookup_or_create(struct Spoor *spoor, u64 file_offset,
     struct Burrow *fresh = burrow_create_file(spoor, file_offset, length);
     if (!fresh)
         return NULL;                         // no ref taken; caller still owns spoor
+    // #194: stamp the caller-sampled backing size BEFORE publication (fresh is
+    // private here -- no lock needed, no reader exists). The fault arm reads it
+    // to refuse pages wholly past EOF. UNKNOWN keeps the pre-#194 unbounded
+    // behavior -- admissible only because the sole size-less backing Dev is the
+    // baked ramfs, which no guest can write (the header's failure-policy note).
+    fresh->file_limit = file_limit;
 
     // --- pass 2: re-search (the create race) + install ---
     spin_lock(&g_image_lock);

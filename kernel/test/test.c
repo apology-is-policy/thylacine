@@ -359,6 +359,9 @@ void test_demand_page_file_multi_page(void);
 void test_demand_page_file_short_read_fills_page(void);
 void test_demand_page_file_cluster_short_read(void);
 void test_demand_page_file_eof_tail_zero(void);
+void test_demand_page_file_past_limit_bus(void);              // #194 (D-3c)
+void test_demand_page_file_partial_page_zero_with_limit(void);
+void test_demand_page_file_cluster_clamps_at_limit(void);
 void test_demand_page_lazy_zero_fill(void);
 void test_demand_page_lazy_decommit_refault(void);
 void test_demand_page_lazy_charge_on_fault_oom(void);
@@ -471,6 +474,9 @@ void test_burrow_map_fixed_carries_offset(void);
 void test_burrow_map_fixed_refusals(void);
 void test_burrow_map_fixed_successive(void);
 void test_burrow_map_fixed_into_free_space(void);
+void test_burrow_munmap_range_tiled(void);                    // #199 (D-3c)
+void test_burrow_munmap_range_partial_refused(void);
+void test_burrow_munmap_range_empty_ok(void);
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -1851,6 +1857,9 @@ struct test_case g_tests[] = {
     { "demand_page.file_cluster_short_read",
                                        test_demand_page_file_cluster_short_read, false, NULL },
     { "demand_page.file_eof_tail_zero", test_demand_page_file_eof_tail_zero, false, NULL },
+    { "demand_page.file_past_limit_bus", test_demand_page_file_past_limit_bus, false, NULL },
+    { "demand_page.file_partial_page_zero_with_limit", test_demand_page_file_partial_page_zero_with_limit, false, NULL },
+    { "demand_page.file_cluster_clamps_at_limit", test_demand_page_file_cluster_clamps_at_limit, false, NULL },
     { "demand_page.lazy_zero_fill",    test_demand_page_lazy_zero_fill,    false, NULL },
     { "demand_page.lazy_decommit_refault",
                                        test_demand_page_lazy_decommit_refault, false, NULL },
@@ -2031,6 +2040,9 @@ struct test_case g_tests[] = {
     { "burrow.map_fixed_refusals",            test_burrow_map_fixed_refusals,            false, NULL },
     { "burrow.map_fixed_successive",          test_burrow_map_fixed_successive,          false, NULL },
     { "burrow.map_fixed_into_free_space",     test_burrow_map_fixed_into_free_space,     false, NULL },
+    { "burrow.munmap_range_tiled",            test_burrow_munmap_range_tiled,            false, NULL },
+    { "burrow.munmap_range_partial_refused",  test_burrow_munmap_range_partial_refused,  false, NULL },
+    { "burrow.munmap_range_empty_ok",         test_burrow_munmap_range_empty_ok,         false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },

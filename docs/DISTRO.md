@@ -317,7 +317,7 @@ measured-off-the-binary discipline applied to the loader:
 |---|---|---|
 | D-3a | arm 1 (the whole-span fd-backed R / R+X map) + the #190 fix | **AS-BUILT** |
 | D-3b | arms 2+3 (MAP_FIXED split/replace: fd-backed RW eager copy, anon tail) | **AS-BUILT** |
-| D-3c | the gate + reference docs + the FOCUSED audit round | owed |
+| D-3c | the gate (#189) + the #194/#193/#199 fixes + the #192 verdict + reference docs + the FOCUSED round | **AS-BUILT** |
 
 **Three corrections the build forced, recorded before the code:**
 
@@ -330,8 +330,13 @@ measured-off-the-binary discipline applied to the loader:
   `getent`, `iconv`, `scanelf` (libc only), plus `ssl_client` and `apk`.
   **The gate is now `ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` -> `4096`**,
   whose output is a real end-to-end assertion (musl's `sysconf(_SC_PAGESIZE)`
-  reads the `AT_PAGESZ` our exec builds), and which re-crosses D-1's symlink on
-  the way (`libc.musl-aarch64.so.1 -> ld-musl-aarch64.so.1`).
+  reads the `AT_PAGESZ` our exec builds). CORRECTED AT D-3c: the earlier claim
+  that this "re-crosses D-1's symlink" (`libc.musl-aarch64.so.1 ->
+  ld-musl-aarch64.so.1`) is FALSE — measured off the vendored `dynlink.c`,
+  getconf's libc DT_NEEDED short-circuits **by name** in `load_library`'s
+  reserved list (`"c.pthread.rt.m.dl.util.xnet."`) and never touches the
+  filesystem. The gate maps exactly TWO objects: ldso (the kernel's D-2 ET_DYN
+  exec) and getconf (ldso's `map_library`, through the D-3 phenotype arms).
 - **arm 2 also carries R and R+X segments, not only RW — but NOT on this
   rootfs.** `dynlink.c:842` MAP_FIXEDs *every* PT_LOAD whose page-floored vaddr
   differs from `addr_min`, at that segment's own prot. At D-3b this was measured
@@ -443,11 +448,79 @@ over shared kernel core; no native mmap API is added.
   geometry check come out right against a concurrent split: it passes exactly
   when the bytes read before the sleep still belong at that slot.
 
-Gate (CORRECTED, see #189 above): the runner spawns
-`ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` explicitly (no D-4 needed)
-— stock ldso maps stock libc.so and runs a stock dynamic binary end to end,
-printing `4096`. The ORIGINAL line named `/bin/echo`, which is a symlink to a
-STATIC busybox and can never load through ldso.
+**D-3c as-built notes.**
+
+- **The gate (#189) is LIVE and boot-fatal.** It rides the L-6c Alpine gate
+  script (`tools/build.sh`, pool-resident) as marker `D3-A-getconf-pagesize-4096`
+  in joey's leg list: the script runs
+  `/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` and emits the marker
+  only when the run's OWN rc is 0 AND its captured stdout is exactly `4096` —
+  output only the success path can produce. The raw BEGIN/END block above it is
+  diagnostics. The FIRST run of the raw block was green end-to-end (ldso mapped
+  getconf through all three phenotype arms and printed 4096); the marker leg
+  failed on its own instrumentation — `2>/dev/null` — which surfaced **#201**:
+  a shell write-redirect passes `O_CREAT`, and `vivarium_openat_decide` refuses
+  `O_CREAT` even on an existing file, so every `> file` in a container breaks
+  (a D-4/D-5 blocker, tracked). The gate line now uses the proven `2>&1` dup,
+  which also tightens the assertion (stderr pollutes the exact match).
+- **#194 FIXED (the D-3a P1): the fault arm is now Linux-faithful past EOF.**
+  Every Image-cache Burrow carries `file_limit`, sampled at creation
+  (`spoor_file_size`): the guest-facing mmap arms REFUSE to map without it
+  (fail-closed, `-EIO`; a hostile near-2^64 size is excluded by the same
+  predicate); exec admits `BURROW_FILE_LIMIT_UNKNOWN` only because the sole
+  size-less backing Dev is the baked, immutable ramfs. The fault arm answers
+  a page wholly past `round_up(file_limit)` with `FAULT_USER_BUS` (Linux
+  SIGBUS) BEFORE any allocation — nothing is minted, so the uncharged-FILE
+  posture is again justified by what it was always justified by: real, shared
+  file bytes. Read-ahead clamps its cluster at the limit so no resident zero
+  page can serve the fast path unchecked. The file's partial last page still
+  zero-fills (the read-short path). This also closes the lying-ELF variant
+  through exec on any stat-answering FS.
+- **The EOF-tail scripture sentence was WRONG about which arm.** Measured off
+  the staged binaries (getconf: file 0x13F90, arm-2 window [0x10000,0x21000)):
+  every wholly-past-EOF page of the whole-span map is OVERLAID by arm 2 before
+  any touch, on BOTH gate objects — so the FAULT arm's EOF-tail-zero was never
+  load-bearing for the real path (and could not be: musl runs on Linux, where
+  those pages SIGBUS). The load-bearing EOF-zero is the EAGER arm's short-read
+  (arm 2 reads past the file end into its charged private copy), unchanged.
+- **#193 FIXED:** both mmap-family success paths now `burrow_unref` OUTSIDE
+  `as->lock` (the FILE arm and its pre-existing `attach_lazy` twin), removing
+  the non-local "cannot be the last ref" argument; failure paths already did.
+- **#199 FIXED (phenotype-only): whole-span munmap over split VMAs works.**
+  `sys_munmap_range_for_proc` detaches every VMA wholly inside the range (each
+  one WHOLE — not partial unmap), succeeds on an empty range (the Linux no-op),
+  and refuses ATOMICALLY on a boundary straddle or a CODE region, via a
+  validation pass under one lock hold. The per-VMA accounting body is the
+  factored `detach_one_locked` the exact syscall also uses, so the I-32 refund
+  logic exists once. `unmap_library`'s error path and dlclose now tear down.
+  The NATIVE `SYS_BURROW_DETACH` keeps exact-match — Linux semantics belong to
+  the phenotype row, and the native ABI does not move under a phenotype chunk.
+- **#192 VERDICT: document, do not enforce.** File-backed `PROT_EXEC` mmap
+  keeps requiring READ authority only — no X-bit check — because (a) it is the
+  Linux semantic (the x bit gates execve, not mmap; noexec is a mount option we
+  lack), (b) Debian Policy section 8.1 ships shared libraries 0644, so an X-bit
+  gate would break every Debian-shaped rootfs at D-5 while Alpine's 0755 libs
+  never exercise it, and (c) the authority argument holds: the caller could
+  already read the bytes (pread) and already run them (exec-from-namespace);
+  only "in THIS address space" is new, and it is confined to the caller's own.
+  The cost is that I-42's "only executable-memory path" wording narrowed — ARCH
+  section 6.6 now enumerates the three fixed-permission paths (exec, file-backed
+  R+X phenotype mmap, CAP_JIT) instead of claiming one. The #201 narrow fix
+  (open-if-exists) preserves the "phenotype cannot create files" premise this
+  verdict leans on; the FULL create fix must revisit #192. The FOCUSED round is
+  instructed to attack this verdict rather than inherit it.
+- **#198 DISPOSITION: documented, not fixed.** The eager arm's up-to-65536
+  serialized 9P reads in one syscall are bounded (BURROW_ATTACH_MAX), fully
+  charged, and death-interruptible by inheritance from the dev9p read — so a
+  kill unwinds the train. Measured need is ~93 reads for the largest real
+  library (372 KiB). The cure, when one is needed, is the Larder read path /
+  bulk staging, not a bespoke loop here.
+
+Gate (as-built; CORRECTED from the design, see #189 above): the L-6c script
+spawns `ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` explicitly (no D-4
+needed) — stock ldso maps a stock dynamic binary end to end, printing `4096`.
+The ORIGINAL design line named `/bin/echo`, which is a symlink to a STATIC
+busybox and can never load through ldso.
 
 ---
 

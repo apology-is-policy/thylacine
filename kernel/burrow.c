@@ -280,6 +280,9 @@ struct Burrow *burrow_create_file(struct Spoor *spoor, u64 file_offset, size_t l
     // spoor_clunks it on the last unref (the I-30 pin held for the Burrow's life).
     v->spoor         = spoor;
     v->file_offset   = file_offset;
+    // KP_ZERO zeroed the struct, and 0 is a REAL size (an empty file, where
+    // every page is past EOF) -- the no-bound default must be explicit (#194).
+    v->file_limit    = BURROW_FILE_LIMIT_UNKNOWN;
     v->file_dc       = spoor->dc;
     v->file_devno    = spoor->devno;
     v->file_qid_path = spoor->qid.path;

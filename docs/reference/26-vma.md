@@ -40,6 +40,12 @@ void vma_free(struct Vma *v);
 int  vma_insert(struct Proc *p, struct Vma *v);
 void vma_remove(struct Proc *p, struct Vma *v);
 struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
+
+// #199 (D-3c): lowest-addressed VMA overlapping [lo, hi), or NULL; caller
+// holds as->lock. The range scan the point probe cannot express -- the
+// phenotype munmap row iterates through this to tell "nothing mapped here"
+// (Linux no-op success) from a boundary-straddling partial overlap (refused).
+struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi);
 int  vma_find_gap(struct Proc *p, u64 length,
                   u64 window_start, u64 window_end, u64 *out_vaddr);
 void vma_drain(struct Proc *p);

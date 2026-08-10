@@ -256,6 +256,13 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt,
 int         vma_insert_in(struct AddrSpace *as, bool exempt, struct Vma *v);
 void        vma_remove_in(struct AddrSpace *as, struct Vma *v);
 struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr);
+
+// #199: lowest-addressed VMA overlapping [lo, hi), or NULL. Caller holds
+// as->lock. The point probe (vma_lookup) is blind to a VMA lying strictly
+// inside a range; this is the range scan the phenotype munmap row needs to
+// tell "nothing mapped here" (Linux: success) from a boundary-straddling
+// partial overlap (refused: partial unmap is post-v1.0).
+struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi);
 void        vma_drain_in(struct AddrSpace *as);
 
 // Diagnostic accessors.

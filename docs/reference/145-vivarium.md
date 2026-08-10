@@ -207,10 +207,19 @@ fail-safe direction preserved.
   own errors survive: `EINVAL` for 0, `ENOMEM` for anything the target refuses.
   Translating that refusal matters — Thylacine signals failure with a bare `-1`,
   which a Linux libc would read as `-EPERM`.
-- **`munmap` (215) → `SYS_BURROW_DETACH`**, exact-match subset. This row has no
-  pure `_decide` because its domain is a question about *state*; the resolution
-  is that it needs none, since `sys_burrow_detach_for_proc` already enforces the
-  match. Attempt, and read the answer.
+- **`munmap` (215) → `sys_munmap_range_for_proc`** (#199, D-3c; was the
+  exact-match `SYS_BURROW_DETACH` subset). The range form detaches every VMA
+  wholly inside `[addr, addr+len)` — each one WHOLE, never partial — succeeds
+  on an empty range (the Linux no-op), and refuses ATOMICALLY (nothing
+  detached) on a boundary straddle or a CODE region. Needed because D-3b's
+  MAP_FIXED split turns one library map into 2-3 VMAs and musl's
+  `unmap_library` munmaps the whole span in one call (its error path and
+  dlclose). The per-VMA accounting body is the factored `detach_one_locked`
+  the native exact syscall also uses; the native `SYS_BURROW_DETACH` ABI keeps
+  exact-match. Refused shapes decline `ENOSYS` (claiming success on a partial
+  overlap would leave a mapping the guest believes gone). Tests:
+  `burrow.munmap_range_{tiled,partial_refused,empty_ok}`; the straddle refusal
+  revert-probed (S3: only its own leg reddens, 1382/1383).
 - **`mprotect` (226) → `ENOSYS`**, recorded rather than left to the default.
 
 **The protection degradation.** Thylacine anonymous memory is always RW/XN and

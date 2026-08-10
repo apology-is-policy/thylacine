@@ -1095,6 +1095,11 @@ echo D2-LDSO-END-rc=$?
 ldso_out=$(/lib/ld-musl-aarch64.so.1 2>&1)
 case "$ldso_out" in *"Dynamic Program Loader"*) echo D2-A-stock-ldso-usage ;; esac
 case "$ldso_out" in *"musl libc (aarch64)"*) echo D2-B-stock-ldso-arch ;; esac
+echo D3-GETCONF-BEGIN
+/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE 2>&1
+echo D3-GETCONF-END-rc=$?
+d3_out=$(/lib/ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE 2>&1); d3_rc=$?
+[ "$d3_rc" = 0 ] && [ "$d3_out" = 4096 ] && echo D3-A-getconf-pagesize-4096
 echo L6C-DONE
 GATEEOF
             chmod 0644 "$ab/rootfs/gate/run.sh"

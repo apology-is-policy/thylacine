@@ -1549,6 +1549,17 @@ int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
     return rc;
 }
 
+// #194: sample the backing file's size for the Image-cache file_limit stamp.
+// BURROW_FILE_LIMIT_UNKNOWN when the Dev cannot answer -- the CALLER owns the
+// failure policy (exec admits unknown for the immutable baked ramfs; the
+// guest-facing phenotype mmap arm refuses it).
+u64 spoor_file_size(struct Spoor *c) {
+    struct t_stat st;
+    if (spoor_stat_native(c, &st) != 0)
+        return BURROW_FILE_LIMIT_UNKNOWN;
+    return st.size;
+}
+
 // Inner — kernel-side core (the #37 *_for_proc testable shape): resolve `hraw`
 // in `p`'s handle table and fill a KERNEL `struct t_stat`. Extracted at V-1b so
 // the native handler and the VIVARIUM `fstat` translator share ONE body: the
@@ -4437,7 +4448,11 @@ static s64 sys_burrow_attach_handler(u64 length_raw) {
     return sys_burrow_attach_for_proc(t->proc, length_raw);
 }
 
-s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+// The shared argument gate for both detach entries (#199 factored it out): the
+// alignment/rounding rules and the window confinement are ONE set of rules, not
+// two. Writes *length_out only on success (0).
+static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
+                             u64 *length_out) {
     if (!p)                                          return -1;
     if (length_raw == 0)                             return -1;
     if (length_raw > BURROW_ATTACH_MAX)              return -1;
@@ -4460,7 +4475,15 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
     if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
 
-    spin_lock(&p->as->lock);
+    *length_out = length;
+    return 0;
+}
+
+// The per-VMA detach body (#199 factored it from sys_burrow_detach_for_proc,
+// byte-identical semantics): exact-match [vaddr_raw, vaddr_raw+length) against
+// ONE installed VMA, remove it, settle the I-32 accounting. Caller holds
+// as->lock and has already run detach_args_check.
+static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length) {
     // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
     // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
     // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
@@ -4493,7 +4516,9 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
     // bound.
     if (dvma && dvma->burrow && dvma->burrow->magic == VMO_MAGIC &&
         dvma->burrow->type == BURROW_TYPE_CODE) {
-        spin_unlock(&p->as->lock);
+        // Return WITH the lock held -- the caller owns the lock pair (#199
+        // factoring; the pre-factor body unlocked here, and leaving that in
+        // made the wrapper's unlock a preempt-underflow double).
         return -1;
     }
 
@@ -4612,9 +4637,71 @@ s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
             // was dropped at all.
             burrow_charge_restore(dv, p, paid);
     }
-    spin_unlock(&p->as->lock);
 
     return (s64)rc;
+}
+
+s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    u64 length;
+    if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
+        return -1;
+    spin_lock(&p->as->lock);
+    s64 rc = detach_one_locked(p, vaddr_raw, length);
+    spin_unlock(&p->as->lock);
+    return rc;
+}
+
+// #199: the RANGE detach the phenotype munmap row needs -- D-3b's MAP_FIXED
+// split turns one library map into 2-3 VMAs, and musl's unmap_library then
+// munmaps the WHOLE span in one call (its error path and dlclose both do), so
+// an exact-match-only munmap leaks the entire library. Linux semantics over
+// the D-3 shapes: every VMA WHOLLY inside [vaddr, vaddr+len) is detached (each
+// one whole -- this is NOT partial unmap), holes are fine, an empty range
+// succeeds. Refused whole -- nothing detached -- when any VMA straddles a
+// boundary (true partial unmap, post-v1.0) or a CODE-alias region is inside
+// (the I-42 pair-lifetime rule detach_one_locked enforces; refusing UP FRONT
+// keeps the range atomic instead of stopping half-torn-down).
+//
+// NATIVE SYS_BURROW_DETACH deliberately keeps exact-match: this widening is a
+// LINUX semantic, and the native ABI does not change under a phenotype chunk.
+s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    u64 length;
+    if (detach_args_check(p, vaddr_raw, length_raw, &length) != 0)
+        return -1;
+    u64 end = vaddr_raw + length;
+
+    spin_lock(&p->as->lock);
+
+    // Validation pass -- ALL refusals decided before the first removal, under
+    // the same lock hold, so the detach loop below cannot stop midway.
+    for (struct Vma *v = vma_next_overlap_in(p->as, vaddr_raw, end); v;
+         v = vma_next_overlap_in(p->as, v->vaddr_end, end)) {
+        if (v->vaddr_start < vaddr_raw || v->vaddr_end > end) {
+            spin_unlock(&p->as->lock);
+            return -1;                   // boundary straddle: partial unmap
+        }
+        if (v->burrow && v->burrow->magic == VMO_MAGIC &&
+            v->burrow->type == BURROW_TYPE_CODE) {
+            spin_unlock(&p->as->lock);
+            return -1;                   // I-42 pair lifetime: JIT syscalls own it
+        }
+    }
+
+    // Detach loop. Each iteration removes the first remaining VMA whole, via
+    // the SAME per-VMA body the exact syscall uses (so the I-32 refund logic
+    // exists ONCE). Validation makes a failure unreachable; if one happens
+    // anyway, stop rather than spin -- the guard is against an infinite loop,
+    // not a real path.
+    struct Vma *v;
+    while ((v = vma_next_overlap_in(p->as, vaddr_raw, end)) != NULL) {
+        if (detach_one_locked(p, v->vaddr_start,
+                              v->vaddr_end - v->vaddr_start) != 0) {
+            spin_unlock(&p->as->lock);
+            return -1;
+        }
+    }
+    spin_unlock(&p->as->lock);
+    return 0;                            // incl. the nothing-mapped no-op (Linux)
 }
 
 static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
@@ -4673,13 +4760,18 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
     // burrow_map failure (overlap / vma-cap / OOM) the construction handle is the
     // only ref; burrow_unref frees the empty lazy Burrow (no pages committed).
     if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
+        // The construction handle is the only ref; freeing an EMPTY anon-lazy
+        // Burrow never sleeps (no Spoor to clunk, no pages committed), so this
+        // one may stay under the lock.
         burrow_unref(b);
         spin_unlock(&p->as->lock);
         return -1;
     }
-    burrow_unref(b);
-
     spin_unlock(&p->as->lock);
+    // #193: the success-path drop sits OUTSIDE as->lock to match the FILE arm --
+    // an anon-lazy free never sleeps today, but two success paths should not
+    // need two different safety arguments.
+    burrow_unref(b);
     return (s64)vaddr;
 }
 
@@ -4763,12 +4855,26 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
         return -(s64)T_E_INVAL;
     }
 
+    // #194 (I-32): the backing size is REQUIRED on this guest-facing arm -- it
+    // is what lets the fault arm refuse pages wholly past EOF (Linux SIGBUS
+    // semantics) instead of minting uncharged demand-zero memory bounded only
+    // by BURROW_ATTACH_MAX x PROC_VMA_MAX. A Dev that cannot answer -- or a
+    // hostile near-2^64 size, which the predicate also excludes -- is refused
+    // outright; only exec (kernel-driven, over the immutable baked ramfs) may
+    // admit an unknown size, and that policy lives at ITS call site.
+    u64 file_limit = spoor_file_size(sp);
+    if (!burrow_file_limit_known(file_limit)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_IO;
+    }
+
     // image_lookup_or_create CONSUMES one Spoor ref on every success path
     // (adopted into the new Burrow on a miss, clunk'd as redundant on a hit) and
     // consumes NOTHING on a NULL return. Hand it a FRESH ref so our own stays
     // ours to drop, exactly as map_file_backed does.
     spoor_ref(sp);
-    struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec);
+    struct Burrow *b = image_lookup_or_create(sp, offset, (size_t)length, exec,
+                                              file_limit);
     if (!b) {
         spoor_clunk(sp);                 // the fresh ref it did not consume
         spoor_clunk(sp);                 // ours
@@ -4794,10 +4900,14 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
         burrow_unref(b);
         return -(s64)T_E_NOMEM;
     }
-    // Drop the construction handle: mapping_count + the cache's own ref keep the
-    // image alive (I-7 dual count).
-    burrow_unref(b);
     spin_unlock(&p->as->lock);
+    // Drop the construction handle OUTSIDE as->lock (#193): mapping_count + the
+    // cache's own ref keep the image alive (I-7 dual count), so this is never
+    // the last ref today -- but if it ever were, burrow_free_internal ->
+    // spoor_clunk may sleep, the same leaf-lock rule file_demand_page_slow
+    // states. Dropping after the unlock removes the need for that non-local
+    // argument entirely; the failure paths above already did.
+    burrow_unref(b);
 
     // A user VA is below 2^47, so this can never be mistaken for the [-4095,-1]
     // errno band a Linux caller checks.
@@ -4952,11 +5062,23 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         spoor_clunk(sp);                 // the copy is done; nothing pins the file
         if (!b)                                      return -(s64)T_E_NOMEM;
     } else {
+        // #194: same guest-facing fail-closed rule as the non-fixed FILE arm --
+        // a demand-paged mapping needs the backing size or it can mint
+        // uncharged demand-zero pages past EOF. (The writable branch above
+        // needs none: its eager copy is CHARGED whole by populate, and a short
+        // read legitimately zero-fills.) NOTE this branch has no producer on
+        // the measured rootfs (#195: every arm-2 request is RW), so only unit
+        // tests and a future -z separate-code toolchain reach it.
+        u64 fx_limit = spoor_file_size(sp);
+        if (!burrow_file_limit_known(fx_limit)) {
+            spoor_clunk(sp);
+            return -(s64)T_E_IO;
+        }
         // image_lookup_or_create CONSUMES a Spoor ref on success and none on
         // NULL, so hand it a fresh one and keep ours to drop.
         spoor_ref(sp);
         b = image_lookup_or_create(sp, offset, (size_t)length,
-                                   (prot & (u32)VMA_PROT_EXEC) != 0);
+                                   (prot & (u32)VMA_PROT_EXEC) != 0, fx_limit);
         if (!b) {
             spoor_clunk(sp);             // the fresh ref it did not consume
             spoor_clunk(sp);             // ours
@@ -10307,27 +10429,28 @@ static s64 viv_tier2(struct exception_context *ctx, struct Proc *p,
     case VIV_LINUX_MUNMAP: {
         // munmap(addr, len): x0 addr, x1 len.
         //
-        // No pure _decide: this row's domain is a question about STATE (does a
-        // VMA match?), and sys_burrow_detach_for_proc ALREADY answers it -- it
-        // enforces the exact match itself. So the shell attempts it and reads
-        // the answer instead of re-deriving the check, which is what keeps this
-        // a decode rather than a second implementation, and leaves no second
-        // lookup to race against.
+        // #199 widened this row from exact-match to the RANGE form: D-3b's
+        // MAP_FIXED split turns one library map into 2-3 VMAs, and musl's
+        // unmap_library munmaps the WHOLE span in one call, so exact-match
+        // leaked every library torn down on map_library's error path or
+        // dlclose. sys_munmap_range_for_proc detaches every VMA WHOLLY inside
+        // the range (whole VMAs only -- never partial), treats nothing-mapped
+        // as the Linux no-op success, and refuses atomically on a boundary
+        // straddle. The range scan it needed (vma_next_overlap_in) now exists,
+        // which is what the previous decline-comment said was missing.
         //
         // The two argument errors are reproduced up front because Linux gives
         // them a specific errno that a decline would replace with ENOSYS.
         if (args[0] & (PAGE_SIZE - 1)) return -(s64)T_E_INVAL;
         if (args[1] == 0)              return -(s64)T_E_INVAL;
 
-        if (sys_burrow_detach_for_proc(p, args[0], args[1]) == 0) return 0;
+        if (sys_munmap_range_for_proc(p, args[0], args[1]) == 0) return 0;
 
-        // Outside the exact-match subset. This DECLINES a case Linux would
-        // succeed on -- unmapping a range with nothing mapped in it -- and that
-        // is deliberate: telling that apart from a PARTIAL overlap needs a range
-        // scan the VMA API does not expose (vma_lookup is a point probe, blind
-        // to a VMA lying strictly inside the range), and the two must not be
-        // conflated. Claiming success on a partial overlap would leave a mapping
-        // the guest believes is gone. Declining is honest; faking is not.
+        // Outside the served subset: a boundary-straddling partial overlap
+        // (Linux would SPLIT the VMA; partial unmap is post-v1.0), a CODE
+        // region (I-42's pair lifetime), or out-of-window coordinates.
+        // Claiming success would leave a mapping the guest believes is gone.
+        // Declining is honest; faking is not.
         return -(s64)T_E_NOSYS;
     }
 

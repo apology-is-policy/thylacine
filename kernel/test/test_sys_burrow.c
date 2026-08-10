@@ -707,3 +707,108 @@ void test_burrow_map_fixed_into_free_space(void) {
 
     drop_proc(p);
 }
+
+// =============================================================================
+// #199 (D-3c): sys_munmap_range_for_proc -- the whole-VMA range detach the
+// phenotype munmap row serves. D-3b's split turns one library map into 2-3
+// VMAs; musl's unmap_library munmaps the WHOLE span in one call, which the
+// exact-match detach refused, leaking the library. The range form detaches
+// every VMA wholly inside (each one WHOLE -- never partial), succeeds on an
+// empty range (Linux no-op), and refuses ATOMICALLY on a boundary straddle.
+// =============================================================================
+
+extern s64 sys_munmap_range_for_proc(struct Proc *p, u64 vaddr_raw,
+                                     u64 length_raw);
+
+// The musl unmap_library shape: a lazy reservation cut into three VMAs by a
+// MAP_FIXED overlay, then ONE whole-span munmap. All three go; the space is
+// reusable; the I-32 counters return to their pre-attach values.
+void test_burrow_munmap_range_tiled(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u32 pages0 = p->as->page_count;
+    u32 vmas0  = p->as->vma_count;
+
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    // Cut [base+2P, base+5P) out of the middle: left | mid | right = 3 VMAs.
+    u64 cut = base + 2 * PAGE_SIZE;
+    struct Burrow *nb = fresh_anon(3 * PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, cut, 3 * PAGE_SIZE, VMA_PROT_RW, 0),
+                   0, "three-way split must succeed");
+    burrow_unref(nb);
+    TEST_ASSERT(vma_lookup(p, base) && vma_lookup(p, cut) &&
+                vma_lookup(p, base + 5 * PAGE_SIZE), "three pieces exist");
+
+    // The musl call: munmap(dso->map, dso->map_len) -- the WHOLE span.
+    TEST_EXPECT_EQ(sys_munmap_range_for_proc(p, base, D3B_LEN), 0,
+                   "whole-span munmap over 3 VMAs succeeds");
+    TEST_ASSERT(vma_lookup(p, base) == NULL, "left piece gone");
+    TEST_ASSERT(vma_lookup(p, cut) == NULL, "mid piece gone");
+    TEST_ASSERT(vma_lookup(p, base + 5 * PAGE_SIZE) == NULL, "right piece gone");
+
+    // The counters return to baseline: the lazy pieces refund their resident
+    // count (0 -- nothing faulted) and the eager mid refunds only a RECORDED
+    // charge (none -- the test mapped it directly, nothing billed page_count),
+    // the #122 positive-allowlist working as attribution.
+    TEST_EXPECT_EQ((u64)p->as->page_count, (u64)pages0, "page axis back to baseline");
+    TEST_EXPECT_EQ((u64)p->as->vma_count,  (u64)vmas0,  "VMA axis back to baseline");
+
+    // The space is genuinely free: a fresh attach can land again.
+    u64 again = d3b_base(p);
+    TEST_ASSERT(again != 0, "the range is reusable after the range munmap");
+
+    drop_proc(p);
+}
+
+// A range that cuts INTO a VMA (its start lies outside) is TRUE partial unmap:
+// refused whole, nothing detached -- the atomicity that keeps "munmap returned
+// an error" meaning "your mappings are exactly as they were".
+void test_burrow_munmap_range_partial_refused(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+
+    u64 cut = base + 4 * PAGE_SIZE;
+    struct Burrow *nb = fresh_anon(4 * PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "anon create failed");
+    TEST_EXPECT_EQ(map_fixed_locked(p, nb, cut, 4 * PAGE_SIZE, VMA_PROT_RW, 0),
+                   0, "tail replace must succeed");
+    burrow_unref(nb);
+
+    // [base+P, end): the first VMA straddles the range's left edge. The SECOND
+    // VMA lies wholly inside -- and must SURVIVE the refusal untouched.
+    TEST_EXPECT_EQ(sys_munmap_range_for_proc(p, base + PAGE_SIZE,
+                                             D3B_LEN - PAGE_SIZE),
+                   -1, "boundary-straddling range refused");
+    struct Vma *left = vma_lookup(p, base);
+    struct Vma *mid  = vma_lookup(p, cut);
+    TEST_ASSERT(left != NULL, "straddled VMA survives");
+    TEST_ASSERT(mid  != NULL, "the wholly-inside VMA ALSO survives (atomic refusal)");
+    TEST_EXPECT_EQ(left->vaddr_end, cut, "straddled VMA geometry untouched");
+
+    drop_proc(p);
+}
+
+// Linux munmap over nothing is a success no-op. The exact-match detach called
+// this -1; the phenotype row needs the honest 0.
+void test_burrow_munmap_range_empty_ok(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // A window inside the attach range with nothing mapped: find one by
+    // attaching, remembering, and detaching -- the hole left behind is known
+    // to be inside the window bounds.
+    u64 base = d3b_base(p);
+    TEST_ASSERT(base != 0, "lazy attach failed");
+    TEST_EXPECT_EQ(sys_burrow_detach_for_proc(p, base, D3B_LEN), 0,
+                   "exact detach clears the range");
+
+    TEST_EXPECT_EQ(sys_munmap_range_for_proc(p, base, D3B_LEN), 0,
+                   "munmap of an empty range is the Linux no-op success");
+
+    drop_proc(p);
+}

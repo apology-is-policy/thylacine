@@ -1126,6 +1126,23 @@ static int do_alpine_shell_gate(void) {
         // [options] [--] pathname [args]", rc 1.
         L6C_MK("D2-A-stock-ldso-usage"),
         L6C_MK("D2-B-stock-ldso-arch"),
+        // DISTRO D-3 (the #189-corrected gate). Stock ldso RUNS a stock
+        // dynamic program end to end: `ld-musl-aarch64.so.1 /usr/bin/getconf
+        // PAGESIZE`. ldso (loaded by D-2's ET_DYN exec) map_library's getconf
+        // through the D-3 phenotype mmap arms -- the whole-span R+X map, the
+        // MAP_FIXED RW eager copy, the anon bss tail -- relocates it, and
+        // getconf's sysconf(_SC_PAGESIZE) reads back the AT_PAGESZ our exec
+        // wrote. EXACTLY TWO objects are mapped: getconf's libc DT_NEEDED
+        // short-circuits by NAME in musl's load_library (the "c." reserved
+        // list) and never touches the filesystem, so there is no third map
+        // and no D-1 symlink crossing on this path (measured off the
+        // vendored dynlink.c, correcting DISTRO.md's earlier claim).
+        //
+        // The marker is emitted only when a run's OWN rc is 0 AND its
+        // captured stdout is exactly `4096` -- output only the success path
+        // can produce; the raw BEGIN/END block above it in the script is
+        // diagnostics, not the assertion.
+        L6C_MK("D3-A-getconf-pagesize-4096"),
         L6C_MK("L6C-DONE"),
     };
 #undef L6C_MK

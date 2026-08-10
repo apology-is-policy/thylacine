@@ -289,7 +289,11 @@ Page count is `ceil(size / PAGE_SIZE)`; allocation is a single `alloc_pages(orde
 
 `BURROW_TYPE_ANON` (anonymous, demand-paged) is the P3-Db type. `BURROW_TYPE_MMIO` (`burrow_create_mmio`, P4-Ic1) and `BURROW_TYPE_DMA` (`burrow_create_dma`, P4-Ic5b1b) back device-MMIO and DMA buffers respectively -- both landed in Phase 4 (the `BURROW_TYPE_PHYS` placeholder this section once named was superseded by the MMIO/DMA split).
 
-`BURROW_TYPE_FILE` (Stratum page cache) requires the 9P client + the page cache; post-v1.0.
+`BURROW_TYPE_FILE` **landed at REVENANT** (`burrow_create_file`: the adopted+pinned
+Spoor, the sparse `filepages[]`, demand-paged through `arch/arm64/fault.c`; since
+DISTRO D-3 it also backs phenotype file mmaps, and carries `file_limit` — the
+#194 SIGBUS-past-EOF bound). This section's earlier "post-v1.0" claim was stale;
+the FILE type's authoritative reference is `docs/reference/126-revenant.md`.
 
 ### `burrow_map(Proc*, ...)` does NOT install PTEs
 
@@ -328,7 +332,7 @@ The struct contains `enum burrow_type` whose underlying integer type is implemen
 | `burrow_create_mmio(struct KObj_MMIO *)` (BURROW_TYPE_MMIO) | **Landed (P4-Ic1)** — wraps KObj_MMIO; holds a ref on the underlying kobj for the Burrow's lifetime; pages=NULL; burrow_free_internal type-dispatches between free_pages (ANON) and kobj_mmio_unref (MMIO). |
 | `burrow_create_dma(struct KObj_DMA *)` (BURROW_TYPE_DMA) | **Landed (P4-Ic5b1b)** — wraps KObj_DMA; holds a ref on the underlying kobj for the Burrow's lifetime; pages=NULL (the contiguous page chunk lives on the KObj_DMA itself); burrow_free_internal type-switch adds DMA → `kobj_dma_unref`. Used by `SYS_DMA_MAP` + the IRQ-latency-bench's shared-memory mechanism. |
 | Magic clobber on `burrow_free_internal` (R9 F148 discipline) | **Landed (P4-N / R13 F213)** — `v->magic = 0` immediately before `kmem_cache_free`. Sibling kobjs (kobj_mmio, kobj_dma) had this discipline since R9; burrow.c was the outlier until P4-N. |
-| `BURROW_TYPE_FILE` (Stratum page cache) | Post-v1.0 |
+| `BURROW_TYPE_FILE` | **Landed (REVENANT R-1)** — see `126-revenant.md`; this row was stale ("post-v1.0") until D-3c |
 | PTE installation (demand paging) for ANON | **Landed (P3-Dc)** — `userland_demand_page` in arch/arm64/fault.c |
 | PTE installation for MMIO (device-memory PTE attrs) | **Landed (P4-Ic2)** — `userland_demand_page` dispatches on `vma->burrow->type`; `mmu_install_user_pte` accepts `bool device_memory` flag |
 | `SYS_MMIO_MAP` syscall | **Landed (P4-Ic2)** — calls `burrow_create_mmio` + `burrow_map`; PTEs install lazily via demand-page |

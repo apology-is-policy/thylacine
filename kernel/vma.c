@@ -361,6 +361,21 @@ struct Vma *vma_lookup_in(struct AddrSpace *as, u64 vaddr) {
     return NULL;
 }
 
+// #199: lowest-addressed VMA overlapping [lo, hi). Caller holds as->lock. The
+// list layout stays this file's business -- range consumers iterate through
+// this rather than walking as->vmas themselves.
+struct Vma *vma_next_overlap_in(struct AddrSpace *as, u64 lo, u64 hi) {
+    if (!as || lo >= hi) return NULL;
+
+    for (struct Vma *cur = as->vmas; cur; cur = cur->next) {
+        if (cur->magic != VMA_MAGIC)
+            extinction("vma_next_overlap: corrupted list entry");
+        if (cur->vaddr_start >= hi) return NULL;   // sorted: nothing later overlaps
+        if (cur->vaddr_end > lo) return cur;
+    }
+    return NULL;
+}
+
 // P6-pouch-mem: first-fit free-range finder for SYS_BURROW_ATTACH. The
 // VMA list is sorted by vaddr_start ascending, so a single forward pass
 // — advancing a candidate base past every VMA that blocks it — finds
