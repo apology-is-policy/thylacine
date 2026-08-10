@@ -262,7 +262,12 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr) {
 // and why that is what makes every failure path hole-free.
 int vma_replace_range_in(struct AddrSpace *as, bool exempt,
                          u64 vaddr, u64 length,
-                         struct Burrow *nb, u32 prot, u64 nb_offset) {
+                         struct Burrow *nb, u32 prot, u64 nb_offset,
+                         struct Burrow **out_free) {
+    // D-3c re-audit F5: the exact-cover arm frees `old`'s Burrow, which may be a
+    // sleeping-free FILE Burrow. Defer it past as->lock via out_free (see the vma.h
+    // contract). NULL on every path but the exact-cover free.
+    if (out_free) *out_free = NULL;
     if (!as || !nb)                       return -1;
     if (length == 0)                      return -1;
     if (vaddr  & (PAGE_SIZE - 1))         return -1;
@@ -357,7 +362,17 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt,
         goto rollback_mid;
     }
 
-    if (!want_left && !want_right) vma_free(old);   // fully replaced
+    if (!want_left && !want_right) {
+        // Exact cover -- the old VMA is fully replaced and its Burrow's mapping
+        // ref drops here. D-3c re-audit F5 [P1]: if that drop is the last ref of a
+        // 9P-backed FILE Burrow (a bypassed image mmap at {h:0,m:1}), the free
+        // reaches a possibly-sleeping spoor_clunk, and we hold as->lock -- the
+        // lock-across-sleep extinction. Defer the physical free to the caller, past
+        // the unlock (the F1 pattern; this was the fourth inline-free-under-lock
+        // site F1 missed). The I-32 mapping-ref bookkeeping still settles here.
+        struct Burrow *tf = vma_free_deferred(old, NULL);
+        if (out_free) *out_free = tf;
+    }   // fully replaced
     return 0;
 
 rollback_mid:

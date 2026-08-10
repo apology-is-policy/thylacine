@@ -4492,7 +4492,13 @@ static s64 detach_args_check(struct Proc *p, u64 vaddr_raw, u64 length_raw,
 // lock); only the physical free is deferred.
 static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
                              struct Burrow **out_free) {
-    if (out_free) *out_free = NULL;
+    // D-3c re-audit F6: this ALWAYS runs under as->lock, so an inline
+    // (possibly-sleeping FILE) free here is the lock-across-sleep extinction.
+    // out_free is therefore MANDATORY -- the helper always DEFERS the physical
+    // free to the caller. A NULL out_free would silently reintroduce F1, so fail
+    // loud rather than take the inline-free arm.
+    if (!out_free) extinction("detach_one_locked without out_free (would free under as->lock)");
+    *out_free = NULL;
     // #65 (I-32): the uncharge must MATCH the charge. An EAGER attach charged
     // length/PAGE_SIZE at attach; a LAZY attach (SYS_BURROW_ATTACH_LAZY) charged only
     // the FAULTED-in pages (per-page, at fault time -- ARCH §6.5 overcommit). Read
@@ -4633,9 +4639,8 @@ static s64 detach_one_locked(struct Proc *p, u64 vaddr_raw, u64 length,
     // unlock. `dv` here (the pre-drop snapshot) is only touched below for the
     // charge-restore path, which by construction runs when the Burrow SURVIVED.
     struct Burrow *tf = NULL;
-    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed,
-                                    out_free ? &tf : NULL);
-    if (out_free) *out_free = tf;
+    int rc = burrow_unmap_reporting(p, vaddr_raw, length, &freed, &tf);
+    *out_free = tf;
     if (rc == 0 && lazy_uncharge)
         proc_page_uncharge(p, lazy_uncharge);
     if (paid) {
@@ -5127,9 +5132,16 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         spoor_clunk(sp);                 // ours; the Burrow holds the pin now
     }
 
+    // D-3c re-audit F5 [P1]: a MAP_FIXED exact-cover REPLACES an existing VMA,
+    // whose Burrow may be a 9P-backed FILE image (a bypassed mmap at {h:0,m:1})
+    // whose free reaches a possibly-sleeping spoor_clunk. burrow_map_fixed hands
+    // that dead Burrow back via `fx_free` instead of freeing it under as->lock;
+    // we free it here, past the unlock (the F1 deferred-free pattern).
+    struct Burrow *fx_free = NULL;
     spin_lock(&p->as->lock);
-    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0);
+    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0, &fx_free);
     spin_unlock(&p->as->lock);
+    if (fx_free) burrow_free_deferred(fx_free);
     // OUTSIDE the lock, unlike the D-3a arm (task #193): the mapping holds the
     // Burrow alive on success, and on failure this is the last ref and dropping
     // it can reach the allocator.
@@ -5161,9 +5173,14 @@ s64 sys_mmap_fixed_anon_for_proc(struct Proc *p, u64 addr, u64 length_raw,
     struct Burrow *b = burrow_create_anon_lazy((size_t)length);
     if (!b)                                          return -(s64)T_E_NOMEM;
 
+    // D-3c re-audit F5: even the anon arm can EXACT-COVER an existing FILE mapping
+    // (the old VMA at `addr` need not be anon), so its replaced Burrow is deferred
+    // and freed past the unlock exactly as the file arm does.
+    struct Burrow *fx_free = NULL;
     spin_lock(&p->as->lock);
-    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0);
+    int rc = burrow_map_fixed(p, b, addr, (size_t)length, prot, /*offset=*/0, &fx_free);
     spin_unlock(&p->as->lock);
+    if (fx_free) burrow_free_deferred(fx_free);
     burrow_unref(b);
     if (rc != 0)                                     return -(s64)T_E_NOMEM;
     return (s64)addr;

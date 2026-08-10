@@ -58,11 +58,15 @@ static void drop_proc(struct Proc *p) {
 }
 
 // DISTRO D-3b: burrow_map_fixed under the lock its contract requires.
+// D-3c re-audit F5: mirror the production arms -- capture the replaced old Burrow
+// and free it AFTER the unlock (a sleeping FILE free must not run under as->lock).
 static int map_fixed_locked(struct Proc *p, struct Burrow *b, u64 va,
                             size_t len, u32 prot, u64 off) {
+    struct Burrow *tf = NULL;
     spin_lock(&p->as->lock);
-    int rc = burrow_map_fixed(p, b, va, len, prot, off);
+    int rc = burrow_map_fixed(p, b, va, len, prot, off, &tf);
     spin_unlock(&p->as->lock);
+    if (tf) burrow_free_deferred(tf);
     return rc;
 }
 
@@ -907,6 +911,42 @@ void test_burrow_munmap_range_file_frees_outside_lock(void) {
     TEST_EXPECT_EQ(g_f1_close_calls, 2, "both backing Devs closed (both freed)");
     TEST_EXPECT_EQ((u64)g_f1_close_preempt, 0ull,
                    "the deferred frees ran with as->lock DROPPED -- #F1");
+
+    drop_proc(p);
+}
+
+// D-3c re-audit F5 [P1]: the FOURTH inline-free-under-as->lock site F1 missed --
+// vma_replace_range_in's exact-cover arm. A MAP_FIXED that EXACTLY covers an
+// existing FILE mapping frees that mapping's Burrow; pre-fix it did so INLINE
+// under as->lock (spoor_clunk -> may sleep -> lock-across-sleep extinction).
+// The fix defers the replaced Burrow's free past the unlock, like the F1 sites.
+// Same discriminator: the stub Dev's .close records preempt_count at free time
+// (pre-fix >= 1, held under the lock; post-fix 0, freed after the unlock). Revert-
+// probed: restoring the inline `vma_free(old)` at vma.c:360 reddens this leg.
+void test_burrow_map_fixed_replace_file_frees_outside_lock(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    g_f1_close_calls = 0; g_f1_close_preempt = 0xffffffffu;
+    // A mapped FILE burrow at {h:0,m:1} (the bypass shape) -- the OLD mapping the
+    // MAP_FIXED will replace.
+    u64 va = f1_map_file(p, EXEC_USER_BURROW_BASE);
+    TEST_ASSERT(va != 0, "FILE burrow map setup failed");
+
+    // MAP_FIXED exact-cover it with a fresh anon burrow. The replace drops the OLD
+    // FILE burrow's last mapping ref -> free -> spoor_clunk -> f1_stub_close.
+    // map_fixed_locked frees the handed-back dead Burrow AFTER dropping as->lock
+    // (the production pattern), so the close must observe preempt_count 0.
+    struct Burrow *nb = fresh_anon(PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "fresh anon burrow alloc failed");
+    int rc = map_fixed_locked(p, nb, va, PAGE_SIZE, VMA_PROT_RW, 0);
+    TEST_EXPECT_EQ(rc, 0, "MAP_FIXED exact-cover of a FILE mapping succeeds");
+    burrow_unref(nb);         // drop the construction handle; the mapping holds it
+
+    TEST_EXPECT_EQ(g_f1_close_calls, 1,
+                   "the replaced FILE burrow's backing Dev closed (it was freed)");
+    TEST_EXPECT_EQ((u64)g_f1_close_preempt, 0ull,
+                   "the replaced-Burrow free ran with as->lock DROPPED -- #F5");
 
     drop_proc(p);
 }

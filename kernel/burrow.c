@@ -986,7 +986,12 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // -- and it is the deliberate price of keeping the VMA-shape rules in ONE place
 // (the surgery) instead of mirroring them here to predict the refusal.
 int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
-                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset) {
+                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset,
+                        struct Burrow **out_free) {
+    // D-3c re-audit F5: the surgery may free a sleeping-free FILE Burrow on its
+    // exact-cover arm; defer it to the caller past as->lock (see vma.h). NULL on
+    // every path but that free.
+    if (out_free) *out_free = NULL;
     if (!as || !v) return -1;
     if (length == 0) return -1;
     if (vaddr  & (PAGE_SIZE - 1)) return -1;
@@ -998,14 +1003,15 @@ int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
     (void)mmu_uninstall_user_range(as->pgtable_root, 0, vaddr, vaddr + length);
 
     return vma_replace_range_in(as, exempt, vaddr, (u64)length,
-                                v, prot, burrow_offset);
+                                v, prot, burrow_offset, out_free);
 }
 
 int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
-                     u32 prot, u64 burrow_offset) {
+                     u32 prot, u64 burrow_offset, struct Burrow **out_free) {
+    if (out_free) *out_free = NULL;
     if (!p) return -1;
     return burrow_map_fixed_in(p->as, proc_resource_exempt(p), v, vaddr, length,
-                               prot, burrow_offset);
+                               prot, burrow_offset, out_free);
 }
 
 int burrow_unmap_reporting(struct Proc *p, u64 vaddr, size_t length,

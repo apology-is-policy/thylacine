@@ -657,10 +657,17 @@ int burrow_map_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
 // Clears the leaf PTEs for the replaced window before the surgery -- necessarily
 // so, since hardware resolves a PTE without taking as->lock. Caller holds
 // as->lock, exactly as for burrow_map.
+//
+// D-3c re-audit F5 [P1]: `out_free` (non-NULL) receives the REPLACED old Burrow
+// when the exact-cover surgery drops its last ref (or NULL) -- the caller frees it
+// with burrow_free_deferred AFTER dropping as->lock, because a 9P FILE Burrow's
+// free may sleep (spoor_clunk) and this runs under the lock. The fourth
+// inline-free-under-lock site F1 missed. Written on every return path.
 int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
-                     u32 prot, u64 burrow_offset);
+                     u32 prot, u64 burrow_offset, struct Burrow **out_free);
 int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
-                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset);
+                        u64 vaddr, size_t length, u32 prot, u64 burrow_offset,
+                        struct Burrow **out_free);
 
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
 // from Proc `p`. Calls vma_remove + vma_free (which calls

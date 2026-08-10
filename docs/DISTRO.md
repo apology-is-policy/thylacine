@@ -532,6 +532,28 @@ over shared kernel core; no native mmap API is added.
   (ideally a non-Fable reviewer — this round was Fable-on-Fable). The three P3s
   (F2 file_limit cache-key coverage, F3 the corrected split-vs-fault comment, F4
   the #192/#201 D-4 tripwire) are recorded, not fixed.
+- **The dirty-close re-audit (Opus, non-Fable — the F1 code was Fable-authored)
+  found F5 [P1], FIXED: F1 was INCOMPLETE.** It deferred the sleeping FILE free at
+  THREE teardown sites but missed the FOURTH -- `vma_replace_range_in`'s exact-cover
+  arm (`vma.c`), reached under `as->lock` via `MAP_FIXED`
+  (`sys_mmap_fixed_file_for_proc` / `sys_mmap_fixed_anon_for_proc` ->
+  `burrow_map_fixed`). A `MAP_FIXED` that EXACTLY covers an existing FILE mapping
+  freed that mapping's Burrow INLINE under the lock -> the same `spoor_clunk`
+  lock-across-sleep extinction, guest-constructible (the bypass FILE Burrow at
+  `{h:0,m:1}`: >128-image-cache-fill + a 9P file mmap). This is the
+  "fix-on-site-N stops you asking about site-N+1" trap. FIX = thread a deferred
+  Burrow out-param through `vma_replace_range_in` / `burrow_map_fixed_in` /
+  `burrow_map_fixed`; the exact-cover `vma_free(old)` becomes `vma_free_deferred`
+  handed back to the two `MAP_FIXED` arms, which free it past the unlock (the F1
+  pattern). Also F6 [P3]: `detach_one_locked`'s `out_free ? &tf : NULL` ternary
+  left a dead-today inline-free-under-lock path -- made always-defer (mandatory
+  out_free, extinct on NULL). Regression = `burrow.map_fixed_replace_file_frees_
+  outside_lock` (the F1 discriminator applied to the replace path; revert-probe
+  reddens ONLY it at 1385/1386, F1's two legs stay green). Pre-existing #205 noted
+  (the replace does not uncharge the old burrow's I-32 page_count -- over-charge,
+  benign direction). **STILL DIRTY** -- a second P1 fix to the same teardown
+  surface, so another re-audit round is owed on the F5 fix (Fable this time --
+  the F5 code is Opus-authored, so Fable restores diversity).
 
 Gate (as-built; CORRECTED from the design, see #189 above): the L-6c script
 spawns `ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` explicitly (no D-4

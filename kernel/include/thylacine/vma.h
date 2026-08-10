@@ -242,9 +242,18 @@ void vma_drain(struct Proc *p);
 // CALLER MUST HOLD as->lock across the call, and MUST have already uninstalled
 // the leaf PTEs for [vaddr, vaddr+length) -- see burrow_map_fixed_in, which is
 // the wrapper that does both and is what callers outside vma.c should use.
+//
+// D-3c re-audit F5 [P1]: the exact-cover arm frees the REPLACED old VMA's Burrow,
+// which can be a 9P-backed FILE Burrow whose free reaches a possibly-sleeping
+// spoor_clunk -- and this runs under as->lock, so an inline free is the
+// lock-across-sleep extinction (the identical hazard F1 deferred at the three
+// teardown sites; this was the fourth). `*out_free` (non-NULL) receives the dead
+// Burrow (or NULL) instead of freeing it inline; the caller frees it with
+// burrow_free_deferred AFTER dropping as->lock. Written on every return path.
 int vma_replace_range_in(struct AddrSpace *as, bool exempt,
                          u64 vaddr, u64 length,
-                         struct Burrow *nb, u32 prot, u64 nb_offset);
+                         struct Burrow *nb, u32 prot, u64 nb_offset,
+                         struct Burrow **out_free);
 
 // LINEAGE L-2: the same four operations, addressed by AddrSpace instead of by
 // Proc. The Proc-taking forms above are thin wrappers over these -- they resolve
