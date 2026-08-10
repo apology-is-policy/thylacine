@@ -317,7 +317,7 @@ measured-off-the-binary discipline applied to the loader:
 |---|---|---|
 | D-3a | arm 1 (the whole-span fd-backed R / R+X map) + the #190 fix | **AS-BUILT** |
 | D-3b | arms 2+3 (MAP_FIXED split/replace: fd-backed RW eager copy, anon tail) | **AS-BUILT** |
-| D-3c | the gate (#189) + the #194/#193/#199 fixes + the #192 verdict + reference docs + the FOCUSED round | **AS-BUILT** |
+| D-3c | the gate (#189) + the #194/#193/#199 fixes + the #192 verdict + the FOCUSED round (F1 [P1] deferred-free fix) + reference docs | **AS-BUILT** |
 
 **Three corrections the build forced, recorded before the code:**
 
@@ -515,6 +515,23 @@ over shared kernel core; no native mmap API is added.
   kill unwinds the train. Measured need is ~93 reads for the largest real
   library (372 KiB). The cure, when one is needed, is the Larder read path /
   bulk staging, not a bespoke loop here.
+- **The FOCUSED round (Fable 5) found F1 [P1], FIXED: the sleeping FILE-burrow
+  free ran under `as->lock`** — the teardown twin of #193. A FILE Burrow's free
+  reaches `spoor_clunk` -> (last 9P session ref) a synchronous Tclunk that MAY
+  SLEEP; detach / munmap-range / vma_drain all freed under `as->lock`, which is
+  the lock-across-sleep extinction. FIX = a deferred-free stack
+  (`burrow_release_mapping_deferred` drops the mapping ref under v->lock,
+  returning the dead Burrow without freeing; `burrow_free_deferred` frees after
+  the unlock; the range munmap collects the chain across ONE lock hold, so the
+  straddle-refusal atomicity is preserved, then frees after). Guest-reachable by
+  D-3 (the first detachable sleeping-free Burrow at a guest address) but a
+  pre-existing STRUCTURE. Regression = a stub Dev `.close` recording
+  `current_thread()->preempt_count` at free time (asserts 0; the revert-probe
+  reddens both legs at 1383/1385). **DIRTY CLOSE** — a P1 returned + an invasive
+  teardown restructure, so a follow-up re-audit round is owed on the fix
+  (ideally a non-Fable reviewer — this round was Fable-on-Fable). The three P3s
+  (F2 file_limit cache-key coverage, F3 the corrected split-vs-fault comment, F4
+  the #192/#201 D-4 tripwire) are recorded, not fixed.
 
 Gate (as-built; CORRECTED from the design, see #189 above): the L-6c script
 spawns `ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` explicitly (no D-4
