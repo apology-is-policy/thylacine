@@ -991,7 +991,10 @@ int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
     // D-3c re-audit F5: the surgery may free a sleeping-free FILE Burrow on its
     // exact-cover arm; defer it to the caller past as->lock (see vma.h). NULL on
     // every path but that free.
-    if (out_free) *out_free = NULL;
+    // F7 (re-audit round 3): out_free MANDATORY -- a NULL would leak the replaced
+    // Burrow (vma_free_deferred does not free). Fail loud at entry, F6 parity.
+    if (!out_free) extinction("burrow_map_fixed_in without out_free (would leak the replaced Burrow)");
+    *out_free = NULL;
     if (!as || !v) return -1;
     if (length == 0) return -1;
     if (vaddr  & (PAGE_SIZE - 1)) return -1;
@@ -1008,7 +1011,10 @@ int burrow_map_fixed_in(struct AddrSpace *as, bool exempt, struct Burrow *v,
 
 int burrow_map_fixed(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length,
                      u32 prot, u64 burrow_offset, struct Burrow **out_free) {
-    if (out_free) *out_free = NULL;
+    // F7 (re-audit round 3): out_free MANDATORY (F6 parity; a NULL leaks the
+    // replaced Burrow). Fail loud at the first entry rather than deep in the surgery.
+    if (!out_free) extinction("burrow_map_fixed without out_free (would leak the replaced Burrow)");
+    *out_free = NULL;
     if (!p) return -1;
     return burrow_map_fixed_in(p->as, proc_resource_exempt(p), v, vaddr, length,
                                prot, burrow_offset, out_free);

@@ -551,9 +551,22 @@ over shared kernel core; no native mmap API is added.
   outside_lock` (the F1 discriminator applied to the replace path; revert-probe
   reddens ONLY it at 1385/1386, F1's two legs stay green). Pre-existing #205 noted
   (the replace does not uncharge the old burrow's I-32 page_count -- over-charge,
-  benign direction). **STILL DIRTY** -- a second P1 fix to the same teardown
-  surface, so another re-audit round is owed on the F5 fix (Fable this time --
-  the F5 code is Opus-authored, so Fable restores diversity).
+  benign direction).
+- **The F5-fix re-audit (Fable, the standing primary AND diverse vs the
+  Opus-authored F5) closed CLEAN: 0 P0 / 0 P1 / 0 P2 / 2 P3**, both parity
+  one-liners, both FIXED in the follow-up: **F7** -- the F5 plumbing tolerated a
+  NULL `out_free` (a silent Burrow LEAK, strictly worse than F6's inline free it
+  landed beside), made mandatory-extinct-on-NULL across `vma_replace_range_in` /
+  `burrow_map_fixed` / `burrow_map_fixed_in` (F6 parity); **F8** --
+  `vma_replace_range_in` lacked the `BURROW_TYPE_CODE` refusal both detach paths
+  enforce (a latent I-42 pair-lifetime bypass; pre-existing D-3b, unreachable today
+  since MAP_FIXED is phenotype-only + CODE is native-only), added the one-line
+  refusal. Regression `burrow.map_fixed_refuses_code_alias` (revert-probe reddens
+  only it). #205 re-audit-verified benign (over-charge only). The re-audit
+  re-verified the F5 fix sound on every axis (out_free on every path, freed once
+  past the unlock, no alias, no double-free, {0,0}-unreachable, the regression a
+  valid discriminator). The dirty-close chain on the D-3c teardown surface is now
+  CLOSED -- F7/F8 are P3 one-liners, not a dirty close, so no further round is owed.
 
 Gate (as-built; CORRECTED from the design, see #189 above): the L-6c script
 spawns `ld-musl-aarch64.so.1 /usr/bin/getconf PAGESIZE` explicitly (no D-4

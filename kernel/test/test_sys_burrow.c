@@ -950,3 +950,38 @@ void test_burrow_map_fixed_replace_file_frees_outside_lock(void) {
 
     drop_proc(p);
 }
+
+// D-3c re-audit F8 [P3]: vma_replace_range_in must refuse a CODE-alias VMA -- the
+// parity detach_one_locked + sys_munmap_range_for_proc already enforce. A CODE
+// region is a JIT pair over one charge; MAP_FIXED-replacing one alias would orphan
+// its peer (SYS_JIT_DESTROY then refuses it), the I-42 lifetime harm. Unreachable in
+// production (MAP_FIXED is phenotype-only, CODE is native-only) -- a parity guard.
+// Revert-probe: dropping the CODE check in vma_replace_range_in lets the replace
+// succeed (rc 0) and reddens this leg.
+void test_burrow_map_fixed_refuses_code_alias(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    // A CODE burrow mapped RX in the window -- the JIT-alias shape.
+    struct Burrow *code = burrow_create_code(PAGE_SIZE);
+    TEST_ASSERT(code != NULL, "burrow_create_code failed");
+    u64 va = EXEC_USER_BURROW_BASE;
+    spin_lock(&p->as->lock);
+    int mrc = burrow_map(p, code, va, PAGE_SIZE, VMA_PROT_READ | VMA_PROT_EXEC);
+    spin_unlock(&p->as->lock);
+    TEST_EXPECT_EQ(mrc, 0, "map the CODE burrow RX");
+    burrow_unref(code);        // drop the construction handle; the mapping holds it
+
+    // MAP_FIXED exact-cover it -- MUST be refused (-1), CODE VMA survives intact.
+    struct Burrow *nb = fresh_anon(PAGE_SIZE);
+    TEST_ASSERT(nb != NULL, "fresh anon burrow alloc failed");
+    int rc = map_fixed_locked(p, nb, va, PAGE_SIZE, VMA_PROT_RW, 0);
+    TEST_EXPECT_EQ(rc, -1, "MAP_FIXED over a CODE alias is refused (I-42 parity)");
+    burrow_unref(nb);          // refused before any acquire_mapping -> our ref frees it
+
+    struct Vma *vma = vma_lookup(p, va);
+    TEST_ASSERT(vma != NULL && vma->burrow == code,
+                "the CODE VMA survives the refused replace");
+
+    drop_proc(p);
+}

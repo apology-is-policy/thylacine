@@ -267,7 +267,12 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt,
     // D-3c re-audit F5: the exact-cover arm frees `old`'s Burrow, which may be a
     // sleeping-free FILE Burrow. Defer it past as->lock via out_free (see the vma.h
     // contract). NULL on every path but the exact-cover free.
-    if (out_free) *out_free = NULL;
+    // F7 (re-audit round 3): out_free is MANDATORY. The exact-cover arm hands back a
+    // dead Burrow that vma_free_deferred does NOT free, so a NULL out_free would LEAK
+    // it (the slab slot + filepages + a FILE Burrow's pinned Spoor) -- strictly worse
+    // than F6's inline-free-under-lock, which at least freed. Fail loud, F6 parity.
+    if (!out_free) extinction("vma_replace_range_in without out_free (would leak the replaced Burrow)");
+    *out_free = NULL;
     if (!as || !nb)                       return -1;
     if (length == 0)                      return -1;
     if (vaddr  & (PAGE_SIZE - 1))         return -1;
@@ -299,6 +304,13 @@ int vma_replace_range_in(struct AddrSpace *as, bool exempt,
     // here would mean inventing its failure semantics too.
     if (vaddr < old->vaddr_start || end > old->vaddr_end)     return -1;
     if (old->flags != 0 || !old->burrow)  return -1;
+    // F8 (re-audit round 3): refuse a CODE-alias VMA, the parity detach_one_locked +
+    // sys_munmap_range_for_proc already enforce. A CODE region is a JIT pair over one
+    // charge; replacing or splitting one alias orphans its peer (SYS_JIT_DESTROY then
+    // refuses it) exactly as detaching it would. Unreachable today (MAP_FIXED is
+    // phenotype-only; CODE is minted only by native SYS_JIT_CREATE) -- a parity guard
+    // for the day either exclusivity relaxes.
+    if (old->burrow->type == BURROW_TYPE_CODE)  return -1;
 
     bool want_left  = (vaddr > old->vaddr_start);
     bool want_right = (end   < old->vaddr_end);

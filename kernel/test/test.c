@@ -480,6 +480,7 @@ void test_burrow_munmap_range_empty_ok(void);
 void test_burrow_detach_file_frees_outside_lock(void);       // #F1 (D-3c round)
 void test_burrow_munmap_range_file_frees_outside_lock(void);
 void test_burrow_map_fixed_replace_file_frees_outside_lock(void);   // #F5 (D-3c re-audit)
+void test_burrow_map_fixed_refuses_code_alias(void);                 // #F8 (D-3c re-audit)
 void test_mmap_eager_copy_charge_pairing(void);   // #197
 void test_torpor_wait_rejects_bad_args(void);
 void test_torpor_wait_rejects_unmapped_va(void);
@@ -2049,6 +2050,7 @@ struct test_case g_tests[] = {
     { "burrow.detach_file_frees_outside_lock", test_burrow_detach_file_frees_outside_lock, false, NULL },
     { "burrow.munmap_range_file_frees_outside_lock", test_burrow_munmap_range_file_frees_outside_lock, false, NULL },
     { "burrow.map_fixed_replace_file_frees_outside_lock", test_burrow_map_fixed_replace_file_frees_outside_lock, false, NULL },
+    { "burrow.map_fixed_refuses_code_alias", test_burrow_map_fixed_refuses_code_alias, false, NULL },
     { "demand_page.eager_copy_charge_pairing", test_mmap_eager_copy_charge_pairing,      false, NULL },
     { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
     { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
