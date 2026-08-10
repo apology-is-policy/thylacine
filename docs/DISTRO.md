@@ -715,8 +715,8 @@ chunks).
 | D-1 | symlinks in stalk + phenotype NOFOLLOW rows + T_E_LOOP (signoff) | joey symlink battery, revert-probed | FOCUSED ROUND (I-28) |
 | D-2 | ET_DYN load + AT_ENTRY (**AS-BUILT**) | stock-ldso usage line, boot-fatal + revert-probed (static-PIE hello = seam, #188) | audit-noted |
 | D-3 | file-backed EL0 mmap + MAP_FIXED subset (a: **AS-BUILT**; b, c owed) | runner-spawned `ld-musl /usr/bin/getconf PAGESIZE` (#189: `/bin/echo` is STATIC) | FOCUSED ROUND (I-36/I-12/I-32) |
-| D-4 | PT_INTERP -> ldso rewrite | busybox execs dynamic `/bin/ls` | audit-noted (exec row) |
-| D-5 | stock rootfs pipeline + put-symlinks (Stratum) | THE ARC GATE: `/bin/sh -c` boot-fatal | build-infra + Stratum |
+| D-4 | PT_INTERP -> ldso rewrite (**AS-BUILT**) | `D4-A-byname-getconf-4096` + `D4-B-argv0-is-the-program`, boot-fatal; 3-way discriminated (S1 rewrite-off reddens the gate + the suite is blind; S2 argv0:=path is gate-green + reddens the unit test) | audit-noted (exec row) |
+| D-5 | stock rootfs pipeline (put-symlinks: **already built**, verified 2026-08-10) | THE ARC GATE: `/bin/sh -c` boot-fatal | build-infra |
 | D-close | arc holotype + SMP gate + docs | clean close | ARC ROUND |
 
 Order: D-1 first (independent; everything else walks through it). D-2 ->
