@@ -530,6 +530,34 @@ suppressed, no display source) would be a frozen pane.
   (first-parked wins); one client per ctx is the intended shape.
 - `rings <n>` and `capset <n>` are recorded, not yet negotiated to the
   device (F_CONTEXT_INIT / per-ring fencing are the Venus deltas).
+- **#195**: host-side pixel capture is structurally unavailable on the GL
+  host — under egl-headless + virtio-gpu-gl every scanout is
+  host-GL-backed and QMP screendump reports "no surface" (QEMU 10.0.11,
+  so not a version gap). The quake gate's pixel legs run as an ANNOUNCED
+  best-effort there, and the direct scanout's display-orientation has no
+  host-side witness: the no-flip property rests on the gallium top-down
+  transfer contract (the shipping llvmpipe `y_up=FALSE` straight copy)
+  plus the Linux virgl desktop anchor. Guest-side TRANSFER_FROM readback
+  cannot substitute — it reads the resource, not the display. The local
+  HVF 2D box keeps full pixel coverage (the ls-gfx family).
+- **#196**: first-contact GLQuake throughput on virgl is ~3 fps aggregate
+  vs the 192.8 fps llvmpipe anchor (~20–25x under after correcting the
+  anchor's 640x480 vs the run's 1280x800) — a per-frame stall somewhere in
+  the encode/transport/fence path; the mid-run QMP TimeoutError (starved
+  QEMU main loop) corroborates. Decomposition plan lives in the task.
+- **#198**: at the post-timedemo transition the game's GL context breaks
+  and Mesa spams `GL_INVALID_OPERATION (invalid call)` per frame —
+  virgl-specific (the llvmpipe sibling idles clean); instrument-first plan
+  in the task.
+- **The launcher is the ^C seam**: pouch has no execve until LINEAGE L-6,
+  so the ramfs face interposes via posix_spawn — and the serial console
+  posts `interrupt` to the OWNER Proc alone (#197: pgrp parity owed),
+  while a CAUGHT note never interrupts a blocking syscall (#199: POSIX
+  EINTR parity owed; ut survives by polling its note fd). The launcher
+  therefore forwards SIGINT/SIGTERM to its child and reaps via
+  WNOHANG + 50 ms usleep — the syscall cadence is the note-delivery
+  point. Both kernel-parity items are tracked tasks; when either lands,
+  the launcher's shape simplifies.
 
 ## Tests
 
@@ -545,3 +573,25 @@ host is the seam's PASS-path gate (`tools/warp-host.sh prove`), and
 `/clade/bin/virgl-prove` is the Warp-3 stack gate — the full Mesa virgl
 driver through the winsys to a rendered triangle (`tools/warp-host.sh
 tri`, both #186-anchored verdict lines required).
+
+The Warp-4 present-integration gate is `tools/warp-host.sh quake`
+(`tools/warp/glq-virgl.exp`): GLQuake launched through the RAMFS bare
+name — the launcher's production auto-detect (the two-step raw
+`/srv/warp` attach probe → the `/env/GALLIUM_DRIVER=virpipe` write; a
+one-shot pouch open cannot cross the srv post, probed not assumed) — with
+BOTH present arms in one run. The letterboxed launch (composed-entry say
+line) puts the early demo through the Composed-GL sync-transfer arm; the
+default Super+F zoom chord typed over QMP (the game's pane holds focus
+from `host()`) makes the display-sized surface the sole visible leaf, and
+the `scanout direct N GL res R` switch line is the SET_SCANOUT(bo)
+evidence; the demo's remainder runs on the Direct flush-only arm; the
+timedemo figure is REPORTED against the 192.8 fps llvmpipe anchor (#165;
+not gated — the ls-gfx-glquake rule); and the ^C teardown leg drives the
+launcher's interrupt forward → SDL_QUIT → surface retire → the
+BO-eviction + console-restore chain (tick-driven — the restore is a
+multi-present chain, each hop needing console output). Verdict = the
+`GLQ-VIRGL PASS` + `LS-CI PASS: glq-virgl:` conjunction, discrimination-
+proven against synthetic pass/fail/swapped logs including the poisoned
+half-match. The battery's glsrc 2D reject legs (off idempotent / unknown
+ctx E_NOENT / junk E_INVAL — a warp ctx cannot exist on 2D, the mint is
+virgl-gated) ride the local interactive gate.

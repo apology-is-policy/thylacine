@@ -806,6 +806,33 @@ pub extern "C" fn rs_main() -> i64 {
     }
     say!("battery: gate OK");
 
+    // Warp-4 glsrc verb gate (the 2D leg): a warp ctx can never exist on
+    // this box (the ctx mint is virgl-gated), so only the verb's own
+    // edges are testable here -- and they must hold exactly. `off` with
+    // nothing set is idempotent-Ok; naming any ctx is E_NOENT (the #178
+    // fail-loud shape: the named half must exist at write); junk is
+    // E_INVAL. Activation legs live in the thyla-gl quake gate. The
+    // writes ride A's OWN conn (surface_ctl -- the minted ctl fd): F2
+    // means the driver conn cannot even resolve A's surface dir, which
+    // the first execution of these legs proved the hard way.
+    if a.surface_ctl("glsrc off").is_err() {
+        say!("tapestry-battery: FAIL glsrc off refused");
+        return 1;
+    }
+    if a.surface_ctl("glsrc 1").is_ok() {
+        say!("tapestry-battery: FAIL glsrc accepted a ctx that cannot exist");
+        return 1;
+    }
+    if a.surface_ctl("glsrc bogus").is_ok() {
+        say!("tapestry-battery: FAIL glsrc accepted junk");
+        return 1;
+    }
+    if a.surface_ctl("glsrc off").is_err() {
+        say!("tapestry-battery: FAIL glsrc off not idempotent");
+        return 1;
+    }
+    say!("battery: glsrc gate OK");
+
     // The hold leg (TPRESENT_HOLD + release, G-6c): magenta blits into
     // the screen buffer NOW but the device push defers -- on screen B
     // stays blue until release. The host samples between the two dumps;

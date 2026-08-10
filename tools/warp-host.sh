@@ -9,6 +9,7 @@
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
+#   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
 #
 # Verification is fail-closed: each leg greps for its own positive evidence
 # and exits non-zero without it. `bench` runs FOREGROUND (~20-45 min under
@@ -32,7 +33,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -123,6 +124,32 @@ tri)
         echo "WARP-3 GATE: UNVERIFIED (need VIRGL-PROVE PASS + the scenario pass line)"
         exit 1
     fi
+    ;;
+quake)
+    out="$REPO_ROOT/build/warp-quake.log"
+    ssh "$HOST" "cd $RREPO && expect tools/warp/glq-virgl.exp" | tee "$out" || true
+    echo "== quake verdict =="
+    # The Warp-4 gate: the tri two-line shape plus the swap certification.
+    # GLQ-VIRGL PASS = every gated leg held in-script (virgl renderer +
+    # composed dump + the direct-switch say line + direct dump + demo
+    # completion + the eviction leg); the LS-CI line = the scenario around
+    # it (boot + login + teardown) held; SWAPPED = the figures measured
+    # swapping, so the run is void regardless of the other two.
+    if grep -q "GLQ-VIRGL SWAPPED" "$out"; then
+        echo "WARP-4 GATE: SWAPPED -- figures measure swapping, DISCARD"
+        exit 1
+    fi
+    if grep -q "GLQ-VIRGL PASS" "$out" && grep -q "LS-CI PASS: glq-virgl:" "$out"; then
+        grep "GLQ-VIRGL" "$out"
+        echo "WARP-4 GATE: VERIFIED"
+    else
+        echo "WARP-4 GATE: UNVERIFIED (need GLQ-VIRGL PASS + the scenario pass line)"
+        exit 1
+    fi
+    # Fetch the dumps: the orientation strips are calibrated look-first
+    # against the real frames before any threshold gates on them.
+    scp -q "$HOST:warp/glq-virgl-1.png" "$HOST:warp/glq-virgl-2.png" \
+        "$REPO_ROOT/build/" 2>/dev/null || echo "(dump fetch failed -- non-fatal)"
     ;;
 *)
     usage
