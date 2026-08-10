@@ -1493,4 +1493,36 @@ void test_exec_interp_argv_shape(void) {
                            bad, sizeof(bad), 2, &len, &n), 0ull,
             "an argv block not ending in a NUL REFUSES the rewrite");
     }
+
+    // (6) SELF-AUDIT SA-1/SA-9. The rules that make the NUL-count identity hold
+    // for ANY input rather than only for the two production callers. Each of
+    // these desyncs argc from the block's NUL count, and the frame builder
+    // answers a desync with an EXTINCTION -- so each must be refused here.
+    {
+        static const char argv[] = "ls\0-l";              // 2 NULs
+        // argc that OVERSTATES the block.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin/ls", 7,
+                           argv, sizeof(argv), 3, &len, &n), 0ull,
+            "argc disagreeing with the block's NUL count REFUSES");
+        // an embedded NUL in the PATH would split one slot into two.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "/bin\0ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an embedded NUL in the path REFUSES");
+        // ...and in the interpreter.
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           "/lib\0ld", 7, "/bin/ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an embedded NUL in the interpreter REFUSES");
+        // A zero-length path would have the ldso open("").
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           INTERP, sizeof(INTERP) - 1, "", 0,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an empty program path REFUSES");
+        TEST_EXPECT_EQ((u64)(uintptr_t)exec_interp_argv(
+                           "", 0, "/bin/ls", 7,
+                           argv, sizeof(argv), 2, &len, &n), 0ull,
+            "an empty interpreter path REFUSES");
+    }
 }

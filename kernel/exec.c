@@ -1098,6 +1098,25 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
     static const char OPT_ARGV0[] = "--argv0";   // 7 + NUL
     static const char OPT_END[]   = "--";        // 2 + NUL
 
+    // THE INPUTS ARE VALIDATED, NOT TRUSTED, and the reason is specific: the
+    // block this returns goes straight to exec_build_init_stack, which
+    // EXTINCTS when the NUL count disagrees with argc. Every rule below exists
+    // so that identity holds for ANY input rather than only for the two
+    // production callers -- an off-by-one reached from a container is a dead
+    // kernel, not a failed exec, and "the callers already check" is exactly the
+    // argument that stops being true when a third caller appears.
+    //
+    // An embedded NUL inside `interp` or `path` would split one slot into two
+    // and desync the count. Neither producer can emit one today
+    // (elf_read_interp scans TO the first NUL; both exec entries reject an
+    // embedded NUL in the path), which is precisely why it would rot unchecked.
+    if (!interp || interp_len == 0) return NULL;
+    if (!path   || path_len   == 0) return NULL;   // the ldso would open("")
+    for (u32 i = 0; i < interp_len; i++) if (interp[i] == '\0') return NULL;
+    for (u32 i = 0; i < path_len;   i++) if (path[i]   == '\0') return NULL;
+
+
+
     // argv[0] of the original vector, and the tail that follows it. argc == 0
     // is representable on both entries (execve(p, NULL, e) and a no-argv
     // spawn); it has no argv[0], so the program is handed an empty one. The
@@ -1118,6 +1137,13 @@ char *exec_interp_argv(const char *interp, u32 interp_len,
         // trailing NUL had been trimmed and got a mis-packed block back.)
         if (!argv_data || argv_data_len == 0) return NULL;
         if (argv_data[argv_data_len - 1] != '\0') return NULL;
+        // The count itself, not just the termination. A block with FEWER NULs
+        // than argc claims produces a rebuilt block with fewer than out_argc,
+        // and the frame builder answers that with an extinction rather than an
+        // error -- so it is refused here, where it is still an error.
+        u32 nuls = 0;
+        for (u32 i = 0; i < argv_data_len; i++) if (argv_data[i] == '\0') nuls++;
+        if (nuls != argc) return NULL;
         a0 = argv_data;
         while (a0_len < argv_data_len && argv_data[a0_len] != '\0') a0_len++;
         if (a0_len == argv_data_len) return NULL;   // unterminated argv[0]
@@ -1205,11 +1231,15 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
                           const char *env_data, u32 env_data_len, u32 envc,
                           u64 *entry_out, u64 *sp_out,
                           struct Spoor **interp_out, char **rw_argv_out) {
-    if (!as || !exe || !entry_out || !sp_out)  return -1;
+    // The disposal contract FIRST, before any return can skip it: a caller
+    // without out-params would silently leak the interpreter Spoor and the
+    // rebuilt argv, which is the F7 shape from D-3c (a tolerant NULL that
+    // leaks is worse than the inline free it replaced).
     if (!interp_out || !rw_argv_out)
         extinction("exec_load_body without disposal out-params");
     *interp_out  = NULL;
     *rw_argv_out = NULL;
+    if (!as || !exe || !entry_out || !sp_out)  return -1;
     if (as->vmas != NULL)                      return -1;     // clean target only
     if (!exe->dev || !exe->dev->read)          return -1;
     if (exe_size == 0 || exe_size > EXEC_FILE_MAX) return -1;
@@ -1316,12 +1346,23 @@ static int exec_load_body(struct AddrSpace *as, bool exempt, struct Proc *nsp,
     // failure, not a silent mis-decode". This is that diagnostic, and it is
     // the hint function's first caller. Consulted ONLY on an already-failed
     // load, so it can never change an outcome -- it only explains one. The
-    // failure is the pre-existing dynamic-binary reject (v1.0 is static-only,
-    // section 9's OUT list); before this, a user got a bare -1.
+    // failure is the dynamic-binary reject; before this, a user got a bare -1.
+    //
+    // D-4 SPLIT THE MESSAGE, because the old one ("Thylacine v1.0 runs
+    // statically-linked ELF only") stopped being true the moment a PHENO_LINUX
+    // exec started running interpreters -- and a diagnostic that states a rule
+    // the kernel no longer follows sends its reader to the wrong place. Which
+    // arm we are on is decided by whether the rewrite already ran: `*interp_out`
+    // is the record of that, so a post-rewrite failure names the INTERPRETER
+    // rather than repeating the native refusal about it.
     if (r == ELF_LOAD_HAS_INTERP || r == ELF_LOAD_HAS_DYNAMIC) {
-        if (elf_brand_hint(hdr, hdr_got) == ELF_BRAND_LINUX_LIKELY) {
-            uart_puts("exec: dynamic Linux binary rejected -- Thylacine v1.0 "
-                      "runs statically-linked ELF only (VIVARIUM section 9)\n");
+        if (*interp_out) {
+            uart_puts("exec: the PT_INTERP interpreter is itself dynamic -- "
+                      "one interpreter level only (DISTRO section 7.1)\n");
+        } else if (elf_brand_hint(hdr, hdr_got) == ELF_BRAND_LINUX_LIKELY) {
+            uart_puts("exec: dynamic Linux binary rejected -- a NATIVE exec "
+                      "runs statically-linked ELF only; a dynamic one needs a "
+                      "PHENO_LINUX vivarium (DISTRO section 7.1)\n");
         }
     }
     kfree(hdr);
