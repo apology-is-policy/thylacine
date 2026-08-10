@@ -1223,7 +1223,7 @@ VIVEOF
                 : > "$sb/rootfs/dev/$leaf"
                 chmod 0666 "$sb/rootfs/dev/$leaf"
             done
-            # The gate script, inline in the manifest. Four legs, each adding
+            # The gate script, inline in the manifest. Five legs, each adding
             # EXACTLY ONE mechanism to the one before it, so a first-missing
             # marker names a cause instead of a symptom:
             #
@@ -1238,18 +1238,34 @@ VIVEOF
             #   C  a second absolute pool symlink resolved for EXEC, plus argv[0]
             #      applet dispatch. C is the leg that reddens if the kernel ever
             #      leaks the symlink-RESOLVED path into argv[0]: busybox would
-            #      then see basename == "busybox", run as the multiplexer, print
-            #      usage and emit nothing. (It does NOT discriminate --argv0 from
-            #      passing the path alone -- nothing on this rootfs can produce a
-            #      vector where those differ; that claim stays at the unit level
-            #      in exec.interp_argv_shape.)
+            #      then see basename == "busybox", treat the filename as an
+            #      applet name, and emit nothing. (It does NOT discriminate
+            #      --argv0 from passing the path alone -- nothing on this rootfs
+            #      can produce a vector where those differ; that claim stays at
+            #      the unit level in exec.interp_argv_shape.)
+            #
+            #      C READS A REAL FILE THROUGH A SYMLINKED APPLET, and the target
+            #      being real is the point. The first version ran `/bin/ls /`,
+            #      which needs directory ENUMERATION on top of applet dispatch --
+            #      two mechanisms in one leg, against this file's own rule. It
+            #      failed on the second: openat declines O_DIRECTORY by design
+            #      (kernel/vivarium.c:470) and getdents64 has no row at all, so
+            #      no Linux program can list a directory here (task #209). The
+            #      dispatch it was actually testing had WORKED -- busybox printed
+            #      "ls: can't open '/'", naming itself by applet -- but the
+            #      marker could not fire, so the leg reported a mechanism that
+            #      was fine. Reading /usr/lib/os-release (a plain file) through
+            #      /bin/cat (a symlink) leaves argv[0] dispatch as the only
+            #      untested variable.
             #   D  a RELATIVE pool symlink crossing `..` (/etc/os-release ->
             #      ../usr/lib/os-release), read through B's already-proven
-            #      multiplexer form so the link is the only new variable. The
-            #      loader path cannot cover this: libc.musl-aarch64.so.1 matches
-            #      the "c." entry of musl's reserved list (dynlink.c:1074-1082),
-            #      so load_library short-circuits it to &ldso and never opens the
-            #      file.
+            #      multiplexer form so the link is the only new variable. C and D
+            #      are now INDEPENDENT: C is symlinked-applet + real target, D is
+            #      multiplexer + symlinked target, so neither can mask the other.
+            #      The loader path cannot cover D's class:
+            #      libc.musl-aarch64.so.1 matches the "c." entry of musl's
+            #      reserved list (dynlink.c:1074-1082), so load_library
+            #      short-circuits it to &ldso and never opens the file.
             #   E  the pool holds the PINNED image, asserted from inside the
             #      guest. This is the #126 stale-bake detector.
             #
@@ -1265,7 +1281,7 @@ VIVEOF
     "ociVersion": "1.0.2",
     "root": { "path": "rootfs", "readonly": true },
     "process": {
-        "args": ["/bin/sh", "-c", "echo DISTRO-A-stock-sh\nb=$(/bin/busybox echo bb-ok); [ \"$b\" = bb-ok ] && echo DISTRO-B-stock-exec\nl=$(/bin/ls /); case \"$l\" in *usr*) echo DISTRO-C-applet-by-symlink ;; esac\no=$(/bin/busybox cat /etc/os-release); echo DISTRO-RAW-OSREL:$o\ncase \"$o\" in *\"Alpine Linux\"*) echo DISTRO-D-relative-symlink ;; esac\ncase \"$o\" in *VERSION_ID=3.21.0*) echo DISTRO-E-pinned-image ;; esac\necho DISTRO-DONE"],
+        "args": ["/bin/sh", "-c", "echo DISTRO-A-stock-sh\nb=$(/bin/busybox echo bb-ok); [ \"$b\" = bb-ok ] && echo DISTRO-B-stock-exec\nc=$(/bin/cat /usr/lib/os-release); echo DISTRO-RAW-C:$c\ncase \"$c\" in *\"Alpine Linux\"*) echo DISTRO-C-applet-by-symlink ;; esac\no=$(/bin/busybox cat /etc/os-release); echo DISTRO-RAW-OSREL:$o\ncase \"$o\" in *\"Alpine Linux\"*) echo DISTRO-D-relative-symlink ;; esac\ncase \"$o\" in *VERSION_ID=3.21.0*) echo DISTRO-E-pinned-image ;; esac\necho DISTRO-DONE"],
         "env": [],
         "cwd": "/"
     },

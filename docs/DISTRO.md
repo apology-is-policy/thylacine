@@ -724,7 +724,7 @@ an existing mount point): the `/net` and `/env` directories, and the six
 `/dev` leaf files. Nothing is written into the rootfs to carry the gate — the
 script rides in `process.args`, so the staged tree is the tarball plus anchors.
 
-**THE ARC GATE, boot-fatal in joey.** Four legs, ordered so that each one adds
+**THE ARC GATE, boot-fatal in joey.** Five legs, ordered so that each one adds
 **exactly one** new mechanism to the one before it; that is what makes a
 first-missing marker name a cause rather than a symptom.
 
@@ -732,8 +732,9 @@ first-missing marker name a cause rather than a symptom.
 |---|---|---|---|
 | A | `DISTRO-A-stock-sh` | The whole D-1..D-4 chain at once: `/bin/sh` (an absolute POOL symlink) -> stock ET_DYN PIE busybox -> `PT_INTERP` -> stock ldso -> applet dispatch on `basename(argv[0]) == "sh"`. Emitted by a shell BUILTIN, so no second exec is involved. | The stock shell cannot start at all. |
 | B | `DISTRO-B-stock-exec` | fork + exec of a stock dynamic binary FROM a stock dynamic parent, in busybox's **multiplexer** form (`/bin/busybox echo` — a real file, argv[0]-independent). | Exec-from-a-dynamic-parent is broken, independent of symlinks and of argv[0]. |
-| C | `DISTRO-C-applet-by-symlink` | A second absolute pool symlink resolved for **exec**, plus argv[0] applet dispatch (`/bin/ls`). | The kernel leaked the symlink-RESOLVED path into `argv[0]`: busybox would then see `basename == "busybox"`, run as the multiplexer, print usage, and emit nothing. |
-| D | `DISTRO-D-relative-symlink` | A **relative** pool symlink crossing `..` (`/etc/os-release`), read through the already-proven multiplexer form so the link is the only new variable. Its content also re-asserts the version pin (`VERSION_ID=3.21.0`) *inside the guest*. | Relative pool symlinks are not traversable by the guest resolver. |
+| C | `DISTRO-C-applet-by-symlink` | A second absolute pool symlink resolved for **exec**, plus argv[0] applet dispatch: `/bin/cat` (a symlink) reading `/usr/lib/os-release` (a **real** file). | The kernel leaked the symlink-RESOLVED path into `argv[0]`: busybox would then see `basename == "busybox"`, take the filename for an applet name, and emit nothing. |
+| D | `DISTRO-D-relative-symlink` | A **relative** pool symlink crossing `..` (`/etc/os-release`), read through the already-proven multiplexer form so the link is the only new variable. C and D are independent — symlinked-applet/real-target versus multiplexer/symlinked-target — so neither can mask the other. | Relative pool symlinks are not traversable by the guest resolver. |
+| E | `DISTRO-E-pinned-image` | The pool holds the **pinned** image, asserted from inside the guest (`VERSION_ID=3.21.0`) — the #126 stale-bake detector. Reads D's capture, so a broken D darkens E too; read D first. | A `PRESERVE=1` build served a stale rootfs. |
 | — | `DISTRO-DONE` | The script reached its end. | The shell died mid-script rather than a leg merely failing. |
 
 Leg C is worth stating precisely, because it is easy to overclaim: it does

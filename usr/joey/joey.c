@@ -1291,16 +1291,29 @@ static int do_alpine_shell_gate(void) {
 //      busybox's multiplexer form: a real file, argv[0]-independent, so B is
 //      clear of both symlinks and argv[0].
 //   C  a second absolute pool symlink resolved for EXEC, plus argv[0] applet
-//      dispatch. C is the leg that reddens if the kernel ever leaks the
+//      dispatch: /bin/cat (a symlink) reading /usr/lib/os-release (a REAL
+//      file). C is the leg that reddens if the kernel ever leaks the
 //      symlink-RESOLVED path into argv[0] -- busybox would see basename ==
-//      "busybox", run as the multiplexer, print usage, and emit nothing. Every
+//      "busybox", take the filename for an applet name, and emit nothing. Every
 //      busybox-based distro depends on this and nothing tested it before.
 //      C does NOT discriminate --argv0 from passing the path alone; that claim
 //      stays at the unit level (exec.interp_argv_shape), for the reason the
 //      L-6c D4-B comment above gives.
+//
+//      THE TARGET BEING A REAL FILE IS THE POINT, and it was learned the hard
+//      way. This leg first ran `/bin/ls /`, which needs directory ENUMERATION
+//      on top of applet dispatch -- two mechanisms in one leg -- and it went
+//      red on the second: openat declines O_DIRECTORY by design
+//      (kernel/vivarium.c:470) and getdents64 has no row, so nothing here can
+//      list a directory (task #209). The dispatch C actually tests had WORKED:
+//      busybox printed "ls: can't open '/'", naming itself by applet, which is
+//      only possible if argv[0] was /bin/ls. A leg that reddens for a mechanism
+//      it is not testing is a broken leg, not a finding.
 //   D  a RELATIVE pool symlink crossing `..` (/etc/os-release ->
 //      ../usr/lib/os-release), read through B's already-proven multiplexer form
-//      so the link is the only new variable. The loader path cannot cover this
+//      so the link is the only new variable. C and D are INDEPENDENT -- C is a
+//      symlinked applet on a real target, D a multiplexer on a symlinked target
+//      -- so neither can mask the other. The loader path cannot cover D's
 //      class: libc.musl-aarch64.so.1 matches the "c." entry of musl's reserved
 //      list (third_party/musl/ldso/dynlink.c:1074-1082), so load_library
 //      short-circuits it to &ldso and never opens the file.

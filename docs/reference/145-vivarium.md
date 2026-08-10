@@ -2354,7 +2354,7 @@ right because every expected value downstream was derived from those exact
 bytes, including the `D2`/`D3`/`D4` output strings and D-5's in-guest
 `VERSION_ID` assertion; a different image would quietly move what PASS means.
 
-### The gate: four legs, one new mechanism each
+### The gate: five legs, one new mechanism each
 
 `do_stock_distro_gate` (`usr/joey/joey.c`) spawns `viv run
 /vivarium/alpine-stock` and matches markers against the drained container
@@ -2365,10 +2365,13 @@ first-missing marker names a cause rather than a symptom.
 |---|---|---|
 | A | `DISTRO-A-stock-sh` | The stock shell starts at all: `/bin/sh` (an absolute POOL symlink, re-anchored at the container root by I-28) -> stock `ET_DYN` PIE busybox -> `PT_INTERP` -> stock ldso -> applet dispatch on `basename(argv[0]) == "sh"`. Printed by a shell BUILTIN, so no second exec stands between the chain and the signal. |
 | B | `DISTRO-B-stock-exec` | fork + exec of a stock dynamic binary FROM a stock dynamic parent, in busybox's multiplexer form (`/bin/busybox echo`): a real file, argv[0]-independent, so B is clear of both symlinks and argv[0]. |
-| C | `DISTRO-C-applet-by-symlink` | A second absolute pool symlink resolved for EXEC, plus argv[0] applet dispatch (`/bin/ls`). |
+| C | `DISTRO-C-applet-by-symlink` | A second absolute pool symlink resolved for EXEC, plus argv[0] applet dispatch: `/bin/cat` (a symlink) reading `/usr/lib/os-release` (a REAL file). |
 | D | `DISTRO-D-relative-symlink` | A RELATIVE pool symlink crossing `..` (`/etc/os-release -> ../usr/lib/os-release`), read through B's already-proven multiplexer form so the link is the only new variable. |
 | E | `DISTRO-E-pinned-image` | The pool holds the PINNED image, asserted from inside the guest. |
 | — | `DISTRO-DONE` | The script reached its end, distinguishing a failed leg from a shell that died mid-script. |
+
+C and D are deliberately independent: C is a symlinked applet on a real target,
+D a multiplexer on a symlinked target, so neither can mask the other.
 
 Leg C is the one worth stating carefully, because it is easy to overclaim. It
 does **not** discriminate `--argv0` from passing the path alone -- nothing on
@@ -2377,8 +2380,45 @@ comment gives, and that claim stays at the unit level in
 `exec.interp_argv_shape`. What C discriminates is a separate property that
 nothing tested before: **symlink resolution must not become visible in
 `argv[0]`.** If the kernel ever passed the resolved path, busybox would see
-`basename == "busybox"`, run as the multiplexer, print usage, and emit nothing.
+`basename == "busybox"`, take the filename for an applet name, and emit nothing.
 Every busybox-based distro depends on this.
+
+### The first run went red at leg C, and the leg was the thing that was wrong
+
+Worth recording in full, because the failure mode is a general one.
+
+The gate's first guest run reported
+`first-missing=DISTRO-C-applet-by-symlink status=0` -- A, B, D, E and DONE all
+fired, and the shell exited cleanly. The obvious reading was the one the leg was
+built to catch: the kernel had leaked the resolved path into `argv[0]`.
+
+The log said otherwise. Because the container's stderr shares the drained pipe,
+the actual error was already sitting next to the markers:
+
+```
+ls: can't open '/': Function not implemented
+vivarium: unserved linux syscall nr=56 (T2 row declined these arguments)
+```
+
+busybox printed **`ls:`** -- it had dispatched to the `ls` applet and was naming
+itself by applet, which is only possible if `argv[0]` was `/bin/ls`. The
+property leg C exists to prove was **satisfied**; the leg simply could not
+observe it, because the version of C that shipped ran `/bin/ls /`, and listing a
+directory needs enumeration on top of dispatch. `openat` declines `O_DIRECTORY`
+by design (`kernel/vivarium.c:470`) and `getdents64` has no row at all, so
+nothing here can list a directory (task #209).
+
+So the leg violated the very rule the ladder is built on -- one new mechanism
+per leg -- and reddened for a mechanism it was not testing. That is strictly
+worse than a leg that fails honestly: it accuses the wrong subsystem. The fix is
+to read a REAL file through a SYMLINKED applet (`/bin/cat /usr/lib/os-release`),
+which leaves argv[0] dispatch as the only untested variable and, as a bonus,
+makes C independent of D.
+
+Two lessons, both already project canon and both re-earned here: a leg's
+dependency set must be no larger than its claim; and when a gate goes red, read
+what the artifact actually printed before believing the hypothesis the gate was
+designed around.
 
 Leg D exists because the loader path cannot cover the relative class at all:
 `libc.musl-aarch64.so.1` matches the `"c."` entry of musl's reserved list
@@ -2432,6 +2472,11 @@ run of that harness darkened C in the CONTROL -- an absolute symlink dangles on
 a host with no container root -- which is the reason the harness rewrites the
 link and the reason a sabotage matrix is only readable once its control is
 fully green.
+
+The harness regenerates the script by parsing it back out of `tools/build.sh`
+rather than keeping its own copy, so what it discriminates is the artifact that
+actually ships. A second copy would have drifted at the leg-C fix and gone on
+certifying the old legs.
 
 What the host run cannot see: anything about the guest. No pool, no stalk, no
 I-28 re-anchoring, no ldso, no `PT_INTERP`. It proves the script's patterns CAN
