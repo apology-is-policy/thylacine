@@ -77,7 +77,19 @@ Stock musl (vendored `third_party/musl` == Alpine's 1.2.x lineage):
 
 - **Direct invocation as a program is supported** (`ldso/dynlink.c:1866` and
   the surrounding `__dls3` branch; the `ldd_mode` family) — the property the
-  D-4 exec-rewrite rests on.
+  D-4 exec-rewrite rests on. Direct mode is SELECTED by `aux[AT_PHDR] ==
+  ldso.phdr` (`dynlink.c:1834`), i.e. by the kernel having loaded the ldso as
+  the image — which is exactly what the rewrite produces, so no auxv change is
+  needed to reach it. Our `AT_PHDR` (`exec.c:655`, `seg->vaddr + (phoff -
+  file_offset)`) and musl's `ldso.phdr` (`laddr(&ldso, e_phoff)` = base +
+  `e_phoff`) are the same value for a segment-0-at-file-offset-0 PIE, which
+  every stock ldso is.
+- **The direct-mode option parser** (`dynlink.c:1868-1890`) accepts
+  `--argv0 VALUE` (`replace_argv0` applied at `dynlink.c:2071`) and a bare
+  `--` terminator, and it REWRITES argc in
+  `argv[-1]` (`dynlink.c:1891`) — so the initial frame must keep argc
+  immediately below `argv[0]` and both writable. All three are load-bearing
+  for the D-4 argv shape (§7.1).
 - **Its mprotect calls tolerate ENOSYS specifically** (`dynlink.c:855,1428`) —
   so the phenotype's `mprotect = ENOSYS` row survives dynamic linking
   unchanged. RELRO degrades (no loss vs status quo); aarch64 PIC has no
@@ -125,9 +137,31 @@ chokepoint.
 **Rejected (recorded as the v1.x fidelity lift): in-kernel dual-image
 PT_INTERP** (the Linux/gVisor model). Full fidelity — `/proc/self/exe`,
 `AT_EXECFN`, `AT_BASE` — at roughly double D-2's loader scope, for fidelity
-nothing in the `/bin/sh` gate needs. Known gaps under the rewrite, accepted:
-`/proc/self/exe` reports ldso (the #90 class — that surface already reports
-the mounter, not the reader), `AT_EXECFN` absent.
+nothing in the `/bin/sh` gate needs.
+
+**The fidelity ledger, re-measured at D-4 implementation (2026-08-10).** The
+2026-08-05 vote recorded two accepted gaps and asserted one property. Reading
+musl's direct-mode parser and fixing where the rewrite LIVES changed three of
+those answers; the ledger below is the corrected one, and §7.1 carries the
+shape that produces it.
+
+| Surface | 08-05 vote said | AS-BUILT at D-4 | Why |
+|---|---|---|---|
+| `argv[0]` | "the app still sees its own argv[0]" | **HOLDS** — exactly | Not from the stated shape, which delivers the PATH instead. `--argv0` is what delivers it (§7.1). |
+| `/proc/self/exe` | reports ldso (accepted gap) | **CLOSED** — reports the program | The rewrite lives INSIDE `exec_load_into`; the Proc-side stamps run in its two callers, which still hold the ORIGINAL `exe`. |
+| `AT_EXECFN` | absent (accepted gap) | absent (unchanged) | We emit no `AT_EXECFN` in either route; musl's consumer is the kernel-loaded branch only. |
+| `argc == 0` | not considered | becomes `argc == 1`, `argv[0] == ""` | Inherent: the ldso's own command line must name a pathname, so a zero-length vector cannot be expressed. Linux itself treats `argc == 0` as a hazard (the CVE-2021-4034 class). |
+| mode `0111` (X, not R) | not considered | REFUSED at load | Inherent to a userspace loader: the ldso re-opens the program `O_RDONLY`. The kernel's own `OEXEC` gate still runs first, so this only ever SUBTRACTS reachability. Fuchsia and Genode have the identical property. |
+| the program path | not considered | resolved TWICE (kernel peek, then ldso `open`) | Benign: the kernel's resolution only decides "this needs an interpreter"; the ldso's is what loads. A file swapped between them is caught by the ldso's own `map_library` validation, never by the kernel mapping the wrong bytes. |
+
+`--argv0` and `--` bind D-4 to a musl ldso carrying both. Read out of the
+vendored tree's own `WHATSNEW` rather than recalled: the `--`-terminated
+option parser arrived in **musl 1.1.1** (`WHATSNEW:1221`, "new options
+--preload and --library-path to dynamic linker") and `--argv0` in **musl
+1.1.17** (`WHATSNEW:1788`). We vendor 1.2.5; the floor is eight years below
+it. That is not a new constraint of substance — glibc distros are already a
+recorded seam (§8) — but it is a CLI dependency rather than an ABI one, so it
+fails LOUD (the ldso's usage text on stderr, exit 1) rather than silently.
 
 ---
 
@@ -580,24 +614,61 @@ busybox and can never load through ldso.
 
 ### 7.1 D-4: PT_INTERP -> ldso (the §3.2 vote)
 
-In the kernel exec core, gated on the caller being `PHENO_LINUX` (native
-execs keep rejecting PT_INTERP): on detecting PT_INTERP, read the
+In the kernel exec core, gated on the execing Proc being `PHENO_LINUX`
+(native execs keep rejecting PT_INTERP): on detecting PT_INTERP, read the
 interpreter path (bounded, NUL-checked, from the already-read header
-buffer), resolve it THROUGH THE CALLER'S NAMESPACE via stalk — the interp
+buffer), resolve it THROUGH THAT PROC'S NAMESPACE via stalk — the interp
 path is container-relative and crosses its own symlink, which is why D-1
-precedes — and restart the load on the interpreter with argv shifted to
-`[interp_path, orig_path, orig argv[1..]]` (musl direct mode: the app still
-sees its own argv[0], musl shifts internally). One level only: an
-interpreter that itself carries PT_INTERP is refused. Both entries route
-here (the in-container execve T2 shell and the runner's ENTRY spawn), so
-there is ONE mechanism.
+precedes — and restart the load on the interpreter with argv shifted. One
+level only: an interpreter that itself carries PT_INTERP is refused. Both
+entries route here (the in-container execve T2 shell and the runner's ENTRY
+spawn), so there is ONE mechanism.
+
+**The argv shape**, corrected 2026-08-10 from the 08-05 vote's
+`[interp_path, orig_path, orig argv[1..]]`:
+
+```
+[interp_path, "--argv0", orig_argv0, "--", orig_path, orig argv[1..]]
+```
+
+Four inserted slots, `argc + 4`. The vote's shape does NOT produce the
+property the vote asserted next to it ("the app still sees its own argv[0]"):
+musl's direct mode uses ONE slot for both "which file to load" and "what
+argv[0] becomes" (`dynlink.c:1913` `app.name = argv[0]`), so under the stated
+shape a program is handed the PATH it was resolved from, not the name its
+caller invoked it by. `--argv0` separates the two — musl consumes it into
+`replace_argv0` and applies it at `dynlink.c:2071`, after which the app's
+vector is byte-identical to the caller's. The parser consumes exactly the four
+slots it is given and rewrites argc to `N` in `argv[-1]`, so the app sees the
+original `argc` too.
+
+Why the flag rather than the literal shape: the corrected version delivers
+what was voted, and the difference is not cosmetic — `argv[0]` is a
+DISPATCH input for the two programs this arc is built on. busybox selects its
+applet from `basename(argv[0])`, and a login shell is identified by a leading
+`-`. The literal shape happens to survive both only while path-basename ==
+applet-name, i.e. it passes the gate and fails `exec -a`.
+
+`--` is emitted unconditionally, not only when needed: without it a program
+path beginning with `--` is eaten by the option parser, and a shape that
+changes with its data is a shape only one of its branches ever gets tested.
+Same reason `--argv0` is unconditional — when `orig_argv0 == orig_path` it is
+semantically a no-op, and paying four slots to keep ONE audited path is the
+trade this file makes everywhere else.
 
 Audit posture: audit-noted, joins the exec/REVENANT row (resolution runs
 under I-28; the loaded image is the interp — everything downstream is D-2's
 already-audited single-image path).
 
 Gate: busybox `sh` execs a DYNAMIC `/bin/ls` via its own execve — proving
-the kernel-shell route, not just the runner route.
+the kernel-shell route, not just the runner route. It must discriminate on
+BY-NAME execution specifically: D3-A already runs the same objects through an
+explicit `ld-musl ... getconf` spawn, so a D-4 gate that only proves "a
+dynamic binary ran" is green before D-4 is written. The leg therefore asserts
+rendered output from a program named WITHOUT its interpreter, and the
+argv[0] half is asserted separately (a program that reports its own
+`argv[0]`), because the two are independent claims and one leg cannot fail
+for both reasons distinguishably.
 
 ### 7.2 D-5: the stock rootfs pipeline + THE ARC GATE
 
