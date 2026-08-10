@@ -44,7 +44,14 @@ LOG="$(mktemp /tmp/thyla-idle-gate.XXXXXX.log)"
 # #89: THIS tree's absolute disk path -- the discriminator every process match
 # below is scoped to. Mirrors run-vm.sh's resolution (we cd'd to the repo root
 # above), so the pattern is exactly the string qemu carries on its cmdline.
+# #200: force any relative override absolute AND re-export it, for both halves
+# of the coherence: a relative pattern (`build/disk.img`) is a substring of
+# every sibling worktree's path (the boot-fail pkill below would cross trees),
+# and run-vm.sh passes the env value through verbatim, so exporting the
+# canonical form keeps this pattern byte-identical to qemu's actual cmdline.
 DISK_IMG="${THYLACINE_DISK_IMG:-$PWD/build/disk.img}"
+case "$DISK_IMG" in /*) ;; *) DISK_IMG="$PWD/$DISK_IMG" ;; esac
+export THYLACINE_DISK_IMG="$DISK_IMG"
 
 # HVF gate: SKIP (exit 0) if the host cannot run HVF, so this is safe in a
 # TCG-only CI without failing the pipeline.
