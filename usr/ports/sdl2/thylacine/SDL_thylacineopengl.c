@@ -41,6 +41,15 @@ OSMesaMakeCurrent(OSMesaContext ctx, void *buffer, GLenum type,
 extern __attribute__((weak)) void OSMesaPixelStore(GLint pname, GLint value);
 extern __attribute__((weak)) OSMESAproc OSMesaGetProcAddress(const char *fn);
 extern __attribute__((weak)) void glFinish(void);
+extern __attribute__((weak)) void glFlush(void);
+
+/* Warp-4 (fork patch 0007): negotiate/withdraw the direct present. Weak
+ * like the rest -- absent on a pre-0007 libOSMesa.a, and the negotiation
+ * simply never happens (the readback path is the shipping behavior). */
+extern __attribute__((weak)) int
+OSMesaThylacineDirect(OSMesaContext ctx, unsigned surface_id,
+                      unsigned *ctx_pub_out);
+extern __attribute__((weak)) void OSMesaThylacineDirectOff(OSMesaContext ctx);
 
 typedef struct THYLACINE_GLContext
 {
@@ -54,6 +63,12 @@ typedef struct THYLACINE_GLContext
     uint64_t bound_va;
     uint32_t bound_w, bound_h;
     SDL_Window *window;
+    /* Warp-4: the direct present is active -- the compositor displays
+     * the GL color resource itself (fullscreen: SET_SCANOUT of the 3D
+     * resource; windowed: server-side readback + compose), the OSMesa
+     * readback into the weave is suppressed, and the swap needs only a
+     * glFlush (ordering is the controlq's FIFO), not a glFinish. */
+    SDL_bool direct;
 } THYLACINE_GLContext;
 
 SDL_bool THYLACINE_GL_Available(void)
@@ -118,6 +133,29 @@ static int gl_bind(THYLACINE_GLContext *ctx, SDL_WindowData *wd)
     ctx->bound_va = wd->tap.map_va;
     ctx->bound_w = wd->tap.w;
     ctx->bound_h = wd->tap.h;
+
+    /* Warp-4: negotiate the direct present, on EVERY bind -- a reweave
+     * reallocates the framebuffer, and the standing consent names one
+     * BO, so it must be re-issued for the new one (both handshake
+     * halves are idempotent server-side). The fork's export refuses on
+     * llvmpipe (driver-name gate), so this costs a plain llvmpipe bind
+     * one cheap failed call. BOTH halves must land; a half-negotiated
+     * state suppresses the readback with no display source, which is a
+     * frozen pane -- so any failure explicitly restores the readback. */
+    ctx->direct = SDL_FALSE;
+    if (OSMesaThylacineDirect) {
+        unsigned ctx_pub = 0;
+        if (OSMesaThylacineDirect(ctx->osmesa, wd->tap.id, &ctx_pub) == 0) {
+            if (thyla_tap_glsrc(&wd->tap, ctx_pub) == 0) {
+                ctx->direct = SDL_TRUE;
+            } else {
+                if (OSMesaThylacineDirectOff) {
+                    OSMesaThylacineDirectOff(ctx->osmesa);
+                }
+                (void)thyla_tap_glsrc(&wd->tap, 0);
+            }
+        }
+    }
     return 0;
 }
 
@@ -303,8 +341,19 @@ int THYLACINE_GL_SwapWindow(_THIS, SDL_Window *window)
      * frame are not necessarily in the buffer yet. glFinish is what makes the
      * present a present rather than a race with the rasteriser — without it
      * the compositor reads partially-drawn tiles. This is the one GL call the
-     * backend itself makes. */
-    glFinish();
+     * backend itself makes.
+     *
+     * Warp-4 direct: the compositor displays the GL resource itself, and
+     * ordering to the display is structural (the winsys submits on flush;
+     * the server's SET_SCANOUT/RESOURCE_FLUSH queue behind it on the one
+     * controlq, FIFO) — so a glFlush suffices and a glFinish would
+     * serialize the whole GPU pipeline per frame for nothing. The winsys's
+     * own 2-in-flight fence throttle bounds the run-ahead. */
+    if (ctx->direct && glFlush) {
+        glFlush();
+    } else {
+        glFinish();
+    }
 
     if (vd->gl_swap_interval > 0) {
         THYLACINE_PaceFrame(wd);
@@ -327,6 +376,12 @@ void THYLACINE_GL_DeleteContext(_THIS, SDL_GLContext context)
         return;
     }
     if (ctx->osmesa && OSMesaDestroyContext) {
+        /* Withdraw a live direct consent first: the warp ctx (per-process,
+         * on the shared screen) outlives this GL context, so the consent
+         * would otherwise dangle until the surface's gen pin inerts it. */
+        if (ctx->direct && OSMesaThylacineDirectOff) {
+            OSMesaThylacineDirectOff(ctx->osmesa);
+        }
         OSMesaDestroyContext(ctx->osmesa);
     }
     SDL_free(ctx);

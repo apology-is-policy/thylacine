@@ -1604,6 +1604,44 @@ impl Gpu {
         self.fenced_commit(slot, GPU_CTRL_HDR_LEN + 48, fence_id, ctx_pub)
     }
 
+    /// Synchronous full-frame TRANSFER_FROM_HOST_3D under the COMPOSITOR's
+    /// own authority (the Warp-4 composed-GL readback). Unlike the
+    /// client-facing fenced `transfer_3d`, this rides the sync `.step`
+    /// slot: the present dispatch that calls it must stay one synchronous
+    /// unit (the I-40 premise), and the response IS the completion --
+    /// virglrenderer copies the texture into the attached backing before
+    /// answering. Level 0, origin box, depth 1, tight stride.
+    pub fn transfer_from_3d_sync(
+        &mut self,
+        ctx_id: u32,
+        res_id: u32,
+        w: u32,
+        h: u32,
+        stride: u32,
+    ) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D, ctx_id);
+            w32(req_va + 24, 0); // box.x
+            w32(req_va + 28, 0); // box.y
+            w32(req_va + 32, 0); // box.z
+            w32(req_va + 36, w);
+            w32(req_va + 40, h);
+            w32(req_va + 44, 1); // box.d
+            w64(req_va + 48, 0); // offset into the backing
+            w32(req_va + 56, res_id);
+            w32(req_va + 60, 0); // level
+            w32(req_va + 64, stride);
+            w32(req_va + 68, 0); // layer_stride
+        }
+        self.ctrl.step(
+            "TRANSFER_FROM_3D",
+            GPU_CTRL_HDR_LEN + 48,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
+    }
+
     /// The serve loop's non-blocking completion pump (Warp-2d).
     pub fn poll_completions(&mut self) {
         self.ctrl.poll_completions();

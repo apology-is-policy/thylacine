@@ -425,6 +425,69 @@ requires BOTH the prover's own PASS line and the scenario pass line —
 build-id note the static link never carries; the fork now runs cacheless
 when the note is absent (port finding 4 in the README).
 
+## The present integration (Warp-4): mutual adoption
+
+A GL client's frame reaches the DISPLAY without ever crossing back into
+guest memory (fullscreen) or with one server-side readback (windowed),
+through a **mutual adoption** between a tapestry surface and a warp ctx:
+
+- **The surface half** (`surface ctl`, owner-gated): `glsrc <ctx_pub>` /
+  `glsrc off` -- accept that ctx as the display source. Naming a ctx
+  grants nothing by itself.
+- **The ctx half** (`ctx ctl`, owner-gated): `present-to <surface>
+  <bo_pub>` / `present-to off` -- consent to displaying this ctx's BO on
+  that surface. The surface INCARNATION is pinned at write time (slot +
+  gen), so slot reuse can never re-arm a stale consent against a future
+  tenant. Pure naming: the BO must be this ctx's own and alive, the
+  surface must exist; geometry gates ACTIVITY, never the verb, so a
+  resize racing the handshake degrades to inactive instead of failing.
+
+Adoption is ACTIVE (`gl_adoption`, resolved fresh at every use -- nothing
+cached, either side's death is inert) iff both halves name each other,
+the BO is alive, and `bo.w/h == surface.w/h`. Present routing then
+becomes, by scanout mode:
+
+- **Direct** (fullscreen, the game case): the F16 pending switch binds
+  `SET_SCANOUT(bo.res_id)`; each present is ONLY a `RESOURCE_FLUSH` --
+  zero guest transfers. Ordering is structural: the client's SUBMIT_3D
+  was queued on the one controlq before its tpresent arrived (the client
+  serializes flush-then-present; the server is single-threaded), so the
+  flush displays the completed frame. The client's swap downgrades
+  glFinish to glFlush (the winsys's 2-in-flight fence throttle bounds
+  run-ahead).
+- **Composed** (windowed, the ladder's readback fallback): a SYNCHRONOUS
+  `TRANSFER_FROM_HOST_3D` (the compositor's own sync step, NOT the
+  client fenced lane -- the present stays one dispatch, the I-40
+  premise) pulls the frame into the BO's own backing, and
+  `blit_composed_pixels` composes from those pages (letterbox/crop
+  shared with the weave path; `res_stale` stays TRUE -- the weave never
+  saw GL frames). No orientation flip: the guest-visible transfer
+  contract is gallium top-down, same as a weave.
+- HOLD is refused in every GL arm (`E_OPNOTSUPP`): its contract is a
+  DEFERRED device-visible flush and the GL arms have no deferral.
+
+`Comp.bound_res` records the DEVICE's currently bound resource (0 =
+none), distinct from the mode-machine's intent -- they diverge across
+soft-Off retarget windows. Every path that can free an adopted BO
+(`wbo_destroy`, `wctx_retire` -- the same chokepoints as the fence-hold
+release) first withdraws the consent, retargets the partner surface
+through the uniform pending rule, and **evicts the device binding before
+any `resource_unref`** (an unref of the scanned-out resource is the one
+order the display cannot survive); surface retire runs the same eviction
+keyed on `bound_res`. On adoption end the weave is marked stale and the
+surface's next present restores a compositor-owned scanout.
+
+The client side (fork patch 0007 + the SDL shim): `OSMesaThylacineDirect
+(ctx, surface_id, *ctx_pub_out)` places the consent through the winsys's
+own connection, returns the ctx pub for the shim's `glsrc`, and
+suppresses the flush_front readback; `OSMesaThylacineDirectOff` restores
+it. One per-process owner (the warp ctx is per-process): a second GL
+context negotiating steals the consent and the loser's readback resumes.
+The shim re-negotiates on EVERY bind -- a reweave reallocates the
+framebuffer, and the consent names one BO. Both halves failing restores
+the readback path explicitly: a half-negotiated state (readback
+suppressed, no display source) would be a frozen pane.
+
 ## Error paths
 
 | Path | Verdict |

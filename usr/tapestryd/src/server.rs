@@ -487,6 +487,12 @@ struct Surface {
     held: Option<Held>,
     title: String,
     events: VecDeque<Tevent>,
+    /// Warp-4: the GL adoption's SURFACE half -- the warp ctx pub id this
+    /// surface accepts as its display source (`glsrc <ctx>`). Display
+    /// activates only while that ctx's own consent names this surface
+    /// incarnation back (mutual adoption, `gl_adoption`); resolved fresh
+    /// at every use, never cached, so either side's death is inert here.
+    gl_src: Option<u32>,
     presents: u64, // diagnostic counter
 }
 
@@ -581,6 +587,14 @@ pub struct Comp {
     layout: Layout,
     screen: Option<Screen>,
     scanout: Scanout,
+    /// Warp-4: the resource id the DEVICE currently scans out (0 = none/
+    /// disabled). `scanout` is the mode-machine's INTENT; this is the
+    /// device's truth -- they diverge across the soft-Off windows (the
+    /// 1037-style defer keeps the old pixels bound until the next
+    /// present-COMPLETE). The GL death-falls key on THIS: an unref of the
+    /// scanned-out resource is the one order the display cannot survive,
+    /// and only the device truth can name which resource that is.
+    bound_res: u32,
     /// The F16 deferred direct switch: SET_SCANOUT to this surface's
     /// resource rides its next present-COMPLETE, never earlier.
     pending_direct: Option<usize>,
@@ -706,6 +720,12 @@ struct WarpCtx {
     /// shape blocked the dispatch for up to 2 s per object -- client-
     /// multipliable into minutes of frozen console (#31/#125).
     retiring: bool,
+    /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
+    /// this ctx consents to displaying its BO `bo_pub` on surface
+    /// (slot, gen). The gen pin makes a consent die with the surface
+    /// incarnation it named -- slot reuse cannot re-arm it against a
+    /// future tenant.
+    present_to: Option<(usize, u32, u32)>,
     bos: [Option<WarpBo>; MAX_WARP_BOS_PER_CTX],
 }
 
@@ -729,6 +749,18 @@ struct WarpBo {
     retiring: bool,
 }
 
+/// Warp-4: a resolved ACTIVE GL adoption (see `gl_adoption`) -- the
+/// device ctx + 3D resource + tapestryd's own mapping of its backing.
+/// A value is valid for the single dispatch that resolved it.
+#[derive(Clone, Copy)]
+struct GlAdopt {
+    dev_ctx: u32,
+    res_id: u32,
+    va: u64,
+    w: u32,
+    h: u32,
+}
+
 const NO_SURFACE: Option<Surface> = None;
 
 impl Comp {
@@ -742,6 +774,7 @@ impl Comp {
             layout: Layout::new(),
             screen: None,
             scanout: Scanout::Boot,
+            bound_res: 0,
             pending_direct: None,
             chrome_epoch: 0,
             geom_sig: 0,
@@ -840,6 +873,7 @@ impl Comp {
             offered: None,
             title: String::new(),
             events: VecDeque::new(),
+            gl_src: None,
             presents: 0,
         });
         Some(n)
@@ -1194,6 +1228,7 @@ impl Comp {
             }
             // The device now scans new.res (zeroed; reconcile's structural
             // repaint fills it this dispatch); old.res is no longer bound.
+            self.bound_res = new.res;
         }
         // Commit: the old screen is now un-scanned (rebound above) or was
         // never bound (Boot/Off/Direct) -- either way safe to free.
@@ -1422,6 +1457,7 @@ impl Comp {
                 self.pending_direct = None;
                 if self.scanout != Scanout::Off && self.scanout != Scanout::Boot {
                     let _ = self.gpu.set_scanout(0, dw, dh);
+                    self.bound_res = 0;
                     self.scanout = Scanout::Off;
                 }
             }
@@ -1470,7 +1506,9 @@ impl Comp {
                 if entering {
                     let sres = self.screen.as_ref().map(|s| s.res).unwrap_or(0);
                     say!("tapestryd: scanout composed ({}x{})", dw, dh);
-                    let _ = self.gpu.set_scanout(sres, dw, dh);
+                    if self.gpu.set_scanout(sres, dw, dh).is_ok() {
+                        self.bound_res = sres;
+                    }
                     // Flush AFTER the bind (#57): a RESOURCE_FLUSH reaches
                     // only scanouts bound to the resource, so the
                     // screen_flush_full above -- issued while the OLD
@@ -1552,6 +1590,11 @@ impl Comp {
     /// inside the present dispatch, for the slot the client just
     /// presented -- the G-6 tearing-freedom invariant. The caller pushes
     /// the region device-side (`screen_push`) -- or defers it (HOLD).
+    /// Warp-4 (`gl_src`): a GL adoption composes from the BO backing
+    /// tapestryd itself mapped -- same geometry as the surface (the
+    /// adoption gate), full-image tight stride -- instead of a weave
+    /// slot. Every rect/letterbox/crop path below is source-agnostic;
+    /// only the base pointer changes.
     fn blit_composed_pixels(
         &mut self,
         n: usize,
@@ -1560,6 +1603,7 @@ impl Comp {
         y: u32,
         pw: u32,
         ph: u32,
+        gl_src: Option<u64>,
     ) -> Option<Rect> {
         let (sw, slot_stride, weave_va) = match self.surf(n) {
             Some(s) => match &s.weave {
@@ -1580,7 +1624,16 @@ impl Comp {
             None => return None,
         };
         let dw = self.gpu.width as u64;
-        let src_base = weave_va + (slot as u64) * slot_stride;
+        let src_base = match gl_src {
+            Some(va) => va,
+            None => weave_va + (slot as u64) * slot_stride,
+        };
+        // Orientation: a GL source needs NO flip. The guest-visible
+        // transfer contract is gallium top-down -- osmesa_read_buffer's
+        // y_up=FALSE arm copies STRAIGHT and is the shipping llvmpipe
+        // path, and the same frontend readback works unchanged on virgl
+        // (virglrenderer compensates host-side), so row 0 of the BO
+        // backing is the scene TOP exactly like a weave row 0.
         let (sh_full, patchwork) = match self.surf(n) {
             Some(s) => (s.h, s.patchwork),
             None => return None,
@@ -1883,7 +1936,29 @@ impl Comp {
             if self.scanout == Scanout::Direct(n) {
                 let (dw, dh) = (self.gpu.width, self.gpu.height);
                 let _ = self.gpu.set_scanout(0, dw, dh);
+                self.bound_res = 0;
                 self.scanout = Scanout::Off;
+            }
+            // Warp-4: a GL-adopted scanout can survive the arms above --
+            // the soft-Off retarget window leaves the DEVICE bound to the
+            // adopted BO while `scanout` already reads Off. If the device
+            // still shows a BO consented to THIS surface incarnation,
+            // unbind: the display must not outlive the surface it was
+            // granted to. (The BO itself is the ctx's to free; only the
+            // binding is ours.)
+            let gl_bound = self.bound_res != 0
+                && self.warp_ctxs.iter().flatten().any(|c| match c.present_to {
+                    Some((sl, g, bp)) if sl == n && g == s.gen => c
+                        .bos
+                        .iter()
+                        .flatten()
+                        .any(|b| b.pub_id == bp && b.res_id == self.bound_res),
+                    _ => false,
+                });
+            if gl_bound {
+                let (dw, dh) = (self.gpu.width, self.gpu.height);
+                let _ = self.gpu.set_scanout(0, dw, dh);
+                self.bound_res = 0;
             }
             // (4) The GPU resource dies before its backing.
             let _ = self.gpu.detach_backing(s.resource_id);
@@ -2560,6 +2635,83 @@ impl Comp {
             .map(|c| c.pub_id)
     }
 
+    /// Warp-4: the ACTIVE GL adoption for surface `n`, or None. Active =
+    /// the surface names a live ctx (`glsrc`), that ctx's consent names
+    /// this surface INCARNATION back (slot + gen), the consented BO is
+    /// alive on the ctx, and its geometry equals the surface's. Ownership
+    /// needs no check here: each half was written through its owner-gated
+    /// ctl, and pub-id resolution + the gen pin make a stale half inert.
+    /// Resolved fresh at every use -- either side's death simply makes
+    /// this return None (the routing then falls back to the 2D arms).
+    fn gl_adoption(&self, n: usize) -> Option<GlAdopt> {
+        let s = self.surfaces.get(n)?.as_ref()?;
+        let want_ctx = s.gl_src?;
+        let c = self
+            .warp_ctxs
+            .iter()
+            .flatten()
+            .find(|c| c.pub_id == want_ctx && !c.retiring)?;
+        let (slot, gen, bo_pub) = c.present_to?;
+        if slot != n || gen != s.gen {
+            return None;
+        }
+        let b = c
+            .bos
+            .iter()
+            .flatten()
+            .find(|b| b.pub_id == bo_pub && !b.retiring && b.dma_fd >= 0)?;
+        if b.w != s.w || b.h != s.h {
+            return None;
+        }
+        Some(GlAdopt {
+            dev_ctx: c.dev_ctx,
+            res_id: b.res_id,
+            va: b.va,
+            w: b.w,
+            h: b.h,
+        })
+    }
+
+    /// Warp-4: an adoption half changed for surface `n` (glsrc write,
+    /// present-to write, or either half's clean clear). If `n` is
+    /// currently direct-scanned, route the source SWITCH through the
+    /// uniform F16 pending rule (the resize-ack precedent): soft-Off --
+    /// no device call, the old pixels persist -- and the next
+    /// present-COMPLETE binds whatever source resolves then. The weave is
+    /// marked stale in the DEACTIVATION direction by the callers that
+    /// know it (GL frames never landed in it).
+    fn gl_retarget(&mut self, n: usize) {
+        if self.scanout == Scanout::Direct(n) {
+            self.scanout = Scanout::Off;
+            self.pending_direct = Some(n);
+        }
+    }
+
+    /// Warp-4: a BO is dying (its own destroy, or its whole ctx's
+    /// retire). If the DEVICE currently scans it out, rebind away FIRST
+    /// -- an unref of the scanned-out resource is the one order the
+    /// display cannot survive -- then re-arm the owning surface's own
+    /// switch through reconcile (its next present restores the display
+    /// from the weave, stale but bounded).
+    fn gl_evict_res(&mut self, res_id: u32) {
+        if res_id == 0 || self.bound_res != res_id {
+            return;
+        }
+        let (dw, dh) = (self.gpu.width, self.gpu.height);
+        let _ = self.gpu.set_scanout(0, dw, dh);
+        self.bound_res = 0;
+        if let Scanout::Direct(n) = self.scanout {
+            self.scanout = Scanout::Off;
+            self.pending_direct = Some(n);
+            if let Some(s) = self.surf_mut(n) {
+                s.res_stale = true;
+            }
+        } else {
+            self.scanout = Scanout::Off;
+        }
+        self.reconcile();
+    }
+
     /// Mint a context for `conn` (one per client -- the I-45 exposure
     /// bound): allocate the slot, CTX_CREATE on the device (virgl-gated by
     /// the caller), roll the slot back if the device refuses.
@@ -2602,6 +2754,7 @@ impl Comp {
             leaked_bytes: 0,
             leaked_count: 0,
             retiring: false,
+            present_to: None,
             bos: [WARP_NO_BO; MAX_WARP_BOS_PER_CTX],
         });
         Some(pub_id)
@@ -3017,6 +3170,37 @@ impl Comp {
             let pub_id = c.pub_id;
             self.gpu.test_hold_ctx_died(pub_id);
         }
+        // Warp-4: the display must never keep scanning a resource this
+        // retire will free (or leak-park) -- an unref of the scanned-out
+        // resource is the one order the display cannot survive. Withdraw
+        // the consent (the partner surface's next present re-routes
+        // through its own 2D path, weave stale but bounded), then evict
+        // any of this ctx's BOs from the device binding. Runs at THIS
+        // chokepoint for the same reason the hold release does: every ctx
+        // death passes through here, and the deferred finish only frees
+        // what was already evicted now.
+        let (evict_res, consent_sl) = self.warp_ctxs[slot].as_ref().map_or((None, None), |c| {
+            (
+                c.bos
+                    .iter()
+                    .flatten()
+                    .map(|b| b.res_id)
+                    .find(|&r| r != 0 && r == self.bound_res),
+                c.present_to.map(|(sl, _, _)| sl),
+            )
+        });
+        if let Some(c) = self.warp_ctxs[slot].as_mut() {
+            c.present_to = None;
+        }
+        if let Some(sl) = consent_sl {
+            if let Some(s) = self.surf_mut(sl) {
+                s.res_stale = true;
+            }
+            self.gl_retarget(sl);
+        }
+        if let Some(r) = evict_res {
+            self.gl_evict_res(r);
+        }
         let (quiesced, poisoned) = match &self.warp_ctxs[slot] {
             Some(c) => (c.fences_in_flight == 0, c.fence_poisoned),
             None => return,
@@ -3086,6 +3270,35 @@ impl Comp {
             Some(s) => s,
             None => return false,
         };
+        // Warp-4: same eviction contract as wctx_retire, scoped to one BO
+        // -- both arms below make it unresolvable NOW (the deferred one
+        // frees it later from the pump), so the display drops it now too.
+        let (evict_res, consent_sl) = self.warp_ctxs[slot].as_ref().map_or((None, None), |c| {
+            (
+                c.bos
+                    .iter()
+                    .flatten()
+                    .find(|b| b.pub_id == bo_pub)
+                    .map(|b| b.res_id)
+                    .filter(|&r| r != 0 && r == self.bound_res),
+                match c.present_to {
+                    Some((sl, _, bp)) if bp == bo_pub => Some(sl),
+                    _ => None,
+                },
+            )
+        });
+        if let Some(sl) = consent_sl {
+            if let Some(c) = self.warp_ctxs[slot].as_mut() {
+                c.present_to = None;
+            }
+            if let Some(s) = self.surf_mut(sl) {
+                s.res_stale = true;
+            }
+            self.gl_retarget(sl);
+        }
+        if let Some(r) = evict_res {
+            self.gl_evict_res(r);
+        }
         let dev_ctx = self.warp_ctxs[slot].as_ref().unwrap().dev_ctx;
         for j in 0..MAX_WARP_BOS_PER_CTX {
             let matches = self.warp_ctxs[slot].as_ref().unwrap().bos[j]
@@ -4551,6 +4764,53 @@ impl Conn {
                 comp.wctx_retire(slot);
                 Ok(())
             }
+            Some("present-to") => {
+                // Warp-4, the adoption's CTX half: consent to displaying
+                // this ctx's BO <bo_pub> on surface <n>. The gen of the
+                // surface incarnation is captured HERE, so a later tenant
+                // of the same slot can never inherit the consent. Pure
+                // naming -- geometry (and both sides' liveness) gate
+                // ACTIVITY per-use in `gl_adoption`, never this write, so
+                // a resize racing the handshake degrades to inactive
+                // instead of failing the verb.
+                let a1 = it.next().ok_or(p9::E_INVAL)?;
+                if a1 == "off" {
+                    let c = comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                    let old = c.present_to.take();
+                    if let Some((sl, _, _)) = old {
+                        if let Some(s) = comp.surf_mut(sl) {
+                            s.res_stale = true;
+                        }
+                        comp.gl_retarget(sl);
+                    }
+                    return Ok(());
+                }
+                let sn: usize = a1.parse().map_err(|_| p9::E_INVAL)?;
+                let bo: u32 = it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)?;
+                if it.next().is_some() {
+                    return Err(p9::E_INVAL);
+                }
+                {
+                    let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                    if !c
+                        .bos
+                        .iter()
+                        .flatten()
+                        .any(|b| b.pub_id == bo && !b.retiring && b.dma_fd >= 0)
+                    {
+                        return Err(p9::E_NOENT);
+                    }
+                }
+                let gen = match comp.surf(sn) {
+                    Some(s) => s.gen,
+                    None => return Err(p9::E_NOENT),
+                };
+                if let Some(c) = comp.wctx_mut(id, self.conn_id) {
+                    c.present_to = Some((sn, gen, bo));
+                }
+                comp.gl_retarget(sn);
+                Ok(())
+            }
             _ => Err(p9::E_INVAL),
         }
     }
@@ -4842,6 +5102,42 @@ impl Conn {
             }
             return comp.resize_ack(n, w, h, serial);
         }
+        if let Some(rest) = s.strip_prefix("glsrc ") {
+            // Warp-4, the adoption's SURFACE half: accept warp ctx
+            // <pub_id> as this surface's display source. Naming a ctx
+            // grants NOTHING by itself -- display activates only when
+            // that ctx's own `present-to` names this surface incarnation
+            // back (mutual adoption), so no ownership check is needed
+            // here: a surface naming a stranger's ctx just never
+            // activates. The ctx must exist NOW (a mis-sequenced
+            // handshake fails loud, the #178 precedent); liveness is
+            // re-checked at every use.
+            let rest = rest.trim();
+            if rest == "off" {
+                if let Some(surf) = comp.surf_mut(n) {
+                    surf.gl_src = None;
+                    // The weave never saw the GL frames; the 2D machinery
+                    // heals from stale on its next switch.
+                    surf.res_stale = true;
+                }
+                comp.gl_retarget(n);
+                return Ok(());
+            }
+            let v: u32 = rest.parse().map_err(|_| p9::E_INVAL)?;
+            if !comp
+                .warp_ctxs
+                .iter()
+                .flatten()
+                .any(|c| c.pub_id == v && !c.retiring)
+            {
+                return Err(p9::E_NOENT);
+            }
+            if let Some(surf) = comp.surf_mut(n) {
+                surf.gl_src = Some(v);
+            }
+            comp.gl_retarget(n);
+            return Ok(());
+        }
         Err(p9::E_INVAL)
     }
 
@@ -4951,39 +5247,114 @@ impl Conn {
                 // switch IS composition); present unheld once first.
                 return Err(E_AGAIN);
             }
-            // The deferred direct switch (F16: SET_SCANOUT only at a
-            // present-COMPLETE). A stale client resource (composed-era
-            // presents never transferred to it) expands this transfer to
-            // the full surface first.
-            let stale = comp.surf(n).map_or(false, |s| s.res_stale);
-            let xfer: Vec<(u32, u32, u32, u32)> =
-                if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
-            for &(tx, ty, tw, th) in &xfer {
-                let offset =
-                    (slot as u64) * slot_stride + ((ty as u64) * (w as u64) + tx as u64) * 4;
-                if comp.gpu.transfer(res, offset, tx, ty, tw, th).is_err() {
-                    return Err(E_IO);
+            // Warp-4: an ACTIVE GL adoption switches to the client's own
+            // 3D resource -- the frame is already host-side, so there is
+            // no guest transfer at all; bind then flush (#57: a flush
+            // before the bind is dropped by spec). The WEAVE stays stale
+            // by construction (GL frames never land in it), so res_stale
+            // is forced TRUE -- the 2D machinery heals from it whenever
+            // the adoption later ends.
+            if let Some(g) = comp.gl_adoption(n) {
+                say!("tapestryd: scanout direct {} GL res {} ({}x{})", n, g.res_id, w, h);
+                if comp.gpu.set_scanout(g.res_id, w, h).is_ok() {
+                    comp.bound_res = g.res_id;
+                    let _ = comp.gpu.flush(g.res_id, 0, 0, w, h);
+                    comp.scanout = Scanout::Direct(n);
+                    comp.pending_direct = None;
                 }
-                if comp.gpu.flush(res, tx, ty, tw, th).is_err() {
-                    return Err(E_IO);
-                }
-            }
-            say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
-            if comp.gpu.set_scanout(res, w, h).is_ok() {
-                // Post-bind full flush (#57): the per-rect flushes above
-                // targeted a not-yet-scanned-out resource (dropped by
-                // spec), and cocoa's same-size surface replace renders
-                // nothing -- without this the display keeps the stale
-                // composed frame until later client damage covers it
-                // (the lingering-dead-pane symptom).
-                let _ = comp.gpu.flush(res, 0, 0, w, h);
-                comp.scanout = Scanout::Direct(n);
-                comp.pending_direct = None;
                 if let Some(s) = comp.surf_mut(n) {
-                    s.res_stale = false;
+                    s.res_stale = true;
+                }
+            } else {
+                // The deferred direct switch (F16: SET_SCANOUT only at a
+                // present-COMPLETE). A stale client resource (composed-era
+                // presents never transferred to it) expands this transfer
+                // to the full surface first.
+                let stale = comp.surf(n).map_or(false, |s| s.res_stale);
+                let xfer: Vec<(u32, u32, u32, u32)> =
+                    if stale { alloc::vec![(0, 0, w, h)] } else { rects.clone() };
+                for &(tx, ty, tw, th) in &xfer {
+                    let offset = (slot as u64) * slot_stride
+                        + ((ty as u64) * (w as u64) + tx as u64) * 4;
+                    if comp.gpu.transfer(res, offset, tx, ty, tw, th).is_err() {
+                        return Err(E_IO);
+                    }
+                    if comp.gpu.flush(res, tx, ty, tw, th).is_err() {
+                        return Err(E_IO);
+                    }
+                }
+                say!("tapestryd: scanout direct {} ({}x{})", n, w, h);
+                if comp.gpu.set_scanout(res, w, h).is_ok() {
+                    // Post-bind full flush (#57): the per-rect flushes
+                    // above targeted a not-yet-scanned-out resource
+                    // (dropped by spec), and cocoa's same-size surface
+                    // replace renders nothing -- without this the display
+                    // keeps the stale composed frame until later client
+                    // damage covers it (the lingering-dead-pane symptom).
+                    let _ = comp.gpu.flush(res, 0, 0, w, h);
+                    comp.bound_res = res;
+                    comp.scanout = Scanout::Direct(n);
+                    comp.pending_direct = None;
+                    if let Some(s) = comp.surf_mut(n) {
+                        s.res_stale = false;
+                    }
                 }
             }
         } else if comp.scanout == Scanout::Direct(n) {
+            if let Some(g) = comp.gl_adoption(n) {
+                // Warp-4 steady-state GL direct: the render already
+                // happened host-side (the client's SUBMIT_3D was queued
+                // before this present arrived -- same controlq, FIFO), so
+                // a present is ONLY the display flush. Damage rects are
+                // ignored: GL frames are whole-frame by nature (the SDL
+                // swap presents full damage), and a partial flush of a 3D
+                // scanout buys nothing. HOLD is refused: its contract is
+                // a DEFERRED device-visible flush, and the GL arms have
+                // no deferral -- silently flushing now would make the
+                // determinism battery's hold legs lie.
+                if hold {
+                    return Err(p9::E_OPNOTSUPP);
+                }
+                if comp.bound_res != g.res_id {
+                    // Defensive (mode-machine-unreachable: every adoption
+                    // change routes through the pending switch): rebind
+                    // rather than flush a non-scanned-out resource, which
+                    // the spec drops silently.
+                    say!("tapestryd: GL direct rebind {} -> {}", comp.bound_res, g.res_id);
+                    if comp.gpu.set_scanout(g.res_id, w, h).is_err() {
+                        return Err(E_IO);
+                    }
+                    comp.bound_res = g.res_id;
+                }
+                if comp.gpu.flush(g.res_id, 0, 0, w, h).is_err() {
+                    return Err(E_IO);
+                }
+                if let Some(s) = comp.surf_mut(n) {
+                    s.res_stale = true;
+                }
+                if !hold {
+                    comp.release_held(n);
+                }
+                // The completion tail, mirrored from the end of this
+                // function (presents count + Woven->Live + the displaced-
+                // generation retire) -- keep in lockstep with it. The
+                // retire is correct here for the same reason as there:
+                // the display shows CURRENT content (the adopted BO), so
+                // no scanout references the displaced weave's resource.
+                {
+                    let s = comp.surf_mut(n).unwrap();
+                    s.presents += 1;
+                    if s.state == SurfState::Woven {
+                        s.state = SurfState::Live;
+                    }
+                }
+                if let Some((oldw, old_res)) =
+                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
+                {
+                    comp.release_gen(&oldw, old_res);
+                }
+                return Ok(());
+            }
             // The stage-0 direct path, byte-identical for the single-rect
             // form: damage transfer + flush on the client's own
             // scanned-out resource (the zero-copy fullscreen case). A
@@ -5019,6 +5390,48 @@ impl Conn {
                 comp.release_held(n);
             }
         } else if comp.scanout == Scanout::Composed {
+            // Warp-4 composed GL (the ladder's readback fallback): pull
+            // the adopted frame host->guest into the BO's own backing --
+            // synchronously, so the present stays one dispatch (the I-40
+            // premise) -- then compose those pages like any weave.
+            // Full-frame always: GL damage is whole-frame by nature, and
+            // the transfer cost dwarfs any rect bookkeeping.
+            if let Some(g) = comp.gl_adoption(n) {
+                if hold {
+                    return Err(p9::E_OPNOTSUPP); // no GL deferral (see the direct arm)
+                }
+                if comp
+                    .gpu
+                    .transfer_from_3d_sync(g.dev_ctx, g.res_id, g.w, g.h, g.w * 4)
+                    .is_ok()
+                {
+                    if let Some(r) =
+                        comp.blit_composed_pixels(n, 0, 0, 0, w, h, Some(g.va))
+                    {
+                        comp.screen_push(r);
+                    }
+                }
+                if let Some(s) = comp.surf_mut(n) {
+                    s.res_stale = true;
+                }
+                if !hold {
+                    comp.release_held(n);
+                }
+                // The completion tail, mirrored (see the GL direct arm).
+                {
+                    let s = comp.surf_mut(n).unwrap();
+                    s.presents += 1;
+                    if s.state == SurfState::Woven {
+                        s.state = SurfState::Live;
+                    }
+                }
+                if let Some((oldw, old_res)) =
+                    comp.surf_mut(n).and_then(|s| s.old_weave.take())
+                {
+                    comp.release_gen(&oldw, old_res);
+                }
+                return Ok(());
+            }
             // Composed: blit the damage into the screen buffer at the
             // pane's content rect (a hidden/unhosted surface skips); the
             // client resource is now stale for a future direct switch.
@@ -5026,7 +5439,7 @@ impl Conn {
             // dispatch) and defer only the screen push.
             let mut acc: Option<Rect> = None;
             for &(x, y, pw, ph) in &rects {
-                if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph) {
+                if let Some(r) = comp.blit_composed_pixels(n, slot, x, y, pw, ph, None) {
                     if hold {
                         acc = Some(rect_union(acc.unwrap_or(Rect::ZERO), r));
                     } else {

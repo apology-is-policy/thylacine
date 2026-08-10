@@ -230,6 +230,20 @@ int thyla_tap_read_events(ThylaTap *t, ThylaEvent *evs, int max)
     return count;
 }
 
+int thyla_tap_glsrc(ThylaTap *t, uint32_t ctx_pub)
+{
+    if (t->ctl < 0)
+        return -1;
+    if (ctx_pub == 0)
+        return t_write(t->ctl, "glsrc off", 9) < 0 ? -1 : 0;
+    char cmd[24];
+    char *p = cmd;
+    memcpy(p, "glsrc ", 6);
+    p += 6;
+    p = tap_fmt_u32(p, ctx_pub);
+    return t_write(t->ctl, cmd, (size_t)(p - cmd)) < 0 ? -1 : 0;
+}
+
 int thyla_tap_reweave(ThylaTap *t, uint32_t w, uint32_t h, uint16_t serial)
 {
     /* resize W H <serial>: the Rwrite is the server's generation fence. */

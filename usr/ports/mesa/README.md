@@ -33,14 +33,13 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`d302f50eb931bef25c8deab034093292adcc39ae` at 0006; the 0005 tip was
+(`cd00196c85cea3d92fe87351563b2c60d14d76cd` at 0007; 0006 was
+`d302f50eb931bef25c8deab034093292adcc39ae`, 0005 was
 `414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
-(The builder's fork sits one amend behind the durable 0006 — the pre-amend
-commit plus the three Warp-3c fix files dirty on top, and without the #191
-disk-cache fallback. A reconcile there will refuse — that refusal is the
-guard — so the round-trip resets it to the 0005 tip and `git am`s the
-durable 0006, then verifies `d302f50e…`.)
+(The builder's fork matches the durable series exactly: the Warp-4 cycle
+reset it to the 0006 tip, `git am`'d the durable 0007, and verified
+`cd00196c…` live before building.)
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
 
@@ -346,10 +345,11 @@ Three things about that set are not guessable and cost a round each:
   monotonic per-ctx `fence-signaled`; submits split at CCMD boundaries
   under the 32 KiB msize. Meson gating keys on
   `with_thylacine = cc.get_define('__thylacine__')` because the cross
-  file deliberately claims `system = 'linux'`. Configure adds virgl:
+  file deliberately claims `system = 'linux'`. Configure adds virgl
+  (and, since Warp-4/#194, kills the driconf/expat pair):
 
   ```
-  -Dgallium-drivers=llvmpipe,virgl
+  -Dgallium-drivers=llvmpipe,virgl -Dxmlconfig=disabled -Dexpat=disabled
   ```
 
   (a meson reconfigure on the existing tree, not a fresh setup; with
@@ -363,8 +363,8 @@ Three things about that set are not guessable and cost a round each:
   CAP_JIT clearance (so a silent llvmpipe fallback cannot pass it) and
   asserts GL_RENDERER names virgl.
 
-  Four port findings from the first two builder cycles, all folded into
-  the patch, all of the builds-clean-when-wrong class:
+  Six port findings from the builder cycles, all folded into the patch
+  or the configure, all of the builds-clean-when-wrong class:
 
   - the osmesa target needed `inc_virtio` (`virgl_winsys.h` includes
     `virtio-gpu/virgl_hw.h`);
@@ -389,7 +389,25 @@ Three things about that set are not guessable and cost a round each:
     `disk_cache` NULL (the configuration `MESA_SHADER_CACHE_DISABLE`
     ships, NULL-handled by every consumer) rather than link-flagging
     `--build-id`, which would have *activated* the cache onto the 9P
-    home and its untested flock/mmap surface.
+    home and its untested flock/mmap surface;
+  - (#194, found by the FIRST guest-side relink after Warp-3, not the
+    builder) virgl pulled `util/xmlconfig` (driconf), and meson's
+    `expat` feature auto-resolved through the `subprojects/expat.wrap`
+    FALLBACK -- it silently built a cross libexpat.a, linked the
+    builder-side provers against it, and the #138 fetch set never
+    carried it. Every builder artifact was green; every GUEST hand-link
+    of the archive (`gl-sdl-prove`, the GLQuake relink) was broken with
+    undefined `XML_*`, and build caching hid it until the Warp-4 shim
+    edit forced the first relink. Configure now disables the pair
+    (driconf is dead weight on Thylacine -- no /etc/drirc, defaults
+    only): `-Dxmlconfig=disabled -Dexpat=disabled` (both: expat cannot
+    be disabled while xmlconfig is enabled). Verified in the artifact:
+    `nm -u libOSMesa.a | grep -c XML_` is 0;
+  - (Warp-4) `osmesa_target.c`'s present bridge includes
+    `virgl_screen.h`/`virgl_resource.h`, whose chain reaches NIR's
+    GENERATED headers (`glsl_types.h -> builtin_types.h`);
+    `driver_virgl` links the driver but does not propagate that include
+    path, so the target's meson gains `idep_nir_headers`.
 
 ## Refresh — per arc, not "when the fork stops changing"
 

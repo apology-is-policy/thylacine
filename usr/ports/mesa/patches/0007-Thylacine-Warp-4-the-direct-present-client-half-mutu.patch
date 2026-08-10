@@ -1,0 +1,365 @@
+From b7f9ed20c329bc51bbda4f9186da3f7d2a1671a1 Mon Sep 17 00:00:00 2001
+From: Michal Frdlik <michaelf.ms@gmail.com>
+Date: Mon, 10 Aug 2026 09:03:18 +0200
+Subject: [PATCH] Thylacine Warp-4: the direct-present client half (mutual
+ adoption)
+
+The compositor (tapestryd) can now display a GL client's color resource
+itself -- fullscreen as a SET_SCANOUT of the 3D resource, windowed as a
+server-side readback + compose -- once BOTH halves of a mutual adoption
+handshake land: the tapestry surface names the warp ctx ("glsrc <ctx>")
+and the warp ctx consents back naming surface + BO ("present-to
+<surface> <bo>"). This commit is the client half:
+
+- warp_client: warp_present_to / warp_present_off write the consent verb
+  on the ctx ctl (pure naming; geometry and liveness gate ACTIVITY
+  per-present server-side, so a resize racing the handshake degrades to
+  inactive instead of failing the verb).
+- winsys: virgl_thylacine_present_to(vws, hw_res, surface, *ctx_pub_out)
+  -- mutex-guarded like every vtable entry; res NULL = withdraw.
+- osmesa target: osmesa_thyla_present_bridge digs the driver-private
+  hw_res out of a pipe_resource, gated FIRST on the driver name (casting
+  a llvmpipe screen to virgl types is UB; a debug-wrapped screen fails
+  the gate and the caller keeps the readback path).
+- st/osmesa: OSMesaThylacineDirect(ctx, surface_id, *ctx_pub_out)
+  resolves the CURRENT front color buffer, places the consent, and
+  suppresses the flush_front snapshot while active (the server owns
+  display; the user buffer is dead weight). OSMesaThylacineDirectOff
+  withdraws + restores the readback. A single per-process owner: the
+  warp ctx is per-process (the shared screen), so a second GL context
+  negotiating steals the consent and the loser's readback resumes --
+  else its pane would freeze on the last suppressed frame. The bridge
+  rides a weak reference so software-only targets keep building; the
+  osmesa target's object is always extracted in real links (osmesa.o's
+  strong osmesa_create_screen reference), verified by nm at fetch.
+
+Re-negotiation is per-bind (the SDL side re-calls on every MakeCurrent /
+reweave rebind): the consent names one BO, and a resize reallocates the
+framebuffer into a new one.
+
+Alternative considered: a minted-token capability (Fuchsia
+BufferCollection-style). Rejected -- mutual naming through two already
+owner-gated ctls needs no RNG, no secret storage, and revokes naturally
+on either side's death (the server pins the surface incarnation by gen,
+so slot reuse cannot re-arm a stale consent).
+---
+ src/gallium/frontends/osmesa/osmesa.c         | 97 +++++++++++++++++++
+ src/gallium/targets/osmesa/meson.build        |  5 +
+ src/gallium/targets/osmesa/osmesa_target.c    | 47 +++++++++
+ .../virgl/thylacine/virgl_thylacine_public.h  | 15 +++
+ .../virgl/thylacine/virgl_thylacine_winsys.c  | 21 ++++
+ .../winsys/virgl/thylacine/warp_client.c      | 19 ++++
+ .../winsys/virgl/thylacine/warp_client.h      | 11 +++
+ 7 files changed, 215 insertions(+)
+
+diff --git a/src/gallium/frontends/osmesa/osmesa.c b/src/gallium/frontends/osmesa/osmesa.c
+index 6d61677..9c54ee8 100644
+--- a/src/gallium/frontends/osmesa/osmesa.c
++++ b/src/gallium/frontends/osmesa/osmesa.c
+@@ -125,6 +125,13 @@ struct osmesa_context
+    GLboolean y_up;        /*< TRUE  -> Y increases upward */
+                           /*< FALSE -> Y increases downward */
+ 
++   /* Thylacine Warp-4: direct present is negotiated -- the compositor
++    * displays the color resource itself (SET_SCANOUT / composed
++    * readback server-side), so flush_front's snapshot into the user
++    * buffer is pure waste and is skipped. Set/cleared ONLY by
++    * OSMesaThylacineDirect below. */
++   GLboolean thyla_direct;
++
+    /** Which postprocessing filters are enabled. */
+    unsigned pp_enabled[PP_FILTERS];
+    struct pp_queue_t *pp;
+@@ -361,6 +368,13 @@ osmesa_st_framebuffer_flush_front(struct st_context *st,
+    if (statt != ST_ATTACHMENT_FRONT_LEFT)
+       return false;
+ 
++   /* Thylacine Warp-4: under an active direct present the server owns
++    * display; the flush's SUBMISSION already happened in the pipe flush
++    * that brought us here, and the user buffer is dead weight. TRUE --
++    * the flush itself succeeded; there is just nothing to copy. */
++   if (osmesa->thyla_direct)
++      return true;
++
+    if (osmesa->pp) {
+       struct pipe_resource *zsbuf = NULL;
+       unsigned i;
+@@ -1005,6 +1019,89 @@ OSMesaColorClamp(GLboolean enable)
+ }
+ 
+ 
++/*
++ * Thylacine Warp-4: negotiate the direct present. Consents (through the
++ * winsys's own warp connection) to displaying the CURRENT front color
++ * resource on tapestry surface `surface_id`, returns the warp ctx public
++ * id -- the caller writes it into its surface's `glsrc` to complete the
++ * mutual adoption -- and suppresses the flush_front readback while
++ * active. Re-call after any rebind that can reallocate the framebuffer
++ * (a size change): the consent names one BO, and a new front buffer is a
++ * new BO. Returns 0; -1 leaves (or restores) the readback path -- on
++ * llvmpipe, on a pre-Warp-4 server, or on any refusal.
++ *
++ * The bridge symbol is defined by the osmesa TARGET when its virgl arm
++ * is linked; the weak reference is what lets this file keep building for
++ * software-only targets.
++ */
++extern int osmesa_thyla_present_bridge(struct pipe_screen *screen,
++                                       struct pipe_resource *res,
++                                       unsigned surface_id,
++                                       unsigned *ctx_pub_out)
++   __attribute__((weak));
++
++/* The single direct-present owner: the warp ctx is per-PROCESS (the
++ * global screen), so its one consent names one surface -- a second
++ * context negotiating steals it, and the loser must resume its readback
++ * or its pane freezes on the last suppressed frame. */
++static OSMesaContext thyla_direct_owner;
++
++GLAPI int GLAPIENTRY
++OSMesaThylacineDirect(OSMesaContext osmesa, unsigned surface_id,
++                      unsigned *ctx_pub_out);
++GLAPI void GLAPIENTRY
++OSMesaThylacineDirectOff(OSMesaContext osmesa);
++
++GLAPI int GLAPIENTRY
++OSMesaThylacineDirect(OSMesaContext osmesa, unsigned surface_id,
++                      unsigned *ctx_pub_out)
++{
++   struct pipe_resource *res;
++   int rc;
++
++   if (!osmesa || !osmesa->current_buffer || !osmesa_thyla_present_bridge)
++      return -1;
++   res = osmesa->current_buffer->textures[ST_ATTACHMENT_FRONT_LEFT];
++   if (!res)
++      return -1;
++   rc = osmesa_thyla_present_bridge(res->screen, res, surface_id,
++                                    ctx_pub_out);
++   if (rc == 0) {
++      if (thyla_direct_owner && thyla_direct_owner != osmesa)
++         thyla_direct_owner->thyla_direct = GL_FALSE;
++      thyla_direct_owner = osmesa;
++      osmesa->thyla_direct = GL_TRUE;
++   } else {
++      osmesa->thyla_direct = GL_FALSE;
++      if (thyla_direct_owner == osmesa)
++         thyla_direct_owner = NULL;
++   }
++   return rc;
++}
++
++GLAPI void GLAPIENTRY
++OSMesaThylacineDirectOff(OSMesaContext osmesa)
++{
++   struct pipe_resource *res;
++
++   if (!osmesa)
++      return;
++   osmesa->thyla_direct = GL_FALSE;
++   if (thyla_direct_owner != osmesa)
++      return;
++   thyla_direct_owner = NULL;
++   /* Withdraw the standing consent so the server retargets the partner
++    * surface (res NULL = the bridge's off-arm; screen still needed for
++    * the driver gate). Best-effort -- a dead framebuffer just leaves the
++    * consent to die with the ctx/surface liveness checks server-side. */
++   if (osmesa_thyla_present_bridge && osmesa->current_buffer) {
++      res = osmesa->current_buffer->textures[ST_ATTACHMENT_FRONT_LEFT];
++      if (res)
++         (void)osmesa_thyla_present_bridge(res->screen, NULL, 0, NULL);
++   }
++}
++
++
+ GLAPI void GLAPIENTRY
+ OSMesaPostprocess(OSMesaContext osmesa, const char *filter,
+                   unsigned enable_value)
+diff --git a/src/gallium/targets/osmesa/meson.build b/src/gallium/targets/osmesa/meson.build
+index 4ebd944..7ff14b5 100644
+--- a/src/gallium/targets/osmesa/meson.build
++++ b/src/gallium/targets/osmesa/meson.build
+@@ -68,6 +68,11 @@ libosmesa = static_library(
+   dependencies : [
+     dep_thread, dep_clock, dep_unwind, driver_swrast, driver_virgl,
+     idep_mesautil,
++    # Warp-4: osmesa_target.c's present bridge includes virgl_screen.h /
++    # virgl_resource.h, whose chain reaches NIR's GENERATED headers
++    # (glsl_types.h -> builtin_types.h). driver_virgl links the driver
++    # but does not propagate that include; the headers idep does.
++    idep_nir_headers,
+   ],
+   install : true,
+ )
+diff --git a/src/gallium/targets/osmesa/osmesa_target.c b/src/gallium/targets/osmesa/osmesa_target.c
+index 8967953..b19a387 100644
+--- a/src/gallium/targets/osmesa/osmesa_target.c
++++ b/src/gallium/targets/osmesa/osmesa_target.c
+@@ -34,6 +34,12 @@
+ #include "virgl/virgl_public.h"
+ #include "virgl/virgl_winsys.h"
+ #include "virgl/thylacine/virgl_thylacine_public.h"
++/* Warp-4: the present bridge digs the driver-private hw_res out of a
++ * pipe_resource, so it needs the virgl driver's internal headers -- which
++ * only this target TU (already the place that knows both worlds: it
++ * creates the virgl screen above) is entitled to include. */
++#include "virgl/virgl_screen.h"
++#include "virgl/virgl_resource.h"
+ #endif
+ 
+ 
+@@ -92,3 +98,44 @@ osmesa_create_screen(void)
+    /* Inject optional trace, debug, etc. wrappers */
+    return debug_screen_wrap(screen);
+ }
++
++/*
++ * Warp-4: the direct-present bridge osmesa.c calls through a weak
++ * reference (declared there, defined only where the virgl arm links).
++ * Gate FIRST on the driver name -- the frontend hands us whatever screen
++ * it is running on, and casting a llvmpipe screen to virgl types is UB.
++ * debug_screen_wrap only interposes when a debug option asks, which the
++ * production path never does; a wrapped screen simply fails the name
++ * gate and the caller keeps the readback path.
++ */
++struct pipe_screen;
++struct pipe_resource;
++
++int
++osmesa_thyla_present_bridge(struct pipe_screen *screen,
++                            struct pipe_resource *res,
++                            unsigned surface_id,
++                            unsigned *ctx_pub_out);
++
++int
++osmesa_thyla_present_bridge(struct pipe_screen *screen,
++                            struct pipe_resource *res,
++                            unsigned surface_id,
++                            unsigned *ctx_pub_out)
++{
++#ifdef GALLIUM_VIRGL
++   const char *name;
++   if (!screen)
++      return -1;
++   name = screen->get_name(screen);
++   if (!name || strncmp(name, "virgl", 5) != 0)
++      return -1;
++   /* res NULL = withdraw the consent (the off-arm). */
++   return virgl_thylacine_present_to(virgl_screen(screen)->vws,
++                                     res ? virgl_resource(res)->hw_res : NULL,
++                                     surface_id, ctx_pub_out);
++#else
++   (void)screen; (void)res; (void)surface_id; (void)ctx_pub_out;
++   return -1;
++#endif
++}
+diff --git a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
+index 315e844..1b7b5f7 100644
+--- a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
++++ b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_public.h
+@@ -9,7 +9,22 @@
+ #define VIRGL_THYLACINE_PUBLIC_H
+ 
+ struct virgl_winsys;
++struct virgl_hw_res;
+ 
+ struct virgl_winsys *virgl_thylacine_winsys_create(void);
+ 
++/*
++ * Warp-4: the GL adoption's client half. Writes this connection's ctx
++ * consent to display `res` on tapestry surface `surface_id` (the seam's
++ * mutual handshake -- the surface's own `glsrc` must name the ctx back)
++ * and returns the ctx public id through *ctx_pub_out for exactly that
++ * purpose. `res` is the driver's opaque handle (virgl_resource()->hw_res)
++ * and MUST belong to this winsys. Returns 0, or -1 (wedged / refused --
++ * the caller keeps the readback path).
++ */
++int virgl_thylacine_present_to(struct virgl_winsys *vws,
++                               struct virgl_hw_res *res,
++                               unsigned surface_id,
++                               unsigned *ctx_pub_out);
++
+ #endif
+diff --git a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
+index 0f41da8..ff78e2f 100644
+--- a/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
++++ b/src/gallium/winsys/virgl/thylacine/virgl_thylacine_winsys.c
+@@ -629,3 +629,24 @@ struct virgl_winsys *virgl_thylacine_winsys_create(void)
+ 
+    return &tws->base;
+ }
++
++int virgl_thylacine_present_to(struct virgl_winsys *vws,
++                               struct virgl_hw_res *res,
++                               unsigned surface_id,
++                               unsigned *ctx_pub_out)
++{
++   struct virgl_thylacine_winsys *tws = virgl_thylacine_winsys(vws);
++   int rc;
++   mtx_lock(&tws->mutex);
++   if (!res) {
++      /* Withdraw (the off-arm): the server retargets the partner
++       * surface's scanout through its uniform pending rule. */
++      rc = warp_present_off(&tws->conn);
++   } else {
++      rc = warp_present_to(&tws->conn, surface_id, res->bo_pub);
++      if (rc == 0 && ctx_pub_out)
++         *ctx_pub_out = tws->conn.ctx;
++   }
++   mtx_unlock(&tws->mutex);
++   return rc;
++}
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.c b/src/gallium/winsys/virgl/thylacine/warp_client.c
+index 22e81b8..68eb76d 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.c
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.c
+@@ -124,6 +124,25 @@ int warp_fence_refresh(struct warp_conn *w)
+    return 0;
+ }
+ 
++int warp_present_to(struct warp_conn *w, uint32_t surface_id, uint32_t bo_pub)
++{
++   char path[64], verb[64];
++   if (w->wedged || w->ctx == 0)
++      return -1;
++   snprintf(path, sizeof(path), "ctx/%u/ctl", w->ctx);
++   snprintf(verb, sizeof(verb), "present-to %u %u", surface_id, bo_pub);
++   return write_verb(w->root, path, verb);
++}
++
++int warp_present_off(struct warp_conn *w)
++{
++   char path[64];
++   if (w->ctx == 0 || w->root < 0)
++      return -1;
++   snprintf(path, sizeof(path), "ctx/%u/ctl", w->ctx);
++   return write_verb(w->root, path, "present-to off");
++}
++
+ /* Block until at least one fence retires, then refresh the counter.
+  * ONLY sound with in-flight > 0 (else the read parks unfillably); every
+  * caller checks. EOF means the ctx was poisoned or torn down: latch. */
+diff --git a/src/gallium/winsys/virgl/thylacine/warp_client.h b/src/gallium/winsys/virgl/thylacine/warp_client.h
+index e72c482..90f8589 100644
+--- a/src/gallium/winsys/virgl/thylacine/warp_client.h
++++ b/src/gallium/winsys/virgl/thylacine/warp_client.h
+@@ -100,6 +100,17 @@ uint64_t warp_transfer(struct warp_conn *w, uint32_t bo, bool to_host,
+                        uint32_t offset, uint32_t stride,
+                        uint32_t layer_stride);
+ 
++/* Warp-4, the adoption's ctx half: consent to displaying `bo_pub` on
++ * tapestry surface `surface_id` ("present-to <surface> <bo>" on the ctx
++ * ctl). Pure naming -- the display activates only when the surface's own
++ * `glsrc` names this ctx back, and geometry gates activity per-present
++ * server-side -- so re-issue only when the FRONT buffer changes (a
++ * resize reallocation mints a new BO). Returns 0 / -1. */
++int warp_present_to(struct warp_conn *w, uint32_t surface_id, uint32_t bo_pub);
++
++/* Withdraw the consent ("present-to off"). Best-effort; 0 / -1. */
++int warp_present_off(struct warp_conn *w);
++
+ /* Refresh `signaled` from the ctl fd (one pread). Returns 0 / -1. */
+ int warp_fence_refresh(struct warp_conn *w);
+ 
+-- 
+2.43.0
+
