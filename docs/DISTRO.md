@@ -779,9 +779,34 @@ full fix must re-open #192.
 
 The ARC holotype (the L-7 precedent: a round scoped to the whole arc catches
 premises a later chunk voided that no chunk-scoped round can see) + the SMP
-gate + reference docs (`docs/reference/` per-surface) + the ARCH section
-25.4 rows for D-1 and D-3 (cumulative-trigger rule: rows land with their
-chunks).
+gate + reference docs (`docs/reference/` per-surface) + the audit-trigger
+rows.
+
+**CORRECTED at D-close (measured, 2026-08-10).** This line used to owe "the
+ARCH section 25.4 rows for D-1 and D-3", which named the wrong file: the
+trigger table moved out of `CLAUDE.md` into `docs/AUDIT-TRIGGERS.md` at
+`83f9e0a2`, hours before this arc's design commit, and `ARCHITECTURE.md`
+section 25.4 is the older expanded twin that has received **no new row since**
+(measured: exactly two commits touched `ARCHITECTURE.md` after the move, both
+this arc's, and both edited section 6.5 prose and the section 28 I-28 cell --
+neither added a 25.4 row). The obligation the parenthetical actually stated --
+*rows land with their chunks* -- was therefore discharged where the tree now
+keeps them: D-1's row at `1acae6fa`, D-2's, D-3's and D-4's with their own
+chunks, all in `docs/AUDIT-TRIGGERS.md`. Duplicating them into section 25.4
+would widen the two-table drift that task #152 exists to close, so D-close
+does not do it.
+
+What D-close DID owe on the docs, and paid: the D-3 row still carried
+"**DIRTY CLOSE** -> a follow-up re-audit round is owed on the fix" long after
+that round had run **twice** (Opus found F5 [P1]; Fable then closed clean with
+F7/F8 [P3]) and the chain had closed at `d4c49e5b`. Section 6 above recorded
+the closure; the row did not, so a future session grepping the trigger table
+before touching `kernel/burrow.c` or `kernel/vma.c` would have been told an
+audit was outstanding. Fixed at D-close. **The generalization is #123's:** a
+claim with a lifetime -- "owed", "deferred", "unreachable", "in flight" --
+outlives the condition that made it true, so when the condition changes, grep
+the CLAIM across every file that carries it rather than updating the one doc
+you happen to be editing.
 
 ---
 
