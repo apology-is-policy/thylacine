@@ -59,7 +59,15 @@ The symlink WIRE is fully built; only FOLLOWING is missing:
   each child, `readlink`s an `S_IFLNK`, and calls `stm_9p_symlink`, with an
   explicit refusal (`:810-816`) rather than a skip when it cannot. Its own
   comment names the reason — "Alpine's `/bin/sh` IS one". So D-5's
-  verify-then-extend reduces to VERIFY; the extend half is already built.
+  verify-then-extend reduced to VERIFY; the extend half was already built.
+  **Both halves of the verify are now DONE (D-5, 2026-08-10).** In the POOL:
+  `stratumd` on a clone of the baked `pool.img` shows `put` preserved every
+  class — `/bin/sh -> /bin/busybox` absolute, `/etc/os-release ->
+  ../usr/lib/os-release` relative, `/lib/libc.musl-aarch64.so.1` relative
+  same-dir — with real files still real. In the GUEST: the ARC gate resolves an
+  absolute pool symlink for exec (legs A and C) and a relative one for read
+  (leg D). This closes the item; `stalk`'s symlink battery is no longer
+  ramfs-only.
 - `kernel/stalk.c`, `spoor.h`: zero symlink handling. No native
   SYS_READLINK/SYS_SYMLINK numbers exist.
 
@@ -785,7 +793,7 @@ chunks).
 | D-2 | ET_DYN load + AT_ENTRY (**AS-BUILT**) | stock-ldso usage line, boot-fatal + revert-probed (static-PIE hello = seam, #188) | audit-noted |
 | D-3 | file-backed EL0 mmap + MAP_FIXED subset (a: **AS-BUILT**; b, c owed) | runner-spawned `ld-musl /usr/bin/getconf PAGESIZE` (#189: `/bin/echo` is STATIC) | FOCUSED ROUND (I-36/I-12/I-32) |
 | D-4 | PT_INTERP -> ldso rewrite (**AS-BUILT**) | `D4-A-byname-getconf-4096` + `D4-B-argv0-is-the-program`, boot-fatal; 3-way discriminated (S1 rewrite-off reddens the gate + the suite is blind; S2 argv0:=path is gate-green + reddens the unit test) | audit-noted (exec row) |
-| D-5 | stock rootfs pipeline (put-symlinks: **already built**, verified 2026-08-10) | THE ARC GATE: `/bin/sh -c` boot-fatal | build-infra |
+| D-5 | stock rootfs pipeline (**AS-BUILT**): `/vivarium/alpine-stock` staged UNMODIFIED from the sha256-pinned tarball, alongside (not replacing) the L-6c bundle; put-symlinks verified in the pool 2026-08-10 | THE ARC GATE, boot-fatal + PASSING: `DISTRO-A-stock-sh` / `B-stock-exec` / `C-applet-by-symlink` / `D-relative-symlink` / `E-pinned-image` / `DONE`; discriminated 3 ways on the host (C alone / D+E / E alone) | build-infra |
 | D-close | arc holotype + SMP gate + docs | clean close | ARC ROUND |
 
 Order: D-1 first (independent; everything else walks through it). D-2 ->
