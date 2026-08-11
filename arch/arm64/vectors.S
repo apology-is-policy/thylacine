@@ -61,12 +61,18 @@
 // mode), so its `msr sp_el0` always writes the non-current bank — the
 // architecturally well-defined form.
 //
-// Trip hazard (deferred): a kernel-stack overflow into the guard page
-// now faults recursively (KERNEL_ENTRY builds the frame on the same
-// overflowing stack) rather than landing on a separate stack. A
-// dedicated overflow / SError stack — entered via an SP_EL0-based
-// check in the 0x200 vector — is a future hardening item; g_exception_
-// stacks is retained as the reserved buffer for it.
+// Trip hazard (partially closed at #214): a kernel-stack overflow into
+// the guard page still faults recursively (KERNEL_ENTRY builds the frame
+// on the same overflowing stack), but the C-side depth guard in
+// exception.c (exception_sync_curr_el) now parks a CPU whose EL1h-sync
+// chain re-enters — stopping the descent that scribbled exception frames
+// across RAM through the directmap on the Pi 400 (#214 autopsy). The
+// guard catches every DESTRUCTIVE case (a mapped SP whose frame stores
+// land); an unmapped-SP spiral still recurses store-free below the C
+// layer — harmless to memory, but that CPU spins. The full asm-side
+// fix — an SP-validity check in this 0x200 slot switching to a dedicated
+// overflow / SError stack — remains the future hardening item;
+// g_exception_stacks is retained as the reserved buffer for it.
 
 #include "exception.h"
 

@@ -407,11 +407,14 @@ esac
 
 # -cpu model + GIC version default off the chosen accel. HVF wants -cpu host +
 # GICv2: its emulated GICv3 distributor MMIO trips an `isv` data-abort assert,
-# and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). TCG
-# wants -cpu max (full ISA incl. RNDR) + GICv3 (QEMU virt's modern default; the
-# kernel autodetects v2-vs-v3 from DTB). THYLACINE_CPU / THYLACINE_GIC override.
+# and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). KVM
+# (Linux hosts, e.g. thyla-pi) wants -cpu host + gic-version=host so the guest
+# GIC is the in-kernel one matching the silicon (GIC-400 = v2 on BCM2711 -- the
+# kernel autodetects v2-vs-v3 from DTB either way). TCG wants -cpu max (full
+# ISA incl. RNDR) + GICv3. THYLACINE_CPU / THYLACINE_GIC override.
 case "$accel" in
     hvf) cpu="${THYLACINE_CPU:-host}"; gicv="${THYLACINE_GIC:-2}" ;;
+    kvm) cpu="${THYLACINE_CPU:-host}"; gicv="${THYLACINE_GIC:-host}" ;;
     *)   cpu="${THYLACINE_CPU:-max}";  gicv="${THYLACINE_GIC:-3}" ;;
 esac
 echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2

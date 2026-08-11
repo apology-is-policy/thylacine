@@ -702,16 +702,29 @@ static void build_page_tables(u64 slide) {
 //      re-use the primary's tables (the kernel image is shared, the
 //      user-VA TTBR0 identity map covers the same low 4 GiB).
 //
-// SMP coherence: TTBR0 and TTBR1 point to tables in regular RAM that
-// the primary already clean+invalidated to PoC during build (write
-// back any dirty cache lines to PoC; secondaries re-read from PoC
-// when their MMU first walks the table). The primary's tlbi_vmalle1is
-// in mmu_enable below isn't needed on secondaries because their TLB
-// is empty post-PSCI bring-up. P2-Ca trip-hazard: secondaries must
-// clean their own dcache before reading the tables (handled by the
-// PoC clean done by build_page_tables which uses dc cvau + dsb ish;
-// the inner-shareable dsb makes the writeback visible to all CPUs).
+// SMP coherence: TTBR0 / TTBR1 point at tables the primary builds and
+// mutates through CACHEABLE mappings, with NO clean-to-PoC anywhere —
+// and that is sound for every walker, because TCR programs the walks
+// themselves cacheable + inner-shareable (IRGN/ORGN=WB, SH=Inner
+// above): a secondary's table walker participates in coherency and
+// observes the primary's dirty table lines directly. (#214: an earlier
+// revision of this comment claimed build_page_tables cleans the tables
+// "to PoC ... with dc cvau" — false twice over: no such clean exists,
+// and CVAU targets PoU, not PoC. Nothing was broken because the WBWA-IS
+// walker never needed it.) The genuinely non-coherent accesses on the
+// secondary bring-up path are its own MMU-off Device writes in the
+// trampoline — confined to the g_cpu_online / g_cpu_stage mailbox
+// lines, protocol in thylacine/smp.h.
+//
+// #214 leaf-ness constraint: this function runs on secondaries with the
+// MMU OFF and returns with it ON — a call frame would be PUSHED as a
+// non-coherent Device write and POPPED as a cacheable read of possibly
+// stale lines. It must remain a frameless register-only leaf: no calls
+// (asid_hw_bits below is a static-inline mrs — keep it that way), no
+// locals that spill. Verified by disassembly at #214; re-check if this
+// function grows.
 void mmu_program_this_cpu(void) {
+    u64 tcr = (u64)TCR_VALUE | (asid_hw_bits() == 16u ? TCR_AS_16BIT : 0ull);
     __asm__ __volatile__(
         "msr mair_el1, %0\n"
         "msr tcr_el1, %1\n"
@@ -726,19 +739,28 @@ void mmu_program_this_cpu(void) {
         // introduces NEW page tables (l1_directmap, l3_vmalloc) whose
         // surface a poisoned TLB could corrupt. tlbi vmalle1is +
         // dsb ish + isb removes the firmware-trust assumption.
+        //
+        // #214: ic iallu extends F120's no-firmware-trust to the I-side.
+        // Cold bring-up I-cache content is the same class of assumption
+        // on PSCI/KVM/EL3 as the TLB, and the v8.0 floor (A72 — no
+        // FEAT_DIC/IDC) makes a stale I-line a real hazard no emulated
+        // substrate (no cache model) could ever surface. The dsb ish +
+        // isb below complete both invalidates before SCTLR turns
+        // M|C|I on.
         "tlbi vmalle1is\n"
+        "ic iallu\n"
         "dsb ish\n"
         "isb\n"
         "mrs x9, sctlr_el1\n"
         "orr x9, x9, %4\n"
         "msr sctlr_el1, x9\n"
         "isb\n"
-        // RW-1 B-F1: TCR_EL1.AS = 1 (16-bit ASIDs) when the CPU reports
-        // ID_AA64MMFR0_EL1.ASIDBits == 0b0010, else 0 (8-bit). Each CPU reads
-        // its own register; ARM requires a uniform ASID width system-wide.
+        // RW-1 B-F1 (the tcr local above): TCR_EL1.AS = 1 (16-bit ASIDs)
+        // when the CPU reports ID_AA64MMFR0_EL1.ASIDBits == 0b0010, else
+        // 0 (8-bit). Each CPU reads its own register; ARM requires a
+        // uniform ASID width system-wide.
         :: "r" ((u64)MAIR_VALUE),
-           "r" ((u64)TCR_VALUE |
-                (asid_hw_bits() == 16u ? TCR_AS_16BIT : 0ull)),
+           "r" (tcr),
            "r" ((u64)(uintptr_t)l0_ttbr0),
            "r" ((u64)(uintptr_t)l0_ttbr1),
            "r" ((u64)(SCTLR_M | SCTLR_C | SCTLR_I))

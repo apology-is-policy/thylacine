@@ -24,10 +24,13 @@
 #include "halls.h"                    // HX-1: per-CPU live-frame tracking for the crash dump
 #include "hwdebug.h"                  // 8a-2a: the EL0 hardware-breakpoint verify (EC 0x30 swallow)
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
+#include "uart.h"                     // #214: raw banner in the recursion-guard runaway path
 
+#include <thylacine/cons.h>           // #214: cons_tx_flush_for_dump in the runaway path
 #include <thylacine/extinction.h>
 #include <thylacine/notes.h>          // P6 #3a: NOTE_NAME_SNARE_* constants for proc_fault_terminate
 #include <thylacine/proc.h>           // R12-uaccess: struct Proc for demand-page synth; P6 #3a: proc_fault_terminate
+#include <thylacine/smp.h>            // #214: smp_cpu_idx_self for the recursion guard
 #include <thylacine/syscall.h>        // P3-Ec: syscall_dispatch
 #include <thylacine/thread.h>         // R12-uaccess: current_thread()
 #include <thylacine/types.h>
@@ -99,10 +102,70 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx);
 __attribute__((noreturn))
 static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_idx);
 
+// #214: EL1h-sync recursion guard. A fault whose HANDLER faults descends
+// forever: every re-entry runs KERNEL_ENTRY on the same stack, and with a
+// mapped SP each iteration lands a 288-byte frame and keeps going — past
+// the kstack guard (SP arithmetic never faults; stores resume wherever SP
+// re-enters mapped territory), scribbling exception frames across physical
+// RAM through the directmap until the page tables themselves are eaten.
+// Observed end-state on the Pi 400 (#214 autopsy): the TTBR1 L1 table
+// overwritten with 'THRD'-magic frames, every CPU's vector fetch then
+// faulting at level 1. The classic seed is fault -> extinction ->
+// halls_dump faults -> fault -> extinction (extinction.c carries the
+// matching re-entrancy guard).
+//
+// Legitimate depth is 1 (uaccess fixups and kernel-fault extinctions do
+// not nest a second EL1h-sync fault), so >= 3 is runaway with margin. The
+// counter resets to 0 on every successful unwind rather than
+// decrementing: a blocking handler that migrates cross-CPU (a uaccess
+// demand-page sleep) would otherwise strand a foreign CPU's increment
+// forever. The reset makes a stranded increment self-heal on that CPU's
+// next clean fault; the theoretical false-park needs EL1_SYNC_DEPTH_MAX
+// consecutive migrated-away faults on one CPU with no clean unwind
+// between — and the failure mode is a loud park, not corruption.
+//
+// The runaway path deliberately does NOT halls_dump (the dump machinery
+// is the likely faulting amplifier): flush the staged cons ring (trylock,
+// bounded — so diagnostics stranded there reach the wire), print one raw
+// banner with the frame that killed the handler, and park THIS CPU with
+// the stack corpse intact for a debugger/QMP autopsy. The banner prints
+// only at exactly DEPTH_MAX: if the banner itself faults, the next entry
+// parks silently instead of looping through the print.
+#define EL1_SYNC_DEPTH_MAX 3u
+static volatile u8 g_el1_sync_depth[DTB_MAX_CPUS];
+
+extern void _torpor(void) __attribute__((noreturn));
+
+__attribute__((noreturn))
+static void el1_sync_runaway(unsigned cpu, const struct exception_context *ctx) {
+    cons_tx_flush_for_dump();
+    uart_puts("\nEXTINCTION: el1-sync recursion, cpu ");
+    uart_putdec((u64)cpu);
+    uart_puts(" elr ");
+    uart_puthex64(ctx->elr);
+    uart_puts(" esr ");
+    uart_puthex64(ctx->esr);
+    uart_puts(" far ");
+    uart_puthex64(ctx->far);
+    uart_puts(" (parked; corpse intact)\n");
+    _torpor();
+}
+
 void exception_sync_curr_el(struct exception_context *ctx) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) cpu = 0;
+    u8 depth = (u8)(g_el1_sync_depth[cpu] + 1u);
+    g_el1_sync_depth[cpu] = depth;
+    if (depth >= EL1_SYNC_DEPTH_MAX) {
+        if (depth == EL1_SYNC_DEPTH_MAX) el1_sync_runaway(cpu, ctx);
+        _torpor();
+    }
+
     const struct exception_context *prev = halls_enter_frame(ctx);
     exception_sync_curr_el_impl(ctx);
     halls_leave_frame(prev);
+
+    g_el1_sync_depth[cpu] = 0;
 }
 
 void exception_irq_curr_el(struct exception_context *ctx) {

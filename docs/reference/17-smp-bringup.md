@@ -378,13 +378,122 @@ P2-Cdc bug fix: `gic_enable_irq` for SGI/PPI was hardcoded to write `g_redist_ba
 
 3. **The secondary trampoline's PA depends on `_kernel_start_va` matching the linker script's BASE**. If the linker script changes the base of the kernel image, `kaslr_kernel_pa_start() + (secondary_entry - _kernel_start)` may compute wrong. The KASLR base is `KASLR_LINK_VA = 0xFFFFA00000080000`; `_kernel_start` is the symbol at the linker-script's image base; their relationship is fixed by the linker script. Don't move `_kernel_start` without updating the trampoline PA computation.
 
-4. **Cache coherence assumption**: the asm trampoline writes `g_cpu_online[idx]` with caches off (Device-nGnRnE). The boot CPU reads via TTBR1's Normal-WB cacheable mapping — `volatile + dmb ish` is sufficient on QEMU virt. On bare-metal hardware where coherency might not include CPUs in pre-MMU state, the boot CPU might need an explicit `dc ivac` before the read. Phase 7 hardening (Pi 5 bring-up) revisits.
+4. **Cache coherence assumption — CLOSED at #214**: the asm trampoline writes `g_cpu_online[idx]` with caches off (Device-nGnRnE), and this caveat's prophecy ("on bare-metal hardware the boot CPU might need an explicit `dc ivac` before the read; Pi 5 bring-up revisits") came due on the Pi 400. The flag arrays are now line-isolated mailboxes under an explicit CIVAC protocol — see "#214: real-silicon bring-up (Pi 400/KVM)" below.
 
 5. **No PSCI version check**. We assume PSCI 0.2+ standard function IDs. Older PSCI variants use different IDs declared in the DTB (`cpu_on = <id>` etc.); we ignore those. QEMU virt advertises PSCI 1.0; bare-metal will too.
 
 6. **The trampoline is in `.text` (executable from the kernel image)**. It must therefore be reachable via the kernel's load PA. The boot loader (QEMU's load_aarch64_image) loads the entire image at a single PA; the trampoline is part of the image; it's reachable by computing kaslr_kernel_pa_start + offset.
 
 7. **DTB_MAX_CPUS = 8 is hard-coded throughout**. The DTB walker's stack arrays, the asm trampoline's bounds check (`mov x9, #8`), the `g_cpu_online` array dimension, all depend on this. Bumping it requires updating each site.
+
+---
+
+## #214: real-silicon bring-up (Pi 400/KVM, 2026-08-11)
+
+The first `-smp 4` boot on real silicon (Pi 400, 4x Cortex-A72, KVM)
+froze at secondary bring-up. Every emulated substrate (TCG, HVF) had
+been structurally incapable of catching any of the four defects below.
+The chunk landed them together; the boot now reaches
+`Thylacine boot OK` at 4/4 CPUs on the Pi.
+
+### Root cause: UNKNOWN-reset TPIDR_EL1 + KVM's poison
+
+`secondary_entry` never initialized TPIDR_EL1/TPIDR_EL0 — architecturally
+UNKNOWN at PSCI entry, exactly as at cold boot, where `_real_start` step
+4.5 zeroes them (P2-A R4 F44/F45). QEMU TCG/HVF reset them to 0, so
+`current_thread()` returned NULL and `spin_preempt_inc`'s `!t` guard
+held — by accident. KVM deliberately poisons UNKNOWN-reset sysregs with
+`0x1de7ec7edbadc0de`, so the secondary's first `current_thread()`
+dereference — `spin_preempt_inc`'s `t->magic` probe, reached via
+`thread_init_per_cpu_idle`'s first allocation lock in `per_cpu_main` —
+read through the poison (ESR `0x96000004`: data abort, L0 translation
+fault; FAR = the poison) and died. The fix: the trampoline zeroes
+TPIDR_EL1, TPIDR_EL0, and TPIDRRO_EL0 at entry (TPIDRRO additionally
+because the kernel never writes it and EL0 can always read it — a boot
+leftover would be EL0-visible forever; `_real_start` gained the same
+TPIDRRO zeroing).
+
+### The amplifier: recursive EL1h-sync descent (guards in exception.c + extinction.c)
+
+The poison fault's handler chain re-dereferenced the same poison (cons
+locks take `spin_preempt_inc` too), so fault -> extinction ->
+halls/print faults -> fault recursed. Each re-entry ran KERNEL_ENTRY on
+the same stack: with a mapped SP every iteration landed a 288-byte
+frame and marched DOWN — past the kstack guard (SP arithmetic never
+faults; stores resume wherever SP re-enters mapped territory) —
+scribbling exception frames across physical RAM through the directmap
+until the L1 page tables themselves held 'THRD'-magic frames and every
+CPU's vector fetch died at a level-1 translation fault. Two guards now
+bound the class:
+
+- `exception_sync_curr_el` (exception.c) carries a per-CPU depth
+  counter: legitimate depth is 1; at depth 3 it flushes the staged cons
+  ring (trylock, bounded), prints one raw
+  `EXTINCTION: el1-sync recursion` banner with the killing frame's
+  ELR/ESR/FAR, and parks the CPU in `_torpor` with the stack corpse
+  intact. The counter resets to 0 on successful unwind (not decrement:
+  a blocking handler migrating cross-CPU would strand a foreign
+  increment forever).
+- `extinction()` / `extinction_with_addr()` carry a per-CPU re-entrancy
+  guard: a second entry prints the message with the halls dump
+  suppressed and parks; a third parks silently.
+
+The unmapped-SP variant of the spiral (stores all fault, nothing lands)
+still recurses below the C layer — harmless to memory, that CPU spins.
+The asm-side SP-validity check in the 0x200 vector slot switching to
+`g_exception_stacks` remains the deferred stronger form (vectors.S trip
+hazard).
+
+### D1: the bring-up timeout rode a dead clock; partial bring-up now extincts
+
+`wait_for_flag`'s timeout counted `g_ticks` — advanced only by cpu0's
+timer IRQ, not guaranteed live in the smp_init context — and the loop
+had never once terminated by timeout on any substrate (secondaries
+always arrived first), so the first real secondary failure froze boot
+forever, silently. The timeout now rides `timer_get_counter()`
+(CNTVCT_EL0, always advances), in ms (`SMP_BRINGUP_TIMEOUT_MS`, 100).
+And `smp_init` now refuses a degraded boot: if any DTB-listed secondary
+fails bring-up while PSCI is ready, it prints per-CPU diagnostics and
+extincts — a partially-SMP boot is a lie waiting to be verified around.
+
+### The mailbox protocol + the per-CPU stage trace
+
+The trampoline's MMU-off stores are Device-nGnRnE writes straight to
+PoC, NOT coherent with the primary's cacheable view (the old caveat-4
+prophecy). `g_cpu_online` is now a line-isolated mailbox
+(`aligned(64)`, padded to `SMP_MAILBOX_BYTES`): the primary writes
+`[0]` once, `DC CIVAC`s the line before the first CPU_ON (so DRAM is
+current and no cached copy's writeback can clobber a secondary's Device
+write), re-CIVACs before every diagnostic read, and never writes the
+line again. `g_cpu_stage` (one line PER CPU, byte at
+`idx * SMP_MAILBOX_BYTES`) records each bring-up step
+(`SMP_STAGE_*` in smp.h, mirrored as literals in the trampoline):
+Device writes pre-MMU, coherent stores after — per-CPU lines because a
+cacheable store to a line another CPU is still Device-writing would
+fill from a stale copy and clobber it on writeback. On timeout the
+diagnostic names the exact stage (this is what localized the root cause
+to the `thread_init_per_cpu_idle` window in one boot). `g_cpu_alive`
+needs no maintenance — written with the MMU on, polled coherently.
+
+The trampoline also gained: VBAR_EL1 installed (high VA) right after
+the SP re-anchor, BEFORE any C runs — previously every fault between
+MMU-on and `per_cpu_main` vectored through a reset-UNKNOWN VBAR, a
+silent wedge; and `mmu_program_this_cpu` gained `ic iallu` beside the
+R6-B F120 `tlbi` (the I-side of the same no-firmware-trust argument —
+A72 has no FEAT_DIC/IDC) plus a hoisted `asid_hw_bits()` call and a
+leaf-ness constraint comment: the function runs with the MMU off and
+returns with it on, so a call frame would be pushed as a Device write
+and popped as a cacheable read of possibly-stale lines. It must remain
+a frameless register-only leaf (verified by disassembly at #214).
+
+### Evidence
+
+thyla-pi `~/warp/`: `smoke-boot.log` (the original freeze),
+`smp4-fix2.log` + the QMP/gdb autopsies (the descent corpse: L1 table
+overwritten with exception frames), `smp4-fix3.log` (guards + stage
+trace: all three secondaries at stage 5, parked by the recursion guard,
+fail-loud extinction with per-CPU stages), `smp4-fix4.log` (the fix:
+`smp: 4/4 cpus online` -> `Thylacine boot OK`, go4c cold build 7.7 s).
 
 ---
 

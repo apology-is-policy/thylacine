@@ -35,7 +35,19 @@ extern void secondary_entry(void);
 // Per-CPU online flag. Set by secondary_entry's trampoline (asm strb)
 // before pac_apply / mmu_program / branch-to-high-VA. Earliest signal
 // that "trampoline reached + idx valid + per-CPU stack assigned."
-volatile u8 g_cpu_online[DTB_MAX_CPUS];
+//
+// #214: the trampoline strb is an MMU-off Device write (non-coherent).
+// The array owns its cache line (aligned + padded) and smp_init runs
+// the CIVAC mailbox protocol documented in smp.h.
+__attribute__((aligned(64)))
+volatile u8 g_cpu_online[SMP_MAILBOX_BYTES];
+
+// #214 bring-up stage trace — one line per CPU (byte at idx *
+// SMP_MAILBOX_BYTES); written by the secondary at each bring-up step,
+// read by the primary only in the timeout diagnostics (post-CIVAC).
+// See smp.h for the stage codes + the mixed-attribute rationale.
+__attribute__((aligned(64)))
+volatile u8 g_cpu_stage[DTB_MAX_CPUS * SMP_MAILBOX_BYTES];
 
 // P2-Cb: per-CPU "fully initialized at high VA" flag. Set by
 // per_cpu_main after VBAR_EL1 + TPIDR_EL1 are configured. The
@@ -213,7 +225,31 @@ static unsigned g_cpu_online_count;
 // Per-secondary timeout. PSCI bring-up + trampoline execution + flag
 // store + dsb sy is microseconds at most on QEMU virt; bare metal might
 // be milliseconds. 100 ms is generous.
-#define SMP_BRINGUP_TIMEOUT_TICKS  100
+//
+// #214 D1: the timeout is measured on CNTVCT_EL0 (timer_get_counter),
+// NEVER on g_ticks — g_ticks advances only via cpu0's timer IRQ, which
+// is not guaranteed live in every smp_init context, and a dead clock
+// turned "timeout" into "frozen boot forever" the first time a
+// secondary actually failed (Pi 400/KVM). The hardware counter always
+// advances.
+#define SMP_BRINGUP_TIMEOUT_MS  100u
+
+// #214: mismatched-attribute mailbox maintenance (protocol in smp.h).
+// civac (clean+invalidate to PoC), not ivac: a stray dirty copy is
+// preserved into DRAM rather than discarded.
+static void dc_civac(const volatile void *p) {
+    __asm__ __volatile__("dc civac, %0" :: "r"(p) : "memory");
+}
+static void dsb_sy(void) { __asm__ __volatile__("dsb sy" ::: "memory"); }
+
+// Diagnostic read of a mailbox byte the secondaries write non-coherently
+// (MMU-off Device stores): drop/flush any cached copy first so the read
+// observes DRAM — the only place those stores land.
+static u8 mailbox_read(const volatile u8 *p) {
+    dc_civac(p);
+    dsb_sy();
+    return *p;
+}
 
 // Compute the PA of secondary_entry. The trampoline is part of the
 // kernel image (.text); its VA was assigned by the linker to
@@ -255,10 +291,17 @@ static const char *psci_status_str(int status) {
 // through `volatile` so the compiler re-fetches each iteration; the
 // explicit `dmb ish` ensures the read happens after any pending
 // inner-shareable store from the secondary.
-static bool wait_for_flag(volatile u8 *flag, u64 timeout_ticks) {
-    u64 start = timer_get_ticks();
+//
+// #214 D1: the deadline rides CNTVCT_EL0, not g_ticks — see the
+// SMP_BRINGUP_TIMEOUT_MS comment. This loop had never terminated by
+// timeout on any substrate before the Pi (secondaries always arrived
+// first), so the dead-clock path was unexercised until it froze a real
+// board.
+static bool wait_for_flag(volatile u8 *flag, u64 timeout_ms) {
+    u64 start = timer_get_counter();
+    u64 limit = (timer_freq_hz() / 1000u) * timeout_ms;
     while (!*flag) {
-        if ((timer_get_ticks() - start) > timeout_ticks) return false;
+        if ((timer_get_counter() - start) > limit) return false;
         __asm__ __volatile__("dmb ish\n" ::: "memory");
         // No WFI here — IRQs may not be live; we want to spin so we
         // notice the flag promptly.
@@ -281,6 +324,17 @@ unsigned smp_init(void) {
     g_cpu_online[0] = 1;
     g_cpu_alive[0]  = 1;
     g_cpu_online_count = 1;
+
+    // #214: publish the mailbox lines to PoC and drop every cached copy
+    // BEFORE the first CPU_ON. The [0]=1 store above dirtied the online
+    // line in this CPU's cache; a later writeback would clobber a
+    // secondary's MMU-off Device write to the same line, and a cached
+    // copy would mask it from our diagnostic reads. From here on this
+    // CPU only READS these lines, and only through mailbox_read.
+    dc_civac(&g_cpu_online[0]);
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++)
+        dc_civac(&g_cpu_stage[i * SMP_MAILBOX_BYTES]);
+    dsb_sy();
 
     // PSCI required for secondary bring-up.
     if (!psci_is_ready()) {
@@ -309,17 +363,25 @@ unsigned smp_init(void) {
             // "trampoline ran"; we want both, but watching alive
             // catches PAC/MMU/VBAR failures that would leave the
             // secondary stuck mid-init.
-            if (wait_for_flag(&g_cpu_alive[i], SMP_BRINGUP_TIMEOUT_TICKS)) {
+            if (wait_for_flag(&g_cpu_alive[i], SMP_BRINGUP_TIMEOUT_MS)) {
                 brought_up++;
                 g_cpu_online_count++;
             } else {
+                // #214: read both mailbox bytes through the CIVAC
+                // protocol (the secondary wrote them non-coherently) and
+                // name the exact stage the secondary died at.
+                u8 online = mailbox_read(&g_cpu_online[i]);
+                u8 stage  = mailbox_read(&g_cpu_stage[i * SMP_MAILBOX_BYTES]);
                 uart_puts("  smp: cpu ");
                 uart_putdec((u64)i);
-                if (g_cpu_online[i]) {
-                    uart_puts(" trampoline reached but per_cpu_main timed out (PAC/MMU/VBAR fail?)\n");
+                if (online) {
+                    uart_puts(" trampoline reached but per_cpu_main timed out");
                 } else {
-                    uart_puts(" PSCI ok but trampoline never ran\n");
+                    uart_puts(" PSCI ok but trampoline never ran");
                 }
+                uart_puts(" (stage ");
+                uart_putdec((u64)stage);
+                uart_puts(": 0=none 1=entry 2=pac 3=mmu 4=highva 5=cmain 6=sched 7=gic)\n");
             }
         } else {
             uart_puts("  smp: cpu ");
@@ -329,6 +391,13 @@ unsigned smp_init(void) {
             uart_puts(")\n");
         }
     }
+
+    // #214: a partially-SMP boot is a lie waiting to be verified around
+    // — on every v1.0 target (QEMU virt TCG/HVF/KVM) a secondary that
+    // PSCI can address MUST come up, so anything less is a kernel bug.
+    // Fail LOUD after the per-CPU diagnostics above, never degraded.
+    if (brought_up != g_cpu_count - 1)
+        extinction("smp: secondary bring-up incomplete -- refusing degraded boot (#214; see per-cpu stage lines above)");
 
     return brought_up;
 }
@@ -391,6 +460,10 @@ void per_cpu_main(int cpu_idx) {
                    "(sparse/cluster MPIDR topology unsupported)");
     }
 
+    // #214 stage trace (coherent from here — MMU is on). Plain stores:
+    // the primary reads these only through its CIVAC diagnostic path.
+    g_cpu_stage[(unsigned)cpu_idx * SMP_MAILBOX_BYTES] = SMP_STAGE_CMAIN;
+
     // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 on this secondary CPU
     // before any context switch. Boot CPU did this in boot_main; each
     // secondary does it independently here because CPACR_EL1 is
@@ -435,6 +508,8 @@ void per_cpu_main(int cpu_idx) {
     // Initialize THIS CPU's per-CPU sched state.
     sched_init((unsigned)cpu_idx);
 
+    g_cpu_stage[(unsigned)cpu_idx * SMP_MAILBOX_BYTES] = SMP_STAGE_SCHED;
+
     // P2-Cdc: per-CPU GIC bring-up + IPI handler attachment + IRQ
     // unmask. Done BEFORE g_cpu_alive flip + the idle loop so:
     //   1. The boot CPU's smp_init wait still observes alive flip as
@@ -443,6 +518,8 @@ void per_cpu_main(int cpu_idx) {
     //   2. The first WFI in the idle loop has IRQs unmasked, so an
     //      incoming IPI_RESCHED actually wakes it.
     smp_cpu_ipi_init((unsigned)cpu_idx);
+
+    g_cpu_stage[(unsigned)cpu_idx * SMP_MAILBOX_BYTES] = SMP_STAGE_GIC;
 
     // Publish the "fully alive" flag. smp_init's wait loop watches
     // this. With MMU on, the store goes through cacheable memory;
