@@ -1158,6 +1158,21 @@ d4b=$(/usr/bin/getconf 2>&1)
 echo D4-USAGE-RAW:$d4b
 case "$d4b" in "Usage: /usr/bin/getconf system_var"*) echo D4-B-argv0-is-the-program ;; esac
 echo L6C-DONE
+# #213 regression -- emitted AFTER L6C-DONE, on purpose, and asserted by joey on
+# the BYTE COUNT rather than a marker. joey's acc buffer is 2048 bytes, so
+# nothing past it is reachable to a marker check; the only honest assertion is
+# the counter. 16*8*8 = 1024 per $L, five of them = 5120 bytes, comfortably past
+# the 4096-byte pipe ring. Under a reap-before-drain joey the container blocks
+# in write() here on a full ring while joey waits for it to exit, and the boot
+# hangs -- which is the defect's true symptom. It lives in THIS bundle and not
+# the stock one for two reasons: this bundle is OURS (a mechanism gate, which is
+# what a pipe-drain regression is), and the stock bundle drives its script
+# through `sh -c`, whose whole string viv bounds at PATH_MAX=512 -- measured, it
+# had 81 bytes of headroom and this needs more. A script FILE has no such cap.
+L=0123456789abcdef
+L=$L$L$L$L$L$L$L$L
+L=$L$L$L$L$L$L$L$L
+echo $L$L$L$L$L
 GATEEOF
             chmod 0644 "$ab/rootfs/gate/run.sh"
             cat > "$ab/config.json" <<'VIVEOF'

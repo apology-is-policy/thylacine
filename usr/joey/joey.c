@@ -408,13 +408,29 @@ static unsigned int rd_u32_le(const unsigned char *rx, size_t off) {
 // (a POSIX fd *is* a Thylacine handle index — POUCH-DESIGN.md §6.1). fd 0
 // is unused — the hello binaries never read stdin.
 //
-// Ordering matters: joey REAPS the child (t_wait_pid) BEFORE draining the
-// pipe. A Thylacine zombie holds its handle table until proc_free, which
-// runs at reap — so the child's write-end stays open (no EOF) until joey
-// reaps it. A read-until-EOF before the reap would deadlock. The child's
-// output is far under the 4 KiB pipe ring, so it never blocks on write
-// and reaches exit on its own; joey reaps, then drains the buffered
-// bytes. (Same lesson as do_stratumd_stub_bringup.)
+// Ordering: joey REAPS the child (t_wait_pid) BEFORE draining the pipe.
+//
+// CORRECTED (#147). This used to be justified as forced -- "a Thylacine zombie
+// holds its handle table until proc_free, which runs at reap, so the write-end
+// stays open (no EOF) until joey reaps; a read-until-EOF before the reap would
+// deadlock." That was true when written and is NOT true now: #68/#926 moved the
+// close to EXIT (proc_close_handles_at_exit, called from exits()), so EOF
+// arrives while the child is still ALIVE and drain-then-reap is available. The
+// order here is now a CHOICE, not a requirement.
+//
+// THE PRECONDITION THAT KEEPS THIS ORDER SAFE IS A LIVE CONSTRAINT, NOT A
+// HISTORICAL NOTE, so check it before adding a caller: reaping first deadlocks
+// on any child that writes MORE than the 4 KiB ring (PIPE_BUF_SIZE) before
+// exiting -- it blocks in write() on a full ring that nobody is draining, while
+// joey blocks waiting for it to exit. These children are OUR binaries with
+// bounded, known-small output, which is the whole reason this is sound. Wire a
+// chatty child -- or one whose failure path is chatty -- to this helper and it
+// hangs the boot.
+//
+// run_viv_bundle deliberately does the OPPOSITE (drain to EOF, then reap),
+// because its children are third-party programs whose failure output is
+// unbounded; see the argument there. The two orders are both correct for their
+// own callers, and neither is copyable to the other without re-deriving why.
 // pouch_smoke_core — pouch_smoke_one's body, parameterized by optional
 // cap_mask and optional perm_flags. If both are 0, uses t_spawn_with_fds
 // (no extra caps, no perm stamps). If cap_mask != 0 and perm_flags == 0,
@@ -981,11 +997,14 @@ static int do_fork_probe(void) {
 }
 
 // run_viv_bundle -- the mechanical half that every `viv run` gate shares:
-// spawn the runner on a pipe, reap it, drain what the container wrote.
+// spawn the runner on a pipe, drain what the container wrote, then reap it.
 //
 // Returns 0 iff the runner was spawned AND reaped (its exit status lands in
 // *status_out), -1 if the run could not be performed at all. `*acc_len` is set
 // either way, so a caller can still read whatever was emitted before a failure.
+// `total_out` (optional) receives the TOTAL bytes drained, which `*acc_len`
+// cannot report because it saturates at acc_cap -- a caller asserting that a
+// large emission survived must read the counter, not the buffer.
 //
 // It drains whether or not the status is clean, deliberately: the markers name
 // HOW FAR the guest got, which is the entire diagnostic value of these legs. A
@@ -993,9 +1012,11 @@ static int do_fork_probe(void) {
 // and the exit status alone cannot tell them apart.
 static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
                           unsigned int argc, const char *what, int *status_out,
-                          unsigned char *acc, size_t acc_cap, size_t *acc_len) {
+                          unsigned char *acc, size_t acc_cap, size_t *acc_len,
+                          size_t *total_out) {
     *acc_len = 0;
     *status_out = -1;
+    if (total_out) *total_out = 0;
 
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
@@ -1035,20 +1056,46 @@ static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
         (void)t_close(rd);
         return -1;
     }
-    long reaped = t_wait_pid_for((int)pid, 0, status_out);
-
-    size_t got = 0;
+    // DRAIN TO EOF FIRST, THEN REAP. The order is the entire safety argument,
+    // not a style choice, and it is the opposite of what pouch_smoke_one does
+    // above -- deliberately, because the premise that justified that order no
+    // longer holds (see the corrected note there).
+    //
+    // Reaping first deadlocks on a talkative container. The ring is 4 KiB
+    // (PIPE_BUF_SIZE), all three of the container's fds are the SAME write end,
+    // and nothing drains while joey sits in wait_pid_for -- so a container that
+    // emits more than 4 KiB before exiting blocks in write() on a full ring
+    // while joey blocks waiting for it to exit. Neither moves; the boot hangs
+    // with no diagnostic. That is not a corner case for these gates, it is
+    // their FAILURE MODE: a broken loader emits one "Error relocating" line per
+    // unresolved symbol, so reap-first hangs precisely when the thing the gate
+    // exists to catch has happened, and reports cleanly only when it has not.
+    //
+    // Draining first is safe because #68/#926 moved the handle close to EXIT
+    // (proc_close_handles_at_exit, from exits()) rather than to reap: the
+    // child's write end is closed while it is still ALIVE, so EOF arrives
+    // without joey reaping first. Our own `wr` was closed above, and that is
+    // load-bearing here rather than tidiness -- joey holding a writer means EOF
+    // never arrives and this loop never ends.
+    //
+    // The echo stays UNBOUNDED on purpose. Capping it would bound the boot log
+    // but blind exactly the verbose-failure case this reordering exists to make
+    // survivable, which would trade a hang for a truncation.
+    size_t got = 0, total = 0;
     for (;;) {
         unsigned char buf[256];
         long n = t_read(rd, buf, sizeof(buf));
         if (n <= 0) break;
+        total += (size_t)n;
         (void)t_puts((const char *)buf, (size_t)n);
         for (long i = 0; i < n && got < acc_cap; i++)
             acc[got++] = buf[i];
     }
     (void)t_close(rd);
     *acc_len = got;
+    if (total_out) *total_out = total;
 
+    long reaped = t_wait_pid_for((int)pid, 0, status_out);
     return reaped == pid ? 0 : -1;
 }
 
@@ -1114,8 +1161,9 @@ static int do_alpine_shell_gate(void) {
     unsigned char acc[2048];
     size_t acc_len = 0;
     int    status  = -1;
+    size_t total   = 0;
     int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "L-6c", &status,
-                                    acc, sizeof(acc), &acc_len);
+                                    acc, sizeof(acc), &acc_len, &total);
 
     // sizeof-derived, never hand-counted: a literal length that disagrees with
     // its string is a marker that silently never matches, which would read as
@@ -1207,6 +1255,37 @@ static int do_alpine_shell_gate(void) {
             missing = (int)i;
             break;
         }
+    }
+    // #213 REGRESSION, and it is reported SEPARATELY from the marker legs on
+    // purpose -- a leg that reddens under someone else's name accuses the wrong
+    // subsystem, which is the mistake the D-5 leg-C fix was about.
+    //
+    // The script's tail emits 5120 bytes after L6C-DONE, past the 4 KiB pipe
+    // ring (PIPE_BUF_SIZE), and this asserts every byte arrived. Two different
+    // regressions redden it, with two different signatures:
+    //
+    //   - Reap-before-drain (the defect itself): the container blocks in
+    //     write() on a full ring while joey waits for it to exit. Nothing
+    //     completes -- THE BOOT HANGS, and the boot timeout reports it. Ugly,
+    //     but it is the true production symptom, and a hang here names the
+    //     cause unambiguously.
+    //   - A drain that stops early (a bounded read, an acc_cap-driven break):
+    //     the run finishes but `total` lands short, and THIS check catches it.
+    //     `acc_len` structurally cannot -- it saturates at acc_cap, 2048, long
+    //     before the ring.
+    //
+    // The threshold is the RING, not the payload: any value above it proves the
+    // drain outlived a full ring, and pinning the exact count would make the
+    // leg brittle against an edit to the emitting line.
+    int short_drain = (total <= 4096);
+    if (short_drain) {
+        char db[24];
+        t_putstr("joey: L-6c gate FAILED the #213 drain regression -- drained=");
+        t_putstr(itoa_dec((int)total, db, sizeof(db)));
+        t_putstr(" bytes, needs > 4096 (the pipe ring). The post-L6C-DONE bulk "
+                 "did not survive; run_viv_bundle must drain to EOF BEFORE it "
+                 "reaps. This is NOT a busybox/vivarium leg failure.\n");
+        return -1;
     }
     if (ran != 0 || status != 0 || missing >= 0) {
         char nb[24];
@@ -1349,8 +1428,15 @@ static int do_stock_distro_gate(void) {
     unsigned char acc[2048];
     size_t acc_len = 0;
     int    status  = -1;
+    // NULL: the #213 drain regression lives on the L-6c gate, whose bundle is
+    // OURS and whose script is a FILE with no length cap. This one drives its
+    // script through `sh -c`, and viv bounds every process arg at PATH_MAX=512
+    // (usr/viv/src/main.rs:226) -- measured 431 bytes used, 81 free, and the
+    // bulk emitter needs more. Keeping it here would also have put a pipe
+    // mechanism inside the stock-distro claim, which is the one-mechanism-per-
+    // leg rule this gate's own leg-C fix exists to enforce.
     int    ran     = run_viv_bundle(vargv, sizeof(vargv), 3, "D-5", &status,
-                                    acc, sizeof(acc), &acc_len);
+                                    acc, sizeof(acc), &acc_len, NULL);
 
     // sizeof-derived, never hand-counted: a literal length that disagrees with
     // its string is a marker that silently never matches, which would read as

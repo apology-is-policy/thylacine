@@ -2493,3 +2493,64 @@ What the host run cannot see: anything about the guest. No pool, no stalk, no
 I-28 re-anchoring, no ldso, no `PT_INTERP`. It proves the script's patterns CAN
 match and that each leg reddens for its own reason -- nothing more. Legs A and B
 have no host sabotage because on the host they are the harness itself.
+
+### `run_viv_bundle` drains to EOF BEFORE it reaps (#213)
+
+The shared helper reads the pipe to EOF and only then calls `t_wait_pid_for`.
+The order is the whole safety argument.
+
+Reaping first deadlocks on a talkative container. The ring is 4 KiB
+(`PIPE_BUF_SIZE`), all three of the container's fds are the SAME write end, and
+nothing drains while joey sits in `wait_pid_for` -- so a container emitting more
+than 4 KiB before exiting blocks in `write()` on a full ring while joey blocks
+waiting for it to exit. **That is not a corner case for these gates, it is their
+failure mode**: a broken loader emits one `Error relocating` line per unresolved
+symbol, so reap-first hangs precisely when the thing the gate exists to catch has
+happened, and reports cleanly only when it has not.
+
+Draining first is safe because #68/#926 moved the handle close to EXIT
+(`proc_close_handles_at_exit`, from `exits()`) rather than to reap: the child's
+write end closes while it is still ALIVE, so EOF arrives without joey reaping
+first. joey's own `wr` is closed before the loop, and that is load-bearing rather
+than tidiness -- joey holding a writer means EOF never arrives.
+
+**The regression leg lives on the L-6c bundle, not the D-5 one, and that
+placement is deliberate twice over.** L-6c's bundle is OURS and is already the
+fork/exec/pipe/reap mechanism gate, which is what a pipe-drain regression is;
+putting it in the stock-distro gate would have bundled a pipe mechanism into a
+claim about Alpine -- the one-mechanism-per-leg rule that gate's own leg-C fix
+exists to enforce. It is also the only one that FITS: D-5 drives its script
+through `sh -c`, and viv bounds every process arg at `PATH_MAX` = 512
+(`usr/viv/src/main.rs:226`). Measured, that script uses 431 bytes and the emitter
+needs more, so the first attempt died at `viv: manifest: arg bounds` with the
+container producing nothing. L-6c drives a script FILE (`/gate/run.sh`), which
+has no such cap.
+
+The leg emits 5120 bytes after `L6C-DONE` and is asserted on the BYTE COUNT, not
+a marker: joey's `acc` is 2048 bytes, so nothing past it is reachable to a marker
+check and the only honest assertion is the counter (`run_viv_bundle` reports a
+`total_out` that `acc_len` cannot, since `acc_len` saturates). The threshold is
+the RING rather than the payload, so an edit to the emitting line cannot make the
+leg brittle. It reports under its own name and says explicitly that it is *not* a
+busybox/vivarium leg failure -- a leg that reddens under someone else's name
+accuses the wrong subsystem.
+
+**A/B revert-probed, and the measurement corrected the prediction.** Control:
+both gates PASS, 5120 bytes through the pipe, suite 1389/1389. Sabotage (restore
+reap-before-drain, verified present in source AND in a changed `ramfs.cpio` hash
+before booting): **the boot HANGS** -- `FAIL: timeout, no boot marker`. The
+prediction had been a *partial* ~4096-byte bulk in the log; the measurement shows
+**zero container stdout at all**, because busybox's stdout to a pipe is FULLY
+buffered, so the whole script's output sits in libc's buffer and the ring fills
+on the first flush, before a byte is relayed. Kernel-side `vivarium:` messages
+keep flowing throughout (46 of them), which is what proves the guest is BLOCKED
+rather than dead -- the deadlock's signature, not a crash. So the pre-fix failure
+was worse than described: not a truncated diagnostic but a silent gate and a
+stopped boot.
+
+`pouch_smoke_one` still reaps first, and that is correct FOR ITS CALLERS rather
+than an inconsistency: its children are our own binaries with bounded output. Its
+comment used to justify the order as forced ("a zombie holds its handle table
+until reap"); #68 made that false, so the order there is now a CHOICE and the
+comment states the 4 KiB precondition as a live constraint to check before wiring
+a new caller (#147).
