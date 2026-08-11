@@ -377,6 +377,14 @@ detect_accel() {
        && "$(sysctl -n kern.hv_support 2>/dev/null)" == "1" ]] \
        && qemu-system-aarch64 -accel help 2>/dev/null | grep -qw hvf; then
         echo hvf
+    elif [[ "$(uname -sm)" == "Linux aarch64" && -r /dev/kvm && -w /dev/kvm ]] \
+       && qemu-system-aarch64 -accel help 2>/dev/null | grep -qw kvm; then
+        # ARM64 Linux hosts (thyla-pi): in-kernel GIC + -cpu host, same
+        # probe shape as HVF -- host capability AND the qemu build's. The
+        # arch match matters: -accel help lists COMPILED accels, so an x86
+        # host with nested virt would otherwise pass this probe and fail
+        # at qemu init (KVM cannot run a foreign-arch guest).
+        echo kvm
     else
         echo tcg
     fi

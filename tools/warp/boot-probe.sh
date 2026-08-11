@@ -19,6 +19,9 @@ GPU_DEV="${2:-}"
 DISP="${3:-}"
 REPO="${WARP_REPO:-$HOME/projects/thylacine}"
 WORK="${WARP_WORK:-$HOME/warp}"
+# 5 s per poll. 180 fits the TCG GL hosts; an SD-backed pool's boot-test
+# suite (two go-probe legs are FS-round-trip-bound) needs more wall clock.
+POLLS="${WARP_BOOT_POLLS:-180}"
 
 mkdir -p "$WORK"
 cd "$REPO"
@@ -46,7 +49,7 @@ VMPID=$!
 # Bounded poll (#134: deadline + named failure conventions), kill by PID.
 ok=0
 i=0
-for i in $(seq 1 180); do
+for i in $(seq 1 "$POLLS"); do
     if ! kill -0 "$VMPID" 2>/dev/null; then
         echo "BOOT-$TAG: QEMU-EXITED-EARLY"
         break

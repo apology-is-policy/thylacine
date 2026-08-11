@@ -54,7 +54,8 @@ if {$dev ne "gl" && $dev ne "2d"} {
     exit 2
 }
 
-set ::env(THYLACINE_ACCEL) tcg
+# tcg unless the caller pins an accel (KVM GL hosts ride warp-host.sh WARP_ACCEL)
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
 set ::env(THYLACINE_NOSTORM) 1
 set ::env(THYLACINE_NO_SHARE) 1
 if {$dev eq "gl"} {

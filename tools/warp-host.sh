@@ -15,13 +15,22 @@
 #
 # Verification is fail-closed: each leg greps for its own positive evidence
 # and exits non-zero without it. `bench` runs FOREGROUND (~20-45 min under
-# TCG) -- detach at the caller if needed. WARP_HOST overrides the alias.
+# TCG) -- detach at the caller if needed. WARP_HOST overrides the alias;
+# WARP_ACCEL=kvm pins the expect legs' accel (default tcg) on KVM GL hosts;
+# WARP_BOOT_TIMEOUT / WARP_BOOT_POLLS widen the boot budgets (slow pools).
 #
 # The build host stays the Mac: the VM has no KVM for ARM64 guests (TCG
 # only), so `sync` pushes artifacts built here; it never builds remotely.
 set -euo pipefail
 
 HOST="${WARP_HOST:-thyla-gl}"
+# Remote-env prefix for the expect legs: WARP_ACCEL rides as THYLACINE_ACCEL
+# (the .exp default is tcg; KVM GL hosts like thyla-pi pass kvm) and
+# WARP_BOOT_TIMEOUT as LS_CI_BOOT_TIMEOUT (the .exp files floor it at 900;
+# a larger caller value passes through -- SD-backed pools boot slower than
+# that). boot-probe legs auto-detect accel; WARP_BOOT_POLLS is their bound.
+RENV="${WARP_ACCEL:+THYLACINE_ACCEL=$WARP_ACCEL }${WARP_BOOT_TIMEOUT:+LS_CI_BOOT_TIMEOUT=$WARP_BOOT_TIMEOUT }"
+RPOLLS="${WARP_BOOT_POLLS:+WARP_BOOT_POLLS=$WARP_BOOT_POLLS }"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RREPO='~/projects/thylacine'
 
@@ -57,11 +66,11 @@ sync)
     sync_all
     ;;
 smoke)
-    ssh "$HOST" "bash $RREPO/tools/warp/boot-probe.sh smoke"
+    ssh "$HOST" "${RPOLLS}bash $RREPO/tools/warp/boot-probe.sh smoke"
     ;;
 bench)
     out="$REPO_ROOT/build/warp-bench.log"
-    ssh "$HOST" "cd $RREPO && expect tools/warp/glq-bench.exp" | tee "$out"
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/glq-bench.exp" | tee "$out"
     echo "== bench verdict =="
     if ! grep -q "WARP-BENCH PASS" "$out"; then
         echo "BENCH UNVERIFIED -- no PASS line"
@@ -75,7 +84,7 @@ bench)
     ;;
 capset)
     out="$REPO_ROOT/build/warp-capset.log"
-    ssh "$HOST" "bash $RREPO/tools/warp/boot-probe.sh capset virtio-gpu-gl-pci egl-headless" |
+    ssh "$HOST" "${RPOLLS}bash $RREPO/tools/warp/boot-probe.sh capset virtio-gpu-gl-pci egl-headless" |
         tee "$out" || true
     echo "== capset verdict =="
     # The Warp-1 gate: a GET_CAPSET response round-tripped in-guest. The
@@ -90,7 +99,7 @@ capset)
     ;;
 prove)
     out="$REPO_ROOT/build/warp-prove.log"
-    ssh "$HOST" "cd $RREPO && expect tools/warp/warp-prove.exp" | tee "$out" || true
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-prove.exp" | tee "$out" || true
     echo "== prove verdict =="
     # The Warp-2 gate: the prover's OWN pass line (sentinel readback + the
     # post-destroy ctx count are asserted in-guest) AND the scenario pass
@@ -104,7 +113,7 @@ prove)
     ;;
 tri)
     out="$REPO_ROOT/build/warp-tri.log"
-    ssh "$HOST" "cd $RREPO && expect tools/warp/virgl-prove.exp" | tee "$out" || true
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/virgl-prove.exp" | tee "$out" || true
     echo "== tri verdict =="
     # The Warp-3 gate, same two-line shape as prove: the prover's own pass
     # (GL_RENDERER discriminator + clear/triangle pixels through the fenced
@@ -129,7 +138,7 @@ tri)
     ;;
 quake)
     out="$REPO_ROOT/build/warp-quake.log"
-    ssh "$HOST" "cd $RREPO && expect tools/warp/glq-virgl.exp" | tee "$out" || true
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/glq-virgl.exp" | tee "$out" || true
     echo "== quake verdict =="
     # The Warp-4 gate: the tri two-line shape plus the swap certification.
     # GLQ-VIRGL PASS = every gated leg held in-script (virgl renderer +
@@ -164,7 +173,7 @@ decomp)
         exit 2
     fi
     out="$REPO_ROOT/build/warp-decomp-$sub.log"
-    ssh "$HOST" "cd $RREPO && WARP_DECOMP_DEV=$sub expect tools/warp/glq-decomp.exp" | tee "$out" || true
+    ssh "$HOST" "cd $RREPO && WARP_DECOMP_DEV=$sub ${RENV}expect tools/warp/glq-decomp.exp" | tee "$out" || true
     echo "== decomp $sub verdict =="
     if grep -q "GLQ-DECOMP SWAPPED" "$out"; then
         echo "DECOMP $sub: SWAPPED -- discard the flagged figure(s), rerun"
@@ -183,7 +192,7 @@ wedge)
     # way (PROGRESSES isolates pacing; WEDGED captures kstacks), so the
     # gate is only that the probe ran to completion.
     out="$REPO_ROOT/build/warp-wedge.log"
-    ssh "$HOST" "cd $RREPO && expect tools/warp/glq-wedge-probe.exp" | tee "$out" || true
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/glq-wedge-probe.exp" | tee "$out" || true
     echo "== wedge verdict =="
     if grep -q "WEDGE-PROBE PASS" "$out" && grep -q "LS-CI PASS: glq-wedge-probe:" "$out"; then
         grep "WEDGE-PROBE" "$out" | grep -v AUTOPSY- | head -8
@@ -200,7 +209,7 @@ wedge-gate)
     # recurrence of the second-launch fence deadlock is red here, not
     # "captured". The pre-fix code fails leg 2 by construction.
     out="$REPO_ROOT/build/warp-wedge-gate.log"
-    ssh "$HOST" "cd $RREPO && WARP_WEDGE_EXPECT=progress expect tools/warp/glq-wedge-probe.exp" | tee "$out" || true
+    ssh "$HOST" "cd $RREPO && WARP_WEDGE_EXPECT=progress ${RENV}expect tools/warp/glq-wedge-probe.exp" | tee "$out" || true
     echo "== wedge-gate verdict =="
     if grep -q "WEDGE-PROBE PACED: PROGRESSES" "$out" \
         && grep -q "WEDGE-PROBE UNPACED: PROGRESSES" "$out" \

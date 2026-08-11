@@ -56,7 +56,8 @@
 set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
 set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
 
-set ::env(THYLACINE_ACCEL) tcg
+# tcg unless the caller pins an accel (KVM GL hosts ride warp-host.sh WARP_ACCEL)
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
 set ::env(THYLACINE_NOSTORM) 1
 set ::env(THYLACINE_NO_SHARE) 1
 set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
