@@ -41,7 +41,7 @@ struct PgrpMount {                              // stalk-2: re-keyed from an
     u64             mp_qid_path;                //   the mount point's full Plan 9
     int             mp_dc;                       //   (type, dev, qid) identity:
     u32             mp_devno;                   //   (dc, devno, qid.path).
-    u32             flags;                      // MREPL | MBEFORE | MAFTER | MCREATE
+    u32             flags;                      // MREPL | MBEFORE | MAFTER | MCREATE | MNOEXEC
     u32             _pad;                        // 8-byte array-stride alignment
 };
 _Static_assert(sizeof(struct PgrpMount) == 32, ...);   // was 16 (stalk-2)
@@ -50,6 +50,7 @@ _Static_assert(sizeof(struct PgrpMount) == 32, ...);   // was 16 (stalk-2)
 #define MBEFORE  0x0002
 #define MAFTER   0x0004
 #define MCREATE  0x0008
+#define MNOEXEC  0x0010   // #217
 
 struct Territory {
     u64                 magic;                  // PGRP_MAGIC
@@ -130,6 +131,13 @@ walk base in a multi-thread Proc. See `docs/reference/104-stalk.md` "Mount cross
 - **Idempotency**: re-mounting the same `(key(mountpoint), source)` pair is a no-op success; no second `spoor_ref`.
 - **MREPL**: if `flags & MREPL` and an entry at the same mount-point identity exists with a different `source`, the existing entry is replaced (old source's ref dropped; new source's ref taken); `nmounts` unchanged. (Re-mounting onto an already-mounted point keys on the SAME underlying identity because `SYS_MOUNT` resolves it with `STALK_MOUNT` -- the final mount is NOT crossed.)
 - **MBEFORE / MAFTER / MCREATE**: recorded in the entry's `flags` field; at v1.0 treated as "append a new entry" for union mounts. Union walk semantics land at Phase 5+ when the walk algorithm grows union support.
+- **MNOEXEC** (#217): recorded in the entry's `flags` field and *enforced*, unlike the three above. Nothing reached through the mounted device instance may become executable -- `exec_resolve_from_namespace` refuses to resolve a binary on it, and both file-backed `PROT_EXEC` mmap arms refuse with `T_E_PERM`. Consulted via `mount_noexec_covers(territory, dc, devno)`, which scans the mount table for an `MNOEXEC` entry whose SOURCE shares the queried `(dc, devno)`.
+
+  The key is the DEVICE INSTANCE, not the mount point, because a file Spoor is always a clone-descendant of the source it was reached through and `spoor_clone` copies `devno` -- so the identity survives every walk and every mount-over-mount cross with nothing having to carry a flag forward. Nothing can forget to propagate it, which is the property that makes the check total. The cost, recorded rather than left to be discovered: one device instance mounted twice cannot carry two different verdicts.
+
+  Lifecycle mirrors the entry's: `territory_clone` deep-copies `flags`, so a forked child inherits an equally-narrow namespace (the I-2 / I-34 shape); `unmount` drops the restriction with the entry, so authority conferred by a namespace edit is revoked by the inverse edit rather than sticking to the device. A NULL Territory answers `false` -- a Proc with no namespace has no mount that could have conferred the restriction, and kernel boot-time exec runs in exactly that state.
+
+  Rendered by `territory_format_ns` as a ` noexec` suffix on the entry's line, so `/proc/<pid>/ns` answers "is this mount actually noexec?" about a RUNNING namespace.
 
 ### `unmount(p, mountpoint)` — return semantics
 

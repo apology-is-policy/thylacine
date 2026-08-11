@@ -578,6 +578,9 @@ pub const T_MREPL:   u32              = 0x0001;
 pub const T_MBEFORE: u32              = 0x0002;
 pub const T_MAFTER:  u32              = 0x0004;
 pub const T_MCREATE: u32              = 0x0008;
+// #217: the mounted device instance may not back an executable mapping --
+// refuses exec resolution AND the file-backed PROT_EXEC phenotype mmap arm.
+pub const T_MNOEXEC: u32              = 0x0010;
 
 // path_id_t — abstract path token used by the mount/unmount/bind
 // surface at v1.0. The kernel comment is the canonical reference:
@@ -1232,7 +1235,7 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
 // by the absolute `path` (`path_len` bytes) in the calling Proc's territory
 // (stalk-2: path-keyed; was an abstract target_path_id). The kernel `stalk`s
 // `path` to the mount point's (dc, devno, qid.path) identity. `flags` is a
-// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE; bits outside that union
+// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE / T_MNOEXEC; bits outside that union
 // are rejected. The mount point MUST EXIST as a walkable directory.
 //
 // Returns 0 on success, -1 on:

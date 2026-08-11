@@ -36,7 +36,8 @@
 use crate::err::{Error, Result};
 use crate::poll::AsFd;
 use crate::{
-    t_chroot, t_mount, t_pivot_root, t_unmount, T_MAFTER, T_MBEFORE, T_MCREATE, T_MREPL,
+    t_chroot, t_mount, t_pivot_root, t_unmount, T_MAFTER, T_MBEFORE, T_MCREATE, T_MNOEXEC,
+    T_MREPL,
 };
 
 // =============================================================================
@@ -72,6 +73,11 @@ impl MountFlags {
     /// Reserved for "create the target if missing" semantics; not
     /// distinguished from no-create at v1.0.
     pub const CREATE: MountFlags = MountFlags(T_MCREATE);
+
+    /// #217: nothing reached through this mount may become executable --
+    /// neither by `exec` nor by a file-backed `PROT_EXEC` mapping. Enforced
+    /// per DEVICE INSTANCE, so it covers the whole mounted tree.
+    pub const NOEXEC: MountFlags = MountFlags(T_MNOEXEC);
 
     /// Construct from raw bits.
     #[inline]

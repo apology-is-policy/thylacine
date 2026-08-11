@@ -153,7 +153,7 @@ enum {
     //   x0 = path_va  (user VA of the absolute mount-point path)
     //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX; bytes, NUL-free)
     //   x2 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
-    //   x3 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE)
+    //   x3 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC)
     // stalk-2: path-keyed (was an abstract target_path_id). The kernel
     // `stalk`s `path` from the caller's Territory root to the mount-point
     // Spoor (STALK_MOUNT: resolve, do NOT cross the final mount, do NOT
@@ -167,7 +167,7 @@ enum {
     //   - path absent / empty / too long / not resolvable / NUL-embedded
     //   - invalid source_spoor_fd (not KOBJ_SPOOR, out-of-range)
     //   - missing RIGHT_READ on the source (it must be consumable as a tree)
-    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE set
+    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC set
     //   - territory mount table full (PGRP_MAX_MOUNTS reached)
     //
     // Lifecycle (per ARCH §9.6.6): `mount` bumps the source Spoor's refcount

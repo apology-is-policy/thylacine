@@ -28,7 +28,8 @@
 //     dup the source fd with reduced rights (no READ); -> -1.
 //
 //   sys_mount.rejects_invalid_flags
-//     flags with bits outside MREPL|MBEFORE|MAFTER|MCREATE -> -1; no entry.
+//     flags with bits outside MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC -> -1; no
+//     entry. Plus the positive half: MNOEXEC (#217) IS accepted.
 //
 //   sys_mount.rejects_null_territory
 //     sys_mount_for_proc on a Proc with NULL territory -> -1.
@@ -206,17 +207,32 @@ void test_sys_mount_rejects_invalid_flags(void) {
     hidx_t fd_rd = -1, fd_wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
 
-    // Bits outside MREPL|MBEFORE|MAFTER|MCREATE (= 0x000F).
-    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0x10), -1,
-        "flags 0x10 -> -1");
+    // Bits outside MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC (= 0x001F). This test
+    // used to pin 0x10 as invalid and CAUGHT #217 widening the allowlist to
+    // include it -- which is the allowlist working, not the test being in the
+    // way. The assertion is re-pointed at the lowest still-unassigned bit
+    // rather than deleted: what it guards (junk bits are refused, and refused
+    // WITHOUT installing an entry) is exactly as load-bearing as before, and
+    // the next flag to land should trip it again.
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0x20), -1,
+        "flags 0x20 (the lowest unassigned bit) -> -1");
     TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, 0xFFFFFFFFu), -1,
         "flags 0xFFFFFFFFu -> -1");
+    // A valid bit ORed with a junk bit is still refused wholesale -- an
+    // allowlist that masked junk off instead of rejecting would pass the two
+    // assertions above and silently honour the request.
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | 0x20), -1,
+        "a valid flag ORed with junk is refused, not masked");
     TEST_EXPECT_EQ(territory_nmounts(p->territory), 0,
         "no entry installed for invalid flags");
 
     // Valid flags accepted (MREPL).
     TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL), 0,
         "MREPL flag accepted");
+    // #217: and MNOEXEC is now in the allowlist -- the positive half, without
+    // which the syscall boundary could reject the flag and nothing would say so.
+    TEST_EXPECT_EQ(sys_mount_for_proc(p, fd_rd, mp, MREPL | MNOEXEC), 0,
+        "MREPL|MNOEXEC accepted at the syscall boundary");
 
     spoor_unref(mp);
     drop_test_proc(p);

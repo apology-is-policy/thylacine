@@ -241,6 +241,9 @@ void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_noexec_covers(void);
+void test_exec_ns_noexec_mount_denied(void);
+void test_mmap_file_noexec_mount_denied(void);
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);
 void test_territory_mount_format_ns(void);
@@ -1675,6 +1678,8 @@ struct test_case g_tests[] = {
     { "exec_ns.resolve_relative_ok",   test_exec_ns_resolve_relative_ok,   false, NULL },
     { "exec_ns.miss_returns_null",     test_exec_ns_miss_returns_null,     false, NULL },
     { "exec_ns.non_executable_denied", test_exec_ns_non_executable_denied, false, NULL },
+    { "exec_ns.noexec_mount_denied",   test_exec_ns_noexec_mount_denied,   false, NULL },
+    { "mmap_file.noexec_mount_denied", test_mmap_file_noexec_mount_denied, false, NULL },
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },
@@ -1721,6 +1726,7 @@ struct test_case g_tests[] = {
     { "territory_mount.clone_bumps_refs",                 test_territory_mount_clone_bumps_refs,                 false, NULL },
     { "territory_mount.destroy_drops_all_refs",           test_territory_mount_destroy_drops_all_refs,           false, NULL },
     { "territory_mount.devno_disambiguates",              test_territory_mount_devno_disambiguates,              false, NULL },
+    { "territory_mount.noexec_covers",                    test_territory_mount_noexec_covers,                    false, NULL },
     { "territory_mount.rejects_cycle",                    test_territory_mount_rejects_cycle,                    false, NULL },
     { "territory_mount.mp_path_lifecycle",                test_territory_mount_mp_path_lifecycle,                false, NULL },
     { "territory_mount.format_ns",                        test_territory_mount_format_ns,                        false, NULL },

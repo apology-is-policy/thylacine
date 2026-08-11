@@ -59,6 +59,7 @@ void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_noexec_covers(void);       // #217
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);   // #66
 void test_territory_mount_format_ns(void);           // #66
@@ -314,6 +315,73 @@ void test_territory_mount_destroy_drops_all_refs(void) {
 // the same (dc, qid.path) but different devno -- the dev9p two-session case
 // (every 9P session shares dc='9' and every attach root has qid.path 0, so
 // without devno their mount points would collide). Also exercises mount_lookup.
+// #217: MNOEXEC. The point of this test is DISCRIMINATION, not detection -- a
+// predicate that returned true unconditionally would satisfy any deny-only
+// test, so every deny below is paired with a control that must come back false
+// on the same call in the same Territory.
+void test_territory_mount_noexec_covers(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
+
+    struct Spoor *noexec_src = spoor_alloc(&devnone);
+    struct Spoor *exec_src   = spoor_alloc(&devnone);
+    struct Spoor *otherdc    = spoor_alloc(&devnone);
+    TEST_ASSERT(noexec_src && exec_src && otherdc, "spoor_alloc");
+    noexec_src->devno = 7;
+    exec_src->devno   = 8;
+    // Same devno as the flagged source, DIFFERENT dc: if the predicate ignored
+    // dc and keyed on devno alone, this would come back true and the container
+    // case would be over-restricted at best and mis-scoped at worst.
+    otherdc->devno = 7;
+    otherdc->dc    = 'X';
+
+    struct Spoor *mp1 = mkmp(101u);
+    struct Spoor *mp2 = mkmp(102u);
+    struct Spoor *mp3 = mkmp(103u);
+    TEST_ASSERT(mp1 && mp2 && mp3, "mkmp");
+
+    TEST_EXPECT_EQ(mount(p, noexec_src, mp1, MNOEXEC), 0, "mount noexec source");
+    TEST_EXPECT_EQ(mount(p, exec_src, mp2, 0), 0, "mount plain source");
+    TEST_EXPECT_EQ(mount(p, otherdc, mp3, 0), 0, "mount other-dc source");
+
+    TEST_ASSERT(mount_noexec_covers(p, '-', 7) == true,
+        "DENY: the MNOEXEC-mounted device instance is covered");
+    TEST_ASSERT(mount_noexec_covers(p, '-', 8) == false,
+        "CONTROL: an unflagged mount in the SAME table is NOT covered "
+        "(an always-true predicate fails here)");
+    TEST_ASSERT(mount_noexec_covers(p, 'X', 7) == false,
+        "CONTROL: same devno, different dc -> NOT covered (the dc axis is live)");
+    TEST_ASSERT(mount_noexec_covers(p, '-', 9) == false,
+        "CONTROL: a device instance with no mount entry at all is not covered");
+    TEST_ASSERT(mount_noexec_covers(NULL, '-', 7) == false,
+        "a Proc with no Territory has no mount that could confer the "
+        "restriction -- fail-open is the contract, and kernel boot exec needs it");
+
+    // The flag must survive a fork, or a child escapes it for free. This is the
+    // hardware-allowance / I-2 shape: a clone inherits an equally-narrow copy.
+    struct Territory *child = territory_clone(p);
+    TEST_ASSERT(child != NULL, "territory_clone");
+    TEST_ASSERT(mount_noexec_covers(child, '-', 7) == true,
+        "a cloned Territory INHERITS MNOEXEC (a child cannot escape by forking)");
+    TEST_ASSERT(mount_noexec_covers(child, '-', 8) == false,
+        "CONTROL: the clone did not gain the flag on the unflagged entry");
+    territory_unref(child);
+
+    // And it must not outlive the mount that conferred it: authority conferred
+    // by a namespace edit is revoked by the inverse edit, not sticky per-device.
+    TEST_EXPECT_EQ(unmount(p, mp1), 0, "unmount the noexec entry");
+    TEST_ASSERT(mount_noexec_covers(p, '-', 7) == false,
+        "REVOKED: unmount drops the restriction with the entry");
+
+    territory_unref(p);
+    spoor_unref(noexec_src);
+    spoor_unref(exec_src);
+    spoor_unref(otherdc);
+    spoor_unref(mp1);
+    spoor_unref(mp2);
+    spoor_unref(mp3);
+}
+
 void test_territory_mount_devno_disambiguates(void) {
     struct Territory *p = territory_alloc();
     TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
@@ -536,15 +604,18 @@ void test_territory_mount_format_ns(void) {
     mproc->path = mkname("proc");
     sb->path    = mkname("realsrc");
     TEST_ASSERT(mproc->path && sb->path, "mkname proc/realsrc");
-    TEST_EXPECT_EQ(mount(p, sb, mproc, 0), 0, "mount /proc");
+    // #217: mounted MNOEXEC, so this entry must render the suffix and the OTHER
+    // one must not -- the rendering is only useful if it discriminates.
+    TEST_EXPECT_EQ(mount(p, sb, mproc, MNOEXEC), 0, "mount /proc noexec");
 
     char buf[256];
     u64 n = territory_format_ns(p, buf, sizeof(buf));
     TEST_ASSERT(n > 0 && n < sizeof(buf), "format_ns produced bounded output");
     buf[n] = '\0';
     TEST_ASSERT(mnt_streq(buf,
-                "mount /srv #-\nmount /proc /realsrc\nbinds: 0\n"),
-                "ns renders both mounts (name + #dc / source-path) + bind count");
+                "mount /srv #-\nmount /proc /realsrc noexec\nbinds: 0\n"),
+                "ns renders both mounts (name + #dc / source-path), the #217 "
+                "noexec suffix on the flagged entry ONLY, + the bind count");
 
     // F2 (audit): truncation discards a partial line at a whole-line boundary --
     // a cap that fits line 1 ("mount /srv #-\n" = 14 B) but not line 2 yields

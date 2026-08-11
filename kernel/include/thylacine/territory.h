@@ -140,6 +140,29 @@ struct PgrpMount {
 #define MAFTER    0x0004
 #define MCREATE   0x0008
 
+// MNOEXEC (#217) -- the one non-Plan-9 flag: the mounted device instance may
+// not back an executable mapping. Refuses BOTH exec resolution and the
+// file-backed PROT_EXEC phenotype mmap arm, because a mount that still permits
+// exec is not noexec.
+//
+// Why a mount flag at all: ARCH 6.5 arm (b) lets a phenotype map a readable
+// file PROT_READ|PROT_EXEC -- bytes into a live address space with no ELF
+// validation, no X bit, at any offset. W^X (I-12) bounds what a PAGE may be at
+// one instant and says nothing about PROVENANCE, so a file that is writable
+// now and mapped executable later never violates it. The vouching has to come
+// from somewhere that is not the mapper; the mount is the Fuchsia answer (an
+// executable filesystem hands out executable mappings; a scratch one does not).
+//
+// GRANULARITY, recorded rather than discovered: the flag is consulted per
+// DEVICE INSTANCE -- the (dc, devno) a file necessarily shares with its mount
+// source, since spoor_clone propagates devno through every walk and cross --
+// not per mount POINT. One device instance mounted twice therefore cannot
+// carry two different verdicts. That is sound for every mount we make (each
+// Env / dev9p session mints its own devno) and is the price of a check that
+// needs no per-Dev propagation to be correct: nothing has to REMEMBER to carry
+// a flag, so no Dev can silently forget to.
+#define MNOEXEC   0x0010
+
 struct Territory {
     u64                  magic;      // PGRP_MAGIC
     int                  ref;        // refcount; rfork(RFNAMEG) shares (Phase 5+)
@@ -389,6 +412,22 @@ struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
 // mount/unmount degrades to today's unsynchronized-snapshot behavior).
 bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
                        u64 qid_path);
+
+// mount_noexec_covers (#217): does ANY mount entry in this Territory carry
+// MNOEXEC over the device instance (dc, devno)? The SOURCE-side twin of
+// mount_is_point_id, which keys on the mount POINT.
+//
+// Answering from (dc, devno) is what makes the check total: a file Spoor is
+// always a clone-descendant of the mount source it was reached through, and
+// spoor_clone copies devno, so the identity survives every walk and every
+// mount-over-mount cross without anything having to carry a flag forward.
+//
+// FAIL-CLOSED on a corrupted-but-non-NULL Territory would be wrong here (an
+// extinction is the honest answer to corruption, and matches its siblings);
+// FAIL-OPEN on a NULL Territory is correct and deliberate -- a Proc with no
+// namespace has no mount that could have conferred the restriction, and the
+// kernel's own boot-time exec runs in exactly that state.
+bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno);
 
 // territory_root_ref: atomically read root_spoor + take a ref under ns_lock, so
 // the read+ref cannot race a concurrent territory_pivot_root / territory_chroot

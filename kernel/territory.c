@@ -533,6 +533,12 @@ u64 territory_format_ns(struct Territory *p, char *buf, u64 cap) {
                 ok = ns_put_str(buf, cap, &off, dev);
             }
         }
+        // #217: render MNOEXEC. A restriction that cannot be observed cannot be
+        // debugged -- an operator asking "is this container's /env actually
+        // noexec?" has no other way to find out, and "the code passes the flag"
+        // is not an answer about a RUNNING namespace. Rendered as a suffix so
+        // every existing parse of the line's first two fields is unchanged.
+        if (ok && (m->flags & MNOEXEC)) ok = ns_put_str(buf, cap, &off, " noexec");
         if (ok) ok = ns_put_str(buf, cap, &off, "\n");
 
         if (!ok) { off = line_start; truncated = true; break; }   // discard partial
@@ -919,6 +925,27 @@ bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
     }
     spin_unlock(&territory->ns_lock);
     return hit;
+}
+
+bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno) {
+    if (!territory)                    return false;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_noexec_covers on corrupted Territory");
+
+    bool noexec = false;
+    spin_lock(&territory->ns_lock);
+    for (int i = 0; i < territory->nmounts; i++) {
+        const struct PgrpMount *m = &territory->mounts[i];
+        if (!(m->flags & MNOEXEC)) continue;
+        // dc/devno are set at spoor_alloc and never mutate, so reading them
+        // through the entry needs only the ns_lock that keeps `source` alive.
+        if (!m->source) continue;
+        if (m->source->dc == dc && m->source->devno == devno) {
+            noexec = true;
+            break;
+        }
+    }
+    spin_unlock(&territory->ns_lock);
+    return noexec;
 }
 
 // =============================================================================

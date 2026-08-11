@@ -49,7 +49,8 @@ mod json;
 use libthyla_rs::{
     t_chdir, t_chroot, t_close, t_fstat, t_getpid, t_mount, t_open, t_pipe, t_poll, t_putstr,
     t_read, t_spawn_full_argv, t_unlink, t_wait_pid_for, t_walk_create, t_write, TPollFd,
-    TSpawnArgs, T_MREPL, T_OPATH, T_OREAD, T_OWRITE, T_POLLIN, T_SPAWN_PERM_MAY_POST_SERVICE,
+    TSpawnArgs, T_MNOEXEC, T_MREPL, T_OPATH, T_OREAD, T_OWRITE, T_POLLIN,
+    T_SPAWN_PERM_MAY_POST_SERVICE,
     T_SPAWN_PHENO_LINUX, T_WAIT_WNOHANG, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -207,9 +208,20 @@ fn extract_manifest(doc: &json::Json) -> Result<Manifest, &'static str> {
     if root_path.is_empty() || root_path.len() > PATH_MAX {
         return Err("manifest: root.path bounds");
     }
-    // root.readonly is parsed for shape but not acted on at v1.0: there is no
-    // read-only bind flag, so the FS permission model (a SYSTEM-owned bake vs
-    // a non-SYSTEM invoker) is the enforcement. Documented, not silent.
+    // root.readonly is parsed for shape but STILL not acted on, and #217 did
+    // not change that -- it is worth being exact about why, because the
+    // neighbouring mechanism now exists and could be mistaken for this one.
+    //
+    // T_MNOEXEC (#217) covers every mount viv makes. It cannot cover the ROOT:
+    // the root arrives by chroot rather than by mount, and it is the one tree
+    // the container must execute from, so "noexec" is both unrepresentable and
+    // unwanted there. Read-only is the mechanism that would bound the root, and
+    // it belongs to the SERVER (the Plan 9 idiom -- a read-only export, as
+    // usr/diorama already does by refusing Twrite) or to how the bundle is
+    // staged, not to a mount flag. Until one of those lands, the enforcement
+    // remains the FS permission model: a SYSTEM-owned bake against a
+    // non-SYSTEM invoker, which does NOT survive a bundle whose files the
+    // container owns. Documented, not silent. See docs/DISTRO.md section 6.
     let _ = root.get("readonly").map(|v| v.as_bool());
 
     let process = doc.get("process").ok_or("manifest: no process")?;
@@ -484,7 +496,15 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     // Mount the diorama over our own /dio (the mount point joey creates on
     // the pivoted root for exactly this per-client use) and take O_PATH fds
     // of the two subtrees the container recipe binds.
-    if unsafe { t_mount(b"/dio".as_ptr(), 4, dio_root, T_MREPL) } != 0 {
+    // T_MNOEXEC (#217) on EVERY mount viv makes. The rule is simple enough to
+    // hold in the head: the only tree a container must execute from is its
+    // rootfs, and the rootfs arrives by chroot, not by mount -- so every entry
+    // in this table can be noexec without costing the container anything, and
+    // any writable surface the SYSTEM hands it stops being a way to turn bytes
+    // into code. /dio covers the diorama's whole 9P session, which is where
+    // /proc and /sys are opened from, so those inherit the verdict by device
+    // instance rather than needing their own.
+    if unsafe { t_mount(b"/dio".as_ptr(), 4, dio_root, T_MREPL | T_MNOEXEC) } != 0 {
         let _ = unsafe { t_close(dio_root) };
         fail!("mount diorama at /dio");
     }
@@ -554,7 +574,7 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
         binds.push(("/dev/tty", t));
     }
     for (path, fd) in &binds {
-        if unsafe { t_mount(path.as_ptr(), path.len(), *fd, T_MREPL) } != 0 {
+        if unsafe { t_mount(path.as_ptr(), path.len(), *fd, T_MREPL | T_MNOEXEC) } != 0 {
             reap_diorama(dio_pid, dio_ctl);
             return Err(format!("recipe mount {} failed (missing rootfs anchor?)", path));
         }

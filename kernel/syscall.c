@@ -4850,6 +4850,21 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 // BURROW_RESERVE_MAX. Measured, the largest library in a stock Alpine rootfs is
 // libcrypto.so.3 at ~4.2 MiB of map span, so the cap is ~60x real need.
 //
+// exec_map_vouched (#217) -- may this file's bytes become EXECUTABLE pages?
+//
+// The one place the MNOEXEC rule is spelled, called by every site that turns a
+// file into executable pages: both phenotype mmap arms and exec's own name
+// resolution. It deliberately does NOT live inside image_lookup_or_create, the
+// shared chokepoint both mmap arms funnel through -- that cache is keyed on
+// (spoor identity, offset, length, exec) and NOT on the Territory, so a hit
+// seeded by a Proc that may exec-map would hand the same executable Burrow to a
+// Proc whose namespace forbids it. The verdict is per-namespace; the cache is
+// global; so the check belongs strictly before the cache, in the caller.
+static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
+    if (!p || !sp) return false;
+    return !mount_noexec_covers(p->territory, sp->dc, sp->devno);
+}
+
 // Returns the mapped VA, or a negated T_E_* the caller passes straight out.
 s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
                            bool exec, u64 offset) {
@@ -4863,14 +4878,21 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     // cannot be described; refuse before it reaches the Burrow's own guards.
     if (offset + length < offset)                    return -(s64)T_E_INVAL;
 
-    // T_RIGHT_READ, not T_RIGHT_EXEC, and deliberately: the authority a file
-    // mapping consumes is the authority to READ those bytes. Thylacine has no
-    // per-handle execute right on a Spoor -- execute authority lives in the
-    // namespace's X bit, which exec's own resolution path checks. Demanding a
-    // right that does not exist would make every mapping fail; demanding READ is
-    // exactly the authority whose result the guest can already obtain with
-    // pread(2), so the mapping grants nothing new. #844: the ref is TRANSFERRED
-    // to us -- spoor_clunk on every path below.
+    // T_RIGHT_READ, not T_RIGHT_EXEC, and deliberately: there is no per-handle
+    // execute right on a Spoor to demand, so requiring one would fail every
+    // mapping. READ is the right authority for the BYTES.
+    //
+    // What READ alone does not authorize is turning those bytes into CODE, and
+    // this comment used to claim otherwise -- "exactly the authority whose
+    // result the guest can already obtain with pread(2), so the mapping grants
+    // nothing new". That is false in the case that matters: pread yields the
+    // bytes as DATA, this yields them as an executable page, and exec (the
+    // other way to run them) walks OEXEC and REFUSES a file carrying no X bit.
+    // The mapping grants authority exec withholds. What closes the gap is the
+    // MNOEXEC vouching below (#217, ARCH 6.5); the wording is corrected here
+    // rather than left standing as the in-code twin of a premise the D-close
+    // arc round already falsified in scripture.
+    // #844: the ref is TRANSFERRED to us -- spoor_clunk on every path below.
     struct Spoor *sp = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
     if (!sp)                                         return -(s64)T_E_BADF;
 
@@ -4890,6 +4912,14 @@ s64 sys_mmap_file_for_proc(struct Proc *p, u64 fd_raw, u64 length_raw,
     if (sp->flag & CWALKONLY) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
+    }
+    // #217: the MNOEXEC vouching. Only the EXEC request is gated -- a read-only
+    // file mapping off a noexec mount stays legal, exactly as on Linux, because
+    // noexec restricts what may become code and not what may be read. T_E_PERM
+    // matches what Linux answers for the same refusal (path_noexec + VM_EXEC).
+    if (exec && !exec_map_vouched(p, sp)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_PERM;
     }
     // Positional reads are the whole mechanism: every page-in is a read at an
     // explicit offset. A Dev with no read slot cannot serve one, and the fault
@@ -5098,6 +5128,16 @@ s64 sys_mmap_fixed_file_for_proc(struct Proc *p, u64 addr, u64 fd_raw,
         (sp->flag & CWALKONLY) || !sp->dev || !sp->dev->read) {
         spoor_clunk(sp);
         return -(s64)T_E_INVAL;
+    }
+    // #217: the same MNOEXEC vouching as the non-fixed arm, and placed BEFORE
+    // the writable/demand-paged split rather than inside the demand-paged
+    // branch that is its only exec-capable producer today. Sited by prot alone,
+    // it cannot be walked past by a future branch: an arm added below inherits
+    // the gate instead of needing to remember it. (W+X cannot arrive here --
+    // vma_alloc refuses it -- so testing EXEC before the split loses nothing.)
+    if ((prot & (u32)VMA_PROT_EXEC) && !exec_map_vouched(p, sp)) {
+        spoor_clunk(sp);
+        return -(s64)T_E_PERM;
     }
 
     bool writable = (prot & (u32)VMA_PROT_WRITE) != 0;
@@ -6259,11 +6299,16 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 // drops the LAST reference.
 
 // MREPL / MBEFORE / MAFTER / MCREATE are 0x0001 / 0x0002 / 0x0004 /
-// 0x0008 per territory.h. Mask out everything else — userspace
-// supplying junk bits is rejected at the syscall layer (mount() in
-// territory.c is silent on extra bits, but we want a tight contract
-// at the boundary).
-#define SYS_MOUNT_VALID_FLAGS  ((u32)(MREPL | MBEFORE | MAFTER | MCREATE))
+// 0x0008 per territory.h; MNOEXEC (#217) is 0x0010. Mask out everything
+// else — userspace supplying junk bits is rejected at the syscall layer
+// (mount() in territory.c is silent on extra bits, but we want a tight
+// contract at the boundary).
+//
+// Adding a flag REQUIRES adding it here: this allowlist is why a new bit is
+// safe to introduce (an old caller's junk still fails) and equally why a new
+// bit that is not listed is silently unusable -- the mount would just fail
+// -1 with nothing naming the cause.
+#define SYS_MOUNT_VALID_FLAGS  ((u32)(MREPL | MBEFORE | MAFTER | MCREATE | MNOEXEC))
 
 // Inner — testable kernel-internally with a Proc handle + a RESOLVED
 // mount-point Spoor (stalk-2: the SVC wrapper stalk's the path; this inner
@@ -6676,6 +6721,14 @@ struct Spoor *exec_resolve_from_namespace(struct Proc *p, const char *name,
     spoor_clunk(start);   // borrowed by stalk; release the ref we took
     if (!quarry)                                   return NULL;
     if (!quarry->dev || !quarry->dev->read)        { spoor_clunk(quarry); return NULL; }
+
+    // #217: MNOEXEC refuses exec as well as the R+X map, because a mount that
+    // still permits exec is not noexec -- and a half-enforced flag is worse
+    // than none, since it reads as a guarantee it does not make. Tested on the
+    // RESOLVED quarry, i.e. after every mount cross, so the verdict follows the
+    // device instance the bytes actually live on rather than the path spelling
+    // used to reach them.
+    if (!exec_map_vouched(p, quarry))              { spoor_clunk(quarry); return NULL; }
 
     // Size from stat -- bounds exec_setup_from_spoor's ELF segment-extent
     // validation + an EXEC_FILE_MAX sanity ceiling (the binary is NOT read here

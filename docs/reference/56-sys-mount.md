@@ -57,7 +57,7 @@ Args:
   x0 = path_va          — user VA of the absolute mount-point path (NUL-free)
   x1 = path_len         — 1 .. SYS_OPEN_PATH_MAX (1024)
   x2 = source_spoor_fd  — hidx_t; KOBJ_SPOOR handle in the caller's table
-  x3 = flags            — u32; MREPL / MBEFORE / MAFTER / MCREATE
+  x3 = flags            — u32; MREPL / MBEFORE / MAFTER / MCREATE / MNOEXEC
 
 Return:
   x0 = 0  on success;
@@ -65,7 +65,7 @@ Return:
     - path absent / empty / too long / not resolvable / embedded NUL;
     - source_spoor_fd not a KOBJ_SPOOR or out-of-range;
     - missing RIGHT_READ on the source handle;
-    - flags has bits outside MREPL|MBEFORE|MAFTER|MCREATE;
+    - flags has bits outside MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC;
     - Territory mount table full (PGRP_MAX_MOUNTS = 8);
     - Proc has no Territory / no root_spoor (resolves from root at v1.0).
 ```
@@ -131,6 +131,7 @@ static inline long t_unmount(unsigned long target_path_id);
 #define T_MBEFORE  0x0002u
 #define T_MAFTER   0x0004u
 #define T_MCREATE  0x0008u
+#define T_MNOEXEC  0x0010u   // #217
 ```
 
 Direct mirrors of the kernel ABI. Returns 0 / -1.
@@ -268,7 +269,7 @@ The Plan 9 cclose semantics fix is invisible at the spec level — the spec mode
 - `sys_mount.idempotent_on_duplicate` — same `(source, target)` twice; nmounts stays 1.
 - `sys_mount.rejects_bad_fd` — out-of-range / negative / closed fds → -1.
 - `sys_mount.rejects_missing_right_read` — `handle_dup` with `RIGHT_WRITE`-only; mount returns -1.
-- `sys_mount.rejects_invalid_flags` — bits outside `MREPL|MBEFORE|MAFTER|MCREATE` → -1; `MREPL` accepted.
+- `sys_mount.rejects_invalid_flags` — bits outside `MREPL|MBEFORE|MAFTER|MCREATE|MNOEXEC` → -1 (probed at `0x20`, the lowest unassigned bit, and at a valid-bit-ORed-with-junk word, which an allowlist that *masked* rather than rejected would wrongly honour); `MREPL` and `MREPL|MNOEXEC` accepted.
 - `sys_mount.rejects_null_territory` — Proc with no Territory → -1.
 - `sys_unmount.removes_entry_and_drops_ref` — full mount → close fds → unmount → ring freed at unmount (proves the mount-table held the last live ref).
 - `sys_unmount.rejects_nonexistent_target` — unmount of unmounted path / unrelated path → -1.
