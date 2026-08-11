@@ -227,8 +227,12 @@ background), `orphf` (#845 abandon Rflushes — death-driven by design),
 `orph` is ZERO on every healthy boot including death flows (the full suite
 is the witness); the kernel also logs the first 4 per client
 (`9p: ownerless frame tag=.. type=..`). Tail: `rd` = elected reader live,
-dead/live, `sw` parked senders, `infl` + per-tag `t<N><d|w>[a]` (done /
-waiting, async).
+dead/live, `sw` parked senders, `infl` + per-tag
+`t<N><d|w>[a]:<kind>:<fid>` — done/waiting, async, then the sent T-type
+(the 9P message number, e.g. `116` = Tread) and the op's primary target
+fid from the session table, so a parked op names WHAT it waits on (e.g.
+`t0w:116:14` = tag 0, waiting, a Tread on fid 14 — the read that
+convicted #210's fence park).
 
 The three-way wedge read (the #210 discriminator, at wedge time):
 

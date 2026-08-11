@@ -706,8 +706,9 @@ struct WarpCtx {
     capset: u32,
     rings: u32,
     /// Fenced-lane bookkeeping (W2d): chains submitted-not-retired for
-    /// this ctx; the newest retired fence id; the newest id the fence
-    /// file has reported. signaled > reported = one unread record.
+    /// this ctx; the DENSE per-ctx completion count (#210 -- NOT the
+    /// device-global fence id); the newest count the fence file has
+    /// reported. signaled > reported = one unread record.
     fences_in_flight: u32,
     fence_signaled: u64,
     fence_reported: u64,
@@ -3447,6 +3448,24 @@ impl Comp {
         // this, one client could burn all 8 ctx slots in ~62 s and kill
         // the seam for the whole box permanently (round-3 F2).
         for v in self.gpu.take_vindications() {
+            // #210 audit F1: a vindication IS a completion -- the device
+            // provably finished one abandoned chain -- so the dense fence
+            // count must take it, or the ctx is left one short of the
+            // client's issue count forever (the silent post-recovery park:
+            // signaled can never reach the parked wait's seq once nothing
+            // later is in flight). Counted BEFORE the poison gate below:
+            // take_vindications drains, and a vindication consumed while a
+            // SIBLING slot is still poisoned would otherwise lose its
+            // count permanently. The gate guards only the RECLAMATION
+            // (un-poison + free), not the arithmetic.
+            if let Some(c) = self
+                .warp_ctxs
+                .iter_mut()
+                .flatten()
+                .find(|c| c.pub_id == v.ctx_pub)
+            {
+                c.fence_signaled += 1;
+            }
             // ONE retired chain is not proof for a ctx that abandoned
             // SEVERAL (round-4 F1): a ctx can hold every fenced slot, and
             // clearing its poison while siblings still execute would let
@@ -4434,8 +4453,9 @@ impl Conn {
                     self.read_str(tag, &s, a.offset, cap)
                 }
                 // The fence completion stream (W2d): one record per read
-                // -- the newest retired fence id, coalescing (FIFO within
-                // our single ring, so id N retires everything <= N); parks
+                // -- the newest completion COUNT (#210: dense per-ctx,
+                // not the device fence id), coalescing (FIFO within our
+                // single ring, so count N retires everything <= N); parks
                 // when nothing is unreported (the FK_EVENT netd leg).
                 // Offset is ignored: a stream, not a file image.
                 WFK_FENCE => {

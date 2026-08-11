@@ -537,6 +537,35 @@ void test_p9_attached_ctl_registry(void) {
     TEST_ASSERT(p.demux_owned >= 1,            "the Rattach had a live owner (demux_owned)");
     TEST_EXPECT_EQ(p.demux_orphan, (u64)0,     "no ownerless frames on a clean handshake");
 
+    // #210 audit F3: the sess FORMATTER end-to-end through the Dev vtable
+    // with a LIVE session (the devctl-side test only ever exercises the
+    // conn rows). Walk /ctl -> 9p-sessions, read, assert this session's
+    // row renders through its tail (idle => no in-flight tag suffix; the
+    // :kind:fid grammar itself is witnessed live by the wedge probe).
+    {
+        struct Spoor *root = devctl.attach("");
+        TEST_ASSERT(root != NULL, "devctl attach");
+        const char *names[1] = { "9p-sessions" };
+        struct Walkqid *wq = devctl.walk(root, NULL, names, 1);
+        TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk to 9p-sessions");
+        struct Spoor *leaf = wq->spoor;
+        walkqid_free(wq);
+        spoor_unref(root);
+        char buf[2048];
+        long got = devctl.read(leaf, buf, sizeof buf, 0);
+        TEST_ASSERT(got > 0, "9p-sessions read positive with a live session");
+        int seen = 0;
+        const char *want = "sess ctlprobe id=- msize=8192";
+        int wl = 0; while (want[wl]) wl++;
+        for (long i = 0; i + wl <= got && !seen; i++) {
+            int j = 0;
+            while (j < wl && buf[i + j] == want[j]) j++;
+            if (j == wl) seen = 1;
+        }
+        TEST_ASSERT(seen, "the live session's sess row renders via the Dev vtable");
+        spoor_unref(leaf);
+    }
+
     p9_attached_set_ctl_ident(a, "relabeled", 42);
     struct att_ctl_probe p2 = { "relabeled", false, 0, 0, 0, 0, 0 };
     p9_attached_ctl_iterate(att_ctl_cb, &p2);

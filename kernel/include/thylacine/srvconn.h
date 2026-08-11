@@ -270,7 +270,7 @@ struct SrvConn {
     // is bidirectional — POLLIN watches c2s, POLLOUT watches s2c, and a
     // teardown surfaces POLLHUP/POLLERR on both. Every producer site
     // (srvconn_client_send + srvconn_server_send into chan_produce,
-    // srvconn_teardown's chan_set_eof on both directions) calls
+    // srvconn_teardown's eof latch on both directions) calls
     // poll_waiter_list_wake(&poll_list) after releasing the channel lock,
     // mirroring kernel/pipe.c's discipline (specs/poll.tla MakeReady).
     struct poll_waiter_list poll_list;
@@ -306,7 +306,7 @@ struct SrvConn {
     // SYS_ATTACH_9P_SRV wraps a byte-mode SrvConn in a kernel-owned 9P
     // client (via p9_srvconn_transport). After this call, the SrvConn's
     // c2s / s2c rings are LOAD-BEARING for the kernel client — any
-    // teardown (chan_set_eof on either ring) breaks all subsequent
+    // teardown (the eof latch on either ring) breaks all subsequent
     // Twalk / Tread / Twrite sends.
     //
     // The default handle_close discipline for KOBJ_SRV is "close the

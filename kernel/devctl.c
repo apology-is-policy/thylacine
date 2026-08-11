@@ -556,7 +556,10 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
                               const struct p9_client_ctl *snap, void *arg) {
     struct ctl_9p_fmt *f = (struct ctl_9p_fmt *)arg;
     size_t n;
-    EMIT_STR("sess ");        EMIT_STR(label);
+    // Belt to the F6 setter guard: a computed-empty label would read as
+    // the overflow sentinel and abort the remaining listing.
+    EMIT_STR("sess ");
+    if (label[0]) EMIT_STR(label); else EMIT_STR("-");
     EMIT_STR(" id=");
     if (id < 0) EMIT_STR("-"); else EMIT_DEC(id);
     EMIT_STR(" msize=");      EMIT_DEC(msize);

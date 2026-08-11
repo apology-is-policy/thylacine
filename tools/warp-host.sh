@@ -193,6 +193,24 @@ wedge)
         exit 1
     fi
     ;;
+wedge-gate)
+    # #210 audit F2: the REGRESSION gate. Both legs must PROGRESS; any
+    # WEDGED verdict lc_fails inside the probe (WARP_WEDGE_EXPECT=progress),
+    # and this arm additionally requires BOTH progress lines -- so a
+    # recurrence of the second-launch fence deadlock is red here, not
+    # "captured". The pre-fix code fails leg 2 by construction.
+    out="$REPO_ROOT/build/warp-wedge-gate.log"
+    ssh "$HOST" "cd $RREPO && WARP_WEDGE_EXPECT=progress expect tools/warp/glq-wedge-probe.exp" | tee "$out" || true
+    echo "== wedge-gate verdict =="
+    if grep -q "WEDGE-PROBE PACED: PROGRESSES" "$out" \
+        && grep -q "WEDGE-PROBE UNPACED: PROGRESSES" "$out" \
+        && grep -q "LS-CI PASS: glq-wedge-probe:" "$out"; then
+        echo "WEDGE GATE: PASS (both legs progress)"
+    else
+        echo "WEDGE GATE: FAIL (a leg wedged or the probe died -- the #210 class)"
+        exit 1
+    fi
+    ;;
 *)
     usage
     ;;

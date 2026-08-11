@@ -87,13 +87,21 @@ static void attached_ctl_unlink(struct p9_attached *a) {
 void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
                                int id) {
     if (!a || a->magic != P9_ATTACHED_MAGIC) return;
+    // Audit F6: the store runs under the registry lock so a concurrent
+    // walker never reads a torn label, and an empty label maps to "-" —
+    // fmt_str("") is devctl's overflow sentinel, so an empty label would
+    // abort the whole sessions listing (the 923235a3 class, reintroduced
+    // by data instead of by literal).
+    spin_lock(&g_p9_ctl_lock);
     if (label) {
         size_t n = 0;
         for (; n < sizeof(a->ctl_label) - 1 && label[n]; n++)
             a->ctl_label[n] = label[n];
         a->ctl_label[n] = 0;
+        if (n == 0) { a->ctl_label[0] = '-'; a->ctl_label[1] = 0; }
     }
     a->ctl_id = id;
+    spin_unlock(&g_p9_ctl_lock);
 }
 
 void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg) {

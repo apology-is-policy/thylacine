@@ -724,10 +724,11 @@ long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
         done += put;
         if (done >= n) {
             // #210: one whole server reply buffer delivered (one 9P reply
-            // frame on the devsrv server arm). Role-held — the #354 writer
-            // role serializes blocking producers, so the plain increment
-            // has exactly one writer at a time.
-            cn->s2c_frames++;
+            // frame on the devsrv server arm). The #354 writer role makes
+            // this single-writer; the atomic is for the ctl walker's
+            // concurrent cross-CPU read (audit F5 — the tree's convention
+            // for lock-free counter pairs, e.g. g_srvconn_created).
+            __atomic_fetch_add(&cn->s2c_frames, 1u, __ATOMIC_RELAXED);
             ret = done;
             break;                            // whole buffer delivered
         }
@@ -847,7 +848,7 @@ long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {
 // This blocking variant mirrors srvconn_client_recv's discipline
 // against c2s instead of s2c: spin_lock the channel, check count > 0
 // (read) / eof (return 0), else tsleep on the channel's Rendez until
-// chan_produce wakes it or chan_set_eof latches eof. Deadline = 0
+// chan_produce wakes it or srvconn_teardown latches eof. Deadline = 0
 // blocks indefinitely — a future per-connection idle timer would
 // extend by setting a server_deadline_ns analog to client_deadline_ns.
 long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
@@ -886,7 +887,7 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
 
         // tsleep with deadline=0 — block indefinitely. wake fires from
         // srvconn_client_send's chan_produce (data arrived) or
-        // srvconn_teardown's chan_set_eof on c2s (peer closed).
+        // srvconn_teardown's eof latch on c2s (peer closed).
         int ts = tsleep(&ch->rendez, chan_cond_readable, ch, 0u);
         if (ts == TSLEEP_TIMEDOUT) {
             ret = -1;                         // Unreachable with deadline=0; defense in depth.
@@ -912,7 +913,7 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
 // Both channel locks are taken in a fixed order (c2s → s2c) across the
 // sample-and-register critical section, matching kernel/pipe.c's r->lock-
 // across-sample-and-register discipline. No other path takes both locks
-// (chan_produce / chan_consume_nonblock / chan_set_eof each take a single
+// (chan_produce / chan_consume_nonblock each take a single
 // ch->lock), so this dual-lock acquire cannot deadlock with itself or with
 // any producer.
 //
@@ -967,7 +968,7 @@ void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg) {
         row.state           = (u8)cn->state;
         row.byte_mode       = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
         row.kernel_attached = __atomic_load_n(&cn->kernel_attached, __ATOMIC_ACQUIRE);
-        row.s2c_frames      = cn->s2c_frames;
+        row.s2c_frames      = __atomic_load_n(&cn->s2c_frames, __ATOMIC_RELAXED);
 
         spin_lock(&cn->c2s.lock);
         row.c2s_produced = cn->c2s.produced;

@@ -45,6 +45,13 @@
 #   WEDGE-PROBE PASS                      (both verdicts + autopsy-if-wedged)
 #
 # env: WARP_REPO, WARP_WORK as the sibling scenarios.
+#
+# WARP_WEDGE_EXPECT=progress (#210 audit F2): the REGRESSION-GATE mode.
+# Post-fix, both legs must PROGRESS; any WEDGED verdict is an lc_fail
+# instead of an autopsy+PASS -- so a recurrence of the second-launch
+# fence deadlock turns the gate red (the pre-fix code fails leg 2 by
+# construction; 7 pre-fix transcripts are the red witness). Without the
+# env the probe keeps its capture semantics (PASS = evidence either way).
 
 set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
 set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
@@ -60,6 +67,9 @@ if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900
 
 set DW 1280
 set DH 800
+
+set expect_progress [expr {[info exists ::env(WARP_WEDGE_EXPECT)] \
+                           && $::env(WARP_WEDGE_EXPECT) eq "progress"}]
 
 file mkdir $work
 file delete -force $work/pool-wedge.img $work/disk-wedge.img
@@ -307,6 +317,9 @@ if {[run_probe_leg paced 1]} {
     reap_progressing_leg paced
 } else {
     puts "\nWEDGE-PROBE PACED: WEDGED\n"
+    if {$expect_progress} {
+        lc_fail "paced leg WEDGED under WARP_WEDGE_EXPECT=progress (the #210 class)"
+    }
     autopsy paced
     set wedged_captured 1
     # The wedge is captured; pacing was not the variable after all this
@@ -324,6 +337,9 @@ if {[run_probe_leg unpaced 0]} {
     reap_progressing_leg unpaced
 } else {
     puts "\nWEDGE-PROBE UNPACED: WEDGED\n"
+    if {$expect_progress} {
+        lc_fail "unpaced (second-launch) leg WEDGED under WARP_WEDGE_EXPECT=progress (the #210 class)"
+    }
     autopsy unpaced
     set wedged_captured 1
 }

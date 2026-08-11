@@ -285,6 +285,13 @@ by-design flows (the #214-F1 conflation lesson):
   healthy boot including death flows; the first 4 per client are logged
   (`9p: ownerless frame tag=.. type=..`).
 
+The snapshot also carries the in-flight table (up to
+`P9_CTL_INFLIGHT_MAX` tags): per tag the done/async flags plus the sent
+T-type (`kind`) and primary target fid, read from the session's
+`outstanding[]` under the same `c->lock` — a parked op is identifiable by
+WHAT it waits on (`33-devctl.md` renders these as `t<N><d|w>[a]:<kind>:
+<fid>`).
+
 Only `p9_attached` sessions appear in the `/ctl` registry (the sole
 production client funnel, `kernel/9p_attach.c`); raw test clients carry
 the counters but are unlisted.
