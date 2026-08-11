@@ -25,6 +25,33 @@
 static u64 g_srvconn_created;
 static u64 g_srvconn_freed;
 
+// #210: the /ctl/9p-sessions registry — every live SrvConn, singly linked
+// through cn->ctl_next. A zeroed spin_lock_t is the unlocked form (the
+// chan_init convention). Lock order: g_srvconn_ctl_lock -> ch->lock (the
+// walker snapshots chans while holding the registry lock); the unlink
+// path takes ONLY the registry lock, so there is no inversion. Unlink
+// runs on the last unref BEFORE teardown/free — the walker holds the
+// registry lock across its whole walk, so it can never reach a conn
+// whose free has begun.
+static spin_lock_t     g_srvconn_ctl_lock;
+static struct SrvConn *g_srvconn_ctl_head;
+
+static void srvconn_ctl_link(struct SrvConn *cn) {
+    spin_lock(&g_srvconn_ctl_lock);
+    cn->ctl_next       = g_srvconn_ctl_head;
+    g_srvconn_ctl_head = cn;
+    spin_unlock(&g_srvconn_ctl_lock);
+}
+
+static void srvconn_ctl_unlink(struct SrvConn *cn) {
+    spin_lock(&g_srvconn_ctl_lock);
+    struct SrvConn **pp = &g_srvconn_ctl_head;
+    while (*pp && *pp != cn) pp = &(*pp)->ctl_next;
+    if (*pp) *pp = cn->ctl_next;
+    spin_unlock(&g_srvconn_ctl_lock);
+    cn->ctl_next = NULL;
+}
+
 // =============================================================================
 // Ring buffer ops. PRECONDITION: the caller holds the channel's lock.
 // =============================================================================
@@ -59,8 +86,9 @@ static long chan_ring_write(struct srvconn_chan *ch, const u8 *buf, long n) {
     chan_copy(ch->buf + ch->head, buf, first);
     chan_copy(ch->buf, buf + first, want - first);
 
-    ch->head   = (ch->head + want) % ch->cap;
-    ch->count += want;
+    ch->head     = (ch->head + want) % ch->cap;
+    ch->count   += want;
+    ch->produced += want;          // #210: lifetime intake (ch->lock held)
     return (long)want;
 }
 
@@ -75,8 +103,9 @@ static long chan_ring_read(struct srvconn_chan *ch, u8 *buf, long n) {
     chan_copy(buf, ch->buf + ch->tail, first);
     chan_copy(buf + first, ch->buf, want - first);
 
-    ch->tail   = (ch->tail + want) % ch->cap;
-    ch->count -= want;
+    ch->tail     = (ch->tail + want) % ch->cap;
+    ch->count   -= want;
+    ch->consumed += want;          // #210: lifetime drain (ch->lock held)
     return (long)want;
 }
 
@@ -95,9 +124,11 @@ static void chan_init(struct srvconn_chan *ch, u8 *buf, u32 cap) {
     ch->count   = 0;
     ch->head    = 0;
     ch->tail    = 0;
-    ch->eof     = false;
-    ch->reading = false;
-    ch->writing = false;
+    ch->eof      = false;
+    ch->reading  = false;
+    ch->writing  = false;
+    ch->produced = 0;
+    ch->consumed = 0;
     rendez_init(&ch->rendez);
     rendez_init(&ch->wrendez);
     poll_waiter_list_init(&ch->role_waiters);
@@ -259,13 +290,9 @@ static long chan_consume_nonblock(struct srvconn_chan *ch, u8 *buf, long n) {
     return eof ? -1 : 0;
 }
 
-// chan_set_eof — latch EOF on a direction + wake its blocked consumer.
-static void chan_set_eof(struct srvconn_chan *ch) {
-    spin_lock(&ch->lock);
-    ch->eof = true;
-    spin_unlock(&ch->lock);
-    wakeup(&ch->rendez);
-}
+// (chan_set_eof was retired: srvconn_teardown latches BOTH directions'
+// eof inside one dual-lock critical section — see its comment on why a
+// per-direction latch would let a poller observe HUP without ERR.)
 
 // =============================================================================
 // Lifecycle.
@@ -318,6 +345,7 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     // valid SrvConn, so a torn observer fast-fails the magic check.
     cn->magic = SRV_CONN_MAGIC;
 
+    srvconn_ctl_link(cn);          // #210: visible to /ctl/9p-sessions
     __atomic_fetch_add(&g_srvconn_created, 1u, __ATOMIC_RELAXED);
     return cn;
 }
@@ -383,13 +411,16 @@ void srvconn_unref(struct SrvConn *cn) {
         extinction("srvconn_unref: refcount underflow");
     if (pre != 1) return;
 
-    // Last reference. Tear down (idempotent — a prior teardown is fine),
-    // then free the connection. Clobber the magic before the kfree so a
-    // racing observer of the freed object fast-fails rather than
-    // dereferencing freed memory. The ring buffers are the SrvConn's own
-    // heap storage (CF-3 B): freed here, after teardown has unparked
+    // Last reference. Unlink from the ctl registry FIRST (the walker holds
+    // the registry lock across its walk, so after unlink returns no walker
+    // can reach this conn), then tear down (idempotent — a prior teardown
+    // is fine), then free the connection. Clobber the magic before the
+    // kfree so a racing observer of the freed object fast-fails rather
+    // than dereferencing freed memory. The ring buffers are the SrvConn's
+    // own heap storage (CF-3 B): freed here, after teardown has unparked
     // every blocked party (no thread can be inside a ring copy at the
     // last unref — each blocking op holds a conn ref across its park).
+    srvconn_ctl_unlink(cn);
     srvconn_teardown(cn);
     cn->magic = 0;
     kfree(cn->c2s.buf);
@@ -691,7 +722,15 @@ long srvconn_server_send_blocking(struct SrvConn *cn, const u8 *buf, long n) {
             break;
         }
         done += put;
-        if (done >= n) { ret = done; break; } // whole buffer delivered
+        if (done >= n) {
+            // #210: one whole server reply buffer delivered (one 9P reply
+            // frame on the devsrv server arm). Role-held — the #354 writer
+            // role serializes blocking producers, so the plain increment
+            // has exactly one writer at a time.
+            cn->s2c_frames++;
+            ret = done;
+            break;                            // whole buffer delivered
+        }
 
         // Ring full -> park until the kernel client drains s2c (wakes
         // wrendez) or teardown latches eof. tsleep re-checks chan_cond_
@@ -912,6 +951,41 @@ short srvconn_poll(struct SrvConn *cn, short events, struct poll_waiter *pw) {
 
 u64 srvconn_total_created(void) {
     return __atomic_load_n(&g_srvconn_created, __ATOMIC_RELAXED);
+}
+
+// #210: walk every live conn for /ctl/9p-sessions. Registry lock held
+// across the walk (see srvconn_ctl_unlink for why that pins lifetimes);
+// each chan's counters snapshot under its own lock — registry -> ch->lock
+// is the documented order and no path takes them in reverse.
+void srvconn_ctl_iterate(srvconn_ctl_cb cb, void *arg) {
+    if (!cb) return;
+    spin_lock(&g_srvconn_ctl_lock);
+    for (struct SrvConn *cn = g_srvconn_ctl_head; cn; cn = cn->ctl_next) {
+        struct srvconn_ctl_row row;
+        row.peer_pid        = cn->peer_pid;
+        row.msize           = cn->msize;
+        row.state           = (u8)cn->state;
+        row.byte_mode       = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
+        row.kernel_attached = __atomic_load_n(&cn->kernel_attached, __ATOMIC_ACQUIRE);
+        row.s2c_frames      = cn->s2c_frames;
+
+        spin_lock(&cn->c2s.lock);
+        row.c2s_produced = cn->c2s.produced;
+        row.c2s_consumed = cn->c2s.consumed;
+        row.c2s_buffered = cn->c2s.count;
+        row.c2s_eof      = cn->c2s.eof;
+        spin_unlock(&cn->c2s.lock);
+
+        spin_lock(&cn->s2c.lock);
+        row.s2c_produced = cn->s2c.produced;
+        row.s2c_consumed = cn->s2c.consumed;
+        row.s2c_buffered = cn->s2c.count;
+        row.s2c_eof      = cn->s2c.eof;
+        spin_unlock(&cn->s2c.lock);
+
+        if (!cb(&row, arg)) break;
+    }
+    spin_unlock(&g_srvconn_ctl_lock);
 }
 
 u64 srvconn_total_freed(void) {

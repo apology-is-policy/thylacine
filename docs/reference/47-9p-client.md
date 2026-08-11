@@ -261,6 +261,34 @@ The fix: at the **first** EAGAIN — before any window can open — `client_send
 
 Before CF-3 A no caller could exceed either bound (`SYS_RW_MAX` was 4096), so the miss was latent. The ceiling lift exposed it immediately: an unclamped bulk `Twrite` **failed the frame build** (`p9_build_twrite` `cap < total`) and returned `-P9_E_IO` on every over-payload write — the go compiler's object writes all EIO'd, no cache puts landed, and the warm build ran cold. `9p_client.bulk_write_clamps_short` pins the clamp (an over-payload write must return the payload max as `accepted`, never EIO). The read-side clamp is belt (servers clamp their replies anyway — `maxgot == 32757` on the boot mount); the write-side clamp is load-bearing.
 
+### The demux counter suite + the ownerless taxonomy (#210)
+
+`demux_frame_locked` maintains six per-client counters (all under
+`c->lock`; it is the sole mutation site), snapshotted by
+`p9_client_ctl_snapshot` and surfaced at `/ctl/9p-sessions` (see
+`33-devctl.md`): `frames_rx` (every steady-state frame that reached the
+demux), `demux_owned` / `demux_wakes` (frames with a live `inflight[tag]`
+submitter / sync wakeups issued), and a three-way ownerless split. The
+split exists because "ownerless" conflates one pathology with THREE
+by-design flows (the #214-F1 conflation lesson):
+
+- `demux_orphan_clunk` — `p9_client_clunk_async` never registers
+  `inflight[tag]`, so every async Rclunk arrives ownerless (constant
+  FID-LIFECYCLE background).
+- `demux_orphan_flush` — the #845 abandon path sends its Tflush
+  ownerless, so every abandon's Rflush lands here (death-driven).
+- `demux_orphan_late` — an abandoned op's late ORIGINAL reply: classified
+  by the session table (`outstanding[tag].active && .awaiting_flush`),
+  read under `c->lock`.
+- `demux_orphan` — the residue: a frame NO living mechanism accounts for
+  (misroute / tag corruption / genuine loss surfacing). ZERO on every
+  healthy boot including death flows; the first 4 per client are logged
+  (`9p: ownerless frame tag=.. type=..`).
+
+Only `p9_attached` sessions appear in the `/ctl` registry (the sole
+production client funnel, `kernel/9p_attach.c`); raw test clients carry
+the counters but are unlisted.
+
 ## Compile-time invariants
 
 `_Static_assert` in `kernel/9p_client.c`:

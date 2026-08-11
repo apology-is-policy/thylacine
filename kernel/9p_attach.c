@@ -10,6 +10,7 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/page.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
@@ -41,6 +42,70 @@ _Static_assert(__builtin_offsetof(struct p9_spoor_transport, magic) == 0,
 _Static_assert(__builtin_offsetof(struct p9_srvconn_transport, magic) == 0,
                "p9_srvconn_transport.magic must be at offset 0 for the "
                "dual-destroy offset-0 read invariant");
+
+// =============================================================================
+// #210: the /ctl/9p-sessions registry — every live attached session,
+// singly linked through a->ctl_next. Only p9_attached sessions register
+// (the sole production p9_client funnel); loopback test clients never
+// appear. Lock order: registry -> c->lock (the walker snapshots each
+// client under its own lock); link/unlink take ONLY the registry lock,
+// so there is no inversion. Unlink runs at the top of the last-unref
+// destroy — the walker holds the registry lock across its whole walk, so
+// it can never reach an attached whose teardown has begun.
+// =============================================================================
+
+static spin_lock_t         g_p9_ctl_lock;
+static struct p9_attached *g_p9_ctl_head;
+
+static void attached_ctl_link(struct p9_attached *a,
+                              const u8 *aname, size_t aname_len) {
+    // Default label: the attach aname (printable-ASCII-sanitized,
+    // truncated). srvconn_attach_dev9p_root relabels /srv sessions.
+    size_t n = 0;
+    for (; n < sizeof(a->ctl_label) - 1 && n < aname_len; n++) {
+        u8 ch = aname[n];
+        a->ctl_label[n] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '?';
+    }
+    a->ctl_label[n] = 0;
+    if (n == 0) { a->ctl_label[0] = '-'; a->ctl_label[1] = 0; }
+    a->ctl_id = -1;
+    spin_lock(&g_p9_ctl_lock);
+    a->ctl_next   = g_p9_ctl_head;
+    g_p9_ctl_head = a;
+    spin_unlock(&g_p9_ctl_lock);
+}
+
+static void attached_ctl_unlink(struct p9_attached *a) {
+    spin_lock(&g_p9_ctl_lock);
+    struct p9_attached **pp = &g_p9_ctl_head;
+    while (*pp && *pp != a) pp = &(*pp)->ctl_next;
+    if (*pp) *pp = a->ctl_next;
+    spin_unlock(&g_p9_ctl_lock);
+    a->ctl_next = NULL;
+}
+
+void p9_attached_set_ctl_ident(struct p9_attached *a, const char *label,
+                               int id) {
+    if (!a || a->magic != P9_ATTACHED_MAGIC) return;
+    if (label) {
+        size_t n = 0;
+        for (; n < sizeof(a->ctl_label) - 1 && label[n]; n++)
+            a->ctl_label[n] = label[n];
+        a->ctl_label[n] = 0;
+    }
+    a->ctl_id = id;
+}
+
+void p9_attached_ctl_iterate(p9_attached_ctl_cb cb, void *arg) {
+    if (!cb) return;
+    spin_lock(&g_p9_ctl_lock);
+    for (struct p9_attached *a = g_p9_ctl_head; a; a = a->ctl_next) {
+        struct p9_client_ctl snap;
+        p9_client_ctl_snapshot(a->client, &snap);
+        if (!cb(a->ctl_label, a->ctl_id, a->msize, &snap, arg)) break;
+    }
+    spin_unlock(&g_p9_ctl_lock);
+}
 
 struct p9_attached *p9_attached_create(
         struct p9_transport_ops transport_ops,
@@ -117,6 +182,7 @@ struct p9_attached *p9_attached_create(
     // F2: adapter / transport_tx / transport_rx already NULL via KP_ZERO;
     // sys_attach_9p_handler installs them via p9_attached_install_transport
     // after this returns. Test-loopback paths never install.
+    attached_ctl_link(a, aname, aname_len);   // #210: visible to /ctl
     return a;
 }
 
@@ -158,6 +224,10 @@ int p9_attached_install_transport(struct p9_attached *a,
 // closing AFTER the root holds a ref via attached_owner so this only
 // fires when both the root's hold AND every walked priv's hold are gone.
 static void attached_destroy_inner(struct p9_attached *a) {
+    // #210: leave /ctl visibility FIRST — after unlink returns, no ctl
+    // walker can reach this attached (the walker holds the registry lock
+    // across its whole walk), so everything below tears down unobserved.
+    attached_ctl_unlink(a);
     // Clunk the root fid before destroying the client. The client's
     // session module would clunk every fid at close anyway (when its
     // refcount hits 0), but explicit-clunk-then-destroy is the
@@ -303,6 +373,10 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
     // The HANDSHAKE_DEADLINE armed above bounded only the serial, fresh-client
     // handshake, where a timeout tears down the unshared client with no desync.
     srvconn_set_client_deadline(cn, 0);
+
+    // #210: attribute this session in /ctl/9p-sessions by the CONNECTING
+    // peer's pid (aname is often empty on the /srv path).
+    p9_attached_set_ctl_ident(att, "srv", cn->peer_pid);
 
     // B1 per-attach loose mode (I-38 opt-in): stamped on the still-private
     // client BEFORE the root Spoor exists -- the caller's handle publication

@@ -1144,8 +1144,9 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
 // been explicit (the Plan 9 shape) -- the cursor is syscall-layer sugar. A
 // byte-mode /srv connection endpoint is itself a KOBJ_SPOOR conn Spoor, so
 // its bytes ride this path too -- devsrv_write picks the server arm
-// (srvconn_server_send) or the CSRVCLIENT client arm (srvconn_client_send)
-// by the conn direction. The client-side KObj_Srv conn handle that once
+// (srvconn_server_send_blocking, #348) or the CSRVCLIENT client arm
+// (srvconn_client_send_blocking, CF-3 B) by the conn direction. The
+// client-side KObj_Srv conn handle that once
 // routed here was retired with SYS_SRV_CONNECT (stalk-3c); the
 // kernel-attached no-direct-I/O guard moved with it into devsrv_write.
 static s64 spoor_write_common(struct Proc *p, hidx_t h, const u8 *kbuf,

@@ -55,6 +55,7 @@ void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
 void test_srvconn_server_send_blocks_then_drain_wakes(void);
+void test_srvconn_ctl_counters(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -1046,4 +1047,66 @@ void test_srvconn_client_send_blocking_poll_edge(void) {
     test_kthread_join_free(tp, &g_pe_exited_p);
     test_kthread_join_free(tw, &g_pe_exited_w);
     srvconn_unref(cn);
+}
+
+// ---------------------------------------------------------------------------
+// #210: the ctl registry + ring counters -- conservation (produced ==
+// consumed + buffered per direction), the whole-frame server send count,
+// registry visibility by peer pid, and unlink at the last unref.
+// ---------------------------------------------------------------------------
+
+struct sc_ctl_probe {
+    int  want_pid;
+    bool found;
+    struct srvconn_ctl_row row;
+};
+
+static bool sc_ctl_cb(const struct srvconn_ctl_row *row, void *arg) {
+    struct sc_ctl_probe *p = (struct sc_ctl_probe *)arg;
+    if (row->peer_pid != p->want_pid) return true;
+    p->row   = *row;
+    p->found = true;
+    return false;
+}
+
+void test_srvconn_ctl_counters(void) {
+    struct SrvConn *cn = srvconn_create(0xAAAAu, 4242, false, 0, SRVCONN_MSIZE);
+    TEST_ASSERT(cn != NULL, "srvconn_create");
+
+    // One whole 71-byte "reply frame" through s2c: blocking server send
+    // (never parks -- the ring is empty), then the client drains it.
+    u8 frame[71];
+    for (u32 i = 0; i < sizeof frame; i++) frame[i] = (u8)(0x51 + i);
+    TEST_EXPECT_EQ(srvconn_server_send_blocking(cn, frame, (long)sizeof frame),
+                   (long)sizeof frame, "server frame delivered whole");
+    u8 out[128];
+    TEST_EXPECT_EQ(srvconn_client_recv(cn, out, (long)sizeof out),
+                   (long)sizeof frame, "client drains the frame");
+
+    // And 5 bytes into c2s left UNDRAINED -- the buffered arm of the
+    // conservation law.
+    const u8 req[5] = { 1, 2, 3, 4, 5 };
+    TEST_EXPECT_EQ(srvconn_client_send(cn, req, 5), (long)5, "client bytes in");
+
+    struct sc_ctl_probe p = { 4242, false, {0} };
+    srvconn_ctl_iterate(sc_ctl_cb, &p);
+    TEST_ASSERT(p.found,                                  "conn visible in the ctl registry");
+    TEST_EXPECT_EQ(p.row.s2c_produced, (u64)sizeof frame, "s2c produced = the frame");
+    TEST_EXPECT_EQ(p.row.s2c_consumed, (u64)sizeof frame, "s2c consumed = the frame");
+    TEST_EXPECT_EQ((u64)p.row.s2c_buffered, (u64)0,       "s2c drained empty");
+    TEST_EXPECT_EQ(p.row.s2c_frames, (u64)1,              "one whole server send counted");
+    TEST_EXPECT_EQ(p.row.c2s_produced, (u64)5,            "c2s produced = the request bytes");
+    TEST_EXPECT_EQ(p.row.c2s_consumed, (u64)0,            "c2s not drained");
+    TEST_EXPECT_EQ((u64)p.row.c2s_buffered, (u64)5,       "c2s holds the undrained bytes");
+    TEST_ASSERT(p.row.c2s_produced == p.row.c2s_consumed + p.row.c2s_buffered,
+                "c2s conservation: produced == consumed + buffered");
+    TEST_ASSERT(p.row.s2c_produced == p.row.s2c_consumed + p.row.s2c_buffered,
+                "s2c conservation: produced == consumed + buffered");
+
+    srvconn_teardown(cn);
+    srvconn_unref(cn);
+
+    struct sc_ctl_probe p2 = { 4242, false, {0} };
+    srvconn_ctl_iterate(sc_ctl_cb, &p2);
+    TEST_ASSERT(!p2.found, "freed conn unlinked from the registry");
 }

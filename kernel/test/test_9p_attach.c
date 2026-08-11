@@ -23,6 +23,7 @@ void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
+void test_p9_attached_ctl_registry(void);
 
 // File-scope storage for the loopback's response buffer. The attached
 // struct heap-allocates everything else (client + recv_buf).
@@ -477,6 +478,75 @@ void test_p9_attached_walked_outlives_root_no_uaf(void) {
     // If we got here without an extinct / UAF crash, F2 is closed.
     // The attached is destroyed by walked's last unref; we don't call
     // p9_attached_destroy(a) ourselves.
+
+    p9_loopback_destroy(&g_loopback);
+}
+
+// ---------------------------------------------------------------------------
+// #210: the /ctl/9p-sessions registry — link at create, label from aname,
+// relabel via set_ctl_ident, unlink at the last unref. Also witnesses the
+// demux counters live: the Rattach rides the normal tagged path, so a
+// freshly-attached session must show frames_rx / demux_owned >= 1.
+// ---------------------------------------------------------------------------
+
+struct att_ctl_probe {
+    const char *want;      // label to find (NUL-terminated)
+    bool        found;
+    int         id;
+    u32         msize;
+    u64         frames_rx;
+    u64         demux_owned;
+    u64         demux_orphan;
+};
+
+static bool att_ctl_cb(const char *label, int id, u32 msize,
+                       const struct p9_client_ctl *snap, void *arg) {
+    struct att_ctl_probe *p = (struct att_ctl_probe *)arg;
+    int i = 0;
+    while (p->want[i] && label[i] == p->want[i]) i++;
+    if (p->want[i] != 0 || label[i] != 0) return true;   // no match; keep walking
+    p->found        = true;
+    p->id           = id;
+    p->msize        = msize;
+    p->frames_rx    = snap->frames_rx;
+    p->demux_owned  = snap->demux_owned;
+    p->demux_orphan = snap->demux_orphan;
+    return false;
+}
+
+void test_p9_attached_ctl_registry(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                attach_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init");
+
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'c','t','l','p','r','o','b','e'};
+    struct p9_attached *a = p9_attached_create(
+        p9_loopback_ops_for(&g_loopback),
+        4096, 0, 8192,
+        uname, sizeof(uname), aname, sizeof(aname), 0, NULL);
+    TEST_ASSERT(a != NULL, "attached created");
+
+    struct att_ctl_probe p = { "ctlprobe", false, 0, 0, 0, 0, 0 };
+    p9_attached_ctl_iterate(att_ctl_cb, &p);
+    TEST_ASSERT(p.found,                       "session registered under its aname label");
+    TEST_EXPECT_EQ((s64)p.id, (s64)-1,         "default ctl id is -1");
+    TEST_EXPECT_EQ((u64)p.msize, (u64)8192,    "ctl row reports the msize");
+    TEST_ASSERT(p.frames_rx >= 1,              "the Rattach was demuxed (frames_rx)");
+    TEST_ASSERT(p.demux_owned >= 1,            "the Rattach had a live owner (demux_owned)");
+    TEST_EXPECT_EQ(p.demux_orphan, (u64)0,     "no ownerless frames on a clean handshake");
+
+    p9_attached_set_ctl_ident(a, "relabeled", 42);
+    struct att_ctl_probe p2 = { "relabeled", false, 0, 0, 0, 0, 0 };
+    p9_attached_ctl_iterate(att_ctl_cb, &p2);
+    TEST_ASSERT(p2.found,                      "relabel visible in the registry");
+    TEST_EXPECT_EQ((s64)p2.id, (s64)42,        "relabel carries the new id");
+
+    p9_attached_destroy(a);
+    struct att_ctl_probe p3 = { "relabeled", false, 0, 0, 0, 0, 0 };
+    p9_attached_ctl_iterate(att_ctl_cb, &p3);
+    TEST_ASSERT(!p3.found,                     "destroyed session unlinked from the registry");
 
     p9_loopback_destroy(&g_loopback);
 }
