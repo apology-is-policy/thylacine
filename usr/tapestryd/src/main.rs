@@ -486,6 +486,30 @@ impl Driver for Tapestryd {
                     unsafe { t_close(c.raw_fd()) };
                 }
             }
+            // #210 custody mirror: fold every conn's park/parse posture
+            // into Comp so the W_CTL reader (one conn) sees its siblings.
+            #[cfg(feature = "test-mode")]
+            {
+                let (mut fp, mut rp, mut ib) = (0u32, 0u32, 0u32);
+                let (mut fc, mut ff) = (0u32, 0u32);
+                for c in &conns {
+                    let (f, r, b, cx, fd) = c.w210_summary();
+                    if f > 0 && fp == 0 {
+                        fc = cx;
+                        ff = fd;
+                    }
+                    fp += f as u32;
+                    rp += r as u32;
+                    if (b as u32) > ib {
+                        ib = b as u32;
+                    }
+                }
+                self.comp.w210_fparked = fp;
+                self.comp.w210_rparked = rp;
+                self.comp.w210_inbuf_max = ib;
+                self.comp.w210_f_ctx = fc;
+                self.comp.w210_f_fid = ff;
+            }
 
             // (4) Poll: both listeners (while room; tapestry then warp,
             // Warp-2c) + every conn, bounded by the time to the next FRAME

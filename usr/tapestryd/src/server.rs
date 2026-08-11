@@ -676,6 +676,22 @@ pub struct Comp {
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
+    /// #210 custody mirror: parked reads + request-buffer residue across
+    /// ALL conns, folded per tick by main's conns walk (the ctl reader's
+    /// conn cannot see its siblings). fparked/rparked = pending fence /
+    /// event reads held server-side; inbuf_max = the largest partial
+    /// request buffered (a persistent nonzero = a parse desync); f_ctx +
+    /// f_fid identify the first parked fence read.
+    #[cfg(feature = "test-mode")]
+    pub w210_fparked: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_rparked: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_inbuf_max: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_f_ctx: u32,
+    #[cfg(feature = "test-mode")]
+    pub w210_f_fid: u32,
 }
 
 /// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
@@ -695,6 +711,15 @@ struct WarpCtx {
     fences_in_flight: u32,
     fence_signaled: u64,
     fence_reported: u64,
+    /// #210 ledger reconciliation: every fenced write that REACHED the
+    /// dispatch funnel (rx), split by outcome (minted / E_AGAIN refused /
+    /// other error). The client's `issued` counts its successful fenced
+    /// writes, so at quiescence issued == minted must hold; rx - minted -
+    /// again - err > 0 would be an answered-without-dispatch arm.
+    fenced_rx: u64,
+    fenced_minted: u64,
+    fenced_again: u64,
+    fenced_err: u64,
     /// A fence of this ctx was ABANDONED (never retired within the
     /// driver's bound): the device may still be writing its backings, so
     /// every later retire under this ctx LEAKS rather than frees.
@@ -798,6 +823,16 @@ impl Comp {
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
+            #[cfg(feature = "test-mode")]
+            w210_fparked: 0,
+            #[cfg(feature = "test-mode")]
+            w210_rparked: 0,
+            #[cfg(feature = "test-mode")]
+            w210_inbuf_max: 0,
+            #[cfg(feature = "test-mode")]
+            w210_f_ctx: 0,
+            #[cfg(feature = "test-mode")]
+            w210_f_fid: 0,
         }
     }
 
@@ -2750,6 +2785,10 @@ impl Comp {
             fences_in_flight: 0,
             fence_signaled: 0,
             fence_reported: 0,
+            fenced_rx: 0,
+            fenced_minted: 0,
+            fenced_again: 0,
+            fenced_err: 0,
             fence_poisoned: false,
             leaked_bytes: 0,
             leaked_count: 0,
@@ -3379,8 +3418,26 @@ impl Comp {
                     // freed again (leak-on-wedge), and the fence must
                     // NOT be reported as signaled.
                     c.fence_poisoned = true;
-                } else if tag.fence_id > c.fence_signaled {
-                    c.fence_signaled = tag.fence_id;
+                } else {
+                    // #210 ROOT CAUSE FIX: count completions DENSELY per
+                    // ctx instead of publishing the device-GLOBAL max
+                    // fence id. The winsys counts fenced ops it ISSUED
+                    // and compares against `fence-signaled`; with the
+                    // global id, any ctx minted after prior fenced work
+                    // (the SECOND GL client of a boot) saw signaled >>
+                    // issued, and its unsigned in-flight throttle
+                    // (issued - signaled) wrapped -- the client parked on
+                    // the fence file forever while its next submit was
+                    // the only thing that could fill the park. Dense
+                    // per-ctx counts are the number space the client's
+                    // model (and this file's own W2d comment) always
+                    // assumed. Sound because completions are FIFO within
+                    // the single ring; pairs 1:1 with the in_flight
+                    // decrement above. The fence-file record's CONTENT
+                    // moves to count-space too -- the winsys never parses
+                    // it (the read is a doorbell; the counter is the
+                    // authority).
+                    c.fence_signaled += 1;
                 }
                 break;
             }
@@ -3488,13 +3545,31 @@ impl Comp {
     }
 
     fn warp_submit(&mut self, ctx_pub: u32, conn: u64, stream: &[u8]) -> Result<u64, u32> {
-        let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
-        match self.gpu.submit_3d(dev_ctx, ctx_pub, stream) {
-            Ok(f) => {
-                self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
-                Ok(f)
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
+        }
+        let r = (|| {
+            let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
+            match self.gpu.submit_3d(dev_ctx, ctx_pub, stream) {
+                Ok(f) => {
+                    self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                    Ok(f)
+                }
+                Err(e) => Err(map_fenced_err(e)),
             }
-            Err(e) => Err(map_fenced_err(e)),
+        })();
+        self.warp_fenced_account(ctx_pub, conn, &r);
+        r
+    }
+
+    /// #210: classify one fenced-funnel outcome on the ctx ledger.
+    fn warp_fenced_account(&mut self, ctx_pub: u32, conn: u64, r: &Result<u64, u32>) {
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            match r {
+                Ok(_) => c.fenced_minted += 1,
+                Err(e) if *e == E_AGAIN => c.fenced_again += 1,
+                Err(_) => c.fenced_err += 1,
+            }
         }
     }
 
@@ -3524,17 +3599,24 @@ impl Comp {
         if !built {
             return Err(p9::E_INVAL);
         }
-        let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
-        match self.gpu.transfer_3d(
-            to_host, dev_ctx, ctx_pub, res_id, level, x, y, z, w, h, d, offset, stride,
-            layer_stride,
-        ) {
-            Ok(f) => {
-                self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
-                Ok(f)
-            }
-            Err(e) => Err(map_fenced_err(e)),
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.fenced_rx += 1;      // #210: arrived at the fenced funnel
         }
+        let r = (|| {
+            let dev_ctx = self.warp_fenced_admit(ctx_pub, conn)?;
+            match self.gpu.transfer_3d(
+                to_host, dev_ctx, ctx_pub, res_id, level, x, y, z, w, h, d, offset, stride,
+                layer_stride,
+            ) {
+                Ok(f) => {
+                    self.wctx_mut(ctx_pub, conn).unwrap().fences_in_flight += 1;
+                    Ok(f)
+                }
+                Err(e) => Err(map_fenced_err(e)),
+            }
+        })();
+        self.warp_fenced_account(ctx_pub, conn, &r);
+        r
     }
 }
 
@@ -3699,6 +3781,26 @@ impl Conn {
     /// Which tree this conn serves (the F7 per-root budget).
     pub fn root(&self) -> u64 {
         self.root
+    }
+
+    /// #210 custody mirror input: this conn's parked fence/event reads +
+    /// request-buffer residue (a persistent nonzero in_buf between frames
+    /// is a parse desync), plus the first parked fence's identity. Folded
+    /// into Comp per tick by main's conns walk so the W_CTL reader (a
+    /// sibling conn) can see it.
+    #[cfg(feature = "test-mode")]
+    pub fn w210_summary(&self) -> (usize, usize, usize, u32, u32) {
+        let (fc, ff) = self
+            .pending_fences
+            .first()
+            .map_or((0, 0), |p| (p.ctx_pub, p.fid));
+        (
+            self.pending_fences.len(),
+            self.pending_reads.len(),
+            self.in_buf.len(),
+            fc,
+            ff,
+        )
     }
 
     // --- frame pump (the ptyfs bodies, verbatim shape) -----------------------
@@ -4226,6 +4328,45 @@ impl Conn {
                 let _ = core::fmt::write(
                     &mut s,
                     format_args!("fenced-free {}\n", comp.gpu.test_fenced_free()),
+                );
+                // #210: the per-ctx fence ledger, readable from ANY conn. The
+                // signaled/reported pair splits a wedged fence wait three
+                // ways: reported == signaled == the id a parked client waits
+                // past means the newest record was CONSUMED by a read (an
+                // Rread was sent -- a client still parked lost it in
+                // transport); reported < signaled means an undelivered
+                // record sits here while the park never fills (a poll_fences
+                // gap); inflight > 0 belies fenced-free.
+                for c in comp.warp_ctxs.iter().flatten() {
+                    let _ = core::fmt::write(
+                        &mut s,
+                        format_args!(
+                            "wctx {} inflight {} signaled {} reported {} rx {} mint {} again {} err {}\n",
+                            c.pub_id,
+                            c.fences_in_flight,
+                            c.fence_signaled,
+                            c.fence_reported,
+                            c.fenced_rx,
+                            c.fenced_minted,
+                            c.fenced_again,
+                            c.fenced_err
+                        ),
+                    );
+                }
+                // #210 custody: reads the server HOLDS right now (folded
+                // per tick across ALL conns) + parse residue. fparked=0
+                // with a client-side parked Tread on a fence fid means
+                // the read never became a park -- look at inbuf.
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "w210 fparked {} rparked {} inbuf {} fctx {} ffid {}\n",
+                        comp.w210_fparked,
+                        comp.w210_rparked,
+                        comp.w210_inbuf_max,
+                        comp.w210_f_ctx,
+                        comp.w210_f_fid
+                    ),
                 );
             }
             return self.read_str(tag, &s, a.offset, cap);

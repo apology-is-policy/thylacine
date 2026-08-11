@@ -153,17 +153,29 @@ the audited two-page sync ring is byte-identical.
   readback's completion is exactly what the client waits for).
 
 **The fence file** (`server.rs`): per-ctx bookkeeping
-(`fences_in_flight` / `fence_signaled` / `fence_reported`). A read returns
-the newest signaled id once (records coalesce — FIFO within the single
-ring, so id N retires everything <= N) and PARKS otherwise (`PendingFence`,
-the FK_EVENT netd leg) with all four cancel sites mirrored: clunk, Tversion
+(`fences_in_flight` / `fence_signaled` / `fence_reported`). Since the
+#210 fix, `fence_signaled` is a **dense per-ctx completion count** (`+= 1`
+per non-abandoned retirement, FIFO within the single ring), NOT the
+device-global fence id: the winsys counts fenced ops it *issued* and
+compares against `fence-signaled`, and the pre-fix global id put the two
+in different number spaces — any ctx minted after prior fenced work (the
+SECOND GL client of a boot) saw `signaled >> issued`, its unsigned
+in-flight throttle `issued - signaled` wrapped, and the client parked on
+the fence file for a record only its own blocked submission could produce
+(#210: deterministic second-launch deadlock, misread as "unpaced wedges"
+because every wedge observation was a second launch — the probe ran its
+paced leg first). The record's *content* is now the count too; the winsys
+never parses it (the read is a doorbell, the counter is the authority). A
+read returns one record when `signaled > reported` (records coalesce —
+count N retires everything <= N) and PARKS otherwise (`PendingFence`, the
+FK_EVENT netd leg) with all four cancel sites mirrored: clunk, Tversion
 reset, conn teardown, Tflush. A dead ctx EOFs the stream — and so does a
 **poisoned** one, unconditionally (round-5 F2). That EOF used to be
 conditional on `fence_signaled <= fence_reported`, which the client could
-suppress itself: fence ids are globally monotone, so any later submission
-that completed left `signaled > reported` and the read returned that higher
-id — which, under the coalescing rule above, *asserts the abandoned fence
-completed*. A poisoned ctx also refuses new submissions and transfers with
+suppress itself: the retire count is monotone, so any later submission
+that completed left `signaled > reported` and the read returned that
+record — which, under the coalescing rule above, *asserts the abandoned
+fence completed*. A poisoned ctx also refuses new submissions and transfers with
 `E_IO`: the poison is the ctx's terminal state, and the client must destroy
 and re-mint (a vindication clears it and the stream resumes). The serve loop
 (`main.rs`) pumps `warp_service_fences()` per pass and clamps the poll
@@ -505,6 +517,15 @@ Raw sampler files: `build/cpu-{gl,2d}-{composed,direct}.txt`.
 | virgl Direct | **wedged — #210** | 26% (idle floor) | — |
 | llvmpipe Composed 1280×800 | 2.2 | 354% | pswpin +280, discarded |
 | llvmpipe Direct 1280×800 | 2.4 | 359% | clean |
+
+**Asterisk (#213, found after these figures landed)**: the virgl legs
+rendered with a *failing texture stream* — `MAX_WARP_BOS_PER_CTX` (128)
+is smaller than GLQuake's texture count, so creates past the cap
+streamed `GL_OUT_OF_MEMORY` (1889 lines in the 4c gate log; invisible
+frames — #195) and the game drew a reduced texture set. Directionally
+this strengthens "no hidden stall" (a *lighter* virgl frame still only
+matched llvmpipe) but weakens the like-for-like parity claim; re-measure
+after the #213 cap fix.
 
 Reading: the Composed-GL arm has **no per-frame stall** — it reaches the
 4-thread llvmpipe control's exact fps using 2.1× less CPU with ~2.3
