@@ -313,6 +313,7 @@ The index (one line per row; refresh with the table):
 - **VIVARIUM: the syscall-entry phenotype branch + the spawn-time declaration (V-1b; I-43)** -- `kernel/syscall.c` (`syscall_dispatch`'s phenotype branch -> `viv_linux_dispatch`; the TIE ...
 - **File-backed EL0 mmap: the phenotype FILE arm (DISTRO D-3; I-36 GENERALIZES, I-12 + I-32 on the line)** -- **D-3a + D-3b + D-3c AS-BUILT.** `kernel/include/thylacine/viv ...
 - **DISTRO D-4: the PT_INTERP rewrite to the interpreter (exec dispatch)** -- `kernel/exec.c` (NEW `exec_interp_argv` + the rewrite block ...
+- **Per-mount `MNOEXEC`: the executable-mapping vouching gate (#217; I-12 PROVENANCE half)** -- `kernel/include/thylacine/territory.h` (`MNOEXEC` 0x0010 in the existing ` ...
 - **Initial bringup** -- `kernel/main.c`, `init/init.c`
 - **Boot banner** -- `kernel/main.c`
 
@@ -417,7 +418,7 @@ names).
 | I-9 | No wakeup lost between cond-check and sleep, incl. the death-wake (#811; frame-atomic for the elected 9P reader recv -- a mid-frame death defers its unwind to the next frame boundary, §8.8.1.1/#90) + terminate-`interrupt` (LS-5) generalizations + the Weft-4 readiness-ring single-cache-line poke (the store-buffer register-then-observe) | `scheduler.tla`, `poll.tla`, `cons_poll.tla`, `net_poll.tla`, `weft_readiness.tla`, `tsleep.tla`, `death_wake.tla`, `reader_frame.tla` (#90); torpor leg prose |
 | I-10 | Per-9P-session tag uniqueness (tag==table index; no reuse until reply/Rflush, #845) | `9p_client.tla` |
 | I-11 | Per-9P-session fid identity stable for the fid's open lifetime | `9p_client.tla` |
-| I-12 | W^X: every page writable XOR executable (PTE checks + ELF reject + no prot-mutation syscall exists; W1.5 transient RW+XN alias) | runtime + `_Static_assert` |
+| I-12 | W^X: every page writable XOR executable (PTE checks + ELF reject + no prot-mutation syscall exists; W1.5 transient RW+XN alias) + the #217 PROVENANCE half: a file-backed executable mapping requires a mount not marked `MNOEXEC` | runtime + `_Static_assert` |
 | I-13 | Kernel-userspace isolation: TTBR0/TTBR1 split | runtime |
 | I-14 | Stratum block integrity (Merkle); OS observes via 9P, bounds hostile Rlerror ecodes | Stratum-side + `9p_client.rlerror_hostile_ecode_bounded` |
 | I-15 | Hardware view derives entirely from DTB (documented PL011 QEMU-virt fallbacks are the argued exceptions) | code review + audit |

@@ -612,6 +612,44 @@ over shared kernel core; no native mmap API is added.
   admits a new `PROT_EXEC` file-mapping shape, whichever comes first.** A
   tripwire keyed to an event that already happened is not a guard; it is a
   comment that looks like one.
+
+  **RESOLVED at #217 (`MNOEXEC`), and the research moved the shape of the fix
+  twice before any code was written.** Two facts measured while designing it
+  are load-bearing and neither was known when the disposition was voted:
+
+  1. **The container root is a `chroot`, not a mount** (`usr/viv/src/main.rs`
+     `t_chroot(rootfs)`), and it is reached through the same dev9p session as
+     the host root -- same `(dc, devno)`, no `PgrpMount` entry of its own. **No
+     per-mount flag can describe it**, so the mechanism as named could never
+     have covered the surface the finding named. Worse, it could not have
+     covered it even in principle: the container root is the tree busybox must
+     `exec` FROM, and a `noexec` root is a container that cannot start. A flag
+     that must be off wherever the threat lives is not a fix for that threat.
+  2. **The escalation the finding described does not exist for the bundle it
+     described.** `VIV_LINUX_EXECVE` is a served tier-2 row (`vivarium.c:308`),
+     so a bundle that owns its own tree can already overwrite one of its own
+     0755 binaries and `execve` it -- arbitrary code as itself, without
+     touching mmap. Against a self-owned tree the R+X map is a second door to
+     a room the attacker is already standing in.
+
+  So the fix lands where a real delta remains, and the claim is trimmed to
+  match. `MNOEXEC` closes the case where `exec` would have **refused** and mmap
+  did not: a writable, readable, non-X file on a surface the SYSTEM *hands* the
+  container -- `/env` being the live one (writable, readable, per-Proc, and its
+  entries carry no X bit, so `exec` declines them and the R+X map did not).
+  Every mount `viv` makes is now `MNOEXEC`; the only tree that stays executable
+  is the chroot'd root, which is also the only tree the container must run
+  from. **What remains open, and is documented rather than claimed closed: a
+  bundle that owns its own executable tree can still author its own code.**
+  That is not a boundary crossing (see fact 2), and making it impossible is a
+  bundle-STAGING problem -- the rootfs must not be writable by its own
+  container -- not a mount flag's job.
+
+  The reachability is also narrower than the finding assumed, which is worth
+  recording because it bounds the severity honestly:
+  `sys_mmap_file_for_proc` has **exactly one caller** (`syscall.c` `VIV_LINUX_MMAP`),
+  so this arm is PHENO_LINUX-only. A native Thylacine Proc has no syscall that
+  reaches it, and CAP_JIT is not bypassable this way outside a vivarium.
 - **#198 DISPOSITION: documented, not fixed.** The eager arm's up-to-65536
   serialized 9P reads in one syscall are bounded (BURROW_ATTACH_MAX), fully
   charged, and death-interruptible by inheritance from the dev9p read — so a
