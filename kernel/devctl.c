@@ -538,11 +538,15 @@ static bool format_9p_conn_cb(const struct srvconn_ctl_row *row, void *arg) {
     EMIT_STR(" c2s=");        EMIT_DEC(row->c2s_produced);
     EMIT_STR("/");            EMIT_DEC(row->c2s_consumed);
     EMIT_STR("+");            EMIT_DEC(row->c2s_buffered);
-    EMIT_STR(row->c2s_eof ? "E" : "");
+    // NEVER route "" through EMIT_STR: fmt_str returns bytes written, so
+    // an empty string returns 0 == the overflow sentinel and would abort
+    // the whole format at the first non-EOF chan (the wedge run 1 lesson:
+    // every read truncated deterministically right here).
+    if (row->c2s_eof) EMIT_STR("E");
     EMIT_STR(" s2c=");        EMIT_DEC(row->s2c_produced);
     EMIT_STR("/");            EMIT_DEC(row->s2c_consumed);
     EMIT_STR("+");            EMIT_DEC(row->s2c_buffered);
-    EMIT_STR(row->s2c_eof ? "E" : "");
+    if (row->s2c_eof) EMIT_STR("E");
     EMIT_STR(" sframes=");    EMIT_DEC(row->s2c_frames);
     EMIT_STR("\n");
     return true;
@@ -572,7 +576,7 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
     for (u32 i = 0; i < snap->n_inflight && i < P9_CTL_INFLIGHT_MAX; i++) {
         EMIT_STR(" t");       EMIT_DEC(snap->tags[i].tag);
         EMIT_STR(snap->tags[i].done ? "d" : "w");
-        EMIT_STR(snap->tags[i].async ? "a" : "");
+        if (snap->tags[i].async) EMIT_STR("a");   // "" == overflow sentinel
     }
     EMIT_STR("\n");
     return true;

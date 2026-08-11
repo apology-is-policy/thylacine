@@ -368,8 +368,13 @@ void test_devctl_read_9p_sessions_format(void) {
     TEST_ASSERT(got > 0, "9p-sessions read positive with a live conn");
     TEST_ASSERT(contains(buf, (size_t)got, "conn peer=31337"),
                 "the live conn renders by peer pid");
-    TEST_ASSERT(contains(buf, (size_t)got, "c2s=3/0+3"),
-                "the c2s counters render (produced/consumed+buffered)");
+    // Assert the WHOLE row through its TAIL, not a prefix: wedge run 1
+    // passed the prefix assertion while the formatter aborted mid-row
+    // (fmt_str("") returns 0 == the overflow sentinel), losing every
+    // field after c2s_buffered and every later row.
+    TEST_ASSERT(contains(buf, (size_t)got,
+                "c2s=3/0+3 s2c=0/0+0 sframes=0"),
+                "the full conn row renders through its tail");
     spoor_clunk(c);
 
     srvconn_teardown(cn);
