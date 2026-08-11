@@ -1374,6 +1374,11 @@ void p9_client_ctl_snapshot(struct p9_client *c, struct p9_client_ctl *out) {
             out->tags[out->n_inflight].tag   = (u16)t;
             out->tags[out->n_inflight].done  = r->done;
             out->tags[out->n_inflight].async = (r->on_complete != NULL);
+            // The sent T-type + target fid from the session table — what a
+            // parked op is WAITING ON (fence read vs present write vs event
+            // read), the wedge run 2 gap.
+            out->tags[out->n_inflight].kind  = c->session.outstanding[t].kind;
+            out->tags[out->n_inflight].fid   = c->session.outstanding[t].fid;
         }
         out->n_inflight++;
     }

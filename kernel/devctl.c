@@ -577,6 +577,8 @@ static bool format_9p_sess_cb(const char *label, int id, u32 msize,
         EMIT_STR(" t");       EMIT_DEC(snap->tags[i].tag);
         EMIT_STR(snap->tags[i].done ? "d" : "w");
         if (snap->tags[i].async) EMIT_STR("a");   // "" == overflow sentinel
+        EMIT_STR(":");        EMIT_DEC(snap->tags[i].kind);
+        EMIT_STR(":");        EMIT_DEC(snap->tags[i].fid);
     }
     EMIT_STR("\n");
     return true;

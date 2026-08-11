@@ -355,6 +355,8 @@ struct p9_client_ctl {
         u16  tag;
         bool done;                 // reply delivered to the submitter's buf
         bool async;                // Loom on_complete op (no parked submitter)
+        u8   kind;                 // the sent T-type (session outstanding[])
+        u32  fid;                  // the op's primary target fid
     } tags[P9_CTL_INFLIGHT_MAX];
 };
 
