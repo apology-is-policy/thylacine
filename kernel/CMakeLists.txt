@@ -340,3 +340,20 @@ add_custom_command(TARGET thylacine.elf POST_BUILD
     COMMENT "Kernel post-link: flat binary + size summary"
     VERBATIM
 )
+
+# #214 audit F2: mmu_program_this_cpu runs on secondaries with the MMU OFF
+# and returns with it ON -- a call frame would be PUSHED as a non-coherent
+# Device write and POPPED as a cacheable read of possibly-stale lines (a
+# real-silicon-only corruption no emulated substrate can see). The
+# constraint "frameless register-only leaf" was prose until this gate:
+# fail the build if the disassembly grows any sp-relative access, sp
+# adjustment, or call. Fail-CLOSED: the symbol's disasm line must be
+# PRESENT (an absent/renamed symbol fails the gate rather than passing
+# vacuously). BSD/macOS grep has no \b -- the patterns use [[:space:]].
+add_custom_command(TARGET thylacine.elf POST_BUILD
+    COMMAND sh -c "${CMAKE_OBJDUMP} -d --disassemble-symbols=mmu_program_this_cpu $<TARGET_FILE:thylacine.elf> > $<TARGET_FILE_DIR:thylacine.elf>/mmu_leafcheck.txt"
+    COMMAND sh -c "grep -q '<mmu_program_this_cpu>:' $<TARGET_FILE_DIR:thylacine.elf>/mmu_leafcheck.txt || { echo 'leaf-check: mmu_program_this_cpu disasm MISSING (fail-closed)' >&2; exit 1; }"
+    COMMAND sh -c "! grep -Eq '\\[sp|sub[[:space:]]+sp|[[:space:]]bl' $<TARGET_FILE_DIR:thylacine.elf>/mmu_leafcheck.txt || { echo 'leaf-check FAIL: mmu_program_this_cpu grew a frame/spill/call -- the #214 MMU-off constraint (see arch/arm64/mmu.c)' >&2; cat $<TARGET_FILE_DIR:thylacine.elf>/mmu_leafcheck.txt >&2; exit 1; }"
+    COMMENT "leaf-check: mmu_program_this_cpu must stay a frameless register-only leaf (#214)"
+    VERBATIM
+)

@@ -42,6 +42,7 @@
 #include <atomic_lse.h>   // t_atomic_fetch_add_relaxed_u32 (W1.5 LSE-patchable)
 
 #include "../arch/arm64/asid.h"     // RW-1 B-F1: asid_resolve (context-switch ASID pre-hook).
+#include "../arch/arm64/exception.h" // #214 F1: exception_sync_depth_reset_this_cpu at the switch
 #include "../arch/arm64/hwdebug.h"  // 8a-2b: hwdebug_switch_in (context-switch HW-breakpoint install).
 #include "../arch/arm64/gic.h"      // P3-G: gic_send_ipi for ready/wakeup wake-idle-peer.
 #include "../arch/arm64/timer.h"    // P5-tsleep: counter read + ns->counter conversion.
@@ -1465,6 +1466,15 @@ void sched(void) {
         // `ctxt` counts.
         __atomic_store_n(&cs->nctxt, cs->nctxt + 1, __ATOMIC_RELAXED);
     }
+
+    // #214 audit F1: a context switch proves the EL1h-sync handler chain on
+    // this CPU is making progress -- a genuine recursive runaway (fault whose
+    // handler faults, synchronously, IRQ-masked) never reaches here -- so
+    // clear the recursion-depth counter. Without this, independent threads
+    // time-sharing this CPU while each ASLEEP inside a legitimate EL1h-sync
+    // handler (kernel-uaccess of a cold demand-paged FILE page blocking in
+    // 9P) accumulate the per-CPU count and spuriously trip the depth-3 park.
+    exception_sync_depth_reset_this_cpu();
 
     cpu_switch_context(&prev->ctx, &next->ctx);
 

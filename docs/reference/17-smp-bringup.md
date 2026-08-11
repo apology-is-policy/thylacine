@@ -427,13 +427,19 @@ CPU's vector fetch died at a level-1 translation fault. Two guards now
 bound the class:
 
 - `exception_sync_curr_el` (exception.c) carries a per-CPU depth
-  counter: legitimate depth is 1; at depth 3 it flushes the staged cons
-  ring (trylock, bounded), prints one raw
+  counter measuring SYNCHRONOUS recursion: at depth 3 it flushes the
+  staged cons ring (trylock, bounded), prints one raw
   `EXTINCTION: el1-sync recursion` banner with the killing frame's
   ELR/ESR/FAR, and parks the CPU in `_torpor` with the stack corpse
-  intact. The counter resets to 0 on successful unwind (not decrement:
-  a blocking handler migrating cross-CPU would strand a foreign
-  increment forever).
+  intact. A legitimate EL1h-sync handler CAN sleep (kernel-uaccess of a
+  cold demand-paged FILE page blocks in 9P), so the raw count is not
+  bounded under load — the audit-F1 correction: the scheduler clears
+  the counter at every context switch (`exception_sync_depth_reset_
+  this_cpu` from `sched()`), because a switch proves forward progress
+  while a genuine runaway (synchronous, IRQ-masked) never reaches
+  `sched()` and its count survives to trip. The reset-to-0 on
+  successful unwind (not decrement) additionally keeps a cross-CPU-
+  migrated handler's exit from stranding a foreign increment.
 - `extinction()` / `extinction_with_addr()` carry a per-CPU re-entrancy
   guard: a second entry prints the message with the halls dump
   suppressed and parks; a third parks silently.
@@ -451,10 +457,13 @@ timer IRQ, not guaranteed live in the smp_init context — and the loop
 had never once terminated by timeout on any substrate (secondaries
 always arrived first), so the first real secondary failure froze boot
 forever, silently. The timeout now rides `timer_get_counter()`
-(CNTVCT_EL0, always advances), in ms (`SMP_BRINGUP_TIMEOUT_MS`, 100).
-And `smp_init` now refuses a degraded boot: if any DTB-listed secondary
-fails bring-up while PSCI is ready, it prints per-CPU diagnostics and
-extincts — a partially-SMP boot is a lie waiting to be verified around.
+(CNTVCT_EL0, always advances), in ms (`SMP_BRINGUP_TIMEOUT_MS`, 1000 —
+audit F3: since a timeout is now FATAL, the bound carries ~3 orders of
+magnitude of margin over the worst observed full bring-up; the cost
+lands only on the failure path). And `smp_init` now refuses a degraded
+boot: if any DTB-listed secondary fails bring-up while PSCI is ready,
+it prints per-CPU diagnostics and extincts — a partially-SMP boot is a
+lie waiting to be verified around.
 
 ### The mailbox protocol + the per-CPU stage trace
 
@@ -485,6 +494,22 @@ leaf-ness constraint comment: the function runs with the MMU off and
 returns with it on, so a call frame would be pushed as a Device write
 and popped as a cacheable read of possibly-stale lines. It must remain
 a frameless register-only leaf (verified by disassembly at #214).
+
+### Audit round (holotype, Fable 5, post-`0847f2f7`)
+
+0 P0 / 1 P1 / 0 P2 / 2 P3; MODEL(start)==MODEL(end). All three fixed in
+the close commit: F1 [P1] the depth guard's false park under
+interleaved SLEEPING uaccess demand-page handlers (the reviewer proved
+the sleeping path: R12-uaccess -> `userland_demand_page` FILE slow path
+-> 9P `sleep()`, which also bypasses the #806 `g_in_kernel_fault`
+flag) — fixed by the scheduler clearing the counter at every switch;
+F2 [P3] the leaf-ness constraint was prose — now a fail-closed
+post-link build gate (kernel/CMakeLists.txt `leaf-check`, both failure
+arms discrimination-proven); F3 [P3] the newly-fatal 100 ms bring-up
+timeout — widened to 1 s with the margin argument. No regression test
+can deterministically drive F1's interleaving (three same-CPU cold-file
+uaccess sleepers); the fix is correct by construction (a runaway never
+reaches `sched()`) and the construction is documented at the guard.
 
 ### Evidence
 

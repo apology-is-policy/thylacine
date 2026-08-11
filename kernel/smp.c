@@ -222,9 +222,9 @@ void smp_enable_secondary_preemption(void) {
 static unsigned g_cpu_count;
 static unsigned g_cpu_online_count;
 
-// Per-secondary timeout. PSCI bring-up + trampoline execution + flag
-// store + dsb sy is microseconds at most on QEMU virt; bare metal might
-// be milliseconds. 100 ms is generous.
+// Per-secondary timeout. PSCI bring-up + the trampoline + the full
+// per_cpu_main init (PAC, MMU, allocations, GIC) is microseconds on QEMU
+// virt and low-milliseconds on the Pi 400 under KVM.
 //
 // #214 D1: the timeout is measured on CNTVCT_EL0 (timer_get_counter),
 // NEVER on g_ticks — g_ticks advances only via cpu0's timer IRQ, which
@@ -232,7 +232,15 @@ static unsigned g_cpu_online_count;
 // turned "timeout" into "frozen boot forever" the first time a
 // secondary actually failed (Pi 400/KVM). The hardware counter always
 // advances.
-#define SMP_BRINGUP_TIMEOUT_MS  100u
+//
+// #214 audit F3: a timeout is now FATAL (smp_init extincts on partial
+// bring-up), so the bound carries a margin argument: 1 s is ~3 orders
+// of magnitude above the worst observed full bring-up (low-ms on
+// Pi/KVM), covering a contended KVM host or a slower future board
+// without turning a healthy-but-slow secondary into a dead box. The
+// cost lands only on the failure path — success returns at the alive
+// flip, never waits the bound out.
+#define SMP_BRINGUP_TIMEOUT_MS  1000u
 
 // #214: mismatched-attribute mailbox maintenance (protocol in smp.h).
 // civac (clean+invalidate to PoC), not ivac: a stray dirty copy is

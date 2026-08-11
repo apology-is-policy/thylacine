@@ -114,15 +114,24 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 // halls_dump faults -> fault -> extinction (extinction.c carries the
 // matching re-entrancy guard).
 //
-// Legitimate depth is 1 (uaccess fixups and kernel-fault extinctions do
-// not nest a second EL1h-sync fault), so >= 3 is runaway with margin. The
-// counter resets to 0 on every successful unwind rather than
-// decrementing: a blocking handler that migrates cross-CPU (a uaccess
-// demand-page sleep) would otherwise strand a foreign CPU's increment
-// forever. The reset makes a stranded increment self-heal on that CPU's
-// next clean fault; the theoretical false-park needs EL1_SYNC_DEPTH_MAX
-// consecutive migrated-away faults on one CPU with no clean unwind
-// between — and the failure mode is a loud park, not corruption.
+// The counter measures SYNCHRONOUS recursion only. A legitimate EL1h-sync
+// handler can SLEEP (a kernel-uaccess of a cold demand-paged FILE page
+// blocks in 9P — the R12-uaccess → userland_demand_page slow path), and
+// independent threads time-sharing this CPU can each be asleep inside
+// such a handler — so the raw per-CPU count is NOT bounded by 1 under
+// legitimate load (#214 audit F1: three interleaved cold-file uaccess
+// sleepers would spuriously hit the cap). The scheduler therefore clears
+// this counter at EVERY context switch (exception_sync_depth_reset_this_
+// cpu from sched()): a switch proves forward progress, and a genuine
+// runaway — fault whose handler faults, synchronously, IRQ-masked —
+// never reaches sched(), so its count survives to trip at 3. The reset
+// to 0 on successful unwind (rather than decrement) additionally keeps a
+// cross-CPU-migrated handler's exit from stranding a foreign increment.
+// Residual: a hypothetical recursive chain that UNMASKS IRQs mid-chain
+// could be preempt-cleared and evade this guard — the extinction
+// re-entrancy guard below still bounds the observed #214 class (its loop
+// runs IRQ-masked), and the failure mode of any miss is a spin, not
+// corruption.
 //
 // The runaway path deliberately does NOT halls_dump (the dump machinery
 // is the likely faulting amplifier): flush the staged cons ring (trylock,
@@ -135,6 +144,11 @@ static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_
 static volatile u8 g_el1_sync_depth[DTB_MAX_CPUS];
 
 extern void _torpor(void) __attribute__((noreturn));
+
+void exception_sync_depth_reset_this_cpu(void) {
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS) g_el1_sync_depth[cpu] = 0;
+}
 
 __attribute__((noreturn))
 static void el1_sync_runaway(unsigned cpu, const struct exception_context *ctx) {
