@@ -40,7 +40,16 @@ THRESHOLD="${THYLACINE_IDLE_THRESHOLD:-80}"
 SETTLE="${THYLACINE_IDLE_SETTLE:-12}"
 SAMPLES="${THYLACINE_IDLE_SAMPLES:-5}"
 BOOT_TO="${THYLACINE_IDLE_BOOT_TO:-150}"
-LOG="$(mktemp /tmp/thyla-idle-gate.XXXXXX.log)"
+# #227 (aux's find): BSD mktemp substitutes only a TRAILING run of X's, so the
+# old `/tmp/thyla-idle-gate.XXXXXX.log` was a LITERAL name -- run 1 owned it and
+# every later run (in EITHER worktree; the name was tree-shared) died with an
+# empty $LOG and the bogus "qemu exited before boot OK; see " verdict below.
+# Tree-tag the name AND check the allocation: unchecked, the next mktemp failure
+# is again misattributed to QEMU with an empty `see `.
+LOG="$(mktemp "/tmp/thyla-idle-gate.$(basename "$PWD").XXXXXX")" || {
+    echo "ci-idle-gate: FAIL (could not allocate a log file under /tmp)" >&2
+    exit 2
+}
 # #89: THIS tree's absolute disk path -- the discriminator every process match
 # below is scoped to. Mirrors run-vm.sh's resolution (we cd'd to the repo root
 # above), so the pattern is exactly the string qemu carries on its cmdline.
