@@ -118,7 +118,15 @@ set s0 [pswp]
 
 # The BARE name: ut resolves the ramfs launcher; the launcher's seam probe
 # + /env write + exec are part of what this gate proves.
-lc_send "tyr-glquake -window -width $DW -height $DH -nosound +timedemo demo1"
+# -noglcompression (#216): the guest Mesa advertises
+# GL_EXT_texture_compression_s3tc while the virgl screen rejects the DXT
+# formats on an S3TC-less host (V3D), so every compressed upload fails
+# guest-side (1692 GL_OUT_OF_MEMORY) and the draws over the incomplete
+# textures feed the #198 storm, which gates the frame rate below the
+# lane's own fps wait. Disabling compression is what the game WOULD do if
+# the extension string were honest -- the #216 Mesa fix makes this flag
+# redundant, not wrong. Revisit after #216.
+lc_send "tyr-glquake -window -width $DW -height $DH -nosound -noglcompression +timedemo demo1"
 
 # Composed-entry leg: the window's arrival splits the layout (console +
 # game, two visible leaves) and the compositor leaves Direct(console) --
