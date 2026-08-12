@@ -884,6 +884,11 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 # login + assert rendered command output (the test that would have caught LS-1).
 # Optional gate (SKIPs without `expect`). THYLACINE_ACCEL=tcg default; bounded
 # retry (LS_CI_ATTEMPTS=3) tolerates host-timing flakes.
+# REFUSES to start (exit 2) if a VM from this tree is already running (#224):
+# its reaper is tree-wide `pkill -9`, so it would SIGKILL a boot it does not
+# own -- presenting to the other gate as "qemu GONE, guest healthy" -- and both
+# gates restore the same build/fixtures/pool.img. Do not run it alongside the
+# SMP gate in one tree; use a separate worktree.
 tools/test-interactive.sh               # full set (or: make test-interactive)
 tools/test-interactive.sh ls-ci         # one scenario by name
 
