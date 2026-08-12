@@ -318,6 +318,21 @@ const NEG_ECHILD: i64 = -10;
 // #151: close-on-exec. EBADF is the whole assertion on the far side of an
 // exec -- a descriptor the sweep closed must be GONE, not merely flagged.
 const NEG_EBADF: i64 = -9;
+
+// #218: the MNOEXEC refusal. WEAK ON ITS OWN and deliberately paired with a
+// control below -- -1 is also syscall_dispatch's generic sentinel, so "== -1"
+// alone is satisfied by almost any breakage. It is the CONTROL leg (the same
+// fd mapping fine without PROT_EXEC) that makes this number mean "the exec
+// gate refused" rather than "something went wrong".
+//
+// Why -1 is nevertheless the RIGHT number here, despite errno.h's standing
+// "DO NOT RETURN -T_E_PERM FROM A SYSCALL HANDLER": that warning is about the
+// pouch boundary line, where __syscall_ret reads a flat -1 as its generic
+// sentinel and reports EIO. sys_mmap_file_for_proc has exactly one caller --
+// the vivarium dispatch -- so this value only ever reaches a PHENO_LINUX
+// guest, for whom -1 IS -EPERM by Linux's own numbering. The exec-side MNOEXEC
+// site does not return an errno at all (it fails resolution, yielding NULL).
+const NEG_EPERM: i64 = -1;
 const NR_FCNTL: u64 = 25;
 const F_DUPFD: u64 = 0;
 const F_GETFD: u64 = 1;
@@ -2386,6 +2401,57 @@ unsafe fn run_linux() -> ! {
     let _ = svc3(NR_CLOSE, sd as u64, 0, 0);
     let _ = svc3(NR_CLOSE, pfd[0] as u64, 0, 0);
     let _ = svc3(NR_CLOSE, pfd[1] as u64, 0, 0);
+
+    // --- L200-L204 (#218): MNOEXEC is LIVE on this container's mounts -------
+    //
+    // #217 proved every kernel link in isolation (5 sabotages, 5 distinct
+    // attributions). The link nothing proved is the LAST one: that viv's ACTUAL
+    // mounts carry the bit in a running container. Every arc gate passing shows
+    // only that noexec does not BREAK a container -- not that it is APPLIED to
+    // one, and those are two readings of the same green. Had some path dropped
+    // the flag between viv's t_mount and PgrpMount.flags, the whole tree would
+    // still be green, which is the standing "boot OK does not prove a gate is
+    // wired" rule.
+    //
+    // THE PAIR IS CHOSEN SO ONLY THE MOUNT FLAG DIFFERS:
+    //   /bin/viv-pheno-probe   dev9p, may_back_exec, arrived by CHROOT -> R+X ok
+    //   /proc/meminfo          dev9p, may_back_exec, MNOEXEC MOUNT     -> refused
+    // Same Dev, same mapping machinery, same phenotype arm. /env and the /dev
+    // leaves cannot witness this AT ALL: the may_back_exec FLOOR (#217 F1)
+    // refuses them before the mount flag is ever consulted, so a denial there
+    // would prove nothing about MNOEXEC. Choosing a target the floor does NOT
+    // cover is the entire point of the pair.
+    const XMAP: u64 = 4096;
+    let selfp2 = b"/bin/viv-pheno-probe\0";
+    let fd_self = svc4(NR_OPENAT, AT_FDCWD, selfp2.as_ptr() as u64, O_RDONLY, 0);
+    leg!(rep, fd_self >= 0, b"L200\n");
+    // CONTROL 1: an R+X FILE mapping is reachable here at all. Without it the
+    // deny leg is satisfied by "a container can never map R+X", which is a
+    // different and much weaker claim than "this mount forbids it".
+    let xok = svc6(NR_MMAP, 0, XMAP, PROT_READ | PROT_EXEC, MAP_PRIVATE,
+                   fd_self as u64, 0);
+    leg!(rep, xok > 0 && !(-4095..0).contains(&xok), b"L201\n");
+    let _ = svc3(NR_MUNMAP, xok as u64, XMAP, 0);
+    let _ = svc3(NR_CLOSE, fd_self as u64, 0, 0);
+
+    let memp = b"/proc/meminfo\0";
+    let fd_mem = svc4(NR_OPENAT, AT_FDCWD, memp.as_ptr() as u64, O_RDONLY, 0);
+    leg!(rep, fd_mem >= 0, b"L202\n");
+    // CONTROL 2: the file on the noexec mount IS mappable without PROT_EXEC.
+    // noexec bounds what may become CODE, not what may be read -- and without
+    // this leg the deny below is satisfied by the file being unmappable, the fd
+    // being bad, or the mount being broken.
+    let rok = svc6(NR_MMAP, 0, XMAP, PROT_READ, MAP_PRIVATE, fd_mem as u64, 0);
+    leg!(rep, rok > 0 && !(-4095..0).contains(&rok), b"L203\n");
+    let _ = svc3(NR_MUNMAP, rok as u64, XMAP, 0);
+    // THE WITNESS. Same fd that just mapped cleanly, one bit added.
+    leg!(
+        rep,
+        svc6(NR_MMAP, 0, XMAP, PROT_READ | PROT_EXEC, MAP_PRIVATE,
+             fd_mem as u64, 0) == NEG_EPERM,
+        b"L204\n"
+    );
+    let _ = svc3(NR_CLOSE, fd_mem as u64, 0, 0);
 
     // --- the verdict, which is also the write leg ---------------------------
     // Linux write(64) puts these bytes in the file; joey reads them from its

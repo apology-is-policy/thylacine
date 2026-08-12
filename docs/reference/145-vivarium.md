@@ -2554,3 +2554,88 @@ comment used to justify the order as forced ("a zombie holds its handle table
 until reap"); #68 made that false, so the order there is now a CHOICE and the
 comment states the 4 KiB precondition as a live constraint to check before wiring
 a new caller (#147).
+
+---
+
+## #218 -- MNOEXEC, witnessed from INSIDE a live container (L200-L204)
+
+### The gap this closes, and why it was not pedantic
+
+#217 proved every kernel link of the executable-mapping gate in isolation: five
+sabotages with five distinct attributions, plus the `may_back_exec` floor that
+round-1 forced underneath the flag. What none of it proved is the LAST link --
+that `viv`'s **actual** mounts carry `MNOEXEC` in a running system.
+
+That gap is invisible to every other gate. The arc gates passing shows only that
+noexec does not **break** a container; it does not show noexec is **applied** to
+one. Those are two readings of the same green, and only a deny-path witness
+separates them. Had some path dropped the flag between `viv`'s `t_mount` and
+`PgrpMount.flags`, the whole tree would still have been green -- the standing
+"boot OK does not prove a gate is wired" rule.
+
+### The pair, chosen so only the mount flag differs
+
+| target | Dev | `may_back_exec` | arrived by | `PROT_READ\|PROT_EXEC` |
+|---|---|---|---|---|
+| `/bin/viv-pheno-probe` | dev9p | true | **chroot** (not a mount) | **admitted** (L201) |
+| `/proc/meminfo` | dev9p | true | **MNOEXEC mount** | **refused** (L204) |
+
+Same Dev, same mapping machinery, same phenotype arm. The only difference is the
+mount flag, which is what makes L204 a statement about `MNOEXEC` rather than
+about containers in general.
+
+**`/env` and the `/dev` leaves cannot witness this at all.** The `may_back_exec`
+floor refuses them *before* the flag is ever consulted (#217 round-1 F1), so a
+denial there would prove nothing about `MNOEXEC` -- it would prove the floor.
+Choosing a target the floor does **not** cover is the entire point of the pair.
+
+L203 is the control that makes L204 mean something: the *same fd* maps cleanly
+without `PROT_EXEC`, so the refusal cannot be explained by a bad descriptor, an
+unmappable file, or a broken mount. noexec bounds what may become **code**, not
+what may be **read**.
+
+### The errno is a flat `-1`, and that is correct here
+
+`errno.h` carries a standing warning: **do not return `-T_E_PERM` from a syscall
+handler**, because value 1 collides with the pouch boundary line's flat-`-1`
+sentinel and `__syscall_ret` maps it to `EIO`. That warning does not apply to
+this path and L204 must not be "fixed" on the strength of it:
+`sys_mmap_file_for_proc` has **exactly one caller**, the vivarium dispatch, so
+the value only ever reaches a PHENO_LINUX guest -- for whom `-1` IS `-EPERM` by
+Linux's own numbering. (The exec-side `MNOEXEC` site returns no errno at all; it
+fails resolution and yields NULL.)
+
+`-1` is nevertheless a WEAK value on its own, since it is also
+`syscall_dispatch`'s generic sentinel. L203 is what upgrades it from "something
+went wrong" to "the exec gate refused".
+
+### Discrimination, proven by A/B
+
+Dropping `T_MNOEXEC` from `viv`:
+
+```
+joey: V-7  viv-probe (containered) PASS          <- native leg unaffected
+joey: V-1b linux-phenotype leg FAILED marker=L204 status=1
+tests: 1394/1394                                 <- kernel suite unaffected
+(no "Thylacine boot OK")
+```
+
+Restoring it returns `V-1b phenotype (native + containered linux) PASS` and the
+boot marker. The failure isolates to the new leg alone.
+
+**BOTH `viv` call sites must be sabotaged to see the flip.**
+`mount_noexec_covers` matches the mount **source's** `(dc, devno)`, and `/dio`
+and `/proc` are the SAME diorama 9P instance -- so dropping only the `/proc`
+bind leaves the `/dio` entry still covering the device, the verdict does not
+change, and the experiment reports "no discrimination" while having sabotaged
+nothing. A sabotage that quietly passes is the finding, not the control.
+
+### Trip hazard: these legs are POOL-RESIDENT
+
+The probe ships inside `/vivarium/pheno`, which lives in the Stratum pool. A run
+under `THYLACINE_MKFS_PRESERVE=1` executes the **stale** binary, so new legs
+silently do not exist and the boot is green for the wrong reason (#126). Re-bake
+the pool when changing them, and confirm from the build log's
+`populate pool: viv bundles baked at /vivarium` -- **not** from a green boot, and
+not by grepping `pool.img`, whose contents are encrypted and will never show a
+plaintext marker.
