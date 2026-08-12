@@ -255,8 +255,13 @@ const _: () = {
     // kernel header is not visible to this crate; the runtime witness is
     // the GL-host boot, which fails loudly when this drifts).
     assert!(FLANE_DMA_SIZE <= 1024 * 1024);
-    // A max-msize Twrite (one submission) must fit a slot with its header.
-    assert!(FREQ_LEN >= 32 * 1024 + GPU_CTRL_HDR_LEN as u64);
+    // A max-msize Twrite (one submission) must fit a slot with its
+    // header: submit_3d stages GPU_CTRL_HDR_LEN + 8 + payload, and the
+    // payload maxes at one Twrite = SRV_MSIZE - 23 (the Twrite envelope).
+    // Derived from the seam constant, not a literal mirror of it (#204
+    // audit F2): an SRV_MSIZE lift moves this floor with it instead of
+    // sleeping through the drift.
+    assert!(FREQ_LEN >= (crate::server::SRV_MSIZE as u64 - 23) + 8 + GPU_CTRL_HDR_LEN as u64);
 };
 
 #[inline(always)]

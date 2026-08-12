@@ -622,7 +622,7 @@ majority) bounds it ~25–40% above Composed.
   one frees), 16 fenced chains in flight process-wide (4 → 16 at #204;
   per-ctx share 8, advertised as ctl `fence-lane`).
 - One Twrite = one submission: the effective stream bound is the 9P iounit
-  (msize 32 KiB − overhead), not the 64 KiB slot. The Warp-3 winsys splits
+  (msize 32 KiB − overhead), not the 36 KiB slot (`FREQ_LEN`). The Warp-3 winsys splits
   its command streams at CCMD boundaries to fit; the Loom-carried bulk
   path (§4.1) remains the successor for a single command wider than the
   bound, which today latches loudly.
