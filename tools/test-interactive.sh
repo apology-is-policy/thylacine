@@ -76,6 +76,27 @@ export THYLACINE_NOSTORM="${THYLACINE_NOSTORM:-1}"
 # matched every thylacine tree: two sessions gating concurrently (main +
 # thylacine-aux, 2026-07-21) shot each other's live VMs -- "qemu GONE, guest
 # healthy" mid-scenario failures on both sides (task #59).
+#
+# #217 (the intra-tree half of #59, surfaced by aux): the EXIT trap below is
+# still TREE-wide, so a VM this script never started (an SMP gate, a test.sh
+# boot, a manual run-vm) dies uncatchably on our way out -- its log just
+# stops, the misread-as-flake shape. Refuse up front instead of narrowing:
+# in-tree concurrency is unsafe for a second reason anyway (both gates
+# restore the same pool.img, and a restore under a live VM manufactures
+# exactly the corruption the gates exist to detect), so a named operator
+# error beats a silent mutual-corruption race. This check MUST precede the
+# trap install -- install-then-refuse fires the reaper on the refusal's own
+# exit, killing the VM it just declined to disturb (aux's 849d85fc lesson).
+# (pgrep never matches itself, procps + BSD both; the pattern must never
+# appear in a wrapper's cmdline.)
+if pgrep -f "qemu-system-aarch64.*$BUILD_DIR/" >/dev/null 2>&1; then
+    echo "test-interactive: a qemu from THIS tree is already running" >&2
+    echo "  (matches: qemu-system-aarch64.*$BUILD_DIR/). Refusing to start:" >&2
+    echo "  this script's EXIT reaper is tree-wide and would SIGKILL it," >&2
+    echo "  and concurrent gates corrupt the shared pool fixture anyway." >&2
+    echo "  Finish or kill that run first (by explicit PID)." >&2
+    exit 2
+fi
 reap_qemu() { pkill -9 -f "qemu-system-aarch64.*$BUILD_DIR/" 2>/dev/null || true; }
 trap reap_qemu EXIT
 
