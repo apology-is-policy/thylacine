@@ -43,6 +43,9 @@ Two doors, one tree:
 
 ```
 ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\nctxs <live>\npoisoned <n>\n"
+                             # + "bo-cap <n>\nfence-lane <n>\nbo-peak <n>\n" (#204: the per-ctx BO
+                             #   capacity, the per-ctx fenced share the client adopts as its throttle
+                             #   depth, and the global backed-BO high-water census)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
@@ -50,7 +53,8 @@ ctx/
   <id>/
     ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy"
                              # read: "<id>\npoisoned <0|1>\nleaked-count <n>\nleaked-bytes <n>\n"
-                             # test-mode ONLY adds: "fences-in-flight <n>\nfence-signaled <n>\n"
+                             #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3)
+                             #   + "bo-live <n>\nbo-peak <n>\n" (#204 census: backed now / high-water)
     submit                   # write: one Twrite = one atomic opaque CCMD submission (fenced)
     fence                    # read: the completion stream -- newest signaled fence id,
                              #       one record per read, PARKS when nothing unreported
@@ -113,11 +117,17 @@ device-PA extent. Mapping a subrange is the §6.2 Venus-chunk delta.
 **used-ENTRY attribution**: `publish(head)` appends an avail entry;
 `drain()` consumes used entries by the ENTRY's id (the head descriptor names
 the slot). Slot 0 is the sync chain (all 2D + ctx/resource commands,
-unchanged semantics); fenced slot `i` (0..4) owns the fixed descriptor pair
+unchanged semantics); fenced slot `i` (0..16) owns the fixed descriptor pair
 `(2+2i, 3+2i)` with its request buffer and response header in a SECOND DMA
-region (`FLANE_DMA_SIZE` = 4×64 KiB + a response page at `GPU_FLANE_VA`),
+region (`FLANE_DMA_SIZE` = 16×64 KiB + a response page at `GPU_FLANE_VA`),
 allocated **only when VIRGL negotiates** — a 2D boot allocates nothing and
-the audited two-page sync ring is byte-identical.
+the audited two-page sync ring is byte-identical. `FENCED_SLOTS` went 4 → 16
+at #204 (the per-ctx share 2 → 8): the depth-2 throttle, faithfully mirrored
+client-side, serialized every GL frame against full guest→host→retire round
+trips (#215). 16 is this layout's ceiling — exactly one response page at
+`FRESP_STRIDE` (16 × 0x100 = PAGE), with 2 + 2×16 descriptor pairs carved
+from the controlq, itself widened 16 → 64 (its QEMU device maximum; the
+cursorq stays at its own maximum of 16, split out as `CURSORQ_SIZE`).
 
 - **Presents stay wait-for-mine.** `submit_and_wait` drains fenced
   completions while waiting for ITS entry, so the stage-0 I-40 argument —
@@ -401,8 +411,16 @@ ISSUED (submits + transfers, FIFO per ring) against the seam's monotonic
 per-ctx `fence-signaled` ctl counter; the fence FILE is only the blocking
 primitive — its coalesced record content is ignored, and it is never read
 with nothing in flight, so no park is unfillable. The in-flight throttle
-mirrors the seam's own bound (2 per ctx); `E_AGAIN` parks on the fence
-and retries bounded. Any hard failure LATCHES the connection — the virgl
+depth is DISCOVERED at `warp_open` (global ctl `fence-lane` = the server's
+per-ctx admission share, 8 as of #204; absent = a pre-#204 server, depth 2;
+clamped to [1, 64]) — the compile-time mirror it replaces sat at 2 after
+the server lane grew, which is what serialized every frame (#215). The
+depth arithmetic rides `inflight_depth()`, whose #210 conservation clamp
+survives a server ledger that runs `signaled` past `issued` (the u64
+subtraction would otherwise wrap huge and latch the throttle forever —
+the #210 wedge shape, client-side): clamp to 0, warn once, and let the
+server's own `E_AGAIN` admission be the back-pressure. `E_AGAIN` parks on
+the fence and retries bounded. Any hard failure LATCHES the connection — the virgl
 driver ignores `submit_cmd`'s return, so a dropped command buffer must
 never be silent — and every subsequent entry point fails fast with a
 `warp:` line on stderr.
@@ -472,8 +490,8 @@ becomes, by scanout mode:
   was queued on the one controlq before its tpresent arrived (the client
   serializes flush-then-present; the server is single-threaded), so the
   flush displays the completed frame. The client's swap downgrades
-  glFinish to glFlush (the winsys's 2-in-flight fence throttle bounds
-  run-ahead).
+  glFinish to glFlush (the winsys's discovered fence throttle — depth 8
+  since #204 — bounds run-ahead).
 - **Composed** (windowed, the ladder's readback fallback): a SYNCHRONOUS
   `TRANSFER_FROM_HOST_3D` (the compositor's own sync step, NOT the
   client fenced lane -- the present stays one dispatch, the I-40
@@ -532,7 +550,10 @@ streamed `GL_OUT_OF_MEMORY` (1889 lines in the 4c gate log; invisible
 frames — #195) and the game drew a reduced texture set. Directionally
 this strengthens "no hidden stall" (a *lighter* virgl frame still only
 matched llvmpipe) but weakens the like-for-like parity claim; re-measure
-after the #213 cap fix.
+after the #213 cap fix. **Resolved at #204**: the cap is 1024 (the
+`bo-peak` census fields are the witness the width is sized against —
+read them after a real workload instead of re-guessing), so these
+figures are superseded by the post-#204 re-measure.
 
 Reading: the Composed-GL arm has **no per-frame stall** — it reaches the
 4-thread llvmpipe control's exact fps using 2.1× less CPU with ~2.3
@@ -542,7 +563,8 @@ server-side `transfer_from_3d_sync` + blit), all TCG-amplified; on
 native silicon both serial phases shrink by the TCG factor and the GPU
 path wins outright. Per-frame op structure (the leg-(d) census): the
 frame's cmdstream submits as fenced `Twrite` chunks ≤ 24 KiB split at
-CCMD boundaries; the 2-in-flight throttle parks via one blocking
+CCMD boundaries; the discovered in-flight throttle (depth 2 then; 8
+since #204) parks via one blocking
 fence-file read + one ctx-ctl snapshot re-read per wait; a present is
 one tapestry RPC (Direct: server-side `RESOURCE_FLUSH` only; Composed
 adds the client `glFinish` fence round-trip and the server's 4 MB sync
@@ -574,14 +596,20 @@ majority) bounds it ~25–40% above Composed.
   sweep knew only virtio-MMIO, and a BAR-decoded device is invisible to
   it). The task stays open for the residual ordering in the fallback
   `proc_free` path.
-- **Client-visible limits**: 8 contexts total, one per connection, 128 BOs
+- **Client-visible limits**: 8 contexts total, one per connection, 1024 BOs
   each (16 → 128 at Warp-3: st/mesa mints ~8 `hw_res` before the first
-  draw, and the round-6 F1 graveyard cap is width-independent by
-  construction — the discriminating churn probe now reads the width from
-  the global ctl `bo-cap` field instead of hardcoding it, so a future cap
-  change cannot silently un-discriminate it), 64 MiB live+leaked backing
+  draw; 128 → 1024 at #204: GLQuake's map load holds more than 128
+  textures live, so creates past the cap streamed `GL_OUT_OF_MEMORY`
+  [#213] — the `bo-peak` census is the witness the width is sized
+  against. The round-6 F1 graveyard cap is width-independent by
+  construction — the discriminating churn probe reads the width from
+  the global ctl `bo-cap` field instead of hardcoding it, so a cap
+  change cannot silently un-discriminate it. The rows are heap
+  allocations at ctx mint since #204; an OOM fails the mint clean),
+  64 MiB live+leaked backing
   per context, 4 concurrent `/srv/warp` connections (a 5th blocks until
-  one frees), 4 fenced chains in flight process-wide.
+  one frees), 16 fenced chains in flight process-wide (4 → 16 at #204;
+  per-ctx share 8, advertised as ctl `fence-lane`).
 - One Twrite = one submission: the effective stream bound is the 9P iounit
   (msize 32 KiB − overhead), not the 64 KiB slot. The Warp-3 winsys splits
   its command streams at CCMD boundaries to fit; the Loom-carried bulk

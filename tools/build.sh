@@ -2776,7 +2776,14 @@ build_sdl2() {
                       "$REPO_ROOT/usr/gl-sdl-prove" \
                       "$REPO_ROOT/usr/lib/thylajit" \
                       -type f -newer "$archive" -print -quit 2>/dev/null)"
-        if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
+        # The FETCHED archive is a link input too (#204; the #139 class one
+        # input further out): a builder round that refreshes libOSMesa.a must
+        # invalidate gl-sdl-prove, or the GL gate tests a binary that predates
+        # the fetch. Rare enough that the full rebuild it forces is fine.
+        local gl_stale=""
+        [[ -n "$gl_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$gl_prove" ]] \
+            && gl_stale=1
+        if [[ -z "$stale" && -z "$gl_stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
             ledger "libSDL2.a: REUSED (cached + up-to-date)"
             return 0
         fi
@@ -3145,7 +3152,12 @@ build_tyrquake() {
        [[ -z "$glq_needed" || -f "$glq_out" ]]; then
         local stale
         stale="$(find "$tq_vendor" "$port_dir" -type f -newer "$progs_out/tyr-quake" -print -quit 2>/dev/null)"
-        if [[ -z "$stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
+        # The FETCHED archive is a link input of the glquake half (#204; the
+        # #139 class): a refreshed libOSMesa.a must invalidate tyr-glquake.
+        local glq_stale=""
+        [[ -n "$glq_needed" && "$BUILD_DIR/clade/gl/lib/libOSMesa.a" -nt "$glq_out" ]] \
+            && glq_stale=1
+        if [[ -z "$stale" && -z "$glq_stale" && ! "$sysroot/lib/libSDL2.a" -nt "$progs_out/tyr-quake" ]]; then
             ledger "tyr-quake + tyr-glquake: REUSED (cached + up-to-date)"
             return 0
         fi

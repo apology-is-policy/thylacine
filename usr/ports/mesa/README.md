@@ -33,13 +33,16 @@ git am <thylacine-repo>/usr/ports/mesa/patches/*.patch
 
 This is **verified, not asserted**: applying the series with `git am` to a
 pristine `mesa-26.1.6` worktree reproduces the fork tip's tree hash exactly
-(`cd00196c85cea3d92fe87351563b2c60d14d76cd` at 0007; 0006 was
-`d302f50eb931bef25c8deab034093292adcc39ae`, 0005 was
+(`88ade8b2af3d48b0ca3873e5fa955ef179895b44` at 0008; 0007 was
+`cd00196c85cea3d92fe87351563b2c60d14d76cd`, 0006
+`d302f50eb931bef25c8deab034093292adcc39ae`, 0005
 `414b19f24384ae66d2107cbbab46cb7c963641e6`). Re-check it after any refresh —
 a patch series that no longer round-trips is a fork you have already lost.
-(The builder's fork matches the durable series exactly: the Warp-4 cycle
-reset it to the 0006 tip, `git am`'d the durable 0007, and verified
-`cd00196c…` live before building.)
+(The builder's fork matches the durable series exactly: the #204 cycle
+committed 0008 on the fork, emitted the patch file, and re-`git am`'d the
+EMITTED file onto the 0007 tip in a scratch worktree to confirm it lands on
+`88ade8b2…` — a patch only known to match the working tree it came from has
+not been checked at all.)
 (`git am` reports four trailing-whitespace warnings from the grafted 25.0.7
 OSMesa source; they are cosmetic and it exits 0.)
 

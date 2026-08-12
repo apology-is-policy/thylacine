@@ -172,21 +172,29 @@ const DEFAULT_DISPLAY_H: u32 = 768;
 const MAX_DISPLAY_DIM: u32 = 8192;
 
 // Two-page DMA ring (the gpud/probe audited single-page layout, plus a
-// dedicated RESP page): page 1 holds both queues + the request region
-// unchanged; the response region moved to its own page because the
-// GET_CAPSET blob (virgl_caps_v2, ~1.2 KiB and growing upstream) outgrew
-// the 0x300-byte slice page 1 had left. The Warp-2/3 winsys get_caps slot
-// reads the same blob, so the headroom is a direct next consumer, not slack.
-const QUEUE_SIZE: u16 = 16;
+// dedicated RESP page): page 1 holds both queues + the request region;
+// the response region has its own page because the GET_CAPSET blob
+// (virgl_caps_v2, ~1.2 KiB and growing upstream) outgrew the 0x300-byte
+// slice page 1 had left. The Warp-2/3 winsys get_caps slot reads the
+// same blob, so the headroom is a direct next consumer, not slack.
+//
+// The two queues have DIFFERENT sizes (#204): the controlq is 64 -- the
+// QEMU device maximum, and the fenced lane's descriptor-pair budget
+// (2 + 2*FENCED_SLOTS) is carved from it, so the controlq size is what
+// ultimately bounds the submit pipeline depth. The cursorq stays 16
+// because 16 IS its QEMU device maximum -- writing 64 there would fail
+// negotiation, and nothing here submits to it anyway.
+const QUEUE_SIZE: u16 = 64;
+const CURSORQ_SIZE: u16 = 16;
 pub const RING_DMA_SIZE: usize = 2 * PAGE_SIZE as usize;
 
 const CTRL_DESC_OFF: u64 = 0x000;
-const CTRL_AVAIL_OFF: u64 = 0x100;
-const CTRL_USED_OFF: u64 = 0x200;
-const CURSOR_DESC_OFF: u64 = 0x300;
-const CURSOR_AVAIL_OFF: u64 = 0x400;
-const CURSOR_USED_OFF: u64 = 0x500;
-const REQ_OFF: u64 = 0x600;
+const CTRL_AVAIL_OFF: u64 = 0x400;
+const CTRL_USED_OFF: u64 = 0x500;
+const CURSOR_DESC_OFF: u64 = 0x800;
+const CURSOR_AVAIL_OFF: u64 = 0x900;
+const CURSOR_USED_OFF: u64 = 0xA00;
+const REQ_OFF: u64 = 0xB00;
 const RESP_OFF: u64 = 0x1000;
 
 const REQ_REGION_LEN: u32 = 0x100;
@@ -196,6 +204,9 @@ const _: () = {
     assert!(CTRL_DESC_OFF + (QUEUE_SIZE as u64) * 16 <= CTRL_AVAIL_OFF);
     assert!(CTRL_AVAIL_OFF + 4 + (QUEUE_SIZE as u64) * 2 <= CTRL_USED_OFF);
     assert!(CTRL_USED_OFF + 4 + (QUEUE_SIZE as u64) * 8 <= CURSOR_DESC_OFF);
+    assert!(CURSOR_DESC_OFF + (CURSORQ_SIZE as u64) * 16 <= CURSOR_AVAIL_OFF);
+    assert!(CURSOR_AVAIL_OFF + 4 + (CURSORQ_SIZE as u64) * 2 <= CURSOR_USED_OFF);
+    assert!(CURSOR_USED_OFF + 4 + (CURSORQ_SIZE as u64) * 8 <= REQ_OFF);
     assert!(REQ_OFF + (REQ_REGION_LEN as u64) <= RESP_OFF);
     assert!(RESP_OFF + (RESP_REGION_LEN as u64) <= RING_DMA_SIZE as u64);
     assert!(GPU_RESP_DISPLAY_INFO_LEN <= RESP_REGION_LEN);
@@ -210,7 +221,14 @@ const _: () = {
 // and a GPU_CTRL_HDR_LEN response header in the tail page. A full lane
 // refuses with Again (the client retries); it never blocks the serve loop
 // (#31/#125: the compositor IS the console).
-pub const FENCED_SLOTS: usize = 4;
+//
+// 4 -> 16 at #204: the per-ctx share (FENCED_SLOTS / 2) was 2, and that
+// depth-2 throttle -- faithfully mirrored client-side -- serialized every
+// GL frame against full guest->host->retire round trips (the #215 ~300x
+// per-draw collapse). 16 is the ceiling this layout admits: exactly one
+// response page at FRESP_STRIDE (16 * 0x100 = PAGE_SIZE), and 2 + 2*16
+// descriptor pairs fit the 64-deep controlq with headroom.
+pub const FENCED_SLOTS: usize = 16;
 const FREQ_LEN: u64 = 0x10000;
 const FRESP_STRIDE: u64 = 0x100;
 const FRESP_OFF: u64 = (FENCED_SLOTS as u64) * FREQ_LEN;
@@ -263,13 +281,20 @@ pub fn prewarm(va: u64, size: usize) {
     }
 }
 
-fn setup_queue(common: u64, queue: u16, desc_pa: u64, avail_pa: u64, used_pa: u64) -> Option<u16> {
+fn setup_queue(
+    common: u64,
+    queue: u16,
+    size: u16,
+    desc_pa: u64,
+    avail_pa: u64,
+    used_pa: u64,
+) -> Option<u16> {
     unsafe {
         w16(common + CCFG_QUEUE_SELECT, queue);
-        if r16(common + CCFG_QUEUE_SIZE) < QUEUE_SIZE {
+        if r16(common + CCFG_QUEUE_SIZE) < size {
             return None;
         }
-        w16(common + CCFG_QUEUE_SIZE, QUEUE_SIZE);
+        w16(common + CCFG_QUEUE_SIZE, size);
         w64(common + CCFG_QUEUE_DESC, desc_pa);
         w64(common + CCFG_QUEUE_DRIVER, avail_pa);
         w64(common + CCFG_QUEUE_DEVICE, used_pa);
@@ -325,6 +350,7 @@ fn init_device(
         let ctrl_off = match setup_queue(
             common,
             GPU_QUEUE_CONTROL,
+            QUEUE_SIZE,
             ring_pa + CTRL_DESC_OFF,
             ring_pa + CTRL_AVAIL_OFF,
             ring_pa + CTRL_USED_OFF,
@@ -339,13 +365,14 @@ fn init_device(
         let cursor_off = match setup_queue(
             common,
             GPU_QUEUE_CURSOR,
+            CURSORQ_SIZE,
             ring_pa + CURSOR_DESC_OFF,
             ring_pa + CURSOR_AVAIL_OFF,
             ring_pa + CURSOR_USED_OFF,
         ) {
             Some(o) => o,
             None => {
-                say!("tapestryd: gpu cursorq size below QUEUE_SIZE");
+                say!("tapestryd: gpu cursorq size below CURSORQ_SIZE");
                 w8(common + CCFG_DEVICE_STATUS, STATUS_FAILED);
                 return Err(Error::Hardware);
             }

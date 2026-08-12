@@ -127,18 +127,26 @@ const MAX_SURFACES_PER_CONN: usize = 4;
 /// client's shared-map budget also bounds -- this cap is the server's own
 /// bookkeeping bound, not the resource authority).
 const MAX_WARP_CTXS: usize = 8;
-/// Lifted 16 -> 128 at Warp-3: the Mesa winsys is the first REAL consumer,
-/// and st/mesa alone mints ~8 hw_res (color + depth + upload/staging
-/// buffers) before the first draw -- 16 was prover-scale, and a GL app's
-/// textures are one hw_res each. The round-6 F1 cap argument is unchanged
-/// by the value: the creation-time `leaked_count + live_backed` cap admits
-/// at most one graveyard park per entry, and the graveyard is sized by
-/// this same constant, so "no record is ever dropped" holds by
-/// construction at any width. Static cost: ~170 KiB across both arrays.
-/// The BYTE bound (WARP_CTX_BACKING_MAX) is the real resource authority
-/// and does not move. Exposed to clients as ctl `bo-cap` (the prover's
-/// churn discriminator derives from it rather than hardcoding).
-const MAX_WARP_BOS_PER_CTX: usize = 128;
+/// Lifted 16 -> 128 at Warp-3 (st/mesa alone mints ~8 hw_res before the
+/// first draw; a GL app's textures are one hw_res each), then 128 -> 1024
+/// at #204: GLQuake's map load holds MORE than 128 textures live at once,
+/// so every create past the cap streamed GL_OUT_OF_MEMORY (#213, 1889
+/// lines on the Pi) and the draws over the missing textures fed the #198
+/// GL_INVALID_OPERATION storm. The per-ctx `bo-peak` census field is the
+/// witness this width is sized against -- read it after a real workload
+/// rather than re-guessing. The round-6 F1 cap argument is unchanged by
+/// the value: the creation-time `leaked_count + live_backed` cap admits
+/// at most one graveyard park per entry, and the graveyard reserves this
+/// same constant at ctx mint, so "no record is ever dropped" holds by
+/// construction at any width. The rows are HEAP allocations per minted
+/// ctx (~160 KiB each; 1024-wide rows outgrew the daemon's main-thread
+/// stack, where `Tapestryd` lives) -- a failed allocation fails the MINT
+/// clean, never a later park. The BYTE bound (WARP_CTX_BACKING_MAX) is
+/// the real resource authority and does not move: 1024 BOs averaging
+/// 64 KiB is exactly the 64 MiB envelope. Exposed to clients as ctl
+/// `bo-cap` (the prover's churn discriminator derives from it rather
+/// than hardcoding).
+const MAX_WARP_BOS_PER_CTX: usize = 1024;
 /// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
 /// a second client can always make progress and no single client can drive
 /// every slot into the abandonment poison.
@@ -660,22 +668,31 @@ pub struct Comp {
     /// dies at `wctx_finish`, each recovered slot handed the client a
     /// fresh cap: 64 MiB leaked per cycle, unbounded.
     ///
-    /// **This array can never overflow (round-6 F1).** Round 5 bounded it
-    /// "by construction: a ctx holds at most MAX_WARP_BOS_PER_CTX backings
-    /// at a time" -- but `bos[]` slots are REUSED, so a poisoned-yet-live
-    /// ctx could mint/build/destroy in a loop and park far more than 16
-    /// over its life, bounded only by bytes. The surplus was dropped by
-    /// value, and `WarpBo` has no `Drop`, so each drop leaked a kernel
-    /// handle AND a mapping. The real bound is the per-ctx `leaked_count`
-    /// cap enforced at BO creation, which admits at most one park per
-    /// graveyard entry -- so the fixed width is sufficient, no record is
-    /// ever dropped, and the overflow flag this used to need is gone.
-    warp_ctx_leaked: [[Option<WarpBo>; MAX_WARP_BOS_PER_CTX]; MAX_WARP_CTXS],
+    /// **This graveyard can never overflow (round-6 F1).** Round 5 bounded
+    /// it "by construction: a ctx holds at most MAX_WARP_BOS_PER_CTX
+    /// backings at a time" -- but `bos[]` slots are REUSED, so a
+    /// poisoned-yet-live ctx could mint/build/destroy in a loop and park
+    /// far more than 16 over its life, bounded only by bytes. The surplus
+    /// was dropped by value, and `WarpBo` has no `Drop`, so each drop
+    /// leaked a kernel handle AND a mapping. The real bound is the per-ctx
+    /// `leaked_count` cap enforced at BO creation, which admits at most
+    /// one park per graveyard entry -- so no record is ever dropped, and
+    /// the overflow flag this used to need is gone. Heap rows since #204
+    /// (the 1024 lift): capacity for the full cap is `try_reserve`d at ctx
+    /// MINT -- an OOM fails the mint clean -- so the parks themselves stay
+    /// infallible (a push within reserved capacity never allocates). The
+    /// capacity is never shrunk while the slot is poisoned; the row is
+    /// drained (records freed) only at vindication.
+    warp_ctx_leaked: [Vec<WarpBo>; MAX_WARP_CTXS],
     /// The pub id whose poison condemned each slot, so a later
     /// vindication can release it (round-3 F2). 0 = none.
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
     warp_ctx_seq: u32,
     warp_bo_seq: u32,
+    /// #204 census, the global half: max `bo_backed_peak` over every ctx
+    /// that ever lived -- readable AFTER a workload's ctx is gone (the
+    /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
+    warp_bo_peak: u32,
     /// #210 custody mirror: parked reads + request-buffer residue across
     /// ALL conns, folded per tick by main's conns walk (the ctl reader's
     /// conn cannot see its siblings). fparked/rparked = pending fence /
@@ -752,7 +769,12 @@ struct WarpCtx {
     /// incarnation it named -- slot reuse cannot re-arm it against a
     /// future tenant.
     present_to: Option<(usize, u32, u32)>,
-    bos: [Option<WarpBo>; MAX_WARP_BOS_PER_CTX],
+    /// #204 census: the most BACKED BOs this ctx ever held at once -- the
+    /// quantity the creation-time cap gates, so it is the number the cap
+    /// width must be sized against. Read via ctl `bo-peak`.
+    bo_backed_peak: u32,
+    /// Heap row (#204): MAX_WARP_BOS_PER_CTX slots, allocated at mint.
+    bos: alloc::boxed::Box<[Option<WarpBo>]>,
 }
 
 /// A GPU buffer object: a kernel-minted GPU-BO DMA chunk attached as the
@@ -820,10 +842,11 @@ impl Comp {
             test_mode: false,
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
-            warp_ctx_leaked: [WARP_NO_BO_ROW; MAX_WARP_CTXS],
+            warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
+            warp_bo_peak: 0,
             #[cfg(feature = "test-mode")]
             w210_fparked: 0,
             #[cfg(feature = "test-mode")]
@@ -2614,9 +2637,19 @@ struct PendingFence {
 const FENCE_REC_MAX: usize = 21;
 
 const WARP_NO_CTX: Option<WarpCtx> = None;
-const WARP_NO_BO: Option<WarpBo> = None;
-/// `WarpBo` is not Copy, so the outer array-repeat needs a const item.
-const WARP_NO_BO_ROW: [Option<WarpBo>; MAX_WARP_BOS_PER_CTX] = [WARP_NO_BO; MAX_WARP_BOS_PER_CTX];
+
+/// Heap BO row (#204: 1024-wide rows outgrew the daemon's stack).
+/// `try_reserve` so an OOM fails the caller (the ctx MINT) clean instead
+/// of aborting the compositor; `resize_with` within reserved capacity
+/// never reallocates.
+fn warp_bo_row() -> Option<alloc::boxed::Box<[Option<WarpBo>]>> {
+    let mut v: Vec<Option<WarpBo>> = Vec::new();
+    if v.try_reserve_exact(MAX_WARP_BOS_PER_CTX).is_err() {
+        return None;
+    }
+    v.resize_with(MAX_WARP_BOS_PER_CTX, || None);
+    Some(v.into_boxed_slice())
+}
 
 // --- Warp-2c: the GPU-seam object lifecycle -------------------------------
 impl Comp {
@@ -2761,6 +2794,22 @@ impl Comp {
         }
         let slot = (0..MAX_WARP_CTXS)
             .find(|&i| self.warp_ctxs[i].is_none() && !self.warp_ctx_slot_poisoned[i])?;
+        // Heap rows BEFORE any device state (#204): a failed allocation
+        // fails the mint with nothing to unwind. The graveyard row is
+        // reserved to the full cap here so `warp_park_leaked` -- which has
+        // no failure arm by round-6 F1's argument -- never allocates. A
+        // mintable slot's row is empty (parked records exist only while
+        // the slot is poisoned, and poisoned slots are skipped above).
+        let bos = warp_bo_row()?;
+        // The row is empty (len 0), so this guarantees capacity >= the
+        // full cap -- a no-op when a reused slot's row kept its capacity.
+        debug_assert!(self.warp_ctx_leaked[slot].is_empty());
+        if self.warp_ctx_leaked[slot]
+            .try_reserve_exact(MAX_WARP_BOS_PER_CTX)
+            .is_err()
+        {
+            return None;
+        }
         let dev_ctx = (slot as u32) + 1;
         if self.gpu.ctx_create(dev_ctx, b"warp").is_err() {
             return None;
@@ -2795,7 +2844,8 @@ impl Comp {
             leaked_count: 0,
             retiring: false,
             present_to: None,
-            bos: [WARP_NO_BO; MAX_WARP_BOS_PER_CTX],
+            bo_backed_peak: 0,
+            bos,
         });
         Some(pub_id)
     }
@@ -2982,6 +3032,7 @@ impl Comp {
         }
 
         let c = self.wctx_mut(ctx_pub, conn).unwrap();
+        let mut built = false;
         for b in c.bos.iter_mut().flatten() {
             if b.pub_id == bo_pub {
                 b.res_id = res_id;
@@ -2991,10 +3042,25 @@ impl Comp {
                 b.size = size;
                 b.w = w;
                 b.h = h;
-                return true;
+                built = true;
+                break;
             }
         }
-        false
+        if !built {
+            return false;
+        }
+        // #204 census: track the backed high-water -- the quantity the
+        // creation-time cap gates, so it is what the cap width is sized
+        // against. Per-ctx AND global (the ctx's copy dies with it).
+        let live = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count() as u32;
+        if live > c.bo_backed_peak {
+            c.bo_backed_peak = live;
+        }
+        let ctx_peak = c.bo_backed_peak;
+        if ctx_peak > self.warp_bo_peak {
+            self.warp_bo_peak = ctx_peak;
+        }
+        true
     }
 
     /// The BO Tweft mint (the weft_ensure precedent): share once, echo the
@@ -3090,18 +3156,19 @@ impl Comp {
     /// -- a failure here could only drop the record, and a dropped `WarpBo`
     /// leaks its still-valid `dma_fd` and its mapping with no `Drop` to
     /// catch it. The creation-time `leaked_count` cap admits at most one
-    /// park per graveyard entry, so the `find` always succeeds; the debug
-    /// assert names that coupling rather than trusting it silently.
+    /// park per row entry, and the mint reserved the row to the full cap,
+    /// so the guarded push below never allocates; the debug assert names
+    /// that coupling rather than trusting it silently.
     fn warp_park_leaked(&mut self, slot: usize, b: WarpBo) {
-        match self.warp_ctx_leaked[slot].iter_mut().find(|g| g.is_none()) {
-            Some(g) => *g = Some(b),
-            None => {
-                debug_assert!(false, "leak graveyard full: leaked_count cap breached");
-                say!(
-                    "tapestryd: warp ctx slot {} leak graveyard full -- BUG, cap breached",
-                    slot
-                );
-            }
+        let g = &mut self.warp_ctx_leaked[slot];
+        if g.len() < MAX_WARP_BOS_PER_CTX {
+            g.push(b);
+        } else {
+            debug_assert!(false, "leak graveyard full: leaked_count cap breached");
+            say!(
+                "tapestryd: warp ctx slot {} leak graveyard full -- BUG, cap breached",
+                slot
+            );
         }
     }
 
@@ -3109,11 +3176,9 @@ impl Comp {
     /// the device has just retired the chain that condemned them, which is
     /// the same proof that lets the slot itself be recycled.
     fn warp_free_leaked(&mut self, slot: usize) {
-        for j in 0..MAX_WARP_BOS_PER_CTX {
-            let b = match self.warp_ctx_leaked[slot][j].take() {
-                Some(b) => b,
-                None => continue,
-            };
+        // drain keeps the row's capacity, so a reused slot's mint-time
+        // reserve stays a no-op.
+        for b in self.warp_ctx_leaked[slot].drain(..) {
             if b.dma_fd >= 0 {
                 unsafe { t_burrow_detach(b.va, b.size) };
                 unsafe { t_close(b.dma_fd) };
@@ -4312,7 +4377,7 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!(
-                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\n",
+                    "virgl {}\ncapsets {}\ncapset {} {} {}\nctxs {}\npoisoned {}\nbo-cap {}\nfence-lane {}\nbo-peak {}\n",
                     comp.gpu.virgl as u32,
                     comp.gpu.num_capsets,
                     comp.gpu.capset_id,
@@ -4324,7 +4389,15 @@ impl Conn {
                     // neither the winsys nor the prover's churn bound bakes
                     // the constant in (#187: a claimed cross-file sync needs
                     // a CHECK; reading it here IS the check).
-                    MAX_WARP_BOS_PER_CTX
+                    MAX_WARP_BOS_PER_CTX,
+                    // #204: the per-ctx fenced-lane share, for the same
+                    // reason -- the winsys throttles its in-flight depth to
+                    // this, and a hardcoded client mirror is what held the
+                    // pipeline at depth 2 (#215) after the server side grew.
+                    WARP_CTX_FENCE_MAX,
+                    // #204 census (global): max backed BOs any ctx ever
+                    // held -- readable after the workload's ctx is gone.
+                    comp.warp_bo_peak
                 ),
             );
             // #175: the anti-vacuous counter. A prover that submits and
@@ -4448,6 +4521,20 @@ impl Conn {
                                 comp.gpu.ctx_fences_in_flight(id),
                                 signaled
                             ),
+                        );
+                        // #204 census (per-ctx): live = backed right now
+                        // (what the creation cap counts); peak = the
+                        // high-water the cap width must be sized against.
+                        let (live, peak) = comp.wctx(id, self.conn_id).map_or((0, 0), |c| {
+                            (
+                                c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count()
+                                    as u32,
+                                c.bo_backed_peak,
+                            )
+                        });
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("bo-live {}\nbo-peak {}\n", live, peak),
                         );
                     }
                     self.read_str(tag, &s, a.offset, cap)
