@@ -86,7 +86,11 @@ mkdir -p "$(dirname "$LOG")"
 # bash EXECs a lone simple command, so the wrapper's argv evaporates and the
 # fake never carries the name it was given -- a sabotage that quietly passes.
 if [[ "${1:-}" == "--selftest" ]]; then
-    cap="$(mktemp /tmp/sigwatch-selftest.XXXXXX.jsonl)"
+    # #227: trailing X's only -- BSD mktemp takes `...XXXXXX.jsonl` literally,
+    # so this would have worked exactly once and then failed forever. That is
+    # fatal for a selftest which is itself the gate on the whole instrument.
+    cap="$(mktemp "/tmp/sigwatch-selftest.XXXXXX")" || {
+        echo "sigwatch selftest: FAIL (could not allocate a capture file)" >&2; exit 1; }
     "$ESLOGGER" signal > "$cap" 2>"$cap.err" &
     espid=$!
     trap 'kill -TERM "$espid" 2>/dev/null; wait "$espid" 2>/dev/null' EXIT

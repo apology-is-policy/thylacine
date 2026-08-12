@@ -36,18 +36,27 @@ THRESHOLD="${THYLACINE_IDLE_THRESHOLD:-80}"
 SETTLE="${THYLACINE_IDLE_SETTLE:-12}"
 SAMPLES="${THYLACINE_IDLE_SAMPLES:-5}"
 BOOT_TO="${THYLACINE_IDLE_BOOT_TO:-150}"
-LOG="$(mktemp /tmp/thyla-idle-gate.XXXXXX.log)"
+# #227: X's must be TRAILING -- BSD mktemp substitutes only a trailing run, so
+# `...XXXXXX.log` was taken LITERALLY: run 1 created that exact fixed name and
+# every later run died on "File exists" with $LOG empty, which made the
+# run-vm.sh redirect fail and got reported as "qemu exited before boot OK" --
+# a QEMU verdict on a failure that never reached QEMU. The name also carries the
+# tree, because both worktrees used the same literal path and collided.
+# CHECKING the allocation is the load-bearing half: unchecked, it misdiagnoses.
+LOG="$(mktemp "/tmp/thyla-idle-gate.$(basename "$PWD").XXXXXX")" || {
+    echo "ci-idle-gate: FAIL (could not allocate a log file under /tmp)" >&2; exit 2; }
 # #89: THIS tree's absolute disk path -- the discriminator every process match
 # below is scoped to. Mirrors run-vm.sh's resolution (we cd'd to the repo root
 # above), so the pattern is exactly the string qemu carries on its cmdline.
 DISK_IMG="${THYLACINE_DISK_IMG:-$PWD/build/disk.img}"
-# #225: force any relative override absolute AND re-export it, for both halves
-# of the coherence. A relative pattern (`build/disk.img`) is a SUBSTRING of
-# every sibling worktree's path, so the boot-fail pkill below would cross trees
-# and shoot the other track's VM, and the pgrep count below would tally their
-# qemu into this tree's "expected exactly 1" assertion. run-vm.sh passes the env
-# value through verbatim, so exporting the canonical form is what keeps this
-# pattern byte-identical to qemu's actual cmdline.
+# #225: force any relative override absolute AND re-export it. A relative
+# pattern (`build/disk.img`) is a SUBSTRING of every sibling worktree's path, so
+# the pgrep below would tally the other track's qemu into this tree's "expected
+# exactly 1" assertion -- a false FAIL naming the wrong tree. (It also used to
+# make the boot-fail pkill cross trees and SHOOT that VM; that pkill is gone
+# since #226, so only the counting half of the hazard remains.) run-vm.sh passes
+# the env value through verbatim, so exporting the canonical form is what keeps
+# this pattern byte-identical to qemu's actual cmdline.
 case "$DISK_IMG" in /*) ;; *) DISK_IMG="$PWD/$DISK_IMG" ;; esac
 export THYLACINE_DISK_IMG="$DISK_IMG"
 
@@ -70,7 +79,15 @@ for _ in $(seq 1 "$BOOT_TO"); do
     kill -0 "$RUNPID" 2>/dev/null || { echo "ci-idle-gate: FAIL (qemu exited before boot OK; see $LOG)"; exit 1; }
     sleep 1
 done
-[ "$booted" = 1 ] || { echo "ci-idle-gate: FAIL (no boot OK within ${BOOT_TO}s; see $LOG)"; kill "$RUNPID" 2>/dev/null; pkill -f "$DISK_IMG" 2>/dev/null; exit 1; }
+# #226: the `pkill -f "$DISK_IMG"` that used to sit beside this kill was pure
+# overkill from birth -- run-vm.sh EXECs qemu (run-vm.sh:452), so $RUNPID IS the
+# qemu and the kill by PID is already sufficient (line 70 above says as much,
+# reporting a dead $RUNPID as "qemu exited"). What the pattern kill added was
+# reach: every VM in this tree boots this same disk, so a failing idle gate also
+# shot a concurrent SMP-gate boot -- and the guard against exactly that (the
+# "expected exactly 1 qemu" assertion below) runs only AFTER a SUCCESSFUL boot,
+# so it could never see this path. Deleted rather than narrowed.
+[ "$booted" = 1 ] || { echo "ci-idle-gate: FAIL (no boot OK within ${BOOT_TO}s; see $LOG)"; kill "$RUNPID" 2>/dev/null; exit 1; }
 
 sleep "$SETTLE"
 
