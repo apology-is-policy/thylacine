@@ -283,15 +283,30 @@ void test_mmap_file_devenv_never_exec_backs(void) {
     struct Spoor *root = devenv.attach("");
     TEST_ASSERT(root != NULL, "attach /env root");
     const char *names[1] = { "NOEXEC217" };
+    // Cleanup-then-fail, NOT TEST_ASSERT: the macro expands to `return`, so an
+    // assert here would skip every unref below it and leak root + the env entry
+    // (and the walked Spoor on the nqid != 1 arm). An earlier draft had the
+    // cleanup written AFTER the assert, where it could never run -- dead code
+    // that reads like failure-path hygiene. #217 round-2 F3.
     struct Walkqid *wq = devenv.walk(root, NULL, names, 1);
-    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk /env/NOEXEC217");
-    if (!wq) { spoor_unref(root); env_free(tp); return; }
+    if (!wq || wq->nqid != 1) {
+        if (wq) { spoor_unref(wq->spoor); walkqid_free(wq); }
+        spoor_unref(root);
+        env_free(tp);
+        test_fail("walk /env/NOEXEC217");
+        return;
+    }
     struct Spoor *vf = wq->spoor;
     walkqid_free(wq);
 
     struct Proc *p = proc_alloc();
-    TEST_ASSERT(p != NULL, "proc_alloc");
-    if (!p) { spoor_unref(vf); spoor_unref(root); env_free(tp); return; }
+    if (!p) {
+        spoor_unref(vf);
+        spoor_unref(root);
+        env_free(tp);
+        test_fail("proc_alloc");
+        return;
+    }
     p->territory = territory_alloc();
 
     spoor_ref(vf); hidx_t fd_x = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, vf);
