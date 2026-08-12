@@ -43,9 +43,12 @@ Two doors, one tree:
 
 ```
 ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\nctxs <live>\npoisoned <n>\n"
-                             # + "bo-cap <n>\nfence-lane <n>\nbo-peak <n>\n" (#204: the per-ctx BO
-                             #   capacity, the per-ctx fenced share the client adopts as its throttle
-                             #   depth, and the global backed-BO high-water census)
+                             # + "bo-cap <n>\nfence-lane <n>\nbo-peak <n>\nbo-bytes-peak <n>\n"
+                             #   (#204: the per-ctx BO capacity, the per-ctx fenced share the client
+                             #   adopts as its throttle depth, and the global backed-BO high-water
+                             #   census on BOTH axes -- count AND bytes; bo-peak 26 against a 1024
+                             #   cap with thousands of refusals proved the BYTE cap
+                             #   [WARP_CTX_BACKING_MAX] is what saturates: few-but-large backings)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
@@ -54,7 +57,8 @@ ctx/
     ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy"
                              # read: "<id>\npoisoned <0|1>\nleaked-count <n>\nleaked-bytes <n>\n"
                              #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3)
-                             #   + "bo-live <n>\nbo-peak <n>\n" (#204 census: backed now / high-water)
+                             #   + "bo-live <n>\nbo-peak <n>\nbo-bytes <n>\nbo-bytes-peak <n>\n"
+                             #     (#204 census: backed now / high-water, count + bytes axes)
     submit                   # write: one Twrite = one atomic opaque CCMD submission (fenced)
     fence                    # read: the completion stream -- newest signaled fence id,
                              #       one record per read, PARKS when nothing unreported

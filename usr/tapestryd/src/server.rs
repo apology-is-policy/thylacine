@@ -781,6 +781,11 @@ struct WarpCtx {
     /// 26 with thousands of refusals showed the BYTE cap can saturate at
     /// tiny counts: few-but-large backings). Read via ctl `bo-bytes-peak`.
     bo_bytes_peak: u64,
+    /// #218 one-shot diagnostic latch: the FIRST refused wbo_create per
+    /// ctx says which arm and with what parameters (four census runs died
+    /// to silence here). One-shot so a per-texture failure loop cannot
+    /// become its own console storm.
+    build_diag_said: bool,
     /// Heap row (#204): MAX_WARP_BOS_PER_CTX slots, allocated at mint.
     bos: alloc::boxed::Box<[Option<WarpBo>]>,
 }
@@ -2855,6 +2860,7 @@ impl Comp {
             present_to: None,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
+            build_diag_said: false,
             bos,
         });
         Some(pub_id)
@@ -2888,6 +2894,34 @@ impl Comp {
     /// length; the kernel envelope + the client's own shared-map budget
     /// bound it -- the server checks only page alignment and non-zero.
     #[allow(clippy::too_many_arguments)]
+    /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
+    /// failing arm + its parameters. Gated on the ctx latch, never the
+    /// counting (#95), so a per-texture failure loop cannot storm the
+    /// console it is diagnosing.
+    #[allow(clippy::too_many_arguments)]
+    fn wbo_diag_once(
+        &mut self,
+        ctx_pub: u32,
+        conn: u64,
+        why: &str,
+        detail: i64,
+        format: u32,
+        w: u32,
+        h: u32,
+        last_level: u32,
+        size: u64,
+    ) {
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            if !c.build_diag_said {
+                c.build_diag_said = true;
+                say!(
+                    "tapestryd: warp create3d refused ({} {}) fmt={} {}x{} lvl={} size={} ctx={}",
+                    why, detail, format, w, h, last_level, size, ctx_pub
+                );
+            }
+        }
+    }
+
     fn wbo_create(
         &mut self,
         ctx_pub: u32,
@@ -2906,6 +2940,7 @@ impl Comp {
         size: u64,
     ) -> bool {
         if size == 0 || size % PAGE != 0 {
+            self.wbo_diag_once(ctx_pub, conn, "size-align", size as i64, format, w, h, last_level, size);
             return false;
         }
         // The backing is CLIENT-DECLARED, and nothing downstream charges
@@ -2925,6 +2960,7 @@ impl Comp {
         // step is checked anyway (belt AND braces: the round-1 version
         // checked only the multiplications and panicked on `v + v/2`).
         if size > WARP_CTX_BACKING_MAX {
+            self.wbo_diag_once(ctx_pub, conn, "size-cap", 0, format, w, h, last_level, size);
             return false;
         }
         let px = (w as u64)
@@ -2942,19 +2978,21 @@ impl Comp {
             None => WARP_CTX_BACKING_MAX, // geometry alone is unbounded; the cap rules
         };
         if size > geom_max {
+            self.wbo_diag_once(ctx_pub, conn, "geometry", geom_max as i64, format, w, h, last_level, size);
             return false;
         }
-        let c = match self.wctx(ctx_pub, conn) {
-            Some(c) => c,
-            None => return false,
-        };
-        // Saturating, not `+` (round-2 F1's second witness): `live` sums
-        // client-chosen sizes and the sum itself must never panic.
-        let live: u64 = c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
-        let leaked = c.leaked_bytes;
-        if live.saturating_add(leaked).saturating_add(size) > WARP_CTX_BACKING_MAX {
-            return false;
-        }
+        // The c-borrowing checks compute into locals first so the failure
+        // arms can reach the (&mut self) one-shot diagnostic (#218).
+        let (byte_fail, byte_live, count_fail, no_mint, already_built, dev_ctx) = {
+            let c = match self.wctx(ctx_pub, conn) {
+                Some(c) => c,
+                None => return false,
+            };
+            // Saturating, not `+` (round-2 F1's second witness): `live` sums
+            // client-chosen sizes and the sum itself must never panic.
+            let live: u64 =
+                c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+            let leaked = c.leaked_bytes;
         // Round-6 F1: the byte cap does NOT bound the leak COUNT. The
         // minimum accepted size is PAGE, so 16384 backings fit inside the
         // 64 MiB budget -- and since `bos[]` slots are reused across
@@ -2971,27 +3009,40 @@ impl Comp {
         // BACKED BOs can be parked (`wbo_retire` returns 0, and so parks
         // nothing, when `dma_fd < 0`), so an unbacked mint is correctly not
         // counted here.
-        let live_backed = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count();
-        if c.leaked_count as usize + live_backed >= MAX_WARP_BOS_PER_CTX {
+            let live_backed = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count();
+            (
+                live.saturating_add(leaked).saturating_add(size) > WARP_CTX_BACKING_MAX,
+                live,
+                c.leaked_count as usize + live_backed >= MAX_WARP_BOS_PER_CTX,
+                !c.bos.iter().flatten().any(|b| b.pub_id == bo_pub),
+                c.bos
+                    .iter()
+                    .flatten()
+                    .any(|b| b.pub_id == bo_pub && b.dma_fd >= 0),
+                c.dev_ctx,
+            )
+        };
+        if byte_fail {
+            self.wbo_diag_once(ctx_pub, conn, "byte-cap", byte_live as i64, format, w, h, last_level, size);
             return false;
         }
-        let dev_ctx = c.dev_ctx;
-        if !c.bos.iter().flatten().any(|b| b.pub_id == bo_pub) {
+        if count_fail {
+            self.wbo_diag_once(ctx_pub, conn, "count-cap", 0, format, w, h, last_level, size);
             return false;
         }
-        // Already built? create3d is once per BO.
-        if c
-            .bos
-            .iter()
-            .flatten()
-            .any(|b| b.pub_id == bo_pub && b.dma_fd >= 0)
-        {
+        if no_mint {
+            self.wbo_diag_once(ctx_pub, conn, "no-mint-record", 0, format, w, h, last_level, size);
+            return false;
+        }
+        // Already built? create3d is once per BO -- benign, no diagnostic.
+        if already_built {
             return false;
         }
 
         let fd =
             unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
+            self.wbo_diag_once(ctx_pub, conn, "dma-create", fd, format, w, h, last_level, size);
             return false;
         }
         let va = self.weave_va_next;
@@ -2999,6 +3050,7 @@ impl Comp {
         let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
         if pa < 0 {
             unsafe { t_close(fd) };
+            self.wbo_diag_once(ctx_pub, conn, "dma-map", pa, format, w, h, last_level, size);
             return false;
         }
 
@@ -3030,14 +3082,17 @@ impl Comp {
             .is_err()
         {
             unwind(&mut self.gpu, 0, res_id);
+            self.wbo_diag_once(ctx_pub, conn, "dev-create", target as i64, format, w, h, last_level, size);
             return false;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
             unwind(&mut self.gpu, 1, res_id);
+            self.wbo_diag_once(ctx_pub, conn, "dev-attach-ctx", 0, format, w, h, last_level, size);
             return false;
         }
         if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
             unwind(&mut self.gpu, 2, res_id);
+            self.wbo_diag_once(ctx_pub, conn, "dev-attach-backing", 0, format, w, h, last_level, size);
             return false;
         }
 
