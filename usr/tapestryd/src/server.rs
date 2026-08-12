@@ -2893,6 +2893,10 @@ impl Comp {
     /// reverse unwind on any failure. Size is the client's declared backing
     /// length; the kernel envelope + the client's own shared-map budget
     /// bound it -- the server checks only page alignment and non-zero.
+    /// A `false` return leaves the mint record untouched HERE: the create3d
+    /// ctl arm consumes it (#218), so every refusal family -- including the
+    /// parse arms that never reach this function -- reclaims the slot at
+    /// one chokepoint.
     #[allow(clippy::too_many_arguments)]
     /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
     /// failing arm + its parameters. Gated on the ctx latch, never the
@@ -3112,6 +3116,11 @@ impl Comp {
             }
         }
         if !built {
+            // Unreachable (single-threaded dispatch; nothing between the
+            // no_mint check and this write-back touches `bos`) -- but a
+            // record that vanished must not strand the device state just
+            // built for it.
+            unwind(&mut self.gpu, 3, res_id);
             return false;
         }
         // #204 census: track the backed high-water on BOTH axes -- count
@@ -3136,6 +3145,34 @@ impl Comp {
             self.warp_bo_bytes_peak = ctx_bytes_peak;
         }
         true
+    }
+
+    /// #218 server half: remove a minted-but-unbuilt BO record whose
+    /// create3d was refused -- the mint's exact inverse. Without it a
+    /// per-texture failure loop filled `bos[]` with corpses and starved
+    /// `wbo_mint` for the ctx's life (the #198 cascade's second stage).
+    /// Bounded three ways: owner-conn (I-45 -- a foreign conn's failed
+    /// write can never unmint another client's record), UNBUILT
+    /// (`dma_fd < 0` -- a built BO is `wbo_destroy`'s to reclaim, so the
+    /// benign already-built refusal cannot touch it), and non-retiring
+    /// (a deferred destroy is the pump's). An unbacked record carries no
+    /// bytes, no census, no graveyard charge: removal has no accounting
+    /// to unwind.
+    fn wbo_unmint_refused(&mut self, bo_pub: u32, conn: u64) {
+        for c in self.warp_ctxs.iter_mut().flatten() {
+            if c.owner_conn != conn || c.retiring {
+                continue;
+            }
+            for slot in c.bos.iter_mut() {
+                if slot
+                    .as_ref()
+                    .map_or(false, |b| b.pub_id == bo_pub && b.dma_fd < 0 && !b.retiring)
+                {
+                    *slot = None;
+                    return;
+                }
+            }
+        }
     }
 
     /// The BO Tweft mint (the weft_ensure precedent): share once, echo the
@@ -5188,35 +5225,21 @@ impl Conn {
         let mut it = s.split_ascii_whitespace();
         match it.next() {
             Some("create3d") => {
-                if !comp.gpu.virgl {
-                    return Err(p9::E_OPNOTSUPP);
+                // #218 server half: a create3d that did not succeed CONSUMES
+                // its mint record. The stock client treats a refused create3d
+                // as terminal for the BO -- it neither retries nor destroys
+                // it -- so the minted-but-unbuilt corpse used to sit in
+                // `bos[]` for the ctx's life, and ~1000 per-texture refusals
+                // starved `wbo_mint` into total BO death (the #198 cascade's
+                // second stage). Hooked HERE, not per-arm in `wbo_create`, so
+                // the parse/OPNOTSUPP arms that never reach it consume the
+                // mint too; the helper's own guards make the benign
+                // already-built refusal (and a foreign conn's) a no-op.
+                let r = self.wbo_ctl_create3d(comp, id, it);
+                if r.is_err() {
+                    comp.wbo_unmint_refused(id, self.conn_id);
                 }
-                let mut arg = |_name: &str| -> Result<u64, u32> {
-                    it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)
-                };
-                let target = arg("target")? as u32;
-                let format = arg("format")? as u32;
-                let bind = arg("bind")? as u32;
-                let w = arg("w")? as u32;
-                let h = arg("h")? as u32;
-                let d = arg("d")? as u32;
-                let array = arg("array")? as u32;
-                let last_level = arg("last_level")? as u32;
-                let samples = arg("samples")? as u32;
-                let flags = arg("flags")? as u32;
-                let size = arg("size")?;
-                let ctx_pub = comp
-                    .wbo(id, self.conn_id)
-                    .map(|(c, _)| c.pub_id)
-                    .ok_or(p9::E_NOENT)?;
-                if comp.wbo_create(
-                    ctx_pub, id, self.conn_id, target, format, bind, w, h, d, array,
-                    last_level, samples, flags, size,
-                ) {
-                    Ok(())
-                } else {
-                    Err(E_IO)
-                }
+                r
             }
             Some("transfer_to") => self.wbo_transfer(comp, id, true, it),
             Some("transfer_from") => self.wbo_transfer(comp, id, false, it),
@@ -5228,6 +5251,45 @@ impl Conn {
                 }
             }
             _ => Err(p9::E_INVAL),
+        }
+    }
+
+    /// The create3d verb body, extracted so the ctl arm can unmint on ANY
+    /// failure (#218) -- including the arms that fail before `wbo_create`.
+    fn wbo_ctl_create3d(
+        &mut self,
+        comp: &mut Comp,
+        id: u32,
+        mut it: core::str::SplitAsciiWhitespace<'_>,
+    ) -> Result<(), u32> {
+        if !comp.gpu.virgl {
+            return Err(p9::E_OPNOTSUPP);
+        }
+        let mut arg = |_name: &str| -> Result<u64, u32> {
+            it.next().and_then(|t| t.parse().ok()).ok_or(p9::E_INVAL)
+        };
+        let target = arg("target")? as u32;
+        let format = arg("format")? as u32;
+        let bind = arg("bind")? as u32;
+        let w = arg("w")? as u32;
+        let h = arg("h")? as u32;
+        let d = arg("d")? as u32;
+        let array = arg("array")? as u32;
+        let last_level = arg("last_level")? as u32;
+        let samples = arg("samples")? as u32;
+        let flags = arg("flags")? as u32;
+        let size = arg("size")?;
+        let ctx_pub = comp
+            .wbo(id, self.conn_id)
+            .map(|(c, _)| c.pub_id)
+            .ok_or(p9::E_NOENT)?;
+        if comp.wbo_create(
+            ctx_pub, id, self.conn_id, target, format, bind, w, h, d, array,
+            last_level, samples, flags, size,
+        ) {
+            Ok(())
+        } else {
+            Err(E_IO)
         }
     }
 

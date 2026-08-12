@@ -39,9 +39,13 @@ lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
 # The prover parks on the fence file until the device retires the clear +
-# readback; under TCG-with-host-GL that is seconds, so give it a real
-# window rather than the prompt-default.
-set timeout 120
+# readback, and the corpse-reclaim leg (#218) drives ~2*(cap+1) mint/refuse
+# round trips -- give the whole battery a real window. NOTE: `set timeout`
+# is DEAD here (lc_expect resets it from lc_cmd_timeout per call; the old
+# `set timeout 120` never took effect and the battery ran on the 30 s
+# default) -- the knob is lc_cmd_timeout. Floor, not stomp: a caller's
+# larger LS_CI_CMD_TIMEOUT (slow TCG hosts) passes through.
+if {$lc_cmd_timeout < 180} { set lc_cmd_timeout 180 }
 lc_run_expect "warp-prove" "WARP-PROVE PASS"
 
 lc_pass "warp-prove: ctx create/destroy + a hand-built CCMD stream round-trips (the Warp-2 gate)"

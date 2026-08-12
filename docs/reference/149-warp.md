@@ -64,6 +64,8 @@ ctx/
                              #       one record per read, PARKS when nothing unreported
     bo/
       new                    # open+read mints a BO record -> "<pub_id>\n"
+                             #   (a create3d that does not return OK CONSUMES
+                             #    the record -- #218; see Error paths)
       <id>/
         ctl                  # "create3d <target> <format> <bind> <w> <h> <d> <array>
                              #     <last_level> <samples> <flags> <size>"
@@ -595,7 +597,7 @@ majority) bounds it ~25–40% above Composed.
 | any warp file on a 2D device (`virgl 0`) needing the device | `E_OPNOTSUPP` |
 | ctx/BO resolve not owned by this conn, or dead | `E_NOENT` |
 | second ctx mint on one conn; ctx-slot/BO exhaustion | `E_NOMEM` |
-| `create3d` refused (size, implausible geometry, ctx backing cap) | `E_IO` |
+| `create3d` refused (size, implausible geometry, ctx backing cap) | `E_IO` — **and the mint record is CONSUMED** (#218): every non-OK create3d, including the parse/`E_OPNOTSUPP` arms, unmints the still-unbuilt record (`wbo_unmint_refused`, owner-conn + unbuilt + non-retiring gated), so a per-texture refusal loop can never fill `bos[]` with corpses and starve `bo/new`. The benign repeat-create3d on a BUILT bo is still refused `E_IO` but the live record is untouched |
 | submit/transfer, fenced lane momentarily full | `E_AGAIN` (retry) |
 | fenced lane permanently exhausted (every slot poisoned) | `E_IO` (do NOT retry) |
 | submit stream larger than a slot | `E_INVAL` |
@@ -619,7 +621,12 @@ majority) bounds it ~25–40% above Composed.
   against. The round-6 F1 graveyard cap is width-independent by
   construction — the discriminating churn probe reads the width from
   the global ctl `bo-cap` field instead of hardcoding it, so a cap
-  change cannot silently un-discriminate it. The rows are heap
+  change cannot silently un-discriminate it. CAVEAT (tracked): on the
+  2026-08-12 runs the churn's refusal fired at attempt ~237 via the
+  `dma-create` arm — each graveyard leak pins its dma handle by design,
+  so tapestryd's handle table exhausts before `leaked_count` reaches the
+  cap, and the R6-F1 count-cap is currently witnessed by the WRONG
+  mechanism. The rows are heap
   allocations at ctx mint since #204; an OOM fails the mint clean),
   64 MiB live+leaked backing
   per context, 4 concurrent `/srv/warp` connections (a 5th blocks until
@@ -690,7 +697,13 @@ kind decision, budget charge/uncharge, reaper registration) — both in the
 2D boots prove the degradation path (`Warp PROBE OK ... virgl 0`, submit
 E_OPNOTSUPP, no flane allocation) and `ls-gfx`/`ls-gfx-play` exercise the
 rewritten controlq under real present pressure; `/warp-prove` on the GL
-host is the seam's PASS-path gate (`tools/warp-host.sh prove`), and
+host is the seam's PASS-path gate (`tools/warp-host.sh prove`) — nine legs
+since #218: the clean path, the poisoned/graveyard/vindication machine, the
+two-client cross-properties, and the corpse-reclaim leg (cap+1 REFUSED
+create3ds per family [wbo_create-validated + pre-parse], the mint must
+survive attempt cap+1, the repeat-create3d-on-a-built-bo guard; A/B-proven
+on thyla-pi 2026-08-12 — the pre-fix server fails it at exactly
+`size-align attempt 1025 (cap 1024)`) — and
 `/clade/bin/virgl-prove` is the Warp-3 stack gate — the full Mesa virgl
 driver through the winsys to a rendered triangle (`tools/warp-host.sh
 tri`, both #186-anchored verdict lines required).

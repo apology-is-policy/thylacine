@@ -108,6 +108,20 @@ fn parse_u32_prefix(s: &str) -> Option<u32> {
     s.trim().split_ascii_whitespace().next()?.parse().ok()
 }
 
+/// Like `open_read_string` but survives an open REFUSAL -- for legs whose
+/// assertion is about whether the open succeeds (a starved `bo/new` mint
+/// refuses at the OPEN, and the generic "open-for-read" fail would leave a
+/// red run blind to which leg and which attempt died).
+fn try_open_read(root: i64, path: &str) -> Option<String> {
+    let fd = unsafe { t_open(root, path.as_ptr(), path.len(), T_OREAD) };
+    if fd < 0 {
+        return None;
+    }
+    let s = read_string(fd);
+    unsafe { t_close(fd) };
+    Some(s)
+}
+
 /// Pull the decimal after `key ` out of a "k v k v ..." line.
 fn parse_field(s: &str, key: &str) -> Option<u64> {
     let mut it = s.split_ascii_whitespace();
@@ -325,8 +339,16 @@ pub extern "C" fn rs_main() -> i64 {
     // there: a hold that was scoped in effect but global in storage.
     prove_two_clients();
 
+    // 9. The CORPSE-RECLAIM path (#218). Every leg above drives create3d
+    // to SUCCEED (or, in the churn, to be refused exactly once at the
+    // cap); none ever asked what a refusal leaves behind. It left the
+    // minted-but-unbuilt record in `bos[]` forever -- ~cap per-texture
+    // refusals starved the mint and converted a recoverable format
+    // fallback into total BO death (the #198 cascade's second stage).
+    prove_corpse_reclaim(root);
+
     unsafe { t_close(root) };
-    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path + two-client)\n");
+    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path + two-client + corpse-reclaim)\n");
     unsafe { t_exits(0) }
 }
 
@@ -894,4 +916,96 @@ fn prove_poisoned_path(root: i64) {
         None => fail("ctl poisoned field missing"),
     }
     let _ = write_ctl(root, "ctl", "warp-hold off");
+}
+
+/// THE #218 REGRESSION ASSERTION. A refused create3d must consume its mint
+/// record. cap+1 refusals PER FAMILY (#185: the fix has two halves -- the
+/// `wbo_create` validation arms and the pre-parse arms that never reach it
+/// -- and a shared loop of (cap+1)/2 each would pass with either half
+/// broken). The discriminator is the MINT surviving attempt cap+1: pre-fix
+/// the corpses exhaust `bos[]` and bo/new starves exactly there; any
+/// smaller bound is a gate that cannot fail. The cap is READ from ctl
+/// `bo-cap` (the churn-leg precedent -- a mirrored constant is a claimed
+/// sync with no check, #187).
+fn prove_corpse_reclaim(root: i64) {
+    let cap: u32 = match parse_field(&open_read_string(root, "ctl"), "bo-cap") {
+        Some(v) if v >= 1 && v <= 4096 => v as u32,
+        Some(v) => fail(&format!("corpse-reclaim: ctl bo-cap {} implausible", v)),
+        None => fail("corpse-reclaim: ctl `bo-cap` field missing"),
+    };
+    let ctx = mint_ctx(root, "corpse-reclaim");
+    // Family A is refused INSIDE wbo_create (unaligned size -- the first
+    // validation arm, no device traffic); family B never reaches it (a
+    // truncated argument list dies at the parse).
+    let bad_size = format!(
+        "create3d {} {} {} 1 1 1 1 0 0 0 {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, 4097
+    );
+    for (family, bad) in [("size-align", bad_size.as_str()), ("parse", "create3d 2")] {
+        for i in 1..=(cap + 1) {
+            // Tolerant read: a starved mint refuses at the OPEN, and this
+            // failure message -- the family and the attempt -- IS the leg's
+            // diagnosis (the generic open fail sent a red run hunting blind).
+            let b = match try_open_read(root, &format!("ctx/{}/bo/new", ctx))
+                .as_deref()
+                .and_then(parse_u32_prefix)
+            {
+                Some(v) => v,
+                None => fail(&format!(
+                    "corpse-reclaim: mint starved at {} attempt {} (cap {}) -- refused \
+                     create3ds are leaving corpses in bos[] (#218)",
+                    family, i, cap
+                )),
+            };
+            // The anti-vacuous half: the refusal must actually FIRE. A
+            // server that ACCEPTS the bad create3d is not exercising the
+            // corpse path, and the loop would pass around the bug.
+            if write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, b), bad) {
+                fail(&format!(
+                    "corpse-reclaim: {} create3d round {} was ACCEPTED (want refusal)",
+                    family, i
+                ));
+            }
+        }
+    }
+    // The ctx must be fully functional after 2*(cap+1) refusals -- and the
+    // unmint's UNBUILT guard must hold: a repeated create3d on a BUILT bo
+    // is refused (once per BO) but must NOT unmint the live record.
+    let bo = match try_open_read(root, &format!("ctx/{}/bo/new", ctx))
+        .as_deref()
+        .and_then(parse_u32_prefix)
+    {
+        Some(v) => v,
+        None => fail("corpse-reclaim: good bo/new refused after the refusal loops"),
+    };
+    let good = format!(
+        "create3d {} {} {} 1 1 1 1 0 0 0 {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, 4096
+    );
+    let bo_ctl = format!("ctx/{}/bo/{}/ctl", ctx, bo);
+    if !write_ctl(root, &bo_ctl, &good) {
+        fail("corpse-reclaim: good create3d refused after the refusal loops");
+    }
+    if write_ctl(root, &bo_ctl, &good) {
+        fail("corpse-reclaim: repeat create3d on a built bo was ACCEPTED");
+    }
+    let c = open_read_string(root, &format!("ctx/{}/ctl", ctx));
+    if parse_field(&c, "bo-live") != Some(1) {
+        fail(&format!(
+            "corpse-reclaim: bo-live != 1 after the repeat-create3d refusal -- the unmint \
+             touched a BUILT record (ctl: {})",
+            c.trim()
+        ));
+    }
+    if !write_ctl(root, &bo_ctl, "destroy") {
+        fail("corpse-reclaim: good-bo destroy");
+    }
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy") {
+        fail("corpse-reclaim: ctx destroy");
+    }
+    t_putstr(&format!(
+        "warp-prove: corpse-reclaim -- {} refused create3ds left the mint alive (cap {})\n",
+        2 * (cap + 1),
+        cap
+    ));
 }
