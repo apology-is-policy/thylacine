@@ -12,6 +12,7 @@
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
 #   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
 #   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
+#   tools/warp-host.sh native-bench  # GPU-DESIGN 13: the HW-GL exit bar's native anchor (V3D vs llvmpipe, surfaceless)
 #
 # Verification is fail-closed: each leg greps for its own positive evidence
 # and exits non-zero without it. `bench` runs FOREGROUND (~20-45 min under
@@ -34,7 +35,7 @@ RPOLLS="${WARP_BOOT_POLLS:+WARP_BOOT_POLLS=$WARP_BOOT_POLLS }"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RREPO='~/projects/thylacine'
 
-usage() { sed -n '2,18p' "$0"; exit 2; }
+usage() { sed -n '2,15p' "$0"; exit 2; }
 [[ $# -ge 1 ]] || usage
 cmd="$1"
 
@@ -44,7 +45,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -199,6 +200,22 @@ wedge)
         echo "WEDGE PROBE: CAPTURED"
     else
         echo "WEDGE PROBE: UNVERIFIED (need WEDGE-PROBE PASS + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+native-bench)
+    # GPU-DESIGN 13: the HW-GL exit bar's NATIVE anchor. Runs on the GL host
+    # itself (native V3D vs native llvmpipe, surfaceless) -- no guest, no
+    # accel plumbing. The ratio it prints is the reference the guest quake/
+    # decomp ratio is held against.
+    out="$REPO_ROOT/build/warp-native-bench.log"
+    ssh "$HOST" "bash $RREPO/tools/warp/native-gl-bench.sh" | tee "$out"
+    echo "== native-bench verdict =="
+    if grep -q "NATIVE-BENCH RATIO:" "$out"; then
+        grep -e "^NGB " -e "NATIVE-BENCH RATIO:" "$out"
+        echo "NATIVE-BENCH: MEASURED"
+    else
+        echo "NATIVE-BENCH: UNVERIFIED (throttled, unparsed, or build failed)"
         exit 1
     fi
     ;;

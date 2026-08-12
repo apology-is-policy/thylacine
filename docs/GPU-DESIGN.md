@@ -724,12 +724,35 @@ workload*. The bar bounds the virt stack's overhead; it is not a mandate to
 tune for one game. If a future workload class (Venus/Vulkan at Warp-6)
 matters, it gets its own grid of the same shape, not a widened bar here.
 
-Status at ratification: guest-HW/guest-SW ≈ **0.04×** (0.6 vs 16.2 fps,
-2026-08-11, #215 open with the #213 storm confound) — roughly two orders of
-magnitude below the bar. The native legs have not yet been measured; the
-`native-bench` arm lands next and its first run doubles as the #215
-discriminator battery (native V3D `GL_VERSION`/extensions vs the guest
-capset; the `MESA_DEBUG=silent` A/B rides the same session).
+**The native leg reads a display-less GPU host through surfaceless EGL + an
+FBO** (`tools/warp/native-gl-bench.c`, run via `warp-host.sh native-bench`).
+This is not a convenience — every windowed/canvas path (SDL, kmsdrm, glmark2
+`--off-screen`) demands a native display connection the headless Pi does not
+have, and `EGL_PLATFORM_SURFACELESS_MESA` + an FBO is both the *only* route
+proven to reach real V3D there AND the faithful match to the guest's
+render-to-FBO model (virglrenderer never touches a window). The bench is
+deliberately **draw-call-heavy** (800 small textured/blended draws/frame,
+`glFinish` per frame to mirror the guest's fence-per-submit) so its ratio
+speaks to the per-submit axis. Caveat, recorded not hidden: the native leg is
+this microbench while the guest legs are tyrquake — so the ratio comparison
+is same-HW:SW-axis but cross-*workload*; native tyrquake awaits a display
+path or a surfaceless vid backend. The guest ratio itself is same-workload
+(tyrquake both legs), so it is a valid measurement on its own.
+
+**First measurement (2026-08-12, thyla-pi, thermal-clean):**
+- native HW (V3D 4.2.14) = **222.8 fps / 178 K draws·s⁻¹**; native SW
+  (llvmpipe) = **20.2 fps / 16 K draws·s⁻¹** → **native HW/SW = 11.0×**
+  (reproduced 11.13×). **The silicon is exonerated**: real V3D is 11× the
+  software renderer, exactly as hardware GL should be.
+- guest HW/SW = 0.6 / 16.2 = **0.037×** (same tyrquake both legs).
+- So in-guest, hardware GL is **27× SLOWER** than software; on bare metal the
+  same GPU is **11× FASTER**. The virt stack converts an 11× win into a 27×
+  loss. Per-draw: native V3D sustains 178 K draws·s⁻¹, the guest ~600 (0.6 fps
+  × ~1000 draws/frame) — a **~300× per-draw collapse** that localizes #215 to
+  **per-submit serialization** in the guest→virtio→tapestryd→virgl path, NOT
+  fill rate, shaders, S3TC, or the GPU. The bar (guest ≥ 5.5×) is missed by
+  ~150×; closing it is a submit-pipelining problem (the #204 client throttle
+  + deeper in-flight depth), not a silicon one.
 
 ---
 
