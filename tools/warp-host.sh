@@ -30,7 +30,7 @@ HOST="${WARP_HOST:-thyla-gl}"
 # WARP_BOOT_TIMEOUT as LS_CI_BOOT_TIMEOUT (the .exp files floor it at 900;
 # a larger caller value passes through -- SD-backed pools boot slower than
 # that). boot-probe legs auto-detect accel; WARP_BOOT_POLLS is their bound.
-RENV="${WARP_ACCEL:+THYLACINE_ACCEL=$WARP_ACCEL }${WARP_BOOT_TIMEOUT:+LS_CI_BOOT_TIMEOUT=$WARP_BOOT_TIMEOUT }"
+RENV="${WARP_ACCEL:+THYLACINE_ACCEL=$WARP_ACCEL }${WARP_BOOT_TIMEOUT:+LS_CI_BOOT_TIMEOUT=$WARP_BOOT_TIMEOUT }${GLQ_FPS_WAIT:+GLQ_FPS_WAIT=$GLQ_FPS_WAIT }"
 RPOLLS="${WARP_BOOT_POLLS:+WARP_BOOT_POLLS=$WARP_BOOT_POLLS }"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RREPO='~/projects/thylacine'

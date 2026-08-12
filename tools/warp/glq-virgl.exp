@@ -210,7 +210,15 @@ if {$c2 >= 0 && $c2 < 8} {
 if {$c2 >= 8} { lc_step "direct-arm frames on the scanout ($c2 buckets)" }
 
 # The demo runs out under the Direct arm; figures REPORTED, not gated.
-set timeout 1800
+# The wait is env-tunable (GLQ_FPS_WAIT, default 1800) so a diagnostic
+# run can reach the census leg quickly; a TIMEOUT no longer aborts on
+# the spot -- it falls through to the ^C + census legs FIRST (three
+# storm-bound runs died holding the bo-peak number, #204/#216) and
+# fails at the end, so a failing run still reports the census.
+set fps_wait 1800
+if {[info exists ::env(GLQ_FPS_WAIT)]} { set fps_wait $::env(GLQ_FPS_WAIT) }
+set timeout $fps_wait
+set fps_seen 0
 expect {
     -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
         # The comparator band is HOST-SPECIFIC -- compare against the same
@@ -219,10 +227,13 @@ expect {
         # another host's band reads as a verdict and is not one.
         puts "\nGLQ-VIRGL FPS: $expect_out(1,string) frames $expect_out(2,string)s $expect_out(3,string) fps (compare the SAME host's llvmpipe leg)\n"
         lc_step "timedemo complete"
+        set fps_seen 1
     }
     "user fault" { lc_fail "segv during the timedemo" }
     "Sys_Error"  { lc_fail "Sys_Error during the timedemo" }
-    timeout      { lc_fail "no timedemo fps line within 1800s" }
+    timeout {
+        puts "\nGLQ-VIRGL FPS-TIMEOUT after ${fps_wait}s -- proceeding to teardown + census, FAIL at the end\n"
+    }
 }
 
 # Teardown leg: ^C kills the game mid-session -- the surface retires, the
@@ -285,6 +296,13 @@ puts "GLQ-VIRGL swap-delta: pswpin +$din pswpout +$dout"
 # NOT copied here; pswpout stays reported above as the pressure witness.
 if {$din > 64} {
     puts "GLQ-VIRGL SWAPPED -- the fps figure measures swapping, DISCARD IT"
+}
+
+# Deferred fps-timeout failure: the census + swap figures above are the
+# point of running the teardown legs on a timed-out demo; the lane still
+# FAILS (the gate needs a completed timedemo).
+if {!$fps_seen} {
+    lc_fail "no timedemo fps line within ${fps_wait}s (teardown + census reported above)"
 }
 
 puts "\nGLQ-VIRGL PASS\n"
