@@ -693,6 +693,9 @@ pub struct Comp {
     /// that ever lived -- readable AFTER a workload's ctx is gone (the
     /// per-ctx field dies with the ctx). Read via global ctl `bo-peak`.
     warp_bo_peak: u32,
+    /// The global BYTES-axis twin: max `bo_bytes_peak` over every ctx that
+    /// ever lived. Read via global ctl `bo-bytes-peak`.
+    warp_bo_bytes_peak: u64,
     /// #210 custody mirror: parked reads + request-buffer residue across
     /// ALL conns, folded per tick by main's conns walk (the ctl reader's
     /// conn cannot see its siblings). fparked/rparked = pending fence /
@@ -773,6 +776,11 @@ struct WarpCtx {
     /// quantity the creation-time cap gates, so it is the number the cap
     /// width must be sized against. Read via ctl `bo-peak`.
     bo_backed_peak: u32,
+    /// #204 census, the BYTES axis: the largest live-backing byte sum this
+    /// ctx ever held -- the quantity WARP_CTX_BACKING_MAX gates (bo-peak
+    /// 26 with thousands of refusals showed the BYTE cap can saturate at
+    /// tiny counts: few-but-large backings). Read via ctl `bo-bytes-peak`.
+    bo_bytes_peak: u64,
     /// Heap row (#204): MAX_WARP_BOS_PER_CTX slots, allocated at mint.
     bos: alloc::boxed::Box<[Option<WarpBo>]>,
 }
@@ -847,6 +855,7 @@ impl Comp {
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
             warp_bo_peak: 0,
+            warp_bo_bytes_peak: 0,
             #[cfg(feature = "test-mode")]
             w210_fparked: 0,
             #[cfg(feature = "test-mode")]
@@ -2845,6 +2854,7 @@ impl Comp {
             retiring: false,
             present_to: None,
             bo_backed_peak: 0,
+            bo_bytes_peak: 0,
             bos,
         });
         Some(pub_id)
@@ -3049,16 +3059,26 @@ impl Comp {
         if !built {
             return false;
         }
-        // #204 census: track the backed high-water -- the quantity the
-        // creation-time cap gates, so it is what the cap width is sized
-        // against. Per-ctx AND global (the ctx's copy dies with it).
+        // #204 census: track the backed high-water on BOTH axes -- count
+        // (what MAX_WARP_BOS_PER_CTX gates) and bytes (what
+        // WARP_CTX_BACKING_MAX gates; bo-peak 26 with thousands of
+        // refusals proved the byte axis can saturate at tiny counts).
+        // Per-ctx AND global (the ctx's copy dies with it).
         let live = c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count() as u32;
         if live > c.bo_backed_peak {
             c.bo_backed_peak = live;
         }
-        let ctx_peak = c.bo_backed_peak;
+        let live_bytes: u64 =
+            c.bos.iter().flatten().map(|b| b.size).fold(0u64, u64::saturating_add);
+        if live_bytes > c.bo_bytes_peak {
+            c.bo_bytes_peak = live_bytes;
+        }
+        let (ctx_peak, ctx_bytes_peak) = (c.bo_backed_peak, c.bo_bytes_peak);
         if ctx_peak > self.warp_bo_peak {
             self.warp_bo_peak = ctx_peak;
+        }
+        if ctx_bytes_peak > self.warp_bo_bytes_peak {
+            self.warp_bo_bytes_peak = ctx_bytes_peak;
         }
         true
     }
@@ -4400,6 +4420,11 @@ impl Conn {
                     comp.warp_bo_peak
                 ),
             );
+            // The BYTES axis (what WARP_CTX_BACKING_MAX actually gates).
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!("bo-bytes-peak {}\n", comp.warp_bo_bytes_peak),
+            );
             // #175: the anti-vacuous counter. A prover that submits and
             // then abandons is racing the drain; if the completion won,
             // nothing was in flight, the abandon was a no-op, and every
@@ -4524,17 +4549,31 @@ impl Conn {
                         );
                         // #204 census (per-ctx): live = backed right now
                         // (what the creation cap counts); peak = the
-                        // high-water the cap width must be sized against.
-                        let (live, peak) = comp.wctx(id, self.conn_id).map_or((0, 0), |c| {
-                            (
-                                c.bos.iter().flatten().filter(|b| b.dma_fd >= 0).count()
-                                    as u32,
-                                c.bo_backed_peak,
-                            )
-                        });
+                        // high-water the cap width must be sized against;
+                        // the bytes twins gate WARP_CTX_BACKING_MAX.
+                        let (live, peak, live_b, peak_b) =
+                            comp.wctx(id, self.conn_id).map_or((0, 0, 0, 0), |c| {
+                                (
+                                    c.bos
+                                        .iter()
+                                        .flatten()
+                                        .filter(|b| b.dma_fd >= 0)
+                                        .count() as u32,
+                                    c.bo_backed_peak,
+                                    c.bos
+                                        .iter()
+                                        .flatten()
+                                        .map(|b| b.size)
+                                        .fold(0u64, u64::saturating_add),
+                                    c.bo_bytes_peak,
+                                )
+                            });
                         let _ = core::fmt::write(
                             &mut s,
-                            format_args!("bo-live {}\nbo-peak {}\n", live, peak),
+                            format_args!(
+                                "bo-live {}\nbo-peak {}\nbo-bytes {}\nbo-bytes-peak {}\n",
+                                live, peak, live_b, peak_b
+                            ),
                         );
                     }
                     self.read_str(tag, &s, a.offset, cap)

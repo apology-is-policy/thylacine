@@ -282,6 +282,18 @@ expect {
     -re {bo-peak (\d+)} {
         puts "\nGLQ-VIRGL BO-PEAK: $expect_out(1,string) (the #204 cap-width census witness)\n"
         lc_step "bo-peak census read"
+        # The BYTES axis (what WARP_CTX_BACKING_MAX gates): bo-peak 26
+        # with thousands of refusals proved the byte cap saturates at
+        # tiny counts, so the count alone cannot attribute exhaustion.
+        set timeout 10
+        expect {
+            -re {bo-bytes-peak (\d+)} {
+                puts "\nGLQ-VIRGL BO-BYTES-PEAK: $expect_out(1,string)\n"
+            }
+            timeout {
+                puts "\nGLQ-VIRGL BO-BYTES-PEAK: absent (pre-bytes-census server)\n"
+            }
+        }
     }
     timeout {
         puts "\nGLQ-VIRGL BO-PEAK: unreadable (pre-#204 server or ctl timeout; census missed, not gated)\n"
