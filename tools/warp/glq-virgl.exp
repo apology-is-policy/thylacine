@@ -273,8 +273,10 @@ expect {
 # against. REPORTED, not gated (a missing field is a pre-#204 server).
 # Via warp-prove's ctl mode -- the shell cannot cross the srv post
 # (`cat /srv/warp/ctl` fails "not a directory"); the prover owns the
-# two-step attach.
-lc_send "/warp-prove ctl"
+# two-step attach. BARE name: the session is post-pivot (its / is the
+# pool), so /warp-prove resolves nowhere -- ramfs bins are reachable
+# only through the bare-name exec fallback (warp-prove.exp precedent).
+lc_send "warp-prove ctl"
 set timeout 30
 expect {
     -re {bo-peak (\d+)} {
