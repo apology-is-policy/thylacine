@@ -228,8 +228,20 @@ const _: () = {
 // per-draw collapse). 16 is the ceiling this layout admits: exactly one
 // response page at FRESP_STRIDE (16 * 0x100 = PAGE_SIZE), and 2 + 2*16
 // descriptor pairs fit the 64-deep controlq with headroom.
+//
+// FREQ_LEN shrank 64 KiB -> 36 KiB in the same change: the whole lane is
+// ONE plain SYS_DMA_CREATE, whose kernel per-buffer cap is 1 MiB
+// (KOBJ_DMA_MAX_SIZE), and 16 x 64 KiB + the response page overshot it by
+// one page -- the allocation failed and the warden restart-looped a
+// console-less tapestryd (caught by the GL-host capset gate; a 2D boot
+// never allocates the lane, so the default suite is structurally blind to
+// this). 36 KiB still swallows anything the byte seam can DELIVER -- one
+// Twrite is one submission and msize bounds its payload at ~32 KiB
+// (fenced_begin refuses larger cleanly); Mesa's 256 KiB VIRGL_MAX_CMDBUF
+// only matters to the Loom bulk path (GPU-DESIGN 4.1), which will carry
+// its own sizing.
 pub const FENCED_SLOTS: usize = 16;
-const FREQ_LEN: u64 = 0x10000;
+const FREQ_LEN: u64 = 0x9000;
 const FRESP_STRIDE: u64 = 0x100;
 const FRESP_OFF: u64 = (FENCED_SLOTS as u64) * FREQ_LEN;
 pub const FLANE_DMA_SIZE: usize = (FRESP_OFF + PAGE_SIZE) as usize;
@@ -238,6 +250,13 @@ const _: () = {
     assert!(2 + 2 * FENCED_SLOTS <= QUEUE_SIZE as usize);
     assert!((FENCED_SLOTS as u64) * FRESP_STRIDE <= PAGE_SIZE);
     assert!(FRESP_STRIDE >= GPU_CTRL_HDR_LEN as u64);
+    // The lane is one PLAIN dma_create: stay under the kernel's 1 MiB
+    // per-buffer cap (KOBJ_DMA_MAX_SIZE -- a literal here because the
+    // kernel header is not visible to this crate; the runtime witness is
+    // the GL-host boot, which fails loudly when this drifts).
+    assert!(FLANE_DMA_SIZE <= 1024 * 1024);
+    // A max-msize Twrite (one submission) must fit a slot with its header.
+    assert!(FREQ_LEN >= 32 * 1024 + GPU_CTRL_HDR_LEN as u64);
 };
 
 #[inline(always)]

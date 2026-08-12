@@ -119,7 +119,7 @@ device-PA extent. Mapping a subrange is the §6.2 Venus-chunk delta.
 the slot). Slot 0 is the sync chain (all 2D + ctx/resource commands,
 unchanged semantics); fenced slot `i` (0..16) owns the fixed descriptor pair
 `(2+2i, 3+2i)` with its request buffer and response header in a SECOND DMA
-region (`FLANE_DMA_SIZE` = 16×64 KiB + a response page at `GPU_FLANE_VA`),
+region (`FLANE_DMA_SIZE` = 16×36 KiB + a response page at `GPU_FLANE_VA`),
 allocated **only when VIRGL negotiates** — a 2D boot allocates nothing and
 the audited two-page sync ring is byte-identical. `FENCED_SLOTS` went 4 → 16
 at #204 (the per-ctx share 2 → 8): the depth-2 throttle, faithfully mirrored
@@ -128,6 +128,17 @@ trips (#215). 16 is this layout's ceiling — exactly one response page at
 `FRESP_STRIDE` (16 × 0x100 = PAGE), with 2 + 2×16 descriptor pairs carved
 from the controlq, itself widened 16 → 64 (its QEMU device maximum; the
 cursorq stays at its own maximum of 16, split out as `CURSORQ_SIZE`).
+`FREQ_LEN` shrank 64 → 36 KiB in the same change: the lane is ONE plain
+`SYS_DMA_CREATE` and 16×64 KiB + the response page overshot the kernel's
+1 MiB per-buffer cap (`KOBJ_DMA_MAX_SIZE`) by one page — the allocation
+failed and the warden restart-looped a console-less tapestryd. Caught by
+the GL-host capset gate, and only there: a 2D boot never allocates the
+lane, so the default suite is structurally blind to flane sizing. 36 KiB
+still swallows anything the byte seam can deliver (one Twrite = one
+submission; msize bounds the payload at ~32 KiB, `fenced_begin` refuses
+larger cleanly); Mesa's 256 KiB `VIRGL_MAX_CMDBUF` only matters to the
+Loom bulk path, which will carry its own sizing. Compile asserts now pin
+both bounds (`FLANE_DMA_SIZE <= 1 MiB`, `FREQ_LEN >= 32 KiB + hdr`).
 
 - **Presents stay wait-for-mine.** `submit_and_wait` drains fenced
   completions while waiting for ITS entry, so the stage-0 I-40 argument —
