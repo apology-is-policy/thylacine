@@ -2888,16 +2888,6 @@ impl Comp {
         Some(pub_id)
     }
 
-    /// The BO backing build (the ctl `create3d` verb): kernel GPU-BO mint
-    /// -> map -> RESOURCE_CREATE_3D -> CTX_ATTACH -> ATTACH_BACKING, with
-    /// reverse unwind on any failure. Size is the client's declared backing
-    /// length; the kernel envelope + the client's own shared-map budget
-    /// bound it -- the server checks only page alignment and non-zero.
-    /// A `false` return leaves the mint record untouched HERE: the create3d
-    /// ctl arm consumes it (#218), so every refusal family -- including the
-    /// parse arms that never reach this function -- reclaims the slot at
-    /// one chokepoint.
-    #[allow(clippy::too_many_arguments)]
     /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
     /// failing arm + its parameters. Gated on the ctx latch, never the
     /// counting (#95), so a per-texture failure loop cannot storm the
@@ -2926,6 +2916,16 @@ impl Comp {
         }
     }
 
+    /// The BO backing build (the ctl `create3d` verb): kernel GPU-BO mint
+    /// -> map -> RESOURCE_CREATE_3D -> CTX_ATTACH -> ATTACH_BACKING, with
+    /// reverse unwind on any failure. Size is the client's declared backing
+    /// length; the kernel envelope + the client's own shared-map budget
+    /// bound it -- the server checks only page alignment and non-zero.
+    /// A `false` return leaves the mint record untouched HERE: the create3d
+    /// ctl arm consumes it (#218), so every refusal family -- including the
+    /// parse arms that never reach this function -- reclaims the slot at
+    /// one chokepoint.
+    #[allow(clippy::too_many_arguments)]
     fn wbo_create(
         &mut self,
         ctx_pub: u32,

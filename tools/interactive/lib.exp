@@ -609,6 +609,26 @@ proc lc_run_expect {cmd expected} {
     lc_expect $expected "output-of: $cmd"
 }
 
+# Like lc_run_expect, but a line matching `failpat` fails the scenario
+# IMMEDIATELY instead of waiting out the timeout. For provers that print
+# their own FAIL line and return to the prompt: without a fail arm their
+# red path reports only via the timeout arm (#218 close F2 -- the warp
+# battery's red latency was the full lc_cmd_timeout). Keying a RED verdict
+# on the failure string is the safe direction of #186: a spurious match
+# turns a pass into a fail, never the reverse.
+proc lc_run_expect_hardfail {cmd expected failpat} {
+    global lc_cmd_timeout timeout
+    lc_send $cmd
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $expected     { lc_step "saw: output-of: $cmd" }
+        -ex $failpat      { lc_fail "hard-fail line \[$failpat\] during 'output-of: $cmd'" }
+        -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during 'output-of: $cmd'" }
+        timeout           { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$expected\] during 'output-of: $cmd'" }
+        eof               { lc_fail "unexpected EOF during 'output-of: $cmd'" }
+    }
+}
+
 # Log in over the console. Reaching the shell banner proves the kernel received
 # every keystroke (the LS-1 regression) and that login authenticated.
 proc lc_login {user pass} {

@@ -46,6 +46,6 @@ lc_login michael correct-horse-battery-staple-v1
 # default) -- the knob is lc_cmd_timeout. Floor, not stomp: a caller's
 # larger LS_CI_CMD_TIMEOUT (slow TCG hosts) passes through.
 if {$lc_cmd_timeout < 180} { set lc_cmd_timeout 180 }
-lc_run_expect "warp-prove" "WARP-PROVE PASS"
+lc_run_expect_hardfail "warp-prove" "WARP-PROVE PASS" "warp-prove: FAIL"
 
 lc_pass "warp-prove: ctx create/destroy + a hand-built CCMD stream round-trips (the Warp-2 gate)"
