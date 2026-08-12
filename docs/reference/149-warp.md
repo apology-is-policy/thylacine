@@ -453,6 +453,13 @@ through a **mutual adoption** between a tapestry surface and a warp ctx:
   tenant. Pure naming: the BO must be this ctx's own and alive, the
   surface must exist; geometry gates ACTIVITY, never the verb, so a
   resize racing the handshake degrades to inactive instead of failing.
+  The named surface's `gl_retarget` (and the `off`-arm `res_stale`) fire
+  ONLY if that surface's `gl_src` already names this ctx (Warp-5 F1): the
+  surface lives on a DIFFERENT connection than the ctx (a process holds a
+  `/srv/warp` conn AND a `/srv/tapestry` conn), so "owner-gated by its own
+  ctl" does not by itself stop a ctx from perturbing a stranger's surface
+  -- the `gl_src == self` gate does. A not-yet-consenting surface is left
+  untouched; its own later `glsrc` write drives its retarget.
 
 Adoption is ACTIVE (`gl_adoption`, resolved fresh at every use -- nothing
 cached, either side's death is inert) iff both halves name each other,

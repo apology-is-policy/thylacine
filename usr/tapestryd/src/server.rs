@@ -4939,10 +4939,19 @@ impl Conn {
                     let c = comp.wctx_mut(id, self.conn_id).ok_or(p9::E_NOENT)?;
                     let old = c.present_to.take();
                     if let Some((sl, _, _)) = old {
-                        if let Some(s) = comp.surf_mut(sl) {
-                            s.res_stale = true;
+                        // Only perturb the surface if it actually names THIS
+                        // ctx (Warp-5 F1): present-to's surface lives on
+                        // another conn, so an ungated retarget + res_stale
+                        // let an unprivileged ctx soft-Off a stranger's
+                        // direct scanout at will. A surface naming a
+                        // different ctx (or none) was never fed by us --
+                        // leave it; its owner's glsrc drives its own switch.
+                        if comp.surf(sl).map_or(false, |s| s.gl_src == Some(id)) {
+                            if let Some(s) = comp.surf_mut(sl) {
+                                s.res_stale = true;
+                            }
+                            comp.gl_retarget(sl);
                         }
-                        comp.gl_retarget(sl);
                     }
                     return Ok(());
                 }
@@ -4969,7 +4978,14 @@ impl Conn {
                 if let Some(c) = comp.wctx_mut(id, self.conn_id) {
                     c.present_to = Some((sn, gen, bo));
                 }
-                comp.gl_retarget(sn);
+                // Re-arm the surface's direct switch only if it names THIS
+                // ctx (Warp-5 F1). If the surface has not yet glsrc'd us the
+                // pairing is not active anyway, and its own glsrc write will
+                // retarget when it lands -- so a foreign surface is never
+                // touched by our present-to.
+                if comp.surf(sn).map_or(false, |s| s.gl_src == Some(id)) {
+                    comp.gl_retarget(sn);
+                }
                 Ok(())
             }
             _ => Err(p9::E_INVAL),
