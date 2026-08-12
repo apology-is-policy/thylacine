@@ -6378,6 +6378,14 @@ int main(void) {
                 t_putstr("joey: Go-4b post-pivot /env re-graft OK\n");
             }
 
+/* #228: the Clade + Go on-device toolchain probes. Ungated until now, so the
+   lean production shape compiled them (the make gate calls mkt_file_eq, which
+   only exists inside this gate -- one of the 11 errors that made
+   THYLA_BOOT_PROBES=OFF unbuildable) and would have RUN them: a boot-to-getty
+   image has no business driving `make -j3` or an on-device `go build`, and the
+   latter would make the lean boot depend on a baked GOROOT. The run ends where
+   real bringup resumes, at the net-2c-1 mount. */
+#if THYLA_BOOT_PROBES
             // === Clade CL-1c-2: the on-device `make -j3` gate ===
             // The audit-bearing proof that GNU make (CL-1c-1) actually DRIVES
             // CL-1b's posix_spawn/wait4 under -j parallelism -- the whole point
@@ -7078,6 +7086,7 @@ int main(void) {
                 // nested here: this region is skipped on a BAKE_GOROOT=0 boot,
                 // which is exactly the clade-only configuration.)
             }
+#endif /* THYLA_BOOT_PROBES (the Clade + Go on-device toolchain probes) */
 
             // net-2c-1: mount netd's /net on the pivoted root. netd (warden-
             // spawned, persistent) posted /srv/net (9P-mode) pre-pivot; the
@@ -7673,7 +7682,6 @@ int main(void) {
                                  "/net: socket/reject/setsockopt/bind/listen/getsockname/"
                                  "shutdown/sendto/recvfrom/close)\n");
                     }
-#endif
 
                     // === net-8: native libthyla-rs TCP stack over the live /net ===
                     // Spawn /bin/net-echo (native, no pouch). It is the live
@@ -8192,6 +8200,14 @@ int main(void) {
                         t_putstr("joey: net-6b PROBE OK (dev9p.poll: udp ready "
                                  "POLLOUT-ready + POLLIN-times-out, no hang)\n");
                     }
+/* #228: the /net probe ladder ends HERE, not fourteen sections earlier. The
+   gate's #endif used to sit right after net-5/6a-2, and every probe appended
+   since (net-8, NP-1..3, TI-4e, the FS bench, SNTP, netstat, nslookup, ping,
+   curl, wget, rustls, net-6b) landed OUTSIDE it -- so the lean production shape
+   both compiled them and would have run them. Five of them call helpers that
+   only exist inside this gate, which is why THYLA_BOOT_PROBES=OFF stopped
+   building at all. APPEND NEW /net PROBES ABOVE THIS LINE. */
+#endif /* THYLA_BOOT_PROBES (the /net probe ladder) */
                 } else {
                     t_putstr("joey: net-2c-1 /srv/net absent -- /net not mounted (netd down?)\n");
                 }

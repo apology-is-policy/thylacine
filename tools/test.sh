@@ -210,7 +210,20 @@ while [[ $(date +%s) -lt $deadline ]]; do
         # persistent miss is a FAIL (tapestryd or aurora down/blank). Skipped
         # when the device/socket is absent (THYLACINE_NO_GPU=1 /
         # THYLACINE_NO_QMP=1), THYLACINE_GPU_GATE=0, or python3 is missing.
-        if [[ "$result" == "pass" && "${THYLACINE_NO_GPU:-0}" != "1" \
+        # #228: the lean production shape (THYLA_BOOT_PROBES=OFF) spawns no
+        # warden, so it has no drivers, no GPU and no compositor -- there is
+        # nothing for the G-4 scanout gate to look at, and running it there
+        # reddens a boot that did exactly what that shape is meant to do.
+        #
+        # Keyed on joey's own BUILD-SHAPE report (#212's line, which prints
+        # before the banner and so is already in the log), NEVER on the absence
+        # of tapestryd: "/srv/tapestry absent" is also what a real tapestryd
+        # regression prints, and skipping on that would convert a failure into
+        # a skip -- the exact disease #212 exists to cure.
+        lean_shape=0
+        grep -aq "ARC-GATES not-built" "$LOG_FILE" 2>/dev/null && lean_shape=1
+        if [[ "$result" == "pass" && "$lean_shape" != "1" \
+              && "${THYLACINE_NO_GPU:-0}" != "1" \
               && "${THYLACINE_NO_QMP:-0}" != "1" && "${THYLACINE_GPU_GATE:-1}" != "0" ]] \
            && [[ -S "$QMP_SOCK" ]] && command -v python3 >/dev/null 2>&1 \
            && kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -303,8 +316,12 @@ case "$result" in
         # task #70: require the watchpoint fire on any accel that can deliver it.
         # run-vm.sh logs the chosen accel ("==> qemu: accel=<a> ..."), so read it
         # back rather than re-deriving the auto-detect here.
+        # #228: `lean_shape` again -- debug-probe IS a boot probe, so the lean
+        # production shape never runs it and the marker can never appear. Unlike
+        # the virtio-input check below-above, this one has no sentinel of its own
+        # to self-skip on, so it needs the build shape explicitly.
         boot_accel="$(LC_ALL=C sed -n 's/^==> qemu: accel=\([a-z0-9]*\).*$/\1/p' "$LOG_FILE" | head -1 || true)"
-        if [[ -n "$boot_accel" && "$boot_accel" != "tcg" ]] \
+        if [[ -n "$boot_accel" && "$boot_accel" != "tcg" && "${lean_shape:-0}" != "1" ]] \
            && ! grep -aq "$HWWATCH_MARKER" "$LOG_FILE"; then
             echo "==> FAIL: accel=$boot_accel delivers EL0 watchpoints, but debug-probe never reported it." >&2
             echo "    Expected log line: '$HWWATCH_MARKER'" >&2
@@ -331,6 +348,9 @@ case "$result" in
             exit 1
         fi
         echo "==> $arc_report"
+        if [[ "${lean_shape:-0}" == "1" ]]; then
+            echo "==> lean shape (THYLA_BOOT_PROBES=OFF): G-4 console gate + debug-probe hwwatch NOT APPLICABLE -- neither is built, so neither is coverage"
+        fi
         echo "--- log tail ---"
         tail -20 "$LOG_FILE"
         echo "----------------"

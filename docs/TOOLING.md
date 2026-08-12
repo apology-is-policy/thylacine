@@ -368,11 +368,13 @@ What makes the check sound rather than racy is the **ordering**: joey signals
 line is already in the log. There is no window in which a banner-observed boot
 can legitimately lack it.
 
-> **Caveat (#228).** The `not-built` arm is written and parses, but has never
-> been *compiled*: `THYLA_BOOT_PROBES=OFF` does not build today — joey fails
-> with 11 pre-existing errors (probe blocks that drifted outside their `#if`,
-> proven pre-existing against a HEAD worktree). Whoever fixes #228 verifies
-> this arm on the way through. `--selftest` case F covers the log-reading half.
+The `not-built` arm is no longer theoretical: #228 restored the lean build, and
+a `--production` boot prints it and is read by the checker end to end —
+
+```
+joey: ARC-GATES not-built (THYLA_BOOT_PROBES=OFF)
+==> arc gates: NOT BUILT (THYLA_BOOT_PROBES=OFF -- the lean production shape; NOT coverage)
+```
 
 **What this buys, and what it does not.** It makes a skip a visible, deliberate,
 reported state; it does **not** manufacture coverage. With the fixture absent
@@ -639,15 +641,49 @@ boot shape**, flipping two CMake options in lockstep:
   `tests: DISABLED (KERNEL_TESTS=OFF production build)`). Kernel flat binary
   929 KiB → 282 KiB.
 - `THYLA_BOOT_PROBES=OFF` — compiles joey without its boot-test probe ladder.
-  The **real bringup is unconditional**: stratumd mount → `pivot_root` → `/srv`
-  re-graft → corvus spawn → `SYS_BOOT_COMPLETE` → console relinquish → the
-  login getty. Only the probes (torture/stress/bench + the corvus
-  USER_CREATE/AUTH/RECOVER/login E2E ladder) compile out.
+  Most **real bringup is unconditional**: stratumd mount → `pivot_root` → `/srv`
+  re-graft → corvus spawn → ptyfs → diorama → `SYS_BOOT_COMPLETE` → console
+  relinquish → the login getty. The probes (torture/stress/bench, the corvus
+  USER_CREATE/AUTH/RECOVER/login E2E ladder, the Clade/Go on-device toolchain
+  gates, the whole `/net` probe run) compile out.
+
+  > **But the WARDEN is inside the gate, and it is not a probe (#230).** With
+  > probes off there is no driver supervisor — so no drivers, **no network**
+  > (netd is warden-spawned) and no compositor. A lean boot says so itself:
+  > `joey: /srv/tapestry absent (no GPU environment); skipping`, and its daemon
+  > registry lists only `stratumd corvus ptyfs diorama`. Whether that is the
+  > intended v1.0 ship shape is an open design question (#230); this paragraph
+  > states what the artifact DOES, which is not what this section claimed
+  > before #228 measured it.
+
+**This shape did not build at all between some earlier chunk and 2026-08-12
+(#228)**, because probe blocks were appended after their gate's `#endif` and
+called helpers that only exist inside it — joey failed with 11 errors. Nothing
+noticed, because nothing builds it: not `tools/test.sh`, not the SMP gate, not
+the interactive harness, not any Makefile default. **`make check-production`
+(`tools/check-production.sh`, ~2 s, no boot) now guards it**; `--all` runs the
+full production build too. When appending a probe, put it INSIDE the gate — the
+two restored regions carry a comment saying exactly that.
+
+`tools/test.sh` understands the shape as of #228: it reads joey's own
+`ARC-GATES not-built` line and reports the **G-4 console gate** and the
+**debug-probe hwwatch** check as NOT APPLICABLE rather than failing them (both
+are probe-dependent, and neither is built here). It keys on the build-shape
+report, never on the absence of tapestryd — that absence is also what a real
+tapestryd regression prints, and skipping on it would convert a failure into a
+skip.
 
 Measured: the production shape boots to `Thylacine boot OK` in **~21.5 ms**
 (TCG) — vs ~525 ms for the dev build — well under the 500 ms `VISION.md §4.5`
 target. The `Thylacine boot OK` banner + the `EXTINCTION:` prefix (the binding
 tooling ABI, §10) are byte-identical in both shapes.
+
+Re-measured at #228 on the first boot the shape had had in a long time, as a
+same-host same-accel pair (HVF, guest-reported `boot-ms`): **1244 ms lean vs
+11203 ms dev**, a ~9x reduction. Not comparable to the TCG figures above — a
+different accelerator, a different tree, and a pool + GOROOT the earlier
+measurement did not carry — so it is recorded beside them rather than over
+them.
 
 **Caveat — first-login provisioning is a seam.** The dev/CI shape's probe
 ladder also mints the bootstrap users (michael/susan/cora) as test fixtures.
