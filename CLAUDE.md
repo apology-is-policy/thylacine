@@ -892,6 +892,18 @@ make test-a72                       # boot on -cpu cortex-a72 (ARMv8.0-only)
 tools/test-interactive.sh               # full set (or: make test-interactive)
 tools/test-interactive.sh ls-ci         # one scenario by name
 
+# Signal witness (#200): NAME the sender of the SIGKILL that makes a QEMU vanish
+# with a healthy guest. SIGKILL is uncatchable, so the victim can never report
+# it -- smp-multiboot's arm-2 detector proves THAT it happened but prints
+# "sender NOT RECOVERABLE". macOS Endpoint Security observes signals from
+# OUTSIDE the victim, so it names both ends; needs root, but NOT a SIP change.
+# Watch mode REFUSES until --selftest has proven the capture can see a kill --
+# an unproven watcher logs nothing and reads exactly like a quiet host.
+# Routine teardown kills appear on every boot: the finding is a sender that is
+# NOT ours, never the mere presence of records.
+sudo tools/sigwatch.sh --selftest       # prove it, then
+sudo tools/sigwatch.sh                  # watch -> build/sigwatch.jsonl
+
 # Launch a dev VM
 tools/run-vm.sh
 
