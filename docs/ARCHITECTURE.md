@@ -1240,10 +1240,18 @@ its own gate as scripture, per "complexity is permitted only where it is verifie
 - **`tools/ci-smp-gate.sh`** (`make smp-gate`) multi-boots the matrix — `default-smp4`,
   `default-smp8`, `ubsan-smp4` (the #860 amplifier), `ubsan-smp8` — at **N≥10** each,
   composing `tools/smp-multiboot.sh`'s classifier (a ctx/stack-corruption signature
-  FAILS; an external kill of QEMU — its own `terminating on signal N from pid M`
-  report, #88 — FAILS under its honest label with the sender `ps`'d at classify time;
-  benign host-timing fragility is reported, not failed). `tools/test.sh` is the
+  FAILS; an external kill of QEMU FAILS under its honest label; benign host-timing
+  fragility is reported, not failed). `tools/test.sh` is the
   primitive the gate multi-boots, never itself the gate.
+  The external-kill bucket has **two** detectors, because one cannot see the signal
+  that matters most: QEMU's own `terminating on signal N from pid M` report (#88)
+  covers the *catchable* signals and names the sender, but **SIGKILL is uncatchable,
+  so a SIGKILLed QEMU never prints it** — the second detector reads the shell's job
+  notification out of the harness stream instead, qualified by `test.sh`'s
+  `qemu_alive_at_teardown=0` so the harness's own teardown kill can never satisfy it
+  (#222; the #200 sightings had been landing in OTHER, and in one corner in the
+  *non-failing* inject-miss class). Captures are archived, never deleted, so
+  re-running a label to investigate it cannot destroy the evidence (#223).
 - **Host-timing budgets soft-warn, never extinct.** The `test_irq_latency_bench` QEMU
   p99 budget uses the `TEST_SOFT_WARN` harness primitive (log + count, do not fail the
   suite) rather than `TEST_ASSERT`. A hard assert there turned host throttling into a

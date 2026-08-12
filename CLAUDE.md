@@ -856,11 +856,20 @@ tools/test.sh
 
 # SMP soundness gate (single boots lie -- multi-boot or it didn't happen).
 # Builds default + UBSan kernels, multi-boots smp4/smp8 x default/UBSan N>=10,
-# classifies CORRUPTION vs EXTERNAL-KILL (#88: QEMU's own 'terminating on
-# signal' report -- someone outside killed the VM) vs benign host-TIMING vs
-# OTHER. Fails iff any boot corrupts, is externally killed, or is unclassified.
+# classifies CORRUPTION vs EXTERNAL-KILL vs benign host-TIMING vs OTHER. Fails
+# iff any boot corrupts, is externally killed, or is unclassified.
+# EXTERNAL-KILL has TWO detectors (#222): QEMU's own 'terminating on signal'
+# report (#88) sees only CATCHABLE signals -- SIGKILL is uncatchable, so the
+# arm that most needed the bucket could not reach it, and the #200 sightings
+# landed in OTHER. The second reads the shell's job notification from the
+# HARNESS log, gated on test.sh's qemu_alive_at_teardown=0 so the harness's own
+# teardown kill cannot trip it. Captures are ARCHIVED, never deleted (#223) --
+# re-running a label to investigate it must not destroy the evidence.
 tools/ci-smp-gate.sh                    # full matrix, N=10 (or: make smp-gate)
 SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier subset
+
+# The gate's classifier, tested without booting (fast; sources the real ladder).
+tools/test-smp-classify.sh
 
 # ARMv8.0 floor guard (#91). The SOURCE + BINARY checks run automatically at the
 # tail of every ramfs bake; these are the extras. `check-floor` adds the big pool

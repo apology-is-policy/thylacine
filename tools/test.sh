@@ -259,6 +259,21 @@ while [[ $(date +%s) -lt $deadline ]]; do
 done
 
 # Halt QEMU + reap injector.
+#
+# Report whether QEMU was still alive when we came to kill it, because it is
+# the one fact only this script knows and the SMP gate cannot otherwise
+# recover it (#222). The gate classifies an external kill (#200) from the
+# shell's own job notification -- 'line N: PID Killed: 9' in the harness
+# stream -- but that notification is NOT a "someone else did it" signal:
+# bash emits it whenever a job died by signal and a command boundary elapsed
+# before the shell reaped it, so the harness's OWN kill prints it too if any
+# command runs between the kill and the wait below (measured; the two are
+# adjacent here for exactly that reason, which is a fragile thing to rest a
+# classification on). alive=0 means the harness's kill hit an already-dead
+# process, so a reported signal death cannot have come from here.
+qemu_alive_at_teardown=0
+kill -0 "$QEMU_PID" 2>/dev/null && qemu_alive_at_teardown=1
+echo "==> harness: qemu_alive_at_teardown=$qemu_alive_at_teardown"
 kill -KILL "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
 if [[ -n "$INJECT_PID" ]]; then

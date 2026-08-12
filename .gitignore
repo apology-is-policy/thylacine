@@ -36,6 +36,12 @@ snapshots/
 
 # Log files
 *.log
+# ...except committed test fixtures. Several of these ARE real captured logs
+# (tools/testdata/smp-classify holds a genuine passing harness log and a
+# genuinely externally-SIGKILLed one), and the blanket rule above would drop
+# them silently -- shipping tools/test-smp-classify.sh without the artifacts
+# its two real-sample cases rest on.
+!tools/testdata/**
 
 # Generated docs
 docs/_build/

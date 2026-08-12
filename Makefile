@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
+.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -51,6 +51,13 @@ test-interactive:
 
 smp-gate:
 	@tools/ci-smp-gate.sh
+
+# The SMP gate's failure classifier, exercised without booting anything (#222).
+# Fast, so there is no excuse for the ladder to go untested again -- the
+# EXTERNAL-KILL bucket was structurally unable to see SIGKILL for as long as
+# nobody drove it.
+test-classify:
+	@tools/test-smp-classify.sh
 
 idle-gate:
 	@tools/ci-idle-gate.sh

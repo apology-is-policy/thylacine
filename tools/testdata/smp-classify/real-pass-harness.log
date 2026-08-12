@@ -1,0 +1,26 @@
+==> Booting kernel under QEMU (timeout 90s)...
+    Log: /Users/northkillpd/projects/thylacine-aux/build/test-boot.log
+==> harness: qemu_alive_at_teardown=1
+==> PASS: boot banner observed.
+--- log tail ---
+jc-probe: leg exit
+jc-probe: PASS (run/stop/jobs/fg-restop/bg/fg-int/exit over a hosted ut)
+joey: PTY-4 job-control E2E OK (hosted ut: run/stop/jobs/fg-restop/bg/fg-int/exit over a live pts)
+joey: /dev/tapestry mounted (tapestryd tree)
+joey: G-3 PROBE OK (/dev/tapestry/ctl: display 1280 800)
+joey: aurora spawned pid=2284 (the console renderer; the gate's scanout owner)
+aurora: #129 feed selftest PASS (order + bound + #135 pacing)
+joey: CL-4 /dev fstat PROBE OK
+joey: clade CL-4 /clade absent (THYLACINE_BAKE_CLADE not set) -- skipping
+joey: clade CL-5 storm: /storm absent -- skipping
+joey: daemon registry (#80; the reaper names these on exit): stratumd=2141 corvus=2219 ptyfs=2230 diorama=2231 aurora=2284
+boot-ms: 13507
+boot-wc: parks=2814750 idle_ms=45135 starved=24879 starved_ms=1898 max_ms=30 | tickless: parks=2664400 starved=24875 starved_ms=1868 max_ms=5 wake-ipi=2644034 wake-oneshot=20366
+Thylacine boot OK
+joey: reaped adopted orphan pid=1973 status=1
+login: consctl ok (line discipline via inherited fd)
+
+Thylacine login: tapestryd: scanout pending-direct 0 (1280x800)
+tapestryd: scanout direct 0 (1280x800)
+aurora: console up 128x36 cells (1280x800 px, cell 10x22)
+----------------
