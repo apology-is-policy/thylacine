@@ -124,11 +124,11 @@ walk base in a multi-thread Proc. See `docs/reference/104-stalk.md` "Mount cross
 
 | Return | Meaning |
 |---|---|
-| `0`  | success (entry added or idempotent no-op) |
+| `0`  | success (entry added, or the existing entry's flags converged) |
 | `-1` | source or mountpoint NULL / corrupted |
 | `-2` | mounts[] full (PGRP_MAX_MOUNTS reached) |
 
-- **Idempotency**: re-mounting the same `(key(mountpoint), source)` pair is a no-op success; no second `spoor_ref`.
+- **Idempotency**: re-mounting the same `(key(mountpoint), source)` pair adds no entry and takes no second `spoor_ref` -- but it *does* converge the existing entry's `flags` to the requested set (**#219**). Until that landed the arm returned `0` having never consulted `flags`, so a re-mount that ADDED `MNOEXEC` reported success and left the pair unrestricted: a return value satisfied by the un-restricted state, and fail-open is the dangerous direction for a flag carrying an enforcement decision. Convergence is deliberately **symmetric** -- a re-mount without `MNOEXEC` drops it from *that entry* -- so `0` always means "this entry now says what you asked for" rather than "something at this identity was already mounted". It does **not** mean the restriction is gone: `mount_noexec_covers` is an ANY-scan over the table, so a device instance mounted at two points stays covered while either entry carries the bit. Converging drops a bit from an entry, never from a device. Symmetry costs no authority: per the `MNOEXEC` lifecycle note below, mount flags are not locks, and the same loosening is already reachable via `unmount` or `MREPL`. `mp_path` is deliberately NOT re-captured (unlike `MREPL`, which does): I-33 makes `Path` write-only and cosmetic, and the fresh mount-point Spoor keys to the same identity by construction, so the ref-swap under `ns_lock` would buy no semantic difference.
 - **MREPL**: if `flags & MREPL` and an entry at the same mount-point identity exists with a different `source`, the existing entry is replaced (old source's ref dropped; new source's ref taken); `nmounts` unchanged. (Re-mounting onto an already-mounted point keys on the SAME underlying identity because `SYS_MOUNT` resolves it with `STALK_MOUNT` -- the final mount is NOT crossed.)
 - **MBEFORE / MAFTER / MCREATE**: recorded in the entry's `flags` field; at v1.0 treated as "append a new entry" for union mounts. Union walk semantics land at Phase 5+ when the walk algorithm grows union support.
 - **MNOEXEC** (#217): recorded in the entry's `flags` field and *enforced*, unlike the three above. Nothing reached through the mounted device instance may become executable -- `exec_resolve_from_namespace` refuses to resolve a binary on it, and both file-backed `PROT_EXEC` mmap arms refuse with `T_E_PERM`. Consulted via `mount_noexec_covers(territory, dc, devno)`, which scans the mount table for an `MNOEXEC` entry whose SOURCE shares the queried `(dc, devno)`.
@@ -139,7 +139,9 @@ walk base in a multi-thread Proc. See `docs/reference/104-stalk.md` "Mount cross
 
 - **`Dev.may_back_exec`** (#217 round-1 F1) -- the FLOOR beneath `MNOEXEC`, and the half that is total. An allowlist field on `struct Dev`: only `devramfs` and `dev9p`, the two Devs serving real file content, set it true. Every other Dev leaves the zero default and is refused an executable mapping outright, mounted or not -- an environment variable is not code, and neither is a `/proc` field, a `/srv` endpoint or a console. Allowlist and not denylist, so a Dev added later is refused until it deliberately opts in. `exec_map_vouched` consults the floor FIRST and the mount flag second; both must pass.
 
-  Lifecycle mirrors the entry's: `territory_clone` deep-copies `flags`, so a forked child inherits an equally-narrow namespace (the I-2 / I-34 shape); `unmount` drops the restriction with the entry, so authority conferred by a namespace edit is revoked by the inverse edit rather than sticking to the device. A NULL Territory answers `false` -- a Proc with no namespace has no mount that could have conferred the restriction. That arm is DEFENSIVE AND UNREACHABLE, not load-bearing: `kproc` is given `kpgrp()` at `proc_init`, `exec_resolve_from_namespace` returns on `territory_root_ref(NULL)` before the gate, and the mmap path is PHENO_LINUX-only where every Proc carries a cloned Territory. (An earlier version said "kernel boot-time exec runs in exactly that state" -- false, and it warned readers off a change that would break nothing.)
+  Lifecycle mirrors the entry's: `territory_clone` deep-copies `flags`, so a forked child inherits an equally-narrow namespace (the I-2 / I-34 shape); `unmount` drops the restriction with the entry, so authority conferred by a namespace edit is revoked by the inverse edit rather than sticking to the device.
+
+  **`MNOEXEC` IS NOT A LOCK, and nothing here should be read as claiming it is.** The restriction is derived from the *current contents* of the mount table, and the mount table is freely mutable by whoever owns the Territory: `SYS_MOUNT` and `SYS_UNMOUNT` carry **no capability gate at all** (`sys_mount_for_proc` checks only `RIGHT_READ` on the source handle; `sys_unmount_for_proc` checks nothing beyond resolution), which is Plan 9's model and correct there -- a per-process namespace edit confers no authority you did not already hold. So a Proc that can reach those syscalls can shed the restriction three ways: `unmount` the entry, `MREPL` over it (the MREPL arm overwrites `flags` wholesale), or re-mount the pair without the bit (the #219 converge). What confines a **vivarium container** today is therefore the *phenotype gate*, not `MNOEXEC`'s durability: Linux nrs 39 (`umount2`) and 40 (`mount`) have no row in `kernel/vivarium.c`'s translate table at all, so `viv_linux_dispatch`'s `default:` arm answers `-T_E_NOSYS`. If a confined *native* Proc ever needs to be held to a mount restriction, that is a new mechanism -- a lock needs a locked-by-WHOM axis Territory has no notion of (Linux's `MNT_LOCK_NOEXEC` is the precedent; Zircon/seL4 answer it instead by making executability a monotonically-non-increasing right on the object). Tracked, unbuilt, signoff-gated. A NULL Territory answers `false` -- a Proc with no namespace has no mount that could have conferred the restriction. That arm is DEFENSIVE AND UNREACHABLE, not load-bearing: `kproc` is given `kpgrp()` at `proc_init`, `exec_resolve_from_namespace` returns on `territory_root_ref(NULL)` before the gate, and the mmap path is PHENO_LINUX-only where every Proc carries a cloned Territory. (An earlier version said "kernel boot-time exec runs in exactly that state" -- false, and it warned readers off a change that would break nothing.)
 
   Rendered by `territory_format_ns` as a ` noexec` suffix on the entry's line, so `/proc/<pid>/ns` answers "is this mount actually noexec?" about a RUNNING namespace.
 
@@ -193,8 +195,8 @@ Unchanged from P2-Eb. Fixed-point reachability over `binds[]`; O(N²) worst case
 ```c
 int mount(struct Territory *p, struct Spoor *source,
           path_id_t target, u32 flags) {
-    // Validate, idempotency check, MREPL replace, table-full check,
-    // spoor_ref(source), append entry.
+    // Validate, cycle check, idempotency (converge flags, #219), MREPL
+    // replace, table-full check, spoor_ref(source), append entry.
 }
 int unmount(struct Territory *p, path_id_t target_path) {
     // Find first entry at target_path, swap-with-last to remove,
@@ -278,7 +280,8 @@ Refcount discipline:
 ### Mount-table (P5-attach-mount)
 
 - `territory_mount.smoke`: mount one Spoor at a target; verify nmounts + source ref bumped; unmount; verify ref dropped.
-- `territory_mount.idempotent_same_source`: re-mount same `(target, source)` is a no-op success; no second ref bump.
+- `territory_mount.idempotent_same_source`: re-mount same `(target, source)` adds no entry; no second ref bump.
+- `territory_mount.idempotent_converges_flags` (#219): re-mount the same pair with `MNOEXEC` added and verify `mount_noexec_covers` now answers true (the fail-open regression), then re-mount without it and verify the restriction is dropped (the deliberate symmetry). Entry count and source ref unchanged across both. Discrimination proven both ways by A/B: with the converge deleted the TIGHTEN assert reddens; with the converge made monotone (`flags |= flags`) the LOOSEN assert reddens; each sabotage fails exactly one test.
 - `territory_mount.mrepl_replaces`: MREPL replaces an existing entry's source; old ref dropped, new ref taken; nmounts stays at 1.
 - `territory_mount.unmount_missing_returns_error`: unmount of a non-existent target returns -1.
 - `territory_mount.table_full`: fill `PGRP_MAX_MOUNTS` entries; next mount returns -2; overflow source's ref is NOT bumped.

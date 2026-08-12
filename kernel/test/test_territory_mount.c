@@ -18,8 +18,15 @@
 //     unmount; verify nmounts back to 0 + source ref dropped.
 //
 //   territory_mount.idempotent_same_source
-//     mount (mp, source); mount (mp, source) again; verify second call is
-//     no-op success (returns 0, no second ref bump).
+//     mount (mp, source); mount (mp, source) again with the SAME flags; verify
+//     the second call adds no entry and takes no second ref. (Differing flags
+//     converge -- that is idempotent_converges_flags below.)
+//
+//   territory_mount.idempotent_converges_flags                          (#219)
+//     mount (mp, source) with flags 0; re-mount the same pair with MNOEXEC;
+//     verify the restriction is now APPLIED (the fail-open regression), then
+//     re-mount without it and verify it is dropped (the deliberate symmetry).
+//     Entry count + source ref must be untouched by both converges.
 //
 //   territory_mount.mrepl_replaces
 //     mount A at mp; mount B at mp with MREPL; verify A's ref dropped,
@@ -53,6 +60,7 @@ extern struct Dev devnone;
 
 void test_territory_mount_smoke(void);
 void test_territory_mount_idempotent_same_source(void);
+void test_territory_mount_idempotent_converges_flags(void);  // #219
 void test_territory_mount_mrepl_replaces(void);
 void test_territory_mount_unmount_missing_returns_error(void);
 void test_territory_mount_table_full(void);
@@ -143,6 +151,78 @@ void test_territory_mount_idempotent_same_source(void) {
     spoor_unref(mp);
     spoor_unref(s);
     territory_unref(p);
+}
+
+// #219. The idempotent arm used to return 0 without ever looking at `flags`,
+// so a re-mount that ADDED MNOEXEC reported success and left the pair
+// unrestricted -- fail-OPEN, which is the dangerous direction for a flag that
+// carries an enforcement decision. Both directions are asserted: the tighten is
+// the regression, the loosen pins the deliberate symmetry (a mount flag is not
+// a lock; see the noexec_covers unmount leg).
+//
+// Every observation is MEASURED first and ASSERTED after the teardown, because
+// TEST_ASSERT returns -- asserting inline would skip the unrefs below and leak
+// a Territory + four Spoors on exactly the run where the test is telling you
+// something.
+void test_territory_mount_idempotent_converges_flags(void) {
+    struct Territory *p     = territory_alloc();
+    struct Spoor     *s     = p ? spoor_alloc(&devnone) : NULL;
+    // Three DISTINCT Spoor objects sharing one mount-point identity: the arm
+    // keys on (dc, devno, qid.path) for the point and on POINTER equality for
+    // the source, so this is the shape that reaches it.
+    struct Spoor     *mp_a  = s ? mkmp(219u) : NULL;
+    struct Spoor     *mp_b  = mp_a ? mkmp(219u) : NULL;
+    struct Spoor     *mp_c  = mp_b ? mkmp(219u) : NULL;
+    if (!p || !s || !mp_a || !mp_b || !mp_c) {
+        if (mp_c) spoor_unref(mp_c);
+        if (mp_b) spoor_unref(mp_b);
+        if (mp_a) spoor_unref(mp_a);
+        if (s)    spoor_unref(s);
+        if (p)    territory_unref(p);
+        test_fail("territory_alloc / spoor_alloc / mkmp returned NULL");
+        return;
+    }
+    s->devno = 21;
+
+    int  rc_first = mount(p, s, mp_a, 0);
+    bool cov_none = mount_noexec_covers(p, '-', 21);
+
+    int  rc_tight = mount(p, s, mp_b, MNOEXEC);
+    bool cov_on   = mount_noexec_covers(p, '-', 21);
+    int  nmounts1 = territory_nmounts(p);
+    int  ref1     = s->ref;
+
+    int  rc_loose = mount(p, s, mp_c, 0);
+    bool cov_off  = mount_noexec_covers(p, '-', 21);
+    int  nmounts2 = territory_nmounts(p);
+
+    int rc_unmount = unmount(p, mp_a);
+    territory_unref(p);
+    spoor_unref(mp_c);
+    spoor_unref(mp_b);
+    spoor_unref(mp_a);
+    spoor_unref(s);
+
+    TEST_EXPECT_EQ(rc_first, 0, "first mount succeeds");
+    TEST_ASSERT(cov_none == false,
+        "CONTROL: mounted with flags 0 -> no restriction (an always-true "
+        "predicate fails here, so cov_on below means something)");
+
+    TEST_EXPECT_EQ(rc_tight, 0, "re-mount adding MNOEXEC still returns 0");
+    TEST_ASSERT(cov_on == true,
+        "#219: a re-mount that ADDS MNOEXEC must APPLY it -- returning 0 with "
+        "the pair still unrestricted is a success satisfied by the broken state");
+    TEST_EXPECT_EQ(nmounts1, 1,
+        "converge must not add a second entry (the idempotency contract)");
+    TEST_EXPECT_EQ(ref1, 2,
+        "converge must not bump the source ref (test + entry, unchanged)");
+
+    TEST_EXPECT_EQ(rc_loose, 0, "re-mount dropping MNOEXEC returns 0");
+    TEST_ASSERT(cov_off == false,
+        "converge is SYMMETRIC by design: 0 means the table says what you "
+        "asked for, in both directions");
+    TEST_EXPECT_EQ(nmounts2, 1, "still exactly one entry after both converges");
+    TEST_EXPECT_EQ(rc_unmount, 0, "unmount finds the converged entry");
 }
 
 void test_territory_mount_mrepl_replaces(void) {

@@ -107,7 +107,7 @@ Territory root only.
 
 `MREPL` / `MBEFORE` / `MAFTER` / `MCREATE` mirror Plan 9 (see `kernel/include/thylacine/territory.h`). At v1.0 only `MREPL` has distinguished semantics — when set and an entry at the same target_path_id exists, the existing entry is **replaced** (its source is `spoor_clunk`'d, the new source is `spoor_ref`'d). Without `MREPL`, a same-target entry results in an "append a new entry" (union mount; walk-side union support is Phase 5+).
 
-Idempotency: mounting the same `(source_spoor_fd, target_path_id)` pair twice is a no-op success (matches `specs/territory.tla::Mount`'s `<<path, s>> \notin mounts[p]` precondition).
+Idempotency: mounting the same `(source_spoor_fd, target_path_id)` pair twice adds no entry and takes no second reference (matching `specs/territory.tla::Mount`'s `<<path, s>> \notin mounts[p]` precondition) -- but since **#219** it converges the existing entry's `flags` to the requested set rather than returning `0` blind. That mattered once `MNOEXEC` gave `flags` an enforcement meaning: the old arm reported success while never applying the restriction, which is fail-open. Convergence is symmetric, so `0` means "this entry now says what you asked for" in both directions -- but NOT "the restriction is gone", since `mount_noexec_covers` is an ANY-scan over the table and a second mount of the same device instance keeps it covered. `territory.tla` does not model `flags`, so this sits beneath the spec.
 
 ### Rights gates
 

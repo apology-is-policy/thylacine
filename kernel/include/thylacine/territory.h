@@ -373,11 +373,24 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
 // future union-mount work; at v1.0 they're treated as "append a new entry."
 //
 // Idempotency: mount(t, S, mp, flags) where (key(mp), S) is already in the
-// mount table is a no-op success (returns 0; refcount not bumped; the spec's
-// `<<path, s>> \notin mounts[p]` precondition under the re-keyed identity).
+// mount table adds no entry and bumps no refcount (the spec's
+// `<<path, s>> \notin mounts[p]` precondition under the re-keyed identity),
+// but it DOES converge the existing entry's `flags` to the requested set
+// (#219). Before that it returned 0 having consulted nothing, so a re-mount
+// ADDING MNOEXEC reported success and left the pair unrestricted -- fail-open.
+// Convergence is symmetric (a re-mount without MNOEXEC drops it from THIS
+// ENTRY), so a 0 always means "this entry now says what you asked for" -- NOT
+// "the restriction is gone": mount_noexec_covers is an ANY-scan, so a device
+// instance mounted at two points stays covered while either entry has the bit.
+// Symmetry is safe
+// rather than merely convenient: mount flags are deliberately NOT locks --
+// unmount() is ungated and MREPL overwrites `flags` wholesale -- so the
+// loosening direction grants nothing that was not already two calls away.
+// `mp_path` is deliberately not re-captured (I-33: Path is write-only,
+// cosmetic to /proc/<pid>/ns, and the fresh Spoor keys to the same identity).
 //
 // Return values:
-//    0   success (entry added or idempotent no-op).
+//    0   success (entry added, or the existing entry's flags converged).
 //   -1   source or mountpoint is NULL / has corrupted magic.
 //   -2   mounts[] full (PGRP_MAX_MOUNTS reached).
 //   -3   would create a mount cycle (I-3) -- a self-mount (source identity ==
@@ -469,7 +482,8 @@ struct Spoor *territory_root_ref(struct Territory *territory);
 //
 // Idempotency: territory_chroot(territory, S) where root_spoor == S is a
 // no-op success (returns 0; refcount not bumped). Mirrors mount()'s
-// idempotent-same-source semantics.
+// idempotent-same-source REFCOUNT semantics, but not its flag convergence --
+// chroot carries no flags word to converge (#219).
 //
 // Spec: maps to `specs/territory.tla::Chroot(p, s)`. Refcount discipline
 // pinned by MountRefcountConsistency (refcount[s] = mount-table-count +
