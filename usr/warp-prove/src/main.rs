@@ -121,6 +121,27 @@ fn parse_field(s: &str, key: &str) -> Option<u64> {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // #204 census mode: `warp-prove ctl` connects and dumps the global ctl
+    // verbatim. The shell cannot cross the srv post (`cat /srv/warp/ctl`
+    // fails "not a directory" -- a one-shot path walk cannot traverse a
+    // post); this binary already owns the two-step attach, so it is the
+    // census reader (bo-peak / fence-lane / bo-cap) for the glq lane.
+    if libthyla_rs::env::args().get_str(1) == Some("ctl") {
+        let root =
+            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+        if root < 0 {
+            t_putstr("warp-prove: ctl: open /srv/warp failed\n");
+            unsafe { t_exits(1) };
+        }
+        let ctl = open_read_string(root, "ctl");
+        t_putstr(&ctl);
+        if !ctl.ends_with('\n') {
+            t_putstr("\n");
+        }
+        unsafe { t_close(root) };
+        return 0;
+    }
+
     t_putstr("warp-prove: starting (the Warp-2 gate)\n");
 
     let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };

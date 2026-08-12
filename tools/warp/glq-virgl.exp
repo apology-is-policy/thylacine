@@ -271,7 +271,10 @@ expect {
 # #204 census: the GLOBAL backed-BO high-water survives the game ctx's
 # teardown, so this read reports the number the bo-cap width is sized
 # against. REPORTED, not gated (a missing field is a pre-#204 server).
-lc_send "cat /srv/warp/ctl"
+# Via warp-prove's ctl mode -- the shell cannot cross the srv post
+# (`cat /srv/warp/ctl` fails "not a directory"); the prover owns the
+# two-step attach.
+lc_send "/warp-prove ctl"
 set timeout 30
 expect {
     -re {bo-peak (\d+)} {
