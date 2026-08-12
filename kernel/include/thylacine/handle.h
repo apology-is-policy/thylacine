@@ -11,7 +11,7 @@
 //     transferable) + Srv (a /srv service or connection object, non-
 //     transferable; P5-corvus-srv).
 //   - Six rights (per §18.2): READ / WRITE / MAP / TRANSFER / DMA / SIGNAL.
-//   - Per-Proc HandleTable is a fixed-size array (PROC_HANDLE_MAX = 64).
+//   - Per-Proc HandleTable is a fixed-size array (PROC_HANDLE_MAX below).
 //     Phase 5+ refactors to growable RB-tree when the syscall surface
 //     lands.
 //   - Underlying-kobj refcount integration: not yet. handle_close just

@@ -62,6 +62,21 @@ fi
 
 echo "ci-idle-gate: boot (hvf, headless) -> settle ${SETTLE}s -> sample ${SAMPLES}x2s; FAIL if mean > ${THRESHOLD}%"
 
+# #226 (aux's sweep; the ci-idle twin of test-interactive's #217 refusal): a
+# VM already live on THIS tree's disk means a concurrent gate -- unsafe for
+# the same two reasons (the shared pool fixture, and this script's own
+# exactly-1 sampling assertion), and the no-boot failure path used to
+# pattern-pkill "$DISK_IMG", shooting the OTHER gate's VM. Refuse up front
+# with a named operator error instead; the failure path below kills by PID
+# only (run-vm.sh execs qemu, so $RUNPID IS the qemu).
+if pgrep -f "$DISK_IMG" >/dev/null 2>&1; then
+    echo "ci-idle-gate: a qemu on THIS tree's disk ($DISK_IMG) is already" >&2
+    echo "  running; refusing to start -- the idle sample would be ambiguous" >&2
+    echo "  and concurrent gates corrupt the shared pool fixture. Finish or" >&2
+    echo "  kill that run first (by explicit PID)." >&2
+    exit 2
+fi
+
 THYLACINE_ACCEL=hvf THYLACINE_DISPLAY=none tools/run-vm.sh < /dev/null > "$LOG" 2>&1 &
 RUNPID=$!
 
@@ -72,7 +87,10 @@ for _ in $(seq 1 "$BOOT_TO"); do
     kill -0 "$RUNPID" 2>/dev/null || { echo "ci-idle-gate: FAIL (qemu exited before boot OK; see $LOG)"; exit 1; }
     sleep 1
 done
-[ "$booted" = 1 ] || { echo "ci-idle-gate: FAIL (no boot OK within ${BOOT_TO}s; see $LOG)"; kill "$RUNPID" 2>/dev/null; pkill -f "$DISK_IMG" 2>/dev/null; exit 1; }
+# By PID only (#226): run-vm.sh execs qemu, so $RUNPID IS the qemu -- the
+# old trailing `pkill -f "$DISK_IMG"` was pure overkill that could shoot a
+# concurrent gate's VM (every VM in this tree boots the same disk).
+[ "$booted" = 1 ] || { echo "ci-idle-gate: FAIL (no boot OK within ${BOOT_TO}s; see $LOG)"; kill "$RUNPID" 2>/dev/null; exit 1; }
 
 sleep "$SETTLE"
 
