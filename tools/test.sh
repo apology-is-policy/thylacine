@@ -316,6 +316,21 @@ case "$result" in
             echo "-----------------------------" >&2
             exit 1
         fi
+        # #212: propagate the DISTRO D-5 / LINEAGE L-6c arc gates into the
+        # verdict. Both soft-skip when their external Alpine bundle is absent,
+        # which is right, but nothing carried the skip into the exit status --
+        # so a tree with a REGRESSED D-1..D-4 chain exited 0 identically to one
+        # where the arc ran. The checker fails on an ABSENT report (a dropped
+        # gate, the shape a green boot could otherwise hide) and otherwise
+        # states what actually ran, in test-interactive.sh's discipline: a skip
+        # is reported, and reported as NOT coverage.
+        # THYLA_ARC_GATES=require makes a skip fatal (for shapes that ship the
+        # fixture); the default stays lenient because a fresh clone has none.
+        if ! arc_report="$("$REPO_ROOT/tools/check-arc-gates.sh" "$LOG_FILE")"; then
+            echo "==> FAIL: arc-gate verdict (see the reason above)." >&2
+            exit 1
+        fi
+        echo "==> $arc_report"
         echo "--- log tail ---"
         tail -20 "$LOG_FILE"
         echo "----------------"

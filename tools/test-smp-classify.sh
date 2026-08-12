@@ -157,6 +157,17 @@ cat > "$TMP/harn-gpugate.log" <<'EOF'
 ==> FAIL: G-4 console gate -- the Aurora scanout did not verify.
 EOF
 
+# #212. Deliberately carries the PASS banner line too, because that is what a
+# real arc-gate failure looks like: every post-banner gate runs after test.sh
+# has already printed it. A log without it would not test the ordering that
+# matters -- it is the '==> PASS' fallback this arm has to beat.
+cat > "$TMP/harn-arcgates.log" <<'EOF'
+==> harness: qemu_alive_at_teardown=1
+==> PASS: boot banner observed.
+check-arc-gates: FAIL -- the boot emitted no 'joey: ARC-GATES' report line.
+==> FAIL: arc-gate verdict (see the reason above).
+EOF
+
 cat > "$TMP/harn-timeout.log" <<'EOF'
 ==> harness: qemu_alive_at_teardown=1
 ==> FAIL: timeout (300s) - no boot marker.
@@ -195,6 +206,10 @@ expect_token "real passing capture"           pass      "$DATA/real-pass-harness
 expect_token "gpu-gate"                       gpu-gate  "$TMP/harn-gpugate.log"
 expect_token "timeout"                        timeout   "$TMP/harn-timeout.log"
 expect_token "unrecognised verdict"           unknown   "$TMP/harn-empty.log"
+# #212: the arc-gate verdict, whose log ALSO holds '==> PASS'. Wanting
+# 'arc-gates' here is what proves the arm beats that fallback rather than
+# merely existing above it.
+expect_token "arc-gate failure beats the PASS line" arc-gates "$TMP/harn-arcgates.log"
 
 echo
 if (( fails == 0 )); then

@@ -1099,6 +1099,29 @@ static int run_viv_bundle(const char *vargv, unsigned int vargv_len,
     return reaped == pid ? 0 : -1;
 }
 
+// ARC-GATE STATE (#212) -- the machine-readable half of what the two gates
+// below already say in prose.
+//
+// Both gates SOFT-SKIP when their external Alpine bundle is absent, which is
+// the correct disposition (a missing input is not a broken kernel) but left
+// the harness unable to tell a skip from a pass: `tools/test.sh` keys its
+// verdict on the boot banner alone, so a tree with a REGRESSED D-1..D-4 chain
+// exited 0 identically to one where the whole arc ran, provided the tarball
+// was absent. The log carried the distinction; the exit status discarded it.
+//
+// So the gates now RECORD their disposition and joey emits one structured
+// line the harness can key on. The producer reports the fact rather than the
+// harness inferring it from which prose line happens to be present -- the
+// same reason `test.sh` reports qemu_alive_at_teardown instead of letting the
+// SMP gate deduce it (#222).
+//
+// MISSING is the load-bearing default: a future edit that drops a gate call
+// (or returns before the report) prints MISSING and reddens the boot, rather
+// than printing nothing and reading as a pass. There is deliberately no arm
+// that leaves this NULL.
+static const char *g_arc_l6c = "MISSING";
+static const char *g_arc_d5  = "MISSING";
+
 // do_alpine_shell_gate -- LINEAGE L-6c, the ARC gate: an Alpine /bin/sh runs a
 // command inside a vivarium.
 //
@@ -1153,6 +1176,7 @@ static int do_alpine_shell_gate(void) {
                  "bundle -- drop an alpine-minirootfs tarball AND a "
                  "busybox-static apk in build/cache/ and rebuild with "
                  "THYLACINE_MKFS_PRESERVE=0)\n");
+        g_arc_l6c = "SKIPPED";
         return 0;
     }
     (void)t_close(abfd);
@@ -1285,6 +1309,7 @@ static int do_alpine_shell_gate(void) {
         t_putstr(" bytes, needs > 4096 (the pipe ring). The post-L6C-DONE bulk "
                  "did not survive; run_viv_bundle must drain to EOF BEFORE it "
                  "reaps. This is NOT a busybox/vivarium leg failure.\n");
+        g_arc_l6c = "FAILED-DRAIN";
         return -1;
     }
     if (ran != 0 || status != 0 || missing >= 0) {
@@ -1331,12 +1356,15 @@ static int do_alpine_shell_gate(void) {
                      "reaches the pipe -- but linux nr=24 has no translator, so "
                      "nothing can be wired onto fd 0 or 1 and the reader gets "
                      "EBADF); not boot-fatal yet\n");
+            g_arc_l6c = "KNOWN-BLOCKED";
             return 0;
         }
+        g_arc_l6c = "FAILED";
         return -1;
     }
     t_putstr("joey: L-6c ALPINE SHELL GATE PASS (busybox sh forked, exec'd, "
              "piped, substituted and reaped -- LINEAGE arc complete)\n");
+    g_arc_l6c = "PASS";
     return 0;
 }
 
@@ -1420,6 +1448,7 @@ static int do_stock_distro_gate(void) {
                  "/vivarium/alpine-stock bundle -- drop an alpine-minirootfs "
                  "tarball in build/cache/ and rebuild with "
                  "THYLACINE_MKFS_PRESERVE=0)\n");
+        g_arc_d5 = "SKIPPED";
         return 0;
     }
     (void)t_close(sbfd);
@@ -1469,12 +1498,17 @@ static int do_stock_distro_gate(void) {
         t_putstr(" status=");
         t_putstr(itoa_dec(status, nb, sizeof(nb)));
         t_putstr("\n");
-        if (!DISTRO_GATE_FATAL) return 0;
+        if (!DISTRO_GATE_FATAL) {
+            g_arc_d5 = "KNOWN-BLOCKED";
+            return 0;
+        }
+        g_arc_d5 = "FAILED";
         return -1;
     }
     t_putstr("joey: D-5 STOCK DISTRO GATE PASS (an unmodified Alpine 3.21.0 "
              "ran its own shell through its own symlink, loader and libc -- "
              "the DISTRO arc chain is live end to end)\n");
+    g_arc_d5 = "PASS";
     return 0;
 }
 
@@ -9517,7 +9551,36 @@ int main(void) {
                 // the stock-dynamic path. Ordering them the other way would
                 // lose that.
                 if (do_stock_distro_gate() != 0) return 1;
+
+                // #212: the one line the harness keys on. Both gates have run
+                // and recorded their disposition; say which, in a form an exit
+                // status can carry. Unconditional on this path -- a fatal gate
+                // returned above (no banner, so the harness already fails), so
+                // FAILED cannot print here; KNOWN-BLOCKED is the only non-PASS/
+                // SKIPPED state that can reach it.
+                //
+                // ONE write, not five. A verdict the harness keys on must not
+                // be tearable by a concurrent console writer -- and tearing is
+                // a live phenomenon here, not a hypothetical (#159 is exactly
+                // that, seven unbracketed writes outside the writer role). A
+                // torn line would fail the parse and redden a green boot.
+                {
+                    const char *parts[] = { "joey: ARC-GATES l6c=", g_arc_l6c,
+                                            " d5=", g_arc_d5, "\n" };
+                    char   rb[96];
+                    size_t rn = 0;
+                    for (unsigned pi = 0; pi < sizeof(parts) / sizeof(parts[0]); pi++)
+                        for (const char *p = parts[pi]; *p && rn < sizeof(rb) - 1; p++)
+                            rb[rn++] = *p;
+                    rb[rn] = '\0';
+                    t_putstr(rb);
+                }
             }
+#else
+            // #212: the lean shape compiles the ladder out, so report THAT
+            // rather than let the harness infer a build shape from an absent
+            // line -- an absence it cannot tell from a deleted gate.
+            t_putstr("joey: ARC-GATES not-built (THYLA_BOOT_PROBES=OFF)\n");
 #endif
         }
 

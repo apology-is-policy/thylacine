@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
+.PHONY: all kernel production sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive test-classify check-arc-gates smp-gate idle-gate check-floor test-a72 run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -58,6 +58,13 @@ smp-gate:
 # nobody drove it.
 test-classify:
 	@tools/test-smp-classify.sh
+
+# The arc-gate verdict checker, exercised without booting anything (#212). Its
+# load-bearing case is a PRE-#212 boot log: a check that passed one of those
+# would be decorative, since that is what every boot looked like while the
+# D-5/L-6c skip was invisible.
+check-arc-gates:
+	@tools/check-arc-gates.sh --selftest
 
 idle-gate:
 	@tools/ci-idle-gate.sh
@@ -166,6 +173,8 @@ help:
 	@echo "               optional gate, SKIPs without 'expect'. THYLACINE_ACCEL=tcg default."
 	@echo "  smp-gate   — SMP soundness CI gate: multi-boot the smp4/smp8 x default/UBSan"
 	@echo "               matrix N>=10 (single boots lie). SMP_GATE_N / SMP_GATE_CONFIGS env."
+	@echo "  check-arc-gates — #212: the D-5/L-6c arc-gate verdict checker, over"
+	@echo "               synthetic logs. No boots; seconds."
 	@echo "  check-floor— #91: full ARMv8.0 floor scan incl. /clade + /goroot (~6 min)."
 	@echo "               build.sh already runs the fast ramfs scan on every bake."
 	@echo "  test-a72   — boot on -cpu cortex-a72 (ARMv8.0-only): the floor's"

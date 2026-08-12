@@ -146,6 +146,11 @@ harness_result_token() {
     elif grep -aqF '==> FAIL: G-4 console gate'                         "$hlog"; then echo gpu-gate
     elif grep -aqF '==> FAIL: virtio-input probe reached'               "$hlog"; then echo inject-enforce
     elif grep -aqE '==> FAIL: accel=.* delivers EL0 watchpoints'        "$hlog"; then echo hwwatch
+    # #212. MUST precede the '==> PASS' arm: every post-banner gate failure
+    # runs AFTER test.sh has already printed '==> PASS: boot banner observed',
+    # so a missing arm here does not degrade to 'unknown' -- it degrades to
+    # 'pass', which is worse, and would have labelled the capture OTHER-pass.
+    elif grep -aqF '==> FAIL: arc-gate verdict'                         "$hlog"; then echo arc-gates
     elif grep -aqF '==> PASS'                                           "$hlog"; then echo pass
     else echo unknown
     fi

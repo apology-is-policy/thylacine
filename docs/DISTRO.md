@@ -884,6 +884,23 @@ assertion is therefore a `$( )` capture (a pipe) or a `2>&1` dup — the same
 constraint D-3c's gate line already works under. This is a real fidelity gap
 being routed around, not a stylistic choice; #201 remains the blocker.
 
+**BOOT-FATAL WHEN IT RUNS — AND SINCE #212, VISIBLE WHEN IT DOES NOT.** The
+gate soft-skips when `/vivarium/alpine-stock` is absent, which is correct (the
+Alpine tarball is untracked and lives only in gitignored `build/cache/`, so a
+fresh clone, CI and any hermetic build have none) and which L-6c does
+identically. But `tools/test.sh` keyed its verdict on the boot banner alone, so
+the skip never reached the exit status: **a tree whose D-1..D-4 chain had
+regressed exited 0 identically to one where the whole arc ran**, provided the
+tarball was absent. The arc's headline claim was opt-in and its absence
+invisible. joey now records each gate's disposition and emits
+`joey: ARC-GATES l6c=<state> d5=<state>` (`not-built` in the `--production`
+shape), `tools/check-arc-gates.sh` reads it, and `tools/test.sh` fails on a
+MISSING state or an absent report — the dropped-gate shape a green boot could
+otherwise hide. A skip still passes, but is now *reported*, and reported as
+NOT coverage; `THYLA_ARC_GATES=require` makes it fatal where the fixture
+ships. Full contract: `TOOLING.md §5.1`. Note what this does not do — it makes
+the unknown visible, it does not make it known.
+
 **The "and its full fix must re-open #192" clause is RETIRED at D-close** —
 see the #192 verdict's correction in section 6. #192 was never actually gated
 on `O_CREAT`: the phenotype can already WRITE any existing file it has DAC

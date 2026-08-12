@@ -323,6 +323,68 @@ Before the shell exists, the agent looks for:
 
 The kernel must print a canonical success banner once init's boot-test asserts pass (via `SYS_BOOT_COMPLETE`; see §10). This is not optional — it is the agent's signal that the boot succeeded.
 
+### 5.1 The arc-gate report line (`joey: ARC-GATES`, #212)
+
+The boot banner is a *whole-boot* verdict, and some gates legitimately do not
+run: the DISTRO **D-5** and LINEAGE **L-6c** arc gates need an external Alpine
+tarball that is deliberately untracked (it lives only in gitignored
+`build/cache/`), so on a fresh clone, in CI, and in any hermetic build they
+**soft-skip**. That disposition is correct — a missing input is not a broken
+kernel — but until #212 nothing carried it into the exit status, so a tree
+whose D-1..D-4 chain had *regressed* exited 0 identically to one where the
+whole arc worked. The log held the distinction; the verdict discarded it. An
+assertion that never executed is an UNKNOWN, and this one was being reported
+as a PASS.
+
+joey therefore emits one structured line, in **every** build shape:
+
+```
+joey: ARC-GATES l6c=<state> d5=<state>       # PASS | SKIPPED | KNOWN-BLOCKED | MISSING
+joey: ARC-GATES not-built (THYLA_BOOT_PROBES=OFF)
+```
+
+`tools/check-arc-gates.sh` reads it (from `build/test-boot.log` by default) and
+`tools/test.sh` consumes its exit status on the pass path:
+
+| State | Verdict | Reported as |
+|---|---|---|
+| `PASS` | ok | counted in `N/2 ran` |
+| `SKIPPED` | ok | `; M SKIPPED (external Alpine fixture absent -- NOT a guest result, and NOT coverage)` |
+| `KNOWN-BLOCKED` | ok | `; M KNOWN-BLOCKED (deliberately non-fatal -- NOT coverage)` |
+| `MISSING` | **FAIL** | the gate was never called, or returned without recording |
+| report line absent | **FAIL** | the boot never reached the gates, or the report was removed |
+| `not-built` | ok | the `--production` shape (§9's `THYLA_BOOT_PROBES=OFF`) |
+
+Two properties are deliberate. The **producer reports the fact** rather than
+the harness inferring a build shape from a missing line — an absence it could
+not tell from a deleted gate (the same reason `test.sh` reports
+`qemu_alive_at_teardown` instead of letting the SMP gate deduce it, #222). And
+`MISSING` is the *default* state of both gates, so an edit that drops a gate
+call reddens the boot instead of printing nothing and reading as a pass.
+
+What makes the check sound rather than racy is the **ordering**: joey signals
+`SYS_BOOT_COMPLETE` (`joey.c:9989`) long after it prints the report
+(`joey.c:9560`), so on any boot where the harness sees the banner at all, the
+line is already in the log. There is no window in which a banner-observed boot
+can legitimately lack it.
+
+> **Caveat (#228).** The `not-built` arm is written and parses, but has never
+> been *compiled*: `THYLA_BOOT_PROBES=OFF` does not build today — joey fails
+> with 11 pre-existing errors (probe blocks that drifted outside their `#if`,
+> proven pre-existing against a HEAD worktree). Whoever fixes #228 verifies
+> this arm on the way through. `--selftest` case F covers the log-reading half.
+
+**What this buys, and what it does not.** It makes a skip a visible, deliberate,
+reported state; it does **not** manufacture coverage. With the fixture absent
+the arc is still unverified — the report now says so. `THYLA_ARC_GATES=require`
+(or `--require`) makes a skip fatal, for the shapes that ship the fixture; the
+default stays lenient because a fresh clone has none.
+
+`tools/check-arc-gates.sh --selftest` drives the real checker over synthetic
+logs — 15 cases, every arm plus its negatives. The load-bearing one is a
+**pre-#212 log** (both gates PASS in prose, no report line): it must FAIL, or
+the check is decorative. Fast; no boots. Also `make check-arc-gates`.
+
 ---
 
 ## 6. QEMU snapshots — the kernel development safety net
