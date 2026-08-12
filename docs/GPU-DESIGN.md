@@ -668,6 +668,71 @@ work (I-42 JIT Burrows + torpor + weft cover it); deltas are a build flag
 
 ---
 
+## 13. The HW-GL exit bar (ratified 2026-08-12)
+
+**The claim "hardware GL works" gets a measured bar, not a vibe.** On real
+GPU silicon, HW GL must far outperform the software renderer — and the way to
+hold ourselves to that without overfitting to one game is a **four-point
+grid** measured on the reference HW host (thyla-pi — CLAUDE.md "The thyla-pi
+host"; permanent):
+
+| Leg | Stack | Where |
+|---|---|---|
+| native-SW | tyrquake + Mesa llvmpipe, Pi Debian, no virt | `warp-host.sh native-bench` |
+| native-HW | tyrquake + Mesa V3D (real GPU), Pi Debian, no virt | `warp-host.sh native-bench` |
+| guest-SW | tyrquake + llvmpipe in-guest (KVM) | the existing `decomp 2d` |
+| guest-HW | tyrquake + virgl-on-V3D in-guest (KVM), **Direct arm** | the existing `quake` / `decomp gl` |
+
+Same tyrquake source, same pak data, same timedemo, same resolution
+(640×480 reference; 1280×800 optional second row), pacing/vsync OFF on every
+leg (`vblank_mode=0` native; the unpaced arm in-guest).
+
+**The anchor precondition** (validates the grid before any ratio is read):
+native-SW and guest-SW agree within **20%**. llvmpipe is CPU-bound and KVM is
+near-native, so if the SW legs disagree the grid is measuring some other tax
+(host contention, thermal, a broken leg) and the run is VOID. This anchor is
+what makes the ratio comparison isolate exactly one quantity: what OUR virt
+GL stack costs on the HW leg (guest Mesa → virtio ring → tapestryd/
+virglrenderer → V3D, versus native Mesa → V3D).
+
+**The bar** (exit criteria for the arc's HW-GL performance claim; the #215
+north star):
+
+1. **Ratio**: guest-HW/guest-SW ≥ **0.5×** of native-HW/native-SW.
+   Aspirational: ≥ 0.8×. (Exact parity is unattainable in principle — virgl
+   adds real per-submit serialization; published virgl-vs-native experience
+   is ~50–80% for well-behaved workloads, worse for draw-call-chatty ones,
+   and GLQuake is 1996-chatty.)
+2. **Absolute**: guest-HW ≥ **0.4×** native-HW at the same resolution.
+
+**Measurement discipline**:
+- The bar is measured on the **Direct arm** only. Composed carries a
+  structural extra cost (the sync transfer + blit — tiler-hostile by
+  construction on V3D) and is tracked as a separate figure, never the bar.
+- **Thermal guard**: `vcgencmd get_throttled` must read clean (0x0) before
+  and after each native leg, else the run is re-taken — a throttled native
+  baseline silently flatters the guest ratio.
+- **Present-cost honesty**: native legs run present-inclusive via KMSDRM
+  where the host has a usable display path; if only a surfaceless context is
+  available, the figures say so (both native legs share the omission, so the
+  native ratio stays valid, but the absolute comparison weakens — note it).
+- Swap-clean rule as everywhere: any leg with pswpin/pswpout movement is
+  DISCARDED.
+
+**Compass, not target** (the standing rule): tyrquake is the *proxy
+workload*. The bar bounds the virt stack's overhead; it is not a mandate to
+tune for one game. If a future workload class (Venus/Vulkan at Warp-6)
+matters, it gets its own grid of the same shape, not a widened bar here.
+
+Status at ratification: guest-HW/guest-SW ≈ **0.04×** (0.6 vs 16.2 fps,
+2026-08-11, #215 open with the #213 storm confound) — roughly two orders of
+magnitude below the bar. The native legs have not yet been measured; the
+`native-bench` arm lands next and its first run doubles as the #215
+discriminator battery (native V3D `GL_VERSION`/extensions vs the guest
+capset; the `MESA_DEBUG=silent` A/B rides the same session).
+
+---
+
 ## Cross-references
 
 - `docs/TAPESTRY.md` §18 — the surface lifecycle, present protocol, weave share
