@@ -157,10 +157,19 @@ struct PgrpMount {
 // DEVICE INSTANCE -- the (dc, devno) a file necessarily shares with its mount
 // source, since spoor_clone propagates devno through every walk and cross --
 // not per mount POINT. One device instance mounted twice therefore cannot
-// carry two different verdicts. That is sound for every mount we make (each
-// Env / dev9p session mints its own devno) and is the price of a check that
-// needs no per-Dev propagation to be correct: nothing has to REMEMBER to carry
-// a flag, so no Dev can silently forget to.
+// carry two different verdicts.
+//
+// **AND IT DOES NOT REACH EVERY DEV. #217 F1 (Fable 5) falsified the original
+// claim here -- "sound for every mount we make (each Env / dev9p session mints
+// its own devno)".** dev9p and devsrv mint a devno per SESSION at attach, and
+// walked descendants inherit it via spoor_clone, so the key holds for them.
+// devenv does NOT: devenv_walk stamps the CALLING Proc's env devno (an I-1 fix
+// -- entry ids restart at 1 per Env, so without it two Procs' unrelated
+// variables claim to be the same file and the REVENANT Image cache serves one
+// the other's bytes). A container's /env files therefore never share an
+// identity with the /env mount source its runner installed, and NO MNOEXEC
+// mount can ever cover devenv. That is why `Dev.may_back_exec` exists as a
+// FLOOR beneath this flag; do not re-derive the coverage claim from the key.
 #define MNOEXEC   0x0010
 
 struct Territory {
@@ -423,10 +432,16 @@ bool mount_is_point_id(struct Territory *territory, int dc, u32 devno,
 // mount-over-mount cross without anything having to carry a flag forward.
 //
 // FAIL-CLOSED on a corrupted-but-non-NULL Territory would be wrong here (an
-// extinction is the honest answer to corruption, and matches its siblings);
-// FAIL-OPEN on a NULL Territory is correct and deliberate -- a Proc with no
-// namespace has no mount that could have conferred the restriction, and the
-// kernel's own boot-time exec runs in exactly that state.
+// extinction is the honest answer to corruption, and matches its siblings).
+// FAIL-OPEN on a NULL Territory is right on the merits -- a Proc with no
+// namespace has no mount that could have conferred the restriction -- but the
+// arm is DEFENSIVE AND UNREACHABLE, not load-bearing, and an earlier version of
+// this comment claimed otherwise ("the kernel's own boot-time exec runs in
+// exactly that state"). It does not: kproc is given kpgrp() at proc.c's init,
+// exec's own path returns on territory_root_ref(NULL) BEFORE reaching the gate,
+// and the mmap path is PHENO_LINUX-only where every Proc carries a cloned
+// Territory. Recorded because the false version actively warned a reader off a
+// change that would have broken nothing.
 bool mount_noexec_covers(struct Territory *territory, int dc, u32 devno);
 
 // territory_root_ref: atomically read root_spoor + take a ref under ns_lock, so

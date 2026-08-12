@@ -633,13 +633,37 @@ over shared kernel core; no native mmap API is added.
      a room the attacker is already standing in.
 
   So the fix lands where a real delta remains, and the claim is trimmed to
-  match. `MNOEXEC` closes the case where `exec` would have **refused** and mmap
-  did not: a writable, readable, non-X file on a surface the SYSTEM *hands* the
-  container -- `/env` being the live one (writable, readable, per-Proc, and its
-  entries carry no X bit, so `exec` declines them and the R+X map did not).
-  Every mount `viv` makes is now `MNOEXEC`; the only tree that stays executable
-  is the chroot'd root, which is also the only tree the container must run
-  from. **What remains open, and is documented rather than claimed closed: a
+  match. The target is the case where `exec` would have **refused** and mmap did
+  not: a writable, readable, non-X file on a surface the SYSTEM *hands* the
+  container. `/env` is the live instance -- measured: entries are
+  `T_S_IFREG | 0644` (no X bit, so `exec` declines them), `.read` and `.write`
+  both present, `perm_enforced == false`, `devenv_stat_native` reports a real
+  size, and `ENV_VALUE_MAX` is **4096**. A full page of attacker-chosen bytes,
+  written and then mapped executable, on a file `exec` itself refuses.
+
+  **IT TAKES TWO MECHANISMS, AND THE FIRST DRAFT SHIPPED WITH ONLY ONE.** The
+  #217 round (Fable 5) found as F1 [P1] that `MNOEXEC` is **structurally
+  incapable of covering `/env`** -- the exact surface named above. `MNOEXEC` is
+  consulted through the `(dc, devno)` a file shares with its mount source, which
+  assumes `devno` names the mounted INSTANCE; `devenv_walk` instead stamps the
+  **calling Proc's** env devno (an I-1 fix: entry ids restart at 1 per Env, so
+  without it two Procs' variables claim to be the same file and the REVENANT
+  Image cache serves one the other's bytes). A container's `/env` files
+  therefore never match the `/env` mount source `viv` installed, no entry
+  matches, and the R+X map was admitted. The scripture asserted a door was shut
+  while it stood open -- **the D-close closed-list lesson recursing one level
+  down: a claim of closure that reads as a guarantee it does not make.**
+
+  What actually closes it is a FLOOR beneath the flag: **`Dev.may_back_exec`**,
+  an allowlist on `struct Dev` set by exactly the two Devs that serve real file
+  content (`devramfs`, `dev9p`). Every other Dev leaves the zero default and is
+  refused outright -- an environment variable is not code, and neither is a
+  `/proc` field, a `/srv` endpoint or a console, mounted or not. Allowlist and
+  not denylist deliberately: a Dev added later is refused until it opts in.
+  `MNOEXEC` remains the refinement ABOVE that floor, for real filesystems where
+  the mount, not the device, is the right granularity. Every mount `viv` makes
+  is `MNOEXEC`; the only tree that stays executable is the chroot'd root, which
+  is also the only tree the container must run from. **What remains open, and is documented rather than claimed closed: a
   bundle that owns its own executable tree can still author its own code.**
   That is not a boundary crossing (see fact 2), and making it impossible is a
   bundle-STAGING problem -- the rootfs must not be writable by its own

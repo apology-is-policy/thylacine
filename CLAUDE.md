@@ -418,7 +418,7 @@ names).
 | I-9 | No wakeup lost between cond-check and sleep, incl. the death-wake (#811; frame-atomic for the elected 9P reader recv -- a mid-frame death defers its unwind to the next frame boundary, §8.8.1.1/#90) + terminate-`interrupt` (LS-5) generalizations + the Weft-4 readiness-ring single-cache-line poke (the store-buffer register-then-observe) | `scheduler.tla`, `poll.tla`, `cons_poll.tla`, `net_poll.tla`, `weft_readiness.tla`, `tsleep.tla`, `death_wake.tla`, `reader_frame.tla` (#90); torpor leg prose |
 | I-10 | Per-9P-session tag uniqueness (tag==table index; no reuse until reply/Rflush, #845) | `9p_client.tla` |
 | I-11 | Per-9P-session fid identity stable for the fid's open lifetime | `9p_client.tla` |
-| I-12 | W^X: every page writable XOR executable (PTE checks + ELF reject + no prot-mutation syscall exists; W1.5 transient RW+XN alias) + the #217 PROVENANCE half: a file-backed executable mapping requires a mount not marked `MNOEXEC` | runtime + `_Static_assert` |
+| I-12 | W^X: every page writable XOR executable (PTE checks + ELF reject + no prot-mutation syscall exists; W1.5 transient RW+XN alias) + the #217 PROVENANCE half: a file-backed executable mapping requires BOTH a Dev with `may_back_exec` set (the allowlist floor) AND a mount not marked `MNOEXEC` | runtime + `_Static_assert` |
 | I-13 | Kernel-userspace isolation: TTBR0/TTBR1 split | runtime |
 | I-14 | Stratum block integrity (Merkle); OS observes via 9P, bounds hostile Rlerror ecodes | Stratum-side + `9p_client.rlerror_hostile_ecode_bounded` |
 | I-15 | Hardware view derives entirely from DTB (documented PL011 QEMU-virt fallbacks are the argued exceptions) | code review + audit |

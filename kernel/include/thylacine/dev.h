@@ -89,6 +89,30 @@ struct Dev {
     // flag decouples "can fstat" from "can seek".
     bool         seekable;
 
+    // May this Dev's files back EXECUTABLE pages -- exec resolution, or a
+    // file-backed PROT_EXEC mapping? An ALLOWLIST: devramfs + dev9p (the two
+    // Devs that serve real file content) set it true; every other Dev leaves the
+    // zero default and is refused. #217 F1.
+    //
+    // Why this is a FLOOR under the per-mount MNOEXEC flag rather than the same
+    // thing: MNOEXEC is consulted via the (dc, devno) a file shares with its
+    // mount source, which assumes devno names the MOUNTED INSTANCE. devenv
+    // breaks that assumption on purpose -- devenv_walk stamps the CALLING Proc's
+    // env devno (an I-1 fix: entry ids restart at 1 per Env, so without it two
+    // Procs' unrelated variables claim to be the same file and the REVENANT
+    // Image cache serves one the other's bytes). A container's /env files
+    // therefore never match the /env mount source that viv installed, and NO
+    // mount flag can ever cover them. An allowlist is immune to that whole class:
+    // a Dev is non-exec-backing until it deliberately says otherwise, so a device
+    // whose "files" are process state cannot become code however it is mounted.
+    //
+    // Allowlist and not a denylist, deliberately: a Dev added later is refused by
+    // default and must opt in, rather than being exec-capable until someone
+    // remembers to exclude it. Same discipline as SYS_MOUNT_VALID_FLAGS, and the
+    // same lesson `seekable` above learned when it was inferred from
+    // `.stat_native != NULL` and the inference turned out to be wrong.
+    bool         may_back_exec;
+
     // Lifecycle: called by the kernel.
     //   reset()    — re-initialize the dev (Plan 9 `dev->reset`);
     //                kernel-driven on hardware reset.

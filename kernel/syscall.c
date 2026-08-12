@@ -4861,7 +4861,17 @@ s64 sys_burrow_attach_lazy_for_proc(struct Proc *p, u64 length_raw) {
 // Proc whose namespace forbids it. The verdict is per-namespace; the cache is
 // global; so the check belongs strictly before the cache, in the caller.
 static bool exec_map_vouched(struct Proc *p, const struct Spoor *sp) {
-    if (!p || !sp) return false;
+    if (!p || !sp || !sp->dev) return false;
+    // THE FLOOR (#217 F1). Only a Dev that serves real file content may back
+    // executable pages at all. This is NOT redundant with the mount check below
+    // -- it is what catches the class the mount check structurally cannot:
+    // devenv stamps the CALLING Proc's env devno at walk time, so a container's
+    // /env files never share (dc, devno) with the /env mount source viv
+    // installed, and no MNOEXEC flag can ever cover them. An environment
+    // variable is not code; nor is a /proc field, a /srv endpoint or a console.
+    if (!sp->dev->may_back_exec) return false;
+    // THE REFINEMENT. Among Devs that may, a specific mount can still be marked
+    // MNOEXEC by whoever composed the namespace.
     return !mount_noexec_covers(p->territory, sp->dc, sp->devno);
 }
 

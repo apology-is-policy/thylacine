@@ -31,6 +31,7 @@
 #include "test.h"
 
 #include <thylacine/dev.h>         // #217: devnone (the impersonating mount source)
+#include <thylacine/env.h>         // #217 F1: env_create/env_write/env_free
 #include <thylacine/errno.h>       // #217: T_E_PERM
 #include <thylacine/exec.h>        // #217: EXEC_USER_BURROW_BASE
 #include <thylacine/handle.h>      // #217: handle_alloc / KOBJ_SPOOR / RIGHT_READ
@@ -58,6 +59,7 @@ void test_exec_ns_miss_returns_null(void);
 void test_exec_ns_non_executable_denied(void);
 void test_exec_ns_noexec_mount_denied(void);      // #217
 void test_mmap_file_noexec_mount_denied(void);    // #217
+void test_mmap_file_devenv_never_exec_backs(void); // #217 F1
 
 void test_exec_ns_resolve_absolute_ok(void) {
     struct Thread *t = current_thread();
@@ -251,4 +253,69 @@ void test_mmap_file_noexec_mount_denied(void) {
     TEST_EXPECT_EQ((int)deny_fixed, -(int)T_E_PERM,
         "DENY: the MAP_FIXED R+X twin is refused too -- the census found this "
         "second exec-mapping site, so it is gated and proven, not assumed");
+}
+
+// #217 F1 regression -- the test whose ABSENCE let the finding through.
+//
+// Every other test here reaches the gate via noexec_source_for(), which FORGES
+// the (dc, devno) match by overwriting a devnone Spoor's identity. devenv is
+// structurally incapable of producing that match: devenv_walk stamps the
+// CALLING Proc's env devno, so a container's /env files never share an identity
+// with the /env mount source viv installed, and no MNOEXEC flag can ever cover
+// them. So the mount-flag battery stayed green while /env -- the surface the
+// scripture NAMES as the reason the mechanism exists -- was wide open.
+//
+// This one manufactures nothing: a REAL entry, through devenv's own attach and
+// walk, into the real syscall body. It reddens on the pre-F1 kernel.
+void test_mmap_file_devenv_never_exec_backs(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current proc");
+    struct Proc *tp = t->proc;
+    env_free(tp);                       // start clean, like test_devenv_walk_read
+
+    u64 id = env_create(tp, "NOEXEC217", 9);
+    TEST_ASSERT(id != 0, "create the /env entry");
+    char payload[64];
+    for (unsigned i = 0; i < sizeof(payload); i++) payload[i] = (char)0x41;
+    TEST_EXPECT_EQ((int)env_write(tp, id, 0, payload, sizeof(payload)),
+                   (int)sizeof(payload), "write the would-be shellcode");
+
+    struct Spoor *root = devenv.attach("");
+    TEST_ASSERT(root != NULL, "attach /env root");
+    const char *names[1] = { "NOEXEC217" };
+    struct Walkqid *wq = devenv.walk(root, NULL, names, 1);
+    TEST_ASSERT(wq != NULL && wq->nqid == 1, "walk /env/NOEXEC217");
+    if (!wq) { spoor_unref(root); env_free(tp); return; }
+    struct Spoor *vf = wq->spoor;
+    walkqid_free(wq);
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    if (!p) { spoor_unref(vf); spoor_unref(root); env_free(tp); return; }
+    p->territory = territory_alloc();
+
+    spoor_ref(vf); hidx_t fd_x = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, vf);
+    spoor_ref(vf); hidx_t fd_r = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, vf);
+
+    // Measure first, assert last (the same reason as the sibling above).
+    s64 xmap = sys_mmap_file_for_proc(p, (u64)fd_x, PAGE_SIZE, true,  0);
+    s64 rmap = sys_mmap_file_for_proc(p, (u64)fd_r, PAGE_SIZE, false, 0);
+
+    vma_drain(p);
+    p->state = 2;                       // PROC_STATE_ZOMBIE
+    proc_free(p);
+    spoor_unref(vf);
+    spoor_unref(root);
+    env_free(tp);
+
+    TEST_EXPECT_EQ((int)xmap, -(int)T_E_PERM,
+        "DENY: a REAL /env entry cannot back an executable mapping. NO mount is "
+        "involved -- the Dev allowlist is what closes this, because no mount "
+        "flag can reach devenv's per-Proc devno");
+    // Deliberately the precise claim, not `rmap > 0`: the floor must gate EXEC
+    // and nothing else. A non-exec devenv map may still fail for unrelated
+    // reasons; what must never happen is it being refused by the exec floor.
+    TEST_ASSERT(rmap != -(s64)T_E_PERM,
+        "CONTROL: the same entry mapped NON-exec is not refused by the exec "
+        "floor (devenv stays readable)");
 }

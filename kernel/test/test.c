@@ -244,6 +244,7 @@ void test_territory_mount_devno_disambiguates(void);
 void test_territory_mount_noexec_covers(void);
 void test_exec_ns_noexec_mount_denied(void);
 void test_mmap_file_noexec_mount_denied(void);
+void test_mmap_file_devenv_never_exec_backs(void);
 void test_territory_mount_rejects_cycle(void);
 void test_territory_mount_mp_path_lifecycle(void);
 void test_territory_mount_format_ns(void);
@@ -1680,6 +1681,7 @@ struct test_case g_tests[] = {
     { "exec_ns.non_executable_denied", test_exec_ns_non_executable_denied, false, NULL },
     { "exec_ns.noexec_mount_denied",   test_exec_ns_noexec_mount_denied,   false, NULL },
     { "mmap_file.noexec_mount_denied", test_mmap_file_noexec_mount_denied, false, NULL },
+    { "mmap_file.devenv_never_exec_backs", test_mmap_file_devenv_never_exec_backs, false, NULL },
     { "namespace_layout.proc_ctl_cross", test_namespace_layout_proc_ctl_cross, false, NULL },
     { "resource.page_cap_attach_enforced",
                                        test_resource_page_cap_attach_enforced, false, NULL },

@@ -44,7 +44,7 @@ struct PgrpMount {                              // stalk-2: re-keyed from an
     u32             flags;                      // MREPL | MBEFORE | MAFTER | MCREATE | MNOEXEC
     u32             _pad;                        // 8-byte array-stride alignment
 };
-_Static_assert(sizeof(struct PgrpMount) == 32, ...);   // was 16 (stalk-2)
+_Static_assert(sizeof(struct PgrpMount) == 40, ...);   // was 16 (stalk-2)
 
 #define MREPL    0x0001
 #define MBEFORE  0x0002

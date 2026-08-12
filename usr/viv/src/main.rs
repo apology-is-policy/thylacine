@@ -500,10 +500,17 @@ fn run(bundle: &str, stdio_born: bool) -> Result<i64, String> {
     // hold in the head: the only tree a container must execute from is its
     // rootfs, and the rootfs arrives by chroot, not by mount -- so every entry
     // in this table can be noexec without costing the container anything, and
-    // any writable surface the SYSTEM hands it stops being a way to turn bytes
-    // into code. /dio covers the diorama's whole 9P session, which is where
-    // /proc and /sys are opened from, so those inherit the verdict by device
-    // instance rather than needing their own.
+    // a writable 9P-backed surface the SYSTEM hands it stops being a way to turn
+    // bytes into code. /dio covers the diorama's whole 9P session, which is
+    // where /proc and /sys are opened from, so those inherit the verdict by
+    // device instance rather than needing their own.
+    //
+    // NOT /env, and the flag here is belt-and-braces rather than the thing that
+    // closes it (#217 F1): devenv stamps the CALLING Proc's env devno at walk
+    // time, so the container's /env files never match this mount source and no
+    // mount flag can cover them. What actually closes /env is the kernel-side
+    // `Dev.may_back_exec` allowlist, which refuses devenv-backed executable
+    // mappings outright, mounted or not.
     if unsafe { t_mount(b"/dio".as_ptr(), 4, dio_root, T_MREPL | T_MNOEXEC) } != 0 {
         let _ = unsafe { t_close(dio_root) };
         fail!("mount diorama at /dio");
