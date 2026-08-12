@@ -588,6 +588,10 @@ pub struct Comp {
     surfaces: [Option<Surface>; MAX_SURFACES],
     gen_seq: u32,
     conn_seq: u64,
+    /// The ctx-less half of the create3d refusal one-shots (WDIAG_* bits):
+    /// parse/no-record/OPNOTSUPP arms fire before a ctx resolves, and the
+    /// per-ctx latch cannot carry them (the #198 hunt's blind spot).
+    warp_diag_noctx_arms: u32,
     /// GPU resource ids are PER-GENERATION (a reweave mints a fresh one);
     /// pre-incremented, so the first id is SCREEN_RES + 1.
     res_seq: u32,
@@ -781,11 +785,17 @@ struct WarpCtx {
     /// 26 with thousands of refusals showed the BYTE cap can saturate at
     /// tiny counts: few-but-large backings). Read via ctl `bo-bytes-peak`.
     bo_bytes_peak: u64,
-    /// #218 one-shot diagnostic latch: the FIRST refused wbo_create per
-    /// ctx says which arm and with what parameters (four census runs died
-    /// to silence here). One-shot so a per-texture failure loop cannot
-    /// become its own console storm.
-    build_diag_said: bool,
+    /// #218 one-shot diagnostic latch, PER ARM (a bitmask indexed by
+    /// WDIAG_*): the FIRST refusal of each kind per ctx says which arm
+    /// and with what parameters (four census runs died to silence here,
+    /// and the per-CTX-once predecessor could name only one kind per ctx
+    /// lifetime -- the #198 hunt needed the second). One-shot per arm so
+    /// a per-texture failure loop cannot become its own console storm.
+    build_diag_arms: u32,
+    /// Every create3d refusal of this ctx, ALL families (counted at the
+    /// ctl chokepoint beside the #218 unmint). The one-shots name the
+    /// first of each kind; this counts the storm, census-readably.
+    create_refused: u64,
     /// Heap row (#204): MAX_WARP_BOS_PER_CTX slots, allocated at mint.
     bos: alloc::boxed::Box<[Option<WarpBo>]>,
 }
@@ -831,6 +841,7 @@ impl Comp {
             surfaces: [NO_SURFACE; MAX_SURFACES],
             gen_seq: 0,
             conn_seq: 0,
+            warp_diag_noctx_arms: 0,
             res_seq: SCREEN_RES,
             layout: Layout::new(),
             screen: None,
@@ -2860,7 +2871,8 @@ impl Comp {
             present_to: None,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
-            build_diag_said: false,
+            build_diag_arms: 0,
+            create_refused: 0,
             bos,
         });
         Some(pub_id)
@@ -2893,10 +2905,32 @@ impl Comp {
     /// counting (#95), so a per-texture failure loop cannot storm the
     /// console it is diagnosing.
     #[allow(clippy::too_many_arguments)]
+    /// WDIAG_* arm indices for the create3d-refusal one-shot bitmasks.
+    /// One bit per refusal family so every arm names itself exactly once
+    /// per ctx (the per-ctx-once predecessor could name only ONE family
+    /// per ctx lifetime, which blinded the #198 hunt to the second).
+    const WDIAG_SIZE_ALIGN: u32 = 0;
+    const WDIAG_SIZE_CAP: u32 = 1;
+    const WDIAG_GEOMETRY: u32 = 2;
+    const WDIAG_BYTE_CAP: u32 = 3;
+    const WDIAG_COUNT_CAP: u32 = 4;
+    const WDIAG_NO_MINT: u32 = 5;
+    const WDIAG_DMA_CREATE: u32 = 6;
+    const WDIAG_DMA_MAP: u32 = 7;
+    const WDIAG_DEV_CREATE: u32 = 8;
+    const WDIAG_DEV_ATTACH_CTX: u32 = 9;
+    const WDIAG_DEV_ATTACH_BACKING: u32 = 10;
+    const WDIAG_ALREADY_BUILT: u32 = 11;
+    const WDIAG_CTX_GONE: u32 = 12;
+    const WDIAG_CTL_PARSE: u32 = 13;
+    const WDIAG_CTL_NO_RECORD: u32 = 14;
+    const WDIAG_CTL_NOT_VIRGL: u32 = 15;
+
     fn wbo_diag_once(
         &mut self,
         ctx_pub: u32,
         conn: u64,
+        arm: u32,
         why: &str,
         detail: i64,
         format: u32,
@@ -2906,10 +2940,22 @@ impl Comp {
         size: u64,
     ) {
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
-            if !c.build_diag_said {
-                c.build_diag_said = true;
+            if c.build_diag_arms & (1 << arm) == 0 {
+                c.build_diag_arms |= 1 << arm;
                 say!(
                     "tapestryd: warp create3d refused ({} {}) fmt={} {}x{} lvl={} size={} ctx={}",
+                    why, detail, format, w, h, last_level, size, ctx_pub
+                );
+            }
+        } else {
+            // A refusal whose ctx cannot be resolved must still be
+            // nameable -- the per-ctx latch silently ate exactly this
+            // class during the #198 hunt. Comp-level latch, same storm
+            // bound.
+            if self.warp_diag_noctx_arms & (1 << arm) == 0 {
+                self.warp_diag_noctx_arms |= 1 << arm;
+                say!(
+                    "tapestryd: warp create3d refused ({} {}) fmt={} {}x{} lvl={} size={} ctx={} (UNRESOLVED)",
                     why, detail, format, w, h, last_level, size, ctx_pub
                 );
             }
@@ -2944,7 +2990,7 @@ impl Comp {
         size: u64,
     ) -> bool {
         if size == 0 || size % PAGE != 0 {
-            self.wbo_diag_once(ctx_pub, conn, "size-align", size as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_ALIGN, "size-align", size as i64, format, w, h, last_level, size);
             return false;
         }
         // The backing is CLIENT-DECLARED, and nothing downstream charges
@@ -2964,7 +3010,7 @@ impl Comp {
         // step is checked anyway (belt AND braces: the round-1 version
         // checked only the multiplications and panicked on `v + v/2`).
         if size > WARP_CTX_BACKING_MAX {
-            self.wbo_diag_once(ctx_pub, conn, "size-cap", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_SIZE_CAP, "size-cap", 0, format, w, h, last_level, size);
             return false;
         }
         let px = (w as u64)
@@ -2982,7 +3028,7 @@ impl Comp {
             None => WARP_CTX_BACKING_MAX, // geometry alone is unbounded; the cap rules
         };
         if size > geom_max {
-            self.wbo_diag_once(ctx_pub, conn, "geometry", geom_max as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_GEOMETRY, "geometry", geom_max as i64, format, w, h, last_level, size);
             return false;
         }
         // The c-borrowing checks compute into locals first so the failure
@@ -2990,7 +3036,10 @@ impl Comp {
         let (byte_fail, byte_live, count_fail, no_mint, already_built, dev_ctx) = {
             let c = match self.wctx(ctx_pub, conn) {
                 Some(c) => c,
-                None => return false,
+                None => {
+                    self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_CTX_GONE, "ctx-gone", 0, format, w, h, last_level, size);
+                    return false;
+                }
             };
             // Saturating, not `+` (round-2 F1's second witness): `live` sums
             // client-chosen sizes and the sum itself must never panic.
@@ -3027,26 +3076,30 @@ impl Comp {
             )
         };
         if byte_fail {
-            self.wbo_diag_once(ctx_pub, conn, "byte-cap", byte_live as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_BYTE_CAP, "byte-cap", byte_live as i64, format, w, h, last_level, size);
             return false;
         }
         if count_fail {
-            self.wbo_diag_once(ctx_pub, conn, "count-cap", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_COUNT_CAP, "count-cap", 0, format, w, h, last_level, size);
             return false;
         }
         if no_mint {
-            self.wbo_diag_once(ctx_pub, conn, "no-mint-record", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_NO_MINT, "no-mint-record", 0, format, w, h, last_level, size);
             return false;
         }
-        // Already built? create3d is once per BO -- benign, no diagnostic.
+        // Already built? create3d is once per BO -- benign, but SAY so:
+        // this was the one silent refusal arm, and a silent arm is where
+        // the #198 hunt lost a session to a contradiction it could not
+        // name (client saw a refusal, server named nothing).
         if already_built {
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_ALREADY_BUILT, "already-built", 0, format, w, h, last_level, size);
             return false;
         }
 
         let fd =
             unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
         if fd < 0 {
-            self.wbo_diag_once(ctx_pub, conn, "dma-create", fd, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_CREATE, "dma-create", fd, format, w, h, last_level, size);
             return false;
         }
         let va = self.weave_va_next;
@@ -3054,7 +3107,7 @@ impl Comp {
         let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
         if pa < 0 {
             unsafe { t_close(fd) };
-            self.wbo_diag_once(ctx_pub, conn, "dma-map", pa, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DMA_MAP, "dma-map", pa, format, w, h, last_level, size);
             return false;
         }
 
@@ -3086,17 +3139,17 @@ impl Comp {
             .is_err()
         {
             unwind(&mut self.gpu, 0, res_id);
-            self.wbo_diag_once(ctx_pub, conn, "dev-create", target as i64, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_CREATE, "dev-create", target as i64, format, w, h, last_level, size);
             return false;
         }
         if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
             unwind(&mut self.gpu, 1, res_id);
-            self.wbo_diag_once(ctx_pub, conn, "dev-attach-ctx", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_CTX, "dev-attach-ctx", 0, format, w, h, last_level, size);
             return false;
         }
         if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
             unwind(&mut self.gpu, 2, res_id);
-            self.wbo_diag_once(ctx_pub, conn, "dev-attach-backing", 0, format, w, h, last_level, size);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_DEV_ATTACH_BACKING, "dev-attach-backing", 0, format, w, h, last_level, size);
             return false;
         }
 
@@ -4667,6 +4720,16 @@ impl Conn {
                                 live, peak, live_b, peak_b
                             ),
                         );
+                        // The #198-hunt storm scale: the one-shots name only
+                        // the FIRST refusal per family; this counts them all.
+                        // Appended LAST so the client-critical keys
+                        // (fence-signaled) stay inside a 255-byte snapshot.
+                        let refused =
+                            comp.wctx(id, self.conn_id).map_or(0, |c| c.create_refused);
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!("create-refused {}\n", refused),
+                        );
                     }
                     self.read_str(tag, &s, a.offset, cap)
                 }
@@ -5235,9 +5298,28 @@ impl Conn {
                 // the parse/OPNOTSUPP arms that never reach it consume the
                 // mint too; the helper's own guards make the benign
                 // already-built refusal (and a foreign conn's) a no-op.
+                let ctx_pub = comp.wbo(id, self.conn_id).map(|(c, _)| c.pub_id);
                 let r = self.wbo_ctl_create3d(comp, id, it);
-                if r.is_err() {
+                if let Err(e) = r {
                     comp.wbo_unmint_refused(id, self.conn_id);
+                    // The #198-hunt accounting: EVERY refusal family passes
+                    // this chokepoint, so the census counter lives here,
+                    // and the families that never reach wbo_create's own
+                    // arms name themselves (E_IO already named its arm
+                    // in there; naming it again would double-report).
+                    if let Some(cp) = ctx_pub {
+                        if let Some(c) = comp.wctx_mut(cp, self.conn_id) {
+                            c.create_refused += 1;
+                        }
+                    }
+                    let cp = ctx_pub.unwrap_or(0);
+                    if e == p9::E_INVAL {
+                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_PARSE, "ctl-parse", data.len() as i64, 0, 0, 0, 0, 0);
+                    } else if e == p9::E_NOENT {
+                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NO_RECORD, "ctl-no-record", id as i64, 0, 0, 0, 0, 0);
+                    } else if e == p9::E_OPNOTSUPP {
+                        comp.wbo_diag_once(cp, self.conn_id, Comp::WDIAG_CTL_NOT_VIRGL, "ctl-not-virgl", 0, 0, 0, 0, 0, 0);
+                    }
                 }
                 r
             }
