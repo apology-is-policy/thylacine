@@ -925,11 +925,15 @@ Working fixtures + logs in `~/warp/`.
 - SD-card I/O is the bottleneck — FS-round-trip-heavy guest work (go builds)
   dominates wall clock; budget bounds off the ~210 s banner, not TCG numbers.
 - The Pi's `build/` holds the **certified artifact set of the last sync**
-  (md5-stable). It has twice served as the bit-exact restore source after a
-  local bake clobbered the fixtures: reverse-sync (`ssh thyla-pi 'gzip -1 -c
+  (md5-stable). It has served as the bit-exact restore source after a local
+  bake clobbered the fixtures: reverse-sync (`ssh thyla-pi 'gzip -1 -c
   .../pool.img' | gunzip | dd of=... conv=sparse bs=1m`) + md5 both sides.
 - Artifacts pair cryptographically: `pool.img` + the key-bearing `ramfs.cpio`
-  ship TOGETHER or the guest gets `STM_EBADTAG`.
+  ship TOGETHER or the guest gets `STM_EBADTAG` (stratumd `rc=-201` ->
+  `EXTINCTION: joey exited non-zero`). **A reverse-sync recovery is only valid
+  if you sync BOTH and DO NOT rebuild** -- a rebuilt ramfs carries a fresh key
+  that no longer matches a reverse-synced pool. If a real code change forces a
+  rebuild, re-bake BOTH paired with `THYLACINE_MKFS_PRESERVE=0`, never `=1`.
 
 ---
 
