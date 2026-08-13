@@ -113,7 +113,16 @@ pub const MAX_CONNS: usize = 8;
 /// console renderer) could not reconnect. The renderer's door is never
 /// closed by GPU clients now.
 pub const MAX_WARP_CONNS: usize = 4;
-const MAX_FIDS: usize = 32;
+/// Sized for GL-scale connections, not the text protocol the original 32
+/// was chosen for: a warp client holds ONE OPEN FID PER LIVE BO MAPPING
+/// (the map fid's clunk is what drops the mapping, I-7), so a Quake-class
+/// texture set needs hundreds of live fids on one conn. At 32 the table
+/// capped a GL ctx at ~28 live textures -- every later walk refused
+/// E_NOMEM at Twalk, which the Mesa client saw as create3d/open failures
+/// (the #198 storm: bo-peak 26, deterministic first refusal, no server-
+/// side warp diagnostic, because the refusal never reached the warp
+/// dispatch). ~24 B/slot inline in Conn: 512 x 8 conns ~= 100 KiB.
+const MAX_FIDS: usize = 512;
 pub const SRV_MSIZE: u32 = 32768;
 const SRV_MSIZE_USIZE: usize = SRV_MSIZE as usize;
 
@@ -590,8 +599,17 @@ pub struct Comp {
     conn_seq: u64,
     /// The ctx-less half of the create3d refusal one-shots (WDIAG_* bits):
     /// parse/no-record/OPNOTSUPP arms fire before a ctx resolves, and the
-    /// per-ctx latch cannot carry them (the #198 hunt's blind spot).
+    /// per-ctx latch cannot carry them (the #198 hunt's blind spot). The
+    /// mask is comp-global (any conn can spend a bit for the daemon's
+    /// life), so it is EXPOSED in the global warp ctl (`diag-noctx-arms`)
+    /// -- a spent latch must at least be visible (audit F4).
     warp_diag_noctx_arms: u32,
+    /// Refusals no per-ctx counter could take (the record never resolved:
+    /// E_NOENT always lands here, E_INVAL/E_OPNOTSUPP when the bo id is
+    /// dead). Global-ctl twin of the per-ctx `create-refused` -- without
+    /// it a post-#218 retry storm against consumed records is census-
+    /// invisible (audit F3, the #210 two-ledgers shape).
+    warp_create_refused_noctx: u64,
     /// GPU resource ids are PER-GENERATION (a reweave mints a fresh one);
     /// pre-incremented, so the first id is SCREEN_RES + 1.
     res_seq: u32,
@@ -842,6 +860,7 @@ impl Comp {
             gen_seq: 0,
             conn_seq: 0,
             warp_diag_noctx_arms: 0,
+            warp_create_refused_noctx: 0,
             res_seq: SCREEN_RES,
             layout: Layout::new(),
             screen: None,
@@ -2900,11 +2919,6 @@ impl Comp {
         Some(pub_id)
     }
 
-    /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
-    /// failing arm + its parameters. Gated on the ctx latch, never the
-    /// counting (#95), so a per-texture failure loop cannot storm the
-    /// console it is diagnosing.
-    #[allow(clippy::too_many_arguments)]
     /// WDIAG_* arm indices for the create3d-refusal one-shot bitmasks.
     /// One bit per refusal family so every arm names itself exactly once
     /// per ctx (the per-ctx-once predecessor could name only ONE family
@@ -2925,7 +2939,13 @@ impl Comp {
     const WDIAG_CTL_PARSE: u32 = 13;
     const WDIAG_CTL_NO_RECORD: u32 = 14;
     const WDIAG_CTL_NOT_VIRGL: u32 = 15;
+    const WDIAG_RECORD_VANISHED: u32 = 16;
 
+    /// #218 one-shot diagnostic: the FIRST refused build per ctx names the
+    /// failing arm + its parameters. Gated on the ctx latch, never the
+    /// counting (#95), so a per-texture failure loop cannot storm the
+    /// console it is diagnosing.
+    #[allow(clippy::too_many_arguments)]
     fn wbo_diag_once(
         &mut self,
         ctx_pub: u32,
@@ -3172,8 +3192,10 @@ impl Comp {
             // Unreachable (single-threaded dispatch; nothing between the
             // no_mint check and this write-back touches `bos`) -- but a
             // record that vanished must not strand the device state just
-            // built for it.
+            // built for it, and must NAME itself (audit F2: this was the
+            // one refusal arm still silent).
             unwind(&mut self.gpu, 3, res_id);
+            self.wbo_diag_once(ctx_pub, conn, Self::WDIAG_RECORD_VANISHED, "record-vanished", 0, format, w, h, last_level, size);
             return false;
         }
         // #204 census: track the backed high-water on BOTH axes -- count
@@ -3888,6 +3910,10 @@ pub struct Conn {
     version_done: bool,
     msize: u32,
     fids: [Option<Fid>; MAX_FIDS],
+    /// One-shot: the fid table filled (walks now refuse E_NOMEM). The #198
+    /// hunt burned three instrumented runs because this refusal was the
+    /// ONE silent layer between the client's diag and the warp dispatch's.
+    fid_full_said: bool,
     in_buf: Vec<u8>,
     out_buf: Vec<u8>,
     defer: bool,
@@ -3954,6 +3980,7 @@ impl Conn {
             version_done: false,
             msize: SRV_MSIZE,
             fids: [NO_FID; MAX_FIDS],
+            fid_full_said: false,
             in_buf: Vec::new(),
             out_buf: Vec::new(),
             defer: false,
@@ -3991,6 +4018,16 @@ impl Conn {
                 true
             }
             None => false,
+        }
+    }
+
+    fn fid_full_diag_once(&mut self) {
+        if !self.fid_full_said {
+            self.fid_full_said = true;
+            say!(
+                "tapestryd: 9p fid table FULL (cap {}) conn={} -- walks refuse E_NOMEM",
+                MAX_FIDS, self.conn_id
+            );
         }
     }
 
@@ -4189,6 +4226,7 @@ impl Conn {
         }
         let root = self.root;
         if !self.fid_set(a.fid, root, 0) {
+            self.fid_full_diag_once();
             return self.err(tag, p9::E_NOMEM);
         }
         let q = self.qid_of(root);
@@ -4374,6 +4412,7 @@ impl Conn {
         }
         if nwalked == a.nwname as usize {
             if !self.fid_set(a.newfid, cur, cur_gen) {
+                self.fid_full_diag_once();
                 return self.err(tag, p9::E_NOMEM);
             }
         } else if nwalked == 0 && a.nwname > 0 {
@@ -4569,6 +4608,17 @@ impl Conn {
             let _ = core::fmt::write(
                 &mut s,
                 format_args!("bo-bytes-peak {}\n", comp.warp_bo_bytes_peak),
+            );
+            // Audit F3/F4: the ctx-less refusal ledger + the comp-global
+            // one-shot mask -- both are spendable/bumpable by ANY conn, so
+            // both must be READABLE or their state is invisible exactly
+            // when the hunt needs it.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "create-refused-noctx {}\ndiag-noctx-arms {}\n",
+                    comp.warp_create_refused_noctx, comp.warp_diag_noctx_arms
+                ),
             );
             // #175: the anti-vacuous counter. A prover that submits and
             // then abandons is racing the drain; if the completion won,
@@ -5303,14 +5353,23 @@ impl Conn {
                 if let Err(e) = r {
                     comp.wbo_unmint_refused(id, self.conn_id);
                     // The #198-hunt accounting: EVERY refusal family passes
-                    // this chokepoint, so the census counter lives here,
-                    // and the families that never reach wbo_create's own
-                    // arms name themselves (E_IO already named its arm
-                    // in there; naming it again would double-report).
+                    // this chokepoint. A refusal whose record resolved
+                    // counts on ITS ctx; one whose record did not (E_NOENT
+                    // always; E_INVAL/E_OPNOTSUPP on a dead id) counts on
+                    // the comp-level twin -- per-ctx alone would make a
+                    // retry storm against consumed records census-invisible
+                    // (audit F3). The families that never reach wbo_create
+                    // name themselves below (E_IO already named its arm in
+                    // there; naming it again would double-report).
+                    let mut counted = false;
                     if let Some(cp) = ctx_pub {
                         if let Some(c) = comp.wctx_mut(cp, self.conn_id) {
                             c.create_refused += 1;
+                            counted = true;
                         }
+                    }
+                    if !counted {
+                        comp.warp_create_refused_noctx += 1;
                     }
                     let cp = ctx_pub.unwrap_or(0);
                     if e == p9::E_INVAL {
