@@ -647,14 +647,14 @@ boot shape**, flipping two CMake options in lockstep:
   USER_CREATE/AUTH/RECOVER/login E2E ladder, the Clade/Go on-device toolchain
   gates, the whole `/net` probe run) compile out.
 
-  > **But the WARDEN is inside the gate, and it is not a probe (#230).** With
-  > probes off there is no driver supervisor — so no drivers, **no network**
-  > (netd is warden-spawned) and no compositor. A lean boot says so itself:
-  > `joey: /srv/tapestry absent (no GPU environment); skipping`, and its daemon
-  > registry lists only `stratumd corvus ptyfs diorama`. Whether that is the
-  > intended v1.0 ship shape is an open design question (#230); this paragraph
-  > states what the artifact DOES, which is not what this section claimed
-  > before #228 measured it.
+  > **The WARDEN is NOT among them, since #230.** It used to be — it entered at
+  > 5c as the bind-loop *proof* and stayed in the ladder when netd and tapestryd
+  > were hung off it — so the lean image had no drivers, no network and no
+  > compositor at all. It is now unconditional, and only the two FIXTURE
+  > manifests (`menagerie-probe`, `crash-probe`) are probe-gated, via the
+  > `--with-fixtures` argv joey passes only from its ladder. A lean boot now
+  > reports `warden: 3 bound, 3 up, 0 gave up, 0 failed` and brings up `/net`,
+  > `/dev/tapestry` and the rendered console.
 
 **This shape did not build at all between some earlier chunk and 2026-08-12
 (#228)**, because probe blocks were appended after their gate's `#endif` and
@@ -666,12 +666,28 @@ full production build too. When appending a probe, put it INSIDE the gate — th
 two restored regions carry a comment saying exactly that.
 
 `tools/test.sh` understands the shape as of #228: it reads joey's own
-`ARC-GATES not-built` line and reports the **G-4 console gate** and the
-**debug-probe hwwatch** check as NOT APPLICABLE rather than failing them (both
-are probe-dependent, and neither is built here). It keys on the build-shape
-report, never on the absence of tapestryd — that absence is also what a real
-tapestryd regression prints, and skipping on it would convert a failure into a
-skip.
+`ARC-GATES not-built` line and reports the **debug-probe hwwatch** check as NOT
+APPLICABLE rather than failing it (debug-probe is a probe, so the marker can
+never appear). It keys on the build-shape report, never on the absence of the
+thing a gate looks for — that absence is also what the corresponding regression
+prints, and skipping on it would convert a failure into a skip.
+
+**The G-4 console gate is NOT skipped** — #230 briefly did skip it, on the
+reasoning that the lean shape had no compositor, but that was the defect and
+not the shape. With the warden unconditional the lean image renders a console
+like any other, and the gate runs against it.
+
+**Two QMP monitors (#230).** A QMP chardev in `server,nowait` serves ONE client
+at a time, and `tools/qmp-inject-key.py` connects at launch and holds the
+monitor for the whole boot (deliberately, #362 — it pays connect+capabilities
+before the guest needs it). That is harmless whenever the injector finishes
+early, and fatal when its `AWAITING_QMP_KEY` sentinel never comes: the lean
+shape does not build that probe, so the G-4 screendump got
+`ConnectionRefusedError` and the gate blamed the renderer for a socket it could
+not open. `run-vm.sh` therefore opens a second monitor at
+`build/qmp-gate.sock` (`THYLACINE_QMP_SOCK2`) and the gate uses that one, so
+the two consumers are independent rather than ordering-dependent. The G-4 FAIL
+arm now also prints the checker's own numbers instead of guessing at causes.
 
 Measured: the production shape boots to `Thylacine boot OK` in **~21.5 ms**
 (TCG) — vs ~525 ms for the dev build — well under the 500 ms `VISION.md §4.5`

@@ -5571,25 +5571,54 @@ int main(void) {
     // ARP round-trips run inside the warden's bind loop below, each narrowed to
     // its conferred allowance, not as broad-CAP_HW_CREATE boot probes.
 
+#endif /* THYLA_BOOT_PROBES -- the warden is NOT a probe; see below (#230) */
+
     // === /warden -- Menagerie build-arc 5c (MENAGERIE.md 4-6, I-34) ===
     // The hardware broker reads the devhw /hw DTB inventory, matches each node
     // against its built-in bind database, intersects the node's resources with
     // the matched manifest (the auditable I-34 grant), and spawns each matched
-    // driver with exactly that narrowed allowance. 5c proves the loop on the
-    // QEMU-virt pl061 GPIO -> menagerie-probe, which maps its granted MMIO and
-    // confirms an out-of-grant create is rejected. Runs PRE-pivot so
-    // /menagerie-probe resolves in devramfs by name. CAP_HW_CREATE: the warden
-    // confers a narrowed slice of it (+ a narrowed allowance) on each driver.
+    // driver with exactly that narrowed allowance. Runs PRE-pivot so the driver
+    // binaries resolve in devramfs by name. CAP_HW_CREATE: the warden confers a
+    // narrowed slice of it (+ a narrowed allowance) on each driver.
     // Exit 0 = every bound driver came up (or nothing matched); 1 FAIL.
+    //
+    // #230: UNCONDITIONAL. This spawn sat inside the probe ladder from 5c, when
+    // the warden really was just the bind-loop proof -- and stayed there when
+    // netd (a day later) and tapestryd made it the thing that brings up the
+    // network and the display. The lean production image therefore had no
+    // drivers at all: no netd, so no /net; no tapestryd, so no GPU and no input
+    // (its manifest gathers virtio-pci:16 AND :18). The production shape was
+    // defined five days BEFORE the warden existed, so it never decided to
+    // exclude it. A hardware broker is not a test.
+    //
+    // What IS a test is the fixture half of the bind database -- menagerie-probe
+    // (the 5c grant proof, which binds a pl061 QEMU-virt really provides) and
+    // crash-probe (the 5e-2 restart loop). Those stay opt-in: only a probes
+    // build passes --with-fixtures, so a shipped box binds real hardware only.
     {
-        const char wd_name[] = "warden";
+        static const char wd_name[] = "warden";
+#if THYLA_BOOT_PROBES
+        static const char   wd_argv[] = "warden\0--with-fixtures";
+        const unsigned int  wd_argc   = 2;
+#else
+        static const char   wd_argv[] = "warden";
+        const unsigned int  wd_argc   = 1;
+#endif
         // net-2b-2: grant the warden MAY_POST_SERVICE so it can confer the bit
         // on a persistent driver that serves a namespace (netd posts /srv/net).
         // joey is console-attached here (pre-relinquish) AND holds the bit, so
         // the kernel grant gate passes; the warden then re-confers it one hop to
         // netd (the #827b delegation). No fds (the warden runs with none).
-        long wd_pid = t_spawn_with_perms(wd_name, sizeof(wd_name) - 1, NULL, 0,
-                                         T_CAP_HW_CREATE, T_SPAWN_PERM_MAY_POST_SERVICE);
+        struct t_sys_spawn_args wreq = {
+            .name_va       = (unsigned long)wd_name,
+            .argv_data_va  = (unsigned long)wd_argv,
+            .name_len      = sizeof(wd_name) - 1,
+            .argv_data_len = sizeof(wd_argv),
+            .argc          = wd_argc,
+            .cap_mask      = T_CAP_HW_CREATE,
+            .perm_flags    = T_SPAWN_PERM_MAY_POST_SERVICE,
+        };
+        long wd_pid = t_spawn_full_argv(&wreq);
         if (wd_pid <= 0) {
             t_putstr("joey: t_spawn(\"warden\") FAILED\n");
             return 1;
@@ -5597,11 +5626,17 @@ int main(void) {
         int wd_status = -1;
         long wd_reaped = t_wait_pid_for((int)wd_pid, 0, &wd_status);
         if (wd_reaped != wd_pid || wd_status != 0) {
-            t_putstr("joey: /warden FAILED (5c bind-loop: pl061 -> menagerie-probe)\n");
+            // Structural only: the warden returns 1 when it could not SPAWN a
+            // bound driver (a missing binary), never for an unmatched node or a
+            // driver that crashed out its restarts. Boot-fatal in both shapes --
+            // an image whose netd binary is absent is a broken image.
+            t_putstr("joey: /warden FAILED (bind loop: discover -> grant -> spawn)\n");
             return 1;
         }
-        t_putstr("joey: warden ok (5c Menagerie bind-loop: discover -> grant -> spawn narrowed)\n");
+        t_putstr("joey: warden ok (Menagerie bind-loop: discover -> grant -> spawn narrowed)\n");
     }
+
+#if THYLA_BOOT_PROBES
 
     // === /sbin/corvus spawn + E2E ===
     // Moved to do_corvus_bringup() (defined above main) and called
