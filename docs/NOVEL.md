@@ -95,6 +95,31 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   tensioned lengthwise threads the [[Weft]] is drawn through, and, independently,
   the SIMT execution group every GPU programmer already knows by that word.)
 
+- **Composition without buffer sharing** (`docs/GPU-DESIGN.md` §4.5; captured
+  2026-08-13 at the #237 design pass). Every modern compositor spends a large
+  part of its protocol surface on **getting a buffer from a client into the
+  compositor**: Wayland negotiates `linux-dmabuf` with format modifiers and then
+  explicit sync via `drm_syncobj`; Fuchsia's sysmem does the sharper version,
+  negotiating format/alignment *constraints across participants before
+  allocation*. **That entire problem is an artifact of the two parties being
+  mutually distrusting processes holding separate GPU contexts.** In Thylacine
+  the compositor IS the GPU driver and the sole `/dev/warp` server, so a
+  client's render target and the screen already live behind one device owned by
+  one trusted process: composition is an **internal reference**, not a handover.
+  There is no import, no modifier negotiation, and no buffer-passing protocol —
+  the compositor simply names the client's resource as the source of a blit.
+  The access control is the warp context, which is already namespace-gated
+  (I-1/I-28), so the capability question is answered by the Plan 9 idiom rather
+  than by a new sharing protocol. The heritage reading is exact at the layer
+  that matters: **Plan 9's devdraw has the server own the images and clients
+  issue draw ops, which inverts Wayland's client-owned-buffer handover.** The
+  strong form does not survive contact with GL — a Mesa pipeline cannot be
+  expressed as devdraw ops, so a client must own the texture it renders into —
+  but the *composition* layer inverts exactly, and that is where the protocol
+  cost lives. Worth recording even though v1.0 exercises only the virgl half:
+  the claim is that a single-trusted-server GPU stack makes an entire category
+  of compositor protocol unnecessary rather than merely cheaper.
+
 - **Loom — a shared-memory ring transport for 9P** (`docs/LOOM.md`). The
   inversion of Linux's io_uring: rather than import io_uring's opcode zoo, expose
   the existing pipelined 9P client (Angle #3) to userspace via a Burrow-backed

@@ -365,6 +365,148 @@ device). Our `t_dma_create` allocations are already contiguous, so the weave is
 natively the right object on that side; what the seam must carry is the
 **import** direction.
 
+### 4.5 GPU composition — the Warp-C arc (designed 2026-08-13; **RESERVED**, not yet built)
+
+§4.4 above records GPU composition as a follow-on "to be built once the direct
+path is proven." **That precondition is now discharged**: Warp-4 built the
+direct path and #215 priced it. This subsection is the design; it is
+**RESERVED** in the I-20/I-40 staged sense — the mechanism is fixed, two
+premises (§4.5.4) are gating, and it becomes ENFORCED at the sub-chunk that
+lands each.
+
+#### 4.5.1 What it costs today, measured
+
+At 1280×800 the composed present is **39.3 ms/frame against the direct path's
+22.5 ms — 43% overhead, a measured 1.75× (25.4 → 44.4 fps)**, priced two
+independent ways agreeing to ~2% (#215; `docs/reference/149-warp.md`). The
+overhead is not one copy but **three passes over the frame**:
+`transfer_from_3d_sync` (host→guest, ~4 MB) → `blit_composed_pixels` (a CPU
+pass) → `screen_push` (guest→host, ~4 MB). And because direct scanout demands
+ONE visible surface AND ONE visible leaf AND an exactly display-sized surface
+(`server.rs:1535-1552`), **that 1.75× is the standing cost of *windowing* a GL
+client** — the normal case, not the exceptional one.
+
+#### 4.5.2 The mechanism
+
+Make the screen a **host-side 3D resource owned by a compositor-owned virgl
+context**, and compose into it with GPU blits.
+
+Per frame: one `VIRGL_CCMD_BLIT` per visible surface, src = the client's 3D
+resource, dst = the screen resource, dst box = the pane content rect; all
+blits for a frame in ONE fenced `submit_3d`; on fence completion
+`SET_SCANOUT`(screen) + `RESOURCE_FLUSH`. **Per-frame guest↔host pixel traffic
+becomes zero.**
+
+The load-bearing feasibility fact is already proven by shipping code: the
+direct path binds a *client's* host-side 3D resource as the scanout
+(`server.rs:5824`, `set_scanout(g.res_id, w, h)`), so a compositor-owned 3D
+screen resource is the same operation redirected to a resource we own — not a
+new capability. Likewise tapestryd already issues GPU commands on a *client's*
+context (the readback uses `g.dev_ctx`), so authoring commands against a
+foreign context is existing practice, not a new authority.
+
+Three consequences beyond the headline number:
+
+- **Chrome stops being a per-frame cost.** Borders, strips and console text
+  become textures uploaded by `TRANSFER_TO_HOST_3D` **on damage**, not
+  re-pushed every frame as `screen_flush_full`/`screen_push` do today.
+- **Scaling becomes free.** `VIRGL_CCMD_BLIT` carries a filter and both dst
+  and src boxes (21 dwords; `DST_RES_HANDLE`@4, `SRC_RES_HANDLE`@13), so it
+  scales and format-converts. A surface need no longer be pane-sized — today
+  that requires a CPU scale.
+- **N GL clients composite at full speed.** Today each additional GL client
+  adds its own full-frame readback.
+
+#### 4.5.3 Why this is ONE model and not two
+
+Everything visible becomes a texture; composition becomes an ordered list of
+blits into a compositor-owned target. Chrome, console text, software surfaces
+and GL surfaces then differ **only in how their texture is filled** (CPU
+upload on damage vs client-side rendering), never in how they are composed.
+That is what dissolves the mixed CPU-chrome / GPU-surface problem instead of
+special-casing it, and it is the property Venus must later join rather than
+bypass (§4.5.5).
+
+#### 4.5.4 The two gating premises — verify BEFORE structural work
+
+Neither is established. Both are cheap and decisive on thyla-pi (real V3D +
+KVM), and the arc's first sub-chunk is exactly these probes.
+
+**P1 — a blit must be able to read a resource created by another context.**
+§4.4 states resource ids are device-global, which is a strong prior, and
+`ctx_attach_resource` is presumably the access-granting step. If P1 is false
+the design does not stand. **Trap: a blit that silently no-ops presents as a
+black screen, not an error** — so the probe MUST assert *pixels*, with a
+positive control (blit a known-nonzero source into a known-zero destination
+and require the destination to change), never merely "no error returned".
+
+**P2 — cross-context ordering: does the blit observe the client's finished
+frame?** The client renders on its context, the compositor blits on its own;
+virglrenderer maps each guest context to a host GL context, and in-order
+controlq dequeue orders the *commands* but not GL execution across two host
+contexts sharing an object. Today the hazard is masked because
+`transfer_from_3d_sync` must produce bytes and so forces the sync as a side
+effect; **a blit has no such side effect, so the hazard goes live exactly when
+the readback is removed.** The failure mode is a torn or stale frame — an I-40
+tearing-freedom violation, i.e. a soundness question, not a perf detail. This
+is where the spec work concentrates.
+
+#### 4.5.5 Venus — the model generalizes, the mechanism must be extended (F2 vote, 2026-08-13)
+
+The composition **model** is capset-neutral. The composition **mechanism** is
+not: `VIRGL_CCMD_BLIT` is a virgl command interpreted by a virgl context,
+while a Venus client's resource belongs to a Venus context, so **one
+compositor context cannot blit across capsets.** The capset-neutral escape is
+blob/dmabuf sharing — and §4.4 already notes Venus chains
+`VkExportMemoryAllocateInfo` unconditionally, so its resources are always
+dmabuf-exportable.
+
+**Decided (user vote 2026-08-13): virgl-first; Venus at Warp-6** — consistent
+with F2, which already sequences blobs "with Venus at Warp-6". Rationale:
+Venus is a genuine SEAM and not a dependency of this chunk (composition works
+fully without it), so the chunk-completeness rule does not force it; and #166
+means hostmem is inert under HVF on the M2 dev host, so a blob-first design
+could not be exercised on the primary dev loop.
+
+**The obligation this vote carries is binding on the arc:** the composition
+model must stay free of virgl-specific assumptions, and the blob-mediated blit
+must be named as the capset-neutral generalization, **so that Warp-6 extends
+the mechanism without reshaping the model.** A Warp-C design that would force
+a second compositor path at Warp-6 has failed this requirement.
+
+#### 4.5.6 Relationship to I-40 — an obligation discharged, not amended
+
+**I-40 does not mandate synchrony.** It mandates quiesce-before-retire
+(`ServerRelease` in `specs/tapestry_present.tla`); synchrony is merely the
+stage-0 mechanism that discharges it "BY CONSTRUCTION". Both the §28 I-40 row
+and the tapestryd audit-trigger row pre-record the successor's obligation in
+terms — *"a pipelined controlq, G-6+, must implement a real drain before
+touching retire"*. Warp-C is therefore the anticipated evolution occupying a
+slot scripture cut for it, and **the arc owes a real drain plus a
+demonstration that it discharges `ServerRelease` and `NoStaleMap` as strongly
+as synchrony did — not an amendment to I-40.** `tapestry_present.tla` is
+model-first and spec-first is RE-ENABLED on this surface, so the model is
+extended BEFORE the impl, with a `drain_skipped` counterexample cfg and (per
+P2) a cross-context-ordering counterexample.
+
+#### 4.5.7 Prior art
+
+The pattern is **Fuchsia's `DisplayCompositor`** (prefer direct scanout, fall
+back to a renderer that composes) — already selected by §4.4, and our
+Direct/Composed split *is* that pattern with the fallback's GPU half unbuilt.
+SurfaceFlinger + HWC is the per-layer generalization (delegate what you can to
+overlay planes, GPU-compose the rest); it is not reachable today because
+virtio-gpu's multiple scanouts are displays, not overlay planes.
+
+**What we deliberately do NOT inherit is the buffer-sharing half.** Wayland
+(`linux-dmabuf` + `drm_syncobj`) and Fuchsia (sysmem buffer collections, the
+sharper form) both exist to negotiate allocation and import between mutually
+distrusting processes holding separate GPU contexts. **Thylacine has no such
+negotiation to do:** the compositor IS the GPU driver and the sole
+`/dev/warp` server, both resources already live behind one device that one
+trusted process owns, and the capability is the warp ctx — already
+namespace-gated (I-1/I-28). See NOVEL.md for the angle.
+
 ---
 
 ## 5. Placement — where the server lives, per backend
@@ -577,6 +719,18 @@ front-loads the one kernel delta whose shape we most want informed by a working
 GL path. The `PciError::BarTooLarge` bug gets **fixed** in chunk 1 regardless —
 it is a live defect (§3), enqueued as its own task.
 
+**RE-AFFIRMED for Warp-C (user vote 2026-08-13).** GPU composition (§4.5)
+re-posed this fork, because a capset-neutral (blob/dmabuf) sharing substrate is
+what would let ONE compositor mechanism span virgl and Venus — a virgl context
+cannot blit a Venus resource (§4.5.5). The vote is again **virgl-first, blobs
+with Venus at Warp-6**: Venus is a genuine SEAM and not a dependency of the
+composition chunk (composition works fully without it), so the
+chunk-completeness rule does not force it; and **#166 means hostmem is inert
+under HVF `-cpu host` on the M2 dev host**, so a blob-first Warp-C could not be
+exercised on the primary dev loop at all. The binding obligation the vote
+carries is recorded at §4.5.5: Warp-C's model must stay capset-neutral so
+Warp-6 extends the mechanism without reshaping the model.
+
 ### F3 — the v3d isolation posture, and I-45's ambition
 
 | | Option | Consequence |
@@ -657,7 +811,8 @@ scope shifts with them.
 | **Warp-3** | `virgl_thylacine_winsys` (18 slots) + the client library; unmodified Mesa virgl driver — **LANDED** (3a `ef6af62c` seam capacity 128 + the `fence-signaled`/`bo-cap` ctl promotion; 3b `8b8ca40d` fork patch 0006: the winsys + `warp_client` + `virgl-prove`; 3c `eb62f97c` the builder cycle; `c64ddbe4` the #191 build-id cacheless fallback, port finding 4; as-built `docs/reference/149-warp.md`) | a triangle, in-guest, on the GPU — **met: `GL_RENDERER = virgl (Apple M2 (Compat))`, via `tools/warp-host.sh tri`** |
 | **Warp-4** | present integration: `SET_SCANOUT` of a 3D resource (Direct), readback fallback (Composed) — **LANDED** (4a+4b `ec2bd8ad` the mutual-adoption protocol, both halves + fork patch 0007; 4c the gate: the launcher auto-detect + `tools/warp-host.sh quake` — both arms in one run, the `scanout direct N GL res R` switch live on thyla-gl; as-built `docs/reference/149-warp.md` §Warp-4) | **GLQuake on virgl** — **measured: ~3 fps aggregate at 1280×800 (the mechanism gate is met). PREMISE CORRECTED 2026-08-10: the 192.8 anchor was macOS/HVF and does not transfer (its own Warp-1 row said so); the same-host llvmpipe band is 2.4–5.9 fps at 640×480, so ~3 fps at 3.3× the pixels sits INSIDE the software band — #196 now asks stall-vs-compute (the `decomp` verb: per-arm unpaced figures + qemu CPU attribution), not "why 20–25× under"**. Findings ledger: #195 (GL-host capture), #197 (console ^C owner-only), #198 (demo-end context break), #199 (caught notes never interrupt blocking syscalls) |
 | **Warp-5** | the focused audit; I-45 enumerated; reference docs | Fable-5-max round closed |
-| **Warp-6** | Venus: hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs | a Vulkan prover in-guest |
+| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass*; **C-1** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample cfg) BEFORE impl; **C-2** compositor ctx + 3D screen; **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path; **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
+| **Warp-6** | Venus: hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs — **now also owes the §4.5.5 generalization: the blob-mediated capset-neutral blit, extending Warp-C's mechanism without reshaping its model** | a Vulkan prover in-guest |
 | **Warp-7+** | RPi: the v3d leaf driver on the MENAGERIE substrate — own charter, F3's posture built in | own gate |
 
 Parallel and independent (the charter says so explicitly): **lavapipe** —
