@@ -583,6 +583,55 @@ after the #213 cap fix. **Resolved at #204**: the cap is 1024 (the
 read them after a real workload instead of re-guessing), so these
 figures are superseded by the post-#204 re-measure.
 
+### Where the hardware-GL frame actually goes (#215, 2026-08-13)
+
+Measured on **thyla-pi under KVM on real V3D 4.2.14.0** — not the TCG
+figures above, which the #204 fix superseded. Two independent methods,
+different lanes and different pacing modes, agree to ~2%.
+
+`glq-decomp gl`, unpaced, 1280×800, one boot, both arms swap-clean:
+
+| arm | fps | wall ms/frame | qemu CPU ms/frame |
+|---|---:|---:|---:|
+| composed | 25.4 (969 frames, 38.1 s) | 39.32 | 44.4 |
+| direct | **44.4** (969 frames, 21.8 s) | 22.50 | 30.8 |
+
+**The composed present path costs 16.8 ms of a 39.3 ms frame — 43% of
+the frame is spent getting the picture out, not drawing it.** Removing
+it is a *measured* **1.75×**, not an extrapolation: the direct arm ran
+at 44.4 fps.
+
+It is work, not a stall. Raw `%CPU` inverts the conclusion and must be
+normalised by frame rate first: composed spends **+16.8 ms wall and
++13.7 ms CPU** per frame, so 81% of the extra time is real CPU burn.
+Direct's higher raw `%CPU` (136.7 vs 112.9) only reflects it pushing
+1.75× more frames per second.
+
+The quarry resolution sweep (paced, all legs mode-witnessed) fits
+`hw-gl = 22.2 ms + 16.8 ns/px`, and the two terms land on the two arms:
+
+- direct frame time 22.50 ms ↔ fitted fixed term 22.24 ms (1.2% apart)
+- composed−direct 16.82 ms ↔ fitted pixel term at 1,024,000 px
+  (16.8 ns/px = 17.18 ms) (2.1% apart)
+
+So the sweep's apparent *resolution scaling was never fill or shading* —
+it is this readback, proportional to pixels because it copies ~4 MB every
+frame. That is also why hw-gl scaled much like the software rasterizer:
+both move pixels, neither was shading-bound. The frame pacer is
+exonerated at this resolution (the unpaced lane reproduces the paced
+quarry leg to the decimal, 38.1 s/25.4 fps vs 38.2 s/25.4 fps).
+
+The mechanism is explicit in `server.rs` ~5958: a composed GL present
+calls `transfer_from_3d_sync` to pull the adopted frame **host→guest**,
+`blit_composed_pixels` to compose it CPU-side, then pushes it back out —
+a full round trip per frame. The direct arm (~5823) instead binds the
+client's own 3D resource as the scanout, where "the frame is already
+host-side, so there is no guest transfer at all". Composition is what
+forces the round trip, and *anything else on screen forces composition*,
+so **composed is the common case**. The synchronous choice is deliberate
+and load-bearing — "synchronously, so the present stays one dispatch
+(the I-40 premise)" — so removing it is a design question, not a patch.
+
 Reading: the Composed-GL arm has **no per-frame stall** — it reaches the
 4-thread llvmpipe control's exact fps using 2.1× less CPU with ~2.3
 vCPUs idle. The bound is *serialized single-threaded guest work* (the
