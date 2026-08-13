@@ -354,6 +354,20 @@ size_t elf_read_interp(const void *blob, size_t size, char *out, size_t out_cap)
     out[0] = '\0';
     if (!blob || size < sizeof(struct Elf64_Ehdr)) return 0;
 
+    // The precondition elf_load enforces at R5-G F61, inherited here because
+    // D-4 promoted this from a private helper into a second PUBLIC parser of
+    // the same hostile bytes -- and inheriting the bounds without the alignment
+    // left the cast below undefined for an unaligned buffer (UBSan traps it;
+    // production codegen may assume alignment in LDP / vector loads).
+    //
+    // Note this one is unlike every other 0 here: those describe the DATA,
+    // whereas `blob` is the kernel's own buffer, so only a CALLER can trip it.
+    // It still answers 0 rather than shouting, to keep this file a pure parser
+    // with no console dependency -- the same reason elf_load returns
+    // ELF_LOAD_BAD_ALIGN instead of printing. A caller that trips it sees every
+    // dynamic binary read as static, and this comment is where they land.
+    if (((uintptr_t)blob) % _Alignof(struct Elf64_Ehdr) != 0) return 0;
+
     const u8 *bytes = (const u8 *)blob;
     const struct Elf64_Ehdr *eh = (const struct Elf64_Ehdr *)blob;
 
@@ -374,6 +388,15 @@ size_t elf_read_interp(const void *blob, size_t size, char *out, size_t out_cap)
     u64 ph_off   = eh->e_phoff;
     u64 ph_bytes = (u64)eh->e_phnum * (u64)sizeof(struct Elf64_Phdr);
     if (ph_off > size || ph_bytes > (u64)size - ph_off) return 0;
+
+    // elf_load's R5-G F62 guard, and here it is the ATTACKER-controlled half:
+    // `blob` above is ours, but e_phoff comes straight off the wire, so an odd
+    // one misaligns the Phdr cast below however well-aligned the buffer is.
+    // Both checks are needed -- neither implies the other. Absent, not an
+    // error: real linkers emit phoff == sizeof(Ehdr) == 64, so anything else
+    // is malformed, and "no interpreter" is already this walk's answer for
+    // malformed.
+    if (ph_off % _Alignof(struct Elf64_Phdr) != 0) return 0;
 
     const struct Elf64_Phdr *ph = (const struct Elf64_Phdr *)(bytes + ph_off);
     for (u16 i = 0; i < eh->e_phnum; i++) {

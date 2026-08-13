@@ -753,4 +753,79 @@ void test_elf_read_interp(void) {
     size = build_elf(flags, 1);
     TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, size, out, 0), 0ull,
         "a zero-capacity buffer is ABSENT");
+
+    // (9) #215 -- the two alignment guards elf_load has carried since R5-G
+    // F61/F62 and this walk did not, from the day D-4 promoted it into a second
+    // public parser of the same bytes.
+    //
+    // Both cases plant a WHOLLY VALID interpreter and differ from case (1) only
+    // in alignment, which is what makes them discriminate: on the pre-fix code
+    // each returns the path's length (the loads are merely undefined, and
+    // aarch64 happens to service them), so each assertion below FAILS. Verified
+    // red before the fix, not assumed -- an alignment test that passes either
+    // way would be the exact "assertion satisfiable by a broken system" shape.
+    {
+        static const char ld[] = "/lib/ld-musl-aarch64.so.1";
+
+        // (9a) A misaligned BUFFER. The blob is the kernel's own, so only a
+        // caller can produce this -- but the cast is undefined all the same.
+        size_t whole = plant_interp(ld, 0);
+        TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, whole,
+                                            out, sizeof(out)),
+            (u64)(sizeof(ld) - 1), "control: the aligned blob still reads");
+        {
+            static _Alignas(struct Elf64_Ehdr) u8 shifted[512];
+            size_t n = whole < sizeof(shifted) - 1 ? whole : sizeof(shifted) - 1;
+            for (size_t i = 0; i < n; i++) shifted[i + 1] = g_test_elf_blob[i];
+            TEST_EXPECT_EQ((u64)elf_read_interp(shifted + 1, n,
+                                                out, sizeof(out)), 0ull,
+                "#215: a misaligned blob is ABSENT, never a path off a UB cast");
+            TEST_EXPECT_EQ((u64)out[0], 0ull, "and leaves the buffer empty");
+        }
+
+        // (9b) An odd e_phoff -- the ATTACKER-controlled half. The buffer is
+        // perfectly aligned here; only the on-wire field moves, which is why
+        // (9a)'s guard cannot stand in for this one.
+        //
+        // Relocate the phdr table to a high offset rather than nudging it one
+        // byte in place. The first attempt did nudge it, and the sabotage run
+        // PASSED: build_elf hands back `at == phoff + span`, so plant_interp
+        // puts the interp string immediately after the table, and shifting the
+        // table up a byte overwrote the string's leading '/' with a Phdr's
+        // p_align high byte (zero) -- the walk then answered 0 through the
+        // EMPTY-INTERP arm and the assertion held with the guard removed.
+        //
+        // Hence the pair below. Relocating to an EVEN offset must still find
+        // the path; only the ODD one may answer absent. The even leg is what
+        // makes a 0 attributable to the alignment and to nothing else.
+        // The two destinations are far apart and copied one at a time. Writing
+        // both in one loop is what broke the second attempt: 1024+i and 1025+i
+        // overlap, so the even branch at i+1 clobbered the odd branch's byte
+        // from i, shifting the "odd" table by a whole element into garbage --
+        // which again answered 0 for a reason that was not the alignment.
+        {
+            const u64 span = (u64)sizeof(struct Elf64_Phdr);
+            const u64 even = 1024, odd = 2049;   // odd % _Alignof(Phdr) == 1
+            const u64 blob_len = odd + span;
+
+            plant_interp(ld, 0);
+            const u64 src = blob_ehdr()->e_phoff;   // still the original 64
+
+            for (u64 i = 0; i < span; i++)
+                g_test_elf_blob[even + i] = g_test_elf_blob[src + i];
+            blob_ehdr()->e_phoff = even;
+            TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, blob_len,
+                                                out, sizeof(out)),
+                (u64)(sizeof(ld) - 1),
+                "control: the relocated table still reads at an ALIGNED phoff");
+
+            for (u64 i = 0; i < span; i++)
+                g_test_elf_blob[odd + i] = g_test_elf_blob[src + i];
+            blob_ehdr()->e_phoff = odd;
+            TEST_EXPECT_EQ((u64)elf_read_interp(g_test_elf_blob, blob_len,
+                                                out, sizeof(out)), 0ull,
+                "#215: an odd e_phoff is ABSENT, never a path off a UB cast");
+            TEST_EXPECT_EQ((u64)out[0], 0ull, "and leaves the buffer empty");
+        }
+    }
 }

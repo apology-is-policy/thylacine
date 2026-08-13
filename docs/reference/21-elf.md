@@ -243,6 +243,10 @@ Similarly, `e_phoff` MUST be 8-byte aligned (`_Alignof(struct Elf64_Phdr)`). Rea
 
 Both checks defend against UBSan-trapping kernel builds (`-fsanitize=alignment` is part of `-fsanitize=undefined`) — without them, an attacker submitting a misaligned ELF could trigger kernel BRK as a denial-of-service primitive.
 
+**Both apply to `elf_read_interp` too, since #215 (2026-08-13).** They were written when `elf_load` was the only consumer of `e_phoff`; DISTRO D-4 promoted the `PT_INTERP` walk into a second public parser of the same attacker-controlled field and it inherited the bounds without the alignment — the premise R5-G established, voided by a later chunk. `elf_read_interp` now rejects both a misaligned `blob` and an odd `e_phoff`, answering **0** (its existing "no interpreter here") rather than a new error code, since it returns a length and 0 already covers every malformed case.
+
+The two are independent and neither implies the other: `blob` is the kernel's own buffer, so only a caller can misalign it, while `e_phoff` comes straight off the wire and can misalign the Phdr cast however well-aligned the buffer is. `elf.read_interp` case (9) asserts each separately, with an aligned-relocation control on the `e_phoff` leg so a 0 is attributable to the alignment and not to a damaged fixture.
+
 ### W^X check is type-blind (R5-G F64)
 
 The W^X check (`p->p_flags & (PF_W | PF_X) == (PF_W | PF_X)` → reject) is hoisted ABOVE the switch over `p->p_type`. Every program header is flag-checked regardless of type, so future segment types automatically inherit the defense. The PT_LOAD-only check would have left an attack surface where a future code-recognized PT_* type with PF_W|PF_X bypasses W^X.
@@ -274,7 +278,14 @@ The bounded `PT_INTERP` walk, extracted so `elf_brand_hint` and the D-4 rewrite 
 copy of "is this offset inside the prefix, is this string terminated". PURE; safe on the
 bounded header PREFIX `exec_read_header` produces. Returns the path's length, or **0 for
 every absent case** -- unreadable, outside the prefix, unterminated, empty, longer than
-`ELF_INTERP_MAX`, or larger than the caller's buffer -- and clears `out` when it does.
+`ELF_INTERP_MAX`, larger than the caller's buffer, or (since #215) misaligned in either
+the `blob` pointer or `e_phoff` -- and clears `out` when it does.
+
+PURE is load-bearing and is why the alignment rejections are silent: the file has no
+console dependency, exactly as `elf_load` returns `ELF_LOAD_BAD_ALIGN` rather than
+printing. A caller that hands a misaligned buffer therefore sees every dynamic binary
+read as static, with no diagnostic; the guard's comment in `kernel/elf.c` is where that
+reader is expected to land.
 
 **The hint inherited the stricter bar, and that is recorded rather than
 reverted** (D-4 round F3): an ELF whose interp string is over-long or
