@@ -1,0 +1,100 @@
+#232 -- hold the console-log descriptor open instead of re-acquiring one
+per line, and stop discarding the results.
+
+Sys_DebugLog (the -condebug sink, reached from Con_Printf/Con_DPrintf)
+opened a FRESH fd for EVERY console line and checked none of the three
+syscalls:
+
+    fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
+    write(fd, data, strlen(data));
+    close(fd);
+
+So it needs a free descriptor slot at every single Con_Printf for the
+whole run, and a process that runs low on descriptors later simply
+stops logging from that point on -- silently, with write(-1, ...) and
+close(-1) failing unremarked.
+
+That is not hypothetical here. On Thylacine a hardware-GL client holds
+one 9P fid per live BO mapping (the #198 four-table chain), so the
+virgl arm is precisely the one that runs low. Measured on thyla-pi:
+after deleting the log and proving it absent, a 969-frame timedemo left
+it holding exactly 47 bytes -- "Added packfile /quake/id1/pak0.pak (339
+files)\n", one line written at Con_Init -- and nothing else, while the
+SAME Con_Printf calls kept reaching stdout via Sys_Printf for the whole
+27-second run. The identical binary with driver=llvmpipe logs normally,
+which is what isolates it to the descriptor budget rather than the
+message path.
+
+The failure was invisible from both ends: the engine reported success
+it never checked, and any reader of the log (here a bench harness
+polling for the timedemo's fps line) sees a healthy run as an infinite
+hang.
+
+Acquiring the descriptor once, on first use, takes it early -- before
+the renderer's allocations can crowd the table -- and keeps it for the
+process lifetime. The path is still honoured: `gamedir` can change it,
+so a differing path closes and re-opens, which is what upstream's
+per-call open gave for free. A failed open or write now says so once on
+stderr and then stays quiet, because a per-line complaint on a
+descriptor-starved process would be its own storm.
+
+Not sent upstream: the descriptor-per-line pattern is harmless on a
+host with a roomy fd table, which is every platform upstream targets.
+
+--- a/common/sys_unix.c	2026-08-13 12:28:22
++++ b/common/sys_unix.c	2026-08-13 12:28:40
+@@ -274,14 +274,50 @@
+ {
+     va_list argptr;
+     static char data[MAX_PRINTMSG];
+-    int fd;
++    static char cur[1024];
++    static int fd = -1;
++    static int complained = 0;
+ 
+     va_start(argptr, fmt);
+     qvsnprintf(data, sizeof(data), fmt, argptr);
+     va_end(argptr);
+-    fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
+-    write(fd, data, strlen(data));
+-    close(fd);
++
++    /* Hold the descriptor open instead of re-acquiring one per line. The
++       upstream open/write/close acquires a FRESH fd for every console line,
++       so it needs a free descriptor slot at every Con_Printf for the whole
++       run -- and a process that runs low later loses the log from that point
++       on, silently, because none of the three results was ever checked. On
++       Thylacine a hardware-GL client holds a 9P fid per live BO mapping, so
++       it is exactly the arm that runs low: the log stopped dead after its
++       first line while stdout kept flowing, which is what made a healthy
++       27-second timedemo look like a hang to anything reading the log.
++       Acquiring once, early, takes the descriptor before the renderer's
++       allocations can crowd it out. */
++    if (fd >= 0 && strcmp(cur, file) != 0) {
++        /* `gamedir` changes the path; honour that as upstream's per-call
++           open did, rather than pinning the first file forever. */
++        close(fd);
++        fd = -1;
++    }
++    if (fd < 0) {
++        fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
++        if (fd < 0) {
++            if (!complained) {
++                complained = 1;
++                fprintf(stderr, "Sys_DebugLog: cannot open %s: %s"
++                        " -- console logging is now OFF\n",
++                        file, strerror(errno));
++            }
++            return;
++        }
++        strncpy(cur, file, sizeof(cur) - 1);
++        cur[sizeof(cur) - 1] = '\0';
++    }
++    if (write(fd, data, strlen(data)) < 0 && !complained) {
++        complained = 1;
++        fprintf(stderr, "Sys_DebugLog: write to %s failed: %s\n",
++                file, strerror(errno));
++    }
+ }
+ 
+ #ifndef USE_X86_ASM

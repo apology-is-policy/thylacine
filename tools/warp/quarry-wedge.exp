@@ -153,8 +153,43 @@ lc_step "#232    absent          -> the engine never created it here"
 lc_step "#232    size 0          -> created, nothing written"
 lc_step "#232    size>0, fps=0   -> writes worked then STOPPED (open-failure"
 lc_step "#232                       shape); TAIL shows how far it got"
-lc_step "#232    size>0, fps>=1  -> the line IS there; quarry's read/parse is"
-lc_step "#232                       at fault, not the engine"
-lc_pass "quarry-wedge: log inspected at the moment of the fps line"
+lc_step "#232    size>0, fps>=1  -> the line IS there; the fix is working"
+
+# THE ACCEPTANCE TEST. Everything above describes the log; this asserts the
+# thing that actually matters -- that quarry can now BENCH the hardware
+# renderer. Pre-fix this row read `hw-gl - - - 0 1 (software) [hung: killed
+# at the bench deadline]` after burning the full 600s deadline, so a row
+# carrying real frames/seconds/fps is the A/B against a well-established
+# baseline (47-byte log, no fps, five runs).
+#
+# Anchored on "renderer   frames", NOT the bare word "backend": "backend"
+# also occurs in a BOOT line (9p_transport.backend_error_transitions_to_error)
+# and a waiter keyed on it matched pre-existing text.
+set timeout 700
+lc_step "#232 waiting for quarry's table (post-fix it should arrive in seconds,"
+lc_step "#232    not at the 600s deadline)"
+expect {
+    -ex "renderer   frames" { lc_step "#232 the bench table printed" }
+    -re {EXTINCTION:}       { lc_extinction_fail "extinction waiting for the table" }
+    eof                     { lc_fail "EOF waiting for the bench table" }
+    timeout { lc_fail "#232 NOT FIXED: no table within 700s -- quarry still cannot see the fps line" }
+}
+
+# The row must carry a REAL measurement. A dash in the fps column is exactly
+# what the broken path produced, so matching the row alone would pass on the
+# failure -- the digits are the assertion.
+set timeout 60
+expect {
+    -re {hw-gl +[0-9]+ +[0-9.]+ +([0-9.]+) +[0-9]+ +[-0-9]+ +([^\r\n]*)} {
+        lc_step "#232 FIXED: quarry reports hw-gl at $expect_out(1,string) fps, backend=$expect_out(2,string)"
+    }
+    -re {hw-gl +- +- +-} {
+        lc_fail "#232 NOT FIXED: the hw-gl row still reads all-dashes (no fps parsed)"
+    }
+    timeout { lc_fail "#232 the table printed but no hw-gl row matched either shape" }
+    eof     { lc_fail "EOF reading the hw-gl row" }
+}
+
+lc_pass "quarry-wedge: hw-gl benched end to end -- the log carries the fps line"
 lc_quit
 exit 0
