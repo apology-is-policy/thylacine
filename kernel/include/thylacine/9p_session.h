@@ -93,10 +93,16 @@
 // values past MAX are reserved (Tversion uses NOTAG = 0xFFFF).
 #define P9_SESSION_MAX_OUTSTANDING  64u
 
-// Max bound fids per session. 256 is comfortable for general workloads;
-// Stratum's server caps at 4096 (STM_9P_MAX_FIDS). The client-side cap
-// is typically smaller because each fid wires a kernel-side handle.
-#define P9_SESSION_MAX_FIDS         256u
+// Max bound fids per session. 256 was comfortable for FS workloads but
+// bound the #198 GL client: a warp program holds one fid per live BO
+// mapping on its /srv/warp session, so Quake-class texture sets blew
+// past 256 (silently -- the refusal at 9p_session.c is kernel-side,
+// invisible to both the client's and the server's diagnostics; that
+// silence cost the hunt a full instrumented round). 1024 matches
+// PROC_HANDLE_MAX, since each bound fid wires a kernel-side handle
+// anyway; Stratum's server caps at 4096 (STM_9P_MAX_FIDS). Cost: the
+// bound_fids array grows 1 KiB -> 4 KiB per session.
+#define P9_SESSION_MAX_FIDS         1024u
 
 // Magic for struct lifetime discipline (R9 F148 mirror — see
 // `docs/reference/39-hw-handles.md` caveat #2). Clobbered on destroy.

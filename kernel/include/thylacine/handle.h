@@ -156,17 +156,21 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
                "makes every slot's magic == 0, naturally signaling free");
 
 // Per-Proc handle table size. 64 was a v1.0 toy limit the code always
-// anticipated growing (Phase 5+ -> growable). Real fd-hungry workloads --
-// the on-device Go toolchain (cmd/go + compile/asm/link spawn fast and hold
-// many open files), multi-fd servers -- need well more than 64, so it is
-// raised to 256. 256 slots = 8 + 24*256 = 6152 bytes exceeds
-// SLUB_MAX_OBJECT_SIZE (2048), so the table is kmalloc-backed (handle.c) --
-// kmalloc routes the oversize object through alloc_pages (2 pages here) --
-// rather than a dedicated slab cache, which cannot hold it. The growable
-// table (a two-level fdtable keyed by hidx_t, the Linux model) is the v1.x
-// design once a Proc needs >> 256; it touches the #844 shared-table lock
-// discipline (peer threads snapshot slots by-value). Tracked as #355.
-#define PROC_HANDLE_MAX 256
+// anticipated growing; 256 (the Go-toolchain lift) fell next, to the #198
+// GL client: a warp GL program holds ONE handle per live BO mapping plus
+// its files, so a Quake-class texture set needs 300-500 live handles --
+// and tapestryd itself holds a dma_fd per BUILT BO on the same constant
+// (the #214 ~237 dma-create wall). 1024 covers both sides with the same
+// clean-refusal I-32 semantics; measured on thyla-pi KVM, the lift (with
+// the session-fid and tapestryd-fid lifts) took GLQuake from a 2323-OOM
+// dispatch-wedge storm at 0.6 fps to a zero-refusal 44.7 fps run. Table =
+// 8 + bitmap + 24*1024 ~= 24.7 KiB, kmalloc-backed via alloc_pages
+// (handle.c) -- far past SLUB_MAX_OBJECT_SIZE either way. The growable
+// table (a two-level fdtable keyed by hidx_t, the Linux model) remains
+// the v1.x design once a Proc needs >> 1024; it touches the #844
+// shared-table lock discipline (peer threads snapshot slots by-value).
+// Tracked as #355.
+#define PROC_HANDLE_MAX 1024
 
 // #151: close-on-exec lives in a BITMAP PARALLEL TO THE SLOT ARRAY, not in
 // struct Handle. Both halves of that are deliberate.
