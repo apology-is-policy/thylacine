@@ -4170,24 +4170,46 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         return 1;
     }
 
-    // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
-    // multi-thread target is no longer refused (the prior `kill -> -EIO in
-    // multi-thread Proc`, 13b R1-F9). Cascade-terminate the whole Proc --
-    // proc_group_terminate flags it + wakes/kicks its Threads so each
-    // self-exits at its EL0-return die-check; the last Thread out reaps the
-    // Proc. Safe under g_proc_table_lock (held by proc_for_each here):
-    // proc_group_terminate acquires only torpor / rendez / cs locks, all below
-    // proc_table_lock in the order, and the target is alive under this lock so
-    // there is no reap-UAF. A SINGLE-thread target falls through to the note
-    // post below -- the existing non-catchable-kill EL0-return delivery, left
-    // unchanged.
+    // `kill` cascade-terminates the whole Proc, whatever its thread count
+    // (ARCH §7.9.1, I-24). proc_group_terminate flags it + wakes/kicks its
+    // Threads so each self-exits at its EL0-return die-check; the last Thread
+    // out reaps the Proc. Safe under g_proc_table_lock (held by proc_for_each
+    // here): proc_group_terminate acquires only torpor / rendez / cs locks,
+    // all below proc_table_lock in the order, and the target is alive under
+    // this lock so there is no reap-UAF.
+    //
+    // #241: this used to be gated on `live_threads > 1`, letting a SINGLE-
+    // thread target fall through to the note post below "-- the existing
+    // non-catchable-kill EL0-return delivery, left unchanged". That sentence
+    // was true about the delivery and blind to the fact that a thread can be
+    // somewhere OTHER than on its way to EL0. `kill` arms no terminate latch
+    // (notes_name_terminate_latch returns 0 for NOTE_BIT_KILL), so the queued
+    // note woke NOTHING -- and a job-stopped target parked in
+    // el0_return_stop_check has exactly three exits (group_exit_msg,
+    // !proc_stop_requested, thread_die_pending), none of which a latchless
+    // queued kill satisfies. SYS_POSTNOTE returned SUCCESS and the Proc lived
+    // forever: the job stop had caught the uncatchable note, violating N-4.
+    //
+    // Routing through proc_group_terminate closes it at the root rather than
+    // per-park: group_exit_msg is the ONE signal every park and sleep
+    // predicate already honours, so this also covers a target merely blocked
+    // (where the latchless kill previously waited for some unrelated wake).
+    // Not a semantics change -- thread_exit_self's become_zombie arm derives
+    // its status from group_exit_msg with the same `"ok" -> 0 / else -> 1`
+    // collapse exits() uses, so the observable outcome is exit_msg "killed" /
+    // status 1 either way. It also makes SYS_POSTNOTE agree with the /proc/
+    // <pid>/ctl `kill` verb, which has always dispatched via
+    // proc_group_terminate uniformly (devproc.c).
+    //
+    // The SELF-post fast path in sys_postnote_handler keeps its thread-count
+    // gate deliberately: the posting thread is by definition RUNNING, and the
+    // EL0-return tail delivers notes BEFORE el0_return_stop_check, so a
+    // self-kill cannot be swallowed by a stop. Changing it would move the
+    // death to a slightly earlier point in the tail for no defect.
     if (notes_name_is_kill(w->name)) {
-        int live_threads = proc_count_live_peers_locked(target, NULL);
-        if (live_threads > 1) {
-            proc_group_terminate(target, "killed");
-            w->result = 1;
-            return 1;
-        }
+        proc_group_terminate(target, "killed");
+        w->result = 1;
+        return 1;
     }
 
     // Post. notes_post is safe under proc_table_lock -- see the lock-order
@@ -4202,6 +4224,26 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     if (rc == 0) proc_interrupt_terminate_wake(target);
     w->result = (rc == 0) ? 1 : -1;
     return 1;
+}
+
+// Test support (the mmap_eager_copy_for_test convention). Deliberately absent
+// from any header -- the harness extern-declares it, and there is no
+// production caller. It runs the REAL cross-Proc post: proc_for_each +
+// postnote_walk_cb under g_proc_table_lock, exactly as sys_postnote_handler
+// does, rather than a reimplementation the test could quietly drift from.
+// Returns the walk's canonical result (+1 posted / -1 refused / 0 not found).
+int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name);
+int sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                const char *name) {
+    struct postnote_walk_ctx wctx = {
+        .target_pid = target_pid,
+        .caller     = caller,
+        .name       = name,
+        .result     = 0,
+    };
+    (void)proc_for_each(postnote_walk_cb, &wctx);
+    return wctx.result;
 }
 
 static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {

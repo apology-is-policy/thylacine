@@ -50,6 +50,8 @@ extern int  notes_noted_default(struct exception_context *ctx, struct Thread *t)
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
+extern int  sys_postnote_cross_for_test(struct Proc *caller, int target_pid,
+                                        const char *name);   // #241
 
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -76,6 +78,7 @@ void test_notes_fstat_reports_chr(void);
 void test_notes_linux_sigign_discard(void);
 void test_notes_default_action_table(void);
 void test_notes_ndflt_dispatch(void);
+void test_notes_kill_terminates_single_thread(void);
 
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke
@@ -1260,4 +1263,92 @@ void test_notes_ndflt_dispatch(void) {
     proc_test_unlink(leader);
     leader->state = PROC_STATE_ZOMBIE;
     proc_free(leader);
+}
+
+// #241: a cross-Proc `kill` must TERMINATE a single-thread target, not queue a
+// note the target may never consume.
+//
+// The old code group-terminated only when live_threads > 1 and let a
+// single-thread target fall through to notes_post, on the reasoning that the
+// EL0-return tail's non-catchable-kill branch would pick it up. `kill` arms no
+// terminate latch (notes_name_terminate_latch returns 0 for NOTE_BIT_KILL), so
+// the post woke nothing at all -- and a job-stopped target parked in
+// el0_return_stop_check leaves only via group_exit_msg / !proc_stop_requested /
+// thread_die_pending, none of which a latchless queued kill satisfies. The post
+// returned SUCCESS and the Proc lived forever.
+//
+// The park loop is not driven here (it needs a scheduled thread). What is
+// asserted is the property that makes the park irrelevant: the kill sets
+// group_exit_msg -- the one signal every park and sleep predicate honours --
+// instead of parking a note in the queue.
+void test_notes_kill_terminates_single_thread(void) {
+    struct Proc *parent = proc_alloc();
+    TEST_ASSERT(parent != NULL, "proc_alloc parent");
+    proc_test_link(parent);
+
+    struct Proc *target = proc_alloc();
+    TEST_ASSERT(target != NULL, "proc_alloc target");
+    proc_test_link_child(parent, target);
+
+    // ONE thread: this is the whole point of the test, so assert the shape
+    // rather than assume it. A target that accidentally had peers would take
+    // the pre-existing multi-thread cascade and pass for the wrong reason.
+    static struct Thread kth;
+    kth.magic            = THREAD_MAGIC;
+    kth.proc             = target;
+    kth.note_mask        = 0;
+    kth.next_in_proc     = NULL;
+    kth.rendez_blocked_on = NULL;
+    target->threads = &kth;
+
+    TEST_ASSERT(target->group_exit_msg == NULL,
+                "precondition: target is not already terminating");
+
+    int rc = sys_postnote_cross_for_test(parent, target->pid, NOTE_NAME_KILL);
+    TEST_EXPECT_EQ(rc, 1, "the cross-Proc kill post reports success");
+
+    // POSITIVE: the cascade ran. Fails closed -- any fixture defect that makes
+    // proc_group_terminate bail early leaves this NULL.
+    TEST_ASSERT(target->group_exit_msg != NULL,
+                "group_exit_msg SET -- the kill cascades (#241)");
+
+    // NEGATIVE, and the half that is red pre-fix. On its own this would be
+    // satisfied by a fixture whose queue is unreadable, so the control below
+    // proves the counter can actually SEE a queued note.
+    TEST_EXPECT_EQ((int)ndflt_note_count(target, NOTE_NAME_KILL), 0,
+                   "no kill QUEUED -- it terminated instead of waiting");
+
+    // The control: same call, same fixture shape, ONE variable changed (the
+    // note name). `interrupt` is not routed to the cascade, so it MUST land in
+    // the queue -- which is what makes the zero above a measurement.
+    struct Proc *ctl = proc_alloc();
+    TEST_ASSERT(ctl != NULL, "proc_alloc ctl");
+    proc_test_link_child(parent, ctl);
+    static struct Thread cth;
+    cth.magic            = THREAD_MAGIC;
+    cth.proc             = ctl;
+    cth.note_mask        = 0;
+    cth.next_in_proc     = NULL;
+    cth.rendez_blocked_on = NULL;
+    ctl->threads = &cth;
+
+    TEST_EXPECT_EQ(sys_postnote_cross_for_test(parent, ctl->pid,
+                                               NOTE_NAME_INTERRUPT), 1,
+                   "the control post reports success");
+    TEST_EXPECT_EQ((int)ndflt_note_count(ctl, NOTE_NAME_INTERRUPT), 1,
+                   "control: a non-kill note IS queued (so 0 above means 0)");
+    TEST_ASSERT(ctl->group_exit_msg == NULL,
+                "control: interrupt did NOT cascade -- only kill does");
+
+    proc_test_unlink(ctl);
+    ctl->threads = NULL;                // the static outlives proc_free
+    ctl->state = PROC_STATE_ZOMBIE;
+    proc_free(ctl);
+    proc_test_unlink(target);
+    target->threads = NULL;
+    target->state = PROC_STATE_ZOMBIE;
+    proc_free(target);
+    proc_test_unlink(parent);
+    parent->state = PROC_STATE_ZOMBIE;
+    proc_free(parent);
 }

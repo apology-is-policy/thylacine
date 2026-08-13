@@ -1119,12 +1119,16 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         int live_peers = proc_count_live_peers_locked(p, t);
         proc_table_lock_release(s);
         if (live_peers != 0) {
-            // Re-enqueue the kill at head. SYS_POSTNOTE refuses kill to
-            // multi-thread Procs at v1.0, so this path is defense-in-
-            // depth for a kernel-internal poster (or the R3-F3 TOCTOU
-            // race against SYS_THREAD_SPAWN). The kill stays queued;
-            // when peer Threads eventually exit on their own, the
-            // survivor picks it up.
+            // Re-enqueue the kill at head. This path is defense-in-depth
+            // for a kernel-internal poster (or the R3-F3 TOCTOU race
+            // against SYS_THREAD_SPAWN): since #241 no SYS_POSTNOTE kill
+            // reaches the queue at all -- the cross-Proc arm cascades via
+            // proc_group_terminate, and the self-post arm cascades once a
+            // peer exists. (The comment here used to say SYS_POSTNOTE
+            // "refuses kill to multi-thread Procs at v1.0", which stopped
+            // being true when that refusal became a cascade.) The kill
+            // stays queued; when peer Threads eventually exit on their
+            // own, the survivor picks it up.
             //
             // R3-F4 audit close: extinct on re-enqueue failure. Kill
             // loss is a kernel-fatal invariant violation (N-2 + N-4);
