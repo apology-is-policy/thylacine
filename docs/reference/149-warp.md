@@ -719,12 +719,60 @@ Driver selection goes through `/env` (remove-then-create, restored on
 exit) because `setenv` does not survive `exec` — the same reason the
 tyr-glquake launcher writes `/env/GALLIUM_DRIVER` rather than setting it.
 
-The CLI (`quarry list` / `quarry bench [row]`) is the automatable face:
-each bench leg runs the demo with stdout+stderr piped through a `PollSet`
-drain loop, parses tyrquake's own `N frames S seconds F fps` line plus
-`GL_RENDERER` and a Mesa-error count, and is hang-killed at 180 s via
-`/proc/<pid>/ctl`. A leg that produces no fps line reports as such rather
-than as a zero. Gate: `tools/warp/quarry-bench.exp` (via
+The CLI (`quarry list` / `quarry bench [demo] [key...]`) is the automatable
+face. Each leg spawns the engine with `-condebug` and stdio INHERITED, then
+polls the engine's own console log (`/quake/id1/qconsole.log`) for tyrquake's
+`N frames S seconds F fps` line plus `GL_RENDERER` and a Mesa-error count,
+and is hang-killed at `BENCH_DEADLINE_MS` (600 s) via `/proc/<pid>/ctl`. A
+leg that produces no fps line reports as such rather than as a zero.
+
+It reads a FILE rather than a pipe because `+timedemo` does not quit the
+engine: under a pipe the fps line sits in the child's full-buffered stdout
+awaiting an exit that never comes, and a drain loop calling `read()` on an
+unready fd blocks in the callee where the outer deadline can never be
+evaluated (#231 -- a deadline a callee can outlive is not a deadline). The
+existing `glq-bench.exp` lane only works because it reads a TTY, which is
+line-buffered. `-condebug` routes `Con_Printf` through `Sys_DebugLog`, whose
+writes are bare `open`/`write`/`close` with no stdio buffer in the path.
+
+An explicit key list both SELECTS and ORDERS the legs, which is load-bearing
+for attribution rather than a convenience: with the default order the GL leg
+is also the LAST leg, so "the GL client fails" and "the last leg fails" are
+the same observation. Each leg brackets its kill with
+`spawned` / `kill-begin` / `kill-end` / `reaped` markers, and prints
+`log-at-end present=/bytes=/last_line=` when it ends WITHOUT an fps line --
+the poll loop is otherwise silent, so a stall inside it leaves no pid and no
+last-known step.
+
+That log dependency has a sharp edge worth knowing (#232). Upstream
+`Sys_DebugLog` acquires a FRESH descriptor for every console line and checks
+none of `open`/`write`/`close`, and it builds the path as
+`va("%s/qconsole.log", com_gamedir)` — where `com_gamedir` is EMPTY for most
+of a run, populated only briefly around `COM_AddGameDirectory`. So the path
+alternates between a usable `<gamedir>/qconsole.log` and a bare
+`/qconsole.log` at the filesystem ROOT, which an unprivileged process cannot
+create (EACCES). Every line emitted outside that brief window was discarded
+in silence: the log stopped at 47 bytes — one line — while stdout carried the
+entire 27-second run, and the bench read a healthy timedemo as an infinite
+hang.
+
+Fixed by `usr/ports/tyrquake/patches/0002-tyrquake-condebug-fd.patch`:
+acquire once and PIN it, deliberately not re-opening when the caller's path
+changes (doing so re-breaks it identically — the first empty-gamedir call
+after a good open would close a working descriptor and never get another),
+and report per-DISTINCT-PATH rather than one-shot, since a single latch is
+spent by the harmless early failure and then hides the one that matters.
+
+Two traps this cost, worth inheriting. The mechanism was first misdiagnosed
+as fd exhaustion, reasoned from a GL-vs-llvmpipe differential WITHOUT ever
+obtaining an errno; the first errno named a different failure and a different
+path — get the errno before naming the resource. And `/clade/bin/tyr-glquake`
+is POOL-resident, so a fix reaches the guest only after
+`tools/build.sh stage-clade` runs BEFORE the pool bake:
+`THYLACINE_BAKE_CLADE=1` puts the EXISTING stage into the pool, it does not
+refresh it. Content-check the stage, not the build output.
+
+Gate: `tools/warp/quarry-bench.exp` (via
 `tools/warp-host.sh quarry-bench`) asserts `hw-gl ready` on a virgl boot
 and then the bench table — so a regression that silently drops the seam
 back to software fails the gate rather than quietly reporting llvmpipe

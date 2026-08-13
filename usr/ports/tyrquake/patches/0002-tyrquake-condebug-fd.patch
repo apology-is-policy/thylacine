@@ -1,100 +1,120 @@
-#232 -- hold the console-log descriptor open instead of re-acquiring one
-per line, and stop discarding the results.
+#232 -- pin the console-log PATH (not the descriptor), and stop discarding
+the open/write results.
 
 Sys_DebugLog (the -condebug sink, reached from Con_Printf/Con_DPrintf)
-opened a FRESH fd for EVERY console line and checked none of the three
-syscalls:
+was:
 
     fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
     write(fd, data, strlen(data));
     close(fd);
 
-So it needs a free descriptor slot at every single Con_Printf for the
-whole run, and a process that runs low on descriptors later simply
-stops logging from that point on -- silently, with write(-1, ...) and
-close(-1) failing unremarked.
+with none of the three results checked. Two separate things are wrong,
+and only one of them is the obvious one.
 
-That is not hypothetical here. On Thylacine a hardware-GL client holds
-one 9P fid per live BO mapping (the #198 four-table chain), so the
-virgl arm is precisely the one that runs low. Measured on thyla-pi:
-after deleting the log and proving it absent, a 969-frame timedemo left
-it holding exactly 47 bytes -- "Added packfile /quake/id1/pak0.pak (339
-files)\n", one line written at Con_Init -- and nothing else, while the
-SAME Con_Printf calls kept reaching stdout via Sys_Printf for the whole
-27-second run. The identical binary with driver=llvmpipe logs normally,
-which is what isolates it to the descriptor budget rather than the
-message path.
+(1) THE PATH. The caller builds it as `va("%s/qconsole.log",
+com_gamedir)`, and com_gamedir is EMPTY for most of a run -- populated
+only briefly around COM_AddGameDirectory. So the path alternates between
+a usable "<gamedir>/qconsole.log" and a bare "/qconsole.log" at the
+filesystem root, which an unprivileged process cannot create. Unchecked,
+every line emitted outside that brief window was dropped in silence.
 
-The failure was invisible from both ends: the engine reported success
-it never checked, and any reader of the log (here a bench harness
-polling for the timedemo's fps line) sees a healthy run as an infinite
+MEASURED on Thylacine (thyla-pi KVM): after deleting the log and proving
+it absent, a 969-frame timedemo left it holding exactly 47 bytes --
+"Added packfile /quake/id1/pak0.pak (339 files)\n", the single line
+printed while com_gamedir was set -- while the SAME Con_Printf calls
+reached stdout for the whole 27-second run (Con_Printf does both in one
+call, common/console.c:324). Listing /, /quake, /quake/id1 and the cwd
+found no second qconsole.log: the output was dropped, not misfiled. The
+engine's own errno, once it was made to report one, is EACCES on
+"/qconsole.log".
+
+(2) THE CLOSE IS LOAD-BEARING -- it is not churn to optimise away. It is
+what PUBLISHES each line to other processes. Thylacine's guest FS cache
+is close-to-open (I-38): a reader's view is fixed at its own open, so a
+writer holding a descriptor is invisible to anyone else however much it
+writes. An earlier revision of this patch held the descriptor and left
+the file reading 0 BYTES to a separate reader -- which is exactly the
+consumer this log exists for. The close stays; only the path is pinned.
+
+The failure was invisible from both ends: the engine reported success it
+never checked, and a reader of the log sees a healthy run as an infinite
 hang.
 
-Acquiring the descriptor once, on first use, takes it early -- before
-the renderer's allocations can crowd the table -- and keeps it for the
-process lifetime. The path is still honoured: `gamedir` can change it,
-so a differing path closes and re-opens, which is what upstream's
-per-call open gave for free. A failed open or write now says so once on
-stderr and then stays quiet, because a per-line complaint on a
-descriptor-starved process would be its own storm.
+The report is per-DISTINCT-PATH rather than one-shot, because a single
+latch is spent by the harmless empty-gamedir failure and then hides any
+later one that matters. A successful open announces its path once, so
+"which file am I even writing?" is answerable from the console instead of
+by rebuilding -- which is what caught a stale-staged binary during this
+work.
 
-Not sent upstream: the descriptor-per-line pattern is harmless on a
-host with a roomy fd table, which is every platform upstream targets.
+Not sent upstream: a descriptor per line, and an empty gamedir aiming at
+/, are both harmless on a host where the process can create files at the
+root -- which is every platform upstream targets.
 
---- a/common/sys_unix.c	2026-08-13 12:28:22
-+++ b/common/sys_unix.c	2026-08-13 12:28:40
-@@ -274,14 +274,50 @@
+--- a/common/sys_unix.c	2026-08-13 13:28:18
++++ b/common/sys_unix.c	2026-08-13 13:28:46
+@@ -274,13 +274,62 @@
  {
      va_list argptr;
      static char data[MAX_PRINTMSG];
--    int fd;
-+    static char cur[1024];
-+    static int fd = -1;
-+    static int complained = 0;
++    static char good[1024];       /* the first path that actually worked */
++    static char refused[1024];    /* last path reported, to report each once */
++    static int wr_complained = 0;
++    const char *target;
+     int fd;
  
      va_start(argptr, fmt);
      qvsnprintf(data, sizeof(data), fmt, argptr);
      va_end(argptr);
 -    fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
 -    write(fd, data, strlen(data));
--    close(fd);
 +
-+    /* Hold the descriptor open instead of re-acquiring one per line. The
-+       upstream open/write/close acquires a FRESH fd for every console line,
-+       so it needs a free descriptor slot at every Con_Printf for the whole
-+       run -- and a process that runs low later loses the log from that point
-+       on, silently, because none of the three results was ever checked. On
-+       Thylacine a hardware-GL client holds a 9P fid per live BO mapping, so
-+       it is exactly the arm that runs low: the log stopped dead after its
-+       first line while stdout kept flowing, which is what made a healthy
-+       27-second timedemo look like a hang to anything reading the log.
-+       Acquiring once, early, takes the descriptor before the renderer's
-+       allocations can crowd it out. */
-+    if (fd >= 0 && strcmp(cur, file) != 0) {
-+        /* `gamedir` changes the path; honour that as upstream's per-call
-+           open did, rather than pinning the first file forever. */
-+        close(fd);
-+        fd = -1;
-+    }
++    /* Remember the PATH that worked -- not the descriptor.
++       Two separate things are wrong with the original, and only one of them
++       is the obvious one.
++
++       (1) The caller builds the path as `va("%s/qconsole.log", com_gamedir)`,
++       and com_gamedir is EMPTY for most of a run -- populated only briefly
++       around COM_AddGameDirectory. So the path alternates between a usable
++       "<gamedir>/qconsole.log" and a bare "/qconsole.log" at the filesystem
++       root, which an unprivileged process cannot create (EACCES). With none
++       of open/write/close ever checked, every line emitted outside that brief
++       window was discarded in silence. Pinning the first path that WORKS is
++       the fix for that.
++
++       (2) The open/write/CLOSE per line is NOT churn to be optimised away --
++       it is what PUBLISHES each line to other processes. Thylacine's guest FS
++       cache is close-to-open (I-38): a reader's view is fixed at its own open,
++       so a writer holding a descriptor makes its data invisible to anyone
++       else no matter how much it writes. An earlier attempt at this patch held
++       the descriptor open and left the file reading 0 bytes to a separate
++       reader -- which is precisely the consumer this log exists for (a bench
++       harness polling for the timedemo's fps line). So the close STAYS. */
++    target = good[0] ? good : file;
++
++    fd = open(target, O_WRONLY | O_CREAT | O_APPEND, 0666);
 +    if (fd < 0) {
-+        fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
-+        if (fd < 0) {
-+            if (!complained) {
-+                complained = 1;
-+                fprintf(stderr, "Sys_DebugLog: cannot open %s: %s"
-+                        " -- console logging is now OFF\n",
-+                        file, strerror(errno));
-+            }
-+            return;
++        /* Report each DISTINCT path once. A one-shot latch would be spent by
++           the harmless empty-gamedir failure and then hide any later one that
++           matters -- an instrument disarmed by the thing it watches. */
++        if (strcmp(refused, target) != 0) {
++            strncpy(refused, target, sizeof(refused) - 1);
++            refused[sizeof(refused) - 1] = '\0';
++            fprintf(stderr, "Sys_DebugLog: cannot open %s: %s\n",
++                    target, strerror(errno));
 +        }
-+        strncpy(cur, file, sizeof(cur) - 1);
-+        cur[sizeof(cur) - 1] = '\0';
++        return;
 +    }
-+    if (write(fd, data, strlen(data)) < 0 && !complained) {
-+        complained = 1;
++    if (!good[0]) {
++        strncpy(good, target, sizeof(good) - 1);
++        good[sizeof(good) - 1] = '\0';
++        fprintf(stderr, "Sys_DebugLog: logging to %s\n", good);
++    }
++    if (write(fd, data, strlen(data)) < 0 && !wr_complained) {
++        wr_complained = 1;
 +        fprintf(stderr, "Sys_DebugLog: write to %s failed: %s\n",
-+                file, strerror(errno));
++                good, strerror(errno));
 +    }
+     close(fd);
  }
  
- #ifndef USE_X86_ASM
