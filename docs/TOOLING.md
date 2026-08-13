@@ -660,10 +660,48 @@ boot shape**, flipping two CMake options in lockstep:
 (#228)**, because probe blocks were appended after their gate's `#endif` and
 called helpers that only exist inside it — joey failed with 11 errors. Nothing
 noticed, because nothing builds it: not `tools/test.sh`, not the SMP gate, not
-the interactive harness, not any Makefile default. **`make check-production`
-(`tools/check-production.sh`, ~2 s, no boot) now guards it**; `--all` runs the
-full production build too. When appending a probe, put it INSIDE the gate — the
-two restored regions carry a comment saying exactly that.
+the interactive harness, not any Makefile default. **`tools/check-production.sh`
+(~2 s, no boot) guards it**; `--all` runs the full production build too.
+
+**Since #229 it is no longer a target you have to remember: `tools/test.sh`
+builds the lean shape before booting the dev one**, and fails the run if it does
+not compile. That is the actual fix for "nothing builds this shape" — a
+`make` target guards nothing on the iterations where nobody types it. It costs
+~2 s, uses a scratch build dir, and SKIPS (loudly, as *not* coverage) when
+`build/generated` is absent, since a kernel-only iteration legitimately has no
+generated headers.
+
+### The probe/production boundary in `joey.c`, and its tripwire (#229)
+
+joey is ~10k lines of which about two thirds is probe ladder, spread over
+eighteen `#if THYLA_BOOT_PROBES` regions. Thirteen of those are statement blocks
+*inside* `main()`; the rest are helpers. That scattering is the shared root of
+#228 (a probe block outside its gate), #229 (probe helpers outside every gate)
+and #232 (probe-shaped gates running in the ship image) — while editing, the
+boundary is invisible.
+
+Two things now hold it:
+
+1. **One region for the helpers.** Every probe-only helper lives in a single
+   `#if THYLA_BOOT_PROBES` block below *all* the production helpers. It can be
+   one region because the dependency is one-way: probes call production helpers,
+   never the reverse. Add a new probe helper inside it.
+2. **`-Werror=unused-function` on the joey target.** A helper typed outside the
+   region is dead code in the lean image; before #229 the only signal was a
+   warning in a log nothing read, and eleven had accumulated. Now the build
+   refuses, in both shapes, naming the function.
+
+The second is what actually prevents recurrence, and it is worth being clear
+that the first does not: moving the helpers into their own region — or their own
+file — does not stop the next person typing a new one wherever they happen to be
+editing. **The compiler is the only reader that is always present.** A function
+genuinely meant to be uncalled says so with `__attribute__((unused))`.
+
+`check-production.sh` verifies the tripwire is *armed* by reading
+`-Werror=unused-function` off the flags CMake generated — not off
+`usr/joey/CMakeLists.txt`, which is the same source the build reads, so agreeing
+with it would only prove the file agrees with itself. Deleting the option makes
+the check FAIL rather than quietly pass (verified both ways).
 
 `tools/test.sh` understands the shape as of #228: it reads joey's own
 `ARC-GATES not-built` line and reports the **debug-probe hwwatch** check as NOT

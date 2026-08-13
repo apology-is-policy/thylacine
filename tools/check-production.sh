@@ -14,11 +14,18 @@
 # PASS; here, a build shape nobody builds reported nothing at all. So this
 # exists to be run -- cheaply, by anyone, without booting.
 #
-# It builds, it does not boot. Compiling is not booting: the lean shape spawns
-# no warden, so it has no drivers, no network and no compositor, and what that
-# SHOULD be is a design question (tracked), not something a compile can answer.
+# It builds, it does not boot -- compiling is not booting. (Until #230 this note
+# also said the lean shape had no drivers, no network and no compositor. That
+# was true, and it was the bug: the warden was parked inside the probe gate. It
+# is unconditional now, so a lean boot brings up its hardware. The two are still
+# separate claims and this script only makes the first one.)
 #
-#   tools/check-production.sh          # joey at THYLA_BOOT_PROBES=OFF (~30 s)
+# #229 added the tripwire that keeps the shape clean between runs:
+# -Werror=unused-function on the joey target, verified below to be armed. A
+# probe helper defined outside the gate is now a build failure rather than a
+# warning nobody reads.
+#
+#   tools/check-production.sh          # joey at THYLA_BOOT_PROBES=OFF (~2 s)
 #   tools/check-production.sh --all    # + the KERNEL_TESTS=OFF kernel (~3 min)
 #
 # Exit: 0 builds, 1 does not, 2 usage/setup.
@@ -51,16 +58,52 @@ if ! cmake -S "$REPO_ROOT/usr" -B "$OUT" \
     exit 1
 fi
 
+# #229: the lean build's guarantee is -Werror=unused-function on the joey
+# target, not this script's diligence. Read that off the flags CMake actually
+# GENERATED -- not off usr/joey/CMakeLists.txt, which is the same source the
+# build reads, so agreeing with it would only prove the file agrees with itself
+# (#143). If someone drops the option, every later run here would pass while
+# silently going back to accumulating warnings.
+FLAGS="$OUT/joey/CMakeFiles/joey.dir/flags.make"
+if [[ ! -f "$FLAGS" ]]; then
+    echo "check-production: FAIL -- $FLAGS absent; cannot confirm the #229 tripwire is armed." >&2
+    exit 1
+fi
+if ! grep -q -- '-Werror=unused-function' "$FLAGS"; then
+    echo "check-production: FAIL -- the #229 tripwire is DISARMED." >&2
+    echo "    joey is being compiled without -Werror=unused-function, so a probe" >&2
+    echo "    helper defined outside the gate is a warning again instead of an" >&2
+    echo "    error -- and this script would keep saying PASS while they pile up." >&2
+    echo "    Restore target_compile_options(joey PRIVATE -Werror=unused-function)" >&2
+    echo "    in usr/joey/CMakeLists.txt." >&2
+    exit 1
+fi
+
 if ! cmake --build "$OUT" --target joey > "$OUT.build.log" 2>&1; then
     echo "check-production: FAIL -- joey does not compile with THYLA_BOOT_PROBES=OFF." >&2
-    echo "    The usual cause is a probe block appended AFTER its gate's #endif:" >&2
-    echo "    it then calls helpers that only exist inside the gate. Move the" >&2
-    echo "    #endif, do not move the helpers -- the lean image must not carry" >&2
-    echo "    the probe ladder." >&2
+    if grep -q "unused function" "$OUT.build.log"; then
+        # #229: the tripwire fired. This is a DIFFERENT defect from the one below
+        # and wants the opposite remedy, so say which one happened.
+        echo "    The #229 tripwire fired: a helper below is defined outside the" >&2
+        echo "    probe gate and called only from inside it, so the lean image" >&2
+        echo "    compiles it and can never reach it. Move the DEFINITION inside" >&2
+        echo "    the '#if THYLA_BOOT_PROBES -- the boot-test probe helpers'" >&2
+        echo "    region in usr/joey/joey.c (it sits below every production" >&2
+        echo "    helper precisely so anything can move into it)." >&2
+    else
+        echo "    The usual cause is a probe block appended AFTER its gate's #endif:" >&2
+        echo "    it then calls helpers that only exist inside the gate. Move the" >&2
+        echo "    #endif, do not move the helpers -- the lean image must not carry" >&2
+        echo "    the probe ladder." >&2
+    fi
     grep -E "error:" "$OUT.build.log" | sed "s|$REPO_ROOT/||" | head -20 >&2
     exit 1
 fi
-echo "  ok -- joey builds lean ($(grep -c 'warning: unused function' "$OUT.build.log") unused-function warnings; see #229)"
+# No warning count here any more, deliberately: with the tripwire armed the
+# count is 0 on every build that reaches this line, so printing it would be a
+# number that can only ever say one thing -- the shape of a check that has
+# stopped being able to fail (#212).
+echo "  ok -- joey builds lean; #229 tripwire armed (-Werror=unused-function)"
 
 if (( do_all )); then
     echo "== check-production: the full --production build =="

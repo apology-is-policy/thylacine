@@ -2737,55 +2737,6 @@ static long go4c_now_ms(void) {
     return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void go4c_timing(const char *step, long t0_ms) {
-    char buf[24];
-    t_putstr("joey: go4c TIMING ");
-    t_putstr(step);
-    t_putstr("=");
-    t_putstr(itoa_dec(go4c_now_ms() - t0_ms, buf, sizeof(buf)));
-    t_putstr("ms\n");
-}
-
-// Go Stage 4c: spawn `name` with an explicit NUL-separated argv blob (argc
-// entries, the login full-argv idiom) on cons fds 0/1/2 -- so the child's
-// stdout/stderr (go's diagnostics + the built binary's marker) reach the console
-// log -- wait BY PID, and return the exit status (>= 0), or -1 on a spawn/wait
-// failure. The children run as joey's identity (PRINCIPAL_SYSTEM during
-// bringup), so they own the SYSTEM-baked /goroot + /go-cache and are
-// resource-exempt (the Go compiler allocates freely). perm_flags/cap_mask 0:
-// the toolchain needs neither -- it reads/writes files (identity-gated) and
-// execs subtools (namespace OEXEC), no capabilities.
-static long go4c_spawn_wait(const char *name, unsigned int name_len,
-                            const char *argv_blob, unsigned int argv_len,
-                            unsigned int argc) {
-    long cfd = t_console_open();
-    unsigned int fds[3] = { 0, 0, 0 };
-    unsigned int fd_count = 0;
-    if (cfd >= 0) {
-        fds[0] = fds[1] = fds[2] = (unsigned int)cfd;
-        fd_count = 3;
-    }
-    struct t_sys_spawn_args req = {
-        .name_va       = (unsigned long)name,
-        .argv_data_va  = (unsigned long)argv_blob,
-        .fd_list_va    = (unsigned long)fds,
-        .name_len      = name_len,
-        .argv_data_len = argv_len,
-        .argc          = argc,
-        .fd_count      = fd_count,
-        .perm_flags    = 0,
-        ._pad_envp     = 0,
-        .cap_mask      = 0,
-    };
-    long pid = t_spawn_full_argv(&req);
-    if (cfd >= 0) (void)t_close(cfd);
-    if (pid <= 0) return -1;
-    int st = -1;
-    long reaped = t_wait_pid_for((int)pid, 0, &st);
-    if (reaped != pid) return -1;
-    return (long)st;
-}
-
 // Spawn + bounded WNOHANG wait with a wall-clock heartbeat (LS-K MONOTONIC).
 // Prints elapsed every hb_sec so a slow REVENANT page-in shows progress;
 // returns the child status, -1 on spawn/reap error, or -2 if the child did not
@@ -2798,9 +2749,6 @@ static long go4c_spawn_wait(const char *name, unsigned int name_len,
 // read, 0 if the Proc is gone / unreadable. *is_zombie tells the caller the
 // peak it just read is FINAL -- a zombie can no longer charge a page, so
 // reading BEFORE the reap is exact, where sampling a live process is not.
-static int proc_status_field(long pid, const char *key, unsigned int keylen,
-                             unsigned int *out);
-
 static int proc_status_peak(long pid, unsigned int *peak_out, int *is_zombie) {
     char path[32];
     char nb[24];
@@ -2837,43 +2785,6 @@ static int proc_status_peak(long pid, unsigned int *peak_out, int *is_zombie) {
         }
     }
     return 0;   // no peak: line -- an old kernel; caller leaves *peak_out alone
-}
-
-// CL-5: read one "<key>:" decimal field out of /proc/<pid>/status. Used by the
-// budget probe; kept separate from proc_status_peak so the hot wait loop stays
-// a single read.
-static int proc_status_field(long pid, const char *key, unsigned int keylen,
-                             unsigned int *out) {
-    char path[32];
-    char nb[24];
-    const char *ds = itoa_dec(pid, nb, sizeof(nb));
-    unsigned int pl = 0;
-    const char *pfx = "/proc/";
-    for (unsigned int i = 0; i < 6; i++) path[pl++] = pfx[i];
-    for (unsigned int i = 0; ds[i] && pl < sizeof(path) - 8; i++) path[pl++] = ds[i];
-    const char *sfx = "/status";
-    for (unsigned int i = 0; i < 7; i++) path[pl++] = sfx[i];
-
-    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, pl, T_OREAD);
-    if (fd < 0) return 0;
-    char buf[512];
-    long n = t_read(fd, buf, sizeof(buf) - 1);
-    (void)t_close(fd);
-    if (n <= 0) return 0;
-    for (long i = 0; i + (long)keylen <= n; i++) {
-        unsigned int k = 0;
-        while (k < keylen && buf[i + (long)k] == key[k]) k++;
-        if (k != keylen) continue;
-        long j = i + (long)keylen;
-        while (j < n && buf[j] == ' ') j++;
-        unsigned int v = 0;
-        int got = 0;
-        while (j < n && buf[j] >= '0' && buf[j] <= '9') { v = v * 10u + (unsigned int)(buf[j++] - '0'); got = 1; }
-        if (!got) return 0;
-        *out = v;
-        return 1;
-    }
-    return 0;
 }
 
 // peak_out (CL-5, may be NULL): when non-NULL the wait polls /proc/<pid>/status
@@ -2958,6 +2869,751 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
                                unsigned long hb_sec, unsigned long cap_mask) {
     return go4c_spawn_wait_hb_peak(name, name_len, argv_blob, argv_len, argc,
                                    max_sec, hb_sec, cap_mask, (unsigned int *)0);
+}
+
+// Clade CL-4c: the device-toolchain gate. When /clade is baked
+// (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
+// /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
+// /clade/bin/clang++ existing -> a normal (non-clade) boot skips it. joey-
+// spawned children are PRINCIPAL_SYSTEM (resource-exempt), so the compiler
+// allocates freely (the 256M PROC_PAGE_MAX cap + the F4 per-child budget are
+// the CL-5 concern -- a logged-in USER's non-exempt compile). Returns 0 PASS
+// / skip; -1 FAIL.
+static int clade_gate(void) {
+    char nb[24];
+    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang++", 18, T_OPATH);
+    if (probe < 0) {
+        t_putstr("joey: clade CL-4 /clade absent (THYLACINE_BAKE_CLADE not set) "
+                 "-- skipping\n");
+        return 0;  // not baked -> not a failure
+    }
+    (void)t_close(probe);
+
+    // Writable scratch on the pool root for the source + build outputs.
+    {
+        long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3, T_OREAD,
+                               T_WALK_CREATE_DMDIR | 0777u);
+        if (m >= 0) (void)t_close(m);
+    }
+
+
+    // Tier 1: does clang++ load + run at all? A trivial --version invocation
+    // surfaces getMainExecutable / Support-layer runtime faults cheaply. argv[0]
+    // ABSOLUTE so getMainExecutable's argv0 resolution (the CL-4 fork patch)
+    // finds the real file -> InstalledDir=/clade/bin.
+    static const char ver_argv[] = "/clade/bin/clang++\0--version";
+    long vst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
+                                  ver_argv, (unsigned int)sizeof(ver_argv), 2,
+                                  120, 20, 0);
+    if (vst != 0) {
+        t_putstr("joey: clade CL-4 gate: clang++ --version FAILED rc=");
+        t_putstr(itoa_dec(vst, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    t_putstr("joey: clade CL-4 clang++ --version OK\n");
+
+    // Write /tmp/hello.cpp. Deliberately a REAL C++ program, not a bare hello:
+    // <vector>/<string> exercise the libc++ headers + template instantiation,
+    // and the throw/catch round trip exercises the CL-2 C++ runtime end to end
+    // in a FRESHLY on-device-compiled binary -- libc++abi's personality routine
+    // + libunwind walking .eh_frame emitted by this very clang (-funwind-tables=2
+    // + ld.lld --eh-frame-hdr). A compile that links but cannot unwind would
+    // otherwise pass a printf-only gate. Exits 0 IFF sum(i*i,0..9)==285 AND the
+    // exception was caught with its payload intact.
+    static const char hello_cpp[] =
+        "#include <cstdio>\n"
+        "#include <vector>\n"
+        "#include <string>\n"
+        "#include <stdexcept>\n"
+        "static long sq(int x){\n"
+        "  if(x<0) throw std::runtime_error(\"neg\");\n"
+        "  return (long)x*x;\n"
+        "}\n"
+        "int main(){\n"
+        "  std::vector<int> v(10);\n"
+        "  for(int i=0;i<10;i++) v[i]=i;\n"
+        "  long s=0; for(int x:v) s+=sq(x);\n"
+        "  int eh=0;\n"
+        "  try { (void)sq(-1); }\n"
+        "  catch(const std::runtime_error &e){ eh = (std::string(e.what())==\"neg\"); }\n"
+        "  std::string tag(\"CLADE-HELLO\");\n"
+        "  std::printf(\"%s sum=%ld eh=%d\\n\", tag.c_str(), s, eh);\n"
+        "  return (s==285 && eh==1)?0:1;\n"
+        "}\n";
+    {
+        long td = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
+        if (td < 0) { t_putstr("joey: clade CL-4 open /tmp FAILED\n"); return -1; }
+        long sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
+        if (sf < 0) {  // self-heal a leftover on a preserved pool
+            (void)t_unlink(td, "hello.cpp", 9, 0);
+            sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
+        }
+        (void)t_close(td);
+        if (sf < 0) { t_putstr("joey: clade CL-4 create hello.cpp FAILED\n"); return -1; }
+        unsigned int srclen = (unsigned int)(sizeof(hello_cpp) - 1);  // drop the NUL
+        long wn = t_write(sf, hello_cpp, srclen);
+        (void)t_fsync(sf, 0);
+        (void)t_close(sf);
+        if (wn != (long)srclen) {
+            t_putstr("joey: clade CL-4 write hello.cpp SHORT\n"); return -1;
+        }
+    }
+
+    // Tier 2a: compile + link. clang++ execs /clade/bin/ld.lld by name (found via
+    // getMainExecutable -> InstalledDir). --sysroot=/clade/sysroot supplies the
+    // C++ headers + the static runtime + CRT. The default target is
+    // aarch64-unknown-thylacine (LLVM_DEFAULT_TARGET_TRIPLE), so no --target.
+    t_putstr("joey: clade CL-4 compiling /tmp/hello.cpp (clang++ -O2 -> ld.lld)\n");
+    // CL-4 DIAG (compile layer): getMainExecutable returns "" on Thylacine
+    // (realpath fails: no /proc/self/fd), so InstalledDir is empty and clang
+    // can't auto-find its resource dir / ld.lld. Work around with explicit
+    // -resource-dir + -B, and -v to surface clang's exact steps + any error.
+    // -v keeps clang's steps visible while the CL-4b getMainExecutable fix is
+    // validated (InstalledDir now resolves -> clang auto-finds its resource dir,
+    // cc1 self-spawn path, and ld.lld -- NO explicit -B/-resource-dir needed).
+    // No -no-canonical-prefixes here: the multicall must self-dispatch its own
+    // cc1 with the DEFAULT driver flags, which is exactly what fork commit
+    // CL-4c fixes (prepend the tool name only when the exec path does not
+    // already name it). A gate that needed the flag would prove nothing --
+    // no real build system passes it.
+    static const char cc_argv[] =
+        "/clade/bin/clang++\0-v\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
+    unsigned int cc_peak = 0;   // CL-5: peak anon pages, read before the reap
+    long cst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
+                                  cc_argv, (unsigned int)sizeof(cc_argv), 7,
+                                  600, 20, 0, &cc_peak);
+    if (cst != 0) {
+        t_putstr("joey: clade CL-4 gate: compile+link FAILED rc=");
+        t_putstr(itoa_dec(cst, nb, sizeof(nb)));
+        t_putstr("\n");
+        return -1;
+    }
+    // CL-5 (LLVM-DESIGN.md section 7): the number the F4 page-budget is sized
+    // against -- the DRIVER's own peak. Note what this does and does not cover:
+    // the driver spawns cc1 and ld.lld as separate Procs, each with its own
+    // independent PROC_PAGE_MAX, so the cap that actually binds a build is the
+    // largest SINGLE process, not the sum. Reported in pages and MiB.
+    t_putstr("joey: clade CL-5 clang++ driver peak=");
+    t_putstr(itoa_dec((long)cc_peak, nb, sizeof(nb)));
+    t_putstr(" pages (");
+    t_putstr(itoa_dec((long)(cc_peak / 256u), nb, sizeof(nb)));
+    t_putstr(" MiB) of cap ");
+    t_putstr(itoa_dec((long)(65536u / 256u), nb, sizeof(nb)));
+    t_putstr(" MiB\n");
+    long ho = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp/hello", 10, T_OPATH);
+    if (ho < 0) { t_putstr("joey: clade CL-4 gate: /tmp/hello not produced\n"); return -1; }
+    (void)t_close(ho);
+
+    // Tier 2b: run it. Its stdio is the console; "CLADE-HELLO sum=285 eh=1" prints +
+    // exit 0 confirms the computed check (proves the fresh ELF execs + runs).
+    t_putstr("joey: clade CL-4 running /tmp/hello\n");
+    static const char run_argv[] = "/tmp/hello";
+    long rst = go4c_spawn_wait_hb("/tmp/hello", 10,
+                                  run_argv, (unsigned int)sizeof(run_argv), 1,
+                                  60, 15, 0);
+    if (rst == 0) {
+        // Tier 2c: the separate compile + link shape every build system drives
+        // (make/cmake/cargo/go). Worth its own leg because `-c` is a SINGLE job,
+        // and Driver.cpp disables integrated-cc1 only when there is more than
+        // one -- so this path runs cc1 IN-PROCESS, exercising ExecuteCC1Tool's
+        // own `ArgV[1] == "-cc1"` dispatch rather than the spawn. Both are
+        // broken by a stale PrependArg, so covering only the spawn would leave
+        // half the surface unproven.
+        t_putstr("joey: clade CL-4 -c compile then link-only\n");
+        static const char co_argv[] =
+            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/hello.cpp\0-o\0/tmp/hello.o";
+        unsigned int co_peak = 0;
+        long ost = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
+                                      co_argv, (unsigned int)sizeof(co_argv), 7,
+                                      600, 20, 0, &co_peak);
+        t_putstr("joey: clade CL-5 clang++ -c peak=");
+        t_putstr(itoa_dec((long)co_peak, nb, sizeof(nb)));
+        t_putstr(" pages\n");
+        if (ost != 0) {
+            t_putstr("joey: clade CL-4 gate: -c compile FAILED rc=");
+            t_putstr(itoa_dec(ost, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        static const char lo_argv[] =
+            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0/tmp/hello.o\0-o\0/tmp/hello2";
+        unsigned int lo_peak = 0;
+        long lst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
+                                      lo_argv, (unsigned int)sizeof(lo_argv), 5,
+                                      600, 20, 0, &lo_peak);
+        t_putstr("joey: clade CL-5 clang++ link-only peak=");
+        t_putstr(itoa_dec((long)lo_peak, nb, sizeof(nb)));
+        t_putstr(" pages\n");
+        if (lst != 0) {
+            t_putstr("joey: clade CL-4 gate: link-only FAILED rc=");
+            t_putstr(itoa_dec(lst, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        static const char run2_argv[] = "/tmp/hello2";
+        long r2 = go4c_spawn_wait_hb("/tmp/hello2", 11,
+                                     run2_argv, (unsigned int)sizeof(run2_argv), 1,
+                                     60, 15, 0);
+        if (r2 != 0) {
+            t_putstr("joey: clade CL-4 gate: /tmp/hello2 exit rc=");
+            t_putstr(itoa_dec(r2, nb, sizeof(nb)));
+            t_putstr(" (want 0)\n");
+            return -1;
+        }
+    }
+    if (rst != 0) {
+        t_putstr("joey: clade CL-4 gate: /tmp/hello exit rc=");
+        t_putstr(itoa_dec(rst, nb, sizeof(nb)));
+        t_putstr(" (want 0)\n");
+        return -1;
+    }
+    // ---- CL-5 (docs/LLVM-DESIGN.md section 7): size the F4 page budget. ----
+    // hello.cpp is a floor, not a workload: it measures what clang costs to
+    // START, not to COMPILE. This TU is deliberately template-heavy (16 Bag<K,V>
+    // instantiations over distinct type pairs + 8 string/vector ones + a
+    // compile-time Fib + sort/unique/hash churn per instantiation) so the
+    // frontend and the -O2 middle-end both do real work. On the host it costs
+    // 3.7x hello.cpp (359 MiB vs 97 MiB), which is the ratio that makes it a
+    // useful probe of where PROC_PAGE_MAX actually binds.
+    //
+    // Compiled with -c so cc1 runs IN-PROCESS -- the spawned-cc1 path reports
+    // only the driver's own ~0.5 MiB, which measures nothing.
+    //
+    // REPORT-ONLY, never a gate: if this TU exceeds PROC_PAGE_MAX the fault
+    // path proc_fault_terminates it (graceful OOM, by design), and that outcome
+    // is the measurement -- not a boot failure.
+    {
+        static const char stress_cpp[] =
+        "#include <algorithm>\n"
+        "#include <functional>\n"
+        "#include <map>\n"
+        "#include <memory>\n"
+        "#include <set>\n"
+        "#include <string>\n"
+        "#include <tuple>\n"
+        "#include <unordered_map>\n"
+        "#include <vector>\n"
+        "template <int N> struct Fib { static const long v = Fib<N-1>::v + Fib<N-2>::v; };\n"
+        "template <> struct Fib<0> { static const long v = 0; };\n"
+        "template <> struct Fib<1> { static const long v = 1; };\n"
+        "template <typename K, typename V> struct Bag {\n"
+        "  std::map<K,V> m; std::unordered_map<K,V> u; std::vector<std::pair<K,V>> v;\n"
+        "  std::set<K> s; std::shared_ptr<std::vector<V>> p;\n"
+        "  void add(const K& k, const V& val){ m[k]=val; u[k]=val; v.push_back({k,val}); s.insert(k); }\n"
+        "  long total() const { long t=0; for (auto&[a,b]:m) t+=(long)m.size(); for(auto&x:s) t+=1; return t+(long)(u.size()+v.size()); }\n"
+        "};\n"
+        "template <typename T> static long churn(std::vector<T>& xs) {\n"
+        "  std::sort(xs.begin(), xs.end());\n"
+        "  std::stable_sort(xs.begin(), xs.end(), std::greater<T>());\n"
+        "  auto it = std::unique(xs.begin(), xs.end());\n"
+        "  xs.erase(it, xs.end());\n"
+        "  long acc = 0; for (auto& x : xs) acc += (long)std::hash<T>{}(x);\n"
+        "  return acc;\n"
+        "}\n"
+        "typedef long long ll; typedef unsigned long ul; typedef unsigned char uc;\n"
+        "typedef unsigned short us; typedef unsigned int ui;\n"
+        "#define MK(n, K, V) static long f##n(){ Bag<K,V> b; b.add(K(), V()); std::vector<K> xs(8); return b.total()+churn(xs); }\n"
+        "MK(0,int,long) MK(1,long,int) MK(2,ui,double) MK(3,char,int)\n"
+        "MK(4,short,long) MK(5,ll,int) MK(6,ul,float) MK(7,double,int)\n"
+        "MK(8,float,long) MK(9,uc,double) MK(10,us,long) MK(11,int,double)\n"
+        "MK(12,long,float) MK(13,ui,ll) MK(14,char,double) MK(15,short,float)\n"
+        "#define MKS(n) static long g##n(){ Bag<std::string,std::vector<int>> b; b.add(\"k\" #n, {1,2,3}); return b.total(); }\n"
+        "MKS(0) MKS(1) MKS(2) MKS(3) MKS(4) MKS(5) MKS(6) MKS(7)\n"
+        "int main(){\n"
+        "  long t = Fib<40>::v;\n"
+        "  t += f0()+f1()+f2()+f3()+f4()+f5()+f6()+f7()+f8()+f9()+f10()+f11()+f12()+f13()+f14()+f15();\n"
+        "  t += g0()+g1()+g2()+g3()+g4()+g5()+g6()+g7();\n"
+        "  return (int)(t & 1);\n"
+        "}\n"        ;
+        long td2 = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
+        if (td2 >= 0) {
+            long sf2 = t_walk_create(td2, "stress.cpp", 10, T_OWRITE, 0644u);
+            if (sf2 < 0) {
+                (void)t_unlink(td2, "stress.cpp", 10, 0);
+                sf2 = t_walk_create(td2, "stress.cpp", 10, T_OWRITE, 0644u);
+            }
+            (void)t_close(td2);
+            if (sf2 >= 0) {
+                unsigned int sl = (unsigned int)(sizeof(stress_cpp) - 1);
+                long wn2 = t_write(sf2, stress_cpp, sl);
+                (void)t_fsync(sf2, 0);
+                (void)t_close(sf2);
+                if (wn2 == (long)sl) {
+                    static const char st_argv[] =
+                        "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/stress.cpp\0-o\0/tmp/stress.o";
+                    unsigned int st_peak = 0;
+                    long sst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
+                                                       st_argv, (unsigned int)sizeof(st_argv), 7,
+                                                       900, 30, 0, &st_peak);
+                    t_putstr("joey: clade CL-5 stress-TU cc1 peak=");
+                    t_putstr(itoa_dec((long)st_peak, nb, sizeof(nb)));
+                    t_putstr(" pages (");
+                    t_putstr(itoa_dec((long)(st_peak / 256u), nb, sizeof(nb)));
+                    t_putstr(" MiB) rc=");
+                    t_putstr(itoa_dec(sst, nb, sizeof(nb)));
+                    t_putstr(" cap=256 MiB\n");
+                }
+            }
+        }
+    }
+
+    t_putstr("joey: clade CL-4 gate: PASS\n");
+    return 0;
+}
+
+// Clade CL-7b-2: llvmpipe on the device. Runs the OSMesa prover, which clears
+// a buffer and rasterises a triangle -- a clear alone could be a memset fast
+// path that never reaches a shader, so only the triangle proves gallivm
+// compiled code and ORC executed it out of a dual-mapped code Burrow (I-42).
+//
+// BOOT-FATAL since CL-7b-2, when the prover first became able to pass. At
+// CL-7b-1 it could not: CAP_JIT is elevation-only, so a joey-spawned child
+// does not inherit it and SYS_JIT_CREATE had to refuse. The prover now walks
+// the corvus jit clearance itself, exactly as /bin/jit-prover does, and holds
+// the capability by the time it touches GL.
+//
+// A zero exit is a strong assertion, not a weak one -- the prover returns
+// non-zero for every station on the way: it cannot reach /srv/corvus, the
+// principal is not eligible for the jit level, the grant is not CAP_JIT, the
+// redeem fails, SYS_JIT_CREATE still refuses afterwards, context creation
+// returns NULL, or any of the rasterised pixels are wrong. So this gate does
+// not need to parse the child's output to know what it proved.
+//
+// What it deliberately does NOT do is fail when the binary is absent. That
+// configuration is real (a clade bake from a builder run predating CL-7a-2
+// stages fine without a GL half), and it is stage_clade's job to say so at
+// bake time -- which it now does, out loud, rather than dropping the file in
+// silence. A gate that also owned that decision would be guessing.
+static int gl_gate(void) {
+    char nb[24];
+    long p = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/osmesa-prove", 23, T_OPATH);
+    if (p < 0) {
+        return 0;  // not baked -- normal boot, nothing to say
+    }
+    (void)t_close(p);
+
+    unsigned int peak = 0;
+    static const char argv0[] = "/clade/bin/osmesa-prove";
+    long rc = go4c_spawn_wait_hb_peak("/clade/bin/osmesa-prove", 23,
+                                      argv0, (unsigned int)sizeof(argv0), 1,
+                                      600, 30, 0, &peak);
+    t_putstr("joey: clade CL-7b osmesa-prove rc=");
+    t_putstr(itoa_dec(rc, nb, sizeof(nb)));
+    t_putstr(" peak=");
+    t_putstr(itoa_dec((long)peak, nb, sizeof(nb)));
+    t_putstr(" pages (");
+    t_putstr(itoa_dec((long)(peak / 256u), nb, sizeof(nb)));
+    t_putstr(" MiB)\n");
+    if (rc != 0) {
+        return 1;
+    }
+    t_putstr("joey: clade CL-7b GL gate: PASS\n");
+    return 0;
+}
+
+// Clade CL-5: the BUILD STORM. `make -jN` drives the device clang over a real
+// project's real sources, on the device, and the artifact it produces RUNS.
+//
+// The project is GNU make 4.4.1 itself (staged at /storm by tools/build.sh
+// stage_storm; see the rationale there). The proof chain is deliberately three
+// links, because only the last one is hard to fake:
+//   1. `make -j4` exits 0                -- the storm completed
+//   2. /storm/outB/make exists, ~370 KiB -- it produced a plausible artifact
+//   3. /storm/outB/make --version exits 0 -- the artifact RUNS
+// A toolchain that miscompiles can still satisfy (1) and (2). Only (3) says the
+// bytes were right, and only (4) -- the device-built make then DRIVING a build
+// of its own -- says the artifact is a working tool rather than a binary that
+// merely survives --version.
+//
+// #102: an opt-out token on the kernel cmdline, read back through the /hw FDT
+// mount. QEMU turns `-append` into /chosen/bootargs; this is the same channel
+// `thylacine.nowatchpoint` uses (usr/debug-probe/src/main.rs), reused rather
+// than reinvented. Absent, empty, or unreadable -> the token is NOT present,
+// so a boot that does not opt out behaves exactly as it did before.
+//
+// devhw is `.seekable = false`, so this MUST be a sequential read -- a
+// positioned pread is rejected by the #37 ESPIPE gate.
+static int bootarg_has(const char *needle, long nlen) {
+    char buf[256];
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, "/hw/chosen/bootargs", 19, T_OREAD);
+    if (fd < 0) {
+        return 0;  // no bootargs property -> nothing opted out
+    }
+    long n = t_read(fd, buf, (long)sizeof(buf));
+    (void)t_close(fd);
+    if (n <= 0 || nlen <= 0) {
+        return 0;
+    }
+    for (long i = 0; i + nlen <= n; i++) {
+        long j = 0;
+        while (j < nlen && buf[i + j] == needle[j]) {
+            j++;
+        }
+        if (j == nlen) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Gated on /storm/Makefile: a normal (non-clade) boot skips silently.
+static int clade_storm_gate(void) {
+    char nb[24];
+    // #102: checked FIRST and reported out loud. The storm is a legitimate
+    // multi-minute boot cost, so a harness with a login budget must be able to
+    // decline it -- and saying so on every boot is what makes the plumbing
+    // visible instead of leaving a silent 300 s timeout to be diagnosed.
+    if (bootarg_has("thylacine.nostorm", 17)) {
+        t_putstr("joey: clade CL-5 storm: thylacine.nostorm -- skipping by request\n");
+        return 0;
+    }
+    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/Makefile", 15, T_OPATH);
+    if (probe < 0) {
+        t_putstr("joey: clade CL-5 storm: /storm absent -- skipping\n");
+        return 0;  // not baked -> not a failure
+    }
+    (void)t_close(probe);
+    // The C-mode driver copy (stage_clade adds it for CL-5). Without it the
+    // storm's .c sources would be compiled as C++ by a clang++ copy.
+    probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang", 16, T_OPATH);
+    if (probe < 0) {
+        t_putstr("joey: clade CL-5 storm FAILED: /clade/bin/clang missing "
+                 "(stale /clade bake -- re-run stage_clade)\n");
+        return -1;
+    }
+    (void)t_close(probe);
+
+    // The build directory. /storm is baked SYSTEM-owned; joey is SYSTEM.
+    {
+        long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm", 6, T_OPATH);
+        if (sd < 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: cannot open /storm\n");
+            return -1;
+        }
+        long od = mkdir_or_open(sd, "out", 3);
+        (void)t_close(sd);
+        if (od < 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: cannot create /storm/out\n");
+            return -1;
+        }
+        (void)t_close(od);
+    }
+
+    // --- The per-TU memory number, measured before the storm. -------------
+    // The storm's own peak is MAKE's peak, which is small and uninteresting;
+    // the compilers are grandchildren joey cannot see. So measure one TU
+    // directly: main.c, the largest source in the project (121 KiB). This is
+    // the number that pairs with -jN to give the concurrent footprint, and it
+    // is the first peak this project has ever recorded for real C (as opposed
+    // to the CL-5 stress TU's deliberately template-heavy C++).
+    {
+        static const char one_argv[] =
+            "/clade/bin/clang\0-march=armv8-a\0-moutline-atomics\0-nostdlibinc"
+            "\0-isystem\0/clade/sysroot/include\0-D_GNU_SOURCE=1\0-DHAVE_CONFIG_H"
+            "\0-include\0/storm/gnumake/src/storm-defs.h"
+            "\0-I/storm/gnumake/src\0-I/storm/gnumake/lib"
+            "\0-std=gnu11\0-O2\0-fno-pic\0-fno-stack-protector"
+            "\0-c\0/storm/gnumake/src/main.c\0-o\0/storm/out/probe_main.o";
+        unsigned int one_peak = 0;
+        long t0 = go4c_now_ms();
+        long ost = go4c_spawn_wait_hb_peak("/clade/bin/clang", 16,
+                                           one_argv, (unsigned int)sizeof(one_argv), 20,
+                                           600, 60, 0, &one_peak);
+        long dt = go4c_now_ms() - t0;
+        t_putstr("joey: clade CL-5 storm one-TU (main.c, 121 KiB) peak=");
+        t_putstr(itoa_dec((long)one_peak, nb, sizeof(nb)));
+        t_putstr(" pages (");
+        t_putstr(itoa_dec((long)(one_peak / 256u), nb, sizeof(nb)));
+        t_putstr(" MiB) ms=");
+        t_putstr(itoa_dec(dt, nb, sizeof(nb)));
+        t_putstr(" rc=");
+        t_putstr(itoa_dec(ost, nb, sizeof(nb)));
+        t_putstr("\n");
+        if (ost != 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: one-TU compile rc != 0\n");
+            return -1;
+        }
+    }
+
+    // --- The storm itself. ------------------------------------------------
+    // -j4 matches the default -smp 4. Every recipe is shell-free by
+    // construction (stage_storm), so make takes its no-shell fast path and
+    // spawns clang directly through CL-1b's posix_spawn -- Thylacine has no
+    // /bin/sh, so a single metachar in the generated command lines would fail
+    // the whole storm rather than degrade.
+    //
+    // Two passes into SEPARATE output dirs: -j1 (the serial CONTROL) then -j4
+    // (the storm). Both are worth keeping permanently:
+    //   * the control is the differential that DIAGNOSED #96 -- the first storm
+    //     boot had -j4's first job succeed and its concurrent siblings exit 1
+    //     with no diagnostic at all, while -j1 over the identical cold tree
+    //     completed; that one comparison separated "make-spawned clang is
+    //     broken" from "CONCURRENT make-spawned clang is broken" and pointed
+    //     straight at GNU make's bad_stdin -> fstat-on-a-pipe. If the storm
+    //     ever reddens again, the control says immediately which it is.
+    //   * -j1 vs -j4 wall time IS the parallel-speedup number the CL-5 charter
+    //     asks to record.
+    //
+    // -B (always-make) on both: the pool persists across boots, so without it
+    // the second boot would find every object up to date and exit 0 having
+    // compiled NOTHING -- a vacuous pass that looks exactly like a real one.
+    long sst = -1;
+    long serial_ms = 0, par_ms = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        const char *jf   = pass ? "-j4" : "-j1";
+        const char *od   = pass ? "/storm/outB" : "/storm/outA";
+        const char *odir = pass ? "outB" : "outA";
+        {
+            long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm", 6, T_OPATH);
+            if (sd >= 0) {
+                long od2 = mkdir_or_open(sd, odir, 4);
+                if (od2 >= 0) (void)t_close(od2);
+                (void)t_close(sd);
+            }
+        }
+        // argv: make -f /storm/Makefile -B <-jN> O=<outdir>. `O=` overrides
+        // the Makefile's output dir from the command line, so the two passes
+        // do not share objects; -B forces every recipe to run even though the
+        // pool still holds the previous boot's outputs.
+        char sa[96];
+        unsigned int n = 0;
+        const char *parts[6] = { "make", "-f", "/storm/Makefile", "-B", jf, od };
+        for (int i = 0; i < 6; i++) {
+            const char *p = parts[i];
+            if (i == 5) { sa[n++] = 'O'; sa[n++] = '='; }
+            unsigned int l = 0; while (p[l]) l++;
+            for (unsigned int k = 0; k < l; k++) sa[n++] = p[k];
+            sa[n++] = '\0';
+        }
+        t_putstr("joey: clade CL-5 storm: running `make -f /storm/Makefile -B ");
+        t_putstr(jf);
+        t_putstr(" O=");
+        t_putstr(od);
+        t_putstr("` (GNU make 4.4.1 builds itself, 35 TUs)\n");
+        long st0 = go4c_now_ms();
+        sst = go4c_spawn_wait_hb("/bin/make", 9, sa, n, 6,
+                                 /*max_sec=*/1800, /*hb_sec=*/30, /*caps=*/0ul);
+        long sdt = go4c_now_ms() - st0;
+        if (pass) par_ms = sdt; else serial_ms = sdt;
+        t_putstr("joey: clade CL-5 storm: make ");
+        t_putstr(jf);
+        t_putstr(" reaped rc=");
+        t_putstr(itoa_dec(sst, nb, sizeof(nb)));
+        t_putstr(" wall_ms=");
+        t_putstr(itoa_dec(sdt, nb, sizeof(nb)));
+        t_putstr("\n");
+        if (sst != 0) {
+            t_putstr("joey: clade CL-5 storm FAILED (make ");
+            t_putstr(jf);
+            t_putstr(" exit != 0)\n");
+            return -1;
+        }
+    }
+    // The parallel-speedup number the CL-5 charter asks to record. Reported as
+    // hundredths so it needs no float: 400 == 4.00x.
+    if (par_ms > 0) {
+        t_putstr("joey: clade CL-5 storm: serial_ms=");
+        t_putstr(itoa_dec(serial_ms, nb, sizeof(nb)));
+        t_putstr(" parallel_ms=");
+        t_putstr(itoa_dec(par_ms, nb, sizeof(nb)));
+        t_putstr(" speedup_x100=");
+        t_putstr(itoa_dec((serial_ms * 100) / par_ms, nb, sizeof(nb)));
+        t_putstr("\n");
+    }
+    // Link 2: a plausible artifact. The host cross-build of the same 35
+    // objects is ~380 KiB; anything under 64 KiB means the link silently
+    // produced a stub.
+    {
+        long fd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/outB/make", 16, T_OREAD);
+        if (fd < 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: /storm/outB/make not produced\n");
+            return -1;
+        }
+        long sz = t_lseek(fd, 0, T_SEEK_END);
+        (void)t_close(fd);
+        t_putstr("joey: clade CL-5 storm: /storm/outB/make = ");
+        t_putstr(itoa_dec(sz, nb, sizeof(nb)));
+        t_putstr(" bytes\n");
+        if (sz < 65536) {
+            t_putstr("joey: clade CL-5 storm FAILED: artifact implausibly small\n");
+            return -1;
+        }
+    }
+
+    // Link 3: it RUNS. A miscompile can still link a right-sized binary.
+    {
+        static const char nv_argv[] = "/storm/outB/make\0--version";
+        long nst = go4c_spawn_wait_hb("/storm/outB/make", 16,
+                                      nv_argv, (unsigned int)sizeof(nv_argv), 2,
+                                      120, 30, 0);
+        if (nst != 0) {
+            t_putstr("joey: clade CL-5 storm FAILED: device-built make "
+                     "--version rc=");
+            t_putstr(itoa_dec(nst, nb, sizeof(nb)));
+            t_putstr("\n");
+            return -1;
+        }
+        t_putstr("joey: clade CL-5 storm: device-built make --version OK\n");
+    }
+
+    // Link 4: it WORKS. The device-built make drives a build of its own --
+    // one shell-free /bin/cp recipe, the CL-1c-2 shape. This is what
+    // separates "the binary starts" from "the binary is a working tool".
+    {
+        static const char self_mk[] =
+            "all: /storm/outB/selftest.out\n"
+            "/storm/outB/selftest.out: /storm/Makefile\n"
+            "\t/bin/cp /storm/Makefile /storm/outB/selftest.out\n";
+        long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/outB", 11, T_OPATH);
+        if (sd >= 0) {
+            long mf = t_walk_create(sd, "selftest.mk", 11, T_OWRITE, 0644u);
+            if (mf < 0) {
+                (void)t_unlink(sd, "selftest.mk", 11, 0);
+                mf = t_walk_create(sd, "selftest.mk", 11, T_OWRITE, 0644u);
+            }
+            (void)t_unlink(sd, "selftest.out", 12, 0);  // force the recipe to run
+            (void)t_close(sd);
+            if (mf >= 0) {
+                unsigned int sl = (unsigned int)(sizeof(self_mk) - 1);
+                long wn = t_write(mf, self_mk, sl);
+                (void)t_fsync(mf, 0);
+                (void)t_close(mf);
+                if (wn == (long)sl) {
+                    static const char sm_argv[] =
+                        "/storm/outB/make\0-f\0/storm/outB/selftest.mk";
+                    long mst = go4c_spawn_wait_hb("/storm/outB/make", 16,
+                                                  sm_argv, (unsigned int)sizeof(sm_argv), 3,
+                                                  120, 30, 0);
+                    if (mst != 0) {
+                        t_putstr("joey: clade CL-5 storm FAILED: device-built "
+                                 "make could not drive a build, rc=");
+                        t_putstr(itoa_dec(mst, nb, sizeof(nb)));
+                        t_putstr("\n");
+                        return -1;
+                    }
+                    long ck = t_open(T_WALK_OPEN_FROM_ROOT,
+                                     "/storm/outB/selftest.out", 24, T_OREAD);
+                    if (ck < 0) {
+                        t_putstr("joey: clade CL-5 storm FAILED: device-built "
+                                 "make exited 0 but ran no recipe\n");
+                        return -1;
+                    }
+                    (void)t_close(ck);
+                    t_putstr("joey: clade CL-5 storm: device-built make DROVE "
+                             "a build (recipe ran, output verified)\n");
+                }
+            }
+        }
+    }
+
+    t_putstr("joey: clade CL-5 build storm: PASS\n");
+    return 0;
+}
+
+#if THYLA_BOOT_PROBES
+// =============================================================================
+// The boot-test probe helpers -- compiled ONLY into the dev image (#229)
+// =============================================================================
+// Everything below this line exists to be CALLED BY THE PROBE LADDER in main()
+// and by nothing else. It used to be interleaved with the production helpers
+// above (go4c_now_ms, proc_status_peak, go4c_spawn_wait_hb*, clade_gate,
+// gl_gate, bootarg_has, clade_storm_gate), outside any gate -- which is how
+// eleven of these came to be compiled into the lean --production init that can
+// never call them.
+//
+// The ordering constraint is one-way, and it is what makes a single region
+// possible: probes call production helpers, never the reverse. So the whole
+// probe set can sit below the whole production set. Keep it that way.
+//
+// Add a new probe helper INSIDE this region. -Werror=unused-function on the
+// joey target is the tripwire if you forget: the lean build then refuses,
+// rather than warning into a log nobody reads.
+
+static void go4c_timing(const char *step, long t0_ms) {
+    char buf[24];
+    t_putstr("joey: go4c TIMING ");
+    t_putstr(step);
+    t_putstr("=");
+    t_putstr(itoa_dec(go4c_now_ms() - t0_ms, buf, sizeof(buf)));
+    t_putstr("ms\n");
+}
+
+// Go Stage 4c: spawn `name` with an explicit NUL-separated argv blob (argc
+// entries, the login full-argv idiom) on cons fds 0/1/2 -- so the child's
+// stdout/stderr (go's diagnostics + the built binary's marker) reach the console
+// log -- wait BY PID, and return the exit status (>= 0), or -1 on a spawn/wait
+// failure. The children run as joey's identity (PRINCIPAL_SYSTEM during
+// bringup), so they own the SYSTEM-baked /goroot + /go-cache and are
+// resource-exempt (the Go compiler allocates freely). perm_flags/cap_mask 0:
+// the toolchain needs neither -- it reads/writes files (identity-gated) and
+// execs subtools (namespace OEXEC), no capabilities.
+static long go4c_spawn_wait(const char *name, unsigned int name_len,
+                            const char *argv_blob, unsigned int argv_len,
+                            unsigned int argc) {
+    long cfd = t_console_open();
+    unsigned int fds[3] = { 0, 0, 0 };
+    unsigned int fd_count = 0;
+    if (cfd >= 0) {
+        fds[0] = fds[1] = fds[2] = (unsigned int)cfd;
+        fd_count = 3;
+    }
+    struct t_sys_spawn_args req = {
+        .name_va       = (unsigned long)name,
+        .argv_data_va  = (unsigned long)argv_blob,
+        .fd_list_va    = (unsigned long)fds,
+        .name_len      = name_len,
+        .argv_data_len = argv_len,
+        .argc          = argc,
+        .fd_count      = fd_count,
+        .perm_flags    = 0,
+        ._pad_envp     = 0,
+        .cap_mask      = 0,
+    };
+    long pid = t_spawn_full_argv(&req);
+    if (cfd >= 0) (void)t_close(cfd);
+    if (pid <= 0) return -1;
+    int st = -1;
+    long reaped = t_wait_pid_for((int)pid, 0, &st);
+    if (reaped != pid) return -1;
+    return (long)st;
+}
+
+// CL-5: read one "<key>:" decimal field out of /proc/<pid>/status. Used by the
+// budget probe; kept separate from proc_status_peak so the hot wait loop stays
+// a single read.
+static int proc_status_field(long pid, const char *key, unsigned int keylen,
+                             unsigned int *out) {
+    char path[32];
+    char nb[24];
+    const char *ds = itoa_dec(pid, nb, sizeof(nb));
+    unsigned int pl = 0;
+    const char *pfx = "/proc/";
+    for (unsigned int i = 0; i < 6; i++) path[pl++] = pfx[i];
+    for (unsigned int i = 0; ds[i] && pl < sizeof(path) - 8; i++) path[pl++] = ds[i];
+    const char *sfx = "/status";
+    for (unsigned int i = 0; i < 7; i++) path[pl++] = sfx[i];
+
+    long fd = t_open(T_WALK_OPEN_FROM_ROOT, path, pl, T_OREAD);
+    if (fd < 0) return 0;
+    char buf[512];
+    long n = t_read(fd, buf, sizeof(buf) - 1);
+    (void)t_close(fd);
+    if (n <= 0) return 0;
+    for (long i = 0; i + (long)keylen <= n; i++) {
+        unsigned int k = 0;
+        while (k < keylen && buf[i + (long)k] == key[k]) k++;
+        if (k != keylen) continue;
+        long j = i + (long)keylen;
+        while (j < n && buf[j] == ' ') j++;
+        unsigned int v = 0;
+        int got = 0;
+        while (j < n && buf[j] >= '0' && buf[j] <= '9') { v = v * 10u + (unsigned int)(buf[j++] - '0'); got = 1; }
+        if (!got) return 0;
+        *out = v;
+        return 1;
+    }
+    return 0;
 }
 
 // #46 regression probe: fstat on a WRITE-ONLY fd must work + see the
@@ -3921,646 +4577,6 @@ static int probe100_errno(void) {
     return bad ? -1 : 0;
 }
 
-// Clade CL-4c: the device-toolchain gate. When /clade is baked
-// (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
-// /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
-// /clade/bin/clang++ existing -> a normal (non-clade) boot skips it. joey-
-// spawned children are PRINCIPAL_SYSTEM (resource-exempt), so the compiler
-// allocates freely (the 256M PROC_PAGE_MAX cap + the F4 per-child budget are
-// the CL-5 concern -- a logged-in USER's non-exempt compile). Returns 0 PASS
-// / skip; -1 FAIL.
-static int clade_gate(void) {
-    char nb[24];
-    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang++", 18, T_OPATH);
-    if (probe < 0) {
-        t_putstr("joey: clade CL-4 /clade absent (THYLACINE_BAKE_CLADE not set) "
-                 "-- skipping\n");
-        return 0;  // not baked -> not a failure
-    }
-    (void)t_close(probe);
-
-    // Writable scratch on the pool root for the source + build outputs.
-    {
-        long m = t_walk_create(T_WALK_OPEN_FROM_ROOT, "tmp", 3, T_OREAD,
-                               T_WALK_CREATE_DMDIR | 0777u);
-        if (m >= 0) (void)t_close(m);
-    }
-
-
-    // Tier 1: does clang++ load + run at all? A trivial --version invocation
-    // surfaces getMainExecutable / Support-layer runtime faults cheaply. argv[0]
-    // ABSOLUTE so getMainExecutable's argv0 resolution (the CL-4 fork patch)
-    // finds the real file -> InstalledDir=/clade/bin.
-    static const char ver_argv[] = "/clade/bin/clang++\0--version";
-    long vst = go4c_spawn_wait_hb("/clade/bin/clang++", 18,
-                                  ver_argv, (unsigned int)sizeof(ver_argv), 2,
-                                  120, 20, 0);
-    if (vst != 0) {
-        t_putstr("joey: clade CL-4 gate: clang++ --version FAILED rc=");
-        t_putstr(itoa_dec(vst, nb, sizeof(nb)));
-        t_putstr("\n");
-        return -1;
-    }
-    t_putstr("joey: clade CL-4 clang++ --version OK\n");
-
-    // Write /tmp/hello.cpp. Deliberately a REAL C++ program, not a bare hello:
-    // <vector>/<string> exercise the libc++ headers + template instantiation,
-    // and the throw/catch round trip exercises the CL-2 C++ runtime end to end
-    // in a FRESHLY on-device-compiled binary -- libc++abi's personality routine
-    // + libunwind walking .eh_frame emitted by this very clang (-funwind-tables=2
-    // + ld.lld --eh-frame-hdr). A compile that links but cannot unwind would
-    // otherwise pass a printf-only gate. Exits 0 IFF sum(i*i,0..9)==285 AND the
-    // exception was caught with its payload intact.
-    static const char hello_cpp[] =
-        "#include <cstdio>\n"
-        "#include <vector>\n"
-        "#include <string>\n"
-        "#include <stdexcept>\n"
-        "static long sq(int x){\n"
-        "  if(x<0) throw std::runtime_error(\"neg\");\n"
-        "  return (long)x*x;\n"
-        "}\n"
-        "int main(){\n"
-        "  std::vector<int> v(10);\n"
-        "  for(int i=0;i<10;i++) v[i]=i;\n"
-        "  long s=0; for(int x:v) s+=sq(x);\n"
-        "  int eh=0;\n"
-        "  try { (void)sq(-1); }\n"
-        "  catch(const std::runtime_error &e){ eh = (std::string(e.what())==\"neg\"); }\n"
-        "  std::string tag(\"CLADE-HELLO\");\n"
-        "  std::printf(\"%s sum=%ld eh=%d\\n\", tag.c_str(), s, eh);\n"
-        "  return (s==285 && eh==1)?0:1;\n"
-        "}\n";
-    {
-        long td = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
-        if (td < 0) { t_putstr("joey: clade CL-4 open /tmp FAILED\n"); return -1; }
-        long sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
-        if (sf < 0) {  // self-heal a leftover on a preserved pool
-            (void)t_unlink(td, "hello.cpp", 9, 0);
-            sf = t_walk_create(td, "hello.cpp", 9, T_OWRITE, 0644u);
-        }
-        (void)t_close(td);
-        if (sf < 0) { t_putstr("joey: clade CL-4 create hello.cpp FAILED\n"); return -1; }
-        unsigned int srclen = (unsigned int)(sizeof(hello_cpp) - 1);  // drop the NUL
-        long wn = t_write(sf, hello_cpp, srclen);
-        (void)t_fsync(sf, 0);
-        (void)t_close(sf);
-        if (wn != (long)srclen) {
-            t_putstr("joey: clade CL-4 write hello.cpp SHORT\n"); return -1;
-        }
-    }
-
-    // Tier 2a: compile + link. clang++ execs /clade/bin/ld.lld by name (found via
-    // getMainExecutable -> InstalledDir). --sysroot=/clade/sysroot supplies the
-    // C++ headers + the static runtime + CRT. The default target is
-    // aarch64-unknown-thylacine (LLVM_DEFAULT_TARGET_TRIPLE), so no --target.
-    t_putstr("joey: clade CL-4 compiling /tmp/hello.cpp (clang++ -O2 -> ld.lld)\n");
-    // CL-4 DIAG (compile layer): getMainExecutable returns "" on Thylacine
-    // (realpath fails: no /proc/self/fd), so InstalledDir is empty and clang
-    // can't auto-find its resource dir / ld.lld. Work around with explicit
-    // -resource-dir + -B, and -v to surface clang's exact steps + any error.
-    // -v keeps clang's steps visible while the CL-4b getMainExecutable fix is
-    // validated (InstalledDir now resolves -> clang auto-finds its resource dir,
-    // cc1 self-spawn path, and ld.lld -- NO explicit -B/-resource-dir needed).
-    // No -no-canonical-prefixes here: the multicall must self-dispatch its own
-    // cc1 with the DEFAULT driver flags, which is exactly what fork commit
-    // CL-4c fixes (prepend the tool name only when the exec path does not
-    // already name it). A gate that needed the flag would prove nothing --
-    // no real build system passes it.
-    static const char cc_argv[] =
-        "/clade/bin/clang++\0-v\0--sysroot=/clade/sysroot\0-O2\0/tmp/hello.cpp\0-o\0/tmp/hello";
-    unsigned int cc_peak = 0;   // CL-5: peak anon pages, read before the reap
-    long cst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
-                                  cc_argv, (unsigned int)sizeof(cc_argv), 7,
-                                  600, 20, 0, &cc_peak);
-    if (cst != 0) {
-        t_putstr("joey: clade CL-4 gate: compile+link FAILED rc=");
-        t_putstr(itoa_dec(cst, nb, sizeof(nb)));
-        t_putstr("\n");
-        return -1;
-    }
-    // CL-5 (LLVM-DESIGN.md section 7): the number the F4 page-budget is sized
-    // against -- the DRIVER's own peak. Note what this does and does not cover:
-    // the driver spawns cc1 and ld.lld as separate Procs, each with its own
-    // independent PROC_PAGE_MAX, so the cap that actually binds a build is the
-    // largest SINGLE process, not the sum. Reported in pages and MiB.
-    t_putstr("joey: clade CL-5 clang++ driver peak=");
-    t_putstr(itoa_dec((long)cc_peak, nb, sizeof(nb)));
-    t_putstr(" pages (");
-    t_putstr(itoa_dec((long)(cc_peak / 256u), nb, sizeof(nb)));
-    t_putstr(" MiB) of cap ");
-    t_putstr(itoa_dec((long)(65536u / 256u), nb, sizeof(nb)));
-    t_putstr(" MiB\n");
-    long ho = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp/hello", 10, T_OPATH);
-    if (ho < 0) { t_putstr("joey: clade CL-4 gate: /tmp/hello not produced\n"); return -1; }
-    (void)t_close(ho);
-
-    // Tier 2b: run it. Its stdio is the console; "CLADE-HELLO sum=285 eh=1" prints +
-    // exit 0 confirms the computed check (proves the fresh ELF execs + runs).
-    t_putstr("joey: clade CL-4 running /tmp/hello\n");
-    static const char run_argv[] = "/tmp/hello";
-    long rst = go4c_spawn_wait_hb("/tmp/hello", 10,
-                                  run_argv, (unsigned int)sizeof(run_argv), 1,
-                                  60, 15, 0);
-    if (rst == 0) {
-        // Tier 2c: the separate compile + link shape every build system drives
-        // (make/cmake/cargo/go). Worth its own leg because `-c` is a SINGLE job,
-        // and Driver.cpp disables integrated-cc1 only when there is more than
-        // one -- so this path runs cc1 IN-PROCESS, exercising ExecuteCC1Tool's
-        // own `ArgV[1] == "-cc1"` dispatch rather than the spawn. Both are
-        // broken by a stale PrependArg, so covering only the spawn would leave
-        // half the surface unproven.
-        t_putstr("joey: clade CL-4 -c compile then link-only\n");
-        static const char co_argv[] =
-            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/hello.cpp\0-o\0/tmp/hello.o";
-        unsigned int co_peak = 0;
-        long ost = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
-                                      co_argv, (unsigned int)sizeof(co_argv), 7,
-                                      600, 20, 0, &co_peak);
-        t_putstr("joey: clade CL-5 clang++ -c peak=");
-        t_putstr(itoa_dec((long)co_peak, nb, sizeof(nb)));
-        t_putstr(" pages\n");
-        if (ost != 0) {
-            t_putstr("joey: clade CL-4 gate: -c compile FAILED rc=");
-            t_putstr(itoa_dec(ost, nb, sizeof(nb)));
-            t_putstr("\n");
-            return -1;
-        }
-        static const char lo_argv[] =
-            "/clade/bin/clang++\0--sysroot=/clade/sysroot\0/tmp/hello.o\0-o\0/tmp/hello2";
-        unsigned int lo_peak = 0;
-        long lst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
-                                      lo_argv, (unsigned int)sizeof(lo_argv), 5,
-                                      600, 20, 0, &lo_peak);
-        t_putstr("joey: clade CL-5 clang++ link-only peak=");
-        t_putstr(itoa_dec((long)lo_peak, nb, sizeof(nb)));
-        t_putstr(" pages\n");
-        if (lst != 0) {
-            t_putstr("joey: clade CL-4 gate: link-only FAILED rc=");
-            t_putstr(itoa_dec(lst, nb, sizeof(nb)));
-            t_putstr("\n");
-            return -1;
-        }
-        static const char run2_argv[] = "/tmp/hello2";
-        long r2 = go4c_spawn_wait_hb("/tmp/hello2", 11,
-                                     run2_argv, (unsigned int)sizeof(run2_argv), 1,
-                                     60, 15, 0);
-        if (r2 != 0) {
-            t_putstr("joey: clade CL-4 gate: /tmp/hello2 exit rc=");
-            t_putstr(itoa_dec(r2, nb, sizeof(nb)));
-            t_putstr(" (want 0)\n");
-            return -1;
-        }
-    }
-    if (rst != 0) {
-        t_putstr("joey: clade CL-4 gate: /tmp/hello exit rc=");
-        t_putstr(itoa_dec(rst, nb, sizeof(nb)));
-        t_putstr(" (want 0)\n");
-        return -1;
-    }
-    // ---- CL-5 (docs/LLVM-DESIGN.md section 7): size the F4 page budget. ----
-    // hello.cpp is a floor, not a workload: it measures what clang costs to
-    // START, not to COMPILE. This TU is deliberately template-heavy (16 Bag<K,V>
-    // instantiations over distinct type pairs + 8 string/vector ones + a
-    // compile-time Fib + sort/unique/hash churn per instantiation) so the
-    // frontend and the -O2 middle-end both do real work. On the host it costs
-    // 3.7x hello.cpp (359 MiB vs 97 MiB), which is the ratio that makes it a
-    // useful probe of where PROC_PAGE_MAX actually binds.
-    //
-    // Compiled with -c so cc1 runs IN-PROCESS -- the spawned-cc1 path reports
-    // only the driver's own ~0.5 MiB, which measures nothing.
-    //
-    // REPORT-ONLY, never a gate: if this TU exceeds PROC_PAGE_MAX the fault
-    // path proc_fault_terminates it (graceful OOM, by design), and that outcome
-    // is the measurement -- not a boot failure.
-    {
-        static const char stress_cpp[] =
-        "#include <algorithm>\n"
-        "#include <functional>\n"
-        "#include <map>\n"
-        "#include <memory>\n"
-        "#include <set>\n"
-        "#include <string>\n"
-        "#include <tuple>\n"
-        "#include <unordered_map>\n"
-        "#include <vector>\n"
-        "template <int N> struct Fib { static const long v = Fib<N-1>::v + Fib<N-2>::v; };\n"
-        "template <> struct Fib<0> { static const long v = 0; };\n"
-        "template <> struct Fib<1> { static const long v = 1; };\n"
-        "template <typename K, typename V> struct Bag {\n"
-        "  std::map<K,V> m; std::unordered_map<K,V> u; std::vector<std::pair<K,V>> v;\n"
-        "  std::set<K> s; std::shared_ptr<std::vector<V>> p;\n"
-        "  void add(const K& k, const V& val){ m[k]=val; u[k]=val; v.push_back({k,val}); s.insert(k); }\n"
-        "  long total() const { long t=0; for (auto&[a,b]:m) t+=(long)m.size(); for(auto&x:s) t+=1; return t+(long)(u.size()+v.size()); }\n"
-        "};\n"
-        "template <typename T> static long churn(std::vector<T>& xs) {\n"
-        "  std::sort(xs.begin(), xs.end());\n"
-        "  std::stable_sort(xs.begin(), xs.end(), std::greater<T>());\n"
-        "  auto it = std::unique(xs.begin(), xs.end());\n"
-        "  xs.erase(it, xs.end());\n"
-        "  long acc = 0; for (auto& x : xs) acc += (long)std::hash<T>{}(x);\n"
-        "  return acc;\n"
-        "}\n"
-        "typedef long long ll; typedef unsigned long ul; typedef unsigned char uc;\n"
-        "typedef unsigned short us; typedef unsigned int ui;\n"
-        "#define MK(n, K, V) static long f##n(){ Bag<K,V> b; b.add(K(), V()); std::vector<K> xs(8); return b.total()+churn(xs); }\n"
-        "MK(0,int,long) MK(1,long,int) MK(2,ui,double) MK(3,char,int)\n"
-        "MK(4,short,long) MK(5,ll,int) MK(6,ul,float) MK(7,double,int)\n"
-        "MK(8,float,long) MK(9,uc,double) MK(10,us,long) MK(11,int,double)\n"
-        "MK(12,long,float) MK(13,ui,ll) MK(14,char,double) MK(15,short,float)\n"
-        "#define MKS(n) static long g##n(){ Bag<std::string,std::vector<int>> b; b.add(\"k\" #n, {1,2,3}); return b.total(); }\n"
-        "MKS(0) MKS(1) MKS(2) MKS(3) MKS(4) MKS(5) MKS(6) MKS(7)\n"
-        "int main(){\n"
-        "  long t = Fib<40>::v;\n"
-        "  t += f0()+f1()+f2()+f3()+f4()+f5()+f6()+f7()+f8()+f9()+f10()+f11()+f12()+f13()+f14()+f15();\n"
-        "  t += g0()+g1()+g2()+g3()+g4()+g5()+g6()+g7();\n"
-        "  return (int)(t & 1);\n"
-        "}\n"        ;
-        long td2 = t_open(T_WALK_OPEN_FROM_ROOT, "/tmp", 4, T_OPATH);
-        if (td2 >= 0) {
-            long sf2 = t_walk_create(td2, "stress.cpp", 10, T_OWRITE, 0644u);
-            if (sf2 < 0) {
-                (void)t_unlink(td2, "stress.cpp", 10, 0);
-                sf2 = t_walk_create(td2, "stress.cpp", 10, T_OWRITE, 0644u);
-            }
-            (void)t_close(td2);
-            if (sf2 >= 0) {
-                unsigned int sl = (unsigned int)(sizeof(stress_cpp) - 1);
-                long wn2 = t_write(sf2, stress_cpp, sl);
-                (void)t_fsync(sf2, 0);
-                (void)t_close(sf2);
-                if (wn2 == (long)sl) {
-                    static const char st_argv[] =
-                        "/clade/bin/clang++\0--sysroot=/clade/sysroot\0-O2\0-c\0/tmp/stress.cpp\0-o\0/tmp/stress.o";
-                    unsigned int st_peak = 0;
-                    long sst = go4c_spawn_wait_hb_peak("/clade/bin/clang++", 18,
-                                                       st_argv, (unsigned int)sizeof(st_argv), 7,
-                                                       900, 30, 0, &st_peak);
-                    t_putstr("joey: clade CL-5 stress-TU cc1 peak=");
-                    t_putstr(itoa_dec((long)st_peak, nb, sizeof(nb)));
-                    t_putstr(" pages (");
-                    t_putstr(itoa_dec((long)(st_peak / 256u), nb, sizeof(nb)));
-                    t_putstr(" MiB) rc=");
-                    t_putstr(itoa_dec(sst, nb, sizeof(nb)));
-                    t_putstr(" cap=256 MiB\n");
-                }
-            }
-        }
-    }
-
-    t_putstr("joey: clade CL-4 gate: PASS\n");
-    return 0;
-}
-
-// Clade CL-7b-2: llvmpipe on the device. Runs the OSMesa prover, which clears
-// a buffer and rasterises a triangle -- a clear alone could be a memset fast
-// path that never reaches a shader, so only the triangle proves gallivm
-// compiled code and ORC executed it out of a dual-mapped code Burrow (I-42).
-//
-// BOOT-FATAL since CL-7b-2, when the prover first became able to pass. At
-// CL-7b-1 it could not: CAP_JIT is elevation-only, so a joey-spawned child
-// does not inherit it and SYS_JIT_CREATE had to refuse. The prover now walks
-// the corvus jit clearance itself, exactly as /bin/jit-prover does, and holds
-// the capability by the time it touches GL.
-//
-// A zero exit is a strong assertion, not a weak one -- the prover returns
-// non-zero for every station on the way: it cannot reach /srv/corvus, the
-// principal is not eligible for the jit level, the grant is not CAP_JIT, the
-// redeem fails, SYS_JIT_CREATE still refuses afterwards, context creation
-// returns NULL, or any of the rasterised pixels are wrong. So this gate does
-// not need to parse the child's output to know what it proved.
-//
-// What it deliberately does NOT do is fail when the binary is absent. That
-// configuration is real (a clade bake from a builder run predating CL-7a-2
-// stages fine without a GL half), and it is stage_clade's job to say so at
-// bake time -- which it now does, out loud, rather than dropping the file in
-// silence. A gate that also owned that decision would be guessing.
-static int gl_gate(void) {
-    char nb[24];
-    long p = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/osmesa-prove", 23, T_OPATH);
-    if (p < 0) {
-        return 0;  // not baked -- normal boot, nothing to say
-    }
-    (void)t_close(p);
-
-    unsigned int peak = 0;
-    static const char argv0[] = "/clade/bin/osmesa-prove";
-    long rc = go4c_spawn_wait_hb_peak("/clade/bin/osmesa-prove", 23,
-                                      argv0, (unsigned int)sizeof(argv0), 1,
-                                      600, 30, 0, &peak);
-    t_putstr("joey: clade CL-7b osmesa-prove rc=");
-    t_putstr(itoa_dec(rc, nb, sizeof(nb)));
-    t_putstr(" peak=");
-    t_putstr(itoa_dec((long)peak, nb, sizeof(nb)));
-    t_putstr(" pages (");
-    t_putstr(itoa_dec((long)(peak / 256u), nb, sizeof(nb)));
-    t_putstr(" MiB)\n");
-    if (rc != 0) {
-        return 1;
-    }
-    t_putstr("joey: clade CL-7b GL gate: PASS\n");
-    return 0;
-}
-
-// Clade CL-5: the BUILD STORM. `make -jN` drives the device clang over a real
-// project's real sources, on the device, and the artifact it produces RUNS.
-//
-// The project is GNU make 4.4.1 itself (staged at /storm by tools/build.sh
-// stage_storm; see the rationale there). The proof chain is deliberately three
-// links, because only the last one is hard to fake:
-//   1. `make -j4` exits 0                -- the storm completed
-//   2. /storm/outB/make exists, ~370 KiB -- it produced a plausible artifact
-//   3. /storm/outB/make --version exits 0 -- the artifact RUNS
-// A toolchain that miscompiles can still satisfy (1) and (2). Only (3) says the
-// bytes were right, and only (4) -- the device-built make then DRIVING a build
-// of its own -- says the artifact is a working tool rather than a binary that
-// merely survives --version.
-//
-// #102: an opt-out token on the kernel cmdline, read back through the /hw FDT
-// mount. QEMU turns `-append` into /chosen/bootargs; this is the same channel
-// `thylacine.nowatchpoint` uses (usr/debug-probe/src/main.rs), reused rather
-// than reinvented. Absent, empty, or unreadable -> the token is NOT present,
-// so a boot that does not opt out behaves exactly as it did before.
-//
-// devhw is `.seekable = false`, so this MUST be a sequential read -- a
-// positioned pread is rejected by the #37 ESPIPE gate.
-static int bootarg_has(const char *needle, long nlen) {
-    char buf[256];
-    long fd = t_open(T_WALK_OPEN_FROM_ROOT, "/hw/chosen/bootargs", 19, T_OREAD);
-    if (fd < 0) {
-        return 0;  // no bootargs property -> nothing opted out
-    }
-    long n = t_read(fd, buf, (long)sizeof(buf));
-    (void)t_close(fd);
-    if (n <= 0 || nlen <= 0) {
-        return 0;
-    }
-    for (long i = 0; i + nlen <= n; i++) {
-        long j = 0;
-        while (j < nlen && buf[i + j] == needle[j]) {
-            j++;
-        }
-        if (j == nlen) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// Gated on /storm/Makefile: a normal (non-clade) boot skips silently.
-static int clade_storm_gate(void) {
-    char nb[24];
-    // #102: checked FIRST and reported out loud. The storm is a legitimate
-    // multi-minute boot cost, so a harness with a login budget must be able to
-    // decline it -- and saying so on every boot is what makes the plumbing
-    // visible instead of leaving a silent 300 s timeout to be diagnosed.
-    if (bootarg_has("thylacine.nostorm", 17)) {
-        t_putstr("joey: clade CL-5 storm: thylacine.nostorm -- skipping by request\n");
-        return 0;
-    }
-    long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/Makefile", 15, T_OPATH);
-    if (probe < 0) {
-        t_putstr("joey: clade CL-5 storm: /storm absent -- skipping\n");
-        return 0;  // not baked -> not a failure
-    }
-    (void)t_close(probe);
-    // The C-mode driver copy (stage_clade adds it for CL-5). Without it the
-    // storm's .c sources would be compiled as C++ by a clang++ copy.
-    probe = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/clang", 16, T_OPATH);
-    if (probe < 0) {
-        t_putstr("joey: clade CL-5 storm FAILED: /clade/bin/clang missing "
-                 "(stale /clade bake -- re-run stage_clade)\n");
-        return -1;
-    }
-    (void)t_close(probe);
-
-    // The build directory. /storm is baked SYSTEM-owned; joey is SYSTEM.
-    {
-        long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm", 6, T_OPATH);
-        if (sd < 0) {
-            t_putstr("joey: clade CL-5 storm FAILED: cannot open /storm\n");
-            return -1;
-        }
-        long od = mkdir_or_open(sd, "out", 3);
-        (void)t_close(sd);
-        if (od < 0) {
-            t_putstr("joey: clade CL-5 storm FAILED: cannot create /storm/out\n");
-            return -1;
-        }
-        (void)t_close(od);
-    }
-
-    // --- The per-TU memory number, measured before the storm. -------------
-    // The storm's own peak is MAKE's peak, which is small and uninteresting;
-    // the compilers are grandchildren joey cannot see. So measure one TU
-    // directly: main.c, the largest source in the project (121 KiB). This is
-    // the number that pairs with -jN to give the concurrent footprint, and it
-    // is the first peak this project has ever recorded for real C (as opposed
-    // to the CL-5 stress TU's deliberately template-heavy C++).
-    {
-        static const char one_argv[] =
-            "/clade/bin/clang\0-march=armv8-a\0-moutline-atomics\0-nostdlibinc"
-            "\0-isystem\0/clade/sysroot/include\0-D_GNU_SOURCE=1\0-DHAVE_CONFIG_H"
-            "\0-include\0/storm/gnumake/src/storm-defs.h"
-            "\0-I/storm/gnumake/src\0-I/storm/gnumake/lib"
-            "\0-std=gnu11\0-O2\0-fno-pic\0-fno-stack-protector"
-            "\0-c\0/storm/gnumake/src/main.c\0-o\0/storm/out/probe_main.o";
-        unsigned int one_peak = 0;
-        long t0 = go4c_now_ms();
-        long ost = go4c_spawn_wait_hb_peak("/clade/bin/clang", 16,
-                                           one_argv, (unsigned int)sizeof(one_argv), 20,
-                                           600, 60, 0, &one_peak);
-        long dt = go4c_now_ms() - t0;
-        t_putstr("joey: clade CL-5 storm one-TU (main.c, 121 KiB) peak=");
-        t_putstr(itoa_dec((long)one_peak, nb, sizeof(nb)));
-        t_putstr(" pages (");
-        t_putstr(itoa_dec((long)(one_peak / 256u), nb, sizeof(nb)));
-        t_putstr(" MiB) ms=");
-        t_putstr(itoa_dec(dt, nb, sizeof(nb)));
-        t_putstr(" rc=");
-        t_putstr(itoa_dec(ost, nb, sizeof(nb)));
-        t_putstr("\n");
-        if (ost != 0) {
-            t_putstr("joey: clade CL-5 storm FAILED: one-TU compile rc != 0\n");
-            return -1;
-        }
-    }
-
-    // --- The storm itself. ------------------------------------------------
-    // -j4 matches the default -smp 4. Every recipe is shell-free by
-    // construction (stage_storm), so make takes its no-shell fast path and
-    // spawns clang directly through CL-1b's posix_spawn -- Thylacine has no
-    // /bin/sh, so a single metachar in the generated command lines would fail
-    // the whole storm rather than degrade.
-    //
-    // Two passes into SEPARATE output dirs: -j1 (the serial CONTROL) then -j4
-    // (the storm). Both are worth keeping permanently:
-    //   * the control is the differential that DIAGNOSED #96 -- the first storm
-    //     boot had -j4's first job succeed and its concurrent siblings exit 1
-    //     with no diagnostic at all, while -j1 over the identical cold tree
-    //     completed; that one comparison separated "make-spawned clang is
-    //     broken" from "CONCURRENT make-spawned clang is broken" and pointed
-    //     straight at GNU make's bad_stdin -> fstat-on-a-pipe. If the storm
-    //     ever reddens again, the control says immediately which it is.
-    //   * -j1 vs -j4 wall time IS the parallel-speedup number the CL-5 charter
-    //     asks to record.
-    //
-    // -B (always-make) on both: the pool persists across boots, so without it
-    // the second boot would find every object up to date and exit 0 having
-    // compiled NOTHING -- a vacuous pass that looks exactly like a real one.
-    long sst = -1;
-    long serial_ms = 0, par_ms = 0;
-    for (int pass = 0; pass < 2; pass++) {
-        const char *jf   = pass ? "-j4" : "-j1";
-        const char *od   = pass ? "/storm/outB" : "/storm/outA";
-        const char *odir = pass ? "outB" : "outA";
-        {
-            long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm", 6, T_OPATH);
-            if (sd >= 0) {
-                long od2 = mkdir_or_open(sd, odir, 4);
-                if (od2 >= 0) (void)t_close(od2);
-                (void)t_close(sd);
-            }
-        }
-        // argv: make -f /storm/Makefile -B <-jN> O=<outdir>. `O=` overrides
-        // the Makefile's output dir from the command line, so the two passes
-        // do not share objects; -B forces every recipe to run even though the
-        // pool still holds the previous boot's outputs.
-        char sa[96];
-        unsigned int n = 0;
-        const char *parts[6] = { "make", "-f", "/storm/Makefile", "-B", jf, od };
-        for (int i = 0; i < 6; i++) {
-            const char *p = parts[i];
-            if (i == 5) { sa[n++] = 'O'; sa[n++] = '='; }
-            unsigned int l = 0; while (p[l]) l++;
-            for (unsigned int k = 0; k < l; k++) sa[n++] = p[k];
-            sa[n++] = '\0';
-        }
-        t_putstr("joey: clade CL-5 storm: running `make -f /storm/Makefile -B ");
-        t_putstr(jf);
-        t_putstr(" O=");
-        t_putstr(od);
-        t_putstr("` (GNU make 4.4.1 builds itself, 35 TUs)\n");
-        long st0 = go4c_now_ms();
-        sst = go4c_spawn_wait_hb("/bin/make", 9, sa, n, 6,
-                                 /*max_sec=*/1800, /*hb_sec=*/30, /*caps=*/0ul);
-        long sdt = go4c_now_ms() - st0;
-        if (pass) par_ms = sdt; else serial_ms = sdt;
-        t_putstr("joey: clade CL-5 storm: make ");
-        t_putstr(jf);
-        t_putstr(" reaped rc=");
-        t_putstr(itoa_dec(sst, nb, sizeof(nb)));
-        t_putstr(" wall_ms=");
-        t_putstr(itoa_dec(sdt, nb, sizeof(nb)));
-        t_putstr("\n");
-        if (sst != 0) {
-            t_putstr("joey: clade CL-5 storm FAILED (make ");
-            t_putstr(jf);
-            t_putstr(" exit != 0)\n");
-            return -1;
-        }
-    }
-    // The parallel-speedup number the CL-5 charter asks to record. Reported as
-    // hundredths so it needs no float: 400 == 4.00x.
-    if (par_ms > 0) {
-        t_putstr("joey: clade CL-5 storm: serial_ms=");
-        t_putstr(itoa_dec(serial_ms, nb, sizeof(nb)));
-        t_putstr(" parallel_ms=");
-        t_putstr(itoa_dec(par_ms, nb, sizeof(nb)));
-        t_putstr(" speedup_x100=");
-        t_putstr(itoa_dec((serial_ms * 100) / par_ms, nb, sizeof(nb)));
-        t_putstr("\n");
-    }
-    // Link 2: a plausible artifact. The host cross-build of the same 35
-    // objects is ~380 KiB; anything under 64 KiB means the link silently
-    // produced a stub.
-    {
-        long fd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/outB/make", 16, T_OREAD);
-        if (fd < 0) {
-            t_putstr("joey: clade CL-5 storm FAILED: /storm/outB/make not produced\n");
-            return -1;
-        }
-        long sz = t_lseek(fd, 0, T_SEEK_END);
-        (void)t_close(fd);
-        t_putstr("joey: clade CL-5 storm: /storm/outB/make = ");
-        t_putstr(itoa_dec(sz, nb, sizeof(nb)));
-        t_putstr(" bytes\n");
-        if (sz < 65536) {
-            t_putstr("joey: clade CL-5 storm FAILED: artifact implausibly small\n");
-            return -1;
-        }
-    }
-
-    // Link 3: it RUNS. A miscompile can still link a right-sized binary.
-    {
-        static const char nv_argv[] = "/storm/outB/make\0--version";
-        long nst = go4c_spawn_wait_hb("/storm/outB/make", 16,
-                                      nv_argv, (unsigned int)sizeof(nv_argv), 2,
-                                      120, 30, 0);
-        if (nst != 0) {
-            t_putstr("joey: clade CL-5 storm FAILED: device-built make "
-                     "--version rc=");
-            t_putstr(itoa_dec(nst, nb, sizeof(nb)));
-            t_putstr("\n");
-            return -1;
-        }
-        t_putstr("joey: clade CL-5 storm: device-built make --version OK\n");
-    }
-
-    // Link 4: it WORKS. The device-built make drives a build of its own --
-    // one shell-free /bin/cp recipe, the CL-1c-2 shape. This is what
-    // separates "the binary starts" from "the binary is a working tool".
-    {
-        static const char self_mk[] =
-            "all: /storm/outB/selftest.out\n"
-            "/storm/outB/selftest.out: /storm/Makefile\n"
-            "\t/bin/cp /storm/Makefile /storm/outB/selftest.out\n";
-        long sd = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/outB", 11, T_OPATH);
-        if (sd >= 0) {
-            long mf = t_walk_create(sd, "selftest.mk", 11, T_OWRITE, 0644u);
-            if (mf < 0) {
-                (void)t_unlink(sd, "selftest.mk", 11, 0);
-                mf = t_walk_create(sd, "selftest.mk", 11, T_OWRITE, 0644u);
-            }
-            (void)t_unlink(sd, "selftest.out", 12, 0);  // force the recipe to run
-            (void)t_close(sd);
-            if (mf >= 0) {
-                unsigned int sl = (unsigned int)(sizeof(self_mk) - 1);
-                long wn = t_write(mf, self_mk, sl);
-                (void)t_fsync(mf, 0);
-                (void)t_close(mf);
-                if (wn == (long)sl) {
-                    static const char sm_argv[] =
-                        "/storm/outB/make\0-f\0/storm/outB/selftest.mk";
-                    long mst = go4c_spawn_wait_hb("/storm/outB/make", 16,
-                                                  sm_argv, (unsigned int)sizeof(sm_argv), 3,
-                                                  120, 30, 0);
-                    if (mst != 0) {
-                        t_putstr("joey: clade CL-5 storm FAILED: device-built "
-                                 "make could not drive a build, rc=");
-                        t_putstr(itoa_dec(mst, nb, sizeof(nb)));
-                        t_putstr("\n");
-                        return -1;
-                    }
-                    long ck = t_open(T_WALK_OPEN_FROM_ROOT,
-                                     "/storm/outB/selftest.out", 24, T_OREAD);
-                    if (ck < 0) {
-                        t_putstr("joey: clade CL-5 storm FAILED: device-built "
-                                 "make exited 0 but ran no recipe\n");
-                        return -1;
-                    }
-                    (void)t_close(ck);
-                    t_putstr("joey: clade CL-5 storm: device-built make DROVE "
-                             "a build (recipe ran, output verified)\n");
-                }
-            }
-        }
-    }
-
-    t_putstr("joey: clade CL-5 build storm: PASS\n");
-    return 0;
-}
-
 // CF-3 A+B always-run regression: bulk byte-I/O through the two-tier
 // syscall bounce + uaccess_copy_in/out + the 9P client payload clamp, on
 // the BULK-negotiated FS mount (CF-3 B: stratumd posts /srv/stratum-fs
@@ -4666,6 +4682,8 @@ static int probe_cf3_bulk_io(void) {
     t_putstr(" bytes; clamp short, bytes verified)\n");
     return 0;
 }
+#endif /* THYLA_BOOT_PROBES (the boot-test probe helpers) */
+
 
 // #370: the system stratumd's stdout/stderr pipe is read by joey only until
 // the readiness token; without a standing reader the 4 KiB pipe buffer is the

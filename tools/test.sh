@@ -139,6 +139,31 @@ if [[ ! -f "$KERNEL_ELF" ]]; then
     fi
 fi
 
+# #229: build the LEAN shape here, before booting the dev one. #228's root cause
+# was not that --production was broken -- it was that NOTHING BUILT IT, so it
+# stayed broken silently for weeks while every gate stayed green. A Makefile
+# target nobody remembers to run does not fix that; putting it in the loop that
+# actually runs does. It costs ~2 s and does not touch the tree (scratch dir).
+#
+# Skipped, not failed, when its input is absent: the generated headers are a
+# product of `build.sh userspace`, and a kernel-only iteration legitimately has
+# no build/generated. A SKIP is REPORTED, and reported as not-coverage (#212).
+if [[ -x "$REPO_ROOT/tools/check-production.sh" ]]; then
+    if [[ -d "$REPO_ROOT/build/generated" ]]; then
+        if prod_out="$("$REPO_ROOT/tools/check-production.sh" 2>&1)"; then
+            echo "==> lean --production shape: builds (#228/#229 guard)"
+        else
+            echo "$prod_out" >&2
+            echo "==> FAIL: the lean --production shape does not build." >&2
+            echo "    Nothing else here can see this -- the dev boot below uses" >&2
+            echo "    THYLA_BOOT_PROBES=ON and passes either way." >&2
+            exit 1
+        fi
+    else
+        echo "==> lean --production shape: SKIPPED (no build/generated -- NOT coverage)"
+    fi
+fi
+
 echo "==> Booting kernel under QEMU (timeout ${BOOT_TIMEOUT}s)..."
 echo "    Log: $LOG_FILE"
 
