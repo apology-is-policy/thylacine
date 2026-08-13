@@ -3794,6 +3794,41 @@ int proc_job_stop_pgrp(u32 pgid) {
     return ctx.affected;
 }
 
+// #15: the SELF stop -- SYS_NOTED(NDFLT) on a note whose default action is
+// STOP. Full contract in proc.h.
+//
+// This is proc_job_stop_pgrp's UNCAUGHT arm applied to one Proc, and it is
+// deliberately the same code rather than a lookalike: NDFLT means "do what
+// would have happened had no handler been installed", so any rule the
+// no-handler path applies must apply here too or the two spellings of "the
+// default" diverge.
+//
+// It keeps the ORPHAN rule and drops the CATCHABILITY gate, and both halves
+// matter. The orphan rule is kept because a stop nobody can resume is a hang
+// -- POSIX discards a stop signal for an orphaned group precisely because no
+// shell-shaped process remains to continue it, and a group already orphaned
+// when it stops never gets the hup+cont rescue that proc_become_zombie_locked
+// fires for a group orphaned LATER. The catchability gate
+// (proc_tty_susp_would_stop_locked) is dropped because it has already run and
+// already answered: it is what routed this note to the handler in the first
+// place. Re-asking it here would read `handler_va != 0`, conclude "caught",
+// and refuse the very stop the handler just asked for -- which is the ignore
+// behaviour #15 exists to remove.
+bool proc_job_stop_self(struct Proc *m) {
+    if (!m || m->magic != PROC_MAGIC) return false;
+    bool stopped = false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (!pgrp_orphaned_locked(m->pgid, NULL))
+        stopped = proc_job_stop_one_locked(m);
+    // The peers, not the caller: this thread parks at its own EL0-return tail
+    // a few instructions from here, but a peer RUNNING at EL0 on another CPU
+    // only reaches its tail when something traps it. Sleeping peers were woken
+    // inside the one_locked helper.
+    if (stopped) smp_resched_others();
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return stopped;
+}
+
 // The tty:cont fan-out (SYS_TTY_CONT / the F8 teardown resume). Full
 // contract in proc.h.
 struct job_cont_ctx { u32 pgid; int visited; };

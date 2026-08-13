@@ -17,7 +17,7 @@ The translation is intentionally partial. Plan 9 notes are string-named and caus
 | `SIGINT` (2) | `interrupt` | yes | terminate (`exits("interrupt")`) |
 | `SIGTERM` (15) | `interrupt` (shared with SIGINT — documented v1.0 limitation) | yes | terminate |
 | `SIGKILL` (9) | `kill` (`sigaction(SIGKILL)` returns EINVAL per POSIX) | **no** — kernel-side N-4 enforced | terminate (kernel calls `exits("killed")`) |
-| `SIGPIPE` (13) | `pipe` | yes (default-masked at startup; see below) | terminate (if mask cleared) |
+| `SIGPIPE` (13) | `pipe` | yes (default-masked at startup; see below) | terminate (if mask cleared) — but see task #237: the kernel's EL0-tail arm does NOT actually default-terminate on `pipe`, so this row and the code disagree |
 | `SIGCHLD` (17) | `child_exit` | yes | ignore |
 | every other signal | (unsupported) | — | `sigaction()` returns `EINVAL` |
 
@@ -93,7 +93,19 @@ hidden void __pouch_note_handler(const char *name, unsigned int arg) {
 }
 ```
 
-`SYS_NOTED(NCONT=0)` restores the saved user context — `ctx->regs[*]`, `sp`, `elr`, `spsr` — from `t->note_saved_*` (per `notes_noted_restore` in `kernel/notes.c`); the original code resumes one instruction past the syscall that triggered delivery. `SYS_NOTED(NDFLT=1)` takes the note's default action — for v1.0's supported set, that's `exits(name)` (terminate the Proc with the note name as the exit string).
+`SYS_NOTED(NCONT=0)` restores the saved user context — `ctx->regs[*]`, `sp`, `elr`, `spsr` — from `t->note_saved_*` (per `notes_noted_restore` in `kernel/notes.c`); the original code resumes one instruction past the syscall that triggered delivery.
+
+`SYS_NOTED(NDFLT=1)` takes the note's default action. **Since #15 that is per-note**, not one action for all of them: `notes_default_action(name)` reads the `dfl` column of `g_known_notes` and the arm branches three ways.
+
+| Disposition | Notes | What NDFLT does |
+|---|---|---|
+| `NOTE_DFL_TERMINATE` | `interrupt`, `kill`, `pipe`, `tty:quit`, `tty:hup` | `exits(name)` — the Proc terminates with the note name as its exit string. Never returns. |
+| `NOTE_DFL_STOP` | `tty:susp` | Restores the pre-handler context exactly as NCONT does, then arms `job_stop_req`; the thread parks at the EL0-return tail and resumes at the interrupted instruction on `tty:cont`. |
+| `NOTE_DFL_IGNORE` | `child_exit`, `tty:winch`, `tty:cont` | Restores and returns — byte-identical to NCONT, because doing nothing *is* the default action. |
+
+Before #15 the arm was unconditionally `exits(name)`, which made the STOP row impossible (`^Z` could only kill or be ignored) and the IGNORE row actively fatal (an NDFLT from a `child_exit` handler terminated the Proc). Pouch worked around both by spelling those defaults NCONT, which is why no shipping program ever hit the second one.
+
+The STOP arm keeps the POSIX orphan rule and drops the catchability gate — `proc_job_stop_self` in `kernel/proc.c` has the reasoning. Death still wins: `el0_return_die_check` runs before `el0_return_stop_check`, so a group-terminate racing the stop terminates rather than parking.
 
 The handler's stack discipline: the kernel arranges `sp_el0` 16-aligned per AAPCS64; the 16 bytes of note name sit at `sp_el0` (x0 points there); the C handler's prologue can save callee-saved regs below `sp_el0 - 16` per normal AAPCS64 (the kernel didn't reserve a red zone — the handler is a fresh frame).
 
@@ -196,9 +208,9 @@ The supported set widens by the five tty job-control signums
 |---|---|---|---|
 | `SIGQUIT` | `tty:quit` | terminate (the latch class) | NDFLT → whole-Proc terminate |
 | `SIGHUP` | `tty:hup` | terminate (dual target) | NDFLT → whole-Proc terminate |
-| `SIGWINCH` | `tty:winch` | informational | NCONT (ignore) |
-| `SIGCONT` | `tty:cont` | informational (the RESUME is kernel-side `SYS_TTY_CONT`) | NCONT (ignore) |
-| `SIGTSTP` | `tty:susp` | **STOP** (job control, PTY-1f) | NCONT — **the documented seam, below** |
+| `SIGWINCH` | `tty:winch` | ignore | NCONT (ignore) |
+| `SIGCONT` | `tty:cont` | ignore (the RESUME is kernel-side `SYS_TTY_CONT`) | NCONT (ignore) |
+| `SIGTSTP` | `tty:susp` | **STOP** (job control, PTY-1f) | NDFLT → the kernel job-stops the Proc (#15) |
 
 All five share the ONE kernel family bit `NOTE_BIT_TTY` (bit 5;
 `POUCH_NOTE_MASK_SUPPORTED` = 0x2f) — `sigprocmask` of any one blocks
@@ -260,21 +272,31 @@ The `/dev/tty` precedent covers the result: one identity, per-process content.
 
 ## Known caveats / footguns
 
-- **SIG_DFL `SIGTSTP` is IGNORE, not STOP, in pouch (PTY-3 seam)**. The
+- **~~SIG_DFL `SIGTSTP` is IGNORE, not STOP, in pouch (PTY-3 seam)~~ —
+  CLOSED by #15.** Recorded here because the mechanism still explains
+  why the disposition is decided in pouch rather than kernel-side. The
   kernel's pre-delivery default-stop gate
   (`proc_tty_susp_would_stop_locked`) treats a Proc with a registered
   notify handler as "caught" — and pouch's `.init_array` constructor
   ALWAYS registers the bootstrap, so every pouch Proc is "caught": the
-  `tty:susp` note delivers to the bootstrap instead of stopping the
-  Proc. The bootstrap cannot re-enter the default either — the kernel
-  `SYS_NOTED(NDFLT)` arm TERMINATES (`exits` → `proc_group_terminate`),
-  never stops, and pouch has no self-stop path — so SIG_DFL SIGTSTP
-  answers NCONT (ignore): `^Z` on a handler-less pouch program does
-  nothing rather than stopping it (NDFLT would turn `^Z` into process
-  death — the one actively-wrong option). A program with a real SIGTSTP
-  handler is unaffected (the handler runs — POSIX). The clean fix is a
-  kernel NDFLT-stop arm for `tty:susp` (an ABI-semantics change on the
-  audited notes surface — needs signoff; surfaced at the PTY-3 close).
+  `tty:susp` note delivers to the bootstrap rather than stopping the
+  Proc. That much is unchanged. What changed is the bootstrap's only
+  way back to the default: `SYS_NOTED(NDFLT)` used to terminate for
+  EVERY note, so SIG_DFL `SIGTSTP` was a choice between killing the
+  program and ignoring it, and pouch chose ignore. #15 gave each note
+  its own default action (`notes_default_action` reading the
+  `g_known_notes` `dfl` column), so NDFLT on `tty:susp` now job-stops
+  the Proc, which resumes at the interrupted instruction on `SIGCONT`.
+  Pouch's SIG_DFL branch routes `SIGTSTP` to NDFLT accordingly. A
+  program with its own SIGTSTP handler is unaffected either way (the
+  handler runs — POSIX).
+  **Verification honesty**: the kernel arm is unit-tested
+  (`notes.ndflt_dispatch`, four sabotage-verified legs) and the pouch
+  arm is verified in the patched source, but the full chain — pts `^Z`
+  → cook → fan → note → bootstrap → NDFLT → park → resume — has no
+  in-guest E2E. The existing PTY-4 job-control E2E hosts native `ut`,
+  which registers no handler and is therefore stopped by the kernel's
+  *pre-delivery* gate without ever reaching `SYS_NOTED`. Task #238.
 - **`kill(-pgrp, sig)` has no kernel form**. `SYS_POSTNOTE` has no
   process-group arm (`notes_post_pgrp` is kernel-internal, tty-seam
   only); a negative pid fails the kernel pid lookup honestly. An ABI

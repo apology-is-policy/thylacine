@@ -508,11 +508,17 @@ open write-mode across a mount) and rerouted musl's direct
 tc[gs]etwinsize + the stdio line-buffering probes) through the
 dispatcher. The signal mappings landed receive-only (`kill`/`raise` of
 a tty signum = `EPERM` — the F4 gate surfaced POSIX-shaped); SIG_DFL
-`SIGTSTP` is the DOCUMENTED ignore-not-stop seam (pouch's
+`SIGTSTP` was the DOCUMENTED ignore-not-stop seam at PTY-3 (pouch's
 always-registered bootstrap reads as "caught" to the kernel
-pre-delivery stop gate, and NDFLT terminates — the kernel
-NDFLT-stop-arm fix needs signoff; `83-pouch-signals.md` "Known
-caveats"). `forkpty` fails honestly (pouch has no `fork()` — a
+pre-delivery stop gate, and NDFLT terminated for every note). **#15
+closed it**: NDFLT is now per-note, `tty:susp`'s default is a job stop,
+and patch 0021 routes SIG_DFL `SIGTSTP` there — so `^Z` on a
+handler-less pouch program stops it rather than doing nothing. The
+pre-delivery gate is unchanged; what changed is where the disposition
+is decided (`83-pouch-signals.md` "Known caveats"). The kernel arm and
+the pouch arm are each verified; the end-to-end chain through a live
+pts is not yet (task #238 — the PTY-4 E2E hosts native `ut`, which
+never reaches `SYS_NOTED`). `forkpty` fails honestly (pouch has no `fork()` — a
 pouch-wide seam, not a pty gap). Proven by `/pouch-hello-pty` (the
 joey boot-fatal probe): the full mint→termios→session→live-ISIG/WINCH/
 HUP→EPERM ladder through unpatched-musl wrappers.

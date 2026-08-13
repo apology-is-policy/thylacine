@@ -55,15 +55,29 @@
 //   N-5 (fd lifecycle): a closed note Spoor fd does not affect future
 //        SYS_NOTE_OPEN or queue state. The queue lives with the Proc.
 //
-// SYS_NOTED arg semantics (R4-F6 audit close):
+// SYS_NOTED arg semantics (R4-F6 audit close; rewritten by #15):
 //   - arg = 0 (NCONT): restore saved user context; resume pre-handler
 //     execution. Always succeeds while in_handler.
-//   - arg = 1 (NDFLT): take the note's default action (for the v1.0
-//     supported set, every default is exits(name)). Requires
-//     `live_peers == 0` -- exits extincts the kernel on live peer
-//     Threads (cross-thread shootdown is v1.x). NDFLT in a multi-
-//     thread Proc therefore returns -1; the handler must fall back to
-//     NCONT or explicit per-Thread teardown (SYS_THREAD_EXIT).
+//   - arg = 1 (NDFLT): take the note's TRUE default action -- the one
+//     `notes_default_action(name)` names, which is what would have happened
+//     had no handler been installed. THREE outcomes, not one:
+//       TERMINATE -- exits(name); noreturn. Single-thread goes ZOMBIE,
+//         multi-thread cascades via proc_group_terminate (#811).
+//       STOP      -- restore the pre-handler context exactly as NCONT does,
+//         then arm the job stop; the EL0-return tail parks the thread. The
+//         Proc resumes at the interrupted PC on tty:cont, which is what
+//         "as if uncaught" means for a suspend.
+//       IGNORE    -- restore and return. Identical to NCONT by construction:
+//         doing nothing IS the default action.
+//     Returns 0 for STOP/IGNORE (with ctx restored, so the EL0 x0 is the
+//     saved pre-handler value, not this 0), -1 if not in a handler.
+//
+//     HISTORY, because the removed rule outlived its removal in this comment:
+//     NDFLT once required `live_peers == 0` and returned -1 in a multi-thread
+//     Proc. RW-8 R5-F1 deleted that refusal after #809/#811 made exits()
+//     cascade instead of extinct -- the refusal had been silently swallowing
+//     SIGINT/SIGTERM in multi-thread pouch daemons. There is no live-peers
+//     gate today.
 //
 // Spec-to-code suspended (CLAUDE.md, broadened 2026-05-23) — no
 // specs/notes.tla module. The invariants above are pinned by the queue-lock
@@ -137,6 +151,31 @@ struct Thread;
 // family even though no v1.0 consumer exists; reserves the bit
 // position for v1.x. PTY-1b adds NOTE_BIT_TTY (bit 5), live.
 #define NOTE_MASK_SUPPORTED  0x3fu
+
+// #15: the DEFAULT ACTION of a note -- what happens when nobody catches it.
+// One value per row of `g_known_notes`, so a note's disposition is a property
+// OF the note rather than of whichever call site is asking. Before #15 the
+// kernel had no such notion: SYS_NOTED(NDFLT) took the same action (terminate)
+// for every name, which made ^Z under SIG_DFL a choice between dying and being
+// ignored, and would have made child_exit's default fatal.
+//
+// The values are the three POSIX default dispositions, minus "core dump"
+// (Thylacine has no core files at v1.0 -- tty:quit terminates without one).
+enum note_default {
+    NOTE_DFL_TERMINATE = 0,  // interrupt, kill, pipe, tty:quit, tty:hup
+    NOTE_DFL_STOP      = 1,  // tty:susp -- the job-control suspend (I-20)
+    NOTE_DFL_IGNORE    = 2,  // child_exit, tty:winch, tty:cont
+};
+
+// The default action for a supported note name; NOTE_DFL_TERMINATE for an
+// unknown one. PURE -- a table lookup with no side effects, which is the point:
+// the policy is unit-testable without driving the noreturn terminate leg.
+//
+// TERMINATE for an unknown name is deliberate. It is both what the kernel did
+// for every name before #15 (so no name's behaviour regresses) and the POSIX
+// majority disposition, and an unknown name cannot actually arrive: every
+// caller passes a name that came out of `g_known_notes` in the first place.
+enum note_default notes_default_action(const char *name);
 
 // In-kernel note record. The ring lives in `struct NoteQueue.ring` (inline
 // — the queue is heap-allocated once per Proc at proc_alloc).

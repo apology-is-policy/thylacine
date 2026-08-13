@@ -59,8 +59,8 @@ Sixteen files:
   src/internal/_pouch_signal.h     POUCH_NOTE_BIT_TTY (1u<<5, the
       PTY-1b family bit) + POUCH_NOTE_MASK_SUPPORTED widened to 0x2f
       (bit 4 stays reserved). Doc preamble grows the tty family
-      contract: receive-only signums, the SIG_DFL dispositions, and
-      the DOCUMENTED SIGTSTP-default seam (below).
+      contract: receive-only signums and the SIG_DFL dispositions
+      (including SIGTSTP, whose seam #15 closed -- see below).
 
   src/signal/_pouch_signal.c       The translation + dispatch growth:
       __pouch_sig_to_note maps SIGQUIT->"tty:quit", SIGTSTP->
@@ -72,18 +72,22 @@ Sixteen files:
       dispatcher routes the five names to their signums and applies
       the SIG_DFL dispositions: quit/hup NDFLT (whole-Proc terminate,
       the POSIX default), winch/cont NCONT (POSIX ignore; a cont's
-      RESUME already happened kernel-side at SYS_TTY_CONT),
-      susp NCONT-ignore -- the DOCUMENTED v1.0 SEAM: POSIX default is
-      STOP, but pouch's always-registered bootstrap makes every pouch
-      Proc "caught" to the kernel's pre-delivery stop gate
-      (proc_tty_susp_would_stop_locked reads handler_va != 0), and
-      the kernel NDFLT arm TERMINATES (exits -> proc_group_terminate,
-      never stops), so ^Z on a handler-less pouch program is ignored
-      rather than stopping it. NDFLT here would turn ^Z into process
-      death -- the one actively-wrong option. The clean fix is a
-      kernel NDFLT-stop arm for tty:susp (an ABI-semantics change on
-      the audited notes surface -- needs signoff); tracked in
-      docs/reference/83-pouch-signals.md.
+      RESUME already happened kernel-side at SYS_TTY_CONT), and susp
+      NDFLT -- the kernel job-stops the Proc, which resumes at the
+      interrupted instruction on SIGCONT.
+
+      THE SUSP SEAM IS CLOSED (Thylacine #15). It was real: pouch's
+      always-registered bootstrap makes every pouch Proc "caught" to
+      the kernel's pre-delivery stop gate
+      (proc_tty_susp_would_stop_locked reads handler_va != 0), so the
+      disposition is decided HERE rather than kernel-side -- and the
+      kernel's NDFLT arm used to terminate for EVERY note, which made
+      ^Z a choice between killing the program and ignoring it. This
+      patch chose ignore as the least-wrong of two wrong options and
+      said so. #15 gave each note its own default action
+      (notes_default_action + the g_known_notes `dfl` column), so
+      NDFLT on tty:susp now stops rather than terminates, and the
+      ignore that was correct here is now the bug.
 
   src/signal/sigaction.c           The accepted-signum set widens by
       the five tty signums. SIGSTOP stays outside the set (EINVAL --
@@ -343,14 +347,14 @@ diff a/src/internal/_pouch_signal.h b/src/internal/_pouch_signal.h
 + * the kernel-raised events. SIG_DFL dispositions: quit/hup NDFLT
 + * (whole-Proc terminate -- the POSIX default); winch/cont NCONT
 + * (ignore -- POSIX; the cont RESUME already happened kernel-side);
-+ * susp NCONT-ignore -- a DOCUMENTED v1.0 SEAM: POSIX default is STOP,
-+ * but pouch's always-registered bootstrap makes every pouch Proc
-+ * "caught" to the kernel's pre-delivery stop gate
-+ * (proc_tty_susp_would_stop_locked reads handler_va), and the NDFLT
-+ * arm TERMINATES (never stops), so ^Z on a handler-less pouch program
-+ * is ignored rather than stopping it. The clean fix is a kernel
-+ * NDFLT-stop arm for tty:susp (an ABI-semantics change -- needs
-+ * signoff); tracked in docs/reference/83-pouch-signals.md.
++ * susp NDFLT -- the kernel job-stops the Proc and resumes it at the
++ * interrupted instruction on SIGCONT. This was NCONT-ignore and a
++ * DOCUMENTED SEAM until Thylacine #15 gave each note its own default
++ * action: pouch's always-registered bootstrap makes every pouch Proc
++ * "caught" to the pre-delivery stop gate, so the disposition is
++ * decided HERE, and the old NDFLT arm terminated unconditionally --
++ * ^Z was a choice between dying and nothing. The seam is closed; the
++ * ignore would now be the bug.
 + *
   * Per-thread shadow + per-Proc sigtab: the kernel's note_mask is per-
   * Thread (POSIX pthread_sigmask semantics); pouch keeps a __thread shadow
@@ -1006,23 +1010,25 @@ diff a/src/signal/_pouch_signal.c b/src/signal/_pouch_signal.c
      } else if (__pouch_note_name_eq(name, "kill")) {
          /* `kill` is non-catchable per N-4 (notes.h). The kernel calls
           * exits("killed") directly; this branch is defense-in-depth in
-@@ -143,7 +183,18 @@
+@@ -143,7 +183,20 @@
           * terminating default, or a kernel re-introducing a refusal) -- NOT
           * the normal multi-thread path; relying on it to swallow a
           * terminating signal would be the bug. */
 -        if (sig == SIGCHLD) {
-+        /* PTY-3 SIG_DFL dispositions for the tty family:
-+         *   SIGQUIT / SIGHUP: NDFLT (whole-Proc terminate -- POSIX).
-+         *   SIGWINCH / SIGCONT: NCONT (POSIX default = ignore; a cont's
-+         *       RESUME already happened kernel-side at SYS_TTY_CONT).
-+         *   SIGTSTP: NCONT-ignore -- the DOCUMENTED v1.0 seam (POSIX
-+         *       default is STOP, but the kernel NDFLT arm TERMINATES
-+         *       and pouch has no self-stop path; see the header
-+         *       preamble + docs/reference/83-pouch-signals.md). Using
-+         *       NDFLT here would turn ^Z into process death -- the one
-+         *       actively-wrong option. */
-+        if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT ||
-+            sig == SIGTSTP) {
++        /* SIG_DFL dispositions for the tty family. Thylacine #15 gave every
++         * note its own default action, so NDFLT now means "whatever the
++         * KERNEL says this note's default is" rather than "terminate":
++         *   SIGQUIT / SIGHUP: NDFLT -- whole-Proc terminate (POSIX).
++         *   SIGTSTP: NDFLT -- the kernel job-stops the Proc and resumes it
++         *       at the interrupted instruction on SIGCONT. This was
++         *       NCONT-ignore up to #15, and the comment here said so: the
++         *       kernel's NDFLT arm terminated unconditionally, ^Z would have
++         *       been process death, and ignoring was the least-wrong of two
++         *       wrong options. The seam is CLOSED; ignoring is now the bug.
++         *   SIGCHLD / SIGWINCH / SIGCONT: NCONT. The kernel agrees these
++         *       default to ignore, so NDFLT would be equivalent -- NCONT is
++         *       kept because a no-op should not need the kernel's table. */
++        if (sig == SIGCHLD || sig == SIGWINCH || sig == SIGCONT) {
              __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
          } else {
              long r = __syscall(SYS_noted, POUCH_SYS_NOTED_NDFLT);

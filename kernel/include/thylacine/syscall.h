@@ -786,12 +786,32 @@ enum {
 
     // SYS_NOTED(arg) — return from a running note handler.
     //   x0 = arg    NCONT (= 0; restore saved user context + resume)
-    //               NDFLT (= 1; take the note's default action — for the
-    //                            v1.0 supported set, exits with a status
-    //                            string matching the note name)
-    // NEVER RETURNS NORMALLY. Either the saved user context is restored
-    // (the syscall's exception_context is rewritten with the t->note_saved_*
-    // fields), or the Proc transitions to ZOMBIE via exits.
+    //               NDFLT (= 1; take the note's default action)
+    //
+    // NDFLT's action is PER-NOTE since #15 -- it is NOT "exits(name)" for
+    // every note, which is what this block used to say. The kernel looks the
+    // in-flight note's name up in its default-action table and does one of
+    // three things:
+    //   TERMINATE  interrupt / kill / pipe / tty:quit / tty:hup
+    //              -> exits(name); the Proc goes ZOMBIE (multi-thread: the
+    //              whole Proc, via the group-terminate cascade). NEVER RETURNS.
+    //   STOP       tty:susp
+    //              -> the saved user context is restored exactly as NCONT
+    //              restores it, then the kernel job-stops the Proc; execution
+    //              resumes at the interrupted instruction when a tty:cont
+    //              arrives. RETURNS (x0 = the restored pre-handler value).
+    //              DISCARDED, having done nothing, if the caller's process
+    //              group is orphaned -- POSIX, because no one could resume it.
+    //              An implementer cannot distinguish that from a stop-then-
+    //              resume, and should not need to.
+    //   IGNORE     child_exit / tty:winch / tty:cont
+    //              -> restore and return; byte-identical to NCONT, because
+    //              doing nothing IS the default action. RETURNS.
+    //
+    // So NCONT never returns normally, and NDFLT returns for two of its three
+    // dispositions. In every returning case the exception_context has been
+    // rewritten from t->note_saved_*, so x0 carries the pre-handler value
+    // rather than a status.
     //
     // Returns -1 on:
     //   - caller is NOT in a handler (t->in_handler == false)

@@ -1589,9 +1589,12 @@ honest-fail → master close → slave EOF (drain-then-EOF).
   prosecutors converged) the controlling-terminal arms gained the
   `pts_resolve` ENOTTY pre-gate. All three fixed in-patch.
 - **Deferred with signoff** (kernel ABI-semantics changes, deliberately
-  not landed): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL `^Z`
-  actually stop a pouch program — see `83-pouch-signals.md`), and the
-  `SYS_POSTNOTE` pgrp arm (`kill(-pgrp)`).
+  not landed at PTY-3): the NDFLT-stop arm for `tty:susp` (makes SIG_DFL
+  `^Z` actually stop a pouch program) and the `SYS_POSTNOTE` pgrp arm
+  (`kill(-pgrp)`). **The first has since LANDED** — #15 made
+  `SYS_NOTED(NDFLT)` per-note rather than always-terminate, and patch
+  0021's SIG_DFL branch now routes `SIGTSTP` to NDFLT; see
+  `83-pouch-signals.md`. The `kill(-pgrp)` arm is still open (task #16).
 
 ## The FS/process wires — `0024-pouch-fs-process-wires.patch` (Clade CL-1a)
 

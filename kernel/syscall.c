@@ -4022,8 +4022,9 @@ static void sys_thread_exit_handler(void) {
 
 extern int  notes_noted_restore(struct exception_context *ctx,
                                 struct Thread *t);
-__attribute__((noreturn))
-extern void notes_noted_default(struct Thread *t);
+// #15: no longer noreturn -- the STOP and IGNORE dispositions return.
+extern int  notes_noted_default(struct exception_context *ctx,
+                                struct Thread *t);
 
 // SYS_NOTE_OPEN — mint a fd to the calling Proc's note queue.
 //   (no args)
@@ -4108,19 +4109,28 @@ static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
         return;
     }
     if (arg == 1) {
-        // NDFLT -- default action: exits(name). For the v1.0 supported set
-        // every uncaught default is process termination. Post-#811 (ARCH
-        // 8.8.1) exits() on a Proc with live peers CASCADES via
-        // proc_group_terminate (it no longer extincts), so a multi-thread
-        // Proc's uncaught default-terminate signal terminates the WHOLE Proc
-        // -- the POSIX default action. RW-8 R5-F1: the prior live-peers
-        // refusal (-1) predated #809/#811 and, with pouch's always-installed
-        // handler bypassing the LS-5 kernel default-terminate, silently
-        // swallowed SIGINT/SIGTERM in multi-thread pouch daemons (NDFLT
-        // refused -> bootstrap NCONT-resumes -> the signal evaporates). The
-        // cascade is the same #811 path a multi-thread exits() already takes.
-        notes_noted_default(t);
-        // unreachable
+        // NDFLT -- the note's TRUE default action, per-note since #15
+        // (notes_default_action + the g_known_notes `dfl` column). Three
+        // outcomes: TERMINATE never returns; STOP and IGNORE restore the
+        // pre-handler context (rewriting ctx, so regs[0] below is NOT what
+        // EL0 sees) and return 0. A STOP additionally arms job_stop_req; the
+        // thread parks at the EL0-return tail after the die-check, so a
+        // racing group-terminate still wins.
+        //
+        // The terminating arm's history, which the per-note table did not
+        // change: post-#811 (ARCH 8.8.1) exits() on a Proc with live peers
+        // CASCADES via proc_group_terminate rather than extincting, so a
+        // multi-thread Proc's uncaught default-terminate takes down the whole
+        // Proc -- the POSIX default action. RW-8 R5-F1 removed the prior
+        // live-peers refusal (-1), which predated #809/#811 and, with pouch's
+        // always-installed handler bypassing the LS-5 kernel default-
+        // terminate, silently swallowed SIGINT/SIGTERM in multi-thread pouch
+        // daemons (NDFLT refused -> bootstrap NCONT-resumes -> the signal
+        // evaporates).
+        if (notes_noted_default(ctx, t) != 0) {
+            ctx->regs[0] = (u64)(s64)-1;
+        }
+        return;
     }
     // Anything else — -EINVAL via -1.
     ctx->regs[0] = (u64)(s64)-1;

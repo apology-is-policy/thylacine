@@ -49,26 +49,57 @@
 // stop/cont are deferred); kernel-synthetic posters only call with the
 // known names (child_exit, pipe).
 
+// #15: `dfl` is the third column. notes_default_action (the NDFLT arm) and
+// notes_name_terminate_latch (the EL0-tail uncaught TERMINATE arm) both read
+// it, so those two can no longer drift apart. The alternative considered and
+// rejected was a tty:susp special case in the NDFLT arm: it would have fixed
+// ^Z and left the identical asymmetry waiting for the next non-terminating
+// note (#95's `terminate` is already queued, so there WILL be a next one).
+//
+// THE UNIFICATION IS PARTIAL -- do not read this table as the single source of
+// truth it is trying to become (audit #15 F5). Two deciders still sit outside
+// it:
+//   the uncaught STOP -- job_stop_cb (kernel/proc.c), reached from
+//     pts_tty_signal's TTY_SIG_TSTP arm, routes an uncaught tty:susp to
+//     proc_job_stop_one_locked by hardcoded control flow and never calls
+//     notes_default_action. Set this row to TERMINATE and an uncaught ^Z still
+//     STOPS while a caught one NDFLTs to death.
+//   the uncaught IGNORE -- there is no reader. notes_deliver_at_el0_return's
+//     handler_va == 0 branch leaves a non-terminate-class note QUEUED for the
+//     fd-read path, which is retention, not the ignore this column names.
+// Folding job_stop_cb onto the column is owed; until then, changing a `dfl`
+// value obliges you to check both sites by hand.
 struct note_name_entry {
-    const char *name;
-    u32         bit;
+    const char       *name;
+    u32               bit;
+    enum note_default dfl;
 };
 
 static const struct note_name_entry g_known_notes[] = {
-    { "interrupt",  NOTE_BIT_INTERRUPT  },
-    { "kill",       NOTE_BIT_KILL       },
-    { "pipe",       NOTE_BIT_PIPE       },
-    { "child_exit", NOTE_BIT_CHILD_EXIT },
+    { "interrupt",  NOTE_BIT_INTERRUPT,  NOTE_DFL_TERMINATE },
+    { "kill",       NOTE_BIT_KILL,       NOTE_DFL_TERMINATE },
+    { "pipe",       NOTE_BIT_PIPE,       NOTE_DFL_TERMINATE },
+    // SIGCHLD's POSIX default is ignore. Before #15 an NDFLT from a
+    // child_exit handler killed the Proc; pouch worked around the kernel by
+    // spelling this default NCONT instead (patches 0007/0021), which is why
+    // no shipping program ever hit it.
+    { "child_exit", NOTE_BIT_CHILD_EXIT, NOTE_DFL_IGNORE    },
     // PTY-1b: the tty:* family (kernel-synthetic-POST + catchable; ONE
     // family mask bit, the SNARE per-kind-masking-is-v1.x precedent).
     // notes_post's tty-prefix gate is the ONLY thing keeping userspace
     // posters out of these entries -- load-bearing, unlike the snare
     // future-proofing (snare:* is not in this table at v1.0).
-    { NOTE_NAME_TTY_WINCH, NOTE_BIT_TTY },
-    { NOTE_NAME_TTY_SUSP,  NOTE_BIT_TTY },
-    { NOTE_NAME_TTY_CONT,  NOTE_BIT_TTY },
-    { NOTE_NAME_TTY_QUIT,  NOTE_BIT_TTY },
-    { NOTE_NAME_TTY_HUP,   NOTE_BIT_TTY },
+    //
+    // The family spans all three dispositions, which is exactly why the
+    // per-note column exists: winch/cont ignore, susp stops, quit/hup
+    // terminate. tty:cont is IGNORE because the resume is the KERNEL's side
+    // effect (proc_job_resume_one_locked, already done by the time anyone
+    // sees the note) -- there is nothing left for the default to do.
+    { NOTE_NAME_TTY_WINCH, NOTE_BIT_TTY, NOTE_DFL_IGNORE    },
+    { NOTE_NAME_TTY_SUSP,  NOTE_BIT_TTY, NOTE_DFL_STOP      },
+    { NOTE_NAME_TTY_CONT,  NOTE_BIT_TTY, NOTE_DFL_IGNORE    },
+    { NOTE_NAME_TTY_QUIT,  NOTE_BIT_TTY, NOTE_DFL_TERMINATE },
+    { NOTE_NAME_TTY_HUP,   NOTE_BIT_TTY, NOTE_DFL_TERMINATE },
 };
 #define NOTE_NUM_KNOWN  (sizeof(g_known_notes) / sizeof(g_known_notes[0]))
 
@@ -91,6 +122,17 @@ static int notes_name_to_bit(const char *name) {
         }
     }
     return -1;
+}
+
+// #15: the note's default action. Contract in <thylacine/notes.h>.
+enum note_default notes_default_action(const char *name) {
+    if (!name) return NOTE_DFL_TERMINATE;
+    for (u32 i = 0; i < NOTE_NUM_KNOWN; i++) {
+        if (notes_name_eq(name, g_known_notes[i].name)) {
+            return g_known_notes[i].dfl;
+        }
+    }
+    return NOTE_DFL_TERMINATE;
 }
 
 // P6 hardening #3a (scripture e45a571 -- docs/ERRORS.md): the `snare:`
@@ -265,15 +307,45 @@ static int notes_find_locked(struct NoteQueue *q, const char *name,
 // PROC_FLAG_TTY_TERMINATE_PENDING for the tty pair -- each latch pairs
 // with ITS OWN family mask bit in the lock-free die predicate), or 0 for a
 // non-terminate name.
+// #15 rewrote the CLASS test to read g_known_notes' `dfl` column instead of
+// re-listing tty:quit / tty:hup by literal here. Behaviour-identical on all
+// nine rows -- the literals it replaced were exactly the TTY-family rows whose
+// dfl is TERMINATE -- but a tenth terminate-class note now gets its latch from
+// its own table row rather than from someone remembering to extend this `if`.
+//
+// The family split stays: a latch is per-FAMILY (one flag for interrupt, one
+// for the tty family), not per-note, because notes_drain_intr_locked clears a
+// latch when the last note sharing it is consumed.
+//
+// TWO terminate-class notes deliberately yield NO latch, and both are load-
+// bearing omissions rather than oversights:
+//   `kill` -- non-catchable (N-4); the EL0-tail kill branch terminates it
+//     before the latch machinery is consulted at all.
+//   `pipe` -- the EL0-tail uncaught arm therefore never default-terminates on
+//     it, which contradicts docs/reference/83-pouch-signals.md:20 and
+//     ARCHITECTURE.md's `pipe` row. That disagreement is REAL and OPEN (task
+//     #237); #15 preserves the behaviour rather than changing it in passing,
+//     because giving `pipe` a latch newly kills native programs that write to
+//     a closed pipe. Named here so the tidier code does not read as though the
+//     gap were designed.
 static u32 notes_name_terminate_latch(const char *name) {
+    if (notes_default_action(name) != NOTE_DFL_TERMINATE) return 0;
     int bit = notes_name_to_bit(name);
     if (bit == (int)NOTE_BIT_INTERRUPT)
         return PROC_FLAG_INTR_TERMINATE_PENDING;
-    if (bit == (int)NOTE_BIT_TTY &&
-        (notes_name_eq(name, NOTE_NAME_TTY_QUIT) ||
-         notes_name_eq(name, NOTE_NAME_TTY_HUP)))
+    if (bit == (int)NOTE_BIT_TTY)
         return PROC_FLAG_TTY_TERMINATE_PENDING;
     return 0;
+}
+
+// Test support (the burrow_*_for_test convention). Deliberately absent from
+// the header: the harness extern-declares it, and there is no production
+// caller. It exists so the #15 table test can assert that the EL0-tail
+// uncaught arm and the NDFLT arm read the SAME `dfl` column -- the two used to
+// be independent lists, and a future edit that re-splits them fails there.
+u32 notes_name_terminate_latch_for_test(const char *name);
+u32 notes_name_terminate_latch_for_test(const char *name) {
+    return notes_name_terminate_latch(name);
 }
 
 // V-8 F2: does THIS Proc have a live handler for `name`? The `handler_va` test
@@ -1272,13 +1344,18 @@ int notes_noted_restore(struct exception_context *ctx, struct Thread *t) {
     return 0;
 }
 
-// Take the default action for the in-flight note (NDFLT). Calls exits
-// with the note name as the status message. Never returns.
-__attribute__((noreturn))
-void notes_noted_default(struct Thread *t);
-__attribute__((noreturn))
-void notes_noted_default(struct Thread *t) {
-    if (!t || !t->in_handler) {
+// Take the in-flight note's default action (NDFLT). #15 made this per-note;
+// full contract in <thylacine/notes.h> under "SYS_NOTED arg semantics".
+// Returns 0 for the STOP and IGNORE dispositions (with `ctx` restored to the
+// pre-handler user state), -1 if the restore failed. TERMINATE never returns.
+//
+// The note is ALREADY consumed at this point (delivery dequeued it), so no
+// disposition re-queues it -- matching the no-handler stop path, whose own
+// test asserts the default stop leaves zero susp notes pending. A stale susp
+// surviving a later cont would re-suspend a resumed program.
+int notes_noted_default(struct exception_context *ctx, struct Thread *t);
+int notes_noted_default(struct exception_context *ctx, struct Thread *t) {
+    if (!ctx || !t || !t->in_handler) {
         // Caller validated in_handler; reaching here is a programmer bug.
         extinction("notes_noted_default: not in handler (caller missed check)");
     }
@@ -1295,6 +1372,36 @@ void notes_noted_default(struct Thread *t) {
         // entries. Defense-in-depth.
         msg = "noted";
     }
+
+    // Read the disposition off the CANONICAL name, not the Thread buffer: both
+    // hold the same bytes, but the canonical pointer has already proven itself
+    // to be a table row, so the lookup cannot silently fall through to the
+    // unknown-name TERMINATE default on a corrupted buffer.
+    switch (notes_default_action(msg)) {
+    case NOTE_DFL_IGNORE:
+        // Doing nothing IS the action. Byte-identical to NCONT.
+        return notes_noted_restore(ctx, t);
+
+    case NOTE_DFL_STOP:
+        // Restore FIRST, then arm. The restore is what makes the resume land
+        // on the interrupted instruction rather than inside a handler frame
+        // that SYS_NOTED already returned from -- "as if uncaught" means the
+        // handler leaves no trace. Arming after it also keeps the failure
+        // ordering honest: a restore that fails leaves no stop armed.
+        if (notes_noted_restore(ctx, t) != 0) return -1;
+        // Discarded rather than applied if the group is orphaned -- see
+        // proc_job_stop_self. The stop takes effect at the EL0-return tail,
+        // where el0_return_die_check runs FIRST, so a group-terminate racing
+        // this dies instead of parking (DeathWinsOverStop, I-24).
+        (void)proc_job_stop_self(t->proc);
+        return 0;
+
+    case NOTE_DFL_TERMINATE:
+    default:
+        break;
+    }
+
     exits(msg);
     // unreachable
+    extinction("notes_noted_default: exits returned");
 }

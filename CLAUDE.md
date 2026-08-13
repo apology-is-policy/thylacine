@@ -425,7 +425,7 @@ names).
 | I-16 | KASLR randomizes kernel base at boot (never-zero slide) | runtime + `/ctl/kernel-base` |
 | I-17 | EEVDF quantitative latency bound — DESIGN TARGET; needs the deferred EEVDF math (2A-F6 → RW-13) | `scheduler.tla` (qualitative only) |
 | I-18 | IPIs from CPU A to B processed in send order | `scheduler.tla` |
-| I-19 | Note delivery causal order; non-`kill` consumed exactly once; `kill` non-catchable; uncaught `interrupt` default-terminates (LS-5) | prose §7.6.7 + tests (notes.tla dropped) |
+| I-19 | Note delivery causal order; non-`kill` consumed exactly once; `kill` non-catchable; uncaught `interrupt` default-terminates (LS-5); each note has ONE default action, held in the `g_known_notes` `dfl` column -- TERMINATE / STOP (`tty:susp`) / IGNORE (#15). PARTIAL unification: the terminate-class latch + `SYS_NOTED(NDFLT)` read the column; the uncaught STOP is still decided by `job_stop_cb` at POST time and the IGNORE class has no uncaught reader (the note is retained, not ignored) -- unifying those is OWED (#15 F5) | prose §7.6.7 + tests (notes.tla dropped) |
 | I-20 | PTY master↔slave atomicity — ENFORCED (PTY-1 kernel seam + the PTY-2 userspace ptyfs data path; byte conservation + SignalXorByte + drain-then-EOF + HupAtMostOnce-by-construction; the 2e openpty E2E proves the signal/teardown legs live) | `pty.tla` + `pty_stop.tla` + the §25.4 PTY rows + the 2e audit |
 | I-21 | Kernel uniformly EL1h (`SPSel=1`); `SP_EL0` exclusively the user stack | `sched_ctxsw.tla` + `test_smp` |
 | I-22 | No identity carries ambient super-authority; elevation only via the legate | IDENTITY-DESIGN §3.3/§8.2 prose + tests |

@@ -548,6 +548,8 @@ void test_notes_post_pipe_helper(void);
 void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
 void test_notes_interrupt_terminate_gate(void);
+void test_notes_default_action_table(void);      // #15 / #236
+void test_notes_ndflt_dispatch(void);            // #15 / #236
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
@@ -2125,6 +2127,8 @@ struct test_case g_tests[] = {
     { "notes.proc_lifecycle",                  test_notes_proc_lifecycle,                  false, NULL },
     { "notes.peek_does_not_pop",               test_notes_peek_does_not_pop,               false, NULL },
     { "notes.interrupt_terminate_gate",        test_notes_interrupt_terminate_gate,        false, NULL },
+    { "notes.default_action_table",            test_notes_default_action_table,            false, NULL },
+    { "notes.ndflt_dispatch",                  test_notes_ndflt_dispatch,                  false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },

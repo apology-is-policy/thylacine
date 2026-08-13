@@ -38,8 +38,18 @@
 #include <thylacine/types.h>
 #include <thylacine/vivarium.h>     // V-6b: the Linux disposition discard
 
+#include "../../arch/arm64/exception.h"  // #15: struct exception_context
 #include "../../arch/arm64/timer.h"
 #include "../../mm/slub.h"          // V-6b: a real sigtab, so proc_free frees it
+
+// #15: test-support hooks + the harness's Proc-table linkage (see the
+// "Test support" blocks in kernel/notes.c and kernel/proc.c -- deliberately
+// absent from the headers, so every consumer extern-declares them).
+extern u32  notes_name_terminate_latch_for_test(const char *name);
+extern int  notes_noted_default(struct exception_context *ctx, struct Thread *t);
+extern void proc_test_link(struct Proc *p);
+extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
+extern void proc_test_unlink(struct Proc *p);
 
 void test_notes_queue_alloc_free_smoke(void);
 void test_notes_post_dequeue_smoke(void);
@@ -60,6 +70,12 @@ void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
 void test_notes_interrupt_terminate_gate(void);
 void test_notes_self_managing_flag(void);
+void test_notes_intr_latch_lifecycle(void);
+void test_notes_die_pending_predicate(void);
+void test_notes_fstat_reports_chr(void);
+void test_notes_linux_sigign_discard(void);
+void test_notes_default_action_table(void);
+void test_notes_ndflt_dispatch(void);
 
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke
@@ -981,4 +997,267 @@ void test_notes_linux_sigign_discard(void) {
     // rather than a stack struct.
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
+}
+
+// =============================================================================
+// #15 / #236: the per-note DEFAULT ACTION table + the SYS_NOTED(NDFLT) dispatch.
+// =============================================================================
+
+// The policy half, as a pure lookup. This is a table test rather than a
+// spot-check on purpose: the bug #15 fixed was that ALL nine names shared one
+// disposition, so a test that asserted only tty:susp would pass on an
+// implementation that stopped for everything -- which is the opposite defect
+// and just as wrong. Naming every row is what makes the green attributable.
+void test_notes_default_action_table(void) {
+    // TERMINATE -- the class that was already correct before #15, asserted so
+    // the fix is shown not to have moved it.
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_INTERRUPT),
+                   (int)NOTE_DFL_TERMINATE, "interrupt terminates");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_KILL),
+                   (int)NOTE_DFL_TERMINATE, "kill terminates");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_PIPE),
+                   (int)NOTE_DFL_TERMINATE, "pipe terminates (POSIX SIGPIPE)");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_QUIT),
+                   (int)NOTE_DFL_TERMINATE, "tty:quit terminates");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_HUP),
+                   (int)NOTE_DFL_TERMINATE, "tty:hup terminates");
+
+    // STOP -- one row, and the whole reason #15 exists.
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_SUSP),
+                   (int)NOTE_DFL_STOP, "tty:susp STOPS (SIGTSTP), never dies");
+
+    // IGNORE -- #236. Each of these terminated the Proc before #15.
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_CHILD_EXIT),
+                   (int)NOTE_DFL_IGNORE, "child_exit ignores (SIGCHLD)");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_WINCH),
+                   (int)NOTE_DFL_IGNORE, "tty:winch ignores (SIGWINCH)");
+    TEST_EXPECT_EQ((int)notes_default_action(NOTE_NAME_TTY_CONT),
+                   (int)NOTE_DFL_IGNORE, "tty:cont ignores (resume already done)");
+
+    // An unsupported name falls back to TERMINATE -- both the pre-#15
+    // behaviour for every name (so nothing regressed) and the POSIX majority.
+    TEST_EXPECT_EQ((int)notes_default_action("no_such_note"),
+                   (int)NOTE_DFL_TERMINATE, "unknown name -> terminate");
+    TEST_EXPECT_EQ((int)notes_default_action(NULL),
+                   (int)NOTE_DFL_TERMINATE, "NULL name -> terminate");
+
+    // The EL0-tail uncaught arm reads the SAME column since #15. Asserted here
+    // because the two used to be independent lists, and a future edit that
+    // re-splits them would leave this pair disagreeing.
+    //
+    // pipe's absence from the latch set is DELIBERATE and OPEN (task #237):
+    // its default action is TERMINATE, but it carries no latch, so the tail
+    // never default-terminates on it. Asserted as it stands so that whichever
+    // way #237 resolves, it has to come through this line.
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_INTERRUPT),
+                   (int)PROC_FLAG_INTR_TERMINATE_PENDING, "interrupt -> INTR latch");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_QUIT),
+                   (int)PROC_FLAG_TTY_TERMINATE_PENDING, "tty:quit -> TTY latch");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_HUP),
+                   (int)PROC_FLAG_TTY_TERMINATE_PENDING, "tty:hup -> TTY latch");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_SUSP),
+                   0, "tty:susp -> NO latch (it stops, it does not die)");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_WINCH),
+                   0, "tty:winch -> no latch");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_TTY_CONT),
+                   0, "tty:cont -> no latch");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_CHILD_EXIT),
+                   0, "child_exit -> no latch");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_KILL),
+                   0, "kill -> no latch (N-4 terminates it before the latch)");
+    TEST_EXPECT_EQ((int)notes_name_terminate_latch_for_test(NOTE_NAME_PIPE),
+                   0, "pipe -> no latch (task #237, preserved deliberately)");
+}
+
+// Drive notes_noted_default through its two RETURNING dispositions. The
+// terminating one is not driven here -- exits() is noreturn and would take the
+// test harness with it; the table test above pins which names reach it, and
+// the pre-existing interrupt_terminate_gate test covers the terminate path.
+//
+// Both directions of #185 are asserted:
+//   (1) SIG_DFL tty:susp STOPS      -- the fix does what it claims;
+//   (2) child_exit does NOT stop    -- the fix did not make everything stop.
+// Without (2), an implementation that stopped on every NDFLT would pass.
+// Count queued notes matching `name` (the test_pts.c pts_note_count shape --
+// duplicated rather than shared because the two files have no common test
+// header and a one-loop helper is cheaper than inventing one).
+static u32 ndflt_note_count(struct Proc *p, const char *name) {
+    struct NoteQueue *q = p->notes;
+    u32 found = 0;
+    spin_lock(&q->lock);
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        int eq = 1;
+        for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
+            if (q->ring[idx].name[i] != name[i]) { eq = 0; break; }
+            if (name[i] == 0) break;
+        }
+        if (eq) found++;
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    spin_unlock(&q->lock);
+    return found;
+}
+
+static void ndflt_arm_handler(struct Thread *t, struct Proc *m,
+                              const char *name) {
+    t->magic       = THREAD_MAGIC;
+    t->proc        = m;
+    t->in_handler  = true;
+    for (u32 i = 0; i < NOTE_NAME_MAX; i++) t->note_handling_name[i] = 0;
+    for (u32 i = 0; name[i] != 0 && i < NOTE_NAME_MAX - 1; i++)
+        t->note_handling_name[i] = name[i];
+    // The pre-handler context the restore must reproduce. Distinct sentinels
+    // so a restore that silently no-ops is visible.
+    for (u32 i = 0; i < 31; i++) t->note_saved_regs[i] = 0xA000u + i;
+    t->note_saved_sp_el0 = 0xB000u;
+    t->note_saved_elr    = 0xC000u;
+    t->note_saved_spsr   = 0u;
+}
+
+void test_notes_ndflt_dispatch(void) {
+    // The anchored-group shape from the PTY-1f orphan tests: `m` is in its own
+    // group, and `leader` -- ALIVE, same session, another group -- is the
+    // parent that keeps m's group non-orphaned. Without the anchor the stop is
+    // correctly discarded, which would make direction (1) below vacuous.
+    struct Proc *leader = proc_alloc();
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    proc_test_link(leader);
+    struct Proc *m = proc_alloc();
+    TEST_ASSERT(m != NULL, "proc_alloc m");
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    proc_test_link_child(leader, m);
+
+    static struct Thread th;            // BSS-zeroed; see test_pts.c's m_th
+    static struct exception_context ctx;
+
+    // `m` MUST own an UNMASKED thread, and this is load-bearing rather than
+    // decoration. proc_tty_susp_would_stop_locked's last line returns false
+    // for "every thread masks the tty family (OR NO THREADS)" -- so a Proc
+    // with m->threads == NULL reads as CAUGHT no matter what handler_va says.
+    // Leg (2b) below asserts CAUGHT; with a threadless fixture it would assert
+    // it for the WRONG REASON and pass even with the handler_va gate deleted.
+    // Caught by running that exact sabotage: the leg stayed green until this
+    // thread was attached.
+    th.magic            = THREAD_MAGIC;
+    th.note_mask        = 0;            // unmasked -> the gate can reach `true`
+    th.next_in_proc     = NULL;
+    th.rendez_blocked_on = NULL;
+    m->threads = &th;
+
+    // ---- (1) tty:susp under SIG_DFL: the Proc STOPS. --------------------
+    //
+    // Note the setup: handler_va is NON-ZERO, because that is the only way a
+    // Proc reaches NDFLT at all -- the pre-delivery gate routes a susp to the
+    // handler precisely BECAUSE a handler exists. A stop arm that re-consulted
+    // catchability would see this and refuse, which is the ignore-not-stop bug
+    // #15 removes. Asserting with the handler installed is what makes the test
+    // reach the code under test rather than the no-handler path.
+    m->handler_va = 0x1000u;
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "NDFLT(tty:susp) succeeds");
+    TEST_ASSERT(!th.in_handler, "the stop left the handler (restore ran)");
+    TEST_EXPECT_EQ((int)(ctx.elr - 0xC000u), 0,
+                   "resumes at the INTERRUPTED pc, not inside the handler");
+    TEST_EXPECT_EQ((int)(ctx.regs[0] - 0xA000u), 0, "x0 restored");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "job_stop_req ARMED -- ^Z stops");
+    TEST_ASSERT(m->stop_report_pending,
+                "the stop latched the parent's WAIT_UNTRACED report");
+
+    // Idempotent: a second NDFLT(susp) on an already-stopped Proc re-latches
+    // nothing (POSIX discards a stop signal for a stopped process).
+    m->stop_report_pending = false;
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "second NDFLT succeeds");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "still stopped");
+    TEST_ASSERT(!m->stop_report_pending, "no re-latch on the idempotent stop");
+
+    // ---- (2) child_exit under SIG_DFL: NOTHING happens. -----------------
+    //
+    // The direction that fails on a "stop for every NDFLT" implementation, and
+    // the direct #236 regression: before the per-note table this call KILLED
+    // the Proc via exits("child_exit").
+    m->job_stop_req = 0;
+    m->stop_report_pending = false;
+    ndflt_arm_handler(&th, m, NOTE_NAME_CHILD_EXIT);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "NDFLT(child_exit) succeeds");
+    TEST_ASSERT(!th.in_handler, "ignore left the handler (restore ran)");
+    TEST_EXPECT_EQ((int)(ctx.elr - 0xC000u), 0, "ignore resumes where it was");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "child_exit did NOT stop the Proc");
+    TEST_ASSERT(!m->stop_report_pending, "and latched no stop report");
+
+    // tty:winch is the same class; asserted separately because it reaches the
+    // table by a different row and shares NOTE_BIT_TTY with tty:susp, so a
+    // dispatch keyed on the MASK BIT rather than the name would stop here.
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_WINCH);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "NDFLT(tty:winch) succeeds");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+                   "tty:winch did NOT stop -- keyed by NAME, not by family bit");
+
+    // ---- (2b) the CAUGHT-arm -> NDFLT linkage (audit F8). ---------------
+    //
+    // Legs (1) and (2) fabricate the in-handler state directly, so they prove
+    // the NDFLT arm in isolation and say nothing about the composition that
+    // makes #15 mean anything: the pts fan must decline to stop a
+    // handler-having member (posting the note instead), and the member's own
+    // NDFLT must then stop it. Without this, an edit to
+    // proc_tty_susp_would_stop_locked that made a handler-having Proc stop at
+    // POST time again would leave legs (1) and (2) green while the target got
+    // DOUBLE-stopped.
+    m->job_stop_req = 0;
+    m->stop_report_pending = false;
+    TEST_EXPECT_EQ(ndflt_note_count(m, NOTE_NAME_TTY_SUSP), 0u,
+                   "precondition: no susp queued");
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "the fan visited m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+                   "CAUGHT (handler_va != 0): the fan posted, did NOT stop");
+    TEST_EXPECT_EQ(ndflt_note_count(m, NOTE_NAME_TTY_SUSP), 1u,
+                   "the susp note was queued for the handler");
+
+    // Now the target takes the default itself -- and the note must NOT be
+    // left pending across the stop (a stale susp surviving a later cont would
+    // re-suspend a resumed program). Delivery consumes it; this pins that.
+    {
+        struct Note drained;
+        spin_lock(&m->notes->lock);
+        (void)notes_dequeue_locked(m, NULL, &drained);   // stand in for delivery
+        spin_unlock(&m->notes->lock);
+    }
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "the target NDFLTs");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "NOW it stops -- the linkage holds");
+    TEST_EXPECT_EQ(ndflt_note_count(m, NOTE_NAME_TTY_SUSP), 0u,
+                   "and no susp is left pending across the stop");
+
+    // ---- (3) the orphan rule survives the new path. ---------------------
+    //
+    // `orphan` is in its own session under kproc, so no ALIVE same-session
+    // out-of-group parent anchors its group. POSIX discards a stop there --
+    // and it must, because a group already orphaned when it stops never gets
+    // the hup+cont rescue a LATER orphaning would fire.
+    struct Proc *orphan = proc_alloc();
+    TEST_ASSERT(orphan != NULL, "proc_alloc orphan");
+    orphan->sid  = (u32)orphan->pid;
+    orphan->pgid = (u32)orphan->pid;
+    proc_test_link(orphan);
+    orphan->handler_va = 0x1000u;
+    static struct Thread oth;
+    ndflt_arm_handler(&oth, orphan, NOTE_NAME_TTY_SUSP);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &oth), 0,
+                   "NDFLT(tty:susp) on an orphan still SUCCEEDS (not an error)");
+    TEST_ASSERT(!oth.in_handler, "orphan discard still left the handler");
+    TEST_EXPECT_EQ((int)orphan->job_stop_req, 0,
+                   "orphaned group's stop DISCARDED -- nobody could resume it");
+
+    proc_test_unlink(orphan);
+    orphan->state = PROC_STATE_ZOMBIE;
+    proc_free(orphan);
+    proc_test_unlink(m);
+    m->threads = NULL;                  // the static outlives proc_free
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);
+    proc_test_unlink(leader);
+    leader->state = PROC_STATE_ZOMBIE;
+    proc_free(leader);
 }

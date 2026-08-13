@@ -1515,6 +1515,29 @@ static inline bool proc_stop_requested(const struct Proc *p) {
 // g_proc_table_lock itself; the pts seam calls it with g_pts_lock RELEASED).
 int proc_job_stop_pgrp(u32 pgid);
 
+// #15: proc_job_stop_self -- the SELF job-stop, the STOP disposition of
+// SYS_NOTED(NDFLT). A Proc whose handler received tty:susp and then asked the
+// kernel for the note's default action stops HERE, having already consumed the
+// note at delivery.
+//
+// It is proc_job_stop_pgrp's uncaught arm narrowed to one Proc: the ORPHAN
+// rule still applies (an orphaned group's stop is DISCARDED -- nobody could
+// resume it, so applying it would hang the Proc forever), but the CATCHABILITY
+// gate does NOT (it already ran, and answering it again would refuse the stop
+// on the grounds that a handler exists -- the handler that just asked for it).
+// Idempotent: an already-job-stopped Proc answers false and re-latches nothing.
+//
+// Returns true iff it stopped `m`. FALSE IS NOT AN ERROR -- it means the stop
+// was correctly discarded (orphaned group) or already in effect, and the
+// caller's syscall still succeeds. The stop takes EFFECT at the caller's own
+// EL0-return tail (el0_return_stop_check), which runs AFTER
+// el0_return_die_check, so a group-terminate racing this one dies rather than
+// parking (DeathWinsOverStop; pty_stop.tla's StopJob, whose `~gflag` guard the
+// tail enforces at the park rather than at the set).
+//
+// Lock-free callers only -- takes g_proc_table_lock itself.
+bool proc_job_stop_self(struct Proc *m);
+
 // proc_job_cont_pgrp: the tty:cont fan-out -- SYS_TTY_CONT (the shell's
 // `fg`/`bg`), the F8 pts-teardown resume, and the orphan rule's cont half.
 // Under one g_proc_table_lock hold, every ALIVE member of `pgid` gets the

@@ -283,8 +283,24 @@ Under one `g_proc_table_lock` hold, per ALIVE member of `pgid`:
    the target has no async handler, is not self-managing (no notes fd), **and** at least
    one thread leaves `NOTE_BIT_TTY` unmasked. Otherwise the susp is **CAUGHT** — the
    `tty:susp` note is posted (delivered/deferred on the target's own terms) and **no
-   stop** happens. tmux/bash/vim catch SIGTSTP to save terminal state; an uncatchable
-   susp would fail PTY-4's own gate.
+   *immediate* stop** happens here. tmux/bash/vim catch SIGTSTP to save terminal state;
+   an uncatchable susp would fail PTY-4's own gate.
+
+   **Since #15 a caught susp can still stop — the target applies the default itself.**
+   `job_stop_req` has a THIRD setter, `proc_job_stop_self` (`kernel/proc.c`), reached
+   from EL0 by the target via `SYS_NOTED(NDFLT)` when its handler declines the note.
+   That path deliberately DROPS this catchability gate (it already ran, and is what
+   routed the note to the handler — re-asking it would refuse the very stop the handler
+   requested) and KEEPS the orphan rule below (a stop nobody can resume is a hang).
+   It is the whole point of #15: pouch's `.init_array` bootstrap makes every ported
+   program "caught" here, so before #15 `^Z` on a SIG_DFL pouch program did nothing.
+
+   **The window is real and is a known open defect.** The decision is taken at POST
+   time but applied an unbounded EL0 handler execution later, and only ONE premise
+   (orphanhood) is revalidated. A pts teardown that runs in between does its
+   hup-then-cont rescue *before* the stop lands, so the cont is a no-op and the job
+   parks unresumable — the carrier-loss rescue this section's PTY-1 close relied on.
+   Tracked; see the #15 audit F2.
 2. **The orphan check**: an uncaught susp on an **orphaned** group (no ALIVE
    same-session out-of-group parent of any member) is **discarded entirely** — the POSIX
    orphan rule's stop-suppression half (nobody could resume it).
