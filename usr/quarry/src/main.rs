@@ -155,14 +155,43 @@ fn probe(r: &Renderer) -> Status {
         // The 3D device probe: /srv/warp's global ctl leads with
         // "virgl <0|1>". An absent service or a 2D device downgrades the row
         // honestly instead of letting the GL build fall back to llvmpipe
-        // under a hardware label.
-        match read_small("/srv/warp/ctl") {
+        // under a hardware label. TWO-STEP (connect the service root, then
+        // open ctl RELATIVE to it) -- opening /srv/warp is a CONNECT and a
+        // single-shot walk of /srv/warp/ctl does not compose through it
+        // (joey's probe and warp_client both use this shape; the one-open
+        // form probed "missing" on a live 3D boot).
+        match read_warp_ctl() {
             Some(s) if s.starts_with("virgl 1") => {}
             Some(_) => return Status::Missing("2D device (virgl 0)".to_string()),
             None => return Status::Missing("no /srv/warp 3D device".to_string()),
         }
     }
     Status::Ready
+}
+
+fn read_warp_ctl() -> Option<String> {
+    use libthyla_rs::{t_close, t_open, t_pread, T_OREAD, T_WALK_OPEN_FROM_ROOT};
+    let path = b"/srv/warp";
+    let root = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, path.as_ptr(), path.len(), T_OREAD) };
+    if root < 0 {
+        return None;
+    }
+    let ctl = b"ctl";
+    let fd = unsafe { t_open(root, ctl.as_ptr(), ctl.len(), T_OREAD) };
+    if fd < 0 {
+        unsafe { t_close(root) };
+        return None;
+    }
+    let mut buf = [0u8; 256];
+    let n = unsafe { t_pread(fd, buf.as_mut_ptr(), buf.len() - 1, 0) };
+    unsafe {
+        t_close(fd);
+        t_close(root);
+    }
+    if n <= 0 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
 /// Slurp a small file (the prowl read_ctl_file idiom). None on any error.
