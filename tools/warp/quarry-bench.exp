@@ -9,14 +9,30 @@
 # tools/warp-host.sh, or directly: THYLACINE_ACCEL=kvm expect this-file).
 
 set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
 
 if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
 set ::env(THYLACINE_NOSTORM) 1
 set ::env(THYLACINE_NO_QMP) 1
 set ::env(THYLACINE_NO_SHARE) 1
+# The GL stack keys on the display backend (run-vm: the -gl device models
+# refuse to realise without one). Without this the boot comes up virgl=0 and
+# the hw-gl row honestly reports a 2D device -- which is the lane failing its
+# own premise, not quarry failing (learned the hard way, first run).
+set ::env(THYLACINE_DISPLAY) egl-headless
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
 if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
     set ::env(LS_CI_BOOT_TIMEOUT) 900
 }
+
+# Per-attempt fixture isolation (#78/#85): the synced images are never
+# booted directly.
+file mkdir $work
+file delete -force $work/pool-quarry.img $work/disk-quarry.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-quarry.img
+exec cp $repo/build/disk.img $work/disk-quarry.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-quarry.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-quarry.img
 
 source [file join [file dirname [info script]] .. interactive lib.exp]
 

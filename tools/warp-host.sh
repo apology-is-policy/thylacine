@@ -45,7 +45,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -56,8 +56,22 @@ sync_all() {
     # (no dependable --sparse), and a raw copy would inflate 906M-in-5G
     # to the full 5G on the wire and on the VM disk.
     echo "== pool.img (sparse) =="
+    # bash -o pipefail on the REMOTE half: without it the remote rc is dd's
+    # (0) even when gunzip dies on a cut stream -- which once shipped a 400MB
+    # prefix of a 5G pool under a green SYNC-DONE (dd of= truncates the old
+    # good file at open, so the failure also destroyed the previous copy).
     gzip -1 -c "$REPO_ROOT"/build/fixtures/pool.img |
-        ssh "$HOST" "gunzip -c | dd of=\$HOME/projects/thylacine/build/fixtures/pool.img conv=sparse bs=1M status=none"
+        ssh "$HOST" "bash -c 'set -o pipefail; gunzip -c | dd of=\$HOME/projects/thylacine/build/fixtures/pool.img conv=sparse bs=1M status=none'"
+    # The rc alone is not the verdict: compare apparent sizes both ends. A
+    # truncated transfer cannot pass this regardless of what the pipeline
+    # reported.
+    local_sz=$(stat -f %z "$REPO_ROOT"/build/fixtures/pool.img 2>/dev/null || stat -c %s "$REPO_ROOT"/build/fixtures/pool.img)
+    remote_sz=$(ssh "$HOST" "stat -c %s $RREPO/build/fixtures/pool.img 2>/dev/null || stat -f %z $RREPO/build/fixtures/pool.img")
+    if [[ "$local_sz" != "$remote_sz" ]]; then
+        echo "SYNC-FAILED: pool size mismatch (local $local_sz != remote $remote_sz) -- the transfer truncated" >&2
+        exit 1
+    fi
+    echo "== pool verified: $remote_sz bytes both ends =="
     ssh "$HOST" "du -h $RREPO/build/fixtures/pool.img; ls -l $RREPO/build/kernel/thylacine.bin $RREPO/build/ramfs.cpio"
     echo "SYNC-DONE"
 }
