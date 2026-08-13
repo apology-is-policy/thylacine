@@ -18,7 +18,7 @@
 //                       AND-only at Phase 5+ syscall surface.
 //
 // At v1.0 P2-Fc:
-//   - Per-Proc table is fixed-size (PROC_HANDLE_MAX = 64 slots).
+//   - Per-Proc table is fixed-size (PROC_HANDLE_MAX = 1024 slots).
 //   - No underlying-kobj refcount integration.
 //   - No transfer-via-9P codepath; Phase 4 wires it.
 //   - No syscall surface; in-kernel callers only.

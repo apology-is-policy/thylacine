@@ -39,6 +39,115 @@ usage() { sed -n '2,15p' "$0"; exit 2; }
 [[ $# -ge 1 ]] || usage
 cmd="$1"
 
+# The pool moves in independently-retryable CHUNKS, not one stream.
+#
+# A single 5 G stream is all-or-nothing, and over the Cloudflare tunnel it does
+# not survive: three consecutive attempts died after 600-870 MB. That is a
+# DETERMINISTIC sustained-transfer limit, not a flake, so a retry budget buys
+# nothing -- nothing varies between attempts. Chunking is what varies: each
+# 64 MiB range is its own short-lived connection, retried on its own.
+#
+# Two properties fall out and both matter more than the retry:
+#   - the .part never becomes the live pool until it is fully verified, so a
+#     failed sync leaves the previous copy (the documented bit-exact restore
+#     source, CLAUDE.md "The Pi's build/") untouched;
+#   - chunks whose content already matches are SKIPPED, so a re-sync of an
+#     unchanged pool -- the common case under THYLACINE_MKFS_PRESERVE=1 --
+#     costs a hash pass instead of a 9-minute transfer.
+CHUNK_BYTES=$((64 * 1024 * 1024))
+
+# Per-chunk MD5s of a local file, one line per chunk, in order.
+local_chunk_hashes() {
+    python3 - "$1" "$CHUNK_BYTES" <<'PY'
+import hashlib, sys
+path, chunk = sys.argv[1], int(sys.argv[2])
+with open(path, 'rb') as f:
+    while True:
+        b = f.read(chunk)
+        if not b: break
+        print(hashlib.md5(b).hexdigest())
+PY
+}
+
+sync_pool() {
+    local lpool="$REPO_ROOT/build/fixtures/pool.img"
+    # $RREPO carries a literal `~`, which only expands UNQUOTED on the remote --
+    # and every path here must be quoted (it is passed through nested bash -c).
+    # Resolve the remote home once so the path is absolute and quote-safe.
+    local rhome rpool
+    rhome=$(ssh "$HOST" 'echo $HOME')
+    rpool="$rhome/projects/thylacine/build/fixtures/pool.img"
+    local lsz nchunks
+    lsz=$(stat -f %z "$lpool" 2>/dev/null || stat -c %s "$lpool")
+    nchunks=$(( (lsz + CHUNK_BYTES - 1) / CHUNK_BYTES ))
+    echo "== pool.img: $lsz bytes in $nchunks x $((CHUNK_BYTES / 1024 / 1024)) MiB chunks =="
+
+    # Base the .part on the existing remote pool when it is the right size, so
+    # only genuinely-differing chunks travel; otherwise start from a sparse file
+    # of the exact size (holes read as zeros, which is what an all-zero chunk
+    # needs anyway). Either way the .part is exactly lsz bytes before any chunk
+    # is written, so `seek` lands where it should and the final size is exact.
+    ssh "$HOST" "bash -c '
+        if [ -f \"$rpool\" ] && [ \"\$(stat -c %s \"$rpool\")\" = \"$lsz\" ]; then
+            cp --sparse=always \"$rpool\" \"$rpool.part\"
+        else
+            rm -f \"$rpool.part\"; truncate -s $lsz \"$rpool.part\"
+        fi'"
+
+    local lhashes rhashes
+    lhashes=$(local_chunk_hashes "$lpool")
+    rhashes=$(ssh "$HOST" "bash -c '
+        for i in \$(seq 0 $((nchunks - 1))); do
+            dd if=\"$rpool.part\" bs=$CHUNK_BYTES skip=\$i count=1 status=none | md5sum | cut -d\" \" -f1
+        done'")
+
+    local sent=0 skipped=0 i=0
+    while [ "$i" -lt "$nchunks" ]; do
+        local lh rh
+        lh=$(printf '%s\n' "$lhashes" | sed -n "$((i + 1))p")
+        rh=$(printf '%s\n' "$rhashes" | sed -n "$((i + 1))p")
+        if [ -n "$lh" ] && [ "$lh" = "$rh" ]; then
+            skipped=$((skipped + 1)); i=$((i + 1)); continue
+        fi
+        local attempt=1 ok=0
+        while [ "$attempt" -le 3 ]; do
+            # The RECEIVING dd must not carry `count=1`: reading from a PIPE it
+            # short-reads, writes only that first partial read, exits, and
+            # SIGPIPEs the whole upstream (observed as rc=141 on every attempt,
+            # which retries cannot fix because nothing varies). No count + EOF
+            # ends it exactly, since the sender ships precisely one chunk; the
+            # SENDING dd reads a regular file, where bs-sized reads are whole.
+            if dd if="$lpool" bs=$CHUNK_BYTES skip="$i" count=1 status=none | gzip -1 |
+               ssh "$HOST" "bash -c 'set -o pipefail; gunzip -c |
+                   dd of=\"$rpool.part\" bs=$CHUNK_BYTES seek=$i conv=notrunc status=none'"; then
+                ok=1; break
+            fi
+            echo "   chunk $i attempt $attempt failed; retrying" >&2
+            attempt=$((attempt + 1))
+        done
+        [ "$ok" = 1 ] || { echo "SYNC-FAILED: chunk $i unsendable after 3 attempts --" \
+            "the .part is kept for resume, the previous pool is INTACT" >&2; exit 1; }
+        sent=$((sent + 1)); i=$((i + 1))
+    done
+    echo "   $sent chunks sent, $skipped already current"
+
+    # The verdict is CONTENT, not the transfer rc: hash the assembled .part and
+    # require every chunk to match. A short or scrambled .part cannot pass this
+    # regardless of what any individual pipeline reported.
+    local rverify
+    rverify=$(ssh "$HOST" "bash -c '
+        for i in \$(seq 0 $((nchunks - 1))); do
+            dd if=\"$rpool.part\" bs=$CHUNK_BYTES skip=\$i count=1 status=none | md5sum | cut -d\" \" -f1
+        done'")
+    if [ "$rverify" != "$lhashes" ]; then
+        echo "SYNC-FAILED: assembled pool does not hash-match the local image --" \
+             "the .part is kept for inspection, the previous pool is INTACT" >&2
+        exit 1
+    fi
+    ssh "$HOST" "mv -f \"$rpool.part\" \"$rpool\""
+    echo "== pool verified: all $nchunks chunks hash-match, renamed into place =="
+}
+
 sync_all() {
     # git archive HEAD: exactly the committed tree (no build/, no .git, no
     # local junk). Uncommitted script changes ride separately below so a
@@ -52,26 +161,11 @@ sync_all() {
     scp -q "$REPO_ROOT"/build/kernel/thylacine.bin "$REPO_ROOT"/build/kernel/thylacine.elf \
         "$HOST:$RREPO/build/kernel/"
     scp -q "$REPO_ROOT"/build/ramfs.cpio "$REPO_ROOT"/build/disk.img "$HOST:$RREPO/build/"
-    # The pool travels as gzip -> dd conv=sparse: macOS ships openrsync
-    # (no dependable --sparse), and a raw copy would inflate 906M-in-5G
-    # to the full 5G on the wire and on the VM disk.
-    echo "== pool.img (sparse) =="
-    # bash -o pipefail on the REMOTE half: without it the remote rc is dd's
-    # (0) even when gunzip dies on a cut stream -- which once shipped a 400MB
-    # prefix of a 5G pool under a green SYNC-DONE (dd of= truncates the old
-    # good file at open, so the failure also destroyed the previous copy).
-    gzip -1 -c "$REPO_ROOT"/build/fixtures/pool.img |
-        ssh "$HOST" "bash -c 'set -o pipefail; gunzip -c | dd of=\$HOME/projects/thylacine/build/fixtures/pool.img conv=sparse bs=1M status=none'"
-    # The rc alone is not the verdict: compare apparent sizes both ends. A
-    # truncated transfer cannot pass this regardless of what the pipeline
-    # reported.
-    local_sz=$(stat -f %z "$REPO_ROOT"/build/fixtures/pool.img 2>/dev/null || stat -c %s "$REPO_ROOT"/build/fixtures/pool.img)
-    remote_sz=$(ssh "$HOST" "stat -c %s $RREPO/build/fixtures/pool.img 2>/dev/null || stat -f %z $RREPO/build/fixtures/pool.img")
-    if [[ "$local_sz" != "$remote_sz" ]]; then
-        echo "SYNC-FAILED: pool size mismatch (local $local_sz != remote $remote_sz) -- the transfer truncated" >&2
-        exit 1
-    fi
-    echo "== pool verified: $remote_sz bytes both ends =="
+    # Each chunk travels gzipped (macOS ships openrsync, no dependable
+    # --sparse; a raw copy would inflate 906M-in-5G to the full 5G on the
+    # wire) and lands via dd seek into a pre-sized sparse .part.
+    sync_pool
+
     ssh "$HOST" "du -h $RREPO/build/fixtures/pool.img; ls -l $RREPO/build/kernel/thylacine.bin $RREPO/build/ramfs.cpio"
     echo "SYNC-DONE"
 }

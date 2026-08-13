@@ -49,6 +49,12 @@ ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\
                              #   census on BOTH axes -- count AND bytes; bo-peak 26 against a 1024
                              #   cap with thousands of refusals proved the BYTE cap
                              #   [WARP_CTX_BACKING_MAX] is what saturates: few-but-large backings)
+                             # + "create-refused-noctx <n>\ndiag-noctx-arms <n>\n"
+                             #   (#198: create3d refusals that never resolved a ctx -- the ctl-parse
+                             #   and ctl-no-record arms -- plus the OR of the WDIAG_* arm bits taken
+                             #   with no ctx to charge them to. A refusal counted HERE and not in the
+                             #   per-ctx "create-refused" is the signature of a chokepoint ABOVE the
+                             #   ctx, which is what made the fid ceiling invisible on both endpoints)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
@@ -59,6 +65,11 @@ ctx/
                              #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3)
                              #   + "bo-live <n>\nbo-peak <n>\nbo-bytes <n>\nbo-bytes-peak <n>\n"
                              #     (#204 census: backed now / high-water, count + bytes axes)
+                             #   + "diag-arms <bits>\ncreate-refused <n>\n" (#198, appended LAST:
+                             #     the OR of the WDIAG_* one-shot arm bits taken on this ctx and the
+                             #     total create3d refusals charged to it. The arm bits name WHICH
+                             #     silent path a refusal took -- WDIAG_RECORD_VANISHED = 16 is the
+                             #     BO record consumed by a failed create3d [#218])
     submit                   # write: one Twrite = one atomic opaque CCMD submission (fenced)
     fence                    # read: the completion stream -- newest signaled fence id,
                              #       one record per read, PARKS when nothing unreported

@@ -104,7 +104,14 @@ struct poll_waiter {
 ```
 
 Stack-allocated by `sys_poll_for_proc` — one per pollfd, `nfds ≤
-PROC_HANDLE_MAX = 64`. Hook lifetime is one `poll` call; the sweep at
+POLL_MAX_NFDS = 64`. The bound is `POLL_MAX_NFDS`, **not**
+`PROC_HANDLE_MAX`, and the distinction is load-bearing: the array
+(`waiters[]` ~2 KiB + `held[]` ~1.5 KiB) sits on the kernel stack, so
+sizing it off the fd table would let a table lift push the frame past
+the kstack guard. The two constants were both 64 until the #198 lift
+took `PROC_HANDLE_MAX` to 1024 — which is exactly when naming the wrong
+one stops being harmless (`kernel/poll.c:272-284` states the same rule
+at the allocation). Hook lifetime is one `poll` call; the sweep at
 the end of `sys_poll_for_proc` unregisters every still-listed hook so
 no stack pointer outlives the call (`specs/poll.tla` `NoStaleHook`).
 

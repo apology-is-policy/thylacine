@@ -184,8 +184,9 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 //
 // NOT IN struct Handle, also because that struct has no slack: 8 + 4 + 4 + 8 is
 // exactly the 24 its _Static_assert pins. A u32 there grows it to 32, taking the
-// table from 6152 to 8200 bytes -- across the 2-page boundary into 3, a 50%
-// per-Proc increase to carry one bit per slot. The bitmap costs 32 bytes total.
+// table from 24712 to 32904 bytes -- across the order-3 alloc_pages boundary
+// into order-4, doubling the physical allocation to carry one bit per slot.
+// The bitmap costs 128 bytes total.
 #define HANDLE_CLOEXEC_WORDS ((PROC_HANDLE_MAX + 63) / 64)
 
 struct HandleTable {

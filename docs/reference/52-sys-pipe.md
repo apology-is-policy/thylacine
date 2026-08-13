@@ -132,7 +132,7 @@ Tests call `sys_pipe_for_proc(p, ...)` (the non-static inner) with a `proc_alloc
 - `sys_pipe_for_proc` returns -1 on:
   - NULL Proc / NULL out pointer.
   - `pipe_create` OOM (ring or endpoint allocation fails).
-  - `handle_alloc` failure (table full; ≥ PROC_HANDLE_MAX = 64 active handles).
+  - `handle_alloc` failure (table full; ≥ PROC_HANDLE_MAX = 1024 active handles).
 - On any failure all partial state is cleaned up. Both Spoors are clunked; any installed handle is closed (which clunks its Spoor too).
 
 ---
