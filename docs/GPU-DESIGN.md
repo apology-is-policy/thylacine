@@ -440,6 +440,42 @@ black screen, not an error** — so the probe MUST assert *pixels*, with a
 positive control (blit a known-nonzero source into a known-zero destination
 and require the destination to change), never merely "no error returned".
 
+> **P1a ANSWERED 2026-08-13 — NO, and that is the good answer.** Probed on
+> thyla-pi (KVM, real V3D) by the `warp-prove` C-0 leg. With the
+> same-context **control passing** (`control same-ctx blit = GREEN`, so the
+> `VIRGL_CCMD_BLIT` encoding is valid and blits do move pixels), the
+> cross-context attempt is refused by name:
+> `vrend_renderer_blit: context error reported 1 "warp" Illegal resource 1080`
+> — 1080 being the other context's resource.
+>
+> **So I-45's context bound is ENFORCED by virglrenderer, verified rather
+> than assumed.** This was a live question about the seam we already ship,
+> not only about Warp-C: `submit` hands the host an *opaque* stream carrying
+> raw device-global resource ids, so it was entirely possible that any warp
+> client could read any other client's framebuffer by naming one. It cannot.
+>
+> **Consequence for Warp-C: P1b is the live path — C-2 must explicitly
+> attach each client resource to the compositor context.** This is a better
+> design than implicit reach: composition authority becomes a deliberate,
+> auditable per-surface grant rather than ambient access across the device.
+>
+> **The control earned its place.** The first probe run used the wrong
+> opcode (21, which is `GET_QUERY_RESULT`; the correct `VIRGL_CCMD_BLIT` is
+> 16) and vrend answered `Illegal command buffer`. Without a same-context
+> control, that mis-encoding would have produced an identical "no pixels
+> moved" reading and been reported as "cross-context access is refused" —
+> the same conclusion, reached for a false reason, sending C-2 to build a
+> cross-attach verb on evidence that proved nothing.
+>
+> **Caveat on the oracle, and it is load-bearing (task #240).** The verdict
+> rests on the HOST log, not on the guest. The rejection is invisible from
+> inside the guest — `poisoned` stays 0, the fence never signals, and the
+> following `transfer_from` never completes — so a refused submit and a hung
+> submit are the same observation, and the probe correctly reports
+> `NO P1 VERDICT` from the pixel channel. **A compositor cannot be built on
+> a submit channel with no failure report**, so #240 is a Warp-C
+> prerequisite and it also bounds what the P1b re-test can assert.
+
 **P2 — cross-context ordering: does the blit observe the client's finished
 frame?** The client renders on its context, the compositor blits on its own;
 virglrenderer maps each guest context to a host GL context, and in-order

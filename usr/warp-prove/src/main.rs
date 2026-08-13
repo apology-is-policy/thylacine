@@ -47,8 +47,19 @@ use libthyla_rs::{
 const VIRGL_CCMD_CREATE_OBJECT: u32 = 1;
 const VIRGL_CCMD_SET_FRAMEBUFFER_STATE: u32 = 5;
 const VIRGL_CCMD_CLEAR: u32 = 7;
+// Counted from VIRGL_CCMD_NOP = 0 in the enum, NOT guessed. The first
+// attempt used 21 and vrend answered `failed to dispatch GET_QUERY_RESULT`
+// + `Illegal command buffer` -- and GET_QUERY_RESULT is exactly 21, so the
+// runtime confirmed the counting rule while refuting the value.
+const VIRGL_CCMD_BLIT: u32 = 16;
 const VIRGL_CCMD_SET_SUB_CTX: u32 = 28;
 const VIRGL_CCMD_CREATE_SUB_CTX: u32 = 29;
+// virgl_protocol.h "blit": 21 payload dwords, S0 packing mask|filter|scissor.
+const VIRGL_CMD_BLIT_SIZE: u32 = 21;
+// util/format/u_formats.h -- R|G|B|A. A ZERO mask is a legal no-op blit, so
+// getting this wrong would forge the exact negative this probe reports.
+const PIPE_MASK_RGBA: u32 = 0xf;
+const PIPE_TEX_FILTER_NEAREST: u32 = 0;
 const VIRGL_OBJECT_SURFACE: u32 = 8;
 // virgl_hw.h
 const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -62,6 +73,16 @@ const W: u32 = 64;
 const H: u32 = 64;
 const BO_SIZE: u32 = W * H * 4;
 const SENTINEL: u32 = 0x4141_4141;
+// B8G8R8A8 as one little-endian u32: byte0=B byte1=G byte2=R byte3=A.
+// Chosen so all THREE outcomes of the C-0 P1 leg are distinguishable:
+// SENTINEL = the readback never landed; RED = the destination's own clear
+// survived (the blit moved nothing); GREEN = the blit moved the source.
+const BLIT_RED: u32 = 0xFFFF_0000;
+const BLIT_GREEN: u32 = 0xFF00_FF00;
+// Not a pixel: `resample`'s report that the context wedged before the
+// readback could land. Distinct from SENTINEL so "the submit was refused"
+// never reads as "the instrument failed".
+const CTX_POISONED: u32 = 0xDEAD_0001;
 const CLEAR_RED_B8G8R8A8: u32 = 0xFFFF_0000;
 
 fn cmd0(cmd: u32, obj: u32, len: u32) -> u32 {
@@ -347,8 +368,13 @@ pub extern "C" fn rs_main() -> i64 {
     // fallback into total BO death (the #198 cascade's second stage).
     prove_corpse_reclaim(root);
 
+    // 10. Warp-C C-0 / P1 (GPU-DESIGN section 4.5.4): the cross-context
+    // blit question the whole GPU-composition design rests on. Reports a
+    // RESULT either way -- only a broken instrument fails the gate.
+    prove_cross_ctx_blit();
+
     unsafe { t_close(root) };
-    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path + two-client + corpse-reclaim)\n");
+    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path + two-client + corpse-reclaim + C0-P1 cross-ctx blit)\n");
     unsafe { t_exits(0) }
 }
 
@@ -400,6 +426,357 @@ fn fenced_free(root: i64) -> u64 {
 fn ctx_field(root: i64, ctx: u32, key: &str) -> u64 {
     parse_field(&open_read_string(root, &format!("ctx/{}/ctl", ctx)), key)
         .unwrap_or_else(|| fail(&format!("two-client: ctx ctl `{}` missing (test-mode build?)", key)))
+}
+
+/// Mint a BO of the prover's standard W x H render-target geometry and
+/// return `(bo_id, res_id, mapped_va)`.
+fn mint_sized_bo(root: i64, ctx: u32, what: &str) -> (u32, u32, u64) {
+    let bo = match parse_u32_prefix(&open_read_string(root, &format!("ctx/{}/bo/new", ctx))) {
+        Some(v) => v,
+        None => fail(&format!("cross-blit: bo/new for {}", what)),
+    };
+    let create = format!(
+        "create3d {} {} {} {} {} 1 1 0 0 0 {}",
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_BIND_RENDER_TARGET, W, H, BO_SIZE
+    );
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &create) {
+        fail(&format!("cross-blit: create3d for {}", what));
+    }
+    let res = parse_field(&open_read_string(root, &format!("ctx/{}/bo/{}/info", ctx, bo)), "res")
+        .unwrap_or_else(|| fail(&format!("cross-blit: info `res` for {}", what))) as u32;
+    let map_fd = unsafe {
+        let p = format!("ctx/{}/bo/{}/map", ctx, bo);
+        t_open(root, p.as_ptr(), p.len(), T_OREAD)
+    };
+    if map_fd < 0 {
+        fail(&format!("cross-blit: map open for {}", what));
+    }
+    let va = unsafe { t_weft_map(map_fd as u64, 0) };
+    if va < 0 {
+        fail(&format!("cross-blit: weft_map for {}", what));
+    }
+    (bo, res, va as u64)
+}
+
+fn submit_stream(root: i64, ctx: u32, st: &[u32], what: &str) {
+    let bytes: Vec<u8> = st.iter().flat_map(|d| d.to_le_bytes()).collect();
+    let fd = unsafe {
+        let p = format!("ctx/{}/submit", ctx);
+        t_open(root, p.as_ptr(), p.len(), T_OWRITE)
+    };
+    if fd < 0 {
+        fail(&format!("cross-blit: submit open ({})", what));
+    }
+    let n = unsafe { t_write(fd, bytes.as_ptr(), bytes.len()) };
+    unsafe { t_close(fd) };
+    if n != bytes.len() as i64 {
+        fail(&format!("cross-blit: submit refused ({})", what));
+    }
+}
+
+/// CREATE_SUB_CTX + SET_SUB_CTX. vrend scopes object state to a sub-context
+/// and Mesa always makes one; emitted ONCE per context, since re-creating
+/// sub-ctx 0 is not idempotent.
+fn subctx_preamble(st: &mut Vec<u32>) {
+    st.push(cmd0(VIRGL_CCMD_CREATE_SUB_CTX, 0, 1));
+    st.push(0);
+    st.push(cmd0(VIRGL_CCMD_SET_SUB_CTX, 0, 1));
+    st.push(0);
+}
+
+/// A surface over `res_id` bound as cbuf0, then CLEAR to (r,g,b,1).
+fn clear_stream(st: &mut Vec<u32>, res_id: u32, surf: u32, r: f32, g: f32, b: f32) {
+    st.push(cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_SURFACE, 5));
+    st.push(surf);
+    st.push(res_id);
+    st.push(VIRGL_FORMAT_B8G8R8A8_UNORM);
+    st.push(0); // level
+    st.push(0); // layers
+    st.push(cmd0(VIRGL_CCMD_SET_FRAMEBUFFER_STATE, 0, 3));
+    st.push(1); // nr_cbufs
+    st.push(0); // zsurf
+    st.push(surf);
+    st.push(cmd0(VIRGL_CCMD_CLEAR, 0, 8));
+    st.push(PIPE_CLEAR_COLOR0);
+    st.push(r.to_bits());
+    st.push(g.to_bits());
+    st.push(b.to_bits());
+    st.push(1.0f32.to_bits());
+    st.push(0); // depth lo
+    st.push(0); // depth hi
+    st.push(0); // stencil
+}
+
+/// A full-surface BLIT, src -> dst. Field order is `virgl_protocol.h`
+/// "blit" verbatim (21 payload dwords); the resource fields carry the raw
+/// DEVICE-GLOBAL res id, which is exactly what `virgl_thylacine_emit_res`
+/// writes for Mesa's own blits.
+fn blit_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32) {
+    st.push(cmd0(VIRGL_CCMD_BLIT, 0, VIRGL_CMD_BLIT_SIZE));
+    st.push(PIPE_MASK_RGBA | (PIPE_TEX_FILTER_NEAREST << 8)); // S0; scissor off
+    st.push(0); // scissor min x|y<<16
+    st.push(0); // scissor max x|y<<16
+    st.push(dst_res);
+    st.push(0); // dst level
+    st.push(VIRGL_FORMAT_B8G8R8A8_UNORM);
+    st.push(0); // dst x
+    st.push(0); // dst y
+    st.push(0); // dst z
+    st.push(W); // dst w
+    st.push(H); // dst h
+    st.push(1); // dst d
+    st.push(src_res);
+    st.push(0); // src level
+    st.push(VIRGL_FORMAT_B8G8R8A8_UNORM);
+    st.push(0); // src x
+    st.push(0); // src y
+    st.push(0); // src z
+    st.push(W); // src w
+    st.push(H); // src h
+    st.push(1); // src d
+}
+
+/// Fail FAST if the last submit wedged the context.
+///
+/// Learned the hard way on the first Pi run: a mis-encoded BLIT made vrend
+/// report `Illegal command buffer`, the context wedged, no fence ever
+/// retired, and `resample`'s fence read -- which PARKS until a NEWER fence
+/// arrives -- blocked forever. The harness then died on ITS timeout, so the
+/// run reported "timeout waiting for WARP-PROVE PASS" instead of the actual
+/// cause, which was sitting in the log two lines above. A bound on the
+/// number of reads is not a bound on TIME when each read can park.
+///
+/// Best-effort by nature (the host reports the error asynchronously), but a
+/// 9P round trip is usually enough for the poison to land, and being
+/// occasionally too early only costs us the old behaviour.
+fn guard_not_poisoned(root: i64, what: &str) {
+    if let Some(v) = parse_field(&open_read_string(root, "ctl"), "poisoned") {
+        if v != 0 {
+            // Emit the reason on its OWN line first: the LS-CI harness
+            // hard-fails on the token "warp-prove: FAIL" and kills the run
+            // mid-line, so anything after that token never reaches the log.
+            t_putstr("warp-prove: C0-P1 diagnosis follows\n");
+            fail(&format!(
+                "cross-blit: the seam reports poisoned={} after {} -- the submit was \
+                 REJECTED (look for `Illegal command buffer` / `failed to dispatch` in \
+                 the host log). Not a blit verdict: the stream never executed.",
+                v, what
+            ));
+        }
+    }
+}
+
+/// Re-sentinel the sample point, queue a readback, ride the fence stream
+/// until the sentinel is overwritten, and return what landed.
+///
+/// Re-sentinelling before EVERY readback is what keeps SENTINEL meaning
+/// exactly one thing -- "the readback never landed" -- on the second and
+/// later calls, instead of decaying into "whatever the previous leg left".
+fn resample(root: i64, ctx: u32, bo: u32, va: u64) -> u32 {
+    let px0 = va as *mut u32;
+    unsafe { core::ptr::write_volatile(px0, SENTINEL) };
+    let before = ctx_field(root, ctx, "fence-signaled");
+    let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", W, H);
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &xfer) {
+        fail("cross-blit: transfer_from queue refused");
+    }
+    // Poll the ctx's MONOTONIC `fence-signaled` counter instead of parking
+    // on the fence fd. Both halves of this were learned on the Pi:
+    //
+    //  - the fence FD PARKS until a NEWER fence retires, so a wedged ctx
+    //    blocks forever. A bound on the number of READS is not a bound on
+    //    TIME. The first run died on the harness's own 180 s timeout and
+    //    reported "timeout waiting for WARP-PROVE PASS", burying the real
+    //    cause (an illegal command buffer) two lines up the log.
+    //  - the condition must be an INCREASE, not a level: a gauge reading
+    //    zero is satisfied by "no fence was ever queued" exactly as well as
+    //    by "the fence landed" (the seam's own ctl comment says so).
+    //
+    // Each poll is a 9P round trip, which is also what gives the host time
+    // to report an async error into `poisoned`.
+    for _ in 0..200 {
+        if ctx_field(root, ctx, "poisoned") != 0 {
+            return CTX_POISONED;
+        }
+        if ctx_field(root, ctx, "fence-signaled") > before {
+            break;
+        }
+    }
+    unsafe { core::ptr::read_volatile(px0) }
+}
+
+fn color_name(v: u32) -> &'static str {
+    match v {
+        SENTINEL => "SENTINEL(no readback)",
+        CTX_POISONED => "CTX-POISONED(submit refused)",
+        BLIT_RED => "RED(unmoved)",
+        BLIT_GREEN => "GREEN(moved)",
+        _ => "OTHER",
+    }
+}
+
+/// Warp-C C-0 / P1 (`docs/GPU-DESIGN.md` §4.5.4): can a `VIRGL_CCMD_BLIT`
+/// submitted on ONE context read a resource created by ANOTHER context?
+///
+/// Warp-C's whole design rests on this -- the compositor composes by
+/// blitting each client's render target into a screen resource it owns, so
+/// if a blit cannot cross the context boundary the design does not stand.
+///
+/// TWO questions, and the FIRST is about the seam we already ship:
+///
+///   P1a -- with NO attach of any kind, does a blit naming a foreign
+///          device-global res id move pixels? A YES is a Warp-C green light
+///          AND an **I-45 finding**: any warp client could read any other
+///          client's framebuffer by naming its id, since `submit` takes an
+///          opaque stream and the res fields are raw device-global ids.
+///   P1b -- if P1a is NO, the seam needs an explicit cross-attach verb and
+///          Warp-C's C-2 must add it. Either answer is a real result; only
+///          a broken instrument is a failure.
+///
+/// THE INSTRUMENT'S OWN TRAP, and why this leg is shaped the way it is. A
+/// blit that is REFUSED and a blit that is MIS-ENCODED produce identical
+/// pixels, and in production both present as a BLACK SCREEN rather than an
+/// error. So:
+///
+///   * the destination is cleared RED and the source GREEN, so "moved
+///     nothing" and "moved the source" are different VALUES, not
+///     presence-vs-absence;
+///   * every readback re-sentinels first, so "the readback never landed" is
+///     a THIRD distinguishable value and a broken instrument cannot
+///     masquerade as a clean negative;
+///   * a SAME-CONTEXT blit runs FIRST as the positive control. If that does
+///     not turn the destination GREEN, the encoding here is wrong and NO
+///     verdict about cross-context access is reportable. Without it, a
+///     mis-encoded blit would read as "cross-context access is refused" --
+///     the exact wrong-and-comforting answer, and the failure mode this
+///     project keeps re-learning (a negative assertion satisfied by a
+///     broken fixture).
+fn prove_cross_ctx_blit() {
+    let a = warp_connect("compositor A");
+    let b = warp_connect("client B");
+    let ctx_a = mint_ctx(a, "compositor A");
+    let ctx_b = mint_ctx(b, "client B");
+    if ctx_a == ctx_b {
+        fail("cross-blit: A and B got the SAME ctx -- one connection, not two; \
+              the cross-context question would be vacuous");
+    }
+
+    // A owns the destination ("the screen") and a local source for the
+    // control; B owns the foreign source.
+    let (dst_bo, dst_res, dst_va) = mint_sized_bo(a, ctx_a, "A dst/screen");
+    let (_, local_res, _) = mint_sized_bo(a, ctx_a, "A local src (control)");
+    let (_, foreign_res, _) = mint_sized_bo(b, ctx_b, "B src (foreign)");
+    if local_res == foreign_res || dst_res == foreign_res {
+        fail("cross-blit: resource ids collide -- the legs below would be vacuous");
+    }
+
+    // Paint: A's local source GREEN, B's foreign source GREEN, A's dst RED.
+    // One sub-ctx preamble per context.
+    let mut sa: Vec<u32> = Vec::new();
+    subctx_preamble(&mut sa);
+    clear_stream(&mut sa, local_res, 1, 0.0, 1.0, 0.0); // local src = GREEN
+    clear_stream(&mut sa, dst_res, 2, 1.0, 0.0, 0.0); // dst        = RED
+    submit_stream(a, ctx_a, &sa, "A paint");
+
+    let mut sb: Vec<u32> = Vec::new();
+    subctx_preamble(&mut sb);
+    clear_stream(&mut sb, foreign_res, 1, 0.0, 1.0, 0.0); // foreign src = GREEN
+    submit_stream(b, ctx_b, &sb, "B paint");
+
+    // Baseline: the destination really is RED before any blit. Without this
+    // a dst that was never painted would make the control's GREEN
+    // unattributable.
+    let base = resample(a, ctx_a, dst_bo, dst_va);
+    if base != BLIT_RED {
+        t_putstr(&format!(
+            "warp-prove: C0-P1 INSTRUMENT: dst baseline is {} (0x{:08x}), want RED -- \
+             the clear or the readback is broken. NO P1 VERDICT.\n",
+            color_name(base), base
+        ));
+        return;
+    }
+    t_putstr("warp-prove: C0-P1 baseline dst=RED\n");
+
+    // CONTROL: a SAME-context blit must move pixels. This validates the
+    // BLIT encoding itself; a failure here invalidates the test below.
+    let mut sc: Vec<u32> = Vec::new();
+    blit_stream(&mut sc, local_res, dst_res);
+    submit_stream(a, ctx_a, &sc, "control same-ctx blit");
+    let ctl = resample(a, ctx_a, dst_bo, dst_va);
+    if ctl != BLIT_GREEN {
+        t_putstr(&format!(
+            "warp-prove: C0-P1 INSTRUMENT: CONTROL same-ctx blit left {} (0x{:08x}), \
+             want GREEN -- the BLIT encoding is wrong, so a cross-context refusal \
+             below would really be an encoding bug. NO P1 VERDICT.\n",
+            color_name(ctl), ctl
+        ));
+        return;
+    }
+    t_putstr("warp-prove: C0-P1 control same-ctx blit = GREEN (encoding valid)\n");
+
+    // THE TEST: repaint dst RED, then blit from B's resource on A's context.
+    let mut sr: Vec<u32> = Vec::new();
+    clear_stream(&mut sr, dst_res, 3, 1.0, 0.0, 0.0);
+    submit_stream(a, ctx_a, &sr, "repaint dst RED");
+    let re = resample(a, ctx_a, dst_bo, dst_va);
+    if re != BLIT_RED {
+        t_putstr(&format!(
+            "warp-prove: C0-P1 INSTRUMENT: dst repaint left {} (0x{:08x}), want RED -- \
+             cannot attribute the cross-context result. NO P1 VERDICT.\n",
+            color_name(re), re
+        ));
+        return;
+    }
+
+    let mut sx: Vec<u32> = Vec::new();
+    blit_stream(&mut sx, foreign_res, dst_res);
+    submit_stream(a, ctx_a, &sx, "cross-ctx blit");
+    // NO guard_not_poisoned here, deliberately: a refused cross-context blit
+    // POISONS the ctx, and that poison IS the measurement. `resample` reports
+    // it as CTX_POISONED -> RESULT=REFUSED. Guarding here aborted the exact
+    // outcome this leg exists to observe (run 3 on the Pi).
+    let got = resample(a, ctx_a, dst_bo, dst_va);
+
+    match got {
+        BLIT_GREEN => {
+            t_putstr(
+                "warp-prove: C0-P1a RESULT=CROSSED -- a blit on ctx A read ctx B's \
+                 resource with NO attach.\n",
+            );
+            t_putstr(
+                "warp-prove: C0-P1a Warp-C is feasible AND this is an I-45 finding: \
+                 a warp client can read any other client's framebuffer by naming its \
+                 device-global res id.\n",
+            );
+        }
+        BLIT_RED | CTX_POISONED => {
+            t_putstr(
+                "warp-prove: C0-P1a RESULT=REFUSED -- the cross-context blit did NOT \
+                 read ctx B's resource (control passed, so the encoding is valid).\n",
+            );
+            t_putstr(
+                "warp-prove: C0-P1a I-45 HOLDS on this host: vrend enforces the \
+                 per-context resource bound even though `submit` carries an opaque \
+                 stream of raw device-global ids.\n",
+            );
+            t_putstr(
+                "warp-prove: C0-P1b Warp-C C-2 must add an explicit cross-attach verb; \
+                 I-45's context bound holds here.\n",
+            );
+        }
+        _ => {
+            t_putstr(&format!(
+                "warp-prove: C0-P1 INSTRUMENT: cross-ctx blit left {} (0x{:08x}) -- neither \
+                 RED nor GREEN nor a poisoned ctx. NO P1 VERDICT.\n",
+                color_name(got), got
+            ));
+        }
+    }
+
+    unsafe {
+        t_close(a);
+        t_close(b);
+    }
 }
 
 /// The cross-client properties. Sequential by construction: every step is a
