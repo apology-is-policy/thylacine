@@ -85,6 +85,9 @@ const QCONSOLE_LOG: &str = "/quake/id1/qconsole.log";
 const ENV_DRIVER: &str = "GALLIUM_DRIVER";
 const ENV_DRIVER_PATH: &str = "/env/GALLIUM_DRIVER";
 
+const ENV_NOPACE: &str = "SDL_THYLACINE_NOPACE";
+const ENV_NOPACE_PATH: &str = "/env/SDL_THYLACINE_NOPACE";
+
 // ---------------------------------------------------------------------------
 // The renderer matrix.
 // ---------------------------------------------------------------------------
@@ -214,24 +217,32 @@ fn read_warp_ctl() -> Option<String> {
 /// Pin GALLIUM_DRIVER in OUR env (children inherit a copy) and hand back the
 /// previous value for restore. Remove-then-create sidesteps any question of
 /// devenv write-at-offset semantics: each set is a fresh value file.
-fn driver_set(val: &str) -> Option<String> {
-    let old = env::var(ENV_DRIVER);
-    let _ = fs::remove_file(ENV_DRIVER_PATH);
-    if let Ok(mut f) = File::create(ENV_DRIVER_PATH) {
+fn env_set(name: &str, path: &str, val: &str) -> Option<String> {
+    let old = env::var(name);
+    let _ = fs::remove_file(path);
+    if let Ok(mut f) = File::create(path) {
         use libthyla_rs::io::Write;
         let _ = f.write_all(val.as_bytes());
     }
     old
 }
 
-fn driver_restore(old: Option<String>) {
-    let _ = fs::remove_file(ENV_DRIVER_PATH);
+fn env_restore(path: &str, old: Option<String>) {
+    let _ = fs::remove_file(path);
     if let Some(v) = old {
-        if let Ok(mut f) = File::create(ENV_DRIVER_PATH) {
+        if let Ok(mut f) = File::create(path) {
             use libthyla_rs::io::Write;
             let _ = f.write_all(v.as_bytes());
         }
     }
+}
+
+fn driver_set(val: &str) -> Option<String> {
+    env_set(ENV_DRIVER, ENV_DRIVER_PATH, val)
+}
+
+fn driver_restore(old: Option<String>) {
+    env_restore(ENV_DRIVER_PATH, old)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +264,21 @@ const BASE_ARGS: &[&str] = &["-window", "-nosound"];
 /// measures any within-boot drift (#168) instead of assuming its absence.
 struct Leg {
     r: &'static Renderer,
+    /// Whether the SDL frame pacer stays ON for this leg.
+    ///
+    /// A bench leg defaults to UNPACED, because a paced present blocks on the
+    /// compositor's FRAME tick and the number stops being a property of the
+    /// renderer: it becomes a property of the clock. That is what
+    /// SDL_THYLACINE_NOPACE exists for ("benchmarks", per the pacer's own
+    /// comment), and it is what every other bench lane already does via the
+    /// rp5/rp6/rp7 wrappers -- quarry not doing it made its figures
+    /// non-comparable with all of them.
+    ///
+    /// `:paced` opts back in, because the paced number is the one a USER
+    /// actually sees. The pair is the measurement: unpaced is renderer
+    /// throughput, paced is delivered frame rate, and the gap between them is
+    /// the compositor's contribution.
+    paced: bool,
     /// None leaves the engine at its own windowed default -- 640x480, seeded
     /// by sdl_common.c's SDL_Init path, NOT by the vid_width/vid_height cvars
     /// (which default to 800x600 and are never consulted once -window makes
@@ -265,9 +291,14 @@ impl Leg {
     /// the label keeps a sweep's table rows self-describing, so a pasted
     /// result cannot lose the one variable it was varying.
     fn label(&self) -> String {
-        match self.res {
+        let base = match self.res {
             Some((w, h)) => format!("{}@{}x{}", self.r.key, w, h),
             None => self.r.key.to_string(),
+        };
+        if self.paced {
+            format!("{}:paced", base)
+        } else {
+            base
         }
     }
 }
@@ -280,6 +311,10 @@ impl Leg {
 /// returns, where the fullscreen path would instead search the modelist and
 /// Sys_Error on a miss.
 fn parse_leg(spec: &str) -> Result<Leg, String> {
+    let (spec, paced) = match spec.strip_suffix(":paced") {
+        Some(rest) => (rest, true),
+        None => (spec, false),
+    };
     let (key, res) = match spec.split_once('@') {
         None => (spec, None),
         Some((k, dims)) => {
@@ -295,7 +330,7 @@ fn parse_leg(spec: &str) -> Result<Leg, String> {
         }
     };
     match RENDERERS.iter().find(|r| r.key == key) {
-        Some(r) => Ok(Leg { r, res }),
+        Some(r) => Ok(Leg { r, res, paced }),
         None => Err(format!("unknown renderer '{}'", key)),
     }
 }
@@ -347,6 +382,14 @@ fn bench_one(leg: &Leg, demo: &str) -> Result<Bench, String> {
     let _ = fs::remove_file(QCONSOLE_LOG);
 
     let old = r.driver.map(driver_set);
+    // Unpaced unless the leg asked otherwise: see Leg::paced. Set around the
+    // spawn exactly like the driver, so the child inherits it at
+    // env_clone_into and quarry's own environment is left as it was found.
+    let old_pace = if leg.paced {
+        None
+    } else {
+        Some(env_set(ENV_NOPACE, ENV_NOPACE_PATH, "1"))
+    };
     let mut cmd = Command::new(r.bin);
     for a in BASE_ARGS {
         cmd.arg(*a);
@@ -381,7 +424,19 @@ fn bench_one(leg: &Leg, demo: &str) -> Result<Bench, String> {
     if let Some(o) = old {
         driver_restore(o);
     }
+    if let Some(o) = old_pace {
+        env_restore(ENV_NOPACE_PATH, o);
+    }
     let mut child = spawned?;
+    t_putstr(&format!(
+        "quarry: {} pace-witness {}\n",
+        tag,
+        if leg.paced {
+            "PACED (blocks on the compositor FRAME tick)"
+        } else {
+            "unpaced (SDL_THYLACINE_NOPACE=1)"
+        }
+    ));
     // Announce the pid at SPAWN, not just at the kill: the poll loop below
     // prints nothing while it runs, so a stall inside it leaves no pid behind
     // to inspect -- which is exactly what happened the first time this hung.
@@ -573,9 +628,13 @@ fn usage() -> i32 {
          \x20 quarry list             probe the renderer matrix\n\
          \x20 quarry bench [demo]     timedemo every ready renderer (default demo1)\n\
          \x20 quarry bench <demo> <leg>...  bench only these, in this order\n\
-         \x20                         a leg is <key> or <key>@<W>x<H>, so one\n\
+         \x20                         a leg is <key>[@<W>x<H>][:paced], so one\n\
          \x20                         command sweeps a renderer across modes:\n\
          \x20                         quarry bench demo1 hw-gl@320x240 hw-gl@1280x800\n\
+         \x20                         bench legs are UNPACED by default (a paced\n\
+         \x20                         present waits on the compositor tick, so the\n\
+         \x20                         number stops being the renderer's); :paced\n\
+         \x20                         opts back in to measure delivered fps\n\
          \x20 quarry <key> [args...]  launch one renderer; keys: sw llvmpipe hw-gl\n\
          \x20                         lavapipe hw-vk (VK rows await Warp-6)\n",
     );
@@ -603,7 +662,7 @@ fn cli_bench(demo: &str, specs: &[String]) -> i32 {
     // renderer at several modes IN ONE BOOT holds the boot constant.
     let mut legs: Vec<Leg> = Vec::new();
     if specs.is_empty() {
-        legs.extend(RENDERERS.iter().map(|r| Leg { r, res: None }));
+        legs.extend(RENDERERS.iter().map(|r| Leg { r, res: None, paced: false }));
     } else {
         for s in specs {
             match parse_leg(s) {
@@ -873,7 +932,7 @@ fn tui() -> i32 {
                             let _ = render(&mut term, &app);
                             // The TUI always benches at the engine default;
                             // a per-leg resolution is a CLI-sweep affordance.
-                            let b = bench_one(&Leg { r, res: None }, "demo1");
+                            let b = bench_one(&Leg { r, res: None, paced: false }, "demo1");
                             let sel = app.sel;
                             match b {
                                 Ok(b) => {
@@ -900,7 +959,7 @@ fn tui() -> i32 {
                             }
                             app.status = Some(format!("benching {}...", r.key));
                             let _ = render(&mut term, &app);
-                            if let Ok(b) = bench_one(&Leg { r, res: None }, "demo1") {
+                            if let Ok(b) = bench_one(&Leg { r, res: None, paced: false }, "demo1") {
                                 app.rows[i].2 = Some(b);
                             }
                         }
