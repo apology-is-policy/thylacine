@@ -88,6 +88,18 @@ lc_login michael correct-horse-battery-staple-v1
 lc_send "quarry list"
 lc_expect "hw-gl     ready" "quarry: the hardware GL row probes ready"
 
+# PRE-STATE. Run 3 found the log holding exactly 47 bytes -- one early line --
+# but could not say whether that was THIS run's first write or a FOSSIL in the
+# pool fixture that quarry's (result-ignoring) remove_file failed to delete.
+# Those accuse different things: "writes worked once then stopped" is resource
+# exhaustion during GL init; "the file was never written at all" is a
+# permission/path fault. Deleting it here OURSELVES and proving it gone
+# removes the ambiguity: anything present afterwards was written by this run's
+# engine.
+probe "DIR"    "ls -ld /quake/id1"
+probe "RM"     "rm -f $QLOG"
+probe "GONE"   "ls -l $QLOG"
+
 # Backgrounded so a slow quarry never costs us the shell -- the shell IS the
 # instrument in this run.
 lc_step "#232 running the hw-gl leg (backgrounded)"
@@ -123,6 +135,18 @@ probe "LS"   "ls -l $QLOG"
 probe "WC"   "wc -c $QLOG"
 probe "GREP" "grep -c fps $QLOG"
 probe "TAIL" "tail -3 $QLOG"
+
+# THE ENOSPC-vs-EMFILE DISCRIMINATOR. The engine's writes fail silently, and
+# TWO causes produce identical silence: the pool refusing writes (ENOSPC --
+# #39/#40 are live Stratum space bugs, so this is not hypothetical), or the
+# engine's own process being out of fds/fids. They differ in SCOPE, so a
+# DIFFERENT process settles it: this shell holds a handful of fds, so if IT
+# can append to the very same file, the filesystem is willing and the refusal
+# is process-local to the engine. If the shell is refused too, the FS is the
+# culprit and the engine is a bystander.
+probe "APPEND" "echo Q232-SHELL-APPENDED >> $QLOG"
+probe "AFTER"  "wc -c $QLOG"
+probe "SEEK"   "grep -c Q232-SHELL-APPENDED $QLOG"
 
 lc_step "#232 VERDICT INPUTS ABOVE. Read them as:"
 lc_step "#232    absent          -> the engine never created it here"
