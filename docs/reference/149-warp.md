@@ -632,6 +632,47 @@ so **composed is the common case**. The synchronous choice is deliberate
 and load-bearing — "synchronously, so the present stays one dispatch
 (the I-40 premise)" — so removing it is a design question, not a patch.
 
+Direct eligibility is narrow by construction (`reconcile`, ~1536): the
+mode is `Direct(n)` only when there is **exactly one visible surface,
+exactly one leaf, and it covers the full display**; every other
+arrangement is `Composed`. So a fullscreen GL client already gets the
+44.4 fps path for free, while *any* second surface on screen — the
+console pane, aurora's tab bar — drops the frame to 25.4. That is the
+practical shape of the 1.75×: it is not a latent optimisation for the
+fullscreen case, it is the cost of windowing a GL client at all.
+
+**The frame pacer is exonerated outright**, by a within-boot paired A/B
+(13 legs: six unpaced/paced pairs at matched resolutions plus a drift
+control, every leg mode- and pace-witnessed):
+
+| leg | unpaced | paced | Δ |
+|---|---:|---:|---:|
+| sw@320×240 | 50.1 | 49.2 | −1.8% |
+| sw@1280×800 | 32.2 | 32.5 | +0.9% |
+| hw-gl@320×240 | 42.4 | 42.0 | −0.9% |
+| hw-gl@640×480 | 35.5 | 35.6 | +0.3% |
+| hw-gl@1024×768 | 27.8 | 27.8 | 0.0% |
+| hw-gl@1280×800 | 25.4 | 25.2 | −0.8% |
+
+Every pair is inside ±1.8%, at *low* resolution as well as high — so the
+`IDLE_HZ=15` / hidden-surface concern does not bite here (the `#164`
+`Comp::animating()` present-pressure rule holds). The drift control
+closed at −1.7% across 13 legs, and the paced legs reproduce a separate
+boot's sweep to within 1.2% on every row, so the lane is repeatable
+boot-to-boot. Bench legs nonetheless default to unpaced (`abd47935`) —
+matching every other lane and the pacer's own "benchmarks" note — with
+`:paced` to opt back in.
+
+The plumbing for a GPU-side composite already exists in part:
+`Gpu::submit_3d` forwards an arbitrary VIRGL_CCMD stream, and
+`ctx_create` / `resource_create_3d` / `ctx_attach_resource` are all
+present. What is missing is an encoder — tapestryd forwards client
+streams but authors none, so compositing host-side would mean emitting
+(at minimum) a `VIRGL_CCMD_BLIT` per adopted surface into the scanout
+resource. That is the Wayland/dmabuf and Fuchsia/Scenic answer (import
+the client buffer as a texture, composite on the GPU); Plan 9's rio is
+CPU-composited and does not speak to it.
+
 Reading: the Composed-GL arm has **no per-frame stall** — it reaches the
 4-thread llvmpipe control's exact fps using 2.1× less CPU with ~2.3
 vCPUs idle. The bound is *serialized single-threaded guest work* (the
