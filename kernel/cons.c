@@ -1807,9 +1807,18 @@ long cons_set_mode_cmd(const void *buf, long n, bool allow_flags) {
     // never strand a fragment that then prepends the next line. This matches the
     // test hook (cons_test_set_termios) -- without it the production consctl
     // path and the test path diverge (the cooking tests would not catch a
-    // fragment-survival regression). No current consumer flips mid-line (login
-    // flips between completed reads; ut at prompt boundaries), but the kernel
-    // must be unambiguous against any consctl writer.
+    // fragment-survival regression). The discard is deliberate and matches
+    // what getpass(3) buys with TCSAFLUSH: type-ahead offered before a
+    // passphrase prompt must not be accepted as part of it.
+    //
+    // The corollary binds every consctl writer: set the mode BEFORE emitting
+    // the prompt that invites the input, never after. A flip placed after the
+    // prompt makes any byte that races it BOTH echoed (the pre-flip mode is
+    // still in force) and then discarded here -- a rendered passphrase prefix
+    // and a silently truncated read. This paragraph previously asserted the
+    // opposite ("no current consumer flips mid-line; login flips between
+    // completed reads"); login's passphrase prompt did exactly that, and the
+    // claim held only because the window is narrow, not because it was shut.
     g_cons.line_len = 0u;
     spin_unlock_irqrestore(&g_cons.lock, s);
 

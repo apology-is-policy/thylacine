@@ -652,7 +652,7 @@ proc lc_login {user pass} {
     lc_raw_send "$pass\r" "login password"
     expect {
         -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
-        -ex "login incorrect"         { lc_fail "auth rejected for $user" }
+        -ex "login incorrect"         { lc_fail "auth rejected for $user -- the credential is known-good, so suspect #233 FIRST: a byte that reaches the console between login's password prompt and its noecho consctl flip is echoed AND then discarded by the flip's TCSAFLUSH line-reset, truncating the passphrase. Look for an echoed character immediately after 'password: ' in the preserved log; that is the fingerprint. Fixed by ordering (mode set BEFORE the prompt) -- a recurrence means the window reopened." }
         -re {EXTINCTION:}             { lc_extinction_fail "extinction during login/provision" }
         timeout                       { lc_fail "shell never came up after auth (login/provision stall?)" }
         eof                           { lc_fail "qemu exited during login" }

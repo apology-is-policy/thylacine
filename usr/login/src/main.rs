@@ -1024,8 +1024,16 @@ pub extern "C" fn rs_main() -> i64 {
         set_console_mode(consctl_fd, MODE_DEFAULT);
         return unsafe { do_recover_flow() };
     }
-    write_out(b"password: ");
+    // Mask BEFORE the prompt, never after. A sender that reacts to "password: "
+    // -- expect, a paste, a fast typist -- puts bytes on the wire inside any
+    // window between the two, and in that window echo is still ON from the
+    // username read: the byte is rendered on the trusted path, and then the
+    // mode flip discards it (cons_set_mode_cmd starts a fresh canonical line,
+    // the TCSAFLUSH discipline), truncating the passphrase to a silent auth
+    // failure. Ordering closes both by construction -- there is no window.
+    // The username prompt above already had it right; this one did not.
     set_console_mode(consctl_fd, MODE_COOKED_NOECHO); // mask the passphrase (HARD no-echo)
+    write_out(b"password: ");
     let pw_ok = read_line(FD_IN, &mut pass);
     set_console_mode(consctl_fd, MODE_DEFAULT); // restore for auth + the shell's raw editor
     if !pw_ok {
