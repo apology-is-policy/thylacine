@@ -302,6 +302,10 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
         driver_restore(o);
     }
     let mut child = spawned?;
+    // Announce the pid at SPAWN, not just at the kill: the poll loop below
+    // prints nothing while it runs, so a stall inside it leaves no pid behind
+    // to inspect -- which is exactly what happened the first time this hung.
+    t_putstr(&format!("quarry: {} spawned pid={}\n", r.key, child.pid()));
 
     let started = Instant::now();
     let mut note = None;
@@ -324,8 +328,39 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
         let _ = time::sleep(Duration::from_millis(500));
     }
 
+    // When a leg ends WITHOUT an fps line, say what we actually read. The
+    // whole question in that case is whether the engine's line is missing
+    // from the log or merely unmatched by the parser, and only the bytes we
+    // saw can tell those apart -- an empty log and a full one that failed to
+    // parse are the same silence otherwise.
+    if note.is_some() {
+        // `present` is reported separately from `bytes` on purpose: an absent
+        // file and an empty one both read as 0 bytes, and they accuse
+        // different things -- the engine never opened the log at all, versus
+        // it opened it and wrote nothing.
+        let present = fs::File::open(QCONSOLE_LOG).is_ok();
+        let last = log.lines().last().unwrap_or("");
+        t_putstr(&format!(
+            "quarry: {} log-at-end present={} bytes={} last_line={:?}\n",
+            r.key,
+            present,
+            log.len(),
+            last
+        ));
+    }
+
     // `+timedemo` leaves the engine running, so every leg ends with a kill.
-    let _ = child.kill();
+    // The markers bracketing the kill are load-bearing, not chatter: a wedge
+    // in here emits nothing at all, and the LAST line printed is the only
+    // thing that says which step blocked. `kill` is an unbounded
+    // /proc/<pid>/ctl write; the reap below is bounded by its own loop.
+    t_putstr(&format!("quarry: {} kill-begin pid={}\n", r.key, child.pid()));
+    let killed = child.kill();
+    t_putstr(&format!(
+        "quarry: {} kill-end {}\n",
+        r.key,
+        if killed.is_ok() { "ok" } else { "err" }
+    ));
     let mut exit = -1;
     for _ in 0..40 {
         match child.try_wait() {
@@ -339,6 +374,7 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
             Err(_) => break,
         }
     }
+    t_putstr(&format!("quarry: {} reaped exit={}\n", r.key, exit));
     // Re-read after the kill: up to one poll interval of lines can land
     // between the last look and the kill, and the fps line is often the last
     // thing written.
@@ -416,6 +452,7 @@ fn usage() -> i32 {
          \x20 quarry                  interactive menu (Kaua TUI)\n\
          \x20 quarry list             probe the renderer matrix\n\
          \x20 quarry bench [demo]     timedemo every ready renderer (default demo1)\n\
+         \x20 quarry bench <demo> <key>...  bench only these, in this order\n\
          \x20 quarry <key> [args...]  launch one renderer; keys: sw llvmpipe hw-gl\n\
          \x20                         lavapipe hw-vk (VK rows await Warp-6)\n",
     );
@@ -434,9 +471,28 @@ fn cli_list() -> i32 {
     0
 }
 
-fn cli_bench(demo: &str) -> i32 {
+fn cli_bench(demo: &str, keys: &[String]) -> i32 {
+    // An explicit key list both SELECTS and ORDERS the legs. Order is
+    // load-bearing for two open questions: #168 (within-boot degradation
+    // makes a late leg read low, so a renderer must be measurable first) and
+    // #232 (whether the wedge follows the GL leg or merely the LAST leg --
+    // undecidable while GL is always last).
+    let mut legs: Vec<&Renderer> = Vec::new();
+    if keys.is_empty() {
+        legs.extend(RENDERERS.iter());
+    } else {
+        for k in keys {
+            match RENDERERS.iter().find(|r| r.key == k.as_str()) {
+                Some(r) => legs.push(r),
+                None => {
+                    t_putstr(&format!("quarry: unknown renderer '{}'\n", k));
+                    return usage();
+                }
+            }
+        }
+    }
     let mut results: Vec<Bench> = Vec::new();
-    for r in RENDERERS {
+    for r in legs {
         match probe(r) {
             Status::Ready => {
                 t_putstr(&format!("quarry: benching {} ({})...\n", r.key, demo));
@@ -760,7 +816,10 @@ pub extern "C" fn rs_main() -> i64 {
     let code = match ops.first().map(|s| s.as_str()) {
         None => tui(),
         Some("list") => cli_list(),
-        Some("bench") => cli_bench(ops.get(1).map(|s| s.as_str()).unwrap_or("demo1")),
+        Some("bench") => cli_bench(
+            ops.get(1).map(|s| s.as_str()).unwrap_or("demo1"),
+            if ops.len() > 2 { &ops[2..] } else { &[] },
+        ),
         Some("help") | Some("-h") | Some("--help") => usage(),
         Some(key) => match RENDERERS.iter().find(|r| r.key == key) {
             Some(r) => match probe(r) {

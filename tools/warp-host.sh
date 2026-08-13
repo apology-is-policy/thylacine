@@ -12,6 +12,7 @@
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
 #   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
 #   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
+#   tools/warp-host.sh quarry-wedge  # #232: does killing a live GL client wedge the console?
 #   tools/warp-host.sh native-bench  # GPU-DESIGN 13: the HW-GL exit bar's native anchor (V3D vs llvmpipe, surfaceless)
 #
 # Verification is fail-closed: each leg greps for its own positive evidence
@@ -154,7 +155,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -308,6 +309,22 @@ wedge)
         echo "WEDGE PROBE: CAPTURED"
     else
         echo "WEDGE PROBE: UNVERIFIED (need WEDGE-PROBE PASS + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+quarry-wedge)
+    # #232: does killing a live GL client wedge the console? The scenario is
+    # a DISCRIMINATOR, so its job is to answer, not to pass -- a no-wedge run
+    # is as informative as a wedge. The gate is therefore "a verdict was
+    # reached", and every verdict line is echoed here.
+    out="$REPO_ROOT/build/quarry-wedge.log"
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/quarry-wedge.exp" | tee "$out" || true
+    echo "== #232 verdict =="
+    grep -E "^\s*(\[step\])?\s*#232 " "$out" || true
+    if grep -q "#232 VERDICT" "$out"; then
+        echo "#232 DISCRIMINATOR: ANSWERED (see the verdict lines above)"
+    else
+        echo "#232 DISCRIMINATOR: NO VERDICT (the run died before deciding -- read $out)"
         exit 1
     fi
     ;;

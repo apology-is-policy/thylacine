@@ -1,0 +1,136 @@
+#!/usr/bin/expect -f
+# tools/warp/quarry-wedge.exp -- the #232 autopsy, run 3: WHERE DID THE LINE GO?
+#
+# SETTLED BY RUNS 1-2 (2026-08-13, thyla-pi KVM) -- do not re-ask any of this:
+#
+#   * NOT a wedge. quarry recovered at its own 600 s BENCH_DEADLINE_MS with
+#     `kill-begin / kill-end ok / reaped exit=1` and printed its table:
+#         hw-gl  -  -  -  0  1  (software)  [hung: killed at the bench deadline]
+#     It was never blocked; it was waiting out the deadline.
+#   * NOT console loss. /ctl/cons counters were IDENTICAL either side of the
+#     leg (rx_* 0/0/0/0, tx_dropped 1, tx_room_waits 2) -- a measured delta of
+#     ZERO drops, against a baseline taken before the leg.
+#   * NOT the guest. During the silence a typed `exit` really exited ut.
+#   * NOT the leg position. Reproduced with hw-gl running FIRST.
+#   * NOT the parser and NOT the binary: llvmpipe and hw-gl are the SAME
+#     binary differing only in driver env, and llvmpipe's fps line IS detected.
+#
+# So the engine's timedemo line reaches STDOUT (we watch it arrive) but never
+# reaches the -condebug LOG that quarry polls. This run asks the one remaining
+# question directly, and does not need quarry's deadline to do it: the shell
+# is alive, so the moment the fps line appears on the console we simply LOOK
+# AT THE FILE.
+#
+# Why that is decisive. third_party/tyrquake/common/sys_unix.c::Sys_DebugLog is
+#
+#     fd = open(file, O_WRONLY | O_CREAT | O_APPEND, 0666);
+#     write(fd, data, strlen(data));      /* fd may be -1 -- NEVER CHECKED */
+#     close(fd);
+#
+# Every line needs a FRESH fd, and a failed open is silent. A GL client holds
+# one 9P fid per live BO mapping (the #198 mechanism), so the virgl arm is the
+# one under fid pressure. The four probes separate the possibilities:
+#
+#   present=no            -> the engine never created it here (wrong path?)
+#   size 0                -> created, nothing ever written
+#   size >0, no "fps"     -> writes worked and then STOPPED  <- the open-failure
+#                            shape; `tail` shows how far it got
+#   size >0, has "fps"    -> the line IS in the log and quarry's read/parse is
+#                            at fault after all
+#
+#   WARP_HOST=thyla-pi-cf WARP_ACCEL=kvm tools/warp-host.sh quarry-wedge
+
+set repo [expr {[info exists ::env(WARP_REPO)] ? $::env(WARP_REPO) : "$::env(HOME)/projects/thylacine"}]
+set work [expr {[info exists ::env(WARP_WORK)] ? $::env(WARP_WORK) : "$::env(HOME)/warp"}]
+
+if {![info exists ::env(THYLACINE_ACCEL)]} { set ::env(THYLACINE_ACCEL) tcg }
+set ::env(THYLACINE_NOSTORM) 1
+set ::env(THYLACINE_NO_QMP) 1
+set ::env(THYLACINE_NO_SHARE) 1
+set ::env(THYLACINE_DISPLAY) egl-headless
+set ::env(THYLACINE_GPU_DEV) virtio-gpu-gl-pci
+if {![info exists ::env(LS_CI_BOOT_TIMEOUT)] || $::env(LS_CI_BOOT_TIMEOUT) < 900} {
+    set ::env(LS_CI_BOOT_TIMEOUT) 900
+}
+
+file mkdir $work
+file delete -force $work/pool-quarry.img $work/disk-quarry.img
+exec cp --sparse=always $repo/build/fixtures/pool.img $work/pool-quarry.img
+exec cp $repo/build/disk.img $work/disk-quarry.img
+set ::env(THYLACINE_POOL_IMG) $work/pool-quarry.img
+set ::env(THYLACINE_DISK_IMG) $work/disk-quarry.img
+
+source [file join [file dirname [info script]] .. interactive lib.exp]
+
+if {$lc_cmd_timeout < 2400} { set lc_cmd_timeout 2400 }
+
+set QLOG "/quake/id1/qconsole.log"
+
+# Sentinel-terminated, never prompt-terminated: ut's prompt is the U+22A2 glyph
+# redrawn on every keystroke (lib.exp "Echo discipline"), so matching it would
+# be a coin flip. A sentinel also survives a probe that hangs.
+proc probe {tag cmd} {
+    global timeout
+    set timeout 45
+    lc_step "#232 probe($tag): $cmd"
+    send -- "$cmd\r"
+    send -- "echo Q232-$tag-END\r"
+    expect {
+        -ex "Q232-$tag-END" { lc_step "#232 probe($tag): done" ; return 1 }
+        timeout { lc_step "#232 probe($tag): NO SENTINEL in 45s" ; return 0 }
+        eof     { lc_fail "EOF during probe $tag" }
+    }
+}
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+lc_send "quarry list"
+lc_expect "hw-gl     ready" "quarry: the hardware GL row probes ready"
+
+# Backgrounded so a slow quarry never costs us the shell -- the shell IS the
+# instrument in this run.
+lc_step "#232 running the hw-gl leg (backgrounded)"
+lc_send "quarry bench demo1 hw-gl &"
+
+# Wait for the engine's OWN fps line on stdout. Any line resets the clock, so
+# a timeout here means true silence, not a missing string.
+set timeout 700
+set saw_fps 0
+expect {
+    -re {([0-9]+) frames +([0-9.]+) seconds +([0-9.]+) fps} {
+        lc_step "#232 the engine printed to STDOUT: $expect_out(1,string) frames $expect_out(3,string) fps"
+        set saw_fps 1
+    }
+    -re {EXTINCTION:} { lc_extinction_fail "kernel extinction during the hw-gl leg" }
+    eof               { lc_fail "unexpected EOF during the hw-gl leg" }
+    -re {\n}          { exp_continue }
+    timeout           { }
+}
+
+if {!$saw_fps} {
+    lc_step "#232 the engine never printed an fps line at all -- a DIFFERENT"
+    lc_step "#232    failure from runs 1-2, where stdout always carried it."
+    lc_step "#232    Do not fold this into #232 without re-establishing it."
+    lc_pass "quarry-wedge: no stdout fps line; nothing to compare against"
+    lc_quit
+    exit 0
+}
+
+# THE PAYLOAD: the engine has just printed the line. Does the log have it?
+lc_step "#232 fps is on the console -- now inspecting the log the engine writes"
+probe "LS"   "ls -l $QLOG"
+probe "WC"   "wc -c $QLOG"
+probe "GREP" "grep -c fps $QLOG"
+probe "TAIL" "tail -3 $QLOG"
+
+lc_step "#232 VERDICT INPUTS ABOVE. Read them as:"
+lc_step "#232    absent          -> the engine never created it here"
+lc_step "#232    size 0          -> created, nothing written"
+lc_step "#232    size>0, fps=0   -> writes worked then STOPPED (open-failure"
+lc_step "#232                       shape); TAIL shows how far it got"
+lc_step "#232    size>0, fps>=1  -> the line IS there; quarry's read/parse is"
+lc_step "#232                       at fault, not the engine"
+lc_pass "quarry-wedge: log inspected at the moment of the fps line"
+lc_quit
+exit 0
