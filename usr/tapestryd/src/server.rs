@@ -4046,6 +4046,10 @@ impl Conn {
         comp.retire_conn(self.conn_id);
         comp.warp_retire_conn(self.conn_id);
         self.fids = [NO_FID; MAX_FIDS];
+        // A new session gets a new one-shot budget (fid-lift audit F5): the
+        // reset empties the table, so a table that fills AGAIN deserves its
+        // own witness -- a spent latch here silenced the second fill.
+        self.fid_full_said = false;
         self.pending_reads.clear();
         self.pending_fences.clear();
     }

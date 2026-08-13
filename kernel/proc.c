@@ -1108,9 +1108,36 @@ bool proc_thread_cap_ok(struct Proc *p) {
     if (!p) return false;
     if (proc_resource_exempt(p)) return true;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    bool ok = p->thread_count < PROC_THREAD_MAX;
+    // SQPOLL kthreads share the budget (fid-lift audit F1): the Proc's
+    // workers, whether they run under it or under kproc on its behalf.
+    bool ok = p->thread_count + p->loom_sqpoll_count < PROC_THREAD_MAX;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
     return ok;
+}
+
+// Charge one SQPOLL kthread against the creating Proc's thread budget.
+// Check-and-increment under one lock hold (unlike the thread path's
+// check-then-create, a Loom setup has no other serialization point).
+// Always counts -- exempt Procs skip only the CAP, so the uncharge is
+// unconditional.
+bool proc_sqpoll_charge(struct Proc *p) {
+    if (!p) return false;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (!proc_resource_exempt(p) &&
+        p->thread_count + p->loom_sqpoll_count >= PROC_THREAD_MAX) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return false;
+    }
+    p->loom_sqpoll_count++;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return true;
+}
+
+void proc_sqpoll_uncharge(struct Proc *p) {
+    if (!p) return;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    if (p->loom_sqpoll_count > 0) p->loom_sqpoll_count--;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
 bool proc_child_cap_ok(struct Proc *p) {

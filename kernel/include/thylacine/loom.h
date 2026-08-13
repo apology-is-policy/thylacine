@@ -478,6 +478,15 @@ struct Loom {
     bool                    sqpoll_stopping; // loom_free sets (release); kthread reads (acquire)
     bool                    sqpoll_exited;   // kthread sets at terminal (release); joiner reads (acquire)
     struct Rendez           sqpoll_park;     // kthread parks here when idle; woken by ENTER / stop
+    // The fid-lift audit F1 charge: the kthread counts against the CREATING
+    // Proc's thread budget. `sqpoll_owner` is lifetime-safe without a ref:
+    // KObj_Loom is I-5 non-transferable, so the creator's handle is the only
+    // handle and loom_free runs at the latest during the creator's own
+    // handle-close-at-exit -- always before proc_free. `sqpoll_charged` keys
+    // the uncharge (set iff the charge succeeded, whether or not the kthread
+    // then started), so every unwind path settles the budget exactly once.
+    struct Proc            *sqpoll_owner;
+    bool                    sqpoll_charged;
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
     // Loom-6: the registered-buffer table (zero-copy payload). `n_reg_buf` is

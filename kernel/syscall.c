@@ -5458,6 +5458,21 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     // earlier failure paths (above) ran with l->sqpoll == NULL, so loom_free
     // skipped the join there. The kthread immediately parks (no SQEs yet).
     if (flags & LOOM_SETUP_SQPOLL) {
+        // The F1 thread-budget charge FIRST: the kthread counts against
+        // this Proc's PROC_THREAD_MAX (its worker, whoever runs it). A
+        // refusal here is the I-32 floor working, same as the page charge
+        // above. loom_unref -> loom_free settles the charge via
+        // sqpoll_charged on every later path, including a start failure.
+        if (!proc_sqpoll_charge(p)) {
+            spin_lock(&p->as->lock);
+            (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+            proc_page_uncharge(p, ring_pages);
+            spin_unlock(&p->as->lock);
+            loom_unref(l);
+            return -1;
+        }
+        l->sqpoll_owner = p;
+        l->sqpoll_charged = true;
         if (loom_start_sqpoll(l) != 0) {
             spin_lock(&p->as->lock);
             (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);

@@ -326,6 +326,13 @@ static void loom_free(struct Loom *l) {
         thread_free(l->sqpoll);
         l->sqpoll = NULL;
     }
+    // Settle the F1 thread-budget charge (keyed on the flag, NOT on
+    // l->sqpoll: a charge whose kthread never started still owes the
+    // uncharge). sqpoll_owner outlives this call -- see loom.h.
+    if (l->sqpoll_charged) {
+        proc_sqpoll_uncharge(l->sqpoll_owner);
+        l->sqpoll_charged = false;
+    }
 
     // specs/loom.tla Teardown-wakes-waiters (NoStrandedWaiter). VACUOUS in the
     // impl: a SYS_LOOM_ENTER caller sleeping on cq_waiters holds a loom ref for
