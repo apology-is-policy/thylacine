@@ -47,6 +47,17 @@ source [file join [file dirname [info script]] .. interactive lib.exp]
 # for ONE timedemo on these hosts.
 if {$lc_cmd_timeout < 2400} { set lc_cmd_timeout 2400 }
 
+# QUARRY_LEGS selects, orders and SIZES the legs (`hw-gl@1280x800 ...`);
+# unset keeps the historical whole-matrix run. The window has to grow with the
+# list for the reason the 2400 s floor exists at all -- a bound below the
+# honest runtime reports a healthy leg as hung -- so budget a full per-leg
+# deadline each rather than assuming the legs stay fast.
+set LEGS [expr {[info exists ::env(QUARRY_LEGS)] ? $::env(QUARRY_LEGS) : ""}]
+if {$LEGS ne ""} {
+    set want [expr {[llength $LEGS] * 700}]
+    if {$lc_cmd_timeout < $want} { set lc_cmd_timeout $want }
+}
+
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
 
@@ -60,7 +71,7 @@ lc_pass "quarry-bench: matrix probed (hw-gl ready)"
 # the table. The table's "backend" column must name virgl for the hw row --
 # the fps figures are DATA (reported, not gated; the GPU-DESIGN section 13
 # bar is judged by the #208 protocol, not this lane).
-lc_send "quarry bench demo1"
+lc_send "quarry bench demo1 $LEGS"
 lc_expect "benching" "quarry bench started"
 lc_expect "backend" "quarry bench table printed"
 lc_expect "virgl" "quarry bench: the hardware row ran on virgl"

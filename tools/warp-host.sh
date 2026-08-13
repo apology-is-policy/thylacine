@@ -12,6 +12,7 @@
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
 #   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
 #   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
+#   tools/warp-host.sh quarry-bench  # in-guest renderer table; QUARRY_LEGS= sweeps resolutions (#215)
 #   tools/warp-host.sh quarry-wedge  # #232: does killing a live GL client wedge the console?
 #   tools/warp-host.sh native-bench  # GPU-DESIGN 13: the HW-GL exit bar's native anchor (V3D vs llvmpipe, surfaceless)
 #
@@ -310,6 +311,35 @@ wedge)
     else
         echo "WEDGE PROBE: UNVERIFIED (need WEDGE-PROBE PASS + the scenario pass line)"
         exit 1
+    fi
+    ;;
+quarry-bench)
+    # The in-guest renderer comparison, and -- with QUARRY_LEGS -- the
+    # same-lane RESOLUTION SWEEP for #215.
+    #
+    # Same-lane is the whole point. The standing figures pair quarry at the
+    # engine default against the wedge-probe lane at 1280x800, and those two
+    # differ in more than resolution (the rp7 pacer wrapper, -noglcompression),
+    # so the apparent resolution-invariance of hw-gl is a LEAD, not a datum.
+    # One lane, one boot, several modes settles it.
+    #
+    #   QUARRY_LEGS="sw@320x240 sw@1280x800 hw-gl@320x240 hw-gl@1280x800" \
+    #     WARP_HOST=thyla-pi WARP_ACCEL=kvm tools/warp-host.sh quarry-bench
+    #
+    # The sw legs are the POSITIVE CONTROL and are not optional: a software
+    # rasterizer is fill-bound, so its fps must fall with pixel count. Without
+    # them a flat hw-gl curve cannot be told apart from a -width that never
+    # took effect -- both look identical. quarry's own per-leg mode-witness
+    # (`+vid_describecurrentmode`) is the second, independent check.
+    out="$REPO_ROOT/build/quarry-bench.log"
+    ssh "$HOST" "cd $RREPO && ${QUARRY_LEGS:+QUARRY_LEGS='$QUARRY_LEGS' }${RENV}expect tools/warp/quarry-bench.exp" | tee "$out" || true
+    echo "== mode witnesses (the resolution each leg ACTUALLY ran at) =="
+    grep -E "mode-witness" "$out" || echo "(none -- resolutions unverified)"
+    echo "== the bench table =="
+    sed -n '/^renderer  */,/^ *$/p' "$out" || true
+    if grep -q "MISMATCH\|mode-witness ABSENT" "$out"; then
+        echo "WARNING: at least one leg did not run at the resolution it was given."
+        echo "         Treat the fps column as unattributed until that is explained."
     fi
     ;;
 quarry-wedge)

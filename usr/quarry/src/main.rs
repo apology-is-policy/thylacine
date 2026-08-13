@@ -14,7 +14,8 @@
 //                              through to the engine
 //   quarry list | bench [demo] the agent-facing CLI: probe table / run the
 //                              timedemo on every ready renderer and print a
-//                              comparison table
+//                              comparison table. A trailing leg list selects,
+//                              orders and sizes the legs (`hw-gl@640x480`).
 //
 // Driver selection rides the /env device: GALLIUM_DRIVER is written into
 // quarry's OWN environment (a create+write of /env/GALLIUM_DRIVER), the child
@@ -242,6 +243,63 @@ fn driver_restore(old: Option<String>) {
 /// otherwise).
 const BASE_ARGS: &[&str] = &["-window", "-nosound"];
 
+/// One bench leg: a renderer row plus the resolution to run it at.
+///
+/// Per-leg rather than per-run so ONE command sweeps a single renderer across
+/// modes. That is the instrument that separates the two candidate explanations
+/// for the GL deficit: a FILL-bound path's fps tracks 1/pixels, a
+/// PER-SUBMIT-bound path's barely moves. Keeping the sweep inside one boot
+/// also holds the boot constant, and repeating a resolution as the last leg
+/// measures any within-boot drift (#168) instead of assuming its absence.
+struct Leg {
+    r: &'static Renderer,
+    /// None leaves the engine at its own windowed default -- 640x480, seeded
+    /// by sdl_common.c's SDL_Init path, NOT by the vid_width/vid_height cvars
+    /// (which default to 800x600 and are never consulted once -window makes
+    /// VID_GetCmdlineMode answer).
+    res: Option<(u32, u32)>,
+}
+
+impl Leg {
+    /// The leg's name everywhere it is reported. Carrying the resolution in
+    /// the label keeps a sweep's table rows self-describing, so a pasted
+    /// result cannot lose the one variable it was varying.
+    fn label(&self) -> String {
+        match self.res {
+            Some((w, h)) => format!("{}@{}x{}", self.r.key, w, h),
+            None => self.r.key.to_string(),
+        }
+    }
+}
+
+/// `key` or `key@WxH`.
+///
+/// An explicit resolution reaches the engine as `-width W -height H`. Those
+/// are honoured for any size because BASE_ARGS already passes `-window`:
+/// VID_GetCmdlineMode writes the request straight into vid_windowed_mode and
+/// returns, where the fullscreen path would instead search the modelist and
+/// Sys_Error on a miss.
+fn parse_leg(spec: &str) -> Result<Leg, String> {
+    let (key, res) = match spec.split_once('@') {
+        None => (spec, None),
+        Some((k, dims)) => {
+            let (w, h) = dims
+                .split_once('x')
+                .ok_or_else(|| format!("resolution '{}' is not WxH", dims))?;
+            let w: u32 = w.parse().map_err(|_| format!("bad width '{}'", w))?;
+            let h: u32 = h.parse().map_err(|_| format!("bad height '{}'", h))?;
+            if w == 0 || h == 0 {
+                return Err(format!("resolution {}x{} has a zero axis", w, h));
+            }
+            (k, Some((w, h)))
+        }
+    };
+    match RENDERERS.iter().find(|r| r.key == key) {
+        Some(r) => Ok(Leg { r, res }),
+        None => Err(format!("unknown renderer '{}'", key)),
+    }
+}
+
 /// Play interactively: inherited console, wait, return the exit status.
 fn play(r: &Renderer, extra: &[String]) -> Result<i32, String> {
     let old = r.driver.map(driver_set);
@@ -267,7 +325,7 @@ fn play(r: &Renderer, extra: &[String]) -> Result<i32, String> {
 /// re-formatting a measurement invites drift.
 #[derive(Clone)]
 struct Bench {
-    key: &'static str,
+    key: String,
     frames: String,
     secs: String,
     fps: String,
@@ -281,7 +339,10 @@ struct Bench {
 /// `Sys_DebugLog` writes with a bare open/write/close per line -- so no stdio
 /// buffer can withhold the report from a process that never exits. A leg past
 /// BENCH_DEADLINE_MS is killed and reported hung.
-fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
+fn bench_one(leg: &Leg, demo: &str) -> Result<Bench, String> {
+    let r = leg.r;
+    let tag = leg.label();
+
     // Start from a clean log so we read THIS leg's lines, not the last one's.
     let _ = fs::remove_file(QCONSOLE_LOG);
 
@@ -290,7 +351,26 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
     for a in BASE_ARGS {
         cmd.arg(*a);
     }
+    // Built before the loop because Command borrows each argument: a
+    // format!() passed inline would be dropped at the end of the statement.
+    let mut res_args: Vec<String> = Vec::new();
+    if let Some((w, h)) = leg.res {
+        res_args.push("-width".to_string());
+        res_args.push(format!("{}", w));
+        res_args.push("-height".to_string());
+        res_args.push(format!("{}", h));
+    }
+    for a in &res_args {
+        cmd.arg(a.as_str());
+    }
     cmd.arg("-condebug");
+    // Make the leg WITNESS its own resolution instead of trusting the flag.
+    // A per-submit-bound renderer and a `-width` that never took effect
+    // produce the identical signature -- a flat fps curve -- so a sweep that
+    // only records what it REQUESTED cannot tell the measurement from the
+    // bug. This console command puts the mode the engine actually selected
+    // into the same log the fps line lands in.
+    cmd.arg("+vid_describecurrentmode");
     cmd.arg("+timedemo").arg(demo);
     // stdout/stderr stay INHERITED: the console shows progress live, and
     // nothing here depends on reading them. Piping them was the #231 bug --
@@ -305,7 +385,7 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
     // Announce the pid at SPAWN, not just at the kill: the poll loop below
     // prints nothing while it runs, so a stall inside it leaves no pid behind
     // to inspect -- which is exactly what happened the first time this hung.
-    t_putstr(&format!("quarry: {} spawned pid={}\n", r.key, child.pid()));
+    t_putstr(&format!("quarry: {} spawned pid={}\n", tag, child.pid()));
 
     let started = Instant::now();
     let mut note = None;
@@ -342,7 +422,7 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
         let last = log.lines().last().unwrap_or("");
         t_putstr(&format!(
             "quarry: {} log-at-end present={} bytes={} last_line={:?}\n",
-            r.key,
+            tag,
             present,
             log.len(),
             last
@@ -354,11 +434,11 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
     // in here emits nothing at all, and the LAST line printed is the only
     // thing that says which step blocked. `kill` is an unbounded
     // /proc/<pid>/ctl write; the reap below is bounded by its own loop.
-    t_putstr(&format!("quarry: {} kill-begin pid={}\n", r.key, child.pid()));
+    t_putstr(&format!("quarry: {} kill-begin pid={}\n", tag, child.pid()));
     let killed = child.kill();
     t_putstr(&format!(
         "quarry: {} kill-end {}\n",
-        r.key,
+        tag,
         if killed.is_ok() { "ok" } else { "err" }
     ));
     let mut exit = -1;
@@ -374,7 +454,7 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
             Err(_) => break,
         }
     }
-    t_putstr(&format!("quarry: {} reaped exit={}\n", r.key, exit));
+    t_putstr(&format!("quarry: {} reaped exit={}\n", tag, exit));
     // Re-read after the kill: up to one poll interval of lines can land
     // between the last look and the kill, and the fps line is often the last
     // thing written.
@@ -383,7 +463,7 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
     }
 
     let mut b = Bench {
-        key: r.key,
+        key: tag,
         frames: String::new(),
         secs: String::new(),
         fps: String::new(),
@@ -396,6 +476,30 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
         b.frames = frames;
         b.secs = secs;
         b.fps = fps;
+    }
+    // The resolution witness. Reported for EVERY leg, including the ones that
+    // requested nothing -- for those it is the only statement of what the
+    // engine's own default actually is, which a sweep is otherwise obliged to
+    // assume. A disagreement is called out by name because the failure it
+    // guards against is silent: an unhonoured -width yields a flat fps curve,
+    // which is exactly the result the sweep is looking for.
+    match mode_line(&log) {
+        Some((w, h)) => {
+            let agrees = leg.res.map(|(rw, rh)| rw == w && rh == h).unwrap_or(true);
+            t_putstr(&format!(
+                "quarry: {} mode-witness {}x{}{}\n",
+                b.key,
+                w,
+                h,
+                if agrees { "" } else { "  MISMATCH vs requested" }
+            ));
+        }
+        None => {
+            t_putstr(&format!(
+                "quarry: {} mode-witness ABSENT (resolution unverified)\n",
+                b.key
+            ));
+        }
     }
     for line in log.lines() {
         if let Some(rest) = line.trim().strip_prefix("GL_RENDERER:") {
@@ -426,6 +530,22 @@ fn read_text(path: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// " 640 x  480 windowed" -> (640, 480), the mode the engine actually chose.
+/// Emitted by `+vid_describecurrentmode`; the widths are %4d-padded, so parse
+/// by tokens rather than by column.
+fn mode_line(text: &str) -> Option<(u32, u32)> {
+    for line in text.lines() {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        if toks.len() < 4 || toks[1] != "x" || toks[3] != "windowed" {
+            continue;
+        }
+        if let (Ok(w), Ok(h)) = (toks[0].parse::<u32>(), toks[2].parse::<u32>()) {
+            return Some((w, h));
+        }
+    }
+    None
+}
+
 /// "969 frames  21.7 seconds  44.7 fps" -> (frames, seconds, fps).
 fn fps_line(text: &str) -> Option<(String, String, String)> {
     for line in text.lines() {
@@ -452,7 +572,10 @@ fn usage() -> i32 {
          \x20 quarry                  interactive menu (Kaua TUI)\n\
          \x20 quarry list             probe the renderer matrix\n\
          \x20 quarry bench [demo]     timedemo every ready renderer (default demo1)\n\
-         \x20 quarry bench <demo> <key>...  bench only these, in this order\n\
+         \x20 quarry bench <demo> <leg>...  bench only these, in this order\n\
+         \x20                         a leg is <key> or <key>@<W>x<H>, so one\n\
+         \x20                         command sweeps a renderer across modes:\n\
+         \x20                         quarry bench demo1 hw-gl@320x240 hw-gl@1280x800\n\
          \x20 quarry <key> [args...]  launch one renderer; keys: sw llvmpipe hw-gl\n\
          \x20                         lavapipe hw-vk (VK rows await Warp-6)\n",
     );
@@ -471,47 +594,49 @@ fn cli_list() -> i32 {
     0
 }
 
-fn cli_bench(demo: &str, keys: &[String]) -> i32 {
-    // An explicit key list both SELECTS and ORDERS the legs. Order is
-    // load-bearing for two open questions: #168 (within-boot degradation
-    // makes a late leg read low, so a renderer must be measurable first) and
-    // #232 (whether the wedge follows the GL leg or merely the LAST leg --
-    // undecidable while GL is always last).
-    let mut legs: Vec<&Renderer> = Vec::new();
-    if keys.is_empty() {
-        legs.extend(RENDERERS.iter());
+fn cli_bench(demo: &str, specs: &[String]) -> i32 {
+    // An explicit leg list SELECTS, ORDERS and SIZES the legs. All three are
+    // load-bearing: order for #168 (within-boot degradation makes a late leg
+    // read low, so a renderer must be measurable first) and #232 (whether a
+    // symptom follows the GL leg or merely the LAST leg -- undecidable while
+    // GL is always last); size for the resolution sweep, where repeating one
+    // renderer at several modes IN ONE BOOT holds the boot constant.
+    let mut legs: Vec<Leg> = Vec::new();
+    if specs.is_empty() {
+        legs.extend(RENDERERS.iter().map(|r| Leg { r, res: None }));
     } else {
-        for k in keys {
-            match RENDERERS.iter().find(|r| r.key == k.as_str()) {
-                Some(r) => legs.push(r),
-                None => {
-                    t_putstr(&format!("quarry: unknown renderer '{}'\n", k));
+        for s in specs {
+            match parse_leg(s) {
+                Ok(leg) => legs.push(leg),
+                Err(e) => {
+                    t_putstr(&format!("quarry: {}\n", e));
                     return usage();
                 }
             }
         }
     }
     let mut results: Vec<Bench> = Vec::new();
-    for r in legs {
-        match probe(r) {
+    for leg in &legs {
+        let tag = leg.label();
+        match probe(leg.r) {
             Status::Ready => {
-                t_putstr(&format!("quarry: benching {} ({})...\n", r.key, demo));
-                match bench_one(r, demo) {
+                t_putstr(&format!("quarry: benching {} ({})...\n", tag, demo));
+                match bench_one(leg, demo) {
                     Ok(b) => results.push(b),
                     Err(e) => {
-                        t_putstr(&format!("quarry: {} failed: {}\n", r.key, e));
+                        t_putstr(&format!("quarry: {} failed: {}\n", tag, e));
                     }
                 }
             }
             Status::Missing(m) => {
-                t_putstr(&format!("quarry: skipping {} ({})\n", r.key, m));
+                t_putstr(&format!("quarry: skipping {} ({})\n", tag, m));
             }
         }
     }
-    t_putstr("\nrenderer   frames   seconds   fps      errors  exit  backend\n");
+    t_putstr("\nrenderer        frames   seconds   fps      errors  exit  backend\n");
     for b in &results {
         t_putstr(&format!(
-            "{:<9}  {:>6}  {:>8}  {:>7}  {:>6}  {:>4}  {}{}\n",
+            "{:<14}  {:>6}  {:>8}  {:>7}  {:>6}  {:>4}  {}{}\n",
             b.key,
             none_dash(&b.frames),
             none_dash(&b.secs),
@@ -746,7 +871,9 @@ fn tui() -> i32 {
                         if let Some(r) = sel_ready(&app) {
                             app.status = Some(format!("timedemo on {} (piped)...", r.key));
                             let _ = render(&mut term, &app);
-                            let b = bench_one(r, "demo1");
+                            // The TUI always benches at the engine default;
+                            // a per-leg resolution is a CLI-sweep affordance.
+                            let b = bench_one(&Leg { r, res: None }, "demo1");
                             let sel = app.sel;
                             match b {
                                 Ok(b) => {
@@ -773,7 +900,7 @@ fn tui() -> i32 {
                             }
                             app.status = Some(format!("benching {}...", r.key));
                             let _ = render(&mut term, &app);
-                            if let Ok(b) = bench_one(r, "demo1") {
+                            if let Ok(b) = bench_one(&Leg { r, res: None }, "demo1") {
                                 app.rows[i].2 = Some(b);
                             }
                         }
