@@ -669,6 +669,65 @@ over shared kernel core; no native mmap API is added.
   bundle-STAGING problem -- the rootfs must not be writable by its own
   container -- not a mount flag's job.
 
+  **`MNOEXEC` IS OWNER-REVISABLE, AND THE THING THAT ACTUALLY CONFINES A
+  CONTAINER IS THE PHENOTYPE GATE (#221).** Both halves are recorded here
+  because the section above, read alone, invites exactly the wrong inference.
+
+  Coverage is derived from the **current** mount table (`mount_noexec_covers`
+  is an ANY-scan over it), and that table is unprivileged-mutable by its owner.
+  So the restriction is revisable by the Proc it restricts, three ungated ways:
+  **unmount**; **`MREPL`**, which replaces the entry wholesale; and -- since
+  #219 -- the **converged idempotent re-mount**, `kernel/territory.c:811`
+  (`territory->mounts[i].flags = flags`). Two of the three PRE-DATE #219 and are
+  not created by its fix. The reasoning is already argued at the code site
+  (`kernel/territory.c:788-802`), which states outright that a mount flag "is
+  not [a lock], deliberately"; this paragraph exists so scripture agrees with it
+  instead of leaving the point discoverable only by reading `territory.c`.
+
+  **That is not the container's security story, and the distinction is the whole
+  point.** A containered Linux guest cannot reach any of the three, because it
+  cannot call `mount(2)` or `umount2(2)` at all. VERIFIED on this tree: the
+  vivarium's `linux_nr` values are an enum in
+  `kernel/include/thylacine/vivarium.h`, and it has **no member for Linux nr 39
+  or 40, and no `VIV_LINUX_*MOUNT*` member anywhere in `kernel/`** -- so
+  `viv_linux_dispatch` falls to its `default:` arm, which reports
+  `"not in the table at all"` and answers `-T_E_NOSYS`
+  (`kernel/syscall.c:11130-11133`). Fail-closed, by absence rather than by a
+  check that could be edited. Container confinement therefore rests on **what
+  the phenotype serves**, not on `MNOEXEC` being unstrippable -- and a reader who
+  believed the latter would be trusting the weaker of the two.
+
+  Two things that look like defects and are not, stated so this does not read as
+  a to-do list:
+
+  - **`SYS_MOUNT` / `SYS_UNMOUNT` having no capability gate is correct Plan 9.**
+    A per-process namespace edit confers no authority the caller did not already
+    hold; it rearranges names it can already reach. Gating it would be a
+    departure from the model, not a fix.
+  - **I-12's PROVENANCE wording needs no correction.** It states what the CHECK
+    requires -- a Dev with `may_back_exec` AND a mount not marked `MNOEXEC` --
+    and never claims the mount table is immutable. It is accurate as written.
+
+  **The lock is NOT built, and the trigger is a caller that does not exist yet:
+  the first confined NATIVE Proc that owns a namespace.** Every container today
+  is a Linux phenotype, which the paragraph above already fences. A lock also
+  needs a "locked by WHOM" axis Territory has no notion of, and designing that
+  without a concrete caller risks designing the wrong one. When the trigger
+  arrives, the shape (a pickup, not a re-derivation): a `PgrpMount.locked` bit
+  set only when the mounter holds a capability the target lacks, honoured by
+  unmount, `MREPL`, and the #219 converge. That is Linux's `MNT_LOCK_NOEXEC`
+  answer -- restrictive flags lock on inheritance into a less-privileged
+  context, the owner may ADD restrictions but never remove -- i.e. **monotone
+  reduction, already our idiom on every other authority axis** (I-2
+  fork-grantable caps, I-6 handle rights). Scripture-first: an ARCH change
+  before any code.
+
+  CONSIDERED, NOT CHOSEN: executability as a monotonically non-increasing right
+  on the Spoor/handle (`ZX_RIGHT_EXECUTE`; Zircon and Genode both land here).
+  Cleanest long-run model and the best fit with I-6 -- there is no mount table
+  to edit at all -- but a substantially larger change across the handle surface.
+  Reconsider if that surface is being reworked for another reason.
+
   The reachability is also narrower than the finding assumed, which is worth
   recording because it bounds the severity honestly:
   `sys_mmap_file_for_proc` has **exactly one caller** (`syscall.c` `VIV_LINUX_MMAP`),
