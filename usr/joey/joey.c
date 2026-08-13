@@ -3189,7 +3189,13 @@ static int gl_gate(void) {
     char nb[24];
     long p = t_open(T_WALK_OPEN_FROM_ROOT, "/clade/bin/osmesa-prove", 23, T_OPATH);
     if (p < 0) {
-        return 0;  // not baked -- normal boot, nothing to say
+        // Both siblings announce their skip, so a silent one here reads as a
+        // gate that RAN. Names the missing ARTIFACT, not "/clade": /clade
+        // absent is an ordinary boot (clade_gate already said so), while
+        // /clade present WITHOUT osmesa-prove is a bake regression.
+        t_putstr("joey: clade CL-7b GL gate: /clade/bin/osmesa-prove absent "
+                 "-- skipping\n");
+        return 0;  // not baked -> not a failure
     }
     (void)t_close(p);
 

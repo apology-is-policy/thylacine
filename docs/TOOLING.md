@@ -674,8 +674,12 @@ generated headers.
 ### The probe/production boundary in `joey.c`, and its tripwire (#229)
 
 joey is ~10k lines of which about two thirds is probe ladder, spread over
-eighteen `#if THYLA_BOOT_PROBES` regions. Thirteen of those are statement blocks
-*inside* `main()`; the rest are helpers. That scattering is the shared root of
+eighteen `#if THYLA_BOOT_PROBES` regions: **five at file scope** (the helpers)
+and **thirteen as statement blocks inside a function** — twelve in `main()`, one
+in `do_corvus_bringup`. (The #229 commit message says "thirteen inside
+`main()`"; that is the in-*function* count, off by the `do_corvus_bringup` one.
+Recounted here at #231, and this is the authoritative figure.) That scattering
+is the shared root of
 #228 (a probe block outside its gate), #229 (probe helpers outside every gate)
 and #232 (probe-shaped gates running in the ship image) — while editing, the
 boundary is invisible.
