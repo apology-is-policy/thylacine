@@ -172,6 +172,23 @@ the builder once and stay in `build/`:
 | `GL/` + `KHR/` headers | `/build/src/mesa/include` | `build/sysroot/include/` | 1.4 MB |
 | the archive list | derived (below) | `build/clade/gl/llvm-libs.list` | — |
 
+**None of this is required to build the tree (#239).** It used to be, by
+accident: `SDL_thylacineopengl.c` includes `<GL/osmesa.h>`, so a checkout
+without the headers could not build `libSDL2.a` — and SDL2 is built before the
+ramfs bake, so a missing *optional* GPU stage took out the kernel image with
+it. `build_sdl2` now compiles `usr/ports/sdl2/thylacine-nogl/` instead when
+`build/sysroot/include/GL/osmesa.h` is absent, announces it, and records the
+mode in `build/sysroot/lib/.libSDL2.gl-mode` so that fetching the headers later
+invalidates the archive (no timestamp would). See `docs/reference/142-sdl-port.md`,
+"The headers are optional too".
+
+Note the trap in the destination column while you are here: the headers land
+**inside** `build/sysroot/include/`, which `build_sysroot` recreates. Fetching
+them once is not permanent — any pouch-patch edit rebuilds the sysroot and
+takes them with it, and the next SDL build silently drops to `nogl` (loudly, as
+of #239, but it still drops). Re-fetch after a sysroot rebuild, or expect a
+GL-less `libSDL2.a`.
+
 **Derive the archive list, never type it.** It is exactly what meson computed
 for `osmesa-prove`'s own link, so a list written by hand can only drift from
 the one that is known to close:

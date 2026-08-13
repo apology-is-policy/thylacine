@@ -2924,15 +2924,39 @@ build_sdl2() {
     local gl_prove="$BUILD_DIR/clade/gl/gl-sdl-prove"
     local gl_needed=""
     [[ -f "$BUILD_DIR/clade/gl/lib/libOSMesa.a" ]] && gl_needed=1
+
+    # #239: which GL backend this archive gets compiled with. The Mesa headers
+    # are fetched, not vendored, AND they land inside build/sysroot/include --
+    # a directory build_sysroot recreates. So their absence is the normal state
+    # of a fresh checkout and the eventual state of every machine that rebuilds
+    # its sysroot, not an exceptional one. Absent them, the nogl backend
+    # compiles in place of SDL_thylacineopengl.c (usr/ports/sdl2/thylacine-nogl)
+    # and the archive is GL-less rather than unbuildable.
+    #
+    # It is a THIRD term of the cache key, not a build-time detail: the mode is
+    # an INPUT the archive consumed, and nothing in the timestamp comparison can
+    # see it change. Fetching the headers into an up-to-date tree moves no file
+    # this guard stats, so without the sentinel the next build would report
+    # REUSED and keep serving the GL-less archive -- and worse, a later
+    # gl-sdl-prove would link the real libOSMesa.a against it. Same lesson as
+    # the two above, third axis.
+    local gl_hdr=""
+    [[ -f "$sysroot/include/GL/osmesa.h" ]] && gl_hdr=1
+    local gl_mode_file="$sysroot/lib/.libSDL2.gl-mode"
+    local gl_mode="nogl"
+    [[ -n "$gl_hdr" ]] && gl_mode="gl"
+
     if [[ -f "$archive" && -f "$progs_out/sdl-probe" ]] &&
-       [[ -z "$gl_needed" || -f "$gl_prove" ]]; then
+       [[ -z "$gl_needed" || -f "$gl_prove" ]] &&
+       [[ -f "$gl_mode_file" ]] &&
+       [[ "$(cat "$gl_mode_file" 2>/dev/null)" == "$gl_mode" ]]; then
         local stale
         stale="$(find "$sdl_vendor" "$port_dir" "$REPO_ROOT/usr/sdl-probe" \
                       "$REPO_ROOT/usr/gl-sdl-prove" \
                       "$REPO_ROOT/usr/lib/thylajit" \
                       -type f -newer "$archive" -print -quit 2>/dev/null)"
         if [[ -z "$stale" && ! "$sysroot/lib/libc.a" -nt "$archive" ]]; then
-            ledger "libSDL2.a: REUSED (cached + up-to-date)"
+            ledger "libSDL2.a: REUSED (cached + up-to-date, $gl_mode)"
             return 0
         fi
     fi
@@ -2951,6 +2975,19 @@ build_sdl2() {
     mkdir -p "$sdl_src/src/video/thylacine"
     cp "$port_dir"/thylacine/*.c "$port_dir"/thylacine/*.h \
         "$sdl_src/src/video/thylacine/"
+
+    # #239: swap the GL backend in the COPY, so the glob below stays the
+    # compile list and exactly one of the two is ever compiled. Announced, not
+    # silent: this is a real capability the archive will not have, and a build
+    # that quietly drops one reads exactly like a build that has it.
+    if [[ -z "$gl_hdr" ]]; then
+        rm -f "$sdl_src/src/video/thylacine/SDL_thylacineopengl.c"
+        cp "$port_dir"/thylacine-nogl/*.c "$sdl_src/src/video/thylacine/"
+        echo "    NO GL: $sysroot/include/GL/osmesa.h is absent -- building the"
+        echo "           GL-less backend (#239). SDL programs build and run;"
+        echo "           SDL_GL_CreateContext reports no OSMesa. Fetch the Mesa"
+        echo "           headers per usr/ports/mesa/README.md for a GL archive."
+    fi
 
     local cflags=( --target=aarch64-thylacine -march=armv8-a -moutline-atomics
                    -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
@@ -3035,7 +3072,14 @@ build_sdl2() {
 
     build_gl_sdl_prove "$sysroot" "$sdl_obj"
 
-    ledger "libSDL2.a: BUILT (+ sdl-probe)"
+    # LAST, deliberately. The archive is written well before this point, so a
+    # build that dies in between leaves no sentinel -- and the guard above then
+    # declines to reuse it. That is the #138 output-half lesson applied to the
+    # mode: the sentinel records a COMPLETED build in a known mode, not an
+    # attempted one.
+    printf '%s\n' "$gl_mode" > "$gl_mode_file"
+
+    ledger "libSDL2.a: BUILT ($gl_mode, + sdl-probe)"
 }
 
 build_gl_sdl_prove() {
