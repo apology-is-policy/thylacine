@@ -719,7 +719,7 @@ Driver selection goes through `/env` (remove-then-create, restored on
 exit) because `setenv` does not survive `exec` — the same reason the
 tyr-glquake launcher writes `/env/GALLIUM_DRIVER` rather than setting it.
 
-The CLI (`quarry list` / `quarry bench [demo] [key...]`) is the automatable
+The CLI (`quarry list` / `quarry bench [demo] [leg...]`) is the automatable
 face. Each leg spawns the engine with `-condebug` and stdio INHERITED, then
 polls the engine's own console log (`/quake/id1/qconsole.log`) for tyrquake's
 `N frames S seconds F fps` line plus `GL_RENDERER` and a Mesa-error count,
@@ -735,10 +735,39 @@ existing `glq-bench.exp` lane only works because it reads a TTY, which is
 line-buffered. `-condebug` routes `Con_Printf` through `Sys_DebugLog`, whose
 writes are bare `open`/`write`/`close` with no stdio buffer in the path.
 
-An explicit key list both SELECTS and ORDERS the legs, which is load-bearing
-for attribution rather than a convenience: with the default order the GL leg
-is also the LAST leg, so "the GL client fails" and "the last leg fails" are
-the same observation. Each leg brackets its kill with
+An explicit leg list SELECTS, ORDERS and SIZES the legs, all three
+load-bearing for attribution rather than convenience. Order: with the default
+order the GL leg is also the LAST leg, so "the GL client fails" and "the last
+leg fails" are the same observation. Size: a leg is `key` or `key@WxH`
+(`hw-gl@1280x800`), which reaches the engine as `-width`/`-height` — honoured
+at any size because `-window` makes `VID_GetCmdlineMode` write the request
+straight into `vid_windowed_mode` instead of searching the modelist and
+`Sys_Error`ing on a miss.
+
+Sizing exists for the #215 resolution sweep, and running it in ONE boot is the
+point: it holds the boot constant, and repeating the first resolution as the
+last leg MEASURES within-boot drift (#168) rather than assuming its absence.
+`QUARRY_LEGS` drives the list from the host through `quarry-bench.exp`, whose
+expect window grows per leg — a bound below the honest runtime reports a
+healthy leg as hung, which is exactly how #232 produced a false wedge.
+
+Every leg WITNESSES its own resolution: it passes `+vid_describecurrentmode`
+and parses the engine's reply (`" 640 x  480 windowed"`) out of the same log
+the fps line lands in, printing `mode-witness WxH` and naming a `MISMATCH`
+against the request. This is not decoration — a per-submit-bound renderer and
+a `-width` that never took effect BOTH produce a flat fps curve, so a sweep
+recording only what it requested cannot tell its measurement from its own bug.
+Legs that request nothing report it too, which is the only actual statement of
+the engine's default: **640x480**, seeded by `sdl_common.c`, NOT the 800x600
+`vid_width`/`vid_height` cvars (`-window` makes `VID_GetCmdlineMode` answer
+before those are ever consulted). The command is registered at `host.c:803`
+and `VID_Init` runs at `:944`, while command-line `+commands` execute from
+`quake.rc`'s `stuffcmds` at `:962` — so the mode is real by the time it is
+described. A software-renderer leg pair at two sizes is the POSITIVE CONTROL
+for any sweep: a fill-bound rasterizer must lose fps as pixels grow, so it
+proves the size knob bites at all.
+
+Each leg brackets its kill with
 `spawned` / `kill-begin` / `kill-end` / `reaped` markers, and prints
 `log-at-end present=/bytes=/last_line=` when it ends WITHOUT an fps line --
 the poll loop is otherwise silent, so a stall inside it leaves no pid and no
@@ -776,7 +805,10 @@ Gate: `tools/warp/quarry-bench.exp` (via
 `tools/warp-host.sh quarry-bench`) asserts `hw-gl ready` on a virgl boot
 and then the bench table — so a regression that silently drops the seam
 back to software fails the gate rather than quietly reporting llvmpipe
-numbers under a hardware label. The interactive TUI is covered by
+numbers under a hardware label. The host target echoes every leg's
+mode-witness and warns when any leg did not run at the size it was given,
+because an unattributed fps column is worse than a missing one. The
+interactive TUI is covered by
 `tools/interactive/quarry.exp`; note it asserts only
 configuration-invariant text, because Kaua's cell-diff renderer fragments
 changed strings across updates (the `prowl.exp` precedent — never assert
