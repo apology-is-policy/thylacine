@@ -2897,6 +2897,21 @@ static long go4c_spawn_wait_hb(const char *name, unsigned int name_len,
                                    max_sec, hb_sec, cap_mask, (unsigned int *)0);
 }
 
+// #231/#232: the three clade gates' dispositions, for the one structured
+// CLADE-GATES line below. Same contract as g_arc_* above, for the same reason:
+// these gates SOFT-SKIP on an unbaked pool, and a skip that reaches no exit
+// status is a silent UNKNOWN reported as a pass (#212).
+//
+// MISSING is the load-bearing default -- a gate call dropped by a later edit
+// prints MISSING and reddens the boot rather than printing nothing.
+//
+// FAILED is deliberately absent: all three gates are BOOT-FATAL, so a failure
+// returns from main() before the report line and can never be observed there.
+// The failure is already carried by the missing boot banner.
+static const char *g_clade_cl4   = "MISSING";
+static const char *g_clade_gl    = "MISSING";
+static const char *g_clade_storm = "MISSING";
+
 // Clade CL-4c: the device-toolchain gate. When /clade is baked
 // (THYLACINE_BAKE_CLADE=1), the cross-built clang++ compiles + links (via
 // /clade/bin/ld.lld) + runs a real C++ program ON THE DEVICE. Gated on
@@ -2911,6 +2926,7 @@ static int clade_gate(void) {
     if (probe < 0) {
         t_putstr("joey: clade CL-4 /clade absent (THYLACINE_BAKE_CLADE not set) "
                  "-- skipping\n");
+        g_clade_cl4 = "SKIPPED";
         return 0;  // not baked -> not a failure
     }
     (void)t_close(probe);
@@ -3184,6 +3200,7 @@ static int clade_gate(void) {
         }
     }
 
+    g_clade_cl4 = "PASS";
     t_putstr("joey: clade CL-4 gate: PASS\n");
     return 0;
 }
@@ -3221,6 +3238,7 @@ static int gl_gate(void) {
         // /clade present WITHOUT osmesa-prove is a bake regression.
         t_putstr("joey: clade CL-7b GL gate: /clade/bin/osmesa-prove absent "
                  "-- skipping\n");
+        g_clade_gl = "SKIPPED";
         return 0;  // not baked -> not a failure
     }
     (void)t_close(p);
@@ -3240,6 +3258,7 @@ static int gl_gate(void) {
     if (rc != 0) {
         return 1;
     }
+    g_clade_gl = "PASS";
     t_putstr("joey: clade CL-7b GL gate: PASS\n");
     return 0;
 }
@@ -3298,11 +3317,16 @@ static int clade_storm_gate(void) {
     // visible instead of leaving a silent 300 s timeout to be diagnosed.
     if (bootarg_has("thylacine.nostorm", 17)) {
         t_putstr("joey: clade CL-5 storm: thylacine.nostorm -- skipping by request\n");
+        // DECLINED, not SKIPPED: an operator opting out is a different fact
+        // from an unbaked pool, and the harness that passes the boot arg wants
+        // to see its own decision reflected rather than a missing fixture.
+        g_clade_storm = "DECLINED";
         return 0;
     }
     long probe = t_open(T_WALK_OPEN_FROM_ROOT, "/storm/Makefile", 15, T_OPATH);
     if (probe < 0) {
         t_putstr("joey: clade CL-5 storm: /storm absent -- skipping\n");
+        g_clade_storm = "SKIPPED";
         return 0;  // not baked -> not a failure
     }
     (void)t_close(probe);
@@ -3539,6 +3563,7 @@ static int clade_storm_gate(void) {
         }
     }
 
+    g_clade_storm = "PASS";
     t_putstr("joey: clade CL-5 build storm: PASS\n");
     return 0;
 }
@@ -10062,6 +10087,33 @@ int main(void) {
         t_putstr("joey: clade CL-5 build storm FAILED\n");
         return 1;
     }
+
+    // #231/#232: the line tools/check-arc-gates.sh keys on. All three gates
+    // have run and recorded a disposition; say which, in a form an exit status
+    // can carry -- otherwise a boot where all three silently skipped is
+    // indistinguishable from one where the calls were deleted (#212).
+    //
+    // ONE write, not seven: a verdict line must not be tearable by a
+    // concurrent console writer, which is a live phenomenon here and not a
+    // hypothetical (#159). A torn line fails the parse and reddens a green
+    // boot. Same construction as the ARC-GATES line above.
+    {
+        const char *parts[] = { "joey: CLADE-GATES cl4=", g_clade_cl4,
+                                " gl=", g_clade_gl,
+                                " storm=", g_clade_storm, "\n" };
+        char   rb[128];
+        size_t rn = 0;
+        for (unsigned pi = 0; pi < sizeof(parts) / sizeof(parts[0]); pi++)
+            for (const char *p = parts[pi]; *p && rn < sizeof(rb) - 1; p++)
+                rb[rn++] = *p;
+        rb[rn] = '\0';
+        t_putstr(rb);
+    }
+#else
+    // The lean shape compiles the gates out, so report THAT rather than let
+    // the harness infer a build shape from an absent line -- an absence it
+    // cannot tell from a deleted gate.
+    t_putstr("joey: CLADE-GATES not-built (THYLA_BOOT_PROBES=OFF)\n");
 #endif /* THYLA_BOOT_PROBES (the three clade gates) */
 
     // #80: dump the daemon registry before the banner. The reaper's ability to

@@ -381,11 +381,23 @@ case "$result" in
         # is reported, and reported as NOT coverage.
         # THYLA_ARC_GATES=require makes a skip fatal (for shapes that ship the
         # fixture); the default stays lenient because a fresh clone has none.
-        if ! arc_report="$("$REPO_ROOT/tools/check-arc-gates.sh" "$LOG_FILE")"; then
-            echo "==> FAIL: arc-gate verdict (see the reason above)." >&2
+        #
+        # #232: the same checker now also answers for the three CLADE gates,
+        # which need it more than the arc gates do -- the lean image no longer
+        # compiles them at all, so their silence is correct in one build shape
+        # and a dropped call in the other. It emits ONE LINE PER FAMILY, hence
+        # the read loop: `echo "==> $var"` would prefix only the first and the
+        # clade verdict would print looking like stray log output.
+        # THYLA_CLADE_GATES=require is its separate opt-in (a clade bake is far
+        # rarer than the Alpine bundle, so folding it into --require would
+        # break that flag's existing callers).
+        if ! gate_report="$("$REPO_ROOT/tools/check-arc-gates.sh" "$LOG_FILE")"; then
+            echo "==> FAIL: arc/clade gate verdict (see the reason above)." >&2
             exit 1
         fi
-        echo "==> $arc_report"
+        while IFS= read -r gate_line; do
+            [[ -n "$gate_line" ]] && echo "==> $gate_line"
+        done <<<"$gate_report"
         if [[ "${lean_shape:-0}" == "1" ]]; then
             echo "==> lean shape (THYLA_BOOT_PROBES=OFF): debug-probe hwwatch NOT APPLICABLE (the probe is not built, so it is not coverage); the G-4 console gate DID run"
         fi

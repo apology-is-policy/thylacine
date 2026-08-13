@@ -363,8 +363,8 @@ not tell from a deleted gate (the same reason `test.sh` reports
 call reddens the boot instead of printing nothing and reading as a pass.
 
 What makes the check sound rather than racy is the **ordering**: joey signals
-`SYS_BOOT_COMPLETE` (`joey.c:9989`) long after it prints the report
-(`joey.c:9560`), so on any boot where the harness sees the banner at all, the
+`SYS_BOOT_COMPLETE` (`joey.c:10145`) long after it prints the report
+(`joey.c:9675`), so on any boot where the harness sees the banner at all, the
 line is already in the log. There is no window in which a banner-observed boot
 can legitimately lack it.
 
@@ -383,9 +383,41 @@ the arc is still unverified — the report now says so. `THYLA_ARC_GATES=require
 default stays lenient because a fresh clone has none.
 
 `tools/check-arc-gates.sh --selftest` drives the real checker over synthetic
-logs — 15 cases, every arm plus its negatives. The load-bearing one is a
-**pre-#212 log** (both gates PASS in prose, no report line): it must FAIL, or
-the check is decorative. Fast; no boots. Also `make check-arc-gates`.
+logs — 32 cases, every arm plus its negatives, across both report families
+(§5.2). The load-bearing one is a **pre-#212 log** (both gates PASS in prose,
+no report line): it must FAIL, or the check is decorative. Fast; no boots. Also
+`make check-arc-gates`.
+
+### 5.2 The clade-gate report line (`joey: CLADE-GATES`, #231/#232)
+
+The same mechanism, same script, for the three **clade** gates — CL-4 (the
+on-device toolchain), CL-7b (llvmpipe/GL) and CL-5 (the build storm). They
+soft-skip on a pool with no `THYLACINE_BAKE_CLADE` bake, which is most pools.
+
+```
+joey: CLADE-GATES cl4=<s> gl=<s> storm=<s>   # PASS | SKIPPED | DECLINED | KNOWN-BLOCKED | MISSING
+joey: CLADE-GATES not-built (THYLA_BOOT_PROBES=OFF)
+```
+
+**#232 made this line necessary rather than merely nice.** Before it, the lean
+image still *ran* the gates and printed their skips, so a deleted call was at
+least visible as missing prose. Now the lean image does not compile them at
+all — so "no clade output" is the correct state for one build shape and a
+dropped gate in the other, and only the report line separates the two.
+
+Two states differ from §5.1. **`FAILED` does not exist**: all three gates are
+boot-fatal, so a failure returns from `main()` before the report and is carried
+by the absent boot banner instead. And the storm alone has **`DECLINED`** —
+`thylacine.nostorm` on the kernel cmdline (`THYLACINE_NOSTORM=1`;
+`tools/test-interactive.sh` sets it to skip a multi-minute build). An operator
+opting out is a different fact from an unbaked pool, so it gets a different
+state rather than a looser shared "skipping" pattern; the checker rejects a
+`SKIPPED` claim backed only by the decline prose, and vice versa.
+
+`THYLA_CLADE_GATES=require` (or `--require-clade`) is the separate opt-in, and
+deliberately **not** folded into `--require`: the arc gates need an Alpine
+tarball, these need a whole clade pool, and a configuration with one rarely has
+the other.
 
 ---
 
