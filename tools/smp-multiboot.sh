@@ -137,6 +137,17 @@ harness_signal_kill() {
 # NAME says which failure it was. Nothing about the gate's pass/fail rests on
 # this (it only labels), so an unrecognised verdict degrades to 'unknown'
 # rather than to a wrong answer.
+#
+# THAT LAST SENTENCE IS FALSE FOR POST-BANNER GATES and the arm below says so:
+# they run after '==> PASS' is already in the log, so a missing arm degrades to
+# 'pass'. Left standing as the general case, corrected here rather than deleted
+# because it is the reasoning that made #212 easy to reintroduce (#234).
+#
+# EVERY LITERAL BELOW IS PRODUCED BY tools/test.sh. The two files are checked
+# against each other by tools/test-smp-classify.sh, which extracts these
+# patterns and requires test.sh to still emit each one -- renaming a verdict
+# string on one side silently voids an arm otherwise (#234, found exactly that
+# way).
 harness_result_token() {
     local hlog="$1"
     [[ -f "$hlog" ]] || { echo unknown; return; }
@@ -150,7 +161,7 @@ harness_result_token() {
     # runs AFTER test.sh has already printed '==> PASS: boot banner observed',
     # so a missing arm here does not degrade to 'unknown' -- it degrades to
     # 'pass', which is worse, and would have labelled the capture OTHER-pass.
-    elif grep -aqF '==> FAIL: arc-gate verdict'                         "$hlog"; then echo arc-gates
+    elif grep -aqF '==> FAIL: arc/clade gate verdict'                   "$hlog"; then echo arc-gates
     elif grep -aqF '==> PASS'                                           "$hlog"; then echo pass
     else echo unknown
     fi

@@ -164,8 +164,8 @@ EOF
 cat > "$TMP/harn-arcgates.log" <<'EOF'
 ==> harness: qemu_alive_at_teardown=1
 ==> PASS: boot banner observed.
-check-arc-gates: FAIL -- the boot emitted no 'joey: ARC-GATES' report line.
-==> FAIL: arc-gate verdict (see the reason above).
+check-arc-gates: FAIL -- the boot emitted no 'joey: CLADE-GATES' report line.
+==> FAIL: arc/clade gate verdict (see the reason above).
 EOF
 
 cat > "$TMP/harn-timeout.log" <<'EOF'
@@ -210,6 +210,59 @@ expect_token "unrecognised verdict"           unknown   "$TMP/harn-empty.log"
 # 'arc-gates' here is what proves the arm beats that fallback rather than
 # merely existing above it.
 expect_token "arc-gate failure beats the PASS line" arc-gates "$TMP/harn-arcgates.log"
+
+# --------------------------------------------------------------------------
+# #234: every classifier arm keys on a literal that tools/test.sh PRODUCES,
+# and nothing tied the two together. Renaming test.sh's arc-gate verdict
+# string voided that arm outright -- and THIS FILE COULD NOT NOTICE, because
+# its fixture carried its own copy of the string and agreed with the
+# classifier while production emitted something else. It stayed 21/21 green,
+# including the case named "arc-gate failure beats the PASS line", about a
+# string nothing produced (#143: a checker that re-derives its reference from
+# a copy only reports internal disagreement).
+#
+# So this reads BOTH REAL FILES and no copy: pull the fixed-string patterns out
+# of the actual classifier, and require test.sh to still emit each one. A
+# rename now reddens here instead of silently degrading a failure mode to the
+# broad '==> PASS' fallback.
+#
+# The single -aqE (regex) arm is excluded deliberately: a regex is not a
+# literal test.sh can be expected to contain verbatim.
+# --------------------------------------------------------------------------
+echo "== the classifier's literals are still PRODUCED by tools/test.sh (#234) =="
+CLASSIFIER="$REPO_ROOT/tools/smp-multiboot.sh"
+token_fn() { sed -n '/^harness_result_token()/,/^}/p' "$CLASSIFIER"; }
+
+# Expected count read from the SAME source, so a partial parse cannot pass as
+# a complete one. An unverified pattern check fails OPEN (#212) -- if the sed
+# stops matching, the loop below would silently iterate zero times and this
+# whole section would certify nothing.
+arm_expected=$(token_fn | grep -c 'grep -aqF')
+arm_found=0
+while IFS= read -r lit; do
+    [[ -n "$lit" ]] || continue
+    arm_found=$((arm_found+1))
+    checked=$((checked+1))
+    if grep -qF -- "$lit" "$REPO_ROOT/tools/test.sh"; then
+        printf '  ok   %-50s produced by test.sh\n' "$lit"
+    else
+        printf '  FAIL %-50s NOT produced by tools/test.sh\n' "$lit"
+        echo "        The arm keying on it can never fire, so that failure mode"
+        echo "        degrades to the '==> PASS' fallback and is labelled 'pass'"
+        echo "        (#212/#234). Change smp-multiboot.sh and test.sh together."
+        fails=$((fails+1))
+    fi
+done < <(token_fn | sed -n "s/.*grep -aqF '\([^']*\)'.*/\1/p")
+
+checked=$((checked+1))
+if (( arm_found > 0 && arm_found == arm_expected )); then
+    printf '  ok   %-50s (%d/%d arms parsed)\n' "extraction is complete" "$arm_found" "$arm_expected"
+else
+    printf '  FAIL %-50s (%d/%d arms parsed)\n' "extraction BROKE" "$arm_found" "$arm_expected"
+    echo "        The parse above did not recover every -aqF arm, so the check it"
+    echo "        feeds is partly or wholly vacuous. Fix the sed, not this count."
+    fails=$((fails+1))
+fi
 
 echo
 if (( fails == 0 )); then
