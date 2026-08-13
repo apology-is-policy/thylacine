@@ -698,6 +698,42 @@ majority) bounds it ~25–40% above Composed.
   point. Both kernel-parity items are tracked tasks; when either lands,
   the launcher's shape simplifies.
 
+## quarry — the renderer launcher and demo bench
+
+`usr/quarry` (native libthyla-rs on Kaua) is the user-facing face of this
+seam: one place to pick a renderer and one place to compare them. Five
+rows, three live today — `sw` (the pure software rasterizer,
+`/bin/tyr-quake`), `llvmpipe` (software GL via `GALLIUM_DRIVER=llvmpipe`),
+`hw-gl` (this seam, `GALLIUM_DRIVER=virpipe`) — and two reserved for
+Warp-6 (`lavapipe`, `hw-vk`), which report `awaits Warp-6 (Venus)` rather
+than pretending to be absent for an unknown reason.
+
+Probing is what makes a row `ready`, and the `hw-gl` probe is the one with
+a footgun worth stating: it reads the warp `ctl`, and `/srv/warp` is a
+SERVICE POST, so a single-shot walk of `/srv/warp/ctl` does not compose —
+the open of the service root IS the connect. The probe therefore opens the
+root, then opens `ctl` RELATIVE to it, which is the shape every working
+consumer of a posted service uses.
+
+Driver selection goes through `/env` (remove-then-create, restored on
+exit) because `setenv` does not survive `exec` — the same reason the
+tyr-glquake launcher writes `/env/GALLIUM_DRIVER` rather than setting it.
+
+The CLI (`quarry list` / `quarry bench [row]`) is the automatable face:
+each bench leg runs the demo with stdout+stderr piped through a `PollSet`
+drain loop, parses tyrquake's own `N frames S seconds F fps` line plus
+`GL_RENDERER` and a Mesa-error count, and is hang-killed at 180 s via
+`/proc/<pid>/ctl`. A leg that produces no fps line reports as such rather
+than as a zero. Gate: `tools/warp/quarry-bench.exp` (via
+`tools/warp-host.sh quarry-bench`) asserts `hw-gl ready` on a virgl boot
+and then the bench table — so a regression that silently drops the seam
+back to software fails the gate rather than quietly reporting llvmpipe
+numbers under a hardware label. The interactive TUI is covered by
+`tools/interactive/quarry.exp`; note it asserts only
+configuration-invariant text, because Kaua's cell-diff renderer fragments
+changed strings across updates (the `prowl.exp` precedent — never assert
+on a diffed status line).
+
 ## Tests
 
 Kernel: `pci.walk_caps_shm` (6 discriminating vectors incl. the

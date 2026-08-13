@@ -42,9 +42,9 @@ use alloc::vec::Vec;
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::fs::{self, File};
 use libthyla_rs::io::Read;
-use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
-use libthyla_rs::process::{Command, Stdio};
-use libthyla_rs::time::Instant;
+use libthyla_rs::poll::PollTimeout;
+use libthyla_rs::process::Command;
+use libthyla_rs::time::{self, Duration, Instant};
 use libthyla_rs::{env, t_putstr};
 
 use kaua::buffer::Buffer;
@@ -67,7 +67,19 @@ const SIZE_QUERY_TIMEOUT_MS: u32 = 150;
 /// One bench leg's ceiling: the slowest legitimate timedemo (llvmpipe at
 /// 1280x800 runs ~16 fps -> ~60 s) plus engine start/asset load. A leg past
 /// this is hung, not slow: the child is killed and the row says so.
-const BENCH_DEADLINE_MS: u64 = 180_000;
+/// A timedemo leg's bound. The existing glq-bench lane allows 1800 s for the
+/// same demo on these hosts, so 180 s was never a hang bound -- it was a
+/// bound below the honest runtime, which reports a healthy leg as hung.
+const BENCH_DEADLINE_MS: u64 = 600_000;
+
+/// The engine's own console log. `-condebug` routes every `Con_Printf`
+/// through `Sys_DebugLog`, which is a bare open(O_APPEND)/write/close per
+/// line -- no stdio buffer anywhere in the path. That is the whole reason
+/// this file exists rather than a pipe: `+timedemo` does NOT quit the
+/// engine when the demo ends, so a piped stdout holds the fps line in the
+/// child's 4-KiB buffer until a process exit that never comes. build.sh
+/// chmod 0777s the gamedir precisely so the session user can write here.
+const QCONSOLE_LOG: &str = "/quake/id1/qconsole.log";
 
 const ENV_DRIVER: &str = "GALLIUM_DRIVER";
 const ENV_DRIVER_PATH: &str = "/env/GALLIUM_DRIVER";
@@ -194,21 +206,6 @@ fn read_warp_ctl() -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
-/// Slurp a small file (the prowl read_ctl_file idiom). None on any error.
-fn read_small(path: &str) -> Option<String> {
-    let mut f = File::open(path).ok()?;
-    let mut buf = [0u8; 512];
-    let mut total = 0usize;
-    while total < buf.len() {
-        match f.read(&mut buf[total..]) {
-            Ok(0) => break,
-            Ok(k) => total += k,
-            Err(_) => return None,
-        }
-    }
-    Some(String::from(core::str::from_utf8(&buf[..total]).ok()?))
-}
-
 // ---------------------------------------------------------------------------
 // Driver env plumbing (/env inheritance at spawn).
 // ---------------------------------------------------------------------------
@@ -280,63 +277,75 @@ struct Bench {
     note: Option<&'static str>,
 }
 
-/// Run `+timedemo <demo>` piped and parse the engine's own report. Both pipes
-/// drain through one PollSet so a chatty stderr can never deadlock the child
-/// against a full pipe; a leg past BENCH_DEADLINE_MS is killed via
-/// /proc/<pid>/ctl and reported hung.
+/// Run `+timedemo <demo>` and read the engine's own `-condebug` log, which
+/// `Sys_DebugLog` writes with a bare open/write/close per line -- so no stdio
+/// buffer can withhold the report from a process that never exits. A leg past
+/// BENCH_DEADLINE_MS is killed and reported hung.
 fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
+    // Start from a clean log so we read THIS leg's lines, not the last one's.
+    let _ = fs::remove_file(QCONSOLE_LOG);
+
     let old = r.driver.map(driver_set);
     let mut cmd = Command::new(r.bin);
     for a in BASE_ARGS {
         cmd.arg(*a);
     }
+    cmd.arg("-condebug");
     cmd.arg("+timedemo").arg(demo);
-    cmd.stdout(Stdio::Piped).stderr(Stdio::Piped);
+    // stdout/stderr stay INHERITED: the console shows progress live, and
+    // nothing here depends on reading them. Piping them was the #231 bug --
+    // the drain called read() on fds a timed-out poll had NOT reported
+    // ready, so it blocked in the callee and the deadline below, written on
+    // the outer loop, was never evaluated again.
     let spawned = cmd.spawn().map_err(|e| format!("spawn: {:?}", e));
     if let Some(o) = old {
         driver_restore(o);
     }
     let mut child = spawned?;
-    let mut out = child.stdout.take();
-    let mut errp = child.stderr.take();
-    let mut out_buf: Vec<u8> = Vec::new();
-    let mut err_buf: Vec<u8> = Vec::new();
+
     let started = Instant::now();
     let mut note = None;
-
+    let mut log;
     loop {
-        if out.is_none() && errp.is_none() {
+        log = read_text(QCONSOLE_LOG).unwrap_or_default();
+        if fps_line(&log).is_some() {
+            break;
+        }
+        // The engine outliving its own demo is NORMAL here, so a leg ends by
+        // our clock or by our kill -- never by waiting for an exit.
+        if let Ok(Some(_)) = child.try_wait() {
+            note = Some("engine exited before reporting a timedemo");
             break;
         }
         if started.elapsed().as_millis() as u64 >= BENCH_DEADLINE_MS {
-            // Hung engine: kill it so the bench (and any TUI above it)
-            // survives. The kernel's I-26 gate authorizes -- it is our child.
-            let _ = write_ctl(child.pid(), b"kill");
             note = Some("hung: killed at the bench deadline");
             break;
         }
-        let mut ps = PollSet::new();
-        if let Some(f) = &out {
-            ps.add(f, PollEvents::READ);
-        }
-        if let Some(f) = &errp {
-            ps.add(f, PollEvents::READ);
-        }
-        match ps.poll(PollTimeout::Millis(2000)) {
-            Ok(_) => {}
+        let _ = time::sleep(Duration::from_millis(500));
+    }
+
+    // `+timedemo` leaves the engine running, so every leg ends with a kill.
+    let _ = child.kill();
+    let mut exit = -1;
+    for _ in 0..40 {
+        match child.try_wait() {
+            Ok(Some(st)) => {
+                exit = st.code().unwrap_or(-1);
+                break;
+            }
+            Ok(None) => {
+                let _ = time::sleep(Duration::from_millis(50));
+            }
             Err(_) => break,
         }
-        // Read whatever is ready; 0 = that side's EOF. A poll timeout falls
-        // through to the deadline check -- reads on unready fds are avoided
-        // by trying only after a poll round, and a spurious ready costs one
-        // short read.
-        drain_side(&mut out, &mut out_buf);
-        drain_side(&mut errp, &mut err_buf);
     }
-    let exit = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+    // Re-read after the kill: up to one poll interval of lines can land
+    // between the last look and the kill, and the fps line is often the last
+    // thing written.
+    if let Some(t) = read_text(QCONSOLE_LOG) {
+        log = t;
+    }
 
-    let stdout = String::from_utf8_lossy(&out_buf).into_owned();
-    let stderr = String::from_utf8_lossy(&err_buf).into_owned();
     let mut b = Bench {
         key: r.key,
         frames: String::new(),
@@ -347,7 +356,12 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
         exit,
         note,
     };
-    for line in stdout.lines().chain(stderr.lines()) {
+    if let Some((frames, secs, fps)) = fps_line(&log) {
+        b.frames = frames;
+        b.secs = secs;
+        b.fps = fps;
+    }
+    for line in log.lines() {
         if let Some(rest) = line.trim().strip_prefix("GL_RENDERER:") {
             if b.gl_renderer.is_none() {
                 b.gl_renderer = Some(rest.trim().to_string());
@@ -356,39 +370,39 @@ fn bench_one(r: &Renderer, demo: &str) -> Result<Bench, String> {
         if line.contains("GL_OUT_OF_MEMORY") || line.contains("Mesa: error") {
             b.errors += 1;
         }
-        // "969 frames  21.7 seconds  44.7 fps" -- the engine's timedemo line.
-        if line.contains(" frames") && line.trim_end().ends_with("fps") {
-            let toks: Vec<&str> = line.split_whitespace().collect();
-            if toks.len() >= 6 && toks[1] == "frames" && toks[5] == "fps" {
-                b.frames = toks[0].to_string();
-                b.secs = toks[2].to_string();
-                b.fps = toks[4].to_string();
-            }
-        }
     }
     Ok(b)
 }
 
-fn drain_side(side: &mut Option<File>, buf: &mut Vec<u8>) {
-    if let Some(f) = side {
-        let mut tmp = [0u8; 4096];
+/// Slurp a regular file. Reads on a regular file always make progress, so
+/// unlike the pipe drain this replaced, it cannot outlive a caller's bound.
+fn read_text(path: &str) -> Option<String> {
+    let mut f = fs::File::open(path).ok()?;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
         match f.read(&mut tmp) {
-            Ok(0) => *side = None,
+            Ok(0) => break,
             Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            Err(_) => {}
+            Err(_) => break,
         }
     }
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-fn write_ctl(pid: i32, verb: &[u8]) -> bool {
-    use libthyla_rs::io::Write;
-    match fs::OpenOptions::new()
-        .write(true)
-        .open(&format!("/proc/{}/ctl", pid))
-    {
-        Ok(mut f) => f.write_all(verb).is_ok(),
-        Err(_) => false,
+/// "969 frames  21.7 seconds  44.7 fps" -> (frames, seconds, fps).
+fn fps_line(text: &str) -> Option<(String, String, String)> {
+    for line in text.lines() {
+        let t = line.trim_end();
+        if !t.ends_with("fps") || !t.contains(" frames") {
+            continue;
+        }
+        let toks: Vec<&str> = t.split_whitespace().collect();
+        if toks.len() >= 6 && toks[1] == "frames" && toks[5] == "fps" {
+            return Some((toks[0].into(), toks[2].into(), toks[4].into()));
+        }
     }
+    None
 }
 
 // ---------------------------------------------------------------------------

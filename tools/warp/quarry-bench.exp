@@ -36,12 +36,16 @@ set ::env(THYLACINE_DISK_IMG) $work/disk-quarry.img
 
 source [file join [file dirname [info script]] .. interactive lib.exp]
 
-# The whole matrix runs as ONE command: sw (~15s) + llvmpipe (~70s) + hw-gl
-# (~35s) + loads, all inside quarry. Floor the per-command window at 600s
-# (the warp-prove.exp floor pattern -- lc_expect stomps `timeout` from
+# The whole matrix runs as ONE command -- three timedemos plus loads, all
+# inside quarry. The window must outlive quarry's OWN per-leg deadline times
+# the number of legs, or the harness fails a run quarry would have reported
+# on: at 600 s per leg that is 1800 s of legs, and the first #231 run died at
+# exactly this boundary (600 s harness vs a leg that never returned). Floor at
+# 2400 s (the warp-prove.exp floor pattern -- lc_expect stomps `timeout` from
 # lc_cmd_timeout per call, so THIS is the knob; a caller's larger
-# LS_CI_CMD_TIMEOUT passes through).
-if {$lc_cmd_timeout < 600} { set lc_cmd_timeout 600 }
+# LS_CI_CMD_TIMEOUT passes through). For scale, glq-bench.exp allows 1800 s
+# for ONE timedemo on these hosts.
+if {$lc_cmd_timeout < 2400} { set lc_cmd_timeout 2400 }
 
 lc_boot
 lc_login michael correct-horse-battery-staple-v1
