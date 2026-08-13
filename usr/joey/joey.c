@@ -2728,6 +2728,32 @@ static void session_getty_loop(long cfd, long consctl_fd) {
     }
 }
 
+#if THYLA_BOOT_PROBES
+// =============================================================================
+// The boot-test probe helpers -- compiled ONLY into the dev image (#229, #232)
+// =============================================================================
+// Everything below this line exists to be CALLED BY THE PROBE LADDER in main()
+// and by nothing else. It used to be interleaved with the production helpers
+// above, outside any gate -- which is how twelve of these came to be compiled
+// into the lean --production init that can never call them.
+//
+// The ordering constraint is one-way, and it is what makes a single region
+// possible: probes call production helpers, never the reverse. So the whole
+// probe set can sit below the whole production set. Keep it that way.
+//
+// #232 extended the region UPWARD over the three clade gates and their
+// exclusive helpers (go4c_now_ms, proc_status_peak, go4c_spawn_wait_hb*,
+// clade_gate, gl_gate, bootarg_has, clade_storm_gate). Those had stayed out
+// because their CALLERS were the ungated tail of main() -- boot-fatal
+// scaffolding for an on-device toolchain the ship image never bakes, so in
+// --production they could only ever no-op. Gating the callers made the
+// definitions probe-only, and the tripwire below is what proved the set was
+// exactly these eight rather than the three obvious ones.
+//
+// Add a new probe helper INSIDE this region. -Werror=unused-function on the
+// joey target is the tripwire if you forget: the lean build then refuses,
+// rather than warning into a log nobody reads.
+
 // Go Stage 4c: per-step wall-clock (CLOCK_MONOTONIC ms) for the device-vs-host
 // build-time comparison. 0 on a clock failure -> the printed delta degrades to
 // a raw now-ms, never blocks the probe.
@@ -3516,25 +3542,6 @@ static int clade_storm_gate(void) {
     t_putstr("joey: clade CL-5 build storm: PASS\n");
     return 0;
 }
-
-#if THYLA_BOOT_PROBES
-// =============================================================================
-// The boot-test probe helpers -- compiled ONLY into the dev image (#229)
-// =============================================================================
-// Everything below this line exists to be CALLED BY THE PROBE LADDER in main()
-// and by nothing else. It used to be interleaved with the production helpers
-// above (go4c_now_ms, proc_status_peak, go4c_spawn_wait_hb*, clade_gate,
-// gl_gate, bootarg_has, clade_storm_gate), outside any gate -- which is how
-// eleven of these came to be compiled into the lean --production init that can
-// never call them.
-//
-// The ordering constraint is one-way, and it is what makes a single region
-// possible: probes call production helpers, never the reverse. So the whole
-// probe set can sit below the whole production set. Keep it that way.
-//
-// Add a new probe helper INSIDE this region. -Werror=unused-function on the
-// joey target is the tripwire if you forget: the lean build then refuses,
-// rather than warning into a log nobody reads.
 
 static void go4c_timing(const char *step, long t0_ms) {
     char buf[24];
@@ -9998,16 +10005,21 @@ int main(void) {
         }
     }
 
-    // CL-4: F2's in-guest proof. fstat on a /dev fd must SUCCEED and report a
-    // character device. The #57b namespace door mints devdev Spoors (not
-    // devcons), so before devdev_stat_native every /dev/* fd failed fstat --
-    // and clang's FixupStandardFileDescriptors treats a non-EBADF fstat failure
-    // as fatal, so `clang++ < /dev/null` died before emitting anything. Runs on
-    // every boot, clade or not, since /dev is always mounted.
+    // A PRODUCTION assertion, not a probe (#232): the namespace must present a
+    // working device layer before boot-complete. It ships in the lean image
+    // deliberately -- every configuration mounts /dev, and a /dev that does not
+    // fstat as a character device is a broken boot whoever is looking.
+    //
+    // Provenance (why it is /dev/null and why fstat specifically): the #57b
+    // namespace door mints devdev Spoors, not devcons, so before
+    // devdev_stat_native every /dev/* fd failed fstat -- and clang's
+    // FixupStandardFileDescriptors treats a non-EBADF fstat failure as fatal,
+    // so `clang++ < /dev/null` died before emitting anything. The clade arc
+    // found it; the invariant it pinned is not clade's.
     {
         long dn = t_open(T_WALK_OPEN_FROM_ROOT, "/dev/null", 9, T_OREAD);
         if (dn < 0) {
-            t_putstr("joey: CL-4 PROBE open(/dev/null) FAILED\n");
+            t_putstr("joey: open(/dev/null) FAILED -- no device layer\n");
             return 1;
         }
         struct t_stat dst = {0};
@@ -10015,37 +10027,42 @@ int main(void) {
         (void)t_close(dn);
         // 0170000 = S_IFMT, 0020000 = S_IFCHR (libt does not export these).
         if (dr != 0 || (dst.mode & 0170000u) != 0020000u) {
-            t_putstr("joey: CL-4 PROBE fstat(/dev/null) FAILED (rc/mode)\n");
+            t_putstr("joey: fstat(/dev/null) FAILED -- not a character device\n");
             return 1;
         }
-        t_putstr("joey: CL-4 /dev fstat PROBE OK\n");
+        t_putstr("joey: /dev/null is a character device\n");
     }
 
-    // CL-4: the on-device device-toolchain gate. BOOT-FATAL -- a toolchain
-    // regression must fail the boot, not merely print. clade_gate() returns 0
-    // when /clade is absent, so a normal (non-BAKE_CLADE) boot is unaffected.
-    // Placed here, before boot-complete, because it is the one spot every
-    // configuration reaches (the goroot region above is skipped on a
-    // clade-only pool) and joey is still console-attached.
+#if THYLA_BOOT_PROBES
+    // The three clade gates. Each exercises an on-device toolchain that the
+    // ship image never bakes, so in --production they could only ever no-op --
+    // #232 moved them inside the probe gate for that reason, and their
+    // definitions with them.
+    //
+    // BOOT-FATAL, all three: a toolchain regression must fail the boot, not
+    // merely print. Each returns 0 when its artifact is absent (announcing the
+    // skip), so a normal non-baked dev boot is unaffected. Placed here, before
+    // boot-complete, because it is the one spot every configuration reaches
+    // (the goroot region above is skipped on a clade-only pool) and joey is
+    // still console-attached.
     if (clade_gate() != 0) {
         t_putstr("joey: clade CL-4 gate FAILED\n");
         return 1;
     }
 
-    // CL-7b-2: llvmpipe. Boot-fatal, like the two gates around it -- see
-    // gl_gate(). Skips silently when the GL half was not baked.
+    // CL-7b-2: llvmpipe.
     if (gl_gate() != 0) {
         t_putstr("joey: clade CL-7b GL gate FAILED\n");
         return 1;
     }
 
-    // CL-5: the build storm. Same gating (skips silently without /storm) and
-    // the same boot-fatal posture -- an on-device build that stops completing
-    // is a toolchain or kernel regression, not a soft signal.
+    // CL-5: the build storm. An on-device build that stops completing is a
+    // toolchain or kernel regression, not a soft signal.
     if (clade_storm_gate() != 0) {
         t_putstr("joey: clade CL-5 build storm FAILED\n");
         return 1;
     }
+#endif /* THYLA_BOOT_PROBES (the three clade gates) */
 
     // #80: dump the daemon registry before the banner. The reaper's ability to
     // say "DAEMON EXITED" instead of "adopted orphan" is only as complete as

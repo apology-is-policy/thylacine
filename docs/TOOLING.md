@@ -674,11 +674,12 @@ generated headers.
 ### The probe/production boundary in `joey.c`, and its tripwire (#229)
 
 joey is ~10k lines of which about two thirds is probe ladder, spread over
-eighteen `#if THYLA_BOOT_PROBES` regions: **five at file scope** (the helpers)
-and **thirteen as statement blocks inside a function** — twelve in `main()`, one
-in `do_corvus_bringup`. (The #229 commit message says "thirteen inside
-`main()`"; that is the in-*function* count, off by the `do_corvus_bringup` one.
-Recounted here at #231, and this is the authoritative figure.) That scattering
+nineteen `#if THYLA_BOOT_PROBES` regions: **five at file scope** (the helpers)
+and **fourteen as statement blocks inside a function** — thirteen in `main()`,
+one in `do_corvus_bringup`. (The #229 commit message says "thirteen inside
+`main()`"; that was the in-*function* count of the day, off by the
+`do_corvus_bringup` one. Recounted at #231 and again at #232, which added the
+`main()` region holding the three clade gates.) That scattering
 is the shared root of
 #228 (a probe block outside its gate), #229 (probe helpers outside every gate)
 and #232 (probe-shaped gates running in the ship image) — while editing, the
@@ -700,6 +701,24 @@ that the first does not: moving the helpers into their own region — or their o
 file — does not stop the next person typing a new one wherever they happen to be
 editing. **The compiler is the only reader that is always present.** A function
 genuinely meant to be uncalled says so with `__attribute__((unused))`.
+
+**What belongs on which side is decided by what the code asserts, not by which
+arc wrote it (#232).** The ungated tail of `main()` held four boot-fatal blocks
+and they split two ways. The three clade gates exercise an on-device toolchain
+the ship image never bakes, so in `--production` they could only ever no-op —
+scaffolding, now inside the gate. The fourth opens `/dev/null` and requires it
+to `fstat` as a character device: the clade arc found that bug, but the
+invariant is the namespace's, every configuration mounts `/dev`, and a failure
+there is a broken boot whoever is looking. It ships, reworded off its `CL-4
+PROBE` label so a v1.0 log does not read as a boot test. **Provenance is not
+category** — an assertion named after the arc that discovered it will keep
+getting filed as that arc's scaffolding.
+
+The tripwire is what makes such a move verifiable rather than hopeful. Gating
+the three callers turned their definitions probe-only, and *transitively* seven
+more — `-Werror=unused-function` named each one until the region held all eight.
+Census first (a warning count is a lower bound: a dead callee referenced by a
+dead caller is silent), then let the compiler confirm the set was exactly right.
 
 `check-production.sh` verifies the tripwire is *armed* by reading
 `-Werror=unused-function` off the flags CMake generated — not off
