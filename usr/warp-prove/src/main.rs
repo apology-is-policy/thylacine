@@ -997,6 +997,74 @@ fn observe_rejection() {
              work. The damage is confined to the refused stream.\n",
         ),
     };
+    // THE DETECTOR (#240 fix, GPU-DESIGN 4.5.4b). Everything above measures
+    // the raw channels and shows they cannot tell refusal from success; this
+    // asks the new one.
+    //
+    // BOTH DIRECTIONS ARE THE GATE. A detector that latches on everything
+    // passes "the rejected ctx reports 1" on its own, and this arc has
+    // already shipped two assertions that were satisfied by a broken fixture
+    // (#212, aux#215). The healthy ctx is the same class of client running
+    // the same verb, so the ONLY difference between the two readings is
+    // whether the host refused a stream.
+    //
+    // `verify-seq` is read first and required to MOVE: `stream-rejected 0`
+    // is equally satisfied by "the probe ran and found health" and by "the
+    // probe never ran at all" (#184, the gauge-reading-zero trap).
+    let vs_bad_0 = ctx_field(bad, ctx_bad, "verify-seq");
+    let vs_ok_0 = ctx_field(ok, ctx_ok, "verify-seq");
+    let wrote_bad = write_ctl(bad, &format!("ctx/{}/ctl", ctx_bad), "verify");
+    let wrote_ok = write_ctl(ok, &format!("ctx/{}/ctl", ctx_ok), "verify");
+    let vs_bad = ctx_field(bad, ctx_bad, "verify-seq");
+    let vs_ok = ctx_field(ok, ctx_ok, "verify-seq");
+    let sr_bad = ctx_field(bad, ctx_bad, "stream-rejected");
+    let sr_ok = ctx_field(ok, ctx_ok, "stream-rejected");
+    let at_bad = ctx_field(bad, ctx_bad, "rejected-at");
+    t_putstr(&format!(
+        "warp-prove: C0-DETECT verify wrote(bad {} ok {}) verify-seq(bad {}->{} ok {}->{}) \
+         stream-rejected(bad {} ok {}) rejected-at(bad {})\n",
+        wrote_bad as u32, wrote_ok as u32, vs_bad_0, vs_bad, vs_ok_0, vs_ok, sr_bad, sr_ok, at_bad
+    ));
+    let _ = if vs_bad <= vs_bad_0 || vs_ok <= vs_ok_0 {
+        t_putstr(
+            "warp-prove: C0-DETECT INSTRUMENT -- `verify-seq` did not advance on one or both \
+             ctxs, so the probe did not run and neither reading below means anything. \
+             (Pre-C-0d tapestryd? the field would read 0 and never move.)\n",
+        )
+    } else if sr_bad == 1 && sr_ok == 0 {
+        t_putstr(&format!(
+            "warp-prove: C0-DETECT PASS -- the REJECTED ctx reports stream-rejected 1 \
+             (at verify {}) while the healthy ctx running the SAME verb reports 0. \
+             The detector discriminates; #240 is observable in-guest.\n",
+            at_bad
+        ))
+    } else if sr_bad == 1 && sr_ok == 1 {
+        t_putstr(
+            "warp-prove: C0-DETECT FAIL(vacuous) -- BOTH ctxs report stream-rejected 1. \
+             The detector latches on health too, so its positive reading proves nothing.\n",
+        )
+    } else if sr_bad == 0 && sr_ok == 0 {
+        t_putstr(
+            "warp-prove: C0-DETECT FAIL(blind) -- the rejected ctx reports 0 after a verify \
+             that DID run. The probe's copy reached the host on a ctx vrend had latched, \
+             or the seed/readback is not landing where the compare reads.\n",
+        )
+    } else {
+        t_putstr(
+            "warp-prove: C0-DETECT FAIL(inverted) -- the HEALTHY ctx reports rejected and the \
+             refused one does not. The two arms are crossed.\n",
+        )
+    };
+    // Sticky is the contract (recreate, never retry): a second verify on the
+    // healthy ctx must not drift, and on the rejected one must not clear.
+    let _ = write_ctl(bad, &format!("ctx/{}/ctl", ctx_bad), "verify");
+    let _ = write_ctl(ok, &format!("ctx/{}/ctl", ctx_ok), "verify");
+    t_putstr(&format!(
+        "warp-prove: C0-DETECT re-verify stream-rejected(bad {} ok {}) -- want (1 0), sticky\n",
+        ctx_field(bad, ctx_bad, "stream-rejected"),
+        ctx_field(ok, ctx_ok, "stream-rejected")
+    ));
+
     t_putstr("warp-prove: C0-REJECT DONE\n");
 
     unsafe {

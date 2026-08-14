@@ -60,8 +60,18 @@ caps                         # the RETAINED preferred capset blob, raw
 ctx/
   new                        # open+read mints a ctx -> "<pub_id>\n" (ONE per conn; I-45)
   <id>/
-    ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy"
+    ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy" | "verify"
                              # read: "<id>\npoisoned <0|1>\nleaked-count <n>\nleaked-bytes <n>\n"
+                             #   + "stream-rejected <0|1>\nrejected-at <n>\nverify-seq <n>\n"
+                             #     (#240 / C-0d: `verify` runs ONE health probe now -- cadence is
+                             #     the client's. `stream-rejected` is STICKY and means the HOST
+                             #     refused this ctx's commands while every fence retired normally;
+                             #     the remedy is recreate, never retry. NOT `poisoned`, whose cause
+                             #     is a chain that never retired. `rejected-at` names the VERIFY
+                             #     that caught it, so the offending stream lies in
+                             #     (previous verify, rejected-at] -- a window, never a command.
+                             #     `verify-seq` counts probes that RAN: a bare `stream-rejected 0`
+                             #     is equally satisfied by "healthy" and "never asked" [#184])
                              #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3)
                              #   + "bo-live <n>\nbo-peak <n>\nbo-bytes <n>\nbo-bytes-peak <n>\n"
                              #     (#204 census: backed now / high-water, count + bytes axes)
@@ -412,6 +422,48 @@ client cannot depend on a test-mode field — so `fences-in-flight` and
   sound there because the holder pins the slot, but B is deliberately unheld
   and retires promptly, so any in-flight snapshot of B would be a coin flip.
 
+## The #240 health probe (C-0d)
+
+`warp_ctx_verify` (`server.rs`) answers one question: are this context's
+submitted commands still executing? It has to be asked out-of-band, because
+the submit itself cannot fail — see the #240 caveat.
+
+Each ctx carries a `CtxProbe` of two 1x1 B8G8R8A8 resources minted at ctx
+create: `mark`, uploaded once with `PROBE_MARK`, and `sentinel`. One verify
+is seed / copy / read:
+
+1. write a per-verify token into `sentinel`'s backing, `TRANSFER_TO_HOST_3D`;
+2. `submit_3d_sync` one `VIRGL_CCMD_RESOURCE_COPY_REGION` (opcode **17**,
+   13 payload dwords) copying `mark` -> `sentinel`;
+3. `TRANSFER_FROM_HOST_3D` the sentinel and read the backing.
+
+Reading `PROBE_MARK` means the copy ran. Reading the token back means it did
+not, which latches `stream_rejected`.
+
+Three choices carry the design, each earned:
+
+- **The copy is stateless.** `RESOURCE_COPY_REGION` names src and dst
+  explicitly and touches no bound state. A `CLEAR` would need
+  `SET_FRAMEBUFFER_STATE`, and virgl context state persists across command
+  buffers while Mesa dirty-tracks its own binds — so a clear-based probe
+  would silently repoint a client's framebuffer at our sentinel.
+- **Steps 1 and 3 are virtio-gpu commands, not command-buffer ones**, so
+  they keep working on a latched context. That asymmetry IS the detector.
+- **The healthy path is silent and costs nothing extra.** Reading back
+  `PROBE_MARK` already proves `mark` held it, so no separate mark check is
+  needed; the mark is re-read only on the path that is about to claim a
+  context is dead. And no log line on success — a `say!` per verify at the
+  per-frame cadence this verb targets would be its own performance defect.
+
+The probe's resources are deliberately NOT in `bos[]`: every client-facing
+resolve walks that array, so membership would be exactly the reachability
+that lets a client forge health (or manufacture a rejection against a
+healthy ctx). A probe that fails to mint leaves `probe: None`, and the ctx
+still serves — it just cannot be asked. Failing the ctx mint on a
+diagnostic's failure would hand clients a new way to be denied a context.
+Teardown follows the same leak posture as BOs: on a fence wedge the device
+may still be executing, so both resources leak rather than risk a UAF.
+
 ## The Mesa winsys + the warp client (Warp-3)
 
 The unmodified virgl gallium driver reaches the seam through a new winsys
@@ -705,7 +757,8 @@ majority) bounds it ~25–40% above Composed.
 | engine dead (latched) | `E_IO` |
 | fence read with `count` < one record (21 bytes) | empty read (never parks unfillable) |
 | malformed ctl verbs / non-UTF-8 | `E_INVAL` |
-| **stream the HOST refuses (vrend context error)** | **none — reported as SUCCESS (#240).** The write returns the byte count, the fence retires, `fence-signaled` increments, `fences-in-flight` returns to 0, `poisoned` stays 0. See the caveat below |
+| **stream the HOST refuses (vrend context error)** | **none on the write — it is reported as SUCCESS (#240).** The write returns the byte count, the fence retires, `fence-signaled` increments, `fences-in-flight` returns to 0, `poisoned` stays 0. Since C-0d it is DETECTABLE out-of-band: write `verify` to the ctx ctl, then read `stream-rejected`. See the caveat below |
+| `verify` on a ctx with no probe (its mint failed) | `Ok` on the write, but `verify-seq` does **not** advance and `stream-rejected` is untouched. `verify-seq` counts probes that actually RAN, so a client tells "could not be asked" from "asked and healthy" by whether the counter moved — a bare `stream-rejected 0` is satisfied by both (#184) |
 
 ## Known caveats / footguns
 
@@ -736,13 +789,12 @@ majority) bounds it ~25–40% above Composed.
   Do NOT infer a hang from a refusal — the original filing said the fence
   never retires, which came from a 200-iteration poll against a 30 s
   timeout and described the probe's budget, not the seam.
-  **FIX DESIGNED, not yet built** (`GPU-DESIGN.md` §4.5.4b, user-voted
-  2026-08-14): a server-appended sentinel stamp per submit, verified by
-  readback on a client-chosen cadence, behind a sticky `stream-rejected`
-  + `rejected-at` on the ctx ctl — the `glGetGraphicsResetStatus` /
-  `VK_ERROR_DEVICE_LOST` contract. Keep `stream-rejected` DISTINCT from
-  `poisoned`: different causes (host refused our commands vs. a chain that
-  never retired), and collapsing them is how this defect was missed.
+  **DETECTABLE since C-0d** (`GPU-DESIGN.md` §4.5.4b): the defect itself is
+  unchanged — the seam still cannot make a refused submit *fail* — but it is
+  now **observable**, via `stream-rejected` on the ctx ctl (below). Keep
+  that field DISTINCT from `poisoned`: different causes (the host refused
+  our commands vs. a chain that never retired), and collapsing them is how
+  this defect was missed for as long as it was.
 - **#170**: the graceful half is closed — `kobj_pci_quiesce` runs from
   `proc_quiesce_owned_devices`, so a PCI-transport driver stops decoding
   and mastering before the exit path frees its DMA pages (round-1 F8: the

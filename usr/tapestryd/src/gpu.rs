@@ -1608,6 +1608,64 @@ impl Gpu {
         )
     }
 
+    /// SUBMIT_3D on the SYNCHRONOUS slot, under the server's own authority
+    /// (#240 / GPU-DESIGN 4.5.4b). The health probe is an ordered
+    /// upload-copy-readback triple, and riding the sync slot is what makes
+    /// "ordered" a property of the code rather than an argument about
+    /// controlq FIFO across two different publication paths. Never used for
+    /// client streams -- those keep the fenced lane and its admission.
+    pub fn submit_3d_sync(&mut self, ctx_id: u32, stream: &[u8]) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id);
+            w32(req_va + 24, stream.len() as u32);
+            w32(req_va + 28, 0); // padding
+        };
+        copy_stream(req_va + 32, stream);
+        self.ctrl.step(
+            "SUBMIT_3D_SYNC",
+            GPU_CTRL_HDR_LEN + 8 + stream.len() as u32,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
+    }
+
+    /// The upload twin of `transfer_from_3d_sync`. A virtio-gpu command,
+    /// NOT a command-buffer one, so it keeps working on a context whose
+    /// command stream vrend has latched off (measured, GPU-DESIGN 4.5.4a)
+    /// -- which is precisely what lets the health probe seed a token the
+    /// dropped copy will fail to overwrite.
+    pub fn transfer_to_3d_sync(
+        &mut self,
+        ctx_id: u32,
+        res_id: u32,
+        w: u32,
+        h: u32,
+        stride: u32,
+    ) -> Result<(), Error> {
+        let req_va = self.ring_va + REQ_OFF;
+        unsafe {
+            write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, ctx_id);
+            w32(req_va + 24, 0); // box.x
+            w32(req_va + 28, 0); // box.y
+            w32(req_va + 32, 0); // box.z
+            w32(req_va + 36, w);
+            w32(req_va + 40, h);
+            w32(req_va + 44, 1); // box.d
+            w64(req_va + 48, 0); // offset into the backing
+            w32(req_va + 56, res_id);
+            w32(req_va + 60, 0); // level
+            w32(req_va + 64, stride);
+            w32(req_va + 68, 0); // layer_stride
+        }
+        self.ctrl.step(
+            "TRANSFER_TO_3D",
+            GPU_CTRL_HDR_LEN + 48,
+            GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA,
+        )
+    }
+
     /// TRANSFER_TO/FROM_HOST_3D: fence-bearing by design -- a readback's
     /// completion (the data landed in the BO backing) is exactly what the
     /// client waits the fence for. Box + level + strides are the client's

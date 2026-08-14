@@ -191,6 +191,31 @@ const EVENT_QUEUE_CAP: usize = 128;
 
 const PAGE: u64 = 0x1000;
 
+// The #240 health probe's virgl vocabulary (GPU-DESIGN 4.5.4b). The seam is
+// otherwise opaque to command streams -- these exist ONLY because the probe
+// is the one stream the SERVER authors. virgl_protocol.h, wire-frozen.
+// 17, ONE PAST VIRGL_CCMD_BLIT (16). Both values are enum ORDINALS, and the
+// first cut of this constant read 96 -- a LINE NUMBER out of a grep of
+// virgl_protocol.h, the identical mistake that put BLIT at 21 in warp-prove
+// (21 is GET_QUERY_RESULT). warp-prove's own `VIRGL_CCMD_BLIT = 16` carries
+// that scar as a comment, and 96 should have been rejected on sight for
+// being nowhere near its neighbour. Derive ordinals by counting the enum,
+// never by grepping for the name.
+const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
+/// From `#define VIRGL_CMD_RESOURCE_COPY_REGION_SIZE 13` -- a real #define
+/// with a real value, unlike the opcode above.
+const VIRGL_CMD_RCR_SIZE: u32 = 13;
+const PIPE_TEXTURE_2D: u32 = 2;
+const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+const VIRGL_BIND_RENDER_TARGET: u32 = 1 << 1;
+/// What `mark` holds. Arbitrary but FIXED, and deliberately not 0 or an
+/// all-ones word: a zeroed or untouched page must never read as a healthy
+/// verify.
+const PROBE_MARK: u32 = 0x5741_5250; // "WARP"
+/// The seed XOR base. The per-verify token mixes the sequence in, so
+/// "unchanged" cannot be satisfied by a value a PREVIOUS verify left.
+const PROBE_TOKEN_BASE: u32 = 0x2444_3040;
+
 /// The weave-mapping VA window in tapestryd's own AS (bump-allocated;
 /// freed VAs are not reused at stage 0 -- bounded by the surface caps per
 /// generation and the 47-bit user VA space; a free-list is a v1.x seam).
@@ -738,6 +763,20 @@ pub struct Comp {
 
 /// A GPU-seam rendering context (Warp-2c). Owned by one conn; the DEVICE
 /// ctx id is its slot + 1 (reused only after the synchronous CTX_DESTROY).
+/// The #240 health probe's two server-owned resources (GPU-DESIGN 4.5.4b).
+/// `mark` is painted once at ctx create and never written again; `sentinel`
+/// is seeded per verify and then copied into. Both are 1x1 B8G8R8A8, so the
+/// whole probe moves 4 bytes each way.
+struct CtxProbe {
+    mark_res: u32,
+    mark_fd: i64,
+    mark_va: u64,
+    sent_res: u32,
+    sent_fd: i64,
+    sent_va: u64,
+    size: u64,
+}
+
 struct WarpCtx {
     owner_conn: u64,
     pub_id: u32,
@@ -788,6 +827,29 @@ struct WarpCtx {
     /// shape blocked the dispatch for up to 2 s per object -- client-
     /// multipliable into minutes of frozen console (#31/#125).
     retiring: bool,
+    /// #240 health probe (GPU-DESIGN 4.5.4b). Two 1x1 resources the client
+    /// can never name: `mark` holds a fixed value, `sentinel` is the
+    /// target a verify copies into. Kept OUT of `bos[]` deliberately --
+    /// every client-facing resolve walks that array, so membership would
+    /// be the reachability the audit forbids (a client that can write
+    /// either can forge health, or manufacture a rejection against a
+    /// healthy ctx).
+    probe: Option<CtxProbe>,
+    /// vrend has latched this context's command stream off: submits are
+    /// still ACCEPTED and their fences still retire, but no command runs
+    /// (#240, measured). STICKY, exactly like the vrend latch it mirrors,
+    /// and exactly like `glGetGraphicsResetStatus` / VK_ERROR_DEVICE_LOST
+    /// -- the remedy is recreate, never retry. DISTINCT from
+    /// `fence_poisoned`, whose cause is a chain that never retired; #240
+    /// happened because the one was read through the other.
+    stream_rejected: bool,
+    /// The verify sequence that caught the loss. The offending stream lies
+    /// in (previous_verify, rejected_at] -- a window, never a command.
+    rejected_at: u64,
+    /// Verifies run on this ctx. Monotonic; `rejected_at` names one of
+    /// these, and a reader can tell "never verified" (0) from "verified
+    /// and healthy" (>0 with stream_rejected 0) -- the #184 distinction.
+    verify_seq: u64,
     /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
     /// this ctx consents to displaying its BO `bo_pub` on surface
     /// (slot, gen). The gen pin makes a consent die with the surface
@@ -2887,6 +2949,15 @@ impl Comp {
             leaked_bytes: 0,
             leaked_count: 0,
             retiring: false,
+            // #240: minted below, AFTER the ctx row exists. A probe that
+            // cannot be built leaves `None` and every verify answers
+            // "unknown" -- the ctx still works, it just cannot be asked.
+            // Failing the whole ctx mint here would turn a diagnostic into
+            // a new denial-of-service surface.
+            probe: None,
+            stream_rejected: false,
+            rejected_at: 0,
+            verify_seq: 0,
             present_to: None,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
@@ -2894,7 +2965,247 @@ impl Comp {
             create_refused: 0,
             bos,
         });
+        // #240: the probe is built AFTER the row exists so its failure is
+        // recoverable -- a ctx with no probe still serves, it just answers
+        // "unknown" to every verify. Making a diagnostic's failure fail the
+        // whole mint would hand a client a new way to be denied a context.
+        let probe = self.warp_probe_build(dev_ctx);
+        if probe.is_none() {
+            say!("tapestryd: warp ctx {} has no #240 health probe (mint failed)", pub_id);
+        }
+        if let Some(c) = self.wctx_mut(pub_id, conn) {
+            c.probe = probe;
+        }
         Some(pub_id)
+    }
+
+    /// Mint one 1x1 B8G8R8A8 render target owned by the SERVER, attached to
+    /// `dev_ctx` but recorded nowhere a client resolve can reach. Returns
+    /// `(res_id, fd, va)`. Every failure arm unwinds the device state in
+    /// reverse and BOTH halves of the guest backing -- `t_burrow_detach`
+    /// before `t_close`, since I-7's dual count frees nothing while a
+    /// mapping ref survives.
+    fn warp_probe_res(&mut self, dev_ctx: u32, size: u64) -> Option<(u32, i64, u64)> {
+        let fd = unsafe { t_dma_create_gpu_bo(size, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP) };
+        if fd < 0 {
+            return None;
+        }
+        let va = self.weave_va_next;
+        self.weave_va_next += (size + PAGE - 1) & !(PAGE - 1);
+        let pa = unsafe { t_dma_map(fd, va, T_PROT_READ | T_PROT_WRITE) };
+        if pa < 0 {
+            unsafe { t_close(fd) };
+            return None;
+        }
+        self.res_seq = self.res_seq.wrapping_add(1);
+        let res_id = self.res_seq;
+        let undo = |gpu: &mut Gpu, stage: u32, res_id: u32| {
+            if stage >= 2 {
+                let _ = gpu.ctx_detach_resource(dev_ctx, res_id);
+            }
+            if stage >= 1 {
+                let _ = gpu.resource_unref(res_id);
+            }
+            unsafe { t_burrow_detach(va, size) };
+            unsafe { t_close(fd) };
+        };
+        if self
+            .gpu
+            .resource_create_3d(
+                res_id,
+                PIPE_TEXTURE_2D,
+                VIRGL_FORMAT_B8G8R8A8_UNORM,
+                VIRGL_BIND_RENDER_TARGET,
+                1,
+                1,
+                1,
+                1,
+                0,
+                0,
+                0,
+            )
+            .is_err()
+        {
+            undo(&mut self.gpu, 0, res_id);
+            return None;
+        }
+        if self.gpu.ctx_attach_resource(dev_ctx, res_id).is_err() {
+            undo(&mut self.gpu, 1, res_id);
+            return None;
+        }
+        if self.gpu.attach_backing(res_id, pa as u64, size as u32).is_err() {
+            undo(&mut self.gpu, 2, res_id);
+            return None;
+        }
+        Some((res_id, fd, va))
+    }
+
+    /// Build the #240 health probe for a freshly minted ctx (GPU-DESIGN
+    /// 4.5.4b). `mark` is painted ONCE here by UPLOAD, never by a CLEAR:
+    /// a CLEAR would need SET_FRAMEBUFFER_STATE, and virgl context state
+    /// persists across command buffers while Mesa dirty-tracks its own
+    /// binds -- so writing the mark that way would silently repoint a
+    /// client's framebuffer at our resource.
+    fn warp_probe_build(&mut self, dev_ctx: u32) -> Option<CtxProbe> {
+        let size = PAGE;
+        let (mark_res, mark_fd, mark_va) = self.warp_probe_res(dev_ctx, size)?;
+        let (sent_res, sent_fd, sent_va) = match self.warp_probe_res(dev_ctx, size) {
+            Some(v) => v,
+            None => {
+                let _ = self.gpu.detach_backing(mark_res);
+                let _ = self.gpu.ctx_detach_resource(dev_ctx, mark_res);
+                let _ = self.gpu.resource_unref(mark_res);
+                unsafe { t_burrow_detach(mark_va, size) };
+                unsafe { t_close(mark_fd) };
+                return None;
+            }
+        };
+        unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
+        if self
+            .gpu
+            .transfer_to_3d_sync(dev_ctx, mark_res, 1, 1, 4)
+            .is_err()
+        {
+            // The mark never reached the host, so a verify could not tell
+            // "the copy ran" from "the copy ran and copied garbage".
+            // Better no probe than a probe that answers wrongly.
+            return None;
+        }
+        Some(CtxProbe {
+            mark_res,
+            mark_fd,
+            mark_va,
+            sent_res,
+            sent_fd,
+            sent_va,
+            size,
+        })
+    }
+
+    /// One #240 health verify (GPU-DESIGN 4.5.4b): seed the sentinel with a
+    /// token, ask the CONTEXT to copy the mark over it, read it back.
+    ///
+    /// The copy is `RESOURCE_COPY_REGION` -- stateless, so it cannot
+    /// disturb whatever the client has bound. The seed and the readback are
+    /// virtio-gpu commands rather than command-buffer ones, which is why
+    /// they still work on a context vrend has latched off; that asymmetry
+    /// IS the detector.
+    ///
+    /// Returns `Some(true)` healthy, `Some(false)` latched, `None` unknown.
+    /// Every transport failure lands on `None`: an errored upload is not
+    /// evidence of refusal, and must never read as health either.
+    fn warp_ctx_verify(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
+        let (dev_ctx, mark_res, sent_res, sent_va) = {
+            let c = self.wctx(ctx_pub, conn)?;
+            let p = c.probe.as_ref()?;
+            (c.dev_ctx, p.mark_res, p.sent_res, p.sent_va)
+        };
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.verify_seq += 1;
+        }
+        let seq = self.wctx(ctx_pub, conn).map_or(0, |c| c.verify_seq);
+
+        // A token that differs from PROBE_MARK and from whatever the last
+        // verify left, so "unchanged" is never satisfied by a stale value.
+        let token = PROBE_TOKEN_BASE ^ (seq as u32).rotate_left(8);
+        unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
+        if self
+            .gpu
+            .transfer_to_3d_sync(dev_ctx, sent_res, 1, 1, 4)
+            .is_err()
+        {
+            return None;
+        }
+        let mut st: [u32; 14] = [0; 14];
+        st[0] = (VIRGL_CCMD_RESOURCE_COPY_REGION & 0xff) | (VIRGL_CMD_RCR_SIZE << 16);
+        st[1] = sent_res; // dst handle
+        st[2] = 0; // dst level
+        st[3] = 0; // dst x
+        st[4] = 0; // dst y
+        st[5] = 0; // dst z
+        st[6] = mark_res; // src handle
+        st[7] = 0; // src level
+        st[8] = 0; // src x
+        st[9] = 0; // src y
+        st[10] = 0; // src z
+        st[11] = 1; // src w
+        st[12] = 1; // src h
+        st[13] = 1; // src d
+        let mut bytes = [0u8; 56];
+        for (i, w) in st.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        if self.gpu.submit_3d_sync(dev_ctx, &bytes).is_err() {
+            return None;
+        }
+        if self
+            .gpu
+            .transfer_from_3d_sync(dev_ctx, sent_res, 1, 1, 4)
+            .is_err()
+        {
+            return None;
+        }
+        let got = unsafe { core::ptr::read_volatile(sent_va as *const u32) };
+        // THE HEALTHY PATH IS SILENT AND COSTS NOTHING EXTRA. Reading back
+        // PROBE_MARK is already proof that `mark` held PROBE_MARK -- the copy
+        // is what delivered it -- so no separate mark check is needed here,
+        // and no log line either: a `say!` per verify at the per-frame
+        // cadence this verb is designed for would flood the console and
+        // become its own performance defect.
+        if got == PROBE_MARK {
+            return Some(true);
+        }
+        // Everything below is about to make a SERIOUS claim ("this context is
+        // dead"), so it pays for corroboration. Read the mark back: if it
+        // does not hold PROBE_MARK then the upload/readback path is broken
+        // and nothing about the copy can be concluded. A good mark plus an
+        // unchanged sentinel is what genuinely means the copy did not run.
+        let mark_now = {
+            let mv = self
+                .wctx(ctx_pub, conn)
+                .and_then(|c| c.probe.as_ref())
+                .map(|p| p.mark_va);
+            match mv {
+                Some(va) => {
+                    if self.gpu.transfer_from_3d_sync(dev_ctx, mark_res, 1, 1, 4).is_err() {
+                        None
+                    } else {
+                        Some(unsafe { core::ptr::read_volatile(va as *const u32) })
+                    }
+                }
+                None => None,
+            }
+        };
+        if mark_now != Some(PROBE_MARK) {
+            say!(
+                "tapestryd: warp ctx {} verify {} -- the MARK reads {:?}, not {:#x}, so the \
+                 probe cannot judge the copy. UNKNOWN, not a verdict.",
+                ctx_pub, seq, mark_now, PROBE_MARK
+            );
+            return None;
+        }
+        if got != token {
+            // Neither the mark nor our seed: the readback is not carrying
+            // what this probe put there, so the probe itself is not
+            // trustworthy on this ctx. Unknown, never a verdict.
+            say!(
+                "tapestryd: warp ctx {} verify {} read {:#x} (neither mark nor token) -- unknown",
+                ctx_pub, seq, got
+            );
+            return None;
+        }
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            if !c.stream_rejected {
+                c.stream_rejected = true;
+                c.rejected_at = seq;
+                say!(
+                    "tapestryd: warp ctx {} STREAM REJECTED -- the host refused a submit \
+                     in (prev verify, {}]; the ctx is dead, recreate it (#240)",
+                    ctx_pub, seq
+                );
+            }
+        }
+        Some(false)
     }
 
     /// Mint a BO record under a ctx (no device state yet -- the ctl
@@ -3388,6 +3699,32 @@ impl Comp {
                 };
                 if Self::wbo_retire(&mut self.gpu, c.dev_ctx, &mut b, leak) > 0 {
                     self.warp_park_leaked(slot, b);
+                }
+            }
+            // #240: the probe's two resources follow the SAME leak posture
+            // as the BOs above -- on a wedge the device may still be
+            // executing this ctx's stream, so neither the device state nor
+            // the guest backing may be touched, and both leak rather than
+            // risk a UAF on pages the host is mid-DMA into. On a clean
+            // retire they unwind in reverse, detach-before-close (I-7).
+            if let Some(p) = c.probe.take() {
+                if leak {
+                    say!(
+                        "tapestryd: warp ctx {} probe backings LEAKED ({} B, fence wedge)",
+                        c.pub_id,
+                        p.size * 2
+                    );
+                } else {
+                    for (res, va, fd) in [
+                        (p.mark_res, p.mark_va, p.mark_fd),
+                        (p.sent_res, p.sent_va, p.sent_fd),
+                    ] {
+                        let _ = self.gpu.detach_backing(res);
+                        let _ = self.gpu.ctx_detach_resource(c.dev_ctx, res);
+                        let _ = self.gpu.resource_unref(res);
+                        unsafe { t_burrow_detach(va, p.size) };
+                        unsafe { t_close(fd) };
+                    }
                 }
             }
             if leak {
@@ -4715,6 +5052,22 @@ impl Conn {
                                 c.fence_poisoned as u32, c.leaked_count, c.leaked_bytes
                             ),
                         );
+                        // #240 (GPU-DESIGN 4.5.4b). DISTINCT from `poisoned`
+                        // on purpose: that one means a fence chain never
+                        // retired, this one means the host refused our
+                        // commands while every fence retired normally. The
+                        // defect existed because the second was read through
+                        // the first. `verify-seq` rides along so a reader
+                        // can tell "never asked" (0) from "asked, healthy"
+                        // -- a zero `stream-rejected` alone is satisfied by
+                        // a probe that never ran (#184).
+                        let _ = core::fmt::write(
+                            &mut s,
+                            format_args!(
+                                "stream-rejected {}\nrejected-at {}\nverify-seq {}\n",
+                                c.stream_rejected as u32, c.rejected_at, c.verify_seq
+                            ),
+                        );
                     }
                     // #180: a BOUNDED way to watch this ctx's fences land. The
                     // fence fd is the only alternative and it parks, so a
@@ -5258,6 +5611,23 @@ impl Conn {
                     return Err(p9::E_NOENT);
                 }
                 comp.wctx_retire(slot);
+                Ok(())
+            }
+            // #240 (GPU-DESIGN 4.5.4b): run one health probe NOW and fold
+            // the result into `stream-rejected`. The verb exists so CADENCE
+            // is the client's -- per frame, every Nth, or never -- because
+            // the server cannot know how much a given client is willing to
+            // pay for the answer. Deliberately returns Ok on every outcome:
+            // the ANSWER lives in the ctl fields, and an unknown (a
+            // transport failure mid-probe) is not a failure of the WRITE.
+            // Erroring here would tempt a client to treat a probe it could
+            // not run as a rejection, which is the direction that
+            // manufactures false deaths.
+            Some("verify") => {
+                if comp.wctx(id, self.conn_id).is_none() {
+                    return Err(p9::E_NOENT);
+                }
+                comp.warp_ctx_verify(id, self.conn_id);
                 Ok(())
             }
             Some("present-to") => {
