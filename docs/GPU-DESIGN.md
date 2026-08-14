@@ -524,9 +524,77 @@ so the guest never lived 30 s past it. A bound on iterations is not a bound
 on time, and an absence observed inside too small a window is not evidence.
 
 C-2 must therefore carry a detection mechanism, not merely an attach verb.
-The candidate shapes are recorded on task #226; the choice is a seam
-contract change and wants the design-conversation pattern before it is
-built.
+
+##### 4.5.4b The #240 detector — a sentinel stamp behind a GL-robustness contract (designed 2026-08-14, user-voted; RESERVED)
+
+**The contract is not novel, and that is the point.** Sticky context death
+surfaced through a polled status is exactly `GL_ARB_robustness`'s
+`glGetGraphicsResetStatus()` and Vulkan's `VK_ERROR_DEVICE_LOST`: the
+context is gone, the remedy is *recreate it*, never *retry the operation*.
+Plan 9's idiom agrees — an asynchronous device error lives in the device's
+own status file, read when the client cares. Thylacine already has that
+file, and it already carries a sticky per-ctx failure bit (`poisoned`), so
+this is an additive field on an existing surface rather than a new channel:
+
+```
+ctx/<id>/ctl:
+    poisoned         0     # the FENCE lane abandoned a chain (timeout/wedge)
+    stream-rejected  1     # the HOST refused our commands          (NEW, sticky)
+    rejected-at      4127  # the submit seq of the verify that caught it (NEW)
+```
+
+`poisoned` and `stream-rejected` are deliberately distinct: they have
+different causes (a chain that never retired vs. commands the host
+declined), and #240 exists precisely because the second was being read
+through the first. A client that treats them as one bit re-creates the bug.
+
+**The detector, since QEMU gives us nothing.** `virgl_cmd_submit_3d`
+discards `virgl_renderer_submit_cmd`'s return and creates the fence
+afterwards unconditionally, so no virtio-gpu field carries the refusal.
+tapestryd therefore appends one **sentinel stamp** to every submitted
+stream — a write of a monotonically increasing per-ctx token into a small
+server-owned resource minted at ctx create and never exposed to the client:
+
+```
+submit: [ ...the client's commands..., CLEAR(sentinel_res, token = N) ]
+```
+
+Verification is a `transfer_from` of that resource and a compare. **This
+works for the exact reason #240 is dangerous**: a latched vrend context
+drops *every* later cmdbuf command, so it drops the stamp too, while the
+`transfer_from` still completes and delivers stale bytes (both measured in
+§4.5.4a). The token that fails to arrive IS the detection.
+
+**Cadence is the client's, not the server's.** The stamp is always
+appended (one `CLEAR` on a tiny resource — GPU-side trivial, no readback);
+the *verify* is opt-in, so a client chooses per-frame, every Nth frame, or
+never. Warp-C verifies once per composed frame, riding the fence sync it
+already performs. **The cost objection dissolves once quantified**: the
+sentinel readback is ~4 bytes against the ~4 MB/frame framebuffer readback
+Warp-C exists to delete — the thing that costs 43% of the frame (§4.5.1).
+Adding a four-byte round trip to remove a four-megabyte one is not a
+tension worth protecting.
+
+**What it does NOT give you, stated plainly.** Detection granularity is the
+*verify window*, not the individual command: `rejected-at` names the submit
+sequence of the verify that caught the loss, so the offending stream is
+somewhere in `(previous_verify, rejected-at]`. Per-frame verification makes
+that window one frame, which is enough to freeze-and-report rather than
+freeze-and-lie, but it is not a per-command error code and must not be
+documented as one. Narrowing it further would need a stamp *between* every
+client command, which is not worth its cost.
+
+**Regression witness.** `tools/warp-host.sh reject` (§`149-warp.md`) becomes
+the gate: after the fix its rejected arm must report `stream-rejected 1`,
+and its class-matched VALID control must still report `0`. Both directions
+are required — a detector that latches on everything passes the first
+assertion alone, which is the failure this arc has already met twice.
+
+**Audit.** The warp seam is an audit-trigger surface, so the implementing
+sub-chunk carries a focused round: the new field is client-readable state
+derived from a server-owned resource, the stamp rides inside an otherwise
+opaque client stream, and the sentinel resource must be unreachable to the
+client (an attacker who can write it can forge health).
 
 **P2 — cross-context ordering: does the blit observe the client's finished
 frame?** The client renders on its context, the compositor blits on its own;
@@ -899,7 +967,7 @@ scope shifts with them.
 | **Warp-3** | `virgl_thylacine_winsys` (18 slots) + the client library; unmodified Mesa virgl driver — **LANDED** (3a `ef6af62c` seam capacity 128 + the `fence-signaled`/`bo-cap` ctl promotion; 3b `8b8ca40d` fork patch 0006: the winsys + `warp_client` + `virgl-prove`; 3c `eb62f97c` the builder cycle; `c64ddbe4` the #191 build-id cacheless fallback, port finding 4; as-built `docs/reference/149-warp.md`) | a triangle, in-guest, on the GPU — **met: `GL_RENDERER = virgl (Apple M2 (Compat))`, via `tools/warp-host.sh tri`** |
 | **Warp-4** | present integration: `SET_SCANOUT` of a 3D resource (Direct), readback fallback (Composed) — **LANDED** (4a+4b `ec2bd8ad` the mutual-adoption protocol, both halves + fork patch 0007; 4c the gate: the launcher auto-detect + `tools/warp-host.sh quake` — both arms in one run, the `scanout direct N GL res R` switch live on thyla-gl; as-built `docs/reference/149-warp.md` §Warp-4) | **GLQuake on virgl** — **measured: ~3 fps aggregate at 1280×800 (the mechanism gate is met). PREMISE CORRECTED 2026-08-10: the 192.8 anchor was macOS/HVF and does not transfer (its own Warp-1 row said so); the same-host llvmpipe band is 2.4–5.9 fps at 640×480, so ~3 fps at 3.3× the pixels sits INSIDE the software band — #196 now asks stall-vs-compute (the `decomp` verb: per-arm unpaced figures + qemu CPU attribution), not "why 20–25× under"**. Findings ledger: #195 (GL-host capture), #197 (console ^C owner-only), #198 (demo-end context break), #199 (caught notes never interrupt blocking syscalls) |
 | **Warp-5** | the focused audit; I-45 enumerated; reference docs | Fable-5-max round closed |
-| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass*; **C-1** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample cfg) BEFORE impl; **C-2** compositor ctx + 3D screen; **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path; **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
+| **Warp-C** | **GPU composition (§4.5; designed 2026-08-13, RESERVED)** — the compositor's own virgl context; the screen becomes a host-side 3D resource; per-frame `VIRGL_CCMD_BLIT` composition replacing the readback; chrome becomes a damage-uploaded texture; the I-40 drain. Sub-chunks: **C-0** the two gating probes (§4.5.4 P1 cross-context blit with a pixel-asserting positive control, P2 cross-context ordering) — *nothing structural lands until both pass* — plus **C-0d**, the #240 detector (§4.5.4b: the sentinel stamp behind a sticky `stream-rejected` on the ctx ctl), which is a PREREQUISITE of P1b rather than a parallel nicety: a WITH-attach retry that silently does nothing is unreadable while a refusal reports success; **C-1** the spec extension (async present + drain; `drain_skipped` + a P2 ordering counterexample cfg) BEFORE impl; **C-2** compositor ctx + 3D screen; **C-3** blit composition + chrome-as-texture; **C-4** retire the readback path; **C-5** focused audit (an I-40 surface + a new cross-context authority path) | **the composed path reaches direct-path parity** — i.e. the #215 43% is gone at 1280×800, measured by the same two-method protocol, with `ls-gfx*` byte-identical and tearing-freedom held under P2 stress |
 | **Warp-6** | Venus: hostmem mapping (§6.2), `vn_renderer_thylacine`, blobs — **now also owes the §4.5.5 generalization: the blob-mediated capset-neutral blit, extending Warp-C's mechanism without reshaping its model** | a Vulkan prover in-guest |
 | **Warp-7+** | RPi: the v3d leaf driver on the MENAGERIE substrate — own charter, F3's posture built in | own gate |
 

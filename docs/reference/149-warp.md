@@ -736,6 +736,13 @@ majority) bounds it ~25–40% above Composed.
   Do NOT infer a hang from a refusal — the original filing said the fence
   never retires, which came from a 200-iteration poll against a 30 s
   timeout and described the probe's budget, not the seam.
+  **FIX DESIGNED, not yet built** (`GPU-DESIGN.md` §4.5.4b, user-voted
+  2026-08-14): a server-appended sentinel stamp per submit, verified by
+  readback on a client-chosen cadence, behind a sticky `stream-rejected`
+  + `rejected-at` on the ctx ctl — the `glGetGraphicsResetStatus` /
+  `VK_ERROR_DEVICE_LOST` contract. Keep `stream-rejected` DISTINCT from
+  `poisoned`: different causes (host refused our commands vs. a chain that
+  never retired), and collapsing them is how this defect was missed.
 - **#170**: the graceful half is closed — `kobj_pci_quiesce` runs from
   `proc_quiesce_owned_devices`, so a PCI-transport driver stops decoding
   and mastering before the exit path frees its DMA pages (round-1 F8: the
