@@ -680,6 +680,45 @@ struct Proc {
     // itself, but the child re-execs and re-stamps its own name at exec_setup.
     char               name[PROC_NAME_MAX];
 
+    // #240 (I-20; the freshness guard on #15's deferred stop): 1 while a
+    // STOP-disposition note (tty:susp) has armed a stop that has not yet been
+    // applied, 0 once any cont has superseded it. proc_job_stop_self applies
+    // the stop only while this reads 1.
+    //
+    // It exists because #15 turned "stop now" into "stop later". Pre-#15 the
+    // uncaught susp set job_stop_req under g_proc_table_lock in the same
+    // critical section that decided it, so no window existed. Post-#15 the
+    // decision is made at POST and applied at the handler's SYS_NOTED(NDFLT)
+    // -- a gap spanning a full EL0 handler execution, interruptible by
+    // preemption, page faults and syscalls. A cont landing inside that gap
+    // finds job_stop_req still 0, returns from proc_job_resume_one_locked
+    // without doing anything, and is then overwritten by the stop it was meant
+    // to prevent. That is a job nobody can resume: the pts teardown's
+    // hup-then-cont rescue (which the PTY-1 close named as the carrier-loss
+    // guarantee) fires exactly there.
+    //
+    // The guard is deliberately a FLAG and not a queued-note predicate: a
+    // "refuse while an unconsumed tty:cont is queued" test is satisfiable and
+    // was checked, but a notes-fd reader can consume the cont, a mask can
+    // defer it and a future coalescing change could drop it -- all of which
+    // silently re-open the window. Nothing but the stop machinery reads or
+    // writes this byte.
+    //
+    // SET (RELEASE) by notes_arm_susp_stop_locked, on the commit of any note
+    // whose g_known_notes `dfl` column is STOP -- inside notes_post, so every
+    // present and future poster is covered by construction rather than by
+    // remembering to stamp. CLEARED (RELEASE) at the TOP of
+    // proc_job_resume_one_locked, BEFORE its `job_stop_req == 0` early return
+    // -- the placement IS the fix, since the not-yet-stopped target is the
+    // whole case. READ (ACQUIRE) in proc_job_stop_self under
+    // g_proc_table_lock, which is also where the clear's own caller holds it,
+    // so the read cannot straddle a concurrent cont. Occupies the 4-byte pad
+    // between name[] and exe_path -- no struct growth. KP_ZERO-fresh 0 (a
+    // reused struct never carries a stale arm, and 0 means "do not stop",
+    // the fail-safe direction); NOT rfork-inherited (a fresh child has no
+    // pending susp).
+    u32                susp_stop_armed;
+
     // VIVARIUM V-4a-0: the namespace name of the executable this Proc is
     // running -- the #66 `Path` of the Spoor `exec_resolve_from_namespace`
     // resolved, ref-held for the Proc's life. The source for
@@ -924,6 +963,13 @@ _Static_assert(__builtin_offsetof(struct Proc, exe_path) == 352,
  "the /proc/<pid>/exe source) appends after prowl-1's name[]+32 "
  "= 384, itself 8-aligned. Every pre-existing offset stays stable; "
  "KP_ZERO-fresh NULL == 'unknown name' (I-33).");
+_Static_assert(__builtin_offsetof(struct Proc, susp_stop_armed) == 348,
+ "#240 susp_stop_armed (the freshness guard on #15's deferred NDFLT "
+ "stop, I-20) occupies the 4-byte pad between prowl-1's "
+ "name[PROC_NAME_MAX=32] (@316, ending @348) and the 8-aligned "
+ "exe_path -- no struct growth, every existing offset stable. The "
+ "exe_path == 352 assert below is the control: if this pad were not "
+ "free, inserting the field would push exe_path and fail there.");
 _Static_assert(__builtin_offsetof(struct Proc, phenotype) == 315,
  "VIVARIUM phenotype (the per-Proc ABI mode, I-43) occupies the "
  "LAST tail pad byte, between debug_exitkill and "

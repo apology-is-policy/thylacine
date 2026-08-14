@@ -79,6 +79,7 @@ void test_notes_linux_sigign_discard(void);
 void test_notes_default_action_table(void);
 void test_notes_ndflt_dispatch(void);
 void test_notes_kill_terminates_single_thread(void);
+void test_notes_ndflt_stop_discarded_after_cont(void);
 
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke
@@ -1158,6 +1159,14 @@ void test_notes_ndflt_dispatch(void) {
     // #15 removes. Asserting with the handler installed is what makes the test
     // reach the code under test rather than the no-handler path.
     m->handler_va = 0x1000u;
+    // #240: ndflt_arm_handler fabricates the DELIVERY half only. In production
+    // a susp is posted before it is delivered, and the post is what arms
+    // susp_stop_armed -- so the fixture must stand in for that too or the new
+    // freshness gate discards this stop and the leg proves nothing. Set
+    // explicitly rather than inside the helper: forgetting it here fails LOUD
+    // (the leg asserts job_stop_req == 1), whereas a helper doing it silently
+    // would also re-arm the cont-discard legs below and hollow them out.
+    m->susp_stop_armed = 1u;
     ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);
     TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "NDFLT(tty:susp) succeeds");
     TEST_ASSERT(!th.in_handler, "the stop left the handler (restore ran)");
@@ -1212,7 +1221,15 @@ void test_notes_ndflt_dispatch(void) {
     m->stop_report_pending = false;
     TEST_EXPECT_EQ(ndflt_note_count(m, NOTE_NAME_TTY_SUSP), 0u,
                    "precondition: no susp queued");
+    // #240: clear the arm BEFORE the fan so the assertion below is a real
+    // control. Leg (1) left it at 1; asserting "the post armed it" without
+    // this would be satisfied by the stale value and would stay green with
+    // notes_arm_susp_stop_locked deleted outright.
+    m->susp_stop_armed = 0u;
     TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "the fan visited m");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1,
+                   "the POST armed the #240 freshness flag (production path, "
+                   "not the fixture)");
     TEST_EXPECT_EQ((int)m->job_stop_req, 0,
                    "CAUGHT (handler_va != 0): the fan posted, did NOT stop");
     TEST_EXPECT_EQ(ndflt_note_count(m, NOTE_NAME_TTY_SUSP), 1u,
@@ -1246,6 +1263,13 @@ void test_notes_ndflt_dispatch(void) {
     proc_test_link(orphan);
     orphan->handler_va = 0x1000u;
     static struct Thread oth;
+    // #240, and this line is the difference between a test and a decoration.
+    // The leg asserts job_stop_req == 0 -- a NEGATIVE. A fresh Proc has
+    // susp_stop_armed == 0, so the new freshness gate ALSO discards the stop,
+    // and the leg would stay green with pgrp_orphaned_locked deleted from
+    // proc_job_stop_self entirely: it would be satisfied by the wrong reason.
+    // Arming leaves the orphan rule as the only thing that can discard.
+    orphan->susp_stop_armed = 1u;
     ndflt_arm_handler(&oth, orphan, NOTE_NAME_TTY_SUSP);
     TEST_EXPECT_EQ(notes_noted_default(&ctx, &oth), 0,
                    "NDFLT(tty:susp) on an orphan still SUCCEEDS (not an error)");
@@ -1351,4 +1375,134 @@ void test_notes_kill_terminates_single_thread(void) {
     proc_test_unlink(parent);
     parent->state = PROC_STATE_ZOMBIE;
     proc_free(parent);
+}
+
+// #240: a cont that overtakes a susp must CANCEL the stop, not be overwritten
+// by it.
+//
+// The defect #15 introduced. Pre-#15 the uncaught susp set job_stop_req in the
+// same g_proc_table_lock critical section that decided it, so "decide" and
+// "apply" were one event. #15 split them: a susp with a handler is POSTED, and
+// the stop is applied later, when the handler calls SYS_NOTED(NDFLT). A cont
+// arriving in between finds job_stop_req still 0 and -- before this fix --
+// returned from proc_job_resume_one_locked having done nothing at all, after
+// which the NDFLT applied the very stop the cont was cancelling.
+//
+// That is not a hypothetical interleaving. It is the pts teardown: pts_free
+// destroys the registry entry and then posts tty:hup + conts the foreground
+// group. The PTY-1 audit close named that hup-then-cont as THE carrier-loss
+// guarantee. With the entry already destroyed, the shell's later `fg` gets
+// -T_E_NOENT -- so the job is stopped, the rescue that should have prevented
+// it ran and did nothing, and nothing can ever resume it.
+//
+// Two windows, because the note is posted at one time and consumed at another:
+// the cont can land after delivery (leg A -- the documented chain) or before
+// it (leg B). Both are the same stale decision and both are asserted, because
+// a fix anchored at DELIVERY closes only A while looking complete.
+void test_notes_ndflt_stop_discarded_after_cont(void) {
+    // The anchored-group shape: `leader` is ALIVE, same session, another
+    // group, so pgrp_orphaned_locked is false for m's group. Without it the
+    // orphan rule discards every stop below and all three legs -- including
+    // the POSITIVE control -- pass for the wrong reason.
+    struct Proc *leader = proc_alloc();
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    proc_test_link(leader);
+    struct Proc *m = proc_alloc();
+    TEST_ASSERT(m != NULL, "proc_alloc m");
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    proc_test_link_child(leader, m);
+
+    static struct Thread th;
+    static struct exception_context ctx;
+    // Unmasked, and load-bearing: proc_tty_susp_would_stop_locked reads a
+    // threadless Proc as CAUGHT regardless of handler_va, so the fan would
+    // post-not-stop for the wrong reason.
+    th.magic             = THREAD_MAGIC;
+    th.note_mask         = 0;
+    th.next_in_proc      = NULL;
+    th.rendez_blocked_on = NULL;
+    m->threads = &th;
+    m->handler_va = 0x1000u;    // a handler exists -> the fan defers to NDFLT
+
+    // ---- POSITIVE CONTROL: no cont, so the stop MUST still land. --------
+    //
+    // First, and deliberately so. Every other leg here asserts job_stop_req
+    // == 0 -- a negative, which a fixture that never stops anything satisfies
+    // perfectly. This leg differs from leg A in exactly one step (the cont)
+    // and proves the machinery can reach a stop at all.
+    m->susp_stop_armed = 0u;
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "control: the fan visits m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "control: CAUGHT -- deferred");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "control: the post armed");
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "control: NDFLT succeeds");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1,
+                   "CONTROL: with no cont the deferred stop DOES apply");
+
+    // ---- LEG A: cont AFTER delivery (the documented step-3 chain). ------
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    m->cont_report_pending = false;
+    m->susp_stop_armed     = 0u;
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "A: the ^Z fan visits m");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "A: armed");
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);      // delivery
+
+    // The pts teardown's rescue, on a target that has NOT yet stopped. This is
+    // the exact call pts_teardown_fan makes.
+    TEST_EXPECT_EQ(proc_job_cont_pgrp(m->pgid), 1, "A: the teardown conts");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+                   "A: the cont found nothing stopped -- as it always did");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 0,
+                   "A: but it DISARMED the in-flight stop -- the fix");
+
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "A: the handler NDFLTs");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+                   "A: the STALE stop was DISCARDED -- the job is not stranded");
+    TEST_ASSERT(!m->stop_report_pending,
+                "A: and no WAIT_UNTRACED report was latched for a non-stop");
+
+    // ---- LEG B: cont BEFORE delivery. -----------------------------------
+    //
+    // The window an at-delivery snapshot cannot see. A target blocked in a
+    // syscall is posted a susp, the carrier drops before it returns to EL0,
+    // and only then is the note delivered to the handler. Anchoring the
+    // freshness at POST is what covers this; the assertion below is the
+    // difference between the two designs.
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    m->cont_report_pending = false;
+    m->susp_stop_armed     = 0u;
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "B: the ^Z fan visits m");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "B: armed");
+    TEST_EXPECT_EQ(proc_job_cont_pgrp(m->pgid), 1, "B: cont, still undelivered");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 0, "B: disarmed before delivery");
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);      // delivery, afterwards
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "B: the handler NDFLTs");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+                   "B: a cont that preceded DELIVERY still cancels the stop");
+
+    // ---- LEG C: a susp AFTER a cont re-arms. ----------------------------
+    //
+    // The flag must not be a one-way latch. A second ^Z on a resumed job is an
+    // ordinary suspend and has to work, or the fix trades a stranded job for a
+    // job that can never be suspended twice.
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 0, "C: starts disarmed (from B)");
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "C: a second ^Z");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "C: re-armed");
+    ndflt_arm_handler(&th, m, NOTE_NAME_TTY_SUSP);
+    TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "C: NDFLT");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1,
+                   "C: the susp-after-cont stops normally -- not a dead latch");
+
+    proc_test_unlink(m);
+    m->threads = NULL;                  // the static outlives proc_free
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);
+    proc_test_unlink(leader);
+    leader->state = PROC_STATE_ZOMBIE;
+    proc_free(leader);
 }

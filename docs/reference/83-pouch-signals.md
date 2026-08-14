@@ -290,6 +290,11 @@ The `/dev/tty` precedent covers the result: one identity, per-process content.
   Pouch's SIG_DFL branch routes `SIGTSTP` to NDFLT accordingly. A
   program with its own SIGTSTP handler is unaffected either way (the
   handler runs — POSIX).
+  Because the stop is applied at NDFLT rather than at the susp's post, a
+  cont can overtake the susp inside that window; since #240 the apply
+  revalidates freshness (`Proc.susp_stop_armed`) as well as orphanhood,
+  and discards a stop a cont has superseded — `notes.ndflt_stop_-
+  discarded_after_cont`, four legs, three sabotages.
   **Verification honesty**: the kernel arm is unit-tested
   (`notes.ndflt_dispatch`, four sabotage-verified legs) and the pouch
   arm is verified in the patched source, but the full chain — pts `^Z`

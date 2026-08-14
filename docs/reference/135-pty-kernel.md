@@ -106,7 +106,7 @@ five names share one mask bit `NOTE_BIT_TTY` (5); per-kind masking is a v1.x lif
 | Name | POSIX | Uncaught default |
 |---|---|---|
 | `tty:winch` | SIGWINCH | ignored (informational; queue for the fd-read path) |
-| `tty:susp` | SIGTSTP | **STOP** (the job-control machinery — applied at POST time, §7.2) |
+| `tty:susp` | SIGTSTP | **STOP** (the job-control machinery: at POST time when uncaught; at the target's own `SYS_NOTED(NDFLT)` when caught, freshness-revalidated per #240 — §7.2) |
 | `tty:cont` | SIGCONT | resume (a kernel side effect, not a note disposition) |
 | `tty:quit` | SIGQUIT | **terminate** (the LS-5 pattern) |
 | `tty:hup` | SIGHUP | **terminate** |
@@ -295,12 +295,31 @@ Under one `g_proc_table_lock` hold, per ALIVE member of `pgid`:
    It is the whole point of #15: pouch's `.init_array` bootstrap makes every ported
    program "caught" here, so before #15 `^Z` on a SIG_DFL pouch program did nothing.
 
-   **The window is real and is a known open defect.** The decision is taken at POST
-   time but applied an unbounded EL0 handler execution later, and only ONE premise
-   (orphanhood) is revalidated. A pts teardown that runs in between does its
-   hup-then-cont rescue *before* the stop lands, so the cont is a no-op and the job
-   parks unresumable — the carrier-loss rescue this section's PTY-1 close relied on.
-   Tracked; see the #15 audit F2.
+   **The window is real, and since #240 it is CLOSED.** The decision is still taken at
+   POST time and applied an unbounded EL0 handler execution later — that split is what
+   #15 is — so the stop revalidates TWO premises at apply time, not one:
+
+   - **orphanhood** (`pgrp_orphaned_locked`), which covers the shell-*death* variant of
+     "nobody can resume this"; and
+   - **freshness** (`Proc.susp_stop_armed`), which covers *carrier loss*, where the
+     shell is alive and the terminal is gone.
+
+   The freshness flag is set on the commit of any STOP-disposition note, inside
+   `notes_post` (`notes_arm_susp_stop_locked`) so every present and future poster is
+   covered structurally; it is cleared at the **top** of `proc_job_resume_one_locked`,
+   *before* that function's `job_stop_req == 0` early return. The placement is the fix:
+   a cont aimed at a target that has not yet stopped used to fall out of that early
+   return having done nothing, after which `SYS_NOTED(NDFLT)` applied the stop the cont
+   was cancelling and the job parked unresumable — with the pts registry entry already
+   destroyed, so the shell's later `fg` returned `-T_E_NOENT`. That is exactly the
+   carrier-loss rescue this section's PTY-1 close relied on. Clearing after the early
+   return instead of before leaves the defect intact while the code reads as fixed; the
+   `notes.ndflt_stop_discarded_after_cont` regression pins the ordering (sabotage-proven
+   in both directions).
+
+   Both windows are covered — a cont landing *after* delivery and one landing *before*
+   it — because the arm is anchored at POST, not at delivery. A susp posted after a cont
+   simply re-arms, so a second `^Z` on a resumed job still suspends it.
 2. **The orphan check**: an uncaught susp on an **orphaned** group (no ALIVE
    same-session out-of-group parent of any member) is **discarded entirely** — the POSIX
    orphan rule's stop-suppression half (nobody could resume it).

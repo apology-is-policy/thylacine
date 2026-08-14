@@ -383,6 +383,27 @@ static void notes_arm_intr_terminate_locked(struct Proc *p, const char *name) {
     __atomic_or_fetch(&p->proc_flags, latch, __ATOMIC_RELEASE);
 }
 
+// #240: the STOP twin of the terminate arm above. A committed STOP-disposition
+// note (tty:susp) arms the freshness flag proc_job_stop_self reads before it
+// applies #15's deferred stop; any cont clears it. See the susp_stop_armed
+// declaration in <thylacine/proc.h> for the window this closes.
+//
+// It sits in notes_post rather than at proc_job_stop_pgrp's caught arm -- the
+// only susp poster today -- so that coverage is structural rather than
+// remembered: a poster added later is guarded without knowing this exists, and
+// the alternative fails in the direction that reads green (an unstamped post
+// leaves a stale arm, which is a stop applied against a cont).
+//
+// NONE of the terminate arm's three gates apply. That path asks whether the
+// note will reach the DEFAULT action, so it declines when a handler exists;
+// this one arms precisely BECAUSE a handler exists and may ask for the default
+// itself. Caller holds q->lock; the important caller (job_stop_cb) also holds
+// g_proc_table_lock, which is what makes the arm ordered against the clear.
+static void notes_arm_susp_stop_locked(struct Proc *p, const char *name) {
+    if (notes_default_action(name) != NOTE_DFL_STOP) return;
+    __atomic_store_n(&p->susp_stop_armed, 1u, __ATOMIC_RELEASE);
+}
+
 // LS-5c: clear the terminate latch when the LAST queued `interrupt` is
 // drained (the fd-read path of a Proc holding an inherited notes fd, or the
 // dispatcher's handler-delivery pop). Caller MUST hold q->lock. A no-op
@@ -473,6 +494,9 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
             // the original post may have declined to arm (a handler existed
             // then) while THIS post's disposition is terminate.
             notes_arm_intr_terminate_locked(p, name);
+            // #240: and the STOP twin -- a coalesced susp is still a susp
+            // asking for a stop, so it re-arms exactly as a fresh one does.
+            notes_arm_susp_stop_locked(p, name);
             // Wake registered poll_waiters AND devnotes_read's pollers
             // (same list at F3 close).
             poll_waiter_list_wake(&q->poll_list);
@@ -504,6 +528,11 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     // not-yet-sleeping thread is covered without the wake -- its sleep's
     // register-then-observe reads the latch.
     notes_arm_intr_terminate_locked(p, name);
+    // #240: and the STOP twin -- see notes_arm_susp_stop_locked. Armed on the
+    // COMMIT, after the -EAGAIN return above: a susp that never made the queue
+    // is never delivered, so arming for it would leave the flag set for an
+    // NDFLT that a LATER note reaches.
+    notes_arm_susp_stop_locked(p, name);
 
     // Wake every registered poll_waiter (including any devnotes_read
     // parked on this list per F3 close) BEFORE we drop the queue lock.

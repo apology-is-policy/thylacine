@@ -3595,6 +3595,15 @@ static bool proc_job_stop_one_locked(struct Proc *m) {
 // only the resume machinery is stop-gated).
 static void proc_job_resume_one_locked(struct Proc *m) {
     if (!m || m->magic != PROC_MAGIC) return;
+    // #240: BEFORE the not-stopped early return, never after. A cont aimed at
+    // a target that has NOT yet stopped is not a no-op -- it is the whole
+    // defect. Post-#15 a susp routed to a handler leaves a stop decision in
+    // flight for the length of an EL0 handler; a cont arriving in that window
+    // (the pts teardown's hup-then-cont, the PTY-1 close's named carrier-loss
+    // rescue) finds job_stop_req still 0 and would fall out below, after which
+    // SYS_NOTED(NDFLT) applies the stop the cont was meant to cancel and the
+    // job strands. Disarming here is what the cont means in that state.
+    __atomic_store_n(&m->susp_stop_armed, 0u, __ATOMIC_RELEASE);
     if (__atomic_load_n(&m->job_stop_req, __ATOMIC_ACQUIRE) == 0) return;
     // Clear BEFORE the wake walk (the I-9 register-then-observe close on the
     // CLEAR -- proc_debug_resume's discipline verbatim, on the job owner).
@@ -3818,7 +3827,15 @@ bool proc_job_stop_self(struct Proc *m) {
     if (!m || m->magic != PROC_MAGIC) return false;
     bool stopped = false;
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
-    if (!pgrp_orphaned_locked(m->pgid, NULL))
+    // #240: the SECOND premise. The orphan re-check below covers the shell-
+    // DEATH variant of "nobody can resume this"; nothing covered carrier
+    // loss, where the shell is alive and the terminal is gone. Both are the
+    // same root property -- a disposition decided at POST is applied here,
+    // an EL0 handler later, and the world may have moved. Read under
+    // g_proc_table_lock, the same lock proc_job_resume_one_locked's clear
+    // runs under, so a cont cannot land between this load and the stop.
+    if (__atomic_load_n(&m->susp_stop_armed, __ATOMIC_ACQUIRE) != 0 &&
+        !pgrp_orphaned_locked(m->pgid, NULL))
         stopped = proc_job_stop_one_locked(m);
     // The peers, not the caller: this thread parks at its own EL0-return tail
     // a few instructions from here, but a peer RUNNING at EL0 on another CPU
