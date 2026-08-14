@@ -83,6 +83,7 @@ const BLIT_GREEN: u32 = 0xFF00_FF00;
 // readback could land. Distinct from SENTINEL so "the submit was refused"
 // never reads as "the instrument failed".
 const CTX_POISONED: u32 = 0xDEAD_0001;
+const XFER_REFUSED: u32 = 0xDEAD_0002;
 const CLEAR_RED_B8G8R8A8: u32 = 0xFFFF_0000;
 
 fn cmd0(cmd: u32, obj: u32, len: u32) -> u32 {
@@ -174,6 +175,26 @@ pub extern "C" fn rs_main() -> i64 {
             t_putstr("\n");
         }
         unsafe { t_close(root) };
+        return 0;
+    }
+
+    // #240 observation mode. Its own argv verb rather than a leg of the
+    // battery: it spends 45 s waiting on a 30 s timeout, and the Warp-2
+    // gate's whole value is being fast enough to run every time.
+    if libthyla_rs::env::args().get_str(1) == Some("reject") {
+        let probe = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/warp".as_ptr(), 9, T_OREAD) };
+        if probe < 0 {
+            t_putstr("warp-prove: reject: open /srv/warp failed\n");
+            unsafe { t_exits(1) };
+        }
+        let ctl = open_read_string(probe, "ctl");
+        unsafe { t_close(probe) };
+        if !ctl.starts_with("virgl 1") {
+            t_putstr("warp-prove: C0-REJECT SKIP -- no virgl on this device\n");
+            t_putstr("warp-prove: C0-REJECT DONE\n");
+            return 0;
+        }
+        observe_rejection();
         return 0;
     }
 
@@ -609,6 +630,7 @@ fn color_name(v: u32) -> &'static str {
     match v {
         SENTINEL => "SENTINEL(no readback)",
         CTX_POISONED => "CTX-POISONED(submit refused)",
+        XFER_REFUSED => "XFER-REFUSED(transfer_from declined)",
         BLIT_RED => "RED(unmoved)",
         BLIT_GREEN => "GREEN(moved)",
         _ => "OTHER",
@@ -777,6 +799,229 @@ fn prove_cross_ctx_blit() {
         t_close(a);
         t_close(b);
     }
+}
+
+/// #240: IS a vrend-rejected command stream observable from the guest, and
+/// after how long?
+///
+/// The C-0 P1 run concluded "poisoned stays 0, the fence never signals, so a
+/// refusal is indistinguishable from a hang". That conclusion came out of a
+/// 200-ITERATION poll -- a few hundred ms of 9P round trips -- while the only
+/// mechanism that can report a never-retiring fence is tapestryd's reaper at
+/// FENCE_ABANDON_MS = 30 s. So the finding described this PROBE'S BUDGET and
+/// was recorded as a property of the seam. Give the reaper the time it needs
+/// and report what actually arrives.
+///
+/// The healthy ctx is sampled in the SAME window on purpose: "the bad ctx
+/// poisons at 30 s" cannot be told apart from "every ctx poisons at 30 s" by
+/// watching the bad one alone, and an indiscriminate reaper would read
+/// identically. It carries real fenced work for the same reason -- a ctx with
+/// nothing in flight is never a reap candidate, so its clean reading would be
+/// satisfied by a completely broken reaper.
+///
+/// Report-only: this leg MEASURES an open question, so it must never emit a
+/// verdict token. A probe's output is data.
+fn observe_rejection() {
+    const OBSERVE_MS: u64 = 45_000;
+    const SAMPLE_MS: u64 = 250;
+
+    t_putstr("warp-prove: C0-REJECT observing a rejected stream for 45 s\n");
+
+    let bad = warp_connect("reject/bad");
+    let ok = warp_connect("reject/ok");
+    let ctx_bad = mint_ctx(bad, "reject/bad");
+    let ctx_ok = mint_ctx(ok, "reject/ok");
+
+    // Both ctxs are built identically, so the ONLY difference between them
+    // is whether vrend accepts the stream. The first cut of this leg gave
+    // the control a `transfer_from` instead of a submit -- a different
+    // CLASS of fenced work, which could not have distinguished "the
+    // rejected submit's fence retired" from "the count I read was the ctx
+    // build's, and the submit's fence was simply lost" (#212).
+    let (bad_bo, bad_res, bad_va) = mint_sized_bo(bad, ctx_bad, "reject/bad");
+    let (ok_bo, ok_res, ok_va) = mint_sized_bo(ok, ctx_ok, "reject/ok");
+
+    // Read the counters BEFORE either submit: ctx create and the backing
+    // build are fenced work too, so a LEVEL reading would credit them to
+    // the stream. Only the delta across the submit is attributable to it.
+    let bad_before = ctx_field(bad, ctx_bad, "fence-signaled");
+    let ok_before = ctx_field(ok, ctx_ok, "fence-signaled");
+    t_putstr(&format!(
+        "warp-prove: C0-REJECT pre-submit fence-signaled: bad {} ok {}\n",
+        bad_before, ok_before
+    ));
+
+    // The CONTROL: a VALID stream through the same submit path.
+    let mut sok: Vec<u32> = Vec::new();
+    subctx_preamble(&mut sok);
+    clear_stream(&mut sok, ok_res, 1, 1.0, 0.0, 0.0);
+    submit_stream(ok, ctx_ok, &sok, "reject/ok valid stream");
+    let _ = bad_res;
+
+    // The rejection. A CLEAR with a zero-dword payload is what the log
+    // already shows vrend refusing ("Illegal command buffer 7"), and it
+    // needs no resource of its own, so nothing but the stream is on trial.
+    let submit_path = format!("ctx/{}/submit", ctx_bad);
+    let fd = unsafe { t_open(bad, submit_path.as_ptr(), submit_path.len(), T_OWRITE) };
+    if fd < 0 {
+        t_putstr("warp-prove: C0-REJECT submit open failed\n");
+        unsafe {
+            t_close(bad);
+            t_close(ok);
+        }
+        return;
+    }
+    let nop = cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes();
+    let wrote = unsafe { t_write(fd, nop.as_ptr(), nop.len()) };
+    unsafe { t_close(fd) };
+    t_putstr(&format!(
+        "warp-prove: C0-REJECT submitted a malformed stream (write rc={})\n",
+        wrote
+    ));
+
+    let t0 = libthyla_rs::time::Instant::now();
+    let mut prev: Option<(u64, u64, u64, u64, u64, u64)> = None;
+    let mut poison_ms: Option<u64> = None;
+    let mut bad_retired_ms: Option<u64> = None;
+    let mut ok_retired_ms: Option<u64> = None;
+    loop {
+        let el = t0.elapsed().as_millis() as u64;
+        if el > OBSERVE_MS {
+            break;
+        }
+        let s = (
+            ctx_field(bad, ctx_bad, "poisoned"),
+            ctx_field(bad, ctx_bad, "fence-signaled"),
+            ctx_field(bad, ctx_bad, "fences-in-flight"),
+            ctx_field(ok, ctx_ok, "poisoned"),
+            ctx_field(ok, ctx_ok, "fence-signaled"),
+            ctx_field(ok, ctx_ok, "fences-in-flight"),
+        );
+        if prev != Some(s) {
+            t_putstr(&format!(
+                "warp-prove: C0-REJECT t={:>6}ms bad(poison {} sig {} inflight {}) \
+                 ok(poison {} sig {} inflight {})\n",
+                el, s.0, s.1, s.2, s.3, s.4, s.5
+            ));
+            prev = Some(s);
+        }
+        if s.0 != 0 && poison_ms.is_none() {
+            poison_ms = Some(el);
+        }
+        if s.1 > bad_before && bad_retired_ms.is_none() {
+            bad_retired_ms = Some(el);
+        }
+        if s.4 > ok_before && ok_retired_ms.is_none() {
+            ok_retired_ms = Some(el);
+        }
+        // Once BOTH submits have resolved one way or the other there is
+        // nothing left for the 30 s reaper to change; stop early only when
+        // the rejected one has genuinely retired, since "still in flight"
+        // is exactly the state the long window exists to watch.
+        if bad_retired_ms.is_some() && ok_retired_ms.is_some() && el > 2 * SAMPLE_MS {
+            break;
+        }
+        if let Some(p) = poison_ms {
+            if el > p + 2 * SAMPLE_MS {
+                break;
+            }
+        }
+        let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(SAMPLE_MS));
+    }
+
+    let _ = match (bad_retired_ms, ok_retired_ms, poison_ms) {
+        // The control never moved: nothing below is interpretable.
+        (_, None, _) => t_putstr(
+            "warp-prove: C0-REJECT INSTRUMENT -- the VALID control stream never retired \
+             its fence, so this run cannot say anything about the rejected one.\n",
+        ),
+        (Some(b), Some(o), None) => t_putstr(&format!(
+            "warp-prove: C0-REJECT ANSWER=REPORTED-AS-SUCCESS -- the REJECTED stream \
+             retired its fence at {}ms (control {}ms) and never poisoned. Every \
+             guest-visible channel says the work completed. A refusal is \
+             indistinguishable from SUCCESS, not from a hang.\n",
+            b, o
+        )),
+        (None, Some(o), Some(p)) => t_putstr(&format!(
+            "warp-prove: C0-REJECT ANSWER=OBSERVABLE-AT-{}ms -- the rejected stream never \
+             retired and the ctx poisoned, while the control retired at {}ms. The signal \
+             is a TIMEOUT: it reports `never completed`, NOT `refused`.\n",
+            p, o
+        )),
+        (None, Some(o), None) => t_putstr(&format!(
+            "warp-prove: C0-REJECT ANSWER=SILENTLY-LOST -- the rejected stream neither \
+             retired its fence nor poisoned within {} ms, while the control retired at \
+             {}ms. The client waits forever with no signal.\n",
+            OBSERVE_MS, o
+        )),
+        (Some(b), Some(o), Some(p)) => t_putstr(&format!(
+            "warp-prove: C0-REJECT ANSWER=RETIRED-THEN-POISONED -- rejected retired at \
+             {}ms (control {}ms) but the ctx ALSO poisoned at {}ms. Contradictory; read \
+             the timeline above before drawing anything.\n",
+            b, o, p
+        )),
+    };
+    // STICKINESS. vrend latches a context error, so the question a
+    // compositor actually cares about is not "was the bad stream lost" but
+    // "is the ctx dead from here on -- while still reporting success?".
+    // Submit a VALID stream on BOTH ctxs and read the pixels back: the
+    // fence counters cannot answer this, since (per the timeline above)
+    // they say `completed` either way. Pixels are the only honest channel.
+    let mut sfix: Vec<u32> = Vec::new();
+    subctx_preamble(&mut sfix);
+    clear_stream(&mut sfix, bad_res, 1, 0.0, 1.0, 0.0); // GREEN
+    submit_stream(bad, ctx_bad, &sfix, "reject/bad recovery stream");
+    let mut sfix2: Vec<u32> = Vec::new();
+    subctx_preamble(&mut sfix2);
+    clear_stream(&mut sfix2, ok_res, 1, 0.0, 1.0, 0.0); // GREEN
+    submit_stream(ok, ctx_ok, &sfix2, "reject/ok second stream");
+
+    let after_bad = quiet_readback(bad, ctx_bad, bad_bo, bad_va);
+    let after_ok = quiet_readback(ok, ctx_ok, ok_bo, ok_va);
+    t_putstr(&format!(
+        "warp-prove: C0-REJECT recovery: bad reads {} (0x{:08x}), ok reads {} (0x{:08x})\n",
+        color_name(after_bad), after_bad, color_name(after_ok), after_ok
+    ));
+    let _ = match (after_bad == BLIT_GREEN, after_ok == BLIT_GREEN) {
+        (_, false) => t_putstr(
+            "warp-prove: C0-REJECT STICKY=NO-CONTROL -- the healthy ctx's own valid \
+             stream did not land either, so the bad ctx's reading proves nothing.\n",
+        ),
+        (false, true) => t_putstr(
+            "warp-prove: C0-REJECT STICKY=YES -- a VALID stream on the rejected ctx \
+             still moves no pixels while the same stream works on a fresh ctx. One bad \
+             submit kills the context PERMANENTLY, and every fence still says success.\n",
+        ),
+        (true, true) => t_putstr(
+            "warp-prove: C0-REJECT STICKY=NO -- the rejected ctx accepts later valid \
+             work. The damage is confined to the refused stream.\n",
+        ),
+    };
+    t_putstr("warp-prove: C0-REJECT DONE\n");
+
+    unsafe {
+        t_close(bad);
+        t_close(ok);
+    }
+}
+
+/// A readback that REPORTS instead of failing -- `resample` aborts the run
+/// when a transfer is refused, which is itself one of the outcomes this leg
+/// exists to measure.
+fn quiet_readback(root: i64, ctx: u32, bo: u32, va: u64) -> u32 {
+    let px0 = va as *mut u32;
+    unsafe { core::ptr::write_volatile(px0, SENTINEL) };
+    let before = ctx_field(root, ctx, "fence-signaled");
+    let xfer = format!("transfer_from 0 0 0 0 {} {} 1 0 0 0", W, H);
+    if !write_ctl(root, &format!("ctx/{}/bo/{}/ctl", ctx, bo), &xfer) {
+        return XFER_REFUSED;
+    }
+    for _ in 0..200 {
+        if ctx_field(root, ctx, "fence-signaled") > before {
+            break;
+        }
+    }
+    unsafe { core::ptr::read_volatile(px0) }
 }
 
 /// The cross-client properties. Sequential by construction: every step is a

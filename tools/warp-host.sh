@@ -9,6 +9,7 @@
 #   tools/warp-host.sh bench     # llvmpipe GLQuake baseline (paced + unpaced x2)
 #   tools/warp-host.sh capset    # virtio-gpu-gl-pci + egl-headless capset probe
 #   tools/warp-host.sh prove     # Warp-2 gate: /warp-prove on the virgl device
+#   tools/warp-host.sh reject    # #240: is a REJECTED command stream observable in-guest?
 #   tools/warp-host.sh quake     # Warp-4 gate: GLQuake on virgl, both present arms
 #   tools/warp-host.sh decomp gl|2d  # #196: unpaced per-arm figures + CPU attribution
 #   tools/warp-host.sh wedge     # #210: direct-arm wedge autopsy (paced vs unpaced)
@@ -156,7 +157,7 @@ sync_all() {
     # dirty iteration loop still tests what you edited.
     ssh "$HOST" "mkdir -p $RREPO/build/kernel $RREPO/build/fixtures $RREPO/share"
     git -C "$REPO_ROOT" archive HEAD | ssh "$HOST" "tar -x -C $RREPO"
-    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
+    for f in tools/run-vm.sh tools/warp/boot-probe.sh tools/warp/glq-bench.exp tools/warp/warp-prove.exp tools/warp/warp-reject.exp tools/warp/virgl-prove.exp tools/warp/glq-virgl.exp tools/warp/glq-decomp.exp tools/warp/glq-wedge-probe.exp tools/warp/quarry-bench.exp tools/warp/quarry-wedge.exp tools/warp/native-gl-bench.c tools/warp/native-gl-bench.sh tools/interactive/gfx_strip.py; do
         scp -q "$REPO_ROOT/$f" "$HOST:$RREPO/$(dirname "$f")/"
     done
     echo "== artifacts =="
@@ -219,6 +220,22 @@ prove)
         echo "WARP-2 GATE: VERIFIED"
     else
         echo "WARP-2 GATE: UNVERIFIED (need WARP-PROVE PASS + the scenario pass line)"
+        exit 1
+    fi
+    ;;
+reject)
+    out="$REPO_ROOT/build/warp-reject.log"
+    ssh "$HOST" "cd $RREPO && ${RENV}expect tools/warp/warp-reject.exp" | tee "$out" || true
+    echo "== #240 observation =="
+    # NOT a gate -- it reports what the seam does. Anchor on ANSWER=, which
+    # only the leg prints: lc_expect's timeout text repeats its own pattern,
+    # so keying on "C0-REJECT DONE" would match a run that never happened
+    # (#186). Print the sample timeline too; the ANSWER line alone hides
+    # whether the control ever moved.
+    if grep -q "C0-REJECT ANSWER=" "$out"; then
+        grep "C0-REJECT" "$out"
+    else
+        echo "#240 OBSERVATION UNVERIFIED -- the leg never printed an ANSWER"
         exit 1
     fi
     ;;

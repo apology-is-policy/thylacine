@@ -469,12 +469,64 @@ and require the destination to change), never merely "no error returned".
 >
 > **Caveat on the oracle, and it is load-bearing (task #240).** The verdict
 > rests on the HOST log, not on the guest. The rejection is invisible from
-> inside the guest — `poisoned` stays 0, the fence never signals, and the
-> following `transfer_from` never completes — so a refused submit and a hung
-> submit are the same observation, and the probe correctly reports
-> `NO P1 VERDICT` from the pixel channel. **A compositor cannot be built on
-> a submit channel with no failure report**, so #240 is a Warp-C
-> prerequisite and it also bounds what the P1b re-test can assert.
+> inside the guest, and the probe correctly reports `NO P1 VERDICT` from the
+> pixel channel. **A compositor cannot be built on a submit channel with no
+> failure report**, so #240 is a Warp-C prerequisite and it also bounds what
+> the P1b re-test can assert.
+>
+> > *This paragraph as written on 2026-08-13 also claimed "the fence never
+> > signals, and the following `transfer_from` never completes — so a refused
+> > submit and a hung submit are the same observation."* **SUPERSEDED
+> > 2026-08-14 — that was wrong, and wrong in the more dangerous direction.
+> > See §4.5.4a.**
+
+##### 4.5.4a #240 measured — a refusal reads as SUCCESS, and it is sticky (2026-08-14)
+
+Measured on thyla-pi (KVM, real V3D) by the `warp-prove reject` leg
+(`tools/warp-host.sh reject`; log `build/warp-reject.log`). Two ctxs built
+identically on separate connections, differing in exactly one variable —
+whether vrend accepts the submitted stream — with the fence counters read
+BEFORE either submit so the delta is attributable to the stream and not to
+the ctx build's own fenced work:
+
+```
+pre-submit fence-signaled: bad 0  ok 0
+t=0ms   bad(poison 0 sig 1 inflight 0)   ok(poison 0 sig 1 inflight 0)
+```
+
+The **refused** stream retires its fence at 0 ms exactly like the valid
+control. `fence-signaled` 0→1 on both, `fences-in-flight` back to 0,
+`poisoned` never sets. **A refusal is indistinguishable from SUCCESS, not
+from a hang** — strictly worse, because a hang is at least visible as a
+stall. And it is **sticky**: a later *valid* stream on that ctx moves no
+pixels (`SENTINEL`) while the identical stream on a fresh ctx works
+(`GREEN`), so one malformed submit kills the context for its whole life
+while every fence keeps reporting success. The `transfer_from` is still
+accepted and still retires — it just delivers stale data — so the readback
+path lies too.
+
+**Blast radius is confined to the submitting context** (the second
+connection's ctx was unaffected throughout), so this is a robustness and
+observability defect rather than a privilege escalation; an unprivileged
+client can only self-DoS. But it is squarely a **Warp-C blocker**: the
+compositor composes by submitting a per-frame blit stream on *its own*
+context on behalf of clients, so one rejection — a stale res id, a retired
+surface, a declined format — freezes the screen permanently while every
+fence reports composed frames. This is §4.5.4's "present as a black screen
+rather than an error" failure mode arriving through the SUBMIT path.
+
+**Why the original reading was wrong is itself the lesson.** It came from a
+200-iteration poll — a few hundred ms of 9P round trips — against
+tapestryd's `FENCE_ABANDON_MS` of 30 s. It described the *probe's budget*
+and was recorded as a property of the *seam*. The old log's missing reaper
+line proved nothing either: the probe exited two lines after the rejection,
+so the guest never lived 30 s past it. A bound on iterations is not a bound
+on time, and an absence observed inside too small a window is not evidence.
+
+C-2 must therefore carry a detection mechanism, not merely an attach verb.
+The candidate shapes are recorded on task #226; the choice is a seam
+contract change and wants the design-conversation pattern before it is
+built.
 
 **P2 — cross-context ordering: does the blit observe the client's finished
 frame?** The client renders on its context, the compositor blits on its own;

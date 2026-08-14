@@ -705,9 +705,37 @@ majority) bounds it ~25–40% above Composed.
 | engine dead (latched) | `E_IO` |
 | fence read with `count` < one record (21 bytes) | empty read (never parks unfillable) |
 | malformed ctl verbs / non-UTF-8 | `E_INVAL` |
+| **stream the HOST refuses (vrend context error)** | **none — reported as SUCCESS (#240).** The write returns the byte count, the fence retires, `fence-signaled` increments, `fences-in-flight` returns to 0, `poisoned` stays 0. See the caveat below |
 
 ## Known caveats / footguns
 
+- **#240 — a host-refused stream is reported as SUCCESS, and it kills the
+  context permanently.** MEASURED 2026-08-14 on thyla-pi (KVM, real V3D),
+  `tools/warp-host.sh reject`. Submitting a stream vrend refuses (here a
+  `CLEAR` with a zero-dword payload → `Illegal command buffer 7`) is
+  indistinguishable at the seam from submitting a valid one: the two ctxs
+  in the A/B differ in exactly one variable, both start at
+  `fence-signaled 0`, and both read `poison 0 sig 1 inflight 0` at t=0.
+  The refusal exists only in the HOST log. Worse, it is STICKY — vrend
+  latches the context error, so a later VALID stream on that ctx moves no
+  pixels (`SENTINEL`) while the identical stream on a fresh ctx works
+  (`GREEN`). One malformed submit kills the context for its whole life
+  while every fence keeps reporting success; the `transfer_from` is still
+  accepted and still retires, it just delivers stale data, so even the
+  readback path lies. **Blast radius is confined to the submitting ctx**
+  (the second connection's ctx was unaffected throughout), so this is a
+  robustness + observability defect, not a privilege escalation — an
+  unprivileged client can only self-DoS.
+  This is the other half of the hazard the winsys already names above
+  ("the virgl driver ignores `submit_cmd`'s return, so a dropped command
+  buffer must never be silent"): the latch there covers SEAM-level
+  failures, which a host refusal is not — the submit write returns its
+  byte count normally. It blocks Warp-C (`GPU-DESIGN.md` §4.5): a
+  compositor submitting a per-frame blit stream would freeze the screen
+  forever on one rejection while reporting composed frames.
+  Do NOT infer a hang from a refusal — the original filing said the fence
+  never retires, which came from a 200-iteration poll against a 30 s
+  timeout and described the probe's budget, not the seam.
 - **#170**: the graceful half is closed — `kobj_pci_quiesce` runs from
   `proc_quiesce_owned_devices`, so a PCI-transport driver stops decoding
   and mastering before the exit path frees its DMA pages (round-1 F8: the
@@ -924,6 +952,21 @@ on thyla-pi 2026-08-12 — the pre-fix server fails it at exactly
 `/clade/bin/virgl-prove` is the Warp-3 stack gate — the full Mesa virgl
 driver through the winsys to a rendered triangle (`tools/warp-host.sh
 tri`, both #186-anchored verdict lines required).
+
+`warp-prove reject` (`tools/warp-host.sh reject`,
+`tools/warp/warp-reject.exp`) is the #240 OBSERVATION lane, not a gate: it
+measures what the seam reports for a stream the host refuses, and prints
+data rather than a verdict. Its own two controls are what make it
+readable — a class-matched valid submit on a second ctx (so a lost
+submit-fence could be told from a retired one; a `transfer_from` control
+could not have, #212), and counters read BEFORE the submits (so the ctx
+build's own fenced work is not credited to the stream). Kept out of the
+Warp-2 battery because it spends 45 s waiting out a 30 s timeout and that
+gate's value is being cheap enough to run every time. The scenario waits
+on `C0-REJECT DONE` while the host-side verdict greps `C0-REJECT ANSWER=`
+— inverted deliberately: `lc_expect` writes its own pattern into its
+timeout text, so a verdict keyed on the awaited token would match a run
+that never happened (#186).
 
 The Warp-4 present-integration gate is `tools/warp-host.sh quake`
 (`tools/warp/glq-virgl.exp`): GLQuake launched through the RAMFS bare
