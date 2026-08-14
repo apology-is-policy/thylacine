@@ -80,6 +80,8 @@ void test_notes_default_action_table(void);
 void test_notes_ndflt_dispatch(void);
 void test_notes_kill_terminates_single_thread(void);
 void test_notes_ndflt_stop_discarded_after_cont(void);
+void test_notes_susp_gate_reads_phenotype_sigtab(void);   // #251
+void test_notes_masked_susp_stops_at_delivery(void);      // #252
 
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke
@@ -1497,6 +1499,272 @@ void test_notes_ndflt_stop_discarded_after_cont(void) {
     TEST_EXPECT_EQ(notes_noted_default(&ctx, &th), 0, "C: NDFLT");
     TEST_EXPECT_EQ((int)m->job_stop_req, 1,
                    "C: the susp-after-cont stops normally -- not a dead latch");
+
+    proc_test_unlink(m);
+    m->threads = NULL;                  // the static outlives proc_free
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);
+    proc_test_unlink(leader);
+    leader->state = PROC_STATE_ZOMBIE;
+    proc_free(leader);
+}
+
+// Bounded name compare, local to the two tests below (notes.c's own is static).
+static bool susp_name_is(const char *got, const char *want) {
+    if (!got) return false;
+    for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
+        if (got[i] != want[i]) return false;
+        if (want[i] == 0) return true;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// susp_gate_reads_phenotype_sigtab (round-2 F1 / #251)
+// ---------------------------------------------------------------------------
+//
+// The ^Z catchability gate must read a PHENOTYPED Proc's disposition out of its
+// sigtab, not out of handler_va. A Linux guest never calls SYS_NOTIFY, so
+// handler_va is 0 for it no matter what it asked for -- and the pre-fix gate
+// read that as "nothing is catching this" and STOPPED the guest, both when it
+// had installed a SIGTSTP handler and when it had explicitly SIG_IGNed it.
+//
+// The SIG_IGN leg is the sharper one: notes_post's V-6b discard cannot save it,
+// because the uncaught arm stops the Proc WITHOUT ever calling notes_post.
+void test_notes_susp_gate_reads_phenotype_sigtab(void) {
+    // The anchored-group shape (see ndflt_stop_discarded_after_cont): without
+    // an ALIVE same-session parent in ANOTHER group, pgrp_orphaned_locked is
+    // true, every stop below is discarded by the orphan rule, and all three
+    // negative legs pass for entirely the wrong reason.
+    struct Proc *leader = proc_alloc();
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    proc_test_link(leader);
+    struct Proc *m = proc_alloc();
+    TEST_ASSERT(m != NULL, "proc_alloc m");
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    proc_test_link_child(leader, m);
+
+    static struct Thread th;
+    th.magic             = THREAD_MAGIC;
+    th.note_mask         = 0;           // UNMASKED: the gate must reach the
+    th.next_in_proc      = NULL;        // disposition question, not short out
+    th.rendez_blocked_on = NULL;        // on "every thread masks the family"
+    th.proc              = m;
+    m->threads    = &th;
+    m->handler_va = 0u;                 // the native axis stays silent
+
+    struct viv_sigtab *tab =
+        (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
+    TEST_ASSERT(tab != NULL, "sigtab alloc");
+    m->sigtab = tab;
+
+    // ---- POSITIVE CONTROL: phenotype + SIG_DFL still stops. --------------
+    //
+    // First, deliberately. Every leg below asserts job_stop_req == 0, and a
+    // fixture that cannot stop anything satisfies all of them. This leg is one
+    // sigtab row away from leg A and proves the fan reaches a stop at all.
+    m->phenotype = PHENO_LINUX;
+    TEST_ASSERT(!viv_sigtab_note_ignored(tab, VIV_SIGNOTE_TTY_SUSP),
+                "control precondition: TTY_SUSP is NOT ignored");
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "control: the fan visits m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1,
+                   "CONTROL: phenotype + SIG_DFL takes the default STOP");
+    TEST_EXPECT_EQ(m->notes->count, 0u, "control: the stop consumed it, no note");
+
+    // ---- LEG A: a phenotype HANDLER defers the stop. ---------------------
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    m->susp_stop_armed     = 0u;
+    struct viv_ksigaction hand = { .handler = 0x4000u, .flags = 0,
+                                   .restorer = 0, .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_TTY_SUSP, &hand),
+                "A precondition: the handler row was WRITTEN");
+    struct viv_ksigaction probe;
+    TEST_ASSERT(viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_SUSP, &probe),
+                "A precondition: and reads back AS a handler");
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "A: the fan visits m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+                   "A: a sigtab handler is CAUGHT -- handler_va is 0 and "
+                   "the pre-fix gate stopped it anyway");
+    TEST_EXPECT_EQ(m->notes->count, 1u,
+                   "A: and the note was POSTED, so the handler can run");
+
+    // Drain so the next leg reads a clean queue.
+    struct Note got;
+    spin_lock(&m->notes->lock);
+    notes_dequeue_locked(m, NULL, &got);
+    spin_unlock(&m->notes->lock);
+    TEST_EXPECT_EQ(m->notes->count, 0u, "queue drained");
+
+    // ---- LEG B: a phenotype SIG_IGN suppresses stop AND note. ------------
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    m->susp_stop_armed     = 0u;
+    struct viv_ksigaction ign = { .handler = VIV_SIG_IGN, .flags = 0,
+                                  .restorer = 0, .mask = 0 };
+    TEST_ASSERT(viv_sigtab_set(tab, VIV_SIGNOTE_TTY_SUSP, &ign),
+                "B precondition: the ignore row was WRITTEN");
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_TTY_SUSP),
+                "B precondition: and reads back AS ignored");
+    TEST_ASSERT(!viv_sigtab_note_handler(tab, VIV_SIGNOTE_TTY_SUSP, &probe),
+                "B precondition: SIG_IGN is not a handler -- leg A is not "
+                "what is being re-tested here");
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "B: the fan visits m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0,
+                   "B: a Proc that IGNORES ^Z is not stopped by it");
+    TEST_EXPECT_EQ(m->notes->count, 0u,
+                   "B: and notes_post dropped it -- no slot leaked either");
+
+    // ---- LEG C: NATIVE with the same table stops. ------------------------
+    //
+    // The phenotype is the gate, not the mere presence of a sigtab. Without
+    // this, a fix that consulted the table unconditionally would pass A and B
+    // while silently changing native behaviour.
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    m->susp_stop_armed     = 0u;
+    m->phenotype = PHENO_NATIVE;
+    TEST_ASSERT(viv_sigtab_note_ignored(tab, VIV_SIGNOTE_TTY_SUSP),
+                "C precondition: the ignore row is STILL set");
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "C: the fan visits m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1,
+                   "C: a NATIVE Proc ignores the table and takes the STOP");
+
+    proc_test_unlink(m);
+    m->threads = NULL;                  // the static outlives proc_free
+    m->state = PROC_STATE_ZOMBIE;
+    proc_free(m);                       // frees the sigtab too
+    proc_test_unlink(leader);
+    leader->state = PROC_STATE_ZOMBIE;
+    proc_free(leader);
+}
+
+// ---------------------------------------------------------------------------
+// masked_susp_stops_at_delivery (round-2 F2 / #252)
+// ---------------------------------------------------------------------------
+//
+// When every thread MASKS the tty family, the ^Z fan posts the note instead of
+// stopping -- POSIX's "a blocked stop signal becomes pending". Before the fix
+// nothing could ever consume that note: the EL0 tail's case analysis only
+// handled the terminate class, so the note sat in the ring for the life of the
+// Proc and the ^Z was silently lost.
+//
+// The decision is driven directly rather than through notes_deliver_at_el0_-
+// return, which takes no Thread argument (it reads current_thread()). That is
+// the same seam notes_terminate_note_name_locked already exists for.
+//
+// WHAT THIS DOES NOT COVER, stated so the green does not read as more than it
+// is: the three lines of WIRING in the EL0 tail -- that it calls this decider
+// at all, dequeues on non-NULL, and drops q->lock before proc_job_stop_self.
+// Deleting that block leaves every assertion below passing. The terminate
+// twin has the identical hole for the identical reason (a unit test cannot
+// install a current_thread), and closing it needs the in-guest ^Z E2E that
+// task #238 already tracks -- which is the only leg that would also prove the
+// lock order under contention.
+void test_notes_masked_susp_stops_at_delivery(void) {
+    struct Proc *leader = proc_alloc();
+    TEST_ASSERT(leader != NULL, "proc_alloc leader");
+    proc_test_link(leader);
+    struct Proc *m = proc_alloc();
+    TEST_ASSERT(m != NULL, "proc_alloc m");
+    m->sid  = (u32)leader->pid;
+    m->pgid = (u32)m->pid;
+    proc_test_link_child(leader, m);
+
+    static struct Thread th;
+    th.magic             = THREAD_MAGIC;
+    th.next_in_proc      = NULL;
+    th.rendez_blocked_on = NULL;
+    th.proc              = m;
+    th.note_mask         = 0;
+    m->threads    = &th;
+    m->handler_va = 0u;
+
+    // ---- POSITIVE CONTROL: unmasked, the fan stops immediately. ----------
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "control: the fan visits m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1,
+                   "CONTROL: unmasked + uncaught stops at POST time");
+    TEST_EXPECT_EQ(m->notes->count, 0u, "control: consumed by the stop");
+
+    // ---- LEG A: masked -- the fan POSTS, and the stop is pending. --------
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    m->susp_stop_armed     = 0u;
+    th.note_mask = (1u << NOTE_BIT_TTY);
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "A: the fan visits m");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "A: all-masked defers the stop");
+    TEST_EXPECT_EQ(m->notes->count, 1u, "A: it was posted instead");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "A: and the post armed #240");
+
+    spin_lock(&m->notes->lock);
+    const char *pending_masked = notes_stop_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    TEST_ASSERT(pending_masked == NULL,
+                "A: still MASKED, so not yet deliverable -- a stop applied "
+                "here would fire while the guest has it blocked");
+
+    // ---- LEG B: unmask -- the pending stop becomes deliverable. ----------
+    th.note_mask = 0;
+    spin_lock(&m->notes->lock);
+    const char *pending_open = notes_stop_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    TEST_ASSERT(pending_open != NULL,
+                "B: unmasking makes the pending ^Z deliverable -- pre-fix "
+                "this was NULL forever and the note leaked its slot");
+    TEST_ASSERT(susp_name_is(pending_open, NOTE_NAME_TTY_SUSP),
+                "B: and it is the susp, not some other queued note");
+
+    // The tail's action on that decision: consume, then apply via the shared
+    // primitive. Asserted separately so a fix that answered right and acted
+    // wrong is still caught.
+    spin_lock(&m->notes->lock);
+    struct Note consumed;
+    int got_it = notes_dequeue_locked(m, &th, &consumed);
+    spin_unlock(&m->notes->lock);
+    TEST_EXPECT_EQ(got_it, 1, "B: the note dequeues");
+    TEST_EXPECT_EQ(m->notes->count, 0u, "B: the slot is RECLAIMED");
+    TEST_ASSERT(proc_job_stop_self(m), "B: and the deferred stop applies");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 1, "B: the guest is stopped");
+
+    // ---- LEG C: a cont while masked cancels it (#240 composition). -------
+    //
+    // The deferred path must inherit the freshness rule, or it re-opens the
+    // window #240 closed -- with a longer fuse, since the note can sit masked
+    // indefinitely.
+    m->job_stop_req        = 0;
+    m->stop_report_pending = false;
+    m->cont_report_pending = false;
+    m->susp_stop_armed     = 0u;
+    th.note_mask = (1u << NOTE_BIT_TTY);
+    TEST_EXPECT_EQ(proc_job_stop_pgrp(m->pgid), 1, "C: a masked ^Z");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 1, "C: armed");
+    TEST_EXPECT_EQ(proc_job_cont_pgrp(m->pgid), 1, "C: a cont arrives");
+    TEST_EXPECT_EQ((int)m->susp_stop_armed, 0, "C: which disarmed it");
+    th.note_mask = 0;
+    TEST_ASSERT(!proc_job_stop_self(m),
+                "C: the deferred stop is DISCARDED -- superseded by the cont");
+    TEST_EXPECT_EQ((int)m->job_stop_req, 0, "C: the job is not stranded");
+
+    // ---- LEG D: a self-managing Proc keeps its note. ---------------------
+    //
+    // It has an fd reader; consuming the note here would steal it.
+    spin_lock(&m->notes->lock);
+    while (m->notes->count > 0) {
+        struct Note drain;
+        notes_dequeue_locked(m, NULL, &drain);
+    }
+    spin_unlock(&m->notes->lock);
+    TEST_EXPECT_EQ(m->notes->count, 0u, "D: queue clean before the leg");
+    notes_mark_self_managing(m);
+    TEST_EXPECT_EQ(notes_post(m, NOTE_NAME_TTY_SUSP, 0u, NULL, true), 0,
+                   "D: a susp is posted to a self-managing Proc");
+    TEST_EXPECT_EQ(m->notes->count, 1u, "D precondition: it IS queued");
+    spin_lock(&m->notes->lock);
+    const char *self_managed = notes_stop_note_name_locked(m, &th);
+    spin_unlock(&m->notes->lock);
+    TEST_ASSERT(self_managed == NULL,
+                "D: the tail does NOT consume it -- devnotes_read owns it");
 
     proc_test_unlink(m);
     m->threads = NULL;                  // the static outlives proc_free

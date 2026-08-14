@@ -903,9 +903,16 @@ u64 viv_signote_to_signal(enum viv_signote note);
 // consume. Dropping them at delivery is what Linux does and what keeps the
 // queue bounded.
 //
-// SIGTSTP is deliberately NOT here: its default is STOP, not ignore, and the
-// kernel NDFLT-stop arm is an unbuilt ABI decision (task #15). Claiming
-// "ignore" for it would be a stored lie in the other direction.
+// SIGTSTP is deliberately NOT here: its default is STOP, not ignore, so
+// claiming "ignore" for it would be a stored lie in the other direction. The
+// STOP is applied, not dropped -- at POST time by job_stop_cb when any thread
+// leaves the tty family unmasked, and at DELIVERY time by the NOTE_DFL_STOP
+// arm of notes_deliver_at_el0_return when they were all masked and the note
+// had to wait. So the "queue would fill with notes nothing consumes" hazard
+// above does not apply to it either: both arms consume.
+//
+// (This used to defer on "the kernel NDFLT-stop arm is an unbuilt ABI decision
+// (task #15)". 434c3fd9 built that arm; the premise is discharged.)
 bool viv_signote_default_is_ignore(enum viv_signote note);
 
 // Per-Proc signal disposition. Lazily allocated on a Proc's first translatable

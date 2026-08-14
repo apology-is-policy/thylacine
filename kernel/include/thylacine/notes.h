@@ -430,6 +430,17 @@ int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 // p->notes->lock.
 int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 
+// Would `name` take its DEFAULT action on `p`? False iff something intercepts
+// it: a native handler (handler_va), a phenotype sigtab handler, or a phenotype
+// SIG_IGN. Pure; no lock required (each read is a single atomic load).
+//
+// Exists because a decider that runs INSTEAD of notes_post cannot rely on the
+// SIG_IGN drop inside it. proc_tty_susp_would_stop_locked is the caller that
+// needs this: its uncaught arm stops the Proc directly, generating no note, so
+// a phenotyped Proc's disposition has to be consulted before the decision
+// rather than during the post.
+bool notes_proc_default_applies(struct Proc *p, const char *name);
+
 // PTY-1b: the name-returning generalization of the above -- the canonical
 // (.rodata, program-lifetime) name of the first DELIVERABLE terminate-class
 // note (interrupt / tty:quit / tty:hup: queued AND its family bit unmasked
@@ -437,6 +448,22 @@ int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 // tail passes the returned name to exits() so the exit_msg reports WHICH
 // signal terminated the Proc. Caller MUST hold p->notes->lock.
 const char *notes_terminate_note_name_locked(struct Proc *p, struct Thread *t);
+
+// The STOP-class twin (round-2 F2): the canonical name of the first note whose
+// DEFAULT action is STOP and that is deliverable to `t` (queued AND its family
+// bit unmasked), or NULL. Same reader gates as the terminate twin, except the
+// disposition test goes through notes_proc_default_applies so a phenotyped
+// Proc's sigtab is consulted.
+//
+// A stop-class note is only ever QUEUED when the post-time fan (job_stop_cb)
+// found every thread masking the family and posted instead of stopping -- the
+// POSIX "a blocked stop signal becomes pending" case. This is where that
+// pending stop lands once the mask lifts. The dispatcher calls it under
+// q->lock and, on non-NULL, dequeues + drops the lock + calls
+// proc_job_stop_self (which re-checks the orphan rule and #240's freshness
+// flag). Exposed because the dispatcher takes no Thread argument, so a unit
+// test can only drive the decision here. Caller MUST hold p->notes->lock.
+const char *notes_stop_note_name_locked(struct Proc *p, struct Thread *t);
 
 // PTY-1b (PTY-DESIGN.md section 4): kernel-synthetic note fan-out to a
 // process group -- the pgrp generalization of proc_console_post_interrupt.

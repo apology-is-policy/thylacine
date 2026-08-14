@@ -3117,13 +3117,24 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // the image's -- and so does the fd-shaped delivery path; only the
     // registered handler entry points go.
     //
-    // Freeing the sigtab here is safe for the same reason proc_free's is: its
+    // THE SIGTAB FREE HERE IS A KNOWN HAZARD, tracked -- see task #254 before
+    // touching it. This comment used to claim the free was safe because "its
     // only reader is notes_deliver_at_el0_return, which runs on a thread of
-    // THIS Proc, and we are the only live one. That is a precondition rather
-    // than a coincidence -- proc_exec_alone established it and the swap above
-    // re-checked it under the lock, so this line inherits the guarantee rather
-    // than assuming it. (V-6b freed it only at reap precisely because that was
-    // the only other point where the same thing was true.)
+    // THIS Proc, and we are the only live one". The single-thread half is
+    // true (proc_exec_alone established it and the swap above re-checked it
+    // under the lock). The single-READER half is NOT: `p->sigtab` is loaded
+    // and dereferenced from OTHER Procs' CPUs by notes_post's V-6b SIG_IGN
+    // hook -- which notes.c names in as many words as "the sole cross-thread
+    // reader" -- and, since the round-2 F1 fix, by notes_proc_default_applies
+    // on the ^Z fan's path. g_proc_table_lock is RELEASED above, so it
+    // serializes none of them against this kfree.
+    //
+    // Left as-is deliberately rather than patched in passing: no reader shares
+    // a lock with this free, so closing it is a design question (one agreed
+    // lock, a refcount, or -- the narrower candidate -- zeroing the table in
+    // place instead of freeing it, which keeps the POSIX reset and leaves no
+    // dangling pointer at all). V-6b freed it only at reap precisely because
+    // that was the one other point where the claim above actually held.
     proc_exec_drop_image_state(p, self);
 
     // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD
@@ -3662,11 +3673,26 @@ static void proc_job_resume_one_locked(struct Proc *m) {
 // The tty:susp catchability gate (round-2 R2-F3; the LS-5
 // notes_interrupt_should_terminate_locked analog, evaluated at POST time
 // because the stop -- unlike the terminate -- is applied post-side, not at
-// the tail): the default STOP fires only when the target has no async
-// handler, is not self-managing (no notes fd -- it would read + act on the
-// susp itself), and at least one thread leaves NOTE_BIT_TTY unmasked (the
-// POSIX any-thread-unblocked delivery shape; all-masked defers to a
-// note-only post). handler_va / proc_flags are read lock-free -- a handler
+// the tail): the default STOP fires only when the target's disposition IS the
+// default (notes_proc_default_applies -- no native handler, and for a
+// phenotyped Proc no sigtab handler and no SIG_IGN either), is not
+// self-managing (no notes fd -- it would read + act on the susp itself), and
+// at least one thread leaves NOTE_BIT_TTY unmasked (the POSIX
+// any-thread-unblocked delivery shape; all-masked defers to a note-only post,
+// whose stop is then applied at delivery -- see the NOTE_DFL_STOP arm in
+// notes_deliver_at_el0_return).
+//
+// The disposition test is DELEGATED rather than spelled here, and that is the
+// whole point of the round-2 F1 fix: this function used to load handler_va
+// directly, which reads a Linux guest -- whose SIGTSTP disposition lives in
+// the sigtab with handler_va at 0 -- as having no disposition at all. Both a
+// phenotype handler and a phenotype SIG_IGN were therefore stopped. The
+// sibling site (notes_arm_intr_terminate_locked) had already been corrected
+// for exactly this at V-8 F2; this one was missed because the fix existed
+// there. Route every disposition question through the shared predicate so a
+// third site cannot repeat it.
+//
+// handler_va / proc_flags are read lock-free -- a handler
 // registered concurrently with the decision orders before-or-after it,
 // indistinguishable from the signal arriving a moment earlier (the POSIX
 // signal race; the LS-5c latch coherence concern does not apply since no
@@ -3674,7 +3700,7 @@ static void proc_job_resume_one_locked(struct Proc *m) {
 // g_proc_table_lock; note_mask is owner-written (SYS_NOTE_MASK), so the
 // cross-thread load is the same benign-race read, made explicit atomic.
 static bool proc_tty_susp_would_stop_locked(struct Proc *m) {
-    if (__atomic_load_n(&m->handler_va, __ATOMIC_ACQUIRE) != 0) return false;
+    if (!notes_proc_default_applies(m, NOTE_NAME_TTY_SUSP)) return false;
     if (proc_is_self_managing_notes(m)) return false;
     for (struct Thread *th = m->threads; th; th = th->next_in_proc) {
         if ((__atomic_load_n(&th->note_mask, __ATOMIC_RELAXED) &

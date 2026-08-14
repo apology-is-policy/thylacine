@@ -553,6 +553,8 @@ void test_notes_default_action_table(void);      // #15 / #236
 void test_notes_ndflt_dispatch(void);            // #15 / #236
 void test_notes_kill_terminates_single_thread(void);   // #241
 void test_notes_ndflt_stop_discarded_after_cont(void); // #240
+void test_notes_susp_gate_reads_phenotype_sigtab(void); // #251
+void test_notes_masked_susp_stops_at_delivery(void);   // #252
 void test_notes_self_managing_flag(void);
 void test_notes_intr_latch_lifecycle(void);
 void test_notes_die_pending_predicate(void);
@@ -2135,6 +2137,8 @@ struct test_case g_tests[] = {
     { "notes.ndflt_dispatch",                  test_notes_ndflt_dispatch,                  false, NULL },
     { "notes.kill_terminates_single_thread",   test_notes_kill_terminates_single_thread,   false, NULL },
     { "notes.ndflt_stop_discarded_after_cont", test_notes_ndflt_stop_discarded_after_cont, false, NULL },
+    { "notes.susp_gate_reads_phenotype_sigtab", test_notes_susp_gate_reads_phenotype_sigtab, false, NULL },
+    { "notes.masked_susp_stops_at_delivery", test_notes_masked_susp_stops_at_delivery, false, NULL },
     { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "notes.intr_latch_lifecycle",            test_notes_intr_latch_lifecycle,            false, NULL },
     { "notes.die_pending_predicate",           test_notes_die_pending_predicate,           false, NULL },

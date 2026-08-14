@@ -280,11 +280,30 @@ Under one `g_proc_table_lock` hold, per ALIVE member of `pgid`:
 
 1. **The catchability gate** (`proc_tty_susp_would_stop_locked`, the LS-5
    `notes_interrupt_should_terminate_locked` analog): the default STOP fires only when
-   the target has no async handler, is not self-managing (no notes fd), **and** at least
-   one thread leaves `NOTE_BIT_TTY` unmasked. Otherwise the susp is **CAUGHT** — the
-   `tty:susp` note is posted (delivered/deferred on the target's own terms) and **no
-   *immediate* stop** happens here. tmux/bash/vim catch SIGTSTP to save terminal state;
-   an uncatchable susp would fail PTY-4's own gate.
+   the target's disposition **is** the default (`notes_proc_default_applies`), it is not
+   self-managing (no notes fd), **and** at least one thread leaves `NOTE_BIT_TTY`
+   unmasked. Otherwise the susp is **CAUGHT** — the `tty:susp` note is posted
+   (delivered/deferred on the target's own terms) and **no *immediate* stop** happens
+   here. tmux/bash/vim catch SIGTSTP to save terminal state; an uncatchable susp would
+   fail PTY-4's own gate.
+
+   **The disposition question is delegated, not spelled here (round-2 F1 / #251).** The
+   gate used to load `handler_va` directly. That is the right question for a native Proc
+   and the wrong one for a **phenotyped** one: a Linux guest never calls `SYS_NOTIFY`, so
+   its `handler_va` is 0 whatever it asked for, and its SIGTSTP disposition lives in the
+   per-Proc `sigtab`. Both a phenotype **handler** and an explicit phenotype **SIG_IGN**
+   were therefore read as "nothing catches this" and **stopped** — the SIG_IGN leg being
+   the sharper one, since a process that explicitly ignored `^Z` was suspended by it.
+   `notes_post`'s V-6b SIG_IGN discard cannot rescue that case, because the uncaught arm
+   stops the Proc **without ever calling `notes_post`**.
+
+   `notes_proc_default_applies` (`kernel/notes.c`) answers for both phenotypes and is
+   the single predicate every disposition decider now routes through. The sibling site
+   (`notes_arm_intr_terminate_locked`) had already been corrected for exactly this at
+   V-8 F2; this one was missed *because* the fix existed there — the recurring
+   "the fix that exists on site N stops you asking about site N+1" shape.
+   `notes.susp_gate_reads_phenotype_sigtab` pins all three legs (handler / SIG_IGN /
+   native-with-a-table), each sabotage-proven independently.
 
    **Since #15 a caught susp can still stop — the target applies the default itself.**
    `job_stop_req` has a THIRD setter, `proc_job_stop_self` (`kernel/proc.c`), reached
@@ -331,6 +350,41 @@ Under one `g_proc_table_lock` hold, per ALIVE member of `pgid`:
 
 An already-job-stopped member is skipped (a second Ctrl-Z on a stopped process is a
 POSIX no-op — no re-latch, no note).
+
+**The all-masked case posts a note, and that note now has a reader (round-2 F2 /
+#252).** When every thread masks `NOTE_BIT_TTY`, gate 1's last line returns false, so
+the fan takes the CAUGHT arm and posts `tty:susp` rather than stopping. That is POSIX —
+a blocked stop signal becomes **pending** — but before the fix nothing could ever
+consume it. The EL0 tail's case analysis handled only the terminate class
+(`notes_terminate_note_name_locked`), and `tty:susp` is STOP-class, so the note fell
+through every arm and was left queued with a comment claiming it awaited "the fd-read
+path" — a path that does not exist for a Proc which is not self-managing, and cannot
+exist for a phenotyped one (a Linux guest has no notes fd at all). The `^Z` was silently
+lost and one of `NOTE_QUEUE_DEPTH`'s 16 slots went with it.
+
+`notes_stop_note_name_locked` (`kernel/notes.c`) is the STOP-class twin of the terminate
+scanner, and the tail's `handler_va == 0` branch consults it after the terminate check
+misses: on a hit it dequeues the note, drops `q->lock`, and applies the stop through
+**`proc_job_stop_self`** — the same primitive `SYS_NOTED(NDFLT)` uses, so the orphan rule
+and #240's `susp_stop_armed` freshness check both apply without being restated. A
+`tty:cont` that arrived while the note sat masked has already disarmed the flag, so the
+deferred stop correctly evaporates instead of resurrecting a superseded `^Z`. Because the
+peek only yields a note once its family bit is unmasked, the stop lands exactly when the
+guest unblocks the signal.
+
+Accumulation was **bounded but not harmless** before the fix: repeated `^Z` from the pts
+fan all share `(name, sender_pid=0)`, so once `q->count` reaches
+`NOTE_COALESCE_THRESHOLD` (12) further posts coalesce into the existing entry rather than
+appending. Twelve of sixteen slots stayed permanently occupied and the queue sat
+permanently in coalesce mode; the Proc did **not** become un-Ctrl-C-able, since four
+slots and the `interrupt` name remained available. The lost stop, not ring exhaustion,
+was the defect.
+
+`notes.masked_susp_stops_at_delivery` pins the pending/unmask sequence, the cont-cancels
+composition with #240, and the self-managing exemption. It does **not** cover the tail's
+three lines of wiring — a unit test cannot install a `current_thread()` — which is the
+same coverage boundary the terminate twin has, and which the in-guest `^Z` E2E owed by
+task #238 would close.
 
 ### 7.3 The shared wake cascade
 

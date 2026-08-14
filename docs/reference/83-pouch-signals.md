@@ -280,7 +280,15 @@ The `/dev/tty` precedent covers the result: one identity, per-process content.
   notify handler as "caught" — and pouch's `.init_array` constructor
   ALWAYS registers the bootstrap, so every pouch Proc is "caught": the
   `tty:susp` note delivers to the bootstrap rather than stopping the
-  Proc. That much is unchanged. What changed is the bootstrap's only
+  Proc. That much is unchanged. (Since round-2 F1 / #251 the gate asks
+  `notes_proc_default_applies` rather than loading `handler_va` itself.
+  For a pouch Proc that is the same answer by the same field — pouch is
+  NATIVE, and its bootstrap sets a real `handler_va`. The change is for
+  the **phenotype** path, a different substrate entirely: a Linux guest
+  under the vivarium keeps its SIGTSTP disposition in the per-Proc
+  `sigtab` with `handler_va` at 0, so the old load read both its handler
+  and its explicit SIG_IGN as "uncaught" and stopped it. See
+  `docs/reference/135-pty-kernel.md` §7.2.) What changed is the bootstrap's only
   way back to the default: `SYS_NOTED(NDFLT)` used to terminate for
   EVERY note, so SIG_DFL `SIGTSTP` was a choice between killing the
   program and ignoring it, and pouch chose ignore. #15 gave each note
