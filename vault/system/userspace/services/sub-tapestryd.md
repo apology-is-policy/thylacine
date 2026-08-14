@@ -5,14 +5,14 @@ title: "tapestryd — the compositor: the weave lifecycle, the present engine, a
 parent: moc-userspace
 code: [usr/tapestryd/src/server.rs, usr/tapestryd/src/gpu.rs, usr/tapestryd/src/pane.rs, usr/tapestryd/src/input.rs, usr/tapestryd/src/main.rs, usr/tapestryd/src/chords.rs, usr/tapestryd/src/keymap.rs]
 audit: hard
-guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1]
+guarded-by: [inv-i40, inv-i5, inv-i34, inv-i1, inv-i45]
 validated-by: [spec-tapestry-present, prose, gate-smp]
 locks: []
 hazards: [haz-driver-panic-dos]
 abis: []
 design: ["docs/TAPESTRY.md", "docs/AURORA-CONFIG.md"]
 created: 2026-08-02
-updated: 2026-08-02
+updated: 2026-08-14
 ---
 ## Purpose
 
@@ -28,6 +28,15 @@ an I-34 allowance narrowed to exactly those functions. Both ride PCI
 because the six populated virtio-mmio slots share one page whose
 lifetime belongs to stratumd, so a second persistent MMIO claimant is
 structurally impossible.
+
+Since the Warp arc it is **also the GPU seam**: when the device offers
+`VIRTIO_GPU_F_VIRGL`, tapestryd serves a second tree, `/srv/warp`,
+through which a client creates a virgl context, mints GPU buffer
+objects, and submits 3D command streams. That half holds [[inv-i45]] —
+which is enforced in code and prosecuted by name in the source, and is
+**not in `ARCHITECTURE.md` §28**, whose table runs I-40, I-42, I-43,
+I-44 and stops. The wikilink is therefore deliberately dangling; see
+Caveats.
 
 ## Contract
 
@@ -57,6 +66,30 @@ because the session **is** the capability.
 **The pane and layout tree is deliberately connection-global.** F2 gates
 surfaces; it never gates the shared tree, because the tree is the window
 manager's, not any one client's.
+
+### The Warp tree — `/srv/warp`
+
+Served only when virgl is negotiated. `ctl`, `caps` (the `GET_CAPSET`
+blob), and `ctx/` with `new` as the mint file; a minted ctx exposes
+`ctl`, `fence`, and `bo/` (again `new` as mint, then per-BO
+`ctl`/`map`/`info`). Warp qids carry bit 42, with bit 39 marking a ctx
+node and bit 38 a BO node — the same tag-bit template as the surface
+tree, one level deeper.
+
+A client's path is: open `ctx/new` → write its capset and ring count →
+open `bo/new` and write a geometry → `Tweft` the BO's `map` fid and
+`SYS_WEFT_MAP` it → write command streams to `ctl` → read `fence` for
+completions. `present-to <surface> <bo>` (Warp-4) is how a GL client
+gets its result on screen: the ctx *consents* to displaying one of its
+BOs on one surface.
+
+That consent is **pinned to `(slot, gen)`**, not to a slot. A surface
+slot is reusable, and a consent naming only the slot would re-arm itself
+against whatever surface next occupies it — a client displaying into a
+stranger's window by outliving its own.
+
+Bounds: 8 contexts globally, 1024 BOs per context, 8 in-flight fences
+per context (`FENCED_SLOTS / 2`), 64 MiB of backing per context.
 
 ## Mechanism
 
@@ -111,6 +144,58 @@ never read again, its last content still displayed, so tearing-freedom
 holds — and retires at the first post-fence present. At most one drains;
 a second reweave returns `E_AGAIN`.
 
+### The fenced lane
+
+The 3D half cannot be synchronous — a GL job takes as long as it takes —
+so Warp-2d added a second lane beside the synchronous ring rather than
+converting it. The audited two-page ring is **byte-identical**; fenced
+chains get their own DMA region.
+
+**The fence mechanism is borrowed, not built.** Setting `hdr.flags` bit
+0 makes the device withhold that command's response until its fence
+signals. So the used-buffer notification *is* the fence completion:
+there is no fence machinery here, only a label on something the
+virtqueue already does.
+
+Slot `i` owns a fixed descriptor pair `(2+2i, 3+2i)`, a request buffer,
+and a response header. Completion is attributed by **used-entry id** —
+the head descriptor names the slot — never inferred from a ring cursor,
+because up to `1 + FENCED_SLOTS` chains are outstanding at once and the
+single-in-flight cursor check that the synchronous lane used cannot
+survive that.
+
+Three postures govern failure, and they are deliberately different:
+
+| posture | trigger | effect |
+|---|---|---|
+| `dead` (latched) | any submit/ring failure, or a used entry naming a chain never published | every later submit fails fast — after one, no cursor can be trusted, and a freshly-zeroed response buffer reads as `resp_type=0x0` |
+| abandoned | a chain unretired for 30 s | *that slot's bookkeeping* is reclaimed; the engine is **not** declared dead |
+| refused (`E_AGAIN`) | every slot in flight | the client retries |
+
+**A slow device is not a dead one**, and the distinction is the whole
+design: tapestryd *is* the console, so a false dead-latch costs the
+user their machine. That is also why a full lane refuses rather than
+blocks — the serve loop must stay live.
+
+Abandonment never frees anything the device might still touch. The
+descriptor pair is **poisoned** (retired from the pool, not returned),
+the owning context is marked, and every later retire under that context
+**leaks rather than frees**. If the device does eventually retire the
+chain, that late retire is proof it has finished: the slot un-poisons
+and a *vindication* travels back to the seam, which frees the parked
+backings. Leaked bytes and leaked *count* are both charged, and both
+reset only at that live un-poison — an uncharge is honest only when
+paired with the drop that actually frees.
+
+The seam mirrors this. A context whose destroy arrives with fences in
+flight is marked `retiring` — **instantly unresolvable to every client**
+— and a per-pass pump finishes it once quiesced. Termination is the
+driver's: an unretired fence is abandoned within the bound, which
+decrements the counter, so the count always reaches zero. A wedged
+context does not free its slot either, because `dev_ctx = slot + 1`:
+handing the slot on would hand a live device context id to the next
+client, and a stale stream would execute against a stranger's context.
+
 ## Data structures
 
 `Surface`: the current `Weave` (handle, VA, size, optional share id),
@@ -130,6 +215,26 @@ window.
 The `tevent` record is 24 bytes, version-pinned; pointer MOVE packs
 surface-**relative** coordinates, never absolute screen ones.
 
+`WarpCtx`: owner connection, public and device context ids, the declared
+capset and ring count, the fence bookkeeping, the two failure flags
+(`fence_poisoned` / `stream_rejected`), the leak accounting
+(`leaked_bytes` + `leaked_count`), the health probe, the `present_to`
+consent, and a heap row of 1024 BO slots allocated at mint.
+
+`WarpBo`: a kernel-minted GPU-BO DMA chunk attached as the backing of a
+device-global 3D resource and shared to the client by `Tweft`. The
+share is minted lazily and **disarmed at retire before any backing is
+freed** — the same ordering as the weave.
+
+Two counters deserve care. `fence_signaled` is a **dense per-context
+completion count**, deliberately not the device-global fence id: they
+usually move together, which is what makes treating them as one number
+space so easy and so wrong. And the fenced-write ledger
+(`rx` / `minted` / `again` / `err`) exists so a client's own count of
+successful writes can be reconciled against the server's at quiescence —
+`rx - minted - again - err > 0` names an answered-without-dispatch path
+that no single counter would reveal.
+
 ## Concurrency
 
 Single-threaded, like its siblings. The interesting property is not a
@@ -148,6 +253,24 @@ not make the guard *false*; it makes it **unimplemented**, silently,
 with the model still green. Any move that way must land a real drain
 first.
 
+**That lift has since happened, and the guard survived — by exclusion,
+not by a drain.** Warp-2d pipelined the controlq for fence-bearing 3D
+chains, which is exactly the move above. It is sound here because
+**presents were left out of it**: a present still submits and waits
+inside one dispatch, so the in-flight *present* set is still provably
+empty at every retire decision point. The pipelined present path remains
+unbuilt.
+
+So the property to check before touching this is now narrower and
+easier to break. It was once "the controlq is synchronous", which one
+glance at `gpu.rs` confirmed. It is now "**presents** are synchronous",
+while the file plainly contains a non-waiting submit path — and a future
+edit that routes presents through the fenced lane for the obvious
+throughput reason would look like using existing machinery rather than
+like removing a guard. The two lanes are one type and one call away from
+each other. Anything moving a present onto the fenced lane still owes
+the real drain.
+
 Deferred event reads use the ptyfs shape: park a `PendingRead`, deliver
 from `poll_events` at the loop top, with four cancel sites (conn death,
 clunk, `Tversion`, `Tflush`).
@@ -164,6 +287,43 @@ per axis.
 
 [[inv-i1]] — the F2 owner + generation gate at every surface-qid
 consumer.
+
+[[inv-i45]] — the Warp seam: a client's GPU authority is bounded by the
+context it minted, and no device state or guest backing is freed while
+the device may still be using it. Enforced by the slot poisoning, the
+leak posture, the `(slot, gen)` consent pin, and the deferred retire —
+all described above. **The wikilink dangles on purpose**: I-45 is named
+by the audit-trigger row, by `GPU-DESIGN.md`, and by the source itself,
+and it is absent from `ARCHITECTURE.md` §28. See Caveats.
+
+The Warp seam's health signal has **two independent failure axes** and
+reading one through the other has already caused a defect:
+
+- **`fence_poisoned`** — a chain of this context never retired. Says
+  nothing about whether commands *ran*.
+- **`stream_rejected`** — the host renderer latched this context's
+  command stream off. Submissions are still accepted and their fences
+  still retire *normally*; simply nothing executes. Sticky, mirroring
+  `glGetGraphicsResetStatus` and `VK_ERROR_DEVICE_LOST` — the remedy is
+  recreate, never retry.
+
+A context can be perfectly healthy on the fence axis while executing
+nothing at all, which is why a fence-based liveness check cannot detect
+it. The detector is a health probe: two 1×1 resources the client can
+never name, one holding a fixed value and one the target of a copy.
+They are kept **out of** the per-context BO array deliberately — every
+client-facing resolve walks that array, so membership would be exactly
+the reachability that lets a client forge a healthy verdict, or
+manufacture a rejection against a context that is fine.
+
+The probe is rate-limited to **one per context per compositor tick**.
+It costs three synchronous device round trips on the dispatch thread and
+a client triggers it, so an ungated version is a fresh denial-of-service
+lever against the console — the fenced lane has admission control for
+precisely this reason and the synchronous slot bypasses all of it. One
+per tick is the cadence the design intends anyway, so the bound costs
+the intended use nothing and caps the whole machine at 8 probes a frame
+regardless of what clients do.
 
 **The untrusted edge** is `present`, and it validates the version word,
 `rect_count ≤ 64`, the **exact** payload length for the declared count,
@@ -274,6 +434,31 @@ construction: one IRQ wait per GPU command.
   is stripped to `E_OPNOTSUPP` in production builds. Pixel work still
   happens in-dispatch even when held, so tearing-freedom is unaffected
   by which build is running.
+- **[[inv-i45]] has no note and no `ARCHITECTURE.md` §28 row**, while
+  being cited by the audit-trigger table, `GPU-DESIGN.md`, `NOVEL.md`,
+  the phase-7 status doc, the retired reference doc, `CLAUDE.md`, and
+  both `gpu.rs` and `server.rs` — the last of which prosecutes "the I-45
+  breach F6" by name. So the invariant is real, enforced, and audited,
+  and absent from the one list the prosecutor prompt template tells an
+  auditor to enumerate. The wikilink is left dangling as the marker.
+  Filed for main as **#173**; `ARCHITECTURE.md` is theirs to edit.
+- **The fenced lane's test hold ships in production.** The crate's
+  default features include `test-mode`, no build passes
+  `--no-default-features`, and `/srv/warp`'s `ctl` is mode 0666 — so the
+  verb that stalls a context's fence completions is reachable by any
+  client. The design answer was not to gate the caller but to make the
+  power proportionate: a client may hold only **its own** context's
+  fences, which it could already achieve by simply not reading them. An
+  earlier revision held globally, which was an unprivileged box-wide
+  denial of service. Worth knowing that identity deliberately cannot
+  separate the prover from an attacker here — the in-guest test battery
+  is an ordinary unprivileged client *by design*.
+- The abandonment bound is 30 s of wall clock, which means a genuinely
+  hung host renderer strands a context's backings for that long before
+  anything is reclaimed, and leaks them permanently if the device never
+  retires. That is an accepted risk recorded in `GPU-DESIGN.md` §9.2,
+  not an oversight — the alternative is declaring a slow device dead,
+  and the console is what dies with it.
 
 ## Provenance
 
