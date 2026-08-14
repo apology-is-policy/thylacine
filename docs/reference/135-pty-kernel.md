@@ -388,12 +388,31 @@ task #238 would close.
 
 ### 7.3 The shared wake cascade
 
-`proc_stop_wake_cascade_locked(p)` is factored out and shared **verbatim** by both
-owners' delivers (`proc_debug_stop_deliver` and `proc_job_stop_one_locked`): it is
+`proc_stop_wake_sleepers_locked(p)` is the shared half: it is
 `proc_group_terminate`'s death-wake cascade, but the woken sleeper arms the sleep-detour
-park instead of the die. `torpor_wake_all_for_proc(p)` for the futex/torpor waiters
-(Go's idle Ms), then the per-peer `wait_lock → rendez_blocked_on → wakeup` walk, then
-`smp_resched_others()` to kick an EL0-running peer to its tail. The RELEASE store of the
+park instead of the die. **`torpor_stop_wake_all_for_proc(p)`** for the futex/torpor
+waiters (Go's idle Ms), then the per-peer `wait_lock → rendez_blocked_on → wakeup` walk.
+
+Two corrections a prior version of this section got wrong, both load-bearing:
+
+- **The torpor wake is the NON-COMPLETING one (#19).** The death cascade's
+  `torpor_wake_all_for_proc` fabricates a completed wait (`awoken = 1`), which is
+  immaterial for a dying Proc and wrong for a stopped one, because a stopped Proc
+  **survives**: the fabricated `TORPOR_OK` rides back to EL0 at resume and makes a
+  `time::sleep` "finish" the instant `fg` resumes it — the resumed job exits, `fg`
+  returns Done, and a second `^Z` finds no job. That is the #19 hang. The
+  non-completing wake leaves `awoken` clear, so the waiter re-loops into the 8c-2 stop
+  detour and parks with its wait PRESERVED, re-registering its original deadline on
+  resume. PTY-4e's round-2 F1 fixed this exact sentence in the CODE comments because
+  it pointed a maintainer at re-introducing #19; the sentence survived here until #242.
+- **The cascade is NOT shared verbatim by both owners.** `proc_stop_wake_cascade_locked`
+  (= sleepers + `smp_resched_others`) is used by the **single-target debugger** deliver
+  only. The per-member job-stop fan calls `proc_stop_wake_sleepers_locked` per member
+  and issues **one** trailing `smp_resched_others` after the whole walk — the IPI is
+  group-GLOBAL (a broadcast to every online CPU), so a fan-out over N members must not
+  issue it N times (audit F2).
+
+`smp_resched_others()` kicks an EL0-running peer to its tail. The RELEASE store of the
 stop flag happens-before each wake and each peer's `wait_lock` acquire, so the woken
 sleeper's ACQUIRE-read observes the stop — no stop-wake lost between the wake and the
 detour re-park (I-9 register-then-observe; `debug_stop.tla` `StopWakesSleeper`).
