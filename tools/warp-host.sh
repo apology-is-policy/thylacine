@@ -239,15 +239,24 @@ reject)
     #   DETECT PASS   the detector DISCRIMINATES (rejected 1, healthy 0)
     #   STICKY PASS   a SECOND REAL probe still reads (1 0)
     #   F1 DEFENDED   a client that WRITES the probe's mark cannot blind it
-    #   DONE          the prover reached its end -- without this an aborted
-    #                 run (ctx_field's fail() path, F9) still shows ANSWER=
-    #                 and would read as verified.
-    # DONE is safe to require here even though lc_expect writes its own
-    # pattern into its timeout text (#186): that text lands in the expect
-    # transcript, and a timeout also costs us the three other terms.
+    #   LS-CI PASS    the SCENARIO completed -- without a completion term an
+    #                 aborted run (ctx_field's fail() path, F9) still shows
+    #                 ANSWER= and would read as verified.
+    #
+    # ROUND-2 F3: that last term was `C0-REJECT DONE`, which is exactly the
+    # token warp-reject.exp's own header says never to key a pass on --
+    # lc_expect writes its own pattern into its timeout text ("waiting for
+    # [C0-REJECT DONE]"), so a guest that hung AFTER `C0-F1 DEFENDED` would
+    # have had the fifth term supplied by the failure message itself, over a
+    # run that never finished. I wrote that warning and then walked into it.
+    # The defence I argued -- "a timeout also costs us the other terms" --
+    # assumed the hang can only happen before they print, which is a guess
+    # about hang location, not a property of the gate. `lc_pass`'s prefix
+    # can only be produced by the success path, and it is what `prove`,
+    # `tri` and `quake` already require.
     grep -E "C0-REJECT|C0-DETECT|C0-F1" "$out" || true
     ok=1
-    for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "C0-REJECT DONE"; do
+    for pat in "C0-REJECT ANSWER=" "C0-DETECT PASS" "C0-DETECT STICKY PASS" "C0-F1 DEFENDED" "LS-CI PASS: warp-prove reject"; do
         if ! grep -q "$pat" "$out"; then
             echo "#240 GATE FAIL -- missing: $pat"
             ok=0

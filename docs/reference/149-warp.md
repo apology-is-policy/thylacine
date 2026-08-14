@@ -61,8 +61,9 @@ ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\
                              #   the vindication FREES them, and parked-without-freed is precisely
                              #   the permanent handle leak F3 found. Monotonic on purpose -- a live
                              #   gauge reading 0 is equally satisfied by "the path never ran" [#184].
-                             #   `verify-unknown` counts every health probe that reached NO verdict,
-                             #   across all ctxs: the per-arm console lines are one-shot per ctx
+                             #   `verify-unknown` counts every probe that RAN and reached no
+                             #   verdict, across all ctxs -- NOT a ctx that has no probe to ask
+                             #   (round-2 F9). The per-arm console lines are one-shot per ctx
                              #   [they were a ~480 line/s storm at the per-frame cadence], so this
                              #   is the only surviving evidence of the RATE)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
@@ -498,10 +499,15 @@ Deferred, not abandoned — the two backings are parked in
 device finished, the same reclamation point that frees the parked BOs and
 un-poisons the slot. Before F3 they were dropped with a `say!` and no park,
 so every wedge burned two kernel handles and two mappings permanently in the
-process that *is* the console, at one wedge per `FENCE_ABANDON_MS`. A parked
-probe exists **iff** the slot is poisoned; `probe-parked` / `probe-freed` on
-the global ctl are the monotonic ledger (`prove_probe_reclaim` asserts both
-halves move).
+process that *is* the console, at one wedge per `FENCE_ABANDON_MS`.
+
+A parked probe **implies** a poisoned slot — that direction is load-bearing
+(it is what makes the mint's skip-poisoned-slots sufficient), and it does
+**not** converse (round-2 F7): a slot is poisoned with nothing parked when
+the ctx never built a probe, and on both destroy-refused arms. So
+`poisoned` does not report a parked probe; `probe-parked` / `probe-freed`
+on the global ctl are the only ledger (`prove_probe_reclaim` asserts both
+halves move, and a sabotage removing the reclaim turns it red).
 
 ## The Mesa winsys + the warp client (Warp-3)
 
@@ -797,8 +803,8 @@ majority) bounds it ~25–40% above Composed.
 | fence read with `count` < one record (21 bytes) | empty read (never parks unfillable) |
 | malformed ctl verbs / non-UTF-8 | `E_INVAL` |
 | **stream the HOST refuses (vrend context error)** | **none on the write — it is reported as SUCCESS (#240).** The write returns the byte count, the fence retires, `fence-signaled` increments, `fences-in-flight` returns to 0, `poisoned` stays 0. Since C-0d it is DETECTABLE out-of-band: write `verify` to the ctx ctl, then read `stream-rejected`. See the caveat below |
-| `verify` on a ctx with no probe (its mint failed) | `Ok` on the write, but neither `verify-seq` nor `verify-ok` advances and `stream-rejected` is untouched (the arm returns before the increment) |
-| `verify` while the ctx has fenced work outstanding | `E_AGAIN` (audit F7). The probe rides the **synchronous** slot on the client's own ctx, so it queues behind that client's GL work, and past `SUBMIT_DEADLINE_MS` (500 ms) the engine latches `dead` — terminal, in the process that *is* the console. Retry once the ctx is quiesced |
+| `verify` on a ctx with no probe (its mint failed) | `Ok` on the write, but neither `verify-seq` nor `verify-ok` advances, `stream-rejected` is untouched, and the global `verify-unknown` does **not** move either (round-2 F9 — an unaskable question is not an unknown verdict, and counting it let a client drive that counter at 9P-write rate, since the per-ctx rate limit sits below this arm) |
+| `verify` while the ctx has fenced work outstanding **or is poisoned** | `E_AGAIN` (audit F7, corrected by round-2 F1). The probe rides the **synchronous** slot on the client's own ctx, so it queues behind that client's GL work, and past `SUBMIT_DEADLINE_MS` (500 ms) the engine latches `dead` — terminal, in the process that *is* the console. **Quiescent means `fences-in-flight 0` AND `poisoned 0`**: an abandoned fence takes its slot and zeroes *both* in-flight gauges while the GL work is by definition still unfinished after 30 s, so the poison flag is the only witness left — the same predicate `warp_fenced_admit` refuses on one lane over |
 | `verify` that runs but reaches no verdict (UNKNOWN) | `Ok`, `verify-seq` **advances**, `verify-ok` does **not**, `stream-rejected` untouched; the global `verify-unknown` increments. **`verify-seq` counts probes ADMITTED, not probes that concluded** (audit F2 — it is incremented before any device I/O). A reader tells "asked and healthy" from both "could not be asked" and "asked, no answer" only by requiring **`verify-ok`** to move; a bare `stream-rejected 0` is satisfied by all three (#184) |
 
 ## Known caveats / footguns

@@ -750,9 +750,15 @@ pub struct Comp {
     /// An `Option`, not a `Vec`, is the exact shape, and that is what keeps
     /// the park infallible without borrowing any of `warp_park_leaked`'s
     /// reasoning: a ctx owns at most ONE probe and DIES when it parks, so
-    /// there is no cap to couple to and no capacity to reserve. A parked
-    /// probe exists IFF the slot is poisoned -- the park poisons, the drain
-    /// un-poisons -- so `warp_poisoned_slots` already reports its presence.
+    /// there is no cap to couple to and no capacity to reserve.
+    ///
+    /// The load-bearing direction is **parked => poisoned** (the park
+    /// poisons; the drain precedes the un-poison), which is what makes the
+    /// mint's skip-poisoned-slots sufficient. It does NOT converse (round-2
+    /// F7): a slot is also poisoned with nothing parked when the ctx had no
+    /// probe to begin with, and on both destroy-refused arms. So
+    /// `warp_poisoned_slots` does NOT report a parked probe -- the
+    /// `probe-parked`/`probe-freed` ledger is the only reporter.
     warp_ctx_leaked_probe: [Option<CtxProbe>; MAX_WARP_CTXS],
     /// The pub id whose poison condemned each slot, so a later
     /// vindication can release it (round-3 F2). 0 = none.
@@ -915,6 +921,10 @@ struct WarpCtx {
     /// comp-global `verify-unknown` count instead, so silencing the storm
     /// costs no information (#95: latch the REPORT, never the counting).
     verify_diag_arms: u32,
+    /// The last VERDICT this tick's probe reached, `None` for unknown
+    /// (round-2 F2). The rate limit answers from this rather than from
+    /// `!stream_rejected`, which cannot represent "asked, no answer".
+    verify_last: Option<bool>,
     /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
     /// this ctx consents to displaying its BO `bo_pub` on surface
     /// (slot, gen). The gen pin makes a consent die with the surface
@@ -3034,6 +3044,7 @@ impl Comp {
             verify_ok: 0,
             verify_tick: 0,
             verify_diag_arms: 0,
+            verify_last: None,
             present_to: None,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
@@ -3206,9 +3217,21 @@ impl Comp {
     /// The count is what makes UNKNOWN a state an operator can SEE at all --
     /// the per-arm `say!`s are now one-shot, so the rate has to live here.
     fn warp_ctx_verify(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
+        // ROUND-2 F9: a ctx that never HAD a probe is not an unknown
+        // VERDICT, it is an unaskable question -- and counting it here let a
+        // client drive the global rate counter at 9P-write rate, because the
+        // per-ctx rate limit sits BELOW this arm and never damps it.
+        // `verify-seq`/`verify-ok` already say "could not be asked" by
+        // standing still.
+        if self.wctx(ctx_pub, conn).map_or(true, |c| c.probe.is_none()) {
+            return None;
+        }
         let r = self.warp_ctx_verify_probe(ctx_pub, conn);
         if r.is_none() {
             self.warp_verify_unknown = self.warp_verify_unknown.saturating_add(1);
+        }
+        if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+            c.verify_last = r;
         }
         r
     }
@@ -3246,8 +3269,21 @@ impl Comp {
             // needs an intervening `tick`, not a sleep. (The reject
             // scenario runs with the clock LIVE, which is why its 100 ms
             // sleep genuinely buys a second probe.)
-            if c.verify_seq > 0 && c.verify_tick == tick {
-                return Some(!c.stream_rejected);
+            // ROUND-2 F2: cache the VERDICT, never a proxy for it.
+            // `!stream_rejected` reads TRUE (healthy) for a tick whose only
+            // probe returned UNKNOWN -- because UNKNOWN correctly leaves
+            // `stream_rejected` alone, and `verify_tick` is pinned before
+            // any device I/O. That is round-1 F1's exact defect (UNKNOWN
+            // silently becoming HEALTHY) surviving in the RETURN VALUE
+            // after the round fixed it on the ctl. Three-valued in, three
+            // valued out.
+            if c.verify_tick == tick {
+                if let Some(v) = c.verify_last {
+                    return Some(v);
+                }
+                if c.verify_seq > 0 {
+                    return None;
+                }
             }
             let p = c.probe.as_ref()?;
             (c.dev_ctx, p.mark_res, p.mark_va, p.sent_res, p.sent_va)
@@ -3931,12 +3967,26 @@ impl Comp {
                         c.pub_id,
                         p.size * 2
                     );
-                    // Infallible: an array-slot write, and the slot is
-                    // poisoned immediately below -- unmintable until the
-                    // vindication drains this.
-                    debug_assert!(self.warp_ctx_leaked_probe[slot].is_none());
-                    self.warp_ctx_leaked_probe[slot] = Some(p);
-                    self.warp_probe_parked = self.warp_probe_parked.saturating_add(1);
+                    // A RUNTIME guard, not a `debug_assert!` (round-2 F4):
+                    // `[profile.release]` sets no `debug-assertions`, so
+                    // every debug assert is compiled OUT of the shipped
+                    // tapestryd -- an overwrite would silently strand two
+                    // live fds and two mappings, `CtxProbe` having no
+                    // `Drop`. The park-implies-poison chain says this cannot
+                    // happen; `warp_park_leaked`'s overflow had exactly that
+                    // status until round-6 F1 refuted it, and the answer
+                    // then was a runtime guard too.
+                    if self.warp_ctx_leaked_probe[slot].is_none() {
+                        self.warp_ctx_leaked_probe[slot] = Some(p);
+                        self.warp_probe_parked = self.warp_probe_parked.saturating_add(1);
+                    } else {
+                        say!(
+                            "tapestryd: warp ctx slot {} probe graveyard OCCUPIED -- BUG, \
+                             park-implies-poison breached; the new record LEAKS rather than \
+                             risk freeing pages the device may still hold",
+                            slot
+                        );
+                    }
                 }
             }
             if leak {
@@ -5213,6 +5263,28 @@ impl Conn {
                 // transport); reported < signaled means an undelivered
                 // record sits here while the park never fills (a poll_fences
                 // gap); inflight > 0 belies fenced-free.
+                // #210 custody: reads the server HOLDS right now (folded
+                // per tick across ALL conns) + parse residue. fparked=0
+                // with a client-side parked Tread on a fence fid means
+                // the read never became a park -- look at inbuf.
+                //
+                // BEFORE the per-ctx loop (round-2 F6), not after: this
+                // line is FIXED size while that loop grows ~66 bytes per
+                // live ctx, and the in-tree reader takes a 512-byte
+                // snapshot. Behind it, the custody mirror silently vanished
+                // from about four live ctxs -- going blind exactly when a
+                // multi-client hunt needs it. The unbounded thing goes last.
+                let _ = core::fmt::write(
+                    &mut s,
+                    format_args!(
+                        "w210 fparked {} rparked {} inbuf {} fctx {} ffid {}\n",
+                        comp.w210_fparked,
+                        comp.w210_rparked,
+                        comp.w210_inbuf_max,
+                        comp.w210_f_ctx,
+                        comp.w210_f_fid
+                    ),
+                );
                 for c in comp.warp_ctxs.iter().flatten() {
                     let _ = core::fmt::write(
                         &mut s,
@@ -5229,21 +5301,6 @@ impl Conn {
                         ),
                     );
                 }
-                // #210 custody: reads the server HOLDS right now (folded
-                // per tick across ALL conns) + parse residue. fparked=0
-                // with a client-side parked Tread on a fence fid means
-                // the read never became a park -- look at inbuf.
-                let _ = core::fmt::write(
-                    &mut s,
-                    format_args!(
-                        "w210 fparked {} rparked {} inbuf {} fctx {} ffid {}\n",
-                        comp.w210_fparked,
-                        comp.w210_rparked,
-                        comp.w210_inbuf_max,
-                        comp.w210_f_ctx,
-                        comp.w210_f_fid
-                    ),
-                );
             }
             return self.read_str(tag, &s, a.offset, cap);
         }
@@ -5263,6 +5320,9 @@ impl Conn {
             return match warp_fk(f.path) {
                 WFK_CTL => {
                     let mut s = String::new();
+                    // Where the keys a CLIENT parses end (round-2 F5); set
+                    // after the fences block below and checked at the tail.
+                    let mut crit_end = 0usize;
                     let _ = core::fmt::write(&mut s, format_args!("{}\n", id));
                     // #175: expose the per-ctx leak accounting so the
                     // prover can watch the round-6 F1 cap directly rather
@@ -5322,6 +5382,17 @@ impl Conn {
                                 signaled
                             ),
                         );
+                        // Everything the client PARSES ends here (round-2
+                        // F5 + the self-found half): the winsys reads this
+                        // file into a 256-byte buffer and pulls
+                        // `fence-signaled` out of it, so the guard below
+                        // must measure THIS prefix, not the whole file.
+                        // Measuring the whole file would cry wolf -- with
+                        // realistic 10-digit monotonic counters the tail
+                        // (`create-refused`) genuinely passes 255 on a
+                        // long-uptime box while every client-critical key
+                        // is still comfortably inside.
+                        crit_end = s.len();
                         // #204 census (per-ctx): live = backed right now
                         // (what the creation cap counts); peak = the
                         // high-water the cap width must be sized against;
@@ -5364,18 +5435,28 @@ impl Conn {
                     // Audit F11: the "keep the client-critical keys inside a
                     // 255-byte snapshot" discipline above was a comment with
                     // nothing checking it, and the C-0d block was inserted
-                    // mid-file against it. The computed worst case is ~219,
-                    // so nothing truncates today -- but a truncation fails
-                    // SILENTLY toward a smaller value (the #210 silent-park
-                    // shape: `parse_field` simply does not find the key and
-                    // the client reads a default), which is the failure mode
+                    // mid-file against it. A truncation fails SILENTLY
+                    // toward a smaller value (the #210 silent-park shape:
+                    // `parse_field` simply does not find the key and the
+                    // client reads a default), which is the failure mode
                     // that must never be discovered by its consequences.
                     // One-shot, because it would otherwise fire per read.
-                    if s.len() > WCTX_CTL_SNAPSHOT && !comp.warp_ctl_wide_said {
+                    //
+                    // Round-1 claimed a "~219 worst case, 36 bytes of
+                    // margin"; round-2 F5 refuted the figure and a
+                    // recomputation puts the client-critical prefix at ~192
+                    // and the WHOLE file at ~285 under reachable magnitudes
+                    // (10-digit monotonic counters; caps of 1024 BOs and
+                    // 64 MiB). Do not re-derive a margin from that prose --
+                    // this runtime check is the only authority, which is why
+                    // it measures rather than asserts.
+                    if crit_end > WCTX_CTL_SNAPSHOT && !comp.warp_ctl_wide_said {
                         comp.warp_ctl_wide_said = true;
                         say!(
-                            "tapestryd: warp ctx ctl is {} bytes, past the {}-byte client \
-                             snapshot -- keys after the cut are INVISIBLE to a short reader",
+                            "tapestryd: warp ctx ctl client-critical prefix is {} bytes (file \
+                             {}), past the {}-byte client snapshot -- keys after the cut are \
+                             INVISIBLE to a short reader",
+                            crit_end,
                             s.len(),
                             WCTX_CTL_SNAPSHOT
                         );
@@ -5878,9 +5959,21 @@ impl Conn {
             // right now, and an ERROR on the write is what keeps that
             // distinct from "asked and healthy" without the client having
             // to infer it from an unmoved counter.
+            //
+            // ROUND-2 F1: `fences_in_flight` ALONE admitted the
+            // maximum-hazard state. `reap_abandoned` takes the fenced slot
+            // and pushes an `abandoned` tag, which decrements this counter
+            // to 0 -- and `gpu.ctx_fences_in_flight` counts the same
+            // now-empty slot, so NEITHER gauge can see it. But "abandoned"
+            // means precisely "the GL work has not finished in 30 s", i.e.
+            // the one state where the readback is most certain to block
+            // past the 500 ms deadline. `fence_poisoned` is the flag that
+            // records it, and `warp_fenced_admit` already refuses on it one
+            // lane over -- the synchronous lane was gated more weakly than
+            // the fenced lane sitting beside it.
             Some("verify") => {
                 let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
-                if c.fences_in_flight > 0 {
+                if c.fences_in_flight > 0 || c.fence_poisoned {
                     return Err(p9::E_AGAIN);
                 }
                 comp.warp_ctx_verify(id, self.conn_id);

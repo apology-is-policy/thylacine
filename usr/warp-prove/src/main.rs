@@ -483,9 +483,14 @@ fn ctx_field_soft(root: i64, ctx: u32, key: &str) -> u64 {
     }
 }
 
+/// ROUND-2 F8: the message names the KEY, not a leg. It used to be
+/// hardcoded "two-client:", so under the harness truncation (which cuts a
+/// line at the hard-fail token) a red run from any OTHER leg printed
+/// `warp-prove: FAIL -- two-client: ctx ctl ` and sent the reader to the
+/// wrong place entirely.
 fn ctx_field(root: i64, ctx: u32, key: &str) -> u64 {
     parse_field(&open_read_string(root, &format!("ctx/{}/ctl", ctx)), key)
-        .unwrap_or_else(|| fail(&format!("two-client: ctx ctl `{}` missing (test-mode build?)", key)))
+        .unwrap_or_else(|| fail(&format!("ctx {} ctl `{}` missing (test-mode build?)", ctx, key)))
 }
 
 /// Mint a BO of the prover's standard W x H render-target geometry and
@@ -1235,10 +1240,15 @@ fn observe_rejection() {
         "warp-prove: C0-F1 before(sr {} vs {} ok {}) after(sr {} vs {} ok {})\n",
         f1_sr0, f1_vs0, f1_ok0, f1_sr, f1_vs, f1_ok
     ));
-    let _ = if f1_vs0 == 0 || f1_sr0 != 0 {
+    // ROUND-2 F8: `verify-seq` advancing plus `stream-rejected 0` is EXACTLY
+    // the reading an UNKNOWN produces -- the round's own F2 lesson, not
+    // applied here when it was learned. `verify-ok` is the only predicate
+    // that means "asked and found healthy", so the baseline requires it.
+    let _ = if f1_vs0 == 0 || f1_sr0 != 0 || f1_ok0 == 0 {
         t_putstr(
             "warp-prove: C0-F1 INSTRUMENT -- the ctx was not verifiably healthy BEFORE the \
-             attack, so nothing after it is attributable.\n",
+             attack (needs verify-seq moved AND verify-ok moved AND stream-rejected 0), so \
+             nothing after it is attributable.\n",
         )
     } else if f1_vs <= f1_vs0 {
         t_putstr(
