@@ -1210,6 +1210,15 @@ bool viv_sigtab_note_handler(const struct viv_sigtab *tab, enum viv_signote note
 bool viv_sigtab_set(struct viv_sigtab *tab, enum viv_signote note,
                     const struct viv_ksigaction *act);
 
+// Put every disposition back to SIG_DFL, IN PLACE. NULL-safe.
+//
+// This exists so exec can honour POSIX's disposition reset WITHOUT freeing the
+// table. The pointer has readers on other CPUs that hold no lock of exec's --
+// notes_post's SIG_IGN hook and notes_proc_has_live_handler both load ->sigtab
+// with a bare acquire, and notes_post takes another Proc as its target -- so a
+// free there is a use-after-free, while a reset leaves nothing to dangle.
+void viv_sigtab_reset(struct viv_sigtab *tab);
+
 // Decide whether an `rt_sigaction` is inside the translatable domain. PURE.
 //
 // `signum` must be 1..64, must not be SIGKILL/SIGSTOP (POSIX: uncatchable, and

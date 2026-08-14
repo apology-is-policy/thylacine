@@ -1415,6 +1415,15 @@ bool proc_exec_alone(struct Proc *p);
 // corruption, not a runtime error.
 void proc_exec_replace(struct Proc *p, struct AddrSpace *nas);
 
+// proc_exec_reset_dispositions -- POSIX's "exec resets caught signals to
+// default", as proc_exec_replace performs it. Split out to be testable.
+//
+// It RESETS the sigtab in place and never frees it: the table has lockless
+// readers on other CPUs (notes_post's SIG_IGN hook, notes_proc_has_live_handler)
+// and notes_post targets another Proc, so freeing it here would be a UAF.
+// proc_exec_alone bounds this Proc's THREADS, not other PROCS.
+void proc_exec_reset_dispositions(struct Proc *p);
+
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
 // return-to-EL0 (the sync-from-EL0 SVC + fault-handled tails in
 // exception.c, and the IRQ-from-EL0 tail in vectors.S 0x480). If the calling
