@@ -58,3 +58,6 @@ vault/**/*.canvas
 # so it is joined per checkout with `yip install` rather than committed.
 .mcp.json
 .claude/settings.local.json
+
+# quaestor build artifact (go build ./... drops the binary in-package)
+vault/meta/quaestor/quaestor
