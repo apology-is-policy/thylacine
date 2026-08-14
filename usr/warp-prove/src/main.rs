@@ -52,6 +52,11 @@ const VIRGL_CCMD_CLEAR: u32 = 7;
 // + `Illegal command buffer` -- and GET_QUERY_RESULT is exactly 21, so the
 // runtime confirmed the counting rule while refuting the value.
 const VIRGL_CCMD_BLIT: u32 = 16;
+// 17 -- ONE PAST BLIT. Counted out of the enum, never grepped for: the
+// server's first cut of this same constant read 96, a line number, and only
+// the healthy control caught it.
+const VIRGL_CCMD_RESOURCE_COPY_REGION: u32 = 17;
+const VIRGL_CMD_RCR_SIZE: u32 = 13;
 const VIRGL_CCMD_SET_SUB_CTX: u32 = 28;
 const VIRGL_CCMD_CREATE_SUB_CTX: u32 = 29;
 // virgl_protocol.h "blit": 21 payload dwords, S0 packing mask|filter|scissor.
@@ -1020,6 +1025,13 @@ fn observe_rejection() {
     let sr_bad = ctx_field(bad, ctx_bad, "stream-rejected");
     let sr_ok = ctx_field(ok, ctx_ok, "stream-rejected");
     let at_bad = ctx_field(bad, ctx_bad, "rejected-at");
+    // AUDIT F2: the healthy arm's `stream-rejected 0` is ALSO satisfied by a
+    // probe that returned UNKNOWN, so on its own it is a negative assertion a
+    // broken fixture passes (the aux#215 class, which this arc has now
+    // shipped three times). `verify-ok` advances ONLY on a healthy verdict,
+    // so requiring it to move is what makes the control mean "asked and
+    // found healthy" rather than merely "not reported rejected".
+    let vok_ok = ctx_field(ok, ctx_ok, "verify-ok");
     t_putstr(&format!(
         "warp-prove: C0-DETECT verify wrote(bad {} ok {}) verify-seq(bad {}->{} ok {}->{}) \
          stream-rejected(bad {} ok {}) rejected-at(bad {})\n",
@@ -1031,12 +1043,19 @@ fn observe_rejection() {
              ctxs, so the probe did not run and neither reading below means anything. \
              (Pre-C-0d tapestryd? the field would read 0 and never move.)\n",
         )
+    } else if sr_bad == 1 && sr_ok == 0 && vok_ok == 0 {
+        t_putstr(
+            "warp-prove: C0-DETECT FAIL(control unproven) -- the healthy ctx reports \
+             stream-rejected 0 but `verify-ok` never advanced, so its probe returned \
+             UNKNOWN rather than finding health. The control is vacuous (F2).\n",
+        )
     } else if sr_bad == 1 && sr_ok == 0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT PASS -- the REJECTED ctx reports stream-rejected 1 \
-             (at verify {}) while the healthy ctx running the SAME verb reports 0. \
-             The detector discriminates; #240 is observable in-guest.\n",
-            at_bad
+             (at verify {}) while the healthy ctx running the SAME verb reports 0 AND \
+             recorded a healthy verdict (verify-ok {}). The detector discriminates; \
+             #240 is observable in-guest.\n",
+            at_bad, vok_ok
         ))
     } else if sr_bad == 1 && sr_ok == 1 {
         t_putstr(
@@ -1096,12 +1115,120 @@ fn observe_rejection() {
         ));
     }
 
+    // ===== F1: CAN A CLIENT BLIND ITS OWN DETECTOR? =====
+    //
+    // The C-0d audit's headline finding, and it is filed as proof-by-
+    // scripture: the reviewer could not read virglrenderer in-tree, so the
+    // central step -- that a client can name a resource the SERVER attached
+    // to the client's OWN dev_ctx -- rests on in-repo statements plus P1a's
+    // same-context control. Convert it to proof-by-measurement before any
+    // fix is designed around it.
+    //
+    // THE ATTACK, exactly as filed. `res_seq` is one pre-incremented counter
+    // shared by probes and client BOs, and a ctx mint consumes exactly two
+    // ids for its probe -- so with the client's first BO reporting `res` N,
+    // the probe's are N-2 (mark) and N-1 (sentinel). The client then writes
+    // MARK, which is painted once at ctx create and never repainted. Every
+    // later verify should read neither mark nor token -> UNKNOWN -> and with
+    // F2 (UNKNOWN has no ctl representation) that reads as HEALTHY forever.
+    //
+    // Uses a THIRD connection so neither arm above is disturbed.
+    let f1 = warp_connect("f1/blind");
+    let ctx_f1 = mint_ctx(f1, "f1/blind");
+    let (f1_bo, f1_res, _f1_va) = mint_sized_bo(f1, ctx_f1, "f1/blind");
+    let _ = f1_bo;
+    // Derive the probe ids from OUR OWN first resource id, exactly as an
+    // attacker would -- do not hardcode, or the leg stops tracking the
+    // server's allocation order and silently tests nothing.
+    let guess_mark = f1_res.wrapping_sub(2);
+    let guess_sent = f1_res.wrapping_sub(1);
+    t_putstr(&format!(
+        "warp-prove: C0-F1 our first res {} -> guessing mark {} sentinel {}\n",
+        f1_res, guess_mark, guess_sent
+    ));
+    // Baseline: the ctx must be HEALTHY and the probe must WORK before the
+    // attack, or a post-attack blindness reading is unattributable.
+    let _ = write_ctl(f1, &format!("ctx/{}/ctl", ctx_f1), "verify");
+    let f1_sr0 = ctx_field(f1, ctx_f1, "stream-rejected");
+    let f1_vs0 = ctx_field(f1, ctx_f1, "verify-seq");
+    let f1_ok0 = ctx_field(f1, ctx_f1, "verify-ok");
+    // Paint our own BO green, then copy IT over the guessed mark.
+    let mut sf: Vec<u32> = Vec::new();
+    subctx_preamble(&mut sf);
+    clear_stream(&mut sf, f1_res, 1, 0.0, 1.0, 0.0);
+    submit_stream(f1, ctx_f1, &sf, "f1 paint own bo");
+    let mut sc2: Vec<u32> = Vec::new();
+    rcr_stream(&mut sc2, f1_res, guess_mark);
+    submit_stream(f1, ctx_f1, &sc2, "f1 overwrite the probe MARK");
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
+    let _ = write_ctl(f1, &format!("ctx/{}/ctl", ctx_f1), "verify");
+    let f1_sr = ctx_field(f1, ctx_f1, "stream-rejected");
+    let f1_vs = ctx_field(f1, ctx_f1, "verify-seq");
+    let f1_ok = ctx_field(f1, ctx_f1, "verify-ok");
+    t_putstr(&format!(
+        "warp-prove: C0-F1 before(sr {} vs {} ok {}) after(sr {} vs {} ok {})\n",
+        f1_sr0, f1_vs0, f1_ok0, f1_sr, f1_vs, f1_ok
+    ));
+    let _ = if f1_vs0 == 0 || f1_sr0 != 0 {
+        t_putstr(
+            "warp-prove: C0-F1 INSTRUMENT -- the ctx was not verifiably healthy BEFORE the \
+             attack, so nothing after it is attributable.\n",
+        )
+    } else if f1_vs <= f1_vs0 {
+        t_putstr(
+            "warp-prove: C0-F1 INSTRUMENT -- the post-attack verify did not run (rate limit?), \
+             so this says nothing.\n",
+        )
+    } else {
+        // Decided IN-GUEST off `verify-ok`, which advances ONLY on a healthy
+        // verdict. Blinding shows up as verify-seq advancing while verify-ok
+        // does not -- the UNKNOWN signature -- with no host-log reading
+        // needed. The first cut of this verdict told the reader to grep for a
+        // phrase it PRINTED ITSELF, so its own output matched the search and
+        // the check could never report absence (#186, in my own instrument).
+        if f1_ok > f1_ok0 {
+            t_putstr(
+                "warp-prove: C0-F1 DEFENDED -- after a client wrote the probe's mark, the \
+                 next verify still reached a HEALTHY verdict (verify-ok advanced). The \
+                 per-verify repaint holds: corruption cannot outlive one verify.\n",
+            )
+        } else {
+            t_putstr(
+                "warp-prove: C0-F1 BLINDED -- verify-seq advanced but verify-ok did NOT, so \
+                 the probe returned UNKNOWN after the client wrote its mark. The detector is \
+                 blindable for the ctx's life and a dead ctx would read as healthy.\n",
+            )
+        }
+    };
+
     t_putstr("warp-prove: C0-REJECT DONE\n");
 
     unsafe {
         t_close(bad);
         t_close(ok);
+        t_close(f1);
     }
+}
+
+/// A stateless 1x1 `RESOURCE_COPY_REGION` (opcode 17, 13 payload dwords).
+/// Mirrors the server's own probe stream -- deliberately, since the F1
+/// question is whether a CLIENT can issue the same command against the
+/// server's resources.
+fn rcr_stream(st: &mut Vec<u32>, src_res: u32, dst_res: u32) {
+    st.push(cmd0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0, VIRGL_CMD_RCR_SIZE));
+    st.push(dst_res);
+    st.push(0); // dst level
+    st.push(0); // dst x
+    st.push(0); // dst y
+    st.push(0); // dst z
+    st.push(src_res);
+    st.push(0); // src level
+    st.push(0); // src x
+    st.push(0); // src y
+    st.push(0); // src z
+    st.push(1); // src w
+    st.push(1); // src h
+    st.push(1); // src d
 }
 
 /// A readback that REPORTS instead of failing -- `resample` aborts the run

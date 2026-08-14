@@ -846,10 +846,18 @@ struct WarpCtx {
     /// The verify sequence that caught the loss. The offending stream lies
     /// in (previous_verify, rejected_at] -- a window, never a command.
     rejected_at: u64,
-    /// Verifies run on this ctx. Monotonic; `rejected_at` names one of
-    /// these, and a reader can tell "never verified" (0) from "verified
-    /// and healthy" (>0 with stream_rejected 0) -- the #184 distinction.
+    /// Verifies ADMITTED on this ctx (incremented before any device I/O),
+    /// so `rejected_at` has a stable name to point at.
     verify_seq: u64,
+    /// Verifies that reached a HEALTHY verdict. AUDIT F2: `verify_seq`
+    /// alone cannot carry the answer, because the probe is three-valued
+    /// (healthy / latched / unknown) while the ctl was two-valued -- every
+    /// UNKNOWN arm left `verify_seq` advanced and `stream_rejected` 0,
+    /// which the docs told readers to interpret as "asked and healthy".
+    /// That is what made F1 exploitable: a blinded probe is permanently
+    /// UNKNOWN, and UNKNOWN was indistinguishable from health. A reader
+    /// now needs `verify_ok` to MOVE before believing a 0.
+    verify_ok: u64,
     /// The compositor tick the last verify ran on. SELF-AUDIT FINDING: the
     /// `verify` verb costs THREE synchronous device round trips on the
     /// compositor's own dispatch thread, and it is client-triggered -- so
@@ -2968,6 +2976,7 @@ impl Comp {
             stream_rejected: false,
             rejected_at: 0,
             verify_seq: 0,
+            verify_ok: 0,
             verify_tick: 0,
             present_to: None,
             bo_backed_peak: 0,
@@ -3107,7 +3116,7 @@ impl Comp {
     /// evidence of refusal, and must never read as health either.
     fn warp_ctx_verify(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
         let tick = self.tick;
-        let (dev_ctx, mark_res, sent_res, sent_va) = {
+        let (dev_ctx, mark_res, mark_va, sent_res, sent_va) = {
             let c = self.wctx(ctx_pub, conn)?;
             // One probe per ctx per compositor tick (see `verify_tick`). A
             // second write in the same frame is answered from the state the
@@ -3119,7 +3128,7 @@ impl Comp {
                 return Some(!c.stream_rejected);
             }
             let p = c.probe.as_ref()?;
-            (c.dev_ctx, p.mark_res, p.sent_res, p.sent_va)
+            (c.dev_ctx, p.mark_res, p.mark_va, p.sent_res, p.sent_va)
         };
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
             c.verify_seq += 1;
@@ -3141,6 +3150,27 @@ impl Comp {
         let mut token = PROBE_TOKEN_BASE ^ (seq as u32).rotate_left(8);
         if token == PROBE_MARK {
             token = !token;
+        }
+        // AUDIT F1, CONFIRMED BY MEASUREMENT: repaint the mark EVERY verify.
+        // The probe's resources are attached to the CLIENT'S OWN dev_ctx, and
+        // the submit stream is unparsed and carries raw device-global ids
+        // that `bo/<id>/info` hands out from a shared counter -- so a client
+        // derives `mark = first_res - 2` and copies over it. Measured on real
+        // V3D: the mark read back as 0xFF00FF00, the client's own green.
+        // Because `mark` used to be painted ONCE at create, that blinded the
+        // detector for the ctx's whole life (every later verify -> UNKNOWN),
+        // and UNKNOWN reads as healthy to anyone following the ctl. Repainting
+        // makes the corruption last less than one verify: this upload, the
+        // copy, and the readback all run inside a single dispatch, on one
+        // in-order controlq, so no client submit can be published between
+        // them. It is a virtio-gpu command, so it lands even on a latched ctx.
+        unsafe { core::ptr::write_volatile(mark_va as *mut u32, PROBE_MARK) };
+        if self
+            .gpu
+            .transfer_to_3d_sync(dev_ctx, mark_res, 1, 1, 4)
+            .is_err()
+        {
+            return None;
         }
         unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
         if self
@@ -3187,6 +3217,9 @@ impl Comp {
         // cadence this verb is designed for would flood the console and
         // become its own performance defect.
         if got == PROBE_MARK {
+            if let Some(c) = self.wctx_mut(ctx_pub, conn) {
+                c.verify_ok += 1;
+            }
             return Some(true);
         }
         // Everything below is about to make a SERIOUS claim ("this context is
@@ -5098,8 +5131,8 @@ impl Conn {
                         let _ = core::fmt::write(
                             &mut s,
                             format_args!(
-                                "stream-rejected {}\nrejected-at {}\nverify-seq {}\n",
-                                c.stream_rejected as u32, c.rejected_at, c.verify_seq
+                                "stream-rejected {}\nrejected-at {}\nverify-seq {}\nverify-ok {}\n",
+                                c.stream_rejected as u32, c.rejected_at, c.verify_seq, c.verify_ok
                             ),
                         );
                     }
