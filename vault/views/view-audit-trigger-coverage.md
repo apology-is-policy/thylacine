@@ -40,7 +40,27 @@ that would catch it — has the owning dossier been updated since the row last
 changed on main? — is the next increment, tracked as task #169.
 
 <!-- generated:begin -->
-**97 declared surfaces · 93 covered by a hard-audit dossier · 1 soft-owned · 0 unowned · 3 unparsed.**
+**97 declared surfaces · 93 covered by a hard-audit dossier · 1 soft-owned · 0 unowned · 3 unparsed · 13 cited path(s) that do not resolve.**
+
+### Cited paths that do not resolve
+
+| declared surface | cited path | |
+|---|---|---|
+| A-5c RECOVER recovery keyslot (corvus) | `usr/corvus-mint` | no such file in the tree |
+| Hardware allowance / I-34 (Menagerie build-arc 2) | `kernel/libt/libthyla-rs` | no such file in the tree |
+| Initial bringup | `init/init.c` | no such file in the tree |
+| Monotonic-clock vDSO page (#343) | `kernel/user` | **possibly a documented NEGATIVE — read the claim** |
+| Notes / signals | `specs/notes.tla` | **possibly a documented NEGATIVE — read the claim** |
+| Page fault + COW + W^X | `mm/vm.c` | **possibly a documented NEGATIVE — read the claim** |
+| Page fault + COW + W^X | `mm/wxe.c` | no such file in the tree |
+| Syscall byte-I/O staging + bulk uaccess + the per-service bulk ring (C… | `kernel/user` | no such file in the tree |
+| The Larder: guest-side 9P FS cache (L1c substrate + attr sub-cache; L1… | `kernel/include/thylacine/larder.c` | no such file in the tree |
+| VMO / BURROW | `mm/vmo_pages.c` | no such file in the tree |
+| `thread_spawn` / `thread_exit` / multi-thread exit | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
+| `torpor_wait` / `torpor_wake` | `specs/futex.tla` | **possibly a documented NEGATIVE — read the claim** |
+| pouch pthread boundary-line | `specs/pthread.tla` | **possibly a documented NEGATIVE — read the claim** |
+
+### Ownership gaps
 
 | declared surface | state | why |
 |---|---|---|

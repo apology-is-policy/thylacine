@@ -563,6 +563,30 @@ func renderCodeCoverage(reg *Registry) string {
 // (usr/tapestryd/).
 var declPathRe = regexp.MustCompile(`(?:kernel|arch|mm|usr|lib|tools|specs|init)/[A-Za-z0-9_./{},-]*`)
 
+// declResolves: does a cited path name a real file? Plain existence is not
+// enough, because the table writes `kernel/foo.{c,h}` under a project
+// convention where the .c sits in kernel/ and the .h in
+// kernel/include/thylacine/. Expanding that brace literally invents a header
+// path that has never existed, so a resolver that only stats the literal
+// string reports ~20 phantom headers and drowns the two real ones.
+func declResolves(root, p string) bool {
+	if _, err := os.Stat(filepath.Join(root, p)); err == nil {
+		return true
+	}
+	if strings.HasSuffix(p, ".h") {
+		alt := filepath.Join(root, "kernel", "include", "thylacine", filepath.Base(p))
+		if _, err := os.Stat(alt); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// negClaimRe: the row may be asserting a path's ABSENCE. Matched against the
+// text immediately preceding a token so a documented negative is flagged for
+// a human read rather than reported as drift.
+var negClaimRe = regexp.MustCompile(`(?i)\b(no|not|never|without|removed|deleted|retired|absent)\b[^.]{0,24}$`)
+
 // expandDecl normalizes one extracted token into the concrete paths it names.
 // Brace sets expand; trailing punctuation swept up by the character class is
 // dropped. Returns nothing for a token that degenerates to a bare directory
@@ -649,6 +673,14 @@ func renderAuditTriggerCoverage(reg *Registry) string {
 	type row struct{ surface, state, detail string }
 	var gaps []row
 	var covered, softOnly, unowned, unparsed int
+	// The second arm (main's suggestion, 2026-08-14): a cited path that does
+	// not resolve. Orthogonal to ownership -- a row can be fully covered AND
+	// cite a phantom -- so it is counted and reported separately rather than
+	// as a fifth state. A wrong path is strictly worse than an empty column:
+	// an empty column announces that it tells you nothing, while a wrong path
+	// reads as authoritative and sends the reader somewhere that never was.
+	type ghost struct{ surface, path, note string }
+	var ghosts []ghost
 	for _, ln := range strings.Split(string(b), "\n") {
 		if !strings.HasPrefix(ln, "| ") || strings.HasPrefix(ln, "|---") ||
 			strings.HasPrefix(ln, "| Surface ") {
@@ -662,12 +694,37 @@ func renderAuditTriggerCoverage(reg *Registry) string {
 		surface := strings.TrimSpace(f[0])
 		var paths []string
 		seen := map[string]bool{}
-		for _, t := range declPathRe.FindAllString(ln, -1) {
-			for _, p := range expandDecl(t) {
-				if !seen[p] {
-					seen[p] = true
-					paths = append(paths, p)
+		for _, loc := range declPathRe.FindAllStringIndex(ln, -1) {
+			for _, p := range expandDecl(ln[loc[0]:loc[1]]) {
+				if seen[p] {
+					continue
 				}
+				seen[p] = true
+				paths = append(paths, p)
+				if declResolves(root, p) {
+					continue
+				}
+				// A leading '/' makes it a GUEST filesystem path, not a source
+				// path (`/lib/ndb/local` is the Plan 9 network database, not a
+				// file in this repo). The regex starts matching at the segment
+				// name, so the slash is only visible by looking back one char.
+				if loc[0] > 0 && ln[loc[0]-1] == '/' {
+					continue
+				}
+				// A path may legitimately be absent because the row SAYS it is
+				// absent ("there is no `mm/vm.c`"). Those are reported, never
+				// suppressed -- a silent skip is how a sweep launders an error
+				// -- but they are flagged so the reader knows to read the
+				// CLAIM rather than the token.
+				note := "no such file in the tree"
+				lo := loc[0] - 48
+				if lo < 0 {
+					lo = 0
+				}
+				if negClaimRe.MatchString(ln[lo:loc[0]]) {
+					note = "**possibly a documented NEGATIVE — read the claim**"
+				}
+				ghosts = append(ghosts, ghost{surface, p, note})
 			}
 		}
 		if len(paths) == 0 {
@@ -697,15 +754,35 @@ func renderAuditTriggerCoverage(reg *Registry) string {
 	total := covered + softOnly + unowned + unparsed
 	out := []string{
 		fmt.Sprintf("**%d declared surfaces · %d covered by a hard-audit dossier · "+
-			"%d soft-owned · %d unowned · %d unparsed.**",
-			total, covered, softOnly, unowned, unparsed),
+			"%d soft-owned · %d unowned · %d unparsed · %d cited path(s) that do "+
+			"not resolve.**",
+			total, covered, softOnly, unowned, unparsed, len(ghosts)),
 		"",
 	}
-	if len(gaps) == 0 {
-		out = append(out, "Every declared surface has a hard-audit dossier.")
+	if len(gaps) == 0 && len(ghosts) == 0 {
+		out = append(out, "Every declared surface has a hard-audit dossier, and every cited path resolves.")
 		return strings.Join(out, "\n")
 	}
-	out = append(out, "| declared surface | state | why |", "|---|---|---|")
+	if len(ghosts) > 0 {
+		out = append(out, "### Cited paths that do not resolve", "",
+			"| declared surface | cited path | |", "|---|---|---|")
+		sort.Slice(ghosts, func(i, j int) bool {
+			if ghosts[i].surface != ghosts[j].surface {
+				return ghosts[i].surface < ghosts[j].surface
+			}
+			return ghosts[i].path < ghosts[j].path
+		})
+		for _, g := range ghosts {
+			out = append(out, fmt.Sprintf("| %s | `%s` | %s |",
+				truncRunes(g.surface, 70), g.path, g.note))
+		}
+		out = append(out, "")
+	}
+	if len(gaps) == 0 {
+		return strings.Join(out, "\n")
+	}
+	out = append(out, "### Ownership gaps", "",
+		"| declared surface | state | why |", "|---|---|---|")
 	sort.Slice(gaps, func(i, j int) bool { return gaps[i].surface < gaps[j].surface })
 	for _, g := range gaps {
 		// Only the surface title is character-truncated: it comes from main's

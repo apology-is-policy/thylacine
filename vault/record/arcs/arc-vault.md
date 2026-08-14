@@ -1,9 +1,11 @@
 ---
 id: arc-vault
 type: arc
-title: "The vault migration"
+title: The vault migration
 status: active
-design: [vault/meta/schema.md, vault/meta/workflow.md]
+design:
+  - vault/meta/schema.md
+  - vault/meta/workflow.md
 chunks:
   - chg-2026-07-31-vault-commit-0
   - chg-2026-07-31-ninep-pilot
