@@ -1422,6 +1422,19 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas);
 // readers on other CPUs (notes_post's SIG_IGN hook, notes_proc_has_live_handler)
 // and notes_post targets another Proc, so freeing it here would be a UAF.
 // proc_exec_alone bounds this Proc's THREADS, not other PROCS.
+//
+// Why reset rather than take a lock or refcount the table -- the reason is
+// evidence, not taste. A lock only holds if every FUTURE reader remembers to
+// take it, and the reader set grows for the most ordinary reason there is: a
+// new disposition predicate needs the dispositions, so it reaches for
+// ->sigtab and nothing objects. That is not hypothetical. The aux tree grew a
+// third cross-Proc reader (a shared predicate on the ^Z fan, reached with an
+// arbitrary pgrp member) in the very session that filed this bug -- written as
+// a bare atomic load by the author who was holding the finding at the time.
+// This tree is one predicate away from the same thing: the cross-Proc call
+// site already exists at proc_tty_susp_would_stop_locked; only the sigtab read
+// is missing. Resetting removes the dangling pointer outright, so reader-set
+// growth is safe BY DEFAULT instead of safe-if-remembered.
 void proc_exec_reset_dispositions(struct Proc *p);
 
 // EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
