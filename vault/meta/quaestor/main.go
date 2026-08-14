@@ -21,6 +21,10 @@ const usage = `quaestor -- the vault registrar (vault/meta/schema.md section 8)
   quaestor backlinks <id> [--json]
   quaestor close <id> --status S [--fixed-by C] [--regression R] [--seam S]
   quaestor id <candidate>       check an id for shape + collisions
+  quaestor owner <path>... [--json]
+                                does the vault carry this surface? (the
+                                per-surface cutover test) exit 0 = go to the
+                                vault, 1 = write the reference doc
   quaestor stale [--all] [--json]
                                 dossiers whose code changed after 'updated:'
   quaestor serve                MCP server on stdio (newline-delimited JSON-RPC)
@@ -122,6 +126,8 @@ func main() {
 		code = cmdClose(root, rest)
 	case "id":
 		code = cmdID(root, rest)
+	case "owner":
+		code = cmdOwner(root, rest)
 	case "stale":
 		code = cmdStale(root, rest)
 	case "serve":

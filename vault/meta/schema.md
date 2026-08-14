@@ -393,9 +393,45 @@ do-not-re-report preamble), `new` (typed note factory from
 `vault/meta/templates/`), `query` (fnd/seam by surface + status),
 `backlinks` (incoming edges + wikilinks), `close` (closure-field flip on a
 Record note, refusing everything else by construction), `id` (shape +
-collision check), `stale` (below), `serve` (the MCP layer:
+collision check), `owner` (below), `stale` (below), `serve` (the MCP layer:
 newline-delimited JSON-RPC over stdio exposing the same operations as
 tools; wired via `.mcp.json`).
+
+`quaestor owner <path>` is the per-surface cutover test: does the vault
+already carry this surface, so an edit belongs in a dossier rather than in a
+new reference doc? Exit 0 says go to the vault, 1 says write the reference
+doc as today and file the sweep. It exists because the cutover rule is only
+worth adopting if the test is one command — "grep the vault for the path"
+gets two conventions wrong, and both wrong answers are confident.
+
+It reports **two** verdicts and they are not the same question:
+
+- **owned** — a `sub` dossier names this exact path in `code:`. The strict
+  fact the coverage ledger counts, arrived at after the first ledger rotted
+  by letting prose mention count. This command must never widen it.
+- **covered** — the vault carries the surface by any route, which is what
+  the decision actually turns on. The exit status follows this one.
+
+Three routes make a path covered but not owned, each a live case in the
+corpus: the `kernel/foo.{c,h}` house convention, where the `.c` sits in
+`kernel/` and the `.h` in `kernel/include/thylacine/` (7 headers — every one
+of them answered UNOWNED before the twin arm existed); a directory claim
+covering files beneath it; and a non-`sub` note that names the file in a
+frontmatter field other than `code:` (`abi-errno` pins `errno.h` through
+`pinned-by:` and has swept nothing, so an errno addition told "unowned,
+write the reference doc" would duplicate the errno registry).
+
+The failure mode that governs the design is a **false unowned** — it
+re-opens the two-sources-of-truth divergence the cutover exists to close,
+silently, because both documents look fine afterwards. So an uncovered
+answer never stops at "no": it names the twin, the neighbours in the same
+directory and how many of them are swept. Two consequences were learned by
+getting them wrong: whether a twin EXISTS is reported separately from
+whether it is owned (the first version announced "twin kernel/errno.c is
+unowned too" about a file that has never existed — the phantom-path class
+this tooling was built to catch, committed by the tooling), and the closing
+directive is conditional on the lead above it (it printed "no dossier, write
+the reference doc" directly under "the twin is owned by sub-kernel-caps").
 
 `quaestor stale` answers the question the coverage ledger says it cannot:
 not "does every file have an owner" but "does a dossier that owned a file
