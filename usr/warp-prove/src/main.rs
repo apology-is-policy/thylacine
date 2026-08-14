@@ -380,6 +380,12 @@ pub extern "C" fn rs_main() -> i64 {
     // machine with nothing able to regress-test it.
     prove_poisoned_path(root);
 
+    // 7b. The PROBE GRAVEYARD (#240 audit F3). The leg above drives the
+    // wedge on a ctx that SURVIVES it; this one drives the wedge into a
+    // ctx DESTROY, which is the only path that parks a probe -- and the
+    // path that leaked its two handles forever until F3.
+    prove_probe_reclaim(root);
+
     // 8. The TWO-CLIENT path (#180). Everything above -- including the
     // poisoned path -- drives ONE connection, so every CROSS-client property
     // of the seam was validated by reading alone. Round-8 F1 lived exactly
@@ -400,7 +406,7 @@ pub extern "C" fn rs_main() -> i64 {
     prove_cross_ctx_blit();
 
     unsafe { t_close(root) };
-    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path + two-client + corpse-reclaim + C0-P1 cross-ctx blit)\n");
+    t_putstr("WARP-PROVE PASS (ctx create/destroy + CCMD round-trip + poisoned path + probe-reclaim + two-client + corpse-reclaim + C0-P1 cross-ctx blit)\n");
     unsafe { t_exits(0) }
 }
 
@@ -447,6 +453,34 @@ fn mint_backed_bo(root: i64, ctx: u32, what: &str) -> u32 {
 fn fenced_free(root: i64) -> u64 {
     parse_field(&open_read_string(root, "ctl"), "fenced-free")
         .unwrap_or_else(|| fail("ctl `fenced-free` field missing (test-mode build?)"))
+}
+
+/// AUDIT F9: the NON-FATAL ctx-ctl reader, for the C0 sections -- which are
+/// documented to report a RESULT either way and to fail only on a broken
+/// instrument. `ctx_field` below calls `fail()`, which prints the harness
+/// HARD-FAIL token, and my own comment beside it claimed a pre-C-0d
+/// tapestryd "would read 0 and never move". It would not: the field is
+/// ABSENT, so the whole reject run aborted on the first read instead of
+/// reaching the INSTRUMENT arm written for exactly that case.
+///
+/// Names the missing key, closes the scenario with its DONE marker so the
+/// harness is not left waiting, and exits 0. The host gate then fails on
+/// the ABSENT verdict terms -- which is the honest way for this to fail,
+/// and (since F8) a way that actually fails.
+fn ctx_field_soft(root: i64, ctx: u32, key: &str) -> u64 {
+    match parse_field(&open_read_string(root, &format!("ctx/{}/ctl", ctx)), key) {
+        Some(v) => v,
+        None => {
+            t_putstr(&format!(
+                "warp-prove: C0-DETECT INSTRUMENT -- the ctx ctl carries no `{}` field. It is \
+                 ABSENT, not 0 (a pre-C-0d tapestryd does not emit it at all), so nothing \
+                 downstream could have meant anything.\n",
+                key
+            ));
+            t_putstr("warp-prove: C0-REJECT DONE\n");
+            unsafe { t_exits(0) }
+        }
+    }
 }
 
 fn ctx_field(root: i64, ctx: u32, key: &str) -> u64 {
@@ -1016,22 +1050,22 @@ fn observe_rejection() {
     // `verify-seq` is read first and required to MOVE: `stream-rejected 0`
     // is equally satisfied by "the probe ran and found health" and by "the
     // probe never ran at all" (#184, the gauge-reading-zero trap).
-    let vs_bad_0 = ctx_field(bad, ctx_bad, "verify-seq");
-    let vs_ok_0 = ctx_field(ok, ctx_ok, "verify-seq");
+    let vs_bad_0 = ctx_field_soft(bad, ctx_bad, "verify-seq");
+    let vs_ok_0 = ctx_field_soft(ok, ctx_ok, "verify-seq");
     let wrote_bad = write_ctl(bad, &format!("ctx/{}/ctl", ctx_bad), "verify");
     let wrote_ok = write_ctl(ok, &format!("ctx/{}/ctl", ctx_ok), "verify");
-    let vs_bad = ctx_field(bad, ctx_bad, "verify-seq");
-    let vs_ok = ctx_field(ok, ctx_ok, "verify-seq");
-    let sr_bad = ctx_field(bad, ctx_bad, "stream-rejected");
-    let sr_ok = ctx_field(ok, ctx_ok, "stream-rejected");
-    let at_bad = ctx_field(bad, ctx_bad, "rejected-at");
+    let vs_bad = ctx_field_soft(bad, ctx_bad, "verify-seq");
+    let vs_ok = ctx_field_soft(ok, ctx_ok, "verify-seq");
+    let sr_bad = ctx_field_soft(bad, ctx_bad, "stream-rejected");
+    let sr_ok = ctx_field_soft(ok, ctx_ok, "stream-rejected");
+    let at_bad = ctx_field_soft(bad, ctx_bad, "rejected-at");
     // AUDIT F2: the healthy arm's `stream-rejected 0` is ALSO satisfied by a
     // probe that returned UNKNOWN, so on its own it is a negative assertion a
     // broken fixture passes (the aux#215 class, which this arc has now
     // shipped three times). `verify-ok` advances ONLY on a healthy verdict,
     // so requiring it to move is what makes the control mean "asked and
     // found healthy" rather than merely "not reported rejected".
-    let vok_ok = ctx_field(ok, ctx_ok, "verify-ok");
+    let vok_ok = ctx_field_soft(ok, ctx_ok, "verify-ok");
     t_putstr(&format!(
         "warp-prove: C0-DETECT verify wrote(bad {} ok {}) verify-seq(bad {}->{} ok {}->{}) \
          stream-rejected(bad {} ok {}) rejected-at(bad {})\n",
@@ -1041,7 +1075,8 @@ fn observe_rejection() {
         t_putstr(
             "warp-prove: C0-DETECT INSTRUMENT -- `verify-seq` did not advance on one or both \
              ctxs, so the probe did not run and neither reading below means anything. \
-             (Pre-C-0d tapestryd? the field would read 0 and never move.)\n",
+             (A pre-C-0d tapestryd cannot reach here at all: the field is ABSENT and \
+             `ctx_field_soft` reports that separately.)\n",
         )
     } else if sr_bad == 1 && sr_ok == 0 && vok_ok == 0 {
         t_putstr(
@@ -1086,14 +1121,30 @@ fn observe_rejection() {
     // `verify-seq` to have advanced before believing the re-read, and say so
     // plainly when it has not.
     let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
-    let rv_bad_0 = ctx_field(bad, ctx_bad, "verify-seq");
-    let rv_ok_0 = ctx_field(ok, ctx_ok, "verify-seq");
+    //
+    // AUDIT F10: half of this leg used to be a TAUTOLOGY. Nothing in the
+    // server ever sets `stream_rejected` back to false -- full writer census
+    // -- so "the rejection did not clear" was unfalsifiable, and the ctl
+    // field cannot tell "the second probe also found rejection" from "the
+    // flag is simply still set". `verify-ok` is the falsifiable twin: it
+    // advances ONLY when a probe reaches a HEALTHY verdict, so a second real
+    // probe must leave it STILL on the rejected ctx and MOVE it on the
+    // control. `rejected-at` rides along as the re-latch check -- it is
+    // written once, at first detection, and must stay pinned there.
+    let rv_bad_0 = ctx_field_soft(bad, ctx_bad, "verify-seq");
+    let rv_ok_0 = ctx_field_soft(ok, ctx_ok, "verify-seq");
+    let vok_bad_0 = ctx_field_soft(bad, ctx_bad, "verify-ok");
+    let vok_ok_0 = ctx_field_soft(ok, ctx_ok, "verify-ok");
+    let at_bad_0 = ctx_field_soft(bad, ctx_bad, "rejected-at");
     let _ = write_ctl(bad, &format!("ctx/{}/ctl", ctx_bad), "verify");
     let _ = write_ctl(ok, &format!("ctx/{}/ctl", ctx_ok), "verify");
-    let rv_bad = ctx_field(bad, ctx_bad, "verify-seq");
-    let rv_ok = ctx_field(ok, ctx_ok, "verify-seq");
-    let sr2_bad = ctx_field(bad, ctx_bad, "stream-rejected");
-    let sr2_ok = ctx_field(ok, ctx_ok, "stream-rejected");
+    let rv_bad = ctx_field_soft(bad, ctx_bad, "verify-seq");
+    let rv_ok = ctx_field_soft(ok, ctx_ok, "verify-seq");
+    let sr2_bad = ctx_field_soft(bad, ctx_bad, "stream-rejected");
+    let sr2_ok = ctx_field_soft(ok, ctx_ok, "stream-rejected");
+    let vok_bad = ctx_field_soft(bad, ctx_bad, "verify-ok");
+    let vok_ok = ctx_field_soft(ok, ctx_ok, "verify-ok");
+    let at_bad = ctx_field_soft(bad, ctx_bad, "rejected-at");
     if rv_bad <= rv_bad_0 || rv_ok <= rv_ok_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY NOT TESTED -- the re-verify was rate-limited \
@@ -1101,17 +1152,32 @@ fn observe_rejection() {
              cache and proves nothing about stickiness.\n",
             rv_bad_0, rv_bad, rv_ok_0, rv_ok
         ));
-    } else if sr2_bad == 1 && sr2_ok == 0 {
+    } else if sr2_bad == 1 && sr2_ok == 0 && vok_bad == vok_bad_0 && vok_ok > vok_ok_0 {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY PASS -- a SECOND real probe (verify-seq bad {} ok \
-             {}) still reads (1 0): the rejection did not clear and health did not drift.\n",
-            rv_bad, rv_ok
+             {}) reads (1 0), and the falsifiable half holds: verify-ok stayed {} on the \
+             rejected ctx (it found no health) while the control's moved {}->{}. \
+             rejected-at pinned at {}.\n",
+            rv_bad, rv_ok, vok_bad, vok_ok_0, vok_ok, at_bad
+        ));
+    } else if at_bad != at_bad_0 {
+        t_putstr(&format!(
+            "warp-prove: C0-DETECT STICKY FAIL(re-latched) -- `rejected-at` moved {}->{}, so \
+             the ctx was re-detected rather than staying latched at first detection.\n",
+            at_bad_0, at_bad
+        ));
+    } else if vok_bad > vok_bad_0 {
+        t_putstr(&format!(
+            "warp-prove: C0-DETECT STICKY FAIL(healed) -- a second real probe found the \
+             REJECTED ctx healthy (verify-ok {}->{}) while stream-rejected still reads {}. \
+             The flag is sticky but the probe is not: the two now disagree.\n",
+            vok_bad_0, vok_bad, sr2_bad
         ));
     } else {
         t_putstr(&format!(
             "warp-prove: C0-DETECT STICKY FAIL -- a second real probe reads (bad {} ok {}), \
-             want (1 0).\n",
-            sr2_bad, sr2_ok
+             want (1 0); verify-ok bad {}->{} ok {}->{} (want still / moved).\n",
+            sr2_bad, sr2_ok, vok_bad_0, vok_bad, vok_ok_0, vok_ok
         ));
     }
 
@@ -1149,9 +1215,9 @@ fn observe_rejection() {
     // Baseline: the ctx must be HEALTHY and the probe must WORK before the
     // attack, or a post-attack blindness reading is unattributable.
     let _ = write_ctl(f1, &format!("ctx/{}/ctl", ctx_f1), "verify");
-    let f1_sr0 = ctx_field(f1, ctx_f1, "stream-rejected");
-    let f1_vs0 = ctx_field(f1, ctx_f1, "verify-seq");
-    let f1_ok0 = ctx_field(f1, ctx_f1, "verify-ok");
+    let f1_sr0 = ctx_field_soft(f1, ctx_f1, "stream-rejected");
+    let f1_vs0 = ctx_field_soft(f1, ctx_f1, "verify-seq");
+    let f1_ok0 = ctx_field_soft(f1, ctx_f1, "verify-ok");
     // Paint our own BO green, then copy IT over the guessed mark.
     let mut sf: Vec<u32> = Vec::new();
     subctx_preamble(&mut sf);
@@ -1162,9 +1228,9 @@ fn observe_rejection() {
     submit_stream(f1, ctx_f1, &sc2, "f1 overwrite the probe MARK");
     let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
     let _ = write_ctl(f1, &format!("ctx/{}/ctl", ctx_f1), "verify");
-    let f1_sr = ctx_field(f1, ctx_f1, "stream-rejected");
-    let f1_vs = ctx_field(f1, ctx_f1, "verify-seq");
-    let f1_ok = ctx_field(f1, ctx_f1, "verify-ok");
+    let f1_sr = ctx_field_soft(f1, ctx_f1, "stream-rejected");
+    let f1_vs = ctx_field_soft(f1, ctx_f1, "verify-seq");
+    let f1_ok = ctx_field_soft(f1, ctx_f1, "verify-ok");
     t_putstr(&format!(
         "warp-prove: C0-F1 before(sr {} vs {} ok {}) after(sr {} vs {} ok {})\n",
         f1_sr0, f1_vs0, f1_ok0, f1_sr, f1_vs, f1_ok
@@ -1764,6 +1830,144 @@ fn prove_poisoned_path(root: i64) {
         None => fail("ctl poisoned field missing"),
     }
     let _ = write_ctl(root, "ctl", "warp-hold off");
+}
+
+/// #240 audit F3: the probe graveyard must RECLAIM. The wedge posture leaks
+/// a ctx's probe backings deliberately -- the device may still be mid-DMA
+/// into those pages -- but a leak with no reclaim is a permanent handle burn
+/// on the process that IS the console, and an unprivileged client can drive
+/// one per FENCE_ABANDON_MS. BOs have been leak-then-reclaim since round 5;
+/// the probe was leak-and-FORGET while the reference doc claimed it shared
+/// their posture, which is the respect that actually bounds the damage.
+///
+/// Two claims, so two assertions, each falsifiable ALONE (#185): the destroy
+/// PARKS (delete the park -> `probe-parked` never moves) and the vindication
+/// FREES (delete the free -> `probe-freed` never moves). Both counters are
+/// monotonic and read BEFORE the cycle, because a live gauge reading 0 is
+/// equally satisfied by "the path never ran" (#184).
+///
+/// What this does NOT prove: that the freed handles are genuinely gone.
+/// Nothing in the tree can count a Proc's open fds (#234), so the ledger is
+/// the producer REPORTING its own act, not an independent audit of it. The
+/// slot-poison census is folded in as a second, independent reading of the
+/// same vindication event.
+fn prove_probe_reclaim(root: i64) {
+    let g0 = open_read_string(root, "ctl");
+    let parked0 = parse_field(&g0, "probe-parked")
+        .unwrap_or_else(|| fail("probe-reclaim: ctl `probe-parked` missing (pre-F3 tapestryd?)"));
+    let freed0 = parse_field(&g0, "probe-freed")
+        .unwrap_or_else(|| fail("probe-reclaim: ctl `probe-freed` missing"));
+    let poisoned0 = parse_field(&g0, "poisoned")
+        .unwrap_or_else(|| fail("probe-reclaim: ctl `poisoned` missing"));
+
+    let ctx = mint_ctx(root, "probe-reclaim");
+    // PRECONDITION: this ctx actually HAS a probe. A mint whose probe failed
+    // to build stores `None`, parks nothing, and would leave every assertion
+    // below testing an absent object -- the leg would report the leak closed
+    // because there was never anything to leak. Asked while the ctx is still
+    // quiesced, which is also the only state a verify may safely run in.
+    let wrote_v = write_ctl(root, &format!("ctx/{}/ctl", ctx), "verify");
+    let vok = ctx_field(root, ctx, "verify-ok");
+    let vseq = ctx_field(root, ctx, "verify-seq");
+    t_putstr(&format!(
+        "warp-prove: probe-reclaim ctx {} baseline verify wrote {} seq {} ok {} \
+         (parked0 {} freed0 {} poisoned0 {})\n",
+        ctx, wrote_v as u32, vseq, vok, parked0, freed0, poisoned0
+    ));
+    if !wrote_v || vok == 0 {
+        fail("probe-reclaim: the fresh ctx has no working probe (see trace above) -- \
+              nothing for the graveyard to hold, so every assertion below is vacuous");
+    }
+
+    // The wedge: hold the completion, submit, abandon. The abandon delta is
+    // the anti-vacuous gate on the poison itself (#175 / round-7 F2) -- if a
+    // drain beat us the ctx is HEALTHY, its destroy takes the clean arm, and
+    // that arm frees the probe outright and never parks it.
+    if !write_ctl(root, "ctl", "warp-hold on") {
+        fail("probe-reclaim: warp-hold on (is tapestryd built with test-mode?)");
+    }
+    let submit_path = format!("ctx/{}/submit", ctx);
+    let fd = unsafe { t_open(root, submit_path.as_ptr(), submit_path.len(), T_OWRITE) };
+    if fd < 0 {
+        fail("probe-reclaim: submit open");
+    }
+    let nop = [cmd0(VIRGL_CCMD_CLEAR, 0, 0).to_le_bytes()].concat();
+    let _ = unsafe { t_write(fd, nop.as_ptr(), nop.len()) };
+    unsafe { t_close(fd) };
+    let ab0 = parse_field(&open_read_string(root, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("probe-reclaim: ctl `abandoned` missing (test-mode build?)"));
+    if !write_ctl(root, "ctl", "warp-abandon") {
+        fail("probe-reclaim: warp-abandon");
+    }
+    let ab1 = parse_field(&open_read_string(root, "ctl"), "abandoned")
+        .unwrap_or_else(|| fail("probe-reclaim: ctl `abandoned` missing after abandon"));
+    if ab1 <= ab0 {
+        fail("probe-reclaim: warp-abandon abandoned 0 NEW slots -- the ctx is healthy, \
+              so its destroy would take the CLEAN arm and the park under test never runs");
+    }
+
+    // The destroy is what parks: a poisoned ctx retires with leak=true.
+    if !write_ctl(root, &format!("ctx/{}/ctl", ctx), "destroy") {
+        fail("probe-reclaim: ctx destroy");
+    }
+    let g1 = open_read_string(root, "ctl");
+    let parked1 = parse_field(&g1, "probe-parked").unwrap_or(0);
+    let poisoned1 = parse_field(&g1, "poisoned").unwrap_or(999);
+    t_putstr(&format!(
+        "warp-prove: probe-reclaim after wedged destroy: probe-parked {}->{} poisoned {}->{}\n",
+        parked0, parked1, poisoned0, poisoned1
+    ));
+    if parked1 != parked0 + 1 {
+        fail("probe-reclaim: a WEDGED ctx destroy did not PARK the probe (see trace above) \
+              -- it was dropped, stranding two kernel handles and two mappings for the \
+              life of the Proc with no vindication able to reach them (audit F3)");
+    }
+
+    // NO `warp-hold off` HERE, and its absence is load-bearing. The destroy
+    // above is ALSO what releases the hold -- round-8 F1 moved the release
+    // onto `wctx_retire`, the one chokepoint every ctx death passes through
+    // -- so the held completion drains and the vindication follows with no
+    // further lever. Writing the verb anyway is what the first cut of this
+    // leg did, and it failed loudly BY DESIGN: `warp-hold` requires the
+    // caller to own a LIVE ctx (#178, so a mis-sequenced test cannot
+    // silently no-op), and this conn's ctx is gone.
+    //
+    // Bounded + self-pacing -- each ctl read is a 9P round trip, so the loop
+    // body itself forces a serve-loop pass. Empirically the whole cycle
+    // completes within the destroy plus one read (the slot is already
+    // recovered by the trace above); the poll exists so a REGRESSION that
+    // strands the parked probe times out here with its numbers instead of
+    // hanging.
+    let mut freed = freed0;
+    let mut poisoned_now = poisoned0 + 1;
+    let mut iters = 0u32;
+    for i in 0..400 {
+        iters = i + 1;
+        let g = open_read_string(root, "ctl");
+        freed = parse_field(&g, "probe-freed").unwrap_or(0);
+        poisoned_now = parse_field(&g, "poisoned").unwrap_or(999);
+        if freed >= freed0 + 1 && poisoned_now == poisoned0 {
+            break;
+        }
+    }
+    // THE EVIDENCE GOES BEFORE THE VERDICT, ALWAYS. The harness aborts the
+    // scenario the instant it sees the hard-fail token, TRUNCATING the rest
+    // of that line -- so a diagnosis carried inside the `fail()` string is
+    // destroyed by the very thing it is meant to explain. (Measured: a red
+    // run printed exactly `warp-prove: FAIL -- probe-r`.) Trace first as an
+    // ordinary line, then fail short.
+    t_putstr(&format!(
+        "warp-prove: probe-reclaim trace parked {}->{} freed {}->{} poisoned {}->{} \
+         after {} polls\n",
+        parked0, parked1, freed0, freed, poisoned0, poisoned_now, iters
+    ));
+    if freed != freed0 + 1 || poisoned_now != poisoned0 {
+        fail("probe-reclaim: vindication did not reclaim the parked probe (see trace above)");
+    }
+    t_putstr(&format!(
+        "warp-prove: probe graveyard parked+reclaimed (parked {} -> {}, freed {} -> {})\n",
+        parked0, parked1, freed0, freed
+    ));
 }
 
 /// THE #218 REGRESSION ASSERTION. A refused create3d must consume its mint

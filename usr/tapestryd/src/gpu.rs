@@ -1615,6 +1615,20 @@ impl Gpu {
     /// controlq FIFO across two different publication paths. Never used for
     /// client streams -- those keep the fenced lane and its admission.
     pub fn submit_3d_sync(&mut self, ctx_id: u32, stream: &[u8]) -> Result<(), Error> {
+        // Audit F6: the fenced twin bounds its payload against the slot
+        // (`fenced_begin`); this lane had no bound at all. Unreachable
+        // today -- the sole caller passes a fixed 56 bytes -- but the next
+        // caller is who gets hurt, and the overrun is silent: past
+        // REQ_REGION_LEN the copy walks into the DEVICE-WRITABLE response
+        // region, so the failure would surface as a corrupted response
+        // rather than as this request being too big.
+        // `Hardware` because that is the single code this whole lane
+        // returns and every caller treats any Err identically (the probe
+        // folds it to UNKNOWN); a distinct variant would be a libdriver ABI
+        // change buying nothing at the one call site that can see it.
+        if (GPU_CTRL_HDR_LEN as usize) + 8 + stream.len() > REQ_REGION_LEN as usize {
+            return Err(Error::Hardware);
+        }
         let req_va = self.ring_va + REQ_OFF;
         unsafe {
             write_ctrl_hdr_ctx(req_va, VIRTIO_GPU_CMD_SUBMIT_3D, ctx_id);

@@ -156,6 +156,13 @@ const MAX_WARP_CTXS: usize = 8;
 /// `bo-cap` (the prover's churn discriminator derives from it rather
 /// than hardcoding).
 const MAX_WARP_BOS_PER_CTX: usize = 1024;
+
+/// The read width a client is entitled to assume covers the WHOLE per-ctx
+/// `ctl` (audit F11). Not a server buffer bound -- the file is composed at
+/// full length and `read_str` honours any offset; it is the CONTRACT the
+/// "appended LAST" ordering discipline exists to protect, now checked
+/// instead of merely asserted in a comment.
+const WCTX_CTL_SNAPSHOT: usize = 255;
 /// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
 /// a second client can always make progress and no single client can drive
 /// every slot into the abandonment poison.
@@ -731,6 +738,22 @@ pub struct Comp {
     /// capacity is never shrunk while the slot is poisoned; the row is
     /// drained (records freed) only at vindication.
     warp_ctx_leaked: [Vec<WarpBo>; MAX_WARP_CTXS],
+    /// The probe backings a wedge refused to free, parked per ctx SLOT
+    /// exactly as the row above parks BOs (#240 audit F3). Before this the
+    /// probe leaked FOREVER: the wedge arm dropped the record with only a
+    /// `say!`, so "the same leak posture as BOs" was false in the one
+    /// respect that BOUNDS the damage -- a BO is leak-then-reclaim, the
+    /// probe was leak-and-forget, and a client can drive one wedge per
+    /// FENCE_ABANDON_MS against `PROC_HANDLE_MAX` in the process that IS
+    /// the console.
+    ///
+    /// An `Option`, not a `Vec`, is the exact shape, and that is what keeps
+    /// the park infallible without borrowing any of `warp_park_leaked`'s
+    /// reasoning: a ctx owns at most ONE probe and DIES when it parks, so
+    /// there is no cap to couple to and no capacity to reserve. A parked
+    /// probe exists IFF the slot is poisoned -- the park poisons, the drain
+    /// un-poisons -- so `warp_poisoned_slots` already reports its presence.
+    warp_ctx_leaked_probe: [Option<CtxProbe>; MAX_WARP_CTXS],
     /// The pub id whose poison condemned each slot, so a later
     /// vindication can release it (round-3 F2). 0 = none.
     warp_ctx_vindicate: [u32; MAX_WARP_CTXS],
@@ -743,6 +766,21 @@ pub struct Comp {
     /// The global BYTES-axis twin: max `bo_bytes_peak` over every ctx that
     /// ever lived. Read via global ctl `bo-bytes-peak`.
     warp_bo_bytes_peak: u64,
+    /// The probe-graveyard ledger (#240 audit F3), process-lifetime and
+    /// MONOTONIC on purpose: a reclaim is provable only by an INCREASE,
+    /// where a live gauge reading 0 is equally satisfied by "the park never
+    /// happened" (#184). Split in two because the two claims fail
+    /// independently -- parked-without-freed is exactly the leak-forever
+    /// the fix closed, and it is what a regression would look like.
+    warp_probe_parked: u32,
+    warp_probe_freed: u32,
+    /// One-shot for the F11 per-ctx-ctl width report.
+    warp_ctl_wide_said: bool,
+    /// Every verify that reached no verdict, across all ctxs (audit F5).
+    /// The one-shot `say!`s name the first of each kind; this is the RATE,
+    /// and without it silencing the storm would have destroyed the only
+    /// evidence that UNKNOWN is happening at all.
+    warp_verify_unknown: u32,
     /// #210 custody mirror: parked reads + request-buffer residue across
     /// ALL conns, folded per tick by main's conns walk (the ctl reader's
     /// conn cannot see its siblings). fparked/rparked = pending fence /
@@ -868,6 +906,15 @@ struct WarpCtx {
     /// designs for, so it costs the intended use nothing, and it caps the
     /// whole box at MAX_WARP_CTXS probes per frame no matter what clients do.
     verify_tick: u64,
+    /// One-shot latch per UNKNOWN arm (audit F5), the `build_diag_arms`
+    /// shape. Both unknown arms used to `say!` unconditionally, and after
+    /// F1 EVERY verify on a blinded ctx took one -- 8 ctxs at the per-frame
+    /// cadence this verb is designed for is ~480 synchronous console lines
+    /// a second, emitted on the compositor's own dispatch thread. The FIRST
+    /// of each kind per ctx still names itself; the RATE is carried by the
+    /// comp-global `verify-unknown` count instead, so silencing the storm
+    /// costs no information (#95: latch the REPORT, never the counting).
+    verify_diag_arms: u32,
     /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
     /// this ctx consents to displaying its BO `bo_pub` on surface
     /// (slot, gen). The gen pin makes a consent die with the surface
@@ -966,11 +1013,16 @@ impl Comp {
             warp_ctxs: [WARP_NO_CTX; MAX_WARP_CTXS],
             warp_ctx_slot_poisoned: [false; MAX_WARP_CTXS],
             warp_ctx_leaked: core::array::from_fn(|_| Vec::new()),
+            warp_ctx_leaked_probe: core::array::from_fn(|_| None),
             warp_ctx_vindicate: [0; MAX_WARP_CTXS],
             warp_ctx_seq: 0,
             warp_bo_seq: 0,
             warp_bo_peak: 0,
             warp_bo_bytes_peak: 0,
+            warp_probe_parked: 0,
+            warp_probe_freed: 0,
+            warp_ctl_wide_said: false,
+            warp_verify_unknown: 0,
             #[cfg(feature = "test-mode")]
             w210_fparked: 0,
             #[cfg(feature = "test-mode")]
@@ -2928,6 +2980,9 @@ impl Comp {
         // The row is empty (len 0), so this guarantees capacity >= the
         // full cap -- a no-op when a reused slot's row kept its capacity.
         debug_assert!(self.warp_ctx_leaked[slot].is_empty());
+        // Same premise on the probe graveyard: a parked probe implies a
+        // poisoned slot, and poisoned slots are skipped above.
+        debug_assert!(self.warp_ctx_leaked_probe[slot].is_none());
         if self.warp_ctx_leaked[slot]
             .try_reserve_exact(MAX_WARP_BOS_PER_CTX)
             .is_err()
@@ -2978,6 +3033,7 @@ impl Comp {
             verify_seq: 0,
             verify_ok: 0,
             verify_tick: 0,
+            verify_diag_arms: 0,
             present_to: None,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
@@ -3060,6 +3116,30 @@ impl Comp {
         Some((res_id, fd, va))
     }
 
+    /// Release one built probe resource: device refs in reverse, then both
+    /// halves of the guest backing -- `t_burrow_detach` before `t_close`,
+    /// since I-7's dual count frees nothing while a mapping ref survives.
+    /// ONE definition, used by every probe teardown (audit F4), because the
+    /// bug it closed was a second copy of this sequence not existing.
+    /// Split in two halves because the WEDGE posture defers exactly the
+    /// second one (`wbo_retire`'s step 3): the device refs go on every
+    /// path, the guest backing waits for the device-finished proof.
+    fn warp_probe_res_undo(&mut self, dev_ctx: u32, res: u32, va: u64, fd: i64, size: u64) {
+        self.warp_probe_undo_dev(dev_ctx, res);
+        Self::warp_probe_undo_guest(va, fd, size);
+    }
+
+    fn warp_probe_undo_dev(&mut self, dev_ctx: u32, res: u32) {
+        let _ = self.gpu.detach_backing(res);
+        let _ = self.gpu.ctx_detach_resource(dev_ctx, res);
+        let _ = self.gpu.resource_unref(res);
+    }
+
+    fn warp_probe_undo_guest(va: u64, fd: i64, size: u64) {
+        unsafe { t_burrow_detach(va, size) };
+        unsafe { t_close(fd) };
+    }
+
     /// Build the #240 health probe for a freshly minted ctx (GPU-DESIGN
     /// 4.5.4b). `mark` is painted ONCE here by UPLOAD, never by a CLEAR:
     /// a CLEAR would need SET_FRAMEBUFFER_STATE, and virgl context state
@@ -3072,11 +3152,7 @@ impl Comp {
         let (sent_res, sent_fd, sent_va) = match self.warp_probe_res(dev_ctx, size) {
             Some(v) => v,
             None => {
-                let _ = self.gpu.detach_backing(mark_res);
-                let _ = self.gpu.ctx_detach_resource(dev_ctx, mark_res);
-                let _ = self.gpu.resource_unref(mark_res);
-                unsafe { t_burrow_detach(mark_va, size) };
-                unsafe { t_close(mark_fd) };
+                self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
                 return None;
             }
         };
@@ -3089,6 +3165,16 @@ impl Comp {
             // The mark never reached the host, so a verify could not tell
             // "the copy ran" from "the copy ran and copied garbage".
             // Better no probe than a probe that answers wrongly.
+            //
+            // AUDIT F4: this arm returned with BOTH resources fully built
+            // and unwound NOTHING -- two kernel handles, two mappings and
+            // two device resources stranded per failed mint, and NOT even
+            // reachable by the retire teardown, which is gated on the
+            // `Some(p)` this arm never stores. The unwind lived inline in
+            // the arm above, so the third arm silently had none: the reason
+            // it is a shared helper now.
+            self.warp_probe_res_undo(dev_ctx, sent_res, sent_va, sent_fd, size);
+            self.warp_probe_res_undo(dev_ctx, mark_res, mark_va, mark_fd, size);
             return None;
         }
         Some(CtxProbe {
@@ -3114,7 +3200,31 @@ impl Comp {
     /// Returns `Some(true)` healthy, `Some(false)` latched, `None` unknown.
     /// Every transport failure lands on `None`: an errored upload is not
     /// evidence of refusal, and must never read as health either.
+    /// Audit F5/F2: ONE exit point folds every UNKNOWN into a comp-global
+    /// count. Six `None` returns sit in the body below and a seventh is one
+    /// edit away; counting at each site is the shape that grows a hole.
+    /// The count is what makes UNKNOWN a state an operator can SEE at all --
+    /// the per-arm `say!`s are now one-shot, so the rate has to live here.
     fn warp_ctx_verify(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
+        let r = self.warp_ctx_verify_probe(ctx_pub, conn);
+        if r.is_none() {
+            self.warp_verify_unknown = self.warp_verify_unknown.saturating_add(1);
+        }
+        r
+    }
+
+    /// Record an UNKNOWN on the console at most ONCE per arm per ctx.
+    fn verify_unknown_once(&mut self, ctx_pub: u32, conn: u64, arm: u32) -> bool {
+        match self.wctx_mut(ctx_pub, conn) {
+            Some(c) if c.verify_diag_arms & (1 << arm) == 0 => {
+                c.verify_diag_arms |= 1 << arm;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn warp_ctx_verify_probe(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
         let tick = self.tick;
         let (dev_ctx, mark_res, mark_va, sent_res, sent_va) = {
             let c = self.wctx(ctx_pub, conn)?;
@@ -3122,8 +3232,20 @@ impl Comp {
             // second write in the same frame is answered from the state the
             // first one established rather than re-running three synchronous
             // device round trips. `verify_seq` deliberately does NOT advance
-            // here: it counts probes that RAN, which is the distinction a
-            // reader needs to tell "healthy" from "never asked".
+            // here -- but note what it does and does NOT mean (audit F2): it
+            // counts probes ADMITTED, incremented below BEFORE any device
+            // I/O, so it advances on the UNKNOWN arms too. `verify_ok` is
+            // the one that counts probes which reached a healthy VERDICT,
+            // and it is what a reader must require to move before believing
+            // a `stream-rejected 0`.
+            //
+            // AUDIT F12, for whoever writes the next test: under the
+            // test-mode FROZEN clock the frame tick advances only on a
+            // `tick` ctl write, so this rate limit pins every later verify
+            // in the same frame to the cached answer -- a second probe
+            // needs an intervening `tick`, not a sleep. (The reject
+            // scenario runs with the clock LIVE, which is why its 100 ms
+            // sleep genuinely buys a second probe.)
             if c.verify_seq > 0 && c.verify_tick == tick {
                 return Some(!c.stream_rejected);
             }
@@ -3244,21 +3366,27 @@ impl Comp {
             }
         };
         if mark_now != Some(PROBE_MARK) {
-            say!(
-                "tapestryd: warp ctx {} verify {} -- the MARK reads {:?}, not {:#x}, so the \
-                 probe cannot judge the copy. UNKNOWN, not a verdict.",
-                ctx_pub, seq, mark_now, PROBE_MARK
-            );
+            if self.verify_unknown_once(ctx_pub, conn, 0) {
+                say!(
+                    "tapestryd: warp ctx {} verify {} -- the MARK reads {:?}, not {:#x}, so the \
+                     probe cannot judge the copy. UNKNOWN, not a verdict. (first only; \
+                     the rate is global `verify-unknown`)",
+                    ctx_pub, seq, mark_now, PROBE_MARK
+                );
+            }
             return None;
         }
         if got != token {
             // Neither the mark nor our seed: the readback is not carrying
             // what this probe put there, so the probe itself is not
             // trustworthy on this ctx. Unknown, never a verdict.
-            say!(
-                "tapestryd: warp ctx {} verify {} read {:#x} (neither mark nor token) -- unknown",
-                ctx_pub, seq, got
-            );
+            if self.verify_unknown_once(ctx_pub, conn, 1) {
+                say!(
+                    "tapestryd: warp ctx {} verify {} read {:#x} (neither mark nor token) \
+                     -- unknown (first only; the rate is global `verify-unknown`)",
+                    ctx_pub, seq, got
+                );
+            }
             return None;
         }
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
@@ -3749,6 +3877,15 @@ impl Comp {
                 unsafe { t_close(b.dma_fd) };
             }
         }
+        // The probe rides the same proof (#240 audit F3). Its device-side
+        // refs went at the park -- as a BO's do -- so only the guest backing
+        // was waiting on this.
+        if let Some(p) = self.warp_ctx_leaked_probe[slot].take() {
+            for (va, fd) in [(p.mark_va, p.mark_fd), (p.sent_va, p.sent_fd)] {
+                Self::warp_probe_undo_guest(va, fd, p.size);
+            }
+            self.warp_probe_freed = self.warp_probe_freed.saturating_add(1);
+        }
     }
 
     fn wctx_finish(&mut self, slot: usize, leak: bool) {
@@ -3769,29 +3906,37 @@ impl Comp {
                 }
             }
             // #240: the probe's two resources follow the SAME leak posture
-            // as the BOs above -- on a wedge the device may still be
-            // executing this ctx's stream, so neither the device state nor
-            // the guest backing may be touched, and both leak rather than
-            // risk a UAF on pages the host is mid-DMA into. On a clean
-            // retire they unwind in reverse, detach-before-close (I-7).
+            // as the BOs above -- which audit F3 caught this arm getting
+            // WRONG IN BOTH HALVES. `wbo_retire` runs the device-side
+            // unwind unconditionally and defers only step (3), the server's
+            // own guest refs; this deferred BOTH and then parked NEITHER, so
+            // a wedge stranded two kernel handles and two mappings for the
+            // life of the Proc with no vindication able to reclaim them.
+            // Now: device refs go on both postures, the guest backing waits
+            // for the device-finished proof, and the unwind order is the
+            // I-7 reverse either way (detach-before-close).
             if let Some(p) = c.probe.take() {
+                for (res, va, fd) in [
+                    (p.mark_res, p.mark_va, p.mark_fd),
+                    (p.sent_res, p.sent_va, p.sent_fd),
+                ] {
+                    self.warp_probe_undo_dev(c.dev_ctx, res);
+                    if !leak {
+                        Self::warp_probe_undo_guest(va, fd, p.size);
+                    }
+                }
                 if leak {
                     say!(
-                        "tapestryd: warp ctx {} probe backings LEAKED ({} B, fence wedge)",
+                        "tapestryd: warp ctx {} probe backings leak-parked ({} B, fence wedge)",
                         c.pub_id,
                         p.size * 2
                     );
-                } else {
-                    for (res, va, fd) in [
-                        (p.mark_res, p.mark_va, p.mark_fd),
-                        (p.sent_res, p.sent_va, p.sent_fd),
-                    ] {
-                        let _ = self.gpu.detach_backing(res);
-                        let _ = self.gpu.ctx_detach_resource(c.dev_ctx, res);
-                        let _ = self.gpu.resource_unref(res);
-                        unsafe { t_burrow_detach(va, p.size) };
-                        unsafe { t_close(fd) };
-                    }
+                    // Infallible: an array-slot write, and the slot is
+                    // poisoned immediately below -- unmintable until the
+                    // vindication drains this.
+                    debug_assert!(self.warp_ctx_leaked_probe[slot].is_none());
+                    self.warp_ctx_leaked_probe[slot] = Some(p);
+                    self.warp_probe_parked = self.warp_probe_parked.saturating_add(1);
                 }
             }
             if leak {
@@ -5017,6 +5162,17 @@ impl Conn {
                 &mut s,
                 format_args!("bo-bytes-peak {}\n", comp.warp_bo_bytes_peak),
             );
+            // #240 audit F3: the probe-graveyard ledger. NOT test-mode --
+            // parked-without-freed is the shape of a real handle leak in
+            // the process that IS the console, so it must be readable on a
+            // production build, exactly like the BO leak counters beside it.
+            let _ = core::fmt::write(
+                &mut s,
+                format_args!(
+                    "probe-parked {}\nprobe-freed {}\nverify-unknown {}\n",
+                    comp.warp_probe_parked, comp.warp_probe_freed, comp.warp_verify_unknown
+                ),
+            );
             // Audit F3/F4: the ctx-less refusal ledger + the comp-global
             // one-shot mask -- both are spendable/bumpable by ANY conn, so
             // both must be READABLE or their state is invisible exactly
@@ -5203,6 +5359,25 @@ impl Conn {
                         let _ = core::fmt::write(
                             &mut s,
                             format_args!("create-refused {}\n", refused),
+                        );
+                    }
+                    // Audit F11: the "keep the client-critical keys inside a
+                    // 255-byte snapshot" discipline above was a comment with
+                    // nothing checking it, and the C-0d block was inserted
+                    // mid-file against it. The computed worst case is ~219,
+                    // so nothing truncates today -- but a truncation fails
+                    // SILENTLY toward a smaller value (the #210 silent-park
+                    // shape: `parse_field` simply does not find the key and
+                    // the client reads a default), which is the failure mode
+                    // that must never be discovered by its consequences.
+                    // One-shot, because it would otherwise fire per read.
+                    if s.len() > WCTX_CTL_SNAPSHOT && !comp.warp_ctl_wide_said {
+                        comp.warp_ctl_wide_said = true;
+                        say!(
+                            "tapestryd: warp ctx ctl is {} bytes, past the {}-byte client \
+                             snapshot -- keys after the cut are INVISIBLE to a short reader",
+                            s.len(),
+                            WCTX_CTL_SNAPSHOT
                         );
                     }
                     self.read_str(tag, &s, a.offset, cap)
@@ -5684,15 +5859,29 @@ impl Conn {
             // the result into `stream-rejected`. The verb exists so CADENCE
             // is the client's -- per frame, every Nth, or never -- because
             // the server cannot know how much a given client is willing to
-            // pay for the answer. Deliberately returns Ok on every outcome:
-            // the ANSWER lives in the ctl fields, and an unknown (a
-            // transport failure mid-probe) is not a failure of the WRITE.
+            // pay for the answer. Deliberately returns Ok on every outcome
+            // of a probe that RAN: the ANSWER lives in the ctl fields, and
+            // an unknown (a transport failure mid-probe) is not a failure
+            // of the WRITE.
             // Erroring here would tempt a client to treat a probe it could
             // not run as a rejection, which is the direction that
             // manufactures false deaths.
+            //
+            // Audit F7: refused while this ctx has fenced work outstanding.
+            // The probe rides the SYNCHRONOUS `.step` slot on the client's
+            // own ctx, so it queues behind that client's GL work; past
+            // SUBMIT_DEADLINE_MS the engine latches `dead`, which is
+            // terminal for the whole compositor -- the process that IS the
+            // console. A client could reach that with nothing but a ctx and
+            // a deep queue. E_AGAIN (not E_IO) is the honest code: the ctx
+            // may be perfectly healthy, the question is merely unanswerable
+            // right now, and an ERROR on the write is what keeps that
+            // distinct from "asked and healthy" without the client having
+            // to infer it from an unmoved counter.
             Some("verify") => {
-                if comp.wctx(id, self.conn_id).is_none() {
-                    return Err(p9::E_NOENT);
+                let c = comp.wctx(id, self.conn_id).ok_or(p9::E_NOENT)?;
+                if c.fences_in_flight > 0 {
+                    return Err(p9::E_AGAIN);
                 }
                 comp.warp_ctx_verify(id, self.conn_id);
                 Ok(())

@@ -55,6 +55,16 @@ ctl                          # "virgl <0|1>\ncapsets N\ncapset <id> <ver> <len>\
                              #   with no ctx to charge them to. A refusal counted HERE and not in the
                              #   per-ctx "create-refused" is the signature of a chokepoint ABOVE the
                              #   ctx, which is what made the fid ceiling invisible on both endpoints)
+                             # + "probe-parked <n>\nprobe-freed <n>\nverify-unknown <n>\n"
+                             #   (C-0d audit F3/F5. The first pair is the #240 probe graveyard's
+                             #   monotonic ledger: a wedged ctx destroy PARKS its probe backings,
+                             #   the vindication FREES them, and parked-without-freed is precisely
+                             #   the permanent handle leak F3 found. Monotonic on purpose -- a live
+                             #   gauge reading 0 is equally satisfied by "the path never ran" [#184].
+                             #   `verify-unknown` counts every health probe that reached NO verdict,
+                             #   across all ctxs: the per-arm console lines are one-shot per ctx
+                             #   [they were a ~480 line/s storm at the per-frame cadence], so this
+                             #   is the only surviving evidence of the RATE)
                              # test-mode ONLY adds: "abandoned <n>\nfenced-free <n>\n"
 caps                         # the RETAINED preferred capset blob, raw
 ctx/
@@ -63,6 +73,7 @@ ctx/
     ctl                      # write: "capset <n>" | "rings <1..64>" | "destroy" | "verify"
                              # read: "<id>\npoisoned <0|1>\nleaked-count <n>\nleaked-bytes <n>\n"
                              #   + "stream-rejected <0|1>\nrejected-at <n>\nverify-seq <n>\n"
+                             #   + "verify-ok <n>\n"
                              #     (#240 / C-0d: `verify` runs ONE health probe now -- cadence is
                              #     the client's. `stream-rejected` is STICKY and means the HOST
                              #     refused this ctx's commands while every fence retired normally;
@@ -70,8 +81,16 @@ ctx/
                              #     is a chain that never retired. `rejected-at` names the VERIFY
                              #     that caught it, so the offending stream lies in
                              #     (previous verify, rejected-at] -- a window, never a command.
-                             #     `verify-seq` counts probes that RAN: a bare `stream-rejected 0`
-                             #     is equally satisfied by "healthy" and "never asked" [#184])
+                             #     `verify-seq` counts probes ADMITTED -- it is incremented before
+                             #     any device I/O, so it advances on the UNKNOWN arms too;
+                             #     `verify-ok` counts those that reached a HEALTHY verdict and is
+                             #     the ONE a reader must require to move, since a bare
+                             #     `stream-rejected 0` is equally satisfied by "healthy",
+                             #     "never asked" and "asked, answer unknown" [#184, audit F2].
+                             #     `verify` is REFUSED with EAGAIN while this ctx has fenced work
+                             #     outstanding: the probe rides the synchronous slot behind that
+                             #     work, and past SUBMIT_DEADLINE_MS the engine latches dead
+                             #     [audit F7])
                              #   + "fences-in-flight <n>\nfence-signaled <n>\n" (promoted at Warp-3)
                              #   + "bo-live <n>\nbo-peak <n>\nbo-bytes <n>\nbo-bytes-peak <n>\n"
                              #     (#204 census: backed now / high-water, count + bytes axes)
@@ -456,13 +475,33 @@ Three choices carry the design, each earned:
   per-frame cadence this verb targets would be its own performance defect.
 
 The probe's resources are deliberately NOT in `bos[]`: every client-facing
-resolve walks that array, so membership would be exactly the reachability
-that lets a client forge health (or manufacture a rejection against a
-healthy ctx). A probe that fails to mint leaves `probe: None`, and the ctx
-still serves — it just cannot be asked. Failing the ctx mint on a
+resolve walks that array, so membership would let a client name them
+through the `bo/<id>/*` tree. **That bounds the RESOLVERS, and nothing
+more** — audit F1, confirmed by measurement on real V3D: the submit stream
+is unparsed and carries raw device-global resource ids, and `bo/<id>/info`
+hands those ids out from one shared counter, so a client computes
+`mark = its_first_res - 2` and copies over it with a plain
+`RESOURCE_COPY_REGION`. The server read its mark back as `0xFF00FF00`, the
+client's own green. The defence is therefore not unreachability but the
+per-verify **repaint**: `mark` is re-uploaded at the top of every verify,
+inside the same dispatch as the copy and the readback, so corruption cannot
+outlive one probe. A probe that fails to mint leaves `probe: None`, and the
+ctx still serves — it just cannot be asked. Failing the ctx mint on a
 diagnostic's failure would hand clients a new way to be denied a context.
-Teardown follows the same leak posture as BOs: on a fence wedge the device
-may still be executing, so both resources leak rather than risk a UAF.
+
+Teardown follows the same leak posture as BOs, in both halves (audit F3
+found it matched in NEITHER): the **device** refs go on every path, exactly
+as `wbo_retire` releases them unconditionally; the **guest** backing is what
+a wedge defers, because the device may still be mid-DMA into those pages.
+Deferred, not abandoned — the two backings are parked in
+`warp_ctx_leaked_probe[slot]` and freed at the vindication that proves the
+device finished, the same reclamation point that frees the parked BOs and
+un-poisons the slot. Before F3 they were dropped with a `say!` and no park,
+so every wedge burned two kernel handles and two mappings permanently in the
+process that *is* the console, at one wedge per `FENCE_ABANDON_MS`. A parked
+probe exists **iff** the slot is poisoned; `probe-parked` / `probe-freed` on
+the global ctl are the monotonic ledger (`prove_probe_reclaim` asserts both
+halves move).
 
 ## The Mesa winsys + the warp client (Warp-3)
 
@@ -758,7 +797,9 @@ majority) bounds it ~25–40% above Composed.
 | fence read with `count` < one record (21 bytes) | empty read (never parks unfillable) |
 | malformed ctl verbs / non-UTF-8 | `E_INVAL` |
 | **stream the HOST refuses (vrend context error)** | **none on the write — it is reported as SUCCESS (#240).** The write returns the byte count, the fence retires, `fence-signaled` increments, `fences-in-flight` returns to 0, `poisoned` stays 0. Since C-0d it is DETECTABLE out-of-band: write `verify` to the ctx ctl, then read `stream-rejected`. See the caveat below |
-| `verify` on a ctx with no probe (its mint failed) | `Ok` on the write, but `verify-seq` does **not** advance and `stream-rejected` is untouched. `verify-seq` counts probes that actually RAN, so a client tells "could not be asked" from "asked and healthy" by whether the counter moved — a bare `stream-rejected 0` is satisfied by both (#184) |
+| `verify` on a ctx with no probe (its mint failed) | `Ok` on the write, but neither `verify-seq` nor `verify-ok` advances and `stream-rejected` is untouched (the arm returns before the increment) |
+| `verify` while the ctx has fenced work outstanding | `E_AGAIN` (audit F7). The probe rides the **synchronous** slot on the client's own ctx, so it queues behind that client's GL work, and past `SUBMIT_DEADLINE_MS` (500 ms) the engine latches `dead` — terminal, in the process that *is* the console. Retry once the ctx is quiesced |
+| `verify` that runs but reaches no verdict (UNKNOWN) | `Ok`, `verify-seq` **advances**, `verify-ok` does **not**, `stream-rejected` untouched; the global `verify-unknown` increments. **`verify-seq` counts probes ADMITTED, not probes that concluded** (audit F2 — it is incremented before any device I/O). A reader tells "asked and healthy" from both "could not be asked" and "asked, no answer" only by requiring **`verify-ok`** to move; a bare `stream-rejected 0` is satisfied by all three (#184) |
 
 ## Known caveats / footguns
 

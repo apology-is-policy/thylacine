@@ -627,6 +627,25 @@ with an argument — the per-ctx BO count and byte caps that #218/#204 sized;
 and the probe's own failure arms must fail CLOSED (an upload or readback
 that errors is "unknown", never "healthy").
 
+**ANSWERED by the round (2026-08-14), and the first question's premise was
+wrong.** Reachability: `mark`/`sentinel` are unreachable through every path
+that RESOLVES a BO — and that is not the same as unreachable. The submit
+stream is unparsed and carries raw device-global resource ids, which
+`bo/<id>/info` hands out from one shared counter, so a client derives
+`mark = its_first_res - 2` and overwrites it with a plain
+`RESOURCE_COPY_REGION`. **Measured on real V3D**: the server read its mark
+back as the client's own green. Containment therefore cannot rest on
+naming; it rests on the per-verify **repaint**, which bounds any corruption
+to less than one probe. Fail-closed: the arms do return "unknown" — but
+"fails closed" is a claim about what the CONSUMER can see, and UNKNOWN had
+no representation on the ctl, so a blinded probe read exactly like a healthy
+one. `verify-ok` (advanced only on a healthy verdict) is what makes the
+distinction expressible; requiring it to move is now the documented contract
+for reading `stream-rejected 0`. Cap exemption: the two resources remain
+exempt from the BO count/byte caps by design, but the argument that made
+that safe assumed they were reclaimed like BOs, and they were not — the
+wedge path leaked them permanently until the probe graveyard landed.
+
 **P2 — cross-context ordering: does the blit observe the client's finished
 frame?** The client renders on its context, the compositor blits on its own;
 virglrenderer maps each guest context to a host GL context, and in-order
