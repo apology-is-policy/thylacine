@@ -557,15 +557,213 @@ func renderCodeCoverage(reg *Registry) string {
 	return strings.Join(out, "\n")
 }
 
+// declPathRe pulls path-shaped tokens out of an audit-trigger row. The table
+// writes them inside backticks, with brace sets for sibling extensions
+// (kernel/dma_handle.{c,h}) and bare directories for whole-program surfaces
+// (usr/tapestryd/).
+var declPathRe = regexp.MustCompile(`(?:kernel|arch|mm|usr|lib|tools|specs|init)/[A-Za-z0-9_./{},-]*`)
+
+// expandDecl normalizes one extracted token into the concrete paths it names.
+// Brace sets expand; trailing punctuation swept up by the character class is
+// dropped. Returns nothing for a token that degenerates to a bare directory
+// root, which would otherwise match half the tree.
+func expandDecl(tok string) []string {
+	tok = strings.TrimRight(tok, ".,-/")
+	if tok == "" || !strings.Contains(tok, "/") {
+		return nil
+	}
+	i, j := strings.Index(tok, "{"), strings.Index(tok, "}")
+	if i < 0 || j < i {
+		return []string{tok}
+	}
+	stem, exts, tail := tok[:i], tok[i+1:j], tok[j+1:]
+	var out []string
+	for _, e := range strings.Split(exts, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, stem+e+tail)
+		}
+	}
+	return out
+}
+
+// renderAuditTriggerCoverage: does every surface main DECLARES audit-bearing
+// have a hard-audit dossier?
+//
+// The fourth view reading outside the vault, and the one that closes a gap the
+// other three structurally could not see. renderAuditTriggers enumerates what
+// the VAULT has written (`audit: hard` dossiers); docs/AUDIT-TRIGGERS.md
+// enumerates what MAIN has declared. Those are different populations, nothing
+// compared them, and the difference is silent in both directions: main's edits
+// to its table merge cleanly (the vault has never stubbed it), and the view
+// re-renders from note fields looking complete. Found 2026-08-14 when a
+// 124-commit merge added the whole Warp/I-45 GPU seam and the view did not move.
+//
+// Matching is on FILES, never on row counts, because the mapping is
+// many-to-many: one dossier routinely covers several declared surfaces and a
+// declared surface routinely spans several dossiers. Counting rows would report
+// a difference that means nothing.
+//
+// Three outcomes, deliberately distinguished because they have different
+// remedies: a surface whose files no dossier names at all needs a SWEEP; one
+// whose files are owned only by soft-audit dossiers needs an `audit:` lift; one
+// whose paths could not be parsed is a LEDGER defect and is reported as such —
+// never folded into "covered", because a check that cannot read its input must
+// not answer yes (the skip-reported-as-pass lesson).
+func renderAuditTriggerCoverage(reg *Registry) string {
+	root := vaultRoot(reg)
+	if root == "" {
+		return "**(registry empty — cannot locate the repo root.)**"
+	}
+	b, err := os.ReadFile(filepath.Join(root, "docs", "AUDIT-TRIGGERS.md"))
+	if err != nil {
+		return "**(docs/AUDIT-TRIGGERS.md is unreadable.)**"
+	}
+	hard := map[string][]string{}
+	soft := map[string][]string{}
+	for _, n := range reg.OfType("sub") {
+		dst := soft
+		if n.Front.Str("audit") == "hard" {
+			dst = hard
+		}
+		for _, c := range n.Front.ListOr("code") {
+			if c = strings.TrimSpace(c); c != "" {
+				dst[c] = append(dst[c], n.ID)
+			}
+		}
+	}
+	// A declared token matches a claimed file exactly, or — when it names a
+	// directory or an extension-less program — by path prefix, because the
+	// table writes `usr/tapestryd/` where the dossier claims its .rs files.
+	owners := func(m map[string][]string, p string) []string {
+		if o, ok := m[p]; ok {
+			return o
+		}
+		var out []string
+		for k, o := range m {
+			if strings.HasPrefix(k, p+"/") {
+				out = append(out, o...)
+			}
+		}
+		return out
+	}
+	type row struct{ surface, state, detail string }
+	var gaps []row
+	var covered, softOnly, unowned, unparsed int
+	for _, ln := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(ln, "| ") || strings.HasPrefix(ln, "|---") ||
+			strings.HasPrefix(ln, "| Surface ") {
+			continue
+		}
+		// Split tolerantly: prose in the later columns contains bare `|`.
+		f := strings.Split(strings.Trim(ln, "|"), "|")
+		if len(f) < 2 {
+			continue
+		}
+		surface := strings.TrimSpace(f[0])
+		var paths []string
+		seen := map[string]bool{}
+		for _, t := range declPathRe.FindAllString(ln, -1) {
+			for _, p := range expandDecl(t) {
+				if !seen[p] {
+					seen[p] = true
+					paths = append(paths, p)
+				}
+			}
+		}
+		if len(paths) == 0 {
+			unparsed++
+			gaps = append(gaps, row{surface, "**unparsed**",
+				"no path token extracted — the ledger cannot judge this row"})
+			continue
+		}
+		var hardHits, softHits []string
+		for _, p := range paths {
+			hardHits = append(hardHits, owners(hard, p)...)
+			softHits = append(softHits, owners(soft, p)...)
+		}
+		switch {
+		case len(hardHits) > 0:
+			covered++
+		case len(softHits) > 0:
+			softOnly++
+			gaps = append(gaps, row{surface, "soft-owned",
+				"owned by " + uniqJoin(softHits) + ", none `audit: hard`"})
+		default:
+			unowned++
+			gaps = append(gaps, row{surface, "**unowned**",
+				"no dossier names " + firstN(paths, 3)})
+		}
+	}
+	total := covered + softOnly + unowned + unparsed
+	out := []string{
+		fmt.Sprintf("**%d declared surfaces · %d covered by a hard-audit dossier · "+
+			"%d soft-owned · %d unowned · %d unparsed.**",
+			total, covered, softOnly, unowned, unparsed),
+		"",
+	}
+	if len(gaps) == 0 {
+		out = append(out, "Every declared surface has a hard-audit dossier.")
+		return strings.Join(out, "\n")
+	}
+	out = append(out, "| declared surface | state | why |", "|---|---|---|")
+	sort.Slice(gaps, func(i, j int) bool { return gaps[i].surface < gaps[j].surface })
+	for _, g := range gaps {
+		// Only the surface title is character-truncated: it comes from main's
+		// table and carries no wikilinks. The detail column is bounded by
+		// construction (a capped id list, a capped path list, or a fixed
+		// string) precisely so it is never cut through a link.
+		out = append(out, fmt.Sprintf("| %s | %s | %s |",
+			truncRunes(g.surface, 90), g.state, g.detail))
+	}
+	return strings.Join(out, "\n")
+}
+
+// uniqJoin caps the LIST rather than the string. Truncating a cell mid-way
+// through a `[[wikilink]]` manufactures a dangling link and fails the linter —
+// found the first time this view rendered.
+func uniqJoin(ids []string) string {
+	seen := map[string]bool{}
+	var out []string
+	for _, i := range ids {
+		if !seen[i] {
+			seen[i] = true
+			out = append(out, "[["+i+"]]")
+		}
+	}
+	sort.Strings(out)
+	if len(out) > 4 {
+		return strings.Join(out[:4], ", ") +
+			fmt.Sprintf(" (+%d more)", len(out)-4)
+	}
+	return strings.Join(out, ", ")
+}
+
+func firstN(ps []string, n int) string {
+	if len(ps) > n {
+		return "`" + strings.Join(ps[:n], "`, `") + "` (+" +
+			fmt.Sprint(len(ps)-n) + " more)"
+	}
+	return "`" + strings.Join(ps, "`, `") + "`"
+}
+
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
 var renderers = map[string]func(*Registry) string{
-	"dashboard":      renderDashboard,
-	"invariants":     renderInvariants,
-	"seams":          renderSeams,
-	"audit-triggers": renderAuditTriggers,
-	"roadmap":        renderRoadmap,
-	"absorption":     renderAbsorption,
-	"spec-coverage":  renderSpecCoverage,
-	"code-coverage":  renderCodeCoverage,
+	"dashboard":              renderDashboard,
+	"invariants":             renderInvariants,
+	"seams":                  renderSeams,
+	"audit-triggers":         renderAuditTriggers,
+	"audit-trigger-coverage": renderAuditTriggerCoverage,
+	"roadmap":                renderRoadmap,
+	"absorption":             renderAbsorption,
+	"spec-coverage":          renderSpecCoverage,
+	"code-coverage":          renderCodeCoverage,
 }
 
 func viewNotes(reg *Registry) []*Note { return reg.OfType("view") }
