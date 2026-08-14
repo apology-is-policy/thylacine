@@ -551,29 +551,49 @@ through the first. A client that treats them as one bit re-creates the bug.
 **The detector, since QEMU gives us nothing.** `virgl_cmd_submit_3d`
 discards `virgl_renderer_submit_cmd`'s return and creates the fence
 afterwards unconditionally, so no virtio-gpu field carries the refusal.
-tapestryd therefore appends one **sentinel stamp** to every submitted
-stream — a write of a monotonically increasing per-ctx token into a small
-server-owned resource minted at ctx create and never exposed to the client:
+The detector must therefore ask the context a question only a *live*
+context can answer.
+
+**The probe is stateless, server-owned, and runs at VERIFY time only.**
+Two tiny (1x1) resources are minted per ctx at create and never exposed to
+the client: `mark`, painted once with a distinctive value, and `sentinel`,
+the target. One verify is three steps:
 
 ```
-submit: [ ...the client's commands..., CLEAR(sentinel_res, token = N) ]
+1. upload token T into `sentinel`      TRANSFER_TO_HOST_3D   (virtio-gpu cmd)
+2. submit  RESOURCE_COPY_REGION(dst=sentinel, src=mark, 1x1) (cmdbuf, stateless)
+3. read back `sentinel`                TRANSFER_FROM_HOST_3D (virtio-gpu cmd)
+
+   reads mark's value -> the copy RAN     -> context healthy
+   reads T            -> the copy was DROPPED -> context latched, sticky
 ```
 
-Verification is a `transfer_from` of that resource and a compare. **This
-works for the exact reason #240 is dangerous**: a latched vrend context
-drops *every* later cmdbuf command, so it drops the stamp too, while the
-`transfer_from` still completes and delivers stale bytes (both measured in
-§4.5.4a). The token that fails to arrive IS the detection.
+**Why each choice is forced.** Steps 1 and 3 are *virtio-gpu* commands, not
+command-buffer commands, so they keep working on a latched context — which
+is exactly what §4.5.4a measured (the `transfer_from` still completed and
+delivered stale bytes). Step 2 is `VIRGL_CCMD_RESOURCE_COPY_REGION` (13
+payload dwords, explicit src/dst handles) because it touches **no bound
+state**. That matters more than it looks: virgl context state persists
+across command buffers, and Mesa's driver dirty-tracks what it has bound,
+so a `CLEAR`-based stamp — which needs `SET_FRAMEBUFFER_STATE` — would
+leave the client's framebuffer binding pointing at our sentinel with Mesa
+unaware it must rebind. **The obvious stamp corrupts client rendering; the
+copy does not.**
 
-**Cadence is the client's, not the server's.** The stamp is always
-appended (one `CLEAR` on a tiny resource — GPU-side trivial, no readback);
-the *verify* is opt-in, so a client chooses per-frame, every Nth frame, or
+**The submit path pays nothing.** An earlier draft of this section stamped
+every submit. That was wasted work: the vrend latch is **sticky**, so one
+stamped command *after* the last submit of a window detects everything the
+window contained. Per-submit stamping bought no extra information, cost a
+command (or a whole extra fenced chain) on the hot path, and raised a
+question about mutating a client's stream that now does not arise. A
+separate command buffer is dropped by a latched context identically — the
+§4.5.4a STICKY leg proves it, since its recovery stream was its own submit.
+
+**Cadence is the client's, not the server's**: per-frame, every Nth, or
 never. Warp-C verifies once per composed frame, riding the fence sync it
-already performs. **The cost objection dissolves once quantified**: the
-sentinel readback is ~4 bytes against the ~4 MB/frame framebuffer readback
-Warp-C exists to delete — the thing that costs 43% of the frame (§4.5.1).
-Adding a four-byte round trip to remove a four-megabyte one is not a
-tension worth protecting.
+already performs. **The cost, quantified**: ~4 bytes each way against the
+~4 MB/frame framebuffer readback Warp-C exists to delete — the thing that
+costs 43% of the frame (§4.5.1).
 
 **What it does NOT give you, stated plainly.** Detection granularity is the
 *verify window*, not the individual command: `rejected-at` names the submit
@@ -581,8 +601,15 @@ sequence of the verify that caught the loss, so the offending stream is
 somewhere in `(previous_verify, rejected-at]`. Per-frame verification makes
 that window one frame, which is enough to freeze-and-report rather than
 freeze-and-lie, but it is not a per-command error code and must not be
-documented as one. Narrowing it further would need a stamp *between* every
+documented as one. Narrowing it further would need a probe *between* every
 client command, which is not worth its cost.
+
+**Nor does it distinguish WHY.** A dropped copy proves the context is
+latched; it does not say which command vrend objected to. That answer
+exists only in the host log, and the guest cannot read it (§4.5.4a). The
+honest contract is "this context is dead, recreate it" — which is exactly
+what `glGetGraphicsResetStatus` and `VK_ERROR_DEVICE_LOST` promise, and no
+more.
 
 **Regression witness.** `tools/warp-host.sh reject` (§`149-warp.md`) becomes
 the gate: after the fix its rejected arm must report `stream-rejected 1`,
@@ -591,10 +618,14 @@ are required — a detector that latches on everything passes the first
 assertion alone, which is the failure this arc has already met twice.
 
 **Audit.** The warp seam is an audit-trigger surface, so the implementing
-sub-chunk carries a focused round: the new field is client-readable state
-derived from a server-owned resource, the stamp rides inside an otherwise
-opaque client stream, and the sentinel resource must be unreachable to the
-client (an attacker who can write it can forge health).
+sub-chunk carries a focused round. The load-bearing questions: `mark` and
+`sentinel` must be unreachable to the client through every path that
+resolves a BO (an attacker who can write either can forge health, or
+manufacture a false rejection against a healthy ctx); the two extra
+resources per ctx must be charged against — or explicitly exempted from,
+with an argument — the per-ctx BO count and byte caps that #218/#204 sized;
+and the probe's own failure arms must fail CLOSED (an upload or readback
+that errors is "unknown", never "healthy").
 
 **P2 — cross-context ordering: does the blit observe the client's finished
 frame?** The client renders on its context, the compositor blits on its own;
