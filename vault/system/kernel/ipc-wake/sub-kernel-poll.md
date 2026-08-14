@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-poll, spec-tsleep, gate-smp]
 locks: [lock-poll-list, lock-rendez, lock-wait, lock-timerwait]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-14
 ---
 ## Purpose
 
@@ -29,11 +29,21 @@ dev9p.poll bridge's userside.
   with `revents != 0`, or -1 (bad args). `timeout_ms < 0` blocks
   indefinitely, `== 0` is a non-blocking probe, `> 0` bounds the park.
 - `nfds` ∈ [1, `POLL_MAX_NFDS` = 64]. **Deliberately decoupled from
-  `PROC_HANDLE_MAX`** (now 256; [[chg-2026-06-24-355-poll-decouple]]):
-  the frame stack-allocates `waiters[]` + `held[]` of this size, and
-  sizing them to the fd-table bound would blow the kstack (~14 KiB at
-  256). Lifting past 64 needs heap-backed arrays —
-  [[seam-poll-heap-waiters]].
+  `PROC_HANDLE_MAX`**, which is now **1024** — 64 at the decoupling,
+  256 by [[chg-2026-06-24-355-poll-decouple]], 1024 since the #198
+  fid-ceiling chain. The frame stack-allocates `waiters[]` + `held[]` at
+  the bound, 32 B + 24 B per fd (`sizeof(struct Handle) == 24` is
+  `_Static_assert`-pinned), so restoring the identity now costs
+  **56 KiB on a 16 KiB kstack** (`THREAD_KSTACK_SIZE`; the other 16 KiB of
+  `THREAD_KSTACK_TOTAL_SIZE` is the guard region that exists to catch this
+  exact overrun, so it is not headroom — #198's own stale-constant sweep
+  compared against the 32 KiB total and understated the margin twofold,
+  arriving at the same 56 KiB numerator by the same arithmetic).
+  **The decoupling changed character without changing text**: at 256 it
+  was prudence — 14 KiB of 16, leaving nothing for the rest of the frame
+  but not itself an overrun — and at 1024 it is the only thing between
+  `poll` and a guard-page walk. Lifting past 64 needs heap-backed arrays
+  — [[seam-poll-heap-waiters]].
 - Event bits are Linux-valued (`POLLIN` 0x001, `POLLOUT` 0x004, and
   output-only `POLLERR`/`POLLHUP`/`POLLNVAL`); `struct pollfd` is
   8 bytes, offset-pinned ABI.
@@ -160,9 +170,16 @@ why `POLL_MAX_NFDS` is a frame bound, not an fd-table bound.
   v1.0" — a soundness argument inverted by the multi-thread lift and
   closed by the retain it says doesn't exist — and sized `waiters[]`
   by `PROC_HANDLE_MAX` throughout, the identity whose restoration
-  would overflow the kstack. `syscall.h`'s SYS_POLL comment still
-  names `PROC_HANDLE_MAX = 64` as the bound; the handler correctly
-  uses `POLL_MAX_NFDS`.
+  would overflow the kstack.
+- **`syscall.h`'s `SYS_POLL` enum comment still documents `nfds` as
+  `1..PROC_HANDLE_MAX = 64`,
+  and arrives at the right number by two cancelling errors.** It names
+  the wrong constant (the bound is `POLL_MAX_NFDS`; the handler is
+  correct) and asserts a value that constant has not held since the
+  decoupling — `PROC_HANDLE_MAX` is 1024, so the stated equation is now
+  wrong by 16x. It reads as current because 64 is still the right
+  answer; nothing about the comment would change if the bound moved.
+  Tracked as task #166, the sibling of #87.
 - P5-poll F3 ([[fnd-poll-r1-f3]]) is this surface's origin story for
   the batch-8 lesson: a P1 "doc-fixed" by documenting a
   single-thread precondition that a later lift silently voided.

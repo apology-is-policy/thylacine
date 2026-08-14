@@ -20,7 +20,11 @@ born:
 - "`uaccess_store_u32` doesn't yet exist; only uaccess_load_u8 is
   wired" — store_u32 landed with #112, and CF-3 added bulk
   copy_in/copy_out.
-- `PROC_HANDLE_MAX = 64` — 256 since the go-arc growth.
+- `PROC_HANDLE_MAX = 64` — the constant has moved twice since this doc
+  froze: 256 at the go-arc growth, **1024** at the #198 fid-ceiling
+  chain. Stated as history rather than as a fresh number, because the
+  first version of this correction said "256 since the go-arc growth"
+  and rotted the same way inside a month.
 
 The handler listing itself is still shape-accurate (rights,
 rollback), which is why the dossier absorbs rather than corrects it.

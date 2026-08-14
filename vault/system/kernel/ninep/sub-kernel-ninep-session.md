@@ -12,7 +12,7 @@ hazards: [haz-shared-stream-desync]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-14
 ---
 ## Purpose
 
@@ -61,7 +61,8 @@ lowest inactive slot or `-1` — back-pressure surfaces as a send-side
 refusal, never a silent overwrite. A full table is the flow-control trip the
 client's #349 machinery sits above.
 
-**Fid table**: `bound_fids[P9_SESSION_MAX_FIDS]` (256), linear scan,
+**Fid table**: `bound_fids[P9_SESSION_MAX_FIDS]` (**1024** since the #198
+fid-ceiling chain; 256 before), linear scan,
 swap-with-last unbind. `SendClunk` **unbinds at send time** — the canonical
 client discipline: no further op can target the fid even while the Rclunk is
 in flight, and an Rlerror on the clunk leaves it unbound (the client already
@@ -70,8 +71,17 @@ so exhaustion fails closed *before* the round trip; the dispatch-side
 `fid_bind` failure that remains (the TOCTOU residual — a peer bound the
 last fid during this op's recv) completes the op as a **synthetic
 Rlerror EIO** rather than returning `-1`, because the client latches the
-whole shared session dead on a dispatch `-1` and a local 256-fid exhaustion
+whole shared session dead on a dispatch `-1` and a local fid exhaustion
 must never kill every other Proc's mount (the R3-F1 lesson).
+
+**Exhaustion here is silent at BOTH endpoints, which is what made it the
+invisible layer of the #198 hunt.** `fid_alloc` refuses before any
+T-message is built, so the client sees a generic failure and the server
+never learns a request existed — three rounds of theorizing at either end
+died on a refusal that sat between them. The ceiling was lifted 256 ->
+1024 rather than made dynamic; the refusal path is unchanged, so the same
+blindness returns at 1024. A future ceiling hunt should instrument here
+first, not last.
 
 **Per-op-family send preconditions** (the spec's "no other in-flight op on
 the same fid" discipline, enforced via `any_outstanding_on_fid`):
@@ -133,7 +143,7 @@ exist — the deferred refinement is noted in place).
 ## Data structures
 
 `struct p9_session`: magic (`0x50395345` "P9SE"), state, root_fid, msize +
-negotiated_msize, `bound_fids[256]` + count, `outstanding[64]`, monotonic
+negotiated_msize, `bound_fids[1024]` + count, `outstanding[64]`, monotonic
 `next_op_id`, sent/completed counters. `struct p9_outstanding`: `active`,
 `kind` (the T-opcode), `fid`, `new_fid`, `op_id`, `awaiting_flush`,
 `abandoned`, `flush_oldtag`, `wga_nwname` (the walkgetattr full-walk

@@ -9,7 +9,7 @@ guarded-by: [inv-i9]
 validated-by: [spec-pipe, gate-smp]
 locks: [lock-pipe-ring, lock-poll-list, lock-rendez]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-14
 ---
 ## Purpose
 
@@ -148,7 +148,12 @@ None open on this surface. The named lifts live elsewhere: the pouch
   next chunk, never updated.
 - `52-sys-pipe.md` (absorbed) is frozen at P5-fd-pipe: "userspace can
   `pipe()` but can't actually use the fds", "`uaccess_store_u32`
-  doesn't yet exist", `PROC_HANDLE_MAX = 64`.
+  doesn't yet exist", `PROC_HANDLE_MAX = 64`. That last one is **1024**
+  today — 64 → 256 at the go-arc growth → 1024 at the #198 fid-ceiling
+  chain — and it is the bound `sys_pipe_for_proc`'s `handle_alloc`
+  failure arm reports against, two fds at a time. The stub's own
+  correction of it said "256" and needed re-correcting inside a month,
+  so it now records the sequence rather than a value.
 
 ## Provenance
 

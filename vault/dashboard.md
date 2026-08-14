@@ -125,6 +125,7 @@ Generated — do not edit between the markers (`quaestor render`).
 
 ## Recent changes
 
+- 2026-08-14 [[chg-2026-08-14-merge-fold-124]] — The 124-commit merge, and what --ours would have thrown away
 - 2026-08-06 [[chg-2026-08-06-ledger-correction]] — Correction: batch 55's pre-sweep baseline was 17829, and proximity beat provenance
 - 2026-08-06 [[chg-2026-08-06-process-creation-arc]] — The process-creation arc, and three comments that outlived their code
 - 2026-08-05 [[chg-2026-08-05-staleness-is-computable]] — Coverage was never currency — 45 of 112 dossiers describe code that moved
@@ -132,5 +133,4 @@ Generated — do not edit between the markers (`quaestor render`).
 - 2026-08-04 [[chg-2026-08-04-leaf-commands-sweep]] — The leaf commands — one rule enforced by construction, one delegated by convention
 - 2026-08-04 [[chg-2026-08-04-netdev-sweep]] — The NIC transport — a teardown obligation stated on the transport that does not need it
 - 2026-08-04 [[chg-2026-08-04-presentation-stack-sweep]] — The presentation stack — eighteen tests that cannot compile, and a fix that reached one sibling again
-- 2026-08-04 [[chg-2026-08-04-virtio-programs-sweep]] — The virtio programs — a guard defeated by a cast, and a bound outside the call it bounds
 <!-- generated:end -->

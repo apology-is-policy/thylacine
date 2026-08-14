@@ -12,7 +12,7 @@ hazards: [haz-single-waiter-rendez, haz-death-path-wake]
 abis: []
 design: []
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-14
 ---
 ## Purpose
 
@@ -190,6 +190,35 @@ magic → free both ring buffers → free the struct. Sound because every
 blocking op's call chain holds a conn ref across its park (no thread can
 be inside a ring copy at the last unref) and teardown has already
 unparked every blocked party.
+
+**The ring counters + the `/ctl` registry** (#210, the reply-loss
+discriminator). Each `srvconn_chan` carries lifetime `produced` /
+`consumed` byte totals mutated **only** inside `chan_ring_write` /
+`chan_ring_read`, both of which document holding `ch->lock` as a
+precondition — so the conservation law `produced == consumed + count`
+holds under the lock **by construction** rather than by audit, and a
+violation is therefore a memory-safety symptom, not an accounting one.
+`SrvConn.s2c_frames` counts whole server reply buffers delivered by
+`srvconn_server_send_blocking`; the plain relaxed increment is sound
+because the #354 writer role already serializes producers to one at a
+time.
+
+Every live conn is linked into `g_srvconn_ctl_head` at create and
+unlinked **on the last unref, before teardown or free**, which is the
+whole lifetime argument: `srvconn_ctl_iterate` holds
+`g_srvconn_ctl_lock` across its entire walk, so it can never reach a
+conn whose free has begun. Order is **registry → `ch->lock`**, and the
+unlink path takes only the registry lock, so there is no inversion to
+find. Surfaced at `/ctl/9p-sessions`.
+
+**What the counters are FOR is the part worth keeping**: they exist to
+tell three indistinguishable failures apart — a reply that was never
+produced, one produced and never consumed, and one consumed by the
+wrong party. Before them, all three presented as "the client is
+parked". `produced > consumed` with the attached client parked is the
+signature of the second, and it is the one a conservation law can
+prove rather than suggest. Pinned by `srvconn.ctl_counters`
+(conservation + the frame count + unlink-on-free).
 
 ## Data structures
 

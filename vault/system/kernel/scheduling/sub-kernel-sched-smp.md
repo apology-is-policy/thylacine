@@ -9,7 +9,7 @@ guarded-by: [inv-i21, inv-i18, inv-i8, inv-i9]
 validated-by: [spec-sched-alpha, spec-sched-oncpu, spec-sched-tickless, spec-sched-rebalance, spec-sched-ctxsw, gate-smp]
 locks: [lock-runq]
 created: 2026-08-01
-updated: 2026-08-01
+updated: 2026-08-14
 ---
 ## Purpose
 
@@ -187,6 +187,82 @@ wake-IPIs off. Before those flip, a secondary is parked in WFI and woken
 only by an explicit IPI. (Without the timer gate, a secondary self-waking
 on its own tick stole a test thread and surfaced as
 `thread_free of RUNNING thread`.)
+
+### Real silicon broke four things at once (#214, Pi 400 / KVM)
+
+The first `-smp 4` boot on real hardware froze at bring-up. **Every
+emulated substrate was structurally incapable of catching any of the
+four defects**, which is the durable point: TCG and HVF had been green
+on this path for months, and none of the four is a race — they are all
+"the emulator was kinder than the architecture allows".
+
+**Root cause: an UNKNOWN-reset register that QEMU happened to zero.**
+`secondary_entry` never initialized `TPIDR_EL1`/`TPIDR_EL0`. Both are
+architecturally UNKNOWN at PSCI entry — exactly as at cold boot, where
+`_real_start` has zeroed them since P2-A. QEMU resets them to 0, so
+`current_thread()` returned NULL and `spin_preempt_inc`'s `!t` guard
+held **by accident**. KVM deliberately poisons UNKNOWN-reset sysregs
+with `0x1de7ec7edbadc0de`, so the secondary's first `current_thread()`
+dereference read through the poison and died (`ESR 0x96000004`, FAR =
+the poison). The trampoline now zeroes `TPIDR_EL1`, `TPIDR_EL0` **and**
+`TPIDRRO_EL0` — the third because the kernel never writes it and EL0
+can always read it, so a boot leftover would be EL0-visible forever.
+
+**The amplifier turned a fault into RAM corruption.** The poison fault's
+own handler chain re-dereferenced the same poison (cons locks take
+`spin_preempt_inc` too), so fault → extinction → print → fault
+recursed. Each re-entry ran KERNEL_ENTRY on the same stack: **SP
+arithmetic never faults**, so with a mapped SP every iteration landed a
+288-byte frame and marched down past the kstack guard, scribbling
+exception frames across physical RAM through the directmap until the L1
+page tables themselves held `THRD`-magic frames. Two guards bound it —
+a per-CPU synchronous-recursion depth counter in `exception.c`
+([[sub-kernel-exception]]) and a per-CPU re-entrancy guard in
+`extinction()`. The depth counter's subtlety is worth carrying: a
+legitimate EL1h-sync handler CAN sleep (kernel-uaccess of a cold
+demand-paged file page blocks in 9P), so the raw count is not bounded
+under load. The audit's F1 fix is that **the scheduler clears the
+counter at every context switch** — a switch proves forward progress,
+while a genuine runaway is synchronous and IRQ-masked and never reaches
+`sched()`. Reset-to-0 on unwind rather than decrement additionally stops
+a migrated handler's exit from stranding a foreign increment.
+
+**The bring-up timeout had never once fired, and rode a dead clock.**
+`wait_for_flag` counted `g_ticks`, advanced only by cpu0's timer IRQ and
+not guaranteed live in the `smp_init` context. Because secondaries had
+always arrived first on every substrate, the loop had **never terminated
+by timeout in its entire history** — so the first real failure froze
+boot forever, silently. It now rides `timer_get_counter()` (CNTVCT_EL0,
+always advances) with `SMP_BRINGUP_TIMEOUT_MS` = 1000. And `smp_init`
+now **extincts on a partial bring-up** rather than continuing with
+fewer CPUs: a partially-SMP boot is a lie waiting to be verified
+around.
+
+**The mailbox protocol** exists because the trampoline's MMU-off stores
+are Device-nGnRnE writes straight to PoC, *not* coherent with the
+primary's cacheable view — the caveat the old reference doc had
+predicted for "bare-metal hardware" and deferred to Pi bring-up.
+`g_cpu_online` is now a line-isolated mailbox (`SMP_MAILBOX_BYTES` = 64,
+`_Static_assert`-pinned and `>= DTB_MAX_CPUS`): the primary writes it
+once, `DC CIVAC`s the line before the first CPU_ON so no cached copy's
+writeback can clobber a secondary's Device write, re-CIVACs before every
+diagnostic read, and never writes the line again. `g_cpu_stage` gets
+**one line per CPU** (`SMP_STAGE_NONE` … `SMP_STAGE_GIC`, 0–7) for the
+same reason inverted: a cacheable store to a line another CPU is still
+Device-writing would fill from a stale copy and clobber it on writeback.
+The stage trace is what localized the root cause to the
+`thread_init_per_cpu_idle` window **in a single boot**. `g_cpu_alive`
+needs none of this — it is written with the MMU on and polled
+coherently, which is exactly the online/alive distinction above earning
+its keep a second time.
+
+Cross-surface: the trampoline changes (TPIDR zeroing, VBAR_EL1 installed
+before any C runs, `ic iallu` in `mmu_program_this_cpu` and its
+frameless-leaf constraint now enforced by a post-link build gate) live in
+`arch/arm64/start.S` — [[sub-kernel-boot-entry]]. `kernel/extinction.c`
+has no dossier at all; only [[abi-boot-banner]] names it, so its
+re-entrancy guard is recorded here and nowhere in a Mechanism section
+(task #32).
 
 ## Data structures
 

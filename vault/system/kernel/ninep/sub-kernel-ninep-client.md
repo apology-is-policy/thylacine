@@ -19,7 +19,7 @@ hazards: [haz-shared-stream-desync, haz-single-waiter-rendez, haz-death-path-wak
 abis: []
 design: ["docs/ARCHITECTURE.md sections 21 + 21.10 + 8.8.1.1"]
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-14
 ---
 ## Purpose
 
@@ -139,6 +139,41 @@ results zero-copy alias the per-op `reply_buf`; `client_run` keeps that
 buffer alive past return via the single `c->done_reply_buf` slot (freed at
 the next completion or destroy, under the lock) so the public op's copy-out
 is valid.
+
+**The demux counter suite + the ownerless taxonomy** (#210).
+`demux_frame_locked` is the sole mutation site for six per-client
+counters, all under `c->lock`: `frames_rx` (every steady-state frame that
+reached the demux), `demux_owned` / `demux_wakes` (frames with a live
+`inflight[tag]` submitter, and sync wakeups actually issued), and a
+**three-way split of the ownerless case**.
+
+The split is the whole point, and it encodes the #214-F1 conflation
+lesson: "ownerless" is not one pathology, it is one pathology wearing
+three by-design flows as camouflage.
+
+| Counter | Why a frame legitimately arrives unowned |
+|---|---|
+| `demux_orphan_clunk` | `p9_client_clunk_async` never registers `inflight[tag]`, so **every** async Rclunk is ownerless — constant background |
+| `demux_orphan_flush` | the #845 abandon path sends its Tflush ownerless, so every abandon's Rflush lands here — death-driven |
+| `demux_orphan_late` | an abandoned op's late ORIGINAL reply, classified from the session table (`outstanding[tag].active && .awaiting_flush`) under the same `c->lock` |
+| `demux_orphan` | **the residue** — a frame no living mechanism accounts for |
+
+Only the last is a defect signal, and it reads **zero on every healthy
+boot including death flows**, which is what makes it usable: a
+single-digit non-zero is a misroute, tag corruption, or genuine loss
+surfacing. The first four per client are logged. Collapsing any of the
+three named flows back into the residue would restore the original
+condition, where a constant stream of legitimate async Rclunks buried
+the one frame that mattered.
+
+The snapshot (`p9_client_ctl_snapshot`, surfaced at `/ctl/9p-sessions`)
+also carries up to `P9_CTL_INFLIGHT_MAX` (8) in-flight tags — per tag the
+done/async flags plus the sent T-type and primary target fid, read from
+`outstanding[]` under the same lock. The design choice worth naming: a
+parked op is identified by **what it waits on**, not by which thread
+holds it, because the thread is the thing you cannot see from `/ctl`.
+Only `p9_attached` sessions are listed (the sole production funnel); raw
+test clients carry the counters unlisted.
 
 ## Data structures
 
