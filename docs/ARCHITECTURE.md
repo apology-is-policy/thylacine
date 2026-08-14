@@ -821,7 +821,7 @@ In `struct Proc`:
 
 In `struct Thread`:
 - `u64 note_mask;` — bit-per-supported-note; bit set = deferred to this Thread.
-- `bool in_handler;` — re-entrancy guard.
+- `bool in_handler;` — re-entrancy guard. **Cleared at exec (#247)** along with `handler_va`, the sigtab and the note mask: it is not a disposition, but it survives into the new image if left set, and the delivery gate reads it above every other branch — so a thread that execs from inside a handler would receive no further note (`kill` excepted).
 - `u64 note_saved_pc, note_saved_sp;` — handler-restore cross-check (the full `ureg` is on the user stack).
 
 The `RFNOTEG` rfork bit (already reserved in `proc.h`) selects share-vs-copy of the queue. v1.0 always copies (each Proc gets its own); the share semantics land when rfork is properly used (Phase 7).

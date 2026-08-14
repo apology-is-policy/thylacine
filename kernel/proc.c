@@ -3003,6 +3003,49 @@ bool proc_exec_alone(struct Proc *p) {
     return alone;
 }
 
+// The note-side half of "drop everything that names the OUTGOING image",
+// factored out of proc_exec_replace so it can be driven directly by a test --
+// the exec path itself cannot be, since it demands current_thread()->proc == p
+// and performs a real TTBR0 swap. Its caller supplies the single-live-thread
+// guarantee (proc_exec_alone, re-checked under the lock at the swap); nothing
+// here re-establishes it.
+//
+// Keep this the ONE place the note-side reset happens. Splitting it -- an
+// in_handler clear here and a mask clear at the call site, say -- is how the
+// next field gets missed, which is exactly how #247 happened.
+static void proc_exec_drop_image_state(struct Proc *p, struct Thread *self) {
+    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
+    kfree(p->sigtab);            // VIVARIUM V-6b Linux dispositions; lazily re-made
+    p->sigtab = NULL;
+    self->note_mask = 0u;
+
+    // #247: and the in-handler LATCH, which the reset above missed until it was
+    // audited. It is not a disposition, so it does not read as one -- but
+    // notes_deliver_at_el0_return returns early on it, ABOVE both the phenotype
+    // and handler_va branches, so a thread that execs from inside a note handler
+    // carries the latch into the new image and that image never receives another
+    // note. `kill` is the one exception, checked above the gate (the R2-F7 fix),
+    // which is the only reason this was a deafness bug rather than an
+    // unkillable-process bug.
+    //
+    // exec from a handler is an ordinary shape, not a contrivance: execve is
+    // async-signal-safe and "catch the hangup, re-exec myself" is the standard
+    // supervisor idiom.
+    //
+    // Clearing this ONE flag is the whole fix -- note_handling_name and the
+    // note_saved_* block are unreachable while in_handler is false (the
+    // invariant notes_noted_restore states when it deliberately leaves the name
+    // buffer intact), so they need no separate scrub.
+    self->in_handler = false;
+}
+
+// Test hook (the *_for_test convention; deliberately absent from the header --
+// the harness extern-declares it and there is no production caller).
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t);
+void proc_exec_drop_image_state_for_test(struct Proc *p, struct Thread *t) {
+    proc_exec_drop_image_state(p, t);
+}
+
 void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     if (!p || p->magic != PROC_MAGIC) extinction("proc_exec_replace: bad Proc");
     if (!nas)                         extinction("proc_exec_replace: NULL address space");
@@ -3081,10 +3124,7 @@ void proc_exec_replace(struct Proc *p, struct AddrSpace *nas) {
     // re-checked it under the lock, so this line inherits the guarantee rather
     // than assuming it. (V-6b freed it only at reap precisely because that was
     // the only other point where the same thing was true.)
-    __atomic_store_n(&p->handler_va, 0ull, __ATOMIC_RELEASE);
-    kfree(p->sigtab);            // VIVARIUM V-6b Linux dispositions; lazily re-made
-    p->sigtab = NULL;
-    self->note_mask = 0u;
+    proc_exec_drop_image_state(p, self);
 
     // L-7 F2: hardware breakpoints and watchpoints are addresses in the OLD
     // image, for exactly the reason the handler entry points above are. Nothing

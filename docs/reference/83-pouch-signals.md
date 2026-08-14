@@ -402,9 +402,27 @@ the handler's pattern. Both sites were revert-probed independently and each
 fails at its own assertion.
 
 The pairing is exhaustive by construction: `in_handler` is written in exactly
-three places (`true` at the two save sites, in straight-line code immediately
-after each save; `false` at the restore), `notes_noted_restore` returns early
-unless `in_handler`, and it has exactly one caller.
+**four** places (`true` at the two save sites, in straight-line code
+immediately after each save; `false` at the restore, and `false` again at
+exec), `notes_noted_restore` returns early unless `in_handler`, and it has
+exactly one caller.
+
+The fourth writer is #247 and it is a *clear*, not a pairing — so it does not
+weaken the save/restore argument above, it closes a leak in it. A thread that
+execs from inside a handler never reaches the restore, so before #247 the latch
+survived into the new image; `notes_deliver_at_el0_return` returns early on it,
+ABOVE both the phenotype and `handler_va` branches, and the new image received
+no further note (`kill` excepted, since the kill peek precedes the gate). It is
+now dropped in `proc_exec_drop_image_state` alongside `handler_va`, the sigtab
+and the note mask, for the same reason all of those go: they name the outgoing
+image. Regression `proc.exec_drops_image_note_state`, sabotage-verified.
+
+Note the shape of that bug, because it is the reusable part: the reset block
+was written around the idea of *dispositions*, and the latch is not a
+disposition — it is a scheduling-visible flag that merely lives next to them.
+Enumerating a category ("caught-signal dispositions") is not the same as
+enumerating the fields that name the old image, and only the second one is
+the property the block actually needs.
 
 ### Why reading live registers is sound
 

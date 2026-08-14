@@ -74,6 +74,8 @@ extern void proc_test_link_child(struct Proc *parent, struct Proc *p);
 extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
 extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 extern void proc_test_set_init(struct Proc *p);
+extern void proc_exec_drop_image_state_for_test(struct Proc *p,
+                                                struct Thread *t);   // #247
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -1989,4 +1991,63 @@ void test_proc_job_stop_orphan_rule(void) {
     // d's death reparented c/c2 to kproc; the parent-aware unlink cleans up.
     legate_drop_linked(c);
     legate_drop_linked(c2);
+}
+
+void test_proc_exec_drops_image_note_state(void);
+
+// #247: a successful exec must drop every note-side thing that names the OLD
+// image -- including the in-handler LATCH, which the reset missed.
+//
+// Why the latch and not just the dispositions: notes_deliver_at_el0_return
+// returns early on `t->in_handler`, and that gate sits ABOVE both the phenotype
+// and handler_va branches. A thread that execs from inside a note handler
+// therefore carries the latch into the new image, and the new image never
+// receives another note -- `kill` excepted, since the kill peek is checked
+// above the gate. execve is async-signal-safe and "catch the hangup, re-exec
+// myself" is the standard supervisor idiom, so this is an ordinary shape.
+//
+// Driven through the extracted helper rather than proc_exec_replace: that
+// function demands current_thread()->proc == p and performs a real TTBR0 swap,
+// neither of which a unit test can honestly supply.
+void test_proc_exec_drops_image_note_state(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    proc_test_link(p);
+
+    static struct Thread th;            // BSS-zeroed
+    th.magic = THREAD_MAGIC;
+    th.proc  = p;
+
+    // ARM every field the reset is supposed to drop -- and assert here that it
+    // IS armed. This block is not ceremony: every post-condition below is of
+    // the form "and now it is zero", which a fixture that never set it
+    // satisfies perfectly. The precondition is what makes the zero a
+    // measurement instead of a starting value.
+    // NOTE_BIT_* are bit INDICES, not masks (NOTE_BIT_INTERRUPT is 0u) -- the
+    // shift is required. Assigning the bare constant sets the mask to ZERO,
+    // which the precondition below caught on this test's first run: the
+    // post-condition "note_mask == 0" would otherwise have passed against a
+    // mask that was never armed.
+    p->handler_va  = 0x1000u;
+    th.note_mask   = (1u << NOTE_BIT_INTERRUPT) | (1u << NOTE_BIT_TTY);
+    th.in_handler  = true;
+    TEST_ASSERT(p->handler_va != 0,  "precondition: a handler is registered");
+    TEST_ASSERT(th.note_mask != 0,   "precondition: the note mask is non-empty");
+    TEST_ASSERT(th.in_handler,       "precondition: the thread is MID-HANDLER");
+
+    proc_exec_drop_image_state_for_test(p, &th);
+
+    TEST_ASSERT(p->handler_va == 0,
+                "exec dropped the handler entry point (an address in the old "
+                "image)");
+    TEST_ASSERT(p->sigtab == NULL, "exec dropped the Linux disposition table");
+    TEST_ASSERT(th.note_mask == 0, "exec dropped the note mask");
+    TEST_ASSERT(!th.in_handler,
+                "#247: exec dropped the in-handler LATCH -- without this the "
+                "new image is deaf to every note but kill");
+
+    th.proc = NULL;                     // the static outlives proc_free
+    proc_test_unlink(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
 }
