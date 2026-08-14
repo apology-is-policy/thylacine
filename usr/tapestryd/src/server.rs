@@ -163,6 +163,12 @@ const MAX_WARP_BOS_PER_CTX: usize = 1024;
 /// "appended LAST" ordering discipline exists to protect, now checked
 /// instead of merely asserted in a comment.
 const WCTX_CTL_SNAPSHOT: usize = 255;
+
+/// The same contract for the GLOBAL warp `ctl` (round-3 F4). Its in-tree
+/// readers take a 512-byte snapshot; measured through the last fixed-size
+/// line, the current prefix is ~336 at type-max, so the headroom is real
+/// but unguarded until this check.
+const W_CTL_SNAPSHOT: usize = 511;
 /// One ctx's share of the process-wide fenced lane (round-5 F4). Half, so
 /// a second client can always make progress and no single client can drive
 /// every slot into the abandonment poison.
@@ -782,6 +788,8 @@ pub struct Comp {
     warp_probe_freed: u32,
     /// One-shot for the F11 per-ctx-ctl width report.
     warp_ctl_wide_said: bool,
+    /// The same, for the GLOBAL ctl (round-3 F4).
+    warp_gctl_wide_said: bool,
     /// Every verify that reached no verdict, across all ctxs (audit F5).
     /// The one-shot `say!`s name the first of each kind; this is the RATE,
     /// and without it silencing the storm would have destroyed the only
@@ -1032,6 +1040,7 @@ impl Comp {
             warp_probe_parked: 0,
             warp_probe_freed: 0,
             warp_ctl_wide_said: false,
+            warp_gctl_wide_said: false,
             warp_verify_unknown: 0,
             #[cfg(feature = "test-mode")]
             w210_fparked: 0,
@@ -2906,6 +2915,25 @@ impl Comp {
             .iter()
             .flatten()
             .find(|c| c.pub_id == want_ctx && !c.retiring)?;
+        // ROUND-3 F2: the SAME synchronous-lane hazard the probe's `verify`
+        // is gated on -- and this path runs it EVERY FRAME, unbidden by the
+        // client that owns the ctx, where the probe runs it on demand. Both
+        // callers below drive `.step` on THIS client's dev_ctx (the composed
+        // arm's `transfer_from_3d_sync`, the direct arm's `flush`), so a ctx
+        // whose fence was abandoned 30 s ago -- by definition GL work that
+        // has not finished -- would take the readback into the 500 ms
+        // deadline and latch the engine `dead`, terminal, for every client
+        // and the console. The gate that existed on the verb did not make
+        // the lane safe; it made one caller safe.
+        //
+        // `fence_poisoned` ONLY, deliberately not `fences_in_flight`: a
+        // healthily-rendering client has fences outstanding most of the
+        // time, so gating on those would collapse composition to the 2D
+        // weave constantly. Returning `None` degrades to a stale frame,
+        // which both call sites already handle.
+        if c.fence_poisoned {
+            return None;
+        }
         let (slot, gen, bo_pub) = c.present_to?;
         if slot != n || gen != s.gen {
             return None;
@@ -3226,8 +3254,22 @@ impl Comp {
         if self.wctx(ctx_pub, conn).map_or(true, |c| c.probe.is_none()) {
             return None;
         }
+        // ROUND-3 F1 (and my own SF-3, found independently): count only when
+        // a probe actually RAN. Round-2 F2 gave the rate-limit cache a
+        // `None` return -- correctly, an UNKNOWN tick must not answer
+        // "healthy" -- and this fold point counts on the return value alone,
+        // so every re-verify inside that same tick bumped the counter having
+        // done zero device I/O. That is round-2 F9's own defect one arm
+        // over, recreated by F2 in the same commit, and it would pin a u32
+        // at MAX and blind the only gauge carrying the UNKNOWN rate.
+        // `verify_seq` advances iff the probe was admitted past the rate
+        // limit, so it is the exact witness of "ran".
+        let seq_before = self.wctx(ctx_pub, conn).map_or(0, |c| c.verify_seq);
         let r = self.warp_ctx_verify_probe(ctx_pub, conn);
-        if r.is_none() {
+        let ran = self
+            .wctx(ctx_pub, conn)
+            .map_or(false, |c| c.verify_seq != seq_before);
+        if ran && r.is_none() {
             self.warp_verify_unknown = self.warp_verify_unknown.saturating_add(1);
         }
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
@@ -3980,10 +4022,19 @@ impl Comp {
                         self.warp_ctx_leaked_probe[slot] = Some(p);
                         self.warp_probe_parked = self.warp_probe_parked.saturating_add(1);
                     } else {
+                        // ROUND-3 F3: charge it anyway. The record IS
+                        // permanently parked-without-freed -- which is
+                        // exactly what this counter means -- and leaving it
+                        // uncounted made `probe-parked - probe-freed` read
+                        // BALANCED in the one case the guard exists to
+                        // report. A ledger that goes quiet precisely when
+                        // the BUG fires is the #184 shape.
+                        self.warp_probe_parked = self.warp_probe_parked.saturating_add(1);
                         say!(
                             "tapestryd: warp ctx slot {} probe graveyard OCCUPIED -- BUG, \
                              park-implies-poison breached; the new record LEAKS rather than \
-                             risk freeing pages the device may still hold",
+                             risk freeing pages the device may still hold (charged to \
+                             probe-parked, which will never be matched by a free)",
                             slot
                         );
                     }
@@ -5223,6 +5274,9 @@ impl Conn {
                     comp.warp_probe_parked, comp.warp_probe_freed, comp.warp_verify_unknown
                 ),
             );
+            // Round-3 F4: where the FIXED-size prefix ends. Re-set below in
+            // the test-mode block, whose `w210` line is also fixed size.
+            let mut gcrit_end = s.len();
             // Audit F3/F4: the ctx-less refusal ledger + the comp-global
             // one-shot mask -- both are spendable/bumpable by ANY conn, so
             // both must be READABLE or their state is invisible exactly
@@ -5285,6 +5339,9 @@ impl Conn {
                         comp.w210_f_fid
                     ),
                 );
+                // The fixed-size prefix ends HERE; everything below grows
+                // with the live-ctx count and is deliberately non-critical.
+                gcrit_end = s.len();
                 for c in comp.warp_ctxs.iter().flatten() {
                     let _ = core::fmt::write(
                         &mut s,
@@ -5301,6 +5358,24 @@ impl Conn {
                         ),
                     );
                 }
+            }
+            // ROUND-3 F4: the per-ctx ctl got a runtime width report and its
+            // global sibling -- widened by six lines in the same arc -- got
+            // only an ordering convention. Same check, same reason: a
+            // truncation is silent, `parse_field` simply misses the key and
+            // the reader takes a default. Measured through `w210` (the last
+            // FIXED-size line; the per-ctx `wctx` rows after it are
+            // deliberately unbounded and non-critical).
+            if gcrit_end > W_CTL_SNAPSHOT && !comp.warp_gctl_wide_said {
+                comp.warp_gctl_wide_said = true;
+                say!(
+                    "tapestryd: warp global ctl fixed prefix is {} bytes (file {}), past the \
+                     {}-byte client snapshot -- keys after the cut are INVISIBLE to a short \
+                     reader",
+                    gcrit_end,
+                    s.len(),
+                    W_CTL_SNAPSHOT
+                );
             }
             return self.read_str(tag, &s, a.offset, cap);
         }
