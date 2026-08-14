@@ -850,6 +850,16 @@ struct WarpCtx {
     /// these, and a reader can tell "never verified" (0) from "verified
     /// and healthy" (>0 with stream_rejected 0) -- the #184 distinction.
     verify_seq: u64,
+    /// The compositor tick the last verify ran on. SELF-AUDIT FINDING: the
+    /// `verify` verb costs THREE synchronous device round trips on the
+    /// compositor's own dispatch thread, and it is client-triggered -- so
+    /// unrated it is a fresh DoS lever, a client spinning writes to starve
+    /// the present path. The fenced lane has `E_AGAIN` admission for exactly
+    /// this reason and the sync slot bypasses all of it. One probe per ctx
+    /// per tick is the bound: it is precisely the per-frame cadence 4.5.4b
+    /// designs for, so it costs the intended use nothing, and it caps the
+    /// whole box at MAX_WARP_CTXS probes per frame no matter what clients do.
+    verify_tick: u64,
     /// Warp-4: the GL adoption's CTX half -- `present-to <surface> <bo>`:
     /// this ctx consents to displaying its BO `bo_pub` on surface
     /// (slot, gen). The gen pin makes a consent die with the surface
@@ -2958,6 +2968,7 @@ impl Comp {
             stream_rejected: false,
             rejected_at: 0,
             verify_seq: 0,
+            verify_tick: 0,
             present_to: None,
             bo_backed_peak: 0,
             bo_bytes_peak: 0,
@@ -3095,19 +3106,42 @@ impl Comp {
     /// Every transport failure lands on `None`: an errored upload is not
     /// evidence of refusal, and must never read as health either.
     fn warp_ctx_verify(&mut self, ctx_pub: u32, conn: u64) -> Option<bool> {
+        let tick = self.tick;
         let (dev_ctx, mark_res, sent_res, sent_va) = {
             let c = self.wctx(ctx_pub, conn)?;
+            // One probe per ctx per compositor tick (see `verify_tick`). A
+            // second write in the same frame is answered from the state the
+            // first one established rather than re-running three synchronous
+            // device round trips. `verify_seq` deliberately does NOT advance
+            // here: it counts probes that RAN, which is the distinction a
+            // reader needs to tell "healthy" from "never asked".
+            if c.verify_seq > 0 && c.verify_tick == tick {
+                return Some(!c.stream_rejected);
+            }
             let p = c.probe.as_ref()?;
             (c.dev_ctx, p.mark_res, p.sent_res, p.sent_va)
         };
         if let Some(c) = self.wctx_mut(ctx_pub, conn) {
             c.verify_seq += 1;
+            c.verify_tick = tick;
         }
         let seq = self.wctx(ctx_pub, conn).map_or(0, |c| c.verify_seq);
 
         // A token that differs from PROBE_MARK and from whatever the last
         // verify left, so "unchanged" is never satisfied by a stale value.
-        let token = PROBE_TOKEN_BASE ^ (seq as u32).rotate_left(8);
+        //
+        // SELF-AUDIT FINDING: the mix alone is not enough. `PROBE_TOKEN_BASE
+        // ^ rot8(seq)` equals PROBE_MARK exactly when rot8(seq) is
+        // 0x24443040 ^ 0x57415250, i.e. at seq 0x10730562 -- roughly 53 days
+        // of 60 Hz verifying, which a long-lived compositor reaches. On that
+        // one verify a LATCHED ctx would seed the mark's own value, read it
+        // back, and be reported HEALTHY: a false negative on the exact
+        // question this probe exists to answer. Perturb instead of trusting
+        // the arithmetic.
+        let mut token = PROBE_TOKEN_BASE ^ (seq as u32).rotate_left(8);
+        if token == PROBE_MARK {
+            token = !token;
+        }
         unsafe { core::ptr::write_volatile(sent_va as *mut u32, token) };
         if self
             .gpu

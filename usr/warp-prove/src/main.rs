@@ -1057,13 +1057,44 @@ fn observe_rejection() {
     };
     // Sticky is the contract (recreate, never retry): a second verify on the
     // healthy ctx must not drift, and on the rejected one must not clear.
+    //
+    // THE SLEEP IS LOAD-BEARING, and its absence made this leg vacuous. The
+    // server rate-limits to one probe per ctx per compositor tick, so a
+    // re-verify issued microseconds after the first is answered from the
+    // state the first one established -- it would agree with the first
+    // reading no matter what a second real probe would have found. Sleep
+    // past a tick (60 Hz -> ~17 ms; 100 ms is comfortable), then REQUIRE
+    // `verify-seq` to have advanced before believing the re-read, and say so
+    // plainly when it has not.
+    let _ = libthyla_rs::time::sleep(libthyla_rs::time::Duration::from_millis(100));
+    let rv_bad_0 = ctx_field(bad, ctx_bad, "verify-seq");
+    let rv_ok_0 = ctx_field(ok, ctx_ok, "verify-seq");
     let _ = write_ctl(bad, &format!("ctx/{}/ctl", ctx_bad), "verify");
     let _ = write_ctl(ok, &format!("ctx/{}/ctl", ctx_ok), "verify");
-    t_putstr(&format!(
-        "warp-prove: C0-DETECT re-verify stream-rejected(bad {} ok {}) -- want (1 0), sticky\n",
-        ctx_field(bad, ctx_bad, "stream-rejected"),
-        ctx_field(ok, ctx_ok, "stream-rejected")
-    ));
+    let rv_bad = ctx_field(bad, ctx_bad, "verify-seq");
+    let rv_ok = ctx_field(ok, ctx_ok, "verify-seq");
+    let sr2_bad = ctx_field(bad, ctx_bad, "stream-rejected");
+    let sr2_ok = ctx_field(ok, ctx_ok, "stream-rejected");
+    if rv_bad <= rv_bad_0 || rv_ok <= rv_ok_0 {
+        t_putstr(&format!(
+            "warp-prove: C0-DETECT STICKY NOT TESTED -- the re-verify was rate-limited \
+             (verify-seq bad {}->{} ok {}->{}), so the second reading is the first one's \
+             cache and proves nothing about stickiness.\n",
+            rv_bad_0, rv_bad, rv_ok_0, rv_ok
+        ));
+    } else if sr2_bad == 1 && sr2_ok == 0 {
+        t_putstr(&format!(
+            "warp-prove: C0-DETECT STICKY PASS -- a SECOND real probe (verify-seq bad {} ok \
+             {}) still reads (1 0): the rejection did not clear and health did not drift.\n",
+            rv_bad, rv_ok
+        ));
+    } else {
+        t_putstr(&format!(
+            "warp-prove: C0-DETECT STICKY FAIL -- a second real probe reads (bad {} ok {}), \
+             want (1 0).\n",
+            sr2_bad, sr2_ok
+        ));
+    }
 
     t_putstr("warp-prove: C0-REJECT DONE\n");
 
