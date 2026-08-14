@@ -4286,25 +4286,36 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     // kernel/include/thylacine/syscall.h (SYS_POSTNOTE docblock).
     //
     // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
-    // multi-thread self-kill cascades the whole Proc instead of being refused
-    // (the prior `kill -> -EIO`, 13b R1-F9). proc_group_terminate's universal
-    // death-wake walks p->threads and so MUST run UNDER g_proc_table_lock
-    // (#811, ARCH §8.8.1) -- the count AND the cascade run in the SAME lock
-    // acquisition (previously the lock was dropped before the cascade; that is
-    // now a contract violation). self cannot be reaped while running here; the
-    // caller returns success + self-exits at its own EL0-return die-check
-    // before userspace resumes. A single-thread self-post falls through to the
-    // note post below (unchanged).
+    // self-kill cascades the whole Proc instead of being refused (the prior
+    // `kill -> -EIO`, 13b R1-F9). proc_group_terminate's universal death-wake
+    // walks p->threads and so MUST run UNDER g_proc_table_lock (#811, ARCH
+    // §8.8.1). self cannot be reaped while running here; the caller returns
+    // success + self-exits at its own EL0-return die-check before userspace
+    // resumes.
+    //
+    // ROUND-2 F4: this arm used to cascade only when `live_threads > 1` and
+    // let a SINGLE-thread self-kill fall through to notes_post. #241 removed
+    // exactly that gate from the CROSS arm and deliberately left this one,
+    // arguing a self-kill cannot be SWALLOWED by a job stop -- true (the tail
+    // delivers notes before el0_return_stop_check) but not the only failure
+    // direction, and #241's own close named the other one: "the old arm could
+    // return -1 when notes_post hit a full queue -- i.e. a kill that failed
+    // for lack of ring space, itself an N-4 violation."
+    //
+    // That was still true here. A Proc with no handler and no notes fd never
+    // drains non-terminate-class notes, so child_exit/pipe posts accumulate to
+    // NOTE_QUEUE_DEPTH; the next raise(SIGKILL) hit the full-queue -1 and the
+    // Proc SURVIVED ITS OWN SIGKILL. N-4 says kill terminates, unconditionally
+    // -- it may not fail for want of ring space. Cascading always also makes
+    // this arm agree with the cross arm and with /proc/<pid>/ctl kill, which
+    // has always dispatched uniformly, so all three spellings of "kill" now
+    // mean one thing.
     if (target_pid == p->pid || pid_raw == 0) {
         if (notes_name_is_kill(buf)) {
             irq_state_t s = proc_table_lock_acquire();
-            int live_threads = proc_count_live_peers_locked(p, NULL);
-            if (live_threads > 1) {
-                proc_group_terminate(p, "killed");
-                proc_table_lock_release(s);
-                return 0;
-            }
+            proc_group_terminate(p, "killed");
             proc_table_lock_release(s);
+            return 0;
         }
         int rc = notes_post(p, buf, 0u, p, false);
         // LS-5c (P3-terminate): a self-post of `interrupt` in a multi-thread

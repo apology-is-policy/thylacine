@@ -3913,8 +3913,19 @@ int proc_job_cont_pgrp(u32 pgid) {
 // group-global reschedule IPI (the F2 hoist) so a peer RUNNING at EL0 traps to its
 // stop checkpoint; CONT clears job_stop_req + wakes the parked threads
 // (proc_job_resume_one_locked, which does its own wake walk). Caller holds
-// g_proc_table_lock (devproc's proc_for_each). Idempotent (a second stop / a
-// cont-of-a-running Proc is a no-op via the one_locked guards).
+// g_proc_table_lock (devproc's proc_for_each). A second stop is idempotent via
+// the one_locked guard.
+//
+// A cont-of-a-RUNNING Proc is NO LONGER a no-op (round-2 F6). #240 moved the
+// susp_stop_armed clear ABOVE proc_job_resume_one_locked's `job_stop_req == 0`
+// early return -- deliberately, since a cont aimed at a not-yet-stopped target
+// is the whole case that fix exists for. The side effect reaches here: a
+// monitor that periodically writes `resume` to /proc/N/ctl, previously
+// harmless, now disarms any tty:susp decision in flight, so a user's ^Z on
+// that Proc silently does nothing. The behaviour is correct -- an explicit
+// resume SHOULD cancel a pending suspend -- but it is not idempotent, and the
+// comment that said so sat directly above the two functions a reader reasons
+// from.
 //
 // UNCONDITIONAL -- unlike the pts SIGTSTP fan (proc_job_stop_pgrp) there is NO
 // tty:susp/tty:cont note and NO catchability gate (proc_tty_susp_would_stop_-

@@ -44,6 +44,8 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/syscall.h>    // PTY-4: SYS_WAIT_PID + the wait flags
 #include <thylacine/thread.h>
+#include <thylacine/vivarium.h>  // #247/F3: the sigtab the exec reset frees
+#include "../../mm/slub.h"      // #247/F3: kzalloc -- a REAL sigtab, so the kfree runs
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/timer.h"   // PTY-1f: the sleeper thunk's deadlines
@@ -2031,9 +2033,18 @@ void test_proc_exec_drops_image_note_state(void) {
     p->handler_va  = 0x1000u;
     th.note_mask   = (1u << NOTE_BIT_INTERRUPT) | (1u << NOTE_BIT_TTY);
     th.in_handler  = true;
+    // The sigtab needs a REAL allocation. Round-2 F3: this line was missing,
+    // so `p->sigtab` was NULL from KP_ZERO both before and after the helper --
+    // the post-condition below asserted a value that was never armed, and
+    // deleting the sigtab reset from proc_exec_drop_image_state left the whole
+    // suite GREEN. Executed, not argued: the sabotage was run and passed.
+    // (kzalloc, not kmalloc -- the helper kfree()s it, so it must be a real
+    // heap block; the test_notes.c linux_sigign_discard fixture is the pattern.)
+    p->sigtab = (struct viv_sigtab *)kzalloc(sizeof(struct viv_sigtab), 0);
     TEST_ASSERT(p->handler_va != 0,  "precondition: a handler is registered");
     TEST_ASSERT(th.note_mask != 0,   "precondition: the note mask is non-empty");
     TEST_ASSERT(th.in_handler,       "precondition: the thread is MID-HANDLER");
+    TEST_ASSERT(p->sigtab != NULL,   "precondition: a Linux sigtab is installed");
 
     proc_exec_drop_image_state_for_test(p, &th);
 
